@@ -23,7 +23,7 @@ This file is **identical for every extension** unless the extension needs additi
 ```json
 {
   "imports": {
-    "@hono/mcp": "npm:@hono/mcp@0.1.1",
+    "@hono/mcp": "npm:@hono/mcp@0.1.5",
     "@modelcontextprotocol/sdk": "npm:@modelcontextprotocol/sdk@1.24.3",
     "hono": "npm:hono@4.9.2",
     "zod": "npm:zod@4.1.13",

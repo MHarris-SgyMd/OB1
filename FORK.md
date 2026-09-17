@@ -68,14 +68,14 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Seventy-eight numbered changes on top of the pin. Seven fix defects found in an
+Seventy-nine numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
 data layer (Phase 2). Four (changes 31, 53, 55, and 59) ship no runtime change at
 all: each is a measurement that decided against building something.
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–78 are the numbered `###` sections** further down, which is
+sections. Changes **18–79 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -202,6 +202,7 @@ extensions/test-tools.ts         # change 77 (new file — every tool of the fiv
 db/test-bench-reuse.ts           # change 76 (new file — the kept bench corpus's oracle cache held to the computation, on one index)
 db/bench-oracle.ts               # change 76 (new file — the cache's pure part: what of a marker's entry a run may trust; test-schema [37])
 <4 vendored MCP servers, 1 sample> # change 78 (a McpServer built per request — per session in the cost recipe's after sample — in place of one shared and connect()ed to a fresh transport each time)
+<17 pin sites, 3 lockfiles>      # change 79 (@hono/mcp 0.1.1 → 0.1.5: the transport lets go of each POST it has answered; the after sample's sweep closes the transports it drops)
 docs/01-getting-started.md       # fix 6
 recipes/content-fingerprint-dedup/README.md  # fix 6
 recipes/email-history-import/README.md       # fix 6
@@ -12410,7 +12411,8 @@ Hono `Context` per tool call until the 30-minute prune drops the session
 (measured: 200 completed POSTs on one transport, 0 of 200 `Request` objects
 finalized after GC; with a transport per request, 200 of 200). The four
 servers moved to a transport per request are clear of it; the sample's README
-says the bound; SMD-1607 holds the library fix. Nothing here changes a response, a
+says the bound; SMD-1607 held the library fix, and change 79 moves the pin to
+0.1.5, which releases each POST as it is answered. Nothing here changes a response, a
 header or a tool surface; the answer a client receives is the same, now for
 the request it sent.
 
@@ -12418,6 +12420,101 @@ Upstream status: at the pin, all five files carry the shared server —
 `delete-thought-mcp`, `update-thought-mcp`, `enhanced-mcp` and
 `work-operating-model-activation` at module scope, and the cost recipe's
 "after" sample as an exported singleton connected once per session.
+**Unfiled** by us.
+
+### 79. The `@hono/mcp` pin moves from 0.1.1 to 0.1.5 — the transport lets go of each POST it has answered, so a transport kept for a session (the cost recipe's after sample) no longer holds one Request and one Context per tool call until the session is swept (SMD-1607)
+
+**The defect.** Change 78's third review pass found it and its "Not done here"
+records it: in `@hono/mcp` 0.1.1 `handlePostRequest` records each request's
+`{ ctx, stream }` in the transport's private `#streamMapping`, and the only
+per-request delete is inside `stream.onAbort`. When a response completes
+normally `send()` closes the stream and deletes the two maps keyed by request
+id, not this one; hono 4.9.2's `streamSSE` then calls `stream.close()`, and
+`StreamingApi.close()` does not run abort subscribers — only `abort()` does.
+So a transport that outlives the request keeps the `Request`, the Hono
+`Context` and the closed stream of every POST it ever answered, until
+`transport.close()` clears the map. The four servers change 78 moved to a
+transport per request drop the transport with the request and are clear of
+it. The cost recipe's after sample keeps one transport per session, on
+purpose — that is the sample's point — and grew by one request per tool call
+for up to the thirty minutes its sweep allows a session.
+
+**The change.** The library fixed this a year ago: 0.1.2 (honojs/middleware
+PR #1342, 2025-08-26, "SSE keepalive timers cleaned up on close") gives every
+`#streamMapping` entry a `cleanup()` that deletes it, and both `send()` on the
+last response and `close()` call `stream.abort()` where they called `close()`,
+which runs the subscribers and so the cleanup; the SSE callback awaits that
+abort and hono's `streamSSE` closes the body after it. 0.1.3 and 0.1.4 are
+version chores (a jsr/npm mismatch); 0.1.5 (2025-10-30) `unref()`s the
+keepalive interval of the standalone GET stream, which the fork's servers
+have not opened since change 75. The peer range, `@modelcontextprotocol/sdk
+^1.12.0` and `hono >=4.0.0`, admits the pin's 1.24.3 and 4.9.2. 0.2.0 and
+later do not: 0.2.5 wants the SDK at ^1.25.1, 0.3.2 at ^1.29.0 and is built
+against hono 4.11.5 — a move of the SDK pin with it, not this ticket's (0.3.0
+also relaxes the Accept check to either token, SMD-1616's mechanism; that
+ticket should weigh it). So the pin moves to 0.1.5 at every site that names it —
+`extensions/package.json`, `server/package.json`,
+`server-portable/package.json`, the thirteen `deno.json` (the core server,
+six extensions, four integrations, two recipes) and the template
+`extensions/_template/AGENT_SPEC.md` hands a new extension — and the three
+`bun.lock` files, in one commit, as `test-auth.ts`'s pin guard requires:
+seventeen sites, three lockfiles. What 0.1.5 leaves as it was: the body is
+still parsed after the server has been connected (change 78's window — its
+staggered probe still means what it did), a POST is still 406 unless Accept
+names both tokens (SMD-1616 stands), and a `tools/list` and a `tools/call`
+answer are the same bytes at both versions — status, headers and body.
+What it changes beside the map: an entry stores `{ header: ctx.header }`
+rather than the Context, and would call that unbound in JSON-response mode
+with a session id — neither of which any server here uses.
+
+**The sample.** `pruneExpiredSessions()` closes the transport of each session
+it drops: `close()` aborts whatever stream is still open, clears the maps and,
+through `onclose`, tells the SDK the server has no transport — a dropped
+session is ended rather than left to the collector. The README's paragraph on
+the session-long transport says the release is 0.1.2's and what 0.1.1 did.
+
+**The measurement.** A probe from `extensions/` — one `McpServer`, one
+transport, 200 completed `tools/list` POSTs, a forced GC, then how many of the
+200 `Request` objects are gone — read through `WeakRef`s. The ticket's
+numbers were read through a `FinalizationRegistry`, and a rearranged probe
+read 0 of 200 in every arrangement, including a transport per request, because
+the registry's callbacks stopped arriving after the first run; `deref()` after
+`Bun.gc(true)` is read on our schedule, not the runtime's. At 0.1.1: the
+shared transport releases 0 of 200; `close()` then releases 199; a transport
+per request releases 198–199. At 0.1.5: the shared transport releases
+199–200 of 200 with no `close()`. The one that lingers is the most recent
+request, reachable for a while from the frame that answered it; three rounds
+of each at each version. 200 POSTs take 4–16 ms either way.
+
+**The test.** `extensions/test-auth.ts` gains a section after the pin guard:
+one server, one transport, 100 sequential `tools/list`, each asserted
+answered with its own id, then a forced GC and the count of `Request` objects
+collected, asserted at 99 or more with the reason for the one. It is a test of
+the pinned library, which nothing runnable in the tree exercised across a
+session; the after sample, which does, cannot be run here (change 78) and is
+held by a text rule that its sweep closes what it drops. The docblock names
+the claim.
+
+**Verified.** `bun test-auth.ts` 775/775 (772 on main: two for the transport,
+one text rule). `server/`: `test-stateless.mjs` 47/47, the two other suites
+PASS. `server-portable/`: `test-server.ts` 151/151, `test-auth.ts` 67/67,
+`tsc --noEmit` clean. `deno check` on `recipes/ob-graph` fetched 0.1.5 and
+passed. `check-fork-consistency.mjs` PASS. Drills: 0.1.1 put back in
+`extensions/package.json` fails 12 — the eleven `deno.json` the guard compares
+and the transport's `0/100 Request objects collected`; the sample without its
+`close()` fails its one rule.
+
+**Not done here.** SMD-1616 (the Accept patches, and whether 0.3.x's
+either-token check is worth the SDK and hono moves it needs). The after
+sample is still untested by anything that runs it. No upstream issue was
+filed against `@hono/mcp`: the fix shipped before this fork found the defect.
+
+Upstream status: at the pin, `server/deno.json` and the twelve vendored
+`deno.json` pin 0.1.1 — and upstream's `server/package.json` ranges
+`^0.1.5`, so upstream's own Node suites ran a transport its Edge Function did
+not deploy (the drift the fork pinned that file down for, and the pin guard
+holds). The fork's seventeen sites read 0.1.5. A rebase over an upstream bump
+of the same lines conflicts on one line per file — take the higher.
 **Unfiled** by us.
 
 ## Detached from the fork network

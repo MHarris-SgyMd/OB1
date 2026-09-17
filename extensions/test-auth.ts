@@ -27,7 +27,8 @@
  * server-portable/auth.ts (a Supabase function is bundled from
  * supabase/functions/, so the module is copied beside the servers rather than
  * imported across the tree), and each deno.json still pins what package.json
- * installs.
+ * installs — and the pinned `@hono/mcp` lets go of each request once it has
+ * answered it (SMD-1607, change 79: 0.1.1 kept every one until close()).
  *
  * The files are imported under a stand-in for the two Deno globals they use —
  * `Deno.env.get` hands the process environment through, `Deno.serve` captures
@@ -849,8 +850,10 @@ console.log("\n[the files this test reads but cannot run]");
 const TEXT_ONLY: { file: string; must: RegExp[]; mustNot: RegExp[] }[] = [
   // The after sample binds one server AND one transport per session (SMD-1497): a server shared between
   // sessions and connect()ed once per session hands its transport to the newest session and hangs the rest.
+  // The sweep closes the transport of each session it drops (SMD-1607), which tells the server too.
   { file: "recipes/edge-function-cost-optimization/examples/after/index.ts",
-    must: [/from "\.\.\/_shared\/auth\.ts"/, /authenticateRequest\(c\.req\.raw,/, /const server = buildServer\(principal\);[^\n]*\n\s*await server\.connect\(transport\);\n\s*session = \{ server, transport,/, /session\.scope !== principal\.scope/],
+    must: [/from "\.\.\/_shared\/auth\.ts"/, /authenticateRequest\(c\.req\.raw,/, /const server = buildServer\(principal\);[^\n]*\n\s*await server\.connect\(transport\);\n\s*session = \{ server, transport,/, /session\.scope !== principal\.scope/,
+      /sessions\.delete\(id\);\n(?:\s*\/\/[^\n]*\n)*\s*void s\.transport\.close\(\);/],
     mustNot: [/[!=]== ?MCP_ACCESS_KEY\b/, /c\.req\.header\("x-access-key"\)/, /serverFor\(/, /Map<[^>\n]*McpServer/] },
   { file: "recipes/edge-function-cost-optimization/examples/after/server.ts",
     must: [/from "\.\.\/_shared\/auth\.ts"/, /export function buildServer\(principal: Principal\): McpServer/, /register\w+\(server, principal\)/],
@@ -900,6 +903,46 @@ for (const t of TEXT_ONLY) {
     const drift = Object.entries(imports).filter(([name, spec]) => name in pkg && spec !== `npm:${name}@${pkg[name]}`);
     assert(drift.length === 0, `${file} pins what package.json installs${drift.length ? ` (${drift.map(([n, s]) => `${n}: ${s}`).join(", ")})` : ""}`);
   }
+}
+
+// ── The pinned transport, across a session ──────────────────────────────────
+// A transport reused across a session — the cost recipe's after sample keeps
+// one per session — must let go of each POST once it has answered it.
+// @hono/mcp 0.1.1 did not: it recorded every request's { ctx, stream } and
+// deleted the record only on abort or close(), so a session grew by one
+// Request and one Hono Context per tool call until the TTL sweep dropped it
+// (SMD-1607). 0.1.2 deletes the record when the response is sent; the pin is
+// 0.1.5 (change 79). Collection is read through WeakRefs after a forced GC —
+// a FinalizationRegistry's callbacks arrive on the runtime's schedule. The
+// most recent request can stay reachable from the frame that answered it, so
+// one of N may remain; at 0.1.1 none is released.
+console.log("\n[the pinned @hono/mcp, one transport across a session]");
+{
+  const { Hono } = await import("hono");
+  const { StreamableHTTPTransport } = await import("@hono/mcp");
+  const { McpServer } = await import("@modelcontextprotocol/sdk/server/mcp.js");
+  const N = 100;
+  const server = new McpServer({ name: "session", version: "0" });
+  server.registerTool("ping", { inputSchema: {} }, async () => ({ content: [{ type: "text", text: "pong" }] }));
+  const transport = new StreamableHTTPTransport();
+  await server.connect(transport);
+  const app = new Hono();
+  app.post("/mcp", (c) => transport.handleRequest(c));
+  const refs: WeakRef<Request>[] = [];
+  const answered = await (async () => {
+    let ok = 0;
+    for (let id = 1; id <= N; id++) {
+      const req = new Request("http://session.test/mcp", { method: "POST", headers: RPC, body: JSON.stringify({ ...LIST, id }) });
+      refs.push(new WeakRef(req));
+      const r = await answer((rq) => app.fetch(rq), req);
+      if (r.status === 200 && r.json?.id === id && toolsOf(r).join() === "ping") ok++;
+    }
+    return ok;
+  })();
+  assert(answered === N, `${N} sequential tools/list on one transport are each answered with their own id (${answered}/${N})`);
+  for (let k = 0; k < 5; k++) { Bun.gc(true); await new Promise((r) => setTimeout(r, 5)); }
+  const released = refs.filter((w) => w.deref() === undefined).length;
+  assert(released >= N - 1, `…and the transport has let go of them: ${released}/${N} Request objects collected after GC (0.1.1 kept every one until close())`);
 }
 
 report();

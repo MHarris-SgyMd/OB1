@@ -36,7 +36,13 @@ const SESSION_TTL_MS = 30 * 60 * 1000;
 function pruneExpiredSessions(): void {
   const cutoff = Date.now() - SESSION_TTL_MS;
   for (const [id, s] of sessions) {
-    if (s.lastSeen < cutoff) sessions.delete(id);
+    if (s.lastSeen < cutoff) {
+      sessions.delete(id);
+      // A dropped session is closed, not left to the collector: close() ends
+      // the transport and, through its onclose, tells the server it has no
+      // transport (ob1-fork, SMD-1607, FORK.md change 79).
+      void s.transport.close();
+    }
   }
 }
 
