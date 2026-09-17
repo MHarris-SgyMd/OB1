@@ -153,7 +153,8 @@ function column(name: string): { sql: string; text: boolean } {
  * `Z` instant (`2026-09-16T00:00:00.000Z` for a date) where PostgREST spells
  * `2026-09-16` and `2026-09-16T18:39:59.275494` — `.slice(0, 10)` agrees, an
  * equality against the bare date does not (change 73's rule; the `date` case
- * is closed below, the zone-less timestamp's stays — no migrated file reads one).
+ * is closed below for a table's rows and a function's, the zone-less
+ * timestamp's stays — no migrated file reads one).
  * Everything else stays as Bun returns it — ±Infinity for an infinite
  * timestamp, `Date(NaN)` for a BC date over a simple query (a parameterised
  * one hands a finite extended-year Date, which becomes
@@ -166,16 +167,22 @@ function column(name: string): { sql: string; text: boolean } {
  * date`, `last_used`) and an embedded row already carried that spelling:
  * `row_to_json` builds it in the database, with Postgres's own spellings for
  * every type, which is what PostgREST gives for an embed too. A function's
- * rows have no column map here and keep the instant.
+ * rows take the map of its OUT columns (`RETURNS TABLE`), so the same
+ * `follow_up_date` is one shape whichever path a tool takes.
  */
 function jsonShaped(row: Record<string, unknown>, cols?: Columns): Record<string, unknown> {
   let out: Record<string, unknown> | null = null;
   for (const [k, v] of Object.entries(row)) {
+    const type = cols?.get(k)?.type;
+    const shaped = (d: Date, t: string | undefined) => (t === "date" || t === "date[]" ? d.toISOString().slice(0, 10) : d.toISOString());
     if (v instanceof Date && Number.isFinite(v.getTime())) {
-      const iso = v.toISOString();
-      (out ??= { ...row })[k] = cols?.get(k)?.type === "date" ? iso.slice(0, 10) : iso;
-    } else if (ArrayBuffer.isView(v) && !(v instanceof DataView)) {
+      (out ??= { ...row })[k] = shaped(v, type);
+    } else if (Array.isArray(v) && v.some((x) => x instanceof Date)) {
+      // A date[] or timestamptz[] column: each element as the scalar column would be.
+      (out ??= { ...row })[k] = v.map((x) => (x instanceof Date && Number.isFinite(x.getTime()) ? shaped(x, type) : x));
+    } else if (cols?.get(k)?.category === "A" && ArrayBuffer.isView(v) && !(v instanceof DataView)) {
       // Bun decodes an int[] column into an Int32Array, which JSON renders as {"0":1,"1":2}; PostgREST gives a list.
+      // Only for an array column: a bytea column's Buffer is a view too and stays what Bun hands back.
       (out ??= { ...row })[k] = Array.from(v as unknown as ArrayLike<number>);
     }
   }
@@ -208,8 +215,8 @@ function arrayLiteral(values: unknown[]): string {
 type ColumnInfo = { type: string; category: string };
 type Columns = Map<string, ColumnInfo>;
 type ForeignKey = { name: string; from: string; fromCols: string[]; to: string; toCols: string[]; unique: boolean };
-type Overload = { names: string[]; types: string[]; categories: string[] };
-type CatalogStore = { columns: Map<string, Promise<Columns>>; fks: Map<string, Promise<ForeignKey[]>>; fns: Map<string, Promise<Overload[]>> };
+type Overload = { names: string[]; types: string[]; categories: string[]; outs: Columns };
+type CatalogStore = { columns: Map<string, Promise<Columns>>; absent: Map<string, Set<string>>; fks: Map<string, Promise<ForeignKey[]>>; fns: Map<string, Promise<Overload[]>> };
 
 /** One store per connection URL: the extension servers create a client per request, and the schema does not change between them. */
 const STORES = new Map<string, CatalogStore>();
@@ -229,7 +236,7 @@ class Catalog {
 
   constructor(private sql: SQL, url: string) {
     let store = STORES.get(url);
-    if (!store) STORES.set(url, (store = { columns: new Map(), fks: new Map(), fns: new Map() }));
+    if (!store) STORES.set(url, (store = { columns: new Map(), absent: new Map(), fks: new Map(), fns: new Map() }));
     this.store = store;
   }
 
@@ -256,16 +263,23 @@ class Catalog {
    * lacks (`ALTER TABLE … ADD COLUMN tags text[]` under a running server: a
    * map from before the column would bind the array raw for the process's
    * life). A name the fresh read lacks either is the caller's mistake, and
-   * Postgres says so (42703), or is a JSON path's base, which is a column.
+   * Postgres says so (42703), or is a JSON path's base, which is a column;
+   * it is remembered as absent, so a file filtering on a column its deployed
+   * schema does not have costs one re-read, not one per call for the life of
+   * the process (pass 2 measured 200 reads for 200 calls). A read that does
+   * find new columns forgets the absent names, since the schema moved.
    */
   async columnsOf(table: string, expect: Iterable<string> = []): Promise<Columns> {
     let cols = await this.memo(this.store.columns, table, () => this.readColumns(table));
-    for (const name of expect) {
-      if (cols.size > 0 && !cols.has(name)) {
-        this.store.columns.delete(table);
-        cols = await this.memo(this.store.columns, table, () => this.readColumns(table));
-        break;
-      }
+    const absent = this.store.absent.get(table) ?? new Set<string>();
+    const missing = [...expect].filter((name) => cols.size > 0 && !cols.has(name) && !absent.has(name));
+    if (missing.length) {
+      this.store.columns.delete(table);
+      const fresh = await this.memo(this.store.columns, table, () => this.readColumns(table));
+      if (fresh.size > cols.size) absent.clear();
+      cols = fresh;
+      for (const name of missing) if (!cols.has(name)) absent.add(name);
+      this.store.absent.set(table, absent);
     }
     return cols;
   }
@@ -298,8 +312,9 @@ class Catalog {
                    JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum) AS from_cols,
                 (SELECT array_agg(a.attname ORDER BY k.ord) FROM unnest(c.confkey) WITH ORDINALITY k(attnum, ord)
                    JOIN pg_attribute a ON a.attrelid = c.confrelid AND a.attnum = k.attnum) AS to_cols,
-                EXISTS (SELECT 1 FROM pg_index i WHERE i.indrelid = c.conrelid AND i.indisunique AND i.indpred IS NULL AND i.indexprs IS NULL
-                          AND (SELECT array_agg(x ORDER BY x) FROM unnest(i.indkey::int2[]) x) = (SELECT array_agg(x ORDER BY x) FROM unnest(c.conkey) x)) AS "unique"
+                EXISTS (SELECT 1 FROM pg_index i WHERE i.indrelid = c.conrelid AND i.indisunique AND i.indisvalid AND i.indpred IS NULL AND i.indexprs IS NULL
+                          AND (SELECT array_agg(x.v ORDER BY x.v) FROM unnest(i.indkey::int2[]) WITH ORDINALITY x(v, ord) WHERE x.ord <= i.indnkeyatts)
+                              = (SELECT array_agg(x ORDER BY x) FROM unnest(c.conkey) x)) AS "unique"
            FROM pg_constraint c JOIN pg_class f ON f.oid = c.conrelid JOIN pg_class t ON t.oid = c.confrelid
           WHERE c.contype = 'f' AND (c.conrelid = to_regclass($1) OR c.confrelid = to_regclass($1))
             AND pg_table_is_visible(f.oid) AND pg_table_is_visible(t.oid)`,
@@ -309,21 +324,35 @@ class Catalog {
     });
   }
 
-  /** Each overload of a function on the search path: its IN argument names, declared types and type categories, in order. */
+  /**
+   * Each overload of a function on the search path: its IN argument names,
+   * declared types and type categories, in order — and its OUT columns (a
+   * `RETURNS TABLE` function's, an OUT parameter's) as a column map, so the
+   * rows a function answers are shaped as a table's are (a `date` column the
+   * bare date): `crm_search_contacts` answers through a function on one path
+   * and through the table on another, and PostgREST gives one shape.
+   */
   argTypesOf(fn: string): Promise<Overload[]> {
     return this.memo(this.store.fns, fn, async () => {
       const rows = (await this.sql.unsafe(
         `SELECT p.proargnames::text[] AS names, p.proargmodes::text[] AS modes,
                 (SELECT array_agg(format_type(u.t, NULL) ORDER BY u.ord) FROM unnest(p.proargtypes) WITH ORDINALITY u(t, ord)) AS types,
-                (SELECT array_agg(y.typcategory::text ORDER BY u.ord) FROM unnest(p.proargtypes) WITH ORDINALITY u(t, ord) JOIN pg_type y ON y.oid = u.t) AS categories
+                (SELECT array_agg(y.typcategory::text ORDER BY u.ord) FROM unnest(p.proargtypes) WITH ORDINALITY u(t, ord) JOIN pg_type y ON y.oid = u.t) AS categories,
+                (SELECT array_agg(format_type(u.t, NULL) ORDER BY u.ord) FROM unnest(p.proallargtypes) WITH ORDINALITY u(t, ord)) AS all_types,
+                (SELECT array_agg(y.typcategory::text ORDER BY u.ord) FROM unnest(p.proallargtypes) WITH ORDINALITY u(t, ord) JOIN pg_type y ON y.oid = u.t) AS all_categories
            FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
           WHERE p.proname = $1 AND n.nspname = ANY (current_schemas(true))`,
         [fn.trim()] as never[]
-      )) as unknown as { names: string[] | null; modes: string[] | null; types: string[] | null; categories: string[] | null }[];
+      )) as unknown as { names: string[] | null; modes: string[] | null; types: string[] | null; categories: string[] | null; all_types: string[] | null; all_categories: string[] | null }[];
       return rows.map((r) => {
-        // proargnames covers OUT arguments too (a RETURNS TABLE function's columns); proargtypes only the IN ones.
+        // proargnames covers OUT arguments too (a RETURNS TABLE function's columns); proargtypes only the IN ones;
+        // proallargtypes every one, in proargnames' order, when any is OUT.
         const names = (r.names ?? []).filter((_, i) => !r.modes || ["i", "b", "v"].includes(r.modes[i]));
-        return { names, types: r.types ?? [], categories: r.categories ?? [] };
+        const outs: Columns = new Map();
+        (r.names ?? []).forEach((name, i) => {
+          if (r.modes && ["o", "t", "b"].includes(r.modes[i]) && r.all_types?.[i]) outs.set(name, { type: r.all_types[i], category: r.all_categories?.[i] ?? "" });
+        });
+        return { names, types: r.types ?? [], categories: r.categories ?? [], outs };
       });
     });
   }
@@ -599,47 +628,95 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
    * PostgREST's `.or("a.gt.1,b.is.null")` — a flat list of `column.op.value`
    * terms combined with OR; `cs` among the operators (`ingredients.cs.[{"name":"x"}]`).
    *
-   * Only the flat form is supported. PostgREST also allows nesting —
-   * `or(and(a.eq.1,b.eq.2),c.eq.3)` — which needs a real parser, and every `.or()`
-   * in this repo is flat. Anything else throws rather than being half-understood.
-   * The split is on the commas between terms: one inside a `cs` value's
-   * brackets or braces, or inside double quotes, belongs to the value.
+   * Read as PostgREST reads it, term by term: a column (a name or a JSON
+   * path) up to the first dot, an operator up to the next, then a value —
+   * a balanced `[…]` or `{…}` group when it starts with one (a `cs` value's
+   * JSON or array literal, brackets and quotes inside it belonging to it), a
+   * double-quoted string when it starts with `"` (PostgREST's quoting), or
+   * plain text up to the next comma. Plain text is split at a comma and
+   * nothing else — a quote, a parenthesis or a bracket in an ILIKE pattern
+   * is pattern text (four tools interpolate user text into their expression:
+   * `name.ilike.%${query}%,…`), and a plain comma in that text splits a term
+   * PostgREST cannot parse either. That term, and a group nothing closes,
+   * resolve as `{ error }` with PostgREST's `PGRST100` at execution — the
+   * tool's own error handling sees it — while the terms that did parse stay
+   * parameterised. Only the flat form is supported: a term that is itself
+   * `and(…)`/`or(…)`/`not.and(…)` grouping, which needs a real parser, is a
+   * programming error in the file's own text and throws at the call (the
+   * words "and (" inside a value are text). Every `.or()` in the tree is flat.
    */
   or(expression: string): this {
-    if (/\band\s*\(|\bor\s*\(/.test(expression)) {
-      throw refusal(
-        `or("${expression}") uses nested and()/or() grouping, ` +
-          `which is not supported. Express it as an .rpc() or split the query.`
-      );
-    }
-    // Split on the commas between terms, not the ones inside a value: `cs.[{"name":"olive oil, extra virgin"}]`
-    // (search_recipes interpolates an ingredient into its expression), `cs.{a,b}`.
-    const raws: string[] = [];
-    let depth = 0, quoted = false, start = 0;
-    for (let i = 0; i < expression.length; i++) {
-      const ch = expression[i];
-      if (ch === '"' && expression[i - 1] !== "\\") quoted = !quoted;
-      else if (!quoted && (ch === "[" || ch === "{" || ch === "(")) depth++;
-      else if (!quoted && (ch === "]" || ch === "}" || ch === ")")) depth--;
-      else if (!quoted && depth === 0 && ch === ",") { raws.push(expression.slice(start, i)); start = i + 1; }
-    }
-    raws.push(expression.slice(start));
-    const terms = raws.map((raw) => {
-      const term = raw.trim();
-      const firstDot = term.indexOf(".");
-      const secondDot = term.indexOf(".", firstDot + 1);
-      if (firstDot < 1 || secondDot < 0) {
-        // Four tools interpolate user text into their expression (`name.ilike.%${query}%,…`): a comma in the text
-        // splits a term PostgREST cannot parse either — it answers 400 as `{ error }`, and so does this, at execution,
-        // rather than throwing out of the tool's handler. The values that did parse stay parameterised.
-        return () => { throw new PostgrestError(`"${term}" (or() term) is not column.operator.value — a comma in a value splits it; PostgREST answers 400 here too`, { code: "PGRST100" }); };
+    type Term = { col: string; op: string; value: string } | { broken: string };
+    const terms: Term[] = [];
+    let i = 0;
+    const n = expression.length;
+    while (i <= n) {
+      const termStart = i;
+      const firstDot = expression.indexOf(".", i);
+      const head = expression.slice(i, firstDot < 0 ? n : firstDot).trim();
+      if (/^(?:not\.)?(?:and|or)\s*\(/.test(expression.slice(i).trimStart())) {
+        throw refusal(
+          `or("${expression}") uses nested and()/or() grouping, ` +
+            `which is not supported. Express it as an .rpc() or split the query.`
+        );
       }
-      const op = term.slice(firstDot + 1, secondDot);
-      if (op === "in") throw refusal(`or() operator "in" is not supported`);
-      return this.term(term.slice(0, firstDot), op, term.slice(secondDot + 1));
+      const secondDot = firstDot < 0 ? -1 : expression.indexOf(".", firstDot + 1);
+      // A term is `column.op.value`, the column a name or a JSON path. Anything else here is what a comma in a
+      // previous plain value left behind (` Salt%,category` — user text) — the broken term, up to the next comma.
+      if (firstDot < 0 || secondDot < 0 || !/^[A-Za-z_][A-Za-z0-9_]*(?:->>?[A-Za-z_][A-Za-z0-9_]*)*$/.test(head)) {
+        const stop = expression.indexOf(",", i);
+        terms.push({ broken: expression.slice(termStart, stop < 0 ? n : stop).trim() });
+        i = stop < 0 ? n + 1 : stop + 1;
+        continue;
+      }
+      const col = head;
+      const op = expression.slice(firstDot + 1, secondDot).trim();
+      let j = secondDot + 1;
+      let value: string;
+      const open = expression[j];
+      if (open === "[" || open === "{") {
+        // A balanced group: brackets and braces nest, a double-quoted string inside it may hold anything.
+        let depth = 0, quoted = false, k = j;
+        for (; k < n; k++) {
+          const ch = expression[k];
+          if (quoted) { if (ch === "\\") k++; else if (ch === '"') quoted = false; continue; }
+          if (ch === '"') quoted = true;
+          else if (ch === "[" || ch === "{") depth++;
+          else if (ch === "]" || ch === "}") { depth--; if (depth === 0) { k++; break; } }
+        }
+        if (depth !== 0) { terms.push({ broken: expression.slice(termStart).trim() }); break; }
+        value = expression.slice(j, k);
+        j = k;
+      } else if (open === '"') {
+        // PostgREST's quoted value: to the closing quote, a backslash escaping the next character.
+        let k = j + 1;
+        for (; k < n && expression[k] !== '"'; k++) if (expression[k] === "\\") k++;
+        if (k >= n) { terms.push({ broken: expression.slice(termStart).trim() }); break; }
+        value = expression.slice(j + 1, k).replace(/\\(.)/g, "$1");
+        j = k + 1;
+      } else {
+        const stop = expression.indexOf(",", j);
+        value = expression.slice(j, stop < 0 ? n : stop);
+        j = stop < 0 ? n : stop;
+      }
+      // After a group or a quoted value only a comma or the end may follow.
+      const rest = expression.slice(j).match(/^\s*(,|$)/);
+      if (!rest) { const stop = expression.indexOf(",", j); terms.push({ broken: expression.slice(termStart, stop < 0 ? n : stop).trim() }); i = stop < 0 ? n + 1 : stop + 1; continue; }
+      terms.push({ col, op, value });
+      i = j + rest[0].length + (rest[1] === "," ? 0 : 1);
+      if (rest[1] !== ",") break;
+    }
+    const filters = terms.map((t): Filter => {
+      if ("broken" in t) {
+        // PostgREST answers 400 to a term it cannot parse; so does this, at execution, as { error } — never a throw
+        // out of a tool's handler for text a user typed.
+        return () => { throw new PostgrestError(`PGRST100: "${t.broken}" is not column.operator.value in or("${expression}") — a comma or an unclosed group in a value; PostgREST answers 400 here too`, { code: "PGRST100" }); };
+      }
+      if (t.op === "in") throw refusal(`or() operator "in" is not supported`);
+      return this.term(t.col, t.op, t.value);
     });
     return this.where((cols) => {
-      const rendered = terms.map((t) => t(cols));
+      const rendered = filters.map((f) => f(cols));
       return { sql: `(${rendered.map((r) => r.sql).join(" OR ")})`, values: rendered.flatMap((r) => r.values) };
     });
   }
@@ -733,10 +810,10 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
     for (const item of this.items) {
       if (item.kind === "star") parts.push("*");
       else if (item.kind === "column") parts.push(item.sql);
-      else if (returning) throw refusal(`select("…${item.key}(…)") embeds a relation in a RETURNING list, which is not supported — read the row back with a second select.`);
       // A table the catalog cannot see has no keys to embed through: the embed is left out so the query itself
       // reports the missing table (42P01, as `{ error }`) rather than a refusal naming a foreign key.
       else if (cols.size === 0) continue;
+      else if (returning) throw refusal(`select("…${item.key}(…)") embeds a relation in a RETURNING list, which is not supported — read the row back with a second select.`);
       else parts.push(await this.embed(item, cols));
     }
     return parts.join(", ") || "*";
@@ -938,7 +1015,9 @@ export class SupabaseSqlClient {
             return `${ident(n, "argument")} => $${values.length}${b.cast}`;
           }).join(", ")})`
         : `${f}()`;
-      const rows = ((await this.sql.unsafe(`SELECT * FROM ${call}`, values as never[])) as unknown as Record<string, unknown>[]).map((r) => jsonShaped(r));
+      // The rows shaped by the overload's OUT columns when the call resolves to one (or every candidate agrees).
+      const outs = overloads.length && overloads.every((o) => [...o.outs].every(([k, v]) => overloads[0].outs.get(k)?.type === v.type)) ? overloads[0].outs : undefined;
+      const rows = ((await this.sql.unsafe(`SELECT * FROM ${call}`, values as never[])) as unknown as Record<string, unknown>[]).map((r) => jsonShaped(r, outs));
 
       // A set-returning function yields rows; a scalar one yields a single column
       // holding the value. PostgREST makes the same distinction.

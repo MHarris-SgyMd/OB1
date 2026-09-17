@@ -63,6 +63,22 @@ if (!URL_) {
   await admin`CREATE TABLE manuals (id serial PRIMARY KEY, widget_id int UNIQUE REFERENCES widgets(id), pages int)`;
   await admin`DROP TABLE IF EXISTS nodes CASCADE`;
   await admin`CREATE TABLE nodes (id serial PRIMARY KEY, parent_id int REFERENCES nodes(id), name text, counts int[] DEFAULT '{}')`;
+  // A domain over an array type (format_type gives the domain's name; the type category says array), and a
+  // same-named table in a schema behind the visible one, carrying the foreign key the visible one lacks.
+  await admin`DROP DOMAIN IF EXISTS tagset CASCADE`;
+  await admin`CREATE DOMAIN tagset AS text[]`;
+  await admin`DROP TABLE IF EXISTS crates CASCADE`;
+  await admin`CREATE TABLE crates (id serial PRIMARY KEY, tags tagset DEFAULT '{}')`;
+  await admin`DROP SCHEMA IF EXISTS hidden CASCADE`;
+  await admin`CREATE SCHEMA hidden`;
+  await admin`DROP TABLE IF EXISTS kids CASCADE`;
+  await admin`CREATE TABLE kids (id serial PRIMARY KEY, widget_id int, v text)`;
+  await admin`CREATE TABLE hidden.kids (id serial PRIMARY KEY, widget_id int REFERENCES widgets(id), v text)`;
+  // A function whose OUT columns include a date: its rows shaped as the table's.
+  await admin`
+    CREATE OR REPLACE FUNCTION gizmos_made(p_label text)
+    RETURNS TABLE (id int, made_on date, label text) LANGUAGE sql STABLE AS $$
+      SELECT id, made_on, label FROM gizmos WHERE label = p_label $$`;
   await admin`
     CREATE OR REPLACE FUNCTION widgets_labelled(p_labels text[], p_kind text DEFAULT NULL)
     RETURNS TABLE (id int, name text) LANGUAGE sql STABLE AS $$
@@ -167,6 +183,16 @@ console.log("\n[4] Filters");
   // Four tools interpolate user text into their expression; a comma in it splits a term PostgREST cannot parse either.
   const split = await db.from("widgets").select("name").or("name.ilike.%Sea, Salt%,kind.is.null");
   assert(split.error !== null && split.error.code === "PGRST100" && /not column\.operator\.value/.test(split.error.message), `a term user text broke resolves as { error } with PostgREST's 400 code, not a throw out of the handler (${split.error?.code})`);
+  // Pattern text is text: a quote, a parenthesis or a bracket in an ILIKE value neither splits nor swallows a term.
+  const rows4 = (r: { data: unknown }) => (r.data as { name: string }[] | null) ?? []; // rowsOf() is declared at [12]
+  const quoteText = rows4(await db.from("widgets").select("name").or('name.ilike.%12" pipe%,name.ilike.%alp%,kind.ilike.%(x%'));
+  assert(quoteText.length === 1 && quoteText[0]?.name === "alpha", `an unbalanced quote or parenthesis in a plain value is pattern text — the terms after it still count (${quoteText.length})`);
+  const andText = rows4(await db.from("widgets").select("name").or("name.ilike.%wine and (cheese)%,name.eq.alpha"));
+  assert(andText.length === 1, `"and (" inside a value is text, not grouping (${andText.length})`);
+  const unclosed = await db.from("widgets").select("name").or('meta.cs.[{"k":"a,name.eq.alpha');
+  assert(unclosed.error?.code === "PGRST100", `a group nothing closes is the 400, not a swallowed expression (${unclosed.error?.code})`);
+  const quotedValue = rows4(await db.from("widgets").select("name").or('name.eq."alpha",name.eq."no, body"'));
+  assert(quotedValue.length === 1, `PostgREST's double-quoted value form holds a comma (${quotedValue.length})`);
 
   // PostgREST semantics: an empty in() list matches nothing rather than everything.
   const emptyIn = await db.from("widgets").select("name").in("name", []);
@@ -359,6 +385,8 @@ try {
   await db.from("gizmos").insert({ label: "dated" }).select("id");
   const dated = rowsOf(await db.from("gizmos").select("made_on").eq("label", "dated"), "date column");
   assert(dated[0]?.made_on === "2026-09-20", `a date column arrives as the bare date PostgREST gives, not a Z instant (${String(dated[0]?.made_on)}) — five extension tools read one`);
+  const viaFn = rowsOf(await db.rpc("gizmos_made", { p_label: "dated" }), "date through a function");
+  assert(viaFn[0]?.made_on === "2026-09-20", `…and the same column through a RETURNS TABLE function is the same bare date — one shape whichever path a tool takes (${String(viaFn[0]?.made_on)})`);
   await db.from("gizmos").delete().eq("label", "dated");
 } catch (e) {
   assert(false, `[13] threw: ${e instanceof Error ? e.message : String(e)}`);
@@ -397,6 +425,8 @@ try {
   assert(JSON.stringify(empty[0]?.meta) === '["j","k"]', `…and the same insert's array into jsonb stores a JSON array (${JSON.stringify(empty[0]?.meta)})`);
   const two = rowsOf(await db.from("widgets").insert({ name: "eta", kind: "tool", score: 2, labels: ["ai", "with, comma", 'quo"te'] }).select("labels"), "insert [a, b]");
   assert(JSON.stringify(two[0]?.labels) === '["ai","with, comma","quo\\"te"]', `elements with a comma and a quote survive the literal (${JSON.stringify(two[0]?.labels)})`);
+  const domain = rowsOf(await db.from("crates").insert({ tags: ["a", "b"] }).select("tags"), "domain over text[]");
+  assert(JSON.stringify(domain[0]?.tags) === '["a","b"]', `a domain over text[] binds as an array — the type's category decides, not its name (${JSON.stringify(domain[0]?.tags)})`);
   const ints = rowsOf(await db.from("nodes").insert({ name: "counted", counts: [3, 1, 2] }).select("counts"), "int[]");
   assert(Array.isArray(ints[0]?.counts) && JSON.stringify(ints[0]?.counts) === "[3,1,2]", `an int[] column comes back as a list, not the Int32Array Bun decodes it into (${JSON.stringify(ints[0]?.counts)})`);
   await db.from("nodes").delete().eq("name", "counted");
@@ -498,6 +528,10 @@ try {
   assert(/in itself/.test(await refusedMsg(() => db.from("nodes").select("*, nodes(name)"))), "embedding a table in itself by name is refused, naming the column form");
   const parent = rowsOf(await db.from("nodes").select("name, parent:parent_id (name)").eq("name", "leaf"), "self by column");
   assert(JSON.stringify(parent[0]) === JSON.stringify({ name: "leaf", parent: { name: "root" } }), `…and the column form serves it (${JSON.stringify(parent[0])})`);
+  // A same-named table in a schema off the search path carries a foreign key the visible one lacks: it is not
+  // counted under the visible table's name, which the join would have reached (the silent wrong join).
+  await new SQL({ url: URL_, max: 1 }).unsafe(`INSERT INTO hidden.kids (widget_id, v) VALUES (${alpha}, 'the hidden table''s row')`).then(() => {});
+  assert(/no foreign key joins it/.test(await refusedMsg(() => db.from("widgets").select("*, kids(v)"))), "a foreign key on an invisible same-named table is not the visible table's — refused, not joined to the wrong rows");
   // A table the catalog cannot see: the query reports it, not a refusal about foreign keys.
   const ghost = await db.from("no_such_table").select("*, widgets(name)");
   assert(ghost.error !== null && ghost.error.code === "42P01", `an embed on a missing table is the missing table's error, as without the embed (${ghost.error?.code})`);
@@ -525,6 +559,10 @@ try {
   await admin`ALTER TABLE latecomers ADD COLUMN aliases text[] DEFAULT '{}'`;
   const grown = rowsOf(await db.from("latecomers").insert({ aliases: ["x"] }).select("aliases"), "insert into a new column");
   assert(JSON.stringify(grown[0]?.aliases) === '["x"]', `a column added under a running client binds by type on its first use — the map is re-read when a named column is missing (${JSON.stringify(grown[0]?.aliases)})`);
+  // A column the table does not have: one re-read, then remembered as absent — not a read per call.
+  const typo1 = await db.from("latecomers").select("id").eq("nmae", "x");
+  const typo2 = await db.from("latecomers").select("id").eq("nmae", "x");
+  assert(typo1.error?.code === "42703" && typo2.error?.code === "42703", "a column the table lacks is Postgres's 42703, both times");
   await admin`DROP TABLE latecomers`;
   await admin.close();
 } catch (e) {

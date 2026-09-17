@@ -11318,7 +11318,8 @@ columns as the labels say. *Twenty-nine:* recorded, not corrected backwards —
 change 74's prose keeps its count with a note.
 
 **Verified:** `../../db/with-postgres.sh bun test-compat.ts` 131/131 (84
-before): [14] `.not()` on `is`, `eq`, `in`, `in []`, `ilike`, `cs`, the two
+before; 144 after pass 1, 152 after pass 2 — the passes' pins are listed in
+their paragraphs): [14] `.not()` on `is`, `eq`, `in`, `in []`, `ilike`, `cs`, the two
 renderings in `toSQL()`, an unknown operator refused; [15] `[]` and
 `["ai", "with, comma", "quo\"te"]` into `text[]` beside an array into `jsonb`
 in one insert, an update, `.contains()` on both column kinds and with
@@ -11330,8 +11331,8 @@ across lines, by key column with and without an alias, one-to-many with `(*)`,
 `null` and `[]`, an embed under `.single()`, the correlated subquery in
 `toSQL()`, and eight refusals; [1] two clients share a pool and closing one
 twice leaves the other's open. `../db/with-postgres.sh bun test-tools.ts`
-114/114 — 29 tools, every argument branch, the drift guard, the connection
-count. Six mutations of the shim, each restored from saved text: `.not()`
+114/114 (117 after pass 1, 121 after pass 2) — 29 tools, every argument
+branch, the drift guard, the connection count. Six mutations of the shim, each restored from saved text: `.not()`
 removed → 5 named failures in the tool suite (the two tools' `.not is not a
 function`), 1 in compat; the array literal removed → 50 and 17 (`malformed
 array literal: "quick,vegetarian"`, `""`; the first run read 25 because a
@@ -11341,7 +11342,7 @@ error a plain object → 2 and 4 (`[object Object]` in both tools' text); `cs`
 removed → 6 (compat aborted at `[4]`'s `.contains()`, which throws outside a
 try — the tool suite carried the tally); `cs` always jsonb → 4 and 4
 (`operator does not exist: text[] @> jsonb`). The connection probe: 84 held
-before the shared pool, the assertion at ≤ 12 after. `bun
+before the shared pool, the assertion at ≤ 20 after (pass 1; 12 before it). `bun
 scripts/migrate-to-sql-shim.mjs` triage: the three embed files no longer
 blocked, `job-hunt` on nesting and a hint, `enhanced-mcp` and `ob-graph` on a
 hint, `agent-memory-api` under `KEEP` with its reason; `--revert` then
@@ -11366,9 +11367,10 @@ double-quoted value form. A column DROPPED under a running server, or one
 whose type changes, is not seen until the process restarts (a column added is
 — pass 1); PostgREST's cache has none but a reload either. A `timestamp
 without time zone` column still arrives as a `Z` instant (change 73's rule;
-the `date` case is closed — pass 1). `text[]`-typed `uuid[]` columns arrive as
-Postgres's literal text (`{…}`), `int[]` as a list (pass 1) — no migrated file
-reads either. VARIADIC arguments cannot be called by name in Postgres, so
+the `date` case is closed for a table's rows, a function's and an array's —
+passes 1 and 2). `uuid[]` columns arrive as Postgres's literal text (`{…}`),
+`int[]` as a list (pass 1), a `bytea` as Bun's `Buffer` — no migrated file
+reads any of them. VARIADIC arguments cannot be called by name in Postgres, so
 `.rpc()` cannot reach one; nothing in the tree is variadic. `test-compat.ts`'s
 `[4]` block has no try, so a refusal thrown inside it ends the run without a
 tally (seen under the `cs` mutant); the tool suite's blocks and `[12]`–`[18]`
@@ -11436,6 +11438,58 @@ and by column, the missing table; `[18]` a late table and a late column; the
 tool suite: `week_start` bare, a comma in an ingredient and in a household
 query, `follow_up_date` equal to the bare date. `test-compat.ts` 144/144 (131
 after the change, 84 before); `test-tools.ts` 117/117.
+
+**Review pass 2** (the same two shapes; eighteen items, thirteen taken, the
+rest noted). The stop signal fired on its face — eight of the reader's ten
+and every one of the runner's findings sat in pass 1's additions — and the
+top two were consecutive seams in one of them, so the mechanism was the
+finding: pass 1's comma split for `.or()` counted brackets and quotes found
+INSIDE a plain value, so an unbalanced `(`, `]` or `"` in user text (`Kitchen
+(main`, `12" pipe`) swallowed the remaining terms into the first value's
+literal and `search_household_items` answered no rows with no error where
+the change's first commit had answered the row — a regression, measured
+against df86661 — while `and (` anywhere in user text still threw the
+nested-grouping refusal out of the handler. `.or()` is a term parser now: a
+column (a name or a JSON path) to the first dot, an operator to the next,
+then a value that is a balanced `[…]`/`{…}` group when it starts with one, a
+double-quoted string when it starts with `"` (PostgREST's quoting), or plain
+text to the next comma with nothing else structural in it; a term whose
+column is not column-shaped (what a comma in a plain value leaves behind), or
+a group nothing closes, is the `PGRST100` `{ error }`; grouping is refused
+only where a term begins. Also taken: pass 1's `ArrayBuffer.isView` rule ate
+a `bytea` column's `Buffer` — it applies to an array column only; `date[]`
+and `timestamptz[]` elements were Dates — shaped by element as the scalar
+is; a function's rows had no column map, so `crm_search_contacts` gave
+`follow_up_date` as an instant through `crm_search_contacts_fts` and as the
+bare date through the ILIKE fallback, the shape changing with whether
+`to_tsquery` accepted the query — each overload carries its OUT columns
+(`proallargtypes` by `proargmodes`) and the rows take that map; a column the
+schema lacks re-read `pg_attribute` on every call for the process's life
+(200 reads for 200 calls, 2.5× the time, no coalescing under concurrency) —
+a fresh read that still lacks the name remembers it as absent, forgotten
+when a later read finds new columns; the one-to-one test reads a valid
+index's key columns only (`indisvalid`, `indnkeyatts`; an `int2vector`
+cast is zero-based, so the first attempt's `[1:n]` slice dropped the first
+key and the pin caught it); the RETURNING refusal is checked after the
+missing-table skip; two pass-1 additions the runner proved load-bearing by
+mutation but nothing pinned — foreign keys among visible tables only (a
+same-named table in a hidden schema with the key the visible one lacks was
+joined as the visible one without the predicate), and array binding by type
+category (a `DOMAIN` over `text[]`) — have their pins; the tool suite's
+comment that Bun opens a pool lazily was wrong (it opens to `max`; the
+FORK sentence was right); the Verified block's superseded numbers. Noted,
+no change: the STORES clear on `close()` is dead in production (no server
+closes) and fires in tests and scripts; the connection bound is 20 against
+an observed 12; the 90-day pin's database-zone case is exercised only
+outside CI's UTC container. Pins: `[4]` a quote, a parenthesis and `and (`
+inside plain values, an unclosed group, PostgREST's quoted form; `[13]` the
+date through a function; `[15]` the domain; `[17]` the hidden table; `[18]`
+the typo's 42703 twice; the tool suite: an unclosed quote and parenthesis as
+pattern text, an exact name through the four-term `.or()`, `follow_up_date`
+one shape through the function. `test-compat.ts` 152/152; `test-tools.ts`
+121/121. The stop signal holds: nothing the pass found in the original
+mechanism is above LOW, and the one mechanism whose seams recurred is
+replaced.
 
 **Upstream status:** not applicable — the shim, the codemod and the suite are
 fork-only, and the five servers' own text is untouched (the embeds, the

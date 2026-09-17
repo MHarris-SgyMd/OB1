@@ -173,7 +173,11 @@ try {
   const byFilters = await c("search_household_items", { category: "appl", location: "kitch" });
   assert(ok(byFilters) && byFilters.body?.count === 1 && byFilters.body?.items?.[0]?.name === "Dishwasher", "…by category and location, ILIKE both");
   const comma = await c("search_household_items", { query: "Sea, Salt" });
-  assert(!ok(comma) && comma.body?.success === false && /not column\.operator\.value/.test(failure(comma)), `…a query with a comma splits the .or() expression as it would through PostgREST (400), and reaches the tool's own error handling — its { success: false, error } body — rather than throwing past it (${failure(comma).slice(0, 80)})`);
+  assert(!ok(comma) && comma.body?.success === false && /PGRST100/.test(failure(comma)), `…a query with a comma splits the .or() expression as it would through PostgREST (400), and the tool's own error handling reports PostgREST's code — the shim resolved { error }, it did not throw (${failure(comma).slice(0, 80)})`);
+  const quoteQuery = await c("search_household_items", { query: 'Paint (Sea "Salt' });
+  assert(ok(quoteQuery) && quoteQuery.body?.count === 0, `…a query with an unclosed quote and parenthesis is pattern text — four ILIKE terms, no rows, no error (${failure(quoteQuery) || quoteQuery.body?.count})`);
+  const exactQuery = await c("search_household_items", { query: "Living Room Paint" });
+  assert(ok(exactQuery) && exactQuery.body?.count === 1, "…and an exact name finds its row through the four-term .or()");
   const none = await c("search_household_items", { query: "nothing-of-the-kind" });
   assert(ok(none) && none.body?.count === 0 && eqJson(none.body?.items, []), "…and none is an empty list");
   const all = await c("search_household_items", {});
@@ -383,6 +387,7 @@ let pastaId = "", saladId = "", shoppingListId = "";
   assert(ok(fts) && fts.body?.search_mode === "fts" && fts.body?.count === 1 && fts.body?.contacts?.[0]?.name === "Ada Lovelace", `crm_search_contacts by query is full-text search (${failure(fts) || fts.body?.search_mode})`);
   const ftsTags = await c("crm_search_contacts", { query: "engineer", tags: ["ai"] });
   assert(ok(ftsTags) && ftsTags.body?.search_mode === "fts" && ftsTags.body?.count === 1, `…with tags, still fts — the text[] argument bound as an array, not the ILIKE fallback (${failure(ftsTags) || ftsTags.body?.search_mode})`);
+  assert(fts.body?.contacts?.[0]?.follow_up_date === null && typeof fts.body?.contacts?.[0]?.created_at === "string", "…its rows through the function are JSON-shaped as the table's are (timestamps strings)");
   const ftsNoTag = await c("crm_search_contacts", { query: "engineer", tags: ["nope"] });
   assert(ok(ftsNoTag) && ftsNoTag.body?.search_mode === "fts" && ftsNoTag.body?.count === 0, "…and a tag she lacks finds none, through fts");
   const ftsTwo = await c("crm_search_contacts", { query: "engine talk" });
@@ -427,6 +432,8 @@ let pastaId = "", saladId = "", shoppingListId = "";
   assert(ok(soon) && soon.body?.overdue_count === 1 && soon.body?.upcoming_count === 0, "…a one-day window keeps only the overdue one");
   const cleared = await c("crm_update_contact", { contact_id: ids.cy, follow_up_date: null });
   assert(ok(cleared) && cleared.body?.contact?.follow_up_date === null, "crm_update_contact clears a follow-up with null");
+  const ftsDated = await c("crm_search_contacts", { query: "bricks" });
+  assert(ok(ftsDated) && ftsDated.body?.search_mode === "fts" && ftsDated.body?.contacts?.[0]?.follow_up_date === dateDaysFromNow(2), `…a date column through the function's rows is the bare date the table's rows give — one shape whichever path the tool takes (${ftsDated.body?.contacts?.[0]?.follow_up_date})`);
   const afterClear = await c("crm_get_follow_ups", {});
   assert(ok(afterClear) && afterClear.body?.overdue_count === 0 && afterClear.body?.upcoming_count === 1, "…and the follow-ups no longer list it");
 
@@ -466,9 +473,9 @@ console.log("\n[the servers' clients share one pool]");
 {
   const [{ n }] = await sql`SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database()`;
   const requests = [...driven.values()].reduce((a, set) => a + set.size, 0);
-  // The shared pool is ten wide and this suite's own two more; Bun opens a pool's connections lazily (one or two are
-  // in use after a serial run), and a backend from an earlier step of the CI job may not have been reaped yet — so
-  // the bound is a fifth of the limit, not the arithmetic: 84 were held before change 76, against a default of 100.
+  // The shared pool is ten wide (Bun opens it to `max`, serial or not) and this suite's own two more, and a backend
+  // from an earlier step of the CI job may not have been reaped yet — so the bound is a fifth of the limit, not the
+  // arithmetic: 84 were held before change 76, against a default of 100.
   assert(Number(n) <= 20, `after ${requests}+ tools/call requests, each of which built a client it never closed, the database sees a handful of connections, not one per request (${n}; 84 held before change 76, against a default limit of 100)`);
 }
 
