@@ -11395,7 +11395,19 @@ or the module-level `server` was, connected to that request's transport and
 dropped with it. The per-scope `Map` and `serverFor()` are gone from the three;
 in `enhanced-mcp` the construction and the thirteen registrations are wrapped in
 the function (a 1,517-line span re-indented — `git diff -w` shows the twenty
-lines that changed, four of them the header comment). This is the shape `kubernetes-deployment`, `ob-graph`, the
+lines that changed, four of them the header comment). The re-indent is this
+fork's largest whitespace-only divergence from the pin, by an order of
+magnitude, in a vendored file: any upstream edit inside the span will
+conflict on a plain rebase. The mitigation is one flag — `git rebase -X
+ignore-space-change upstream/main` resolves whitespace-only hunks and takes
+upstream's substantive edits at their old indentation, to re-indent by hand —
+and the procedure under "Rebasing onto upstream" names it. The alternative,
+a wrap with the body left at column 0, would have kept both diffs at twenty
+lines at the cost of a 1,500-line function body no other server in the tree
+formats that way; readability won. CI's deno-check job typechecks the
+wrapped file from this change on (it never listed `enhanced-mcp`: change 67's
+rationale for the job was the files that consume `../_shared/auth.ts`, and
+this one keeps its own compare). This is the shape `kubernetes-deployment`, `ob-graph`, the
 cost recipe's "before" sample and the seven extensions already had, and the one
 the ticket called the cheap option. The "after" sample builds per *session*:
 `server.ts` exports `buildServer(principal)` in place of the cached
@@ -11408,7 +11420,15 @@ was measured on the pinned SDK (Bun 1.4.0, 20,000 builds after 2,000 warm): a
 one-tool server with `delete_thought`'s schema builds in 45 µs (31–45 across
 the three reviewers' re-runs, most of it the SDK's Ajv instance, which
 `tools/call` never uses — it validates with zod), the recipe's four-tool shape
-in 70 µs, thirteen tools with five-field schemas in 474 µs.
+in 70 µs, thirteen tools with five-field schemas in 474 µs. Those are Bun
+numbers; the servers deploy on Deno, so the seventh review pass ran the same
+build under Deno 2.9.6 with `enhanced-mcp`'s own deno.json (SDK 1.24.3, zod
+4.1.13): one tool 92–97 µs against Bun's 37–39, thirteen five-field tools
+776–839 µs against 216–221 — two and a half to four times slower, most of the
+gap zod's schema construction — which puts `enhanced-mcp`'s real build at
+roughly 1.2–1.8 ms on Deno. Cold start gets lighter, not heavier: the Ajv
+instance moves from import time to request time, and the server is garbage
+after the response instead of retained.
 The cheapest thing any of these servers then does is a database round trip,
 in milliseconds; the per-scope cache change 67 kept was buying tens of
 microseconds and costing the hang. The cost recipe's README and its "before"
@@ -11486,8 +11506,9 @@ staggered request, hung. The
 fourth reviewer's other mutants: a server built before the 401 check for a
 dummy principal fails the nine scope assertions; the probe with three equal
 ids still fails main's shape (the deadline carries the detection, the ids
-the attribution). `deno check` on `enhanced-mcp` passes (CI does not run it
-for that file; its deno.json resolves supabase-js).
+the attribution). `deno check` on `enhanced-mcp` passes (and CI's deno-check
+job runs it for that file from this change on; its deno.json resolves
+supabase-js).
 `bun scripts/check-fork-consistency.mjs` PASS.
 
 **Not done here.** `enhanced-mcp` stays outside `test-auth.ts`'s table — its
@@ -11559,7 +11580,11 @@ git fetch upstream
 git log --oneline upstream-pin-9543c29..upstream/main -- server/ docs/01-getting-started.md
 
 git checkout -b siggymd/rebase-$(date +%Y%m%d) siggymd/fork-baseline
-git rebase upstream/main
+git rebase -X ignore-space-change upstream/main   # change 77 re-indented 1,517 lines of
+                                                  # integrations/enhanced-mcp/index.ts; the flag
+                                                  # resolves whitespace-only hunks and takes an
+                                                  # upstream edit inside the span at its old
+                                                  # indentation, to re-indent by hand
 
 cd server
 bun install --frozen-lockfile

@@ -125,6 +125,15 @@ jobs:
         working-directory: integrations/kubernetes-deployment
         run: deno check --node-modules-dir=none index.ts
 
+      # enhanced-mcp keeps its own key compare, so change 67's rationale never
+      # listed it; change 77 (SMD-1497) wrapped its thirteen tool registrations
+      # in a per-request buildServer() — a 1,517-line span — and this holds
+      # that wrap, and any later edit inside it, to Deno's typecheck. Its
+      # deno.json resolves supabase-js.
+      - name: deno check integrations/enhanced-mcp
+        working-directory: integrations/enhanced-mcp
+        run: deno check --node-modules-dir=none index.ts
+
   portable-server:
     name: Portable server (Bun + Workers)
     runs-on: ubuntu-latest
