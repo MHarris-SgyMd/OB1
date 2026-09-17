@@ -9835,7 +9835,7 @@ only the statement that produces the counts changes:
 ```sql
 SELECT count(*) FILTER (WHERE p.hit), count(DISTINCT b.blk) FILTER (WHERE p.hit), count(DISTINCT b.blk)
   INTO v_hits, v_hit_pages, v_pages_seen
-FROM (SELECT DISTINCT floor(random() * v_pages)::int AS blk FROM generate_series(1, 8)) b
+FROM (SELECT DISTINCT floor(random() * v_pages)::bigint AS blk FROM generate_series(1, 8)) b
 LEFT JOIN LATERAL (
   SELECT (t.metadata @> filter AND t.embedding IS NOT NULL) AS hit
   FROM thoughts t
@@ -9887,10 +9887,13 @@ a real Postgres before the file was written.**
   extra SPI round trip at entry (the unfiltered path still pays for `v_pages`
   alone, as under 037), keeps the estimate one statement over locals declared
   at entry — which is what `extractBody` and `routingAt` read for [8e] and
-  the bench — and is never pulled up either. `random()` in a target list is
-  evaluated once per row of `generate_series` (the once-only trap is a scalar
-  subquery, an InitPlan, which change 70 met loading its fixture); `DISTINCT`
-  collapses a block drawn twice so no page is read or counted twice.
+  the bench, and what test-schema [8e] reads out of `pg_proc` to run against
+  its own table — and is never pulled up either. `random()` in a target list
+  is evaluated once per row of `generate_series` (the once-only trap is a
+  scalar subquery, an InitPlan, which change 70 met loading its fixture);
+  `DISTINCT` collapses a block drawn twice so no page is read or counted
+  twice; the block is a `bigint`, since an `int` draw would overflow past 2³¹
+  pages (a 16 TB heap — academic, and free to remove).
 - *Plan mode, which 037's statement lost on.* Both plan modes price the new
   statement alike — the bounds are column references under either — so
   plpgsql adopts the generic plan after the fifth call and never replans.
@@ -9953,9 +9956,10 @@ duplicates collapsed reached eight distinct pages in all but a few of a
 thousand at the floor (the fewest seen: 7 in 1,000 draws, 6 in 20,000). The
 thin-spread layout, the one condition 3 is weakest against, was skipped 29
 times in 20,000 draws at the floor — 1.45e-3, which is what change 70's
-formula computes, C(8,3) × (251 / 8,191)³ = 1.6e-3. 037 measured 14 in
-20,000 for the same layout because `SYSTEM`'s variance made condition 1 fail
-whenever its draw reached nine pages or more; that accident is gone, the bound
+formula computes, C(8,3) × (251 / 8,191)³ = 1.6e-3. 037's statement, re-run
+on this heap, was skipped 14 times in 20,000 (its header's 13 was on a
+6,826-page heap) because `SYSTEM`'s variance made condition 1 fail whenever
+its draw reached ten pages or more (nine on 037's smaller heap); that accident is gone, the bound
 is the formula's and falls as the cube of the heap (7e-6 at a million rows,
 7e-9 at ten million), and `hit_pages ≥ 4` remains the knob if the band
 matters. At the ceiling count (`v_exact` 8,000) the picture is change 70's:
@@ -10033,10 +10037,11 @@ first, five queries):
 Read down the tables and three things fall out.
 
 - **The sample's cost is flat, and the empty filter has its cost back.** The
-  `estimate` row reads 0.08–0.12 ms at 10,000 rows, 0.08–0.12 at a million
+  `estimate` row reads 0.07–0.12 ms at 10,000 rows, 0.08–0.12 at a million
   and 0.09–0.12 at ten million under 038, the same three columns for the 50%
-  filter, a thin one and the empty one — against 037's 0.04–0.14, 0.22–0.36
-  and 1.10–1.20: the 2 ns a page, gone. That is the ticket's first check
+  filter, a thin one and the empty one — against 037's 0.04–0.12, 0.22–0.36
+  and 1.10–1.20 (that last from the loaded before pass; 0.94 on the idle
+  machine in change 70): the 2 ns a page, gone. That is the ticket's first check
   (within a factor of two across the three scales; it is within 1.5). Through
   the function the empty filter at ten million rows costs 0.36 ms — 0.27
   before 037 in change 70's pass, 1.31 under 037 there and 1.67 under 037
@@ -10088,12 +10093,15 @@ sessions' benches resident, one whose connection the server dropped under
 the same pressure, and the fourth on the idle VM — which is a fact about a
 shared 14.8 GB VM, not about the bench.
 
-**Verified:** `db/test-schema.ts` 873/873 under PGlite, [8e] rewritten (the
+**Verified:** `db/test-schema.ts` 877/877 under PGlite, [8e] rewritten (the
 TID range probe, the three load-bearing tokens — `DISTINCT`, `LEFT`, `LIMIT
 291` — no `TABLESAMPLE` in the body, the floor, exactness with the gate
-reached, five draws judged by the rule and reaching between one and eight
-pages, and five more over a heap with its middle deleted and vacuumed, each
-counting the pages it drew) and [20]'s definer pin moved to 038;
+reached; then the statement read out of the installed body: five draws judged
+by the rule and each reaching three to eight pages, its plan TID Range Scans
+with no sequential scan and no Materialize, and — the heap's middle deleted
+and vacuumed — the probe pinned to eight emptied blocks reporting eight pages
+drawn and no hit, where an INNER join reports none) and [20]'s definer pin
+moved to 038;
 `db/test-live.ts` 500/500 on real Postgres, [5d] now exact (the broad filter
 makes exactly one GIN scan fewer per call than under 020's body, twenty of
 twenty, where 037's band was 0.75–1.0; 0.33 ms a call for the sample on its
@@ -10105,6 +10113,34 @@ privilege moves; 014 re-applied by hand, then 038 alone, leaves one form);
 after at a million rows and at 10,000 (both arms' estimate rows: 037's a
 `Sample Scan`, 038's a `Tid Range Scan`) and at ten million rows (the after
 pass on its fourth attempt, the VM idle), above.
+
+**Review pass 1** (a cold reader and a run-it reviewer with a scratch
+Postgres). No defect in the mechanism: the reviewers re-derived the planner
+account (`create_tidscan_paths` reads `baserestrictinfo` with the lateral
+relids as `required_outer`; `IsBinaryTidClause` admits a lateral reference;
+two default inequalities on one column give the 0.5% range default), checked
+every figure in the header, and re-measured the flat cost (0.051 ms at 20,000
+pages, 0.049 at 60,000), the generic plan after five calls (auto_explain: five
+custom plans with the page count inlined, then `$n`), the edge cases (an
+empty heap, one page, a page count a hundred times the heap, 75% of the heap
+deleted and vacuumed, NULL and non-object metadata, a 200 KB TOASTed value on
+a probed page, a `setseed` draw) and 200 concurrent calls over sixteen
+connections with no error or differing answer. What they found: [8e]'s
+behavioural checks ran a copy of the statement kept in the test, so an INNER
+join, a missing `LIMIT` and a constant block all passed them and were caught
+by the text regexes alone — the copy now comes out of `pg_proc`, the LEFT
+join has a deterministic probe (eight blocks pinned in an emptied range) and
+the `LIMIT` a plan assertion; the header cited 037's ten-million estimate
+from the loaded pass without saying so, carried "nine pages" from 037's
+smaller heap where this one needs ten, quoted 037's re-run as "037 measured",
+and said [8e] read the statement through `extractBody` (the bench does; [8e]
+reads `pg_proc`); the temp-table note described one of two cases — in a
+session whose first temp table is the shadow, every cached plan is rebuilt
+and the whole call reads the shadow, still the safe side; an `int` block
+would overflow at 2³¹ pages, now `bigint`. test-live [7] failed three times
+for the run-it reviewer while another agent's suite ran in the same
+worktree, then passed nine times in a row; that is SMD-1545's assertion, and
+the concurrent-suite lead is on that ticket.
 
 **The operator's path, walked.** A brain at 037 with rows, upgraded by `bun
 db/migrate.ts`: "038 applied, 1 applied, 37 skipped", one `match_thoughts`

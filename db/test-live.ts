@@ -488,7 +488,7 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
       return ts.sort((a, b) => a - b)[Math.floor(n / 2)];
     };
     const sampleMs = await timed(`SELECT count(*) FILTER (WHERE p.hit), count(DISTINCT b.blk) FILTER (WHERE p.hit), count(DISTINCT b.blk)
-      FROM (SELECT DISTINCT floor(random() * ${pages})::int AS blk FROM generate_series(1, ${ROUTE_SAMPLE_PAGES})) b
+      FROM (SELECT DISTINCT floor(random() * ${pages})::bigint AS blk FROM generate_series(1, ${ROUTE_SAMPLE_PAGES})) b
       LEFT JOIN LATERAL (SELECT (t.metadata @> '${BROAD}'::jsonb AND t.embedding IS NOT NULL) AS hit FROM thoughts t
                          WHERE t.ctid >= ('(' || b.blk || ',0)')::tid AND t.ctid < ('(' || b.blk + 1 || ',0)')::tid LIMIT 291) p ON true`);
     const collectMs = await timed(`SELECT array_agg(s.id) FROM (SELECT t.id FROM thoughts t WHERE t.metadata @> '${BROAD}'::jsonb AND (t.embedding IS NOT NULL OR EXISTS (SELECT 1 FROM thought_chunks k WHERE k.thought_id = t.id)) LIMIT 1001) s`);

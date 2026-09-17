@@ -49,7 +49,7 @@
 --            count(DISTINCT b.blk) FILTER (WHERE p.hit),
 --            count(DISTINCT b.blk)
 --       INTO v_hits, v_hit_pages, v_pages_seen
---     FROM (SELECT DISTINCT floor(random() * v_pages)::int AS blk
+--     FROM (SELECT DISTINCT floor(random() * v_pages)::bigint AS blk
 --           FROM generate_series(1, {{ROUTE_SAMPLE_PAGES}})) b
 --     LEFT JOIN LATERAL (
 --       SELECT (t.metadata @> filter AND t.embedding IS NOT NULL) AS hit
@@ -96,8 +96,9 @@
 --     shrank between the sizing and the read) read nothing and cost nothing
 --     — and such a block still counts among the pages drawn, which lowers
 --     the estimate: the safe side. Core Postgres has no constructor from a
---     block number to a tid, so the bounds are built as text; sixteen small
---     casts a call.
+--     block number to a tid, so the bounds are built as text — sixteen
+--     text-to-tid casts a call. The block is a bigint: as an int the draw
+--     and its +1 would overflow past 2^31 pages, a 16 TB heap.
 --   * The LIMIT is for the planner, twice over, and never cuts a page: an
 --     8 KB page holds at most 291 tuples (MaxHeapTuplesPerPage), so no block
 --     can return more. First, it keeps the probe a subquery. Without it the
@@ -121,9 +122,10 @@
 --   * The blocks are drawn inside the statement, not in plpgsql: no extra
 --     SPI round trip at entry (the unfiltered path still pays for v_pages
 --     alone, as under 037), and the estimate stays ONE statement over locals
---     declared at entry, which is what test-support's extractBody and
---     routingAt read for db/test-schema.ts [8e] and db/bench-hnsw.ts section
---     C. random() in the subquery's target list is evaluated once per row of
+--     declared at entry — which db/bench-hnsw.ts section C reads through
+--     test-support's extractBody and routingAt, and db/test-schema.ts [8e]
+--     reads out of pg_proc to run against its own table with the locals
+--     substituted. random() in the subquery's target list is evaluated once per row of
 --     generate_series (the once-only trap is a scalar subquery, an InitPlan);
 --     DISTINCT collapses a block drawn twice so no page is read or counted
 --     twice, and keeps that subquery a subquery too.
@@ -179,9 +181,12 @@
 --     against (a few matches a page over hundreds of pages): 1,000 rows four
 --     a page over 251 pages of the 8,191 were skipped 29 times in 20,000
 --     draws at the floor — 1.45e-3, which is the formula's figure, C(8,3) x
---     (251 / 8,191)^3 = 1.6e-3. 037 measured 14 in 20,000 for the same
---     layout because SYSTEM's variance made condition 1 fail whenever its
---     draw reached nine pages or more; that accident is gone, and the bound
+--     (251 / 8,191)^3 = 1.6e-3. 037's statement, re-run on this heap, was
+--     skipped 14 times in 20,000 (its own header's 13 was on a 6,826-page
+--     heap) because SYSTEM's variance made condition 1 fail whenever its
+--     draw reached ten pages or more (nine, on 037's smaller heap: twelve
+--     hits scale to just over ten times the threshold at nine pages here);
+--     that accident is gone, and the bound
 --     is now what 037's header computes, falling as the cube of the heap
 --     (7e-6 at a million rows, 7e-9 at ten million). A contiguous 1,000 rows
 --     were skipped once in 20,000 (0), the 900-row uniform filter never.
@@ -210,9 +215,17 @@
 --     reads on every filtered call and nothing that grows with the heap.
 --   * A generic plan. Adopted by design after the fifth call (Design above);
 --     it is the plan both modes agree on, and the cap keeps it clear of JIT.
---   * A block past the heap, a temp table shadowing the name, wide
---     metadata, statistics: as 037's header states them; nothing here reads
---     pg_statistic or reltuples.
+--   * A temp table shadowing the name, in two shapes (measured through
+--     auto_explain). In a session that already has a temp schema, the cached
+--     plans keep reading the real table while v_pages sizes the shadow —
+--     037's case: the probes read blocks 0..2 of the real heap for a
+--     three-page shadow. In a session whose FIRST temp table is the shadow,
+--     creating it changes the effective search path, every cached plan is
+--     rebuilt, and the whole call — probes, collection and walk — reads the
+--     shadow. Both are the safe side: under the shipped floor a small shadow
+--     switches the gate off, and a fresh session sees one table.
+--   * A block past the heap, wide metadata, statistics: as 037's header
+--     states them; nothing here reads pg_statistic or reltuples.
 --   * The table is under the floor. Nothing here runs; 037's Why is the
 --     cost, at most a few milliseconds on the broadest filter.
 --
@@ -235,9 +248,10 @@
 --   plan is adopted, against 0.66 for 037's. db/bench-hnsw.ts before and
 --   after this file at 10,000, a million and ten million rows are FORK.md
 --   change 71's tables; section C prints the sample's own cost beside the
---   collection's at every scale: 0.08–0.12 ms at 10,000 rows, 0.08–0.12 at
---   a million, 0.09–0.12 at ten million (037's: 0.04–0.14, 0.22–0.36,
---   1.10–1.20). Through the function the empty filter at ten million rows
+--   collection's at every scale: 0.07–0.12 ms at 10,000 rows, 0.08–0.12 at
+--   a million, 0.09–0.12 at ten million (037's: 0.04–0.12, 0.22–0.36, and
+--   1.10–1.20 in a before pass that ran under load — 0.94 on the idle
+--   machine in FORK.md change 70). Through the function the empty filter at ten million rows
 --   costs 0.36 ms — 0.27 before 037, 1.31 under it — and the 50% tier 14.4,
 --   as under 037 (13.2); the thin tiers moved by the sample's saving and the
 --   spread. Those are the ticket's two checks, the estimate flat across the
@@ -249,9 +263,9 @@
 --   the pgvector floor line; 020's DROP of the 4-argument form with the ACL
 --   capture before it and the replay after; the two template constants; and
 --   the estimate as ONE statement over locals declared at entry (v_pages
---   with pg_relation_size, no v_pct), which test-support's routingAt and
---   extractBody read for db/test-schema.ts [8e] and db/bench-hnsw.ts section
---   C. If it keeps this sampling, the probe's LIMIT stays with it (Design: a
+--   with pg_relation_size, no v_pct), which db/bench-hnsw.ts section C reads
+--   through test-support's routingAt and extractBody and db/test-schema.ts
+--   [8e] reads out of pg_proc. If it keeps this sampling, the probe's LIMIT stays with it (Design: a
 --   probe pulled up into the join is a sequential scan of the heap), and so
 --   do DISTINCT on the draw and the LEFT join. A successor that removes the
 --   gate should say why in its header and expect FORK.md change 70's tables
@@ -519,7 +533,7 @@ BEGIN
       SELECT count(*) FILTER (WHERE p.hit), count(DISTINCT b.blk) FILTER (WHERE p.hit), count(DISTINCT b.blk)
         INTO v_hits, v_hit_pages, v_pages_seen
       FROM (
-        SELECT DISTINCT floor(random() * v_pages)::int AS blk
+        SELECT DISTINCT floor(random() * v_pages)::bigint AS blk
         FROM generate_series(1, {{ROUTE_SAMPLE_PAGES}})
       ) b
       LEFT JOIN LATERAL (
