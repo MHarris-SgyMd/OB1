@@ -1,5 +1,5 @@
 -- ============================================================================
--- 038 — match_thoughts walks a half-precision index: the two HNSW indexes
+-- 039 — match_thoughts walks a half-precision index: the two HNSW indexes
 --        are rebuilt over `embedding::halfvec(D)` under their names, and the
 --        walk branches order by that cast; the stored vectors, the exact
 --        branch and the similarity stay full precision (SMD-1501)
@@ -29,7 +29,7 @@
 --   qwen3-embedding:0.6b at the same width (51,660 and 145,705), the
 --   unfiltered default path at match_count 10 for the 470 questions, each
 --   arm's ten ids against an exact pass made with no vector index in
---   existence. FORK.md change 80 has every row; the default ef_search's:
+--   existence. FORK.md change 81 has every row; the default ef_search's:
 --
 --     arm, ef_search 40             recall@10 vs exact   median ms    index bytes   build time
 --                                   S       M            S     M      (of vector)   (of vector)
@@ -89,10 +89,10 @@
 --      this shape, refused by name when of another, and dropped first when
 --      it is INVALID: that is the by-hand path for a large brain, below.
 --
---   2. The function. 037's body verbatim but for the two walk branches — the
+--   2. The function. 038's body verbatim but for the two walk branches — the
 --      unfiltered path and the broad filter — whose four candidate ORDER BYs
 --      become `embedding::halfvec(D) <=> query_embedding::halfvec(D)`, the
---      index's expression token for token. Everything else is as 037 left
+--      index's expression token for token. Everything else is as 038 left
 --      it: the similarity is `1 - (embedding <=> query_embedding)` on the
 --      full vector (the candidates' heap rows are read anyway, so scoring
 --      them at full precision costs nothing and keeps the threshold, the
@@ -123,7 +123,7 @@
 --     name under the body's ORDER BY and to none under the raw column's.
 --   * The similarity on the full vector. The halfvec walk decides which
 --     v_fetch candidates each side yields; the score they are merged, cut
---     and ordered by is the same number 037 computed, so a caller's
+--     and ordered by is the same number 038 computed, so a caller's
 --     threshold and a stored `similarity` compare across the upgrade. The
 --     alternative — `1 - (halfvec <=> halfvec)` — saves nothing (the row is
 --     in hand) and moves every similarity by up to a few parts in ten
@@ -193,7 +193,7 @@
 --     repo's runtime does this — the servers and both stores call
 --     match_thoughts, and search_thoughts_hybrid calls it by name — and the
 --     evals that do (an exact oracle, a k-NN control) mean the scan.
---   * An earlier definer re-applied by hand. 037 or 020 applied over this
+--   * An earlier definer re-applied by hand. 038 or 020 applied over this
 --     file puts a body that orders by the raw column over an index that
 --     holds the cast: every walk becomes the sequential scan above, under
 --     `enable_seqscan = off` (a penalty, not a prohibition — 019). Answers
@@ -241,8 +241,8 @@
 --     while its generic plan, adopted from the sixth call of a session, still
 --     takes the bitmap (9.7 ms, exact). Nothing moved but the plan's cost
 --     estimate; the walk's recall is what it was. At scale the routing gate
---     (037) and the GIN-or-HNSW choice change 28 measured are unchanged in
---     kind; FORK.md change 80 has section A under this file at the two
+--     (038) and the GIN-or-HNSW choice change 28 measured are unchanged in
+--     kind; FORK.md change 81 has section A under this file at the two
 --     published scales.
 --   * Dimensions past 2,000. halfvec's HNSW ceiling is 4,000 where vector's
 --     is 2,000, and a model's native width (qwen3-embedding:4b's 2,560)
@@ -257,7 +257,7 @@
 --
 -- Cost, measured (evals/eval-quant.ts, this file's development machine —
 -- Apple M5 Pro, podman VM, pgvector 0.8.6, maintenance_work_mem 2GB, four
--- parallel workers; FORK.md change 80 has the tables)
+-- parallel workers; FORK.md change 81 has the tables)
 --
 --     LongMemEval-S, qwen3-embedding:4b@1024 (19,825 thoughts + 56,267 chunks)
 --       vector   thoughts 155 MB, chunks 423 MB; built in 13.9 s (both)
@@ -271,7 +271,7 @@
 --   at 400, S 18.1 → 9.1 ms, M 17.4 → 14.8 ms.
 --
 -- What a successor must carry
---   037's list — `SET hnsw.iterative_scan = relaxed_order`, `SET
+--   038's list — `SET hnsw.iterative_scan = relaxed_order`, `SET
 --   enable_seqscan = off`, `ROWS 10`, the `ob1:filter-inside-scan` sentinel
 --   in the body, the pgvector floor line, 020's DROP of the 4-argument form
 --   with the ACL capture before and the replay after, the two template
@@ -283,14 +283,14 @@
 --   same file, or the walk has no index; test-schema [38] holds the pair.
 --
 -- Prerequisites
---   Migration 037 (the body this file carries). pgvector 0.8.0 or later.
+--   Migration 038 (the body this file carries). pgvector 0.8.0 or later.
 --   maintenance_work_mem sized for the graph in the migrating session
 --   (Design: 2.5 KB a vector across both tables), and /dev/shm to hold it
 --   under parallel workers. Applied by `bun db/migrate.ts`; on a brain past
 --   a million rows, the CONCURRENTLY builds under Design first.
 --
 -- Expected outcome
---   `match_thoughts` returns what 037's returned up to the index's
+--   `match_thoughts` returns what 038's returned up to the index's
 --   approximation: at the default ef_search the identical ten rows on 93%
 --   of S's questions and 95% of M's, and recall against the exact answer
 --   within a hundredth (the build-to-build spread) — evals/eval-filtered.ts's
@@ -354,7 +354,7 @@ BEGIN
     IF v_valid AND v_def ~ v_shape THEN
       CONTINUE;
     ELSIF v_valid AND v_def LIKE '%halfvec%' THEN
-      RAISE EXCEPTION 'migration 038: % exists but is not an HNSW index over (embedding::halfvec({{EMBEDDING_DIM}})) with halfvec_cosine_ops — %. Build % as the header says (CONCURRENTLY, so the walk keeps this index meanwhile), then drop this one and re-run: the staging index is adopted under the name.', v_idx, v_def, v_new
+      RAISE EXCEPTION 'migration 039: % exists but is not an HNSW index over (embedding::halfvec({{EMBEDDING_DIM}})) with halfvec_cosine_ops — %. Build % as the header says (CONCURRENTLY, so the walk keeps this index meanwhile), then drop this one and re-run: the staging index is adopted under the name.', v_idx, v_def, v_new
         USING ERRCODE = 'object_not_in_prerequisite_state';
     END IF;
     SELECT pg_get_indexdef(i.indexrelid), i.indisvalid INTO v_def, v_valid
@@ -363,7 +363,7 @@ BEGIN
       EXECUTE format('DROP INDEX %I', v_new);
       v_valid := NULL;
     ELSIF v_valid AND v_def !~ v_shape THEN
-      RAISE EXCEPTION 'migration 038: % exists but is not an HNSW index over (embedding::halfvec({{EMBEDDING_DIM}})) with halfvec_cosine_ops — %. Drop it, or build it as the header says, and re-run.', v_new, v_def
+      RAISE EXCEPTION 'migration 039: % exists but is not an HNSW index over (embedding::halfvec({{EMBEDDING_DIM}})) with halfvec_cosine_ops — %. Drop it, or build it as the header says, and re-run.', v_new, v_def
         USING ERRCODE = 'object_not_in_prerequisite_state';
     END IF;
     IF v_valid IS NULL THEN
@@ -478,17 +478,16 @@ DECLARE
   -- filter` to build the matched set, two GIN scans and two rounds of heap
   -- fetches per call, under two snapshots (eleventh review pass).
   v_ids        uuid[];
-  -- The gate on that collection (037). The heap's size in pages, exact and
-  -- cheap (pg_relation_size is a stat of the main fork; to_regclass resolves
-  -- the name on every call, so a cached plan never holds a dropped table's
-  -- OID — the header says what a temp table shadowing the name does), and
-  -- the share of it that puts
-  -- {{ROUTE_SAMPLE_PAGES}} pages into the sample. Both are computed at entry
-  -- — a few microseconds, on the unfiltered path too — so the estimate
-  -- statement below stands alone with its locals substituted, which is how
-  -- db/bench-hnsw.ts section C reads it out of the catalog.
+  -- The gate on that collection (037; the sample's statement is 038's). The
+  -- heap's size in pages, exact and cheap (pg_relation_size is a stat of the
+  -- main fork; to_regclass resolves the name on every call, so a cached plan
+  -- never holds a dropped table's OID — the header says what a temp table
+  -- shadowing the name does): the range the sample draws its block numbers
+  -- from. Computed at entry — a few microseconds, on the unfiltered path too
+  -- — so the estimate statement below stands alone with its locals
+  -- substituted, which is how db/bench-hnsw.ts section C reads it out of the
+  -- catalog.
   v_pages      bigint  := GREATEST(pg_relation_size(to_regclass('thoughts')) / current_setting('block_size')::int, 1);
-  v_pct        float   := LEAST(100.0, 100.0 * {{ROUTE_SAMPLE_PAGES}} / v_pages);
   v_hits       int;
   v_hit_pages  int;
   v_pages_seen int;
@@ -533,11 +532,12 @@ BEGIN
   -- the bitmap — db/bench-hnsw.ts section C explains this statement on the
   -- broadest and the empty filter for that reason. Since 037 that collection
   -- is gated: on a heap of {{ROUTE_ESTIMATE_MIN_PAGES}} pages or more, a
-  -- sample of {{ROUTE_SAMPLE_PAGES}} pages is read first, and when it shows
-  -- the filter matching far more than v_exact thoughts the collection is not
-  -- run at all — the walk is the answer for such a filter, and the bitmap it
-  -- would have built costs the number of matching rows (this file's header
-  -- has the measurement and the three conditions). At most v_exact matching:
+  -- sample of {{ROUTE_SAMPLE_PAGES}} pages is read first (since 038 by TID
+  -- range, {{ROUTE_SAMPLE_PAGES}} page reads whatever the heap holds), and
+  -- when it shows the filter matching far more than v_exact thoughts the
+  -- collection is not run at all — the walk is the answer for such a filter,
+  -- and the bitmap it would have built costs the number of matching rows
+  -- (037's header has the rule and this file's the statement). At most v_exact matching:
   -- score those rows and their chunks directly by id — exact, no index walk,
   -- and a filter matching NOTHING (the shape one integration sends on every
   -- call) costs that one GIN probe and returns empty, where the walk-only
@@ -552,7 +552,7 @@ BEGIN
   IF filter IS NULL OR filter = '{}'::jsonb THEN
     -- Unfiltered. A NULL filter is unfiltered: 007 evaluated
     -- `NULL = '{}' OR metadata @> NULL`, which excluded every row.
-    -- 038: the walk orders by the half-precision cast, on BOTH sides of the
+    -- 039: the walk orders by the half-precision cast, on BOTH sides of the
     -- operator — token for token the expression thoughts_embedding_idx and
     -- thought_chunks_embedding_idx are built over since this file, or the
     -- planner has no index path and the scan below is a sequential one under
@@ -591,31 +591,39 @@ BEGIN
     ORDER BY 6 DESC, t.id
     LIMIT v_count;
   ELSE
-    -- The gate (037). On a heap large enough for the collection below to cost
-    -- more than a sample of it, read {{ROUTE_SAMPLE_PAGES}} random pages —
-    -- TABLESAMPLE SYSTEM picks whole pages, so the read is a handful of
-    -- buffers whatever the table holds, plus ~2 ns a heap page for the
-    -- per-block decision (the header's Design and "large heap" bullets) —
-    -- and count the rows that pass the filter and carry a vector, the pages
-    -- those rows sit on, and the pages the sample reached. A row with a
-    -- vector, not the collection's "vector or chunks": the EXISTS probe
-    -- inside an expression became a hashed
-    -- subplan over the whole chunk table (18 ms measured, against 0.15 for
-    -- the sample), and counting fewer scoreable rows than there are only
-    -- biases the gate towards running the collection, which is the safe
-    -- side. The page numbers come from ctid; SYSTEM sampling is by page, so
-    -- a filter whose matches sit together on disk shows up as one page full
-    -- of hits or none, and the third condition below is what catches that.
+    -- The gate (037), sampling by TID range (038). On a heap large enough for
+    -- the collection below to cost more than a sample of it, draw
+    -- {{ROUTE_SAMPLE_PAGES}} block numbers and read each block as one TID
+    -- range — `ctid >= '(b,0)' AND ctid < '(b+1,0)'`, a TID Range Scan, one
+    -- page read per block whatever the heap holds — and count the rows that
+    -- pass the filter and carry a vector, the pages those rows sit on, and
+    -- the pages drawn. A row with a vector, not the collection's "vector or
+    -- chunks": an EXISTS probe here became a hashed subplan over the whole
+    -- chunk table, and counting fewer scoreable rows than there are only
+    -- biases the gate towards running the collection, the safe side. The
+    -- draw is DISTINCT (a block drawn twice is read and counted once), the
+    -- join is LEFT (a page with no live row counts among the pages drawn),
+    -- and the probe's LIMIT never cuts a page — it keeps the probe a
+    -- subquery, which is what gives it a TID Range path, and caps the
+    -- planner's estimate under jit_above_cost. The header has the
+    -- measurements behind each, the planner paths the statement depends on
+    -- (SMD-1624), and why sampling by page needs the third condition below.
     IF v_pages >= {{ROUTE_ESTIMATE_MIN_PAGES}} THEN
-      SELECT count(*) FILTER (WHERE s.hit), count(DISTINCT s.blk) FILTER (WHERE s.hit), count(DISTINCT s.blk)
+      SELECT count(*) FILTER (WHERE p.hit), count(DISTINCT b.blk) FILTER (WHERE p.hit), count(DISTINCT b.blk)
         INTO v_hits, v_hit_pages, v_pages_seen
       FROM (
-        SELECT (t.metadata @> filter AND t.embedding IS NOT NULL) AS hit,
-               (t.ctid::text::point)[0] AS blk
-        FROM thoughts t TABLESAMPLE SYSTEM (v_pct)
-      ) s;
+        SELECT DISTINCT floor(random() * v_pages)::bigint AS blk
+        FROM generate_series(1, {{ROUTE_SAMPLE_PAGES}})
+      ) b
+      LEFT JOIN LATERAL (
+        SELECT (t.metadata @> filter AND t.embedding IS NOT NULL) AS hit
+        FROM thoughts t
+        WHERE t.ctid >= ('(' || b.blk || ',0)')::tid
+          AND t.ctid <  ('(' || b.blk + 1 || ',0)')::tid
+        LIMIT 291
+      ) p ON true;
       -- Skip the collection only when all three hold: the sample, scaled to
-      -- the table (hits x pages / pages seen), puts the filter at ten times
+      -- the table (hits x pages / pages drawn), puts the filter at ten times
       -- the exact threshold or more; at least eight sampled rows passed, so
       -- one or two lucky rows on a huge table cannot decide; and they sit on
       -- at least three different pages, so one page of clustered matches
@@ -623,9 +631,9 @@ BEGIN
       -- filter the gate lets through costs what it always cost, a filter it
       -- wrongly skipped would go to the walk, which is correct but slower
       -- for a thin filter and, at a million rows, can return short — so the
-      -- rule is built to make the second mistake rare (the header has the
-      -- arithmetic, the measured rates, and the one layout it is weakest
-      -- against).
+      -- rule is built to make the second mistake rare (037's header has the
+      -- arithmetic and the one layout it is weakest against; this file's
+      -- has the rates re-measured for the TID-range draw).
       v_broad := v_hits >= 8
                  AND v_hit_pages >= 3
                  AND v_hits * v_pages >= 10 * v_exact * v_pages_seen;

@@ -2918,8 +2918,8 @@ rows (workers=0 built; workers=4 died), worth reporting upstream.
 database `eval-longmemeval.ts` loaded, `OB1_EVAL_LME` its file and
 `OB1_EVAL_EMBED` its model. Needs Ollama for the 470 question vectors and a
 container with `OB1_PG_SHM_SIZE=3g` for the parallel builds; `OB1_PG_KEEP`
-keeps the copied corpus between runs. FORK.md change 80 has the decision and
-migration 038 the mechanism; this section is the measurement.
+keeps the copied corpus between runs. FORK.md change 81 has the decision and
+migration 039 the mechanism; this section is the measurement.
 
 **The question.** At 1,024 dimensions an HNSW index over `vector` costs a
 whole 8 KB page per row — a float4 vector plus its neighbour lists is more
@@ -2988,7 +2988,7 @@ another's shares its row — is 46.2% on S and 34.5% on M. Builds and bytes:
 within the build-to-build spread at every `ef_search`, the identical ten rows
 on 93–95% of questions at the default, the same gold sessions within a point —
 in the same time or less, in a third of the bytes, built in two thirds of the
-time. It is now the shipped index (migration 038; the walk branches of
+time. It is now the shipped index (migration 039; the walk branches of
 `match_thoughts` order by the cast, the stored vectors and the exact branch are
 untouched). Binary is declined, and not on the numbers alone: without a
 rerank it drops three hundredths of recall at the default `ef_search`;

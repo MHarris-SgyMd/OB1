@@ -414,18 +414,18 @@ else {
   const shipped = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
   assert(/candidate scan.*declares enable_seqscan = off and ROWS 10, search_thoughts_keyword ROWS 25/s.test(shipped.out), "with every migration re-applied, the candidate-scan check reports 019's clause and both row estimates");
   assert(shipped.code === 0 && /search signatures.*one of each/s.test(shipped.out), "…and the signature check is satisfied");
-  // 038: the walk's cast and the index's expression are one contract in two
+  // 039: the walk's cast and the index's expression are one contract in two
   // halves, and each half moves by hand without the other — 037 re-applied
   // alone puts a raw-column body over the halfvec indexes; 001's DDL re-run
   // after a drop puts a vector index under the cast body. Everything else
   // reads as ok in both states; every walk is a sequential scan.
-  assert(/walk index.*orders its walk by embedding::halfvec and both HNSW indexes are over that expression \(038\)/s.test(shipped.out), "with every migration applied, the walk-index check pairs the body's cast with both indexes");
-  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("037") });
+  assert(/walk index.*orders its walk by embedding::halfvec and both HNSW indexes are over that expression \(039\)/s.test(shipped.out), "with every migration applied, the walk-index check pairs the body's cast with both indexes");
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("038") });
   const rawBody = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
   assert(rawBody.code === 0 && /walk index.*orders its walk by the vector column but thoughts_embedding_idx is over embedding::halfvec; thought_chunks_embedding_idx is over embedding::halfvec/s.test(rawBody.out),
-         "037 re-applied over 038: the check names the raw-column body over both halfvec indexes, as a warning");
-  assert(/Apply db\/migrations\/038_match_thoughts_halfvec_index\.sql/.test(rawBody.out), "…with 038 as the remedy");
-  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("038") });
+         "038 re-applied over 039: the check names the raw-column body over both halfvec indexes, as a warning");
+  assert(/Apply db\/migrations\/039_match_thoughts_halfvec_index\.sql/.test(rawBody.out), "…with 039 as the remedy");
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("039") });
   const rebuilt = new SQL({ url: LIVE, max: 1 });
   await rebuilt.unsafe(`DROP INDEX thoughts_embedding_idx`);
   await rebuilt.unsafe(`CREATE INDEX thoughts_embedding_idx ON thoughts USING hnsw (embedding vector_cosine_ops)`);
@@ -433,34 +433,34 @@ else {
   const vecIdx = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
   assert(/walk index.*orders its walk by embedding::halfvec but thoughts_embedding_idx is over the vector column —/s.test(vecIdx.out) && !/thought_chunks_embedding_idx is over/.test(vecIdx.out),
          "001's DDL re-run by hand: the check names the vector index under the cast body and leaves the chunk index unmentioned");
-  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("038") });
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("039") });
   const paired = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
-  assert(/walk index.*over that expression \(038\)/s.test(paired.out), "…and re-applying 038 pairs them again");
+  assert(/walk index.*over that expression \(039\)/s.test(paired.out), "…and re-applying 039 pairs them again");
   // The other two branches, and the ledger's suffix (review pass 3): an
   // INVALID index under the name — what an interrupted CONCURRENTLY build
   // leaves, made here by flipping the catalog flag as test-upgrade [16] does —
-  // a missing index, and the wording when the ledger records 038.
+  // a missing index, and the wording when the ledger records 039.
   const broken = new SQL({ url: LIVE, max: 1 });
   await broken.unsafe(`UPDATE pg_index SET indisvalid = false WHERE indexrelid = to_regclass('thoughts_embedding_idx')`);
   await broken.unsafe(`CREATE TABLE schema_migrations (name text PRIMARY KEY, sha256 text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())`);
-  await broken.unsafe(`INSERT INTO schema_migrations (name, sha256) VALUES ('038_match_thoughts_halfvec_index.sql', 'test')`);
+  await broken.unsafe(`INSERT INTO schema_migrations (name, sha256) VALUES ('039_match_thoughts_halfvec_index.sql', 'test')`);
   await broken.close();
   const invalid = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
-  assert(/walk index.*thoughts_embedding_idx is INVALID \(an interrupted CREATE INDEX CONCURRENTLY\), which the planner ignores — although migration 038 is recorded as applied/s.test(invalid.out),
-         "an INVALID index under the name is named as such, with the ledger's suffix when 038 is recorded");
-  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("038") });
+  assert(/walk index.*thoughts_embedding_idx is INVALID \(an interrupted CREATE INDEX CONCURRENTLY\), which the planner ignores — although migration 039 is recorded as applied/s.test(invalid.out),
+         "an INVALID index under the name is named as such, with the ledger's suffix when 039 is recorded");
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("039") });
   const rebuiltValid = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
-  assert(/walk index.*over that expression \(038\)/s.test(rebuiltValid.out), "…and the remedy — 038 again — rebuilds it");
+  assert(/walk index.*over that expression \(039\)/s.test(rebuiltValid.out), "…and the remedy — 039 again — rebuilds it");
   const gone = new SQL({ url: LIVE, max: 1 });
   await gone.unsafe(`DROP INDEX thought_chunks_embedding_idx`);
   await gone.unsafe(`DROP TABLE schema_migrations`);
   await gone.close();
   const missing = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
-  assert(/walk index.*thought_chunks_embedding_idx does not exist — the planner has no index path/s.test(missing.out) && !/although migration 038 is recorded/.test(missing.out),
-         "a missing index is named, without the ledger's suffix when nothing records 038");
-  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("038") });
-  const restored038 = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
-  assert(/walk index.*over that expression \(038\)/s.test(restored038.out), "…and 038 builds it where the name is free");
+  assert(/walk index.*thought_chunks_embedding_idx does not exist — the planner has no index path/s.test(missing.out) && !/although migration 039 is recorded/.test(missing.out),
+         "a missing index is named, without the ledger's suffix when nothing records 039");
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("039") });
+  const restored039 = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+  assert(/walk index.*over that expression \(039\)/s.test(restored039.out), "…and 039 builds it where the name is free");
 
   /**
    * The other state 020's header names: an earlier migration re-applied by hand

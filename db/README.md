@@ -164,7 +164,7 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `911 assertions: 911 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `922 assertions: 922 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports twenty-three migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
@@ -201,7 +201,7 @@ thought_chunks` shows five columns since 013 added `context`.
 Migrations 024 onward are described in `FORK.md`, one numbered change each
 (024 change 45, 025 change 46, 026 change 47, 027 change 48, 028 change 49,
 029 change 54, 030 change 56, 031 change 57, 032 change 60, 033 change 63,
-034 change 65, 035 change 66, 036 change 68, 037 change 70, 038 change 80).
+034 change 65, 035 change 66, 036 change 68, 037 change 70, 038 change 80, 039 change 81).
 
 ## What changed relative to the guide
 
@@ -987,8 +987,8 @@ OB1_BENCH_UPTO=037 ./with-postgres.sh bun bench-hnsw.ts
 # it and records the exact oracle's answers beside it (SMD-1562); every later
 # run under the same name finds it, checks it, applies any migration the tree
 # gained since, and skips the load, the builds and the exact pass. One corpus
-# per name. A corpus kept under a tree before migration 038 is the exception:
-# 038 rebuilds the two HNSW indexes as new relations, which the marker's
+# per name. A corpus kept under a tree before migration 039 is the exception:
+# 039 rebuilds the two HNSW indexes as new relations, which the marker's
 # physical fingerprint would read as the corpus rewritten, so the bench
 # refuses such a reuse from the migrator's dry run, before anything is built
 # — remove the volume and build again under this tree.
@@ -1246,7 +1246,7 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 911 assertions, PGlite, no container
+bun test-schema.ts                          # 922 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts         # 501 assertions, real server, throwaway container
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 ```
@@ -1392,20 +1392,20 @@ is on one index. It drops its marker table on the way out. Not in CI or
   populated 037 — no column, signature, row or privilege moves — and each,
   after a hand re-apply of 014 puts the 4-argument form back, applies the
   migration under test alone and finds one form again.
-- **The walk's index is half precision** (migration 038). `test-schema.ts`
+- **The walk's index is half precision** (migration 039). `test-schema.ts`
   [38] holds the swap's every case — a re-run and a hand re-apply of 001
   rebuild nothing, a vector index put back under the name is swapped again, a
   staging index built beforehand is adopted — and pairs the body's cast with
   the plan: an Index Scan by the index's name under the body's ORDER BY, none
   under the raw column's; [20] compares the candidate CTEs to 014's with the
-  cast taken out. [5] holds both plans on a real server; [5d] applies 038
+  cast taken out. [5] holds both plans on a real server; [5d] applies 039
   before it drops the index, since the swap would build one over its 25,000
-  rows. `test-upgrade.ts` [16] applies 038 onto a populated 037 — no row,
+  rows. `test-upgrade.ts` [17] applies 039 onto a populated 038 — no row,
   signature or privilege moves, the walk agrees with the exact answer before
   and after, the index OIDs survive a re-apply, and an INVALID staging index
   (an interrupted `CREATE INDEX CONCURRENTLY`) is rebuilt rather than adopted.
   The recall, the bytes and the decision are `evals/eval-quant.ts`'s, on real
-  vectors (FORK.md change 80).
+  vectors (FORK.md change 81).
 - **The backfill holds the table** (migration 023). [6c] plants a legacy
   singleton and two twins, runs `backfill_content_fingerprints()` on one
   connection inside an open transaction, and has a second capture the
@@ -1704,7 +1704,7 @@ default — are unaffected.
   thousand rows ("could not resize shared memory segment"), so `deploy/compose.yaml`
   sets `shm_size` (`POSTGRES_SHM_SIZE`), and where it cannot be raised
   `max_parallel_maintenance_workers = 0` builds in ordinary backend memory.
-  `bench-hnsw.ts` section L has the build times by scale. Migration 038
+  `bench-hnsw.ts` section L has the build times by scale. Migration 039
   rebuilds both HNSW indexes over `embedding::halfvec` on a populated brain,
   writers held for the build, in the migrating session's
   `maintenance_work_mem` — the server's 64 MB unless the role was given more,
@@ -1713,7 +1713,7 @@ default — are unaffected.
   (250 MB per 100,000, 2.5 GB per million), `/dev/shm` at least that under
   parallel workers; with the graph in memory the build ran at about 100 µs a
   row with four workers, and the migrator prints the vector count and the
-  setting in force just before 038. It adopts staging indexes built beforehand
+  setting in force just before 039. It adopts staging indexes built beforehand
   with `CREATE INDEX CONCURRENTLY` under the names its header gives, which is
   the path for a brain past a million rows.
 - **Data migration is not covered here.** These migrations create the schema. Moving

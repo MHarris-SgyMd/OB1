@@ -42,7 +42,7 @@
  * 100 and 400. Each arm's indexes are built alone — timed under one
  * `maintenance_work_mem` and worker count on both tables, sized, and dropped
  * before the next arm's — and the arm the deployed function walks (read from
- * its body: halfvec since 038, vector before) goes last, under the shipped
+ * its body: halfvec since 039, vector before) goes last, under the shipped
  * names, so the database ends in the tree's shape. Scored against an exact
  * pass made before any vector index existed: the same statement with nothing
  * for the planner to walk — exact in the function's own shape, the true
@@ -181,7 +181,7 @@ async function secondaryIndexes(): Promise<{ name: string; def: string; hnsw: bo
 
 type CopyStats = { source: "copied" | "kept"; seconds: number; otherIndexesS: number };
 
-/** 038's staging indexes, built under this run's memory and workers where the shipped name does not already hold a halfvec index. */
+/** 039's staging indexes, built under this run's memory and workers where the shipped name does not already hold a halfvec index. */
 async function stageHalfvec(): Promise<void> {
   await sql.unsafe(`SET maintenance_work_mem = '${MEM}'`);
   await sql.unsafe(`SET max_parallel_maintenance_workers = ${WORKERS}`);
@@ -215,11 +215,11 @@ async function copyCorpus(): Promise<CopyStats> {
   if (have.thoughts === source.thoughts && have.chunks === source.chunks) {
     const [m] = await sql.unsafe(`SELECT array_agg(DISTINCT embedding_model) AS models, max(vector_dims(embedding)) AS dim FROM thoughts`);
     if ((m.models as string[])?.length === 1 && m.models[0] === spec.name && Number(m.dim) === DIM) {
-      // A copy kept under an earlier tree meets 038 here, whose swap would
+      // A copy kept under an earlier tree meets 039 here, whose swap would
       // build both halfvec indexes inside migrate.ts under the server's
       // default maintenance_work_mem. Stage them first under this run's
       // settings — the header's own by-hand path — so the migration adopts
-      // them; a tree without 038 leaves the staging indexes to dropHnsw().
+      // them; a tree without 039 leaves the staging indexes to dropHnsw().
       await stageHalfvec();
       await migrate();
       return { source: "kept", seconds: 0, otherIndexesS: 0 };
@@ -399,7 +399,7 @@ const [{ pgvector }] = await sql.unsafe(`SELECT extversion AS pgvector FROM pg_e
 console.log(copy.source === "kept" ? `▸ corpus kept from an earlier run (counts match the source)` : `▸ copied in ${copy.seconds.toFixed(0)} s`);
 await dropHnsw(); // a kept copy ends each run in the shipped shape; every arm starts from none
 
-// The arm the deployed function walks, read from its body: since 038 the two
+// The arm the deployed function walks, read from its body: since 039 the two
 // walk branches order by the halfvec cast; before it, by the vector. That arm
 // is measured last, under the shipped index names, and is the CONTROL's.
 const FUNCTION_ARM: Arm = /::halfvec\(/.test(String((await sql.unsafe(`SELECT prosrc FROM pg_proc WHERE oid = $1::oid`, [await matchThoughtsOid(sql)]))[0].prosrc)) ? "halfvec" : "vector";

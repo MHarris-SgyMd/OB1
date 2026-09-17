@@ -300,8 +300,8 @@ await sql.close();
 // Since 019 the after arm's function carries `enable_seqscan = off`, so its
 // unfiltered CTEs are an HNSW walk where 007's function, on a corpus this
 // size at the shipped width, seq-scanned and returned the exact order (019's
-// header); since 038 the walk is over the half-precision index (SMD-1501,
-// FORK.md change 80 — the queries that move are that change's cost, stated
+// header); since 039 the walk is over the half-precision index (SMD-1501,
+// FORK.md change 81 — the queries that move are that change's cost, stated
 // there). A row that moved is therefore the index's approximation on the
 // unfiltered path, not a filter regression — reported as overlap, and the run
 // stops only when the overlap says the two paths no longer agree at all.
@@ -315,7 +315,7 @@ for (const d of EVAL) {
   overlap += a.filter((id) => want.has(id)).length / Math.max(1, b.length);
 }
 const meanOverlap = overlap / EVAL.length;
-console.log(`\n  unfiltered control: ${EVAL.length - moved}/${EVAL.length} queries return identical rows before and after; mean overlap ${(meanOverlap * 100).toFixed(1)}% (the after arm walks the half-precision HNSW index — 038 — where the before arm scanned exactly — 019)`);
+console.log(`\n  unfiltered control: ${EVAL.length - moved}/${EVAL.length} queries return identical rows before and after; mean overlap ${(meanOverlap * 100).toFixed(1)}% (the after arm walks the half-precision HNSW index — 039 — where the before arm scanned exactly — 019)`);
 if (meanOverlap < 0.8) {
   console.error("  The unfiltered paths disagree on more than a fifth of their rows. The index's approximation does not explain that; nothing below is trustworthy until it is understood.");
   process.exit(1);

@@ -120,13 +120,13 @@ there, for that check to pass.
   bulk load of a few hundred thousand rows. Raise it with `maintenance_work_mem`
   before rebuilding a large index, or build with
   `max_parallel_maintenance_workers = 0` (`db/README.md`, "Caveats"). Migration
-  038 is such a rebuild on every brain it reaches — both HNSW indexes over
+  039 is such a rebuild on every brain it reaches — both HNSW indexes over
   `embedding::halfvec`, in the migrate service's session, which has the server's
   64 MB unless the role was given more: set `maintenance_work_mem` on the
   migrating role to about 2.5 KB per vector across `thoughts` and
   `thought_chunks` (250 MB per 100,000, 2.5 GB per million) and
   `POSTGRES_SHM_SIZE` at least that, before the stack runs it; the migrator
-  prints the vector count and the setting in force just before 038. On a brain
+  prints the vector count and the setting in force just before 039. On a brain
   past a million rows build the two staging indexes `CONCURRENTLY` first, as
   the migration's header says, and let it adopt them.
 - **A Supabase Edge Function passing checks 2, 3 and 4.** On Supabase the API gateway

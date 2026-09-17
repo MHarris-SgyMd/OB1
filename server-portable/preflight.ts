@@ -95,19 +95,19 @@ const DIRECT_CHECKS = [
   "vector extension",
   "atomic capture", "write privileges", "fingerprint backfill", "audit trail", "agent identity",
   "keyword search", "hybrid search", "stats summary", "provenance", "work claims", "search signatures", "edit signature", "filtered search",
-  "candidate scan", "chunk context", "trigram index", "embedding contract", "vector models",
+  "candidate scan", "walk index", "chunk context", "trigram index", "embedding contract", "vector models",
   "updated_at trigger", "re-embed pass", "consolidate pass", "migration ledger", "query log",
 ];
 /**
  * 020 gave match_thoughts and search_thoughts_hybrid the forms the servers
- * call; 027 last defines search_thoughts_hybrid (the relative floor) and 038
- * match_thoughts (the routing gate, sampled by TID range), both under 020's
+ * call; 027 last defines search_thoughts_hybrid (the relative floor) and 039
+ * match_thoughts (the half-precision walk, over 038's gate), both under 020's
  * signatures. A remedy
  * that applied 020 alone would leave 020's bodies over theirs — the
  * stale-body state the ledger then cannot see — so the signature remedies
  * name all three, in order.
  */
-const APPLY_020 = "Apply db/migrations/020_match_thoughts_recency.sql, then 027_search_thoughts_relative_floor.sql and 038_match_thoughts_tid_range_sample.sql (the last definers of search_thoughts_hybrid and match_thoughts).";
+const APPLY_020 = "Apply db/migrations/020_match_thoughts_recency.sql, then 027_search_thoughts_relative_floor.sql and 039_match_thoughts_halfvec_index.sql (the last definers of search_thoughts_hybrid and match_thoughts).";
 /**
  * PostgREST answers a call it cannot resolve with PGRST202 both when the
  * function is missing and while its schema cache predates the migration that
@@ -115,7 +115,7 @@ const APPLY_020 = "Apply db/migrations/020_match_thoughts_recency.sql, then 027_
  * has just applied it back to the migrator (first review pass of 021).
  */
 const RELOAD_HINT = "If the ledger already records it, PostgREST may not have reloaded its schema cache: NOTIFY pgrst, 'reload schema';";
-const APPLY_020_POSTGREST = `Apply the migrations through db/migrations/038_match_thoughts_tid_range_sample.sql against the project's direct connection (server-portable/README.md §4) — 020 gives both functions the forms the server sends; 027 and 038 last define search_thoughts_hybrid and match_thoughts. ${RELOAD_HINT}`;
+const APPLY_020_POSTGREST = `Apply the migrations through db/migrations/039_match_thoughts_halfvec_index.sql against the project's direct connection (server-portable/README.md §4) — 020 gives both functions the forms the server sends; 027 and 039 last define search_thoughts_hybrid and match_thoughts. ${RELOAD_HINT}`;
 const APPLY_021 = "Apply db/migrations/021_embedding_model_per_row.sql.";
 const APPLY_032 = "Apply db/migrations/032_update_thought_provenance.sql.";
 /**
@@ -1457,6 +1457,55 @@ if (configFailed) {
           // Not defined: the check above already said so.
         } catch (e) {
           add("candidate scan", "warn", `could not verify: ${(e as Error).message}`, "The catalog read behind this check needs SELECT on pg_proc.");
+        }
+
+        /**
+         * Migration 039: match_thoughts' walk branches order by
+         * `embedding::halfvec(D)`, and the two HNSW indexes are built over that
+         * expression under 001's and 007's names. The planner matches the two
+         * structurally, so they are one contract in two halves, and each half
+         * can be moved by hand without the other: 037 or 020 re-applied over
+         * 039 (a raw-column body over the halfvec index), 001's DDL re-run
+         * after a drop (the cast body over a vector index), an interrupted
+         * CREATE INDEX CONCURRENTLY left INVALID under the name. Each leaves
+         * every unfiltered and broad-filter search a sequential scan of both
+         * tables under `enable_seqscan = off` — exact, at 019's cost — and
+         * nothing else reads as wrong: proconfig is intact, the ledger
+         * records 039. Read from the catalog: the ORDER BY of the body (the
+         * statement, not a word a comment could carry) and each index's
+         * definition and validity. A WARNING, as 019's: searches answer.
+         */
+        try {
+          if (catalog instanceof Error) throw catalog;
+          const { mt, ledger } = catalog;
+          if (!mt.length) {
+            add("walk index", "skip", "not checked — match_thoughts is not defined (filtered search says so)");
+          } else {
+            const bodyCasts = /ORDER BY \w+\.embedding::halfvec\(\d+\) <=> query_embedding::halfvec\(\d+\)/.test(mt[0].src);
+            const HALF = /USING hnsw \(\(\(embedding\)::(\w+\.)?halfvec\(\d+\)\) (\w+\.)?halfvec_cosine_ops\)$/;
+            const idx = (await sql`
+              SELECT n.name, pg_get_indexdef(i.indexrelid) AS def, i.indisvalid AS valid
+              FROM (VALUES ('thoughts_embedding_idx'), ('thought_chunks_embedding_idx')) AS n(name)
+              LEFT JOIN pg_index i ON i.indexrelid = to_regclass('public.' || n.name)`) as { name: string; def: string | null; valid: boolean | null }[];
+            const problems: string[] = [];
+            for (const r of idx) {
+              if (r.def === null) problems.push(`${r.name} does not exist`);
+              else if (r.valid === false) problems.push(`${r.name} is INVALID (an interrupted CREATE INDEX CONCURRENTLY), which the planner ignores`);
+              else if (HALF.test(r.def) !== bodyCasts) problems.push(`${r.name} is over ${HALF.test(r.def) ? "embedding::halfvec" : /\(embedding vector_cosine_ops\)$/.test(r.def) ? "the vector column" : `another expression (${r.def.replace(/^.*USING /, "")})`}`);
+            }
+            const ledgerHas039 = ledger.has("039");
+            if (!problems.length) {
+              add("walk index", "ok", bodyCasts
+                ? "match_thoughts orders its walk by embedding::halfvec and both HNSW indexes are over that expression (039)"
+                : "match_thoughts orders its walk by the vector column and both HNSW indexes are over it (before 039)");
+            } else {
+              add("walk index", "warn",
+                  `match_thoughts orders its walk by ${bodyCasts ? "embedding::halfvec" : "the vector column"} but ${problems.join("; ")}${ledgerHas039 ? " — although migration 039 is recorded as applied: an earlier definer re-applied by hand, or an index rebuilt by hand" : ""} — the planner has no index path for the walk, so every unfiltered and broad-filter search sequentially scans both tables (exact; 019's latency back)`,
+                  `Apply db/migrations/039_match_thoughts_halfvec_index.sql — \`bun db/migrate.ts\` where the ledger does not record it, \`--reapply\` or the file alone against the direct connection where it does — which swaps a vector index under the name for the halfvec one, builds where the name is free, rebuilds an INVALID one and restores the body's cast; on a brain past a million rows build the staging indexes CONCURRENTLY first, as its header says.`);
+            }
+          }
+        } catch (e) {
+          add("walk index", "warn", `could not verify: ${(e as Error).message}`, "The catalog reads behind this check need SELECT on pg_proc, pg_index and pg_class.");
         }
 
         /**

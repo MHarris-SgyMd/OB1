@@ -830,12 +830,12 @@ for (const m of reapply && !dryRun ? [] : migrations) {
     process.exit(1);
   }
 
-  // 038 builds two HNSW graphs over every vector the brain holds, in the
+  // 039 builds two HNSW graphs over every vector the brain holds, in the
   // session's maintenance_work_mem — 64 MB unless the operator sized it (its
   // header has the rule: 2.5 KB a vector at 1,024 dimensions) — and prints
   // nothing while it runs. Say what it is about to do, and with what, so the
   // two can be compared before the wait rather than after it.
-  if (m.name.startsWith("038_")) {
+  if (m.name.startsWith("039_")) {
     // The larger of the planner's count and the statistics collector's: a
     // restored or bulk-loaded brain that autovacuum has not analysed reports
     // reltuples -1 or a stale figure, and that is the brain this line is for.

@@ -765,12 +765,12 @@ async function migrateWhole(sql: SQL, onto: "kept" | "fresh"): Promise<string[]>
     // test-support's ledgerStrangers both go.
     const dry = await runMigrator(URL_, MIGRATOR_ENV, "--dry-run");
     if (dry.code !== 0) refuse(dry, `migrate.ts --dry-run exited ${dry.code} (above), before anything ran`);
-    // 038 rebuilds both HNSW indexes as NEW relations under their names, which
+    // 039 rebuilds both HNSW indexes as NEW relations under their names, which
     // the physical fingerprint below would refuse as rewritten — after a build
     // inside migrate.ts under the server's default maintenance_work_mem, hours
     // at ten million rows. The dry run already says it is pending: refuse now.
-    if (/038_\S+\s+would apply/.test(dry.out)) {
-      refuse(dry, "migration 038 is pending on this kept corpus: its swap rebuilds both HNSW indexes as new relations, which the marker's fingerprint would refuse as rewritten once built — remove the kept volume (the exit line prints the command) and build the corpus again under this tree");
+    if (/039_\S+\s+would apply/.test(dry.out)) {
+      refuse(dry, "migration 039 is pending on this kept corpus: its swap rebuilds both HNSW indexes as new relations, which the marker's fingerprint would refuse as rewritten once built — remove the kept volume (the exit line prints the command) and build the corpus again under this tree");
     }
   }
   const before = new Set((await ledgerNames(sql)) ?? []);
