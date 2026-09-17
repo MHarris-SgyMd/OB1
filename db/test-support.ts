@@ -464,7 +464,7 @@ export async function extractBody(sql: SQL, branch: Branch, dim: number, opts: {
     // p ON true;` under 038 — minus the INTO, either shape. A body from before
     // 037 has none, and says so.
     const m = /SELECT (count\(\*\) FILTER[\s\S]*?)\s+INTO v_hits, v_hit_pages, v_pages_seen\s+(FROM \([\s\S]*?(?:TABLESAMPLE SYSTEM[\s\S]*?\) s|LEFT JOIN LATERAL \([\s\S]*?\) p ON true));/.exec(def);
-    if (!m) throw new Error("match_thoughts has no sample of the heap before its routing statement (a body from before 037); the bench's rewrite does not apply");
+    if (!m) throw new Error("match_thoughts has no sample of the heap in a shape this rewrite recognises — a body from before 037, or a redefinition that re-aliased the statement; the bench's rewrite does not apply");
     block = `SELECT ${m[1]} ${m[2]}`;
   } else {
     // Three RETURN QUERY branches: unfiltered, the exact answer for a thin

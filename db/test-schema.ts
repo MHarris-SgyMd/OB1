@@ -879,7 +879,7 @@ console.log("\n[8e] Migrations 037 and 038: the routing count is gated by a samp
       `SELECT count(*) FILTER (WHERE ctid >= ('(' || ${hi} || ',0)')::tid)::int AS beyond,
               count(*) FILTER (WHERE ctid >= ('(' || ${lo} || ',0)')::tid AND ctid < ('(' || ${hi} || ',0)')::tid)::int AS inside
        FROM thoughts`)).rows;
-    assert(inside > 0 && beyond > 0, `the band [${lo}, ${hi}) holds ${inside} live rows and ${beyond} live rows lie beyond it, so emptying it leaves the heap its size`);
+    assert(inside > 0 && beyond > 0, `the band [${lo}, ${hi}) holds ${inside} live rows and ${beyond} live rows lie beyond it, so emptying it leaves the heap its size (the fixture's ${pages} pages need to be at least ${ROUTE_SAMPLE_PAGES + 3} with the last one live — a narrower EMBEDDING_DIM packs more rows a page)`);
     const deleted = (await db.query(`DELETE FROM thoughts WHERE ctid >= ('(' || ${lo} || ',0)')::tid AND ctid < ('(' || ${hi} || ',0)')::tid`)).affectedRows ?? -1;
     await db.exec(`VACUUM thoughts`);
     const [{ live_pages, heap_pages }] = (await db.query<{ live_pages: number; heap_pages: number }>(
@@ -890,11 +890,19 @@ console.log("\n[8e] Migrations 037 and 038: the routing count is gated by a samp
     const pinned = await drawOnce(BROAD, pages, empties);
     assert(pinned !== null && pinned.hits === 0 && pinned.hit_pages === 0 && pinned.pages_seen === ROUTE_SAMPLE_PAGES,
       `the body's probe pinned to the ${ROUTE_SAMPLE_PAGES} emptied blocks [${lo}, ${hi}) draws ${pinned?.pages_seen} pages and answers ${pinned?.hits} hits on ${pinned?.hit_pages} — the pages drawn are counted, not the pages that answered`);
+    // The scan node's own Buffers line (its total across the eight loops), not
+    // the top node's: the top node's is cumulative over the whole tree, and
+    // the DISTINCT draw's subtree reads catalog buffers when the syscache is
+    // cold (measured: 5 at the top on a first run, 2 at the scan) — the count
+    // would then hold only because the same statement ran just before
+    // (review pass 3). Planning buffers, when printed, come after the tree
+    // under `Planning:`.
     const pinnedText = deployedSample(BROAD, pages, empties);
     const buffers = pinnedText === null ? "" : (await db.query<{ "QUERY PLAN": string }>(`EXPLAIN (ANALYZE, BUFFERS) ${pinnedText}`)).rows.map((r) => r["QUERY PLAN"]).join("\n");
-    const touched = [...(/Buffers: ([^\n]*)/.exec(buffers)?.[1] ?? "").matchAll(/(?:hit|read)=(\d+)/g)].reduce((n, m) => n + Number(m[1]), 0);
+    const scanBuffers = /Tid Range Scan on thoughts[^\n]*\n(?:[^\n]*\n)*?\s*Buffers: ([^\n]*)/.exec(buffers)?.[1] ?? "";
+    const touched = [...scanBuffers.matchAll(/(?:hit|read)=(\d+)/g)].reduce((n, m) => n + Number(m[1]), 0);
     assert(touched === ROUTE_SAMPLE_PAGES,
-      `…and touches ${touched} buffers doing it — one page per block, ${ROUTE_SAMPLE_PAGES} in all (${/Buffers: [^\n]*/.exec(buffers)?.[0] ?? "no Buffers line in the plan"})`);
+      `…and the probe touches ${touched} buffers doing it — one page per block, ${ROUTE_SAMPLE_PAGES} in all (the Tid Range Scan's line: ${scanBuffers || "none in the plan"})`);
     // And the random draw over the heap with its band emptied: it still
     // reaches its pages and the rule still says "collect".
     const sparse: string[] = [];

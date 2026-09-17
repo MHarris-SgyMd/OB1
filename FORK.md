@@ -9901,7 +9901,20 @@ a real Postgres before the file was written.**
   over the round trip in the default mode, 0.22 under `force_custom_plan`
   (the replan), and 0.66 for 037's statement, which was priced 200× cheaper
   custom than generic and so replanned on every call. One plan, cached, eight
-  page reads.
+  page reads — while the paths the plan is built from are enabled. Turn one
+  off at session, role or database level (`enable_tidscan`, `enable_nestloop`,
+  or `enable_hashagg` and `enable_sort` together) and the planner still picks
+  the same plan but adds `disable_cost`, 1e10, which carries the statement
+  past every JIT threshold: the sample is compiled on every call, 41 ms
+  against 0.46 on a 1,191-page heap, with the same plan node, the same eight
+  buffers and nothing in preflight or the ledger to show it (review pass 3).
+  The tidscan and nestloop sensitivities are new with 038 — 037's Sample Scan
+  had neither a join nor a TID path — and the hashagg-and-sort one is 037's
+  too (85 ms against 81). A function-level `SET jit = off` removes all three
+  (measured) but also changes what the walk pays under a generic plan, which
+  is SMD-1464's question; pinning the two `enable_*` GUCs on the function
+  overrides an operator's setting for the walk as well. The decision is
+  SMD-1624; the header states the premise.
 - *The bounds are text-built tids* (`'(b,0)'::tid` is at or below every
   tuple of block *b*, offsets starting at 1; `'(b+1,0)'` above them) because
   core Postgres has no constructor from a block number; the executor clamps
@@ -10090,7 +10103,7 @@ the line for the next preflight change. The threshold, the plan mode of the
 *walk* statement (which flips onto a generic plan under a recency weight at
 the ceiling and changes answers; change 70's "Not done here") and the seeded
 bounds are SMD-1464; `ef_search` on real vectors SMD-1465. The `hit_pages ≥
-4` knob is stated, not turned. A hundred million rows was not run, for the
+4` knob is stated, not turned. The disabled-path JIT premise is SMD-1624. A hundred million rows was not run, for the
 reasons change 28 gives; what this change establishes is that the sample's
 cost no longer depends on it. The ten-million after pass took four attempts
 over six hours — two killed mid-build by the VM's OOM killer with other
@@ -10176,6 +10189,40 @@ stood alone, a Design bullet still deferred the temp-table case to 037, the
 and effect backwards — all reworded. test-live [7] failed once more for the
 reviewer with other suites active in the worktree and passed on re-run
 (SMD-1545).
+
+**Review pass 3** (an operator's and adversary's run-it, and a fresh-eyes
+read of the TypeScript alone). The deployer's paths all do what this section
+says: a fresh brain (38 applied, dry-run clean), a brain at 037 ("038 applied,
+1 applied, 37 skipped"), `--baseline` then a plain run, 037 pasted over 038
+then `--reapply`, a `--dry-run` for a pending 038 that prints no SQL and
+changes nothing, and all of it as a non-superuser owner once pgvector is
+installed (the file's `SELECT '[1]'::vector` is what lets a non-superuser
+set the hnsw clause; without it, "permission denied to set parameter").
+Preflight at 038 with rows: every check ok; with 037's or 020's body pasted
+over it, still ok (no recogniser, as stated); with 014 re-applied, `search
+signatures` fails and prints the DROP. The PostgREST contract is
+byte-identical to 037's. A SELECT-only role in a READ ONLY transaction under
+a 1 ms statement timeout, a Supabase-shaped authenticator/anon pair, forced
+plan modes, `jit = off`, `random_page_cost = 1`, a 64 kB `work_mem`, parallel
+query forced and off: eight heap blocks a call every time (pg_statio and
+pg_stat_statements agree, 8.08 blocks a call over forty). Races — a
+concurrent tail delete and `VACUUM` truncating 1,191 pages to 300 under a
+loop of filtered calls, concurrent inserts growing it, a full delete and
+reload — 14,000 calls without an error under either body; the temp table's
+two shapes as the header describes. What the pass found: the JIT premise
+above (the one finding of weight, stated in the header and filed as
+SMD-1624 rather than decided here); [8e]'s buffer count read the top node's
+cumulative line, which includes catalog reads on a cold syscache and held
+only because the identical statement had just run — it now reads the Tid
+Range Scan's own line; [5d]'s exact band compared two divided totals, which
+IEEE arithmetic gets wrong for 52 integer deltas that are exactly right — it
+now compares the raw scan counts; `extractBody`'s failure message named one
+cause where a re-aliased statement is the other; [8e]'s band-geometry premise
+(at least eleven pages with the last one live) is now in its label.
+Pre-existing and left: `--reapply` rebuilds a missing HNSW index in dynamic
+shared memory and fails under a 64 MB /dev/shm (001's parallel build, not
+038's; a real brain has its index), and the migrator cannot bootstrap a brain
+as a non-superuser on an image whose pgvector is not trusted.
 
 **The operator's path, walked.** A brain at 037 with rows, upgraded by `bun
 db/migrate.ts`: "038 applied, 1 applied, 37 skipped", one `match_thoughts`

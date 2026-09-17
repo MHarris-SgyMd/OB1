@@ -443,7 +443,7 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
         return tx.unsafe(`SELECT id FROM thoughts WHERE metadata @> '${filter}' ORDER BY embedding <=> '${qv}'::vector, id LIMIT 10`);
       });
     /** GIN scans per call and exact-answer agreement, for one filter under the installed body. */
-    const measure = async (filter: string): Promise<{ scansPerCall: number; agree: number }> => {
+    const measure = async (filter: string): Promise<{ scans: number; scansPerCall: number; agree: number }> => {
       let agree = 0;
       const g0 = await ginScans();
       for (const qv of queries) {
@@ -454,7 +454,8 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
       // The oracle runs inside the bracket too, but with index and bitmap scans
       // off it seq-scans and touches no GIN index; what the bracket counts is
       // the function's own scans.
-      return { scansPerCall: ((await ginScans()) - g0) / QUERIES, agree };
+      const scans = (await ginScans()) - g0;
+      return { scans, scansPerCall: scans / QUERIES, agree };
     };
     const BROAD = '{"broad": true}';
     const THIN = '{"thin": true}';
@@ -468,7 +469,11 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
     assert(!TID_PROBE.test(await body()) && !/v_broad/.test(await body()), "020 re-applied over 038: the body has no sample and no gate (the state a hand re-apply of 020 leaves; preflight's remedy names 038 for that reason)");
     const plainBroad = await measure(BROAD);
     const plainThin = await measure(THIN);
-    const saved = plainBroad.scansPerCall - gatedBroad.scansPerCall;
+    // The raw scan counts, not the per-call quotients: x/20 − y/20 is not
+    // exactly 1 in IEEE arithmetic for every x − y = 20 (41/20 − 21/20 is
+    // 0.9999999999999998), so the property is asserted on the integers
+    // (review pass 3).
+    const saved = plainBroad.scans - gatedBroad.scans;
     // Every draw reads eight pages of some 65 rows each, all broad, so every
     // call meets the three conditions (condition 1 needs about 200 hits on
     // this heap; eight pages hold some 500) and skips the collection; the
@@ -476,8 +481,8 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
     // bodies and cancel. Exactly one fewer per call is the band — 037's draw
     // could reach fewer than three pages and missed, which is why this
     // section once accepted five misses in twenty.
-    assert(saved === 1, `on the broad filter 038 makes exactly one fewer GIN scan per call than 020 — the collection skipped on every call (020: ${plainBroad.scansPerCall.toFixed(2)} a call, 038: ${gatedBroad.scansPerCall.toFixed(2)})`);
-    assert(plainThin.scansPerCall === gatedThin.scansPerCall, `on the thin filter both bodies scan the GIN index the same ${gatedThin.scansPerCall.toFixed(2)} times a call — the collection ran, and the exact branch answered`);
+    assert(saved === QUERIES, `on the broad filter 038 makes exactly one fewer GIN scan per call than 020 over ${QUERIES} calls — the collection skipped on every call (020: ${plainBroad.scansPerCall.toFixed(2)} a call, 038: ${gatedBroad.scansPerCall.toFixed(2)})`);
+    assert(plainThin.scans === gatedThin.scans, `on the thin filter both bodies scan the GIN index the same ${gatedThin.scansPerCall.toFixed(2)} times a call — the collection ran, and the exact branch answered`);
     assert(plainBroad.agree === QUERIES && plainThin.agree === QUERIES, "…and 020's answers are the same exact top-10 (the gate changed the route, not the answer)");
 
     // The sample's cost against the collection's on this table, printed for the

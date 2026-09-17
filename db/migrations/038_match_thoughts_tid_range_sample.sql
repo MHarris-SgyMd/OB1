@@ -117,7 +117,8 @@
 --     finding met exactly that, 50 ms a call). With the cap each probe is
 --     priced at 291 rows at most: the whole statement at 107 / 849 / 2,405
 --     cost units at 2,000 / 20,000 / 200,000 pages, flat from there, and no
---     JIT at any size. A build with 32 KB pages could hold more tuples on a
+--     JIT at any size — while the paths it is built from are enabled; the
+--     "disabled planner path" failure mode below is the exception. A build with 32 KB pages could hold more tuples on a
 --     dense page than the LIMIT admits; the count would then be short, the
 --     estimate low, and the collection run — the safe side again.
 --   * The blocks are drawn inside the statement, not in plpgsql: no extra
@@ -221,6 +222,30 @@
 --     reads on every filtered call and nothing that grows with the heap.
 --   * A generic plan. Adopted by design after the fifth call (Design above);
 --     it is the plan both modes agree on, and the cap keeps it clear of JIT.
+--   * A disabled planner path. Every piece of the statement has exactly one
+--     viable path — a TID Range Scan for the block (enable_seqscan is
+--     already off on the function), a Nested Loop for the LATERAL join
+--     (nothing else takes a lateral reference), Sort/Unique or HashAggregate
+--     for the DISTINCT draw. When a session, role or database turns that
+--     path off (`enable_tidscan = off`, `enable_nestloop = off`, or
+--     `enable_hashagg` and `enable_sort` both off) the planner still chooses
+--     it and adds disable_cost, 1e10, and the statement's cost is then far
+--     past jit_above_cost and its inlining and optimisation thresholds: the
+--     executor JIT-compiles the sample on EVERY call. Measured through the
+--     function on a 1,191-page heap (review pass 3): 0.46 ms a call by
+--     default, 41 under `enable_tidscan = off` or `enable_nestloop = off` —
+--     the same plan node, the same eight buffers, the compiler's time —
+--     and `ALTER DATABASE … SET enable_nestloop = off`, a spelling operators
+--     do use, gives every fresh connection the 41. The tidscan and nestloop
+--     sensitivities are new with this file (037's Sample Scan had neither a
+--     join nor a TID path); the hashagg-and-sort one is 037's too (85 ms
+--     against 81). Nothing shows it: not the plan, the rows, preflight or
+--     the ledger. `SET jit = off` on the function removes all three
+--     (measured, 0.38–0.82 ms under each), but also changes what the WALK
+--     pays under a generic plan, which is SMD-1464's plan-mode question;
+--     pinning `enable_tidscan = on` and `enable_nestloop = on` on the
+--     function overrides the operator's setting for the walk too. The
+--     decision is SMD-1624; this file states the premise.
 --   * A temp table shadowing the name, in two shapes (measured through
 --     auto_explain). In a session that already has a temp schema, the cached
 --     plans keep reading the real table while v_pages sizes the shadow —
@@ -532,7 +557,10 @@ BEGIN
     -- (pulled up into the join they become join quals, and the plan is a
     -- sequential scan under Materialize: 72 ms measured), and it caps the
     -- estimate the planner cannot make for a bound it cannot see, so the
-    -- statement's cost stays far under jit_above_cost at any heap size.
+    -- statement's cost stays far under jit_above_cost at any heap size —
+    -- unless an operator has disabled a path it is built from (tidscan,
+    -- nestloop, or hashagg and sort together), when disable_cost puts every
+    -- call through the JIT compiler: the header's failure mode, SMD-1624.
     -- Sampling is by page, so a filter whose matches sit together on disk
     -- shows up as one page full of hits or none, and the third condition
     -- below is what catches that.
