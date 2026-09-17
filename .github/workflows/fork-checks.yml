@@ -100,7 +100,7 @@ jobs:
       # `.d.ts` for `.js`, Deno does not, and the module — every tool handler's
       # arguments with it — is `any`. Each SDK import in these files carries a
       # `// @ts-types` pragma naming the extensionless subpath, and test-auth.ts
-      # holds it there (change 80). A file that loses the pragma fails here
+      # holds it there (change 81). A file that loses the pragma fails here
       # with `implicitly has an 'any' type` at every handler.
       - name: deno check server/index.ts
         working-directory: server

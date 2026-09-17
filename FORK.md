@@ -68,14 +68,14 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Eighty numbered changes on top of the pin. Seven fix defects found in an
+Eighty-one numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
 data layer (Phase 2). Four (changes 31, 53, 55, and 59) ship no runtime change at
 all: each is a measurement that decided against building something.
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–80 are the numbered `###` sections** further down, which is
+sections. Changes **18–81 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -202,8 +202,8 @@ extensions/test-tools.ts         # change 77 (new file — every tool of the fiv
 db/test-bench-reuse.ts           # change 76 (new file — the kept bench corpus's oracle cache held to the computation, on one index)
 db/bench-oracle.ts               # change 76 (new file — the cache's pure part: what of a marker's entry a run may trust; test-schema [37])
 <4 vendored MCP servers, 1 sample> # change 78 (a McpServer built per request — per session in the cost recipe's after sample — in place of one shared and connect()ed to a fresh transport each time)
-<17 pin sites, 3 lockfiles>      # change 79 (@hono/mcp 0.1.1 → 0.1.5: the transport lets go of each POST it has answered; the after sample's sweep closes the transports it drops)
-<19 pin sites, 3 lockfiles, 15 servers, 20 SDK importers> # change 80 (SDK 1.30.0, @hono/mcp 0.3.2, hono 4.13.8, zod 4.6.5 together; the Accept patches removed; an @ts-types pragma on every SDK import so Deno types it)
+<17 pin sites, 3 lockfiles>      # change 80 (@hono/mcp 0.1.1 → 0.1.5: the transport lets go of each POST it has answered; the after sample's sweep closes the transports it drops)
+<19 pin sites, 3 lockfiles, 15 servers, 20 SDK importers> # change 81 (SDK 1.30.0, @hono/mcp 0.3.2, hono 4.13.8, zod 4.6.5 together; the Accept patches removed; an @ts-types pragma on every SDK import so Deno types it)
 docs/01-getting-started.md       # fix 6
 recipes/content-fingerprint-dedup/README.md  # fix 6
 recipes/email-history-import/README.md       # fix 6
@@ -11283,7 +11283,7 @@ transport try so a non-JSON body reports the status the server sent rather than
 `Accept: text/event-stream` alone and gets 200 — the Accept patch now supplies
 whichever of the two tokens the transport requires is missing, where it used to
 test only the SSE token and let that POST through to a 406 after paying the
-resolve and the build (change 80 removed the patch: at `@hono/mcp` 0.3.x the
+resolve and the build (change 81 removed the patch: at `@hono/mcp` 0.3.x the
 transport takes either token, or none, and [7] sends all three forms
 unpatched). Drilled by restoring the pre-change shape — the handler on
 `app.all` and the `notFound` removed — 34 of 151 assertions fail: the
@@ -12327,7 +12327,7 @@ through the servers' Accept patch as a Claude Desktop connector's would — whic
 found two servers with no such patch, `extensions/meal-planning/shared-server.ts`
 and the cost recipe's "before" sample, answering 406 to any POST whose Accept
 lacks `text/event-stream` where the other twelve patch it in (pre-existing;
-SMD-1616; the probe kept the header for those two until change 80 moved the
+SMD-1616; the probe kept the header for those two until change 81 moved the
 transport to a version that wants no patch and removed all fifteen); the
 other two requests start 5 ms later, complete. The stagger is load-bearing, and the
 fourth review pass is why: three requests fired in one tick caught main's
@@ -12415,7 +12415,7 @@ Hono `Context` per tool call until the 30-minute prune drops the session
 (measured: 200 completed POSTs on one transport, 0 of 200 `Request` objects
 finalized after GC; with a transport per request, 200 of 200). The four
 servers moved to a transport per request are clear of it; the sample's README
-says the bound; SMD-1607 held the library fix, and change 79 moves the pin to
+says the bound; SMD-1607 held the library fix, and change 80 moves the pin to
 0.1.5, which releases each POST as it is answered. Nothing here changes a response, a
 header or a tool surface; the answer a client receives is the same, now for
 the request it sent.
@@ -12426,7 +12426,7 @@ Upstream status: at the pin, all five files carry the shared server —
 "after" sample as an exported singleton connected once per session.
 **Unfiled** by us.
 
-### 79. The `@hono/mcp` pin moves from 0.1.1 to 0.1.5 — the transport lets go of each POST it has answered, so a transport kept for a session (the cost recipe's after sample) no longer holds one Request and one Context per tool call until the session is swept (SMD-1607)
+### 80. The `@hono/mcp` pin moves from 0.1.1 to 0.1.5 — the transport lets go of each POST it has answered, so a transport kept for a session (the cost recipe's after sample) no longer holds one Request and one Context per tool call until the session is swept (SMD-1607)
 
 **The defect.** Change 78's third review pass found it and its "Not done here"
 records it: in `@hono/mcp` 0.1.1 `handlePostRequest` records each request's
@@ -12456,7 +12456,7 @@ have not opened since change 75. The peer range, `@modelcontextprotocol/sdk
 later do not: 0.2.5 wants the SDK at ^1.25.1, 0.3.2 at ^1.29.0 and is built
 against hono 4.11.5 — a move of the SDK pin with it, not this ticket's (0.3.0
 also relaxes the Accept check to either token, SMD-1616's mechanism; change
-80 made that move). So the pin moves to 0.1.5 at every site that names it —
+81 made that move). So the pin moves to 0.1.5 at every site that names it —
 `extensions/package.json`, `server/package.json`,
 `server-portable/package.json`, the thirteen `deno.json` (the core server,
 six extensions, four integrations, two recipes) and the template
@@ -12517,7 +12517,7 @@ and the transport's `0/100 Request objects collected`; the sample without its
 `close()` fails its one rule.
 
 **Review, first pass** (one cold reviewer beside the author's read; the pass
-covered change 80 with this one, and its findings there are recorded there).
+covered change 81 with this one, and its findings there are recorded there).
 Two findings here, both fixed. The release assertion's bar of 99 rested on
 the slack being exactly one; the reviewer's standalone copy of the loop read
 98 twice, so the bar is 90 and the paragraphs above say why. The sample's
@@ -12528,7 +12528,7 @@ that per-request transports hold no timer on the POST path, and that
 deleting from the sessions Map inside `for…of` is safe.
 
 **Not done here.** SMD-1616 (the Accept patches, and whether 0.3.x's
-either-token check is worth the SDK and hono moves it needs — change 80
+either-token check is worth the SDK and hono moves it needs — change 81
 made the moves and removed the patches). The after
 sample is still untested by anything that runs it. No upstream issue was
 filed against `@hono/mcp`: the fix shipped before this fork found the defect.
@@ -12541,9 +12541,9 @@ holds). The fork's seventeen sites read 0.1.5. A rebase over an upstream bump
 of the same lines conflicts on one line per file — take the higher.
 **Unfiled** by us.
 
-### 80. The MCP stack moves together — SDK 1.24.3 → 1.30.0, `@hono/mcp` 0.1.5 → 0.3.2, hono 4.9.2 → 4.13.8, zod 4.1.13 → 4.6.5: a second `connect()` on one server now throws, the transport takes whatever Accept a client sends and the fifteen Accept patches are gone, and every SDK import carries the `@ts-types` pragma Deno needs to type it (SMD-1643, SMD-1616)
+### 81. The MCP stack moves together — SDK 1.24.3 → 1.30.0, `@hono/mcp` 0.1.5 → 0.3.2, hono 4.9.2 → 4.13.8, zod 4.1.13 → 4.6.5: a second `connect()` on one server now throws, the transport takes whatever Accept a client sends and the fifteen Accept patches are gone, and every SDK import carries the `@ts-types` pragma Deno needs to type it (SMD-1643, SMD-1616)
 
-**Why now.** Change 79 found that the defect it fixed had been fixed in the
+**Why now.** Change 80 found that the defect it fixed had been fixed in the
 library a year earlier and the fork's pins had not moved. A survey of every
 pin against npm (2026-09-17) put the MCP stack eight to thirteen months
 behind, and the four constrain each other — `@hono/mcp` 0.3.x wants the SDK at
@@ -12610,8 +12610,11 @@ files is preceded by its pragma. Upstream, the SDK's pattern would want to be
 as tsc does. Neither filed.
 
 **Beside the pins.** Two more things the release notes did not name, both
-read out of 0.3.2's dist and neither present at 0.1.5. A POST after
-initialize is checked for the `mcp-protocol-version` header: absent, it reads
+read out of 0.3.2's dist and neither present at 0.1.5. Every POST that is not
+itself an initialize — whether or not the transport ever saw one; a stateless
+transport skips the session check, not this one, so on the fourteen
+per-request servers that is every tool call — is checked for the
+`mcp-protocol-version` header: absent, it reads
 as 2025-03-26 and passes; naming a version outside the SDK's list
 (2025-11-25, 2025-06-18, 2025-03-26, 2024-11-05, 2024-10-07 at 1.30.0) it is
 refused with **404** and a "Bad Request: Unsupported protocol version" body.
@@ -12630,7 +12633,7 @@ answer are byte-identical
 across the move — status, headers, body; `handlePostRequest` still awaits
 `ctx.req.json()` after the server is connected, so change 78's staggered probe
 still means what it did; a transport reused across 200 POSTs still lets go of
-every Request (change 79's assertion holds at 200/200). The build cost on
+every Request (change 80's assertion holds at 200/200). The build cost on
 change 78's harness moved the right way: one tool 39 → 36 µs, thirteen tools
 218 → 129 µs (Bun 1.4.0, same machine, same session). Two packages enter
 the lockfiles as `@hono/mcp`'s peers: `hono-rate-limiter` 0.5.4 and
@@ -12642,9 +12645,10 @@ pin guard found two files the seventeen-site count missed — the two REST
 integrations' `deno.json` pin hono and zod without `@hono/mcp` — so nineteen
 sites.
 
-**Verified.** `bun test-auth.ts` **808/808** (775 at change 79: thirteen
+**Verified.** `bun test-auth.ts` **809/809** (775 at change 80: thirteen
 no-patch guards, thirteen pragma guards, the enhanced-mcp pair, the SDK's
-throw, the protocol-version pair, three text rules for the after sample).
+throw, the protocol-version pair, the core server's pin mirror, three text
+rules for the after sample).
 `server/`: `test-stateless`
 47/47 and the two other suites PASS. `server-portable/`: `test-server.ts`
 153/153 (151: the Accept row became three), `test-auth.ts` 67/67,
@@ -12657,7 +12661,7 @@ a server fail without them (pragmas renamed, checks run, pragmas restored):
 handler argument. `check-fork-consistency.mjs` PASS.
 
 **Review, first pass** (one cold reviewer beside the author's read, over
-changes 79 and 80 together; ten findings, two of them 79's and recorded
+changes 80 and 81 together; ten findings, two of them 80's and recorded
 there). Fixed: `server/bun.lock` had kept a nested zod 4.5.4 for the SDK
 beside the 4.6.5 the Edge Function deploys — `server/package.json` listed no
 zod, so `bun install` had nothing to hold it to; zod is pinned there now and
@@ -12685,6 +12689,32 @@ through `abort()` → `reader.cancel()` with the frame already pulled), 202 for
 a notification now a JSON `null` body, no tool name in the tree that
 `validateAndWarnToolName` would warn about per request, `response.headers`
 edits still landing on 0.3.2's fresh Response, and the counts here.
+
+**Review, second pass** (a second cold reviewer, given the first pass's
+additions to read first). Nothing above LOW, and every code finding sat in
+the first pass's own additions — the stop signal. Taken anyway, each a line
+or two: the protocol-version check runs on every POST that is not itself an
+initialize, whether or not the transport ever saw one — the paragraph above
+said "after initialize", and the test's own transport, which never saw one,
+had shown otherwise; the test names `LATEST_PROTOCOL_VERSION` rather than
+the list's first entry, so its label is true by construction; the no-patch
+guard matches the patch's mechanism, `Object.defineProperty(c.req, "raw"`,
+not the header it set, which an outgoing fetch may set too; the pragma
+guard's message admits the other way it fails — an SDK import in a spelling
+it does not read (single quotes, no semicolon, a line break), which it
+refuses rather than passes. And one gap the first pass's fix had exposed:
+`server/package.json` promises to mirror `server/deno.json` exactly and
+nothing held it to that, which is how the nested zod arrived — the pin guard
+now compares the two on every MCP-stack import (supabase-js excepted: the
+Node suites never load it, no installed package peers it); drilled with
+hono at 4.13.7 in the one file, one failure naming it. Merge 4b8e5ec's
+hand-resolution checked against both parents: nothing duplicated, nothing
+lost. Noted, not this change's: four servers' `Access-Control-Allow-Headers`
+omit `mcp-protocol-version` (and `last-event-id`) where the core, the
+portable server and `kubernetes-deployment` carry them — a browser client
+sending the header the spec asks for is refused at preflight; pre-existing,
+and only sharper now that the header is validated (SMD-1668). 809
+assertions.
 
 **Not done here.** The live connector check (one Claude Desktop session, two
 tool calls in flight, Accept as the client sends it) that SMD-1497, SMD-1259

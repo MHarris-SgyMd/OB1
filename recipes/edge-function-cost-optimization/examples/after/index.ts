@@ -21,7 +21,7 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { Hono } from "hono";
 import { StreamableHTTPTransport } from "@hono/mcp";
 // Deno reads the SDK's types through the extensionless subpath: its exports map
-// names them `./dist/esm/*.d.ts`, unreachable from `.js` (FORK.md change 80).
+// names them `./dist/esm/*.d.ts`, unreachable from `.js` (FORK.md change 81).
 // @ts-types="@modelcontextprotocol/sdk/server/mcp"
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { buildServer } from "./server.ts";
@@ -43,7 +43,7 @@ function pruneExpiredSessions(): void {
       sessions.delete(id);
       // A dropped session is closed, not left to the collector: close() ends
       // the transport and, through its onclose, tells the server it has no
-      // transport (ob1-fork, SMD-1607, FORK.md change 79). Nothing in close()
+      // transport (ob1-fork, SMD-1607, FORK.md change 80). Nothing in close()
       // throws today; a rejection here must still not become an unhandled one,
       // which under Deno ends the isolate.
       s.transport.close().catch(() => {});
