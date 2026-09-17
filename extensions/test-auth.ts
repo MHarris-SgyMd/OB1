@@ -921,11 +921,14 @@ for (const t of TEXT_ONLY) {
   // server/package.json says it mirrors server/deno.json exactly; nothing held
   // it to that until a nested zod 4.5.4 arrived in its lock (change 83's
   // review). Every MCP-stack import of the one is in the other at the same
-  // version — supabase-js excepted: the Node suites never load it.
+  // version — supabase-js excepted: the Node suites never load it. (Named by
+  // regex, not as a quoted literal: the shim codemod rewrites every quoted
+  // supabase-js literal in a file it takes for a migration target.)
   {
+    const MCP_STACK = /^(hono|zod|@hono\/mcp|@modelcontextprotocol\/sdk)$/;
     const imports = JSON.parse(readFileSync(join(ROOT, "server/deno.json"), "utf8")).imports as Record<string, string>;
     const dev = JSON.parse(readFileSync(join(ROOT, "server/package.json"), "utf8")).devDependencies as Record<string, string>;
-    const drift = Object.entries(imports).filter(([name, spec]) => PACKAGES.test(name) && name !== "@supabase/supabase-js" && spec !== `npm:${name}@${dev[name]}`);
+    const drift = Object.entries(imports).filter(([name, spec]) => MCP_STACK.test(name) && spec !== `npm:${name}@${dev[name]}`);
     assert(drift.length === 0, `server/package.json pins what server/deno.json deploys, MCP stack entire${drift.length ? ` (${drift.map(([n, s]) => `${n}: ${s} vs ${dev[n] ?? "absent"}`).join(", ")})` : ""}`);
   }
 }

@@ -13393,7 +13393,10 @@ refuses rather than passes. And one gap the first pass's fix had exposed:
 nothing held it to that, which is how the nested zod arrived — the pin guard
 now compares the two on every MCP-stack import (supabase-js excepted: the
 Node suites never load it, no installed package peers it); drilled with
-hono at 4.13.7 in the one file, one failure naming it. Merge 4b8e5ec's
+hono at 4.13.7 in the one file, one failure naming it. Its first spelling
+named supabase-js as a quoted literal, which the shim codemod takes for a
+migration target — CI's round-trip check rewrote the test file and failed
+the PR's first run; the exception is a regex now. Merge 4b8e5ec's
 hand-resolution checked against both parents: nothing duplicated, nothing
 lost. Noted, not this change's: four servers' `Access-Control-Allow-Headers`
 omit `mcp-protocol-version` (and `last-event-id`) where the core, the
