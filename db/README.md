@@ -1301,6 +1301,38 @@ give two HNSW graphs and two recall figures, which is why every comparison
 is on one index. It drops its marker table on the way out. Not in CI or
 `ci-parity.sh`, for the three minutes of exact passes it costs.
 
+### hnsw-graph.ts
+
+Reads a pgvector HNSW index page by page and says which live rows its entry
+point cannot reach. A vector search is a walk from the index's entry point over
+its neighbour lists, so a live row in a component the entry cannot reach is
+invisible to every search that walks; the walk itself cannot show that, since a
+short answer from an approximate index looks the same whether the graph has a
+hole or the beam stopped early. This decodes the pages the walk reads —
+pgvector 0.8.x's `HnswMetaPageData`, `HnswElementTupleData` and
+`HnswNeighborTupleData`, through `pageinspect`'s `get_raw_page` — and computes
+reachability from the graph itself, then joins to the table so "live" means a
+row the session can see.
+
+```bash
+./with-postgres.sh bun hnsw-graph.ts                              # both shipped indexes
+bun hnsw-graph.ts --url "$DATABASE_URL" --index thoughts_embedding_idx --json
+```
+
+`pageinspect` is superuser-only, so this is a diagnostic for a database you
+administer — the suites' throwaway containers, a local brain — not a check the
+server runs on a managed database. It exists because of SMD-1632: over the
+suite's near-equidistant vectors (orthogonal unit axes, every pair at cosine
+distance 1.0) pgvector's neighbour-selection heuristic keeps few edges and the
+graph is not connected, so a search misses a live row its own vector matches —
+which is what flaked `test-live.ts` [7] before SMD-1574 moved its reads to the
+exact branch. `test-live.ts` [17] drives it: the walk misses most axes of an
+orthogonal corpus and none of a random one, and every row the decoder calls
+unreachable is one the walk misses. A random, production-shaped corpus is fully
+reachable; `REINDEX` does not clear the degenerate case (a rebuild of an
+equidistant graph is no more reachable), so it is not the remedy the finding
+first assumed. See FORK.md's SMD-1632 section.
+
 ### What only the live suite can catch
 
 - **The migration runner.** `migrate.ts` talks to a server over TCP with `Bun.sql`.
@@ -1394,8 +1426,11 @@ is on one index. It drops its marker table on the way out. Not in CI or
   new vector's; a re-capture with no vector keeps the windows with the vector
   and its label. The found-by reads filter on a metadata key only that
   thought carries, so `match_thoughts`'s exact branch answers them and no
-  HNSW walk decides (SMD-1574; the walk missed live rows outright after an
-  autovacuum — SMD-1632). `test-upgrade.ts` [5] shows the defect at 021
+  HNSW walk decides (SMD-1574). The walk had missed live rows outright: over
+  the suite's tied unit-axis vectors pgvector's graph is not connected and a
+  search cannot reach them, which [17] reproduces and `hnsw-graph.ts` reads
+  from the index (SMD-1632); [4], [11] and [15] moved to the exact branch for
+  the same reason. `test-upgrade.ts` [5] shows the defect at 021
   before applying 022 over it, then both halves of the rule.
 - **The re-embed, end to end.** [9] runs `reembed.ts` as a subprocess against a
   stub provider: refused without `--switch-model`, then two workers over

@@ -12435,6 +12435,91 @@ Upstream status: at the pin, all five files carry the shared server —
 "after" sample as an exported singleton connected once per session.
 **Unfiled** by us.
 
+### 79. A live row an HNSW walk cannot reach is the geometry, not the vacuum — `db/hnsw-graph.ts` reads the disconnected graph the suite's tied vectors build, and [4]/[11]/[15] join [7] on `match_thoughts`' exact branch (SMD-1632)
+
+**The finding.** SMD-1574 moved `test-live.ts` [7]'s found-by reads off the HNSW
+walk after they flaked in CI, and filed this to explain the walk returning none
+of three live rows — reading it, from an instrumented dump, as a vacuum leaving
+the entry point on a deleted element. The dump was right that the entry point's
+reachable component held one row while two live rows sat outside it; the cause
+it inferred was not. Over the suite's vectors — orthogonal unit axes, every pair
+at cosine distance 1.0 — pgvector's neighbour-selection heuristic (`SelectNeighbors`,
+`CheckElementCloser` in `hnswutils.c`) keeps an edge only where a candidate is
+strictly closer to the element than to any neighbour already chosen, so with
+every distance equal it keeps few, and the graph is not connected. A search
+walking from the entry point cannot reach a row in another component, and even a
+reachable one is missed by the bounded `ef` beam. This reproduces with **no
+vacuum, no deletes**: a single insert of one orthogonal unit vector per axis
+leaves live rows unreachable outright. The autovacuum the ticket named is a
+contributory trigger — it re-picks the tiny graph's entry point and repairs
+neighbourhoods, shifting which rows fall outside the reachable component at the
+moment [7] reads — not the root.
+
+**What `db/hnsw-graph.ts` shows.** A reader that decodes the index pages
+(pgvector 0.8.6's `HnswMetaPageData`, `HnswElementTupleData`, `HnswNeighborTupleData`
+through `pageinspect`'s `get_raw_page`, the magic number checked), walks the
+graph from the entry point following neighbour lists at every level, and joins
+to the table by ctid, so it reports the live rows the entry point cannot reach.
+It is a **sound** detector: every row it calls unreachable is one an unbounded
+relaxed walk of that row's own vector does not return (measured against the
+walk; the reverse does not hold — the bounded beam misses reachable rows too,
+so the walk misses more than the decoder reports). The all-levels walk is the
+correction that makes it sound: a search does not walk level 0 from the meta
+entry point but descends the upper lists to a query-dependent level-0 start, so
+a level-0-only reachability under-counts and would call a reachable row
+unreachable (the `test-live.ts` [17] soundness check caught exactly that during
+this work). Measured on pgvector 0.8.6-pg16, 1024-dim: 1,024 orthogonal unit
+vectors leave 0 to ~860 rows unreachable build to build (one connected build in
+twenty), and a search of a row's own axis misses 100–111 of 120 sampled
+whatever the hole; a 2,000-row **random** corpus is fully reachable and every
+row is found by its own vector; 50 orthogonal vectors dropped into a random
+corpus stay reachable. So the pathology needs a corpus **dominated** by
+near-equidistant vectors — the suite's, quantised or binary vectors, not real
+embeddings.
+
+**The test reads that flaked, and the ones that could.** [7]'s reads took
+`match_thoughts`' exact branch in SMD-1574 (a metadata key only that thought
+carries → 014/037 score the matching thoughts and their chunks by id, no walk).
+This adds the same key to [4], [11] and [15] — the sections whose reads still
+walked the same shape of corpus — and filters their reads on it, so the vector
+arm (`search_thoughts_hybrid` passes the filter to `match_thoughts` for [11] and
+[15]) takes the exact branch too. The ticket doubted [11] could be filtered
+without changing what it tests; it can — the keyword arm is filtered by the same
+key, which every row carries, so the keyword-hit-outside-the-window and
+window-of-one probe are unchanged — and the suite proves it. [5b] is left on the
+walk on purpose: its 2,000 vectors are random, which the finding shows are
+reachable, and it exists to hold the walk's recall. `test-live.ts` [17] is the
+new coverage: the walk misses most axes of an orthogonal corpus and none of a
+random one, the decoder is sound, and `REINDEX` does not lift the miss rate.
+
+**The decision.** No production reachability check and no capture-path
+verification: a real corpus is reachable, so either would never fire and both
+would cost every capture a walk. `REINDEX` is **not** the remedy the ticket
+assumed — a rebuild of an all-equidistant graph is no more connected (measured:
+the miss rate does not move) — so it is not offered as one. The mitigation is
+the diagnostic (`db/hnsw-graph.ts`, superuser-only, for a database you
+administer) and the test hardening. Not filed upstream as a bug: HNSW over
+near-equidistant data being poorly connected is a known property of the
+algorithm, reproduced here with no vacuum in play, not a pgvector defect — the
+`hnswvacuum.c` path the ticket read (`RepairGraphEntryPoint`, whose own comment
+says the entry point "will be empty until an element is repaired") is real but
+is not what the reproduction needs.
+
+**Verified.** `bun test-live.ts` 507/507 against pgvector 0.8.6-pg16, [17]
+included, stable across repeated local runs; `db/hnsw-graph.ts` reads both
+shipped indexes and its CLI exits non-zero on a holed index. The decoder's
+soundness and the random-corpus reachability are the two facts the section rests
+on, both robust to the build's randomness; the hole's size is reported, not
+gated on.
+
+**Not done here.** No standalone script produces the three-row miss on demand —
+the tiny-graph miss needs the suite's accumulated index history and an
+autovacuum at the read, and 282 standalone iterations at SMD-1574 plus the
+replays here never caught it; the deterministic reproduction is the many-vector
+disconnected graph, which is the same mechanism at a scale where it is certain.
+The quantised and binary indexes (SMD-1501) share the near-equidistant risk at
+low bit depth and are not measured for it.
+
 ## Detached from the fork network
 
 This repository was forked from `NateBJones-Projects/OB1` and then detached, for
@@ -12570,38 +12655,20 @@ Deliberate. Recorded so nobody assumes they were missed.
   divergent content, and `AGENTS.md` mandates updating a private tracker.
   [PR #274](https://github.com/NateBJones-Projects/OB1/pull/274) proposed the
   obvious fix, was endorsed in review, and was closed unmerged.
-- **The thoughts HNSW index scan has returned none of the table's live rows**
-  (pgvector 0.8.6). `test-live.ts` [7]'s same-model found-by read, then an
-  unfiltered `match_thoughts` top-10, missed in five CI attempts on three
-  trees that touched nothing under `db/` and, looped locally, four times in
-  thirty-seven runs (thirty-four with a second suite beside it), twice there
-  and twice at the other-model read. An instrumented copy caught two with the
-  state dumped: the thoughts index scan itself returned one of the three live
-  rows once and none of them once — iterative scan on or off, still 300 ms
-  later — with an autovacuum having run on both tables during the run (the
-  dump does not time it against the sections), the chunk index answering
-  throughout and the sections after finding their rows again. Not a tie: a
-  tie can reorder candidates, not remove them, and one dump's scan returned
-  no row at all. The 022 sequence alone never missed — 282 iterations over
-  three index histories (random rows then unit rows, unit rows only, none)
-  under three vacuum modes (none, before, in flight), and two 150-second runs
-  of ~117k inserts against 55k and 43k nonstop vacuums (probe output not
-  retained) — and every call in the suite forced down the walk missed in two
-  of four standalone runs, a probabilistic demonstrator and not a model of
-  the code before the fix. SMD-1574 moved [7]'s reads to the filtered branch
-  (change 40's note): measured on its rows, a filtered call adds no
-  `idx_scan` to either HNSW index and one to the metadata GIN, the unfiltered
-  call adds one to each, the heap is far under 037's 8,192-page floor so the
-  sample gate cannot fire, and the exact branch costs about 0.1 ms more a
-  call (0.07 to 0.2 across two measurements, round trip dominated); the exact
-  branch's chunk CTE emptied fails the two window reads. The fixed suite is
-  green in twelve local runs under `db/with-postgres.sh` (500/500 each); the
-  ticket's twenty CI runs are not done. Whether a real corpus with real
-  vectors can reach the same state is not shown either way, and no mitigation
-  (a reachability check, `REINDEX`) is built. Still on the walk: [4]'s read,
-  [15]'s, [11]'s two hybrid reads and [5b]'s two ([15] and [11] run after the
-  suite's mass deletes as [7] does; [4] runs first, on a near-fresh index).
-  SMD-1632.
+- **An HNSW walk can miss a live row over near-equidistant vectors**
+  (pgvector 0.8.6). Investigated under SMD-1632 and now understood: over the
+  test suite's orthogonal unit axes (every pair at cosine distance 1.0)
+  pgvector's neighbour-selection heuristic keeps few edges and the graph is not
+  connected, so a search walking from the entry point misses a live row its own
+  vector matches — the flake behind `test-live.ts` [7], reproduced with no
+  vacuum. `db/hnsw-graph.ts` reads it from the index and [17] drives it; [4],
+  [7], [11] and [15]'s reads take `match_thoughts`' exact branch, which does not
+  walk. A **random, production-shaped corpus is fully reachable**, so this is
+  the test corpus's problem (and quantised or binary vectors', SMD-1501) rather
+  than a live brain's; no production check or capture-path verification is built
+  for it, and `REINDEX` is not a remedy (a rebuild of an equidistant graph is no
+  more connected). See change 79 (SMD-1632) for the measurements and the
+  decision.
 ---
 
 ## Before this touches anything sensitive
