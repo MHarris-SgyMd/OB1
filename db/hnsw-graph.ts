@@ -19,12 +19,13 @@
  *
  * pageinspect is superuser-only, so this is a diagnostic for a database you
  * administer — the test suites' containers, a local brain — not a check the
- * server can run on a managed database; preflight's `index reachability`
- * (server-portable/preflight.ts) judges the same property from the walk's
- * answers, which any role can read. The layout decoded here is pgvector's
- * `HnswMetaPageData`, `HnswElementTupleData` and `HnswNeighborTupleData`
- * (src/hnsw.h at 0.8.6); the magic number is checked, and an index of another
- * layout is refused rather than misread.
+ * server can run on a managed database. No production check is built on it: a
+ * real corpus does not have the hole (SMD-1632, FORK.md change 79), so one
+ * would never fire and would cost every capture a walk. The layout decoded here
+ * is pgvector's `HnswMetaPageData`, `HnswElementTupleData` and
+ * `HnswNeighborTupleData` (src/hnsw.h at 0.8.6); the magic number and the meta
+ * page version are checked, and an index of another layout is refused rather
+ * than misread.
  */
 import { SQL } from "bun";
 
@@ -67,6 +68,7 @@ export type HnswGraph = {
 };
 
 const HNSW_MAGIC = 0xa953a953;
+const HNSW_VERSION = 1; // pgvector's HnswMetaPageData.version; a different one is a layout this decoder was not written for
 const HNSW_HEAPTIDS = 10;
 const ELEMENT_TUPLE = 1;
 const NEIGHBOR_TUPLE = 2;
@@ -94,11 +96,13 @@ export function decodeMeta(page: Uint8Array): HnswMeta {
   const o = PAGE_HEADER;
   const magic = v.getUint32(o, true);
   if (magic !== HNSW_MAGIC) throw new Error(`not an hnsw meta page (magic 0x${magic.toString(16)}, expected 0x${HNSW_MAGIC.toString(16)})`);
+  const version = v.getUint32(o + 4, true);
+  if (version !== HNSW_VERSION) throw new Error(`hnsw meta page version ${version}, expected ${HNSW_VERSION} — this decoder is written for pgvector 0.8.x's layout and refuses another rather than misreading it`);
   const entryBlkno = v.getUint32(o + 16, true);
   const entryOffno = v.getUint16(o + 20, true);
   return {
     magic,
-    version: v.getUint32(o + 4, true),
+    version,
     dimensions: v.getUint32(o + 8, true),
     m: v.getUint16(o + 12, true),
     efConstruction: v.getUint16(o + 14, true),
@@ -173,7 +177,7 @@ export function decodePage(blkno: number, page: Uint8Array, m: number): { elemen
 export async function readHnswGraph(sql: SQL, index: string, opts: { maxPages?: number } = {}): Promise<HnswGraph> {
   const maxPages = opts.maxPages ?? 20_000;
   const [{ pages }] = (await sql`SELECT (pg_relation_size(${index}::regclass) / current_setting('block_size')::int)::int AS pages`) as { pages: number }[];
-  if (pages > maxPages) throw new Error(`${index} has ${pages} pages, over the ${maxPages}-page bound of this reader — pass a larger maxPages, or judge reachability from the walk (preflight's check)`);
+  if (pages > maxPages) throw new Error(`${index} has ${pages} pages, over the ${maxPages}-page bound of this reader — pass a larger maxPages, or judge reachability from the walk instead (a search of a live row's own vector that does not return it)`);
   const [metaRow] = (await sql`SELECT get_raw_page(${index}, 0) AS p`) as { p: unknown }[];
   const meta = decodeMeta(bytes(metaRow.p));
   const elements = new Map<Tid, HnswElement>();
@@ -219,7 +223,19 @@ export async function readHnswGraph(sql: SQL, index: string, opts: { maxPages?: 
  * edges, then the level-0 edges out of any node it lands on — so following ALL
  * levels' edges from the entry is a superset of any query's reached set, and
  * an element outside it is unreachable by every walk. Deleted elements are not
- * followed: pgvector raises on loading one, and vacuum empties their lists.
+ * followed, which is exact rather than an approximation: pgvector's vacuum sets
+ * an element's `deleted` flag and invalidates its neighbour tuple's TIDs in the
+ * same pass (`hnswvacuum.c` MarkDeleted), so a `deleted` element has no outbound
+ * edges to follow; a heap-dead element the vacuum has not reached is not marked
+ * `deleted`, still carries valid edges, and IS followed, as the live search
+ * follows it.
+ *
+ * Soundness assumes a QUIESCENT index. `readHnswGraph` reads the pages one at a
+ * time under a share lock, not in one snapshot, so under a concurrent insert or
+ * vacuum the picture is inconsistent and a row can read as unreachable while a
+ * live search reaches it — fine for a diagnostic on a database you administer
+ * and for [17]'s freshly built corpus, not a check to run against a brain
+ * taking writes.
  */
 export function reachableFromEntry(g: HnswGraph): Set<Tid> {
   const seen = new Set<Tid>();

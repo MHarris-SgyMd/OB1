@@ -12460,20 +12460,22 @@ moment [7] reads — not the root.
 through `pageinspect`'s `get_raw_page`, the magic number checked), walks the
 graph from the entry point following neighbour lists at every level, and joins
 to the table by ctid, so it reports the live rows the entry point cannot reach.
-It is a **sound** detector: every row it calls unreachable is one an unbounded
-relaxed walk of that row's own vector does not return (measured against the
-walk; the reverse does not hold — the bounded beam misses reachable rows too,
-so the walk misses more than the decoder reports). The all-levels walk is the
+On a quiescent index it is a **sound** detector: every row it calls unreachable
+is one an unbounded relaxed walk of that row's own vector does not return
+(measured against the walk; the reverse does not hold — the bounded beam misses
+reachable rows too, so the walk misses more than the decoder reports). It reads
+the pages one at a time, not in one snapshot, so under a concurrent insert or
+vacuum the picture is inconsistent — fine for the diagnostic it is, not a check
+against a brain taking writes. The all-levels walk is the
 correction that makes it sound: a search does not walk level 0 from the meta
 entry point but descends the upper lists to a query-dependent level-0 start, so
 a level-0-only reachability under-counts and would call a reachable row
 unreachable (the `test-live.ts` [17] soundness check caught exactly that during
 this work). Measured on pgvector 0.8.6-pg16, 1024-dim: 1,024 orthogonal unit
 vectors leave 0 to ~860 rows unreachable build to build (one connected build in
-twenty), and a search of a row's own axis misses 100–111 of 120 sampled
+twenty), and a search of a row's own axis misses well over 100 of 120 sampled
 whatever the hole; a 2,000-row **random** corpus is fully reachable and every
-row is found by its own vector; 50 orthogonal vectors dropped into a random
-corpus stay reachable. So the pathology needs a corpus **dominated** by
+row is found by its own vector. So the pathology needs a corpus **dominated** by
 near-equidistant vectors — the suite's, quantised or binary vectors, not real
 embeddings.
 
