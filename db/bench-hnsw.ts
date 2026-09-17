@@ -1490,7 +1490,8 @@ for (const n of SCALES) {
     answers[key] = rows;
     if (have < Q) process.stdout.write(".");
   }
-  console.log(" done");
+  // "done" is the computing pass's word; a pass the marker answered ends its line as it stands.
+  console.log(have < Q ? " done" : "");
   const max = answers[WHOLE_TABLE].reduce((m, a) => Math.max(m, a.top), -1);
   try {
     stats.confound = Confound.check(max);

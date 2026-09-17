@@ -11619,8 +11619,10 @@ the digest uses `node:crypto`'s `createHash`, as `migrate.ts` and `auth.ts`
 do, in place of Bun's hasher; the suite's two table readers share one cell
 splitter and the section-L reader finds the data row from the separator
 rather than by position; and the oracle entry is built where it is written
-rather than on every path. Left as they were, being behaviour or outside the
-touched files: test-live's own by-hand `OB1_*` strips, which
+rather than on every path. A second look found the run line saying `done`
+after a pass the marker had answered, and let it end as it stands. Left as
+they were, being behaviour or outside the touched files: test-live's own
+by-hand `OB1_*` strips, which
 `shellWithoutOb1` could replace; a `--json` report the suite could compare
 as data rather than scraped markdown; and prewarming the metadata GIN on
 both paths so a reused row's first tier queries find it warm.
