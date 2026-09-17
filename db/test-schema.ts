@@ -815,19 +815,17 @@ console.log("\n[8e] Migrations 037 and 038: the routing count is gated by a samp
       }
       return text;
     };
-    const drawOnce = async (filter: string, pageCount: number, drawn?: number[]): Promise<Draw | null> => {
-      const text = deployedSample(filter, pageCount, drawn);
-      if (text === null) return null;
-      return (await db.query<Draw>(`SELECT x.c1::int AS hits, x.c2::int AS hit_pages, x.c3::int AS pages_seen FROM (${text}) x(c1, c2, c3)`)).rows[0];
-    };
+    const runText = async (text: string | null): Promise<Draw | null> =>
+      text === null ? null : (await db.query<Draw>(`SELECT x.c1::int AS hits, x.c2::int AS hit_pages, x.c3::int AS pages_seen FROM (${text}) x(c1, c2, c3)`)).rows[0];
+    const drawOnce = (filter: string, pageCount: number, drawn?: number[]) => runText(deployedSample(filter, pageCount, drawn));
     // The body's three conditions at the default count (v_exact = GREATEST(v_base * 4, 1000) = 1,000).
     const skips = (r: Draw, pageCount: number) => r.hits >= 8 && r.hit_pages >= 3 && r.hits * pageCount >= 10 * 1000 * r.pages_seen;
     // A draw is sound when it reached between two and ROUTE_SAMPLE_PAGES distinct
     // pages: eight draws over P pages land on ONE page with probability P^-7
     // (under 1e-8 at sixteen pages), and a draw that read one block eight times
-    // — or counted its blocks without DISTINCT — would report one, or more than
-    // ROUTE_SAMPLE_PAGES. 037's TABLESAMPLE promised neither (one run there drew
-    // no page at all).
+    // would report one. (A draw without DISTINCT is the same-block probe's to
+    // catch below: its page count stays a DISTINCT count, its hits come back
+    // eightfold.) 037's TABLESAMPLE drew no page at all on one run.
     const sound = (r: Draw) => r.pages_seen >= 2 && r.pages_seen <= ROUTE_SAMPLE_PAGES && r.hit_pages <= r.pages_seen;
     const BROAD = '{"kind":"broad"}';
     // Five draws, each judged by the body's own three conditions: the rule
@@ -887,7 +885,8 @@ console.log("\n[8e] Migrations 037 and 038: the routing count is gated by a samp
     assert(deleted === inside && heap_pages === pages && live_pages <= pages - ROUTE_SAMPLE_PAGES,
       `the band's ${deleted} rows deleted and the heap vacuumed: still ${heap_pages} pages, ${live_pages} of them with a live row`);
     const empties = Array.from({ length: ROUTE_SAMPLE_PAGES }, (_, i) => lo + i);
-    const pinned = await drawOnce(BROAD, pages, empties);
+    const pinnedText = deployedSample(BROAD, pages, empties);
+    const pinned = await runText(pinnedText);
     assert(pinned !== null && pinned.hits === 0 && pinned.hit_pages === 0 && pinned.pages_seen === ROUTE_SAMPLE_PAGES,
       `the body's probe pinned to the ${ROUTE_SAMPLE_PAGES} emptied blocks [${lo}, ${hi}) draws ${pinned?.pages_seen} pages and answers ${pinned?.hits} hits on ${pinned?.hit_pages} — the pages drawn are counted, not the pages that answered`);
     // The scan node's own Buffers line (its total across the eight loops), not
@@ -897,9 +896,9 @@ console.log("\n[8e] Migrations 037 and 038: the routing count is gated by a samp
     // would then hold only because the same statement ran just before
     // (review pass 3). Planning buffers, when printed, come after the tree
     // under `Planning:`.
-    const pinnedText = deployedSample(BROAD, pages, empties);
     const buffers = pinnedText === null ? "" : (await db.query<{ "QUERY PLAN": string }>(`EXPLAIN (ANALYZE, BUFFERS) ${pinnedText}`)).rows.map((r) => r["QUERY PLAN"]).join("\n");
-    const scanBuffers = /Tid Range Scan on thoughts[^\n]*\n(?:[^\n]*\n)*?\s*Buffers: ([^\n]*)/.exec(buffers)?.[1] ?? "";
+    // The plan tree only — `Planning:` and its own Buffers line follow it.
+    const scanBuffers = /Tid Range Scan on thoughts[^\n]*\n(?:[^\n]*\n)*?\s*Buffers: ([^\n]*)/.exec(buffers.split(/\nPlanning:/)[0])?.[1] ?? "";
     const touched = [...scanBuffers.matchAll(/(?:hit|read)=(\d+)/g)].reduce((n, m) => n + Number(m[1]), 0);
     assert(touched === ROUTE_SAMPLE_PAGES,
       `…and the probe touches ${touched} buffers doing it — one page per block, ${ROUTE_SAMPLE_PAGES} in all (the Tid Range Scan's line: ${scanBuffers || "none in the plan"})`);

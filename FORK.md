@@ -9671,7 +9671,8 @@ Read down the tables and four things fall out.
   50,000 / 500,000 heap pages is a line — a tenth of a millisecond for the
   eight pages' rows plus ~2 ns a page — not a cache effect) and the
   measurement agreed: one row a page, every page warm in
-  `shared_buffers`, the statement costs 0.038 ms at 2,000 pages, 0.094 at
+  the OS page cache (the larger two heaps exceed the image's 128 MB
+  `shared_buffers`; change 71's fourth review pass), the statement costs 0.038 ms at 2,000 pages, 0.094 at
   20,000, 0.459 at 200,000. `TABLESAMPLE SYSTEM` decides per page by hashing
   every block number against its cutoff, so the eight page reads are the
   small part. So the ticket's "the estimate must not cost more than the
@@ -9897,9 +9898,10 @@ a real Postgres before the file was written.**
 - *Plan mode, which 037's statement lost on.* Both plan modes price the new
   statement alike — the bounds are column references under either — so
   plpgsql adopts the generic plan after the fifth call and never replans.
-  Measured through a plpgsql wrapper on a 200,000-page heap: 0.05 ms a call
-  over the round trip in the default mode, 0.22 under `force_custom_plan`
-  (the replan), and 0.66 for 037's statement, which was priced 200× cheaper
+  Measured through a plpgsql wrapper on a 200,000-page heap: a few
+  hundredths of a millisecond a call over the round trip in the default mode
+  (0.01–0.09 across rounds, against a round trip of 0.2–0.3), 0.14–0.22
+  under `force_custom_plan` (the replan), and 0.5–0.7 for 037's statement, which was priced 200× cheaper
   custom than generic and so replanned on every call. One plan, cached, eight
   page reads — while the paths the plan is built from are enabled. Turn one
   off at session, role or database level (`enable_tidscan`, `enable_nestloop`,
@@ -9914,7 +9916,14 @@ a real Postgres before the file was written.**
   (measured) but also changes what the walk pays under a generic plan, which
   is SMD-1464's question; pinning the two `enable_*` GUCs on the function
   overrides an operator's setting for the walk as well. The decision is
-  SMD-1624; the header states the premise.
+  SMD-1624; the header states the premise. Row-level security on `thoughts`
+  is a fourth trigger, and the one operators actually set: `jsonb_contains`
+  is not leakproof, so under a policy `metadata @> filter` cannot be an index
+  qual and 014's collection and the walk's direct CTE become sequential scans
+  at `disable_cost`, JIT-compiled — 150 ms against 7 on 25,000 rows — since
+  014/019 and unchanged by 038, whose TID bounds are leakproof (the probe
+  keeps its plan; the policy undercounts its hits, the safe side). That is
+  SMD-1625.
 - *The bounds are text-built tids* (`'(b,0)'::tid` is at or below every
   tuple of block *b*, offsets starting at 1; `'(b+1,0)'` above them) because
   core Postgres has no constructor from a block number; the executor clamps
@@ -9925,10 +9934,11 @@ a real Postgres before the file was written.**
   where test-schema runs, does not ship it — with rows rather than pages as
   the unit and the `pages_seen` defect unchanged); *not* eight statements in
   a plpgsql loop (eight plans and eight SPI calls where one does; eight
-  literal arms planned in 0.08–0.1 ms a call); *not* the planner's `@>`
+  literal arms planned in 0.07–0.1 ms a call); *not* the planner's `@>`
   estimate, for change 70's reasons.
 
-**The statement alone, one row a page, every page warm in `shared_buffers`**
+**The statement alone, one row a page, every page warm in the OS page cache**
+(the 20,000- and 200,000-page heaps exceed the image's 128 MB `shared_buffers`)
 (`EXPLAIN ANALYZE` execution time, median of 30, `enable_seqscan` off as the
 function has it; change 70's first review pass measured 037's the same way):
 
@@ -9937,6 +9947,10 @@ function has it; change 70's first review pass measured 037's the same way):
 | 2,000 | 0.036 ms | 0.034 ms |
 | 20,000 | 0.075 | 0.048 |
 | 200,000 | 0.469 | 0.052 |
+
+The fourth review pass re-ran both on a fresh container with its own code:
+038 0.029 / 0.049 / 0.054, 037 0.027 / 0.071 / 0.433; the planner costs 107 /
+849 / 2,405 and the absence of JIT reproduced exactly.
 
 **The rule, re-measured for this draw** — 1,000 draws per filter on a
 500,000-row corpus of the bench's shape (24,999 pages, twenty rows a page,
@@ -9959,9 +9973,13 @@ worth in brackets:
 
 Every filter at or under the threshold ran the collection every time over
 1,000 draws, on this corpus and on one just under the floor (163,840 rows,
-8,191 pages: 50% skipped 1,000 and 10% 979 of 1,000 there, against 993 and
-905; the contiguous 10,000 was skipped 10 times against 037's statement's 13,
-not a wrong answer at ten times the threshold).
+8,191 pages: 50% skipped 1,000 and 10% 979 of 1,000 there in one run, 961 in
+a re-run — a knife-edge tier, ten hits needed of a mean sixteen — against 993
+and 905, 983 and 884 re-run; the contiguous 10,000 was skipped 10 times
+against 037's statement's 13, not a wrong answer at ten times the threshold).
+Every bracketed 037 figure is one run; a re-seeded re-run moved them by up to
+two sigma (984 → 975 on the 50% filter, 337 → 296 on the bloated heap) with
+every comparison keeping its direction.
 The broad filters are skipped a little more often than under 037, because the
 draw always reaches its pages: `SYSTEM` took a binomial number of pages with
 mean eight and reached fewer than three about 1.4% of the time (e⁻⁸ × 41) —
@@ -9970,7 +9988,8 @@ duplicates collapsed reached eight distinct pages in all but a few of a
 thousand at the floor (the fewest seen: 7 in 1,000 draws, 6 in 20,000). The
 thin-spread layout, the one condition 3 is weakest against, was skipped 29
 times in 20,000 draws at the floor — 1.45e-3, which is what change 70's
-formula computes, C(8,3) × (251 / 8,191)³ = 1.6e-3. 037's statement, re-run
+formula computes — C(8,3) × (251 / 8,191)³ = 1.6e-3 as a union bound, 1.44e-3
+exact (a re-run: 34 in 20,000). 037's statement, re-run
 on this heap, was skipped only 14 times in 20,000 — under the formula's 32 —
 because `SYSTEM`'s variance made condition 1 fail whenever its draw reached
 ten pages or more (twelve hits on nine pages still scale to 10.9× the
@@ -10038,6 +10057,7 @@ first, five queries):
 | ---: | --- | --- | ---: | ---: | ---: |
 | 10,000 | route | 50% | 5,041 | 0.60 / 0.54 / 0.65 | 0.68 / 0.63 / 0.72 |
 | 10,000 | estimate | 50% | 5,041 | 0.10 / 0.10 / 0.08 | 0.12 / 0.08 / 0.09 |
+| 10,000 | estimate | 0.01% | 1 | 0.11 / 0.14 / 0.10 | 0.14 / 0.10 / 0.08 |
 | 10,000 | estimate | nothing | 0 | 0.12 / 0.08 / 0.04 | 0.08 / 0.07 / 0.12 |
 | 1,000,000 | route | 50% | 499,443 | 35.09 / 33.41 / 33.67 | 28.13 / 29.54 / 27.70 |
 | 1,000,000 | route | 0.01% | 99 | 0.65 / 1.07 / 0.73 | 0.65 / 0.68 / 0.71 |
@@ -10053,14 +10073,14 @@ first, five queries):
 Read down the tables and three things fall out.
 
 - **The sample's cost is flat, and the empty filter has its cost back.** The
-  `estimate` row reads 0.07–0.12 ms at 10,000 rows, 0.08–0.12 at a million
+  `estimate` row reads 0.07–0.14 ms at 10,000 rows, 0.08–0.12 at a million
   and 0.09–0.12 at ten million under 038, the same three columns for the 50%
-  filter, a thin one and the empty one — against 037's 0.04–0.12, 0.22–0.36
+  filter, a thin one and the empty one — against 037's 0.04–0.14, 0.22–0.36
   and 1.10–1.20 (that last from the loaded before pass; 0.94–1.11 on the
   idle machine across change 70's two passes, so load barely moved that
   row): the 2 ns a page, gone. That is the ticket's first check (within a
-  factor of two across the three scales; it is within 1.5 for any one filter
-  and plan mode, 1.7 across the widest pair of cells). Through
+  factor of two across the three scales; it is within 1.6 for any one filter
+  and plan mode, 2.0 across the widest pair of cells, 0.07 and 0.14). Through
   the function the empty filter at ten million rows costs 0.36 ms — 0.27
   before 037 in change 70's pass, 1.31 under 037 there and 1.67 under 037
   today — which is the ticket's second check, within 0.1 ms of the pre-037
@@ -10103,7 +10123,7 @@ the line for the next preflight change. The threshold, the plan mode of the
 *walk* statement (which flips onto a generic plan under a recency weight at
 the ceiling and changes answers; change 70's "Not done here") and the seeded
 bounds are SMD-1464; `ef_search` on real vectors SMD-1465. The `hit_pages ≥
-4` knob is stated, not turned. The disabled-path JIT premise is SMD-1624. A hundred million rows was not run, for the
+4` knob is stated, not turned. The disabled-path JIT premise is SMD-1624; row-level security, which has cost `@>` its index since 014 and is a fourth trigger of the same JIT, is SMD-1625. A hundred million rows was not run, for the
 reasons change 28 gives; what this change establishes is that the sample's
 cost no longer depends on it. The ten-million after pass took four attempts
 over six hours — two killed mid-build by the VM's OOM killer with other
@@ -10125,7 +10145,7 @@ where an INNER join reports none and a `<=` bound reads sixteen) and [20]'s
 definer pin moved to 038;
 `db/test-live.ts` 500/500 on real Postgres, [5d] now exact (the broad filter
 makes exactly one GIN scan fewer per call than under 020's body, twenty of
-twenty, where 037's band was 0.75–1.0; 0.33 ms a call for the sample on its
+twenty, where 037's band was 0.75–1.0; 0.27–0.33 ms a call for the sample on its
 386-page heap at the shipped width, round trip included); `db/test-upgrade.ts`
 184/184, [15] new (038 onto a populated 037: no column, signature, row or
 privilege moves; 014 re-applied by hand, then 038 alone, leaves one form);
@@ -10223,6 +10243,32 @@ Pre-existing and left: `--reapply` rebuilds a missing HNSW index in dynamic
 shared memory and fails under a 64 MB /dev/shm (001's parallel build, not
 038's; a real brain has its index), and the migrator cannot bootstrap a brain
 as a non-superuser on an image whose pgvector is not trusted.
+
+**Review pass 4** (a reproduction of the header's numbers on a fresh
+container with fresh code, and a final-state read of the tests and documents
+with a row-level-security probe). Everything that carries a conclusion
+reproduced: the planner costs and the absence of JIT exactly, the cost table
+within 5–15%, the rates within binomial noise at 1,000 and 20,000 draws, the
+bloated heap's 332 to the digit, the disabled-path JIT at 43–48 ms against
+0.49 through the shipped function over the floor. What did not hold was a
+premise and some precision, all reworded above: "every page in
+`shared_buffers`" — the 20,000- and 200,000-page heaps never fit the image's
+128 MB and the reads came from the OS page cache (the conclusion is
+unchanged; this also corrects change 70's sentence); the 10% tier at the
+floor is a knife-edge that read 961 in the re-run against 979; the plan-mode
+"0.05 ms" and [5d]'s "0.33 ms" were quoted tighter than their spread; a 0.14
+cell was missing from the 10,000-row range; the no-LIMIT cost is the
+2,000-page figure; the thin-spread bound is a union bound, 1.44e-3 exact. The
+final state after three passes reads as one account and every [8e] assertion
+fails on the mechanism it names; the residue was failure-path labels on
+passes 2 and 3's own lines (a comment misnaming which probe catches a missing
+`DISTINCT`, a Buffers regex that could run on into `Planning:`, the pin
+computed twice) — fixed. The one finding of weight is not 038's: under
+row-level security every `metadata @> filter` loses the GIN index, because
+`jsonb_contains` is not leakproof, and 014's collection and the walk's direct
+CTE seq-scan the heap at `disable_cost`, JIT-compiled — 150 ms against 7 on
+25,000 rows, since 014/019; 038's probe is unaffected in kind (the TID bounds
+are leakproof; the policy undercounts the hits, the safe side). SMD-1625.
 
 **The operator's path, walked.** A brain at 037 with rows, upgraded by `bun
 db/migrate.ts`: "038 applied, 1 applied, 37 skipped", one `match_thoughts`

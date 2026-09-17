@@ -15,9 +15,12 @@
 --   with the share sized to {{ROUTE_SAMPLE_PAGES}} pages. SYSTEM decides page
 --   by page over the WHOLE heap — it hashes every block number against its
 --   cutoff — so the statement carried about 2 ns per heap page besides the
---   eight pages' rows. Measured with one row a page and every page in
---   shared_buffers, the way 037's first review pass measured it (0.038 /
---   0.094 / 0.459 then), both statements re-run for this file:
+--   eight pages' rows. Measured with one row a page and every page warm —
+--   in the OS page cache: the 20,000- and 200,000-page heaps exceed the
+--   image's 128 MB shared_buffers — the way 037's first review pass measured
+--   it (0.038 / 0.094 / 0.459 then), both statements re-run for this file,
+--   and once more by the fourth review pass on a fresh container (038 0.029
+--   / 0.049 / 0.054, 037 0.027 / 0.071 / 0.433):
 --
 --     heap pages    037's sample     this file's
 --     2,000           0.036 ms         0.034 ms
@@ -106,8 +109,9 @@
 --     planner pulls the LATERAL up into the join, the ctid bounds become
 --     JOIN quals, and the TID Range path — which reads a relation's own
 --     restrictions only — is never built: the plan was a sequential scan of
---     the whole heap under Materialize, cost 10,000,002,844 under 019's
---     enable_seqscan = off, 72 ms at 2,000 pages and 632 at 200,000
+--     the whole heap under Materialize, cost 10,000,002,844 at 2,000 pages
+--     (disable_cost plus the heap) under 019's enable_seqscan = off, 72 ms
+--     there and 632 at 200,000
 --     (measured). Second, it caps the estimate: the planner cannot see a
 --     bound that is an expression over another relation's column, prices
 --     the range at its default (half a per cent of the heap), and at ten
@@ -118,7 +122,8 @@
 --     priced at 291 rows at most: the whole statement at 107 / 849 / 2,405
 --     cost units at 2,000 / 20,000 / 200,000 pages, flat from there, and no
 --     JIT at any size — while the paths it is built from are enabled; the
---     "disabled planner path" failure mode below is the exception. A build with 32 KB pages could hold more tuples on a
+--     "disabled planner path" failure mode below is the exception. A build
+--     with 32 KB pages could hold more tuples on a
 --     dense page than the LIMIT admits; the count would then be short, the
 --     estimate low, and the collection run — the safe side again.
 --   * The blocks are drawn inside the statement, not in plpgsql: no extra
@@ -127,16 +132,19 @@
 --     declared at entry — which db/bench-hnsw.ts section C reads through
 --     test-support's extractBody and routingAt, and db/test-schema.ts [8e]
 --     reads out of pg_proc to run against its own table with the locals
---     substituted. random() in the subquery's target list is evaluated once per row of
+--     substituted. random() in the subquery's target list is evaluated once
+--     per row of
 --     generate_series (the once-only trap is a scalar subquery, an InitPlan);
 --     DISTINCT collapses a block drawn twice so no page is read or counted
 --     twice, and keeps that subquery a subquery too.
 --   * Plan mode, which 037's statement lost on. Both plan modes price this
 --     statement alike — the bounds are column references under either — so
 --     plpgsql adopts the generic plan after the fifth call and never replans:
---     measured through a plpgsql wrapper on a 200,000-page heap, 0.05 ms a
---     call over the round trip in the default mode against 0.22 under
---     force_custom_plan (the replan) and 0.66 for 037's statement, which was
+--     measured through a plpgsql wrapper on a 200,000-page heap, a few
+--     hundredths of a millisecond a call over the round trip in the default
+--     mode (0.01–0.09 across rounds; the round trip it is measured against
+--     is 0.2–0.3) against 0.14–0.22 under force_custom_plan (the replan)
+--     and 0.5–0.7 for 037's statement, which was
 --     priced 200x cheaper custom than generic and so replanned on every
 --     call (037's "generic plan" bullet). One plan, cached, eight page reads.
 --   * Not tsm_system_rows' `TABLESAMPLE SYSTEM_ROWS`, which walks a random
@@ -145,7 +153,7 @@
 --     ship it), rows rather than pages as the unit, and 037's pages_seen
 --     defect unchanged. Not eight statements in a plpgsql loop: eight plans
 --     and eight SPI calls where one does (eight literal arms planned in
---     0.08–0.1 ms a call, measured). Not the planner's `@>` estimate, for
+--     0.07–0.1 ms a call, measured). Not the planner's `@>` estimate, for
 --     037's reasons.
 --   * pg_relation_size and to_regclass as 037: exact, one stat() call, the
 --     name resolved on every call (a temp table shadowing the name: Failure
@@ -177,20 +185,26 @@
 --     draw always reaches its pages). Just under the floor — a 163,840-row
 --     corpus of 8,191 pages — the same over 1,000 draws (the 20,000-draw
 --     rates for the two thin layouts are the next bullet), with the 50%
---     filter 1,000 and the 10% 979 of 1,000 (037: 993 and 905); the
---     contiguous 10,000 was skipped 10 times (037's statement: 13 of 1,000),
---     which is not a wrong answer at ten times the threshold.
+--     filter 1,000 and the 10% 979 of 1,000 in one run, 961 in a re-run — a
+--     knife-edge tier there, ten hits needed of a mean sixteen — (037: 993
+--     and 905; 983 and 884 re-run); the contiguous 10,000 was skipped 10
+--     times (037's statement: 13 of 1,000), which is not a wrong answer at
+--     ten times the threshold. Every 037 figure in brackets here is one run,
+--     and a re-seeded re-run moved them by up to two sigma with every
+--     comparison keeping its direction.
 --   * The thin-spread layout, the one 037's third condition is weakest
 --     against (a few matches a page over hundreds of pages): 1,000 rows four
 --     a page over 251 pages of the 8,191 were skipped 29 times in 20,000
---     draws at the floor — 1.45e-3, which is the formula's figure, C(8,3) x
---     (251 / 8,191)^3 = 1.6e-3. 037's statement, re-run on this heap, was
+--     draws at the floor — 1.45e-3, which is the formula's figure: C(8,3) x
+--     (251 / 8,191)^3 = 1.6e-3 as a union bound, 1.44e-3 exact (a re-run:
+--     34 in 20,000). 037's statement, re-run on this heap, was
 --     skipped only 14 times in 20,000 — under the formula's 32 — because
 --     SYSTEM's variance made condition 1 fail whenever its draw reached ten
 --     pages or more (twelve hits on nine pages still scale to 10.9 times the
 --     threshold here; on 037's 6,826-page heap the cut was nine pages, which
 --     is where its header's 13 in 20,000 came from). That accident is gone,
---     and the bound is now what 037's header computes, falling as the cube of the heap
+--     and the bound is now what 037's header computes, falling as the cube
+--     of the heap
 --     (7e-6 at a million rows, 7e-9 at ten million). A contiguous 1,000 rows
 --     were skipped once in 20,000 (0), the 900-row uniform filter never.
 --     `hit_pages >= 4` remains the knob if that band matters (C(8,4) x f^4,
@@ -211,17 +225,18 @@
 --     uniform one again, not the ~3e-5 the biased denominator gave (the
 --     figures are in FORK.md change 71). VACUUM FULL restores the density.
 --   * The eight page reads. They are the whole cost now: about 0.05 ms
---     together on a heap of one row a page that fits the buffer pool, about
+--     together on a heap of one row a page, warm in the page cache, about
 --     0.3 ms at the shipped width's 65–80 rows a page, each of which the
---     filter is tested against (db/test-live.ts [5d] prints it: 0.33 ms
---     with the round trip on its 386-page heap; 037's sample cost the same
+--     filter is tested against (db/test-live.ts [5d] prints it: 0.27–0.33
+--     ms with the round trip on its 386-page heap; 037's sample cost the same
 --     there, plus its per-page term). On a heap larger than
 --     memory they are eight random reads from disk — on the order of 0.1 ms
 --     each on NVMe, more on network storage — where 037 paid the same reads
 --     plus its per-page term. A brain of a hundred million rows pays those
 --     reads on every filtered call and nothing that grows with the heap.
 --   * A generic plan. Adopted by design after the fifth call (Design above);
---     it is the plan both modes agree on, and the cap keeps it clear of JIT.
+--     it is the plan both modes agree on, and the cap keeps it clear of JIT
+--     while its paths are enabled (next bullet).
 --   * A disabled planner path. Every piece of the statement has exactly one
 --     viable path — a TID Range Scan for the block (enable_seqscan is
 --     already off on the function), a Nested Loop for the LATERAL join
@@ -232,15 +247,26 @@
 --     it and adds disable_cost, 1e10, and the statement's cost is then far
 --     past jit_above_cost and its inlining and optimisation thresholds: the
 --     executor JIT-compiles the sample on EVERY call. Measured through the
---     function on a 1,191-page heap (review pass 3): 0.46 ms a call by
+--     function on a 1,191-page heap with the floor lowered (review pass 3):
+--     0.46 ms a call by
 --     default, 41 under `enable_tidscan = off` or `enable_nestloop = off` —
 --     the same plan node, the same eight buffers, the compiler's time —
 --     and `ALTER DATABASE … SET enable_nestloop = off`, a spelling operators
 --     do use, gives every fresh connection the 41. The tidscan and nestloop
 --     sensitivities are new with this file (037's Sample Scan had neither a
 --     join nor a TID path); the hashagg-and-sort one is 037's too (85 ms
---     against 81). Nothing shows it: not the plan, the rows, preflight or
---     the ledger. `SET jit = off` on the function removes all three
+--     against 81); through the shipped function over the floor on a
+--     24,999-page heap (review pass 4): 0.49 / 43 / 48 / 90 ms, and 0.52
+--     with tidscan off and jit off. Nothing shows it: not the plan, the
+--     rows, preflight or the ledger. Row-level security on `thoughts` is a
+--     fourth trigger, and the one operators actually set: `jsonb_contains`
+--     is not leakproof, so under a policy `metadata @> filter` cannot be an
+--     index qual, and 014's collection and the walk's direct CTE become
+--     sequential scans at disable_cost, JIT-compiled — 150 ms against 7 on
+--     25,000 rows, since 014/019 and unchanged by this file (the TID
+--     bounds ARE leakproof, so the probe keeps its plan under a policy and
+--     merely undercounts its hits: the safe side). That is SMD-1625. `SET
+--     jit = off` on the function removes all three
 --     (measured, 0.38–0.82 ms under each), but also changes what the WALK
 --     pays under a generic plan, which is SMD-1464's plan-mode question;
 --     pinning `enable_tidscan = on` and `enable_nestloop = on` on the
@@ -262,7 +288,8 @@
 --
 -- Cost, measured
 --   The statement alone, EXPLAIN ANALYZE execution time, median of 30, on a
---   heap of one row a page with every page in shared_buffers (this file's
+--   heap of one row a page with every page warm in the OS page cache — the
+--   larger two heaps exceed the image's 128 MB shared_buffers (this file's
 --   development machine: Apple M5 Pro, podman VM, pgvector 0.8.6 on
 --   PostgreSQL 16 at its image defaults), enable_seqscan off as the function
 --   has it:
@@ -275,19 +302,20 @@
 --   and 0.045–0.07 ms a draw on the 500,000-row corpus (0.13–0.15 for
 --   037's), the same for the 50% filter and the empty one: the cost is the
 --   pages read, not the rows that pass. Through the function, on that
---   200,000-page heap: 0.05 ms a call over the round trip once the generic
---   plan is adopted, against 0.66 for 037's. db/bench-hnsw.ts before and
+--   200,000-page heap: a few hundredths of a millisecond a call over the
+--   round trip once the generic plan is adopted, against 0.5–0.7 for
+--   037's. db/bench-hnsw.ts before and
 --   after this file at 10,000, a million and ten million rows are FORK.md
 --   change 71's tables; section C prints the sample's own cost beside the
---   collection's at every scale: 0.07–0.12 ms at 10,000 rows, 0.08–0.12 at
---   a million, 0.09–0.12 at ten million (037's: 0.04–0.12, 0.22–0.36, and
+--   collection's at every scale: 0.07–0.14 ms at 10,000 rows, 0.08–0.12 at
+--   a million, 0.09–0.12 at ten million (037's: 0.04–0.14, 0.22–0.36, and
 --   1.10–1.20 in a before pass that ran under load — 0.94–1.11 on the idle
 --   machine across FORK.md change 70's two passes, so load barely moved that
 --   row). Through the function the empty filter at ten million rows
 --   costs 0.36 ms — 0.27 before 037, 1.31 under it — and the 50% tier 14.4,
 --   as under 037 (13.2); the thin tiers moved by the sample's saving and the
 --   spread. Those are the ticket's two checks, the estimate flat across the
---   scales and the empty filter back within 0.2 ms of what it cost before 037.
+--   scales and the empty filter back within 0.1 ms of what it cost before 037.
 --
 -- What a successor must carry
 --   037's list, unchanged — `SET hnsw.iterative_scan = relaxed_order`, `SET
@@ -297,9 +325,13 @@
 --   the estimate as ONE statement over locals declared at entry (v_pages
 --   with pg_relation_size, no v_pct), which db/bench-hnsw.ts section C reads
 --   through test-support's routingAt and extractBody and db/test-schema.ts
---   [8e] reads out of pg_proc. If it keeps this sampling, the probe's LIMIT stays with it (Design: a
---   probe pulled up into the join is a sequential scan of the heap), and so
---   do DISTINCT on the draw and the LEFT join. A successor that removes the
+--   [8e] reads out of pg_proc. If it keeps this sampling, the probe's LIMIT
+--   stays with it (Design: a probe pulled up into the join is a sequential
+--   scan of the heap), and so do DISTINCT on the draw and the LEFT join. A
+--   successor that changes the statement's shape changes which planner
+--   paths it has exactly one of, and re-derives the "disabled planner path"
+--   list under Failure modes (and inherits whatever SMD-1624 pins on the
+--   function). A successor that removes the
 --   gate should say why in its header and expect FORK.md change 70's tables
 --   to come back.
 --
@@ -315,7 +347,7 @@
 --   {{ROUTE_ESTIMATE_MIN_PAGES}} pages or more every filtered call pays
 --   eight page reads for its sample and nothing that grows with the heap,
 --   so the empty-filter call at ten million rows costs what it cost before
---   037 within a fraction of a millisecond (db/bench-hnsw.ts sections B and
+--   037 within 0.1 ms (db/bench-hnsw.ts sections B and
 --   C, before and after). pg_proc.prosrc carries the sentinel, the TID
 --   range probe and the two constants, and no TABLESAMPLE; db/test-schema.ts
 --   [8e], db/test-live.ts [5d] and db/test-upgrade.ts [15] hold it.

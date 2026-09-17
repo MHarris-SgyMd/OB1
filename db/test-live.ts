@@ -431,9 +431,9 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
     // Twenty calls. Under 037 the gate missed a broad filter when its
     // TABLESAMPLE draw reached fewer than three pages — 17 in 1,000 draws on
     // this fixture — and the band below was 0.75–1.0; 038 draws eight blocks
-    // and reads each, so a draw reaches fewer than three pages only when six
-    // of eight land on the same one or two of some 400 (under one in a
-    // billion), and the band is exact.
+    // and reads each, so a draw reaches fewer than three pages only when all
+    // eight land on one or two of some 400 (about 3e-14), and the band is
+    // exact.
     const QUERIES = 20;
     const queries = Array.from({ length: QUERIES }, () => `[${unitVector(EMBEDDING_DIM).join(",")}]`);
     const exactTop = (qv: string, filter: string) =>
@@ -472,7 +472,7 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
     // The raw scan counts, not the per-call quotients: x/20 − y/20 is not
     // exactly 1 in IEEE arithmetic for every x − y = 20 (41/20 − 21/20 is
     // 0.9999999999999998), so the property is asserted on the integers
-    // (review pass 3).
+    // (SMD-1526 review pass 3).
     const saved = plainBroad.scans - gatedBroad.scans;
     // Every draw reads eight pages of some 65 rows each, all broad, so every
     // call meets the three conditions (condition 1 needs about 200 hits on
@@ -504,7 +504,7 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
     throw e;
   } finally {
     // The shipped state back on every path — a throw above would otherwise
-    // leave 25,000 rows and no HNSW index to [6]..[16] (first review pass): 038
+    // leave 25,000 rows and no HNSW index to [6]..[16] (SMD-1463's first review pass): 038
     // with its floor, and 027, because 020's file also redefines
     // search_thoughts_hybrid as 020 had it, without 027's relative floor, and
     // [15] holds that floor (the first run of this section left 020's hybrid
@@ -513,7 +513,7 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
     // nothing — so a throw from the re-apply cannot leave them behind (second
     // review pass); and when the section itself threw, a cleanup that fails
     // on the same fault is reported, not thrown, so the cause is what the
-    // run shows (fourth review pass).
+    // run shows (SMD-1463's fourth review pass).
     try {
       await sql`DELETE FROM thoughts`;
       await sql.unsafe(`ALTER TABLE thoughts ENABLE TRIGGER USER`);
