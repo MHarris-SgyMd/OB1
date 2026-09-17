@@ -12537,13 +12537,14 @@ the ceiling and changes answers; change 70's "Not done here") and the seeded
 bounds are SMD-1464; `ef_search` on real vectors SMD-1465. The `hit_pages ≥
 4` knob is stated, not turned. The disabled-path JIT premise is SMD-1624; row-level security, which has cost `@>` its index since 014 and is a fourth trigger of the same JIT, is SMD-1625. A hundred million rows was not run, for the
 reasons change 28 gives; what this change establishes is that the sample's
-cost no longer depends on it. The ten-million after pass took four attempts
-over six hours — two killed mid-build by the VM's OOM killer with other
-sessions' benches resident, one whose connection the server dropped under
-the same pressure, and the fourth on the idle VM — which is a fact about a
-shared 14.8 GB VM, not about the bench.
+cost no longer depends on it. The bench's before arm (`OB1_BENCH_UPTO=037`)
+does not combine with a kept corpus — change 72's rule: a corpus built under
+a schema cut at a migration is measured and dropped, never kept — so a kept
+ten-million corpus at 037 is not this change's before arm; the ten-million
+passes here were built fresh, and the after pass's four attempts are the
+tables' paragraph.
 
-**Verified:** `db/test-schema.ts` 879/879 under PGlite, [8e] rewritten (the
+**Verified, on the merged tree:** `db/test-schema.ts` 901/901 under PGlite, [8e] rewritten (the
 TID range probe, the three load-bearing tokens — `DISTINCT`, `LEFT`, `LIMIT
 291` — no `TABLESAMPLE` in the body, the floor, exactness with the gate
 reached; then the statement read out of the installed body, on a compacted
@@ -12559,7 +12560,7 @@ definer pin moved to 038;
 makes exactly one GIN scan fewer per call than under 020's body, twenty of
 twenty, where 037's band was 0.75–1.0; 0.27–0.33 ms a call for the sample on its
 386-page heap at the shipped width, round trip included); `db/test-upgrade.ts`
-184/184, [16] new (038 onto a populated 037: no column, signature, row or
+189/189, [16] new (038 onto a populated 037: no column, signature, row or
 privilege moves; 014 re-applied by hand, then 038 alone, leaves one form);
 `server-portable` `tsc --noEmit` and `test-preflight.ts` (205/205) clean;
 `bun scripts/check-fork-consistency.mjs` PASS; `bench-hnsw.ts` before and
@@ -12567,123 +12568,48 @@ after at a million rows and at 10,000 (both arms' estimate rows: 037's a
 `Sample Scan`, 038's a `Tid Range Scan`) and at ten million rows (the after
 pass on its fourth attempt, the VM idle), above.
 
-**Review pass 1** (a cold reader and a run-it reviewer with a scratch
-Postgres). No defect in the mechanism: the reviewers re-derived the planner
-account (`create_tidscan_paths` reads `baserestrictinfo` with the lateral
-relids as `required_outer`; `IsBinaryTidClause` admits a lateral reference;
-two default inequalities on one column give the 0.5% range default), checked
-every figure in the header, and re-measured the flat cost (0.051 ms at 20,000
-pages, 0.049 at 60,000), the generic plan after five calls (auto_explain: five
-custom plans with the page count inlined, then `$n`), the edge cases (an
-empty heap, one page, a page count a hundred times the heap, 75% of the heap
-deleted and vacuumed, NULL and non-object metadata, a 200 KB TOASTed value on
-a probed page, a `setseed` draw) and 200 concurrent calls over sixteen
-connections with no error or differing answer. What they found: [8e]'s
-behavioural checks ran a copy of the statement kept in the test, so an INNER
-join, a missing `LIMIT` and a constant block all passed them and were caught
-by the text regexes alone — the copy now comes out of `pg_proc`, the LEFT
-join has a deterministic probe (eight blocks pinned in an emptied range) and
-the `LIMIT` a plan assertion; the header cited 037's ten-million estimate
-from the loaded pass without saying so, carried "nine pages" from 037's
-smaller heap where this one needs ten, quoted 037's re-run as "037 measured",
-and said [8e] read the statement through `extractBody` (the bench does; [8e]
-reads `pg_proc`); the temp-table note described one of two cases — in a
-session whose first temp table is the shadow, every cached plan is rebuilt
-and the whole call reads the shadow, still the safe side; an `int` block
-would overflow at 2³¹ pages, now `bigint`. test-live [7] failed three times
-for the run-it reviewer while another agent's suite ran in the same
-worktree, then passed nine times in a row; that is SMD-1545's assertion, and
-the concurrent-suite lead is on that ticket.
-
-**Review pass 2** (a run-it reviewer with six mutants of the migration
-against the rewired [8e], and a coherence reader over the documents). The
-mutants: an INNER join was killed three times in three by the pinned probe
-(0 pages drawn against 8), a missing `LIMIT` by the plan assertion (PGlite
-printed `Materialize` over `Seq Scan on thoughts`), a constant block and a
-non-distinct page count by the page bounds; the unmutated tree passed twice.
-What the pass found was in pass 1's own additions — the loop's stop signal.
-[8e]'s "emptied middle half" was mostly pre-empty: the sections before leave
-their dead rows unvacuumed, so the fixture sat on the last 17 of 55 pages
-and the pinned probe passed on an incidental layout; the fixture is now
-vacuumed before the load and the band's rows are counted before and after
-the delete. The pin had replaced the whole draw, `DISTINCT` included, so that
-token was held by text alone; the pin now replaces only the random draw, and
-one block drawn eight times over must count its rows once. A `<=` bound
-would have passed everything but a regex; the pinned probe's buffer count
-(eight) holds it. A body the extraction regex cannot read now fails one
-assertion instead of throwing the suite away. In the documents: a
-half-edited sentence in this section still said [8e] read the statement
-through `extractBody` (fixed above), "within 1.5" had outlived the range it
-described, 037's cost table was attributed to change 70's pass with
-different figures there, the friendliest of change 70's idle-machine figures
-stood alone, a Design bullet still deferred the temp-table case to 037, the
-0.05 ms figure lacked its one-row-a-page premise, and one sentence read cause
-and effect backwards — all reworded. test-live [7] failed once more for the
-reviewer with other suites active in the worktree and passed on re-run
-(SMD-1545).
-
-**Review pass 3** (an operator's and adversary's run-it, and a fresh-eyes
-read of the TypeScript alone). The deployer's paths all do what this section
-says: a fresh brain (38 applied, dry-run clean), a brain at 037 ("038 applied,
-1 applied, 37 skipped"), `--baseline` then a plain run, 037 pasted over 038
-then `--reapply`, a `--dry-run` for a pending 038 that prints no SQL and
-changes nothing, and all of it as a non-superuser owner once pgvector is
-installed (the file's `SELECT '[1]'::vector` is what lets a non-superuser
-set the hnsw clause; without it, "permission denied to set parameter").
-Preflight at 038 with rows: every check ok; with 037's or 020's body pasted
-over it, still ok (no recogniser, as stated); with 014 re-applied, `search
-signatures` fails and prints the DROP. The PostgREST contract is
-byte-identical to 037's. A SELECT-only role in a READ ONLY transaction under
-a 1 ms statement timeout, a Supabase-shaped authenticator/anon pair, forced
-plan modes, `jit = off`, `random_page_cost = 1`, a 64 kB `work_mem`, parallel
-query forced and off: eight heap blocks a call every time (pg_statio and
-pg_stat_statements agree, 8.08 blocks a call over forty). Races — a
-concurrent tail delete and `VACUUM` truncating 1,191 pages to 300 under a
-loop of filtered calls, concurrent inserts growing it, a full delete and
-reload — 14,000 calls without an error under either body; the temp table's
-two shapes as the header describes. What the pass found: the JIT premise
-above (the one finding of weight, stated in the header and filed as
-SMD-1624 rather than decided here); [8e]'s buffer count read the top node's
-cumulative line, which includes catalog reads on a cold syscache and held
-only because the identical statement had just run — it now reads the Tid
-Range Scan's own line; [5d]'s exact band compared two divided totals, which
-IEEE arithmetic gets wrong for 52 integer deltas that are exactly right — it
-now compares the raw scan counts; `extractBody`'s failure message named one
-cause where a re-aliased statement is the other; [8e]'s band-geometry premise
-(at least eleven pages with the last one live) is now in its label.
-Pre-existing and left: `--reapply` rebuilds a missing HNSW index in dynamic
-shared memory and fails under a 64 MB /dev/shm (001's parallel build, not
-038's; a real brain has its index), and the migrator cannot bootstrap a brain
-as a non-superuser on an image whose pgvector is not trusted.
-
-**Review pass 4** (a reproduction of the header's numbers on a fresh
-container with fresh code, and a final-state read of the tests and documents
-with a row-level-security probe). Everything that carries a conclusion
-reproduced: the planner costs and the absence of JIT exactly, the cost table
-within 5–15%, the rates within binomial noise at 1,000 and 20,000 draws, the
-bloated heap's 332 to the digit, the disabled-path JIT at 43–48 ms against
-0.49 through the shipped function over the floor. What did not hold was a
-premise and some precision, all reworded above: "every page in
-`shared_buffers`" — the 20,000- and 200,000-page heaps never fit the image's
-128 MB and the reads came from the OS page cache (the conclusion is
-unchanged; this also corrects change 70's sentence); the 10% tier at the
-floor is a knife-edge that read 961 in the re-run against 979; the plan-mode
-"0.05 ms" and [5d]'s "0.33 ms" were quoted tighter than their spread; a 0.14
-cell was missing from the 10,000-row range; the no-LIMIT cost is the
-2,000-page figure; the thin-spread bound is a union bound, 1.44e-3 exact. The
-final state after three passes reads as one account and every [8e] assertion
-fails on the mechanism it names; the residue was failure-path labels on
-passes 2 and 3's own lines (a comment misnaming which probe catches a missing
-`DISTINCT`, a Buffers regex that could run on into `Planning:`, the pin
-computed twice) — fixed. The one finding of weight is not 038's: under
-row-level security every `metadata @> filter` loses the GIN index, because
-`jsonb_contains` is not leakproof, and 014's collection and the walk's direct
-CTE seq-scan the heap at `disable_cost`, JIT-compiled — 150 ms against 7 on
-25,000 rows, since 014/019; 038's probe is unaffected in kind (the TID bounds
-are leakproof; the policy undercounts the hits, the safe side). SMD-1625.
-test-live's first run after this pass failed once more at [7] with no other
-suite running anywhere, and passed on re-run — SMD-1545's fifth sighting,
-and one that weakens its concurrent-suite lead.
+**Review** — five passes, two reviewers each, triaged fix / ticket / no;
+the stop signal (a pass's top findings in the previous pass's own additions)
+came at pass 2 and again at 4, the later passes at the user's call. What
+changed the change: test-schema [8e]'s behavioural checks had run a copy of
+the statement kept in the test, so an INNER join, a missing `LIMIT` and a
+constant block all passed them and were caught by regexes alone — [8e] now
+runs the statement read out of `pg_proc`, on a fixture vacuumed before the
+load (its "emptied middle half" had been pages earlier sections left empty),
+pins the probe to eight emptied blocks (an INNER join reports none drawn),
+draws one block eight times over (without `DISTINCT` the hits come back
+eightfold), asserts the plan (without the `LIMIT`, `Materialize` over `Seq
+Scan`) and the probe's eight buffers from the scan node's own line (a `<=`
+bound reads sixteen); the mutants were run and each is killed by the
+assertion that names it. test-live [5d] compares raw scan counts (IEEE gets
+x/20 − y/20 wrong for 52 exact deltas). What changed the documents: the
+"no JIT at any size" premise (a disabled planner path adds `disable_cost`
+and JIT-compiles the sample on every call, 41 ms against 0.46 — SMD-1624, the
+decision between `SET jit = off` and pinning the paths, since either touches
+the walk); row-level security as a fourth trigger, pre-existing since 014
+(`jsonb_contains` is not leakproof, 150 ms against 7 — SMD-1625); "every
+page in `shared_buffers`" corrected to the OS page cache (the larger two
+heaps never fit the image's 128 MB; change 70's sentence carried the same
+error); the knife-edge 10% tier at the floor (979 one run, 961 the re-run);
+a handful of figures quoted tighter than their spread, and the header's
+first-screen block for a paged operator. What was verified without change:
+the planner account re-derived from source; every header number reproduced
+on a fresh container with fresh code (costs and the absence of JIT exactly,
+the rates within binomial noise, the bloated heap to the digit); the
+deployer's paths through `migrate.ts` including a non-superuser owner;
+preflight with pasted-over bodies; the PostgREST contract byte-identical;
+restricted and read-only callers; 14,000 calls under concurrent truncation
+and growth; both temp-table shapes; the suites green on PostgreSQL 15, 16
+and 17 with the probe planning as eight TID Range Scans on each; [8e]
+flake-free over twenty runs and [5d]'s exact band over 180 isolated
+iterations (3,600 calls), where 037's body missed on 6 of 30 — the ~1.2% the
+header attributes to it. Filed and not fixed here: SMD-1624, SMD-1625,
+SMD-1627 (`--reapply` rebuilds a missing HNSW index in dynamic shared memory
+and fails under a 64 MB /dev/shm; a non-superuser cannot bootstrap where
+pgvector is not trusted — both pre-existing). test-live [7] flaked six times
+across the passes, thrice with another suite in the worktree and thrice
+alone, and passed on every re-run — SMD-1545's, with the concurrent-suite
+lead weakened accordingly.
 
 **The operator's path, walked.** A brain at 037 with rows, upgraded by `bun
 db/migrate.ts`: "038 applied, 1 applied, 37 skipped", one `match_thoughts`

@@ -8,6 +8,18 @@
 --   (match_thoughts is redefined here with 014's and 019's SET clauses, so
 --   this file declares the same floor; db/migrate.ts reads the line)
 --
+-- If filtered search is slow with this file installed
+--   This file's own cost is eight page reads on every filtered call over the
+--   floor — about 0.05 ms with one row a page, about 0.3 at the shipped
+--   width — and nothing that grows with the heap. EXPLAIN (ANALYZE) a
+--   filtered call, or read auto_explain with log_nested_statements: a `JIT:`
+--   block under the sample means a disabled planner path (enable_tidscan,
+--   enable_nestloop, or hashagg and sort together — SMD-1624); a `Seq Scan
+--   on thoughts` under the collection or the walk means row-level security
+--   on the table, which costs `metadata @> filter` its GIN index since 014
+--   (SMD-1625); a body carrying TABLESAMPLE means 037 was pasted over this
+--   file — `bun db/migrate.ts --reapply`. Failure modes below has each.
+--
 -- Why
 --   037 (SMD-1463) gates the routing count — the capped GIN collection every
 --   filtered call opened with, whose cost is the number of matching rows —
@@ -136,7 +148,10 @@
 --     per row of
 --     generate_series (the once-only trap is a scalar subquery, an InitPlan);
 --     DISTINCT collapses a block drawn twice so no page is read or counted
---     twice, and keeps that subquery a subquery too.
+--     twice, and keeps that subquery a subquery too. (EXPLAIN deparses the
+--     probe's bound as `floor((random() * '1191'::double precision))::bigint`,
+--     which reads as if random() ran once per probe; it does not — the
+--     Unique node above the probe shows loops=7 when two draws collide.)
 --   * Plan mode, which 037's statement lost on. Both plan modes price this
 --     statement alike — the bounds are column references under either — so
 --     plpgsql adopts the generic plan after the fifth call and never replans:
@@ -197,15 +212,13 @@
 --     a page over 251 pages of the 8,191 were skipped 29 times in 20,000
 --     draws at the floor — 1.45e-3, which is the formula's figure: C(8,3) x
 --     (251 / 8,191)^3 = 1.6e-3 as a union bound, 1.44e-3 exact (a re-run:
---     34 in 20,000). 037's statement, re-run on this heap, was
---     skipped only 14 times in 20,000 — under the formula's 32 — because
---     SYSTEM's variance made condition 1 fail whenever its draw reached ten
---     pages or more (twelve hits on nine pages still scale to 10.9 times the
---     threshold here; on 037's 6,826-page heap the cut was nine pages, which
---     is where its header's 13 in 20,000 came from). That accident is gone,
---     and the bound is now what 037's header computes, falling as the cube
---     of the heap
---     (7e-6 at a million rows, 7e-9 at ten million). A contiguous 1,000 rows
+--     34 in 20,000). 037's statement, re-run on this heap, was skipped only
+--     14 times in 20,000 — under the formula's 32 — because SYSTEM's
+--     variance made condition 1 fail on its larger draws (FORK.md change 78
+--     has the arithmetic, and why 037's own header says 13). That accident
+--     is gone, and the bound is now what 037's header computes, falling as
+--     the cube of the heap (7e-6 at a million rows, 7e-9 at ten million). A
+--     contiguous 1,000 rows
 --     were skipped once in 20,000 (0), the 900-row uniform filter never.
 --     `hit_pages >= 4` remains the knob if that band matters (C(8,4) x f^4,
 --     ~6e-5 at the floor); the rule ships as 037 shipped it.
@@ -258,20 +271,22 @@
 --     against 81); through the shipped function over the floor on a
 --     24,999-page heap (review pass 4): 0.49 / 43 / 48 / 90 ms, and 0.52
 --     with tidscan off and jit off. Nothing shows it: not the plan, the
---     rows, preflight or the ledger. Row-level security on `thoughts` is a
---     fourth trigger, and the one operators actually set: `jsonb_contains`
---     is not leakproof, so under a policy `metadata @> filter` cannot be an
---     index qual, and 014's collection and the walk's direct CTE become
---     sequential scans at disable_cost, JIT-compiled — 150 ms against 7 on
---     25,000 rows, since 014/019 and unchanged by this file (the TID
---     bounds ARE leakproof, so the probe keeps its plan under a policy and
---     merely undercounts its hits: the safe side). That is SMD-1625. `SET
---     jit = off` on the function removes all three
+--     rows, preflight or the ledger. `SET jit = off` on the function
+--     removes all three
 --     (measured, 0.38–0.82 ms under each), but also changes what the WALK
 --     pays under a generic plan, which is SMD-1464's plan-mode question;
 --     pinning `enable_tidscan = on` and `enable_nestloop = on` on the
 --     function overrides the operator's setting for the walk too. The
 --     decision is SMD-1624; this file states the premise.
+--   * Row-level security on thoughts (SMD-1625; since 014/019, unchanged
+--     here). A fourth trigger of the same JIT, and the one operators
+--     actually set: `jsonb_contains` is not leakproof, so under a policy
+--     `metadata @> filter` cannot be an index qual, and 014's collection
+--     and the walk's direct CTE become sequential scans at disable_cost,
+--     JIT-compiled — 150 ms against 7 on 25,000 rows, a heap scan per
+--     filtered call at scale. The probe here is unaffected in kind: the TID
+--     bounds ARE leakproof, so it keeps its plan under a policy and merely
+--     undercounts its hits, the safe side.
 --   * A temp table shadowing the name, in two shapes (measured through
 --     auto_explain). In a session that already has a temp schema, the cached
 --     plans keep reading the real table while v_pages sizes the shadow —
@@ -338,8 +353,13 @@
 -- Prerequisites
 --   Migration 037 (the gate this file re-samples; 037 carries 020's
 --   signature). PostgreSQL 14 or later for the TID Range Scan — the fork
---   pins pgvector's pg16 image, PGlite is 17, Supabase ships 15 and 17 — and
---   pgvector 0.8.0 or later, as 014. Applied by `bun db/migrate.ts`.
+--   pins pgvector's pg16 image, PGlite is 17, Supabase ships 15 and 17, and
+--   the suites ran green on 15, 16 and 17 — and pgvector 0.8.0 or later, as
+--   014. Nothing enforces the 14: on 13 (out of support) the CREATE succeeds
+--   and the probe, with no TID Range path to take, is a sequential scan at
+--   disable_cost — the "disabled planner path" failure mode on every call.
+--   The suites themselves need 15 (db/test-live.ts reads
+--   pg_stat_force_next_flush). Applied by `bun db/migrate.ts`.
 --
 -- Expected outcome
 --   `match_thoughts` returns what 037's returned for every call, up to the
