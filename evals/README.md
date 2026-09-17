@@ -2829,10 +2829,10 @@ floor where every index struggles on random vectors):
 
 | store | build | index size | unfiltered recall | filtered p95 | end-to-end p95 (+ pg id→row) |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| pgvector HNSW | 159.6s | 570 MB | 17% (45% at ef 200) | 3.7 ms | — (single store) |
-| pgvector IVFFlat | 11.7s | 287 MB | 3% (83% at 200 probes) | 2.2 ms (65 ms at 200) | — |
-| pgvectorscale DiskANN | 8165s (136 min) | 455 MB | 11% | 520 ms | — |
-| Qdrant | 108.8s | 994 MB | 52% | 24.9 ms | 9.3 ms |
+| pgvector HNSW | 159.6 s | 570 MB | 17% (45% at ef 200) | 3.7 ms | — (single store) |
+| pgvector IVFFlat | 11.7 s | 287 MB | 3% (83% at 200 probes) | 2.2 ms (65 ms at 200) | — |
+| pgvectorscale DiskANN | 8165 s (136 min) | 455 MB | 11% | 520 ms | — |
+| Qdrant | 108.8 s | 994 MB | 52% | 24.9 ms | 9.3 ms |
 
 Two numbers decide more than the recall floor does. **DiskANN's build took 136
 minutes at one million rows** — fifty times HNSW's, and its filtered query
