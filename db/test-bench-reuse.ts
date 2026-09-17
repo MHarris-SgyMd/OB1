@@ -28,6 +28,9 @@
  *   5.  Q=6 again — all six from the marker; the tables equal run 4's.
  *   6.  the marker is marked `rewritten`, as a refused reuse leaves it, and a
  *       run is refused before the oracle is consulted.
+ *   7.  039's ledger row is removed, as on a corpus kept before it: the run is
+ *       refused from the dry run, before the migrator rebuilds the indexes
+ *       the fingerprint covers (change 81).
  *
  * What "kept" means to the bench is the OB1_PG_KEEP variable and a marker
  * row; the container and its volume are with-postgres.sh's concern, held by
@@ -224,6 +227,14 @@ try {
   const r6 = await bench(3, 2);
   assert(r6.out.includes("had its tables changed by migrations applied onto it on an earlier run"), "with the rewritten refusal");
   assert(!r6.out.includes("exact oracle"), "and the cached answers were never read");
+
+  console.log("[7] a kept corpus on which migration 039 is pending is refused before the migrator runs it (its swap would rebuild the fingerprinted indexes)");
+  await sql.unsafe(`UPDATE ${BENCH_MARKER} SET corpus = corpus - 'rewritten'`);
+  await sql.unsafe(`DELETE FROM schema_migrations WHERE name LIKE '039_%'`);
+  const r7 = await bench(3, 1);
+  assert(r7.out.includes("migration 039 is pending on this kept corpus"), "with the pending-039 refusal, named");
+  assert(/039_\S+\s+would apply/.test(r7.out) && !/039_\S+\s+applied/.test(r7.out), "the dry run said it would apply, and the live run never ran it");
+  assert(!r7.out.includes("exact oracle"), "and nothing after the schema check ran");
 } catch (err) {
   // A throw is a failure with a tally, not a stack trace in place of one —
   // the stack kept, since the next run is three minutes of exact passes.

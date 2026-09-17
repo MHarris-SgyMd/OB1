@@ -2715,6 +2715,308 @@ needs vectors the export does not carry. The gate fixture here is generated
 (seeded, synthetic) so the repo can gate itself; a deployment that wanted the
 gate over its own corpus would redact its thoughts to id+embedding.
 
+## Does the store matter? pgvector against a dedicated vector database (SMD-1037)
+
+Every retrieval number above was measured on Postgres with pgvector, because
+that is the store the fork kept when it left Supabase. The choice was argued —
+one transactional store lets a hybrid query run as one statement over one
+snapshot — never measured against the alternative it rules out. SMD-1038
+(FORK.md, "A second vector store beside Postgres") wrote the two-store shape and
+the bar its numbers would have to clear *before* this measurement; this is the
+measurement, read against that bar. Nothing in the product changes as a result —
+the comparators are wired into an eval, never a backend
+(`evals/store-backends.ts`).
+
+**Method.** The unit is a *point*: one embedding with the thought it belongs to
+(`ref`) and its filter payload. A thought's whole-content vector and each chunk
+vector are separate points sharing a ref, as the server stores them (migration
+007); retrieval returns points, deduped to distinct refs by MAX score —
+`match_thoughts`' own rule — so what is compared is the index, not the app-side
+fusion identical above every store. One exact-cosine ground truth (a Postgres
+seq scan with the vector index kept out of the plan) scores every store; no
+store's numbers come from another's (precisely, the exact top-10 refs among the
+exact top-50 points — ample when a thought owns one or two points). The bracket
+is the ticket's: a different index in the same engine (pgvectorscale
+StreamingDiskANN, and pgvector IVFFlat as a control) and a different engine
+(Qdrant), against the incumbent pgvector HNSW. Each pg store is forced onto its
+own vector index (`enable_seqscan`/`bitmapscan` off) so the filtered arm
+measures the vector index post-filtering its candidates — not the planner
+falling back to an exact scan. `timescale/timescaledb-ha:pg16` carries pgvector
+0.8.6 and pgvectorscale 0.9.1; Qdrant runs beside it; the harness starts and
+tears down both.
+
+Reproduce: `bun evals/store-compare.ts` (real corpus — needs the cached corpus
+and a local Ollama, as `eval-filtered.ts` does) and `bun evals/store-scale.ts`
+(synthetic; its header carries the scale knobs — DiskANN builds serially, 10M
+needs an on-disk Qdrant and a build timeout). Docker is required; no
+`../db/with-postgres.sh`.
+
+### Real corpus — 601 Linear issues, 963 points, 1024-dim, 150 title queries
+
+Recall@10 versus exact, by filter arm (share of the corpus in parentheses):
+
+| store | effort | unfiltered | api (32%) | web (15%) | portal (3.5%) | design (2.3%) | t10 (11%) | t2 (1.7%) | t07 (0.5%) |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| pgvector HNSW | default | 100% | 71% | 53% | 10% | 9% | 33% | 6% | 10% |
+| pgvector HNSW | ef_search 200 | 100% | 99% | 94% | 32% | 37% | 96% | 25% | 42% |
+| pgvectorscale DiskANN | default | 96% | 80% | 74% | 81% | 90% | 75% | 100% | 100% |
+| pgvectorscale DiskANN | rescore 200 | 100% | 93% | 88% | 96% | 98% | 89% | 100% | 100% |
+| pgvector IVFFlat | default | 55% | 30% | 20% | 10% | 10% | 21% | 5% | 2% |
+| pgvector IVFFlat | probes 200 | 100% | 100% | 100% | 100% | 100% | 100% | 100% | 100% |
+| Qdrant | default | 100% | 100% | 100% | 100% | 100% | 100% | 100% | 100% |
+
+The unfiltered column is the vendor-benchmark case, and there pgvector HNSW ties
+exact (100%) — the store does not change the rows for the query the product
+rarely runs. The filtered columns are the case the product actually runs, and
+there the *bare* pgvector HNSW index loses recall as the filter tightens: at
+`portal` (3.5% of the corpus) it returns 10% of the exact top-10, because its
+candidate list is chosen before the filter is applied and a rare label survives
+in few of them. This is exactly the SMD-968 hazard — and raising `ef_search` to
+200 recovers the broad labels (api 99%, t10 96%) but not the rare ones (portal
+32%, t07 42%): a post- filter cannot recover what its candidate list never held.
+Qdrant, filtering inside its graph against a payload index, holds 100% at every
+tier; DiskANN, filtering its stream and rescoring with full vectors, holds
+strongly at default and recovers to near-exact when rescored. IVFFlat at its
+default single probe is the weak control; at 200 probes it is exact, at a
+latency cost. The "200" rows are each engine's own effort knob — HNSW's
+`ef_search`, IVFFlat's `probes`, DiskANN's `query_rescore` — at a nominal
+setting, not an equalised cost; the latency tables below show what each costs to
+buy that recall.
+
+**The finding, and the caveat that decides it.** A dedicated store *can*
+preserve filtered recall where a bare HNSW index cannot. But the product does
+not run a bare HNSW index: `match_thoughts` pushes the filter *into* the scan
+(migration 014, SMD-968), which is pgvector's own in-engine answer to precisely
+this loss — the "Filtered search" section above measures it holding recall where
+the pre-014 path did not. So the store question and the migration-014 question
+are the same question, and pgvector already answered it inside the engine.
+DiskANN is a second in-engine rung that answers it too, with no second store to
+keep consistent. Qdrant matches what the in-engine rungs achieve on recall; it
+does not beat them.
+
+Latency at 963 points is under 6 ms for every store — too small at this corpus
+size to rank; the row-count question latency is meant to answer lives at scale,
+below. Build time and index size at 963 points are likewise too small to read
+(Qdrant's 574 MB is fixed segment preallocation, not data); the scale table
+carries them.
+
+Hybrid, the shape the single store was argued for — vector combined with a
+keyword match — measured over 60 queries: the Postgres one statement runs in 2.9
+ms (p50) with one round trip; the two-store shape (a Qdrant vector query, a
+Postgres keyword query, merged in application code) runs in 1.4 ms (p50) with
+two. On loopback the extra round trip is cheap and the parallel two-store arm is
+even faster; the cost the ticket names is architectural — two network hops and a
+merge instead of one statement over one snapshot — and it grows with real
+network latency, not with the localhost number.
+
+### Scale — synthetic random unit vectors, 64-dim, 1M and 10M rows
+
+The real-corpus arm is at the product's 1024 width but only a few thousand
+points; the row-count questions — latency as N grows, index build time, on-disk
+size, and the resolve hop a second store pays — need millions of rows. Those are
+seeded synthetically with the generator db/bench-hnsw.ts uses (deterministic
+random unit vectors, the same vectors streamed into every store), at 64
+dimensions so 10M fits the 14 GB test VM and DiskANN can be built at all. **Two
+consequences of the synthetic width must be read with the numbers:** random
+uniform vectors are the hardest case for any graph index (bench-hnsw's finding),
+so the recall column here is a worst-case floor, not the recall real embeddings
+get — that lives in the real-corpus table above; and absolute latencies at 64
+dimensions are smaller than at 1024. What scale measures cleanly is build time,
+footprint, the resolve hop, and how each moves with N.
+
+Recall@10 vs exact and p95 latency at 1M rows (15 random queries; the recall
+floor where every index struggles on random vectors):
+
+| store | build | index size | unfiltered recall | filtered p95 | end-to-end p95 (+ pg id→row) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| pgvector HNSW | 159.6 s | 570 MB | 17% (45% at ef 200) | 3.7 ms | — (single store) |
+| pgvector IVFFlat | 11.7 s | 287 MB | 3% (83% at 200 probes) | 2.2 ms (65 ms at 200) | — |
+| pgvectorscale DiskANN | 8165 s (136 min) | 455 MB | 11% | 520 ms | — |
+| Qdrant | 108.8 s | 994 MB | 52% | 24.9 ms | 9.3 ms |
+
+Two numbers decide more than the recall floor does. **DiskANN's build took 136
+minutes at one million rows** — fifty times HNSW's, and its filtered query
+latency was half a second; the in-engine rung with the best small-corpus
+filtered recall is the one that does not survive to scale, on build time and on
+filtered latency both. And Qdrant's **end-to-end p95 — its ANN search plus the
+Postgres resolve of the ids it returns — is 9.3 ms, larger than single-store
+pgvector HNSW's 4.1 ms unfiltered**: the external store does not win the latency
+it would have to win, it adds a hop. (Latency at fifteen queries is noisy; the
+ordering, not the third digit, is the signal.) A separate note on build cost at
+the product's real width: at 1M × 1024, HNSW built in 35 minutes to an 8 GB
+index and Qdrant's collection was 6.4 GB, while DiskANN's build exhausted the 14
+GB VM outright — the build and footprint numbers above are an order larger at
+1024 than at 64.
+
+At ten million rows the pattern sharpens, under two compromises the 14 GB test
+VM forces: Qdrant's 9 GB in-RAM index crashed search outright, so it was rebuilt
+on-disk (mmap), and the random-vector recall floor deepens further.
+
+| store | build | index size | unfiltered recall | filtered p95 | end-to-end p95 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| pgvector HNSW | 139 min | 5.7 GB | 0% (8% at ef 200) | 3.2 ms | — |
+| pgvector IVFFlat | 2.3 min | 2.8 GB | 3% (75% at 200 probes) | 28 ms (489 ms at 200) | — |
+| pgvectorscale DiskANN | did not build in 10 min | — | — | — | — |
+| Qdrant (on-disk) | ≥30 min † | 8.7 GB | 87% * | 11.0 s | 1.6 s |
+
+Three things decide here, and none needs the recall floor to read them.
+**DiskANN did not finish its build inside a ten-minute bound** — it needed 136
+minutes at one million, so hours at ten; the in-engine rung with the best
+filtered recall is not buildable at this size in a practical window, and a
+re-embed (SMD-946) rebuilds it. **HNSW's own build took 139 minutes** — the
+incumbent scales, but not for free. And **Qdrant at ten million did not fit the
+VM's memory**: in RAM its 9 GB index crashed search; forced on-disk it answered,
+but at 1.4 s unfiltered and 11 s filtered p95 — a second store at this size is
+either a memory burden the machine does not have or a disk-bound latency no one
+wants, and its read still carries the id→row resolve. (* Qdrant's on-disk
+collection was still background-indexing, so it brute-forced the unindexed
+majority — exact by construction — which is why its recall reads high where the
+graph indexes collapse on random vectors; it is not a graph-recall number.
+Realistic recall is the real-corpus table above. † Qdrant's 30 min is the
+harness's index-wait cap, not a finished build: the collection never reached
+`green` at 10M on-disk in the VM, so it is a floor, not a build cost comparable
+to HNSW's 139 min.)
+
+### The decision, against the pre-registered bar
+
+SMD-1038 pre-registered three triggers; none is cleared in favour of a second
+store within the row counts reached.
+
+1. **Recall gap at a used filter tier.** Real: bare HNSW loses filtered recall,
+   but `match_thoughts`' migration-014 in-scan filter is pgvector's own
+   in-engine fix for exactly that, and DiskANN is a second in-engine rung;
+   Qdrant *matches* the in-engine rungs, it does not beat them.
+   Synthetic-at-scale: on random vectors every index falls far from exact
+   (Qdrant best at 52%), and the spread does not favour a second store beyond
+   what the real-corpus recall settles. → not a second-store trigger.
+2. **Latency gap at a reachable row count.** At 1M the external store's
+   end-to-end read (ANN + id→row resolve) is *slower* than single-store
+   pgvector, not faster. At 10M the external store did not even fit the VM's RAM
+   (its 9 GB index crashed search); on-disk it answered at seconds per query —
+   further from a latency win, not closer. → not cleared.
+3. **Index build time.** DiskANN — the in-engine option with the best filtered
+   recall — is the one made impractical by build time (136 min at 1M × 64; OOM
+   at 1024); the external store builds faster but only to match on recall what
+   014 already gives. → a real cost, but it argues against DiskANN, not for a
+   store.
+
+So the answer to "shouldn't this be in a real vector database?" is a number: on
+the retrieval this product does, the store does not change the rows for the
+unfiltered query; the filtered-recall case is an in-engine question migration
+014 already answers; and a dedicated store adds a resolve hop and a second
+system to keep consistent (SMD-1038's whole consistency section) without a
+measured win on recall, latency or build cost within reach. The second store is
+**not built**. The `thoughts.embedding` column stays the source of truth. A
+narrow follow-up worth its own ticket: DiskANN's SBQ compression gave the
+smallest index and strong small- corpus filtered recall — a bounded evaluation
+of its build/query knobs (not an adoption) is the one thread this leaves open;
+and pgvectorscale's parallel DiskANN build crashed the Postgres backend at 1M
+rows (workers=0 built; workers=4 died), worth reporting upstream.
+## Quantised indexes at the shipped width: halfvec adopted, binary declined (SMD-1501)
+
+`eval-quant.ts`, run as `bun run quant` with `OB1_EVAL_QUANT_SOURCE` naming a
+database `eval-longmemeval.ts` loaded, `OB1_EVAL_LME` its file and
+`OB1_EVAL_EMBED` its model. Needs Ollama for the 470 question vectors and a
+container with `OB1_PG_SHM_SIZE=3g` for the parallel builds; `OB1_PG_KEEP`
+keeps the copied corpus between runs. FORK.md change 81 has the decision and
+migration 039 the mechanism; this section is the measurement.
+
+**The question.** At 1,024 dimensions an HNSW index over `vector` costs a
+whole 8 KB page per row — a float4 vector plus its neighbour lists is more
+than half a page, and pgvector packs pages by whole elements — so a
+ten-million-row brain's `thoughts` index alone is near 80 GB. pgvector also
+indexes `halfvec` (three to a page) and binary-quantised vectors (twenty to a
+page). What either costs in recall on *real* vectors, and whether a rerank on
+the full vectors gives it back, is a question the random 64-dimensional bench
+cannot answer.
+
+**How it was measured.** The two real corpora this repo has at the shipped
+width: LongMemEval-S under `qwen3-embedding:4b@1024` (19,825 whole vectors +
+56,267 windows = 76,092 vectors, exactly the rows `match_thoughts`' two CTEs
+scan) and LongMemEval-M under `qwen3-embedding:0.6b@1024` (51,660 + 145,705 =
+197,365). The harness copies a corpus into a throwaway database under the
+tree's schema, embeds the 470 questions, takes an exact pass with no vector
+index in existence (exact in the function's own shape — the true nearest
+`v_fetch` per side merged by MAX, what a perfect index would return — not the
+ten highest MAX scores over every row, which the two-CTE shape does not
+compute; the report counts how often the two differ — on none of the 470
+questions, on either corpus), then builds each arm's two indexes alone —
+timed under
+`maintenance_work_mem` 2GB with four workers, sized, dropped before the next —
+and runs the function's unfiltered statement with only the candidate ORDER BY
+changed, under the function's own SET clauses, at `hnsw.ef_search` 40 / 100 /
+400. Three arms: **vector** (`hnsw (embedding vector_cosine_ops)`, what 001
+and 007 ship), **halfvec** (`hnsw ((embedding::halfvec(1024))
+halfvec_cosine_ops)`, the query cast to match, the candidates' similarity
+recomputed on the full vector), **binary** (`hnsw
+((binary_quantize(embedding)::bit(1024)) bit_hamming_ops)`, each CTE taking
+`v_fetch × R` candidates by Hamming distance and reranking them by full-vector
+cosine to `v_fetch`, R = 1, 2, 4, 10). A control holds `match_thoughts` itself
+to the mirrored statement of the arm it walks, question for question (0 of
+470 differ). Why the unfiltered path: LongMemEval's per-question filter
+matches a few hundred thoughts and routes every question to the exact branch,
+which reads no index — the harness as usually run never touches HNSW at all.
+
+**Results, second build of each corpus** (the first build's recall differed by
+up to a hundredth — a parallel HNSW build is not deterministic — and latencies
+by about a quarter on a shared machine):
+
+| arm | candidates per CTE | ef_search | S recall@10 vs exact | M recall@10 | S gold-hit@10 | M gold-hit@10 | same list as vector, S / M | S median ms | M median ms |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| vector | 40 | 40 | 0.984 | 0.971 | 46.2% | 33.8% | 100% / 100% | 4.13 | 4.22 |
+| vector | 40 | 100 | 0.996 | 0.989 | 46.4% | 34.0% | 100% / 100% | 6.42 | 6.54 |
+| vector | 40 | 400 | 0.999 | 0.998 | 46.2% | 34.5% | 100% / 100% | 18.09 | 17.36 |
+| halfvec | 40 | 40 | 0.974 | 0.970 | 45.5% | 33.6% | 93.4% / 95.3% | 3.12 | 4.08 |
+| halfvec | 40 | 100 | 0.993 | 0.989 | 46.2% | 34.0% | 98.1% / 98.1% | 4.11 | 6.13 |
+| halfvec | 40 | 400 | 0.999 | 0.999 | 46.0% | 34.5% | 99.6% / 99.6% | 9.12 | 14.81 |
+| binary | 40 | 40 | 0.955 | 0.939 | 46.0% | 33.4% | 69.6% / 68.3% | 1.80 | 3.08 |
+| binary | 40 | 400 | 0.974 | 0.964 | 46.4% | 34.7% | 76.8% / 76.4% | 5.30 | 6.30 |
+| binary | 80 → 40 | 40 | 0.980 | 0.973 | 46.2% | 34.3% | 83.0% / 79.1% | 3.07 | 4.09 |
+| binary | 160 → 40 | 40 | 0.993 | 0.991 | 46.0% | 34.5% | 86.6% / 82.8% | 5.63 | 7.92 |
+| binary | 400 → 40 | 40 | 0.998 | 0.997 | 46.2% | 34.5% | 88.9% / 83.6% | 13.25 | 17.44 |
+
+The exact pass's gold-hit@10 — the ceiling, since a session whose text twins
+another's shares its row — is 46.2% on S and 34.5% on M. Builds and bytes:
+
+| arm | S build s (both tables) | S bytes | M build s | M bytes | of vector |
+| --- | --- | --- | --- | --- | --- |
+| vector | 13.9 | 577 MB | 28.7 | 1,482 MB | 100% |
+| halfvec | 7.9 | 193 MB | 18.5 | 494 MB | 33% |
+| binary | 2.5 | 31 MB | 7.3 | 79 MB | 5% |
+
+**What it says.** halfvec returns what the vector index returns — recall
+within the build-to-build spread at every `ef_search`, the identical ten rows
+on 93–95% of questions at the default, the same gold sessions within a point —
+in the same time or less, in a third of the bytes, built in two thirds of the
+time. It is now the shipped index (migration 039; the walk branches of
+`match_thoughts` order by the cast, the stored vectors and the exact branch are
+untouched). Binary is declined, and not on the numbers alone: without a
+rerank it drops three hundredths of recall at the default `ef_search`;
+reranked at 80 → 40 it meets the bar's every number (recall within four
+thousandths, the vector index's latency, a twentieth of the bytes); reranked
+further (160 → 40) it passes the vector index's recall at 1.4–1.9× its
+latency, because reading each candidate's full vector out of TOAST is the
+cost, paid once per CTE. What decides against it is that any rerank is a
+change to the function's body — a subquery and a second depth to size in each
+walk CTE — returning the identical list on only 79–83% of questions, where
+halfvec needs a cast and gives 93–95%. The 80 → 40 arm is the one for a brain
+whose halfvec index no longer fits in memory, to be chosen on that brain's
+numbers with this harness.
+
+**Caveats.** Two corpora, two builds each, on a machine shared with other
+containers: the recall spread between builds (≤ 0.01) is larger than the
+halfvec-vs-vector difference, and the latencies are round trips from the
+harness, comparable within a run and not across machines. M's vectors are the
+0.6b model's, at the shipped width but not the shipped model. The ticket's
+100,000-row point is bracketed (76k and 197k vectors), not hit; nothing here
+is a random vector, and none of it is a recall figure for any other model. One
+side effect is the planner's, not the precision's: the halfvec index is a
+third of the pages and priced accordingly, so a filtered call whose plan sat
+on the edge between the HNSW walk and the exact GIN bitmap can now walk —
+`db/test-live.ts` [5b]'s 2,000 random rows under a 99% filter did, for the
+five custom-plan calls that open a session, at the walk's usual 7 of 10 on
+random vectors; the vector index had been priced out of that plan entirely.
+
 ## Related
 
 - `../SETUP.md` — the two decisions these evals inform
