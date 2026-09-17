@@ -12805,6 +12805,215 @@ the default labels `after (014 on)` and explains 038's as a TID range scan.
 **Upstream status:** not applicable — 014's routing statement and 037's gate
 are this fork's.
 
+### 81. `match_thoughts` runs with `jit = off` — migration 039 adds 017's clause to 038's function, so a planner path an operator disables no longer JIT-compiles the gate's sample on every call, and a generic plan's flat estimate no longer compiles the walk (SMD-1624)
+
+Change 80 shipped with a premise stated in its header: 038's sample statement
+has, in every piece, exactly one viable planner path — a TID Range Scan for
+the block (019's `enable_seqscan = off` is on the function), a Nested Loop
+for the `LATERAL` join, Sort/Unique or HashAggregate for the `DISTINCT` draw
+— and when a session, role or database turns that path off the planner still
+takes it and adds `disable_cost`, 1e10. The statement's cost is then far past
+`jit_above_cost` and its inlining and optimisation thresholds, and the
+executor compiles the sample on every execution: the same plan node, the
+same eight buffers, the same rows, nothing in preflight or the ledger, and
+some fifty milliseconds of compiler on every filtered call. `ALTER DATABASE …
+SET enable_nestloop = off` is a spelling operators use to tame a nested-loop
+disaster elsewhere, and it would have given every fresh connection that.
+SMD-1624 asked for the decision between a function-level `SET jit = off`,
+pinning the paths, and leaving the premise stated.
+
+**Measured first.** The ticket's table reproduced on this tree through the
+function — 25,000 rows at 1,024 dimensions (385 heap pages; the HNSW index
+dropped, so the 50% column is a GIN bitmap and a sort, the fixture's cost),
+the floor lowered to 0 so the sample runs, medians of nine calls after three
+warm ones, round trip included, an empty-match filter / a filter matching
+half the rows:
+
+| setting (session) | 038's function | 038's + `jit = off` on the function |
+| --- | ---: | ---: |
+| default | 0.99 / 59 ms | 1.30 / 66 |
+| `enable_tidscan = off` | **51.3 / 108** | 1.28 / 62 |
+| `enable_nestloop = off` | **59.0 / 108** | 1.07 / 66 |
+| `enable_hashagg = off`, `enable_sort = off` | **105 / 270** | 0.99 / 65 |
+| `enable_tidscan = off`, session `jit = off` | 1.04 / 66 | 1.11 / 60 |
+
+The sample statement alone under `enable_tidscan = off`: total cost
+80,000,000,070 (eight times `disable_cost`), 52 ms with the JIT block —
+Inlining 7.4, Optimization 23.4, Emission 20.9 — and 0.18 ms without it. The
+hashagg-and-sort case costs more than the other two because every `ORDER BY`
+in the body carries `disable_cost` with sort disabled: the walk's statements
+were compiled too. The tidscan and nestloop sensitivities are 038's; the sort
+one is 037's (`count(DISTINCT …)` sorted). A row-level-security policy of
+`USING (true)` reproduced nothing — the planner folds a constant policy — so
+SMD-1625 stands on its own fixture, not this one.
+
+**Migration 039.** 038's `CREATE OR REPLACE` with one clause added between
+019's `SET enable_seqscan = off` and `AS $$`: `SET jit = off`. The body is
+038's byte for byte — test-upgrade [17] compares `prosrc` across the upgrade
+— and with it 014's sentinel, the two template constants, 019's two clauses
+and `ROWS 10`, 020's `DROP` of the 4-argument form with its ACL capture and
+replay; 039 is the last definer, which preflight's remedies and the suites'
+`restoreShipped` apply alone. It is 017's clause for 017's reason: nothing in
+this body has enough rows for JIT to pay for itself — the walk passes a few
+hundred tuples under the seeded bounds, the exact branch scores at most
+`v_exact` rows, the collection stops at `v_exact + 1`, the sample reads eight
+pages — and what prices its statements past the threshold is never the
+work. It is `disable_cost`, or a generic plan's flat estimate: change 28
+measured every generic plan at ten million rows carrying 30–110 ms its custom
+twin did not (the routing count on the empty filter 31 ms against 0.03, the
+exact branch 108 against 24, the 2,000-row walk 136 against 20) and, with
+`jit = off`, 0.03, 11 and 23. The one generic plan whose cost is not JIT —
+the 50% walk's GIN bitmap over five million rows sorted by distance, 11.6 s
+against 15 ms custom, 11.7 with jit off — this change does not touch; that
+is the plan mode, SMD-1464's.
+
+**Why not the alternatives.** Pinning `enable_tidscan = on` would be
+harmless and cover one case; `enable_nestloop = on` covers a second and
+overrides an operator's setting for the walk's chunk join too; the third
+needs `enable_sort = on` as well, over every `ORDER BY` in the body — and none
+of the three touches the generic plan's JIT at scale, the compile under
+row-level security (SMD-1625) or PostgreSQL 13's (038's Prerequisites). One
+clause removes the compile in every case and changes nothing about which
+plan the operator's settings choose. A higher `jit_above_cost` on the
+function has no finite value safely above 1e10 per disabled node. Leaving
+the premise stated was what 038 did. Not a plan mode: 038's sample adopts
+the generic plan by design, the walk's mode is SMD-1464's, and 019's rule
+stands — 019's "no other SET" was written about the walk bounds (the
+operator's database-level knob) and a plan mode, and `jit` is neither; 017
+and 027 have carried it since.
+
+**The bench at a million rows, and what the pair could not say.** The
+before arm (`OB1_BENCH_UPTO=038`) and the after arm, each on its own
+container and corpus, agreed on every tier but two: the 5,000-row and 1%
+tiers walked HNSW under 038 (546 and 424 ms, 8.8 and 8.9 of the exact
+top-10) and were served exact from the GIN index under 039 (61 and 86 ms,
+10 of 10). That is not the clause. It is the planner on the knife edge
+change 28 named — at a million rows it serves filters "up to ~0.2%" from
+GIN and walks for 0.5% and 1%, and which side a 0.5% filter falls on
+depends on the statistics `VACUUM ANALYZE` sampled for that load; a second
+after run on a fresh corpus fell the same way (30 and 53 ms, 10 of 10), and
+a third container could have fallen either way. So the attribution was done
+on ONE corpus, kept under `OB1_PG_KEEP=jit1m`: the function with the clause
+(A), with it `RESET` — 038's function — (B), and with it again (A′), twenty
+seeded queries per tier on a fresh connection each, so every arm walks the
+same plan-cache trajectory (custom plans for five calls, then generic where
+not costlier); median of calls 6–20 / 1–5:
+
+| tier | A: 039 | B: clause RESET (038's) | A′: 039 again | rows identical |
+| --- | ---: | ---: | ---: | :---: |
+| 50% | 13.0 / 18.7 ms | 16.8 / 17.4 | 13.9 / 15.4 | yes |
+| 10% | 66.2 / 52.9 | 63.6 / 63.0 | 52.6 / 51.1 | yes |
+| 1% | 54.8 / 45.3 | 43.4 / 52.7 | 43.6 / 48.4 | yes |
+| 5,000 rows | 33.6 / 32.9 | 25.8 / 26.0 | 25.5 / 23.2 | yes |
+| 2,000 rows | 17.0 / 20.0 | 13.9 / 14.0 | 13.2 / 13.4 | yes |
+| 0.1% | 11.8 / 12.3 | 10.7 / 10.0 | 11.1 / 10.9 | yes |
+| 900 rows | 12.0 / 12.5 | 8.9 / 10.9 | 10.7 / 11.0 | yes |
+| 0.01% | 3.1 / 3.1 | 1.7 / 2.4 | 2.1 / 3.2 | yes |
+| nothing | 1.3 / 1.5 | 0.7 / 1.0 | 0.8 / 0.9 | yes |
+
+Identical rows in every cell, the arms within the run's spread (the first
+arm ran coldest), and the first five calls costing what the rest cost under
+both functions: at a million rows no generic plan of this body is priced
+past `jit_above_cost` yet — change 28 put that between a million and ten
+million — so the clause removes nothing here and costs nothing. Section C's
+third column, "generic, jit on", read within noise of the generic column on
+every branch (walk 0.1% 477 against 487 ms, route 50% 32.0 against 31.7,
+estimate 0.11–0.14 against 0.12–0.16): agreement, as a flat estimate under
+the threshold predicts. The ten-million arm was not re-run for this change
+— the machine was carrying another session's ten-million containers — and
+change 28's "generic, jit off" column (0.03 / 11 / 23 ms against 31 / 108 /
+136) is what the function's generic plans now pay there; the third column
+is where the next ten-million run reads it.
+
+**The walk under the operator's `enable_nestloop = off`, measured.** The
+ticket asked what the walk does under the setting that pinning would have
+overridden. On the same corpus, the same three arms, session-level `SET
+enable_nestloop = off`, median of calls 6–20 / 1–5:
+
+| tier | A: 039 | B: clause RESET (038's) | A′: 039 again |
+| --- | ---: | ---: | ---: |
+| 50% | 3,022 / 2,747 ms | 2,830 / 2,502 | 3,473 / 3,215 |
+| 1% | 2,320 / 2,265 | 2,340 / 2,640 | 2,799 / 2,901 |
+| 5,000 rows | 2,404 / 2,195 | 2,849 / 2,851 | 2,907 / 2,790 |
+| 900 rows | 2,141 / 2,047 | 2,454 / 2,484 | 2,754 / 2,662 |
+| nothing | 0.62 / 1.08 | **66.8 / 66.8** | 1.19 / 1.73 |
+
+The `nothing` row is this change: the sample's compile, 66 ms on every call
+to a brain whose operator turned nested loops off, gone. The other rows are
+not: without a nested loop the walk's chunk join and the exact branch's
+parent lookups become joins over the whole chunk table, 2–3 s on every
+filtered call with rows, identical rows and the same under 038. Pinning
+`enable_nestloop = on` on the function would remove that — and would
+override the operator's setting for every statement of the call, a second
+mechanism and its own decision: SMD-1677, filed with this table.
+
+**What the clause does not fix.** Under row-level security the collection
+and the walk's direct CTE are sequential scans of the heap (`jsonb_contains`
+is not leakproof): the compile goes, the scan stays — SMD-1625. On
+PostgreSQL 13 the probe has no TID Range path and is a sequential scan per
+block; the same. `disable_cost` is still in the estimate under a disabled
+path — the TID Range Scan at 8e10, the Nested Loop at 1e10 — and a reader of
+auto_explain sees the cost and no JIT block; the plan and the eight buffers
+are the same. On a server built without JIT (`pg_jit_available()` false:
+PGlite, some managed images) the clause is accepted and does nothing.
+
+**What holds it.** `CREATE OR REPLACE` resets `proconfig`, exactly as it
+resets 014's and 019's clauses, and the ledger cannot see it — the class of
+loss change 70 and 80 could only state. preflight's `candidate scan` check
+(019's) now reads `jit = off` beside `enable_seqscan = off` and `ROWS 10`: ok
+names all three; a body carrying 019's clauses and not 039's warns with the
+compile it lets back in, the migration as the remedy while the ledger does
+not record 039 and the `ALTER FUNCTION … SET jit = off` when it does;
+test-preflight's fixtures that model 019's loss restore the jit clause so
+they stay 019's, and a new probe models 039's alone. test-schema [20] and
+[21] pin exactly three clauses on the shipped body — a successor that adds
+or drops one fails there on purpose. test-live [5e], on a 3,000-row heap
+with the floor lowered: under each of the three disabled paths the statement
+read out of the installed body, explained under the function's own settings,
+keeps its TID Range Scan at `disable_cost` and has no JIT block; the same
+statement with `jit` forced back on has one — Generation, Inlining,
+Optimization, Emission, 41–45 ms on the CI image — so the first check has
+teeth; and through the function the mutant, 039's clause `RESET` (what a
+redefinition without it leaves), pays the compile on every call: 55 ms a call
+against 8 with the clause, 8 by default on that fixture. The forced-on plan
+and the timing run only where `pg_jit_available()`; the catalog and plan
+checks run everywhere. test-upgrade [17] applies 039 onto a populated 038:
+no column, signature, row or privilege moves, the body byte for byte,
+`jit=off` beside 014's and 019's clauses, and after a hand re-apply of 014
+puts the 4-argument form back, 039 alone drops it again. db/bench-hnsw.ts
+section C's third arm, which had been the generic plan with `jit = off`,
+now forces `jit = on` over the function's clause: the column is what the
+clause saves, and on a body before 039 (`OB1_BENCH_UPTO=038`, the new before
+arm) the last two columns agree.
+
+**What it costs where it does nothing.** One more `proconfig` entry, set at
+call entry and restored at exit — microseconds, what 017 and 027 pay. The
+default column in the table above is within the run's spread (0.99–1.30 ms
+across the six cells that ran without JIT under either function).
+
+**Not done here.** The walk under an operator's `enable_nestloop = off`
+(SMD-1677, the table above); the plan mode of the walk and the threshold
+(SMD-1464); row-level security's sequential scan (SMD-1625); preflight's
+recogniser for the gate's body (change 80's "Not done here"). The
+ten-million arm was not re-run; a hundred million rows was not run.
+
+**The operator's path, walked.** A brain with rows migrated by `bun
+db/migrate.ts` through 039 (on a brain at 038 it is the one pending file):
+one `match_thoughts` whose `proconfig` reads `hnsw.iterative_scan=relaxed_order,
+enable_seqscan=off, jit=off`, preflight's `candidate scan` ok naming all
+three, a filtered call answering as before. The same brain with 038's file
+pasted over 039 by hand: the plain run reports "applied 0, skipped 39", the
+body is unchanged, and what is lost is the clause — `candidate scan` warns
+"carries enable_seqscan = off and both row estimates hold, but not jit = off
+although migration 039 is recorded as applied — a later redefinition dropped
+its SET clause" with `ALTER FUNCTION match_thoughts(…) SET jit = off;` as
+the remedy, and `migrate.ts --reapply` (39 re-applied) restores it with
+everything else, after which the check is ok again. The PostgREST contract
+is byte-identical to 020's.
+
+**Upstream status:** not applicable — 014's routing statement, 037's gate and
+038's sample are this fork's.
+
 
 ## Detached from the fork network
 

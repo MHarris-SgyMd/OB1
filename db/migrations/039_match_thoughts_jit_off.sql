@@ -109,7 +109,10 @@
 --     none of the three touches the generic plan's JIT at ten million rows,
 --     the compile under row-level security (SMD-1625), or PostgreSQL 13's
 --     (038's Prerequisites). One clause removes the compile in every case
---     and overrides nothing about which plan the operator's settings choose.
+--     and overrides nothing about which plan the operator's settings choose
+--     — including the one the ticket asked to be measured: what the walk
+--     does under `enable_nestloop = off` is under Failure modes, and its
+--     decision is SMD-1677.
 --   * Not a higher jit_above_cost on the function. disable_cost is 1e10 per
 --     disabled node; no finite threshold is safely above it, and "off" says
 --     what is meant.
@@ -154,6 +157,15 @@
 --     managed images). The clause is accepted and does nothing; db/test-live.ts
 --     [5e] runs its timing tooth only where JIT is available and asserts the
 --     clause on the catalog everywhere.
+--   * An operator's `enable_nestloop = off`, for the rest of the call. This
+--     file removes the sample's compile under it (the empty filter at a
+--     million rows: 66.8 ms a call under 038's function, 0.6 under this
+--     one); it does not give the walk or the exact branch their nested
+--     loops back — every filtered tier with rows costs 2–3 s at a million
+--     rows under that setting, the same under 038 and this file, identical
+--     rows (the table is in FORK.md change 81). Pinning `enable_nestloop =
+--     on` on the function would, and would override the operator's setting
+--     for the whole call: SMD-1677, not here.
 --   * An operator who wants JIT inside match_thoughts. A function-level SET
 --     beats a session or database setting for the call. No measured case
 --     wants it; `ALTER FUNCTION … RESET jit` is the escape, and preflight
@@ -165,6 +177,27 @@
 --   within the run's spread (0.99–1.30 ms across the six cells that ran
 --   without JIT under either function). Over the floor, the sample's eight
 --   page reads are 038's, unchanged.
+--
+--   At a million rows (db/bench-hnsw.ts's corpus: 64 dimensions, 49,999
+--   heap pages, kept under OB1_PG_KEEP so every arm read ONE corpus with
+--   one set of statistics), the function with this clause, with it RESET —
+--   038's function — and with it again, twenty seeded queries per tier on a
+--   fresh connection each, medians of calls 6–20 / 1–5: identical rows on
+--   every tier in every arm, the times within the run's spread — 50% 13 /
+--   17 / 14 ms, 10% 66 / 64 / 53, 1% 55 / 43 / 44, 5,000 rows 34 / 26 / 25,
+--   900 rows 12 / 9 / 11, the empty filter 1.3 / 0.7 / 0.8 — and the first
+--   five calls (custom plans) costing what the rest cost (generic where
+--   adopted) under both functions: at a million rows no generic plan of
+--   this body is priced past jit_above_cost yet (FORK.md change 28 put that
+--   between a million and ten million), so the clause has nothing to remove
+--   there and costs nothing. Two separately loaded containers (the bench's
+--   before and after arms) had disagreed on the 5,000-row and 1% tiers —
+--   546 and 424 ms walking HNSW under 038, 61 and 86 served exact from GIN
+--   under this file — which is the planner's knife-edge choice for a 0.5%
+--   filter between two corpora's statistics (change 28's "~0.2%" line),
+--   not this clause; the one-corpus run above is the attribution. The
+--   ten-million arm was not re-run for this file (the machine was shared);
+--   db/bench-hnsw.ts section C's third column is where the claim is read.
 --
 -- What a successor must carry
 --   038's list, unchanged — `SET hnsw.iterative_scan = relaxed_order`, `SET
@@ -187,10 +220,13 @@
 --   is 038's — and no statement of its body is JIT-compiled whatever the
 --   session, role or database sets: under each of the three disabled paths
 --   the call costs what it costs by default (the table under Why, right
---   column), and db/bench-hnsw.ts section C's generic column at ten million
---   rows reads what its "jit off" column read under 038. pg_proc.proconfig
---   carries `jit=off` beside 014's and 019's clauses; preflight's
---   `candidate scan` reports all three.
+--   column); at a million rows every tier returns the rows it returned
+--   under 038 in the same time (Cost); at ten million, where FORK.md change
+--   28 measured the generic plans paying 30–110 ms of JIT, db/bench-hnsw.ts
+--   section C's generic column should read what its "jit off" column read
+--   then (not re-run for this file; the third column is now the compile
+--   the clause removes). pg_proc.proconfig carries `jit=off` beside 014's
+--   and 019's clauses; preflight's `candidate scan` reports all three.
 -- ============================================================================
 
 -- Load pgvector's library into THIS session before the CREATE below: the SET
