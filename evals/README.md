@@ -2745,6 +2745,12 @@ falling back to an exact scan. `timescale/timescaledb-ha:pg16` carries pgvector
 0.8.6 and pgvectorscale 0.9.1; Qdrant runs beside it; the harness starts and
 tears down both.
 
+Reproduce: `bun evals/store-compare.ts` (real corpus — needs the cached corpus
+and a local Ollama, as `eval-filtered.ts` does) and `bun evals/store-scale.ts`
+(synthetic; its header carries the scale knobs — DiskANN builds serially, 10M
+needs an on-disk Qdrant and a build timeout). Docker is required; no
+`../db/with-postgres.sh`.
+
 ### Real corpus — 601 Linear issues, 963 points, 1024-dim, 150 title queries
 
 Recall@10 versus exact, by filter arm (share of the corpus in parentheses):

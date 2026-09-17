@@ -20,9 +20,22 @@
  * is the product's 1024 by default; the real-corpus fidelity lives in
  * store-compare.ts, and this arm isolates behaviour as N grows.
  *
- *   OB1_STORE_SCALES=1000000 bun store-scale.ts
- *   OB1_STORE_SCALES=1000000,10000000 OB1_STORE_QUERIES=12 OB1_STORE_DIM=1024 \
- *     OB1_STORE_MAINT_MEM=8GB OB1_STORE_PG_SHM=8g bun store-scale.ts
+ *   # 1M and 10M at 64-dim, all engines — the curve the tables report:
+ *   OB1_STORE_SCALES=1000000,10000000 OB1_STORE_DIM=64 OB1_STORE_QUERIES=10 \
+ *     OB1_STORE_QDRANT_ONDISK=1 OB1_STORE_BUILD_TIMEOUT_MS=600000 \
+ *     OB1_STORE_MAINT_MEM=2GB OB1_STORE_PG_SHM=3g bun store-scale.ts
+ *   # 1M at the product's 1024 width — a build-cost data point; DiskANN's build
+ *   # exceeds a 14 GB VM at 1024, so this pins the pg indexes to the two that fit:
+ *   OB1_STORE_SCALES=1000000 OB1_STORE_DIM=1024 OB1_STORE_PG_INDEXES=hnsw,ivfflat \
+ *     OB1_STORE_MAINT_MEM=2GB OB1_STORE_PG_SHM=3g bun store-scale.ts
+ *
+ * The knobs that make scale runnable in a memory-bounded VM, all reflected above:
+ * pgvectorscale's PARALLEL DiskANN build crashes the backend at >=1M rows, so its
+ * build defaults to serial (`OB1_STORE_BUILD_WORKERS=0` for diskann);
+ * `OB1_STORE_BUILD_TIMEOUT_MS` bounds the slow serial build so a run records the
+ * failure instead of hanging; `OB1_STORE_QDRANT_ONDISK=1` keeps a 10M Qdrant index
+ * mmap'd so it can be searched beside Postgres rather than swapped. Image overrides:
+ * `OB1_STORE_PG_IMAGE`, `OB1_STORE_QDRANT_IMAGE`; ingest batch: `OB1_STORE_QDRANT_BATCH`.
  *
  * Starts and tears down its own timescaledb-ha + qdrant containers per scale (a
  * kept database holds one corpus). Touches nothing in the product.
