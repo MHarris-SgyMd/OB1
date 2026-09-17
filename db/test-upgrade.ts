@@ -21,7 +21,7 @@
 import { SQL } from "bun";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { applyMigrations, createAssert, dropSchema, ledgerStrangers, migrationFiles, migratorEnv, plantLegacyRow, requireDatabaseUrl, resetSchema, runMigrator, runScript, updatedAtTriggerState } from "./test-support.ts";
+import { TID_PROBE, applyMigrations, createAssert, dropSchema, ledgerStrangers, migrationFiles, migratorEnv, plantLegacyRow, requireDatabaseUrl, resetSchema, runMigrator, runScript, updatedAtTriggerState } from "./test-support.ts";
 import { ACCEPTED_CAVEAT_PREFIX, ACCEPTED_CLAIM_SQL, LOCK_TIMEOUT_S, UPDATE_THOUGHT_SIGNATURE, reembedKey } from "./config.mjs";
 
 const URL_ = requireDatabaseUrl("test-upgrade.ts");
@@ -1075,7 +1075,7 @@ console.log("\n[13] Migration 035 onto a populated 033 — a re-capture no longe
   await sql.close();
 }
 
-console.log("\n[14] Migration 037 onto a populated 035 — match_thoughts gains its gate; no signature, row or privilege moves; and a hand-re-applied 014's 4-argument form is dropped as 020 dropped it (SMD-1463)");
+console.log("\n[14] Migration 037 onto a populated 036 — match_thoughts gains its gate; no signature, row or privilege moves; and a hand-re-applied 014's 4-argument form is dropped as 020 dropped it (SMD-1463)");
 {
   await dropSchema(URL_);
   await applyMigrations(URL_, { ...OPTS, only: (f) => f < "037" });
@@ -1171,7 +1171,6 @@ console.log("\n[16] Migration 038 onto a populated 037 — the gate's sample is 
   const aclOf = async (sig: string) => String((await sql`SELECT proacl::text AS a FROM pg_proc WHERE oid = ${sig}::regprocedure`)[0].a ?? "");
   const forms = async () => Number((await sql`SELECT count(*)::int AS c FROM pg_proc WHERE proname = 'match_thoughts'`)[0].c);
   const answer = async (kind: string) => JSON.stringify((await sql`SELECT id FROM match_thoughts(${vec(0)}::vector, -1.0, 10, ${{ kind }}::jsonb)`).map((r: { id: string }) => r.id).sort());
-  const TID_PROBE = /t\.ctid >= \('\(' \|\| b\.blk \|\| ',0\)'\)::tid/;
 
   // A corpus at 037 — thirty rows of two kinds, both filters under the exact
   // threshold and the table far under the gate's floor — and a hardened

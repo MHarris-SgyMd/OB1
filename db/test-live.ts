@@ -33,7 +33,7 @@ import { readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, EMBEDDING_DIM, EMBEDDING_MODEL, HNSW_BOUNDS, MATCH_COUNT_CEILING, MATCH_THOUGHTS_SIGNATURE, ROUTE_ESTIMATE_MIN_PAGES, ROUTE_SAMPLE_PAGES, parseSetConfig, versionAtLeast } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { applyFunctionSettings, applyMigrations, createAssert, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
+import { TID_PROBE, applyFunctionSettings, applyMigrations, createAssert, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
 import { heartbeatFor, leaseRefusal } from "./lease.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -395,8 +395,6 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
   // Read by the finally block below as well as the section.
   const opts038 = { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f: string) => f.startsWith("038") };
   const body = async () => String((await sql`SELECT prosrc AS s FROM pg_proc WHERE oid = ${MATCH_THOUGHTS_SIGNATURE}::regprocedure`)[0].s);
-  /** 038's probe: every tuple of one block, half-open at the next. */
-  const TID_PROBE = /t\.ctid >= \('\(' \|\| b\.blk \|\| ',0\)'\)::tid/;
   let failure: unknown;
   try {
     const N = 25_000;

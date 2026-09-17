@@ -53,17 +53,16 @@
 --
 --   A second, smaller defect of the same statement: 037's `pages_seen` was
 --   the count of distinct pages among the rows RETURNED, so a sampled page
---   with no live row — a mass delete and a plain VACUUM leave them — dropped
---   out of the denominator and the scaled estimate `hits x pages /
+--   with no live row — a mass delete and a plain VACUUM leave them —
+--   dropped out of the denominator and the scaled estimate `hits x pages /
 --   pages_seen` was biased up. Conditions 2 and 3 still protected a thin
 --   filter, but the uniform bound moved from ~1e-7 to ~3e-5 on a heap three
 --   quarters empty at the floor (037's "bloated heap" bullet).
 --
 -- What
---   The gate is 037's — the same floor, the same {{ROUTE_SAMPLE_PAGES}}
---   pages, the same three conditions over the same three counts, the same
---   collection wrapped in the same IF — and only the statement that produces
---   the counts changes:
+--   The gate is 037's — floor, {{ROUTE_SAMPLE_PAGES}} pages, three conditions,
+--   the collection wrapped in the same IF — and only the statement that
+--   produces its three counts changes:
 --
 --     SELECT count(*) FILTER (WHERE p.hit),
 --            count(DISTINCT b.blk) FILTER (WHERE p.hit),
@@ -303,23 +302,15 @@
 --     switches the gate off, and a fresh session sees one table.
 --   * A block past the heap, wide metadata, statistics: as 037's header
 --     states them; nothing here reads pg_statistic or reltuples.
---   * The table is under the floor. Nothing here runs; 037's Why is the
---     cost, at most a few milliseconds on the broadest filter.
 --
 -- Cost, measured
---   The statement alone, EXPLAIN ANALYZE execution time, median of 30, on a
---   heap of one row a page with every page warm in the OS page cache — the
---   larger two heaps exceed the image's 128 MB shared_buffers (this file's
---   development machine: Apple M5 Pro, podman VM, pgvector 0.8.6 on
---   PostgreSQL 16 at its image defaults), enable_seqscan off as the function
---   has it:
---
---     heap pages    this file    037's statement
---     2,000           0.034 ms     0.036 ms
---     20,000          0.048        0.075
---     200,000         0.052        0.469
---
---   and 0.045–0.07 ms a draw on the 500,000-row corpus (0.13–0.15 for
+--   The statement alone: the table under Why (EXPLAIN ANALYZE execution
+--   time, median of 30, one row a page, every page warm in the OS page
+--   cache, enable_seqscan off as the function has it; this file's
+--   development machine is an Apple M5 Pro running a podman VM with pgvector
+--   0.8.6 on PostgreSQL 16 at its image defaults, and the fourth review pass
+--   re-ran it on a fresh container), and 0.045–0.07 ms a draw on the
+--   500,000-row corpus (0.13–0.15 for
 --   037's), the same for the 50% filter and the empty one: the cost is the
 --   pages read, not the rows that pass. Through the function, on that
 --   200,000-page heap: a few hundredths of a millisecond a call over the
@@ -330,7 +321,8 @@
 --   collection's at every scale: 0.07–0.14 ms at 10,000 rows, 0.08–0.12 at
 --   a million, 0.09–0.12 at ten million (037's: 0.04–0.14, 0.22–0.36, and
 --   1.10–1.20 in a before pass that ran under load — 0.94–1.11 on the idle
---   machine across FORK.md change 70's two passes, so load barely moved that
+--   machine across FORK.md change 70's two passes, so load barely moved
+--   that
 --   row). Through the function the empty filter at ten million rows
 --   costs 0.36 ms — 0.27 before 037, 1.31 under it — and the 50% tier 14.4,
 --   as under 037 (13.2); the thin tiers moved by the sample's saving and the

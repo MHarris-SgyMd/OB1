@@ -12491,7 +12491,11 @@ and fails under a 64 MB /dev/shm; a non-superuser cannot bootstrap where
 pgvector is not trusted — both pre-existing). test-live [7] flaked six times
 across the passes — four with another suite in the worktree, twice alone —
 and passed on every re-run: SMD-1545's, with the concurrent-suite lead
-weakened accordingly.
+weakened accordingly. Boyscout, after the passes: one exported `TID_PROBE`
+(both bounds) where three files had their own, [8e]'s FROM clause read once
+and a tautological bound dropped, two helper comments reworded for two
+migrations, test-upgrade [14]'s title naming the schema it applies, the
+header's cost table stated once — no behaviour change.
 
 **The operator's path, walked.** A brain at 037 with rows, upgraded by `bun
 db/migrate.ts`: "038 applied, 1 applied, 37 skipped", one `match_thoughts`

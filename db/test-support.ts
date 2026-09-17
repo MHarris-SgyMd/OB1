@@ -127,8 +127,8 @@ export type SchemaOptions = {
   /** Rows migration 023's call writes: NULL (every row) unless a suite asks for a batch. Pinned so the shell's OB1_BACKFILL_LIMIT cannot change what a suite applies. */
   backfillLimit?: number | null;
   /**
-   * The heap size, in pages, under which 037's match_thoughts does not sample
-   * before its routing count (038 draws the same sample by TID range). The
+   * The heap size, in pages, under which the routing gate (037; its sample
+   * drawn by TID range since 038) does not run before the routing count. The
    * shipped floor (ROUTE_ESTIMATE_MIN_PAGES) is 64 MB of heap; a suite that
    * wants the gate on a table of a few thousand rows applies the last definer
    * with 0 and restores the default afterwards.
@@ -650,6 +650,13 @@ function resolveLocals(text: string, locals: Map<string, string>, opts: { overri
 /** The PREPARE parameter list every explainer declares — match_thoughts' six arguments since 020, in one place. */
 export const preparedSignature = (dim: number) => `(vector(${dim}), float, int, jsonb, float, float)`;
 
+/**
+ * 038's probe as the body spells it — every tuple of one block, half-open at
+ * the next. test-schema [8e], test-live [5d] and test-upgrade [16] read the
+ * installed body for it; one spelling here rather than three that drift.
+ */
+export const TID_PROBE = /t\.ctid >= \('\(' \|\| b\.blk \|\| ',0\)'\)::tid\s+AND t\.ctid <\s+\('\(' \|\| b\.blk \+ 1 \|\| ',0\)'\)::tid/;
+
 
 /**
  * The DECLARE block's locals, name → expression text: `name  type words  :=
@@ -696,15 +703,16 @@ export async function routingAt(sql: SQL, matchCount: number): Promise<{ vFetch:
       },
     });
   // The gate's locals too, where the body declares them, evaluated NOW
-  // against this table: the heap's page count (v_pages — 037 and 038; the
+  // against this table — the heap's page count (v_pages; 037 and 038, the
   // range 038 draws its blocks from) and 037's sample share (v_pct, the
-  // fraction of the heap TABLESAMPLE read). An explainer that substituted the
-  // declaring expressions instead — pg_relation_size is volatile — left the
-  // planner unable to size 037's sample scan; it priced a scan of the whole
-  // heap, and at ten million rows that estimate crossed jit_above_cost and
-  // the explained statement paid ~50 ms of JIT the function never pays (its
-  // custom plan knows the parameter's value). The bench passes these back as
-  // the locals' overrides (SMD-1463).
+  // fraction of the heap its TABLESAMPLE read) — so the bench can substitute
+  // the values the function's own custom plan sees. Under 037 that was
+  // load-bearing: an explainer that substituted the declaring expression
+  // (pg_relation_size is volatile) left the planner unable to size the
+  // sample scan, which it then priced as the whole heap, past jit_above_cost
+  // at ten million rows — ~50 ms of JIT the function never pays (SMD-1463).
+  // Under 038 the literal only makes the explained plan the function's; the
+  // probes are priced alike whatever the planner knows (SMD-1526).
   const gate = ["v_pages", "v_pct"].filter((name) => locals.has(name));
   const [row] = await sql.unsafe(
     `SELECT ${resolve("v_fetch")}::int AS v_fetch, ${resolve("v_exact")}::int AS v_exact${gate.map((name) => `, ${resolve(name)}::float AS ${name}`).join("")}`

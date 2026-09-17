@@ -55,7 +55,7 @@ import {
 } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createAssert, seededRandom } from "./test-support.ts";
+import { TID_PROBE, createAssert, seededRandom } from "./test-support.ts";
 import { markerAnswers } from "./bench-oracle.ts";
 import { ENTITY_TYPES, RELATIONS } from "../server-portable/entities.ts";
 
@@ -714,7 +714,6 @@ console.log("\n[8e] Migrations 037 and 038: the routing count is gated by a samp
   const shipped = async () => String((await db.query<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = '${MATCH_THOUGHTS_SIGNATURE}'::regprocedure`)).rows[0].s);
   const src = await shipped();
   assert(lastDefinerOf("match_thoughts").startsWith("038"), `038 is the last definer of match_thoughts (${lastDefinerOf("match_thoughts")})`);
-  const TID_PROBE = /t\.ctid >= \('\(' \|\| b\.blk \|\| ',0\)'\)::tid\s+AND t\.ctid <\s+\('\(' \|\| b\.blk \+ 1 \|\| ',0\)'\)::tid/;
   assert(TID_PROBE.test(src) && /INTO v_hits, v_hit_pages, v_pages_seen/.test(src) && !/TABLESAMPLE/.test(src),
     "the shipped body samples the heap by TID range — every tuple of one block, half-open at the next — into the three counts the gate reads, and carries no TABLESAMPLE");
   assert(new RegExp(`floor\\(random\\(\\) \\* v_pages\\)::bigint AS blk\\s+FROM generate_series\\(1, ${ROUTE_SAMPLE_PAGES}\\)`).test(src) && new RegExp(`IF v_pages >= ${ROUTE_ESTIMATE_MIN_PAGES} THEN`).test(src),
@@ -724,8 +723,11 @@ console.log("\n[8e] Migrations 037 and 038: the routing count is gated by a samp
   assert(/IF NOT v_broad THEN\s+SELECT array_agg\(s\.id\) INTO v_ids/.test(src) && /IF NOT v_broad AND COALESCE\(cardinality\(v_ids\), 0\) <= v_exact THEN/.test(src),
     "…the collection runs only when the gate did not decide, and the exact branch only when the collection ran");
   // The statement itself, not the source around it: the body's comments
-  // mention EXISTS and the sample in the same breath (review pass 1).
-  const sampleStmt = /INTO v_hits, v_hit_pages, v_pages_seen\s+(FROM \([\s\S]*?\) p ON true);/.exec(src)?.[1] ?? "";
+  // mention EXISTS and the sample in the same breath (review pass 1). Read
+  // once here — the three counts and the FROM clause — for the token checks
+  // now and the draws further down.
+  const stmt = /SELECT (count\(\*\) FILTER[\s\S]*?)\s+INTO v_hits, v_hit_pages, v_pages_seen\s+(FROM \([\s\S]*?\) p ON true);/.exec(src);
+  const sampleStmt = stmt?.[2] ?? "";
   assert(/embedding IS NOT NULL\) AS hit/.test(sampleStmt) && !/EXISTS/.test(sampleStmt) && !/thought_chunks/.test(sampleStmt),
     "the sample counts rows with a vector and probes no chunk table (the EXISTS became a hashed subplan there — 037's header says)");
   // 038's three load-bearing tokens (its header, Design): DISTINCT blocks so a
@@ -794,7 +796,6 @@ console.log("\n[8e] Migrations 037 and 038: the routing count is gated by a samp
   // LIMIT, a constant block) and left the tokens to the regexes above (review
   // pass 1). A body the regex cannot read fails the one assertion and skips
   // the rest, rather than throwing the suite away from [9] on (review pass 2).
-  const stmt = /SELECT (count\(\*\) FILTER[\s\S]*?)\s+INTO v_hits, v_hit_pages, v_pages_seen\s+(FROM \([\s\S]*?\) p ON true);/.exec(src);
   assert(stmt !== null, "the sample statement reads out of the installed body (SELECT <three counts> INTO v_hits, v_hit_pages, v_pages_seen FROM (<the draw>) b LEFT JOIN LATERAL (<the probe>) p ON true)");
   if (stmt) {
     const [, counts, from] = stmt;
@@ -829,7 +830,7 @@ console.log("\n[8e] Migrations 037 and 038: the routing count is gated by a samp
     // would report one. (A draw without DISTINCT is the same-block probe's to
     // catch below: its page count stays a DISTINCT count, its hits come back
     // eightfold.) 037's TABLESAMPLE drew no page at all on one run.
-    const sound = (r: Draw) => r.pages_seen >= 2 && r.pages_seen <= ROUTE_SAMPLE_PAGES && r.hit_pages <= r.pages_seen;
+    const sound = (r: Draw) => r.pages_seen >= 2 && r.pages_seen <= ROUTE_SAMPLE_PAGES;
     const BROAD = '{"kind":"broad"}';
     // Five draws, each judged by the body's own three conditions: the rule
     // must say "collect" whatever it drew — on 1,000 rows the scaled estimate
