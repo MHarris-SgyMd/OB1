@@ -11435,7 +11435,8 @@ first await before any body is parsed. The regression that needs the window
 is a "cleanup": build a server per request but `if (previous) await
 previous.close()` first, the previous request's server kept in a module-level
 `let`. In a burst the closed server is always an earlier, finished request's,
-so all three answer (771/771 with the same-tick probe); staggered, the second
+so all three answer (771/771 with the same-tick probe — the suite's count
+then, before the fourth pass's last text rule); staggered, the second
 request closes the first's server while its body is still arriving, `close()`
 makes the SDK forget that server's transport, and the first request's answer
 is sent to nothing — request 11 fails alone. (The fifth pass tried the other

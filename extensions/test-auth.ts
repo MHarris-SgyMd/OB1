@@ -488,7 +488,8 @@ for (const s of SERVERS.filter((s) => s.kind === "mcp")) {
   // No handler (the import failed above) is already a counted failure; the probe is skipped rather than thrown from.
   const answers = handler ? await overlapping(ids, (id, late) => answer(handler, new Request("http://extension.test/mcp",
     // @ts-ignore -- duplex is required for a streaming body, and is not in the lib's RequestInit
-    { method: "POST", headers: { ...RPC, "x-brain-key": LEGACY_KEY }, body: late ?? JSON.stringify({ ...LIST, id }), ...(late ? { duplex: "half" } : {}) }))) : [];
+    // The late request drops Accept, as in the table probe: this server has the patch.
+    { method: "POST", headers: late ? { "Content-Type": RPC["Content-Type"], "x-brain-key": LEGACY_KEY } : { ...RPC, "x-brain-key": LEGACY_KEY }, body: late ?? JSON.stringify({ ...LIST, id }), ...(late ? { duplex: "half" } : {}) }))) : [];
   // The reference list is the first answer that carries one — not answers[0], which under the defect is the timeout.
   const tools = answers.map(toolsOf).find((t) => t.length > 0) ?? [];
   assert(tools.length > 0, `its tools/list under the key names its tools (${tools.length})`);
