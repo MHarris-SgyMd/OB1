@@ -262,7 +262,7 @@ type Reply = { status: number; json: any; text: string };
 
 /** One request to server `s`; `also` carries further presented forms beside the one under test. */
 async function request(s: Server, key: string | null, via: Via, also: Partial<Record<Via, string>>,
-  init: { method: string; path: string; body?: unknown; rawBody?: string; accept?: boolean }): Promise<Reply> {
+  init: { method: string; path: string; body?: unknown; rawBody?: string | ReadableStream<Uint8Array>; accept?: boolean }): Promise<Reply> {
   const handler = served[SERVERS.indexOf(s)];
   // Where createClient runs per request, the URL shape must be the one THIS server's client accepts.
   process.env.SUPABASE_URL = s.url;
@@ -278,7 +278,9 @@ async function request(s: Server, key: string | null, via: Via, also: Partial<Re
   const [path, own] = init.path.split("?");
   if (own) query.push(own);
   const url = "http://extension.test" + path + (query.length ? `?${query.join("&")}` : "");
-  return answer(handler, new Request(url, { method: init.method, headers, body: init.rawBody ?? (init.body === undefined ? undefined : JSON.stringify(init.body)) }));
+  const body = init.rawBody ?? (init.body === undefined ? undefined : JSON.stringify(init.body));
+  // @ts-ignore -- duplex is required for a streaming body, and is not in the lib's RequestInit
+  return answer(handler, new Request(url, { method: init.method, headers, body, ...(typeof body === "object" ? { duplex: "half" } : {}) }));
 }
 /** One request to one handler, in process, with a deadline. */
 async function answer(handler: Handler, req: Request): Promise<Reply> {
@@ -334,6 +336,39 @@ const run = (s: Server, key: string | null, dryRun: boolean) =>
 const passed = (r: Reply) => r.status !== 401 && r.status !== 403 && !/access key|read-scoped/i.test(r.text);
 
 const LIST = { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} };
+
+// ── Overlapping requests ─────────────────────────────────────────────────────
+//
+// Three tools/list at one server under one key, overlapping two ways
+// (SMD-1497, FORK.md change 77). The first request starts alone, its headers
+// in and its body still on the wire for LATE_BODY_MS; the other two start
+// STAGGER_MS later with their bodies complete. So the first is inside the
+// server between connect() and the arrival of its message while the second
+// and third connect — the window a server that outlives the request gets
+// wrong: main's shape overwrote its transport on the later connect() and
+// answered the first request on it, and a plausible repair — close() the
+// kept server before connecting it again — passes a same-tick probe (all
+// three close a server that had already finished) yet hangs the earlier of
+// two staggered requests in production, because close() makes the SDK forget
+// its transport and the first request's answer is sent to nothing. Both fail
+// this probe; the per-request build passes it. A server kept per scope behind
+// a serialising lock passes too, and answers correctly — the lock covers the
+// whole window — at the price of every request under a scope waiting for the
+// previous one's body, and of a shared abort-controller map keyed by JSON-RPC
+// id across unrelated clients; the probe cannot see either, and the record
+// (change 77) says so.
+const STAGGER_MS = 5;
+const LATE_BODY_MS = 20;
+/** A JSON-RPC body that arrives `ms` after the request does. */
+const lateBody = (body: unknown, ms: number) => new ReadableStream<Uint8Array>({
+  start(ctrl) { setTimeout(() => { ctrl.enqueue(new TextEncoder().encode(JSON.stringify(body))); ctrl.close(); }, ms); },
+});
+/** The three answers, in the order of `ids`; `send` gets a late body for the first id and none (build its own) for the rest. */
+async function overlapping(ids: number[], send: (id: number, late?: ReadableStream<Uint8Array>) => Promise<Reply>): Promise<Reply[]> {
+  const first = send(ids[0], lateBody({ ...LIST, id: ids[0] }, LATE_BODY_MS));
+  await new Promise((r) => setTimeout(r, STAGGER_MS));
+  return Promise.all([first, ...ids.slice(1).map((id) => send(id))]);
+}
 const toolsOf = (r: { json: any }) => ((r.json?.result?.tools ?? []) as { name: string }[]).map((t) => t.name).sort();
 const env = (s: Server, keys: string | undefined, legacy?: string) => {
   if (keys === undefined) delete process.env[s.keys]; else process.env[s.keys] = keys;
@@ -372,19 +407,15 @@ for (const s of SERVERS.filter((s) => s.kind === "mcp")) {
       "…and its listing is an empty list under a declared tools capability, not a failed method");
   }
 
-  // Three requests at once under one key, each answered with its own id and the
-  // full list (SMD-1497, FORK.md change 77). Any two overlapping requests are
-  // the trigger, not a burst: a server built once and `connect()`ed to a fresh
-  // transport per request has the SDK overwrite its transport on the second
-  // connect and capture it when the first message arrives, so the first
-  // request's answer goes to the second request's transport — the first hangs
-  // (request()'s deadline reports that as status 0, not a slow server) or the
-  // second client reads an answer to a request it never sent. Three of these
-  // servers were that shape on main. Explicit statuses: a `!== 200` would pass
-  // the timeout.
+  // Three overlapping requests under one key (see `overlapping` above), each
+  // answered with its own id and the full list. Any two overlapping requests
+  // are the trigger, not a burst; three of these servers were main's shape.
+  // A hang is request()'s deadline as status 0, not a slow server. Explicit
+  // statuses: a `!== 200` would pass the timeout.
   {
     const ids = [11, 12, 13];
-    const answers = await Promise.all(ids.map((id) => call(s, WRITE_KEY, { ...LIST, id })));
+    const answers = await overlapping(ids, (id, late) =>
+      late ? request(s, WRITE_KEY, "x-access-key", {}, { method: "POST", path: "/mcp", rawBody: late }) : call(s, WRITE_KEY, { ...LIST, id }));
     for (const [i, r] of answers.entries()) {
       assert(r.status === 200 && r.json?.id === ids[i] && toolsOf(r).join() === all.join(),
         `${ids.length} concurrent tools/list under one key: request ${ids[i]} is answered with its own id and every tool (${r.status === 0 ? r.text : `${r.status}, id ${r.json?.id ?? "none"}, ${toolsOf(r).length} tools`})`);
@@ -433,8 +464,9 @@ for (const s of SERVERS.filter((s) => s.kind === "mcp")) {
   const handler = served[before];
   const ids = [11, 12, 13];
   // No handler (the import failed above) is already a counted failure; the probe is skipped rather than thrown from.
-  const answers = handler ? await Promise.all(ids.map((id) => answer(handler, new Request("http://extension.test/mcp",
-    { method: "POST", headers: { ...RPC, "x-brain-key": LEGACY_KEY }, body: JSON.stringify({ ...LIST, id }) })))) : [];
+  const answers = handler ? await overlapping(ids, (id, late) => answer(handler, new Request("http://extension.test/mcp",
+    // @ts-ignore -- duplex is required for a streaming body, and is not in the lib's RequestInit
+    { method: "POST", headers: { ...RPC, "x-brain-key": LEGACY_KEY }, body: late ?? JSON.stringify({ ...LIST, id }), ...(late ? { duplex: "half" } : {}) }))) : [];
   // The reference list is the first answer that carries one — not answers[0], which under the defect is the timeout.
   const tools = answers.map(toolsOf).find((t) => t.length > 0) ?? [];
   assert(tools.length > 0, `its tools/list under the key names its tools (${tools.length})`);
@@ -806,7 +838,8 @@ const TEXT_ONLY: { file: string; must: RegExp[]; mustNot: RegExp[] }[] = [
     mustNot: [/[!=]== ?MCP_ACCESS_KEY\b/, /c\.req\.header\("x-access-key"\)/, /serverFor\(/, /Map<[^>\n]*McpServer/] },
   { file: "recipes/edge-function-cost-optimization/examples/after/server.ts",
     must: [/from "\.\.\/_shared\/auth\.ts"/, /export function buildServer\(principal: Principal\): McpServer/, /register\w+\(server, principal\)/],
-    mustNot: [/export const server\b/, /new Map</, /serverFor/] },
+    // No module-level declaration naming McpServer: a cache under any name, in any container, is a server shared across sessions.
+    mustNot: [/export const server\b/, /new Map</, /serverFor/, /^(?:export )?(?:const|let|var) [^\n]*\bMcpServer\b/m] },
   { file: "recipes/vercel-neon-telegram/src/app/api/telegram/route.ts",
     must: [/import \{ secretMatches \} from "@\/lib\/auth"/, /secretMatches\(req\.headers\.get\("x-telegram-bot-api-secret-token"\), expectedSecret\)/],
     mustNot: [/secret !== expectedSecret/] },

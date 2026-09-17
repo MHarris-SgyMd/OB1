@@ -8870,8 +8870,8 @@ seventeen still neither bundle as an Edge Function nor run under Deno, fix
 13's consequence, unchanged here — SMD-1480 records it for five extensions and
 now carries a comment widening it to these. Read scope on the workers means a
 dry run, which still spends LLM calls; that is a cost, not a write. The three
-module-singleton MCP servers still `connect()` one cached `McpServer` to a
-fresh transport per request, as they did on main: the SDK overwrites the
+module-singleton MCP servers still, at this change, `connect()`ed one cached
+`McpServer` to a fresh transport per request, as they did on main: the SDK overwrites the
 transport on connect and captures it when a message arrives, so two concurrent
 requests to one of them can cross responses — a pre-existing defect the
 per-scope cache neither causes nor cures (SMD-1497 held it; change 77 builds
@@ -11380,8 +11380,9 @@ draft repeated: one `McpServer` per key scope, `connect()`ed once per
 transport, so the second session minted for a scope took the server's
 transport from the first, and every session but the last minted hung. The
 review pass ran it on the pinned SDK: two sessions on one key, a POST through
-the first's transport times out with `Failed to send response: … No
-connection established for request ID: 1`, a POST through the second answers.
+the first's transport times out while the server logs `Failed to send
+response: … No connection established for request ID: 1`, and a POST through
+the second answers.
 Two clients on one key, or one client whose session the isolate re-mints,
 would have met it. (The SDK at 1.30.0 refuses a second `connect()` — `Already
 connected to a transport. Call close() before connecting to a new transport` —
@@ -11393,8 +11394,8 @@ so a pin bump would have turned the silent hang into a loud 500; at 1.24.3
 or the module-level `server` was, connected to that request's transport and
 dropped with it. The per-scope `Map` and `serverFor()` are gone from the three;
 in `enhanced-mcp` the construction and the thirteen registrations are wrapped in
-the function (a 1,516-line span re-indented — `git diff -w` shows the sixteen
-lines that changed). This is the shape `kubernetes-deployment`, `ob-graph`, the
+the function (a 1,517-line span re-indented — `git diff -w` shows the twenty
+lines that changed, four of them the header comment). This is the shape `kubernetes-deployment`, `ob-graph`, the
 cost recipe's "before" sample and the seven extensions already had, and the one
 the ticket called the cheap option. The "after" sample builds per *session*:
 `server.ts` exports `buildServer(principal)` in place of the cached
@@ -11404,8 +11405,10 @@ tree say so — that shape needs a session store, a TTL and a client that sends
 the id back, which the sample has and the four servers do not (they mint no
 session id, so a client has nothing to send). Per request is not free, so it
 was measured on the pinned SDK (Bun 1.4.0, 20,000 builds after 2,000 warm): a
-one-tool server with `delete_thought`'s schema builds in 45 µs, the recipe's
-four-tool shape in 70 µs, thirteen tools with five-field schemas in 474 µs.
+one-tool server with `delete_thought`'s schema builds in 45 µs (31–45 across
+the three reviewers' re-runs, most of it the SDK's Ajv instance, which
+`tools/call` never uses — it validates with zod), the recipe's four-tool shape
+in 70 µs, thirteen tools with five-field schemas in 474 µs.
 The cheapest thing any of these servers then does is a database round trip,
 in milliseconds; the per-scope cache change 67 kept was buying tens of
 microseconds and costing the hang. The cost recipe's README and its "before"
@@ -11415,11 +11418,27 @@ lifetime does not touch, and per session — once per handshake, not once per
 call — is the grain their numbers assume.
 
 **The harness.** `test-auth.ts` fires three `tools/list` at each MCP server
-at once under one key and asserts each answer carries its own id and the full
-list — explicit statuses, since a `!== 200` would pass a timeout (change 75).
-For `enhanced-mcp`, outside the servers table, a section of its own imports it
-under the stand-in and runs the same probe under the one key it reads. Two
-things the probe needed from the harness: every in-process request now has a
+under one key, overlapping two ways, and asserts each answer carries its own
+id and the full list — explicit statuses, since a `!== 200` would pass a
+timeout (change 75). The first request starts alone with its body still
+arriving for 20 ms; the other two start 5 ms later, complete. The stagger is
+load-bearing, and the fourth review pass is why: three requests fired in one
+tick caught main's shape (the `connect()` overwrite is independent of timing)
+but passed a plausible repair of it — keep the server, `close()` it before
+each `connect()` — because all three closed a server that had already
+finished, while in production that repair hangs the earlier of two staggered
+requests (`close()` makes the SDK forget its transport, and the first
+request's answer is sent to nothing). Staggered, that mutant fails request
+11's assertion and the per-request build passes. One shape passes the probe
+and is output-correct: a server per scope behind a serialising lock — the
+lock covers the whole connect-to-dispatch window, so each answer reaches its
+own transport. It is a worse design than a build per request, for reasons the
+probe cannot see: every request under a scope waits for the previous one's
+body to finish arriving, and the SDK's abort-controller map, keyed by JSON-RPC
+id, is shared across unrelated clients. For `enhanced-mcp`, outside the
+servers table, a section of its own imports it under the stand-in and runs
+the same probe under the one key it reads. Two things the probe needed from
+the harness: every in-process request now has a
 two-second deadline and reports a hang as status 0 rather than waiting on it,
 and the console silencer around a handler is a counter, not a save-and-restore
 per call — two requests in flight each saved the other's no-op, and a hung
@@ -11432,15 +11451,22 @@ request — a module-level declaration that names `McpServer`, holds what
 cached;` filled later passes it), and the probe is the proof. The "after"
 sample, whose tool modules are not in the repository, is held by the
 text-only rules to building its server beside its transport when a session is
-minted, and to no `serverFor`.
+minted, to no `serverFor`, and to no module-level declaration in `server.ts`
+that names `McpServer` — a cache under any name.
 
-**Verified.** `bun test-auth.ts` 771/771 (709 before: 3 concurrent × 13
-servers + 14 guards + 5 for `enhanced-mcp` + 4 text-only rules for the "after"
-sample). Drilled by putting `main`'s file
-back: `delete-thought-mcp` fails 3 of 771 — requests 11 and 12 `timed out
-after 2000 ms`, request 13 (the last transport connected) answered, and the
-guard; `enhanced-mcp` the same three. `deno check` on `enhanced-mcp` passes
-(CI does not run it for that file; its deno.json resolves supabase-js).
+**Verified.** `bun test-auth.ts` 772/772 (709 before: 3 overlapping × 13
+servers + 14 guards + 5 for `enhanced-mcp` + 5 text-only rules for the "after"
+sample). Drilled by putting `main`'s file back: `delete-thought-mcp` fails 3
+of 772 — requests 11 and 12 `timed out after 2000 ms`, request 13 (the last
+transport connected) answered, and the guard; `enhanced-mcp` the same three;
+the "after" sample's `server.ts` fails its four text rules. The kept server
+with `close()` before each `connect()` (an untyped `let cached;`, which the
+text guard passes) fails request 11 alone — the staggered request, hung. The
+fourth reviewer's other mutants: a server built before the 401 check for a
+dummy principal fails the nine scope assertions; the probe with three equal
+ids still fails main's shape (the deadline carries the detection, the ids
+the attribution). `deno check` on `enhanced-mcp` passes (CI does not run it
+for that file; its deno.json resolves supabase-js).
 `bun scripts/check-fork-consistency.mjs` PASS.
 
 **Not done here.** `enhanced-mcp` stays outside `test-auth.ts`'s table — its
@@ -11460,8 +11486,11 @@ says the bound; SMD-1607 holds the library fix. Nothing here changes a response,
 header or a tool surface; the answer a client receives is the same, now for
 the request it sent.
 
-Upstream status: upstream's `delete-thought-mcp`, `update-thought-mcp` and
-`enhanced-mcp` carry the module-level server. **Unfiled** by us.
+Upstream status: at the pin, all five files carry the shared server —
+`delete-thought-mcp`, `update-thought-mcp`, `enhanced-mcp` and
+`work-operating-model-activation` at module scope, and the cost recipe's
+"after" sample as an exported singleton connected once per session.
+**Unfiled** by us.
 
 ## Detached from the fork network
 
