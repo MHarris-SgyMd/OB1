@@ -12716,6 +12716,14 @@ sending the header the spec asks for is refused at preflight; pre-existing,
 and only sharper now that the header is validated (SMD-1668). 809
 assertions.
 
+**Tidied while the files were open.** The comments the two passes grew in
+`test-auth.ts` — the pragma guard's, the transport and SDK blocks', the
+protocol-version pair's, the pin mirror's and the probe's Accept sentence —
+cut to a pointer at this section each, forty-seven lines to twenty-eight; and
+two `change 80` the renumber had missed, where the word and its number sat on
+different lines (the transport block, `test-server.ts` [7]), read 81. No
+behaviour change.
+
 **Not done here.** The live connector check (one Claude Desktop session, two
 tool calls in flight, Accept as the client sends it) that SMD-1497, SMD-1259
 and SMD-1246 also wait on; a client that sends *neither* token nor `*/*`

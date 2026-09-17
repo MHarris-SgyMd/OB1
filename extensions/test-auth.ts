@@ -362,11 +362,9 @@ const LIST = { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} };
 // connect at the 5 ms timer, so the body's 20 ms leaves 15 ms; a longer
 // event-loop stall degrades the probe to one request then a burst of two —
 // detection weakens, the fix cannot fail. The first request also carries no
-// Accept header at all — @hono/mcp 0.3.x takes a missing Accept as `*/*`
-// and either token as enough, where 0.1.x demanded both, so the servers'
-// Accept patches for Claude Desktop connectors are gone (change 81; SMD-1616
-// was the two servers that never had one) and every server answers the bare
-// request here.
+// Accept header: @hono/mcp 0.3.x takes none as `*/*` and either token as
+// enough, so the Accept patches are gone and every server answers the bare
+// request (change 81).
 const STAGGER_MS = 5;
 const LATE_BODY_MS = 20;
 /** A JSON-RPC body that arrives `ms` after the request does. */
@@ -772,12 +770,9 @@ const OLD_SPELLINGS = /c\.req\.query\("key"\)|c\.req\.header\("x-access-key"\)|[
  */
 const builtPerRequest = (text: string) =>
   !/^(?:export )?(?:const|let|var) [^\n]*(?:\bMcpServer\b|\bStreamableHTTPTransport\b|= buildServer\(|= new Map[<(])/m.test(text);
-// Every SDK subpath import is preceded by its `@ts-types` pragma. Since SDK 1.29
-// the exports map names the types `./dist/esm/*.d.ts`; for `server/mcp.js` that
-// is a file that does not exist, tsc substitutes `.d.ts` for `.js` and Deno does
-// not, so under `deno check` the module — and every tool handler's arguments —
-// is `any`. The pragma routes the types through the extensionless subpath,
-// which the pattern does resolve; the runtime import keeps `.js` (change 81).
+// Every SDK subpath import is preceded by its `@ts-types` pragma: without it,
+// `deno check` reads the module — and every tool handler's arguments — as
+// `any` at SDK 1.29 and later (change 81 has the mechanism).
 const sdkTyped = (text: string) => {
   const imports = [...text.matchAll(/^(.*)\n(?:\s*)import (?:type )?[^\n]* from "@modelcontextprotocol\/sdk\/([\w/]+)\.js";/gm)];
   // Every SDK specifier in the file is one the line above matched — a multi-line, single-quoted or
@@ -923,12 +918,10 @@ for (const t of TEXT_ONLY) {
     const drift = Object.entries(imports).filter(([name, spec]) => name in pkg && spec !== `npm:${name}@${pkg[name]}`);
     assert(drift.length === 0, `${file} pins what package.json installs${drift.length ? ` (${drift.map(([n, s]) => `${n}: ${s}`).join(", ")})` : ""}`);
   }
-  // The core Edge Function's pin is server/deno.json, and server/package.json
-  // says it mirrors it exactly — nothing held it to that: its lock kept a nested
-  // zod 4.5.4 for the SDK while deno.json deployed 4.6.5, because package.json
-  // listed no zod (change 81's review). Every MCP-stack import of the one is in
-  // the other, at the same version; supabase-js is excepted — the Node suites
-  // never load it, and no installed package names it as a peer.
+  // server/package.json says it mirrors server/deno.json exactly; nothing held
+  // it to that until a nested zod 4.5.4 arrived in its lock (change 81's
+  // review). Every MCP-stack import of the one is in the other at the same
+  // version — supabase-js excepted: the Node suites never load it.
   {
     const imports = JSON.parse(readFileSync(join(ROOT, "server/deno.json"), "utf8")).imports as Record<string, string>;
     const dev = JSON.parse(readFileSync(join(ROOT, "server/package.json"), "utf8")).devDependencies as Record<string, string>;
@@ -938,26 +931,18 @@ for (const t of TEXT_ONLY) {
 }
 
 // ── The pinned transport, across a session ──────────────────────────────────
-// A transport reused across a session — the cost recipe's after sample keeps
-// one per session — must let go of each POST once it has answered it.
-// @hono/mcp 0.1.1 did not: it recorded every request's { ctx, stream } and
-// deleted the record only on abort or close(), so a session grew by one
-// Request and one Hono Context per tool call until the TTL sweep dropped it
-// (SMD-1607). 0.1.2 deletes the record when the response is sent; the pin
-// moved to 0.1.5 (change 80), then 0.3.2 with the SDK, hono and zod (change
-// 80). Collection is read through WeakRefs after a forced GC —
-// a FinalizationRegistry's callbacks arrive on the runtime's schedule. One
-// or two of N can stay reachable from the frames that answered them (a
-// conservative stack scan; the review's standalone copy of this loop read 98
-// of 100 twice in thirty rounds), so the bar is most of N, not all: at 0.1.1
-// none is released, and the distance between none and most is the mechanism.
+// A transport reused across a session (the after sample's shape) must let go
+// of each POST it answers; @hono/mcp 0.1.1 kept every one until close()
+// (SMD-1607; change 80, and the pin moved on with change 81). Read through
+// WeakRefs after a forced GC — a FinalizationRegistry's callbacks arrive on
+// the runtime's schedule — and asked for most of N, not all: one or two can
+// stay reachable from the frames that answered them, and at 0.1.1 none is
+// released (change 80's measurement).
 // ── The pinned SDK, one server and two transports ───────────────────────────
-// Change 78 fixed five servers that connect()ed one McpServer to a fresh
-// transport per request, which SDK 1.24.3 accepted silently and answered on
-// the wrong one. 1.26.0 (GHSA-345p-7cg4-v4c7, "sharing server/transport
-// instances can leak cross-client response data") made the second connect()
-// throw; the pin is 1.30.0 (change 81). So the shape the drift guard above
-// refuses is now also refused at the runtime, loudly, on the first overlap.
+// A second connect() on one server: SDK 1.24.3 overwrote the transport
+// silently (change 78's defect; GHSA-345p-7cg4-v4c7), 1.26.0 made it throw,
+// so the shape the drift guard above refuses is refused at the runtime too,
+// on the first overlap (change 81).
 console.log("\n[the pinned SDK, a second connect() on one server]");
 {
   const { StreamableHTTPTransport } = await import("@hono/mcp");
@@ -997,14 +982,10 @@ console.log("\n[the pinned @hono/mcp, one transport across a session]");
   const released = refs.filter((w) => w.deref() === undefined).length;
   assert(released >= N - 10, `…and the transport has let go of them: ${released}/${N} Request objects collected after GC, ${N - 10} or more wanted (0.1.1 kept every one until close())`);
 
-  // New at 0.3.x, absent at 0.1.x: every POST that is not itself an initialize
-  // is checked for the `mcp-protocol-version` header, whether or not the
-  // transport ever saw one (a stateless transport skips the session check, not
-  // this one) — absent it reads as 2025-03-26 and passes; one the SDK does not
-  // list is refused, with 404 and a "Bad Request" body. A client sends the
-  // version it negotiated at initialize, which the server chose from this
-  // list, so no known client meets the refusal; this holds the rule so a later
-  // bump that changes it is seen here, not in a connector.
+  // New at 0.3.x: every non-initialize POST is checked for `mcp-protocol-version`
+  // — absent it reads as 2025-03-26; a version the SDK does not list is refused
+  // 404. A client sends the version it negotiated, so no known client meets
+  // it; held so a bump that moves the rule is seen here first (change 81).
   const { LATEST_PROTOCOL_VERSION } = await import("@modelcontextprotocol/sdk/types.js");
   const versioned = (v: string) => answer((rq) => app.fetch(rq), new Request("http://session.test/mcp", { method: "POST", headers: { ...RPC, "mcp-protocol-version": v }, body: JSON.stringify({ ...LIST, id: N + 1 }) }));
   const known = await versioned(LATEST_PROTOCOL_VERSION);
