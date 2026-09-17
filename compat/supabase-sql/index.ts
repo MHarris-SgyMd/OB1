@@ -7,7 +7,7 @@
  * from upstream permanently.
  *
  * But the API surface they use is small and closed — under thirty methods, and
- * measurably so: `.from .select .insert .update .upsert .delete .rpc`, thirteen
+ * measurably so: `.from .select .insert .update .upsert .delete .rpc`, fourteen
  * filters, and seven modifiers (the README tables them). That is shimmable. With
  * this module a file migrates by changing one line:
  *
@@ -17,12 +17,46 @@
  * and passing a Postgres URL where it passed a project URL. The rest of the file
  * is untouched, which keeps it mergeable from upstream.
  *
- * ── What is deliberately NOT supported ───────────────────────────────────────
- * PostgREST resource embedding — `.select("*, other_table(*)")` — needs foreign
- * key introspection to become a join. Four of the 54 files use it. Rather than
- * guess and return subtly wrong rows, those selects throw with a message saying
- * so. Silently mishandling a join is exactly the failure class this migration has
- * been removing.
+ * ── The catalog (SMD-1588, FORK.md change 77) ────────────────────────────────
+ * PostgREST knows the schema; supabase-js callers lean on that without knowing
+ * it. A JavaScript array in a payload is a `text[]` literal for one column and
+ * a JSON array for the next (`tags TEXT[]` beside `instructions JSONB` in one
+ * insert), `.contains()` is array containment on the first and jsonb
+ * containment on the second, `.select("*, recipes:recipe_id (name)")` is a
+ * join PostgREST finds through the foreign key, and a `text[]` argument to
+ * `.rpc()` is an array literal because the function says so. Bun's driver
+ * serialises a value by the type the server describes for the parameter, and
+ * has no array-literal form: a JS array reaches a `text[]` column as its
+ * `String()` — `a,b`, or `""` for `[]` — and is refused as malformed. Value
+ * shape cannot decide any of these. So the shim reads the catalog the way
+ * PostgREST does — a table's column types, its foreign keys in both directions,
+ * a function's argument names and types — once per name per process, cached by
+ * connection URL (the servers create a client per request), and renders from
+ * that. Seven of the twenty-nine extension tools failed on these gaps when
+ * change 74's review drove them; two more surfaced when every argument branch
+ * was driven (a tag filter on a `text[]` column, an ingredient filter through
+ * `.or()`'s `cs`). A table that appears after the first read is seen on its
+ * first use (an empty answer is not kept); a column that appears is seen when
+ * a filter, an order, a payload or a select list names it (the map is re-read
+ * once) or when a row comes back carrying it (the next call's map is fresh);
+ * one dropped or retyped is not until the process restarts — PostgREST's own
+ * cache reloads on a signal, not on its own.
+ *
+ * ── Resource embedding, one hop ──────────────────────────────────────────────
+ * `.select("*, maintenance_tasks ( id, name )")`, `"*, recipes:recipe_id (name)"`
+ * and `"*, children(*)"` are served: the relation is a table with exactly one
+ * foreign key to or from this one, or a foreign-key column of this table; a
+ * many-to-one embed is an object (`null` when the key is), a one-to-many one an
+ * array (`[]` when empty) — or the one row where the referencing columns are
+ * unique, a one-to-one — keyed by the alias or the relation's name, as
+ * PostgREST keys them. Refused, with a message saying which: a nested embed, an
+ * embedding hint (`!inner`, `!fk_name`), a relation with no foreign key to this
+ * table or with more than one (name the column: `alias:fk_column (…)`), and an
+ * embed in a RETURNING list. The codemod's blockers refuse the two of these
+ * it can see in a file's text — a nested embed, a hint; whether a relation has
+ * one foreign key or two is the catalog's to say, at the first call. Silently
+ * mishandling a join is the failure class this migration has been removing, so
+ * nothing here guesses.
  *
  * Also unsupported, because nothing in the repo uses them: `.auth`, `.storage`,
  * `.channel`, `.functions.invoke`.
@@ -32,19 +66,25 @@
  * is accepted in the comparison filters, `is`, `in`, `match`, an `.or()` term
  * and `.order()`: rendered `"metadata"->>'key'`, the key a quoted literal, the
  * bound value cast to text, which is the text comparison PostgREST makes. Not
- * in `.contains()`, whose operator is jsonb's. A path ending in `->` (jsonb),
- * an array index (`->0`), and a path in a select list, a payload or a conflict
- * target are refused. Rows come back JSON-shaped as PostgREST's are in the one
- * respect a driven file needed: a timestamp is an ISO string, not Bun's Date.
- * The bio worker is the one shim-migrated file that filters on a JSON path and
- * the first whose code slices a timestamp; driven, it hit both — a 500 at its
- * first query, then at its prompt.
+ * in `.contains()`, whose operator is the column's. A path ending in `->`
+ * (jsonb), an array index (`->0`), and a path in a select list, a payload or a
+ * conflict target are refused. Rows come back JSON-shaped as PostgREST's are in
+ * the one respect a driven file needed: a timestamp is an ISO string, not
+ * Bun's Date. The bio worker is the one shim-migrated file that filters on a
+ * JSON path and the first whose code slices a timestamp; driven, it hit both —
+ * a 500 at its first query, then at its prompt.
  *
  * ── Error convention ─────────────────────────────────────────────────────────
  * supabase-js resolves with `{ data, error }` and does not throw. This matches
  * that exactly, including on SQL errors, so existing `if (error)` branches keep
- * working. Programming errors — an invalid identifier, an embedded select — throw,
- * because they are bugs in the caller rather than runtime conditions.
+ * working; the error is a `PostgrestError`, an `Error` subclass as supabase-js's
+ * is, so a file that does `if (error) throw error` hands its caller the message
+ * rather than `[object Object]` (two extension tools did). Programming errors —
+ * an invalid identifier, a nested embed, an `.or()` that begins with grouping —
+ * throw, because they are bugs in the caller rather than runtime conditions;
+ * what an `.or()` term asks for is the exception, because four tools build
+ * their expression from a user's text, so a term the shim cannot serve is
+ * PostgREST's 400 as `{ error }`.
  */
 
 import { SQL } from "bun";
@@ -63,6 +103,8 @@ function ident(name: string, what: string): string {
   return `"${trimmed}"`;
 }
 
+const refusal = (what: string) => new Error(`compat/supabase-sql: ${what}`);
+
 /**
  * A filter or ORDER BY column: a plain identifier, or PostgREST's JSON path —
  * `metadata->>generated_by`, `meta->nested->>level` — rendered with the column
@@ -79,7 +121,7 @@ function ident(name: string, what: string): string {
  * containment. An array index (`->0`) is not identifier-shaped and falls to
  * ident()'s refusal, as does a path anywhere but a comparison or an order: a
  * select list, a payload key, a conflict target, and `.contains()`, whose
- * operator is jsonb's (the file that wants containment under a key has
+ * operator is the column's (the file that wants containment under a key has
  * `.contains("meta", { key: … })`). SMD-1544 (FORK.md change
  * 73): the bio worker's source and profile queries filter on `metadata->>…`,
  * and ident()'s refusal was a 500 at the worker's first query on the fork.
@@ -93,8 +135,8 @@ function column(name: string): { sql: string; text: boolean } {
   const segments = m[2].match(/->>?[A-Za-z_][A-Za-z0-9_]*/g) ?? [];
   const last = segments[segments.length - 1];
   if (!last.startsWith("->>") || segments.slice(0, -1).some((s) => s.startsWith("->>"))) {
-    throw new Error(
-      `compat/supabase-sql: refusing to interpolate column "${name}". A JSON path must end in ->> ` +
+    throw refusal(
+      `refusing to interpolate column "${name}". A JSON path must end in ->> ` +
         `(the key's text): a path ending in -> yields jsonb, and what a bound value means against it ` +
         `depends on the value's JavaScript type. Use ->> to compare the text, or .contains() for containment.`
     );
@@ -117,42 +159,258 @@ function column(name: string): { sql: string; text: boolean } {
  * `timestamp without time zone` column is a Date to Bun too and arrives as a
  * `Z` instant (`2026-09-16T00:00:00.000Z` for a date) where PostgREST spells
  * `2026-09-16` and `2026-09-16T18:39:59.275494` — `.slice(0, 10)` agrees, an
- * equality against the bare date does not; no shim-migrated file reads one.
+ * equality against the bare date does not (change 73's rule; the `date` case
+ * is closed below for a table's rows and a function's, the zone-less
+ * timestamp's stays — no migrated file reads one).
  * Everything else stays as Bun returns it — ±Infinity for an infinite
  * timestamp, `Date(NaN)` for a BC date over a simple query (a parameterised
  * one hands a finite extended-year Date, which becomes
  * `-000043-03-15T00:00:00.000Z`; server-portable/store.ts's `isoTimestamp`
  * reads every one of these to the same result), numerics as text — nothing
- * driven has needed more.
+ * driven has needed more. Change 77 has the column map in hand for a table
+ * verb, and a `date` column's Date (UTC midnight, whatever the process's
+ * zone) becomes the bare date PostgREST gives — `2026-09-21` — because five
+ * extension tools read one (`week_start`, `follow_up_date`, `expected_close_
+ * date`, `last_used`) and an embedded row already carried that spelling:
+ * `row_to_json` builds it in the database, with Postgres's own spellings for
+ * every type, which is what PostgREST gives for an embed too. A function's
+ * rows take the map of what it declares — its OUT columns (`RETURNS TABLE`),
+ * the table it returns rows of (`RETURNS SETOF thoughts`), its one scalar —
+ * so the same `follow_up_date` is one shape whichever path a tool takes.
  */
-function jsonShaped(row: Record<string, unknown>): Record<string, unknown> {
+function jsonShaped(row: Record<string, unknown>, cols?: Columns): Record<string, unknown> {
   let out: Record<string, unknown> | null = null;
   for (const [k, v] of Object.entries(row)) {
-    if (v instanceof Date && Number.isFinite(v.getTime())) (out ??= { ...row })[k] = v.toISOString();
+    const type = cols?.get(k)?.type;
+    const shaped = (d: Date, t: string | undefined) => (t === "date" || t === "date[]" ? d.toISOString().slice(0, 10) : d.toISOString());
+    if (v instanceof Date && Number.isFinite(v.getTime())) {
+      (out ??= { ...row })[k] = shaped(v, type);
+    } else if (Array.isArray(v) && v.some((x) => x instanceof Date)) {
+      // A date[] or timestamptz[] column: each element as the scalar column would be.
+      (out ??= { ...row })[k] = v.map((x) => (x instanceof Date && Number.isFinite(x.getTime()) ? shaped(x, type) : x));
+    } else if (ArrayBuffer.isView(v) && !(v instanceof DataView) && (cols ? cols.get(k)?.category === "A" : !(v instanceof Uint8Array))) {
+      // Bun decodes an int[] column into an Int32Array, which JSON renders as {"0":1,"1":2}; PostgREST gives a list.
+      // With a column map, only an array column's; without one (a function's rows with no OUT columns), every view
+      // but a byte view — a bytea column's Buffer stays what Bun hands back either way.
+      (out ??= { ...row })[k] = Array.from(v as unknown as ArrayLike<number>);
+    }
   }
   return out ?? row;
 }
 
-/** `"id, content, metadata"` → `"id", "content", "metadata"`. Rejects embeds. */
-function columnList(cols: string): string {
-  const spec = cols.trim();
-  if (spec === "" || spec === "*") return "*";
-  if (/\(/.test(spec)) {
-    throw new Error(
-      `compat/supabase-sql: select("${spec}") uses PostgREST resource embedding, which ` +
-        `needs foreign-key introspection to become a SQL join and is not supported. ` +
-        `Write the join as an explicit .rpc() or a SQL view instead.`
-    );
+/**
+ * A JavaScript array as Postgres's array-literal text — `{"a","b"}`, `{}` —
+ * for a column or argument the catalog says is an array. Bun serialises a JS
+ * array parameter by the server-described type and has no literal form for
+ * one: `["a","b"]` reaches a `text[]` column as `a,b`, `[]` as `""`, and
+ * Postgres refuses both as malformed (22P02); an `int[]` fails in the wire
+ * protocol itself. Elements are double-quoted with `\` and `"` escaped, so
+ * a tag with a comma or a space survives; null (and undefined, as JSON has no
+ * word for it) is `NULL`, a nested array a nested literal, an object its JSON
+ * (a `jsonb[]` column), a Date its ISO instant. Bound with an explicit cast to
+ * the declared type.
+ */
+function arrayLiteral(values: unknown[]): string {
+  const element = (x: unknown): string => {
+    if (x === null || x === undefined) return "NULL";
+    if (Array.isArray(x)) return arrayLiteral(x);
+    const text = x instanceof Date ? x.toISOString() : typeof x === "object" ? JSON.stringify(x) : String(x);
+    return `"${text.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+  };
+  return `{${values.map(element).join(",")}}`;
+}
+
+// ── The catalog ──────────────────────────────────────────────────────────────
+
+type ColumnInfo = { type: string; category: string };
+type Columns = Map<string, ColumnInfo>;
+type ForeignKey = { name: string; from: string; fromCols: string[]; to: string; toCols: string[]; unique: boolean };
+type Overload = { names: string[]; types: string[]; categories: string[]; outs: Columns; returns: { type: string; category: string; table: string | null } };
+type CatalogStore = { columns: Map<string, Promise<Columns>>; absent: Map<string, Set<string>>; fks: Map<string, Promise<ForeignKey[]>>; fns: Map<string, Promise<Overload[]>> };
+
+/** One store per connection URL: the extension servers create a client per request, and the schema does not change between them. */
+const STORES = new Map<string, CatalogStore>();
+
+/**
+ * What PostgREST knows about the schema and a supabase-js caller leans on: a
+ * table's column types (which of them are arrays, which jsonb), its foreign
+ * keys in both directions, and a function's argument names and types. Each is
+ * read once per name per process and shared across clients on the same URL;
+ * a read that fails (the database unreachable) is not kept, so the next call
+ * tries again. A table or function that does not exist reads as empty, and
+ * the query that follows fails as it would have — 42P01, 42883 — resolved as
+ * `{ error }`.
+ */
+class Catalog {
+  private store: CatalogStore;
+
+  constructor(private sql: SQL, url: string) {
+    let store = STORES.get(url);
+    if (!store) STORES.set(url, (store = { columns: new Map(), absent: new Map(), fks: new Map(), fns: new Map() }));
+    this.store = store;
   }
-  return spec
-    .split(",")
-    .map((c) => {
-      const bare = c.trim();
-      // `count` is a PostgREST pseudo-column; callers use it via { count: "exact" }.
-      if (bare === "*") return "*";
-      return ident(bare, "column");
-    })
-    .join(", ");
+
+  /**
+   * One read per key, shared while it is in flight. A read that fails is
+   * not kept. Nor is an EMPTY answer — a table that does not exist yet (a
+   * server that took a request before its schema.sql was applied), a
+   * function not yet created — because a process that cached "no columns"
+   * would bind every array raw and route every `cs` to jsonb for its whole
+   * life; the next call reads again, and finds the schema when it is there.
+   */
+  private memo<T extends { size: number } | unknown[]>(map: Map<string, Promise<T>>, key: string, read: () => Promise<T>): Promise<T> {
+    let p = map.get(key);
+    if (!p) {
+      p = read();
+      map.set(key, p);
+      p.then((v) => { if ((Array.isArray(v) ? v.length : v.size) === 0) map.delete(key); }, () => map.delete(key));
+    }
+    return p;
+  }
+
+  /**
+   * The table's columns — read again when the caller names one the cached map
+   * lacks (`ALTER TABLE … ADD COLUMN tags text[]` under a running server: a
+   * map from before the column would bind the array raw for the process's
+   * life). A name the fresh read lacks either is the caller's mistake, and
+   * Postgres says so (42703), or is a JSON path's base, which is a column;
+   * it is remembered as absent, so a file filtering on a column its deployed
+   * schema does not have costs one re-read, not one per call for the life of
+   * the process (pass 2 measured 200 reads for 200 calls). A read that does
+   * find new columns forgets the absent names, since the schema moved — and
+   * so does a query that named an absent column and then failed with anything
+   * but "undefined column" (`forget()`, from execute): the column exists now
+   * and the map is stale, so the next call reads again. A column queried
+   * before the migration that adds it costs one failed call, not a restart.
+   */
+  async columnsOf(table: string, expect: Iterable<string> = []): Promise<Columns> {
+    const read = this.memo(this.store.columns, table, () => this.readColumns(table));
+    // One set per table, made before the await, so two callers naming two missing columns at once add to the same
+    // object rather than each writing its own back over the other's.
+    let absent = this.store.absent.get(table);
+    if (!absent) this.store.absent.set(table, (absent = new Set<string>()));
+    let cols = await read;
+    const missing = [...expect].filter((name) => cols.size > 0 && !cols.has(name) && !absent.has(name));
+    if (missing.length) {
+      // Twenty callers missing the same name share one re-read: only the caller whose map is still the current
+      // one drops it; the rest find the replacement already in flight.
+      if (this.store.columns.get(table) === read) this.store.columns.delete(table);
+      const fresh = await this.memo(this.store.columns, table, () => this.readColumns(table));
+      if (fresh.size > cols.size) absent.clear();
+      cols = fresh;
+      // Bounded: a comma in user text can inject a well-formed term with any column name (`x, foo.eq.1`), and the set
+      // is keyed by what callers name; past 64 names it starts over rather than growing with the traffic.
+      if (absent.size >= 64) absent.clear();
+      for (const name of missing) if (!cols.has(name)) absent.add(name);
+    }
+    return cols;
+  }
+
+  /** Whether any of these names is remembered as absent from the table — the query then runs on a map that skipped a refresh. */
+  skippedRefresh(table: string, names: Iterable<string>): boolean {
+    const absent = this.store.absent.get(table);
+    return !!absent && [...names].some((n) => absent.has(n));
+  }
+
+  /** Drop what is remembered about a table's columns; the next call reads them again. */
+  forget(table: string): void {
+    this.store.columns.delete(table);
+    this.store.absent.delete(table);
+  }
+
+  private readColumns(table: string): Promise<Columns> {
+    return (async () => {
+      const rows = (await this.sql.unsafe(
+        `SELECT a.attname AS name, format_type(a.atttypid, a.atttypmod) AS type, t.typcategory AS category
+           FROM pg_attribute a JOIN pg_type t ON t.oid = a.atttypid
+          WHERE a.attrelid = to_regclass($1) AND a.attnum > 0 AND NOT a.attisdropped`,
+        [ident(table, "table")] as never[]
+      )) as unknown as { name: string; type: string; category: string }[];
+      return new Map(rows.map((r) => [r.name, { type: r.type, category: r.category }]));
+    })();
+  }
+
+  /**
+   * Every foreign key this table takes part in, as the referencing and the
+   * referenced side, by relation name — of tables the search path resolves,
+   * so a name here is the one table `FROM "name"` will reach. A same-named
+   * table in a schema behind the visible one is left out rather than counted
+   * under the visible one's name (the silent wrong join this change exists
+   * to avoid).
+   */
+  foreignKeysOf(table: string): Promise<ForeignKey[]> {
+    return this.memo(this.store.fks, table, async () => {
+      const rows = (await this.sql.unsafe(
+        `SELECT c.conname AS name, f.relname AS "from", t.relname AS "to",
+                (SELECT array_agg(a.attname ORDER BY k.ord) FROM unnest(c.conkey) WITH ORDINALITY k(attnum, ord)
+                   JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum) AS from_cols,
+                (SELECT array_agg(a.attname ORDER BY k.ord) FROM unnest(c.confkey) WITH ORDINALITY k(attnum, ord)
+                   JOIN pg_attribute a ON a.attrelid = c.confrelid AND a.attnum = k.attnum) AS to_cols,
+                EXISTS (SELECT 1 FROM pg_index i WHERE i.indrelid = c.conrelid AND i.indisunique AND i.indisvalid AND i.indpred IS NULL AND i.indexprs IS NULL
+                          AND (SELECT array_agg(x.v ORDER BY x.v) FROM unnest(i.indkey::int2[]) WITH ORDINALITY x(v, ord) WHERE x.ord <= i.indnkeyatts)
+                              = (SELECT array_agg(x ORDER BY x) FROM unnest(c.conkey) x)) AS "unique"
+           FROM pg_constraint c JOIN pg_class f ON f.oid = c.conrelid JOIN pg_class t ON t.oid = c.confrelid
+          WHERE c.contype = 'f' AND (c.conrelid = to_regclass($1) OR c.confrelid = to_regclass($1))
+            AND pg_table_is_visible(f.oid) AND pg_table_is_visible(t.oid)`,
+        [ident(table, "table")] as never[]
+      )) as unknown as { name: string; from: string; to: string; from_cols: string[]; to_cols: string[]; unique: boolean }[];
+      return rows.map((r) => ({ name: r.name, from: r.from, fromCols: r.from_cols, to: r.to, toCols: r.to_cols, unique: r.unique }));
+    });
+  }
+
+  /**
+   * Each overload of a function on the search path: its IN argument names,
+   * declared types and type categories, in order — and its OUT columns (a
+   * `RETURNS TABLE` function's, an OUT parameter's) as a column map, so the
+   * rows a function answers are shaped as a table's are (a `date` column the
+   * bare date): `crm_search_contacts` answers through a function on one path
+   * and through the table on another, and PostgREST gives one shape.
+   */
+  argTypesOf(fn: string): Promise<Overload[]> {
+    return this.memo(this.store.fns, fn, async () => {
+      const rows = (await this.sql.unsafe(
+        `SELECT p.proargnames::text[] AS names, p.proargmodes::text[] AS modes,
+                (SELECT array_agg(format_type(u.t, NULL) ORDER BY u.ord) FROM unnest(p.proargtypes) WITH ORDINALITY u(t, ord)) AS types,
+                (SELECT array_agg(y.typcategory::text ORDER BY u.ord) FROM unnest(p.proargtypes) WITH ORDINALITY u(t, ord) JOIN pg_type y ON y.oid = u.t) AS categories,
+                (SELECT array_agg(format_type(u.t, NULL) ORDER BY u.ord) FROM unnest(p.proallargtypes) WITH ORDINALITY u(t, ord)) AS all_types,
+                (SELECT array_agg(y.typcategory::text ORDER BY u.ord) FROM unnest(p.proallargtypes) WITH ORDINALITY u(t, ord) JOIN pg_type y ON y.oid = u.t) AS all_categories,
+                format_type(p.prorettype, NULL) AS ret_type, rt.typcategory::text AS ret_category,
+                CASE WHEN rt.typtype = 'c' AND rc.relkind IN ('r', 'v', 'm', 'p', 'c') AND pg_table_is_visible(rc.oid) THEN rc.relname END AS ret_table
+           FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+                JOIN pg_type rt ON rt.oid = p.prorettype LEFT JOIN pg_class rc ON rc.oid = rt.typrelid
+          WHERE p.proname = $1 AND n.nspname = ANY (current_schemas(true))`,
+        [fn.trim()] as never[]
+      )) as unknown as { names: string[] | null; modes: string[] | null; types: string[] | null; categories: string[] | null; all_types: string[] | null; all_categories: string[] | null; ret_type: string; ret_category: string; ret_table: string | null }[];
+      return rows.map((r) => {
+        // proargnames covers OUT arguments too (a RETURNS TABLE function's columns); proargtypes only the IN ones;
+        // proallargtypes every one, in proargnames' order, when any is OUT.
+        const names = (r.names ?? []).filter((_, i) => !r.modes || ["i", "b", "v"].includes(r.modes[i]));
+        const outs: Columns = new Map();
+        (r.names ?? []).forEach((name, i) => {
+          if (r.modes && ["o", "t", "b"].includes(r.modes[i]) && r.all_types?.[i]) outs.set(name, { type: r.all_types[i], category: r.all_categories?.[i] ?? "" });
+        });
+        return { names, types: r.types ?? [], categories: r.categories ?? [], outs, returns: { type: r.ret_type, category: r.ret_category, table: r.ret_table } };
+      });
+    });
+  }
+}
+
+/**
+ * The bound form of a value for a column or argument of a known type: a JS
+ * array as an array literal with a cast where the type is an array; for a
+ * `vector` argument, JSON text (`[1,0,0]`), which Postgres coerces where a
+ * Postgres array literal is not valid vector input — the shape `.rpc()`
+ * always sent an embedding in; everything else as it is (an object or an
+ * array for a `jsonb` column is serialised by the driver correctly, and MUST
+ * NOT be pre-stringified — Bun binds a JS string to jsonb as a JSON scalar
+ * string, the double-encoding trap db/migrations/005 rejects at the database).
+ */
+function bound(info: ColumnInfo | undefined, v: unknown): { value: unknown; cast: string } {
+  // By the type's category, not its name: a domain over `text[]` is category A under its own name.
+  if (Array.isArray(v) && info?.category === "A") return { value: arrayLiteral(v), cast: `::${info.type}` };
+  // `vector` for an argument; `vector(1536)` for a column (format_type carries the typmod).
+  if (Array.isArray(v) && /^vector(\(\d+\))?$/.test(info?.type ?? "")) return { value: JSON.stringify(v), cast: "" };
+  return { value: v, cast: "" };
 }
 
 /**
@@ -162,26 +420,95 @@ function columnList(cols: string): string {
  * "ERR_POSTGRES_SERVER_ERROR" in `code`. PostgREST puts the SQLSTATE in `code`,
  * and recipes branch on it — `error.code === "23505"` for a duplicate key is a
  * common pattern. Map it across, or every one of those branches silently stops
- * matching.
+ * matching. The result extends `Error`, as supabase-js's `PostgrestError`
+ * does: a file that does `if (error) throw error` hands the MCP SDK (or any
+ * caller) an `Error` whose message is the database's, where a plain object
+ * rendered as `[object Object]` and hid every real message.
  */
-function toPostgrestError(e: unknown): { message: string; code?: string } {
-  const err = e as { message?: string; code?: string; errno?: string | number; detail?: string };
-  const sqlstate = err?.errno !== undefined ? String(err.errno) : undefined;
-  return {
-    message: err?.message ?? String(e),
-    // Prefer the SQLSTATE; fall back to Bun's marker when there is no server error.
-    code: /^[0-9A-Z]{5}$/.test(sqlstate ?? "") ? sqlstate : err?.code,
-  };
+export class PostgrestError extends Error {
+  code?: string;
+  details?: string;
+  hint?: string;
+  constructor(message: string, fields: { code?: string; details?: string; hint?: string } = {}) {
+    super(message);
+    this.name = "PostgrestError";
+    if (fields.code !== undefined) this.code = fields.code;
+    if (fields.details !== undefined) this.details = fields.details;
+    if (fields.hint !== undefined) this.hint = fields.hint;
+  }
 }
 
-type Filter = { sql: string; values: unknown[] };
+function toPostgrestError(e: unknown): PostgrestError {
+  const err = e as { message?: string; code?: string; errno?: string | number; detail?: string; hint?: string };
+  const sqlstate = err?.errno !== undefined ? String(err.errno) : undefined;
+  return new PostgrestError(err?.message ?? String(e), {
+    // Prefer the SQLSTATE; fall back to Bun's marker when there is no server error.
+    code: /^[0-9A-Z]{5}$/.test(sqlstate ?? "") ? sqlstate : err?.code,
+    details: err?.detail,
+    hint: err?.hint,
+  });
+}
+
+/** A caller bug — a bad identifier, a nested embed — thrown by the shim itself, not a database condition. */
+const isRefusal = (e: unknown) => e instanceof Error && e.message.startsWith("compat/supabase-sql:");
+
+// ── The select list ──────────────────────────────────────────────────────────
+
+type SelectItem =
+  | { kind: "star" }
+  | { kind: "column"; sql: string }
+  | { kind: "embed"; key: string; relation: string; cols: string[] | "*" };
+
+/**
+ * PostgREST's select list: `*`, columns, and one hop of resource embedding —
+ * `relation (cols)`, `alias:relation (cols)`, `relation(*)` — the relation
+ * being a table or a foreign-key column of this one, whitespace anywhere
+ * (`maintenance_tasks (\n id,\n name\n )` is the tree's spelling). What is
+ * refused is refused here, at the call, as a programming error: a nested
+ * embed, an embedding hint (`!inner`, `!fk_name`, which choose a join or a
+ * key the shim would otherwise have to guess), a cast or a JSON path in the
+ * list (ident() refuses those, as before).
+ */
+function parseSelect(spec: string): SelectItem[] {
+  const trimmed = spec.trim();
+  if (trimmed === "" || trimmed === "*") return [{ kind: "star" }];
+  if (/\([^()]*\(/.test(trimmed)) throw refusal(`select("${spec}") nests one resource embedding inside another, which is not supported — one hop is; write the deeper join as an .rpc() or a SQL view.`);
+  if (/!/.test(trimmed)) throw refusal(`select("${spec}") uses a PostgREST embedding hint (!inner, !fk_name), which is not supported — name the foreign-key column instead: alias:fk_column (…).`);
+  // Split on the commas outside parentheses.
+  const items: string[] = [];
+  let depth = 0, start = 0;
+  for (let i = 0; i < trimmed.length; i++) {
+    const ch = trimmed[i];
+    if (ch === "(") depth++;
+    else if (ch === ")") depth--;
+    else if (ch === "," && depth === 0) { items.push(trimmed.slice(start, i)); start = i + 1; }
+  }
+  items.push(trimmed.slice(start));
+  return items.map((raw): SelectItem => {
+    const item = raw.trim();
+    if (item === "*") return { kind: "star" };
+    const embed = /^([A-Za-z_][A-Za-z0-9_]*)(?:\s*:\s*([A-Za-z_][A-Za-z0-9_]*))?\s*\(([^()]*)\)$/.exec(item);
+    if (embed) {
+      const [, first, second, inner] = embed;
+      const cols = inner.trim() === "*" ? "*" : inner.split(",").map((c) => c.trim()).filter(Boolean);
+      if (cols !== "*") for (const c of cols) ident(c, "embedded column");
+      if (cols !== "*" && cols.length === 0) throw refusal(`select("${spec}") embeds "${first}" with no columns — name them, or (*).`);
+      return second ? { kind: "embed", key: first, relation: second, cols } : { kind: "embed", key: first, relation: first, cols };
+    }
+    if (/\(|\)/.test(item)) throw refusal(`select("${spec}"): "${item}" is not a column or a one-hop embed (relation (cols) or alias:relation (cols)).`);
+    return { kind: "column", sql: ident(item, "column") };
+  });
+}
+
+type Filter = (cols: Columns) => { sql: string; values: unknown[] };
 type Op = "select" | "insert" | "update" | "upsert" | "delete";
 
+/** `error` is a PostgrestError at runtime (change 77); the type stays the structural one migrated files were written against. */
 export type Result<T> = { data: T | null; error: { message: string; code?: string } | null; count: number | null };
 
 export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<Result<T>> {
   private op: Op = "select";
-  private cols = "*";
+  private items: SelectItem[] = [{ kind: "star" }];
   private filters: Filter[] = [];
   private orderBy: string[] = [];
   private limitN: number | null = null;
@@ -191,15 +518,22 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
   private wantCount: "exact" | null = null;
   private headOnly = false;
   private rowMode: "many" | "single" | "maybeSingle" = "many";
+  /** The columns the filters, the order and the payload name — what the catalog's map must know (see columnsOf). */
+  private named = new Set<string>();
 
-  constructor(private sql: SQL, private table: string) {}
+  constructor(private sql: SQL, private catalog: Catalog, private table: string) {}
+
+  private names(col: string): void {
+    const base = /^([A-Za-z_][A-Za-z0-9_]*)/.exec(col.trim())?.[1];
+    if (base) this.named.add(base);
+  }
 
   // ── verbs ──────────────────────────────────────────────────────────────────
 
   select(cols = "*", opts?: { count?: "exact" | "planned" | "estimated"; head?: boolean }): this {
-    // `.select()` after insert/update/delete means RETURNING, not a new query.
-    if (this.op === "select") this.op = "select";
-    this.cols = columnList(cols);
+    // `.select()` after insert/update/delete means RETURNING, not a new query: the verb stands, only the list moves.
+    this.items = parseSelect(cols);
+    for (const item of this.items) if (item.kind === "column") this.names(item.sql.slice(1, -1));
     if (opts?.count) this.wantCount = "exact";
     if (opts?.head) this.headOnly = true;
     return this;
@@ -234,114 +568,231 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
 
   // ── filters ────────────────────────────────────────────────────────────────
 
-  private cmp(col: string, operator: string, value: unknown): this {
-    const c = column(col);
-    this.filters.push({ sql: `${c.sql} ${operator} ${c.text ? "?::text" : "?"}`, values: [value] });
-    return this;
-  }
-
-  eq(c: string, v: unknown) { return this.cmp(c, "=", v); }
-  neq(c: string, v: unknown) { return this.cmp(c, "<>", v); }
-  gt(c: string, v: unknown) { return this.cmp(c, ">", v); }
-  gte(c: string, v: unknown) { return this.cmp(c, ">=", v); }
-  lt(c: string, v: unknown) { return this.cmp(c, "<", v); }
-  lte(c: string, v: unknown) { return this.cmp(c, "<=", v); }
-  like(c: string, v: string) { return this.cmp(c, "LIKE", v); }
-  ilike(c: string, v: string) { return this.cmp(c, "ILIKE", v); }
-
-  is(c: string, v: null | boolean): this {
-    // `IS` takes a literal, not a parameter.
-    const lit = v === null ? "NULL" : v ? "TRUE" : "FALSE";
-    this.filters.push({ sql: `${column(c).sql} IS ${lit}`, values: [] });
-    return this;
-  }
-
-  in(c: string, values: unknown[]): this {
-    if (values.length === 0) {
-      // Matches PostgREST: in.() selects nothing. The column is not read, so an unrenderable one is not refused here.
-      this.filters.push({ sql: "FALSE", values: [] });
-      return this;
-    }
-    const col = column(c);
-    this.filters.push({
-      sql: `${col.sql} IN (${values.map(() => (col.text ? "?::text" : "?")).join(", ")})`,
-      values: [...values],
-    });
-    return this;
-  }
+  private static readonly CMP: Record<string, string> = {
+    eq: "=", neq: "<>", gt: ">", gte: ">=", lt: "<", lte: "<=", like: "LIKE", ilike: "ILIKE",
+  };
 
   /**
-   * jsonb containment — PostgREST's `.contains()` on a jsonb column is `@>`.
-   *
-   * The value is bound as an OBJECT, never a pre-stringified one. Bun.sql sends a
-   * JS string to a jsonb parameter as a JSON scalar string, so `JSON.stringify()`
-   * here would make the comparison `object @> string`, which is always false and
-   * returns zero rows with no error. That is the same double-encoding trap
-   * db/migrations/005 rejects at the database.
+   * One PostgREST filter term, `column.operator.value`, as a clause — rendered
+   * when the query compiles, because `cs` (containment) is the column's
+   * operator: `@>` on a `text[]` column with an array literal, `@>` on a jsonb
+   * one with the value bound as an object (never a pre-stringified one — Bun
+   * binds a JS string to a jsonb parameter as a JSON scalar string, so
+   * `object @> string` is always false with no error; the same trap
+   * db/migrations/005 rejects). `negate` is `.not()`'s: `IS NOT` for `is`, and
+   * `NOT (…)` around everything else, which is how PostgREST renders
+   * `not.eq.1` too (`NOT (x = 1)`, not `x <> 1` — they differ on NULL).
    */
-  contains(c: string, v: Record<string, unknown> | unknown[] | string): this {
-    this.filters.push({
-      sql: `${ident(c, "column")} @> ?::jsonb`,
-      values: [typeof v === "string" ? v : (v as unknown)],
-    });
-    return this;
+  private term(col: string, operator: string, value: unknown, negate = false): Filter {
+    // `in.()` selects nothing without reading the column, so the column is not one this query names: a name that
+    // never reaches the SQL must not drive the catalog's refresh (or its forget-on-success, which would re-read
+    // the table on every such call against a column it lacks).
+    if (operator === "in" && Array.isArray(value) && value.length === 0 && !negate) return () => ({ sql: "FALSE", values: [] });
+    this.names(col);
+    const not = (sql: string) => (negate ? `NOT (${sql})` : sql);
+    if (operator === "is") {
+      const lit = value === null || value === "null" ? "NULL" : value === true || value === "true" ? "TRUE" : value === false || value === "false" ? "FALSE" : null;
+      if (lit === null) throw refusal(`is(${String(value)}) must be null, true or false`);
+      const c = column(col);
+      return () => ({ sql: `${c.sql} IS ${negate ? "NOT " : ""}${lit}`, values: [] });
+    }
+    if (operator === "in") {
+      if (!Array.isArray(value)) throw refusal(`in() takes an array of values`);
+      if (value.length === 0) {
+        // Matches PostgREST: the negation of in.() selects every row whose column is not NULL (`NOT (x = ANY('{}'))`
+        // is NULL for a NULL x); the positive form returned above, before the column was counted as named.
+        return () => ({ sql: `${column(col).sql} IS NOT NULL`, values: [] });
+      }
+      const c = column(col);
+      return (cols) => {
+        const b = value.map((v) => bound(cols.get(col.trim()), v));
+        return { sql: not(`${c.sql} IN (${b.map((x) => (c.text ? "?::text" : `?${x.cast}`)).join(", ")})`), values: b.map((x) => x.value) };
+      };
+    }
+    if (operator === "cs") {
+      const name = col.trim();
+      const c = ident(name, "column");
+      return (cols) => {
+        const info = cols.get(name);
+        if (info?.category === "A") {
+          // An array column: the caller's array, or the literal text PostgREST's `cs.{a,b}` carries.
+          const v = Array.isArray(value) ? arrayLiteral(value) : value;
+          return { sql: not(`${c} @> ?::${info.type}`), values: [v] };
+        }
+        // jsonb: an object or array is bound as such; `.or()`'s text is parsed to one first (a string would be a JSON scalar).
+        let v = value;
+        if (typeof value === "string") {
+          // Text reaches here from or() only, where it may be a user's: PostgREST's 400, resolved as { error }.
+          try { v = JSON.parse(value); } catch { throw new PostgrestError(`PGRST100: cs.${value} is not JSON, and "${col}" is ${info ? "not an array column" : "not a column the table has"}`, { code: "PGRST100" }); }
+        }
+        return { sql: not(`${c} @> ?::jsonb`), values: [v] };
+      };
+    }
+    const sqlOp = QueryBuilder.CMP[operator];
+    if (!sqlOp) throw refusal(`operator "${operator}" is not supported`);
+    const c = column(col);
+    // A JS array against an array column (`eq.{a,b}` in PostgREST) is the literal too — the same binding the payloads get.
+    return (cols) => {
+      const b = bound(cols.get(col.trim()), value);
+      return { sql: not(`${c.sql} ${sqlOp} ${c.text ? "?::text" : `?${b.cast}`}`), values: [b.value] };
+    };
   }
+
+  private where(f: Filter): this { this.filters.push(f); return this; }
+
+  eq(c: string, v: unknown) { return this.where(this.term(c, "eq", v)); }
+  neq(c: string, v: unknown) { return this.where(this.term(c, "neq", v)); }
+  gt(c: string, v: unknown) { return this.where(this.term(c, "gt", v)); }
+  gte(c: string, v: unknown) { return this.where(this.term(c, "gte", v)); }
+  lt(c: string, v: unknown) { return this.where(this.term(c, "lt", v)); }
+  lte(c: string, v: unknown) { return this.where(this.term(c, "lte", v)); }
+  like(c: string, v: string) { return this.where(this.term(c, "like", v)); }
+  ilike(c: string, v: string) { return this.where(this.term(c, "ilike", v)); }
+  is(c: string, v: null | boolean) { return this.where(this.term(c, "is", v)); }
+  in(c: string, values: unknown[]) { return this.where(this.term(c, "in", values)); }
+
+  /**
+   * Containment — PostgREST's `.contains()` is `@>` with the column's own
+   * operator: array containment on a `text[]` column (`tags @> '{"ai"}'`), jsonb
+   * containment on a jsonb one (`metadata @> '{"k": 1}'`). Which, the catalog
+   * says at compile time; the tree has both (`recipes.tags`, `thoughts.metadata`).
+   */
+  contains(c: string, v: Record<string, unknown> | unknown[] | string) { return this.where(this.term(c, "cs", v)); }
+
+  /**
+   * PostgREST's `.not(column, operator, value)` — the negation of the named
+   * filter: `not("next_due", "is", null)` is `next_due IS NOT NULL`; the other
+   * operators are wrapped in `NOT (…)`. The two calls in the tree are both
+   * `is` null (SMD-1588; the method did not exist, and two tools answered
+   * `.not is not a function`).
+   */
+  not(c: string, operator: string, v: unknown) { return this.where(this.term(c, operator, v, true)); }
 
   /**
    * PostgREST's `.or("a.gt.1,b.is.null")` — a flat list of `column.op.value`
-   * terms combined with OR.
+   * terms combined with OR; `cs` among the operators (`ingredients.cs.[{"name":"x"}]`).
    *
-   * Only the flat form is supported. PostgREST also allows nesting —
-   * `or(and(a.eq.1,b.eq.2),c.eq.3)` — which needs a real parser, and every `.or()`
-   * in this repo is flat. Anything else throws rather than being half-understood.
+   * Read as PostgREST reads it, term by term: a column (a name or a JSON
+   * path) up to the first dot, an operator up to the next, then a value —
+   * a balanced `[…]` or `{…}` group when it starts with one (a `cs` value's
+   * JSON or array literal, brackets and quotes inside it belonging to it), a
+   * double-quoted string when it starts with `"` (PostgREST's quoting), or
+   * plain text up to the next comma; `col.not.op.value` negates as
+   * PostgREST's does. Plain text is split at a comma and nothing else — a
+   * quote, a parenthesis or a bracket in an ILIKE pattern is pattern text
+   * (four tools interpolate user text into their expression:
+   * `name.ilike.%${query}%,…`), and a plain comma in that text splits a term
+   * PostgREST cannot parse either. That term, a group nothing closes, and
+   * whatever a comma-made term asks of term() that it refuses (`v1.2.3` reads
+   * as operator "2") resolve as `{ error }` with PostgREST's `PGRST100` at
+   * execution — the tool's own error handling sees it — while the terms that
+   * did parse stay parameterised. Only the flat form is supported: an
+   * expression that BEGINS with `and(…)`/`or(…)`/`not.and(…)` grouping, which
+   * needs a real parser, is a programming error in the file's own text and
+   * throws at the call; the same words anywhere later are a user's (`x, and
+   * (y`) and are the 400. Every `.or()` in the tree is flat.
    */
   or(expression: string): this {
-    if (/\band\s*\(|\bor\s*\(/.test(expression)) {
-      throw new Error(
-        `compat/supabase-sql: or("${expression}") uses nested and()/or() grouping, ` +
-          `which is not supported. Express it as an .rpc() or split the query.`
-      );
+    type Term = { col: string; op: string; value: string; negate: boolean } | { broken: string };
+    const terms: Term[] = [];
+    let i = 0;
+    const n = expression.length;
+    while (i <= n) {
+      const termStart = i;
+      const firstDot = expression.indexOf(".", i);
+      const head = expression.slice(i, firstDot < 0 ? n : firstDot).trim();
+      // Grouping is a programming error only where the file's own text begins with it; later in the expression a
+      // term start is whatever a comma in a plain value left behind (`x, and (y` typed by a user) — that is the 400.
+      if (termStart === 0 && /^(?:not\.)?(?:and|or)\s*\(/.test(expression.trimStart())) {
+        throw refusal(
+          `or("${expression}") uses nested and()/or() grouping, ` +
+            `which is not supported. Express it as an .rpc() or split the query.`
+        );
+      }
+      const secondDot = firstDot < 0 ? -1 : expression.indexOf(".", firstDot + 1);
+      // A term is `column.op.value`, the column a name or a JSON path. Anything else here is what a comma in a
+      // previous plain value left behind (` Salt%,category` — user text) — the broken term, up to the next comma.
+      if (firstDot < 0 || secondDot < 0 || !/^[A-Za-z_][A-Za-z0-9_]*(?:->>?[A-Za-z_][A-Za-z0-9_]*)*$/.test(head)) {
+        const stop = expression.indexOf(",", i);
+        terms.push({ broken: expression.slice(termStart, stop < 0 ? n : stop).trim() });
+        i = stop < 0 ? n + 1 : stop + 1;
+        continue;
+      }
+      const col = head;
+      let op = expression.slice(firstDot + 1, secondDot).trim();
+      let j = secondDot + 1;
+      let negate = false;
+      if (op === "not") {
+        // PostgREST's negation inside or(): `col.not.eq.1`, `col.not.is.null`.
+        const thirdDot = expression.indexOf(".", j);
+        if (thirdDot < 0) { const stop = expression.indexOf(",", i); terms.push({ broken: expression.slice(termStart, stop < 0 ? n : stop).trim() }); i = stop < 0 ? n + 1 : stop + 1; continue; }
+        op = expression.slice(j, thirdDot).trim();
+        negate = true;
+        j = thirdDot + 1;
+      }
+      let value: string;
+      const open = expression[j];
+      if (open === "[" || open === "{") {
+        // A balanced group: brackets and braces nest, a double-quoted string inside it may hold anything.
+        let depth = 0, quoted = false, k = j;
+        for (; k < n; k++) {
+          const ch = expression[k];
+          if (quoted) { if (ch === "\\") k++; else if (ch === '"') quoted = false; continue; }
+          if (ch === '"') quoted = true;
+          else if (ch === "[" || ch === "{") depth++;
+          else if (ch === "]" || ch === "}") { depth--; if (depth === 0) { k++; break; } }
+        }
+        if (depth !== 0) { terms.push({ broken: expression.slice(termStart).trim() }); break; }
+        value = expression.slice(j, k);
+        j = k;
+      } else if (open === '"') {
+        // PostgREST's quoted value: to the closing quote, a backslash escaping the next character.
+        let k = j + 1;
+        for (; k < n && expression[k] !== '"'; k++) if (expression[k] === "\\") k++;
+        if (k >= n) { terms.push({ broken: expression.slice(termStart).trim() }); break; }
+        value = expression.slice(j + 1, k).replace(/\\(.)/g, "$1");
+        j = k + 1;
+      } else {
+        const stop = expression.indexOf(",", j);
+        value = expression.slice(j, stop < 0 ? n : stop);
+        j = stop < 0 ? n : stop;
+      }
+      // After a group or a quoted value only a comma or the end may follow.
+      const rest = expression.slice(j).match(/^\s*(,|$)/);
+      if (!rest) { const stop = expression.indexOf(",", j); terms.push({ broken: expression.slice(termStart, stop < 0 ? n : stop).trim() }); i = stop < 0 ? n + 1 : stop + 1; continue; }
+      terms.push({ col, op, value, negate });
+      i = j + rest[0].length + (rest[1] === "," ? 0 : 1);
+      if (rest[1] !== ",") break;
     }
-
-    const ops: Record<string, string> = {
-      eq: "=", neq: "<>", gt: ">", gte: ">=", lt: "<", lte: "<=", like: "LIKE", ilike: "ILIKE",
-    };
-    const values: unknown[] = [];
-    const terms = expression.split(",").map((raw) => {
-      const term = raw.trim();
-      const firstDot = term.indexOf(".");
-      const secondDot = term.indexOf(".", firstDot + 1);
-      if (firstDot < 1 || secondDot < 0) {
-        throw new Error(`compat/supabase-sql: or() term "${term}" is not column.operator.value`);
+    const badRequest = (what: string) => (): never => { throw new PostgrestError(`PGRST100: ${what} in or("${expression}") — PostgREST answers 400 here too`, { code: "PGRST100" }); };
+    const filters = terms.map((t): Filter => {
+      // PostgREST answers 400 to a term it cannot parse; so does this, at execution, as { error } — never a throw
+      // out of a tool's handler for text a user typed. The same for what a comma-made term asks of term(): an
+      // operator that is not one (`v1.2.3` → operator "2"), `in`, a `cs` value that is not JSON.
+      if ("broken" in t) return badRequest(`"${t.broken}" is not column.operator.value (a comma or an unclosed group in a value)`);
+      if (t.op === "in") return badRequest(`operator "in" is not supported in an or() term`);
+      try {
+        return this.term(t.col, t.op, t.value, t.negate);
+      } catch (e) {
+        return badRequest(e instanceof Error ? e.message.replace(/^compat\/supabase-sql: /, "") : String(e));
       }
-      const col = column(term.slice(0, firstDot));
-      const op = term.slice(firstDot + 1, secondDot);
-      const value = term.slice(secondDot + 1);
-
-      if (op === "is") {
-        const lit = value === "null" ? "NULL" : value === "true" ? "TRUE" : value === "false" ? "FALSE" : null;
-        if (lit === null) throw new Error(`compat/supabase-sql: or() "is.${value}" must be null, true or false`);
-        return `${col.sql} IS ${lit}`;
-      }
-      const sqlOp = ops[op];
-      if (!sqlOp) throw new Error(`compat/supabase-sql: or() operator "${op}" is not supported`);
-      values.push(value);
-      return `${col.sql} ${sqlOp} ${col.text ? "?::text" : "?"}`;
     });
-
-    this.filters.push({ sql: `(${terms.join(" OR ")})`, values });
-    return this;
+    return this.where((cols) => {
+      const rendered = filters.map((f) => f(cols));
+      return { sql: `(${rendered.map((r) => r.sql).join(" OR ")})`, values: rendered.flatMap((r) => r.values) };
+    });
   }
 
   /** Equality across several columns at once. */
   match(criteria: Record<string, unknown>): this {
-    for (const [c, v] of Object.entries(criteria)) this.cmp(c, "=", v);
+    for (const [c, v] of Object.entries(criteria)) this.eq(c, v);
     return this;
   }
 
   // ── modifiers ──────────────────────────────────────────────────────────────
 
   order(col: string, opts?: { ascending?: boolean; nullsFirst?: boolean }): this {
+    this.names(col);
     const dir = opts?.ascending === false ? "DESC" : "ASC";
     const nulls = opts?.nullsFirst === undefined ? "" : opts.nullsFirst ? " NULLS FIRST" : " NULLS LAST";
     this.orderBy.push(`${column(col).sql} ${dir}${nulls}`);
@@ -362,49 +813,109 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
 
   // ── compilation ────────────────────────────────────────────────────────────
 
-  /** Renders `?` placeholders as $1..$n in order. */
-  private render(parts: string, values: unknown[]): { text: string; values: unknown[] } {
-    let i = 0;
-    return { text: parts.replace(/\?/g, () => `$${++i}`), values };
-  }
-
-  private whereClause(startAt: number): { text: string; values: unknown[] } {
+  private whereClause(cols: Columns, startAt: number): { text: string; values: unknown[] } {
     if (this.filters.length === 0) return { text: "", values: [] };
     const values: unknown[] = [];
     let i = startAt;
     const clauses = this.filters.map((f) => {
-      const rendered = f.sql.replace(/\?/g, () => `$${++i}`);
-      values.push(...f.values);
-      return rendered;
+      const r = f(cols);
+      values.push(...r.values);
+      return r.sql.replace(/\?/g, () => `$${++i}`);
     });
     return { text: ` WHERE ${clauses.join(" AND ")}`, values };
   }
 
-  private build(): { text: string; values: unknown[] } {
-    const t = ident(this.table, "table");
+  /**
+   * One embed as a correlated subquery. The relation is a foreign-key column of
+   * this table (`recipes:recipe_id (…)`: many-to-one through that key), or a
+   * table with exactly one foreign key between the two, in either direction —
+   * this table's key to it is many-to-one, its key to this table one-to-many.
+   * Many-to-one is `row_to_json` of the one row (NULL when the key is), keyed
+   * as the alias; one-to-many is `json_agg` of the rows, `[]` when there are
+   * none — unless the referencing columns carry a unique index, a one-to-one,
+   * which is the one row again — PostgREST's shapes. The embedded table is aliased `__e` so a
+   * self-reference still names the outer row by the table's own name.
+   */
+  private async embed(item: Extract<SelectItem, { kind: "embed" }>, cols: Columns): Promise<string> {
+    const base = this.table.trim();
+    const fks = await this.catalog.foreignKeysOf(base);
+    let fk: ForeignKey, manyToOne: boolean;
+    if (cols.has(item.relation)) {
+      const via = fks.filter((f) => f.from === base && f.fromCols.length === 1 && f.fromCols[0] === item.relation);
+      if (via.length !== 1) throw refusal(`select embeds "${item.relation}", a column of "${base}" that is not a single-column foreign key.`);
+      fk = via[0]; manyToOne = true;
+    } else {
+      const out = fks.filter((f) => f.from === base && f.to === item.relation);
+      const back = fks.filter((f) => f.to === base && f.from === item.relation && f.from !== f.to);
+      const self = fks.filter((f) => f.from === base && f.to === base && item.relation === base);
+      if (self.length) throw refusal(`select embeds "${item.relation}" in itself — which side is meant is not decidable from the table's name; name the column: alias:fk_column (…).`);
+      if (out.length + back.length === 0) throw refusal(`select embeds "${item.relation}", and no foreign key joins it to "${base}" (or the table is off the search path).`);
+      if (out.length + back.length > 1) throw refusal(`select embeds "${item.relation}", and more than one foreign key joins it to "${base}" — name the column: alias:fk_column (…).`);
+      manyToOne = out.length === 1;
+      fk = out[0] ?? back[0];
+    }
+    // A one-to-many whose referencing columns are unique is a one-to-one: PostgREST gives the one row, or null.
+    const oneRow = manyToOne || fk.unique;
+    const target = ident(manyToOne ? fk.to : fk.from, "table");
+    const pairs = (manyToOne ? fk.toCols : fk.fromCols).map((c, i) =>
+      `__e.${ident(c, "column")} = ${ident(base, "table")}.${ident((manyToOne ? fk.fromCols : fk.toCols)[i], "column")}`);
+    const projection = item.cols === "*" ? "__e.*" : item.cols.map((c) => `__e.${ident(c, "column")}`).join(", ");
+    const rows = `SELECT ${projection} FROM ${target} AS __e WHERE ${pairs.join(" AND ")}`;
+    const value = oneRow
+      ? `(SELECT row_to_json(__r) FROM (${rows}) __r)`
+      : `COALESCE((SELECT json_agg(__r) FROM (${rows}) __r), '[]'::json)`;
+    return `${value} AS ${ident(item.key, "embed alias")}`;
+  }
+
+  private async projection(cols: Columns, returning: boolean): Promise<string> {
+    const parts: string[] = [];
+    for (const item of this.items) {
+      if (item.kind === "star") parts.push("*");
+      else if (item.kind === "column") parts.push(item.sql);
+      // A table the catalog cannot see has no keys to embed through: the embed is left out so the query itself
+      // reports the missing table (42P01, as `{ error }`) rather than a refusal naming a foreign key.
+      else if (cols.size === 0) continue;
+      else if (returning) throw refusal(`select("…${item.key}(…)") embeds a relation in a RETURNING list, which is not supported — read the row back with a second select.`);
+      else parts.push(await this.embed(item, cols));
+    }
+    return parts.join(", ") || "*";
+  }
+
+  private async compile(): Promise<{ text: string; values: unknown[]; cols: Columns }> {
+    const table = this.table.trim();
+    const t = ident(table, "table");
+    for (const row of this.payload) for (const c of Object.keys(row)) this.names(c);
+    const cols = await this.catalog.columnsOf(table, this.named);
 
     if (this.op === "select") {
-      const projection = this.headOnly && this.wantCount ? "count(*)::int AS __count" : this.cols;
-      const where = this.whereClause(0);
+      const projection = this.headOnly && this.wantCount ? "count(*)::int AS __count" : await this.projection(cols, false);
+      const where = this.whereClause(cols, 0);
       let text = `SELECT ${projection} FROM ${t}${where.text}`;
       if (!this.headOnly) {
         if (this.orderBy.length) text += ` ORDER BY ${this.orderBy.join(", ")}`;
         if (this.limitN !== null) text += ` LIMIT ${Number(this.limitN)}`;
         if (this.offsetN !== null) text += ` OFFSET ${Number(this.offsetN)}`;
       }
-      return { text, values: where.values };
+      return { text, values: where.values, cols };
     }
 
+    const returning = await this.projection(cols, true);
+    // A value bound by its column's type: an array column takes an array literal with a cast (change 77).
+    const bind = (c: string, v: unknown, values: unknown[]): string => {
+      const b = bound(cols.get(c), v);
+      values.push(b.value);
+      return `$${values.length}${b.cast}`;
+    };
+
     if (this.op === "insert" || this.op === "upsert") {
-      // Union of keys across rows, so a heterogeneous batch still inserts.
-      const cols = [...new Set(this.payload.flatMap((r) => Object.keys(r)))];
-      if (cols.length === 0) throw new Error("compat/supabase-sql: insert() called with no columns");
-      const quoted = cols.map((c) => ident(c, "column"));
+      // Union of keys across rows, so a heterogeneous batch still inserts. A key whose value is undefined in every
+      // row is not a column: supabase-js's JSON drops it and Postgres applies the column's DEFAULT, where a NULL here
+      // was a 23502 against a NOT NULL DEFAULT column (a row lacking a key another row has still gets NULL).
+      const names = [...new Set(this.payload.flatMap((r) => Object.keys(r).filter((k) => r[k] !== undefined)))];
+      if (names.length === 0) throw refusal("insert() called with no columns");
+      const quoted = names.map((c) => ident(c, "column"));
       const values: unknown[] = [];
-      let i = 0;
-      const tuples = this.payload.map(
-        (row) => `(${cols.map((c) => { values.push(row[c] ?? null); return `$${++i}`; }).join(", ")})`
-      );
+      const tuples = this.payload.map((row) => `(${names.map((c) => bind(c, row[c] ?? null, values)).join(", ")})`);
       let text = `INSERT INTO ${t} (${quoted.join(", ")}) VALUES ${tuples.join(", ")}`;
       if (this.op === "upsert") {
         const target = this.conflictTarget
@@ -413,47 +924,57 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
         const sets = quoted.filter((c) => c !== `"${this.conflictTarget}"`).map((c) => `${c} = EXCLUDED.${c}`);
         text += ` ON CONFLICT (${target}) DO ${sets.length ? `UPDATE SET ${sets.join(", ")}` : "NOTHING"}`;
       }
-      text += ` RETURNING ${this.cols}`;
-      return { text, values };
+      text += ` RETURNING ${returning}`;
+      return { text, values, cols };
     }
 
     if (this.op === "update") {
       const row = this.payload[0] ?? {};
-      const cols = Object.keys(row);
-      if (cols.length === 0) throw new Error("compat/supabase-sql: update() called with no columns");
+      const names = Object.keys(row).filter((k) => row[k] !== undefined); // as supabase-js's JSON drops them
+      if (names.length === 0) throw refusal("update() called with no columns");
       const values: unknown[] = [];
-      let i = 0;
-      const sets = cols.map((c) => { values.push(row[c]); return `${ident(c, "column")} = $${++i}`; });
-      const where = this.whereClause(i);
+      const sets = names.map((c) => `${ident(c, "column")} = ${bind(c, row[c], values)}`);
+      const where = this.whereClause(cols, values.length);
       return {
-        text: `UPDATE ${t} SET ${sets.join(", ")}${where.text} RETURNING ${this.cols}`,
+        text: `UPDATE ${t} SET ${sets.join(", ")}${where.text} RETURNING ${returning}`,
         values: [...values, ...where.values],
+        cols,
       };
     }
 
-    const where = this.whereClause(0);
-    return { text: `DELETE FROM ${t}${where.text} RETURNING ${this.cols}`, values: where.values };
-  }
-
-  /** Exposed for tests and for anyone debugging what the shim generates. */
-  toSQL(): { text: string; values: unknown[] } {
-    return this.build();
+    const where = this.whereClause(cols, 0);
+    return { text: `DELETE FROM ${t}${where.text} RETURNING ${returning}`, values: where.values, cols };
   }
 
   /**
-   * Runs the query. May reject: a caller bug (bad identifier, embedded select)
-   * rejects, while a runtime SQL failure resolves as `{ error }` the way
-   * supabase-js does.
+   * Exposed for tests and for anyone debugging what the shim generates. Reads
+   * the catalog, so it is a promise (change 77); it rejects where execute()
+   * would resolve `{ error }` for what compiles badly — an `.or()` term that is
+   * PostgREST's 400 — since there is no result to carry the error in.
+   */
+  async toSQL(): Promise<{ text: string; values: unknown[] }> {
+    const { text, values } = await this.compile();
+    return { text, values };
+  }
+
+  /**
+   * Runs the query. May reject: a caller bug (bad identifier, nested embed, no
+   * foreign key for an embed) rejects, while a runtime failure — a SQL error,
+   * the database unreachable, in the query or in the catalog read before it —
+   * resolves as `{ error }` the way supabase-js does.
    */
   private async execute(): Promise<Result<T>> {
-    let text: string;
-    let values: unknown[];
-    // Compilation happens outside the try so a programming error propagates as a
-    // rejection rather than being reported as a database error.
-    ({ text, values } = this.build());
-
+    let compiled = false;
     try {
-      const rows = ((await this.sql.unsafe(text, values as never[])) as unknown as Record<string, unknown>[]).map(jsonShaped);
+      const { text, values, cols } = await this.compile();
+      compiled = true;
+      const rows = ((await this.sql.unsafe(text, values as never[])) as unknown as Record<string, unknown>[]).map((r) => jsonShaped(r, cols));
+      // The query named a column remembered as absent and RAN: the column exists, the map is stale (a `date` column
+      // added after it was first named would shape as an instant for the process's life) — forget it for the next call.
+      // So too when a row comes back with a column the map does not know (`select("*")` after an ADD COLUMN names
+      // nothing, but the row does): this row is shaped by the old map, the next call's by a fresh one.
+      const known = (k: string) => cols.size === 0 || cols.has(k) || k === "__count" || this.items.some((it) => it.kind === "embed" && it.key === k);
+      if (this.catalog.skippedRefresh(this.table.trim(), this.named) || (rows[0] && Object.keys(rows[0]).some((k) => !known(k)))) this.catalog.forget(this.table.trim());
 
       if (this.headOnly && this.wantCount) {
         return { data: null, error: null, count: Number(rows[0]?.__count ?? 0) };
@@ -461,14 +982,20 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
       if (this.rowMode !== "many") {
         if (rows.length === 0) {
           return this.rowMode === "single"
-            ? { data: null, error: { message: "JSON object requested, multiple (or no) rows returned", code: "PGRST116" }, count: null }
+            ? { data: null, error: new PostgrestError("JSON object requested, multiple (or no) rows returned", { code: "PGRST116" }), count: null }
             : { data: null, error: null, count: null };
         }
         return { data: rows[0] as T, error: null, count: null };
       }
       return { data: rows as T, error: null, count: this.wantCount ? rows.length : null };
     } catch (e) {
-      return { data: null, error: toPostgrestError(e), count: null };
+      if (isRefusal(e)) throw e;
+      const error = toPostgrestError(e);
+      // The query ran on a map that skipped a refresh for a column remembered as absent, and failed with something
+      // other than "that column does not exist": the column is there now and the map is stale — forget it, so the
+      // next call reads the table again (a 42703 confirms the absence and keeps the memo).
+      if (compiled && error.code !== "42703" && this.catalog.skippedRefresh(this.table.trim(), this.named)) this.catalog.forget(this.table.trim());
+      return { data: null, error, count: null };
     }
   }
 
@@ -496,49 +1023,106 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
   }
 }
 
+/**
+ * One pool per connection URL, shared by every client made for it. The
+ * vendored servers call `createClient` inside each request handler — a
+ * Supabase Edge Function's shape, where an invocation is short-lived and its
+ * client dies with it — and never close it. Under Bun the process lives on
+ * (change 74), and a pool per request held its connection open for the life
+ * of the process: the tool suite's eighty-odd calls left 84 connections
+ * open against Postgres's default limit of 100, so a server would have been
+ * refused after about ninety-five tool calls. Clients on one URL now share a
+ * pool (the first client's `max` sizes it), counted, and the pool closes when
+ * the last client that will close does; a server that never closes holds one
+ * pool, not one per request.
+ */
+const POOLS = new Map<string, { sql: SQL; clients: number }>();
+
 export class SupabaseSqlClient {
   readonly sql: SQL;
+  private catalog: Catalog;
+  private pool: { sql: SQL; clients: number };
+  private closed = false;
 
-  constructor(databaseUrl: string, opts: { max?: number } = {}) {
-    this.sql = new SQL({ url: databaseUrl, max: opts.max ?? Number(process.env.OB1_PG_POOL ?? 10) });
+  constructor(private databaseUrl: string, opts: { max?: number } = {}) {
+    let pool = POOLS.get(databaseUrl);
+    if (!pool) POOLS.set(databaseUrl, (pool = { sql: new SQL({ url: databaseUrl, max: opts.max ?? Number(process.env.OB1_PG_POOL ?? 10) }), clients: 0 }));
+    pool.clients++;
+    this.pool = pool;
+    this.sql = pool.sql;
+    this.catalog = new Catalog(this.sql, databaseUrl);
   }
 
   from<T = Record<string, unknown>[]>(table: string): QueryBuilder<T> {
-    return new QueryBuilder<T>(this.sql, table);
+    return new QueryBuilder<T>(this.sql, this.catalog, table);
   }
 
-  /** Calls a stored function by name with named arguments, as PostgREST does. */
+  /**
+   * Calls a stored function by name with named arguments, as PostgREST does.
+   *
+   * Each argument is bound by the type the function declares for it (the
+   * catalog's `pg_proc` read, once per name): an array-typed argument takes a
+   * JS array as an array literal with a cast (`search_tags text[]` — sent raw,
+   * Bun's `String()` of it was "malformed array literal", and the one caller
+   * fell back to an ILIKE scan without saying so); a `vector` argument takes
+   * JSON text, `[1,0,0]`, which Postgres coerces where an array literal is not
+   * valid vector input; a `jsonb` one takes the object or array untouched —
+   * never pre-stringified, since Bun binds a JS string to jsonb as a JSON
+   * scalar string, and `jsonb_array_length` then fails with "cannot get array
+   * length of a scalar". Where overloads disagree on a name's type, or the
+   * function is unknown, the value goes as it is — except a numeric array,
+   * which goes as JSON text, the rule this method had before it read the
+   * catalog — and Postgres resolves the call as before.
+   */
   async rpc<T = unknown>(fn: string, args: Record<string, unknown> = {}): Promise<Result<T>> {
     try {
+      const f = ident(fn, "function");
       const names = Object.keys(args);
-      const call = names.length
-        ? `${ident(fn, "function")}(${names.map((n, i) => `${ident(n, "argument")} => $${i + 1}`).join(", ")})`
-        : `${ident(fn, "function")}()`;
-      // Argument binding has to split by shape, because Bun gets each one wrong
-      // in a different direction and PostgREST gets both right by accident: it
-      // sends a JSON body and lets Postgres coerce to the declared parameter type.
-      //
-      //   NUMERIC ARRAYS — an embedding for a `vector` parameter. Bun binds a JS
-      //   array as a Postgres array literal, and `{1,0,0}` is not valid `vector`
-      //   input. Passed as JSON text, `[1,0,0]`, Postgres coerces it correctly.
-      //
-      //   EVERYTHING ELSE — arrays of objects, and objects, for `jsonb`
-      //   parameters. These must NOT be pre-stringified: Bun binds a JS string to
-      //   jsonb as a JSON *scalar string*, so `jsonb_array_length` then fails with
-      //   "cannot get array length of a scalar". Bun serialises the value itself
-      //   correctly, so hand it over untouched.
-      //
-      // The split is a heuristic, not introspection. A numeric array genuinely
-      // destined for a `jsonb` parameter would arrive as text and a real
-      // Postgres array parameter (`int[]`) would need `{1,2}` rather than
-      // `[1,2]`; nothing in this repo has either. A caller that grows one wants an
-      // explicit cast in its own SQL rather than more guessing here.
-      const values = names.map((n) => {
+      for (const n of names) ident(n, "argument");
+      let overloads = (await this.catalog.argTypesOf(fn)).filter((o) => names.every((n) => o.names.includes(n)));
+      // Overloads that share an argument's name but not its type are told apart by the value, as PostgREST's JSON
+      // body tells them apart: a JS array is for an array, json or vector parameter, not a text one. Without this,
+      // `tagged(search_tags text[])` beside `tagged(search_tags text)` — in one schema or across two visible ones —
+      // left the array unbound, Bun sent "a,b", and Postgres chose the text overload without a word.
+      const fits = (o: Overload, n: string) => {
         const v = args[n];
-        const numeric = Array.isArray(v) && v.length > 0 && v.every((x) => typeof x === "number");
-        return numeric ? JSON.stringify(v) : v;
-      });
-      const rows = ((await this.sql.unsafe(`SELECT * FROM ${call}`, values as never[])) as unknown as Record<string, unknown>[]).map(jsonShaped);
+        const i = o.names.indexOf(n);
+        const type = o.types[i] ?? "", category = o.categories[i] ?? "";
+        if (Array.isArray(v)) return category === "A" || /^(?:jsonb?|vector)$/.test(type);
+        if (v !== null && typeof v === "object") return /^jsonb?$/.test(type);
+        return true;
+      };
+      const fitting = overloads.filter((o) => names.every((n) => fits(o, n)));
+      if (fitting.length) overloads = fitting;
+      const typeOf = (n: string): ColumnInfo | undefined => {
+        const types = new Set(overloads.map((o) => `${o.types[o.names.indexOf(n)]}\u0000${o.categories[o.names.indexOf(n)]}`));
+        if (types.size !== 1) return undefined;
+        const [type, category] = [...types][0].split("\u0000");
+        return { type, category };
+      };
+      const values: unknown[] = [];
+      const call = names.length
+        ? `${f}(${names.map((n) => {
+            const v = args[n];
+            const type = typeOf(n);
+            const numeric = Array.isArray(v) && v.length > 0 && v.every((x) => typeof x === "number");
+            const b = type === undefined && numeric ? { value: JSON.stringify(v), cast: "" } : bound(type, v);
+            values.push(b.value);
+            return `${ident(n, "argument")} => $${values.length}${b.cast}`;
+          }).join(", ")})`
+        : `${f}()`;
+      // The rows shaped as a table's are, by what the function declares — its OUT columns (`RETURNS TABLE`, OUT
+      // parameters), the table whose rows it returns (`RETURNS SETOF thoughts`), or its one scalar column, named as
+      // the function is — when every candidate overload declares the same; candidates that differ leave the rows as
+      // they come (one with no OUT columns beside one with some is a difference, not an agreement).
+      const shapes = await Promise.all(overloads.map(async (o) => {
+        if (o.outs.size) return o.outs;
+        if (o.returns.table) return this.catalog.columnsOf(o.returns.table);
+        return new Map([[fn.trim(), { type: o.returns.type, category: o.returns.category }]]) as Columns;
+      }));
+      const key = (m: Columns) => JSON.stringify([...m].sort(([a], [b]) => (a < b ? -1 : 1)).map(([k, v]) => [k, v.type]));
+      const outs = shapes.length && shapes.every((m) => key(m) === key(shapes[0])) ? shapes[0] : undefined;
+      const rows = ((await this.sql.unsafe(`SELECT * FROM ${call}`, values as never[])) as unknown as Record<string, unknown>[]).map((r) => jsonShaped(r, outs));
 
       // A set-returning function yields rows; a scalar one yields a single column
       // holding the value. PostgREST makes the same distinction.
@@ -548,13 +1132,19 @@ export class SupabaseSqlClient {
       }
       return { data: rows as T, error: null, count: null };
     } catch (e) {
-      if (e instanceof Error && e.message.startsWith("compat/supabase-sql:")) throw e;
+      if (isRefusal(e)) throw e;
       return { data: null, error: toPostgrestError(e), count: null };
     }
   }
 
+  /** Releases this client's hold on the shared pool; the pool itself closes with the last hold. */
   async close(): Promise<void> {
-    await this.sql.close();
+    if (this.closed) return;
+    this.closed = true;
+    if (--this.pool.clients > 0) return;
+    if (POOLS.get(this.databaseUrl) === this.pool) POOLS.delete(this.databaseUrl);
+    STORES.delete(this.databaseUrl); // the next client on this URL reads the catalog afresh
+    await this.pool.sql.close();
   }
 }
 

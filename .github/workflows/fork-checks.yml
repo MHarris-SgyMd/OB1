@@ -430,7 +430,7 @@ jobs:
       # each is driven as deployed against this database — the fork's schema
       # plus the three sidecars and the log table the writers assume, dropped again at the end —
       # and the row it leaves is compared with the row update_thought leaves
-      # for the same edit. Last in the job because it applies those sidecars.
+      # for the same edit. Late in the job because it applies those sidecars.
       - name: Install the vendored servers' pinned test dependencies
         working-directory: extensions
         run: bun install --frozen-lockfile
@@ -438,6 +438,20 @@ jobs:
       - name: Vendored writers leave what update_thought leaves
         working-directory: extensions
         run: bun test-writes.ts
+        env:
+          DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
+
+      # Every tool of the five extension servers on the SQL shim, called through
+      # tools/call against the extensions' own schema.sql files (applied after
+      # the READMEs' two auth.* stubs, dropped again at the end) — each read's
+      # filters, each write's row, the embedded relation, the trigger's effect,
+      # the message a failure carries (change 77, SMD-1588). A shim gap fails a
+      # named assertion here rather than a user's first call; a tool added to a
+      # server fails the drift guard until it is driven. Last in the job because
+      # it applies those schemas.
+      - name: Every extension tool answers on the SQL shim
+        working-directory: extensions
+        run: bun test-tools.ts
         env:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
 
