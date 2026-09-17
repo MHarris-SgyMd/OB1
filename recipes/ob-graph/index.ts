@@ -55,7 +55,6 @@ app.get("/:fn/health", health);
 // Route ALL methods (GET included) to the MCP transport so the GET opens a
 // real SSE stream. Do not split GET onto a non-streaming handler.
 app.all("*", async (c) => {
-
   // Named, scoped, hashed keys — the core server's auth path (_shared/auth.ts
   // is server-portable/auth.ts, held identical by extensions/test-auth.ts).
   // MCP_ACCESS_KEYS holds name:scope:sha256 entries; the older single

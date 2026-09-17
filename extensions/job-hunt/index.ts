@@ -555,8 +555,6 @@ async function handleLinkContactToProfessionalCRM(supabase: any, args: z.infer<t
 
 // MCP server endpoint
 app.post("*", async (c) => {
-
-
   // Validate access key
   // Named, scoped, hashed keys — the core server's auth path (_shared/auth.ts
   // is server-portable/auth.ts, held identical by test-auth.ts). MCP_ACCESS_KEYS

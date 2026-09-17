@@ -1435,8 +1435,9 @@ app.get("*", async (c, next) => (HEALTH_PATH.test(c.req.path) ? c.text("ok", 200
 // to — pinged every 30 s, closed only by the client or by Bun's idle reset —
 // from a browser opening the connector URL or any client echoing `?key=` on GET
 // (upstream #424). The SDK client sets `Accept: text/event-stream` on its own
-// GET, so gating the Accept patch below would not have been enough; it treats
-// the 405 notFound gives as "no stream here". FORK.md change 75.
+// GET, so gating the Accept patch this handler carried then (change 80 removed
+// it) would not have been enough; it treats the 405 notFound gives as "no
+// stream here". FORK.md change 75.
 app.on(MCP_METHODS, "*", async (c) => {
   // Accept the access key via header, bearer token OR URL query parameter — every
   // form presented is tried, so a gateway's own bearer token beside the client's

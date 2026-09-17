@@ -16,8 +16,6 @@ import { authenticateRequest, canWrite } from "../_shared/auth.ts";
 const app = new Hono();
 
 app.post("*", async (c) => {
-
-
   // Named, scoped, hashed keys — the core server's auth path (_shared/auth.ts
   // is server-portable/auth.ts, held identical by test-auth.ts). MCP_ACCESS_KEYS
   // holds name:scope:sha256 entries; the older single MCP_ACCESS_KEY still

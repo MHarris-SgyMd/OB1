@@ -12590,9 +12590,24 @@ files is preceded by its pragma. Upstream, the SDK's pattern would want to be
 `"types": "./dist/esm/*"`, which both resolvers handle; Deno could substitute
 as tsc does. Neither filed.
 
-**Beside the pins.** The `./*` typings change is the only surprise the
-release notes did not name. What the notes and the measurements agree did
-not change: a `tools/list` and a `tools/call` answer are byte-identical
+**Beside the pins.** Two more things the release notes did not name, both
+read out of 0.3.2's dist and neither present at 0.1.5. A POST after
+initialize is checked for the `mcp-protocol-version` header: absent, it reads
+as 2025-03-26 and passes; naming a version outside the SDK's list
+(2025-11-25, 2025-06-18, 2025-03-26, 2024-11-05, 2024-10-07 at 1.30.0) it is
+refused with **404** and a "Bad Request: Unsupported protocol version" body.
+A client sends the version it negotiated at initialize, which the server chose
+from that list, so no known client meets it; `test-auth.ts` holds the rule
+(200 at the newest listed, 404 at `1999-01-01`) so a bump that moves it is
+seen here first. And a GET with *no* Accept header now reads as `*/*` and
+opens the standalone SSE stream where 0.1.x answered 406: on the servers that
+still route GET to the transport — upstream's `server/index.ts` and the
+vendored `app.all("*")` servers, which change 75's method guard did not
+reach — a keyed, Accept-less GET hangs where it used to fail fast. The SDK
+client and mcp-remote send `Accept: text/event-stream` on GET and hung there
+already (change 75, SMD-1259); a bare curl is what changes. What the notes
+and the measurements agree did not change: a `tools/list` and a `tools/call`
+answer are byte-identical
 across the move — status, headers, body; `handlePostRequest` still awaits
 `ctx.req.json()` after the server is connected, so change 78's staggered probe
 still means what it did; a transport reused across 200 POSTs still lets go of
@@ -12600,14 +12615,18 @@ every Request (change 79's assertion holds at 200/200). The build cost on
 change 78's harness moved the right way: one tool 39 → 36 µs, thirteen tools
 218 → 129 µs (Bun 1.4.0, same machine, same session). Two packages enter
 the lockfiles as `@hono/mcp`'s peers: `hono-rate-limiter` 0.5.4 and
-`pkce-challenge`, for its auth middleware, which nothing here imports. The
+`pkce-challenge`, for its auth middleware, which nothing here calls —
+`pkce-challenge` does load with the module (a static import of the package's
+`auth.mjs`, which its `index.mjs` imports), `hono-rate-limiter` only when the
+rate-limit middleware runs. The
 pin guard found two files the seventeen-site count missed — the two REST
 integrations' `deno.json` pin hono and zod without `@hono/mcp` — so nineteen
 sites.
 
-**Verified.** `bun test-auth.ts` **806/806** (775 at change 79: thirteen
+**Verified.** `bun test-auth.ts` **808/808** (775 at change 79: thirteen
 no-patch guards, thirteen pragma guards, the enhanced-mcp pair, the SDK's
-throw, three text rules for the after sample). `server/`: `test-stateless`
+throw, the protocol-version pair, three text rules for the after sample).
+`server/`: `test-stateless`
 47/47 and the two other suites PASS. `server-portable/`: `test-server.ts`
 153/153 (151: the Accept row became three), `test-auth.ts` 67/67,
 `tsc --noEmit` clean, `wrangler deploy --dry-run` builds. `extensions/`:
@@ -12617,6 +12636,36 @@ a server fail without them (pragmas renamed, checks run, pragmas restored):
 `server` 11, `family-calendar` 6, `job-hunt` 10, `ob-graph` 27,
 `kubernetes-deployment` 11, `enhanced-mcp` 13 errors, every one an `any`
 handler argument. `check-fork-consistency.mjs` PASS.
+
+**Review, first pass** (one cold reviewer beside the author's read, over
+changes 79 and 80 together; ten findings, two of them 79's and recorded
+there). Fixed: `server/bun.lock` had kept a nested zod 4.5.4 for the SDK
+beside the 4.6.5 the Edge Function deploys — `server/package.json` listed no
+zod, so `bun install` had nothing to hold it to; zod is pinned there now and
+the lock regenerated from nothing, one zod. The pragma guard counted only
+the imports its one-line regex matched, so a multi-line or single-quoted SDK
+import would have passed unguarded beside a guarded one; it now also counts
+every SDK specifier in the file and wants the two counts equal. The no-patch
+guard matched one exact spelling; it matches any `.set("Accept", …)`. Four
+comments still described the patch as present (two in `test-auth.ts`, one in
+the portable server, and `test-server.ts` [7] calling an SSE-only Accept the
+SDK client's POST form — that is its GET form; its POSTs name both tokens).
+"Which nothing here imports" of the two new lockfile entries: `pkce-challenge`
+does load with the module, `hono-rate-limiter` does not; the paragraph above
+says so. The protocol-version 404 and the Accept-less GET, which the author's
+read had found and written up between the commit and the review, the reviewer
+found independently and confirmed against the dist. Not reproduced: one run
+in the reviewer's ninety, made beside its other probes, reported two failed
+assertions its loop did not capture (it kept the summary line; the suite
+prints every failing line); thirty runs alone here failed none, and CI runs
+the suite alone. Declined: a GET method guard for `ob-graph` and upstream's
+`server/index.ts` — SMD-1259's family, not this change's — and a CI retry for
+a flake that does not reproduce alone. Checked and found right: the stream
+lifecycle at 0.3.2 (no `finally { close() }` in its `streamSSE`; the body ends
+through `abort()` → `reader.cancel()` with the frame already pulled), 202 for
+a notification now a JSON `null` body, no tool name in the tree that
+`validateAndWarnToolName` would warn about per request, `response.headers`
+edits still landing on 0.3.2's fresh Response, and the counts here.
 
 **Not done here.** The live connector check (one Claude Desktop session, two
 tool calls in flight, Accept as the client sends it) that SMD-1497, SMD-1259
