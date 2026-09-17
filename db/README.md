@@ -1395,9 +1395,8 @@ is on one index. It drops its marker table on the way out. Not in CI or
   and its label. The found-by reads filter on a metadata key only that
   thought carries, so `match_thoughts`'s exact branch answers them and no
   HNSW walk decides (SMD-1574; the walk missed live rows outright after an
-  autovacuum — SMD-1632).
-  `test-upgrade.ts` [5] shows the defect at 021 before
-  applying 022 over it, then both halves of the rule.
+  autovacuum — SMD-1632). `test-upgrade.ts` [5] shows the defect at 021
+  before applying 022 over it, then both halves of the rule.
 - **The re-embed, end to end.** [9] runs `reembed.ts` as a subprocess against a
   stub provider: refused without `--switch-model`, then two workers over
   thirty-eight rows including three chunked ones (one of whose whole-content
