@@ -210,8 +210,8 @@ console.log("\n[4] Indexes exist with the right access methods");
   const byName = Object.fromEntries(idx.rows.map((r) => [r.indexname, r.indexdef]));
   assert(/USING hnsw/.test(byName["thoughts_embedding_idx"] ?? ""), "thoughts_embedding_idx is HNSW");
   assert(
-    /vector_cosine_ops/.test(byName["thoughts_embedding_idx"] ?? ""),
-    "…using vector_cosine_ops, matching the <=> operator the RPC orders by"
+    new RegExp(`\\(\\(embedding\\)::halfvec\\(${EMBEDDING_DIM}\\)\\) halfvec_cosine_ops`).test(byName["thoughts_embedding_idx"] ?? ""),
+    "…over (embedding)::halfvec(D) with halfvec_cosine_ops — 039's expression, the <=> the RPC's walk orders by ([38] holds the pair)"
   );
   assert(/USING gin/.test(byName["thoughts_metadata_idx"] ?? ""), "thoughts_metadata_idx is GIN");
   assert(/created_at DESC/.test(byName["thoughts_created_at_idx"] ?? ""), "thoughts_created_at_idx is DESC");
@@ -713,7 +713,7 @@ console.log("\n[8e] Migrations 037 and 038: the routing count is gated by a samp
 {
   const shipped = async () => String((await db.query<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = '${MATCH_THOUGHTS_SIGNATURE}'::regprocedure`)).rows[0].s);
   const src = await shipped();
-  assert(lastDefinerOf("match_thoughts").startsWith("038"), `038 is the last definer of match_thoughts (${lastDefinerOf("match_thoughts")})`);
+  assert(lastDefinerOf("match_thoughts").startsWith("039"), `039 is the last definer of match_thoughts, carrying 038's gate (${lastDefinerOf("match_thoughts")})`);
   assert(TID_PROBE.test(src) && /INTO v_hits, v_hit_pages, v_pages_seen/.test(src) && !/TABLESAMPLE/.test(src),
     "the shipped body samples the heap by TID range — every tuple of one block, half-open at the next — into the three counts the gate reads, and carries no TABLESAMPLE");
   assert(new RegExp(`floor\\(random\\(\\) \\* v_pages\\)::bigint AS blk\\s+FROM generate_series\\(1, ${ROUTE_SAMPLE_PAGES}\\)`).test(src) && new RegExp(`IF v_pages >= ${ROUTE_ESTIMATE_MIN_PAGES} THEN`).test(src),
@@ -784,9 +784,9 @@ console.log("\n[8e] Migrations 037 and 038: the routing count is gated by a samp
   // The floor lowered to zero: the gate runs on every filtered call. It cannot
   // skip — condition 1 needs the table at ten times the threshold, and 1,000
   // rows are not — so the collection still runs and the answers hold.
-  const file038 = files.find((f) => f.startsWith("038"))!;
-  await db.exec(substituteMigration(readFileSync(join(MIGRATIONS, file038), "utf8"), migrationValues({ dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, trgm: DEFAULT_TRGM_INDEX, backfillLimit: null, routeEstimateMinPages: 0 })));
-  assert(/IF v_pages >= 0 THEN/.test(await shipped()), "038 applied with SchemaOptions.routeEstimateMinPages = 0: the sample runs on any heap");
+  const definer = lastDefinerOf("match_thoughts");
+  await db.exec(substituteMigration(readFileSync(join(MIGRATIONS, definer), "utf8"), migrationValues({ dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, trgm: DEFAULT_TRGM_INDEX, backfillLimit: null, routeEstimateMinPages: 0 })));
+  assert(/IF v_pages >= 0 THEN/.test(await shipped()), `${definer.slice(0, 3)} applied with SchemaOptions.routeEstimateMinPages = 0: the sample runs on any heap`);
   await agree("with the gate reached");
   // The gate's own input on this table, run as the body runs it: the sample
   // statement is read out of the installed body (pg_proc.prosrc) with the two
@@ -915,7 +915,7 @@ console.log("\n[8e] Migrations 037 and 038: the routing count is gated by a samp
       `on the heap with ${ROUTE_SAMPLE_PAGES} of ${pages} pages emptied every random draw still reaches 2 to ${ROUTE_SAMPLE_PAGES} pages and the rule still says "collect" (hits/hit pages/pages drawn: ${sparse.join(", ")})`);
   }
   const restored = await restoreShipped("match_thoughts");
-  assert(restored.length === 1 && restored[0].startsWith("038") && new RegExp(`IF v_pages >= ${ROUTE_ESTIMATE_MIN_PAGES} THEN`).test(await shipped()),
+  assert(restored.length === 1 && restored[0].startsWith("039") && new RegExp(`IF v_pages >= ${ROUTE_ESTIMATE_MIN_PAGES} THEN`).test(await shipped()),
     "…and the shipped floor is back for the sections after");
 }
 
@@ -1675,6 +1675,19 @@ console.log("\n[17] extract_search_needles picks literals and identifiers, not w
 console.log("\n[17b] search_thoughts_hybrid: exact hits, the vector arm, and the gate between them");
 {
   await db.exec(`DELETE FROM thoughts`);
+  // The index too, not only the table: PGlite never vacuums, so by now the
+  // HNSW index holds every row the sections before deleted — thousands of
+  // dead elements the walk still traverses — around the three live rows below.
+  // Once, in CI under 039's half-precision index, the default path returned
+  // the two rows behind the exact match and not the exact match at cosine 1.0,
+  // on a run that passed locally every time. The likeliest cause is that
+  // graph: whether a walk through the dead elements reaches every live row
+  // depends on how they link it, which turns on the level each insert drew at
+  // random — inferred from the symptom, not shown: a local probe with 2,500
+  // dead elements over four seeds returned all three rows each time. Either
+  // way the vector arm is measured here over the rows it is given, so the
+  // index holds only them.
+  await db.exec(`VACUUM thoughts`);
   // Vectors at known angles to the query unit(0). The literal SMD-507 sits in
   // the two rows the embedding ranks LAST — the situation 012 measured — and
   // one of those has no vector at all.
@@ -1997,8 +2010,18 @@ console.log("\n[20] Migration 019: the row estimates and the plan setting — ca
   await reapply("014");
   assert((await functionsNamed("match_thoughts")) === 2, "re-applying 014 puts the 4-argument function back BESIDE 020's — the overload 020's header names");
   const mt014 = await proc(MT_4);
-  assert(cteBlocks(mt.prosrc).length === 3 && cteBlocks(mt.prosrc).join("\n---\n") === cteBlocks(mt014.prosrc).join("\n---\n"),
-         "the three candidate CTEs of the shipped body are 014's, byte for byte");
+  // 039 casts the two walk branches' ORDER BYs to halfvec on both sides — the
+  // expression its indexes are built over — and touches nothing else in the
+  // CTEs: with that cast taken out they are 014's, and the exact branch's
+  // carry none ([38] pairs the cast with the index's plan).
+  const CAST = `embedding::halfvec(${EMBEDDING_DIM}) <=> query_embedding::halfvec(${EMBEDDING_DIM})`;
+  const casts = (src: string) => src.split(CAST).length - 1;
+  const uncast = (src: string) => src.split(CAST).join("embedding <=> query_embedding");
+  const blocks = cteBlocks(mt.prosrc);
+  assert(blocks.length === 3 && casts(blocks[0]) === 2 && casts(blocks[1]) === 0 && casts(blocks[2]) === 2 && casts(mt.prosrc) === 4,
+         "039's cast is on both sides of each walk branch's two ORDER BYs — the unfiltered and the broad-filter CTEs, thoughts and chunks — and nowhere in the exact branch");
+  assert(cteBlocks(uncast(mt.prosrc)).join("\n---\n") === cteBlocks(mt014.prosrc).join("\n---\n"),
+         "with 039's cast taken out, the three candidate CTEs of the shipped body are 014's, byte for byte");
   assert(routing(mt.prosrc).length > 0 && routing(mt.prosrc) === routing(mt014.prosrc), "…and so is the routing statement");
   assert(Number(mt014.prorows) === 1000 && !("enable_seqscan" in mt014.settings),
          `014's function has the estimate 1,000 and no plan setting (prorows ${mt014.prorows}, proconfig ${JSON.stringify(mt014.settings)}) — the trap that puts both in the defining statement`);
@@ -2022,11 +2045,12 @@ console.log("\n[20] Migration 019: the row estimates and the plan setting — ca
          `re-applying the migrations that last define each (${restored.join(", ")}) restores both — the shipped state, for whatever runs after`);
   assert((await functionsNamed("match_thoughts")) === 1 && (await functionsNamed("search_thoughts_keyword")) === 1, "…and 020's DROP removed the 4-argument function again: one match_thoughts, one search_thoughts_keyword");
   // Deliberately pinned, as [20] pinned 019 before 020 landed, 020 before
-  // 037 and 037 before 038: 019 last defines the keyword function, 038
+  // 037, 037 before 038 and 038 before 039: 019 last defines the keyword
+  // function, 039
   // match_thoughts. A successor that redefines either fails here on purpose,
   // and the expectations move with the clauses it must carry.
-  assert(restored.length === 2 && restored[0].startsWith("019") && restored[1].startsWith("038"),
-         `019 is the last definer of search_thoughts_keyword and 038 of match_thoughts (${restored.join(", ")})`);
+  assert(restored.length === 2 && restored[0].startsWith("019") && restored[1].startsWith("039"),
+         `019 is the last definer of search_thoughts_keyword and 039 of match_thoughts (${restored.join(", ")})`);
 
   // The migrator's floor line, since whichever file last defines the function
   // redefines it with the hnsw.* clause 014 needed pgvector 0.8 for.
@@ -2065,15 +2089,31 @@ console.log("\n[21] Migration 020: the recency blend — identical at weight 0, 
   // special rows below. Row i sits at cosine 0.95 - 0.003 i to the query
   // unit(0) — a second axis carries the rest of the unit length — so the
   // ranking by similarity is known exactly, and the candidate window's edge
-  // (40 at count 10 without a weight, 160 with one) falls between rows.
+  // (40 at count 10 without a weight, 160 with one) falls between rows. The
+  // rest of each row's unit length points in a random direction within axes
+  // 1–32 — a subspace the rows share, so their pairwise distances vary and
+  // the HNSW graph over them is connected. The first draft put it on one axis
+  // per row: every row nearly equidistant from every other, a graph the walk
+  // reached 34 of 200 rows of under either index — and this section passed,
+  // because the two functions it compared walked the same graph. 039 showed
+  // it up (its comparison function had no index), and the guard below holds
+  // the fixture connected.
   await db.exec(`DELETE FROM thoughts`);
   const Q = unit(0);
-  const at = (cos: number, axis: number) => blend(0, axis, cos, Math.sqrt(1 - cos * cos));
-  const axisOf = (i: number) => 1 + (i % (EMBEDDING_DIM - 1));
+  const { rnd: rnd21 } = seededRandom(2021);
+  const at = (cos: number) => {
+    const r = Array.from({ length: 32 }, () => rnd21() - 0.5);
+    const n = Math.hypot(...r);
+    const s = Math.sqrt(1 - cos * cos);
+    const v = new Array(EMBEDDING_DIM).fill(0);
+    for (let k = 0; k < 32; k++) v[1 + k] = (r[k] / n) * s;
+    v[0] = cos;
+    return `[${v.join(",")}]`;
+  };
   for (let i = 0; i < 200; i += 50) {
     const values = Array.from({ length: 50 }, (_, k) => {
       const n = i + k;
-      return `('row ${n}', '{"kind":"${n % 3 === 0 ? "a" : "b"}"}'::jsonb, '${at(0.95 - 0.003 * n, axisOf(n))}'::vector, now() - interval '400 days' - (${n} || ' hours')::interval)`;
+      return `('row ${n}', '{"kind":"${n % 3 === 0 ? "a" : "b"}"}'::jsonb, '${at(0.95 - 0.003 * n)}'::vector, now() - interval '400 days' - (${n} || ' hours')::interval)`;
     }).join(",");
     await db.exec(`INSERT INTO thoughts (content, metadata, embedding, created_at) VALUES ${values}`);
   }
@@ -2085,27 +2125,35 @@ console.log("\n[21] Migration 020: the recency blend — identical at weight 0, 
                  SELECT id, 0, 'chunk', embedding FROM thoughts WHERE substr(content, 5)::int % 5 = 0`);
   const chunkOnly = (await db.query<{ id: string }>(
     `INSERT INTO thoughts (content, metadata, embedding, created_at) VALUES ('chunk-only', '{"kind":"b"}'::jsonb, $1::vector, now() - interval '400 days') RETURNING id`,
-    [at(0.10, 2)])).rows[0].id;
-  await db.query(`INSERT INTO thought_chunks (thought_id, chunk_index, content, embedding) VALUES ($1::uuid, 0, 'the near chunk', $2::vector)`, [chunkOnly, at(0.99, 3)]);
+    [at(0.10)])).rows[0].id;
+  await db.query(`INSERT INTO thought_chunks (thought_id, chunk_index, content, embedding) VALUES ($1::uuid, 0, 'the near chunk', $2::vector)`, [chunkOnly, at(0.99)]);
   // The recent row: 61st by similarity — outside the 40-candidate window an
   // unweighted default call has, inside the 160 a weighted one has.
   const recent = (await db.query<{ id: string }>(
     `INSERT INTO thoughts (content, metadata, embedding, created_at) VALUES ('recent', '{"kind":"b"}'::jsonb, $1::vector, now()) RETURNING id`,
-    [at(0.95 - 0.003 * 60 + 0.001, 4)])).rows[0].id;
+    [at(0.95 - 0.003 * 60 + 0.001)])).rows[0].id;
   const rankOf = async (id: string) =>
     (await db.query<{ r: number }>(`SELECT (SELECT count(*)::int FROM thoughts o WHERE o.embedding <=> $1::vector < t.embedding <=> $1::vector) + 1 AS r FROM thoughts t WHERE t.id = $2::uuid`, [Q, id])).rows[0].r;
   const recentRank = await rankOf(recent);
   assert(recentRank > 40 && recentRank <= 160, `the recent row ranks ${recentRank} by similarity alone: outside the unweighted window of 40, inside the weighted one of 160`);
+  const [{ walked }] = (await db.query<{ walked: number }>(`SELECT count(*)::int AS walked FROM match_thoughts($1::vector, -1.0, 500, '{}'::jsonb)`, [Q])).rows;
+  const [{ total }] = (await db.query<{ total: number }>(`SELECT count(*)::int AS total FROM thoughts`)).rows;
+  assert(walked === total, `the walk reaches every row of the fixture (${walked} of ${total}): the graph over it is connected, so what follows measures the blend and not the index`);
 
   // ── Backward compatibility, exactly. 019's own function, installed from its
   // file under another name, answers the same calls; rows and order must match
   // and `score` must equal `similarity` on every row. Filters reach the
   // unfiltered and the exact branch here; [8c] holds the walk against an exact
-  // scan on 1,200 rows, and its final SELECT is the same edit.
+  // scan on 1,200 rows, and its final SELECT is the same edit. 019's four
+  // walk ORDER BYs take 039's cast — the raw column has no index since 039,
+  // and the point is the blend, so both functions must walk the same index;
+  // the similarity stays 019's, on the full vector, as 039's own does.
   const m019 = files.find((f) => f.startsWith("019"))!;
   const text019 = subst(readFileSync(join(MIGRATIONS, m019), "utf8"));
   assert(text019.split("FUNCTION match_thoughts(").length === 2, "019's file defines match_thoughts once, so it can be installed under another name");
-  await db.exec(text019.replace("FUNCTION match_thoughts(", "FUNCTION match_thoughts_019("));
+  const WALK_019 = /ORDER BY (t|c)\.embedding <=> query_embedding/g;
+  assert((text019.match(WALK_019) ?? []).length === 4, "019's body has four walk ORDER BYs — thoughts and chunks, unfiltered and filtered — which take 039's cast for the comparison");
+  await db.exec(text019.replace(WALK_019, (_, a: string) => `ORDER BY ${a}.embedding::halfvec(${EMBEDDING_DIM}) <=> query_embedding::halfvec(${EMBEDDING_DIM})`).replace("FUNCTION match_thoughts(", "FUNCTION match_thoughts_019("));
   type Row = { id: string; similarity: number; score: number | null };
   let compared = 0;
   let same = true;
@@ -2115,7 +2163,7 @@ console.log("\n[21] Migration 020: the recency blend — identical at weight 0, 
     // would tie every row off axis 3 at 0, and 020 breaks ties by id where
     // 019 left them to the plan — a difference in the tiebreak, not the ranking,
     // and one [21] asserts separately below.
-    for (const q of [Q, at(0.5, 5), at(0.3, 2)]) {
+    for (const q of [Q, at(0.5), at(0.3)]) {
       const now = (await db.query<Row>(`SELECT id, similarity, score FROM match_thoughts($1::vector, $2, $3, $4::jsonb)`, [q, th, n, filter])).rows;
       const was = (await db.query<Row>(`SELECT id, similarity FROM match_thoughts_019($1::vector, $2, $3, $4::jsonb)`, [q, th, n, filter])).rows;
       compared++;
@@ -2156,8 +2204,8 @@ console.log("\n[21] Migration 020: the recency blend — identical at weight 0, 
   // of w*, and a shorter half-life moves w* — at one weight, the two
   // half-lives give opposite orders.
   await db.exec(`DELETE FROM thoughts`);
-  const A = (await db.query<{ id: string }>(`INSERT INTO thoughts (content, embedding, created_at) VALUES ('A: older, closer', $1::vector, now() - interval '365 days') RETURNING id`, [at(0.90, 1)])).rows[0].id;
-  const B = (await db.query<{ id: string }>(`INSERT INTO thoughts (content, embedding, created_at) VALUES ('B: newer, farther', $1::vector, now() - interval '40 days') RETURNING id`, [at(0.80, 2)])).rows[0].id;
+  const A = (await db.query<{ id: string }>(`INSERT INTO thoughts (content, embedding, created_at) VALUES ('A: older, closer', $1::vector, now() - interval '365 days') RETURNING id`, [at(0.90)])).rows[0].id;
+  const B = (await db.query<{ id: string }>(`INSERT INTO thoughts (content, embedding, created_at) VALUES ('B: newer, farther', $1::vector, now() - interval '40 days') RETURNING id`, [at(0.80)])).rows[0].id;
   await db.query(`INSERT INTO thoughts (content, embedding, created_at) VALUES ('C: orthogonal, brand new', $1::vector, now())`, [unit(3)]);
   const order = async (w: number | null, h: number | null, th = -1.0) =>
     (await db.query<{ content: string; score: number }>(`SELECT content, score FROM match_thoughts($1::vector, $2, 10, '{}'::jsonb, $3, $4)`, [Q, th, w, h])).rows;
@@ -2193,7 +2241,7 @@ console.log("\n[21] Migration 020: the recency blend — identical at weight 0, 
   let refused = "";
   try { await order(0.3, 0); } catch (e) { refused = (e as Error).message; }
   assert(/half_life_days must be positive/.test(refused), `a non-positive half-life is refused (${refused.split("\n")[0] || "it was accepted"})`);
-  const nullAge = (await db.query<{ id: string }>(`INSERT INTO thoughts (content, embedding, created_at) VALUES ('no date', $1::vector, NULL) RETURNING id`, [at(0.85, 4)])).rows[0].id;
+  const nullAge = (await db.query<{ id: string }>(`INSERT INTO thoughts (content, embedding, created_at) VALUES ('no date', $1::vector, NULL) RETURNING id`, [at(0.85)])).rows[0].id;
   const dated = (await db.query<{ id: string; similarity: number; score: number }>(`SELECT id, similarity, score FROM match_thoughts($1::vector, -1.0, 10, '{}'::jsonb, 0.5, 90.0)`, [Q])).rows.find((r) => r.id === nullAge)!;
   assert(dated !== undefined && Math.abs(dated.score - dated.similarity * 0.5) < 1e-9, `a row with no created_at scores as infinitely old (${dated?.score} = ${dated?.similarity} * 0.5)`);
   // Infinite timestamps (the column accepts them): -infinity is infinitely old,
@@ -2202,7 +2250,7 @@ console.log("\n[21] Migration 020: the recency blend — identical at weight 0, 
   // raising "cannot subtract infinite timestamps" on a call 019 answered fine.
   const [past, future] = (await db.query<{ id: string }>(
     `INSERT INTO thoughts (content, embedding, created_at) VALUES ('from -infinity', $1::vector, '-infinity'), ('from +infinity', $2::vector, 'infinity') RETURNING id`,
-    [at(0.84, 5), at(0.83, 6)])).rows.map((r) => r.id);
+    [at(0.84), at(0.83)])).rows.map((r) => r.id);
   const inf0 = (await db.query<Row>(`SELECT id, similarity, score FROM match_thoughts($1::vector, -1.0, 10, '{}'::jsonb)`, [Q])).rows;
   assert(inf0.some((r) => r.id === past && r.score === r.similarity) && inf0.some((r) => r.id === future && r.score === r.similarity), "rows with infinite created_at are returned at weight 0 with score = similarity");
   const inf1 = (await db.query<Row>(`SELECT id, similarity, score FROM match_thoughts($1::vector, -1.0, 10, '{}'::jsonb, 0.5, 90.0)`, [Q])).rows;
@@ -2214,7 +2262,7 @@ console.log("\n[21] Migration 020: the recency blend — identical at weight 0, 
   // 019's ORDER BY would have left their order — and which survive a LIMIT —
   // to the plan (first review pass).
   const tied = (await db.query<{ id: string }>(
-    `INSERT INTO thoughts (content, embedding) VALUES ('tie a', $1::vector), ('tie b', $1::vector), ('tie c', $1::vector) RETURNING id`, [at(0.7, 7)])).rows.map((r) => r.id).sort();
+    `INSERT INTO thoughts (content, embedding) VALUES ('tie a', $1::vector), ('tie b', $1::vector), ('tie c', $1::vector) RETURNING id`, [at(0.7)])).rows.map((r) => r.id).sort();
   const tiedOut = (await db.query<Row>(`SELECT id, similarity, score FROM match_thoughts($1::vector, -1.0, 20, '{}'::jsonb, 1.0, 90.0)`, [Q])).rows.filter((r) => tied.includes(r.id));
   assert(tiedOut.length === 3 && new Set(tiedOut.map((r) => r.score)).size === 1 && tiedOut.map((r) => r.id).join() === tied.join(), `three rows with equal scores come back in id order (${tiedOut.map((r) => r.id.slice(0, 8)).join(", ")})`);
   const tiedTwo = (await db.query<Row>(`SELECT id FROM match_thoughts($1::vector, 0.65, 2, '{}'::jsonb, 1.0, 90.0)`, [Q])).rows.map((r) => r.id).filter((id) => tied.includes(id));
@@ -2246,7 +2294,7 @@ console.log("\n[21] Migration 020: the recency blend — identical at weight 0, 
   // carries the rank just past the window; without that it tied a rank-1
   // vector-only row at exactly 1/(k + 1) and lost on similarity (second review
   // pass). Row N: contains the needle, similarity 0.45, brand new.
-  await db.query(`INSERT INTO thoughts (content, embedding, created_at) VALUES ('N: names SMD-9450, below the threshold', $1::vector, now())`, [at(0.45, 5)]);
+  await db.query(`INSERT INTO thoughts (content, embedding, created_at) VALUES ('N: names SMD-9450, below the threshold', $1::vector, now())`, [at(0.45)]);
   const needleBelow = (await db.query<{ content: string; similarity: number; matched_needles: string[] }>(
     `SELECT content, similarity, matched_needles FROM search_thoughts_hybrid($1::vector, 'the scheduler work on SMD-9450', 0.5, 10, '{}'::jsonb, 0.5, 90.0)`, [Q])).rows;
   assert(needleBelow[0].content.startsWith("N:") && needleBelow[0].matched_needles.join() === "SMD-9450" && needleBelow[0].similarity < 0.5,
@@ -2258,7 +2306,7 @@ console.log("\n[21] Migration 020: the recency blend — identical at weight 0, 
   // through the 2-arg fallback outranks a three-year-old embedded hit — its
   // NULL similarity is scored as 0 into the same formula under a weight, where
   // the first draft sorted its NULL blend last (second review pass).
-  await db.query(`INSERT INTO thoughts (content, embedding, created_at) VALUES ('O: old embedded, names SMD-9450', $1::vector, now() - interval '3 years'), ('P: unembedded today, names SMD-9450', NULL, now())`, [at(0.9, 6)]);
+  await db.query(`INSERT INTO thoughts (content, embedding, created_at) VALUES ('O: old embedded, names SMD-9450', $1::vector, now() - interval '3 years'), ('P: unembedded today, names SMD-9450', NULL, now())`, [at(0.9)]);
   const byAge = (await db.query<{ content: string; similarity: number | null }>(
     `SELECT content, similarity FROM search_thoughts_hybrid($1::vector, 'SMD-9450', -1.0, 10, '{}'::jsonb, 1.0, 90.0)`, [Q])).rows;
   const posP = byAge.findIndex((r) => r.content.startsWith("P:")), posO = byAge.findIndex((r) => r.content.startsWith("O:"));
@@ -2766,6 +2814,7 @@ console.log("\n[25] Migration 025: derived_from / supersedes, their constraints,
 console.log("\n[26] Migration 027: search_thoughts_hybrid admits relative to the top match (SMD-1300)");
 {
   await db.exec(`DELETE FROM thoughts`);
+  await db.exec(`VACUUM thoughts`); // the dead elements out of the index before a three-row walk ([17b] says why)
   // 027 replaces 020's absolute 0.5 cosine floor — which drops the right answer
   // on a long capture, whose short-question cosine is 0.2–0.4 — with a cutoff
   // RELATIVE to the top candidate: admit the strongest match and every row
@@ -4141,6 +4190,117 @@ console.log("\n[37] bench-hnsw's oracle cache: what of a marker's entry a run ma
     assert(r.have === 0 && r.had === 3 && r.taken["whole table"].length === 0, `${what}: the entry answers for nothing, and is counted as found (had ${r.had})`);
   }
   assert(markerAnswers(entry(3), keys, digests, () => 2).have === 0, "an expected size the entry does not meet answers for nothing");
+}
+
+// ── 38. Migration 039 — the walk's index is half precision ───────────────────
+//
+// At the shipped width pgvector fits one float4 vector to an index page and
+// three halfvec ones; 039 rebuilds the two HNSW indexes over
+// `embedding::halfvec(D)` under 001/007's names and casts the walk branches'
+// ORDER BYs to match. The index expression and the body's ORDER BY are one
+// contract — the planner matches them structurally — so this section holds
+// the swap's every case the header names and pairs the cast with the plan.
+// The recall and the bytes are evals/eval-quant.ts's, on real vectors.
+
+console.log("\n[38] Migration 039: the walk's index is half precision — the swap under 001/007's names, what a re-run, a hand rebuild, a staging index and an invalid one each meet, and the plan that pairs the body's cast with the index");
+{
+  const def = async (name: string) => String((await db.query<{ d: string | null }>(`SELECT pg_get_indexdef(to_regclass($1)) AS d`, [name])).rows[0].d ?? "");
+  const oid = async (name: string) => (await db.query<{ o: string | null }>(`SELECT to_regclass($1)::oid::text AS o`, [name])).rows[0].o;
+  const HALF = new RegExp(`USING hnsw \\(\\(\\(embedding\\)::halfvec\\(${EMBEDDING_DIM}\\)\\) halfvec_cosine_ops\\)$`);
+  for (const [t, name] of [["thoughts", "thoughts_embedding_idx"], ["thought_chunks", "thought_chunks_embedding_idx"]]) {
+    const d = await def(name);
+    assert(HALF.test(d) && d.includes(` ON public.${t} `), `${name} is HNSW over (embedding)::halfvec(${EMBEDDING_DIM}) with halfvec_cosine_ops, under the name 001/007 gave it (${d})`);
+    assert((await oid(`${t}_embedding_halfvec_idx`)) === null, `…and no staging index is left on ${t}`);
+  }
+  const oids = async () => JSON.stringify([await oid("thoughts_embedding_idx"), await oid("thought_chunks_embedding_idx")]);
+  const kept = await oids();
+  await reapply("039");
+  assert((await oids()) === kept, "re-applying 039 rebuilds nothing: both indexes keep their OIDs (the swap finds halfvec under the shipped name and does nothing)");
+  await reapply("001");
+  assert((await oids()) === kept && HALF.test(await def("thoughts_embedding_idx")), "001 re-applied by hand leaves it: its CREATE INDEX IF NOT EXISTS finds the name");
+
+  // The pair: the body's ORDER BY reaches the index; the raw column's, which
+  // had it until 039, does not; nor does a cast on one side only.
+  await db.exec(`DELETE FROM thoughts`);
+  const { unitVector } = seededRandom(1501);
+  const values = Array.from({ length: 60 }, (_, k) => `('half ${k}', '{}'::jsonb, '[${unitVector(EMBEDDING_DIM).join(",")}]'::vector)`).join(",");
+  await db.exec(`INSERT INTO thoughts (content, metadata, embedding) VALUES ${values}`);
+  const q = `[${unitVector(EMBEDDING_DIM).join(",")}]`;
+  const plan = async (orderBy: string) => {
+    await db.exec(`SET enable_seqscan = off`);
+    try {
+      return (await db.query<{ "QUERY PLAN": string }>(`EXPLAIN SELECT id FROM thoughts ORDER BY ${orderBy} LIMIT 5`)).rows.map((r) => r["QUERY PLAN"]).join("\n");
+    } finally {
+      await db.exec(`RESET enable_seqscan`);
+    }
+  };
+  const cast = `embedding::halfvec(${EMBEDDING_DIM}) <=> '${q}'::vector::halfvec(${EMBEDDING_DIM})`;
+  assert(/Index Scan using thoughts_embedding_idx/.test(await plan(cast)), "ordered by the cast on both sides — the body's ORDER BY — the walk is an Index Scan using thoughts_embedding_idx");
+  assert(!/Index Scan using thoughts_embedding_idx/.test(await plan(`embedding <=> '${q}'::vector`)), "ordered by the raw column it is not: since 039 the cast is the index's key (the header's first failure mode)");
+  const exact = (await db.query<{ id: string }>(`SELECT id FROM thoughts ORDER BY embedding <=> $1::vector, id LIMIT 10`, [q])).rows.map((x) => x.id);
+  const got = (await db.query<{ id: string }>(`SELECT id FROM match_thoughts($1::vector, -1.0, 10, '{}'::jsonb)`, [q])).rows.map((x) => x.id);
+  assert(got.length === 10 && got.every((id) => exact.includes(id)), "match_thoughts over the half-precision index returns the exact top-10 on 60 rows (the walk finds them all; the score is the full vector's)");
+
+  // A hand rebuild from 001's DDL puts a vector index under the name: the
+  // body's ORDER BY has no index path until 039 is re-applied.
+  await db.exec(`DROP INDEX thoughts_embedding_idx`);
+  await db.exec(`CREATE INDEX thoughts_embedding_idx ON thoughts USING hnsw (embedding vector_cosine_ops)`);
+  assert(!/Index Scan/.test(await plan(cast)), "with a vector index back under the name, the body's ORDER BY has no index path (the second failure mode: 019's sequential scan — exact, slow)");
+  await reapply("039");
+  assert(HALF.test(await def("thoughts_embedding_idx")) && /Index Scan using thoughts_embedding_idx/.test(await plan(cast)), "re-applying 039 swaps it back, and the walk has its index again");
+
+  // A staging index built beforehand — the CONCURRENTLY path for a large
+  // brain — is adopted under the shipped name, the same relation.
+  const stage = async () => {
+    await db.exec(`DROP INDEX thoughts_embedding_idx`);
+    await db.exec(`CREATE INDEX thoughts_embedding_idx ON thoughts USING hnsw (embedding vector_cosine_ops)`);
+    await db.exec(`CREATE INDEX thoughts_embedding_halfvec_idx ON thoughts USING hnsw ((embedding::halfvec(${EMBEDDING_DIM})) halfvec_cosine_ops)`);
+    return oid("thoughts_embedding_halfvec_idx");
+  };
+  const staged = await stage();
+  await reapply("039");
+  assert((await oid("thoughts_embedding_idx")) === staged && (await oid("thoughts_embedding_halfvec_idx")) === null && HALF.test(await def("thoughts_embedding_idx")),
+         "a valid staging index built by hand is adopted: renamed under the shipped name, the same relation, nothing rebuilt");
+  // A valid index of another shape under the staging name is refused by name,
+  // never renamed into place (review pass 1); dropped by hand, the re-run
+  // builds and swaps as on a fresh table.
+  await db.exec(`DROP INDEX thoughts_embedding_idx`);
+  await db.exec(`CREATE INDEX thoughts_embedding_idx ON thoughts USING hnsw (embedding vector_cosine_ops)`);
+  await db.exec(`CREATE INDEX thoughts_embedding_halfvec_idx ON thoughts USING hnsw (embedding vector_cosine_ops)`);
+  let refused = "";
+  try {
+    await reapply("039");
+  } catch (e) {
+    refused = (e as Error).message;
+  }
+  assert(new RegExp(`migration 039: thoughts_embedding_halfvec_idx exists but is not an HNSW index over \\(embedding::halfvec\\(${EMBEDDING_DIM}\\)\\)`).test(refused) && !HALF.test(await def("thoughts_embedding_idx")),
+         `a staging index of another shape is refused by name and nothing is renamed (${refused.split("\n")[0] || "it was adopted"})`);
+  await db.exec(`DROP INDEX thoughts_embedding_halfvec_idx`);
+  await reapply("039");
+  assert(HALF.test(await def("thoughts_embedding_idx")) && (await oid("thoughts_embedding_halfvec_idx")) === null, "…dropped by hand, the re-run builds and swaps as on a fresh table");
+  // The same under the SHIPPED name: a valid index that names halfvec but is
+  // not this shape — an IVFFlat over the cast, from pgvector's docs — is
+  // refused, not taken for done; 001's vector index is swapped (review pass 2).
+  await db.exec(`DROP INDEX thoughts_embedding_idx`);
+  await db.exec(`CREATE INDEX thoughts_embedding_idx ON thoughts USING ivfflat ((embedding::halfvec(${EMBEDDING_DIM})) halfvec_cosine_ops) WITH (lists = 1)`);
+  refused = "";
+  try {
+    await reapply("039");
+  } catch (e) {
+    refused = (e as Error).message;
+  }
+  assert(new RegExp(`migration 039: thoughts_embedding_idx exists but is not an HNSW index over \\(embedding::halfvec\\(${EMBEDDING_DIM}\\)\\)`).test(refused) && /USING ivfflat/.test(await def("thoughts_embedding_idx")),
+         `an IVFFlat index over the cast under the shipped name is refused by name, not taken for done (${refused.split("\n")[0] || "it was kept"})`);
+  await db.exec(`DROP INDEX thoughts_embedding_idx`);
+  await reapply("039");
+  assert(HALF.test(await def("thoughts_embedding_idx")), "…dropped by hand, the re-run builds the HNSW index under the name");
+  // An INVALID staging index — what an interrupted CREATE INDEX CONCURRENTLY
+  // leaves — is dropped and a fresh one built, and an INVALID halfvec index
+  // under the shipped name is rebuilt rather than kept. Both cases are
+  // db/test-upgrade.ts [16]'s: they are made by flipping pg_index.indisvalid,
+  // and PGlite refuses the catalog write ("tuple concurrently updated") where
+  // a server does not.
+  await db.exec(`DELETE FROM thoughts`);
 }
 
 report();

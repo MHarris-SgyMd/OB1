@@ -2912,6 +2912,110 @@ smallest index and strong small- corpus filtered recall — a bounded evaluation
 of its build/query knobs (not an adoption) is the one thread this leaves open;
 and pgvectorscale's parallel DiskANN build crashed the Postgres backend at 1M
 rows (workers=0 built; workers=4 died), worth reporting upstream.
+## Quantised indexes at the shipped width: halfvec adopted, binary declined (SMD-1501)
+
+`eval-quant.ts`, run as `bun run quant` with `OB1_EVAL_QUANT_SOURCE` naming a
+database `eval-longmemeval.ts` loaded, `OB1_EVAL_LME` its file and
+`OB1_EVAL_EMBED` its model. Needs Ollama for the 470 question vectors and a
+container with `OB1_PG_SHM_SIZE=3g` for the parallel builds; `OB1_PG_KEEP`
+keeps the copied corpus between runs. FORK.md change 81 has the decision and
+migration 039 the mechanism; this section is the measurement.
+
+**The question.** At 1,024 dimensions an HNSW index over `vector` costs a
+whole 8 KB page per row — a float4 vector plus its neighbour lists is more
+than half a page, and pgvector packs pages by whole elements — so a
+ten-million-row brain's `thoughts` index alone is near 80 GB. pgvector also
+indexes `halfvec` (three to a page) and binary-quantised vectors (twenty to a
+page). What either costs in recall on *real* vectors, and whether a rerank on
+the full vectors gives it back, is a question the random 64-dimensional bench
+cannot answer.
+
+**How it was measured.** The two real corpora this repo has at the shipped
+width: LongMemEval-S under `qwen3-embedding:4b@1024` (19,825 whole vectors +
+56,267 windows = 76,092 vectors, exactly the rows `match_thoughts`' two CTEs
+scan) and LongMemEval-M under `qwen3-embedding:0.6b@1024` (51,660 + 145,705 =
+197,365). The harness copies a corpus into a throwaway database under the
+tree's schema, embeds the 470 questions, takes an exact pass with no vector
+index in existence (exact in the function's own shape — the true nearest
+`v_fetch` per side merged by MAX, what a perfect index would return — not the
+ten highest MAX scores over every row, which the two-CTE shape does not
+compute; the report counts how often the two differ — on none of the 470
+questions, on either corpus), then builds each arm's two indexes alone —
+timed under
+`maintenance_work_mem` 2GB with four workers, sized, dropped before the next —
+and runs the function's unfiltered statement with only the candidate ORDER BY
+changed, under the function's own SET clauses, at `hnsw.ef_search` 40 / 100 /
+400. Three arms: **vector** (`hnsw (embedding vector_cosine_ops)`, what 001
+and 007 ship), **halfvec** (`hnsw ((embedding::halfvec(1024))
+halfvec_cosine_ops)`, the query cast to match, the candidates' similarity
+recomputed on the full vector), **binary** (`hnsw
+((binary_quantize(embedding)::bit(1024)) bit_hamming_ops)`, each CTE taking
+`v_fetch × R` candidates by Hamming distance and reranking them by full-vector
+cosine to `v_fetch`, R = 1, 2, 4, 10). A control holds `match_thoughts` itself
+to the mirrored statement of the arm it walks, question for question (0 of
+470 differ). Why the unfiltered path: LongMemEval's per-question filter
+matches a few hundred thoughts and routes every question to the exact branch,
+which reads no index — the harness as usually run never touches HNSW at all.
+
+**Results, second build of each corpus** (the first build's recall differed by
+up to a hundredth — a parallel HNSW build is not deterministic — and latencies
+by about a quarter on a shared machine):
+
+| arm | candidates per CTE | ef_search | S recall@10 vs exact | M recall@10 | S gold-hit@10 | M gold-hit@10 | same list as vector, S / M | S median ms | M median ms |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| vector | 40 | 40 | 0.984 | 0.971 | 46.2% | 33.8% | 100% / 100% | 4.13 | 4.22 |
+| vector | 40 | 100 | 0.996 | 0.989 | 46.4% | 34.0% | 100% / 100% | 6.42 | 6.54 |
+| vector | 40 | 400 | 0.999 | 0.998 | 46.2% | 34.5% | 100% / 100% | 18.09 | 17.36 |
+| halfvec | 40 | 40 | 0.974 | 0.970 | 45.5% | 33.6% | 93.4% / 95.3% | 3.12 | 4.08 |
+| halfvec | 40 | 100 | 0.993 | 0.989 | 46.2% | 34.0% | 98.1% / 98.1% | 4.11 | 6.13 |
+| halfvec | 40 | 400 | 0.999 | 0.999 | 46.0% | 34.5% | 99.6% / 99.6% | 9.12 | 14.81 |
+| binary | 40 | 40 | 0.955 | 0.939 | 46.0% | 33.4% | 69.6% / 68.3% | 1.80 | 3.08 |
+| binary | 40 | 400 | 0.974 | 0.964 | 46.4% | 34.7% | 76.8% / 76.4% | 5.30 | 6.30 |
+| binary | 80 → 40 | 40 | 0.980 | 0.973 | 46.2% | 34.3% | 83.0% / 79.1% | 3.07 | 4.09 |
+| binary | 160 → 40 | 40 | 0.993 | 0.991 | 46.0% | 34.5% | 86.6% / 82.8% | 5.63 | 7.92 |
+| binary | 400 → 40 | 40 | 0.998 | 0.997 | 46.2% | 34.5% | 88.9% / 83.6% | 13.25 | 17.44 |
+
+The exact pass's gold-hit@10 — the ceiling, since a session whose text twins
+another's shares its row — is 46.2% on S and 34.5% on M. Builds and bytes:
+
+| arm | S build s (both tables) | S bytes | M build s | M bytes | of vector |
+| --- | --- | --- | --- | --- | --- |
+| vector | 13.9 | 577 MB | 28.7 | 1,482 MB | 100% |
+| halfvec | 7.9 | 193 MB | 18.5 | 494 MB | 33% |
+| binary | 2.5 | 31 MB | 7.3 | 79 MB | 5% |
+
+**What it says.** halfvec returns what the vector index returns — recall
+within the build-to-build spread at every `ef_search`, the identical ten rows
+on 93–95% of questions at the default, the same gold sessions within a point —
+in the same time or less, in a third of the bytes, built in two thirds of the
+time. It is now the shipped index (migration 039; the walk branches of
+`match_thoughts` order by the cast, the stored vectors and the exact branch are
+untouched). Binary is declined, and not on the numbers alone: without a
+rerank it drops three hundredths of recall at the default `ef_search`;
+reranked at 80 → 40 it meets the bar's every number (recall within four
+thousandths, the vector index's latency, a twentieth of the bytes); reranked
+further (160 → 40) it passes the vector index's recall at 1.4–1.9× its
+latency, because reading each candidate's full vector out of TOAST is the
+cost, paid once per CTE. What decides against it is that any rerank is a
+change to the function's body — a subquery and a second depth to size in each
+walk CTE — returning the identical list on only 79–83% of questions, where
+halfvec needs a cast and gives 93–95%. The 80 → 40 arm is the one for a brain
+whose halfvec index no longer fits in memory, to be chosen on that brain's
+numbers with this harness.
+
+**Caveats.** Two corpora, two builds each, on a machine shared with other
+containers: the recall spread between builds (≤ 0.01) is larger than the
+halfvec-vs-vector difference, and the latencies are round trips from the
+harness, comparable within a run and not across machines. M's vectors are the
+0.6b model's, at the shipped width but not the shipped model. The ticket's
+100,000-row point is bracketed (76k and 197k vectors), not hit; nothing here
+is a random vector, and none of it is a recall figure for any other model. One
+side effect is the planner's, not the precision's: the halfvec index is a
+third of the pages and priced accordingly, so a filtered call whose plan sat
+on the edge between the HNSW walk and the exact GIN bitmap can now walk —
+`db/test-live.ts` [5b]'s 2,000 random rows under a 99% filter did, for the
+five custom-plan calls that open a session, at the walk's usual 7 of 10 on
+random vectors; the vector index had been priced out of that plan entirely.
 
 ## Related
 
