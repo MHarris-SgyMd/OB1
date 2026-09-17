@@ -4433,6 +4433,21 @@ re-applied is ok, the 3-argument form dropped is refused naming 022 and not
 the GRANT and starts once granted. Suites after: schema 483 at both widths,
 live 308, upgrade 36, preflight 138, chunking 35, sql 62, postgrest 46.
 
+`test-live` [7]'s three found-by assertions (five `foundAt` calls, two of them
+window reads at axis 2) go through `match_thoughts`'s filtered branch since
+SMD-1574: a metadata key only the re-captured thought carries, so 014 scores
+it and its chunks by id and no walk decides — the section no longer exercises
+the HNSW path at all. Read unfiltered, the same-model assertion missed the
+freshly moved vector in five CI attempts on three trees that touched nothing
+under `db/`, and four times in thirty-seven local runs; the ticket's own
+reading — ten live rows tied at the axis — was wrong, since [7] starts from an
+emptied table and has three thoughts and four chunk rows under a returned
+limit of ten and a candidate window of forty. What the dumps showed, what was
+measured and what still reads the walk are in "Known issues we did NOT fix"
+under SMD-1632; [5b] holds the walk's recall on random vectors, [5c] its plan.
+Three review passes and a boyscout, all prose: the accounting of runs, the
+hedges on what was shown, and this note cut to its place.
+
 **A first pass, triaged.** Its top finding was the rule itself: the first
 version deleted the windows on every vectored re-capture, and on the path the
 header names — a `server-portable`-windowed note re-saved from Claude Desktop
@@ -12555,7 +12570,38 @@ Deliberate. Recorded so nobody assumes they were missed.
   divergent content, and `AGENTS.md` mandates updating a private tracker.
   [PR #274](https://github.com/NateBJones-Projects/OB1/pull/274) proposed the
   obvious fix, was endorsed in review, and was closed unmerged.
-
+- **The thoughts HNSW index scan has returned none of the table's live rows**
+  (pgvector 0.8.6). `test-live.ts` [7]'s same-model found-by read, then an
+  unfiltered `match_thoughts` top-10, missed in five CI attempts on three
+  trees that touched nothing under `db/` and, looped locally, four times in
+  thirty-seven runs (thirty-four with a second suite beside it), twice there
+  and twice at the other-model read. An instrumented copy caught two with the
+  state dumped: the thoughts index scan itself returned one of the three live
+  rows once and none of them once — iterative scan on or off, still 300 ms
+  later — with an autovacuum having run on both tables during the run (the
+  dump does not time it against the sections), the chunk index answering
+  throughout and the sections after finding their rows again. Not a tie: a
+  tie can reorder candidates, not remove them, and one dump's scan returned
+  no row at all. The 022 sequence alone never missed — 282 iterations over
+  three index histories (random rows then unit rows, unit rows only, none)
+  under three vacuum modes (none, before, in flight), and two 150-second runs
+  of ~117k inserts against 55k and 43k nonstop vacuums (probe output not
+  retained) — and every call in the suite forced down the walk missed in two
+  of four standalone runs, a probabilistic demonstrator and not a model of
+  the code before the fix. SMD-1574 moved [7]'s reads to the filtered branch
+  (change 40's note): measured on its rows, a filtered call adds no
+  `idx_scan` to either HNSW index and one to the metadata GIN, the unfiltered
+  call adds one to each, the heap is far under 037's 8,192-page floor so the
+  sample gate cannot fire, and the exact branch costs about 0.1 ms more a
+  call (0.07 to 0.2 across two measurements, round trip dominated); the exact
+  branch's chunk CTE emptied fails the two window reads. The fixed suite is
+  green in twelve local runs under `db/with-postgres.sh` (500/500 each); the
+  ticket's twenty CI runs are not done. Whether a real corpus with real
+  vectors can reach the same state is not shown either way, and no mitigation
+  (a reachability check, `REINDEX`) is built. Still on the walk: [4]'s read,
+  [15]'s, [11]'s two hybrid reads and [5b]'s two ([15] and [11] run after the
+  suite's mass deletes as [7] does; [4] runs first, on a near-fresh index).
+  SMD-1632.
 ---
 
 ## Before this touches anything sensitive
