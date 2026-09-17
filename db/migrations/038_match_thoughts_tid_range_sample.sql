@@ -16,7 +16,8 @@
 --   by page over the WHOLE heap — it hashes every block number against its
 --   cutoff — so the statement carried about 2 ns per heap page besides the
 --   eight pages' rows. Measured with one row a page and every page in
---   shared_buffers (037's first review pass, and again for this file):
+--   shared_buffers, the way 037's first review pass measured it (0.038 /
+--   0.094 / 0.459 then), both statements re-run for this file:
 --
 --     heap pages    037's sample     this file's
 --     2,000           0.036 ms         0.034 ms
@@ -146,9 +147,8 @@
 --     0.08–0.1 ms a call, measured). Not the planner's `@>` estimate, for
 --     037's reasons.
 --   * pg_relation_size and to_regclass as 037: exact, one stat() call, the
---     name resolved on every call (037's header says what a temp table
---     shadowing the name does — the same here, since the same local is the
---     range the blocks are drawn from).
+--     name resolved on every call (a temp table shadowing the name: Failure
+--     modes below, two shapes).
 --
 -- Failure modes, each with its cost
 --   * An unlucky sample skips a filter at or under the threshold. As 037,
@@ -173,21 +173,23 @@
 --
 --     Every filter at or under the threshold ran the collection every time;
 --     the broad ones are skipped a little more often than under 037 (the
---     draw always reaches its pages). At the floor — a 163,840-row corpus of
---     8,191 pages — the same, with the 50% filter 1,000 and the 10% 979 of
---     1,000 (037: 993 and 905); the contiguous 10,000 was skipped 10 times
---     (13), which is not a wrong answer at ten times the threshold.
+--     draw always reaches its pages). Just under the floor — a 163,840-row
+--     corpus of 8,191 pages — the same over 1,000 draws (the 20,000-draw
+--     rates for the two thin layouts are the next bullet), with the 50%
+--     filter 1,000 and the 10% 979 of 1,000 (037: 993 and 905); the
+--     contiguous 10,000 was skipped 10 times (037's statement: 13 of 1,000),
+--     which is not a wrong answer at ten times the threshold.
 --   * The thin-spread layout, the one 037's third condition is weakest
 --     against (a few matches a page over hundreds of pages): 1,000 rows four
 --     a page over 251 pages of the 8,191 were skipped 29 times in 20,000
 --     draws at the floor — 1.45e-3, which is the formula's figure, C(8,3) x
 --     (251 / 8,191)^3 = 1.6e-3. 037's statement, re-run on this heap, was
---     skipped 14 times in 20,000 (its own header's 13 was on a 6,826-page
---     heap) because SYSTEM's variance made condition 1 fail whenever its
---     draw reached ten pages or more (nine, on 037's smaller heap: twelve
---     hits scale to just over ten times the threshold at nine pages here);
---     that accident is gone, and the bound
---     is now what 037's header computes, falling as the cube of the heap
+--     skipped only 14 times in 20,000 — under the formula's 32 — because
+--     SYSTEM's variance made condition 1 fail whenever its draw reached ten
+--     pages or more (twelve hits on nine pages still scale to 10.9 times the
+--     threshold here; on 037's 6,826-page heap the cut was nine pages, which
+--     is where its header's 13 in 20,000 came from). That accident is gone,
+--     and the bound is now what 037's header computes, falling as the cube of the heap
 --     (7e-6 at a million rows, 7e-9 at ten million). A contiguous 1,000 rows
 --     were skipped once in 20,000 (0), the 900-row uniform filter never.
 --     `hit_pages >= 4` remains the knob if that band matters (C(8,4) x f^4,
@@ -207,8 +209,12 @@
 --     037 returns, nothing worse — and the thin filters' bound is the
 --     uniform one again, not the ~3e-5 the biased denominator gave (the
 --     figures are in FORK.md change 71). VACUUM FULL restores the density.
---   * The eight page reads. They are the whole cost now, and on a heap that
---     fits the buffer pool about 0.05 ms together. On a heap larger than
+--   * The eight page reads. They are the whole cost now: about 0.05 ms
+--     together on a heap of one row a page that fits the buffer pool, about
+--     0.3 ms at the shipped width's 65–80 rows a page, each of which the
+--     filter is tested against (db/test-live.ts [5d] prints it: 0.33 ms
+--     with the round trip on its 386-page heap; 037's sample cost the same
+--     there, plus its per-page term). On a heap larger than
 --     memory they are eight random reads from disk — on the order of 0.1 ms
 --     each on NVMe, more on network storage — where 037 paid the same reads
 --     plus its per-page term. A brain of a hundred million rows pays those
@@ -250,8 +256,9 @@
 --   change 71's tables; section C prints the sample's own cost beside the
 --   collection's at every scale: 0.07–0.12 ms at 10,000 rows, 0.08–0.12 at
 --   a million, 0.09–0.12 at ten million (037's: 0.04–0.12, 0.22–0.36, and
---   1.10–1.20 in a before pass that ran under load — 0.94 on the idle
---   machine in FORK.md change 70). Through the function the empty filter at ten million rows
+--   1.10–1.20 in a before pass that ran under load — 0.94–1.11 on the idle
+--   machine across FORK.md change 70's two passes, so load barely moved that
+--   row). Through the function the empty filter at ten million rows
 --   costs 0.36 ms — 0.27 before 037, 1.31 under it — and the 50% tier 14.4,
 --   as under 037 (13.2); the thin tiers moved by the sample's saving and the
 --   spread. Those are the ticket's two checks, the estimate flat across the

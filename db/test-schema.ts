@@ -738,7 +738,13 @@ console.log("\n[8e] Migrations 037 and 038: the routing count is gated by a samp
 
   // 1,000 random rows, 990 of one kind and 10 of another: both filters are
   // under the exact threshold, so both answers must be the exact top-10.
+  // Emptied AND vacuumed: the sections before leave their dead rows behind,
+  // and without the VACUUM this fixture sat on the tail of a 55-page heap whose
+  // first 38 pages were already empty — the "emptied band" below was then
+  // mostly pre-empty and the probe passed on an incidental layout (review
+  // pass 2). Compacted, 1,000 rows are some sixteen pages, every one live.
   await db.exec(`DELETE FROM thoughts`);
+  await db.exec(`VACUUM thoughts`);
   const { unitVector } = seededRandom(1463);
   for (let i = 0; i < 1000; i += 100) {
     const values = Array.from({ length: 100 }, (_, k) => `('gate ${i + k}', '{"kind":"${(i + k) % 100 === 0 ? "thin" : "broad"}"}'::jsonb, '[${unitVector(EMBEDDING_DIM).join(",")}]'::vector)`).join(",");
@@ -783,74 +789,124 @@ console.log("\n[8e] Migrations 037 and 038: the routing count is gated by a samp
   // as literals, so what runs here is the deployed text and not a copy kept in
   // this file: a copy passed every drop-the-mechanism mutant (INNER join, no
   // LIMIT, a constant block) and left the tokens to the regexes above (review
-  // pass 1). Five draws, each judged by the body's own three conditions: the
-  // rule must say "collect" whatever it drew — on 1,000 rows the scaled
-  // estimate can never reach ten times the threshold (second review pass of
-  // 037) — and every draw reaches at least three distinct pages of the
-  // ROUTE_SAMPLE_PAGES drawn: eight draws over this heap land on two or fewer
-  // pages with probability about 1e-6, and a draw that read one block eight
-  // times would report one. 037's TABLESAMPLE promised neither (one run there
-  // drew no page at all).
+  // pass 1). A body the regex cannot read fails the one assertion and skips
+  // the rest, rather than throwing the suite away from [9] on (review pass 2).
   const stmt = /SELECT (count\(\*\) FILTER[\s\S]*?)\s+INTO v_hits, v_hit_pages, v_pages_seen\s+(FROM \([\s\S]*?\) p ON true);/.exec(src);
-  assert(stmt !== null, "the sample statement reads out of the installed body");
-  /** The body's sample with its locals substituted; `drawn` pins the blocks in place of the random draw, the probe and the join still the body's text. */
-  const deployedSample = (filter: string, pageCount: number, drawn?: number[]) => {
-    let text = `SELECT ${stmt![1]} ${stmt![2]}`.replace(/\bv_pages\b/g, () => String(pageCount)).replace(/\bfilter\b/g, () => `'${filter}'::jsonb`);
-    if (drawn) {
-      const pinned = text.replace(/FROM \(\s*SELECT DISTINCT floor\(random\(\) \* \d+\)::bigint AS blk\s+FROM generate_series\(1, \d+\)\s*\) b/, () => `FROM (SELECT unnest(ARRAY[${drawn.join(",")}])::bigint AS blk) b`);
-      assert(pinned !== text, "the body draws its blocks as `SELECT DISTINCT floor(random() * v_pages)::bigint AS blk FROM generate_series(1, N)`, so a test can pin them");
-      text = pinned;
+  assert(stmt !== null, "the sample statement reads out of the installed body (SELECT <three counts> INTO v_hits, v_hit_pages, v_pages_seen FROM (<the draw>) b LEFT JOIN LATERAL (<the probe>) p ON true)");
+  if (stmt) {
+    const [, counts, from] = stmt;
+    type Draw = { hits: number; hit_pages: number; pages_seen: number };
+    /**
+     * The body's sample with its locals substituted. `drawn` pins the blocks in
+     * place of the random draw — only `floor(random() * N) … FROM
+     * generate_series(1, N)` is replaced, so the body's DISTINCT, its join and
+     * its probe are what run; null (with a failed assertion) when the body's
+     * draw is not that shape.
+     */
+    const deployedSample = (filter: string, pageCount: number, drawn?: number[]): string | null => {
+      let text = `SELECT ${counts} ${from}`.replace(/\bv_pages\b/g, () => String(pageCount)).replace(/\bfilter\b/g, () => `'${filter}'::jsonb`);
+      if (drawn) {
+        const pinned = text.replace(/floor\(random\(\) \* \d+\)::bigint AS blk\s+FROM generate_series\(1, \d+\)/, () => `unnest(ARRAY[${drawn.join(",")}])::bigint AS blk`);
+        if (pinned === text) {
+          assert(false, "the body draws its blocks as `floor(random() * v_pages)::bigint AS blk FROM generate_series(1, N)`, so a test can pin them");
+          return null;
+        }
+        text = pinned;
+      }
+      return text;
+    };
+    const drawOnce = async (filter: string, pageCount: number, drawn?: number[]): Promise<Draw | null> => {
+      const text = deployedSample(filter, pageCount, drawn);
+      if (text === null) return null;
+      return (await db.query<Draw>(`SELECT x.c1::int AS hits, x.c2::int AS hit_pages, x.c3::int AS pages_seen FROM (${text}) x(c1, c2, c3)`)).rows[0];
+    };
+    // The body's three conditions at the default count (v_exact = GREATEST(v_base * 4, 1000) = 1,000).
+    const skips = (r: Draw, pageCount: number) => r.hits >= 8 && r.hit_pages >= 3 && r.hits * pageCount >= 10 * 1000 * r.pages_seen;
+    // A draw is sound when it reached between two and ROUTE_SAMPLE_PAGES distinct
+    // pages: eight draws over P pages land on ONE page with probability P^-7
+    // (under 1e-8 at sixteen pages), and a draw that read one block eight times
+    // — or counted its blocks without DISTINCT — would report one, or more than
+    // ROUTE_SAMPLE_PAGES. 037's TABLESAMPLE promised neither (one run there drew
+    // no page at all).
+    const sound = (r: Draw) => r.pages_seen >= 2 && r.pages_seen <= ROUTE_SAMPLE_PAGES && r.hit_pages <= r.pages_seen;
+    const BROAD = '{"kind":"broad"}';
+    // Five draws, each judged by the body's own three conditions: the rule
+    // must say "collect" whatever it drew — on 1,000 rows the scaled estimate
+    // can never reach ten times the threshold (second review pass of 037).
+    const draws: string[] = [];
+    let wouldSkip = 0;
+    let soundDraws = 0;
+    for (let i = 0; i < 5; i++) {
+      const r = (await drawOnce(BROAD, pages))!;
+      draws.push(`${r.hits}/${r.hit_pages}/${r.pages_seen}`);
+      if (skips(r, pages)) wouldSkip++;
+      if (sound(r)) soundDraws++;
     }
-    return text;
-  };
-  const drawOnce = async (filter: string, pageCount: number, drawn?: number[]) =>
-    (await db.query<{ hits: number; hit_pages: number; pages_seen: number }>(`SELECT x.c1::int AS hits, x.c2::int AS hit_pages, x.c3::int AS pages_seen FROM (${deployedSample(filter, pageCount, drawn)}) x(c1, c2, c3)`)).rows[0];
-  const skips = (r: { hits: number; hit_pages: number; pages_seen: number }, pageCount: number) => r.hits >= 8 && r.hit_pages >= 3 && r.hits * pageCount >= 10 * 1000 * r.pages_seen;
-  const draws: string[] = [];
-  let wouldSkip = 0;
-  let spread = 0;
-  for (let i = 0; i < 5; i++) {
-    const r = await drawOnce('{"kind":"broad"}', pages);
-    draws.push(`${r.hits}/${r.hit_pages}/${r.pages_seen}`);
-    if (skips(r, pages)) wouldSkip++;
-    if (r.pages_seen >= 3 && r.pages_seen <= ROUTE_SAMPLE_PAGES && r.hit_pages <= r.pages_seen) spread++;
+    assert(wouldSkip === 0 && soundDraws === 5,
+      `five draws of the body's own sample on 1,000 rows (hits/hit pages/pages drawn: ${draws.join(", ")}) — none meets the three conditions on ${pages} pages, so the gate cannot skip here, and every draw reached 2 to ${ROUTE_SAMPLE_PAGES} distinct pages`);
+    // The plan the statement gets: TID Range Scans of the heap and no scan of
+    // it. Without the probe's LIMIT the planner pulls the probe up into the
+    // join, the ctid bounds become join quals no TID Range path reads, and the
+    // plan is a sequential scan of thoughts under Materialize (038's header) —
+    // a property of the plan, which the text assertion above cannot hold.
+    const plan = (await db.query<{ "QUERY PLAN": string }>(`EXPLAIN ${deployedSample(BROAD, pages)}`)).rows.map((r) => r["QUERY PLAN"]).join("\n");
+    assert(/Tid Range Scan on thoughts/.test(plan) && !/Seq Scan on thoughts/.test(plan) && !/Materialize/.test(plan),
+      `the body's sample plans as TID Range Scans of thoughts — no sequential scan, no Materialize (${plan.split("\n").filter((l) => /Scan|Materialize/.test(l)).map((l) => l.trim().replace(/\s+\(cost.*$/, "")).join("; ")})`);
+    // DISTINCT: the same block drawn eight times is read and counted once. The
+    // last block holds the tail of the load; its broad rows counted by ctid,
+    // then the body's sample pinned to eight copies of it — one page drawn,
+    // that many hits. Without DISTINCT the probe runs eight times and the
+    // hits come back eightfold.
+    const last = pages - 1;
+    const [{ on_last }] = (await db.query<{ on_last: number }>(
+      `SELECT count(*)::int AS on_last FROM thoughts WHERE ctid >= ('(' || ${last} || ',0)')::tid AND ctid < ('(' || ${last + 1} || ',0)')::tid AND metadata @> '${BROAD}' AND embedding IS NOT NULL`)).rows;
+    const same = await drawOnce(BROAD, pages, Array.from({ length: ROUTE_SAMPLE_PAGES }, () => last));
+    assert(on_last > 0 && same !== null && same.pages_seen === 1 && same.hits === on_last && same.hit_pages === 1,
+      `block ${last} drawn ${ROUTE_SAMPLE_PAGES} times over: one page drawn, its ${on_last} broad rows counted once (drew ${same?.pages_seen} pages, ${same?.hits} hits on ${same?.hit_pages}) — the DISTINCT`);
+    // The pages drawn are counted whether or not they hold a row — the LEFT
+    // join. An eight-block band starting a quarter of the way in, with live
+    // rows beyond it so a plain VACUUM cannot truncate it away, is emptied
+    // (its rows deleted, then vacuumed: dead tuples gone, the pages kept), and
+    // the body's probe pinned to those eight blocks draws eight pages and
+    // answers nothing; an INNER join — 037's count of the pages that RETURNED
+    // a row — reports none drawn. The same probe under EXPLAIN (ANALYZE,
+    // BUFFERS) touches exactly eight buffers: one page per block and no more,
+    // which a bound of `<= '(b+1,0)'` would double (it reads into the next
+    // block) — the cost the whole change exists to bound.
+    const lo = Math.floor(pages / 4);
+    const hi = lo + ROUTE_SAMPLE_PAGES;
+    const [{ beyond, inside }] = (await db.query<{ beyond: number; inside: number }>(
+      `SELECT count(*) FILTER (WHERE ctid >= ('(' || ${hi} || ',0)')::tid)::int AS beyond,
+              count(*) FILTER (WHERE ctid >= ('(' || ${lo} || ',0)')::tid AND ctid < ('(' || ${hi} || ',0)')::tid)::int AS inside
+       FROM thoughts`)).rows;
+    assert(inside > 0 && beyond > 0, `the band [${lo}, ${hi}) holds ${inside} live rows and ${beyond} live rows lie beyond it, so emptying it leaves the heap its size`);
+    const deleted = (await db.query(`DELETE FROM thoughts WHERE ctid >= ('(' || ${lo} || ',0)')::tid AND ctid < ('(' || ${hi} || ',0)')::tid`)).affectedRows ?? -1;
+    await db.exec(`VACUUM thoughts`);
+    const [{ live_pages, heap_pages }] = (await db.query<{ live_pages: number; heap_pages: number }>(
+      `SELECT count(DISTINCT (ctid::text::point)[0])::int AS live_pages, (pg_relation_size(to_regclass('thoughts')) / current_setting('block_size')::int)::int AS heap_pages FROM thoughts`)).rows;
+    assert(deleted === inside && heap_pages === pages && live_pages <= pages - ROUTE_SAMPLE_PAGES,
+      `the band's ${deleted} rows deleted and the heap vacuumed: still ${heap_pages} pages, ${live_pages} of them with a live row`);
+    const empties = Array.from({ length: ROUTE_SAMPLE_PAGES }, (_, i) => lo + i);
+    const pinned = await drawOnce(BROAD, pages, empties);
+    assert(pinned !== null && pinned.hits === 0 && pinned.hit_pages === 0 && pinned.pages_seen === ROUTE_SAMPLE_PAGES,
+      `the body's probe pinned to the ${ROUTE_SAMPLE_PAGES} emptied blocks [${lo}, ${hi}) draws ${pinned?.pages_seen} pages and answers ${pinned?.hits} hits on ${pinned?.hit_pages} — the pages drawn are counted, not the pages that answered`);
+    const pinnedText = deployedSample(BROAD, pages, empties);
+    const buffers = pinnedText === null ? "" : (await db.query<{ "QUERY PLAN": string }>(`EXPLAIN (ANALYZE, BUFFERS) ${pinnedText}`)).rows.map((r) => r["QUERY PLAN"]).join("\n");
+    const touched = [...(/Buffers: ([^\n]*)/.exec(buffers)?.[1] ?? "").matchAll(/(?:hit|read)=(\d+)/g)].reduce((n, m) => n + Number(m[1]), 0);
+    assert(touched === ROUTE_SAMPLE_PAGES,
+      `…and touches ${touched} buffers doing it — one page per block, ${ROUTE_SAMPLE_PAGES} in all (${/Buffers: [^\n]*/.exec(buffers)?.[0] ?? "no Buffers line in the plan"})`);
+    // And the random draw over the heap with its band emptied: it still
+    // reaches its pages and the rule still says "collect".
+    const sparse: string[] = [];
+    let stillSound = 0;
+    for (let i = 0; i < 5; i++) {
+      const r = (await drawOnce(BROAD, pages))!;
+      sparse.push(`${r.hits}/${r.hit_pages}/${r.pages_seen}`);
+      if (sound(r) && !skips(r, pages)) stillSound++;
+    }
+    assert(stillSound === 5,
+      `on the heap with ${ROUTE_SAMPLE_PAGES} of ${pages} pages emptied every random draw still reaches 2 to ${ROUTE_SAMPLE_PAGES} pages and the rule still says "collect" (hits/hit pages/pages drawn: ${sparse.join(", ")})`);
   }
-  assert(wouldSkip === 0 && spread === 5,
-    `five draws of the body's own sample on 1,000 rows (hits/hit pages/pages drawn: ${draws.join(", ")}) — none meets the three conditions on ${pages} pages, so the gate cannot skip here, and every draw reached 3 to ${ROUTE_SAMPLE_PAGES} distinct pages`);
-  // The plan the statement gets: TID Range Scans of the heap and no scan of
-  // it. Without the probe's LIMIT the planner pulls the probe up into the
-  // join, the ctid bounds become join quals no TID Range path reads, and the
-  // plan is a sequential scan of thoughts under Materialize (038's header) —
-  // a property of the plan, which the text assertion above cannot hold.
-  const plan = (await db.query<{ "QUERY PLAN": string }>(`EXPLAIN ${deployedSample('{"kind":"broad"}', pages)}`)).rows.map((r) => r["QUERY PLAN"]).join("\n");
-  assert(/Tid Range Scan on thoughts/.test(plan) && !/Seq Scan on thoughts/.test(plan) && !/Materialize/.test(plan),
-    `the body's sample plans as TID Range Scans of thoughts — no sequential scan, no Materialize (${plan.split("\n").filter((l) => /Scan|Materialize/.test(l)).map((l) => l.trim().replace(/\s+\(cost.*$/, "")).join("; ")})`);
-  // The pages drawn are counted whether or not they hold a row — the LEFT
-  // join. With the middle half of the heap deleted and vacuumed (dead tuples
-  // gone, the pages kept), the body's probe pinned to eight blocks inside the
-  // emptied range draws eight pages and none answers; an INNER join — 037's
-  // count of the pages that RETURNED a row — would report none drawn, every
-  // time. Then the random draw over the half-empty heap: it still reaches its
-  // pages and the rule still says "collect".
-  const [{ lo, hi }] = (await db.query<{ lo: number; hi: number }>(`SELECT (${pages} / 4)::int AS lo, (${pages} * 3 / 4)::int AS hi`)).rows;
-  await db.exec(`DELETE FROM thoughts WHERE ctid >= ('(' || ${lo} || ',0)')::tid AND ctid < ('(' || ${hi} || ',0)')::tid`);
-  await db.exec(`VACUUM thoughts`);
-  const [{ live_pages, heap_pages }] = (await db.query<{ live_pages: number; heap_pages: number }>(
-    `SELECT count(DISTINCT (ctid::text::point)[0])::int AS live_pages, (pg_relation_size(to_regclass('thoughts')) / current_setting('block_size')::int)::int AS heap_pages FROM thoughts`)).rows;
-  assert(heap_pages === pages && live_pages < pages, `the heap keeps its ${heap_pages} pages after the delete and a plain VACUUM, ${live_pages} of them with a live row`);
-  const empties = Array.from({ length: ROUTE_SAMPLE_PAGES }, (_, i) => lo + Math.floor((i * (hi - lo)) / ROUTE_SAMPLE_PAGES));
-  const pinnedDraw = await drawOnce('{"kind":"broad"}', pages, empties);
-  assert(pinnedDraw.hits === 0 && pinnedDraw.hit_pages === 0 && pinnedDraw.pages_seen === ROUTE_SAMPLE_PAGES,
-    `the body's probe pinned to ${ROUTE_SAMPLE_PAGES} blocks inside the emptied range [${lo}, ${hi}) draws ${pinnedDraw.pages_seen} pages and answers ${pinnedDraw.hits} hits on ${pinnedDraw.hit_pages} — the pages drawn are counted, not the pages that answered`);
-  const sparse: string[] = [];
-  let drawnCounted = 0;
-  for (let i = 0; i < 5; i++) {
-    const r = await drawOnce('{"kind":"broad"}', pages);
-    sparse.push(`${r.hits}/${r.hit_pages}/${r.pages_seen}`);
-    if (r.pages_seen >= 3 && r.hit_pages <= r.pages_seen && !skips(r, pages)) drawnCounted++;
-  }
-  assert(drawnCounted === 5,
-    `on the half-empty heap every random draw still reaches 3 or more pages and the rule still says "collect" (hits/hit pages/pages drawn: ${sparse.join(", ")})`);
   const restored = await restoreShipped("match_thoughts");
   assert(restored.length === 1 && restored[0].startsWith("038") && new RegExp(`IF v_pages >= ${ROUTE_ESTIMATE_MIN_PAGES} THEN`).test(await shipped()),
     "…and the shipped floor is back for the sections after");

@@ -1269,10 +1269,11 @@ container.
   `test-schema.ts` [8e] holds the body's shape — the TID range probe, DISTINCT
   blocks, a LEFT join so an empty page counts among the pages drawn, the
   probe's LIMIT — and the three conditions, then runs the statement read out
-  of the installed body: five draws judged by the rule on a table too small to
-  skip, each reaching three pages or more; its plan, TID Range Scans and no
-  sequential scan; and, with the middle of the heap deleted and vacuumed, the
-  probe pinned to eight emptied blocks reports eight pages drawn and no hit;
+  of the installed body on a compacted heap: five draws judged by the rule on
+  a table too small to skip, each reaching two pages or more; its plan, TID
+  Range Scans and no sequential scan; one block drawn eight times over counted
+  once; and, an eight-block band emptied and vacuumed, the probe pinned to it
+  reports eight pages drawn, no hit and eight buffers touched;
   `test-upgrade.ts` [14] applies 037 onto a populated 036 and [15] 038 onto a
   populated 037 — no column, signature, row or privilege moves — and each,
   after a hand re-apply of 014 puts the 4-argument form back, applies the
