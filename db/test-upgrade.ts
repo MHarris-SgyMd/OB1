@@ -1158,7 +1158,7 @@ console.log("\n[14] Migration 037 onto a populated 035 — match_thoughts gains 
   await sql.close();
 }
 
-console.log("\n[15] Migration 038 onto a populated 037 — the gate's sample is drawn by TID range; no signature, row or privilege moves; and a hand-re-applied 014's 4-argument form is dropped as 020 dropped it (SMD-1526)");
+console.log("\n[16] Migration 038 onto a populated 037 — the gate's sample is drawn by TID range; no signature, row or privilege moves; and a hand-re-applied 014's 4-argument form is dropped as 020 dropped it (SMD-1526)");
 {
   await dropSchema(URL_);
   await applyMigrations(URL_, { ...OPTS, only: (f) => f < "038" });

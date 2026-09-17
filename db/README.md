@@ -199,7 +199,7 @@ thought_chunks` shows five columns since 013 added `context`.
 Migrations 024 onward are described in `FORK.md`, one numbered change each
 (024 change 45, 025 change 46, 026 change 47, 027 change 48, 028 change 49,
 029 change 54, 030 change 56, 031 change 57, 032 change 60, 033 change 63,
-034 change 65, 035 change 66, 036 change 68, 037 change 70, 038 change 71).
+034 change 65, 035 change 66, 036 change 68, 037 change 70, 038 change 78).
 
 ## What changed relative to the guide
 
@@ -1274,7 +1274,7 @@ container.
   Range Scans and no sequential scan; one block drawn eight times over counted
   once; and, an eight-block band emptied and vacuumed, the probe pinned to it
   reports eight pages drawn, no hit and eight buffers touched;
-  `test-upgrade.ts` [14] applies 037 onto a populated 036 and [15] 038 onto a
+  `test-upgrade.ts` [14] applies 037 onto a populated 036 and [16] 038 onto a
   populated 037 — no column, signature, row or privilege moves — and each,
   after a hand re-apply of 014 puts the 4-argument form back, applies the
   migration under test alone and finds one form again.

@@ -90,7 +90,7 @@
 --   sentinel, the two template constants, and — this file being the last
 --   definer, which preflight's remedy and the suites' restoreShipped apply
 --   ALONE — 020's DROP of the 4-argument form with its ACL capture and
---   replay (037's header says why; test-upgrade [15] holds it).
+--   replay (037's header says why; test-upgrade [16] holds it).
 --
 -- Design — why this statement
 --   * A TID Range Scan reads one block and stops: `ctid >= '(b,0)'` is at or
@@ -223,7 +223,7 @@
 --     their collection back for want of hits, as under 037 — the cost before
 --     037 returns, nothing worse — and the thin filters' bound is the
 --     uniform one again, not the ~3e-5 the biased denominator gave (the
---     figures are in FORK.md change 71). VACUUM FULL restores the density.
+--     figures are in FORK.md change 78). VACUUM FULL restores the density.
 --   * The eight page reads. They are the whole cost now: about 0.05 ms
 --     together on a heap of one row a page, warm in the page cache, about
 --     0.3 ms at the shipped width's 65–80 rows a page, each of which the
@@ -306,7 +306,7 @@
 --   round trip once the generic plan is adopted, against 0.5–0.7 for
 --   037's. db/bench-hnsw.ts before and
 --   after this file at 10,000, a million and ten million rows are FORK.md
---   change 71's tables; section C prints the sample's own cost beside the
+--   change 78's tables; section C prints the sample's own cost beside the
 --   collection's at every scale: 0.07–0.14 ms at 10,000 rows, 0.08–0.12 at
 --   a million, 0.09–0.12 at ten million (037's: 0.04–0.14, 0.22–0.36, and
 --   1.10–1.20 in a before pass that ran under load — 0.94–1.11 on the idle
@@ -350,7 +350,7 @@
 --   037 within 0.1 ms (db/bench-hnsw.ts sections B and
 --   C, before and after). pg_proc.prosrc carries the sentinel, the TID
 --   range probe and the two constants, and no TABLESAMPLE; db/test-schema.ts
---   [8e], db/test-live.ts [5d] and db/test-upgrade.ts [15] hold it.
+--   [8e], db/test-live.ts [5d] and db/test-upgrade.ts [16] hold it.
 -- ============================================================================
 
 -- Load pgvector's library into THIS session before the CREATE below: the SET
