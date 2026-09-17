@@ -440,20 +440,47 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
         await tx.unsafe(`SET LOCAL enable_bitmapscan = off`);
         return tx.unsafe(`SELECT id FROM thoughts WHERE metadata @> '${filter}' ORDER BY embedding <=> '${qv}'::vector, id LIMIT 10`);
       });
-    /** GIN scans per call and exact-answer agreement, for one filter under the installed body. */
-    const measure = async (filter: string): Promise<{ scans: number; scansPerCall: number; agree: number }> => {
+    /**
+     * GIN scans per call and exact-answer agreement, for one filter under the
+     * installed body. Every call runs on its own connection, so each is the
+     * function's FIRST execution in its session and every statement in the
+     * body gets a fresh custom plan: on one connection plpgsql plans the first
+     * five calls custom and may switch the WALK to a generic plan from the
+     * sixth, and the two plans do not scan the GIN index the same number of
+     * times (the chunk join by GIN bitmap on the parent, or by primary key) —
+     * so a run's per-call count depended on where in that trajectory each
+     * arm was, and the arms need not agree (this section's first CI run read
+     * 020 at 2.00 a call and 038 at 1.50 where the same tree read 2.75 and
+     * 1.75 locally and 2.00 and 1.00 on a freshly reset schema). A backend
+     * flushes its own statistics: the flush is forced on the calling
+     * connection before it closes, then the count is read here.
+     */
+    const measure = async (filter: string): Promise<{ scans: number; scansPerCall: number; agree: number; perCall: number[] }> => {
       let agree = 0;
+      const perCall: number[] = [];
       const g0 = await ginScans();
+      let last = g0;
       for (const qv of queries) {
         const want = new Set((await exactTop(qv, filter)).map((r: { id: string }) => r.id));
-        const got = await sql.unsafe(`SELECT id FROM match_thoughts('${qv}'::vector, -1.0, 10, '${filter}'::jsonb)`);
-        if (got.length === 10 && got.every((r: { id: string }) => want.has(r.id))) agree++;
+        const one = new SQL({ url: URL_, max: 1 });
+        let got: { id: string }[];
+        try {
+          got = await one.unsafe(`SELECT id FROM match_thoughts('${qv}'::vector, -1.0, 10, '${filter}'::jsonb)`);
+          await one`SELECT pg_stat_force_next_flush()`;
+          await one`SELECT 1`;
+        } finally {
+          await one.close();
+        }
+        if (got.length === 10 && got.every((r) => want.has(r.id))) agree++;
+        const now = await ginScans();
+        perCall.push(now - last);
+        last = now;
       }
       // The oracle runs inside the bracket too, but with index and bitmap scans
       // off it seq-scans and touches no GIN index; what the bracket counts is
       // the function's own scans.
-      const scans = (await ginScans()) - g0;
-      return { scans, scansPerCall: scans / QUERIES, agree };
+      const scans = last - g0;
+      return { scans, scansPerCall: scans / QUERIES, agree, perCall };
     };
     const BROAD = '{"broad": true}';
     const THIN = '{"thin": true}';
@@ -479,8 +506,8 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
     // bodies and cancel. Exactly one fewer per call is the band — 037's draw
     // could reach fewer than three pages and missed, which is why this
     // section once accepted five misses in twenty.
-    assert(saved === QUERIES, `on the broad filter 038 makes exactly one fewer GIN scan per call than 020 over ${QUERIES} calls — the collection skipped on every call (020: ${plainBroad.scansPerCall.toFixed(2)} a call, 038: ${gatedBroad.scansPerCall.toFixed(2)})`);
-    assert(plainThin.scans === gatedThin.scans, `on the thin filter both bodies scan the GIN index the same ${gatedThin.scansPerCall.toFixed(2)} times a call — the collection ran, and the exact branch answered`);
+    assert(saved === QUERIES, `on the broad filter 038 makes exactly one fewer GIN scan per call than 020 over ${QUERIES} calls — the collection skipped on every call (020: ${plainBroad.scansPerCall.toFixed(2)} a call, 038: ${gatedBroad.scansPerCall.toFixed(2)}; per call 020 [${plainBroad.perCall.join(" ")}], 038 [${gatedBroad.perCall.join(" ")}])`);
+    assert(plainThin.scans === gatedThin.scans, `on the thin filter both bodies scan the GIN index the same ${gatedThin.scansPerCall.toFixed(2)} times a call — the collection ran, and the exact branch answered (per call 020 [${plainThin.perCall.join(" ")}], 038 [${gatedThin.perCall.join(" ")}])`);
     assert(plainBroad.agree === QUERIES && plainThin.agree === QUERIES, "…and 020's answers are the same exact top-10 (the gate changed the route, not the answer)");
 
     // The sample's cost against the collection's on this table, printed for the

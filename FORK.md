@@ -12440,7 +12440,15 @@ where an INNER join reports none and a `<=` bound reads sixteen) and [20]'s
 definer pin moved to 038;
 `db/test-live.ts` 500/500 on real Postgres, [5d] now exact (the broad filter
 makes exactly one GIN scan fewer per call than under 020's body, twenty of
-twenty, where 037's band was 0.75–1.0; 0.27–0.33 ms a call for the sample on its
+twenty, each call on its own connection — PR #69's first CI run failed this
+section at 020 2.00 a call against 038 1.50 where the same tree read 2.75 and
+1.75 locally and 2.00 and 1.00 on a freshly reset schema: on one connection
+plpgsql plans the first five calls custom and may switch the walk to a
+generic plan from the sixth, the two plans scan the GIN index a different
+number of times through the chunk join, and the arms' trajectories need not
+cancel; a first execution per call gives every call the same plan on both
+arms, and the failure message now prints the per-call counts; 0.27–0.33 ms a
+call for the sample on its
 386-page heap at the shipped width, round trip included); `db/test-upgrade.ts`
 189/189, [16] new (038 onto a populated 037: no column, signature, row or
 privilege moves; 014 re-applied by hand, then 038 alone, leaves one form);
