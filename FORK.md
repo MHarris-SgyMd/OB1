@@ -11511,6 +11511,15 @@ job runs it for that file from this change on; its deno.json resolves
 supabase-js).
 `bun scripts/check-fork-consistency.mjs` PASS.
 
+**Tidied while the files were open** (one commit after the seventh pass; no
+behaviour changed, 772 before and after). The four servers' handler comments
+repeated the mechanism their new header notes already state; each now says
+what the line does and points at the note and this section. In
+`test-auth.ts` the request deadline and the counted console silencer are
+declared above the `request()` that uses them rather than below, and the
+streaming-body test reads `body instanceof ReadableStream` rather than
+`typeof body === "object"`.
+
 **Not done here.** `enhanced-mcp` stays outside `test-auth.ts`'s table — its
 own key compare (change 67's decision) and its integer-id read tools
 (SMD-1525) are their own tickets. The "after" sample cannot be run here (its

@@ -892,14 +892,10 @@ app.all("*", async (c) => {
 
   // One server per request, connected to this request's transport and dropped
   // with it — a read-scoped principal is handed a server on which the tools
-  // that write were never registered. Change 67 cached one server per key
-  // scope and connect()ed it to a fresh transport each request; that crossed
-  // concurrent requests: the SDK's Protocol.connect() overwrites the server's
-  // transport, and _onrequest() captures whichever transport the server holds
-  // when the message arrives, which is after handleRequest() has awaited the
-  // body — so the first of two overlapping requests was answered on the
-  // second's transport and hung. A build is tens of microseconds (FORK.md change
-  // 77 has the number); extensions/test-auth.ts fires three overlapping requests.
+  // that write were never registered. Not one per key scope (change 67's
+  // cache): a server that outlives the request answers on the wrong transport
+  // — the header note above, and FORK.md change 77 for the mechanism and the
+  // build cost (tens of microseconds).
   const transport = new StreamableHTTPTransport();
   await buildServer(principal).connect(transport);
   return transport.handleRequest(c);

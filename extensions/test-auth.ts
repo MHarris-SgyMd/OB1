@@ -267,6 +267,16 @@ type Via = "x-access-key" | "x-brain-key" | "bearer" | "query";
 const RPC = { "Content-Type": "application/json", Accept: "application/json, text/event-stream" };
 type Reply = { status: number; json: any; text: string };
 
+/** How long an in-process request may take before it is called a hang — a handler answers a listing in single-digit ms here, and a query is refused at once. */
+const REQUEST_MS = 2000;
+// The silencer is counted, not saved and restored per call: two requests in
+// flight at once (the overlapping probe below) would otherwise each save the
+// other's no-op and leave the console dark for the rest of the run.
+const CONSOLE = { error: console.error, warn: console.warn };
+let hushed = 0;
+function hush() { if (hushed++ === 0) { console.error = () => {}; console.warn = () => {}; } }
+function unhush() { if (--hushed === 0) Object.assign(console, CONSOLE); }
+
 /** One request to server `s`; `also` carries further presented forms beside the one under test. */
 async function request(s: Server, key: string | null, via: Via, also: Partial<Record<Via, string>>,
   init: { method: string; path: string; body?: unknown; rawBody?: string | ReadableStream<Uint8Array>; accept?: boolean }): Promise<Reply> {
@@ -287,7 +297,7 @@ async function request(s: Server, key: string | null, via: Via, also: Partial<Re
   const url = "http://extension.test" + path + (query.length ? `?${query.join("&")}` : "");
   const body = init.rawBody ?? (init.body === undefined ? undefined : JSON.stringify(init.body));
   // @ts-ignore -- duplex is required for a streaming body, and is not in the lib's RequestInit
-  return answer(handler, new Request(url, { method: init.method, headers, body, ...(typeof body === "object" ? { duplex: "half" } : {}) }));
+  return answer(handler, new Request(url, { method: init.method, headers, body, ...(body instanceof ReadableStream ? { duplex: "half" } : {}) }));
 }
 /** One request to one handler, in process, with a deadline. */
 async function answer(handler: Handler, req: Request): Promise<Reply> {
@@ -309,15 +319,6 @@ async function answer(handler: Handler, req: Request): Promise<Reply> {
     unhush();
   }
 }
-/** How long an in-process request may take before it is called a hang — a handler answers a listing in single-digit ms here, and a query is refused at once. */
-const REQUEST_MS = 2000;
-// The silencer is counted, not saved and restored per call: two requests in
-// flight at once (the concurrency probe below) would otherwise each save the
-// other's no-op and leave the console dark for the rest of the run.
-const CONSOLE = { error: console.error, warn: console.warn };
-let hushed = 0;
-function hush() { if (hushed++ === 0) { console.error = () => {}; console.warn = () => {}; } }
-function unhush() { if (--hushed === 0) Object.assign(console, CONSOLE); }
 /** A server's answer: its status, its text, and the JSON in it — direct, or the first SSE data line. */
 async function parse(r: Response): Promise<Reply> {
   const text = await r.text();

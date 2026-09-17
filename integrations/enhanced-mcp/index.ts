@@ -99,18 +99,13 @@ function truncateContent(content: string, maxLen: number): string {
 
 // ── MCP Server ────────────────────────────────────────────────────────────
 
-// ob1-fork (SMD-1497): the server is built per request, inside buildServer(),
-// connected to that request's transport and dropped with it. Upstream built one
-// McpServer at module scope and connect()ed it to a fresh transport on every
-// request; the SDK's Protocol.connect() overwrites the server's transport and
-// _onrequest() captures whichever transport the server holds when the message
-// arrives, which is after handleRequest() has awaited the body — so the first of
-// two overlapping requests was answered on the second's transport and hung. A
-// build registers the thirteen tools in about half a millisecond on Bun and
-// two to four times that under Deno, the runtime this deploys on — a fraction
-// of the database round trip every tool then makes (FORK.md change 77 has
-// both measurements); extensions/test-auth.ts fires three overlapping
-// requests.
+// ob1-fork (SMD-1497): built per request, inside buildServer(), and connected
+// to that request's transport — not once at module scope, which answered the
+// first of two overlapping requests on the second's transport (the header note
+// at the top of the file; FORK.md change 77 for the mechanism). Registering the
+// thirteen tools costs about half a millisecond on Bun and two to four times
+// that under Deno, the runtime this deploys on — a fraction of the database
+// round trip every tool then makes.
 function buildServer(): McpServer {
   const server = new McpServer({
     name: "open-brain-enhanced",
