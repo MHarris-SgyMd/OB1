@@ -9,6 +9,10 @@
 // scoped, hashed entries in MCP_ACCESS_KEYS (the older single MCP_ACCESS_KEY still
 // works, compared by digest), and a read-scoped key is never given the tools
 // that write. FORK.md change 67; extensions/test-auth.ts exercises it.
+// ob1-fork (SMD-1497): the McpServer is built per request — one that outlived
+// the request, connect()ed to a fresh transport each time, answered the first
+// of two overlapping requests on the second's transport. FORK.md change 78;
+// extensions/test-auth.ts fires three overlapping requests.
 import "../../compat/deno-on-bun.ts"; // ob1-original-types: jsr:@supabase/functions-js/edge-runtime.d.ts
 
 import { StreamableHTTPTransport } from "@hono/mcp";
@@ -847,20 +851,6 @@ function buildServer(principal: Principal): McpServer {
   return server;
 }
 
-// One server per key scope, built on first use — a read-scoped principal is
-// handed a server on which the tools that write were never registered, and
-// neither server is rebuilt per request.
-const servers = new Map<boolean, McpServer>();
-function serverFor(principal: Principal): McpServer {
-  const write = canWrite(principal);
-  let server = servers.get(write);
-  if (!server) {
-    server = buildServer(principal);
-    servers.set(write, server);
-  }
-  return server;
-}
-
 app.get("/health", (c) =>
   c.json({ status: "ok", service: "Work Operating Model Activation MCP", version: "1.0.0" })
 );
@@ -900,8 +890,14 @@ app.all("*", async (c) => {
     return c.json({ error: "Unauthorized" }, 401);
   }
 
+  // One server per request, connected to this request's transport and dropped
+  // with it — a read-scoped principal is handed a server on which the tools
+  // that write were never registered. Not one per key scope (change 67's
+  // cache): a server that outlives the request answers on the wrong transport
+  // — the header note above, and FORK.md change 78 for the mechanism and the
+  // build cost (tens of microseconds).
   const transport = new StreamableHTTPTransport();
-  await serverFor(principal).connect(transport);
+  await buildServer(principal).connect(transport);
   return transport.handleRequest(c);
 });
 

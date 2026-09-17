@@ -15,10 +15,14 @@
  * they are absent from tools/list and a call names a tool that does not exist;
  * for an HTTP API the routes that write answer 403 before they parse a body;
  * for a worker anything but a dry run answers 403. The webhook receiver's
- * secret has no scope to give and is compared digest to digest. Then the drift
+ * secret has no scope to give and is compared digest to digest. Each MCP
+ * server answers three overlapping requests each with its own id (SMD-1497,
+ * change 78: a server that outlives the request and is connect()ed to a fresh
+ * transport each time answers on the wrong one). Then the drift
  * guards: every tool a file registers and every route an API mounts is
  * classified here as a read or a write, exactly the writes are gated, each
- * write does write and each read does not, the key is read through the shared
+ * write does write and each read does not, the server is built per request,
+ * the key is read through the shared
  * module and nowhere else, every `_shared/auth.ts` is byte-for-byte
  * server-portable/auth.ts (a Supabase function is bundled from
  * supabase/functions/, so the module is copied beside the servers rather than
@@ -132,6 +136,13 @@ type Server = {
   health?: string;
   /** What no configured key at all answers: 401, or the workers' 503 misconfigured. */
   unconfigured?: number;
+  /**
+   * MCP: `false` for a server with no Accept patch — it answers 406 to a POST
+   * whose Accept lacks text/event-stream, so the overlapping probe's first
+   * request keeps its Accept header there (SMD-1616 adds the patch to the two
+   * that lack it; then this field goes).
+   */
+  acceptPatch?: false;
 };
 const PG = "postgres://ob1:stub@stub.invalid:5432/ob1";
 /** For a server whose handler queries before it can answer: refused at once, no name to resolve. */
@@ -169,9 +180,9 @@ const SERVERS: Server[] = [
   ext("professional-crm/index.ts", ["crm_search_contacts", "crm_get_contact_history", "crm_get_follow_ups", "crm_prep_context", "crm_stale_contacts"],
     ["crm_add_contact", "crm_log_interaction", "crm_create_opportunity", "crm_update_contact", "crm_link_thought"]),
   ext("meal-planning/shared-server.ts", ["view_meal_plan", "view_recipes", "view_shopping_list"], ["mark_item_purchased"],
-    { keys: "MCP_HOUSEHOLD_ACCESS_KEYS", legacy: "MCP_HOUSEHOLD_ACCESS_KEY" }),
+    { keys: "MCP_HOUSEHOLD_ACCESS_KEYS", legacy: "MCP_HOUSEHOLD_ACCESS_KEY", acceptPatch: false }),
   // The recipes and integrations (change 67).
-  vendored("recipes/edge-function-cost-optimization/examples/before/per-request-server.ts", "mcp", ["list_vendors"], []),
+  vendored("recipes/edge-function-cost-optimization/examples/before/per-request-server.ts", "mcp", ["list_vendors"], [], { acceptPatch: false }),
   vendored("recipes/ob-graph/index.ts", "mcp", ["search_nodes", "get_neighbors", "traverse_graph", "find_path", "list_edge_types"],
     ["create_node", "create_edge", "update_node", "delete_node", "delete_edge"], { url: HTTPS, health: "/health" }),
   vendored("recipes/work-operating-model-activation/index.ts", "mcp", ["query_operating_model"],
@@ -256,9 +267,19 @@ type Via = "x-access-key" | "x-brain-key" | "bearer" | "query";
 const RPC = { "Content-Type": "application/json", Accept: "application/json, text/event-stream" };
 type Reply = { status: number; json: any; text: string };
 
+/** How long an in-process request may take before it is called a hang — a handler answers a listing in single-digit ms here, and a query is refused at once. */
+const REQUEST_MS = 2000;
+// The silencer is counted, not saved and restored per call: two requests in
+// flight at once (the overlapping probe below) would otherwise each save the
+// other's no-op and leave the console dark for the rest of the run.
+const CONSOLE = { error: console.error, warn: console.warn };
+let hushed = 0;
+function hush() { if (hushed++ === 0) { console.error = () => {}; console.warn = () => {}; } }
+function unhush() { if (--hushed === 0) Object.assign(console, CONSOLE); }
+
 /** One request to server `s`; `also` carries further presented forms beside the one under test. */
 async function request(s: Server, key: string | null, via: Via, also: Partial<Record<Via, string>>,
-  init: { method: string; path: string; body?: unknown; rawBody?: string; accept?: boolean }): Promise<Reply> {
+  init: { method: string; path: string; body?: unknown; rawBody?: string | ReadableStream<Uint8Array>; accept?: boolean }): Promise<Reply> {
   const handler = served[SERVERS.indexOf(s)];
   // Where createClient runs per request, the URL shape must be the one THIS server's client accepts.
   process.env.SUPABASE_URL = s.url;
@@ -274,16 +295,29 @@ async function request(s: Server, key: string | null, via: Via, also: Partial<Re
   const [path, own] = init.path.split("?");
   if (own) query.push(own);
   const url = "http://extension.test" + path + (query.length ? `?${query.join("&")}` : "");
+  const body = init.rawBody ?? (init.body === undefined ? undefined : JSON.stringify(init.body));
+  // @ts-ignore -- duplex is required for a streaming body, and is not in the lib's RequestInit
+  return answer(handler, new Request(url, { method: init.method, headers, body, ...(body instanceof ReadableStream ? { duplex: "half" } : {}) }));
+}
+/** One request to one handler, in process, with a deadline. */
+async function answer(handler: Handler, req: Request): Promise<Reply> {
   // A handler that queries a refused port logs the refusal; the status is the assertion, the log is noise on a green run.
-  const console_ = { error: console.error, warn: console.warn };
-  console.error = () => {}; console.warn = () => {};
-  let r: Response;
+  hush();
+  // Every request has a deadline: a handler that never answers (SMD-1497's
+  // crossed transports parked one) is reported as a timeout with status 0, not
+  // waited on — and the silencer above is released either way, which a
+  // `finally` on the bare handler promise could not promise.
+  const timeout: Reply = { status: 0, json: null, text: `timed out after ${REQUEST_MS} ms` };
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    r = await handler(new Request(url, { method: init.method, headers, body: init.rawBody ?? (init.body === undefined ? undefined : JSON.stringify(init.body)) }));
+    return await Promise.race([
+      Promise.resolve(handler(req)).then(parse),
+      new Promise<Reply>((res) => { timer = setTimeout(() => res(timeout), REQUEST_MS); }),
+    ]);
   } finally {
-    Object.assign(console, console_);
+    clearTimeout(timer);
+    unhush();
   }
-  return parse(r);
 }
 /** A server's answer: its status, its text, and the JSON in it — direct, or the first SSE data line. */
 async function parse(r: Response): Promise<Reply> {
@@ -310,6 +344,44 @@ const run = (s: Server, key: string | null, dryRun: boolean) =>
 const passed = (r: Reply) => r.status !== 401 && r.status !== 403 && !/access key|read-scoped/i.test(r.text);
 
 const LIST = { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} };
+
+// ── Overlapping requests ─────────────────────────────────────────────────────
+//
+// Three tools/list at one server under one key, overlapping two ways
+// (SMD-1497, FORK.md change 78). The first request starts alone, its headers
+// in and its body still on the wire for LATE_BODY_MS; the other two start
+// STAGGER_MS later with their bodies complete. So the first sits inside the
+// server between connect() and the arrival of its message while the second
+// and third connect — the window a server that outlives the request gets
+// wrong. A same-tick burst would catch main's shape (its connect() overwrite
+// does not depend on timing) but never opens that window: every handler in a
+// burst reaches its first await before any body is parsed. The stagger is
+// what catches a server per request that first close()s the previous
+// request's server — in a burst that server has always finished; staggered,
+// the first request's answer is sent to a transport the SDK has forgotten,
+// and it fails here as the lone timeout. Change 78 records the mutants run,
+// and the one shape the probe passes yet is worse than a build per request
+// (a per-scope server behind a serialising lock). The margin: the first
+// request reaches its body await within microseconds and the other two
+// connect at the 5 ms timer, so the body's 20 ms leaves 15 ms; a longer
+// event-loop stall degrades the probe to one request then a burst of two —
+// detection weakens, the fix cannot fail. The first request also drops the
+// Accept header, so its streaming body goes through the servers' Accept
+// patch as a Claude Desktop connector's does — except at the two servers
+// that have no patch and answer 406 without it (`acceptPatch: false`;
+// SMD-1616), where it keeps the header.
+const STAGGER_MS = 5;
+const LATE_BODY_MS = 20;
+/** A JSON-RPC body that arrives `ms` after the request does. */
+const lateBody = (body: unknown, ms: number) => new ReadableStream<Uint8Array>({
+  start(ctrl) { setTimeout(() => { ctrl.enqueue(new TextEncoder().encode(JSON.stringify(body))); ctrl.close(); }, ms); },
+});
+/** The three answers, in the order of `ids`; `send` gets a late body for the first id and none (build its own) for the rest. */
+async function overlapping(ids: number[], send: (id: number, late?: ReadableStream<Uint8Array>) => Promise<Reply>): Promise<Reply[]> {
+  const first = send(ids[0], lateBody({ ...LIST, id: ids[0] }, LATE_BODY_MS));
+  await new Promise((r) => setTimeout(r, STAGGER_MS));
+  return Promise.all([first, ...ids.slice(1).map((id) => send(id))]);
+}
 const toolsOf = (r: { json: any }) => ((r.json?.result?.tools ?? []) as { name: string }[]).map((t) => t.name).sort();
 const env = (s: Server, keys: string | undefined, legacy?: string) => {
   if (keys === undefined) delete process.env[s.keys]; else process.env[s.keys] = keys;
@@ -348,6 +420,21 @@ for (const s of SERVERS.filter((s) => s.kind === "mcp")) {
       "…and its listing is an empty list under a declared tools capability, not a failed method");
   }
 
+  // Three overlapping requests under one key (see `overlapping` above), each
+  // answered with its own id and the full list. Any two overlapping requests
+  // are the trigger, not a burst; three of these servers were main's shape.
+  // A hang is request()'s deadline as status 0, not a slow server. Explicit
+  // statuses: a `!== 200` would pass the timeout.
+  {
+    const ids = [11, 12, 13];
+    const answers = await overlapping(ids, (id, late) =>
+      late ? request(s, WRITE_KEY, "x-access-key", {}, { method: "POST", path: "/mcp", rawBody: late, accept: s.acceptPatch === false }) : call(s, WRITE_KEY, { ...LIST, id }));
+    for (const [i, r] of answers.entries()) {
+      assert(r.status === 200 && r.json?.id === ids[i] && toolsOf(r).join() === all.join(),
+        `${ids.length} concurrent tools/list under one key: request ${ids[i]} is answered with its own id and every tool (${r.status === 0 ? r.text : `${r.status}, id ${r.json?.id ?? "none"}, ${toolsOf(r).length} tools`})`);
+    }
+  }
+
   assert((await call(s, "not-a-key", LIST)).status === 401, "a wrong key is refused with 401");
   assert((await call(s, null, LIST)).status === 401, "no key is refused with 401");
   assert((await call(s, hashKey(WRITE_KEY), LIST)).status === 401,
@@ -365,6 +452,43 @@ for (const s of SERVERS.filter((s) => s.kind === "mcp")) {
   env(s, undefined, undefined);
   assert((await call(s, LEGACY_KEY, LIST)).status === 401, "no keys configured at all refuses everything");
   env(s, KEYS);
+}
+
+// ── The MCP server outside the shared auth path ──────────────────────────────
+//
+// enhanced-mcp keeps its own single-key compare (change 67 left it there, and
+// check 8 passes it), so it is not in SERVERS and none of the claims above are
+// made for it. It was, though, the fourth module-level McpServer connect()ed
+// to a fresh transport on every request — SMD-1497 named three — so the
+// concurrency probe runs against it too, imported the same way, under the one
+// key it reads.
+{
+  const file = "integrations/enhanced-mcp/index.ts";
+  console.log(`\n[${file}]`);
+  process.env.SUPABASE_URL = HTTPS;
+  process.env.MCP_ACCESS_KEY = LEGACY_KEY;
+  const before = served.length;
+  try {
+    await import(join(ROOT, file));
+  } catch (e) {
+    assert(false, `${file} threw at import: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  assert(served.length === before + 1, `${file} imports as deployed and hands Deno.serve one handler`);
+  const handler = served[before];
+  const ids = [11, 12, 13];
+  // No handler (the import failed above) is already a counted failure; the probe is skipped rather than thrown from.
+  const answers = handler ? await overlapping(ids, (id, late) => answer(handler, new Request("http://extension.test/mcp",
+    // @ts-ignore -- duplex is required for a streaming body, and is not in the lib's RequestInit
+    // The late request drops Accept, as in the table probe: this server has the patch.
+    { method: "POST", headers: late ? { "Content-Type": RPC["Content-Type"], "x-brain-key": LEGACY_KEY } : { ...RPC, "x-brain-key": LEGACY_KEY }, body: late ?? JSON.stringify({ ...LIST, id }), ...(late ? { duplex: "half" } : {}) }))) : [];
+  // The reference list is the first answer that carries one — not answers[0], which under the defect is the timeout.
+  const tools = answers.map(toolsOf).find((t) => t.length > 0) ?? [];
+  assert(tools.length > 0, `its tools/list under the key names its tools (${tools.length})`);
+  for (const [i, r] of answers.entries()) {
+    assert(r.status === 200 && r.json?.id === ids[i] && toolsOf(r).join() === tools.join(),
+      `${ids.length} concurrent tools/list under one key: request ${ids[i]} is answered with its own id and the same tools (${r.status === 0 ? r.text : `${r.status}, id ${r.json?.id ?? "none"}, ${toolsOf(r).length} tools`})`);
+  }
+  delete process.env.MCP_ACCESS_KEY;
 }
 
 // ── The HTTP APIs ────────────────────────────────────────────────────────────
@@ -633,6 +757,22 @@ const blockOf = (text: string, name: string) => {
   return text.slice(at, text.indexOf("\n  );", at));
 };
 const OLD_SPELLINGS = /c\.req\.query\("key"\)|c\.req\.header\("x-access-key"\)|[!=]== ?(?:MCP|AUDITOR)_ACCESS_KEY\b|isAuthorized\(|\bauth\(c\)/;
+/**
+ * No McpServer that outlives a request: such a server is connect()ed to a
+ * fresh transport each time, and the SDK answers on whichever transport it
+ * holds when the message arrives (SMD-1497). Textually: no module-level
+ * declaration (exported or not, typed or not) that names McpServer — a server,
+ * a lazy `let server: McpServer | undefined`, a `Map<…, McpServer>` cache — and
+ * none that holds what buildServer() returns or a Map (a cache under any name;
+ * no MCP server here keeps one at module scope), and no module-level
+ * StreamableHTTPTransport either — one shared across requests routes by
+ * JSON-RPC id, which distinct ids would pass. A spelling check: an untyped
+ * `let cached;` filled later passes it. The concurrency probe above is the
+ * proof; this catches the shape before it reaches a run. The after sample's
+ * per-session server is checked in TEXT_ONLY.
+ */
+const builtPerRequest = (text: string) =>
+  !/^(?:export )?(?:const|let|var) [^\n]*(?:\bMcpServer\b|\bStreamableHTTPTransport\b|= buildServer\(|= new Map[<(])/m.test(text);
 
 console.log("\n[the files say what this test assumes]");
 for (const s of SERVERS) {
@@ -657,6 +797,7 @@ for (const s of SERVERS) {
       assert(!writes(reach), `…${r} does not write (no table verb; any RPC it calls is in RPC_READS)`);
     }
     assert(text.includes("authenticateRequest(c.req.raw,"), "…the key is read and resolved from the request, every presented form tried");
+    assert(builtPerRequest(text), "…the McpServer is built inside a function, per request: no module-level declaration names McpServer, holds what buildServer() returns, or is a `new Map` (a server that outlives the request is connect()ed to a fresh transport each time and answers on the wrong one — SMD-1497, change 78)");
   } else if (s.kind === "rest") {
     const mounted = [...text.matchAll(/^app\.(get|post|put|patch|delete)\("([^"]+)",\s*(requireWrite,\s*)?/gm)]
       .map((m) => ({ route: `${m[1].toUpperCase()} ${m[2]}`, gated: Boolean(m[3]), at: m.index! }));
@@ -694,18 +835,27 @@ for (const s of SERVERS) {
   assert(text.includes('from "../_shared/auth.ts"') && text.includes("secretMatches(") && !/[!=]== ?READWISE_WEBHOOK_SECRET\b/.test(text),
     `${WEBHOOK.file}: the echoed secret is compared through the module's secretMatches(), digest to digest, and with no operator`);
 }
+{
+  const file = "integrations/enhanced-mcp/index.ts";
+  const text = readFileSync(join(ROOT, file), "utf8");
+  assert(builtPerRequest(text) && text.includes("await buildServer().connect(transport)"),
+    `${file}: the McpServer is built per request by buildServer() and connected to that request's transport (SMD-1497, change 78)`);
+}
 
 // The files this test cannot import — a sample whose tool modules are not in
 // the repository, a Next.js route, a README's code block, a Node stub — say the
 // same thing in their text.
 console.log("\n[the files this test reads but cannot run]");
 const TEXT_ONLY: { file: string; must: RegExp[]; mustNot: RegExp[] }[] = [
+  // The after sample binds one server AND one transport per session (SMD-1497): a server shared between
+  // sessions and connect()ed once per session hands its transport to the newest session and hangs the rest.
   { file: "recipes/edge-function-cost-optimization/examples/after/index.ts",
-    must: [/from "\.\.\/_shared\/auth\.ts"/, /authenticateRequest\(c\.req\.raw,/, /serverFor\(principal\)/, /session\.scope !== principal\.scope/],
-    mustNot: [/[!=]== ?MCP_ACCESS_KEY\b/, /c\.req\.header\("x-access-key"\)/] },
+    must: [/from "\.\.\/_shared\/auth\.ts"/, /authenticateRequest\(c\.req\.raw,/, /const server = buildServer\(principal\);[^\n]*\n\s*await server\.connect\(transport\);\n\s*session = \{ server, transport,/, /session\.scope !== principal\.scope/],
+    mustNot: [/[!=]== ?MCP_ACCESS_KEY\b/, /c\.req\.header\("x-access-key"\)/, /serverFor\(/, /Map<[^>\n]*McpServer/] },
   { file: "recipes/edge-function-cost-optimization/examples/after/server.ts",
-    must: [/from "\.\.\/_shared\/auth\.ts"/, /export function serverFor\(principal: Principal\)/, /register\w+\(server, principal\)/],
-    mustNot: [/export const server\b/] },
+    must: [/from "\.\.\/_shared\/auth\.ts"/, /export function buildServer\(principal: Principal\): McpServer/, /register\w+\(server, principal\)/],
+    // No module-level declaration naming McpServer: a cache under any name, in any container, is a server shared across sessions.
+    mustNot: [/export const server\b/, /new Map</, /serverFor/, /^(?:export )?(?:const|let|var) [^\n]*\bMcpServer\b/m] },
   { file: "recipes/vercel-neon-telegram/src/app/api/telegram/route.ts",
     must: [/import \{ secretMatches \} from "@\/lib\/auth"/, /secretMatches\(req\.headers\.get\("x-telegram-bot-api-secret-token"\), expectedSecret\)/],
     mustNot: [/secret !== expectedSecret/] },

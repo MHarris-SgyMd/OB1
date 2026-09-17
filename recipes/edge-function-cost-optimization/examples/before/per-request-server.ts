@@ -13,8 +13,10 @@
 // notifications/initialized + tools/list + tools/call). With this pattern,
 // each request rebuilds the McpServer, re-registers all tools, and creates a
 // new Supabase client. Multiplied across multiple connectors and the MCP
-// handshake fan-out, this drives invocation counts (and per-request CPU)
-// orders of magnitude higher than necessary.
+// handshake fan-out, this drives invocation counts orders of magnitude higher
+// than necessary. (The McpServer build itself is tens of microseconds — the
+// invocations are the cost, not the build; FORK.md change 78. The new Supabase
+// client per request is the other real waste here.)
 
 import "../../../../compat/deno-on-bun.ts";
 import { Hono } from "hono";
