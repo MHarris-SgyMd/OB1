@@ -1,8 +1,11 @@
 // ✅ Unified edge function with Mcp-Session-Id reuse.
 //
 // Key elements:
-//  - One McpServer per key scope + Supabase client at module scope (no
-//    per-request reconstruction)
+//  - One McpServer per session, built with the session's transport when the
+//    session is minted (not per request — and not one per key scope shared
+//    across sessions, which hangs every session but the last minted: a server
+//    holds one transport; ob1-fork, SMD-1497, FORK.md change 78); the Supabase
+//    client at module scope
 //  - app.options("*") returns CORS preflights cheaply BEFORE auth
 //  - Mcp-Session-Id header is minted on first request and reused on
 //    subsequent ones, collapsing the 4-step MCP handshake
@@ -17,13 +20,16 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { Hono } from "hono";
 import { StreamableHTTPTransport } from "@hono/mcp";
-import { serverFor } from "./server.ts";
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { buildServer } from "./server.ts";
 import { authenticateRequest, type Scope } from "../_shared/auth.ts";
 
 // ── Session reuse ──────────────────────────────────────────────────────────
 // A session remembers the scope it was minted under: a session id is not a
 // credential, so a request under a key of another scope does not resume it.
-type Session = { transport: StreamableHTTPTransport; lastSeen: number; scope: Scope };
+// Each session owns its server as well as its transport: the two are bound one
+// to one, and a server shared between sessions answers on the wrong transport.
+type Session = { server: McpServer; transport: StreamableHTTPTransport; lastSeen: number; scope: Scope };
 const sessions = new Map<string, Session>();
 const SESSION_TTL_MS = 30 * 60 * 1000;
 
@@ -63,7 +69,7 @@ app.all("*", async (c) => {
 
   // ✅ Named, scoped, hashed keys through the shared module: every presented
   // form tried, digests compared timing-safe, and the server this principal
-  // gets is the one built for its scope (server.ts).
+  // gets is built for its session with its scope's tools (server.ts).
   const principal = authenticateRequest(c.req.raw, {
     MCP_ACCESS_KEYS: Deno.env.get("MCP_ACCESS_KEYS"),
     MCP_ACCESS_KEY: Deno.env.get("MCP_ACCESS_KEY"),
@@ -97,8 +103,9 @@ app.all("*", async (c) => {
   if (!session) {
     id = crypto.randomUUID();
     const transport = new StreamableHTTPTransport();
-    await serverFor(principal).connect(transport); // bind once per session, not per request
-    session = { transport, lastSeen: Date.now(), scope: principal.scope };
+    const server = buildServer(principal); // one server AND one transport per session, bound once
+    await server.connect(transport);
+    session = { server, transport, lastSeen: Date.now(), scope: principal.scope };
     sessions.set(id, session);
   } else {
     session.lastSeen = Date.now();

@@ -1223,15 +1223,35 @@ console.log("\n[7] Chunk context survives capture, edit and a payload without it
    * longer had, and match_thoughts found it by them. At the same model the
    * windows are still that model's vectors of this text, and stay. (Axes 0–4
    * only, as the rest of this section: the suite's floor on the width.)
+   *
+   * The found-by reads are exact (SMD-1574). A metadata key only this thought
+   * carries sends match_thoughts down its filtered branch, where 014 scores
+   * the matching thoughts and their chunks BY ID, no index walk — so "found"
+   * is this thought's own vectors against the query and nothing else, and
+   * "not found" after the model change is the thought in the scored set with
+   * no vector that answers. Read unfiltered — an HNSW walk over the thoughts
+   * and chunk indexes — the same-model assertion below missed in five CI
+   * attempts on three trees that touched nothing here and in a local loop,
+   * where the dumps showed the thoughts index scan returning one or none of
+   * three live rows: SMD-1632, and FORK.md's known-issues entry for it, hold
+   * that. This section no longer exercises the walk at all; [5b] holds its
+   * recall on random vectors, [5c] its plan, and [4], [15], [11]'s hybrid
+   * reads and [5b]'s two walk reads still read it unfiltered.
+   *
+   * 035's re-capture merges metadata (`||`), so the key survives every
+   * re-capture below — the last assertion reads `k` beside it. The filter
+   * object is the one the first capture stores: `as const`, so a later edit
+   * cannot mutate it and part the filter from the stored metadata silently.
    */
   const RECAP = "a long capture, re-captured through the 3-argument form";
+  const ONLY_RECAP = { fixture: "022-recap" } as const;
   const [long] = await sql`
-    SELECT upsert_thought(${RECAP}, ${{ metadata: {}, embedding_model: "old-model" }}::jsonb, ${unit(0)}::vector,
+    SELECT upsert_thought(${RECAP}, ${{ metadata: ONLY_RECAP, embedding_model: "old-model" }}::jsonb, ${unit(0)}::vector,
       ${chunkPayload([{ content: "first window", at: 1 }, { content: "second window", at: 2 }])}::jsonb) AS r`;
   const longId = long.r.id as string;
   const windows = async () => Number((await sql`SELECT count(*)::int AS c FROM thought_chunks WHERE thought_id = ${longId}::uuid`)[0].c);
   const foundAt = async (axis: number) =>
-    ((await sql`SELECT id FROM match_thoughts(${unit(axis)}::vector, 0.5, 10)`) as { id: string }[]).some((r) => r.id === longId);
+    ((await sql`SELECT id FROM match_thoughts(${unit(axis)}::vector, 0.5, 10, ${ONLY_RECAP}::jsonb)`) as { id: string }[]).some((r) => r.id === longId);
   const labelled = async () => (await sql`SELECT embedding_model AS m FROM thoughts WHERE id = ${longId}::uuid`)[0].m as string | null;
   assert((await windows()) === 2 && (await foundAt(2)), "a thought at old-model with two windows, found by its second window");
   await sql`SELECT upsert_thought(${RECAP}, ${{ metadata: {}, embedding_model: "old-model" }}::jsonb, ${unit(3)}::vector)`;

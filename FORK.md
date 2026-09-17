@@ -71,7 +71,7 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 Eighty numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
-data layer (Phase 2). Four (changes 31, 53, 55, and 59) ship no runtime change at
+data layer (Phase 2). Five (changes 31, 53, 55, 59, and 79) ship no runtime change at
 all: each is a measurement that decided against building something.
 
 The table below covers changes 1–17, which landed before this file grew prose
@@ -201,6 +201,7 @@ compat/deno-on-bun.ts            # change 74 (new file — Deno's two globals on
 extensions/test-tools.ts         # change 77 (new file — every tool of the five extension servers on the shim, driven against Postgres with their schemas)
 db/test-bench-reuse.ts           # change 76 (new file — the kept bench corpus's oracle cache held to the computation, on one index)
 db/bench-oracle.ts               # change 76 (new file — the cache's pure part: what of a marker's entry a run may trust; test-schema [37])
+<4 vendored MCP servers, 1 sample> # change 78 (a McpServer built per request — per session in the cost recipe's after sample — in place of one shared and connect()ed to a fresh transport each time)
 docs/01-getting-started.md       # fix 6
 recipes/content-fingerprint-dedup/README.md  # fix 6
 recipes/email-history-import/README.md       # fix 6
@@ -4431,6 +4432,21 @@ re-applied is ok, the 3-argument form dropped is refused naming 022 and not
 004, and a capturing role without DELETE on `thought_chunks` is refused with
 the GRANT and starts once granted. Suites after: schema 483 at both widths,
 live 308, upgrade 36, preflight 138, chunking 35, sql 62, postgrest 46.
+
+`test-live` [7]'s three found-by assertions (five `foundAt` calls, two of them
+window reads at axis 2) go through `match_thoughts`'s filtered branch since
+SMD-1574: a metadata key only the re-captured thought carries, so 014 scores
+it and its chunks by id and no walk decides — the section no longer exercises
+the HNSW path at all. Read unfiltered, the same-model assertion missed the
+freshly moved vector in five CI attempts on three trees that touched nothing
+under `db/`, and four times in thirty-seven local runs; the ticket's own
+reading — ten live rows tied at the axis — was wrong, since [7] starts from an
+emptied table and has three thoughts and four chunk rows under a returned
+limit of ten and a candidate window of forty. What the dumps showed, what was
+measured and what still reads the walk are in "Known issues we did NOT fix"
+under SMD-1632; [5b] holds the walk's recall on random vectors, [5c] its plan.
+Three review passes and a boyscout, all prose: the accounting of runs, the
+hedges on what was shown, and this note cut to its place.
 
 **A first pass, triaged.** Its top finding was the rule itself: the first
 version deleted the windows on every vectored re-capture, and on the path the
@@ -8743,7 +8759,10 @@ sample) the principal is a parameter; where it was a module singleton
 (`delete-thought-mcp`, `update-thought-mcp`, `work-operating-model-activation`)
 `buildServer(principal)` runs once per key scope and `serverFor(principal)`
 hands back the cached one — two servers at most, not one per request, which is
-the property those files and the cost recipe care about. A server with no
+the property those files and the cost recipe care about (undone by change 78:
+a server shared across requests is connect()ed to a fresh transport each time
+and answers on the wrong one; `buildServer(principal)` runs per request now,
+and the cost recipe's sample per session). A server with no
 tool for a read-scoped principal (the two single-tool integrations) still
 declares a tools capability and lists an empty set — the SDK wires `tools/list`
 only when a tool is registered, and a client whose listing fails shows a broken
@@ -8869,12 +8888,15 @@ seventeen still neither bundle as an Edge Function nor run under Deno, fix
 13's consequence, unchanged here — SMD-1480 records it for five extensions and
 now carries a comment widening it to these. Read scope on the workers means a
 dry run, which still spends LLM calls; that is a cost, not a write. The three
-module-singleton MCP servers still `connect()` one cached `McpServer` to a
-fresh transport per request, as they did on main: the SDK overwrites the
+module-singleton MCP servers still, at this change, `connect()`ed one cached
+`McpServer` to a fresh transport per request, as they did on main: the SDK overwrites the
 transport on connect and captures it when a message arrives, so two concurrent
 requests to one of them can cross responses — a pre-existing defect the
-per-scope cache neither causes nor cures (SMD-1497 holds it); the "after"
-sample's one transport per session is the shape that does.
+per-scope cache neither causes nor cures (SMD-1497 held it; change 78 builds
+each server per request, and found `enhanced-mcp` a fourth); the "after"
+sample's one transport per session was the shape this paragraph first called
+correct — it shared one server per scope across sessions and hung every
+session but the last minted; change 78 builds its server per session.
 
 **Review, first pass** (triaged; two reviewers, nineteen findings — one HIGH,
 four MED, the rest low — twelve fixed, one filed, the rest noted or declined).
@@ -8933,7 +8955,7 @@ branch's hunks (the fourth pass found three that were, hidden among the
 shim's, and fixed them; two casts in `work-operating-model-activation` are
 `main`'s);
 two overlapping requests to a module singleton hang on `main` and here alike —
-SMD-1497 has the trigger, any two, not a burst. Text: `metadata-norm` deploys
+SMD-1497 has the trigger, any two, not a burst (closed by change 78). Text: `metadata-norm` deploys
 through its `deno.json`, not an inline specifier; fourteen importers, not
 thirteen; the Verified line's count; two non-probes record spellings the rule
 must keep ignoring (a property of a bound principal, a `typeof` beside a bound
@@ -12103,6 +12125,260 @@ leave to the SDK.
 fork-only, and the five servers' own text is untouched (the embeds, the
 `.not()` calls and the array payloads are upstream's spelling, now served).
 
+### 78. Every vendored MCP server is built for the request, or the session, it answers — the three per-scope singletons, one the ticket did not name and one it called correct no longer answer a request on another's transport (SMD-1497)
+
+**The defect.** `integrations/delete-thought-mcp`, `integrations/update-thought-mcp`
+and `recipes/work-operating-model-activation` built their `McpServer` once —
+upstream at module scope, since change 67 once per key scope — and on every
+request did `await server.connect(new StreamableHTTPTransport())` and handed
+that transport the request. In `@modelcontextprotocol/sdk` 1.24.3
+`Protocol.connect()` sets `this._transport = transport` before anything else,
+and `_onrequest()` captures `this._transport` when the *message* arrives — and
+`@hono/mcp` 0.1.1's `handleRequest()` awaits `ctx.req.json()` between the two.
+So with requests A and B overlapping on one server: A connects transport TA,
+B connects TB (overwriting), A's body finishes parsing, A's message is
+dispatched to the server, and the server answers it on TB. TB has no stream
+for A's request id, `send()` throws `No connection established for request
+ID`, the SDK reports it to `onerror`, and A's client waits on a response that
+will never come. Change 67's review pass found this and filed the ticket; its
+second pass ran it — any two overlapping requests, not a burst. The fourth
+server was `integrations/enhanced-mcp`, which the ticket did not name: it
+keeps its own single-key compare and so was never in `extensions/test-auth.ts`'s
+table, and the ticket was filed from a review of the files that were. It had
+the same shape — `const server = new McpServer(…)` at module scope, thirteen
+`server.registerTool(…)` calls beneath it, `server.connect(transport)` per
+request — and the same hang, run. The fifth was the cost recipe's "after"
+sample, `recipes/edge-function-cost-optimization/examples/after/`, which the
+ticket held up as the correct shape for a singleton and this section's first
+draft repeated: one `McpServer` per key scope, `connect()`ed once per
+*session*. The grain is coarser and the defect the same — a server holds one
+transport, so the second session minted for a scope took the server's
+transport from the first, and every session but the last minted hung. The
+review pass ran it on the pinned SDK: two sessions on one key, a POST through
+the first's transport times out while the server logs `Failed to send
+response: … No connection established for request ID: 1`, and a POST through
+the second answers.
+Two clients on one key, or one client whose session the isolate re-mints,
+would have met it. (The SDK at 1.30.0 refuses a second `connect()` — `Already
+connected to a transport. Call close() before connecting to a new transport` —
+so a pin bump would have turned the silent hang into a loud 500; at 1.24.3
+`connect()` has no guard.)
+
+**The change.** The four servers build per request: `buildServer(principal)`
+(or, for `enhanced-mcp`, `buildServer()`) is called where `serverFor(principal)`
+or the module-level `server` was, connected to that request's transport and
+dropped with it. The per-scope `Map` and `serverFor()` are gone from the three;
+in `enhanced-mcp` the construction and the thirteen registrations are wrapped in
+the function (a 1,517-line span re-indented — `git diff -w` shows the twenty
+lines that changed, four of them the header comment). The re-indent is this
+fork's largest whitespace-only divergence from the pin, by an order of
+magnitude, in a vendored file: any upstream edit inside the span will
+conflict on a plain rebase. The mitigation is one flag — `git rebase -X
+ignore-space-change upstream/main` resolves whitespace-only hunks and takes
+upstream's substantive edits at their old indentation, to re-indent by hand —
+and the procedure under "Rebasing onto upstream" names it. The alternative,
+a wrap with the body left at column 0, would have kept both diffs at twenty
+lines at the cost of a 1,500-line function body no other server in the tree
+formats that way; readability won. CI's deno-check job typechecks the
+wrapped file from this change on (it never listed `enhanced-mcp`: change 67's
+rationale for the job was the files that consume `../_shared/auth.ts`, and
+this one keeps its own compare). This is the shape `kubernetes-deployment`, `ob-graph`, the
+cost recipe's "before" sample and the seven extensions already had, and the one
+the ticket called the cheap option. The "after" sample builds per *session*:
+`server.ts` exports `buildServer(principal)` in place of the cached
+`serverFor()`, `index.ts` builds the server beside the transport when it mints
+a session and the session owns both, and the README's Step 2, Step 3 and file
+tree say so — that shape needs a session store, a TTL and a client that sends
+the id back, which the sample has and the four servers do not (they mint no
+session id, so a client has nothing to send). Per request is not free, so it
+was measured on the pinned SDK (Bun 1.4.0, 20,000 builds after 2,000 warm): a
+one-tool server with `delete_thought`'s schema builds in 45 µs (31–45 across
+the three reviewers' re-runs, most of it the SDK's Ajv instance, which
+`tools/call` never uses — it validates with zod), the recipe's four-tool shape
+in 70 µs, thirteen tools with five-field schemas in 474 µs. Those are Bun
+numbers; the servers deploy on Deno, so the seventh review pass ran the same
+build under Deno 2.9.6 with `enhanced-mcp`'s own deno.json (SDK 1.24.3, zod
+4.1.13): one tool 92–97 µs against Bun's 37–39, thirteen five-field tools
+776–839 µs against 216–221 — two and a half to four times slower, most of the
+gap zod's schema construction — which puts `enhanced-mcp`'s real build at
+roughly 1.2–1.8 ms on Deno. Cold start gets lighter, not heavier: the Ajv
+instance moves from import time to request time, and the server is garbage
+after the response instead of retained.
+The cheapest thing any of these servers then does is a database round trip,
+in milliseconds; the per-scope cache change 67 kept was buying tens of
+microseconds and costing the hang. The cost recipe's README and its "before"
+sample still call per-request construction the anti-pattern: their argument is
+Supabase invocation counts and the handshake fan-out, which the server's
+lifetime does not touch, and per session — once per handshake, not once per
+call — is the grain their numbers assume.
+
+**The harness.** `test-auth.ts` fires three `tools/list` at each MCP server
+under one key, overlapping two ways, and asserts each answer carries its own
+id and the full list — explicit statuses, since a `!== 200` would pass a
+timeout (change 75). The first request starts alone with its body still
+arriving for 20 ms, and without an Accept header, so the streaming body goes
+through the servers' Accept patch as a Claude Desktop connector's would — which
+found two servers with no such patch, `extensions/meal-planning/shared-server.ts`
+and the cost recipe's "before" sample, answering 406 to any POST whose Accept
+lacks `text/event-stream` where the other twelve patch it in (pre-existing;
+SMD-1616; the probe keeps the header for those two until it lands); the
+other two requests start 5 ms later, complete. The stagger is load-bearing, and the
+fourth review pass is why: three requests fired in one tick caught main's
+shape (the `connect()` overwrite is independent of timing) but never open
+the connect-to-body window itself — every handler in a burst reaches its
+first await before any body is parsed. The regression that needs the window
+is a "cleanup": build a server per request but `if (previous) await
+previous.close()` first, the previous request's server kept in a module-level
+`let`. In a burst the closed server is always an earlier, finished request's,
+so all three answer (771/771 with the same-tick probe — the suite's count
+then, before the fourth pass's last text rule); staggered, the second
+request closes the first's server while its body is still arriving, `close()`
+makes the SDK forget that server's transport, and the first request's answer
+is sent to nothing — request 11 fails alone. (The fifth pass tried the other
+reading — a server object kept and re-`connect()`ed after each `close()` —
+and found a burst catches it too: it is main's shape again.) The margin is 15
+ms: the first request reaches its body await within microseconds (measured:
+connects at 3.6 ms, the other two at 9.2 and 9.5, its body read at 24.0),
+and a stall longer than that degrades the probe to one request then a burst
+of two — detection weakens, the fix cannot fail (forced with a 25 ms
+stagger: the fix 772/772, the cleanup mutant still 1). Thirty-five runs,
+ten of them under four CPU burners, all 772. One shape passes the probe
+and is output-correct: a server per scope behind a serialising lock — the
+lock covers the whole connect-to-dispatch window, so each answer reaches its
+own transport. It is a worse design than a build per request, for reasons the
+probe cannot see: every request under a scope waits for the previous one's
+body to finish arriving, and the SDK's abort-controller map, keyed by JSON-RPC
+id, is shared across unrelated clients. For `enhanced-mcp`, outside the
+servers table, a section of its own imports it under the stand-in and runs
+the same probe under the one key it reads. Two things the probe needed from
+the harness: every in-process request now has a
+two-second deadline and reports a hang as status 0 rather than waiting on it,
+and the console silencer around a handler is a counter, not a save-and-restore
+per call — two requests in flight each saved the other's no-op, and a hung
+request never restored anything, so the first run of the probe printed `6
+failed` with no failing line: the silencer had eaten them. A drift guard in
+the file-text section refuses the spellings of a server that outlives the
+request — a module-level declaration that names `McpServer` or
+`StreamableHTTPTransport` (a shared transport routes by JSON-RPC id, which
+distinct ids would pass), holds what `buildServer()` returns, or is a `Map`
+— and the `enhanced-mcp` text is held to
+`buildServer().connect(transport)`; it is a spelling check (an untyped `let
+cached;` filled later passes it), and the probe is the proof. The "after"
+sample, whose tool modules are not in the repository, is held by the
+text-only rules to building its server beside its transport when a session is
+minted, to no `serverFor`, and to no module-level declaration in `server.ts`
+that names `McpServer` — a cache under any name.
+
+**Verified.** `bun test-auth.ts` 772/772 (709 before: 3 overlapping × 13
+servers + 14 guards + 5 for `enhanced-mcp` + 5 text-only rules for the "after"
+sample). Drilled by putting `main`'s file back: `delete-thought-mcp` fails 3
+of 772 — requests 11 and 12 `timed out after 2000 ms`, request 13 (the last
+transport connected) answered, and the guard; `enhanced-mcp` the same three;
+the "after" sample's `server.ts` fails its four text rules. The cleanup
+mutant — a server per request, the previous request's closed first, held in
+an untyped `let`, which the text guard passes — fails request 11 alone: the
+staggered request, hung. The
+fourth reviewer's other mutants: a server built before the 401 check for a
+dummy principal fails the nine scope assertions; the probe with three equal
+ids still fails main's shape (the deadline carries the detection, the ids
+the attribution). `deno check` on `enhanced-mcp` passes (and CI's deno-check
+job runs it for that file from this change on; its deno.json resolves
+supabase-js).
+`bun scripts/check-fork-consistency.mjs` PASS.
+
+**Tidied while the files were open** (one commit after the seventh pass; no
+behaviour changed, 772 before and after). The four servers' handler comments
+repeated the mechanism their new header notes already state; each now says
+what the line does and points at the note and this section. In
+`test-auth.ts` the request deadline and the counted console silencer are
+declared above the `request()` that uses them rather than below, and the
+streaming-body test reads `body instanceof ReadableStream` rather than
+`typeof body === "object"`.
+
+**Not done here.** `enhanced-mcp` stays outside `test-auth.ts`'s table — its
+own key compare (change 67's decision) and its integer-id read tools
+(SMD-1525) are their own tickets. The "after" sample cannot be run here (its
+tool modules are placeholders), so its fix is held by text and by the
+mechanism the four runnable servers prove. The third review pass found, in
+the per-session transport that sample keeps, a growth this change did not
+introduce and does not fix: `@hono/mcp` 0.1.1 records every POST's `{ ctx,
+stream }` in the transport's `#streamMapping` and deletes it only on abort or
+`close()`, so a transport reused across a session holds one `Request` and one
+Hono `Context` per tool call until the 30-minute prune drops the session
+(measured: 200 completed POSTs on one transport, 0 of 200 `Request` objects
+finalized after GC; with a transport per request, 200 of 200). The four
+servers moved to a transport per request are clear of it; the sample's README
+says the bound; SMD-1607 holds the library fix. Nothing here changes a response, a
+header or a tool surface; the answer a client receives is the same, now for
+the request it sent.
+
+Upstream status: at the pin, all five files carry the shared server —
+`delete-thought-mcp`, `update-thought-mcp`, `enhanced-mcp` and
+`work-operating-model-activation` at module scope, and the cost recipe's
+"after" sample as an exported singleton connected once per session.
+**Unfiled** by us.
+
+### 79. The store measured against pgvector, and the second store not built — filtered recall is an in-engine question migration 014 already answers (SMD-1037)
+
+The un-numbered section above, "A second vector store beside Postgres"
+(SMD-1038), wrote down before any number existed the shape a second vector store
+would take beside Postgres and the bar its numbers would have to clear: a recall
+gap at a used filter tier, a latency gap at a reachable row count, or an index
+build time that turns a re-embed into a maintenance window. SMD-1037 is that
+measurement. It scores pgvector HNSW against pgvectorscale's DiskANN and
+pgvector IVFFlat in the same Postgres, and against Qdrant in its own container,
+on the fork's own corpus and on synthetic corpora to 10M rows — every store
+against one exact-cosine ground truth over the same vectors, the comparators
+wired into an eval (`evals/store-compare.ts`, `store-scale.ts`,
+`store-backends.ts`) and never into the product. Like changes 31, 53, 55 and 59,
+it ships no runtime change; the numbers are in evals/README.md, "Does the store
+matter?".
+
+**Unfiltered, the store does not matter.** On the real corpus pgvector HNSW
+returns the exact top-10 for the unfiltered query — the case every vendor
+benchmark reports — and so does every comparator. The pre-registered anti-bar
+named an unfiltered-only win as no reason to move; there is not even a win to
+argue.
+
+**Filtered, a bare index loses recall — and that is the migration-014 question,
+not a store question.** As the filter tightens, pgvector HNSW's default scan
+returns a shrinking share of the exact top-10 (10% at a 3.5%-selective label),
+because it picks its candidates before the filter and a rare label survives in
+few of them — the SMD-968 hazard. Qdrant, filtering inside its graph, holds
+100%; DiskANN, filtering its stream and rescoring, holds strongly and recovers
+to near-exact. But the product does not run a bare index: `match_thoughts`
+pushes the filter into the scan (migration 014), pgvector's own in-engine answer
+to this exact loss, and DiskANN is a second in-engine rung. The recall dimension
+of the bar is real and is met inside the engine; a second store matches the
+in-engine rungs, it does not beat them.
+
+**Latency and build cost at scale.** At a million synthetic rows (64-dim, where
+random vectors defeat every index's recall, so these are build, size and latency
+— not realistic recall): HNSW builds in 160s to a 570 MB index, IVFFlat in 12s,
+and DiskANN — the best small-corpus filtered recall — in 8,165s, two hours and
+sixteen minutes, with a filtered query latency of 520ms at a million rows.
+Qdrant's read is its ANN search plus a Postgres resolve of the ids it returns:
+9.3ms end-to-end at p95, larger than single-store pgvector HNSW's 4.1ms
+unfiltered. At the product's real 1024 width the build costs are an order larger
+— HNSW 35 minutes to an 8 GB index, and DiskANN's build exhausted the 14 GB test
+machine outright. At ten million the pattern only sharpens: DiskANN did not
+build inside a ten-minute bound (it needed 136 minutes at one million), HNSW's
+own build took 139 minutes, and Qdrant's index no longer fit the test machine's
+memory — in RAM it crashed search, on-disk it answered at seconds per query.
+
+**Verdict.** None of the three triggers clears in favour of a second store
+within reach. Filtered recall — the one real gap — is answered inside the engine
+by migration 014 (and by DiskANN, at a build cost that rules DiskANN out at
+scale); the external store matches that, it does not beat it. Latency does not
+gap toward the external store — its id→row resolve makes the two-store read
+slower than the single store, not faster. Build time is a real cost, but it
+argues against DiskANN, not for Qdrant. The second store is not built. The
+`thoughts.embedding` column stays the source of truth (SMD-1038's guardrail).
+Two threads left open, each worth its own ticket if taken: a bounded evaluation
+— not adoption — of DiskANN's SBQ compression, which gave the smallest index and
+strong small-corpus filtered recall; and an upstream note that pgvectorscale's
+parallel DiskANN build crashed the Postgres backend at a million rows (a serial
+build completed).
 ### 80. The gate's sample is drawn by TID range — migration 038 reads its eight pages as eight TID Range Scans instead of a `TABLESAMPLE SYSTEM` over the whole heap, so the sample costs eight page reads at any size and counts the pages it drew (SMD-1526)
 
 Change 70 ended on a term that grows with the table, and this removes it.
@@ -12575,7 +12851,11 @@ git fetch upstream
 git log --oneline upstream-pin-9543c29..upstream/main -- server/ docs/01-getting-started.md
 
 git checkout -b siggymd/rebase-$(date +%Y%m%d) siggymd/fork-baseline
-git rebase upstream/main
+git rebase -X ignore-space-change upstream/main   # change 78 re-indented 1,517 lines of
+                                                  # integrations/enhanced-mcp/index.ts; the flag
+                                                  # resolves whitespace-only hunks and takes an
+                                                  # upstream edit inside the span at its old
+                                                  # indentation, to re-indent by hand
 
 cd server
 bun install --frozen-lockfile
@@ -12780,7 +13060,38 @@ Deliberate. Recorded so nobody assumes they were missed.
   divergent content, and `AGENTS.md` mandates updating a private tracker.
   [PR #274](https://github.com/NateBJones-Projects/OB1/pull/274) proposed the
   obvious fix, was endorsed in review, and was closed unmerged.
-
+- **The thoughts HNSW index scan has returned none of the table's live rows**
+  (pgvector 0.8.6). `test-live.ts` [7]'s same-model found-by read, then an
+  unfiltered `match_thoughts` top-10, missed in five CI attempts on three
+  trees that touched nothing under `db/` and, looped locally, four times in
+  thirty-seven runs (thirty-four with a second suite beside it), twice there
+  and twice at the other-model read. An instrumented copy caught two with the
+  state dumped: the thoughts index scan itself returned one of the three live
+  rows once and none of them once — iterative scan on or off, still 300 ms
+  later — with an autovacuum having run on both tables during the run (the
+  dump does not time it against the sections), the chunk index answering
+  throughout and the sections after finding their rows again. Not a tie: a
+  tie can reorder candidates, not remove them, and one dump's scan returned
+  no row at all. The 022 sequence alone never missed — 282 iterations over
+  three index histories (random rows then unit rows, unit rows only, none)
+  under three vacuum modes (none, before, in flight), and two 150-second runs
+  of ~117k inserts against 55k and 43k nonstop vacuums (probe output not
+  retained) — and every call in the suite forced down the walk missed in two
+  of four standalone runs, a probabilistic demonstrator and not a model of
+  the code before the fix. SMD-1574 moved [7]'s reads to the filtered branch
+  (change 40's note): measured on its rows, a filtered call adds no
+  `idx_scan` to either HNSW index and one to the metadata GIN, the unfiltered
+  call adds one to each, the heap is far under 037's 8,192-page floor so the
+  sample gate cannot fire, and the exact branch costs about 0.1 ms more a
+  call (0.07 to 0.2 across two measurements, round trip dominated); the exact
+  branch's chunk CTE emptied fails the two window reads. The fixed suite is
+  green in twelve local runs under `db/with-postgres.sh` (500/500 each); the
+  ticket's twenty CI runs are not done. Whether a real corpus with real
+  vectors can reach the same state is not shown either way, and no mitigation
+  (a reachability check, `REINDEX`) is built. Still on the walk: [4]'s read,
+  [15]'s, [11]'s two hybrid reads and [5b]'s two ([15] and [11] run after the
+  suite's mass deletes as [7] does; [4] runs first, on a near-fresh index).
+  SMD-1632.
 ---
 
 ## Before this touches anything sensitive
