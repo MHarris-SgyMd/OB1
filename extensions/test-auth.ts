@@ -350,36 +350,26 @@ const LIST = { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} };
 // Three tools/list at one server under one key, overlapping two ways
 // (SMD-1497, FORK.md change 77). The first request starts alone, its headers
 // in and its body still on the wire for LATE_BODY_MS; the other two start
-// STAGGER_MS later with their bodies complete. So the first is inside the
+// STAGGER_MS later with their bodies complete. So the first sits inside the
 // server between connect() and the arrival of its message while the second
 // and third connect — the window a server that outlives the request gets
-// wrong. Main's shape overwrote its transport on the later connect() and
-// answered the first request on it; a burst catches that, since the
-// overwrite does not depend on timing. What a burst cannot open is the window
-// itself: every handler in it reaches its first await before any body is
-// parsed. The regression that needs the window is a "cleanup" — build a
-// server per request but `if (previous) await previous.close()` first, the
-// previous request's server kept in a module-level `let`. In a burst the
-// closed server is always an earlier, finished request's, so all three
-// answer; staggered, the second request closes the first's server while its
-// body is still arriving, close() makes the SDK forget that server's
-// transport, and the first request's answer is sent to nothing — it fails
-// here as the lone timeout. (A server object kept and re-connect()ed after a
-// close() is main's shape again, and a burst catches it.) The per-request
-// build passes. A server kept per scope behind a serialising lock passes
-// too, and answers correctly — the lock covers the whole window — at the
-// price of every request under a scope waiting for the previous one's body,
-// and of a shared abort-controller map keyed by JSON-RPC id across unrelated
-// clients; the probe cannot see either, and the record (change 77) says so.
-// The margin: the first request reaches its body await within microseconds
-// and the other two connect at the 5 ms timer, so the body's 20 ms leaves
-// 15 ms; an event-loop stall longer than that degrades the probe to "one
-// request, then a burst of two" — detection weakens, the fix cannot fail.
-// The first request also drops the Accept header, so its streaming body goes
-// through the servers' Accept patch (a re-wrapped Request with duplex half),
-// which is the path a Claude Desktop connector's body takes — except at the
-// two servers that have no patch and answer 406 without the header
-// (`acceptPatch: false`; SMD-1616), where it keeps the header.
+// wrong. A same-tick burst would catch main's shape (its connect() overwrite
+// does not depend on timing) but never opens that window: every handler in a
+// burst reaches its first await before any body is parsed. The stagger is
+// what catches a server per request that first close()s the previous
+// request's server — in a burst that server has always finished; staggered,
+// the first request's answer is sent to a transport the SDK has forgotten,
+// and it fails here as the lone timeout. Change 77 records the mutants run,
+// and the one shape the probe passes yet is worse than a build per request
+// (a per-scope server behind a serialising lock). The margin: the first
+// request reaches its body await within microseconds and the other two
+// connect at the 5 ms timer, so the body's 20 ms leaves 15 ms; a longer
+// event-loop stall degrades the probe to one request then a burst of two —
+// detection weakens, the fix cannot fail. The first request also drops the
+// Accept header, so its streaming body goes through the servers' Accept
+// patch as a Claude Desktop connector's does — except at the two servers
+// that have no patch and answer 406 without it (`acceptPatch: false`;
+// SMD-1616), where it keeps the header.
 const STAGGER_MS = 5;
 const LATE_BODY_MS = 20;
 /** A JSON-RPC body that arrives `ms` after the request does. */
