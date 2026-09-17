@@ -104,8 +104,9 @@
  *      every call the gate lets through still does — on
  *      the 50% filter, where GIN builds its largest bitmap before the LIMIT
  *      can stop anything, on the thinnest filter with rows, and on the empty
- *      one; and 037's estimate — the TABLESAMPLE count that runs before it on
- *      a large heap and decides whether it runs at all — on the same three,
+ *      one; and the gate's estimate — the sample of the heap that runs before
+ *      it on a large heap and decides whether it runs at all: 037's
+ *      TABLESAMPLE count, eight TID range probes since 038 — on the same three,
  *      so the sample's cost stands beside the collection's it saves. That
  *      inspects the SQL actually deployed rather than a copy of it kept here,
  *      and it fails loudly if the function no longer has the shape the rewrite
@@ -140,7 +141,7 @@
  *   # a million rows and up: one scale per container, with the shared memory
  *   # the parallel build needs — the two commands are in db/README.md
  *   ./with-postgres.sh bun bench-hnsw.ts --plans     # print the full plans
- *   OB1_BENCH_UPTO=036 ./with-postgres.sh bun bench-hnsw.ts   # the after arm's schema stops at 036: the function before 037
+ *   OB1_BENCH_UPTO=037 ./with-postgres.sh bun bench-hnsw.ts   # the after arm's schema stops at 037: the function before 038
  *
  *   # Keep the ten-million-row corpus between passes: the first run builds it
  *   # and records the exact pass's answers in its marker; every later run under
@@ -174,7 +175,10 @@
  * migrations are checksummed and append-only. Migration 037 (SMD-1463, FORK.md
  * change 70) then gated the routing count behind a sample of the heap; the
  * before/after tables there are this bench with and without OB1_BENCH_UPTO=036,
- * and section C prints the sample's cost beside the collection's.
+ * and section C prints the sample's cost beside the collection's. Migration
+ * 038 (SMD-1526, change 80) draws that sample by TID range — eight page reads
+ * whatever the heap holds, where 037's TABLESAMPLE cost ~2 ns a heap page —
+ * and its before/after is OB1_BENCH_UPTO=037 against the default.
  *
  * The before arm — the function as shipped by 001–013 — runs at the published
  * scales only (up to 100,000 rows). Its defect is established there; at a
@@ -294,7 +298,7 @@ const UPTO = process.env.OB1_BENCH_UPTO;
 if (UPTO !== undefined && (!/^\d{3}$/.test(UPTO) || UPTO < "014")) {
   // 014 or later: the after arm reads the function's locals from the
   // catalog, and a body from before 014 has none to read (review pass 1).
-  console.error(`OB1_BENCH_UPTO must be a three-digit migration prefix of 014 or later, such as 036 (got ${JSON.stringify(UPTO)})`);
+  console.error(`OB1_BENCH_UPTO must be a three-digit migration prefix of 014 or later, such as 037 (got ${JSON.stringify(UPTO)})`);
   process.exit(2);
 }
 if (UPTO !== undefined && KEPT) {
@@ -761,6 +765,13 @@ async function migrateWhole(sql: SQL, onto: "kept" | "fresh"): Promise<string[]>
     // test-support's ledgerStrangers both go.
     const dry = await runMigrator(URL_, MIGRATOR_ENV, "--dry-run");
     if (dry.code !== 0) refuse(dry, `migrate.ts --dry-run exited ${dry.code} (above), before anything ran`);
+    // 039 rebuilds both HNSW indexes as NEW relations under their names, which
+    // the physical fingerprint below would refuse as rewritten — after a build
+    // inside migrate.ts under the server's default maintenance_work_mem, hours
+    // at ten million rows. The dry run already says it is pending: refuse now.
+    if (/039_\S+\s+would apply/.test(dry.out)) {
+      refuse(dry, "migration 039 is pending on this kept corpus: its swap rebuilds both HNSW indexes as new relations, which the marker's fingerprint would refuse as rewritten once built — remove the kept volume (the exit line prints the command) and build the corpus again under this tree");
+    }
   }
   const before = new Set((await ledgerNames(sql)) ?? []);
   const run = await runMigrator(URL_, MIGRATOR_ENV);
@@ -1134,6 +1145,7 @@ function shapeOf(plan: string, ms: number): PlanShape {
     if (new RegExp(`Index (Only )?Scan using thought_chunks_(thought_id_idx|pkey) on ${a}`).test(plan)) return "chunk lookups by parent";
     if (alias.startsWith("thought_chunks") && new RegExp(`Bitmap Heap Scan on ${a}`).test(plan) && /Bitmap Index Scan on thought_chunks_(thought_id_idx|pkey)/.test(plan)) return "chunk lookups by parent (bitmap)";
     if (new RegExp(`Bitmap Heap Scan on ${a}`).test(plan)) return "GIN bitmap";
+    if (new RegExp(`Tid Range Scan on ${a}`).test(plan)) return "TID range scan"; // 038's estimate: one block per probe
     if (new RegExp(`Sample Scan on ${a}`).test(plan)) return "sample scan"; // 037's estimate: TABLESAMPLE SYSTEM
     if (new RegExp(`Seq Scan on ${a}`).test(plan)) return "seq scan";
     return "?";
@@ -1159,11 +1171,15 @@ function shapeOf(plan: string, ms: number): PlanShape {
 type Plans = { custom: PlanShape; generic: PlanShape; genericNoJit: PlanShape };
 
 async function plans(sql: SQL, q: number[], filter: string, branch: Branch): Promise<Plans> {
-  // The estimate's sample share as a literal, the value the function's own
-  // custom plan sees: left as its declaring expression (volatile) the planner
-  // could not size the sample scan and, at ten million rows, JIT-compiled a
-  // statement the function runs in a millisecond (routingAt says more).
-  const overrides = branch === "estimate" && routing.vPct !== undefined ? { v_pct: String(routing.vPct) } : undefined;
+  // The estimate's locals as literals, the values the function's own custom
+  // plan sees — the heap's page count (037 and 038) and 037's sample share:
+  // left as their declaring expressions (volatile) the planner could not size
+  // 037's sample scan and, at ten million rows, JIT-compiled a statement the
+  // function runs in a millisecond (routingAt says more).
+  const overrides =
+    branch === "estimate"
+      ? { ...(routing.vPages !== undefined ? { v_pages: String(routing.vPages) } : {}), ...(routing.vPct !== undefined ? { v_pct: String(routing.vPct) } : {}) }
+      : undefined;
   const body = await extractBody(sql, branch, DIM, { overrides });
   const arm = async (mode: "force_custom_plan" | "force_generic_plan", jit: boolean): Promise<PlanShape> => {
     const { text, ms } = await sql.begin(async (tx: SQL) => {
@@ -1270,7 +1286,7 @@ assertThrowawayDatabase(URL_);
  * (test-support's routingAt), so the tiers are routed by the threshold the
  * function actually has, not by a copy of 014's arithmetic.
  */
-let routing: { vFetch: number; vExact: number; vPct?: number } = { vFetch: NaN, vExact: NaN };
+let routing: { vFetch: number; vExact: number; vPages?: number; vPct?: number } = { vFetch: NaN, vExact: NaN };
 /**
  * pgvector's own defaults for the bounds 014 seeds, read from the server once
  * the library is loaded (`pg_settings.boot_val`) over the same HNSW_BOUNDS
@@ -1631,16 +1647,17 @@ for (const n of SCALES) {
       if (broadest) plan.routeBroad = { branch: "route", tier: broadest.label, matches: broadest.matches, ...(await plans(sql, queries[0], tierFilter(broadest.key), "route")) };
       if (thinnest && thinnest !== broadest) plan.routeThin = { branch: "route", tier: thinnest.label, matches: thinnest.matches, ...(await plans(sql, queries[0], tierFilter(thinnest.key), "route")) };
       plan.routeNone = { branch: "route", tier: "nothing", matches: 0, ...(await plans(sql, queries[0], tierFilter("none"), "route")) };
-      // 037's estimate — the sample of the heap that runs before `route` and
-      // decides whether it runs — on the same three filters: its cost is the
-      // pages it reads, so the three rows should agree, and the difference
-      // between them and `route`'s is what the gate saves or costs a call. A
-      // body from before 037 (OB1_BENCH_UPTO=036) has no such statement.
-      // Whether the body declares the sample share is routingAt's to say;
-      // a rewrite failure on a body that does must propagate, not read as
-      // "before 037" (review pass 1).
-      const gated = routing.vPct !== undefined;
-      if (!gated) console.log("\n  (the deployed match_thoughts declares no sample share — a body from before 037 — so no estimate is explained)");
+      // The gate's estimate — the sample of the heap that runs before `route`
+      // and decides whether it runs (037's TABLESAMPLE, 038's TID ranges) —
+      // on the same three filters: its cost is the pages it reads, so the
+      // three rows should agree, and the difference between them and
+      // `route`'s is what the gate saves or costs a call. A body from before
+      // 037 (OB1_BENCH_UPTO=036) has no such statement. Whether the body
+      // declares the heap's page count is routingAt's to say; a rewrite
+      // failure on a body that does must propagate, not read as "before 037"
+      // (review pass 1).
+      const gated = routing.vPages !== undefined;
+      if (!gated) console.log("\n  (the deployed match_thoughts declares no heap page count — a body from before 037 — so no estimate is explained)");
       if (gated) {
         if (broadest) plan.estimateBroad = { branch: "estimate", tier: broadest.label, matches: broadest.matches, ...(await plans(sql, queries[0], tierFilter(broadest.key), "estimate")) };
         if (thinnest && thinnest !== broadest) plan.estimateThin = { branch: "estimate", tier: thinnest.label, matches: thinnest.matches, ...(await plans(sql, queries[0], tierFilter(thinnest.key), "estimate")) };
@@ -1750,7 +1767,7 @@ for (const r of results) {
 
 console.log("\n### C. Plan shape of each filtered branch, on the filter the function routes to it (custom plan / generic plan)\n");
 console.log("plpgsql runs custom plans for the first five calls, then generic if it is not costlier; both are shown, and the generic plan once more with `jit = off` — the flat estimate that makes a plan generic can also carry its cost past jit_above_cost, and the difference between the last two columns is what JIT costs the call.\n");
-console.log("`route` is the capped id collection that decides between the other two; it has no chunk side, and its cost is the filter's matching rows (GIN builds the whole bitmap before the LIMIT). `estimate` is 037's sample of the heap, which runs before `route` on a heap of ROUTE_ESTIMATE_MIN_PAGES pages or more and skips it when the sample says the filter is far too broad for the exact branch; its cost is the pages it reads, whatever the filter. It is explained wherever the deployed body has it — the function itself runs it only on a heap of that many pages, so under the floor the row prices a statement the call never makes. Its three columns explain one plan: the sample share is substituted as the literal the function's custom plan sees (routingAt), so nothing is left for a generic plan to leave unknown — the whole-heap estimate a generic plan would make is exactly what the substitution removes.\n");
+console.log("`route` is the capped id collection that decides between the other two; it has no chunk side, and its cost is the filter's matching rows (GIN builds the whole bitmap before the LIMIT). `estimate` is the gate's sample of the heap (037), which runs before `route` on a heap of ROUTE_ESTIMATE_MIN_PAGES pages or more and skips it when the sample says the filter is far too broad for the exact branch; its cost is the pages it reads, whatever the filter — eight TID range probes since 038, where 037's TABLESAMPLE SYSTEM also paid ~2 ns a heap page. It is explained wherever the deployed body has it — the function itself runs it only on a heap of that many pages, so under the floor the row prices a statement the call never makes. Its three columns explain one plan: the gate's locals (the heap's page count; 037's sample share) are substituted as the literals the function's custom plan sees (routingAt), so nothing is left for a generic plan to leave unknown — the whole-heap estimate a generic plan would make of 037's sample scan is exactly what the substitution removes; 038's probes are priced alike under both modes.\n");
 console.log("| rows | branch | filter | matching rows | thoughts side | chunk side | exec ms: custom / generic / generic, jit off |");
 console.log("| ---: | --- | ---: | ---: | --- | --- | ---: |");
 for (const r of results) {
