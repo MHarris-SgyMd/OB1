@@ -9977,12 +9977,16 @@ day). The machine was busier than for change 70's tables: seven other
 Postgres containers held the VM's memory throughout, and the before arm's
 own figures sit above change 70's for the same 037 body at every tier (the
 empty filter 1.05 ms at a million rows against 0.43 then), so read the
-columns as a pair and not against change 70's. The ten-million after pass
-was started twice and killed twice mid-build by the VM's OOM killer — two
-other sessions' benches were building there by then, a kept ten-million
-corpus among them — and is queued to run when the VM is idle; the
-ten-million before pass ran, and its rows are here for that reason. Section
-B, ten asked, median over 50 random queries:
+million-row columns as a pair and not against change 70's. At ten million
+the two columns are two machines: the before pass ran under that load (its
+50% tier 132 ms against change 70's 13 for the same 037 body — the walk
+reading the index from disk), while the after pass — started twice and
+killed twice mid-build by the VM's OOM killer with two other sessions'
+benches resident, a kept ten-million corpus among them — ran six hours later
+on the idle VM change 70's own passes had, and its column sits within the
+spread of change 70's 037 figures everywhere but the rows this change is
+about (50% 13.2 then, 14.4 now; 900 rows 10.9 and 11.1). Section B, ten
+asked, median over 50 random queries:
 
 | rows | filter | matching rows | 037: in exact top-10 | median ms | 038: in exact top-10 | median ms |
 | ---: | --- | ---: | ---: | ---: | ---: | ---: |
@@ -9995,13 +9999,15 @@ B, ten asked, median over 50 random queries:
 | 1,000,000 | 900 rows | 934 | 10.0 | 10.26 | 10.0 | 7.81 |
 | 1,000,000 | 0.01% | 99 | 10.0 | 2.38 | 10.0 | 1.39 |
 | 1,000,000 | nothing | 0 | 0.0 | 1.05 | 0.0 | 0.34 |
-| 10,000,000 | 50% | 4,998,406 | 0.9 | 132.40 | pending | pending |
-| 10,000,000 | 10% | 999,827 | 2.1 | 387.55 | pending | pending |
-| 10,000,000 | 1% | 99,633 | 5.5 | 2,608.58 | pending | pending |
-| 10,000,000 | 0.1% | 10,231 | 10.0 | 115.04 | pending | pending |
-| 10,000,000 | 900 rows | 886 | 10.0 | 13.91 | pending | pending |
-| 10,000,000 | 0.01% | 959 | 10.0 | 15.51 | pending | pending |
-| 10,000,000 | nothing | 0 | 0.0 | 1.67 | pending | pending |
+| 10,000,000 | 50% | 4,998,406 | 0.9 | 132.40 | 0.7 | 14.42 |
+| 10,000,000 | 10% | 999,827 | 2.1 | 387.55 | 1.9 | 49.88 |
+| 10,000,000 | 1% | 99,633 | 5.5 | 2,608.58 | 5.3 | 425.48 |
+| 10,000,000 | 0.1% | 10,231 | 10.0 | 115.04 | 4.2 | 914.71 |
+| 10,000,000 | 5,000 rows | 5,088 | 10.0 | 63.11 | 10.0 | 55.80 |
+| 10,000,000 | 2,000 rows | 1,978 | 10.0 | 36.98 | 10.0 | 33.14 |
+| 10,000,000 | 900 rows | 886 | 10.0 | 13.91 | 10.0 | 11.09 |
+| 10,000,000 | 0.01% | 959 | 10.0 | 15.51 | 10.0 | 12.13 |
+| 10,000,000 | nothing | 0 | 0.0 | 1.67 | 0.0 | 0.36 |
 
 Section C, the two statements themselves, extracted from the deployed body and
 explained (execution time under a forced custom plan / a forced generic plan /
@@ -10019,27 +10025,25 @@ first, five queries):
 | 1,000,000 | estimate | 50% | 499,443 | 0.25 / 0.31 / 0.30 | 0.12 / 0.10 / 0.11 |
 | 1,000,000 | estimate | 0.01% | 99 | 0.30 / 0.22 / 0.25 | 0.09 / 0.08 / 0.09 |
 | 1,000,000 | estimate | nothing | 0 | 0.32 / 0.36 / 0.27 | 0.10 / 0.10 / 0.10 |
-| 10,000,000 | route | 50% | 4,998,406 | 297.21 / 316.29 / 283.95 | pending |
-| 10,000,000 | estimate | 50% | 4,998,406 | 1.17 / 1.14 / 1.15 | pending |
-| 10,000,000 | estimate | 900 rows | 886 | 1.10 / 1.13 / 1.20 | pending |
-| 10,000,000 | estimate | nothing | 0 | 1.20 / 1.12 / 1.14 | pending |
+| 10,000,000 | route | 50% | 4,998,406 | 297.21 / 316.29 / 283.95 | 278.63 / 317.77 / 284.75 |
+| 10,000,000 | estimate | 50% | 4,998,406 | 1.17 / 1.14 / 1.15 | 0.12 / 0.10 / 0.10 |
+| 10,000,000 | estimate | 900 rows | 886 | 1.10 / 1.13 / 1.20 | 0.11 / 0.12 / 0.10 |
+| 10,000,000 | estimate | nothing | 0 | 1.20 / 1.12 / 1.14 | 0.10 / 0.09 / 0.09 |
 
 Read down the tables and three things fall out.
 
 - **The sample's cost is flat, and the empty filter has its cost back.** The
-  `estimate` row reads 0.08–0.12 ms at 10,000 rows and 0.08–0.12 at a
-  million under 038, the same three columns for the 50% filter and the empty
-  one — against 037's 0.04–0.14 and 0.22–0.36, and 1.10–1.20 at ten million,
-  the 2 ns a page. Through the function the empty filter at a million rows
-  went from 1.05 ms to 0.34 in this pair; change 70 measured 0.21 before 037
-  and 0.43 after on a quieter machine, so the ticket's "within 0.2 ms of what
-  it cost before 037" holds at a million rows on this pair's own terms. The
-  ticket's two checks at ten million — the estimate row within a factor of
-  two of the smaller scales, the empty filter within 0.2 ms of 0.27 — are the
-  pending pass's; what stands for them today is the standalone table above
-  (0.052 ms at 200,000 pages, a fifth of the ten-million heap, against 037's
-  0.469 there and 1.1 in the bench at ten million) and the plan the bench
-  prints, eight `Tid Range Scan`s whose cost does not read the heap's size.
+  `estimate` row reads 0.08–0.12 ms at 10,000 rows, 0.08–0.12 at a million
+  and 0.09–0.12 at ten million under 038, the same three columns for the 50%
+  filter, a thin one and the empty one — against 037's 0.04–0.14, 0.22–0.36
+  and 1.10–1.20: the 2 ns a page, gone. That is the ticket's first check
+  (within a factor of two across the three scales; it is within 1.5). Through
+  the function the empty filter at ten million rows costs 0.36 ms — 0.27
+  before 037 in change 70's pass, 1.31 under 037 there and 1.67 under 037
+  today — which is the ticket's second check, within 0.1 ms of the pre-037
+  figure; at a million rows 0.34 in this pair (1.05 under 037 today, 0.43 in
+  change 70's pass, 0.21 before 037). The standalone table above says the
+  same thing without a bench: 0.052 ms at 200,000 pages against 0.469.
 - **The broad tiers lose the collection on every call now.** 50% at a
   million: 20.2 ms → 14.9, 10%: 63.5 → 53.6, with the recall columns
   unchanged (3.0 and 5.4–5.5, the index's own); the `route` rows are the same
@@ -10047,17 +10051,20 @@ Read down the tables and three things fall out.
   difference is the calls that no longer run it — 037 skipped the 10% filter
   nine times in ten, 038 987 in a thousand. The thin tiers moved by the
   sample's saving and the spread (900 rows 10.3 → 7.8, 0.01% 2.4 → 1.4).
-- **The planner's coin, on two more tiers.** The 2,000- and 5,000-row tiers
-  were served from GIN under the walk branch in the before pass (10.0 of 10
-  at 17 and 32 ms) and walked HNSW in the after pass (8.5 and 8.6 at 560 and
-  399 ms); the 1% tier walked HNSW in both (8.9 / 8.8). Both tiers are above
-  the threshold and routed to the walk by both arms — the gate cannot skip
-  them (condition 2 needs eight hits and 160 sampled rows at 0.2–0.5% hold
-  well under one) and cannot choose the walk's plan, which section E shows
-  flipping under the seeded bounds on the same rows (17 ms and 10.0 against
-  577 ms and 8.5). Change 70 met the same flip on the 1% tier between its
-  own passes under a fresh `ANALYZE`; it is SMD-1464's band, with two more
-  rows for it.
+- **The planner's coin, on three more tiers.** At a million rows the 2,000-
+  and 5,000-row tiers were served from GIN under the walk branch in the
+  before pass (10.0 of 10 at 17 and 32 ms) and walked HNSW in the after pass
+  (8.5 and 8.6 at 560 and 399 ms); at ten million the 0.1% tier did the same
+  (10.0 at 115 ms, then 4.2 at 915), while the 1% tier walked HNSW in both
+  passes at both scales. Every one of those tiers is above the threshold and
+  routed to the walk by both arms — the gate cannot skip them (condition 2
+  needs eight hits, and 160 sampled rows at 0.1–0.5% hold well under one)
+  and cannot choose the walk's plan, which section E shows flipping under
+  the seeded bounds on the same rows (17 ms and 10.0 against 577 ms and 8.5
+  at a million; 851 ms and 4.2 against 206 ms and 10.0 with `ef_search`
+  raised at ten million). Change 70 met the same flip on the 1% tier between
+  its own passes under a fresh `ANALYZE`; it is SMD-1464's band, with three
+  more rows for it.
 
 **What it costs where it does nothing.** Under the floor — every real brain
 today — nothing changes: the body computes `v_pages` at entry as under 037 and
@@ -10075,9 +10082,11 @@ the ceiling and changes answers; change 70's "Not done here") and the seeded
 bounds are SMD-1464; `ef_search` on real vectors SMD-1465. The `hit_pages ≥
 4` knob is stated, not turned. A hundred million rows was not run, for the
 reasons change 28 gives; what this change establishes is that the sample's
-cost no longer depends on it. The ten-million after pass is queued, not run:
-its two attempts were killed by the VM's OOM killer with other sessions'
-benches resident, and the tables above say so where its rows would be.
+cost no longer depends on it. The ten-million after pass took four attempts
+over six hours — two killed mid-build by the VM's OOM killer with other
+sessions' benches resident, one whose connection the server dropped under
+the same pressure, and the fourth on the idle VM — which is a fact about a
+shared 14.8 GB VM, not about the bench.
 
 **Verified:** `db/test-schema.ts` 873/873 under PGlite, [8e] rewritten (the
 TID range probe, the three load-bearing tokens — `DISTINCT`, `LEFT`, `LIMIT
@@ -10094,8 +10103,8 @@ privilege moves; 014 re-applied by hand, then 038 alone, leaves one form);
 `server-portable` `tsc --noEmit` and `test-preflight.ts` (205/205) clean;
 `bun scripts/check-fork-consistency.mjs` PASS; `bench-hnsw.ts` before and
 after at a million rows and at 10,000 (both arms' estimate rows: 037's a
-`Sample Scan`, 038's a `Tid Range Scan`), the ten-million before pass, above,
-and the ten-million after pass pending.
+`Sample Scan`, 038's a `Tid Range Scan`) and at ten million rows (the after
+pass on its fourth attempt, the VM idle), above.
 
 **The operator's path, walked.** A brain at 037 with rows, upgraded by `bun
 db/migrate.ts`: "038 applied, 1 applied, 37 skipped", one `match_thoughts`

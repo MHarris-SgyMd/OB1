@@ -233,11 +233,15 @@
 --   pages read, not the rows that pass. Through the function, on that
 --   200,000-page heap: 0.05 ms a call over the round trip once the generic
 --   plan is adopted, against 0.66 for 037's. db/bench-hnsw.ts before and
---   after this file at 100,000, a million and ten million rows are FORK.md
+--   after this file at 10,000, a million and ten million rows are FORK.md
 --   change 71's tables; section C prints the sample's own cost beside the
---   collection's at every scale, and the ticket's two checks — the estimate
---   row flat across the three scales, the empty filter at ten million back
---   within 0.2 ms of the 0.27 it cost before 037 — are read off them.
+--   collection's at every scale: 0.08–0.12 ms at 10,000 rows, 0.08–0.12 at
+--   a million, 0.09–0.12 at ten million (037's: 0.04–0.14, 0.22–0.36,
+--   1.10–1.20). Through the function the empty filter at ten million rows
+--   costs 0.36 ms — 0.27 before 037, 1.31 under it — and the 50% tier 14.4,
+--   as under 037 (13.2); the thin tiers moved by the sample's saving and the
+--   spread. Those are the ticket's two checks, the estimate flat across the
+--   scales and the empty filter back within 0.2 ms of what it cost before 037.
 --
 -- What a successor must carry
 --   037's list, unchanged — `SET hnsw.iterative_scan = relaxed_order`, `SET
