@@ -432,8 +432,9 @@ for (const s of SERVERS.filter((s) => s.kind === "mcp")) {
   assert(served.length === before + 1, `${file} imports as deployed and hands Deno.serve one handler`);
   const handler = served[before];
   const ids = [11, 12, 13];
-  const answers = await Promise.all(ids.map((id) => answer(handler, new Request("http://extension.test/mcp",
-    { method: "POST", headers: { ...RPC, "x-brain-key": LEGACY_KEY }, body: JSON.stringify({ ...LIST, id }) }))));
+  // No handler (the import failed above) is already a counted failure; the probe is skipped rather than thrown from.
+  const answers = handler ? await Promise.all(ids.map((id) => answer(handler, new Request("http://extension.test/mcp",
+    { method: "POST", headers: { ...RPC, "x-brain-key": LEGACY_KEY }, body: JSON.stringify({ ...LIST, id }) })))) : [];
   // The reference list is the first answer that carries one — not answers[0], which under the defect is the timeout.
   const tools = answers.map(toolsOf).find((t) => t.length > 0) ?? [];
   assert(tools.length > 0, `its tools/list under the key names its tools (${tools.length})`);
@@ -711,12 +712,19 @@ const blockOf = (text: string, name: string) => {
 };
 const OLD_SPELLINGS = /c\.req\.query\("key"\)|c\.req\.header\("x-access-key"\)|[!=]== ?(?:MCP|AUDITOR)_ACCESS_KEY\b|isAuthorized\(|\bauth\(c\)/;
 /**
- * No McpServer at module scope and no per-scope cache of one: a server that
- * outlives the request is connect()ed to a fresh transport each time, and the
- * SDK answers on whichever transport it holds when the message arrives
- * (SMD-1497). The after sample's per-session binding is checked in TEXT_ONLY.
+ * No McpServer that outlives a request: such a server is connect()ed to a
+ * fresh transport each time, and the SDK answers on whichever transport it
+ * holds when the message arrives (SMD-1497). Textually: no module-level
+ * declaration (exported or not, typed or not) that names McpServer — a server,
+ * a lazy `let server: McpServer | undefined`, a `Map<…, McpServer>` cache — and
+ * none that holds what buildServer() returns or a Map (a cache under any name;
+ * no MCP server here keeps one at module scope). A spelling check: an untyped
+ * `let cached;` filled later passes it. The concurrency probe above is the
+ * proof; this catches the shape before it reaches a run. The after sample's
+ * per-session server is checked in TEXT_ONLY.
  */
-const builtPerRequest = (text: string) => !/^(?:const|let) \w+ = new McpServer\(/m.test(text) && !/^const servers = new Map</m.test(text);
+const builtPerRequest = (text: string) =>
+  !/^(?:export )?(?:const|let|var) [^\n]*(?:\bMcpServer\b|= buildServer\(|= new Map[<(])/m.test(text);
 
 console.log("\n[the files say what this test assumes]");
 for (const s of SERVERS) {
@@ -791,12 +799,14 @@ for (const s of SERVERS) {
 // same thing in their text.
 console.log("\n[the files this test reads but cannot run]");
 const TEXT_ONLY: { file: string; must: RegExp[]; mustNot: RegExp[] }[] = [
+  // The after sample binds one server AND one transport per session (SMD-1497): a server shared between
+  // sessions and connect()ed once per session hands its transport to the newest session and hangs the rest.
   { file: "recipes/edge-function-cost-optimization/examples/after/index.ts",
-    must: [/from "\.\.\/_shared\/auth\.ts"/, /authenticateRequest\(c\.req\.raw,/, /serverFor\(principal\)/, /session\.scope !== principal\.scope/],
-    mustNot: [/[!=]== ?MCP_ACCESS_KEY\b/, /c\.req\.header\("x-access-key"\)/] },
+    must: [/from "\.\.\/_shared\/auth\.ts"/, /authenticateRequest\(c\.req\.raw,/, /const server = buildServer\(principal\);[^\n]*\n\s*await server\.connect\(transport\);\n\s*session = \{ server, transport,/, /session\.scope !== principal\.scope/],
+    mustNot: [/[!=]== ?MCP_ACCESS_KEY\b/, /c\.req\.header\("x-access-key"\)/, /serverFor\(/] },
   { file: "recipes/edge-function-cost-optimization/examples/after/server.ts",
-    must: [/from "\.\.\/_shared\/auth\.ts"/, /export function serverFor\(principal: Principal\)/, /register\w+\(server, principal\)/],
-    mustNot: [/export const server\b/] },
+    must: [/from "\.\.\/_shared\/auth\.ts"/, /export function buildServer\(principal: Principal\): McpServer/, /register\w+\(server, principal\)/],
+    mustNot: [/export const server\b/, /new Map</, /serverFor/] },
   { file: "recipes/vercel-neon-telegram/src/app/api/telegram/route.ts",
     must: [/import \{ secretMatches \} from "@\/lib\/auth"/, /secretMatches\(req\.headers\.get\("x-telegram-bot-api-secret-token"\), expectedSecret\)/],
     mustNot: [/secret !== expectedSecret/] },

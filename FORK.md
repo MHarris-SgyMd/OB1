@@ -8872,7 +8872,9 @@ transport on connect and captures it when a message arrives, so two concurrent
 requests to one of them can cross responses — a pre-existing defect the
 per-scope cache neither causes nor cures (SMD-1497 held it; change 76 builds
 each server per request, and found `enhanced-mcp` a fourth); the "after"
-sample's one transport per session is the other shape that does.
+sample's one transport per session was the shape this paragraph first called
+correct — it shared one server per scope across sessions and hung every
+session but the last minted; change 76 builds its server per session.
 
 **Review, first pass** (triaged; two reviewers, nineteen findings — one HIGH,
 four MED, the rest low — twelve fixed, one filed, the rest noted or declined).
@@ -11344,7 +11346,7 @@ is why check 4 reads the body.
 
 Upstream status: #424 open, PR #425 open. **Unfiled** by us.
 
-### 76. Every vendored MCP server is built per request — the three per-scope singletons, and a fourth the ticket did not name, no longer answer one request on another's transport (SMD-1497)
+### 76. Every vendored MCP server is built for the request, or the session, it answers — the three per-scope singletons and two more the ticket did not name no longer answer one request on another's transport (SMD-1497)
 
 **The defect.** `integrations/delete-thought-mcp`, `integrations/update-thought-mcp`
 and `recipes/work-operating-model-activation` built their `McpServer` once —
@@ -11363,33 +11365,50 @@ will never come. Change 67's review pass found this and filed the ticket; its
 second pass ran it — any two overlapping requests, not a burst. The fourth
 server was `integrations/enhanced-mcp`, which the ticket did not name: it
 keeps its own single-key compare and so was never in `extensions/test-auth.ts`'s
-table, and the survey that filed the ticket read the files that were. It had
+table, and the ticket was filed from a review of the files that were. It had
 the same shape — `const server = new McpServer(…)` at module scope, thirteen
 `server.registerTool(…)` calls beneath it, `server.connect(transport)` per
-request — and the same hang, run.
+request — and the same hang, run. The fifth was the cost recipe's "after"
+sample, `recipes/edge-function-cost-optimization/examples/after/`, which the
+ticket held up as the correct shape for a singleton and this section's first
+draft repeated: one `McpServer` per key scope, `connect()`ed once per
+*session*. The grain is coarser and the defect the same — a server holds one
+transport, so the second session minted for a scope took the server's
+transport from the first, and every session but the last minted hung. The
+review pass ran it on the pinned SDK: two sessions on one key, a POST through
+the first's transport times out with `Failed to send response: … No
+connection established for request ID: 1`, a POST through the second answers.
+Two clients on one key, or one client whose session the isolate re-mints,
+would have met it. (The SDK at 1.30.0 refuses a second `connect()` — `Already
+connected to a transport. Call close() before connecting to a new transport` —
+so a pin bump would have turned the silent hang into a loud 500; at 1.24.3
+`connect()` has no guard.)
 
 **The change.** The four servers build per request: `buildServer(principal)`
 (or, for `enhanced-mcp`, `buildServer()`) is called where `serverFor(principal)`
 or the module-level `server` was, connected to that request's transport and
 dropped with it. The per-scope `Map` and `serverFor()` are gone from the three;
 in `enhanced-mcp` the construction and the thirteen registrations are wrapped in
-the function (a re-indent of 1,516 lines — `git diff -w` shows the fifteen that
-changed). This is the shape `kubernetes-deployment`, `ob-graph`, the cost
-recipe's "before" sample and the seven extensions already had, and the one the
-ticket called the cheap option. The other correct shape — keep the singleton
-and bind one transport per `Mcp-Session-Id`, as the cost recipe's "after"
-sample does — needs a session store, a TTL and a client that sends the id
-back; these servers mint no session id, so a client has nothing to send. Per
-request is not free, so it was measured on the pinned SDK (Bun 1.4.0, 20,000
-builds after 2,000 warm): a one-tool server with `delete_thought`'s schema
-builds in 45 µs, the recipe's four-tool shape in 70 µs, thirteen tools with
-five-field schemas in 474 µs. The cheapest thing any of these servers then
-does is a database round trip, in milliseconds; the per-scope cache change 67
-kept was buying tens of microseconds and costing the hang. The cost recipe's
-README and its "before" sample still call per-request construction the
-anti-pattern: their argument is Supabase invocation counts and the handshake
-fan-out, which the server's lifetime does not touch, and their remedy for a
-singleton — bind per session — is the one this change leaves in place there.
+the function (a 1,516-line span re-indented — `git diff -w` shows the sixteen
+lines that changed). This is the shape `kubernetes-deployment`, `ob-graph`, the
+cost recipe's "before" sample and the seven extensions already had, and the one
+the ticket called the cheap option. The "after" sample builds per *session*:
+`server.ts` exports `buildServer(principal)` in place of the cached
+`serverFor()`, `index.ts` builds the server beside the transport when it mints
+a session and the session owns both, and the README's Step 2, Step 3 and file
+tree say so — that shape needs a session store, a TTL and a client that sends
+the id back, which the sample has and the four servers do not (they mint no
+session id, so a client has nothing to send). Per request is not free, so it
+was measured on the pinned SDK (Bun 1.4.0, 20,000 builds after 2,000 warm): a
+one-tool server with `delete_thought`'s schema builds in 45 µs, the recipe's
+four-tool shape in 70 µs, thirteen tools with five-field schemas in 474 µs.
+The cheapest thing any of these servers then does is a database round trip,
+in milliseconds; the per-scope cache change 67 kept was buying tens of
+microseconds and costing the hang. The cost recipe's README and its "before"
+sample still call per-request construction the anti-pattern: their argument is
+Supabase invocation counts and the handshake fan-out, which the server's
+lifetime does not touch, and per session — once per handshake, not once per
+call — is the grain their numbers assume.
 
 **The harness.** `test-auth.ts` fires three `tools/list` at each MCP server
 at once under one key and asserts each answer carries its own id and the full
@@ -11402,13 +11421,19 @@ and the console silencer around a handler is a counter, not a save-and-restore
 per call — two requests in flight each saved the other's no-op, and a hung
 request never restored anything, so the first run of the probe printed `6
 failed` with no failing line: the silencer had eaten them. A drift guard in
-the file-text section asserts no MCP server declares a `McpServer` or a
-`servers` map at module scope, and the `enhanced-mcp` text is held to
-`buildServer().connect(transport)`.
+the file-text section refuses the spellings of a server that outlives the
+request — a module-level declaration that names `McpServer`, holds what
+`buildServer()` returns, or is a `Map` — and the `enhanced-mcp` text is held to
+`buildServer().connect(transport)`; it is a spelling check (an untyped `let
+cached;` filled later passes it), and the probe is the proof. The "after"
+sample, whose tool modules are not in the repository, is held by the
+text-only rules to building its server beside its transport when a session is
+minted, and to no `serverFor`.
 
-**Verified.** `bun test-auth.ts` 767/767 (709 before: 3 concurrent × 13
-servers + 14 guards + 5 for `enhanced-mcp`). Drilled by putting `main`'s file
-back: `delete-thought-mcp` fails 3 of 767 — requests 11 and 12 `timed out
+**Verified.** `bun test-auth.ts` 770/770 (709 before: 3 concurrent × 13
+servers + 14 guards + 5 for `enhanced-mcp` + 3 text-only rules for the "after"
+sample). Drilled by putting `main`'s file
+back: `delete-thought-mcp` fails 3 of 770 — requests 11 and 12 `timed out
 after 2000 ms`, request 13 (the last transport connected) answered, and the
 guard; `enhanced-mcp` the same three. `deno check` on `enhanced-mcp` passes
 (CI does not run it for that file; its deno.json resolves supabase-js).
@@ -11416,10 +11441,11 @@ guard; `enhanced-mcp` the same three. `deno check` on `enhanced-mcp` passes
 
 **Not done here.** `enhanced-mcp` stays outside `test-auth.ts`'s table — its
 own key compare (change 67's decision) and its integer-id read tools
-(SMD-1525) are their own tickets. The cost recipe's prose is left as it is,
-for the reason above. Nothing here changes a response, a header or a tool
-surface; the answer a client receives is the same, now for the request it
-sent.
+(SMD-1525) are their own tickets. The "after" sample cannot be run here (its
+tool modules are placeholders), so its fix is held by text and by the
+mechanism the four runnable servers prove. Nothing here changes a response, a
+header or a tool surface; the answer a client receives is the same, now for
+the request it sent.
 
 Upstream status: upstream's `delete-thought-mcp`, `update-thought-mcp` and
 `enhanced-mcp` carry the module-level server. **Unfiled** by us.

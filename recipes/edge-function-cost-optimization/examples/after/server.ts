@@ -1,38 +1,37 @@
-// ✅ Module-scope McpServer singletons — one per key scope, each constructed
-// exactly ONCE per cold-start, on the first request that needs it.
+// ✅ One McpServer per SESSION — built by buildServer() when index.ts mints a
+// session, connected to that session's transport, and dropped with it.
 //
 // Each tool module exports a `register(server, principal)` function; a tool
 // that writes is registered only `if (canWrite(principal))`, so the server a
 // read-scoped key is handed never had those tools (ob1-fork, SMD-1455). The
-// server is cached per SCOPE, so `principal` is the first caller's for that
-// scope: use it for canWrite() and nothing else — never for attribution.
+// principal is the one the session was minted under: use it for canWrite()
+// and nothing else — never for attribution.
 // Adding a new extension means: drop a new file in `tools/`, add one import,
-// add one `register()` call. No per-request reconstruction — two servers at
-// most, not one per request.
+// add one `register()` call.
+//
+// Not one server per key scope, connected once per session (this file's first
+// shape): a McpServer holds ONE transport, and the SDK answers a request on
+// whichever transport the server holds when the message arrives — so the
+// second session minted for a scope took the server's transport from the
+// first, and every session but the last minted hung (ob1-fork, SMD-1497,
+// FORK.md change 76). A build is tens of microseconds, once per session.
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { canWrite, type Principal } from "../_shared/auth.ts";
+import { type Principal } from "../_shared/auth.ts";
 import { register as registerOpenBrain } from "./tools/open-brain.ts";
 import { register as registerHousehold } from "./tools/household.ts";
 import { register as registerMeal } from "./tools/meal.ts";
 import { register as registerCrm } from "./tools/crm.ts";
 
-const servers = new Map<boolean, McpServer>();
-
-/** The server for this principal's scope, built on first use. */
-export function serverFor(principal: Principal): McpServer {
-  const write = canWrite(principal);
-  let server = servers.get(write);
-  if (!server) {
-    server = new McpServer({
-      name: "open-brain-unified",
-      version: "2.0.0",
-    });
-    registerOpenBrain(server, principal);
-    registerHousehold(server, principal);
-    registerMeal(server, principal);
-    registerCrm(server, principal);
-    servers.set(write, server);
-  }
+/** The server for one session: every tool module registered for this principal's scope. */
+export function buildServer(principal: Principal): McpServer {
+  const server = new McpServer({
+    name: "open-brain-unified",
+    version: "2.0.0",
+  });
+  registerOpenBrain(server, principal);
+  registerHousehold(server, principal);
+  registerMeal(server, principal);
+  registerCrm(server, principal);
   return server;
 }

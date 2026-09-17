@@ -25,7 +25,7 @@ Multiply that by **4 connectors** at session startup → **16 invocations** befo
 
 ### 1. Consolidate N edge functions into 1
 
-Tools are uniquely named across extensions. There's no technical reason they need separate functions — splitting them only multiplies the per-session handshake cost. One Hono app + one `McpServer` per key scope + N `register(server, principal)` calls covers all extensions and exposes them via a single connector URL.
+Tools are uniquely named across extensions. There's no technical reason they need separate functions — splitting them only multiplies the per-session handshake cost. One Hono app + one `McpServer` per session + N `register(server, principal)` calls covers all extensions and exposes them via a single connector URL.
 
 ```
 4 connectors × 4-step handshake = 16 invocations per session start
@@ -93,7 +93,7 @@ supabase/functions/_shared/
 supabase/functions/open-brain-mcp/
   deno.json           # pins hono, @hono/mcp, @modelcontextprotocol/sdk, zod (copy an extension's)
   index.ts            # Hono app, auth (../_shared/auth.ts: scoped keys), CORS, session map, transport wiring
-  server.ts           # module-scope McpServer per key scope; calls register(server, principal) per tool module
+  server.ts           # buildServer(principal): one McpServer per session; calls register(server, principal) per tool module
   lib/
     cache.ts          # TTL Map with tag-based invalidation
     supabase.ts       # createClient() singleton
@@ -105,14 +105,14 @@ supabase/functions/open-brain-mcp/
     ...
 ```
 
-Each extension's tools live in their own module, exporting a `register(server, principal)` function called once per key scope, on the first request that needs that scope; a tool that writes is registered only `if (canWrite(principal))`. **Move tool implementations verbatim** from the old per-extension files; only the wrapper changes.
+Each extension's tools live in their own module, exporting a `register(server, principal)` function called once per session, when `buildServer(principal)` mints its server; a tool that writes is registered only `if (canWrite(principal))`. **Move tool implementations verbatim** from the old per-extension files; only the wrapper changes.
 
 ### Step 3 — Add session reuse to `index.ts`
 
 The minimal pattern (full version in [`examples/after/index.ts`](./examples/after/index.ts)):
 
 ```ts
-type Session = { transport: StreamableHTTPTransport; lastSeen: number };
+type Session = { server: McpServer; transport: StreamableHTTPTransport; lastSeen: number };
 const sessions = new Map<string, Session>();
 const SESSION_TTL_MS = 30 * 60 * 1000;
 
@@ -137,8 +137,9 @@ app.all("*", async (c) => {
   if (!session) {
     id = crypto.randomUUID();
     const transport = new StreamableHTTPTransport();
+    const server = buildServer(principal); // one server AND one transport per session
     await server.connect(transport);
-    session = { transport, lastSeen: Date.now() };
+    session = { server, transport, lastSeen: Date.now() };
     sessions.set(id, session);
   } else {
     session.lastSeen = Date.now();
@@ -148,6 +149,8 @@ app.all("*", async (c) => {
   return session.transport.handleRequest(c);
 });
 ```
+
+The server is built per session, not shared between them: a `McpServer` holds one transport, and the SDK answers a request on whichever transport the server holds when the message arrives. One server per key scope, `connect()`ed once per session, hands the first session's transport to the second the moment it is minted — every session but the last one hangs (the same defect, per request, that the fork's single-tool integrations had; FORK.md change 76). Building the server costs tens of microseconds and happens once per session, so nothing the numbers below rest on changes.
 
 Don't forget `Access-Control-Expose-Headers: mcp-session-id` in your CORS config — without it, browser clients can't read the session ID off the response.
 

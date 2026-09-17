@@ -9,6 +9,10 @@
 // scoped, hashed entries in MCP_ACCESS_KEYS (the older single MCP_ACCESS_KEY still
 // works, compared by digest), and a read-scoped key is never given the tools
 // that write. FORK.md change 67; extensions/test-auth.ts exercises it.
+// ob1-fork (SMD-1497): the McpServer is built per request — one that outlived
+// the request, connect()ed to a fresh transport each time, answered the first
+// of two overlapping requests on the second's transport. FORK.md change 76;
+// extensions/test-auth.ts fires three requests at once.
 import "../../compat/deno-on-bun.ts"; // ob1-original-types: jsr:@supabase/functions-js/edge-runtime.d.ts
 
 import { StreamableHTTPTransport } from "@hono/mcp";
@@ -894,7 +898,7 @@ app.all("*", async (c) => {
   // transport, and _onrequest() captures whichever transport the server holds
   // when the message arrives, which is after handleRequest() has awaited the
   // body — so the first of two overlapping requests was answered on the
-  // second's transport and hung. A build is a few microseconds (FORK.md change
+  // second's transport and hung. A build is tens of microseconds (FORK.md change
   // 76 has the number); extensions/test-auth.ts fires three at once.
   const transport = new StreamableHTTPTransport();
   await buildServer(principal).connect(transport);

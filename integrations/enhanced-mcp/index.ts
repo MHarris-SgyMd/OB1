@@ -4,6 +4,10 @@
 // (021) and the chunk rows (022) follow the text and vector, and the actor
 // reaches the audit (008). FORK.md change 69; extensions/test-writes.ts drives it
 // against Postgres, and scripts/check-fork-consistency.mjs check 10 holds it.
+// ob1-fork (SMD-1497): the McpServer is built per request, inside buildServer()
+// — one built at module scope and connect()ed to a fresh transport each request
+// answered the first of two overlapping requests on the second's transport.
+// FORK.md change 76; extensions/test-auth.ts fires three requests at once.
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
