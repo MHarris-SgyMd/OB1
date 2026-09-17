@@ -10,6 +10,9 @@
 // FORK.md change 78; extensions/test-auth.ts fires three overlapping requests.
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 
+// Deno reads the SDK's types through the extensionless subpath: its exports map
+// names them `./dist/esm/*.d.ts`, unreachable from `.js` (FORK.md change 80).
+// @ts-types="@modelcontextprotocol/sdk/server/mcp"
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPTransport } from "@hono/mcp";
 import { Hono } from "hono";
@@ -1694,24 +1697,6 @@ app.all("*", async (c) => {
       401,
       corsHeaders,
     );
-  }
-
-  // Fix: Claude Desktop connectors don't send the Accept header that
-  // StreamableHTTPTransport requires. Build a patched request if missing.
-  if (!c.req.header("accept")?.includes("text/event-stream")) {
-    const headers = new Headers(c.req.raw.headers);
-    headers.set("Accept", "application/json, text/event-stream");
-    const patched = new Request(c.req.raw.url, {
-      method: c.req.raw.method,
-      headers,
-      body: c.req.raw.body,
-      // @ts-ignore -- duplex required for streaming body in Deno
-      duplex: "half",
-    });
-    Object.defineProperty(c.req, "raw", {
-      value: patched,
-      writable: true,
-    });
   }
 
   const transport = new StreamableHTTPTransport();

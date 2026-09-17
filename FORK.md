@@ -68,14 +68,14 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Seventy-nine numbered changes on top of the pin. Seven fix defects found in an
+Eighty numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
 data layer (Phase 2). Four (changes 31, 53, 55, and 59) ship no runtime change at
 all: each is a measurement that decided against building something.
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–79 are the numbered `###` sections** further down, which is
+sections. Changes **18–80 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -203,6 +203,7 @@ db/test-bench-reuse.ts           # change 76 (new file — the kept bench corpus
 db/bench-oracle.ts               # change 76 (new file — the cache's pure part: what of a marker's entry a run may trust; test-schema [37])
 <4 vendored MCP servers, 1 sample> # change 78 (a McpServer built per request — per session in the cost recipe's after sample — in place of one shared and connect()ed to a fresh transport each time)
 <17 pin sites, 3 lockfiles>      # change 79 (@hono/mcp 0.1.1 → 0.1.5: the transport lets go of each POST it has answered; the after sample's sweep closes the transports it drops)
+<19 pin sites, 3 lockfiles, 15 servers, 20 SDK importers> # change 80 (SDK 1.30.0, @hono/mcp 0.3.2, hono 4.13.8, zod 4.6.5 together; the Accept patches removed; an @ts-types pragma on every SDK import so Deno types it)
 docs/01-getting-started.md       # fix 6
 recipes/content-fingerprint-dedup/README.md  # fix 6
 recipes/email-history-import/README.md       # fix 6
@@ -11282,7 +11283,9 @@ transport try so a non-JSON body reports the status the server sent rather than
 `Accept: text/event-stream` alone and gets 200 — the Accept patch now supplies
 whichever of the two tokens the transport requires is missing, where it used to
 test only the SSE token and let that POST through to a 406 after paying the
-resolve and the build. Drilled by restoring the pre-change shape — the handler on
+resolve and the build (change 80 removed the patch: at `@hono/mcp` 0.3.x the
+transport takes either token, or none, and [7] sends all three forms
+unpatched). Drilled by restoring the pre-change shape — the handler on
 `app.all` and the `notFound` removed — 34 of 151 assertions fail: the
 fetch rows holding a valid GET fail as `TimeoutError`; the doubled-slash row as
 a 200 (the stream's headers flush at once; it is the body that never ends, and
@@ -12324,7 +12327,8 @@ through the servers' Accept patch as a Claude Desktop connector's would — whic
 found two servers with no such patch, `extensions/meal-planning/shared-server.ts`
 and the cost recipe's "before" sample, answering 406 to any POST whose Accept
 lacks `text/event-stream` where the other twelve patch it in (pre-existing;
-SMD-1616; the probe keeps the header for those two until it lands); the
+SMD-1616; the probe kept the header for those two until change 80 moved the
+transport to a version that wants no patch and removed all fifteen); the
 other two requests start 5 ms later, complete. The stagger is load-bearing, and the
 fourth review pass is why: three requests fired in one tick caught main's
 shape (the `connect()` overwrite is independent of timing) but never open
@@ -12451,8 +12455,8 @@ have not opened since change 75. The peer range, `@modelcontextprotocol/sdk
 ^1.12.0` and `hono >=4.0.0`, admits the pin's 1.24.3 and 4.9.2. 0.2.0 and
 later do not: 0.2.5 wants the SDK at ^1.25.1, 0.3.2 at ^1.29.0 and is built
 against hono 4.11.5 — a move of the SDK pin with it, not this ticket's (0.3.0
-also relaxes the Accept check to either token, SMD-1616's mechanism; that
-ticket should weigh it). So the pin moves to 0.1.5 at every site that names it —
+also relaxes the Accept check to either token, SMD-1616's mechanism; change
+80 made that move). So the pin moves to 0.1.5 at every site that names it —
 `extensions/package.json`, `server/package.json`,
 `server-portable/package.json`, the thirteen `deno.json` (the core server,
 six extensions, four integrations, two recipes) and the template
@@ -12505,7 +12509,8 @@ and the transport's `0/100 Request objects collected`; the sample without its
 `close()` fails its one rule.
 
 **Not done here.** SMD-1616 (the Accept patches, and whether 0.3.x's
-either-token check is worth the SDK and hono moves it needs). The after
+either-token check is worth the SDK and hono moves it needs — change 80
+made the moves and removed the patches). The after
 sample is still untested by anything that runs it. No upstream issue was
 filed against `@hono/mcp`: the fix shipped before this fork found the defect.
 
@@ -12516,6 +12521,117 @@ not deploy (the drift the fork pinned that file down for, and the pin guard
 holds). The fork's seventeen sites read 0.1.5. A rebase over an upstream bump
 of the same lines conflicts on one line per file — take the higher.
 **Unfiled** by us.
+
+### 80. The MCP stack moves together — SDK 1.24.3 → 1.30.0, `@hono/mcp` 0.1.5 → 0.3.2, hono 4.9.2 → 4.13.8, zod 4.1.13 → 4.6.5: a second `connect()` on one server now throws, the transport takes whatever Accept a client sends and the fifteen Accept patches are gone, and every SDK import carries the `@ts-types` pragma Deno needs to type it (SMD-1643, SMD-1616)
+
+**Why now.** Change 79 found that the defect it fixed had been fixed in the
+library a year earlier and the fork's pins had not moved. A survey of every
+pin against npm (2026-09-17) put the MCP stack eight to thirteen months
+behind, and the four constrain each other — `@hono/mcp` 0.3.x wants the SDK at
+^1.29, the SDK at 1.30 depends on hono ^4.11.4, both take zod ^3.25 or ^4 — so
+they move as one. The SDK's v2 package family (2026-07-28, a new wire
+revision) is not this: two months old, clients unsettled; the 1.x line it is.
+
+**What the move buys.** Three things the fork had wanted. SDK **1.26.0**
+(2026-02-04) addresses GHSA-345p-7cg4-v4c7, "sharing server/transport
+instances can leak cross-client response data" — change 78's defect, with a
+name: `Protocol.connect()` now throws `Already connected to a transport. Call
+close() before connecting to a new transport, or use a separate Protocol
+instance per connection.` where 1.24.3 overwrote the transport silently. The
+shape change 78 removed by hand is refused at the runtime, on the first
+overlap, loudly; `test-auth.ts` asserts the throw. `@hono/mcp` **0.3.0**
+relaxes the POST Accept check: a missing header reads as `*/*`, and either
+token — or `*/*` — is enough, where 0.1.x demanded both and answered 406 to
+everything else (measured at 0.1.5: no Accept, `application/json` alone,
+`text/event-stream` alone and `*/*` all 406; at 0.3.2 all 200). Every Accept
+patch in the tree existed for that check — the re-wrap of the request into a
+new `Request` with both tokens that upstream added for Claude Desktop
+connectors (their #33), which the core server carried, the portable server
+carried with change 75's either-missing predicate, twelve vendored servers
+carried, and the cost recipe's after sample carried. **Fifteen files, all
+removed**, twelve to twenty-one lines each. SMD-1616, the two servers that
+never had one, closes with them: there is nothing left to be missing.
+`test-auth.ts`'s overlapping probe now sends its first request with no Accept
+header at all fourteen servers (the `acceptPatch` flag and its two rows are
+gone), and asserts no server carries the patch; `test-server.ts` [7] sends
+SSE-only, JSON-only and no Accept and gets 200 for each. SDK 1.30.0 also
+fixed the SSE keep-alive timer lifecycle and widened `@hono/node-server` past
+GHSA-frvp-7c67-39w9; 1.28.0 rejects a plain JSON Schema object passed as
+`inputSchema` — nothing here passes one, or the suites would have said.
+
+**The Deno trap.** With the pins moved, every suite passed under Bun and
+`tsc --noEmit` passed under 5.9.3 and 6.0.3 — and CI's seven `deno check`
+steps failed on the six files that build a server, every error the same:
+`Binding element 'query' implicitly has an 'any' type` at each tool handler.
+Bisected on a twenty-line probe with three tool shapes: SDK **1.28.0** types
+clean under Deno 2.9.6, **1.29.0** does not, at either zod. 1.29.0's "Add
+typings exports" (#1623) put `"types": "./dist/esm/*.d.ts"` in the `./*`
+export. For `@modelcontextprotocol/sdk/server/mcp.js` that substitutes to
+`dist/esm/server/mcp.js.d.ts`, a file that does not exist; TypeScript's
+resolver then tries `.js` → `.d.ts` and finds `mcp.d.ts`, Deno's does not
+and types the module as `any` — so every handler's arguments are `any`, and
+`noImplicitAny` reports each. Tried and rejected: a `// @deno-types` pragma
+at the `dist/esm/…d.ts` path (the exports map refuses `dist/` subpaths, in
+`check` and `run` alike); an import-map entry aiming the `.js` specifier at
+the dist file (refused the same way); `--node-modules-dir=auto` (same
+resolver); the extensionless specifier `sdk/server/mcp` (types resolve — the
+pattern gives `mcp.d.ts` — and **the runtime does not**: `Could not resolve
+'npm:@modelcontextprotocol/sdk@1.30.0/server/mcp'`; the worst combination,
+green check, dead deploy). What works: a **`// @ts-types="@modelcontextprotocol/sdk/server/mcp"`
+pragma** on the line above the `.js` import — Deno reads the types through
+the extensionless subpath, the runtime import is unchanged, and under Bun and
+tsc the line is a comment. Twenty-two pragmas in twenty files: the seventeen
+Deno-side files that import an SDK subpath (`server/mcp.js` everywhere,
+`types.js` in the two single-tool integrations), the extension template
+`AGENT_SPEC.md`, and the two READMEs that show the import line; the first in
+each file carries a two-line note. `test-auth.ts` holds it: every SDK subpath
+import in every MCP server it reads, enhanced-mcp, and the after sample's two
+files is preceded by its pragma. Upstream, the SDK's pattern would want to be
+`"types": "./dist/esm/*"`, which both resolvers handle; Deno could substitute
+as tsc does. Neither filed.
+
+**Beside the pins.** The `./*` typings change is the only surprise the
+release notes did not name. What the notes and the measurements agree did
+not change: a `tools/list` and a `tools/call` answer are byte-identical
+across the move — status, headers, body; `handlePostRequest` still awaits
+`ctx.req.json()` after the server is connected, so change 78's staggered probe
+still means what it did; a transport reused across 200 POSTs still lets go of
+every Request (change 79's assertion holds at 200/200). The build cost on
+change 78's harness moved the right way: one tool 39 → 36 µs, thirteen tools
+218 → 129 µs (Bun 1.4.0, same machine, same session). Two packages enter
+the lockfiles as `@hono/mcp`'s peers: `hono-rate-limiter` 0.5.4 and
+`pkce-challenge`, for its auth middleware, which nothing here imports. The
+pin guard found two files the seventeen-site count missed — the two REST
+integrations' `deno.json` pin hono and zod without `@hono/mcp` — so nineteen
+sites.
+
+**Verified.** `bun test-auth.ts` **806/806** (775 at change 79: thirteen
+no-patch guards, thirteen pragma guards, the enhanced-mcp pair, the SDK's
+throw, three text rules for the after sample). `server/`: `test-stateless`
+47/47 and the two other suites PASS. `server-portable/`: `test-server.ts`
+153/153 (151: the Accept row became three), `test-auth.ts` 67/67,
+`tsc --noEmit` clean, `wrangler deploy --dry-run` builds. `extensions/`:
+`test-tools.ts` 122/122 and `test-writes.ts` 186/186 against Postgres. All
+seven `deno check` steps pass with the pragmas — and the six files that build
+a server fail without them (pragmas renamed, checks run, pragmas restored):
+`server` 11, `family-calendar` 6, `job-hunt` 10, `ob-graph` 27,
+`kubernetes-deployment` 11, `enhanced-mcp` 13 errors, every one an `any`
+handler argument. `check-fork-consistency.mjs` PASS.
+
+**Not done here.** The live connector check (one Claude Desktop session, two
+tool calls in flight, Accept as the client sends it) that SMD-1497, SMD-1259
+and SMD-1246 also wait on; a client that sends *neither* token nor `*/*`
+would now get 406 where the patch used to rescue it — no known client does,
+and the check would show one. The supabase-js pin (SMD-1644) and the test
+tooling pins (SMD-1645) are their own tickets. No upstream issue against the
+SDK's `types` pattern or Deno's resolver.
+
+Upstream status: at the pin, upstream deploys SDK 1.24.3, `@hono/mcp` 0.1.1,
+hono 4.9.2 and zod 4.1.13 with the Accept patch in every server;
+`server/package.json` ranges `^1.28.0` / `^0.1.5` / `^4.12.9`. The fork's
+nineteen sites and fifteen handlers diverge accordingly; a rebase conflicts on
+each pin line (take the higher) and on each removed patch block (take the
+removal). **Unfiled** by us.
 
 ## Detached from the fork network
 

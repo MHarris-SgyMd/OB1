@@ -46,7 +46,11 @@
 
 import "../../compat/deno-on-bun.ts"; // ob1-original-types: jsr:@supabase/functions-js/edge-runtime.d.ts
 
+// Deno reads the SDK's types through the extensionless subpath: its exports map
+// names them `./dist/esm/*.d.ts`, unreachable from `.js` (FORK.md change 80).
+// @ts-types="@modelcontextprotocol/sdk/server/mcp"
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+// @ts-types="@modelcontextprotocol/sdk/types"
 import { ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { StreamableHTTPTransport } from "@hono/mcp";
 import { Hono } from "hono";
@@ -182,19 +186,6 @@ app.all("*", async (c) => {
   });
   if (!principal) {
     return c.json({ error: "Invalid or missing access key" }, 401, corsHeaders);
-  }
-
-  if (!c.req.header("accept")?.includes("text/event-stream")) {
-    const headers = new Headers(c.req.raw.headers);
-    headers.set("Accept", "application/json, text/event-stream");
-    const patched = new Request(c.req.raw.url, {
-      method: c.req.raw.method,
-      headers,
-      body: c.req.raw.body,
-      // @ts-ignore -- duplex required for streaming body in Deno
-      duplex: "half",
-    });
-    Object.defineProperty(c.req, "raw", { value: patched, writable: true });
   }
 
   // One server per request, connected to this request's transport and dropped

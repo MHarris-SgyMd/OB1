@@ -180,11 +180,15 @@ console.log("\n[7] initialize");
   assert(result?.protocolVersion != null, "protocolVersion returned");
   assert(result?.capabilities != null, "capabilities returned");
 
-  // The transport wants both Accept tokens on a POST; the patch supplies
-  // whichever is missing. Before change 75 it tested only the SSE token, so
-  // this request reached the transport unpatched and got 406.
-  const sseOnly = await fetch(BASE, { method: "POST", headers: { ...AUTH, Accept: "text/event-stream" }, body: INIT });
-  assert(sseOnly.status === 200 && (await mcpBody(sseOnly))?.result != null, `Accept: text/event-stream alone is patched to both tokens → 200 (${sseOnly.status})`);
+  // @hono/mcp 0.1.x wanted both Accept tokens on a POST and the server carried
+  // a patch that supplied whichever was missing (change 75 made it test both).
+  // 0.3.x takes either token, or none, as enough and the patch is gone (change
+  // 80): a Claude Desktop connector's `Accept: application/json`, the SDK
+  // client's SSE-only form and no Accept at all reach the transport as sent.
+  for (const [label, headers] of [["text/event-stream alone", { Accept: "text/event-stream" }], ["application/json alone", { Accept: "application/json" }], ["no Accept header", {}]] as [string, Record<string, string>][]) {
+    const r = await fetch(BASE, { method: "POST", headers: { ...AUTH, ...headers }, body: INIT });
+    assert(r.status === 200 && (await mcpBody(r))?.result != null, `Accept: ${label} reaches the transport unpatched → 200 (${r.status})`);
+  }
 }
 
 console.log("\n[8] Per-request isolation — a fresh McpServer each time");

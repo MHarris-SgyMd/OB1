@@ -1476,28 +1476,6 @@ app.on(MCP_METHODS, "*", async (c) => {
   }
   principal.agentId = identity.agentId;
 
-  // Fix: Claude Desktop connectors don't send the Accept header that
-  // StreamableHTTPTransport requires. Build a patched request if missing.
-  // See: https://github.com/NateBJones-Projects/OB1/issues/33
-  // Only MCP_METHODS reach this handler, so the patch never tells a GET to
-  // expect an event stream — that was SMD-1259's mechanism. The transport
-  // requires BOTH tokens on a POST (406 otherwise), so the patch fires when
-  // either is missing; it used to test only the SSE token, and a POST carrying
-  // `Accept: text/event-stream` alone paid the resolve and the build for a 406.
-  const accept = c.req.header("accept") ?? "";
-  if (!accept.includes("application/json") || !accept.includes("text/event-stream")) {
-    const headers = new Headers(c.req.raw.headers);
-    headers.set("Accept", "application/json, text/event-stream");
-    const patched = new Request(c.req.raw.url, {
-      method: c.req.raw.method,
-      headers,
-      body: c.req.raw.body,
-      // @ts-ignore -- duplex required for streaming body in Deno
-      duplex: "half",
-    });
-    Object.defineProperty(c.req, "raw", { value: patched, writable: true });
-  }
-
   const server = buildServer(principal);
   const transport = new StreamableHTTPTransport();
   await server.connect(transport);

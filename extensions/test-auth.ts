@@ -18,7 +18,9 @@
  * secret has no scope to give and is compared digest to digest. Each MCP
  * server answers three overlapping requests each with its own id (SMD-1497,
  * change 78: a server that outlives the request and is connect()ed to a fresh
- * transport each time answers on the wrong one). Then the drift
+ * transport each time answers on the wrong one), the first with no Accept
+ * header (change 80: the transport takes either token or none, and the
+ * servers' Accept patches are gone). Then the drift
  * guards: every tool a file registers and every route an API mounts is
  * classified here as a read or a write, exactly the writes are gated, each
  * write does write and each read does not, the server is built per request,
@@ -137,13 +139,6 @@ type Server = {
   health?: string;
   /** What no configured key at all answers: 401, or the workers' 503 misconfigured. */
   unconfigured?: number;
-  /**
-   * MCP: `false` for a server with no Accept patch — it answers 406 to a POST
-   * whose Accept lacks text/event-stream, so the overlapping probe's first
-   * request keeps its Accept header there (SMD-1616 adds the patch to the two
-   * that lack it; then this field goes).
-   */
-  acceptPatch?: false;
 };
 const PG = "postgres://ob1:stub@stub.invalid:5432/ob1";
 /** For a server whose handler queries before it can answer: refused at once, no name to resolve. */
@@ -181,9 +176,9 @@ const SERVERS: Server[] = [
   ext("professional-crm/index.ts", ["crm_search_contacts", "crm_get_contact_history", "crm_get_follow_ups", "crm_prep_context", "crm_stale_contacts"],
     ["crm_add_contact", "crm_log_interaction", "crm_create_opportunity", "crm_update_contact", "crm_link_thought"]),
   ext("meal-planning/shared-server.ts", ["view_meal_plan", "view_recipes", "view_shopping_list"], ["mark_item_purchased"],
-    { keys: "MCP_HOUSEHOLD_ACCESS_KEYS", legacy: "MCP_HOUSEHOLD_ACCESS_KEY", acceptPatch: false }),
+    { keys: "MCP_HOUSEHOLD_ACCESS_KEYS", legacy: "MCP_HOUSEHOLD_ACCESS_KEY" }),
   // The recipes and integrations (change 67).
-  vendored("recipes/edge-function-cost-optimization/examples/before/per-request-server.ts", "mcp", ["list_vendors"], [], { acceptPatch: false }),
+  vendored("recipes/edge-function-cost-optimization/examples/before/per-request-server.ts", "mcp", ["list_vendors"], []),
   vendored("recipes/ob-graph/index.ts", "mcp", ["search_nodes", "get_neighbors", "traverse_graph", "find_path", "list_edge_types"],
     ["create_node", "create_edge", "update_node", "delete_node", "delete_edge"], { url: HTTPS, health: "/health" }),
   vendored("recipes/work-operating-model-activation/index.ts", "mcp", ["query_operating_model"],
@@ -366,11 +361,12 @@ const LIST = { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} };
 // request reaches its body await within microseconds and the other two
 // connect at the 5 ms timer, so the body's 20 ms leaves 15 ms; a longer
 // event-loop stall degrades the probe to one request then a burst of two —
-// detection weakens, the fix cannot fail. The first request also drops the
-// Accept header, so its streaming body goes through the servers' Accept
-// patch as a Claude Desktop connector's does — except at the two servers
-// that have no patch and answer 406 without it (`acceptPatch: false`;
-// SMD-1616), where it keeps the header.
+// detection weakens, the fix cannot fail. The first request also carries no
+// Accept header at all — @hono/mcp 0.3.x takes a missing Accept as `*/*`
+// and either token as enough, where 0.1.x demanded both, so the servers'
+// Accept patches for Claude Desktop connectors are gone (change 80; SMD-1616
+// was the two servers that never had one) and every server answers the bare
+// request here.
 const STAGGER_MS = 5;
 const LATE_BODY_MS = 20;
 /** A JSON-RPC body that arrives `ms` after the request does. */
@@ -429,7 +425,7 @@ for (const s of SERVERS.filter((s) => s.kind === "mcp")) {
   {
     const ids = [11, 12, 13];
     const answers = await overlapping(ids, (id, late) =>
-      late ? request(s, WRITE_KEY, "x-access-key", {}, { method: "POST", path: "/mcp", rawBody: late, accept: s.acceptPatch === false }) : call(s, WRITE_KEY, { ...LIST, id }));
+      late ? request(s, WRITE_KEY, "x-access-key", {}, { method: "POST", path: "/mcp", rawBody: late, accept: false }) : call(s, WRITE_KEY, { ...LIST, id }));
     for (const [i, r] of answers.entries()) {
       assert(r.status === 200 && r.json?.id === ids[i] && toolsOf(r).join() === all.join(),
         `${ids.length} concurrent tools/list under one key: request ${ids[i]} is answered with its own id and every tool (${r.status === 0 ? r.text : `${r.status}, id ${r.json?.id ?? "none"}, ${toolsOf(r).length} tools`})`);
@@ -774,6 +770,16 @@ const OLD_SPELLINGS = /c\.req\.query\("key"\)|c\.req\.header\("x-access-key"\)|[
  */
 const builtPerRequest = (text: string) =>
   !/^(?:export )?(?:const|let|var) [^\n]*(?:\bMcpServer\b|\bStreamableHTTPTransport\b|= buildServer\(|= new Map[<(])/m.test(text);
+// Every SDK subpath import is preceded by its `@ts-types` pragma. Since SDK 1.29
+// the exports map names the types `./dist/esm/*.d.ts`; for `server/mcp.js` that
+// is a file that does not exist, tsc substitutes `.d.ts` for `.js` and Deno does
+// not, so under `deno check` the module — and every tool handler's arguments —
+// is `any`. The pragma routes the types through the extensionless subpath,
+// which the pattern does resolve; the runtime import keeps `.js` (change 80).
+const sdkTyped = (text: string) => {
+  const imports = [...text.matchAll(/^(.*)\n(?:\s*)import (?:type )?[^\n]* from "@modelcontextprotocol\/sdk\/([\w/]+)\.js";/gm)];
+  return imports.length > 0 && imports.every((m) => m[1].trim() === `// @ts-types="@modelcontextprotocol/sdk/${m[2]}"`);
+};
 
 console.log("\n[the files say what this test assumes]");
 for (const s of SERVERS) {
@@ -799,6 +805,9 @@ for (const s of SERVERS) {
     }
     assert(text.includes("authenticateRequest(c.req.raw,"), "…the key is read and resolved from the request, every presented form tried");
     assert(builtPerRequest(text), "…the McpServer is built inside a function, per request: no module-level declaration names McpServer, holds what buildServer() returns, or is a `new Map` (a server that outlives the request is connect()ed to a fresh transport each time and answers on the wrong one — SMD-1497, change 78)");
+    assert(!text.includes('set("Accept", "application/json, text/event-stream")'),
+      "…and no Accept patch: the transport at @hono/mcp 0.3.x takes a missing Accept as */* and either token as enough, so the re-wrap of every request for Claude Desktop connectors is gone (change 80)");
+    assert(sdkTyped(text), "…and each SDK import carries its @ts-types pragma, so `deno check` types the tool handlers rather than reading the module as any (change 80)");
   } else if (s.kind === "rest") {
     const mounted = [...text.matchAll(/^app\.(get|post|put|patch|delete)\("([^"]+)",\s*(requireWrite,\s*)?/gm)]
       .map((m) => ({ route: `${m[1].toUpperCase()} ${m[2]}`, gated: Boolean(m[3]), at: m.index! }));
@@ -841,6 +850,8 @@ for (const s of SERVERS) {
   const text = readFileSync(join(ROOT, file), "utf8");
   assert(builtPerRequest(text) && text.includes("await buildServer().connect(transport)"),
     `${file}: the McpServer is built per request by buildServer() and connected to that request's transport (SMD-1497, change 78)`);
+  assert(sdkTyped(text) && !text.includes('set("Accept", "application/json, text/event-stream")'),
+    `${file}: each SDK import carries its @ts-types pragma, and the Accept patch is gone (change 80)`);
 }
 
 // The files this test cannot import — a sample whose tool modules are not in
@@ -853,10 +864,12 @@ const TEXT_ONLY: { file: string; must: RegExp[]; mustNot: RegExp[] }[] = [
   // The sweep closes the transport of each session it drops (SMD-1607), which tells the server too.
   { file: "recipes/edge-function-cost-optimization/examples/after/index.ts",
     must: [/from "\.\.\/_shared\/auth\.ts"/, /authenticateRequest\(c\.req\.raw,/, /const server = buildServer\(principal\);[^\n]*\n\s*await server\.connect\(transport\);\n\s*session = \{ server, transport,/, /session\.scope !== principal\.scope/,
-      /sessions\.delete\(id\);\n(?:\s*\/\/[^\n]*\n)*\s*void s\.transport\.close\(\);/],
-    mustNot: [/[!=]== ?MCP_ACCESS_KEY\b/, /c\.req\.header\("x-access-key"\)/, /serverFor\(/, /Map<[^>\n]*McpServer/] },
+      /sessions\.delete\(id\);\n(?:\s*\/\/[^\n]*\n)*\s*void s\.transport\.close\(\);/,
+      /\/\/ @ts-types="@modelcontextprotocol\/sdk\/server\/mcp"\nimport type \{ McpServer \} from "@modelcontextprotocol\/sdk\/server\/mcp\.js";/],
+    mustNot: [/[!=]== ?MCP_ACCESS_KEY\b/, /c\.req\.header\("x-access-key"\)/, /serverFor\(/, /Map<[^>\n]*McpServer/, /set\("Accept", "application\/json, text\/event-stream"\)/] },
   { file: "recipes/edge-function-cost-optimization/examples/after/server.ts",
-    must: [/from "\.\.\/_shared\/auth\.ts"/, /export function buildServer\(principal: Principal\): McpServer/, /register\w+\(server, principal\)/],
+    must: [/from "\.\.\/_shared\/auth\.ts"/, /export function buildServer\(principal: Principal\): McpServer/, /register\w+\(server, principal\)/,
+      /\/\/ @ts-types="@modelcontextprotocol\/sdk\/server\/mcp"\nimport \{ McpServer \} from "@modelcontextprotocol\/sdk\/server\/mcp\.js";/],
     // No module-level declaration naming McpServer: a cache under any name, in any container, is a server shared across sessions.
     mustNot: [/export const server\b/, /new Map</, /serverFor/, /^(?:export )?(?:const|let|var) [^\n]*\bMcpServer\b/m] },
   { file: "recipes/vercel-neon-telegram/src/app/api/telegram/route.ts",
@@ -911,11 +924,30 @@ for (const t of TEXT_ONLY) {
 // @hono/mcp 0.1.1 did not: it recorded every request's { ctx, stream } and
 // deleted the record only on abort or close(), so a session grew by one
 // Request and one Hono Context per tool call until the TTL sweep dropped it
-// (SMD-1607). 0.1.2 deletes the record when the response is sent; the pin is
-// 0.1.5 (change 79). Collection is read through WeakRefs after a forced GC —
+// (SMD-1607). 0.1.2 deletes the record when the response is sent; the pin
+// moved to 0.1.5 (change 79), then 0.3.2 with the SDK, hono and zod (change
+// 80). Collection is read through WeakRefs after a forced GC —
 // a FinalizationRegistry's callbacks arrive on the runtime's schedule. The
 // most recent request can stay reachable from the frame that answered it, so
 // one of N may remain; at 0.1.1 none is released.
+// ── The pinned SDK, one server and two transports ───────────────────────────
+// Change 78 fixed five servers that connect()ed one McpServer to a fresh
+// transport per request, which SDK 1.24.3 accepted silently and answered on
+// the wrong one. 1.26.0 (GHSA-345p-7cg4-v4c7, "sharing server/transport
+// instances can leak cross-client response data") made the second connect()
+// throw; the pin is 1.30.0 (change 80). So the shape the drift guard above
+// refuses is now also refused at the runtime, loudly, on the first overlap.
+console.log("\n[the pinned SDK, a second connect() on one server]");
+{
+  const { StreamableHTTPTransport } = await import("@hono/mcp");
+  const { McpServer } = await import("@modelcontextprotocol/sdk/server/mcp.js");
+  const server = new McpServer({ name: "shared", version: "0" });
+  await server.connect(new StreamableHTTPTransport());
+  const second = await server.connect(new StreamableHTTPTransport()).then(() => null, (e: unknown) => (e instanceof Error ? e.message : String(e)));
+  assert(second !== null && /Already connected to a transport/.test(second),
+    `a second connect() on one server throws rather than overwriting the transport (${second === null ? "accepted silently" : JSON.stringify(second.slice(0, 60))})`);
+}
+
 console.log("\n[the pinned @hono/mcp, one transport across a session]");
 {
   const { Hono } = await import("hono");

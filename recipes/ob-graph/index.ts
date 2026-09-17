@@ -30,6 +30,9 @@
 // The _shared import below is this file's first from outside its own directory: deploy
 // it with _shared/auth.ts beside it (supabase/functions/_shared/), as the README says.
 import { Hono, type Context } from "hono";
+// Deno reads the SDK's types through the extensionless subpath: its exports map
+// names them `./dist/esm/*.d.ts`, unreachable from `.js` (FORK.md change 80).
+// @ts-types="@modelcontextprotocol/sdk/server/mcp"
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPTransport } from "@hono/mcp";
 import { z } from "zod";
@@ -52,20 +55,6 @@ app.get("/:fn/health", health);
 // Route ALL methods (GET included) to the MCP transport so the GET opens a
 // real SSE stream. Do not split GET onto a non-streaming handler.
 app.all("*", async (c) => {
-  // Fix: Claude Desktop connectors don't send the Accept header that
-  // StreamableHTTPTransport requires. Build a patched request if missing.
-  if (!c.req.header("accept")?.includes("text/event-stream")) {
-    const headers = new Headers(c.req.raw.headers);
-    headers.set("Accept", "application/json, text/event-stream");
-    const patched = new Request(c.req.raw.url, {
-      method: c.req.raw.method,
-      headers,
-      body: c.req.raw.body,
-      // @ts-ignore -- duplex required for streaming body in Deno
-      duplex: "half",
-    });
-    Object.defineProperty(c.req, "raw", { value: patched, writable: true });
-  }
 
   // Named, scoped, hashed keys — the core server's auth path (_shared/auth.ts
   // is server-portable/auth.ts, held identical by extensions/test-auth.ts).
