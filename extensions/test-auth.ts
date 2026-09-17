@@ -16,7 +16,7 @@
  * for an HTTP API the routes that write answer 403 before they parse a body;
  * for a worker anything but a dry run answers 403. The webhook receiver's
  * secret has no scope to give and is compared digest to digest. Each MCP
- * server answers three requests at once each with its own id (SMD-1497,
+ * server answers three overlapping requests each with its own id (SMD-1497,
  * change 77: a server that outlives the request and is connect()ed to a fresh
  * transport each time answers on the wrong one). Then the drift
  * guards: every tool a file registers and every route an API mounts is
@@ -136,6 +136,13 @@ type Server = {
   health?: string;
   /** What no configured key at all answers: 401, or the workers' 503 misconfigured. */
   unconfigured?: number;
+  /**
+   * MCP: `false` for a server with no Accept patch — it answers 406 to a POST
+   * whose Accept lacks text/event-stream, so the overlapping probe's first
+   * request keeps its Accept header there (SMD-1616 adds the patch to the two
+   * that lack it; then this field goes).
+   */
+  acceptPatch?: false;
 };
 const PG = "postgres://ob1:stub@stub.invalid:5432/ob1";
 /** For a server whose handler queries before it can answer: refused at once, no name to resolve. */
@@ -173,9 +180,9 @@ const SERVERS: Server[] = [
   ext("professional-crm/index.ts", ["crm_search_contacts", "crm_get_contact_history", "crm_get_follow_ups", "crm_prep_context", "crm_stale_contacts"],
     ["crm_add_contact", "crm_log_interaction", "crm_create_opportunity", "crm_update_contact", "crm_link_thought"]),
   ext("meal-planning/shared-server.ts", ["view_meal_plan", "view_recipes", "view_shopping_list"], ["mark_item_purchased"],
-    { keys: "MCP_HOUSEHOLD_ACCESS_KEYS", legacy: "MCP_HOUSEHOLD_ACCESS_KEY" }),
+    { keys: "MCP_HOUSEHOLD_ACCESS_KEYS", legacy: "MCP_HOUSEHOLD_ACCESS_KEY", acceptPatch: false }),
   // The recipes and integrations (change 67).
-  vendored("recipes/edge-function-cost-optimization/examples/before/per-request-server.ts", "mcp", ["list_vendors"], []),
+  vendored("recipes/edge-function-cost-optimization/examples/before/per-request-server.ts", "mcp", ["list_vendors"], [], { acceptPatch: false }),
   vendored("recipes/ob-graph/index.ts", "mcp", ["search_nodes", "get_neighbors", "traverse_graph", "find_path", "list_edge_types"],
     ["create_node", "create_edge", "update_node", "delete_node", "delete_edge"], { url: HTTPS, health: "/health" }),
   vendored("recipes/work-operating-model-activation/index.ts", "mcp", ["query_operating_model"],
@@ -345,18 +352,33 @@ const LIST = { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} };
 // STAGGER_MS later with their bodies complete. So the first is inside the
 // server between connect() and the arrival of its message while the second
 // and third connect — the window a server that outlives the request gets
-// wrong: main's shape overwrote its transport on the later connect() and
-// answered the first request on it, and a plausible repair — close() the
-// kept server before connecting it again — passes a same-tick probe (all
-// three close a server that had already finished) yet hangs the earlier of
-// two staggered requests in production, because close() makes the SDK forget
-// its transport and the first request's answer is sent to nothing. Both fail
-// this probe; the per-request build passes it. A server kept per scope behind
-// a serialising lock passes too, and answers correctly — the lock covers the
-// whole window — at the price of every request under a scope waiting for the
-// previous one's body, and of a shared abort-controller map keyed by JSON-RPC
-// id across unrelated clients; the probe cannot see either, and the record
-// (change 77) says so.
+// wrong. Main's shape overwrote its transport on the later connect() and
+// answered the first request on it; a burst catches that, since the
+// overwrite does not depend on timing. What a burst cannot open is the window
+// itself: every handler in it reaches its first await before any body is
+// parsed. The regression that needs the window is a "cleanup" — build a
+// server per request but `if (previous) await previous.close()` first, the
+// previous request's server kept in a module-level `let`. In a burst the
+// closed server is always an earlier, finished request's, so all three
+// answer; staggered, the second request closes the first's server while its
+// body is still arriving, close() makes the SDK forget that server's
+// transport, and the first request's answer is sent to nothing — it fails
+// here as the lone timeout. (A server object kept and re-connect()ed after a
+// close() is main's shape again, and a burst catches it.) The per-request
+// build passes. A server kept per scope behind a serialising lock passes
+// too, and answers correctly — the lock covers the whole window — at the
+// price of every request under a scope waiting for the previous one's body,
+// and of a shared abort-controller map keyed by JSON-RPC id across unrelated
+// clients; the probe cannot see either, and the record (change 77) says so.
+// The margin: the first request reaches its body await within microseconds
+// and the other two connect at the 5 ms timer, so the body's 20 ms leaves
+// 15 ms; an event-loop stall longer than that degrades the probe to "one
+// request, then a burst of two" — detection weakens, the fix cannot fail.
+// The first request also drops the Accept header, so its streaming body goes
+// through the servers' Accept patch (a re-wrapped Request with duplex half),
+// which is the path a Claude Desktop connector's body takes — except at the
+// two servers that have no patch and answer 406 without the header
+// (`acceptPatch: false`; SMD-1616), where it keeps the header.
 const STAGGER_MS = 5;
 const LATE_BODY_MS = 20;
 /** A JSON-RPC body that arrives `ms` after the request does. */
@@ -415,7 +437,7 @@ for (const s of SERVERS.filter((s) => s.kind === "mcp")) {
   {
     const ids = [11, 12, 13];
     const answers = await overlapping(ids, (id, late) =>
-      late ? request(s, WRITE_KEY, "x-access-key", {}, { method: "POST", path: "/mcp", rawBody: late }) : call(s, WRITE_KEY, { ...LIST, id }));
+      late ? request(s, WRITE_KEY, "x-access-key", {}, { method: "POST", path: "/mcp", rawBody: late, accept: s.acceptPatch === false }) : call(s, WRITE_KEY, { ...LIST, id }));
     for (const [i, r] of answers.entries()) {
       assert(r.status === 200 && r.json?.id === ids[i] && toolsOf(r).join() === all.join(),
         `${ids.length} concurrent tools/list under one key: request ${ids[i]} is answered with its own id and every tool (${r.status === 0 ? r.text : `${r.status}, id ${r.json?.id ?? "none"}, ${toolsOf(r).length} tools`})`);
@@ -750,13 +772,15 @@ const OLD_SPELLINGS = /c\.req\.query\("key"\)|c\.req\.header\("x-access-key"\)|[
  * declaration (exported or not, typed or not) that names McpServer — a server,
  * a lazy `let server: McpServer | undefined`, a `Map<…, McpServer>` cache — and
  * none that holds what buildServer() returns or a Map (a cache under any name;
- * no MCP server here keeps one at module scope). A spelling check: an untyped
+ * no MCP server here keeps one at module scope), and no module-level
+ * StreamableHTTPTransport either — one shared across requests routes by
+ * JSON-RPC id, which distinct ids would pass. A spelling check: an untyped
  * `let cached;` filled later passes it. The concurrency probe above is the
  * proof; this catches the shape before it reaches a run. The after sample's
  * per-session server is checked in TEXT_ONLY.
  */
 const builtPerRequest = (text: string) =>
-  !/^(?:export )?(?:const|let|var) [^\n]*(?:\bMcpServer\b|= buildServer\(|= new Map[<(])/m.test(text);
+  !/^(?:export )?(?:const|let|var) [^\n]*(?:\bMcpServer\b|\bStreamableHTTPTransport\b|= buildServer\(|= new Map[<(])/m.test(text);
 
 console.log("\n[the files say what this test assumes]");
 for (const s of SERVERS) {

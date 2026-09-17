@@ -12,7 +12,7 @@
 // ob1-fork (SMD-1497): the McpServer is built per request — one that outlived
 // the request, connect()ed to a fresh transport each time, answered the first
 // of two overlapping requests on the second's transport. FORK.md change 77;
-// extensions/test-auth.ts fires three requests at once.
+// extensions/test-auth.ts fires three overlapping requests.
 /**
  * delete-thought-mcp — Standalone MCP Edge Function that adds a single tool:
  *   delete_thought(id)
@@ -206,7 +206,7 @@ app.all("*", async (c) => {
   // message arrives, which is after handleRequest() has awaited the body — so
   // the first of two overlapping requests was answered on the second's
   // transport and hung. A build is tens of microseconds (FORK.md change 77 has
-  // the number); extensions/test-auth.ts fires three at once.
+  // the number); extensions/test-auth.ts fires three overlapping requests.
   const transport = new StreamableHTTPTransport();
   await buildServer(principal).connect(transport);
   return transport.handleRequest(c);

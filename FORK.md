@@ -11421,15 +11421,32 @@ call — is the grain their numbers assume.
 under one key, overlapping two ways, and asserts each answer carries its own
 id and the full list — explicit statuses, since a `!== 200` would pass a
 timeout (change 75). The first request starts alone with its body still
-arriving for 20 ms; the other two start 5 ms later, complete. The stagger is
-load-bearing, and the fourth review pass is why: three requests fired in one
-tick caught main's shape (the `connect()` overwrite is independent of timing)
-but passed a plausible repair of it — keep the server, `close()` it before
-each `connect()` — because all three closed a server that had already
-finished, while in production that repair hangs the earlier of two staggered
-requests (`close()` makes the SDK forget its transport, and the first
-request's answer is sent to nothing). Staggered, that mutant fails request
-11's assertion and the per-request build passes. One shape passes the probe
+arriving for 20 ms, and without an Accept header, so the streaming body goes
+through the servers' Accept patch as a Claude Desktop connector's would — which
+found two servers with no such patch, `extensions/meal-planning/shared-server.ts`
+and the cost recipe's "before" sample, answering 406 to any POST whose Accept
+lacks `text/event-stream` where the other twelve patch it in (pre-existing;
+SMD-1616; the probe keeps the header for those two until it lands); the
+other two requests start 5 ms later, complete. The stagger is load-bearing, and the
+fourth review pass is why: three requests fired in one tick caught main's
+shape (the `connect()` overwrite is independent of timing) but never open
+the connect-to-body window itself — every handler in a burst reaches its
+first await before any body is parsed. The regression that needs the window
+is a "cleanup": build a server per request but `if (previous) await
+previous.close()` first, the previous request's server kept in a module-level
+`let`. In a burst the closed server is always an earlier, finished request's,
+so all three answer (771/771 with the same-tick probe); staggered, the second
+request closes the first's server while its body is still arriving, `close()`
+makes the SDK forget that server's transport, and the first request's answer
+is sent to nothing — request 11 fails alone. (The fifth pass tried the other
+reading — a server object kept and re-`connect()`ed after each `close()` —
+and found a burst catches it too: it is main's shape again.) The margin is 15
+ms: the first request reaches its body await within microseconds (measured:
+connects at 3.6 ms, the other two at 9.2 and 9.5, its body read at 24.0),
+and a stall longer than that degrades the probe to one request then a burst
+of two — detection weakens, the fix cannot fail (forced with a 25 ms
+stagger: the fix 772/772, the cleanup mutant still 1). Thirty-five runs,
+ten of them under four CPU burners, all 772. One shape passes the probe
 and is output-correct: a server per scope behind a serialising lock — the
 lock covers the whole connect-to-dispatch window, so each answer reaches its
 own transport. It is a worse design than a build per request, for reasons the
@@ -11445,8 +11462,10 @@ per call — two requests in flight each saved the other's no-op, and a hung
 request never restored anything, so the first run of the probe printed `6
 failed` with no failing line: the silencer had eaten them. A drift guard in
 the file-text section refuses the spellings of a server that outlives the
-request — a module-level declaration that names `McpServer`, holds what
-`buildServer()` returns, or is a `Map` — and the `enhanced-mcp` text is held to
+request — a module-level declaration that names `McpServer` or
+`StreamableHTTPTransport` (a shared transport routes by JSON-RPC id, which
+distinct ids would pass), holds what `buildServer()` returns, or is a `Map`
+— and the `enhanced-mcp` text is held to
 `buildServer().connect(transport)`; it is a spelling check (an untyped `let
 cached;` filled later passes it), and the probe is the proof. The "after"
 sample, whose tool modules are not in the repository, is held by the
@@ -11459,9 +11478,10 @@ servers + 14 guards + 5 for `enhanced-mcp` + 5 text-only rules for the "after"
 sample). Drilled by putting `main`'s file back: `delete-thought-mcp` fails 3
 of 772 — requests 11 and 12 `timed out after 2000 ms`, request 13 (the last
 transport connected) answered, and the guard; `enhanced-mcp` the same three;
-the "after" sample's `server.ts` fails its four text rules. The kept server
-with `close()` before each `connect()` (an untyped `let cached;`, which the
-text guard passes) fails request 11 alone — the staggered request, hung. The
+the "after" sample's `server.ts` fails its four text rules. The cleanup
+mutant — a server per request, the previous request's closed first, held in
+an untyped `let`, which the text guard passes — fails request 11 alone: the
+staggered request, hung. The
 fourth reviewer's other mutants: a server built before the 401 check for a
 dummy principal fails the nine scope assertions; the probe with three equal
 ids still fails main's shape (the deadline carries the detection, the ids
