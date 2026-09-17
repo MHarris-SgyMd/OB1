@@ -11,14 +11,18 @@
 -- If filtered search is slow with this file installed
 --   This file's own cost is eight page reads on every filtered call over the
 --   floor — about 0.05 ms with one row a page, about 0.3 at the shipped
---   width — and nothing that grows with the heap. EXPLAIN (ANALYZE) a
---   filtered call, or read auto_explain with log_nested_statements: a `JIT:`
---   block under the sample means a disabled planner path (enable_tidscan,
+--   width — and nothing that grows with the heap. Read auto_explain with
+--   log_nested_statements (an EXPLAIN of the call shows only the Function
+--   Scan; the body's statements are nested), or EXPLAIN the statement
+--   db/test-support.ts's extractBody reads out of the body: a `JIT:` block
+--   under the sample means a disabled planner path (enable_tidscan,
 --   enable_nestloop, or hashagg and sort together — SMD-1624); a `Seq Scan
 --   on thoughts` under the collection or the walk means row-level security
 --   on the table, which costs `metadata @> filter` its GIN index since 014
 --   (SMD-1625); a body carrying TABLESAMPLE means 037 was pasted over this
---   file — `bun db/migrate.ts --reapply`. Failure modes below has each.
+--   file — `bun db/migrate.ts --reapply` (preflight has no recogniser for
+--   the gate's body; FORK.md change 78's operator's path). Failure modes
+--   below has the first two.
 --
 -- Why
 --   037 (SMD-1463) gates the routing count — the capped GIN collection every
@@ -270,9 +274,10 @@
 --     join nor a TID path); the hashagg-and-sort one is 037's too (85 ms
 --     against 81); through the shipped function over the floor on a
 --     24,999-page heap (review pass 4): 0.49 / 43 / 48 / 90 ms, and 0.52
---     with tidscan off and jit off. Nothing shows it: not the plan, the
+--     with tidscan off and jit off. Nothing but the plan shows it — the
+--     `JIT:` block and a cost past 1e10 in auto_explain — not the
 --     rows, preflight or the ledger. `SET jit = off` on the function
---     removes all three
+--     removes all three GUC triggers
 --     (measured, 0.38–0.82 ms under each), but also changes what the WALK
 --     pays under a generic plan, which is SMD-1464's plan-mode question;
 --     pinning `enable_tidscan = on` and `enable_nestloop = on` on the
@@ -355,9 +360,11 @@
 --   signature). PostgreSQL 14 or later for the TID Range Scan — the fork
 --   pins pgvector's pg16 image, PGlite is 17, Supabase ships 15 and 17, and
 --   the suites ran green on 15, 16 and 17 — and pgvector 0.8.0 or later, as
---   014. Nothing enforces the 14: on 13 (out of support) the CREATE succeeds
---   and the probe, with no TID Range path to take, is a sequential scan at
---   disable_cost — the "disabled planner path" failure mode on every call.
+--   014. Nothing enforces the 14. On 13 (out of support, not run here) the
+--   planner's account says the CREATE would succeed and the probe, with no
+--   TID Range path to take, would be a sequential scan of the heap per block
+--   at disable_cost, JIT-compiled — the no-LIMIT shape under Design (72 ms at
+--   2,000 pages), on every call.
 --   The suites themselves need 15 (db/test-live.ts reads
 --   pg_stat_force_next_flush). Applied by `bun db/migrate.ts`.
 --

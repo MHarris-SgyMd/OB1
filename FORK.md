@@ -12103,127 +12103,6 @@ leave to the SDK.
 fork-only, and the five servers' own text is untouched (the embeds, the
 `.not()` calls and the array payloads are upstream's spelling, now served).
 
-### Vendored content: audit once, hold the delta
-
-Everything under `recipes/`, `integrations/`, `extensions/`, `skills/`,
-`schemas/`, `dashboards/` and `primitives/` is upstream's community tree,
-vendored wholesale at the pin. That means we ship its worst advice with its
-best, under this repository's name, in a repo whose stated differentiator is
-that the core is tested and the auth path is hardened. The rule (SMD-1251,
-change 51): **we audit the tree once and hold the delta**, and a standing check
-carries the audit so a rebase cannot quietly undo it. Four rules are audited
-today. Writes around the functions (SMD-1228, change 69; SMD-1524, change
-71): check 10 fails the build on a PostgREST `.update(`/`.upsert(`/`.insert(`
-on `thoughts` whose payload carries `content` or `embedding` — inline or
-through an object the file fills — and on a SQL `UPDATE thoughts … SET` of
-either column or `INSERT INTO thoughts (…)` naming one: the raw update nine
-vendored files made around `update_thought` and the 3-argument
-`upsert_thought`, leaving a stale fingerprint, a stale model label and the
-previous vector's windows, and the raw insert eight more made around the
-capture, leaving no fingerprint and no label at all; with counted per-file
-exceptions for a file whose README says it bypasses the functions — seven,
-each a database of its own, a function body shown, or the test's fixture.
-Credentials (SMD-1252, change 64; SMD-1455, change 67): check 8 fails
-the build on a value read from the environment under a credential's name
-compared with an equality operator — the one shared plaintext key seven
-extension servers, and then seventeen more vendored files, compared with `!==`
-before they became consumers of `server-portable/auth.ts` — with counted
-per-file exceptions, and the list has been empty since change 67. Core
-ownership (SMD-1250, change 58): check 7 fails the build on any
-vendored statement that redefines, drops or re-comments a function
-`db/migrations/` owns, the owned set read from the migrations, with counted
-exceptions for the files that create a brain rather than add to one. And
-shell safety — `scripts/check-fork-consistency.mjs` check 6 fails the build on
-Codex's sandbox-bypass flag or its aliases, Claude Code's skip-permissions flag
-or mode, any allow rule that grants all of `Bash` or a prefix of a network
-client or interpreter, or any spawn through a shell (the `shell:` option with a
-non-false value, `exec`/`execSync`, `os.system`, an explicit `sh -c`/`cmd /c`
-argv), in every non-binary, non-ignored file under those seven directories,
-with a reviewed exception list — per file *and* per pattern, and *counted* —
-for prose that names a flag in order to say it was removed, and probe lists the
-check runs against its own patterns on every run, positive and negative. A
-rebase that brings a new hit fails CI, and the choice is the same as it was at
-the pin: fix the vendored file and record the delta here, or list the exception
-with its reason. SMD-1250 landed in that shape as change 58, SMD-1252 as
-change 64, SMD-1455 as change 67, SMD-1228 as change 69 and SMD-1524 — the
-raw inserts change 69 left outside its rule — as change 71: the four rules
-named when the standard was decided are all audited and held, the last on
-both of its doors.
-
-### Landing a rebase on `main`, which is protected
-
-`main` is the working default and carries a ruleset: nine required status checks,
-no deletion, **no force-push**, and no bypass actors — it applies to admins too.
-That is deliberate, and it interacts with a rebase in one specific way.
-
-A rebase produces `siggymd/rebase-YYYYMMDD` with **rewritten history**, so it
-cannot fast-forward onto `main`. Two ways forward:
-
-**Open a pull request (normal case).** Required status checks mean **no push
-directly to `main` succeeds**, merge commit or not — a push carries commits CI has
-never seen, so the rule cannot be satisfied:
-
-```
-remote: - 9 of 9 required status checks are expected.
-```
-
-That is not a quirk of the merge; it is what requiring checks means. Everything
-reaching `main` goes through a PR, which is two commands:
-
-```bash
-gh pr create --fill --base main --head siggymd/rebase-$(date +%Y%m%d)
-gh pr merge --merge --auto        # lands itself once the nine checks pass
-```
-
-History keeps both lines, which is what happened when the fork's work first landed
-on `main`, and is the right default: the rebase is a reconciliation, not a
-replacement.
-
-**Reset `main` to the rebased line (rare).** Only if you want `main`'s history to
-*be* the rebased history — cleaner, but it discards the record of how the fork
-diverged. This is a force-push and the ruleset will refuse it:
-
-```
-remote: - Cannot force-push to this branch
-```
-
-To do it anyway — as with any push that must bypass the checks — set the ruleset
-to `disabled`, push, and put it back:
-
-```bash
-gh api -X PUT repos/MHarris-SgyMd/OB1/rulesets/22189960 -f enforcement=disabled
-git push --force-with-lease origin main
-gh api -X PUT repos/MHarris-SgyMd/OB1/rulesets/22189960 -f enforcement=active
-```
-
-Prefer `--force-with-lease` over `--force` so a push that raced with someone else's
-is refused rather than silently discarding it.
-
-**Nothing forces the rewrite.** The pin is held by the annotated tag
-`upstream-pin-<sha>`, not by any branch, so `main`'s history never has to be
-rewritten to record where upstream was. Reach for the merge.
-
-**Drop a patch rather than carry it** if upstream fixes the same defect. Check
-issues #470 and #216 first — both are open with volunteers waiting, so fixes 3
-and possibly the auth work may arrive upstream.
-
-### Why we do not send these upstream
-
-`CONTRIBUTING.md:268` lists modifying "the core MCP server" as an automatic
-reject, and [PR #122](https://github.com/NateBJones-Projects/OB1/pull/122) was
-closed on exactly that basis:
-
-> The main change edits the core MCP server, which is explicitly out of scope for
-> community contributions in this repo… If we want this behavior upstream, it
-> needs to come through a focused maintainer-led path instead.
-
-Fixes 1–5 all live in `server/index.ts`. Fixes 6 and 7 are contributable in
-principle; note that [issue #482](https://github.com/NateBJones-Projects/OB1/issues/482)
-reports the upstream PR gate currently fails on **every** fork-originated PR.
-
----
-
-
 ### 78. The gate's sample is drawn by TID range — migration 038 reads its eight pages as eight TID Range Scans instead of a `TABLESAMPLE SYSTEM` over the whole heap, so the sample costs eight page reads at any size and counts the pages it drew (SMD-1526)
 
 Change 70 ended on a term that grows with the table, and this removes it.
@@ -12431,9 +12310,11 @@ empty filter 1.05 ms at a million rows against 0.43 then), so read the
 million-row columns as a pair and not against change 70's. At ten million
 the two columns are two machines: the before pass ran under that load (its
 50% tier 132 ms against change 70's 13 for the same 037 body — the walk
-reading the index from disk), while the after pass — started twice and
-killed twice mid-build by the VM's OOM killer with two other sessions'
-benches resident, a kept ten-million corpus among them — ran six hours later
+reading the index from disk), while the after pass — started three times
+and stopped three times mid-build, twice by the VM's OOM killer with two
+other sessions' benches resident, a kept ten-million corpus among them, once
+when the server dropped the connection under the same pressure — ran on the
+fourth attempt six hours later
 on the idle VM change 70's own passes had, and its column sits within the
 spread of change 70's 037 figures everywhere but the rows this change is
 about (50% 13.2 then, 14.4 now; 900 rows 10.9 and 11.1). Section B, ten
@@ -12524,7 +12405,8 @@ Read down the tables and three things fall out.
 **What it costs where it does nothing.** Under the floor — every real brain
 today — nothing changes: the body computes `v_pages` at entry as under 037 and
 runs no sample. Above it, every filtered call pays eight page reads: about
-0.05 ms warm, eight random reads from disk on a heap larger than memory (on
+0.05 ms warm with one row a page, about 0.3 at the shipped width's 65–80
+rows a page, eight random reads from disk on a heap larger than memory (on
 the order of 0.1 ms each on NVMe, more on network storage), and nothing that
 grows with the heap.
 
@@ -12602,14 +12484,14 @@ restricted and read-only callers; 14,000 calls under concurrent truncation
 and growth; both temp-table shapes; the suites green on PostgreSQL 15, 16
 and 17 with the probe planning as eight TID Range Scans on each; [8e]
 flake-free over twenty runs and [5d]'s exact band over 180 isolated
-iterations (3,600 calls), where 037's body missed on 6 of 30 — the ~1.2% the
-header attributes to it. Filed and not fixed here: SMD-1624, SMD-1625,
+iterations (3,600 calls), where 037's body missed in 6 of 30 iterations of
+twenty calls — the ~1.4% per draw the header attributes to it. Filed and not fixed here: SMD-1624, SMD-1625,
 SMD-1627 (`--reapply` rebuilds a missing HNSW index in dynamic shared memory
 and fails under a 64 MB /dev/shm; a non-superuser cannot bootstrap where
 pgvector is not trusted — both pre-existing). test-live [7] flaked six times
-across the passes, thrice with another suite in the worktree and thrice
-alone, and passed on every re-run — SMD-1545's, with the concurrent-suite
-lead weakened accordingly.
+across the passes — four with another suite in the worktree, twice alone —
+and passed on every re-run: SMD-1545's, with the concurrent-suite lead
+weakened accordingly.
 
 **The operator's path, walked.** A brain at 037 with rows, upgraded by `bun
 db/migrate.ts`: "038 applied, 1 applied, 37 skipped", one `match_thoughts`
@@ -12695,6 +12577,126 @@ git tag -a upstream-pin-$(git rev-parse --short upstream/main) \
 ```
 
 Then update the pin table at the top of this file.
+
+### Vendored content: audit once, hold the delta
+
+Everything under `recipes/`, `integrations/`, `extensions/`, `skills/`,
+`schemas/`, `dashboards/` and `primitives/` is upstream's community tree,
+vendored wholesale at the pin. That means we ship its worst advice with its
+best, under this repository's name, in a repo whose stated differentiator is
+that the core is tested and the auth path is hardened. The rule (SMD-1251,
+change 51): **we audit the tree once and hold the delta**, and a standing check
+carries the audit so a rebase cannot quietly undo it. Four rules are audited
+today. Writes around the functions (SMD-1228, change 69; SMD-1524, change
+71): check 10 fails the build on a PostgREST `.update(`/`.upsert(`/`.insert(`
+on `thoughts` whose payload carries `content` or `embedding` — inline or
+through an object the file fills — and on a SQL `UPDATE thoughts … SET` of
+either column or `INSERT INTO thoughts (…)` naming one: the raw update nine
+vendored files made around `update_thought` and the 3-argument
+`upsert_thought`, leaving a stale fingerprint, a stale model label and the
+previous vector's windows, and the raw insert eight more made around the
+capture, leaving no fingerprint and no label at all; with counted per-file
+exceptions for a file whose README says it bypasses the functions — seven,
+each a database of its own, a function body shown, or the test's fixture.
+Credentials (SMD-1252, change 64; SMD-1455, change 67): check 8 fails
+the build on a value read from the environment under a credential's name
+compared with an equality operator — the one shared plaintext key seven
+extension servers, and then seventeen more vendored files, compared with `!==`
+before they became consumers of `server-portable/auth.ts` — with counted
+per-file exceptions, and the list has been empty since change 67. Core
+ownership (SMD-1250, change 58): check 7 fails the build on any
+vendored statement that redefines, drops or re-comments a function
+`db/migrations/` owns, the owned set read from the migrations, with counted
+exceptions for the files that create a brain rather than add to one. And
+shell safety — `scripts/check-fork-consistency.mjs` check 6 fails the build on
+Codex's sandbox-bypass flag or its aliases, Claude Code's skip-permissions flag
+or mode, any allow rule that grants all of `Bash` or a prefix of a network
+client or interpreter, or any spawn through a shell (the `shell:` option with a
+non-false value, `exec`/`execSync`, `os.system`, an explicit `sh -c`/`cmd /c`
+argv), in every non-binary, non-ignored file under those seven directories,
+with a reviewed exception list — per file *and* per pattern, and *counted* —
+for prose that names a flag in order to say it was removed, and probe lists the
+check runs against its own patterns on every run, positive and negative. A
+rebase that brings a new hit fails CI, and the choice is the same as it was at
+the pin: fix the vendored file and record the delta here, or list the exception
+with its reason. SMD-1250 landed in that shape as change 58, SMD-1252 as
+change 64, SMD-1455 as change 67, SMD-1228 as change 69 and SMD-1524 — the
+raw inserts change 69 left outside its rule — as change 71: the four rules
+named when the standard was decided are all audited and held, the last on
+both of its doors.
+
+### Landing a rebase on `main`, which is protected
+
+`main` is the working default and carries a ruleset: nine required status checks,
+no deletion, **no force-push**, and no bypass actors — it applies to admins too.
+That is deliberate, and it interacts with a rebase in one specific way.
+
+A rebase produces `siggymd/rebase-YYYYMMDD` with **rewritten history**, so it
+cannot fast-forward onto `main`. Two ways forward:
+
+**Open a pull request (normal case).** Required status checks mean **no push
+directly to `main` succeeds**, merge commit or not — a push carries commits CI has
+never seen, so the rule cannot be satisfied:
+
+```
+remote: - 9 of 9 required status checks are expected.
+```
+
+That is not a quirk of the merge; it is what requiring checks means. Everything
+reaching `main` goes through a PR, which is two commands:
+
+```bash
+gh pr create --fill --base main --head siggymd/rebase-$(date +%Y%m%d)
+gh pr merge --merge --auto        # lands itself once the nine checks pass
+```
+
+History keeps both lines, which is what happened when the fork's work first landed
+on `main`, and is the right default: the rebase is a reconciliation, not a
+replacement.
+
+**Reset `main` to the rebased line (rare).** Only if you want `main`'s history to
+*be* the rebased history — cleaner, but it discards the record of how the fork
+diverged. This is a force-push and the ruleset will refuse it:
+
+```
+remote: - Cannot force-push to this branch
+```
+
+To do it anyway — as with any push that must bypass the checks — set the ruleset
+to `disabled`, push, and put it back:
+
+```bash
+gh api -X PUT repos/MHarris-SgyMd/OB1/rulesets/22189960 -f enforcement=disabled
+git push --force-with-lease origin main
+gh api -X PUT repos/MHarris-SgyMd/OB1/rulesets/22189960 -f enforcement=active
+```
+
+Prefer `--force-with-lease` over `--force` so a push that raced with someone else's
+is refused rather than silently discarding it.
+
+**Nothing forces the rewrite.** The pin is held by the annotated tag
+`upstream-pin-<sha>`, not by any branch, so `main`'s history never has to be
+rewritten to record where upstream was. Reach for the merge.
+
+**Drop a patch rather than carry it** if upstream fixes the same defect. Check
+issues #470 and #216 first — both are open with volunteers waiting, so fixes 3
+and possibly the auth work may arrive upstream.
+
+### Why we do not send these upstream
+
+`CONTRIBUTING.md:268` lists modifying "the core MCP server" as an automatic
+reject, and [PR #122](https://github.com/NateBJones-Projects/OB1/pull/122) was
+closed on exactly that basis:
+
+> The main change edits the core MCP server, which is explicitly out of scope for
+> community contributions in this repo… If we want this behavior upstream, it
+> needs to come through a focused maintainer-led path instead.
+
+Fixes 1–5 all live in `server/index.ts`. Fixes 6 and 7 are contributable in
+principle; note that [issue #482](https://github.com/NateBJones-Projects/OB1/issues/482)
+reports the upstream PR gate currently fails on **every** fork-originated PR.
+
+---
 
 ## Known issues we did NOT fix
 

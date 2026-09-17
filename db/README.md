@@ -979,7 +979,8 @@ OB1_BENCH_SCALES=10000000 OB1_PG_SHM_SIZE=11g OB1_BENCH_MAINTENANCE_MEM=9GB ./wi
 
 # Before/after a redefinition of match_thoughts, from one tree: the after
 # arm's schema stops at the named migration (the function before 038 here;
-# 036 for the function before 037).
+# 036 for the function before 037). Not with OB1_PG_KEEP below: a corpus cut
+# at a migration is measured and dropped, never kept.
 OB1_BENCH_UPTO=037 ./with-postgres.sh bun bench-hnsw.ts
 
 # Keep the corpus between passes (SMD-1493): the first run under a name builds
