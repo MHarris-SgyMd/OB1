@@ -1190,31 +1190,22 @@ console.log("\n[7] Chunk context survives capture, edit and a payload without it
    * the matching thoughts and their chunks BY ID, no index walk — so "found"
    * is this thought's own vectors against the query and nothing else, and
    * "not found" after the model change is the thought in the scored set with
-   * no vector that answers. The unfiltered call is an HNSW walk over the
-   * thoughts and chunk indexes, and read that way the same-model assertion
-   * below failed in five CI attempts on three trees that touched nothing
-   * here; this suite looped locally missed four times in thirty-seven runs
-   * (thirty-four with a second suite beside it), twice there and twice at
-   * the other-model read. Two of those were caught with the state dumped:
-   * the thoughts index scan itself returned one of the table's three live
-   * rows once and none of them once, with the iterative scan on and off,
-   * 300 ms later still; an autovacuum had run on both tables during the run
-   * (the dump does not time it against the sections), the chunk index
-   * answered throughout, and the sections after found their rows again. A
-   * tie cannot explain it: three thoughts and four chunk rows under a
-   * returned limit of ten and a candidate window of forty, so nothing is
-   * truncated and a tie can reorder candidates, not remove them — and one
-   * dump's index scan returned no row at all. A graph the scan cannot reach
-   * live rows through. SMD-1632 holds that finding. This section no longer
-   * exercises the walk at all; [5b] holds its recall on random vectors, [5c]
-   * its plan, and the unfiltered reads left on it are [4]'s, [15]'s, [11]'s
-   * two hybrid reads and [5b]'s two.
+   * no vector that answers. Read unfiltered — an HNSW walk over the thoughts
+   * and chunk indexes — the same-model assertion below missed in five CI
+   * attempts on three trees that touched nothing here and in a local loop,
+   * where the dumps showed the thoughts index scan returning one or none of
+   * three live rows: SMD-1632, and FORK.md's known-issues entry for it, hold
+   * that. This section no longer exercises the walk at all; [5b] holds its
+   * recall on random vectors, [5c] its plan, and [4], [15], [11]'s hybrid
+   * reads and [5b]'s two walk reads still read it unfiltered.
    *
    * 035's re-capture merges metadata (`||`), so the key survives every
-   * re-capture below — the last assertion reads `k` beside it.
+   * re-capture below — the last assertion reads `k` beside it. The filter
+   * object is the one the first capture stores: `as const`, so a later edit
+   * cannot mutate it and part the filter from the stored metadata silently.
    */
   const RECAP = "a long capture, re-captured through the 3-argument form";
-  const ONLY_RECAP = { fixture: "022-recap" };
+  const ONLY_RECAP = { fixture: "022-recap" } as const;
   const [long] = await sql`
     SELECT upsert_thought(${RECAP}, ${{ metadata: ONLY_RECAP, embedding_model: "old-model" }}::jsonb, ${unit(0)}::vector,
       ${chunkPayload([{ content: "first window", at: 1 }, { content: "second window", at: 2 }])}::jsonb) AS r`;

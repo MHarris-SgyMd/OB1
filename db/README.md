@@ -1240,7 +1240,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 890 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 317 assertions, real server, throwaway container
+./with-postgres.sh bun test-live.ts         # 500 assertions, real server, throwaway container
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 ```
 
