@@ -3164,8 +3164,17 @@ console.log("\n[17] Over near-equidistant vectors the HNSW walk misses live rows
   const holed = await reachabilityReport(sql, "thoughts_embedding_idx", "thoughts");
   assert(holed.entry !== null && holed.visible === N && holed.rowsWithoutElement === 0,
          `the ${N}-row index parsed: an entry point and an element for every live row (entry ${holed.entry}, ${holed.visible} visible of ${holed.elements} elements, ${holed.rowsWithoutElement} rows without)`);
-  assert(before.miss >= before.S / 2,
-         `a search of a row's own axis misses it on most axes: ${before.miss} of ${before.S} — the walk over the tied corpus [7] met (decoder reports ${holed.unreachableVisible.length}/${holed.visible} unreachable) (SMD-1632)`);
+  // The degenerate-geometry miss needs more orthogonal axes than the ef≈40 beam
+  // explores; the default width (1024) has them, a small OB1_EMBEDDING_DIM might
+  // not — below 256 the beam finds a large fraction and this observable would
+  // not bite, so it is skipped rather than flaked. CI runs the default width;
+  // the synthetic assertion above and [5b] are width-independent.
+  const wideEnough = N >= 256;
+  if (wideEnough)
+    assert(before.miss >= before.S / 2,
+           `a search of a row's own axis misses it on most axes: ${before.miss} of ${before.S} — the walk over the tied corpus [7] met (decoder reports ${holed.unreachableVisible.length}/${holed.visible} unreachable) (SMD-1632)`);
+  else
+    skip("a search of a row's own axis misses it on most axes", `OB1_EMBEDDING_DIM=${N} is below 256 — too few orthogonal axes to disconnect the graph past the ef beam`);
 
   // The decoder is SOUND: every row it calls unreachable is one the walk misses.
   // (Reachable is not found — the bounded beam misses more — so this checks the
@@ -3186,8 +3195,11 @@ console.log("\n[17] Over near-equidistant vectors the HNSW walk misses live rows
   // assumed fix does not hold for near-degenerate data.
   await sql.unsafe(`REINDEX INDEX thoughts_embedding_idx`);
   const after = await sampleMiss();
-  assert(after.miss >= after.S / 2,
-         `after REINDEX the walk still misses most axes (${after.miss} of ${after.S}) — a rebuild of an equidistant graph is no more reachable, so REINDEX is not the fix the ticket assumed`);
+  if (wideEnough)
+    assert(after.miss >= after.S / 2,
+           `after REINDEX the walk still misses most axes (${after.miss} of ${after.S}) — a rebuild of an equidistant graph is no more reachable, so REINDEX is not the fix the ticket assumed`);
+  else
+    skip("after REINDEX the walk still misses most axes", `OB1_EMBEDDING_DIM=${N} is below 256`);
 
   // A production-shaped corpus — random unit vectors, a range of distances — is
   // fully reachable AND fully found: the pathology needs a corpus DOMINATED by

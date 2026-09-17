@@ -223,12 +223,14 @@ export async function readHnswGraph(sql: SQL, index: string, opts: { maxPages?: 
  * edges, then the level-0 edges out of any node it lands on — so following ALL
  * levels' edges from the entry is a superset of any query's reached set, and
  * an element outside it is unreachable by every walk. Deleted elements are not
- * followed, which is exact rather than an approximation: pgvector's vacuum sets
- * an element's `deleted` flag and invalidates its neighbour tuple's TIDs in the
- * same pass (`hnswvacuum.c` MarkDeleted), so a `deleted` element has no outbound
- * edges to follow; a heap-dead element the vacuum has not reached is not marked
- * `deleted`, still carries valid edges, and IS followed, as the live search
- * follows it.
+ * followed, which is exact rather than an approximation: pgvector's vacuum, in
+ * the pass that sets an element's `deleted` flag, first re-links every live
+ * element that pointed at it (`hnswvacuum.c` RepairGraph, then ConfirmRepaired
+ * asserts none remain), so a walk over live elements never arrives at a deleted
+ * one — and even reached, a `deleted` element's own neighbour TIDs are
+ * invalidated in that same pass (MarkDeleted), so it is a dead end either way.
+ * A heap-dead element the vacuum has not reached is not marked `deleted`, still
+ * carries valid edges, and IS followed, as the live search follows it.
  *
  * Soundness assumes a QUIESCENT index. `readHnswGraph` reads the pages one at a
  * time under a share lock, not in one snapshot, so under a concurrent insert or

@@ -12457,8 +12457,9 @@ moment [7] reads — not the root.
 
 **What `db/hnsw-graph.ts` shows.** A reader that decodes the index pages
 (pgvector 0.8.6's `HnswMetaPageData`, `HnswElementTupleData`, `HnswNeighborTupleData`
-through `pageinspect`'s `get_raw_page`, the magic number checked), walks the
-graph from the entry point following neighbour lists at every level, and joins
+through `pageinspect`'s `get_raw_page`, the magic number and the meta page version
+checked), walks the graph from the entry point following neighbour lists at every
+level, and joins
 to the table by ctid, so it reports the live rows the entry point cannot reach.
 On a quiescent index it is a **sound** detector: every row it calls unreachable
 is one an unbounded relaxed walk of that row's own vector does not return
@@ -12470,8 +12471,9 @@ against a brain taking writes. The all-levels walk is the
 correction that makes it sound: a search does not walk level 0 from the meta
 entry point but descends the upper lists to a query-dependent level-0 start, so
 a level-0-only reachability under-counts and would call a reachable row
-unreachable (the `test-live.ts` [17] soundness check caught exactly that during
-this work). Measured on pgvector 0.8.6-pg16, 1024-dim: 1,024 orthogonal unit
+unreachable — a synthetic-graph assertion in [17] holds the walk to every level
+(a review pass found the database soundness sample let a level-0-only walk pass,
+so that assertion carries the guarantee). Measured on pgvector 0.8.6-pg16, 1024-dim: 1,024 orthogonal unit
 vectors leave 0 to ~860 rows unreachable build to build (one connected build in
 twenty), and a search of a row's own axis misses well over 100 of 120 sampled
 whatever the hole; a 2,000-row **random** corpus is fully reachable and every
@@ -12507,7 +12509,7 @@ algorithm, reproduced here with no vacuum in play, not a pgvector defect — the
 says the entry point "will be empty until an element is repaired") is real but
 is not what the reproduction needs.
 
-**Verified.** `bun test-live.ts` 507/507 against pgvector 0.8.6-pg16, [17]
+**Verified.** `bun test-live.ts` 508/508 against pgvector 0.8.6-pg16, [17]
 included, stable across repeated local runs; `db/hnsw-graph.ts` reads both
 shipped indexes and its CLI exits non-zero on a holed index. The decoder's
 soundness and the random-corpus reachability are the two facts the section rests
@@ -12520,7 +12522,9 @@ autovacuum at the read, and 282 standalone iterations at SMD-1574 plus the
 replays here never caught it; the deterministic reproduction is the many-vector
 disconnected graph, which is the same mechanism at a scale where it is certain.
 The quantised and binary indexes (SMD-1501) share the near-equidistant risk at
-low bit depth and are not measured for it.
+low bit depth and are not measured for it. And [17] guards the decoder's
+reachability logic and its gross layout (magic and version), not the individual
+page-field offsets — a byte-level decode fixture is SMD-1673.
 
 ## Detached from the fork network
 
