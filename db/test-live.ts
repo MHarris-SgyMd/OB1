@@ -3148,35 +3148,24 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
 
 console.log("\n[17] Over near-equidistant vectors the HNSW walk misses live rows an exact scan would find, and db/hnsw-graph.ts reads why from the index itself (SMD-1632)");
 {
-  // Why [7]'s found-by reads flaked, reproduced deterministically and read from
-  // the graph rather than inferred from a miss. A vector search walks from the
-  // index's entry point through its neighbour lists; pgvector's
-  // neighbour-selection heuristic keeps an edge only where a candidate is
-  // strictly closer to the element than to any neighbour already chosen, so
-  // when every pair sits at cosine distance 1.0 — orthogonal unit vectors, this
-  // suite's axes — it keeps few, and a bounded search reaches almost none of
-  // them: the walk misses a live row its own vector matches exactly. That is
-  // the whole of [7]'s flake, and [4]/[11]/[15] carry the same shape, which is
-  // why their reads moved to match_thoughts' exact branch (no walk) rather than
-  // the index or the capture path changing.
+  // Why [7]'s found-by reads flaked, reproduced deterministically. Over the
+  // suite's orthogonal unit axes (every pair at cosine distance 1.0) pgvector's
+  // HNSW graph is not connected, so a search from the entry point misses a live
+  // row its own vector matches — the mechanism db/hnsw-graph.ts and FORK change
+  // 83 explain, and the shape [4]/[11]/[15] share, which is why their reads
+  // moved to match_thoughts' exact branch. Two things are asserted here: the
+  // OBSERVABLE (a search of a row's own axis does not return it), robust at well
+  // over 100 of 120 misses whatever the build; and that the decoder is SOUND
+  // (every row it calls unreachable is one the walk misses). The hole's size
+  // varies build to build (0 to ~860 of 1024), so it is reported, not gated on.
   //
-  // Two things are asserted. The OBSERVABLE — a search of a row's own axis does
-  // not return it — is robust: measured well over 100 misses in 120 axes across
-  // eight builds, whatever the graph's exact shape. And db/hnsw-graph.ts, which
-  // decodes the index pages (pageinspect, superuser here) and computes
-  // reachability from the entry point, is SOUND: every row it calls unreachable
-  // is one the walk misses. The hole's size varies build to build (0 to ~860
-  // of 1024, one connected build in twenty), so it is reported, not gated on;
-  // the observable does not depend on it.
-  // First, the reachability logic gets deterministic teeth from a synthetic
-  // graph, independent of any build. A search reaches a node through edges at
-  // the right level, so `reachableFromEntry` must follow every level's lists,
-  // not level 0 alone; the DB soundness sample below cannot enforce that on its
-  // own, because on the degenerate corpus a level-0-only walk is nearly
-  // indistinguishable from the correct one. Here E reaches A only through its
-  // LEVEL-1 edge and B only through A's level-0 edge, so a level-0-only walk
-  // from E would miss both. (The page decoder's byte offsets are covered
-  // separately — SMD-1673.)
+  // First, deterministic teeth for the reachability logic from a synthetic
+  // graph: a search reaches a node through edges at the right level, so
+  // `reachableFromEntry` must follow every level's lists, not level 0 alone (the
+  // DB soundness sample below cannot enforce that — on the degenerate corpus a
+  // level-0-only walk is nearly indistinguishable). E reaches A only via its
+  // level-1 edge and B only via A's level-0 edge, so a level-0-only walk from E
+  // misses both. (Byte-offset coverage of the page decode is SMD-1673.)
   {
     const el = (tid: string, level: number, neighbors: string[][]): HnswElement =>
       ({ tid, blkno: 1, offno: 1, level, deleted: false, version: 1, heaptids: [tid], neighborTid: tid, neighbors, level0Slots: 32 });
