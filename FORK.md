@@ -14227,18 +14227,25 @@ dropped silently. The two paths also cut on two clocks — the anchor and git's
 `--since` on committer time, each row and the dump filter on author date — and
 129 of the log's 1,351 commits carry different days on the two (every rebase
 moves the committer date; four of them are review passes), so a dump and a
-live run of one window tallied differently. Both are one rule now: every date
-is the committer time (`%cd`) rendered as a day in the zone the script runs
-in, and a `--since` day is the whole calendar day on both paths, filtered on
-the row's date rather than passed to git. The rendering zone was the review's
-catch: git's plain `--date=short` renders each commit in its own committer
-offset, and the log carries twelve offsets, so 28 commits sat on a different
-day than in the operator's zone and a day cut could disagree with the instant
-cut a `<sha>` anchor makes; `--date=short-local` puts both on one clock, at
-the price that a dump must be made and read in one zone. Verified on the live
-log: `--since` at 2026-09-18, -17 and -14 returns the same commit set from the
-git path and from a dump, and the four passes authored the day before they
-were committed are in or out of both together.
+live run of one window tallied differently. Both are one rule now: every row
+carries the committer instant (`%cI`), read as a calendar day in one declared
+zone, and a `--since` day is the whole calendar day on both paths, filtered
+on the row's day rather than passed to git. The zone took two review passes
+to get right. Git's plain `--date=short` renders each commit in its own
+committer offset, and the log carries twelve offsets, so 28 commits sat on a
+different day than on the operator's clock and a day cut could disagree with
+the instant cut a `<sha>` anchor makes. The first fix rendered in the
+machine's zone, and the second pass measured what that costs: the same
+`--since 2026-09-18` gave one commit set in Chicago, another under UTC and a
+third in Tokyo, all printed under one label, so the re-measure command in this
+section would not reproduce on another machine. The day is now derived from
+the instant in a declared zone — `--zone`, default `America/Chicago`, the
+offset every review pass in the log was committed in — and
+the window label names it; a dump is instants, so it is zone-free and the
+reader's zone applies. Verified on the live log: `--since` at 2026-09-18, -17
+and -14 returns the same commit set from the git path and from a dump, under
+`TZ=UTC` and `TZ=Asia/Tokyo` as well as the machine's own, and the four passes
+authored the day before they were committed are in or out of both together.
 
 The attribution rule was the larger defect. `ticketOf` took the first
 `SMD-nnnn` anywhere in subject and body, and a subject often names another

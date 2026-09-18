@@ -61,31 +61,36 @@
  *
  *   bun scripts/mechanism-yield.mjs                      # whole log
  *   bun scripts/mechanism-yield.mjs --since <sha>        # that commit and everything committed at or after it
- *   bun scripts/mechanism-yield.mjs --since YYYY-MM-DD   # from that calendar day on, by committer date
+ *   bun scripts/mechanism-yield.mjs --since YYYY-MM-DD   # from that calendar day on, committer time in --zone
+ *   bun scripts/mechanism-yield.mjs --zone Europe/London  # the zone days are read in (default America/Chicago)
  *   bun scripts/mechanism-yield.mjs --log dump.txt       # a saved dump (--since then takes a date only)
  *   bun scripts/mechanism-yield.mjs --self-check         # the parser fixtures
  *
  * `--since <sha>` is a window in TIME as well as ancestry — the commit's own
  * commit time onward — so a branch that started before the anchor and merged
  * after it contributes only what it committed in the tagged era. Every date
- * the script cuts on or prints is the COMMITTER time (`%cd`, the instant a
- * `--since <sha>` anchor cuts on) rendered as a calendar day in the zone the
- * script runs in (`--date=short-local`): the anchor, a `--since` day and each
- * row's date are one clock, so a saved dump and a live run of the same window
- * tally alike (a rebase moves the committer time, so about a tenth of the
- * log's commits carry two days; and rendered in each commit's own offset, as
- * plain `--date=short` does, 28 of them would fall on another day than in the
- * operator's zone). `--since YYYY-MM-DD` is the whole calendar day on both
- * paths: the script filters rows on their date rather than handing the bare
- * day to git, whose approxidate reads it as that day at the current time of
- * day and silently drops every commit made earlier in it. The numbers behind
- * both are in FORK.md, "The window and the attribution, corrected (SMD-1728)".
- * Options take `--name value` or `--name=value`; an unknown option is
- * refused. Others: --samples N (rows shown per class, default 6; 0 shows
- * none), --dump rows.tsv (every row with its classification). A dump is what
- * `git log --format='%x1e%H%x1f%cd%x1f%s%x1f%b' --date=short-local` prints,
- * so make and read it in one zone; one made with `%ad` (before SMD-1728)
- * carries author dates and windows on them.
+ * the script cuts on or prints is the COMMITTER instant (`%cI`, the clock a
+ * `--since <sha>` anchor cuts on and the one a rebase moves; about a tenth of
+ * the log's commits were authored on another day than they were committed),
+ * read as a calendar day in ONE DECLARED ZONE — `--zone <IANA name>`, default
+ * America/Chicago, the zone every review pass in the record was committed in.
+ * The zone is declared rather than taken from the machine or from each
+ * commit's own offset because both make the same command tally differently
+ * elsewhere: the log carries twelve committer offsets, and a `--since
+ * 2026-09-18` run gives one commit set in Chicago, another under UTC and a
+ * third in Tokyo. The window label names the zone. `--since YYYY-MM-DD` is
+ * the whole calendar day on both paths: the script filters rows on their day
+ * rather than handing the bare day to git, whose approxidate reads it as that
+ * day at the current time of day and silently drops every commit made
+ * earlier in it. The numbers behind all this are in FORK.md, "The window and
+ * the attribution, corrected (SMD-1728)". Options take `--name value` or
+ * `--name=value`; an unknown option is refused. Others: --samples N (rows
+ * shown per class, default 6; 0 shows none), --dump rows.tsv (every row with
+ * its classification). A dump is what `git log
+ * --format='%x1e%H%x1f%cI%x1f%s%x1f%b'` prints: instants, so it is zone-free
+ * and any reader's `--zone` applies. A dump whose date column is already a
+ * bare day (made with `--date=short`, before this change) windows on those
+ * days as written, whatever clock produced them.
  */
 
 import { execFileSync } from "node:child_process";
@@ -94,7 +99,7 @@ import fs from "node:fs";
 // ---------------------------------------------------------------------------
 // Arguments
 // ---------------------------------------------------------------------------
-const KNOWN = { "--since": "value", "--log": "value", "--samples": "value", "--dump": "value", "--self-check": "flag" };
+const KNOWN = { "--since": "value", "--log": "value", "--zone": "value", "--samples": "value", "--dump": "value", "--self-check": "flag" };
 
 /** `--name value` or `--name=value`; a flag takes none; anything unknown is refused. */
 function parseArgs(argv) {
@@ -136,17 +141,44 @@ const isDate = (s) => /^\d{4}-\d{2}-\d{2}$/.test(s);
 /** The commits dated on or after a calendar day — the one date filter both paths use. */
 const sinceDay = (commits, day) => commits.filter((c) => c.date >= day);
 
+// The zone a committer instant is read as a calendar day in. Declared, not the
+// machine's: the record's passes were all committed in this one, and a day cut
+// must give the same set on every machine that re-runs the FORK.md command.
+const DEFAULT_ZONE = "America/Chicago";
+const ZONE = OPTS["--zone"] ?? DEFAULT_ZONE;
+/** A YYYY-MM-DD formatter for one IANA zone, or null when the name is not one. */
+function dayFormatter(zone) {
+  try {
+    return new Intl.DateTimeFormat("en-CA", { timeZone: zone, year: "numeric", month: "2-digit", day: "2-digit" });
+  } catch {
+    return null;
+  }
+}
+const DAY_FORMAT = dayFormatter(ZONE);
+if (!DAY_FORMAT) {
+  console.error(`--zone takes an IANA zone name such as ${DEFAULT_ZONE} or UTC, got ${ZONE}`);
+  process.exit(2);
+}
+/**
+ * The calendar day of a committer stamp in a zone: an ISO instant ("2026-09-18T02:24:12-05:00")
+ * is converted; a bare day from an older dump is kept as written.
+ */
+function dayOf(stamp, formatter = DAY_FORMAT) {
+  if (isDate(stamp)) return stamp;
+  const t = new Date(stamp);
+  if (Number.isNaN(t.getTime())) return stamp; // unreadable: left as is, and a day filter will not match it
+  return formatter.format(t);
+}
+
 // ---------------------------------------------------------------------------
 // Parsing
 // ---------------------------------------------------------------------------
-// %cd, the committer time: the clock `--since <sha>` cuts on (%cI) and the one
-// a rebase moves. The author date (%ad) is when the work was done and can sit
-// a day earlier, so a dump and a live run would window differently on it.
-const FORMAT = "%x1e%H%x1f%cd%x1f%s%x1f%b";
-// Rendered in the zone the script runs in, not each commit's own offset: two
-// commits made at one instant in two zones then fall on the same side of a
-// `--since` day, and a day cut agrees with an instant cut on the same clock.
-const DATE = "--date=short-local";
+// %cI, the committer instant with its offset: the clock `--since <sha>` cuts
+// on and the one a rebase moves. The author date (%ad) is when the work was
+// done and can sit a day earlier, so a dump and a live run would window
+// differently on it. An instant rather than a rendered day, so a dump is
+// zone-free and the reader's --zone decides the day.
+const FORMAT = "%x1e%H%x1f%cI%x1f%s%x1f%b";
 
 function git(args) {
   try {
@@ -167,15 +199,15 @@ function readLog() {
       console.error(`--since with --log takes a date (YYYY-MM-DD): a dump has no ancestry to resolve ${SINCE} against`);
       process.exit(2);
     }
-    return { commits: sinceDay(commits, SINCE), windowLabel: `window ${SINCE} → end of dump: ` };
+    return { commits: sinceDay(commits, SINCE), windowLabel: `window ${SINCE} (${ZONE} days) → end of dump: ` };
   }
-  const args = ["log", `--format=${FORMAT}`, DATE];
+  const args = ["log", `--format=${FORMAT}`];
   if (SINCE === undefined) return { commits: parseCommits(git(args)), windowLabel: "" };
   if (isDate(SINCE)) {
     // The whole log, cut by the same filter the --log path applies. Passing the
     // bare day to git as --since would read it as that day at the current time
     // of day and drop every commit made earlier in the day.
-    return { commits: sinceDay(parseCommits(git(args)), SINCE), windowLabel: `window ${SINCE} → HEAD: ` };
+    return { commits: sinceDay(parseCommits(git(args)), SINCE), windowLabel: `window ${SINCE} (${ZONE} days) → HEAD: ` };
   }
   // A revision: everything reachable from HEAD that was COMMITTED at or after
   // the anchor's own commit time, the anchor included. Ancestry alone
@@ -191,8 +223,8 @@ function parseCommits(raw) {
     .split("\x1e")
     .filter((r) => r.trim())
     .map((r) => {
-      const [sha, date, subject, body = ""] = r.split("\x1f");
-      return { sha: sha.trim().slice(0, 7), date: date.trim(), subject: subject.trim(), body };
+      const [sha, stamp, subject, body = ""] = r.split("\x1f");
+      return { sha: sha.trim().slice(0, 7), date: dayOf(stamp.trim()), subject: subject.trim(), body };
     });
 }
 
@@ -444,7 +476,17 @@ function selfCheck() {
   check(passNumber("[fork] Review, second pass: …") === 2 && passNumber("[fork] Review pass 4: …") === 4 && passNumber("[fork] Second review pass, triaged: …") === 2 && passNumber("[fork] Review, reproducibility pass, triaged: …") === 0, "pass numbers from four subject shapes");
   check(passNumber("[fork] Review pass 4: the third pass's fix held, and …") === 4 && passNumber("[fork] Review, third pass: pass 2's RETURNING moved a test anchor …") === 3, "a subject that names two passes is attributed to the leftmost, whichever spelling");
   check(ticketOf("[fork] Review, second pass: that field is SMD-1730's, not this one's (SMD-1719)", "Body mentions SMD-1000 first.") === "SMD-1719" && ticketOf("[fork] Review pass 2: the probe beside SMD-1498's, re-run on the fixed table", "") === "SMD-1498" && ticketOf("[fork] Review pass 1: the header re-read (SMD-1463 review pass 1)", "SMD-1526 first in the body") === "SMD-1463" && ticketOf("[fork] Review, first pass", "Filed as SMD-1462.") === "SMD-1462" && ticketOf("[fork] Review, first pass", "no ticket") === "(none)" && ticketOf("[fork] Bump, and SMD-1616's probe re-run (SMD-1643, SMD-1616)", "") === "SMD-1643", "ticket: the first in the subject's trailing parenthetical, then its first mention, then the body");
-  check(FORMAT.includes("%x1f%cd%x1f") && !FORMAT.includes("%ad") && DATE === "--date=short-local", "rows carry the committer time, the clock the window is cut on, rendered in the zone the script runs in");
+  check(FORMAT.includes("%x1f%cI%x1f") && !FORMAT.includes("%ad") && !FORMAT.includes("%cd"), "rows carry the committer instant, the clock the anchor cuts on, not a rendered day");
+  {
+    const stamp = "2026-09-18T20:30:00-05:00"; // late evening in Chicago; already the 19th in UTC and Tokyo
+    const chicago = dayFormatter("America/Chicago"), utc = dayFormatter("UTC"), tokyo = dayFormatter("Asia/Tokyo");
+    check(dayOf(stamp, chicago) === "2026-09-18" && dayOf(stamp, utc) === "2026-09-19" && dayOf(stamp, tokyo) === "2026-09-19", "a committer instant becomes a day in the declared zone, not the machine's");
+    check(dayOf("2026-09-18T02:24:12+09:00", chicago) === "2026-09-17", "an instant committed in another offset is read on the declared zone's clock");
+    check(dayOf("2026-09-18", tokyo) === "2026-09-18" && dayOf("garbage", tokyo) === "garbage", "an older dump's bare day is kept as written; an unreadable stamp is left alone");
+    check(dayFormatter("Not/AZone") === null && dayFormatter("UTC") !== null, "an unknown zone name is refused, a known one accepted");
+    const cs = parseCommits("\x1e" + ["abcdef0123", "2026-09-18T20:30:00-05:00", "s", "b"].join("\x1f"));
+    check(cs.length === 1 && cs[0].date === dayOf("2026-09-18T20:30:00-05:00") && cs[0].sha === "abcdef0", "a parsed commit's date is its instant read in the running zone");
+  }
   check(sinceDay([{ date: "2026-09-17" }, { date: "2026-09-18" }, { date: "2026-09-19" }], "2026-09-18").length === 2, "a --since day keeps that day and later, on the row's own date");
   {
     const s = ticketSummary([
@@ -459,11 +501,11 @@ function selfCheck() {
   check(REVIEW_RE.test("[fork] Review, first pass: x") && REVIEW_RE.test("[fork] Review pass 6: x") && REVIEW_RE.test("[fork] Third review pass, triaged: x"), "the three review-pass subject shapes are recognised");
   check(!REVIEW_RE.test("[fork] This ticket's section is change 74: … while the third pass was in flight") && !REVIEW_RE.test("[fork] The ten-million-row second pass, measured") && !REVIEW_RE.test("[fork] Tidy the review passes left, while the files were open") && !REVIEW_RE.test("[fork] The reviewed pass over the bench, measured"), "a subject that only mentions a pass, or says reviewed, is not a review pass");
   check(BOYSCOUT_RE.test("[fork] Boyscout: tidy") && MERGE_RE.test("Merge origin/main into x: the review pass"), "boyscout and merge subjects told apart");
-  const a1 = parseArgs(["--since=abc", "--samples", "0", "--self-check"]);
+  const a1 = parseArgs(["--since=abc", "--samples", "0", "--zone", "UTC", "--self-check"]);
   const a2 = parseArgs(["--dump", "--self-check"]);
   const a3 = parseArgs(["--window", "x"]);
   const a4 = parseArgs(["--self-check=1"]);
-  check(a1["--since"] === "abc" && a1["--samples"] === "0" && a1["--self-check"] === true, "options read in both spellings");
+  check(a1["--since"] === "abc" && a1["--samples"] === "0" && a1["--zone"] === "UTC" && a1["--self-check"] === true, "options read in both spellings");
   check(!!a2.error && !!a3.error && !!a4.error, "a flag is never a value, an unknown option is refused, a flag takes no value");
   check(isRunResult("Committed suite 500/500; test-schema 890/890 untouched.") && !isRunResult("[9]'s >= passed 20/20 runs with the trigger dropped — toothless"), "a run result is suite names and counts only; a finding that quotes a count is not one");
   console.log(failures ? `\n${failures} self-check failure(s)` : "\nself-check green");
@@ -563,16 +605,17 @@ console.log();
 
 console.log("== Per ticket: passes run, and the last pass that found a code/teeth defect ==");
 {
-  const list = [...ticketSummary(rows).entries()].filter(([t, e]) => e.rows > 0 && t !== "(none)");
+  // Each ticket's last defect computed once, then sorted and labelled from that.
+  const list = [...ticketSummary(rows).entries()]
+    .filter(([t, e]) => e.rows > 0 && t !== "(none)")
+    .map(([t, e]) => ({ t, e, last: lastDefect(e) }))
+    .sort((a, b) => a.last.rank - b.last.rank);
   const hist = new Map();
-  for (const [, e] of list.sort((a, b) => lastDefect(a[1]).rank - lastDefect(b[1]).rank)) {
-    const { label } = lastDefect(e);
-    hist.set(label, (hist.get(label) ?? 0) + 1);
-  }
+  for (const { last } of list) hist.set(last.label, (hist.get(last.label) ?? 0) + 1);
   console.log(`tickets with bullet rows: ${list.length}`);
   console.log("last defect at → tickets: " + [...hist.entries()].map(([p, n]) => `${p}: ${n}`).join(", "));
-  const deep = list.filter(([, e]) => e.passes.size && Math.max(...e.passes) >= 5).sort((a, b) => Math.max(...b[1].passes) - Math.max(...a[1].passes));
-  if (deep.length) console.log("≥5 passes: " + deep.map(([t, e]) => `${t} (max ${Math.max(...e.passes)}, last defect ${lastDefect(e).label})`).join("; "));
+  const deep = list.filter(({ e }) => e.passes.size && Math.max(...e.passes) >= 5).sort((a, b) => Math.max(...b.e.passes) - Math.max(...a.e.passes));
+  if (deep.length) console.log("≥5 passes: " + deep.map(({ t, e, last }) => `${t} (max ${Math.max(...e.passes)}, last defect ${last.label})`).join("; "));
 }
 console.log();
 
@@ -597,11 +640,13 @@ if (SAMPLES > 0) {
     console.log(`-- ${t} (${rs.length})`);
     for (const r of sample(rs, SAMPLES)) console.log(`   [${r.mechanism}] ${r.ticket} p${r.pass ?? "?"}: ${r.text.slice(0, 150)}`);
   }
-  if (runResults.length) {
-    console.log();
-    console.log(`== Skipped as run results (${runResults.length}) — a finding here is a rule that needs a tag or a fix ==`);
-    for (const r of sample(runResults, SAMPLES)) console.log(`   ${r.ticket} p${r.pass ?? "?"} ${r.sha}: ${r.text.slice(0, 150)}`);
-  }
+}
+// Every dropped bullet, not a sample and not subject to --samples 0: the section
+// exists to show the rare finding a rule lost, and there are few (one in the log).
+if (runResults.length) {
+  console.log();
+  console.log(`== Skipped as run results (all ${runResults.length}) — a finding here is a rule that needs a tag or a fix ==`);
+  for (const r of runResults) console.log(`   ${r.ticket} p${r.pass ?? "?"} ${r.sha}: ${r.text.slice(0, 150)}`);
 }
 
 if (DUMP) {
