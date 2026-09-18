@@ -3360,6 +3360,174 @@ HNSW does not build in a practical window, so the anchor is IVFFlat).
 
 
 
+### The composed match — coarse recall + exact rerank, stores as complements not substitutes (SMD-1707)
+
+SMD-1037, SMD-1662 and SMD-1696 all raced stores as **substitutes**: each store
+doing the *whole* match (vector ANN top-k + return the rows), asking "which single
+store serves the read?" The id→row hop was treated as cost to minimise (SMD-1662)
+or eliminate (SMD-1696). But that hop is the **precision stage** where a multi-store
+match earns its keep — exact metadata predicates, recency (SMD-945), keyword/FTS
+fusion (SMD-958) — the things the ANN cannot express. This measures the stores as
+**complements**:
+
+- **Stage 1 — coarse recall:** a scalable ANN engine (LanceDB, the SMD-1662 store)
+  returns a large candidate set (K′ ≫ k), cheap and shardable.
+- **Stage 2 — exact rerank / fuse in Postgres** over that *small* candidate set:
+  exact cosine (MIN over a ref's windows), an exact metadata filter, an optional
+  recency blend (SMD-945's `recency_score`, inlined), and an optional keyword arm
+  fused with the vector *rank* by symmetric RRF over `docs.tsv` (both terms on the
+  RRF scale, as `search_thoughts_hybrid` fuses them — SMD-958). The "resolve"
+  reframed as the rerank join — no `ORDER BY` over the vector index anywhere, so it
+  is exact within the candidate set by construction and reads |cand| = K′ rows, not
+  N (rows read is bounded by K′, but wall-clock still grows with N and is cache-bound
+  at scale — see the scale table).
+
+`store-composed.ts` drives it against one exact-cosine oracle, K = 10. Comparators:
+the substitute (vector-only ANN@k at the shallow depth `FETCH`=50), a single-store
+Postgres hybrid (vector ⋈ FTS RRF over the whole table, the SMD-1037 hybrid), a
+`pg`-HNSW-coarse control (single-store staging), and the exact oracle (ceiling). The
+coarse-depth **K′ is swept** to trace quality and stage cost. (Metrics against the
+oracle's top-k: recall@10 is set overlap; nDCG@10 is binary-gain — a returned ref is
+relevant iff in the oracle top-k — discounted by result position; MRR here is the
+reciprocal rank of the oracle's *top-1* ref in the result, the `eval-recency.ts`
+convention, not the mean over a relevant set.)
+
+**Real corpus (601 issues, 963 points, 1024-dim, 150 title queries).** At this size
+the ANN is already exact — the substitute gets 100% recall@10 unfiltered — so there
+is *nothing for the exact rerank to recover*; the composition matches it, and the
+K′ sweep only shows the mechanism warming up (K′=10 → 78%, K′=25 → 99%, K′=50 →
+100%). The recall win is a scale phenomenon (below), not a small-corpus one.
+
+| strategy | unfiltered | portal (3.5%) | design (2.3%) | t2 (2.8%) | t07 (1.0%) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| vector-only ANN@k (substitute, depth 50) | 100% | 100% | 100% | 100% | 100% |
+| composed C(200) — coarse→exact rerank | 100% | 100% | 100% | 100% | 100% |
+| composed C(200) via pg HNSW coarse (control) | 100% | 32% | 37% | 30% | 14% |
+| single-store PG hybrid (vector ⋈ FTS RRF) | 80% | 4% | 4% | 3% | 2% |
+| exact oracle (full scan, ceiling) | 100% | 100% | 100% | 100% | 100% |
+
+The **pg-HNSW-coarse control collapses on selective filters** (portal 32%, t07 14%)
+— pgvector's post-filter is the SMD-968 hazard, and stage 2's exact filter cannot
+recover rows the coarse stage never surfaced. Lance coarse prefilters and holds
+filtered recall (100%). *The coarse store's filtering quality is load-bearing.* (The
+hybrid's low recall-vs-cosine-oracle is expected — it optimises keyword+vector, a
+different objective; see the fusion section. It also applies no metadata filter, so
+its filtered-arm cells are an unfiltered result scored against a filtered oracle —
+read only its unfiltered cell.)
+
+**1M rows (64-dim, 20 queries) — the crux.** Here the ANN loses recall (substitute
+60% unfiltered, nDCG 0.72), and the composition's real shape appears:
+
+| K′ | recall@10 | nDCG@10 | MRR | stage-1 coarse p50 (ms) | stage-2 rerank p50 (ms) | total p50 (ms) |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 10 | 60% | 0.717 | 0.700 | 4.6 | 0.9 | 5.4 |
+| 50 | 60% | 0.717 | 0.700 | 5.2 | 1.2 | 6.4 |
+| 200 | 60% | 0.717 | 0.700 | 6.5 | 2.2 | 8.7 |
+| 500 | 83% | 0.889 | 0.800 | 11.5 | 4.1 | 15.5 |
+| 1000 | 92% | 0.949 | 0.900 | 15.2 | 6.5 | 21.7 |
+
+Recall@10 does **not** move until K′ is deep enough. At the headline K′=200 the
+composed match ties the substitute (60%) — the exact rerank only *re-orders* the
+candidate set, and the true top-10 neighbours are simply not in a 200-candidate ANN
+pool 40% of the time. Only **deep coarse recall recovers it**: 83% at K′=500, **92%
+at K′=1000**, approaching the oracle's 100% — at 21.7 ms total vs the oracle's
+full-scan 30.1 ms. So the composition's quality win is *deep coarse recall + exact
+ordering*, a quality/latency dial (K′), not a free lunch: the exact rerank makes a
+deep-but-approximate set precisely ordered, but you pay stage-1 cost to make the set
+deep. (Recall is HNSW-build-dependent and drifts ±~2 pts run-to-run; latencies drift
+with machine load — numbers here are one representative committed-code run.)
+
+Filtered recall repeats the real-corpus split at scale: Lance coarse (prefilter)
+holds it on the selective tiers (t10/t1/t01 = 100%) at a latency cost (~40 ms p50);
+the non-selective t50 tier sits at the substitute's 71% — half the corpus passing the
+filter is the same coarse-recall problem as the unfiltered arm, which the prefilter
+does not fix. The pg-HNSW-coarse control collapses (41/32/17/2% across
+t50/t10/t1/t01).
+
+**The scale claim, corrected by the 10M measurement — the composed *total* stays
+below the ~O(N) full scan and its edge widens with N, but the rerank stage's
+wall-clock is cache-bound and run-to-run volatile, not cleanly sub-linear.** The
+rerank reads a bounded K′ rows, but at 10M those K′ heap fetches hit a heap that
+exceeds RAM, so its wall-clock is dominated by cache/OS-load and swings between runs.
+Two runs of the committed code measured, at K′=1000:
+
+| corpus | stage-2 rerank p50 | composed total p50 | exact full scan p50 | full-scan ÷ composed-total |
+| --- | ---: | ---: | ---: | ---: |
+| 1M (64-dim) | 6.5 ms | 21.7 ms | 30.1 ms | 1.4× |
+| 10M (64-dim), run A | 36.5 ms | 71.9 ms | 364.3 ms | 5.1× |
+| 10M (64-dim), run B | 108.5 ms | 154.8 ms | 379.7 ms | 2.5× |
+
+What is **stable**: the exact full scan is a clean ~O(N) (≈30 ms → ≈370 ms, ~12×), and
+the composed *total* beats it at both scales, by more at 10M (1.4× cheaper at 1M →
+2.5–5.1× at 10M). What is **not** stable: the rerank *stage* wall-clock — 6.5 ms at 1M
+but 36.5–108.5 ms at 10M across two runs (a ~6×–17× jump for 10× data), because the K′
+heap fetches are cache-misses once the heap outgrows RAM. So the a-priori "rerank is
+N-independent" is doubly wrong — it grows with N and is volatile — but the direction
+the composition needs holds: the bounded-candidate total scales far better than the
+~O(N) full scan. The coarse ANN is the half that grows most with N and is the
+shardable one; sharding it would improve the system edge further, but that is
+asserted, not measured here. (Filtered reads at 10M are dominated by the coarse
+stage, not the
+rerank: the substitute's filtered-arm-mean Lance prefilter cost ~237–259 ms p50 and the
+composed arm ~267–298 ms, the pg-HNSW-coarse control ~361–579 ms — the recall tier's
+filter cost is the 10M wart, as in SMD-1696's read-model filtered reads.)
+
+**Fusion in the rerank — the precision the ANN can't express (real corpus).** Judged
+against the objective each serves, not the pure-cosine oracle:
+
+*Recency* — recall@10 vs an exact recency-blended oracle (w=0.3, 90-day half-life):
+
+| strategy | recall@10 vs recency oracle |
+| --- | ---: |
+| vector-only ANN@k (ignores recency) | 18% |
+| composed C(200), pure cosine (ignores recency) | 18% |
+| composed C(200) + recency blend | 73% |
+
+The exact rerank stage *serves the recency objective* (73% at ~3.8 ms p50) that the
+ANN cannot express (18%) — precision quantified, not a recall loss. It caps at 73%
+rather than 100% because the cosine coarse stage does not surface every
+recency-optimal row (deeper K′ raises it) — the same "coarse recall is the binding
+constraint" lesson.
+
+*Keyword* — top-10 overlap with the whole-table hybrid it reproduces over the
+bounded candidate set: pure cosine 80% → +keyword RRF **94%**. The composed keyword
+arm fuses the vector rank and keyword rank by symmetric RRF (both on the RRF scale,
+as `search_thoughts_hybrid` does), so folding in the keyword signal pulls the
+composed top-k onto the full-table hybrid's ranking — the hybrid's precision
+reproduced over a bounded candidate set, not over the whole corpus.
+
+Reproduce:
+
+```
+bun store-composed.ts                                        # real corpus, full sweep + fusion
+OB1_STORE_SCALES=1000000 OB1_STORE_DIM=64 OB1_STORE_PAYLOAD_BYTES=256 \
+  OB1_STORE_QUERIES=20 OB1_STORE_PG_SHM=3g bun store-composed.ts        # 1M
+OB1_STORE_SCALES=10000000 OB1_STORE_DIM=64 OB1_STORE_PAYLOAD_BYTES=128 \
+  OB1_STORE_QUERIES=20 OB1_STORE_PG_INDEX=ivfflat OB1_STORE_SKIP_ORACLE_OVER=2000000 \
+  OB1_STORE_MAINT_MEM=3GB OB1_STORE_PG_SHM=3g bun store-composed.ts     # 10M (recall skipped; latency + K′ curve)
+```
+
+**Verdict — the multi-store win is composition, and it is real but conditional.**
+Where a single ANN pass loses recall at scale (1M+), *deep* coarse recall + exact
+rerank recovers it toward exact quality (92% of the oracle at K′=1000, measured at 1M
+— where the composed total was ~1.4× cheaper than the full scan), and the rerank
+stage adds precision the ANN cannot express (the recency objective, exact filters)
+over a bounded K′-row candidate set whose advantage over the full scan *grows* with N
+(composed-total edge ~1.4× at 1M → 2.5–5.1× at 10M across runs, where recall itself was
+skipped). This is the id→row hop reframed as the *precision stage*, exactly as
+SMD-1696 predicted. The conditions matter: the win needs deep coarse recall (K′
+large → stage-1 cost grows and must shard), the coarse store's filtering quality is
+load-bearing (a post-filtering coarse stage throws filtered recall away before the
+rerank sees it), and on a small corpus there is nothing to recover. So a second
+store earns its place as the **recall tier** at scale, with Postgres as the
+**precision tier** — quality *and* scale, not substitution. **Eval-only; not built**
+— a composed retrieval path in the product is a separate scoped issue if a bar
+clears. Complements SMD-1697 (where the single store stops fitting). Stage 3 (a
+cross-encoder / LLM reranker) is out of scope: the rerank spikes (SMD-1305-era)
+measured it flat-to-negative and it is a heavy out-of-process dependency. (LanceDB
+is Apache-2.0, the fork FSL-1.1-MIT — SMD-1038's guardrail — a dependency of an
+eval, not the product.)
+
 ## Quantised indexes at the shipped width: halfvec adopted, binary declined (SMD-1501)
 
 `eval-quant.ts`, run as `bun run quant` with `OB1_EVAL_QUANT_SOURCE` naming a
