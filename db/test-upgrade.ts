@@ -436,8 +436,9 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // lock, SMD-1043), 034 (the opt-in query log, SMD-1295), 035 (a
   // re-capture writes no provenance, SMD-1453), 036 (delete_thought's lock
   // order, SMD-1462), 037 (the routing count's gate, SMD-1463) and 038 (the
-  // gate's sample by TID range, SMD-1526) and 039 (the half-precision walk,
-  // SMD-1501) stay recorded and are never tried. 030 is the right one to make
+  // gate's sample by TID range, SMD-1526), 039 (the half-precision walk,
+  // SMD-1501) and 041 (the citations facet and delete_thought's third
+  // argument, SMD-1712) stay recorded and are never tried. 030 is the right one to make
   // pending
   // because its prerequisites — 015 and 021's embedding_model column — are
   // exactly what a through-020 schema lacks, so it fails by name rather than
@@ -446,11 +447,12 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // 016, 025, 032 and 033; 036 redefines delete_thought and needs only 009's
   // body and 029's supersession lock; 037 redefines 020's match_thoughts and
   // 038 037's; 039 redefines it again and swaps 001's and 007's two indexes,
-  // which every schema has — all recorded by the baseline with their
-  // prerequisites present, so none becomes the
-  // plain-run failure point above).
+  // which every schema has; 041 adds a table on 001's and redefines
+  // delete_thought on 009's body and 036's lock key, all present — all
+  // recorded by the baseline with their prerequisites present, so none
+  // becomes the plain-run failure point above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 10, `030 is among the last ten migrations (${last})`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 11, `030 is among the last eleven migrations (${last})`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&

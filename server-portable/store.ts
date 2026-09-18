@@ -444,12 +444,24 @@ export function normaliseProposal(r: Record<string, unknown>): SupersessionPropo
 /**
  * What update_thought / delete_thought refuse with. SUPERSEDES_NOT_FOUND and
  * WOULD_CYCLE (migration 032): the provenance envelope named a thought that
- * does not exist, or a pointer that would close a supersession loop.
+ * does not exist, or a pointer that would close a supersession loop. CITED
+ * (migration 041): active citations rest on the thought a delete named, and
+ * the caller did not ask to detach them — `citedBy` counts them, `citations`
+ * is up to ten of the citing rows, newest first.
  */
-export type MutationError = "NOT_FOUND" | "STALE_READ" | "DUPLICATE_CONTENT" | "SUPERSEDES_NOT_FOUND" | "WOULD_CYCLE";
+export type MutationError = "NOT_FOUND" | "STALE_READ" | "DUPLICATE_CONTENT" | "SUPERSEDES_NOT_FOUND" | "WOULD_CYCLE" | "CITED";
+/** One citing row of a CITED refusal: the facet, the thought it is on, its stance and text (migration 041). */
+export type Citation = { id: string; thoughtId: string; stance: string; text: string; createdAt?: string };
 export type MutationResult =
   | { ok: true; id: string }
-  | { ok: false; error: MutationError; currentUpdatedAt?: string };
+  | { ok: false; error: MutationError; currentUpdatedAt?: string; citedBy?: number; citations?: Citation[] };
+/**
+ * `detached` (migration 041): the active citations the delete detached from the
+ * removed source — non-zero only when `detach` was asked; `inactive`, when
+ * present, the expired or superseded citations that named it and were marked
+ * the same way in either mode.
+ */
+export type DeleteResult = MutationResult & { detached?: number; inactive?: number };
 /**
  * `duplicateOf` (migration 018): the edit's text normalises to what the row
  * already held AND another thought carries that fingerprint — a pair from
@@ -463,12 +475,15 @@ export type UpdateResult = MutationResult & { updatedAt?: string; duplicateOf?: 
  * the store's discriminated union. Shared so the two stores cannot disagree
  * about what a refusal looks like — the class of bug the audit work hit twice.
  */
-export function normaliseMutation(r: Record<string, unknown> | undefined): UpdateResult {
+export function normaliseMutation(r: Record<string, unknown> | undefined): UpdateResult & DeleteResult {
   if (!r) return { ok: false, error: "NOT_FOUND" };
   if (r.ok === true) {
     return {
       ok: true,
       id: String(r.id),
+      // 041's delete counts; absent on an edit's envelope and on a pre-041 body.
+      detached: typeof r.detached === "number" ? r.detached : undefined,
+      inactive: typeof r.inactive === "number" ? r.inactive : undefined,
       // isoTimestamp, not String: the function returns jsonb, so this arrives
       // as Postgres's `+00:00` spelling on both clients, and `fetch` prints the
       // same column through normaliseThoughtRecord. Passing the ISO value back
@@ -485,6 +500,17 @@ export function normaliseMutation(r: Record<string, unknown> | undefined): Updat
     ok: false,
     error: (r.error as MutationError) ?? "NOT_FOUND",
     currentUpdatedAt: isoTimestampOpt(r.current_updated_at),
+    // 041's CITED refusal: the count, and the citing rows the function sampled.
+    citedBy: typeof r.cited_by === "number" ? r.cited_by : undefined,
+    citations: Array.isArray(r.citations)
+      ? (r.citations as Record<string, unknown>[]).map((c) => ({
+          id: String(c.id),
+          thoughtId: String(c.thought_id),
+          stance: String(c.stance ?? ""),
+          text: String(c.text ?? ""),
+          createdAt: isoTimestampOpt(c.created_at),
+        }))
+      : undefined,
   };
 }
 
@@ -797,11 +823,18 @@ export interface ThoughtStore {
     provenance?: UpdateProvenance;
   }): Promise<UpdateResult>;
 
-  /** Hard delete. Chunks cascade; migration 008 preserves the prior content. */
+  /**
+   * Hard delete. Chunks cascade; migration 008 preserves the prior content.
+   * Refused as CITED (migration 041) while active citations rest on the
+   * thought, unless `detach` — then each citing row keeps its text and stance,
+   * loses its source and records the deleted id and time, and the result
+   * says how many.
+   */
   deleteThought(opts: {
     id: string;
     actor?: Actor;
-  }): Promise<MutationResult>;
+    detach?: boolean;
+  }): Promise<DeleteResult>;
 
   /**
    * Resolve a key digest and its configured name to a stable agent id,

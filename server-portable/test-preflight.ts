@@ -1064,30 +1064,32 @@ else {
       await claims.unsafe("GRANT SELECT ON ALL TABLES IN SCHEMA public TO ob1_pf_capture");
       await claims.unsafe("GRANT INSERT, UPDATE, DELETE ON thoughts TO ob1_pf_capture");
 
-      // thoughts satisfied, but no INSERT/DELETE on thought_chunks and no INSERT
-      // on thought_audit: refused, both tables named in CAPTURE_WRITES order,
-      // each with its GRANT.
+      // thoughts satisfied, but no INSERT/DELETE on thought_chunks, no INSERT
+      // on thought_audit and no UPDATE on thought_facets (041's delete guard
+      // writes the detached citations as the caller): refused, the three
+      // tables named in CAPTURE_WRITES order, each with its GRANT.
       const missingBoth = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
       const writeLine = (out: string) => out.split("\n").find((l) => /write privileges/.test(l)) ?? "";
       assert(missingBoth.code === 1 &&
              /write privileges\s+this connection's role \(ob1_pf_capture\) is missing privileges the capture path's writers need/.test(missingBoth.out) &&
-             /INSERT, DELETE on thought_chunks; INSERT on thought_audit/.test(writeLine(missingBoth.out)) &&
-             /GRANT INSERT, DELETE ON thought_chunks TO ob1_pf_capture;\s+GRANT INSERT ON thought_audit TO ob1_pf_capture;/.test(missingBoth.out),
-             `a role missing the chunk and audit writes does not start, each named in order with its GRANT (exit ${missingBoth.code})`);
+             /INSERT, DELETE on thought_chunks; INSERT on thought_audit; UPDATE on thought_facets/.test(writeLine(missingBoth.out)) &&
+             /GRANT INSERT, DELETE ON thought_chunks TO ob1_pf_capture;\s+GRANT INSERT ON thought_audit TO ob1_pf_capture;\s+GRANT UPDATE ON thought_facets TO ob1_pf_capture;/.test(missingBoth.out),
+             `a role missing the chunk, audit and facet writes does not start, each named in order with its GRANT (exit ${missingBoth.code})`);
       assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, both 035's/.test(missingBoth.out), "…while atomic capture, a separate fact, is ok for it");
 
-      // Grant the chunk writes by hand; only the audit INSERT remains named.
+      // Grant the chunk writes by hand; the audit INSERT and the facet UPDATE remain named.
       await claims.unsafe("GRANT INSERT, DELETE ON thought_chunks TO ob1_pf_capture");
       const missingAudit = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
       assert(missingAudit.code === 1 &&
-             /INSERT on thought_audit/.test(writeLine(missingAudit.out)) &&
+             /INSERT on thought_audit; UPDATE on thought_facets/.test(writeLine(missingAudit.out)) &&
              !/thought_chunks/.test(writeLine(missingAudit.out)) &&
-             /GRANT INSERT ON thought_audit TO ob1_pf_capture;/.test(missingAudit.out),
-             `with the chunk writes granted, only the audit INSERT is named (exit ${missingAudit.code})`);
+             /GRANT INSERT ON thought_audit TO ob1_pf_capture;\s+GRANT UPDATE ON thought_facets TO ob1_pf_capture;/.test(missingAudit.out),
+             `with the chunk writes granted, the audit INSERT and the facet UPDATE are named, the chunks no longer (exit ${missingAudit.code})`);
 
-      // Grant the audit INSERT by hand so the base capture set is satisfied — the
-      // extraction conditional is the remaining lever.
+      // Grant the audit INSERT and the facet UPDATE by hand so the base capture
+      // set is satisfied — the extraction conditional is the remaining lever.
       await claims.unsafe("GRANT INSERT ON thought_audit TO ob1_pf_capture");
+      await claims.unsafe("GRANT UPDATE ON thought_facets TO ob1_pf_capture");
       const baseOk = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
       assert(baseOk.code === 0 && /write privileges\s+ob1_pf_capture holds the capture path's privileges/.test(baseOk.out) && !/thought_work_claims/.test(writeLine(baseOk.out)),
              `with the audit INSERT granted and extraction off, the base capture set is ok and says nothing of thought_work_claims (exit ${baseOk.code})`);

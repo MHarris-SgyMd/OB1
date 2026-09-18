@@ -4094,13 +4094,14 @@ console.log("\n[36] Migration 036: delete_thought and review_supersession_propos
   // 032/029/009 without restoring would otherwise silently give us a stale body.
   await restoreShipped("delete_thought", "review_supersession_proposal");
   await db.exec(`DELETE FROM thoughts`);
-  // 036 is the only redefinition of delete_thought since 009; the body is
-  // 009's plus one advisory-lock line, so a future edit that drops the lock —
-  // reopening the accept-vs-delete deadlock db/test-live.ts [6g] proves — is
-  // caught here, in the fast suite, without a live server.
-  assert((await functionsNamed("delete_thought")) === 1 && lastDefinerOf("delete_thought").startsWith("036"),
-    `one delete_thought, 036 the last definer (${lastDefinerOf("delete_thought")})`);
-  const src = String((await db.query<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = $1::regprocedure`, ["delete_thought(uuid, jsonb)"])).rows[0].s);
+  // 036 added one advisory-lock line to 009's body; 041 carried that body
+  // forward under a third parameter, the two-argument form dropped so there is
+  // still one function. A future edit that drops the lock — reopening the
+  // accept-vs-delete deadlock db/test-live.ts [6g] proves — is caught here, in
+  // the fast suite, without a live server. [39] holds what 041 added.
+  assert((await functionsNamed("delete_thought")) === 1 && lastDefinerOf("delete_thought").startsWith("041"),
+    `one delete_thought, 041 the last definer carrying 036's lock (${lastDefinerOf("delete_thought")})`);
+  const src = String((await db.query<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = $1::regprocedure`, ["delete_thought(uuid, jsonb, boolean)"])).rows[0].s);
   const iLock = src.indexOf("pg_advisory_xact_lock(hashtext('ob1:supersession-review'))");
   const iDelete = src.indexOf("DELETE FROM thoughts WHERE id = p_id");
   assert(iLock > 0 && iDelete > 0 && iLock < iDelete,
@@ -4301,6 +4302,147 @@ console.log("\n[38] Migration 039: the walk's index is half precision — the sw
   // and PGlite refuses the catalog write ("tuple concurrently updated") where
   // a server does not.
   await db.exec(`DELETE FROM thoughts`);
+}
+
+console.log("\n[39] Migration 041: a cited source is refused as a value and detached on request, a citation on a thought the same statement deletes never counts, history never blocks, the writer joins the lock order, and the shape re-applies (SMD-1712)");
+{
+  await restoreShipped("delete_thought");
+  await db.exec(`DELETE FROM thoughts`);
+  const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
+  const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
+  type Env = { ok: boolean; id?: string; error?: string; cited_by?: number; citations?: { id: string; thought_id: string; stance: string; text: string }[]; detached?: number; inactive?: number };
+  const thought = async (content: string) => String((await one<{ id: string }>(`SELECT upsert_thought($1, '{"metadata":{}}'::jsonb) ->> 'id' AS id`, [content])).id);
+  const del = async (id: string, detach?: boolean): Promise<Env> =>
+    (await one<{ r: Env }>(detach === undefined ? `SELECT delete_thought($1::uuid, NULL::jsonb) AS r` : `SELECT delete_thought($1::uuid, NULL::jsonb, $2::boolean) AS r`, detach === undefined ? [id] : [id, detach])).r;
+  const cite = async (t: string, s: string, text = "a statement", stance = "retrieved"): Promise<Env> =>
+    (await one<{ r: Env }>(`SELECT record_citation($1::uuid, $2::uuid, $3, $4) AS r`, [t, s, text, stance])).r;
+  const exists = async (id: string) => (await one<{ c: number }>(`SELECT count(*)::int AS c FROM thoughts WHERE id = $1::uuid`, [id])).c === 1;
+  const refuses = async (sql: string, params: unknown[] = []): Promise<string> => { try { await db.query(sql, params); return ""; } catch (e) { return (e as Error).message; } };
+  const refusesExec = async (sql: string): Promise<string> => { try { await db.exec(sql); return ""; } catch (e) { return (e as Error).message; } };
+  const GHOST = "00000000-0000-4000-8000-000000000000";
+
+  // The shape: two triggers, the guard per statement over the deleted rows;
+  // one delete_thought of three arguments; the function catches only the
+  // guard's SQLSTATE; the lock is outside the block; the writer's order.
+  const trg = await q<{ tgname: string; rel: string; tgtype: number; e: string; old_table: string | null }>(
+    `SELECT tgname, tgrelid::regclass::text AS rel, tgtype, tgenabled AS e, tgoldtable AS old_table FROM pg_trigger WHERE NOT tgisinternal AND tgname IN ('thoughts_guard_citation_sources', 'thought_facets_validate') ORDER BY 1`);
+  assert(trg.length === 2 && trg[0].tgname === "thought_facets_validate" && trg[0].rel === "thought_facets" && trg[1].tgname === "thoughts_guard_citation_sources" && trg[1].rel === "thoughts" && trg.every((t) => t.e === "O"),
+    `the validate trigger is on thought_facets and the guard on thoughts, both enabled (${trg.map((t) => `${t.tgname}@${t.rel}`).join(", ")})`);
+  // tgtype bits: 1 row-level, 2 BEFORE, 4 INSERT, 8 DELETE, 16 UPDATE.
+  assert(Number(trg[1].tgtype) === 8 && trg[1].old_table === "deleted", `the guard fires AFTER DELETE FOR EACH STATEMENT with the deleted rows as a transition table (tgtype ${trg[1].tgtype}, old table ${trg[1].old_table})`);
+  assert((Number(trg[0].tgtype) & 3) === 3 && (Number(trg[0].tgtype) & 20) === 20, `the validate trigger is BEFORE INSERT OR UPDATE FOR EACH ROW (tgtype ${trg[0].tgtype})`);
+  const forms = await one<{ three: boolean; two: boolean }>(`SELECT to_regprocedure('delete_thought(uuid, jsonb, boolean)') IS NOT NULL AS three, to_regprocedure('delete_thought(uuid, jsonb)') IS NULL AS two`);
+  assert((await functionsNamed("delete_thought")) === 1 && forms.three && forms.two && lastDefinerOf("delete_thought").startsWith("041"), `one delete_thought, of three arguments, the two-argument form dropped (${lastDefinerOf("delete_thought")})`);
+  const src = String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = 'delete_thought(uuid, jsonb, boolean)'::regprocedure`)).s);
+  // The one EXCEPTION clause names the one SQLSTATE; the body's comments may
+  // mention foreign_key_violation as what it does NOT catch.
+  const caught = [...src.matchAll(/EXCEPTION\s+WHEN\s+(.+?)\s+THEN/g)].map((m) => m[1]);
+  assert(caught.length === 1 && caught[0] === "SQLSTATE 'OB001'", `the function catches the guard's own SQLSTATE and nothing else — a real foreign-key failure is not its to answer (${caught.join(" | ") || "no EXCEPTION clause"})`);
+  assert(src.indexOf("pg_advisory_xact_lock(hashtext('ob1:supersession-review'))") > 0 && src.indexOf("pg_advisory_xact_lock") < src.indexOf("  BEGIN\n    DELETE FROM thoughts WHERE id = p_id"), "the supersession lock is taken before the block the DELETE runs in, so a refusal's rollback does not release it");
+  const idx = await q<{ indexdef: string }>(`SELECT indexdef FROM pg_indexes WHERE tablename = 'thought_facets' ORDER BY 1`);
+  assert(idx.some((i) => /\(\(payload ->> 'source_id'::text\)\)/.test(i.indexdef) && /WHERE \(kind = 'citation'::text\)/.test(i.indexdef)), `the guard's lookup has its partial expression index (${idx.map((i) => i.indexdef.replace(/^CREATE INDEX /, "").split(" ON ")[0]).join(", ")})`);
+  const w = String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = 'record_citation(uuid, uuid, text, text)'::regprocedure`)).s);
+  assert(w.indexOf("pg_advisory_xact_lock(hashtext('ob1:supersession-review'))") > 0 && w.indexOf("pg_advisory_xact_lock") < w.indexOf("INSERT INTO thought_facets"), "record_citation takes the supersession lock before its INSERT — the writers' order");
+  const v = String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = 'thought_facets_validate()'::regprocedure`)).s);
+  assert(/FROM thoughts WHERE id = v_source::uuid FOR KEY SHARE/.test(v), "the validate trigger locks the source KEY SHARE, as a foreign key would");
+
+  // Refuse, as a value; nothing written.
+  const S = await thought("the source: the API allows 600 calls a minute");
+  const C = await thought("the note: the ceiling is 500 because of the limit");
+  const wrote = await cite(C, S, "the limit is 600 a minute");
+  assert(wrote.ok === true && typeof wrote.id === "string", `record_citation writes the row (${JSON.stringify(wrote)})`);
+  const refused = await del(S);
+  assert(refused.ok === false && refused.error === "CITED" && refused.id === S && refused.cited_by === 1 && refused.citations?.length === 1 && refused.citations[0].thought_id === C && refused.citations[0].stance === "retrieved" && refused.citations[0].text === "the limit is 600 a minute",
+    `deleting the source is refused as CITED with the count and the citing row (${JSON.stringify(refused)})`);
+  assert((await exists(S)) && (await one<{ c: number }>(`SELECT count(*)::int AS c FROM thought_audit WHERE thought_id = $1::uuid AND action = 'delete'`, [S])).c === 0, "…the source stands and no audit delete row was written");
+  const ghost = await del(GHOST);
+  assert(ghost.ok === false && ghost.error === "NOT_FOUND", `a two-argument call resolves through the default, and a missing row is still NOT_FOUND (${JSON.stringify(ghost)})`);
+  assert((await cite(C, C)).error === "SELF_CITATION" && (await cite(C, S, "x", "guessed")).error === "BAD_STANCE" && (await cite(C, S, "   ")).error === "EMPTY_TEXT" && (await cite(C, GHOST)).error === "SOURCE_NOT_FOUND" && (await cite(GHOST, S)).error === "NOT_FOUND",
+    "record_citation refuses a self-citation, a stance outside the three, an empty text, a ghost source and a ghost thought, each by name");
+  // Detach: the row goes, the citation keeps its text and records the source.
+  const detached = await del(S, true);
+  assert(detached.ok === true && detached.detached === 1 && detached.inactive === undefined && !(await exists(S)), `with p_detach the source is deleted and one citation detached (${JSON.stringify(detached)})`);
+  const facet = (await one<{ payload: Record<string, unknown> }>(`SELECT payload FROM thought_facets WHERE thought_id = $1::uuid`, [C])).payload;
+  assert(facet.source_id === null && facet.source_deleted_id === S && typeof facet.source_deleted_at === "string" && facet.text === "the limit is 600 a minute" && facet.stance === "retrieved", `the citation keeps its text and stance and records the deleted source (${JSON.stringify(facet)})`);
+  assert((await one<{ c: number }>(`SELECT count(*)::int AS c FROM thought_audit WHERE thought_id = $1::uuid AND action = 'delete'`, [S])).c === 1, "…and the delete is audited — the settings were made outside the block the refusal rolls back");
+  assert(/null only after the guard detached it/.test(await refuses(`UPDATE thought_facets SET payload = payload - 'source_deleted_id' WHERE thought_id = $1::uuid`, [C])), "the detached shape needs source_deleted_id — a citation cannot simply lose its source");
+  assert((await del(C)).ok === true && (await one<{ c: number }>(`SELECT count(*)::int AS c FROM thought_facets`)).c === 0, "deleting the citing thought cascades its facets");
+
+  // History never blocks, and is marked when the source goes.
+  const S2 = await thought("a second source with only stale citations");
+  const C2 = await thought("a note whose citations of the second source are history");
+  const expired = (await cite(C2, S2, "an old claim")).id!;
+  await db.query(`UPDATE thought_facets SET valid_until = now() - interval '1 day' WHERE id = $1::uuid`, [expired]);
+  const replaced = (await cite(C2, S2, "a replaced claim")).id!;
+  const replacing = (await cite(C2, S2, "the replacing claim")).id!;
+  await db.query(`UPDATE thought_facets SET superseded_by = $2::uuid WHERE id = $1::uuid`, [replaced, replacing]);
+  const oneActive = await del(S2);
+  assert(oneActive.error === "CITED" && oneActive.cited_by === 1 && oneActive.citations?.[0].text === "the replacing claim", `only the active citation counts and is sampled (${JSON.stringify(oneActive)})`);
+  await db.query(`UPDATE thought_facets SET valid_until = now() - interval '1 hour' WHERE id = $1::uuid`, [replacing]);
+  const clean = await del(S2);
+  assert(clean.ok === true && clean.detached === 0 && clean.inactive === 3, `with every citation expired or superseded the delete goes through and says three were marked (${JSON.stringify(clean)})`);
+  const marked = await q<{ s: string | null; d: string }>(`SELECT payload->>'source_id' AS s, payload->>'source_deleted_id' AS d FROM thought_facets WHERE thought_id = $1::uuid`, [C2]);
+  assert(marked.length === 3 && marked.every((m) => m.s === null && m.d === S2), "…and all three record the deleted source, so no row names a thought that is gone");
+  assert(/violates check constraint/.test(await refuses(`UPDATE thought_facets SET superseded_by = id WHERE id = $1::uuid`, [replacing])), "a facet cannot supersede itself");
+
+  // Thirteen: the count is the whole, the sample ten.
+  const S3 = await thought("a source thirteen notes cite");
+  for (let i = 0; i < 13; i++) await cite(await thought(`citing note number ${i} of thirteen`), S3, `statement ${i}`);
+  const many = await del(S3);
+  assert(many.error === "CITED" && many.cited_by === 13 && many.citations?.length === 10 && new Set(many.citations.map((c) => c.id)).size === 10, `thirteen citations: cited_by 13, ten distinct rows sampled (${many.citations?.length})`);
+
+  // One statement, the note and its source together: nothing survives resting
+  // on nothing → clean, whatever the row order; a third thought's citation
+  // refuses it and the statement writes nothing.
+  const S4 = await thought("source deleted together with its note");
+  const C4 = await thought("note deleted together with its source");
+  await cite(C4, S4, "together");
+  const C5 = await thought("a note that survives, citing the same source");
+  await cite(C5, S4, "survives");
+  assert(/is cited as a source by 1 active citation\(s\) on thoughts this delete leaves standing/.test(await refuses(`DELETE FROM thoughts WHERE id IN ($1::uuid, $2::uuid)`, [S4, C4])) && (await exists(S4)) && (await exists(C4)),
+    "deleting note and source together while a third thought cites the source is refused, and the statement wrote nothing");
+  await db.query(`DELETE FROM thoughts WHERE id = $1::uuid`, [C5]);
+  assert((await refuses(`DELETE FROM thoughts WHERE id IN ($1::uuid, $2::uuid)`, [S4, C4])) === "" && !(await exists(S4)) && !(await exists(C4)), "…with the survivor gone, note and source delete together in one statement");
+  // Two cited sources in one raw detach statement: one total, each citation its own source.
+  const S5 = await thought("source five");
+  const S6 = await thought("source six");
+  const C6 = await thought("a note citing five and six");
+  await cite(C6, S5, "five");
+  await cite(C6, S6, "six");
+  await db.exec(`BEGIN; SELECT set_config('ob1.cited_delete', 'detach', true); SELECT set_config('ob1.citations_detached', '0', true); DELETE FROM thoughts WHERE id IN ('${S5}', '${S6}'); CREATE TEMP TABLE zz_1712_total AS SELECT current_setting('ob1.citations_detached', true) AS n; COMMIT`);
+  const total = (await one<{ n: string }>(`SELECT n FROM zz_1712_total`)).n;
+  const perSource = await q<{ d: string }>(`SELECT payload->>'source_deleted_id' AS d FROM thought_facets WHERE thought_id = $1::uuid`, [C6]);
+  assert(total === "2" && perSource.length === 2 && new Set(perSource.map((p) => p.d)).size === 2 && !(await exists(S5)) && !(await exists(S6)), `a raw detach of two cited sources in one statement totals 2 and each citation records its own source (${total})`);
+  await db.exec(`DROP TABLE zz_1712_total`);
+  // The guard is the table's: a raw DELETE meets it; a mode that is neither is refused by name.
+  const S7 = await thought("raw-deleted source");
+  await cite(await thought("raw note"), S7);
+  assert(/is cited as a source by 1 active citation/.test(await refuses(`DELETE FROM thoughts WHERE id = $1::uuid`, [S7])) && (await exists(S7)), "a raw DELETE meets the same refusal — the guard is the table's, not the function's");
+  assert(/must be refuse or detach, got 'sometimes'/.test(await refusesExec(`BEGIN; SELECT set_config('ob1.cited_delete', 'sometimes', true); DELETE FROM thoughts WHERE id = '${S7}'; COMMIT`)), "a mode that is neither is refused by name");
+  await db.exec(`ROLLBACK`);
+  assert((await exists(S7)), "…and nothing was deleted under it");
+  // Raw insert shapes the trigger refuses without the writer.
+  assert(/is not a registered facet kind/.test(await refuses(`INSERT INTO thought_facets (thought_id, kind, payload) VALUES ($1::uuid, 'procedure', '{}')`, [S7])), "an unregistered kind is refused by name");
+  assert(/must be a thought id/.test(await refuses(`INSERT INTO thought_facets (thought_id, kind, payload) VALUES ($1::uuid, 'citation', '{"text":"t","stance":"stated"}')`, [S7])), "a citation without a source is refused");
+  assert(/must be a JSON object, got array/.test(await refuses(`INSERT INTO thought_facets (thought_id, kind, payload) VALUES ($1::uuid, 'citation', '[1]')`, [S7])), "a payload that is not an object is refused before any key is read");
+  assert(/is not a thought/.test(await refuses(`INSERT INTO thought_facets (thought_id, kind, payload) VALUES ($1::uuid, 'citation', '{"text":"t","stance":"stated","source_id":"${GHOST}"}')`, [S7])), "a raw insert naming a ghost source is refused by the trigger, not only by the writer");
+  assert(/cannot cite itself/.test(await refuses(`INSERT INTO thought_facets (thought_id, kind, payload) VALUES ($1::uuid, 'citation', jsonb_build_object('text', 't', 'stance', 'stated', 'source_id', $1::uuid))`, [S7])), "…and a raw self-citation likewise");
+  // A real foreign-key failure is a fault, not CITED.
+  await db.exec(`CREATE TABLE zz_1712_pin (thought_id uuid REFERENCES thoughts(id))`);
+  const S8 = await thought("a thought a foreign table pins");
+  await db.query(`INSERT INTO zz_1712_pin VALUES ($1::uuid)`, [S8]);
+  assert(/violates foreign key constraint "zz_1712_pin_thought_id_fkey"/.test(await refuses(`SELECT delete_thought($1::uuid, NULL::jsonb)`, [S8])) && (await exists(S8)), "a foreign-key violation on the DELETE propagates as the fault it is");
+  await db.exec(`DROP TABLE zz_1712_pin`);
+
+  // Re-applying 041 changes nothing: one function, two triggers, every row kept.
+  const before = (await one<{ c: number }>(`SELECT count(*)::int AS c FROM thought_facets`)).c;
+  await reapply("041");
+  await reapply("041");
+  const again = await q<{ tgname: string }>(`SELECT tgname FROM pg_trigger WHERE NOT tgisinternal AND tgname IN ('thoughts_guard_citation_sources', 'thought_facets_validate')`);
+  assert(again.length === 2 && (await functionsNamed("delete_thought")) === 1 && before > 0 && (await one<{ c: number }>(`SELECT count(*)::int AS c FROM thought_facets`)).c === before, `041 re-applied twice leaves two triggers, one delete_thought and every facet row (${before})`);
+  // A reset of the whole table: every citing thought goes with its source, so nothing survives and the statement is clean.
+  await db.exec(`DELETE FROM thoughts`);
+  assert((await one<{ c: number }>(`SELECT count(*)::int AS c FROM thought_facets`)).c === 0, "DELETE FROM thoughts with citations among the rows is clean — nothing survives to rest on nothing — and the facets cascade");
 }
 
 report();

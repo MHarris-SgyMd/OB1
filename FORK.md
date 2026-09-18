@@ -13967,6 +13967,167 @@ now checked.
 
 **Upstream status:** not applicable — the eval is this fork's.
 
+### 89. A thought cited as a source cannot be deleted from under the citation — `thought_facets` with one kind, a statement-level guard on `thoughts` that refuses with its own SQLSTATE, `delete_thought` answering it as a value with the citing rows named, and a detach opt-in (SMD-1712)
+
+Nothing on the fork recorded that one thought is the *source* of a statement
+made in another. Change 46 (migration 025) records what a thought was derived
+from and which thought it replaces — facts about the whole thought. A citation
+is finer: "this statement in note C rests on thought S". Without it,
+`delete_thought(S)` removed a source a later note leaned on, silently, and the
+note read the same afterwards with nothing behind it. The proposal bundle of
+2026-09-12 drafted the fix — a `thought_facets` sidecar with a claim kind, a
+`BEFORE DELETE` guard raising `foreign_key_violation`, `delete_thought`
+catching it — against a `main` that had since moved under every hunk (the
+ticket lists the eleven ways). The idea lands here as migration **041** on the
+fork's own terms.
+
+**The gate, and the number it was decided on.** SMD-1712 was gated on
+SMD-1711's re-measure at ten tagged tickets. When this was built the log held
+three (this file's "Review passes" section explains the tag): 9 review-pass
+commits since the first tagged one, 69 finding rows, **68 tagged (99%)** against
+**0 of 511** before the convention; cold-read caught 82% of the code and
+test-teeth defects, run-it 11%, mutants 7%; defect share 42 / 28 / 62% at passes
+one to three (small n). The epic SMD-1729 says to re-decide the gate on what is
+tagged rather than let it stall Phase 2, and the operator called it: the tag
+convention shows that what is recorded at the moment of the act is recoverable
+and what is not, is not — 0 of 511 before, 68 of 69 after — which is the
+thesis this facet rests on. The ten-ticket re-measure still runs when it can
+(`bun scripts/mechanism-yield.mjs --since fe09f4d`); it now judges Phase 3.
+
+**What 041 adds.** One table, `thought_facets` (`thought_id` → `thoughts`
+`ON DELETE CASCADE`, `kind`, `payload jsonb`, `valid_until`, `superseded_by` →
+a later facet, `ON DELETE SET NULL`), with **one registered kind**, `citation`,
+payload `{text, stance, source_id}` — the statement, whether it was stated /
+retrieved / inferred, the thought it rests on. `thought_facets_validate`
+(`BEFORE INSERT OR UPDATE`) refuses an unregistered kind, a non-object payload,
+an empty text, a stance outside the three, a `source_id` that is not an existing
+thought or is the citing thought itself, all as `check_violation`; a later
+migration registers a kind by extending the function, not by the proposal's
+vocabulary registry, which is not built. A citation is *active* while
+`superseded_by IS NULL` and `valid_until` is null or future; only active
+citations gate a delete, and a read should label an expired one, never hide it
+(change 46's rule, the ticket's rider on proposal issue 04).
+
+`thoughts_guard_citation_sources` is **`AFTER DELETE … FOR EACH STATEMENT`,
+`REFERENCING OLD TABLE AS deleted`** — not the proposal's row-level `BEFORE`
+trigger, and this was found while writing the tests, not designed in. A
+row-level guard sees one row at a time: "delete the note and its source
+together" would be refused or not by the order the rows came in (the note's
+row first cascades its facet and the source then passes; the source's row first
+finds the citation and refuses), and a reset — `DELETE FROM thoughts` — would
+be refused the moment any citation existed. Order-dependent behaviour is the
+class this fork treats as a defect, so the statement is the unit a deletion is
+judged by: the guard counts the active citations whose source is a deleted row
+**and whose own thought the statement leaves standing** — which is every
+citation the join finds, because the cascade on `thought_id` is a row-level
+`AFTER` trigger and Postgres fires those before any statement-level one. A
+`NOT IN (SELECT id FROM deleted)` clause was written to say so explicitly; its
+mutant passed every check, so it was removed rather than kept as a mechanism
+that is not one, and the reliance is stated in the header. If any, and the
+transaction-local `ob1.cited_delete` is not `detach`, it raises **SQLSTATE
+`OB001`** and the whole statement fails. Otherwise it *detaches* every surviving
+citation that named a deleted row, active or not: the row keeps its text and
+stance, `source_id` becomes JSON null and `source_deleted_id` /
+`source_deleted_at` record which thought went and when — the citation survives
+as "rested on a thought deleted at T", which is what a reader of the note needs
+to know, and no row names a thought that is gone. It totals what it did in two
+transaction-local settings, summed across statements. The refusal is the
+*table's*: a bulk `DELETE`, a vendored script, `psql` all meet it, the way
+008's append-only rule is `thought_audit`'s; the way through is the setting,
+which only a caller who names it takes. The price is the transition table — a
+delete of N rows holds the N deleted rows once, vectors included; a single
+delete pays nothing that shows.
+
+`delete_thought(uuid, jsonb, boolean)` is **036's body** — the actor and the
+mode set first, *outside* the block (a caught exception rolls back its
+subtransaction, `set_config` included, and 008's audit trigger must still see
+the actor); the supersession advisory lock, also outside the block, since a
+savepoint's rollback releases the advisory locks it acquired and this one must
+outlive a refusal; then the `DELETE` inside `BEGIN … EXCEPTION WHEN SQLSTATE
+'OB001'`, answering `{ok:false, error:'CITED', id, cited_by, citations}` — the
+count and up to ten citing rows, newest first, read after the rollback in the
+same transaction, the state the guard saw. Only that SQLSTATE is caught: a real
+`23503`, a permission failure, anything else propagates as the fault it is —
+the proposal's `WHEN foreign_key_violation` would have reported every FK failure
+on a delete as "cited". Success carries `detached:n` and, when non-zero,
+`inactive:m`. The two-argument overload is **dropped first** (a `DEFAULT` on
+the third parameter beside it makes every two-argument call "not unique");
+two-argument callers — `db/test-live.ts` [6g], the vendored servers' `rpc`
+calls — resolve through the default, which is the old behaviour plus the
+refusal. And `record_citation(uuid, uuid, text, text)` is the one writer,
+because a citation write locks the source `KEY SHARE` and every writer of a
+contended row on this fork has taken the supersession advisory lock *first*
+since changes 63 and 68: the function takes it, then the `INSERT`'s validate
+trigger takes the row lock. Refusals as values: `NOT_FOUND`,
+`SOURCE_NOT_FOUND`, `SELF_CITATION`, `BAD_STANCE`, `EMPTY_TEXT`. **No MCP tool
+calls it yet** — the write side of citations belongs to the epic's event shape
+(SMD-1730) and grounding rule (SMD-1733); this change is the guard, and the
+writer the guard is tested through.
+
+**The check is not a precheck, and the race is measured.** The guard fires
+inside the `DELETE`, so a citation committed between a look and the delete is
+seen; the validate trigger's `FOR KEY SHARE` on the source is the lock a
+foreign key would take, so a delete of that row waits for the citation's
+transaction and then, under READ COMMITTED with an `AFTER` trigger running
+after the statement's own waits, sees it. `db/test-live.ts` [6i] runs it three
+ways against a real server: a raw `INSERT` holding `KEY SHARE` (the delete
+waits, then is refused, nothing dangles); `record_citation` in a transaction
+that goes on to write `supersedes` (the lock is re-entrant, no cycle, refused
+after the commit); and the residue stated in 041's header — a raw writer whose
+transaction takes the advisory lock *after* the row, through `update_thought`,
+against the waiting delete — which deadlocks, deterministically, and Postgres
+breaks it with nothing dangling either way. That third arm is what
+`record_citation`'s order exists to avoid.
+
+**On the portable server.** `MutationError` gains `CITED`; `deleteThought`
+takes `detach`, both stores send the third argument explicitly (`p_detach`
+named, so PostgREST resolves the one function), and `normaliseMutation` carries
+`citedBy`, `citations`, `detached` and `inactive`. The tool gains
+`detach_citations` (default false); a refusal reads "Refused: 13 citations on
+other thoughts rest on <id> as their source — deleting it would leave those
+statements resting on nothing:", lists the ten sampled `thought_id (stance):
+text` lines, "…and 3 more", then the way through; a success says how many were
+detached and records the deleted id, or how many expired or superseded rows
+were marked. The guard runs as the calling role, so `ROLE_GRANTS.capture` gains
+`thought_facets` `SELECT, UPDATE` (`since: "041"`) — a self-hosted server role
+without them cannot delete *any* thought — and preflight's `write privileges`
+names it with its `GRANT`; the README's grants table carries the row (check 7's
+README rule holds the two together).
+
+**Held by:** `db/test-schema.ts` [39] on PGlite — the shape (two triggers, the
+guard per statement over `deleted`, one three-argument `delete_thought`, the
+one `EXCEPTION` clause naming the one SQLSTATE, the lock before the block, the
+writer's order, the `KEY SHARE`, the partial expression index), refuse / detach /
+history marked / thirteen counted and ten sampled / note and source together
+clean while a third citer refuses it / two sources in one raw detach statement
+totalling 2 / a raw `DELETE` meeting the table's refusal / an unknown mode /
+five raw-insert shapes / a real FK failure propagating / 041 re-applied twice /
+a whole-table reset clean — and [36] re-pointed at 041's body for 036's lock
+assertions; `server-portable/test-update-delete.ts` [10] through the tool over
+real Postgres, the FK-fault fixture included; `db/test-live.ts` [6i], the three
+race arms above; `test-upgrade` [7]'s window guard and note moved to eleven;
+`test-preflight` [5]'s capture-role walk names the facet `UPDATE`. Ten
+mutants, each reverting one mechanism, each failing the suite named for it:
+the lock dropped from `delete_thought` ([36], [39], and [6g]'s forty-race
+deadlock — 13 of 40), the guard raising `foreign_key_violation` ([39]'s
+refusal becomes a fault; [10]), the `KEY SHARE` dropped ([6i] arm 1: the
+delete no longer waits), history counted as active, a self-citation allowed,
+the writer's lock dropped ([6i] arm 2 deadlocks), the guard's default flipped
+to detach, `WHEN OTHERS` (the FK fixture answers `CITED`), the store dropping
+`cited_by`, the tool never passing `detach`. An eleventh — the same-statement
+exclusion dropped — passed every check and is the clause removed above.
+
+**Not built, and why.** The proposal's vocabulary registry, corrections table,
+coverage and yield views (each a later ticket if the facet earns its keep);
+`thought_edges` (declined in change 46, and check 7 knows upstream's shape as a
+clobber pattern); a read that labels a citation's expiry or a deleted source
+(SMD-1725's `as_of` read is where labels on facets belong); any writer over
+MCP. `--reapply` (change 56) re-runs 009 and 036 in their turn, each
+re-creating the two-argument form, and 041 drops it again in its.
+
+**Upstream status:** not applicable — the fork's schema; upstream has no
+citation or facet concept.
+
 ## Detached from the fork network
 
 This repository was forked from `NateBJones-Projects/OB1` and then detached, for

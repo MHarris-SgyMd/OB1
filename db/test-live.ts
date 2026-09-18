@@ -1185,6 +1185,81 @@ console.log("\n[6h] update_thought naming supersedes races a delete of that targ
   await sql`DELETE FROM thoughts`;
 }
 
+console.log("\n[6i] A citation written while a delete of its source is in flight: the citation's transaction holds the source KEY SHARE (a raw insert) or the writers' advisory lock (record_citation), the delete waits and then sees it — refused, never a dangling source; and the raw-writer residue the lock order exists for, reproduced (migration 041, SMD-1712)");
+{
+  await sql`DELETE FROM thoughts`;
+  const mk = async (tag: string) => ({
+    s: ((await sql`SELECT upsert_thought(${"a source about to be cited — " + tag}, '{"metadata":{}}'::jsonb, ${unit(0)}::vector) AS r`)[0].r as { id: string }).id,
+    c: ((await sql`SELECT upsert_thought(${"the note that cites it — " + tag}, '{"metadata":{}}'::jsonb, ${unit(1)}::vector) AS r`)[0].r as { id: string }).id,
+    x: ((await sql`SELECT upsert_thought(${"an older version the note supersedes — " + tag}, '{"metadata":{}}'::jsonb, ${unit(2)}::vector) AS r`)[0].r as { id: string }).id,
+  });
+  type Env = { ok: boolean; error?: string; cited_by?: number };
+  const connW = new SQL({ url: URL_, max: 1 });
+  const connD = new SQL({ url: URL_, max: 1 });
+  // A wait that never ends would hang the suite: cap both sides.
+  await connW.unsafe("SET statement_timeout = '8s'");
+  await connD.unsafe("SET statement_timeout = '8s'");
+  const startDelete = (s: string) => {
+    const t0 = Date.now();
+    return (async () => {
+      try { return { r: ((await connD`SELECT delete_thought(${s}::uuid, NULL::jsonb) AS r`) as { r: Env }[])[0].r, ms: Date.now() - t0 }; }
+      catch (e) { return { r: { ok: false, error: (e as Error).message } as Env, ms: Date.now() - t0 }; }
+    })();
+  };
+  const stillWaiting = async (p: Promise<unknown>) => (await Promise.race([p.then(() => "settled"), Bun.sleep(400).then(() => "waiting")])) === "waiting";
+  const dangling = async (s: string) => Number((await sql`SELECT count(*)::int AS c FROM thought_facets f WHERE f.payload->>'source_id' = ${s} AND NOT EXISTS (SELECT 1 FROM thoughts WHERE id = ${s}::uuid)`)[0].c);
+
+  // Arm 1 — a raw INSERT holds KEY SHARE on the source; the delete waits on the row.
+  {
+    const { s, c } = await mk("raw");
+    await connW.unsafe("BEGIN");
+    await connW`INSERT INTO thought_facets (thought_id, kind, payload) VALUES (${c}::uuid, 'citation', jsonb_build_object('text', 'rests on it', 'stance', 'retrieved', 'source_id', ${s}::uuid))`;
+    const del = startDelete(s);
+    assert(await stillWaiting(del), "with the raw citation's transaction open, the delete has not returned — it waits on the source row the validate trigger locked KEY SHARE");
+    await connW.unsafe("COMMIT");
+    const d = await del;
+    assert(d.r.ok === false && d.r.error === "CITED" && d.r.cited_by === 1 && d.ms >= 400, `…and once it commits the delete sees the citation and is refused (${JSON.stringify(d.r)}, after ${d.ms} ms)`);
+    assert((await dangling(s)) === 0 && Number((await sql`SELECT count(*)::int AS c FROM thoughts WHERE id = ${s}::uuid`)[0].c) === 1, "the source stands and no citation names a thought that is gone");
+  }
+  // Arm 2 — record_citation in a transaction that goes on to write supersedes:
+  // the writers' order, the lock re-entrant, no cycle.
+  {
+    const { s, c, x } = await mk("ordered");
+    await connW.unsafe("BEGIN");
+    const wrote = ((await connW`SELECT record_citation(${c}::uuid, ${s}::uuid, 'rests on it', 'retrieved') AS r`) as { r: Env }[])[0].r;
+    const del = startDelete(s);
+    assert(wrote.ok === true && (await stillWaiting(del)), "the citation is written under the advisory lock and the delete waits on that lock");
+    const upd = ((await connW`SELECT update_thought(${c}::uuid, p_provenance => jsonb_build_object('supersedes', ${x}::uuid)) AS r`) as { r: Env }[])[0].r;
+    await connW.unsafe("COMMIT");
+    const d = await del;
+    assert(upd.ok === true && d.r.ok === false && d.r.error === "CITED", `the same transaction's supersedes write proceeds — no deadlock — and the delete is refused after the commit (update ${JSON.stringify(upd)}, delete ${JSON.stringify(d.r)})`);
+    assert((await dangling(s)) === 0, "…nothing dangles");
+  }
+  // Arm 3 — the residue, reproduced: a raw INSERT takes KEY SHARE and no
+  // advisory lock, the waiting delete holds the advisory lock, and the raw
+  // writer's transaction then wants it through update_thought — a cycle
+  // Postgres has to break. This is what record_citation's lock order avoids
+  // (arm 2); the header states it as the raw writer's residue.
+  {
+    const { s, c, x } = await mk("residue");
+    await connW.unsafe("BEGIN");
+    await connW`INSERT INTO thought_facets (thought_id, kind, payload) VALUES (${c}::uuid, 'citation', jsonb_build_object('text', 'rests on it', 'stance', 'retrieved', 'source_id', ${s}::uuid))`;
+    const del = startDelete(s);
+    assert(await stillWaiting(del), "the delete waits on the raw citation's KEY SHARE");
+    let updErr = "";
+    try { await connW`SELECT update_thought(${c}::uuid, p_provenance => jsonb_build_object('supersedes', ${x}::uuid)) AS r`; } catch (e) { updErr = (e as Error).message; }
+    const d = await del;
+    try { await connW.unsafe("COMMIT"); } catch { /* an aborted transaction: the ROLLBACK below ends it */ }
+    try { await connW.unsafe("ROLLBACK"); } catch { /* no transaction in progress */ }
+    assert(/deadlock detected/.test(updErr) || /deadlock detected/.test(d.r.error ?? ""),
+      `a raw writer that takes the advisory lock after the row closes the cycle record_citation avoids — deadlock detected in one of the two (update: ${updErr.slice(0, 40) || "ok"}; delete: ${(d.r.error ?? "ok").slice(0, 40)})`);
+    assert((await dangling(s)) === 0, "…and whichever writer Postgres chose, no citation names a thought that is gone");
+  }
+  await connW.close();
+  await connD.close();
+  await sql`DELETE FROM thoughts`;
+}
+
 console.log("\n[7] Chunk context survives capture, edit and a payload without it");
 {
   await sql`DELETE FROM thoughts`;
