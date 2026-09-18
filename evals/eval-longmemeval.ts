@@ -531,7 +531,7 @@ async function scoreCurrent(map: SidMap, idToSids: Map<string, string[]>): Promi
   // CONTROL: the slice's shape — two gold sessions, dated apart, the earlier
   // one stating the value the later one updates. A question outside the shape
   // would make "current" a guess, so the run refuses instead.
-  type Pair = { q: ScoreQ; stale: string; current: string; gapDays: number };
+  type Pair = { q: ScoreQ; stale: string; current: string; gapDays: number; hay: Set<string> };
   const pairs: Pair[] = use.map((q) => {
     if (q.answer_session_ids.length !== 2) throw new Error(`CONTROL FAILED: ${q.question_id} has ${q.answer_session_ids.length} gold sessions, not the two a knowledge update has.`);
     const [a, b] = q.answer_session_ids.map((sid) => {
@@ -542,7 +542,7 @@ async function scoreCurrent(map: SidMap, idToSids: Map<string, string[]>): Promi
     });
     if (a.t === b.t) throw new Error(`CONTROL FAILED: ${q.question_id}'s gold sessions share a date; neither is the update.`);
     const [stale, current] = a.t < b.t ? [a, b] : [b, a];
-    return { q, stale: stale.sid, current: current.sid, gapDays: (current.t - stale.t) / 86_400_000 };
+    return { q, stale: stale.sid, current: current.sid, gapDays: (current.t - stale.t) / 86_400_000, hay: new Set(q.haystack_session_ids) };
   });
   const gaps = pairs.map((p) => p.gapDays).sort((x, y) => x - y);
   console.log(`▸ the current-value question over ${pairs.length} knowledge-update questions — ${EMBED_MODEL}`);
@@ -581,7 +581,7 @@ async function scoreCurrent(map: SidMap, idToSids: Map<string, string[]>): Promi
    */
   const resolveThrough = (ids: string[], q: ScoreQ): string[] => {
     const p = pairOf.get(q.question_id)!;
-    const hay = new Set(q.haystack_session_ids);
+    const hay = p.hay;
     const inHistory = (id: string) => (idToSids.get(id) ?? []).some((sid) => hay.has(sid));
     const next = (id: string): string | undefined => {
       // A twin row is walked only when the stale session is the only one it
@@ -629,7 +629,7 @@ async function scoreCurrent(map: SidMap, idToSids: Map<string, string[]>): Promi
   for (let i = 0; i < pairs.length; i++) {
     const p = pairs[i];
     const qv = toVector(qvs[i]);
-    const hay = new Set(p.q.haystack_session_ids);
+    const hay = p.hay;
     for (const arm of arms) {
       for (const k of KS) {
         const tq = Date.now();
