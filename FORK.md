@@ -13992,9 +13992,9 @@ multi-hop set, which is the right objective — a cosine oracle would be self-de
 for a stage that deliberately reorders toward relatedness, change 87's lesson. The
 **pre-registered bar** (SMD-1038 posture, committed before the numbers): build the stage
 iff multi-hop recall lifts ≥ 0.05 over vector AND it recovers more than it breaks AND it
-does not cut aggregate recall. K′ and hops are swept, and the headline is the arm's best
-cell — an upper bound over the sweep, so a FAIL of the best cell is conclusive (no cell
-clears the bar).
+does not cut aggregate recall. K′ and hops are swept; the headline is the arm's best
+cell (argmax multi-hop recall), and the conjunctive bar is checked on every cell, so a
+FAIL means no cell of the sweep cleared all three clauses.
 
 **On this corpus vector is already at ceiling, so there is nothing for the stage to
 recover.** Vector gets multi-hop recall@10 **1.00** (601 issues, 1024-dim, 27

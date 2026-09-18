@@ -121,7 +121,9 @@ function median(xs: number[]): number { const s = xs.slice().sort((a, b) => a - 
 // graph is circular). Density is modelled on the real graph's printed stats; the skew
 // exponent makes a few hot entities so the hub cap does real work.
 const SCALE = Number(flag("scale") ?? 0);
-if (!Number.isInteger(SCALE) || SCALE < 0) { console.error("--scale needs a non-negative integer (the synthetic corpus size)."); process.exit(2); }
+// --scale with no value (last arg, or followed by another --flag) leaves SCALE 0 and
+// would silently run the real-corpus path; require a positive integer when it is passed.
+if (has("scale") && (flag("scale") === undefined || !Number.isInteger(SCALE) || SCALE < 1)) { console.error("--scale needs a positive integer (the synthetic corpus size)."); process.exit(2); }
 const SYN_ENT = Number(process.env.OB1_GRAPH_SCALE_ENTITIES ?? Math.max(1, Math.round(SCALE * 4))); // real: ~2000 entities for 441 docs
 const SYN_MENTIONS = Number(process.env.OB1_GRAPH_SCALE_MENTIONS_PER ?? 6); // real: ~6.4 mentions/doc
 const SYN_EDGES = Number(process.env.OB1_GRAPH_SCALE_EDGES_PER ?? 2); // real: ~2 edges/entity
@@ -439,6 +441,11 @@ function fuseUnion(rows: { issue: string; gs: number; dist: number }[]): { rrf: 
  * cost (SMD-1707's result) is deliberately out of the measurement.
  */
 async function runScale(): Promise<void> {
+  // The SYN_* knobs go straight into generate_series / power(); a NaN or ≤0 value crashes
+  // the run or plants a degenerate graph. Validate them like --scale/--k.
+  for (const [name, v, intOnly] of [["ENTITIES", SYN_ENT, true], ["MENTIONS_PER", SYN_MENTIONS, true], ["EDGES_PER", SYN_EDGES, true], ["REPEAT", SYN_REPEAT, true], ["SKEW", SYN_SKEW, false]] as const) {
+    if (!Number.isFinite(v) || v <= 0 || (intOnly && !Number.isInteger(v))) { console.error(`OB1_GRAPH_SCALE_${name} needs a positive ${intOnly ? "integer" : "number"}.`); process.exit(2); }
+  }
   const N = SCALE, M = SYN_ENT;
   console.log(`  --scale ${N.toLocaleString()}: synthesizing ${N.toLocaleString()} thoughts, ${M.toLocaleString()} entities, ~${SYN_MENTIONS} mentions/thought, ~${SYN_EDGES} edges/entity (skew ${SYN_SKEW}), dim ${DIM}`);
   const constVec = "[" + Array(DIM).fill(0.1).join(",") + "]";
@@ -760,11 +767,25 @@ console.log(`    aggregate recall@${K} (all ${results.length}): vector ${vecAll.
 // breaks AND it does not cut aggregate recall. SMD-1038 posture — the bar, not the
 // number, decides.
 const lift = compMH - vecMH, net = recovered.length - brokenMH.length, agg = compAll - vecAll;
-const pass = lift >= 0.05 && net > 0 && agg >= 0;
+// The bar is conjunctive (lift AND net AND agg), and the best-recall cell maximises only
+// lift — a different cell could clear net/agg. So evaluate every clause on every cell and
+// ask whether ANY cell clears all three: then "no cell clears the bar" is checked, not
+// inferred from the best cell.
+const clears = (cell: { rows: SweepRow[] }) => {
+  const mh = cell.rows.filter((r) => r.q.type === "multi-hop");
+  const cLift = mean(mh.map((r) => r.s.recall)) - vecMH;
+  const cNet = mh.filter((r, i) => r.s.recall > mhR[i].scores.vector.recall).length - mh.filter((r, i) => r.s.recall < mhR[i].scores.vector.recall).length;
+  const cAgg = mean(cell.rows.map((r) => r.s.recall)) - vecAll;
+  return cLift >= 0.05 && cNet > 0 && cAgg >= 0;
+};
+const passingCells = sweep.filter(clears);
+const pass = passingCells.length > 0;
 console.log(`\n  PRE-REGISTERED BAR (SMD-1738): multi-hop lift ≥ +0.05 AND net-positive AND aggregate not cut`);
-console.log(`    evaluated on the arm's BEST cell (K′=${headK}, ${headH} hop) — an upper bound over the ${sweep.length}-cell sweep, so a FAIL is conclusive (no cell clears it) and a PASS would be provisional, to be confirmed on a pre-registered single config`);
-console.log(`    lift ${(lift >= 0 ? "+" : "") + lift.toFixed(2)} ${lift >= 0.05 ? "✓" : "✗"} | net ${net >= 0 ? "+" : ""}${net} ${net > 0 ? "✓" : "✗"} | aggregate Δ ${(agg >= 0 ? "+" : "") + agg.toFixed(2)} ${agg >= 0 ? "✓" : "✗"}`);
-console.log(`    VERDICT: ${pass ? "PASS (provisional — best of the sweep) → a graph expansion stage may clear the bar; confirm on a pre-registered single config before a product path" : "FAIL → do not build; confirms SMD-948's decision, now on the composed axis"}`);
+console.log(`    evaluated on every one of the ${sweep.length} cells; the row below is the best cell (K′=${headK}, ${headH} hop, argmax multi-hop recall)`);
+console.log(`    best cell:  lift ${(lift >= 0 ? "+" : "") + lift.toFixed(2)} ${lift >= 0.05 ? "✓" : "✗"} | net ${net >= 0 ? "+" : ""}${net} ${net > 0 ? "✓" : "✗"} | aggregate Δ ${(agg >= 0 ? "+" : "") + agg.toFixed(2)} ${agg >= 0 ? "✓" : "✗"}`);
+console.log(`    VERDICT: ${pass
+  ? `PASS (provisional) → ${passingCells.length} of ${sweep.length} cells clear all three clauses (e.g. K′=${passingCells[0].kprime}, ${passingCells[0].hops} hop); confirm on a pre-registered single config before a product path`
+  : `FAIL → NO cell of the ${sweep.length} clears all three clauses; do not build, confirms SMD-948's decision on the composed axis`}`);
 
 console.log(`\n  cost`);
 console.log(`    graph construction: not measured by this run — it replays a dump. The extraction pass that made it is eval-entities.ts --corpus; FORK.md change 30 records 82 min for 441 issues at two workers on qwen2.5:7b. One call per new thought after that.`);
