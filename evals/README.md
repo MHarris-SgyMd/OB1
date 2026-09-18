@@ -2331,8 +2331,11 @@ McNemar's exact test — not compared as a mean.
 **Arms.** `vector@-1`, the shipped order. `recency@0.3`, 020's blend as a
 caller can send it today (`recency_weight` 0.3, the half-life fixed at 90
 days). `recency@0.3/3650`, the same weight at a half-life long enough for a
-week of age to register on rows three years old. `age@1`, age alone among the
-nearest candidates. And `resolve`: the ticket's chain-walking read — each hit
+week of age to register on rows three years old. `age@1`, age alone — under
+the history filter `match_thoughts` takes its exact branch and blends every
+row of the history before cutting to k, so this arm is the k newest sessions
+in the history with similarity ignored, and the two recency arms reorder the
+whole history, not a nearest-N window. And `resolve`: the ticket's chain-walking read — each hit
 walked forward along `supersedes` to the head of its chain and returned in
 the hit's place, at the hit's rank, a session listed once — run as an
 **oracle**, because the corpus carries **0** `supersedes` pointers (printed;
@@ -2373,8 +2376,9 @@ current-first and is no longer distinguishable from the shipped order
   byte-identical no-op here: at a 90-day half-life a row from 2023 has a
   recency of about 10⁻⁴, and so does the row a week newer, so the blend
   changes nothing below weight 1. A half-life long enough to see the gap
-  moves one question. Age alone among the nearest twenty puts newer,
-  unrelated sessions ahead of both golds and collapses strict recall to 2.8%.
+  moves one question. Age alone — the five newest sessions in the history —
+  puts newer, unrelated sessions ahead of both golds and collapses strict
+  recall to 2.8%.
   Change 53 found the same for the temporal slice; the update is not usually
   the most recent session in a history, it is the most recent *about this*.
 * **The resolving read is a change of relevance definition, not a ranking

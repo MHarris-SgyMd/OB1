@@ -13775,8 +13775,9 @@ section could have shown it.
 (`recency_weight` 0.3, the half-life fixed at 90 days) is a byte-identical
 no-op on rows three years old: a 2023 session has a recency near 10⁻⁴ and so
 does the one a week newer. A half-life of 3,650 days moves one question
-(p=1.000). Age alone among the nearest twenty candidates puts newer, unrelated
-sessions ahead of both golds — current-first 29.2%, strict 2.8%, +10 / −27
+(p=1.000). Age alone — under the history filter `match_thoughts` blends every
+row of the history and cuts to k, so the arm is the five newest sessions in it —
+puts newer, unrelated sessions ahead of both golds — current-first 29.2%, strict 2.8%, +10 / −27
 against the shipped order (p=0.008). Change 53 found the same on the temporal
 slice; the update is not the most recent session in a history, it is the most
 recent *about this*, and only a signal that reads the texts can know it.

@@ -87,8 +87,9 @@
  * not) and `current@1`. Arms: the shipped order; 020's recency blend as a
  * caller can send it today (`recency_weight`, half-life 90 days — on a corpus
  * three years old that is a no-op below weight 1, and the arm shows it), the
- * same blend at a half-life long enough to see a week, and age alone among the
- * nearest candidates; and `resolve`, the ticket's chain-walking read as an
+ * same blend at a half-life long enough to see a week, and age alone — under
+ * the history filter the blend runs over every row of the history, so that
+ * arm is the k newest sessions in it; and `resolve`, the ticket's chain-walking read as an
  * ORACLE — the store carries no supersedes pointers (the count is printed; the
  * consolidation pass has not run here, and at one thought per session it
  * would judge whole conversations), so the arm walks each question's gold pair,
@@ -381,10 +382,12 @@ async function load(): Promise<void> {
       // merge below could union them — the merge then unioned the new list
       // with itself, and the first twin's questions were gone (second review
       // pass). They are written after the upsert instead: lme_q as a union;
-      // lme_sid only where the row has none, and created_at only when that
-      // write landed — the row's first session. (upsert_thought's `existed`
-      // flag is 035's, and a store loaded at 025, as the persisted ones were,
-      // does not return it; the write count says the same thing everywhere.)
+      // lme_sid only where the row has none; created_at only on the row whose
+      // lme_sid is this session — the row's first session — so a load that
+      // dies between the two writes is repaired by the next one rather than
+      // left dated at load time (third review pass). (upsert_thought's
+      // `existed` flag is 035's, and a store loaded at 025, as the persisted
+      // ones were, does not return it; nothing here reads it.)
       const envelope = {
         metadata: { source: "longmemeval", session_date: it.s.date },
         embedding_model: spec.name,
@@ -399,11 +402,9 @@ async function load(): Promise<void> {
       await sql`UPDATE thoughts SET metadata = jsonb_set(metadata, '{lme_q}',
                   (SELECT to_jsonb(array_agg(DISTINCT x)) FROM jsonb_array_elements_text(coalesce(metadata->'lme_q','[]'::jsonb) || ${it.s.qids}::jsonb) AS x))
                 WHERE id = ${id}::uuid`;
-      const first = await sql`UPDATE thoughts SET metadata = metadata || jsonb_build_object('lme_sid', ${it.s.sid}::text) WHERE id = ${id}::uuid AND NOT metadata ? 'lme_sid'`;
-      if (first.count === 1) {
-        const iso = toIso(it.s.date);
-        if (iso) await sql`UPDATE thoughts SET created_at = ${iso}::timestamptz WHERE id = ${id}::uuid`;
-      }
+      await sql`UPDATE thoughts SET metadata = metadata || jsonb_build_object('lme_sid', ${it.s.sid}::text) WHERE id = ${id}::uuid AND NOT metadata ? 'lme_sid'`;
+      const iso = toIso(it.s.date);
+      if (iso) await sql`UPDATE thoughts SET created_at = ${iso}::timestamptz WHERE id = ${id}::uuid AND metadata->>'lme_sid' = ${it.s.sid}::text`;
       map[it.s.sid] = id;
       tokensSeen += Math.round(it.s.text.length / 4);
     }
@@ -478,11 +479,14 @@ type Arm = { key: string; label: string; run: (qv: string, q: ScoreQ, k: number)
 
 /**
  * McNemar's exact test, two-sided: the discordant pairs (helped, hurt) under a
- * fair coin. n is at most the slice, so the binomial sum is exact in doubles.
+ * fair coin. The binomial sum is exact in doubles while 2^n is finite — n at
+ * most 1,000, twice the corpus — and refused beyond, rather than printing a
+ * p of 0 (third review pass).
  */
 function mcnemarExact(helped: number, hurt: number): number {
   const n = helped + hurt;
   if (n === 0) return 1;
+  if (n > 1000) throw new Error(`mcnemarExact: ${n} discordant pairs is past the exact sum's range; use a normal approximation.`);
   const lo = Math.min(helped, hurt);
   let c = 1, tail = 0;
   for (let i = 0; i <= lo; i++) { tail += c; c = (c * (n - i)) / (i + 1); }
@@ -570,7 +574,11 @@ async function scoreCurrent(map: SidMap, idToSids: Map<string, string[]>): Promi
     { key: "vector@-1", label: "match_thoughts as shipped, similarity alone", run: (qv, q, k) => vector(qv, q, k, 0, 90) },
     { key: "recency@0.3", label: "020's blend as a caller can send it today: recency_weight 0.3, half-life 90 days", run: (qv, q, k) => vector(qv, q, k, 0.3, 90) },
     { key: "recency@0.3/3650", label: "the blend at a half-life of 3,650 days, so a week of age is visible on a three-year-old corpus", run: (qv, q, k) => vector(qv, q, k, 0.3, 3650) },
-    { key: "age@1", label: "age alone among the nearest candidates (recency_weight 1)", run: (qv, q, k) => vector(qv, q, k, 1, 90) },
+    // Under the history filter match_thoughts takes its exact branch: every row
+    // of the history is blended and the top k kept, so this arm is the k newest
+    // sessions in the history with similarity ignored, and the recency arms
+    // reorder the whole history, not a nearest-N window (third review pass).
+    { key: "age@1", label: "the k newest sessions in the history, similarity ignored (recency_weight 1)", run: (qv, q, k) => vector(qv, q, k, 1, 90) },
     {
       key: "resolve",
       label: oracle
@@ -656,6 +664,15 @@ async function score(): Promise<void> {
   if (missing.length) throw new Error(`${missing.length} sessions are not loaded; run the load phase first.`);
   const idToSids = new Map<string, string[]>();
   for (const [sid, id] of Object.entries(map)) idToSids.set(id, [...(idToSids.get(id) ?? []), sid]);
+  // CONTROL: every gold session's row carries its question in lme_q, else the
+  // filter can never return it and a harness fault would score as a retrieval
+  // miss — the shape of the twin defect the second review pass found, which
+  // the outside-the-history control cannot see (third review pass).
+  const qidsOfRow = new Map<string, Set<string>>();
+  for (const r of (await sql`SELECT id, metadata->'lme_q' AS q FROM thoughts WHERE metadata ? 'lme_sid'`) as { id: string; q: string[] | null }[]) qidsOfRow.set(r.id, new Set(r.q ?? []));
+  const unreachable: string[] = [];
+  for (const q of scorable(questions)) for (const sid of q.answer_session_ids) if (map[sid] && !qidsOfRow.get(map[sid])?.has(q.question_id)) unreachable.push(`${q.question_id}/${sid}`);
+  if (unreachable.length) throw new Error(`CONTROL FAILED: ${unreachable.length} gold sessions' rows do not carry their question in lme_q, so the filter cannot return them (${unreachable.slice(0, 5).join(", ")}${unreachable.length > 5 ? ", …" : ""}); re-run the load phase, which unions lme_q for every session.`);
   if (ARMS === "current") { await scoreCurrent(map, idToSids); return; }
 
   const scored = scorable(questions);
