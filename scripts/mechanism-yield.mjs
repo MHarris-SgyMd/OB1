@@ -115,7 +115,7 @@ const DUMP = OPTS["--dump"];
 const LOG = OPTS["--log"];
 const SINCE = OPTS["--since"];
 const SELF_CHECK = OPTS["--self-check"] === true;
-const IS_DATE = (s) => /^\d{4}-\d{2}-\d{2}$/.test(s);
+const isDate = (s) => /^\d{4}-\d{2}-\d{2}$/.test(s);
 
 // ---------------------------------------------------------------------------
 // Parsing
@@ -137,7 +137,7 @@ function readLog() {
   if (LOG) {
     let commits = parseCommits(fs.readFileSync(LOG, "utf8"));
     if (SINCE === undefined) return { commits, windowLabel: "" };
-    if (!IS_DATE(SINCE)) {
+    if (!isDate(SINCE)) {
       console.error(`--since with --log takes a date (YYYY-MM-DD): a dump has no ancestry to resolve ${SINCE} against`);
       process.exit(2);
     }
@@ -146,7 +146,7 @@ function readLog() {
   }
   const args = ["log", `--format=${FORMAT}`, "--date=short"];
   if (SINCE === undefined) return { commits: parseCommits(git(args)), windowLabel: "" };
-  if (IS_DATE(SINCE)) {
+  if (isDate(SINCE)) {
     args.push(`--since=${SINCE}`);
     return { commits: parseCommits(git(args)), windowLabel: `window ${SINCE} → HEAD: ` };
   }
@@ -390,13 +390,14 @@ for (const c of review) {
   const pass = passNumber(c.subject);
   const { findings, skipped } = bulletsOf(c.body);
   runResults += skipped;
+  const row = (kind, text) => ({ sha: c.sha, date: c.date, ticket, pass, kind, ...classifyRow(text) });
   if (findings.length === 0) {
     // Older passes carry their findings in the subject only: one coarse row, kept out of the tables.
     subjectOnly++;
-    rows.push({ sha: c.sha, date: c.date, ticket, pass, kind: "subject", ...classifyRow(c.subject.replace(/^\[fork\]\s*/, "")) });
+    rows.push(row("subject", c.subject.replace(/^\[fork\]\s*/, "")));
     continue;
   }
-  for (const b of findings) rows.push({ sha: c.sha, date: c.date, ticket, pass, kind: "bullet", ...classifyRow(b) });
+  for (const b of findings) rows.push(row("bullet", b));
 }
 const bulletRows = rows.filter((r) => r.kind === "bullet");
 
@@ -411,10 +412,10 @@ const count = (arr, key) => {
   for (const r of arr) m.set(r[key], (m.get(r[key]) ?? 0) + 1);
   return [...m.entries()].sort((a, b) => b[1] - a[1]);
 };
-const ticketsOf = (cs) => new Set(cs.map((c) => ticketOf(c.subject, c.body)).filter((t) => t !== "(none)")).size;
+const distinctTickets = (tickets) => new Set(tickets.filter((t) => t !== "(none)")).size;
 
-console.log(`${windowLabel}commits ${commits.length}; review-pass commits ${review.length} across ${ticketsOf(review)} tickets (subject-only ${subjectOnly}); boyscout commits ${boyscout.length} (excluded: tidy-ups, not catches)`);
-console.log(`finding rows ${bulletRows.length} in ${new Set(bulletRows.map((r) => r.ticket).filter((t) => t !== "(none)")).size} tickets (+ ${subjectOnly} subject-only rows, not tabulated; ${runResults} run-result bullets skipped)`);
+console.log(`${windowLabel}commits ${commits.length}; review-pass commits ${review.length} across ${distinctTickets(review.map((c) => ticketOf(c.subject, c.body)))} tickets (subject-only ${subjectOnly}); boyscout commits ${boyscout.length} (excluded: tidy-ups, not catches)`);
+console.log(`finding rows ${bulletRows.length} in ${distinctTickets(bulletRows.map((r) => r.ticket))} tickets (+ ${subjectOnly} subject-only rows, not tabulated; ${runResults} run-result bullets skipped)`);
 {
   const by = Object.fromEntries(count(bulletRows, "source"));
   const tagged = (by.tagged ?? 0) + (by["tagged-unknown"] ?? 0);
@@ -464,19 +465,16 @@ console.log();
 
 console.log("== Per ticket: passes run, and the last pass that found a code/teeth defect ==");
 {
+  // Every review commit contributes its pass to its ticket (subject-only ones too); only bullet rows count as findings.
   const byTicket = new Map();
-  for (const c of review) {
-    const t = ticketOf(c.subject, c.body);
-    const e = byTicket.get(t) ?? { passes: new Set(), lastDefect: 0, rows: 0 };
-    const p = passNumber(c.subject);
-    if (p) e.passes.add(p);
-    byTicket.set(t, e);
-  }
-  for (const r of bulletRows) {
-    const e = byTicket.get(r.ticket);
-    if (!e) continue;
-    e.rows++;
-    if (DEFECTS.has(r.target) && r.pass && r.pass > e.lastDefect) e.lastDefect = r.pass;
+  for (const r of rows) {
+    const e = byTicket.get(r.ticket) ?? { passes: new Set(), lastDefect: 0, rows: 0 };
+    if (r.pass) e.passes.add(r.pass);
+    if (r.kind === "bullet") {
+      e.rows++;
+      if (DEFECTS.has(r.target) && r.pass && r.pass > e.lastDefect) e.lastDefect = r.pass;
+    }
+    byTicket.set(r.ticket, e);
   }
   const list = [...byTicket.entries()].filter(([t, e]) => e.rows > 0 && t !== "(none)");
   const hist = new Map();
@@ -494,7 +492,7 @@ if (bulletRows.some((r) => r.held)) {
   console.log();
 }
 
-const sample = (arr, n) => (n === 0 ? [] : arr.length <= n ? arr : Array.from({ length: n }, (_, i) => arr[Math.floor((i * arr.length) / n)]));
+const sample = (arr, n) => (arr.length <= n ? arr : Array.from({ length: n }, (_, i) => arr[Math.floor((i * arr.length) / n)]));
 if (SAMPLES > 0) {
   console.log("== Samples per mechanism ==");
   for (const m of mechs) {
