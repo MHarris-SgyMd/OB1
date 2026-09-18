@@ -11,7 +11,8 @@
  * the top K. Any answering step has to work from what was retrieved, and a
  * generated answer over the wrong documents is a confident fabrication.
  *
- * Five arms, all over the same throwaway Postgres holding the corpus with real
+ * Five whole-match arms (the SMD-1738 composed stage below is a sixth, of a different
+ * shape), all over the same throwaway Postgres holding the corpus with real
  * embeddings and the entity graph SMD-947 extracted:
  *
  *   vector   `match_thoughts` — the baseline the product ships today.
