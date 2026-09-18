@@ -121,6 +121,7 @@ function median(xs: number[]): number { const s = xs.slice().sort((a, b) => a - 
 // graph is circular). Density is modelled on the real graph's printed stats; the skew
 // exponent makes a few hot entities so the hub cap does real work.
 const SCALE = Number(flag("scale") ?? 0);
+if (!Number.isInteger(SCALE) || SCALE < 0) { console.error("--scale needs a non-negative integer (the synthetic corpus size)."); process.exit(2); }
 const SYN_ENT = Number(process.env.OB1_GRAPH_SCALE_ENTITIES ?? Math.max(1, Math.round(SCALE * 4))); // real: ~2000 entities for 441 docs
 const SYN_MENTIONS = Number(process.env.OB1_GRAPH_SCALE_MENTIONS_PER ?? 6); // real: ~6.4 mentions/doc
 const SYN_EDGES = Number(process.env.OB1_GRAPH_SCALE_EDGES_PER ?? 2); // real: ~2 edges/entity
@@ -149,7 +150,10 @@ if (!SCALE) {
 // ── Load: thoughts with vectors, then the graph ──────────────────────────────
 
 await resetSchema(URL_, { dim: DIM, model: spec.name });
-const sql = new SQL({ url: URL_, max: 4 });
+// max:1 — the harness runs strictly sequentially, and --scale's session-local TEMP
+// tables (syn_t/syn_e) must be read on the same connection that created them, which a
+// multi-connection pool does not guarantee.
+const sql = new SQL({ url: URL_, max: 1 });
 
 // ── --scale N: synthetic graph, expansion-latency only (SMD-1738) ─────────────
 if (SCALE) { await runScale(); await sql.close(); process.exit(0); }
@@ -373,7 +377,8 @@ async function expandStage(candIds: string[], vecLit: string, hops: number): Pro
       JOIN df ON df.entity_id = m.entity_id CROSS JOIN n
       WHERE df.docs <= n.total * 0.1
     ),
-    -- expand up to hops over the edges; UNION dedups so cycles terminate
+    -- expand up to hops over the edges; the r.hop < hops bound terminates the walk
+    -- (UNION removes duplicate (id, hop) rows; mindist below keeps each entity's shortest hop)
     reach(id, hop) AS (
       SELECT id, 0 FROM seed
       UNION
@@ -408,9 +413,9 @@ async function expandStage(candIds: string[], vecLit: string, hops: number): Pro
 
 // Coarse vector recall: the top-K′ thought ids. Depends only on (q, K′), so a caller
 // sweeping hops computes it once per K′ and reuses it across hops.
-async function coarseRecall(qv: number[], kprime: number): Promise<{ ids: string[]; ms: number }> {
+async function coarseRecall(vecLit: string, kprime: number): Promise<{ ids: string[]; ms: number }> {
   const t = Date.now();
-  const rows = (await sql`SELECT id FROM thoughts ORDER BY embedding <=> ${lit(qv)}::vector LIMIT ${kprime}`) as { id: string }[];
+  const rows = (await sql`SELECT id FROM thoughts ORDER BY embedding <=> ${vecLit}::vector LIMIT ${kprime}`) as { id: string }[];
   return { ids: rows.map((r) => r.id), ms: Date.now() - t };
 }
 
@@ -494,7 +499,7 @@ async function runScale(): Promise<void> {
     const ms: number[] = []; let unionRows = 0;
     for (let i = 0; i < SYN_REPEAT; i++) { const r = await expandStage(cand, constVec, hops); ms.push(r.ms); unionRows = r.rows.length; }
     ms.sort((a, b) => a - b);
-    console.log(`    ${String(kprime).padStart(4)}  ${String(hops).padStart(4)}   ${String(unionRows).padStart(9)}   ${ms[Math.floor(ms.length / 2)].toFixed(1)} ms    ${ms[Math.min(ms.length - 1, Math.floor(ms.length * 0.95))].toFixed(1)} ms`);
+    console.log(`    ${String(kprime).padStart(4)}  ${String(hops).padStart(4)}   ${String(unionRows).padStart(9)}   ${median(ms).toFixed(1)} ms    ${ms[Math.min(ms.length - 1, Math.floor(ms.length * 0.95))].toFixed(1)} ms`);
   }
   console.log(`\n  Note: latency only. df is recomputed per call as in graphArm; a materialized df is the obvious production optimization. union rows caps at the query's LIMIT 5000.`);
 }
@@ -654,10 +659,11 @@ for (const q of questions) {
   // Coarse recall once per K′ (reused across hops); expansion once per (K′, hops); both
   // rankings from the one union. The headline cell (which feeds the main table and the
   // bar) is chosen after the sweep as the arm's BEST cell, so the graph gets its best shot.
+  const qvLit = lit(qv); // one serialization of the query vector, reused across the sweep
   for (const kprime of KPRIMES) {
-    const c = await coarseRecall(qv, kprime);
+    const c = await coarseRecall(qvLit, kprime);
     for (const hops of HOPS) {
-      const { rows, ms } = await expandStage(c.ids, lit(qv), hops);
+      const { rows, ms } = await expandStage(c.ids, qvLit, hops);
       const f = fuseUnion(rows);
       cellOf.get(`${kprime}:${hops}`)!.rows.push({ q, s: score(f.rrf, q.expected), sCos: score(f.cos, q.expected), coarseMs: c.ms, expandMs: ms });
     }
@@ -756,8 +762,9 @@ console.log(`    aggregate recall@${K} (all ${results.length}): vector ${vecAll.
 const lift = compMH - vecMH, net = recovered.length - brokenMH.length, agg = compAll - vecAll;
 const pass = lift >= 0.05 && net > 0 && agg >= 0;
 console.log(`\n  PRE-REGISTERED BAR (SMD-1738): multi-hop lift ≥ +0.05 AND net-positive AND aggregate not cut`);
+console.log(`    evaluated on the arm's BEST cell (K′=${headK}, ${headH} hop) — an upper bound over the ${sweep.length}-cell sweep, so a FAIL is conclusive (no cell clears it) and a PASS would be provisional, to be confirmed on a pre-registered single config`);
 console.log(`    lift ${(lift >= 0 ? "+" : "") + lift.toFixed(2)} ${lift >= 0.05 ? "✓" : "✗"} | net ${net >= 0 ? "+" : ""}${net} ${net > 0 ? "✓" : "✗"} | aggregate Δ ${(agg >= 0 ? "+" : "") + agg.toFixed(2)} ${agg >= 0 ? "✓" : "✗"}`);
-console.log(`    VERDICT: ${pass ? "PASS → a graph expansion stage clears the bar; a product path is a separately scoped issue" : "FAIL → do not build; confirms SMD-948's decision, now on the composed axis"}`);
+console.log(`    VERDICT: ${pass ? "PASS (provisional — best of the sweep) → a graph expansion stage may clear the bar; confirm on a pre-registered single config before a product path" : "FAIL → do not build; confirms SMD-948's decision, now on the composed axis"}`);
 
 console.log(`\n  cost`);
 console.log(`    graph construction: not measured by this run — it replays a dump. The extraction pass that made it is eval-entities.ts --corpus; FORK.md change 30 records 82 min for 441 issues at two workers on qwen2.5:7b. One call per new thought after that.`);

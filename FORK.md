@@ -13993,7 +13993,8 @@ for a stage that deliberately reorders toward relatedness, change 87's lesson. T
 **pre-registered bar** (SMD-1038 posture, committed before the numbers): build the stage
 iff multi-hop recall lifts ≥ 0.05 over vector AND it recovers more than it breaks AND it
 does not cut aggregate recall. K′ and hops are swept, and the headline is the arm's best
-cell, so the graph gets its best shot.
+cell — an upper bound over the sweep, so a FAIL of the best cell is conclusive (no cell
+clears the bar).
 
 **On this corpus vector is already at ceiling, so there is nothing for the stage to
 recover.** Vector gets multi-hop recall@10 **1.00** (601 issues, 1024-dim, 27

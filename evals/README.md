@@ -1885,7 +1885,7 @@ cosine oracle would be the wrong gold for a stage that deliberately reorders tow
 relatedness (SMD-1707). The **pre-registered bar** (SMD-1038 posture, fixed before the
 numbers): build the stage iff multi-hop recall@10 lifts **≥ 0.05** over vector **and** it
 recovers more than it breaks **and** it does not cut aggregate recall. K′ and hops are
-swept; the headline is the arm's *best* cell, so the graph gets its best shot.
+swept; the headline is the arm's *best* cell — an upper bound over the sweep, so a FAIL of the best cell is conclusive (no cell clears the bar) and a PASS would be provisional.
 
 **Real corpus (601 issues, 1024-dim, 27 questions), recall@10:**
 
