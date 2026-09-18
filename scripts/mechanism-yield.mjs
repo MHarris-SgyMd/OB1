@@ -62,7 +62,7 @@
  *   bun scripts/mechanism-yield.mjs                      # whole log
  *   bun scripts/mechanism-yield.mjs --since <sha>        # that commit and everything committed at or after it
  *   bun scripts/mechanism-yield.mjs --since YYYY-MM-DD   # from that calendar day on, committer time in --zone
- *   bun scripts/mechanism-yield.mjs --zone Europe/London  # the zone days are read in (default America/Chicago)
+ *   bun scripts/mechanism-yield.mjs --zone Europe/London # the zone days are read in (default America/Chicago)
  *   bun scripts/mechanism-yield.mjs --log dump.txt       # a saved dump (--since then takes a date only)
  *   bun scripts/mechanism-yield.mjs --self-check         # the parser fixtures
  *
@@ -123,27 +123,22 @@ function parseArgs(argv) {
   return out;
 }
 
-const OPTS = parseArgs(process.argv.slice(2));
-if (OPTS.error) {
-  console.error(OPTS.error);
+/** A refusal with a reason: printed, and the run stops with exit 2. */
+function refuse(msg) {
+  console.error(msg);
   process.exit(2);
 }
+
+const OPTS = parseArgs(process.argv.slice(2));
+if (OPTS.error) refuse(OPTS.error);
 const samplesArg = Number(OPTS["--samples"]);
 const SAMPLES = OPTS["--samples"] === undefined ? 6 : Number.isInteger(samplesArg) && samplesArg >= 0 ? samplesArg : null;
-if (SAMPLES === null) {
-  console.error(`--samples takes a non-negative integer, got ${OPTS["--samples"]}`);
-  process.exit(2);
-}
+if (SAMPLES === null) refuse(`--samples takes a non-negative integer, got ${OPTS["--samples"]}`);
 const DUMP = OPTS["--dump"];
 const LOG = OPTS["--log"];
 const SINCE = OPTS["--since"];
 const SELF_CHECK = OPTS["--self-check"] === true;
 const isDate = (s) => /^\d{4}-\d{2}-\d{2}$/.test(s);
-/** A refusal with a reason: printed, and the run stops. */
-function refuse(msg) {
-  console.error(msg);
-  process.exit(2);
-}
 
 // ---------------------------------------------------------------------------
 // The zone. A `--since YYYY-MM-DD` day is resolved ONCE to the instant it
@@ -213,21 +208,18 @@ function git(args) {
     return execFileSync("git", args, { encoding: "utf8", maxBuffer: 64 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"] });
   } catch (e) {
     const msg = String(e.stderr ?? e.message).trim().split("\n")[0];
-    console.error(`git ${args.slice(0, 2).join(" ")} failed: ${msg}`);
-    process.exit(2);
+    refuse(`git ${args.slice(0, 2).join(" ")} failed: ${msg}`);
   }
 }
 
 /** Returns { commits, windowLabel }. */
 function readLog() {
+  const dayLabel = `window ${SINCE} (${ZONE} days) → `;
   if (LOG) {
-    let commits = parseCommits(fs.readFileSync(LOG, "utf8"));
+    const commits = parseCommits(fs.readFileSync(LOG, "utf8"));
     if (SINCE === undefined) return { commits, windowLabel: "" };
-    if (!isDate(SINCE)) {
-      console.error(`--since with --log takes a date (YYYY-MM-DD): a dump has no ancestry to resolve ${SINCE} against`);
-      process.exit(2);
-    }
-    return { commits: sinceInstant(commits, startOfDay(SINCE, ZONE)), windowLabel: `window ${SINCE} (${ZONE} days) → end of dump: ` };
+    if (!isDate(SINCE)) refuse(`--since with --log takes a date (YYYY-MM-DD): a dump has no ancestry to resolve ${SINCE} against`);
+    return { commits: sinceInstant(commits, startOfDay(SINCE, ZONE)), windowLabel: `${dayLabel}end of dump: ` };
   }
   const args = ["log", `--format=${FORMAT}`];
   if (SINCE === undefined) return { commits: parseCommits(git(args)), windowLabel: "" };
@@ -235,7 +227,7 @@ function readLog() {
     // The whole log, cut by the same instant filter the --log path applies.
     // Passing the bare day to git as --since would read it as that day at the
     // current time of day and drop every commit made earlier in the day.
-    return { commits: sinceInstant(parseCommits(git(args)), startOfDay(SINCE, ZONE)), windowLabel: `window ${SINCE} (${ZONE} days) → HEAD: ` };
+    return { commits: sinceInstant(parseCommits(git(args)), startOfDay(SINCE, ZONE)), windowLabel: `${dayLabel}HEAD: ` };
   }
   // A revision: everything reachable from HEAD that was COMMITTED at or after
   // the anchor's own commit time, the anchor included. Ancestry alone
@@ -583,7 +575,7 @@ const boyscout = commits.filter((c) => BOYSCOUT_RE.test(c.subject) && !MERGE_RE.
 
 const rows = [];
 let subjectOnly = 0;
-const runResults = []; // the bullets the run-result rules dropped, shown in the samples so a lost finding is visible
+const runResults = []; // the bullets the run-result rules dropped, printed in full at the end so a lost finding is visible
 for (const c of review) {
   const ticket = ticketOf(c.subject, c.body);
   const pass = passNumber(c.subject);

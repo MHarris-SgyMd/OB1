@@ -14273,8 +14273,8 @@ read as pass 3; the five subjects in the log that name two passes survived
 only by word order), a bullet carrying a `(caught` tag is a finding wherever
 it sits (a "Verified:" line may introduce tagged findings, and a tagged bullet
 may quote the count that proved it), every bullet the run-result rules drop is
-printed in a samples section so an untagged finding lost to them is seen (one
-in the whole log, a suite count), a bullet too short to be a finding is
+printed in full at the end of the report so an untagged finding lost to them
+is seen (one in the whole log, a suite count), a bullet too short to be a finding is
 counted as skipped rather than nowhere, a defect found by a named or unnumbered
 pass shows as "an unnumbered pass" in the per-ticket table instead of "none",
 and a row whose tag does not parse is classified over the finding, not over
