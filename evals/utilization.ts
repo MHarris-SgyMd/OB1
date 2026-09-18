@@ -175,6 +175,10 @@ export type Attribution = {
   unattributed: ActionRow[];
   /** Plain tool names seen that are not in OPEN_TOOLS — counted as opened, reported as unknown. */
   unknownTools: Map<string, number>;
+  /** Action rows whose tool is `<writer>/<pointer>`, attributed or not — zero with actions present is a schema smell (035 absent). */
+  citeRows: number;
+  /** search id → distinct ids returned; built once here, read by summarise. */
+  returnedDistinct: Map<string, number>;
 };
 
 /**
@@ -201,18 +205,24 @@ export function attribute(searches: SearchRow[], actions: ActionRow[], windowMin
   const bySearch = new Map<string, Uses>();
   const unattributed: ActionRow[] = [];
   const unknownTools = new Map<string, number>();
+  const returnedDistinct = new Map<string, number>();
+  let citeRows = 0;
   const windowUs = windowMinutes * 60_000_000;
 
   const byAgent = new Map<string | null, { s: SearchRow; at: number; ids: Set<string> }[]>();
   for (const s of searches) {
+    const ids = new Set(s.resultIds);
+    returnedDistinct.set(s.id, ids.size);
     const list = byAgent.get(s.agentId) ?? [];
-    list.push({ s, at: tick(s), ids: new Set(s.resultIds) });
+    list.push({ s, at: tick(s), ids });
     byAgent.set(s.agentId, list);
   }
   for (const list of byAgent.values()) list.sort((a, b) => b.at - a.at); // newest first
 
   for (const act of actions) {
-    if (citePointerOf(act.tool) === null && !OPEN_TOOLS.has(act.tool)) unknownTools.set(act.tool, (unknownTools.get(act.tool) ?? 0) + 1);
+    const isCite = citePointerOf(act.tool) !== null; // once per action
+    if (isCite) citeRows++;
+    else if (!OPEN_TOOLS.has(act.tool)) unknownTools.set(act.tool, (unknownTools.get(act.tool) ?? 0) + 1);
     const at = tick(act);
     let hit: SearchRow | undefined;
     for (const c of byAgent.get(act.agentId) ?? []) {
@@ -232,7 +242,7 @@ export function attribute(searches: SearchRow[], actions: ActionRow[], windowMin
     // cited and opened PARTITION used: an id that reached a write is cited,
     // and only an id that was merely looked at is opened — so cited + opened =
     // used, and cited/used reads as the share of use that reached a write.
-    if (citePointerOf(act.tool) !== null) {
+    if (isCite) {
       uses.cited.add(act.targetId);
       uses.opened.delete(act.targetId);
     } else if (!uses.cited.has(act.targetId)) {
@@ -240,7 +250,7 @@ export function attribute(searches: SearchRow[], actions: ActionRow[], windowMin
     }
     bySearch.set(hit.id, uses);
   }
-  return { bySearch, unattributed, unknownTools };
+  return { bySearch, unattributed, unknownTools, citeRows, returnedDistinct };
 }
 
 /** A `real` column decoded to a double carries float32 noise (0.3 → 0.30000001192092896); six significant digits is the column's own precision. */
@@ -279,6 +289,8 @@ export type Summary = {
   unattributed: number;
   /** Plain tool names outside OPEN_TOOLS, with counts — counted as opened, flagged in the report. */
   unknownTools: Map<string, number>;
+  /** Cite-shaped action rows in the log, attributed or not. */
+  citeRows: number;
   windowMinutes: number;
 };
 
@@ -309,7 +321,7 @@ export function summarise(
   windowMinutes: number,
   gold?: Map<string, Set<string>>,
 ): Summary {
-  const { bySearch, unattributed, unknownTools } = attribute(searches, actions, windowMinutes);
+  const { bySearch, unattributed, unknownTools, citeRows, returnedDistinct } = attribute(searches, actions, windowMinutes);
   const withGold = gold !== undefined;
   const overall = emptyStats(withGold);
   const arms = new Map<string, ArmStats>();
@@ -324,12 +336,13 @@ export function summarise(
     const armSt = arms.get(arm) ?? emptyStats(withGold);
     const agSt = agents.get(agent) ?? emptyStats(withGold);
     const hasTokens = typeof s.resultTokens === "number" && Number.isFinite(s.resultTokens);
-    // Distinct ids: a duplicate in a logged result set is one id returned, so
-    // utilization can reach 1 and the token estimate's whole-set test holds.
-    const returnedDistinct = new Set(s.resultIds).size;
+    // Distinct ids (built once in attribute): a duplicate in a logged result
+    // set is one id returned, so utilization can reach 1 and the token
+    // estimate's whole-set test holds.
+    const distinct = returnedDistinct.get(s.id) ?? new Set(s.resultIds).size;
     for (const st of [overall, armSt, agSt]) {
       st.searches++;
-      st.returned += returnedDistinct;
+      st.returned += distinct;
       st.used += used;
       st.cited += uses?.cited.size ?? 0;
       st.opened += uses?.opened.size ?? 0;
@@ -358,7 +371,7 @@ export function summarise(
   finish(overall, usedWithTokens.overall);
   for (const [k, st] of arms) finish(st, usedWithTokens.arms.get(k) ?? 0);
   for (const [k, st] of agents) finish(st, usedWithTokens.agents.get(k) ?? 0);
-  return { overall, arms, agents, actionsTotal: actions.length, unattributed: unattributed.length, unknownTools, windowMinutes };
+  return { overall, arms, agents, actionsTotal: actions.length, unattributed: unattributed.length, unknownTools, citeRows, windowMinutes };
 }
 
 const pct = (x: number | null): string => (x === null ? "  n/a" : `${(100 * x).toFixed(0).padStart(3)}%`);
@@ -381,6 +394,9 @@ export function renderReport(sum: Summary): string {
   lines.push(`window ${sum.windowMinutes} min; ${sum.actionsTotal} action row(s), ${sum.unattributed} attributed to no search; token estimate for ${sum.overall.searchesWithTokens} of ${sum.overall.searches} search(es) (a search with a since-deleted result carries none)`);
   if (sum.unknownTools.size > 0) {
     lines.push(`  WARN ${[...sum.unknownTools].map(([t, n]) => `${t} ×${n}`).join(", ")}: plain tool name(s) outside {${[...OPEN_TOOLS].join(", ")}} — counted as opened; a writer that cites must log <writer>/<pointer>`);
+  }
+  if (sum.citeRows === 0) {
+    lines.push(`  WARN no cite row in the log (no <writer>/<pointer> tool among ${sum.actionsTotal} action rows): either no write has cited a source yet, or the brain lacks migration 035, without which capture_thought logs no cite (preflight's "query log" check says which) — read cited=0 as unknown, not as zero use`);
   }
   lines.push(head);
   lines.push("─".repeat(head.length));

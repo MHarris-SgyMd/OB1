@@ -65,6 +65,21 @@ function toUuidArray(ids: string[]): string {
 }
 
 /**
+ * A Postgres array literal for a `::uuid[]` bind where an element may be
+ * absent: null, undefined and the empty string become the NULL element; any
+ * other value must be a uuid or the literal is refused here, loudly, rather
+ * than reaching array_in as a malformed literal a best-effort caller would
+ * swallow. Kept apart from toUuidArray, whose contract is validated ids only.
+ */
+function toNullableUuidArray(xs: (string | null | undefined)[]): string {
+  return `{${xs.map((x) => {
+    if (x === null || x === undefined || x === "") return "NULL";
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(x)) throw new Error(`toNullableUuidArray: not a uuid: ${x.slice(0, 40)}`);
+    return x;
+  }).join(",")}}`;
+}
+
+/**
  * A Postgres array literal for a `::text[]` bind. Elements are double-quoted
  * with `"` and `\` escaped, so a tool name — or anything else — survives the
  * literal intact; the log's tool values are `[a-z_/]` today, the quoting is for
@@ -423,7 +438,7 @@ export class SqlStore implements ThoughtStore {
       INSERT INTO query_log (kind, tool, agent_id, target_id)
       SELECT 'action', t.tool, t.agent_id, t.target_id
         FROM unnest(${toTextArray(rows.map((r) => r.tool))}::text[],
-                    ${toUuidArray(rows.map((r) => r.agentId ?? "NULL"))}::uuid[],
+                    ${toNullableUuidArray(rows.map((r) => r.agentId))}::uuid[],
                     ${toUuidArray(rows.map((r) => r.targetId))}::uuid[]) AS t(tool, agent_id, target_id)`;
   }
 

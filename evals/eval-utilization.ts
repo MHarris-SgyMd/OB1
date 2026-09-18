@@ -40,6 +40,10 @@ if (!URL_) {
 const WINDOW_MIN = posInt(process.env.OB1_EXPORT_WINDOW_MIN, 30);
 
 const args = process.argv.slice(2);
+if (args.filter((a) => a === "--gold").length > 1) {
+  process.stderr.write("--gold given more than once; one gold fixture per run\n");
+  process.exit(2);
+}
 const goldIdx = args.indexOf("--gold");
 const goldPath = goldIdx >= 0 ? args[goldIdx + 1] : undefined;
 if (goldIdx >= 0 && (!goldPath || goldPath.startsWith("--"))) {

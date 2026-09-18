@@ -2008,8 +2008,18 @@ if (configFailed) {
             const { queryLogEnabled, queryLogRetentionDays } = await import("../db/config.mjs");
             const on = queryLogEnabled(env as unknown as Record<string, string | undefined>);
             const days = queryLogRetentionDays(env as unknown as Record<string, string | undefined>);
-            add("query log", "ok",
+            // Cite rows (SMD-1719) are logged only when 035's upsert_thought
+            // answers `existed` — the store's affirmative "fresh row". On a
+            // brain at 034 without 035 the log records opens and never a cite,
+            // and a utilization report would read that as callers never citing.
+            // 035 is the migration whose 3-argument body returns the key.
+            const [{ cites }] = await sql`
+              SELECT bool_or(pg_get_functiondef(p.oid) LIKE '%''existed''%') AS cites
+                FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+               WHERE n.nspname = 'public' AND p.proname = 'upsert_thought'`;
+            add("query log", cites ? "ok" : "warn",
               `present; ${on ? "ON (OB1_QUERY_LOG=on) here" : "off by default — set OB1_QUERY_LOG=on to record"}. ` +
+              (cites ? "" : "Cite rows (a write naming a returned id as its source, SMD-1719) need migration 035's upsert_thought and will NOT be logged on this brain — utilization would read as callers never citing. ") +
               `Logs each search and the fetch/edit/delete of a returned id, and a write that cites one (SMD-1719) (query text, arguments, returned ids — personal data at rest), read offline by evals/export-queries.ts and evals/eval-utilization.ts (which also joins the returned ids to thoughts content for a token estimate). ` +
               `Retention: prune_query_log(${days}); a self-hosted role needs query_log INSERT (db/README.md).`);
           }

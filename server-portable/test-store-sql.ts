@@ -475,6 +475,38 @@ console.log("\n[10] listSupersessionProposals reads migration 029's queue throug
   await admin5.close();
 }
 
+console.log("\n[11] logActions: the one writer of action rows — a batch in one statement, an absent agent as SQL NULL, a malformed agent refused loudly (migration 034, SMD-1719)");
+{
+  const admin6 = new SQL({ url: URL_, max: 1 });
+  await admin6`DELETE FROM query_log`;
+  const AG = "99999999-9999-4999-8999-999999999999";
+  const X = "aaaaaaaa-0000-4000-8000-000000000001";
+  const Y = "aaaaaaaa-0000-4000-8000-000000000002";
+  await store.logActions([]);
+  assert((await admin6<{ n: number }[]>`SELECT count(*)::int AS n FROM query_log`)[0].n === 0, "an empty batch writes nothing");
+  // undefined AND the empty string are absent agents — `??` alone would have
+  // let "" through as a malformed array element (fifth review pass).
+  await store.logActions([
+    { tool: "fetch", agentId: AG, targetId: X },
+    { tool: "capture_thought/derived_from", agentId: undefined, targetId: Y },
+    { tool: "update_thought/supersedes", agentId: "", targetId: X },
+  ]);
+  const rows = await admin6<{ tool: string; agent_id: string | null; target_id: string }[]>`SELECT tool, agent_id, target_id FROM query_log ORDER BY tool`;
+  assert(rows.length === 3, `three rows in one statement (${rows.length})`);
+  assert(rows.find((r) => r.tool === "fetch")?.agent_id === AG, "a present agent lands");
+  assert(rows.find((r) => r.tool === "capture_thought/derived_from")?.agent_id === null, "an undefined agent lands as SQL NULL");
+  assert(rows.find((r) => r.tool === "update_thought/supersedes")?.agent_id === null, "an empty-string agent lands as SQL NULL, not as a malformed literal");
+  // A non-uuid agent is refused before the statement, loudly, so a caller's
+  // best-effort catch drops a batch it can name rather than array_in failing
+  // on a literal it cannot.
+  let refused = "";
+  try { await store.logActions([{ tool: "fetch", agentId: "not-a-uuid", targetId: X }]); } catch (e) { refused = (e as Error).message; }
+  assert(/toNullableUuidArray: not a uuid: not-a-uuid/.test(refused), `a malformed agent id is refused by name (${refused.slice(0, 60)})`);
+  assert((await admin6<{ n: number }[]>`SELECT count(*)::int AS n FROM query_log`)[0].n === 3, "…and wrote nothing");
+  await admin6`DELETE FROM query_log`;
+  await admin6.close();
+}
+
 await store.close();
 
 report();

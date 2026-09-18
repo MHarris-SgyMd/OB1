@@ -410,8 +410,9 @@ nothing else:
   migration 012), `getThought` / `listThoughts` / `countThoughts` /
   `statsSummary` / `pageThoughtMeta`, `resolveAgent` and the work-claim tables
   (SMD-946), `traceProvenance` / `findDerivatives` / `supersededAmong` /
-  `listSupersessionProposals` (migrations 025/029), `logSearch` / `logAction`
-  (the query log, SMD-1295, migration 034), and every non-vector table:
+  `listSupersessionProposals` (migrations 025/029), `logSearch` / `logActions`
+  (the query log, SMD-1295, migration 034; the one writer of action rows since
+  change 88), and every non-vector table:
   `thought_audit`, `thought_work_claims`, the entity tables, `ob1_config`.
 
 The split is the point: the store holds one column of one table plus the
@@ -13995,7 +13996,15 @@ which is the disagreement `at_us` exists to close. The
 database-row coercions the report relies on (bigint as string, the uuid
 literal, a partly deleted result set, `at_us`, a `real`'s float noise) are
 driven in [39] without a database, since no CI job runs the report itself.
-`bunx tsc --noEmit` in `server-portable/`.
+The number's definition was checked as invariants over 600 random logs with
+duplicate ids, retried actions, an unknown tool, partial token estimates and
+gold on some queries: cited + opened = used at every grain, utilization in
+[0, 1], the per-arm and per-agent tables sum to the overall row, the estimate
+is null exactly when its stated condition holds, and the rendered `all` row
+carries the overall numbers. `bunx tsc --noEmit` in `server-portable/` covers
+the server files; `evals/utilization.ts`, `query-log.ts` and
+`eval-utilization.ts` have no tsconfig and are **runtime-checked only**,
+through [39] under Bun — the same standing as every other `evals/` file.
 The measurement itself — the operator's first week of real use with the log on
 — is the ticket's Verify, not this section's: the number exists when the log
 has rows.

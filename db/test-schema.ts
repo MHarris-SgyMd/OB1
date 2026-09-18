@@ -4445,6 +4445,12 @@ console.log("\n[39] Memory utilization over the query log: attribution, the cite
   assert(dup.overall.returned === 2 && dup.overall.utilization === 1, `duplicates collapse: returned 2, utilization 1 (${dup.overall.returned}, ${dup.overall.utilization})`);
   assert(dbRow({ result_ids: `{${A},${A},${B}}`, surviving: "2", returned_n: "2" }).resultTokens === 300, "a database row with a duplicated id keeps its whole estimate when the reader's distinct count matches the survivors");
 
+  // A log with actions but no cite-shaped tool anywhere reads as "unknown, not
+  // zero use": either nothing has cited yet or the brain lacks 035 (fifth pass).
+  assert(sum.citeRows === 2 && !/no cite row in the log/.test(renderReport(sum)), `the fixture's two cite rows are counted, so no schema warning (${sum.citeRows})`);
+  const opensOnly = summarise(searches, actions.filter((a) => citePointerOf(a.tool) === null), 30);
+  assert(opensOnly.citeRows === 0 && /WARN no cite row in the log/.test(renderReport(opensOnly)) && /migration 035/.test(renderReport(opensOnly)), "actions but no cite row → the report warns and names 035");
+
   const aligned = renderReport(summarise([...searches, search("s0", AG, 20, "empty", [], null)], actions, 30));
   const rowLines = aligned.split("\n").filter((l) => /^(search_thoughts|all|9999|\(anon)/.test(l));
   assert(rowLines.length >= 2 && new Set(rowLines.map((l) => l.length)).size === 1, `every table row is the same width (${[...new Set(rowLines.map((l) => l.length))].join(",")})`);
