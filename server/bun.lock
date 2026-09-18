@@ -5,7 +5,7 @@
     "": {
       "name": "ob1-server-tests",
       "devDependencies": {
-        "@hono/mcp": "0.1.1",
+        "@hono/mcp": "0.1.5",
         "@hono/node-server": "1.19.11",
         "@modelcontextprotocol/sdk": "1.24.3",
         "hono": "4.9.2",
@@ -13,7 +13,7 @@
     },
   },
   "packages": {
-    "@hono/mcp": ["@hono/mcp@0.1.1", "", { "peerDependencies": { "@modelcontextprotocol/sdk": "^1.12.0", "hono": ">=4.0.0" } }, "sha512-2iQ4xBKfQdBBJP3V1/XCVyxQZeWWnxJG+5ytu9/Xuwwje3D70fm9ws0VV536rZ3CKWrnZZ/X+xeJ7FwR3ErVbw=="],
+    "@hono/mcp": ["@hono/mcp@0.1.5", "", { "peerDependencies": { "@modelcontextprotocol/sdk": "^1.12.0", "hono": ">=4.0.0" } }, "sha512-q6Yurx9VUwVEpqnwVXtzIYaq4kgQgWWq9lYLM7NFS2W0sg1RzL+RdKh6jO4/dGyvBLKrahPd2v+NC6rr0XWBvQ=="],
 
     "@hono/node-server": ["@hono/node-server@1.19.11", "", { "peerDependencies": { "hono": "^4" } }, "sha512-dr8/3zEaB+p0D2n/IUrlPF1HZm586qgJNXK1a9fhg/PzdtkK7Ksd5l312tJX2yBuALqDYBlG20QEbayqPyxn+g=="],
 
