@@ -1420,11 +1420,12 @@ if (configFailed) {
          * are read beside it, since the same kind of redefinition resets each.
          * So is 039's `SET jit = off` (SMD-1624): without it a planner path an
          * operator disables at any level — enable_tidscan, enable_nestloop,
-         * hashagg with sort — adds disable_cost to the gate's sample and the
-         * executor JIT-compiles it on every filtered call, ~50 ms, with the
-         * plan, the rows and the ledger unchanged (039's header has the
-         * table). A WARNING: every search still answers, at the seq scan's or
-         * the compiler's cost.
+         * hashagg with sort — adds disable_cost to the gate's sample on
+         * PostgreSQL 14–17 and the executor JIT-compiles it on every filtered
+         * call, ~50 ms, with the plan, the rows and the ledger unchanged (039's
+         * header has the table; 18 counts disabled nodes instead, and there
+         * the clause guards the generic plan's flat estimate). A WARNING: every
+         * search still answers, at the seq scan's or the compiler's cost.
          */
         try {
           if (catalog instanceof Error) throw catalog;
@@ -1451,7 +1452,7 @@ if (configFailed) {
             const mtAlter = mtMissing ? `ALTER FUNCTION ${mt[0].sig}${seqOff ? "" : " SET enable_seqscan = off"}${jitOff ? "" : " SET jit = off"}${rows !== 10 ? " ROWS 10" : ""};` : "";
             const kwAlter = kwOff ? "ALTER FUNCTION search_thoughts_keyword(text, int, int, jsonb) ROWS 25;" : "";
             const remedy = mtMissing && !ledgerHas039
-              ? `Apply db/migrations/039_match_thoughts_jit_off.sql — the last definer of match_thoughts, which carries 019's clauses and ROWS 10 with its own (019's file alone would re-create the 4-argument form 020 dropped).${kwOff ? ` Then put the keyword estimate back: SELECT '[1]'::vector; ${kwAlter}  and carry it into the migration that redefined that function.` : ""}`
+              ? `Apply db/migrations/039_match_thoughts_jit_off.sql${!seqOff || rows !== 10 ? " — the last definer of match_thoughts, which carries 019's clauses and ROWS 10 with its own (019's file alone would re-create the 4-argument form 020 dropped)" : ""}.${kwOff ? ` Then put the keyword estimate back: SELECT '[1]'::vector; ${kwAlter}  and carry it into the migration that redefined that function.` : ""}`
               : `Put it back — after any re-apply of a migration body, since CREATE OR REPLACE resets these: SELECT '[1]'::vector; ${[mtAlter, kwAlter].filter(Boolean).join(" ")}  and carry them into the migration that redefined the function.`;
             const estimates = [
               ...(rows !== 10 ? [`match_thoughts' row estimate is ${rows} rather than 10`] : []),
@@ -1459,7 +1460,7 @@ if (configFailed) {
             ];
             const jitNote = jitOff
               ? ""
-              : `; and it does not carry jit = off${ledgerHas039 ? " although migration 039 is recorded as applied — a later redefinition dropped its SET clause" : " — migration 039 is not applied"}, so a planner path disabled at any level (enable_tidscan, enable_nestloop, hashagg with sort) JIT-compiles the gate's sample on every filtered call, ~50 ms (039's header has the table)`;
+              : `; and it does not carry jit = off${ledgerHas039 ? " although migration 039 is recorded as applied — a later redefinition dropped its SET clause" : " — migration 039 is not applied"}, so a planner path disabled at any level (enable_tidscan, enable_nestloop, hashagg with sort) JIT-compiles the gate's sample on every filtered call, ~50 ms, on PostgreSQL 14–17 (on 18 the clause guards the generic plan's flat estimate; 039's header has the table)`;
             if (!missing019 && jitOff) {
               add("candidate scan", "ok", "match_thoughts declares enable_seqscan = off and ROWS 10, search_thoughts_keyword ROWS 25 (019), and match_thoughts jit = off (039): the candidate scan takes the HNSW indexes at the shipped width, callers plan against real row counts, and no statement of the body is JIT-compiled");
             } else if (!seqOff) {
@@ -1472,7 +1473,7 @@ if (configFailed) {
                   remedy);
             } else {
               add("candidate scan", "warn",
-                  `match_thoughts carries enable_seqscan = off and both row estimates hold, but not jit = off${ledgerHas039 ? " although migration 039 is recorded as applied — a later redefinition dropped its SET clause" : " — migration 039 is not applied"}: a planner path disabled at any level (enable_tidscan, enable_nestloop, hashagg with sort) JIT-compiles the gate's sample on every filtered call, ~50 ms, with the plan, the rows and the ledger unchanged (039's header has the table)`,
+                  `match_thoughts carries enable_seqscan = off and both row estimates hold, but not jit = off${ledgerHas039 ? " although migration 039 is recorded as applied — a later redefinition dropped its SET clause" : " — migration 039 is not applied"}: a planner path disabled at any level (enable_tidscan, enable_nestloop, hashagg with sort) JIT-compiles the gate's sample on every filtered call, ~50 ms, with the plan, the rows and the ledger unchanged, on PostgreSQL 14–17 (on 18 the clause guards the generic plan's flat estimate; 039's header has the table)`,
                   remedy);
             }
           }

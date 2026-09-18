@@ -21,7 +21,10 @@
 --   enable_hashagg with enable_sort): the plan is the same, the eight page
 --   reads are the same, and since this file the cost figure is all there is
 --   to it (PostgreSQL 14–17; 18 prints `Disabled: true` on the node instead
---   and its cost stays ordinary). A `Seq Scan on thoughts` under the collection or the walk means
+--   and its cost stays ordinary — except that on 18 `enable_tidscan = off`
+--   leaves the probe no TID Range path at all and it is a sequential scan of
+--   the heap per block, Failure modes below). A `Seq Scan on thoughts` under
+--   the collection or the walk means
 --   row-level security on the table (SMD-1625, unchanged here); a body
 --   carrying TABLESAMPLE means 037 was pasted over 038 and this file (038's
 --   first screen). Failure modes below has each.
@@ -70,9 +73,9 @@
 --
 --   The second thing the clause buys was measured before this ticket. At
 --   ten million rows plpgsql's GENERIC plans — adopted after five calls when
---   not costlier — carried 30–110 ms their custom twins did not: the routing
---   count on the empty filter 31 ms against 0.03, the exact branch 108
---   against 24, the 2,000-row walk 136 against 20; with `jit = off` those
+--   not costlier — carried 30–110 ms their custom twins did not: the
+--   routing count on the empty filter 31 ms against 0.03, the exact branch
+--   108 against 24, the 2,000-row walk 136 against 20; with `jit = off` those
 --   were 0.03, 11 and 23 (FORK.md change 28, "At scale"; db/bench-hnsw.ts
 --   section C's third column since then). The generic plan's flat estimate
 --   carries the statements past jit_above_cost between a million rows and
@@ -143,10 +146,11 @@
 --     skips a recorded file); db/test-schema.ts [20] pins
 --     the three clauses on the shipped body and fails on a successor that
 --     drops one.
---   * A disabled planner path, still. The plan under `enable_tidscan = off`
---     is the same TID Range Scan at cost 8e10, under `enable_nestloop = off`
---     the same Nested Loop at 1e10: disable_cost is a planner penalty, not a
---     prohibition, and with the compile gone nothing else in the call
+--   * A disabled planner path, still (14–17). The plan under `enable_tidscan
+--     = off` is the same TID Range Scan at cost 8e10, under `enable_nestloop
+--     = off` the same Nested Loop at 1e10: disable_cost is a planner
+--     penalty, not a prohibition, and with the compile gone nothing else in
+--     the call
 --     changes (the table under Why). A reader of auto_explain sees the cost
 --     and no JIT block.
 --   * What the clause does not fix. Under row-level security the collection
@@ -160,11 +164,18 @@
 --     disabled nodes kept beside the cost (`Disabled: true` in EXPLAIN), so
 --     a disabled path no longer carries the sample past jit_above_cost and
 --     the compile under Why cannot be triggered that way there — measured
---     on 18.6: the plan under each disabled path costs 36–1,490 and is not
---     compiled with the clause or without it (db/test-live.ts [5e] asserts
---     the absence on 18). The clause stands on 18 for the generic plan's
---     flat estimate, the compile under row-level security and 13's, none of
---     which 18 changed.
+--     on 18.6: nothing is compiled under any of the three, with the clause
+--     or without it (db/test-live.ts [5e] asserts the absence on 18). Under
+--     `enable_nestloop = off` and hashagg-with-sort the probe keeps its TID
+--     Range Scan (cost 36 on the fixture). Under `enable_tidscan = off` 18
+--     does not build the TID Range path at all — tidpath.c returns before
+--     it, where 14–17 built the path and priced it — and each probe is a
+--     sequential scan of the heap with the ctid range as a filter (cost
+--     1,490 on a 3,000-row fixture; eight heap reads per filtered call at
+--     scale): 13's state under Prerequisites, the cost the gate exists to
+--     avoid, and no clause on the function reaches it (SMD-1703). The clause
+--     stands on 18 for the generic plan's flat estimate, the compile under
+--     row-level security and 13's, none of which 18 changed.
 --   * A server built without JIT (`pg_jit_available()` false: PGlite, some
 --     managed images). The clause is accepted and does nothing; db/test-live.ts
 --     [5e] runs its timing tooth only where JIT is available and asserts the
@@ -212,9 +223,9 @@
 --   it lands on is decided by the statistics sample": 332 and 283 ms in two
 --   of its passes, 23 and 38 in the third), between two corpora's sampled
 --   statistics and not this clause; the one-corpus run above is the
---   attribution. The
---   ten-million arm was not re-run for this file (the machine was shared);
---   db/bench-hnsw.ts section C's third column is where the claim is read.
+--   attribution. The ten-million arm was not re-run for this file (the
+--   machine was shared); db/bench-hnsw.ts section C's third column is where
+--   the claim is read.
 --
 -- What a successor must carry
 --   038's list, unchanged — `SET hnsw.iterative_scan = relaxed_order`, `SET

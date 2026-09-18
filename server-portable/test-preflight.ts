@@ -379,9 +379,10 @@ else {
   assert(noClause.code === 0, "a recorded 014 whose function lost only its SET clause still starts");
   assert(/has 014's body but no iterative scan in force although migration 014 is recorded as applied — a later redefinition dropped its SET clause/.test(noClause.out), "…is described as 014's body without its clause");
   assert(/ALTER FUNCTION match_thoughts\(vector,double precision,integer,jsonb,double precision,double precision\) SET hnsw\.iterative_scan = relaxed_order/.test(noClause.out), "…with the ALTER FUNCTION that puts the clause back as the remedy, naming the signature the catalog holds");
-  // RESET ALL took 019's clause with it, and CREATE OR REPLACE would have
-  // reset the row estimate too: the second check names both, as a warning, with
-  // the migration as the remedy since this ledger does not record 019.
+  // RESET ALL took 019's clause with it (prorows it leaves alone): the second
+  // check names the clause, as a warning, with 039's file as the remedy since
+  // this ledger records neither 019 nor 039 — 039 is the last definer and
+  // carries 019's clauses; 019's own file is never named (review pass 2).
   assert(/candidate scan.*does not carry enable_seqscan = off — migration 019 is not applied/s.test(noClause.out), "the candidate-scan check reports 019's clause missing");
   // The remedy is the LAST definer, not 019's file: on this 6-argument brain
   // 019's CREATE would put the 4-argument form back beside it (the state the
@@ -458,8 +459,10 @@ else {
   await led039b.unsafe(`DELETE FROM schema_migrations WHERE name LIKE '039%'`);
   await led039b.close();
   const unrecorded039 = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
-  assert(/Apply db\/migrations\/039_match_thoughts_jit_off\.sql — the last definer[^\n]*\. Then put the keyword estimate back: SELECT '\[1\]'::vector; ALTER FUNCTION search_thoughts_keyword\(text, int, int, jsonb\) ROWS 25;/.test(unrecorded039.out),
-         "…and with 039 not recorded the remedy is 039's file for the clause and the keyword ALTER beside it, which 039 cannot restore");
+  // Only the jit clause and the keyword estimate are missing here, so the file
+  // is named without the parenthetical about 019's clauses (review pass 3).
+  assert(/Apply db\/migrations\/039_match_thoughts_jit_off\.sql\. Then put the keyword estimate back: SELECT '\[1\]'::vector; ALTER FUNCTION search_thoughts_keyword\(text, int, int, jsonb\) ROWS 25;/.test(unrecorded039.out) && !/the last definer of match_thoughts/.test(unrecorded039.out),
+         "…and with 039 not recorded the remedy is 039's file for the clause and the keyword ALTER beside it, which 039 cannot restore — without the note about 019's clauses, which hold");
   const unled039 = new SQL({ url: LIVE, max: 1 });
   await unled039.unsafe(`DROP TABLE schema_migrations`);
   await unled039.unsafe(`ALTER FUNCTION search_thoughts_keyword(text, int, int, jsonb) ROWS 25`);

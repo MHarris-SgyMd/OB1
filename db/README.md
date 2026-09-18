@@ -1244,7 +1244,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 904 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 514 assertions, real server, throwaway container
+./with-postgres.sh bun test-live.ts         # 514 assertions, real server, throwaway container (on 14–17 with JIT; fewer, reported as skipped, on 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 ```
 
@@ -1398,7 +1398,11 @@ is on one index. It drops its marker table on the way out. Not in CI or
   `disable_cost` and has no JIT block, the same statement with `jit` forced
   on has one, and through the function the mutant with 039's clause RESET
   pays the compile on every call (~50 ms) where the clause costs the
-  default's time. `test-upgrade.ts` [17] applies 039 onto a populated 038:
+  default's time — on PostgreSQL 14–17; on 18, which counts disabled nodes
+  instead of costing them, [5e] asserts that nothing is compiled either way
+  and names the node each path leaves (a sequential scan of the heap per
+  probe under `enable_tidscan = off`, which no clause reaches — SMD-1703),
+  and skips the mutant arm. `test-upgrade.ts` [17] applies 039 onto a populated 038:
   the body byte for byte 038's, `jit=off` beside 014's and 019's clauses, no
   row or privilege moves, and the last definer applied alone drops a
   hand-re-applied 014's 4-argument form. `test-schema.ts` [20] pins the

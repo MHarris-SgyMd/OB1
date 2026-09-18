@@ -632,10 +632,16 @@ console.log("\n[5e] A planner path disabled at session level no longer JIT-compi
     assert(sampleText !== null, "the sample statement reads out of the installed body (038's, byte for byte)");
     const { unitVector } = seededRandom(1624);
     const queries = Array.from({ length: 12 }, () => `[${unitVector(EMBEDDING_DIM).join(",")}]`);
-    const CASES: [string, string[]][] = [
-      ["enable_tidscan = off", ["enable_tidscan"]],
-      ["enable_nestloop = off", ["enable_nestloop"]],
-      ["enable_hashagg = off, enable_sort = off", ["enable_hashagg", "enable_sort"]],
+    // The third column is the node 18 takes: with enable_tidscan off, 18 does
+    // not build the TID Range path at all (tidpath.c returns before it) and
+    // the probe is a sequential scan of the heap per block — 13's state, the
+    // cost the gate exists to avoid, which no clause on the function can
+    // reach (SMD-1703); the other two disable a node above the probe and
+    // the probe keeps its TID Range Scan (review pass 3).
+    const CASES: [string, string[], RegExp][] = [
+      ["enable_tidscan = off", ["enable_tidscan"], /Seq Scan on thoughts/],
+      ["enable_nestloop = off", ["enable_nestloop"], /Tid Range Scan on thoughts/],
+      ["enable_hashagg = off, enable_sort = off", ["enable_hashagg", "enable_sort"], /Tid Range Scan on thoughts/],
     ];
     /**
      * EXPLAIN (ANALYZE) of the sample statement in one transaction: the paths
@@ -671,7 +677,7 @@ console.log("\n[5e] A planner path disabled at session level no longer JIT-compi
     const plain = await explained([]);
     assert(!/JIT:/.test(plain) && topCost(plain) < 1e6 && /Tid Range Scan on thoughts/.test(plain), `with every path enabled the sample's plan is the TID Range Scan at a cost far under disable_cost (${topCost(plain)}) with no JIT block`);
     const baseline = await median([]);
-    for (const [label, gucs] of CASES) {
+    for (const [label, gucs, node18] of CASES) {
       const under = await explained(gucs);
       // One tooth, not two: "no JIT block" means something only at a cost past
       // jit_above_cost — without the function's settings the tidscan case is a
@@ -679,9 +685,21 @@ console.log("\n[5e] A planner path disabled at session level no longer JIT-compi
       // and a bare `!/JIT:/` passed with the clause absent (review pass 1, run-it).
       const cost = topCost(under);
       if (!disableCost) {
+        // On 18 these three lines say nothing about 039's clause — nothing
+        // compiles here with it or without it (run-it, pass 3); the clause's
+        // teeth on 18 are the proconfig assertions above and below, test-schema
+        // [20]/[21] and test-upgrade [17]. They record what 18 does with each
+        // path, and name the failing term (review pass 3).
         const forced = jitAvailable ? await explained(gucs, "on") : under;
-        assert(cost < 1e6 && !/JIT:/.test(under) && !/JIT:/.test(forced) && /Disabled: true/.test(under),
-          `${label}: on PostgreSQL 18 a disabled path is a disabled-node count (Disabled: true), not disable_cost — the plan costs ${cost.toExponential(2)} and is not JIT-compiled with the clause or without it; the trigger this section exists for is 14–17's`);
+        const failed = [
+          ...(cost < 1e6 ? [] : [`cost ${cost.toExponential(2)}`]),
+          ...(/JIT:/.test(under) ? ["a JIT block under the function's settings"] : []),
+          ...(/JIT:/.test(forced) ? ["a JIT block with jit forced on"] : []),
+          ...(/Disabled: true/.test(under) ? [] : ["no Disabled: true"]),
+          ...(node18.test(under) ? [] : [`no ${node18.source.replace(" on thoughts", "")}`]),
+        ];
+        assert(failed.length === 0,
+          `${label}: on PostgreSQL 18 a disabled path is a disabled-node count (Disabled: true), not disable_cost — the probe is a ${node18.source.replace(" on thoughts", "")} at cost ${cost.toExponential(2)} and is not JIT-compiled with the clause or without it; the trigger this section exists for is 14–17's${failed.length ? ` — but: ${failed.join(", ")}` : ""}`);
         continue;
       }
       assert(cost >= 1e10 && /Tid Range Scan on thoughts/.test(under) && !/JIT:/.test(under),
@@ -703,17 +721,17 @@ console.log("\n[5e] A planner path disabled at session level no longer JIT-compi
       // The bound is the compile's size, not a multiple of the default: the
       // compiled call through the function is 51–105 ms in 039's header and
       // was never under 50 across the review runs (EXPLAIN's JIT total for the
-      // sample alone 40–150), so 25 ms of headroom over the default kills the
-      // mechanism-removed value and survives a noisy runner, whose fixed-minus-
-      // default spread was 0.2–1.3 ms over seven runs (review passes 1 and 2).
-      // The compiled arm itself is the noisy one (two compiled medians in one
-      // run were 31 ms apart), which is why the tooth above compares it with
-      // the uncompiled arm and asks only for 10 ms.
-      assert(fixed <= baseline + 25, `…and with the clause the disabled path costs what the default costs: ${fixed.toFixed(2)} ms against ${baseline.toFixed(2)} (the compiled call is 50–105 ms)`);
+      // sample alone 40–70), so 25 ms of headroom over the default kills the
+      // mechanism-removed value and survives a noisy runner: fixed against
+      // default read 7.9–8.9 against 8.0–8.2 in pass 1 and 0.2–1.3 ms apart
+      // over pass 2's four runs. The compiled arm itself is the noisy one (two
+      // compiled medians in one run were 31 ms apart), which is why the tooth
+      // above compares it with the uncompiled arm and asks only for 10 ms.
+      assert(fixed <= baseline + 25, `…and with the clause the disabled path costs what the default costs: ${fixed.toFixed(2)} ms against ${baseline.toFixed(2)} (the compiled call is 51–105 ms)`);
     } else if (!disableCost) {
-      console.log("      (PostgreSQL 18: no disable_cost, so no compile to time — the mutant arm did not run; the catalog and plan checks did)");
+      skip("[5e] the mutant arm through the function", "PostgreSQL 18: a disabled path is counted, not costed, so there is no compile to time");
     } else {
-      console.log("      (this server has no JIT, or its own jit is off: the forced-on plan and the timing did not run; the catalog and plan checks did)");
+      skip("[5e] the forced-on plan and the mutant arm", "this server has no JIT, or its own jit is off");
     }
   } catch (e) {
     failure = e;

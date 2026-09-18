@@ -13065,7 +13065,8 @@ clause-deleted mutant's test-preflight kills (three, not two), and the
 compile's figures name their quantity. What the run-it reviewer verified:
 pass 1's fold is load-bearing — without the `!/JIT:/` term all three plan
 assertions passed with the clause deleted, each printing "— but a JIT block
-is in the plan"; with it all three fail; `keywordAlter` emptied and
+is in the plan"; with it all three fail; `keywordAlter` (pass 2 renamed it
+`kwAlter`) emptied and
 `ledgerHas039` ignored were each killed by exactly the probes written for
 them; a body edit and the clause deleted are killed in test-schema by
 exactly the pinned assertions; over four more [5e] runs the fixed call was
@@ -13074,6 +13075,48 @@ ranged 52–87 ms and two compiled medians in one run were 31 ms apart — the
 teeth compare the uncompiled arms and leave the compiled one its noise. Not
 changed: "30–130 ms of startup" in two pre-existing comments where change
 28 and this section say 30–110 (boyscout).
+
+Pass 3, the same two reviewers on pass 2's additions first. What changed:
+on PostgreSQL 18 `enable_tidscan = off` does not price the TID Range path,
+it never builds it — tidpath.c returns before `create_tidrangescan_path`
+where 14–17 built the path and priced it — so the probe's only path is a
+sequential scan of the heap with the ctid range as a filter, disabled and
+taken anyway: `Seq Scan on thoughts t`, `Disabled: true`, 258 buffers
+against 8 on the 43-page fixture (43 pages × 6 distinct blocks), and on an
+ad hoc 2,469-page heap 19,752 buffers and 152 ms for the statement, the
+empty-filter call 22 → 164 ms. That is 13's state (038's Prerequisites)
+reached on a supported version by an operator's setting, the cost the gate
+exists to avoid, and no clause on the function reaches it — SMD-1703, filed
+with the table. Pass 2's 18 branch had asserted `Disabled: true` and no JIT
+block and passed over that plan without naming it (the `Disabled: true`
+it matched was the sequential scan's); [5e] now asserts the node per case
+on 18 — a `Seq Scan` under `enable_tidscan = off`, the TID Range Scan under
+the other two — and names the failing term, and the header's first screen,
+the 18 bullet and Prerequisites say what 18 does under each. Pass 2's "the
+plan under each disabled path cost 36–1,490" was this finding unread. Also:
+[5e] reports the arms that do not run through the suite's `skip()` rather
+than a printed line, so the count reads as 514 on 14–17 with JIT and fewer
+with skips elsewhere (the README count line says so); the pending-039
+remedy carries its note about 019's clauses only when those are missing,
+not for the common brain at 038 with the jit clause alone to gain;
+preflight's warn strings and the README's [5e] paragraph say 14–17 for the
+compile and what the clause guards on 18; the bound's comment cited seven
+runs for a figure four support and a 150 ms figure that was row-level
+security's; the first screen's wrap; a stale probe comment; this
+paragraph's `keywordAlter`, which pass 2 had renamed. What the run-it
+reviewer verified: the clause deleted from 039 on 18 is killed by the two
+proconfig assertions and nothing else — the three plan lines are green with
+or without it, as designed and now said in the comment; `disableCost`
+forced false on 16 fails all three 18 assertions (the branch cannot take
+18's path on 16); the remedy naming 019's file again is killed by three
+probes, `kwAlter` emptied by four; the stale-pool gate reproduced pass 2's
+wrong-reason failure and the fresh-connection gate skips instead; the whole
+of test-live on 18.6 passes, 507 of 507, the seven fewer being [5e]'s
+skipped arms and no other section differing. Not changed: the first
+`median([])` runs colder than the later arms (12–13 ms against 9–11), a few
+milliseconds of headroom the 25 ms bound does not need; the wording
+"migration 019 is not applied" where the ledger records neither 019 nor
+039, which is the ledger's word and 019's precedent.
 
 **The operator's path, walked.** A brain with rows migrated by `bun
 db/migrate.ts` through 039 (on a brain at 038 it is the one pending file):
