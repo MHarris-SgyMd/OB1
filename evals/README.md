@@ -2333,9 +2333,12 @@ the hit's place, at the hit's rank, a session listed once — run as an
 **oracle**, because the corpus carries **0** `supersedes` pointers (printed;
 nothing populates them: the consolidation pass has not run on these loads,
 and at one thought per session it would be judging whole conversations). The
-arm holds the 72 gold pairs in memory as the chains, as if a reviewer had
+arm holds each question's gold pair in memory as that question's chain — not
+one chain over all 72, since a session sits in many histories and another
+question's stale session is not this question's — as if a reviewer had
 accepted exactly the right proposals. It is the upper bound of the read, not
-a measurement of it.
+a measurement of it. On a store that does carry pointers the arm walks them
+instead, stopping at the edge of the history, and says so.
 
 **Results, k=5, 72 questions.** 4b / 0.6b:
 
@@ -2400,6 +2403,11 @@ thought — ID …`) names the head one read away, and `Captured:` dates every
 hit. What would move the reader's number without a chain is a reranker that
 reads the two texts and picks the later state — the one-pool rerank change 59
 found to be the lever — measured on this slice with this arm set.
+
+### Caveats
+
+* Two local models, both at 1024 dimensions. Nothing hosted has been
+  measured on this corpus, as on the others (see "The biggest gap").
 * The date is prepended to each session's text. Without it temporal questions
   are unanswerable by any retriever; with it, the harness has made a choice a
   capture path would have to make too. It helps the temporal slice and is
@@ -2411,7 +2419,8 @@ found to be the lever — measured on this slice with this arm set.
 * No reranker arm. The cascade (above) was measured flat on the tracker; this
   corpus is where it would be re-derived, and `eval-cascade.ts` is the harness
   for that.
-* Three-arm, two-k design; per-question rank data is not kept. A follow-up
+* Three-arm, two-k design; the shipped arm set keeps no per-question rank
+  data (the `current` set keeps each gold's rank for its slice). A follow-up
   that wants MRR or the rank of the missed gold session extends `score()`.
 
 ## What the windows buy under a model that embeds the capture whole — and the rule that replaced the constant

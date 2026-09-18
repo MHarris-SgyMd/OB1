@@ -175,6 +175,8 @@ type Question = {
  */
 type ScoreQ = Pick<Question, "question_id" | "question_type" | "question" | "answer_session_ids" | "haystack_session_ids">;
 const questions: ScoreQ[] = [];
+/** The questions an arm set scores: every non-abstention one, or the knowledge-update slice for `current`. One rule for the prune and the score. */
+const scorable = (qs: ScoreQ[]) => qs.filter((q) => !q.question_id.endsWith("_abs") && (ARMS !== "current" || q.question_type === "knowledge-update"));
 
 /**
  * One session as a captured transcript. The date leads, because a pasted
@@ -264,9 +266,12 @@ async function ingest(): Promise<void> {
     questions.push({ question_id: q.question_id, question_type: q.question_type, question: q.question, answer_session_ids: q.answer_session_ids, haystack_session_ids: q.haystack_session_ids });
   });
 
-  // A smoke run (OB1_EVAL_MAX_QUESTIONS) loads only the histories it will score.
+  // A smoke run (OB1_EVAL_MAX_QUESTIONS) loads only the histories it will score
+  // — the first MAXQ of the questions the arm set scores, so the `current` set
+  // keeps knowledge-update histories, not the file's first few of every type
+  // (first review pass).
   if (MAXQ) {
-    const keep = new Set(questions.filter((q) => !q.question_id.endsWith("_abs")).slice(0, MAXQ).map((q) => q.question_id));
+    const keep = new Set(scorable(questions).slice(0, MAXQ).map((q) => q.question_id));
     for (const [sid, s] of sessions) if (!s.qids.some((id) => keep.has(id))) sessions.delete(sid);
   }
 }
@@ -314,18 +319,31 @@ function writeMap(m: SidMap): void { writeFileSync(`${MAP_PATH}.tmp`, JSON.strin
  */
 async function readMapOrRebuild(): Promise<SidMap> {
   if (existsSync(MAP_PATH)) return JSON.parse(readFileSync(MAP_PATH, "utf8")) as SidMap;
-  const rows = (await sql`SELECT id, metadata->>'lme_sid' AS sid FROM thoughts WHERE metadata ? 'lme_sid'`) as { id: string; sid: string }[];
+  // The map is per model (MAP_PATH carries the spec), so only rows this model
+  // embedded count as loaded; a store under another model rebuilds to nothing
+  // and the load phase re-embeds, as the lost map used to make it (first
+  // review pass).
+  const rows = (await sql`SELECT id, metadata->>'lme_sid' AS sid FROM thoughts WHERE metadata ? 'lme_sid' AND embedding_model = ${spec.name}`) as { id: string; sid: string }[];
   if (!rows.length) return {};
   const map: SidMap = {};
   for (const r of rows) map[r.sid] = r.id;
   let twins = 0;
   for (const s of sessions.values()) {
     if (map[s.sid]) continue;
-    const hit = (await sql`SELECT id FROM thoughts WHERE content_fingerprint = content_fingerprint_of(${s.text}::text) AND metadata ? 'lme_sid'`) as { id: string }[];
-    if (hit.length === 1) { map[s.sid] = hit[0].id; twins++; }
+    const hit = (await sql`SELECT id FROM thoughts WHERE content_fingerprint = content_fingerprint_of(${s.text}::text) AND metadata ? 'lme_sid' AND embedding_model = ${spec.name}`) as { id: string }[];
+    if (hit.length !== 1) continue;
+    // A twin's questions reach the row only through the load phase's merge,
+    // which a load that died between the upsert and the merge never ran; the
+    // merge is idempotent, so run it for every rebuilt twin rather than trust
+    // it (first review pass).
+    await sql`UPDATE thoughts SET metadata = jsonb_set(metadata, '{lme_q}',
+                (SELECT to_jsonb(array_agg(DISTINCT x)) FROM jsonb_array_elements_text(coalesce(metadata->'lme_q','[]'::jsonb) || ${s.qids}::jsonb) AS x))
+              WHERE id = ${hit[0].id}::uuid`;
+    map[s.sid] = hit[0].id;
+    twins++;
   }
   writeMap(map);
-  console.log(`▸ no map at ${MAP_PATH}; rebuilt ${Object.keys(map).length} entries from the store's lme_sid (${twins} fingerprint twins matched by text)`);
+  console.log(`▸ no map at ${MAP_PATH}; rebuilt ${Object.keys(map).length} entries from the store's lme_sid under ${spec.name} (${twins} fingerprint twins matched by fingerprint, their questions merged)`);
   return map;
 }
 
@@ -453,8 +471,9 @@ function mcnemarExact(helped: number, hurt: number): number {
 
 /** The current-value question (SMD-1720; the header's CURRENT VALUE). */
 async function scoreCurrent(map: SidMap, idToSids: Map<string, string[]>): Promise<void> {
-  const ku = questions.filter((q) => q.question_type === "knowledge-update" && !q.question_id.endsWith("_abs"));
+  const ku = scorable(questions);
   const use = MAXQ ? ku.slice(0, MAXQ) : ku;
+  if (!use.length) throw new Error("CONTROL FAILED: no knowledge-update questions in this run; the current-value question has nothing to score.");
   // CONTROL: the slice's shape — two gold sessions, dated apart, the earlier
   // one stating the value the later one updates. A question outside the shape
   // would make "current" a guess, so the run refuses instead.
@@ -475,22 +494,44 @@ async function scoreCurrent(map: SidMap, idToSids: Map<string, string[]>): Promi
   console.log(`▸ the current-value question over ${pairs.length} knowledge-update questions — ${EMBED_MODEL}`);
   console.log(`  stale → current gap: median ${gaps[Math.floor(gaps.length / 2)].toFixed(0)} days, min ${gaps[0].toFixed(0)}, max ${gaps[gaps.length - 1].toFixed(0)}`);
 
-  // The chain precondition, printed: what a resolving read would have to walk.
+  // The chain precondition: what a resolving read has to walk. With pointers in
+  // the store the arm walks THEM — superseded → superseder, the read as it
+  // would run — and only a store with none falls back to the oracle, so the
+  // corpus the decision waits for is measured, not re-oracled (first review
+  // pass).
   const pointers = ((await sql`SELECT count(supersedes)::int AS n FROM thoughts WHERE metadata ? 'lme_q'`) as { n: number }[])[0].n;
-  console.log(`  supersedes pointers on the corpus: ${pointers}${pointers === 0 ? " — a chain-walking read returns every hit unchanged; the resolve arm walks the gold pairs as an oracle" : ""}`);
-  // The oracle's chains: the stale session's thought → the current one's.
-  const chain = new Map<string, string>();
-  for (const p of pairs) chain.set(map[p.stale], map[p.current]);
+  const oracle = pointers === 0;
+  const storeChain = new Map<string, string>();
+  if (!oracle) {
+    for (const r of (await sql`SELECT id, supersedes FROM thoughts WHERE supersedes IS NOT NULL AND metadata ? 'lme_q'`) as { id: string; supersedes: string }[]) storeChain.set(r.supersedes, r.id);
+  }
+  console.log(`  supersedes pointers on the corpus: ${pointers}${oracle ? " — a chain-walking read returns every hit unchanged; the resolve arm walks each question's gold pair as an oracle" : " — the resolve arm walks them"}`);
 
   const filterFor = (q: ScoreQ) => ({ lme_q: [q.question_id] });
   const vector = async (qv: string, q: ScoreQ, k: number, weight: number, halfLife: number) =>
     ((await sql`SELECT id FROM match_thoughts(${qv}::vector, -1.0, ${k}, ${filterFor(q)}::jsonb, ${weight}::float, ${halfLife}::float)`) as { id: string }[]).map((r) => r.id);
-  /** Each hit walked forward to the head of its chain, kept at the hit's rank, listed once — bounded like trace_provenance. */
-  const resolveThrough = (ids: string[]): string[] => {
+  const pairOf = new Map(pairs.map((p) => [p.q.question_id, p]));
+  /**
+   * Each hit walked forward to the head of its chain, kept at the hit's rank,
+   * listed once — bounded like trace_provenance. The oracle's chain is THIS
+   * question's pair alone: a hit that is another question's stale session
+   * (sessions are shared across histories) is not walked to that question's
+   * update (first review pass). A store chain stops at the edge of the
+   * history, as a filtered read would.
+   */
+  const resolveThrough = (ids: string[], q: ScoreQ): string[] => {
+    const p = pairOf.get(q.question_id)!;
+    const hay = new Set(q.haystack_session_ids);
+    const inHistory = (id: string) => (idToSids.get(id) ?? []).some((sid) => hay.has(sid));
+    const next = (id: string): string | undefined => {
+      if (oracle) return id === map[p.stale] ? map[p.current] : undefined;
+      const head = storeChain.get(id);
+      return head !== undefined && inHistory(head) ? head : undefined;
+    };
     const out: string[] = [];
     for (const id of ids) {
       let head = id;
-      for (let i = 0; i < 1000 && chain.has(head); i++) head = chain.get(head)!;
+      for (let i = 0; i < 1000; i++) { const n = next(head); if (n === undefined) break; head = n; }
       if (!out.includes(head)) out.push(head);
     }
     return out;
@@ -500,7 +541,13 @@ async function scoreCurrent(map: SidMap, idToSids: Map<string, string[]>): Promi
     { key: "recency@0.3", label: "020's blend as a caller can send it today: recency_weight 0.3, half-life 90 days", run: (qv, q, k) => vector(qv, q, k, 0.3, 90) },
     { key: "recency@0.3/3650", label: "the blend at a half-life of 3,650 days, so a week of age is visible on a three-year-old corpus", run: (qv, q, k) => vector(qv, q, k, 0.3, 3650) },
     { key: "age@1", label: "age alone among the nearest candidates (recency_weight 1)", run: (qv, q, k) => vector(qv, q, k, 1, 90) },
-    { key: "resolve", label: "the shipped order, every hit walked to the head of its supersedes chain — the gold pairs as the chains, an oracle", run: async (qv, q, k) => resolveThrough(await vector(qv, q, k, 0, 90)) },
+    {
+      key: "resolve",
+      label: oracle
+        ? "the shipped order, every hit walked to the head of its supersedes chain — each question's gold pair as the chain, an oracle (the store has no pointers)"
+        : `the shipped order, every hit walked to the head of its supersedes chain — the store's ${pointers} pointers, the read as it would run`,
+      run: async (qv, q, k) => resolveThrough(await vector(qv, q, k, 0, 90), q),
+    },
   ];
   const KS = [5, 10];
 

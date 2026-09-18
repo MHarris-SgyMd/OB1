@@ -13786,9 +13786,9 @@ recent *about this*, and only a signal that reads the texts can know it.
 54) has not run on these loads, and at one thought per session it would judge
 whole conversations — so the ticket's read (walk each hit forward to the head
 of its chain, return the head at the hit's rank, list a session once) cannot be
-measured as an arm. It is measured as its upper bound instead: the 72 gold pairs
-held in memory as the chains, as if a reviewer had accepted exactly the right
-proposals. Fed those, it puts the update first on **every** question (+34 / −0
+measured as an arm. It is measured as its upper bound instead: each question's
+gold pair held in memory as that question's chain, as if a reviewer had accepted
+exactly the right proposals (a store that carries pointers is walked as it is). Fed those, it puts the update first on **every** question (+34 / −0
 on the 4b, +39 / −0 on the 0.6b, p<0.001), at rank one on 94–97% — and scores
 **0% on strict recall**, because it hands back one session where the benchmark
 wants two. With the forward walk removed (the mutant) the arm is the shipped
