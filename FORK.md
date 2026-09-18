@@ -13181,8 +13181,8 @@ shape, not of the transport, and no assertion should rest on its exact size.
 one server, one transport, 100 sequential `tools/list`, each asserted
 answered with its own id, then a forced GC and the count of `Request` objects
 collected, asserted at 90 or more of 100 — 0.1.1 releases none, and the
-distance between none and most is the mechanism; the exact slack is not
-(the review's first pass moved the bar from 99, see above). It is a test of
+distance between none and most is the mechanism; the exact slack is not (the
+review pass moved the bar from 99). It is a test of
 the pinned library, which nothing runnable in the tree exercised across a
 session; the after sample, which does, cannot be run here (change 78) and is
 held by a text rule that its sweep closes what it drops. The docblock names
@@ -13207,6 +13207,10 @@ the stream lifecycle at 0.1.5 (`send()` → `abort()` → `reader.cancel()`,
 the frame already pulled because the transform's readable has no buffer),
 that per-request transports hold no timer on the POST path, and that
 deleting from the sessions Map inside `for…of` is safe.
+
+**Tidied while the files were open.** The release section's comment in
+`test-auth.ts` points at this section instead of restating it, twelve lines
+to six; the test paragraph above loses a parenthetical. No behaviour change.
 
 **Not done here.** SMD-1616 (the Accept patches, and whether 0.3.x's
 either-token check is worth the SDK and hono moves it needs). The after

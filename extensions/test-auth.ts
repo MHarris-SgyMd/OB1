@@ -906,18 +906,12 @@ for (const t of TEXT_ONLY) {
 }
 
 // ── The pinned transport, across a session ──────────────────────────────────
-// A transport reused across a session — the cost recipe's after sample keeps
-// one per session — must let go of each POST once it has answered it.
-// @hono/mcp 0.1.1 did not: it recorded every request's { ctx, stream } and
-// deleted the record only on abort or close(), so a session grew by one
-// Request and one Hono Context per tool call until the TTL sweep dropped it
-// (SMD-1607). 0.1.2 deletes the record when the response is sent; the pin is
-// 0.1.5 (change 82). Collection is read through WeakRefs after a forced GC —
-// a FinalizationRegistry's callbacks arrive on the runtime's schedule. One
-// or two of N can stay reachable from the frames that answered them (a
-// conservative stack scan; the review's standalone copy of this loop read 98
-// of 100 twice in thirty rounds), so the bar is most of N, not all: at 0.1.1
-// none is released, and the distance between none and most is the mechanism.
+// A transport reused across a session (the after sample's shape) must let go
+// of each POST it answers; @hono/mcp 0.1.1 kept every one until close()
+// (SMD-1607, change 82). Read through WeakRefs after a forced GC — a
+// FinalizationRegistry's callbacks arrive on the runtime's schedule — and
+// asked for most of N, not all: one or two can stay reachable from the frames
+// that answered them, and at 0.1.1 none is released (change 82's measurement).
 console.log("\n[the pinned @hono/mcp, one transport across a session]");
 {
   const { Hono } = await import("hono");
