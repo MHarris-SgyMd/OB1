@@ -68,29 +68,30 @@
  *
  * `--since <sha>` is a window in TIME as well as ancestry — the commit's own
  * commit time onward — so a branch that started before the anchor and merged
- * after it contributes only what it committed in the tagged era. Every date
- * the script cuts on or prints is the COMMITTER instant (`%cI`, the clock a
- * `--since <sha>` anchor cuts on and the one a rebase moves; about a tenth of
- * the log's commits were authored on another day than they were committed),
- * read as a calendar day in ONE DECLARED ZONE — `--zone <IANA name>`, default
- * America/Chicago, the zone every review pass in the record was committed in.
- * The zone is declared rather than taken from the machine or from each
- * commit's own offset because both make the same command tally differently
- * elsewhere: the log carries twelve committer offsets, and a `--since
- * 2026-09-18` run gives one commit set in Chicago, another under UTC and a
- * third in Tokyo. The window label names the zone. `--since YYYY-MM-DD` is
- * the whole calendar day on both paths: the script filters rows on their day
- * rather than handing the bare day to git, whose approxidate reads it as that
- * day at the current time of day and silently drops every commit made
- * earlier in it. The numbers behind all this are in FORK.md, "The window and
- * the attribution, corrected (SMD-1728)". Options take `--name value` or
- * `--name=value`; an unknown option is refused. Others: --samples N (rows
- * shown per class, default 6; 0 shows none), --dump rows.tsv (every row with
- * its classification). A dump is what `git log
- * --format='%x1e%H%x1f%cI%x1f%s%x1f%b'` prints: instants, so it is zone-free
- * and any reader's `--zone` applies. A dump whose date column is already a
- * bare day (made with `--date=short`, before this change) windows on those
- * days as written, whatever clock produced them.
+ * after it contributes only what it committed in the tagged era. Every window
+ * is a cut on the COMMITTER instant (`%cI`, the clock a rebase moves; about a
+ * tenth of the log's commits were authored on another day than they were
+ * committed). `--since YYYY-MM-DD` is resolved once to the instant that day
+ * begins in ONE DECLARED ZONE — `--zone <Region/City>`, default
+ * America/Chicago, the zone every review pass in the record was committed in
+ * — and then filtered like the anchor, so the two spellings are one filter and
+ * the zone is applied in one place. The zone is declared rather than taken
+ * from the machine or from each commit's own offset because both make the
+ * same command tally differently elsewhere: the log carries twelve committer
+ * offsets, and a `--since 2026-09-18` run gave one commit set in Chicago,
+ * another under UTC and a third in Tokyo. The window label names the zone,
+ * and the day a row is shown with is rendered in it. The bare day is never
+ * handed to git, whose approxidate reads it as that day at the current time
+ * of day and silently drops every commit made earlier in it. The numbers
+ * behind all this are in FORK.md, "The window and the attribution, corrected
+ * (SMD-1728)". Options take `--name value` or `--name=value`; an unknown
+ * option is refused. Others: --samples N (rows shown per class, default 6; 0
+ * shows none), --dump rows.tsv (every row with its classification, its
+ * committer instant and its day in --zone — not the dump `--log` reads). A
+ * `--log` dump is what `git log --format='%x1e%H%x1f%cI%x1f%s%x1f%b'` prints:
+ * instants, so it is zone-free and any reader's --zone applies. A dump whose
+ * date column is a rendered day (made before this change) is refused by
+ * record and must be regenerated; the log it came from still exists.
  */
 
 import { execFileSync } from "node:child_process";
@@ -138,15 +139,30 @@ const LOG = OPTS["--log"];
 const SINCE = OPTS["--since"];
 const SELF_CHECK = OPTS["--self-check"] === true;
 const isDate = (s) => /^\d{4}-\d{2}-\d{2}$/.test(s);
-/** The commits dated on or after a calendar day — the one date filter both paths use. */
-const sinceDay = (commits, day) => commits.filter((c) => c.date >= day);
+/** A refusal with a reason: printed, and the run stops. */
+function refuse(msg) {
+  console.error(msg);
+  process.exit(2);
+}
 
-// The zone a committer instant is read as a calendar day in. Declared, not the
-// machine's: the record's passes were all committed in this one, and a day cut
-// must give the same set on every machine that re-runs the FORK.md command.
+// ---------------------------------------------------------------------------
+// The zone. A `--since YYYY-MM-DD` day is resolved ONCE to the instant it
+// begins in one declared zone, and every window is then a comparison of
+// committer instants — the same comparison the `--since <sha>` anchor makes.
+// The zone is declared, not the machine's: the record's passes were all
+// committed in this one, and a day cut must give the same set on every machine
+// that re-runs the FORK.md command. Rows keep their instant; the calendar day
+// a row is shown with is rendered in the same zone and is display only.
+// ---------------------------------------------------------------------------
 const DEFAULT_ZONE = "America/Chicago";
-const ZONE = OPTS["--zone"] ?? DEFAULT_ZONE;
-/** A YYYY-MM-DD formatter for one IANA zone, or null when the name is not one. */
+/** The zone from the options: a Region/City IANA name or UTC. Legacy abbreviations (EST) are refused — they are fixed offsets, not zones. */
+function zoneOf(opts) {
+  const z = opts["--zone"];
+  if (z === undefined) return { zone: DEFAULT_ZONE };
+  if (!/^(?:[A-Za-z]+\/[A-Za-z0-9_+\-]+(?:\/[A-Za-z0-9_+\-]+)?|UTC)$/.test(z)) return { error: `--zone takes an IANA Region/City name such as ${DEFAULT_ZONE}, or UTC; got ${JSON.stringify(z)}` };
+  return dayFormatter(z) ? { zone: z } : { error: `--zone: ${JSON.stringify(z)} is not a zone this runtime knows` };
+}
+/** A YYYY-MM-DD formatter for one IANA zone, or null when the runtime does not know the name. */
 function dayFormatter(zone) {
   try {
     return new Intl.DateTimeFormat("en-CA", { timeZone: zone, year: "numeric", month: "2-digit", day: "2-digit" });
@@ -154,21 +170,33 @@ function dayFormatter(zone) {
     return null;
   }
 }
-const DAY_FORMAT = dayFormatter(ZONE);
-if (!DAY_FORMAT) {
-  console.error(`--zone takes an IANA zone name such as ${DEFAULT_ZONE} or UTC, got ${ZONE}`);
-  process.exit(2);
+/** The zone's offset from UTC at an instant, in ms (Chicago in September: -5 h). */
+function offsetMs(t, zone) {
+  const parts = new Intl.DateTimeFormat("en-US", { timeZone: zone, hourCycle: "h23", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" }).formatToParts(t);
+  const g = (type) => Number(parts.find((p) => p.type === type).value);
+  return Date.UTC(g("year"), g("month") - 1, g("day"), g("hour"), g("minute"), g("second")) - t.getTime();
 }
 /**
- * The calendar day of a committer stamp in a zone: an ISO instant ("2026-09-18T02:24:12-05:00")
- * is converted; a bare day from an older dump is kept as written.
+ * The instant a calendar day begins in a zone. Start from the day's UTC
+ * midnight, shift by the zone's offset at that instant, and shift once more
+ * so a DST change between the two candidate instants is applied.
  */
-function dayOf(stamp, formatter = DAY_FORMAT) {
-  if (isDate(stamp)) return stamp;
-  const t = new Date(stamp);
-  if (Number.isNaN(t.getTime())) return stamp; // unreadable: left as is, and a day filter will not match it
-  return formatter.format(t);
+function startOfDay(day, zone) {
+  const [y, m, d] = day.split("-").map(Number);
+  const midnightUTC = Date.UTC(y, m - 1, d);
+  let t = new Date(midnightUTC);
+  for (let i = 0; i < 2; i++) t = new Date(midnightUTC - offsetMs(t, zone));
+  return t;
 }
+/** The commits committed at or after an instant — the one window filter, for a day or a sha anchor alike. */
+const sinceInstant = (commits, start) => commits.filter((c) => c.stamp.getTime() >= start.getTime());
+/** The calendar day of an instant in a zone, for display. */
+const dayOf = (t, formatter) => formatter.format(t);
+
+const zoneRead = zoneOf(OPTS);
+if (zoneRead.error) refuse(zoneRead.error);
+const ZONE = zoneRead.zone;
+const DAY_FORMAT = dayFormatter(ZONE);
 
 // ---------------------------------------------------------------------------
 // Parsing
@@ -199,15 +227,15 @@ function readLog() {
       console.error(`--since with --log takes a date (YYYY-MM-DD): a dump has no ancestry to resolve ${SINCE} against`);
       process.exit(2);
     }
-    return { commits: sinceDay(commits, SINCE), windowLabel: `window ${SINCE} (${ZONE} days) → end of dump: ` };
+    return { commits: sinceInstant(commits, startOfDay(SINCE, ZONE)), windowLabel: `window ${SINCE} (${ZONE} days) → end of dump: ` };
   }
   const args = ["log", `--format=${FORMAT}`];
   if (SINCE === undefined) return { commits: parseCommits(git(args)), windowLabel: "" };
   if (isDate(SINCE)) {
-    // The whole log, cut by the same filter the --log path applies. Passing the
-    // bare day to git as --since would read it as that day at the current time
-    // of day and drop every commit made earlier in the day.
-    return { commits: sinceDay(parseCommits(git(args)), SINCE), windowLabel: `window ${SINCE} (${ZONE} days) → HEAD: ` };
+    // The whole log, cut by the same instant filter the --log path applies.
+    // Passing the bare day to git as --since would read it as that day at the
+    // current time of day and drop every commit made earlier in the day.
+    return { commits: sinceInstant(parseCommits(git(args)), startOfDay(SINCE, ZONE)), windowLabel: `window ${SINCE} (${ZONE} days) → HEAD: ` };
   }
   // A revision: everything reachable from HEAD that was COMMITTED at or after
   // the anchor's own commit time, the anchor included. Ancestry alone
@@ -215,16 +243,28 @@ function readLog() {
   // the anchor; time alone would admit commits on other branches.
   const committed = git(["log", "-1", "--format=%cI", SINCE]).trim();
   args.push(`--since=${committed}`, `${SINCE}^..HEAD`);
-  return { commits: parseCommits(git(args)), windowLabel: `window ${SINCE} (committed ${committed.slice(0, 10)}) → HEAD: ` };
+  return { commits: parseCommits(git(args)), windowLabel: `window ${SINCE} (committed ${dayOf(new Date(committed), DAY_FORMAT)}) → HEAD: ` };
 }
 
-function parseCommits(raw) {
+/**
+ * Records → commits. Each record is sha, committer instant, subject, body. A
+ * record without its fields, or with a stamp that is not an instant — a
+ * truncated copy, a hand-edited dump, or one made before SMD-1728 with a
+ * rendered day — is refused by position, not skipped and not compared.
+ */
+function parseCommits(raw, fail = refuse) {
   return raw
     .split("\x1e")
     .filter((r) => r.trim())
-    .map((r) => {
+    .map((r, i) => {
       const [sha, stamp, subject, body = ""] = r.split("\x1f");
-      return { sha: sha.trim().slice(0, 7), date: dayOf(stamp.trim()), subject: subject.trim(), body };
+      const id = `record ${i + 1} (${sha.trim().slice(0, 7)})`;
+      if (stamp === undefined || subject === undefined) return fail(`${id} has no date or subject column; a dump is what \`git log --format='${FORMAT}'\` prints`);
+      const s = stamp.trim();
+      const t = new Date(s);
+      // A bare day parses as a Date too (UTC midnight), so it is refused by shape, not by parse failure.
+      if (isDate(s) || Number.isNaN(t.getTime())) return fail(`${id} has ${JSON.stringify(s)} where a committer instant (%cI) should be; a dump made with a rendered day (before SMD-1728) must be regenerated from the log`);
+      return { sha: sha.trim().slice(0, 7), stamp: t, date: dayOf(t, DAY_FORMAT), subject: subject.trim(), body };
     });
 }
 
@@ -478,16 +518,36 @@ function selfCheck() {
   check(ticketOf("[fork] Review, second pass: that field is SMD-1730's, not this one's (SMD-1719)", "Body mentions SMD-1000 first.") === "SMD-1719" && ticketOf("[fork] Review pass 2: the probe beside SMD-1498's, re-run on the fixed table", "") === "SMD-1498" && ticketOf("[fork] Review pass 1: the header re-read (SMD-1463 review pass 1)", "SMD-1526 first in the body") === "SMD-1463" && ticketOf("[fork] Review, first pass", "Filed as SMD-1462.") === "SMD-1462" && ticketOf("[fork] Review, first pass", "no ticket") === "(none)" && ticketOf("[fork] Bump, and SMD-1616's probe re-run (SMD-1643, SMD-1616)", "") === "SMD-1643", "ticket: the first in the subject's trailing parenthetical, then its first mention, then the body");
   check(FORMAT.includes("%x1f%cI%x1f") && !FORMAT.includes("%ad") && !FORMAT.includes("%cd"), "rows carry the committer instant, the clock the anchor cuts on, not a rendered day");
   {
-    const stamp = "2026-09-18T20:30:00-05:00"; // late evening in Chicago; already the 19th in UTC and Tokyo
-    const chicago = dayFormatter("America/Chicago"), utc = dayFormatter("UTC"), tokyo = dayFormatter("Asia/Tokyo");
-    check(dayOf(stamp, chicago) === "2026-09-18" && dayOf(stamp, utc) === "2026-09-19" && dayOf(stamp, tokyo) === "2026-09-19", "a committer instant becomes a day in the declared zone, not the machine's");
-    check(dayOf("2026-09-18T02:24:12+09:00", chicago) === "2026-09-17", "an instant committed in another offset is read on the declared zone's clock");
-    check(dayOf("2026-09-18", tokyo) === "2026-09-18" && dayOf("garbage", tokyo) === "garbage", "an older dump's bare day is kept as written; an unreadable stamp is left alone");
-    check(dayFormatter("Not/AZone") === null && dayFormatter("UTC") !== null, "an unknown zone name is refused, a known one accepted");
-    const cs = parseCommits("\x1e" + ["abcdef0123", "2026-09-18T20:30:00-05:00", "s", "b"].join("\x1f"));
-    check(cs.length === 1 && cs[0].date === dayOf("2026-09-18T20:30:00-05:00") && cs[0].sha === "abcdef0", "a parsed commit's date is its instant read in the running zone");
+    const iso = (t) => t.toISOString();
+    check(iso(startOfDay("2026-09-18", "America/Chicago")) === "2026-09-18T05:00:00.000Z" && iso(startOfDay("2026-09-18", "UTC")) === "2026-09-18T00:00:00.000Z" && iso(startOfDay("2026-09-18", "Asia/Tokyo")) === "2026-09-17T15:00:00.000Z", "a day begins at a different instant in each declared zone");
+    check(iso(startOfDay("2026-03-08", "America/Chicago")) === "2026-03-08T06:00:00.000Z" && iso(startOfDay("2026-11-01", "America/Chicago")) === "2026-11-01T05:00:00.000Z" && iso(startOfDay("2026-07-01", "America/Chicago")) === "2026-07-01T05:00:00.000Z", "the day DST starts still begins on standard time, the day it ends on daylight time");
+    // Lebanon moves its clocks at midnight, so 2026-03-29 has no 00:00 there: the day begins at 01:00 EEST = 22:00Z the evening before. One shift from UTC midnight lands an hour early; the second corrects it.
+    check(iso(startOfDay("2026-03-29", "Asia/Beirut")) === "2026-03-28T22:00:00.000Z", "a zone whose DST change falls at midnight still gets the day's true first instant");
+    const parseErr = (raw) => {
+      try {
+        parseCommits(raw, (m) => { throw new Error(m); });
+        return null;
+      } catch (e) {
+        return e.message;
+      }
+    };
+    const rec = (...f) => "\x1e" + f.join("\x1f");
+    const ok = rec("aaaaaaa1234", "2026-09-18T02:24:12-05:00", "s", "b");
+    check(parseErr(ok) === null && /^record 2 \(bbbbbbb\) has "2026-09-18" where a committer instant/.test(parseErr(ok + rec("bbbbbbb1234", "2026-09-18", "s", "b"))) && /^record 2 \(ccccccc\) has "garbage"/.test(parseErr(ok + rec("ccccccc1234", "garbage", "s", "b"))) && /^record 2 \(ddddddd\) has no date or subject column/.test(parseErr(ok + "\x1eddddddd1234\n")), "a rendered day, an unreadable stamp and a record without fields are each refused by record, never compared");
+    const cs = sinceInstant(
+      [{ stamp: new Date("2026-09-18T04:59:59Z") }, { stamp: new Date("2026-09-18T05:00:00Z") }, { stamp: new Date("2026-09-18T20:30:00-05:00") }],
+      startOfDay("2026-09-18", "America/Chicago"),
+    );
+    check(cs.length === 2, `a --since day keeps the commits from its first instant in the zone on: 23:59:59 Chicago the night before is out, midnight is in (${cs.length})`);
+    check(sinceInstant([{ stamp: new Date("2026-09-18T20:30:00-05:00") }], startOfDay("2026-09-19", "UTC")).length === 1 && sinceInstant([{ stamp: new Date("2026-09-18T20:30:00-05:00") }], startOfDay("2026-09-19", "America/Chicago")).length === 0, "one instant is inside the 19th under UTC and outside it in Chicago — the zone decides, once");
+    const chicago = dayFormatter("America/Chicago"), tokyo = dayFormatter("Asia/Tokyo");
+    check(dayOf(new Date("2026-09-18T20:30:00-05:00"), chicago) === "2026-09-18" && dayOf(new Date("2026-09-18T20:30:00-05:00"), tokyo) === "2026-09-19", "the day a row is shown with is rendered in the declared zone");
+    check(zoneOf({}).zone === DEFAULT_ZONE && zoneOf({ "--zone": "UTC" }).zone === "UTC" && zoneOf({ "--zone": "Europe/London" }).zone === "Europe/London" && zoneOf({ "--zone": "America/Argentina/Buenos_Aires" }).zone === "America/Argentina/Buenos_Aires", "the zone comes from --zone, else the default");
+    check(!!zoneOf({ "--zone": "EST" }).error && !!zoneOf({ "--zone": "" }).error && !!zoneOf({ "--zone": "Not/AZone" }).error && /""/.test(zoneOf({ "--zone": "" }).error), "a legacy abbreviation, an empty value and an unknown name are refused, the empty one visibly");
+    check(ZONE === (OPTS["--zone"] ?? DEFAULT_ZONE) && DAY_FORMAT.resolvedOptions().timeZone === ZONE, `the running zone is the one the options named and the formatter is built on it (${ZONE})`);
+    const parsed = parseCommits("\x1e" + ["abcdef0123", "2026-09-18T20:30:00-05:00", "s", "b"].join("\x1f"));
+    check(parsed.length === 1 && parsed[0].stamp.getTime() === Date.parse("2026-09-18T20:30:00-05:00") && parsed[0].date === dayOf(parsed[0].stamp, DAY_FORMAT) && parsed[0].sha === "abcdef0", "a parsed commit keeps its instant, and its shown day is that instant in the running zone");
   }
-  check(sinceDay([{ date: "2026-09-17" }, { date: "2026-09-18" }, { date: "2026-09-19" }], "2026-09-18").length === 2, "a --since day keeps that day and later, on the row's own date");
   {
     const s = ticketSummary([
       { ticket: "SMD-1", pass: 0, kind: "bullet", target: "code" },
@@ -529,7 +589,7 @@ for (const c of review) {
   const pass = passNumber(c.subject);
   const { findings, skipped } = bulletsOf(c.body);
   for (const s of skipped) runResults.push({ sha: c.sha, ticket, pass, text: s });
-  const row = (kind, text) => ({ sha: c.sha, date: c.date, ticket, pass, kind, ...classifyRow(text) });
+  const row = (kind, text) => ({ sha: c.sha, stamp: c.stamp, date: c.date, ticket, pass, kind, ...classifyRow(text) });
   if (findings.length === 0) {
     // Older passes carry their findings in the subject only: one coarse row, kept out of the tables.
     subjectOnly++;
@@ -652,7 +712,8 @@ if (runResults.length) {
 if (DUMP) {
   fs.writeFileSync(
     DUMP,
-    ["sha\tdate\tticket\tpass\tkind\tsource\tmechanism\theld\ttarget\ttext", ...rows.map((r) => [r.sha, r.date, r.ticket, r.pass ?? "", r.kind, r.source, r.mechanism, r.held ?? "", r.target, r.text.replace(/\t/g, " ")].join("\t"))].join("\n") + "\n",
+    // The committer instant and the day it was read as in --zone, so two row files made under different zones explain themselves.
+    [`sha\tcommitted\tday (${ZONE})\tticket\tpass\tkind\tsource\tmechanism\theld\ttarget\ttext`, ...rows.map((r) => [r.sha, r.stamp.toISOString(), r.date, r.ticket, r.pass ?? "", r.kind, r.source, r.mechanism, r.held ?? "", r.target, r.text.replace(/\t/g, " ")].join("\t"))].join("\n") + "\n",
   );
   console.log(`\nrows written to ${DUMP}`);
 }
