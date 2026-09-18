@@ -13834,6 +13834,12 @@ one, so change 48's tables stand; the rebuild's merge repaired the rows, and
 re-loading a twin session through the fixed loader leaves the row's id,
 questions and date as they were.
 
+Tidied after the third pass, while the file was open, no behaviour change: the
+isolation filter and the two k values live once at module scope, the control
+that turns returned ids into this history's sessions is one function both
+scorers call, and the resolve arm walks the shipped arm's ids for the same
+question and k instead of fetching the same list again. Tables identical.
+
 **Upstream status:** not applicable — the eval is this fork's.
 
 ## Detached from the fork network

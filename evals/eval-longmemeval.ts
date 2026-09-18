@@ -478,6 +478,36 @@ async function loadWindows(): Promise<void> {
 type Arm = { key: string; label: string; run: (qv: string, q: ScoreQ, k: number) => Promise<string[]> };
 
 /**
+ * The isolation filter: this question's history, by id — jsonb array
+ * containment through 014's filter-inside-the-scan path. An object, not a
+ * JSON string: Bun stringifies a ::jsonb parameter itself, and a string would
+ * arrive as a jsonb scalar that nothing contains.
+ */
+const filterFor = (q: ScoreQ) => ({ lme_q: [q.question_id] });
+const KS = [5, 10];
+
+/**
+ * The returned thought ids as the distinct session ids of THIS history, in
+ * rank order — the control both scorers share. A row the loader did not write
+ * is a broken mapping and is thrown, since a 0% would be the harness, not the
+ * store; a fingerprint twin stands for session ids in several histories and
+ * counts here as the one(s) in this history; a row none of whose ids is in the
+ * history is a filter failure, counted for the caller to refuse on.
+ */
+function sidsInHistory(ids: string[], hay: Set<string>, idToSids: Map<string, string[]>, armKey: string): { sids: string[]; outside: number } {
+  const sids: string[] = [];
+  let outside = 0;
+  for (const id of ids) {
+    const own = idToSids.get(id);
+    if (!own) throw new Error(`CONTROL FAILED: ${armKey} returned ${id}, which the loader did not record.`);
+    const here = own.filter((sid) => hay.has(sid));
+    if (!here.length) outside++;
+    for (const sid of here) if (!sids.includes(sid)) sids.push(sid);
+  }
+  return { sids, outside };
+}
+
+/**
  * McNemar's exact test, two-sided: the discordant pairs (helped, hurt) under a
  * fair coin. The binomial sum is exact in doubles while 2^n is finite — n at
  * most 1,000, twice the corpus — and refused beyond, rather than printing a
@@ -538,7 +568,6 @@ async function scoreCurrent(map: SidMap, idToSids: Map<string, string[]>): Promi
   }
   console.log(`  supersedes pointers on the corpus: ${pointers}${oracle ? " — a chain-walking read returns every hit unchanged; the resolve arm walks each question's gold pair as an oracle" : " — the resolve arm walks them"}`);
 
-  const filterFor = (q: ScoreQ) => ({ lme_q: [q.question_id] });
   const vector = async (qv: string, q: ScoreQ, k: number, weight: number, halfLife: number) =>
     ((await sql`SELECT id FROM match_thoughts(${qv}::vector, -1.0, ${k}, ${filterFor(q)}::jsonb, ${weight}::float, ${halfLife}::float)`) as { id: string }[]).map((r) => r.id);
   const pairOf = new Map(pairs.map((p) => [p.q.question_id, p]));
@@ -570,8 +599,13 @@ async function scoreCurrent(map: SidMap, idToSids: Map<string, string[]>): Promi
     }
     return out;
   };
+  /** The shipped arm's ids per (question, k): the resolve arm walks these rather than fetching the same list again. */
+  const shippedIds = new Map<string, string[]>();
   const arms: Arm[] = [
-    { key: "vector@-1", label: "match_thoughts as shipped, similarity alone", run: (qv, q, k) => vector(qv, q, k, 0, 90) },
+    {
+      key: "vector@-1", label: "match_thoughts as shipped, similarity alone",
+      run: async (qv, q, k) => { const ids = await vector(qv, q, k, 0, 90); shippedIds.set(`${q.question_id}|${k}`, ids); return ids; },
+    },
     { key: "recency@0.3", label: "020's blend as a caller can send it today: recency_weight 0.3, half-life 90 days", run: (qv, q, k) => vector(qv, q, k, 0.3, 90) },
     { key: "recency@0.3/3650", label: "the blend at a half-life of 3,650 days, so a week of age is visible on a three-year-old corpus", run: (qv, q, k) => vector(qv, q, k, 0.3, 3650) },
     // Under the history filter match_thoughts takes its exact branch: every row
@@ -584,10 +618,9 @@ async function scoreCurrent(map: SidMap, idToSids: Map<string, string[]>): Promi
       label: oracle
         ? "the shipped order, every hit walked to the head of its supersedes chain — each question's gold pair as the chain, an oracle (the store has no pointers)"
         : `the shipped order, every hit walked to the head of its supersedes chain — the store's ${pointers} pointers, the read as it would run`,
-      run: async (qv, q, k) => resolveThrough(await vector(qv, q, k, 0, 90), q),
+      run: async (qv, q, k) => resolveThrough(shippedIds.get(`${q.question_id}|${k}`) ?? (await vector(qv, q, k, 0, 90)), q),
     },
   ];
-  const KS = [5, 10];
 
   type Out = { both: boolean; currentIn: boolean; currentFirst: boolean; staleOnly: boolean; currentAt1: boolean; rCur: number; rStale: number };
   const outcomes = new Map<string, Out>(); // `${arm}|${k}|${qid}`
@@ -602,15 +635,9 @@ async function scoreCurrent(map: SidMap, idToSids: Map<string, string[]>): Promi
         const tq = Date.now();
         const ids = await arm.run(qv, p.q, k);
         queryMs += Date.now() - tq;
-        const sids: string[] = [];
-        for (const id of ids) {
-          const own = idToSids.get(id);
-          if (!own) throw new Error(`CONTROL FAILED: ${arm.key} returned ${id}, which the loader did not record.`);
-          const here = own.filter((sid) => hay.has(sid));
-          if (!here.length) outside++;
-          for (const sid of here) if (!sids.includes(sid)) sids.push(sid);
-        }
-        const top = sids.slice(0, k);
+        const found = sidsInHistory(ids, hay, idToSids, arm.key);
+        outside += found.outside;
+        const top = found.sids.slice(0, k);
         const rCur = top.indexOf(p.current), rStale = top.indexOf(p.stale); // −1 when absent
         outcomes.set(`${arm.key}|${k}|${p.q.question_id}`, {
           both: rCur >= 0 && rStale >= 0,
@@ -679,9 +706,6 @@ async function score(): Promise<void> {
   const use = MAXQ ? scored.slice(0, MAXQ) : scored;
   console.log(`▸ scoring ${use.length} questions (${questions.length - scored.length} abstention skipped) — ${EMBED_MODEL}`);
 
-  // An object, not a JSON string: Bun stringifies a ::jsonb parameter itself,
-  // and a string would arrive as a jsonb scalar that nothing contains.
-  const filterFor = (q: ScoreQ) => ({ lme_q: [q.question_id] });
   const idsOf = (rows: { id: string }[]) => rows.map((r) => r.id);
   const shipped: Arm[] = [
     {
@@ -760,7 +784,6 @@ async function score(): Promise<void> {
   const arms = ARMS === "windows" ? windows : shipped;
   /** The arm whose misses are listed: the one each set exists to examine. */
   const missArm = ARMS === "windows" ? "whole@-1" : "hybrid@0.5";
-  const KS = [5, 10];
 
   // The length slice: a question sits in the bucket of its LONGEST gold
   // session, since that is the vector with the most to wash out. Estimated
@@ -810,20 +833,9 @@ async function score(): Promise<void> {
         const tq = Date.now();
         const ids = await arm.run(qv, q, k);
         queryMs += Date.now() - tq;
-        const sids: string[] = [];
-        for (const id of ids) {
-          const own = idToSids.get(id);
-          // CONTROL: every returned row is one the loader wrote, else the
-          // mapping is broken and a 0% would be the harness, not the store.
-          if (!own) throw new Error(`CONTROL FAILED: ${arm.key} returned ${id}, which the loader did not record.`);
-          // A fingerprint twin stands for session ids in several histories;
-          // in this question it is the one(s) in this history. A row none of
-          // whose ids is in the history is a filter failure, counted below.
-          const here = own.filter((sid) => hay.has(sid));
-          if (!here.length) outside++;
-          for (const sid of here) if (!sids.includes(sid)) sids.push(sid);
-        }
-        const top = new Set(sids.slice(0, k));
+        const found = sidsInHistory(ids, hay, idToSids, arm.key);
+        outside += found.outside;
+        const top = new Set(found.sids.slice(0, k));
         const strict = [...gold].every((g) => top.has(g));
         const any = [...gold].some((g) => top.has(g));
         if (ids.length < Math.min(k, hay.size)) {
