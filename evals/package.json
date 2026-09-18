@@ -15,6 +15,7 @@
     "entities": "../db/with-postgres.sh bun eval-entities.ts qwen2.5:7b",
     "entities:corpus": "../db/with-postgres.sh bun eval-entities.ts --corpus",
     "graphrag": "../db/with-postgres.sh bun eval-graphrag.ts",
+    "graph-scale": "OB1_EVAL_EMBED=syn@64 OB1_GRAPH_KPRIME=10,100,1000 OB1_GRAPH_HOPS=1,2 OB1_PG_SHM=3g ../db/with-postgres.sh bun eval-graphrag.ts --scale 1000000",
     "hybrid": "../db/with-postgres.sh bun eval-hybrid.ts",
     "recency": "../db/with-postgres.sh bun eval-recency.ts",
     "store-compare": "bun store-compare.ts",

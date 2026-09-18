@@ -68,14 +68,14 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Eighty-eight numbered changes on top of the pin. Seven fix defects found in an
+Eighty-nine numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
-data layer (Phase 2). Nine (changes 31, 53, 55, 59, 79, 82, 86, 87 and 88) ship no runtime change at
+data layer (Phase 2). Ten (changes 31, 53, 55, 59, 79, 82, 86, 87, 88, and 89) ship no runtime change at
 all: each is a measurement that decided against building something.
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–88 are the numbered `###` sections** further down, which is
+sections. Changes **18–89 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -13966,6 +13966,76 @@ the row's one date — never true here (the date leads the text a twin shares),
 now checked.
 
 **Upstream status:** not applicable — the eval is this fork's.
+
+
+
+### 89. GraphRAG as an expansion/rerank stage, measured — and it still does not help here: where vector recall is already at ceiling there is nothing to recover, so a graph added as a stage can only reorder the answers vector already found (SMD-1738)
+
+Change 31 (SMD-948) declined GraphRAG on a head-to-head: vector recall@10 0.98,
+graph 0.51 over twenty-seven hand-labelled multi-hop questions. But that raced the
+graph as a **substitute** — the recall tier doing the whole match, seeding its own
+entities from the question — the substitute-vs-complement error change 87 (SMD-1707)
+named. A graph is rarely a good recall tier and might be a good **expansion/precision**
+stage: pull the neighbours of the *vector* hits along the change-30 entity edges and
+rerank the union. This measures that shape, on the same `eval-graphrag.ts` corpus and
+the same labelled gold. Like changes 31, 53, 55, 59, 79, 82, 86, 87 and 88 it ships no
+runtime change; the numbers are in evals/README.md, under "GraphRAG…".
+
+`eval-graphrag.ts` gains a **composed arm**: stage 1, a vector coarse recall of K′ ≫ k
+thoughts; stage 2, seed the graph from *those* hits' entities (not the question),
+expand `hops` over `ob1_entity_edges` (rarity-weighted, hub-capped, 0.3^hop decayed as
+the change-31 walk), and rerank the union of the vector candidates and the graph-reached
+thoughts by **symmetric RRF** of the cosine rank and the graph-score rank (symmetric
+because a raw cosine added to a raw weight sum is change 87's scale-mismatch trap). A
+**comp-cos** control orders the same union by cosine only. Gold is the labelled
+multi-hop set, which is the right objective — a cosine oracle would be self-defeating
+for a stage that deliberately reorders toward relatedness, change 87's lesson. The
+**pre-registered bar** (SMD-1038 posture, committed before the numbers): build the stage
+iff multi-hop recall lifts ≥ 0.05 over vector AND it recovers more than it breaks AND it
+does not cut aggregate recall. K′ and hops are swept, and the headline is the arm's best
+cell, so the graph gets its best shot.
+
+**On this corpus vector is already at ceiling, so there is nothing for the stage to
+recover.** Vector gets multi-hop recall@10 **1.00** (601 issues, 1024-dim, 27
+questions); the substitute graph reproduces change 31 at **0.43**. The composed arm at
+its best cell (K′=10, 1 hop) scores **0.89** multi-hop — *below* vector — and **recovers
+0** of vector's answers while breaking 4. The tell is the control: **comp-cos ties
+vector exactly (1.00)**. Adding the graph-reached candidates to the pool loses nothing
+and adds nothing — vector already held every labelled answer — so the union is lossless
+but not additive, and the graph *rerank* can only subtract. It subtracts more as the
+coarse set deepens (multi-hop recall 0.89 → 0.76 → 0.57 → **0.42** across K′ = 10, 20,
+50, 100), the exact opposite of change 87's vector-composed arm: there the deeper
+candidates were true neighbours the rerank ordered precisely; here they are not, and the
+graph relatedness score is uncorrelated with relevance, so equal-weight fusion buries
+real hits. Bar: lift −0.11, net −4, aggregate 0.97 → 0.89 — **FAIL on every clause.**
+
+**The binding constraint is change 87's, restated.** Composition helps only when the
+substitute leaves recall on the table. Vector does not here, because this corpus's
+multi-hop answers *are* the near neighbours — one team's trackers share vocabulary, so
+the second document of a multi-hop pair sits in vector's top-10 already (change 31's
+"why", measured again). A graph-as-stage would need a corpus whose answers fall outside
+the vector top-K′; this corpus does not provide one, and a planted graph cannot, so the
+quality question is answered where the graph is real and answered no.
+
+**Scale (synthetic, latency only).** A synthetic graph at 1,000,000 thoughts (4M
+entities, 6M mentions, 8M edges, density modelled on the real graph) times the expansion
+stage alone. It is **not** K′-bounded as written: a ~2.0 s floor at K′=10 rising to ~5.0
+s at K′=1000/2-hop, dominated by the per-call `df` full scan over all six million
+mentions — the change-31 walk recomputes document frequency each call. Rows-read bounded
+≠ wall-clock bounded (change 87 again); a **materialized `df`** refreshed on write is the
+prerequisite for the stage to scale at all. So even were the quality case there, the
+mechanism would need a standing table first.
+
+**Verdict — do not build.** Change 87 confirmed composition works when the tiers are
+complementary (a scalable ANN recalls, Postgres reranks precisely). This is the
+converse: a graph laid over a vector recall that is already exact is not complementary —
+it has nothing to add and, fused, takes away. SMD-948's decision holds on the composed
+axis. **Not built**; a graph-expansion retrieval path in the product is a separately
+scoped issue only if a corpus of the shape above clears the bar. Stage-3 rerankers stay
+out for change 87's reasons. (The entity graph is Apache-2.0-free — it is this fork's own
+change 30 — and the measurement is an eval, not the product.)
+
+**Upstream status:** not applicable — the graph and its eval are this fork's.
 
 ## Detached from the fork network
 

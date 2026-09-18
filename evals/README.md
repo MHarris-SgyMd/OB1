@@ -1865,6 +1865,94 @@ the arms and the scoring are written, and the one-line rule for reading the
 result is the same: the graph has to beat `match_thoughts` on questions
 someone actually asked.
 
+### GraphRAG as an expansion stage, not a substitute — and it still does not help here (SMD-1738)
+
+The decision above raced the graph as a **substitute**: it seeded its own entities
+from the question and did the whole match, so 0.51 vs 0.98 is a recall-tier verdict.
+SMD-1707 named the trap — a retriever declined as a *substitute* may earn its place as
+a *complement*. So this revisits the graph as an **expansion / rerank stage** over
+vector recall, on the same corpus, edges and labelled gold:
+
+- **Stage 1 — vector coarse recall:** the ANN returns K′ ≫ k candidate thoughts.
+- **Stage 2 — graph expansion + rerank:** seed the graph from *those hits'* entities
+  (not the question), expand `hops` over `ob1_entity_edges` (rarity-weighted, hub-capped,
+  0.3^hop decayed, as the local walk above), and rerank the union of the vector
+  candidates and the graph-reached thoughts by **symmetric RRF** of the cosine rank and
+  the graph-score rank. A **comp-cos** control orders the same union by cosine only.
+
+Gold is the labelled multi-hop set — the relational objective the stage optimises; a
+cosine oracle would be the wrong gold for a stage that deliberately reorders toward
+relatedness (SMD-1707). The **pre-registered bar** (SMD-1038 posture, fixed before the
+numbers): build the stage iff multi-hop recall@10 lifts **≥ 0.05** over vector **and** it
+recovers more than it breaks **and** it does not cut aggregate recall. K′ and hops are
+swept; the headline is the arm's *best* cell, so the graph gets its best shot.
+
+**Real corpus (601 issues, 1024-dim, 27 questions), recall@10:**
+
+| arm | multi-hop | aggregation | corpus | all |
+| --- | ---: | ---: | ---: | ---: |
+| vector — the substitute baseline | **1.00** | 0.98 | 0.75 | 0.97 |
+| graph — SMD-948 substitute (question-seeded) | 0.43 | 0.47 | 0.33 | 0.43 |
+| composed C(K′=10, 1 hop) — best cell, RRF rerank | 0.89 | 0.98 | 0.69 | 0.89 |
+| comp-cos — same union, cosine order (control) | **1.00** | 0.98 | 0.75 | 0.97 |
+
+**Vector is already at ceiling on multi-hop (1.00), so there is nothing to recover.**
+The control makes it unambiguous: **comp-cos ties vector exactly** — pooling the
+graph-reached thoughts loses no answer and surfaces none, because vector already held
+them all. The union is lossless but not additive, so the graph *rerank* can only
+subtract, and it subtracts more as the coarse set deepens (the opposite of SMD-1707's
+vector-composed arm, where the deeper candidates were true neighbours):
+
+| K′ | hops | recall@10 (mh) | nDCG@10 (mh) | coarse p50 | expand p50 |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 10 | 1 | **0.89** | 0.69 | 2.0 ms | 4.0 ms |
+| 20 | 1 | 0.76 | 0.60 | 2.0 ms | 5.0 ms |
+| 50 | 1 | 0.57 | 0.44 | 2.0 ms | 6.0 ms |
+| 100 | 1 | 0.42 | 0.30 | 2.0 ms | 6.0 ms |
+
+At the best cell: multi-hop lift **−0.11**, **recovers 0** questions and breaks 4,
+aggregate recall 0.97 → 0.89 — **the bar fails on every clause.** The binding
+constraint is SMD-1707's, restated: composition helps only when the substitute leaves
+recall on the table, and vector does not here — this corpus's multi-hop answers *are*
+the near neighbours (one team's trackers share vocabulary, so the second document of a
+pair already sits in vector's top-10: SMD-948's "why", measured again). A graph-as-stage
+needs a corpus whose answers fall outside the vector top-K′; this one does not provide it.
+
+**Scale (synthetic, latency only).** A synthetic graph at 1,000,000 thoughts (4M
+entities, 6M mentions, 8M edges, density modelled on the real graph) times the expansion
+stage. It is **not** K′-bounded as written — a floor set by the per-call `df` full scan
+over all mentions (the local walk recomputes document frequency each call):
+
+| K′ | hops | expand p50 @ 1M |
+| ---: | ---: | ---: |
+| 10 | 1 | 2.0 s |
+| 100 | 1 | 2.0 s |
+| 1000 | 1 | 2.6 s |
+| 1000 | 2 | 5.0 s |
+
+Rows-read bounded ≠ wall-clock bounded (SMD-1707): a **materialized `df`** refreshed on
+write is the prerequisite for the stage to scale; the K′-and-hop-bounded part
+(seed → reach → score) is the small addend on top of that ~2 s floor. Quality on a
+planted graph would be circular, so this run is latency only.
+
+Reproduce:
+
+```
+OB1_METADATA_MODEL=qwen2.5:7b OB1_EVAL_CORPUS=/tmp/linear-corpus-full.json \
+  ../db/with-postgres.sh bun eval-graphrag.ts --no-global --allow-stale-dump   # real corpus, quality
+OB1_EVAL_EMBED=syn@64 OB1_GRAPH_KPRIME=10,100,1000 OB1_GRAPH_HOPS=1,2 OB1_PG_SHM=3g \
+  ../db/with-postgres.sh bun eval-graphrag.ts --scale 1000000                   # 1M synthetic, latency
+```
+
+**Verdict — do not build.** SMD-1707 confirmed composition works when the tiers are
+complementary (a scalable ANN recalls, Postgres reranks precisely). This is the converse:
+a graph laid over a vector recall that is already exact is not complementary — it adds
+nothing and, fused, takes away. SMD-948's decision holds on the composed axis.
+**Eval-only; not built** — a graph-expansion path in the product is a separately scoped
+issue only if a corpus of the shape above clears the bar (SMD-1039 is where that corpus
+would come from). The entity layer (migration 016) still earns its place for the
+structured questions it answers directly.
+
 ## Hybrid ranking, measured on four query sets
 
 `eval-hybrid.ts`, run as `bun run hybrid` (SMD-958, migration 017). Needs
