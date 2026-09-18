@@ -21,7 +21,7 @@
  * pageinspect is superuser-only, so this is a diagnostic for a database you
  * administer — the test suites' containers, a local brain — not a check the
  * server can run on a managed database. No production check is built on it: a
- * real corpus does not have the hole (SMD-1632, FORK.md change 82), so one
+ * real corpus does not have the hole (SMD-1632, FORK.md change 83), so one
  * would never fire and would cost every capture a walk. The layout decoded here
  * is pgvector's `HnswMetaPageData`, `HnswElementTupleData` and
  * `HnswNeighborTupleData` (src/hnsw.h at 0.8.6); the magic number and the meta
