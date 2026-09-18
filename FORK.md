@@ -14228,20 +14228,28 @@ dropped silently. The two paths also cut on two clocks — the anchor and git's
 129 of the log's 1,351 commits carry different days on the two (every rebase
 moves the committer date; four of them are review passes), so a dump and a
 live run of one window tallied differently. Both are one rule now: every date
-is the committer date (`%cd`), and a `--since` day is the whole calendar day
-on both paths, filtered on the row's date rather than passed to git. Verified
-on the live log: `--since` at 2026-09-18, -17 and -14 returns the same commit
-set from the git path and from a dump, and the four passes authored the day
-before they were committed are in or out of both together.
+is the committer time (`%cd`) rendered as a day in the zone the script runs
+in, and a `--since` day is the whole calendar day on both paths, filtered on
+the row's date rather than passed to git. The rendering zone was the review's
+catch: git's plain `--date=short` renders each commit in its own committer
+offset, and the log carries twelve offsets, so 28 commits sat on a different
+day than in the operator's zone and a day cut could disagree with the instant
+cut a `<sha>` anchor makes; `--date=short-local` puts both on one clock, at
+the price that a dump must be made and read in one zone. Verified on the live
+log: `--since` at 2026-09-18, -17 and -14 returns the same commit set from the
+git path and from a dump, and the four passes authored the day before they
+were committed are in or out of both together.
 
 The attribution rule was the larger defect. `ticketOf` took the first
 `SMD-nnnn` anywhere in subject and body, and a subject often names another
 ticket before its own ("main took 79 for SMD-1037 while the branch sat
 unpushed … (SMD-1607)"): 13 of the 221 review passes at the 28e20d7 baseline
 were credited to the wrong ticket, and three "tickets" in the tally (SMD-1616,
-SMD-1624, SMD-1625) existed only by that error. The rule is now the trailing
-`(SMD-nnnn)` of the subject, then the first mention in the subject, then the
-body. The baseline figures above are re-read under it from the same dump: 221
+SMD-1624, SMD-1625) existed only by that error. The rule is now the first
+ticket in the parenthetical the subject ends with — `(SMD-nnnn)`, or the
+`(SMD-1643, SMD-1616)` and `(SMD-1463 review pass 1)` shapes twelve subjects
+use — then the first mention in the subject, then the body. The baseline
+figures above are re-read under it from the same dump: 221
 review passes across **61** tickets (was 64), 511 findings in **31** (was 34);
 the per-pass defect shares (44 / 43 / 51 / 51 %), the fourteen tickets whose
 last defect came at pass three or later and the three-of-four on their final
@@ -14250,7 +14258,9 @@ leftmost mention whichever spelling ("Review pass 4: the third pass's fix held"
 read as pass 3; the five subjects in the log that name two passes survived
 only by word order), a bullet carrying a `(caught` tag is a finding wherever
 it sits (a "Verified:" line may introduce tagged findings, and a tagged bullet
-may quote the count that proved it), a bullet too short to be a finding is
+may quote the count that proved it), every bullet the run-result rules drop is
+printed in a samples section so an untagged finding lost to them is seen (one
+in the whole log, a suite count), a bullet too short to be a finding is
 counted as skipped rather than nowhere, a defect found by a named or unnumbered
 pass shows as "an unnumbered pass" in the per-ticket table instead of "none",
 and a row whose tag does not parse is classified over the finding, not over
