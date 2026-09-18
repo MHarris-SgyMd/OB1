@@ -62,7 +62,40 @@
  *   OB1_EVAL_MAX_QUESTIONS=20                score a prefix only (smoke test)
  *   OB1_EVAL_LME_MAP=/path/map.json          where the session→thought map is kept
  *   OB1_EVAL_LME_ARMS=windows                score the windows question (SMD-1305) instead of the floor
+ *   OB1_EVAL_LME_ARMS=current                score the current-value question (SMD-1720) on the knowledge-update slice
  *   OB1_EVAL_LME_CHUNKS=lme_chunks_4096      a side table of windows to score instead of thought_chunks
+ *
+ * THE MAP is derived data. Every row the loader writes carries its first
+ * session id as `metadata.lme_sid`, and a fingerprint twin's other ids have
+ * the row's exact text, so a map lost with /tmp is rebuilt from the store on
+ * the next run instead of by a 14-hour reload (SMD-1720's run found both S
+ * maps gone).
+ *
+ * CURRENT VALUE (SMD-1720). Every knowledge-update question has exactly two
+ * gold sessions — one states a value, a later one updates it — and strict
+ * recall_all counts the question when BOTH are in the top k. That is the
+ * benchmark's frame. MERIT's is the reader's: which of the two is handed over
+ * first, because a stale value ranked above its update is the failure an
+ * update-on-write store never has, and the slice's 97% strict says nothing
+ * about it. The `current` arm set scores both frames over the same calls, on
+ * the knowledge-update slice alone: `both` (strict), `current-in` (the current
+ * session in the top k), `current-first` (in the top k and above the stale
+ * one, or the stale one absent — what a reader that takes the first relevant
+ * hit gets right), `stale-only` (the stale one in the top k and the current one
+ * not) and `current@1`. Arms: the shipped order; 020's recency blend as a
+ * caller can send it today (`recency_weight`, half-life 90 days — on a corpus
+ * three years old that is a no-op below weight 1, and the arm shows it), the
+ * same blend at a half-life long enough to see a week, and age alone among the
+ * nearest candidates; and `resolve`, the ticket's chain-walking read as an
+ * ORACLE — the store carries no supersedes pointers (the count is printed; the
+ * consolidation pass has not run here, and at one thought per session it
+ * would judge whole conversations), so the arm walks the gold pairs held in
+ * memory as if a reviewer had accepted exactly the right proposals: a hit that
+ * is the stale session is replaced by the current one at the hit's rank, and a
+ * session already listed is not listed twice. That is the upper bound of what
+ * the read could buy, not a measurement of it. Every arm is paired with the
+ * shipped order per question — helped / hurt and McNemar's exact test, the
+ * way SMD-1420 reported — not compared as means.
  *
  * WINDOWS (SMD-1305). A session over chunk.ts's limit is stored as its whole
  * vector plus overlapping windows, and match_thoughts scores it by the best of
@@ -114,7 +147,7 @@ const BATCH = Number(process.env.OB1_EVAL_BATCH ?? 32);
 const MAXQ = Number(process.env.OB1_EVAL_MAX_QUESTIONS ?? 0);
 const MAP_PATH = process.env.OB1_EVAL_LME_MAP ?? `/tmp/lme-map-${EMBED_MODEL.replace(/[^A-Za-z0-9.-]+/g, "_")}.json`;
 const ARMS = process.env.OB1_EVAL_LME_ARMS ?? "shipped";
-if (ARMS !== "shipped" && ARMS !== "windows") { console.error(`OB1_EVAL_LME_ARMS must be shipped or windows, not ${ARMS}.`); process.exit(2); }
+if (ARMS !== "shipped" && ARMS !== "windows" && ARMS !== "current") { console.error(`OB1_EVAL_LME_ARMS must be shipped, windows or current, not ${ARMS}.`); process.exit(2); }
 if (!["load", "score", "both", "windows"].includes(PHASE)) { console.error(`OB1_EVAL_PHASE must be load, score, both or windows, not ${PHASE}.`); process.exit(2); }
 /** The windows table the direct arms read and the windows phase writes; an identifier, interpolated, so it is checked. */
 const CHUNKS = process.env.OB1_EVAL_LME_CHUNKS ?? "thought_chunks";
@@ -269,11 +302,35 @@ const sql = new SQL({ url: URL_, max: 4 });
 
 /** session id → thought id, persisted so a load resumes and a score needs no re-derivation. */
 type SidMap = Record<string, string>;
-function readMap(): SidMap { return existsSync(MAP_PATH) ? (JSON.parse(readFileSync(MAP_PATH, "utf8")) as SidMap) : {}; }
 function writeMap(m: SidMap): void { writeFileSync(`${MAP_PATH}.tmp`, JSON.stringify(m)); renameSync(`${MAP_PATH}.tmp`, MAP_PATH); }
+/**
+ * The map file, or the map rebuilt from the store when the file is gone (the
+ * header's THE MAP): every row's `lme_sid`, then the sessions still unmapped
+ * looked up by fingerprint — a twin folded onto another session's row. A
+ * session in neither is not loaded, which is what the load phase then does.
+ * Under OB1_EVAL_MAX_QUESTIONS only the kept histories' sessions are in memory
+ * to look up; a pruned twin left out costs a later load one embedding call
+ * that lands on its existing row.
+ */
+async function readMapOrRebuild(): Promise<SidMap> {
+  if (existsSync(MAP_PATH)) return JSON.parse(readFileSync(MAP_PATH, "utf8")) as SidMap;
+  const rows = (await sql`SELECT id, metadata->>'lme_sid' AS sid FROM thoughts WHERE metadata ? 'lme_sid'`) as { id: string; sid: string }[];
+  if (!rows.length) return {};
+  const map: SidMap = {};
+  for (const r of rows) map[r.sid] = r.id;
+  let twins = 0;
+  for (const s of sessions.values()) {
+    if (map[s.sid]) continue;
+    const hit = (await sql`SELECT id FROM thoughts WHERE content_fingerprint = content_fingerprint_of(${s.text}::text) AND metadata ? 'lme_sid'`) as { id: string }[];
+    if (hit.length === 1) { map[s.sid] = hit[0].id; twins++; }
+  }
+  writeMap(map);
+  console.log(`▸ no map at ${MAP_PATH}; rebuilt ${Object.keys(map).length} entries from the store's lme_sid (${twins} fingerprint twins matched by text)`);
+  return map;
+}
 
 async function load(): Promise<void> {
-  const map = readMap();
+  const map = await readMapOrRebuild();
   const todo = [...sessions.values()].filter((s) => !map[s.sid]);
   console.log(`▸ ${sessions.size} distinct sessions, ${Object.keys(map).length} already loaded, ${todo.length} to go — ${EMBED_MODEL}, batch ${BATCH}`);
   const t0 = Date.now();
@@ -332,7 +389,7 @@ async function loadWindows(): Promise<void> {
   const limit = Number(process.env.OB1_CHUNK_TOKENS);
   if (!Number.isFinite(limit) || limit <= 0) throw new Error("the windows phase needs OB1_CHUNK_TOKENS, the limit to window at.");
   if (CHUNKS === "thought_chunks") throw new Error("the windows phase writes a side table: set OB1_EVAL_LME_CHUNKS to a name other than thought_chunks.");
-  const map = readMap();
+  const map = await readMapOrRebuild();
   const missing = [...sessions.keys()].filter((sid) => !map[sid]);
   if (missing.length) throw new Error(`${missing.length} sessions are not loaded; run the load phase first.`);
   await sql.unsafe(`CREATE TABLE IF NOT EXISTS ${CHUNKS} (
@@ -381,12 +438,148 @@ async function loadWindows(): Promise<void> {
 
 type Arm = { key: string; label: string; run: (qv: string, q: ScoreQ, k: number) => Promise<string[]> };
 
+/**
+ * McNemar's exact test, two-sided: the discordant pairs (helped, hurt) under a
+ * fair coin. n is at most the slice, so the binomial sum is exact in doubles.
+ */
+function mcnemarExact(helped: number, hurt: number): number {
+  const n = helped + hurt;
+  if (n === 0) return 1;
+  const lo = Math.min(helped, hurt);
+  let c = 1, tail = 0;
+  for (let i = 0; i <= lo; i++) { tail += c; c = (c * (n - i)) / (i + 1); }
+  return Math.min(1, (2 * tail) / 2 ** n);
+}
+
+/** The current-value question (SMD-1720; the header's CURRENT VALUE). */
+async function scoreCurrent(map: SidMap, idToSids: Map<string, string[]>): Promise<void> {
+  const ku = questions.filter((q) => q.question_type === "knowledge-update" && !q.question_id.endsWith("_abs"));
+  const use = MAXQ ? ku.slice(0, MAXQ) : ku;
+  // CONTROL: the slice's shape — two gold sessions, dated apart, the earlier
+  // one stating the value the later one updates. A question outside the shape
+  // would make "current" a guess, so the run refuses instead.
+  type Pair = { q: ScoreQ; stale: string; current: string; gapDays: number };
+  const pairs: Pair[] = use.map((q) => {
+    if (q.answer_session_ids.length !== 2) throw new Error(`CONTROL FAILED: ${q.question_id} has ${q.answer_session_ids.length} gold sessions, not the two a knowledge update has.`);
+    const [a, b] = q.answer_session_ids.map((sid) => {
+      const s = sessions.get(sid);
+      const iso = s ? toIso(s.date) : null;
+      if (!s || !iso) throw new Error(`CONTROL FAILED: gold session ${sid} of ${q.question_id} has no readable date.`);
+      return { sid, t: Date.parse(iso) };
+    });
+    if (a.t === b.t) throw new Error(`CONTROL FAILED: ${q.question_id}'s gold sessions share a date; neither is the update.`);
+    const [stale, current] = a.t < b.t ? [a, b] : [b, a];
+    return { q, stale: stale.sid, current: current.sid, gapDays: (current.t - stale.t) / 86_400_000 };
+  });
+  const gaps = pairs.map((p) => p.gapDays).sort((x, y) => x - y);
+  console.log(`▸ the current-value question over ${pairs.length} knowledge-update questions — ${EMBED_MODEL}`);
+  console.log(`  stale → current gap: median ${gaps[Math.floor(gaps.length / 2)].toFixed(0)} days, min ${gaps[0].toFixed(0)}, max ${gaps[gaps.length - 1].toFixed(0)}`);
+
+  // The chain precondition, printed: what a resolving read would have to walk.
+  const pointers = ((await sql`SELECT count(supersedes)::int AS n FROM thoughts WHERE metadata ? 'lme_q'`) as { n: number }[])[0].n;
+  console.log(`  supersedes pointers on the corpus: ${pointers}${pointers === 0 ? " — a chain-walking read returns every hit unchanged; the resolve arm walks the gold pairs as an oracle" : ""}`);
+  // The oracle's chains: the stale session's thought → the current one's.
+  const chain = new Map<string, string>();
+  for (const p of pairs) chain.set(map[p.stale], map[p.current]);
+
+  const filterFor = (q: ScoreQ) => ({ lme_q: [q.question_id] });
+  const vector = async (qv: string, q: ScoreQ, k: number, weight: number, halfLife: number) =>
+    ((await sql`SELECT id FROM match_thoughts(${qv}::vector, -1.0, ${k}, ${filterFor(q)}::jsonb, ${weight}::float, ${halfLife}::float)`) as { id: string }[]).map((r) => r.id);
+  /** Each hit walked forward to the head of its chain, kept at the hit's rank, listed once — bounded like trace_provenance. */
+  const resolveThrough = (ids: string[]): string[] => {
+    const out: string[] = [];
+    for (const id of ids) {
+      let head = id;
+      for (let i = 0; i < 1000 && chain.has(head); i++) head = chain.get(head)!;
+      if (!out.includes(head)) out.push(head);
+    }
+    return out;
+  };
+  const arms: Arm[] = [
+    { key: "vector@-1", label: "match_thoughts as shipped, similarity alone", run: (qv, q, k) => vector(qv, q, k, 0, 90) },
+    { key: "recency@0.3", label: "020's blend as a caller can send it today: recency_weight 0.3, half-life 90 days", run: (qv, q, k) => vector(qv, q, k, 0.3, 90) },
+    { key: "recency@0.3/3650", label: "the blend at a half-life of 3,650 days, so a week of age is visible on a three-year-old corpus", run: (qv, q, k) => vector(qv, q, k, 0.3, 3650) },
+    { key: "age@1", label: "age alone among the nearest candidates (recency_weight 1)", run: (qv, q, k) => vector(qv, q, k, 1, 90) },
+    { key: "resolve", label: "the shipped order, every hit walked to the head of its supersedes chain — the gold pairs as the chains, an oracle", run: async (qv, q, k) => resolveThrough(await vector(qv, q, k, 0, 90)) },
+  ];
+  const KS = [5, 10];
+
+  type Out = { both: boolean; currentIn: boolean; currentFirst: boolean; staleOnly: boolean; currentAt1: boolean; rCur: number; rStale: number };
+  const outcomes = new Map<string, Out>(); // `${arm}|${k}|${qid}`
+  let outside = 0, queryMs = 0;
+  const qvs = await embedMany(pairs.map((p) => p.q.question), true);
+  for (let i = 0; i < pairs.length; i++) {
+    const p = pairs[i];
+    const qv = toVector(qvs[i]);
+    const hay = new Set(p.q.haystack_session_ids);
+    for (const arm of arms) {
+      for (const k of KS) {
+        const tq = Date.now();
+        const ids = await arm.run(qv, p.q, k);
+        queryMs += Date.now() - tq;
+        const sids: string[] = [];
+        for (const id of ids) {
+          const own = idToSids.get(id);
+          if (!own) throw new Error(`CONTROL FAILED: ${arm.key} returned ${id}, which the loader did not record.`);
+          const here = own.filter((sid) => hay.has(sid));
+          if (!here.length) outside++;
+          for (const sid of here) if (!sids.includes(sid)) sids.push(sid);
+        }
+        const top = sids.slice(0, k);
+        const rCur = top.indexOf(p.current), rStale = top.indexOf(p.stale); // −1 when absent
+        outcomes.set(`${arm.key}|${k}|${p.q.question_id}`, {
+          both: rCur >= 0 && rStale >= 0,
+          currentIn: rCur >= 0,
+          currentFirst: rCur >= 0 && (rStale < 0 || rCur < rStale),
+          staleOnly: rStale >= 0 && rCur < 0,
+          currentAt1: rCur === 0,
+          rCur, rStale,
+        });
+      }
+    }
+  }
+  if (outside) throw new Error(`CONTROL FAILED: ${outside} results came from outside the question's history; the filter did not isolate.`);
+  console.log(`\n✓ control: every result was inside its question's history (${pairs.length} questions × ${arms.length} arms × ${KS.length} k)`);
+  console.log(`  ${(queryMs / (pairs.length * arms.length * KS.length)).toFixed(1)} ms per search call, mean`);
+
+  const pct = (n: number) => `${((100 * n) / pairs.length).toFixed(1)}%`;
+  const count = (arm: string, k: number, f: (o: Out) => boolean) => pairs.filter((p) => f(outcomes.get(`${arm}|${k}|${p.q.question_id}`)!)).length;
+  /** helped / hurt against the shipped order on one outcome, with McNemar's exact p. */
+  const paired = (arm: string, k: number, f: (o: Out) => boolean) => {
+    let helped = 0, hurt = 0;
+    for (const p of pairs) {
+      const base = f(outcomes.get(`${arms[0].key}|${k}|${p.q.question_id}`)!);
+      const mine = f(outcomes.get(`${arm}|${k}|${p.q.question_id}`)!);
+      if (mine && !base) helped++;
+      if (base && !mine) hurt++;
+    }
+    return arm === arms[0].key ? "—" : `+${helped} / −${hurt}, p=${mcnemarExact(helped, hurt).toFixed(3)}`;
+  };
+  for (const k of KS) {
+    console.log(`\n## the current-value question at k=${k}, ${pairs.length} knowledge-update questions`);
+    console.log(`| arm | both (strict) | current-in | current-first | current@1 | stale-only | vs shipped, current-first | vs shipped, both |`);
+    console.log(`| --- | --- | --- | --- | --- | --- | --- | --- |`);
+    for (const a of arms) {
+      console.log(`| ${a.key} | ${pct(count(a.key, k, (o) => o.both))} | ${pct(count(a.key, k, (o) => o.currentIn))} | ${pct(count(a.key, k, (o) => o.currentFirst))} | ${pct(count(a.key, k, (o) => o.currentAt1))} | ${pct(count(a.key, k, (o) => o.staleOnly))} | ${paired(a.key, k, (o) => o.currentFirst)} | ${paired(a.key, k, (o) => o.both)} |`);
+    }
+  }
+  console.log(`\narms: ${arms.map((a) => `${a.key} = ${a.label}`).join("; ")}`);
+  console.log(`columns: both = every gold in the top k (strict recall_all); current-in = the current session in the top k; current-first = in the top k and above the stale one, or the stale one absent; current@1 = the top session is the current one; stale-only = the stale one in the top k, the current one not. Paired: questions the arm gets right and the shipped order does not / the reverse, McNemar exact two-sided.`);
+  const staleFirst = pairs.filter((p) => !outcomes.get(`${arms[0].key}|5|${p.q.question_id}`)!.currentFirst);
+  console.log(`\n${staleFirst.length} questions where the shipped order at k=5 does not put the current session first (rank of current / stale, 0-based, −1 absent; gap in days):`);
+  for (const p of staleFirst) {
+    const o = outcomes.get(`${arms[0].key}|5|${p.q.question_id}`)!;
+    console.log(`  ${p.q.question_id}  cur ${o.rCur} / stale ${o.rStale}  gap ${p.gapDays.toFixed(0)}d  ${p.q.question.slice(0, 80)}`);
+  }
+}
+
 async function score(): Promise<void> {
-  const map = readMap();
+  const map = await readMapOrRebuild();
   const missing = [...sessions.keys()].filter((sid) => !map[sid]);
   if (missing.length) throw new Error(`${missing.length} sessions are not loaded; run the load phase first.`);
   const idToSids = new Map<string, string[]>();
   for (const [sid, id] of Object.entries(map)) idToSids.set(id, [...(idToSids.get(id) ?? []), sid]);
+  if (ARMS === "current") { await scoreCurrent(map, idToSids); return; }
 
   const scored = questions.filter((q) => !q.question_id.endsWith("_abs"));
   const use = MAXQ ? scored.slice(0, MAXQ) : scored;

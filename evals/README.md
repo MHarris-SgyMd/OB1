@@ -2236,7 +2236,8 @@ leading line, and the vector does not weight them. Multi-session is where the
 (95.0%): the second gold session is close behind, which is the case a
 reranker or a larger candidate window addresses. Knowledge-update is 97–99%:
 both the stale and the current session are retrieved, which is the retrieval
-half of the problem SMD-1294 (consolidation) exists for.
+half of the problem SMD-1294 (consolidation) exists for — and, measured below
+under SMD-1720, the half the number cannot see: which of the two comes first.
 
 **Where this sits.** The default model lands 4.0 points below GBrain without
 its reranker and 6.1 below with it, on a 2.5 GB local model with no reranker
@@ -2292,10 +2293,113 @@ ten-result query** (mean non-target 8.30 → 9.02), because a dominant top of ~0
 keeps rows ≥0.4 where the floor kept ≥0.5. A little more fill below the answer for
 the 45→87% long-capture recall: bounded and non-adversarial.
 
-### Caveats
+### The knowledge-update slice: what strict recall hides, and the resolving read priced as an oracle (SMD-1720)
 
-* Two local models, both at 1024 dimensions. Nothing hosted has been
-  measured on this corpus, as on the others (see "The biggest gap").
+`eval-longmemeval.ts` with `OB1_EVAL_LME_ARMS=current`, scoring only, on the
+same persisted loads (the S-corpus maps had gone with `/tmp`; the score phase
+now rebuilds a missing map from each row's `metadata.lme_sid`, the four
+fingerprint twins matched by fingerprint, and says so). 2026-09-18.
+
+SMD-1720 asked for the knowledge-update slice to be reported on its own, on
+the reading that it never had been. It had — the tables above carry it, at
+97.2% (4b) and 98.6% (0.6b) strict recall_all@5, the best slice on both
+models — so by the ticket's own rule it closes with that number. But the
+number answers the benchmark's question, not MERIT's. Every one of the 72
+knowledge-update questions has exactly two gold sessions, one that states a
+value and a later one that updates it (median 50 days apart, from under a
+day to 256), and
+strict recall_all counts the question when *both* are in the top five. A
+reader handed the stale value first, or the stale value alone, scores the
+same as one handed the update. That is the failure MERIT measured embedding
+retrieval at 0.30–0.95 on and update-on-write stores at 0.70–1.00, and it
+needs the rank of each gold, which the shipped arm set does not keep.
+
+**What is scored.** Over the same `match_thoughts` calls, per question: `both`
+(strict, as above), `current-in` (the current session in the top k),
+`current-first` (in the top k and above the stale one, or the stale one
+absent — what a reader that takes the first relevant hit gets right),
+`current@1`, and `stale-only` (the stale session in the top k, the current one
+not). A control refuses any question without two golds dated apart. Every
+arm is paired with the shipped order per question — helped / hurt and
+McNemar's exact test — not compared as a mean.
+
+**Arms.** `vector@-1`, the shipped order. `recency@0.3`, 020's blend as a
+caller can send it today (`recency_weight` 0.3, the half-life fixed at 90
+days). `recency@0.3/3650`, the same weight at a half-life long enough for a
+week of age to register on rows three years old. `age@1`, age alone among the
+nearest candidates. And `resolve`: the ticket's chain-walking read — each hit
+walked forward along `supersedes` to the head of its chain and returned in
+the hit's place, at the hit's rank, a session listed once — run as an
+**oracle**, because the corpus carries **0** `supersedes` pointers (printed;
+nothing populates them: the consolidation pass has not run on these loads,
+and at one thought per session it would be judging whole conversations). The
+arm holds the 72 gold pairs in memory as the chains, as if a reviewer had
+accepted exactly the right proposals. It is the upper bound of the read, not
+a measurement of it.
+
+**Results, k=5, 72 questions.** 4b / 0.6b:
+
+| arm | both (strict) | current-in | current-first | current@1 | stale-only | vs shipped on current-first |
+| --- | --- | --- | --- | --- | --- | --- |
+| vector@-1 (shipped) | 97.2% / 98.6% | 97.2% / 100% | **52.8% / 45.8%** | 52.8% / 44.4% | 2.8% / 0% | — |
+| recency@0.3, half-life 90d | 97.2% / 98.6% | 97.2% / 100% | 52.8% / 45.8% | 52.8% / 44.4% | 2.8% / 0% | +0 / −0 on both models |
+| recency@0.3, half-life 3,650d | 97.2% / 98.6% | 97.2% / 100% | 54.2% / 47.2% | 52.8% / 45.8% | 2.8% / 0% | +1 / −0, p=1.000 |
+| age@1 | 2.8% / 2.8% | 29.2% / 29.2% | 29.2% / 29.2% | 5.6% / 5.6% | 0% / 0% | +10 / −27, p=0.008 · +11 / −23, p=0.058 |
+| resolve (oracle chains) | **0% / 0%** | 100% / 100% | **100% / 100%** | 97.2% / 94.4% | 0% / 0% | +34 / −0 · +39 / −0, p<0.001 |
+
+At k=10 the shipped arm reaches 100% on `both` on both models and
+`current-first` does not move (52.8% / 45.8%); `age@1` climbs to 51.4%
+current-first and is no longer distinguishable from the shipped order
+(+18 / −19, p=1.000 on the 4b). 2.1–2.7 ms a call.
+
+**What it says.**
+
+* **The shipped read is a coin flip on which value comes first.** On 34 of 72
+  questions (4b; 39 on the 0.6b) the stale session outranks its update — in
+  almost every one the stale row is the top hit and the update is second.
+  Both are always retrieved, so the strict number is 97–99% and the reader's
+  number is 45–53%. That is MERIT's range, reproduced on a public corpus
+  through the fork's own write and read path, and it is invisible to every
+  table above this one.
+* **The date is not the lever, again.** The blend a caller can send is a
+  byte-identical no-op here: at a 90-day half-life a row from 2023 has a
+  recency of about 10⁻⁴, and so does the row a week newer, so the blend
+  changes nothing below weight 1. A half-life long enough to see the gap
+  moves one question. Age alone among the nearest twenty puts newer,
+  unrelated sessions ahead of both golds and collapses strict recall to 2.8%.
+  Change 53 found the same for the temporal slice; the update is not usually
+  the most recent session in a history, it is the most recent *about this*.
+* **The resolving read is a change of relevance definition, not a ranking
+  improvement.** Fed perfect chains it puts the current value first on every
+  question and at rank one on 94–97% — and scores 0% on strict recall,
+  because it hands back one session where the benchmark wants two. The same
+  split `eval-supersession.ts` found on the seeded corpus (topical relevance
+  +0.000, current-version relevance +0.333) holds on the public one. And the
+  benchmark is right to want two: 14 of the 72 questions carry a cue like
+  *previous*, *before*, *initially*, and about ten of them ask for the value
+  the update replaced ("What was my previous frequent flyer status", "Where
+  did I initially keep my old sneakers" — asked beside "Where do I currently
+  keep"); one asks for both. A read that resolves by default answers those
+  from a row it has hidden.
+* **The mutant.** With the forward walk removed (a hit returned as itself)
+  the resolve arm is the shipped order on every question, +0 / −0 — the walk
+  is the whole effect.
+
+**Decision.** Not built, and the number stands as the ticket's step one. The
+resolve read is deterministic given chains — a hit in a chain is replaced,
+one outside it is not — so nothing about its *effect* is left to measure by
+building it; what is missing is chains, and no measured corpus has one (this
+one has 0 pointers; on the tracker corpus the pass filed proposals, and a
+proposal is not a pointer until a reviewer accepts it). When
+a corpus with accepted proposals exists, the read belongs behind an opt-in
+flag on the search functions (`p_resolve`, default off), with a
+`superseded_by_chain: n` label on a replaced hit, and never as the default:
+the benchmark's own previous-value questions are the case against a default.
+Today the reader has the pieces: the label (`⚠ Superseded by a newer
+thought — ID …`) names the head one read away, and `Captured:` dates every
+hit. What would move the reader's number without a chain is a reranker that
+reads the two texts and picks the later state — the one-pool rerank change 59
+found to be the lever — measured on this slice with this arm set.
 * The date is prepended to each session's text. Without it temporal questions
   are unanswerable by any retriever; with it, the harness has made a choice a
   capture path would have to make too. It helps the temporal slice and is
