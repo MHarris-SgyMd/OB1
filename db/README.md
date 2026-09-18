@@ -22,7 +22,7 @@ later — migration 014 declares HNSW settings that older pgvector rejects.
 - To run `test-live.ts`: podman or docker, for a throwaway container
 - To run `test-upgrade.ts`, `bench-trgm.ts` or `bench-keyword.ts`: the same, and
   for the benchmarks a few minutes — they build tables up to 100,000 rows;
-  `test-bench-reuse.ts` the same and about three minutes (eight bench runs at
+  `test-bench-reuse.ts` the same and about three minutes (nine bench runs at
   150,000 rows).
   `bench-hnsw.ts` at a million rows and up wants most of an hour and a container with
   gigabytes of shared memory; its section below says how much
@@ -164,7 +164,7 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `904 assertions: 904 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `925 assertions: 925 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports twenty-three migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
@@ -201,8 +201,8 @@ thought_chunks` shows five columns since 013 added `context`.
 Migrations 024 onward are described in `FORK.md`, one numbered change each
 (024 change 45, 025 change 46, 026 change 47, 027 change 48, 028 change 49,
 029 change 54, 030 change 56, 031 change 57, 032 change 60, 033 change 63,
-034 change 65, 035 change 66, 036 change 68, 037 change 70, 038 change 80,
-039 change 81).
+034 change 65, 035 change 66, 036 change 68, 037 change 70, 038 change 80, 039 change 81,
+040 change 86).
 
 ## What changed relative to the guide
 
@@ -979,16 +979,21 @@ OB1_BENCH_SCALES=1000000  OB1_PG_SHM_SIZE=4g  ./with-postgres.sh bun bench-hnsw.
 OB1_BENCH_SCALES=10000000 OB1_PG_SHM_SIZE=11g OB1_BENCH_MAINTENANCE_MEM=9GB ./with-postgres.sh bun bench-hnsw.ts
 
 # Before/after a redefinition of match_thoughts, from one tree: the after
-# arm's schema stops at the named migration (the function before 039 here;
-# 037 for the function before 038). Not with OB1_PG_KEEP below: a corpus cut
-# at a migration is measured and dropped, never kept.
-OB1_BENCH_UPTO=038 ./with-postgres.sh bun bench-hnsw.ts
+# arm's schema stops at the named migration (the function before 040 here;
+# 038 for the function before 039, 037 for the one before 038). Not with
+# OB1_PG_KEEP below: a corpus cut at a migration is measured and dropped,
+# never kept.
+OB1_BENCH_UPTO=039 ./with-postgres.sh bun bench-hnsw.ts
 
 # Keep the corpus between passes (SMD-1493): the first run under a name builds
 # it and records the exact oracle's answers beside it (SMD-1562); every later
 # run under the same name finds it, checks it, applies any migration the tree
 # gained since, and skips the load, the builds and the exact pass. One corpus
-# per name.
+# per name. A corpus kept under a tree before migration 039 is the exception:
+# 039 rebuilds the two HNSW indexes as new relations, which the marker's
+# physical fingerprint would read as the corpus rewritten, so the bench
+# refuses such a reuse from the migrator's dry run, before anything is built
+# — remove the volume and build again under this tree.
 OB1_PG_KEEP=hnsw10m OB1_BENCH_SCALES=10000000 OB1_PG_SHM_SIZE=11g OB1_BENCH_MAINTENANCE_MEM=9GB ./with-postgres.sh bun bench-hnsw.ts
 podman volume rm ob1-pg-keep-hnsw10m   # when done with it (the exit line prints this, with the runtime as found)
 ```
@@ -1243,8 +1248,8 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 904 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 514 assertions, real server, throwaway container (on 14–17 with JIT; fewer, reported as skipped, on 18 or without JIT)
+bun test-schema.ts                          # 925 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 523 assertions, real server, throwaway container (on 14–17 with JIT; on 18, or where the server has no JIT or its own jit is off, [5e]'s compile arms are one skipped group)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 ```
 
@@ -1286,7 +1291,7 @@ The kept corpus and the exact answers its marker keeps (SMD-1562) have a
 suite of their own:
 
 ```bash
-./with-postgres.sh bun test-bench-reuse.ts   # eight bench runs at 150,000 rows against one database, ~3 min
+./with-postgres.sh bun test-bench-reuse.ts   # nine bench runs at 150,000 rows against one database, ~3 min
 ```
 
 It runs the bench eight times against the wrapper's one throwaway database,
@@ -1304,6 +1309,38 @@ consulted. Two builds would
 give two HNSW graphs and two recall figures, which is why every comparison
 is on one index. It drops its marker table on the way out. Not in CI or
 `ci-parity.sh`, for the three minutes of exact passes it costs.
+
+### hnsw-graph.ts
+
+Reads a pgvector HNSW index page by page and says which live rows its entry
+point cannot reach. A vector search is a walk from the index's entry point over
+its neighbour lists, so a live row in a component the entry cannot reach is
+invisible to every search that walks; the walk itself cannot show that, since a
+short answer from an approximate index looks the same whether the graph has a
+hole or the beam stopped early. This decodes the pages the walk reads —
+pgvector 0.8.x's `HnswMetaPageData`, `HnswElementTupleData` and
+`HnswNeighborTupleData`, through `pageinspect`'s `get_raw_page` — and computes
+reachability from the graph itself, then joins to the table so "live" means a
+row the session can see.
+
+```bash
+./with-postgres.sh bun hnsw-graph.ts                              # both shipped indexes
+bun hnsw-graph.ts --url "$DATABASE_URL" --index thoughts_embedding_idx --json
+```
+
+`pageinspect` is superuser-only, so this is a diagnostic for a database you
+administer — the suites' throwaway containers, a local brain — not a check the
+server runs on a managed database. It exists because of SMD-1632: over the
+suite's near-equidistant vectors (orthogonal unit axes, every pair at cosine
+distance 1.0) pgvector's neighbour-selection heuristic keeps few edges and the
+graph is not connected, so a search misses a live row its own vector matches —
+which is what flaked `test-live.ts` [7] before SMD-1574 moved its reads to the
+exact branch. `test-live.ts` [17] drives it: the walk misses most axes of an
+orthogonal corpus and none of a random one, and every row the decoder calls
+unreachable is one the walk misses. A random, production-shaped corpus is fully
+reachable; `REINDEX` does not clear the degenerate case (a rebuild of an
+equidistant graph is no more reachable), so it is not the remedy the finding
+first assumed. See FORK.md's SMD-1632 section.
 
 ### What only the live suite can catch
 
@@ -1372,10 +1409,10 @@ is on one index. It drops its marker table on the way out. Not in CI or
   takes the supersession lock.
 - **The routing count is gated by a sample of the heap, drawn by TID range**
   (migrations 037 and 038). [5d] loads 25,000 rows at the configured width,
-  applies the last definer (039 — 038's body, run with `jit = off`) with its
+  applies the last definer (040 — 039's body, run with `jit = off`) with its
   floor lowered to zero, and counts GIN index scans per call: the broad
-  filter makes exactly one fewer under the gate than under 020's body (the
-  collection skipped on every call — 037's TABLESAMPLE draw could
+  filter makes exactly one fewer under the gate than under 020's
+  body (the collection skipped on every call — 037's TABLESAMPLE draw could
   reach fewer than three pages and miss, so the band was 0.75–1.0 then), the
   thin filter the same number (the collection ran), and both answer exactly.
   `test-schema.ts` [8e] holds the body's shape — the TID range probe, DISTINCT
@@ -1390,20 +1427,34 @@ is on one index. It drops its marker table on the way out. Not in CI or
   populated 037 — no column, signature, row or privilege moves — and each,
   after a hand re-apply of 014 puts the 4-argument form back, applies the
   migration under test alone and finds one form again.
-- **match_thoughts runs with `jit = off`** (migration 039). [5e] turns off
+- **The walk's index is half precision** (migration 039). `test-schema.ts`
+  [38] holds the swap's every case — a re-run and a hand re-apply of 001
+  rebuild nothing, a vector index put back under the name is swapped again, a
+  staging index built beforehand is adopted — and pairs the body's cast with
+  the plan: an Index Scan by the index's name under the body's ORDER BY, none
+  under the raw column's; [20] compares the candidate CTEs to 014's with the
+  cast taken out. [5] holds both plans on a real server; [5d] applies the
+  last definer before it drops the index, the order 039's swap needed (it
+  would have built one over its 25,000 rows). `test-upgrade.ts` [17] applies 039 onto a populated 038 — no row,
+  signature or privilege moves, the walk agrees with the exact answer before
+  and after, the index OIDs survive a re-apply, and an INVALID staging index
+  (an interrupted `CREATE INDEX CONCURRENTLY`) is rebuilt rather than adopted.
+  The recall, the bytes and the decision are `evals/eval-quant.ts`'s, on real
+  vectors (FORK.md change 81).
+- **match_thoughts runs with `jit = off`** (migration 040). [5e] turns off
   each planner path the sample has exactly one of (`enable_tidscan`,
   `enable_nestloop`, `enable_hashagg` with `enable_sort`) at session level
   on a heap with the floor lowered: the statement read out of the body,
   explained under the function's settings, keeps its TID Range Scan at
   `disable_cost` and has no JIT block, the same statement with `jit` forced
-  on has one, and through the function the mutant with 039's clause RESET
+  on has one, and through the function the mutant with 040's clause RESET
   pays the compile on every call (~50 ms) where the clause costs the
   default's time — on PostgreSQL 14–17; on 18, which counts disabled nodes
   instead of costing them, [5e] asserts that nothing is compiled either way
   and names the node each path leaves (a sequential scan of the heap per
   probe under `enable_tidscan = off`, which no clause reaches — SMD-1703),
-  and skips the mutant arm. `test-upgrade.ts` [17] applies 039 onto a populated 038:
-  the body byte for byte 038's, `jit=off` beside 014's and 019's clauses, no
+  and skips the mutant arm. `test-upgrade.ts` [18] applies 040 onto a populated 039:
+  the body byte for byte 039's, `jit=off` beside 014's and 019's clauses, no
   row or privilege moves, and the last definer applied alone drops a
   hand-re-applied 014's 4-argument form. `test-schema.ts` [20] pins the
   three clauses; preflight's `candidate scan` reads the third beside 019's.
@@ -1425,8 +1476,11 @@ is on one index. It drops its marker table on the way out. Not in CI or
   new vector's; a re-capture with no vector keeps the windows with the vector
   and its label. The found-by reads filter on a metadata key only that
   thought carries, so `match_thoughts`'s exact branch answers them and no
-  HNSW walk decides (SMD-1574; the walk missed live rows outright after an
-  autovacuum — SMD-1632). `test-upgrade.ts` [5] shows the defect at 021
+  HNSW walk decides (SMD-1574). The walk had missed live rows outright: over
+  the suite's tied unit-axis vectors pgvector's graph is not connected and a
+  search cannot reach them, which [17] reproduces and `hnsw-graph.ts` reads
+  from the index (SMD-1632); [4], [11] and [15] moved to the exact branch for
+  the same reason. `test-upgrade.ts` [5] shows the defect at 021
   before applying 022 over it, then both halves of the rule.
 - **The re-embed, end to end.** [9] runs `reembed.ts` as a subprocess against a
   stub provider: refused without `--switch-model`, then two workers over
@@ -1708,7 +1762,18 @@ default — are unaffected.
   thousand rows ("could not resize shared memory segment"), so `deploy/compose.yaml`
   sets `shm_size` (`POSTGRES_SHM_SIZE`), and where it cannot be raised
   `max_parallel_maintenance_workers = 0` builds in ordinary backend memory.
-  `bench-hnsw.ts` section L has the build times by scale.
+  `bench-hnsw.ts` section L has the build times by scale. Migration 039
+  rebuilds both HNSW indexes over `embedding::halfvec` on a populated brain,
+  writers held for the build, in the migrating session's
+  `maintenance_work_mem` — the server's 64 MB unless the role was given more,
+  and past some 25,000 vectors that is pgvector's slow on-disk phase. Size it
+  first: about 2.5 KB per vector across `thoughts` and `thought_chunks`
+  (250 MB per 100,000, 2.5 GB per million), `/dev/shm` at least that under
+  parallel workers; with the graph in memory the build ran at about 100 µs a
+  row with four workers, and the migrator prints the vector count and the
+  setting in force just before 039. It adopts staging indexes built beforehand
+  with `CREATE INDEX CONCURRENTLY` under the names its header gives, which is
+  the path for a brain past a million rows.
 - **Data migration is not covered here.** These migrations create the schema. Moving
   rows is `pg_dump --data-only`, plus `bun reembed.ts --switch-model` if the model
   family changes at the same width.

@@ -35,6 +35,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { TID_PROBE, applyFunctionSettings, applyMigrations, createAssert, sampleStatementOf, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
 import { heartbeatFor, leaseRefusal } from "./lease.ts";
+import { reachabilityReport, readHnswGraph, reachableFromEntry, type HnswElement, type HnswGraph } from "./hnsw-graph.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const URL_ = process.env.DATABASE_URL;
@@ -152,17 +153,26 @@ console.log("\n[3] jsonb parameter binding through a real driver");
 console.log("\n[4] Capture and search through Bun.sql and real pgvector");
 {
   await sql`DELETE FROM thoughts`;
+  // Every row of this section also carries a shared fixture key, so the
+  // ordering read below filters on it and takes match_thoughts' exact branch
+  // (014/037: at most v_exact = 1,000 matching thoughts are scored by id, no
+  // HNSW walk) — the same move [7] makes, and for the same reason. [7]'s
+  // found-by reads flaked in CI because a walk over the tied unit-axis corpus
+  // returned live rows short (SMD-1632, FORK.md's known-issues entry); this
+  // section's vectors are less degenerate, but it asserts an exact order over
+  // three rows, so the walk is not what it means to test — [5b] holds that.
+  const S = { s: "04" } as const;
   const [cap] = await sql`
-    SELECT upsert_thought(${"exact"}, ${{ metadata: { kind: "a" } }}::jsonb, ${unit(0)}::vector) AS r`;
+    SELECT upsert_thought(${"exact"}, ${{ metadata: { kind: "a", ...S } }}::jsonb, ${unit(0)}::vector) AS r`;
   assert(cap.r?.id != null, "3-arg atomic capture returns an id");
 
   const blend = new Array(EMBEDDING_DIM).fill(0);
   blend[0] = 0.9;
   blend[1] = 0.44;
-  await sql`SELECT upsert_thought(${"near"}, ${{ metadata: { kind: "a" } }}::jsonb, ${`[${blend.join(",")}]`}::vector)`;
-  await sql`SELECT upsert_thought(${"distant"}, ${{ metadata: { kind: "b" } }}::jsonb, ${unit(1)}::vector)`;
+  await sql`SELECT upsert_thought(${"near"}, ${{ metadata: { kind: "a", ...S } }}::jsonb, ${`[${blend.join(",")}]`}::vector)`;
+  await sql`SELECT upsert_thought(${"distant"}, ${{ metadata: { kind: "b", ...S } }}::jsonb, ${unit(1)}::vector)`;
 
-  const rows = await sql`SELECT content, similarity FROM match_thoughts(${unit(0)}::vector, -1.0, 10, ${{}}::jsonb)`;
+  const rows = await sql`SELECT content, similarity FROM match_thoughts(${unit(0)}::vector, -1.0, 10, ${S}::jsonb)`;
   assert(rows.length === 3, `match_thoughts returned ${rows.length} rows`);
   assert(rows[0].content === "exact", `closest first (${rows[0].content})`);
   assert(rows[1].content === "near", `then the blend (${rows[1].content})`);
@@ -188,13 +198,18 @@ console.log("\n[5] The planner can reach the HNSW index");
   // SET LOCAL inside one transaction, not a session SET on this max-4 pool: the
   // pool does not promise the EXPLAIN the connection that received the SET,
   // and a connection left with seq scans off would reach later sections.
-  const plan = await sql.begin(async (tx: SQL) => {
+  const explainOrdered = (orderBy: string) => sql.begin(async (tx: SQL) => {
     await tx`SET LOCAL enable_seqscan = off`;
-    return (await tx`EXPLAIN SELECT id FROM thoughts ORDER BY embedding <=> ${unit(0)}::vector LIMIT 1`)
+    return (await tx.unsafe(`EXPLAIN SELECT id FROM thoughts ORDER BY ${orderBy} LIMIT 1`))
       .map((r: Record<string, string>) => Object.values(r)[0])
       .join(" ");
   });
-  assert(/thoughts_embedding_idx/.test(plan), "thoughts_embedding_idx appears in the plan");
+  // Since 039 the index is over `embedding::halfvec(D)`, so the ORDER BY that
+  // reaches it carries the cast on both sides — the function's own — and an
+  // ORDER BY on the raw column, which had the index until 039, no longer does.
+  const plan = await explainOrdered(`embedding::halfvec(${EMBEDDING_DIM}) <=> '${unit(0)}'::vector::halfvec(${EMBEDDING_DIM})`);
+  assert(/thoughts_embedding_idx/.test(plan), "thoughts_embedding_idx appears in the plan for the body's ORDER BY (the halfvec cast on both sides — 039)");
+  assert(!/thoughts_embedding_idx/.test(await explainOrdered(`embedding <=> '${unit(0)}'::vector`)), "…and not in the plan for an ORDER BY on the raw column: the cast is the index's key");
 }
 
 console.log("\n[5b] A filtered match_thoughts agrees with an exact scan at scale (migration 014)");
@@ -250,7 +265,20 @@ console.log("\n[5b] A filtered match_thoughts agrees with an exact scan at scale
   let agree = 0;
   let walkOverlap = 0;
   let walkShort = 0;
-  const QUERIES = 10;
+  // Fifty queries, not ten. On this fixture the planner priced the vector
+  // index out of the walk branch — every call read the GIN bitmap, which is
+  // exact, under both plan modes — and the ten-query sum sat at 100. Since
+  // 039 the halfvec index, a third of the pages, wins the CUSTOM plans
+  // plpgsql gives the first five calls of a session: those five walk (2,000
+  // random unit vectors at 1,024 dimensions, HNSW's hardest case, about 7 of
+  // 10 exact ids at ef_search 40 under either index) and every call after
+  // the generic plan is adopted reads the bitmap again. Measured per query
+  // over 100: calls one to five lost two to six ids each on every build,
+  // calls six to a hundred lost none; under the vector index none did. Ten
+  // queries are therefore the five that walk plus five that do not; fifty
+  // put the statistic where the walk's failure shape — short, or wrong rows
+  // — is what moves it, and 039's header has the plan reads.
+  const QUERIES = 50;
   for (let q = 0; q < QUERIES; q++) {
     const qv = random();
     const thin = new Set((await exactTop(qv, '{"tagged": true}')).map((r: { id: string }) => r.id));
@@ -263,7 +291,7 @@ console.log("\n[5b] A filtered match_thoughts agrees with an exact scan at scale
   }
   assert(agree === QUERIES, `a 1% filter (20 rows, the exact branch) returns the exact top-10 on ${agree}/${QUERIES} random queries`);
   assert(walkShort === 0, `a 99% filter (1,980 rows, the walk branch) returns 10 rows on every query (${walkShort} short)`);
-  assert(walkOverlap >= 85, `…and ${walkOverlap}/100 of them are the exact top-10 (HNSW is approximate; random vectors are its hardest case)`);
+  assert(walkOverlap >= 0.9 * QUERIES * 10, `…and ${walkOverlap}/${QUERIES * 10} of them are the exact top-10 (HNSW is approximate and random vectors are its hardest case; the first five calls of a session walk the halfvec index under custom plans, the rest read the GIN bitmap — 039's header)`);
 
   // match_count is clamped inside the function, as 012 clamps its p_limit: the
   // cost of a call is now proportional to it, and direct callers are unbounded.
@@ -385,6 +413,19 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
   // in a way that does not matter to a section about the statement BEFORE it.
   await sql`DELETE FROM thoughts`;
   const [{ hnswDef }] = await sql.unsafe(`SELECT pg_get_indexdef('thoughts_embedding_idx'::regclass) AS "hnswDef"`);
+  // Read by the finally block below as well as the section: the last definer
+  // of match_thoughts — 040, 039's body (038's gate, the half-precision walk)
+  // run with jit off — applied through test-support with the one override
+  // SchemaOptions carries.
+  const opts040 = { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f: string) => f.startsWith("040") };
+  const body = async () => String((await sql`SELECT prosrc AS s FROM pg_proc WHERE oid = ${MATCH_THOUGHTS_SIGNATURE}::regprocedure`)[0].s);
+  // The floor lowered to 0 for the section, so the gate runs on this heap.
+  // Applied BEFORE the index is dropped and the rows loaded, the order 039
+  // needed (040 carries no index swap, and keeps the order): 039's swap block
+  // builds the index when the shipped name is missing, and a build over
+  // 25,000 rows at the shipped width is the minute this section avoids.
+  await applyMigrations(URL_, { ...opts040, routeEstimateMinPages: 0 });
+  assert(/IF v_pages >= 0 THEN/.test(await body()) && TID_PROBE.test(await body()), "040 is installed with its floor at 0 (038's gate, carried through 039): the sample runs on every filtered call to this table");
   await sql.unsafe(`DROP INDEX thoughts_embedding_idx`);
   // User triggers off for the load, as the bench does: 008's audit trigger
   // would write a row per row (25,000 here, then 25,000 more for the DELETE)
@@ -392,12 +433,6 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
   // measures — and the heap they leave behind moves a timing-sensitive race
   // that follows ([6g]). Re-enabled in the finally block.
   await sql.unsafe(`ALTER TABLE thoughts DISABLE TRIGGER USER`);
-  // Read by the finally block below as well as the section. 039 is the last
-  // definer — 038's body with `jit = off` on the function — so it is what
-  // preflight's remedy and this section apply; the gate is 037's and the
-  // sample 038's.
-  const opts039 = { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f: string) => f.startsWith("039") };
-  const body = async () => String((await sql`SELECT prosrc AS s FROM pg_proc WHERE oid = ${MATCH_THOUGHTS_SIGNATURE}::regprocedure`)[0].s);
   let failure: unknown;
   try {
     const N = 25_000;
@@ -413,12 +448,8 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
     const [{ pages }] = await sql.unsafe(`SELECT (pg_relation_size(to_regclass('thoughts')) / current_setting('block_size')::int)::int AS pages`);
     assert(Number(pages) > 0 && Number(pages) < ROUTE_ESTIMATE_MIN_PAGES, `${N.toLocaleString()} rows at ${EMBEDDING_DIM} dimensions are ${pages} heap pages (the vectors are TOASTed), under the shipped floor of ${ROUTE_ESTIMATE_MIN_PAGES}`);
 
-    // The floor lowered to 0 for the section, so the gate runs on this heap: 039
-    // applied through test-support with the one override SchemaOptions carries.
-    await applyMigrations(URL_, { ...opts039, routeEstimateMinPages: 0 });
-    assert(/IF v_pages >= 0 THEN/.test(await body()) && TID_PROBE.test(await body()), "039 is installed with its floor at 0: the sample runs on every filtered call to this table");
-    // The body, kept for the timing at the end: by then 020's re-apply has replaced it.
-    const body039 = await body();
+    // The deployed body — 040, carrying 038's sample — kept for the timing at the end: by then 020's re-apply has replaced it.
+    const body038 = await body();
 
     // The observable: 014's collection is one scan of the GIN index per call,
     // and nothing else in a call to this table scans it the same way twice — so
@@ -496,7 +527,7 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
 
     // 020's body on the same table — the collection on every filtered call.
     await applyMigrations(URL_, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("020") });
-    assert(!TID_PROBE.test(await body()) && !/v_broad/.test(await body()), "020 re-applied over 039: the body has no sample and no gate (the state a hand re-apply of 020 leaves; preflight's remedy names 039 for that reason)");
+    assert(!TID_PROBE.test(await body()) && !/v_broad/.test(await body()), "020 re-applied over 038: the body has no sample and no gate (the state a hand re-apply of 020 leaves; preflight's remedy names 038 for that reason)");
     const plainBroad = await measure(BROAD);
     const plainThin = await measure(THIN);
     // The raw scan counts, not the per-call quotients: x/20 − y/20 is not
@@ -524,7 +555,7 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
     };
     // The deployed statement, read out of 038's body rather than a copy kept
     // here — the class of thing review pass 1 removed from [8e].
-    const sampleText = sampleStatementOf(body039, Number(pages), BROAD);
+    const sampleText = sampleStatementOf(body038, Number(pages), BROAD);
     const sampleMs = sampleText === null ? NaN : await timed(sampleText);
     const collectMs = await timed(`SELECT array_agg(s.id) FROM (SELECT t.id FROM thoughts t WHERE t.metadata @> '${BROAD}'::jsonb AND (t.embedding IS NOT NULL OR EXISTS (SELECT 1 FROM thought_chunks k WHERE k.thought_id = t.id)) LIMIT 1001) s`);
     console.log(`      (${ROUTE_SAMPLE_PAGES} pages of ${pages} read by TID range: ${sampleMs.toFixed(2)} ms a call; the collection on the ${N.toLocaleString()}-row filter: ${collectMs.toFixed(2)} ms — round trip included in both)`);
@@ -534,7 +565,7 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
     throw e;
   } finally {
     // The shipped state back on every path — a throw above would otherwise
-    // leave 25,000 rows and no HNSW index to [6]..[16] (SMD-1463's first review pass): 039
+    // leave 25,000 rows and no HNSW index to [6]..[16] (SMD-1463's first review pass): 040
     // with its floor, and 027, because 020's file also redefines
     // search_thoughts_hybrid as 020 had it, without 027's relative floor, and
     // [15] holds that floor (the first run of this section left 020's hybrid
@@ -551,8 +582,8 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
       // start from the heap they would have had without this one.
       await sql.unsafe(`VACUUM thoughts`);
       await sql.unsafe(String(hnswDef));
-      await applyMigrations(URL_, { ...opts039, only: (f) => f.startsWith("027") || f.startsWith("039") });
-      assert(new RegExp(`IF v_pages >= ${ROUTE_ESTIMATE_MIN_PAGES} THEN`).test(await body()) && TID_PROBE.test(await body()), `039 restored with the shipped floor of ${ROUTE_ESTIMATE_MIN_PAGES} pages`);
+      await applyMigrations(URL_, { ...opts040, only: (f) => f.startsWith("027") || f.startsWith("040") });
+      assert(new RegExp(`IF v_pages >= ${ROUTE_ESTIMATE_MIN_PAGES} THEN`).test(await body()) && TID_PROBE.test(await body()), `040 restored with the shipped floor of ${ROUTE_ESTIMATE_MIN_PAGES} pages`);
       assert(/ob1:relative-floor/.test(String((await sql`SELECT prosrc AS s FROM pg_proc WHERE oid = 'search_thoughts_hybrid(vector, text, float, int, jsonb, float, float)'::regprocedure`)[0].s)),
         "…and search_thoughts_hybrid carries 027's sentinel again, not the 020 body the re-apply above installed");
     } catch (cleanup) {
@@ -562,7 +593,7 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
   }
 }
 
-console.log("\n[5e] A planner path disabled at session level no longer JIT-compiles the gate's sample: match_thoughts runs with jit = off (migration 039, SMD-1624)");
+console.log("\n[5e] A planner path disabled at session level no longer JIT-compiles the gate's sample: match_thoughts runs with jit = off (migration 040, SMD-1624)");
 {
   // 038's sample statement has one viable path per piece — a TID Range Scan
   // for the block, a Nested Loop for the LATERAL join, Sort/Unique or
@@ -570,13 +601,13 @@ console.log("\n[5e] A planner path disabled at session level no longer JIT-compi
   // that turns one off adds disable_cost (1e10) to the plan, which carries
   // the statement past every JIT threshold: the same plan, the same eight
   // buffers, and ~50 ms of compiler on every filtered call (038's header;
-  // 039's has the table). 039 puts `jit = off` on the function. Three checks
+  // 040's has the table). 040 puts `jit = off` on the function. Three checks
   // per disabled path, on a small heap with the floor lowered so the sample
   // runs: the statement read out of the installed body, EXPLAINed under the
   // function's own settings, has no JIT block; the same statement with jit
   // forced back on has one — the trigger is real on this server, so the
   // first check has teeth; and through the function, the median call under
-  // 039 is within the default's while the mutant — 039's clause RESET on the
+  // 040 is within the default's while the mutant — 040's clause RESET on the
   // function, what a redefinition without it leaves — pays the compile. The
   // forced-on plan and the timing run only where the server has JIT
   // (pg_jit_available()); the catalog and plan checks run everywhere.
@@ -602,14 +633,14 @@ console.log("\n[5e] A planner path disabled at session level no longer JIT-compi
   // this section exists for cannot be triggered that way there: on 18 the
   // checks below assert its ABSENCE with and without the clause, and the
   // mutant timing has nothing to measure (review pass 2, run on 18.6). The
-  // clause stands on 18 for the generic plan's flat estimate (039's header).
+  // clause stands on 18 for the generic plan's flat estimate (040's header).
   const disableCost = Number((await sql.unsafe(`SELECT current_setting('server_version_num')::int AS v`))[0].v) < 180000;
   const N = 3_000;
   await sql`DELETE FROM thoughts`;
   const [{ hnswDef }] = await sql.unsafe(`SELECT pg_get_indexdef('thoughts_embedding_idx'::regclass) AS "hnswDef"`);
   await sql.unsafe(`DROP INDEX thoughts_embedding_idx`);
   await sql.unsafe(`ALTER TABLE thoughts DISABLE TRIGGER USER`);
-  const opts039 = { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f: string) => f.startsWith("039") };
+  const opts040 = { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f: string) => f.startsWith("040") };
   const body = async () => String((await sql`SELECT prosrc AS s FROM pg_proc WHERE oid = ${MATCH_THOUGHTS_SIGNATURE}::regprocedure`)[0].s);
   const proconfig = async () => String((await sql`SELECT array_to_string(proconfig, ',') AS c FROM pg_proc WHERE oid = ${MATCH_THOUGHTS_SIGNATURE}::regprocedure`)[0].c ?? "");
   let failure: unknown;
@@ -625,11 +656,11 @@ console.log("\n[5e] A planner path disabled at session level no longer JIT-compi
     // fixture's.
     await sql.unsafe(String(hnswDef));
     const [{ pages }] = await sql.unsafe(`SELECT (pg_relation_size(to_regclass('thoughts')) / current_setting('block_size')::int)::int AS pages`);
-    await applyMigrations(URL_, { ...opts039, routeEstimateMinPages: 0 });
-    assert(/(^|,)jit=off(,|$)/.test(await proconfig()) && /IF v_pages >= 0 THEN/.test(await body()), `039 is installed with its floor at 0 and jit = off on the function (proconfig ${await proconfig()})`);
+    await applyMigrations(URL_, { ...opts040, routeEstimateMinPages: 0 });
+    assert(/(^|,)jit=off(,|$)/.test(await proconfig()) && /IF v_pages >= 0 THEN/.test(await body()), `040 is installed with its floor at 0 and jit = off on the function (proconfig ${await proconfig()})`);
     const BROAD = '{"broad": true}';
     const sampleText = sampleStatementOf(await body(), Number(pages), BROAD);
-    assert(sampleText !== null, "the sample statement reads out of the installed body (038's, byte for byte)");
+    assert(sampleText !== null, "the sample statement reads out of the installed body (039's, byte for byte)");
     const { unitVector } = seededRandom(1624);
     const queries = Array.from({ length: 12 }, () => `[${unitVector(EMBEDDING_DIM).join(",")}]`);
     // The third column is the node 18 takes: with enable_tidscan off, 18 does
@@ -646,7 +677,7 @@ console.log("\n[5e] A planner path disabled at session level no longer JIT-compi
     /**
      * EXPLAIN (ANALYZE) of the sample statement in one transaction: the paths
      * disabled, then the function's own settings (jit = off among them since
-     * 039), then `jit` forced where asked — the order a session GUC, a
+     * 040), then `jit` forced where asked — the order a session GUC, a
      * function-level SET and a later SET LOCAL take in the call too.
      */
     const explained = async (gucs: string[], jit?: "on" | "off"): Promise<string> =>
@@ -685,25 +716,29 @@ console.log("\n[5e] A planner path disabled at session level no longer JIT-compi
       // and a bare `!/JIT:/` passed with the clause absent (review pass 1, run-it).
       const cost = topCost(under);
       if (!disableCost) {
-        // On 18 these three lines say nothing about 039's clause — nothing
+        // On 18 these three lines say nothing about 040's clause — nothing
         // compiles here with it or without it (run-it, pass 3); the clause's
         // teeth on 18 are the proconfig assertions above and below, test-schema
-        // [20]/[21] and test-upgrade [17]. They record what 18 does with each
+        // [20]/[21] and test-upgrade [18]. They record what 18 does with each
         // path, and name the failing term (review pass 3).
         const forced = jitAvailable ? await explained(gucs, "on") : under;
         const failed = [
           ...(cost < 1e6 ? [] : [`cost ${cost.toExponential(2)}`]),
           ...(/JIT:/.test(under) ? ["a JIT block under the function's settings"] : []),
-          ...(/JIT:/.test(forced) ? ["a JIT block with jit forced on"] : []),
+          ...(jitAvailable && /JIT:/.test(forced) ? ["a JIT block with jit forced on"] : []),
           ...(/Disabled: true/.test(under) ? [] : ["no Disabled: true"]),
           ...(node18.test(under) ? [] : [`no ${node18.source.replace(" on thoughts", "")}`]),
         ];
+        const seen = /(Seq Scan|Tid Range Scan) on thoughts/.exec(under)?.[1] ?? "no scan of thoughts";
         assert(failed.length === 0,
-          `${label}: on PostgreSQL 18 a disabled path is a disabled-node count (Disabled: true), not disable_cost — the probe is a ${node18.source.replace(" on thoughts", "")} at cost ${cost.toExponential(2)} and is not JIT-compiled with the clause or without it; the trigger this section exists for is 14–17's${failed.length ? ` — but: ${failed.join(", ")}` : ""}`);
+          `${label}: on PostgreSQL 18 a disabled path is a disabled-node count (Disabled: true), not disable_cost — the probe is a ${seen} at cost ${cost.toExponential(2)}${failed.length ? `; expected a ${node18.source.replace(" on thoughts", "")}, not JIT-compiled with the clause or without it — but: ${failed.join(", ")}` : " and is not JIT-compiled with the clause or without it; the trigger this section exists for is 14–17's"}`);
         continue;
       }
+      // The JIT term can bite only where this server would compile at all:
+      // with no JIT, or its own jit off, it is true whatever the clause says,
+      // and the proconfig assertions are the clause's teeth (run-it, pass 4).
       assert(cost >= 1e10 && /Tid Range Scan on thoughts/.test(under) && !/JIT:/.test(under),
-        `${label}: the planner still takes the TID Range Scan, prices the plan at disable_cost (${cost.toExponential(2)}), and under the function's settings does not JIT-compile it${/JIT:/.test(under) ? " — but a JIT block is in the plan" : ""}`);
+        `${label}: the planner still takes the TID Range Scan, prices the plan at disable_cost (${cost.toExponential(2)}), and under the function's settings ${/JIT:/.test(under) ? "JIT-compiles it — a JIT block is in the plan" : jitAvailable ? "does not JIT-compile it" : "does not JIT-compile it (this server would not compile it whatever the clause said: no JIT, or its own jit off)"}`);
       if (jitAvailable) {
         const forced = await explained(gucs, "on");
         assert(/JIT:/.test(forced) && /Functions: \d+/.test(forced), `…while the same statement with jit forced on IS compiled (${/JIT:[\s\S]*?Timing: ([^\n]*)/.exec(forced)?.[1] ?? "no timing line"}) — the trigger is real here, so the check above has teeth`);
@@ -713,15 +748,15 @@ console.log("\n[5e] A planner path disabled at session level no longer JIT-compi
       const [label, gucs] = CASES[0];
       const fixed = await median(gucs);
       await sql.unsafe(`ALTER FUNCTION ${MATCH_THOUGHTS_SIGNATURE} RESET jit`);
-      assert(!/jit=off/.test(await proconfig()), "the mutant: 039's clause RESET on the function — what a redefinition without it leaves, and what the ledger cannot see");
+      assert(!/jit=off/.test(await proconfig()), "the mutant: 040's clause RESET on the function — what a redefinition without it leaves, and what the ledger cannot see");
       const mutant = await median(gucs);
-      await applyMigrations(URL_, { ...opts039, routeEstimateMinPages: 0 });
-      assert(/(^|,)jit=off(,|$)/.test(await proconfig()), "…and 039 re-applied puts the clause back");
-      assert(mutant - fixed >= 10, `through the function under ${label} the mutant pays the compile on every call: ${mutant.toFixed(2)} ms a call against ${fixed.toFixed(2)} with 039's clause (default ${baseline.toFixed(2)})`);
+      await applyMigrations(URL_, { ...opts040, routeEstimateMinPages: 0 });
+      assert(/(^|,)jit=off(,|$)/.test(await proconfig()), "…and 040 re-applied puts the clause back");
+      assert(mutant - fixed >= 10, `through the function under ${label} the mutant pays the compile on every call: ${mutant.toFixed(2)} ms a call against ${fixed.toFixed(2)} with 040's clause (default ${baseline.toFixed(2)})`);
       // The bound is the compile's size, not a multiple of the default: the
-      // compiled call through the function is 51–105 ms in 039's header and
-      // was never under 50 across the review runs (EXPLAIN's JIT total for the
-      // sample alone 40–70), so 25 ms of headroom over the default kills the
+      // compiled call through the function is 51–105 ms in 040's header and
+      // 49.6–87 across the review runs (EXPLAIN's JIT total for the sample
+      // alone 40–70), so 25 ms of headroom over the default kills the
       // mechanism-removed value and survives a noisy runner: fixed against
       // default read 7.9–8.9 against 8.0–8.2 in pass 1 and 0.2–1.3 ms apart
       // over pass 2's four runs. The compiled arm itself is the noisy one (two
@@ -738,14 +773,14 @@ console.log("\n[5e] A planner path disabled at session level no longer JIT-compi
     throw e;
   } finally {
     // The shipped state back on every path, as [5d] does: rows out, trigger
-    // on, the heap compacted, the index present, 039 with its floor.
+    // on, the heap compacted, the index present, 040 with its floor.
     try {
       await sql`DELETE FROM thoughts`;
       await sql.unsafe(`ALTER TABLE thoughts ENABLE TRIGGER USER`);
       await sql.unsafe(`VACUUM thoughts`);
       if (!(await sql.unsafe(`SELECT to_regclass('thoughts_embedding_idx') IS NOT NULL AS ok`))[0].ok) await sql.unsafe(String(hnswDef));
-      await applyMigrations(URL_, opts039);
-      assert(new RegExp(`IF v_pages >= ${ROUTE_ESTIMATE_MIN_PAGES} THEN`).test(await body()) && /(^|,)jit=off(,|$)/.test(await proconfig()), `039 restored with the shipped floor of ${ROUTE_ESTIMATE_MIN_PAGES} pages and jit = off`);
+      await applyMigrations(URL_, opts040);
+      assert(new RegExp(`IF v_pages >= ${ROUTE_ESTIMATE_MIN_PAGES} THEN`).test(await body()) && /(^|,)jit=off(,|$)/.test(await proconfig()), `040 restored with the shipped floor of ${ROUTE_ESTIMATE_MIN_PAGES} pages and jit = off`);
     } catch (cleanup) {
       if (failure === undefined) throw cleanup;
       console.error(`      [5e] cleanup failed after the section did: ${(cleanup as Error).message}`);
@@ -2717,16 +2752,24 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
 console.log("\n[11] search_thoughts_hybrid through Bun.sql on real pgvector (migration 017)");
 {
   await sql`DELETE FROM thoughts`;
-  await sql`SELECT upsert_thought(${"exact"}, ${{ metadata: { kind: "a" } }}::jsonb, ${unit(0)}::vector)`;
-  await sql`SELECT upsert_thought(${"distant, and it names SMD-507"}, ${{ metadata: { kind: "b" } }}::jsonb, ${unit(1)}::vector)`;
+  // A shared fixture key on every row, so the hybrid reads below filter on it
+  // and the vector arm — match_thoughts with the filter passed through (017/027)
+  // — takes the exact branch rather than the HNSW walk over these tied unit
+  // axes (SMD-1632; the same move [7] makes). The keyword arm is filtered by
+  // the same key, which every row carries, so what the section tests — a
+  // keyword hit outside the vector window, and the window-of-one probe — is
+  // unchanged; only the walk is taken out of the vector arm.
+  const S = { s: "11" } as const;
+  await sql`SELECT upsert_thought(${"exact"}, ${{ metadata: { kind: "a", ...S } }}::jsonb, ${unit(0)}::vector)`;
+  await sql`SELECT upsert_thought(${"distant, and it names SMD-507"}, ${{ metadata: { kind: "b", ...S } }}::jsonb, ${unit(1)}::vector)`;
   // A chunked thought: its own vector is orthogonal but one chunk is close, so
   // the keyword hit's similarity must come from the chunk, as match_thoughts'
   // would — the direct probe scores the same rule.
-  const [{ r: chunked }] = await sql`SELECT upsert_thought(${"long, mentions SMD-507 in a chunk"}, ${{ metadata: { kind: "b" } }}::jsonb, ${unit(2)}::vector) AS r`;
+  const [{ r: chunked }] = await sql`SELECT upsert_thought(${"long, mentions SMD-507 in a chunk"}, ${{ metadata: { kind: "b", ...S } }}::jsonb, ${unit(2)}::vector) AS r`;
   const near = new Array(EMBEDDING_DIM).fill(0); near[0] = 0.8; near[3] = 0.6;
   await sql`INSERT INTO thought_chunks (thought_id, chunk_index, content, embedding) VALUES (${chunked.id}::uuid, 0, ${"chunk mentioning SMD-507"}, ${`[${near.join(",")}]`}::vector)`;
 
-  const rows = await sql`SELECT content, similarity, matched_needles, literal_only FROM search_thoughts_hybrid(${unit(0)}::vector, ${"SMD-507"}, 0.5, 10, ${{}}::jsonb)`;
+  const rows = await sql`SELECT content, similarity, matched_needles, literal_only FROM search_thoughts_hybrid(${unit(0)}::vector, ${"SMD-507"}, 0.5, 10, ${S}::jsonb)`;
   assert(rows.length === 3, `both exact hits and the one vector row above 0.5 come back (${rows.length})`);
   assert(rows[0].content === "long, mentions SMD-507 in a chunk", `the chunk-scored hit ranks first among the exact hits (${rows.map((r: { content: string }) => r.content).join(" | ")})`);
   assert(Math.abs(Number(rows[0].similarity) - 0.8) < 1e-6, `…with the chunk's similarity, 0.8, not the parent's 0 (${rows[0].similarity})`);
@@ -2739,9 +2782,9 @@ console.log("\n[11] search_thoughts_hybrid through Bun.sql on real pgvector (mig
   // copy of match_thoughts' best-of-vector-and-chunks rule that the header
   // marks as the one to mirror (review pass: the first version of this test
   // used a window of ten, every row was in it, and the probe never ran).
-  const [one] = await sql`SELECT content, similarity FROM search_thoughts_hybrid(${unit(0)}::vector, ${"SMD-507"}, 0.5, 1, ${{}}::jsonb)`;
+  const [one] = await sql`SELECT content, similarity FROM search_thoughts_hybrid(${unit(0)}::vector, ${"SMD-507"}, 0.5, 1, ${S}::jsonb)`;
   assert(one.content === "long, mentions SMD-507 in a chunk", `with a window of one the chunked exact hit still leads (${one.content})`);
-  const [mt] = await sql`SELECT similarity FROM match_thoughts(${unit(0)}::vector, -1.0, 10, ${{ kind: "b" }}::jsonb) WHERE content = ${"long, mentions SMD-507 in a chunk"}`;
+  const [mt] = await sql`SELECT similarity FROM match_thoughts(${unit(0)}::vector, -1.0, 10, ${{ kind: "b", ...S }}::jsonb) WHERE content = ${"long, mentions SMD-507 in a chunk"}`;
   assert(Math.abs(Number(mt.similarity) - Number(one.similarity)) < 1e-9, `…scored by the probe to exactly match_thoughts' number (${one.similarity} vs ${mt.similarity})`);
   await sql`DELETE FROM thoughts`;
 }
@@ -3031,14 +3074,21 @@ console.log("\n[15] search_thoughts_hybrid admits relative to the top match on r
   // (≥ 0.5×top, kept), far 0.10 (< 0.5×top, trimmed). All sit BELOW the old 0.5
   // floor — the long-capture case, where a short question scores a low cosine
   // against a big document, and the floor dropped the right answer.
+  // A shared fixture key on all three rows, so the reads filter on it and the
+  // vector arm takes match_thoughts' exact branch (017/027 pass the filter
+  // through) instead of the HNSW walk — this section runs after the suite's
+  // mass deletes, the shape that flaked [7] (SMD-1632). The relative cutoff is
+  // computed over whatever the vector arm returns, so filtering all three rows
+  // in changes nothing it asserts; a key on ONE row would defeat the cutoff.
+  const S = { s: "15" } as const;
   const at = (wa: number, wb: number) => { const v = new Array(EMBEDDING_DIM).fill(0); v[0] = wa; v[1] = wb; return `[${v.join(",")}]`; };
-  await sql`SELECT upsert_thought(${"top, still low"}, ${{ metadata: {} }}::jsonb, ${at(0.30, 0.9539)}::vector)`;
-  await sql`SELECT upsert_thought(${"within half"}, ${{ metadata: {} }}::jsonb, ${at(0.18, 0.9837)}::vector)`;
-  await sql`SELECT upsert_thought(${"far below"}, ${{ metadata: {} }}::jsonb, ${at(0.10, 0.9950)}::vector)`;
+  await sql`SELECT upsert_thought(${"top, still low"}, ${{ metadata: { ...S } }}::jsonb, ${at(0.30, 0.9539)}::vector)`;
+  await sql`SELECT upsert_thought(${"within half"}, ${{ metadata: { ...S } }}::jsonb, ${at(0.18, 0.9837)}::vector)`;
+  await sql`SELECT upsert_thought(${"far below"}, ${{ metadata: { ...S } }}::jsonb, ${at(0.10, 0.9950)}::vector)`;
 
   // Threshold 0 — what the tools send now: the relative cutoff governs. The top
   // and the row within half of it come back; the far row is trimmed.
-  const rel = await sql`SELECT content, similarity FROM search_thoughts_hybrid(${unit(0)}::vector, ${"a plain question with no identifiers"}, 0.0, 10, ${{}}::jsonb)`;
+  const rel = await sql`SELECT content, similarity FROM search_thoughts_hybrid(${unit(0)}::vector, ${"a plain question with no identifiers"}, 0.0, 10, ${S}::jsonb)`;
   const names = rel.map((r: { content: string }) => r.content);
   assert(rel.length === 2 && names.includes("top, still low") && names.includes("within half") && !names.includes("far below"),
     `threshold 0 keeps the top and the row within half of it, trims the far row (${names.join(" | ")})`);
@@ -3046,7 +3096,7 @@ console.log("\n[15] search_thoughts_hybrid admits relative to the top match on r
 
   // The absolute floor is unchanged and still available: at 0.5 nothing here
   // clears it — the whole set the shipped tool silently dropped before SMD-1300.
-  const floored = await sql`SELECT content FROM search_thoughts_hybrid(${unit(0)}::vector, ${"a plain question with no identifiers"}, 0.5, 10, ${{}}::jsonb)`;
+  const floored = await sql`SELECT content FROM search_thoughts_hybrid(${unit(0)}::vector, ${"a plain question with no identifiers"}, 0.5, 10, ${S}::jsonb)`;
   assert(floored.length === 0, `an explicit 0.5 floor still excludes every sub-floor row (${floored.length})`);
   await sql`DELETE FROM thoughts`;
 }
@@ -3291,6 +3341,153 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
   try { unlinkSync(dump); } catch { /* already gone */ }
   await sql`DELETE FROM thoughts`;
   await sql`DELETE FROM ob1_entities`;
+}
+
+console.log("\n[17] Over near-equidistant vectors the HNSW walk misses live rows an exact scan would find, and db/hnsw-graph.ts reads why from the index itself (SMD-1632)");
+{
+  // Why [7]'s found-by reads flaked, reproduced deterministically. Over the
+  // suite's orthogonal unit axes (every pair at cosine distance 1.0) pgvector's
+  // HNSW graph is not connected, so a search from the entry point misses a live
+  // row its own vector matches — the mechanism db/hnsw-graph.ts and FORK change
+  // 83 explain, and the shape [4]/[11]/[15] share, which is why their reads
+  // moved to match_thoughts' exact branch. Two things are asserted here: the
+  // OBSERVABLE (a search of a row's own axis does not return it), robust at well
+  // over 100 of 120 misses whatever the build; and that the decoder is SOUND
+  // (every row it calls unreachable is one the walk misses). The hole's size
+  // varies build to build (0 to ~860 of 1024), so it is reported, not gated on.
+  //
+  // First, deterministic teeth for the reachability logic from a synthetic
+  // graph: a search reaches a node through edges at the right level, so
+  // `reachableFromEntry` must follow every level's lists, not level 0 alone (the
+  // DB soundness sample below cannot enforce that — on the degenerate corpus a
+  // level-0-only walk is nearly indistinguishable). E reaches A only via its
+  // level-1 edge and B only via A's level-0 edge, so a level-0-only walk from E
+  // misses both. (Byte-offset coverage of the page decode is SMD-1673.)
+  {
+    const el = (tid: string, level: number, neighbors: string[][]): HnswElement =>
+      ({ tid, blkno: 1, offno: 1, level, deleted: false, version: 1, heaptids: [tid], neighborTid: tid, neighbors, level0Slots: 32 });
+    const g: HnswGraph = {
+      index: "synthetic", pages: 0,
+      meta: { magic: 0, version: 1, dimensions: EMBEDDING_DIM, m: 16, efConstruction: 64, entry: "E", entryLevel: 1, insertPage: 0 },
+      elements: new Map<string, HnswElement>([
+        ["E", el("E", 1, [[], ["A"]])], // level-0 list empty; level-1 list → A
+        ["A", el("A", 1, [["B"], []])], // level-0 list → B
+        ["B", el("B", 0, [[]])],
+      ]),
+    };
+    const reach = reachableFromEntry(g);
+    assert(reach.has("A") && reach.has("B"),
+           `reachableFromEntry follows upper-level edges: E→A (level 1)→B (level 0) both reached (${[...reach].sort().join(",")}) — a level-0-only walk would miss them`);
+  }
+
+  await sql`CREATE EXTENSION IF NOT EXISTS pageinspect`;
+
+  // Orthogonal unit vectors, one per axis, all mutually at distance 1.0 — as
+  // many as the width, the scale where a hole is all but certain. One INSERT so
+  // the section stays quick; REINDEX first so the graph is exactly this corpus,
+  // not this plus the dead elements earlier sections left unvacuumed.
+  await sql`DELETE FROM thoughts`;
+  await sql.unsafe(`REINDEX INDEX thoughts_embedding_idx`);
+  const N = EMBEDDING_DIM;
+  const unitVals = Array.from({ length: N }, (_, i) => `('axis ${i}', '${unit(i)}'::vector)`).join(",");
+  await sql.unsafe(`INSERT INTO thoughts (content, embedding) VALUES ${unitVals}`);
+  const axisOfCtid = new Map<string, number>();
+  for (const r of (await sql`SELECT content, ctid::text AS c FROM thoughts`) as { content: string; c: string }[]) axisOfCtid.set(r.c, Number(r.content.slice(5)));
+
+  // Since migration 039 the index is over `embedding::halfvec(D)`, so a walk
+  // that uses it must order by that cast (as match_thoughts does); the raw
+  // `embedding <=> query` seqscans and would find every row exactly, which is
+  // not the index walk this section is about ([5] asserts the cast is the key).
+  const idxWalk = (q: string) => `embedding::halfvec(${EMBEDDING_DIM}) <=> '${q}'::vector::halfvec(${EMBEDDING_DIM})`;
+  /** Does a bounded relaxed walk of `axis` return the row whose vector is unit(axis)? */
+  const walkFinds = async (axis: number, want: string) => {
+    const got = await sql.begin(async (tx: SQL) => {
+      await tx.unsafe(`SET LOCAL enable_seqscan = off`);
+      await tx.unsafe(`SET LOCAL hnsw.iterative_scan = relaxed_order`);
+      return (await tx.unsafe(`SELECT ctid::text AS c FROM thoughts ORDER BY ${idxWalk(unit(axis))} LIMIT 1`)) as { c: string }[];
+    });
+    return got.length > 0 && got[0].c === want;
+  };
+  const ctidOfAxis = new Map<number, string>();
+  for (const [c, a] of axisOfCtid) ctidOfAxis.set(a, c);
+  const sampleMiss = async () => { let miss = 0; const S = 120; for (let i = 0; i < S; i++) { const a = Math.floor((i * N) / S); if (!(await walkFinds(a, ctidOfAxis.get(a)!))) miss++; } return { miss, S }; };
+
+  const before = await sampleMiss();
+  const holed = await reachabilityReport(sql, "thoughts_embedding_idx", "thoughts");
+  assert(holed.entry !== null && holed.visible === N && holed.rowsWithoutElement === 0,
+         `the ${N}-row index parsed: an entry point and an element for every live row (entry ${holed.entry}, ${holed.visible} visible of ${holed.elements} elements, ${holed.rowsWithoutElement} rows without)`);
+  // The degenerate-geometry miss needs more orthogonal axes than the ef≈40 beam
+  // explores; the default width (1024) has them, a small OB1_EMBEDDING_DIM might
+  // not — below 256 the beam finds a large fraction and this observable would
+  // not bite, so it is skipped rather than flaked. CI runs the default width;
+  // the synthetic assertion above and [5b] are width-independent.
+  const wideEnough = N >= 256;
+  if (wideEnough)
+    assert(before.miss >= before.S / 2,
+           `a search of a row's own axis misses it on most axes: ${before.miss} of ${before.S} — the walk over the tied corpus [7] met (decoder reports ${holed.unreachableVisible.length}/${holed.visible} unreachable) (SMD-1632)`);
+  else
+    skip("a search of a row's own axis misses it on most axes", `OB1_EMBEDDING_DIM=${N} is below 256 — too few orthogonal axes to disconnect the graph past the ef beam`);
+
+  // The decoder is SOUND: every row it calls unreachable is one the walk misses.
+  // (Reachable is not found — the bounded beam misses more — so this checks the
+  // one direction that must hold; vacuous only in the rare fully connected build.)
+  let checked = 0, foundAnUnreachable = false;
+  for (const u of holed.unreachableVisible) {
+    if (checked >= 100) break; // a sample bounds the round trips
+    const axis = axisOfCtid.get(u.heaptids[0]);
+    if (axis === undefined) continue;
+    checked++;
+    if (await walkFinds(axis, u.heaptids[0])) { foundAnUnreachable = true; break; }
+  }
+  assert(!foundAnUnreachable,
+         `every row the decoder calls unreachable is one the walk misses (${checked} of ${holed.unreachableVisible.length} checked) — unreachable ⇒ not found`);
+
+  // REINDEX is not the remedy for this geometry: a rebuild of an all-equidistant
+  // graph misses just as much, so the observable does not improve — the ticket's
+  // assumed fix does not hold for near-degenerate data.
+  await sql.unsafe(`REINDEX INDEX thoughts_embedding_idx`);
+  const after = await sampleMiss();
+  if (wideEnough)
+    assert(after.miss >= after.S / 2,
+           `after REINDEX the walk still misses most axes (${after.miss} of ${after.S}) — a rebuild of an equidistant graph is no more reachable, so REINDEX is not the fix the ticket assumed`);
+  else
+    skip("after REINDEX the walk still misses most axes", `OB1_EMBEDDING_DIM=${N} is below 256`);
+
+  // A production-shaped corpus — random unit vectors, a range of distances — is
+  // fully reachable AND fully found: the pathology needs a corpus DOMINATED by
+  // near-equidistant vectors, which real embeddings are not.
+  await sql`DELETE FROM thoughts`;
+  await sql.unsafe(`REINDEX INDEX thoughts_embedding_idx`);
+  const { unitVector } = seededRandom(1632);
+  const R = 2000;
+  const randVecs: string[] = [];
+  for (let i = 0; i < R; i += 100) {
+    const vals = Array.from({ length: 100 }, (_, k) => { const v = `[${unitVector(EMBEDDING_DIM).join(",")}]`; randVecs.push(v); return `('rr ${i + k}', '${v}'::vector)`; }).join(",");
+    await sql.unsafe(`INSERT INTO thoughts (content, embedding) VALUES ${vals}`);
+  }
+  const ctidOfRr = new Map<number, string>();
+  for (const r of (await sql`SELECT content, ctid::text AS c FROM thoughts`) as { content: string; c: string }[]) ctidOfRr.set(Number(r.content.slice(3)), r.c);
+  const random = await reachabilityReport(sql, "thoughts_embedding_idx", "thoughts");
+  assert(random.visible === R && random.unreachableVisible.length === 0,
+         `a ${R}-row random corpus is fully reachable (${random.reachable}/${random.visible}, ${random.unreachableVisible.length} unreachable) — the hole is the degenerate geometry's, not the index's`);
+  let rMiss = 0; const RS = 120;
+  for (let i = 0; i < RS; i++) {
+    const idx = Math.floor((i * R) / RS);
+    const got = await sql.begin(async (tx: SQL) => {
+      await tx.unsafe(`SET LOCAL enable_seqscan = off`);
+      await tx.unsafe(`SET LOCAL hnsw.iterative_scan = relaxed_order`);
+      return (await tx.unsafe(`SELECT ctid::text AS c FROM thoughts ORDER BY ${idxWalk(randVecs[idx])} LIMIT 1`)) as { c: string }[];
+    });
+    if (!(got.length > 0 && got[0].c === ctidOfRr.get(idx))) rMiss++;
+  }
+  assert(rMiss <= 2, `and a search of each random row's own vector returns it (${rMiss} of ${RS} missed; a rare bounded-beam miss is allowed, the contrast with the ${before.miss} unit misses is the point) — the walk is sound where the geometry is not degenerate`);
+
+  // The reader also gives the meta page a next occurrence should dump (entry
+  // block and level) — proven callable here.
+  const g = await readHnswGraph(sql, "thoughts_embedding_idx");
+  assert(g.meta.entry !== null && reachableFromEntry(g).size > 0, "the decoder reads the meta page's entry point and walks from it");
+
+  await sql`DELETE FROM thoughts`;
 }
 
 await sql.close();

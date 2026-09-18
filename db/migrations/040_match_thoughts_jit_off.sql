@@ -1,5 +1,5 @@
 -- ============================================================================
--- 039 — match_thoughts runs with `jit = off`: a planner path an operator
+-- 040 — match_thoughts runs with `jit = off`: a planner path an operator
 --        disables no longer JIT-compiles the gate's sample on every call,
 --        and a generic plan's flat estimate no longer compiles the walk
 --        (SMD-1624)
@@ -9,7 +9,7 @@
 --   this file declares the same floor; db/migrate.ts reads the line)
 --
 -- If filtered search is slow with this file installed
---   This file adds no statement and reads nothing: it is 038's function with
+--   This file adds no statement and reads nothing: it is 039's function with
 --   one more SET clause, `jit = off`, scoped to the call. A `JIT:` block
 --   under ANY statement of the body in auto_explain (log_nested_statements;
 --   an EXPLAIN of the call shows only the Function Scan) means the clause is
@@ -18,16 +18,21 @@
 --   the ALTER FUNCTION that puts it back until `bun db/migrate.ts --reapply`
 --   does. A cost past 1e10 on the sample or the walk WITHOUT a JIT block is
 --   a planner path disabled at some level (enable_tidscan, enable_nestloop,
---   enable_hashagg with enable_sort): the plan is the same, the eight page
---   reads are the same, and since this file the cost figure is all there is
---   to it (PostgreSQL 14–17; 18 prints `Disabled: true` on the node instead
---   and its cost stays ordinary — except that on 18 `enable_tidscan = off`
---   leaves the probe no TID Range path at all and it is a sequential scan of
---   the heap per block, Failure modes below). A `Seq Scan on thoughts` under
---   the collection or the walk means
---   row-level security on the table (SMD-1625, unchanged here); a body
---   carrying TABLESAMPLE means 037 was pasted over 038 and this file (038's
---   first screen). Failure modes below has each.
+--   enable_hashagg with enable_sort) on PostgreSQL 14–17: the plan is the
+--   same, the eight page reads are the same, and since this file the cost
+--   figure is all there is to it. On 18 the node reads `Disabled: true` at
+--   an ordinary cost instead — and under `enable_tidscan = off` the probe
+--   has no TID Range path at all there and is a sequential scan of the heap
+--   per block (SMD-1703). A `Seq Scan on thoughts` under the collection or
+--   the walk means row-level security on the table (SMD-1625, unchanged
+--   here); a body carrying TABLESAMPLE means 037 was pasted over 038, 039
+--   and this file (038's first screen); a walk ordered by the raw column
+--   over the half-precision indexes means 038 was pasted over 039 and this
+--   file (preflight's `walk index` check, 039's). On Supabase, whose images
+--   are built without LLVM JIT and whose upgrades set `jit = off`, nothing
+--   here compiles today whatever the clause says; the clause is for a
+--   self-hosted or future server, and for the generic plan wherever JIT is
+--   on. Failure modes below has each.
 --
 -- Why
 --   038's sample statement has, in every piece, exactly one viable planner
@@ -51,7 +56,11 @@
 --   dropped, so the 50% column is a GIN bitmap and a sort, the fixture's
 --   cost and not the function's), the floor lowered to 0 so the sample runs,
 --   medians of nine calls after three warm ones, round trip included, an
---   empty-match filter / a filter matching half the rows:
+--   empty-match filter / a filter matching half the rows. The function
+--   measured was 038's: main took 039 (the half-precision index, which
+--   changes the walk's ORDER BY and nothing in the sample) while this file
+--   was in review, and the statement the compile is about is the same in
+--   038, 039 and this file:
 --
 --     setting (session)                 038's function     038's + `jit = off`
 --     default                            0.99 /  59 ms       1.30 /  66 ms
@@ -87,7 +96,7 @@
 --   does not touch: that is the plan mode, SMD-1464.
 --
 -- What
---   038's CREATE OR REPLACE with one clause added between 019's
+--   039's CREATE OR REPLACE with one clause added between 019's
 --   `SET enable_seqscan = off` and `AS $$`:
 --
 --     SET jit = off
@@ -97,12 +106,19 @@
 --   seeded bounds, the exact branch scores at most v_exact rows, the
 --   collection stops at v_exact + 1, the sample reads eight pages — and what
 --   prices its statements past the threshold is never the work, it is
---   disable_cost or a flat estimate. The body is 038's byte for byte
---   (db/test-upgrade.ts [17] compares prosrc), and with it 014's sentinel,
---   the two template constants, 019's two clauses and ROWS 10, 020's DROP of
---   the 4-argument form with its ACL capture and replay — this file is the
---   last definer, which preflight's remedy and the suites' restoreShipped
---   apply alone.
+--   disable_cost or a flat estimate. The body is 039's byte for byte
+--   (db/test-upgrade.ts [18] compares prosrc; db/test-schema.ts [20]
+--   re-applies 039 alone and compares too), and with it 039's half-precision
+--   cast in the walk's ORDER BY, 014's sentinel, the two template constants,
+--   019's two clauses and ROWS 10, 020's DROP of the 4-argument form with its
+--   ACL capture and replay — this file is the last definer of the FUNCTION,
+--   which preflight's remedy and the suites' restoreShipped apply alone.
+--   039's index swap is not here: it is a one-time move of two indexes, not
+--   part of the function, and 039's own header lists what a successor
+--   carries (the cast) and what it does not (the swap). preflight's `walk
+--   index` check still names 039 for an index out of step with the body;
+--   after a hand re-apply of 039 the `candidate scan` check names this file
+--   for the clause 039's CREATE resets.
 --
 -- Design — why this and not the alternatives SMD-1624 listed
 --   * Not the paths pinned. `SET enable_tidscan = on` would be harmless (no
@@ -137,7 +153,9 @@
 --     at every scale the bench runs.
 --
 -- Failure modes
---   * The clause dropped by a later redefinition. CREATE OR REPLACE resets
+--   * The clause dropped by a later redefinition — or by 039's file
+--     re-applied by hand for its index swap, whose CREATE carries 019's
+--     clauses and not this one. CREATE OR REPLACE resets
 --     proconfig, exactly as it resets 014's and 019's clauses, and the
 --     ledger cannot see it. preflight's `candidate scan` check (019's) reads
 --     `jit = off` beside `enable_seqscan = off` and ROWS 10, names this
@@ -150,9 +168,8 @@
 --     = off` is the same TID Range Scan at cost 8e10, under `enable_nestloop
 --     = off` the same Nested Loop at 1e10: disable_cost is a planner
 --     penalty, not a prohibition, and with the compile gone nothing else in
---     the call
---     changes (the table under Why). A reader of auto_explain sees the cost
---     and no JIT block.
+--     the call changes (the table under Why). A reader of auto_explain sees
+--     the cost and no JIT block.
 --   * What the clause does not fix. Under row-level security the collection
 --     and the walk's direct CTE are sequential scans of the heap (SMD-1625:
 --     jsonb_contains is not leakproof, so `@>` cannot be an index qual); the
@@ -171,15 +188,20 @@
 --     does not build the TID Range path at all — tidpath.c returns before
 --     it, where 14–17 built the path and priced it — and each probe is a
 --     sequential scan of the heap with the ctid range as a filter (cost
---     1,490 on a 3,000-row fixture; eight heap reads per filtered call at
---     scale): 13's state under Prerequisites, the cost the gate exists to
---     avoid, and no clause on the function reaches it (SMD-1703). The clause
+--     1,490 on a 3,000-row fixture; eight full scans of the heap per
+--     filtered call at scale): 13's state (038's Prerequisites), the cost
+--     the gate exists to avoid, and no clause on the function reaches it
+--     (SMD-1703). The clause
 --     stands on 18 for the generic plan's flat estimate, the compile under
 --     row-level security and 13's, none of which 18 changed.
---   * A server built without JIT (`pg_jit_available()` false: PGlite, some
---     managed images). The clause is accepted and does nothing; db/test-live.ts
---     [5e] runs its timing tooth only where JIT is available and asserts the
---     clause on the catalog everywhere.
+--   * A server built without JIT, or with its own `jit` off. Supabase — the
+--     fork's stated target since 038's Prerequisites — builds its 15 and 17
+--     images without LLVM JIT (`pg_jit_available()` is false) and its
+--     upgrade scripts set `jit = off`; PGlite has no JIT either. There the
+--     clause is accepted and does nothing today, and preflight's warning for
+--     a missing clause says so in a parenthesis; db/test-live.ts [5e] runs
+--     its forced-on plan and its timing only where the server has JIT and
+--     its own `jit` is on, and asserts the clause on the catalog everywhere.
 --   * An operator's `enable_nestloop = off`, for the rest of the call. This
 --     file removes the sample's compile under it (the empty filter at a
 --     million rows: 66.8 ms a call under 038's function, 0.6 under this
@@ -203,8 +225,9 @@
 --
 --   At a million rows (db/bench-hnsw.ts's corpus: 64 dimensions, 49,999
 --   heap pages, kept under OB1_PG_KEEP so every arm read ONE corpus with
---   one set of statistics), the function with this clause, with it RESET —
---   038's function — and with it again, twenty seeded queries per tier on a
+--   one set of statistics; 038's function, before 039 landed), the function
+--   with this clause, with it RESET — 038's function — and with it again,
+--   twenty seeded queries per tier on a
 --   fresh connection each, medians of calls 6–20 / 1–5: identical rows on
 --   every tier in every arm, the times within the run's spread — 50% 13 /
 --   17 / 14 ms, 10% 66 / 64 / 53, 1% 55 / 43 / 44, 5,000 rows 34 / 26 / 25,
@@ -228,29 +251,34 @@
 --   the claim is read.
 --
 -- What a successor must carry
---   038's list, unchanged — `SET hnsw.iterative_scan = relaxed_order`, `SET
+--   039's list, unchanged — `SET hnsw.iterative_scan = relaxed_order`, `SET
 --   enable_seqscan = off`, `ROWS 10`, the `ob1:filter-inside-scan` sentinel,
 --   the pgvector floor line, 020's DROP with the ACL capture and replay, the
 --   two template constants, the estimate as ONE statement over locals
---   declared at entry — and `SET jit = off`, which db/test-schema.ts [20]
---   pins and preflight reads. A successor that removes it should say in its
+--   declared at entry, the walk's `embedding::halfvec(D) <=>
+--   query_embedding::halfvec(D)` on both tables (the expression 039's
+--   indexes are built over; test-schema [38] holds the pair) — and `SET jit
+--   = off`, which db/test-schema.ts [20] pins and preflight reads. A
+--   successor that removes it should say in its
 --   header which statement it measured gaining from JIT, and expect the
 --   table under Why to come back.
 --
 -- Prerequisites
---   Migration 038 (the function this file redefines; 038 carries 037's gate
---   and 020's signature). PostgreSQL 14 or later as 038 requires; the `jit`
+--   Migration 039 (the function this file redefines: 038's gate and sample,
+--   the half-precision walk, 020's signature). PostgreSQL 14 or later as 038
+--   requires; the `jit`
 --   GUC exists on every supported build, with or without JIT compiled in.
 --   The disabled-path trigger under Why is 14–17's (Failure modes has 18).
 --   Applied by `bun db/migrate.ts`.
 --
 -- Expected outcome
---   `match_thoughts` returns what 038's returned for every call — the body
---   is 038's — and no statement of its body is JIT-compiled whatever the
+--   `match_thoughts` returns what 039's returned for every call — the body
+--   is 039's — and no statement of its body is JIT-compiled whatever the
 --   session, role or database sets: under each of the three disabled paths
 --   the call costs what it costs by default (the table under Why, right
 --   column); at a million rows every tier returns the rows it returned
---   under 038 in the same time (Cost); at ten million, where FORK.md change
+--   without the clause in the same time (Cost); at ten million, where
+--   FORK.md change
 --   28 measured the generic plans paying 30–110 ms of JIT, db/bench-hnsw.ts
 --   section C's generic column should read what its "jit off" column read
 --   then (not re-run for this file; the third column is now the compile
@@ -327,10 +355,11 @@ SET enable_seqscan = off
 -- passes a few hundred tuples, the exact branch scores at most v_exact rows,
 -- the sample reads eight pages — and what prices its statements past
 -- jit_above_cost is never the work: a planner path an operator disabled adds
--- disable_cost (1e10) and the sample was compiled on every call, ~50 ms; a
--- generic plan's flat estimate at ten million rows compiled the route, exact
--- and walk statements for 30–110 ms (FORK.md change 28). The header has the
--- table, and why this is not a plan mode and not the enable_* paths pinned.
+-- disable_cost (1e10) on PostgreSQL 14–17 and the sample was compiled on
+-- every call, ~50 ms; a generic plan's flat estimate at ten million rows
+-- compiled the route, exact and walk statements for 30–110 ms (FORK.md
+-- change 28). The header has the table, and why this is not a plan mode and
+-- not the enable_* paths pinned.
 SET jit = off
 AS $$
 DECLARE
@@ -450,18 +479,26 @@ BEGIN
   IF filter IS NULL OR filter = '{}'::jsonb THEN
     -- Unfiltered. A NULL filter is unfiltered: 007 evaluated
     -- `NULL = '{}' OR metadata @> NULL`, which excluded every row.
+    -- 039: the walk orders by the half-precision cast, on BOTH sides of the
+    -- operator — token for token the expression thoughts_embedding_idx and
+    -- thought_chunks_embedding_idx are built over since this file, or the
+    -- planner has no index path and the scan below is a sequential one under
+    -- enable_seqscan = off (a penalty, not a prohibition) — and scores the
+    -- candidates on the full vector, so the similarity, the threshold and the
+    -- merge with the chunk side mean what they meant. The broad-filter walk
+    -- below does the same; the exact branch reads no index and casts nothing.
     RETURN QUERY
     WITH direct AS (
       SELECT t.id AS tid, 1 - (t.embedding <=> query_embedding) AS sim
       FROM thoughts t
       WHERE t.embedding IS NOT NULL
-      ORDER BY t.embedding <=> query_embedding
+      ORDER BY t.embedding::halfvec({{EMBEDDING_DIM}}) <=> query_embedding::halfvec({{EMBEDDING_DIM}})
       LIMIT v_fetch
     ),
     chunked AS (
       SELECT c.thought_id AS tid, 1 - (c.embedding <=> query_embedding) AS sim
       FROM thought_chunks c
-      ORDER BY c.embedding <=> query_embedding
+      ORDER BY c.embedding::halfvec({{EMBEDDING_DIM}}) <=> query_embedding::halfvec({{EMBEDDING_DIM}})
       LIMIT v_fetch
     ),
     best AS (
@@ -602,7 +639,7 @@ BEGIN
         FROM thoughts t
         WHERE t.embedding IS NOT NULL
           AND t.metadata @> filter
-        ORDER BY t.embedding <=> query_embedding
+        ORDER BY t.embedding::halfvec({{EMBEDDING_DIM}}) <=> query_embedding::halfvec({{EMBEDDING_DIM}})
         LIMIT v_fetch
       ),
       chunked AS (
@@ -610,7 +647,7 @@ BEGIN
         FROM thought_chunks c
         JOIN thoughts p ON p.id = c.thought_id
         WHERE p.metadata @> filter
-        ORDER BY c.embedding <=> query_embedding
+        ORDER BY c.embedding::halfvec({{EMBEDDING_DIM}}) <=> query_embedding::halfvec({{EMBEDDING_DIM}})
         LIMIT v_fetch
       ),
       best AS (

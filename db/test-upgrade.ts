@@ -21,7 +21,7 @@
 import { SQL } from "bun";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { TID_PROBE, applyMigrations, createAssert, dropSchema, ledgerStrangers, migrationFiles, migratorEnv, plantLegacyRow, requireDatabaseUrl, resetSchema, runMigrator, runScript, updatedAtTriggerState } from "./test-support.ts";
+import { TID_PROBE, applyMigrations, createAssert, dropSchema, ledgerStrangers, loadChunkRows, migrationFiles, migratorEnv, plantLegacyRow, requireDatabaseUrl, resetSchema, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
 import { ACCEPTED_CAVEAT_PREFIX, ACCEPTED_CLAIM_SQL, LOCK_TIMEOUT_S, UPDATE_THOUGHT_SIGNATURE, reembedKey } from "./config.mjs";
 
 const URL_ = requireDatabaseUrl("test-upgrade.ts");
@@ -435,20 +435,23 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // 032 (the provenance envelope, SMD-1323), 033 (the capture's fingerprint
   // lock, SMD-1043), 034 (the opt-in query log, SMD-1295), 035 (a
   // re-capture writes no provenance, SMD-1453), 036 (delete_thought's lock
-  // order, SMD-1462), 037 (the routing count's gate, SMD-1463), 038 (the
-  // gate's sample by TID range, SMD-1526) and 039 (jit off on the function,
-  // SMD-1624) stay recorded and are never tried.
-  // 030 is the right one to make pending
+  // order, SMD-1462), 037 (the routing count's gate, SMD-1463) and 038 (the
+  // gate's sample by TID range, SMD-1526), 039 (the half-precision walk,
+  // SMD-1501) and 040 (jit off on the function, SMD-1624) stay recorded and
+  // are never tried. 030 is the right one to make
+  // pending
   // because its prerequisites — 015 and 021's embedding_model column — are
   // exactly what a through-020 schema lacks, so it fails by name rather than
   // with a bare error. The window guard trips whenever a migration lands past
   // 030, to force this note to be re-read (034 needs only 001/010; 035 needs
   // 016, 025, 032 and 033; 036 redefines delete_thought and needs only 009's
   // body and 029's supersession lock; 037 redefines 020's match_thoughts and
-  // 038 037's and 039 038's — all recorded by the baseline with their
-  // prerequisites present, so none becomes the plain-run failure point above).
+  // 038 037's; 039 redefines it again and swaps 001's and 007's two indexes,
+  // which every schema has; 040 redefines it once more with one SET clause —
+  // all recorded by the baseline with their prerequisites present, so none
+  // becomes the plain-run failure point above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 10, `030 is among the last ten migrations (${last})`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 11, `030 is among the last eleven migrations (${last})`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -1226,10 +1229,153 @@ console.log("\n[16] Migration 038 onto a populated 037 — the gate's sample is 
   await sql.close();
 }
 
-console.log("\n[17] Migration 039 onto a populated 038 — match_thoughts gains jit = off and nothing else: the body byte for byte 038's, no signature, row or privilege moves, and a hand-re-applied 014's 4-argument form is dropped as 020 dropped it (SMD-1624)");
+console.log("\n[17] Migration 039 onto a populated 038 — both HNSW indexes swapped for half precision under their names with rows in place; no signature, row or privilege moves; the walk agrees with the exact answer before and after; a re-apply rebuilds nothing, 001 re-applied leaves it, a staging index built beforehand is adopted and an invalid one is not (SMD-1501)");
 {
   await dropSchema(URL_);
   await applyMigrations(URL_, { ...OPTS, only: (f) => f < "039" });
+  const sql = new SQL({ url: URL_, max: 1 });
+  const { unitVector } = seededRandom(1501);
+  const lit = () => `[${unitVector(OPTS.dim).join(",")}]`;
+  const SIX = "match_thoughts(vector, float, int, jsonb, float, float)";
+  const bodyOf = async (sig: string) => (await sql`SELECT prosrc FROM pg_proc WHERE oid = ${sig}::regprocedure`)[0].prosrc as string;
+  const aclOf = async (sig: string) => String((await sql`SELECT proacl::text AS a FROM pg_proc WHERE oid = ${sig}::regprocedure`)[0].a ?? "");
+  const def = async (name: string) => String((await sql`SELECT pg_get_indexdef(to_regclass(${name})) AS d`)[0].d ?? "");
+  const oid = async (name: string) => (await sql`SELECT to_regclass(${name})::oid::text AS o`)[0].o as string | null;
+  const validOf = async (name: string) => (await sql`SELECT indisvalid AS valid FROM pg_index WHERE indexrelid = to_regclass(${name})`)[0]?.valid as boolean | undefined;
+  const HALF = new RegExp(`USING hnsw \\(\\(\\(embedding\\)::halfvec\\(${OPTS.dim}\\)\\) halfvec_cosine_ops\\)$`);
+
+  // A corpus at 038: three hundred random rows (content `row N`, the shape
+  // loadChunkRows derives its rows from), a chunk row on every fifth carrying
+  // its parent's vector (so the exact answer is the thoughts table's), and a
+  // hardened 6-argument form.
+  for (let i = 0; i < 300; i++) {
+    await sql`SELECT upsert_thought(${`row ${i}`}, ${{ metadata: { kind: i % 3 === 0 ? "a" : "b" } }}::jsonb, ${lit()}::vector)`;
+  }
+  await loadChunkRows(sql, 5);
+  await sql.unsafe(`VACUUM ANALYZE thoughts`);
+  await sql.unsafe(`DO $r$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob1_upgrade_searcher38') THEN CREATE ROLE ob1_upgrade_searcher38 NOLOGIN; END IF; END $r$`);
+  await sql.unsafe(`REVOKE ALL ON FUNCTION ${SIX} FROM PUBLIC`);
+  await sql.unsafe(`GRANT EXECUTE ON FUNCTION ${SIX} TO ob1_upgrade_searcher38`);
+  const acl = await aclOf(SIX);
+  const before = await shape(sql);
+  const snapshot = async () => JSON.stringify(await sql`SELECT id, content_fingerprint, metadata, embedding::text AS e, updated_at::text AS u FROM thoughts ORDER BY id`);
+  const rows = await snapshot();
+  assert(/USING hnsw \(embedding vector_cosine_ops\)$/.test(await def("thoughts_embedding_idx")) && /USING hnsw \(embedding vector_cosine_ops\)$/.test(await def("thought_chunks_embedding_idx")),
+         "at 038 both indexes are 001's and 007's, over the vector column");
+  const queries = Array.from({ length: 5 }, lit);
+  // Exact by construction, not by the planner's mood: with the vector index
+  // present the raw-column ORDER BY has an index path, so it is kept out.
+  const exact = (q: string) => sql.begin(async (tx: SQL) => {
+    await tx.unsafe(`SET LOCAL enable_indexscan = off`);
+    await tx.unsafe(`SET LOCAL enable_bitmapscan = off`);
+    return (await tx.unsafe(`SELECT id FROM thoughts ORDER BY embedding <=> $1::vector, id LIMIT 10`, [q])).map((r: { id: string }) => r.id) as string[];
+  });
+  const wants: string[][] = [];
+  for (const q of queries) wants.push(await exact(q));
+  const overlap = async () => {
+    let o = 0;
+    for (const [i, q] of queries.entries()) o += (await sql.unsafe(`SELECT id FROM match_thoughts($1::vector, -1.0, 10, '{}'::jsonb)`, [q])).filter((r: { id: string }) => wants[i].includes(r.id)).length;
+    return o / (queries.length * 10);
+  };
+  const overlapBefore = await overlap();
+  assert(overlapBefore >= 0.9, `at 038 the unfiltered walk agrees with the exact top-10 on 300 rows (overlap ${overlapBefore.toFixed(2)})`);
+
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("039") });
+
+  const after = await shape(sql);
+  assert(before.columns === after.columns && before.functions === after.functions, "039 adds no column and changes no signature — one match_thoughts, as before");
+  assert((await snapshot()) === rows, "no row moved — the stored vectors are what they were (reembed.ts has nothing to do)");
+  assert((await aclOf(SIX)) === acl && !/(^\{|,)=X\//.test(acl), `CREATE OR REPLACE under the same signature keeps the hardened ACL (${acl})`);
+  assert(HALF.test(await def("thoughts_embedding_idx")) && HALF.test(await def("thought_chunks_embedding_idx")),
+         `both indexes are HNSW over (embedding)::halfvec(${OPTS.dim}) with halfvec_cosine_ops, under their names`);
+  assert((await oid("thoughts_embedding_halfvec_idx")) === null && (await oid("thought_chunks_embedding_halfvec_idx")) === null, "…and no staging index remains");
+  const body = await bodyOf(SIX);
+  const CAST = `embedding::halfvec(${OPTS.dim}) <=> query_embedding::halfvec(${OPTS.dim})`;
+  assert(body.split(CAST).length - 1 === 4 && TID_PROBE.test(body) && /ob1:filter-inside-scan/.test(body),
+         "…the body orders the four walk ORDER BYs by the cast on both sides and carries 038's gate and 014's sentinel");
+  const [{ cfg, prorows }] = await sql`SELECT array_to_string(proconfig, ',') AS cfg, prorows FROM pg_proc WHERE oid = ${SIX}::regprocedure`;
+  assert(/hnsw\.iterative_scan=relaxed_order/.test(String(cfg)) && /enable_seqscan=off/.test(String(cfg)) && Number(prorows) === 10, `…with 014's and 019's clauses carried (${cfg}; ROWS ${prorows})`);
+  const plan = await sql.begin(async (tx: SQL) => {
+    await tx.unsafe(`SET LOCAL enable_seqscan = off`);
+    return (await tx.unsafe(`EXPLAIN SELECT id FROM thoughts ORDER BY ${CAST.replace("query_embedding", `'${queries[0]}'::vector`)} LIMIT 10`)).map((r: Record<string, string>) => Object.values(r)[0]).join(" ");
+  });
+  assert(/Index Scan using thoughts_embedding_idx/.test(plan), "…and the body's ORDER BY reaches the swapped index by its name");
+  const overlapAfter = await overlap();
+  assert(overlapAfter >= 0.9, `after 039 the unfiltered walk agrees with the exact top-10 on the same rows (overlap ${overlapAfter.toFixed(2)}, was ${overlapBefore.toFixed(2)})`);
+
+  const oids = async () => JSON.stringify([await oid("thoughts_embedding_idx"), await oid("thought_chunks_embedding_idx")]);
+  const kept = await oids();
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("039") });
+  assert((await oids()) === kept, "re-applying 039 rebuilds nothing: both indexes keep their OIDs");
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("001") });
+  assert((await oids()) === kept && HALF.test(await def("thoughts_embedding_idx")), "001 re-applied by hand leaves it: CREATE INDEX IF NOT EXISTS finds the name");
+  // The CONCURRENTLY path: a valid staging index built beforehand is adopted
+  // (renamed, the same relation); an INVALID one — an interrupted concurrent
+  // build — is dropped and a fresh one built.
+  const stage = async () => {
+    await sql.unsafe(`DROP INDEX thoughts_embedding_idx`);
+    await sql.unsafe(`CREATE INDEX thoughts_embedding_idx ON thoughts USING hnsw (embedding vector_cosine_ops)`);
+    await sql.unsafe(`CREATE INDEX thoughts_embedding_halfvec_idx ON thoughts USING hnsw ((embedding::halfvec(${OPTS.dim})) halfvec_cosine_ops)`);
+    return oid("thoughts_embedding_halfvec_idx");
+  };
+  const staged = await stage();
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("039") });
+  assert((await oid("thoughts_embedding_idx")) === staged && (await oid("thoughts_embedding_halfvec_idx")) === null, "a valid staging index built by hand is adopted under the shipped name — the same relation");
+  const invalid = await stage();
+  await sql.unsafe(`UPDATE pg_index SET indisvalid = false WHERE indexrelid = to_regclass('thoughts_embedding_halfvec_idx')`);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("039") });
+  assert(HALF.test(await def("thoughts_embedding_idx")) && (await oid("thoughts_embedding_idx")) !== invalid && (await validOf("thoughts_embedding_idx")) === true, "an INVALID staging index is dropped and a fresh one built and renamed");
+  assert((await overlap()) >= 0.9, "…and the walk still agrees with the exact answer over the rebuilt index");
+  // An INVALID halfvec index under the SHIPPED name — a by-hand CREATE INDEX
+  // CONCURRENTLY under that name, interrupted: the planner ignores it and
+  // every walk seq-scans — is not "already done"; it is rebuilt (review pass 1).
+  const broken = await oid("thoughts_embedding_idx");
+  await sql.unsafe(`UPDATE pg_index SET indisvalid = false WHERE indexrelid = to_regclass('thoughts_embedding_idx')`);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("039") });
+  assert((await oid("thoughts_embedding_idx")) !== broken && (await validOf("thoughts_embedding_idx")) === true && HALF.test(await def("thoughts_embedding_idx")),
+         "an INVALID halfvec index under the shipped name is rebuilt, not kept");
+  // A valid index of another shape under the staging name is refused by
+  // name, never renamed into place; dropped by hand, the re-run proceeds.
+  await sql.unsafe(`DROP INDEX thoughts_embedding_idx`);
+  await sql.unsafe(`CREATE INDEX thoughts_embedding_idx ON thoughts USING hnsw (embedding vector_cosine_ops)`);
+  await sql.unsafe(`CREATE INDEX thoughts_embedding_halfvec_idx ON thoughts USING hnsw (embedding vector_cosine_ops)`);
+  let refused = "";
+  try {
+    await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("039") });
+  } catch (e) {
+    refused = (e as Error).message;
+  }
+  assert(/migration 039: thoughts_embedding_halfvec_idx exists but is not an HNSW index over \(embedding::halfvec\(8\)\)/.test(refused) && !HALF.test(await def("thoughts_embedding_idx")),
+         `a staging index of another shape is refused by name and nothing is renamed (${refused.split("\n")[0] || "it was adopted"})`);
+  await sql.unsafe(`DROP INDEX thoughts_embedding_halfvec_idx`);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("039") });
+  assert(HALF.test(await def("thoughts_embedding_idx")) && (await oid("thoughts_embedding_halfvec_idx")) === null, "…dropped by hand, the re-run builds and swaps as on a fresh table");
+  // A valid index under the SHIPPED name that names halfvec but is not this
+  // shape — an IVFFlat over the cast — is refused, not taken for done.
+  await sql.unsafe(`DROP INDEX thoughts_embedding_idx`);
+  await sql.unsafe(`CREATE INDEX thoughts_embedding_idx ON thoughts USING ivfflat ((embedding::halfvec(${OPTS.dim})) halfvec_cosine_ops) WITH (lists = 1)`);
+  refused = "";
+  try {
+    await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("039") });
+  } catch (e) {
+    refused = (e as Error).message;
+  }
+  assert(/migration 039: thoughts_embedding_idx exists but is not an HNSW index over \(embedding::halfvec\(8\)\)/.test(refused) && /USING ivfflat/.test(await def("thoughts_embedding_idx")),
+         `an IVFFlat index over the cast under the shipped name is refused by name (${refused.split("\n")[0] || "it was kept"})`);
+  await sql.unsafe(`DROP INDEX thoughts_embedding_idx`);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("039") });
+  assert(HALF.test(await def("thoughts_embedding_idx")), "…dropped by hand, the re-run builds the HNSW index under the name");
+  await sql.unsafe(`REVOKE ALL ON FUNCTION ${SIX} FROM ob1_upgrade_searcher38`);
+  await sql.unsafe(`GRANT EXECUTE ON FUNCTION ${SIX} TO PUBLIC`);
+  await sql.unsafe(`DROP OWNED BY ob1_upgrade_searcher38`);
+  await sql.unsafe(`DROP ROLE ob1_upgrade_searcher38`);
+  await sql.close();
+}
+
+console.log("\n[18] Migration 040 onto a populated 039 — match_thoughts gains jit = off and nothing else: the body byte for byte 039's, no signature, row or privilege moves, and a hand-re-applied 014's 4-argument form is dropped as 020 dropped it (SMD-1624)");
+{
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < "040" });
   const sql = new SQL({ url: URL_, max: 1 });
   const vec = (axis: number) => `[${Array.from({ length: OPTS.dim }, (_, i) => (i === axis ? 1 : 0)).join(",")}]`;
   const SIX = "match_thoughts(vector, float, int, jsonb, float, float)";
@@ -1239,42 +1385,42 @@ console.log("\n[17] Migration 039 onto a populated 038 — match_thoughts gains 
   const forms = async () => Number((await sql`SELECT count(*)::int AS c FROM pg_proc WHERE proname = 'match_thoughts'`)[0].c);
   const answer = async (kind: string) => JSON.stringify((await sql`SELECT id FROM match_thoughts(${vec(0)}::vector, -1.0, 10, ${{ kind }}::jsonb)`).map((r: { id: string }) => r.id).sort());
 
-  // A corpus at 038 — thirty rows of two kinds, both filters under the exact
+  // A corpus at 039 — thirty rows of two kinds, both filters under the exact
   // threshold and the table far under the gate's floor — and a hardened
   // 6-argument form.
   for (let i = 0; i < 30; i++) {
-    await sql`SELECT upsert_thought(${`upgrade 039: note ${i}`}, ${{ metadata: { kind: i % 10 === 0 ? "rare" : "common" } }}::jsonb, ${vec(i % OPTS.dim)}::vector)`;
+    await sql`SELECT upsert_thought(${`upgrade 040: note ${i}`}, ${{ metadata: { kind: i % 10 === 0 ? "rare" : "common" } }}::jsonb, ${vec(i % OPTS.dim)}::vector)`;
   }
-  await sql.unsafe(`DO $r$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob1_upgrade_searcher39') THEN CREATE ROLE ob1_upgrade_searcher39 NOLOGIN; END IF; END $r$`);
+  await sql.unsafe(`DO $r$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob1_upgrade_searcher40') THEN CREATE ROLE ob1_upgrade_searcher40 NOLOGIN; END IF; END $r$`);
   await sql.unsafe(`REVOKE ALL ON FUNCTION ${SIX} FROM PUBLIC`);
-  await sql.unsafe(`GRANT EXECUTE ON FUNCTION ${SIX} TO ob1_upgrade_searcher39`);
+  await sql.unsafe(`GRANT EXECUTE ON FUNCTION ${SIX} TO ob1_upgrade_searcher40`);
   const acl = await aclOf(SIX);
   const before = await shape(sql);
   const snapshot = async () => JSON.stringify(await sql`SELECT id, content_fingerprint, metadata, updated_at::text AS u FROM thoughts ORDER BY id`);
   const rows = await snapshot();
   const rareBefore = await answer("rare");
   const commonBefore = await answer("common");
-  const body038 = await bodyOf(SIX);
-  const settings038 = await settingsOf(SIX);
-  assert(TID_PROBE.test(body038) && /enable_seqscan=off/.test(settings038) && !/jit=off/.test(settings038) && (await forms()) === 1, `at 038 match_thoughts samples by TID range, carries 014's and 019's clauses and no jit clause (${settings038}), and has one form`);
+  const body039 = await bodyOf(SIX);
+  const settings039 = await settingsOf(SIX);
+  assert(TID_PROBE.test(body039) && /enable_seqscan=off/.test(settings039) && !/jit=off/.test(settings039) && (await forms()) === 1, `at 039 match_thoughts samples by TID range, carries 014's and 019's clauses and no jit clause (${settings039}), and has one form`);
 
-  await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("039") });
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("040") });
 
   const after = await shape(sql);
-  assert(before.columns === after.columns && before.functions === after.functions, "039 adds no column and changes no signature — one match_thoughts, as before");
+  assert(before.columns === after.columns && before.functions === after.functions, "040 adds no column and changes no signature — one match_thoughts, as before");
   assert((await snapshot()) === rows, "no row moved — nothing here is a backfill");
   assert((await aclOf(SIX)) === acl && !/(^\{|,)=X\//.test(acl), `CREATE OR REPLACE under the same signature keeps the hardened ACL: PUBLIC still revoked, the role still granted (${acl})`);
-  assert((await bodyOf(SIX)) === body038, "…the body is 038's byte for byte — 039 adds a SET clause and changes no statement");
+  assert((await bodyOf(SIX)) === body039, "…the body is 039's byte for byte — 040 adds a SET clause and changes no statement");
   const [{ cfg, prorows }] = await sql`SELECT array_to_string(proconfig, ',') AS cfg, prorows FROM pg_proc WHERE oid = ${SIX}::regprocedure`;
   assert(/hnsw\.iterative_scan=relaxed_order/.test(String(cfg)) && /enable_seqscan=off/.test(String(cfg)) && /(^|,)jit=off(,|$)/.test(String(cfg)) && Number(prorows) === 10, `…with 014's and 019's clauses carried and jit = off beside them (${cfg}; ROWS ${prorows})`);
-  assert((await answer("rare")) === rareBefore && (await answer("common")) === commonBefore, "…and both filters — 3 and 27 matching rows — return exactly the rows they returned at 038");
+  assert((await answer("rare")) === rareBefore && (await answer("common")) === commonBefore, "…and both filters — 3 and 27 matching rows — return exactly the rows they returned at 039");
 
   // The state a hand re-apply of 014 leaves — the 4-argument form back beside
   // the 6-argument one, every 4-argument call ambiguous — and what the last
   // definer applied ALONE does about it, since that is what preflight's
-  // remedy and the suites' restoreShipped apply: 039 carries 020's DROP.
+  // remedy and the suites' restoreShipped apply: 040 carries 020's DROP.
   await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("014") });
-  assert((await forms()) === 2, "014 re-applied by hand puts the 4-argument form back beside 039's");
+  assert((await forms()) === 2, "014 re-applied by hand puts the 4-argument form back beside 040's");
   let ambiguous = "";
   try {
     await sql`SELECT count(*) FROM match_thoughts(${vec(0)}::vector, 0.0, 10, '{}'::jsonb)`;
@@ -1282,14 +1428,14 @@ console.log("\n[17] Migration 039 onto a populated 038 — match_thoughts gains 
     ambiguous = (e as Error).message;
   }
   assert(/not unique/.test(ambiguous), `…and a 4-argument call is ambiguous (${ambiguous.split("\n")[0] || "it succeeded"})`);
-  await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("039") });
-  assert((await forms()) === 1 && (await aclOf(SIX)) === acl && (await bodyOf(SIX)) === body038 && /(^|,)jit=off(,|$)/.test(await settingsOf(SIX)),
-         "re-applying 039 alone drops the 4-argument form again and leaves the 6-argument form's ACL, body and clauses as they were — the last definer restores the shipped state by itself");
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("040") });
+  assert((await forms()) === 1 && (await aclOf(SIX)) === acl && (await bodyOf(SIX)) === body039 && /(^|,)jit=off(,|$)/.test(await settingsOf(SIX)),
+         "re-applying 040 alone drops the 4-argument form again and leaves the 6-argument form's ACL, body and clauses as they were — the last definer restores the shipped state by itself");
   assert((await answer("rare")) === rareBefore, "…and the filtered call answers as before");
-  await sql.unsafe(`REVOKE ALL ON FUNCTION ${SIX} FROM ob1_upgrade_searcher39`);
+  await sql.unsafe(`REVOKE ALL ON FUNCTION ${SIX} FROM ob1_upgrade_searcher40`);
   await sql.unsafe(`GRANT EXECUTE ON FUNCTION ${SIX} TO PUBLIC`);
-  await sql.unsafe(`DROP OWNED BY ob1_upgrade_searcher39`);
-  await sql.unsafe(`DROP ROLE ob1_upgrade_searcher39`);
+  await sql.unsafe(`DROP OWNED BY ob1_upgrade_searcher40`);
+  await sql.unsafe(`DROP ROLE ob1_upgrade_searcher40`);
   await sql.close();
 }
 

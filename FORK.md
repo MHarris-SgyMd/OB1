@@ -68,14 +68,14 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Eighty-one numbered changes on top of the pin. Seven fix defects found in an
+Eighty-six numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
-data layer (Phase 2). Five (changes 31, 53, 55, 59, and 79) ship no runtime change at
+data layer (Phase 2). Six (changes 31, 53, 55, 59, 79, and 82) ship no runtime change at
 all: each is a measurement that decided against building something.
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–81 are the numbered `###` sections** further down, which is
+sections. Changes **18–86 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -201,7 +201,11 @@ compat/deno-on-bun.ts            # change 74 (new file — Deno's two globals on
 extensions/test-tools.ts         # change 77 (new file — every tool of the five extension servers on the shim, driven against Postgres with their schemas)
 db/test-bench-reuse.ts           # change 76 (new file — the kept bench corpus's oracle cache held to the computation, on one index)
 db/bench-oracle.ts               # change 76 (new file — the cache's pure part: what of a marker's entry a run may trust; test-schema [37])
+db/migrations/039_*.sql          # change 81 (new file — the two HNSW indexes over embedding::halfvec under their names; match_thoughts' walk branches order by the cast)
+evals/eval-quant.ts              # change 81 (new file — vector, halfvec and binary-with-rerank measured on real vectors at the shipped width; test-schema [38], test-upgrade [16])
 <4 vendored MCP servers, 1 sample> # change 78 (a McpServer built per request — per session in the cost recipe's after sample — in place of one shared and connect()ed to a fresh transport each time)
+<17 pin sites, 3 lockfiles>      # change 83 (@hono/mcp 0.1.1 → 0.1.5: the transport lets go of each POST it has answered; the after sample's sweep closes the transports it drops)
+<19 pin sites, 3 lockfiles, 15 servers, 20 SDK importers> # change 84 (SDK 1.30.0, @hono/mcp 0.3.2, hono 4.13.8, zod 4.6.5 together; the Accept patches removed; an @ts-types pragma on every SDK import so Deno types it)
 docs/01-getting-started.md       # fix 6
 recipes/content-fingerprint-dedup/README.md  # fix 6
 recipes/email-history-import/README.md       # fix 6
@@ -11299,7 +11303,9 @@ transport try so a non-JSON body reports the status the server sent rather than
 `Accept: text/event-stream` alone and gets 200 — the Accept patch now supplies
 whichever of the two tokens the transport requires is missing, where it used to
 test only the SSE token and let that POST through to a 406 after paying the
-resolve and the build. Drilled by restoring the pre-change shape — the handler on
+resolve and the build (change 84 removed the patch: at `@hono/mcp` 0.3.x the
+transport takes either token, or none, and [7] sends all three forms
+unpatched). Drilled by restoring the pre-change shape — the handler on
 `app.all` and the `notFound` removed — 34 of 151 assertions fail: the
 fetch rows holding a valid GET fail as `TimeoutError`; the doubled-slash row as
 a 200 (the stream's headers flush at once; it is the body that never ends, and
@@ -12221,7 +12227,8 @@ through the servers' Accept patch as a Claude Desktop connector's would — whic
 found two servers with no such patch, `extensions/meal-planning/shared-server.ts`
 and the cost recipe's "before" sample, answering 406 to any POST whose Accept
 lacks `text/event-stream` where the other twelve patch it in (pre-existing;
-SMD-1616; the probe keeps the header for those two until it lands); the
+SMD-1616; the probe kept the header for those two until change 84 moved the
+transport to a version that wants no patch and removed all fifteen); the
 other two requests start 5 ms later, complete. The stagger is load-bearing, and the
 fourth review pass is why: three requests fired in one tick caught main's
 shape (the `connect()` overwrite is independent of timing) but never open
@@ -12308,7 +12315,8 @@ Hono `Context` per tool call until the 30-minute prune drops the session
 (measured: 200 completed POSTs on one transport, 0 of 200 `Request` objects
 finalized after GC; with a transport per request, 200 of 200). The four
 servers moved to a transport per request are clear of it; the sample's README
-says the bound; SMD-1607 holds the library fix. Nothing here changes a response, a
+says the bound; SMD-1607 held the library fix, and change 83 moves the pin to
+0.1.5, which releases each POST as it is answered. Nothing here changes a response, a
 header or a tool surface; the answer a client receives is the same, now for
 the request it sent.
 
@@ -12483,7 +12491,7 @@ a real Postgres before the file was written.**
   (measured) but also changes what the walk pays under a generic plan, which
   is SMD-1464's question; pinning the two `enable_*` GUCs on the function
   overrides an operator's setting for the walk as well. The decision was
-  SMD-1624 (done: migration 039, change 81 — `SET jit = off` on the
+  SMD-1624 (done: migration 040, change 86 — `SET jit = off` on the
   function); 038's header states the premise. Row-level security on `thoughts`
   is a fourth trigger, and the one operators actually set: `jsonb_contains`
   is not leakproof, so under a policy `metadata @> filter` cannot be an index
@@ -12694,7 +12702,7 @@ the line for the next preflight change. The threshold, the plan mode of the
 *walk* statement (which flips onto a generic plan under a recency weight at
 the ceiling and changes answers; change 70's "Not done here") and the seeded
 bounds are SMD-1464; `ef_search` on real vectors SMD-1465. The `hit_pages ≥
-4` knob is stated, not turned. The disabled-path JIT premise was SMD-1624 (done: migration 039, change 81); row-level security, which has cost `@>` its index since 014 and is a fourth trigger of the same JIT, is SMD-1625. A hundred million rows was not run, for the
+4` knob is stated, not turned. The disabled-path JIT premise was SMD-1624 (done: migration 040, change 86); row-level security, which has cost `@>` its index since 014 and is a fourth trigger of the same JIT, is SMD-1625. A hundred million rows was not run, for the
 reasons change 28 gives; what this change establishes is that the sample's
 cost no longer depends on it. The bench's before arm (`OB1_BENCH_UPTO=037`)
 does not combine with a kept corpus — change 72's rule: a corpus built under
@@ -12753,7 +12761,7 @@ x/20 − y/20 wrong for 52 exact deltas). What changed the documents: the
 "no JIT at any size" premise (a disabled planner path adds `disable_cost`
 and JIT-compiles the sample on every call, 41 ms against 0.46 — SMD-1624, the
 decision between `SET jit = off` and pinning the paths, since either touches
-the walk; done: migration 039, change 81); row-level security as a fourth trigger, pre-existing since 014
+the walk; done: migration 040, change 86); row-level security as a fourth trigger, pre-existing since 014
 (`jsonb_contains` is not leakproof, 150 ms against 7 — SMD-1625); "every
 page in `shared_buffers`" corrected to the OS page cache (the larger two
 heaps never fit the image's 128 MB; change 70's sentence carried the same
@@ -12805,7 +12813,802 @@ the default labels `after (014 on)` and explains 038's as a TID range scan.
 **Upstream status:** not applicable — 014's routing statement and 037's gate
 are this fork's.
 
-### 81. `match_thoughts` runs with `jit = off` — migration 039 adds 017's clause to 038's function, so a planner path an operator disables no longer JIT-compiles the gate's sample on every call, and a generic plan's flat estimate no longer compiles the walk (SMD-1624)
+
+### 81. Quantised vector indexes at the shipped width, measured on real vectors — halfvec adopted for `match_thoughts` (migration 039), binary declined (SMD-1501)
+
+At the shipped width — 1,024 dimensions, `qwen3-embedding:4b` truncated — a
+ten-million-row brain's two HNSW indexes were argued to be "roughly four
+times" the 5.4 GB + 1.1 GB change 28 measured at 64 dimensions. pgvector 0.7+
+indexes `halfvec` (half the bytes) and binary-quantised vectors (a
+thirty-second), and the published results at equal recall are build times cut
+by an order of magnitude and footprints by up to twelve times, with a rerank of
+the candidates on the full vectors giving recall back. Nothing in the fork had
+measured either, and change 28's random 64-dimensional bench cannot answer a
+recall question. The ticket's shape was a measurement rather than a switch:
+`match_thoughts` has two candidate CTEs merged by MAX per thought, a rerank
+would have to sit between the CTEs and the merge on both sides, the exact
+branch reads no index, and `evals/eval-filtered.ts`'s unfiltered control
+exists to notice the default path's rows moving.
+
+**The harness (`evals/eval-quant.ts`).** The real vectors this fork holds at
+1,024 dimensions are the two LongMemEval corpora `eval-longmemeval.ts` loaded:
+S under the shipped model (19,825 whole vectors and 56,267 windows — the two
+tables `match_thoughts` scans, 76,092 vectors) and M under
+`qwen3-embedding:0.6b` at the same width (51,660 and 145,705: 197,365). The
+ticket asked for 100,000 rows and the largest the corpus allows; these bracket
+it, and no third real corpus at this width exists on the machine (embedding
+100,000 more sessions at 4b is days). The harness copies a corpus, rows only,
+into a throwaway database under the tree's schema (kept under `OB1_PG_KEEP`,
+re-migrated on reuse), embeds the 470 questions with the corpus's model, takes
+an exact pass with no vector index in existence — exact in the function's own
+shape, the true nearest `v_fetch` per side merged by MAX, which is what a
+perfect index would return; not the ten highest MAX scores over every row,
+which the two-CTE shape does not compute, and the report counts on how many
+questions the two differ: on none of the 470, on either corpus — and then
+builds each arm's two indexes alone — timed under one `maintenance_work_mem`
+and worker count,
+sized, dropped before the next — and runs the function's unfiltered statement
+with only the candidate ORDER BY changed, under the function's own SET clauses,
+at `hnsw.ef_search` 40 / 100 / 400. The arm the deployed function walks goes
+last, under the shipped index names, and a CONTROL holds the function itself
+to that arm's mirrored statement question for question (0 of 470 differed,
+both corpora, both before and after 039). LongMemEval's own per-question
+filter matches a few hundred thoughts and routes every question to the exact
+branch, so the harness as run never touched the HNSW index; the measurement
+is the unfiltered default path, `match_count` 10, where the index is used.
+
+Three arms: `vector` (001/007's `hnsw (embedding vector_cosine_ops)`);
+`halfvec` (`hnsw ((embedding::halfvec(1024)) halfvec_cosine_ops)`, the query
+cast to match, the candidates' similarity recomputed on the full vector — the
+heap row is read anyway); `binary` (`hnsw ((binary_quantize(embedding)::bit(1024))
+bit_hamming_ops)`, each CTE taking `v_fetch × R` candidates by Hamming distance
+and reranking them by full-vector cosine to `v_fetch`, R = 1, 2, 4, 10 — 400
+candidates at the default count is the ticket's `v_fetch × k`). Scored:
+recall@10 against the exact ten; how often one of the question's gold sessions
+is among the ten with the whole corpus as haystack (the exact pass is the
+ceiling: 46.2% on S, 34.5% on M — a session whose text twins another's shares
+its row); whether the ten are the identical list the vector arm returns at the
+same `ef_search`; the round trip's median and p95 after one untimed pass.
+Each corpus was built and measured twice (`quant-*.log` in the session
+scratchpad; the tables are the second pass, the first is quoted where it
+differs).
+
+**What the pages hold.** At 1,024 dimensions a float4 vector is 4,096 bytes
+plus its neighbour lists, and pgvector packs an index page by whole elements:
+two do not fit an 8 KB page, so every vector costs the index a page — 8.2 KB
+per row on both tables, both corpora (155 MB for 19,825 thoughts; 404 MB for
+51,660). Three halfvec elements fit a page (2.75 KB per row); a binary element
+is 128 bytes and a page holds twenty (0.4 KB). So the shipped index at ten
+million rows is near 80 GB before the chunks', not "four times 5.4 GB", and
+halfvec is not half of it but a third.
+
+**Results, `ef_search` 40 (the default, which the function leaves alone).**
+
+| arm | candidates per CTE | S recall@10 | M recall@10 | S gold-hit | M gold-hit | same list as vector, S / M | S ms | M ms | index bytes | build s, S / M |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| vector (001/007) | 40 | 0.984 | 0.971 | 46.2% | 33.8% | 100% / 100% | 4.13 | 4.22 | 577 MB / 1,482 MB | 13.9 / 28.7 |
+| **halfvec (039)** | 40 | 0.974 | 0.970 | 45.5% | 33.6% | 93.4% / 95.3% | 3.12 | 4.08 | 193 MB / 494 MB (33%) | 7.9 / 18.5 |
+| binary | 40 | 0.955 | 0.939 | 46.0% | 33.4% | 69.6% / 68.3% | 1.80 | 3.08 | 31 MB / 79 MB (5%) | 2.5 / 7.3 |
+| binary | 80 → 40 | 0.980 | 0.973 | 46.2% | 34.3% | 83.0% / 79.1% | 3.07 | 4.09 | " | " |
+| binary | 160 → 40 | 0.993 | 0.991 | 46.0% | 34.5% | 86.6% / 82.8% | 5.63 | 7.92 | " | " |
+| binary | 400 → 40 | 0.998 | 0.997 | 46.2% | 34.5% | 88.9% / 83.6% | 13.25 | 17.44 | " | " |
+
+The `ef_search` sweep for the two contenders (S / M):
+
+| arm | ef_search 40 | 100 | 400 | ms at 40 / 100 / 400 |
+| --- | --- | --- | --- | --- |
+| vector | 0.984 / 0.971 | 0.996 / 0.989 | 0.999 / 0.998 | 4.1 / 6.4 / 18.1 — 4.2 / 6.5 / 17.4 |
+| halfvec | 0.974 / 0.970 | 0.993 / 0.989 | 0.999 / 0.999 | 3.1 / 4.1 / 9.1 — 4.1 / 6.1 / 14.8 |
+
+The first pass had put halfvec at 0.981 / 0.971 and vector at 0.983 / 0.973
+(S / M): an HNSW graph built in parallel differs build to build, and a
+hundredth of recall is that spread; latencies moved by about a quarter between
+passes on a machine shared with other sessions' containers. A third pass
+after 039 landed, with `match_thoughts` itself now the halfvec arm's control
+(0 of 470 differ on either corpus): halfvec 0.980 / 0.971 against vector
+0.984 / 0.973, the function's own median 3.1 / 3.8 ms. Every gold-hit
+figure is within a point of the exact pass's ceiling under every arm — on a
+haystack of the whole corpus the LongMemEval questions are not what
+distinguishes these indexes; recall against the exact answer is.
+
+**The decision.** The bar, set before the runs: an arm is worth a migration
+only if, at the default `ef_search` on both corpora, its recall@10 is within
+0.02 of the vector index's, its median latency no more than 1.2× the vector
+index's, and its bytes at most 60% of the vector index's. **halfvec clears
+it** on every axis: recall within the build-to-build spread at every
+`ef_search`, faster or equal (the walk reads a third of the pages), a third
+of the bytes, builds in 57–64% of the time. **Binary is declined, and not on
+the numbers alone.** Without a rerank it loses three hundredths of recall
+(0.939 against 0.971 on M — under the bar, and 68% identical lists). Reranked
+at 80 → 40 it meets every number the bar asks: recall within four thousandths
+on both corpora, latency at the vector index's, 5% of the bytes. Reranked
+further (160 → 40) it passes the vector index's recall at 1.4–1.9× its
+latency, because the rerank reads every candidate's full vector out of TOAST
+and the two-CTE shape pays it twice, once a side. What decides against it is
+what the ticket's own framing named: a rerank is a change to the function's
+body — a subquery and a second candidate depth to size inside each of the
+four walk CTEs, a second knob beside `ef_search` — and it returns the
+identical ten rows on only 79–83% of questions, where halfvec clears the bar
+with a cast and 93–95%. Binary at 80 → 40 is the arm for a brain whose
+halfvec index no longer fits in memory, and a decision to make on that
+brain's numbers with this harness; for the default path today halfvec
+dominates vector.
+
+**Migration 039.** Two things, in one file (its header has the rest). The
+two HNSW indexes are rebuilt over `(embedding::halfvec(D))` with
+`halfvec_cosine_ops` **under their names** — built under a staging name,
+001/007's index dropped, the staging index renamed — so preflight,
+`test-live.ts` [5]/[5c], `bench-hnsw.ts` and `bench-plan.ts`, which match
+plans on `Index Scan using thoughts_embedding_idx`, read as they did. A
+re-run finds the shipped name already over halfvec, of this shape and valid,
+and does nothing (a valid index of another shape that names halfvec — an
+IVFFlat over the cast — is refused by name, with the staging build as the
+remedy, rather than taken for done); a staging index built beforehand by hand — `CREATE INDEX CONCURRENTLY
+thoughts_embedding_halfvec_idx …`, the path for a brain where a plain CREATE
+INDEX would hold writers too long (about 100 µs a row under
+`maintenance_work_mem` 2GB with four workers, the graph in memory: a couple
+of minutes at a million rows, some twenty at ten million) — is adopted when
+valid and of this shape, refused by name when of another, and dropped first
+when INVALID; an INVALID index under the shipped name is rebuilt rather than
+kept. And `match_thoughts` is 038's body
+with the two walk branches' four ORDER BYs cast on both sides,
+`embedding::halfvec(D) <=> query_embedding::halfvec(D)`, the index's
+expression token for token; the similarity stays `1 - (embedding <=>
+query_embedding)` on the full vector, so the threshold, the merge and the
+exact branch — which reads no index and casts nothing — are on one scale. The
+stored vectors do not change: `reembed.ts`, the servers and every writer are
+untouched, and the expression index keeps itself on every write.
+`search_thoughts_hybrid` calls `match_thoughts` by name and inherits.
+
+**Applying it.** 039 is the first bulk graph build most brains meet — 001 and
+007 indexed an empty table that then grew row by row — and neither the file
+nor `migrate.ts` sets `maintenance_work_mem`, so the compose stack's migrate
+service and a `bun db/migrate.ts` from a shell build under the server's
+64 MB and two workers: pgvector keeps the graph in memory while it fits
+(some 25,000 vectors at this width, 2.5 KB each) and finishes the rest in its
+on-disk phase, many times slower, with a NOTICE no driver here surfaces
+(review pass 2). The rule, in the header, `db/README.md` and
+`deploy/README.md`: 2.5 KB × the vectors across both tables — 250 MB per
+100,000, 2.5 GB per million — set on the migrating role before the run,
+`/dev/shm` to hold it under parallel workers; `migrate.ts` now prints the
+vector count and the setting in force just before 039 runs. The file lifts
+`statement_timeout` for its own transaction (a platform's per-role timeout
+would cancel a build of minutes and roll the file back after the work), and
+its DROP and RENAME take ACCESS EXCLUSIVE, so a held reader past the
+migrator's `lock_timeout` aborts the file — the by-hand staging indexes
+survive that rollback, the plain build does not. And preflight gains a check,
+`walk index`, for the one failure state 039 creates and nothing else sees: a
+body that orders by the cast over an index that is not over it, or the
+reverse, or an INVALID index under the name — every walk a sequential scan
+under `enable_seqscan = off`, exact at 019's cost, with `proconfig` intact and
+the ledger recording 039. It reads the body's ORDER BY and each index's
+definition and validity from the catalog and names the re-apply as the
+remedy.
+
+**What moved, and what it costs.** The default path's rows: at `ef_search`
+40 the identical ten on 93% of S's questions and 95% of M's, recall within a
+hundredth, gold sessions within a point. `evals/eval-filtered.ts`'s
+unfiltered control, re-run on the 576-issue Linear corpus with 039 in the
+after arm: 599 of 601 queries return the identical rows before and after, and
+the mean overlap rounds to 100.0% — two lists differ by a row each, the
+index's approximation and the intended change. The one thing that gets slower is a statement nobody
+in the runtime sends: `ORDER BY embedding <=> q` on the raw column, from
+psql or a recipe's own SQL, had the vector index and now has a sequential
+scan — exact, 10–100 ms per hundred thousand rows at this width — because the
+cast is the index's key (`test-live.ts` [5] holds both plans). An earlier
+definer re-applied by hand (038, 020) puts a raw-column body over the halfvec
+index and gets that scan on every walk; preflight's remedies now name 039 as
+`match_thoughts`' last definer.
+
+One thing did move, and the first draft of this section misread it.
+`test-live.ts` [5b] calls the function under a 99% filter on 2,000 random
+unit vectors at 1,024 dimensions, and its ten-query overlap with the exact
+top-10 fell from at least 85 of 100 under the vector index to 79–83 under
+halfvec, three runs running. Measured per query through the function over
+100 queries on that fixture: under the vector index every call returned all
+ten exact ids; under halfvec the first five calls of the session lost two to
+six ids each and the ninety-five after them lost none, on every build. That
+is not precision, it is plpgsql's plan cache: EXPLAIN of the function's own
+walk statement shows the vector index priced out of the plan on this fixture
+— both the custom and the generic plan read the GIN bitmap, which is exact —
+while the halfvec index, a third of the pages, wins the custom plans the
+first five calls get (an Index Scan, 2.6 ms, and the walk's recall on random
+vectors, about 7 of 10 at `ef_search` 40 under either index) and loses to
+the bitmap again once the generic plan is adopted (9.7 ms, exact). A cheaper
+index moved a plan that sat on the edge; the walk itself is what it was.
+[5b] now sums fifty queries against a 90% floor and says so; the 039 header
+carries it as a failure mode; `bench-hnsw.ts`'s section A, which walks by
+construction, is re-measured below.
+
+**What the suites found on the way.** `test-schema.ts` [21] — 020's blend,
+"identical at weight 0" — compared the shipped function with 019's installed
+under another name, over a fixture of 200 rows each on its own axis: every
+row nearly equidistant from every other, a graph the HNSW walk reached 34 of
+200 rows of under *either* index. The section passed for a year because both
+functions walked the same graph; under 039 the comparison function had no
+index, scanned exactly, and the two disagreed. The fixture now spreads each
+row's remainder over 32 shared axes (the walk reaches all 200, asserted), and
+the comparison function takes 039's cast so the two walk the same index. New:
+[38] holds the swap's every case (re-run, 001 re-applied, a hand rebuild, a
+staging index adopted) and pairs the body's cast with the plan — an Index
+Scan under the body's ORDER BY, none under the raw column's; [4] reads the
+halfvec expression; [8e] and [20] pin 039 as the last definer, and [20]
+compares the CTEs to 014's with the cast taken out. `test-upgrade.ts` [17]
+applies 039 onto a populated 038: no row, signature or privilege moves, the
+walk agrees with the exact answer before and after, a re-apply keeps the
+index OIDs, and an INVALID staging index is rebuilt (made by flipping
+`pg_index.indisvalid`, which PGlite refuses and a server allows).
+`test-live.ts` [5d] applies the last definer before it drops the index — 039's
+swap would otherwise build one over its 25,000 rows. And the first CI run of
+this branch failed ten assertions of `test-schema.ts` [17b] — the hybrid
+search's three-row fixture — with `match_thoughts` returning the near match
+and the distant note but not the exact match at cosine 1.0, on a run that
+passed locally every time. The likeliest cause: PGlite never vacuums, so by
+[17b] the HNSW index holds the thousands of rows every earlier section
+deleted, and whether a walk through those dead elements reaches every live
+row turns on the level each insert drew at random — inferred from the
+symptom rather than shown, since a local probe with 2,500 dead elements over
+four seeds returned all three rows each time. The two three-row sections
+([17b], [26]) now VACUUM after their DELETE, so the vector arm is measured
+over the rows it is given whatever the cause was. Any HNSW index between
+deletes and a vacuum has the same exposure, and had it before this change.
+922 / 501 / 210 assertions.
+
+**The bench.** `bench-hnsw.ts`'s after arm applies the whole tree, so from
+this change its section A recall and every walk tier are the halfvec index's
+at 64 dimensions. A corpus kept under an earlier tree (change 72) does NOT
+take 039 on its next reuse: the marker's physical fingerprint covers the two
+HNSW indexes by relfilenode, and 039's swap is a new relation under the old
+name, which the fingerprint would read as `rewritten` — by design, since the
+marker's section L sizes and build times would describe a graph that no
+longer exists. The bench reads the migrator's dry run before the live run and
+refuses a reuse on which 039 is pending there, before anything is built
+(the alternative was the rebuild inside `migrate.ts` under the server's
+default `maintenance_work_mem`, hours at ten million rows, and then the
+refusal; `test-bench-reuse.ts` [7] holds it). Remove the kept volume and
+build the corpus again under this tree (`db/README.md` names the command;
+the ten-million-row volume `hnsw10m` on the development machine is such a
+corpus). A fresh run at the two large scales then prints the halfvec
+index's sizes and build times in section L where change 28's table holds the
+vector index's. Run at the two published scales under 039, section A's
+after arm reads 8.3 of 10 in the exact top-10 at `ef_search` 40 and 10.0 at
+400 for 10,000 rows, 4.8 and 9.6 for 100,000 — change 28's table has
+8.2 / 10.0 and 5.0 / 9.5 under
+the vector index, the difference inside a pass's spread — at 1.31 and 1.91 ms
+for the default path (1.82 and 3.25 there, on a different day's machine).
+Change 28's tables stand; section L still records the before arm's vector
+index sizes, and at 64 dimensions a float4 vector is 256 bytes, so the
+page-packing gain above is smaller there and unmeasured.
+
+**Follow-ups.** halfvec's HNSW ceiling is 4,000 dimensions where vector's is
+2,000, and `qwen3-embedding:4b`'s native 2,560 would fit — but 001 still
+builds the vector index first at the column's width, so `config.mjs`'s
+ceiling stays 2,000; lifting it means 001's index becoming conditional, a
+change of its own. SMD-1465 (size `ef_search` on real vectors) has its
+unquantised baseline in the sweep table above.
+
+**Review.** Three high-effort passes, each a fresh reviewer over the saved
+diff with its own lens, each triaged and verified by the suites. Pass 1
+(correctness and teeth) found the decision prose contradicting its own
+table, the [5b] regression misread as fp16 when it was the plan cache, an
+exact reference that was not exact by construction, the swap block trusting
+names, the DROP's lock, and a harness that could be pointed at its own
+source. Pass 2 (the operator and the upgrade path) found the kept bench
+corpus's dead end, the build under the server's default memory, the failure
+state preflight could not see, "exact" over-claimed, and the shipped-name
+check weaker than the staging one. Pass 3 opened on pass 2's fixes — the
+bench should refuse before the build rather than document it, the new
+preflight scenarios left two branches undriven, the migrator's count came
+from the wrong statistic, the shipped-name remedy dropped the live index,
+the same-source guard compared hostnames literally — the stop signal, and
+each was fixed. Declined: a `cteLimit` parameter on the harness's statement
+builder in place of the string split that makes the true-MAX statement — the
+pass itself said nothing breaks today, and the split is one line beside its
+reason.
+
+Upstream status: **not applicable** — upstream's `match_thoughts` is the
+guide's single-table function over a Supabase index. **Unfiled.** Reproduce:
+`cd evals && OB1_EVAL_QUANT_SOURCE=<a LongMemEval database> OB1_EVAL_LME=<its
+file> OB1_EVAL_EMBED=<its model>@1024 OB1_PG_KEEP=quant OB1_PG_SHM_SIZE=3g
+../db/with-postgres.sh bun eval-quant.ts --plans`; `bun db/test-schema.ts`
+[38]; `./with-postgres.sh bun test-upgrade.ts` [16].
+
+### 82. LanceDB, the embedded store, measured too — the one part of the two-store cost it removes is the network hop, and the hop was never the cost (SMD-1662)
+
+Change 79 (SMD-1037) bracketed the second-store question with a separate server
+(Qdrant) and an in-engine index (DiskANN), and left one shape untested that the
+ticket itself named: an *embedded* store, run in-process against local files with
+no second server and no network round trip — though still a second store to keep
+consistent with Postgres. LanceDB is that store. It is wired as a fourth store
+into the same harness (`evals/store-backends.ts`, a `LanceEngine` behind the same
+`ExternalEngine` interface as Qdrant), scored against the same exact-cosine
+oracle over the same points, so the measurement isolates which part of the
+two-store cost is the network hop and which is architectural. Like changes 31,
+53, 55, 59 and 79 it ships no runtime change; the numbers are in evals/README.md,
+under "Does the store matter?".
+
+**Filtered recall holds — because LanceDB prefilters, which is the migration-014
+shape, not a store advantage.** LanceDB has no unquantized HNSW; its unquantized
+index is IVF_FLAT (the fair recall row) and its graph is HNSW_SQ (scalar-
+quantized). Both apply the filter *before* the vector search, so on the real
+corpus they hold recall at the selective tiers where a *bare* pgvector HNSW
+collapses (portal 3.5%: bare HNSW 10%, LanceDB IVF_FLAT in the high 80s at
+default — build-variable, exact once probed — and HNSW_SQ 99–100%). That is
+exactly what Qdrant did in change 79, and
+exactly what `match_thoughts` already does in-engine via migration 014's in-scan
+filter. LanceDB *matches* the in-engine ladder; it does not beat it.
+
+**The network hop, isolated — and it is a fraction of a millisecond.** The clean
+measure is the bare per-query vector round trip at default effort: Qdrant's whole
+call — a round trip to its localhost server plus an HNSW search — ran at 0.77 ms
+median, LanceDB's in-process IVF_FLAT call at 0.57 ms. The ~0.2 ms difference
+(0.1–0.2 ms across runs) is an upper bound on the network hop: it also folds in
+whatever separates an HNSW search from an IVF_FLAT one, so the loopback trip
+itself is smaller. Either way it is sub-millisecond, growing only with real
+network distance — the whole of what "embedded" buys. (The two-store hybrid arm runs its vector and
+keyword legs in parallel, so its means measure the round-trip *shape* — two trips
+versus one statement — not the hop, which is why the hop is read from the bare
+search latency instead.) What "embedded" does **not** remove is the rest of the
+two-store cost — every read is still an ANN search plus a Postgres resolve of the
+ids it returns, and two stores must still be kept consistent (SMD-1038's
+consistency section). Those are the costs change 79's verdict rested on, and they
+are unchanged.
+
+**At scale, the leanest external store is still a second store.** LanceDB is
+embedded and on-disk (memory-mapped Lance files), so at a million 64-dim rows it
+loaded in 5 s and built its index in 2 s to a 541 MB dataset, against Qdrant's
+28 s load, 92 s index and 994 MB — the leanest, fastest-built external measured.
+At ten million — where change 79 recorded Qdrant's *in-RAM* index OOM-crashing
+the 14 GB VM — LanceDB built its IVF_FLAT in 28 s to a 5.6 GB dataset where
+Qdrant's on-disk index needed 26 minutes and 7.4 GB; being on-disk from the
+start, it never needed the on-disk workaround at all. But its end-to-end read
+(~7.7 ms at 10M, within noise of Qdrant's on-disk 7.3 ms) still carries the
+Postgres id→row resolve, so it does not gap toward a latency win over the single
+store any more than Qdrant did; it removes the hop that was already cheap and
+keeps the resolve that was the point.
+
+**Verdict — change 79's holds, now for a reason it named.** The one part of the
+two-store cost LanceDB removes is the network hop; the hop is a fraction of a
+millisecond (~0.1–0.2 ms) on loopback, not the cost the verdict rested on. What remains is what it rested on:
+a second store's id→row resolve and the consistency tax of two stores. LanceDB is
+the best-behaved external store measured — prefilter recall, the leanest
+footprint, no server — and a best-behaved second store is still a second store
+that does not beat what migration 014 gives Postgres in-engine. Not built; the
+`thoughts.embedding` column stays the source of truth. (LanceDB is Apache-2.0 and
+the fork is FSL-1.1-MIT — SMD-1038's guardrail — so it is a dependency of an
+eval, not the product.)
+
+**What this does not answer.** This measured a second store as a *subordinate ANN
+index* — Postgres the source of truth, every read resolving ids back to it — and
+on *retrieval quality* it found parity, with filter strategy (in-engine via
+migration 014) the only real variable. It did **not** measure the two shapes
+where a second store would actually earn its place, and the resolve/consistency
+costs the verdict leans on are partly artifacts of that chosen topology: a
+**read-model** shape where the store holds the payload and serves the read with no
+Postgres resolve at all (SMD-1696), and the **scale/operational failure envelope**
+— the corpus size and width at which single-store pgvector stops fitting or
+building, plus the re-embed maintenance window and read/write contention it
+imposes (SMD-1697). The 10M arm above already hints at the latter: pgvector could
+not build there while LanceDB built in 28 s. So "not built" is scoped to
+retrieval quality on a corpus the single store handles; the read-model topology
+and the scale case are open.
+
+**Upstream status:** not applicable — the store comparison is this fork's eval.
+
+### 83. The `@hono/mcp` pin moves from 0.1.1 to 0.1.5 — the transport lets go of each POST it has answered, so a transport kept for a session (the cost recipe's after sample) no longer holds one Request and one Context per tool call until the session is swept (SMD-1607)
+
+**The defect.** Change 78's third review pass found it and its "Not done here"
+records it: in `@hono/mcp` 0.1.1 `handlePostRequest` records each request's
+`{ ctx, stream }` in the transport's private `#streamMapping`, and the only
+per-request delete is inside `stream.onAbort`. When a response completes
+normally `send()` closes the stream and deletes the two maps keyed by request
+id, not this one; hono 4.9.2's `streamSSE` then calls `stream.close()`, and
+`StreamingApi.close()` does not run abort subscribers — only `abort()` does.
+So a transport that outlives the request keeps the `Request`, the Hono
+`Context` and the closed stream of every POST it ever answered, until
+`transport.close()` clears the map. The four servers change 78 moved to a
+transport per request drop the transport with the request and are clear of
+it. The cost recipe's after sample keeps one transport per session, on
+purpose — that is the sample's point — and grew by one request per tool call
+for up to the thirty minutes its sweep allows a session.
+
+**The change.** The library fixed this a year ago: 0.1.2 (honojs/middleware
+PR #1342, 2025-08-26, "SSE keepalive timers cleaned up on close") gives every
+`#streamMapping` entry a `cleanup()` that deletes it, and both `send()` on the
+last response and `close()` call `stream.abort()` where they called `close()`,
+which runs the subscribers and so the cleanup; the SSE callback awaits that
+abort and hono's `streamSSE` closes the body after it. 0.1.3 and 0.1.4 are
+version chores (a jsr/npm mismatch); 0.1.5 (2025-10-30) `unref()`s the
+keepalive interval of the standalone GET stream, which the fork's servers
+have not opened since change 75. The peer range, `@modelcontextprotocol/sdk
+^1.12.0` and `hono >=4.0.0`, admits the pin's 1.24.3 and 4.9.2. 0.2.0 and
+later do not: 0.2.5 wants the SDK at ^1.25.1, 0.3.2 at ^1.29.0 and is built
+against hono 4.11.5 — a move of the SDK pin with it, not this ticket's (0.3.0
+also relaxes the Accept check to either token, SMD-1616's mechanism; change
+84 made that move). So the pin moves to 0.1.5 at every site that names it —
+`extensions/package.json`, `server/package.json`,
+`server-portable/package.json`, the thirteen `deno.json` (the core server,
+six extensions, four integrations, two recipes) and the template
+`extensions/_template/AGENT_SPEC.md` hands a new extension — and the three
+`bun.lock` files, in one commit, as `test-auth.ts`'s pin guard requires:
+seventeen sites, three lockfiles. What 0.1.5 leaves as it was: the body is
+still parsed after the server has been connected (change 78's window — its
+staggered probe still means what it did), a POST is still 406 unless Accept
+names both tokens (SMD-1616 stands), and a `tools/list` and a `tools/call`
+answer are the same bytes at both versions — status, headers and body.
+What it changes beside the map: an entry stores `{ header: ctx.header }`
+rather than the Context, and would call that unbound in JSON-response mode
+with a session id — neither of which any server here uses.
+
+**The sample.** `pruneExpiredSessions()` closes the transport of each session
+it drops: `close()` aborts whatever stream is still open, clears the maps and,
+through `onclose`, tells the SDK the server has no transport — a dropped
+session is ended rather than left to the collector; the call carries a
+`.catch` so that a rejection — nothing in `close()` throws today — cannot
+become an unhandled one, which under Deno ends the isolate. The README's
+paragraph on the session-long transport says the release is 0.1.2's and what
+0.1.1 did.
+
+**The measurement.** A probe from `extensions/` — one `McpServer`, one
+transport, 200 completed `tools/list` POSTs, a forced GC, then how many of the
+200 `Request` objects are gone — read through `WeakRef`s. The ticket's
+numbers were read through a `FinalizationRegistry`, and a rearranged probe
+read 0 of 200 in every arrangement, including a transport per request, because
+the registry's callbacks stopped arriving after the first run; `deref()` after
+`Bun.gc(true)` is read on our schedule, not the runtime's. At 0.1.1: the
+shared transport releases 0 of 200; `close()` then releases 199; a transport
+per request releases 198–199. At 0.1.5: the shared transport releases
+199–200 of 200 with no `close()`; three rounds of each at each version. 200
+POSTs take 4–16 ms either way. One or two can linger, reachable from the
+frames that answered them under a conservative stack scan — the review's
+standalone copy of the same loop read 98 of 100 twice in thirty rounds where
+the suite's read 100 in ninety — so the slack is a property of the frame
+shape, not of the transport, and no assertion should rest on its exact size.
+
+**The test.** `extensions/test-auth.ts` gains a section after the pin guard:
+one server, one transport, 100 sequential `tools/list`, each asserted
+answered with its own id, then a forced GC and the count of `Request` objects
+collected, asserted at 90 or more of 100 — 0.1.1 releases none, and the
+distance between none and most is the mechanism; the exact slack is not (the
+review pass moved the bar from 99). It is a test of
+the pinned library, which nothing runnable in the tree exercised across a
+session; the after sample, which does, cannot be run here (change 78) and is
+held by a text rule that its sweep closes what it drops. The docblock names
+the claim.
+
+**Verified.** `bun test-auth.ts` 775/775 (772 on main: two for the transport,
+one text rule). `server/`: `test-stateless.mjs` 47/47, the two other suites
+PASS. `server-portable/`: `test-server.ts` 151/151, `test-auth.ts` 67/67,
+`tsc --noEmit` clean. `deno check` on `recipes/ob-graph` fetched 0.1.5 and
+passed. `check-fork-consistency.mjs` PASS. Drills: 0.1.1 put back in
+`extensions/package.json` fails 12 — the eleven `deno.json` the guard compares
+and the transport's `0/100 Request objects collected`; the sample without its
+`close()` fails its one rule.
+
+**Review, first pass** (one cold reviewer beside the author's read; the pass
+covered change 83 with this one, and its findings there are recorded there).
+covered change 84 with this one, and its findings there are recorded there).
+Two findings here, both fixed. The release assertion's bar of 99 rested on
+the slack being exactly one; the reviewer's standalone copy of the loop read
+98 twice, so the bar is 90 and the paragraphs above say why. The sample's
+`close()` was `void`ed; it carries a `.catch` now. Checked and found right:
+the stream lifecycle at 0.1.5 (`send()` → `abort()` → `reader.cancel()`,
+the frame already pulled because the transform's readable has no buffer),
+that per-request transports hold no timer on the POST path, and that
+deleting from the sessions Map inside `for…of` is safe.
+
+**Tidied while the files were open.** The release section's comment in
+`test-auth.ts` points at this section instead of restating it, twelve lines
+to six; the test paragraph above loses a parenthetical. No behaviour change.
+
+**Not done here.** SMD-1616 (the Accept patches, and whether 0.3.x's
+either-token check is worth the SDK and hono moves it needs — change 84
+made the moves and removed the patches). The after
+sample is still untested by anything that runs it. No upstream issue was
+filed against `@hono/mcp`: the fix shipped before this fork found the defect.
+
+Upstream status: at the pin, `server/deno.json` and the twelve vendored
+`deno.json` pin 0.1.1 — and upstream's `server/package.json` ranges
+`^0.1.5`, so upstream's own Node suites ran a transport its Edge Function did
+not deploy (the drift the fork pinned that file down for, and the pin guard
+holds). The fork's seventeen sites read 0.1.5. A rebase over an upstream bump
+of the same lines conflicts on one line per file — take the higher.
+**Unfiled** by us.
+
+### 84. The MCP stack moves together — SDK 1.24.3 → 1.30.0, `@hono/mcp` 0.1.5 → 0.3.2, hono 4.9.2 → 4.13.8, zod 4.1.13 → 4.6.5: a second `connect()` on one server now throws, the transport takes whatever Accept a client sends and the fifteen Accept patches are gone, and every SDK import carries the `@ts-types` pragma Deno needs to type it (SMD-1643, SMD-1616)
+
+**Why now.** Change 83 found that the defect it fixed had been fixed in the
+library a year earlier and the fork's pins had not moved. A survey of every
+pin against npm (2026-09-17) put the MCP stack eight to thirteen months
+behind, and the four constrain each other — `@hono/mcp` 0.3.x wants the SDK at
+^1.29, the SDK at 1.30 depends on hono ^4.11.4, both take zod ^3.25 or ^4 — so
+they move as one. The SDK's v2 package family (2026-07-28, a new wire
+revision) is not this: two months old, clients unsettled; the 1.x line it is.
+
+**What the move buys.** Three things the fork had wanted. SDK **1.26.0**
+(2026-02-04) addresses GHSA-345p-7cg4-v4c7, "sharing server/transport
+instances can leak cross-client response data" — change 78's defect, with a
+name: `Protocol.connect()` now throws `Already connected to a transport. Call
+close() before connecting to a new transport, or use a separate Protocol
+instance per connection.` where 1.24.3 overwrote the transport silently. The
+shape change 78 removed by hand is refused at the runtime, on the first
+overlap, loudly; `test-auth.ts` asserts the throw. `@hono/mcp` **0.3.0**
+relaxes the POST Accept check: a missing header reads as `*/*`, and either
+token — or `*/*` — is enough, where 0.1.x demanded both and answered 406 to
+everything else (measured at 0.1.5: no Accept, `application/json` alone,
+`text/event-stream` alone and `*/*` all 406; at 0.3.2 all 200). Every Accept
+patch in the tree existed for that check — the re-wrap of the request into a
+new `Request` with both tokens that upstream added for Claude Desktop
+connectors (their #33), which the core server carried, the portable server
+carried with change 75's either-missing predicate, twelve vendored servers
+carried, and the cost recipe's after sample carried. **Fifteen files, all
+removed**, twelve to twenty-one lines each. SMD-1616, the two servers that
+never had one, closes with them: there is nothing left to be missing.
+`test-auth.ts`'s overlapping probe now sends its first request with no Accept
+header at all fourteen servers (the `acceptPatch` flag and its two rows are
+gone), and asserts no server carries the patch; `test-server.ts` [7] sends
+SSE-only, JSON-only and no Accept and gets 200 for each. SDK 1.30.0 also
+fixed the SSE keep-alive timer lifecycle and widened `@hono/node-server` past
+GHSA-frvp-7c67-39w9; 1.28.0 rejects a plain JSON Schema object passed as
+`inputSchema` — nothing here passes one, or the suites would have said.
+
+**The Deno trap.** With the pins moved, every suite passed under Bun and
+`tsc --noEmit` passed under 5.9.3 and 6.0.3 — and CI's seven `deno check`
+steps failed on the six files that build a server, every error the same:
+`Binding element 'query' implicitly has an 'any' type` at each tool handler.
+Bisected on a twenty-line probe with three tool shapes: SDK **1.28.0** types
+clean under Deno 2.9.6, **1.29.0** does not, at either zod. 1.29.0's "Add
+typings exports" (#1623) put `"types": "./dist/esm/*.d.ts"` in the `./*`
+export. For `@modelcontextprotocol/sdk/server/mcp.js` that substitutes to
+`dist/esm/server/mcp.js.d.ts`, a file that does not exist; TypeScript's
+resolver then tries `.js` → `.d.ts` and finds `mcp.d.ts`, Deno's does not
+and types the module as `any` — so every handler's arguments are `any`, and
+`noImplicitAny` reports each. Tried and rejected: a `// @deno-types` pragma
+at the `dist/esm/…d.ts` path (the exports map refuses `dist/` subpaths, in
+`check` and `run` alike); an import-map entry aiming the `.js` specifier at
+the dist file (refused the same way); `--node-modules-dir=auto` (same
+resolver); the extensionless specifier `sdk/server/mcp` (types resolve — the
+pattern gives `mcp.d.ts` — and **the runtime does not**: `Could not resolve
+'npm:@modelcontextprotocol/sdk@1.30.0/server/mcp'`; the worst combination,
+green check, dead deploy). What works: a **`// @ts-types="@modelcontextprotocol/sdk/server/mcp"`
+pragma** on the line above the `.js` import — Deno reads the types through
+the extensionless subpath, the runtime import is unchanged, and under Bun and
+tsc the line is a comment. Twenty-two pragmas in twenty files: the seventeen
+Deno-side files that import an SDK subpath (`server/mcp.js` everywhere,
+`types.js` in the two single-tool integrations), the extension template
+`AGENT_SPEC.md`, and the two READMEs that show the import line; the first in
+each file carries a two-line note. `test-auth.ts` holds it: every SDK subpath
+import in every MCP server it reads, enhanced-mcp, and the after sample's two
+files is preceded by its pragma. Upstream, the SDK's pattern would want to be
+`"types": "./dist/esm/*"`, which both resolvers handle; Deno could substitute
+as tsc does. Neither filed.
+
+**Beside the pins.** Two more things the release notes did not name, both
+read out of 0.3.2's dist and neither present at 0.1.5. Every POST that is not
+itself an initialize — whether or not the transport ever saw one; a stateless
+transport skips the session check, not this one, so on the fourteen
+per-request servers that is every tool call — is checked for the
+`mcp-protocol-version` header: absent, it reads
+as 2025-03-26 and passes; naming a version outside the SDK's list
+(2025-11-25, 2025-06-18, 2025-03-26, 2024-11-05, 2024-10-07 at 1.30.0) it is
+refused with **404** and a "Bad Request: Unsupported protocol version" body.
+A client sends the version it negotiated at initialize, which the server chose
+from that list, so no known client meets it; `test-auth.ts` holds the rule
+(200 at the newest listed, 404 at `1999-01-01`) so a bump that moves it is
+seen here first. And a GET with *no* Accept header now reads as `*/*` and
+opens the standalone SSE stream where 0.1.x answered 406: on the servers that
+still route GET to the transport — upstream's `server/index.ts` and the
+vendored `app.all("*")` servers, which change 75's method guard did not
+reach — a keyed, Accept-less GET hangs where it used to fail fast. The SDK
+client and mcp-remote send `Accept: text/event-stream` on GET and hung there
+already (change 75, SMD-1259); a bare curl is what changes. What the notes
+and the measurements agree did not change: a `tools/list` and a `tools/call`
+answer are byte-identical
+across the move — status, headers, body; `handlePostRequest` still awaits
+`ctx.req.json()` after the server is connected, so change 78's staggered probe
+still means what it did; a transport reused across 200 POSTs still lets go of
+every Request (change 83's assertion holds at 200/200). The build cost on
+change 78's harness moved the right way: one tool 39 → 36 µs, thirteen tools
+218 → 129 µs (Bun 1.4.0, same machine, same session). Two packages enter
+the lockfiles as `@hono/mcp`'s peers: `hono-rate-limiter` 0.5.4 and
+`pkce-challenge`, for its auth middleware, which nothing here calls —
+`pkce-challenge` does load with the module (a static import of the package's
+`auth.mjs`, which its `index.mjs` imports), `hono-rate-limiter` only when the
+rate-limit middleware runs. The
+pin guard found two files the seventeen-site count missed — the two REST
+integrations' `deno.json` pin hono and zod without `@hono/mcp` — so nineteen
+sites.
+
+**Verified.** `bun test-auth.ts` **809/809** (775 at change 83: thirteen
+no-patch guards, thirteen pragma guards, the enhanced-mcp pair, the SDK's
+throw, the protocol-version pair, the core server's pin mirror, three text
+rules for the after sample).
+`server/`: `test-stateless`
+47/47 and the two other suites PASS. `server-portable/`: `test-server.ts`
+153/153 (151: the Accept row became three), `test-auth.ts` 67/67,
+`tsc --noEmit` clean, `wrangler deploy --dry-run` builds. `extensions/`:
+`test-tools.ts` 122/122 and `test-writes.ts` 186/186 against Postgres. All
+seven `deno check` steps pass with the pragmas — and the six files that build
+a server fail without them (pragmas renamed, checks run, pragmas restored):
+`server` 11, `family-calendar` 6, `job-hunt` 10, `ob-graph` 27,
+`kubernetes-deployment` 11, `enhanced-mcp` 13 errors, every one an `any`
+handler argument. `check-fork-consistency.mjs` PASS.
+
+**Review, first pass** (one cold reviewer beside the author's read, over
+changes 83 and 84 together; ten findings, two of them 83's and recorded
+there). Fixed: `server/bun.lock` had kept a nested zod 4.5.4 for the SDK
+beside the 4.6.5 the Edge Function deploys — `server/package.json` listed no
+zod, so `bun install` had nothing to hold it to; zod is pinned there now and
+the lock regenerated from nothing, one zod. The pragma guard counted only
+the imports its one-line regex matched, so a multi-line or single-quoted SDK
+import would have passed unguarded beside a guarded one; it now also counts
+every SDK specifier in the file and wants the two counts equal. The no-patch
+guard matched one exact spelling; it matches any `.set("Accept", …)`. Four
+comments still described the patch as present (two in `test-auth.ts`, one in
+the portable server, and `test-server.ts` [7] calling an SSE-only Accept the
+SDK client's POST form — that is its GET form; its POSTs name both tokens).
+"Which nothing here imports" of the two new lockfile entries: `pkce-challenge`
+does load with the module, `hono-rate-limiter` does not; the paragraph above
+says so. The protocol-version 404 and the Accept-less GET, which the author's
+read had found and written up between the commit and the review, the reviewer
+found independently and confirmed against the dist. Not reproduced: one run
+in the reviewer's ninety, made beside its other probes, reported two failed
+assertions its loop did not capture (it kept the summary line; the suite
+prints every failing line); thirty runs alone here failed none, and CI runs
+the suite alone. Declined: a GET method guard for `ob-graph` and upstream's
+`server/index.ts` — SMD-1259's family, not this change's — and a CI retry for
+a flake that does not reproduce alone. Checked and found right: the stream
+lifecycle at 0.3.2 (no `finally { close() }` in its `streamSSE`; the body ends
+through `abort()` → `reader.cancel()` with the frame already pulled), 202 for
+a notification now a JSON `null` body, no tool name in the tree that
+`validateAndWarnToolName` would warn about per request, `response.headers`
+edits still landing on 0.3.2's fresh Response, and the counts here.
+
+**Review, second pass** (a second cold reviewer, given the first pass's
+additions to read first). Nothing above LOW, and every code finding sat in
+the first pass's own additions — the stop signal. Taken anyway, each a line
+or two: the protocol-version check runs on every POST that is not itself an
+initialize, whether or not the transport ever saw one — the paragraph above
+said "after initialize", and the test's own transport, which never saw one,
+had shown otherwise; the test names `LATEST_PROTOCOL_VERSION` rather than
+the list's first entry, so its label is true by construction; the no-patch
+guard matches the patch's mechanism, `Object.defineProperty(c.req, "raw"`,
+not the header it set, which an outgoing fetch may set too; the pragma
+guard's message admits the other way it fails — an SDK import in a spelling
+it does not read (single quotes, no semicolon, a line break), which it
+refuses rather than passes. And one gap the first pass's fix had exposed:
+`server/package.json` promises to mirror `server/deno.json` exactly and
+nothing held it to that, which is how the nested zod arrived — the pin guard
+now compares the two on every MCP-stack import (supabase-js excepted: the
+Node suites never load it, no installed package peers it); drilled with
+hono at 4.13.7 in the one file, one failure naming it. Its first spelling
+named supabase-js as a quoted literal, which the shim codemod takes for a
+migration target — CI's round-trip check rewrote the test file and failed
+the PR's first run; the exception is a regex now. Merge 4b8e5ec's
+hand-resolution checked against both parents: nothing duplicated, nothing
+lost. Noted, not this change's: four servers' `Access-Control-Allow-Headers`
+omit `mcp-protocol-version` (and `last-event-id`) where the core, the
+portable server and `kubernetes-deployment` carry them — a browser client
+sending the header the spec asks for is refused at preflight; pre-existing,
+and only sharper now that the header is validated (SMD-1668). 809
+assertions.
+
+**Tidied while the files were open.** The comments the two passes grew in
+`test-auth.ts` — the pragma guard's, the transport and SDK blocks', the
+protocol-version pair's, the pin mirror's and the probe's Accept sentence —
+cut to a pointer at this section each, forty-seven lines to twenty-eight; and
+two references the renumber had missed, where the word `change` and its
+number sat on different lines (the transport block, `test-server.ts` [7]),
+read the right number. A second look after the PR opened: the pin mirror's
+comment, six lines to four, keeping the codemod warning. No behaviour change.
+
+**Not done here.** The live connector check (one Claude Desktop session, two
+tool calls in flight, Accept as the client sends it) that SMD-1497, SMD-1259
+and SMD-1246 also wait on; a client that sends *neither* token nor `*/*`
+would now get 406 where the patch used to rescue it — no known client does,
+and the check would show one. The supabase-js pin (SMD-1644) and the test
+tooling pins (SMD-1645) are their own tickets. No upstream issue against the
+SDK's `types` pattern or Deno's resolver.
+
+Upstream status: at the pin, upstream deploys SDK 1.24.3, `@hono/mcp` 0.1.1,
+hono 4.9.2 and zod 4.1.13 with the Accept patch in every server;
+`server/package.json` ranges `^1.28.0` / `^0.1.5` / `^4.12.9`. The fork's
+nineteen sites and fifteen handlers diverge accordingly; a rebase conflicts on
+each pin line (take the higher) and on each removed patch block (take the
+removal). **Unfiled** by us.
+
+### 85. A live row an HNSW walk cannot reach is the geometry, not the vacuum — `db/hnsw-graph.ts` reads the disconnected graph the suite's tied vectors build, and [4]/[11]/[15] join [7] on `match_thoughts`' exact branch (SMD-1632)
+
+**The finding.** SMD-1574 moved `test-live.ts` [7]'s found-by reads off the HNSW
+walk after they flaked in CI, and filed this to explain the walk returning none
+of three live rows — reading it, from an instrumented dump, as a vacuum leaving
+the entry point on a deleted element. The dump was right that the entry point's
+reachable component held one row while two live rows sat outside it; the cause
+it inferred was not. Over the suite's vectors — orthogonal unit axes, every pair
+at cosine distance 1.0 — pgvector's neighbour-selection heuristic (`SelectNeighbors`,
+`CheckElementCloser` in `hnswutils.c`) keeps an edge only where a candidate is
+strictly closer to the element than to any neighbour already chosen, so with
+every distance equal it keeps few, and the graph is not connected. A search
+walking from the entry point cannot reach a row in another component, and even a
+reachable one is missed by the bounded `ef` beam. This reproduces with **no
+vacuum, no deletes**: a single insert of one orthogonal unit vector per axis
+leaves live rows unreachable outright. The autovacuum the ticket named is a
+contributory trigger — it re-picks the tiny graph's entry point and repairs
+neighbourhoods, shifting which rows fall outside the reachable component at the
+moment [7] reads — not the root.
+
+**What `db/hnsw-graph.ts` shows.** A reader that decodes the index pages
+(pgvector 0.8.6's `HnswMetaPageData`, `HnswElementTupleData`, `HnswNeighborTupleData`
+through `pageinspect`'s `get_raw_page`, the magic number and the meta page version
+checked), walks the graph from the entry point following neighbour lists at every
+level, and joins
+to the table by ctid, so it reports the live rows the entry point cannot reach.
+On a quiescent index it is a **sound** detector: every row it calls unreachable
+is one an unbounded relaxed walk of that row's own vector does not return
+(measured against the walk; the reverse does not hold — the bounded beam misses
+reachable rows too, so the walk misses more than the decoder reports). It reads
+the pages one at a time, not in one snapshot, so under a concurrent insert or
+vacuum the picture is inconsistent — fine for the diagnostic it is, not a check
+against a brain taking writes. The all-levels walk is the
+correction that makes it sound: a search does not walk level 0 from the meta
+entry point but descends the upper lists to a query-dependent level-0 start, so
+a level-0-only reachability under-counts and would call a reachable row
+unreachable — a synthetic-graph assertion in [17] holds the walk to every level
+(a review pass found the database soundness sample let a level-0-only walk pass,
+so that assertion carries the guarantee). Measured on pgvector 0.8.6-pg16, 1024-dim: 1,024 orthogonal unit
+vectors leave 0 to ~860 rows unreachable build to build (one connected build in
+twenty), and a search of a row's own axis misses well over 100 of 120 sampled
+whatever the hole; a 2,000-row **random** corpus is fully reachable and every
+row is found by its own vector. So the pathology needs a corpus **dominated** by
+near-equidistant vectors — the suite's, quantised or binary vectors, not real
+embeddings.
+
+**The test reads that flaked, and the ones that could.** [7]'s reads took
+`match_thoughts`' exact branch in SMD-1574 (a metadata key only that thought
+carries → 014/037 score the matching thoughts and their chunks by id, no walk).
+This adds the same key to [4], [11] and [15] — the sections whose reads still
+walked the same shape of corpus — and filters their reads on it, so the vector
+arm (`search_thoughts_hybrid` passes the filter to `match_thoughts` for [11] and
+[15]) takes the exact branch too. The ticket doubted [11] could be filtered
+without changing what it tests; it can — the keyword arm is filtered by the same
+key, which every row carries, so the keyword-hit-outside-the-window and
+window-of-one probe are unchanged — and the suite proves it. [5b] is left on the
+walk on purpose: its 2,000 vectors are random, which the finding shows are
+reachable, and it exists to hold the walk's recall. `test-live.ts` [17] is the
+new coverage: the walk misses most axes of an orthogonal corpus and none of a
+random one, the decoder is sound, and `REINDEX` does not lift the miss rate.
+
+**The decision.** No production reachability check and no capture-path
+verification: a real corpus is reachable, so either would never fire and both
+would cost every capture a walk. `REINDEX` is **not** the remedy the ticket
+assumed — a rebuild of an all-equidistant graph is no more connected (measured:
+the miss rate does not move) — so it is not offered as one. The mitigation is
+the diagnostic (`db/hnsw-graph.ts`, superuser-only, for a database you
+administer) and the test hardening. Not filed upstream as a bug: HNSW over
+near-equidistant data being poorly connected is a known property of the
+algorithm, reproduced here with no vacuum in play, not a pgvector defect — the
+`hnswvacuum.c` path the ticket read (`RepairGraphEntryPoint`, whose own comment
+says the entry point "will be empty until an element is repaired") is real but
+is not what the reproduction needs.
+
+**Verified.** `bun test-live.ts` 508/508 against pgvector 0.8.6-pg16, [17]
+included, stable across repeated local runs; `db/hnsw-graph.ts` reads both
+shipped indexes and its CLI exits non-zero on a holed index. The decoder's
+soundness and the random-corpus reachability are the two facts the section rests
+on, both robust to the build's randomness; the hole's size is reported, not
+gated on.
+
+**Not done here.** No standalone script produces the three-row miss on demand —
+the tiny-graph miss needs the suite's accumulated index history and an
+autovacuum at the read, and 282 standalone iterations at SMD-1574 plus the
+replays here never caught it; the deterministic reproduction is the many-vector
+disconnected graph, which is the same mechanism at a scale where it is certain.
+The quantised and binary indexes (SMD-1501) share the near-equidistant risk at
+low bit depth and are not measured for it. And [17] guards the decoder's
+reachability logic and its gross layout (magic and version), not the individual
+page-field offsets — a byte-level decode fixture is SMD-1673.
+
+### 86. `match_thoughts` runs with `jit = off` — migration 040 adds 017's clause to 039's function, so a planner path an operator disables no longer JIT-compiles the gate's sample on every call, and a generic plan's flat estimate no longer compiles the walk (SMD-1624)
 
 Change 80 shipped with a premise stated in its header: 038's sample statement
 has, in every piece, exactly one viable planner path — a TID Range Scan for
@@ -12821,6 +13624,12 @@ SET enable_nestloop = off` is a spelling operators use to tame a nested-loop
 disaster elsewhere, and it would have given every fresh connection that.
 SMD-1624 asked for the decision between a function-level `SET jit = off`,
 pinning the paths, and leaving the premise stated.
+
+Main took change 81 — migration 039, the half-precision index, which
+redefines `match_thoughts`' walk `ORDER BY` and nothing in the sample — and
+changes 82 to 85 while this change was in review, so it is migration 040 and
+change 86. The measurements below were taken on 038's function; the statement
+they are about is the same in 038, 039 and 040, byte for byte.
 
 **Measured first.** The ticket's table reproduced on this tree through the
 function — 25,000 rows at 1,024 dimensions (385 heap pages; the HNSW index
@@ -12847,13 +13656,19 @@ one is 037's (`count(DISTINCT …)` sorted). A row-level-security policy of
 `USING (true)` reproduced nothing — the planner folds a constant policy — so
 SMD-1625 stands on its own fixture, not this one.
 
-**Migration 039.** 038's `CREATE OR REPLACE` with one clause added between
+**Migration 040.** 039's `CREATE OR REPLACE` with one clause added between
 019's `SET enable_seqscan = off` and `AS $$`: `SET jit = off`. The body is
-038's byte for byte — test-upgrade [17] compares `prosrc` across the upgrade
-— and with it 014's sentinel, the two template constants, 019's two clauses
-and `ROWS 10`, 020's `DROP` of the 4-argument form with its ACL capture and
-replay; 039 is the last definer, which preflight's remedies and the suites'
-`restoreShipped` apply alone. It is 017's clause for 017's reason: nothing in
+039's byte for byte — test-upgrade [18] compares `prosrc` across the upgrade,
+test-schema [20] re-applies 039 alone and compares too — and with it 039's
+half-precision cast in the walk's `ORDER BY`, 014's sentinel, the two
+template constants, 019's two clauses and `ROWS 10`, 020's `DROP` of the
+4-argument form with its ACL capture and replay; 040 is the last definer of
+the function, which preflight's remedies and the suites' `restoreShipped`
+apply alone. 039's index swap is not carried: it is a one-time move of two
+indexes, not part of the function, and 039's own successor list names the
+cast and not the swap; preflight's `walk index` check still names 039 for an
+index out of step with the body, and after a hand re-apply of 039 the
+`candidate scan` check names 040 for the clause 039's `CREATE` resets. It is 017's clause for 017's reason: nothing in
 this body has enough rows for JIT to pay for itself — the walk passes a few
 hundred tuples under the seeded bounds, the exact branch scores at most
 `v_exact` rows, the collection stops at `v_exact + 1`, the sample reads eight
@@ -12887,7 +13702,7 @@ before arm (`OB1_BENCH_UPTO=038`) and the after arm, each on its own
 container and corpus, agreed on every tier but two: the 5,000-row and 1%
 tiers — both routed to the walk branch, with K=10 the exact threshold is
 1,000 — ran the walk statement as an HNSW walk under 038 (546 and 424 ms,
-8.8 and 8.9 of the exact top-10) and as a GIN bitmap with a sort under 039
+8.8 and 8.9 of the exact top-10) and as a GIN bitmap with a sort under 040
 (61 and 86 ms, 10 of 10). That is not the clause. It is the edge change 28
 documented for exactly those two tiers: "between about half a percent and
 one percent of the table, the walk branch is on the planner's edge, and
@@ -12903,7 +13718,7 @@ seeded queries per tier on a fresh connection each, so every arm walks the
 same plan-cache trajectory (custom plans for five calls, then generic where
 not costlier); median of calls 6–20 / 1–5:
 
-| tier | A: 039 | B: clause RESET (038's) | A′: 039 again | rows identical |
+| tier | A: 040 | B: clause RESET (038's) | A′: 040 again | rows identical |
 | --- | ---: | ---: | ---: | :---: |
 | 50% | 13.0 / 18.7 ms | 16.8 / 17.4 | 13.9 / 15.4 | yes |
 | 10% | 66.2 / 52.9 | 63.6 / 63.0 | 52.6 / 51.1 | yes |
@@ -12934,7 +13749,7 @@ ticket asked what the walk does under the setting that pinning would have
 overridden. On the same corpus, the same three arms, session-level `SET
 enable_nestloop = off`, median of calls 6–20 / 1–5:
 
-| tier | A: 039 | B: clause RESET (038's) | A′: 039 again |
+| tier | A: 040 | B: clause RESET (038's) | A′: 040 again |
 | --- | ---: | ---: | ---: |
 | 50% | 3,022 / 2,747 ms | 2,830 / 2,502 | 3,473 / 3,215 |
 | 1% | 2,320 / 2,265 | 2,340 / 2,640 | 2,799 / 2,901 |
@@ -12965,11 +13780,11 @@ PGlite, some managed images) the clause is accepted and does nothing.
 resets 014's and 019's clauses, and the ledger cannot see it — the class of
 loss change 70 and 80 could only state. preflight's `candidate scan` check
 (019's) now reads `jit = off` beside `enable_seqscan = off` and `ROWS 10`: ok
-names all three; a body carrying 019's clauses and not 039's warns with the
+names all three; a body carrying 019's clauses and not 040's warns with the
 compile it lets back in, the migration as the remedy while the ledger does
-not record 039 and the `ALTER FUNCTION … SET jit = off` when it does;
+not record 040 and the `ALTER FUNCTION … SET jit = off` when it does;
 test-preflight's fixtures that model 019's loss restore the jit clause so
-they stay 019's, and a new probe models 039's alone. test-schema [20] and
+they stay 019's, and a new probe models 040's alone. test-schema [20] and
 [21] pin exactly three clauses on the shipped body — a successor that adds
 or drops one fails there on purpose. test-live [5e], on a 3,000-row heap
 with the floor lowered: under each of the three disabled paths the statement
@@ -12978,17 +13793,18 @@ keeps its TID Range Scan at `disable_cost` and has no JIT block; the same
 statement with `jit` forced back on has one — Generation, Inlining,
 Optimization, Emission, EXPLAIN's JIT total 41–45 ms on the CI image in that
 run, 40–70 across the pass-1 runs — so the first check has
-teeth; and through the function the mutant, 039's clause `RESET` (what a
+teeth; and through the function the mutant, 040's clause `RESET` (what a
 redefinition without it leaves), pays the compile on every call: 55 ms a call
 against 8 with the clause, 8 by default on that fixture. The forced-on plan
-and the timing run only where `pg_jit_available()`; the catalog and plan
-checks run everywhere. test-upgrade [17] applies 039 onto a populated 038:
+and the timing run only where the server has JIT and its own `jit` is on,
+on 14–17, and are one skipped group otherwise; the catalog and plan
+checks run everywhere. test-upgrade [18] applies 040 onto a populated 038:
 no column, signature, row or privilege moves, the body byte for byte,
 `jit=off` beside 014's and 019's clauses, and after a hand re-apply of 014
-puts the 4-argument form back, 039 alone drops it again. db/bench-hnsw.ts
+puts the 4-argument form back, 040 alone drops it again. db/bench-hnsw.ts
 section C's third arm, which had been the generic plan with `jit = off`,
 now forces `jit = on` over the function's clause: the column is what the
-clause saves, and on a body before 039 (`OB1_BENCH_UPTO=038`, the new before
+clause saves, and on a body before 040 (`OB1_BENCH_UPTO=038`, the new before
 arm) the last two columns agree.
 
 **What it costs where it does nothing.** One more `proconfig` entry, set at
@@ -13008,8 +13824,8 @@ triaged fix / ticket / no. What changed: the header and this section had
 cited a change-28 line that does not exist for the two-tier disagreement —
 the sentence change 28 does have is quoted now, and the flip is named as
 the walk statement's plan, not the branch; preflight's file remedy dropped
-the keyword ALTER that 039 cannot restore in one reachable state (019
-recorded, 039 not, the keyword estimate reset), and the ledger-records-039
+the keyword ALTER that 040 cannot restore in one reachable state (019
+recorded, 040 not, the keyword estimate reset), and the ledger-records-040
 wording with its `SET jit = off` ALTER had no test — test-preflight probes
 both states now (211); [5e]'s "not JIT-compiled" check was vacuous on its
 own for the tidscan case (without the function's settings the plan is a
@@ -13017,19 +13833,19 @@ cheap sequential scan no JIT would touch, and the bare check passed with
 the clause absent) — it is one tooth with the disable-cost assertion now;
 [5e] runs its timing only where the server's own `jit` is on (an operator's
 database-level `jit = off` made the mutant compile nothing and the tooth
-fail with 039 correct) and bounds the fixed call at the default plus 25 ms,
+fail with 040 correct) and bounds the fixed call at the default plus 25 ms,
 the compile's size, where `3 × default` was loose; the "byte for byte"
 claim is checked in the fast loop too (test-schema [20] re-applies 038
 alone: same body, no jit clause; 904); README's [5d] paragraph and two
 header figures corrected. What the run-it reviewer verified: the clause
-deleted from 039 is killed in all four suites — test-schema [20] and [21],
-test-upgrade [17] twice, test-live [5e] eight times including all three
+deleted from 040 is killed in all four suites — test-schema [20] and [21],
+test-upgrade [18] twice, test-live [5e] eight times including all three
 plan checks, test-preflight three times; preflight blinded to the clause is
 killed by exactly the new probe; the forced-on arm neutered is killed by
-exactly its three assertions; a line added to 039's body is killed by
-[17]'s byte-for-byte assertion; three runs of [5e] put the mutant at 51–56
+exactly its three assertions; a line added to 040's body is killed by
+[18]'s byte-for-byte assertion; three runs of [5e] put the mutant at 51–56
 ms against 7.9–8.9 fixed and 8.0–8.2 default, four times the bound. Not
-changed: the timing message's "with 039's clause" label reads from the
+changed: the timing message's "with 040's clause" label reads from the
 file's intent, not the catalog, and would mislead only after the catalog
 assertion before it has already failed.
 
@@ -13040,7 +13856,7 @@ disabled path no longer carries the sample past `jit_above_cost` and the
 compile this change removes cannot be triggered that way — run on 18.6, the
 plan under each disabled path cost 36–1,490, nothing was compiled with the
 clause or without it, the mutant timed 10.35 against 10.11, and seven [5e]
-assertions failed against a correct 039; [5e] reads the server version and
+assertions failed against a correct 040; [5e] reads the server version and
 on 18 asserts the absence (no JIT block with or without the clause,
 `Disabled: true`, an ordinary cost) and skips the mutant arm with a line
 saying why, and the header's first screen, Failure modes and Prerequisites
@@ -13050,7 +13866,7 @@ preflight's file remedy had named 019's file whenever the ledger lacked 019
 — pre-existing, rewritten by pass 1 — and 019's `CREATE` is the 4-argument
 form 020 dropped: on any brain past 020 it re-creates the overload the
 `search signatures` check then fails the start on, and restores none of the
-6-argument function's clauses; the remedy now names 039, the last definer,
+6-argument function's clauses; the remedy now names 040, the last definer,
 which carries 019's clauses and `ROWS 10` with its own and drops that form,
 with the keyword `ALTER` beside it (019's file is never named), and the
 `RESET ALL` probe asserts the whole string. [5e]'s `jit` gate was read on
@@ -13058,8 +13874,8 @@ the suite's pool while the timing ran on fresh connections, so a
 database-level `jit = off` set after the pool connected read as "on", the
 timing ran, and its tooth failed at 7.97 against 8.05 for the wrong reason
 (run-it, M4a); the gate is read on a fresh connection now. The 019-loss
-fixture in test-preflight records 039 beside 019 (a brain whose function
-carries the clause and whose ledger records 019 records 039), one probe's
+fixture in test-preflight records 040 beside 019 (a brain whose function
+carries the clause and whose ledger records 019 records 040), one probe's
 comment had the ledger state inverted, this paragraph undercounted the
 clause-deleted mutant's test-preflight kills (three, not two), and the
 compile's figures name their quantity. What the run-it reviewer verified:
@@ -13067,7 +13883,7 @@ pass 1's fold is load-bearing — without the `!/JIT:/` term all three plan
 assertions passed with the clause deleted, each printing "— but a JIT block
 is in the plan"; with it all three fail; `keywordAlter` (pass 2 renamed it
 `kwAlter`) emptied and
-`ledgerHas039` ignored were each killed by exactly the probes written for
+`ledgerHas040` ignored were each killed by exactly the probes written for
 them; a body edit and the clause deleted are killed in test-schema by
 exactly the pinned assertions; over four more [5e] runs the fixed call was
 0.2–1.3 ms over the default against a 25 ms bound while the compiled arm
@@ -13096,7 +13912,7 @@ the 18 bullet and Prerequisites say what 18 does under each. Pass 2's "the
 plan under each disabled path cost 36–1,490" was this finding unread. Also:
 [5e] reports the arms that do not run through the suite's `skip()` rather
 than a printed line, so the count reads as 514 on 14–17 with JIT and fewer
-with skips elsewhere (the README count line says so); the pending-039
+with skips elsewhere (the README count line says so); the pending-040
 remedy carries its note about 019's clauses only when those are missing,
 not for the common brain at 038 with the jit clause alone to gain;
 preflight's warn strings and the README's [5e] paragraph say 14–17 for the
@@ -13104,7 +13920,7 @@ compile and what the clause guards on 18; the bound's comment cited seven
 runs for a figure four support and a 150 ms figure that was row-level
 security's; the first screen's wrap; a stale probe comment; this
 paragraph's `keywordAlter`, which pass 2 had renamed. What the run-it
-reviewer verified: the clause deleted from 039 on 18 is killed by the two
+reviewer verified: the clause deleted from 040 on 18 is killed by the two
 proconfig assertions and nothing else — the three plan lines are green with
 or without it, as designed and now said in the comment; `disableCost`
 forced false on 16 fails all three 18 assertions (the branch cannot take
@@ -13116,17 +13932,60 @@ skipped arms and no other section differing. Not changed: the first
 `median([])` runs colder than the later arms (12–13 ms against 9–11), a few
 milliseconds of headroom the 25 ms bound does not need; the wording
 "migration 019 is not applied" where the ledger records neither 019 nor
-039, which is the ledger's word and 019's precedent.
+040, which is the ledger's word and 019's precedent.
+
+Pass 4, the same two reviewers, the cold one also reading as an operator on
+Supabase and as the maintainer merging. What changed: main had moved — 039
+(change 81, the half-precision index, which redefines `match_thoughts`) and
+changes 82 to 85 landed while this was in review — so this is migration 040
+on 039's body, change 86 and test-upgrade [18]; every pin, remedy string,
+count and pointer was re-applied onto main's text (the reliable pattern:
+take main's file at every stop, re-apply the section once), test-upgrade
+[7]'s tripwire reads "last eleven", and the section says what was measured
+on which body. Supabase's images are built without LLVM JIT and its
+upgrades set `jit = off`, so on the fork's stated target the compile this
+change removes cannot happen today: the header's first screen and the
+without-JIT bullet say so, and preflight's warning appends "(not on this
+server today …)" when the server it reads has no JIT or its own `jit` off
+— the clause still guards a self-hosted or future server, and the generic
+plan wherever JIT is on. The 18 bullet's "13's state under Prerequisites"
+pointed at this file's Prerequisites, which do not describe 13 (038's do);
+"eight heap reads per filtered call" read as page reads where it meant
+whole-heap scans; the first screen's parenthetical had grown to five ragged
+lines and said "Failure modes below" twice; a bullet ended with "call"
+alone on a line; the bound's comment cited seven runs where four support
+the figure and a 150 ms figure that was row-level security's; [5e]'s 18
+message named the node it expected rather than the one the plan had, and
+its 14–17 label claimed a JIT term that cannot bite on a server without JIT
+or with its own `jit` off (the proconfig assertions are the clause's teeth
+there, as on 18); the `failed` list could blame a forced-on plan that was
+never forced; SMD-1703's table gained the 2,469-page row this section
+already quoted; this paragraph's `keywordAlter` was pass 2's name for
+`kwAlter`; a probe's comment named 019 where the remedy now turns on 040.
+What the run-it reviewer verified: every mutant of pass 3's additions was
+killed by exactly the predicted assertion — the node regexes swapped (each
+message ending "— but: no Tid Range Scan" or "— but: no Seq Scan"), the
+`Disabled: true` and cost terms inverted, the 019 note made unconditional
+(one probe) or never appended (the other), the keyword `ALTER` dropped from
+the file form; a database-level `jit = off` set before the pool connects
+takes the skip path on 16; pass 1's fold still kills (without its JIT term
+the three plan lines pass with the clause deleted, printing the
+self-incriminating "— but a JIT block is in the plan"); the compiled call
+was 49.6 ms once, so "never under 50" became "49.6–87"; a `skip()` counts
+once for the seven assertions it stands for, which the count lines now call
+a skipped group. Not changed: the 14–17 assertion's JIT term is still one
+conjunction with the cost and node terms; on a server without JIT the label
+says which term cannot bite rather than splitting it.
 
 **The operator's path, walked.** A brain with rows migrated by `bun
-db/migrate.ts` through 039 (on a brain at 038 it is the one pending file):
+db/migrate.ts` through 040 (on a brain at 038 it is the one pending file):
 one `match_thoughts` whose `proconfig` reads `hnsw.iterative_scan=relaxed_order,
 enable_seqscan=off, jit=off`, preflight's `candidate scan` ok naming all
 three, a filtered call answering as before. The same brain with 038's file
-pasted over 039 by hand: the plain run reports "applied 0, skipped 39", the
+pasted over 040 by hand: the plain run reports "applied 0, skipped 39", the
 body is unchanged, and what is lost is the clause — `candidate scan` warns
 "carries enable_seqscan = off and both row estimates hold, but not jit = off
-although migration 039 is recorded as applied — a later redefinition dropped
+although migration 040 is recorded as applied — a later redefinition dropped
 its SET clause" with `ALTER FUNCTION match_thoughts(…) SET jit = off;` as
 the remedy, and `migrate.ts --reapply` (39 re-applied) restores it with
 everything else, after which the check is ok again. The PostgREST contract
@@ -13391,38 +14250,20 @@ Deliberate. Recorded so nobody assumes they were missed.
   divergent content, and `AGENTS.md` mandates updating a private tracker.
   [PR #274](https://github.com/NateBJones-Projects/OB1/pull/274) proposed the
   obvious fix, was endorsed in review, and was closed unmerged.
-- **The thoughts HNSW index scan has returned none of the table's live rows**
-  (pgvector 0.8.6). `test-live.ts` [7]'s same-model found-by read, then an
-  unfiltered `match_thoughts` top-10, missed in five CI attempts on three
-  trees that touched nothing under `db/` and, looped locally, four times in
-  thirty-seven runs (thirty-four with a second suite beside it), twice there
-  and twice at the other-model read. An instrumented copy caught two with the
-  state dumped: the thoughts index scan itself returned one of the three live
-  rows once and none of them once — iterative scan on or off, still 300 ms
-  later — with an autovacuum having run on both tables during the run (the
-  dump does not time it against the sections), the chunk index answering
-  throughout and the sections after finding their rows again. Not a tie: a
-  tie can reorder candidates, not remove them, and one dump's scan returned
-  no row at all. The 022 sequence alone never missed — 282 iterations over
-  three index histories (random rows then unit rows, unit rows only, none)
-  under three vacuum modes (none, before, in flight), and two 150-second runs
-  of ~117k inserts against 55k and 43k nonstop vacuums (probe output not
-  retained) — and every call in the suite forced down the walk missed in two
-  of four standalone runs, a probabilistic demonstrator and not a model of
-  the code before the fix. SMD-1574 moved [7]'s reads to the filtered branch
-  (change 40's note): measured on its rows, a filtered call adds no
-  `idx_scan` to either HNSW index and one to the metadata GIN, the unfiltered
-  call adds one to each, the heap is far under 037's 8,192-page floor so the
-  sample gate cannot fire, and the exact branch costs about 0.1 ms more a
-  call (0.07 to 0.2 across two measurements, round trip dominated); the exact
-  branch's chunk CTE emptied fails the two window reads. The fixed suite is
-  green in twelve local runs under `db/with-postgres.sh` (500/500 each); the
-  ticket's twenty CI runs are not done. Whether a real corpus with real
-  vectors can reach the same state is not shown either way, and no mitigation
-  (a reachability check, `REINDEX`) is built. Still on the walk: [4]'s read,
-  [15]'s, [11]'s two hybrid reads and [5b]'s two ([15] and [11] run after the
-  suite's mass deletes as [7] does; [4] runs first, on a near-fresh index).
-  SMD-1632.
+- **An HNSW walk can miss a live row over near-equidistant vectors**
+  (pgvector 0.8.6). Investigated under SMD-1632 and now understood: over the
+  test suite's orthogonal unit axes (every pair at cosine distance 1.0)
+  pgvector's neighbour-selection heuristic keeps few edges and the graph is not
+  connected, so a search walking from the entry point misses a live row its own
+  vector matches — the flake behind `test-live.ts` [7], reproduced with no
+  vacuum. `db/hnsw-graph.ts` reads it from the index and [17] drives it; [4],
+  [7], [11] and [15]'s reads take `match_thoughts`' exact branch, which does not
+  walk. A **random, production-shaped corpus is fully reachable**, so this is
+  the test corpus's problem (and quantised or binary vectors', SMD-1501) rather
+  than a live brain's; no production check or capture-path verification is built
+  for it, and `REINDEX` is not a remedy (a rebuild of an equidistant graph is no
+  more connected). See change 85 (SMD-1632) for the measurements and the
+  decision.
 ---
 
 ## Before this touches anything sensitive

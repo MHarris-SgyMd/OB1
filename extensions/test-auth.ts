@@ -18,7 +18,9 @@
  * secret has no scope to give and is compared digest to digest. Each MCP
  * server answers three overlapping requests each with its own id (SMD-1497,
  * change 78: a server that outlives the request and is connect()ed to a fresh
- * transport each time answers on the wrong one). Then the drift
+ * transport each time answers on the wrong one), the first with no Accept
+ * header (change 84: the transport takes either token or none, and the
+ * servers' Accept patches are gone). Then the drift
  * guards: every tool a file registers and every route an API mounts is
  * classified here as a read or a write, exactly the writes are gated, each
  * write does write and each read does not, the server is built per request,
@@ -27,7 +29,8 @@
  * server-portable/auth.ts (a Supabase function is bundled from
  * supabase/functions/, so the module is copied beside the servers rather than
  * imported across the tree), and each deno.json still pins what package.json
- * installs.
+ * installs — and the pinned `@hono/mcp` lets go of each request once it has
+ * answered it (SMD-1607, change 83: 0.1.1 kept every one until close()).
  *
  * The files are imported under a stand-in for the two Deno globals they use —
  * `Deno.env.get` hands the process environment through, `Deno.serve` captures
@@ -136,13 +139,6 @@ type Server = {
   health?: string;
   /** What no configured key at all answers: 401, or the workers' 503 misconfigured. */
   unconfigured?: number;
-  /**
-   * MCP: `false` for a server with no Accept patch — it answers 406 to a POST
-   * whose Accept lacks text/event-stream, so the overlapping probe's first
-   * request keeps its Accept header there (SMD-1616 adds the patch to the two
-   * that lack it; then this field goes).
-   */
-  acceptPatch?: false;
 };
 const PG = "postgres://ob1:stub@stub.invalid:5432/ob1";
 /** For a server whose handler queries before it can answer: refused at once, no name to resolve. */
@@ -180,9 +176,9 @@ const SERVERS: Server[] = [
   ext("professional-crm/index.ts", ["crm_search_contacts", "crm_get_contact_history", "crm_get_follow_ups", "crm_prep_context", "crm_stale_contacts"],
     ["crm_add_contact", "crm_log_interaction", "crm_create_opportunity", "crm_update_contact", "crm_link_thought"]),
   ext("meal-planning/shared-server.ts", ["view_meal_plan", "view_recipes", "view_shopping_list"], ["mark_item_purchased"],
-    { keys: "MCP_HOUSEHOLD_ACCESS_KEYS", legacy: "MCP_HOUSEHOLD_ACCESS_KEY", acceptPatch: false }),
+    { keys: "MCP_HOUSEHOLD_ACCESS_KEYS", legacy: "MCP_HOUSEHOLD_ACCESS_KEY" }),
   // The recipes and integrations (change 67).
-  vendored("recipes/edge-function-cost-optimization/examples/before/per-request-server.ts", "mcp", ["list_vendors"], [], { acceptPatch: false }),
+  vendored("recipes/edge-function-cost-optimization/examples/before/per-request-server.ts", "mcp", ["list_vendors"], []),
   vendored("recipes/ob-graph/index.ts", "mcp", ["search_nodes", "get_neighbors", "traverse_graph", "find_path", "list_edge_types"],
     ["create_node", "create_edge", "update_node", "delete_node", "delete_edge"], { url: HTTPS, health: "/health" }),
   vendored("recipes/work-operating-model-activation/index.ts", "mcp", ["query_operating_model"],
@@ -365,11 +361,10 @@ const LIST = { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} };
 // request reaches its body await within microseconds and the other two
 // connect at the 5 ms timer, so the body's 20 ms leaves 15 ms; a longer
 // event-loop stall degrades the probe to one request then a burst of two —
-// detection weakens, the fix cannot fail. The first request also drops the
-// Accept header, so its streaming body goes through the servers' Accept
-// patch as a Claude Desktop connector's does — except at the two servers
-// that have no patch and answer 406 without it (`acceptPatch: false`;
-// SMD-1616), where it keeps the header.
+// detection weakens, the fix cannot fail. The first request also carries no
+// Accept header: @hono/mcp 0.3.x takes none as `*/*` and either token as
+// enough, so the Accept patches are gone and every server answers the bare
+// request (change 84).
 const STAGGER_MS = 5;
 const LATE_BODY_MS = 20;
 /** A JSON-RPC body that arrives `ms` after the request does. */
@@ -428,7 +423,7 @@ for (const s of SERVERS.filter((s) => s.kind === "mcp")) {
   {
     const ids = [11, 12, 13];
     const answers = await overlapping(ids, (id, late) =>
-      late ? request(s, WRITE_KEY, "x-access-key", {}, { method: "POST", path: "/mcp", rawBody: late, accept: s.acceptPatch === false }) : call(s, WRITE_KEY, { ...LIST, id }));
+      late ? request(s, WRITE_KEY, "x-access-key", {}, { method: "POST", path: "/mcp", rawBody: late, accept: false }) : call(s, WRITE_KEY, { ...LIST, id }));
     for (const [i, r] of answers.entries()) {
       assert(r.status === 200 && r.json?.id === ids[i] && toolsOf(r).join() === all.join(),
         `${ids.length} concurrent tools/list under one key: request ${ids[i]} is answered with its own id and every tool (${r.status === 0 ? r.text : `${r.status}, id ${r.json?.id ?? "none"}, ${toolsOf(r).length} tools`})`);
@@ -479,7 +474,7 @@ for (const s of SERVERS.filter((s) => s.kind === "mcp")) {
   // No handler (the import failed above) is already a counted failure; the probe is skipped rather than thrown from.
   const answers = handler ? await overlapping(ids, (id, late) => answer(handler, new Request("http://extension.test/mcp",
     // @ts-ignore -- duplex is required for a streaming body, and is not in the lib's RequestInit
-    // The late request drops Accept, as in the table probe: this server has the patch.
+    // The late request carries no Accept, as in the table probe: the transport takes none as */* (change 84).
     { method: "POST", headers: late ? { "Content-Type": RPC["Content-Type"], "x-brain-key": LEGACY_KEY } : { ...RPC, "x-brain-key": LEGACY_KEY }, body: late ?? JSON.stringify({ ...LIST, id }), ...(late ? { duplex: "half" } : {}) }))) : [];
   // The reference list is the first answer that carries one — not answers[0], which under the defect is the timeout.
   const tools = answers.map(toolsOf).find((t) => t.length > 0) ?? [];
@@ -710,10 +705,12 @@ for (const s of SERVERS.filter((s) => s.kind === "mcp" && s.writes.length > 0)) 
     "a wrong x-brain-key beside a right x-access-key does not shadow it");
   assert((await call(s, "wrong-one", LIST, "query", { bearer: "wrong-two", "x-brain-key": "wrong-three" })).status === 401,
     "three wrong forms are three refusals, not one acceptance");
-  // Claude Desktop's connectors send no Accept header; the servers patch one in
-  // by replacing c.req.raw before the key is read from it.
+  // Claude Desktop's connectors may send no Accept header. Until change 84 the
+  // servers patched one in by replacing c.req.raw before the key was read from
+  // it; now the transport takes none as */* and the key is read from the request
+  // as it came — either way, ?key= on a bare request authenticates.
   assert(toolsOf(await call(s, READ_KEY, LIST, "query", {}, false)).join() === [...s.reads].sort().join(),
-    "a request without an Accept header (the patched c.req.raw) still authenticates from ?key=");
+    "a request without an Accept header still authenticates from ?key=");
   assert((await call(s, "not-a-key", LIST, "x-access-key", {}, false)).status === 401,
     "…and is still refused with a wrong key");
 }
@@ -773,6 +770,18 @@ const OLD_SPELLINGS = /c\.req\.query\("key"\)|c\.req\.header\("x-access-key"\)|[
  */
 const builtPerRequest = (text: string) =>
   !/^(?:export )?(?:const|let|var) [^\n]*(?:\bMcpServer\b|\bStreamableHTTPTransport\b|= buildServer\(|= new Map[<(])/m.test(text);
+// Every SDK subpath import is preceded by its `@ts-types` pragma: without it,
+// `deno check` reads the module — and every tool handler's arguments — as
+// `any` at SDK 1.29 and later (change 84 has the mechanism).
+const sdkTyped = (text: string) => {
+  const imports = [...text.matchAll(/^(.*)\n(?:\s*)import (?:type )?[^\n]* from "@modelcontextprotocol\/sdk\/([\w/]+)\.js";/gm)];
+  // Every SDK specifier in the file is one the line above matched — a multi-line, single-quoted or
+  // semicolon-less import would otherwise slip past as long as one other import carried its pragma.
+  const named = (text.match(/from ['"]@modelcontextprotocol\/sdk\/[^'"]+['"]/g) ?? []).length;
+  return imports.length > 0 && imports.length === named && imports.every((m) => m[1].trim() === `// @ts-types="@modelcontextprotocol/sdk/${m[2]}"`);
+};
+/** The Accept patch by its mechanism — every one re-wrapped the request over `c.req.raw` — not by the header it set, which an outgoing fetch may set too. */
+const ACCEPT_PATCH = /Object\.defineProperty\(\s*c\.req,\s*['"]raw['"]/;
 
 console.log("\n[the files say what this test assumes]");
 for (const s of SERVERS) {
@@ -798,6 +807,9 @@ for (const s of SERVERS) {
     }
     assert(text.includes("authenticateRequest(c.req.raw,"), "…the key is read and resolved from the request, every presented form tried");
     assert(builtPerRequest(text), "…the McpServer is built inside a function, per request: no module-level declaration names McpServer, holds what buildServer() returns, or is a `new Map` (a server that outlives the request is connect()ed to a fresh transport each time and answers on the wrong one — SMD-1497, change 78)");
+    assert(!ACCEPT_PATCH.test(text),
+      "…and no Accept patch: the transport at @hono/mcp 0.3.x takes a missing Accept as */* and either token as enough, so the re-wrap of every request for Claude Desktop connectors is gone (change 84)");
+    assert(sdkTyped(text), "…and each SDK import carries its @ts-types pragma, so `deno check` types the tool handlers rather than reading the module as any (change 84) — or an SDK import is in a spelling this guard does not read");
   } else if (s.kind === "rest") {
     const mounted = [...text.matchAll(/^app\.(get|post|put|patch|delete)\("([^"]+)",\s*(requireWrite,\s*)?/gm)]
       .map((m) => ({ route: `${m[1].toUpperCase()} ${m[2]}`, gated: Boolean(m[3]), at: m.index! }));
@@ -840,6 +852,8 @@ for (const s of SERVERS) {
   const text = readFileSync(join(ROOT, file), "utf8");
   assert(builtPerRequest(text) && text.includes("await buildServer().connect(transport)"),
     `${file}: the McpServer is built per request by buildServer() and connected to that request's transport (SMD-1497, change 78)`);
+  assert(sdkTyped(text) && !ACCEPT_PATCH.test(text),
+    `${file}: each SDK import carries its @ts-types pragma (or one is in a spelling this guard does not read), and the Accept patch is gone (change 84)`);
 }
 
 // The files this test cannot import — a sample whose tool modules are not in
@@ -849,11 +863,15 @@ console.log("\n[the files this test reads but cannot run]");
 const TEXT_ONLY: { file: string; must: RegExp[]; mustNot: RegExp[] }[] = [
   // The after sample binds one server AND one transport per session (SMD-1497): a server shared between
   // sessions and connect()ed once per session hands its transport to the newest session and hangs the rest.
+  // The sweep closes the transport of each session it drops (SMD-1607), which tells the server too.
   { file: "recipes/edge-function-cost-optimization/examples/after/index.ts",
-    must: [/from "\.\.\/_shared\/auth\.ts"/, /authenticateRequest\(c\.req\.raw,/, /const server = buildServer\(principal\);[^\n]*\n\s*await server\.connect\(transport\);\n\s*session = \{ server, transport,/, /session\.scope !== principal\.scope/],
-    mustNot: [/[!=]== ?MCP_ACCESS_KEY\b/, /c\.req\.header\("x-access-key"\)/, /serverFor\(/, /Map<[^>\n]*McpServer/] },
+    must: [/from "\.\.\/_shared\/auth\.ts"/, /authenticateRequest\(c\.req\.raw,/, /const server = buildServer\(principal\);[^\n]*\n\s*await server\.connect\(transport\);\n\s*session = \{ server, transport,/, /session\.scope !== principal\.scope/,
+      /sessions\.delete\(id\);\n(?:\s*\/\/[^\n]*\n)*\s*s\.transport\.close\(\)\.catch\(/,
+      /\/\/ @ts-types="@modelcontextprotocol\/sdk\/server\/mcp"\nimport type \{ McpServer \} from "@modelcontextprotocol\/sdk\/server\/mcp\.js";/],
+    mustNot: [/[!=]== ?MCP_ACCESS_KEY\b/, /c\.req\.header\("x-access-key"\)/, /serverFor\(/, /Map<[^>\n]*McpServer/, ACCEPT_PATCH] },
   { file: "recipes/edge-function-cost-optimization/examples/after/server.ts",
-    must: [/from "\.\.\/_shared\/auth\.ts"/, /export function buildServer\(principal: Principal\): McpServer/, /register\w+\(server, principal\)/],
+    must: [/from "\.\.\/_shared\/auth\.ts"/, /export function buildServer\(principal: Principal\): McpServer/, /register\w+\(server, principal\)/,
+      /\/\/ @ts-types="@modelcontextprotocol\/sdk\/server\/mcp"\nimport \{ McpServer \} from "@modelcontextprotocol\/sdk\/server\/mcp\.js";/],
     // No module-level declaration naming McpServer: a cache under any name, in any container, is a server shared across sessions.
     mustNot: [/export const server\b/, /new Map</, /serverFor/, /^(?:export )?(?:const|let|var) [^\n]*\bMcpServer\b/m] },
   { file: "recipes/vercel-neon-telegram/src/app/api/telegram/route.ts",
@@ -900,6 +918,81 @@ for (const t of TEXT_ONLY) {
     const drift = Object.entries(imports).filter(([name, spec]) => name in pkg && spec !== `npm:${name}@${pkg[name]}`);
     assert(drift.length === 0, `${file} pins what package.json installs${drift.length ? ` (${drift.map(([n, s]) => `${n}: ${s}`).join(", ")})` : ""}`);
   }
+  // server/package.json mirrors server/deno.json on the MCP stack (change 84's
+  // review: a nested zod 4.5.4 had arrived in its lock unheld). supabase-js is
+  // left out — the Node suites never load it — and left out by regex: a quoted
+  // supabase-js literal makes this file a target for the shim codemod.
+  {
+    const MCP_STACK = /^(hono|zod|@hono\/mcp|@modelcontextprotocol\/sdk)$/;
+    const imports = JSON.parse(readFileSync(join(ROOT, "server/deno.json"), "utf8")).imports as Record<string, string>;
+    const dev = JSON.parse(readFileSync(join(ROOT, "server/package.json"), "utf8")).devDependencies as Record<string, string>;
+    const drift = Object.entries(imports).filter(([name, spec]) => MCP_STACK.test(name) && spec !== `npm:${name}@${dev[name]}`);
+    assert(drift.length === 0, `server/package.json pins what server/deno.json deploys, MCP stack entire${drift.length ? ` (${drift.map(([n, s]) => `${n}: ${s} vs ${dev[n] ?? "absent"}`).join(", ")})` : ""}`);
+  }
+}
+
+// ── The pinned transport, across a session ──────────────────────────────────
+// A transport reused across a session (the after sample's shape) must let go
+// of each POST it answers; @hono/mcp 0.1.1 kept every one until close()
+// (SMD-1607; change 83, and the pin moved on with change 84). Read through
+// WeakRefs after a forced GC — a FinalizationRegistry's callbacks arrive on
+// the runtime's schedule — and asked for most of N, not all: one or two can
+// stay reachable from the frames that answered them, and at 0.1.1 none is
+// released (change 83's measurement).
+// ── The pinned SDK, one server and two transports ───────────────────────────
+// A second connect() on one server: SDK 1.24.3 overwrote the transport
+// silently (change 78's defect; GHSA-345p-7cg4-v4c7), 1.26.0 made it throw,
+// so the shape the drift guard above refuses is refused at the runtime too,
+// on the first overlap (change 84).
+console.log("\n[the pinned SDK, a second connect() on one server]");
+{
+  const { StreamableHTTPTransport } = await import("@hono/mcp");
+  const { McpServer } = await import("@modelcontextprotocol/sdk/server/mcp.js");
+  const server = new McpServer({ name: "shared", version: "0" });
+  await server.connect(new StreamableHTTPTransport());
+  const second = await server.connect(new StreamableHTTPTransport()).then(() => null, (e: unknown) => (e instanceof Error ? e.message : String(e)));
+  assert(second !== null && /Already connected to a transport/.test(second),
+    `a second connect() on one server throws rather than overwriting the transport (${second === null ? "accepted silently" : JSON.stringify(second.slice(0, 60))})`);
+}
+
+console.log("\n[the pinned @hono/mcp, one transport across a session]");
+{
+  const { Hono } = await import("hono");
+  const { StreamableHTTPTransport } = await import("@hono/mcp");
+  const { McpServer } = await import("@modelcontextprotocol/sdk/server/mcp.js");
+  const N = 100;
+  const server = new McpServer({ name: "session", version: "0" });
+  server.registerTool("ping", { inputSchema: {} }, async () => ({ content: [{ type: "text", text: "pong" }] }));
+  const transport = new StreamableHTTPTransport();
+  await server.connect(transport);
+  const app = new Hono();
+  app.post("/mcp", (c) => transport.handleRequest(c));
+  const refs: WeakRef<Request>[] = [];
+  const answered = await (async () => {
+    let ok = 0;
+    for (let id = 1; id <= N; id++) {
+      const req = new Request("http://session.test/mcp", { method: "POST", headers: RPC, body: JSON.stringify({ ...LIST, id }) });
+      refs.push(new WeakRef(req));
+      const r = await answer((rq) => app.fetch(rq), req);
+      if (r.status === 200 && r.json?.id === id && toolsOf(r).join() === "ping") ok++;
+    }
+    return ok;
+  })();
+  assert(answered === N, `${N} sequential tools/list on one transport are each answered with their own id (${answered}/${N})`);
+  for (let k = 0; k < 5; k++) { Bun.gc(true); await new Promise((r) => setTimeout(r, 5)); }
+  const released = refs.filter((w) => w.deref() === undefined).length;
+  assert(released >= N - 10, `…and the transport has let go of them: ${released}/${N} Request objects collected after GC, ${N - 10} or more wanted (0.1.1 kept every one until close())`);
+
+  // New at 0.3.x: every non-initialize POST is checked for `mcp-protocol-version`
+  // — absent it reads as 2025-03-26; a version the SDK does not list is refused
+  // 404. A client sends the version it negotiated, so no known client meets
+  // it; held so a bump that moves the rule is seen here first (change 84).
+  const { LATEST_PROTOCOL_VERSION } = await import("@modelcontextprotocol/sdk/types.js");
+  const versioned = (v: string) => answer((rq) => app.fetch(rq), new Request("http://session.test/mcp", { method: "POST", headers: { ...RPC, "mcp-protocol-version": v }, body: JSON.stringify({ ...LIST, id: N + 1 }) }));
+  const known = await versioned(LATEST_PROTOCOL_VERSION);
+  const unknown = await versioned("1999-01-01");
+  assert(known.status === 200 && known.json?.id === N + 1, `a POST naming the newest protocol version the SDK supports (${LATEST_PROTOCOL_VERSION}) is answered (${known.status})`);
+  assert(unknown.status === 404 && /Unsupported protocol version/.test(unknown.text), `…and one naming a version it does not is refused: 404, "Unsupported protocol version" (${unknown.status})`);
 }
 
 report();

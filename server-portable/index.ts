@@ -1435,8 +1435,9 @@ app.get("*", async (c, next) => (HEALTH_PATH.test(c.req.path) ? c.text("ok", 200
 // to — pinged every 30 s, closed only by the client or by Bun's idle reset —
 // from a browser opening the connector URL or any client echoing `?key=` on GET
 // (upstream #424). The SDK client sets `Accept: text/event-stream` on its own
-// GET, so gating the Accept patch below would not have been enough; it treats
-// the 405 notFound gives as "no stream here". FORK.md change 75.
+// GET, so gating the Accept patch this handler carried then (change 84 removed
+// it) would not have been enough; it treats the 405 notFound gives as "no
+// stream here". FORK.md change 75.
 app.on(MCP_METHODS, "*", async (c) => {
   // Accept the access key via header, bearer token OR URL query parameter — every
   // form presented is tried, so a gateway's own bearer token beside the client's
@@ -1475,28 +1476,6 @@ app.on(MCP_METHODS, "*", async (c) => {
     return unauthorizedResponse(extractJsonRpcId(bodyText), REVOKED_MESSAGE);
   }
   principal.agentId = identity.agentId;
-
-  // Fix: Claude Desktop connectors don't send the Accept header that
-  // StreamableHTTPTransport requires. Build a patched request if missing.
-  // See: https://github.com/NateBJones-Projects/OB1/issues/33
-  // Only MCP_METHODS reach this handler, so the patch never tells a GET to
-  // expect an event stream — that was SMD-1259's mechanism. The transport
-  // requires BOTH tokens on a POST (406 otherwise), so the patch fires when
-  // either is missing; it used to test only the SSE token, and a POST carrying
-  // `Accept: text/event-stream` alone paid the resolve and the build for a 406.
-  const accept = c.req.header("accept") ?? "";
-  if (!accept.includes("application/json") || !accept.includes("text/event-stream")) {
-    const headers = new Headers(c.req.raw.headers);
-    headers.set("Accept", "application/json, text/event-stream");
-    const patched = new Request(c.req.raw.url, {
-      method: c.req.raw.method,
-      headers,
-      body: c.req.raw.body,
-      // @ts-ignore -- duplex required for streaming body in Deno
-      duplex: "half",
-    });
-    Object.defineProperty(c.req, "raw", { value: patched, writable: true });
-  }
 
   const server = buildServer(principal);
   const transport = new StreamableHTTPTransport();

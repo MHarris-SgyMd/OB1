@@ -141,7 +141,7 @@
  *   # a million rows and up: one scale per container, with the shared memory
  *   # the parallel build needs — the two commands are in db/README.md
  *   ./with-postgres.sh bun bench-hnsw.ts --plans     # print the full plans
- *   OB1_BENCH_UPTO=038 ./with-postgres.sh bun bench-hnsw.ts   # the after arm's schema stops at 038: the function before 039 (037 for the one before 038)
+ *   OB1_BENCH_UPTO=039 ./with-postgres.sh bun bench-hnsw.ts   # the after arm's schema stops at 039: the function before 040 (038 and 037 for the ones before 039 and 038)
  *
  *   # Keep the ten-million-row corpus between passes: the first run builds it
  *   # and records the exact pass's answers in its marker; every later run under
@@ -179,10 +179,10 @@
  * 038 (SMD-1526, change 80) draws that sample by TID range — eight page reads
  * whatever the heap holds, where 037's TABLESAMPLE cost ~2 ns a heap page —
  * and its before/after is OB1_BENCH_UPTO=037 against the default. Migration
- * 039 (SMD-1624, change 81) puts `jit = off` on the function — a planner path
+ * 040 (SMD-1624, change 86) puts `jit = off` on the function — a planner path
  * an operator disabled had JIT-compiled the sample on every call, and a
  * generic plan's flat estimate the walk — and its before/after is
- * OB1_BENCH_UPTO=038 against the default; section C's third column is what
+ * OB1_BENCH_UPTO=039 against the default; section C's third column is what
  * the clause saves the generic plan.
  *
  * The before arm — the function as shipped by 001–013 — runs at the published
@@ -770,6 +770,13 @@ async function migrateWhole(sql: SQL, onto: "kept" | "fresh"): Promise<string[]>
     // test-support's ledgerStrangers both go.
     const dry = await runMigrator(URL_, MIGRATOR_ENV, "--dry-run");
     if (dry.code !== 0) refuse(dry, `migrate.ts --dry-run exited ${dry.code} (above), before anything ran`);
+    // 039 rebuilds both HNSW indexes as NEW relations under their names, which
+    // the physical fingerprint below would refuse as rewritten — after a build
+    // inside migrate.ts under the server's default maintenance_work_mem, hours
+    // at ten million rows. The dry run already says it is pending: refuse now.
+    if (/039_\S+\s+would apply/.test(dry.out)) {
+      refuse(dry, "migration 039 is pending on this kept corpus: its swap rebuilds both HNSW indexes as new relations, which the marker's fingerprint would refuse as rewritten once built — remove the kept volume (the exit line prints the command) and build the corpus again under this tree");
+    }
   }
   const before = new Set((await ledgerNames(sql)) ?? []);
   const run = await runMigrator(URL_, MIGRATOR_ENV);
@@ -1186,7 +1193,7 @@ async function plans(sql: SQL, q: number[], filter: string, branch: Branch): Pro
       // all but a plan mode, since this section exists to show both plans.
       await applyFunctionSettings(tx);
       // The third arm forces JIT back on over the function's `jit = off`
-      // (039): what the same plan pays without the clause.
+      // (040): what the same plan pays without the clause.
       if (jitOn) await tx.unsafe(`SET LOCAL jit = on`);
       return explainPrepared(tx, { body, dim: DIM, args: `'${lit(q)}'::vector, -1.0, ${K}, '${filter}'::jsonb, 0.0, 90.0`, mode });
     });
@@ -1196,9 +1203,9 @@ async function plans(sql: SQL, q: number[], filter: string, branch: Branch): Pro
   // At ten million rows every generic plan carried 30–130 ms of startup its
   // custom twin did not, and the flat estimate that makes a plan generic is
   // also what carries its cost past jit_above_cost; the third arm read that
-  // rather than inferring it (SMD-1018 review pass) and, since 039 put
+  // rather than inferring it (SMD-1018 review pass) and, since 040 put
   // `jit = off` on the function, reads what the clause saves. On a body
-  // before 039 (OB1_BENCH_UPTO=038) the last two columns agree.
+  // before 040 (OB1_BENCH_UPTO=039) the last two columns agree.
   return { custom: await arm("force_custom_plan", false), generic: await arm("force_generic_plan", false), genericJitOn: await arm("force_generic_plan", true) };
 }
 
@@ -1768,7 +1775,7 @@ for (const r of results) {
 }
 
 console.log("\n### C. Plan shape of each filtered branch, on the filter the function routes to it (custom plan / generic plan)\n");
-console.log("plpgsql runs custom plans for the first five calls, then generic if it is not costlier; both are shown under the function's own settings, and the generic plan once more with `jit` forced on over the function's `jit = off` (039) — the flat estimate that makes a plan generic can also carry its cost past jit_above_cost, and the difference between the last two columns is what the clause saves the call. On a body before 039 (OB1_BENCH_UPTO=038) the last two columns agree.\n");
+console.log("plpgsql runs custom plans for the first five calls, then generic if it is not costlier; both are shown under the function's own settings, and the generic plan once more with `jit` forced on over the function's `jit = off` (040) — the flat estimate that makes a plan generic can also carry its cost past jit_above_cost, and the difference between the last two columns is what the clause saves the call. On a body before 040 (OB1_BENCH_UPTO=039) the last two columns agree.\n");
 console.log("`route` is the capped id collection that decides between the other two; it has no chunk side, and its cost is the filter's matching rows (GIN builds the whole bitmap before the LIMIT). `estimate` is the gate's sample of the heap (037), which runs before `route` on a heap of ROUTE_ESTIMATE_MIN_PAGES pages or more and skips it when the sample says the filter is far too broad for the exact branch; its cost is the pages it reads, whatever the filter — eight TID range probes since 038, where 037's TABLESAMPLE SYSTEM also paid ~2 ns a heap page. It is explained wherever the deployed body has it — the function itself runs it only on a heap of that many pages, so under the floor the row prices a statement the call never makes. Its three columns explain one plan: the gate's locals (the heap's page count; 037's sample share) are substituted as the literals the function's custom plan sees (routingAt), so nothing is left for a generic plan to leave unknown — the whole-heap estimate a generic plan would make of 037's sample scan is exactly what the substitution removes; 038's probes are priced alike under both modes.\n");
 console.log("| rows | branch | filter | matching rows | thoughts side | chunk side | exec ms: custom / generic / generic, jit on |");
 console.log("| ---: | --- | ---: | ---: | --- | --- | ---: |");

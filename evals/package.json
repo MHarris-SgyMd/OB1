@@ -2,6 +2,10 @@
   "name": "ob1-evals",
   "private": true,
   "type": "module",
+  "dependencies": {
+    "@lancedb/lancedb": "0.38.0",
+    "apache-arrow": "^18.1.0"
+  },
   "scripts": {
     "retrieval": "bun eval-retrieval.ts nomic-embed-text embeddinggemma bge-m3 snowflake-arctic-embed2 mxbai-embed-large granite-embedding all-minilm",
     "extraction": "bun eval-extraction.ts llama3.2 qwen2.5:7b phi4-mini gemma3:4b",
@@ -16,6 +20,7 @@
     "store-compare": "bun store-compare.ts",
     "store-scale": "bun store-scale.ts",
     "longmemeval": "bun eval-longmemeval.ts",
+    "quant": "../db/with-postgres.sh bun eval-quant.ts",
     "export-queries": "bun export-queries.ts",
     "replay": "bun eval-replay.ts",
     "build-replay-fixture": "bun build-replay-fixture.ts"
