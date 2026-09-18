@@ -13797,7 +13797,7 @@ heap fetches hit a heap that exceeds RAM, so its wall-clock is dominated by cach
 load and *swings between runs*. Two runs of the committed code, at K′=1000: rerank
 6.5 ms at 1M, then **36.5 ms and 108.5 ms** at 10M — a ~6×–17× jump for 10× the data,
 not the clean sub-linear the first cut claimed. What is stable is the full scan
-(≈30 ms → ≈380 ms, a clean ~O(N), ~13×) and the direction: the **composed total**
+(≈30 ms → ≈370 ms, a clean ~O(N), ~12×) and the direction: the **composed total**
 (coarse ANN + rerank) at K′=1000 was 21.7 ms at 1M (≈1.4× cheaper than the full scan)
 and 72–155 ms at 10M (2.5–5.1× cheaper across the two runs) — the system's edge over
 the full scan widens with N even though the rerank stage's own scaling is volatile.
@@ -13807,14 +13807,15 @@ coarse-recall → exact-rerank scales where the full scan does not — not becau
 rerank is flat (it is neither flat nor reliably sub-linear), but because the
 bounded-candidate total stays well under the ~O(N) scan. (At 10M the filtered read is
 dominated by the coarse stage's prefilter, ~237–259 ms p50 substitute / ~267–298 ms composed
-for Lance's selective tiers — the recall tier's filter cost is the scale wart, as in
+for Lance's filtered arms (the mean over all filtered arms — the per-tier split is
+unavailable at 10M, where the oracle is skipped) — the recall tier's filter cost is the scale wart, as in
 change 86's read-model filtered reads.)
 
 **The rerank stage adds precision the ANN cannot express, quantified.** Judged
 against the objective each serves (not the pure-cosine oracle): against an exact
 recency-blended oracle (w=0.3, 90-day half-life), the ANN substitute and the
 pure-cosine composition both scored 18%, while folding recency into the rerank
-recovered **73%** at 4.5 ms — the exact stage serves the recency objective the vector
+recovered **73%** at ~3.8 ms — the exact stage serves the recency objective the vector
 store cannot. (It caps below 100% because the cosine coarse stage does not surface
 every recency-optimal row — the same binding-constraint lesson; deeper K′ raises it.)
 Folding the keyword signal into the rerank moved the composed top-k onto the

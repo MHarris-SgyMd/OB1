@@ -3289,7 +3289,9 @@ The **pg-HNSW-coarse control collapses on selective filters** (portal 32%, t07 1
 recover rows the coarse stage never surfaced. Lance coarse prefilters and holds
 filtered recall (100%). *The coarse store's filtering quality is load-bearing.* (The
 hybrid's low recall-vs-cosine-oracle is expected — it optimises keyword+vector, a
-different objective; see the fusion section.)
+different objective; see the fusion section. It also applies no metadata filter, so
+its filtered-arm cells are an unfiltered result scored against a filtered oracle —
+read only its unfiltered cell.)
 
 **1M rows (64-dim, 20 queries) — the crux.** Here the ANN loses recall (substitute
 60% unfiltered, nDCG 0.72), and the composition's real shape appears:
@@ -3344,7 +3346,7 @@ the composition needs holds: the bounded-candidate total scales far better than 
 shardable one; sharding it would improve the system edge further, but that is
 asserted, not measured here. (Filtered reads at 10M are dominated by the coarse
 stage, not the
-rerank: the substitute's selective-tier Lance prefilter cost ~237–259 ms p50 and the
+rerank: the substitute's filtered-arm-mean Lance prefilter cost ~237–259 ms p50 and the
 composed arm ~267–298 ms, the pg-HNSW-coarse control ~361–579 ms — the recall tier's
 filter cost is the 10M wart, as in SMD-1696's read-model filtered reads.)
 
@@ -3359,7 +3361,7 @@ against the objective each serves, not the pure-cosine oracle:
 | composed C(200), pure cosine (ignores recency) | 18% |
 | composed C(200) + recency blend | 73% |
 
-The exact rerank stage *serves the recency objective* (73% at 4.5 ms p50) that the
+The exact rerank stage *serves the recency objective* (73% at ~3.8 ms p50) that the
 ANN cannot express (18%) — precision quantified, not a recall loss. It caps at 73%
 rather than 100% because the cosine coarse stage does not surface every
 recency-optimal row (deeper K′ raises it) — the same "coarse recall is the binding

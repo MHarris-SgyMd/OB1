@@ -28,7 +28,7 @@
  *             N-independent: at 10M the K′ heap fetches hit a heap past RAM, so it is
  *             cache-bound and run-to-run volatile (K′=1000 measured 36.5 and 108.5 ms
  *             across two runs). What is stable: the exact full scan is ~O(N) (≈30 ms
- *             → ≈380 ms), and the composed TOTAL stays under it, by more at 10M
+ *             → ≈370 ms), and the composed TOTAL stays under it, by more at 10M
  *             (~1.4× cheaper at 1M → 2.5–5.1× at 10M). ANN-only recall at fixed depth
  *             degrades with N, so the coarse stage must go deeper (larger K′).
  *
@@ -76,7 +76,7 @@ import { DEFAULT_EMBEDDING_MODEL } from "../db/config.mjs";
 import { seededRandom } from "../db/test-support.ts";
 import { embed, parseSpec } from "./lib.ts";
 import {
-  PgEngine, PgStore, LanceEngine, dedupTopK, recallAt, nDCG, mrr, nowMs,
+  PgEngine, LanceEngine, dedupTopK, recallAt, nDCG, mrr, nowMs,
   type Point, type Filter, type LanceIndexKind, type PgIndexKind,
 } from "./store-backends.ts";
 
@@ -336,11 +336,12 @@ function rerankSql(candRefs: string[], vecLit: string, filter: Filter, q: Query,
   return `
     WITH cand(ref) AS (VALUES ${values}),
     vec AS (
-      SELECT p.ref, MIN(p.embedding <=> '${vecLit}'::vector) AS d,
-             row_number() OVER (ORDER BY MIN(p.embedding <=> '${vecLit}'::vector)) AS vr
-      FROM points p JOIN cand USING (ref)
-      ${where}
-      GROUP BY p.ref
+      SELECT ref, d, row_number() OVER (ORDER BY d) AS vr FROM (
+        SELECT p.ref, MIN(p.embedding <=> '${vecLit}'::vector) AS d
+        FROM points p JOIN cand USING (ref)
+        ${where}
+        GROUP BY p.ref
+      ) g
     )${kwCte}
     SELECT v.ref
     FROM vec v JOIN docs dc USING (ref) ${useKw ? "LEFT JOIN kw USING (ref)" : ""}
@@ -348,7 +349,11 @@ function rerankSql(candRefs: string[], vecLit: string, filter: Filter, q: Query,
     LIMIT ${K}`;
 }
 
-/** One composed query: coarse ANN@K′ (timed) → exact rerank/fuse in PG (timed). */
+/** One composed query: coarse ANN@K′ (timed) → exact rerank/fuse in PG (timed).
+ *  The coarse store returns K′ *points*; dedupTopK collapses them to ≤ K′ *distinct
+ *  refs* (the candidate set the rerank sees). On the synthetic scale corpora that is
+ *  exactly K′ (one point per ref); on the real corpus, with whole+window points per
+ *  thought, it is somewhat fewer — the scale claims are all from the synthetic runs. */
 async function composed(
   coarse: CoarseStore,
   pg: PgEngine, q: Query, filter: Filter, kprime: number, fuse: Fuse,
@@ -394,13 +399,12 @@ async function pgHybrid(pg: PgEngine, q: Query): Promise<string[]> {
  * deliberately optimizes this instead. Must run before forcePlanVectorIndex (it is
  * a full scan; seqscan is still on), like the cosine oracle.
  */
-async function recencyOracle(pg: PgEngine, q: Query, filter: Filter, w: number, hl: number): Promise<string[]> {
+async function recencyOracle(pg: PgEngine, q: Query, w: number, hl: number): Promise<string[]> {
   const lit = litOf(q.vec);
-  const where = filter ? `WHERE p.${filter.key} @> '${JSON.stringify([filter.value])}'::jsonb` : "";
   const rows = await pg.raw(`
     SELECT g.ref FROM (
       SELECT p.ref, MIN(p.embedding <=> '${lit}'::vector) AS d
-      FROM points p ${where} GROUP BY p.ref
+      FROM points p GROUP BY p.ref
     ) g JOIN docs dc USING (ref)
     ORDER BY (1 - g.d) * (1 - ${w}) + power(0.5, GREATEST(EXTRACT(EPOCH FROM (now() - dc.created_at)), 0) / 86400.0 / ${hl}) * ${w} DESC
     LIMIT ${K}`);
@@ -527,7 +531,7 @@ async function runCorpus(c: Corpus): Promise<void> {
     if (exact && RECENCY_W > 0) {
       recencyExact = new Map<number, string[]>();
       for (let qi = 0; qi < c.queries.length; qi++)
-        recencyExact.set(qi, await recencyOracle(pg, c.queries[qi], null, RECENCY_W, HALF_LIFE));
+        recencyExact.set(qi, await recencyOracle(pg, c.queries[qi], RECENCY_W, HALF_LIFE));
     }
 
     // Force the vector index for the coarse-pg control + the hybrid vector arm, and
@@ -630,7 +634,7 @@ async function runCorpus(c: Corpus): Promise<void> {
  *  (recency blend). Built over the harness's own tables, self-contained. */
 async function loadDocs(pg: PgEngine, c: Corpus): Promise<void> {
   await pg.raw("CREATE TABLE docs (ref text PRIMARY KEY, content text NOT NULL, tsv tsvector, created_at timestamptz NOT NULL)");
-  const nowIso = Date.now();
+  const loadNowMs = Date.now();
   let batch: string[] = [];
   const flush = async () => {
     if (!batch.length) return;
@@ -639,7 +643,7 @@ async function loadDocs(pg: PgEngine, c: Corpus): Promise<void> {
   };
   for (const d of c.docStream()) {
     const cts = esc(d.content);
-    const created = new Date(nowIso - d.createdAtDaysAgo * 86400e3).toISOString();
+    const created = new Date(loadNowMs - d.createdAtDaysAgo * 86400e3).toISOString();
     batch.push(`('${esc(d.ref)}','${cts}',to_tsvector('english','${cts}'),'${created}')`);
     if (batch.length >= 2000) await flush();
   }
