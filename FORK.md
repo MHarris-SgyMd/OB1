@@ -68,14 +68,14 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Seventy-eight numbered changes on top of the pin. Seven fix defects found in an
+Eighty-one numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
-data layer (Phase 2). Four (changes 31, 53, 55, and 59) ship no runtime change at
+data layer (Phase 2). Five (changes 31, 53, 55, 59, and 79) ship no runtime change at
 all: each is a measurement that decided against building something.
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–78 are the numbered `###` sections** further down, which is
+sections. Changes **18–81 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -201,6 +201,8 @@ compat/deno-on-bun.ts            # change 74 (new file — Deno's two globals on
 extensions/test-tools.ts         # change 77 (new file — every tool of the five extension servers on the shim, driven against Postgres with their schemas)
 db/test-bench-reuse.ts           # change 76 (new file — the kept bench corpus's oracle cache held to the computation, on one index)
 db/bench-oracle.ts               # change 76 (new file — the cache's pure part: what of a marker's entry a run may trust; test-schema [37])
+db/migrations/039_*.sql          # change 81 (new file — the two HNSW indexes over embedding::halfvec under their names; match_thoughts' walk branches order by the cast)
+evals/eval-quant.ts              # change 81 (new file — vector, halfvec and binary-with-rerank measured on real vectors at the shipped width; test-schema [38], test-upgrade [16])
 <4 vendored MCP servers, 1 sample> # change 78 (a McpServer built per request — per session in the cost recipe's after sample — in place of one shared and connect()ed to a fresh transport each time)
 docs/01-getting-started.md       # fix 6
 recipes/content-fingerprint-dedup/README.md  # fix 6
@@ -9715,7 +9717,8 @@ Read down the tables and four things fall out.
   50,000 / 500,000 heap pages is a line — a tenth of a millisecond for the
   eight pages' rows plus ~2 ns a page — not a cache effect) and the
   measurement agreed: one row a page, every page warm in
-  `shared_buffers`, the statement costs 0.038 ms at 2,000 pages, 0.094 at
+  the OS page cache (the larger two heaps exceed the image's 128 MB
+  `shared_buffers`; change 80's fourth review pass), the statement costs 0.038 ms at 2,000 pages, 0.094 at
   20,000, 0.459 at 200,000. `TABLESAMPLE SYSTEM` decides per page by hashing
   every block number against its cutoff, so the eight page reads are the
   small part. So the ticket's "the estimate must not cost more than the
@@ -9726,7 +9729,8 @@ Read down the tables and four things fall out.
   10 ms on every filtered call. Sizing `shared_buffers` does not change it;
   a different sampling statement does — eight TID range probes, eight page
   reads whatever the heap, which also counts sampled pages exactly where
-  `pages_seen` today misses an empty one — and that is SMD-1526. The bench's own
+  `pages_seen` today misses an empty one — and that is SMD-1526 (done:
+  migration 038, change 80). The bench's own
   `estimate` row at ten million read 60 ms under both plan modes and 0.94
   with JIT off, which is why the table's last column is the JIT-off figure:
   the extraction had substituted the sample share as its declaring
@@ -9773,7 +9777,8 @@ give the `filtered search` check a "037's body" detail, the way `atomic
 capture` names 035's — a line for the next preflight change, not this one.
 The sample's per-page cost and its `pages_seen` denominator
 are SMD-1526 (TID range probes in place of `TABLESAMPLE SYSTEM`: eight page
-reads whatever the heap, sampled pages counted exactly). The threshold, the
+reads whatever the heap, sampled pages counted exactly — done: migration 038,
+change 80). The threshold, the
 plan mode and which of the two seeded bounds bites are SMD-1464; `ef_search`
 on real vectors is SMD-1465. One thing
 the prototype saw in passing belongs with SMD-1464: with `enable_seqscan` on,
@@ -12122,126 +12127,6 @@ leave to the SDK.
 fork-only, and the five servers' own text is untouched (the embeds, the
 `.not()` calls and the array payloads are upstream's spelling, now served).
 
-### Vendored content: audit once, hold the delta
-
-Everything under `recipes/`, `integrations/`, `extensions/`, `skills/`,
-`schemas/`, `dashboards/` and `primitives/` is upstream's community tree,
-vendored wholesale at the pin. That means we ship its worst advice with its
-best, under this repository's name, in a repo whose stated differentiator is
-that the core is tested and the auth path is hardened. The rule (SMD-1251,
-change 51): **we audit the tree once and hold the delta**, and a standing check
-carries the audit so a rebase cannot quietly undo it. Four rules are audited
-today. Writes around the functions (SMD-1228, change 69; SMD-1524, change
-71): check 10 fails the build on a PostgREST `.update(`/`.upsert(`/`.insert(`
-on `thoughts` whose payload carries `content` or `embedding` — inline or
-through an object the file fills — and on a SQL `UPDATE thoughts … SET` of
-either column or `INSERT INTO thoughts (…)` naming one: the raw update nine
-vendored files made around `update_thought` and the 3-argument
-`upsert_thought`, leaving a stale fingerprint, a stale model label and the
-previous vector's windows, and the raw insert eight more made around the
-capture, leaving no fingerprint and no label at all; with counted per-file
-exceptions for a file whose README says it bypasses the functions — seven,
-each a database of its own, a function body shown, or the test's fixture.
-Credentials (SMD-1252, change 64; SMD-1455, change 67): check 8 fails
-the build on a value read from the environment under a credential's name
-compared with an equality operator — the one shared plaintext key seven
-extension servers, and then seventeen more vendored files, compared with `!==`
-before they became consumers of `server-portable/auth.ts` — with counted
-per-file exceptions, and the list has been empty since change 67. Core
-ownership (SMD-1250, change 58): check 7 fails the build on any
-vendored statement that redefines, drops or re-comments a function
-`db/migrations/` owns, the owned set read from the migrations, with counted
-exceptions for the files that create a brain rather than add to one. And
-shell safety — `scripts/check-fork-consistency.mjs` check 6 fails the build on
-Codex's sandbox-bypass flag or its aliases, Claude Code's skip-permissions flag
-or mode, any allow rule that grants all of `Bash` or a prefix of a network
-client or interpreter, or any spawn through a shell (the `shell:` option with a
-non-false value, `exec`/`execSync`, `os.system`, an explicit `sh -c`/`cmd /c`
-argv), in every non-binary, non-ignored file under those seven directories,
-with a reviewed exception list — per file *and* per pattern, and *counted* —
-for prose that names a flag in order to say it was removed, and probe lists the
-check runs against its own patterns on every run, positive and negative. A
-rebase that brings a new hit fails CI, and the choice is the same as it was at
-the pin: fix the vendored file and record the delta here, or list the exception
-with its reason. SMD-1250 landed in that shape as change 58, SMD-1252 as
-change 64, SMD-1455 as change 67, SMD-1228 as change 69 and SMD-1524 — the
-raw inserts change 69 left outside its rule — as change 71: the four rules
-named when the standard was decided are all audited and held, the last on
-both of its doors.
-
-### Landing a rebase on `main`, which is protected
-
-`main` is the working default and carries a ruleset: nine required status checks,
-no deletion, **no force-push**, and no bypass actors — it applies to admins too.
-That is deliberate, and it interacts with a rebase in one specific way.
-
-A rebase produces `siggymd/rebase-YYYYMMDD` with **rewritten history**, so it
-cannot fast-forward onto `main`. Two ways forward:
-
-**Open a pull request (normal case).** Required status checks mean **no push
-directly to `main` succeeds**, merge commit or not — a push carries commits CI has
-never seen, so the rule cannot be satisfied:
-
-```
-remote: - 9 of 9 required status checks are expected.
-```
-
-That is not a quirk of the merge; it is what requiring checks means. Everything
-reaching `main` goes through a PR, which is two commands:
-
-```bash
-gh pr create --fill --base main --head siggymd/rebase-$(date +%Y%m%d)
-gh pr merge --merge --auto        # lands itself once the nine checks pass
-```
-
-History keeps both lines, which is what happened when the fork's work first landed
-on `main`, and is the right default: the rebase is a reconciliation, not a
-replacement.
-
-**Reset `main` to the rebased line (rare).** Only if you want `main`'s history to
-*be* the rebased history — cleaner, but it discards the record of how the fork
-diverged. This is a force-push and the ruleset will refuse it:
-
-```
-remote: - Cannot force-push to this branch
-```
-
-To do it anyway — as with any push that must bypass the checks — set the ruleset
-to `disabled`, push, and put it back:
-
-```bash
-gh api -X PUT repos/MHarris-SgyMd/OB1/rulesets/22189960 -f enforcement=disabled
-git push --force-with-lease origin main
-gh api -X PUT repos/MHarris-SgyMd/OB1/rulesets/22189960 -f enforcement=active
-```
-
-Prefer `--force-with-lease` over `--force` so a push that raced with someone else's
-is refused rather than silently discarding it.
-
-**Nothing forces the rewrite.** The pin is held by the annotated tag
-`upstream-pin-<sha>`, not by any branch, so `main`'s history never has to be
-rewritten to record where upstream was. Reach for the merge.
-
-**Drop a patch rather than carry it** if upstream fixes the same defect. Check
-issues #470 and #216 first — both are open with volunteers waiting, so fixes 3
-and possibly the auth work may arrive upstream.
-
-### Why we do not send these upstream
-
-`CONTRIBUTING.md:268` lists modifying "the core MCP server" as an automatic
-reject, and [PR #122](https://github.com/NateBJones-Projects/OB1/pull/122) was
-closed on exactly that basis:
-
-> The main change edits the core MCP server, which is explicitly out of scope for
-> community contributions in this repo… If we want this behavior upstream, it
-> needs to come through a focused maintainer-led path instead.
-
-Fixes 1–5 all live in `server/index.ts`. Fixes 6 and 7 are contributable in
-principle; note that [issue #482](https://github.com/NateBJones-Projects/OB1/issues/482)
-reports the upstream PR gate currently fails on **every** fork-originated PR.
-
----
-
 ### 78. Every vendored MCP server is built for the request, or the session, it answers — the three per-scope singletons, one the ticket did not name and one it called correct no longer answer a request on another's transport (SMD-1497)
 
 **The defect.** `integrations/delete-thought-mcp`, `integrations/update-thought-mcp`
@@ -12435,7 +12320,793 @@ Upstream status: at the pin, all five files carry the shared server —
 "after" sample as an exported singleton connected once per session.
 **Unfiled** by us.
 
-### 79. A live row an HNSW walk cannot reach is the geometry, not the vacuum — `db/hnsw-graph.ts` reads the disconnected graph the suite's tied vectors build, and [4]/[11]/[15] join [7] on `match_thoughts`' exact branch (SMD-1632)
+### 79. The store measured against pgvector, and the second store not built — filtered recall is an in-engine question migration 014 already answers (SMD-1037)
+
+The un-numbered section above, "A second vector store beside Postgres"
+(SMD-1038), wrote down before any number existed the shape a second vector store
+would take beside Postgres and the bar its numbers would have to clear: a recall
+gap at a used filter tier, a latency gap at a reachable row count, or an index
+build time that turns a re-embed into a maintenance window. SMD-1037 is that
+measurement. It scores pgvector HNSW against pgvectorscale's DiskANN and
+pgvector IVFFlat in the same Postgres, and against Qdrant in its own container,
+on the fork's own corpus and on synthetic corpora to 10M rows — every store
+against one exact-cosine ground truth over the same vectors, the comparators
+wired into an eval (`evals/store-compare.ts`, `store-scale.ts`,
+`store-backends.ts`) and never into the product. Like changes 31, 53, 55 and 59,
+it ships no runtime change; the numbers are in evals/README.md, "Does the store
+matter?".
+
+**Unfiltered, the store does not matter.** On the real corpus pgvector HNSW
+returns the exact top-10 for the unfiltered query — the case every vendor
+benchmark reports — and so does every comparator. The pre-registered anti-bar
+named an unfiltered-only win as no reason to move; there is not even a win to
+argue.
+
+**Filtered, a bare index loses recall — and that is the migration-014 question,
+not a store question.** As the filter tightens, pgvector HNSW's default scan
+returns a shrinking share of the exact top-10 (10% at a 3.5%-selective label),
+because it picks its candidates before the filter and a rare label survives in
+few of them — the SMD-968 hazard. Qdrant, filtering inside its graph, holds
+100%; DiskANN, filtering its stream and rescoring, holds strongly and recovers
+to near-exact. But the product does not run a bare index: `match_thoughts`
+pushes the filter into the scan (migration 014), pgvector's own in-engine answer
+to this exact loss, and DiskANN is a second in-engine rung. The recall dimension
+of the bar is real and is met inside the engine; a second store matches the
+in-engine rungs, it does not beat them.
+
+**Latency and build cost at scale.** At a million synthetic rows (64-dim, where
+random vectors defeat every index's recall, so these are build, size and latency
+— not realistic recall): HNSW builds in 160s to a 570 MB index, IVFFlat in 12s,
+and DiskANN — the best small-corpus filtered recall — in 8,165s, two hours and
+sixteen minutes, with a filtered query latency of 520ms at a million rows.
+Qdrant's read is its ANN search plus a Postgres resolve of the ids it returns:
+9.3ms end-to-end at p95, larger than single-store pgvector HNSW's 4.1ms
+unfiltered. At the product's real 1024 width the build costs are an order larger
+— HNSW 35 minutes to an 8 GB index, and DiskANN's build exhausted the 14 GB test
+machine outright. At ten million the pattern only sharpens: DiskANN did not
+build inside a ten-minute bound (it needed 136 minutes at one million), HNSW's
+own build took 139 minutes, and Qdrant's index no longer fit the test machine's
+memory — in RAM it crashed search, on-disk it answered at seconds per query.
+
+**Verdict.** None of the three triggers clears in favour of a second store
+within reach. Filtered recall — the one real gap — is answered inside the engine
+by migration 014 (and by DiskANN, at a build cost that rules DiskANN out at
+scale); the external store matches that, it does not beat it. Latency does not
+gap toward the external store — its id→row resolve makes the two-store read
+slower than the single store, not faster. Build time is a real cost, but it
+argues against DiskANN, not for Qdrant. The second store is not built. The
+`thoughts.embedding` column stays the source of truth (SMD-1038's guardrail).
+Two threads left open, each worth its own ticket if taken: a bounded evaluation
+— not adoption — of DiskANN's SBQ compression, which gave the smallest index and
+strong small-corpus filtered recall; and an upstream note that pgvectorscale's
+parallel DiskANN build crashed the Postgres backend at a million rows (a serial
+build completed).
+### 80. The gate's sample is drawn by TID range — migration 038 reads its eight pages as eight TID Range Scans instead of a `TABLESAMPLE SYSTEM` over the whole heap, so the sample costs eight page reads at any size and counts the pages it drew (SMD-1526)
+
+Change 70 ended on a term that grows with the table, and this removes it.
+Migration 037 gates the routing count behind a sample of the heap: `FROM
+thoughts t TABLESAMPLE SYSTEM (v_pct)` with the share sized to eight pages.
+`SYSTEM` decides page by page over the *whole* heap — it hashes every block
+number against its cutoff — so the statement carried about 2 ns per heap page
+besides the eight pages' rows: a millisecond at ten million rows (526,000
+pages) on every filtered call, whatever the buffer pool held. The empty-filter
+shape one integration sends on every call went from 0.27 ms to 1.31 in change
+70's bench, and by the slope a hundred million rows would pay some 10 ms.
+Change 70's third finding measured the term, its header named this statement
+as the fix, and SMD-1526 filed it with a second, smaller defect from the same
+statement: `pages_seen` counted the distinct pages among the rows *returned*,
+so a sampled page with no live row — a mass delete and a plain `VACUUM` leave
+them — dropped out of the denominator and the scaled estimate was biased up.
+
+**Migration 038.** The gate is 037's — the same floor, eight pages, three
+conditions over three counts, the collection wrapped in the same `IF` — and
+only the statement that produces the counts changes:
+
+```sql
+SELECT count(*) FILTER (WHERE p.hit), count(DISTINCT b.blk) FILTER (WHERE p.hit), count(DISTINCT b.blk)
+  INTO v_hits, v_hit_pages, v_pages_seen
+FROM (SELECT DISTINCT floor(random() * v_pages)::bigint AS blk FROM generate_series(1, 8)) b
+LEFT JOIN LATERAL (
+  SELECT (t.metadata @> filter AND t.embedding IS NOT NULL) AS hit
+  FROM thoughts t
+  WHERE t.ctid >= ('(' || b.blk || ',0)')::tid
+    AND t.ctid <  ('(' || b.blk + 1 || ',0)')::tid
+  LIMIT 291
+) p ON true;
+```
+
+Eight block numbers are drawn from the heap's page count (`v_pages`, 037's
+local, still computed at entry from `pg_relation_size`), made distinct, and
+each is read as one TID range — every tuple of block *b* and nothing else, a
+TID Range Scan (PostgreSQL 14 and later), one page read per block whatever the
+heap holds. The rows on those pages are counted as 037 counted them, and the
+third count is now the distinct blocks *drawn*: the `LEFT JOIN` keeps a block
+that returned no row, which is the denominator the rule always meant. `v_pct`
+goes; it was `TABLESAMPLE`'s argument. Everything else is carried token for
+token — the rule, 014's collection ([20] compares it), 019's clauses, the
+sentinel, the two template constants, and 020's `DROP` of the 4-argument form
+with its ACL replay, since 038 is now the last definer that preflight's remedy
+and the suites' `restoreShipped` apply alone (test-upgrade [16] holds it).
+
+**Why this statement, and what the ticket's sketch got wrong — prototyped on
+a real Postgres before the file was written.**
+
+- *The probe needs a `LIMIT`, and it does two jobs.* The ticket's sketch was a
+  `VALUES`/`generate_series` of the blocks joined `LATERAL` to the range probe.
+  Written that way the planner pulls the `LATERAL` up into the join, the
+  `ctid` bounds become *join* quals, and the TID Range path — which reads a
+  relation's own restrictions only — is never built: the plan was a
+  sequential scan of the whole heap under `Materialize`, cost 10,000,002,844
+  under 019's `enable_seqscan = off`, 72 ms at 2,000 pages and 632 at
+  200,000. A `LIMIT` on the probe keeps it a subquery (a subquery with a
+  `LIMIT` is never pulled up), and 291 — `MaxHeapTuplesPerPage` on an 8 KB
+  page — is a value no block can exceed, so it never cuts a page. It also
+  caps the planner's estimate: the planner cannot see a bound that is an
+  expression over another relation's column, prices the range at half a per
+  cent of the heap, and uncapped that would put the eight probes at tens of
+  thousands of cost units at ten million rows, within reach of
+  `jit_above_cost` (100,000) on a larger heap — where JIT compiles the
+  statement on every execution, the 50 ms a call change 70's third finding
+  met. Capped, each probe is priced at 291 rows at most: the statement costs
+  107 / 849 / 2,405 units at 2,000 / 20,000 / 200,000 pages and is flat
+  from there. A build with 32 KB pages could hold more tuples on a dense page
+  than the `LIMIT` admits; the count would then be short and the collection
+  run — the safe side.
+- *The draw is inside the statement, not in plpgsql.* The sketch drew the
+  blocks in plpgsql. A `DISTINCT` subquery over `generate_series` costs no
+  extra SPI round trip at entry (the unfiltered path still pays for `v_pages`
+  alone, as under 037), keeps the estimate one statement over locals declared
+  at entry — which is what `extractBody` and `routingAt` read for the bench,
+  and what test-schema [8e] reads out of `pg_proc` to run against its own
+  table — and is never pulled up either. `random()` in a target list
+  is evaluated once per row of `generate_series` (the once-only trap is a
+  scalar subquery, an InitPlan, which change 70 met loading its fixture);
+  `DISTINCT` collapses a block drawn twice so no page is read or counted
+  twice; the block is a `bigint`, since an `int` draw would overflow past 2³¹
+  pages (a 16 TB heap — academic, and the wider cast is free).
+- *Plan mode, which 037's statement lost on.* Both plan modes price the new
+  statement alike — the bounds are column references under either — so
+  plpgsql adopts the generic plan after the fifth call and never replans.
+  Measured through a plpgsql wrapper on a 200,000-page heap: a few
+  hundredths of a millisecond a call over the round trip in the default mode
+  (0.01–0.09 across rounds, against a round trip of 0.2–0.3), 0.14–0.22
+  under `force_custom_plan` (the replan), and 0.5–0.7 for 037's statement, which was priced 200× cheaper
+  custom than generic and so replanned on every call. One plan, cached, eight
+  page reads — while the paths the plan is built from are enabled. Turn one
+  off at session, role or database level (`enable_tidscan`, `enable_nestloop`,
+  or `enable_hashagg` and `enable_sort` together) and the planner still picks
+  the same plan but adds `disable_cost`, 1e10, which carries the statement
+  past every JIT threshold: the sample is compiled on every call, 41 ms
+  against 0.46 on a 1,191-page heap, with the same plan node, the same eight
+  buffers and nothing in preflight or the ledger to show it (review pass 3).
+  The tidscan and nestloop sensitivities are new with 038 — 037's Sample Scan
+  had neither a join nor a TID path — and the hashagg-and-sort one is 037's
+  too (85 ms against 81). A function-level `SET jit = off` removes all three
+  (measured) but also changes what the walk pays under a generic plan, which
+  is SMD-1464's question; pinning the two `enable_*` GUCs on the function
+  overrides an operator's setting for the walk as well. The decision is
+  SMD-1624; the header states the premise. Row-level security on `thoughts`
+  is a fourth trigger, and the one operators actually set: `jsonb_contains`
+  is not leakproof, so under a policy `metadata @> filter` cannot be an index
+  qual and 014's collection and the walk's direct CTE become sequential scans
+  at `disable_cost`, JIT-compiled — 150 ms against 7 on 25,000 rows — since
+  014/019 and unchanged by 038, whose TID bounds are leakproof (the probe
+  keeps its plan; the policy undercounts its hits, the safe side). That is
+  SMD-1625.
+- *The bounds are text-built tids* (`'(b,0)'::tid` is at or below every
+  tuple of block *b*, offsets starting at 1; `'(b+1,0)'` above them) because
+  core Postgres has no constructor from a block number; the executor clamps
+  a bound past the heap, so the last block's upper bound and a block the heap
+  no longer has read nothing, cost nothing, and still count among the pages
+  drawn — the safe side.
+- *Not* `tsm_system_rows` (an extension the function would depend on — PGlite,
+  where test-schema runs, does not ship it — with rows rather than pages as
+  the unit and the `pages_seen` defect unchanged); *not* eight statements in
+  a plpgsql loop (eight plans and eight SPI calls where one does; eight
+  literal arms planned in 0.07–0.1 ms a call); *not* the planner's `@>`
+  estimate, for change 70's reasons.
+
+**The statement alone, one row a page, every page warm in the OS page cache**
+(the 20,000- and 200,000-page heaps exceed the image's 128 MB `shared_buffers`)
+(`EXPLAIN ANALYZE` execution time, median of 30, `enable_seqscan` off as the
+function has it; change 70's first review pass measured 037's the same way):
+
+| heap pages | 037's sample (`TABLESAMPLE SYSTEM`) | 038's (eight TID ranges) |
+| ---: | ---: | ---: |
+| 2,000 | 0.036 ms | 0.034 ms |
+| 20,000 | 0.075 | 0.048 |
+| 200,000 | 0.469 | 0.052 |
+
+The fourth review pass re-ran both on a fresh container with its own code:
+038 0.029 / 0.049 / 0.054, 037 0.027 / 0.071 / 0.433; the planner costs 107 /
+849 / 2,405 and the absence of JIT reproduced exactly.
+
+**The rule, re-measured for this draw** — 1,000 draws per filter on a
+500,000-row corpus of the bench's shape (24,999 pages, twenty rows a page,
+`v_exact` 1,000), 037's statement on the same corpus and the same draws'
+worth in brackets:
+
+| filter | matching rows | placement | skipped, 038 | skipped, 037 |
+| --- | ---: | --- | ---: | ---: |
+| 50% | 249,851 | uniform | 1,000 | 984 |
+| 10% | 49,829 | uniform | 987 | 901 |
+| 10,000 rows | 10,000 | one contiguous run | 0 | 1 |
+| 1% | 4,915 | uniform | 1 | 1 |
+| 2,000 rows | 1,882 | uniform | 0 | 0 |
+| 1,000 rows | 1,000 | one contiguous run | 0 | 0 |
+| 1,000 rows | 1,000 | four a page over 251 pages | 0 | 0 |
+| 900 rows | 858 | uniform | 0 | 0 |
+| 0.1% | 504 | uniform | 0 | 0 |
+| 0.01% | 58 | uniform | 0 | 0 |
+| nothing | 0 | — | 0 | 0 |
+
+Every filter at or under the threshold ran the collection every time over
+1,000 draws, on this corpus and on one just under the floor (163,840 rows,
+8,191 pages: 50% skipped 1,000 and 10% 979 of 1,000 there in one run, 961 in
+a re-run — a knife-edge tier, ten hits needed of a mean sixteen — against 993
+and 905, 983 and 884 re-run; the contiguous 10,000 was skipped 10 times
+against 037's statement's 13, not a wrong answer at ten times the threshold).
+Every bracketed 037 figure is one run; a re-seeded re-run moved them by up to
+two sigma (984 → 975 on the 50% filter, 337 → 296 on the bloated heap) with
+every comparison keeping its direction.
+The broad filters are skipped a little more often than under 037, because the
+draw always reaches its pages: `SYSTEM` took a binomial number of pages with
+mean eight and reached fewer than three about 1.4% of the time (e⁻⁸ × 41) —
+the misses test-live [5d] widened its band for — where eight draws with the
+duplicates collapsed reached eight distinct pages in all but a few of a
+thousand at the floor (the fewest seen: 7 in 1,000 draws, 6 in 20,000). The
+thin-spread layout, the one condition 3 is weakest against, was skipped 29
+times in 20,000 draws at the floor — 1.45e-3, which is what change 70's
+formula computes — C(8,3) × (251 / 8,191)³ = 1.6e-3 as a union bound, 1.44e-3
+exact (a re-run: 34 in 20,000). 037's statement, re-run
+on this heap, was skipped only 14 times in 20,000 — under the formula's 32 —
+because `SYSTEM`'s variance made condition 1 fail whenever its draw reached
+ten pages or more (twelve hits on nine pages still scale to 10.9× the
+threshold here; on 037's 6,826-page heap the cut was nine pages, which is
+where its header's 13 in 20,000 came from); that accident is gone, the bound
+is the formula's and falls as the cube of the heap (7e-6 at a million rows,
+7e-9 at ten million), and `hit_pages ≥ 4` remains the knob if the band
+matters. At the ceiling count (`v_exact` 8,000) the picture is change 70's:
+near the floor the 10% filter is never skipped (0 of 2,000; 037: 0) and the
+50% filter about half the time (1,169 of 2,000; 037: 1,212), so the
+collection runs as before 037 plus the sample. On a heap three quarters empty
+— the 500,000-row corpus with its middle deleted and plain-`VACUUM`ed, 6,250
+live pages of 24,999 — the broad filters get their collection back for want of
+hits under both statements alike (50% skipped 332 of 1,000 against 337, 10%
+126 against 132, the thin filters 0), and the denominator is now honest:
+condition 1 failed in 105 of the 50% draws under 038 where under 037 it
+failed in none, because 037's `pages_seen` had shrunk to the two pages that
+answered and scaled twenty hits to the whole heap.
+
+**Through the function, before and after, on the machine change 28 describes**
+(`db/bench-hnsw.ts`, the before pass as `OB1_BENCH_UPTO=037` — the function
+with 037's sample — and the after pass with 038, from one tree, on the same
+day). The machine was busier than for change 70's tables: seven other
+Postgres containers held the VM's memory throughout, and the before arm's
+own figures sit above change 70's for the same 037 body at every tier (the
+empty filter 1.05 ms at a million rows against 0.43 then), so read the
+million-row columns as a pair and not against change 70's. At ten million
+the two columns are two machines: the before pass ran under that load (its
+50% tier 132 ms against change 70's 13 for the same 037 body — the walk
+reading the index from disk), while the after pass — started three times
+and stopped three times mid-build, twice by the VM's OOM killer with two
+other sessions' benches resident, a kept ten-million corpus among them, once
+when the server dropped the connection under the same pressure — ran on the
+fourth attempt six hours later
+on the idle VM change 70's own passes had, and its column sits within the
+spread of change 70's 037 figures everywhere but the rows this change is
+about (50% 13.2 then, 14.4 now; 900 rows 10.9 and 11.1). Section B, ten
+asked, median over 50 random queries:
+
+| rows | filter | matching rows | 037: in exact top-10 | median ms | 038: in exact top-10 | median ms |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| 1,000,000 | 50% | 499,443 | 3.0 | 20.16 | 3.0 | 14.87 |
+| 1,000,000 | 10% | 99,748 | 5.5 | 63.47 | 5.4 | 53.62 |
+| 1,000,000 | 1% | 9,951 | 8.9 | 426.32 | 8.8 | 328.66 |
+| 1,000,000 | 5,000 rows | 4,916 | 10.0 | 31.93 | 8.6 | 399.43 |
+| 1,000,000 | 2,000 rows | 1,963 | 10.0 | 16.98 | 8.5 | 559.51 |
+| 1,000,000 | 0.1% | 1,034 | 10.0 | 11.73 | 10.0 | 9.33 |
+| 1,000,000 | 900 rows | 934 | 10.0 | 10.26 | 10.0 | 7.81 |
+| 1,000,000 | 0.01% | 99 | 10.0 | 2.38 | 10.0 | 1.39 |
+| 1,000,000 | nothing | 0 | 0.0 | 1.05 | 0.0 | 0.34 |
+| 10,000,000 | 50% | 4,998,406 | 0.9 | 132.40 | 0.7 | 14.42 |
+| 10,000,000 | 10% | 999,827 | 2.1 | 387.55 | 1.9 | 49.88 |
+| 10,000,000 | 1% | 99,633 | 5.5 | 2,608.58 | 5.3 | 425.48 |
+| 10,000,000 | 0.1% | 10,231 | 10.0 | 115.04 | 4.2 | 914.71 |
+| 10,000,000 | 5,000 rows | 5,088 | 10.0 | 63.11 | 10.0 | 55.80 |
+| 10,000,000 | 2,000 rows | 1,978 | 10.0 | 36.98 | 10.0 | 33.14 |
+| 10,000,000 | 900 rows | 886 | 10.0 | 13.91 | 10.0 | 11.09 |
+| 10,000,000 | 0.01% | 959 | 10.0 | 15.51 | 10.0 | 12.13 |
+| 10,000,000 | nothing | 0 | 0.0 | 1.67 | 0.0 | 0.36 |
+
+Section C, the two statements themselves, extracted from the deployed body and
+explained (execution time under a forced custom plan / a forced generic plan /
+generic with JIT off; the 10,000-row rows are the sanity passes both arms ran
+first, five queries):
+
+| rows | statement | filter | matching rows | 037: ms | 038: ms |
+| ---: | --- | --- | ---: | ---: | ---: |
+| 10,000 | route | 50% | 5,041 | 0.60 / 0.54 / 0.65 | 0.68 / 0.63 / 0.72 |
+| 10,000 | estimate | 50% | 5,041 | 0.10 / 0.10 / 0.08 | 0.12 / 0.08 / 0.09 |
+| 10,000 | estimate | 0.01% | 1 | 0.11 / 0.14 / 0.10 | 0.14 / 0.10 / 0.08 |
+| 10,000 | estimate | nothing | 0 | 0.12 / 0.08 / 0.04 | 0.08 / 0.07 / 0.12 |
+| 1,000,000 | route | 50% | 499,443 | 35.09 / 33.41 / 33.67 | 28.13 / 29.54 / 27.70 |
+| 1,000,000 | route | 0.01% | 99 | 0.65 / 1.07 / 0.73 | 0.65 / 0.68 / 0.71 |
+| 1,000,000 | route | nothing | 0 | 0.05 / 0.04 / 0.07 | 0.03 / 0.04 / 0.03 |
+| 1,000,000 | estimate | 50% | 499,443 | 0.25 / 0.31 / 0.30 | 0.12 / 0.10 / 0.11 |
+| 1,000,000 | estimate | 0.01% | 99 | 0.30 / 0.22 / 0.25 | 0.09 / 0.08 / 0.09 |
+| 1,000,000 | estimate | nothing | 0 | 0.32 / 0.36 / 0.27 | 0.10 / 0.10 / 0.10 |
+| 10,000,000 | route | 50% | 4,998,406 | 297.21 / 316.29 / 283.95 | 278.63 / 317.77 / 284.75 |
+| 10,000,000 | estimate | 50% | 4,998,406 | 1.17 / 1.14 / 1.15 | 0.12 / 0.10 / 0.10 |
+| 10,000,000 | estimate | 900 rows | 886 | 1.10 / 1.13 / 1.20 | 0.11 / 0.12 / 0.10 |
+| 10,000,000 | estimate | nothing | 0 | 1.20 / 1.12 / 1.14 | 0.10 / 0.09 / 0.09 |
+
+Read down the tables and three things fall out.
+
+- **The sample's cost is flat, and the empty filter has its cost back.** The
+  `estimate` row reads 0.07–0.14 ms at 10,000 rows, 0.08–0.12 at a million
+  and 0.09–0.12 at ten million under 038, the same three columns for the 50%
+  filter, a thin one and the empty one — against 037's 0.04–0.14, 0.22–0.36
+  and 1.10–1.20 (that last from the loaded before pass; 0.94–1.11 on the
+  idle machine across change 70's two passes, so load barely moved that
+  row): the 2 ns a page, gone. That is the ticket's first check (within a
+  factor of two across the three scales; it is within 1.6 for any one filter
+  and plan mode, 2.0 across the widest pair of cells, 0.07 and 0.14). Through
+  the function the empty filter at ten million rows costs 0.36 ms — 0.27
+  before 037 in change 70's pass, 1.31 under 037 there and 1.67 under 037
+  today — which is the ticket's second check, within 0.1 ms of the pre-037
+  figure; at a million rows 0.34 in this pair (1.05 under 037 today, 0.43 in
+  change 70's pass, 0.21 before 037). The standalone table above says the
+  same thing without a bench: 0.052 ms at 200,000 pages against 0.469.
+- **The broad tiers lose the collection on every call now.** 50% at a
+  million: 20.2 ms → 14.9, 10%: 63.5 → 53.6, with the recall columns
+  unchanged (3.0 and 5.4–5.5, the index's own); the `route` rows are the same
+  statement at the same cost (35 → 28 ms is the day's cache), so the
+  difference is the calls that no longer run it — 037 skipped the 10% filter
+  nine times in ten, 038 987 in a thousand. The thin tiers moved by the
+  sample's saving and the spread (900 rows 10.3 → 7.8, 0.01% 2.4 → 1.4).
+- **The planner's coin, on three more tiers.** At a million rows the 2,000-
+  and 5,000-row tiers were served from GIN under the walk branch in the
+  before pass (10.0 of 10 at 17 and 32 ms) and walked HNSW in the after pass
+  (8.5 and 8.6 at 560 and 399 ms); at ten million the 0.1% tier did the same
+  (10.0 at 115 ms, then 4.2 at 915), while the 1% tier walked HNSW in both
+  passes at both scales. Every one of those tiers is above the threshold and
+  routed to the walk by both arms — the gate cannot skip them (condition 2
+  needs eight hits, and 160 sampled rows at 0.1–0.5% hold well under one)
+  and cannot choose the walk's plan, which section E shows flipping under
+  the seeded bounds on the same rows (17 ms and 10.0 against 577 ms and 8.5
+  at a million; 851 ms and 4.2 against 206 ms and 10.0 with `ef_search`
+  raised at ten million). Change 70 met the same flip on the 1% tier between
+  its own passes under a fresh `ANALYZE`; it is SMD-1464's band, with three
+  more rows for it.
+
+**What it costs where it does nothing.** Under the floor — every real brain
+today — nothing changes: the body computes `v_pages` at entry as under 037 and
+runs no sample. Above it, every filtered call pays eight page reads: about
+0.05 ms warm with one row a page, about 0.3 at the shipped width's 65–80
+rows a page, eight random reads from disk on a heap larger than memory (on
+the order of 0.1 ms each on NVMe, more on network storage), and nothing that
+grows with the heap.
+
+**Not done here.** Preflight still has no recogniser for the gate's body (a
+037 or a 020 pasted over 038 passes the `filtered search` check; the
+operator's path below), as change 70 said — a sentinel of the gate's own is
+the line for the next preflight change. The threshold, the plan mode of the
+*walk* statement (which flips onto a generic plan under a recency weight at
+the ceiling and changes answers; change 70's "Not done here") and the seeded
+bounds are SMD-1464; `ef_search` on real vectors SMD-1465. The `hit_pages ≥
+4` knob is stated, not turned. The disabled-path JIT premise is SMD-1624; row-level security, which has cost `@>` its index since 014 and is a fourth trigger of the same JIT, is SMD-1625. A hundred million rows was not run, for the
+reasons change 28 gives; what this change establishes is that the sample's
+cost no longer depends on it. The bench's before arm (`OB1_BENCH_UPTO=037`)
+does not combine with a kept corpus — change 72's rule: a corpus built under
+a schema cut at a migration is measured and dropped, never kept — so a kept
+ten-million corpus at 037 is not this change's before arm; the ten-million
+passes here were built fresh, and the after pass's four attempts are the
+tables' paragraph.
+
+**Verified, on the merged tree:** `db/test-schema.ts` 901/901 under PGlite, [8e] rewritten (the
+TID range probe, the three load-bearing tokens — `DISTINCT`, `LEFT`, `LIMIT
+291` — no `TABLESAMPLE` in the body, the floor, exactness with the gate
+reached; then the statement read out of the installed body, on a compacted
+heap of some sixteen pages: five draws judged by the rule and each reaching
+two to eight pages, its plan TID Range Scans with no sequential scan and no
+Materialize, one block drawn eight times over reporting one page and its rows
+counted once — the `DISTINCT` — and, an eight-block band emptied and vacuumed
+with live rows beyond it, the probe pinned to that band reporting eight pages
+drawn, no hit and eight buffers touched — the `LEFT` join and the `<` bound —
+where an INNER join reports none and a `<=` bound reads sixteen) and [20]'s
+definer pin moved to 038;
+`db/test-live.ts` 500/500 on real Postgres, [5d] now exact (the broad filter
+makes exactly one GIN scan fewer per call than under 020's body, twenty of
+twenty, each call on its own connection — PR #69's first CI run failed this
+section at 020 2.00 a call against 038 1.50 where the same tree read 2.75 and
+1.75 locally and 2.00 and 1.00 on a freshly reset schema: on one connection
+plpgsql plans the first five calls custom and may switch the walk to a
+generic plan from the sixth, the two plans scan the GIN index a different
+number of times through the chunk join, and the arms' trajectories need not
+cancel; a first execution per call gives every call the same plan on both
+arms, and the failure message now prints the per-call counts; 0.27–0.33 ms a
+call for the sample on its
+386-page heap at the shipped width, round trip included); `db/test-upgrade.ts`
+189/189, [16] new (038 onto a populated 037: no column, signature, row or
+privilege moves; 014 re-applied by hand, then 038 alone, leaves one form);
+`server-portable` `tsc --noEmit` and `test-preflight.ts` (205/205) clean;
+`bun scripts/check-fork-consistency.mjs` PASS; `bench-hnsw.ts` before and
+after at a million rows and at 10,000 (both arms' estimate rows: 037's a
+`Sample Scan`, 038's a `Tid Range Scan`) and at ten million rows (the after
+pass on its fourth attempt, the VM idle), above.
+
+**Review** — five passes, two reviewers each, triaged fix / ticket / no;
+the stop signal (a pass's top findings in the previous pass's own additions)
+came at pass 2 and again at 4, the later passes at the user's call. What
+changed the change: test-schema [8e]'s behavioural checks had run a copy of
+the statement kept in the test, so an INNER join, a missing `LIMIT` and a
+constant block all passed them and were caught by regexes alone — [8e] now
+runs the statement read out of `pg_proc`, on a fixture vacuumed before the
+load (its "emptied middle half" had been pages earlier sections left empty),
+pins the probe to eight emptied blocks (an INNER join reports none drawn),
+draws one block eight times over (without `DISTINCT` the hits come back
+eightfold), asserts the plan (without the `LIMIT`, `Materialize` over `Seq
+Scan`) and the probe's eight buffers from the scan node's own line (a `<=`
+bound reads sixteen); the mutants were run and each is killed by the
+assertion that names it. test-live [5d] compares raw scan counts (IEEE gets
+x/20 − y/20 wrong for 52 exact deltas). What changed the documents: the
+"no JIT at any size" premise (a disabled planner path adds `disable_cost`
+and JIT-compiles the sample on every call, 41 ms against 0.46 — SMD-1624, the
+decision between `SET jit = off` and pinning the paths, since either touches
+the walk); row-level security as a fourth trigger, pre-existing since 014
+(`jsonb_contains` is not leakproof, 150 ms against 7 — SMD-1625); "every
+page in `shared_buffers`" corrected to the OS page cache (the larger two
+heaps never fit the image's 128 MB; change 70's sentence carried the same
+error); the knife-edge 10% tier at the floor (979 one run, 961 the re-run);
+a handful of figures quoted tighter than their spread, and the header's
+first-screen block for a paged operator. What was verified without change:
+the planner account re-derived from source; every header number reproduced
+on a fresh container with fresh code (costs and the absence of JIT exactly,
+the rates within binomial noise, the bloated heap to the digit); the
+deployer's paths through `migrate.ts` including a non-superuser owner;
+preflight with pasted-over bodies; the PostgREST contract byte-identical;
+restricted and read-only callers; 14,000 calls under concurrent truncation
+and growth; both temp-table shapes; the suites green on PostgreSQL 15, 16
+and 17 with the probe planning as eight TID Range Scans on each; [8e]
+flake-free over twenty runs and [5d]'s exact band over 180 isolated
+iterations (3,600 calls), where 037's body missed in 6 of 30 iterations of
+twenty calls — the ~1.4% per draw the header attributes to it. Filed and not fixed here: SMD-1624, SMD-1625,
+SMD-1627 (`--reapply` rebuilds a missing HNSW index in dynamic shared memory
+and fails under a 64 MB /dev/shm; a non-superuser cannot bootstrap where
+pgvector is not trusted — both pre-existing). test-live [7] flaked six times
+across the passes — four with another suite in the worktree, twice alone —
+and passed on every re-run: SMD-1545's, with the concurrent-suite lead
+weakened accordingly. Boyscout, after the passes: one exported `TID_PROBE`
+(both bounds) where three files had their own, [8e]'s FROM clause read once
+and a tautological bound dropped, two helper comments reworded for two
+migrations, test-upgrade [14]'s title naming the schema it applies, the
+header's cost table stated once — no behaviour change; and a second look
+after CI: the body comment above the sample statement trimmed to the
+mechanism, its measurements left to the header; and a third: one place in
+`test-support` reads the sample statement out of a body (`SAMPLE_STATEMENT`,
+`sampleStatementOf`) for [8e]'s draws and [5d]'s timing, so the last kept
+copy of the statement is gone; `buffersOf` reads one node's Buffers line when
+given the node; `extractBody` ignores comment lines before it looks for the
+estimate.
+
+**The operator's path, walked.** A brain at 037 with rows, upgraded by `bun
+db/migrate.ts`: "038 applied, 1 applied, 37 skipped", one `match_thoughts`
+carrying the TID range probe and no `TABLESAMPLE`, a filtered call answering
+as before. The same brain with 037's file pasted over 038 by hand: the plain
+run reports "applied 0, skipped 38" — the ledger records both and cannot see
+the body — and what is lost is the per-page term coming back, a degradation
+preflight's stated scope does not cover (change 70's paragraph); `migrate.ts
+--reapply` re-runs every file in one transaction and the probe is back. The
+PostgREST contract — six argument names, the `RETURNS TABLE` shape — is
+byte-identical to 020's. The README's bench command with `OB1_BENCH_UPTO=037`
+labels its arm `after (014–037)` and explains 037's estimate as a sample scan;
+the default labels `after (014 on)` and explains 038's as a TID range scan.
+
+**Upstream status:** not applicable — 014's routing statement and 037's gate
+are this fork's.
+
+
+### 81. Quantised vector indexes at the shipped width, measured on real vectors — halfvec adopted for `match_thoughts` (migration 039), binary declined (SMD-1501)
+
+At the shipped width — 1,024 dimensions, `qwen3-embedding:4b` truncated — a
+ten-million-row brain's two HNSW indexes were argued to be "roughly four
+times" the 5.4 GB + 1.1 GB change 28 measured at 64 dimensions. pgvector 0.7+
+indexes `halfvec` (half the bytes) and binary-quantised vectors (a
+thirty-second), and the published results at equal recall are build times cut
+by an order of magnitude and footprints by up to twelve times, with a rerank of
+the candidates on the full vectors giving recall back. Nothing in the fork had
+measured either, and change 28's random 64-dimensional bench cannot answer a
+recall question. The ticket's shape was a measurement rather than a switch:
+`match_thoughts` has two candidate CTEs merged by MAX per thought, a rerank
+would have to sit between the CTEs and the merge on both sides, the exact
+branch reads no index, and `evals/eval-filtered.ts`'s unfiltered control
+exists to notice the default path's rows moving.
+
+**The harness (`evals/eval-quant.ts`).** The real vectors this fork holds at
+1,024 dimensions are the two LongMemEval corpora `eval-longmemeval.ts` loaded:
+S under the shipped model (19,825 whole vectors and 56,267 windows — the two
+tables `match_thoughts` scans, 76,092 vectors) and M under
+`qwen3-embedding:0.6b` at the same width (51,660 and 145,705: 197,365). The
+ticket asked for 100,000 rows and the largest the corpus allows; these bracket
+it, and no third real corpus at this width exists on the machine (embedding
+100,000 more sessions at 4b is days). The harness copies a corpus, rows only,
+into a throwaway database under the tree's schema (kept under `OB1_PG_KEEP`,
+re-migrated on reuse), embeds the 470 questions with the corpus's model, takes
+an exact pass with no vector index in existence — exact in the function's own
+shape, the true nearest `v_fetch` per side merged by MAX, which is what a
+perfect index would return; not the ten highest MAX scores over every row,
+which the two-CTE shape does not compute, and the report counts on how many
+questions the two differ: on none of the 470, on either corpus — and then
+builds each arm's two indexes alone — timed under one `maintenance_work_mem`
+and worker count,
+sized, dropped before the next — and runs the function's unfiltered statement
+with only the candidate ORDER BY changed, under the function's own SET clauses,
+at `hnsw.ef_search` 40 / 100 / 400. The arm the deployed function walks goes
+last, under the shipped index names, and a CONTROL holds the function itself
+to that arm's mirrored statement question for question (0 of 470 differed,
+both corpora, both before and after 039). LongMemEval's own per-question
+filter matches a few hundred thoughts and routes every question to the exact
+branch, so the harness as run never touched the HNSW index; the measurement
+is the unfiltered default path, `match_count` 10, where the index is used.
+
+Three arms: `vector` (001/007's `hnsw (embedding vector_cosine_ops)`);
+`halfvec` (`hnsw ((embedding::halfvec(1024)) halfvec_cosine_ops)`, the query
+cast to match, the candidates' similarity recomputed on the full vector — the
+heap row is read anyway); `binary` (`hnsw ((binary_quantize(embedding)::bit(1024))
+bit_hamming_ops)`, each CTE taking `v_fetch × R` candidates by Hamming distance
+and reranking them by full-vector cosine to `v_fetch`, R = 1, 2, 4, 10 — 400
+candidates at the default count is the ticket's `v_fetch × k`). Scored:
+recall@10 against the exact ten; how often one of the question's gold sessions
+is among the ten with the whole corpus as haystack (the exact pass is the
+ceiling: 46.2% on S, 34.5% on M — a session whose text twins another's shares
+its row); whether the ten are the identical list the vector arm returns at the
+same `ef_search`; the round trip's median and p95 after one untimed pass.
+Each corpus was built and measured twice (`quant-*.log` in the session
+scratchpad; the tables are the second pass, the first is quoted where it
+differs).
+
+**What the pages hold.** At 1,024 dimensions a float4 vector is 4,096 bytes
+plus its neighbour lists, and pgvector packs an index page by whole elements:
+two do not fit an 8 KB page, so every vector costs the index a page — 8.2 KB
+per row on both tables, both corpora (155 MB for 19,825 thoughts; 404 MB for
+51,660). Three halfvec elements fit a page (2.75 KB per row); a binary element
+is 128 bytes and a page holds twenty (0.4 KB). So the shipped index at ten
+million rows is near 80 GB before the chunks', not "four times 5.4 GB", and
+halfvec is not half of it but a third.
+
+**Results, `ef_search` 40 (the default, which the function leaves alone).**
+
+| arm | candidates per CTE | S recall@10 | M recall@10 | S gold-hit | M gold-hit | same list as vector, S / M | S ms | M ms | index bytes | build s, S / M |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| vector (001/007) | 40 | 0.984 | 0.971 | 46.2% | 33.8% | 100% / 100% | 4.13 | 4.22 | 577 MB / 1,482 MB | 13.9 / 28.7 |
+| **halfvec (039)** | 40 | 0.974 | 0.970 | 45.5% | 33.6% | 93.4% / 95.3% | 3.12 | 4.08 | 193 MB / 494 MB (33%) | 7.9 / 18.5 |
+| binary | 40 | 0.955 | 0.939 | 46.0% | 33.4% | 69.6% / 68.3% | 1.80 | 3.08 | 31 MB / 79 MB (5%) | 2.5 / 7.3 |
+| binary | 80 → 40 | 0.980 | 0.973 | 46.2% | 34.3% | 83.0% / 79.1% | 3.07 | 4.09 | " | " |
+| binary | 160 → 40 | 0.993 | 0.991 | 46.0% | 34.5% | 86.6% / 82.8% | 5.63 | 7.92 | " | " |
+| binary | 400 → 40 | 0.998 | 0.997 | 46.2% | 34.5% | 88.9% / 83.6% | 13.25 | 17.44 | " | " |
+
+The `ef_search` sweep for the two contenders (S / M):
+
+| arm | ef_search 40 | 100 | 400 | ms at 40 / 100 / 400 |
+| --- | --- | --- | --- | --- |
+| vector | 0.984 / 0.971 | 0.996 / 0.989 | 0.999 / 0.998 | 4.1 / 6.4 / 18.1 — 4.2 / 6.5 / 17.4 |
+| halfvec | 0.974 / 0.970 | 0.993 / 0.989 | 0.999 / 0.999 | 3.1 / 4.1 / 9.1 — 4.1 / 6.1 / 14.8 |
+
+The first pass had put halfvec at 0.981 / 0.971 and vector at 0.983 / 0.973
+(S / M): an HNSW graph built in parallel differs build to build, and a
+hundredth of recall is that spread; latencies moved by about a quarter between
+passes on a machine shared with other sessions' containers. A third pass
+after 039 landed, with `match_thoughts` itself now the halfvec arm's control
+(0 of 470 differ on either corpus): halfvec 0.980 / 0.971 against vector
+0.984 / 0.973, the function's own median 3.1 / 3.8 ms. Every gold-hit
+figure is within a point of the exact pass's ceiling under every arm — on a
+haystack of the whole corpus the LongMemEval questions are not what
+distinguishes these indexes; recall against the exact answer is.
+
+**The decision.** The bar, set before the runs: an arm is worth a migration
+only if, at the default `ef_search` on both corpora, its recall@10 is within
+0.02 of the vector index's, its median latency no more than 1.2× the vector
+index's, and its bytes at most 60% of the vector index's. **halfvec clears
+it** on every axis: recall within the build-to-build spread at every
+`ef_search`, faster or equal (the walk reads a third of the pages), a third
+of the bytes, builds in 57–64% of the time. **Binary is declined, and not on
+the numbers alone.** Without a rerank it loses three hundredths of recall
+(0.939 against 0.971 on M — under the bar, and 68% identical lists). Reranked
+at 80 → 40 it meets every number the bar asks: recall within four thousandths
+on both corpora, latency at the vector index's, 5% of the bytes. Reranked
+further (160 → 40) it passes the vector index's recall at 1.4–1.9× its
+latency, because the rerank reads every candidate's full vector out of TOAST
+and the two-CTE shape pays it twice, once a side. What decides against it is
+what the ticket's own framing named: a rerank is a change to the function's
+body — a subquery and a second candidate depth to size inside each of the
+four walk CTEs, a second knob beside `ef_search` — and it returns the
+identical ten rows on only 79–83% of questions, where halfvec clears the bar
+with a cast and 93–95%. Binary at 80 → 40 is the arm for a brain whose
+halfvec index no longer fits in memory, and a decision to make on that
+brain's numbers with this harness; for the default path today halfvec
+dominates vector.
+
+**Migration 039.** Two things, in one file (its header has the rest). The
+two HNSW indexes are rebuilt over `(embedding::halfvec(D))` with
+`halfvec_cosine_ops` **under their names** — built under a staging name,
+001/007's index dropped, the staging index renamed — so preflight,
+`test-live.ts` [5]/[5c], `bench-hnsw.ts` and `bench-plan.ts`, which match
+plans on `Index Scan using thoughts_embedding_idx`, read as they did. A
+re-run finds the shipped name already over halfvec, of this shape and valid,
+and does nothing (a valid index of another shape that names halfvec — an
+IVFFlat over the cast — is refused by name, with the staging build as the
+remedy, rather than taken for done); a staging index built beforehand by hand — `CREATE INDEX CONCURRENTLY
+thoughts_embedding_halfvec_idx …`, the path for a brain where a plain CREATE
+INDEX would hold writers too long (about 100 µs a row under
+`maintenance_work_mem` 2GB with four workers, the graph in memory: a couple
+of minutes at a million rows, some twenty at ten million) — is adopted when
+valid and of this shape, refused by name when of another, and dropped first
+when INVALID; an INVALID index under the shipped name is rebuilt rather than
+kept. And `match_thoughts` is 038's body
+with the two walk branches' four ORDER BYs cast on both sides,
+`embedding::halfvec(D) <=> query_embedding::halfvec(D)`, the index's
+expression token for token; the similarity stays `1 - (embedding <=>
+query_embedding)` on the full vector, so the threshold, the merge and the
+exact branch — which reads no index and casts nothing — are on one scale. The
+stored vectors do not change: `reembed.ts`, the servers and every writer are
+untouched, and the expression index keeps itself on every write.
+`search_thoughts_hybrid` calls `match_thoughts` by name and inherits.
+
+**Applying it.** 039 is the first bulk graph build most brains meet — 001 and
+007 indexed an empty table that then grew row by row — and neither the file
+nor `migrate.ts` sets `maintenance_work_mem`, so the compose stack's migrate
+service and a `bun db/migrate.ts` from a shell build under the server's
+64 MB and two workers: pgvector keeps the graph in memory while it fits
+(some 25,000 vectors at this width, 2.5 KB each) and finishes the rest in its
+on-disk phase, many times slower, with a NOTICE no driver here surfaces
+(review pass 2). The rule, in the header, `db/README.md` and
+`deploy/README.md`: 2.5 KB × the vectors across both tables — 250 MB per
+100,000, 2.5 GB per million — set on the migrating role before the run,
+`/dev/shm` to hold it under parallel workers; `migrate.ts` now prints the
+vector count and the setting in force just before 039 runs. The file lifts
+`statement_timeout` for its own transaction (a platform's per-role timeout
+would cancel a build of minutes and roll the file back after the work), and
+its DROP and RENAME take ACCESS EXCLUSIVE, so a held reader past the
+migrator's `lock_timeout` aborts the file — the by-hand staging indexes
+survive that rollback, the plain build does not. And preflight gains a check,
+`walk index`, for the one failure state 039 creates and nothing else sees: a
+body that orders by the cast over an index that is not over it, or the
+reverse, or an INVALID index under the name — every walk a sequential scan
+under `enable_seqscan = off`, exact at 019's cost, with `proconfig` intact and
+the ledger recording 039. It reads the body's ORDER BY and each index's
+definition and validity from the catalog and names the re-apply as the
+remedy.
+
+**What moved, and what it costs.** The default path's rows: at `ef_search`
+40 the identical ten on 93% of S's questions and 95% of M's, recall within a
+hundredth, gold sessions within a point. `evals/eval-filtered.ts`'s
+unfiltered control, re-run on the 576-issue Linear corpus with 039 in the
+after arm: 599 of 601 queries return the identical rows before and after, and
+the mean overlap rounds to 100.0% — two lists differ by a row each, the
+index's approximation and the intended change. The one thing that gets slower is a statement nobody
+in the runtime sends: `ORDER BY embedding <=> q` on the raw column, from
+psql or a recipe's own SQL, had the vector index and now has a sequential
+scan — exact, 10–100 ms per hundred thousand rows at this width — because the
+cast is the index's key (`test-live.ts` [5] holds both plans). An earlier
+definer re-applied by hand (038, 020) puts a raw-column body over the halfvec
+index and gets that scan on every walk; preflight's remedies now name 039 as
+`match_thoughts`' last definer.
+
+One thing did move, and the first draft of this section misread it.
+`test-live.ts` [5b] calls the function under a 99% filter on 2,000 random
+unit vectors at 1,024 dimensions, and its ten-query overlap with the exact
+top-10 fell from at least 85 of 100 under the vector index to 79–83 under
+halfvec, three runs running. Measured per query through the function over
+100 queries on that fixture: under the vector index every call returned all
+ten exact ids; under halfvec the first five calls of the session lost two to
+six ids each and the ninety-five after them lost none, on every build. That
+is not precision, it is plpgsql's plan cache: EXPLAIN of the function's own
+walk statement shows the vector index priced out of the plan on this fixture
+— both the custom and the generic plan read the GIN bitmap, which is exact —
+while the halfvec index, a third of the pages, wins the custom plans the
+first five calls get (an Index Scan, 2.6 ms, and the walk's recall on random
+vectors, about 7 of 10 at `ef_search` 40 under either index) and loses to
+the bitmap again once the generic plan is adopted (9.7 ms, exact). A cheaper
+index moved a plan that sat on the edge; the walk itself is what it was.
+[5b] now sums fifty queries against a 90% floor and says so; the 039 header
+carries it as a failure mode; `bench-hnsw.ts`'s section A, which walks by
+construction, is re-measured below.
+
+**What the suites found on the way.** `test-schema.ts` [21] — 020's blend,
+"identical at weight 0" — compared the shipped function with 019's installed
+under another name, over a fixture of 200 rows each on its own axis: every
+row nearly equidistant from every other, a graph the HNSW walk reached 34 of
+200 rows of under *either* index. The section passed for a year because both
+functions walked the same graph; under 039 the comparison function had no
+index, scanned exactly, and the two disagreed. The fixture now spreads each
+row's remainder over 32 shared axes (the walk reaches all 200, asserted), and
+the comparison function takes 039's cast so the two walk the same index. New:
+[38] holds the swap's every case (re-run, 001 re-applied, a hand rebuild, a
+staging index adopted) and pairs the body's cast with the plan — an Index
+Scan under the body's ORDER BY, none under the raw column's; [4] reads the
+halfvec expression; [8e] and [20] pin 039 as the last definer, and [20]
+compares the CTEs to 014's with the cast taken out. `test-upgrade.ts` [17]
+applies 039 onto a populated 038: no row, signature or privilege moves, the
+walk agrees with the exact answer before and after, a re-apply keeps the
+index OIDs, and an INVALID staging index is rebuilt (made by flipping
+`pg_index.indisvalid`, which PGlite refuses and a server allows).
+`test-live.ts` [5d] applies the last definer before it drops the index — 039's
+swap would otherwise build one over its 25,000 rows. And the first CI run of
+this branch failed ten assertions of `test-schema.ts` [17b] — the hybrid
+search's three-row fixture — with `match_thoughts` returning the near match
+and the distant note but not the exact match at cosine 1.0, on a run that
+passed locally every time. The likeliest cause: PGlite never vacuums, so by
+[17b] the HNSW index holds the thousands of rows every earlier section
+deleted, and whether a walk through those dead elements reaches every live
+row turns on the level each insert drew at random — inferred from the
+symptom rather than shown, since a local probe with 2,500 dead elements over
+four seeds returned all three rows each time. The two three-row sections
+([17b], [26]) now VACUUM after their DELETE, so the vector arm is measured
+over the rows it is given whatever the cause was. Any HNSW index between
+deletes and a vacuum has the same exposure, and had it before this change.
+922 / 501 / 210 assertions.
+
+**The bench.** `bench-hnsw.ts`'s after arm applies the whole tree, so from
+this change its section A recall and every walk tier are the halfvec index's
+at 64 dimensions. A corpus kept under an earlier tree (change 72) does NOT
+take 039 on its next reuse: the marker's physical fingerprint covers the two
+HNSW indexes by relfilenode, and 039's swap is a new relation under the old
+name, which the fingerprint would read as `rewritten` — by design, since the
+marker's section L sizes and build times would describe a graph that no
+longer exists. The bench reads the migrator's dry run before the live run and
+refuses a reuse on which 039 is pending there, before anything is built
+(the alternative was the rebuild inside `migrate.ts` under the server's
+default `maintenance_work_mem`, hours at ten million rows, and then the
+refusal; `test-bench-reuse.ts` [7] holds it). Remove the kept volume and
+build the corpus again under this tree (`db/README.md` names the command;
+the ten-million-row volume `hnsw10m` on the development machine is such a
+corpus). A fresh run at the two large scales then prints the halfvec
+index's sizes and build times in section L where change 28's table holds the
+vector index's. Run at the two published scales under 039, section A's
+after arm reads 8.3 of 10 in the exact top-10 at `ef_search` 40 and 10.0 at
+400 for 10,000 rows, 4.8 and 9.6 for 100,000 — change 28's table has
+8.2 / 10.0 and 5.0 / 9.5 under
+the vector index, the difference inside a pass's spread — at 1.31 and 1.91 ms
+for the default path (1.82 and 3.25 there, on a different day's machine).
+Change 28's tables stand; section L still records the before arm's vector
+index sizes, and at 64 dimensions a float4 vector is 256 bytes, so the
+page-packing gain above is smaller there and unmeasured.
+
+**Follow-ups.** halfvec's HNSW ceiling is 4,000 dimensions where vector's is
+2,000, and `qwen3-embedding:4b`'s native 2,560 would fit — but 001 still
+builds the vector index first at the column's width, so `config.mjs`'s
+ceiling stays 2,000; lifting it means 001's index becoming conditional, a
+change of its own. SMD-1465 (size `ef_search` on real vectors) has its
+unquantised baseline in the sweep table above.
+
+**Review.** Three high-effort passes, each a fresh reviewer over the saved
+diff with its own lens, each triaged and verified by the suites. Pass 1
+(correctness and teeth) found the decision prose contradicting its own
+table, the [5b] regression misread as fp16 when it was the plan cache, an
+exact reference that was not exact by construction, the swap block trusting
+names, the DROP's lock, and a harness that could be pointed at its own
+source. Pass 2 (the operator and the upgrade path) found the kept bench
+corpus's dead end, the build under the server's default memory, the failure
+state preflight could not see, "exact" over-claimed, and the shipped-name
+check weaker than the staging one. Pass 3 opened on pass 2's fixes — the
+bench should refuse before the build rather than document it, the new
+preflight scenarios left two branches undriven, the migrator's count came
+from the wrong statistic, the shipped-name remedy dropped the live index,
+the same-source guard compared hostnames literally — the stop signal, and
+each was fixed. Declined: a `cteLimit` parameter on the harness's statement
+builder in place of the string split that makes the true-MAX statement — the
+pass itself said nothing breaks today, and the split is one line beside its
+reason.
+
+Upstream status: **not applicable** — upstream's `match_thoughts` is the
+guide's single-table function over a Supabase index. **Unfiled.** Reproduce:
+`cd evals && OB1_EVAL_QUANT_SOURCE=<a LongMemEval database> OB1_EVAL_LME=<its
+file> OB1_EVAL_EMBED=<its model>@1024 OB1_PG_KEEP=quant OB1_PG_SHM_SIZE=3g
+../db/with-postgres.sh bun eval-quant.ts --plans`; `bun db/test-schema.ts`
+[38]; `./with-postgres.sh bun test-upgrade.ts` [16].
+
+### 82. A live row an HNSW walk cannot reach is the geometry, not the vacuum — `db/hnsw-graph.ts` reads the disconnected graph the suite's tied vectors build, and [4]/[11]/[15] join [7] on `match_thoughts`' exact branch (SMD-1632)
 
 **The finding.** SMD-1574 moved `test-live.ts` [7]'s found-by reads off the HNSW
 walk after they flaked in CI, and filed this to explain the walk returning none
@@ -12598,6 +13269,126 @@ git tag -a upstream-pin-$(git rev-parse --short upstream/main) \
 
 Then update the pin table at the top of this file.
 
+### Vendored content: audit once, hold the delta
+
+Everything under `recipes/`, `integrations/`, `extensions/`, `skills/`,
+`schemas/`, `dashboards/` and `primitives/` is upstream's community tree,
+vendored wholesale at the pin. That means we ship its worst advice with its
+best, under this repository's name, in a repo whose stated differentiator is
+that the core is tested and the auth path is hardened. The rule (SMD-1251,
+change 51): **we audit the tree once and hold the delta**, and a standing check
+carries the audit so a rebase cannot quietly undo it. Four rules are audited
+today. Writes around the functions (SMD-1228, change 69; SMD-1524, change
+71): check 10 fails the build on a PostgREST `.update(`/`.upsert(`/`.insert(`
+on `thoughts` whose payload carries `content` or `embedding` — inline or
+through an object the file fills — and on a SQL `UPDATE thoughts … SET` of
+either column or `INSERT INTO thoughts (…)` naming one: the raw update nine
+vendored files made around `update_thought` and the 3-argument
+`upsert_thought`, leaving a stale fingerprint, a stale model label and the
+previous vector's windows, and the raw insert eight more made around the
+capture, leaving no fingerprint and no label at all; with counted per-file
+exceptions for a file whose README says it bypasses the functions — seven,
+each a database of its own, a function body shown, or the test's fixture.
+Credentials (SMD-1252, change 64; SMD-1455, change 67): check 8 fails
+the build on a value read from the environment under a credential's name
+compared with an equality operator — the one shared plaintext key seven
+extension servers, and then seventeen more vendored files, compared with `!==`
+before they became consumers of `server-portable/auth.ts` — with counted
+per-file exceptions, and the list has been empty since change 67. Core
+ownership (SMD-1250, change 58): check 7 fails the build on any
+vendored statement that redefines, drops or re-comments a function
+`db/migrations/` owns, the owned set read from the migrations, with counted
+exceptions for the files that create a brain rather than add to one. And
+shell safety — `scripts/check-fork-consistency.mjs` check 6 fails the build on
+Codex's sandbox-bypass flag or its aliases, Claude Code's skip-permissions flag
+or mode, any allow rule that grants all of `Bash` or a prefix of a network
+client or interpreter, or any spawn through a shell (the `shell:` option with a
+non-false value, `exec`/`execSync`, `os.system`, an explicit `sh -c`/`cmd /c`
+argv), in every non-binary, non-ignored file under those seven directories,
+with a reviewed exception list — per file *and* per pattern, and *counted* —
+for prose that names a flag in order to say it was removed, and probe lists the
+check runs against its own patterns on every run, positive and negative. A
+rebase that brings a new hit fails CI, and the choice is the same as it was at
+the pin: fix the vendored file and record the delta here, or list the exception
+with its reason. SMD-1250 landed in that shape as change 58, SMD-1252 as
+change 64, SMD-1455 as change 67, SMD-1228 as change 69 and SMD-1524 — the
+raw inserts change 69 left outside its rule — as change 71: the four rules
+named when the standard was decided are all audited and held, the last on
+both of its doors.
+
+### Landing a rebase on `main`, which is protected
+
+`main` is the working default and carries a ruleset: nine required status checks,
+no deletion, **no force-push**, and no bypass actors — it applies to admins too.
+That is deliberate, and it interacts with a rebase in one specific way.
+
+A rebase produces `siggymd/rebase-YYYYMMDD` with **rewritten history**, so it
+cannot fast-forward onto `main`. Two ways forward:
+
+**Open a pull request (normal case).** Required status checks mean **no push
+directly to `main` succeeds**, merge commit or not — a push carries commits CI has
+never seen, so the rule cannot be satisfied:
+
+```
+remote: - 9 of 9 required status checks are expected.
+```
+
+That is not a quirk of the merge; it is what requiring checks means. Everything
+reaching `main` goes through a PR, which is two commands:
+
+```bash
+gh pr create --fill --base main --head siggymd/rebase-$(date +%Y%m%d)
+gh pr merge --merge --auto        # lands itself once the nine checks pass
+```
+
+History keeps both lines, which is what happened when the fork's work first landed
+on `main`, and is the right default: the rebase is a reconciliation, not a
+replacement.
+
+**Reset `main` to the rebased line (rare).** Only if you want `main`'s history to
+*be* the rebased history — cleaner, but it discards the record of how the fork
+diverged. This is a force-push and the ruleset will refuse it:
+
+```
+remote: - Cannot force-push to this branch
+```
+
+To do it anyway — as with any push that must bypass the checks — set the ruleset
+to `disabled`, push, and put it back:
+
+```bash
+gh api -X PUT repos/MHarris-SgyMd/OB1/rulesets/22189960 -f enforcement=disabled
+git push --force-with-lease origin main
+gh api -X PUT repos/MHarris-SgyMd/OB1/rulesets/22189960 -f enforcement=active
+```
+
+Prefer `--force-with-lease` over `--force` so a push that raced with someone else's
+is refused rather than silently discarding it.
+
+**Nothing forces the rewrite.** The pin is held by the annotated tag
+`upstream-pin-<sha>`, not by any branch, so `main`'s history never has to be
+rewritten to record where upstream was. Reach for the merge.
+
+**Drop a patch rather than carry it** if upstream fixes the same defect. Check
+issues #470 and #216 first — both are open with volunteers waiting, so fixes 3
+and possibly the auth work may arrive upstream.
+
+### Why we do not send these upstream
+
+`CONTRIBUTING.md:268` lists modifying "the core MCP server" as an automatic
+reject, and [PR #122](https://github.com/NateBJones-Projects/OB1/pull/122) was
+closed on exactly that basis:
+
+> The main change edits the core MCP server, which is explicitly out of scope for
+> community contributions in this repo… If we want this behavior upstream, it
+> needs to come through a focused maintainer-led path instead.
+
+Fixes 1–5 all live in `server/index.ts`. Fixes 6 and 7 are contributable in
+principle; note that [issue #482](https://github.com/NateBJones-Projects/OB1/issues/482)
+reports the upstream PR gate currently fails on **every** fork-originated PR.
+
+---
+
 ## Known issues we did NOT fix
 
 Deliberate. Recorded so nobody assumes they were missed.
@@ -12673,7 +13464,7 @@ Deliberate. Recorded so nobody assumes they were missed.
   the test corpus's problem (and quantised or binary vectors', SMD-1501) rather
   than a live brain's; no production check or capture-path verification is built
   for it, and `REINDEX` is not a remedy (a rebuild of an equidistant graph is no
-  more connected). See change 79 (SMD-1632) for the measurements and the
+  more connected). See change 82 (SMD-1632) for the measurements and the
   decision.
 ---
 

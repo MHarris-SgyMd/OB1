@@ -830,6 +830,24 @@ for (const m of reapply && !dryRun ? [] : migrations) {
     process.exit(1);
   }
 
+  // 039 builds two HNSW graphs over every vector the brain holds, in the
+  // session's maintenance_work_mem — 64 MB unless the operator sized it (its
+  // header has the rule: 2.5 KB a vector at 1,024 dimensions) — and prints
+  // nothing while it runs. Say what it is about to do, and with what, so the
+  // two can be compared before the wait rather than after it.
+  if (m.name.startsWith("039_")) {
+    // The larger of the planner's count and the statistics collector's: a
+    // restored or bulk-loaded brain that autovacuum has not analysed reports
+    // reltuples -1 or a stale figure, and that is the brain this line is for.
+    const count = (rel: string) => `GREATEST(COALESCE((SELECT c.reltuples FROM pg_class c WHERE c.oid = to_regclass('${rel}')), 0), COALESCE((SELECT s.n_live_tup FROM pg_stat_user_tables s WHERE s.relid = to_regclass('${rel}')), 0), 0)::bigint`;
+    const [r] = await sql.unsafe(`
+      SELECT ${count("thoughts")} AS t, ${count("thought_chunks")} AS c,
+             current_setting('maintenance_work_mem') AS mem,
+             current_setting('max_parallel_maintenance_workers') AS workers`);
+    const perVector = (2 * EMBEDDING_DIM + 450) / 1024; // a halfvec element and its neighbour lists, about
+    console.log(`  …  ${m.name}  builds two HNSW indexes over about ${(Number(r.t) + Number(r.c)).toLocaleString()} vectors (thoughts ${Number(r.t).toLocaleString()}, windows ${Number(r.c).toLocaleString()}) under maintenance_work_mem = ${r.mem} with ${r.workers} parallel workers — the graph wants about ${perVector.toFixed(1)} KB a vector at ${EMBEDDING_DIM} dimensions, ${Math.ceil(((Number(r.t) + Number(r.c)) * perVector) / 1024)} MB here (the file's header)`);
+  }
+
   // Each migration runs in its own transaction: a failure leaves earlier ones
   // applied and recorded, so a rerun resumes rather than starting over.
   try {

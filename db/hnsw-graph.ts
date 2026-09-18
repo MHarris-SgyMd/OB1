@@ -11,8 +11,9 @@
  * reads — pgvector 0.8.x's on-disk layout, through pageinspect's
  * `get_raw_page` — and computes reachability from the graph itself: every
  * element, its heap TIDs, its neighbour lists at every level, the meta page's
- * entry point; then a breadth-first walk over the level-0 lists from the
- * entry, and a join to the table so "live" means a row the session can see.
+ * entry point; then a breadth-first walk from the entry over the neighbour
+ * lists at every level, and a join to the table so "live" means a row the
+ * session can see.
  *
  *   bun hnsw-graph.ts --url $DATABASE_URL                       # both shipped indexes
  *   bun hnsw-graph.ts --url $DATABASE_URL --index thoughts_embedding_idx --json
@@ -20,7 +21,7 @@
  * pageinspect is superuser-only, so this is a diagnostic for a database you
  * administer — the test suites' containers, a local brain — not a check the
  * server can run on a managed database. No production check is built on it: a
- * real corpus does not have the hole (SMD-1632, FORK.md change 79), so one
+ * real corpus does not have the hole (SMD-1632, FORK.md change 82), so one
  * would never fire and would cost every capture a walk. The layout decoded here
  * is pgvector's `HnswMetaPageData`, `HnswElementTupleData` and
  * `HnswNeighborTupleData` (src/hnsw.h at 0.8.6); the magic number and the meta

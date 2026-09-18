@@ -22,7 +22,7 @@ later — migration 014 declares HNSW settings that older pgvector rejects.
 - To run `test-live.ts`: podman or docker, for a throwaway container
 - To run `test-upgrade.ts`, `bench-trgm.ts` or `bench-keyword.ts`: the same, and
   for the benchmarks a few minutes — they build tables up to 100,000 rows;
-  `test-bench-reuse.ts` the same and about three minutes (eight bench runs at
+  `test-bench-reuse.ts` the same and about three minutes (nine bench runs at
   150,000 rows).
   `bench-hnsw.ts` at a million rows and up wants most of an hour and a container with
   gigabytes of shared memory; its section below says how much
@@ -164,7 +164,7 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `890 assertions: 890 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `922 assertions: 922 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports twenty-three migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
@@ -201,7 +201,7 @@ thought_chunks` shows five columns since 013 added `context`.
 Migrations 024 onward are described in `FORK.md`, one numbered change each
 (024 change 45, 025 change 46, 026 change 47, 027 change 48, 028 change 49,
 029 change 54, 030 change 56, 031 change 57, 032 change 60, 033 change 63,
-034 change 65, 035 change 66, 036 change 68, 037 change 70).
+034 change 65, 035 change 66, 036 change 68, 037 change 70, 038 change 80, 039 change 81).
 
 ## What changed relative to the guide
 
@@ -978,14 +978,20 @@ OB1_BENCH_SCALES=1000000  OB1_PG_SHM_SIZE=4g  ./with-postgres.sh bun bench-hnsw.
 OB1_BENCH_SCALES=10000000 OB1_PG_SHM_SIZE=11g OB1_BENCH_MAINTENANCE_MEM=9GB ./with-postgres.sh bun bench-hnsw.ts
 
 # Before/after a redefinition of match_thoughts, from one tree: the after
-# arm's schema stops at the named migration (the function before 037 here).
-OB1_BENCH_UPTO=036 ./with-postgres.sh bun bench-hnsw.ts
+# arm's schema stops at the named migration (the function before 038 here;
+# 036 for the function before 037). Not with OB1_PG_KEEP below: a corpus cut
+# at a migration is measured and dropped, never kept.
+OB1_BENCH_UPTO=037 ./with-postgres.sh bun bench-hnsw.ts
 
 # Keep the corpus between passes (SMD-1493): the first run under a name builds
 # it and records the exact oracle's answers beside it (SMD-1562); every later
 # run under the same name finds it, checks it, applies any migration the tree
 # gained since, and skips the load, the builds and the exact pass. One corpus
-# per name.
+# per name. A corpus kept under a tree before migration 039 is the exception:
+# 039 rebuilds the two HNSW indexes as new relations, which the marker's
+# physical fingerprint would read as the corpus rewritten, so the bench
+# refuses such a reuse from the migrator's dry run, before anything is built
+# — remove the volume and build again under this tree.
 OB1_PG_KEEP=hnsw10m OB1_BENCH_SCALES=10000000 OB1_PG_SHM_SIZE=11g OB1_BENCH_MAINTENANCE_MEM=9GB ./with-postgres.sh bun bench-hnsw.ts
 podman volume rm ob1-pg-keep-hnsw10m   # when done with it (the exit line prints this, with the runtime as found)
 ```
@@ -1011,8 +1017,9 @@ filtered branch's statement with its plpgsql variables rewritten as parameters,
 and EXPLAINs it under both custom and generic planning on the filter the
 function routes to it (the walk on the thinnest tier above the threshold, the
 exact branch on the broadest under it, the routing count on the broadest, the
-thinnest and the empty filter, and 037's sample of the heap — which gates that
-count on a large table — on the same three), because plpgsql may use either
+thinnest and the empty filter, and the gate's sample of the heap — which gates
+that count on a large table: 037's TABLESAMPLE, eight TID range probes since
+038 — on the same three), because plpgsql may use either
 plan. Section D
 runs the walk's own statement on the thin and empty filters — which the
 function never walks for — under a forced generic plan, to show what the seeded
@@ -1239,8 +1246,8 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 890 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 500 assertions, real server, throwaway container
+bun test-schema.ts                          # 922 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 501 assertions, real server, throwaway container
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 ```
 
@@ -1282,7 +1289,7 @@ The kept corpus and the exact answers its marker keeps (SMD-1562) have a
 suite of their own:
 
 ```bash
-./with-postgres.sh bun test-bench-reuse.ts   # eight bench runs at 150,000 rows against one database, ~3 min
+./with-postgres.sh bun test-bench-reuse.ts   # nine bench runs at 150,000 rows against one database, ~3 min
 ```
 
 It runs the bench eight times against the wrapper's one throwaway database,
@@ -1398,16 +1405,39 @@ first assumed. See FORK.md's SMD-1632 section.
   populated 033 whose re-capture had just filled a pointer: the pointer stays
   (no data change), the next such re-capture fills nothing, and no capture
   takes the supersession lock.
-- **The routing count is gated by a sample of the heap** (migration 037).
-  [5d] loads 25,000 rows at the configured width, applies 037 with its floor
-  lowered to zero, and counts GIN index scans per call: the broad filter makes
-  one fewer under 037 than under 020's body (the collection skipped), the thin
-  filter the same number (the collection ran), and both answer exactly.
-  `test-schema.ts` [8e] holds the body's shape and the three conditions, and
-  judges five sample draws by the rule on a table too small to skip;
-  `test-upgrade.ts` [14] applies 037 onto a populated 036 — no column,
-  signature, row or privilege moves — and, after a hand re-apply of 014 puts
-  the 4-argument form back, applies 037 alone and finds one form again.
+- **The routing count is gated by a sample of the heap, drawn by TID range**
+  (migrations 037 and 038). [5d] loads 25,000 rows at the configured width,
+  applies 038 with its floor lowered to zero, and counts GIN index scans per
+  call: the broad filter makes exactly one fewer under 038 than under 020's
+  body (the collection skipped on every call — 037's TABLESAMPLE draw could
+  reach fewer than three pages and miss, so the band was 0.75–1.0 then), the
+  thin filter the same number (the collection ran), and both answer exactly.
+  `test-schema.ts` [8e] holds the body's shape — the TID range probe, DISTINCT
+  blocks, a LEFT join so an empty page counts among the pages drawn, the
+  probe's LIMIT — and the three conditions, then runs the statement read out
+  of the installed body on a compacted heap: five draws judged by the rule on
+  a table too small to skip, each reaching two pages or more; its plan, TID
+  Range Scans and no sequential scan; one block drawn eight times over counted
+  once; and, an eight-block band emptied and vacuumed, the probe pinned to it
+  reports eight pages drawn, no hit and eight buffers touched;
+  `test-upgrade.ts` [14] applies 037 onto a populated 036 and [16] 038 onto a
+  populated 037 — no column, signature, row or privilege moves — and each,
+  after a hand re-apply of 014 puts the 4-argument form back, applies the
+  migration under test alone and finds one form again.
+- **The walk's index is half precision** (migration 039). `test-schema.ts`
+  [38] holds the swap's every case — a re-run and a hand re-apply of 001
+  rebuild nothing, a vector index put back under the name is swapped again, a
+  staging index built beforehand is adopted — and pairs the body's cast with
+  the plan: an Index Scan by the index's name under the body's ORDER BY, none
+  under the raw column's; [20] compares the candidate CTEs to 014's with the
+  cast taken out. [5] holds both plans on a real server; [5d] applies 039
+  before it drops the index, since the swap would build one over its 25,000
+  rows. `test-upgrade.ts` [17] applies 039 onto a populated 038 — no row,
+  signature or privilege moves, the walk agrees with the exact answer before
+  and after, the index OIDs survive a re-apply, and an INVALID staging index
+  (an interrupted `CREATE INDEX CONCURRENTLY`) is rebuilt rather than adopted.
+  The recall, the bytes and the decision are `evals/eval-quant.ts`'s, on real
+  vectors (FORK.md change 81).
 - **The backfill holds the table** (migration 023). [6c] plants a legacy
   singleton and two twins, runs `backfill_content_fingerprints()` on one
   connection inside an open transaction, and has a second capture the
@@ -1712,7 +1742,18 @@ default — are unaffected.
   thousand rows ("could not resize shared memory segment"), so `deploy/compose.yaml`
   sets `shm_size` (`POSTGRES_SHM_SIZE`), and where it cannot be raised
   `max_parallel_maintenance_workers = 0` builds in ordinary backend memory.
-  `bench-hnsw.ts` section L has the build times by scale.
+  `bench-hnsw.ts` section L has the build times by scale. Migration 039
+  rebuilds both HNSW indexes over `embedding::halfvec` on a populated brain,
+  writers held for the build, in the migrating session's
+  `maintenance_work_mem` — the server's 64 MB unless the role was given more,
+  and past some 25,000 vectors that is pgvector's slow on-disk phase. Size it
+  first: about 2.5 KB per vector across `thoughts` and `thought_chunks`
+  (250 MB per 100,000, 2.5 GB per million), `/dev/shm` at least that under
+  parallel workers; with the graph in memory the build ran at about 100 µs a
+  row with four workers, and the migrator prints the vector count and the
+  setting in force just before 039. It adopts staging indexes built beforehand
+  with `CREATE INDEX CONCURRENTLY` under the names its header gives, which is
+  the path for a brain past a million rows.
 - **Data migration is not covered here.** These migrations create the schema. Moving
   rows is `pg_dump --data-only`, plus `bun reembed.ts --switch-model` if the model
   family changes at the same width.
