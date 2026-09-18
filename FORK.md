@@ -113,6 +113,7 @@ db/migrations/                   # fix 9   (moved here from server/ in fix 9)
 .github/metadata.schema.json     # fix 7   (3 additive optional fields)
 .github/workflows/fork-checks.yml# fix 7   (new file)
 scripts/check-fork-consistency.mjs # fix 7 (new file)
+scripts/mechanism-yield.mjs      # SMD-1711 (new file — review-pass yield report, not a gate)
 server-portable/                 # fix 8   (new dir — parallel, does not touch server/)
 db/                              # fix 9   (new dir — schema, runner, tests)
 deploy/                          # fix 12  (new dir — compose stack, smoke test)
@@ -13932,10 +13933,10 @@ reports the upstream PR gate currently fails on **every** fork-originated PR.
 ## Review passes: what caught a finding is written at the catch
 
 Measured 2026-09-18 over the commit log with `bun scripts/mechanism-yield.mjs`:
-225 review-pass commits across 65 tickets, 512 bulleted findings in the 34
+221 review-pass commits across 64 tickets, 512 bulleted findings in the 34
 tickets whose passes carry bullet bodies. Of the 512, **492 say what was wrong
-and what changed and never say what found it** — the mutant runs do, a handful
-of "found by driving it for real" lines do, nothing else. So "which review
+and what changed and never say what found it**. Twenty do: the mutant runs
+(12), a named reviewer (5), "found by driving it for real" (3). So "which review
 mechanisms pay" cannot be answered from the record, and a proposal to back-fill
 a corrections table from it (SMD-1711's origin) was dropped for that reason.
 
@@ -13948,7 +13949,7 @@ What the record does say, by a keyword classifier whose samples were read:
 - **The defect share does not fall with the pass number**: 44 / 44 / 51 / 51 %
   at passes one to four, higher on the few tickets that went further. Fourteen
   of 34 tickets found their last code or test defect at pass three or later, and
-  the four that ran five or more passes found one on their final pass. Passes
+  three of the four that ran five or more passes found one on their final pass. Passes
   stop because the operator stops them. The stop signal — a pass whose findings
   are the previous pass's own fixes — is a per-ticket judgement; a pass count
   is no proxy for it.
