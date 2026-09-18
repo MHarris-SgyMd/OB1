@@ -13840,6 +13840,20 @@ that turns returned ids into this history's sessions is one function both
 scorers call, and the resolve arm walks the shipped arm's ids for the same
 question and k instead of fetching the same list again. Tables identical.
 
+Two items the passes had declined were then applied on request. The rebuild
+matches a twin's session by a fingerprint computed client-side, one query for
+the store's fingerprints instead of one round trip per unmapped session — and
+the first run of it showed why the rule is checked against the store before it
+is used: JavaScript's `\s` and `toLowerCase` are not 003's rule. Postgres's
+`\s` leaves U+00A0, U+202F and U+FEFF alone and its `lower` turns İ into a
+plain i; the naive spelling disagreed on 47 of 19,825 rows and the run fell
+back to the server lookup, tables unchanged. The class now mirrors Postgres's
+and agrees on every row, and a disagreement on any future store still sends
+the twins to the server. And the `current` set refuses a gold session whose
+row also stands for a session dated differently, since the recency arms read
+the row's one date — never true here (the date leads the text a twin shares),
+now checked.
+
 **Upstream status:** not applicable — the eval is this fork's.
 
 ## Detached from the fork network

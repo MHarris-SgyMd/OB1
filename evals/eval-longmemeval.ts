@@ -130,6 +130,7 @@
  * here.
  */
 import { SQL } from "bun";
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync, renameSync } from "node:fs";
 import { loadEnv } from "./env.ts";
 import { EVAL_BASE, EVAL_HEADERS, applyPrompt, parseSpec } from "./lib.ts";
@@ -326,7 +327,7 @@ async function readMapOrRebuild(): Promise<SidMap> {
   // embedded count as loaded; a store under another model rebuilds to nothing
   // and the load phase re-embeds, as the lost map used to make it (first
   // review pass).
-  const rows = (await sql`SELECT id, metadata->>'lme_sid' AS sid FROM thoughts WHERE metadata ? 'lme_sid' AND embedding_model = ${spec.name}`) as { id: string; sid: string }[];
+  const rows = (await sql`SELECT id, metadata->>'lme_sid' AS sid, content_fingerprint AS fp FROM thoughts WHERE metadata ? 'lme_sid' AND embedding_model = ${spec.name}`) as { id: string; sid: string; fp: string | null }[];
   if (!rows.length) {
     // Say which it is — an empty store, or a store under another label —
     // before the load phase re-embeds everything (second review pass).
@@ -335,11 +336,39 @@ async function readMapOrRebuild(): Promise<SidMap> {
     return {};
   }
   const map: SidMap = {};
-  for (const r of rows) map[r.sid] = r.id;
+  const byFingerprint = new Map<string, string>();
+  for (const r of rows) { map[r.sid] = r.id; if (r.fp) byFingerprint.set(r.fp, r.id); }
+  // The unmapped sessions are matched by fingerprint computed HERE — 003's
+  // rule, sha256 of lower(trim(regexp_replace(text, '\s+', ' '))) — so a
+  // partly loaded store costs one query, not one per unloaded session with its
+  // transcript on the wire. JavaScript's `\s` and `toLowerCase` are NOT that
+  // rule: Postgres's `\s` leaves U+00A0, U+202F and U+FEFF alone and its
+  // `lower` turns the dotted İ (U+0130) into a plain i, where JavaScript
+  // collapses the three and adds a combining dot — 47 of this corpus's 19,825
+  // rows differ under the naive spelling. The class below is JavaScript's
+  // whitespace minus those three, the İ is mapped first, and the rule is still
+  // not trusted: it is checked against every row whose session is in memory,
+  // and one disagreement sends the twins back to the server-side lookup.
+  // (Third pass's efficiency item, applied on request.) Code points are
+  // spelled with fromCharCode because two of them are line terminators in
+  // source.
+  const pgSpace = new RegExp("[\\t\\n\\v\\f\\r " + [0x1680, 0x2028, 0x2029, 0x205f, 0x3000].map((c) => String.fromCharCode(c)).join("") + String.fromCharCode(0x2000) + "-" + String.fromCharCode(0x200a) + "]+", "g");
+  const dottedI = String.fromCharCode(0x130);
+  const fingerprintOf = (text: string) => createHash("sha256").update(text.replace(pgSpace, " ").replace(/^ | $/g, "").split(dottedI).join("i").toLowerCase(), "utf8").digest("hex");
+  let checked = 0, disagreed = 0;
+  for (const r of rows) {
+    const s = sessions.get(r.sid);
+    if (!s || !r.fp) continue;
+    checked++;
+    if (fingerprintOf(s.text) !== r.fp) disagreed++;
+  }
+  const clientRule = checked > 0 && disagreed === 0;
   let twins = 0;
   for (const s of sessions.values()) {
     if (map[s.sid]) continue;
-    const hit = (await sql`SELECT id FROM thoughts WHERE content_fingerprint = content_fingerprint_of(${s.text}::text) AND metadata ? 'lme_sid' AND embedding_model = ${spec.name}`) as { id: string }[];
+    const hit = clientRule
+      ? [byFingerprint.get(fingerprintOf(s.text))].filter((id): id is string => id !== undefined).map((id) => ({ id }))
+      : (await sql`SELECT id FROM thoughts WHERE content_fingerprint = content_fingerprint_of(${s.text}::text) AND metadata ? 'lme_sid' AND embedding_model = ${spec.name}`) as { id: string }[];
     if (hit.length !== 1) continue;
     // A twin's questions reach the row only through the load phase's merge,
     // which a load that died between the upsert and the merge never ran; the
@@ -352,7 +381,8 @@ async function readMapOrRebuild(): Promise<SidMap> {
     twins++;
   }
   writeMap(map);
-  console.log(`▸ no map at ${MAP_PATH}; rebuilt ${Object.keys(map).length} entries from the store's lme_sid under ${spec.name} (${twins} fingerprint twins matched by fingerprint, their questions merged)`);
+  const how = clientRule ? `client-side, the rule checked on ${checked} rows` : `server-side: the client rule disagreed with the store on ${disagreed} of ${checked} rows`;
+  console.log(`▸ no map at ${MAP_PATH}; rebuilt ${Object.keys(map).length} entries from the store's lme_sid under ${spec.name} (${twins} fingerprint twins matched ${how}, their questions merged)`);
   return map;
 }
 
@@ -532,6 +562,7 @@ async function scoreCurrent(map: SidMap, idToSids: Map<string, string[]>): Promi
   // one stating the value the later one updates. A question outside the shape
   // would make "current" a guess, so the run refuses instead.
   type Pair = { q: ScoreQ; stale: string; current: string; gapDays: number; hay: Set<string> };
+  let twinGolds = 0;
   const pairs: Pair[] = use.map((q) => {
     if (q.answer_session_ids.length !== 2) throw new Error(`CONTROL FAILED: ${q.question_id} has ${q.answer_session_ids.length} gold sessions, not the two a knowledge update has.`);
     const [a, b] = q.answer_session_ids.map((sid) => {
@@ -541,13 +572,25 @@ async function scoreCurrent(map: SidMap, idToSids: Map<string, string[]>): Promi
       return { sid, t: Date.parse(iso) };
     });
     if (a.t === b.t) throw new Error(`CONTROL FAILED: ${q.question_id}'s gold sessions share a date; neither is the update.`);
+    // A gold on a twin row: the recency arms read the row's one created_at,
+    // so every session the row stands for must carry this gold's date. They
+    // do by construction — twins share the text and the date leads it — and
+    // the run checks rather than assumes (third pass's item, applied on
+    // request).
+    for (const g of [a, b]) {
+      for (const other of (idToSids.get(map[g.sid]) ?? []).filter((sid) => sid !== g.sid)) {
+        const so = sessions.get(other);
+        if (so && so.date !== sessions.get(g.sid)!.date) throw new Error(`CONTROL FAILED: gold session ${g.sid} of ${q.question_id} shares a row with ${other}, dated ${so.date} against its ${sessions.get(g.sid)!.date}; the row's created_at cannot be both.`);
+        if (so) twinGolds++;
+      }
+    }
     const [stale, current] = a.t < b.t ? [a, b] : [b, a];
     return { q, stale: stale.sid, current: current.sid, gapDays: (current.t - stale.t) / 86_400_000, hay: new Set(q.haystack_session_ids) };
   });
   const gaps = pairs.map((p) => p.gapDays).sort((x, y) => x - y);
   console.log(`▸ the current-value question over ${pairs.length} knowledge-update questions — ${EMBED_MODEL}`);
   const median = gaps.length % 2 ? gaps[(gaps.length - 1) / 2] : (gaps[gaps.length / 2 - 1] + gaps[gaps.length / 2]) / 2;
-  console.log(`  stale → current gap: median ${median.toFixed(0)} days, min ${gaps[0].toFixed(0)}, max ${gaps[gaps.length - 1].toFixed(0)}`);
+  console.log(`  stale → current gap: median ${median.toFixed(0)} days, min ${gaps[0].toFixed(0)}, max ${gaps[gaps.length - 1].toFixed(0)}; ${twinGolds} gold sessions share a row with another session, dates agreeing`);
 
   // The chain precondition: what a resolving read has to walk. With pointers in
   // the store the arm walks THEM — superseded → superseder, the read as it
