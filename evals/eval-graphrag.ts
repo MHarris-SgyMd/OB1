@@ -124,6 +124,10 @@ const REL_PRIOR = `CASE e.relation
 // way --k does, rather than crash on an empty sweep later.
 if (KPRIMES.length === 0) { console.error("OB1_GRAPH_KPRIME needs a comma list of positive integers."); process.exit(2); }
 if (HOPS.length === 0) { console.error("OB1_GRAPH_HOPS needs a comma list of positive integers."); process.exit(2); }
+// The scarcity probe's starved vector budgets (SMD-1738 phase 2), validated up here with
+// the other knobs so a bad value fails fast rather than after the corpus loads.
+const SCARCITY = numList(process.env.OB1_GRAPH_SCARCITY, [1, 3, 5, 10]);
+if (SCARCITY.length === 0) { console.error("OB1_GRAPH_SCARCITY needs a comma list of positive integers."); process.exit(2); }
 function median(xs: number[]): number { const s = xs.slice().sort((a, b) => a - b); return s.length ? s[Math.floor(s.length / 2)] : 0; }
 // --scale N: skip the corpus and synthesize N thoughts + a synthetic entity graph, to
 // measure the EXPANSION stage latency at scale (latency only — quality on a planted
@@ -775,7 +779,6 @@ const cellOf = new Map(sweep.map((c) => [`${c.kprime}:${c.hops}`, c]));
 // Starve the vector budget b and ask whether the edge-aware graph expansion recovers
 // answers vector-top-b misses — the ticket's "answer is not the nearest neighbour", and
 // SMD-1707's at-scale regime where ANN recall degrades.
-const SCARCITY = numList(process.env.OB1_GRAPH_SCARCITY, [1, 3, 5, 10]);
 const scarcity = SCARCITY.map((b) => ({ b, vec: [] as { q: Question; s: Score }[], typed: [] as { q: Question; s: Score }[] }));
 // Entity-membership (aggregation): graph exact membership vs vector vs keyword, on the
 // membership objective. Only the questions carrying a needle.
@@ -937,15 +940,16 @@ console.log(`\n  BEYOND RECALL — does the graph, used as a typed/weighted stru
 const cAll = mean(results.map((r) => r.scores.composed.recall)), tAll = mean(results.map((r) => r.scores["comp-typed"].recall));
 const cN = mean(results.map((r) => r.scores.composed.ndcg)), tN = mean(results.map((r) => r.scores["comp-typed"].ndcg));
 console.log(`\n  (a) edge properties — typed/weighted expansion (best K′=${headTK}, ${headTH} hop) vs untyped vs vector`);
-console.log(`      recall@${K}: untyped ${cAll.toFixed(2)} → typed ${tAll.toFixed(2)} (vector ${mean(results.map((r) => r.scores.vector.recall)).toFixed(2)}); nDCG@${K}: untyped ${cN.toFixed(2)} → typed ${tN.toFixed(2)} — using the relations helps ranking${tAll > cAll ? ", and recall," : " but not recall,"} not enough to pass a ceiling'd vector`);
+const vRecAll = mean(results.map((r) => r.scores.vector.recall));
+console.log(`      recall@${K}: untyped ${cAll.toFixed(2)} → typed ${tAll.toFixed(2)} (vector ${vRecAll.toFixed(2)}); nDCG@${K}: untyped ${cN.toFixed(2)} → typed ${tN.toFixed(2)} — using the relations helps ranking${tAll > cAll ? " and recall" : " but not recall"}${tAll + 0.005 < vRecAll ? ", not enough to pass a ceiling'd vector" : ", now matching vector"}`);
 
 // (b) scarcity: does graph recover what a starved vector budget misses?
 console.log(`\n  (b) recall-complement under a starved vector budget b — vector-top-b alone vs edge-aware composed(K′=b)`);
 console.log(`      b     vec-top-b R@${K}   composed R@${K}   Δ   |   (multi-hop) vec → composed`);
-let scarcityWin = false;
+const scWin = scarcity.find((sb) => arm(sb.typed) - arm(sb.vec) >= 0.02); // the tightest budget where the graph recovers recall
+const scarcityWin = !!scWin;
 for (const sb of scarcity) {
   const v = arm(sb.vec), t = arm(sb.typed), vM = armMH(sb.vec), tM = armMH(sb.typed);
-  if (t - v >= 0.02) scarcityWin = true;
   console.log(`      ${String(sb.b).padStart(2)}       ${v.toFixed(2)}          ${t.toFixed(2)}       ${(t - v >= 0 ? "+" : "") + (t - v).toFixed(2)}  |   ${vM.toFixed(2)} → ${tM.toFixed(2)}`);
 }
 console.log(`      → ${scarcityWin ? "graph expansion DOES recover answers a starved vector misses — a real benefit where recall is scarce (the at-scale regime)" : "graph expansion does not recover a starved vector's misses here — the seeds' entities do not reach the missing answers"}`);
@@ -954,7 +958,7 @@ console.log(`      → ${scarcityWin ? "graph expansion DOES recover answers a s
 if (membership.length) {
   const res = membership.filter((m) => m.resolved);
   console.log(`\n  (c) exact entity-membership — graph vs vector vs keyword, recall@${K}`);
-  console.log(`      ${res.length} of ${membership.length} needles resolve to an entity with mentions; the rest are literal-string aggregations ("Decision:", "Promote") — keyword's job, not the graph's, so entity-membership does not apply to them`);
+  console.log(`      ${res.length} of ${membership.length} needles resolve to an entity with mentions; the rest are literal-string aggregations ("Decision:", "Promote") — keyword's job — or resolve to an entity the extraction under-covers, so entity-membership does not cleanly apply`);
   if (res.length) {
     const g = mean(res.map((m) => m.graph.recall)), v = mean(res.map((m) => m.vector.recall)), k = mean(res.map((m) => m.keyword.recall));
     console.log(`      on the ${res.length} entity needles: graph ${g.toFixed(2)} | vector ${v.toFixed(2)} | keyword ${k.toFixed(2)} — ${g > Math.max(v, k) + 0.02 ? "graph's exact membership wins" : g >= Math.max(v, k) - 0.02 ? "graph ties vector/keyword (exact membership, no lift on this vocabulary-dense corpus)" : "graph trails — the extracted entity's mentions do not cover the labelled set"}`);
@@ -977,12 +981,12 @@ const [rel] = await sql.unsafe(`
   FROM pairs p JOIN thoughts a ON a.id = p.ta
   LEFT JOIN LATERAL (SELECT o.id FROM thoughts o WHERE o.id <> a.id ORDER BY o.embedding <=> a.embedding LIMIT ${K}) top ON top.id = p.tb`) as { total: number; blind: number }[];
 console.log(`\n  (d) relational structure vector can't see (descriptive) — of ${rel.total} issue pairs joined by a depends_on/uses edge, ${rel.blind} (${rel.total ? Math.round(100 * rel.blind / rel.total) : 0}%) have the linked sibling OUTSIDE the issue's vector top-${K}`);
-console.log(`      → ${rel.total && rel.blind / rel.total >= 0.5 ? "a real store of relational neighbours a single vector pass does not surface; the graph is the only tier that reaches them (the value the scarcity probe (b) turns into recovered recall)" : "vector surfaces most strong-edge siblings here, so the graph adds little relational reach on this corpus"}`);
+console.log(`      → ${rel.total && rel.blind / rel.total >= 0.5 ? "a real store of relational neighbours a single vector pass does not surface; the graph is the only tier that reaches them" + (scarcityWin ? " (the value the scarcity probe (b) turns into recovered recall)" : "") : "vector surfaces most strong-edge siblings here, so the graph adds little relational reach on this corpus"}`);
 
 // ── Bottom line, integrated across axes ──────────────────────────────────────
 console.log(`\n  BOTTOM LINE (multi-axis, SMD-1738):`);
 console.log(`    • Against a FULL-budget vector on this question set the graph stage ${pass ? "clears the pre-registered bar (see VERDICT above)" : "does not pay — the bar FAILS (vector is at ceiling; nothing to recover)"}, and the edge properties ${tAll > cAll ? `lift recall to ${tAll.toFixed(2)} and` : "only"} sharpen ranking (nDCG ${cN.toFixed(2)}→${tN.toFixed(2)})${tAll > cAll ? "." : ", not recall."}`);
-console.log(`    • ${scarcityWin ? `But under a STARVED vector budget the edge-aware graph is a real recall complement (b=${scarcity[0].b}: ${arm(scarcity[0].vec).toFixed(2)}→${arm(scarcity[0].typed).toFixed(2)}) — exactly the at-scale regime where a single ANN loses recall (SMD-1707). That is where a graph tier earns its place, not as a replacement for a healthy vector recall.` : "And even under a starved vector budget the graph did not recover the misses — no regime here favours it."}`);
+console.log(`    • ${scWin ? `But under a STARVED vector budget the edge-aware graph is a real recall complement (b=${scWin.b}: ${arm(scWin.vec).toFixed(2)}→${arm(scWin.typed).toFixed(2)}) — exactly the at-scale regime where a single ANN loses recall (SMD-1707). That is where a graph tier earns its place, not as a replacement for a healthy vector recall.` : "And even under a starved vector budget the graph did not recover the misses — no regime here favours it."}`);
 console.log(`    • Verdict: not a substitute, and not an everyday stage over a ceiling'd vector — a CONDITIONAL recall/precision tier for the scarce-recall regime (deep scale, tight ANN budgets, relational/entity-membership question types this corpus barely poses). A product path is a scale-regime test away, not a here-and-now build (SMD-1038 posture).`);
 
 console.log(`\n  cost`);
