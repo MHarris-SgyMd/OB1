@@ -12885,14 +12885,18 @@ and 027 have carried it since.
 **The bench at a million rows, and what the pair could not say.** The
 before arm (`OB1_BENCH_UPTO=038`) and the after arm, each on its own
 container and corpus, agreed on every tier but two: the 5,000-row and 1%
-tiers walked HNSW under 038 (546 and 424 ms, 8.8 and 8.9 of the exact
-top-10) and were served exact from the GIN index under 039 (61 and 86 ms,
-10 of 10). That is not the clause. It is the planner on the knife edge
-change 28 named — at a million rows it serves filters "up to ~0.2%" from
-GIN and walks for 0.5% and 1%, and which side a 0.5% filter falls on
-depends on the statistics `VACUUM ANALYZE` sampled for that load; a second
-after run on a fresh corpus fell the same way (30 and 53 ms, 10 of 10), and
-a third container could have fallen either way. So the attribution was done
+tiers — both routed to the walk branch, with K=10 the exact threshold is
+1,000 — ran the walk statement as an HNSW walk under 038 (546 and 424 ms,
+8.8 and 8.9 of the exact top-10) and as a GIN bitmap with a sort under 039
+(61 and 86 ms, 10 of 10). That is not the clause. It is the edge change 28
+documented for exactly those two tiers: "between about half a percent and
+one percent of the table, the walk branch is on the planner's edge, and
+which side it lands on is decided by the statistics sample" — 332 and 283 ms
+walking HNSW in two of its passes, 23 and 38 served from GIN in the third,
+same rows, a fresh `ANALYZE` each time. Two containers are two statistics
+samples; a second after run on a fresh corpus fell the GIN way too (30 and
+53 ms, 10 of 10), and a third could have fallen either way. So the
+attribution was done
 on ONE corpus, kept under `OB1_PG_KEEP=jit1m`: the function with the clause
 (A), with it `RESET` — 038's function — (B), and with it again (A′), twenty
 seeded queries per tier on a fresh connection each, so every arm walks the

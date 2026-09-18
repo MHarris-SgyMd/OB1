@@ -428,6 +428,36 @@ else {
          "match_thoughts without 039's jit clause still starts, and the candidate-scan check names the clause, the compile it lets back in and 039 as the remedy");
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("039") });
   assert(/candidate scan.*and match_thoughts jit = off \(039\)/s.test((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE })).out), "…and 039 re-applied is reported as carrying it");
+  // The other wording, with 039 RECORDED: "apply 039" would be a no-op for a
+  // plain run, so the remedy is the ALTER that puts the clause back — and,
+  // with the keyword estimate reset beside it and 019 recorded too, the
+  // Put-it-back list names both functions. Then 039 recorded but the ledger
+  // lacking 019 with the keyword estimate reset: the file for 039's clause
+  // and the keyword ALTER beside it, since 039 does not define that function
+  // (review pass 1). The ledger is created for these probes and dropped after.
+  const led039 = new SQL({ url: LIVE, max: 1 });
+  await led039.unsafe(`CREATE TABLE schema_migrations (name text PRIMARY KEY, sha256 text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())`);
+  await led039.unsafe(`INSERT INTO schema_migrations (name, sha256) VALUES ('019_match_thoughts_plan_and_rows.sql', 'test'), ('039_match_thoughts_jit_off.sql', 'test')`);
+  await led039.unsafe(`ALTER FUNCTION ${MATCH_THOUGHTS_SIGNATURE} RESET jit`);
+  await led039.unsafe(`ALTER FUNCTION search_thoughts_keyword(text, int, int, jsonb) ROWS 1000`);
+  await led039.close();
+  const recorded039 = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+  assert(/candidate scan.*carries enable_seqscan = off but search_thoughts_keyword's row estimate is 1000 rather than 25 — a redefinition reset what 019 declared; every query[^\n]*; and it does not carry jit = off although migration 039 is recorded as applied — a later redefinition dropped its SET clause/s.test(recorded039.out),
+         "with 019 and 039 recorded, a reset keyword estimate and a dropped jit clause are both named, the clause as recorded-but-dropped");
+  assert(/Put it back[^\n]*ALTER FUNCTION match_thoughts\(vector,double precision,integer,jsonb,double precision,double precision\) SET jit = off; ALTER FUNCTION search_thoughts_keyword\(text, int, int, jsonb\) ROWS 25;/.test(recorded039.out),
+         "…with one ALTER per function as the remedy — SET jit = off for match_thoughts, ROWS 25 for the keyword function");
+  const led039b = new SQL({ url: LIVE, max: 1 });
+  await led039b.unsafe(`DELETE FROM schema_migrations WHERE name LIKE '039%'`);
+  await led039b.close();
+  const unrecorded039 = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+  assert(/Apply db\/migrations\/039_match_thoughts_jit_off\.sql\. Then put the keyword estimate back: SELECT '\[1\]'::vector; ALTER FUNCTION search_thoughts_keyword\(text, int, int, jsonb\) ROWS 25;/.test(unrecorded039.out),
+         "…and with 039 not recorded the remedy is 039's file for the clause and the keyword ALTER beside it, which 039 cannot restore");
+  const unled039 = new SQL({ url: LIVE, max: 1 });
+  await unled039.unsafe(`DROP TABLE schema_migrations`);
+  await unled039.unsafe(`ALTER FUNCTION search_thoughts_keyword(text, int, int, jsonb) ROWS 25`);
+  await unled039.close();
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("039") });
+  assert(/candidate scan.*declares enable_seqscan = off and ROWS 10, search_thoughts_keyword ROWS 25 \(019\), and match_thoughts jit = off \(039\)/s.test((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE })).out), "…and everything put back is reported ok again");
 
   /**
    * The other state 020's header names: an earlier migration re-applied by hand

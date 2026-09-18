@@ -117,7 +117,7 @@
 --     disabled node; no finite threshold is safely above it, and "off" says
 --     what is meant.
 --   * Not left stated. 038 stated the premise; a database-level
---     `enable_nestloop = off` gives every fresh connection 41–59 ms a call
+--     `enable_nestloop = off` gives every fresh connection 41–67 ms a call
 --     with nothing in preflight, the ledger or the rows to show it.
 --   * Not a plan mode. 038's sample adopts the generic plan by design (both
 --     modes price it alike); the walk's plan mode is SMD-1464's question,
@@ -136,8 +136,10 @@
 --   * The clause dropped by a later redefinition. CREATE OR REPLACE resets
 --     proconfig, exactly as it resets 014's and 019's clauses, and the
 --     ledger cannot see it. preflight's `candidate scan` check (019's) reads
---     `jit = off` beside `enable_seqscan = off` and ROWS 10 and prints the
---     ALTER FUNCTION for whichever is missing; db/test-schema.ts [20] pins
+--     `jit = off` beside `enable_seqscan = off` and ROWS 10, names this
+--     file while the ledger does not record it and prints the ALTER
+--     FUNCTION for whichever clause is missing once it does (a plain run
+--     skips a recorded file); db/test-schema.ts [20] pins
 --     the three clauses on the shipped body and fails on a successor that
 --     drops one.
 --   * A disabled planner path, still. The plan under `enable_tidscan = off`
@@ -192,10 +194,15 @@
 --   between a million and ten million), so the clause has nothing to remove
 --   there and costs nothing. Two separately loaded containers (the bench's
 --   before and after arms) had disagreed on the 5,000-row and 1% tiers —
---   546 and 424 ms walking HNSW under 038, 61 and 86 served exact from GIN
---   under this file — which is the planner's knife-edge choice for a 0.5%
---   filter between two corpora's statistics (change 28's "~0.2%" line),
---   not this clause; the one-corpus run above is the attribution. The
+--   the walk statement's plan was the HNSW walk under 038 (546 and 424 ms,
+--   8.8 and 8.9 of 10) and a GIN bitmap with a sort under this file (61 and
+--   86 ms, 10 of 10) — which is the edge FORK.md change 28 documented for
+--   exactly those two tiers ("between about half a percent and one percent
+--   of the table, the walk branch is on the planner's edge, and which side
+--   it lands on is decided by the statistics sample": 332 and 283 ms in two
+--   of its passes, 23 and 38 in the third), between two corpora's sampled
+--   statistics and not this clause; the one-corpus run above is the
+--   attribution. The
 --   ten-million arm was not re-run for this file (the machine was shared);
 --   db/bench-hnsw.ts section C's third column is where the claim is read.
 --

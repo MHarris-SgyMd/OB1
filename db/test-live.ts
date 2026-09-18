@@ -580,7 +580,11 @@ console.log("\n[5e] A planner path disabled at session level no longer JIT-compi
   // function, what a redefinition without it leaves — pays the compile. The
   // forced-on plan and the timing run only where the server has JIT
   // (pg_jit_available()); the catalog and plan checks run everywhere.
-  const [{ jitAvailable }] = await sql.unsafe(`SELECT pg_jit_available() AS "jitAvailable"`);
+  // Both: a build with JIT, and a server whose own `jit` is on — an operator
+  // may have set it off at database level (the header calls that a valid
+  // setting), and then the mutant below has nothing to compile and the timing
+  // would fail for the wrong reason (review pass 1).
+  const [{ jitAvailable }] = await sql.unsafe(`SELECT pg_jit_available() AND current_setting('jit') = 'on' AS "jitAvailable"`);
   const N = 3_000;
   await sql`DELETE FROM thoughts`;
   const [{ hnswDef }] = await sql.unsafe(`SELECT pg_get_indexdef('thoughts_embedding_idx'::regclass) AS "hnswDef"`);
@@ -666,9 +670,13 @@ console.log("\n[5e] A planner path disabled at session level no longer JIT-compi
       await applyMigrations(URL_, { ...opts039, routeEstimateMinPages: 0 });
       assert(/(^|,)jit=off(,|$)/.test(await proconfig()), "…and 039 re-applied puts the clause back");
       assert(mutant - fixed >= 10, `through the function under ${label} the mutant pays the compile on every call: ${mutant.toFixed(2)} ms a call against ${fixed.toFixed(2)} with 039's clause (default ${baseline.toFixed(2)})`);
-      assert(fixed <= 3 * baseline + 2, `…and with the clause the disabled path costs what the default costs: ${fixed.toFixed(2)} ms against ${baseline.toFixed(2)} (the compile alone is ~50 ms)`);
+      // The bound is the compile's size, not a multiple of the default: the
+      // compile alone is 40–70 ms on this image, so 25 ms of headroom over the
+      // default kills the mechanism-removed value (~55) and survives a noisy
+      // runner (review pass 1).
+      assert(fixed <= baseline + 25, `…and with the clause the disabled path costs what the default costs: ${fixed.toFixed(2)} ms against ${baseline.toFixed(2)} (the compile alone is 40–70 ms)`);
     } else {
-      console.log("      (pg_jit_available() is false on this server: the forced-on plan and the timing did not run; the catalog and plan checks did)");
+      console.log("      (this server has no JIT, or its own jit is off: the forced-on plan and the timing did not run; the catalog and plan checks did)");
     }
   } catch (e) {
     failure = e;

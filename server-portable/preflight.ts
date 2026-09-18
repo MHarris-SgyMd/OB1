@@ -1450,8 +1450,12 @@ if (configFailed) {
               ...(missing019 && !ledgerHas019 ? ["019_match_thoughts_plan_and_rows.sql"] : []),
               ...(!jitOff && !ledgerHas039 ? ["039_match_thoughts_jit_off.sql"] : []),
             ];
+            // 039 redefines match_thoughts whole (019's clauses and ROWS 10 with
+            // it) but not search_thoughts_keyword: a reset keyword estimate with
+            // 019 recorded still needs its ALTER beside the file (review pass 1).
+            const keywordAlter = kwOff && !files.some((f) => f.startsWith("019")) ? ` Then put the keyword estimate back: SELECT '[1]'::vector; ALTER FUNCTION search_thoughts_keyword(text, int, int, jsonb) ROWS 25;  and carry it into the migration that redefined that function.` : "";
             const remedy = files.length
-              ? `Apply ${files.map((f) => `db/migrations/${f}`).join(" and ")}.`
+              ? `Apply ${files.map((f) => `db/migrations/${f}`).join(" and ")}.${keywordAlter}`
               : `Put it back — after any re-apply of a migration body, since CREATE OR REPLACE resets these: SELECT '[1]'::vector; ${alters.join(" ")}  and carry them into the migration that redefined the function.`;
             const estimates = [
               ...(rows !== 10 ? [`match_thoughts' row estimate is ${rows} rather than 10`] : []),

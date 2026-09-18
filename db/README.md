@@ -1372,9 +1372,10 @@ is on one index. It drops its marker table on the way out. Not in CI or
   takes the supersession lock.
 - **The routing count is gated by a sample of the heap, drawn by TID range**
   (migrations 037 and 038). [5d] loads 25,000 rows at the configured width,
-  applies 038 with its floor lowered to zero, and counts GIN index scans per
-  call: the broad filter makes exactly one fewer under 038 than under 020's
-  body (the collection skipped on every call — 037's TABLESAMPLE draw could
+  applies the last definer (039 — 038's body, run with `jit = off`) with its
+  floor lowered to zero, and counts GIN index scans per call: the broad
+  filter makes exactly one fewer under the gate than under 020's body (the
+  collection skipped on every call — 037's TABLESAMPLE draw could
   reach fewer than three pages and miss, so the band was 0.75–1.0 then), the
   thin filter the same number (the collection ran), and both answer exactly.
   `test-schema.ts` [8e] holds the body's shape — the TID range probe, DISTINCT
