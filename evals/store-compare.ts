@@ -16,15 +16,21 @@
  * vectors (evals/lib.ts `embed`, cached SHA-keyed exactly as eval-filtered.ts
  * caches), never against another store. The bracket is pgvector HNSW (the
  * incumbent `match_thoughts` walks), pgvectorscale StreamingDiskANN and pgvector
- * IVFFlat in the same Postgres, and Qdrant as an external engine — see
+ * IVFFlat in the same Postgres, and two external engines — Qdrant (a separate
+ * server) and LanceDB (embedded, in-process, no network hop; SMD-1662) — see
  * store-backends.ts for why the unit is a point and how each is forced onto its
  * own vector index.
  *
  *   ../db/with-postgres.sh is NOT used — this harness starts its own
- *   timescale/timescaledb-ha and qdrant containers and tears them down.
+ *   timescale/timescaledb-ha and qdrant containers and tears them down; LanceDB
+ *   is embedded, so it needs no container, only a temp dataset directory.
  *
- *   bun store-compare.ts
+ *   bun store-compare.ts                                   # every store, both externals
+ *   OB1_STORE_EXTERNAL=lance bun store-compare.ts          # pin to one external engine
  *   OB1_STORE_EFFORT=200 OB1_STORE_QUERIES=120 bun store-compare.ts
+ *
+ * OB1_STORE_EXTERNAL (default `qdrant,lance`) selects external engines; `lance`
+ * expands to one store per OB1_STORE_LANCE_INDEXES kind (default `ivfflat,hnswsq`).
  *
  * Data handling mirrors eval-filtered.ts: the corpus is internal engineering
  * data read from /tmp, embedded by a local Ollama, kept out of the repo.
@@ -38,8 +44,8 @@ import { DEFAULT_EMBEDDING_MODEL } from "../db/config.mjs";
 import { seededRandom } from "../db/test-support.ts";
 import { embed, parseSpec } from "./lib.ts";
 import {
-  PgEngine, QdrantEngine, dedupTopK, recallAt, nowMs,
-  type Point, type Filter, type Store, type PgIndexKind,
+  PgEngine, externalEngines, dedupTopK, recallAt, nowMs,
+  type Point, type Filter, type Store, type ExternalEngine, type PgIndexKind,
 } from "./store-backends.ts";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -161,10 +167,10 @@ const pct = (xs: number[], p: number) => {
 const mean = (xs: number[]) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : NaN);
 
 type Cell = { recall: number; p50: number; p95: number; short: number };
-type Result = { store: string; effort: string; build: string; bytes: number; cells: Map<string, Cell> };
+type Result = { store: string; effort: string; build: string; bytes: number; cells: Map<string, Cell>; note?: string };
 
 const pg = new PgEngine(DIM);
-const qd = new QdrantEngine(DIM);
+const externals = externalEngines(DIM);
 const results: Result[] = [];
 
 /** recall@K + latency for one store across every arm, at one effort. */
@@ -189,11 +195,19 @@ async function measure(store: Store, exact: Map<string, string[]>, effort?: numb
   return cells;
 }
 
+const liveExternals: ExternalEngine[] = [];
 try {
-  console.log(`  starting containers (pg ${DIM}-dim + qdrant), loading ${POINTS.length} points from ${DOCS.length} docs`);
-  await Promise.all([pg.start(), qd.start()]);
-  const [pgLoad, qdLoad] = await Promise.all([pg.load(POINTS), qd.load(POINTS)]);
-  console.log(`  loaded: pg ${(pgLoad / 1000).toFixed(1)}s, qdrant ${(qdLoad / 1000).toFixed(1)}s`);
+  console.log(`  starting pg ${DIM}-dim + ${externals.map((e) => e.name).join(", ")}, loading ${POINTS.length} points from ${DOCS.length} docs`);
+  await Promise.all([pg.start(), ...externals.map((e) => e.start())]);
+  const pgLoad = await pg.load(POINTS);
+  // Load each external tolerantly: one that fails to load or build is dropped
+  // with a note, and the rest (and every pg index) still land — the Qdrant
+  // tolerance pattern, now that a run carries more than one external store.
+  for (const e of externals) {
+    try { await e.load(POINTS); liveExternals.push(e); }
+    catch (err) { console.log(`  ${e.name} load FAILED — ${(err as Error).message.slice(0, 100)}`); }
+  }
+  console.log(`  loaded: pg ${(pgLoad / 1000).toFixed(1)}s, ${liveExternals.map((e) => `${e.name} ${(e.stat.loadMs / 1000).toFixed(1)}s`).join(", ")}`);
 
   // Exact ground truth per (query, arm), computed BEFORE the vector plan is forced.
   console.log("  computing exact-cosine ground truth (index kept out of the plan)");
@@ -218,21 +232,40 @@ try {
     }
     await pg.dropIndex(kind);
   }
-  results.push({ store: qd.name, effort: "default", build: (qd.stat.buildMs / 1000).toFixed(1) + "s", bytes: qd.stat.indexBytes, cells: await measure(qd, exact) });
+  // External stores. LanceDB's IVF_FLAT default recall is low until nprobes is
+  // raised, so an external with an effort knob gets both a default and a raised
+  // row (as the pg indexes do); Qdrant has none here, so it keeps its single
+  // default row — identical to what SMD-1037 measured, so it stays comparable.
+  for (const ext of liveExternals) {
+    const efforts: readonly [string, number | undefined][] = "setEffort" in ext
+      ? [["default", undefined], [`effort=${EFFORT}`, EFFORT]]
+      : [["default", undefined]];
+    for (const [label, eff] of efforts) {
+      try {
+        results.push({ store: ext.name, effort: label, build: (ext.stat.buildMs / 1000).toFixed(1) + "s", bytes: ext.stat.indexBytes, cells: await measure(ext, exact, eff), note: ext.stat.note });
+      } catch (err) {
+        console.log(`  ${ext.name} (${label}) measure FAILED — ${(err as Error).message.slice(0, 100)}`);
+      }
+    }
+  }
 
   // ── hybrid shape: one statement vs two round trips + a merge ────────────────
-  await hybrid();
+  await hybrid(liveExternals);
 
   // ── report ─────────────────────────────────────────────────────────────────
-  report(tableBytes, pgLoad, qdLoad);
+  report(tableBytes, pgLoad, liveExternals);
 } finally {
-  await Promise.all([pg.stop(), qd.stop()]);
+  await Promise.all([pg.stop(), ...externals.map((e) => e.stop())]);
 }
 
 // ── hybrid arm ────────────────────────────────────────────────────────────────
 
-async function hybrid(): Promise<void> {
+async function hybrid(externals: ExternalEngine[]): Promise<void> {
   console.log("\n  hybrid: loading a keyword side-table and comparing one statement vs two stores");
+  // The measure loop above left any effort-knobbed external (LanceDB) at its
+  // raised setting; reset every external to default so the two-store shapes are
+  // compared at the same effort, not one raised and one not.
+  for (const e of externals) if ("setEffort" in e) await (e as { setEffort(ef: number): Promise<void> }).setEffort(0);
   // Content-side table on the same Postgres — the keyword arm hybrid needs.
   await pg.raw("CREATE TABLE docs (ref text PRIMARY KEY, content text, tsv tsvector)");
   for (const d of DOCS) {
@@ -255,24 +288,39 @@ async function hybrid(): Promise<void> {
     kw: (d.title.match(/[A-Za-z][A-Za-z0-9]{3,}/g) ?? []).slice(0, 3).join(" ") || d.title,
   }));
 
-  const onePg: number[] = [], twoStore: number[] = [];
+  const onePg: number[] = [];
+  const twoStore = new Map<string, number[]>(externals.map((e) => [e.name, []]));
   // warmup
   await pgHybridOneStatement(store, hq[0].vec, hq[0].kw);
-  await twoStoreHybrid(hq[0].vec, hq[0].kw);
+  for (const e of externals) await twoStoreHybrid(e, hq[0].vec, hq[0].kw);
   for (const { vec, kw } of hq) {
     let t = nowMs();
     await pgHybridOneStatement(store, vec, kw);
     onePg.push(nowMs() - t);
-    t = nowMs();
-    await twoStoreHybrid(vec, kw);
-    twoStore.push(nowMs() - t);
+    // Each external runs the same two-store shape (its vector round trip + the
+    // Postgres keyword round trip, merged here). Qdrant pays a network hop;
+    // embedded LanceDB does not — the delta between their means is that hop.
+    for (const e of externals) {
+      t = nowMs();
+      await twoStoreHybrid(e, vec, kw);
+      twoStore.get(e.name)!.push(nowMs() - t);
+    }
   }
   await pg.dropIndex("hnsw");
   console.log(`\n### Hybrid: vector ⋈ keyword, ${hq.length} queries`);
   console.log("| shape | round trips | mean ms | p50 | p95 |");
   console.log("| --- | ---: | ---: | ---: | ---: |");
   console.log(`| Postgres, one statement | 1 | ${mean(onePg).toFixed(1)} | ${pct(onePg, 50).toFixed(1)} | ${pct(onePg, 95).toFixed(1)} |`);
-  console.log(`| Qdrant + Postgres keyword + merge | 2 | ${mean(twoStore).toFixed(1)} | ${pct(twoStore, 50).toFixed(1)} | ${pct(twoStore, 95).toFixed(1)} |`);
+  for (const e of externals) {
+    const ts = twoStore.get(e.name)!;
+    console.log(`| ${e.name} + Postgres keyword + merge | 2 | ${mean(ts).toFixed(1)} | ${pct(ts, 50).toFixed(1)} | ${pct(ts, 95).toFixed(1)} |`);
+  }
+  // The two-store legs run in parallel (Promise.all), so each mean here is
+  // max(vector, keyword) + merge — the round-trip *shape*, not the vector hop.
+  // The vector round-trip hop is isolated cleanly by the bare unfiltered
+  // search-latency delta (Qdrant's localhost round trip vs LanceDB's in-process
+  // call) in the latency table — reported by `report()`, not from these means.
+  console.log("  (two-store legs run in parallel; the isolated vector hop is the unfiltered search-latency delta above, not this mean.)");
 }
 
 /** One SQL statement: vector top-N over points ⋈ keyword over docs, RRF-fused. */
@@ -299,11 +347,11 @@ async function pgHybridOneStatement(store: Store, v: number[], kw: string): Prom
   return rows.map((r: { ref: string }) => String(r.ref));
 }
 
-/** Two stores: a Qdrant vector round trip, a Postgres keyword round trip, merged here. */
-async function twoStoreHybrid(v: number[], kw: string): Promise<string[]> {
+/** Two stores: an external vector round trip, a Postgres keyword round trip, merged here. */
+async function twoStoreHybrid(ext: Store, v: number[], kw: string): Promise<string[]> {
   const q = kw.replace(/'/g, "''");
   const [vhits, khits] = await Promise.all([
-    qd.search(v, FETCH, null),
+    ext.search(v, FETCH, null),
     pg.raw(`SELECT ref FROM docs WHERE tsv @@ plainto_tsquery('english','${q}') ORDER BY ts_rank(tsv, plainto_tsquery('english','${q}')) DESC LIMIT ${FETCH}`).then((rs) => rs.map((r: { ref: string }) => String(r.ref))),
   ]);
   const score = new Map<string, number>();
@@ -314,7 +362,7 @@ async function twoStoreHybrid(v: number[], kw: string): Promise<string[]> {
 
 // ── report ────────────────────────────────────────────────────────────────────
 
-function report(tableBytes: number, pgLoad: number, qdLoad: number): void {
+function report(tableBytes: number, pgLoad: number, externals: ExternalEngine[]): void {
   console.log(`\n### Recall@${K} vs exact, by filter arm (share of corpus in parentheses)\n`);
   const header = ["store", "effort", ...ARMS.map((a) => `${a.name}${a.share < 1 ? ` (${(100 * a.share).toFixed(1)}%)` : ""}`)];
   console.log("| " + header.join(" | ") + " |");
@@ -330,22 +378,38 @@ function report(tableBytes: number, pgLoad: number, qdLoad: number): void {
   console.log(`\n### Latency p50 / p95 (ms) at match_count ${K}, default effort\n`);
   console.log("| store | unfiltered p50 | p95 | filtered p50 (mean of tiers) | p95 |");
   console.log("| --- | ---: | ---: | ---: | ---: |");
-  for (const r of results.filter((x) => x.effort === "default")) {
+  const defaults = results.filter((x) => x.effort === "default");
+  for (const r of defaults) {
     const un = r.cells.get("unfiltered")!;
     const fp50 = mean(FILTERS.map((f) => r.cells.get(f.name)!.p50));
     const fp95 = mean(FILTERS.map((f) => r.cells.get(f.name)!.p95));
     console.log(`| ${r.store} | ${un.p50.toFixed(2)} | ${un.p95.toFixed(2)} | ${fp50.toFixed(2)} | ${fp95.toFixed(2)} |`);
   }
+  // The network hop, upper-bounded: a bare unfiltered vector round trip at
+  // default effort — Qdrant's localhost server call (HNSW) vs LanceDB's in-process
+  // call (IVF_FLAT), no keyword leg and no parallelism to mask it. The delta is an
+  // upper bound on the loopback round trip — it also folds in the HNSW-vs-IVF_FLAT
+  // compute difference, and grows with real network distance. Printed when both run.
+  const qCell = defaults.find((r) => r.store === "qdrant")?.cells.get("unfiltered");
+  const lCell = defaults.find((r) => r.store.startsWith("lancedb"))?.cells.get("unfiltered");
+  if (qCell && lCell) {
+    console.log(`\n  vector round-trip hop (unfiltered p50, qdrant − lancedb): ${qCell.p50.toFixed(2)} − ${lCell.p50.toFixed(2)} = ${(qCell.p50 - lCell.p50).toFixed(2)} ms`);
+  }
 
   console.log(`\n### Index build time and footprint (${POINTS.length} points, ${DIM}-dim)\n`);
   console.log("| store | build | index size | note |");
   console.log("| --- | ---: | ---: | --- |");
+  const kindNote = (store: string) =>
+    store.startsWith("pgvector") ? "index only" : store === "qdrant" ? "on-disk collection" : "on-disk dataset";
   const seen = new Set<string>();
   for (const r of results) {
     if (seen.has(r.store)) continue;
     seen.add(r.store);
-    console.log(`| ${r.store} | ${r.build} | ${(r.bytes / 1e6).toFixed(1)} MB | ${r.store === "qdrant" ? "on-disk collection" : "index only"} |`);
+    console.log(`| ${r.store} | ${r.build} | ${(r.bytes / 1e6).toFixed(1)} MB | ${kindNote(r.store)}${r.note ? ` — ${r.note}` : ""} |`);
   }
-  console.log(`\n  points table (no vector index): ${(tableBytes / 1e6).toFixed(1)} MB · pg load ${(pgLoad / 1000).toFixed(1)}s · qdrant load ${(qdLoad / 1000).toFixed(1)}s`);
-  console.log(`  short returns (fewer than ${K} after dedup) flag the filtered post-LIMIT loss; see per-arm recall.\n`);
+  const loads = externals.map((e) => `${e.name} load ${(e.stat.loadMs / 1000).toFixed(1)}s`).join(" · ");
+  console.log(`\n  points table (no vector index): ${(tableBytes / 1e6).toFixed(1)} MB · pg load ${(pgLoad / 1000).toFixed(1)}s · ${loads}`);
+  console.log(`  short returns (fewer than ${K} after dedup) flag the filtered post-LIMIT loss; see per-arm recall.`);
+  for (const e of externals) if (e.stat.note) console.log(`  note (${e.name}): ${e.stat.note}`);
+  console.log();
 }
