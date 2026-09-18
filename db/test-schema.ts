@@ -4416,6 +4416,19 @@ console.log("\n[39] Memory utilization over the query log: attribution, the cite
   assert(actDb.agentId === null && actDb.atUs === 1789816860000000, "an action row's NULL agent and at_us survive the coercion");
   const goldFx = goldFromFixture({ queries: [{ query: "first", relevant: `{${C},"${D}"}` }, { query: "second", relevant: [C] }] });
   assert(goldFx.get("first")?.has(C) && goldFx.get("first")?.has(D) && goldFx.get("second")?.size === 1, "a gold fixture reads a `{a,b}` literal (quoted or not) and an array alike");
+  assert(goldFromFixture({ queries: [{ query: "up", relevant: [C.toUpperCase()] }] }).get("up")?.has(C) === true, "a gold id spelled upper-case matches the lower-case id the log holds (seventh pass)");
+  // An instant that does not parse credits nothing and takes nothing: a
+  // search row with an unreadable timestamp is never a hit, an action row
+  // with one is unattributed — not attributed to the agent's newest search
+  // because every comparison against NaN is false (seventh pass).
+  {
+    const badSearch = { ...search("bad", AG, 0, "q", [A], null), loggedAt: "not a date" };
+    const goodSearch = search("good", AG, 0, "q", [A], null);
+    const r1 = attribute([badSearch], [act(AG, 1, "fetch", A)], 30);
+    assert(r1.unattributed.length === 1 && !r1.bySearch.has("bad"), "a search with an unreadable instant is never credited");
+    const r2 = attribute([goodSearch], [{ ...act(AG, 1, "fetch", A), loggedAt: "" }], 30);
+    assert(r2.unattributed.length === 1 && !r2.bySearch.has("good"), "an action with an unreadable instant is unattributed, not handed to the newest search");
+  }
 
   // Microsecond grain: two searches by one agent 400 µs apart both return X,
   // then a fetch of X. The SQL join (ORDER BY logged_at DESC) credits the

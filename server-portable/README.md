@@ -102,8 +102,11 @@ key (twins, or a stale key) are ok. `query log` (034, SMD-1295): the opt-in quer
 log — reported, never a refusal, since it is off by default and its write is
 best-effort. When `query_log` is present the check names it and whether
 `OB1_QUERY_LOG=on` here, says what it stores (personal data at rest) and its
-retention, and points at `evals/export-queries.ts`; absent, it is a skip. Over
-PostgREST the direct-connection checks are skips: none is reachable there.
+retention, and points at `evals/export-queries.ts` and `evals/eval-utilization.ts`;
+absent, it is a skip; present without migration 035 it warns, since a write that
+cites a returned id logs no cite row there (SMD-1719). Over PostgREST the
+direct-connection checks — this one included — are skips naming what they would
+have read: none is reachable there.
 
 ## Choosing a data layer
 

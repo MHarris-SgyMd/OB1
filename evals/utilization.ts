@@ -147,7 +147,10 @@ export function toActionRow(r: ActionDbRow): ActionRow {
  */
 export function goldFromFixture(fx: { queries?: { query: string; relevant: unknown }[] }): Map<string, Set<string>> {
   const gold = new Map<string, Set<string>>();
-  for (const q of fx.queries ?? []) gold.set(q.query, new Set(parsePgUuidArray(q.relevant)));
+  // Lower-cased: the log holds ids as Postgres emits them, and a hand-labelled
+  // fixture may spell them either way (UUID_RE admits both; the server
+  // lower-cases a cite pointer for the same reason).
+  for (const q of fx.queries ?? []) gold.set(q.query, new Set(parsePgUuidArray(q.relevant).map((id) => id.toLowerCase())));
   return gold;
 }
 
@@ -171,14 +174,13 @@ export type Uses = { used: Set<string>; cited: Set<string>; opened: Set<string> 
 export type Attribution = {
   /** search id → the ids of its results the caller used, split by how. */
   bySearch: Map<string, Uses>;
-  /** Action rows that matched no search (no prior search by that agent, in the window, returning the id). */
+  /** Action rows that matched no search (no prior search by that agent, in the window, returning the id) — or whose instant could not be read. */
   unattributed: ActionRow[];
   /** Plain tool names seen that are not in OPEN_TOOLS — counted as opened, reported as unknown. */
   unknownTools: Map<string, number>;
   /** Action rows whose tool is `<writer>/<pointer>`, attributed or not — zero with actions present is a schema smell (035 absent). */
   citeRows: number;
   /** search id → distinct ids returned; built once here, read by summarise. */
-  returnedDistinct: Map<string, number>;
 };
 
 /**
@@ -205,16 +207,19 @@ export function attribute(searches: SearchRow[], actions: ActionRow[], windowMin
   const bySearch = new Map<string, Uses>();
   const unattributed: ActionRow[] = [];
   const unknownTools = new Map<string, number>();
-  const returnedDistinct = new Map<string, number>();
   let citeRows = 0;
   const windowUs = windowMinutes * 60_000_000;
 
   const byAgent = new Map<string | null, { s: SearchRow; at: number; ids: Set<string> }[]>();
   for (const s of searches) {
-    const ids = new Set(s.resultIds);
-    returnedDistinct.set(s.id, ids.size);
+    const at = tick(s);
+    // An instant that did not parse (a hand-edited fixture's timestamp) is
+    // NaN, and every comparison against NaN is false — the row would have
+    // sat at neither end of the order and matched any action. It can credit
+    // nothing.
+    if (!Number.isFinite(at)) continue;
     const list = byAgent.get(s.agentId) ?? [];
-    list.push({ s, at: tick(s), ids });
+    list.push({ s, at, ids: new Set(s.resultIds) });
     byAgent.set(s.agentId, list);
   }
   for (const list of byAgent.values()) list.sort((a, b) => b.at - a.at); // newest first
@@ -225,7 +230,9 @@ export function attribute(searches: SearchRow[], actions: ActionRow[], windowMin
     else if (!OPEN_TOOLS.has(act.tool)) unknownTools.set(act.tool, (unknownTools.get(act.tool) ?? 0) + 1);
     const at = tick(act);
     let hit: SearchRow | undefined;
-    for (const c of byAgent.get(act.agentId) ?? []) {
+    // Same rule for an action: an unreadable instant would have passed both
+    // window tests against every search and taken the agent's newest one.
+    for (const c of Number.isFinite(at) ? byAgent.get(act.agentId) ?? [] : []) {
       if (c.at > at) continue; // a later search cannot have produced this touch
       if (c.at < at - windowUs) break; // sorted newest first: everything after this is older still
       if (c.ids.has(act.targetId)) {
@@ -250,7 +257,7 @@ export function attribute(searches: SearchRow[], actions: ActionRow[], windowMin
     }
     bySearch.set(hit.id, uses);
   }
-  return { bySearch, unattributed, unknownTools, citeRows, returnedDistinct };
+  return { bySearch, unattributed, unknownTools, citeRows };
 }
 
 /** A `real` column decoded to a double carries float32 noise (0.3 → 0.30000001192092896); six significant digits is the column's own precision. */
@@ -321,7 +328,7 @@ export function summarise(
   windowMinutes: number,
   gold?: Map<string, Set<string>>,
 ): Summary {
-  const { bySearch, unattributed, unknownTools, citeRows, returnedDistinct } = attribute(searches, actions, windowMinutes);
+  const { bySearch, unattributed, unknownTools, citeRows } = attribute(searches, actions, windowMinutes);
   const withGold = gold !== undefined;
   const overall = emptyStats(withGold);
   const arms = new Map<string, ArmStats>();
@@ -336,10 +343,9 @@ export function summarise(
     const armSt = arms.get(arm) ?? emptyStats(withGold);
     const agSt = agents.get(agent) ?? emptyStats(withGold);
     const hasTokens = typeof s.resultTokens === "number" && Number.isFinite(s.resultTokens);
-    // Distinct ids (built once in attribute): a duplicate in a logged result
-    // set is one id returned, so utilization can reach 1 and the token
-    // estimate's whole-set test holds.
-    const distinct = returnedDistinct.get(s.id) ?? new Set(s.resultIds).size;
+    // Distinct ids: a duplicate in a logged result set is one id returned, so
+    // utilization can reach 1 and the token estimate's whole-set test holds.
+    const distinct = new Set(s.resultIds).size;
     // Gold membership depends on the search alone: decided once, counted in
     // each of the three buckets.
     const g = gold && s.query !== null ? gold.get(s.query) : undefined;

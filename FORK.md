@@ -13889,7 +13889,11 @@ and that edit, which writes the pointer, logs the cite under its own writer.
 The guard is `existed === false`, the store's affirmative "fresh row" from
 035's function: a brain at 034 without 035 reports no flag, and logs no cite,
 because there the pointer's fate is unknown (a second pass caught `!== true`
-reading the absent flag as fresh).
+reading the absent flag as fresh). Preflight's `query log` check says so on
+such a brain, and reads whether the body is 035's from the verdict the
+`atomic capture` check already reached over the sentinel that body declares
+— one detector, not a second grep of the same source for the word `existed`
+(a seventh pass); over PostgREST it is a skip naming both facts.
 (The first cut logged on the *act* of citing and a review pass found it would
 have counted a ghost or self-pointer a re-capture never checked.) The tool
 column now tells two kinds of use apart by its shape alone:
@@ -13963,7 +13967,15 @@ a click-through label is bound to the corpus at export time in any case —
 `eval-replay.ts` reads `baseline` beside `relevant` for that reason. Labelling
 the superseder too would need the fixture to follow `thoughts.supersedes` at
 export, a different fixture; the README says which row the label names.
-Per-*model* arms: the log does
+Gating the cite on 035's flag rather than on
+"a pointer was written" (a seventh pass): on a brain at 025–034 a fresh
+3-argument capture does validate and write `derived_from`, and logs no cite
+here. Kept: before 035 the function wrote pointers on a re-capture too (the
+NULL fill 035 removed) and answered nothing about which path it took, so the
+store cannot tell a written pointer from a filled or ignored one there; the
+shipped schema is 035's (the `atomic capture` check warns on every earlier
+body and names the file), and the gap is said twice — by preflight and by
+the report. Per-*model* arms: the log does
 not record the embedding model a search ran under, and 034's `filter` column
 is dead on `search_thoughts` (SMD-1490) — whether to carry the arm there or in
 a column is that ticket's call. A read whose use ends in prose to the user, with no write and no fetch,
@@ -14030,7 +14042,25 @@ search equals the export's `relevant` per query, the counts match a hand tally
 of the log rows (7 distinct returned, 4 used, 3 cited, 1 opened), preflight
 reads the log as present and on before and after, and the same walk on an
 empty log prints `n/a`, on an opens-only log the 035 warning, and with the
-table absent the refusal above. `bunx tsc --noEmit` in `server-portable/` covers
+table absent the refusal above. The hosted path was walked the same way (a
+seventh pass): the server with `OB1_STORE=postgrest` — the default store —
+and its real supabase-js client, through a prefix-stripping proxy to a real
+PostgREST 12.2 container over the lane's Postgres, the same calls; the log
+rows, the report and the export came out identical to the SQL walk. That walk
+found preflight printing no `query log` line at all over PostgREST — the
+check lived only in the direct-connection branch, so the hosted operator got
+neither the presence verdict nor the 035 warning; it is now a skip there
+naming both facts, like its siblings. The same pass moved the tool column of
+an action batch onto the driver's own `sql.array` after probing that it
+carries a quote, a backslash, a comma and a brace through `unnest` intact;
+the uuid columns keep the by-hand literal because `sql.array` renders a null
+element as the text `null`, which `uuid[]` refuses, and the agent column is
+nullable — probed, not assumed. Two fixture-side guards were added and held
+in [39]: a row whose instant does not parse is never credited and never
+attributed (NaN passes both window tests and would have taken the agent's
+newest search), and a gold id spelled upper-case matches the lower-case id
+the log holds. `test-preflight.ts`'s pre-035 run asserts the `query log`
+warning and its absence once 035 is back. `bunx tsc --noEmit` in `server-portable/` covers
 the server files; `evals/utilization.ts`, `query-log.ts` and
 `eval-utilization.ts` have no tsconfig and are **runtime-checked only**,
 through [39] under Bun — the same standing as every other `evals/` file.

@@ -87,16 +87,6 @@ function toCheckedUuidArray(xs: (string | null | undefined)[], column: string, n
 }
 
 /**
- * A Postgres array literal for a `::text[]` bind. Elements are double-quoted
- * with `"` and `\` escaped, so a tool name — or anything else — survives the
- * literal intact; the log's tool values are `[a-z_/]` today, the quoting is for
- * the day one is not.
- */
-function toTextArray(xs: string[]): string {
-  return `{${xs.map((x) => `"${x.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`).join(",")}}`;
-}
-
-/**
  * A Postgres array literal for a `::real[]` bind, aligned to a uuid array. A
  * null or non-finite score is the keyword NULL (a returned id whose score the
  * retrieval path did not carry); a finite number is itself.
@@ -443,12 +433,17 @@ export class SqlStore implements ThoughtStore {
     // their ids upstream today, but one malformed element would malform the
     // whole literal and the best-effort caller would drop the batch without a
     // word — so the refusal is here, by column, before the statement. The
-    // one writer of action rows — a single-row VALUES twin was removed so
-    // there is one INSERT shape to keep right (SMD-1719, fourth pass).
+    // tool column binds through the driver's own sql.array, which carries a
+    // quote, a backslash, a comma and a brace intact (probed) — the by-hand
+    // literal stays only for the uuid columns, because sql.array renders a
+    // null element as the text `null`, which uuid[] refuses, and the agent
+    // column is nullable (seventh review pass). The one writer of action rows
+    // — a single-row VALUES twin was removed so there is one INSERT shape to
+    // keep right (SMD-1719, fourth pass).
     await this.sql`
       INSERT INTO query_log (kind, tool, agent_id, target_id)
       SELECT 'action', t.tool, t.agent_id, t.target_id
-        FROM unnest(${toTextArray(rows.map((r) => r.tool))}::text[],
+        FROM unnest(${this.sql.array(rows.map((r) => r.tool), "TEXT")}::text[],
                     ${toCheckedUuidArray(rows.map((r) => r.agentId), "agent_id", true)}::uuid[],
                     ${toCheckedUuidArray(rows.map((r) => r.targetId), "target_id", false)}::uuid[]) AS t(tool, agent_id, target_id)`;
   }

@@ -87,6 +87,16 @@ const EXPOSURE =
   "a filtered match_thoughts call — direct SQL, a PostgREST RPC, or a community integration's metadata filter; the server's own search_thoughts sends no filter — silently returns fewer rows than match";
 const APPLY_014 = "Apply the migrations through db/migrations/014_filtered_match_thoughts.sql.";
 const CATALOG_HINT = "run once with OB1_STORE=sql to read the catalog";
+/**
+ * Whether the 3-argument upsert_thought carries 035's sentinel — set by the
+ * `atomic capture` check from the body it reads, read by the `query log` check
+ * (cite rows, SMD-1719, are logged only when that body answers `existed`).
+ * One detector of 035, not a second grep of the same body: a seventh review
+ * pass found the query-log check matching the literal 'existed' in the source
+ * while the atomic-capture check beside it read the sentinel. `undefined`
+ * until the atomic-capture check has run, or when it could not read the body.
+ */
+let threeArgIs035: boolean | undefined;
 // Every check the direct-connection block owns, in the order it reports them.
 // A throw anywhere in that block lands in one catch, and a check that prints
 // nothing looks like one that passed — so the catch reports each of these
@@ -539,6 +549,11 @@ if (configFailed) {
       add("atomic capture", "skip", `not checked over PostgREST — whether the 3-argument upsert_thought is 022's is read from the catalog; ${CATALOG_HINT}`);
       add("write privileges", "skip", `not checked over PostgREST — the capture path's table privileges are read over a direct connection; ${CATALOG_HINT}`);
       add("fingerprint backfill", "skip", `not checked over PostgREST — whether a thought without a fingerprint has one waiting is decided by hashing rows on the server; ${CATALOG_HINT}`);
+      // The query log (034) and whether upsert_thought answers `existed` (035,
+      // without which no cite row is logged, SMD-1719) are catalog facts too.
+      // A seventh review pass walked the hosted path and found this check
+      // printed nothing there — the one shape the comment above forbids.
+      add("query log", "skip", `not checked over PostgREST — whether query_log (034) is present, and whether upsert_thought answers \`existed\` (035), without which a write that cites a returned id logs no cite row (SMD-1719), are read from the catalog; ${CATALOG_HINT}`);
     }
 
     // The atomic capture path needs migration 004. Its absence is not fatal — the
@@ -655,6 +670,7 @@ if (configFailed) {
         // (first review pass; SMD-1245's arity-alone finding).
         const three = forms.find((f) => f.sig === "upsert_thought(text,jsonb,vector)");
         const two = forms.find((f) => f.sig === "upsert_thought(text,jsonb)");
+        threeArgIs035 = three !== undefined && /ob1:re-capture-writes-no-provenance/.test(three.src);
         // 007/013's 4-argument form — the windowed capture the servers call —
         // is the third form the migrations define; anything else is a
         // vendored file's, and is named.
@@ -2012,14 +2028,14 @@ if (configFailed) {
             // answers `existed` — the store's affirmative "fresh row". On a
             // brain at 034 without 035 the log records opens and never a cite,
             // and a utilization report would read that as callers never citing.
-            // 035 is the migration whose 3-argument body returns the key.
-            const [{ cites }] = await sql`
-              SELECT bool_or(pg_get_functiondef(p.oid) LIKE '%''existed''%') AS cites
-                FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-               WHERE n.nspname = 'public' AND p.proname = 'upsert_thought'`;
-            add("query log", cites ? "ok" : "warn",
+            // Whether the body is 035's is the atomic-capture check's verdict,
+            // read from the sentinel that body declares (threeArgIs035 above).
+            const cites = threeArgIs035;
+            add("query log", cites === true ? "ok" : "warn",
               `present; ${on ? "ON (OB1_QUERY_LOG=on) here" : "off by default — set OB1_QUERY_LOG=on to record"}. ` +
-              (cites ? "" : "Cite rows (a write naming a returned id as its source, SMD-1719) need migration 035's upsert_thought and will NOT be logged on this brain — utilization would read as callers never citing. ") +
+              (cites === true ? "" : cites === false
+                ? "Cite rows (a write naming a returned id as its source, SMD-1719) need migration 035's upsert_thought and will NOT be logged on this brain — utilization would read as callers never citing (the `atomic capture` check above names the remedy). "
+                : "Whether cite rows (SMD-1719) can be logged depends on migration 035's upsert_thought, which the `atomic capture` check could not read. ") +
               `Logs each search and the fetch/edit/delete of a returned id, and a write that cites one (SMD-1719) (query text, arguments, returned ids — personal data at rest), read offline by evals/export-queries.ts and evals/eval-utilization.ts (which also joins the returned ids to thoughts content for a token estimate). ` +
               `Retention: prune_query_log(${days}); a self-hosted role needs query_log INSERT (db/README.md).`);
           }

@@ -61,7 +61,18 @@ if (stray.length) {
 // The coercions live in utilization.ts (toSearchRow, toActionRow,
 // goldFromFixture) so db/test-schema.ts [39] can drive them over database-shaped
 // rows without a database; this file is the SQL and the printing.
-const gold = goldPath ? goldFromFixture(JSON.parse(readFileSync(goldPath, "utf8"))) : undefined;
+let gold: ReturnType<typeof goldFromFixture> | undefined;
+if (goldPath) {
+  try {
+    gold = goldFromFixture(JSON.parse(readFileSync(goldPath, "utf8")));
+  } catch (e) {
+    // The likeliest operator mistake — a mistyped path, a file that is not
+    // JSON — is refused in a sentence like the script's other refusals,
+    // before the database is touched.
+    process.stderr.write(`--gold ${goldPath}: not a readable JSON fixture (${(e as Error).message})\n`);
+    process.exit(2);
+  }
+}
 
 const sql = new SQL({ url: URL_, max: 2 });
 await requireQueryLog(sql, "eval-utilization");
