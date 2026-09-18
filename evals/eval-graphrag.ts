@@ -112,6 +112,14 @@ const ALLOW_STALE = has("allow-stale-dump");
 const numList = (s: string | undefined, d: number[]) => (s ? s.split(",").map((x) => Number(x.trim())).filter((n) => Number.isInteger(n) && n > 0) : d);
 const KPRIMES = numList(process.env.OB1_GRAPH_KPRIME, [10, 20, 50, 100]);
 const HOPS = numList(process.env.OB1_GRAPH_HOPS, [1, 2]);
+// SMD-1738 phase 2 — the edge-aware expansion's PRE-REGISTERED relation prior (a
+// depends_on/uses edge carries more "useful relevance" than a co_occurs_with one), fixed
+// before the numbers. Declared up here (not beside expandStageTyped) because the --scale
+// branch calls that function before a later const would be initialized.
+const REL_PRIOR = `CASE e.relation
+  WHEN 'depends_on' THEN 1.0 WHEN 'uses' THEN 0.9 WHEN 'works_on' THEN 0.8
+  WHEN 'member_of' THEN 0.6 WHEN 'located_in' THEN 0.5 WHEN 'related_to' THEN 0.4
+  WHEN 'co_occurs_with' THEN 0.2 ELSE 0.3 END`;
 // A truthy-but-all-invalid value (OB1_GRAPH_KPRIME=0/abc) filters to [] — refuse it the
 // way --k does, rather than crash on an empty sweep later.
 if (KPRIMES.length === 0) { console.error("OB1_GRAPH_KPRIME needs a comma list of positive integers."); process.exit(2); }
@@ -169,7 +177,10 @@ const t0 = Date.now();
 const { vectors, embedded } = await cachedDocumentVectors(docs, {
   path: linearVectorCachePath(EMBED_MODEL, "thought"), dim: DIM, text: linearThoughtText, embed: (t) => embed(EMBED_MODEL, t),
 });
-for (const d of docs) await insertLinearThought(sql, d, lit(vectors[d.id]));
+// Pass createdAt so thoughts.created_at carries the issue's real open date — the
+// temporal signal the edge-aware expansion and the entity-membership arm weight by
+// (SMD-1738 phase 2); without it every row would date to now() and recency is flat.
+for (const d of docs) await insertLinearThought(sql, d, lit(vectors[d.id]), undefined, d.createdAt);
 const loadedIssues = new Set<string>((await sql`SELECT metadata->>'issue' AS issue FROM thoughts`).map((r: { issue: string }) => r.issue));
 console.log(`  loaded ${loadedIssues.size} thoughts (${embedded} embedded now, ${docs.length - embedded} from cache) in ${((Date.now() - t0) / 1000).toFixed(0)} s`);
 const dropped = docs.map((d) => d.id).filter((id) => !loadedIssues.has(id));
@@ -238,6 +249,29 @@ async function vectorArm(qv: number[]): Promise<Ranked> {
 async function keywordArm(needle: string | undefined): Promise<Ranked | null> {
   if (!needle) return null;
   const rows = await sql`SELECT metadata->>'issue' AS issue FROM search_thoughts_keyword(${needle}, ${FETCH}, 0, '{}'::jsonb)`;
+  return rows.map((r: { issue: string }) => r.issue);
+}
+
+// SMD-1738 phase 2 — exact entity-membership: an aggregation question ("every issue
+// mentioning X") is answered by the graph directly — resolve the needle to an entity
+// (the product's rule, then trigram ≥ 0.55) and return every thought that mentions it,
+// ranked by mention confidence then recency. This is the axis a graph is built for and a
+// vector only approximates; scored on that objective, beside vector and keyword.
+async function membershipArm(needle: string | undefined): Promise<Ranked | null> {
+  if (!needle) return null;
+  const rows = await sql`
+    WITH e AS (
+      SELECT id FROM ob1_entities
+      WHERE normalized_name = normalize_entity_name(${needle}) OR normalize_entity_name(${needle}) = ANY(merged_from)
+      UNION ALL
+      (SELECT id FROM ob1_entities WHERE similarity(normalized_name, normalize_entity_name(${needle})) >= 0.55
+       ORDER BY similarity(normalized_name, normalize_entity_name(${needle})) DESC LIMIT 1)
+      LIMIT 1
+    )
+    SELECT t.metadata->>'issue' AS issue
+    FROM thought_entities m JOIN e ON e.id = m.entity_id JOIN thoughts t ON t.id = m.thought_id
+    ORDER BY m.confidence DESC, t.created_at DESC
+    LIMIT ${FETCH}`;
   return rows.map((r: { issue: string }) => r.issue);
 }
 
@@ -414,12 +448,61 @@ async function expandStage(candIds: string[], vecLit: string, hops: number): Pro
   return { rows, ms: Date.now() - t };
 }
 
+async function expandStageTyped(candIds: string[], vecLit: string, hops: number): Promise<{ rows: { issue: string; gs: number; dist: number }[]; ms: number }> {
+  const t = Date.now();
+  // sql.unsafe (not the tagged template) because REL_PRIOR is a raw SQL fragment; the
+  // interpolated values are all our own (uuids from a prior query, an int, our vector).
+  const candLit = `'{${candIds.join(",")}}'::uuid[]`;
+  const rows = (await sql.unsafe(`
+    WITH RECURSIVE
+    n AS (SELECT count(*)::float AS total FROM thoughts),
+    df AS (SELECT entity_id, count(*)::float AS docs FROM thought_entities GROUP BY entity_id),
+    cand(id) AS (SELECT unnest(${candLit})),
+    seed(id, w) AS (
+      SELECT DISTINCT m.entity_id, ln(n.total / df.docs)
+      FROM thought_entities m JOIN cand ON cand.id = m.thought_id
+      JOIN df ON df.entity_id = m.entity_id CROSS JOIN n
+      WHERE df.docs <= n.total * 0.1
+    ),
+    -- one weighted, typed edge per (from, to, relation): evidence support and mean confidence
+    edge_w AS (
+      SELECT from_entity_id AS a, to_entity_id AS b, relation,
+             count(*)::float AS support, avg(confidence)::float AS conf
+      FROM ob1_entity_edges GROUP BY 1, 2, 3
+    ),
+    -- spreading activation: carry the accumulated weight; the r.hop < hops bound terminates
+    reach(id, w, hop) AS (
+      SELECT id, w, 0 FROM seed
+      UNION ALL
+      SELECT nb.id, r.w * (${REL_PRIOR}) * ln(1 + e.support) * e.conf * 0.5, r.hop + 1
+      FROM reach r
+      JOIN edge_w e ON r.id IN (e.a, e.b)
+      CROSS JOIN LATERAL (SELECT CASE WHEN e.a = r.id THEN e.b ELSE e.a END AS id) nb
+      JOIN df ON df.entity_id = nb.id CROSS JOIN n
+      WHERE r.hop < ${hops} AND df.docs <= n.total * 0.1
+    ),
+    weights AS (SELECT id, max(w) AS w FROM reach GROUP BY id),
+    scored AS (
+      SELECT m.thought_id, sum(w.w) AS gs
+      FROM thought_entities m JOIN weights w ON w.id = m.entity_id
+      GROUP BY m.thought_id
+    )
+    SELECT t.metadata->>'issue' AS issue, COALESCE(s.gs, 0) AS gs, (t.embedding <=> '${vecLit}'::vector) AS dist
+    FROM (SELECT id FROM cand UNION SELECT thought_id FROM scored) u
+    JOIN thoughts t ON t.id = u.id
+    LEFT JOIN scored s ON s.thought_id = t.id
+    LEFT JOIN cand cc ON cc.id = t.id
+    ORDER BY (cc.id IS NOT NULL) DESC, s.gs DESC NULLS LAST
+    LIMIT 5000`)) as { issue: string; gs: number; dist: number }[];
+  return { rows, ms: Date.now() - t };
+}
+
 // Coarse vector recall: the top-K′ thought ids. Depends only on (q, K′), so a caller
 // sweeping hops computes it once per K′ and reuses it across hops.
-async function coarseRecall(vecLit: string, kprime: number): Promise<{ ids: string[]; ms: number }> {
+async function coarseRecall(vecLit: string, kprime: number): Promise<{ ids: string[]; issues: string[]; ms: number }> {
   const t = Date.now();
-  const rows = (await sql`SELECT id FROM thoughts ORDER BY embedding <=> ${vecLit}::vector LIMIT ${kprime}`) as { id: string }[];
-  return { ids: rows.map((r) => r.id), ms: Date.now() - t };
+  const rows = (await sql`SELECT id, metadata->>'issue' AS issue FROM thoughts ORDER BY embedding <=> ${vecLit}::vector LIMIT ${kprime}`) as { id: string; issue: string }[];
+  return { ids: rows.map((r) => r.id), issues: rows.map((r) => r.issue), ms: Date.now() - t };
 }
 
 // Two rankings over one expansion union, from the same rows: the symmetric-RRF fuse of
@@ -454,40 +537,62 @@ async function runScale(): Promise<void> {
   // would fire per row — drop the index and disable user triggers for the bulk load.
   await sql.unsafe(`DROP INDEX IF EXISTS thoughts_embedding_idx`);
   await sql.unsafe(`ALTER TABLE thoughts DISABLE TRIGGER USER`);
+  // Throwaway container: make the graph tables (the 40M-row bulk) UNLOGGED (no WAL — the
+  // inserts otherwise fill pg_wal and the disk) and leave the embedding NULL (scale never
+  // vector-searches; the 64-dim vectors are ~2.5 GB at 10M we don't need). thoughts stays
+  // logged (a logged table, thought_chunks, references it), but is small without vectors.
+  // Order: the referencing tables before ob1_entities (a logged table may not reference an
+  // unlogged one; an unlogged table referencing a logged one is fine).
+  for (const tbl of ["thought_entities", "ob1_entity_edges", "ob1_entities"]) await sql.unsafe(`ALTER TABLE ${tbl} SET UNLOGGED`);
   const t0 = Date.now();
   await sql.unsafe(`CREATE TEMP TABLE syn_t AS SELECT g AS gid, gen_random_uuid() AS tid FROM generate_series(1, ${N}) g`);
   await sql.unsafe(`CREATE TEMP TABLE syn_e AS SELECT g AS gid, gen_random_uuid() AS eid FROM generate_series(1, ${M}) g`);
   await sql.unsafe(`CREATE INDEX ON syn_t (gid)`);
   await sql.unsafe(`CREATE INDEX ON syn_e (gid)`);
-  await sql.unsafe(`INSERT INTO thoughts (id, content, embedding, metadata) SELECT tid, 'syn '||gid, '${constVec}'::vector, jsonb_build_object('issue', 'SYN-'||gid) FROM syn_t`);
-  await sql.unsafe(`INSERT INTO ob1_entities (id, entity_type, name, normalized_name) SELECT eid, 'topic', 'e'||gid, 'e'||gid FROM syn_e`);
-  // Mentions: each thought mentions SYN_MENTIONS entities, chosen with a skew so a few
-  // entities are hot (and then excluded by the hub cap, as real hubs are). The random
-  // target gid is computed per row in a MATERIALIZED CTE — random() in a JOIN ON, or in
-  // an uncorrelated LATERAL, is evaluated once and every thought lands on one entity.
-  await sql.unsafe(`
-    WITH picks AS MATERIALIZED (
-      SELECT t.tid, 1 + floor(power(random(), ${SYN_SKEW}) * ${M})::int AS egid
-      FROM syn_t t CROSS JOIN generate_series(1, ${SYN_MENTIONS}) k
-    )
-    INSERT INTO thought_entities (thought_id, entity_id, confidence, extraction_key)
-    SELECT p.tid, e.eid, 1.0, 'syn'
-    FROM picks p JOIN syn_e e ON e.gid = p.egid
-    ON CONFLICT DO NOTHING`);
-  // Edges: SYN_EDGES per entity to skewed-random neighbours, each evidenced by a random
-  // thought. Same per-row-random pattern.
-  await sql.unsafe(`
-    WITH picks AS MATERIALIZED (
-      SELECT a.eid AS from_eid,
-             1 + floor(power(random(), ${SYN_SKEW}) * ${M})::int AS to_gid,
-             1 + floor(random() * ${N})::int AS t_gid
-      FROM syn_e a CROSS JOIN generate_series(1, ${SYN_EDGES}) k
-    )
-    INSERT INTO ob1_entity_edges (thought_id, from_entity_id, to_entity_id, relation, confidence, extraction_key)
-    SELECT t.tid, p.from_eid, b.eid, 'related_to', 1.0, 'syn'
-    FROM picks p JOIN syn_e b ON b.gid = p.to_gid JOIN syn_t t ON t.gid = p.t_gid
-    WHERE p.from_eid <> b.eid
-    ON CONFLICT DO NOTHING`);
+  // Insert in gid-range CHUNKs: a single 10M-row statement (or a tens-of-millions-row
+  // MATERIALIZED pick set) OOMs the container; each chunk is about the size of the 1M run
+  // that loads cleanly. A pre-registered relation mix and a small confidence tail give the
+  // typed pass representative edge_w work.
+  const CHUNK = 1_000_000;
+  const REL = `(ARRAY['uses','uses','related_to','works_on','depends_on','member_of','co_occurs_with','located_in'])[1 + floor(random()*8)::int]`;
+  const CONF = `CASE WHEN random() < 0.02 THEN 0.7 ELSE 1.0 END`;
+  for (let lo = 1; lo <= N; lo += CHUNK) {
+    const hi = Math.min(lo + CHUNK - 1, N);
+    await sql.unsafe(`INSERT INTO thoughts (id, content, metadata) SELECT tid, 'syn '||gid, jsonb_build_object('issue', 'SYN-'||gid) FROM syn_t WHERE gid BETWEEN ${lo} AND ${hi}`);
+  }
+  for (let lo = 1; lo <= M; lo += CHUNK) {
+    const hi = Math.min(lo + CHUNK - 1, M);
+    await sql.unsafe(`INSERT INTO ob1_entities (id, entity_type, name, normalized_name) SELECT eid, 'topic', 'e'||gid, 'e'||gid FROM syn_e WHERE gid BETWEEN ${lo} AND ${hi}`);
+  }
+  // Mentions: each thought mentions SYN_MENTIONS skewed-random entities. The random target
+  // gid is computed per row in a MATERIALIZED CTE — random() in a JOIN ON, or an
+  // uncorrelated LATERAL, is evaluated once and every thought lands on one entity.
+  for (let lo = 1; lo <= N; lo += CHUNK) {
+    const hi = Math.min(lo + CHUNK - 1, N);
+    await sql.unsafe(`
+      WITH picks AS MATERIALIZED (
+        SELECT t.tid, 1 + floor(power(random(), ${SYN_SKEW}) * ${M})::int AS egid
+        FROM syn_t t CROSS JOIN generate_series(1, ${SYN_MENTIONS}) k WHERE t.gid BETWEEN ${lo} AND ${hi}
+      )
+      INSERT INTO thought_entities (thought_id, entity_id, confidence, extraction_key)
+      SELECT p.tid, e.eid, ${CONF}, 'syn' FROM picks p JOIN syn_e e ON e.gid = p.egid
+      ON CONFLICT DO NOTHING`);
+  }
+  // Edges: SYN_EDGES per entity to skewed-random neighbours, each evidenced by a random thought.
+  for (let lo = 1; lo <= M; lo += CHUNK) {
+    const hi = Math.min(lo + CHUNK - 1, M);
+    await sql.unsafe(`
+      WITH picks AS MATERIALIZED (
+        SELECT a.eid AS from_eid, 1 + floor(power(random(), ${SYN_SKEW}) * ${M})::int AS to_gid,
+               1 + floor(random() * ${N})::int AS t_gid, ${REL} AS rel, ${CONF} AS conf
+        FROM syn_e a CROSS JOIN generate_series(1, ${SYN_EDGES}) k WHERE a.gid BETWEEN ${lo} AND ${hi}
+      )
+      INSERT INTO ob1_entity_edges (thought_id, from_entity_id, to_entity_id, relation, confidence, extraction_key)
+      SELECT t.tid, p.from_eid, b.eid, p.rel, p.conf, 'syn'
+      FROM picks p JOIN syn_e b ON b.gid = p.to_gid JOIN syn_t t ON t.gid = p.t_gid
+      WHERE p.from_eid <> b.eid
+      ON CONFLICT DO NOTHING`);
+  }
   await sql.unsafe(`ALTER TABLE thoughts ENABLE TRIGGER USER`);
   for (const tbl of ["thoughts", "ob1_entities", "thought_entities", "ob1_entity_edges"]) await sql.unsafe(`ANALYZE ${tbl}`);
   const loadS = ((Date.now() - t0) / 1000).toFixed(0);
@@ -499,17 +604,22 @@ async function runScale(): Promise<void> {
     FROM (SELECT entity_id, count(*) AS d FROM thought_entities GROUP BY entity_id) q`;
   console.log(`  loaded in ${loadS} s → ${st.thoughts.toLocaleString()} thoughts, ${st.entities.toLocaleString()} entities, ${st.mentions.toLocaleString()} mentions, ${st.edges.toLocaleString()} edges`);
   console.log(`  entity mention degree: avg ${deg.avg_deg.toFixed(1)}, max ${deg.max_deg}, ${deg.hubs} above the 0.1·N hub cap (excluded from seeds and hops)`);
-  console.log(`\n  expansion-stage latency (stage 2 only; candidates picked by id, so the coarse vector cost is out — that is SMD-1707's result). Median/p95 of ${SYN_REPEAT} runs.`);
-  console.log(`    K′    hops   union rows   expand p50   expand p95`);
+  // The typed pass aggregates edge_w (support/confidence per relation) in an un-indexed
+  // CTE — an O(edges) scan on top of the untyped walk's O(mentions) df scan. It is
+  // correct but far slower at scale (~46 s at 500k/2M edges), so time it only up to
+  // OB1_GRAPH_SCALE_TYPED_MAX and report the untyped curve at the full N.
+  const typedMax = Number(process.env.OB1_GRAPH_SCALE_TYPED_MAX ?? 1_000_000);
+  const timeTyped = N <= typedMax;
+  console.log(`\n  expansion-stage latency (stage 2 only; candidates picked by id, so the coarse vector cost is out — SMD-1707's result). p50 of ${SYN_REPEAT} runs.${timeTyped ? " untyped and edge-aware (typed)." : ` typed skipped above ${typedMax.toLocaleString()} (O(edges) edge_w scan — see below).`}`);
+  console.log(`    K′    hops   union rows   untyped p50${timeTyped ? "   typed p50" : ""}`);
   console.log("    " + "─".repeat(58));
   for (const kprime of KPRIMES) for (const hops of HOPS) {
     const cand = (await sql`SELECT tid AS id FROM syn_t WHERE gid <= ${kprime}`).map((r: { id: string }) => r.id);
-    const ms: number[] = []; let unionRows = 0;
-    for (let i = 0; i < SYN_REPEAT; i++) { const r = await expandStage(cand, constVec, hops); ms.push(r.ms); unionRows = r.rows.length; }
-    ms.sort((a, b) => a - b);
-    console.log(`    ${String(kprime).padStart(4)}  ${String(hops).padStart(4)}   ${String(unionRows).padStart(9)}   ${median(ms).toFixed(1)} ms    ${ms[Math.min(ms.length - 1, Math.floor(ms.length * 0.95))].toFixed(1)} ms`);
+    const ms: number[] = [], mt: number[] = []; let unionRows = 0;
+    for (let i = 0; i < SYN_REPEAT; i++) { const r = await expandStage(cand, constVec, hops); ms.push(r.ms); unionRows = r.rows.length; if (timeTyped) mt.push((await expandStageTyped(cand, constVec, hops)).ms); }
+    console.log(`    ${String(kprime).padStart(4)}  ${String(hops).padStart(4)}   ${String(unionRows).padStart(9)}   ${median(ms).toFixed(1)} ms${timeTyped ? `     ${median(mt).toFixed(1)} ms` : ""}`);
   }
-  console.log(`\n  Note: latency only. df is recomputed per call as in graphArm; a materialized df is the obvious production optimization. union rows caps at the query's LIMIT 5000.`);
+  console.log(`\n  Note: latency only. Untyped is O(mentions) — the per-call df full scan (a materialized df is the fix). Typed adds an O(edges) edge_w scan on top (materialize edge_w too). Both must be standing tables before the scarce-recall regime the graph wins in is reachable at scale. union rows caps at the query's LIMIT 5000.`);
 }
 
 // ── Communities, for the global arm ─────────────────────────────────────────
@@ -644,18 +754,27 @@ function score(ranked: Ranked, expected: string[]): Score {
 
 // The headline composed arms sit in the main table beside the substitute; `composed`
 // is the RRF fuse and `comp-cos` the cosine-only control, both at the headline K′/hops.
-type Result = { q: Question; seeds: string[]; scores: { vector: Score; graph: Score; hybrid: Score; composed: Score; "comp-cos": Score; global?: Score; keyword?: Score } };
+type Result = { q: Question; seeds: string[]; scores: { vector: Score; graph: Score; hybrid: Score; composed: Score; "comp-typed": Score; "comp-cos": Score; global?: Score; keyword?: Score } };
 type Arm = keyof Result["scores"];
-const arms: Arm[] = ["vector", "graph", "hybrid", "composed", "comp-cos", ...(GLOBAL ? (["global"] as Arm[]) : []), "keyword"];
+const arms: Arm[] = ["vector", "graph", "hybrid", "composed", "comp-typed", "comp-cos", ...(GLOBAL ? (["global"] as Arm[]) : []), "keyword"];
 const results: Result[] = [];
 // The full K′ × hop sweep of the composed arm, one cell per (K′, hops). Each row keeps
 // both the RRF fuse (the composed arm) and the cosine-only order (the comp-cos control)
 // derived from the same expansion union, so comp-cos is the control for whatever cell
 // becomes the headline — not a different depth.
-type SweepRow = { q: Question; s: Score; sCos: Score; coarseMs: number; expandMs: number };
+type SweepRow = { q: Question; s: Score; sTyped: Score; sCos: Score; coarseMs: number; expandMs: number; typedMs: number };
 const sweep: { kprime: number; hops: number; rows: SweepRow[] }[] = [];
 for (const kprime of KPRIMES) for (const hops of HOPS) sweep.push({ kprime, hops, rows: [] });
 const cellOf = new Map(sweep.map((c) => [`${c.kprime}:${c.hops}`, c]));
+// Scarcity probe (SMD-1738 phase 2): the phase-1 verdict rests on "vector is at ceiling".
+// Starve the vector budget b and ask whether the edge-aware graph expansion recovers
+// answers vector-top-b misses — the ticket's "answer is not the nearest neighbour", and
+// SMD-1707's at-scale regime where ANN recall degrades.
+const SCARCITY = numList(process.env.OB1_GRAPH_SCARCITY, [1, 3, 5, 10]);
+const scarcity = SCARCITY.map((b) => ({ b, vec: [] as { q: Question; s: Score }[], typed: [] as { q: Question; s: Score }[] }));
+// Entity-membership (aggregation): graph exact membership vs vector vs keyword, on the
+// membership objective. Only the questions carrying a needle.
+const membership: { q: Question; graph: Score; vector: Score; keyword: Score; resolved: boolean }[] = [];
 let seedMs = 0;
 for (const q of questions) {
   const qv = await embed(EMBED_MODEL, q.question, true);
@@ -673,32 +792,48 @@ for (const q of questions) {
     for (const hops of HOPS) {
       const { rows, ms } = await expandStage(c.ids, qvLit, hops);
       const f = fuseUnion(rows);
-      cellOf.get(`${kprime}:${hops}`)!.rows.push({ q, s: score(f.rrf, q.expected), sCos: score(f.cos, q.expected), coarseMs: c.ms, expandMs: ms });
+      const ty = await expandStageTyped(c.ids, qvLit, hops); // edge-aware: typed/weighted expansion
+      const ft = fuseUnion(ty.rows);
+      cellOf.get(`${kprime}:${hops}`)!.rows.push({ q, s: score(f.rrf, q.expected), sTyped: score(ft.rrf, q.expected), sCos: score(f.cos, q.expected), coarseMs: c.ms, expandMs: ms, typedMs: ty.ms });
     }
+  }
+  // Scarcity: vector-top-b alone vs edge-aware composed at the same starved budget b.
+  for (const sb of scarcity) {
+    const cb = await coarseRecall(qvLit, sb.b);
+    sb.vec.push({ q, s: score(cb.issues, q.expected) });
+    const ty = await expandStageTyped(cb.ids, qvLit, 1);
+    sb.typed.push({ q, s: score(fuseUnion(ty.rows).rrf, q.expected) });
   }
   const scores: Result["scores"] = {
     vector: score(vector, q.expected), graph: score(graph, q.expected), hybrid: score(rrf([vector, graph]), q.expected),
-    composed: score([], q.expected), "comp-cos": score([], q.expected), // both filled from the best cell after the sweep
+    composed: score([], q.expected), "comp-typed": score([], q.expected), "comp-cos": score([], q.expected), // filled from the best cell after the sweep
   };
   if (GLOBAL) scores.global = score(await globalArm(qv), q.expected);
   const kw = await keywordArm(q.keyword);
   if (kw) scores.keyword = score(kw, q.expected);
+  if (q.keyword) {
+    const mem = await membershipArm(q.keyword);
+    membership.push({ q, graph: score(mem ?? [], q.expected), vector: score(vector, q.expected), keyword: score(kw ?? [], q.expected), resolved: (mem?.length ?? 0) > 0 });
+  }
   results.push({ q, seeds: seeds.names, scores });
   process.stderr.write(`  … ${q.id}\n`);
 }
 // Headline = the composed arm's best cell by multi-hop recall (tie-break: cheaper
 // expansion). Fill each result's composed and comp-cos scores from it; results and every
 // cell's rows are in the same question order.
-const meanMH = (rows: SweepRow[]) => { const mh = rows.filter((r) => r.q.type === "multi-hop"); return mh.length ? mh.reduce((a, r) => a + r.s.recall, 0) / mh.length : 0; };
-const bestCell = sweep.slice().sort((a, b) => meanMH(b.rows) - meanMH(a.rows) || median(a.rows.map((r) => r.expandMs)) - median(b.rows.map((r) => r.expandMs)))[0];
+const meanRec = (rows: SweepRow[], pick: (r: SweepRow) => Score) => { const mh = rows.filter((r) => r.q.type === "multi-hop"); return mh.length ? mh.reduce((a, r) => a + pick(r).recall, 0) / mh.length : 0; };
+const bestBy = (pick: (r: SweepRow) => Score) => sweep.slice().sort((a, b) => meanRec(b.rows, pick) - meanRec(a.rows, pick) || median(a.rows.map((r) => r.expandMs)) - median(b.rows.map((r) => r.expandMs)))[0];
+const bestCell = bestBy((r) => r.s);          // untyped composed
+const bestTyped = bestBy((r) => r.sTyped);    // edge-aware composed
 const headK = bestCell.kprime, headH = bestCell.hops;
-results.forEach((r, i) => { r.scores.composed = bestCell.rows[i].s; r.scores["comp-cos"] = bestCell.rows[i].sCos; });
+const headTK = bestTyped.kprime, headTH = bestTyped.hops;
+results.forEach((r, i) => { r.scores.composed = bestCell.rows[i].s; r.scores["comp-cos"] = bestCell.rows[i].sCos; r.scores["comp-typed"] = bestTyped.rows[i].sTyped; });
 const of = (r: Result, a: Arm): Score | undefined => r.scores[a];
 
 const types = ["multi-hop", "aggregation", "corpus"] as const;
 const mean = (xs: number[]) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0);
 console.log(`\n  ${questions.length} questions, recall@${K} (share of the expected documents in the top ${K}), nDCG@${K} (position-discounted, over the labelled set), complete@${K} (all of them), MRR@${K} (rank of the first expected document, 0 if none in the top ${K})`);
-console.log(`  composed = vector coarse recall K′=${headK} → graph expansion ${headH} hop(s) → RRF rerank, the arm's best cell (SMD-1738); comp-cos = that same union ordered by cosine only (control); graph = the SMD-948 substitute (question-seeded)`);
+console.log(`  composed = vector coarse recall K′=${headK} → untyped graph expansion → RRF (best cell); comp-typed = the edge-aware expansion, K′=${headTK} (relation prior × support × confidence); comp-cos = that union by cosine only (control); graph = the SMD-948 substitute`);
 console.log(`  keyword is scored only on the ${questions.filter((q) => q.keyword).length} aggregation and corpus questions that carry a needle`);
 if (seedFailures || summaryCost.failed) console.log(`  ! HARNESS: ${seedFailures} of ${questions.length} seed extractions failed; ${summaryCost.failed} of ${summaryCost.calls} summaries failed — the graph arms below were measured with those gaps`);
 console.log("");
@@ -787,6 +922,63 @@ console.log(`    best cell:  lift ${(lift >= 0 ? "+" : "") + lift.toFixed(2)} ${
 console.log(`    VERDICT: ${pass
   ? `PASS (provisional) → ${passingCells.length} of ${sweep.length} cells clear all three clauses (e.g. K′=${passingCells[0].kprime}, ${passingCells[0].hops} hop); confirm on a pre-registered single config before a product path`
   : `FAIL → NO cell of the ${sweep.length} clears all three clauses; do not build, confirms SMD-948's decision on the composed axis`}`);
+
+// ── Beyond recall (SMD-1738 phase 2) — the axes vector can't express ──────────
+const arm = (rows: { s: Score }[]) => mean(rows.map((r) => r.s.recall));
+const armMH = (rows: { q: Question; s: Score }[]) => mean(rows.filter((r) => r.q.type === "multi-hop").map((r) => r.s.recall));
+console.log(`\n  BEYOND RECALL — does the graph, used as a typed/weighted structure, bring what vector can't?`);
+
+// (a) edge properties: comp-typed vs comp (untyped) vs vector, already in the table
+const cAll = mean(results.map((r) => r.scores.composed.recall)), tAll = mean(results.map((r) => r.scores["comp-typed"].recall));
+const cN = mean(results.map((r) => r.scores.composed.ndcg)), tN = mean(results.map((r) => r.scores["comp-typed"].ndcg));
+console.log(`\n  (a) edge properties — typed/weighted/directional expansion (best K′=${headTK}, ${headTH} hop) vs untyped vs vector`);
+console.log(`      recall@${K}: untyped ${cAll.toFixed(2)} → typed ${tAll.toFixed(2)} (vector ${mean(results.map((r) => r.scores.vector.recall)).toFixed(2)}); nDCG@${K}: untyped ${cN.toFixed(2)} → typed ${tN.toFixed(2)} — using the relations helps ranking${tAll > cAll ? ", and recall," : " but not recall,"} not enough to pass a ceiling'd vector`);
+
+// (b) scarcity: does graph recover what a starved vector budget misses?
+console.log(`\n  (b) recall-complement under a starved vector budget b — vector-top-b alone vs edge-aware composed(K′=b)`);
+console.log(`      b     vec-top-b R@${K}   composed R@${K}   Δ   |   (multi-hop) vec → composed`);
+let scarcityWin = false;
+for (const sb of scarcity) {
+  const v = arm(sb.vec), t = arm(sb.typed), vM = armMH(sb.vec), tM = armMH(sb.typed);
+  if (t - v >= 0.02) scarcityWin = true;
+  console.log(`      ${String(sb.b).padStart(2)}       ${v.toFixed(2)}          ${t.toFixed(2)}       ${(t - v >= 0 ? "+" : "") + (t - v).toFixed(2)}  |   ${vM.toFixed(2)} → ${tM.toFixed(2)}`);
+}
+console.log(`      → ${scarcityWin ? "graph expansion DOES recover answers a starved vector misses — a real benefit where recall is scarce (the at-scale regime)" : "graph expansion does not recover a starved vector's misses here — the seeds' entities do not reach the missing answers"}`);
+
+// (c) exact entity-membership (aggregation): graph vs vector vs keyword on the membership objective
+if (membership.length) {
+  const res = membership.filter((m) => m.resolved);
+  console.log(`\n  (c) exact entity-membership — graph vs vector vs keyword, recall@${K}`);
+  console.log(`      ${res.length} of ${membership.length} needles resolve to an entity; the rest are literal-string aggregations ("Decision:", "Promote") — keyword's job, not the graph's, so entity-membership does not apply to them`);
+  if (res.length) {
+    const g = mean(res.map((m) => m.graph.recall)), v = mean(res.map((m) => m.vector.recall)), k = mean(res.map((m) => m.keyword.recall));
+    console.log(`      on the ${res.length} entity needles: graph ${g.toFixed(2)} | vector ${v.toFixed(2)} | keyword ${k.toFixed(2)} — ${g > Math.max(v, k) + 0.02 ? "graph's exact membership wins" : g >= Math.max(v, k) - 0.02 ? "graph ties vector/keyword (exact membership, no lift on this vocabulary-dense corpus)" : "graph trails — the extracted entity's mentions do not cover the labelled set"}`);
+  }
+  console.log(`      → the question set poses few true entity-membership queries, as it poses few relational ones — the same shape-of-question gap SMD-948 named`);
+}
+
+// (d) relational structure vector can't see — a corpus fact, not a scored arm: how many
+// issue pairs linked by a STRONG typed edge (depends_on/uses) have the sibling OUTSIDE
+// the issue's vector top-K. Descriptive (the graph defines the link), so it measures
+// vector's blind spot to graph-defined relations, not a quality win.
+const [rel] = await sql.unsafe(`
+  WITH strong AS (SELECT DISTINCT from_entity_id a, to_entity_id b FROM ob1_entity_edges WHERE relation IN ('depends_on','uses')),
+  pairs AS (
+    SELECT DISTINCT ma.thought_id ta, mb.thought_id tb
+    FROM strong s JOIN thought_entities ma ON ma.entity_id = s.a JOIN thought_entities mb ON mb.entity_id = s.b
+    WHERE ma.thought_id <> mb.thought_id LIMIT 3000
+  )
+  SELECT count(*)::int AS total, count(*) FILTER (WHERE top.id IS NULL)::int AS blind
+  FROM pairs p JOIN thoughts a ON a.id = p.ta
+  LEFT JOIN LATERAL (SELECT o.id FROM thoughts o ORDER BY o.embedding <=> a.embedding LIMIT ${K}) top ON top.id = p.tb`) as { total: number; blind: number }[];
+console.log(`\n  (d) relational structure vector can't see (descriptive) — of ${rel.total} issue pairs joined by a depends_on/uses edge, ${rel.blind} (${rel.total ? Math.round(100 * rel.blind / rel.total) : 0}%) have the linked sibling OUTSIDE the issue's vector top-${K}`);
+console.log(`      → a real store of relational neighbours a single vector pass does not surface; the graph is the only tier that reaches them (the value the scarcity probe (b) turns into recovered recall)`);
+
+// ── Bottom line, integrated across axes ──────────────────────────────────────
+console.log(`\n  BOTTOM LINE (multi-axis, SMD-1738):`);
+console.log(`    • Against a FULL-budget vector on this question set the graph stage does not pay — the bar FAILS (vector is at ceiling; nothing to recover), and the edge properties only sharpen ranking (nDCG ${cN.toFixed(2)}→${tN.toFixed(2)}), not recall.`);
+console.log(`    • ${scarcityWin ? "But under a STARVED vector budget the edge-aware graph is a real recall complement (b=1: " + arm(scarcity[0].vec).toFixed(2) + "→" + arm(scarcity[0].typed).toFixed(2) + ") — exactly the at-scale regime where a single ANN loses recall (SMD-1707). That is where a graph tier earns its place, not as a replacement for a healthy vector recall." : "And even under a starved vector budget the graph did not recover the misses — no regime here favours it."}`);
+console.log(`    • Verdict: not a substitute, and not an everyday stage over a ceiling'd vector — a CONDITIONAL recall/precision tier for the scarce-recall regime (deep scale, tight ANN budgets, relational/entity-membership question types this corpus barely poses). A product path is a scale-regime test away, not a here-and-now build (SMD-1038 posture).`);
 
 console.log(`\n  cost`);
 console.log(`    graph construction: not measured by this run — it replays a dump. The extraction pass that made it is eval-entities.ts --corpus; FORK.md change 30 records 82 min for 441 issues at two workers on qwen2.5:7b. One call per new thought after that.`);
