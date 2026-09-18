@@ -57,7 +57,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { SAMPLE_STATEMENT, TID_PROBE, buffersOf, createAssert, sampleStatementOf, seededRandom } from "./test-support.ts";
 import { markerAnswers } from "./bench-oracle.ts";
-import { attribute, citePointerOf, renderReport, summarise, type ActionRow, type SearchRow } from "../evals/utilization.ts";
+import { armOf, attribute, citePointerOf, goldFromFixture, renderReport, summarise, toActionRow, toSearchRow, type ActionRow, type SearchRow } from "../evals/utilization.ts";
 import { ENTITY_TYPES, RELATIONS } from "../server-portable/entities.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -4393,6 +4393,43 @@ console.log("\n[39] Memory utilization over the query log: attribution, the cite
   const odd = summarise(searches, [...actions, act(AG, 5, "new_tool_that_forgot", B)], 30);
   assert(odd.unknownTools.get("new_tool_that_forgot") === 1 && odd.overall.opened === 3 && odd.overall.cited === 2, `an unknown plain tool is counted as opened and reported (${JSON.stringify([...odd.unknownTools])})`);
   assert(/WARN new_tool_that_forgot ×1/.test(renderReport(odd)), "…and the report warns by name");
+
+  // The database-row coercions the report script relies on, driven here
+  // without a database (third review pass: the script itself runs in no CI
+  // job). bigint columns arrive as strings under Bun; uuid[] as the `{a,b}`
+  // literal; the token estimate is whole or absent.
+  const dbRow = (over: Partial<Parameters<typeof toSearchRow>[0]> = {}) => toSearchRow({
+    id: "s9", agent_id: AG, logged_at: t(0), at_us: "1789816800000000", tool: "search_thoughts", query: "q",
+    match_count: 5, threshold: 0.30000001192092896, recency_weight: 0, result_ids: `{${A},${B}}`, chars: "1200", surviving: "2", returned_n: "2", ...over,
+  });
+  const whole = dbRow();
+  assert(whole.resultIds.join() === [A, B].join() && whole.resultTokens === 300 && whole.atUs === 1789816800000000, `a whole result set: ids parsed from the literal, chars/4 as tokens, at_us as a number (${JSON.stringify([whole.resultIds.length, whole.resultTokens, whole.atUs])})`);
+  assert(dbRow({ surviving: "1" }).resultTokens === null, "one returned id since deleted → no estimate, not a partial one");
+  assert(dbRow({ chars: null, surviving: "0", returned_n: "0", result_ids: "{}" }).resultTokens === null, "nothing returned → no estimate");
+  assert(armOf(whole) === "search_thoughts k=5 thr=0.3 rw=0", `a real's float32 noise does not reach the arm name (${armOf(whole)})`);
+  const actDb = toActionRow({ agent_id: null, logged_at: t(1), at_us: "1789816860000000", tool: "fetch", target_id: A });
+  assert(actDb.agentId === null && actDb.atUs === 1789816860000000, "an action row's NULL agent and at_us survive the coercion");
+  const goldFx = goldFromFixture({ queries: [{ query: "first", relevant: `{${C},"${D}"}` }, { query: "second", relevant: [C] }] });
+  assert(goldFx.get("first")?.has(C) && goldFx.get("first")?.has(D) && goldFx.get("second")?.size === 1, "a gold fixture reads a `{a,b}` literal (quoted or not) and an array alike");
+
+  // Microsecond grain: two searches by one agent 400 µs apart both return X,
+  // then a fetch of X. The SQL join (ORDER BY logged_at DESC) credits the
+  // later one; so does attribute() when the rows carry at_us — a Date alone
+  // would tie them at the millisecond.
+  const base = 1789816800000000;
+  const closeSearches: SearchRow[] = [
+    { ...search("c1", AG, 0, "q", [A], null), atUs: base },
+    { ...search("c2", AG, 0, "q", [A], null), atUs: base + 400 },
+  ];
+  const closeAttr = attribute(closeSearches, [{ ...act(AG, 0, "fetch", A), atUs: base + 800 }], 30);
+  assert(closeAttr.bySearch.has("c2") && !closeAttr.bySearch.has("c1"), "with at_us, the fetch attributes to the later of two searches 400 µs apart, as the SQL join does");
+  assert(attribute(closeSearches, [{ ...act(AG, 0, "fetch", A), atUs: base + 200 }], 30).bySearch.has("c1"), "…and a fetch between them attributes to the earlier one, not the one 200 µs later");
+
+  // The rendered rows align: a numeric util and an n/a util print at the
+  // same width, so the columns under the header line up (third pass).
+  const aligned = renderReport(summarise([...searches, search("s0", AG, 20, "empty", [], null)], actions, 30));
+  const rowLines = aligned.split("\n").filter((l) => /^(search_thoughts|all|9999|\(anon)/.test(l));
+  assert(rowLines.length >= 2 && new Set(rowLines.map((l) => l.length)).size === 1, `every table row is the same width (${[...new Set(rowLines.map((l) => l.length))].join(",")})`);
 }
 
 report();

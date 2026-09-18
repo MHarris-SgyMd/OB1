@@ -26,8 +26,8 @@
 import { SQL } from "bun";
 import { readFileSync } from "node:fs";
 import { loadEnv } from "./env.ts";
-import { parsePgUuidArray, posInt } from "./query-log.ts";
-import { renderReport, summarise, type ActionRow, type SearchRow } from "./utilization.ts";
+import { posInt } from "./query-log.ts";
+import { goldFromFixture, renderReport, summarise, toActionRow, toSearchRow, type ActionDbRow, type SearchDbRow } from "./utilization.ts";
 
 loadEnv();
 
@@ -54,50 +54,29 @@ if (stray.length) {
   process.exit(2);
 }
 
-let gold: Map<string, Set<string>> | undefined;
-if (goldPath) {
-  const fx = JSON.parse(readFileSync(goldPath, "utf8")) as { queries?: { query: string; relevant: unknown }[] };
-  gold = new Map();
-  // `relevant` is an array in a fresh export and may be a `{a,b}` literal in a
-  // re-serialised one (eval-replay.ts guards the same); coerce, never char-scan.
-  for (const q of fx.queries ?? []) gold.set(q.query, new Set(parsePgUuidArray(q.relevant)));
-}
+// The coercions live in utilization.ts (toSearchRow, toActionRow,
+// goldFromFixture) so db/test-schema.ts [39] can drive them over database-shaped
+// rows without a database; this file is the SQL and the printing.
+const gold = goldPath ? goldFromFixture(JSON.parse(readFileSync(goldPath, "utf8"))) : undefined;
 
 const sql = new SQL({ url: URL_, max: 2 });
 
-const searchRows = await sql<{
-  id: string; agent_id: string | null; logged_at: Date; tool: string; query: string | null;
-  match_count: number | null; threshold: number | null; recency_weight: number | null;
-  result_ids: unknown; chars: number | null; surviving: number; returned_n: number;
-}[]>`
-  SELECT s.id, s.agent_id, s.logged_at, s.tool, s.query, s.match_count, s.threshold, s.recency_weight, s.result_ids,
+// at_us: logged_at at the log's own microsecond grain, so the attribution
+// orders and bounds exactly as export-queries.ts's SQL join does; a Date alone
+// is milliseconds.
+const searchRows = await sql<SearchDbRow[]>`
+  SELECT s.id, s.agent_id, s.logged_at,
+         (extract(epoch FROM s.logged_at) * 1000000)::bigint AS at_us,
+         s.tool, s.query, s.match_count, s.threshold, s.recency_weight, s.result_ids,
          (SELECT sum(length(t.content))::bigint FROM thoughts t WHERE t.id = ANY(s.result_ids)) AS chars,
          (SELECT count(*)::int FROM thoughts t WHERE t.id = ANY(s.result_ids)) AS surviving,
          coalesce(cardinality(s.result_ids), 0) AS returned_n
     FROM query_log s
    WHERE s.kind = 'search'`;
-const actionRows = await sql<{ agent_id: string | null; logged_at: Date; tool: string; target_id: string }[]>`
-  SELECT agent_id, logged_at, tool, target_id FROM query_log WHERE kind = 'action'`;
+const actionRows = await sql<ActionDbRow[]>`
+  SELECT agent_id, logged_at, (extract(epoch FROM logged_at) * 1000000)::bigint AS at_us, tool, target_id
+    FROM query_log WHERE kind = 'action'`;
 await sql.close();
 
-const searches: SearchRow[] = searchRows.map((r) => ({
-  id: r.id,
-  agentId: r.agent_id,
-  loggedAt: r.logged_at,
-  tool: r.tool,
-  query: r.query,
-  matchCount: r.match_count,
-  threshold: r.threshold,
-  recencyWeight: r.recency_weight,
-  resultIds: parsePgUuidArray(r.result_ids),
-  // The estimate is whole or absent: a search whose returned ids are all still
-  // stored gets chars/4 over all of them; one where any id has since been
-  // deleted gets none, rather than a partial sum that reads as a cheaper
-  // search than it was (second review pass). Edits still shift it — said in
-  // the report's caveat.
-  resultTokens: r.chars !== null && Number(r.surviving) === Number(r.returned_n) && Number(r.returned_n) > 0 ? Math.round(Number(r.chars) / 4) : null,
-}));
-const actions: ActionRow[] = actionRows.map((r) => ({ agentId: r.agent_id, loggedAt: r.logged_at, tool: r.tool, targetId: r.target_id }));
-
-const summary = summarise(searches, actions, WINDOW_MIN, gold);
+const summary = summarise(searchRows.map(toSearchRow), actionRows.map(toActionRow), WINDOW_MIN, gold);
 console.log(renderReport(summary));

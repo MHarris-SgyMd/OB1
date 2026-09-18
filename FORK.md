@@ -13904,8 +13904,10 @@ carry the new shape and the `COMMENT` predates it.
 
 `evals/utilization.ts` is the pure part: 034's attribution rule (most recent
 prior search by the same agent, within the window, whose results held the id; a
-NULL agent its own bucket — the export's join in TypeScript, so the report and
-the fixture agree by construction), then per arm (the search tool and its
+NULL agent its own bucket — the export's join in TypeScript, compared at the
+log's own microsecond grain when read from the log, since a JS `Date` is
+milliseconds and two rows under a millisecond apart would order differently in
+the two; a fixture in whole minutes is unaffected), then per arm (the search tool and its
 recorded arguments), per agent and overall: ids returned, ids used (cited ∪
 opened, distinct per search), **utilization** = used / returned, **use rate** =
 searches with at least one use, the cited/opened split, and **tokens per used
@@ -13929,7 +13931,17 @@ dropped. Nothing changes ranking: the number first.
 proposed it): declined. MCP tool names cannot contain a slash, so the
 convention cannot collide with a tool; the typed field for *what a write
 cited* belongs on the event itself, which is SMD-1730's event shape (Phase 1
-of SMD-1729), not a column bolted onto 034 now. Per-*model* arms: the log does
+of SMD-1729), not a column bolted onto 034 now. The column's own `COMMENT`
+still describes three plain names; re-commenting it through a new migration,
+as 028 did for the claim table, is **SMD-1749** (a third pass proposed it;
+a second mechanism for this PR). An `update_thought` that re-sends the pointer
+the row already holds logs a cite although nothing changed (a third pass):
+kept. `used` is a set per search, so a retry inside one search's window counts
+once; a re-send after a *new* search that returned the id is that search's
+result reaching a write, which is what the number asks; and telling a
+confirmed pointer from a written one needs 032's function to return the prior
+value, a migration, and would undercount the confirmations SMD-1736 wants to
+see. Per-*model* arms: the log does
 not record the embedding model a search ran under, and 034's `filter` column
 is dead on `search_thoughts` (SMD-1490) — whether to carry the arm there or in
 a column is that ticket's call. A read whose use ends in prose to the user, with no write and no fetch,
@@ -13956,8 +13968,15 @@ no mismatch. The report script was run against a throwaway Postgres with a
 seeded log: the anonymous fetch of an id its search never returned is the one
 unattributed action, tokens per used id came out at exactly what the seeded
 content lengths predict, and the gold arm read 0% ignored where the relevant
-id was cited and n/a where it was never returned. `bunx tsc --noEmit` in
-`server-portable/`.
+id was cited and n/a where it was never returned. The batch writer was probed
+against Postgres with an empty batch, a NULL agent, a tool name carrying a
+quote and a backslash, and forty rows, and writes the same row shape as the
+single-row insert; a mutant that keeps only the first row of a batch fails
+exactly the assertion that reads the second and nothing else. The
+database-row coercions the report relies on (bigint as string, the uuid
+literal, a partly deleted result set, `at_us`, a `real`'s float noise) are
+driven in [39] without a database, since no CI job runs the report itself.
+`bunx tsc --noEmit` in `server-portable/`.
 The measurement itself — the operator's first week of real use with the log on
 — is the ticket's Verify, not this section's: the number exists when the log
 has rows.

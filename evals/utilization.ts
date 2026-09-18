@@ -43,10 +43,19 @@
  * db/test-schema.ts drives it over fixtures.
  */
 
+import { parsePgUuidArray } from "./query-log.ts";
+
 export type SearchRow = {
   id: string;
   agentId: string | null;
   loggedAt: Date | string;
+  /**
+   * `logged_at` in microseconds since the epoch, when the reader has it. The
+   * SQL join compares timestamptz at microsecond grain; a JS Date is
+   * milliseconds, so two rows under 1 ms apart would order differently in the
+   * two. eval-utilization.ts reads this from the log; a fixture may omit it.
+   */
+  atUs?: number;
   tool: string;
   query: string | null;
   matchCount: number | null;
@@ -60,9 +69,83 @@ export type SearchRow = {
 export type ActionRow = {
   agentId: string | null;
   loggedAt: Date | string;
+  /** As on SearchRow. */
+  atUs?: number;
   tool: string;
   targetId: string;
 };
+
+/**
+ * The shape eval-utilization.ts's SELECT hands back, one row per search. Kept
+ * as a type here so the coercion below is testable without a database.
+ */
+export type SearchDbRow = {
+  id: string;
+  agent_id: string | null;
+  logged_at: Date | string;
+  at_us: string | number | bigint;
+  tool: string;
+  query: string | null;
+  match_count: number | null;
+  threshold: number | null;
+  recency_weight: number | null;
+  /** uuid[] as the driver returns it: an array, or the `{a,b}` literal. */
+  result_ids: unknown;
+  /** sum(length(content)) over the returned ids still stored — bigint, so possibly a string. */
+  chars: string | number | bigint | null;
+  /** count of the returned ids still stored. */
+  surviving: string | number | bigint;
+  /** cardinality(result_ids). */
+  returned_n: string | number | bigint;
+};
+
+export type ActionDbRow = {
+  agent_id: string | null;
+  logged_at: Date | string;
+  at_us: string | number | bigint;
+  tool: string;
+  target_id: string;
+};
+
+/**
+ * A search row from the database → a SearchRow. The token estimate is whole or
+ * absent: chars/4 when every returned id is still stored, null when any has
+ * since been deleted (a partial sum would read as a cheaper search than it was)
+ * or when nothing was returned. bigint columns arrive as strings under Bun.
+ */
+export function toSearchRow(r: SearchDbRow): SearchRow {
+  const surviving = Number(r.surviving);
+  const returned = Number(r.returned_n);
+  const whole = r.chars !== null && returned > 0 && surviving === returned;
+  return {
+    id: r.id,
+    agentId: r.agent_id,
+    loggedAt: r.logged_at,
+    atUs: Number(r.at_us),
+    tool: r.tool,
+    query: r.query,
+    matchCount: r.match_count,
+    threshold: r.threshold,
+    recencyWeight: r.recency_weight,
+    resultIds: parsePgUuidArray(r.result_ids),
+    resultTokens: whole ? Math.round(Number(r.chars) / 4) : null,
+  };
+}
+
+export function toActionRow(r: ActionDbRow): ActionRow {
+  return { agentId: r.agent_id, loggedAt: r.logged_at, atUs: Number(r.at_us), tool: r.tool, targetId: r.target_id };
+}
+
+/**
+ * A gold map from a fixture in export-queries.ts's shape: query text → the ids
+ * a hand-labelled set calls relevant. `relevant` is an array in a fresh export
+ * and may be the `{a,b}` literal in a re-serialised one; both read.
+ */
+export function goldFromFixture(fx: { queries?: { query: string; relevant: unknown }[] }): Map<string, Set<string>> {
+  const gold = new Map<string, Set<string>>();
+  for (const q of fx.queries ?? []) gold.set(q.query, new Set(parsePgUuidArray(q.relevant)));
+  return gold;
+}
 
 /**
  * The plain tool names the server logs as an open — click-through relevance
@@ -90,7 +173,14 @@ export type Attribution = {
   unknownTools: Map<string, number>;
 };
 
-const ms = (t: Date | string): number => (t instanceof Date ? t.getTime() : new Date(t).getTime());
+/**
+ * A row's instant in microseconds: `atUs` when the reader supplied it (the
+ * log's own grain), else the Date's milliseconds × 1000. The SQL join orders
+ * and bounds at microsecond grain, so the report matches it exactly when read
+ * from the log; a fixture in whole seconds or minutes is unaffected.
+ */
+const tick = (r: { loggedAt: Date | string; atUs?: number }): number =>
+  typeof r.atUs === "number" && Number.isFinite(r.atUs) ? r.atUs : (r.loggedAt instanceof Date ? r.loggedAt.getTime() : new Date(r.loggedAt).getTime()) * 1000;
 
 /**
  * Each action → the most recent prior search by the same agent (NULL agent is
@@ -107,23 +197,23 @@ export function attribute(searches: SearchRow[], actions: ActionRow[], windowMin
   const bySearch = new Map<string, Uses>();
   const unattributed: ActionRow[] = [];
   const unknownTools = new Map<string, number>();
-  const windowMs = windowMinutes * 60_000;
+  const windowUs = windowMinutes * 60_000_000;
 
   const byAgent = new Map<string | null, { s: SearchRow; at: number; ids: Set<string> }[]>();
   for (const s of searches) {
     const list = byAgent.get(s.agentId) ?? [];
-    list.push({ s, at: ms(s.loggedAt), ids: new Set(s.resultIds) });
+    list.push({ s, at: tick(s), ids: new Set(s.resultIds) });
     byAgent.set(s.agentId, list);
   }
   for (const list of byAgent.values()) list.sort((a, b) => b.at - a.at); // newest first
 
   for (const act of actions) {
     if (citePointerOf(act.tool) === null && !OPEN_TOOLS.has(act.tool)) unknownTools.set(act.tool, (unknownTools.get(act.tool) ?? 0) + 1);
-    const at = ms(act.loggedAt);
+    const at = tick(act);
     let hit: SearchRow | undefined;
     for (const c of byAgent.get(act.agentId) ?? []) {
       if (c.at > at) continue; // a later search cannot have produced this touch
-      if (c.at < at - windowMs) break; // sorted newest first: everything after this is older still
+      if (c.at < at - windowUs) break; // sorted newest first: everything after this is older still
       if (c.ids.has(act.targetId)) {
         hit = c.s;
         break;
@@ -142,12 +232,12 @@ export function attribute(searches: SearchRow[], actions: ActionRow[], windowMin
   return { bySearch, unattributed, unknownTools };
 }
 
+/** A `real` column decoded to a double carries float32 noise (0.3 → 0.30000001192092896); six significant digits is the column's own precision. */
+const fmt = (x: number | null): string => (x === null ? "?" : String(Number(x.toPrecision(6))));
+
 /** The arm a search row ran under: the tool and the arguments the log recorded. */
 export function armOf(s: SearchRow): string {
-  const k = s.matchCount ?? "?";
-  const thr = s.threshold ?? "?";
-  const rw = s.recencyWeight ?? "?";
-  return `${s.tool} k=${k} thr=${thr} rw=${rw}`;
+  return `${s.tool} k=${s.matchCount ?? "?"} thr=${fmt(s.threshold)} rw=${fmt(s.recencyWeight)}`;
 }
 
 export type ArmStats = {
@@ -272,7 +362,7 @@ export function renderReport(sum: Summary): string {
   }
   const head = `${"arm".padEnd(44)} ${"searches".padStart(8)} ${"returned".padStart(8)} ${"used".padStart(5)} ${"util".padStart(5)} ${"use-rate".padStart(8)} ${"cited".padStart(5)} ${"opened".padStart(6)} ${"tok/used".padStart(8)}${sum.overall.gold ? ` ${"gold".padStart(5)} ${"ignored".padStart(7)}` : ""}`;
   const row = (label: string, st: ArmStats): string =>
-    `${label.slice(0, 44).padEnd(44)} ${String(st.searches).padStart(8)} ${String(st.returned).padStart(8)} ${String(st.used).padStart(5)} ${pct(st.utilization)} ${pct(st.useRate).padStart(8)} ${String(st.cited).padStart(5)} ${String(st.opened).padStart(6)} ${num(st.tokensPerUsed).padStart(8)}` +
+    `${label.slice(0, 44).padEnd(44)} ${String(st.searches).padStart(8)} ${String(st.returned).padStart(8)} ${String(st.used).padStart(5)} ${pct(st.utilization).padStart(5)} ${pct(st.useRate).padStart(8)} ${String(st.cited).padStart(5)} ${String(st.opened).padStart(6)} ${num(st.tokensPerUsed).padStart(8)}` +
     (st.gold ? ` ${String(st.gold.withGold).padStart(5)} ${pct(st.gold.ignoreRate).padStart(7)}` : "");
   lines.push(`window ${sum.windowMinutes} min; ${sum.actionsTotal} action row(s), ${sum.unattributed} attributed to no search; token estimate for ${sum.overall.searchesWithTokens} of ${sum.overall.searches} search(es) (a search with a since-deleted result carries none)`);
   if (sum.unknownTools.size > 0) {
