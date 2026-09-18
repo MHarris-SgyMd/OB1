@@ -11,7 +11,7 @@
  * the top K. Any answering step has to work from what was retrieved, and a
  * generated answer over the wrong documents is a confident fabrication.
  *
- * Five whole-match arms (the SMD-1738 composed stage below is a sixth, of a different
+ * Five whole-match arms (the SMD-1738 composed / comp-typed stages below are a different
  * shape), all over the same throwaway Postgres holding the corpus with real
  * embeddings and the entity graph SMD-947 extracted:
  *
@@ -59,12 +59,16 @@
  *   … --allow-stale-dump replay a dump whose fingerprints do not match the loaded text, by id
  *   OB1_EVAL_EMBED=qwen3-embedding:4b@1024   the embedding spec, as the other harnesses take it
  *
- * SMD-1738 adds a sixth arm, `composed`: the graph as an EXPANSION / rerank stage over
- * vector recall (stage 1 coarse vector recall K′; stage 2 seed from the vector hits'
- * entities, expand `hops`, rerank the union), with a `comp-cos` cosine-only control. It
- * is scored against the labelled gold and gated by a pre-registered bar (see the report).
- *   OB1_GRAPH_KPRIME=10,20,50,100   coarse depths K′ to sweep (composed arm)
+ * SMD-1738 measures the graph as an EXPANSION / rerank stage over vector recall (stage 1
+ * coarse vector recall K′; stage 2 seed from the vector hits' entities, expand `hops`,
+ * rerank the union): `composed` (untyped walk), `comp-typed` (edge-aware — relation prior
+ * × support × confidence), and a `comp-cos` cosine-only control, scored against the
+ * labelled gold and gated by a pre-registered bar. Phase 2 also measures beyond recall —
+ * the report's (b) recall-complement under a starved vector budget, (c) entity-membership,
+ * (d) relational structure vector can't see.
+ *   OB1_GRAPH_KPRIME=10,20,50,100   coarse depths K′ to sweep (composed arms)
  *   OB1_GRAPH_HOPS=1,2              hop depths to sweep
+ *   OB1_GRAPH_SCARCITY=1,3,5,10     starved vector budgets for the (b) probe
  *   … --scale 1000000    skip the corpus; synthesize a graph of this many thoughts and
  *                        time the expansion stage only (latency, not quality). Knobs:
  *                        OB1_GRAPH_SCALE_ENTITIES / _MENTIONS_PER / _EDGES_PER / _SKEW /
