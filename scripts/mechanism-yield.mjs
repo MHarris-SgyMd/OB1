@@ -40,10 +40,13 @@
  *
  * What is a finding: a bullet ("- " or "* ", at any indent — a nested
  * sub-bullet is its own finding) in the body of a review-pass commit, outside
- * a fenced code block, and not a run result — a bullet under a "Green …" line
- * or one that is only suite names and N/N counts is skipped and counted as
- * such. A bullet continues on following non-blank lines at any indent until a
- * blank line or the next bullet, so a tag wrapped onto the next line is read.
+ * a fenced code block, and not a run result — a bullet under a "Green …" or
+ * "Verified …" line, or one that is only suite names and N/N counts, is
+ * skipped and counted as such, as is a bullet of twelve characters or fewer.
+ * A bullet that carries a `(caught` tag is a finding wherever it sits: the
+ * writer said so, and no heuristic overrules the tag. A bullet continues on
+ * following non-blank lines at any indent until a blank line or the next
+ * bullet, so a tag wrapped onto the next line is read.
  *
  * A review-pass commit is one whose subject says "review" and "pass" in one
  * of the fork's shapes ("Review, second pass", "Review pass 4", "Second review
@@ -58,17 +61,27 @@
  *
  *   bun scripts/mechanism-yield.mjs                      # whole log
  *   bun scripts/mechanism-yield.mjs --since <sha>        # that commit and everything committed at or after it
- *   bun scripts/mechanism-yield.mjs --since YYYY-MM-DD   # by commit date
+ *   bun scripts/mechanism-yield.mjs --since YYYY-MM-DD   # from that calendar day on, by committer date
  *   bun scripts/mechanism-yield.mjs --log dump.txt       # a saved dump (--since then takes a date only)
  *   bun scripts/mechanism-yield.mjs --self-check         # the parser fixtures
  *
  * `--since <sha>` is a window in TIME as well as ancestry — the commit's own
  * commit time onward — so a branch that started before the anchor and merged
- * after it contributes only what it committed in the tagged era. Options take
- * `--name value` or `--name=value`; an unknown option is refused. Others:
- * --samples N (rows shown per class, default 6; 0 shows none), --dump rows.tsv
- * (every row with its classification). A dump is what `git log
- * --format='%x1e%H%x1f%ad%x1f%s%x1f%b' --date=short` prints.
+ * after it contributes only what it committed in the tagged era. Every date
+ * the script cuts on or prints is the COMMITTER date (`%cd`): the anchor's
+ * time, a `--since` day and each row's date are one clock, so a saved dump
+ * and a live run of the same window tally alike (129 of the log's 1,351
+ * commits were authored on a different day than they were committed — every
+ * rebase moves the committer date). `--since YYYY-MM-DD` is the whole
+ * calendar day on both paths: the script filters rows on their date rather
+ * than handing the bare day to git, whose approxidate reads it as that day at
+ * the current time of day and silently drops every commit made earlier in it
+ * (`--since 2026-09-18` at 03:27 returned 0 commits; the same day's dump, 9).
+ * Options take `--name value` or `--name=value`; an unknown option is
+ * refused. Others: --samples N (rows shown per class, default 6; 0 shows
+ * none), --dump rows.tsv (every row with its classification). A dump is what
+ * `git log --format='%x1e%H%x1f%cd%x1f%s%x1f%b' --date=short` prints; one
+ * made with `%ad` (before SMD-1728) carries author dates and windows on them.
  */
 
 import { execFileSync } from "node:child_process";
@@ -116,11 +129,16 @@ const LOG = OPTS["--log"];
 const SINCE = OPTS["--since"];
 const SELF_CHECK = OPTS["--self-check"] === true;
 const isDate = (s) => /^\d{4}-\d{2}-\d{2}$/.test(s);
+/** The commits dated on or after a calendar day — the one date filter both paths use. */
+const sinceDay = (commits, day) => commits.filter((c) => c.date >= day);
 
 // ---------------------------------------------------------------------------
 // Parsing
 // ---------------------------------------------------------------------------
-const FORMAT = "%x1e%H%x1f%ad%x1f%s%x1f%b";
+// %cd, the committer date: the clock `--since <sha>` cuts on (%cI) and the one
+// a rebase moves. The author date (%ad) is when the work was done and can sit
+// a day earlier, so a dump and a live run would window differently on it.
+const FORMAT = "%x1e%H%x1f%cd%x1f%s%x1f%b";
 
 function git(args) {
   try {
@@ -141,14 +159,15 @@ function readLog() {
       console.error(`--since with --log takes a date (YYYY-MM-DD): a dump has no ancestry to resolve ${SINCE} against`);
       process.exit(2);
     }
-    commits = commits.filter((c) => c.date >= SINCE);
-    return { commits, windowLabel: `window ${SINCE} → end of dump: ` };
+    return { commits: sinceDay(commits, SINCE), windowLabel: `window ${SINCE} → end of dump: ` };
   }
   const args = ["log", `--format=${FORMAT}`, "--date=short"];
   if (SINCE === undefined) return { commits: parseCommits(git(args)), windowLabel: "" };
   if (isDate(SINCE)) {
-    args.push(`--since=${SINCE}`);
-    return { commits: parseCommits(git(args)), windowLabel: `window ${SINCE} → HEAD: ` };
+    // The whole log, cut by the same filter the --log path applies. Passing the
+    // bare day to git as --since would read it as that day at the current time
+    // of day and drop every commit made earlier in the day.
+    return { commits: sinceDay(parseCommits(git(args)), SINCE), windowLabel: `window ${SINCE} → HEAD: ` };
   }
   // A revision: everything reachable from HEAD that was COMMITTED at or after
   // the anchor's own commit time, the anchor included. Ancestry alone
@@ -177,15 +196,24 @@ const BOYSCOUT_RE = /\bboyscout\b/i;
 const MERGE_RE = /^Merge\b/;
 const ORDINALS = { first: 1, second: 2, third: 3, fourth: 4, fifth: 5, sixth: 6, seventh: 7, eighth: 8, ninth: 9, tenth: 10, eleventh: 11, twelfth: 12 };
 
+// One alternation, so the LEFTMOST mention wins whichever spelling it uses: a
+// subject names its own pass first and an earlier one after ("Review pass 4:
+// the third pass's fix held"); trying the ordinal spelling first would read
+// that as pass 3.
+const PASS_RE = new RegExp(`\\b(?:pass (\\d+)|(${ORDINAL})(?: review)? pass)\\b`, "i");
 function passNumber(subject) {
-  const m1 = subject.match(new RegExp(`\\b(${ORDINAL})(?: review)? pass\\b`, "i"));
-  if (m1) return ORDINALS[m1[1].toLowerCase()];
-  const m2 = subject.match(/\bpass (\d+)\b/i);
-  if (m2) return Number(m2[1]);
+  const m = subject.match(PASS_RE);
+  if (m) return m[1] ? Number(m[1]) : ORDINALS[m[2].toLowerCase()];
   if (/reproducibility|convergence/i.test(subject)) return 0; // named, not numbered
   return null;
 }
-const ticketOf = (subject, body) => (subject + " " + body).match(/SMD-\d+/)?.[0] ?? "(none)";
+/**
+ * The ticket a commit belongs to: the "(SMD-nnnn)" the subject ends with, then
+ * the first mention in the subject, then the first in the body. A subject often
+ * names another ticket before its own ("main took 79 for SMD-1037 … (SMD-1607)"),
+ * so first-mention-anywhere attributed 13 of the log's review passes wrongly.
+ */
+const ticketOf = (subject, body) => subject.match(/\((SMD-\d+)\)\s*$/)?.[1] ?? subject.match(/SMD-\d+/)?.[0] ?? body.match(/SMD-\d+/)?.[0] ?? "(none)";
 
 const BULLET_RE = /^\s*[-*] (.*)$/;
 const GREEN_HEAD_RE = /^\s*(green|all green|verified)\b/i;
@@ -200,8 +228,11 @@ function isRunResult(text) {
  * Finding bullets of a commit body → { findings, skipped }. A bullet starts
  * with "- " or "* " at any indent and continues on following non-blank lines
  * until a blank line or the next bullet. Fenced code is skipped. Bullets under
- * a "Green …" line, and bullets that are only suite names and N/N counts, are
- * run results, counted in `skipped`.
+ * a "Green …" or "Verified …" line, bullets that are only suite names and N/N
+ * counts, and bullets of twelve characters or fewer are run results, counted
+ * in `skipped` — unless the bullet carries a `(caught` tag, which makes it a
+ * finding wherever it sits: a "Verified:" line may introduce tagged findings,
+ * and a tagged bullet may quote the count that proved it.
  */
 function bulletsOf(body) {
   const findings = [];
@@ -211,8 +242,9 @@ function bulletsOf(body) {
   let green = false;
   const flush = () => {
     if (cur === null) return;
-    if (green || isRunResult(cur)) skipped++;
-    else if (cur.length > 12) findings.push(cur);
+    const tagged = /\(caught/i.test(cur);
+    if (!tagged && (green || isRunResult(cur) || cur.length <= 12)) skipped++;
+    else findings.push(cur);
     cur = null;
   };
   for (const line of body.split("\n")) {
@@ -253,13 +285,15 @@ const TAG_TAIL_RE = /^\((?:caught|caught-by):\s*([a-z_-]+)\s*(?:;\s*held(?:-by)?
 
 /**
  * Reads the `(caught: …; held: …)` tag off a bullet. Returns null when there is
- * no "(caught" at all; `{unparsed: true}` when there is one that does not read.
+ * no "(caught" at all; `{unparsed: true, head}` when there is one that does not
+ * read — `head` is the finding before it, so the target is classified over the
+ * finding and not over whatever the broken tag names.
  */
 function readTag(text) {
   const idx = text.toLowerCase().lastIndexOf("(caught");
   if (idx < 0) return null;
   const m = text.slice(idx).match(TAG_TAIL_RE);
-  if (!m) return { unparsed: true, text };
+  if (!m) return { unparsed: true, text, head: text.slice(0, idx).trim() };
   const mechanism = m[1].toLowerCase();
   return { mechanism, known: MECHANISMS.includes(mechanism), held: m[2]?.trim() ?? null, text: text.slice(0, idx).trim() };
 }
@@ -283,7 +317,7 @@ const DEFECTS = new Set(["code", "test-teeth"]);
 function classifyRow(text) {
   const tag = readTag(text);
   if (tag?.unparsed) {
-    return { text, source: "tag-unparsed", mechanism: "unparsed", held: null, target: classify(TARGET, text, "unclassified") };
+    return { text, source: "tag-unparsed", mechanism: "unparsed", held: null, target: classify(TARGET, tag.head, "unclassified") };
   }
   if (tag) {
     return {
@@ -296,6 +330,32 @@ function classifyRow(text) {
   }
   return { text, source: "implicit", mechanism: "implicit", held: null, target: classify(TARGET, text, "unclassified") };
 }
+
+/**
+ * Per ticket: the passes run (every review commit contributes its number,
+ * subject-only ones too), the bullet rows, whether any row was a code/teeth
+ * defect, and the highest-numbered pass that found one. `hadDefect` is kept
+ * apart from `lastDefect` because a named pass (0) or an unparsed one (null)
+ * can find a defect that no pass number can carry.
+ */
+function ticketSummary(rows) {
+  const byTicket = new Map();
+  for (const r of rows) {
+    const e = byTicket.get(r.ticket) ?? { passes: new Set(), lastDefect: 0, hadDefect: false, rows: 0 };
+    if (r.pass) e.passes.add(r.pass);
+    if (r.kind === "bullet") {
+      e.rows++;
+      if (DEFECTS.has(r.target)) {
+        e.hadDefect = true;
+        if (r.pass && r.pass > e.lastDefect) e.lastDefect = r.pass;
+      }
+    }
+    byTicket.set(r.ticket, e);
+  }
+  return byTicket;
+}
+/** "pass N", or where the defects sit when no numbered pass found one. */
+const lastDefectLabel = (e) => (e.lastDefect ? `pass ${e.lastDefect}` : e.hadDefect ? "an unnumbered pass" : "none");
 
 // ---------------------------------------------------------------------------
 // Self-check: the parsers and the tag reader on fixtures
@@ -326,6 +386,8 @@ function selfCheck() {
     "- A bullet whose wrapped tag sits on a flush-left continuation line",
     "(caught: run-it)",
     "",
+    "- ok.",
+    "",
     "The convention, for the record:",
     "```",
     "- <finding>. (caught: <mechanism>)",
@@ -337,11 +399,16 @@ function selfCheck() {
     "- bun db/test-schema.ts 907/907",
     "- bun scripts/check-fork-consistency.mjs PASS, with a sentence long enough to look like a finding",
     "",
+    "Verified against the container, and two things came of it:",
+    "- test-live 17/17 (caught: run-it)",
+    "- the migration applied twice and left one row, as an untagged line under a Verified heading",
+    "",
     "Co-Authored-By: nobody <noreply@example.com>",
   ].join("\n");
   const { findings: bullets, skipped } = bulletsOf(body);
-  check(bullets.length === 13, `thirteen finding bullets: continuation lines joined, nested and star bullets their own, the fenced example and the run results not among them (${bullets.length})`);
-  check(skipped === 3, `three run-result bullets skipped: one by shape, two under a Green line (${skipped})`);
+  check(bullets.length === 14, `fourteen finding bullets: continuation lines joined, nested and star bullets their own, the fenced example and the run results not among them, the tagged count under a Verified line in (${bullets.length})`);
+  check(skipped === 5, `five bullets skipped: a run result by shape, two under a Green line, an untagged one under a Verified line, one too short to be a finding on its own (${skipped})`);
+  check(bullets[13] === "test-live 17/17 (caught: run-it)" && isRunResult("test-live 17/17 (caught: run-it)"), "a bullet the run-result rule would skip is a finding once it carries a tag");
   const rows = bullets.map(classifyRow);
   const r = (i) => rows[i] ?? {};
   check(r(0).source === "tagged" && r(0).mechanism === "cold-read" && r(0).held === null, "tag without held read");
@@ -357,8 +424,22 @@ function selfCheck() {
   check(r(8).source === "implicit" && r(9).source === "tagged" && r(9).mechanism === "walkthrough" && r(10).source === "implicit", "nested sub-bullets are separate rows with their own tags");
   check(r(11).source === "tagged-unknown" && r(11).mechanism === "unknown:run_it", "star bullet parsed; underscore typo flagged as unknown");
   check(r(12).source === "tagged" && r(12).mechanism === "run-it", "a tag wrapped onto a flush-left line is read");
-  check(rows.filter((x) => x.source === "tagged").length === 6 && rows.filter((x) => x.source === "implicit").length === 4, `tagged 6, implicit 4 (${rows.filter((x) => x.source === "tagged").length}, ${rows.filter((x) => x.source === "implicit").length})`);
+  check(rows.filter((x) => x.source === "tagged").length === 7 && rows.filter((x) => x.source === "implicit").length === 4, `tagged 7, implicit 4 (${rows.filter((x) => x.source === "tagged").length}, ${rows.filter((x) => x.source === "implicit").length})`);
+  check(classifyRow("The header said five (caught: cold-read) trailing").target === "record" && classifyRow("Nothing classifiable (caught: cold-read; held: eval-x.ts) trailing").target === "unclassified", "an unparsed tag's row is classified over the finding, not over the tag's tail");
   check(passNumber("[fork] Review, second pass: …") === 2 && passNumber("[fork] Review pass 4: …") === 4 && passNumber("[fork] Second review pass, triaged: …") === 2 && passNumber("[fork] Review, reproducibility pass, triaged: …") === 0, "pass numbers from four subject shapes");
+  check(passNumber("[fork] Review pass 4: the third pass's fix held, and …") === 4 && passNumber("[fork] Review, third pass: pass 2's RETURNING moved a test anchor …") === 3, "a subject that names two passes is attributed to the leftmost, whichever spelling");
+  check(ticketOf("[fork] Review, second pass: that field is SMD-1730's, not this one's (SMD-1719)", "Body mentions SMD-1000 first.") === "SMD-1719" && ticketOf("[fork] Review pass 2: the figure is this ticket's probe, not SMD-1498's", "") === "SMD-1498" && ticketOf("[fork] Review, first pass", "Filed as SMD-1462.") === "SMD-1462" && ticketOf("[fork] Review, first pass", "no ticket") === "(none)", "ticket: the subject's trailing (SMD-n), then its first mention, then the body");
+  check(FORMAT.includes("%x1f%cd%x1f") && !FORMAT.includes("%ad"), "rows carry the committer date, the clock the window is cut on");
+  check(sinceDay([{ date: "2026-09-17" }, { date: "2026-09-18" }, { date: "2026-09-19" }], "2026-09-18").length === 2, "a --since day keeps that day and later, on the row's own date");
+  {
+    const s = ticketSummary([
+      { ticket: "SMD-1", pass: 0, kind: "bullet", target: "code" },
+      { ticket: "SMD-2", pass: 2, kind: "bullet", target: "code" },
+      { ticket: "SMD-2", pass: 3, kind: "bullet", target: "record" },
+      { ticket: "SMD-3", pass: 1, kind: "bullet", target: "confirmed" },
+    ]);
+    check(lastDefectLabel(s.get("SMD-1")) === "an unnumbered pass" && lastDefectLabel(s.get("SMD-2")) === "pass 2" && lastDefectLabel(s.get("SMD-3")) === "none", "a defect found by a named pass is a defect the ticket had, not 'none'");
+  }
   check(REVIEW_RE.test("[fork] Review, first pass: x") && REVIEW_RE.test("[fork] Review pass 6: x") && REVIEW_RE.test("[fork] Third review pass, triaged: x"), "the three review-pass subject shapes are recognised");
   check(!REVIEW_RE.test("[fork] This ticket's section is change 74: … while the third pass was in flight") && !REVIEW_RE.test("[fork] The ten-million-row second pass, measured") && !REVIEW_RE.test("[fork] Tidy the review passes left, while the files were open") && !REVIEW_RE.test("[fork] The reviewed pass over the bench, measured"), "a subject that only mentions a pass, or says reviewed, is not a review pass");
   check(BOYSCOUT_RE.test("[fork] Boyscout: tidy") && MERGE_RE.test("Merge origin/main into x: the review pass"), "boyscout and merge subjects told apart");
@@ -465,24 +546,15 @@ console.log();
 
 console.log("== Per ticket: passes run, and the last pass that found a code/teeth defect ==");
 {
-  // Every review commit contributes its pass to its ticket (subject-only ones too); only bullet rows count as findings.
-  const byTicket = new Map();
-  for (const r of rows) {
-    const e = byTicket.get(r.ticket) ?? { passes: new Set(), lastDefect: 0, rows: 0 };
-    if (r.pass) e.passes.add(r.pass);
-    if (r.kind === "bullet") {
-      e.rows++;
-      if (DEFECTS.has(r.target) && r.pass && r.pass > e.lastDefect) e.lastDefect = r.pass;
-    }
-    byTicket.set(r.ticket, e);
-  }
-  const list = [...byTicket.entries()].filter(([t, e]) => e.rows > 0 && t !== "(none)");
+  const list = [...ticketSummary(rows).entries()].filter(([t, e]) => e.rows > 0 && t !== "(none)");
+  // Numbered passes ascending, then the tickets whose defects sit only in an unnumbered pass, then none.
+  const order = (e) => (e.lastDefect ? e.lastDefect : e.hadDefect ? 1e3 : 1e6);
   const hist = new Map();
-  for (const [, e] of list) hist.set(e.lastDefect, (hist.get(e.lastDefect) ?? 0) + 1);
+  for (const [, e] of list.sort((a, b) => order(a[1]) - order(b[1]))) hist.set(lastDefectLabel(e), (hist.get(lastDefectLabel(e)) ?? 0) + 1);
   console.log(`tickets with bullet rows: ${list.length}`);
-  console.log("last defect at → tickets: " + [...hist.entries()].sort((a, b) => a[0] - b[0]).map(([p, n]) => `${p === 0 ? "none" : "pass " + p}: ${n}`).join(", "));
+  console.log("last defect at → tickets: " + [...hist.entries()].map(([p, n]) => `${p}: ${n}`).join(", "));
   const deep = list.filter(([, e]) => e.passes.size && Math.max(...e.passes) >= 5).sort((a, b) => Math.max(...b[1].passes) - Math.max(...a[1].passes));
-  if (deep.length) console.log("≥5 passes: " + deep.map(([t, e]) => `${t} (max ${Math.max(...e.passes)}, last defect ${e.lastDefect || "none"})`).join("; "));
+  if (deep.length) console.log("≥5 passes: " + deep.map(([t, e]) => `${t} (max ${Math.max(...e.passes)}, last defect ${lastDefectLabel(e)})`).join("; "));
 }
 console.log();
 
