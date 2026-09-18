@@ -918,12 +918,10 @@ for (const t of TEXT_ONLY) {
     const drift = Object.entries(imports).filter(([name, spec]) => name in pkg && spec !== `npm:${name}@${pkg[name]}`);
     assert(drift.length === 0, `${file} pins what package.json installs${drift.length ? ` (${drift.map(([n, s]) => `${n}: ${s}`).join(", ")})` : ""}`);
   }
-  // server/package.json says it mirrors server/deno.json exactly; nothing held
-  // it to that until a nested zod 4.5.4 arrived in its lock (change 83's
-  // review). Every MCP-stack import of the one is in the other at the same
-  // version — supabase-js excepted: the Node suites never load it. (Named by
-  // regex, not as a quoted literal: the shim codemod rewrites every quoted
-  // supabase-js literal in a file it takes for a migration target.)
+  // server/package.json mirrors server/deno.json on the MCP stack (change 83's
+  // review: a nested zod 4.5.4 had arrived in its lock unheld). supabase-js is
+  // left out — the Node suites never load it — and left out by regex: a quoted
+  // supabase-js literal makes this file a target for the shim codemod.
   {
     const MCP_STACK = /^(hono|zod|@hono\/mcp|@modelcontextprotocol\/sdk)$/;
     const imports = JSON.parse(readFileSync(join(ROOT, "server/deno.json"), "utf8")).imports as Record<string, string>;

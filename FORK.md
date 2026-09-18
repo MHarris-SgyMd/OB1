@@ -13409,9 +13409,10 @@ assertions.
 `test-auth.ts` — the pragma guard's, the transport and SDK blocks', the
 protocol-version pair's, the pin mirror's and the probe's Accept sentence —
 cut to a pointer at this section each, forty-seven lines to twenty-eight; and
-two `change 82` the renumber had missed, where the word and its number sat on
-different lines (the transport block, `test-server.ts` [7]), read 81. No
-behaviour change.
+two references the renumber had missed, where the word `change` and its
+number sat on different lines (the transport block, `test-server.ts` [7]),
+read the right number. A second look after the PR opened: the pin mirror's
+comment, six lines to four, keeping the codemod warning. No behaviour change.
 
 **Not done here.** The live connector check (one Claude Desktop session, two
 tool calls in flight, Accept as the client sends it) that SMD-1497, SMD-1259
