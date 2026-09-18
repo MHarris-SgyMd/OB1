@@ -13171,6 +13171,21 @@ that does not beat what migration 014 gives Postgres in-engine. Not built; the
 the fork is FSL-1.1-MIT — SMD-1038's guardrail — so it is a dependency of an
 eval, not the product.)
 
+**What this does not answer.** This measured a second store as a *subordinate ANN
+index* — Postgres the source of truth, every read resolving ids back to it — and
+on *retrieval quality* it found parity, with filter strategy (in-engine via
+migration 014) the only real variable. It did **not** measure the two shapes
+where a second store would actually earn its place, and the resolve/consistency
+costs the verdict leans on are partly artifacts of that chosen topology: a
+**read-model** shape where the store holds the payload and serves the read with no
+Postgres resolve at all (SMD-1696), and the **scale/operational failure envelope**
+— the corpus size and width at which single-store pgvector stops fitting or
+building, plus the re-embed maintenance window and read/write contention it
+imposes (SMD-1697). The 10M arm above already hints at the latter: pgvector could
+not build there while LanceDB built in 28 s. So "not built" is scoped to
+retrieval quality on a corpus the single store handles; the read-model topology
+and the scale case are open.
+
 **Upstream status:** not applicable — the store comparison is this fork's eval.
 
 

@@ -3036,6 +3036,20 @@ product.) Reproduce with `OB1_STORE_EXTERNAL=qdrant,lance` (the default) on
 `store-compare.ts` and `store-scale.ts`; `OB1_STORE_LANCE_INDEXES` picks the
 index kinds.
 
+**What this does not answer.** This — like SMD-1037 — measured a second store as
+a *subordinate ANN index*, with Postgres the source of truth and every read
+resolving ids back to it, on a corpus the single store handles. So the parity
+finding is real *for retrieval quality*, and the id→row resolve the verdict leans
+on is partly an artifact of that topology rather than of a two-store design. Two
+shapes where a second store would actually earn its place went unmeasured: a
+**read-model** topology where the store holds the payload and serves the read with
+no Postgres resolve at all (SMD-1696), and the **scale/operational failure
+envelope** — the corpus size and width at which single-store pgvector stops
+fitting or building, and the re-embed maintenance window and read/write contention
+it imposes (SMD-1697). The 10M arm above already hints at the latter: pgvector
+could not build there while LanceDB built in 28 s. "Not built" is the right call
+on retrieval quality; the topology and scale cases are the open questions.
+
 
 
 ## Quantised indexes at the shipped width: halfvec adopted, binary declined (SMD-1501)
