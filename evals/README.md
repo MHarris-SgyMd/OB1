@@ -2296,9 +2296,14 @@ the 45→87% long-capture recall: bounded and non-adversarial.
 ### The knowledge-update slice: what strict recall hides, and the resolving read priced as an oracle (SMD-1720)
 
 `eval-longmemeval.ts` with `OB1_EVAL_LME_ARMS=current`, scoring only, on the
-same persisted loads (the S-corpus maps had gone with `/tmp`; the score phase
-now rebuilds a missing map from each row's `metadata.lme_sid`, the four
-fingerprint twins matched by fingerprint, and says so). 2026-09-18.
+same persisted loads (the S-corpus maps had gone with `/tmp`; whichever phase
+reads the map first now rebuilds a missing one from each row's
+`metadata.lme_sid` under the run's model, the four fingerprint twins matched
+by fingerprint and their questions re-merged, and says so). The re-merge
+repaired a loader defect the review found: a twin's upsert had replaced the
+first session's questions on the row, since `upsert_thought` merges metadata
+key by key; the audit shows ten questions each lost one distractor session
+and none lost a gold one, so the tables above stand. 2026-09-18.
 
 SMD-1720 asked for the knowledge-update slice to be reported on its own, on
 the reading that it never had been. It had — the tables above carry it, at

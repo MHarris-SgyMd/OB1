@@ -13818,10 +13818,20 @@ chain is a reranker that reads the two texts and picks the later state — the
 one-pool rerank change 59 found to be the lever — on this slice with this arm
 set. That is a follow-up, filed against SMD-1319's reranker.
 
-Also in this change: the score phase rebuilds a missing session→thought map
-from each row's `metadata.lme_sid` (the four fingerprint twins matched by
-fingerprint) and says so — both S maps had gone with `/tmp`, and the
-alternative was a 14-hour reload.
+Also in this change: whichever phase reads the session→thought map first
+rebuilds a missing one from each row's `metadata.lme_sid` under the run's
+model (the four fingerprint twins matched by fingerprint, their questions
+re-merged) and says so — both S maps had gone with `/tmp`, and the alternative
+was a 14-hour reload. And a loader defect the second review pass found by
+reading: the envelope carried `lme_q` and `lme_sid` onto a twin's existing
+row, where `upsert_thought`'s key-wise metadata merge replaced the first
+session's questions before the loader's union could keep them. The ids are now
+written after the upsert, the union always, the id and date only for a row the
+session created. The audit trail (008) shows the four overwrites on each S
+store, ten questions losing one distractor session each and none losing a gold
+one, so change 48's tables stand; the rebuild's merge repaired the rows, and
+re-loading a twin session through the fixed loader leaves the row's id,
+questions and date as they were.
 
 **Upstream status:** not applicable — the eval is this fork's.
 

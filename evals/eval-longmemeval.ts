@@ -65,11 +65,13 @@
  *   OB1_EVAL_LME_ARMS=current                score the current-value question (SMD-1720) on the knowledge-update slice
  *   OB1_EVAL_LME_CHUNKS=lme_chunks_4096      a side table of windows to score instead of thought_chunks
  *
- * THE MAP is derived data. Every row the loader writes carries its first
- * session id as `metadata.lme_sid`, and a fingerprint twin's other ids have
- * the row's exact text, so a map lost with /tmp is rebuilt from the store on
- * the next run instead of by a 14-hour reload (SMD-1720's run found both S
- * maps gone).
+ * THE MAP is derived data. Every row the loader writes carries the id of the
+ * session that created it as `metadata.lme_sid` (a twin loaded later leaves
+ * it alone), and a fingerprint twin's other ids have the row's exact text, so
+ * a map lost with /tmp is rebuilt from the store by whichever phase reads it
+ * first, instead of by a 14-hour reload (SMD-1720's run found both S maps
+ * gone). The rebuild is per model, and it re-runs the question merge for a
+ * twin it matches.
  *
  * CURRENT VALUE (SMD-1720). Every knowledge-update question has exactly two
  * gold sessions — one states a value, a later one updates it — and strict
@@ -324,7 +326,13 @@ async function readMapOrRebuild(): Promise<SidMap> {
   // and the load phase re-embeds, as the lost map used to make it (first
   // review pass).
   const rows = (await sql`SELECT id, metadata->>'lme_sid' AS sid FROM thoughts WHERE metadata ? 'lme_sid' AND embedding_model = ${spec.name}`) as { id: string; sid: string }[];
-  if (!rows.length) return {};
+  if (!rows.length) {
+    // Say which it is — an empty store, or a store under another label —
+    // before the load phase re-embeds everything (second review pass).
+    const other = ((await sql`SELECT count(*)::int AS n FROM thoughts WHERE metadata ? 'lme_sid'`) as { n: number }[])[0].n;
+    if (other) console.log(`▸ no map at ${MAP_PATH}, and no loaded row carries embedding_model ${spec.name} (${other} rows carry another label or none); the load phase starts from nothing`);
+    return {};
+  }
   const map: SidMap = {};
   for (const r of rows) map[r.sid] = r.id;
   let twins = 0;
@@ -366,24 +374,34 @@ async function load(): Promise<void> {
     for (const it of items) {
       const whole = vectors[k++];
       const chunks = it.windows.map((content) => ({ content, embedding: toVector(vectors[k++]), context: null }));
+      // The session's ids stay OUT of the envelope: upsert_thought merges
+      // metadata key by key (`thoughts.metadata || EXCLUDED.metadata`), so an
+      // envelope carrying lme_q / lme_sid onto a fingerprint twin's existing
+      // row would REPLACE the first session's questions and id before the
+      // merge below could union them — the merge then unioned the new list
+      // with itself, and the first twin's questions were gone (second review
+      // pass). They are written after the upsert instead: lme_q as a union,
+      // lme_sid and created_at only for a row this session created.
       const envelope = {
-        metadata: { source: "longmemeval", lme_sid: it.s.sid, lme_q: it.s.qids, session_date: it.s.date },
+        metadata: { source: "longmemeval", session_date: it.s.date },
         embedding_model: spec.name,
       };
       const rows = chunks.length
         ? await sql`SELECT upsert_thought(${it.s.text}::text, ${envelope}::jsonb, ${toVector(whole)}::vector, ${chunks}::jsonb) AS r`
         : await sql`SELECT upsert_thought(${it.s.text}::text, ${envelope}::jsonb, ${toVector(whole)}::vector) AS r`;
-      const id = (rows[0]?.r as { id?: string })?.id;
+      const r = rows[0]?.r as { id?: string; existed?: boolean } | undefined;
+      const id = r?.id;
       if (!id) throw new Error(`upsert_thought returned no id for ${it.s.sid}`);
-      // A fingerprint twin lands on an existing row whose lme_q lacks this
-      // session's questions: merge them so the filter still isolates.
       // Bun serialises a parameter bound as ::jsonb with JSON.stringify, so a
       // pre-stringified value arrives as a JSON *string*; pass the array itself.
       await sql`UPDATE thoughts SET metadata = jsonb_set(metadata, '{lme_q}',
                   (SELECT to_jsonb(array_agg(DISTINCT x)) FROM jsonb_array_elements_text(coalesce(metadata->'lme_q','[]'::jsonb) || ${it.s.qids}::jsonb) AS x))
                 WHERE id = ${id}::uuid`;
-      const iso = toIso(it.s.date);
-      if (iso) await sql`UPDATE thoughts SET created_at = ${iso}::timestamptz WHERE id = ${id}::uuid`;
+      if (r.existed !== true) {
+        await sql`UPDATE thoughts SET metadata = metadata || jsonb_build_object('lme_sid', ${it.s.sid}::text) WHERE id = ${id}::uuid AND NOT metadata ? 'lme_sid'`;
+        const iso = toIso(it.s.date);
+        if (iso) await sql`UPDATE thoughts SET created_at = ${iso}::timestamptz WHERE id = ${id}::uuid`;
+      }
       map[it.s.sid] = id;
       tokensSeen += Math.round(it.s.text.length / 4);
     }
@@ -492,7 +510,8 @@ async function scoreCurrent(map: SidMap, idToSids: Map<string, string[]>): Promi
   });
   const gaps = pairs.map((p) => p.gapDays).sort((x, y) => x - y);
   console.log(`▸ the current-value question over ${pairs.length} knowledge-update questions — ${EMBED_MODEL}`);
-  console.log(`  stale → current gap: median ${gaps[Math.floor(gaps.length / 2)].toFixed(0)} days, min ${gaps[0].toFixed(0)}, max ${gaps[gaps.length - 1].toFixed(0)}`);
+  const median = gaps.length % 2 ? gaps[(gaps.length - 1) / 2] : (gaps[gaps.length / 2 - 1] + gaps[gaps.length / 2]) / 2;
+  console.log(`  stale → current gap: median ${median.toFixed(0)} days, min ${gaps[0].toFixed(0)}, max ${gaps[gaps.length - 1].toFixed(0)}`);
 
   // The chain precondition: what a resolving read has to walk. With pointers in
   // the store the arm walks THEM — superseded → superseder, the read as it
@@ -503,7 +522,13 @@ async function scoreCurrent(map: SidMap, idToSids: Map<string, string[]>): Promi
   const oracle = pointers === 0;
   const storeChain = new Map<string, string>();
   if (!oracle) {
-    for (const r of (await sql`SELECT id, supersedes FROM thoughts WHERE supersedes IS NOT NULL AND metadata ? 'lme_q'`) as { id: string; supersedes: string }[]) storeChain.set(r.supersedes, r.id);
+    // A row two rows supersede (025's column allows it) has two heads, and a
+    // map would keep whichever came last in scan order; refuse rather than
+    // pick one silently (second review pass).
+    for (const r of (await sql`SELECT id, supersedes FROM thoughts WHERE supersedes IS NOT NULL AND metadata ? 'lme_q'`) as { id: string; supersedes: string }[]) {
+      if (storeChain.has(r.supersedes)) throw new Error(`CONTROL FAILED: ${r.supersedes} is superseded by both ${storeChain.get(r.supersedes)} and ${r.id}; the chain forks and the read has no one head to return.`);
+      storeChain.set(r.supersedes, r.id);
+    }
   }
   console.log(`  supersedes pointers on the corpus: ${pointers}${oracle ? " — a chain-walking read returns every hit unchanged; the resolve arm walks each question's gold pair as an oracle" : " — the resolve arm walks them"}`);
 
@@ -524,7 +549,10 @@ async function scoreCurrent(map: SidMap, idToSids: Map<string, string[]>): Promi
     const hay = new Set(q.haystack_session_ids);
     const inHistory = (id: string) => (idToSids.get(id) ?? []).some((sid) => hay.has(sid));
     const next = (id: string): string | undefined => {
-      if (oracle) return id === map[p.stale] ? map[p.current] : undefined;
+      // A twin row is walked only when the stale session is the only one it
+      // stands for in this history; otherwise the reader saw another session
+      // too, and replacing the row would hide it (second review pass).
+      if (oracle) return id === map[p.stale] && (idToSids.get(id) ?? []).filter((sid) => hay.has(sid)).every((sid) => sid === p.stale) ? map[p.current] : undefined;
       const head = storeChain.get(id);
       return head !== undefined && inHistory(head) ? head : undefined;
     };
@@ -628,7 +656,7 @@ async function score(): Promise<void> {
   for (const [sid, id] of Object.entries(map)) idToSids.set(id, [...(idToSids.get(id) ?? []), sid]);
   if (ARMS === "current") { await scoreCurrent(map, idToSids); return; }
 
-  const scored = questions.filter((q) => !q.question_id.endsWith("_abs"));
+  const scored = scorable(questions);
   const use = MAXQ ? scored.slice(0, MAXQ) : scored;
   console.log(`▸ scoring ${use.length} questions (${questions.length - scored.length} abstention skipped) — ${EMBED_MODEL}`);
 
