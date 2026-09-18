@@ -3052,6 +3052,192 @@ on retrieval quality; the topology and scale cases are the open questions.
 
 
 
+### The read model — the store holds the payload, no id→row resolve (SMD-1696)
+
+SMD-1037 and SMD-1662 both measured a second store as a *subordinate ANN index*:
+Postgres was the source of truth, and every read resolved the store's returned ids
+back to Postgres rows. The id→row resolve the "not built" verdict leaned on is
+partly an artifact of *that* topology, not of a two-store design. A columnar store
+can hold the vector **and the full payload** and serve the retrieval read
+completely, with Postgres kept only as the transactional write log — a **read
+model / CQRS** shape whose read path makes **zero Postgres calls**. That is the
+configuration where a second store is actually compelling, and the one the earlier
+evals put out of scope ("keep the resolve"). This measures it.
+
+A `LanceReadModel` (in `store-backends.ts`) holds `{ref, content, metadata, labels,
+tiers, vector}` and exposes two reads over one index — `search` (ids only, feeding
+the SMD-1662 resolve) and `searchRows` (full rows, the read-model read).
+`store-readmodel.ts` measures three read paths on identical vectors against one
+exact-cosine oracle:
+
+1. **single-store Postgres** — one statement: ANN over the points, deduped to
+   distinct thoughts, joined to the payload. A `match_thoughts`-equivalent read.
+2. **two-store resolve** (SMD-1662) — LanceDB returns ids; Postgres pulls the
+   payload back (`SELECT content, metadata … WHERE ref IN …`).
+3. **read model** (this ticket) — LanceDB returns the full rows. No Postgres.
+
+All three pull the same candidate depth (`FETCH`) before dedup, so they are scored
+on a level field. Paths 2 and 3 share the same LanceDB index and differ only in
+where the payload comes from, so `(path2 − path3)` is the net topology delta and
+`(path1 − path3)` is the read model against the incumbent.
+
+**The zero-Postgres read path is real, and demonstrated.** The read model holds no
+Postgres handle, so its read path is zero-Postgres by construction; a query counter
+on the shared handle read **0** across the whole path-3 loop (a runtime regression
+guard), and — the demonstration — Postgres was *stopped* mid-run and the read model
+still answered, byte-identical rows, with the OLTP database down. Every returned row
+carried the exact payload (content correctness checked, not just the id).
+
+**Real corpus (601 issues, 963 points, 1024-dim, 150 title queries).** Recall@10
+versus exact — all three paths agree on the unfiltered arm, where the resolve
+latency delta is read:
+
+| path | store | unfiltered | portal (3.5%) | design (2.3%) | t2 (1.7%) | t07 (0.5%) |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| 1 single-store PG | pgvector HNSW | 100% | 10% | 9% | 6% | 10% |
+| 2 two-store resolve | LanceDB HNSW_SQ | 100% | 99% | 100% | 100% | 100% |
+| 3 read model | LanceDB HNSW_SQ | 100% | 99% | 100% | 100% | 100% |
+
+(Path 1's *filtered* recall is a bare pgvector HNSW post-filter — the SMD-968
+hazard; shipped `match_thoughts` fixes filtered recall in-engine via migration 014,
+SMD-1037's finding and orthogonal to the resolve question here. The read model
+holds filtered recall by prefilter, exactly as SMD-1662.)
+
+Read latency (ms, p50/p95, default effort):
+
+| path | unfiltered p50 | p95 |
+| --- | ---: | ---: |
+| 1 single-store PG | 1.30 | 1.65 |
+| 2 two-store resolve | 1.67 | 2.20 |
+| 3 read model (no resolve) | 1.21 | 1.60 |
+
+The net topology delta `(path2 − path3)` was **~0.45 ms** here (from the unrounded
+p50s) and near zero on a
+quieter run (0.0–0.5 ms across runs), and the read model against single-store
+Postgres `(path1 − path3)` was **+0.09 ms** — the read model was 0.09 ms *faster*
+here (1.21 vs 1.30 ms), single-store faster on a quieter run: the three paths are
+within the run-to-run spread, no clear winner. At this corpus size the resolve is
+essentially free, so removing it buys nothing.
+
+**At 1M rows (64-dim, random vectors — the worst-case recall floor).** Single-store
+pgvector's own read is the fastest, and the read-model-vs-resolve delta is within
+run-to-run noise of zero:
+
+| path | unfiltered p50 | p95 | filtered p50 (mean) |
+| --- | ---: | ---: | ---: |
+| 1 single-store PG (pgvector HNSW) | 2.54 | 3.13 | 2.77 |
+| 2 two-store resolve (LanceDB HNSW_SQ) | 2.96 | 3.49 | 41.1 |
+| 3 read model (no resolve) | 3.59 | 4.14 | 38.7 |
+
+Single-store pgvector (2.54 ms) was the fastest read in every run; the net topology
+delta was −0.7 to +0.5 ms across runs — fetching the payload from LanceDB costs
+about the same as a Postgres primary-key resolve of ten ids — so even with the
+resolve gone the two-store read does not overtake the single store. (The high
+*filtered* p50 is LanceDB prefiltering an unindexed `array_has` list column — a
+scalar-index config choice, the same LanceEngine shape as SMD-1662, and orthogonal
+to the unfiltered resolve reading.)
+
+**At 10M rows** the ordering is unchanged and the write side sharpens. (pgvector
+HNSW did not build in a practical window — abandoned after 40 minutes still
+constructing its graph — so the single-store anchor is IVFFlat, built in 2.4 min,
+as SMD-1662's 10M table did.)
+
+| path | unfiltered p50 | p95 | filtered p50 (mean) |
+| --- | ---: | ---: | ---: |
+| 1 single-store PG (pgvector IVFFlat) | 5.93 | 17.84 | 50.2 |
+| 2 two-store resolve (LanceDB HNSW_SQ) | 7.56 | 12.20 | 247.3 |
+| 3 read model (no resolve) | 7.38 | 8.50 | 243.8 |
+
+Single-store IVFFlat has the fastest p50 (5.9 ms) — though the worst *tail*, p95
+17.8 ms against the read model's 8.5 ms (see the table); the resolve delta is
+0.18 ms (negligible); the read model does not overtake the single store on p50. The read model's
+*filtered* reads reach ~244 ms — an unindexed `array_has` prefilter scanned over 10M
+rows. The mutable-edit tax explodes — **84.8 ms/ref** at 10M (3.3 → 11.7 → 84.8
+across 601 → 1M → 10M, each edit rewriting an ever-larger fragment) — while batched
+appends stay cheap (drain 103k rows/s). Storage: the read model adds 6.3 GB
+atop Postgres's 8.9 GB (+71% whole-system).
+
+**The read cost reappears at write time — and it is dominated by mutable edits.** A
+*synchronous* dual-write (a durable Postgres write plus a per-row LanceDB append)
+cost **~2.3–3.0 ms/write** extra, because LanceDB writes a data fragment per `add`.
+Batched propagation erases the append path, but payload *edits* do not stay cheap:
+
+| measure | real corpus | 1M |
+| --- | ---: | ---: |
+| dual-write tax (synchronous, per write) | 2.97 ms | 2.32 ms |
+| outbox/CDC drain throughput | 21,100 rows/s | 86,700 rows/s |
+| read-model append (batched) | 0.17 ms/row | 0.02 ms/row |
+| mutable content edit — `update` by ref | 3.34 ms/ref | 11.65 ms/ref |
+
+An outbox/CDC drain is the right shape and the one OB1 already runs — embeddings
+are *already* eventually consistent with content (the re-embed worker lags writes),
+so a read model is that same consistency model relocated, not a new one. A batched
+append is one Lance fragment write amortised over the batch, so it is cheap and does
+not grow with corpus size (the per-row figures above fall with *batch* size — 20
+rows at the real corpus, 200 at scale — not with N); the drain sustains 21k–103k
+rows/s across the scales. The real consistency tax is the mutable content edit (a
+LanceDB `update` rewrites the fragment holding the ref), and it *grows* with the
+store — **3.3 → 11.7 → 84.8 ms/ref** across 601 rows → 1M → 10M. Vectors are
+append-mostly; the cost is the mutable payload — `update_thought`, provenance,
+consolidation, entities.
+
+**Storage — the payload lives twice.**
+
+| topology | Postgres | read-model store | total system |
+| --- | ---: | ---: | ---: |
+| single-store PG | 15 MB / 1297 MB | — | 15 MB / 1297 MB |
+| index + resolve (SMD-1662) | 15 MB / 1297 MB | 5 MB / 599 MB | 20 MB / 1897 MB |
+| read model (SMD-1696) | 15 MB / 1297 MB | 9 MB / 656 MB | 24 MB / 1953 MB |
+
+(real corpus / 1M; Postgres excludes `points_ref_idx`, which no path here uses.) The
+read model holds the payload on top of the index — a 4 MB duplication over an
+index-only store on the real corpus, 57 MB at 1M — lifting the whole-system
+footprint about +50% over single-store Postgres (+71% at 10M). (On-disk duplication
+tracks compressibility: the synthetic filler compresses hard — 57 MB on disk vs
+268 MB logical at 1M — so there it understates what real content would cost, while
+real content does not compress and carries Lance's per-fragment overhead, landing
+near or above the logical figure — 4 MB on disk vs 2 MB logical on the real corpus.)
+
+**Verdict — SMD-1037's holds, and the resolve it leaned on is shown not to be the
+bottleneck.** The read-model topology *works*: its read path is provably
+zero-Postgres — it serves reads with Postgres stopped — and appends are cheap when
+batched, on the eventual-consistency model the fork already uses. But removing the
+resolve buys no read-latency win: the resolve is a fraction of a millisecond, the
+three paths are within noise on the real corpus and single-store pgvector has the
+fastest *p50* from 1M up, and the read-model-vs-resolve delta is within noise
+throughout. (One tail-latency caveat already points at the scale case: at 10M the
+single store could only run IVFFlat — pg HNSW would not build — whose p95, 17.8 ms,
+is worse than the external HNSW_SQ index's 8.5 ms; at scale the off-DB store builds a
+better-tail index than pgvector can — SMD-1697's territory.) Meanwhile the read model
+adds a write-time propagation path whose mutable-edit cost grows with scale and holds
+the payload a second time (+50–71% whole-system). So the read model does not earn its place on
+*retrieval latency*; where it plausibly would is the scale/operational envelope —
+offloading the vector working set and being buildable where single-store pgvector is
+not (SMD-1662's 10M arm already showed pgvector failing to build where LanceDB built
+in 28 s). That is **SMD-1697**, still open. **Not built**; `thoughts.embedding`
+stays the source of truth — now because the resolve the second-store case turned on
+was measured and found not to be the cost, not merely assumed.
+
+**What this still measures as a race, not a composition.** SMD-1037, SMD-1662 and
+this eval all measured stores as *substitutes* — each doing the whole match and
+returning the rows, the cross-store hop treated as cost to minimise or eliminate.
+None measured stores as *complements*: a composed match where a scalable ANN engine
+does cheap coarse recall and Postgres does the exact rerank/fusion (metadata,
+recency, keyword, freshness) over the small candidate set — where the id→row hop is
+the precision stage, not a tax, and coarse recall shards while the rerank set stays
+small. That is the axis on which a second store plausibly earns its place, unmeasured
+here (SMD-1707).
+
+Reproduce (each scale is a separate run — the single-store index differs):
+`bun store-readmodel.ts` (real corpus); `OB1_STORE_SCALES=1000000 OB1_STORE_DIM=64
+OB1_STORE_PAYLOAD_BYTES=256 OB1_STORE_PG_SHM=3g bun store-readmodel.ts` (1M, HNSW
+anchor, storage-delta measured); `OB1_STORE_SCALES=10000000 OB1_STORE_DIM=64
+OB1_STORE_PAYLOAD_BYTES=128 OB1_STORE_PG_INDEX=ivfflat OB1_STORE_SKIP_ORACLE_OVER=2000000
+OB1_STORE_RM_STORAGE_DELTA=0 OB1_STORE_PG_SHM=3g bun store-readmodel.ts` (10M — pg
+HNSW does not build in a practical window, so the anchor is IVFFlat).
+
+
+
 ## Quantised indexes at the shipped width: halfvec adopted, binary declined (SMD-1501)
 
 `eval-quant.ts`, run as `bun run quant` with `OB1_EVAL_QUANT_SOURCE` naming a
