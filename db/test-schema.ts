@@ -57,7 +57,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { SAMPLE_STATEMENT, TID_PROBE, buffersOf, createAssert, sampleStatementOf, seededRandom } from "./test-support.ts";
 import { markerAnswers } from "./bench-oracle.ts";
-import { attribute, renderReport, summarise, type ActionRow, type SearchRow } from "../evals/utilization.ts";
+import { attribute, citePointerOf, renderReport, summarise, type ActionRow, type SearchRow } from "../evals/utilization.ts";
 import { ENTITY_TYPES, RELATIONS } from "../server-portable/entities.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -4325,13 +4325,20 @@ console.log("\n[39] Memory utilization over the query log: attribution, the cite
     search("s3", null, 0, "anon", [A, B], null),    // anonymous: A B, no token estimate
   ];
   const actions: ActionRow[] = [
-    act(AG, 2, "fetch", A),                 // opened A → s1
-    act(AG, 3, "capture_thought", B),       // cited B → s1
-    act(AG, 12, "capture_thought", C),      // cited C → s2 (most recent prior search returning C, not s1)
-    act(AG, 50, "fetch", D),                // 40 min after s2 → outside a 30-min window → unattributed
-    act(null, 1, "fetch", A),               // anonymous fetch of A → s3, never AG's s1 (NULL agent is its own bucket)
+    act(AG, 2, "fetch", A),                              // opened A → s1
+    act(AG, 3, "capture_thought/derived_from", B),       // cited B → s1
+    act(AG, 12, "update_thought/supersedes", C),         // cited C → s2 (most recent prior search returning C, not s1); an edit's pointer is a cite too
+    act(AG, 50, "fetch", D),                             // 40 min after s2 → outside a 30-min window → unattributed
+    act(null, 1, "fetch", A),                            // anonymous fetch of A → s3, never AG's s1 (NULL agent is its own bucket)
     act(AG, 4, "delete_thought", "aaaaaaaa-0000-4000-8000-00000000ffff"), // an id no search returned → unattributed
   ];
+
+  // The split is read from the tool's shape alone: `<writer>/<pointer>` is a
+  // cite whatever the writer, a plain name is an open.
+  assert(citePointerOf("capture_thought/derived_from") === "derived_from" && citePointerOf("update_thought/supersedes") === "supersedes" && citePointerOf("some_future_tool/derived_from") === "derived_from",
+    "a `<writer>/<pointer>` tool names its pointer, for any writer");
+  assert(citePointerOf("fetch") === null && citePointerOf("update_thought") === null && citePointerOf("odd/") === null && citePointerOf("/x") === null,
+    "a plain tool, or a malformed slash form, is not a cite");
 
   const attr = attribute(searches, actions, 30);
   const s1 = attr.bySearch.get("s1")!;
@@ -4360,7 +4367,7 @@ console.log("\n[39] Memory utilization over the query log: attribution, the cite
   // The mutant this section is for: drop the cite rows (the SMD-1719 server
   // change) and the number moves — utilization falls to the opened-only 2/7 and
   // cited reads 0. A report that did not move here would not be measuring cites.
-  const noCites = summarise(searches, actions.filter((a) => a.tool !== "capture_thought"), 30);
+  const noCites = summarise(searches, actions.filter((a) => citePointerOf(a.tool) === null), 30);
   assert(noCites.overall.cited === 0 && Math.abs((noCites.overall.utilization ?? 0) - 2 / 7) < 1e-9, `without the cite rows: cited 0, utilization 2/7 (${noCites.overall.utilization}) — the cites are what the number measures`);
 
   // Gold: a hand-labelled map says s1's relevant id was C (never used) and s2's

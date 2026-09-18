@@ -2666,7 +2666,10 @@ on to open. This loop captures it and gates PRs on it.
 
 1. **Log** — off by default. `OB1_QUERY_LOG=on` records one row per search (query,
    arguments, and the ids returned in rank order with scores) and one per
-   follow-up fetch/edit/delete of a returned id (migration 034; `db/README.md`).
+   follow-up fetch/edit/delete of a returned id (migration 034; `db/README.md`),
+   and — since SMD-1719 — one per id a later capture or edit cites as its source
+   (`derived_from` / `supersedes`), logged under `<writer>/<pointer>`; a cite is
+   the stronger relevance label and the export includes it.
    A caller who searches then opens result 3 has labelled result 3 relevant —
    *click-through relevance*, a proxy, kept beside the hand-labelled sets, not
    instead of them.

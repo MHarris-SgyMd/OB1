@@ -13757,19 +13757,34 @@ fact reached a write: a later capture naming the id as its source. `derived_from
 were not logged.
 
 **What changed.** No migration. 034's `tool` column is free text and its
-`action` shape needs only a target, so `capture_thought` now writes one action
-row per id it names in `derived_from` or `supersedes`, tool `capture_thought`,
-target the cited id — under the same `OB1_QUERY_LOG=on` flag, best-effort like
-every log write, logged on the act of citing once the row is saved (whether or
-not 035 wrote the pointer on a re-capture, and whether or not the vector
-attached: the log records what the caller did, not what the row now holds). A
-cite the function refused — a ghost id, a loop — never reaches the log, because
-the capture threw. The tool column now tells two kinds of use apart:
+`action` shape needs only a target, so a write that names a returned id as its
+source now logs one action row per id, target the cited id, tool
+`<writer>/<pointer>` — `capture_thought/derived_from`,
+`capture_thought/supersedes`, `update_thought/supersedes` — under the same
+`OB1_QUERY_LOG=on` flag, best-effort like every log write, the rows for one
+write issued concurrently, ids lower-cased before the dedup (`UUID_RE` admits
+either case; two spellings are one cite). **A cite row is a pointer the
+database accepted**, which is what makes it a use and not a wish: on a fresh
+row `upsert_thought` validated every id (a ghost or a loop threw, and nothing
+was logged); on a re-capture 035 wrote no pointer and validated none, so nothing
+is logged there either — the reply's note sends the caller to `update_thought`,
+and that edit, which writes the pointer, logs the cite under its own writer.
+(The first cut logged on the *act* of citing and a review pass found it would
+have counted a ghost or self-pointer a re-capture never checked.) The tool
+column now tells two kinds of use apart by its shape alone:
 
-- **cited** — `capture_thought`: a write named the id as a source (MERIT's
-  memory-utilization signal);
-- **opened** — `fetch`, `update_thought`, `delete_thought`: the caller went and
-  looked at, or touched, the row (034's click-through).
+- **cited** — `<writer>/<pointer>`: a write named the id as a source and the
+  pointer was written (MERIT's memory-utilization signal). A new writer that
+  cites names itself the same way and is counted without a code change.
+- **opened** — a plain tool name, `fetch`, `update_thought`, `delete_thought`:
+  the caller went and looked at, or touched, the row (034's click-through).
+
+One consequence for change 65: the export's `relevant` label is every action
+row, so a cite now counts as click-through relevance too — the stronger label,
+and the export's note says so. 034's table `COMMENT` still describes an action
+as a fetch, edit or delete; a migration's text is not edited after the fact
+(the ledger would read it as drift), so the server, store, preflight and README
+carry the new shape and the `COMMENT` predates it.
 
 `evals/utilization.ts` is the pure part: 034's attribution rule (most recent
 prior search by the same agent, within the window, whose results held the id; a
@@ -13808,9 +13823,13 @@ rows: attribution by agent, window and recency; the cited/opened split; the
 rates; tokens per used id over searches with an estimate; the no-cites mutant;
 the gold ignore rate; the `n/a` rule; the rendered table.
 `server-portable/test-e2e-sql.ts` [10] extends 034's section: a capture with
-`derived_from` after a search writes one `capture_thought` action row for the
-id it named and a plain capture writes none, and the join attributes the cite
-to the search that returned the id. `bunx tsc --noEmit` in `server-portable/`.
+`derived_from` after a search writes one `capture_thought/derived_from` row for
+the id it named and a plain capture writes none; the join attributes the cite
+to the search that returned the id; a re-capture naming a pointer logs no cite
+(the pointer was not written); the `update_thought` that then writes it logs
+the edited id as opened and the superseded id as cited. A run with the cite
+logging removed fails exactly those assertions and nothing else. `bunx tsc
+--noEmit` in `server-portable/`.
 The measurement itself — the operator's first week of real use with the log on
 — is the ticket's Verify, not this section's: the number exists when the log
 has rows.

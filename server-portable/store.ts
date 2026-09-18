@@ -649,7 +649,8 @@ export type QuerySearchLog = {
 };
 
 /**
- * An 'action' row for the query log: a fetch/edit/delete of a returned id.
+ * An 'action' row for the query log: a fetch/edit/delete of a returned id, or
+ * (SMD-1719) a write that named it as a source — `tool` is `<writer>/<pointer>`.
  * Carries only the acting tool, the agent, and the id touched — export links it
  * back to the search that returned the id.
  */
@@ -851,7 +852,8 @@ export interface ThoughtStore {
    * rejection so a log write can never fail a search, a fetch or a capture.
    * Nothing reads them on the hot path — the export tool reads the table offline.
    * `logSearch` records one search call and the ids it returned; `logAction`
-   * records a later fetch/edit/delete of a returned id. They are NOT joined at
+   * records a later fetch/edit/delete of a returned id, or a write that cited
+   * it (`<writer>/<pointer>`, SMD-1719). They are NOT joined at
    * write time (there is no request token in the handlers); export links them by
    * (agent, id, window). A store on a schema before 034 will reject — that is
    * why the calls are guarded and swallowed, not why they are skipped.

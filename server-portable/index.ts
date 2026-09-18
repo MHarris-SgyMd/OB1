@@ -56,7 +56,8 @@ type Env = {
   OB1_CHUNK_CONTEXT?: string;
   /**
    * "on" to record the opt-in query log (migration 034, SMD-1295): one row per
-   * search and one per follow-up fetch/edit/delete of a returned id, so a
+   * search and one per follow-up fetch/edit/delete of a returned id — or, since
+   * SMD-1719, per id a write cited as its source — so a
    * retrieval change can be replayed against real use (evals/eval-replay.ts).
    * Off by default — anything but "on" writes nothing. Personal data at rest
    * (every query typed); see SETUP.md. The write is best-effort and never fails
@@ -340,10 +341,14 @@ function buildServer(principal: Principal): McpServer {
       // best-effort: a log failure must never reach the caller.
     }
   };
-  // `tool` is the action's kind as well as its writer: `fetch` / `update_thought`
-  // / `delete_thought` say the caller opened or touched a returned id (034);
-  // `capture_thought` says a write cited it (SMD-1719). eval-utilization.ts
-  // reads the split from this column, so a new tool that logs here names itself.
+  // `tool` is the action's kind as well as its writer. A plain tool name —
+  // `fetch`, `update_thought`, `delete_thought` — says the caller opened or
+  // touched the target (034's click-through). `<writer>/<pointer>` —
+  // `capture_thought/derived_from`, `capture_thought/supersedes`,
+  // `update_thought/supersedes` — says the writer named the target as a source
+  // and the database accepted the pointer (SMD-1719's cite). evals/utilization.ts
+  // splits cited from opened on the `/` alone, so a new writer that cites names
+  // itself the same way and is counted without a code change there.
   const logActionCall = async (tool: string, targetId: string): Promise<void> => {
     if (!queryLogEnabled(env())) return;
     try {
@@ -351,6 +356,19 @@ function buildServer(principal: Principal): McpServer {
     } catch {
       // best-effort.
     }
+  };
+  // One cite row per distinct id a write named as a source, lower-cased before
+  // the dedup (UUID_RE admits either case, and two spellings of one id are one
+  // cite), written concurrently — each is best-effort on its own.
+  const logCiteCalls = async (writer: string, pointers: { derived_from?: string[]; supersedes?: string }): Promise<void> => {
+    if (!queryLogEnabled(env())) return;
+    const rows = new Map<string, string>(); // id → tool, first pointer wins
+    for (const id of pointers.derived_from ?? []) rows.set(id.toLowerCase(), `${writer}/derived_from`);
+    if (pointers.supersedes) {
+      const id = pointers.supersedes.toLowerCase();
+      if (!rows.has(id)) rows.set(id, `${writer}/supersedes`);
+    }
+    await Promise.all([...rows].map(([id, tool]) => logActionCall(tool, id)));
   };
 
   // ChatGPT compatibility: restricted connector surfaces, company knowledge, and deep
@@ -1024,17 +1042,15 @@ function buildServer(principal: Principal): McpServer {
         // returned id as its source — `derived_from`, or `supersedes` — is the
         // caller USING a search result in a write, the signal MERIT calls memory
         // utilization and this fork's fetch/edit/delete rows cannot carry (they
-        // say the caller looked, not that the fact reached a write). One action
-        // row per id named, tool `capture_thought`, so eval-utilization.ts can
-        // split cited from opened by the tool column alone. Logged on the ACT of
-        // citing, once the row is saved: whether or not 035 wrote the pointer (a
-        // re-capture writes no provenance) and whether or not the vector
-        // attached, the caller used the result, and the log records what the
-        // caller did, not what the row now holds. Best-effort like every log
-        // write; a cite the function refused (a ghost id, a loop) never reaches
-        // here because the capture itself threw.
-        for (const cited of new Set([...(derived_from ?? []), ...(supersedes ? [supersedes] : [])])) {
-          await logActionCall("capture_thought", cited.toLowerCase());
+        // say the caller looked, not that the fact reached a write). A cite row
+        // is a pointer the database ACCEPTED: on a fresh row upsert_thought
+        // validated every id (a ghost or a loop threw, and nothing reaches
+        // here); on a re-capture (`existed`) 035 wrote no pointer and validated
+        // none, so nothing is logged — the note below sends the caller to
+        // update_thought, which logs the cite when it writes the pointer. The
+        // vector attaching or not does not change what was written.
+        if (captured.existed !== true) {
+          await logCiteCalls("capture_thought", { derived_from, supersedes: supersedes ?? undefined });
         }
 
         if (captured.embeddingFailed) {
@@ -1211,6 +1227,12 @@ function buildServer(principal: Principal): McpServer {
         // Click-through relevance (034): the caller edited this id after a
         // search. Only on a written edit, not a refusal.
         await logActionCall("update_thought", id);
+        // SMD-1719: an edit that sets `supersedes` names a returned id as this
+        // thought's source — the same act as a capture's pointer, and the path
+        // capture_thought's re-capture note sends the caller down. The function
+        // accepted the pointer (a ghost or a loop was refused above), so it is
+        // a cite of the SUPERSEDED id; the edited id above stays "opened".
+        if (typeof supersedes === "string") await logCiteCalls("update_thought", { supersedes });
 
         const what = [
           content !== undefined ? "content re-embedded" : null,

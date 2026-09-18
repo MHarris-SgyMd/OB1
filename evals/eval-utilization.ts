@@ -26,6 +26,7 @@
 import { SQL } from "bun";
 import { readFileSync } from "node:fs";
 import { loadEnv } from "./env.ts";
+import { parsePgUuidArray, posInt } from "./query-log.ts";
 import { renderReport, summarise, type ActionRow, type SearchRow } from "./utilization.ts";
 
 loadEnv();
@@ -36,10 +37,6 @@ if (!URL_) {
   process.exit(2);
 }
 
-const posInt = (raw: string | undefined, def: number): number => {
-  const n = Number.parseInt(String(raw ?? "").trim(), 10);
-  return Number.isFinite(n) && n > 0 ? n : def;
-};
 const WINDOW_MIN = posInt(process.env.OB1_EXPORT_WINDOW_MIN, 30);
 
 const args = process.argv.slice(2);
@@ -60,14 +57,6 @@ if (goldPath) {
   const fx = JSON.parse(readFileSync(goldPath, "utf8")) as { queries?: { query: string; relevant: string[] }[] };
   gold = new Map();
   for (const q of fx.queries ?? []) gold.set(q.query, new Set(q.relevant));
-}
-
-/** Bun.sql hands a uuid[] back as the Postgres literal `{a,b}`; parse it (as export-queries.ts does). */
-function parsePgUuidArray(v: unknown): string[] {
-  if (Array.isArray(v)) return v as string[];
-  if (typeof v !== "string") return [];
-  const inner = v.replace(/^\{|\}$/g, "").trim();
-  return inner ? inner.split(",").map((s) => s.replace(/^"|"$/g, "")).filter(Boolean) : [];
 }
 
 const sql = new SQL({ url: URL_, max: 2 });

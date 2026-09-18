@@ -8,13 +8,17 @@
  * facts. This module computes that layer from the opt-in query log (migration
  * 034): a search row per call with the ids it returned, and an action row per
  * follow-up touch of an id by the same agent. Two kinds of touch are told apart
- * by the tool that wrote the action row:
+ * by the `tool` that wrote the action row:
  *
- *   cited  — a write that names the id as a source: `capture_thought` with
- *            `derived_from` (025) or `supersedes`, one row per id named. This is
- *            the MERIT "memory utilization" signal: the fact reached a write.
- *   opened — `fetch`, `update_thought`, `delete_thought`: the caller went and
- *            looked at, or touched, the row. Click-through relevance (SMD-1295).
+ *   cited  — the tool is `<writer>/<pointer>`: a write named the id as its source
+ *            and the database accepted the pointer — `capture_thought/derived_from`,
+ *            `capture_thought/supersedes`, `update_thought/supersedes` today; a new
+ *            writer that cites names itself the same way and is counted here
+ *            without a change. This is MERIT's "memory utilization" signal: the
+ *            fact reached a write.
+ *   opened — a plain tool name — `fetch`, `update_thought`, `delete_thought`: the
+ *            caller went and looked at, or touched, the row. Click-through
+ *            relevance (SMD-1295).
  *
  * Attribution is the export's rule (evals/export-queries.ts), unchanged: an
  * action belongs to the MOST RECENT prior search by the same agent, within the
@@ -60,10 +64,14 @@ export type ActionRow = {
   targetId: string;
 };
 
-/** A write that names the id as a source — the fact reached a write. */
-export const CITE_TOOLS: ReadonlySet<string> = new Set(["capture_thought"]);
-/** The caller opened or touched the row — click-through relevance (034). */
+/** The caller opened or touched the row — click-through relevance (034). Any plain tool name counts as opened. */
 export const OPEN_TOOLS: ReadonlySet<string> = new Set(["fetch", "update_thought", "delete_thought"]);
+
+/** `<writer>/<pointer>` → the pointer the write set (`derived_from`, `supersedes`); null for a plain (opened) tool. */
+export function citePointerOf(tool: string): string | null {
+  const i = tool.indexOf("/");
+  return i > 0 && i < tool.length - 1 ? tool.slice(i + 1) : null;
+}
 
 export type Uses = { used: Set<string>; cited: Set<string>; opened: Set<string> };
 
@@ -81,31 +89,44 @@ const ms = (t: Date | string): number => (t instanceof Date ? t.getTime() : new 
  * its own bucket), within `windowMinutes` before the action, whose result_ids
  * contain the target. The export's join, in TypeScript so it is testable
  * without a database and so the report and the fixture agree by construction.
+ *
+ * Searches are grouped by agent and sorted newest first with their times parsed
+ * once, so each action scans only its own agent's searches and stops at the
+ * window's edge — a 30-day log attributes in milliseconds, not by re-parsing
+ * every timestamp per action.
  */
 export function attribute(searches: SearchRow[], actions: ActionRow[], windowMinutes: number): Attribution {
   const bySearch = new Map<string, Uses>();
   const unattributed: ActionRow[] = [];
   const windowMs = windowMinutes * 60_000;
-  // Newest first, so the first match in scan order is the most recent prior search.
-  const ordered = [...searches].sort((a, b) => ms(b.loggedAt) - ms(a.loggedAt));
+
+  const byAgent = new Map<string | null, { s: SearchRow; at: number; ids: Set<string> }[]>();
+  for (const s of searches) {
+    const list = byAgent.get(s.agentId) ?? [];
+    list.push({ s, at: ms(s.loggedAt), ids: new Set(s.resultIds) });
+    byAgent.set(s.agentId, list);
+  }
+  for (const list of byAgent.values()) list.sort((a, b) => b.at - a.at); // newest first
+
   for (const act of actions) {
     const at = ms(act.loggedAt);
-    const hit = ordered.find(
-      (s) =>
-        s.agentId === act.agentId &&
-        ms(s.loggedAt) <= at &&
-        ms(s.loggedAt) >= at - windowMs &&
-        s.resultIds.includes(act.targetId),
-    );
+    let hit: SearchRow | undefined;
+    for (const c of byAgent.get(act.agentId) ?? []) {
+      if (c.at > at) continue; // a later search cannot have produced this touch
+      if (c.at < at - windowMs) break; // sorted newest first: everything after this is older still
+      if (c.ids.has(act.targetId)) {
+        hit = c.s;
+        break;
+      }
+    }
     if (!hit) {
       unattributed.push(act);
       continue;
     }
     const uses = bySearch.get(hit.id) ?? { used: new Set(), cited: new Set(), opened: new Set() };
     uses.used.add(act.targetId);
-    if (CITE_TOOLS.has(act.tool)) uses.cited.add(act.targetId);
-    else if (OPEN_TOOLS.has(act.tool)) uses.opened.add(act.targetId);
-    else uses.opened.add(act.targetId); // an unknown tool still touched the id; counted as opened, never dropped
+    if (citePointerOf(act.tool) !== null) uses.cited.add(act.targetId);
+    else uses.opened.add(act.targetId); // any plain tool, known or not, touched the id; counted as opened, never dropped
     bySearch.set(hit.id, uses);
   }
   return { bySearch, unattributed };
@@ -189,6 +210,7 @@ export function summarise(
     const agent = s.agentId ?? "(anonymous)";
     const armSt = arms.get(arm) ?? emptyStats(withGold);
     const agSt = agents.get(agent) ?? emptyStats(withGold);
+    const hasTokens = typeof s.resultTokens === "number" && Number.isFinite(s.resultTokens);
     for (const st of [overall, armSt, agSt]) {
       st.searches++;
       st.returned += s.resultIds.length;
@@ -196,8 +218,8 @@ export function summarise(
       st.cited += uses?.cited.size ?? 0;
       st.opened += uses?.opened.size ?? 0;
       if (used > 0) st.searchesUsed++;
-      if (typeof s.resultTokens === "number" && Number.isFinite(s.resultTokens)) {
-        st.tokensReturned += s.resultTokens;
+      if (hasTokens) {
+        st.tokensReturned += s.resultTokens as number;
         st.searchesWithTokens++;
       }
       if (st.gold && gold && s.query !== null) {
@@ -208,7 +230,7 @@ export function summarise(
         }
       }
     }
-    if (typeof s.resultTokens === "number" && Number.isFinite(s.resultTokens)) {
+    if (hasTokens) {
       usedWithTokens.overall += used;
       usedWithTokens.arms.set(arm, (usedWithTokens.arms.get(arm) ?? 0) + used);
       usedWithTokens.agents.set(agent, (usedWithTokens.agents.get(agent) ?? 0) + used);
@@ -251,7 +273,7 @@ export function renderReport(sum: Summary): string {
   }
   lines.push(
     "",
-    "util = ids used / ids returned (MERIT's memory utilization); use-rate = searches with ≥1 use; cited = ids a write named as a source; opened = ids fetched, edited or deleted;",
+    "util = ids used / ids returned (MERIT's memory utilization); use-rate = searches with ≥1 use; cited = ids a write named as a source (tool <writer>/<pointer>); opened = ids fetched, edited or deleted;",
     "tok/used = approx. tokens returned per id used, over searches with an estimate (content as stored now, chars/4). Attribution: same agent, most recent prior search in the window that returned the id.",
   );
   if (sum.overall.gold) lines.push("gold = searches whose results held a hand-labelled relevant id; ignored = of those, the share where none was used (MERIT's ignore rate).");

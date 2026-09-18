@@ -10,7 +10,9 @@
  * which returned thought they went on to open — and writes it as a fixture that
  * eval-replay.ts scores a code change against.
  *
- * The link between a search and the fetch/edit/delete that followed is NOT in
+ * The link between a search and the fetch/edit/delete — or, since SMD-1719, the
+ * capture or edit that CITED a returned id in `derived_from`/`supersedes`,
+ * logged under `<writer>/<pointer>` — that followed is NOT in
  * the log (there is no request token in the handlers). It is recovered here by
  * the only keys both rows share: the acting agent and the returned id, within a
  * window. An action is attributed to the MOST RECENT prior search by the same
@@ -36,6 +38,7 @@
 
 import { SQL } from "bun";
 import { loadEnv } from "./env.ts";
+import { parsePgUuidArray, posInt } from "./query-log.ts";
 
 loadEnv();
 
@@ -45,29 +48,12 @@ if (!URL_) {
   process.exit(2);
 }
 
-// A positive integer or the default — a stray "abc"/"" must not become NaN in a
-// make_interval() bind (a cryptic mid-query error) or a zero-width window.
-const posInt = (raw: string | undefined, def: number): number => {
-  const n = Number.parseInt(String(raw ?? "").trim(), 10);
-  return Number.isFinite(n) && n > 0 ? n : def;
-};
+// The window parser and the uuid[] parser are shared with eval-utilization.ts
+// (evals/query-log.ts), so the two readers of the log cannot drift on them.
 const WINDOW_MIN = posInt(process.env.OB1_EXPORT_WINDOW_MIN, 30);
 const OUT = process.argv[2] ?? process.env.OB1_EXPORT_OUT ?? "/tmp/ob1-query-fixture.json";
 
 const sql = new SQL({ url: URL_, max: 2 });
-
-/**
- * Bun.sql returns a uuid[] column as the raw Postgres literal `{a,b}`, not a JS
- * array (the same asymmetry store-sql.ts builds the literal by hand for). Parse
- * it back so `baseline` is committed as an array of ids, never a string an
- * indexOf would then char-scan.
- */
-function parsePgUuidArray(v: unknown): string[] {
-  if (Array.isArray(v)) return v as string[];
-  if (typeof v !== "string") return [];
-  const inner = v.replace(/^\{|\}$/g, "").trim();
-  return inner ? inner.split(",").map((s) => s.replace(/^"|"$/g, "")).filter(Boolean) : [];
-}
 
 // Each action → the most recent prior search (same agent, within the window)
 // that returned its id. LATERAL so the "most recent" is decided per action.
@@ -116,7 +102,7 @@ const fixture = {
   generated: new Date().toISOString(),
   origin: "query_log",
   windowMinutes: WINDOW_MIN,
-  note: "Click-through relevance from OB1_QUERY_LOG (SMD-1295). Query text and ids — no thought content, but the query strings are the searcher's own (personal data). `relevant` is a proxy (a fetch can be a wrong guess), bucketed by query text; `baseline` is the ranking the log recorded at export time.",
+  note: "Click-through relevance from OB1_QUERY_LOG (SMD-1295). Query text and ids — no thought content, but the query strings are the searcher's own (personal data). `relevant` is a proxy (a fetch can be a wrong guess; a cite — a later write naming the id as its source, SMD-1719 — is the stronger label and is included), bucketed by query text; `baseline` is the ranking the log recorded at export time.",
   queries,
 };
 
@@ -126,5 +112,5 @@ await sql.close();
 const labelled = queries.reduce((n, q) => n + q.relevant.length, 0);
 process.stderr.write(
   `  exported ${queries.length} queries (${labelled} click-through labels, window ${WINDOW_MIN} min) → ${OUT}\n` +
-  (queries.length === 0 ? "  (no query had a follow-up touch — is OB1_QUERY_LOG on, and has anyone searched then fetched?)\n" : ""),
+  (queries.length === 0 ? "  (no query had a follow-up touch — is OB1_QUERY_LOG on, and has anyone searched then fetched or cited a result?)\n" : ""),
 );
