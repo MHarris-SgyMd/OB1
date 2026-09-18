@@ -182,7 +182,7 @@ console.log("\n[7] initialize");
 
   // @hono/mcp 0.1.x wanted both Accept tokens on a POST and the server patched
   // whichever was missing; 0.3.x takes either, or none, and the patch is gone
-  // (change 83) — a connector's `application/json`, an SSE-only Accept (the SDK
+  // (change 84) — a connector's `application/json`, an SSE-only Accept (the SDK
   // client's GET form) and no Accept at all reach the transport as sent.
   for (const [label, headers] of [["text/event-stream alone", { Accept: "text/event-stream" }], ["application/json alone", { Accept: "application/json" }], ["no Accept header", {}]] as [string, Record<string, string>][]) {
     const r = await fetch(BASE, { method: "POST", headers: { ...AUTH, ...headers }, body: INIT });
