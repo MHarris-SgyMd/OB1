@@ -111,6 +111,11 @@ const ALLOW_STALE = has("allow-stale-dump");
 const numList = (s: string | undefined, d: number[]) => (s ? s.split(",").map((x) => Number(x.trim())).filter((n) => Number.isInteger(n) && n > 0) : d);
 const KPRIMES = numList(process.env.OB1_GRAPH_KPRIME, [10, 20, 50, 100]);
 const HOPS = numList(process.env.OB1_GRAPH_HOPS, [1, 2]);
+// A truthy-but-all-invalid value (OB1_GRAPH_KPRIME=0/abc) filters to [] — refuse it the
+// way --k does, rather than crash on an empty sweep later.
+if (KPRIMES.length === 0) { console.error("OB1_GRAPH_KPRIME needs a comma list of positive integers."); process.exit(2); }
+if (HOPS.length === 0) { console.error("OB1_GRAPH_HOPS needs a comma list of positive integers."); process.exit(2); }
+function median(xs: number[]): number { const s = xs.slice().sort((a, b) => a - b); return s.length ? s[Math.floor(s.length / 2)] : 0; }
 // --scale N: skip the corpus and synthesize N thoughts + a synthetic entity graph, to
 // measure the EXPANSION stage latency at scale (latency only — quality on a planted
 // graph is circular). Density is modelled on the real graph's printed stats; the skew
@@ -393,25 +398,30 @@ async function expandStage(candIds: string[], vecLit: string, hops: number): Pro
     FROM (SELECT id FROM cand UNION SELECT thought_id FROM scored) u
     JOIN thoughts t ON t.id = u.id
     LEFT JOIN scored s ON s.thought_id = t.id
-    ORDER BY s.gs DESC NULLS LAST
+    LEFT JOIN cand cc ON cc.id = t.id
+    -- keep every vector candidate before the LIMIT bites: they carry gs = 0 and would
+    -- otherwise be the first rows dropped, silently starving the arm of its own recall
+    ORDER BY (cc.id IS NOT NULL) DESC, s.gs DESC NULLS LAST
     LIMIT 5000`) as { issue: string; gs: number; dist: number }[];
   return { rows, ms: Date.now() - t };
 }
 
-async function composedExpandArm(qv: number[], kprime: number, hops: number, fuse: "rrf" | "cosine"): Promise<{ ranked: Ranked; coarseMs: number; expandMs: number }> {
-  const t0 = Date.now();
-  const cand = (await sql`SELECT id FROM thoughts ORDER BY embedding <=> ${lit(qv)}::vector LIMIT ${kprime}`) as { id: string }[];
-  const coarseMs = Date.now() - t0;
-  if (cand.length === 0) return { ranked: [], coarseMs, expandMs: 0 };
-  const { rows, ms: expandMs } = await expandStage(cand.map((c) => c.id), lit(qv), hops);
-  if (fuse === "cosine") {
-    const ranked = rows.slice().sort((a, b) => a.dist - b.dist).map((r) => r.issue).slice(0, FETCH);
-    return { ranked, coarseMs, expandMs };
-  }
-  // Symmetric RRF: rank the union by cosine and by graph score, fuse the two ranks.
+// Coarse vector recall: the top-K′ thought ids. Depends only on (q, K′), so a caller
+// sweeping hops computes it once per K′ and reuses it across hops.
+async function coarseRecall(qv: number[], kprime: number): Promise<{ ids: string[]; ms: number }> {
+  const t = Date.now();
+  const rows = (await sql`SELECT id FROM thoughts ORDER BY embedding <=> ${lit(qv)}::vector LIMIT ${kprime}`) as { id: string }[];
+  return { ids: rows.map((r) => r.id), ms: Date.now() - t };
+}
+
+// Two rankings over one expansion union, from the same rows: the symmetric-RRF fuse of
+// the cosine rank and the graph-score rank (the composed arm), and the cosine-only order
+// (the comp-cos control). RRF is symmetric because a raw cosine added to a raw weight sum
+// is change 87's scale-mismatch trap; both sides go on the rank scale.
+function fuseUnion(rows: { issue: string; gs: number; dist: number }[]): { rrf: Ranked; cos: Ranked } {
   const byVec = rows.slice().sort((a, b) => a.dist - b.dist).map((r) => r.issue);
   const byGraph = rows.slice().sort((a, b) => b.gs - a.gs || a.dist - b.dist).map((r) => r.issue);
-  return { ranked: rrf([byVec, byGraph]), coarseMs, expandMs };
+  return { rrf: rrf([byVec, byGraph]), cos: byVec.slice(0, FETCH) };
 }
 
 /**
@@ -625,10 +635,14 @@ type Result = { q: Question; seeds: string[]; scores: { vector: Score; graph: Sc
 type Arm = keyof Result["scores"];
 const arms: Arm[] = ["vector", "graph", "hybrid", "composed", "comp-cos", ...(GLOBAL ? (["global"] as Arm[]) : []), "keyword"];
 const results: Result[] = [];
-// The full K′ × hop sweep of the composed RRF arm, one cell per (K′, hops).
-type SweepRow = { q: Question; s: Score; coarseMs: number; expandMs: number };
+// The full K′ × hop sweep of the composed arm, one cell per (K′, hops). Each row keeps
+// both the RRF fuse (the composed arm) and the cosine-only order (the comp-cos control)
+// derived from the same expansion union, so comp-cos is the control for whatever cell
+// becomes the headline — not a different depth.
+type SweepRow = { q: Question; s: Score; sCos: Score; coarseMs: number; expandMs: number };
 const sweep: { kprime: number; hops: number; rows: SweepRow[] }[] = [];
 for (const kprime of KPRIMES) for (const hops of HOPS) sweep.push({ kprime, hops, rows: [] });
+const cellOf = new Map(sweep.map((c) => [`${c.kprime}:${c.hops}`, c]));
 let seedMs = 0;
 for (const q of questions) {
   const qv = await embed(EMBED_MODEL, q.question, true);
@@ -637,20 +651,20 @@ for (const q of questions) {
   seedMs += Date.now() - ts;
   const vector = await vectorArm(qv);
   const graph = await graphArm(seeds.ids, qv);
-  // Sweep the composed RRF arm across every K′ × hops. The headline (which feeds the
-  // main table and the bar) is chosen after the sweep as the arm's BEST cell, so graph
-  // gets its best shot. comp-cos is the cosine-only control at the DEEPEST K′ — the
-  // largest union, the most stringent test that adding graph-reached candidates loses
-  // nothing to cosine ordering.
-  for (const cell of sweep) {
-    const c = await composedExpandArm(qv, cell.kprime, cell.hops, "rrf");
-    cell.rows.push({ q, s: score(c.ranked, q.expected), coarseMs: c.coarseMs, expandMs: c.expandMs });
+  // Coarse recall once per K′ (reused across hops); expansion once per (K′, hops); both
+  // rankings from the one union. The headline cell (which feeds the main table and the
+  // bar) is chosen after the sweep as the arm's BEST cell, so the graph gets its best shot.
+  for (const kprime of KPRIMES) {
+    const c = await coarseRecall(qv, kprime);
+    for (const hops of HOPS) {
+      const { rows, ms } = await expandStage(c.ids, lit(qv), hops);
+      const f = fuseUnion(rows);
+      cellOf.get(`${kprime}:${hops}`)!.rows.push({ q, s: score(f.rrf, q.expected), sCos: score(f.cos, q.expected), coarseMs: c.ms, expandMs: ms });
+    }
   }
-  const deepK = Math.max(...KPRIMES);
-  const headCos = await composedExpandArm(qv, deepK, HOPS[0], "cosine");
   const scores: Result["scores"] = {
     vector: score(vector, q.expected), graph: score(graph, q.expected), hybrid: score(rrf([vector, graph]), q.expected),
-    composed: score([], q.expected), "comp-cos": score(headCos.ranked, q.expected), // composed filled from the best cell after the sweep
+    composed: score([], q.expected), "comp-cos": score([], q.expected), // both filled from the best cell after the sweep
   };
   if (GLOBAL) scores.global = score(await globalArm(qv), q.expected);
   const kw = await keywordArm(q.keyword);
@@ -659,19 +673,18 @@ for (const q of questions) {
   process.stderr.write(`  … ${q.id}\n`);
 }
 // Headline = the composed arm's best cell by multi-hop recall (tie-break: cheaper
-// expansion). Fill each result's composed score from it; results and every cell's rows
-// are in the same question order.
+// expansion). Fill each result's composed and comp-cos scores from it; results and every
+// cell's rows are in the same question order.
 const meanMH = (rows: SweepRow[]) => { const mh = rows.filter((r) => r.q.type === "multi-hop"); return mh.length ? mh.reduce((a, r) => a + r.s.recall, 0) / mh.length : 0; };
-const p50c = (xs: number[]) => { const s = xs.slice().sort((a, b) => a - b); return s.length ? s[Math.floor(s.length / 2)] : 0; };
-const bestCell = sweep.slice().sort((a, b) => meanMH(b.rows) - meanMH(a.rows) || p50c(a.rows.map((r) => r.expandMs)) - p50c(b.rows.map((r) => r.expandMs)))[0];
+const bestCell = sweep.slice().sort((a, b) => meanMH(b.rows) - meanMH(a.rows) || median(a.rows.map((r) => r.expandMs)) - median(b.rows.map((r) => r.expandMs)))[0];
 const headK = bestCell.kprime, headH = bestCell.hops;
-results.forEach((r, i) => { r.scores.composed = bestCell.rows[i].s; });
+results.forEach((r, i) => { r.scores.composed = bestCell.rows[i].s; r.scores["comp-cos"] = bestCell.rows[i].sCos; });
 const of = (r: Result, a: Arm): Score | undefined => r.scores[a];
 
 const types = ["multi-hop", "aggregation", "corpus"] as const;
 const mean = (xs: number[]) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0);
 console.log(`\n  ${questions.length} questions, recall@${K} (share of the expected documents in the top ${K}), nDCG@${K} (position-discounted, over the labelled set), complete@${K} (all of them), MRR@${K} (rank of the first expected document, 0 if none in the top ${K})`);
-console.log(`  composed = vector coarse recall K′=${headK} → graph expansion ${headH} hop(s) → RRF rerank, the arm's best cell (SMD-1738); comp-cos = that union ordered by cosine only at the deepest K′=${Math.max(...KPRIMES)} (control); graph = the SMD-948 substitute (question-seeded)`);
+console.log(`  composed = vector coarse recall K′=${headK} → graph expansion ${headH} hop(s) → RRF rerank, the arm's best cell (SMD-1738); comp-cos = that same union ordered by cosine only (control); graph = the SMD-948 substitute (question-seeded)`);
 console.log(`  keyword is scored only on the ${questions.filter((q) => q.keyword).length} aggregation and corpus questions that carry a needle`);
 if (seedFailures || summaryCost.failed) console.log(`  ! HARNESS: ${seedFailures} of ${questions.length} seed extractions failed; ${summaryCost.failed} of ${summaryCost.calls} summaries failed — the graph arms below were measured with those gaps`);
 console.log("");
@@ -708,7 +721,6 @@ for (const r of results.filter((x) => x.scores.vector.recall < 1)) {
 // The K′ × hop sweep of the composed RRF arm — recall recovers with coarse depth if
 // it recovers at all, so the curve, not one point, is the finding. Latency is the
 // stage cost: coarse (vector) p50 and expansion (graph) p50.
-const p50 = (xs: number[]) => { if (!xs.length) return 0; const s = xs.slice().sort((a, b) => a - b); return s[Math.floor(s.length / 2)]; };
 const mhOf = (rows: SweepRow[]) => rows.filter((r) => r.q.type === "multi-hop");
 console.log(`\n  composed arm (SMD-1738) — K′ × hop sweep, RRF fuse, scored vs the labelled gold`);
 console.log(`    K′    hops   R@k(all)  R@k(mh)  nDCG(mh)   coarse p50   expand p50`);
@@ -717,7 +729,7 @@ for (const cell of sweep) {
   const mh = mhOf(cell.rows);
   const Rall = mean(cell.rows.map((r) => r.s.recall)); const Rmh = mean(mh.map((r) => r.s.recall)); const Nmh = mean(mh.map((r) => r.s.ndcg));
   const head = cell.kprime === headK && cell.hops === headH ? " ←headline (best)" : "";
-  console.log(`    ${String(cell.kprime).padStart(4)}  ${String(cell.hops).padStart(4)}     ${Rall.toFixed(2)}     ${Rmh.toFixed(2)}     ${Nmh.toFixed(2)}     ${p50(cell.rows.map((r) => r.coarseMs)).toFixed(1)} ms     ${p50(cell.rows.map((r) => r.expandMs)).toFixed(1)} ms${head}`);
+  console.log(`    ${String(cell.kprime).padStart(4)}  ${String(cell.hops).padStart(4)}     ${Rall.toFixed(2)}     ${Rmh.toFixed(2)}     ${Nmh.toFixed(2)}     ${median(cell.rows.map((r) => r.coarseMs)).toFixed(1)} ms     ${median(cell.rows.map((r) => r.expandMs)).toFixed(1)} ms${head}`);
 }
 
 // Recovery: on the multi-hop subset — where the answer is not the nearest vector
