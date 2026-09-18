@@ -831,3 +831,35 @@ export function recallAt(got: string[], exact: string[], k: number): number {
   const hit = got.slice(0, k).filter((r) => want.has(r)).length;
   return hit / Math.min(k, want.size);
 }
+
+/**
+ * nDCG@k against the exact-cosine oracle's top-k as the gold set (SMD-1707).
+ * Binary relevance — a returned ref is relevant iff it is in the oracle's top-k —
+ * discounted by the position it is returned at: DCG = Σ rel(got[i]) / log2(i+2)
+ * over the first k results, IDCG = Σ 1/log2(i+2) over the first min(k, |gold|)
+ * ideal positions (every gold ref surfaced in order). Unlike recall@k it rewards
+ * putting the right rows *high*, which is the whole point of an exact rerank over
+ * a coarse candidate set. Returns NaN when the oracle is empty.
+ */
+export function nDCG(got: string[], oracleTopK: string[], k: number): number {
+  if (!oracleTopK.length) return NaN;
+  const gold = new Set(oracleTopK.slice(0, k));
+  let dcg = 0;
+  got.slice(0, k).forEach((r, i) => { if (gold.has(r)) dcg += 1 / Math.log2(i + 2); });
+  let idcg = 0;
+  for (let i = 0; i < Math.min(k, gold.size); i++) idcg += 1 / Math.log2(i + 2);
+  return idcg === 0 ? NaN : dcg / idcg;
+}
+
+/**
+ * Reciprocal rank of the oracle's single best row (its top-1) within the result
+ * list — the eval-recency.ts:224-227 / eval-hybrid.ts:343-346 `rankOf` convention,
+ * lifted here for the composed match: "did we surface THE most relevant row, and
+ * how high?" Mean over queries is MRR. 0 if the oracle's #1 is absent from `got`;
+ * NaN when the oracle is empty.
+ */
+export function mrr(got: string[], oracleRanked: string[]): number {
+  if (!oracleRanked.length) return NaN;
+  const rank = got.indexOf(oracleRanked[0]) + 1;
+  return rank === 0 ? 0 : 1 / rank;
+}
