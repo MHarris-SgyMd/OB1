@@ -13913,7 +13913,7 @@ NULL agent its own bucket — the export's join in TypeScript, compared at the
 log's own microsecond grain when read from the log, since a JS `Date` is
 milliseconds and two rows under a millisecond apart would order differently in
 the two; a fixture in whole minutes is unaffected), then per arm (the search tool and its
-recorded arguments), per agent and overall: distinct ids returned, ids used
+recorded arguments), per agent when the log holds more than one, and overall: distinct ids returned, ids used
 (distinct per search), **utilization** = used / returned, **use rate** =
 searches with at least one use, the cited / opened **partition** of used (an
 id that reached a write is cited even if it was also fetched; opened is what
@@ -13933,7 +13933,12 @@ and asks whether the log is on, rather than 0% over an empty join — the mutant
 opened-only share, so the number is measuring the cites and not something that
 would survive their absence. Actions that attribute to no search (a touch
 outside the window, an id no search returned) are counted and shown, not
-dropped. Nothing changes ranking: the number first.
+dropped. Nothing changes ranking: the number first. On a brain the log
+table is not on (034 not applied) both readers refuse in their own words —
+"query_log is not present", apply 034, turn the log on — exit 2, where a sixth
+pass found each dying in the driver on its first query (`relation "query_log"
+does not exist`, a stack trace) while preflight's own check says it plainly;
+the check is one shared helper, `evals/query-log.ts`'s `requireQueryLog`.
 
 **Not done here.** A typed `pointer` column on `query_log` in place of the
 `<writer>/<pointer>` convention in the free-text `tool` (a second review pass
@@ -13950,7 +13955,15 @@ once; a re-send after a *new* search that returned the id is that search's
 result reaching a write, which is what the number asks; and telling a
 confirmed pointer from a written one needs 032's function to return the prior
 value, a migration, and would undercount the confirmations SMD-1736 wants to
-see. Per-*model* arms: the log does
+see. A `supersedes` cite labels the *superseded* row as relevant in the
+export's fixture (a sixth pass): kept. That row is what the searcher needed in
+order to correct it, so the search that surfaced it did its job; the fork
+labels superseded rows at read time and does not demote them (SMD-1720, change 88), and
+a click-through label is bound to the corpus at export time in any case —
+`eval-replay.ts` reads `baseline` beside `relevant` for that reason. Labelling
+the superseder too would need the fixture to follow `thoughts.supersedes` at
+export, a different fixture; the README says which row the label names.
+Per-*model* arms: the log does
 not record the embedding model a search ran under, and 034's `filter` column
 is dead on `search_thoughts` (SMD-1490) — whether to carry the arm there or in
 a column is that ticket's call. A read whose use ends in prose to the user, with no write and no fetch,
@@ -13981,6 +13994,12 @@ id was cited and n/a where it was never returned. The SQL writer was probed
 against Postgres with an empty batch, a NULL agent, a tool name carrying a
 quote and a backslash, and forty rows; a mutant that keeps only the first row
 of a batch fails exactly the assertion that reads the second and nothing else.
+`test-store-sql.ts` [11] drives the SQL writer's own contract: a batch of three
+in one statement, an undefined and an empty-string agent landing as SQL NULL,
+and a malformed agent, a malformed target and an absent target each refused by
+column before the statement with nothing written (a fifth pass found the
+agent column bound through a text sentinel; a sixth found the target column
+trusted while the agent column was checked).
 `test-store-postgrest.ts` [11] drives the PostgREST writer — the hosted
 deployment's path — through the shim: an empty batch, a batch of one and of
 three, a NULL agent, the cite tool through the array insert, and 034's join
@@ -14001,7 +14020,17 @@ duplicate ids, retried actions, an unknown tool, partial token estimates and
 gold on some queries: cited + opened = used at every grain, utilization in
 [0, 1], the per-arm and per-agent tables sum to the overall row, the estimate
 is null exactly when its stated condition holds, and the rendered `all` row
-carries the overall numbers. `bunx tsc --noEmit` in `server-portable/` covers
+carries the overall numbers. The operator's path was walked end to end as a
+separate process — the Dockerfile's entrypoint (`bun preflight.ts && exec bun
+index.ts`) against a throwaway Postgres with a stub provider on a port and
+`OB1_QUERY_LOG=on`, tool calls over HTTP (three captures, a search, a capture
+citing two returned ids, a second search, a fetch, an edit that supersedes, a
+re-capture naming a pointer), then both readers: the report's used set per
+search equals the export's `relevant` per query, the counts match a hand tally
+of the log rows (7 distinct returned, 4 used, 3 cited, 1 opened), preflight
+reads the log as present and on before and after, and the same walk on an
+empty log prints `n/a`, on an opens-only log the 035 warning, and with the
+table absent the refusal above. `bunx tsc --noEmit` in `server-portable/` covers
 the server files; `evals/utilization.ts`, `query-log.ts` and
 `eval-utilization.ts` have no tsconfig and are **runtime-checked only**,
 through [39] under Bun — the same standing as every other `evals/` file.

@@ -1061,7 +1061,7 @@ function buildServer(principal: Principal): McpServer {
         // "fresh" on the one schema where the pointer's fate is unknown). The
         // vector attaching or not does not change what was written.
         if (captured.existed === false) {
-          await logActionCalls(citeRows("capture_thought", { derived_from, supersedes: supersedes ?? undefined }));
+          await logActionCalls(citeRows("capture_thought", { derived_from, supersedes }));
         }
 
         if (captured.embeddingFailed) {

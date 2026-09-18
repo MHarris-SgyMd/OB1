@@ -851,9 +851,10 @@ export interface ThoughtStore {
    * when OB1_QUERY_LOG=on, and the call is best-effort: the handler swallows any
    * rejection so a log write can never fail a search, a fetch or a capture.
    * Nothing reads them on the hot path — the export tool reads the table offline.
-   * `logSearch` records one search call and the ids it returned; `logAction`
-   * records a later fetch/edit/delete of a returned id, or a write that cited
-   * it (`<writer>/<pointer>`, SMD-1719). They are NOT joined at
+   * `logSearch` records one search call and the ids it returned; `logActions`
+   * records, in one statement, the later fetch/edit/delete rows of returned
+   * ids and the rows of a write that cited them (`<writer>/<pointer>`,
+   * SMD-1719) — the one writer of action rows. They are NOT joined at
    * write time (there is no request token in the handlers); export links them by
    * (agent, id, window). A store on a schema before 034 will reject — that is
    * why the calls are guarded and swallowed, not why they are skipped.

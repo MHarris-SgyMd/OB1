@@ -2669,7 +2669,12 @@ on to open. This loop captures it and gates PRs on it.
    follow-up fetch/edit/delete of a returned id (migration 034; `db/README.md`),
    and — since SMD-1719 — one per id a later capture or edit cites as its source
    (`derived_from` / `supersedes`), logged under `<writer>/<pointer>`; a cite is
-   the stronger relevance label and the export includes it.
+   the stronger relevance label and the export includes it. A `supersedes` cite
+   labels the *superseded* row — the one the searcher needed in order to
+   correct it — so a replay on a corpus that has since demoted superseded rows
+   would read that query as a miss; the fork labels such rows at read time and
+   does not demote them (SMD-1720, change 88), and every click-through label is bound to
+   the corpus at export time (`baseline` says which).
    A caller who searches then opens result 3 has labelled result 3 relevant —
    *click-through relevance*, a proxy, kept beside the hand-labelled sets, not
    instead of them.
@@ -2724,7 +2729,8 @@ DATABASE_URL=… bun eval-utilization.ts [--gold fixture.json]
 OB1_EXPORT_WINDOW_MIN=30   # the same attribution window as export-queries.ts
 ```
 
-prints, per arm (search tool + recorded arguments), per agent and overall: ids
+prints, per arm (search tool + recorded arguments), per agent when the log
+holds more than one, and overall: ids
 returned, ids used (cited ∪ opened), **util** = used / returned, **use-rate** =
 searches with ≥ 1 use, the cited/opened split, and **tok/used** — approximate
 tokens returned per id used (the ids' content as stored now, chars / 4; a
@@ -2734,7 +2740,9 @@ rather than a partial one, and the header says how many do). With
 relevant }] }` shape) it adds the **ignore rate**: searches whose results held a
 relevant id the caller never used. A fixture exported from the same log's touches
 is circular as gold; label by hand. With no action rows the report says `n/a`
-and asks whether the log is on, rather than printing 0%. Attribution is the
+and asks whether the log is on, rather than printing 0%; on a brain without
+migration 034 it (and `export-queries.ts`) refuses in words, exit 2, rather
+than dying in the driver. Attribution is the
 export's rule, in `utilization.ts` (pure, tested by `db/test-schema.ts` [39]).
 A read whose use ends in prose, with no write and no fetch, is invisible here,
 so utilization is a lower bound on use. No ranking changes on this number; if

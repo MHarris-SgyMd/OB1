@@ -26,7 +26,7 @@
 import { SQL } from "bun";
 import { readFileSync } from "node:fs";
 import { loadEnv } from "./env.ts";
-import { posInt } from "./query-log.ts";
+import { posInt, requireQueryLog } from "./query-log.ts";
 import { goldFromFixture, renderReport, summarise, toActionRow, toSearchRow, type ActionDbRow, type SearchDbRow } from "./utilization.ts";
 
 loadEnv();
@@ -64,6 +64,7 @@ if (stray.length) {
 const gold = goldPath ? goldFromFixture(JSON.parse(readFileSync(goldPath, "utf8"))) : undefined;
 
 const sql = new SQL({ url: URL_, max: 2 });
+await requireQueryLog(sql, "eval-utilization");
 
 // at_us: logged_at at the log's own microsecond grain, so the attribution
 // orders and bounds exactly as export-queries.ts's SQL join does; a Date alone

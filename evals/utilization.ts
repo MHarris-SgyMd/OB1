@@ -340,6 +340,11 @@ export function summarise(
     // set is one id returned, so utilization can reach 1 and the token
     // estimate's whole-set test holds.
     const distinct = returnedDistinct.get(s.id) ?? new Set(s.resultIds).size;
+    // Gold membership depends on the search alone: decided once, counted in
+    // each of the three buckets.
+    const g = gold && s.query !== null ? gold.get(s.query) : undefined;
+    const holdsGold = g !== undefined && s.resultIds.some((id) => g.has(id));
+    const usedGold = holdsGold && s.resultIds.some((id) => g!.has(id) && uses?.used.has(id));
     for (const st of [overall, armSt, agSt]) {
       st.searches++;
       st.returned += distinct;
@@ -351,12 +356,9 @@ export function summarise(
         st.tokensReturned += s.resultTokens as number;
         st.searchesWithTokens++;
       }
-      if (st.gold && gold && s.query !== null) {
-        const g = gold.get(s.query);
-        if (g && s.resultIds.some((id) => g.has(id))) {
-          st.gold.withGold++;
-          if (!s.resultIds.some((id) => g.has(id) && uses?.used.has(id))) st.gold.ignored++;
-        }
+      if (st.gold && holdsGold) {
+        st.gold.withGold++;
+        if (!usedGold) st.gold.ignored++;
       }
     }
     if (hasTokens) {

@@ -65,16 +65,23 @@ function toUuidArray(ids: string[]): string {
 }
 
 /**
- * A Postgres array literal for a `::uuid[]` bind where an element may be
- * absent: null, undefined and the empty string become the NULL element; any
- * other value must be a uuid or the literal is refused here, loudly, rather
- * than reaching array_in as a malformed literal a best-effort caller would
- * swallow. Kept apart from toUuidArray, whose contract is validated ids only.
+ * A Postgres array literal for a `::uuid[]` bind whose elements the caller did
+ * not validate. Every element is checked against UUID_RE (store.ts — the one
+ * definition of a uuid this module has) and a miss is refused here, loudly and
+ * naming the column, rather than reaching array_in as a malformed literal a
+ * best-effort caller would swallow with the whole batch. With `nullable`,
+ * null, undefined and the empty string are the NULL element; without it they
+ * are refused too (the column is NOT NULL, and a silent NULL would be the
+ * CHECK's error instead). Kept apart from toUuidArray, whose contract is
+ * validated ids only.
  */
-function toNullableUuidArray(xs: (string | null | undefined)[]): string {
+function toCheckedUuidArray(xs: (string | null | undefined)[], column: string, nullable: boolean): string {
   return `{${xs.map((x) => {
-    if (x === null || x === undefined || x === "") return "NULL";
-    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(x)) throw new Error(`toNullableUuidArray: not a uuid: ${x.slice(0, 40)}`);
+    if (x === null || x === undefined || x === "") {
+      if (nullable) return "NULL";
+      throw new Error(`logActions: ${column} is absent`);
+    }
+    if (!UUID_RE.test(x)) throw new Error(`logActions: not a uuid for ${column}: ${x.slice(0, 40)}`);
     return x;
   }).join(",")}}`;
 }
@@ -428,18 +435,22 @@ export class SqlStore implements ThoughtStore {
 
   async logActions(rows: QueryActionLog[]): Promise<void> {
     if (rows.length === 0) return;
-    // One statement for one row or forty: the tools and targets as aligned
-    // array literals (the same by-hand binding toUuidArray exists for),
-    // unnested side by side. Agent ids may differ per row in principle; here
-    // they are one caller's, but the array keeps the contract general. The
+    // One statement for one row or forty: the tools, agents and targets as
+    // aligned array literals (the same by-hand binding toUuidArray exists
+    // for), unnested side by side. Agent ids may differ per row in principle;
+    // here they are one caller's, but the array keeps the contract general.
+    // Both uuid columns go through the checked builder: the callers validate
+    // their ids upstream today, but one malformed element would malform the
+    // whole literal and the best-effort caller would drop the batch without a
+    // word — so the refusal is here, by column, before the statement. The
     // one writer of action rows — a single-row VALUES twin was removed so
     // there is one INSERT shape to keep right (SMD-1719, fourth pass).
     await this.sql`
       INSERT INTO query_log (kind, tool, agent_id, target_id)
       SELECT 'action', t.tool, t.agent_id, t.target_id
         FROM unnest(${toTextArray(rows.map((r) => r.tool))}::text[],
-                    ${toNullableUuidArray(rows.map((r) => r.agentId))}::uuid[],
-                    ${toUuidArray(rows.map((r) => r.targetId))}::uuid[]) AS t(tool, agent_id, target_id)`;
+                    ${toCheckedUuidArray(rows.map((r) => r.agentId), "agent_id", true)}::uuid[],
+                    ${toCheckedUuidArray(rows.map((r) => r.targetId), "target_id", false)}::uuid[]) AS t(tool, agent_id, target_id)`;
   }
 
   async close(): Promise<void> {

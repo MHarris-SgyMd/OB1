@@ -38,7 +38,7 @@
 
 import { SQL } from "bun";
 import { loadEnv } from "./env.ts";
-import { parsePgUuidArray, posInt } from "./query-log.ts";
+import { parsePgUuidArray, posInt, requireQueryLog } from "./query-log.ts";
 
 loadEnv();
 
@@ -54,6 +54,7 @@ const WINDOW_MIN = posInt(process.env.OB1_EXPORT_WINDOW_MIN, 30);
 const OUT = process.argv[2] ?? process.env.OB1_EXPORT_OUT ?? "/tmp/ob1-query-fixture.json";
 
 const sql = new SQL({ url: URL_, max: 2 });
+await requireQueryLog(sql, "export-queries");
 
 // Each action → the most recent prior search (same agent, within the window)
 // that returned its id. LATERAL so the "most recent" is decided per action.
@@ -102,7 +103,7 @@ const fixture = {
   generated: new Date().toISOString(),
   origin: "query_log",
   windowMinutes: WINDOW_MIN,
-  note: "Click-through relevance from OB1_QUERY_LOG (SMD-1295). Query text and ids — no thought content, but the query strings are the searcher's own (personal data). `relevant` is a proxy (a fetch can be a wrong guess; a cite — a later write naming the id as its source, SMD-1719 — is the stronger label and is included), bucketed by query text; `baseline` is the ranking the log recorded at export time.",
+  note: "Click-through relevance from OB1_QUERY_LOG (SMD-1295). Query text and ids — no thought content, but the query strings are the searcher's own (personal data). `relevant` is a proxy (a fetch can be a wrong guess; a cite — a later write naming the id as its source, SMD-1719 — is the stronger label and is included; a supersedes cite labels the SUPERSEDED row, the one the searcher needed in order to correct it), bucketed by query text; `baseline` is the ranking the log recorded at export time.",
   queries,
 };
 

@@ -475,7 +475,7 @@ console.log("\n[10] listSupersessionProposals reads migration 029's queue throug
   await admin5.close();
 }
 
-console.log("\n[11] logActions: the one writer of action rows — a batch in one statement, an absent agent as SQL NULL, a malformed agent refused loudly (migration 034, SMD-1719)");
+console.log("\n[11] logActions: the one writer of action rows — a batch in one statement, an absent agent as SQL NULL, a malformed agent or target refused loudly by column (migration 034, SMD-1719)");
 {
   const admin6 = new SQL({ url: URL_, max: 1 });
   await admin6`DELETE FROM query_log`;
@@ -501,8 +501,17 @@ console.log("\n[11] logActions: the one writer of action rows — a batch in one
   // on a literal it cannot.
   let refused = "";
   try { await store.logActions([{ tool: "fetch", agentId: "not-a-uuid", targetId: X }]); } catch (e) { refused = (e as Error).message; }
-  assert(/toNullableUuidArray: not a uuid: not-a-uuid/.test(refused), `a malformed agent id is refused by name (${refused.slice(0, 60)})`);
-  assert((await admin6<{ n: number }[]>`SELECT count(*)::int AS n FROM query_log`)[0].n === 3, "…and wrote nothing");
+  assert(/logActions: not a uuid for agent_id: not-a-uuid/.test(refused), `a malformed agent id is refused by name (${refused.slice(0, 60)})`);
+  // The target column too (sixth review pass: agents were checked and targets
+  // trusted — one bad target in a batch of three would have malformed the
+  // literal and lost all three, with no message naming the culprit).
+  refused = "";
+  try { await store.logActions([{ tool: "fetch", agentId: AG, targetId: X }, { tool: "fetch", agentId: AG, targetId: "abc}" }]); } catch (e) { refused = (e as Error).message; }
+  assert(/logActions: not a uuid for target_id: abc\}/.test(refused), `a malformed target id is refused by name (${refused.slice(0, 60)})`);
+  refused = "";
+  try { await store.logActions([{ tool: "fetch", agentId: AG, targetId: "" }]); } catch (e) { refused = (e as Error).message; }
+  assert(/logActions: target_id is absent/.test(refused), `an absent target is refused, not bound as NULL for the CHECK to catch (${refused.slice(0, 60)})`);
+  assert((await admin6<{ n: number }[]>`SELECT count(*)::int AS n FROM query_log`)[0].n === 3, "…and none of the refused batches wrote a row");
   await admin6`DELETE FROM query_log`;
   await admin6.close();
 }
