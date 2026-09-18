@@ -81,14 +81,14 @@ await requireQueryLog(sql, "eval-utilization");
 // orders and bounds exactly as export-queries.ts's SQL join does; a Date alone
 // is milliseconds.
 // One lateral pass over the returned ids per search row gives both aggregates;
-// returned_n counts DISTINCT ids so a duplicate in a logged result set neither
-// strips the estimate nor caps utilization below one.
+// the distinct count of returned ids is the reader's (toSearchRow), so a
+// duplicate in a logged result set neither strips the estimate nor caps
+// utilization below one, and the count has one definition.
 const searchRows = await sql<SearchDbRow[]>`
   SELECT s.id, s.agent_id, s.logged_at,
          (extract(epoch FROM s.logged_at) * 1000000)::bigint AS at_us,
          s.tool, s.query, s.match_count, s.threshold, s.recency_weight, s.result_ids,
-         c.chars, c.surviving,
-         (SELECT count(DISTINCT x) FROM unnest(s.result_ids) AS x)::int AS returned_n
+         c.chars, c.surviving
     FROM query_log s
     CROSS JOIN LATERAL (
       SELECT sum(length(t.content))::bigint AS chars, count(*)::int AS surviving
@@ -98,7 +98,15 @@ const searchRows = await sql<SearchDbRow[]>`
 const actionRows = await sql<ActionDbRow[]>`
   SELECT agent_id, logged_at, (extract(epoch FROM logged_at) * 1000000)::bigint AS at_us, tool, target_id
     FROM query_log WHERE kind = 'action'`;
+// The by-agent table names its rows from the registry beside the log
+// (ob1_agents, migration 010; the label mirrors the key name) — an eighth
+// review pass's two-agent walk read a table of bare uuids. A brain without 010
+// has no registry and the rows keep their ids.
+const agentNames = new Map<string, string>();
+if ((await sql<{ present: boolean }[]>`SELECT to_regclass('public.ob1_agents') IS NOT NULL AS present`)[0].present) {
+  for (const r of await sql<{ id: string; label: string }[]>`SELECT canonical_agent_id AS id, label FROM ob1_agents`) agentNames.set(r.id, r.label);
+}
 await sql.close();
 
 const summary = summarise(searchRows.map(toSearchRow), actionRows.map(toActionRow), WINDOW_MIN, gold);
-console.log(renderReport(summary));
+console.log(renderReport(summary, agentNames));

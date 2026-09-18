@@ -13877,7 +13877,15 @@ source now logs one action row per id, target the cited id, tool
 call in one `INSERT` (`logActions`, the one writer of action rows — a fetch's
 single row, a forty-source synthesis, an edit's opened row beside its cite —
 so each store has one INSERT shape to keep right; a single-row twin existed
-for two passes and was removed as a parity obligation with no reader), ids
+for two passes and was removed as a parity obligation with no reader), the
+batch's contract one function both stores call before anything reaches a
+database — `normaliseActionRows`: an absent agent (null, undefined, `""`) is
+SQL NULL, a target must be present, any id that is not a uuid is refused by
+column name rather than reaching `array_in` or PostgREST as a value the
+best-effort caller would swallow with the whole batch (a fifth pass found the
+agent column bound through a text sentinel, a sixth the target column trusted
+while the agent column was checked, an eighth the PostgREST writer sending
+`""` through as an agent id and dropping the batch on the 22P02) — ids
 lower-cased before the dedup (`UUID_RE` admits either case; two spellings are
 one cite). A cite row is written for every id a write names, whether or not a
 search returned it; the link to a search is made when the log is read. **A cite row is a pointer the
@@ -13917,7 +13925,7 @@ NULL agent its own bucket — the export's join in TypeScript, compared at the
 log's own microsecond grain when read from the log, since a JS `Date` is
 milliseconds and two rows under a millisecond apart would order differently in
 the two; a fixture in whole minutes is unaffected), then per arm (the search tool and its
-recorded arguments), per agent when the log holds more than one, and overall: distinct ids returned, ids used
+recorded arguments), per agent when the log holds more than one — named from the registry (`ob1_agents.label`, 010) with the id's prefix beside it — and overall: distinct ids returned, ids used
 (distinct per search), **utilization** = used / returned, **use rate** =
 searches with at least one use, the cited / opened **partition** of used (an
 id that reached a write is cited even if it was also fetched; opened is what
@@ -14060,7 +14068,23 @@ in [39]: a row whose instant does not parse is never credited and never
 attributed (NaN passes both window tests and would have taken the agent's
 newest search), and a gold id spelled upper-case matches the lower-case id
 the log holds. `test-preflight.ts`'s pre-035 run asserts the `query log`
-warning and its absence once 035 is back. `bunx tsc --noEmit` in `server-portable/` covers
+warning and its absence once 035 is back. An eighth pass walked two named
+agents (`MCP_ACCESS_KEYS`, alice and bob) over the SQL-store server process:
+bob's fetch of an id only alice's search returned and bob's cite of an id his
+own search did not return are the two unattributed actions, bob's cite of an
+id his later search did return is attributed to that search, alice's delete of
+a returned id is her search's one use and strips the token estimate from both
+searches that had returned it while the third keeps its own; the by-agent
+table split the two as the log rows say. That table printed bare uuids, with
+the registry that names them one table away — the report now reads
+`ob1_agents.label` when 010 is present and prints `label (id prefix)`, held
+in [39]. A capture whose embedding the provider refuses fails before any
+write and logs nothing, which is the rule (no pointer was accepted). The same
+pass's cold read moved the distinct-returned count to one definition — the
+reader's, from the parsed ids, where a `count(DISTINCT)` subquery per search
+row had duplicated it under a comment that called it a cardinality — and the
+035 verdict preflight carries between two checks into the block those checks
+share, so a second run in one process starts unset. `bunx tsc --noEmit` in `server-portable/` covers
 the server files; `evals/utilization.ts`, `query-log.ts` and
 `eval-utilization.ts` have no tsconfig and are **runtime-checked only**,
 through [39] under Bun — the same standing as every other `evals/` file.

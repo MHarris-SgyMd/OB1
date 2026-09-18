@@ -23,7 +23,7 @@
  */
 
 import { SQL } from "bun";
-import { actorPayload, captureEnvelope, isoTimestampOrNull, normaliseAgentResolution, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, normaliseThoughtMeta, normaliseThoughtRecord, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE } from "./store.ts";
+import { actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, normaliseThoughtMeta, normaliseThoughtRecord, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
@@ -65,25 +65,14 @@ function toUuidArray(ids: string[]): string {
 }
 
 /**
- * A Postgres array literal for a `::uuid[]` bind whose elements the caller did
- * not validate. Every element is checked against UUID_RE (store.ts — the one
- * definition of a uuid this module has) and a miss is refused here, loudly and
- * naming the column, rather than reaching array_in as a malformed literal a
- * best-effort caller would swallow with the whole batch. With `nullable`,
- * null, undefined and the empty string are the NULL element; without it they
- * are refused too (the column is NOT NULL, and a silent NULL would be the
- * CHECK's error instead). Kept apart from toUuidArray, whose contract is
- * validated ids only.
+ * A Postgres array literal for a `::uuid[]` bind whose elements may be NULL —
+ * the query log's agent column. The ids were validated by normaliseActionRows
+ * (store.ts), so this only renders; a null is the NULL element. By hand rather
+ * than sql.array because the driver renders a null element as the text `null`,
+ * which uuid[] refuses (probed, seventh review pass).
  */
-function toCheckedUuidArray(xs: (string | null | undefined)[], column: string, nullable: boolean): string {
-  return `{${xs.map((x) => {
-    if (x === null || x === undefined || x === "") {
-      if (nullable) return "NULL";
-      throw new Error(`logActions: ${column} is absent`);
-    }
-    if (!UUID_RE.test(x)) throw new Error(`logActions: not a uuid for ${column}: ${x.slice(0, 40)}`);
-    return x;
-  }).join(",")}}`;
+function toNullableUuidArray(xs: (string | null)[]): string {
+  return `{${xs.map((x) => x ?? "NULL").join(",")}}`;
 }
 
 /**
@@ -425,27 +414,23 @@ export class SqlStore implements ThoughtStore {
 
   async logActions(rows: QueryActionLog[]): Promise<void> {
     if (rows.length === 0) return;
-    // One statement for one row or forty: the tools, agents and targets as
-    // aligned array literals (the same by-hand binding toUuidArray exists
-    // for), unnested side by side. Agent ids may differ per row in principle;
-    // here they are one caller's, but the array keeps the contract general.
-    // Both uuid columns go through the checked builder: the callers validate
-    // their ids upstream today, but one malformed element would malform the
-    // whole literal and the best-effort caller would drop the batch without a
-    // word — so the refusal is here, by column, before the statement. The
-    // tool column binds through the driver's own sql.array, which carries a
-    // quote, a backslash, a comma and a brace intact (probed) — the by-hand
-    // literal stays only for the uuid columns, because sql.array renders a
-    // null element as the text `null`, which uuid[] refuses, and the agent
-    // column is nullable (seventh review pass). The one writer of action rows
-    // — a single-row VALUES twin was removed so there is one INSERT shape to
-    // keep right (SMD-1719, fourth pass).
+    // The batch's contract — absent agent → NULL, every id a uuid, refused by
+    // column before the statement — is normaliseActionRows (store.ts), the
+    // same call the PostgREST writer makes. One statement for one row or
+    // forty: the tools, agents and targets as aligned arrays, unnested side by
+    // side. The tool column binds through the driver's own sql.array (a quote,
+    // a backslash, a comma and a brace carried intact — probed); the uuid
+    // columns as by-hand literals, because sql.array renders a null element as
+    // the text `null` and the agent column is nullable. The one writer of
+    // action rows — a single-row VALUES twin was removed so there is one
+    // INSERT shape to keep right (SMD-1719, fourth pass).
+    const clean = normaliseActionRows(rows);
     await this.sql`
       INSERT INTO query_log (kind, tool, agent_id, target_id)
       SELECT 'action', t.tool, t.agent_id, t.target_id
-        FROM unnest(${this.sql.array(rows.map((r) => r.tool), "TEXT")}::text[],
-                    ${toCheckedUuidArray(rows.map((r) => r.agentId), "agent_id", true)}::uuid[],
-                    ${toCheckedUuidArray(rows.map((r) => r.targetId), "target_id", false)}::uuid[]) AS t(tool, agent_id, target_id)`;
+        FROM unnest(${this.sql.array(clean.map((r) => r.tool), "TEXT")}::text[],
+                    ${toNullableUuidArray(clean.map((r) => r.agentId))}::uuid[],
+                    ${toUuidArray(clean.map((r) => r.targetId))}::uuid[]) AS t(tool, agent_id, target_id)`;
   }
 
   async close(): Promise<void> {

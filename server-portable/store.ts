@@ -269,6 +269,27 @@ export function normaliseThoughtMeta(r: Record<string, unknown>): ThoughtMeta {
 export const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
+ * The one contract for a batch of query-log action rows, applied by BOTH
+ * writers before anything reaches a database: an absent agent — null,
+ * undefined or the empty string — is SQL NULL (034's anonymous bucket); a
+ * target must be present; and any id that is not a uuid is refused here,
+ * loudly and naming the column, rather than reaching array_in or PostgREST as
+ * a malformed value the best-effort caller would swallow with the whole batch.
+ * An eighth review pass found the SQL writer holding this rule and the
+ * PostgREST writer sending `""` through as an agent id (22P02, batch dropped);
+ * one function, one contract.
+ */
+export function normaliseActionRows(rows: QueryActionLog[]): { tool: string; agentId: string | null; targetId: string }[] {
+  return rows.map((r) => {
+    const agentId = r.agentId === null || r.agentId === undefined || r.agentId === "" ? null : r.agentId;
+    if (agentId !== null && !UUID_RE.test(agentId)) throw new Error(`logActions: not a uuid for agent_id: ${agentId.slice(0, 40)}`);
+    if (r.targetId === null || r.targetId === undefined || r.targetId === "") throw new Error("logActions: target_id is absent");
+    if (!UUID_RE.test(r.targetId)) throw new Error(`logActions: not a uuid for target_id: ${r.targetId.slice(0, 40)}`);
+    return { tool: r.tool, agentId, targetId: r.targetId };
+  });
+}
+
+/**
  * What thought_stats renders: the corpus total, its date range, and the counts
  * by type, topic and person. The tool sorts each map and renders its own top 10,
  * so a store need only return at least that many, in any order — the maps are not

@@ -87,16 +87,6 @@ const EXPOSURE =
   "a filtered match_thoughts call — direct SQL, a PostgREST RPC, or a community integration's metadata filter; the server's own search_thoughts sends no filter — silently returns fewer rows than match";
 const APPLY_014 = "Apply the migrations through db/migrations/014_filtered_match_thoughts.sql.";
 const CATALOG_HINT = "run once with OB1_STORE=sql to read the catalog";
-/**
- * Whether the 3-argument upsert_thought carries 035's sentinel — set by the
- * `atomic capture` check from the body it reads, read by the `query log` check
- * (cite rows, SMD-1719, are logged only when that body answers `existed`).
- * One detector of 035, not a second grep of the same body: a seventh review
- * pass found the query-log check matching the literal 'existed' in the source
- * while the atomic-capture check beside it read the sentinel. `undefined`
- * until the atomic-capture check has run, or when it could not read the body.
- */
-let threeArgIs035: boolean | undefined;
 // Every check the direct-connection block owns, in the order it reports them.
 // A throw anywhere in that block lands in one catch, and a check that prints
 // nothing looks like one that passed — so the catch reports each of these
@@ -618,6 +608,14 @@ if (configFailed) {
         // path (the shape the `vector extension` check above fails), and a
         // pick by it would then have called a present form missing (second
         // review pass, SMD-1250).
+        // Whether the 3-argument upsert_thought carries 035's sentinel — set by
+        // the `atomic capture` check from the body it reads below, read by the
+        // `query log` check further down this block (cite rows, SMD-1719, are
+        // logged only when that body answers `existed`). One detector of 035,
+        // not a second grep of the same body (seventh review pass); scoped to
+        // this block rather than the module so a second run in one process
+        // starts unset (eighth). `undefined` = the body was not read.
+        let threeArgIs035: boolean | undefined;
         const forms = (await sql`
           SELECT p.proname || '(' || COALESCE((SELECT string_agg(t.typname, ',' ORDER BY a.n)
                                                  FROM unnest(p.proargtypes) WITH ORDINALITY AS a(o, n)

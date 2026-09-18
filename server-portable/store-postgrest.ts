@@ -12,7 +12,7 @@
  */
 
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
-import { actorPayload, captureEnvelope, normaliseAgentResolution, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, normaliseThoughtMeta, normaliseThoughtRecord, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE } from "./store.ts";
+import { actorPayload, captureEnvelope, normaliseActionRows, normaliseAgentResolution, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, normaliseThoughtMeta, normaliseThoughtRecord, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
@@ -460,8 +460,11 @@ export class PostgrestStore implements ThoughtStore {
   async logActions(rows: QueryActionLog[]): Promise<void> {
     if (rows.length === 0) return;
     // PostgREST inserts an array of rows in one request — one row or forty.
+    // The batch's contract (absent agent → NULL, every id a uuid, refused by
+    // column before the request) is normaliseActionRows, shared with the SQL
+    // writer: `""` sent as an agent id was a 22P02 that dropped the batch.
     const { error } = await this.client.from("query_log").insert(
-      rows.map((row) => ({ kind: "action", tool: row.tool, agent_id: row.agentId ?? null, target_id: row.targetId })),
+      normaliseActionRows(rows).map((row) => ({ kind: "action", tool: row.tool, agent_id: row.agentId, target_id: row.targetId })),
     );
     if (error) throw new Error(error.message);
   }

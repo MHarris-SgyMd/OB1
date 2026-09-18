@@ -533,6 +533,20 @@ console.log("\n[11] The query log's action rows over PostgREST: one or many thro
   assert(acts.some((r) => r.tool === "fetch" && r.target_id === X && r.agent_id === AG), "the single-row batch landed as a plain open");
   assert(acts.some((r) => r.tool === "update_thought/supersedes" && r.target_id === X), "a cite row keeps its <writer>/<pointer> tool through the array insert");
   assert(acts.some((r) => r.tool === "capture_thought/derived_from" && r.agent_id === null), "an undefined agent lands as SQL NULL through the array insert");
+  // The same contract as the SQL writer (normaliseActionRows): an empty-string
+  // agent is NULL, not a 22P02 that drops the batch (eighth review pass); a
+  // malformed id is refused by column before the request, nothing written.
+  await store.logActions([{ tool: "delete_thought", agentId: "", targetId: Y }]);
+  const [{ n_empty }] = await admin<{ n_empty: number }[]>`SELECT count(*)::int AS n_empty FROM query_log WHERE kind = 'action' AND tool = 'delete_thought' AND agent_id IS NULL`;
+  assert(n_empty === 1, "an empty-string agent lands as SQL NULL through the array insert too");
+  let refused = "";
+  try { await store.logActions([{ tool: "fetch", agentId: "not-a-uuid", targetId: X }]); } catch (e) { refused = (e as Error).message; }
+  assert(/logActions: not a uuid for agent_id: not-a-uuid/.test(refused), `a malformed agent is refused by column on the hosted writer (${refused.slice(0, 60)})`);
+  refused = "";
+  try { await store.logActions([{ tool: "fetch", agentId: AG, targetId: X }, { tool: "fetch", agentId: AG, targetId: "abc}" }]); } catch (e) { refused = (e as Error).message; }
+  assert(/logActions: not a uuid for target_id: abc\}/.test(refused), `a malformed target is refused by column on the hosted writer (${refused.slice(0, 60)})`);
+  const [{ n_all }] = await admin<{ n_all: number }[]>`SELECT count(*)::int AS n_all FROM query_log WHERE kind = 'action'`;
+  assert(n_all === 5, `…and the refused batches wrote nothing (${n_all})`);
   // The export join over what this store wrote: the cite of X links to the search.
   const [{ from_query }] = await admin<{ from_query: string | null }[]>`
     SELECT (SELECT s.query FROM query_log s WHERE s.kind='search' AND s.agent_id IS NOT DISTINCT FROM act.agent_id

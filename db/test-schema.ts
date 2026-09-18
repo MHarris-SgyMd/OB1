@@ -57,7 +57,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { SAMPLE_STATEMENT, TID_PROBE, buffersOf, createAssert, sampleStatementOf, seededRandom } from "./test-support.ts";
 import { markerAnswers } from "./bench-oracle.ts";
-import { armOf, attribute, citePointerOf, goldFromFixture, renderReport, summarise, toActionRow, toSearchRow, type ActionRow, type SearchRow } from "../evals/utilization.ts";
+import { agentLabel, armOf, attribute, citePointerOf, goldFromFixture, renderReport, summarise, toActionRow, toSearchRow, type ActionRow, type SearchRow } from "../evals/utilization.ts";
 import { ENTITY_TYPES, RELATIONS } from "../server-portable/entities.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -4398,6 +4398,16 @@ console.log("\n[39] Memory utilization over the query log: attribution, the cite
   const oddUncited = summarise(searches, [...actions, act(AG, 11, "new_tool_that_forgot", D)], 30);
   assert(oddUncited.overall.opened === 3 && oddUncited.unknownTools.get("new_tool_that_forgot") === 1, `an unknown plain tool on an uncited id is counted as opened (${oddUncited.overall.opened})`);
   assert(/WARN new_tool_that_forgot ×1/.test(renderReport(odd)), "…and the report warns by name");
+  // The by-agent table (two or more agents) names a row from the registry
+  // when the reader hands the names over, id prefix beside it; an id the
+  // registry does not know, and the anonymous bucket, keep their labels.
+  {
+    const named = renderReport(sum, new Map([[AG, "laptop"]]));
+    assert(new RegExp(`^laptop \\(${AG.slice(0, 8)}\\)\\s+\\d`, "m").test(named), "a by-agent row reads `label (id prefix)` when the registry names the id");
+    assert(/^\(anonymous\)\s+\d/m.test(named) && !new RegExp(`^${AG}\\s`, "m").test(named), "the anonymous bucket keeps its name, and the named id no longer prints bare");
+    assert(new RegExp(`^${AG}\\s+\\d`, "m").test(renderReport(sum)), "…while without names the id prints as itself");
+    assert(agentLabel("x", new Map()) === "x" && agentLabel("(anonymous)") === "(anonymous)", "agentLabel falls back to the key itself");
+  }
 
   // The database-row coercions the report script relies on, driven here
   // without a database (third review pass: the script itself runs in no CI
@@ -4405,12 +4415,12 @@ console.log("\n[39] Memory utilization over the query log: attribution, the cite
   // literal; the token estimate is whole or absent.
   const dbRow = (over: Partial<Parameters<typeof toSearchRow>[0]> = {}) => toSearchRow({
     id: "s9", agent_id: AG, logged_at: t(0), at_us: "1789816800000000", tool: "search_thoughts", query: "q",
-    match_count: 5, threshold: 0.30000001192092896, recency_weight: 0, result_ids: `{${A},${B}}`, chars: "1200", surviving: "2", returned_n: "2", ...over,
+    match_count: 5, threshold: 0.30000001192092896, recency_weight: 0, result_ids: `{${A},${B}}`, chars: "1200", surviving: "2", ...over,
   });
   const whole = dbRow();
   assert(whole.resultIds.join() === [A, B].join() && whole.resultTokens === 300 && whole.atUs === 1789816800000000, `a whole result set: ids parsed from the literal, chars/4 as tokens, at_us as a number (${JSON.stringify([whole.resultIds.length, whole.resultTokens, whole.atUs])})`);
   assert(dbRow({ surviving: "1" }).resultTokens === null, "one returned id since deleted → no estimate, not a partial one");
-  assert(dbRow({ chars: null, surviving: "0", returned_n: "0", result_ids: "{}" }).resultTokens === null, "nothing returned → no estimate");
+  assert(dbRow({ chars: null, surviving: "0", result_ids: "{}" }).resultTokens === null, "nothing returned → no estimate");
   assert(armOf(whole) === "search_thoughts k=5 thr=0.3 rw=0", `a real's float32 noise does not reach the arm name (${armOf(whole)})`);
   const actDb = toActionRow({ agent_id: null, logged_at: t(1), at_us: "1789816860000000", tool: "fetch", target_id: A });
   assert(actDb.agentId === null && actDb.atUs === 1789816860000000, "an action row's NULL agent and at_us survive the coercion");
@@ -4456,7 +4466,7 @@ console.log("\n[39] Memory utilization over the query log: attribution, the cite
   // reach 1 and the whole-set estimate holds (the reader counts distinct ids).
   const dup = summarise([search("d1", AG, 0, "d", [A, A, B], 120)], [act(AG, 1, "fetch", A), act(AG, 2, "fetch", B)], 30);
   assert(dup.overall.returned === 2 && dup.overall.utilization === 1, `duplicates collapse: returned 2, utilization 1 (${dup.overall.returned}, ${dup.overall.utilization})`);
-  assert(dbRow({ result_ids: `{${A},${A},${B}}`, surviving: "2", returned_n: "2" }).resultTokens === 300, "a database row with a duplicated id keeps its whole estimate when the reader's distinct count matches the survivors");
+  assert(dbRow({ result_ids: `{${A},${A},${B}}`, surviving: "2" }).resultTokens === 300, "a database row with a duplicated id keeps its whole estimate: the reader counts distinct ids and they match the survivors");
 
   // A log with actions but no cite-shaped tool anywhere reads as "unknown, not
   // zero use": either nothing has cited yet or the brain lacks 035 (fifth pass).

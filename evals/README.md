@@ -2730,7 +2730,8 @@ OB1_EXPORT_WINDOW_MIN=30   # the same attribution window as export-queries.ts
 ```
 
 prints, per arm (search tool + recorded arguments), per agent when the log
-holds more than one, and overall: ids
+holds more than one (named from the registry, `ob1_agents.label`, with the
+id's prefix beside it), and overall: ids
 returned, ids used (cited ∪ opened), **util** = used / returned, **use-rate** =
 searches with ≥ 1 use, the cited/opened split, and **tok/used** — approximate
 tokens returned per id used (the ids' content as stored now, chars / 4; a

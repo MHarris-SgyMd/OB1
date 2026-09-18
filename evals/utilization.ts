@@ -97,8 +97,6 @@ export type SearchDbRow = {
   chars: string | number | bigint | null;
   /** count of the returned ids still stored. */
   surviving: string | number | bigint;
-  /** cardinality(result_ids). */
-  returned_n: string | number | bigint;
 };
 
 export type ActionDbRow = {
@@ -111,15 +109,16 @@ export type ActionDbRow = {
 
 /**
  * A search row from the database → a SearchRow. The token estimate is whole or
- * absent: chars/4 when every DISTINCT returned id is still stored (`returned_n`
- * is the reader's count of distinct ids; `surviving` counts rows, which are
- * distinct by key), null when any has since been deleted (a partial sum would
- * read as a cheaper search than it was) or when nothing was returned. bigint
- * columns arrive as strings under Bun.
+ * absent: chars/4 when every DISTINCT returned id is still stored (the distinct
+ * count is taken here from the parsed ids — the one definition summarise()
+ * also uses; `surviving` counts rows, which are distinct by key), null when any
+ * has since been deleted (a partial sum would read as a cheaper search than it
+ * was) or when nothing was returned. bigint columns arrive as strings under Bun.
  */
 export function toSearchRow(r: SearchDbRow): SearchRow {
+  const resultIds = parsePgUuidArray(r.result_ids);
   const surviving = Number(r.surviving);
-  const returned = Number(r.returned_n);
+  const returned = new Set(resultIds).size;
   const whole = r.chars !== null && returned > 0 && surviving === returned;
   return {
     id: r.id,
@@ -131,7 +130,7 @@ export function toSearchRow(r: SearchDbRow): SearchRow {
     matchCount: r.match_count,
     threshold: r.threshold,
     recencyWeight: r.recency_weight,
-    resultIds: parsePgUuidArray(r.result_ids),
+    resultIds,
     resultTokens: whole ? Math.round(Number(r.chars) / 4) : null,
   };
 }
@@ -180,7 +179,6 @@ export type Attribution = {
   unknownTools: Map<string, number>;
   /** Action rows whose tool is `<writer>/<pointer>`, attributed or not — zero with actions present is a schema smell (035 absent). */
   citeRows: number;
-  /** search id → distinct ids returned; built once here, read by summarise. */
 };
 
 /**
@@ -385,8 +383,19 @@ export function summarise(
 const pct = (x: number | null): string => (x === null ? "  n/a" : `${(100 * x).toFixed(0).padStart(3)}%`);
 const num = (x: number | null, digits = 0): string => (x === null ? "n/a" : x.toFixed(digits));
 
+/**
+ * The by-agent row's label: the registry's name for the id when the reader
+ * supplied one (`ob1_agents.label`, migration 010, mirrors the key name in
+ * MCP_ACCESS_KEYS) with the id's first eight characters beside it, else the id
+ * itself; the anonymous bucket keeps its name.
+ */
+export function agentLabel(agent: string, names?: Map<string, string>): string {
+  const name = names?.get(agent);
+  return name ? `${name} (${agent.slice(0, 8)})` : agent;
+}
+
 /** The report as text. Says "n/a" where a number would be a lie. */
-export function renderReport(sum: Summary): string {
+export function renderReport(sum: Summary, agentNames?: Map<string, string>): string {
   const lines: string[] = [];
   if (sum.actionsTotal === 0) {
     lines.push(
@@ -412,7 +421,7 @@ export function renderReport(sum: Summary): string {
   lines.push(row("all", sum.overall));
   if (sum.agents.size > 1) {
     lines.push("", "by agent");
-    for (const [ag, st] of [...sum.agents.entries()].sort((a, b) => b[1].searches - a[1].searches)) lines.push(row(ag, st));
+    for (const [ag, st] of [...sum.agents.entries()].sort((a, b) => b[1].searches - a[1].searches)) lines.push(row(agentLabel(ag, agentNames), st));
   }
   lines.push(
     "",
