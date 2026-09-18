@@ -3019,7 +3019,7 @@ Qdrant's rows in this subsection come from this run, not the SMD-1037 scale
 tables above, and differ from them: here its 10M on-disk index reached a built
 state (7.3 ms end-to-end, 26 min build) where the table above caught it
 mid-indexing (1.6 s, `≥30 min †`). Same store, measured at different points — not
-a contradiction; and change 82's verdict rests on the resolve, not on which
+a contradiction; and change 83's verdict rests on the resolve, not on which
 Qdrant latency you read.
 
 **Verdict — SMD-1037's holds, now for a reason it names.** The one part of the

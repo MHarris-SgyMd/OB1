@@ -20,6 +20,9 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { Hono } from "hono";
 import { StreamableHTTPTransport } from "@hono/mcp";
+// Deno reads the SDK's types through the extensionless subpath: its exports map
+// names them `./dist/esm/*.d.ts`, unreachable from `.js` (FORK.md change 84).
+// @ts-types="@modelcontextprotocol/sdk/server/mcp"
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { buildServer } from "./server.ts";
 import { authenticateRequest, type Scope } from "../_shared/auth.ts";
@@ -36,7 +39,15 @@ const SESSION_TTL_MS = 30 * 60 * 1000;
 function pruneExpiredSessions(): void {
   const cutoff = Date.now() - SESSION_TTL_MS;
   for (const [id, s] of sessions) {
-    if (s.lastSeen < cutoff) sessions.delete(id);
+    if (s.lastSeen < cutoff) {
+      sessions.delete(id);
+      // A dropped session is closed, not left to the collector: close() ends
+      // the transport and, through its onclose, tells the server it has no
+      // transport (ob1-fork, SMD-1607, FORK.md change 83). Nothing in close()
+      // throws today; a rejection here must still not become an unhandled one,
+      // which under Deno ends the isolate.
+      s.transport.close().catch(() => {});
+    }
   }
 }
 
@@ -79,20 +90,6 @@ app.all("*", async (c) => {
   }
 
   pruneExpiredSessions();
-
-  // Patch missing Accept header for Claude Desktop compatibility (PR #94).
-  if (!c.req.header("accept")?.includes("text/event-stream")) {
-    const headers = new Headers(c.req.raw.headers);
-    headers.set("Accept", "application/json, text/event-stream");
-    const patched = new Request(c.req.raw.url, {
-      method: c.req.raw.method,
-      headers,
-      body: c.req.raw.body,
-      // @ts-ignore -- duplex required for streaming body in Deno
-      duplex: "half",
-    });
-    Object.defineProperty(c.req, "raw", { value: patched, writable: true });
-  }
 
   // ── Session lookup or mint ───────────────────────────────────────────────
   const sid = c.req.header("mcp-session-id") || undefined;
