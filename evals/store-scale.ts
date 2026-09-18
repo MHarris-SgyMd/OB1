@@ -8,9 +8,11 @@
  * decisive: "a latency gap at a row count within a stated multiple of the largest
  * real deployment ... measured end to end: in the two-store shape every vector
  * read is an external ANN query PLUS a Postgres resolve of the returned ids to
- * rows." So Qdrant's number here is its ANN search *plus* a Postgres primary-key
- * fetch of the ids it returns — the architectural cost that does not shrink with
- * tuning.
+ * rows." So each external's end-to-end number here is its ANN search *plus* a
+ * Postgres primary-key fetch of the ids it returns — the architectural cost that
+ * does not shrink with tuning. Qdrant pays that over a network; embedded LanceDB
+ * (SMD-1662) pays only the Postgres resolve, so the gap between them at scale is
+ * the network hop, isolated from the resolve that neither escapes.
  *
  * The corpus is synthetic: deterministic random unit vectors (db/test-support.ts'
  * `seededRandom`, the generator db/bench-hnsw.ts seeds SMD-1018 with), the SAME
@@ -34,17 +36,23 @@
  * build defaults to serial (`OB1_STORE_BUILD_WORKERS=0` for diskann);
  * `OB1_STORE_BUILD_TIMEOUT_MS` bounds the slow serial build so a run records the
  * failure instead of hanging; `OB1_STORE_QDRANT_ONDISK=1` keeps a 10M Qdrant index
- * mmap'd so it can be searched beside Postgres rather than swapped. Image overrides:
- * `OB1_STORE_PG_IMAGE`, `OB1_STORE_QDRANT_IMAGE`; ingest batch: `OB1_STORE_QDRANT_BATCH`.
+ * mmap'd so it can be searched beside Postgres rather than swapped. LanceDB is
+ * embedded and on-disk (memory-mapped Lance files), so it needs no container and
+ * no such flag — it tolerates a 10M corpus the in-RAM Qdrant collection cannot.
+ * Image overrides: `OB1_STORE_PG_IMAGE`, `OB1_STORE_QDRANT_IMAGE`; ingest batch:
+ * `OB1_STORE_QDRANT_BATCH` / `OB1_STORE_LANCE_BATCH`. `OB1_STORE_EXTERNAL`
+ * (default `qdrant,lance`) selects external engines; `OB1_STORE_LANCE_INDEXES`
+ * (default `ivfflat,hnswsq`) picks LanceDB's index kinds.
  *
  * Starts and tears down its own timescaledb-ha + qdrant containers per scale (a
- * kept database holds one corpus). Touches nothing in the product.
+ * kept database holds one corpus); LanceDB uses a temp dataset directory removed
+ * on stop. Touches nothing in the product.
  */
 
 import { seededRandom } from "../db/test-support.ts";
 import {
-  PgEngine, QdrantEngine, dedupTopK, recallAt, nowMs,
-  type Point, type Filter, type Store, type PgIndexKind,
+  PgEngine, externalEngines, dedupTopK, recallAt, nowMs,
+  type Point, type Filter, type Store, type ExternalEngine, type PgIndexKind,
 } from "./store-backends.ts";
 
 const DIM = Number(process.env.OB1_STORE_DIM ?? 1024);
@@ -113,16 +121,29 @@ for (const N of SCALES) {
   const arms: { name: string; f: Filter }[] = [{ name: "unfiltered", f: null }, ...TIERS.map((t) => ({ name: t.key, f: { key: "tiers" as const, value: t.key } }))];
   const queries = queryVectors(QSEED);
   const pg = new PgEngine(DIM, `scale${N}`);
-  const qd = new QdrantEngine(DIM, `scale${N}`);
+  const externals = externalEngines(DIM, `scale${N}`);
   const rows: Row[] = [];
+  const failures: string[] = [];
   console.log(`\n══════ scale ${N.toLocaleString()} rows, ${DIM}-dim ══════`);
   try {
-    await Promise.all([pg.start(), qd.start()]);
-    console.log("  loading (streamed, identical vectors into both stores)…");
+    await Promise.all([pg.start(), ...externals.map((e) => e.start())]);
+    console.log(`  loading (streamed, identical vectors into pg + ${externals.map((e) => e.name).join(", ")})…`);
     const pgLoad = await pg.load(gen(N, SEED));
     console.log(`  pg load ${(pgLoad / 1000).toFixed(1)}s`);
-    const qdLoad = await qd.load(gen(N, SEED));
-    console.log(`  qdrant load ${(qdLoad / 1000).toFixed(1)}s, index ${(qd.stat.buildMs / 1000).toFixed(1)}s, ${(qd.stat.indexBytes / 1e6).toFixed(0)}MB`);
+    // Load each external tolerantly (streamed from the same seed → identical
+    // vectors); one that fails to load/build is dropped with a note.
+    const liveExternals: ExternalEngine[] = [];
+    for (const e of externals) {
+      try {
+        await e.load(gen(N, SEED));
+        liveExternals.push(e);
+        console.log(`  ${e.name} load ${(e.stat.loadMs / 1000).toFixed(1)}s, index ${(e.stat.buildMs / 1000).toFixed(1)}s, ${(e.stat.indexBytes / 1e6).toFixed(0)}MB`);
+      } catch (err) {
+        const msg = (err as Error).message.slice(0, 90);
+        console.log(`  ${e.name} load FAILED at ${N.toLocaleString()} — ${msg}`);
+        failures.push(`${e.name} load: ${msg}`);
+      }
+    }
 
     // Exact oracle: unfiltered is one full scan per query; each tier scans only
     // its own (far smaller) rows. Computed before the vector plan is forced.
@@ -134,31 +155,42 @@ for (const N of SCALES) {
     }
     await pg.forcePlanVectorIndex();
     const tableBytes = await pg.tableBytes();
-    const failures: string[] = [];
 
-    // Qdrant first (external), while the Postgres backend is healthy for the
+    // External stores first, while the Postgres backend is healthy for the
     // id→row resolve. pgvectorscale's DiskANN build crashed the backend at 1M
-    // rows; measuring the external engine before the risky in-engine build means
-    // that crash costs only DiskANN's row, not Qdrant's.
-    try {
-      const qcells = await measure(qd, queries, exact, arms);
-      const e2e: number[] = [];
-      for (let qi = 0; qi < queries.length; qi++) {
-        const t0 = nowMs();
-        const refs = dedupTopK(await qd.search(queries[qi], FETCH, null), K);
-        const list = refs.map((r) => `'${r.replace(/'/g, "''")}'`).join(",") || "''";
-        await pg.raw(`SELECT ref FROM points WHERE ref IN (${list})`);
-        e2e.push(nowMs() - t0);
+    // rows; measuring every external before the risky in-engine build means that
+    // crash costs only DiskANN's row. Each external's end-to-end p95 is its ANN
+    // search PLUS the Postgres primary-key resolve of the ids it returns — the
+    // architectural cost. For embedded LanceDB there is no network hop, so its
+    // end-to-end is the resolve cost with the network removed (SMD-1662).
+    for (const ext of liveExternals) {
+      try {
+        const efforts: readonly [string, number | undefined][] = "setEffort" in ext
+          ? [["default", undefined], [`effort=${EFFORT}`, EFFORT]]
+          : [["default", undefined]];
+        for (const [label, eff] of efforts) {
+          // measure() applies this row's effort, so the e2e loop below reads the
+          // store at the same effort — each row's end-to-end is its own.
+          const cells = await measure(ext, queries, exact, arms, eff);
+          const e2e: number[] = [];
+          for (let qi = 0; qi < queries.length; qi++) {
+            const t0 = nowMs();
+            const refs = dedupTopK(await ext.search(queries[qi], FETCH, null), K);
+            const list = refs.map((r) => `'${r.replace(/'/g, "''")}'`).join(",") || "''";
+            await pg.raw(`SELECT ref FROM points WHERE ref IN (${list})`);
+            e2e.push(nowMs() - t0);
+          }
+          rows.push({ store: ext.name, effort: label, buildS: (ext.stat.buildMs / 1000).toFixed(1) + "s", bytes: ext.stat.indexBytes, cells, e2e95: pct(e2e, 95), note: ext.stat.note });
+        }
+      } catch (e) {
+        // A search timed out (seen for in-RAM Qdrant at 10M in the 14 GB VM):
+        // keep the build/footprint already measured and let the rest still land.
+        const msg = (e as Error).message.slice(0, 90);
+        console.log(`  ${ext.name} measure FAILED at ${N.toLocaleString()} — ${msg}`);
+        failures.push(`${ext.name} search: ${msg}`);
+        const nanCells = new Map(arms.map((a) => [a.name, { recall: NaN, p50: NaN, p95: NaN }]));
+        rows.push({ store: ext.name, effort: "default", buildS: (ext.stat.buildMs / 1000).toFixed(1) + "s", bytes: ext.stat.indexBytes, cells: nanCells, note: ext.stat.note });
       }
-      rows.push({ store: qd.name, effort: "default", buildS: (qd.stat.buildMs / 1000).toFixed(1) + "s", bytes: qd.stat.indexBytes, cells: qcells, e2e95: pct(e2e, 95), note: qd.stat.note });
-    } catch (e) {
-      // Qdrant's search timed out at 10M in the 14 GB VM: keep its build/footprint
-      // (already measured) and let the pg-side numbers still land.
-      const msg = (e as Error).message.slice(0, 90);
-      console.log(`  qdrant measure FAILED at ${N.toLocaleString()} — ${msg}`);
-      failures.push(`qdrant search: ${msg}`);
-      const nanCells = new Map(arms.map((a) => [a.name, { recall: NaN, p50: NaN, p95: NaN }]));
-      rows.push({ store: qd.name, effort: "default", buildS: (qd.stat.buildMs / 1000).toFixed(1) + "s", bytes: qd.stat.indexBytes, cells: nanCells, note: qd.stat.note });
     }
 
     // Postgres indexes, DiskANN last. A backend crash during a build poisons the
@@ -184,13 +216,13 @@ for (const N of SCALES) {
       }
     }
 
-    report(N, rows, arms, tableBytes, pgLoad, qdLoad, failures);
+    report(N, rows, arms, tableBytes, pgLoad, liveExternals, failures);
   } finally {
-    await Promise.all([pg.stop(), qd.stop()]);
+    await Promise.all([pg.stop(), ...externals.map((e) => e.stop())]);
   }
 }
 
-function report(N: number, rows: Row[], arms: { name: string; f: Filter }[], tableBytes: number, pgLoad: number, qdLoad: number, failures: string[] = []): void {
+function report(N: number, rows: Row[], arms: { name: string; f: Filter }[], tableBytes: number, pgLoad: number, externals: ExternalEngine[], failures: string[] = []): void {
   console.log(`\n### Recall@${K} vs exact — ${N.toLocaleString()} rows, ${DIM}-dim\n`);
   const head = ["store", "effort", ...arms.map((a) => a.name)];
   console.log("| " + head.join(" | ") + " |\n| " + head.map(() => "---").join(" | ") + " |");
@@ -211,7 +243,8 @@ function report(N: number, rows: Row[], arms: { name: string; f: Filter }[], tab
   console.log("| --- | ---: | ---: |");
   const seen = new Set<string>();
   for (const r of rows) { if (seen.has(r.store)) continue; seen.add(r.store); console.log(`| ${r.store} | ${r.buildS} | ${(r.bytes / 1e6).toFixed(0)} MB |`); }
-  console.log(`\n  points table (no vector index): ${(tableBytes / 1e6).toFixed(0)} MB · pg load ${(pgLoad / 1000).toFixed(1)}s · qdrant load ${(qdLoad / 1000).toFixed(1)}s`);
+  const loads = externals.map((e) => `${e.name} load ${(e.stat.loadMs / 1000).toFixed(1)}s`).join(" · ");
+  console.log(`\n  points table (no vector index): ${(tableBytes / 1e6).toFixed(0)} MB · pg load ${(pgLoad / 1000).toFixed(1)}s · ${loads}`);
   if (failures.length) console.log(`  build failures: ${failures.join("; ")}`);
   for (const r of rows) if (r.note) console.log(`  note (${r.store}): ${r.note}`);
   console.log();

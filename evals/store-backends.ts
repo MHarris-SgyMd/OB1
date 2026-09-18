@@ -33,6 +33,26 @@
  */
 
 import { SQL } from "bun";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type * as lancedb from "@lancedb/lancedb";
+import type * as arrow from "apache-arrow";
+
+// LanceDB's native binding is loaded lazily — only when a LanceEngine is started
+// — so a run that uses only Qdrant or only Postgres is unaffected on a platform
+// where the native module is unavailable (the top imports above are `import type`
+// and erase at runtime). The version is pinned exactly in package.json so the
+// index defaults this measurement relies on — chiefly that a `where` filter is
+// applied *before* the vector search (prefilter), not after — cannot drift.
+let _lance: { lancedb: typeof lancedb; arrow: typeof arrow } | null = null;
+async function lanceModules(): Promise<{ lancedb: typeof lancedb; arrow: typeof arrow }> {
+  if (!_lance) {
+    const [l, a] = await Promise.all([import("@lancedb/lancedb"), import("apache-arrow")]);
+    _lance = { lancedb: l, arrow: a };
+  }
+  return _lance;
+}
 
 export type Point = { ref: string; labels: string[]; tiers: string[]; embedding: number[] };
 export type Filter = { key: "labels" | "tiers"; value: string } | null;
@@ -45,6 +65,34 @@ export interface Store {
   readonly stat: BuildStat;
   /** Median-latency-friendly: returns up to `n` point refs in rank order. */
   search(vec: number[], n: number, filter: Filter): Promise<string[]>;
+}
+
+/**
+ * An external engine that owns its own lifecycle: started, loaded (which also
+ * builds its index and fills `stat`), searched, stopped. Qdrant (a separate
+ * server) and LanceDB (embedded, in-process) both implement it, so the drivers
+ * iterate external stores uniformly — every one scored against the SAME pg
+ * exact-cosine oracle, its returned ids resolved to rows in Postgres.
+ */
+export interface ExternalEngine extends Store {
+  start(): Promise<void>;
+  load(points: Iterable<Point>, batchSize?: number): Promise<number>;
+  /** Raise the recall/latency effort knob, if the engine has one. */
+  setEffort?(ef: number): Promise<void>;
+  stop(): Promise<void>;
+}
+
+/** On-disk size of a host path in bytes (LanceDB's dataset lives on the host, not
+ *  in a container). `-sk` (1 KiB blocks) is portable — BSD/macOS `du` has no `-b`. */
+async function hostDuBytes(path: string): Promise<number> {
+  try {
+    const proc = Bun.spawn(["du", "-sk", path], { stdout: "pipe", stderr: "ignore" });
+    const out = await new Response(proc.stdout).text();
+    await proc.exited;
+    return (Number(out.trim().split(/\s+/)[0]) || 0) * 1024;
+  } catch {
+    return 0;
+  }
 }
 
 // ── docker helpers ───────────────────────────────────────────────────────────
@@ -295,7 +343,7 @@ export class PgStore implements Store {
 
 const QDRANT_IMAGE = process.env.OB1_STORE_QDRANT_IMAGE ?? "qdrant/qdrant:latest";
 
-export class QdrantEngine implements Store {
+export class QdrantEngine implements ExternalEngine {
   readonly kind = "external" as const;
   readonly name = "qdrant";
   stat: BuildStat = { loadMs: 0, buildMs: 0, indexBytes: 0 };
@@ -403,6 +451,165 @@ export class QdrantEngine implements Store {
   async stop(): Promise<void> {
     await docker(["rm", "-f", this.containerName], { allowFail: true });
   }
+}
+
+// ── LanceDB engine (embedded, in-process — no container) ─────────────────────
+
+export type LanceIndexKind = "ivfflat" | "hnswsq";
+
+/**
+ * LanceDB run embedded: an in-process ANN over local Lance/Arrow files, with no
+ * second server and no network round trip — the part of the two-store cost that
+ * counted against Qdrant (SMD-1037). It is still a *second store*: the ids it
+ * returns are resolved to rows in Postgres exactly as Qdrant's are, and it must
+ * be kept consistent with Postgres. So measuring it isolates the network hop
+ * (removed here) from the architectural id→row resolve and consistency tax
+ * (unchanged) — SMD-1662.
+ *
+ * LanceDB has no unquantized HNSW. IVF_FLAT is its unquantized index — the fair
+ * recall-vs-exact row, and the closest analogue to pgvector's own IVFFlat
+ * control; HNSW_SQ is its scalar-quantized graph, what a real deployment would
+ * ship, whose recall is a quantization trade (flagged as such in the report).
+ *
+ * It PREFILTERS by default: the `where` predicate is applied before the vector
+ * search, so a selective filter should not cost recall — the same shape
+ * migration 014 gives `match_thoughts` in-engine, and unlike a bare
+ * postfiltering HNSW (the SMD-968 hazard). One LanceEngine owns one index kind
+ * and its own dataset directory, loaded independently, so two kinds are two
+ * stores scored side by side (mirroring how each Qdrant collection is one store).
+ */
+export class LanceEngine implements ExternalEngine {
+  readonly kind = "external" as const;
+  readonly name: string;
+  stat: BuildStat = { loadMs: 0, buildMs: 0, indexBytes: 0 };
+  private db!: lancedb.Connection;
+  private tbl!: lancedb.Table;
+  private L!: typeof lancedb;
+  private A!: typeof arrow;
+  private dir = "";
+  private effort = 0;
+  constructor(
+    private readonly dim: number,
+    private readonly indexKind: LanceIndexKind = "ivfflat",
+    private readonly tag = String(process.pid),
+  ) {
+    this.name = `lancedb-${indexKind}`;
+  }
+
+  /** Explicit Arrow schema: an empty labels/tiers list can't be type-inferred, so it isn't optional. */
+  private schema(): arrow.Schema {
+    const A = this.A;
+    const listUtf8 = () => new A.List(new A.Field("item", new A.Utf8(), true));
+    return new A.Schema([
+      new A.Field("id", new A.Int64(), false),
+      new A.Field("ref", new A.Utf8(), false),
+      new A.Field("labels", listUtf8(), false),
+      new A.Field("tiers", listUtf8(), false),
+      new A.Field("vector", new A.FixedSizeList(this.dim, new A.Field("item", new A.Float32(), true)), false),
+    ]);
+  }
+
+  async start(): Promise<void> {
+    const m = await lanceModules();
+    this.L = m.lancedb;
+    this.A = m.arrow;
+    // A fresh dataset dir under the OS temp root — never inside the repo. mkdtemp
+    // adds a random suffix, so two kinds sharing a tag never collide.
+    this.dir = await mkdtemp(join(tmpdir(), `ob1-store-lance-${this.tag}-`));
+    this.db = await this.L.connect(this.dir);
+    this.tbl = await this.db.createEmptyTable("points", this.schema());
+  }
+
+  async load(points: Iterable<Point>, batchSize = Number(process.env.OB1_STORE_LANCE_BATCH ?? 4096)): Promise<number> {
+    const t0 = nowMs();
+    let batch: Record<string, unknown>[] = [];
+    let id = 0;
+    const flush = async () => {
+      if (!batch.length) return;
+      await this.tbl.add(batch);
+      batch = [];
+    };
+    for (const p of points) {
+      id++;
+      batch.push({ id, ref: p.ref, labels: p.labels, tiers: p.tiers, vector: p.embedding });
+      if (batch.length >= batchSize) await flush();
+    }
+    await flush();
+    this.stat.loadMs = nowMs() - t0;
+    // Build the vector index (timed). numPartitions ≈ √rows mirrors the IVFFlat
+    // control; HNSW_SQ takes cosine and its own graph defaults. distanceType
+    // must match the search's — cosine both places, so scores match the oracle.
+    const tb = nowMs();
+    const numPartitions = Math.max(1, Math.round(Math.sqrt(id)));
+    const config = this.indexKind === "ivfflat"
+      ? this.L.Index.ivfFlat({ distanceType: "cosine", numPartitions })
+      : this.L.Index.hnswSq({ distanceType: "cosine" });
+    await this.tbl.createIndex("vector", { config });
+    this.stat.buildMs = nowMs() - tb;
+    // Footprint is the whole on-disk dataset (data + index share the directory;
+    // Lance has no isolable "index size"), reported like Qdrant's collection du.
+    this.stat.indexBytes = await hostDuBytes(this.dir);
+    return this.stat.loadMs;
+  }
+
+  /**
+   * LanceDB's recall/latency levers: `nprobes` (IVF partitions probed) and
+   * `refineFactor` (rescore the shortlist at full precision — the lever that
+   * matters for the quantized HNSW_SQ), plus `ef` (graph search breadth) for the
+   * HNSW kind. Stored and applied on every search query.
+   */
+  async setEffort(ef: number): Promise<void> {
+    this.effort = ef;
+  }
+
+  async search(vec: number[], n: number, filter: Filter): Promise<string[]> {
+    // Select only ref + the score column (never the vector — Qdrant returns
+    // payload without vectors, so pulling 1024-dim rows back would tax LanceDB's
+    // latency unfairly). Naming `_distance` explicitly also avoids Lance's
+    // scoring-autoprojection deprecation warning that a bare `select(["ref"])`
+    // floods the run with.
+    let q = this.tbl.query().nearestTo(vec).distanceType("cosine").select(["ref", "_distance"]).limit(n);
+    // `where` alone prefilters (LanceDB's default — the filter is applied before
+    // the vector search), which is the whole methodological point: it is the
+    // migration-014 shape, not a bare HNSW's postfilter. We deliberately never
+    // call `.postfilter()`; the pinned version freezes this default.
+    if (filter) q = q.where(`array_has(${filter.key}, '${filter.value.replace(/'/g, "''")}')`);
+    if (this.effort > 0) {
+      q = q.nprobes(this.effort);
+      // refineFactor/ef are the quantized graph's rescore + search-breadth
+      // levers; on the unquantized IVF_FLAT nprobes alone is the knob.
+      if (this.indexKind === "hnswsq") q = q.ef(this.effort).refineFactor(Math.max(1, Math.round(this.effort / n)));
+    }
+    const rows = await q.toArray();
+    return rows.map((r: { ref: string }) => String(r.ref));
+  }
+
+  async stop(): Promise<void> {
+    try {
+      this.tbl?.close?.();
+      this.db?.close?.();
+    } catch {}
+    if (this.dir) await rm(this.dir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+/**
+ * The external engines a run measures, from `OB1_STORE_EXTERNAL` (default
+ * `qdrant,lance`). `lance` expands to one engine per `OB1_STORE_LANCE_INDEXES`
+ * kind (default `ivfflat,hnswsq`), since each LanceDB index kind is its own
+ * loaded store. A run can pin to one engine (`OB1_STORE_EXTERNAL=lance`).
+ */
+export function externalEngines(dim: number, tag = String(process.pid)): ExternalEngine[] {
+  const names = (process.env.OB1_STORE_EXTERNAL ?? "qdrant,lance").split(",").map((s) => s.trim()).filter(Boolean);
+  const lanceKinds = (process.env.OB1_STORE_LANCE_INDEXES ?? "ivfflat,hnswsq")
+    .split(",").map((s) => s.trim()).filter(Boolean) as LanceIndexKind[];
+  const out: ExternalEngine[] = [];
+  for (const n of names) {
+    if (n === "qdrant") out.push(new QdrantEngine(dim, tag));
+    else if (n === "lance") for (const k of lanceKinds) out.push(new LanceEngine(dim, k, tag));
+    else throw new Error(`OB1_STORE_EXTERNAL: unknown engine ${JSON.stringify(n)} (known: qdrant, lance)`);
+  }
+  return out;
 }
 
 // ── point → ref dedup (match_thoughts' MAX rule, applied to any store's output) ─
