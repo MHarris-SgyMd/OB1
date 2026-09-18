@@ -57,6 +57,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { SAMPLE_STATEMENT, TID_PROBE, buffersOf, createAssert, sampleStatementOf, seededRandom } from "./test-support.ts";
 import { markerAnswers } from "./bench-oracle.ts";
+import { attribute, renderReport, summarise, type ActionRow, type SearchRow } from "../evals/utilization.ts";
 import { ENTITY_TYPES, RELATIONS } from "../server-portable/entities.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -4301,6 +4302,81 @@ console.log("\n[38] Migration 039: the walk's index is half precision — the sw
   // and PGlite refuses the catalog write ("tuple concurrently updated") where
   // a server does not.
   await db.exec(`DELETE FROM thoughts`);
+}
+
+console.log("\n[39] Memory utilization over the query log: attribution, the cited/opened split, the rates, and what the report refuses to print (SMD-1719, evals/utilization.ts)");
+{
+  // No database: the pure module over hand-made rows. The fixture is one agent
+  // (AG) who searches twice, an anonymous caller who searches once, and the
+  // touches that follow. Times are minutes on one clock so the window is exact.
+  const t = (min: number) => new Date(Date.UTC(2026, 8, 18, 12, min)).toISOString();
+  const A = "aaaaaaaa-0000-4000-8000-000000000001";
+  const B = "aaaaaaaa-0000-4000-8000-000000000002";
+  const C = "aaaaaaaa-0000-4000-8000-000000000003";
+  const D = "aaaaaaaa-0000-4000-8000-000000000004";
+  const AG = "99999999-9999-4999-8999-999999999999";
+  const search = (id: string, agentId: string | null, min: number, query: string, ids: string[], tokens: number | null, tool = "search_thoughts"): SearchRow =>
+    ({ id, agentId, loggedAt: t(min), tool, query, matchCount: 5, threshold: 0, recencyWeight: 0, resultIds: ids, resultTokens: tokens });
+  const act = (agentId: string | null, min: number, tool: string, targetId: string): ActionRow => ({ agentId, loggedAt: t(min), tool, targetId });
+
+  const searches: SearchRow[] = [
+    search("s1", AG, 0, "first", [A, B, C], 300),   // AG's first search: A B C returned, ~300 tokens
+    search("s2", AG, 10, "second", [C, D], 100),    // AG's second: C D
+    search("s3", null, 0, "anon", [A, B], null),    // anonymous: A B, no token estimate
+  ];
+  const actions: ActionRow[] = [
+    act(AG, 2, "fetch", A),                 // opened A → s1
+    act(AG, 3, "capture_thought", B),       // cited B → s1
+    act(AG, 12, "capture_thought", C),      // cited C → s2 (most recent prior search returning C, not s1)
+    act(AG, 50, "fetch", D),                // 40 min after s2 → outside a 30-min window → unattributed
+    act(null, 1, "fetch", A),               // anonymous fetch of A → s3, never AG's s1 (NULL agent is its own bucket)
+    act(AG, 4, "delete_thought", "aaaaaaaa-0000-4000-8000-00000000ffff"), // an id no search returned → unattributed
+  ];
+
+  const attr = attribute(searches, actions, 30);
+  const s1 = attr.bySearch.get("s1")!;
+  const s2 = attr.bySearch.get("s2")!;
+  const s3 = attr.bySearch.get("s3")!;
+  assert([...s1.used].sort().join() === [A, B].join() && s1.opened.has(A) && s1.cited.has(B) && !s1.cited.has(A), "s1: A opened, B cited — the tool column splits the two kinds of use");
+  assert([...s2.used].join() === C && s2.cited.has(C) && !s1.used.has(C), "a cite of C goes to the MOST RECENT prior search that returned it (s2), not the older s1");
+  assert([...s3.used].join() === A && s3.opened.has(A), "the anonymous fetch attributes to the anonymous search");
+  assert(s3.used.size === 1 && s1.used.size === 2 && !s1.used.has(D), "…and a NULL agent is its own bucket: AG's search did not absorb the anonymous touch, nor the anonymous search AG's");
+  assert(attr.unattributed.length === 2 && attr.unattributed.some((a) => a.targetId === D) && attr.unattributed.some((a) => a.tool === "delete_thought"),
+    `a touch 40 min after its search, and a touch of an id no search returned, attribute to nothing and are counted (${attr.unattributed.length})`);
+
+  const sum = summarise(searches, actions, 30);
+  assert(sum.overall.searches === 3 && sum.overall.returned === 7 && sum.overall.used === 4, `overall: 3 searches, 7 ids returned, 4 used (${sum.overall.returned}, ${sum.overall.used})`);
+  assert(Math.abs((sum.overall.utilization ?? 0) - 4 / 7) < 1e-9, `utilization = used / returned = 4/7 (${sum.overall.utilization})`);
+  assert(sum.overall.useRate === 1, "every search had at least one use → use rate 1");
+  assert(sum.overall.cited === 2 && sum.overall.opened === 2, `cited 2, opened 2 (${sum.overall.cited}, ${sum.overall.opened})`);
+  assert(sum.actionsTotal === 6 && sum.unattributed === 2, "the report carries the action count and how many attributed to nothing");
+  // Tokens per used id is computed only over searches that carry an estimate:
+  // s1 (300 tokens, 2 used) and s2 (100 tokens, 1 used) → 400 / 3; s3 has none.
+  assert(Math.abs((sum.overall.tokensPerUsed ?? 0) - 400 / 3) < 1e-9 && sum.overall.searchesWithTokens === 2, `tokens per used id over the searches with an estimate (${sum.overall.tokensPerUsed})`);
+  // Per arm: the fixture is one arm; per agent: AG and (anonymous).
+  assert(sum.arms.size === 1 && [...sum.arms.keys()][0] === "search_thoughts k=5 thr=0 rw=0", `one arm, named from the row's tool and arguments (${[...sum.arms.keys()][0]})`);
+  assert(sum.agents.get(AG)?.searches === 2 && sum.agents.get("(anonymous)")?.searches === 1, "per-agent rows: AG's two searches and the anonymous one");
+
+  // The mutant this section is for: drop the cite rows (the SMD-1719 server
+  // change) and the number moves — utilization falls to the opened-only 2/7 and
+  // cited reads 0. A report that did not move here would not be measuring cites.
+  const noCites = summarise(searches, actions.filter((a) => a.tool !== "capture_thought"), 30);
+  assert(noCites.overall.cited === 0 && Math.abs((noCites.overall.utilization ?? 0) - 2 / 7) < 1e-9, `without the cite rows: cited 0, utilization 2/7 (${noCites.overall.utilization}) — the cites are what the number measures`);
+
+  // Gold: a hand-labelled map says s1's relevant id was C (never used) and s2's
+  // was C (used). Ignore rate over searches whose results held a gold id: 1 of 2.
+  const gold = new Map<string, Set<string>>([["first", new Set([C])], ["second", new Set([C])]]);
+  const withGold = summarise(searches, actions, 30, gold);
+  assert(withGold.overall.gold?.withGold === 2 && withGold.overall.gold?.ignored === 1 && withGold.overall.gold?.ignoreRate === 0.5,
+    `ignore rate: of 2 searches that returned a gold id, 1 used none of them (${JSON.stringify(withGold.overall.gold)})`);
+
+  // What the report refuses to print: with no action rows at all it says n/a
+  // and asks whether the log is on, rather than 0% over an empty join.
+  const none = renderReport(summarise(searches, [], 30));
+  assert(/utilization: n\/a/.test(none) && /NO action rows/.test(none) && !/0%/.test(none), "no action rows → 'n/a', not 0%");
+  const full = renderReport(sum);
+  assert(/all\s+3\s+7\s+4\s+57%/.test(full) && /2 attributed to no search/.test(full), `the rendered table carries the overall row and the unattributed count (${full.split("\n").find((l) => l.startsWith("all"))})`);
+  assert(/by agent/.test(full) && /\(anonymous\)/.test(full), "two agents → a by-agent block naming the anonymous bucket");
 }
 
 report();

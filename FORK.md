@@ -68,14 +68,14 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Eighty-six numbered changes on top of the pin. Seven fix defects found in an
+Eighty-seven numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
 data layer (Phase 2). Seven (changes 31, 53, 55, 59, 79, 82, and 86) ship no runtime change at
 all: each is a measurement that decided against building something.
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–86 are the numbered `###` sections** further down, which is
+sections. Changes **18–87 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -13735,6 +13735,87 @@ three evals defined it away by racing single stores at the whole job. Unmeasured
 (SMD-1707).
 
 **Upstream status:** not applicable — the store comparison is this fork's eval.
+
+### 87. A capture that cites a returned id is logged as a use of it, and `eval-utilization.ts` reads the query log for the layer every other number here skips — did the caller use what came back (SMD-1719)
+
+Every retrieval number in this file asks whether the right rows came back.
+MERIT (arXiv 2609.05441, September 2026) measured the next layer — whether a
+retrieved fact changed what the agent did — and found agents ignore 45–53% of
+correctly retrieved facts, even under full replay; MemoryArena found models
+near-perfect on LoCoMo fall to 40–60% when later subtasks depend on earlier
+ones. The evaluation stack the literature now asks for is four layers: evidence
+retrieval, evidence use, task outcome, cost. The fork had the first (every
+`evals/` harness) and the fourth (tokens priced on every decision), and no
+number for the second.
+
+**What the log already had, and what it lacked.** Migration 034 (change 65)
+records a `search` row per call with the ids returned and an `action` row when
+the same agent fetches, edits or deletes a returned id — click-through
+relevance: the caller *looked*. It did not record the one act that says the
+fact reached a write: a later capture naming the id as its source. `derived_from`
+(025) and `supersedes` on `capture_thought` are exactly that act, and they
+were not logged.
+
+**What changed.** No migration. 034's `tool` column is free text and its
+`action` shape needs only a target, so `capture_thought` now writes one action
+row per id it names in `derived_from` or `supersedes`, tool `capture_thought`,
+target the cited id — under the same `OB1_QUERY_LOG=on` flag, best-effort like
+every log write, logged on the act of citing once the row is saved (whether or
+not 035 wrote the pointer on a re-capture, and whether or not the vector
+attached: the log records what the caller did, not what the row now holds). A
+cite the function refused — a ghost id, a loop — never reaches the log, because
+the capture threw. The tool column now tells two kinds of use apart:
+
+- **cited** — `capture_thought`: a write named the id as a source (MERIT's
+  memory-utilization signal);
+- **opened** — `fetch`, `update_thought`, `delete_thought`: the caller went and
+  looked at, or touched, the row (034's click-through).
+
+`evals/utilization.ts` is the pure part: 034's attribution rule (most recent
+prior search by the same agent, within the window, whose results held the id; a
+NULL agent its own bucket — the export's join in TypeScript, so the report and
+the fixture agree by construction), then per arm (the search tool and its
+recorded arguments), per agent and overall: ids returned, ids used (cited ∪
+opened, distinct per search), **utilization** = used / returned, **use rate** =
+searches with at least one use, the cited/opened split, and **tokens per used
+id** — approximate, the returned ids' content as stored *now* at four
+characters a token, over the searches that carry an estimate — MERIT's
+cost-adjusted marginal utility in this fork's units. With a gold map (a
+hand-labelled fixture in `export-queries.ts`'s shape), the **ignore rate**:
+searches whose results held a relevant id the caller never used.
+`evals/eval-utilization.ts` reads the log from `DATABASE_URL` and prints it.
+
+**What the report refuses to print.** With no action rows at all it says `n/a`
+and asks whether the log is on, rather than 0% over an empty join — the mutant
+[39] runs: drop the cite rows and cited reads 0 and utilization falls to the
+opened-only share, so the number is measuring the cites and not something that
+would survive their absence. Actions that attribute to no search (a touch
+outside the window, an id no search returned) are counted and shown, not
+dropped. Nothing changes ranking: the number first.
+
+**Not done here.** Per-*model* arms: the log does not record the embedding
+model a search ran under, and 034's `filter` column is dead on `search_thoughts`
+(SMD-1490) — whether to carry the arm there or in a column is that ticket's
+call. A read whose use ends in prose to the user, with no write and no fetch,
+is invisible to this log, so utilization here is a **lower bound** on use and
+the ignore rate an upper bound; the write-path eval (SMD-1713) is where a
+planted fact's survival becomes observable. A fixture exported from this log's
+own touches is circular as gold (its `relevant` IS the touches); the honest gold
+is a hand-labelled set. SMD-1737's four-layer report consumes this as layer 2.
+
+**Verified.** `db/test-schema.ts` [39] drives the pure module over hand-made
+rows: attribution by agent, window and recency; the cited/opened split; the
+rates; tokens per used id over searches with an estimate; the no-cites mutant;
+the gold ignore rate; the `n/a` rule; the rendered table.
+`server-portable/test-e2e-sql.ts` [10] extends 034's section: a capture with
+`derived_from` after a search writes one `capture_thought` action row for the
+id it named and a plain capture writes none, and the join attributes the cite
+to the search that returned the id. `bunx tsc --noEmit` in `server-portable/`.
+The measurement itself — the operator's first week of real use with the log on
+— is the ticket's Verify, not this section's: the number exists when the log
+has rows.
+
+**Upstream status:** not sent — the query log is this fork's (change 65).
 
 
 

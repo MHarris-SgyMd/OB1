@@ -2707,6 +2707,34 @@ on to open. This loop captures it and gates PRs on it.
    and watching recall collapse (0.154 < 0.8) — a scrambling regression would
    score the same. The live corpus stays out of CI.
 
+**Utilization — did the caller use what came back (SMD-1719).** Every number
+above is layer one of the four the literature now asks for (evidence retrieval,
+evidence use, task outcome, cost). MERIT (arXiv 2609.05441) measured the second
+and found agents ignore 45–53% of correctly retrieved facts. The query log can
+answer it, because a later `capture_thought` that names a returned id in
+`derived_from` or `supersedes` is logged as an action row under its own tool
+(FORK.md change 87), so a touch is either **cited** (a write named it as a
+source) or **opened** (fetch / update / delete — click-through). Then:
+
+```
+DATABASE_URL=… bun eval-utilization.ts [--gold fixture.json]
+OB1_EXPORT_WINDOW_MIN=30   # the same attribution window as export-queries.ts
+```
+
+prints, per arm (search tool + recorded arguments), per agent and overall: ids
+returned, ids used (cited ∪ opened), **util** = used / returned, **use-rate** =
+searches with ≥ 1 use, the cited/opened split, and **tok/used** — approximate
+tokens returned per id used (the ids' content as stored now, chars / 4). With
+`--gold` (a hand-labelled fixture in `export-queries.ts`'s `{ queries: [{ query,
+relevant }] }` shape) it adds the **ignore rate**: searches whose results held a
+relevant id the caller never used. A fixture exported from the same log's touches
+is circular as gold; label by hand. With no action rows the report says `n/a`
+and asks whether the log is on, rather than printing 0%. Attribution is the
+export's rule, in `utilization.ts` (pure, tested by `db/test-schema.ts` [39]).
+A read whose use ends in prose, with no write and no fetch, is invisible here,
+so utilization is a lower bound on use. No ranking changes on this number; if
+it comes out low, the lever is presentation (SMD-1735), not retrieval.
+
 **Why two fixtures.** The export fixture (query text + ids) drives the local,
 model-backed `eval-replay.ts` against your own brain — no vectors, because the
 live corpus supplies them. The gate fixture (ids + vectors, no text) drives the

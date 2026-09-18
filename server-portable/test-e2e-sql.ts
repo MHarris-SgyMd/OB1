@@ -498,6 +498,27 @@ console.log("\n[10] query log: a search and its follow-up fetch, recorded and jo
       FROM query_log act WHERE act.kind='action'`;
   assert(joined[0]?.from_query === "gamma", `the export join ties the fetch back to its search (${JSON.stringify(joined[0])})`);
 
+  // SMD-1719: a capture that cites the returned id — derived_from — is the
+  // caller USING the result in a write, and is logged as an action row with
+  // tool `capture_thought` and the cited id as target, one per id named. A
+  // capture that cites nothing writes no action row. The same join attributes
+  // the cite to the search that returned the id, so eval-utilization.ts can
+  // count it as "cited" beside the fetch's "opened".
+  await call("capture_thought", { content: "a note built on the gamma note", derived_from: [hitId!] });
+  await call("capture_thought", { content: "an unrelated note that cites nothing" });
+  const cites = await qlog<{ tool: string; target_id: string }[]>`
+    SELECT tool, target_id FROM query_log WHERE kind = 'action' AND tool = 'capture_thought'`;
+  assert(cites.length === 1 && cites[0].target_id === hitId, `the citing capture logged one action row for the id it named, under its own tool (${JSON.stringify(cites)})`);
+  const actionCount = (await qlog<{ n: number }[]>`SELECT count(*)::int AS n FROM query_log WHERE kind = 'action'`)[0].n;
+  assert(actionCount === 2, `the non-citing capture logged nothing: fetch + cite = 2 action rows (${actionCount})`);
+  const citeJoined = await qlog<{ from_query: string | null }[]>`
+    SELECT (SELECT s.query FROM query_log s
+             WHERE s.kind='search' AND s.agent_id IS NOT DISTINCT FROM act.agent_id
+               AND s.logged_at <= act.logged_at AND s.result_ids @> ARRAY[act.target_id]
+             ORDER BY s.logged_at DESC LIMIT 1) AS from_query
+      FROM query_log act WHERE act.kind='action' AND act.tool = 'capture_thought'`;
+  assert(citeJoined[0]?.from_query === "gamma", `the cite attributes to the search that returned the id (${JSON.stringify(citeJoined[0])})`);
+
   await qlog`DELETE FROM query_log`;
   await qlog`DELETE FROM thoughts`;
   await qlog.close();

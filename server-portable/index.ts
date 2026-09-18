@@ -340,6 +340,10 @@ function buildServer(principal: Principal): McpServer {
       // best-effort: a log failure must never reach the caller.
     }
   };
+  // `tool` is the action's kind as well as its writer: `fetch` / `update_thought`
+  // / `delete_thought` say the caller opened or touched a returned id (034);
+  // `capture_thought` says a write cited it (SMD-1719). eval-utilization.ts
+  // reads the split from this column, so a new tool that logs here names itself.
   const logActionCall = async (tool: string, targetId: string): Promise<void> => {
     if (!queryLogEnabled(env())) return;
     try {
@@ -1015,6 +1019,23 @@ function buildServer(principal: Principal): McpServer {
           derivedFrom: derived_from,
           supersedes,
         });
+
+        // Memory utilization (SMD-1719, over 034's log): a capture that names a
+        // returned id as its source — `derived_from`, or `supersedes` — is the
+        // caller USING a search result in a write, the signal MERIT calls memory
+        // utilization and this fork's fetch/edit/delete rows cannot carry (they
+        // say the caller looked, not that the fact reached a write). One action
+        // row per id named, tool `capture_thought`, so eval-utilization.ts can
+        // split cited from opened by the tool column alone. Logged on the ACT of
+        // citing, once the row is saved: whether or not 035 wrote the pointer (a
+        // re-capture writes no provenance) and whether or not the vector
+        // attached, the caller used the result, and the log records what the
+        // caller did, not what the row now holds. Best-effort like every log
+        // write; a cite the function refused (a ghost id, a loop) never reaches
+        // here because the capture itself threw.
+        for (const cited of new Set([...(derived_from ?? []), ...(supersedes ? [supersedes] : [])])) {
+          await logActionCall("capture_thought", cited.toLowerCase());
+        }
 
         if (captured.embeddingFailed) {
           return {
