@@ -2912,6 +2912,132 @@ smallest index and strong small- corpus filtered recall — a bounded evaluation
 of its build/query knobs (not an adoption) is the one thread this leaves open;
 and pgvectorscale's parallel DiskANN build crashed the Postgres backend at 1M
 rows (workers=0 built; workers=4 died), worth reporting upstream.
+### The embedded store — LanceDB, no server and no network hop (SMD-1662)
+
+SMD-1037's bracket had a separate server (Qdrant) and an in-engine index
+(DiskANN). It left one shape untested that the ticket itself named: an *embedded*
+store, run in-process against local files with no second server and no network
+round trip — though still a second store to keep consistent with Postgres.
+LanceDB is that store, and it is the external candidate most likely to help a
+local-by-default fork, because it removes the "second process + network hop" part
+of the two-store cost while the id→row resolve and the consistency tax remain. So
+measuring it isolates which part of that cost is the network and which is
+architectural. It is wired as a fourth store into the same harness
+(`store-backends.ts`, a `LanceEngine` behind the same `ExternalEngine` interface
+as Qdrant), embedded — no container, only a temp dataset directory — and scored
+against the same exact-cosine oracle over the same points.
+
+LanceDB has no unquantized HNSW: **IVF_FLAT** is its unquantized index (the fair
+recall-vs-exact row) and **HNSW_SQ** its scalar-quantized graph (what a
+deployment would ship — its recall a quantization trade). Both **prefilter** —
+the `where` predicate is applied before the vector search — so, like Qdrant's
+graph filter and unlike a bare pgvector HNSW, filtered recall holds. On the real
+corpus (the same 601 issues, 963 points, 1024-dim, 150 title queries), recall@10
+versus exact at the selective tiers where a bare HNSW loses the most:
+
+| store (effort) | unfiltered | portal (3.5%) | design (2.3%) | t2 (1.7%) | t07 (0.5%) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| pgvector HNSW (bare, ef 200) | 100% | 32% | 37% | 25% | 42% |
+| Qdrant (default) | 100% | 100% | 100% | 100% | 100% |
+| LanceDB IVF_FLAT (default) | 100% | 88% | 82% | 61% | 79% |
+| LanceDB IVF_FLAT (nprobes 200) | 100% | 100% | 100% | 100% | 100% |
+| LanceDB HNSW_SQ (default) | 100% | 99% | 100% | 100% | 100% |
+
+LanceDB holds filtered recall exactly where Qdrant does and the bare HNSW index
+does not — because it prefilters, the same shape migration 014 gives
+`match_thoughts` in-engine. It *matches* the in-engine ladder; it does not beat
+it. (IVF_FLAT's default recall varies run to run with its k-means IVF
+partitioning — roughly the 60s to high-90s at these tiers, the row below being
+one build — and is exact once probed; HNSW_SQ holds 99–100% even at default.)
+Its whole-dataset footprint is the leanest of the external stores: IVF_FLAT
+8.1 MB (the unquantized, like-for-like row) and HNSW_SQ 5.2 MB (smaller because
+scalar-quantized — a precision trade against exact that barely shows at these
+tiers), against Qdrant's 574 MB collection. (That 574 MB is Qdrant's fixed
+segment preallocation at this tiny corpus, not data — the fair like-for-like is
+the scale table below, 541 MB vs 994 MB at 1M. And pgvector's 7.9 MB is
+`pg_relation_size` of the *index only*, excluding the 5.6 MB points table the
+Lance and Qdrant whole-dataset figures include.) LanceDB is the leanest external,
+a second store nonetheless.
+
+**The network hop, isolated — and it is a fraction of a millisecond.** The clean
+measure is the bare per-query vector round trip at default effort (no keyword leg,
+no parallelism to mask it): Qdrant's *whole* call — a round trip to its localhost
+server plus an HNSW search — ran at **0.77 ms** median, LanceDB's in-process
+IVF_FLAT call at **0.57 ms**. The **~0.2 ms** difference (0.1–0.2 ms across runs)
+is an *upper bound* on the network hop: it also folds in whatever separates an
+HNSW search from an IVF_FLAT one, so the loopback trip itself is smaller. Either
+way it is sub-millisecond and grows only with real network distance — the whole
+of what "embedded" buys. (The harness's two-store hybrid arm runs its vector and
+keyword legs in parallel, so its means measure the round-trip *shape* — two trips
+versus one statement — not the hop, which is why the hop is read from the bare
+search latency instead.)
+What embedded does *not* remove: every read is still an ANN search plus a Postgres
+resolve of the ids it returns, and two stores must still be kept consistent
+(SMD-1038's consistency section).
+
+**At scale (64-dim, 1M and 10M random vectors — the same synthetic corpus and
+worst-case recall floor as above).** LanceDB is embedded and on-disk (memory-
+mapped Lance files), so it needs no container and, unlike Qdrant's in-RAM index,
+tolerates 10M in the 14 GB VM without the OOM that forced Qdrant on-disk:
+
+At 1M rows, build time, footprint, and the end-to-end read (each external's ANN
+search plus the Postgres id→row resolve of the ids it returns):
+
+| store | index build | index size | end-to-end p95 (ANN + pg id→row) |
+| --- | ---: | ---: | ---: |
+| pgvector HNSW (single store) | 117 s | 570 MB | — (own scan 4.0 ms, no resolve) |
+| Qdrant | 92 s | 994 MB | 3.6 ms |
+| LanceDB IVF_FLAT | **1.9 s** | 541 MB | 4.4 ms |
+| LanceDB HNSW_SQ | 64 s | 599 MB | 4.5 ms |
+
+LanceDB IVF_FLAT builds in under two seconds — an order below every other index
+— to the leanest external footprint, and its end-to-end read sits within noise
+of Qdrant's: the Postgres resolve, not the vanished network hop, is what both
+two-store reads pay.
+
+At 10M rows — where SMD-1037's *in-RAM* Qdrant index OOM-crashed the 14 GB VM —
+every store here built and answered, because the externals run on-disk (Qdrant by
+its `on_disk` flag, LanceDB natively):
+
+| store | index build | index size | end-to-end p95 (ANN + pg id→row) |
+| --- | ---: | ---: | ---: |
+| pgvector IVFFlat (single store) | 146 s | 2.8 GB | — (own scan 8.5 ms) |
+| Qdrant (on-disk) | 26 min | 7.4 GB | 7.3 ms |
+| LanceDB IVF_FLAT | **28 s** | 5.6 GB | 7.7 ms |
+| LanceDB HNSW_SQ | 6.4 min | 5.9 GB | 8.0 ms |
+
+LanceDB is on-disk from the start, so it never needed Qdrant's on-disk workaround,
+and its IVF_FLAT built in **28 seconds** against Qdrant's 26 minutes — to a leaner
+5.6 GB. (At this width pgvector HNSW took 139 min to a 5.7 GB index in SMD-1037's
+run, and DiskANN did not build in a practical window.) But LanceDB's end-to-end
+read is ~7.7 ms, within noise of Qdrant's on-disk 7.3 ms and dominated by the
+Postgres id→row resolve — the leanest, fastest-building external is still a
+second store paying the resolve. (End-to-end p95 at ten queries is noisy; the
+ordering, not the third digit, is the signal.)
+
+Qdrant's rows in this subsection come from this run, not the SMD-1037 scale
+tables above, and differ from them: here its 10M on-disk index reached a built
+state (7.3 ms end-to-end, 26 min build) where the table above caught it
+mid-indexing (1.6 s, `≥30 min †`). Same store, measured at different points — not
+a contradiction; and change 82's verdict rests on the resolve, not on which
+Qdrant latency you read.
+
+**Verdict — SMD-1037's holds, now for a reason it names.** The one part of the
+two-store cost LanceDB removes is the network hop, and the hop is a fraction of a
+millisecond (~0.1–0.2 ms) on loopback — not the cost the verdict rested on. What remains is what it rested on:
+a second store's id→row resolve (its read is still ANN + Postgres fetch) and the
+consistency tax of keeping two stores in step. LanceDB is the best-behaved
+external store measured — prefilter recall, the leanest footprint, no server —
+and a best-behaved second store is still a second store that does not beat what
+migration 014 gives Postgres in-engine. **Not built**; the `thoughts.embedding`
+column stays the source of truth. (LanceDB is Apache-2.0 and the fork is
+FSL-1.1-MIT — SMD-1038's guardrail — so it is a dependency of an eval, not the
+product.) Reproduce with `OB1_STORE_EXTERNAL=qdrant,lance` (the default) on
+`store-compare.ts` and `store-scale.ts`; `OB1_STORE_LANCE_INDEXES` picks the
+index kinds.
+
+
+
 ## Quantised indexes at the shipped width: halfvec adopted, binary declined (SMD-1501)
 
 `eval-quant.ts`, run as `bun run quant` with `OB1_EVAL_QUANT_SOURCE` naming a
