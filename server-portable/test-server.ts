@@ -180,12 +180,10 @@ console.log("\n[7] initialize");
   assert(result?.protocolVersion != null, "protocolVersion returned");
   assert(result?.capabilities != null, "capabilities returned");
 
-  // @hono/mcp 0.1.x wanted both Accept tokens on a POST and the server carried
-  // a patch that supplied whichever was missing (change 75 made it test both).
-  // 0.3.x takes either token, or none, as enough and the patch is gone (change
-  // 83): a Claude Desktop connector's `Accept: application/json`, an SSE-only
-  // Accept (the SDK client's GET form; its POSTs name both tokens) and no
-  // Accept at all reach the transport as sent.
+  // @hono/mcp 0.1.x wanted both Accept tokens on a POST and the server patched
+  // whichever was missing; 0.3.x takes either, or none, and the patch is gone
+  // (change 83) — a connector's `application/json`, an SSE-only Accept (the SDK
+  // client's GET form) and no Accept at all reach the transport as sent.
   for (const [label, headers] of [["text/event-stream alone", { Accept: "text/event-stream" }], ["application/json alone", { Accept: "application/json" }], ["no Accept header", {}]] as [string, Record<string, string>][]) {
     const r = await fetch(BASE, { method: "POST", headers: { ...AUTH, ...headers }, body: INIT });
     assert(r.status === 200 && (await mcpBody(r))?.result != null, `Accept: ${label} reaches the transport unpatched → 200 (${r.status})`);
