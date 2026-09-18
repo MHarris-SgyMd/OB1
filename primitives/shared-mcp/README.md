@@ -119,6 +119,9 @@ Create a new Edge Function for the shared server. This is a Supabase Edge Functi
 ```typescript
 // shared-server index.ts (Supabase Edge Function)
 import { Hono } from "hono";
+// Deno reads the SDK's types through the extensionless subpath: its exports map
+// names them `./dist/esm/*.d.ts`, unreachable from `.js` (FORK.md change 84).
+// @ts-types="@modelcontextprotocol/sdk/server/mcp"
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPTransport } from "@hono/mcp";
 import { z } from "zod";

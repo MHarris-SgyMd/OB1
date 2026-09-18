@@ -94,6 +94,14 @@ jobs:
       # node_modules mode and the check fails with "Could not find a matching
       # package for 'npm:@supabase/supabase-js'". The flag makes this behave the
       # same in CI and on a developer machine that has just run the tests.
+      #
+      # Since SDK 1.29 the package's exports name its types `./dist/esm/*.d.ts`,
+      # which for a `.js` subpath is a file that does not exist; tsc substitutes
+      # `.d.ts` for `.js`, Deno does not, and the module — every tool handler's
+      # arguments with it — is `any`. Each SDK import in these files carries a
+      # `// @ts-types` pragma naming the extensionless subpath, and test-auth.ts
+      # holds it there (change 84). A file that loses the pragma fails here
+      # with `implicitly has an 'any' type` at every handler.
       - name: deno check server/index.ts
         working-directory: server
         run: deno check --node-modules-dir=none index.ts

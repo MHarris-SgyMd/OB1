@@ -23,10 +23,10 @@ This file is **identical for every extension** unless the extension needs additi
 ```json
 {
   "imports": {
-    "@hono/mcp": "npm:@hono/mcp@0.1.5",
-    "@modelcontextprotocol/sdk": "npm:@modelcontextprotocol/sdk@1.24.3",
-    "hono": "npm:hono@4.9.2",
-    "zod": "npm:zod@4.1.13",
+    "@hono/mcp": "npm:@hono/mcp@0.3.2",
+    "@modelcontextprotocol/sdk": "npm:@modelcontextprotocol/sdk@1.30.0",
+    "hono": "npm:hono@4.13.8",
+    "zod": "npm:zod@4.6.5",
     "@supabase/supabase-js": "npm:@supabase/supabase-js@2.47.10"
   }
 }
@@ -122,6 +122,9 @@ Supabase Edge Function that implements an MCP server. Must follow this exact str
 ```typescript
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 
+// Deno reads the SDK's types through the extensionless subpath: its exports map
+// names them `./dist/esm/*.d.ts`, unreachable from `.js` (FORK.md change 84).
+// @ts-types="@modelcontextprotocol/sdk/server/mcp"
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPTransport } from "@hono/mcp";
 import { Hono } from "hono";

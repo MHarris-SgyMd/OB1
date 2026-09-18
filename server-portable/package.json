@@ -19,11 +19,11 @@
   },
   "comment": "Runtime dependencies are pinned to the exact versions in ../server/deno.json so all four targets run identical library code. Bump both files in the same commit.",
   "dependencies": {
-    "@hono/mcp": "0.1.5",
-    "@modelcontextprotocol/sdk": "1.24.3",
+    "@hono/mcp": "0.3.2",
+    "@modelcontextprotocol/sdk": "1.30.0",
     "@supabase/supabase-js": "2.47.10",
-    "hono": "4.9.2",
-    "zod": "4.1.13"
+    "hono": "4.13.8",
+    "zod": "4.6.5"
   },
   "devDependencies": {
     "@types/bun": "1.4.0",
