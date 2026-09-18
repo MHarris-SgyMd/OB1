@@ -13932,27 +13932,32 @@ reports the upstream PR gate currently fails on **every** fork-originated PR.
 
 ## Review passes: what caught a finding is written at the catch
 
-Measured 2026-09-18 over the commit log with `bun scripts/mechanism-yield.mjs`:
-221 review-pass commits across 64 tickets, 512 bulleted findings in the 34
-tickets whose passes carry bullet bodies. Of the 512, **492 say what was wrong
-and what changed and never say what found it**. Twenty do: the mutant runs
-(12), a named reviewer (5), "found by driving it for real" (3). So "which review
-mechanisms pay" cannot be answered from the record, and a proposal to back-fill
-a corrections table from it (SMD-1711's origin) was dropped for that reason.
+Measured 2026-09-18 with `bun scripts/mechanism-yield.mjs` over the commit log
+as of `main` at 28e20d7 — before any tagged pass existed, so a re-run at HEAD
+adds this ticket's own passes to every figure: 221 review-pass commits across
+64 tickets, 511 bulleted findings in the 34 tickets whose passes carry bullet
+bodies. **None of the 511 says what found it.** Each says what was wrong and
+what changed. A keyword search for phrases that name a catcher ("mutant", "the
+reviewer", "found by driving it") turns up about twenty, and half of those are
+mentions, not catches — so nothing is inferred, and "which review mechanisms
+pay" cannot be answered from the record. A proposal to back-fill a corrections
+table from it (SMD-1711's origin) was dropped for that reason.
 
-What the record does say, by a keyword classifier whose samples were read:
+What the record does say, by a keyword classifier whose samples were read
+(approximate by design: a defect in a checker that parses comments reads as
+record drift):
 
 - About a third of findings are record drift — this file, comments, READMEs.
   A little under a third are code defects. A fifth are test teeth: a vacuous
   assertion, a wrong fixture, a gate with no margin. The rest are confirmations
   of no defect and tickets filed.
-- **The defect share does not fall with the pass number**: 44 / 44 / 51 / 51 %
+- **The defect share does not fall with the pass number**: 44 / 43 / 51 / 51 %
   at passes one to four, higher on the few tickets that went further. Fourteen
-  of 34 tickets found their last code or test defect at pass three or later, and
-  three of the four that ran five or more passes found one on their final pass. Passes
-  stop because the operator stops them. The stop signal — a pass whose findings
-  are the previous pass's own fixes — is a per-ticket judgement; a pass count
-  is no proxy for it.
+  of 34 tickets found their last code or test defect at pass three or later,
+  and three of the four that ran five or more passes found one on their final
+  pass. Passes stop because the operator stops them. The stop signal — a pass
+  whose findings are the previous pass's own fixes — is a per-ticket judgement;
+  a pass count is no proxy for it.
 
 **The convention, from SMD-1711 on.** Every finding bullet in a review-pass
 commit body ends with a tag the script reads:
@@ -13970,10 +13975,14 @@ gate fired on its own — CI, a check, preflight, typecheck; name it in `held`).
 Confirmations of no defect and record fixes carry the tag too: the mix per
 mechanism is the point. `held` is optional and names the test section, check
 or migration that now enforces the finding. An untagged bullet is counted as
-`implicit`, and the script says how many there were.
+`implicit`, and the script says how many there were; a bullet that contains
+"(caught" but does not end in a readable tag is warned on, not counted as
+untagged. Bullets that only report a green run are not findings.
 
 **Re-measure when ten tickets carry tags**: `bun scripts/mechanism-yield.mjs
---since <first tagged commit>`. That run — not this note — decides SMD-1712,
+--since <first tagged commit>` — that commit and everything committed at or
+after it, so a branch begun earlier contributes only what it committed in the
+tagged era. That run — not this note — decides SMD-1712,
 the citations facet that would give `delete_thought` a `CITED` refusal; it is
 gated on the number. The script is a maintainer report, not a CI gate; it
 prints its rules and a sample per class so the tallies can be judged before
