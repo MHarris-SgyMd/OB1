@@ -113,7 +113,7 @@ db/migrations/                   # fix 9   (moved here from server/ in fix 9)
 .github/metadata.schema.json     # fix 7   (3 additive optional fields)
 .github/workflows/fork-checks.yml# fix 7   (new file)
 scripts/check-fork-consistency.mjs # fix 7 (new file)
-scripts/mechanism-yield.mjs      # SMD-1711 (new file — review-pass yield report, not a gate)
+scripts/mechanism-yield.mjs      # SMD-1711 (new file — review-pass yield report, not a gate); window and attribution fixed SMD-1728
 server-portable/                 # fix 8   (new dir — parallel, does not touch server/)
 db/                              # fix 9   (new dir — schema, runner, tests)
 deploy/                          # fix 12  (new dir — compose stack, smoke test)
@@ -14164,7 +14164,7 @@ reports the upstream PR gate currently fails on **every** fork-originated PR.
 Measured 2026-09-18 with `bun scripts/mechanism-yield.mjs` over the commit log
 as of `main` at 28e20d7 — before any tagged pass existed, so a re-run at HEAD
 adds this ticket's own passes to every figure: 221 review-pass commits across
-64 tickets, 511 bulleted findings in the 34 tickets whose passes carry bullet
+61 tickets, 511 bulleted findings in the 31 tickets whose passes carry bullet
 bodies. **None of the 511 says what found it.** Each says what was wrong and
 what changed. A keyword search for phrases that name a catcher ("mutant", "the
 reviewer", "found by driving it") turns up about twenty, and half of those are
@@ -14182,7 +14182,7 @@ record drift):
   of no defect and tickets filed.
 - **The defect share does not fall with the pass number**: 44 / 43 / 51 / 51 %
   at passes one to four, higher on the few tickets that went further. Fourteen
-  of 34 tickets found their last code or test defect at pass three or later,
+  of 31 tickets found their last code or test defect at pass three or later,
   and three of the four that ran five or more passes found one on their final
   pass. Passes stop because the operator stops them. The stop signal — a pass
   whose findings are the previous pass's own fixes — is a per-ticket judgement;
@@ -14216,6 +14216,70 @@ the citations facet that would give `delete_thought` a `CITED` refusal; it is
 gated on the number. The script is a maintainer report, not a CI gate; it
 prints its rules and a sample per class so the tallies can be judged before
 anything is built on them. `--self-check` runs the parser's fixtures.
+
+**The window and the attribution, corrected (SMD-1728).** A review pass aimed
+at PR #76 by mistake ran the script on the day it was merged and showed the
+window was not what the header said. `--since YYYY-MM-DD` on the git path
+handed the bare day to git, whose approxidate reads it as that day *at the
+current time*: at 03:27, `--since 2026-09-18` counted 0 commits while the same
+day's saved dump counted 9, so every pass committed earlier that day was
+dropped silently. The two paths also cut on two clocks — the anchor and git's
+`--since` on committer time, each row and the dump filter on author date — and
+129 of the log's 1,351 commits carry different days on the two (every rebase
+moves the committer date; four of them are review passes), so a dump and a
+live run of one window tallied differently. Both are one rule now: every row
+carries the committer instant (`%cI`); a `--since` day is resolved once to
+the instant it begins in one declared zone and then cut exactly as a `<sha>`
+anchor is, by instant, never passed to git. The zone took three review passes
+to get right. Git's plain `--date=short` renders each commit in its own
+committer offset, and the log carries twelve offsets, so 28 commits sat on a
+different day than on the operator's clock and a day cut could disagree with
+the anchor's instant cut. The first fix rendered in the machine's zone, and
+the second pass measured what that costs: the same `--since 2026-09-18` gave
+one commit set in Chicago, another under UTC and a third in Tokyo, all printed
+under one label, so the re-measure command in this section would not
+reproduce on another machine. The second fix rendered each row's day in a
+declared zone, and the third pass found the zone leaking into four places —
+the row, the anchor label, the row file, a legacy branch for older dumps —
+each needing to know which clock made its day. Now the zone is applied in
+one place, the start of the `--since` day (`--zone`, a Region/City name,
+default `America/Chicago`, the offset every review pass in the log was
+committed in; a fixed-offset abbreviation such as `EST` is refused); the
+window label names it, the day a row is shown with is rendered in it, and a
+dump is instants, so it is zone-free and the reader's zone applies. A dump
+made with a rendered day, before this change, is refused by record rather
+than read on an unknown clock. Verified on the live log: `--since` at
+2026-09-18, -17 and -14 returns the same commit set from the git path and
+from a dump, under `TZ=UTC` and `TZ=Asia/Tokyo` as well as the machine's own,
+and the four passes authored the day before they were committed are in or
+out of both together.
+
+The attribution rule was the larger defect. `ticketOf` took the first
+`SMD-nnnn` anywhere in subject and body, and a subject often names another
+ticket before its own ("main took 79 for SMD-1037 while the branch sat
+unpushed … (SMD-1607)"): 13 of the 221 review passes at the 28e20d7 baseline
+were credited to the wrong ticket, and three "tickets" in the tally (SMD-1616,
+SMD-1624, SMD-1625) existed only by that error. The rule is now the first
+ticket in the parenthetical the subject ends with — `(SMD-nnnn)`, or the
+`(SMD-1643, SMD-1616)` and `(SMD-1463 review pass 1)` shapes twelve subjects
+use — then the first mention in the subject, then the body. The baseline
+figures above are re-read under it from the same dump: 221
+review passes across **61** tickets (was 64), 511 findings in **31** (was 34);
+the per-pass defect shares (44 / 43 / 51 / 51 %), the fourteen tickets whose
+last defect came at pass three or later and the three-of-four on their final
+pass are unchanged. Also fixed, each with a fixture: the pass number is the
+leftmost mention whichever spelling ("Review pass 4: the third pass's fix held"
+read as pass 3; the five subjects in the log that name two passes survived
+only by word order), a bullet carrying a `(caught` tag is a finding wherever
+it sits (a "Verified:" line may introduce tagged findings, and a tagged bullet
+may quote the count that proved it), every bullet the run-result rules drop is
+printed in full at the end of the report so an untagged finding lost to them
+is seen (one in the whole log, a suite count), a bullet too short to be a finding is
+counted as skipped rather than nowhere, a defect found by a named or unnumbered
+pass shows as "an unnumbered pass" in the per-ticket table instead of "none",
+and a row whose tag does not parse is classified over the finding, not over
+the tag's tail. A dump made before this change carries author dates and
+windows on them; the whole-log baseline does not depend on the date column.
 
 ---
 
