@@ -13984,7 +13984,7 @@ in evals/README.md, under "GraphRAG…".
 `eval-graphrag.ts` gains a **composed arm** (vector coarse recall K′ → seed the graph from
 *those* hits' entities → expand `hops` over `ob1_entity_edges` → symmetric-RRF rerank the
 union) and, because a first pass flattened the graph, a **comp-typed** arm that uses the
-graph's real structure: a *typed, weighted, directional* walk weighting each hop by a
+graph's real structure: a *typed, weighted* walk (undirected traversal) weighting each hop by a
 pre-registered relation prior (a `depends_on`/`uses` edge carries more relevance than a
 `co_occurs_with` one), the edge's evidence support `ln(1+count)` and its confidence,
 propagated as decaying spreading activation. A **comp-cos** control orders the union by
@@ -13999,9 +13999,11 @@ the substitute graph reproduces change 31 at **0.43**. The best composed cell sc
 **0.89** multi-hop — below vector — and **recovers 0** of vector's answers. The control
 says why: **comp-cos ties vector exactly (1.00)** — pooling the graph-reached thoughts
 loses nothing and adds nothing, vector already held every answer, so the rerank can only
-subtract. **Using the real typed edges does not change this** (comp-typed recall 0.89 too)
-— it sharpens *ranking* (nDCG 0.73 → 0.74, MRR 0.66 → 0.71) but cannot add recall that is
-not missing. So the flattening was not the reason; the reason is the ceiling.
+subtract. **Using the real typed edges makes the rerank gentler** — comp-typed lifts recall
+over the untyped walk (0.89 → 0.95 all, multi-hop **0.98**) and ranking (nDCG 0.73 → 0.77)
+by weighting the graph score down where the edge is weak, so it preserves more of vector's
+order — but it still **cannot exceed** a ceiling'd vector (comp-cos = vector). So the
+flattening cost some recall, and the ceiling caps even the typed version.
 
 **But recall is one axis, and the ceiling is a property of the *question set*, not of the
 graph. On the axes a graph is built for, the picture turns.**
@@ -14010,11 +14012,11 @@ graph. On the axes a graph is built for, the picture turns.**
   coarse budget b and the edge-aware graph becomes a real recall tier: at **b = 1** vector
   alone gets recall@10 **0.35** and the composed stage **0.83** (**+0.48**; multi-hop 0.42
   → 0.85), at b = 3 0.78 → 0.90, crossing over only at b ≈ 10 where vector reaches its
-  ceiling (0.97 → 0.89). That is exactly the regime change 87 found a single ANN falls
+  ceiling (0.97 → 0.95). That is exactly the regime change 87 found a single ANN falls
   into *at scale* — recall degrades and the second tier recovers it. The ceiling here hides
   it; a corpus or scale where vector is not saturated does not.
 - **Relational structure a vector pass cannot see.** Of 3,000 issue pairs joined by a
-  strong typed edge (`depends_on`/`uses`), **96%** have the linked sibling *outside* the
+  strong typed edge (`depends_on`/`uses`), **95%** have the linked sibling *outside* the
   issue's vector top-10 — a large store of relational neighbours only the graph reaches
   (the raw material the scarcity probe turns into recovered recall). Descriptive: the graph
   both defines and answers the link, so it measures vector's blind spot, not a scored win.

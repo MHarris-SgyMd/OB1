@@ -1890,15 +1890,17 @@ graph into a unit-weight adjacency, on the graph's **real typed/weighted structu
 | vector — the substitute baseline | **1.00** | 0.98 | 0.75 | 0.97 | 0.96 |
 | graph — SMD-948 substitute (question-seeded) | 0.43 | 0.47 | 0.33 | 0.43 | 0.31 |
 | composed — untyped expansion (best cell) | 0.89 | 0.98 | 0.69 | 0.89 | 0.69 |
-| **comp-typed** — edge-aware (relation prior × support × conf) | 0.89 | 0.98 | 0.69 | 0.89 | **0.72** |
+| **comp-typed** — edge-aware (relation prior × support × conf) | **0.98** | 0.98 | 0.69 | **0.95** | **0.75** |
 | comp-cos — union by cosine only (control) | **1.00** | 0.98 | 0.75 | 0.97 | 0.96 |
 
 **The bar FAILS — because vector is at ceiling, not because the graph was flattened.**
 comp-cos ties vector exactly: pooling the graph-reached thoughts loses and adds nothing.
-Using the **real typed edges** (comp-typed) does not lift recall either — it only sharpens
-ranking (nDCG 0.69 → 0.72). recovers 0, breaks 4, aggregate 0.97 → 0.89: no cell of the 8
-clears all three clauses. But recall is one axis, and the ceiling is a property of the
-*question set*. On the axes a graph is built for, the picture turns.
+Using the **real typed edges** (comp-typed) lifts recall over the untyped walk (0.89 → 0.95
+all, multi-hop 0.98) and ranking (nDCG 0.73 → 0.77) — a gentler, more vector-preserving
+rerank — but still **cannot exceed** a ceiling'd vector (the untyped best cell recovers 0,
+breaks 4; no cell of the 8 clears the ≥0.05-lift bar). So the flattening cost some recall,
+but the ceiling caps even the typed version. Recall, though, is one axis, and the ceiling is
+a property of the *question set*. On the axes a graph is built for, the picture turns.
 
 **Beyond recall — the axes vector can't express:**
 
@@ -1910,14 +1912,14 @@ budget b; the edge-aware graph becomes a real recall tier where vector runs shor
 | 1 | 0.35 | **0.83** | **+0.48** | 0.42 → 0.85 |
 | 3 | 0.78 | 0.90 | +0.12 | 0.90 → 0.96 |
 | 5 | 0.92 | 0.94 | +0.02 | 1.00 → 0.98 |
-| 10 | 0.97 | 0.89 | −0.07 | 1.00 → 0.89 |
+| 10 | 0.97 | 0.95 | −0.02 | 1.00 → 0.98 |
 
 At a tight budget the graph recovers what vector misses (+0.48 at b=1), crossing over only
 when vector saturates (b ≈ 10). This is exactly SMD-1707's at-scale regime, where a single
 ANN loses recall and a second tier recovers it — hidden here by the ceiling, not absent.
 
 *Relational structure vector can't see* — of 3,000 issue pairs joined by a strong typed
-edge (`depends_on`/`uses`), **96%** have the linked sibling *outside* the issue's vector
+edge (`depends_on`/`uses`), **95%** have the linked sibling *outside* the issue's vector
 top-10: a large store of relational neighbours only the graph reaches (descriptive — the
 graph defines the link). *Entity-membership* applies to only 5 of 10 needles (the rest are
 literal-string aggregations, keyword's job); on those the extracted graph trails

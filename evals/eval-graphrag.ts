@@ -177,9 +177,9 @@ const t0 = Date.now();
 const { vectors, embedded } = await cachedDocumentVectors(docs, {
   path: linearVectorCachePath(EMBED_MODEL, "thought"), dim: DIM, text: linearThoughtText, embed: (t) => embed(EMBED_MODEL, t),
 });
-// Pass createdAt so thoughts.created_at carries the issue's real open date — the
-// temporal signal the edge-aware expansion and the entity-membership arm weight by
-// (SMD-1738 phase 2); without it every row would date to now() and recency is flat.
+// Pass createdAt so thoughts.created_at carries the issue's real open date — the temporal
+// signal the entity-membership arm ranks by (SMD-1738 phase 2; the typed expansion itself
+// does not use recency); without it every row would date to now() and recency is flat.
 for (const d of docs) await insertLinearThought(sql, d, lit(vectors[d.id]), undefined, d.createdAt);
 const loadedIssues = new Set<string>((await sql`SELECT metadata->>'issue' AS issue FROM thoughts`).map((r: { issue: string }) => r.issue));
 console.log(`  loaded ${loadedIssues.size} thoughts (${embedded} embedded now, ${docs.length - embedded} from cache) in ${((Date.now() - t0) / 1000).toFixed(0)} s`);
@@ -260,14 +260,16 @@ async function keywordArm(needle: string | undefined): Promise<Ranked | null> {
 async function membershipArm(needle: string | undefined): Promise<Ranked | null> {
   if (!needle) return null;
   const rows = await sql`
-    WITH e AS (
-      SELECT id FROM ob1_entities
+    WITH cand AS (
+      SELECT id, 0 AS rk, 1.0 AS sim FROM ob1_entities
       WHERE normalized_name = normalize_entity_name(${needle}) OR normalize_entity_name(${needle}) = ANY(merged_from)
       UNION ALL
-      (SELECT id FROM ob1_entities WHERE similarity(normalized_name, normalize_entity_name(${needle})) >= 0.55
-       ORDER BY similarity(normalized_name, normalize_entity_name(${needle})) DESC LIMIT 1)
-      LIMIT 1
-    )
+      SELECT id, 1 AS rk, similarity(normalized_name, normalize_entity_name(${needle})) AS sim FROM ob1_entities
+      WHERE similarity(normalized_name, normalize_entity_name(${needle})) >= 0.55
+    ),
+    -- an exact match (rk 0) always beats the best fuzzy (rk 1); a plain UNION ALL + LIMIT 1
+    -- would let the fuzzy branch win depending on the plan's emit order
+    e AS (SELECT id FROM cand ORDER BY rk, sim DESC LIMIT 1)
     SELECT t.metadata->>'issue' AS issue
     FROM thought_entities m JOIN e ON e.id = m.entity_id JOIN thoughts t ON t.id = m.thought_id
     ORDER BY m.confidence DESC, t.created_at DESC
@@ -474,7 +476,10 @@ async function expandStageTyped(candIds: string[], vecLit: string, hops: number)
     reach(id, w, hop) AS (
       SELECT id, w, 0 FROM seed
       UNION ALL
-      SELECT nb.id, r.w * (${REL_PRIOR}) * ln(1 + e.support) * e.conf * 0.5, r.hop + 1
+      -- per-hop multiplier = rel_prior(≤1) × support_saturating(<1) × conf(≤1) × 0.5, so
+      -- weight STRICTLY DECAYS from the seed (an earlier ln(1+support) could exceed 1 and
+      -- amplify a hop above its seed — a scoring artifact, not relatedness).
+      SELECT nb.id, r.w * (${REL_PRIOR}) * (e.support / (e.support + 5.0)) * e.conf * 0.5, r.hop + 1
       FROM reach r
       JOIN edge_w e ON r.id IN (e.a, e.b)
       CROSS JOIN LATERAL (SELECT CASE WHEN e.a = r.id THEN e.b ELSE e.a END AS id) nb
@@ -931,7 +936,7 @@ console.log(`\n  BEYOND RECALL — does the graph, used as a typed/weighted stru
 // (a) edge properties: comp-typed vs comp (untyped) vs vector, already in the table
 const cAll = mean(results.map((r) => r.scores.composed.recall)), tAll = mean(results.map((r) => r.scores["comp-typed"].recall));
 const cN = mean(results.map((r) => r.scores.composed.ndcg)), tN = mean(results.map((r) => r.scores["comp-typed"].ndcg));
-console.log(`\n  (a) edge properties — typed/weighted/directional expansion (best K′=${headTK}, ${headTH} hop) vs untyped vs vector`);
+console.log(`\n  (a) edge properties — typed/weighted expansion (best K′=${headTK}, ${headTH} hop) vs untyped vs vector`);
 console.log(`      recall@${K}: untyped ${cAll.toFixed(2)} → typed ${tAll.toFixed(2)} (vector ${mean(results.map((r) => r.scores.vector.recall)).toFixed(2)}); nDCG@${K}: untyped ${cN.toFixed(2)} → typed ${tN.toFixed(2)} — using the relations helps ranking${tAll > cAll ? ", and recall," : " but not recall,"} not enough to pass a ceiling'd vector`);
 
 // (b) scarcity: does graph recover what a starved vector budget misses?
@@ -949,7 +954,7 @@ console.log(`      → ${scarcityWin ? "graph expansion DOES recover answers a s
 if (membership.length) {
   const res = membership.filter((m) => m.resolved);
   console.log(`\n  (c) exact entity-membership — graph vs vector vs keyword, recall@${K}`);
-  console.log(`      ${res.length} of ${membership.length} needles resolve to an entity; the rest are literal-string aggregations ("Decision:", "Promote") — keyword's job, not the graph's, so entity-membership does not apply to them`);
+  console.log(`      ${res.length} of ${membership.length} needles resolve to an entity with mentions; the rest are literal-string aggregations ("Decision:", "Promote") — keyword's job, not the graph's, so entity-membership does not apply to them`);
   if (res.length) {
     const g = mean(res.map((m) => m.graph.recall)), v = mean(res.map((m) => m.vector.recall)), k = mean(res.map((m) => m.keyword.recall));
     console.log(`      on the ${res.length} entity needles: graph ${g.toFixed(2)} | vector ${v.toFixed(2)} | keyword ${k.toFixed(2)} — ${g > Math.max(v, k) + 0.02 ? "graph's exact membership wins" : g >= Math.max(v, k) - 0.02 ? "graph ties vector/keyword (exact membership, no lift on this vocabulary-dense corpus)" : "graph trails — the extracted entity's mentions do not cover the labelled set"}`);
@@ -970,14 +975,14 @@ const [rel] = await sql.unsafe(`
   )
   SELECT count(*)::int AS total, count(*) FILTER (WHERE top.id IS NULL)::int AS blind
   FROM pairs p JOIN thoughts a ON a.id = p.ta
-  LEFT JOIN LATERAL (SELECT o.id FROM thoughts o ORDER BY o.embedding <=> a.embedding LIMIT ${K}) top ON top.id = p.tb`) as { total: number; blind: number }[];
+  LEFT JOIN LATERAL (SELECT o.id FROM thoughts o WHERE o.id <> a.id ORDER BY o.embedding <=> a.embedding LIMIT ${K}) top ON top.id = p.tb`) as { total: number; blind: number }[];
 console.log(`\n  (d) relational structure vector can't see (descriptive) — of ${rel.total} issue pairs joined by a depends_on/uses edge, ${rel.blind} (${rel.total ? Math.round(100 * rel.blind / rel.total) : 0}%) have the linked sibling OUTSIDE the issue's vector top-${K}`);
-console.log(`      → a real store of relational neighbours a single vector pass does not surface; the graph is the only tier that reaches them (the value the scarcity probe (b) turns into recovered recall)`);
+console.log(`      → ${rel.total && rel.blind / rel.total >= 0.5 ? "a real store of relational neighbours a single vector pass does not surface; the graph is the only tier that reaches them (the value the scarcity probe (b) turns into recovered recall)" : "vector surfaces most strong-edge siblings here, so the graph adds little relational reach on this corpus"}`);
 
 // ── Bottom line, integrated across axes ──────────────────────────────────────
 console.log(`\n  BOTTOM LINE (multi-axis, SMD-1738):`);
-console.log(`    • Against a FULL-budget vector on this question set the graph stage does not pay — the bar FAILS (vector is at ceiling; nothing to recover), and the edge properties only sharpen ranking (nDCG ${cN.toFixed(2)}→${tN.toFixed(2)}), not recall.`);
-console.log(`    • ${scarcityWin ? "But under a STARVED vector budget the edge-aware graph is a real recall complement (b=1: " + arm(scarcity[0].vec).toFixed(2) + "→" + arm(scarcity[0].typed).toFixed(2) + ") — exactly the at-scale regime where a single ANN loses recall (SMD-1707). That is where a graph tier earns its place, not as a replacement for a healthy vector recall." : "And even under a starved vector budget the graph did not recover the misses — no regime here favours it."}`);
+console.log(`    • Against a FULL-budget vector on this question set the graph stage ${pass ? "clears the pre-registered bar (see VERDICT above)" : "does not pay — the bar FAILS (vector is at ceiling; nothing to recover)"}, and the edge properties ${tAll > cAll ? `lift recall to ${tAll.toFixed(2)} and` : "only"} sharpen ranking (nDCG ${cN.toFixed(2)}→${tN.toFixed(2)})${tAll > cAll ? "." : ", not recall."}`);
+console.log(`    • ${scarcityWin ? `But under a STARVED vector budget the edge-aware graph is a real recall complement (b=${scarcity[0].b}: ${arm(scarcity[0].vec).toFixed(2)}→${arm(scarcity[0].typed).toFixed(2)}) — exactly the at-scale regime where a single ANN loses recall (SMD-1707). That is where a graph tier earns its place, not as a replacement for a healthy vector recall.` : "And even under a starved vector budget the graph did not recover the misses — no regime here favours it."}`);
 console.log(`    • Verdict: not a substitute, and not an everyday stage over a ceiling'd vector — a CONDITIONAL recall/precision tier for the scarce-recall regime (deep scale, tight ANN budgets, relational/entity-membership question types this corpus barely poses). A product path is a scale-regime test away, not a here-and-now build (SMD-1038 posture).`);
 
 console.log(`\n  cost`);
