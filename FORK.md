@@ -13873,9 +13873,13 @@ source now logs one action row per id, target the cited id, tool
 `<writer>/<pointer>` — `capture_thought/derived_from`,
 `capture_thought/supersedes`, `update_thought/supersedes` — under the same
 `OB1_QUERY_LOG=on` flag, best-effort like every log write, the rows for one
-write in one `INSERT` (`logActions`, a forty-source synthesis is one round
-trip, and an edit's opened row travels with its cite), ids lower-cased before
-the dedup (`UUID_RE` admits either case; two spellings are one cite). **A cite row is a pointer the
+call in one `INSERT` (`logActions`, the one writer of action rows — a fetch's
+single row, a forty-source synthesis, an edit's opened row beside its cite —
+so each store has one INSERT shape to keep right; a single-row twin existed
+for two passes and was removed as a parity obligation with no reader), ids
+lower-cased before the dedup (`UUID_RE` admits either case; two spellings are
+one cite). A cite row is written for every id a write names, whether or not a
+search returned it; the link to a search is made when the log is read. **A cite row is a pointer the
 database accepted**, which is what makes it a use and not a wish: on a fresh
 row `upsert_thought` validated every id (a ghost or a loop threw, and nothing
 was logged); on a re-capture 035 wrote no pointer and validated none, so nothing
@@ -13908,9 +13912,13 @@ NULL agent its own bucket — the export's join in TypeScript, compared at the
 log's own microsecond grain when read from the log, since a JS `Date` is
 milliseconds and two rows under a millisecond apart would order differently in
 the two; a fixture in whole minutes is unaffected), then per arm (the search tool and its
-recorded arguments), per agent and overall: ids returned, ids used (cited ∪
-opened, distinct per search), **utilization** = used / returned, **use rate** =
-searches with at least one use, the cited/opened split, and **tokens per used
+recorded arguments), per agent and overall: distinct ids returned, ids used
+(distinct per search), **utilization** = used / returned, **use rate** =
+searches with at least one use, the cited / opened **partition** of used (an
+id that reached a write is cited even if it was also fetched; opened is what
+was only looked at; the two sum to used, so cited / used is the share of use
+that reached a write — a fourth pass found the first cut counted an id in
+both), and **tokens per used
 id** — approximate, the returned ids' content as stored *now* at four
 characters a token, over the searches that carry an estimate — MERIT's
 cost-adjusted marginal utility in this fork's units. With a gold map (a
@@ -13968,11 +13976,22 @@ no mismatch. The report script was run against a throwaway Postgres with a
 seeded log: the anonymous fetch of an id its search never returned is the one
 unattributed action, tokens per used id came out at exactly what the seeded
 content lengths predict, and the gold arm read 0% ignored where the relevant
-id was cited and n/a where it was never returned. The batch writer was probed
+id was cited and n/a where it was never returned. The SQL writer was probed
 against Postgres with an empty batch, a NULL agent, a tool name carrying a
-quote and a backslash, and forty rows, and writes the same row shape as the
-single-row insert; a mutant that keeps only the first row of a batch fails
-exactly the assertion that reads the second and nothing else. The
+quote and a backslash, and forty rows; a mutant that keeps only the first row
+of a batch fails exactly the assertion that reads the second and nothing else.
+`test-store-postgrest.ts` [11] drives the PostgREST writer — the hosted
+deployment's path — through the shim: an empty batch, a batch of one and of
+three, a NULL agent, the cite tool through the array insert, and 034's join
+over what it wrote. Writing that section found a pre-existing shim gap: the
+PostgREST store's `logSearch` fails through `compat/supabase-sql` when
+`result_scores` carries a null element, which the server sends for a
+score-less hit — so a shim-backed deployment can log no search row for such a
+call, silently. Filed on SMD-1602; [11] seeds its search row by SQL and says
+why. Two searches seeded 400 µs apart both
+returning one id, then a fetch: the export's SQL join and the report both
+credit the later search; the millisecond fallback credits the earlier one,
+which is the disagreement `at_us` exists to close. The
 database-row coercions the report relies on (bigint as string, the uuid
 literal, a partly deleted result set, `at_us`, a `real`'s float noise) are
 driven in [39] without a database, since no CI job runs the report itself.

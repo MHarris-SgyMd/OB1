@@ -356,12 +356,9 @@ function buildServer(principal: Principal): McpServer {
       // forty sources is forty rows in one INSERT, not forty INSERTs on the
       // pool). Best-effort as a whole: a failure drops the batch, never the
       // write it followed.
-      const store = await db();
-      const withAgent = rows.map((r) => ({ tool: r.tool, agentId: principal.agentId, targetId: r.targetId }));
-      // One row takes the single-row VALUES insert; a batch takes the unnest.
-      // Same row shape either way (the probe in change 88's Verified checks it).
-      if (withAgent.length === 1) await store.logAction(withAgent[0]);
-      else await store.logActions(withAgent);
+      // One writer for every action row, one or forty: one INSERT shape per
+      // store to keep right, no single-row twin to drift from it.
+      await (await db()).logActions(rows.map((r) => ({ tool: r.tool, agentId: principal.agentId, targetId: r.targetId })));
     } catch {
       // best-effort.
     }

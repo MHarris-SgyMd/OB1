@@ -65,11 +65,6 @@ function toUuidArray(ids: string[]): string {
 }
 
 /**
- * A Postgres array literal for a `::real[]` bind, aligned to a uuid array. A
- * null or non-finite score is the keyword NULL (a returned id whose score the
- * retrieval path did not carry); a finite number is itself.
- */
-/**
  * A Postgres array literal for a `::text[]` bind. Elements are double-quoted
  * with `"` and `\` escaped, so a tool name — or anything else — survives the
  * literal intact; the log's tool values are `[a-z_/]` today, the quoting is for
@@ -79,6 +74,11 @@ function toTextArray(xs: string[]): string {
   return `{${xs.map((x) => `"${x.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`).join(",")}}`;
 }
 
+/**
+ * A Postgres array literal for a `::real[]` bind, aligned to a uuid array. A
+ * null or non-finite score is the keyword NULL (a returned id whose score the
+ * retrieval path did not carry); a finite number is itself.
+ */
 function toRealArray(xs: (number | null)[]): string {
   return `{${xs.map((x) => (x === null || !Number.isFinite(x as number) ? "NULL" : String(x))).join(",")}}`;
 }
@@ -411,18 +411,14 @@ export class SqlStore implements ThoughtStore {
          ${row.filter}::jsonb, ${toUuidArray(row.resultIds)}::uuid[], ${toRealArray(row.resultScores)}::real[])`;
   }
 
-  async logAction(row: QueryActionLog): Promise<void> {
-    await this.sql`
-      INSERT INTO query_log (kind, tool, agent_id, target_id)
-      VALUES ('action', ${row.tool}::text, ${row.agentId ?? null}::uuid, ${row.targetId}::uuid)`;
-  }
-
   async logActions(rows: QueryActionLog[]): Promise<void> {
     if (rows.length === 0) return;
-    // One statement for the batch: the tools and targets as aligned array
-    // literals (the same by-hand binding toUuidArray exists for), unnested
-    // side by side. Agent ids may differ per row in principle; here they are
-    // one caller's, but the array keeps the contract general.
+    // One statement for one row or forty: the tools and targets as aligned
+    // array literals (the same by-hand binding toUuidArray exists for),
+    // unnested side by side. Agent ids may differ per row in principle; here
+    // they are one caller's, but the array keeps the contract general. The
+    // one writer of action rows — a single-row VALUES twin was removed so
+    // there is one INSERT shape to keep right (SMD-1719, fourth pass).
     await this.sql`
       INSERT INTO query_log (kind, tool, agent_id, target_id)
       SELECT 'action', t.tool, t.agent_id, t.target_id

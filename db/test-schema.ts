@@ -4390,8 +4390,13 @@ console.log("\n[39] Memory utilization over the query log: attribution, the cite
   // A plain tool name outside the known opens is counted as opened (never
   // dropped) AND flagged: a writer that forgot the `<writer>/<pointer>` form
   // is seen, not folded silently into click-through.
+  // B was already cited by s1's capture, so this open of B changes nothing in
+  // the partition (cited wins); an unknown tool on an UNCITED id is counted as
+  // opened — both shown.
   const odd = summarise(searches, [...actions, act(AG, 5, "new_tool_that_forgot", B)], 30);
-  assert(odd.unknownTools.get("new_tool_that_forgot") === 1 && odd.overall.opened === 3 && odd.overall.cited === 2, `an unknown plain tool is counted as opened and reported (${JSON.stringify([...odd.unknownTools])})`);
+  assert(odd.unknownTools.get("new_tool_that_forgot") === 1 && odd.overall.opened === 2 && odd.overall.cited === 2, `an unknown plain tool is reported, and an open of an already-cited id leaves the partition alone (${JSON.stringify([...odd.unknownTools])}, opened ${odd.overall.opened})`);
+  const oddUncited = summarise(searches, [...actions, act(AG, 11, "new_tool_that_forgot", D)], 30);
+  assert(oddUncited.overall.opened === 3 && oddUncited.unknownTools.get("new_tool_that_forgot") === 1, `an unknown plain tool on an uncited id is counted as opened (${oddUncited.overall.opened})`);
   assert(/WARN new_tool_that_forgot ×1/.test(renderReport(odd)), "…and the report warns by name");
 
   // The database-row coercions the report script relies on, driven here
@@ -4427,6 +4432,19 @@ console.log("\n[39] Memory utilization over the query log: attribution, the cite
 
   // The rendered rows align: a numeric util and an n/a util print at the
   // same width, so the columns under the header line up (third pass).
+  // cited and opened partition used (fourth pass): an id fetched AND then cited
+  // within one search's window is cited, not both; cited + opened = used.
+  const both = summarise([search("p1", AG, 0, "p", [A, B], null)], [act(AG, 1, "fetch", A), act(AG, 2, "capture_thought/derived_from", A), act(AG, 3, "fetch", B)], 30);
+  assert(both.overall.used === 2 && both.overall.cited === 1 && both.overall.opened === 1, `opened then cited → cited 1, opened 1 (B only), used 2 (${both.overall.cited}, ${both.overall.opened}, ${both.overall.used})`);
+  const citedFirst = summarise([search("p2", AG, 0, "p", [A], null)], [act(AG, 1, "capture_thought/derived_from", A), act(AG, 2, "fetch", A)], 30);
+  assert(citedFirst.overall.cited === 1 && citedFirst.overall.opened === 0, "cited then opened → still cited, not opened: order does not matter");
+
+  // A duplicate id in a logged result set is one id returned: utilization can
+  // reach 1 and the whole-set estimate holds (the reader counts distinct ids).
+  const dup = summarise([search("d1", AG, 0, "d", [A, A, B], 120)], [act(AG, 1, "fetch", A), act(AG, 2, "fetch", B)], 30);
+  assert(dup.overall.returned === 2 && dup.overall.utilization === 1, `duplicates collapse: returned 2, utilization 1 (${dup.overall.returned}, ${dup.overall.utilization})`);
+  assert(dbRow({ result_ids: `{${A},${A},${B}}`, surviving: "2", returned_n: "2" }).resultTokens === 300, "a database row with a duplicated id keeps its whole estimate when the reader's distinct count matches the survivors");
+
   const aligned = renderReport(summarise([...searches, search("s0", AG, 20, "empty", [], null)], actions, 30));
   const rowLines = aligned.split("\n").filter((l) => /^(search_thoughts|all|9999|\(anon)/.test(l));
   assert(rowLines.length >= 2 && new Set(rowLines.map((l) => l.length)).size === 1, `every table row is the same width (${[...new Set(rowLines.map((l) => l.length))].join(",")})`);

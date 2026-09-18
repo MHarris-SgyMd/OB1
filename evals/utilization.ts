@@ -27,9 +27,11 @@
  * change 65).
  *
  * What is reported, per arm (the search tool and its arguments) and overall:
- *   searches, ids returned, ids used (cited ∪ opened, distinct per search),
+ *   searches, distinct ids returned, ids used (distinct per search),
  *   utilization = used / returned, use rate = searches with ≥ 1 use / searches,
- *   the cited and opened splits, and — when the search rows carry a token
+ *   the cited / opened partition of used (an id that reached a write is cited
+ *   even if it was also opened; opened is what was only looked at, so the two
+ *   sum to used), and — when the search rows carry a token
  *   estimate for what they returned — tokens per used id, MERIT's cost-adjusted
  *   utility in this fork's units. With a gold map (query text → relevant ids,
  *   from a hand-labelled fixture), the ignore rate: searches whose results held
@@ -109,9 +111,11 @@ export type ActionDbRow = {
 
 /**
  * A search row from the database → a SearchRow. The token estimate is whole or
- * absent: chars/4 when every returned id is still stored, null when any has
- * since been deleted (a partial sum would read as a cheaper search than it was)
- * or when nothing was returned. bigint columns arrive as strings under Bun.
+ * absent: chars/4 when every DISTINCT returned id is still stored (`returned_n`
+ * is the reader's count of distinct ids; `surviving` counts rows, which are
+ * distinct by key), null when any has since been deleted (a partial sum would
+ * read as a cheaper search than it was) or when nothing was returned. bigint
+ * columns arrive as strings under Bun.
  */
 export function toSearchRow(r: SearchDbRow): SearchRow {
   const surviving = Number(r.surviving);
@@ -225,8 +229,15 @@ export function attribute(searches: SearchRow[], actions: ActionRow[], windowMin
     }
     const uses = bySearch.get(hit.id) ?? { used: new Set(), cited: new Set(), opened: new Set() };
     uses.used.add(act.targetId);
-    if (citePointerOf(act.tool) !== null) uses.cited.add(act.targetId);
-    else uses.opened.add(act.targetId); // any plain tool, known or not, touched the id; counted as opened, never dropped
+    // cited and opened PARTITION used: an id that reached a write is cited,
+    // and only an id that was merely looked at is opened — so cited + opened =
+    // used, and cited/used reads as the share of use that reached a write.
+    if (citePointerOf(act.tool) !== null) {
+      uses.cited.add(act.targetId);
+      uses.opened.delete(act.targetId);
+    } else if (!uses.cited.has(act.targetId)) {
+      uses.opened.add(act.targetId); // any plain tool, known or not, touched the id; counted as opened, never dropped
+    }
     bySearch.set(hit.id, uses);
   }
   return { bySearch, unattributed, unknownTools };
@@ -313,9 +324,12 @@ export function summarise(
     const armSt = arms.get(arm) ?? emptyStats(withGold);
     const agSt = agents.get(agent) ?? emptyStats(withGold);
     const hasTokens = typeof s.resultTokens === "number" && Number.isFinite(s.resultTokens);
+    // Distinct ids: a duplicate in a logged result set is one id returned, so
+    // utilization can reach 1 and the token estimate's whole-set test holds.
+    const returnedDistinct = new Set(s.resultIds).size;
     for (const st of [overall, armSt, agSt]) {
       st.searches++;
-      st.returned += s.resultIds.length;
+      st.returned += returnedDistinct;
       st.used += used;
       st.cited += uses?.cited.size ?? 0;
       st.opened += uses?.opened.size ?? 0;
@@ -378,7 +392,7 @@ export function renderReport(sum: Summary): string {
   }
   lines.push(
     "",
-    "util = ids used / ids returned (MERIT's memory utilization); use-rate = searches with ≥1 use; cited = ids a write named as a source (tool <writer>/<pointer>); opened = ids fetched, edited or deleted;",
+    "util = ids used / distinct ids returned (MERIT's memory utilization); use-rate = searches with ≥1 use; cited = ids a write named as a source (tool <writer>/<pointer>); opened = ids only fetched, edited or deleted — cited + opened = used;",
     "tok/used = approx. tokens returned per id used, over searches with an estimate (content as stored now, chars/4). Attribution: same agent, most recent prior search in the window that returned the id.",
   );
   if (sum.overall.gold) lines.push("gold = searches whose results held a hand-labelled relevant id; ignored = of those, the share where none was used (MERIT's ignore rate).");

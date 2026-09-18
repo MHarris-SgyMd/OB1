@@ -38,9 +38,10 @@ A third opt-in feature stores data rather than spending model calls, and is also
 **off until you turn it on**: the query log (`OB1_QUERY_LOG=on`, migration 034).
 With it on, the server records one row per search — the query text, its arguments
 and the ids returned — one per follow-up fetch, edit or delete of a returned
-id — and, since FORK.md change 88, one per returned id a later capture or edit
-names as its source (`derived_from` / `supersedes`): every source a synthesis
-cites is a row. Together they let a retrieval change be replayed against what
+id — and, since FORK.md change 88, one per id a capture or edit names as its
+source (`derived_from` / `supersedes`), whether or not a search returned it:
+every source a synthesis cites is a row, and the link to a search is made when
+the log is read, not when it is written. Together they let a retrieval change be replayed against what
 the brain was actually asked (`evals/eval-replay.ts`) and show whether callers
 use what comes back (`evals/eval-utilization.ts`). It is **personal data at rest**: every query you
 typed. It adds no new external destination and makes no model or provider call —

@@ -64,14 +64,20 @@ const sql = new SQL({ url: URL_, max: 2 });
 // at_us: logged_at at the log's own microsecond grain, so the attribution
 // orders and bounds exactly as export-queries.ts's SQL join does; a Date alone
 // is milliseconds.
+// One lateral pass over the returned ids per search row gives both aggregates;
+// returned_n counts DISTINCT ids so a duplicate in a logged result set neither
+// strips the estimate nor caps utilization below one.
 const searchRows = await sql<SearchDbRow[]>`
   SELECT s.id, s.agent_id, s.logged_at,
          (extract(epoch FROM s.logged_at) * 1000000)::bigint AS at_us,
          s.tool, s.query, s.match_count, s.threshold, s.recency_weight, s.result_ids,
-         (SELECT sum(length(t.content))::bigint FROM thoughts t WHERE t.id = ANY(s.result_ids)) AS chars,
-         (SELECT count(*)::int FROM thoughts t WHERE t.id = ANY(s.result_ids)) AS surviving,
-         coalesce(cardinality(s.result_ids), 0) AS returned_n
+         c.chars, c.surviving,
+         (SELECT count(DISTINCT x) FROM unnest(s.result_ids) AS x)::int AS returned_n
     FROM query_log s
+    CROSS JOIN LATERAL (
+      SELECT sum(length(t.content))::bigint AS chars, count(*)::int AS surviving
+        FROM thoughts t WHERE t.id = ANY(s.result_ids)
+    ) c
    WHERE s.kind = 'search'`;
 const actionRows = await sql<ActionDbRow[]>`
   SELECT agent_id, logged_at, (extract(epoch FROM logged_at) * 1000000)::bigint AS at_us, tool, target_id

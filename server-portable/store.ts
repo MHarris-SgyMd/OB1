@@ -859,11 +859,11 @@ export interface ThoughtStore {
    * why the calls are guarded and swallowed, not why they are skipped.
    */
   logSearch(row: QuerySearchLog): Promise<void>;
-  logAction(row: QueryActionLog): Promise<void>;
   /**
-   * Several action rows in one round trip — the cite rows of one write
-   * (SMD-1719), or an edit's opened row beside its cite. Same best-effort
-   * contract as logAction; an empty list writes nothing.
+   * The action rows of one call in one round trip — a fetch's single row, an
+   * edit's opened row beside its cite, a capture's cite per source (SMD-1719).
+   * One writer for every action row, so there is one INSERT shape per store
+   * to keep right; an empty list writes nothing.
    */
   logActions(rows: QueryActionLog[]): Promise<void>;
 
