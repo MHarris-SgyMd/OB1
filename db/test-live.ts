@@ -584,7 +584,26 @@ console.log("\n[5e] A planner path disabled at session level no longer JIT-compi
   // may have set it off at database level (the header calls that a valid
   // setting), and then the mutant below has nothing to compile and the timing
   // would fail for the wrong reason (review pass 1).
-  const [{ jitAvailable }] = await sql.unsafe(`SELECT pg_jit_available() AND current_setting('jit') = 'on' AS "jitAvailable"`);
+  // Read on a FRESH connection, the kind the timing below measures on: the
+  // suite's pool connected before this section, and a database- or
+  // role-level `jit` set since would read as the pool's stale value while
+  // every measured call saw the new one (review pass 2, run-it).
+  const jitAvailable = await (async () => {
+    const one = new SQL({ url: URL_, max: 1 });
+    try {
+      return Boolean((await one.unsafe(`SELECT pg_jit_available() AND current_setting('jit') = 'on' AS ok`))[0].ok);
+    } finally {
+      await one.close();
+    }
+  })();
+  // PostgreSQL 18 replaced the disable_cost penalty with a count of disabled
+  // nodes kept beside the cost (`Disabled: true` in the plan), so a disabled
+  // path no longer carries a statement past jit_above_cost and the compile
+  // this section exists for cannot be triggered that way there: on 18 the
+  // checks below assert its ABSENCE with and without the clause, and the
+  // mutant timing has nothing to measure (review pass 2, run on 18.6). The
+  // clause stands on 18 for the generic plan's flat estimate (039's header).
+  const disableCost = Number((await sql.unsafe(`SELECT current_setting('server_version_num')::int AS v`))[0].v) < 180000;
   const N = 3_000;
   await sql`DELETE FROM thoughts`;
   const [{ hnswDef }] = await sql.unsafe(`SELECT pg_get_indexdef('thoughts_embedding_idx'::regclass) AS "hnswDef"`);
@@ -659,6 +678,12 @@ console.log("\n[5e] A planner path disabled at session level no longer JIT-compi
       // cheap sequential scan (enable_seqscan back on) that no JIT would touch,
       // and a bare `!/JIT:/` passed with the clause absent (review pass 1, run-it).
       const cost = topCost(under);
+      if (!disableCost) {
+        const forced = jitAvailable ? await explained(gucs, "on") : under;
+        assert(cost < 1e6 && !/JIT:/.test(under) && !/JIT:/.test(forced) && /Disabled: true/.test(under),
+          `${label}: on PostgreSQL 18 a disabled path is a disabled-node count (Disabled: true), not disable_cost — the plan costs ${cost.toExponential(2)} and is not JIT-compiled with the clause or without it; the trigger this section exists for is 14–17's`);
+        continue;
+      }
       assert(cost >= 1e10 && /Tid Range Scan on thoughts/.test(under) && !/JIT:/.test(under),
         `${label}: the planner still takes the TID Range Scan, prices the plan at disable_cost (${cost.toExponential(2)}), and under the function's settings does not JIT-compile it${/JIT:/.test(under) ? " — but a JIT block is in the plan" : ""}`);
       if (jitAvailable) {
@@ -666,7 +691,7 @@ console.log("\n[5e] A planner path disabled at session level no longer JIT-compi
         assert(/JIT:/.test(forced) && /Functions: \d+/.test(forced), `…while the same statement with jit forced on IS compiled (${/JIT:[\s\S]*?Timing: ([^\n]*)/.exec(forced)?.[1] ?? "no timing line"}) — the trigger is real here, so the check above has teeth`);
       }
     }
-    if (jitAvailable) {
+    if (jitAvailable && disableCost) {
       const [label, gucs] = CASES[0];
       const fixed = await median(gucs);
       await sql.unsafe(`ALTER FUNCTION ${MATCH_THOUGHTS_SIGNATURE} RESET jit`);
@@ -676,10 +701,17 @@ console.log("\n[5e] A planner path disabled at session level no longer JIT-compi
       assert(/(^|,)jit=off(,|$)/.test(await proconfig()), "…and 039 re-applied puts the clause back");
       assert(mutant - fixed >= 10, `through the function under ${label} the mutant pays the compile on every call: ${mutant.toFixed(2)} ms a call against ${fixed.toFixed(2)} with 039's clause (default ${baseline.toFixed(2)})`);
       // The bound is the compile's size, not a multiple of the default: the
-      // compile alone is 40–70 ms on this image, so 25 ms of headroom over the
-      // default kills the mechanism-removed value (~55) and survives a noisy
-      // runner (review pass 1).
-      assert(fixed <= baseline + 25, `…and with the clause the disabled path costs what the default costs: ${fixed.toFixed(2)} ms against ${baseline.toFixed(2)} (the compile alone is 40–70 ms)`);
+      // compiled call through the function is 51–105 ms in 039's header and
+      // was never under 50 across the review runs (EXPLAIN's JIT total for the
+      // sample alone 40–150), so 25 ms of headroom over the default kills the
+      // mechanism-removed value and survives a noisy runner, whose fixed-minus-
+      // default spread was 0.2–1.3 ms over seven runs (review passes 1 and 2).
+      // The compiled arm itself is the noisy one (two compiled medians in one
+      // run were 31 ms apart), which is why the tooth above compares it with
+      // the uncompiled arm and asks only for 10 ms.
+      assert(fixed <= baseline + 25, `…and with the clause the disabled path costs what the default costs: ${fixed.toFixed(2)} ms against ${baseline.toFixed(2)} (the compiled call is 50–105 ms)`);
+    } else if (!disableCost) {
+      console.log("      (PostgreSQL 18: no disable_cost, so no compile to time — the mutant arm did not run; the catalog and plan checks did)");
     } else {
       console.log("      (this server has no JIT, or its own jit is off: the forced-on plan and the timing did not run; the catalog and plan checks did)");
     }

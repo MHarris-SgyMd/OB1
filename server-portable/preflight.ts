@@ -1439,24 +1439,20 @@ if (configFailed) {
             const ledgerHas019 = ledger.has("019");
             const ledgerHas039 = ledger.has("039");
             const missing019 = !seqOff || rows !== 10 || kwOff;
-            // One statement per function that needs it, in the order to run them.
-            const alters = [
-              ...(!seqOff || rows !== 10 || !jitOff ? [`ALTER FUNCTION ${mt[0].sig}${seqOff ? "" : " SET enable_seqscan = off"}${jitOff ? "" : " SET jit = off"}${rows !== 10 ? " ROWS 10" : ""};`] : []),
-              ...(kwOff ? ["ALTER FUNCTION search_thoughts_keyword(text, int, int, jsonb) ROWS 25;"] : []),
-            ];
-            // The migration, where the ledger does not record it; the ALTER where
-            // it does (a plain run would skip the recorded file).
-            const files = [
-              ...(missing019 && !ledgerHas019 ? ["019_match_thoughts_plan_and_rows.sql"] : []),
-              ...(!jitOff && !ledgerHas039 ? ["039_match_thoughts_jit_off.sql"] : []),
-            ];
-            // 039 redefines match_thoughts whole (019's clauses and ROWS 10 with
-            // it) but not search_thoughts_keyword: a reset keyword estimate with
-            // 019 recorded still needs its ALTER beside the file (review pass 1).
-            const keywordAlter = kwOff && !files.some((f) => f.startsWith("019")) ? ` Then put the keyword estimate back: SELECT '[1]'::vector; ALTER FUNCTION search_thoughts_keyword(text, int, int, jsonb) ROWS 25;  and carry it into the migration that redefined that function.` : "";
-            const remedy = files.length
-              ? `Apply ${files.map((f) => `db/migrations/${f}`).join(" and ")}.${keywordAlter}`
-              : `Put it back — after any re-apply of a migration body, since CREATE OR REPLACE resets these: SELECT '[1]'::vector; ${alters.join(" ")}  and carry them into the migration that redefined the function.`;
+            const mtMissing = !seqOff || rows !== 10 || !jitOff;
+            // match_thoughts' three clauses and its row estimate are restored by
+            // its LAST definer, 039 — never by 019's file, whose CREATE is the
+            // 4-argument form 020 dropped and would put a second overload beside
+            // the shipped one on any brain past 020 (review pass 2) — named
+            // while the ledger does not record 039, ALTERed once it does (a
+            // plain run skips a recorded file). The keyword estimate is 019's
+            // and 039 does not define that function, so its remedy is the ALTER
+            // in either case, beside the file or in the Put-it-back list.
+            const mtAlter = mtMissing ? `ALTER FUNCTION ${mt[0].sig}${seqOff ? "" : " SET enable_seqscan = off"}${jitOff ? "" : " SET jit = off"}${rows !== 10 ? " ROWS 10" : ""};` : "";
+            const kwAlter = kwOff ? "ALTER FUNCTION search_thoughts_keyword(text, int, int, jsonb) ROWS 25;" : "";
+            const remedy = mtMissing && !ledgerHas039
+              ? `Apply db/migrations/039_match_thoughts_jit_off.sql — the last definer of match_thoughts, which carries 019's clauses and ROWS 10 with its own (019's file alone would re-create the 4-argument form 020 dropped).${kwOff ? ` Then put the keyword estimate back: SELECT '[1]'::vector; ${kwAlter}  and carry it into the migration that redefined that function.` : ""}`
+              : `Put it back — after any re-apply of a migration body, since CREATE OR REPLACE resets these: SELECT '[1]'::vector; ${[mtAlter, kwAlter].filter(Boolean).join(" ")}  and carry them into the migration that redefined the function.`;
             const estimates = [
               ...(rows !== 10 ? [`match_thoughts' row estimate is ${rows} rather than 10`] : []),
               ...(kwOff ? [`search_thoughts_keyword's row estimate is ${kwRows} rather than 25`] : []),

@@ -383,10 +383,18 @@ else {
   // reset the row estimate too: the second check names both, as a warning, with
   // the migration as the remedy since this ledger does not record 019.
   assert(/candidate scan.*does not carry enable_seqscan = off — migration 019 is not applied/s.test(noClause.out), "the candidate-scan check reports 019's clause missing");
-  assert(/019_match_thoughts_plan_and_rows\.sql/.test(noClause.out), "…with 019 as the remedy while the ledger does not record it");
+  // The remedy is the LAST definer, not 019's file: on this 6-argument brain
+  // 019's CREATE would put the 4-argument form back beside it (the state the
+  // twoForms section below fails the start on), while 039 carries 019's
+  // clauses and ROWS 10 with its own and drops that form (review pass 2).
+  assert(/Apply db\/migrations\/039_match_thoughts_jit_off\.sql — the last definer of match_thoughts, which carries 019's clauses and ROWS 10 with its own \(019's file alone would re-create the 4-argument form 020 dropped\)\.\s*$/m.test(noClause.out) && !/Apply db\/migrations\/019/.test(noClause.out) && !/Then put the keyword estimate back/.test(noClause.out),
+         "…with 039, the last definer, as the whole remedy while the ledger records neither 019 nor 039 — never 019's own file, and no keyword ALTER while that estimate holds");
   // The other remedy: 019 recorded, the clause gone — the ALTER that restores both.
   const led019 = new SQL({ url: LIVE, max: 1 });
-  await led019.unsafe(`INSERT INTO schema_migrations (name, sha256) VALUES ('019_match_thoughts_plan_and_rows.sql', 'test')`);
+  // 039 recorded beside 019: a brain whose function carries 039's clause and
+  // whose ledger records 019 records 039 too, and a recorded last definer is
+  // what makes the ALTER, not a file, the remedy (review pass 2).
+  await led019.unsafe(`INSERT INTO schema_migrations (name, sha256) VALUES ('019_match_thoughts_plan_and_rows.sql', 'test'), ('039_match_thoughts_jit_off.sql', 'test')`);
   // RESET ALL leaves prorows alone; a CREATE OR REPLACE would not, so reset it by hand as a redefinition would —
   // and reset the keyword function's too, as re-applying 012 alone does. 039's
   // jit clause is put back here so this fixture is 019's loss alone; its own
@@ -431,9 +439,9 @@ else {
   // The other wording, with 039 RECORDED: "apply 039" would be a no-op for a
   // plain run, so the remedy is the ALTER that puts the clause back — and,
   // with the keyword estimate reset beside it and 019 recorded too, the
-  // Put-it-back list names both functions. Then 039 recorded but the ledger
-  // lacking 019 with the keyword estimate reset: the file for 039's clause
-  // and the keyword ALTER beside it, since 039 does not define that function
+  // Put-it-back list names both functions. Then 019 recorded but the ledger
+  // lacking 039, the keyword estimate reset: the file for 039's clause and
+  // the keyword ALTER beside it, since 039 does not define that function
   // (review pass 1). The ledger is created for these probes and dropped after.
   const led039 = new SQL({ url: LIVE, max: 1 });
   await led039.unsafe(`CREATE TABLE schema_migrations (name text PRIMARY KEY, sha256 text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())`);
@@ -450,7 +458,7 @@ else {
   await led039b.unsafe(`DELETE FROM schema_migrations WHERE name LIKE '039%'`);
   await led039b.close();
   const unrecorded039 = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
-  assert(/Apply db\/migrations\/039_match_thoughts_jit_off\.sql\. Then put the keyword estimate back: SELECT '\[1\]'::vector; ALTER FUNCTION search_thoughts_keyword\(text, int, int, jsonb\) ROWS 25;/.test(unrecorded039.out),
+  assert(/Apply db\/migrations\/039_match_thoughts_jit_off\.sql — the last definer[^\n]*\. Then put the keyword estimate back: SELECT '\[1\]'::vector; ALTER FUNCTION search_thoughts_keyword\(text, int, int, jsonb\) ROWS 25;/.test(unrecorded039.out),
          "…and with 039 not recorded the remedy is 039's file for the clause and the keyword ALTER beside it, which 039 cannot restore");
   const unled039 = new SQL({ url: LIVE, max: 1 });
   await unled039.unsafe(`DROP TABLE schema_migrations`);

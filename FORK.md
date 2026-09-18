@@ -12976,7 +12976,8 @@ with the floor lowered: under each of the three disabled paths the statement
 read out of the installed body, explained under the function's own settings,
 keeps its TID Range Scan at `disable_cost` and has no JIT block; the same
 statement with `jit` forced back on has one — Generation, Inlining,
-Optimization, Emission, 41–45 ms on the CI image — so the first check has
+Optimization, Emission, EXPLAIN's JIT total 41–45 ms on the CI image in that
+run, 40–70 across the pass-1 runs — so the first check has
 teeth; and through the function the mutant, 039's clause `RESET` (what a
 redefinition without it leaves), pays the compile on every call: 55 ms a call
 against 8 with the clause, 8 by default on that fixture. The forced-on plan
@@ -13023,7 +13024,7 @@ alone: same body, no jit clause; 904); README's [5d] paragraph and two
 header figures corrected. What the run-it reviewer verified: the clause
 deleted from 039 is killed in all four suites — test-schema [20] and [21],
 test-upgrade [17] twice, test-live [5e] eight times including all three
-plan checks, test-preflight twice; preflight blinded to the clause is
+plan checks, test-preflight three times; preflight blinded to the clause is
 killed by exactly the new probe; the forced-on arm neutered is killed by
 exactly its three assertions; a line added to 039's body is killed by
 [17]'s byte-for-byte assertion; three runs of [5e] put the mutant at 51–56
@@ -13031,6 +13032,48 @@ ms against 7.9–8.9 fixed and 8.0–8.2 default, four times the bound. Not
 changed: the timing message's "with 039's clause" label reads from the
 file's intent, not the catalog, and would mislead only after the catalog
 assertion before it has already failed.
+
+Pass 2, the same two reviewers on pass 1's additions first. What changed:
+PostgreSQL 18 replaced the `disable_cost` penalty with a count of disabled
+nodes kept beside the cost (`Disabled: true` in the plan), so on 18 a
+disabled path no longer carries the sample past `jit_above_cost` and the
+compile this change removes cannot be triggered that way — run on 18.6, the
+plan under each disabled path cost 36–1,490, nothing was compiled with the
+clause or without it, the mutant timed 10.35 against 10.11, and seven [5e]
+assertions failed against a correct 039; [5e] reads the server version and
+on 18 asserts the absence (no JIT block with or without the clause,
+`Disabled: true`, an ordinary cost) and skips the mutant arm with a line
+saying why, and the header's first screen, Failure modes and Prerequisites
+say 14–17 for the trigger and what 18 does (the clause stands on 18 for the
+generic plan's flat estimate, row-level security's compile and 13's).
+preflight's file remedy had named 019's file whenever the ledger lacked 019
+— pre-existing, rewritten by pass 1 — and 019's `CREATE` is the 4-argument
+form 020 dropped: on any brain past 020 it re-creates the overload the
+`search signatures` check then fails the start on, and restores none of the
+6-argument function's clauses; the remedy now names 039, the last definer,
+which carries 019's clauses and `ROWS 10` with its own and drops that form,
+with the keyword `ALTER` beside it (019's file is never named), and the
+`RESET ALL` probe asserts the whole string. [5e]'s `jit` gate was read on
+the suite's pool while the timing ran on fresh connections, so a
+database-level `jit = off` set after the pool connected read as "on", the
+timing ran, and its tooth failed at 7.97 against 8.05 for the wrong reason
+(run-it, M4a); the gate is read on a fresh connection now. The 019-loss
+fixture in test-preflight records 039 beside 019 (a brain whose function
+carries the clause and whose ledger records 019 records 039), one probe's
+comment had the ledger state inverted, this paragraph undercounted the
+clause-deleted mutant's test-preflight kills (three, not two), and the
+compile's figures name their quantity. What the run-it reviewer verified:
+pass 1's fold is load-bearing — without the `!/JIT:/` term all three plan
+assertions passed with the clause deleted, each printing "— but a JIT block
+is in the plan"; with it all three fail; `keywordAlter` emptied and
+`ledgerHas039` ignored were each killed by exactly the probes written for
+them; a body edit and the clause deleted are killed in test-schema by
+exactly the pinned assertions; over four more [5e] runs the fixed call was
+0.2–1.3 ms over the default against a 25 ms bound while the compiled arm
+ranged 52–87 ms and two compiled medians in one run were 31 ms apart — the
+teeth compare the uncompiled arms and leave the compiled one its noise. Not
+changed: "30–130 ms of startup" in two pre-existing comments where change
+28 and this section say 30–110 (boyscout).
 
 **The operator's path, walked.** A brain with rows migrated by `bun
 db/migrate.ts` through 039 (on a brain at 038 it is the one pending file):

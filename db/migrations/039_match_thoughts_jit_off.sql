@@ -20,7 +20,8 @@
 --   a planner path disabled at some level (enable_tidscan, enable_nestloop,
 --   enable_hashagg with enable_sort): the plan is the same, the eight page
 --   reads are the same, and since this file the cost figure is all there is
---   to it. A `Seq Scan on thoughts` under the collection or the walk means
+--   to it (PostgreSQL 14–17; 18 prints `Disabled: true` on the node instead
+--   and its cost stays ordinary). A `Seq Scan on thoughts` under the collection or the walk means
 --   row-level security on the table (SMD-1625, unchanged here); a body
 --   carrying TABLESAMPLE means 037 was pasted over 038 and this file (038's
 --   first screen). Failure modes below has each.
@@ -155,6 +156,15 @@
 --     Range path and is a sequential scan per block; the same. A trivially
 --     true policy (`USING (true)`) is folded by the planner and triggers
 --     neither — the row-level case was not reproduced by that fixture here.
+--   * PostgreSQL 18. It replaced the disable_cost penalty with a count of
+--     disabled nodes kept beside the cost (`Disabled: true` in EXPLAIN), so
+--     a disabled path no longer carries the sample past jit_above_cost and
+--     the compile under Why cannot be triggered that way there — measured
+--     on 18.6: the plan under each disabled path costs 36–1,490 and is not
+--     compiled with the clause or without it (db/test-live.ts [5e] asserts
+--     the absence on 18). The clause stands on 18 for the generic plan's
+--     flat estimate, the compile under row-level security and 13's, none of
+--     which 18 changed.
 --   * A server built without JIT (`pg_jit_available()` false: PGlite, some
 --     managed images). The clause is accepted and does nothing; db/test-live.ts
 --     [5e] runs its timing tooth only where JIT is available and asserts the
@@ -220,6 +230,7 @@
 --   Migration 038 (the function this file redefines; 038 carries 037's gate
 --   and 020's signature). PostgreSQL 14 or later as 038 requires; the `jit`
 --   GUC exists on every supported build, with or without JIT compiled in.
+--   The disabled-path trigger under Why is 14–17's (Failure modes has 18).
 --   Applied by `bun db/migrate.ts`.
 --
 -- Expected outcome
