@@ -91,8 +91,8 @@
  * nearest candidates; and `resolve`, the ticket's chain-walking read as an
  * ORACLE — the store carries no supersedes pointers (the count is printed; the
  * consolidation pass has not run here, and at one thought per session it
- * would judge whole conversations), so the arm walks the gold pairs held in
- * memory as if a reviewer had accepted exactly the right proposals: a hit that
+ * would judge whole conversations), so the arm walks each question's gold pair,
+ * held in memory, as if a reviewer had accepted exactly the right proposal: a hit that
  * is the stale session is replaced by the current one at the hit's rank, and a
  * session already listed is not listed twice. That is the upper bound of what
  * the read could buy, not a measurement of it. Every arm is paired with the
@@ -380,8 +380,11 @@ async function load(): Promise<void> {
       // row would REPLACE the first session's questions and id before the
       // merge below could union them — the merge then unioned the new list
       // with itself, and the first twin's questions were gone (second review
-      // pass). They are written after the upsert instead: lme_q as a union,
-      // lme_sid and created_at only for a row this session created.
+      // pass). They are written after the upsert instead: lme_q as a union;
+      // lme_sid only where the row has none, and created_at only when that
+      // write landed — the row's first session. (upsert_thought's `existed`
+      // flag is 035's, and a store loaded at 025, as the persisted ones were,
+      // does not return it; the write count says the same thing everywhere.)
       const envelope = {
         metadata: { source: "longmemeval", session_date: it.s.date },
         embedding_model: spec.name,
@@ -389,16 +392,15 @@ async function load(): Promise<void> {
       const rows = chunks.length
         ? await sql`SELECT upsert_thought(${it.s.text}::text, ${envelope}::jsonb, ${toVector(whole)}::vector, ${chunks}::jsonb) AS r`
         : await sql`SELECT upsert_thought(${it.s.text}::text, ${envelope}::jsonb, ${toVector(whole)}::vector) AS r`;
-      const r = rows[0]?.r as { id?: string; existed?: boolean } | undefined;
-      const id = r?.id;
+      const id = (rows[0]?.r as { id?: string } | undefined)?.id;
       if (!id) throw new Error(`upsert_thought returned no id for ${it.s.sid}`);
       // Bun serialises a parameter bound as ::jsonb with JSON.stringify, so a
       // pre-stringified value arrives as a JSON *string*; pass the array itself.
       await sql`UPDATE thoughts SET metadata = jsonb_set(metadata, '{lme_q}',
                   (SELECT to_jsonb(array_agg(DISTINCT x)) FROM jsonb_array_elements_text(coalesce(metadata->'lme_q','[]'::jsonb) || ${it.s.qids}::jsonb) AS x))
                 WHERE id = ${id}::uuid`;
-      if (r.existed !== true) {
-        await sql`UPDATE thoughts SET metadata = metadata || jsonb_build_object('lme_sid', ${it.s.sid}::text) WHERE id = ${id}::uuid AND NOT metadata ? 'lme_sid'`;
+      const first = await sql`UPDATE thoughts SET metadata = metadata || jsonb_build_object('lme_sid', ${it.s.sid}::text) WHERE id = ${id}::uuid AND NOT metadata ? 'lme_sid'`;
+      if (first.count === 1) {
         const iso = toIso(it.s.date);
         if (iso) await sql`UPDATE thoughts SET created_at = ${iso}::timestamptz WHERE id = ${id}::uuid`;
       }
