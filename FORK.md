@@ -13873,13 +13873,18 @@ source now logs one action row per id, target the cited id, tool
 `<writer>/<pointer>` — `capture_thought/derived_from`,
 `capture_thought/supersedes`, `update_thought/supersedes` — under the same
 `OB1_QUERY_LOG=on` flag, best-effort like every log write, the rows for one
-write issued concurrently, ids lower-cased before the dedup (`UUID_RE` admits
-either case; two spellings are one cite). **A cite row is a pointer the
+write in one `INSERT` (`logActions`, a forty-source synthesis is one round
+trip, and an edit's opened row travels with its cite), ids lower-cased before
+the dedup (`UUID_RE` admits either case; two spellings are one cite). **A cite row is a pointer the
 database accepted**, which is what makes it a use and not a wish: on a fresh
 row `upsert_thought` validated every id (a ghost or a loop threw, and nothing
 was logged); on a re-capture 035 wrote no pointer and validated none, so nothing
 is logged there either — the reply's note sends the caller to `update_thought`,
 and that edit, which writes the pointer, logs the cite under its own writer.
+The guard is `existed === false`, the store's affirmative "fresh row" from
+035's function: a brain at 034 without 035 reports no flag, and logs no cite,
+because there the pointer's fate is unknown (a second pass caught `!== true`
+reading the absent flag as fresh).
 (The first cut logged on the *act* of citing and a review pass found it would
 have counted a ghost or self-pointer a re-capture never checked.) The tool
 column now tells two kinds of use apart by its shape alone:
@@ -13919,10 +13924,15 @@ would survive their absence. Actions that attribute to no search (a touch
 outside the window, an id no search returned) are counted and shown, not
 dropped. Nothing changes ranking: the number first.
 
-**Not done here.** Per-*model* arms: the log does not record the embedding
-model a search ran under, and 034's `filter` column is dead on `search_thoughts`
-(SMD-1490) — whether to carry the arm there or in a column is that ticket's
-call. A read whose use ends in prose to the user, with no write and no fetch,
+**Not done here.** A typed `pointer` column on `query_log` in place of the
+`<writer>/<pointer>` convention in the free-text `tool` (a second review pass
+proposed it): declined. MCP tool names cannot contain a slash, so the
+convention cannot collide with a tool; the typed field for *what a write
+cited* belongs on the event itself, which is SMD-1730's event shape (Phase 1
+of SMD-1729), not a column bolted onto 034 now. Per-*model* arms: the log does
+not record the embedding model a search ran under, and 034's `filter` column
+is dead on `search_thoughts` (SMD-1490) — whether to carry the arm there or in
+a column is that ticket's call. A read whose use ends in prose to the user, with no write and no fetch,
 is invisible to this log, so utilization here is a **lower bound** on use and
 the ignore rate an upper bound; the write-path eval (SMD-1713) is where a
 planted fact's survival becomes observable. A fixture exported from this log's
@@ -13939,8 +13949,15 @@ the id it named and a plain capture writes none; the join attributes the cite
 to the search that returned the id; a re-capture naming a pointer logs no cite
 (the pointer was not written); the `update_thought` that then writes it logs
 the edited id as opened and the superseded id as cited. A run with the cite
-logging removed fails exactly those assertions and nothing else. `bunx tsc
---noEmit` in `server-portable/`.
+logging removed fails exactly those assertions and nothing else. The bucketed
+attribution was checked against a naive reading of the rule on 400 random logs
+(distinct timestamps, three agents including NULL, five tools, three windows):
+no mismatch. The report script was run against a throwaway Postgres with a
+seeded log: the anonymous fetch of an id its search never returned is the one
+unattributed action, tokens per used id came out at exactly what the seeded
+content lengths predict, and the gold arm read 0% ignored where the relevant
+id was cited and n/a where it was never returned. `bunx tsc --noEmit` in
+`server-portable/`.
 The measurement itself — the operator's first week of real use with the log on
 — is the ticket's Verify, not this section's: the number exists when the log
 has rows.

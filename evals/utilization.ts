@@ -64,7 +64,13 @@ export type ActionRow = {
   targetId: string;
 };
 
-/** The caller opened or touched the row — click-through relevance (034). Any plain tool name counts as opened. */
+/**
+ * The plain tool names the server logs as an open — click-through relevance
+ * (034). Any plain tool name is COUNTED as opened (never dropped); one outside
+ * this set is also reported as unknown, so a new writer that forgot the
+ * `<writer>/<pointer>` convention, or a renamed tool, is seen rather than
+ * silently folded into "opened".
+ */
 export const OPEN_TOOLS: ReadonlySet<string> = new Set(["fetch", "update_thought", "delete_thought"]);
 
 /** `<writer>/<pointer>` → the pointer the write set (`derived_from`, `supersedes`); null for a plain (opened) tool. */
@@ -80,6 +86,8 @@ export type Attribution = {
   bySearch: Map<string, Uses>;
   /** Action rows that matched no search (no prior search by that agent, in the window, returning the id). */
   unattributed: ActionRow[];
+  /** Plain tool names seen that are not in OPEN_TOOLS — counted as opened, reported as unknown. */
+  unknownTools: Map<string, number>;
 };
 
 const ms = (t: Date | string): number => (t instanceof Date ? t.getTime() : new Date(t).getTime());
@@ -98,6 +106,7 @@ const ms = (t: Date | string): number => (t instanceof Date ? t.getTime() : new 
 export function attribute(searches: SearchRow[], actions: ActionRow[], windowMinutes: number): Attribution {
   const bySearch = new Map<string, Uses>();
   const unattributed: ActionRow[] = [];
+  const unknownTools = new Map<string, number>();
   const windowMs = windowMinutes * 60_000;
 
   const byAgent = new Map<string | null, { s: SearchRow; at: number; ids: Set<string> }[]>();
@@ -109,6 +118,7 @@ export function attribute(searches: SearchRow[], actions: ActionRow[], windowMin
   for (const list of byAgent.values()) list.sort((a, b) => b.at - a.at); // newest first
 
   for (const act of actions) {
+    if (citePointerOf(act.tool) === null && !OPEN_TOOLS.has(act.tool)) unknownTools.set(act.tool, (unknownTools.get(act.tool) ?? 0) + 1);
     const at = ms(act.loggedAt);
     let hit: SearchRow | undefined;
     for (const c of byAgent.get(act.agentId) ?? []) {
@@ -129,7 +139,7 @@ export function attribute(searches: SearchRow[], actions: ActionRow[], windowMin
     else uses.opened.add(act.targetId); // any plain tool, known or not, touched the id; counted as opened, never dropped
     bySearch.set(hit.id, uses);
   }
-  return { bySearch, unattributed };
+  return { bySearch, unattributed, unknownTools };
 }
 
 /** The arm a search row ran under: the tool and the arguments the log recorded. */
@@ -166,6 +176,8 @@ export type Summary = {
   agents: Map<string, ArmStats>;
   actionsTotal: number;
   unattributed: number;
+  /** Plain tool names outside OPEN_TOOLS, with counts — counted as opened, flagged in the report. */
+  unknownTools: Map<string, number>;
   windowMinutes: number;
 };
 
@@ -196,7 +208,7 @@ export function summarise(
   windowMinutes: number,
   gold?: Map<string, Set<string>>,
 ): Summary {
-  const { bySearch, unattributed } = attribute(searches, actions, windowMinutes);
+  const { bySearch, unattributed, unknownTools } = attribute(searches, actions, windowMinutes);
   const withGold = gold !== undefined;
   const overall = emptyStats(withGold);
   const arms = new Map<string, ArmStats>();
@@ -242,7 +254,7 @@ export function summarise(
   finish(overall, usedWithTokens.overall);
   for (const [k, st] of arms) finish(st, usedWithTokens.arms.get(k) ?? 0);
   for (const [k, st] of agents) finish(st, usedWithTokens.agents.get(k) ?? 0);
-  return { overall, arms, agents, actionsTotal: actions.length, unattributed: unattributed.length, windowMinutes };
+  return { overall, arms, agents, actionsTotal: actions.length, unattributed: unattributed.length, unknownTools, windowMinutes };
 }
 
 const pct = (x: number | null): string => (x === null ? "  n/a" : `${(100 * x).toFixed(0).padStart(3)}%`);
@@ -262,7 +274,10 @@ export function renderReport(sum: Summary): string {
   const row = (label: string, st: ArmStats): string =>
     `${label.slice(0, 44).padEnd(44)} ${String(st.searches).padStart(8)} ${String(st.returned).padStart(8)} ${String(st.used).padStart(5)} ${pct(st.utilization)} ${pct(st.useRate).padStart(8)} ${String(st.cited).padStart(5)} ${String(st.opened).padStart(6)} ${num(st.tokensPerUsed).padStart(8)}` +
     (st.gold ? ` ${String(st.gold.withGold).padStart(5)} ${pct(st.gold.ignoreRate).padStart(7)}` : "");
-  lines.push(`window ${sum.windowMinutes} min; ${sum.actionsTotal} action row(s), ${sum.unattributed} attributed to no search`);
+  lines.push(`window ${sum.windowMinutes} min; ${sum.actionsTotal} action row(s), ${sum.unattributed} attributed to no search; token estimate for ${sum.overall.searchesWithTokens} of ${sum.overall.searches} search(es) (a search with a since-deleted result carries none)`);
+  if (sum.unknownTools.size > 0) {
+    lines.push(`  WARN ${[...sum.unknownTools].map(([t, n]) => `${t} ×${n}`).join(", ")}: plain tool name(s) outside {${[...OPEN_TOOLS].join(", ")}} — counted as opened; a writer that cites must log <writer>/<pointer>`);
+  }
   lines.push(head);
   lines.push("─".repeat(head.length));
   for (const [arm, st] of [...sum.arms.entries()].sort((a, b) => b[1].searches - a[1].searches)) lines.push(row(arm, st));

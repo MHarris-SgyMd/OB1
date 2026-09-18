@@ -2010,7 +2010,7 @@ if (configFailed) {
             const days = queryLogRetentionDays(env as unknown as Record<string, string | undefined>);
             add("query log", "ok",
               `present; ${on ? "ON (OB1_QUERY_LOG=on) here" : "off by default — set OB1_QUERY_LOG=on to record"}. ` +
-              `Logs each search and the fetch/edit/delete of a returned id, and a write that cites one (SMD-1719) (query text, arguments, returned ids — personal data at rest), read offline by evals/export-queries.ts. ` +
+              `Logs each search and the fetch/edit/delete of a returned id, and a write that cites one (SMD-1719) (query text, arguments, returned ids — personal data at rest), read offline by evals/export-queries.ts and evals/eval-utilization.ts (which also joins the returned ids to thoughts content for a token estimate). ` +
               `Retention: prune_query_log(${days}); a self-hosted role needs query_log INSERT (db/README.md).`);
           }
         } catch (e) {

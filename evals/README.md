@@ -2727,7 +2727,9 @@ OB1_EXPORT_WINDOW_MIN=30   # the same attribution window as export-queries.ts
 prints, per arm (search tool + recorded arguments), per agent and overall: ids
 returned, ids used (cited ∪ opened), **util** = used / returned, **use-rate** =
 searches with ≥ 1 use, the cited/opened split, and **tok/used** — approximate
-tokens returned per id used (the ids' content as stored now, chars / 4). With
+tokens returned per id used (the ids' content as stored now, chars / 4; a
+search any of whose returned ids has since been deleted carries no estimate
+rather than a partial one, and the header says how many do). With
 `--gold` (a hand-labelled fixture in `export-queries.ts`'s `{ queries: [{ query,
 relevant }] }` shape) it adds the **ignore rate**: searches whose results held a
 relevant id the caller never used. A fixture exported from the same log's touches

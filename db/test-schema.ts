@@ -4383,7 +4383,16 @@ console.log("\n[39] Memory utilization over the query log: attribution, the cite
   assert(/utilization: n\/a/.test(none) && /NO action rows/.test(none) && !/0%/.test(none), "no action rows → 'n/a', not 0%");
   const full = renderReport(sum);
   assert(/all\s+3\s+7\s+4\s+57%/.test(full) && /2 attributed to no search/.test(full), `the rendered table carries the overall row and the unattributed count (${full.split("\n").find((l) => l.startsWith("all"))})`);
+  assert(/token estimate for 2 of 3 search/.test(full), "…and says how many searches carry a token estimate, so tok/used is read over the right denominator");
   assert(/by agent/.test(full) && /\(anonymous\)/.test(full), "two agents → a by-agent block naming the anonymous bucket");
+  assert(!/WARN/.test(full) && sum.unknownTools.size === 0, "every plain tool in the fixture is a known open — no warning");
+
+  // A plain tool name outside the known opens is counted as opened (never
+  // dropped) AND flagged: a writer that forgot the `<writer>/<pointer>` form
+  // is seen, not folded silently into click-through.
+  const odd = summarise(searches, [...actions, act(AG, 5, "new_tool_that_forgot", B)], 30);
+  assert(odd.unknownTools.get("new_tool_that_forgot") === 1 && odd.overall.opened === 3 && odd.overall.cited === 2, `an unknown plain tool is counted as opened and reported (${JSON.stringify([...odd.unknownTools])})`);
+  assert(/WARN new_tool_that_forgot ×1/.test(renderReport(odd)), "…and the report warns by name");
 }
 
 report();

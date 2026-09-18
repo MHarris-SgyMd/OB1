@@ -349,26 +349,31 @@ function buildServer(principal: Principal): McpServer {
   // and the database accepted the pointer (SMD-1719's cite). evals/utilization.ts
   // splits cited from opened on the `/` alone, so a new writer that cites names
   // itself the same way and is counted without a code change there.
-  const logActionCall = async (tool: string, targetId: string): Promise<void> => {
-    if (!queryLogEnabled(env())) return;
+  const logActionCalls = async (rows: { tool: string; targetId: string }[]): Promise<void> => {
+    if (!queryLogEnabled(env()) || rows.length === 0) return;
     try {
-      await (await db()).logAction({ tool, agentId: principal.agentId, targetId });
+      // One round trip for the batch, whatever its size (a synthesis citing
+      // forty sources is forty rows in one INSERT, not forty INSERTs on the
+      // pool). Best-effort as a whole: a failure drops the batch, never the
+      // write it followed.
+      await (await db()).logActions(rows.map((r) => ({ tool: r.tool, agentId: principal.agentId, targetId: r.targetId })));
     } catch {
       // best-effort.
     }
   };
-  // One cite row per distinct id a write named as a source, lower-cased before
-  // the dedup (UUID_RE admits either case, and two spellings of one id are one
-  // cite), written concurrently — each is best-effort on its own.
-  const logCiteCalls = async (writer: string, pointers: { derived_from?: string[]; supersedes?: string }): Promise<void> => {
-    if (!queryLogEnabled(env())) return;
-    const rows = new Map<string, string>(); // id → tool, first pointer wins
+  const logActionCall = (tool: string, targetId: string): Promise<void> => logActionCalls([{ tool, targetId }]);
+  // The cite rows of one write: one per distinct id it named as a source,
+  // lower-cased before the dedup (UUID_RE admits either case, and two spellings
+  // of one id are one cite), tool `<writer>/<pointer>`, first pointer wins for
+  // an id named twice. Returns the rows so a caller can batch them with its own.
+  const citeRows = (writer: string, pointers: { derived_from?: string[]; supersedes?: string }): { tool: string; targetId: string }[] => {
+    const rows = new Map<string, string>();
     for (const id of pointers.derived_from ?? []) rows.set(id.toLowerCase(), `${writer}/derived_from`);
     if (pointers.supersedes) {
       const id = pointers.supersedes.toLowerCase();
       if (!rows.has(id)) rows.set(id, `${writer}/supersedes`);
     }
-    await Promise.all([...rows].map(([id, tool]) => logActionCall(tool, id)));
+    return [...rows].map(([targetId, tool]) => ({ tool, targetId }));
   };
 
   // ChatGPT compatibility: restricted connector surfaces, company knowledge, and deep
@@ -1048,9 +1053,13 @@ function buildServer(principal: Principal): McpServer {
         // here); on a re-capture (`existed`) 035 wrote no pointer and validated
         // none, so nothing is logged — the note below sends the caller to
         // update_thought, which logs the cite when it writes the pointer. The
+        // store says `existed: false` only when 035's function answered; a
+        // brain without 035 reports nothing, and nothing is logged there
+        // either (second review pass: `!== true` had read an absent flag as
+        // "fresh" on the one schema where the pointer's fate is unknown). The
         // vector attaching or not does not change what was written.
-        if (captured.existed !== true) {
-          await logCiteCalls("capture_thought", { derived_from, supersedes: supersedes ?? undefined });
+        if (captured.existed === false) {
+          await logActionCalls(citeRows("capture_thought", { derived_from, supersedes: supersedes ?? undefined }));
         }
 
         if (captured.embeddingFailed) {
@@ -1225,14 +1234,16 @@ function buildServer(principal: Principal): McpServer {
         if (!result.ok) return toolError(explainRefusal(result, id));
 
         // Click-through relevance (034): the caller edited this id after a
-        // search. Only on a written edit, not a refusal.
-        await logActionCall("update_thought", id);
-        // SMD-1719: an edit that sets `supersedes` names a returned id as this
-        // thought's source — the same act as a capture's pointer, and the path
-        // capture_thought's re-capture note sends the caller down. The function
-        // accepted the pointer (a ghost or a loop was refused above), so it is
-        // a cite of the SUPERSEDED id; the edited id above stays "opened".
-        if (typeof supersedes === "string") await logCiteCalls("update_thought", { supersedes });
+        // search. Only on a written edit, not a refusal. SMD-1719: an edit that
+        // sets `supersedes` also names a returned id as this thought's source —
+        // the same act as a capture's pointer, and the path capture_thought's
+        // re-capture note sends the caller down. The function accepted the
+        // pointer (a ghost or a loop was refused above), so it is a cite of the
+        // SUPERSEDED id; the edited id stays "opened". One batch, one round trip.
+        await logActionCalls([
+          { tool: "update_thought", targetId: id },
+          ...(typeof supersedes === "string" ? citeRows("update_thought", { supersedes }) : []),
+        ]);
 
         const what = [
           content !== undefined ? "content re-embedded" : null,

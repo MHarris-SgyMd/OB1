@@ -467,6 +467,15 @@ export class PostgrestStore implements ThoughtStore {
     if (error) throw new Error(error.message);
   }
 
+  async logActions(rows: QueryActionLog[]): Promise<void> {
+    if (rows.length === 0) return;
+    // PostgREST inserts an array of rows in one request.
+    const { error } = await this.client.from("query_log").insert(
+      rows.map((row) => ({ kind: "action", tool: row.tool, agent_id: row.agentId ?? null, target_id: row.targetId })),
+    );
+    if (error) throw new Error(error.message);
+  }
+
   async close(): Promise<void> {
     // supabase-js holds no pooled connection; nothing to release.
   }

@@ -860,6 +860,12 @@ export interface ThoughtStore {
    */
   logSearch(row: QuerySearchLog): Promise<void>;
   logAction(row: QueryActionLog): Promise<void>;
+  /**
+   * Several action rows in one round trip — the cite rows of one write
+   * (SMD-1719), or an edit's opened row beside its cite. Same best-effort
+   * contract as logAction; an empty list writes nothing.
+   */
+  logActions(rows: QueryActionLog[]): Promise<void>;
 
   close(): Promise<void>;
 }

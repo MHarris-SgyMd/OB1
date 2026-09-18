@@ -27,6 +27,7 @@
 import { SQL } from "bun";
 import { loadEnv } from "./env.ts";
 import { embed, parseSpec } from "./lib.ts";
+import { parsePgUuidArray } from "./query-log.ts";
 
 loadEnv();
 
@@ -52,12 +53,9 @@ type FixtureQuery = { query: string; relevant: string[]; baseline: string[] };
 type Fixture = { queries: FixtureQuery[] };
 const fixture: Fixture = JSON.parse(await Bun.file(FIXTURE).text());
 // Defensive: a fixture must carry arrays. Coerce a stray Postgres array literal
-// ("{a,b}") so a rank lookup never char-scans a string.
-const asIds = (v: unknown): string[] =>
-  Array.isArray(v) ? (v as string[])
-  : typeof v === "string" ? v.replace(/^\{|\}$/g, "").split(",").map((s) => s.replace(/^"|"$/g, "")).filter(Boolean)
-  : [];
-for (const q of fixture.queries ?? []) { q.relevant = asIds(q.relevant); q.baseline = asIds(q.baseline); }
+// ("{a,b}") so a rank lookup never char-scans a string — the one parser every
+// reader of the log shares (evals/query-log.ts).
+for (const q of fixture.queries ?? []) { q.relevant = parsePgUuidArray(q.relevant); q.baseline = parsePgUuidArray(q.baseline); }
 const queries = (fixture.queries ?? []).filter((q) => q.relevant.length);
 if (queries.length === 0) {
   process.stderr.write("The fixture has no query with a relevant id to score.\n");

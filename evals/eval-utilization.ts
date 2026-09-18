@@ -46,17 +46,21 @@ if (goldIdx >= 0 && (!goldPath || goldPath.startsWith("--"))) {
   process.stderr.write("--gold needs a fixture path\n");
   process.exit(2);
 }
-const unknown = args.filter((a, i) => a.startsWith("--") && a !== "--gold" && !(i > 0 && args[i - 1] === "--gold"));
-if (unknown.length) {
-  process.stderr.write(`unknown option ${unknown[0]}; known: --gold <fixture.json>\n`);
+// Anything that is not `--gold <path>` is refused — a fixture path given
+// without the flag must not run the report silently without its gold columns.
+const stray = args.filter((a, i) => !(a === "--gold" || (i > 0 && args[i - 1] === "--gold")));
+if (stray.length) {
+  process.stderr.write(`unexpected argument ${stray[0]}; usage: bun evals/eval-utilization.ts [--gold <fixture.json>]\n`);
   process.exit(2);
 }
 
 let gold: Map<string, Set<string>> | undefined;
 if (goldPath) {
-  const fx = JSON.parse(readFileSync(goldPath, "utf8")) as { queries?: { query: string; relevant: string[] }[] };
+  const fx = JSON.parse(readFileSync(goldPath, "utf8")) as { queries?: { query: string; relevant: unknown }[] };
   gold = new Map();
-  for (const q of fx.queries ?? []) gold.set(q.query, new Set(q.relevant));
+  // `relevant` is an array in a fresh export and may be a `{a,b}` literal in a
+  // re-serialised one (eval-replay.ts guards the same); coerce, never char-scan.
+  for (const q of fx.queries ?? []) gold.set(q.query, new Set(parsePgUuidArray(q.relevant)));
 }
 
 const sql = new SQL({ url: URL_, max: 2 });
@@ -64,10 +68,12 @@ const sql = new SQL({ url: URL_, max: 2 });
 const searchRows = await sql<{
   id: string; agent_id: string | null; logged_at: Date; tool: string; query: string | null;
   match_count: number | null; threshold: number | null; recency_weight: number | null;
-  result_ids: unknown; chars: number | null;
+  result_ids: unknown; chars: number | null; surviving: number; returned_n: number;
 }[]>`
   SELECT s.id, s.agent_id, s.logged_at, s.tool, s.query, s.match_count, s.threshold, s.recency_weight, s.result_ids,
-         (SELECT sum(length(t.content))::bigint FROM thoughts t WHERE t.id = ANY(s.result_ids)) AS chars
+         (SELECT sum(length(t.content))::bigint FROM thoughts t WHERE t.id = ANY(s.result_ids)) AS chars,
+         (SELECT count(*)::int FROM thoughts t WHERE t.id = ANY(s.result_ids)) AS surviving,
+         coalesce(cardinality(s.result_ids), 0) AS returned_n
     FROM query_log s
    WHERE s.kind = 'search'`;
 const actionRows = await sql<{ agent_id: string | null; logged_at: Date; tool: string; target_id: string }[]>`
@@ -84,7 +90,12 @@ const searches: SearchRow[] = searchRows.map((r) => ({
   threshold: r.threshold,
   recencyWeight: r.recency_weight,
   resultIds: parsePgUuidArray(r.result_ids),
-  resultTokens: r.chars === null ? null : Math.round(Number(r.chars) / 4),
+  // The estimate is whole or absent: a search whose returned ids are all still
+  // stored gets chars/4 over all of them; one where any id has since been
+  // deleted gets none, rather than a partial sum that reads as a cheaper
+  // search than it was (second review pass). Edits still shift it — said in
+  // the report's caveat.
+  resultTokens: r.chars !== null && Number(r.surviving) === Number(r.returned_n) && Number(r.returned_n) > 0 ? Math.round(Number(r.chars) / 4) : null,
 }));
 const actions: ActionRow[] = actionRows.map((r) => ({ agentId: r.agent_id, loggedAt: r.logged_at, tool: r.tool, targetId: r.target_id }));
 
