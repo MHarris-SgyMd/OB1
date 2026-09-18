@@ -13001,6 +13001,37 @@ across the six cells that ran without JIT under either function).
 recogniser for the gate's body (change 80's "Not done here"). The
 ten-million arm was not re-run; a hundred million rows was not run.
 
+**Review** — pass 1, two reviewers (a cold reader over the diff and the
+documents; a run-it reviewer mutating the mechanism in its own worktree),
+triaged fix / ticket / no. What changed: the header and this section had
+cited a change-28 line that does not exist for the two-tier disagreement —
+the sentence change 28 does have is quoted now, and the flip is named as
+the walk statement's plan, not the branch; preflight's file remedy dropped
+the keyword ALTER that 039 cannot restore in one reachable state (019
+recorded, 039 not, the keyword estimate reset), and the ledger-records-039
+wording with its `SET jit = off` ALTER had no test — test-preflight probes
+both states now (211); [5e]'s "not JIT-compiled" check was vacuous on its
+own for the tidscan case (without the function's settings the plan is a
+cheap sequential scan no JIT would touch, and the bare check passed with
+the clause absent) — it is one tooth with the disable-cost assertion now;
+[5e] runs its timing only where the server's own `jit` is on (an operator's
+database-level `jit = off` made the mutant compile nothing and the tooth
+fail with 039 correct) and bounds the fixed call at the default plus 25 ms,
+the compile's size, where `3 × default` was loose; the "byte for byte"
+claim is checked in the fast loop too (test-schema [20] re-applies 038
+alone: same body, no jit clause; 904); README's [5d] paragraph and two
+header figures corrected. What the run-it reviewer verified: the clause
+deleted from 039 is killed in all four suites — test-schema [20] and [21],
+test-upgrade [17] twice, test-live [5e] eight times including all three
+plan checks, test-preflight twice; preflight blinded to the clause is
+killed by exactly the new probe; the forced-on arm neutered is killed by
+exactly its three assertions; a line added to 039's body is killed by
+[17]'s byte-for-byte assertion; three runs of [5e] put the mutant at 51–56
+ms against 7.9–8.9 fixed and 8.0–8.2 default, four times the bound. Not
+changed: the timing message's "with 039's clause" label reads from the
+file's intent, not the catalog, and would mislead only after the catalog
+assertion before it has already failed.
+
 **The operator's path, walked.** A brain with rows migrated by `bun
 db/migrate.ts` through 039 (on a brain at 038 it is the one pending file):
 one `match_thoughts` whose `proconfig` reads `hnsw.iterative_scan=relaxed_order,

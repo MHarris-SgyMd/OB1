@@ -2015,6 +2015,14 @@ console.log("\n[20] Migration 019: the row estimates and the plan setting — ca
     ambiguous = (e as Error).message;
   }
   assert(/not unique/.test(ambiguous), `with two match_thoughts a 4-argument call is ambiguous (${ambiguous.split("\n")[0] || "it succeeded"})`);
+  // 039's body is 038's byte for byte — the clause is the whole change — and
+  // 038's file re-applied alone drops it, which is what a hand re-apply
+  // leaves and preflight's candidate scan reports (test-upgrade [17] holds
+  // the same across an upgrade; this is the fast loop's copy, review pass 1).
+  await reapply("038");
+  const mt038 = await proc(MT);
+  assert(mt038.prosrc === mt.prosrc && !("jit" in mt038.settings) && mt038.settings["enable_seqscan"] === "off",
+         `039's body is 038's byte for byte, and 038 re-applied alone carries 019's clauses without 039's (proconfig ${JSON.stringify(mt038.settings)})`);
   await reapply("012");
   const kw012 = await proc(KW);
   assert(kw012.prosrc === kw.prosrc, "019's search_thoughts_keyword body is 012's, byte for byte");

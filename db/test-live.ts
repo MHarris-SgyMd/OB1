@@ -654,8 +654,13 @@ console.log("\n[5e] A planner path disabled at session level no longer JIT-compi
     const baseline = await median([]);
     for (const [label, gucs] of CASES) {
       const under = await explained(gucs);
-      assert(topCost(under) >= 1e10 && /Tid Range Scan on thoughts/.test(under), `${label}: the planner still takes the TID Range Scan and prices the plan at disable_cost (${topCost(under).toExponential(2)})`);
-      assert(!/JIT:/.test(under), `…and under the function's settings the statement is not JIT-compiled`);
+      // One tooth, not two: "no JIT block" means something only at a cost past
+      // jit_above_cost — without the function's settings the tidscan case is a
+      // cheap sequential scan (enable_seqscan back on) that no JIT would touch,
+      // and a bare `!/JIT:/` passed with the clause absent (review pass 1, run-it).
+      const cost = topCost(under);
+      assert(cost >= 1e10 && /Tid Range Scan on thoughts/.test(under) && !/JIT:/.test(under),
+        `${label}: the planner still takes the TID Range Scan, prices the plan at disable_cost (${cost.toExponential(2)}), and under the function's settings does not JIT-compile it${/JIT:/.test(under) ? " — but a JIT block is in the plan" : ""}`);
       if (jitAvailable) {
         const forced = await explained(gucs, "on");
         assert(/JIT:/.test(forced) && /Functions: \d+/.test(forced), `…while the same statement with jit forced on IS compiled (${/JIT:[\s\S]*?Timing: ([^\n]*)/.exec(forced)?.[1] ?? "no timing line"}) — the trigger is real here, so the check above has teeth`);
