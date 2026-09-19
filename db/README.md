@@ -164,7 +164,7 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `996 assertions: 996 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `993 assertions: 993 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports forty-one migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d

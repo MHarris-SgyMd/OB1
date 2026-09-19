@@ -50,7 +50,7 @@ const TABLES = [
   "ob1_config",
   // 034's opt-in query log (SMD-1295): no foreign key either way, so its place
   // in the order is free. Absent from this list until SMD-1749's test-upgrade
-  // [18] built a schema "without 034" after a section that had applied every
+  // [19] built a schema "without 034" after a section that had applied every
   // file, and found the previous section's query_log still standing: the
   // reset had carried 034's table across every section boundary since it
   // landed, and a case about a brain that lacks it could not be built.
@@ -116,6 +116,14 @@ const FUNCTIONS = [
   "validate_derived_from(jsonb)",
   // 034 (SMD-1295); listed with its table, above.
   "prune_query_log(int)",
+  // 024, 025 and 026: the three this list had also missed, found when
+  // SMD-1749's second review pass listed what survives a reset on a fully
+  // applied brain. test-upgrade [20] asks the catalog the same question after
+  // every run, so the next name a migration adds without a line here fails
+  // there rather than in the section that happens to need it gone.
+  "thought_stats_summary()",
+  "find_derivatives(uuid, int)",
+  "trace_provenance(uuid, int, int)",
 ];
 
 export type SchemaOptions = {

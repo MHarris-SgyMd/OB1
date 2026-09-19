@@ -1470,6 +1470,34 @@ console.log("\n[19] Migration 041 on a schema without 034 — refused up front, 
   const [{ t: tbl }] = await sql`SELECT obj_description('query_log'::regclass, 'pg_class') AS t`;
   assert(/<writer>\/<pointer>/.test(String(col ?? "")) && /<writer>\/<pointer>/.test(String(tbl ?? "")), "…and both live comments name <writer>/<pointer>");
   await sql.close();
+  // Left behind: a ledger ahead of its schema (035–040 recorded over a schema
+  // through 034, plus 041's comments). [20] starts from a full brain and ends
+  // with one, so a section after it meets what every section before this one
+  // met (second review pass).
+}
+
+console.log("\n[20] test-support's schema reset leaves nothing of the fork's in public — every table, function and type a migration creates is on its drop lists (SMD-1749)");
+{
+  // The reset drops a hand-kept list, and a name a migration added without a
+  // line there survives every section boundary: 034's table did until [19]
+  // built a schema "without 034" and found it standing, and three functions
+  // (024, 025, 026) did until SMD-1749's second review pass listed the
+  // survivors on a fully applied brain. So the catalog is asked here, after a
+  // reset of a full brain, and the next omission fails in this section rather
+  // than in whichever section happens to need the object gone. Members of an
+  // extension (pgvector and pg_trgm install into public) are excepted.
+  await resetSchema(URL_, OPTS);
+  await dropSchema(URL_);
+  const sql = new SQL({ url: URL_, max: 1 });
+  const notExt = (oid: string) => `NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.objid = ${oid} AND d.deptype = 'e')`;
+  const rels = ((await sql.unsafe(`SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' AND c.relkind IN ('r','v','m','S') AND ${notExt("c.oid")} ORDER BY 1`)) as { relname: string }[]).map((r) => r.relname);
+  const fns = ((await sql.unsafe(`SELECT p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')' AS sig FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public' AND ${notExt("p.oid")} ORDER BY 1`)) as { sig: string }[]).map((r) => r.sig);
+  const types = ((await sql.unsafe(`SELECT t.typname FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace WHERE n.nspname = 'public' AND t.typtype IN ('e','c','d') AND NOT EXISTS (SELECT 1 FROM pg_class c WHERE c.reltype = t.oid) AND ${notExt("t.oid")} ORDER BY 1`)) as { typname: string }[]).map((r) => r.typname);
+  assert(rels.length === 0, `no relation of the fork's survives the reset (${rels.join(", ") || "none"})`);
+  assert(fns.length === 0, `no function of the fork's survives the reset (${fns.join(", ") || "none"})`);
+  assert(types.length === 0, `no type of the fork's survives the reset (${types.join(", ") || "none"})`);
+  await sql.close();
+  await applyMigrations(URL_, OPTS);
 }
 
 report();

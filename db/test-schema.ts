@@ -4514,24 +4514,30 @@ console.log("\n[40] Migration 041: query_log.tool's two shapes, and the table's 
     `SELECT obj_description('query_log'::regclass, 'pg_class') AS c`)).rows[0]?.c ?? "";
   assert(colComment.length > 0, "query_log.tool carries a comment (034 wrote none)");
   assert(/<writer>\/<pointer>/.test(colComment) && /<writer>\/<pointer>/.test(tblComment), "both comments name <writer>/<pointer>");
-  assert(/plain tool name.*is an OPEN/is.test(colComment) && /<writer>\/<pointer>.*is a CITE/is.test(colComment),
-    "…the column's gives both shapes: a plain name is an open, a slashed name a cite");
+  // Each shape anchored inside its own sentence ([^.]*, not a dot-all span
+  // that reaches the other sentence), so a re-issue that inverts the two
+  // meanings fails here (second review pass).
+  assert(/plain tool name[^.]*is an OPEN/.test(colComment) && /<writer>\/<pointer>[^.]*is a CITE/.test(colComment),
+    "…the column's gives both shapes, each in its own sentence: a plain name is an open, a slashed name a cite");
   assert(/named the target as its source and the database accepted the pointer/.test(colComment), "…and what a cite is: the writer named the target as its source, and the database accepted the pointer");
-  assert(/any value with a non-empty name either side of its first slash is a cite, whatever the writer/.test(colComment) && /a slash at either end is not a cite/.test(colComment) && /cannot contain a slash/.test(colComment),
-    "…the rule as the column's — a non-empty name either side of the first slash is a cite, a slash at either end is not (citePointerOf's rule, [39]) — and why the shapes cannot collide (an MCP tool name has no slash)");
+  assert(/any value with a non-empty name either side of its first slash is a cite, whatever the writer/.test(colComment) && /a slash at either end is not a cite/.test(colComment),
+    "…the rule as the column's — a non-empty name either side of the first slash is a cite, a slash at either end is not (citePointerOf's rule, [39])");
+  assert(/Neither this server's tool names nor the MCP tool-name grammar \(\[A-Za-z0-9._-\]\) carry a slash/.test(colComment) && /would be read as a cite/.test(colComment) && /OPEN_TOOLS/.test(colComment),
+    "…why the shapes do not collide here, stated as this server's rule and not a protocol guarantee, with what a foreign slashed name would read as and where an unknown plain name is reported");
   assert(/server-portable\/index\.ts/.test(colComment) && /evals\/utilization\.ts/.test(colComment),
     "…and sends a reader to index.ts and utilization.ts for when a cite is logged and how it is attributed, rather than restating them");
   // The values the comment names are the ones index.ts writes today, and [39]
   // already drives each through the reader; this section asks only that the
-  // applied text names them. Hard-coded as [39] hard-codes them: a renamed
-  // writer that stranded the applied text fails here, and the fix is a
-  // migration that re-comments, not an edit (a first review pass had this
-  // loop re-assert the reader's results too, a second copy of [39]'s tooth
-  // under a label that blamed the migration text).
-  for (const t of ["capture_thought/derived_from", "capture_thought/supersedes", "update_thought/supersedes"])
-    assert(colComment.includes(t), `…names ${t} among the cite values`);
-  for (const t of ["fetch", "update_thought", "delete_thought"])
-    assert(new RegExp(`\\b${t}\\b(?!/)`).test(colComment), `…and names ${t} as a plain name`);
+  // applied text names them — as the two enumerated lists beside their
+  // shapes, not as words somewhere in the prose ("follow-up fetch" would
+  // satisfy a word search; second review pass). Hard-coded as [39] hard-codes
+  // them: a renamed writer that stranded the applied text fails here, and the
+  // fix is a migration that re-comments, not an edit (a first pass had these
+  // re-assert the reader's results too, a second copy of [39]'s tooth).
+  assert(colComment.includes("(capture_thought/derived_from, capture_thought/supersedes, update_thought/supersedes) is a CITE"),
+    "…names the three cite values written today as one list beside their shape");
+  assert(colComment.includes("(fetch, update_thought, delete_thought) is an OPEN"),
+    "…and the three plain names as one list beside theirs");
   // 034's table text, whole — the opt-in flag, the personal-data sentence, the
   // export-time link and the pruning — so a successor that keeps only the
   // cite clause is caught too.

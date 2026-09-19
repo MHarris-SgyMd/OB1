@@ -14896,8 +14896,12 @@ change 90, `<writer>/<pointer>` — `capture_thought/derived_from`,
 named the target as its source and the database accepted the pointer: a
 **cite**, MERIT's memory-utilization signal. `evals/utilization.ts` splits the
 two on the slash alone, so a new writer that cites names itself the same way
-and is counted without a code change; an MCP tool name cannot contain a slash,
-so the convention cannot collide with a tool. The contract lived in
+and is counted without a code change. Neither this server's tool names nor
+the MCP tool-name grammar (`[A-Za-z0-9._-]`, the spec's SHOULD, which the SDK
+enforces as a warning) carry a slash, so the two shapes do not collide here —
+the server's rule, not a protocol guarantee: a foreign tool logged under a
+slashed name would read as a cite, and `utilization.ts` reports a plain name
+it does not know as unknown (`OPEN_TOOLS`) rather than folding it in. The contract lived in
 `server-portable/index.ts`'s comment beside the writer, `utilization.ts`'s
 header, `evals/README.md` and change 90's section. The **schema said
 nothing**: 034 wrote no `COMMENT ON COLUMN` for `tool` at all — the three
@@ -14982,7 +14986,18 @@ schema reset drops a fixed list of tables and functions, and 034's
 since change 65 had carried the previous section's log table across the
 boundary; nothing before this section asked for a brain that lacked it, and
 the by-hand reproduction in a fresh container fired the guard exactly as
-written. The two names are in the lists now, with the reason at the entry. With the
+written. The two names are in the lists now, with the reason at the entry —
+and a second pass, listing what survives a reset on a fully applied brain,
+found three more: `thought_stats_summary()` (024), `find_derivatives` (025)
+and `trace_provenance` (025/026), never dropped either. Those are listed
+too, and `test-upgrade` **[20]** now asks the catalog the same question after
+every run — a reset of a full brain leaves no non-extension relation,
+function or type in `public` — so the next name a migration adds without a
+line in the list fails there rather than in whichever section happens to
+need the object gone. Deriving the lists from the migrations instead
+(`config.mjs` already reads the owned function set from them for the
+vendored-SQL check) is **SMD-1819**; the tooth makes the hand-kept list safe
+until then. With the
 reset fixed, the guard's own mutant bites: the `DO` block removed, [19]'s
 plain run fails with the bare `relation "query_log" does not exist` and the
 assertion that wants the named message and the remedy fails on it. The
@@ -15023,6 +15038,25 @@ anchors on it. And it trimmed [40]: the loops over the six tool names had
 re-asserted `citePointerOf`'s results — a second copy of [39]'s tooth under a
 label that blamed the migration text — and now ask only that the applied text
 names them.
+
+**Second pass** (a cold reader over the merged branch; the run-it arm walked
+an upgrade — a brain built by main's own runner and files, then this branch's
+runner over it: 041 applied, forty skipped, no hash refusal, `--dry-run` quiet,
+preflight's query-log line reading the shape — and the three server-portable
+suites that share the reset on the merged tree). Its findings, all taken: the
+reset list's three other omissions and [20], above; the `test-support` entry's
+pointer to "[18]", which the merge had renumbered to [19] everywhere else; the
+column comment's "an MCP tool name cannot contain a slash", a protocol
+impossibility the spec does not promise (a SHOULD, a warning in the SDK) —
+stated now as the server's rule with what a foreign slashed name would read as
+and where an unknown plain name is reported; [40]'s two shape assertions had
+anchored on dot-all spans that could reach the other sentence, so a re-issue
+that *inverted* the meanings would have passed — each shape is anchored inside
+its own sentence now; and its plain-name loop had matched the word anywhere in
+the prose ("follow-up fetch" would do), so the two enumerated lists are
+asserted as strings beside their shapes instead. [19] leaves a ledger ahead of
+its schema; [20] starts from a full brain and ends with one, and [19] says so.
+The guard paste was surfaced again and stays SMD-1811's.
 
 **Upstream status:** not sent — the query log is this fork's (change 65).
 

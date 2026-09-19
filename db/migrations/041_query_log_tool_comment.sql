@@ -17,8 +17,13 @@
 --   click-through relevance). A slashed name is a CITE: the fact reached a
 --   write (MERIT's memory-utilization signal). `evals/utilization.ts` splits
 --   the two on the slash alone, so a new writer that cites names itself the
---   same way and is counted without a code change there; an MCP tool name
---   cannot contain a slash, so the convention cannot collide with a tool.
+--   same way and is counted without a code change there. Neither this
+--   server's tool names nor the MCP tool-name grammar ([A-Za-z0-9._-], the
+--   spec's SHOULD, which the SDK enforces as a warning) carry a slash, so the
+--   two shapes do not collide here — the server's rule, not a protocol
+--   guarantee: a foreign tool logged under a slashed name would read as a
+--   cite, and utilization.ts reports a plain name it does not know as unknown
+--   (OPEN_TOOLS) rather than folding it in silently.
 --
 --   The contract lives in server-portable/index.ts's comment beside the writer,
 --   evals/utilization.ts's header, evals/README.md and the FORK section. The
@@ -99,7 +104,7 @@ END
 $qc$;
 
 COMMENT ON COLUMN query_log.tool IS
-  'Which tool wrote the row. On a search row: the search tool (search, search_thoughts). On an action row, one of two shapes. A plain tool name (fetch, update_thought, delete_thought) is an OPEN: the caller went and looked at, or touched, the target (click-through relevance, SMD-1295). <writer>/<pointer> (capture_thought/derived_from, capture_thought/supersedes, update_thought/supersedes) is a CITE: the writer named the target as its source and the database accepted the pointer (SMD-1719). The rule is the column''s, not one tool''s: any value with a non-empty name either side of its first slash is a cite, whatever the writer, so a new writer that cites names itself <its tool>/<the pointer field> and is counted without a code change; a slash at either end is not a cite, and an MCP tool name cannot contain a slash, so the two shapes cannot collide. When a cite is logged (a pointer the database accepted, never a re-capture), which writers cite, and how an action is attributed to a search are the server''s and the readers'' contract, not the column''s: server-portable/index.ts beside the writer and evals/utilization.ts''s header state them. Stated here: SMD-1749.';
+  'Which tool wrote the row. On a search row: the search tool (search, search_thoughts). On an action row, one of two shapes. A plain tool name (fetch, update_thought, delete_thought) is an OPEN: the caller went and looked at, or touched, the target (click-through relevance, SMD-1295). <writer>/<pointer> (capture_thought/derived_from, capture_thought/supersedes, update_thought/supersedes) is a CITE: the writer named the target as its source and the database accepted the pointer (SMD-1719). The rule is the column''s, not one tool''s: any value with a non-empty name either side of its first slash is a cite, whatever the writer, so a new writer that cites names itself <its tool>/<the pointer field> and is counted without a code change; a slash at either end is not a cite. Neither this server''s tool names nor the MCP tool-name grammar ([A-Za-z0-9._-]) carry a slash, so the two shapes do not collide here; a foreign tool logged under a slashed name would be read as a cite, and a plain name the readers do not know is reported as unknown (evals/utilization.ts, OPEN_TOOLS). When a cite is logged (a pointer the database accepted, never a re-capture), which writers cite, and how an action is attributed to a search are the server''s and the readers'' contract, not the column''s: server-portable/index.ts beside the writer and evals/utilization.ts''s header state them. Stated here: SMD-1749.';
 
 COMMENT ON TABLE query_log IS
   'Opt-in (OB1_QUERY_LOG=on), off by default: one row per search call (the query, its arguments, and the ids returned in rank order with scores) and one per follow-up fetch/edit/delete of a returned id, or a write that cited a returned id as its source (the target; the tool is <writer>/<pointer> on a cite, and the tool column''s comment has both shapes, SMD-1719). Personal data at rest — every query typed. Nothing reads it on the hot path; the write is best-effort and never fails a search. An action is linked to its search at export time by (agent_id, target_id, time window), not at write time — there is no request/session token in the handlers. Pruned by prune_query_log(); default retention 30 days (OB1_QUERY_LOG_RETENTION_DAYS).';
