@@ -14048,7 +14048,10 @@ its job.
 Boyscout, after the passes: the two pre-existing comments that said "30–130
 ms of startup" for the generic plans at ten million rows (db/bench-hnsw.ts,
 db/test-support.ts) say 30–110, change 28's figure; db/README.md's "twenty-three
-migrations applied" says forty — no behaviour change.
+migrations applied" says forty. A second look: the unrecorded-040 probe
+asserts its two claims under two labels (225), the test-live count line's
+parenthetical is a clause, and [5d]'s comment on applying before the index
+drop says whose order it keeps — no behaviour change.
 
 **The operator's path, walked.** A brain with rows migrated by `bun
 db/migrate.ts` through 040 (on a brain at 039 it is the one pending file):

@@ -424,10 +424,10 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
   // shipped state for the sections after and nothing would say (review pass 5).
   const hasJitOff = async () => /(^|,)jit=off(,|$)/.test(String((await sql`SELECT array_to_string(proconfig, ',') AS c FROM pg_proc WHERE oid = ${MATCH_THOUGHTS_SIGNATURE}::regprocedure`)[0].c ?? ""));
   // The floor lowered to 0 for the section, so the gate runs on this heap.
-  // Applied BEFORE the index is dropped and the rows loaded, the order 039
-  // needed (040 carries no index swap, and keeps the order): 039's swap block
-  // builds the index when the shipped name is missing, and a build over
-  // 25,000 rows at the shipped width is the minute this section avoids.
+  // Applied BEFORE the index is dropped and the rows loaded. 039 needed that
+  // order — its swap block builds the index when the shipped name is missing,
+  // and a build over 25,000 rows at the shipped width is the minute this
+  // section avoids — and 040, which carries no swap, keeps it.
   await applyMigrations(URL_, { ...opts040, routeEstimateMinPages: 0 });
   assert(/IF v_pages >= 0 THEN/.test(await body()) && TID_PROBE.test(await body()) && (await hasJitOff()), "040 is installed with its floor at 0 (038's gate, carried through 039) and jit = off on the function: the sample runs on every filtered call to this table");
   await sql.unsafe(`DROP INDEX thoughts_embedding_idx`);

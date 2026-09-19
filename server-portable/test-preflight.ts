@@ -515,8 +515,9 @@ else {
   const unrecorded040 = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
   // Only the jit clause and the keyword estimate are missing here, so the file
   // is named without the parenthetical about 019's clauses (review pass 3).
-  assert(/Apply db\/migrations\/040_match_thoughts_jit_off\.sql\. Then put the keyword estimate back: SELECT '\[1\]'::vector; ALTER FUNCTION search_thoughts_keyword\(text, int, int, jsonb\) ROWS 25;/.test(unrecorded040.out) && !/the last definer of match_thoughts/.test(unrecorded040.out),
-         "…and with 040 not recorded the remedy is 040's file for the clause and the keyword ALTER beside it, which 040 cannot restore — without the note about 019's clauses, which hold");
+  assert(/Apply db\/migrations\/040_match_thoughts_jit_off\.sql\. Then put the keyword estimate back: SELECT '\[1\]'::vector; ALTER FUNCTION search_thoughts_keyword\(text, int, int, jsonb\) ROWS 25;/.test(unrecorded040.out),
+         "…and with 040 not recorded the remedy is 040's file for the clause and the keyword ALTER beside it, which 040 cannot restore");
+  assert(!/the last definer of match_thoughts/.test(unrecorded040.out), "…without the note about 019's clauses, which hold here");
   const unled040 = new SQL({ url: LIVE, max: 1 });
   await unled040.unsafe(`DROP TABLE schema_migrations`);
   await unled040.unsafe(`ALTER FUNCTION search_thoughts_keyword(text, int, int, jsonb) ROWS 25`);

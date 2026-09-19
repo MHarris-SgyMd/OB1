@@ -1249,7 +1249,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 926 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 523 assertions, real server, throwaway container (on 14–17 with JIT; on 18, or where the server has no JIT or its own jit is off, [5e]'s compile arms are one skipped group)
+./with-postgres.sh bun test-live.ts         # 523 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 ```
 
