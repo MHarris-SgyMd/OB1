@@ -504,8 +504,10 @@ export function normaliseMutation(r: Record<string, unknown> | undefined): Updat
     // Number(), not a typeof guard: a body that arrives with the count as a
     // string (a proxy, a hand-made envelope) still counts to the tool.
     citedBy: r.cited_by == null || !Number.isFinite(Number(r.cited_by)) ? undefined : Number(r.cited_by),
+    // Elements that are not objects (a truncating proxy's null) are dropped,
+    // not thrown on: the refusal is still a refusal.
     citations: Array.isArray(r.citations)
-      ? (r.citations as Record<string, unknown>[]).map((c) => ({
+      ? (r.citations as unknown[]).filter((c): c is Record<string, unknown> => c !== null && typeof c === "object").map((c) => ({
           id: String(c.id),
           thoughtId: String(c.thought_id),
           stance: String(c.stance ?? ""),

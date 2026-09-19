@@ -109,8 +109,11 @@
 --
 -- Lock order, stated
 --   delete_thought:  supersession advisory lock → the thought's row (DELETE) →
---                    the surviving citing facet rows (the guard's locking read,
---                    then its UPDATE when the delete proceeds).
+--                    the citing thoughts' rows → the citing facet rows (the
+--                    guard's locking reads, then its UPDATEs when the delete
+--                    proceeds). Thoughts before facets, because a raw delete of
+--                    a citing thought holds its row while its cascade wants
+--                    the facets (sixth review pass).
 --   record_citation: supersession advisory lock → KEY SHARE on the citing and
 --                    the source thought (its prechecks; the validate trigger
 --                    re-locks the source) → the facet row (INSERT).
@@ -292,22 +295,31 @@ BEGIN
       NEW.payload := NEW.payload || jsonb_build_object('source_deleted_id', v_deleted::uuid);
       v_deleted := (v_deleted::uuid)::text;
     END IF;
-    IF TG_OP = 'INSERT' OR OLD.payload->>'source_id' IS NOT NULL THEN
-      -- The transition the guard makes — from the source the row had — or a
-      -- detached row arriving whole; either way, only once that thought is gone.
-      IF TG_OP = 'UPDATE' AND v_deleted::uuid IS DISTINCT FROM (OLD.payload->>'source_id')::uuid THEN
+    IF TG_OP = 'INSERT' AND EXISTS (SELECT 1 FROM thoughts WHERE id = v_deleted::uuid) THEN
+      -- A detached row arriving whole whose lost source exists again — a
+      -- restore that brought the thoughts back before the facets — is
+      -- re-attached to it, as the UPDATE path below re-attaches (sixth review
+      -- pass); it then meets the live-source checks like any citation.
+      NEW.payload := (NEW.payload - 'source_deleted_id' - 'source_deleted_at') || jsonb_build_object('source_id', v_deleted::uuid);
+      v_source := v_deleted;
+    ELSE
+      IF TG_OP = 'INSERT' OR OLD.payload->>'source_id' IS NOT NULL THEN
+        -- The transition the guard makes — from the source the row had — or a
+        -- detached row arriving whole; either way, only once that thought is gone.
+        IF TG_OP = 'UPDATE' AND v_deleted::uuid IS DISTINCT FROM (OLD.payload->>'source_id')::uuid THEN
+          RAISE EXCEPTION USING ERRCODE = 'check_violation',
+            MESSAGE = format('a citation is detached only from the source it had (%s), not %s', OLD.payload->>'source_id', v_deleted);
+        END IF;
+        IF EXISTS (SELECT 1 FROM thoughts WHERE id = v_deleted::uuid) THEN
+          RAISE EXCEPTION USING ERRCODE = 'check_violation',
+            MESSAGE = format('a citation is detached only when its source is gone; thought %s still exists', v_deleted);
+        END IF;
+      ELSIF v_deleted::uuid IS DISTINCT FROM (OLD.payload->>'source_deleted_id')::uuid THEN
         RAISE EXCEPTION USING ERRCODE = 'check_violation',
-          MESSAGE = format('a citation is detached only from the source it had (%s), not %s', OLD.payload->>'source_id', v_deleted);
+          MESSAGE = 'a detached citation keeps the source it lost';
       END IF;
-      IF EXISTS (SELECT 1 FROM thoughts WHERE id = v_deleted::uuid) THEN
-        RAISE EXCEPTION USING ERRCODE = 'check_violation',
-          MESSAGE = format('a citation is detached only when its source is gone; thought %s still exists', v_deleted);
-      END IF;
-    ELSIF v_deleted::uuid IS DISTINCT FROM (OLD.payload->>'source_deleted_id')::uuid THEN
-      RAISE EXCEPTION USING ERRCODE = 'check_violation',
-        MESSAGE = 'a detached citation keeps the source it lost';
+      RETURN NEW;
     END IF;
-    RETURN NEW;
   END IF;
 
   IF v_source !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN
@@ -339,6 +351,14 @@ BEGIN
   IF v_source IS DISTINCT FROM (v_source::uuid)::text THEN
     NEW.payload := NEW.payload || jsonb_build_object('source_id', v_source::uuid);
     v_source := (v_source::uuid)::text;
+  END IF;
+  -- A live citation carries no deletion keys: the detached shape is the
+  -- guard's, and a re-attach strips them. A raw write that puts
+  -- source_deleted_id beside a live source would read as detached from a
+  -- thought that was never deleted (sixth review pass).
+  IF NEW.payload ? 'source_deleted_id' OR NEW.payload ? 'source_deleted_at' THEN
+    RAISE EXCEPTION USING ERRCODE = 'check_violation',
+      MESSAGE = 'a citation with a source carries no source_deleted_id or source_deleted_at — those are the detached shape''s, written when the source is deleted';
   END IF;
   -- The source must exist, and is locked KEY SHARE while this transaction
   -- runs — re-checked only when the pointer is new or moved, as an FK is.
@@ -425,6 +445,7 @@ DECLARE
   v_sources  int;
   v_first    uuid;
   v_ids      uuid[];
+  v_active_ids uuid[];
   v_sample   jsonb;
 BEGIN
   IF v_mode NOT IN ('refuse', 'detach') THEN
@@ -432,17 +453,32 @@ BEGIN
       MESSAGE = format('ob1.cited_delete must be refuse or detach, got %L', v_mode);
   END IF;
 
+  -- The citing THOUGHTS' rows first, before any facet: a raw delete of a
+  -- citing thought holds that row while its cascade wants the thought's
+  -- facets, so a guard that locked the facets first and the thought after (the
+  -- fifth pass's order, for the updated_at bump below) closed a cycle with
+  -- such a delete — deadlock detected, the MCP delete a fault instead of a
+  -- value. Taken here, whoever wins the thought's row the other waits, and no
+  -- cycle forms (sixth review pass; db/test-live.ts [6i] arm 6).
+  PERFORM 1 FROM thoughts t
+   WHERE t.id IN (SELECT f.thought_id FROM thought_facets f
+                    JOIN deleted d ON f.kind = 'citation' AND f.payload->>'source_id' = d.id::text)
+     FOR NO KEY UPDATE OF t;
+
   -- The citing rows, LOCKED (FOR NO KEY UPDATE) and each one's status read
   -- from the version the lock won — a citation revived under a concurrent
   -- writer is seen as active. Locked and not yet rewritten, so a refusal
   -- rewrites nothing and its row locks go with the rollback (second review
   -- pass: the first pass's UPDATE … RETURNING rewrote every citing row and
   -- threw the rewrite away on each refusal). The lock footprint, stated: a
-  -- refuse-mode delete of a source cited N times holds N facet rows until the
-  -- statement fails, and writers of those rows wait that long. No new citing
-  -- row can slip in between this read and the rewrite below: its writer's KEY
-  -- SHARE on the source waits on the DELETE's own row lock until this
-  -- transaction ends.
+  -- refuse-mode delete of a source cited N times holds N facet rows and their
+  -- thoughts until the statement fails, and writers of those rows wait that
+  -- long. No new citing row can slip in between this read and the rewrite
+  -- below: its writer's KEY SHARE on the source waits on the DELETE's own row
+  -- lock until this transaction ends. Each row is judged ONCE, here; the
+  -- refusal's sample and the rewrite both go by the ids this read classed
+  -- (sixth pass: a second thought_facet_active in the sample could disagree
+  -- with the count under a concurrent change to a superseder).
   WITH hits AS (
     SELECT f.id, thought_facet_active(f) AS active, d.id AS source
       FROM deleted d
@@ -453,8 +489,9 @@ BEGIN
          count(*) FILTER (WHERE NOT active)::int,
          count(DISTINCT source) FILTER (WHERE active)::int,
          min(source::text) FILTER (WHERE active)::uuid,
-         array_agg(id)
-    INTO v_active, v_inactive, v_sources, v_first, v_ids
+         array_agg(id),
+         array_agg(id) FILTER (WHERE active)
+    INTO v_active, v_inactive, v_sources, v_first, v_ids, v_active_ids
     FROM hits;
 
   IF v_active > 0 AND v_mode = 'refuse' THEN
@@ -472,7 +509,7 @@ BEGIN
       FROM (SELECT f.id, f.thought_id, (f.payload->>'source_id')::uuid AS source_id,
                    f.payload->>'stance' AS stance, f.payload->>'text' AS text, f.created_at
               FROM thought_facets f
-             WHERE f.id = ANY(v_ids) AND thought_facet_active(f)
+             WHERE f.id = ANY(v_active_ids)
              ORDER BY f.created_at DESC, f.id
              LIMIT 10) s;
     RAISE EXCEPTION USING ERRCODE = 'OB001',
@@ -499,8 +536,9 @@ BEGIN
     -- writing text that still asserts the statement rests on the deleted
     -- source (fifth review pass). 008's audit trigger sees an empty diff and
     -- writes no row — a facet event on the audit trail is the event shape's
-    -- (SMD-1730), not this migration's. Rows locked after the facets; nothing
-    -- that holds a citing thought's row waits on a facet or the source.
+    -- (SMD-1730), not this migration's. The rows were locked at the top of
+    -- this function, before the facets; this is a re-lock in the same
+    -- transaction and waits on nothing.
     UPDATE thoughts t SET updated_at = now()
      WHERE t.id IN (SELECT f.thought_id FROM thought_facets f WHERE f.id = ANY(v_ids));
   END IF;
@@ -545,11 +583,14 @@ DECLARE
   -- the same transaction meets the guard's default (or the caller's own
   -- setting) and not this call's choice (first review pass; [39] holds it).
   v_prev_mode text := current_setting('ob1.cited_delete', true);
-  -- The totals as the caller's transaction had them, likewise put back after
-  -- this call has read its own: a raw detach transaction that calls this in
-  -- the middle keeps the sum the guard's comment promises it (third pass).
-  v_prev_det  text := current_setting('ob1.citations_detached', true);
-  v_prev_ina  text := current_setting('ob1.citations_inactive', true);
+  -- The running totals as the caller's transaction has them, read before and
+  -- subtracted after: the guard ADDS to them, a refusal's rollback undoes its
+  -- adding, and NOT_FOUND adds nothing — so this call's own count is the
+  -- difference, with no zeroing and nothing to put back, and a raw detach
+  -- transaction that calls this in the middle keeps its sum (third pass found
+  -- the loss; the sixth replaced the zero-and-restore with the difference).
+  v_before_det int := COALESCE(NULLIF(current_setting('ob1.citations_detached', true), ''), '0')::int;
+  v_before_ina int := COALESCE(NULLIF(current_setting('ob1.citations_inactive', true), ''), '0')::int;
   v_refused   boolean := false;
   v_detail    text;
   v_json      jsonb;
@@ -563,8 +604,6 @@ BEGIN
     PERFORM set_config('ob1.actor', p_actor::text, true);
   END IF;
   PERFORM set_config('ob1.cited_delete', CASE WHEN COALESCE(p_detach, false) THEN 'detach' ELSE 'refuse' END, true);
-  PERFORM set_config('ob1.citations_detached', '0', true);
-  PERFORM set_config('ob1.citations_inactive', '0', true);
 
   -- 036: the supersession advisory lock before the DELETE — the key
   -- review_supersession_proposal, update_thought and upsert_thought take
@@ -592,11 +631,10 @@ BEGIN
   PERFORM set_config('ob1.cited_delete', COALESCE(v_prev_mode, ''), true);
 
   IF v_refused OR v_deleted IS NULL THEN
-    -- Nothing was detached: a refusal, or no row — a distinct outcome, not a
-    -- silent success; the caller asked to remove a specific thing, and not
-    -- finding it is information. The caller's totals go back as they were.
-    PERFORM set_config('ob1.citations_detached', COALESCE(v_prev_det, ''), true);
-    PERFORM set_config('ob1.citations_inactive', COALESCE(v_prev_ina, ''), true);
+    -- Nothing was detached: a refusal (whose rollback undid the guard's
+    -- adding), or no row — a distinct outcome, not a silent success; the
+    -- caller asked to remove a specific thing, and not finding it is
+    -- information.
     IF v_refused THEN
       -- The guard's DETAIL is JSON; an OB001 from anything else (a future
       -- trigger, a hand-raised one) is answered as a refusal with a count of
@@ -616,12 +654,10 @@ BEGIN
 
   -- What the guard did on the way: the active citations it detached (only with
   -- p_detach — refuse mode never reaches here with any), and the expired or
-  -- superseded ones it marked with the deleted source in either mode. Read,
-  -- then the caller's own running totals put back, this call's added to them.
-  v_detached := COALESCE(NULLIF(current_setting('ob1.citations_detached', true), ''), '0')::int;
-  v_inactive := COALESCE(NULLIF(current_setting('ob1.citations_inactive', true), ''), '0')::int;
-  PERFORM set_config('ob1.citations_detached', (COALESCE(NULLIF(v_prev_det, ''), '0')::int + v_detached)::text, true);
-  PERFORM set_config('ob1.citations_inactive', (COALESCE(NULLIF(v_prev_ina, ''), '0')::int + v_inactive)::text, true);
+  -- superseded ones it marked with the deleted source in either mode — the
+  -- difference between the running totals now and as the caller had them.
+  v_detached := COALESCE(NULLIF(current_setting('ob1.citations_detached', true), ''), '0')::int - v_before_det;
+  v_inactive := COALESCE(NULLIF(current_setting('ob1.citations_inactive', true), ''), '0')::int - v_before_ina;
   RETURN jsonb_build_object('ok', true, 'id', v_deleted, 'detached', v_detached)
          || CASE WHEN v_inactive > 0 THEN jsonb_build_object('inactive', v_inactive) ELSE '{}'::jsonb END;
 END;

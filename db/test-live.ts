@@ -1293,6 +1293,30 @@ console.log("\n[6i] A citation written while a delete of its source is in flight
     assert(w.r.ok === false && w.r.error === "SOURCE_NOT_FOUND", `…and once it commits the writer answers SOURCE_NOT_FOUND as a value, not a raised check_violation (${JSON.stringify(w.r)})`);
     assert(Number((await sql`SELECT count(*)::int AS c FROM thought_facets WHERE thought_id = ${c}::uuid`)[0].c) === 0, "nothing was written");
   }
+  // Arm 6 — a raw delete of the CITING thought while a detaching delete of the
+  // source runs. The guard locks the citing thoughts' rows before any facet:
+  // here it waits on the note's row the other transaction holds, that
+  // transaction's cascade takes the facets freely, and the detach finds nothing
+  // left to mark. With the facets locked first (the fifth pass's order) the
+  // cascade waited on the guard and the guard on the note — a deadlock.
+  {
+    const { s, c } = await mk("citing-note-deleted");
+    const wrote = (await sql`SELECT record_citation(${c}::uuid, ${s}::uuid, 'about to lose its note', 'stated') AS r`)[0].r as { ok: boolean };
+    await connW.unsafe("BEGIN");
+    await connW`SELECT 1 FROM thoughts WHERE id = ${c}::uuid FOR UPDATE`;
+    const t0 = Date.now();
+    const del = (async () => {
+      try { return { r: ((await connD`SELECT delete_thought(${s}::uuid, NULL::jsonb, true) AS r`) as { r: Env & { detached?: number } }[])[0].r, ms: Date.now() - t0 }; }
+      catch (e) { return { r: { ok: false, error: (e as Error).message } as Env, ms: Date.now() - t0 }; }
+    })();
+    assert(wrote.ok === true && (await stillWaiting(del)), "with the note's row held, the detaching delete of the source waits on it — before it has touched a facet");
+    let rawErr = "";
+    try { await connW`DELETE FROM thoughts WHERE id = ${c}::uuid`; } catch (e) { rawErr = (e as Error).message; }
+    await connW.unsafe(rawErr ? "ROLLBACK" : "COMMIT");
+    const d = await del;
+    assert(rawErr === "" && d.r.ok === true && !/deadlock/.test(d.r.error ?? ""), `the raw delete of the note runs — its cascade takes the facets, which the guard has not locked — and the source's delete then completes with nothing to detach (raw: ${rawErr || "ok"}; delete: ${JSON.stringify(d.r)})`);
+    assert(Number((await sql`SELECT count(*)::int AS c FROM thoughts WHERE id IN (${s}::uuid, ${c}::uuid)`)[0].c) === 0 && (await dangling(s)) === 0, "both thoughts are gone and nothing dangles");
+  }
   await connW.close();
   await connD.close();
   await sql`DELETE FROM thoughts`;

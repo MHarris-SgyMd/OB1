@@ -4403,8 +4403,13 @@ console.log("\n[39] Migration 041: a cited source is refused as a value and deta
   // the thought it lost must be gone.
   assert((await refuses(`INSERT INTO thought_facets (thought_id, kind, payload) VALUES ($1::uuid, 'citation', jsonb_build_object('text', 'restored', 'stance', 'stated', 'source_id', NULL, 'source_deleted_id', $2::uuid, 'source_deleted_at', now()))`, [liveNote, S])) === "",
     "a detached citation can be inserted whole — a restore keeps the history the detach kept");
-  assert(/still exists/.test(await refuses(`INSERT INTO thought_facets (thought_id, kind, payload) VALUES ($1::uuid, 'citation', jsonb_build_object('text', 'forged', 'stance', 'stated', 'source_id', NULL, 'source_deleted_id', $2::uuid, 'source_deleted_at', now()))`, [liveNote, live])),
-    "…but not one naming a live thought as its deleted source");
+  // …and one naming a thought that exists as its deleted source is re-attached
+  // to it on arrival: whether a restore that brought the thoughts back first
+  // or a forgery, what lands is a live citation of a live thought, which any
+  // writer could have inserted — nothing false remains.
+  assert((await refuses(`INSERT INTO thought_facets (thought_id, kind, payload) VALUES ($1::uuid, 'citation', jsonb_build_object('text', 'forged', 'stance', 'stated', 'source_id', NULL, 'source_deleted_id', $2::uuid, 'source_deleted_at', now()))`, [liveNote, live])) === "" &&
+           (await one<{ payload: Record<string, unknown> }>(`SELECT payload FROM thought_facets WHERE thought_id = $1::uuid AND payload->>'text' = 'forged'`, [liveNote])).payload.source_id === live,
+    "…and one naming a live thought as its deleted source arrives as a live citation of it, the deletion keys gone");
   assert((await refuses(`UPDATE thought_facets SET valid_until = now() WHERE thought_id = $1::uuid`, [C2])) === "" && (await del(live)).error === "CITED",
     "a citation the guard detached can still be edited and keeps its shape, and the live source is still refused");
   assert(/keeps the source it lost/.test(await refuses(`UPDATE thought_facets SET payload = payload || jsonb_build_object('source_deleted_id', $2::uuid) WHERE thought_id = $1::uuid`, [C2, GHOST])), "…but a detached citation cannot be re-pointed at a different lost source");
@@ -4424,6 +4429,13 @@ console.log("\n[39] Migration 041: a cited source is refused as a value and deta
     "a detached citation is re-attached to the source it lost once that thought exists again");
   const reattached = (await one<{ payload: Record<string, unknown> }>(`SELECT payload FROM thought_facets WHERE thought_id = $1::uuid AND payload->>'text' = 'an old claim'`, [C2])).payload;
   assert(reattached.source_id === S2 && !("source_deleted_id" in reattached) && !("source_deleted_at" in reattached), `…and the deletion keys are gone with the deletion (${JSON.stringify(reattached)})`);
+  // A detached row inserted whole whose lost source exists again (S2, restored above) is re-attached to it, as the UPDATE path does.
+  await db.query(`INSERT INTO thought_facets (thought_id, kind, payload) VALUES ($1::uuid, 'citation', jsonb_build_object('text', 'restored after its source', 'stance', 'stated', 'source_id', NULL, 'source_deleted_id', $2::uuid, 'source_deleted_at', now()))`, [liveNote, S2]);
+  const restoredWhole = (await one<{ payload: Record<string, unknown> }>(`SELECT payload FROM thought_facets WHERE thought_id = $1::uuid AND payload->>'text' = 'restored after its source'`, [liveNote])).payload;
+  assert(restoredWhole.source_id === S2 && !("source_deleted_id" in restoredWhole), `a detached row inserted whole after its source was restored is re-attached to it (${JSON.stringify(restoredWhole)})`);
+  // A live citation carries no deletion keys, written or added.
+  assert(/carries no source_deleted_id or source_deleted_at/.test(await refuses(`INSERT INTO thought_facets (thought_id, kind, payload) VALUES ($1::uuid, 'citation', jsonb_build_object('text', 'forged history', 'stance', 'stated', 'source_id', $2::uuid, 'source_deleted_id', $3::uuid, 'source_deleted_at', now()))`, [liveNote, live, GHOST])), "a live citation cannot be inserted with deletion keys beside its source");
+  assert(/carries no source_deleted_id or source_deleted_at/.test(await refuses(`UPDATE thought_facets SET payload = payload || jsonb_build_object('source_deleted_id', $2::uuid) WHERE thought_id = $1::uuid AND payload->>'text' = 'rests on a live source'`, [liveNote, GHOST])), "…nor given them by a raw UPDATE");
   // A detached row inserted whole with an upper-case deleted id is stored canonical, as a live source_id is.
   await db.query(`INSERT INTO thought_facets (thought_id, kind, payload) VALUES ($1::uuid, 'citation', jsonb_build_object('text', 'restored in caps', 'stance', 'stated', 'source_id', NULL, 'source_deleted_id', upper($2::text), 'source_deleted_at', now()))`, [liveNote, S]);
   assert((await one<{ d: string }>(`SELECT payload->>'source_deleted_id' AS d FROM thought_facets WHERE thought_id = $1::uuid AND payload->>'text' = 'restored in caps'`, [liveNote])).d === S, "an upper-case source_deleted_id on a restored row is stored canonical");

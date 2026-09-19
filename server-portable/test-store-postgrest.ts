@@ -527,6 +527,8 @@ console.log("\n[11] deleteThought's rpc shape over PostgREST: p_detach named and
   const coerced = normaliseMutation({ ok: false, error: "CITED", cited_by: "3", citations: [] });
   const garbage = normaliseMutation({ ok: false, error: "CITED", cited_by: "many" });
   assert(coerced.ok === false && coerced.citedBy === 3 && garbage.ok === false && garbage.citedBy === undefined, "a cited_by that arrives as a numeric string is a number to the tool, and a word is no count");
+  const holed = normaliseMutation({ ok: false, error: "CITED", cited_by: 2, citations: [null, { id: "a", thought_id: "b", stance: "stated", text: "t" }] });
+  assert(holed.ok === false && holed.citations?.length === 1 && holed.citations[0].thoughtId === "b", "a citation element that is not an object is dropped, not thrown on — the refusal stays a refusal");
   // A named call with p_id and p_actor alone — the vendored servers' rpc shape — still resolves.
   const { data, error } = await client.rpc("delete_thought", { p_id: citer, p_actor: null });
   assert(error === null && (data as { ok: boolean }).ok === true, `rpc with p_id and p_actor alone resolves through the default (${JSON.stringify(data ?? error)})`);

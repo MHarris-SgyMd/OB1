@@ -14064,7 +14064,15 @@ is part of its thought's record, so a reader holding an older
 `if_unchanged_since` is told `STALE_READ` on its next edit rather than writing
 text that still asserts the statement rests on the deleted source; 008's audit
 trigger sees an empty diff and writes no row, and a facet event on the audit
-trail is the event shape's to define (SMD-1730; fifth pass). The detached shape is accepted by the validate trigger
+trail is the event shape's to define (SMD-1730; fifth pass). That bump locked
+the citing thoughts *after* the facets, which the sixth pass caught as a
+deadlock with a raw delete of a citing thought — that delete holds the
+thought's row while its cascade wants the facets — so the guard now locks the
+citing thoughts' rows *first*, before any facet: whoever wins the thought, the
+other waits and no cycle forms ([6i] arm 6 holds it deterministically). Each
+citing row is judged once, in the locked read; the refusal's sample and the
+rewrite go by the ids that read classed, so count and sample cannot disagree
+(sixth pass). The detached shape is accepted by the validate trigger
 only as the guard writes it — from the source the row had, once that thought
 is gone, with a real timestamp — so a raw `UPDATE` cannot detach a live
 citation or forge a deletion; a detached citation is not re-pointed at a new
@@ -14074,7 +14082,11 @@ when 008/009's recovery restores that thought under its id, the deletion keys
 going with the deletion (fifth pass); a detached row may arrive *whole* by
 `INSERT` under the same checks, since a restore or an import of the facet table
 would otherwise lose exactly the history the detach kept (fourth pass), its
-deleted id stored canonical like a live one (fifth); and
+deleted id stored canonical like a live one (fifth), and re-attached at once
+when its lost source already exists again — a restore that brought the
+thoughts back first (sixth); a citation *with* a source carries no deletion
+keys, written or added, so no row reads as detached from a thought that was
+never deleted (sixth); and
 the source id is stored canonical, since
 the validate regex is case-insensitive and a raw writer's upper-case uuid would
 otherwise have been invisible to the guard's text compare — its source
@@ -14132,9 +14144,11 @@ on a delete as "cited". Success carries `detached:n` and, when non-zero,
 was there is put back after the block, so a raw `DELETE` later in the same
 transaction meets the guard's default, or the caller's own setting, and not
 this call's `p_detach` (first review pass; [39]); the two running totals are
-put back the same way with this call's added, so a raw detach transaction that
-calls the function in the middle keeps the sum the guard's comment promises
-(third pass). The two-argument overload is
+read before and subtracted after — the guard adds to them, a refusal's
+rollback undoes its adding — so this call's own count is the difference and a
+raw detach transaction that calls the function in the middle keeps its sum
+(third pass found the loss, the sixth replaced the zero-and-restore with the
+difference). The two-argument overload is
 **dropped first** (a `DEFAULT` on the third parameter beside it makes every
 two-argument call "not unique"); two-argument callers — `db/test-live.ts`
 [6g], the vendored servers' `rpc` calls — resolve through the default, which
@@ -14158,7 +14172,10 @@ foreign key would take, so a delete of that row waits for the citation's
 transaction and then, under READ COMMITTED with an `AFTER` trigger running
 after the statement's own waits, sees it. `db/test-live.ts` [6i] runs it three
 ways against a real server, five after the first pass: a raw `INSERT` holding
-`KEY SHARE` (the delete waits, then is refused, nothing dangles);
+`KEY SHARE` (the delete waits, then is refused, nothing dangles), and a sixth
+after the sixth pass — a raw delete of the citing note while the source's
+detaching delete runs, which completes with nothing to detach where the
+fifth pass's lock order deadlocked;
 `record_citation` in a transaction that goes on to write `supersedes` (the lock
 is re-entrant, no cycle, refused after the commit); the residue stated in 041's
 header — a raw writer whose transaction takes the advisory lock *after* the
@@ -14254,7 +14271,10 @@ From the fifth: the refusal's `DETAIL` dropped — which first crashed the
 function on an empty string as JSON, so the parse is defensive and an `OB001`
 without the guard's JSON answers a count of nothing — a detached citation
 refused its own restored source, the deleted id stored as written, the citing
-thought's clock not moved.
+thought's clock not moved. From the sixth: the citing thoughts locked after
+the facets ([6i] arm 6 deadlocks), a live citation accepting deletion keys, a
+detached row inserted whole refused its restored source, the store throwing
+on a null citation element.
 
 **Considered and kept as is.** The third review pass argued the source pointer
 should be typed columns — `source_id uuid`, `source_deleted_id uuid`,

@@ -288,6 +288,9 @@ function explainRefusal(
       // in the error), so a CITED envelope with neither is one the function did
       // not write — a proxy, a truncated body. Say so rather than "0 citations".
       if (total <= 0) return `Refused: other thoughts cite ${id} as their source, but the reply carried no count and no citing rows — re-read the thought (fetch takes the id) before deciding. To delete anyway, pass detach_citations: true.`;
+      // A count with no rows (a proxy that dropped the array): no list, no
+      // dangling colon, the same advice.
+      if (rows.length === 0) return `Refused: ${total} citation${total === 1 ? "" : "s"} on other thoughts rest${total === 1 ? "s" : ""} on ${id} as ${total === 1 ? "its" : "their"} source, but the citing rows were not returned — re-read the thought (fetch takes the id) before deciding. To delete anyway, pass detach_citations: true.`;
       return `Refused: ${total} citation${total === 1 ? "" : "s"} on other thoughts rest${total === 1 ? "s" : ""} on ${id} as ${total === 1 ? "its" : "their"} source — deleting it would leave ${total === 1 ? "that statement" : "those statements"} resting on nothing:\n${rows.join("\n")}${more > 0 ? `\n  …and ${more} more` : ""}\nRead the citing thoughts first (fetch takes the id). To delete anyway, pass detach_citations: true — each citation keeps its text and stance, loses its source, and records ${id} and the time as the deleted source.`;
     }
     default:
