@@ -72,8 +72,8 @@
 --      DELETE inside a BEGIN … EXCEPTION block that catches exactly SQLSTATE
 --      'OB001' and returns {ok:false, error:'CITED', id, cited_by, citations}
 --      — the count and up to ten citing rows, newest first, read after the
---      subtransaction rolled back and in the same transaction, so they describe
---      the state the guard saw. Any other error — a real 23503, a permission
+--      subtransaction rolled back; when the citing rows are gone by then, the
+--      delete is tried once more. Any other error — a real 23503, a permission
 --      failure — propagates as the fault it is. Success carries detached:n and,
 --      when non-zero, inactive:m. The two-argument overload is DROPPED first:
 --      with a DEFAULT on the third parameter, leaving it would make every
@@ -116,7 +116,12 @@
 --   A raw INSERT INTO thought_facets skips the advisory lock and takes only
 --   KEY SHARE; it cannot deadlock delete_thought unless its own transaction goes
 --   on to take the advisory lock — the residue every raw writer on this fork
---   has, stated as 036's header states the delete's.
+--   has, stated as 036's header states the delete's. A raw UPDATE of a facet's
+--   valid_until or superseded_by — the only way to expire or supersede a
+--   citation until a writer for it lands with the write side (SMD-1733) —
+--   takes the facet row outside the order the same way, and the guard takes
+--   those rows FOR NO KEY UPDATE after the thought's: the same residue, the
+--   same shape (fourth review pass).
 --
 -- Callers that delete around delete_thought
 --   Three vendored servers issue a raw `.delete()` on thoughts —
@@ -255,18 +260,19 @@ BEGIN
   END IF;
 
   IF v_source IS NULL THEN
-    -- Only the detached shape may carry no source, and only the guard can
-    -- have written it: source_deleted_id is the source this row HAD, that
-    -- thought is gone, source_deleted_at is a timestamp. A raw UPDATE that
-    -- nulls the source of a live citation, names another thought as the one
-    -- deleted, or writes a time that is not one is refused (second review
-    -- pass); a row already detached keeps what it lost. A citation written
-    -- without a source is not a citation.
-    IF TG_OP = 'INSERT' OR v_deleted IS NULL
+    -- Only the detached shape may carry no source: source_deleted_id is the
+    -- source this row had, that thought is gone, source_deleted_at is a
+    -- timestamp. The guard writes it as a transition; a restore or an import
+    -- inserts it whole (fourth review pass), and both meet the same checks. A
+    -- raw UPDATE that nulls the source of a live citation, names another
+    -- thought as the one deleted, or writes a time that is not one is refused
+    -- (second pass); a row already detached keeps what it lost. A citation
+    -- written without a source and without that history is not a citation.
+    IF v_deleted IS NULL
        OR v_deleted !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
        OR NEW.payload->>'source_deleted_at' IS NULL THEN
       RAISE EXCEPTION USING ERRCODE = 'check_violation',
-        MESSAGE = 'a citation names its source: payload.source_id must be a thought id (null only after the guard detached it, with source_deleted_id and source_deleted_at set)';
+        MESSAGE = 'a citation names its source: payload.source_id must be a thought id (null only with source_deleted_id and source_deleted_at — the shape the guard writes when a source is deleted, or a detached row restored whole)';
     END IF;
     BEGIN
       PERFORM (NEW.payload->>'source_deleted_at')::timestamptz;
@@ -274,10 +280,10 @@ BEGIN
       RAISE EXCEPTION USING ERRCODE = 'check_violation',
         MESSAGE = format('a detached citation''s source_deleted_at must be a timestamp, got %L', left(NEW.payload->>'source_deleted_at', 40));
     END;
-    IF OLD.payload->>'source_id' IS NOT NULL THEN
-      -- The transition, which only the guard makes: from the source it had, and
-      -- only once that thought is gone.
-      IF v_deleted::uuid IS DISTINCT FROM (OLD.payload->>'source_id')::uuid THEN
+    IF TG_OP = 'INSERT' OR OLD.payload->>'source_id' IS NOT NULL THEN
+      -- The transition the guard makes — from the source the row had — or a
+      -- detached row arriving whole; either way, only once that thought is gone.
+      IF TG_OP = 'UPDATE' AND v_deleted::uuid IS DISTINCT FROM (OLD.payload->>'source_id')::uuid THEN
         RAISE EXCEPTION USING ERRCODE = 'check_violation',
           MESSAGE = format('a citation is detached only from the source it had (%s), not %s', OLD.payload->>'source_id', v_deleted);
       END IF;
@@ -399,6 +405,7 @@ DECLARE
   v_inactive int;
   v_sources  int;
   v_first    uuid;
+  v_ids      uuid[];
 BEGIN
   IF v_mode NOT IN ('refuse', 'detach') THEN
     RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
@@ -422,8 +429,9 @@ BEGIN
   SELECT count(*) FILTER (WHERE active)::int,
          count(*) FILTER (WHERE NOT active)::int,
          count(DISTINCT source) FILTER (WHERE active)::int,
-         min(source::text) FILTER (WHERE active)::uuid
-    INTO v_active, v_inactive, v_sources, v_first
+         min(source::text) FILTER (WHERE active)::uuid,
+         array_agg(id)
+    INTO v_active, v_inactive, v_sources, v_first, v_ids
     FROM hits;
 
   IF v_active > 0 AND v_mode = 'refuse' THEN
@@ -438,12 +446,13 @@ BEGIN
   -- Detach — every surviving citing row, active or not, marked with the source
   -- it lost (source_id null, source_deleted_id / source_deleted_at), through
   -- thought_facets_validate, which accepts exactly this shape from a source
-  -- that is gone. The rows are the ones locked above.
+  -- that is gone. The rows are the ones locked above, by id — one set by
+  -- construction, not two predicates that happen to match.
   IF v_active + v_inactive > 0 THEN
     UPDATE thought_facets f
        SET payload = f.payload || jsonb_build_object('source_id', NULL, 'source_deleted_id', d.id, 'source_deleted_at', now())
       FROM deleted d
-     WHERE f.kind = 'citation' AND f.payload->>'source_id' = d.id::text;
+     WHERE f.id = ANY(v_ids) AND f.payload->>'source_id' = d.id::text;
   END IF;
   -- Totals for the caller, summed across the statements of a transaction.
   -- delete_thought zeroes them first and reads them after its one statement.
@@ -491,6 +500,7 @@ DECLARE
   v_prev_det  text := current_setting('ob1.citations_detached', true);
   v_prev_ina  text := current_setting('ob1.citations_inactive', true);
   v_refused   boolean := false;
+  v_try       int;
   v_cited     int;
   v_citations jsonb;
   v_detached  int;
@@ -515,23 +525,25 @@ BEGIN
   -- acquired, and this one must outlive a refusal.
   PERFORM pg_advisory_xact_lock(hashtext('ob1:supersession-review'));
 
-  BEGIN
-    DELETE FROM thoughts WHERE id = p_id RETURNING id INTO v_deleted;
-  EXCEPTION WHEN SQLSTATE 'OB001' THEN
-    -- The guard refused (041). Only this SQLSTATE is caught: a real
-    -- foreign_key_violation, a permission failure, anything else is the fault
-    -- it is and propagates.
-    v_refused := true;
-  END;
-  PERFORM set_config('ob1.cited_delete', COALESCE(v_prev_mode, ''), true);
-
-  IF v_refused THEN
-    -- Nothing was detached; the caller's totals go back as they were.
-    PERFORM set_config('ob1.citations_detached', COALESCE(v_prev_det, ''), true);
-    PERFORM set_config('ob1.citations_inactive', COALESCE(v_prev_ina, ''), true);
+  -- The DELETE, and one more try when a refusal's sample comes back empty. The
+  -- sample is read after the subtransaction rolled back — its row locks
+  -- released — under a fresh READ COMMITTED snapshot, so the citing rows the
+  -- guard saw may have gone since (expired, superseded, their note deleted). A
+  -- refusal with nothing behind it is answered by asking again rather than
+  -- reported (fourth review pass); a second refusal is reported as it stands.
+  FOR v_try IN 1..2 LOOP
+    v_refused := false;
+    BEGIN
+      DELETE FROM thoughts WHERE id = p_id RETURNING id INTO v_deleted;
+    EXCEPTION WHEN SQLSTATE 'OB001' THEN
+      -- The guard refused (041). Only this SQLSTATE is caught: a real
+      -- foreign_key_violation, a permission failure, anything else is the fault
+      -- it is and propagates.
+      v_refused := true;
+    END;
+    EXIT WHEN NOT v_refused;
     -- Answer with what cites the row, not the message: the count and up to ten
-    -- citing rows, newest first, read after the subtransaction rolled back, in
-    -- the same transaction — the state the guard saw.
+    -- citing rows, newest first.
     SELECT count(*)::int,
            COALESCE(jsonb_agg(jsonb_build_object('id', f.id, 'thought_id', f.thought_id,
                                                  'stance', f.payload->>'stance', 'text', f.payload->>'text',
@@ -542,16 +554,20 @@ BEGIN
               FROM thought_facets f
              WHERE f.kind = 'citation' AND f.payload->>'source_id' = p_id::text
                AND thought_facet_active(f)) f;
-    RETURN jsonb_build_object('ok', false, 'error', 'CITED', 'id', p_id,
-                              'cited_by', COALESCE(v_cited, 0), 'citations', v_citations);
-  END IF;
+    EXIT WHEN v_cited > 0 OR v_try = 2;
+  END LOOP;
+  PERFORM set_config('ob1.cited_delete', COALESCE(v_prev_mode, ''), true);
 
-  IF v_deleted IS NULL THEN
-    -- A distinct outcome, not a silent success. The caller asked to remove a
-    -- specific thing; not finding it is information. The guard ran over no
-    -- rows; the caller's totals go back as they were.
+  IF v_refused OR v_deleted IS NULL THEN
+    -- Nothing was detached: a refusal, or no row — a distinct outcome, not a
+    -- silent success; the caller asked to remove a specific thing, and not
+    -- finding it is information. The caller's totals go back as they were.
     PERFORM set_config('ob1.citations_detached', COALESCE(v_prev_det, ''), true);
     PERFORM set_config('ob1.citations_inactive', COALESCE(v_prev_ina, ''), true);
+    IF v_refused THEN
+      RETURN jsonb_build_object('ok', false, 'error', 'CITED', 'id', p_id,
+                                'cited_by', COALESCE(v_cited, 0), 'citations', v_citations);
+    END IF;
     RETURN jsonb_build_object('ok', false, 'error', 'NOT_FOUND');
   END IF;
 

@@ -4338,7 +4338,8 @@ console.log("\n[39] Migration 041: a cited source is refused as a value and deta
   // mention foreign_key_violation as what it does NOT catch.
   const caught = [...src.matchAll(/EXCEPTION\s+WHEN\s+(.+?)\s+THEN/g)].map((m) => m[1]);
   assert(caught.length === 1 && caught[0] === "SQLSTATE 'OB001'", `the function catches the guard's own SQLSTATE and nothing else — a real foreign-key failure is not its to answer (${caught.join(" | ") || "no EXCEPTION clause"})`);
-  assert(src.indexOf("pg_advisory_xact_lock(hashtext('ob1:supersession-review'))") > 0 && src.indexOf("pg_advisory_xact_lock") < src.indexOf("  BEGIN\n    DELETE FROM thoughts WHERE id = p_id"), "the supersession lock is taken before the block the DELETE runs in, so a refusal's rollback does not release it");
+  assert(src.indexOf("pg_advisory_xact_lock(hashtext('ob1:supersession-review'))") > 0 && src.indexOf("pg_advisory_xact_lock") < src.indexOf("FOR v_try IN 1..2 LOOP") && src.indexOf("FOR v_try IN 1..2 LOOP") < src.indexOf("DELETE FROM thoughts WHERE id = p_id"),
+    "the supersession lock is taken before the loop the DELETE runs in, so a refusal's rollback does not release it");
   const idx = await q<{ indexdef: string }>(`SELECT indexdef FROM pg_indexes WHERE tablename = 'thought_facets' ORDER BY 1`);
   assert(idx.some((i) => /\(\(payload ->> 'source_id'::text\)\)/.test(i.indexdef) && /WHERE \(kind = 'citation'::text\)/.test(i.indexdef)), `the guard's lookup has its partial expression index (${idx.map((i) => i.indexdef.replace(/^CREATE INDEX /, "").split(" ON ")[0]).join(", ")})`);
   const w = String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = 'record_citation(uuid, uuid, text, text)'::regprocedure`)).s);
@@ -4365,7 +4366,7 @@ console.log("\n[39] Migration 041: a cited source is refused as a value and deta
   const facet = (await one<{ payload: Record<string, unknown> }>(`SELECT payload FROM thought_facets WHERE thought_id = $1::uuid`, [C])).payload;
   assert(facet.source_id === null && facet.source_deleted_id === S && typeof facet.source_deleted_at === "string" && facet.text === "the limit is 600 a minute" && facet.stance === "retrieved", `the citation keeps its text and stance and records the deleted source (${JSON.stringify(facet)})`);
   assert((await one<{ c: number }>(`SELECT count(*)::int AS c FROM thought_audit WHERE thought_id = $1::uuid AND action = 'delete'`, [S])).c === 1, "…and the delete is audited — the settings were made outside the block the refusal rolls back");
-  assert(/null only after the guard detached it/.test(await refuses(`UPDATE thought_facets SET payload = payload - 'source_deleted_id' WHERE thought_id = $1::uuid`, [C])), "the detached shape needs source_deleted_id — a citation cannot simply lose its source");
+  assert(/must be a thought id \(null only with source_deleted_id/.test(await refuses(`UPDATE thought_facets SET payload = payload - 'source_deleted_id' WHERE thought_id = $1::uuid`, [C])), "the detached shape needs source_deleted_id — a citation cannot simply lose its source");
   assert((await del(C)).ok === true && (await one<{ c: number }>(`SELECT count(*)::int AS c FROM thought_facets`)).c === 0, "deleting the citing thought cascades its facets");
 
   // History never blocks, and is marked when the source goes.
@@ -4396,6 +4397,12 @@ console.log("\n[39] Migration 041: a cited source is refused as a value and deta
     "…nor name another thought as the one deleted");
   assert(/source_deleted_at must be a timestamp/.test(await refuses(`UPDATE thought_facets SET payload = payload || '{"source_id":null,"source_deleted_at":"soon"}'::jsonb || jsonb_build_object('source_deleted_id', $2::uuid) WHERE thought_id = $1::uuid`, [liveNote, live])),
     "…nor write a time that is not one");
+  // A detached row arrives whole — a restore, an import — under the same checks:
+  // the thought it lost must be gone.
+  assert((await refuses(`INSERT INTO thought_facets (thought_id, kind, payload) VALUES ($1::uuid, 'citation', jsonb_build_object('text', 'restored', 'stance', 'stated', 'source_id', NULL, 'source_deleted_id', $2::uuid, 'source_deleted_at', now()))`, [liveNote, S])) === "",
+    "a detached citation can be inserted whole — a restore keeps the history the detach kept");
+  assert(/still exists/.test(await refuses(`INSERT INTO thought_facets (thought_id, kind, payload) VALUES ($1::uuid, 'citation', jsonb_build_object('text', 'forged', 'stance', 'stated', 'source_id', NULL, 'source_deleted_id', $2::uuid, 'source_deleted_at', now()))`, [liveNote, live])),
+    "…but not one naming a live thought as its deleted source");
   assert((await refuses(`UPDATE thought_facets SET valid_until = now() WHERE thought_id = $1::uuid`, [C2])) === "" && (await del(live)).error === "CITED",
     "a citation the guard detached can still be edited and keeps its shape, and the live source is still refused");
   assert(/keeps the source it lost/.test(await refuses(`UPDATE thought_facets SET payload = payload || jsonb_build_object('source_deleted_id', $2::uuid) WHERE thought_id = $1::uuid`, [C2, GHOST])), "…but a detached citation cannot be re-pointed at a different lost source");

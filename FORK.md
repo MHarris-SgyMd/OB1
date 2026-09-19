@@ -14060,7 +14060,10 @@ only as the guard writes it — from the source the row had, once that thought
 is gone, with a real timestamp — so a raw `UPDATE` cannot detach a live
 citation or forge a deletion; a detached citation is not re-pointed at a new
 source either, since the reverse transition would leave the deletion keys
-beside a live source (third pass); and the source id is stored canonical, since
+beside a live source (third pass); a detached row may arrive *whole* by
+`INSERT` under the same checks, since a restore or an import of the facet table
+would otherwise lose exactly the history the detach kept (fourth pass); and
+the source id is stored canonical, since
 the validate regex is case-insensitive and a raw writer's upper-case uuid would
 otherwise have been invisible to the guard's text compare — its source
 deletable from under it (both second pass; [39]). `superseded_by` carries a
@@ -14098,7 +14101,11 @@ savepoint's rollback releases the advisory locks it acquired and this one must
 outlive a refusal; then the `DELETE` inside `BEGIN … EXCEPTION WHEN SQLSTATE
 'OB001'`, answering `{ok:false, error:'CITED', id, cited_by, citations}` — the
 count and up to ten citing rows, newest first, read after the rollback in the
-same transaction, the state the guard saw. Only that SQLSTATE is caught: a real
+same transaction — under a fresh snapshot, so the citing rows the guard saw
+may have gone since, and when the sample comes back empty the delete is tried
+once more rather than a refusal with nothing behind it reported (fourth pass;
+a second empty refusal is reported as `cited_by: 0`, which the tool words as
+"retry"). Only that SQLSTATE is caught: a real
 `23503`, a permission failure, anything else propagates as the fault it is —
 the proposal's `WHEN foreign_key_violation` would have reported every FK failure
 on a delete as "cited". Success carries `detached:n` and, when non-zero,
@@ -14138,7 +14145,10 @@ is re-entrant, no cycle, refused after the commit); the residue stated in 041's
 header — a raw writer whose transaction takes the advisory lock *after* the
 row, through `update_thought`, against the waiting delete — which deadlocks,
 deterministically, and Postgres breaks it with nothing dangling either way (that
-arm is what `record_citation`'s order exists to avoid); a citation revived
+arm is what `record_citation`'s order exists to avoid, and a raw `UPDATE` of a
+facet's `valid_until` or `superseded_by` — the only way to expire or supersede
+a citation until the write side lands a writer for it, SMD-1733 — is the same
+residue in the same shape, stated in the header; fourth pass); a citation revived
 under an open transaction while its source is deleted (the delete waits on the
 row and reads the revived version: refused); and a raw delete of the source in
 flight while `record_citation` runs (it waits on the row and answers
@@ -14212,7 +14222,10 @@ form as current, the id stored as written, a live source detached by a raw
 `UPDATE`, a non-timestamp accepted as the deletion time, a `source_deleted_id`
 the row never had, the store's `typeof` guard on the count; and from the third
 pass, a detached citation re-pointed, the superseder index dropped, the totals
-not put back, the isolation check treating every level as read committed.
+not put back, the isolation check treating every level as read committed; and
+from the fourth, a detached row refused on `INSERT`. The fourth pass's retry
+of an empty refusal has no deterministic fixture — the gap it closes is the
+microseconds between a rollback and a read — and is held by reading.
 
 **Considered and kept as is.** The third review pass argued the source pointer
 should be typed columns — `source_id uuid`, `source_deleted_id uuid`,
