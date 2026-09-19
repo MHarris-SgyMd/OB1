@@ -786,7 +786,7 @@ export async function applyFunctionSettings(tx: SQL, opts: { scope?: "transactio
  * two of them nowhere.
  *
  * COSTS stays ON. It was OFF for legibility until SMD-1018 found every generic
- * plan at ten million rows carrying 30–130 ms of startup the custom plan of
+ * plan at ten million rows carrying 30–110 ms of startup the custom plan of
  * the same shape did not, and could not say why: EXPLAIN prints its JIT
  * summary only when costs are printed, so the one line that would have named
  * the cost was suppressed with them. The estimated cost is also what decides

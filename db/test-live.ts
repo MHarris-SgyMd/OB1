@@ -414,16 +414,22 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
   await sql`DELETE FROM thoughts`;
   const [{ hnswDef }] = await sql.unsafe(`SELECT pg_get_indexdef('thoughts_embedding_idx'::regclass) AS "hnswDef"`);
   // Read by the finally block below as well as the section: the last definer
-  // of match_thoughts — 039, which carries 038's gate — applied through
-  // test-support with the one override SchemaOptions carries.
-  const opts039 = { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f: string) => f.startsWith("039") };
+  // of match_thoughts — 040, 039's body (038's gate, the half-precision walk)
+  // run with jit off — applied through test-support with the one override
+  // SchemaOptions carries.
+  const opts040 = { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f: string) => f.startsWith("040") };
   const body = async () => String((await sql`SELECT prosrc AS s FROM pg_proc WHERE oid = ${MATCH_THOUGHTS_SIGNATURE}::regprocedure`)[0].s);
+  // 040's clause, read with the body: 039's body satisfies every other check
+  // here, so without this a slip back to applying 039 would leave 039 as the
+  // shipped state for the sections after and nothing would say (review pass 5).
+  const hasJitOff = async () => /(^|,)jit=off(,|$)/.test(String((await sql`SELECT array_to_string(proconfig, ',') AS c FROM pg_proc WHERE oid = ${MATCH_THOUGHTS_SIGNATURE}::regprocedure`)[0].c ?? ""));
   // The floor lowered to 0 for the section, so the gate runs on this heap.
-  // Applied BEFORE the index is dropped and the rows loaded: 039's swap block
-  // builds the index when the shipped name is missing, and a build over
-  // 25,000 rows at the shipped width is the minute this section avoids.
-  await applyMigrations(URL_, { ...opts039, routeEstimateMinPages: 0 });
-  assert(/IF v_pages >= 0 THEN/.test(await body()) && TID_PROBE.test(await body()), "039 is installed with its floor at 0 (038's gate, carried): the sample runs on every filtered call to this table");
+  // Applied BEFORE the index is dropped and the rows loaded. 039 needed that
+  // order — its swap block builds the index when the shipped name is missing,
+  // and a build over 25,000 rows at the shipped width is the minute this
+  // section avoids — and 040, which carries no swap, keeps it.
+  await applyMigrations(URL_, { ...opts040, routeEstimateMinPages: 0 });
+  assert(/IF v_pages >= 0 THEN/.test(await body()) && TID_PROBE.test(await body()) && (await hasJitOff()), "040 is installed with its floor at 0 (038's gate, carried through 039) and jit = off on the function: the sample runs on every filtered call to this table");
   await sql.unsafe(`DROP INDEX thoughts_embedding_idx`);
   // User triggers off for the load, as the bench does: 008's audit trigger
   // would write a row per row (25,000 here, then 25,000 more for the DELETE)
@@ -446,8 +452,8 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
     const [{ pages }] = await sql.unsafe(`SELECT (pg_relation_size(to_regclass('thoughts')) / current_setting('block_size')::int)::int AS pages`);
     assert(Number(pages) > 0 && Number(pages) < ROUTE_ESTIMATE_MIN_PAGES, `${N.toLocaleString()} rows at ${EMBEDDING_DIM} dimensions are ${pages} heap pages (the vectors are TOASTed), under the shipped floor of ${ROUTE_ESTIMATE_MIN_PAGES}`);
 
-    // The deployed body — 039, carrying 038's sample — kept for the timing at the end: by then 020's re-apply has replaced it.
-    const body038 = await body();
+    // The deployed body — 040, carrying 038's sample — kept for the timing at the end: by then 020's re-apply has replaced it.
+    const bodyGate = await body();
 
     // The observable: 014's collection is one scan of the GIN index per call,
     // and nothing else in a call to this table scans it the same way twice — so
@@ -520,12 +526,12 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
     const THIN = '{"thin": true}';
     const gatedBroad = await measure(BROAD);
     const gatedThin = await measure(THIN);
-    assert(gatedBroad.agree === QUERIES, `under 038, a filter matching every row (${N.toLocaleString()}, the walk) returns the exact top-10 on ${gatedBroad.agree}/${QUERIES} queries — without an HNSW index the walk is exact`);
+    assert(gatedBroad.agree === QUERIES, `under the gate (040, carrying 038's), a filter matching every row (${N.toLocaleString()}, the walk) returns the exact top-10 on ${gatedBroad.agree}/${QUERIES} queries — without an HNSW index the walk is exact`);
     assert(gatedThin.agree === QUERIES, `…and a filter matching ${N / 250} rows (the exact branch) on ${gatedThin.agree}/${QUERIES}`);
 
     // 020's body on the same table — the collection on every filtered call.
     await applyMigrations(URL_, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("020") });
-    assert(!TID_PROBE.test(await body()) && !/v_broad/.test(await body()), "020 re-applied over 038: the body has no sample and no gate (the state a hand re-apply of 020 leaves; preflight's remedy names 038 for that reason)");
+    assert(!TID_PROBE.test(await body()) && !/v_broad/.test(await body()), "020 re-applied over 040: the body has no sample and no gate (the state a hand re-apply of 020 leaves; preflight's remedy names 040, the last definer, for that reason)");
     const plainBroad = await measure(BROAD);
     const plainThin = await measure(THIN);
     // The raw scan counts, not the per-call quotients: x/20 − y/20 is not
@@ -540,8 +546,8 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
     // bodies and cancel. Exactly one fewer per call is the band — 037's draw
     // could reach fewer than three pages and missed, which is why this
     // section once accepted five misses in twenty.
-    assert(saved === QUERIES, `on the broad filter 038 makes exactly one fewer GIN scan per call than 020 over ${QUERIES} calls — the collection skipped on every call (020: ${plainBroad.scansPerCall.toFixed(2)} a call, 038: ${gatedBroad.scansPerCall.toFixed(2)}; per call 020 [${plainBroad.perCall.join(" ")}], 038 [${gatedBroad.perCall.join(" ")}])`);
-    assert(plainThin.scans === gatedThin.scans, `on the thin filter both bodies scan the GIN index the same ${gatedThin.scansPerCall.toFixed(2)} times a call — the collection ran, and the exact branch answered (per call 020 [${plainThin.perCall.join(" ")}], 038 [${gatedThin.perCall.join(" ")}])`);
+    assert(saved === QUERIES, `on the broad filter the gate makes exactly one fewer GIN scan per call than 020 over ${QUERIES} calls — the collection skipped on every call (020: ${plainBroad.scansPerCall.toFixed(2)} a call, 040: ${gatedBroad.scansPerCall.toFixed(2)}; per call 020 [${plainBroad.perCall.join(" ")}], 040 [${gatedBroad.perCall.join(" ")}])`);
+    assert(plainThin.scans === gatedThin.scans, `on the thin filter both bodies scan the GIN index the same ${gatedThin.scansPerCall.toFixed(2)} times a call — the collection ran, and the exact branch answered (per call 020 [${plainThin.perCall.join(" ")}], 040 [${gatedThin.perCall.join(" ")}])`);
     assert(plainBroad.agree === QUERIES && plainThin.agree === QUERIES, "…and 020's answers are the same exact top-10 (the gate changed the route, not the answer)");
 
     // The sample's cost against the collection's on this table, printed for the
@@ -553,7 +559,7 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
     };
     // The deployed statement, read out of 038's body rather than a copy kept
     // here — the class of thing review pass 1 removed from [8e].
-    const sampleText = sampleStatementOf(body038, Number(pages), BROAD);
+    const sampleText = sampleStatementOf(bodyGate, Number(pages), BROAD);
     const sampleMs = sampleText === null ? NaN : await timed(sampleText);
     const collectMs = await timed(`SELECT array_agg(s.id) FROM (SELECT t.id FROM thoughts t WHERE t.metadata @> '${BROAD}'::jsonb AND (t.embedding IS NOT NULL OR EXISTS (SELECT 1 FROM thought_chunks k WHERE k.thought_id = t.id)) LIMIT 1001) s`);
     console.log(`      (${ROUTE_SAMPLE_PAGES} pages of ${pages} read by TID range: ${sampleMs.toFixed(2)} ms a call; the collection on the ${N.toLocaleString()}-row filter: ${collectMs.toFixed(2)} ms — round trip included in both)`);
@@ -563,7 +569,7 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
     throw e;
   } finally {
     // The shipped state back on every path — a throw above would otherwise
-    // leave 25,000 rows and no HNSW index to [6]..[16] (SMD-1463's first review pass): 039
+    // leave 25,000 rows and no HNSW index to [6]..[16] (SMD-1463's first review pass): 040
     // with its floor, and 027, because 020's file also redefines
     // search_thoughts_hybrid as 020 had it, without 027's relative floor, and
     // [15] holds that floor (the first run of this section left 020's hybrid
@@ -580,13 +586,219 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
       // start from the heap they would have had without this one.
       await sql.unsafe(`VACUUM thoughts`);
       await sql.unsafe(String(hnswDef));
-      await applyMigrations(URL_, { ...opts039, only: (f) => f.startsWith("027") || f.startsWith("039") });
-      assert(new RegExp(`IF v_pages >= ${ROUTE_ESTIMATE_MIN_PAGES} THEN`).test(await body()) && TID_PROBE.test(await body()), `039 restored with the shipped floor of ${ROUTE_ESTIMATE_MIN_PAGES} pages`);
+      await applyMigrations(URL_, { ...opts040, only: (f) => f.startsWith("027") || f.startsWith("040") });
+      assert(new RegExp(`IF v_pages >= ${ROUTE_ESTIMATE_MIN_PAGES} THEN`).test(await body()) && TID_PROBE.test(await body()) && (await hasJitOff()), `040 restored with the shipped floor of ${ROUTE_ESTIMATE_MIN_PAGES} pages and jit = off`);
       assert(/ob1:relative-floor/.test(String((await sql`SELECT prosrc AS s FROM pg_proc WHERE oid = 'search_thoughts_hybrid(vector, text, float, int, jsonb, float, float)'::regprocedure`)[0].s)),
         "…and search_thoughts_hybrid carries 027's sentinel again, not the 020 body the re-apply above installed");
     } catch (cleanup) {
       if (failure === undefined) throw cleanup;
       console.error(`      [5d] cleanup failed after the section did: ${(cleanup as Error).message}`);
+    }
+  }
+}
+
+console.log("\n[5e] A planner path disabled at session level no longer JIT-compiles the gate's sample: match_thoughts runs with jit = off (migration 040, SMD-1624)");
+{
+  // 038's sample statement has one viable path per piece — a TID Range Scan
+  // for the block, a Nested Loop for the LATERAL join, Sort/Unique or
+  // HashAggregate for the DISTINCT draw — and a session, role or database
+  // that turns one off adds disable_cost (1e10) to the plan, which carries
+  // the statement past every JIT threshold: the same plan, the same eight
+  // buffers, and ~50 ms of compiler on every filtered call (038's header;
+  // 040's has the table). 040 puts `jit = off` on the function. Three checks
+  // per disabled path, on a small heap with the floor lowered so the sample
+  // runs: the statement read out of the installed body, EXPLAINed under the
+  // function's own settings, has no JIT block; the same statement with jit
+  // forced back on has one — the trigger is real on this server, so the
+  // first check has teeth; and through the function, the median call under
+  // 040 is within the default's while the mutant — 040's clause RESET on the
+  // function, what a redefinition without it leaves — pays the compile. The
+  // forced-on plan and the timing run only where the server has JIT
+  // (pg_jit_available()); the catalog and plan checks run everywhere.
+  // Both: a build with JIT, and a server whose own `jit` is on — an operator
+  // may have set it off at database level (the header calls that a valid
+  // setting), and then the mutant below has nothing to compile and the timing
+  // would fail for the wrong reason (review pass 1).
+  // Read on a FRESH connection, the kind the timing below measures on: the
+  // suite's pool connected before this section, and a database- or
+  // role-level `jit` set since would read as the pool's stale value while
+  // every measured call saw the new one (review pass 2, run-it).
+  const jitAvailable = await (async () => {
+    const one = new SQL({ url: URL_, max: 1 });
+    try {
+      return Boolean((await one.unsafe(`SELECT pg_jit_available() AND current_setting('jit') = 'on' AS ok`))[0].ok);
+    } finally {
+      await one.close();
+    }
+  })();
+  // PostgreSQL 18 replaced the disable_cost penalty with a count of disabled
+  // nodes kept beside the cost (`Disabled: true` in the plan), so a disabled
+  // path no longer carries a statement past jit_above_cost and the compile
+  // this section exists for cannot be triggered that way there: on 18 the
+  // checks below assert its ABSENCE with and without the clause, and the
+  // mutant timing has nothing to measure (review pass 2, run on 18.6). The
+  // clause stands on 18 for the generic plan's flat estimate (040's header).
+  const disableCost = Number((await sql.unsafe(`SELECT current_setting('server_version_num')::int AS v`))[0].v) < 180000;
+  const N = 3_000;
+  await sql`DELETE FROM thoughts`;
+  const [{ hnswDef }] = await sql.unsafe(`SELECT pg_get_indexdef('thoughts_embedding_idx'::regclass) AS "hnswDef"`);
+  await sql.unsafe(`DROP INDEX thoughts_embedding_idx`);
+  await sql.unsafe(`ALTER TABLE thoughts DISABLE TRIGGER USER`);
+  const opts040 = { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f: string) => f.startsWith("040") };
+  const body = async () => String((await sql`SELECT prosrc AS s FROM pg_proc WHERE oid = ${MATCH_THOUGHTS_SIGNATURE}::regprocedure`)[0].s);
+  const proconfig = async () => String((await sql`SELECT array_to_string(proconfig, ',') AS c FROM pg_proc WHERE oid = ${MATCH_THOUGHTS_SIGNATURE}::regprocedure`)[0].c ?? "");
+  let failure: unknown;
+  try {
+    await sql.unsafe(`
+      INSERT INTO thoughts (content, metadata, embedding)
+      SELECT 'jit ' || r.i, '{"broad": true}'::jsonb,
+             (SELECT ('[' || string_agg((random() - 0.5)::text, ',') || ']')::vector FROM generate_series(1, ${EMBEDDING_DIM} + 0 * r.i))
+      FROM generate_series(1, ${N}) AS r(i)`);
+    await sql.unsafe(`VACUUM ANALYZE thoughts`);
+    // The index back on the loaded rows (seconds at this size), so the walk
+    // through the function is the shipped walk and its cost is not the
+    // fixture's.
+    await sql.unsafe(String(hnswDef));
+    const [{ pages }] = await sql.unsafe(`SELECT (pg_relation_size(to_regclass('thoughts')) / current_setting('block_size')::int)::int AS pages`);
+    await applyMigrations(URL_, { ...opts040, routeEstimateMinPages: 0 });
+    assert(/(^|,)jit=off(,|$)/.test(await proconfig()) && /IF v_pages >= 0 THEN/.test(await body()), `040 is installed with its floor at 0 and jit = off on the function (proconfig ${await proconfig()})`);
+    const BROAD = '{"broad": true}';
+    const sampleText = sampleStatementOf(await body(), Number(pages), BROAD);
+    assert(sampleText !== null, "the sample statement reads out of the installed body (039's, byte for byte)");
+    const { unitVector } = seededRandom(1624);
+    const queries = Array.from({ length: 12 }, () => `[${unitVector(EMBEDDING_DIM).join(",")}]`);
+    // The third column is the node 18 takes: with enable_tidscan off, 18 does
+    // not build the TID Range path at all (tidpath.c returns before it) and
+    // the probe is a sequential scan of the heap per block — 13's state, the
+    // cost the gate exists to avoid, which no clause on the function can
+    // reach (SMD-1703); the other two disable a node above the probe and
+    // the probe keeps its TID Range Scan (review pass 3).
+    const CASES: [string, string[], RegExp][] = [
+      ["enable_tidscan = off", ["enable_tidscan"], /Seq Scan on thoughts/],
+      ["enable_nestloop = off", ["enable_nestloop"], /Tid Range Scan on thoughts/],
+      ["enable_hashagg = off, enable_sort = off", ["enable_hashagg", "enable_sort"], /Tid Range Scan on thoughts/],
+    ];
+    /**
+     * EXPLAIN (ANALYZE) of the sample statement in one transaction: the paths
+     * disabled, then the function's own settings (jit = off among them since
+     * 040), then `jit` forced where asked — the order a session GUC, a
+     * function-level SET and a later SET LOCAL take in the call too.
+     */
+    const explained = async (gucs: string[], jit?: "on" | "off"): Promise<string> =>
+      sql.begin(async (tx: SQL) => {
+        for (const g of gucs) await tx.unsafe(`SET LOCAL ${g} = off`);
+        await applyFunctionSettings(tx);
+        if (jit) await tx.unsafe(`SET LOCAL jit = ${jit}`);
+        const rows = await tx.unsafe(`EXPLAIN (ANALYZE, COSTS, SUMMARY) ${sampleText}`);
+        return rows.map((r: Record<string, string>) => Object.values(r)[0]).join("\n");
+      });
+    const topCost = (plan: string) => Number(/cost=[\d.]+\.\.([\d.]+)/.exec(plan.split("\n")[0])?.[1] ?? 0);
+    /** Median wall time of nine calls after three warm ones, on one connection with the paths disabled at session level. */
+    const median = async (gucs: string[]): Promise<number> => {
+      const one = new SQL({ url: URL_, max: 1 });
+      try {
+        for (const g of gucs) await one.unsafe(`SET ${g} = off`);
+        const ts: number[] = [];
+        for (const [i, q] of queries.entries()) {
+          const t0 = performance.now();
+          await one.unsafe(`SELECT id FROM match_thoughts('${q}'::vector, -1.0, 10, '${BROAD}'::jsonb)`);
+          if (i >= 3) ts.push(performance.now() - t0);
+        }
+        return ts.sort((a, b) => a - b)[Math.floor(ts.length / 2)];
+      } finally {
+        await one.close();
+      }
+    };
+    const plain = await explained([]);
+    assert(!/JIT:/.test(plain) && topCost(plain) < 1e6 && /Tid Range Scan on thoughts/.test(plain), `with every path enabled the sample's plan is the TID Range Scan at a cost far under disable_cost (${topCost(plain)}) with no JIT block`);
+    // EXPLAIN's JIT total for each forced-on plan: the compile's size on THIS
+    // machine, which the timing teeth below scale their bounds from (run-it,
+    // pass 6 — a literal 20 ms was a machine constant written down).
+    const jitTotals: number[] = [];
+    for (const [label, gucs, node18] of CASES) {
+      const under = await explained(gucs);
+      // One tooth, not two: "no JIT block" means something only at a cost past
+      // jit_above_cost — without the function's settings the tidscan case is a
+      // cheap sequential scan (enable_seqscan back on) that no JIT would touch,
+      // and a bare `!/JIT:/` passed with the clause absent (review pass 1, run-it).
+      const cost = topCost(under);
+      if (!disableCost) {
+        // On 18 these three lines say nothing about 040's clause — nothing
+        // compiles here with it or without it (run-it, pass 3); the clause's
+        // teeth on 18 are the proconfig assertions above and below, test-schema
+        // [20]/[21] and test-upgrade [18]. They record what 18 does with each
+        // path, and name the failing term (review pass 3).
+        const forced = jitAvailable ? await explained(gucs, "on") : under;
+        const failed = [
+          ...(cost < 1e6 ? [] : [`cost ${cost.toExponential(2)}`]),
+          ...(/JIT:/.test(under) ? ["a JIT block under the function's settings"] : []),
+          ...(jitAvailable && /JIT:/.test(forced) ? ["a JIT block with jit forced on"] : []),
+          ...(/Disabled: true/.test(under) ? [] : ["no Disabled: true"]),
+          ...(node18.test(under) ? [] : [`no ${node18.source.replace(" on thoughts", "")}`]),
+        ];
+        const seen = /(Seq Scan|Tid Range Scan) on thoughts/.exec(under)?.[1] ?? "no scan of thoughts";
+        assert(failed.length === 0,
+          `${label}: on PostgreSQL 18 a disabled path is a disabled-node count (Disabled: true), not disable_cost — the probe is a ${seen} at cost ${cost.toExponential(2)}${failed.length ? `; expected a ${node18.source.replace(" on thoughts", "")}, not JIT-compiled with the clause or without it — but: ${failed.join(", ")}` : " and is not JIT-compiled with the clause or without it; the trigger this section exists for is 14–17's"}`);
+        continue;
+      }
+      // The JIT term can bite only where this server would compile at all:
+      // with no JIT, or its own jit off, it is true whatever the clause says,
+      // and the proconfig assertions are the clause's teeth (run-it, pass 4).
+      assert(cost >= 1e10 && /Tid Range Scan on thoughts/.test(under) && !/JIT:/.test(under),
+        `${label}: the planner still takes the TID Range Scan, prices the plan at disable_cost (${cost.toExponential(2)}), and under the function's settings ${/JIT:/.test(under) ? "JIT-compiles it — a JIT block is in the plan" : jitAvailable ? "does not JIT-compile it" : "does not JIT-compile it (this server would not compile it whatever the clause said: no JIT, or its own jit off)"}`);
+      if (jitAvailable) {
+        const forced = await explained(gucs, "on");
+        jitTotals.push(Number(/JIT:[\s\S]*?Timing:[^\n]*?Total ([\d.]+) ms/.exec(forced)?.[1] ?? NaN));
+        assert(/JIT:/.test(forced) && /Functions: \d+/.test(forced), `…while the same statement with jit forced on IS compiled (${/JIT:[\s\S]*?Timing: ([^\n]*)/.exec(forced)?.[1] ?? "no timing line"}) — the trigger is real here, so the check above has teeth`);
+      }
+    }
+    if (jitAvailable && disableCost) {
+      const [label, gucs] = CASES[0];
+      // The default and the fixed arm back to back, so a load spike on the
+      // shared machine lands on both or neither (run-it, pass 6).
+      const baseline = await median([]);
+      const fixed = await median(gucs);
+      await sql.unsafe(`ALTER FUNCTION ${MATCH_THOUGHTS_SIGNATURE} RESET jit`);
+      assert(!/jit=off/.test(await proconfig()), "the mutant: 040's clause RESET on the function — what a redefinition without it leaves, and what the ledger cannot see");
+      const mutant = await median(gucs);
+      await applyMigrations(URL_, { ...opts040, routeEstimateMinPages: 0 });
+      assert(/(^|,)jit=off(,|$)/.test(await proconfig()), "…and 040 re-applied puts the clause back");
+      // Each arm is judged against the default, never against the other:
+      // with the clause deleted from 040 both arms compile and differed by
+      // 12.9 ms in one run and 0.4 in another — the compiled call's own noise
+      // (two compiled medians in one run were 31 ms apart) — so a
+      // `mutant - fixed >= 10` passed with the mechanism removed (run-it,
+      // pass 5). The gap that separates "compiled" from "not" is half the
+      // smallest compile this run saw (EXPLAIN's JIT total, 36–70 ms on the
+      // machines this ran on, so 18–35), never under 10: the fixed arm has
+      // read 0.04–4 ms over the default across every run, the compiled arm
+      // 35–95 over it, and a bound that scales with the machine's compile
+      // keeps both margins on a faster or slower host (run-it, pass 6).
+      const compile = Math.min(...jitTotals.filter(Number.isFinite));
+      const gap = Math.max(10, compile / 2);
+      assert(mutant >= baseline + gap, `the trigger through the function under ${label}: the mutant (040's clause RESET) pays the compile on every call, ${mutant.toFixed(2)} ms against a default of ${baseline.toFixed(2)} (EXPLAIN's smallest JIT total this run ${compile.toFixed(1)} ms, the bound half of it) — the clause's own tooth is the next line`);
+      assert(fixed <= baseline + gap, `…and with the clause the disabled path costs what the default costs: ${fixed.toFixed(2)} ms against ${baseline.toFixed(2)}, within ${gap.toFixed(1)} (the compiled call is 45–105 ms)`);
+    } else if (!disableCost) {
+      skip("[5e] the mutant arm through the function", "PostgreSQL 18: a disabled path is counted, not costed, so there is no compile to time");
+    } else {
+      skip("[5e] the forced-on plan and the mutant arm", "this server has no JIT, or its own jit is off");
+    }
+  } catch (e) {
+    failure = e;
+    throw e;
+  } finally {
+    // The shipped state back on every path, as [5d] does: rows out, trigger
+    // on, the heap compacted, the index present, 040 with its floor.
+    try {
+      await sql`DELETE FROM thoughts`;
+      await sql.unsafe(`ALTER TABLE thoughts ENABLE TRIGGER USER`);
+      await sql.unsafe(`VACUUM thoughts`);
+      if (!(await sql.unsafe(`SELECT to_regclass('thoughts_embedding_idx') IS NOT NULL AS ok`))[0].ok) await sql.unsafe(String(hnswDef));
+      await applyMigrations(URL_, opts040);
+      assert(new RegExp(`IF v_pages >= ${ROUTE_ESTIMATE_MIN_PAGES} THEN`).test(await body()) && /(^|,)jit=off(,|$)/.test(await proconfig()), `040 restored with the shipped floor of ${ROUTE_ESTIMATE_MIN_PAGES} pages and jit = off`);
+    } catch (cleanup) {
+      if (failure === undefined) throw cleanup;
+      console.error(`      [5e] cleanup failed after the section did: ${(cleanup as Error).message}`);
     }
   }
 }
