@@ -14045,6 +14045,11 @@ recorded so the count is known; a `SET jit = false` in a successor would
 store "false" and fail every regex and [20]'s pin, which is the pin doing
 its job.
 
+Boyscout, after the passes: the two pre-existing comments that said "30–130
+ms of startup" for the generic plans at ten million rows (db/bench-hnsw.ts,
+db/test-support.ts) say 30–110, change 28's figure; db/README.md's "twenty-three
+migrations applied" says forty — no behaviour change.
+
 **The operator's path, walked.** A brain with rows migrated by `bun
 db/migrate.ts` through 040 (on a brain at 039 it is the one pending file):
 one `match_thoughts` whose `proconfig` reads `hnsw.iterative_scan=relaxed_order,

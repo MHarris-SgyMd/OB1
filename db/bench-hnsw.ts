@@ -1200,7 +1200,7 @@ async function plans(sql: SQL, q: number[], filter: string, branch: Branch): Pro
     return shapeOf(text, ms);
   };
   // The generic plan twice: as the function gets it, and with JIT forced on.
-  // At ten million rows every generic plan carried 30–130 ms of startup its
+  // At ten million rows every generic plan carried 30–110 ms of startup its
   // custom twin did not, and the flat estimate that makes a plan generic is
   // also what carries its cost past jit_above_cost; the third arm read that
   // rather than inferring it (SMD-1018 review pass) and, since 040 put
