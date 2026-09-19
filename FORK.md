@@ -204,6 +204,7 @@ db/test-bench-reuse.ts           # change 76 (new file — the kept bench corpus
 db/bench-oracle.ts               # change 76 (new file — the cache's pure part: what of a marker's entry a run may trust; test-schema [37])
 db/migrations/039_*.sql          # change 81 (new file — the two HNSW indexes over embedding::halfvec under their names; match_thoughts' walk branches order by the cast)
 db/migrations/040_*.sql          # change 91 (new file — 039's match_thoughts with `SET jit = off`; a disabled planner path no longer JIT-compiles the gate's sample)
+db/migrations/041_*.sql          # change 93 (new file — query_log.tool's two shapes and the table's cite clause as COMMENTs, behind 031's guard; test-schema [40], test-upgrade [19]; [20] keeps test-support's reset lists honest)
 evals/eval-quant.ts              # change 81 (new file — vector, halfvec and binary-with-rerank measured on real vectors at the shipped width; test-schema [38], test-upgrade [16])
 <4 vendored MCP servers, 1 sample> # change 78 (a McpServer built per request — per session in the cost recipe's after sample — in place of one shared and connect()ed to a fresh transport each time)
 <17 pin sites, 3 lockfiles>      # change 83 (@hono/mcp 0.1.1 → 0.1.5: the transport lets go of each POST it has answered; the after sample's sweep closes the transports it drops)
@@ -15006,14 +15007,20 @@ SMD-1730's event shape (Phase 1a of SMD-1729); when it lands, the migration
 that carries it should re-issue this column's comment to point at it — the
 ticket's note, carried in 041's header.
 
-**Not done here.** A shared `columnComment` / `tableComment` helper in
-`test-support` for the catalog reads that [40] and `test-upgrade` [19] each
-spell (a first review pass counted six copies of the `col_description` join
-across the two suites): declined. The two suites read through two clients —
-PGlite's `db.query` and Bun's `sql` — so the helper would take a query
-callback to save a two-line statement, and the four earlier copies were left
-by four earlier tickets for the same reason; SMD-1730's re-issue, when it
-comes, can be the fifth or can make the helper. A generic mapping in
+**Not done here.** A shared helper for the catalog reads that [40] and
+`test-upgrade` [19] each spelled (a first review pass counted six copies of
+the `col_description` join across the two suites) was declined in that pass
+because the two suites read through two clients — PGlite's `db.query` and
+Bun's `sql` — and a helper would take a query callback to save two lines. A
+third pass pointed out that a SQL *string* needs no callback: both clients
+take text with positional parameters. So `test-support` now exports
+`COLUMN_COMMENT_SQL` and `TABLE_COMMENT_SQL` and both sections read through
+them; the four earlier copies ([27], [31] and two more) are left for a
+boyscout or for SMD-1730's re-issue. Still not done: `test-upgrade`'s
+`shape()` decides "is this ours?" by a hand list of eighteen pgvector name
+prefixes where [20] asks `pg_depend`; changing the predicate every upgrade
+section compares on is not this ticket's, and is noted on SMD-1819. A
+generic mapping in
 `migrate.ts` — a pending file failing with `42P01`/`42883` on a ledger that
 records earlier files gets the baseline hint once, retiring the block 030,
 031 and 041 each paste — is **SMD-1811** (the same pass's altitude finding);
@@ -15057,6 +15064,24 @@ the prose ("follow-up fetch" would do), so the two enumerated lists are
 asserted as strings beside their shapes instead. [19] leaves a ledger ahead of
 its schema; [20] starts from a full brain and ends with one, and [19] says so.
 The guard paste was surfaced again and stays SMD-1811's.
+
+**Third pass** (a cold reader; the run-it arm ran the two mutants the second
+pass's anchors claim to catch — the two meanings inverted in a re-issue fails
+three of [40]'s assertions, the plain-name list dropped with the words kept in
+prose fails one — and the two remaining suites that reset through
+`test-support`, `test-search-path` and `test-bench-reuse`, on the grown lists).
+The reader found [20]'s sweep blind to the object kinds a future migration is
+most likely to add: its relation query stopped at `r`, `v`, `m` and `S`, so a
+partitioned or foreign table and the relation behind a standalone composite
+type were invisible, and its type query excluded every composite — a table's
+row type and a `CREATE TYPE … AS` alike. The sweep now reads every relation
+kind and the four type kinds no relation backs, excepts an extension's
+members by `pg_depend`'s (classid, objid) pair rather than `objid` alone, and
+proves itself first: five probes of the uncovered kinds are planted beside the
+fork's objects, each must be seen after the reset, then dropped by hand, and
+the sweep must come back empty. Two inventories had not followed: the
+README's second count line still said 973, and this file's list of new files
+stopped at 040. And the helper decline was reversed, above.
 
 **Upstream status:** not sent — the query log is this fork's (change 65).
 

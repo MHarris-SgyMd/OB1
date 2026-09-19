@@ -126,6 +126,19 @@ const FUNCTIONS = [
   "trace_provenance(uuid, int, int)",
 ];
 
+/**
+ * The two catalog reads a COMMENT-asserting section makes, as SQL text: both
+ * clients take a string with positional parameters (PGlite's `db.query(text,
+ * params)`, Bun's `sql.unsafe(text, params)`), so one spelling serves
+ * test-schema and test-upgrade without a query callback. `$1` is the table
+ * (cast to regclass), `$2` the column; the row's one field is `c`. Dropped
+ * columns keep a pg_attribute row under a mangled name and are excluded.
+ * (SMD-1749's third review pass; the first had declined a helper because the
+ * clients differ — a constant does not care.)
+ */
+export const COLUMN_COMMENT_SQL = "SELECT col_description(a.attrelid, a.attnum) AS c FROM pg_attribute a WHERE a.attrelid = $1::regclass AND a.attname = $2 AND NOT a.attisdropped";
+export const TABLE_COMMENT_SQL = "SELECT obj_description($1::regclass, 'pg_class') AS c";
+
 export type SchemaOptions = {
   /** Vector width to substitute for `{{EMBEDDING_DIM}}`. */
   dim: number;

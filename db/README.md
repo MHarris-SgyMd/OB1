@@ -1248,7 +1248,7 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 973 assertions, PGlite, no container
+bun test-schema.ts                          # 993 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts         # 523 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 ```

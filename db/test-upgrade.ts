@@ -21,7 +21,7 @@
 import { SQL } from "bun";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { TID_PROBE, applyMigrations, createAssert, dropSchema, ledgerStrangers, loadChunkRows, migrationFiles, migratorEnv, plantLegacyRow, requireDatabaseUrl, resetSchema, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
+import { COLUMN_COMMENT_SQL, TABLE_COMMENT_SQL, TID_PROBE, applyMigrations, createAssert, dropSchema, ledgerStrangers, loadChunkRows, migrationFiles, migratorEnv, plantLegacyRow, requireDatabaseUrl, resetSchema, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
 import { ACCEPTED_CAVEAT_PREFIX, ACCEPTED_CLAIM_SQL, LOCK_TIMEOUT_S, UPDATE_THOUGHT_SIGNATURE, reembedKey } from "./config.mjs";
 
 const URL_ = requireDatabaseUrl("test-upgrade.ts");
@@ -1466,8 +1466,8 @@ console.log("\n[19] Migration 041 on a schema without 034 — refused up front, 
   await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("034") });
   const applied = await migrate();
   assert(applied.code === 0 && /041_query_log_tool_comment\.sql\s+applied/.test(applied.out), `…and once 034's table exists the plain run applies 041 (exit ${applied.code})${applied.code === 0 ? "" : `:\n${applied.out}`}`);
-  const [{ c: col }] = await sql`SELECT col_description('query_log'::regclass, a.attnum) AS c FROM pg_attribute a WHERE a.attrelid = 'query_log'::regclass AND a.attname = 'tool'`;
-  const [{ t: tbl }] = await sql`SELECT obj_description('query_log'::regclass, 'pg_class') AS t`;
+  const [{ c: col }] = (await sql.unsafe(COLUMN_COMMENT_SQL, ["query_log", "tool"])) as { c: string | null }[];
+  const [{ c: tbl }] = (await sql.unsafe(TABLE_COMMENT_SQL, ["query_log"])) as { c: string | null }[];
   assert(/<writer>\/<pointer>/.test(String(col ?? "")) && /<writer>\/<pointer>/.test(String(tbl ?? "")), "…and both live comments name <writer>/<pointer>");
   await sql.close();
   // Left behind: a ledger ahead of its schema (035–040 recorded over a schema
@@ -1485,17 +1485,46 @@ console.log("\n[20] test-support's schema reset leaves nothing of the fork's in 
   // survivors on a fully applied brain. So the catalog is asked here, after a
   // reset of a full brain, and the next omission fails in this section rather
   // than in whichever section happens to need the object gone. Members of an
-  // extension (pgvector and pg_trgm install into public) are excepted.
+  // extension (pgvector and pg_trgm install into public) are excepted — by
+  // pg_depend's (classid, objid), the pair that names an object, not objid
+  // alone (third review pass).
+  //
+  // The sweep is asked of itself first: five objects of the kinds the drop
+  // lists do not cover — a standalone composite type, a partitioned table, an
+  // enum, a domain, a function — are planted beside the fork's, and after the
+  // reset each must be seen. A third pass found the first sweep blind to
+  // exactly those: relkind 'c', 'p' and 'f' were outside its relation query,
+  // and its type query excluded every composite, a table's row type and a
+  // CREATE TYPE … AS alike. Then they are dropped by hand and the sweep must
+  // come back empty.
   await resetSchema(URL_, OPTS);
-  await dropSchema(URL_);
   const sql = new SQL({ url: URL_, max: 1 });
-  const notExt = (oid: string) => `NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.objid = ${oid} AND d.deptype = 'e')`;
-  const rels = ((await sql.unsafe(`SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' AND c.relkind IN ('r','v','m','S') AND ${notExt("c.oid")} ORDER BY 1`)) as { relname: string }[]).map((r) => r.relname);
-  const fns = ((await sql.unsafe(`SELECT p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')' AS sig FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public' AND ${notExt("p.oid")} ORDER BY 1`)) as { sig: string }[]).map((r) => r.sig);
-  const types = ((await sql.unsafe(`SELECT t.typname FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace WHERE n.nspname = 'public' AND t.typtype IN ('e','c','d') AND NOT EXISTS (SELECT 1 FROM pg_class c WHERE c.reltype = t.oid) AND ${notExt("t.oid")} ORDER BY 1`)) as { typname: string }[]).map((r) => r.typname);
-  assert(rels.length === 0, `no relation of the fork's survives the reset (${rels.join(", ") || "none"})`);
-  assert(fns.length === 0, `no function of the fork's survives the reset (${fns.join(", ") || "none"})`);
-  assert(types.length === 0, `no type of the fork's survives the reset (${types.join(", ") || "none"})`);
+  for (const ddl of [
+    `CREATE TYPE ob1_probe_rowtype AS (a int)`,
+    `CREATE TYPE ob1_probe_enum AS ENUM ('x')`,
+    `CREATE DOMAIN ob1_probe_domain AS int`,
+    `CREATE TABLE ob1_probe_part (k int) PARTITION BY RANGE (k)`,
+    `CREATE FUNCTION ob1_probe_fn() RETURNS int LANGUAGE sql AS 'SELECT 1'`,
+  ]) await sql.unsafe(ddl);
+  await dropSchema(URL_);
+  const notExt = (catalog: string, oid: string) => `NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = '${catalog}'::regclass AND d.objid = ${oid} AND d.deptype = 'e')`;
+  const sweep = async () => ({
+    // Every relation kind: tables, partitioned and foreign tables, views,
+    // materialized views, sequences, and the relation a standalone composite
+    // type is backed by.
+    rels: ((await sql.unsafe(`SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' AND c.relkind IN ('r','p','f','v','m','S','c') AND ${notExt("pg_class", "c.oid")} ORDER BY 1`)) as { relname: string }[]).map((r) => r.relname),
+    fns: ((await sql.unsafe(`SELECT p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')' AS sig FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public' AND ${notExt("pg_proc", "p.oid")} ORDER BY 1`)) as { sig: string }[]).map((r) => r.sig),
+    // The type kinds no relation backs: enums, domains, ranges, multiranges.
+    types: ((await sql.unsafe(`SELECT t.typname FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace WHERE n.nspname = 'public' AND t.typtype IN ('e','d','r','m') AND ${notExt("pg_type", "t.oid")} ORDER BY 1`)) as { typname: string }[]).map((r) => r.typname),
+  });
+  const planted = await sweep();
+  assert(planted.rels.includes("ob1_probe_rowtype") && planted.rels.includes("ob1_probe_part") && planted.fns.includes("ob1_probe_fn()") && planted.types.includes("ob1_probe_enum") && planted.types.includes("ob1_probe_domain"),
+    `the sweep sees what the reset does not drop — a composite type, a partitioned table, a function, an enum and a domain planted beside the fork's objects (${[...planted.rels, ...planted.fns, ...planted.types].join(", ")})`);
+  for (const ddl of [`DROP TABLE ob1_probe_part`, `DROP FUNCTION ob1_probe_fn()`, `DROP TYPE ob1_probe_rowtype`, `DROP TYPE ob1_probe_enum`, `DROP DOMAIN ob1_probe_domain`]) await sql.unsafe(ddl);
+  const left = await sweep();
+  assert(left.rels.length === 0, `no relation of the fork's survives the reset (${left.rels.join(", ") || "none"})`);
+  assert(left.fns.length === 0, `no function of the fork's survives the reset (${left.fns.join(", ") || "none"})`);
+  assert(left.types.length === 0, `no type of the fork's survives the reset (${left.types.join(", ") || "none"})`);
   await sql.close();
   await applyMigrations(URL_, OPTS);
 }

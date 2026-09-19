@@ -55,7 +55,7 @@ import {
 } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { SAMPLE_STATEMENT, TID_PROBE, buffersOf, createAssert, sampleStatementOf, seededRandom } from "./test-support.ts";
+import { buffersOf, COLUMN_COMMENT_SQL, createAssert, SAMPLE_STATEMENT, sampleStatementOf, seededRandom, TABLE_COMMENT_SQL, TID_PROBE } from "./test-support.ts";
 import { markerAnswers } from "./bench-oracle.ts";
 import { agentLabel, armOf, attribute, citePointerOf, goldFromFixture, renderReport, summarise, toActionRow, toSearchRow, type ActionRow, type SearchRow } from "../evals/utilization.ts";
 import { ENTITY_TYPES, RELATIONS } from "../server-portable/entities.ts";
@@ -4507,11 +4507,8 @@ console.log("\n[40] Migration 041: query_log.tool's two shapes, and the table's 
   // rather than trusted to prose — of the LIVE text after every file applied,
   // so a later migration that re-comments either and re-issues 034's text
   // drops the clause and fails here whichever file it is; no number pinned.
-  const colComment = (await db.query<{ c: string | null }>(
-    `SELECT col_description('query_log'::regclass, a.attnum) AS c
-       FROM pg_attribute a WHERE a.attrelid = 'query_log'::regclass AND a.attname = 'tool'`)).rows[0]?.c ?? "";
-  const tblComment = (await db.query<{ c: string | null }>(
-    `SELECT obj_description('query_log'::regclass, 'pg_class') AS c`)).rows[0]?.c ?? "";
+  const colComment = (await db.query<{ c: string | null }>(COLUMN_COMMENT_SQL, ["query_log", "tool"])).rows[0]?.c ?? "";
+  const tblComment = (await db.query<{ c: string | null }>(TABLE_COMMENT_SQL, ["query_log"])).rows[0]?.c ?? "";
   assert(colComment.length > 0, "query_log.tool carries a comment (034 wrote none)");
   assert(/<writer>\/<pointer>/.test(colComment) && /<writer>\/<pointer>/.test(tblComment), "both comments name <writer>/<pointer>");
   // Each shape anchored inside its own sentence ([^.]*, not a dot-all span
