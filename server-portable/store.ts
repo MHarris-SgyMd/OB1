@@ -454,14 +454,26 @@ export type MutationError = "NOT_FOUND" | "STALE_READ" | "DUPLICATE_CONTENT" | "
 export type Citation = { id: string; thoughtId: string; stance: string; text: string; createdAt?: string };
 export type MutationResult =
   | { ok: true; id: string }
+  | { ok: false; error: MutationError; currentUpdatedAt?: string };
+/**
+ * What delete_thought answers (migration 041). Success: `detached`, the active
+ * citations the delete detached from the removed source — non-zero only when
+ * `detach` was asked — and `inactive`, when present, the expired or superseded
+ * citations that named it and were marked the same way in either mode. A
+ * refusal may carry CITED's `citedBy` and `citations`; update_thought's never
+ * does, so those live here and not on MutationResult (seventh review pass).
+ */
+export type DeleteResult =
+  | { ok: true; id: string; detached?: number; inactive?: number }
   | { ok: false; error: MutationError; currentUpdatedAt?: string; citedBy?: number; citations?: Citation[] };
 /**
- * `detached` (migration 041): the active citations the delete detached from the
- * removed source — non-zero only when `detach` was asked; `inactive`, when
- * present, the expired or superseded citations that named it and were marked
- * the same way in either mode.
+ * Both functions' envelopes as one normaliser reads them — the superset that
+ * UpdateResult and DeleteResult each narrow. Shared so the two stores cannot
+ * disagree about what a refusal looks like.
  */
-export type DeleteResult = MutationResult & { detached?: number; inactive?: number };
+export type MutationEnvelope =
+  | { ok: true; id: string; updatedAt?: string; duplicateOf?: string; fingerprintHeldBy?: string; detached?: number; inactive?: number }
+  | { ok: false; error: MutationError; currentUpdatedAt?: string; citedBy?: number; citations?: Citation[] };
 /**
  * `duplicateOf` (migration 018): the edit's text normalises to what the row
  * already held AND another thought carries that fingerprint — a pair from
@@ -475,7 +487,7 @@ export type UpdateResult = MutationResult & { updatedAt?: string; duplicateOf?: 
  * the store's discriminated union. Shared so the two stores cannot disagree
  * about what a refusal looks like — the class of bug the audit work hit twice.
  */
-export function normaliseMutation(r: Record<string, unknown> | undefined): UpdateResult & DeleteResult {
+export function normaliseMutation(r: Record<string, unknown> | undefined): MutationEnvelope {
   if (!r) return { ok: false, error: "NOT_FOUND" };
   if (r.ok === true) {
     return {
@@ -501,9 +513,12 @@ export function normaliseMutation(r: Record<string, unknown> | undefined): Updat
     error: (r.error as MutationError) ?? "NOT_FOUND",
     currentUpdatedAt: isoTimestampOpt(r.current_updated_at),
     // 041's CITED refusal: the count, and the citing rows the function sampled.
-    // Number(), not a typeof guard: a body that arrives with the count as a
-    // string (a proxy, a hand-made envelope) still counts to the tool.
-    citedBy: r.cited_by == null || !Number.isFinite(Number(r.cited_by)) ? undefined : Number(r.cited_by),
+    // A number, or a string of digits (a proxy, a hand-made envelope) — and
+    // nothing else: Number() alone took `true`, `""` and `[5]` for counts
+    // (seventh review pass).
+    citedBy: typeof r.cited_by === "number" && Number.isFinite(r.cited_by) ? r.cited_by
+      : typeof r.cited_by === "string" && /^\d+$/.test(r.cited_by) ? Number(r.cited_by)
+      : undefined,
     // Elements that are not objects (a truncating proxy's null) are dropped,
     // not thrown on: the refusal is still a refusal.
     citations: Array.isArray(r.citations)

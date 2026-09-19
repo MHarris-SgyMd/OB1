@@ -284,14 +284,20 @@ function explainRefusal(
       const rows = (r.citations ?? []).map((c) => `  - ${c.thoughtId} (${c.stance}): ${snipText(c.text, 120)}`);
       const total = r.citedBy ?? rows.length;
       const more = total - rows.length;
+      // One subject, one way through, three shapes: the number and its grammar
+      // spelled once (seventh review pass).
+      const one = total === 1;
+      const subject = `${total} citation${one ? "" : "s"} on other thoughts rest${one ? "s" : ""} on ${id} as ${one ? "its" : "their"} source`;
+      const through = `To delete anyway, pass detach_citations: true`;
+      const reread = `re-read the thought (fetch takes the id) before deciding. ${through}.`;
       // The count and rows come from the guard's own refusal (041 carries them
       // in the error), so a CITED envelope with neither is one the function did
       // not write — a proxy, a truncated body. Say so rather than "0 citations".
-      if (total <= 0) return `Refused: other thoughts cite ${id} as their source, but the reply carried no count and no citing rows — re-read the thought (fetch takes the id) before deciding. To delete anyway, pass detach_citations: true.`;
+      if (total <= 0) return `Refused: other thoughts cite ${id} as their source, but the reply carried no count and no citing rows — ${reread}`;
       // A count with no rows (a proxy that dropped the array): no list, no
       // dangling colon, the same advice.
-      if (rows.length === 0) return `Refused: ${total} citation${total === 1 ? "" : "s"} on other thoughts rest${total === 1 ? "s" : ""} on ${id} as ${total === 1 ? "its" : "their"} source, but the citing rows were not returned — re-read the thought (fetch takes the id) before deciding. To delete anyway, pass detach_citations: true.`;
-      return `Refused: ${total} citation${total === 1 ? "" : "s"} on other thoughts rest${total === 1 ? "s" : ""} on ${id} as ${total === 1 ? "its" : "their"} source — deleting it would leave ${total === 1 ? "that statement" : "those statements"} resting on nothing:\n${rows.join("\n")}${more > 0 ? `\n  …and ${more} more` : ""}\nRead the citing thoughts first (fetch takes the id). To delete anyway, pass detach_citations: true — each citation keeps its text and stance, loses its source, and records ${id} and the time as the deleted source.`;
+      if (rows.length === 0) return `Refused: ${subject}, but the citing rows were not returned — ${reread}`;
+      return `Refused: ${subject} — deleting it would leave ${one ? "that statement" : "those statements"} resting on nothing:\n${rows.join("\n")}${more > 0 ? `\n  …and ${more} more` : ""}\nRead the citing thoughts first (fetch takes the id). ${through} — each citation keeps its text and stance, loses its source, and records ${id} and the time as the deleted source.`;
     }
     default:
       return `Refused: ${r.error}`;

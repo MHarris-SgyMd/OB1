@@ -1105,6 +1105,8 @@ else {
              /INSERT, DELETE on thought_chunks; INSERT on thought_audit; UPDATE on thought_facets/.test(writeLine(missingBoth.out)) &&
              /GRANT INSERT, DELETE ON thought_chunks TO ob1_pf_capture;\s+GRANT INSERT ON thought_audit TO ob1_pf_capture;\s+GRANT UPDATE ON thought_facets TO ob1_pf_capture;/.test(missingBoth.out),
              `a role missing the chunk, audit and facet writes does not start, each named in order with its GRANT (exit ${missingBoth.code})`);
+      assert(/a windowed capture, an edit with content, or 008's audit trigger, and every delete of a thought \(041's citation guard reads and writes thought_facets as the caller\) would fail/.test(writeLine(missingBoth.out)),
+             "…and says what each missing privilege breaks: the capture path for the chunk and audit writes, every delete for the facet one");
       assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, both 035's/.test(missingBoth.out), "…while atomic capture, a separate fact, is ok for it");
 
       // Grant the chunk writes by hand; the audit INSERT and the facet UPDATE remain named.
@@ -1115,10 +1117,15 @@ else {
              !/thought_chunks/.test(writeLine(missingAudit.out)) &&
              /GRANT INSERT ON thought_audit TO ob1_pf_capture;\s+GRANT UPDATE ON thought_facets TO ob1_pf_capture;/.test(missingAudit.out),
              `with the chunk writes granted, the audit INSERT and the facet UPDATE are named, the chunks no longer (exit ${missingAudit.code})`);
-
-      // Grant the audit INSERT and the facet UPDATE by hand so the base capture
-      // set is satisfied — the extraction conditional is the remaining lever.
+      // Grant the audit INSERT alone: only the facet UPDATE remains, and the
+      // sentence names only deletes — a capture would succeed, and says so.
       await claims.unsafe("GRANT INSERT ON thought_audit TO ob1_pf_capture");
+      const facetOnly = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
+      assert(facetOnly.code === 1 && /UPDATE on thought_facets — so every delete of a thought \(041's citation guard reads and writes thought_facets as the caller\) would fail/.test(writeLine(facetOnly.out)) && !/windowed capture/.test(writeLine(facetOnly.out)),
+             `with only the facet UPDATE missing, the check names deletes and not captures as what would fail (exit ${facetOnly.code})`);
+
+      // Grant the facet UPDATE by hand so the base capture set is satisfied —
+      // the extraction conditional is the remaining lever.
       await claims.unsafe("GRANT UPDATE ON thought_facets TO ob1_pf_capture");
       const baseOk = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
       assert(baseOk.code === 0 && /write privileges\s+ob1_pf_capture holds the capture path's privileges/.test(baseOk.out) && !/thought_work_claims/.test(writeLine(baseOk.out)),

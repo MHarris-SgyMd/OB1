@@ -1257,9 +1257,10 @@ console.log("\n[6i] A citation written while a delete of its source is in flight
   }
   // Arm 4 — a citation revived under a concurrent writer: T1 clears the
   // expiry of an expired citation of S and holds the row; the delete of S in
-  // refuse mode meets that row lock inside its one UPDATE … RETURNING, waits,
-  // and reads the revived version — refused, where a count followed by an
-  // UPDATE would have counted the old version as expired and rewritten the new.
+  // refuse mode meets that row lock in the guard's locked read (FOR NO KEY
+  // UPDATE), waits, and reads the revived version — refused, where an
+  // unlocked count followed by a rewrite counted the old version as expired
+  // and rewrote the new.
   {
     const { s, c } = await mk("revived");
     const f = ((await sql`SELECT record_citation(${c}::uuid, ${s}::uuid, 'was expired', 'retrieved') AS r`)[0].r as { id: string }).id;

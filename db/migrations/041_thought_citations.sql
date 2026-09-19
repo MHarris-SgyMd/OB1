@@ -446,6 +446,7 @@ DECLARE
   v_first    uuid;
   v_ids      uuid[];
   v_active_ids uuid[];
+  v_bump_ids uuid[];
   v_sample   jsonb;
 BEGIN
   IF v_mode NOT IN ('refuse', 'detach') THEN
@@ -480,7 +481,7 @@ BEGIN
   -- (sixth pass: a second thought_facet_active in the sample could disagree
   -- with the count under a concurrent change to a superseder).
   WITH hits AS (
-    SELECT f.id, thought_facet_active(f) AS active, d.id AS source
+    SELECT f.id, f.thought_id, thought_facet_active(f) AS active, d.id AS source
       FROM deleted d
       JOIN thought_facets f ON f.kind = 'citation' AND f.payload->>'source_id' = d.id::text
        FOR NO KEY UPDATE OF f
@@ -490,8 +491,9 @@ BEGIN
          count(DISTINCT source) FILTER (WHERE active)::int,
          min(source::text) FILTER (WHERE active)::uuid,
          array_agg(id),
-         array_agg(id) FILTER (WHERE active)
-    INTO v_active, v_inactive, v_sources, v_first, v_ids, v_active_ids
+         array_agg(id) FILTER (WHERE active),
+         array_agg(DISTINCT thought_id) FILTER (WHERE active)
+    INTO v_active, v_inactive, v_sources, v_first, v_ids, v_active_ids, v_bump_ids
     FROM hits;
 
   IF v_active > 0 AND v_mode = 'refuse' THEN
@@ -530,17 +532,22 @@ BEGIN
        SET payload = f.payload || jsonb_build_object('source_id', NULL, 'source_deleted_id', d.id, 'source_deleted_at', now())
       FROM deleted d
      WHERE f.id = ANY(v_ids) AND f.payload->>'source_id' = d.id::text;
-    -- A facet is part of its thought's record, so the citing thoughts' record
-    -- changed: their updated_at moves (001's trigger), and a reader holding an
-    -- older if_unchanged_since is told STALE_READ on its next edit rather than
+    -- A live citation detached is a change to its thought's record: the
+    -- thought's updated_at moves (001's trigger), and a reader holding an older
+    -- if_unchanged_since is told STALE_READ on its next edit rather than
     -- writing text that still asserts the statement rests on the deleted
-    -- source (fifth review pass). 008's audit trigger sees an empty diff and
-    -- writes no row — a facet event on the audit trail is the event shape's
-    -- (SMD-1730), not this migration's. The rows were locked at the top of
-    -- this function, before the facets; this is a re-lock in the same
-    -- transaction and waits on nothing.
-    UPDATE thoughts t SET updated_at = now()
-     WHERE t.id IN (SELECT f.thought_id FROM thought_facets f WHERE f.id = ANY(v_ids));
+    -- source (fifth review pass). Only for ACTIVE citations: marking an
+    -- expired or superseded one is history's bookkeeping, and moving a clock
+    -- for it would send an editor with nothing to reconcile back to re-read
+    -- (seventh pass). 008's audit trigger sees an empty diff and writes no row
+    -- — a facet event on the audit trail is the event shape's (SMD-1730), not
+    -- this migration's. The rows were locked at the top of this function,
+    -- before the facets; this is a re-lock in the same transaction and waits
+    -- on nothing. The ids come from the locked read, not a fourth pass over
+    -- the facets.
+    IF v_active > 0 THEN
+      UPDATE thoughts t SET updated_at = now() WHERE t.id = ANY(v_bump_ids);
+    END IF;
   END IF;
   -- Totals for the caller, summed across the statements of a transaction.
   -- delete_thought zeroes them first, reads them after its one statement, and

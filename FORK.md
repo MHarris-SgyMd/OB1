@@ -14062,9 +14062,12 @@ citation's writer takes `KEY SHARE` on the source and waits on the `DELETE`'s
 own row lock. A detach also moves the citing thoughts' `updated_at`: a facet
 is part of its thought's record, so a reader holding an older
 `if_unchanged_since` is told `STALE_READ` on its next edit rather than writing
-text that still asserts the statement rests on the deleted source; 008's audit
-trigger sees an empty diff and writes no row, and a facet event on the audit
-trail is the event shape's to define (SMD-1730; fifth pass). That bump locked
+text that still asserts the statement rests on the deleted source; only for
+*active* citations, since marking an expired or superseded one is history's
+bookkeeping and moving a clock for it would send an editor with nothing to
+reconcile back to re-read (seventh pass); 008's audit trigger sees an empty
+diff and writes no row, and a facet event on the audit trail is the event
+shape's to define (SMD-1730; fifth pass). That bump locked
 the citing thoughts *after* the facets, which the sixth pass caught as a
 deadlock with a raw delete of a citing thought — that delete holds the
 thought's row while its cascade wants the facets — so the guard now locks the
@@ -14213,7 +14216,13 @@ unique" — the check names each state with its remedy, as 032's does for
 `update_thought`; over PostgREST, where the catalog is out of reach, the same
 check probes `delete_thought` with an id no row has, as the edit check does,
 since the hosted brain is the one that deploys a server ahead of a migration
-(third pass). And a citation's text in a refusal goes through the same
+(third pass) — and a `permission denied` from that probe is a failure naming
+the `GRANT`, not a skip, since the guard reads `thought_facets` as the caller
+on every delete and the probe itself just met the missing privilege; the
+direct path's `write privileges` says separately what a missing facet
+privilege breaks — every delete — rather than the capture path, so an operator
+whose capture succeeds is not told the check was wrong (seventh pass). And a
+citation's text in a refusal goes through the same
 `cleanForDisplay` every other thought-derived text in a reply does — the first
 draft had re-implemented the one-line snip without it, the only place a
 thought's text would have reached a terminal with its control characters
@@ -14221,7 +14230,13 @@ thought's text would have reached a terminal with its control characters
 tool's snip calls it). The refusal's count is coerced with `Number()` and a
 `CITED` body carrying neither count nor rows — one the function did not write
 — is said to be that rather than "0 citations", and the tool types the rows
-with the store's `Citation` (second pass). The hosted remedy for the search
+with the store's `Citation` (second pass); the count is a number or a string
+of digits and nothing else, since `Number()` alone took `true` and `[5]` for
+counts (seventh pass); and the delete-only refusal fields live on
+`DeleteResult`'s own failure arm rather than the shared `MutationResult`, so
+`UpdateResult` advertises nothing `update_thought` never returns — one
+`MutationEnvelope` is what the normaliser reads and both result types narrow
+(seventh pass). The hosted remedy for the search
 signatures names 041 as the last file to apply through, so an operator who
 follows it is not sent back for `delete signature` on the next start (fifth
 pass).
@@ -14274,7 +14289,9 @@ refused its own restored source, the deleted id stored as written, the citing
 thought's clock not moved. From the sixth: the citing thoughts locked after
 the facets ([6i] arm 6 deadlocks), a live citation accepting deletion keys, a
 detached row inserted whole refused its restored source, the store throwing
-on a null citation element.
+on a null citation element. From the seventh: the clock moved for an expired
+citation's mark, `true` taken for a count, the facet privilege's failure
+worded as the capture path's.
 
 **Considered and kept as is.** The third review pass argued the source pointer
 should be typed columns — `source_id uuid`, `source_deleted_id uuid`,

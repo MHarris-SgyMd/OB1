@@ -4447,6 +4447,15 @@ console.log("\n[39] Migration 041: a cited source is refused as a value and deta
   const clockBefore = (await one<{ u: string }>(`SELECT updated_at::text AS u FROM thoughts WHERE id = $1::uuid`, [UN])).u;
   await db.query(`SELECT pg_sleep(0.02)`);
   assert((await del(U1, true)).detached === 1 && (await one<{ u: string }>(`SELECT updated_at::text AS u FROM thoughts WHERE id = $1::uuid`, [UN])).u > clockBefore, "detaching a note's citation moves the note's updated_at");
+  // …but marking an expired one is history's bookkeeping: a plain delete of a
+  // source cited only in the past leaves the note's clock alone.
+  const U2 = await thought("a source cited only in the past");
+  const expiredF = (await cite(UN, U2, "once")).id!;
+  await db.query(`UPDATE thought_facets SET valid_until = now() - interval '1 day' WHERE id = $1::uuid`, [expiredF]);
+  const clockAfter = (await one<{ u: string }>(`SELECT updated_at::text AS u FROM thoughts WHERE id = $1::uuid`, [UN])).u;
+  await db.query(`SELECT pg_sleep(0.02)`);
+  const past = await del(U2);
+  assert(past.ok === true && past.inactive === 1 && (await one<{ u: string }>(`SELECT updated_at::text AS u FROM thoughts WHERE id = $1::uuid`, [UN])).u === clockAfter, `deleting a source with only an expired citation marks it and leaves the note's updated_at where it was (${JSON.stringify(past)})`);
   // superseded_by's SET NULL has an index to find the pointing rows by.
   assert(idx.some((i) => /thought_facets_superseded_by_idx/.test(i.indexdef) && /\(superseded_by\)/.test(i.indexdef) && /WHERE \(superseded_by IS NOT NULL\)/.test(i.indexdef)), "the superseder pointer has its partial index, so the SET NULL cascade probes instead of scanning");
   // delete_thought puts the caller's running totals back with its own added: a

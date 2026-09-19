@@ -552,6 +552,15 @@ if (configFailed) {
             add("delete signature", "fail",
                 "delete_thought does not take p_detach over PostgREST — it is missing or is a form from before migration 041 — and the server sends it on every delete, so every delete_thought call would fail",
                 APPLY_041_POSTGREST);
+          } else if (threeErr && /permission denied/i.test(threeErr.message)) {
+            // 041's guard reads and writes thought_facets as the caller on
+            // every delete, a zero-row one included — so the probe itself
+            // meets the missing privilege, and the evidence is in hand: not a
+            // skip (seventh review pass). The direct path's `write privileges`
+            // says the same from the catalog.
+            add("delete signature", "fail",
+                `the connection's role lacks a privilege 041's citation guard needs on every delete (${threeErr.message}) — so every delete_thought call would fail`,
+                "GRANT SELECT, UPDATE ON thought_facets TO <the connector's role>; against the project's direct connection (db/README.md, Grants for a capturing role).");
           } else if (threeErr) {
             add("delete signature", "skip", `could not probe delete_thought over PostgREST (${threeErr.message}); ${CATALOG_HINT}`);
           } else if ((three as { error?: string } | null)?.error !== "NOT_FOUND") {
@@ -872,9 +881,18 @@ if (configFailed) {
           }
           const absent = reqTables.filter((t, i) => reqTables.indexOf(t) === i && !presentTables.has(t));
           const triggerMiss = triggerPresent && (missingByTable.has("ob1_config") || missingByTable.has("thought_work_claims"));
-          const why = triggerMiss
-            ? " — a windowed capture, an edit with content, 008's audit trigger, or 016's enqueue trigger — which as the caller reads ob1_config on every capture, and upserts a work claim while entity extraction is enabled — would fail"
-            : " — so a windowed capture, an edit with content, or 008's audit trigger would fail";
+          // What would fail, by what is missing: the capture path's writers
+          // for any capture-path table, and — 041's guard reads and writes
+          // thought_facets as the caller on every delete — every delete of a
+          // thought for that one, said separately so an operator whose
+          // capture succeeds is not told the check was wrong (seventh pass).
+          const captureMiss = [...missingByTable.keys()].some((t) => t !== "thought_facets");
+          const fails: string[] = [];
+          if (captureMiss) fails.push(triggerMiss
+            ? "a windowed capture, an edit with content, 008's audit trigger, or 016's enqueue trigger — which as the caller reads ob1_config on every capture, and upserts a work claim while entity extraction is enabled —"
+            : "a windowed capture, an edit with content, or 008's audit trigger");
+          if (missingByTable.has("thought_facets")) fails.push("every delete of a thought (041's citation guard reads and writes thought_facets as the caller)");
+          const why = ` — so ${fails.join(", and ")} would fail`;
           if (missingByTable.size) {
             const phrase = [...missingByTable].map(([t, ps]) => `${ps.join(", ")} on ${t}`).join("; ");
             const grants = [...missingByTable].map(([t, ps]) => `GRANT ${ps.join(", ")} ON ${t} TO ${ident};`).join("  ");

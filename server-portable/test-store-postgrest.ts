@@ -526,7 +526,10 @@ console.log("\n[11] deleteThought's rpc shape over PostgREST: p_detach named and
   // The count coerced: a body whose cited_by arrives as a string still counts; garbage does not.
   const coerced = normaliseMutation({ ok: false, error: "CITED", cited_by: "3", citations: [] });
   const garbage = normaliseMutation({ ok: false, error: "CITED", cited_by: "many" });
-  assert(coerced.ok === false && coerced.citedBy === 3 && garbage.ok === false && garbage.citedBy === undefined, "a cited_by that arrives as a numeric string is a number to the tool, and a word is no count");
+  const truthy = normaliseMutation({ ok: false, error: "CITED", cited_by: true });
+  const listy = normaliseMutation({ ok: false, error: "CITED", cited_by: [5] });
+  assert(coerced.ok === false && coerced.citedBy === 3 && garbage.ok === false && garbage.citedBy === undefined && truthy.ok === false && truthy.citedBy === undefined && listy.ok === false && listy.citedBy === undefined,
+    "a cited_by that arrives as a numeric string is a number to the tool; a word, a boolean or a list is no count");
   const holed = normaliseMutation({ ok: false, error: "CITED", cited_by: 2, citations: [null, { id: "a", thought_id: "b", stance: "stated", text: "t" }] });
   assert(holed.ok === false && holed.citations?.length === 1 && holed.citations[0].thoughtId === "b", "a citation element that is not an object is dropped, not thrown on — the refusal stays a refusal");
   // A named call with p_id and p_actor alone — the vendored servers' rpc shape — still resolves.
