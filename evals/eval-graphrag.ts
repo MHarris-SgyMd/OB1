@@ -941,11 +941,11 @@ const armMH = (rows: { q: Question; s: Score }[]) => mean(rows.filter((r) => r.q
 console.log(`\n  BEYOND RECALL — does the graph, used as a typed/weighted structure, bring what vector can't?`);
 
 // (a) edge properties: comp-typed vs comp (untyped) vs vector, already in the table
-const cAll = mean(results.map((r) => r.scores.composed.recall)), tAll = mean(results.map((r) => r.scores["comp-typed"].recall));
+// untyped composed = compAll and vector = vecAll, both computed for the recovery table above
+const tAll = mean(results.map((r) => r.scores["comp-typed"].recall));
 const cN = mean(results.map((r) => r.scores.composed.ndcg)), tN = mean(results.map((r) => r.scores["comp-typed"].ndcg));
 console.log(`\n  (a) edge properties — typed/weighted expansion (best K′=${headTK}, ${headTH} hop) vs untyped vs vector`);
-const vRecAll = mean(results.map((r) => r.scores.vector.recall));
-console.log(`      recall@${K}: untyped ${cAll.toFixed(2)} → typed ${tAll.toFixed(2)} (vector ${vRecAll.toFixed(2)}); nDCG@${K}: untyped ${cN.toFixed(2)} → typed ${tN.toFixed(2)} — using the relations helps ranking${tAll > cAll ? " and recall" : " but not recall"}${tAll + 0.005 < vRecAll ? ", not enough to pass a ceiling'd vector" : ", now matching vector"}`);
+console.log(`      recall@${K}: untyped ${compAll.toFixed(2)} → typed ${tAll.toFixed(2)} (vector ${vecAll.toFixed(2)}); nDCG@${K}: untyped ${cN.toFixed(2)} → typed ${tN.toFixed(2)} — using the relations helps ranking${tAll > compAll ? " and recall" : " but not recall"}${tAll + 0.005 < vecAll ? ", not enough to pass a ceiling'd vector" : ", now matching vector"}`);
 
 // (b) scarcity: does graph recover what a starved vector budget misses?
 console.log(`\n  (b) recall-complement under a starved vector budget b — vector-top-b alone vs edge-aware composed(K′=b)`);
@@ -989,7 +989,7 @@ console.log(`      → ${rel.total && rel.blind / rel.total >= 0.5 ? "a real sto
 
 // ── Bottom line, integrated across axes ──────────────────────────────────────
 console.log(`\n  BOTTOM LINE (multi-axis, SMD-1738):`);
-console.log(`    • Against a FULL-budget vector on this question set the graph stage ${pass ? "clears the pre-registered bar (see VERDICT above)" : "does not pay — the bar FAILS (vector is at ceiling; nothing to recover)"}, and the edge properties ${tAll > cAll ? `lift recall to ${tAll.toFixed(2)} and` : "only"} sharpen ranking (nDCG ${cN.toFixed(2)}→${tN.toFixed(2)})${tAll > cAll ? "." : ", not recall."}`);
+console.log(`    • Against a FULL-budget vector on this question set the graph stage ${pass ? "clears the pre-registered bar (see VERDICT above)" : "does not pay — the bar FAILS (vector is at ceiling; nothing to recover)"}, and the edge properties ${tAll > compAll ? `lift recall to ${tAll.toFixed(2)} and` : "only"} sharpen ranking (nDCG ${cN.toFixed(2)}→${tN.toFixed(2)})${tAll > compAll ? "." : ", not recall."}`);
 console.log(`    • ${scWin ? `But under a STARVED vector budget the edge-aware graph is a real recall complement (b=${scWin.b}: ${arm(scWin.vec).toFixed(2)}→${arm(scWin.typed).toFixed(2)}) — exactly the at-scale regime where a single ANN loses recall (SMD-1707). That is where a graph tier earns its place, not as a replacement for a healthy vector recall.` : "And even under a starved vector budget the graph did not recover the misses — no regime here favours it."}`);
 console.log(`    • Verdict: not a substitute, and not an everyday stage over a ceiling'd vector — a CONDITIONAL recall/precision tier for the scarce-recall regime (deep scale, tight ANN budgets, relational/entity-membership question types this corpus barely poses). A product path is a scale-regime test away, not a here-and-now build (SMD-1038 posture).`);
 
