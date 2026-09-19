@@ -15,7 +15,7 @@
  */
 
 import { SQL } from "bun";
-import { createAssert, resetSchema } from "../db/test-support.ts";
+import { createAssert, plantLegacyRow, resetSchema } from "../db/test-support.ts";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -540,6 +540,60 @@ console.log("\n[10] query log: a search and its follow-up fetch, recorded and jo
   await qlog`DELETE FROM query_log`;
   await qlog`DELETE FROM thoughts`;
   await qlog.close();
+}
+
+console.log("\n[11] Undated and infinity rows render through the tools without a fabricated date (SMD-1328)");
+{
+  // The corpus is empty here (the section above wiped it). Plant the two rows
+  // only a direct INSERT can make — a NULL created_at and an infinite one — and
+  // drive the two tools that print a date: list_thoughts (the [date] prefix)
+  // and fetch (the title). Neither may print 1/1/1970 or "Invalid Date".
+  const sql = new SQL({ url: URL_, max: 1 });
+  const axis = (i: number) => { const a = new Array(EMBEDDING_DIM).fill(0); a[i] = 1; return "[" + a.join(",") + "]"; };
+  const undatedId = await plantLegacyRow(sql, "an undated e2e thought", axis(0), null);
+  const infinityId = await plantLegacyRow(sql, "an infinity-dated e2e thought", axis(1), "infinity");
+  try {
+    const listed = await call("list_thoughts", { limit: 10 });
+    assert(!/1970/.test(listed) && !/Invalid Date/.test(listed), `list_thoughts prints no fabricated date (${listed.replace(/\n/g, " ⏎ ")})`);
+    assert(/\[undated\]/.test(listed), "the undated row shows [undated], not a date");
+    assert(/\[infinity\]/.test(listed), "the infinity row shows [infinity], its own text");
+
+    const undated = JSON.parse(await call("fetch", { id: undatedId }));
+    assert(/^Open Brain/.test(undated.title) && !/1970/.test(undated.title), `fetch titles an undated thought "Open Brain …", not the epoch (${undated.title})`);
+    assert(undated.metadata?.created_at === null, `fetch's created_at metadata is null for an undated row (${JSON.stringify(undated.metadata?.created_at)})`);
+
+    const inf = JSON.parse(await call("fetch", { id: infinityId }));
+    assert(inf.title.startsWith("infinity - ") && !/Invalid Date/.test(inf.title), `fetch titles an infinity thought with its own text (${inf.title})`);
+    assert(inf.metadata?.created_at === "infinity", `fetch's created_at metadata keeps "infinity" (${JSON.stringify(inf.metadata?.created_at)})`);
+
+    // The thought_stats range is the fifth renderer. min/max skip the NULL row
+    // (024), so the range over this corpus is the infinity row on both ends —
+    // it must read "infinity", not "Invalid Date" (the pre-fix new Date() form).
+    const stats = await call("thought_stats");
+    const rangeLine = stats.split("\n").find((l) => l.startsWith("Date range")) ?? "";
+    assert(/infinity/.test(rangeLine) && !/Invalid Date/.test(rangeLine) && !/1970/.test(rangeLine),
+           `thought_stats renders the infinity range as text, not Invalid Date/1970 (${JSON.stringify(rangeLine)})`);
+
+    // The two remaining renderers are the `Captured:` lines of search_thoughts
+    // and search_thoughts_keyword. Every other search in this suite runs over
+    // dated rows, where displayDate and the pre-fix new Date() agree — so drive
+    // both tools over the planted rows here, or a revert ships silently. The
+    // negatives avoid a bare /1970/ (a hex uuid could carry those digits): the
+    // fabrications are "Invalid Date" (infinity) and a digit right after
+    // "Captured: " (the epoch), neither of which a correct render produces.
+    const kwInf = await call("search_thoughts_keyword", { query: "infinity" });
+    assert(/Captured: infinity/.test(kwInf) && !/Invalid Date/.test(kwInf),
+           `search_thoughts_keyword renders the infinity row's date as its own text (${kwInf.replace(/\n/g, " ⏎ ")})`);
+    const kwUndated = await call("search_thoughts_keyword", { query: "undated" });
+    assert(!/Captured:/.test(kwUndated) && !/Invalid Date/.test(kwUndated),
+           `search_thoughts_keyword omits the Captured line for the undated row (${kwUndated.replace(/\n/g, " ⏎ ")})`);
+    const stBoth = await call("search_thoughts", { query: "infinity", threshold: -1 });
+    assert(/Captured: infinity/.test(stBoth) && !/Invalid Date/.test(stBoth) && !/Captured:\s*\d/.test(stBoth),
+           `search_thoughts renders the infinity row's date as text and never fabricates one for the undated row it also returns (${stBoth.replace(/\n/g, " ⏎ ")})`);
+  } finally {
+    await sql`DELETE FROM thoughts WHERE id = ${undatedId}::uuid OR id = ${infinityId}::uuid`;
+    await sql.close();
+  }
 }
 
 server.stop();

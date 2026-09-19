@@ -49,9 +49,29 @@ export function normaliseType(raw: unknown): { type: string; raw?: string } {
   return { type: "observation", raw: raw.trim() };
 }
 
-export function thoughtTitle(content: string, createdAt?: string): string {
+/**
+ * Render a stored `created_at` (store.ts `isoTimestamp`) for a human, or null
+ * when there is no date to show. SMD-1328: `created_at` is `string | null` — a
+ * SQL NULL is `null` (never the fabricated epoch `new Date(null)` gave), and an
+ * infinite or BC/extended-year value with no ISO form arrives as Postgres's own
+ * text. `new Date()` renders both the sentinels and null as "Invalid Date" or
+ * "1/1/1970", so nothing in the tools should call it on a raw column again:
+ *   - null / undefined → null (the caller shows the date as absent);
+ *   - a parseable timestamp → the locale date;
+ *   - anything else (infinity, -infinity, a no-ISO-form date) → its own text.
+ */
+export function displayDate(v: string | null | undefined): string | null {
+  // "" is unreachable from a timestamptz column, but returning null for it keeps
+  // the caller's two idioms — `?? "Open Brain"/"undated"` and `captured ? … : []`
+  // — consistent, since "" is falsy but not nullish.
+  if (v == null || v === "") return null;
+  const d = new Date(v);
+  return Number.isNaN(d.getTime()) ? v : d.toLocaleDateString();
+}
+
+export function thoughtTitle(content: string, createdAt?: string | null): string {
   const firstLine = content.replace(/\s+/g, " ").trim().slice(0, 80);
-  const datePrefix = createdAt ? new Date(createdAt).toLocaleDateString() : "Open Brain";
+  const datePrefix = displayDate(createdAt) ?? "Open Brain";
   return firstLine ? `${datePrefix} - ${firstLine}` : `${datePrefix} thought`;
 }
 
