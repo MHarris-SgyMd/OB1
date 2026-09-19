@@ -100,14 +100,14 @@ const DIRECT_CHECKS = [
 ];
 /**
  * 020 gave match_thoughts and search_thoughts_hybrid the forms the servers
- * call; 027 last defines search_thoughts_hybrid (the relative floor) and 040
+ * call; 027 last defines search_thoughts_hybrid (the relative floor) and 041
  * match_thoughts (039's half-precision walk over 038's gate, run with jit
- * off), both under 020's signatures. A remedy
+ * off and its two planner paths pinned), both under 020's signatures. A remedy
  * that applied 020 alone would leave 020's bodies over theirs — the
  * stale-body state the ledger then cannot see — so the signature remedies
  * name all three, in order.
  */
-const APPLY_020 = "Apply db/migrations/020_match_thoughts_recency.sql, then 027_search_thoughts_relative_floor.sql and 040_match_thoughts_jit_off.sql (the last definers of search_thoughts_hybrid and match_thoughts).";
+const APPLY_020 = "Apply db/migrations/020_match_thoughts_recency.sql, then 027_search_thoughts_relative_floor.sql and 041_match_thoughts_pin_paths.sql (the last definers of search_thoughts_hybrid and match_thoughts).";
 /**
  * PostgREST answers a call it cannot resolve with PGRST202 both when the
  * function is missing and while its schema cache predates the migration that
@@ -115,7 +115,7 @@ const APPLY_020 = "Apply db/migrations/020_match_thoughts_recency.sql, then 027_
  * has just applied it back to the migrator (first review pass of 021).
  */
 const RELOAD_HINT = "If the ledger already records it, PostgREST may not have reloaded its schema cache: NOTIFY pgrst, 'reload schema';";
-const APPLY_020_POSTGREST = `Apply the migrations through db/migrations/040_match_thoughts_jit_off.sql against the project's direct connection (server-portable/README.md §4) — 020 gives both functions the forms the server sends; 027 and 040 last define search_thoughts_hybrid and match_thoughts. ${RELOAD_HINT}`;
+const APPLY_020_POSTGREST = `Apply the migrations through db/migrations/041_match_thoughts_pin_paths.sql against the project's direct connection (server-portable/README.md §4) — 020 gives both functions the forms the server sends; 027 and 041 last define search_thoughts_hybrid and match_thoughts. ${RELOAD_HINT}`;
 const APPLY_021 = "Apply db/migrations/021_embedding_model_per_row.sql.";
 const APPLY_032 = "Apply db/migrations/032_update_thought_provenance.sql.";
 /**
@@ -1362,7 +1362,7 @@ if (configFailed) {
           const seedBounds =
             `Run as the database owner, in one session: SELECT '[1]'::vector; ${Object.entries(HNSW_SEEDS).map(([n, v]) => `ALTER DATABASE <db> SET ${n} = ${v};`).join(" ")}  then restart the server so its pool reconnects.`;
           const putBack =
-            `Put it back: SELECT '[1]'::vector; ALTER FUNCTION ${mt[0]?.sig ?? "match_thoughts"} SET hnsw.iterative_scan = relaxed_order;  — a redefinition that dropped this clause dropped 019's and 040's too (the candidate scan check below says) — and carry them into the migration that redefined it.`;
+            `Put it back: SELECT '[1]'::vector; ALTER FUNCTION ${mt[0]?.sig ?? "match_thoughts"} SET hnsw.iterative_scan = relaxed_order;  — a redefinition that dropped this clause dropped 019's, 040's and 041's too (the candidate scan check below says) — and carry them into the migration that redefined it.`;
           const staleRecord = installedOld && libraryNew;
 
           if (mt.length === 0) {
@@ -1440,8 +1440,16 @@ if (configFailed) {
          * PostgreSQL 14–17 and the executor JIT-compiles it on every filtered
          * call, ~50 ms, with the plan, the rows and the ledger unchanged (040's
          * header has the table; 18 counts disabled nodes instead, and there
-         * the clause guards the generic plan's flat estimate). A WARNING: every
-         * search still answers, at the seq scan's or the compiler's cost.
+         * the clause guards the generic plan's flat estimate). And 041's two
+         * pins (SMD-1677, SMD-1703): without `enable_nestloop = on` an
+         * operator's `enable_nestloop = off` reaches every join in the call —
+         * merge and hash joins over the whole table, 1.3–2.2 s a call at a
+         * million rows, the unfiltered call included, the walk's rows changed;
+         * without `enable_tidscan = on` PostgreSQL 18 under `enable_tidscan =
+         * off` gives the gate's probe no TID Range path and scans the whole
+         * heap eight times a call (041's header has the tables). A WARNING:
+         * every search still answers, at the seq scan's, the compiler's or
+         * the whole-table join's cost.
          */
         try {
           if (catalog instanceof Error) throw catalog;
@@ -1451,29 +1459,31 @@ if (configFailed) {
           } else {
             const seqOff = mt[0].settings["enable_seqscan"] === "off";
             const jitOff = mt[0].settings["jit"] === "off";
+            const pinned = mt[0].settings["enable_nestloop"] === "on" && mt[0].settings["enable_tidscan"] === "on";
             const rows = mt[0].rows;
             const kwOff = kwRows !== null && kwRows !== 25;
             const ledgerHas019 = ledger.has("019");
             const ledgerHas040 = ledger.has("040");
+            const ledgerHas041 = ledger.has("041");
             // Whether THIS server would compile at all: Supabase's images are
             // built without LLVM JIT and its upgrades set jit = off, so there a
             // missing clause costs nothing today and the warning says so.
             const [{ jitOn }] = await sql`SELECT pg_jit_available() AND current_setting('jit') = 'on' AS "jitOn"`;
             const today = jitOn ? "" : " (not on this server today: it has no JIT, or its own jit is off — Supabase ships both; the clause is for a server that compiles)";
             const missing019 = !seqOff || rows !== 10 || kwOff;
-            const mtMissing = !seqOff || rows !== 10 || !jitOff;
-            // match_thoughts' three clauses and its row estimate are restored by
-            // its LAST definer, 040 — never by 019's file, whose CREATE is the
+            const mtMissing = !seqOff || rows !== 10 || !jitOff || !pinned;
+            // match_thoughts' five clauses and its row estimate are restored by
+            // its LAST definer, 041 — never by 019's file, whose CREATE is the
             // 4-argument form 020 dropped and would put a second overload beside
             // the shipped one on any brain past 020 (review pass 2) — named
-            // while the ledger does not record 040, ALTERed once it does (a
+            // while the ledger does not record 041, ALTERed once it does (a
             // plain run skips a recorded file). The keyword estimate is 019's
-            // and 040 does not define that function, so its remedy is the ALTER
+            // and 041 does not define that function, so its remedy is the ALTER
             // in either case, beside the file or in the Put-it-back list.
-            const mtAlter = mtMissing ? `ALTER FUNCTION ${mt[0].sig}${seqOff ? "" : " SET enable_seqscan = off"}${jitOff ? "" : " SET jit = off"}${rows !== 10 ? " ROWS 10" : ""};` : "";
+            const mtAlter = mtMissing ? `ALTER FUNCTION ${mt[0].sig}${seqOff ? "" : " SET enable_seqscan = off"}${jitOff ? "" : " SET jit = off"}${pinned ? "" : " SET enable_nestloop = on SET enable_tidscan = on"}${rows !== 10 ? " ROWS 10" : ""};` : "";
             const kwAlter = kwOff ? "ALTER FUNCTION search_thoughts_keyword(text, int, int, jsonb) ROWS 25;" : "";
-            const remedy = mtMissing && !ledgerHas040
-              ? `Apply db/migrations/040_match_thoughts_jit_off.sql${!seqOff || rows !== 10 ? " — the last definer of match_thoughts, which carries 019's clauses and ROWS 10 with its own (019's file alone would re-create the 4-argument form 020 dropped)" : ""}.${kwOff ? ` Then put the keyword estimate back: SELECT '[1]'::vector; ${kwAlter}  and carry it into the migration that redefined that function.` : ""}`
+            const remedy = mtMissing && !ledgerHas041
+              ? `Apply db/migrations/041_match_thoughts_pin_paths.sql${!seqOff || rows !== 10 ? " — the last definer of match_thoughts, which carries 019's clauses and ROWS 10 with its own (019's file alone would re-create the 4-argument form 020 dropped)" : ""}.${kwOff ? ` Then put the keyword estimate back: SELECT '[1]'::vector; ${kwAlter}  and carry it into the migration that redefined that function.` : ""}`
               : `Put it back — after any re-apply of a migration body, since CREATE OR REPLACE resets these: SELECT '[1]'::vector; ${[mtAlter, kwAlter].filter(Boolean).join(" ")}  and carry them into the migration that redefined the function.`;
             const estimates = [
               ...(rows !== 10 ? [`match_thoughts' row estimate is ${rows} rather than 10`] : []),
@@ -1482,19 +1492,26 @@ if (configFailed) {
             const jitNote = jitOff
               ? ""
               : `; and it does not carry jit = off${ledgerHas040 ? " although migration 040 is recorded as applied — a later redefinition dropped its SET clause" : " — migration 040 is not applied"}, so a planner path disabled at any level (enable_tidscan, enable_nestloop, hashagg with sort) JIT-compiles the gate's sample on every filtered call, ~50 ms, on PostgreSQL 14–17 (on 18 the clause guards the generic plan's flat estimate; 040's header has the table)${today}`;
-            if (!missing019 && jitOff) {
-              add("candidate scan", "ok", "match_thoughts declares enable_seqscan = off and ROWS 10, search_thoughts_keyword ROWS 25 (019), and match_thoughts jit = off (040): the candidate scan takes the HNSW indexes at the shipped width, callers plan against real row counts, and no statement of the body is JIT-compiled");
+            const pinLedger = ledgerHas041 ? " although migration 041 is recorded as applied — a later redefinition dropped its SET clauses" : " — migration 041 is not applied";
+            const pinWhy = "an operator's enable_nestloop = off at any level reaches every join in the call — the parent lookups and the walk's chunk join become merge and hash joins over the whole table, 1.3–2.2 s a call at a million rows, the unfiltered call included, and the walk's rows change — and on PostgreSQL 18 enable_tidscan = off leaves the gate's probe no TID Range path, so every filtered call scans the whole heap eight times (041's header has the tables)";
+            const pinNote = pinned ? "" : `; and it does not carry enable_nestloop = on and enable_tidscan = on${pinLedger}, so ${pinWhy}`;
+            if (!missing019 && jitOff && pinned) {
+              add("candidate scan", "ok", "match_thoughts declares enable_seqscan = off and ROWS 10, search_thoughts_keyword ROWS 25 (019), match_thoughts jit = off (040) and enable_nestloop = on with enable_tidscan = on (041): the candidate scan takes the HNSW indexes at the shipped width, callers plan against real row counts, no statement of the body is JIT-compiled, and the call's joins and the gate's probe keep their paths whatever the session sets");
             } else if (!seqOff) {
               add("candidate scan", "warn",
-                  `match_thoughts does not carry enable_seqscan = off${ledgerHas019 ? " although migration 019 is recorded as applied — a later redefinition dropped its SET clause" : " — migration 019 is not applied"}${estimates.length ? `, and ${estimates.join(", and ")}` : ""} — so at the shipped width the planner seq-scans the chunk table on every search and both tables above the default count, on brains up to some tens of thousands of thoughts (019's header has the numbers)${jitNote}`,
+                  `match_thoughts does not carry enable_seqscan = off${ledgerHas019 ? " although migration 019 is recorded as applied — a later redefinition dropped its SET clause" : " — migration 019 is not applied"}${estimates.length ? `, and ${estimates.join(", and ")}` : ""} — so at the shipped width the planner seq-scans the chunk table on every search and both tables above the default count, on brains up to some tens of thousands of thoughts (019's header has the numbers)${jitNote}${pinNote}`,
                   remedy);
             } else if (estimates.length) {
               add("candidate scan", "warn",
-                  `match_thoughts carries enable_seqscan = off but ${estimates.join(", and ")}${ledgerHas019 ? " — a redefinition reset what 019 declared" : " — migration 019 is not applied"}; every query composing the function is planned against that count (017's header records what a 1,000-row estimate cost)${jitNote}`,
+                  `match_thoughts carries enable_seqscan = off but ${estimates.join(", and ")}${ledgerHas019 ? " — a redefinition reset what 019 declared" : " — migration 019 is not applied"}; every query composing the function is planned against that count (017's header records what a 1,000-row estimate cost)${jitNote}${pinNote}`,
+                  remedy);
+            } else if (!jitOff) {
+              add("candidate scan", "warn",
+                  `match_thoughts carries enable_seqscan = off and both row estimates hold, but not jit = off${ledgerHas040 ? " although migration 040 is recorded as applied — a later redefinition dropped its SET clause" : " — migration 040 is not applied"}: a planner path disabled at any level (enable_tidscan, enable_nestloop, hashagg with sort) JIT-compiles the gate's sample on every filtered call, ~50 ms, with the plan, the rows and the ledger unchanged, on PostgreSQL 14–17 (on 18 the clause guards the generic plan's flat estimate; 040's header has the table)${today}${pinNote}`,
                   remedy);
             } else {
               add("candidate scan", "warn",
-                  `match_thoughts carries enable_seqscan = off and both row estimates hold, but not jit = off${ledgerHas040 ? " although migration 040 is recorded as applied — a later redefinition dropped its SET clause" : " — migration 040 is not applied"}: a planner path disabled at any level (enable_tidscan, enable_nestloop, hashagg with sort) JIT-compiles the gate's sample on every filtered call, ~50 ms, with the plan, the rows and the ledger unchanged, on PostgreSQL 14–17 (on 18 the clause guards the generic plan's flat estimate; 040's header has the table)${today}`,
+                  `match_thoughts carries enable_seqscan = off, both row estimates hold and jit = off, but not enable_nestloop = on and enable_tidscan = on${pinLedger}: ${pinWhy}`,
                   remedy);
             }
           }
