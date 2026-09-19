@@ -1865,6 +1865,95 @@ the arms and the scoring are written, and the one-line rule for reading the
 result is the same: the graph has to beat `match_thoughts` on questions
 someone actually asked.
 
+### GraphRAG as an expansion/rerank stage — not a substitute, and conditional (SMD-1738)
+
+SMD-948 raced the graph as a **substitute** (0.51 vs vector 0.98) — the recall tier doing
+the whole match. SMD-1707 named the trap: a retriever declined as a substitute may be a
+good *complement*. So this measures the graph as an **expansion/rerank stage** over vector
+recall, on the same corpus, edges and labelled gold — and, after a first pass flattened the
+graph into a unit-weight adjacency, on the graph's **real typed/weighted structure**.
+
+- **Stage 1 — vector coarse recall:** the ANN returns K′ ≫ k candidates.
+- **Stage 2 — graph expansion + rerank:** seed the graph from *those hits'* entities,
+  expand `hops` over `ob1_entity_edges`, symmetric-RRF rerank the union. `composed` is the
+  untyped walk; **`comp-typed`** weights each hop by a pre-registered relation prior
+  (`depends_on`/`uses`/`works_on` high, `co_occurs_with` low), evidence support
+  a saturating `support/(support+5)` and confidence — the discrete first step toward relevance as diffusion over
+  a typed/weighted graph. `comp-cos` orders the union by cosine only (control). The
+  **pre-registered bar** (SMD-1038): build iff multi-hop recall@10 lifts ≥ 0.05 over vector
+  AND recovers more than it breaks AND does not cut aggregate recall, checked on every cell.
+
+**Recall, vs a full-budget vector (601 issues, 27 questions):**
+
+| arm | multi-hop | aggregation | corpus | all | nDCG (mh) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| vector — the substitute baseline | **1.00** | 0.98 | 0.75 | 0.97 | 0.96 |
+| graph — SMD-948 substitute (question-seeded) | 0.43 | 0.47 | 0.33 | 0.43 | 0.31 |
+| composed — untyped expansion (best cell) | 0.89 | 0.98 | 0.69 | 0.89 | 0.69 |
+| **comp-typed** — edge-aware (relation prior × support × conf) | **0.98** | 0.98 | 0.69 | **0.95** | **0.75** |
+| comp-cos — union by cosine only (control) | **1.00** | 0.98 | 0.75 | 0.97 | 0.96 |
+
+**The bar FAILS — because vector is at ceiling, not because the graph was flattened.**
+comp-cos ties vector exactly: pooling the graph-reached thoughts loses and adds nothing.
+Using the **real typed edges** (comp-typed) lifts recall over the untyped walk (0.89 → 0.95
+all, multi-hop 0.98) and ranking (all-question nDCG 0.73 → 0.77; multi-hop 0.69 → 0.75) — a gentler, more vector-preserving
+rerank — but still **cannot exceed** a ceiling'd vector (the untyped best cell recovers 0,
+breaks 4; no cell of the 8 clears the ≥0.05-lift bar). So the flattening cost some recall,
+but the ceiling caps even the typed version. Recall, though, is one axis, and the ceiling is
+a property of the *question set*. On the axes a graph is built for, the picture turns.
+
+**Beyond recall — the axes vector can't express:**
+
+*Recall-complement under a starved vector budget* — the finding. Constrain the coarse
+budget b; the edge-aware graph becomes a real recall tier where vector runs short:
+
+| b (vector budget) | vector-top-b R@10 | edge-aware composed R@10 | Δ | (multi-hop) vec → composed |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 0.35 | **0.83** | **+0.48** | 0.42 → 0.85 |
+| 3 | 0.78 | 0.90 | +0.12 | 0.90 → 0.96 |
+| 5 | 0.92 | 0.94 | +0.02 | 1.00 → 0.98 |
+| 10 | 0.97 | 0.95 | −0.02 | 1.00 → 0.98 |
+
+At a tight budget the graph recovers what vector misses (+0.48 at b=1), crossing over only
+when vector saturates (b ≈ 10). This is exactly SMD-1707's at-scale regime, where a single
+ANN loses recall and a second tier recovers it — hidden here by the ceiling, not absent.
+
+*Relational structure vector can't see* — of 3,000 issue pairs joined by a strong typed
+edge (`depends_on`/`uses`), **95%** have the linked sibling *outside* the issue's vector
+top-10: a large store of relational neighbours only the graph reaches (descriptive — the
+graph defines the link). *Entity-membership* applies to only 5 of 10 needles (the rest are
+literal-string aggregations, keyword's job); on those the extracted graph trails
+(0.18 vs vector 0.97), limited by SMD-947's extraction coverage. The set poses few true
+relational or entity-membership queries — the shape-of-question gap SMD-948 named.
+
+**Scale (synthetic typed graph, latency only).** Not K′-bounded as written — at 1M
+(6M mentions) a ~2.0 s floor at K′=10 rising to ~5.0 s at K′=1000/2-hop, and at 10M (30M mentions, lighter density) a ~7 s floor essentially FLAT across K′=10–1000 (11.3 s only at K′=1000/2-hop) — the df scan tracks the mention count, not K′ —
+dominated by the per-call `df` full scan (the walk recomputes document frequency each
+call). A **materialized `df`** is the prerequisite to scale; the typed pass adds the
+`edge_w` aggregate on top.
+
+Reproduce:
+
+```
+OB1_METADATA_MODEL=qwen2.5:7b OB1_EVAL_CORPUS=/tmp/linear-corpus-full.json \
+  ../db/with-postgres.sh bun eval-graphrag.ts --no-global --allow-stale-dump   # real corpus, all axes
+OB1_EVAL_EMBED=syn@64 OB1_GRAPH_SCALE_MENTIONS_PER=3 OB1_GRAPH_SCALE_EDGES_PER=1 \
+  OB1_GRAPH_KPRIME=10,100,1000 OB1_GRAPH_HOPS=1,2 OB1_PG_SHM=3g \
+  ../db/with-postgres.sh bun eval-graphrag.ts --scale 10000000                  # 10M synthetic, latency
+```
+
+**Verdict — a conditional tier, not a substitute or an everyday stage.** Against a healthy
+full-budget vector on ordinary questions the graph stage does not pay (ceiling). But where
+vector recall is *scarce* — deep scale, a tight ANN budget, relational/entity-membership
+questions — the edge-aware graph is a real recall/precision complement, the recall tier to
+vector's precision tier that SMD-1707 framed. **Eval-only; not built** — a product path is a
+scale-regime test away (SMD-1038 posture). *Forward-looking:* the value here is the edges'
+type and support; confidence is near-uniform and lineage/supersession is absent from this
+corpus (that is the claim-log SMD-1729 and trust labels SMD-1724). Carrying trust, lineage
+and recency *dynamically* on the edges — relevance as continuous-time diffusion over a
+typed/weighted/temporal graph, a CfC/liquid-network shape — is where this points; the static
+edge-aware expansion is the first discrete step.
+
 ## Hybrid ranking, measured on four query sets
 
 `eval-hybrid.ts`, run as `bun run hybrid` (SMD-958, migration 017). Needs
