@@ -191,8 +191,9 @@ CREATE TRIGGER trg_queue_entity_extraction
 -- issues db/config.mjs ROLE_GRANTS' `community` group, which covers this file's
 -- five tables (SELECT, INSERT, UPDATE, DELETE) and the three bigserial
 -- sequences by name (USAGE, SELECT — an INSERT needs them), instead of every
--- sequence in the schema. The trigger function needs no EXECUTE grant: a
--- trigger fires as the table's owner set it up. Row-level security: SMD-1716.
+-- sequence in the schema. The trigger function needs no EXECUTE grant:
+-- Postgres checks EXECUTE on a trigger function when the trigger is created,
+-- not when it fires. Row-level security: SMD-1716.
 -- ============================================================
 
 -- Notify PostgREST to reload schema cache

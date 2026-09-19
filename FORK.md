@@ -14119,13 +14119,14 @@ assertion found the merge: `GRANT SELECT, INSERT ON thought_audit`, not
 TABLE does not, and a role's `SELECT` on `thoughts` does not reach a view over
 it.
 `db/README.md`'s grants table gains the rows, and check-fork-consistency's
-grants check now requires every sequence and function named there too.
+grants check now requires every view, sequence and function named there too.
 
 **One rule keeps the constructs out**, in two places from one spelling.
 `config.mjs`'s `SUPABASE_SQL_RULES` — `service_role`; `TO`/`FROM` lists ending
 in `authenticated` or `anon`; `auth.uid()`, `auth.role()`, `auth.jwt()`,
 `auth.users`; a `supabase_` name; `ENABLE ROW LEVEL SECURITY` or `CREATE
-POLICY` — applied per line of `stripSqlComments`' output. That strip is
+POLICY` — matched over the whole of `stripSqlComments`' output, one hit per rule
+and line, so a statement broken across lines is a hit. That strip is
 literal-aware: `--` and slash-star comments go, string literals and quoted
 identifiers stay, and a dollar-quoted body is scanned within with its own
 comments stripped, newlines kept so a hit's line number is the file's. String
@@ -14201,6 +14202,30 @@ Supabase-ism (`net.http_post`, `vault.`, `current_setting('request.jwt…')`),
 none of which the tree carries; a `FROM anon` table alias would be a false
 positive; `TABLES` in test-support skips its two duplicates now. No finding
 became a ticket.
+
+**Review, second pass** (a second cold reviewer, given the first pass's
+findings, beside the author's re-read of what that pass added). Its findings
+sat in the first pass's additions, which is the stop signal: three sentences
+still said the rules ran "per line" after that pass moved them to the whole
+text (config's rule doc, the type declaration, this section — caught: reading
+the doc against the code); the row type's doc named three kinds where the type
+declares four; the live section's comment on the indexes its restore cannot
+remove miscounted them twice over — enhanced-thoughts builds five on `thoughts`,
+not four, and provenance-chains one nobody had named (caught: grepping every
+`CREATE INDEX` in the files against the migrations' own names); the
+entity-extraction note said a trigger "fires as the table's owner set it up",
+where Postgres checks EXECUTE on a trigger function at CREATE TRIGGER, not when
+it fires — right conclusion, wrong mechanism; test-support's drop-list header
+says a table with a foreign key must precede `thoughts`, and the community
+tables it now appends follow it — harmless, since the CASCADE cuts the
+constraints, and the comment says so now. The author's own re-read added the
+view to every sentence that listed the kinds, and to the live section's
+dry-run assertion. By-catch, pre-existing: thought-audit's file builds
+`thought_audit_session_id_idx`, the same column and predicate as 008's
+`thought_audit_session_idx` under another name, so on a migrated brain it adds
+a redundant index — its README says so now; the file is upstream's. Declared:
+a hit that spans lines is reported at the line its statement starts on. No
+finding became a ticket.
 
 **Upstream status:** the twelve files now differ from upstream's in their
 grant/RLS sections (plus wiki-pages' extension line and smart-ingest's foreign

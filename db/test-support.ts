@@ -58,7 +58,8 @@ const TABLES = [
   // Their bigserial sequences go with them; their functions stay (CREATE OR
   // REPLACE re-applies cleanly, and none is a migration's). thought_audit and
   // thought_entities are above already; the view is not a table and goes with
-  // `thoughts`.
+  // `thoughts`. They follow `thoughts` although several reference it: the
+  // CASCADE above has already cut those constraints by the time they drop.
   ...grantedTables(["community"]).filter((t) => t !== "thought_audit" && t !== "thought_entities"),
 ];
 

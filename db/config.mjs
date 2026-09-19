@@ -1658,7 +1658,7 @@ export function grantPresenceSql(objects) {
 /**
  * GRANT statements giving `role` exactly the privileges the given groups need
  * (default: all — the do-everything role the guide sets up). Pass `present` (a
- * Set of object names that exist — tables, sequences and functions alike, the
+ * Set of object names that exist — tables, views, sequences and functions alike, the
  * names as the rows spell them) to skip what a partially-migrated database or an
  * unapplied community schema lacks; omit it to emit everything. The role is
  * quoted; the schema USAGE grant is the caller's to add (a schema, not a
@@ -1766,7 +1766,8 @@ export function stripSqlComments(text) {
 
 /**
  * What a `.sql` file may not run on this fork, each with the reason (SMD-1796).
- * Tested per line of the comment-stripped text — string literals included,
+ * Matched over the whole comment-stripped text, one hit per rule and line, so a
+ * statement broken across lines is one hit — string literals included,
  * since `EXECUTE 'GRANT … TO service_role'` runs the grant as surely as the
  * bare statement does — so a header that quotes one of these to explain its
  * absence is not a hit, and a statement is.

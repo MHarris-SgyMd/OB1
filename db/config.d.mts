@@ -270,8 +270,8 @@ export function alignVectorSearchPath(sql: import("bun").SQL): Promise<string | 
 /**
  * One object's requirement in ROLE_GRANTS: the privileges a group needs on it,
  * and what introduced the need — a migration number, or for the `community`
- * group the schemas/ file. Exactly one of `table`, `sequence` or `function` is
- * set; a function is named with its argument types (SMD-1796).
+ * group the schemas/ file. Exactly one of `table`, `view`, `sequence` or
+ * `function` is set; a function is named with its argument types (SMD-1796).
  */
 export type RoleGrant = { table?: string; view?: string; sequence?: string; function?: string; privileges: readonly string[]; since: string };
 /** The groups ROLE_GRANTS is keyed by. */
@@ -324,7 +324,7 @@ export function grantPresenceSql(objects: readonly GrantObject[]): string;
 export function grantStatements(role: string, opts?: { groups?: readonly string[]; present?: Set<string> | null }): string[];
 /** `text` with its comments blanked in place — literal-aware, dollar-quoted bodies scanned within, newlines kept so line numbers hold (SMD-1796, SMD-1316). */
 export function stripSqlComments(text: string): string;
-/** What a .sql file may not run on this fork: each rule's name, per-line regex and reason (SMD-1796). */
+/** What a .sql file may not run on this fork: each rule's name, regex (matched over the whole comment-stripped text) and reason (SMD-1796). */
 export const SUPABASE_SQL_RULES: readonly { name: string; re: RegExp; msg: string }[];
 /** Every SUPABASE_SQL_RULES hit in `text`, comments excepted, with the source line number. */
 export function supabaseIsmsIn(text: string): { rule: string; line: number; msg: string }[];

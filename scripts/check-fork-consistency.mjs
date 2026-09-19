@@ -1787,7 +1787,7 @@ await checkEmbeddingDefaults();
 
 /**
  * db/README.md's "Grants for a capturing role" names every table db/config.mjs's
- * ROLE_GRANTS requires — and, since SMD-1796, every sequence and function the
+ * ROLE_GRANTS requires — and, since SMD-1796, every view, sequence and function the
  * community group adds — the two are one spelling (SMD-1226). Preflight's `write
  * privileges` check and `migrate.ts --grant` both read ROLE_GRANTS; the README is
  * the human list. An object added to a group in config without a line in the

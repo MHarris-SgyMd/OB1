@@ -142,7 +142,7 @@ if (reapply && baseline) {
 // capturing role". A standalone mode: it records nothing in the ledger and runs
 // no migration, so it is refused beside --baseline or --reapply. It grants only
 // objects that already exist — tables, and since SMD-1796 the community
-// schemas' sequences and functions too — so it is safe on a partially-migrated
+// schemas' views, sequences and functions too — so it is safe on a partially-migrated
 // database, before a community schema is applied, and again after later
 // migrations or schemas bring the rest. It never creates a role or sets a
 // password — a missing role is an error naming CREATE ROLE, not a silent create

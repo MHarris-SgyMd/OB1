@@ -51,7 +51,7 @@ SUPABASE (from your Open Brain setup)
 
 ## Steps
 
-1. Apply `schema.sql` to your brain: `psql "$DATABASE_URL" -f schema.sql` (or paste it into your SQL console). This creates the `thought_audit` table and its indexes — on a brain built by `db/migrate.ts`, migration 008 already did, and the file is idempotent.
+1. Apply `schema.sql` to your brain: `psql "$DATABASE_URL" -f schema.sql` (or paste it into your SQL console). This creates the `thought_audit` table and its indexes — on a brain built by `db/migrate.ts`, migration 008 already did, and the file is idempotent, with one wrinkle: its `thought_audit_session_id_idx` is 008's `thought_audit_session_idx` (same column, same predicate) under another name, so applying the file there builds one redundant index; drop it, or skip the file.
 2. From `db/`, run `bun migrate.ts --url "$DATABASE_URL" --grant <role>`: the role your server connects as gets `SELECT, INSERT` on the table — append-only, as upstream's grant to Supabase's `service_role` was; the file itself grants nothing and enables no RLS (this fork, SMD-1796).
 3. *(Optional)* Open a new query, paste the full contents of `author-session-id.sql`, and click **Run**. This creates the `thought_provenance` view and `thoughts_by_session()` RPC used to query by session id.
 4. **Wire audit writes into your mutation tools.** This schema is storage only — no trigger, no hidden magic. You (or a mutation integration like `integrations/update-thought-mcp` and `integrations/delete-thought-mcp`) are responsible for inserting a row after each capture / update / delete. See the "How to write audit rows" section below for copy-paste examples.

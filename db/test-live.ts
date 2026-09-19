@@ -3309,9 +3309,12 @@ console.log("\n[18] Every schemas/*.sql applies over TCP with no Supabase role p
   // dropped in the finally. What it cannot put back goes with the next suite's
   // dropSchema (which also names the community tables should a run die here):
   // the columns the files add to `thoughts`, and the indexes they build on
-  // migration-owned tables (thought_audit's three, thought_entities' two,
-  // enhanced-thoughts' and text-search-trgm's on `thoughts`) — a kept database
-  // (OB1_PG_KEEP) keeps those.
+  // migration-owned tables — enhanced-thoughts' five and provenance-chains'
+  // one on `thoughts`, entity-extraction's two on thought_entities,
+  // thought-audit's one whose name 008 does not already use
+  // (thought_audit_session_id_idx; its other two and text-search-trgm's are
+  // the migrations' own names, so IF NOT EXISTS adds nothing) — a kept
+  // database (OB1_PG_KEEP) keeps those.
   const catalog = async () => ({
     tables: new Set(((await sql`SELECT tablename AS n FROM pg_tables WHERE schemaname = 'public'`) as { n: string }[]).map((r) => r.n)),
     views: new Set(((await sql`SELECT viewname AS n FROM pg_views WHERE schemaname = 'public'`) as { n: string }[]).map((r) => r.n)),
@@ -3359,8 +3362,8 @@ console.log("\n[18] Every schemas/*.sql applies over TCP with no Supabase role p
       const dry = await migrate("--grant", ROLE, "--dry-run");
       const skippedLine = dry.out.split("\n").find((l) => /not yet present, skipped/.test(l)) ?? "";
       const communityTables = grantedTables(["community"]).filter((t) => t !== "thought_audit" && t !== "thought_entities");
-      assert(dry.code === 0 && communityTables.every((t) => skippedLine.includes(t)) && grantedSequences(["community"]).every((s) => skippedLine.includes(s)) && grantedFunctions(["community"]).every((f) => skippedLine.includes(f)),
-             `before the files are applied, --grant --dry-run names every community table, sequence and function as not yet present (exit ${dry.code}; ${skippedLine.length} chars of skipped list)`);
+      assert(dry.code === 0 && communityTables.every((t) => skippedLine.includes(t)) && grantedViews(["community"]).every((v) => skippedLine.includes(v)) && grantedSequences(["community"]).every((s) => skippedLine.includes(s)) && grantedFunctions(["community"]).every((f) => skippedLine.includes(f)),
+             `before the files are applied, --grant --dry-run names every community table, view, sequence and function as not yet present (exit ${dry.code}; ${skippedLine.length} chars of skipped list)`);
       assert(!/ON SEQUENCE|ON FUNCTION|agent_memories/.test(dry.out.replace(skippedLine, "")) && /GRANT SELECT, INSERT, UPDATE, DELETE ON thoughts TO "ob1_live_community";/.test(dry.out),
              "…grants nothing of the community group, and grants the migrations' tables");
 
@@ -3372,7 +3375,8 @@ console.log("\n[18] Every schemas/*.sql applies over TCP with no Supabase role p
       assert(schemaFiles.length >= 17 && failed.length === 0, `every schemas/*.sql applies over TCP with no Supabase role (${schemaFiles.length} files; failed: ${failed.join(" | ") || "none"})`);
 
       // After: --grant issues the whole community group, over TCP, in one
-      // transaction — sequences and functions spelled as GRANT takes them.
+      // transaction — views as tables, sequences and functions spelled as GRANT
+      // takes them.
       const grant = await migrate("--grant", ROLE);
       assert(grant.code === 0 && !/not yet present/.test(grant.out) && /over \d+ object\(s\)/.test(grant.out),
              `--grant issues everything, nothing skipped (exit ${grant.code}: ${grant.out.trim().split("\n").find((l) => /Granted/.test(l)) ?? grant.out.trim().split("\n").slice(-1)[0]})`);

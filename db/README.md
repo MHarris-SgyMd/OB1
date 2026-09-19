@@ -307,8 +307,8 @@ a superuser), after the migrations are applied:
 bun migrate.ts --url ... --grant your_role
 ```
 
-`--grant` issues exactly the list above for the tables, sequences and functions
-that exist, in one transaction; it never creates the role or sets a password, so
+`--grant` issues exactly the list above for the tables, views, sequences and
+functions that exist, in one transaction; it never creates the role or sets a password, so
 create the role first. `--grant --dry-run` prints the statements without running
 them, so a locked-down deployment can grant a subset by hand. A role that only
 ever runs the server needs the **capture** and **server** groups; add **worker**
