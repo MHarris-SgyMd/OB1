@@ -55,6 +55,14 @@ async function lanceModules(): Promise<{ lancedb: typeof lancedb; arrow: typeof 
 }
 
 export type Point = { ref: string; labels: string[]; tiers: string[]; embedding: number[] };
+/**
+ * A point that also carries the row payload it belongs to — the unit a read-model
+ * store holds so it can serve a retrieval read WITHOUT a Postgres id→row resolve
+ * (SMD-1696). `metadata` is a JSON string, mirroring a real `thoughts.metadata
+ * jsonb`. Leaves `Point` and its consumers untouched; only the read-model store
+ * and its driver use this wider unit.
+ */
+export type PayloadPoint = Point & { content: string; metadata: string };
 export type Filter = { key: "labels" | "tiers"; value: string } | null;
 export type BuildStat = { loadMs: number; buildMs: number; indexBytes: number; note?: string };
 
@@ -138,6 +146,7 @@ export class PgEngine {
   private readonly name: string;
   private loadMs = 0;
   private rows = 0;
+  private calls = 0;
   constructor(private readonly dim: number, private readonly tag = String(process.pid)) {
     this.name = `ob1-store-pg-${this.tag}`;
   }
@@ -170,6 +179,21 @@ export class PgEngine {
     }
     if (streak < 3) throw new Error(`Postgres ${this.name} never became stable`);
     this.sql = new SQL({ url, max: 1 });
+    // A regression guard for the read-model arm (SMD-1696): the read model holds
+    // no Postgres handle at all, so its read path is zero-Postgres by construction.
+    // This counter makes that checkable at runtime — the driver resets it, runs the
+    // whole read-model read loop (shared measure machinery included) and asserts the
+    // count is still 0, catching any future edit that reintroduces a pg call on that
+    // path. The actual *demonstration* of independence is the driver's Postgres-DOWN
+    // re-read (Postgres stopped, the read model still answers), not this counter.
+    // PgStore shares this handle, so a stray vector search would be counted too.
+    // (`exact` runs inside `sql.begin`, a different handle, so the oracle's scans are
+    // not counted — irrelevant, as the read-model loop never calls the oracle.)
+    const rawUnsafe = this.sql.unsafe.bind(this.sql);
+    (this.sql as unknown as { unsafe: unknown }).unsafe = (...args: unknown[]) => {
+      this.calls++;
+      return (rawUnsafe as (...a: unknown[]) => unknown)(...args);
+    };
     await this.sql.unsafe("CREATE EXTENSION IF NOT EXISTS vector");
     await this.sql.unsafe("CREATE EXTENSION IF NOT EXISTS vectorscale CASCADE");
     await this.sql.unsafe(
@@ -277,6 +301,15 @@ export class PgEngine {
    *  Postgres (a keyword index over thought text) beside the vector points. */
   async raw(text: string): Promise<any[]> {
     return this.sql.unsafe(text);
+  }
+
+  /** Queries issued through the shared handle since the last reset — the read-model
+   *  arm (SMD-1696) checks this stays 0 across its zero-Postgres read loop. */
+  pgCallCount(): number {
+    return this.calls;
+  }
+  resetPgCalls(): void {
+    this.calls = 0;
   }
 
   /** Exact top-`n` refs by cosine, index kept out of the plan — the ground truth. */
@@ -593,6 +626,170 @@ export class LanceEngine implements ExternalEngine {
   }
 }
 
+// ── LanceDB as a READ MODEL (embedded, payload included — no id→row resolve) ──
+
+/**
+ * LanceDB run as a READ MODEL (SMD-1696): the same in-process ANN as
+ * `LanceEngine`, but every row carries the FULL payload (`content`, `metadata`)
+ * beside the vector, so a retrieval read is served entirely from Lance with NO
+ * Postgres call. This is the CQRS shape SMD-1037/1662 defined away by keeping
+ * Postgres the source of the returned rows and paying an id→row resolve on every
+ * read — the configuration where a second store is actually compelling, and the
+ * one the earlier evals put out of scope. Postgres stays the transactional write
+ * log; this store is the read side, fed by write-time propagation whose cost is
+ * measured separately (dual-write, outbox/CDC drain, mutable-payload upsert).
+ *
+ * It exposes TWO reads over ONE built index, so the two-store resolve path and
+ * the read-model no-resolve path differ only in where the payload comes from,
+ * never in the vector search:
+ *   - `search`     → refs only (feeds the SMD-1662 id→row resolve against PG)
+ *   - `searchRows` → ref + content + metadata (the read-model read; zero PG)
+ * plus the write-side primitives the propagation model drives:
+ *   - `applyAppend`      → new rows (append-mostly: new thoughts / new vectors)
+ *   - `applyContentEdit` → rewrite one ref's payload columns, vectors preserved
+ *     (the mutable-payload edit — an `update_thought`-style content/metadata
+ *     change, the real consistency tax)
+ *
+ * It prefilters by default (`where` before the search) exactly as `LanceEngine`;
+ * the pinned 0.38 version freezes that default. IVF_FLAT is the unquantized recall
+ * control; HNSW_SQ is the ship-shape default (a quantization trade). One instance
+ * owns one index kind and its own dataset directory.
+ */
+export class LanceReadModel implements ExternalEngine {
+  readonly kind = "external" as const;
+  readonly name: string;
+  stat: BuildStat = { loadMs: 0, buildMs: 0, indexBytes: 0 };
+  private db!: lancedb.Connection;
+  private tbl!: lancedb.Table;
+  private L!: typeof lancedb;
+  private A!: typeof arrow;
+  private dir = "";
+  private effort = 0;
+  private loaded = 0;
+  constructor(
+    private readonly dim: number,
+    private readonly indexKind: LanceIndexKind = "hnswsq",
+    private readonly tag = String(process.pid),
+  ) {
+    this.name = `readmodel-${indexKind}`;
+  }
+
+  /** Same explicit Arrow schema as LanceEngine plus the payload columns. */
+  private schema(): arrow.Schema {
+    const A = this.A;
+    const listUtf8 = () => new A.List(new A.Field("item", new A.Utf8(), true));
+    return new A.Schema([
+      new A.Field("id", new A.Int64(), false),
+      new A.Field("ref", new A.Utf8(), false),
+      new A.Field("content", new A.Utf8(), false),
+      new A.Field("metadata", new A.Utf8(), false),
+      new A.Field("labels", listUtf8(), false),
+      new A.Field("tiers", listUtf8(), false),
+      new A.Field("vector", new A.FixedSizeList(this.dim, new A.Field("item", new A.Float32(), true)), false),
+    ]);
+  }
+
+  private toRow(id: number, p: PayloadPoint): Record<string, unknown> {
+    return { id, ref: p.ref, content: p.content, metadata: p.metadata, labels: p.labels, tiers: p.tiers, vector: p.embedding };
+  }
+
+  async start(): Promise<void> {
+    const m = await lanceModules();
+    this.L = m.lancedb;
+    this.A = m.arrow;
+    this.dir = await mkdtemp(join(tmpdir(), `ob1-store-readmodel-${this.tag}-`));
+    this.db = await this.L.connect(this.dir);
+    this.tbl = await this.db.createEmptyTable("points", this.schema());
+  }
+
+  async load(points: Iterable<PayloadPoint>, batchSize = Number(process.env.OB1_STORE_LANCE_BATCH ?? 4096)): Promise<number> {
+    const t0 = nowMs();
+    let batch: Record<string, unknown>[] = [];
+    let id = 0;
+    const flush = async () => {
+      if (!batch.length) return;
+      await this.tbl.add(batch);
+      batch = [];
+    };
+    for (const p of points) {
+      id++;
+      batch.push(this.toRow(id, p));
+      if (batch.length >= batchSize) await flush();
+    }
+    await flush();
+    this.loaded = id;
+    this.stat.loadMs = nowMs() - t0;
+    const tb = nowMs();
+    const numPartitions = Math.max(1, Math.round(Math.sqrt(id)));
+    const config = this.indexKind === "ivfflat"
+      ? this.L.Index.ivfFlat({ distanceType: "cosine", numPartitions })
+      : this.L.Index.hnswSq({ distanceType: "cosine" });
+    await this.tbl.createIndex("vector", { config });
+    this.stat.buildMs = nowMs() - tb;
+    // Whole on-disk dataset (payload + vectors + index share the directory) — the
+    // read-model footprint. Its delta over an index-only LanceEngine load of the
+    // same corpus is the payload duplication the CQRS topology adds (SMD-1696).
+    this.stat.indexBytes = await hostDuBytes(this.dir);
+    return this.stat.loadMs;
+  }
+
+  async setEffort(ef: number): Promise<void> {
+    this.effort = ef;
+  }
+
+  async search(vec: number[], n: number, filter: Filter): Promise<string[]> {
+    let q = this.tbl.query().nearestTo(vec).distanceType("cosine").select(["ref", "_distance"]).limit(n);
+    if (filter) q = q.where(`array_has(${filter.key}, '${filter.value.replace(/'/g, "''")}')`);
+    if (this.effort > 0) {
+      q = q.nprobes(this.effort);
+      if (this.indexKind === "hnswsq") q = q.ef(this.effort).refineFactor(Math.max(1, Math.round(this.effort / n)));
+    }
+    const rows = await q.toArray();
+    return rows.map((r: { ref: string }) => String(r.ref));
+  }
+
+  /** The read-model read: full rows (ref + content + metadata) straight from Lance,
+   *  no Postgres. Same vector search as `search`; only the projection is wider. */
+  async searchRows(vec: number[], n: number, filter: Filter): Promise<{ ref: string; content: string; metadata: string }[]> {
+    let q = this.tbl.query().nearestTo(vec).distanceType("cosine").select(["ref", "content", "metadata", "_distance"]).limit(n);
+    if (filter) q = q.where(`array_has(${filter.key}, '${filter.value.replace(/'/g, "''")}')`);
+    if (this.effort > 0) {
+      q = q.nprobes(this.effort);
+      if (this.indexKind === "hnswsq") q = q.ef(this.effort).refineFactor(Math.max(1, Math.round(this.effort / n)));
+    }
+    const rows = await q.toArray();
+    return rows.map((r: { ref: string; content: string; metadata: string }) => ({ ref: String(r.ref), content: String(r.content), metadata: String(r.metadata) }));
+  }
+
+  /** Append new rows (append-mostly propagation: new thoughts, new vectors). */
+  async applyAppend(points: PayloadPoint[]): Promise<void> {
+    if (!points.length) return;
+    await this.tbl.add(points.map((p) => this.toRow(++this.loaded, p)));
+  }
+
+  /** Propagate a mutable payload edit (content/metadata) for one ref — the real
+   *  consistency tax. An `update` by ref rewrites the payload columns of every row
+   *  that shares the ref (a thought's whole + window points all carry its content)
+   *  while preserving each row's distinct vector — unlike a mergeInsert on the
+   *  non-unique ref, which would clobber the window vectors. `values` are literals,
+   *  escaped by the driver; only the `where` ref is interpolated. */
+  async applyContentEdit(ref: string, content: string, metadata: string): Promise<void> {
+    await this.tbl.update({ where: `ref = '${ref.replace(/'/g, "''")}'`, values: { content, metadata } });
+  }
+
+  async countRows(): Promise<number> {
+    return this.tbl.countRows();
+  }
+
+  async stop(): Promise<void> {
+    try {
+      this.tbl?.close?.();
+      this.db?.close?.();
+    } catch {}
+    if (this.dir) await rm(this.dir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
 /**
  * The external engines a run measures, from `OB1_STORE_EXTERNAL` (default
  * `qdrant,lance`). `lance` expands to one engine per `OB1_STORE_LANCE_INDEXES`
@@ -633,4 +830,36 @@ export function recallAt(got: string[], exact: string[], k: number): number {
   const want = new Set(exact.slice(0, k));
   const hit = got.slice(0, k).filter((r) => want.has(r)).length;
   return hit / Math.min(k, want.size);
+}
+
+/**
+ * nDCG@k against the exact-cosine oracle's top-k as the gold set (SMD-1707).
+ * Binary relevance — a returned ref is relevant iff it is in the oracle's top-k —
+ * discounted by the position it is returned at: DCG = Σ rel(got[i]) / log2(i+2)
+ * over the first k results, IDCG = Σ 1/log2(i+2) over the first min(k, |gold|)
+ * ideal positions (every gold ref surfaced in order). Unlike recall@k it rewards
+ * putting the right rows *high*, which is the whole point of an exact rerank over
+ * a coarse candidate set. Returns NaN when the oracle is empty.
+ */
+export function nDCG(got: string[], oracleTopK: string[], k: number): number {
+  if (!oracleTopK.length) return NaN;
+  const gold = new Set(oracleTopK.slice(0, k));
+  let dcg = 0;
+  got.slice(0, k).forEach((r, i) => { if (gold.has(r)) dcg += 1 / Math.log2(i + 2); });
+  let idcg = 0;
+  for (let i = 0; i < Math.min(k, gold.size); i++) idcg += 1 / Math.log2(i + 2);
+  return idcg === 0 ? NaN : dcg / idcg;
+}
+
+/**
+ * Reciprocal rank of the oracle's single best row (its top-1) within the result
+ * list — the eval-recency.ts:224-227 / eval-hybrid.ts:343-346 `rankOf` convention,
+ * lifted here for the composed match: "did we surface THE most relevant row, and
+ * how high?" Mean over queries is MRR. 0 if the oracle's #1 is absent from `got`;
+ * NaN when the oracle is empty.
+ */
+export function mrr(got: string[], oracleRanked: string[]): number {
+  if (!oracleRanked.length) return NaN;
+  const rank = got.indexOf(oracleRanked[0]) + 1;
+  return rank === 0 ? 0 : 1 / rank;
 }

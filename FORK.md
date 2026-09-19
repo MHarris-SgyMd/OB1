@@ -68,14 +68,14 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Eighty-six numbered changes on top of the pin. Seven fix defects found in an
+Ninety-one numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
-data layer (Phase 2). Six (changes 31, 53, 55, 59, 79, and 82) ship no runtime change at
+data layer (Phase 2). Ten (changes 31, 53, 55, 59, 79, 82, 86, 87, 88, and 89) ship no runtime change at
 all: each is a measurement that decided against building something.
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–86 are the numbered `###` sections** further down, which is
+sections. Changes **18–91 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -113,6 +113,7 @@ db/migrations/                   # fix 9   (moved here from server/ in fix 9)
 .github/metadata.schema.json     # fix 7   (3 additive optional fields)
 .github/workflows/fork-checks.yml# fix 7   (new file)
 scripts/check-fork-consistency.mjs # fix 7 (new file)
+scripts/mechanism-yield.mjs      # SMD-1711 (new file — review-pass yield report, not a gate); window and attribution fixed SMD-1728
 server-portable/                 # fix 8   (new dir — parallel, does not touch server/)
 db/                              # fix 9   (new dir — schema, runner, tests)
 deploy/                          # fix 12  (new dir — compose stack, smoke test)
@@ -202,7 +203,7 @@ extensions/test-tools.ts         # change 77 (new file — every tool of the fiv
 db/test-bench-reuse.ts           # change 76 (new file — the kept bench corpus's oracle cache held to the computation, on one index)
 db/bench-oracle.ts               # change 76 (new file — the cache's pure part: what of a marker's entry a run may trust; test-schema [37])
 db/migrations/039_*.sql          # change 81 (new file — the two HNSW indexes over embedding::halfvec under their names; match_thoughts' walk branches order by the cast)
-db/migrations/040_*.sql          # change 86 (new file — 039's match_thoughts with `SET jit = off`; a disabled planner path no longer JIT-compiles the gate's sample)
+db/migrations/040_*.sql          # change 91 (new file — 039's match_thoughts with `SET jit = off`; a disabled planner path no longer JIT-compiles the gate's sample)
 evals/eval-quant.ts              # change 81 (new file — vector, halfvec and binary-with-rerank measured on real vectors at the shipped width; test-schema [38], test-upgrade [16])
 <4 vendored MCP servers, 1 sample> # change 78 (a McpServer built per request — per session in the cost recipe's after sample — in place of one shared and connect()ed to a fresh transport each time)
 <17 pin sites, 3 lockfiles>      # change 83 (@hono/mcp 0.1.1 → 0.1.5: the transport lets go of each POST it has answered; the after sample's sweep closes the transports it drops)
@@ -410,8 +411,9 @@ nothing else:
   migration 012), `getThought` / `listThoughts` / `countThoughts` /
   `statsSummary` / `pageThoughtMeta`, `resolveAgent` and the work-claim tables
   (SMD-946), `traceProvenance` / `findDerivatives` / `supersededAmong` /
-  `listSupersessionProposals` (migrations 025/029), `logSearch` / `logAction`
-  (the query log, SMD-1295, migration 034), and every non-vector table:
+  `listSupersessionProposals` (migrations 025/029), `logSearch` / `logActions`
+  (the query log, SMD-1295, migration 034; the one writer of action rows since
+  change 90), and every non-vector table:
   `thought_audit`, `thought_work_claims`, the entity tables, `ob1_config`.
 
 The split is the point: the store holds one column of one table plus the
@@ -12492,7 +12494,7 @@ a real Postgres before the file was written.**
   (measured) but also changes what the walk pays under a generic plan, which
   is SMD-1464's question; pinning the two `enable_*` GUCs on the function
   overrides an operator's setting for the walk as well. The decision was
-  SMD-1624 (done: migration 040, change 86 — `SET jit = off` on the
+  SMD-1624 (done: migration 040, change 91 — `SET jit = off` on the
   function); 038's header states the premise. Row-level security on `thoughts`
   is a fourth trigger, and the one operators actually set: `jsonb_contains`
   is not leakproof, so under a policy `metadata @> filter` cannot be an index
@@ -12703,7 +12705,7 @@ the line for the next preflight change. The threshold, the plan mode of the
 *walk* statement (which flips onto a generic plan under a recency weight at
 the ceiling and changes answers; change 70's "Not done here") and the seeded
 bounds are SMD-1464; `ef_search` on real vectors SMD-1465. The `hit_pages ≥
-4` knob is stated, not turned. The disabled-path JIT premise was SMD-1624 (done: migration 040, change 86); row-level security, which has cost `@>` its index since 014 and is a fourth trigger of the same JIT, is SMD-1625. A hundred million rows was not run, for the
+4` knob is stated, not turned. The disabled-path JIT premise was SMD-1624 (done: migration 040, change 91); row-level security, which has cost `@>` its index since 014 and is a fourth trigger of the same JIT, is SMD-1625. A hundred million rows was not run, for the
 reasons change 28 gives; what this change establishes is that the sample's
 cost no longer depends on it. The bench's before arm (`OB1_BENCH_UPTO=037`)
 does not combine with a kept corpus — change 72's rule: a corpus built under
@@ -12762,7 +12764,7 @@ x/20 − y/20 wrong for 52 exact deltas). What changed the documents: the
 "no JIT at any size" premise (a disabled planner path adds `disable_cost`
 and JIT-compiles the sample on every call, 41 ms against 0.46 — SMD-1624, the
 decision between `SET jit = off` and pinning the paths, since either touches
-the walk; done: migration 040, change 86); row-level security as a fourth trigger, pre-existing since 014
+the walk; done: migration 040, change 91); row-level security as a fourth trigger, pre-existing since 014
 (`jsonb_contains` is not leakproof, 150 ms against 7 — SMD-1625); "every
 page in `shared_buffers`" corrected to the OS page cache (the larger two
 heaps never fit the image's 128 MB; change 70's sentence carried the same
@@ -13609,7 +13611,739 @@ low bit depth and are not measured for it. And [17] guards the decoder's
 reachability logic and its gross layout (magic and version), not the individual
 page-field offsets — a byte-level decode fixture is SMD-1673.
 
-### 86. `match_thoughts` runs with `jit = off` — migration 040 adds 017's clause to 039's function, so a planner path an operator disables no longer JIT-compiles the gate's sample on every call, and a generic plan's flat estimate no longer compiles the walk (SMD-1624)
+### 86. The read model, measured — the store holds the payload and serves the read with zero Postgres calls, and removing the resolve does not change the latency verdict; it relocates the cost to write time and storage (SMD-1696)
+
+Change 82 (SMD-1662) closed by naming what it had not measured: it, like change
+79, benchmarked a second store as a *subordinate ANN index* — Postgres the source
+of truth, every read resolving the store's ids back to Postgres rows — so the
+id→row resolve the "not built" verdict leaned on was partly an artifact of that
+chosen topology, not of a two-store design. The shape it defined away is the one
+where a second store is actually compelling: a **read model** (CQRS), where the
+store holds the vector *and the full payload* and serves the retrieval read
+completely, Postgres kept only as the transactional write log — a read path that
+makes **zero Postgres calls**. This measures that shape, on the same harness and
+the same exact-cosine oracle. Like changes 31, 53, 55, 59, 79 and 82 it ships no
+runtime change; the numbers are in evals/README.md, under "Does the store matter?".
+
+A `LanceReadModel` is added beside `LanceEngine` in `evals/store-backends.ts`: the
+same in-process ANN, but every row carries `content` and `metadata` alongside the
+vector, so it exposes two reads over one index — `search` (ids only, feeding the
+change-82 resolve) and `searchRows` (full rows, the read-model read). The driver
+`evals/store-readmodel.ts` measures three read paths on identical vectors against
+one oracle: **(1)** single-store Postgres — one statement, ANN over the points
+joined to the payload, a `match_thoughts`-equivalent read; **(2)** the change-82
+two-store resolve — LanceDB ids, then Postgres pulls the payload back; **(3)** the
+read model — LanceDB returns the full rows, no Postgres. Paths 2 and 3 use the
+same LanceDB index and differ only in where the payload comes from, so `(path2 −
+path3)` is the net topology delta and `(path1 − path3)` is the read model against
+the incumbent.
+
+**The zero-Postgres read path is real, and demonstrated.** The read model holds no
+Postgres handle, so its read path is zero-Postgres by construction; a query counter
+on the shared handle reads **0** across the whole path-3 loop (a runtime regression
+guard), and — the demonstration — Postgres is *stopped* mid-run and the read model
+still answers, byte-identical rows, with the OLTP database down. Content
+correctness is checked too: every returned row carries the exact payload, not just
+a matching id.
+
+**Removing the resolve does not change change 79's latency conclusion.** On the
+real corpus (601 issues, 963 points, 1024-dim, 150 queries) all three paths land
+within a few tenths of a millisecond of each other — no clear winner: the read
+model *edged* single-store Postgres by 0.09 ms in one run (1.21 vs 1.30 ms p50) and
+trailed it on a quieter run, and the read-model-vs-resolve delta was 0.0–0.5 ms.
+The resolve is essentially free at this size, so removing it buys nothing. At **1M
+rows (64-dim)** the tie breaks toward the single store: single-store pgvector's own
+HNSW read (~2.5 ms) was the fastest of the three in every run, and the
+read-model-vs-resolve delta sat within run-to-run noise of zero (−0.7 to +0.5 ms) —
+fetching the payload from LanceDB costs about the same as a Postgres primary-key
+resolve of ten ids. So from 1M up the read model does not overtake the single
+store: pgvector serving the read in one statement is the floor, and the resolve was
+never the deciding cost.
+
+At **10M rows** the same holds and the write side sharpens. (pgvector HNSW did not
+build in a practical window here — still constructing its graph after 40 minutes,
+so it was abandoned; the single-store anchor uses IVFFlat, which built in 2.4 min,
+as change 82's 10M table did.) Single-store pgvector IVFFlat was again the fastest
+read at 5.9 ms p50, the read model 7.4 ms, and the resolve delta a negligible
+0.18 ms — removing it still does not overtake the single store. What grows sharply
+is the mutable-edit tax: propagating one content edit cost **84.8 ms at 10M**
+(3.3 → 11.7 → 84.8 ms/ref from 601 rows to 1M to 10M) as each edit rewrites an
+ever-larger Lance fragment, while batched appends stayed cheap (drain 103k
+rows/s). The read model added 6.3 GB on top of Postgres's 8.9 GB (+71% system), and
+filtered reads on it reached ~244 ms — LanceDB scanning an unindexed list-column
+prefilter over 10M rows, a scale wart a scalar index would address but the
+index-only shape carries too.
+
+**The cost the read model removes from read time reappears at write time — and it
+is dominated by mutable edits.** A *synchronous* dual-write (each durable Postgres
+write plus a per-row LanceDB append) cost **~2.3–3.0 ms/write** on top of the
+Postgres write, because LanceDB writes a data fragment per `add`. Batched
+propagation is the cure: an outbox/CDC drain sustained **21,000–103,000 rows/s**
+across the scales (~0.01–0.05 ms/row), a few milliseconds per batch of freshness
+lag — a batched append is one Lance fragment write amortised over the batch, so it
+is cheap and does not grow with corpus size. That is the pattern OB1 already runs —
+embeddings are *already* eventually consistent with content, the re-embed worker
+lagging writes — so a read model is that same consistency model relocated, not a
+new one. The genuinely expensive part is payload *edits*: propagating one
+`update_thought`-style content change (a LanceDB `update`, which rewrites the
+fragment holding the ref) cost **3.3 ms/ref on the real corpus and 11.7 ms/ref at
+1M** (84.8 ms/ref at 10M) — it grows with fragment size, unlike a batched append.
+Vectors are append-mostly; the consistency tax is the mutable payload, and unlike
+the vectors it does not stay cheap as the store grows.
+
+**Storage: the payload is held twice.** The payload lives in both stores.
+On the real corpus the read-model dataset was 9 MB against an index-only LanceDB's
+5 MB (a 4 MB payload duplication on disk; 2 MB logical), lifting the whole-system
+total from 15 MB single-store to 24 MB. At 1M the read model held 656 MB against
+599 MB index-only, whole-system 1.95 GB vs 1.30 GB single-store — about +50% (+71%
+at 10M). (On-disk duplication tracks compressibility: the synthetic filler
+compresses hard — 57 MB on disk vs 268 MB logical at 1M — so there it understates
+what real content would cost; real content does not compress and carries Lance's
+per-fragment overhead, landing near or above the logical figure — 4 MB on disk vs
+2 MB logical on the real corpus.)
+
+**Verdict — change 79's holds, and now the resolve it leaned on is shown not to be
+the bottleneck.** The read-model topology *works*: its read path is provably
+zero-Postgres — it serves reads with Postgres stopped — and feeding it is cheap for
+appends when batched, on the eventual-consistency model the fork already uses. But
+removing the resolve buys no read-latency win: the resolve is a fraction of a
+millisecond, the three paths are within noise on the real corpus, single-store
+pgvector has the fastest *p50* from 1M up, and the read-model-vs-resolve difference
+is within noise throughout. (One tail-latency caveat already points at the scale
+case: at 10M the single store could only run IVFFlat — pg HNSW would not build —
+whose p95, 17.8 ms, is worse than the external HNSW_SQ index's 8.5 ms; at scale the
+off-DB store builds a better-tail index than pgvector can, which is SMD-1697's
+territory.) Meanwhile the read model holds the payload a second time (+50–71%
+whole-system) and adds a write-time propagation path whose mutable-edit cost *grows*
+with scale. So the read model does not earn its place on *retrieval latency*; where
+it plausibly would is
+the scale/operational envelope — offloading the vector working set off the OLTP
+database and being buildable where single-store pgvector is not (the 10M arm of
+change 82 already showed pgvector failing to build where LanceDB built in 28 s).
+That is SMD-1697, still open. **Not built**; `thoughts.embedding` stays the source
+of truth, now because the resolve the second-store case turned on was measured and
+found not to be the cost — not merely assumed. (LanceDB is Apache-2.0 and the fork
+is FSL-1.1-MIT — SMD-1038's guardrail — a dependency of an eval, not the product.)
+
+**What this still measures as a race, not a composition.** Change 79, change 82 and
+this one all measured stores as *substitutes* — each doing the whole match and
+returning the rows, the cross-store hop treated as cost to minimise (change 82) or
+eliminate (this change). None measured stores as *complements*: a **composed** match
+where a scalable ANN engine does cheap coarse recall and Postgres does the exact
+rerank/fusion — metadata, recency, keyword, freshness — over the small candidate
+set. In that shape the id→row hop is the *precision stage*, not a tax, and it is
+also the scale answer (coarse recall shards; the rerank set stays small and fits
+RAM). That is the axis on which a second store plausibly earns its place, and all
+three evals defined it away by racing single stores at the whole job. Measured
+in change 87 (SMD-1707).
+
+**Upstream status:** not applicable — the store comparison is this fork's eval.
+
+
+
+### 87. The composed match, measured — stores as complements, not substitutes: a scalable ANN does cheap deep coarse recall, Postgres does the exact rerank/fuse over the small candidate set, and that recovers recall a single ANN pass loses at scale while adding precision the ANN can't express (SMD-1707)
+
+Change 86 (SMD-1696) closed by naming the axis it had not measured. Changes 79, 82
+and 86 all raced stores as **substitutes** — each doing the whole match and returning
+the rows, the id→row hop treated as cost to minimise (82) or eliminate (86). None
+measured stores as **complements**: a **composed** match where a scalable ANN engine
+does cheap coarse recall and Postgres does the exact rerank/fusion over the small
+candidate set, the hop reframed as the *precision stage*. This measures that shape,
+on the same harness and the same exact-cosine oracle. Like changes 31, 53, 55, 59,
+79, 82 and 86 it ships no runtime change; the numbers are in evals/README.md, under
+"Does the store matter?".
+
+`evals/store-composed.ts` drives two stages against one oracle (K = 10): **stage 1**,
+a coarse ANN over K′ ≫ k candidates from LanceDB (the change-82 store); **stage 2**,
+an exact rerank/fuse in Postgres over just those K′ refs — exact cosine (MIN over a
+ref's windows), an exact metadata filter, an optional recency blend (change-20's
+`recency_score`, inlined) and an optional keyword arm fused with the vector *rank* by
+symmetric RRF over `docs.tsv` (both terms on the RRF scale, as search_thoughts_hybrid
+fuses them). The rerank has no `ORDER BY` over the vector index, so it is exact within the candidate set and its cost is bounded by
+|cand| = K′, not by N. Comparators: the substitute (vector-only ANN@k at depth 50),
+a single-store Postgres hybrid (vector ⋈ FTS RRF over the whole table), a
+pg-HNSW-coarse control, and the exact oracle. K′ is swept.
+
+**On a small corpus there is nothing to recover.** On the real corpus (601 issues,
+963 points, 1024-dim, 150 queries) the ANN is already exact — the substitute gets
+100% recall@10 unfiltered — so the composition matches it and the K′ sweep only
+shows the mechanism warming up (K′=10 → 78%, K′=25 → 99%, K′=50 → 100%). The recall
+win is a scale phenomenon.
+
+**At 1M rows the composition's real shape appears — and it is deep coarse recall,
+not the rerank alone, that recovers recall.** The single ANN pass loses recall at
+scale (substitute 60% unfiltered, nDCG 0.72). At the headline K′=200 the composed
+match *ties* it (60%) — the exact rerank only re-orders the candidate set, and the
+true top-10 neighbours are simply absent from a 200-candidate ANN pool 40% of the
+time. Recall moves only as K′ deepens: **83% at K′=500, 92% at K′=1000**, approaching
+the oracle's 100% at 21.7 ms total versus the oracle's 30.1 ms full scan. So the
+quality win is *deep coarse recall + exact ordering* — a quality/latency dial, not a
+free lunch: the rerank makes a deep-but-approximate set precisely ordered, but the
+set is made deep by paying stage-1 cost. This sharpens change 86's thesis: the
+precision stage is where a second store earns its place, but it only pays once the
+coarse stage recalls enough to rerank.
+
+**The coarse store's filtering quality is load-bearing.** On selective filters the
+pg-HNSW-coarse control collapses (real corpus: portal 32%, t07 14%; 1M: 41/32/17/2%
+across the tiers) — pgvector's post-filter is the SMD-968 hazard, and stage 2's exact
+filter cannot recover rows the coarse stage never surfaced. LanceDB coarse
+prefilters and holds filtered recall on the *selective* tiers (t10/t1/t01 = 100% at
+1M), at a latency cost (~40 ms p50); the non-selective t50 tier sits at the
+substitute's 71% — a scale recall loss the prefilter does not fix, since half the
+corpus passing the filter is the same coarse-recall problem as the unfiltered arm. A
+composed match is only as good as what its recall tier surfaces.
+
+**The composed total beats the ~O(N) full scan and its edge widens with N; the rerank
+stage's wall-clock is cache-bound and run-to-run volatile — the scale claim, corrected
+by re-running the committed code.** The a-priori guess was that the stage-2 rerank
+would be N-independent. It is not: it reads a bounded K′ rows, but at 10M those K′
+heap fetches hit a heap that exceeds RAM, so its wall-clock is dominated by cache/OS
+load and *swings between runs*. Two runs of the committed code, at K′=1000: rerank
+6.5 ms at 1M, then **36.5 ms and 108.5 ms** at 10M — a ~6×–17× jump for 10× the data,
+not the clean sub-linear the first cut claimed. What is stable is the full scan
+(≈30 ms → ≈370 ms, a clean ~O(N), ~12×) and the direction: the **composed total**
+(coarse ANN + rerank) at K′=1000 was 21.7 ms at 1M (≈1.4× cheaper than the full scan)
+and 72–155 ms at 10M (2.5–5.1× cheaper across the two runs) — the system's edge over
+the full scan widens with N even though the rerank stage's own scaling is volatile.
+The coarse ANN is the part that grows most with N and is the shardable half; sharding
+it would improve the system edge further, but that is asserted, not measured here. So
+coarse-recall → exact-rerank scales where the full scan does not — not because the
+rerank is flat (it is neither flat nor reliably sub-linear), but because the
+bounded-candidate total stays well under the ~O(N) scan. (At 10M the filtered read is
+dominated by the coarse stage's prefilter, ~237–259 ms p50 substitute / ~267–298 ms composed
+for Lance's filtered arms (the mean over all filtered arms — the per-tier split is
+unavailable at 10M, where the oracle is skipped) — the recall tier's filter cost is the scale wart, as in
+change 86's read-model filtered reads.)
+
+**The rerank stage adds precision the ANN cannot express, quantified.** Judged
+against the objective each serves (not the pure-cosine oracle): against an exact
+recency-blended oracle (w=0.3, 90-day half-life), the ANN substitute and the
+pure-cosine composition both scored 18%, while folding recency into the rerank
+recovered **73%** at ~3.8 ms — the exact stage serves the recency objective the vector
+store cannot. (It caps below 100% because the cosine coarse stage does not surface
+every recency-optimal row — the same binding-constraint lesson; deeper K′ raises it.)
+Folding the keyword signal into the rerank moved the composed top-k onto the
+whole-table hybrid it reproduces (**80% → 94% top-10 overlap**) — the composed keyword
+arm fuses the vector rank and keyword rank by symmetric RRF, the same fusion
+search_thoughts_hybrid runs over the whole table, so the bounded-candidate rerank
+reproduces the full-table hybrid's ranking.
+
+**Verdict — the multi-store win is composition, and it is real but conditional.**
+Where a single ANN pass loses recall at scale (1M+), deep coarse recall + exact
+rerank recovers it toward exact quality (92% of the oracle at K′=1000, measured at
+1M — where the composed total was ~1.4× cheaper than the full scan), and the rerank
+adds precision the ANN cannot express, over a bounded K′-row candidate set whose
+advantage over the full scan *grows* with N (composed-total edge ~1.4× at 1M → 2.5–5.1×
+at 10M, where recall itself was skipped). This is the id→row hop reframed as the
+precision stage, exactly as change 86 predicted — stores as
+complements, a **recall tier** (the scalable ANN) plus a **precision tier**
+(Postgres). The conditions are the finding as much as the win: it needs deep coarse
+recall (K′ large → stage-1 cost grows and must shard), the coarse store's filtering
+quality is load-bearing, and a small corpus has nothing to recover. **Not built** —
+a composed retrieval path in the product is a separate scoped issue if a bar clears;
+this closes the second of the two axes change 86 named (SMD-1697, where the single
+store stops fitting, is the other, still open). Stage 3 (a cross-encoder / LLM
+reranker over stage 2) was left out: the rerank spikes already measured it
+flat-to-negative and it is a heavy out-of-process dependency. (LanceDB is Apache-2.0
+and the fork is FSL-1.1-MIT — SMD-1038's guardrail — a dependency of an eval, not the
+product.)
+
+**Upstream status:** not applicable — the store comparison is this fork's eval.
+
+### 88. The knowledge-update slice was already reported and is the best one — and the number cannot see the failure MERIT means: the shipped read puts the stale value first on half the questions, and the resolving read, fed perfect chains, fixes that by changing what counts as relevant (SMD-1720)
+
+SMD-1720 read MERIT's hardest tier — a fact updated later, embedding retrieval
+at 0.30–0.95 success, update-on-write stores at 0.70–1.00 — against the fork's
+`supersedes` column (025), which labels a superseded hit and never follows the
+chain, and asked first for LongMemEval's knowledge-update slice on its own,
+which it took to be unreported. It was reported: change 48's tables carry it at
+**97.2% (4b) / 98.6% (0.6b)** strict recall_all@5, the best slice on both models,
+so by the ticket's own step one it closes with the number. This change is what
+was measured on the way to closing it. Like changes 31, 53, 55, 59, 79, 82, 86
+and 87 it ships **no runtime change**; the harness is a third arm set in
+`evals/eval-longmemeval.ts` (`OB1_EVAL_LME_ARMS=current`) and the numbers are in
+evals/README.md under "The knowledge-update slice".
+
+**The number answers the benchmark's question, not the reader's.** Every one
+of the 72 knowledge-update questions has exactly two gold sessions — one states
+a value, a later one updates it, median 50 days apart — and strict recall_all
+counts the question when *both* are in the top five. A reader handed the stale
+value first scores the same as one handed the update. So the arm set keeps the
+rank of each gold and scores both frames over the same calls: `both` (strict),
+`current-in`, `current-first` (the update in the top k and above the stale
+session, or the stale one absent), `current@1`, `stale-only`; a control refuses
+a question without two golds dated apart; every arm is paired with the shipped
+order per question with McNemar's exact test, as change 59 reported.
+
+**The shipped read is a coin flip on which value comes first.** `match_thoughts`
+puts the update above the stale session on **38 of 72** questions on the 4b
+(52.8%) and **33 of 72** on the 0.6b (45.8%); in almost every miss the stale
+row is the top hit and the update second. Both are retrieved on 97–99%, so the
+strict number is high and the reader's number is MERIT's range, reproduced on a
+public corpus through the fork's own write and read path. Nothing above this
+section could have shown it.
+
+**The date is not the lever, again.** 020's blend as a caller can send it
+(`recency_weight` 0.3, the half-life fixed at 90 days) is a byte-identical
+no-op on rows three years old: a 2023 session has a recency near 10⁻⁴ and so
+does the one a week newer. A half-life of 3,650 days moves one question
+(p=1.000). Age alone — under the history filter `match_thoughts` blends every
+row of the history and cuts to k, so the arm is the five newest sessions in it —
+puts newer, unrelated sessions ahead of both golds — current-first 29.2%, strict 2.8%, +10 / −27
+against the shipped order (p=0.008). Change 53 found the same on the temporal
+slice; the update is not the most recent session in a history, it is the most
+recent *about this*, and only a signal that reads the texts can know it.
+
+**The resolving read, priced as an oracle.** The corpus carries **0**
+`supersedes` pointers — nothing populates them: the consolidation pass (change
+54) has not run on these loads, and at one thought per session it would judge
+whole conversations — so the ticket's read (walk each hit forward to the head
+of its chain, return the head at the hit's rank, list a session once) cannot be
+measured as an arm. It is measured as its upper bound instead: each question's
+gold pair held in memory as that question's chain, as if a reviewer had accepted
+exactly the right proposals (a store that carries pointers is walked as it is). Fed those, it puts the update first on **every** question (+34 / −0
+on the 4b, +39 / −0 on the 0.6b, p<0.001), at rank one on 94–97% — and scores
+**0% on strict recall**, because it hands back one session where the benchmark
+wants two. With the forward walk removed (the mutant) the arm is the shipped
+order on every question, +0 / −0: the walk is the whole effect.
+
+**What that means.** The read is a change of relevance definition, not a
+ranking improvement — the same split `eval-supersession.ts` found on the seeded
+corpus (change 46: topical relevance +0.000, current-version relevance +0.333),
+now on the public one. And the benchmark is right to want both sessions: 14 of
+the 72 questions carry a cue like *previous*, *before*, *initially*, about ten
+of them ask for the value the update replaced ("What was my previous frequent
+flyer status", "Where did I initially keep my old sneakers" — asked beside
+"Where do I currently keep"), and one asks for both. A read that resolves by
+default answers those from a row it has hidden.
+
+**Decision: not built.** The read is deterministic given chains — a hit in a
+chain is replaced, one outside it is not — so building it would measure nothing
+the oracle has not; what is missing is chains, and no measured corpus carries an
+accepted one. When one does, the read belongs behind an opt-in flag on the
+search functions (`p_resolve`, default off), with a `superseded_by_chain: n`
+label on a replaced hit, and never as the default — the benchmark's own
+previous-value questions are the case against a default, and 025's decision
+(label, do not exclude) stands. The reader has the pieces today: the
+`⚠ Superseded by a newer thought — ID …` label names the head one read away,
+and `Captured:` dates every hit. What would move the reader's number without a
+chain is a reranker that reads the two texts and picks the later state — the
+one-pool rerank change 59 found to be the lever — on this slice with this arm
+set. That is a follow-up, filed against SMD-1319's reranker.
+
+Also in this change: whichever phase reads the session→thought map first
+rebuilds a missing one from each row's `metadata.lme_sid` under the run's
+model (the four fingerprint twins matched by fingerprint, their questions
+re-merged) and says so — both S maps had gone with `/tmp`, and the alternative
+was a 14-hour reload. And a loader defect the second review pass found by
+reading: the envelope carried `lme_q` and `lme_sid` onto a twin's existing
+row, where `upsert_thought`'s key-wise metadata merge replaced the first
+session's questions before the loader's union could keep them. The ids are now
+written after the upsert, the union always, the id and date only for a row the
+session created. The audit trail (008) shows the four overwrites on each S
+store, ten questions losing one distractor session each and none losing a gold
+one, so change 48's tables stand; the rebuild's merge repaired the rows, and
+re-loading a twin session through the fixed loader leaves the row's id,
+questions and date as they were.
+
+Tidied after the third pass, while the file was open, no behaviour change: the
+isolation filter and the two k values live once at module scope, the control
+that turns returned ids into this history's sessions is one function both
+scorers call, and the resolve arm walks the shipped arm's ids for the same
+question and k instead of fetching the same list again. Tables identical.
+
+Two items the passes had declined were then applied on request. The rebuild
+matches a twin's session by a fingerprint computed client-side, one query for
+the store's fingerprints instead of one round trip per unmapped session — and
+the first run of it showed why the rule is checked against the store before it
+is used: JavaScript's `\s` and `toLowerCase` are not 003's rule. Postgres's
+`\s` leaves U+00A0, U+202F and U+FEFF alone and its `lower` turns İ into a
+plain i; the naive spelling disagreed on 47 of 19,825 rows and the run fell
+back to the server lookup, tables unchanged. The class now mirrors Postgres's
+and agrees on every row, and a disagreement on any future store still sends
+the twins to the server. And the `current` set refuses a gold session whose
+row also stands for a session dated differently, since the recency arms read
+the row's one date — never true here (the date leads the text a twin shares),
+now checked.
+
+**Upstream status:** not applicable — the eval is this fork's.
+
+
+
+### 89. GraphRAG as an expansion/rerank stage, measured on the *typed* graph and beyond recall — not a substitute and not an everyday stage over a vector already at ceiling, but a real recall complement exactly where a single vector pass runs short (SMD-1738)
+
+Change 31 (SMD-948) declined GraphRAG on a head-to-head: vector recall@10 0.98, graph
+0.51 over twenty-seven hand-labelled questions. But that raced the graph as a
+**substitute** — the recall tier doing the whole match, seeding its own entities from the
+question — the substitute-vs-complement error change 87 (SMD-1707) named. A graph is
+rarely a good recall tier and might be a good **expansion/precision** stage: pull the
+neighbours of the *vector* hits along the change-30 entity edges and rerank the union.
+This measures that shape, on the same `eval-graphrag.ts` corpus and labelled gold. Like
+changes 31, 53, 55, 59, 79, 82, 86, 87 and 88 it ships no runtime change; the numbers are
+in evals/README.md, under "GraphRAG…".
+
+`eval-graphrag.ts` gains a **composed arm** (vector coarse recall K′ → seed the graph from
+*those* hits' entities → expand `hops` over `ob1_entity_edges` → symmetric-RRF rerank the
+union) and, because a first pass flattened the graph, a **comp-typed** arm that uses the
+graph's real structure: a *typed, weighted* walk (undirected traversal) weighting each hop by a
+pre-registered relation prior (a `depends_on`/`uses` edge carries more relevance than a
+`co_occurs_with` one), the edge's evidence support (a saturating `support/(support+5)`) and its confidence,
+propagated as decaying spreading activation. A **comp-cos** control orders the union by
+cosine only. The **pre-registered bar** (SMD-1038 posture, committed before the numbers):
+build iff multi-hop recall lifts ≥ 0.05 over vector AND recovers more than it breaks AND
+does not cut aggregate recall — checked on every cell of the K′×hop sweep, so a FAIL means
+no cell cleared all three.
+
+**Recall, against a full-budget vector: the bar FAILS, because vector is already at
+ceiling.** Vector gets multi-hop recall@10 **1.00** (601 issues, 1024-dim, 27 questions);
+the substitute graph reproduces change 31 at **0.43**. The best composed cell scores
+**0.89** multi-hop — below vector — and **recovers 0** of vector's answers. The control
+says why: **comp-cos ties vector exactly (1.00)** — pooling the graph-reached thoughts
+loses nothing and adds nothing, vector already held every answer, so the rerank can only
+subtract. **Using the real typed edges makes the rerank gentler** — comp-typed lifts recall
+over the untyped walk (0.89 → 0.95 all, multi-hop **0.98**) and ranking (all-question nDCG 0.73 → 0.77; multi-hop 0.69 → 0.75)
+by weighting the graph score down where the edge is weak, so it preserves more of vector's
+order — but it still **cannot exceed** a ceiling'd vector (comp-cos = vector). So the
+flattening cost some recall, and the ceiling caps even the typed version.
+
+**But recall is one axis, and the ceiling is a property of the *question set*, not of the
+graph. On the axes a graph is built for, the picture turns.**
+
+- **Recall-complement under a starved vector budget — the finding.** Constrain the vector
+  coarse budget b and the edge-aware graph becomes a real recall tier: at **b = 1** vector
+  alone gets recall@10 **0.35** and the composed stage **0.83** (**+0.48**; multi-hop 0.42
+  → 0.85), at b = 3 0.78 → 0.90, crossing over only at b ≈ 10 where vector reaches its
+  ceiling (0.97 → 0.95). That is exactly the regime change 87 found a single ANN falls
+  into *at scale* — recall degrades and the second tier recovers it. The ceiling here hides
+  it; a corpus or scale where vector is not saturated does not.
+- **Relational structure a vector pass cannot see.** Of 3,000 issue pairs joined by a
+  strong typed edge (`depends_on`/`uses`), **95%** have the linked sibling *outside* the
+  issue's vector top-10 — a large store of relational neighbours only the graph reaches
+  (the raw material the scarcity probe turns into recovered recall). Descriptive: the graph
+  both defines and answers the link, so it measures vector's blind spot, not a scored win.
+- **Exact entity-membership** applies to only 5 of the 10 needle questions — the rest are
+  literal-string aggregations (`Decision:`, `Promote`), keyword's job. On the 5 that name
+  an entity the extracted graph trails (0.18 vs vector 0.97), limited by change-30's
+  extraction coverage (most entities are mentioned once). The set poses few true
+  entity-membership or relational queries — the same shape-of-question gap change 31 named.
+
+**Scale (synthetic, latency only).** A synthetic typed graph times the expansion stage
+alone. It is **not** K′-bounded as written: at 1M (6M mentions) a ~2.0 s floor at K′=10
+rising to ~5.0 s at K′=1000/2-hop, and at 10M (30M mentions, lighter density) a ~7 s floor essentially FLAT across K′=10–1000 (11.3 s only at K′=1000/2-hop) — the df scan tracks the mention count, not K′ — dominated by the per-call `df` full scan
+over every mention (the change-31 walk recomputes document frequency each call). Rows-read
+bounded ≠ wall-clock bounded (change 87); a **materialized `df`** refreshed on write is the
+prerequisite for the stage to scale, and the typed pass adds the `edge_w` aggregate cost on
+top. So the mechanism needs a standing df table before the scarce-recall regime it wins in
+is reachable in production.
+
+**Verdict — not a substitute, not an everyday stage, a *conditional* tier.** Against a
+healthy full-budget vector on ordinary questions the graph stage does not pay (bar FAILS;
+ceiling). But where vector recall is *scarce* — deep scale, a tight ANN budget, relational
+or entity-membership questions this corpus barely poses — the edge-aware graph is a real
+recall/precision complement, the recall tier to Postgres/vector's precision tier that
+change 87 framed. This sharpens change 31's "do not build" rather than overturning it: not
+built, and a product path is a **scale-regime test** away (SMD-1038 posture), not a
+here-and-now build.
+
+**Forward-looking — truthiness, lineage, and edges that carry relevance.** The value seen
+here comes from the edges' *type and support*; their `confidence` is nearly uniform (a weak
+signal), and **lineage/supersession is absent** from the Linear corpus — that is the fork's
+claim-log machinery (SMD-1729) and trust labels (SMD-1724), not this eval's data. Carrying
+trust, lineage and recency *dynamically* on the edges — relevance as continuous-time
+diffusion over a typed/weighted/temporal graph, a CfC/liquid-network shape — is where this
+points; the static edge-aware expansion here is the discrete first step, and it would need
+the claim-log lineage and trust labels the fork has scoped but not built to become the
+dynamic version. (LanceDB/graph aside: the entity graph is this fork's own change 30, an
+eval dependency, not the product.)
+
+**Upstream status:** not applicable — the graph and its eval are this fork's.
+
+### 90. A capture that cites a returned id is logged as a use of it, and `eval-utilization.ts` reads the query log for the layer every other number here skips — did the caller use what came back (SMD-1719)
+
+Every retrieval number in this file asks whether the right rows came back.
+MERIT (arXiv 2609.05441, September 2026) measured the next layer — whether a
+retrieved fact changed what the agent did — and found agents ignore 45–53% of
+correctly retrieved facts, even under full replay; MemoryArena found models
+near-perfect on LoCoMo fall to 40–60% when later subtasks depend on earlier
+ones. The evaluation stack the literature now asks for is four layers: evidence
+retrieval, evidence use, task outcome, cost. The fork had the first (every
+`evals/` harness) and the fourth (tokens priced on every decision), and no
+number for the second.
+
+**What the log already had, and what it lacked.** Migration 034 (change 65)
+records a `search` row per call with the ids returned and an `action` row when
+the same agent fetches, edits or deletes a returned id — click-through
+relevance: the caller *looked*. It did not record the one act that says the
+fact reached a write: a later capture naming the id as its source. `derived_from`
+(025) and `supersedes` on `capture_thought` are exactly that act, and they
+were not logged.
+
+**What changed.** No migration. 034's `tool` column is free text and its
+`action` shape needs only a target, so a write that names a returned id as its
+source now logs one action row per id, target the cited id, tool
+`<writer>/<pointer>` — `capture_thought/derived_from`,
+`capture_thought/supersedes`, `update_thought/supersedes` — under the same
+`OB1_QUERY_LOG=on` flag, best-effort like every log write, the rows for one
+call in one `INSERT` (`logActions`, the one writer of action rows — a fetch's
+single row, a forty-source synthesis, an edit's opened row beside its cite —
+so each store has one INSERT shape to keep right; a single-row twin existed
+for two passes and was removed as a parity obligation with no reader), the
+batch's contract one function both stores call before anything reaches a
+database — `normaliseActionRows`: an absent agent (null, undefined, `""`) is
+SQL NULL, a target must be present, any id that is not a uuid is refused by
+column name rather than reaching `array_in` or PostgREST as a value the
+best-effort caller would swallow with the whole batch (a fifth pass found the
+agent column bound through a text sentinel, a sixth the target column trusted
+while the agent column was checked, an eighth the PostgREST writer sending
+`""` through as an agent id and dropping the batch on the 22P02) — ids
+lower-cased before the dedup (`UUID_RE` admits either case; two spellings are
+one cite). A cite row is written for every id a write names, whether or not a
+search returned it; the link to a search is made when the log is read. **A cite row is a pointer the
+database accepted**, which is what makes it a use and not a wish: on a fresh
+row `upsert_thought` validated every id (a ghost or a loop threw, and nothing
+was logged); on a re-capture 035 wrote no pointer and validated none, so nothing
+is logged there either — the reply's note sends the caller to `update_thought`,
+and that edit, which writes the pointer, logs the cite under its own writer.
+The guard is `existed === false`, the store's affirmative "fresh row" from
+035's function: a brain at 034 without 035 reports no flag, and logs no cite,
+because there the pointer's fate is unknown (a second pass caught `!== true`
+reading the absent flag as fresh). Preflight's `query log` check says so on
+such a brain, and reads whether the body is 035's from the verdict the
+`atomic capture` check already reached over the sentinel that body declares
+— one detector, not a second grep of the same source for the word `existed`
+(a seventh pass); over PostgREST it is a skip naming both facts.
+(The first cut logged on the *act* of citing and a review pass found it would
+have counted a ghost or self-pointer a re-capture never checked.) The tool
+column now tells two kinds of use apart by its shape alone:
+
+- **cited** — `<writer>/<pointer>`: a write named the id as a source and the
+  pointer was written (MERIT's memory-utilization signal). A new writer that
+  cites names itself the same way and is counted without a code change.
+- **opened** — a plain tool name, `fetch`, `update_thought`, `delete_thought`:
+  the caller went and looked at, or touched, the row (034's click-through).
+
+One consequence for change 65: the export's `relevant` label is every action
+row, so a cite now counts as click-through relevance too — the stronger label,
+and the export's note says so. 034's table `COMMENT` still describes an action
+as a fetch, edit or delete; a migration's text is not edited after the fact
+(the ledger would read it as drift), so the server, store, preflight and README
+carry the new shape and the `COMMENT` predates it.
+
+`evals/utilization.ts` is the pure part: 034's attribution rule (most recent
+prior search by the same agent, within the window, whose results held the id; a
+NULL agent its own bucket — the export's join in TypeScript, and since a ninth
+pass the export's own implementation too: `export-queries.ts` reads the same
+two row sets and calls `attribute()`, so the fixture's labels and the report's
+uses are one rule by construction rather than two kept in step by hand;
+compared at the
+log's own microsecond grain when read from the log, since a JS `Date` is
+milliseconds and two rows under a millisecond apart would order differently in
+the two; a fixture in whole minutes is unaffected), then per arm (the search tool and its
+recorded arguments), per agent when the log holds more than one — named from the registry (`ob1_agents.label`, 010) with the id's prefix beside it — and overall: distinct ids returned, ids used
+(distinct per search), **utilization** = used / returned, **use rate** =
+searches with at least one use, the cited / opened **partition** of used (an
+id that reached a write is cited even if it was also fetched; opened is what
+was only looked at; the two sum to used, so cited / used is the share of use
+that reached a write — a fourth pass found the first cut counted an id in
+both), and **tokens per used
+id** — approximate, the returned ids' content as stored *now* at four
+characters a token, over the searches that carry an estimate — MERIT's
+cost-adjusted marginal utility in this fork's units. With a gold map (a
+hand-labelled fixture in `export-queries.ts`'s shape), the **ignore rate**:
+searches whose results held a relevant id the caller never used.
+`evals/eval-utilization.ts` reads the log from `DATABASE_URL` and prints it.
+
+**What the report refuses to print.** With no action rows at all it says `n/a`
+and asks whether the log is on, rather than 0% over an empty join — the mutant
+[39] runs: drop the cite rows and cited reads 0 and utilization falls to the
+opened-only share, so the number is measuring the cites and not something that
+would survive their absence. Actions that attribute to no search (a touch
+outside the window, an id no search returned) are counted and shown, not
+dropped. Nothing changes ranking: the number first. On a brain the log
+table is not on (034 not applied) both readers refuse in their own words —
+"query_log is not present", apply 034, turn the log on — exit 2, where a sixth
+pass found each dying in the driver on its first query (`relation "query_log"
+does not exist`, a stack trace) while preflight's own check says it plainly;
+the check is one shared helper, `evals/query-log.ts`'s `requireQueryLog`.
+
+**Not done here.** A typed `pointer` column on `query_log` in place of the
+`<writer>/<pointer>` convention in the free-text `tool` (a second review pass
+proposed it): declined. MCP tool names cannot contain a slash, so the
+convention cannot collide with a tool; the typed field for *what a write
+cited* belongs on the event itself, which is SMD-1730's event shape (Phase 1
+of SMD-1729), not a column bolted onto 034 now. The column's own `COMMENT`
+still describes three plain names; re-commenting it through a new migration,
+as 028 did for the claim table, is **SMD-1749** (a third pass proposed it;
+a second mechanism for this PR).
+
+An `update_thought` that re-sends the pointer
+the row already holds logs a cite although nothing changed (a third pass):
+kept. `used` is a set per search, so a retry inside one search's window counts
+once; a re-send after a *new* search that returned the id is that search's
+result reaching a write, which is what the number asks; and telling a
+confirmed pointer from a written one needs 032's function to return the prior
+value, a migration, and would undercount the confirmations SMD-1736 wants to
+see.
+
+A `supersedes` cite labels the *superseded* row as relevant in the
+export's fixture (a sixth pass): kept. That row is what the searcher needed in
+order to correct it, so the search that surfaced it did its job; the fork
+labels superseded rows at read time and does not demote them (SMD-1720, change 88), and
+a click-through label is bound to the corpus at export time in any case —
+`eval-replay.ts` reads `baseline` beside `relevant` for that reason. Labelling
+the superseder too would need the fixture to follow `thoughts.supersedes` at
+export, a different fixture; the README says which row the label names.
+
+Gating the cite on 035's flag rather than on
+"a pointer was written" (a seventh pass): on a brain at 025–034 a fresh
+3-argument capture does validate and write `derived_from`, and logs no cite
+here. Kept: before 035 the function wrote pointers on a re-capture too (the
+NULL fill 035 removed) and answered nothing about which path it took, so the
+store cannot tell a written pointer from a filled or ignored one there; the
+shipped schema is 035's (the `atomic capture` check warns on every earlier
+body and names the file), and the gap is said twice — by preflight and by
+the report.
+
+Per-*model* arms: the log does
+not record the embedding model a search ran under, and 034's `filter` column
+is dead on `search_thoughts` (SMD-1490) — whether to carry the arm there or in
+a column is that ticket's call. A read whose use ends in prose to the user, with no write and no fetch,
+is invisible to this log, so utilization here is a **lower bound** on use and
+the ignore rate an upper bound; the write-path eval (SMD-1713) is where a
+planted fact's survival becomes observable. A fixture exported from this log's
+own touches is circular as gold (its `relevant` IS the touches); the honest gold
+is a hand-labelled set. SMD-1737's four-layer report consumes this as layer 2.
+
+**Verified.** `db/test-schema.ts` [39] drives the pure module over hand-made
+rows: attribution by agent, window and recency; the cited/opened split; the
+rates; tokens per used id over searches with an estimate; the no-cites mutant;
+the gold ignore rate; the `n/a` rule; the rendered table.
+`server-portable/test-e2e-sql.ts` [10] extends 034's section: a capture with
+`derived_from` after a search writes one `capture_thought/derived_from` row for
+the id it named and a plain capture writes none; the join attributes the cite
+to the search that returned the id; a re-capture naming a pointer logs no cite
+(the pointer was not written); the `update_thought` that then writes it logs
+the edited id as opened and the superseded id as cited. A run with the cite
+logging removed fails exactly those assertions and nothing else. The bucketed
+attribution was checked against a naive reading of the rule on 400 random logs
+(distinct timestamps, three agents including NULL, five tools, three windows):
+no mismatch.
+
+The report script was run against a throwaway Postgres with a
+seeded log: the anonymous fetch of an id its search never returned is the one
+unattributed action, tokens per used id came out at exactly what the seeded
+content lengths predict, and the gold arm read 0% ignored where the relevant
+id was cited and n/a where it was never returned. The SQL writer was probed
+against Postgres with an empty batch, a NULL agent, a tool name carrying a
+quote and a backslash, and forty rows; a mutant that keeps only the first row
+of a batch fails exactly the assertion that reads the second and nothing else.
+`test-store-sql.ts` [11] drives the SQL writer's own contract: a batch of three
+in one statement, an undefined and an empty-string agent landing as SQL NULL,
+and a malformed agent, a malformed target and an absent target each refused by
+column before the statement with nothing written (a fifth pass found the
+agent column bound through a text sentinel; a sixth found the target column
+trusted while the agent column was checked).
+`test-store-postgrest.ts` [11] drives the PostgREST writer — the hosted
+deployment's path — through the shim: an empty batch, a batch of one and of
+three, a NULL agent, the cite tool through the array insert, and 034's join
+over what it wrote. Writing that section found a pre-existing shim gap: the
+PostgREST store's `logSearch` fails through `compat/supabase-sql` when
+`result_scores` carries a null element, which the server sends for a
+score-less hit — so a shim-backed deployment can log no search row for such a
+call, silently. Filed on SMD-1602; [11] seeds its search row by SQL and says
+why. Two searches seeded 400 µs apart both
+returning one id, then a fetch: the export's SQL join (as it then was) and the
+report both credit the later search; the millisecond fallback credits the
+earlier one, which is the disagreement `at_us` exists to close. The
+database-row coercions the report relies on (bigint as string, the uuid
+literal, a partly deleted result set, `at_us`, a `real`'s float noise) are
+driven in [39] without a database, since no CI job runs the report itself.
+The number's definition was checked as invariants over 600 random logs with
+duplicate ids, retried actions, an unknown tool, partial token estimates and
+gold on some queries: cited + opened = used at every grain, utilization in
+[0, 1], the per-arm and per-agent tables sum to the overall row, the estimate
+is null exactly when its stated condition holds, and the rendered `all` row
+carries the overall numbers.
+
+The operator's path was walked end to end as a
+separate process — the Dockerfile's entrypoint (`bun preflight.ts && exec bun
+index.ts`) against a throwaway Postgres with a stub provider on a port and
+`OB1_QUERY_LOG=on`, tool calls over HTTP (three captures, a search, a capture
+citing two returned ids, a second search, a fetch, an edit that supersedes, a
+re-capture naming a pointer), then both readers: the report's used set per
+search equals the export's `relevant` per query, the counts match a hand tally
+of the log rows (7 distinct returned, 4 used, 3 cited, 1 opened), preflight
+reads the log as present and on before and after, and the same walk on an
+empty log prints `n/a`, on an opens-only log the 035 warning, and with the
+table absent the refusal above.
+
+The hosted path was walked the same way (a
+seventh pass): the server with `OB1_STORE=postgrest` — the default store —
+and its real supabase-js client, through a prefix-stripping proxy to a real
+PostgREST 12.2 container over the lane's Postgres, the same calls; the log
+rows, the report and the export came out identical to the SQL walk. That walk
+found preflight printing no `query log` line at all over PostgREST — the
+check lived only in the direct-connection branch, so the hosted operator got
+neither the presence verdict nor the 035 warning; it is now a skip there
+naming both facts, like its siblings. The same pass moved the tool column of
+an action batch onto the driver's own `sql.array` after probing that it
+carries a quote, a backslash, a comma and a brace through `unnest` intact;
+the uuid columns keep the by-hand literal because `sql.array` renders a null
+element as the text `null`, which `uuid[]` refuses, and the agent column is
+nullable — probed, not assumed. Two fixture-side guards were added and held
+in [39]: a row whose instant does not parse is never credited and never
+attributed (NaN passes both window tests and would have taken the agent's
+newest search), and a gold id spelled upper-case matches the lower-case id
+the log holds. `test-preflight.ts`'s pre-035 run asserts the `query log`
+warning and its absence once 035 is back.
+
+An eighth pass walked two named
+agents (`MCP_ACCESS_KEYS`, alice and bob) over the SQL-store server process:
+bob's fetch of an id only alice's search returned and bob's cite of an id his
+own search did not return are the two unattributed actions, bob's cite of an
+id his later search did return is attributed to that search, alice's delete of
+a returned id is her search's one use and strips the token estimate from both
+searches that had returned it while the third keeps its own; the by-agent
+table split the two as the log rows say. That table printed bare uuids, with
+the registry that names them one table away — the report now reads
+`ob1_agents.label` when 010 is present and prints `label (id prefix)`, held
+in [39]. A capture whose embedding the provider refuses fails before any
+write and logs nothing, which is the rule (no pointer was accepted). The same
+pass's cold read moved the distinct-returned count to one definition — the
+reader's, from the parsed ids, where a `count(DISTINCT)` subquery per search
+row had duplicated it under a comment that called it a cardinality — and the
+035 verdict preflight carries between two checks into the block those checks
+share, so a second run in one process starts unset.
+
+A ninth pass fired forty
+captures at once at the live server, each citing the two ids one search had
+returned: forty succeeded, eighty cite rows landed, none dropped, nothing on
+the server's stderr, and the report read 2 used of 2 returned; and it seeded
+the window's exact edge at microsecond precision — three agents, each a
+search at T and a fetch of its id at T + 30 min exactly, one microsecond
+inside and one outside — and both readers agreed: the edge and the inside
+fetch attributed, the outside one not, and at a 29-minute window none. That
+parity check was the last one needed by hand: the same pass's cold read made
+the export call `attribute()` instead of running its own SQL join, cast the
+epoch arithmetic to `numeric` so `at_us` is exact on any server, guarded the
+registry read so a role without SELECT on `ob1_agents` gets bare ids and a
+line rather than a stack trace, made preflight's 035 verdict a plain boolean
+(the "could not read" branch was unreachable), and folded the two `uuid[]`
+renderers into one. Recounting a search's distinct ids in `summarise()` after
+`attribute()` built the same set was raised again and declined: a seventh
+pass removed the field that carried it at a reviewer's request, the recount is
+one `Set` per search row, and one code path beats a threaded-out map. `bunx tsc --noEmit` in `server-portable/` covers
+the server files; `evals/utilization.ts`, `query-log.ts` and
+`eval-utilization.ts` have no tsconfig and are **runtime-checked only**,
+through [39] under Bun — the same standing as every other `evals/` file.
+The measurement itself — the operator's first week of real use with the log on
+— is the ticket's Verify, not this section's: the number exists when the log
+has rows.
+
+**Upstream status:** not sent — the query log is this fork's (change 65).
+
+
+### 91. `match_thoughts` runs with `jit = off` — migration 040 adds 017's clause to 039's function, so a planner path an operator disables no longer JIT-compiles the gate's sample on every call, and a generic plan's flat estimate no longer compiles the walk (SMD-1624)
 
 Change 80 shipped with a premise stated in its header: 038's sample statement
 has, in every piece, exactly one viable planner path — a TID Range Scan for
@@ -13629,7 +14363,7 @@ pinning the paths, and leaving the premise stated.
 Main took change 81 — migration 039, the half-precision index, which
 redefines `match_thoughts`' walk `ORDER BY` and nothing in the sample — and
 changes 82 to 85 while this change was in review, so it is migration 040 and
-change 86. The measurements below were taken on 038's function; the statement
+change 91. The measurements below were taken on 038's function; the statement
 they are about is the same in 038, 039 and 040, byte for byte.
 
 **Measured first.** The ticket's table reproduced on this tree through the
@@ -13941,7 +14675,7 @@ Pass 4, the same two reviewers, the cold one also reading as an operator on
 Supabase and as the maintainer merging. What changed: main had moved — 039
 (change 81, the half-precision index, which redefines `match_thoughts`) and
 changes 82 to 85 landed while this was in review — so this is migration 040
-on 039's body, change 86 and test-upgrade [18]; every pin, remedy string,
+on 039's body, change 91 and test-upgrade [18]; every pin, remedy string,
 count and pointer was re-applied onto main's text (the reliable pattern:
 take main's file at every stop, re-apply the section once), test-upgrade
 [7]'s tripwire reads "last eleven", and the section says what was measured
@@ -14261,6 +14995,130 @@ closed on exactly that basis:
 Fixes 1–5 all live in `server/index.ts`. Fixes 6 and 7 are contributable in
 principle; note that [issue #482](https://github.com/NateBJones-Projects/OB1/issues/482)
 reports the upstream PR gate currently fails on **every** fork-originated PR.
+
+---
+
+## Review passes: what caught a finding is written at the catch
+
+Measured 2026-09-18 with `bun scripts/mechanism-yield.mjs` over the commit log
+as of `main` at 28e20d7 — before any tagged pass existed, so a re-run at HEAD
+adds this ticket's own passes to every figure: 221 review-pass commits across
+61 tickets, 511 bulleted findings in the 31 tickets whose passes carry bullet
+bodies. **None of the 511 says what found it.** Each says what was wrong and
+what changed. A keyword search for phrases that name a catcher ("mutant", "the
+reviewer", "found by driving it") turns up about twenty, and half of those are
+mentions, not catches — so nothing is inferred, and "which review mechanisms
+pay" cannot be answered from the record. A proposal to back-fill a corrections
+table from it (SMD-1711's origin) was dropped for that reason.
+
+What the record does say, by a keyword classifier whose samples were read
+(approximate by design: a defect in a checker that parses comments reads as
+record drift):
+
+- About a third of findings are record drift — this file, comments, READMEs.
+  A little under a third are code defects. A fifth are test teeth: a vacuous
+  assertion, a wrong fixture, a gate with no margin. The rest are confirmations
+  of no defect and tickets filed.
+- **The defect share does not fall with the pass number**: 44 / 43 / 51 / 51 %
+  at passes one to four, higher on the few tickets that went further. Fourteen
+  of 31 tickets found their last code or test defect at pass three or later,
+  and three of the four that ran five or more passes found one on their final
+  pass. Passes stop because the operator stops them. The stop signal — a pass
+  whose findings are the previous pass's own fixes — is a per-ticket judgement;
+  a pass count is no proxy for it.
+
+**The convention, from SMD-1711 on.** Every finding bullet in a review-pass
+commit body ends with a tag the script reads:
+
+```
+- <finding>. (caught: <mechanism>)
+- <finding>. (caught: <mechanism>; held: test-live [17])
+```
+
+`<mechanism>` is one of five: `cold-read` (a reviewer reading the diff or the
+record), `run-it` (running the suite, bench or tool and reading what it did),
+`mutant` (a deliberate break the suite should have failed on), `walkthrough`
+(following the documented procedure as an operator or deployer), `automated` (a
+gate fired on its own — CI, a check, preflight, typecheck; name it in `held`).
+Confirmations of no defect and record fixes carry the tag too: the mix per
+mechanism is the point. `held` is optional and names the test section, check
+or migration that now enforces the finding. An untagged bullet is counted as
+`implicit`, and the script says how many there were; a bullet that contains
+"(caught" but does not end in a readable tag is warned on, not counted as
+untagged. Bullets that only report a green run are not findings.
+
+**Re-measure when ten tickets carry tags**: `bun scripts/mechanism-yield.mjs
+--since <first tagged commit>` — that commit and everything committed at or
+after it, so a branch begun earlier contributes only what it committed in the
+tagged era. That run — not this note — decides SMD-1712,
+the citations facet that would give `delete_thought` a `CITED` refusal; it is
+gated on the number. The script is a maintainer report, not a CI gate; it
+prints its rules and a sample per class so the tallies can be judged before
+anything is built on them. `--self-check` runs the parser's fixtures.
+
+**The window and the attribution, corrected (SMD-1728).** A review pass aimed
+at PR #76 by mistake ran the script on the day it was merged and showed the
+window was not what the header said. `--since YYYY-MM-DD` on the git path
+handed the bare day to git, whose approxidate reads it as that day *at the
+current time*: at 03:27, `--since 2026-09-18` counted 0 commits while the same
+day's saved dump counted 9, so every pass committed earlier that day was
+dropped silently. The two paths also cut on two clocks — the anchor and git's
+`--since` on committer time, each row and the dump filter on author date — and
+129 of the log's 1,351 commits carry different days on the two (every rebase
+moves the committer date; four of them are review passes), so a dump and a
+live run of one window tallied differently. Both are one rule now: every row
+carries the committer instant (`%cI`); a `--since` day is resolved once to
+the instant it begins in one declared zone and then cut exactly as a `<sha>`
+anchor is, by instant, never passed to git. The zone took three review passes
+to get right. Git's plain `--date=short` renders each commit in its own
+committer offset, and the log carries twelve offsets, so 28 commits sat on a
+different day than on the operator's clock and a day cut could disagree with
+the anchor's instant cut. The first fix rendered in the machine's zone, and
+the second pass measured what that costs: the same `--since 2026-09-18` gave
+one commit set in Chicago, another under UTC and a third in Tokyo, all printed
+under one label, so the re-measure command in this section would not
+reproduce on another machine. The second fix rendered each row's day in a
+declared zone, and the third pass found the zone leaking into four places —
+the row, the anchor label, the row file, a legacy branch for older dumps —
+each needing to know which clock made its day. Now the zone is applied in
+one place, the start of the `--since` day (`--zone`, a Region/City name,
+default `America/Chicago`, the offset every review pass in the log was
+committed in; a fixed-offset abbreviation such as `EST` is refused); the
+window label names it, the day a row is shown with is rendered in it, and a
+dump is instants, so it is zone-free and the reader's zone applies. A dump
+made with a rendered day, before this change, is refused by record rather
+than read on an unknown clock. Verified on the live log: `--since` at
+2026-09-18, -17 and -14 returns the same commit set from the git path and
+from a dump, under `TZ=UTC` and `TZ=Asia/Tokyo` as well as the machine's own,
+and the four passes authored the day before they were committed are in or
+out of both together.
+
+The attribution rule was the larger defect. `ticketOf` took the first
+`SMD-nnnn` anywhere in subject and body, and a subject often names another
+ticket before its own ("main took 79 for SMD-1037 while the branch sat
+unpushed … (SMD-1607)"): 13 of the 221 review passes at the 28e20d7 baseline
+were credited to the wrong ticket, and three "tickets" in the tally (SMD-1616,
+SMD-1624, SMD-1625) existed only by that error. The rule is now the first
+ticket in the parenthetical the subject ends with — `(SMD-nnnn)`, or the
+`(SMD-1643, SMD-1616)` and `(SMD-1463 review pass 1)` shapes twelve subjects
+use — then the first mention in the subject, then the body. The baseline
+figures above are re-read under it from the same dump: 221
+review passes across **61** tickets (was 64), 511 findings in **31** (was 34);
+the per-pass defect shares (44 / 43 / 51 / 51 %), the fourteen tickets whose
+last defect came at pass three or later and the three-of-four on their final
+pass are unchanged. Also fixed, each with a fixture: the pass number is the
+leftmost mention whichever spelling ("Review pass 4: the third pass's fix held"
+read as pass 3; the five subjects in the log that name two passes survived
+only by word order), a bullet carrying a `(caught` tag is a finding wherever
+it sits (a "Verified:" line may introduce tagged findings, and a tagged bullet
+may quote the count that proved it), every bullet the run-result rules drop is
+printed in full at the end of the report so an untagged finding lost to them
+is seen (one in the whole log, a suite count), a bullet too short to be a finding is
+counted as skipped rather than nowhere, a defect found by a named or unnumbered
+pass shows as "an unnumbered pass" in the per-ticket table instead of "none",
+and a row whose tag does not parse is classified over the finding, not over
+the tag's tail. A dump made before this change carries author dates and
+windows on them; the whole-log baseline does not depend on the date column.
 
 ---
 

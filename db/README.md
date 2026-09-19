@@ -164,7 +164,7 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `926 assertions: 926 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `973 assertions: 973 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports forty migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
@@ -202,7 +202,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 (024 change 45, 025 change 46, 026 change 47, 027 change 48, 028 change 49,
 029 change 54, 030 change 56, 031 change 57, 032 change 60, 033 change 63,
 034 change 65, 035 change 66, 036 change 68, 037 change 70, 038 change 80, 039 change 81,
-040 change 86).
+040 change 91).
 
 ## What changed relative to the guide
 
@@ -1248,7 +1248,7 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 926 assertions, PGlite, no container
+bun test-schema.ts                          # 973 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts         # 523 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 ```

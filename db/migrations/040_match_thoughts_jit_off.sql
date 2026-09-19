@@ -208,7 +208,7 @@
 --     one); it does not give the walk or the exact branch their nested
 --     loops back — every filtered tier with rows costs 2–3 s at a million
 --     rows under that setting, the same under 038 and this file, identical
---     rows (the table is in FORK.md change 86). Pinning `enable_nestloop =
+--     rows (the table is in FORK.md change 91). Pinning `enable_nestloop =
 --     on` on the function would, and would override the operator's setting
 --     for the whole call: SMD-1677, not here.
 --   * An operator who wants JIT inside match_thoughts. A function-level SET

@@ -179,7 +179,7 @@
  * 038 (SMD-1526, change 80) draws that sample by TID range — eight page reads
  * whatever the heap holds, where 037's TABLESAMPLE cost ~2 ns a heap page —
  * and its before/after is OB1_BENCH_UPTO=037 against the default. Migration
- * 040 (SMD-1624, change 86) puts `jit = off` on the function — a planner path
+ * 040 (SMD-1624, change 91) puts `jit = off` on the function — a planner path
  * an operator disabled had JIT-compiled the sample on every call, and a
  * generic plan's flat estimate the walk — and its before/after is
  * OB1_BENCH_UPTO=039 against the default; section C's third column is what

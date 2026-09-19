@@ -1865,6 +1865,95 @@ the arms and the scoring are written, and the one-line rule for reading the
 result is the same: the graph has to beat `match_thoughts` on questions
 someone actually asked.
 
+### GraphRAG as an expansion/rerank stage — not a substitute, and conditional (SMD-1738)
+
+SMD-948 raced the graph as a **substitute** (0.51 vs vector 0.98) — the recall tier doing
+the whole match. SMD-1707 named the trap: a retriever declined as a substitute may be a
+good *complement*. So this measures the graph as an **expansion/rerank stage** over vector
+recall, on the same corpus, edges and labelled gold — and, after a first pass flattened the
+graph into a unit-weight adjacency, on the graph's **real typed/weighted structure**.
+
+- **Stage 1 — vector coarse recall:** the ANN returns K′ ≫ k candidates.
+- **Stage 2 — graph expansion + rerank:** seed the graph from *those hits'* entities,
+  expand `hops` over `ob1_entity_edges`, symmetric-RRF rerank the union. `composed` is the
+  untyped walk; **`comp-typed`** weights each hop by a pre-registered relation prior
+  (`depends_on`/`uses`/`works_on` high, `co_occurs_with` low), evidence support
+  a saturating `support/(support+5)` and confidence — the discrete first step toward relevance as diffusion over
+  a typed/weighted graph. `comp-cos` orders the union by cosine only (control). The
+  **pre-registered bar** (SMD-1038): build iff multi-hop recall@10 lifts ≥ 0.05 over vector
+  AND recovers more than it breaks AND does not cut aggregate recall, checked on every cell.
+
+**Recall, vs a full-budget vector (601 issues, 27 questions):**
+
+| arm | multi-hop | aggregation | corpus | all | nDCG (mh) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| vector — the substitute baseline | **1.00** | 0.98 | 0.75 | 0.97 | 0.96 |
+| graph — SMD-948 substitute (question-seeded) | 0.43 | 0.47 | 0.33 | 0.43 | 0.31 |
+| composed — untyped expansion (best cell) | 0.89 | 0.98 | 0.69 | 0.89 | 0.69 |
+| **comp-typed** — edge-aware (relation prior × support × conf) | **0.98** | 0.98 | 0.69 | **0.95** | **0.75** |
+| comp-cos — union by cosine only (control) | **1.00** | 0.98 | 0.75 | 0.97 | 0.96 |
+
+**The bar FAILS — because vector is at ceiling, not because the graph was flattened.**
+comp-cos ties vector exactly: pooling the graph-reached thoughts loses and adds nothing.
+Using the **real typed edges** (comp-typed) lifts recall over the untyped walk (0.89 → 0.95
+all, multi-hop 0.98) and ranking (all-question nDCG 0.73 → 0.77; multi-hop 0.69 → 0.75) — a gentler, more vector-preserving
+rerank — but still **cannot exceed** a ceiling'd vector (the untyped best cell recovers 0,
+breaks 4; no cell of the 8 clears the ≥0.05-lift bar). So the flattening cost some recall,
+but the ceiling caps even the typed version. Recall, though, is one axis, and the ceiling is
+a property of the *question set*. On the axes a graph is built for, the picture turns.
+
+**Beyond recall — the axes vector can't express:**
+
+*Recall-complement under a starved vector budget* — the finding. Constrain the coarse
+budget b; the edge-aware graph becomes a real recall tier where vector runs short:
+
+| b (vector budget) | vector-top-b R@10 | edge-aware composed R@10 | Δ | (multi-hop) vec → composed |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 0.35 | **0.83** | **+0.48** | 0.42 → 0.85 |
+| 3 | 0.78 | 0.90 | +0.12 | 0.90 → 0.96 |
+| 5 | 0.92 | 0.94 | +0.02 | 1.00 → 0.98 |
+| 10 | 0.97 | 0.95 | −0.02 | 1.00 → 0.98 |
+
+At a tight budget the graph recovers what vector misses (+0.48 at b=1), crossing over only
+when vector saturates (b ≈ 10). This is exactly SMD-1707's at-scale regime, where a single
+ANN loses recall and a second tier recovers it — hidden here by the ceiling, not absent.
+
+*Relational structure vector can't see* — of 3,000 issue pairs joined by a strong typed
+edge (`depends_on`/`uses`), **95%** have the linked sibling *outside* the issue's vector
+top-10: a large store of relational neighbours only the graph reaches (descriptive — the
+graph defines the link). *Entity-membership* applies to only 5 of 10 needles (the rest are
+literal-string aggregations, keyword's job); on those the extracted graph trails
+(0.18 vs vector 0.97), limited by SMD-947's extraction coverage. The set poses few true
+relational or entity-membership queries — the shape-of-question gap SMD-948 named.
+
+**Scale (synthetic typed graph, latency only).** Not K′-bounded as written — at 1M
+(6M mentions) a ~2.0 s floor at K′=10 rising to ~5.0 s at K′=1000/2-hop, and at 10M (30M mentions, lighter density) a ~7 s floor essentially FLAT across K′=10–1000 (11.3 s only at K′=1000/2-hop) — the df scan tracks the mention count, not K′ —
+dominated by the per-call `df` full scan (the walk recomputes document frequency each
+call). A **materialized `df`** is the prerequisite to scale; the typed pass adds the
+`edge_w` aggregate on top.
+
+Reproduce:
+
+```
+OB1_METADATA_MODEL=qwen2.5:7b OB1_EVAL_CORPUS=/tmp/linear-corpus-full.json \
+  ../db/with-postgres.sh bun eval-graphrag.ts --no-global --allow-stale-dump   # real corpus, all axes
+OB1_EVAL_EMBED=syn@64 OB1_GRAPH_SCALE_MENTIONS_PER=3 OB1_GRAPH_SCALE_EDGES_PER=1 \
+  OB1_GRAPH_KPRIME=10,100,1000 OB1_GRAPH_HOPS=1,2 OB1_PG_SHM=3g \
+  ../db/with-postgres.sh bun eval-graphrag.ts --scale 10000000                  # 10M synthetic, latency
+```
+
+**Verdict — a conditional tier, not a substitute or an everyday stage.** Against a healthy
+full-budget vector on ordinary questions the graph stage does not pay (ceiling). But where
+vector recall is *scarce* — deep scale, a tight ANN budget, relational/entity-membership
+questions — the edge-aware graph is a real recall/precision complement, the recall tier to
+vector's precision tier that SMD-1707 framed. **Eval-only; not built** — a product path is a
+scale-regime test away (SMD-1038 posture). *Forward-looking:* the value here is the edges'
+type and support; confidence is near-uniform and lineage/supersession is absent from this
+corpus (that is the claim-log SMD-1729 and trust labels SMD-1724). Carrying trust, lineage
+and recency *dynamically* on the edges — relevance as continuous-time diffusion over a
+typed/weighted/temporal graph, a CfC/liquid-network shape — is where this points; the static
+edge-aware expansion is the first discrete step.
+
 ## Hybrid ranking, measured on four query sets
 
 `eval-hybrid.ts`, run as `bun run hybrid` (SMD-958, migration 017). Needs
@@ -2236,7 +2325,8 @@ leading line, and the vector does not weight them. Multi-session is where the
 (95.0%): the second gold session is close behind, which is the case a
 reranker or a larger candidate window addresses. Knowledge-update is 97–99%:
 both the stale and the current session are retrieved, which is the retrieval
-half of the problem SMD-1294 (consolidation) exists for.
+half of the problem SMD-1294 (consolidation) exists for — and, measured below
+under SMD-1720, the half the number cannot see: which of the two comes first.
 
 **Where this sits.** The default model lands 4.0 points below GBrain without
 its reranker and 6.1 below with it, on a 2.5 GB local model with no reranker
@@ -2292,6 +2382,126 @@ ten-result query** (mean non-target 8.30 → 9.02), because a dominant top of ~0
 keeps rows ≥0.4 where the floor kept ≥0.5. A little more fill below the answer for
 the 45→87% long-capture recall: bounded and non-adversarial.
 
+### The knowledge-update slice: what strict recall hides, and the resolving read priced as an oracle (SMD-1720)
+
+`eval-longmemeval.ts` with `OB1_EVAL_LME_ARMS=current`, scoring only, on the
+same persisted loads (the S-corpus maps had gone with `/tmp`; whichever phase
+reads the map first now rebuilds a missing one from each row's
+`metadata.lme_sid` under the run's model, the four fingerprint twins matched
+by fingerprint and their questions re-merged, and says so). The re-merge
+repaired a loader defect the review found: a twin's upsert had replaced the
+first session's questions on the row, since `upsert_thought` merges metadata
+key by key; the audit shows ten questions each lost one distractor session
+and none lost a gold one, so the tables above stand. 2026-09-18.
+
+SMD-1720 asked for the knowledge-update slice to be reported on its own, on
+the reading that it never had been. It had — the tables above carry it, at
+97.2% (4b) and 98.6% (0.6b) strict recall_all@5, the best slice on both
+models — so by the ticket's own rule it closes with that number. But the
+number answers the benchmark's question, not MERIT's. Every one of the 72
+knowledge-update questions has exactly two gold sessions, one that states a
+value and a later one that updates it (median 50 days apart, from under a
+day to 256), and
+strict recall_all counts the question when *both* are in the top five. A
+reader handed the stale value first, or the stale value alone, scores the
+same as one handed the update. That is the failure MERIT measured embedding
+retrieval at 0.30–0.95 on and update-on-write stores at 0.70–1.00, and it
+needs the rank of each gold, which the shipped arm set does not keep.
+
+**What is scored.** Over the same `match_thoughts` calls, per question: `both`
+(strict, as above), `current-in` (the current session in the top k),
+`current-first` (in the top k and above the stale one, or the stale one
+absent — what a reader that takes the first relevant hit gets right),
+`current@1`, and `stale-only` (the stale session in the top k, the current one
+not). A control refuses any question without two golds dated apart. Every
+arm is paired with the shipped order per question — helped / hurt and
+McNemar's exact test — not compared as a mean.
+
+**Arms.** `vector@-1`, the shipped order. `recency@0.3`, 020's blend as a
+caller can send it today (`recency_weight` 0.3, the half-life fixed at 90
+days). `recency@0.3/3650`, the same weight at a half-life long enough for a
+week of age to register on rows three years old. `age@1`, age alone — under
+the history filter `match_thoughts` takes its exact branch and blends every
+row of the history before cutting to k, so this arm is the k newest sessions
+in the history with similarity ignored, and the two recency arms reorder the
+whole history, not a nearest-N window. And `resolve`: the ticket's chain-walking read — each hit
+walked forward along `supersedes` to the head of its chain and returned in
+the hit's place, at the hit's rank, a session listed once — run as an
+**oracle**, because the corpus carries **0** `supersedes` pointers (printed;
+nothing populates them: the consolidation pass has not run on these loads,
+and at one thought per session it would be judging whole conversations). The
+arm holds each question's gold pair in memory as that question's chain — not
+one chain over all 72, since a session sits in many histories and another
+question's stale session is not this question's — as if a reviewer had
+accepted exactly the right proposals. It is the upper bound of the read, not
+a measurement of it. On a store that does carry pointers the arm walks them
+instead, stopping at the edge of the history, and says so.
+
+**Results, k=5, 72 questions.** 4b / 0.6b:
+
+| arm | both (strict) | current-in | current-first | current@1 | stale-only | vs shipped on current-first |
+| --- | --- | --- | --- | --- | --- | --- |
+| vector@-1 (shipped) | 97.2% / 98.6% | 97.2% / 100% | **52.8% / 45.8%** | 52.8% / 44.4% | 2.8% / 0% | — |
+| recency@0.3, half-life 90d | 97.2% / 98.6% | 97.2% / 100% | 52.8% / 45.8% | 52.8% / 44.4% | 2.8% / 0% | +0 / −0 on both models |
+| recency@0.3, half-life 3,650d | 97.2% / 98.6% | 97.2% / 100% | 54.2% / 47.2% | 52.8% / 45.8% | 2.8% / 0% | +1 / −0, p=1.000 |
+| age@1 | 2.8% / 2.8% | 29.2% / 29.2% | 29.2% / 29.2% | 5.6% / 5.6% | 0% / 0% | +10 / −27, p=0.008 · +11 / −23, p=0.058 |
+| resolve (oracle chains) | **0% / 0%** | 100% / 100% | **100% / 100%** | 97.2% / 94.4% | 0% / 0% | +34 / −0 · +39 / −0, p<0.001 |
+
+At k=10 the shipped arm reaches 100% on `both` on both models and
+`current-first` does not move (52.8% / 45.8%); `age@1` climbs to 51.4%
+current-first and is no longer distinguishable from the shipped order
+(+18 / −19, p=1.000 on the 4b). 2.1–2.7 ms a call.
+
+**What it says.**
+
+* **The shipped read is a coin flip on which value comes first.** On 34 of 72
+  questions (4b; 39 on the 0.6b) the stale session outranks its update — in
+  almost every one the stale row is the top hit and the update is second.
+  Both are always retrieved, so the strict number is 97–99% and the reader's
+  number is 45–53%. That is MERIT's range, reproduced on a public corpus
+  through the fork's own write and read path, and it is invisible to every
+  table above this one.
+* **The date is not the lever, again.** The blend a caller can send is a
+  byte-identical no-op here: at a 90-day half-life a row from 2023 has a
+  recency of about 10⁻⁴, and so does the row a week newer, so the blend
+  changes nothing below weight 1. A half-life long enough to see the gap
+  moves one question. Age alone — the five newest sessions in the history —
+  puts newer, unrelated sessions ahead of both golds and collapses strict
+  recall to 2.8%.
+  Change 53 found the same for the temporal slice; the update is not usually
+  the most recent session in a history, it is the most recent *about this*.
+* **The resolving read is a change of relevance definition, not a ranking
+  improvement.** Fed perfect chains it puts the current value first on every
+  question and at rank one on 94–97% — and scores 0% on strict recall,
+  because it hands back one session where the benchmark wants two. The same
+  split `eval-supersession.ts` found on the seeded corpus (topical relevance
+  +0.000, current-version relevance +0.333) holds on the public one. And the
+  benchmark is right to want two: 14 of the 72 questions carry a cue like
+  *previous*, *before*, *initially*, and about ten of them ask for the value
+  the update replaced ("What was my previous frequent flyer status", "Where
+  did I initially keep my old sneakers" — asked beside "Where do I currently
+  keep"); one asks for both. A read that resolves by default answers those
+  from a row it has hidden.
+* **The mutant.** With the forward walk removed (a hit returned as itself)
+  the resolve arm is the shipped order on every question, +0 / −0 — the walk
+  is the whole effect.
+
+**Decision.** Not built, and the number stands as the ticket's step one. The
+resolve read is deterministic given chains — a hit in a chain is replaced,
+one outside it is not — so nothing about its *effect* is left to measure by
+building it; what is missing is chains, and no measured corpus has one (this
+one has 0 pointers; on the tracker corpus the pass filed proposals, and a
+proposal is not a pointer until a reviewer accepts it). When
+a corpus with accepted proposals exists, the read belongs behind an opt-in
+flag on the search functions (`p_resolve`, default off), with a
+`superseded_by_chain: n` label on a replaced hit, and never as the default:
+the benchmark's own previous-value questions are the case against a default.
+Today the reader has the pieces: the label (`⚠ Superseded by a newer
+thought — ID …`) names the head one read away, and `Captured:` dates every
+hit. What would move the reader's number without a chain is a reranker that
+reads the two texts and picks the later state — the one-pool rerank change 59
+found to be the lever — measured on this slice with this arm set.
+
 ### Caveats
 
 * Two local models, both at 1024 dimensions. Nothing hosted has been
@@ -2307,7 +2517,8 @@ the 45→87% long-capture recall: bounded and non-adversarial.
 * No reranker arm. The cascade (above) was measured flat on the tracker; this
   corpus is where it would be re-derived, and `eval-cascade.ts` is the harness
   for that.
-* Three-arm, two-k design; per-question rank data is not kept. A follow-up
+* Three-arm, two-k design; the shipped arm set keeps no per-question rank
+  data (the `current` set keeps each gold's rank for its slice). A follow-up
   that wants MRR or the rank of the missed gold session extends `score()`.
 
 ## What the windows buy under a model that embeds the capture whole — and the rule that replaced the constant
@@ -2666,7 +2877,15 @@ on to open. This loop captures it and gates PRs on it.
 
 1. **Log** — off by default. `OB1_QUERY_LOG=on` records one row per search (query,
    arguments, and the ids returned in rank order with scores) and one per
-   follow-up fetch/edit/delete of a returned id (migration 034; `db/README.md`).
+   follow-up fetch/edit/delete of a returned id (migration 034; `db/README.md`),
+   and — since SMD-1719 — one per id a later capture or edit cites as its source
+   (`derived_from` / `supersedes`), logged under `<writer>/<pointer>`; a cite is
+   the stronger relevance label and the export includes it. A `supersedes` cite
+   labels the *superseded* row — the one the searcher needed in order to
+   correct it — so a replay on a corpus that has since demoted superseded rows
+   would read that query as a miss; the fork labels such rows at read time and
+   does not demote them (SMD-1720, change 88), and every click-through label is bound to
+   the corpus at export time (`baseline` says which).
    A caller who searches then opens result 3 has labelled result 3 relevant —
    *click-through relevance*, a proxy, kept beside the hand-labelled sets, not
    instead of them.
@@ -2706,6 +2925,41 @@ on to open. This loop captures it and gates PRs on it.
    1.000); the gate proves its floor has teeth by replaying random query vectors
    and watching recall collapse (0.154 < 0.8) — a scrambling regression would
    score the same. The live corpus stays out of CI.
+
+**Utilization — did the caller use what came back (SMD-1719).** Every number
+above is layer one of the four the literature now asks for (evidence retrieval,
+evidence use, task outcome, cost). MERIT (arXiv 2609.05441) measured the second
+and found agents ignore 45–53% of correctly retrieved facts. The query log can
+answer it, because a later `capture_thought` that names a returned id in
+`derived_from` or `supersedes` is logged as an action row under its own tool
+(FORK.md change 90), so a touch is either **cited** (a write named it as a
+source) or **opened** (fetch / update / delete — click-through). Then:
+
+```
+DATABASE_URL=… bun eval-utilization.ts [--gold fixture.json]
+OB1_EXPORT_WINDOW_MIN=30   # the same attribution window as export-queries.ts
+```
+
+prints, per arm (search tool + recorded arguments), per agent when the log
+holds more than one (named from the registry, `ob1_agents.label`, with the
+id's prefix beside it), and overall: ids
+returned, ids used (cited ∪ opened), **util** = used / returned, **use-rate** =
+searches with ≥ 1 use, the cited/opened split, and **tok/used** — approximate
+tokens returned per id used (the ids' content as stored now, chars / 4; a
+search any of whose returned ids has since been deleted carries no estimate
+rather than a partial one, and the header says how many do). With
+`--gold` (a hand-labelled fixture in `export-queries.ts`'s `{ queries: [{ query,
+relevant }] }` shape) it adds the **ignore rate**: searches whose results held a
+relevant id the caller never used. A fixture exported from the same log's touches
+is circular as gold; label by hand. With no action rows the report says `n/a`
+and asks whether the log is on, rather than printing 0%; on a brain without
+migration 034 it (and `export-queries.ts`) refuses in words, exit 2, rather
+than dying in the driver. Attribution is the
+export's rule, in `utilization.ts` (pure, tested by `db/test-schema.ts` [39]) —
+one implementation, which `export-queries.ts` calls as well.
+A read whose use ends in prose, with no write and no fetch, is invisible here,
+so utilization is a lower bound on use. No ranking changes on this number; if
+it comes out low, the lever is presentation (SMD-1735), not retrieval.
 
 **Why two fixtures.** The export fixture (query text + ids) drives the local,
 model-backed `eval-replay.ts` against your own brain — no vectors, because the
@@ -3051,6 +3305,360 @@ could not build there while LanceDB built in 28 s. "Not built" is the right call
 on retrieval quality; the topology and scale cases are the open questions.
 
 
+
+### The read model — the store holds the payload, no id→row resolve (SMD-1696)
+
+SMD-1037 and SMD-1662 both measured a second store as a *subordinate ANN index*:
+Postgres was the source of truth, and every read resolved the store's returned ids
+back to Postgres rows. The id→row resolve the "not built" verdict leaned on is
+partly an artifact of *that* topology, not of a two-store design. A columnar store
+can hold the vector **and the full payload** and serve the retrieval read
+completely, with Postgres kept only as the transactional write log — a **read
+model / CQRS** shape whose read path makes **zero Postgres calls**. That is the
+configuration where a second store is actually compelling, and the one the earlier
+evals put out of scope ("keep the resolve"). This measures it.
+
+A `LanceReadModel` (in `store-backends.ts`) holds `{ref, content, metadata, labels,
+tiers, vector}` and exposes two reads over one index — `search` (ids only, feeding
+the SMD-1662 resolve) and `searchRows` (full rows, the read-model read).
+`store-readmodel.ts` measures three read paths on identical vectors against one
+exact-cosine oracle:
+
+1. **single-store Postgres** — one statement: ANN over the points, deduped to
+   distinct thoughts, joined to the payload. A `match_thoughts`-equivalent read.
+2. **two-store resolve** (SMD-1662) — LanceDB returns ids; Postgres pulls the
+   payload back (`SELECT content, metadata … WHERE ref IN …`).
+3. **read model** (this ticket) — LanceDB returns the full rows. No Postgres.
+
+All three pull the same candidate depth (`FETCH`) before dedup, so they are scored
+on a level field. Paths 2 and 3 share the same LanceDB index and differ only in
+where the payload comes from, so `(path2 − path3)` is the net topology delta and
+`(path1 − path3)` is the read model against the incumbent.
+
+**The zero-Postgres read path is real, and demonstrated.** The read model holds no
+Postgres handle, so its read path is zero-Postgres by construction; a query counter
+on the shared handle read **0** across the whole path-3 loop (a runtime regression
+guard), and — the demonstration — Postgres was *stopped* mid-run and the read model
+still answered, byte-identical rows, with the OLTP database down. Every returned row
+carried the exact payload (content correctness checked, not just the id).
+
+**Real corpus (601 issues, 963 points, 1024-dim, 150 title queries).** Recall@10
+versus exact — all three paths agree on the unfiltered arm, where the resolve
+latency delta is read:
+
+| path | store | unfiltered | portal (3.5%) | design (2.3%) | t2 (1.7%) | t07 (0.5%) |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| 1 single-store PG | pgvector HNSW | 100% | 10% | 9% | 6% | 10% |
+| 2 two-store resolve | LanceDB HNSW_SQ | 100% | 99% | 100% | 100% | 100% |
+| 3 read model | LanceDB HNSW_SQ | 100% | 99% | 100% | 100% | 100% |
+
+(Path 1's *filtered* recall is a bare pgvector HNSW post-filter — the SMD-968
+hazard; shipped `match_thoughts` fixes filtered recall in-engine via migration 014,
+SMD-1037's finding and orthogonal to the resolve question here. The read model
+holds filtered recall by prefilter, exactly as SMD-1662.)
+
+Read latency (ms, p50/p95, default effort):
+
+| path | unfiltered p50 | p95 |
+| --- | ---: | ---: |
+| 1 single-store PG | 1.30 | 1.65 |
+| 2 two-store resolve | 1.67 | 2.20 |
+| 3 read model (no resolve) | 1.21 | 1.60 |
+
+The net topology delta `(path2 − path3)` was **~0.45 ms** here (from the unrounded
+p50s) and near zero on a
+quieter run (0.0–0.5 ms across runs), and the read model against single-store
+Postgres `(path1 − path3)` was **+0.09 ms** — the read model was 0.09 ms *faster*
+here (1.21 vs 1.30 ms), single-store faster on a quieter run: the three paths are
+within the run-to-run spread, no clear winner. At this corpus size the resolve is
+essentially free, so removing it buys nothing.
+
+**At 1M rows (64-dim, random vectors — the worst-case recall floor).** Single-store
+pgvector's own read is the fastest, and the read-model-vs-resolve delta is within
+run-to-run noise of zero:
+
+| path | unfiltered p50 | p95 | filtered p50 (mean) |
+| --- | ---: | ---: | ---: |
+| 1 single-store PG (pgvector HNSW) | 2.54 | 3.13 | 2.77 |
+| 2 two-store resolve (LanceDB HNSW_SQ) | 2.96 | 3.49 | 41.1 |
+| 3 read model (no resolve) | 3.59 | 4.14 | 38.7 |
+
+Single-store pgvector (2.54 ms) was the fastest read in every run; the net topology
+delta was −0.7 to +0.5 ms across runs — fetching the payload from LanceDB costs
+about the same as a Postgres primary-key resolve of ten ids — so even with the
+resolve gone the two-store read does not overtake the single store. (The high
+*filtered* p50 is LanceDB prefiltering an unindexed `array_has` list column — a
+scalar-index config choice, the same LanceEngine shape as SMD-1662, and orthogonal
+to the unfiltered resolve reading.)
+
+**At 10M rows** the ordering is unchanged and the write side sharpens. (pgvector
+HNSW did not build in a practical window — abandoned after 40 minutes still
+constructing its graph — so the single-store anchor is IVFFlat, built in 2.4 min,
+as SMD-1662's 10M table did.)
+
+| path | unfiltered p50 | p95 | filtered p50 (mean) |
+| --- | ---: | ---: | ---: |
+| 1 single-store PG (pgvector IVFFlat) | 5.93 | 17.84 | 50.2 |
+| 2 two-store resolve (LanceDB HNSW_SQ) | 7.56 | 12.20 | 247.3 |
+| 3 read model (no resolve) | 7.38 | 8.50 | 243.8 |
+
+Single-store IVFFlat has the fastest p50 (5.9 ms) — though the worst *tail*, p95
+17.8 ms against the read model's 8.5 ms (see the table); the resolve delta is
+0.18 ms (negligible); the read model does not overtake the single store on p50. The read model's
+*filtered* reads reach ~244 ms — an unindexed `array_has` prefilter scanned over 10M
+rows. The mutable-edit tax explodes — **84.8 ms/ref** at 10M (3.3 → 11.7 → 84.8
+across 601 → 1M → 10M, each edit rewriting an ever-larger fragment) — while batched
+appends stay cheap (drain 103k rows/s). Storage: the read model adds 6.3 GB
+atop Postgres's 8.9 GB (+71% whole-system).
+
+**The read cost reappears at write time — and it is dominated by mutable edits.** A
+*synchronous* dual-write (a durable Postgres write plus a per-row LanceDB append)
+cost **~2.3–3.0 ms/write** extra, because LanceDB writes a data fragment per `add`.
+Batched propagation erases the append path, but payload *edits* do not stay cheap:
+
+| measure | real corpus | 1M |
+| --- | ---: | ---: |
+| dual-write tax (synchronous, per write) | 2.97 ms | 2.32 ms |
+| outbox/CDC drain throughput | 21,100 rows/s | 86,700 rows/s |
+| read-model append (batched) | 0.17 ms/row | 0.02 ms/row |
+| mutable content edit — `update` by ref | 3.34 ms/ref | 11.65 ms/ref |
+
+An outbox/CDC drain is the right shape and the one OB1 already runs — embeddings
+are *already* eventually consistent with content (the re-embed worker lags writes),
+so a read model is that same consistency model relocated, not a new one. A batched
+append is one Lance fragment write amortised over the batch, so it is cheap and does
+not grow with corpus size (the per-row figures above fall with *batch* size — 20
+rows at the real corpus, 200 at scale — not with N); the drain sustains 21k–103k
+rows/s across the scales. The real consistency tax is the mutable content edit (a
+LanceDB `update` rewrites the fragment holding the ref), and it *grows* with the
+store — **3.3 → 11.7 → 84.8 ms/ref** across 601 rows → 1M → 10M. Vectors are
+append-mostly; the cost is the mutable payload — `update_thought`, provenance,
+consolidation, entities.
+
+**Storage — the payload lives twice.**
+
+| topology | Postgres | read-model store | total system |
+| --- | ---: | ---: | ---: |
+| single-store PG | 15 MB / 1297 MB | — | 15 MB / 1297 MB |
+| index + resolve (SMD-1662) | 15 MB / 1297 MB | 5 MB / 599 MB | 20 MB / 1897 MB |
+| read model (SMD-1696) | 15 MB / 1297 MB | 9 MB / 656 MB | 24 MB / 1953 MB |
+
+(real corpus / 1M; Postgres excludes `points_ref_idx`, which no path here uses.) The
+read model holds the payload on top of the index — a 4 MB duplication over an
+index-only store on the real corpus, 57 MB at 1M — lifting the whole-system
+footprint about +50% over single-store Postgres (+71% at 10M). (On-disk duplication
+tracks compressibility: the synthetic filler compresses hard — 57 MB on disk vs
+268 MB logical at 1M — so there it understates what real content would cost, while
+real content does not compress and carries Lance's per-fragment overhead, landing
+near or above the logical figure — 4 MB on disk vs 2 MB logical on the real corpus.)
+
+**Verdict — SMD-1037's holds, and the resolve it leaned on is shown not to be the
+bottleneck.** The read-model topology *works*: its read path is provably
+zero-Postgres — it serves reads with Postgres stopped — and appends are cheap when
+batched, on the eventual-consistency model the fork already uses. But removing the
+resolve buys no read-latency win: the resolve is a fraction of a millisecond, the
+three paths are within noise on the real corpus and single-store pgvector has the
+fastest *p50* from 1M up, and the read-model-vs-resolve delta is within noise
+throughout. (One tail-latency caveat already points at the scale case: at 10M the
+single store could only run IVFFlat — pg HNSW would not build — whose p95, 17.8 ms,
+is worse than the external HNSW_SQ index's 8.5 ms; at scale the off-DB store builds a
+better-tail index than pgvector can — SMD-1697's territory.) Meanwhile the read model
+adds a write-time propagation path whose mutable-edit cost grows with scale and holds
+the payload a second time (+50–71% whole-system). So the read model does not earn its place on
+*retrieval latency*; where it plausibly would is the scale/operational envelope —
+offloading the vector working set and being buildable where single-store pgvector is
+not (SMD-1662's 10M arm already showed pgvector failing to build where LanceDB built
+in 28 s). That is **SMD-1697**, still open. **Not built**; `thoughts.embedding`
+stays the source of truth — now because the resolve the second-store case turned on
+was measured and found not to be the cost, not merely assumed.
+
+**What this still measures as a race, not a composition.** SMD-1037, SMD-1662 and
+this eval all measured stores as *substitutes* — each doing the whole match and
+returning the rows, the cross-store hop treated as cost to minimise or eliminate.
+None measured stores as *complements*: a composed match where a scalable ANN engine
+does cheap coarse recall and Postgres does the exact rerank/fusion (metadata,
+recency, keyword, freshness) over the small candidate set — where the id→row hop is
+the precision stage, not a tax, and coarse recall shards while the rerank set stays
+small. That is the axis on which a second store plausibly earns its place, unmeasured
+here (SMD-1707).
+
+Reproduce (each scale is a separate run — the single-store index differs):
+`bun store-readmodel.ts` (real corpus); `OB1_STORE_SCALES=1000000 OB1_STORE_DIM=64
+OB1_STORE_PAYLOAD_BYTES=256 OB1_STORE_PG_SHM=3g bun store-readmodel.ts` (1M, HNSW
+anchor, storage-delta measured); `OB1_STORE_SCALES=10000000 OB1_STORE_DIM=64
+OB1_STORE_PAYLOAD_BYTES=128 OB1_STORE_PG_INDEX=ivfflat OB1_STORE_SKIP_ORACLE_OVER=2000000
+OB1_STORE_RM_STORAGE_DELTA=0 OB1_STORE_PG_SHM=3g bun store-readmodel.ts` (10M — pg
+HNSW does not build in a practical window, so the anchor is IVFFlat).
+
+
+
+### The composed match — coarse recall + exact rerank, stores as complements not substitutes (SMD-1707)
+
+SMD-1037, SMD-1662 and SMD-1696 all raced stores as **substitutes**: each store
+doing the *whole* match (vector ANN top-k + return the rows), asking "which single
+store serves the read?" The id→row hop was treated as cost to minimise (SMD-1662)
+or eliminate (SMD-1696). But that hop is the **precision stage** where a multi-store
+match earns its keep — exact metadata predicates, recency (SMD-945), keyword/FTS
+fusion (SMD-958) — the things the ANN cannot express. This measures the stores as
+**complements**:
+
+- **Stage 1 — coarse recall:** a scalable ANN engine (LanceDB, the SMD-1662 store)
+  returns a large candidate set (K′ ≫ k), cheap and shardable.
+- **Stage 2 — exact rerank / fuse in Postgres** over that *small* candidate set:
+  exact cosine (MIN over a ref's windows), an exact metadata filter, an optional
+  recency blend (SMD-945's `recency_score`, inlined), and an optional keyword arm
+  fused with the vector *rank* by symmetric RRF over `docs.tsv` (both terms on the
+  RRF scale, as `search_thoughts_hybrid` fuses them — SMD-958). The "resolve"
+  reframed as the rerank join — no `ORDER BY` over the vector index anywhere, so it
+  is exact within the candidate set by construction and reads |cand| = K′ rows, not
+  N (rows read is bounded by K′, but wall-clock still grows with N and is cache-bound
+  at scale — see the scale table).
+
+`store-composed.ts` drives it against one exact-cosine oracle, K = 10. Comparators:
+the substitute (vector-only ANN@k at the shallow depth `FETCH`=50), a single-store
+Postgres hybrid (vector ⋈ FTS RRF over the whole table, the SMD-1037 hybrid), a
+`pg`-HNSW-coarse control (single-store staging), and the exact oracle (ceiling). The
+coarse-depth **K′ is swept** to trace quality and stage cost. (Metrics against the
+oracle's top-k: recall@10 is set overlap; nDCG@10 is binary-gain — a returned ref is
+relevant iff in the oracle top-k — discounted by result position; MRR here is the
+reciprocal rank of the oracle's *top-1* ref in the result, the `eval-recency.ts`
+convention, not the mean over a relevant set.)
+
+**Real corpus (601 issues, 963 points, 1024-dim, 150 title queries).** At this size
+the ANN is already exact — the substitute gets 100% recall@10 unfiltered — so there
+is *nothing for the exact rerank to recover*; the composition matches it, and the
+K′ sweep only shows the mechanism warming up (K′=10 → 78%, K′=25 → 99%, K′=50 →
+100%). The recall win is a scale phenomenon (below), not a small-corpus one.
+
+| strategy | unfiltered | portal (3.5%) | design (2.3%) | t2 (2.8%) | t07 (1.0%) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| vector-only ANN@k (substitute, depth 50) | 100% | 100% | 100% | 100% | 100% |
+| composed C(200) — coarse→exact rerank | 100% | 100% | 100% | 100% | 100% |
+| composed C(200) via pg HNSW coarse (control) | 100% | 32% | 37% | 30% | 14% |
+| single-store PG hybrid (vector ⋈ FTS RRF) | 80% | 4% | 4% | 3% | 2% |
+| exact oracle (full scan, ceiling) | 100% | 100% | 100% | 100% | 100% |
+
+The **pg-HNSW-coarse control collapses on selective filters** (portal 32%, t07 14%)
+— pgvector's post-filter is the SMD-968 hazard, and stage 2's exact filter cannot
+recover rows the coarse stage never surfaced. Lance coarse prefilters and holds
+filtered recall (100%). *The coarse store's filtering quality is load-bearing.* (The
+hybrid's low recall-vs-cosine-oracle is expected — it optimises keyword+vector, a
+different objective; see the fusion section. It also applies no metadata filter, so
+its filtered-arm cells are an unfiltered result scored against a filtered oracle —
+read only its unfiltered cell.)
+
+**1M rows (64-dim, 20 queries) — the crux.** Here the ANN loses recall (substitute
+60% unfiltered, nDCG 0.72), and the composition's real shape appears:
+
+| K′ | recall@10 | nDCG@10 | MRR | stage-1 coarse p50 (ms) | stage-2 rerank p50 (ms) | total p50 (ms) |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 10 | 60% | 0.717 | 0.700 | 4.6 | 0.9 | 5.4 |
+| 50 | 60% | 0.717 | 0.700 | 5.2 | 1.2 | 6.4 |
+| 200 | 60% | 0.717 | 0.700 | 6.5 | 2.2 | 8.7 |
+| 500 | 83% | 0.889 | 0.800 | 11.5 | 4.1 | 15.5 |
+| 1000 | 92% | 0.949 | 0.900 | 15.2 | 6.5 | 21.7 |
+
+Recall@10 does **not** move until K′ is deep enough. At the headline K′=200 the
+composed match ties the substitute (60%) — the exact rerank only *re-orders* the
+candidate set, and the true top-10 neighbours are simply not in a 200-candidate ANN
+pool 40% of the time. Only **deep coarse recall recovers it**: 83% at K′=500, **92%
+at K′=1000**, approaching the oracle's 100% — at 21.7 ms total vs the oracle's
+full-scan 30.1 ms. So the composition's quality win is *deep coarse recall + exact
+ordering*, a quality/latency dial (K′), not a free lunch: the exact rerank makes a
+deep-but-approximate set precisely ordered, but you pay stage-1 cost to make the set
+deep. (Recall is HNSW-build-dependent and drifts ±~2 pts run-to-run; latencies drift
+with machine load — numbers here are one representative committed-code run.)
+
+Filtered recall repeats the real-corpus split at scale: Lance coarse (prefilter)
+holds it on the selective tiers (t10/t1/t01 = 100%) at a latency cost (~40 ms p50);
+the non-selective t50 tier sits at the substitute's 71% — half the corpus passing the
+filter is the same coarse-recall problem as the unfiltered arm, which the prefilter
+does not fix. The pg-HNSW-coarse control collapses (41/32/17/2% across
+t50/t10/t1/t01).
+
+**The scale claim, corrected by the 10M measurement — the composed *total* stays
+below the ~O(N) full scan and its edge widens with N, but the rerank stage's
+wall-clock is cache-bound and run-to-run volatile, not cleanly sub-linear.** The
+rerank reads a bounded K′ rows, but at 10M those K′ heap fetches hit a heap that
+exceeds RAM, so its wall-clock is dominated by cache/OS-load and swings between runs.
+Two runs of the committed code measured, at K′=1000:
+
+| corpus | stage-2 rerank p50 | composed total p50 | exact full scan p50 | full-scan ÷ composed-total |
+| --- | ---: | ---: | ---: | ---: |
+| 1M (64-dim) | 6.5 ms | 21.7 ms | 30.1 ms | 1.4× |
+| 10M (64-dim), run A | 36.5 ms | 71.9 ms | 364.3 ms | 5.1× |
+| 10M (64-dim), run B | 108.5 ms | 154.8 ms | 379.7 ms | 2.5× |
+
+What is **stable**: the exact full scan is a clean ~O(N) (≈30 ms → ≈370 ms, ~12×), and
+the composed *total* beats it at both scales, by more at 10M (1.4× cheaper at 1M →
+2.5–5.1× at 10M). What is **not** stable: the rerank *stage* wall-clock — 6.5 ms at 1M
+but 36.5–108.5 ms at 10M across two runs (a ~6×–17× jump for 10× data), because the K′
+heap fetches are cache-misses once the heap outgrows RAM. So the a-priori "rerank is
+N-independent" is doubly wrong — it grows with N and is volatile — but the direction
+the composition needs holds: the bounded-candidate total scales far better than the
+~O(N) full scan. The coarse ANN is the half that grows most with N and is the
+shardable one; sharding it would improve the system edge further, but that is
+asserted, not measured here. (Filtered reads at 10M are dominated by the coarse
+stage, not the
+rerank: the substitute's filtered-arm-mean Lance prefilter cost ~237–259 ms p50 and the
+composed arm ~267–298 ms, the pg-HNSW-coarse control ~361–579 ms — the recall tier's
+filter cost is the 10M wart, as in SMD-1696's read-model filtered reads.)
+
+**Fusion in the rerank — the precision the ANN can't express (real corpus).** Judged
+against the objective each serves, not the pure-cosine oracle:
+
+*Recency* — recall@10 vs an exact recency-blended oracle (w=0.3, 90-day half-life):
+
+| strategy | recall@10 vs recency oracle |
+| --- | ---: |
+| vector-only ANN@k (ignores recency) | 18% |
+| composed C(200), pure cosine (ignores recency) | 18% |
+| composed C(200) + recency blend | 73% |
+
+The exact rerank stage *serves the recency objective* (73% at ~3.8 ms p50) that the
+ANN cannot express (18%) — precision quantified, not a recall loss. It caps at 73%
+rather than 100% because the cosine coarse stage does not surface every
+recency-optimal row (deeper K′ raises it) — the same "coarse recall is the binding
+constraint" lesson.
+
+*Keyword* — top-10 overlap with the whole-table hybrid it reproduces over the
+bounded candidate set: pure cosine 80% → +keyword RRF **94%**. The composed keyword
+arm fuses the vector rank and keyword rank by symmetric RRF (both on the RRF scale,
+as `search_thoughts_hybrid` does), so folding in the keyword signal pulls the
+composed top-k onto the full-table hybrid's ranking — the hybrid's precision
+reproduced over a bounded candidate set, not over the whole corpus.
+
+Reproduce:
+
+```
+bun store-composed.ts                                        # real corpus, full sweep + fusion
+OB1_STORE_SCALES=1000000 OB1_STORE_DIM=64 OB1_STORE_PAYLOAD_BYTES=256 \
+  OB1_STORE_QUERIES=20 OB1_STORE_PG_SHM=3g bun store-composed.ts        # 1M
+OB1_STORE_SCALES=10000000 OB1_STORE_DIM=64 OB1_STORE_PAYLOAD_BYTES=128 \
+  OB1_STORE_QUERIES=20 OB1_STORE_PG_INDEX=ivfflat OB1_STORE_SKIP_ORACLE_OVER=2000000 \
+  OB1_STORE_MAINT_MEM=3GB OB1_STORE_PG_SHM=3g bun store-composed.ts     # 10M (recall skipped; latency + K′ curve)
+```
+
+**Verdict — the multi-store win is composition, and it is real but conditional.**
+Where a single ANN pass loses recall at scale (1M+), *deep* coarse recall + exact
+rerank recovers it toward exact quality (92% of the oracle at K′=1000, measured at 1M
+— where the composed total was ~1.4× cheaper than the full scan), and the rerank
+stage adds precision the ANN cannot express (the recency objective, exact filters)
+over a bounded K′-row candidate set whose advantage over the full scan *grows* with N
+(composed-total edge ~1.4× at 1M → 2.5–5.1× at 10M across runs, where recall itself was
+skipped). This is the id→row hop reframed as the *precision stage*, exactly as
+SMD-1696 predicted. The conditions matter: the win needs deep coarse recall (K′
+large → stage-1 cost grows and must shard), the coarse store's filtering quality is
+load-bearing (a post-filtering coarse stage throws filtered recall away before the
+rerank sees it), and on a small corpus there is nothing to recover. So a second
+store earns its place as the **recall tier** at scale, with Postgres as the
+**precision tier** — quality *and* scale, not substitution. **Eval-only; not built**
+— a composed retrieval path in the product is a separate scoped issue if a bar
+clears. Complements SMD-1697 (where the single store stops fitting). Stage 3 (a
+cross-encoder / LLM reranker) is out of scope: the rerank spikes (SMD-1305-era)
+measured it flat-to-negative and it is a heavy out-of-process dependency. (LanceDB
+is Apache-2.0, the fork FSL-1.1-MIT — SMD-1038's guardrail — a dependency of an
+eval, not the product.)
 
 ## Quantised indexes at the shipped width: halfvec adopted, binary declined (SMD-1501)
 
