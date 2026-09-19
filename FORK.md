@@ -13986,7 +13986,7 @@ in evals/README.md, under "GraphRAG…".
 union) and, because a first pass flattened the graph, a **comp-typed** arm that uses the
 graph's real structure: a *typed, weighted* walk (undirected traversal) weighting each hop by a
 pre-registered relation prior (a `depends_on`/`uses` edge carries more relevance than a
-`co_occurs_with` one), the edge's evidence support `ln(1+count)` and its confidence,
+`co_occurs_with` one), the edge's evidence support (a saturating `support/(support+5)`) and its confidence,
 propagated as decaying spreading activation. A **comp-cos** control orders the union by
 cosine only. The **pre-registered bar** (SMD-1038 posture, committed before the numbers):
 build iff multi-hop recall lifts ≥ 0.05 over vector AND recovers more than it breaks AND
@@ -14000,7 +14000,7 @@ the substitute graph reproduces change 31 at **0.43**. The best composed cell sc
 says why: **comp-cos ties vector exactly (1.00)** — pooling the graph-reached thoughts
 loses nothing and adds nothing, vector already held every answer, so the rerank can only
 subtract. **Using the real typed edges makes the rerank gentler** — comp-typed lifts recall
-over the untyped walk (0.89 → 0.95 all, multi-hop **0.98**) and ranking (nDCG 0.73 → 0.77)
+over the untyped walk (0.89 → 0.95 all, multi-hop **0.98**) and ranking (all-question nDCG 0.73 → 0.77; multi-hop 0.69 → 0.75)
 by weighting the graph score down where the edge is weak, so it preserves more of vector's
 order — but it still **cannot exceed** a ceiling'd vector (comp-cos = vector). So the
 flattening cost some recall, and the ceiling caps even the typed version.

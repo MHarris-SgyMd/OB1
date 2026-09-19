@@ -1878,7 +1878,7 @@ graph into a unit-weight adjacency, on the graph's **real typed/weighted structu
   expand `hops` over `ob1_entity_edges`, symmetric-RRF rerank the union. `composed` is the
   untyped walk; **`comp-typed`** weights each hop by a pre-registered relation prior
   (`depends_on`/`uses`/`works_on` high, `co_occurs_with` low), evidence support
-  `ln(1+count)` and confidence — the discrete first step toward relevance as diffusion over
+  a saturating `support/(support+5)` and confidence — the discrete first step toward relevance as diffusion over
   a typed/weighted graph. `comp-cos` orders the union by cosine only (control). The
   **pre-registered bar** (SMD-1038): build iff multi-hop recall@10 lifts ≥ 0.05 over vector
   AND recovers more than it breaks AND does not cut aggregate recall, checked on every cell.
@@ -1896,7 +1896,7 @@ graph into a unit-weight adjacency, on the graph's **real typed/weighted structu
 **The bar FAILS — because vector is at ceiling, not because the graph was flattened.**
 comp-cos ties vector exactly: pooling the graph-reached thoughts loses and adds nothing.
 Using the **real typed edges** (comp-typed) lifts recall over the untyped walk (0.89 → 0.95
-all, multi-hop 0.98) and ranking (nDCG 0.73 → 0.77) — a gentler, more vector-preserving
+all, multi-hop 0.98) and ranking (all-question nDCG 0.73 → 0.77; multi-hop 0.69 → 0.75) — a gentler, more vector-preserving
 rerank — but still **cannot exceed** a ceiling'd vector (the untyped best cell recovers 0,
 breaks 4; no cell of the 8 clears the ≥0.05-lift bar). So the flattening cost some recall,
 but the ceiling caps even the typed version. Recall, though, is one axis, and the ceiling is
