@@ -1865,6 +1865,95 @@ the arms and the scoring are written, and the one-line rule for reading the
 result is the same: the graph has to beat `match_thoughts` on questions
 someone actually asked.
 
+### GraphRAG as an expansion/rerank stage — not a substitute, and conditional (SMD-1738)
+
+SMD-948 raced the graph as a **substitute** (0.51 vs vector 0.98) — the recall tier doing
+the whole match. SMD-1707 named the trap: a retriever declined as a substitute may be a
+good *complement*. So this measures the graph as an **expansion/rerank stage** over vector
+recall, on the same corpus, edges and labelled gold — and, after a first pass flattened the
+graph into a unit-weight adjacency, on the graph's **real typed/weighted structure**.
+
+- **Stage 1 — vector coarse recall:** the ANN returns K′ ≫ k candidates.
+- **Stage 2 — graph expansion + rerank:** seed the graph from *those hits'* entities,
+  expand `hops` over `ob1_entity_edges`, symmetric-RRF rerank the union. `composed` is the
+  untyped walk; **`comp-typed`** weights each hop by a pre-registered relation prior
+  (`depends_on`/`uses`/`works_on` high, `co_occurs_with` low), evidence support
+  a saturating `support/(support+5)` and confidence — the discrete first step toward relevance as diffusion over
+  a typed/weighted graph. `comp-cos` orders the union by cosine only (control). The
+  **pre-registered bar** (SMD-1038): build iff multi-hop recall@10 lifts ≥ 0.05 over vector
+  AND recovers more than it breaks AND does not cut aggregate recall, checked on every cell.
+
+**Recall, vs a full-budget vector (601 issues, 27 questions):**
+
+| arm | multi-hop | aggregation | corpus | all | nDCG (mh) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| vector — the substitute baseline | **1.00** | 0.98 | 0.75 | 0.97 | 0.96 |
+| graph — SMD-948 substitute (question-seeded) | 0.43 | 0.47 | 0.33 | 0.43 | 0.31 |
+| composed — untyped expansion (best cell) | 0.89 | 0.98 | 0.69 | 0.89 | 0.69 |
+| **comp-typed** — edge-aware (relation prior × support × conf) | **0.98** | 0.98 | 0.69 | **0.95** | **0.75** |
+| comp-cos — union by cosine only (control) | **1.00** | 0.98 | 0.75 | 0.97 | 0.96 |
+
+**The bar FAILS — because vector is at ceiling, not because the graph was flattened.**
+comp-cos ties vector exactly: pooling the graph-reached thoughts loses and adds nothing.
+Using the **real typed edges** (comp-typed) lifts recall over the untyped walk (0.89 → 0.95
+all, multi-hop 0.98) and ranking (all-question nDCG 0.73 → 0.77; multi-hop 0.69 → 0.75) — a gentler, more vector-preserving
+rerank — but still **cannot exceed** a ceiling'd vector (the untyped best cell recovers 0,
+breaks 4; no cell of the 8 clears the ≥0.05-lift bar). So the flattening cost some recall,
+but the ceiling caps even the typed version. Recall, though, is one axis, and the ceiling is
+a property of the *question set*. On the axes a graph is built for, the picture turns.
+
+**Beyond recall — the axes vector can't express:**
+
+*Recall-complement under a starved vector budget* — the finding. Constrain the coarse
+budget b; the edge-aware graph becomes a real recall tier where vector runs short:
+
+| b (vector budget) | vector-top-b R@10 | edge-aware composed R@10 | Δ | (multi-hop) vec → composed |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 0.35 | **0.83** | **+0.48** | 0.42 → 0.85 |
+| 3 | 0.78 | 0.90 | +0.12 | 0.90 → 0.96 |
+| 5 | 0.92 | 0.94 | +0.02 | 1.00 → 0.98 |
+| 10 | 0.97 | 0.95 | −0.02 | 1.00 → 0.98 |
+
+At a tight budget the graph recovers what vector misses (+0.48 at b=1), crossing over only
+when vector saturates (b ≈ 10). This is exactly SMD-1707's at-scale regime, where a single
+ANN loses recall and a second tier recovers it — hidden here by the ceiling, not absent.
+
+*Relational structure vector can't see* — of 3,000 issue pairs joined by a strong typed
+edge (`depends_on`/`uses`), **95%** have the linked sibling *outside* the issue's vector
+top-10: a large store of relational neighbours only the graph reaches (descriptive — the
+graph defines the link). *Entity-membership* applies to only 5 of 10 needles (the rest are
+literal-string aggregations, keyword's job); on those the extracted graph trails
+(0.18 vs vector 0.97), limited by SMD-947's extraction coverage. The set poses few true
+relational or entity-membership queries — the shape-of-question gap SMD-948 named.
+
+**Scale (synthetic typed graph, latency only).** Not K′-bounded as written — at 1M
+(6M mentions) a ~2.0 s floor at K′=10 rising to ~5.0 s at K′=1000/2-hop, and at 10M (30M mentions, lighter density) a ~7 s floor essentially FLAT across K′=10–1000 (11.3 s only at K′=1000/2-hop) — the df scan tracks the mention count, not K′ —
+dominated by the per-call `df` full scan (the walk recomputes document frequency each
+call). A **materialized `df`** is the prerequisite to scale; the typed pass adds the
+`edge_w` aggregate on top.
+
+Reproduce:
+
+```
+OB1_METADATA_MODEL=qwen2.5:7b OB1_EVAL_CORPUS=/tmp/linear-corpus-full.json \
+  ../db/with-postgres.sh bun eval-graphrag.ts --no-global --allow-stale-dump   # real corpus, all axes
+OB1_EVAL_EMBED=syn@64 OB1_GRAPH_SCALE_MENTIONS_PER=3 OB1_GRAPH_SCALE_EDGES_PER=1 \
+  OB1_GRAPH_KPRIME=10,100,1000 OB1_GRAPH_HOPS=1,2 OB1_PG_SHM=3g \
+  ../db/with-postgres.sh bun eval-graphrag.ts --scale 10000000                  # 10M synthetic, latency
+```
+
+**Verdict — a conditional tier, not a substitute or an everyday stage.** Against a healthy
+full-budget vector on ordinary questions the graph stage does not pay (ceiling). But where
+vector recall is *scarce* — deep scale, a tight ANN budget, relational/entity-membership
+questions — the edge-aware graph is a real recall/precision complement, the recall tier to
+vector's precision tier that SMD-1707 framed. **Eval-only; not built** — a product path is a
+scale-regime test away (SMD-1038 posture). *Forward-looking:* the value here is the edges'
+type and support; confidence is near-uniform and lineage/supersession is absent from this
+corpus (that is the claim-log SMD-1729 and trust labels SMD-1724). Carrying trust, lineage
+and recency *dynamically* on the edges — relevance as continuous-time diffusion over a
+typed/weighted/temporal graph, a CfC/liquid-network shape — is where this points; the static
+edge-aware expansion is the first discrete step.
+
 ## Hybrid ranking, measured on four query sets
 
 `eval-hybrid.ts`, run as `bun run hybrid` (SMD-958, migration 017). Needs
@@ -2236,7 +2325,8 @@ leading line, and the vector does not weight them. Multi-session is where the
 (95.0%): the second gold session is close behind, which is the case a
 reranker or a larger candidate window addresses. Knowledge-update is 97–99%:
 both the stale and the current session are retrieved, which is the retrieval
-half of the problem SMD-1294 (consolidation) exists for.
+half of the problem SMD-1294 (consolidation) exists for — and, measured below
+under SMD-1720, the half the number cannot see: which of the two comes first.
 
 **Where this sits.** The default model lands 4.0 points below GBrain without
 its reranker and 6.1 below with it, on a 2.5 GB local model with no reranker
@@ -2292,6 +2382,126 @@ ten-result query** (mean non-target 8.30 → 9.02), because a dominant top of ~0
 keeps rows ≥0.4 where the floor kept ≥0.5. A little more fill below the answer for
 the 45→87% long-capture recall: bounded and non-adversarial.
 
+### The knowledge-update slice: what strict recall hides, and the resolving read priced as an oracle (SMD-1720)
+
+`eval-longmemeval.ts` with `OB1_EVAL_LME_ARMS=current`, scoring only, on the
+same persisted loads (the S-corpus maps had gone with `/tmp`; whichever phase
+reads the map first now rebuilds a missing one from each row's
+`metadata.lme_sid` under the run's model, the four fingerprint twins matched
+by fingerprint and their questions re-merged, and says so). The re-merge
+repaired a loader defect the review found: a twin's upsert had replaced the
+first session's questions on the row, since `upsert_thought` merges metadata
+key by key; the audit shows ten questions each lost one distractor session
+and none lost a gold one, so the tables above stand. 2026-09-18.
+
+SMD-1720 asked for the knowledge-update slice to be reported on its own, on
+the reading that it never had been. It had — the tables above carry it, at
+97.2% (4b) and 98.6% (0.6b) strict recall_all@5, the best slice on both
+models — so by the ticket's own rule it closes with that number. But the
+number answers the benchmark's question, not MERIT's. Every one of the 72
+knowledge-update questions has exactly two gold sessions, one that states a
+value and a later one that updates it (median 50 days apart, from under a
+day to 256), and
+strict recall_all counts the question when *both* are in the top five. A
+reader handed the stale value first, or the stale value alone, scores the
+same as one handed the update. That is the failure MERIT measured embedding
+retrieval at 0.30–0.95 on and update-on-write stores at 0.70–1.00, and it
+needs the rank of each gold, which the shipped arm set does not keep.
+
+**What is scored.** Over the same `match_thoughts` calls, per question: `both`
+(strict, as above), `current-in` (the current session in the top k),
+`current-first` (in the top k and above the stale one, or the stale one
+absent — what a reader that takes the first relevant hit gets right),
+`current@1`, and `stale-only` (the stale session in the top k, the current one
+not). A control refuses any question without two golds dated apart. Every
+arm is paired with the shipped order per question — helped / hurt and
+McNemar's exact test — not compared as a mean.
+
+**Arms.** `vector@-1`, the shipped order. `recency@0.3`, 020's blend as a
+caller can send it today (`recency_weight` 0.3, the half-life fixed at 90
+days). `recency@0.3/3650`, the same weight at a half-life long enough for a
+week of age to register on rows three years old. `age@1`, age alone — under
+the history filter `match_thoughts` takes its exact branch and blends every
+row of the history before cutting to k, so this arm is the k newest sessions
+in the history with similarity ignored, and the two recency arms reorder the
+whole history, not a nearest-N window. And `resolve`: the ticket's chain-walking read — each hit
+walked forward along `supersedes` to the head of its chain and returned in
+the hit's place, at the hit's rank, a session listed once — run as an
+**oracle**, because the corpus carries **0** `supersedes` pointers (printed;
+nothing populates them: the consolidation pass has not run on these loads,
+and at one thought per session it would be judging whole conversations). The
+arm holds each question's gold pair in memory as that question's chain — not
+one chain over all 72, since a session sits in many histories and another
+question's stale session is not this question's — as if a reviewer had
+accepted exactly the right proposals. It is the upper bound of the read, not
+a measurement of it. On a store that does carry pointers the arm walks them
+instead, stopping at the edge of the history, and says so.
+
+**Results, k=5, 72 questions.** 4b / 0.6b:
+
+| arm | both (strict) | current-in | current-first | current@1 | stale-only | vs shipped on current-first |
+| --- | --- | --- | --- | --- | --- | --- |
+| vector@-1 (shipped) | 97.2% / 98.6% | 97.2% / 100% | **52.8% / 45.8%** | 52.8% / 44.4% | 2.8% / 0% | — |
+| recency@0.3, half-life 90d | 97.2% / 98.6% | 97.2% / 100% | 52.8% / 45.8% | 52.8% / 44.4% | 2.8% / 0% | +0 / −0 on both models |
+| recency@0.3, half-life 3,650d | 97.2% / 98.6% | 97.2% / 100% | 54.2% / 47.2% | 52.8% / 45.8% | 2.8% / 0% | +1 / −0, p=1.000 |
+| age@1 | 2.8% / 2.8% | 29.2% / 29.2% | 29.2% / 29.2% | 5.6% / 5.6% | 0% / 0% | +10 / −27, p=0.008 · +11 / −23, p=0.058 |
+| resolve (oracle chains) | **0% / 0%** | 100% / 100% | **100% / 100%** | 97.2% / 94.4% | 0% / 0% | +34 / −0 · +39 / −0, p<0.001 |
+
+At k=10 the shipped arm reaches 100% on `both` on both models and
+`current-first` does not move (52.8% / 45.8%); `age@1` climbs to 51.4%
+current-first and is no longer distinguishable from the shipped order
+(+18 / −19, p=1.000 on the 4b). 2.1–2.7 ms a call.
+
+**What it says.**
+
+* **The shipped read is a coin flip on which value comes first.** On 34 of 72
+  questions (4b; 39 on the 0.6b) the stale session outranks its update — in
+  almost every one the stale row is the top hit and the update is second.
+  Both are always retrieved, so the strict number is 97–99% and the reader's
+  number is 45–53%. That is MERIT's range, reproduced on a public corpus
+  through the fork's own write and read path, and it is invisible to every
+  table above this one.
+* **The date is not the lever, again.** The blend a caller can send is a
+  byte-identical no-op here: at a 90-day half-life a row from 2023 has a
+  recency of about 10⁻⁴, and so does the row a week newer, so the blend
+  changes nothing below weight 1. A half-life long enough to see the gap
+  moves one question. Age alone — the five newest sessions in the history —
+  puts newer, unrelated sessions ahead of both golds and collapses strict
+  recall to 2.8%.
+  Change 53 found the same for the temporal slice; the update is not usually
+  the most recent session in a history, it is the most recent *about this*.
+* **The resolving read is a change of relevance definition, not a ranking
+  improvement.** Fed perfect chains it puts the current value first on every
+  question and at rank one on 94–97% — and scores 0% on strict recall,
+  because it hands back one session where the benchmark wants two. The same
+  split `eval-supersession.ts` found on the seeded corpus (topical relevance
+  +0.000, current-version relevance +0.333) holds on the public one. And the
+  benchmark is right to want two: 14 of the 72 questions carry a cue like
+  *previous*, *before*, *initially*, and about ten of them ask for the value
+  the update replaced ("What was my previous frequent flyer status", "Where
+  did I initially keep my old sneakers" — asked beside "Where do I currently
+  keep"); one asks for both. A read that resolves by default answers those
+  from a row it has hidden.
+* **The mutant.** With the forward walk removed (a hit returned as itself)
+  the resolve arm is the shipped order on every question, +0 / −0 — the walk
+  is the whole effect.
+
+**Decision.** Not built, and the number stands as the ticket's step one. The
+resolve read is deterministic given chains — a hit in a chain is replaced,
+one outside it is not — so nothing about its *effect* is left to measure by
+building it; what is missing is chains, and no measured corpus has one (this
+one has 0 pointers; on the tracker corpus the pass filed proposals, and a
+proposal is not a pointer until a reviewer accepts it). When
+a corpus with accepted proposals exists, the read belongs behind an opt-in
+flag on the search functions (`p_resolve`, default off), with a
+`superseded_by_chain: n` label on a replaced hit, and never as the default:
+the benchmark's own previous-value questions are the case against a default.
+Today the reader has the pieces: the label (`⚠ Superseded by a newer
+thought — ID …`) names the head one read away, and `Captured:` dates every
+hit. What would move the reader's number without a chain is a reranker that
+reads the two texts and picks the later state — the one-pool rerank change 59
+found to be the lever — measured on this slice with this arm set.
+
 ### Caveats
 
 * Two local models, both at 1024 dimensions. Nothing hosted has been
@@ -2307,7 +2517,8 @@ the 45→87% long-capture recall: bounded and non-adversarial.
 * No reranker arm. The cascade (above) was measured flat on the tracker; this
   corpus is where it would be re-derived, and `eval-cascade.ts` is the harness
   for that.
-* Three-arm, two-k design; per-question rank data is not kept. A follow-up
+* Three-arm, two-k design; the shipped arm set keeps no per-question rank
+  data (the `current` set keeps each gold's rank for its slice). A follow-up
   that wants MRR or the rank of the missed gold session extends `score()`.
 
 ## What the windows buy under a model that embeds the capture whole — and the rule that replaced the constant
@@ -2721,7 +2932,7 @@ evidence use, task outcome, cost). MERIT (arXiv 2609.05441) measured the second
 and found agents ignore 45–53% of correctly retrieved facts. The query log can
 answer it, because a later `capture_thought` that names a returned id in
 `derived_from` or `supersedes` is logged as an action row under its own tool
-(FORK.md change 88), so a touch is either **cited** (a write named it as a
+(FORK.md change 90), so a touch is either **cited** (a write named it as a
 source) or **opened** (fetch / update / delete — click-through). Then:
 
 ```

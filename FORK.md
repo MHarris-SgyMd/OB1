@@ -68,14 +68,14 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Eighty-eight numbered changes on top of the pin. Seven fix defects found in an
+Ninety numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
-data layer (Phase 2). Eight (changes 31, 53, 55, 59, 79, 82, 86, and 87) ship no runtime change at
+data layer (Phase 2). Ten (changes 31, 53, 55, 59, 79, 82, 86, 87, 88, and 89) ship no runtime change at
 all: each is a measurement that decided against building something.
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–88 are the numbered `###` sections** further down, which is
+sections. Changes **18–90 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -113,7 +113,7 @@ db/migrations/                   # fix 9   (moved here from server/ in fix 9)
 .github/metadata.schema.json     # fix 7   (3 additive optional fields)
 .github/workflows/fork-checks.yml# fix 7   (new file)
 scripts/check-fork-consistency.mjs # fix 7 (new file)
-scripts/mechanism-yield.mjs      # SMD-1711 (new file — review-pass yield report, not a gate)
+scripts/mechanism-yield.mjs      # SMD-1711 (new file — review-pass yield report, not a gate); window and attribution fixed SMD-1728
 server-portable/                 # fix 8   (new dir — parallel, does not touch server/)
 db/                              # fix 9   (new dir — schema, runner, tests)
 deploy/                          # fix 12  (new dir — compose stack, smoke test)
@@ -412,7 +412,7 @@ nothing else:
   (SMD-946), `traceProvenance` / `findDerivatives` / `supersededAmong` /
   `listSupersessionProposals` (migrations 025/029), `logSearch` / `logActions`
   (the query log, SMD-1295, migration 034; the one writer of action rows since
-  change 88), and every non-vector table:
+  change 90), and every non-vector table:
   `thought_audit`, `thought_work_claims`, the entity tables, `ob1_config`.
 
 The split is the point: the store holds one column of one table plus the
@@ -13848,7 +13848,215 @@ product.)
 
 **Upstream status:** not applicable — the store comparison is this fork's eval.
 
-### 88. A capture that cites a returned id is logged as a use of it, and `eval-utilization.ts` reads the query log for the layer every other number here skips — did the caller use what came back (SMD-1719)
+### 88. The knowledge-update slice was already reported and is the best one — and the number cannot see the failure MERIT means: the shipped read puts the stale value first on half the questions, and the resolving read, fed perfect chains, fixes that by changing what counts as relevant (SMD-1720)
+
+SMD-1720 read MERIT's hardest tier — a fact updated later, embedding retrieval
+at 0.30–0.95 success, update-on-write stores at 0.70–1.00 — against the fork's
+`supersedes` column (025), which labels a superseded hit and never follows the
+chain, and asked first for LongMemEval's knowledge-update slice on its own,
+which it took to be unreported. It was reported: change 48's tables carry it at
+**97.2% (4b) / 98.6% (0.6b)** strict recall_all@5, the best slice on both models,
+so by the ticket's own step one it closes with the number. This change is what
+was measured on the way to closing it. Like changes 31, 53, 55, 59, 79, 82, 86
+and 87 it ships **no runtime change**; the harness is a third arm set in
+`evals/eval-longmemeval.ts` (`OB1_EVAL_LME_ARMS=current`) and the numbers are in
+evals/README.md under "The knowledge-update slice".
+
+**The number answers the benchmark's question, not the reader's.** Every one
+of the 72 knowledge-update questions has exactly two gold sessions — one states
+a value, a later one updates it, median 50 days apart — and strict recall_all
+counts the question when *both* are in the top five. A reader handed the stale
+value first scores the same as one handed the update. So the arm set keeps the
+rank of each gold and scores both frames over the same calls: `both` (strict),
+`current-in`, `current-first` (the update in the top k and above the stale
+session, or the stale one absent), `current@1`, `stale-only`; a control refuses
+a question without two golds dated apart; every arm is paired with the shipped
+order per question with McNemar's exact test, as change 59 reported.
+
+**The shipped read is a coin flip on which value comes first.** `match_thoughts`
+puts the update above the stale session on **38 of 72** questions on the 4b
+(52.8%) and **33 of 72** on the 0.6b (45.8%); in almost every miss the stale
+row is the top hit and the update second. Both are retrieved on 97–99%, so the
+strict number is high and the reader's number is MERIT's range, reproduced on a
+public corpus through the fork's own write and read path. Nothing above this
+section could have shown it.
+
+**The date is not the lever, again.** 020's blend as a caller can send it
+(`recency_weight` 0.3, the half-life fixed at 90 days) is a byte-identical
+no-op on rows three years old: a 2023 session has a recency near 10⁻⁴ and so
+does the one a week newer. A half-life of 3,650 days moves one question
+(p=1.000). Age alone — under the history filter `match_thoughts` blends every
+row of the history and cuts to k, so the arm is the five newest sessions in it —
+puts newer, unrelated sessions ahead of both golds — current-first 29.2%, strict 2.8%, +10 / −27
+against the shipped order (p=0.008). Change 53 found the same on the temporal
+slice; the update is not the most recent session in a history, it is the most
+recent *about this*, and only a signal that reads the texts can know it.
+
+**The resolving read, priced as an oracle.** The corpus carries **0**
+`supersedes` pointers — nothing populates them: the consolidation pass (change
+54) has not run on these loads, and at one thought per session it would judge
+whole conversations — so the ticket's read (walk each hit forward to the head
+of its chain, return the head at the hit's rank, list a session once) cannot be
+measured as an arm. It is measured as its upper bound instead: each question's
+gold pair held in memory as that question's chain, as if a reviewer had accepted
+exactly the right proposals (a store that carries pointers is walked as it is). Fed those, it puts the update first on **every** question (+34 / −0
+on the 4b, +39 / −0 on the 0.6b, p<0.001), at rank one on 94–97% — and scores
+**0% on strict recall**, because it hands back one session where the benchmark
+wants two. With the forward walk removed (the mutant) the arm is the shipped
+order on every question, +0 / −0: the walk is the whole effect.
+
+**What that means.** The read is a change of relevance definition, not a
+ranking improvement — the same split `eval-supersession.ts` found on the seeded
+corpus (change 46: topical relevance +0.000, current-version relevance +0.333),
+now on the public one. And the benchmark is right to want both sessions: 14 of
+the 72 questions carry a cue like *previous*, *before*, *initially*, about ten
+of them ask for the value the update replaced ("What was my previous frequent
+flyer status", "Where did I initially keep my old sneakers" — asked beside
+"Where do I currently keep"), and one asks for both. A read that resolves by
+default answers those from a row it has hidden.
+
+**Decision: not built.** The read is deterministic given chains — a hit in a
+chain is replaced, one outside it is not — so building it would measure nothing
+the oracle has not; what is missing is chains, and no measured corpus carries an
+accepted one. When one does, the read belongs behind an opt-in flag on the
+search functions (`p_resolve`, default off), with a `superseded_by_chain: n`
+label on a replaced hit, and never as the default — the benchmark's own
+previous-value questions are the case against a default, and 025's decision
+(label, do not exclude) stands. The reader has the pieces today: the
+`⚠ Superseded by a newer thought — ID …` label names the head one read away,
+and `Captured:` dates every hit. What would move the reader's number without a
+chain is a reranker that reads the two texts and picks the later state — the
+one-pool rerank change 59 found to be the lever — on this slice with this arm
+set. That is a follow-up, filed against SMD-1319's reranker.
+
+Also in this change: whichever phase reads the session→thought map first
+rebuilds a missing one from each row's `metadata.lme_sid` under the run's
+model (the four fingerprint twins matched by fingerprint, their questions
+re-merged) and says so — both S maps had gone with `/tmp`, and the alternative
+was a 14-hour reload. And a loader defect the second review pass found by
+reading: the envelope carried `lme_q` and `lme_sid` onto a twin's existing
+row, where `upsert_thought`'s key-wise metadata merge replaced the first
+session's questions before the loader's union could keep them. The ids are now
+written after the upsert, the union always, the id and date only for a row the
+session created. The audit trail (008) shows the four overwrites on each S
+store, ten questions losing one distractor session each and none losing a gold
+one, so change 48's tables stand; the rebuild's merge repaired the rows, and
+re-loading a twin session through the fixed loader leaves the row's id,
+questions and date as they were.
+
+Tidied after the third pass, while the file was open, no behaviour change: the
+isolation filter and the two k values live once at module scope, the control
+that turns returned ids into this history's sessions is one function both
+scorers call, and the resolve arm walks the shipped arm's ids for the same
+question and k instead of fetching the same list again. Tables identical.
+
+Two items the passes had declined were then applied on request. The rebuild
+matches a twin's session by a fingerprint computed client-side, one query for
+the store's fingerprints instead of one round trip per unmapped session — and
+the first run of it showed why the rule is checked against the store before it
+is used: JavaScript's `\s` and `toLowerCase` are not 003's rule. Postgres's
+`\s` leaves U+00A0, U+202F and U+FEFF alone and its `lower` turns İ into a
+plain i; the naive spelling disagreed on 47 of 19,825 rows and the run fell
+back to the server lookup, tables unchanged. The class now mirrors Postgres's
+and agrees on every row, and a disagreement on any future store still sends
+the twins to the server. And the `current` set refuses a gold session whose
+row also stands for a session dated differently, since the recency arms read
+the row's one date — never true here (the date leads the text a twin shares),
+now checked.
+
+**Upstream status:** not applicable — the eval is this fork's.
+
+
+
+### 89. GraphRAG as an expansion/rerank stage, measured on the *typed* graph and beyond recall — not a substitute and not an everyday stage over a vector already at ceiling, but a real recall complement exactly where a single vector pass runs short (SMD-1738)
+
+Change 31 (SMD-948) declined GraphRAG on a head-to-head: vector recall@10 0.98, graph
+0.51 over twenty-seven hand-labelled questions. But that raced the graph as a
+**substitute** — the recall tier doing the whole match, seeding its own entities from the
+question — the substitute-vs-complement error change 87 (SMD-1707) named. A graph is
+rarely a good recall tier and might be a good **expansion/precision** stage: pull the
+neighbours of the *vector* hits along the change-30 entity edges and rerank the union.
+This measures that shape, on the same `eval-graphrag.ts` corpus and labelled gold. Like
+changes 31, 53, 55, 59, 79, 82, 86, 87 and 88 it ships no runtime change; the numbers are
+in evals/README.md, under "GraphRAG…".
+
+`eval-graphrag.ts` gains a **composed arm** (vector coarse recall K′ → seed the graph from
+*those* hits' entities → expand `hops` over `ob1_entity_edges` → symmetric-RRF rerank the
+union) and, because a first pass flattened the graph, a **comp-typed** arm that uses the
+graph's real structure: a *typed, weighted* walk (undirected traversal) weighting each hop by a
+pre-registered relation prior (a `depends_on`/`uses` edge carries more relevance than a
+`co_occurs_with` one), the edge's evidence support (a saturating `support/(support+5)`) and its confidence,
+propagated as decaying spreading activation. A **comp-cos** control orders the union by
+cosine only. The **pre-registered bar** (SMD-1038 posture, committed before the numbers):
+build iff multi-hop recall lifts ≥ 0.05 over vector AND recovers more than it breaks AND
+does not cut aggregate recall — checked on every cell of the K′×hop sweep, so a FAIL means
+no cell cleared all three.
+
+**Recall, against a full-budget vector: the bar FAILS, because vector is already at
+ceiling.** Vector gets multi-hop recall@10 **1.00** (601 issues, 1024-dim, 27 questions);
+the substitute graph reproduces change 31 at **0.43**. The best composed cell scores
+**0.89** multi-hop — below vector — and **recovers 0** of vector's answers. The control
+says why: **comp-cos ties vector exactly (1.00)** — pooling the graph-reached thoughts
+loses nothing and adds nothing, vector already held every answer, so the rerank can only
+subtract. **Using the real typed edges makes the rerank gentler** — comp-typed lifts recall
+over the untyped walk (0.89 → 0.95 all, multi-hop **0.98**) and ranking (all-question nDCG 0.73 → 0.77; multi-hop 0.69 → 0.75)
+by weighting the graph score down where the edge is weak, so it preserves more of vector's
+order — but it still **cannot exceed** a ceiling'd vector (comp-cos = vector). So the
+flattening cost some recall, and the ceiling caps even the typed version.
+
+**But recall is one axis, and the ceiling is a property of the *question set*, not of the
+graph. On the axes a graph is built for, the picture turns.**
+
+- **Recall-complement under a starved vector budget — the finding.** Constrain the vector
+  coarse budget b and the edge-aware graph becomes a real recall tier: at **b = 1** vector
+  alone gets recall@10 **0.35** and the composed stage **0.83** (**+0.48**; multi-hop 0.42
+  → 0.85), at b = 3 0.78 → 0.90, crossing over only at b ≈ 10 where vector reaches its
+  ceiling (0.97 → 0.95). That is exactly the regime change 87 found a single ANN falls
+  into *at scale* — recall degrades and the second tier recovers it. The ceiling here hides
+  it; a corpus or scale where vector is not saturated does not.
+- **Relational structure a vector pass cannot see.** Of 3,000 issue pairs joined by a
+  strong typed edge (`depends_on`/`uses`), **95%** have the linked sibling *outside* the
+  issue's vector top-10 — a large store of relational neighbours only the graph reaches
+  (the raw material the scarcity probe turns into recovered recall). Descriptive: the graph
+  both defines and answers the link, so it measures vector's blind spot, not a scored win.
+- **Exact entity-membership** applies to only 5 of the 10 needle questions — the rest are
+  literal-string aggregations (`Decision:`, `Promote`), keyword's job. On the 5 that name
+  an entity the extracted graph trails (0.18 vs vector 0.97), limited by change-30's
+  extraction coverage (most entities are mentioned once). The set poses few true
+  entity-membership or relational queries — the same shape-of-question gap change 31 named.
+
+**Scale (synthetic, latency only).** A synthetic typed graph times the expansion stage
+alone. It is **not** K′-bounded as written: at 1M (6M mentions) a ~2.0 s floor at K′=10
+rising to ~5.0 s at K′=1000/2-hop, and at 10M (30M mentions, lighter density) a ~7 s floor essentially FLAT across K′=10–1000 (11.3 s only at K′=1000/2-hop) — the df scan tracks the mention count, not K′ — dominated by the per-call `df` full scan
+over every mention (the change-31 walk recomputes document frequency each call). Rows-read
+bounded ≠ wall-clock bounded (change 87); a **materialized `df`** refreshed on write is the
+prerequisite for the stage to scale, and the typed pass adds the `edge_w` aggregate cost on
+top. So the mechanism needs a standing df table before the scarce-recall regime it wins in
+is reachable in production.
+
+**Verdict — not a substitute, not an everyday stage, a *conditional* tier.** Against a
+healthy full-budget vector on ordinary questions the graph stage does not pay (bar FAILS;
+ceiling). But where vector recall is *scarce* — deep scale, a tight ANN budget, relational
+or entity-membership questions this corpus barely poses — the edge-aware graph is a real
+recall/precision complement, the recall tier to Postgres/vector's precision tier that
+change 87 framed. This sharpens change 31's "do not build" rather than overturning it: not
+built, and a product path is a **scale-regime test** away (SMD-1038 posture), not a
+here-and-now build.
+
+**Forward-looking — truthiness, lineage, and edges that carry relevance.** The value seen
+here comes from the edges' *type and support*; their `confidence` is nearly uniform (a weak
+signal), and **lineage/supersession is absent** from the Linear corpus — that is the fork's
+claim-log machinery (SMD-1729) and trust labels (SMD-1724), not this eval's data. Carrying
+trust, lineage and recency *dynamically* on the edges — relevance as continuous-time
+diffusion over a typed/weighted/temporal graph, a CfC/liquid-network shape — is where this
+points; the static edge-aware expansion here is the discrete first step, and it would need
+the claim-log lineage and trust labels the fork has scoped but not built to become the
+dynamic version. (LanceDB/graph aside: the entity graph is this fork's own change 30, an
+eval dependency, not the product.)
+
+**Upstream status:** not applicable — the graph and its eval are this fork's.
+
+### 90. A capture that cites a returned id is logged as a use of it, and `eval-utilization.ts` reads the query log for the layer every other number here skips — did the caller use what came back (SMD-1719)
 
 Every retrieval number in this file asks whether the right rows came back.
 MERIT (arXiv 2609.05441, September 2026) measured the next layer — whether a
@@ -14133,7 +14341,6 @@ has rows.
 **Upstream status:** not sent — the query log is this fork's (change 65).
 
 
-
 ## Detached from the fork network
 
 This repository was forked from `NateBJones-Projects/OB1` and then detached, for
@@ -14331,7 +14538,7 @@ reports the upstream PR gate currently fails on **every** fork-originated PR.
 Measured 2026-09-18 with `bun scripts/mechanism-yield.mjs` over the commit log
 as of `main` at 28e20d7 — before any tagged pass existed, so a re-run at HEAD
 adds this ticket's own passes to every figure: 221 review-pass commits across
-64 tickets, 511 bulleted findings in the 34 tickets whose passes carry bullet
+61 tickets, 511 bulleted findings in the 31 tickets whose passes carry bullet
 bodies. **None of the 511 says what found it.** Each says what was wrong and
 what changed. A keyword search for phrases that name a catcher ("mutant", "the
 reviewer", "found by driving it") turns up about twenty, and half of those are
@@ -14349,7 +14556,7 @@ record drift):
   of no defect and tickets filed.
 - **The defect share does not fall with the pass number**: 44 / 43 / 51 / 51 %
   at passes one to four, higher on the few tickets that went further. Fourteen
-  of 34 tickets found their last code or test defect at pass three or later,
+  of 31 tickets found their last code or test defect at pass three or later,
   and three of the four that ran five or more passes found one on their final
   pass. Passes stop because the operator stops them. The stop signal — a pass
   whose findings are the previous pass's own fixes — is a per-ticket judgement;
@@ -14383,6 +14590,70 @@ the citations facet that would give `delete_thought` a `CITED` refusal; it is
 gated on the number. The script is a maintainer report, not a CI gate; it
 prints its rules and a sample per class so the tallies can be judged before
 anything is built on them. `--self-check` runs the parser's fixtures.
+
+**The window and the attribution, corrected (SMD-1728).** A review pass aimed
+at PR #76 by mistake ran the script on the day it was merged and showed the
+window was not what the header said. `--since YYYY-MM-DD` on the git path
+handed the bare day to git, whose approxidate reads it as that day *at the
+current time*: at 03:27, `--since 2026-09-18` counted 0 commits while the same
+day's saved dump counted 9, so every pass committed earlier that day was
+dropped silently. The two paths also cut on two clocks — the anchor and git's
+`--since` on committer time, each row and the dump filter on author date — and
+129 of the log's 1,351 commits carry different days on the two (every rebase
+moves the committer date; four of them are review passes), so a dump and a
+live run of one window tallied differently. Both are one rule now: every row
+carries the committer instant (`%cI`); a `--since` day is resolved once to
+the instant it begins in one declared zone and then cut exactly as a `<sha>`
+anchor is, by instant, never passed to git. The zone took three review passes
+to get right. Git's plain `--date=short` renders each commit in its own
+committer offset, and the log carries twelve offsets, so 28 commits sat on a
+different day than on the operator's clock and a day cut could disagree with
+the anchor's instant cut. The first fix rendered in the machine's zone, and
+the second pass measured what that costs: the same `--since 2026-09-18` gave
+one commit set in Chicago, another under UTC and a third in Tokyo, all printed
+under one label, so the re-measure command in this section would not
+reproduce on another machine. The second fix rendered each row's day in a
+declared zone, and the third pass found the zone leaking into four places —
+the row, the anchor label, the row file, a legacy branch for older dumps —
+each needing to know which clock made its day. Now the zone is applied in
+one place, the start of the `--since` day (`--zone`, a Region/City name,
+default `America/Chicago`, the offset every review pass in the log was
+committed in; a fixed-offset abbreviation such as `EST` is refused); the
+window label names it, the day a row is shown with is rendered in it, and a
+dump is instants, so it is zone-free and the reader's zone applies. A dump
+made with a rendered day, before this change, is refused by record rather
+than read on an unknown clock. Verified on the live log: `--since` at
+2026-09-18, -17 and -14 returns the same commit set from the git path and
+from a dump, under `TZ=UTC` and `TZ=Asia/Tokyo` as well as the machine's own,
+and the four passes authored the day before they were committed are in or
+out of both together.
+
+The attribution rule was the larger defect. `ticketOf` took the first
+`SMD-nnnn` anywhere in subject and body, and a subject often names another
+ticket before its own ("main took 79 for SMD-1037 while the branch sat
+unpushed … (SMD-1607)"): 13 of the 221 review passes at the 28e20d7 baseline
+were credited to the wrong ticket, and three "tickets" in the tally (SMD-1616,
+SMD-1624, SMD-1625) existed only by that error. The rule is now the first
+ticket in the parenthetical the subject ends with — `(SMD-nnnn)`, or the
+`(SMD-1643, SMD-1616)` and `(SMD-1463 review pass 1)` shapes twelve subjects
+use — then the first mention in the subject, then the body. The baseline
+figures above are re-read under it from the same dump: 221
+review passes across **61** tickets (was 64), 511 findings in **31** (was 34);
+the per-pass defect shares (44 / 43 / 51 / 51 %), the fourteen tickets whose
+last defect came at pass three or later and the three-of-four on their final
+pass are unchanged. Also fixed, each with a fixture: the pass number is the
+leftmost mention whichever spelling ("Review pass 4: the third pass's fix held"
+read as pass 3; the five subjects in the log that name two passes survived
+only by word order), a bullet carrying a `(caught` tag is a finding wherever
+it sits (a "Verified:" line may introduce tagged findings, and a tagged bullet
+may quote the count that proved it), every bullet the run-result rules drop is
+printed in full at the end of the report so an untagged finding lost to them
+is seen (one in the whole log, a suite count), a bullet too short to be a finding is
+counted as skipped rather than nowhere, a defect found by a named or unnumbered
+pass shows as "an unnumbered pass" in the per-ticket table instead of "none",
+and a row whose tag does not parse is classified over the finding, not over
+the tag's tail. A dump made before this change carries author dates and
+windows on them; the whole-log baseline does not depend on the date column.
 
 ---
 

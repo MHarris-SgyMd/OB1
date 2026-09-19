@@ -15,7 +15,7 @@
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import type { SQL } from "bun";
 
-/** `createdAt` — when the issue was opened — is in corpora built on or after 2026-09-08; eval-recency.ts needs it, nothing else reads it. */
+/** `createdAt` — when the issue was opened — is in corpora built on or after 2026-09-08; eval-recency.ts needs it, and eval-graphrag.ts's entity-membership arm ranks by it (SMD-1738). */
 export type LinearDoc = { id: string; title: string; text: string; labels?: string[]; createdAt?: string };
 
 export const DEFAULT_CORPUS = "/tmp/linear-corpus-full.json";
