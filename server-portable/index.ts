@@ -352,12 +352,11 @@ function buildServer(principal: Principal): McpServer {
   const logActionCalls = async (rows: { tool: string; targetId: string }[]): Promise<void> => {
     if (!queryLogEnabled(env()) || rows.length === 0) return;
     try {
-      // One round trip for the batch, whatever its size (a synthesis citing
-      // forty sources is forty rows in one INSERT, not forty INSERTs on the
-      // pool). Best-effort as a whole: a failure drops the batch, never the
-      // write it followed.
-      // One writer for every action row, one or forty: one INSERT shape per
-      // store to keep right, no single-row twin to drift from it.
+      // One round trip and one writer for the batch, whatever its size: a
+      // synthesis citing forty sources is forty rows in one INSERT, not forty
+      // on the pool, and there is one INSERT shape per store to keep right,
+      // no single-row twin to drift from it. Best-effort as a whole: a
+      // failure drops the batch, never the write it followed.
       await (await db()).logActions(rows.map((r) => ({ tool: r.tool, agentId: principal.agentId, targetId: r.targetId })));
     } catch {
       // best-effort.

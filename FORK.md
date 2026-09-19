@@ -13964,14 +13964,18 @@ cited* belongs on the event itself, which is SMD-1730's event shape (Phase 1
 of SMD-1729), not a column bolted onto 034 now. The column's own `COMMENT`
 still describes three plain names; re-commenting it through a new migration,
 as 028 did for the claim table, is **SMD-1749** (a third pass proposed it;
-a second mechanism for this PR). An `update_thought` that re-sends the pointer
+a second mechanism for this PR).
+
+An `update_thought` that re-sends the pointer
 the row already holds logs a cite although nothing changed (a third pass):
 kept. `used` is a set per search, so a retry inside one search's window counts
 once; a re-send after a *new* search that returned the id is that search's
 result reaching a write, which is what the number asks; and telling a
 confirmed pointer from a written one needs 032's function to return the prior
 value, a migration, and would undercount the confirmations SMD-1736 wants to
-see. A `supersedes` cite labels the *superseded* row as relevant in the
+see.
+
+A `supersedes` cite labels the *superseded* row as relevant in the
 export's fixture (a sixth pass): kept. That row is what the searcher needed in
 order to correct it, so the search that surfaced it did its job; the fork
 labels superseded rows at read time and does not demote them (SMD-1720, change 88), and
@@ -13979,6 +13983,7 @@ a click-through label is bound to the corpus at export time in any case —
 `eval-replay.ts` reads `baseline` beside `relevant` for that reason. Labelling
 the superseder too would need the fixture to follow `thoughts.supersedes` at
 export, a different fixture; the README says which row the label names.
+
 Gating the cite on 035's flag rather than on
 "a pointer was written" (a seventh pass): on a brain at 025–034 a fresh
 3-argument capture does validate and write `derived_from`, and logs no cite
@@ -13987,7 +13992,9 @@ NULL fill 035 removed) and answered nothing about which path it took, so the
 store cannot tell a written pointer from a filled or ignored one there; the
 shipped schema is 035's (the `atomic capture` check warns on every earlier
 body and names the file), and the gap is said twice — by preflight and by
-the report. Per-*model* arms: the log does
+the report.
+
+Per-*model* arms: the log does
 not record the embedding model a search ran under, and 034's `filter` column
 is dead on `search_thoughts` (SMD-1490) — whether to carry the arm there or in
 a column is that ticket's call. A read whose use ends in prose to the user, with no write and no fetch,
