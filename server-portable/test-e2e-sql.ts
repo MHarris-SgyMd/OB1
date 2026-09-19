@@ -534,6 +534,23 @@ console.log("\n[11] Undated and infinity rows render through the tools without a
     const rangeLine = stats.split("\n").find((l) => l.startsWith("Date range")) ?? "";
     assert(/infinity/.test(rangeLine) && !/Invalid Date/.test(rangeLine) && !/1970/.test(rangeLine),
            `thought_stats renders the infinity range as text, not Invalid Date/1970 (${JSON.stringify(rangeLine)})`);
+
+    // The two remaining renderers are the `Captured:` lines of search_thoughts
+    // and search_thoughts_keyword. Every other search in this suite runs over
+    // dated rows, where displayDate and the pre-fix new Date() agree — so drive
+    // both tools over the planted rows here, or a revert ships silently. The
+    // negatives avoid a bare /1970/ (a hex uuid could carry those digits): the
+    // fabrications are "Invalid Date" (infinity) and a digit right after
+    // "Captured: " (the epoch), neither of which a correct render produces.
+    const kwInf = await call("search_thoughts_keyword", { query: "infinity" });
+    assert(/Captured: infinity/.test(kwInf) && !/Invalid Date/.test(kwInf),
+           `search_thoughts_keyword renders the infinity row's date as its own text (${kwInf.replace(/\n/g, " ⏎ ")})`);
+    const kwUndated = await call("search_thoughts_keyword", { query: "undated" });
+    assert(!/Captured:/.test(kwUndated) && !/Invalid Date/.test(kwUndated),
+           `search_thoughts_keyword omits the Captured line for the undated row (${kwUndated.replace(/\n/g, " ⏎ ")})`);
+    const stBoth = await call("search_thoughts", { query: "infinity", threshold: -1 });
+    assert(/Captured: infinity/.test(stBoth) && !/Invalid Date/.test(stBoth) && !/Captured:\s*\d/.test(stBoth),
+           `search_thoughts renders the infinity row's date as text and never fabricates one for the undated row it also returns (${stBoth.replace(/\n/g, " ⏎ ")})`);
   } finally {
     await sql`DELETE FROM thoughts WHERE id = ${undatedId}::uuid OR id = ${infinityId}::uuid`;
     await sql.close();
