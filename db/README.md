@@ -164,8 +164,8 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `992 assertions: 992 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports forty migrations applied, and
+`bun test-schema.ts` prints `996 assertions: 996 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports forty-one migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -202,7 +202,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 (024 change 45, 025 change 46, 026 change 47, 027 change 48, 028 change 49,
 029 change 54, 030 change 56, 031 change 57, 032 change 60, 033 change 63,
 034 change 65, 035 change 66, 036 change 68, 037 change 70, 038 change 80, 039 change 81,
-040 change 91).
+040 change 91, 041 change 93).
 
 ## What changed relative to the guide
 
@@ -979,10 +979,11 @@ OB1_BENCH_SCALES=1000000  OB1_PG_SHM_SIZE=4g  ./with-postgres.sh bun bench-hnsw.
 OB1_BENCH_SCALES=10000000 OB1_PG_SHM_SIZE=11g OB1_BENCH_MAINTENANCE_MEM=9GB ./with-postgres.sh bun bench-hnsw.ts
 
 # Before/after a redefinition of match_thoughts, from one tree: the after
-# arm's schema stops at the named migration (the function before 038 here;
-# 036 for the function before 037). Not with OB1_PG_KEEP below: a corpus cut
-# at a migration is measured and dropped, never kept.
-OB1_BENCH_UPTO=037 ./with-postgres.sh bun bench-hnsw.ts
+# arm's schema stops at the named migration (the function before 040 here;
+# 038 for the function before 039, 037 for the one before 038). Not with
+# OB1_PG_KEEP below: a corpus cut at a migration is measured and dropped,
+# never kept.
+OB1_BENCH_UPTO=039 ./with-postgres.sh bun bench-hnsw.ts
 
 # Keep the corpus between passes (SMD-1493): the first run under a name builds
 # it and records the exact oracle's answers beside it (SMD-1562); every later
@@ -1247,8 +1248,8 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 922 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 501 assertions, real server, throwaway container
+bun test-schema.ts                          # 973 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 523 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 ```
 
@@ -1408,8 +1409,9 @@ first assumed. See FORK.md's SMD-1632 section.
   takes the supersession lock.
 - **The routing count is gated by a sample of the heap, drawn by TID range**
   (migrations 037 and 038). [5d] loads 25,000 rows at the configured width,
-  applies 038 with its floor lowered to zero, and counts GIN index scans per
-  call: the broad filter makes exactly one fewer under 038 than under 020's
+  applies the last definer (040 — 039's body, run with `jit = off`) with its
+  floor lowered to zero, and counts GIN index scans per call: the broad
+  filter makes exactly one fewer under the gate than under 020's
   body (the collection skipped on every call — 037's TABLESAMPLE draw could
   reach fewer than three pages and miss, so the band was 0.75–1.0 then), the
   thin filter the same number (the collection ran), and both answer exactly.
@@ -1431,14 +1433,31 @@ first assumed. See FORK.md's SMD-1632 section.
   staging index built beforehand is adopted — and pairs the body's cast with
   the plan: an Index Scan by the index's name under the body's ORDER BY, none
   under the raw column's; [20] compares the candidate CTEs to 014's with the
-  cast taken out. [5] holds both plans on a real server; [5d] applies 039
-  before it drops the index, since the swap would build one over its 25,000
-  rows. `test-upgrade.ts` [17] applies 039 onto a populated 038 — no row,
+  cast taken out. [5] holds both plans on a real server; [5d] applies the
+  last definer before it drops the index, the order 039's swap needed (it
+  would have built one over its 25,000 rows). `test-upgrade.ts` [17] applies 039 onto a populated 038 — no row,
   signature or privilege moves, the walk agrees with the exact answer before
   and after, the index OIDs survive a re-apply, and an INVALID staging index
   (an interrupted `CREATE INDEX CONCURRENTLY`) is rebuilt rather than adopted.
   The recall, the bytes and the decision are `evals/eval-quant.ts`'s, on real
   vectors (FORK.md change 81).
+- **match_thoughts runs with `jit = off`** (migration 040). [5e] turns off
+  each planner path the sample has exactly one of (`enable_tidscan`,
+  `enable_nestloop`, `enable_hashagg` with `enable_sort`) at session level
+  on a heap with the floor lowered: the statement read out of the body,
+  explained under the function's settings, keeps its TID Range Scan at
+  `disable_cost` and has no JIT block, the same statement with `jit` forced
+  on has one, and through the function the mutant with 040's clause RESET
+  pays the compile on every call (~50 ms) where the clause costs the
+  default's time — on PostgreSQL 14–17; on 18, which counts disabled nodes
+  instead of costing them, [5e] asserts that nothing is compiled either way
+  and names the node each path leaves (a sequential scan of the heap per
+  probe under `enable_tidscan = off`, which no clause reaches — SMD-1703),
+  and skips the mutant arm. `test-upgrade.ts` [18] applies 040 onto a populated 039:
+  the body byte for byte 039's, `jit=off` beside 014's and 019's clauses, no
+  row or privilege moves, and the last definer applied alone drops a
+  hand-re-applied 014's 4-argument form. `test-schema.ts` [20] pins the
+  three clauses; preflight's `candidate scan` reads the third beside 019's.
 - **The backfill holds the table** (migration 023). [6c] plants a legacy
   singleton and two twins, runs `backfill_content_fingerprints()` on one
   connection inside an open transaction, and has a second capture the

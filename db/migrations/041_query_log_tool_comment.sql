@@ -1,5 +1,5 @@
 -- =============================================================================
--- Migration 040: the cite shape, stated at the table — query_log.tool's two
+-- Migration 041: the cite shape, stated at the table — query_log.tool's two
 --                shapes and what each means, and the table's COMMENT re-issued
 --                to name a cite beside fetch/edit/delete (SMD-1749)
 -- =============================================================================
@@ -43,13 +43,13 @@
 --     baselined and never re-applied); a plain run there, the compose stack's,
 --     gates the server and would stop with no remedy named. The file refuses
 --     up front naming 034 and --reapply, as 031 does for 015. db/test-upgrade.ts
---     [18] drives it, and drives the same pending file applying once 034's
+--     [19] drives it, and drives the same pending file applying once 034's
 --     table exists.
 --   * COMMENT ON COLUMN query_log.tool — the DATA CONTRACT: on a search row,
 --     the search tool; on an action row, one of two shapes — a plain tool name
 --     is an open, `<writer>/<pointer>` is a cite — with what each shape means,
---     the three cite values written today, the rule that a slashed name is a
---     cite whatever the writer, and where the readers are. Which rows a cite
+--     the three cite values written today, the rule that a value with a non-empty name either side of its first
+--     slash is a cite whatever the writer, and where the readers are. Which rows a cite
 --     is logged for (a pointer the database accepted, so never a re-capture),
 --     which writers cite, and how a cite is attributed to a search are the
 --     SERVER's and the READERS' contract and change with them, so the comment
@@ -90,7 +90,7 @@ DO $qc$
 BEGIN
   IF to_regclass('query_log') IS NULL THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'migration 040 needs 034 (query_log); this schema lacks it',
+      MESSAGE = 'migration 041 needs 034 (query_log); this schema lacks it',
       -- ASCII only: Bun's client hands a HINT holding a non-ASCII character back mis-decoded (030's fourth review pass).
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
       ERRCODE = 'invalid_schema_definition';
@@ -99,7 +99,7 @@ END
 $qc$;
 
 COMMENT ON COLUMN query_log.tool IS
-  'Which tool wrote the row. On a search row: the search tool (search, search_thoughts). On an action row, one of two shapes. A plain tool name (fetch, update_thought, delete_thought) is an OPEN: the caller went and looked at, or touched, the target (click-through relevance, SMD-1295). <writer>/<pointer> (capture_thought/derived_from, capture_thought/supersedes, update_thought/supersedes) is a CITE: the writer named the target as its source and the database accepted the pointer (SMD-1719). The rule is the column''s, not one tool''s: any value containing a slash is a cite, whatever the writer, so a new writer that cites names itself <its tool>/<the pointer field> and is counted without a code change; an MCP tool name cannot contain a slash, so the two shapes cannot collide. When a cite is logged (a pointer the database accepted, never a re-capture), which writers cite, and how an action is attributed to a search are the server''s and the readers'' contract, not the column''s: server-portable/index.ts beside the writer and evals/utilization.ts''s header state them. Stated here: SMD-1749.';
+  'Which tool wrote the row. On a search row: the search tool (search, search_thoughts). On an action row, one of two shapes. A plain tool name (fetch, update_thought, delete_thought) is an OPEN: the caller went and looked at, or touched, the target (click-through relevance, SMD-1295). <writer>/<pointer> (capture_thought/derived_from, capture_thought/supersedes, update_thought/supersedes) is a CITE: the writer named the target as its source and the database accepted the pointer (SMD-1719). The rule is the column''s, not one tool''s: any value with a non-empty name either side of its first slash is a cite, whatever the writer, so a new writer that cites names itself <its tool>/<the pointer field> and is counted without a code change; a slash at either end is not a cite, and an MCP tool name cannot contain a slash, so the two shapes cannot collide. When a cite is logged (a pointer the database accepted, never a re-capture), which writers cite, and how an action is attributed to a search are the server''s and the readers'' contract, not the column''s: server-portable/index.ts beside the writer and evals/utilization.ts''s header state them. Stated here: SMD-1749.';
 
 COMMENT ON TABLE query_log IS
   'Opt-in (OB1_QUERY_LOG=on), off by default: one row per search call (the query, its arguments, and the ids returned in rank order with scores) and one per follow-up fetch/edit/delete of a returned id, or a write that cited a returned id as its source (the target; the tool is <writer>/<pointer> on a cite, and the tool column''s comment has both shapes, SMD-1719). Personal data at rest — every query typed. Nothing reads it on the hot path; the write is best-effort and never fails a search. An action is linked to its search at export time by (agent_id, target_id, time window), not at write time — there is no request/session token in the handlers. Pruned by prune_query_log(); default retention 30 days (OB1_QUERY_LOG_RETENTION_DAYS).';

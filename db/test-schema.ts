@@ -714,7 +714,7 @@ console.log("\n[8e] Migrations 037 and 038: the routing count is gated by a samp
 {
   const shipped = async () => String((await db.query<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = '${MATCH_THOUGHTS_SIGNATURE}'::regprocedure`)).rows[0].s);
   const src = await shipped();
-  assert(lastDefinerOf("match_thoughts").startsWith("039"), `039 is the last definer of match_thoughts, carrying 038's gate (${lastDefinerOf("match_thoughts")})`);
+  assert(lastDefinerOf("match_thoughts").startsWith("040"), `040 is the last definer of match_thoughts — 039's body, run with jit off, carrying 038's gate (${lastDefinerOf("match_thoughts")})`);
   assert(TID_PROBE.test(src) && /INTO v_hits, v_hit_pages, v_pages_seen/.test(src) && !/TABLESAMPLE/.test(src),
     "the shipped body samples the heap by TID range — every tuple of one block, half-open at the next — into the three counts the gate reads, and carries no TABLESAMPLE");
   assert(new RegExp(`floor\\(random\\(\\) \\* v_pages\\)::bigint AS blk\\s+FROM generate_series\\(1, ${ROUTE_SAMPLE_PAGES}\\)`).test(src) && new RegExp(`IF v_pages >= ${ROUTE_ESTIMATE_MIN_PAGES} THEN`).test(src),
@@ -916,7 +916,7 @@ console.log("\n[8e] Migrations 037 and 038: the routing count is gated by a samp
       `on the heap with ${ROUTE_SAMPLE_PAGES} of ${pages} pages emptied every random draw still reaches 2 to ${ROUTE_SAMPLE_PAGES} pages and the rule still says "collect" (hits/hit pages/pages drawn: ${sparse.join(", ")})`);
   }
   const restored = await restoreShipped("match_thoughts");
-  assert(restored.length === 1 && restored[0].startsWith("039") && new RegExp(`IF v_pages >= ${ROUTE_ESTIMATE_MIN_PAGES} THEN`).test(await shipped()),
+  assert(restored.length === 1 && restored[0].startsWith("040") && new RegExp(`IF v_pages >= ${ROUTE_ESTIMATE_MIN_PAGES} THEN`).test(await shipped()),
     "…and the shipped floor is back for the sections after");
 }
 
@@ -1982,8 +1982,11 @@ console.log("\n[20] Migration 019: the row estimates and the plan setting — ca
   assert(Number(mt.prorows) === 10, `match_thoughts declares ROWS 10 (prorows ${mt.prorows})`);
   assert(Number(kw.prorows) === 25, `search_thoughts_keyword declares ROWS 25 (prorows ${kw.prorows})`);
   assert(mt.provolatile === "s" && kw.provolatile === "s", "both are still STABLE");
-  assert(Object.keys(mt.settings).sort().join(",") === "enable_seqscan,hnsw.iterative_scan" && mt.settings["enable_seqscan"] === "off" && mt.settings["hnsw.iterative_scan"] === "relaxed_order",
-         `match_thoughts carries exactly the scan mode and the plan setting (${JSON.stringify(mt.settings)})`);
+  // Exactly three clauses — 014's scan mode, 019's plan setting, 040's jit
+  // off — and no walk bound or plan mode (019's rule). A successor that adds
+  // or drops one fails here on purpose.
+  assert(Object.keys(mt.settings).sort().join(",") === "enable_seqscan,hnsw.iterative_scan,jit" && mt.settings["enable_seqscan"] === "off" && mt.settings["hnsw.iterative_scan"] === "relaxed_order" && mt.settings["jit"] === "off",
+         `match_thoughts carries exactly the scan mode, the plan setting and jit off (${JSON.stringify(mt.settings)})`);
   assert(Object.keys(kw.settings).length === 0, `search_thoughts_keyword carries no SET clause (${JSON.stringify(kw.settings)})`);
   assert(/ob1:filter-inside-scan/.test(mt.prosrc), "the ob1:filter-inside-scan sentinel is in the shipped body");
 
@@ -2036,22 +2039,32 @@ console.log("\n[20] Migration 019: the row estimates and the plan setting — ca
     ambiguous = (e as Error).message;
   }
   assert(/not unique/.test(ambiguous), `with two match_thoughts a 4-argument call is ambiguous (${ambiguous.split("\n")[0] || "it succeeded"})`);
+  // 040's body is 039's byte for byte — the clause is the whole change — and
+  // 039's file re-applied alone (its index swap is idempotent; its CREATE
+  // carries 019's clauses and not 040's) drops it, which is what a hand
+  // re-apply leaves and preflight's candidate scan reports (test-upgrade [18]
+  // holds the same across an upgrade; this is the fast loop's copy).
+  await reapply("039");
+  const mt039 = await proc(MT);
+  assert(mt039.prosrc === mt.prosrc, "040's body is 039's byte for byte — the clause is the whole change");
+  assert(!("jit" in mt039.settings) && mt039.settings["enable_seqscan"] === "off",
+         `…and 039 re-applied alone carries 019's clauses without 040's, the state a hand re-apply leaves (proconfig ${JSON.stringify(mt039.settings)})`);
   await reapply("012");
   const kw012 = await proc(KW);
   assert(kw012.prosrc === kw.prosrc, "019's search_thoughts_keyword body is 012's, byte for byte");
   assert(Number(kw012.prorows) === 1000, `…and re-applying 012 alone resets its estimate to 1,000 (prorows ${kw012.prorows})`);
   const restored = await restoreShipped("match_thoughts", "search_thoughts_keyword");
   const back = await proc(MT);
-  assert(Number(back.prorows) === 10 && back.settings["enable_seqscan"] === "off" && Number((await proc(KW)).prorows) === 25,
+  assert(Number(back.prorows) === 10 && back.settings["enable_seqscan"] === "off" && back.settings["jit"] === "off" && Number((await proc(KW)).prorows) === 25,
          `re-applying the migrations that last define each (${restored.join(", ")}) restores both — the shipped state, for whatever runs after`);
   assert((await functionsNamed("match_thoughts")) === 1 && (await functionsNamed("search_thoughts_keyword")) === 1, "…and 020's DROP removed the 4-argument function again: one match_thoughts, one search_thoughts_keyword");
   // Deliberately pinned, as [20] pinned 019 before 020 landed, 020 before
-  // 037, 037 before 038 and 038 before 039: 019 last defines the keyword
-  // function, 039
-  // match_thoughts. A successor that redefines either fails here on purpose,
-  // and the expectations move with the clauses it must carry.
-  assert(restored.length === 2 && restored[0].startsWith("019") && restored[1].startsWith("039"),
-         `019 is the last definer of search_thoughts_keyword and 039 of match_thoughts (${restored.join(", ")})`);
+  // 037, 037 before 038, 038 before 039 and 039 before 040: 019 last defines
+  // the keyword function, 040 match_thoughts. A successor that redefines
+  // either fails here on purpose, and the expectations move with the clauses
+  // it must carry.
+  assert(restored.length === 2 && restored[0].startsWith("019") && restored[1].startsWith("040"),
+         `019 is the last definer of search_thoughts_keyword and 040 of match_thoughts (${restored.join(", ")})`);
 
   // The migrator's floor line, since whichever file last defines the function
   // redefines it with the hnsw.* clause 014 needed pgvector 0.8 for.
@@ -2079,8 +2092,10 @@ console.log("\n[21] Migration 020: the recency blend — identical at weight 0, 
     `SELECT prorows, proconfig AS cfg, prosrc FROM pg_proc WHERE oid = $1::regprocedure`, [MT])).rows[0];
   assert((await functionsNamed("match_thoughts")) === 1 && (await functionsNamed("search_thoughts_hybrid")) === 1, "one match_thoughts, one search_thoughts_hybrid: 020 replaced both signatures rather than adding overloads");
   const settings = parseSetConfig(proc.cfg);
-  assert(Number(proc.prorows) === 10 && settings["enable_seqscan"] === "off" && settings["hnsw.iterative_scan"] === "relaxed_order" && Object.keys(settings).length === 2 && /ob1:filter-inside-scan/.test(proc.prosrc),
-         "020 carries what 019 handed over: ROWS 10, exactly the two settings, the sentinel");
+  // The shipped body: 020's clauses as 019 handed them over, and 040's jit
+  // off beside them — three settings and no other ([20] pins the same set).
+  assert(Number(proc.prorows) === 10 && settings["enable_seqscan"] === "off" && settings["hnsw.iterative_scan"] === "relaxed_order" && settings["jit"] === "off" && Object.keys(settings).length === 3 && /ob1:filter-inside-scan/.test(proc.prosrc),
+         "the shipped body carries what 019 handed 020: ROWS 10, its two settings and the sentinel — and 040's jit = off, exactly three settings");
   const cols = (await db.query<{ n: string }>(
     `SELECT a.attname AS n FROM pg_proc p, unnest(p.proallargtypes, p.proargmodes, p.proargnames) WITH ORDINALITY AS a(t, m, attname, o)
      WHERE p.oid = $1::regprocedure AND a.m = 't' ORDER BY a.o`, [MT])).rows.map((r) => r.n);
@@ -4479,7 +4494,7 @@ console.log("\n[39] Memory utilization over the query log: attribution, the cite
   assert(rowLines.length >= 2 && new Set(rowLines.map((l) => l.length)).size === 1, `every table row is the same width (${[...new Set(rowLines.map((l) => l.length))].join(",")})`);
 }
 
-console.log("\n[40] Migration 040: query_log.tool's two shapes, and the table's cite clause, are stated at the table in the live text (SMD-1749)");
+console.log("\n[40] Migration 041: query_log.tool's two shapes, and the table's cite clause, are stated at the table in the live text (SMD-1749)");
 {
   // 034 commented the table and not the column: the three action names were a
   // SQL comment in the file, invisible to a reader of the live table, and the
@@ -4502,19 +4517,21 @@ console.log("\n[40] Migration 040: query_log.tool's two shapes, and the table's 
   assert(/plain tool name.*is an OPEN/is.test(colComment) && /<writer>\/<pointer>.*is a CITE/is.test(colComment),
     "…the column's gives both shapes: a plain name is an open, a slashed name a cite");
   assert(/named the target as its source and the database accepted the pointer/.test(colComment), "…and what a cite is: the writer named the target as its source, and the database accepted the pointer");
-  assert(/any value containing a slash is a cite, whatever the writer/.test(colComment) && /cannot contain a slash/.test(colComment),
-    "…the rule as the column's — any slashed value is a cite — and why the shapes cannot collide (an MCP tool name has no slash)");
+  assert(/any value with a non-empty name either side of its first slash is a cite, whatever the writer/.test(colComment) && /a slash at either end is not a cite/.test(colComment) && /cannot contain a slash/.test(colComment),
+    "…the rule as the column's — a non-empty name either side of the first slash is a cite, a slash at either end is not (citePointerOf's rule, [39]) — and why the shapes cannot collide (an MCP tool name has no slash)");
   assert(/server-portable\/index\.ts/.test(colComment) && /evals\/utilization\.ts/.test(colComment),
     "…and sends a reader to index.ts and utilization.ts for when a cite is logged and how it is attributed, rather than restating them");
-  // The comment's examples agree with the code that splits them: each cite
-  // value it names is what index.ts writes and utilization.ts reads as a cite
-  // with that pointer; each plain name it gives reads as an open. Hard-coded
-  // as [39] hard-codes them: a renamed writer that stranded the applied text
-  // fails here, and the fix is a migration that re-comments, not an edit.
+  // The values the comment names are the ones index.ts writes today, and [39]
+  // already drives each through the reader; this section asks only that the
+  // applied text names them. Hard-coded as [39] hard-codes them: a renamed
+  // writer that stranded the applied text fails here, and the fix is a
+  // migration that re-comments, not an edit (a first review pass had this
+  // loop re-assert the reader's results too, a second copy of [39]'s tooth
+  // under a label that blamed the migration text).
   for (const t of ["capture_thought/derived_from", "capture_thought/supersedes", "update_thought/supersedes"])
-    assert(colComment.includes(t) && citePointerOf(t) === t.split("/")[1], `…names ${t}, which utilization.ts reads as a cite with pointer ${t.split("/")[1]}`);
+    assert(colComment.includes(t), `…names ${t} among the cite values`);
   for (const t of ["fetch", "update_thought", "delete_thought"])
-    assert(new RegExp(`\\b${t}\\b(?!/)`).test(colComment) && citePointerOf(t) === null, `…and names ${t} as a plain name, which it reads as an open`);
+    assert(new RegExp(`\\b${t}\\b(?!/)`).test(colComment), `…and names ${t} as a plain name`);
   // 034's table text, whole — the opt-in flag, the personal-data sentence, the
   // export-time link and the pruning — so a successor that keeps only the
   // cite clause is caught too.
