@@ -177,11 +177,13 @@ if (grantRole !== undefined) {
       ((await gsql.unsafe(grantPresenceSql(wanted))) as { kind: string; name: string; present: boolean }[]).filter((r) => r.present).map((r) => r.name)
     );
     const missing = wanted.filter((o) => !present.has(o.name)).map((o) => o.name);
+    // "; " between names: a function's name carries ", " inside its argument list.
+    const skippedHint = `not yet present, skipped (run --grant again after applying the migration or community schema that creates them; a function listed here may instead exist under another argument list, which --grant does not reach): ${missing.join("; ")}`;
     const statements = [`GRANT USAGE ON SCHEMA public TO ${quoteIdent(grantRole)};`, ...grantStatements(grantRole, { present })];
     if (dryRun) {
       console.log(`\n--grant ${grantRole}  (--dry-run: nothing run)\n`);
       for (const s of statements) console.log(`  ${s}`);
-      if (missing.length) console.log(`\n  not yet present, skipped: ${missing.join("; ")}`);
+      if (missing.length) console.log(`\n  ${skippedHint}`);
       await gsql.close();
       process.exit(0);
     }
@@ -199,8 +201,7 @@ if (grantRole !== undefined) {
     });
     console.log(`\nGranted ${grantRole} the capturing-role privileges over ${present.size} object(s):\n`);
     for (const s of statements) console.log(`  ${s}`);
-    // "; " between names: a function's name carries ", " inside its argument list.
-    if (missing.length) console.log(`\n  not yet present, skipped (run --grant again after applying the migration or community schema that creates them; a function listed here may instead exist under another argument list, which --grant does not reach): ${missing.join("; ")}`);
+    if (missing.length) console.log(`\n  ${skippedHint}`);
     await gsql.close();
     process.exit(0);
   } catch (err) {

@@ -3419,6 +3419,23 @@ console.log("\n[18] Every schemas/*.sql applies over TCP with no Supabase role p
       let rewrite = "";
       try { await asRole.unsafe(`UPDATE wiki_section_revisions SET body_md = '' WHERE false`); } catch (e) { rewrite = (e as Error).message; }
       assert(/permission denied/.test(rewrite), `…but cannot UPDATE wiki_section_revisions — append-only, as upstream had it (${rewrite.split("\n")[0] || "the UPDATE was allowed"})`);
+
+      // The rollback path, over TCP: --grant connected as THIS role — every
+      // privilege held, none with grant option — granting a third role. Every
+      // GRANT "succeeds" with a warning and no effect, the verify inside the
+      // transaction finds the third role holding nothing, and --grant exits 1
+      // naming it, with nothing committed (the third pass's check, run through
+      // Bun's begin/rollback rather than reasoned about — fourth pass).
+      await sql.unsafe(`CREATE ROLE ob1_live_third NOLOGIN`);
+      try {
+        const weak = await runMigrator(ROLE_URL, undefined, "--grant", "ob1_live_third");
+        assert(weak.code === 1 && /were not granted/.test(weak.out) && /Not held by ob1_live_third/.test(weak.out) && /Connect as the objects' owner/.test(weak.out) && !/permission denied/.test(weak.out),
+               `--grant run as a role without grant option exits 1 and names what was not granted, without the 42501 hint (exit ${weak.code}: ${(weak.out.split("\n").find((l) => /not granted/.test(l)) ?? weak.out).trim().slice(0, 140)})`);
+        const [{ held }] = (await sql`SELECT has_table_privilege('ob1_live_third', 'public.thought_audit', 'SELECT') AS held`) as { held: boolean }[];
+        assert(held === false, "…and the third role holds nothing: the transaction rolled back");
+      } finally {
+        await sql.unsafe(`DROP OWNED BY ob1_live_third; DROP ROLE ob1_live_third`);
+      }
     } finally {
       if (asRole) await asRole.close();
       await dropRole();

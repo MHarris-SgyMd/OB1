@@ -282,7 +282,7 @@ After running the migration:
 
 - Upstream's outcome: a table `public.thought_work_claims` with `thought_id UUID REFERENCES public.thoughts(id)`, a `(thought_id, work_type)` primary key, a `status` check constraint, RLS enabled, `SELECT, INSERT, UPDATE, DELETE` granted to `service_role` only, and all privileges explicitly revoked from `anon` and `authenticated`. On this fork the table is migration 015's — no RLS, no Supabase roles; `bun migrate.ts --grant`'s `worker` group covers it (SMD-1796).
 - Two indexes exist: `idx_twc_status_ttl` (the reaper / work-type queries) and the partial `idx_twc_worker` (a worker's open claims).
-- Three RPCs exist — `claim_thoughts`, `release_thought`, `release_claims_for_worker` — each `SECURITY INVOKER`; upstream granted them to `service_role` only, and on this fork they are 015's, executable by the roles you grant.
+- Three RPCs exist — `claim_thoughts`, `release_thought`, `release_claims_for_worker` — each `SECURITY INVOKER`; upstream granted them to `service_role` only. On this fork they are 015's — executable by any role, since 015 revokes nothing from PUBLIC; what a caller needs is the `worker` group's privileges on the table.
 - Running two workers against the same `work_type` divides the pool with no overlap: each thought is processed exactly once.
 - A claim whose worker dies is automatically reclaimable after its TTL expires, on the next `claim_thoughts` call for that `work_type`.
 - No column on `public.thoughts` is altered or dropped — the change is purely additive.

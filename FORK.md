@@ -14263,6 +14263,28 @@ two review-pass commits had written their mechanisms mid-bullet, so
 reworded to end each bullet in the tag, before the push (caught: run-it;
 held: mechanism-yield.mjs). No finding became a ticket.
 
+**Review, fourth pass** (a fourth cold reviewer, aimed at what the third
+added). Every finding sat in the third pass's additions — the stop signal,
+this time by its own rule. Fixed: the verify's rollback path — the throw
+inside Bun's `begin`, the rollback, the thrown message reaching the outer
+catch — was reasoned about, not run; test-live [18] now runs `--grant`
+connected as its granted LOGIN role (every privilege held, none with grant
+option) against a third role and reads exit 1, the "were not granted" line
+naming that role, no 42501 hint, and the third role holding nothing (caught:
+cold-read; held: test-live [18]); [39]'s weak-grantor cleanup dropped the
+grantee role without revoking its privileges first, so had the GRANT ever
+taken effect the DROP ROLE would have aborted the suite instead of recording
+one failure (caught: run-it); `--dry-run` kept the short skipped hint after
+the live path's grew — one string now; `db/README.md` said nothing of the
+verify — one sentence; thought-work-claims' README implied an EXECUTE grant
+gates 015's RPCs, which revoke nothing from PUBLIC — what a caller needs is
+the `worker` group's table privileges; the FORK-paragraph bullets in two pass
+commits carried no tag and counted as implicit findings — folded into the
+bullets before them. Noted, no change: a fresh role holds USAGE on `public`
+through PUBLIC on stock Postgres, so the verify's schema row bites only on a
+hardened database; two `run-it` tags on grep-driven index comparisons are
+closer to a tooling-assisted cold read.
+
 **Upstream status:** the twelve files now differ from upstream's in their
 grant/RLS sections (plus wiki-pages' extension line and smart-ingest's foreign
 key), which a rebase will show as conflicts wherever upstream edits those

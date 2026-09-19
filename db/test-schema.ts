@@ -4491,7 +4491,10 @@ console.log("\n[39] Every schemas/*.sql applies to a migrated brain with no Supa
   try { await cdb.exec(`SET ROLE ob1_weak_grantor; GRANT INSERT ON crm_persons TO ob1_grantee; RESET ROLE`); } catch (e) { await cdb.exec("RESET ROLE"); weakError = (e as Error).message; }
   const [{ held: granteeHolds }] = (await cdb.query<{ held: boolean }>(`SELECT has_table_privilege('ob1_grantee', 'public.crm_persons', 'INSERT') AS held`)).rows;
   assert(weakError === "" && granteeHolds === false, `a grantor holding SELECT without grant option issues GRANT INSERT with no error and no effect (error: ${weakError || "none"}; grantee holds INSERT: ${granteeHolds}) — why --grant verifies`);
-  await cdb.exec(`DROP OWNED BY ob1_weak_grantor; DROP ROLE ob1_weak_grantor; DROP ROLE ob1_grantee`);
+  // Both roles' privileges revoked before the drops: were the GRANT ever to
+  // take effect (the assertion's own mutant), DROP ROLE ob1_grantee would
+  // raise 2BP01 and abort the suite instead of leaving one recorded failure.
+  await cdb.exec(`DROP OWNED BY ob1_weak_grantor, ob1_grantee; DROP ROLE ob1_weak_grantor; DROP ROLE ob1_grantee`);
   const after = await insertCodes();
   const denied = [...after].filter(([, r]) => r.code === "42501").map(([t, r]) => `${t}: ${r.message}`);
   assert(denied.length === 0, `granted the whole community group, no community table refuses the role's INSERT (${after.size} tables; still refused: ${denied.join("; ") || "none"})`);

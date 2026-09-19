@@ -308,7 +308,11 @@ bun migrate.ts --url ... --grant your_role
 ```
 
 `--grant` issues exactly the list above for the tables, views, sequences and
-functions that exist, in one transaction; it never creates the role or sets a password, so
+functions that exist, in one transaction — and before committing it asks the
+catalog whether the role now holds each privilege, because a grantor that holds
+a privilege without grant option "grants" it with only a warning and no effect;
+if anything is not held it rolls back, names the privileges, and says to connect
+as the objects' owner or a superuser; it never creates the role or sets a password, so
 create the role first. `--grant --dry-run` prints the statements without running
 them, so a locked-down deployment can grant a subset by hand. A role that only
 ever runs the server needs the **capture** and **server** groups; add **worker**
