@@ -14042,21 +14042,36 @@ the row keeps its text and stance, `source_id` becomes JSON null and
 `source_deleted_id` / `source_deleted_at` record which thought went and when —
 the citation survives as "rested on a thought deleted at T", which is what a
 reader of the note needs to know, and no row names a thought that is gone. The
-count and the detach are **one `UPDATE … RETURNING`** over the citing rows, so
-each row's status is read from the version its row lock won: a citation revived
-by a concurrent writer — `valid_until` or `superseded_by` cleared between a look
-and a write — is seen as active, where the first draft's count followed by an
-UPDATE would have counted the old version as expired and rewritten the new one
-under refuse mode (the first review pass's top finding; `db/test-live.ts` [6i]
-arm 4 holds it against a real server, and `thought_facet_active(thought_facets)`
-is the one spelling of "still counts" the guard and the function's sample
-share). In refuse mode the raise aborts the statement and the rewrite with it.
+citing rows are read **under a row lock** (`FOR NO KEY UPDATE`) before anything
+is decided, so each row's status comes from the version its lock won: a
+citation revived by a concurrent writer — `valid_until` or `superseded_by`
+cleared between a look and a write — is seen as active, where the first draft's
+unlocked count followed by an UPDATE counted the old version as expired and
+rewrote the new one under refuse mode (the first review pass's top finding;
+`db/test-live.ts` [6i] arm 4 holds it against a real server, and
+`thought_facet_active(thought_facets)` is the one spelling of "still counts" the
+guard and the function's sample share). The rewrite runs only when the delete
+proceeds — the first pass had made count and rewrite one `UPDATE … RETURNING`,
+which rewrote every citing row and discarded the rewrite on each refusal
+(second pass). Nothing can slip in between the locked read and the rewrite: a
+new citation's writer takes `KEY SHARE` on the source and waits on the
+`DELETE`'s own row lock. The detached shape is accepted by the validate trigger
+only as the guard writes it — from the source the row had, once that thought
+is gone, with a real timestamp — so a raw `UPDATE` cannot detach a live
+citation or forge a deletion; and the source id is stored canonical, since the
+validate regex is case-insensitive and a raw writer's upper-case uuid would
+otherwise have been invisible to the guard's text compare — its source
+deletable from under it (both second pass; [39]).
 It totals what it did in two transaction-local settings, summed across
 statements. The refusal is the *table's*: a bulk `DELETE`, a vendored script,
 `psql` all meet it, the way 008's append-only rule is `thought_audit`'s; the
 way through is the setting, which only a caller who names it takes. The price
-is the transition table — a delete of N rows holds the N deleted rows once,
-vectors included; a single delete pays nothing that shows.
+is the transition table, and it was measured rather than asserted (second
+review pass, real server): `DELETE FROM thoughts` over 20,000 rows of
+1,024-dimension vectors ran in 483 ms with the guard and 534 ms with it
+disabled — medians of three, the difference noise — and a single
+`delete_thought` of an uncited row takes 0.43 ms. The deleted tuples are held
+as the statement already holds them; the DELETE's own work is the cost.
 
 `delete_thought(uuid, jsonb, boolean)` is **036's body** — the actor and the
 mode set first, *outside* the block (a caught exception rolls back its
@@ -14134,7 +14149,10 @@ unique" — the check names each state with its remedy, as 032's does for
 draft had re-implemented the one-line snip without it, the only place a
 thought's text would have reached a terminal with its control characters
 (first review pass; `snipText` is now the one spelling, and the proposals
-tool's snip calls it).
+tool's snip calls it). The refusal's count is coerced with `Number()` and a
+`CITED` body carrying neither count nor rows — one the function did not write
+— is said to be that rather than "0 citations", and the tool types the rows
+with the store's `Citation` (second pass).
 
 **Held by:** `db/test-schema.ts` [39] on PGlite — the shape (two triggers, the
 guard per statement over `deleted`, one three-argument `delete_thought`, the
@@ -14161,7 +14179,15 @@ delete no longer waits), history counted as active, a self-citation allowed,
 the writer's lock dropped ([6i] arm 2 deadlocks), the guard's default flipped
 to detach, `WHEN OTHERS` (the FK fixture answers `CITED`), the store dropping
 `cited_by`, the tool never passing `detach`. An eleventh — the same-statement
-exclusion dropped — passed every check and is the clause removed above.
+exclusion dropped — passed every check and is the clause removed above. The
+two review passes added twelve more, one per fix, each biting: the mode never
+put back, the unlocked count-then-detach guard ([6i] arm 4, twice: once as the
+first draft's shape, once as a read without the row lock), the unlocked source
+precheck ([6i] arm 5), a superseder already gone still superseding, the
+citation text skipping the cleaner, preflight treating every `delete_thought`
+form as current, the id stored as written, a live source detached by a raw
+`UPDATE`, a non-timestamp accepted as the deletion time, a `source_deleted_id`
+the row never had, the store's `typeof` guard on the count.
 
 **Not built, and why.** The proposal's vocabulary registry, corrections table,
 coverage and yield views (each a later ticket if the facet earns its keep);

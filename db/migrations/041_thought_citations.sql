@@ -59,9 +59,8 @@
 --      moment any citation existed — order-dependent behaviour, the class this
 --      fork treats as a defect. The statement is the unit a deletion is judged
 --      by; the price is the transition table, the deleted rows held once for
---      the statement (a bulk delete of N rows materialises N rows, vectors
---      included — the cost a reset of a large corpus pays; a single delete
---      pays nothing that shows).
+--      the statement — measured under "Cost" below as nothing that shows, at
+--      20,000 rows or at one.
 --      The guard fires on EVERY delete of thoughts rows — a bulk DELETE, a
 --      vendored script, psql — not only through delete_thought: the refusal is
 --      the table's, the way 008's append-only rule is thought_audit's, and the
@@ -123,6 +122,12 @@
 --   index on (payload->>'source_id') WHERE kind = 'citation' — one index probe
 --   on an empty table for every brain that has written no citation. The
 --   BEGIN … EXCEPTION block is a savepoint per delete; a delete is not a hot path.
+--   Measured against a real server (second review pass): a single
+--   delete_thought of an uncited row 0.43 ms; DELETE FROM thoughts over 20,000
+--   rows of 1,024-dimension vectors 483 ms with the guard against 534 ms with it
+--   disabled (medians of three; the difference is noise) — the transition table
+--   holds the deleted tuples as the statement already holds them, and the
+--   DELETE's own work is the whole cost.
 --   The guard runs as the calling role (SECURITY INVOKER, like every function
 --   here), so a self-hosted server role needs SELECT and UPDATE on
 --   thought_facets to delete ANY thought — db/config.mjs ROLE_GRANTS.capture
@@ -191,7 +196,11 @@ CREATE INDEX IF NOT EXISTS thought_facets_citation_source_idx
 -- rule, as a CHECK would say if a CHECK could hold a subquery (it cannot; 025
 -- departure 3). The source-exists check takes FOR KEY SHARE on the source row
 -- — the lock an FK takes — so a concurrent delete of the source waits for this
--- transaction and then sees the citation.
+-- transaction and then sees the citation. The source id is stored canonical
+-- (lower case), so the guard's text compare finds every spelling; and the
+-- detached shape is accepted only as the guard writes it — from the source the
+-- row had, once that thought is gone, with a real timestamp — so a raw UPDATE
+-- cannot detach a live citation or forge a deletion.
 -- ---------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION thought_facets_validate()
 RETURNS trigger
@@ -228,14 +237,39 @@ BEGIN
   END IF;
 
   IF v_source IS NULL THEN
-    -- Only the detached shape may carry no source: the guard wrote which
-    -- thought was deleted and when. A citation written without a source is not
-    -- a citation.
+    -- Only the detached shape may carry no source, and only the guard can
+    -- have written it: source_deleted_id is the source this row HAD, that
+    -- thought is gone, source_deleted_at is a timestamp. A raw UPDATE that
+    -- nulls the source of a live citation, names another thought as the one
+    -- deleted, or writes a time that is not one is refused (second review
+    -- pass); a row already detached keeps what it lost. A citation written
+    -- without a source is not a citation.
     IF TG_OP = 'INSERT' OR v_deleted IS NULL
        OR v_deleted !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
        OR NEW.payload->>'source_deleted_at' IS NULL THEN
       RAISE EXCEPTION USING ERRCODE = 'check_violation',
         MESSAGE = 'a citation names its source: payload.source_id must be a thought id (null only after the guard detached it, with source_deleted_id and source_deleted_at set)';
+    END IF;
+    BEGIN
+      PERFORM (NEW.payload->>'source_deleted_at')::timestamptz;
+    EXCEPTION WHEN OTHERS THEN
+      RAISE EXCEPTION USING ERRCODE = 'check_violation',
+        MESSAGE = format('a detached citation''s source_deleted_at must be a timestamp, got %L', left(NEW.payload->>'source_deleted_at', 40));
+    END;
+    IF OLD.payload->>'source_id' IS NOT NULL THEN
+      -- The transition, which only the guard makes: from the source it had, and
+      -- only once that thought is gone.
+      IF v_deleted::uuid IS DISTINCT FROM (OLD.payload->>'source_id')::uuid THEN
+        RAISE EXCEPTION USING ERRCODE = 'check_violation',
+          MESSAGE = format('a citation is detached only from the source it had (%s), not %s', OLD.payload->>'source_id', v_deleted);
+      END IF;
+      IF EXISTS (SELECT 1 FROM thoughts WHERE id = v_deleted::uuid) THEN
+        RAISE EXCEPTION USING ERRCODE = 'check_violation',
+          MESSAGE = format('a citation is detached only when its source is gone; thought %s still exists', v_deleted);
+      END IF;
+    ELSIF v_deleted::uuid IS DISTINCT FROM (OLD.payload->>'source_deleted_id')::uuid THEN
+      RAISE EXCEPTION USING ERRCODE = 'check_violation',
+        MESSAGE = 'a detached citation keeps the source it lost';
     END IF;
     RETURN NEW;
   END IF;
@@ -247,6 +281,13 @@ BEGIN
   IF v_source::uuid = NEW.thought_id THEN
     RAISE EXCEPTION USING ERRCODE = 'check_violation',
       MESSAGE = 'a thought cannot cite itself as a source';
+  END IF;
+  -- Stored canonical — lower case — so the guard's text compare on
+  -- payload->>'source_id' finds it: the regex above is case-insensitive, and
+  -- a raw writer may spell a uuid in upper case (second review pass).
+  IF v_source IS DISTINCT FROM (v_source::uuid)::text THEN
+    NEW.payload := NEW.payload || jsonb_build_object('source_id', v_source::uuid);
+    v_source := (v_source::uuid)::text;
   END IF;
   -- The source must exist, and is locked KEY SHARE while this transaction
   -- runs — re-checked only when the pointer is new or moved, as an FK is.
@@ -313,14 +354,14 @@ COMMENT ON FUNCTION thought_facet_active(thought_facets) IS
 -- thought_facet_active reads whether the superseder still exists rather than
 -- whether the pointer is null ([39] holds the case both ways).
 --
--- The count and the detach are ONE statement, an UPDATE … RETURNING over the
--- citing rows: each row is locked and its status read from the version the
--- lock won, so a citation revived under a concurrent writer — valid_until or
+-- The citing rows are read under a row lock (FOR NO KEY UPDATE) before
+-- anything is decided: each row's status comes from the version the lock won,
+-- so a citation revived under a concurrent writer — valid_until or
 -- superseded_by cleared between a look and a write — is seen as active, where
--- a count followed by an UPDATE would have counted the old version and
--- rewritten the new one (first review pass; db/test-live.ts [6i] arm 4). In
--- refuse mode with an active row the RAISE below aborts the DELETE statement
--- and this UPDATE with it, so a refusal rewrites nothing.
+-- an unlocked count followed by an UPDATE counted the old version and
+-- rewrote the new one (first review pass; db/test-live.ts [6i] arm 4). The
+-- rewrite runs only when the delete proceeds, so a refusal locks and rewrites
+-- nothing (second review pass).
 -- ---------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION thoughts_guard_citation_sources()
 RETURNS trigger
@@ -338,23 +379,26 @@ BEGIN
       MESSAGE = format('ob1.cited_delete must be refuse or detach, got %L', v_mode);
   END IF;
 
-  -- Every surviving citing row, active or not, marked with the source it lost
-  -- (source_id null, source_deleted_id / source_deleted_at) — through
-  -- thought_facets_validate, which accepts this shape — and its status read
-  -- back from the locked version. Rolled back with the statement on a refusal.
-  WITH marked AS (
-    UPDATE thought_facets f
-       SET payload = f.payload || jsonb_build_object('source_id', NULL, 'source_deleted_id', d.id, 'source_deleted_at', now())
+  -- The citing rows, LOCKED (FOR NO KEY UPDATE) and each one's status read
+  -- from the version the lock won — a citation revived under a concurrent
+  -- writer is seen as active. Locked and not yet rewritten, so a refusal
+  -- rewrites nothing (second review pass: the first pass's UPDATE … RETURNING
+  -- rewrote every citing row and threw the rewrite away on each refusal). No
+  -- new citing row can slip in between this read and the rewrite below: its
+  -- writer's KEY SHARE on the source waits on the DELETE's own row lock until
+  -- this transaction ends.
+  WITH hits AS (
+    SELECT f.id, thought_facet_active(f) AS active, d.id AS source
       FROM deleted d
-     WHERE f.kind = 'citation' AND f.payload->>'source_id' = d.id::text
-     RETURNING thought_facet_active(f) AS active, d.id AS source
+      JOIN thought_facets f ON f.kind = 'citation' AND f.payload->>'source_id' = d.id::text
+       FOR NO KEY UPDATE OF f
   )
   SELECT count(*) FILTER (WHERE active)::int,
          count(*) FILTER (WHERE NOT active)::int,
          count(DISTINCT source) FILTER (WHERE active)::int,
          min(source::text) FILTER (WHERE active)::uuid
     INTO v_active, v_inactive, v_sources, v_first
-    FROM marked;
+    FROM hits;
 
   IF v_active > 0 AND v_mode = 'refuse' THEN
     RAISE EXCEPTION USING ERRCODE = 'OB001',
@@ -365,6 +409,16 @@ BEGIN
       HINT = 'delete_thought(id, actor, true) detaches them: each keeps its text and stance, loses source_id and records source_deleted_id and source_deleted_at. A raw DELETE does the same under set_config(''ob1.cited_delete'', ''detach'', true).';
   END IF;
 
+  -- Detach — every surviving citing row, active or not, marked with the source
+  -- it lost (source_id null, source_deleted_id / source_deleted_at), through
+  -- thought_facets_validate, which accepts exactly this shape from a source
+  -- that is gone. The rows are the ones locked above.
+  IF v_active + v_inactive > 0 THEN
+    UPDATE thought_facets f
+       SET payload = f.payload || jsonb_build_object('source_id', NULL, 'source_deleted_id', d.id, 'source_deleted_at', now())
+      FROM deleted d
+     WHERE f.kind = 'citation' AND f.payload->>'source_id' = d.id::text;
+  END IF;
   -- Totals for the caller, summed across the statements of a transaction.
   -- delete_thought zeroes them first and reads them after its one statement.
   PERFORM set_config('ob1.citations_detached',

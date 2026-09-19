@@ -6,7 +6,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPTransport } from "@hono/mcp";
 import { Hono } from "hono";
 import { z } from "zod";
-import { createStore, UUID_RE, type ThoughtStore } from "./store.ts";
+import { createStore, UUID_RE, type Citation, type ThoughtStore } from "./store.ts";
 import { queryLogEnabled } from "../db/config.mjs";
 import { authenticateRequest, canWrite, type Principal } from "./auth.ts";
 import { AgentResolver, cacheTtlFromEnv } from "./agents.ts";
@@ -261,7 +261,7 @@ function toolError(text: string) {
  * says what to do rather than only what went wrong.
  */
 function explainRefusal(
-  r: { error: string; currentUpdatedAt?: string; citedBy?: number; citations?: { thoughtId: string; stance: string; text: string }[] },
+  r: { error: string; currentUpdatedAt?: string; citedBy?: number; citations?: Citation[] },
   id: string,
 ): string {
   switch (r.error) {
@@ -284,6 +284,9 @@ function explainRefusal(
       const rows = (r.citations ?? []).map((c) => `  - ${c.thoughtId} (${c.stance}): ${snipText(c.text, 120)}`);
       const total = r.citedBy ?? rows.length;
       const more = total - rows.length;
+      // A CITED envelope with neither a count nor rows is one the function
+      // did not write (a proxy, a truncated body): say so rather than count 0.
+      if (total <= 0) return `Refused: other thoughts cite ${id} as their source, but the reply carried no count and no citing rows — re-read the thought (fetch takes the id) before deciding. To delete anyway, pass detach_citations: true.`;
       return `Refused: ${total} citation${total === 1 ? "" : "s"} on other thoughts rest${total === 1 ? "s" : ""} on ${id} as ${total === 1 ? "its" : "their"} source — deleting it would leave ${total === 1 ? "that statement" : "those statements"} resting on nothing:\n${rows.join("\n")}${more > 0 ? `\n  …and ${more} more` : ""}\nRead the citing thoughts first (fetch takes the id). To delete anyway, pass detach_citations: true — each citation keeps its text and stance, loses its source, and records ${id} and the time as the deleted source.`;
     }
     default:

@@ -501,7 +501,9 @@ export function normaliseMutation(r: Record<string, unknown> | undefined): Updat
     error: (r.error as MutationError) ?? "NOT_FOUND",
     currentUpdatedAt: isoTimestampOpt(r.current_updated_at),
     // 041's CITED refusal: the count, and the citing rows the function sampled.
-    citedBy: typeof r.cited_by === "number" ? r.cited_by : undefined,
+    // Number(), not a typeof guard: a body that arrives with the count as a
+    // string (a proxy, a hand-made envelope) still counts to the tool.
+    citedBy: r.cited_by == null || !Number.isFinite(Number(r.cited_by)) ? undefined : Number(r.cited_by),
     citations: Array.isArray(r.citations)
       ? (r.citations as Record<string, unknown>[]).map((c) => ({
           id: String(c.id),

@@ -4384,6 +4384,27 @@ console.log("\n[39] Migration 041: a cited source is refused as a value and deta
   const marked = await q<{ s: string | null; d: string }>(`SELECT payload->>'source_id' AS s, payload->>'source_deleted_id' AS d FROM thought_facets WHERE thought_id = $1::uuid`, [C2]);
   assert(marked.length === 3 && marked.every((m) => m.s === null && m.d === S2), "…and all three record the deleted source, so no row names a thought that is gone");
   assert(/violates check constraint/.test(await refuses(`UPDATE thought_facets SET superseded_by = id WHERE id = $1::uuid`, [replacing])), "a facet cannot supersede itself");
+  // The detached shape is the guard's alone: a raw UPDATE cannot detach a live
+  // citation, name another thought as the one deleted, or write a time that is
+  // not one; a row the guard detached can still be edited but keeps what it lost.
+  const live = await thought("a live source someone tries to detach by hand");
+  const liveNote = await thought("the note resting on the live source");
+  await cite(liveNote, live, "rests on a live source");
+  assert(/detached only when its source is gone; thought/.test(await refuses(`UPDATE thought_facets SET payload = payload || jsonb_build_object('source_id', NULL, 'source_deleted_id', $2::uuid, 'source_deleted_at', now()) WHERE thought_id = $1::uuid`, [liveNote, live])),
+    "a raw UPDATE cannot detach a citation whose source still exists");
+  assert(/detached only from the source it had/.test(await refuses(`UPDATE thought_facets SET payload = payload || jsonb_build_object('source_id', NULL, 'source_deleted_id', $2::uuid, 'source_deleted_at', now()) WHERE thought_id = $1::uuid`, [liveNote, GHOST])),
+    "…nor name another thought as the one deleted");
+  assert(/source_deleted_at must be a timestamp/.test(await refuses(`UPDATE thought_facets SET payload = payload || '{"source_id":null,"source_deleted_at":"soon"}'::jsonb || jsonb_build_object('source_deleted_id', $2::uuid) WHERE thought_id = $1::uuid`, [liveNote, live])),
+    "…nor write a time that is not one");
+  assert((await refuses(`UPDATE thought_facets SET valid_until = now() WHERE thought_id = $1::uuid`, [C2])) === "" && (await del(live)).error === "CITED",
+    "a citation the guard detached can still be edited and keeps its shape, and the live source is still refused");
+  assert(/keeps the source it lost/.test(await refuses(`UPDATE thought_facets SET payload = payload || jsonb_build_object('source_deleted_id', $2::uuid) WHERE thought_id = $1::uuid`, [C2, GHOST])), "…but a detached citation cannot be re-pointed at a different lost source");
+  // A raw writer's upper-case source id is stored canonical, so the guard's compare finds it.
+  const upper = await thought("a source cited in upper case");
+  const upperNote = await thought("the note that spells the id in upper case");
+  await db.query(`INSERT INTO thought_facets (thought_id, kind, payload) VALUES ($1::uuid, 'citation', jsonb_build_object('text', 't', 'stance', 'stated', 'source_id', upper($2::text)))`, [upperNote, upper]);
+  assert((await one<{ s: string }>(`SELECT payload->>'source_id' AS s FROM thought_facets WHERE thought_id = $1::uuid`, [upperNote])).s === upper, "an upper-case source_id from a raw writer is stored canonical");
+  assert((await del(upper)).error === "CITED" && (await exists(upper)), "…so the guard finds the citation and refuses the source's delete");
 
   // Thirteen: the count is the whole, the sample ten.
   const S3 = await thought("a source thirteen notes cite");

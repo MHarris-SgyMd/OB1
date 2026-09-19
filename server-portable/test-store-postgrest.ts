@@ -25,7 +25,7 @@ import { SQL } from "bun";
 import { createAssert, ISO_RE, plantLegacyRow, resetSchema } from "../db/test-support.ts";
 import { createClient } from "../compat/supabase-sql/index.ts";
 import { PostgrestStore } from "./store-postgrest.ts";
-import { isoTimestamp, isoTimestampOrNull } from "./store.ts";
+import { isoTimestamp, isoTimestampOrNull, normaliseMutation } from "./store.ts";
 
 const URL_ = process.env.DATABASE_URL;
 if (!URL_) {
@@ -523,6 +523,10 @@ console.log("\n[11] deleteThought's rpc shape over PostgREST: p_detach named and
   assert(ev?.actor_name === "importer", `the delete is attributed over this path too (${ev?.actor_name})`);
   const [facet] = (await admin`SELECT payload FROM thought_facets WHERE thought_id = ${citer}`) as { payload: Record<string, unknown> }[];
   assert(facet?.payload?.source_id === null && facet?.payload?.source_deleted_id === source, "the citation records the deleted source");
+  // The count coerced: a body whose cited_by arrives as a string still counts; garbage does not.
+  const coerced = normaliseMutation({ ok: false, error: "CITED", cited_by: "3", citations: [] });
+  const garbage = normaliseMutation({ ok: false, error: "CITED", cited_by: "many" });
+  assert(coerced.ok === false && coerced.citedBy === 3 && garbage.ok === false && garbage.citedBy === undefined, "a cited_by that arrives as a numeric string is a number to the tool, and a word is no count");
   // A named call with p_id and p_actor alone — the vendored servers' rpc shape — still resolves.
   const { data, error } = await client.rpc("delete_thought", { p_id: citer, p_actor: null });
   assert(error === null && (data as { ok: boolean }).ok === true, `rpc with p_id and p_actor alone resolves through the default (${JSON.stringify(data ?? error)})`);
