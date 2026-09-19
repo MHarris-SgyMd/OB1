@@ -68,14 +68,14 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Ninety-two numbered changes on top of the pin. Seven fix defects found in an
+Ninety-three numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
 data layer (Phase 2). Ten (changes 31, 53, 55, 59, 79, 82, 86, 87, 88, and 89) ship no runtime change at
 all: each is a measurement that decided against building something.
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–92 are the numbered `###` sections** further down, which is
+sections. Changes **18–93 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -204,7 +204,7 @@ db/test-bench-reuse.ts           # change 76 (new file — the kept bench corpus
 db/bench-oracle.ts               # change 76 (new file — the cache's pure part: what of a marker's entry a run may trust; test-schema [37])
 db/migrations/039_*.sql          # change 81 (new file — the two HNSW indexes over embedding::halfvec under their names; match_thoughts' walk branches order by the cast)
 db/migrations/040_*.sql          # change 91 (new file — 039's match_thoughts with `SET jit = off`; a disabled planner path no longer JIT-compiles the gate's sample)
-db/migrations/041_*.sql          # change 92 (new file — 040's match_thoughts with `enable_nestloop = on` and `enable_tidscan = on` pinned; an operator's setting no longer reaches the call's joins or the gate's probe)
+db/migrations/041_*.sql          # change 93 (new file — 040's match_thoughts with `enable_nestloop = on` and `enable_tidscan = on` pinned; an operator's setting no longer reaches the call's joins or the gate's probe)
 evals/eval-quant.ts              # change 81 (new file — vector, halfvec and binary-with-rerank measured on real vectors at the shipped width; test-schema [38], test-upgrade [16])
 <4 vendored MCP servers, 1 sample> # change 78 (a McpServer built per request — per session in the cost recipe's after sample — in place of one shared and connect()ed to a fresh transport each time)
 <17 pin sites, 3 lockfiles>      # change 83 (@hono/mcp 0.1.1 → 0.1.5: the transport lets go of each POST it has answered; the after sample's sweep closes the transports it drops)
@@ -14343,6 +14343,85 @@ has rows.
 
 **Upstream status:** not sent — the query log is this fork's (change 65).
 
+### 92. A NULL `created_at` is `null`, not the fabricated epoch, and a timestamp with no ISO form renders as its own text — the decision SMD-1040 documented and left, made once in `isoTimestamp`/`displayDate` (SMD-1328)
+
+`thoughts.created_at` is `timestamptz DEFAULT now()` with no `NOT NULL`
+(migration 001); 020's `recency_score` has an explicit NULL branch and
+`db/test-schema.ts` plants a no-date row and asserts `match_thoughts` returns
+it. But every read mapper ran the column through `new Date(v).toISOString()`,
+and `new Date(null)` is the epoch — so a NULL row came back as the fabricated
+string `1970-01-01T00:00:00.000Z`, silently, on **both** stores, and the five
+`toLocaleDateString` renderers printed **"Invalid Date"** for an `infinity` or a
+BC date. No capture path can make such a row — every insert omits the column and
+takes the DEFAULT — so it needs a direct INSERT; the risk is a fabricated date
+shown as real, not a crash. Change 52 (SMD-1040) put the timestamp convention in
+one place (`isoTimestamp`) and documented that NULL and the no-ISO-form values
+were still open, under types that said `created_at: string`. This is that
+decision.
+
+**The decision.** A SQL NULL is `null` under `created_at: string | null` — the
+widening `updated_at` and `ThoughtMeta.created_at` already carried, with
+`updated_at?: string | null` on `ThoughtRecord` as the precedent — and the tools
+render a null date as **absent**. `infinity` and `-infinity` stay their **own
+string** on both stores (`isoTimestamp` keeps them, `infinity` is the value 020
+ranks by and `[3d]` pins it), and the tools show that text, not "Invalid Date". A
+BC or extended-year date has no ISO form either, but the stores split on it:
+PostgREST's text survives and renders as itself, while Bun's SQL driver has
+already turned it into `Date(NaN)` before the store is reached, so `isoTimestamp`
+yields the literal string "Invalid Date" and `displayDate` faithfully prints
+*that* — the declined case below, not a value this change makes legible. The rule
+lives in two helpers: `isoTimestampOrNull` for the read path, `displayDate` (new,
+in `thoughts.ts`) for the render path.
+
+**Where it's applied.** One read-path change: `normaliseListItem` takes
+`isoTimestampOrNull`, so the list item, the three match shapes and the record
+that spread it all read a NULL as null — `match_thoughts`, `getThought` and
+`listThoughts` no longer fabricate. Five renderers move onto `displayDate`:
+`thoughtTitle` (the `search`/`fetch` title — a null date is the existing
+`Open Brain` prefix, not `1/1/1970`); the two `Captured:` lines in
+`search_thoughts`/`search_thoughts_keyword` (omitted when the date is absent);
+the `list_thoughts` `[date]` prefix (`[undated]`, since the bracket is
+structural); and the `thought_stats` range (024's `min`/`max` already skip NULLs,
+so `displayDate` only keeps an `infinity` edge legible).
+
+**Declined.** Recovering the SQL store's *text* for a BC/extended-year date —
+Bun's driver hands the store `Date(NaN)` (or an extended-year `Date` that fails
+`ISO_RE`) before it is seen, where PostgREST's text survives — would mean
+`SELECT created_at::text` beside every column in `store-sql.ts`. That row reaches
+no capture path, only a hand-written INSERT, and the two drivers disagree at the
+wire; the one odd row is left as each client renders it rather than rewriting
+every SELECT. Two mappers this ticket did **not** move stay on the pre-fix
+convention. `derivationFields` (025's provenance/derivative walk) runs
+`created_at` through `isoTimestamp`, which keeps `infinity` but fabricates the
+epoch on a NULL ancestor. `normaliseProposal`'s local `iso` (029's
+`list_supersession_proposals`, and the `day()` renderer beside it) calls
+`new Date(v).toISOString()` directly, with no such guard — so, worse, an
+`infinity`- or BC-dated proposal thought makes it **throw** and
+`list_supersession_proposals` errors out entirely rather than misrendering.
+The offline maintainer CLI `db/consolidate.ts` carries the same two defects (its
+`day()` at :277 throws on infinity and fabricates on NULL; its judge-prompt
+`dateOf` feed at :489–490 fabricates on NULL). All of these are graph walks over
+captured thoughts, off the list/match/get path this ticket scoped and reachable
+only by a hand-INSERT, so they are the follow-up **SMD-1803**, not this change.
+
+**A parity note.** Before change 52 the PostgREST store passed a NULL
+`created_at` through as JSON null, so `fetch` returned `created_at: null` while
+the SQL store fabricated the epoch; change 52 made **both** return the epoch. This
+change makes both return `null` — the honest value, and the one the PostgREST
+store had before parity was chosen.
+
+**Teeth.** `test-thoughts` [5]/[5b] cover `thoughtTitle` and `displayDate`
+directly, including that a row *genuinely* dated at the epoch still renders
+`1/1/1970` — the fix suppresses fabrication from NULL, not the value 0.
+`test-store-sql` [11] and `test-store-postgrest`'s undated block plant a NULL row
+and assert `null` on `matchThoughts`/`getThought`/`listThoughts`; `test-e2e-sql`
+[11] drives the real tools over MCP and asserts the rendered `list_thoughts`
+shows `[undated]`/`[infinity]` and `fetch` titles an undated thought `Open Brain
+…`, with no `1970` and no `Invalid Date` in the output over those two rows.
+
+**Upstream status:** divergence. `server/index.ts` and upstream's store carry the
+same `new Date(...)` fabrication; the fork's fix lives in `server-portable`, and
+this is not filed upstream (an undated row reaches no capture path).
 
 ### 91. `match_thoughts` runs with `jit = off` — migration 040 adds 017's clause to 039's function, so a planner path an operator disables no longer JIT-compiles the gate's sample on every call, and a generic plan's flat estimate no longer compiles the walk (SMD-1624)
 
@@ -14502,7 +14581,7 @@ filtered call with rows, identical rows and the same under 038. Pinning
 `enable_nestloop = on` on the function would remove that — and would
 override the operator's setting for every statement of the call, a second
 mechanism and its own decision: SMD-1677, filed with this table (done:
-migration 041, change 92).
+migration 041, change 93).
 
 **What the clause does not fix.** Under row-level security the collection
 and the walk's direct CTE are sequential scans of the heap (`jsonb_contains`
@@ -14551,7 +14630,7 @@ default column in the table above is within the run's spread (0.99–1.30 ms
 across the six cells that ran without JIT under either function).
 
 **Not done here.** The walk under an operator's `enable_nestloop = off`
-(SMD-1677, the table above; done: migration 041, change 92); the plan mode of the walk and the threshold
+(SMD-1677, the table above; done: migration 041, change 93); the plan mode of the walk and the threshold
 (SMD-1464); row-level security's sequential scan (SMD-1625); preflight's
 recogniser for the gate's body (change 80's "Not done here"). The
 ten-million arm was not re-run; a hundred million rows was not run.
@@ -14642,7 +14721,7 @@ ad hoc 2,469-page heap 19,752 buffers and 152 ms for the statement, the
 empty-filter call 22 → 164 ms. That is 13's state (038's Prerequisites)
 reached on a supported version by an operator's setting, the cost the gate
 exists to avoid, and no clause on the function reaches it — SMD-1703, filed
-with the table (done: migration 041 pins `enable_tidscan = on`, change 92). Pass 2's 18 branch had asserted `Disabled: true` and no JIT
+with the table (done: migration 041 pins `enable_tidscan = on`, change 93). Pass 2's 18 branch had asserted `Disabled: true` and no JIT
 block and passed over that plan without naming it (the `Disabled: true`
 it matched was the sequential scan's); [5e] now asserts the node per case
 on 18 — a `Seq Scan` under `enable_tidscan = off`, the TID Range Scan under
@@ -14807,7 +14886,7 @@ is byte-identical to 020's.
 **Upstream status:** not applicable — 014's routing statement, 037's gate and
 038's sample are this fork's.
 
-### 92. `match_thoughts` pins the two planner paths its statements are built around — migration 041 adds `enable_nestloop = on` and `enable_tidscan = on` to 040's function, so an operator's `enable_nestloop = off` no longer turns every join in the call into a merge or hash join over the whole table, and on PostgreSQL 18 `enable_tidscan = off` no longer turns the gate's eight one-page probes into eight scans of the heap (SMD-1677, SMD-1703)
+### 93. `match_thoughts` pins the two planner paths its statements are built around — migration 041 adds `enable_nestloop = on` and `enable_tidscan = on` to 040's function, so an operator's `enable_nestloop = off` no longer turns every join in the call into a merge or hash join over the whole table, and on PostgreSQL 18 `enable_tidscan = off` no longer turns the gate's eight one-page probes into eight scans of the heap (SMD-1677, SMD-1703)
 
 **The mechanism.** Every join in `match_thoughts`' body is a primary-key
 probe driven by an outer the statement itself bounds: the parent lookup that

@@ -24,7 +24,7 @@ export type ThoughtMatch = {
   metadata: Record<string, unknown>;
   /** The raw cosine similarity — what the threshold gates. Unchanged by a recency weight. */
   similarity: number;
-  created_at: string;
+  created_at: string | null;
   /**
    * What the rows are ordered by (migration 020): `similarity` blended with
    * 0.5 ^ (age_days / half_life_days) at the call's recency weight; equal to
@@ -64,7 +64,7 @@ export type ThoughtKeywordMatch = {
   id: string;
   content: string;
   metadata: Record<string, unknown>;
-  created_at: string;
+  created_at: string | null;
   /** Case-insensitive occurrences of the needle in this thought's content. */
   occurrences: number;
   /** Matches across the whole corpus, before limit and offset. */
@@ -86,7 +86,7 @@ export type ThoughtHybridMatch = {
   id: string;
   content: string;
   metadata: Record<string, unknown>;
-  created_at: string;
+  created_at: string | null;
   /** Best of the thought's vector and its chunks; null when it has neither. */
   similarity: number | null;
   /** The needles this row contains, in query order. Empty for a vector-only row. */
@@ -124,12 +124,25 @@ export type ThoughtHybridMatch = {
  * driver has already turned it into `Date(NaN)` — or, on a parameterised
  * query, a Date whose `toISOString` is the extended-year form — before the
  * store sees it, so the SQL store hands back JS's "Invalid Date". Recovering
- * the text there means selecting `created_at::text` beside the column; that,
- * and whether NULL (the epoch, the Date(null) convention every mapper here
- * has always had) and the no-ISO-form rows should be `null` under a widened
- * type, and what the tools print for them (today "Invalid Date"), is
- * SMD-1328. `undefined` throws: the column is missing from the row, a bug in
- * the SELECT, not data.
+ * the text there would mean selecting `created_at::text` beside every column;
+ * SMD-1328 decided not to — a BC/extended-year date reaches no capture path,
+ * only a hand-written INSERT, and the two drivers disagree at the wire, so the
+ * one odd row is left as each client renders it rather than rewriting every
+ * SELECT. SMD-1328 did settle the two cases that reach the read/display path:
+ * a SQL NULL is `null`, not the fabricated epoch `new Date(null)` gave every
+ * mapper here — `normaliseListItem` takes `isoTimestampOrNull`, so `created_at`
+ * is `string | null` on the list item and the three match shapes and the
+ * record that spread it, the same widening `updated_at` and `ThoughtMeta`
+ * already carry — and the tools render a null date as absent and a no-ISO-form
+ * value as its own text, not "Invalid Date" (thoughts.ts `displayDate`).
+ * `infinity` stays a string, the value migration 020 ranks by; [3d] pins it.
+ * Two mappers stay on the old `new Date(...)` form and are SMD-1803, not this
+ * change: `derivationFields` (025's provenance walk) fabricates the epoch on a
+ * NULL ancestor, and `normaliseProposal`'s local `iso` (029's
+ * `list_supersession_proposals`) THROWS on an `infinity`-dated proposal thought
+ * — both off the list/match/get path and reachable only by a hand-INSERT.
+ * `undefined` throws: the column is missing from the row, a bug in the SELECT,
+ * not data.
  */
 export function isoTimestamp(v: unknown): string {
   if (v === undefined) throw new Error("isoTimestamp: the row has no such column");
@@ -214,7 +227,7 @@ export type ThoughtRecord = {
   id: string;
   content: string;
   metadata: Record<string, unknown>;
-  created_at: string;
+  created_at: string | null;
   updated_at?: string | null;
 };
 
@@ -222,7 +235,7 @@ export type ThoughtListItem = {
   id: string;
   content: string;
   metadata: Record<string, unknown>;
-  created_at: string;
+  created_at: string | null;
 };
 
 /**
@@ -249,7 +262,10 @@ export function normaliseListItem(r: Record<string, unknown>): ThoughtListItem {
     id: String(r.id),
     content: String(r.content),
     metadata: (r.metadata ?? {}) as Record<string, unknown>,
-    created_at: isoTimestamp(r.created_at),
+    // SMD-1328: the column is nullable, so map a SQL NULL to null rather than
+    // the epoch `new Date(null)` fabricated. See `isoTimestamp`'s header for the
+    // full decision and `thoughts.ts` `displayDate` for how the tools render it.
+    created_at: isoTimestampOrNull(r.created_at),
   };
 }
 

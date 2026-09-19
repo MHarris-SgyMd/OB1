@@ -184,7 +184,7 @@
  * generic plan's flat estimate the walk — and its before/after is
  * OB1_BENCH_UPTO=039 against the default; section C's third column is what
  * the clause saves the generic plan. Migration 041 (SMD-1677 and SMD-1703,
- * change 92) pins `enable_nestloop = on` and `enable_tidscan = on` on the
+ * change 93) pins `enable_nestloop = on` and `enable_tidscan = on` on the
  * function — under an operator's `enable_nestloop = off` every join in the
  * call had become a merge or hash join over the whole table, and on
  * PostgreSQL 18 under `enable_tidscan = off` each of the gate's probes a scan

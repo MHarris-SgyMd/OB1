@@ -196,7 +196,7 @@ console.log("\n[3b] keywordThoughts over PostgREST returns the same shape");
   // The two stores must agree on the SHAPE of a field, not merely have one. This
   // path returned a locale- and timezone-formatted date where the SQL store
   // returns ISO, and every assertion that only checked presence passed.
-  assert(ISO_RE.test(hits[0].created_at),
+  assert(typeof hits[0].created_at === "string" && ISO_RE.test(hits[0].created_at),
          `created_at is an ISO string, as the SQL store returns (got ${hits[0].created_at})`);
 
   // The p_filter argument, which is the jsonb one and therefore the one that
@@ -225,7 +225,7 @@ console.log("\n[3c] hybridThoughts over PostgREST — the path every search take
   assert(rows[0].needleCounts.length === 1 && rows[0].needleCounts[0] === 1, `needle_counts is mapped to numbers (${JSON.stringify(rows[0].needleCounts)})`);
   assert(rows[0].literalOnly === true && rows[0].commonNeedles.length === 0, "literal_only and common_needles are mapped, not left undefined");
   assert(typeof rows[0].similarity === "number" && Math.abs(rows[0].similarity) < 1e-6, `a keyword hit orthogonal to the query reports similarity 0, not null (${rows[0].similarity})`);
-  assert(ISO_RE.test(rows[0].created_at), `created_at is an ISO string (got ${rows[0].created_at})`);
+  assert(typeof rows[0].created_at === "string" && ISO_RE.test(rows[0].created_at), `created_at is an ISO string (got ${rows[0].created_at})`);
 
   const plain = await store.hybridThoughts({ query: "windows", embedding: vec(3), threshold: 0.5, limit: 5, filter: {} });
   const vector = await store.matchThoughts({ embedding: vec(3), threshold: 0.5, limit: 5, filter: {} });
@@ -247,7 +247,7 @@ console.log("\n[3d] Every read method returns the SQL store's timestamp form —
   const kw = await store.keywordThoughts({ query: "PGRST202", limit: 1, offset: 0, filter: {} });
   assert(kw.length === 1, `[3b]'s keyword thought is still there to read back (${kw.length})`);
   const rec = await store.getThought(kw[0].id);
-  assert(rec !== null && ISO_RE.test(rec.created_at), `getThought's created_at is ISO (got ${String(rec?.created_at)})`);
+  assert(rec !== null && typeof rec.created_at === "string" && ISO_RE.test(rec.created_at), `getThought's created_at is ISO (got ${String(rec?.created_at)})`);
   assert(rec !== null && (rec.updated_at == null || ISO_RE.test(rec.updated_at)), `getThought's updated_at is null or ISO (got ${String(rec?.updated_at)})`);
   assert((await store.getThought("not-a-uuid")) === null, "a malformed id is null on this store too, not a uuid cast error");
 
@@ -266,7 +266,7 @@ console.log("\n[3d] Every read method returns the SQL store's timestamp form —
     // By id, not position: a NULL created_at sorts above +infinity under DESC,
     // so a later undated fixture must not turn this into a misleading failure.
     const list = await store.listThoughts({ limit: 50 });
-    assert(list.find((r) => r.id === plantedId)?.created_at === "infinity" && list.filter((r) => r.id !== plantedId).every((r) => ISO_RE.test(r.created_at)),
+    assert(list.find((r) => r.id === plantedId)?.created_at === "infinity" && list.filter((r) => r.id !== plantedId).every((r) => typeof r.created_at === "string" && ISO_RE.test(r.created_at)),
            `listThoughts: the planted row is "infinity", every other created_at is ISO (${list.map((r) => r.created_at).join(" ").slice(0, 80)})`);
     const page = await store.pageThoughtMeta(0, 50);
     assert(page.some((r) => r.created_at === "infinity") && page.filter((r) => r.created_at !== "infinity").every((r) => r.created_at !== null && ISO_RE.test(r.created_at)),
@@ -420,6 +420,16 @@ console.log("\n[8] statsSummary aggregates the corpus through the page walk this
   const undatedId = await plantLegacyRow(sql, "a row with no date", "[" + vec(7).join(",") + "]", null);
   const s = await (async () => {
     try {
+      // SMD-1328: the undated row reads back as null on every read method, not
+      // the fabricated epoch new Date(null) gave (the parity change [3d] notes
+      // made both stores return the epoch here; now both return null). vec(7)
+      // is the axis this row was planted on, so it is the only hit.
+      const hit = (await store.matchThoughts({ embedding: vec(7), threshold: 0.5, limit: 5, filter: {} })).find((r) => r.id === undatedId);
+      assert(hit?.created_at === null, `matchThoughts: an undated row is null, not the epoch (got ${JSON.stringify(hit?.created_at)})`);
+      const rec = await store.getThought(undatedId);
+      assert(rec?.created_at === null, `getThought: null (got ${JSON.stringify(rec?.created_at)})`);
+      const listed = (await store.listThoughts({ limit: 50 })).find((r) => r.id === undatedId);
+      assert(listed?.created_at === null, `listThoughts: null (got ${JSON.stringify(listed?.created_at)})`);
       const [range] = await sql`SELECT min(created_at) AS oldest, max(created_at) AS newest FROM thoughts`;
       const s = await store.statsSummary();
       // The store's own formatter as the oracle, not a second one: on the edges
