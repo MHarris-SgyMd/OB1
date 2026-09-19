@@ -502,5 +502,60 @@ console.log("\n[10] listSupersessionProposals's rpc shape over PostgREST (migrat
   await admin.close();
 }
 
+console.log("\n[11] The query log's action rows over PostgREST: one or many through the one writer (migration 034, SMD-1719)");
+{
+  // The hosted deployment's path for every fetch, edit and cite: logActions'
+  // ARRAY insert through the client. Read back by SQL so the rows are checked
+  // as stored, not as the client echoed them. The search row is seeded by SQL:
+  // logSearch through THIS shim is a pre-existing divergence (uuid[] + real[]
+  // with a null element — see SMD-1602), not this ticket's writer.
+  const admin = new SQL({ url: URL_, max: 1 });
+  await admin`DELETE FROM query_log`;
+  const AG = "99999999-9999-4999-8999-999999999999";
+  const X = "aaaaaaaa-0000-4000-8000-000000000001";
+  const Y = "aaaaaaaa-0000-4000-8000-000000000002";
+  await admin`
+    INSERT INTO query_log (kind, tool, agent_id, query, match_count, threshold, recency_weight, filter, result_ids, result_scores)
+    VALUES ('search', 'search_thoughts', ${AG}::uuid, 'postgrest log', 5, 0, 0, '{}'::jsonb, ARRAY[${X},${Y}]::uuid[], ARRAY[0.9, NULL]::real[])`;
+  await store.logActions([]);
+  await store.logActions([{ tool: "fetch", agentId: AG, targetId: X }]);
+  await store.logActions([
+    { tool: "update_thought", agentId: AG, targetId: Y },
+    { tool: "update_thought/supersedes", agentId: AG, targetId: X },
+    { tool: "capture_thought/derived_from", agentId: undefined, targetId: Y },
+  ]);
+  const rows = await admin<{ kind: string; tool: string; agent_id: string | null; target_id: string | null; query: string | null; n_ids: number | null }[]>`
+    SELECT kind, tool, agent_id, target_id, query, cardinality(result_ids) AS n_ids FROM query_log ORDER BY kind, tool, target_id`;
+  const search = rows.filter((r) => r.kind === "search");
+  const acts = rows.filter((r) => r.kind === "action");
+  assert(search.length === 1 && search[0].query === "postgrest log" && search[0].n_ids === 2 && search[0].agent_id === AG, `one search row with its two ids (${JSON.stringify(search[0])})`);
+  assert(acts.length === 4, `an empty batch wrote nothing; a batch of one and a batch of three wrote four action rows (${acts.length})`);
+  assert(acts.some((r) => r.tool === "fetch" && r.target_id === X && r.agent_id === AG), "the single-row batch landed as a plain open");
+  assert(acts.some((r) => r.tool === "update_thought/supersedes" && r.target_id === X), "a cite row keeps its <writer>/<pointer> tool through the array insert");
+  assert(acts.some((r) => r.tool === "capture_thought/derived_from" && r.agent_id === null), "an undefined agent lands as SQL NULL through the array insert");
+  // The same contract as the SQL writer (normaliseActionRows): an empty-string
+  // agent is NULL, not a 22P02 that drops the batch (eighth review pass); a
+  // malformed id is refused by column before the request, nothing written.
+  await store.logActions([{ tool: "delete_thought", agentId: "", targetId: Y }]);
+  const [{ n_empty }] = await admin<{ n_empty: number }[]>`SELECT count(*)::int AS n_empty FROM query_log WHERE kind = 'action' AND tool = 'delete_thought' AND agent_id IS NULL`;
+  assert(n_empty === 1, "an empty-string agent lands as SQL NULL through the array insert too");
+  let refused = "";
+  try { await store.logActions([{ tool: "fetch", agentId: "not-a-uuid", targetId: X }]); } catch (e) { refused = (e as Error).message; }
+  assert(/logActions: not a uuid for agent_id: not-a-uuid/.test(refused), `a malformed agent is refused by column on the hosted writer (${refused.slice(0, 60)})`);
+  refused = "";
+  try { await store.logActions([{ tool: "fetch", agentId: AG, targetId: X }, { tool: "fetch", agentId: AG, targetId: "abc}" }]); } catch (e) { refused = (e as Error).message; }
+  assert(/logActions: not a uuid for target_id: abc\}/.test(refused), `a malformed target is refused by column on the hosted writer (${refused.slice(0, 60)})`);
+  const [{ n_all }] = await admin<{ n_all: number }[]>`SELECT count(*)::int AS n_all FROM query_log WHERE kind = 'action'`;
+  assert(n_all === 5, `…and the refused batches wrote nothing (${n_all})`);
+  // The export join over what this store wrote: the cite of X links to the search.
+  const [{ from_query }] = await admin<{ from_query: string | null }[]>`
+    SELECT (SELECT s.query FROM query_log s WHERE s.kind='search' AND s.agent_id IS NOT DISTINCT FROM act.agent_id
+              AND s.logged_at <= act.logged_at AND s.result_ids @> ARRAY[act.target_id] ORDER BY s.logged_at DESC LIMIT 1) AS from_query
+      FROM query_log act WHERE act.kind='action' AND act.tool = 'update_thought/supersedes'`;
+  assert(from_query === "postgrest log", `034's join attributes the cite this store wrote (${from_query})`);
+  await admin`DELETE FROM query_log`;
+  await admin.close();
+}
+
 await store.close();
 report();

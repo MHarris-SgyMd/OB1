@@ -968,8 +968,15 @@ else {
   const reapplied033 = await run(SQL_ENV);
   assert(reapplied033.code === 0 && /atomic capture\s+the 2- and 3-argument upsert_thought present, and the 3-argument body carries 022's rule, 025's envelope and the fingerprint lock, but it is from before migration 035 \(migration 035 is not yet applied, or 033 was re-applied by hand\): a re-capture naming supersedes fills a NULL pointer without walking the chain, so a dedup can write a two-row loop, and every capture naming supersedes holds the supersession lock through its insert/.test(reapplied033.out) && /Apply db\/migrations\/035_recapture_writes_no_provenance\.sql\./.test(reapplied033.out) && !/either/.test(reapplied033.out) && !/2-argument body is not/.test(reapplied033.out),
          "033 re-applied over 035 puts the fill and the supersession lock back, and the start warns naming 035 — the cause hedged with no ledger — with the 2-argument body not mentioned");
+  // The query-log check reads the same verdict (SMD-1719): a body from before
+  // 035 answers no `existed`, so no cite row is ever logged on this brain, and
+  // the line says so rather than reporting the log as complete.
+  assert(/query log\s+present; .*Cite rows \(a write naming a returned id as its source, SMD-1719\) need migration 035's upsert_thought and will NOT be logged on this brain/.test(reapplied033.out) && /!  query log/.test(reapplied033.out),
+         "…and the query-log line warns that cite rows will not be logged under the pre-035 body");
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("035") });
-  assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, both 035's/.test((await run(SQL_ENV)).out), "…and 035 after it is the shipped pair again");
+  const shippedAgain = await run(SQL_ENV);
+  assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, both 035's/.test(shippedAgain.out), "…and 035 after it is the shipped pair again");
+  assert(/✓  query log\s+present; /.test(shippedAgain.out) && !/will NOT be logged/.test(shippedAgain.out), "…and the query-log line is ok again, without the cite warning");
   // The 2-argument form from before 005 — what the getting-started guide, the
   // fingerprint recipe's Step 2 and upstream's enhanced-thoughts schema all
   // carry — over 035's (SMD-1250): 003 re-applied is that statement. A warning
