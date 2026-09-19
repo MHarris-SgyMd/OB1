@@ -13697,8 +13697,9 @@ stands — 019's "no other SET" was written about the walk bounds (the
 operator's database-level knob) and a plan mode, and `jit` is neither; 017
 and 027 have carried it since.
 
-**The bench at a million rows, and what the pair could not say.** The
-before arm (`OB1_BENCH_UPTO=038`) and the after arm, each on its own
+**The bench at a million rows, and what the pair could not say.** Run on
+the tree before 039 landed, where 038 was the function before this one: the
+before arm (`OB1_BENCH_UPTO=038` there) and the after arm, each on its own
 container and corpus, agreed on every tier but two: the 5,000-row and 1%
 tiers — both routed to the walk branch, with K=10 the exact threshold is
 1,000 — ran the walk statement as an HNSW walk under 038 (546 and 424 ms,
@@ -13798,13 +13799,13 @@ redefinition without it leaves), pays the compile on every call: 55 ms a call
 against 8 with the clause, 8 by default on that fixture. The forced-on plan
 and the timing run only where the server has JIT and its own `jit` is on,
 on 14–17, and are one skipped group otherwise; the catalog and plan
-checks run everywhere. test-upgrade [18] applies 040 onto a populated 038:
+checks run everywhere. test-upgrade [18] applies 040 onto a populated 039:
 no column, signature, row or privilege moves, the body byte for byte,
 `jit=off` beside 014's and 019's clauses, and after a hand re-apply of 014
 puts the 4-argument form back, 040 alone drops it again. db/bench-hnsw.ts
 section C's third arm, which had been the generic plan with `jit = off`,
 now forces `jit = on` over the function's clause: the column is what the
-clause saves, and on a body before 040 (`OB1_BENCH_UPTO=038`, the new before
+clause saves, and on a body before 040 (`OB1_BENCH_UPTO=039`, the new before
 arm) the last two columns agree.
 
 **What it costs where it does nothing.** One more `proconfig` entry, set at
@@ -13836,7 +13837,8 @@ database-level `jit = off` made the mutant compile nothing and the tooth
 fail with 040 correct) and bounds the fixed call at the default plus 25 ms,
 the compile's size, where `3 × default` was loose; the "byte for byte"
 claim is checked in the fast loop too (test-schema [20] re-applies 038
-alone: same body, no jit clause; 904); README's [5d] paragraph and two
+alone: same body, no jit clause — 039 since the merge; 904 then, 925 on the
+merged tree); README's [5d] paragraph and two
 header figures corrected. What the run-it reviewer verified: the clause
 deleted from 040 is killed in all four suites — test-schema [20] and [21],
 test-upgrade [18] twice, test-live [5e] eight times including all three
@@ -13914,7 +13916,7 @@ plan under each disabled path cost 36–1,490" was this finding unread. Also:
 than a printed line, so the count reads as 514 on 14–17 with JIT and fewer
 with skips elsewhere (the README count line says so); the pending-040
 remedy carries its note about 019's clauses only when those are missing,
-not for the common brain at 038 with the jit clause alone to gain;
+not for the common brain at 039 with the jit clause alone to gain;
 preflight's warn strings and the README's [5e] paragraph say 14–17 for the
 compile and what the clause guards on 18; the bound's comment cited seven
 runs for a figure four support and a 150 ms figure that was row-level
@@ -13953,15 +13955,13 @@ pointed at this file's Prerequisites, which do not describe 13 (038's do);
 "eight heap reads per filtered call" read as page reads where it meant
 whole-heap scans; the first screen's parenthetical had grown to five ragged
 lines and said "Failure modes below" twice; a bullet ended with "call"
-alone on a line; the bound's comment cited seven runs where four support
-the figure and a 150 ms figure that was row-level security's; [5e]'s 18
+alone on a line; [5e]'s 18
 message named the node it expected rather than the one the plan had, and
 its 14–17 label claimed a JIT term that cannot bite on a server without JIT
 or with its own `jit` off (the proconfig assertions are the clause's teeth
 there, as on 18); the `failed` list could blame a forced-on plan that was
 never forced; SMD-1703's table gained the 2,469-page row this section
-already quoted; this paragraph's `keywordAlter` was pass 2's name for
-`kwAlter`; a probe's comment named 019 where the remedy now turns on 040.
+already quoted.
 What the run-it reviewer verified: every mutant of pass 3's additions was
 killed by exactly the predicted assertion — the node regexes swapped (each
 message ending "— but: no Tid Range Scan" or "— but: no Seq Scan"), the
@@ -13977,17 +13977,48 @@ a skipped group. Not changed: the 14–17 assertion's JIT term is still one
 conjunction with the cost and node terms; on a server without JIT the label
 says which term cannot bite rather than splitting it.
 
+Pass 5, the same two reviewers on the merge. What changed: [5e]'s
+"the mutant pays the compile" tooth had compared the two arms with each
+other — `mutant − fixed ≥ 10` — and passed with the clause deleted from
+040, both arms compiled and 12.9 ms apart, which is the compiled call's own
+noise (the fixed-against-default bound was the tooth in that pair); each
+arm is judged against the default now, the mutant at least 20 ms over it
+and the fixed call at most 20 ms over it, run with the clause deleted:
+44.9 against 11.5 fails, 45.6 against 11.5 passes, as they should.
+[5d]'s "installed" and "restored" assertions read the body's floor and the
+probe, which 039's body satisfies too, so a slip back to applying 039 had
+left 039 as the shipped state for the sections after and nothing said —
+both read the `jit=off` clause now. Prose the renumber left behind: the
+operator's-path paragraph described a 38-file tree, a brain "at 038" with
+one pending file and 038's file pasted over 040 (which also loses 039's
+cast and trips the `walk index` check) — it is 039's file, 40 files, a
+brain at 039; "test-upgrade [18] onto a populated 038" and "`OB1_BENCH_UPTO=038`,
+the new before arm" said 038 where the code says 039; the header's
+`enable_nestloop` table pointer said change 81, which is SMD-1501's; this
+Review had re-recorded three pass-3 fixes under pass 4; "test-schema [20]
+re-applies 038 alone" and "the common brain at 038" said 038 for 039. What
+the run-it reviewer verified on the merged tree: clean controls 925 / 221 /
+523 on 16 and 516 with one skipped group on 18 / 224; the clause deleted
+from 040 is killed in test-schema three times (the `reapply("039")` block
+passes by design — it pins 039's clauses, not 040's), test-upgrade [18]
+twice, test-live [5e] seven times and test-preflight four times. Not
+changed: main's change 81 still describes the pre-040 tree as fact ("[8e]
+and [20] pin 039", "[5d] applies 039") — numbered sections are history,
+and change 80's pointers were annotated because they were forward references
+to this ticket.
+
 **The operator's path, walked.** A brain with rows migrated by `bun
-db/migrate.ts` through 040 (on a brain at 038 it is the one pending file):
+db/migrate.ts` through 040 (on a brain at 039 it is the one pending file):
 one `match_thoughts` whose `proconfig` reads `hnsw.iterative_scan=relaxed_order,
 enable_seqscan=off, jit=off`, preflight's `candidate scan` ok naming all
-three, a filtered call answering as before. The same brain with 038's file
-pasted over 040 by hand: the plain run reports "applied 0, skipped 39", the
-body is unchanged, and what is lost is the clause — `candidate scan` warns
+three, a filtered call answering as before. The same brain with 039's file
+pasted over 040 by hand (for its index swap, say): the plain run reports
+"applied 0, skipped 40", the body is unchanged — 039's and 040's are the
+same — and what is lost is the clause — `candidate scan` warns
 "carries enable_seqscan = off and both row estimates hold, but not jit = off
 although migration 040 is recorded as applied — a later redefinition dropped
 its SET clause" with `ALTER FUNCTION match_thoughts(…) SET jit = off;` as
-the remedy, and `migrate.ts --reapply` (39 re-applied) restores it with
+the remedy, and `migrate.ts --reapply` (40 re-applied) restores it with
 everything else, after which the check is ok again. The PostgREST contract
 is byte-identical to 020's.
 

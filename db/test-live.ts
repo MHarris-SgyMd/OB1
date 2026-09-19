@@ -419,13 +419,17 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
   // SchemaOptions carries.
   const opts040 = { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f: string) => f.startsWith("040") };
   const body = async () => String((await sql`SELECT prosrc AS s FROM pg_proc WHERE oid = ${MATCH_THOUGHTS_SIGNATURE}::regprocedure`)[0].s);
+  // 040's clause, read with the body: 039's body satisfies every other check
+  // here, so without this a slip back to applying 039 would leave 039 as the
+  // shipped state for the sections after and nothing would say (review pass 5).
+  const hasJitOff = async () => /(^|,)jit=off(,|$)/.test(String((await sql`SELECT array_to_string(proconfig, ',') AS c FROM pg_proc WHERE oid = ${MATCH_THOUGHTS_SIGNATURE}::regprocedure`)[0].c ?? ""));
   // The floor lowered to 0 for the section, so the gate runs on this heap.
   // Applied BEFORE the index is dropped and the rows loaded, the order 039
   // needed (040 carries no index swap, and keeps the order): 039's swap block
   // builds the index when the shipped name is missing, and a build over
   // 25,000 rows at the shipped width is the minute this section avoids.
   await applyMigrations(URL_, { ...opts040, routeEstimateMinPages: 0 });
-  assert(/IF v_pages >= 0 THEN/.test(await body()) && TID_PROBE.test(await body()), "040 is installed with its floor at 0 (038's gate, carried through 039): the sample runs on every filtered call to this table");
+  assert(/IF v_pages >= 0 THEN/.test(await body()) && TID_PROBE.test(await body()) && (await hasJitOff()), "040 is installed with its floor at 0 (038's gate, carried through 039) and jit = off on the function: the sample runs on every filtered call to this table");
   await sql.unsafe(`DROP INDEX thoughts_embedding_idx`);
   // User triggers off for the load, as the bench does: 008's audit trigger
   // would write a row per row (25,000 here, then 25,000 more for the DELETE)
@@ -583,7 +587,7 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
       await sql.unsafe(`VACUUM thoughts`);
       await sql.unsafe(String(hnswDef));
       await applyMigrations(URL_, { ...opts040, only: (f) => f.startsWith("027") || f.startsWith("040") });
-      assert(new RegExp(`IF v_pages >= ${ROUTE_ESTIMATE_MIN_PAGES} THEN`).test(await body()) && TID_PROBE.test(await body()), `040 restored with the shipped floor of ${ROUTE_ESTIMATE_MIN_PAGES} pages`);
+      assert(new RegExp(`IF v_pages >= ${ROUTE_ESTIMATE_MIN_PAGES} THEN`).test(await body()) && TID_PROBE.test(await body()) && (await hasJitOff()), `040 restored with the shipped floor of ${ROUTE_ESTIMATE_MIN_PAGES} pages and jit = off`);
       assert(/ob1:relative-floor/.test(String((await sql`SELECT prosrc AS s FROM pg_proc WHERE oid = 'search_thoughts_hybrid(vector, text, float, int, jsonb, float, float)'::regprocedure`)[0].s)),
         "…and search_thoughts_hybrid carries 027's sentinel again, not the 020 body the re-apply above installed");
     } catch (cleanup) {
@@ -752,17 +756,24 @@ console.log("\n[5e] A planner path disabled at session level no longer JIT-compi
       const mutant = await median(gucs);
       await applyMigrations(URL_, { ...opts040, routeEstimateMinPages: 0 });
       assert(/(^|,)jit=off(,|$)/.test(await proconfig()), "…and 040 re-applied puts the clause back");
-      assert(mutant - fixed >= 10, `through the function under ${label} the mutant pays the compile on every call: ${mutant.toFixed(2)} ms a call against ${fixed.toFixed(2)} with 040's clause (default ${baseline.toFixed(2)})`);
+      // Each arm judged against the default, not against the other: with the
+      // clause deleted from 040 both arms compile and differed by 12.9 ms, so
+      // a `mutant - fixed >= 10` passed with the mechanism removed (run-it,
+      // pass 5). The compile is 40–70 ms over a default of 8–13 (a 45 ms
+      // compiled call over an 11.5 ms default was the closest run); 20 ms of
+      // headroom kills a compiled "fixed" arm and survives the runner's
+      // fixed-minus-default spread of 0.2–4 ms.
+      assert(mutant >= baseline + 20, `through the function under ${label} the mutant pays the compile on every call: ${mutant.toFixed(2)} ms a call against a default of ${baseline.toFixed(2)} (with 040's clause: ${fixed.toFixed(2)})`);
       // The bound is the compile's size, not a multiple of the default: the
       // compiled call through the function is 51–105 ms in 040's header and
-      // 49.6–87 across the review runs (EXPLAIN's JIT total for the sample
+      // 45–87 across the review runs (EXPLAIN's JIT total for the sample
       // alone 40–70), so 25 ms of headroom over the default kills the
       // mechanism-removed value and survives a noisy runner: fixed against
       // default read 7.9–8.9 against 8.0–8.2 in pass 1 and 0.2–1.3 ms apart
       // over pass 2's four runs. The compiled arm itself is the noisy one (two
       // compiled medians in one run were 31 ms apart), which is why the tooth
       // above compares it with the uncompiled arm and asks only for 10 ms.
-      assert(fixed <= baseline + 25, `…and with the clause the disabled path costs what the default costs: ${fixed.toFixed(2)} ms against ${baseline.toFixed(2)} (the compiled call is 51–105 ms)`);
+      assert(fixed <= baseline + 20, `…and with the clause the disabled path costs what the default costs: ${fixed.toFixed(2)} ms against ${baseline.toFixed(2)} (the compiled call is 45–105 ms)`);
     } else if (!disableCost) {
       skip("[5e] the mutant arm through the function", "PostgreSQL 18: a disabled path is counted, not costed, so there is no compile to time");
     } else {
