@@ -13967,7 +13967,7 @@ now checked.
 
 **Upstream status:** not applicable — the eval is this fork's.
 
-### 89. A thought cited as a source cannot be deleted from under the citation — `thought_facets` with one kind, a statement-level guard on `thoughts` that refuses with its own SQLSTATE, `delete_thought` answering it as a value with the citing rows named, and a detach opt-in (SMD-1712)
+### 91. A thought cited as a source cannot be deleted from under the citation — `thought_facets` with one kind, a statement-level guard on `thoughts` that refuses with its own SQLSTATE, `delete_thought` answering it as a value with the citing rows named, and a detach opt-in (SMD-1712)
 
 Nothing on the fork recorded that one thought is the *source* of a statement
 made in another. Change 46 (migration 025) records what a thought was derived
@@ -14058,10 +14058,27 @@ new citation's writer takes `KEY SHARE` on the source and waits on the
 `DELETE`'s own row lock. The detached shape is accepted by the validate trigger
 only as the guard writes it — from the source the row had, once that thought
 is gone, with a real timestamp — so a raw `UPDATE` cannot detach a live
-citation or forge a deletion; and the source id is stored canonical, since the
-validate regex is case-insensitive and a raw writer's upper-case uuid would
+citation or forge a deletion; a detached citation is not re-pointed at a new
+source either, since the reverse transition would leave the deletion keys
+beside a live source (third pass); and the source id is stored canonical, since
+the validate regex is case-insensitive and a raw writer's upper-case uuid would
 otherwise have been invisible to the guard's text compare — its source
-deletable from under it (both second pass; [39]).
+deletable from under it (both second pass; [39]). `superseded_by` carries a
+partial index, because its `SET NULL` is a referential action that scans for
+the pointing rows on every facet the `thought_id` cascade removes (third pass).
+
+**Under READ COMMITTED.** Every lock-order argument on this fork — change 40's
+fingerprint lock, 63's one order, 68's delete, this guard — holds because a
+writer that waits on a row lock re-reads the row the lock won. A deleting
+transaction run `REPEATABLE READ` or `SERIALIZABLE` reads its own snapshot in
+the guard, so a citation committed after that snapshot and before the
+`DELETE` is invisible to it and its source goes from under it; a real foreign
+key uses a crosscheck snapshot a trigger cannot. The third review pass named
+it; the header states the assumption, and preflight gains a **`transaction
+isolation`** check that warns — not refuses — when the connection's default is
+not read committed, naming the guarantees that rest on it and the `ALTER ROLE`
+that restores it. The guard itself does not refuse on isolation, since every
+other guarantee here already stands or falls with the same setting.
 It totals what it did in two transaction-local settings, summed across
 statements. The refusal is the *table's*: a bulk `DELETE`, a vendored script,
 `psql` all meet it, the way 008's append-only rule is `thought_audit`'s; the
@@ -14088,7 +14105,10 @@ on a delete as "cited". Success carries `detached:n` and, when non-zero,
 `inactive:m`. The mode is the *call's*, not the transaction's: the setting that
 was there is put back after the block, so a raw `DELETE` later in the same
 transaction meets the guard's default, or the caller's own setting, and not
-this call's `p_detach` (first review pass; [39]). The two-argument overload is
+this call's `p_detach` (first review pass; [39]); the two running totals are
+put back the same way with this call's added, so a raw detach transaction that
+calls the function in the middle keeps the sum the guard's comment promises
+(third pass). The two-argument overload is
 **dropped first** (a `DEFAULT` on the third parameter beside it makes every
 two-argument call "not unique"); two-argument callers — `db/test-live.ts`
 [6g], the vendored servers' `rpc` calls — resolve through the default, which
@@ -14144,7 +14164,10 @@ started green and failed every delete at the first user call with "function
 does not exist", and a hand re-apply of 009 or 036 over 041 would put the
 two-argument form back beside it and make every two-argument caller "not
 unique" — the check names each state with its remedy, as 032's does for
-`update_thought`. And a citation's text in a refusal goes through the same
+`update_thought`; over PostgREST, where the catalog is out of reach, the same
+check probes `delete_thought` with an id no row has, as the edit check does,
+since the hosted brain is the one that deploys a server ahead of a migration
+(third pass). And a citation's text in a refusal goes through the same
 `cleanForDisplay` every other thought-derived text in a reply does — the first
 draft had re-implemented the one-line snip without it, the only place a
 thought's text would have reached a terminal with its control characters
@@ -14187,7 +14210,22 @@ precheck ([6i] arm 5), a superseder already gone still superseding, the
 citation text skipping the cleaner, preflight treating every `delete_thought`
 form as current, the id stored as written, a live source detached by a raw
 `UPDATE`, a non-timestamp accepted as the deletion time, a `source_deleted_id`
-the row never had, the store's `typeof` guard on the count.
+the row never had, the store's `typeof` guard on the count; and from the third
+pass, a detached citation re-pointed, the superseder index dropped, the totals
+not put back, the isolation check treating every level as read committed.
+
+**Considered and kept as is.** The third review pass argued the source pointer
+should be typed columns — `source_id uuid`, `source_deleted_id uuid`,
+`source_deleted_at timestamptz` — since the upper-case id, the forged detach
+and the non-timestamp findings of passes 1–2 are what jsonb keys cost that
+types give for free. They are; but `thought_facets` is a sidecar of *kinds*,
+each with its own payload, and a column trio for one kind on a table whose
+next kinds (a procedure's trigger predicate, a validity window) carry other
+pointers puts the per-kind shape back into DDL, which is what the payload and
+the one validate function exist to avoid. The validate trigger is the one
+place a kind's shape is checked, and every defect found there is now held by
+a test. Revisit when a second kind carrying a thought pointer lands; if it
+needs the same block, that is the moment for a shared column.
 
 **Not built, and why.** The proposal's vocabulary registry, corrections table,
 coverage and yield views (each a later ticket if the facet earns its keep);

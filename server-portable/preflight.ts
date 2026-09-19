@@ -94,7 +94,7 @@ const CATALOG_HINT = "run once with OB1_STORE=sql to read the catalog";
 const DIRECT_CHECKS = [
   "vector extension",
   "atomic capture", "write privileges", "fingerprint backfill", "audit trail", "agent identity",
-  "keyword search", "hybrid search", "stats summary", "provenance", "work claims", "search signatures", "edit signature", "delete signature", "filtered search",
+  "keyword search", "hybrid search", "stats summary", "provenance", "work claims", "search signatures", "edit signature", "delete signature", "transaction isolation", "filtered search",
   "candidate scan", "walk index", "chunk context", "trigram index", "embedding contract", "vector models",
   "updated_at trigger", "re-embed pass", "consolidate pass", "migration ledger", "query log",
 ];
@@ -119,6 +119,7 @@ const APPLY_020_POSTGREST = `Apply the migrations through db/migrations/039_matc
 const APPLY_021 = "Apply db/migrations/021_embedding_model_per_row.sql.";
 const APPLY_032 = "Apply db/migrations/032_update_thought_provenance.sql.";
 const APPLY_041 = "Apply db/migrations/041_thought_citations.sql.";
+const APPLY_041_POSTGREST = `Apply the migrations through db/migrations/041_thought_citations.sql against the project's direct connection (server-portable/README.md §4). ${RELOAD_HINT}`;
 /**
  * Where the ledger already records the migration a check finds absent — a
  * brain adopted with --baseline whose schema is the guide's — "apply it" is a
@@ -533,6 +534,44 @@ if (configFailed) {
         } catch (e) {
           add("edit signature", "skip", `could not probe update_thought over PostgREST (${(e as Error).message}); ${CATALOG_HINT}`);
         }
+        /**
+         * Migration 041 gave delete_thought a third parameter, p_detach, by
+         * dropping the two-argument form, and the store sends all three by
+         * name on every delete. Probed as the store calls it, with an id no
+         * row has: the function answers {ok:false, error:'NOT_FOUND'} and
+         * writes nothing. PGRST202 is a form from before 041 (or no
+         * function); then two named arguments, which only a two-argument form
+         * re-created beside 041's by a hand re-apply of 009 or 036 makes
+         * ambiguous — and that breaks every PostgREST caller by name from
+         * before this change (third review pass).
+         */
+        try {
+          const nobody = "00000000-0000-4000-8000-000000000000";
+          const { data: three, error: threeErr } = await legacy.rpc("delete_thought", { p_id: nobody, p_actor: null, p_detach: false });
+          if (threeErr && missing(threeErr.message)) {
+            add("delete signature", "fail",
+                "delete_thought does not take p_detach over PostgREST — it is missing or is a form from before migration 041 — and the server sends it on every delete, so every delete_thought call would fail",
+                APPLY_041_POSTGREST);
+          } else if (threeErr) {
+            add("delete signature", "skip", `could not probe delete_thought over PostgREST (${threeErr.message}); ${CATALOG_HINT}`);
+          } else if ((three as { error?: string } | null)?.error !== "NOT_FOUND") {
+            add("delete signature", "skip", `delete_thought answered a probe for an id no row has with ${JSON.stringify(three)} rather than NOT_FOUND; ${CATALOG_HINT}`);
+          } else {
+            const { error: twoErr } = await legacy.rpc("delete_thought", { p_id: nobody, p_actor: null });
+            if (!twoErr) {
+              add("delete signature", "ok", "delete_thought takes 041's arguments over PostgREST, and a 2-argument call resolves to one function — no earlier form beside it");
+            } else if (/could not choose|PGRST203|not unique/i.test(twoErr.message)) {
+              add("delete signature", "fail",
+                  "delete_thought has more than one form — 009 or 036 re-applied by hand beside 041's — and PostgREST cannot choose between them for a call with two arguments, so every caller by name from before this change fails",
+                  "Drop the earlier form, as 041 does, against the project's direct connection: DROP FUNCTION IF EXISTS delete_thought(uuid, jsonb);");
+            } else {
+              add("delete signature", "skip", `could not probe delete_thought over PostgREST (${twoErr.message}); ${CATALOG_HINT}`);
+            }
+          }
+        } catch (e) {
+          add("delete signature", "skip", `could not probe delete_thought over PostgREST (${(e as Error).message}); ${CATALOG_HINT}`);
+        }
+        add("transaction isolation", "skip", `not checked over PostgREST — the connection's default isolation level is read over a direct connection; ${CATALOG_HINT}`);
       }
       // The 3-argument upsert_thought's body (022's sentinel) and the role's
       // DELETE on thought_chunks are catalog facts; over PostgREST neither is
@@ -1308,6 +1347,31 @@ if (configFailed) {
           }
         } catch (e) {
           add("delete signature", "warn", `could not verify: ${(e as Error).message}`, "The catalog read behind this check needs SELECT on pg_proc.");
+        }
+
+        /**
+         * Every lock-order argument on this fork — 018's fingerprint lock,
+         * 033's one order for the writers, 036's delete, 041's citation guard
+         * — holds under READ COMMITTED, Postgres's default: a writer that
+         * waits on a row lock re-reads the row the lock won. A connection whose
+         * default is REPEATABLE READ or SERIALIZABLE (a role or database
+         * setting, a pooler) reads its transaction's snapshot instead, and
+         * 041's guard then cannot see a citation committed after that
+         * snapshot — its source goes from under it. A warning, not a refusal:
+         * the server still works, the guarantees named do not (third review
+         * pass, SMD-1712).
+         */
+        try {
+          const [{ level }] = (await sql`SELECT current_setting('default_transaction_isolation') AS level`) as { level: string }[];
+          if (/^read (committed|uncommitted)$/i.test(level)) {
+            add("transaction isolation", "ok", `default_transaction_isolation is ${level} — the level the writers' lock order (018/033/036) and the citation guard (041) are argued under`);
+          } else {
+            add("transaction isolation", "warn",
+                `default_transaction_isolation is ${level}: the writers' lock order (018/033/036) and the citation guard (041) are argued under read committed — under ${level} a transaction reads its own snapshot, so a citation committed after it began is invisible to a delete of its source`,
+                `Set the connection's default back: ALTER ROLE ${ident} SET default_transaction_isolation = 'read committed'; (or at the database or pooler where it was changed).`);
+          }
+        } catch (e) {
+          add("transaction isolation", "warn", `could not verify: ${(e as Error).message}`);
         }
 
         try {

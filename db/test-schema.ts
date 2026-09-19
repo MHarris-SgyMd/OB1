@@ -4405,6 +4405,18 @@ console.log("\n[39] Migration 041: a cited source is refused as a value and deta
   await db.query(`INSERT INTO thought_facets (thought_id, kind, payload) VALUES ($1::uuid, 'citation', jsonb_build_object('text', 't', 'stance', 'stated', 'source_id', upper($2::text)))`, [upperNote, upper]);
   assert((await one<{ s: string }>(`SELECT payload->>'source_id' AS s FROM thought_facets WHERE thought_id = $1::uuid`, [upperNote])).s === upper, "an upper-case source_id from a raw writer is stored canonical");
   assert((await del(upper)).error === "CITED" && (await exists(upper)), "…so the guard finds the citation and refuses the source's delete");
+  // A detached citation is not re-pointed: the reverse transition would leave
+  // the deletion keys beside a live source.
+  assert(/is not re-pointed at a new source/.test(await refuses(`UPDATE thought_facets SET payload = payload || jsonb_build_object('source_id', $2::uuid) WHERE thought_id = $1::uuid AND payload->>'text' = 'an old claim'`, [C2, upper])), "a detached citation cannot be given a new source — that is a new citation");
+  // superseded_by's SET NULL has an index to find the pointing rows by.
+  assert(idx.some((i) => /thought_facets_superseded_by_idx/.test(i.indexdef) && /\(superseded_by\)/.test(i.indexdef) && /WHERE \(superseded_by IS NOT NULL\)/.test(i.indexdef)), "the superseder pointer has its partial index, so the SET NULL cascade probes instead of scanning");
+  // delete_thought puts the caller's running totals back with its own added: a
+  // raw detach transaction that calls it in the middle keeps the sum.
+  const T1 = await thought("total one"), T2 = await thought("total two"), T3 = await thought("total three"), TN = await thought("the note citing all three");
+  await cite(TN, T1, "one"); await cite(TN, T2, "two"); await cite(TN, T3, "three");
+  await db.exec(`BEGIN; SELECT set_config('ob1.cited_delete', 'detach', true); SELECT set_config('ob1.citations_detached', '0', true); DELETE FROM thoughts WHERE id IN ('${T1}', '${T2}'); SELECT delete_thought('${T3}'::uuid, NULL::jsonb, true); CREATE TEMP TABLE zz_1712_sum AS SELECT current_setting('ob1.citations_detached', true) AS n; COMMIT`);
+  assert((await one<{ n: string }>(`SELECT n FROM zz_1712_sum`)).n === "3", "a raw detach of two sources and a delete_thought of a third in one transaction total 3 — the call adds its own to the caller's, not over it");
+  await db.exec(`DROP TABLE zz_1712_sum`);
 
   // Thirteen: the count is the whole, the sample ten.
   const S3 = await thought("a source thirteen notes cite");
