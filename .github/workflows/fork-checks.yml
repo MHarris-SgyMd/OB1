@@ -72,7 +72,7 @@ jobs:
       # is not installed on the maintainer's machine, so a node-only run was
       # the one step nobody could reproduce locally); the script is plain ESM
       # and runs under either.
-      - name: Check metadata, links, dependencies, SQL guards, shell hazards, core-function redefinitions, credential compares, fixture redaction, thought writes and the shim's runtime
+      - name: Check metadata, links, dependencies, SQL guards, shell hazards, core-function redefinitions, credential compares, fixture redaction, thought writes, the shim's runtime and Supabase-isms in schema SQL
         run: bun scripts/check-fork-consistency.mjs
 
   deno-check:

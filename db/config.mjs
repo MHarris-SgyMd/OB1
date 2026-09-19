@@ -1458,10 +1458,82 @@ export const ROLE_GRANTS = Object.freeze({
   querylog: Object.freeze([
     Object.freeze({ table: "query_log", privileges: Object.freeze(["INSERT"]), since: "034" }),
   ]),
+  // The community schemas under schemas/ (SMD-1796), applied by hand beside the
+  // migrations. Upstream's files granted these to Supabase's `service_role`
+  // (and enabled RLS with a policy for it) — a role that does not exist on plain
+  // Postgres, so the first GRANT stopped each file there. Those statements are
+  // gone from the files; this group is what replaces them, so the one grant
+  // path knows the community tables too. `since` names the file, not a
+  // migration. The privileges are the ones upstream gave its service role
+  // (GRANT ALL read as the four DML verbs; append-only tables keep SELECT,
+  // INSERT), plus the two things Supabase's default privileges hid: a
+  // BIGSERIAL column needs USAGE on its sequence (an identity column does not —
+  // test-schema [39] measures both), and a function REVOKEd FROM PUBLIC needs
+  // an EXECUTE. Functions upstream left executable by PUBLIC are not listed:
+  // EXECUTE is PUBLIC's by default. thought-work-claims adds nothing a grant
+  // could cover (015 already created what it creates); thought-audit's table is
+  // 008's, listed here for the SELECT upstream gave beside `capture`'s INSERT.
+  // Presence is per object, not per file: the two rows whose tables a
+  // migration also creates (thought_audit, thought_entities) are therefore
+  // issued on every migrated brain, community schema applied or not — a SELECT
+  // on the audit log and an UPDATE on the mention table, both the operator's.
+  community: Object.freeze([
+    // schemas/thought-audit (008's table; the readers upstream's author-session-id.sql adds need SELECT)
+    Object.freeze({ table: "thought_audit", privileges: Object.freeze(["SELECT", "INSERT"]), since: "schemas/thought-audit" }),
+    // schemas/agent-memory
+    Object.freeze({ table: "agent_memories",              privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/agent-memory" }),
+    Object.freeze({ table: "agent_memory_source_refs",    privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/agent-memory" }),
+    Object.freeze({ table: "agent_memory_artifacts",      privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/agent-memory" }),
+    Object.freeze({ table: "agent_memory_relations",      privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/agent-memory" }),
+    Object.freeze({ table: "agent_memory_review_actions", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/agent-memory" }),
+    Object.freeze({ table: "agent_memory_recall_traces",  privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/agent-memory" }),
+    Object.freeze({ table: "agent_memory_recall_items",   privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/agent-memory" }),
+    Object.freeze({ table: "agent_memory_audit_events",   privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/agent-memory" }),
+    // schemas/per-agent-identity (the SECURITY DEFINER lookup is REVOKEd FROM PUBLIC)
+    Object.freeze({ table: "openbrain_agents",  privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/per-agent-identity" }),
+    Object.freeze({ table: "agent_memory_keys", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/per-agent-identity" }),
+    Object.freeze({ function: "lookup_agent_memory_key(text)", privileges: Object.freeze(["EXECUTE"]), since: "schemas/per-agent-identity" }),
+    // schemas/smart-ingest (bigserial ids; the SECURITY DEFINER append is REVOKEd FROM PUBLIC)
+    Object.freeze({ table: "ingestion_jobs",  privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/smart-ingest" }),
+    Object.freeze({ table: "ingestion_items", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/smart-ingest" }),
+    Object.freeze({ sequence: "ingestion_jobs_id_seq",  privileges: Object.freeze(["USAGE", "SELECT"]), since: "schemas/smart-ingest" }),
+    Object.freeze({ sequence: "ingestion_items_id_seq", privileges: Object.freeze(["USAGE", "SELECT"]), since: "schemas/smart-ingest" }),
+    Object.freeze({ function: "append_thought_evidence(bigint, jsonb)", privileges: Object.freeze(["EXECUTE"]), since: "schemas/smart-ingest" }),
+    // schemas/entity-extraction (upstream's `entities`/`edges`, not 016's ob1_* tables; three bigserial ids;
+    // `thought_entities` is the one name the two share — on a migrated brain the file's IF NOT EXISTS
+    // leaves 016's table, so this row widens `extraction`'s SELECT, INSERT, DELETE on it with UPDATE)
+    Object.freeze({ table: "entities",                privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/entity-extraction" }),
+    Object.freeze({ table: "edges",                   privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/entity-extraction" }),
+    Object.freeze({ table: "thought_entities",        privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/entity-extraction" }),
+    Object.freeze({ table: "entity_extraction_queue", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/entity-extraction" }),
+    Object.freeze({ table: "consolidation_log",       privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/entity-extraction" }),
+    Object.freeze({ sequence: "entities_id_seq",          privileges: Object.freeze(["USAGE", "SELECT"]), since: "schemas/entity-extraction" }),
+    Object.freeze({ sequence: "edges_id_seq",             privileges: Object.freeze(["USAGE", "SELECT"]), since: "schemas/entity-extraction" }),
+    Object.freeze({ sequence: "consolidation_log_id_seq", privileges: Object.freeze(["USAGE", "SELECT"]), since: "schemas/entity-extraction" }),
+    // schemas/typed-reasoning-edges (bigserial id; the upsert RPC is REVOKEd FROM PUBLIC)
+    Object.freeze({ table: "thought_edges", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/typed-reasoning-edges" }),
+    Object.freeze({ sequence: "thought_edges_id_seq", privileges: Object.freeze(["USAGE", "SELECT"]), since: "schemas/typed-reasoning-edges" }),
+    Object.freeze({ function: "thought_edges_upsert(uuid, uuid, text, numeric, integer, text, timestamptz, timestamptz, jsonb)", privileges: Object.freeze(["EXECUTE"]), since: "schemas/typed-reasoning-edges" }),
+    // schemas/wiki-pages (revisions are append-only; the three RPCs are REVOKEd FROM PUBLIC; the identity id needs no sequence grant)
+    Object.freeze({ table: "wiki_pages",             privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/wiki-pages" }),
+    Object.freeze({ table: "wiki_sections",          privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/wiki-pages" }),
+    Object.freeze({ table: "wiki_section_revisions", privileges: Object.freeze(["SELECT", "INSERT"]),                     since: "schemas/wiki-pages" }),
+    Object.freeze({ function: "wiki_upsert_page(text, text, text, jsonb, text)",                               privileges: Object.freeze(["EXECUTE"]), since: "schemas/wiki-pages" }),
+    Object.freeze({ function: "wiki_write_section(uuid, text, text, text, text, jsonb, uuid[], integer, text)", privileges: Object.freeze(["EXECUTE"]), since: "schemas/wiki-pages" }),
+    Object.freeze({ function: "wiki_accept_pending(uuid, text)",                                                privileges: Object.freeze(["EXECUTE"]), since: "schemas/wiki-pages" }),
+    // schemas/crm-person-tiers
+    Object.freeze({ table: "crm_persons",         privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/crm-person-tiers" }),
+    Object.freeze({ table: "crm_person_mentions", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/crm-person-tiers" }),
+    // schemas/readwise-books (upstream granted the table nothing — its integration wrote it through Supabase's default privileges)
+    Object.freeze({ table: "readwise_books", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/readwise-books" }),
+    // schemas/provenance-chains (two SECURITY DEFINER merges, REVOKEd FROM PUBLIC)
+    Object.freeze({ function: "merge_thought_provenance_metadata(uuid, jsonb)", privileges: Object.freeze(["EXECUTE"]), since: "schemas/provenance-chains" }),
+    Object.freeze({ function: "merge_thought_eval_metadata(uuid, jsonb)",       privileges: Object.freeze(["EXECUTE"]), since: "schemas/provenance-chains" }),
+  ]),
 });
 
 /** The order groups are issued and documented in. */
-export const ROLE_GRANT_GROUPS = Object.freeze(["capture", "server", "worker", "extraction", "querylog"]);
+export const ROLE_GRANT_GROUPS = Object.freeze(["capture", "server", "worker", "extraction", "querylog", "community"]);
 
 /**
  * The (table, privilege) pairs the core capture/edit/search path needs
@@ -1522,38 +1594,182 @@ export function queryLogRetentionDays(env) {
   return Number.isFinite(n) && n >= 0 ? n : QUERY_LOG.retentionDaysDefault;
 }
 
-/** Every table named across the given groups (default: all), in group/list order, de-duplicated. */
-export function grantedTables(groups = ROLE_GRANT_GROUPS) {
+/**
+ * A ROLE_GRANTS row's object: the one of `table`, `sequence` or `function` it
+ * names, with its kind. A function is named with its argument types, as GRANT
+ * and to_regprocedure take it (SMD-1796).
+ */
+export function grantObjectOf(row) {
+  if (row.table) return { kind: "table", name: row.table };
+  if (row.sequence) return { kind: "sequence", name: row.sequence };
+  if (row.function) return { kind: "function", name: row.function };
+  throw new Error(`ROLE_GRANTS row names no table, sequence or function: ${JSON.stringify(row)}`);
+}
+/** Every object named across the given groups (default: all), in group/list order, de-duplicated by name: [{ kind, name }]. */
+export function grantedObjects(groups = ROLE_GRANT_GROUPS) {
   const seen = new Set();
   const out = [];
-  for (const g of groups) for (const row of ROLE_GRANTS[g] ?? []) if (!seen.has(row.table)) { seen.add(row.table); out.push(row.table); }
+  for (const g of groups) for (const row of ROLE_GRANTS[g] ?? []) { const o = grantObjectOf(row); if (!seen.has(o.name)) { seen.add(o.name); out.push(o); } }
+  return out;
+}
+/** Every table named across the given groups (default: all), in group/list order, de-duplicated. */
+export function grantedTables(groups = ROLE_GRANT_GROUPS) {
+  return grantedObjects(groups).filter((o) => o.kind === "table").map((o) => o.name);
+}
+/** Every sequence named across the given groups (default: all), in order, de-duplicated. */
+export function grantedSequences(groups = ROLE_GRANT_GROUPS) {
+  return grantedObjects(groups).filter((o) => o.kind === "sequence").map((o) => o.name);
+}
+/** Every function (with argument types) named across the given groups (default: all), in order, de-duplicated. */
+export function grantedFunctions(groups = ROLE_GRANT_GROUPS) {
+  return grantedObjects(groups).filter((o) => o.kind === "function").map((o) => o.name);
+}
+/**
+ * One statement telling which of `objects` (grantedObjects()' shape) exist in
+ * `public`, as rows { kind, name, present } in the order given — tables and
+ * sequences through to_regclass, functions through to_regprocedure (which takes
+ * the argument types as the row spells them). The same text runs under Bun's
+ * SQL (`migrate.ts --grant`) and PGlite (test-schema [39]), so the two cannot
+ * disagree on what "present" means. Names are config's own literals, quoted as
+ * SQL strings all the same.
+ */
+export function grantPresenceSql(objects) {
+  const lit = (v) => `'${String(v).replace(/'/g, "''")}'`;
+  if (objects.length === 0) return `SELECT NULL::text AS kind, NULL::text AS name, false AS present WHERE false`;
+  const values = objects.map((o, i) => `(${i}, ${lit(o.kind)}, ${lit(o.name)})`).join(", ");
+  return `SELECT kind, name,
+       CASE WHEN kind = 'function' THEN to_regprocedure('public.' || name) IS NOT NULL
+            ELSE to_regclass('public.' || name) IS NOT NULL END AS present
+  FROM (VALUES ${values}) AS v(ord, kind, name) ORDER BY ord`;
+}
+/**
+ * GRANT statements giving `role` exactly the privileges the given groups need
+ * (default: all — the do-everything role the guide sets up). Pass `present` (a
+ * Set of object names that exist — tables, sequences and functions alike, the
+ * names as the rows spell them) to skip what a partially-migrated database or an
+ * unapplied community schema lacks; omit it to emit everything. The role is
+ * quoted; the schema USAGE grant is the caller's to add (a schema, not a
+ * table). One GRANT per object, its privileges combined, in group/list order.
+ */
+export function grantStatements(role, { groups = ROLE_GRANT_GROUPS, present = null } = {}) {
+  const ident = quoteIdent(role);
+  // An object can appear in more than one group with different privileges
+  // (ob1_config: SELECT in `server`, INSERT/UPDATE in `worker`; thought_audit:
+  // INSERT in `capture`, SELECT and INSERT in `community`). Merge per object so
+  // the role gets one GRANT combining them, privileges in a stable order.
+  const ORDER = ["USAGE", "SELECT", "INSERT", "UPDATE", "DELETE", "EXECUTE"];
+  const byName = new Map();
+  for (const g of groups) {
+    for (const row of ROLE_GRANTS[g] ?? []) {
+      const o = grantObjectOf(row);
+      if (present && !present.has(o.name)) continue;
+      const entry = byName.get(o.name) ?? { kind: o.kind, set: new Set() };
+      for (const p of row.privileges) entry.set.add(p);
+      byName.set(o.name, entry);
+    }
+  }
+  const out = [];
+  for (const [name, { kind, set }] of byName) {
+    const privs = ORDER.filter((p) => set.has(p)).join(", ");
+    // A sequence's name is a plain identifier; a function's carries its argument
+    // list, which GRANT ... ON FUNCTION takes as written.
+    out.push(kind === "table" ? `GRANT ${privs} ON ${name} TO ${ident};` : `GRANT ${privs} ON ${kind.toUpperCase()} ${name} TO ${ident};`);
+  }
   return out;
 }
 
 /**
- * GRANT statements giving `role` exactly the privileges the given groups need
- * (default: all — the do-everything role the guide sets up). Pass `present` (a
- * Set of table names that exist) to skip the tables a partially-migrated
- * database lacks; omit it to emit every table. The role is quoted; the schema
- * USAGE grant is the caller's to add (a schema, not a table). One GRANT per
- * table, its privileges combined, in group/list order.
+ * SQL with its comments blanked and everything else kept in place — `--` to end
+ * of line and slash-star block comments (nested, as Postgres nests them), outside string
+ * literals ('…', '' doubled), quoted identifiers ("…") and dollar-quoted bodies,
+ * whose inside is scanned the same way (a plpgsql body's `--` is a comment; its
+ * literals are literals). Newlines are kept, so a line number in the result is
+ * a line number in the source (SMD-1796; the literal-aware strip SMD-1316 asked
+ * for — a `--` inside a string no longer hides the rest of its line). Shared by
+ * test-schema [10] and check-fork-consistency's Supabase-isms check through
+ * supabaseIsmsIn(); ownedFunctionsIn keeps its own coarser strip, which blanks
+ * bodies whole because a CREATE inside one is not a definition.
  */
-export function grantStatements(role, { groups = ROLE_GRANT_GROUPS, present = null } = {}) {
-  const ident = quoteIdent(role);
-  // A table can appear in more than one group with different privileges
-  // (ob1_config: SELECT in `server`, INSERT/UPDATE in `worker`). Merge per table
-  // so the role gets one GRANT combining them, privileges in a stable order.
-  const ORDER = ["SELECT", "INSERT", "UPDATE", "DELETE"];
-  const byTable = new Map();
-  for (const g of groups) {
-    for (const row of ROLE_GRANTS[g] ?? []) {
-      if (present && !present.has(row.table)) continue;
-      const set = byTable.get(row.table) ?? new Set();
-      for (const p of row.privileges) set.add(p);
-      byTable.set(row.table, set);
+export function stripSqlComments(text) {
+  let out = "";
+  let i = 0;
+  const n = text.length;
+  const blank = (s) => s.replace(/[^\n]/g, " ");
+  while (i < n) {
+    const c = text[i];
+    const d = text[i + 1];
+    if (c === "-" && d === "-") {
+      let j = text.indexOf("\n", i);
+      if (j === -1) j = n;
+      out += blank(text.slice(i, j));
+      i = j;
+      continue;
     }
+    if (c === "/" && d === "*") {
+      let depth = 1;
+      let j = i + 2;
+      while (j < n && depth > 0) {
+        if (text[j] === "/" && text[j + 1] === "*") { depth++; j += 2; }
+        else if (text[j] === "*" && text[j + 1] === "/") { depth--; j += 2; }
+        else j++;
+      }
+      out += blank(text.slice(i, j));
+      i = j;
+      continue;
+    }
+    if (c === "'" || c === '"') {
+      let j = i + 1;
+      while (j < n) {
+        if (text[j] === c) { if (text[j + 1] === c) { j += 2; continue; } break; }
+        j++;
+      }
+      out += text.slice(i, j + 1);
+      i = j + 1;
+      continue;
+    }
+    if (c === "$") {
+      const m = /^\$([A-Za-z_][A-Za-z0-9_]*)?\$/.exec(text.slice(i, i + 64));
+      if (m) {
+        const tag = m[0];
+        const end = text.indexOf(tag, i + tag.length);
+        if (end !== -1) {
+          out += tag + stripSqlComments(text.slice(i + tag.length, end)) + tag;
+          i = end + tag.length;
+          continue;
+        }
+      }
+    }
+    out += c;
+    i++;
   }
-  const out = [];
-  for (const [table, set] of byTable) out.push(`GRANT ${ORDER.filter((p) => set.has(p)).join(", ")} ON ${table} TO ${ident};`);
   return out;
+}
+
+/**
+ * What a `.sql` file may not run on this fork, each with the reason (SMD-1796).
+ * Tested per line of the comment-stripped text — string literals included,
+ * since `EXECUTE 'GRANT … TO service_role'` runs the grant as surely as the
+ * bare statement does — so a header that quotes one of these to explain its
+ * absence is not a hit, and a statement is.
+ */
+export const SUPABASE_SQL_RULES = Object.freeze([
+  Object.freeze({ name: "service_role", re: /\bservice_role\b/i,
+    msg: "names Supabase's `service_role` — a Supabase-managed role that does not exist on plain Postgres, where the statement fails (`role \"service_role\" does not exist`) and stops the file; grant the connecting role with `migrate.ts --grant` (db/config.mjs ROLE_GRANTS) instead" }),
+  Object.freeze({ name: "supabase-api-role", re: /\b(?:TO|FROM)\s+(?:(?:"?[A-Za-z_][A-Za-z0-9_]*"?|PUBLIC)\s*,\s*)*(?:authenticated|anon)\b/i,
+    msg: "grants to, revokes from or scopes a policy to Supabase's `authenticated`/`anon` — API roles that do not exist on plain Postgres (`role \"authenticated\" does not exist` stops the file); EXECUTE is PUBLIC's by default, and the fork's connecting role is granted through `migrate.ts --grant`" }),
+  Object.freeze({ name: "auth-schema", re: /\bauth\.(?:uid|role|jwt|email)\s*\(|\bauth\.users\b/i,
+    msg: "reaches GoTrue's `auth` schema (`auth.uid()`, `auth.role()`, `auth.users`), which exists only on Supabase — the statement fails elsewhere, and on Supabase the fork's operator is not an Auth user, so such a policy denies every row; the operator model is SMD-1716" }),
+  Object.freeze({ name: "supabase-prefix", re: /\bsupabase_[a-z0-9_]*/i,
+    msg: "names a `supabase_`-prefixed role or schema, which exists only on Supabase" }),
+  Object.freeze({ name: "rls", re: /\bENABLE\s+ROW\s+LEVEL\s+SECURITY\b|\bCREATE\s+POLICY\b/i,
+    msg: "enables row-level security or creates a policy — on this fork the connecting role is not the table's owner and has no BYPASSRLS, so RLS with no policy for it denies it every row, and every policy here was written for Supabase's roles; isolation is deferred by decision (SMD-1716), so drop the RLS block rather than port it" }),
+]);
+/** Every SUPABASE_SQL_RULES hit in `text`: [{ rule, line, msg }], line numbers in the source. */
+export function supabaseIsmsIn(text) {
+  const lines = stripSqlComments(text).split("\n");
+  const hits = [];
+  for (const rule of SUPABASE_SQL_RULES) {
+    lines.forEach((line, i) => { if (rule.re.test(line)) hits.push({ rule: rule.name, line: i + 1, msg: rule.msg }); });
+  }
+  return hits.sort((a, b) => a.line - b.line);
 }

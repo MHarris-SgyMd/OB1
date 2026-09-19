@@ -52,6 +52,14 @@ import {
   coreFunctionStatement,
   ownedColumnCommentsIn,
   ownedFunctionsIn,
+  grantPresenceSql,
+  grantStatements,
+  grantedFunctions,
+  grantedObjects,
+  grantedSequences,
+  grantedTables,
+  stripSqlComments,
+  supabaseIsmsIn,
 } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -957,19 +965,17 @@ console.log("\n[10] Migrations carry nothing Supabase-specific");
    *
    * Stripping first makes the check strictly sharper, not laxer: it still sees
    * every executable statement, and it stops seeing text that only describes
-   * one. `--` to end of line, and `/* *\/` blocks; no migration here puts either
-   * sequence inside a string literal, and one that did would be a reason to
-   * parse rather than to widen this.
+   * one. The strip is config.mjs's stripSqlComments, literal-aware since
+   * SMD-1796 (what SMD-1316 asked for): a `--` inside a string literal no
+   * longer hides the rest of its line, and a dollar-quoted body is scanned
+   * within, its own comments stripped. The rules are SUPABASE_SQL_RULES — the
+   * list check-fork-consistency holds every .sql under schemas/ and db/ to —
+   * so the migrations and the community schemas answer to one spelling, and
+   * [39] runs the same scan over schemas/ from inside this suite.
    */
-  const executable = (sql: string) =>
-    sql.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/--[^\n]*/g, " ");
-  const all = files
-    .map((f) => executable(subst(readFileSync(join(MIGRATIONS, f), "utf8"))))
-    .join("\n");
-  assert(!/auth\.uid\(\)/.test(all), "no auth.uid() — GoTrue does not exist off Supabase");
-  assert(!/auth\.role\(\)/.test(all), "no auth.role() — the core RLS policy is dropped deliberately");
-  assert(!/\bTO service_role\b/.test(all), "no GRANT TO service_role — that role is Supabase-managed");
-  assert(!/ENABLE ROW LEVEL SECURITY/i.test(all), "no RLS enabled — it never fired anyway");
+  const hits = files.flatMap((f) => supabaseIsmsIn(subst(readFileSync(join(MIGRATIONS, f), "utf8"))).map((h) => `${f}:${h.line} ${h.rule}`));
+  assert(hits.length === 0, `no migration runs a Supabase-ism — no auth.uid()/auth.role() (GoTrue), no service_role/authenticated/anon (Supabase's roles), no RLS (it never fired anyway) (${hits.join("; ") || "none"})`);
+  const all = files.map((f) => stripSqlComments(subst(readFileSync(join(MIGRATIONS, f), "utf8")))).join("\n");
   assert(!/pgcrypto/i.test(all) || /NOT pgcrypto/.test(all), "pgcrypto not required (gen_random_uuid + sha256 are built-ins)");
 }
 
@@ -2934,11 +2940,11 @@ console.log("\n[27] Migration 028: thought_work_claims.last_error and release_th
   assert(/p_error is stored in last_error whatever p_status is/.test(fnComment), "…and says p_error is stored whatever the status");
   assert(/on succeeded, when given, a caveat/.test(fnComment) && /the write stands/.test(fnComment) && /Pass NULL for a clean success/.test(fnComment),
     "…what it means on success, and what to pass for a clean one");
-  // [10] strips `--` to end of line before scanning the migrations, on the
-  // stated assumption that no migration puts that sequence in a string literal
-  // (SMD-1316 would make that strip literal-aware). Asserted of the LIVE text,
-  // so it holds whichever file wrote the comment.
-  assert(!/--/.test(colComment) && !/--/.test(fnComment), "neither comment carries `--`, so [10]'s comment-stripping scan reads every literal whole");
+  // [10]'s strip has been literal-aware since SMD-1796 (SMD-1316's ask), so a
+  // `--` inside one of these literals would no longer hide the rest of its
+  // line from the scan; the contract is still plainer without one. Asserted
+  // of the LIVE text, so it holds whichever file wrote the comment.
+  assert(!/--/.test(colComment) && !/--/.test(fnComment), "neither comment carries `--` — the comment-stripping scan does not need to be literal-aware for these two, though it is");
   // Those are checks of the LIVE text after every file has applied, so a later
   // migration that redefines release_thought and re-issues 015's one-sentence
   // COMMENT — CREATE OR REPLACE keeps a comment, a re-issued COMMENT replaces
@@ -3384,14 +3390,14 @@ console.log("\n[31] A vendored schema applied to a migrated brain replaces no fu
   assert(RELEASE_SHIPPED_RE.test(await srcOf("release_thought(uuid,text,text,text,text)")) && RELEASE_SHIPPED_RE.test(await srcOf("release_claims_for_worker(text,text)")) && THOUGHT_STATS_SHIPPED_RE.test(await srcOf("thought_stats_summary()")),
     "…and for 015's two release bodies (the lease cleared) and 024's thought_stats_summary (topics guarded by type)");
 
-  // The vendored file as fixed — its section 6 gone — applied whole. The
-  // Supabase roles its GRANTs name do not exist in PGlite.
+  // The vendored file as fixed — its section 6 gone, and since SMD-1796 its
+  // GRANTs to Supabase's roles gone too — applied whole. This block used to
+  // create authenticated, service_role and anon first so those GRANTs would
+  // run; no role is created now, and [39] applies every schemas/*.sql the
+  // same way.
   const vendored = readFileSync(join(HERE, "..", "schemas", "enhanced-thoughts", "schema.sql"), "utf8");
   assert(![...owned.keys()].some((fn) => coreFunctionStatement(fn).test(vendored)) && ![...ownedCols.keys()].some((col) => coreColumnCommentStatement(col).test(vendored)),
     "schemas/enhanced-thoughts/schema.sql names no owned function or column comment in a statement, by check 7's own rules");
-  for (const role of ["authenticated", "service_role", "anon"]) {
-    await db.exec(`DO $r$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${role}') THEN CREATE ROLE ${role} NOLOGIN; END IF; END $r$`);
-  }
   await db.exec(`DELETE FROM thoughts`);
   await db.exec(vendored);
   assert(JSON.stringify(await bodies()) === JSON.stringify(shipped), "applied to a migrated brain, it leaves every owned function's body and overload set exactly as the migrations left them");
@@ -4301,6 +4307,168 @@ console.log("\n[38] Migration 039: the walk's index is half precision — the sw
   // and PGlite refuses the catalog write ("tuple concurrently updated") where
   // a server does not.
   await db.exec(`DELETE FROM thoughts`);
+}
+
+// ── 39. The community schemas on a plain-Postgres brain ──────────────────────
+
+console.log("\n[39] Every schemas/*.sql applies to a migrated brain with no Supabase role present, and --grant's community group is what makes it usable (SMD-1796)");
+{
+  // A second PGlite: the files add a trigger on `thoughts` (entity-extraction's
+  // queue) and columns to it (enhanced-thoughts, provenance-chains), and the
+  // sections above must not meet them. Fresh migrations, then every SQL file
+  // under schemas/, in the order their prerequisites require — enhanced-thoughts
+  // before readwise-books (whose function filters on its source_type column)
+  // and text-search-trgm; entity-extraction before typed-reasoning-edges (which
+  // alters its edges table) — the rest alphabetical. Twelve of the seventeen
+  // ended with GRANTs TO service_role, RLS and policies for it, and two with
+  // policies on auth.uid(): on any Postgres that is not Supabase the first such
+  // statement stopped the file (`role "service_role" does not exist`). [31]
+  // used to create the three roles for the one file it applied; nothing does now.
+  const SCHEMAS = join(HERE, "..", "schemas");
+  const FIRST = ["enhanced-thoughts/schema.sql", "text-search-trgm/schema.sql", "readwise-books/schema.sql", "entity-extraction/schema.sql", "typed-reasoning-edges/schema.sql"];
+  const rank = (f: string) => (FIRST.indexOf(f) === -1 ? FIRST.length : FIRST.indexOf(f));
+  const schemaFiles: string[] = [];
+  for (const d of readdirSync(SCHEMAS, { withFileTypes: true })) {
+    if (!d.isDirectory()) continue;
+    for (const f of readdirSync(join(SCHEMAS, d.name))) if (f.endsWith(".sql")) schemaFiles.push(`${d.name}/${f}`);
+  }
+  schemaFiles.sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
+  assert(schemaFiles.length >= 17 && FIRST.every((f) => schemaFiles.includes(f)), `${schemaFiles.length} SQL files under schemas/ (17 when this was written; the set can only grow), the five with prerequisites among them`);
+
+  // The rule check-fork-consistency holds these files to, from inside the
+  // suite: none runs a Supabase-ism, comments excepted. And the strip's teeth,
+  // on the three shapes the old `--`-to-end-of-line strip could not tell apart:
+  // a literal carrying `--` followed by a statement on the same line, a
+  // comment inside a dollar-quoted body, and a statement inside an EXECUTE
+  // string (recipes/brain-health-monitoring runs its grants that way).
+  const isms = schemaFiles.flatMap((f) => supabaseIsmsIn(readFileSync(join(SCHEMAS, f), "utf8")).map((h) => `${f}:${h.line} ${h.rule}`));
+  assert(isms.length === 0, `no schemas/*.sql runs a Supabase-ism (${isms.length}: ${isms.slice(0, 4).join("; ") || "none"})`);
+  const probe = "-- GRANT x TO service_role, in a comment\nSELECT 'a -- literal', 1; GRANT x TO service_role;\nDO $b$ BEGIN -- service_role, in a body's comment\n  EXECUTE 'ALTER TABLE t ENABLE ROW LEVEL SECURITY'; END $b$;\nCREATE POLICY p ON t\n  FOR SELECT\n  TO authenticated USING (true);";
+  const probeHits = supabaseIsmsIn(probe).map((h) => `${h.rule}@${h.line}`);
+  assert(JSON.stringify(probeHits) === JSON.stringify(["service_role@2", "rls@4", "rls@5", "supabase-api-role@7"]),
+    `the scan reads past a literal's -- to the statement after it, skips a body's comment, reads a body's EXECUTE string, and finds a policy's TO on its own line (${probeHits.join(", ")})`);
+
+  const cdb = new PGlite({ extensions: { vector, pg_trgm } });
+  for (const f of files) await cdb.exec(subst(readFileSync(join(MIGRATIONS, f), "utf8")));
+  const roles = (await cdb.query<{ c: number }>(`SELECT count(*)::int AS c FROM pg_roles WHERE rolname IN ('authenticated', 'anon', 'service_role')`)).rows[0].c;
+  assert(roles === 0, "no Supabase role exists in this database");
+  const tablesNow = async () => new Set((await cdb.query<{ n: string }>(`SELECT tablename AS n FROM pg_tables WHERE schemaname = 'public'`)).rows.map((r) => r.n));
+  const coreTables = await tablesNow();
+  const failed: string[] = [];
+  for (const f of schemaFiles) {
+    try {
+      await cdb.exec(readFileSync(join(SCHEMAS, f), "utf8"));
+    } catch (e) {
+      failed.push(`${f}: ${(e as Error).message.split("\n")[0]}`);
+      try { await cdb.exec("ROLLBACK"); } catch { /* the file opened no transaction */ }
+    }
+  }
+  assert(failed.length === 0, `every file applies, in that order (${failed.length} failed: ${failed.join(" | ") || "none"})`);
+
+  // What the community group names is present — by the probe migrate.ts
+  // --grant runs — and the group names everything the files created that a
+  // grant can reach: every new table, every bigserial sequence (an identity
+  // column's sequence needs no grant, measured below), and every function the
+  // files REVOKEd FROM PUBLIC. A new community table or definer with no row in
+  // ROLE_GRANTS.community would be one --grant does not reach.
+  const objects = grantedObjects(["community"]);
+  const presence = (await cdb.query<{ kind: string; name: string; present: boolean }>(grantPresenceSql(objects))).rows;
+  const absent = presence.filter((r) => !r.present).map((r) => `${r.kind} ${r.name}`);
+  assert(presence.length === objects.length && absent.length === 0, `every object the community group names exists once the files are applied (${objects.length}; absent: ${absent.join(", ") || "none"})`);
+  const communityTables = new Set(grantedTables(["community"]));
+  const newTables = [...(await tablesNow())].filter((t) => !coreTables.has(t));
+  const unlisted = newTables.filter((t) => !communityTables.has(t));
+  // 25 listed, 23 created: thought_audit is 008's and thought_entities 016's
+  // (upstream's entity-extraction file names the same table under IF NOT
+  // EXISTS, so on a migrated brain it is 016's shape the grant reaches), and
+  // the first run of this section found the second of those.
+  const preExisting = [...communityTables].filter((t) => coreTables.has(t)).sort();
+  assert(newTables.length === communityTables.size - 2 && unlisted.length === 0 && JSON.stringify(preExisting) === JSON.stringify(["thought_audit", "thought_entities"]),
+    `every table the files created is in the community group (${newTables.length} created of ${communityTables.size} listed; ${preExisting.join(" and ")} were the migrations' already; unlisted: ${unlisted.join(", ") || "none"})`);
+  const seqs = (await cdb.query<{ seq: string; identity: boolean; tbl: string }>(
+    `SELECT c.relname AS seq, a.attidentity <> '' AS identity, d.refobjid::regclass::text AS tbl
+       FROM pg_class c
+       JOIN pg_depend d ON d.objid = c.oid AND d.classid = 'pg_class'::regclass AND d.refclassid = 'pg_class'::regclass AND d.deptype IN ('a', 'i')
+       JOIN pg_attribute a ON a.attrelid = d.refobjid AND a.attnum = d.refobjsubid
+      WHERE c.relkind = 'S' AND c.relnamespace = 'public'::regnamespace`)).rows;
+  const listedSeqs = new Set(grantedSequences(["community"]));
+  const serialSeqs = seqs.filter((s) => !s.identity && communityTables.has(s.tbl)).map((s) => s.seq);
+  const identitySeqs = seqs.filter((s) => s.identity && communityTables.has(s.tbl)).map((s) => s.seq);
+  assert(serialSeqs.length === 6 && serialSeqs.every((s) => listedSeqs.has(s)) && listedSeqs.size === serialSeqs.length,
+    `the community group names exactly the bigserial sequences the files created (${serialSeqs.length}: ${serialSeqs.sort().join(", ")})`);
+  assert(identitySeqs.length === 1 && identitySeqs[0] === "wiki_section_revisions_id_seq" && !listedSeqs.has(identitySeqs[0]),
+    `…and not the one identity column's (${identitySeqs.join(", ")})`);
+
+  // The role: created here with nothing, granted USAGE on the schema, then
+  // probed as the connecting role. An INSERT of DEFAULT VALUES asks for every
+  // privilege an insert needs and nothing else: it answers 42501 when the
+  // table or its sequence is not granted, and some other code (23502 not-null,
+  // 23503 foreign key, 23514 check) or success when they are — so the probe
+  // separates the grant from the row's shape. Before any grant every community
+  // table answers 42501: the drop-the-mechanism mutant, run first.
+  await cdb.exec(`CREATE ROLE ob1_community NOLOGIN`);
+  await cdb.exec(`GRANT USAGE ON SCHEMA public TO ob1_community`);
+  const asRole = async (sql: string): Promise<{ code: string | null; message: string }> => {
+    try {
+      await cdb.exec(`BEGIN; SET ROLE ob1_community; ${sql}; ROLLBACK;`);
+      return { code: null, message: "" };
+    } catch (e) {
+      try { await cdb.exec("ROLLBACK"); } catch { /* already rolled back */ }
+      return { code: String((e as { code?: string }).code ?? "?"), message: (e as Error).message.split("\n")[0] };
+    }
+  };
+  const insertCodes = async () => {
+    const out = new Map<string, { code: string | null; message: string }>();
+    for (const t of communityTables) out.set(t, await asRole(`INSERT INTO ${t} DEFAULT VALUES`));
+    return out;
+  };
+  const before = await insertCodes();
+  const notDenied = [...before].filter(([, r]) => r.code !== "42501").map(([t, r]) => `${t}=${r.code}`);
+  assert(notDenied.length === 0, `ungranted, the role's INSERT into every community table is refused with 42501 (${before.size} tables; exceptions: ${notDenied.join(", ") || "none"})`);
+  const fnOids = async (names: string[]) => (await cdb.query<{ o: number }>(`SELECT to_regprocedure('public.' || n)::oid AS o FROM unnest($1::text[]) AS u(n)`, [names])).rows.map((r) => r.o);
+  const listedFns = grantedFunctions(["community"]);
+  const listedOids = new Set(await fnOids(listedFns));
+  const definersWithoutPublic = (await cdb.query<{ sig: string; oid: number }>(
+    `SELECT p.oid::regprocedure::text AS sig, p.oid FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND NOT has_function_privilege('ob1_community', p.oid, 'EXECUTE') ORDER BY 1`)).rows;
+  const unlistedFns = definersWithoutPublic.filter((f) => !listedOids.has(f.oid)).map((f) => f.sig);
+  assert(definersWithoutPublic.length === listedFns.length && unlistedFns.length === 0,
+    `every function the files REVOKEd FROM PUBLIC is in the community group, and nothing else is (${definersWithoutPublic.length}: ${definersWithoutPublic.map((f) => f.sig.split("(")[0]).join(", ")}; unlisted: ${unlistedFns.join(", ") || "none"})`);
+
+  // Tables alone, first: the bigserial tables are still refused — on the
+  // sequence, not the table — and the identity table is not. That is the
+  // measurement db/README.md and ROLE_GRANTS.community cite for why six
+  // sequences are listed and the seventh is not.
+  const present = new Set(presence.map((r) => r.name));
+  const statements = grantStatements("ob1_community", { groups: ["community"], present });
+  const tableGrants = statements.filter((s) => !/ ON (SEQUENCE|FUNCTION) /.test(s));
+  const restGrants = statements.filter((s) => / ON (SEQUENCE|FUNCTION) /.test(s));
+  assert(tableGrants.length === communityTables.size && restGrants.length === listedSeqs.size + listedFns.length && statements.every((s) => /TO "ob1_community";$/.test(s)),
+    `--grant's community statements: one per table (${tableGrants.length}), one per sequence and function (${restGrants.length}), the role quoted`);
+  for (const s of tableGrants) await cdb.exec(s);
+  const serialOnly = await asRole(`INSERT INTO ingestion_jobs DEFAULT VALUES`);
+  assert(serialOnly.code === "42501" && /sequence ingestion_jobs_id_seq/.test(serialOnly.message), `with the tables granted and the sequences not, an INSERT into a bigserial table is refused on the sequence (${serialOnly.code}: ${serialOnly.message})`);
+  const identityOnly = await asRole(`INSERT INTO wiki_section_revisions DEFAULT VALUES`);
+  assert(identityOnly.code === "23502", `…and an INSERT into the identity-column table gets past privileges to its NOT NULL columns with no sequence grant (${identityOnly.code}: ${identityOnly.message})`);
+  const stillDenied = [...(await insertCodes())].filter(([, r]) => r.code === "42501").map(([t]) => t).sort();
+  assert(JSON.stringify(stillDenied) === JSON.stringify(["consolidation_log", "edges", "entities", "ingestion_items", "ingestion_jobs", "thought_edges"]),
+    `exactly the six bigserial tables are still refused (${stillDenied.join(", ")})`);
+  for (const s of restGrants) await cdb.exec(s);
+  const after = await insertCodes();
+  const denied = [...after].filter(([, r]) => r.code === "42501").map(([t, r]) => `${t}: ${r.message}`);
+  assert(denied.length === 0, `granted the whole community group, no community table refuses the role's INSERT (${after.size} tables; still refused: ${denied.join("; ") || "none"})`);
+  const unreadable: string[] = [];
+  for (const t of communityTables) if ((await asRole(`SELECT 1 FROM ${t} LIMIT 0`)).code !== null) unreadable.push(t);
+  assert(unreadable.length === 0, `…and reads every one (unreadable: ${unreadable.join(", ") || "none"})`);
+  const seqDenied: string[] = [];
+  for (const s of listedSeqs) if ((await asRole(`SELECT nextval('${s}')`)).code !== null) seqDenied.push(s);
+  assert(seqDenied.length === 0, `…and takes a value from each listed sequence (refused: ${seqDenied.join(", ") || "none"})`);
+  const fnDenied = (await cdb.query<{ sig: string }>(`SELECT p.oid::regprocedure::text AS sig FROM pg_proc p WHERE p.oid = ANY($1::oid[]) AND NOT has_function_privilege('ob1_community', p.oid, 'EXECUTE')`, [[...listedOids]])).rows.map((r) => r.sig);
+  assert(fnDenied.length === 0, `…and may EXECUTE every listed function (refused: ${fnDenied.join(", ") || "none"})`);
+  // Upstream's append-only intent, kept: the revision history takes SELECT and
+  // INSERT only, so the role cannot rewrite it.
+  const rewrite = await asRole(`UPDATE wiki_section_revisions SET body_md = '' WHERE false`);
+  assert(rewrite.code === "42501", `the role cannot UPDATE wiki_section_revisions — the append-only grant upstream gave its service role is kept (${rewrite.code})`);
+  await cdb.close();
 }
 
 report();

@@ -24,7 +24,7 @@ The RPCs read `source_type` and `sensitivity_tier` columns from the [enhanced-th
 
 ## Security Model
 
-All four RPCs run as `SECURITY INVOKER`, so they respect whatever Row Level Security policies you've put on the `thoughts` table. Execute is granted to the `authenticated` and `service_role` roles only — **not `anon`**. If you want an unauthenticated public dashboard to read these aggregates, review your RLS policy first and then grant `anon` yourself, e.g.:
+All four RPCs run as `SECURITY INVOKER`, so they read `thoughts` with the caller's own privileges. On this fork the file grants nothing (SMD-1796): upstream granted execute to Supabase's `authenticated` and `service_role` — **not `anon`** — and those roles do not exist off Supabase; execute is `PUBLIC`'s by default, so whichever role you connect as can call them, and what it sees is what its `SELECT` on `thoughts` allows. On Supabase, if you want an unauthenticated public dashboard to read these aggregates, review your RLS policy first and then grant `anon` yourself, e.g.:
 
 ```sql
 grant execute on function public.brain_stats_daily(integer, text, boolean) to anon;
@@ -51,22 +51,21 @@ SUPABASE (from your Open Brain setup)
 
 ## Steps
 
-1. Open your Supabase dashboard and navigate to the **SQL Editor**.
-2. Create a new query and paste the full contents of [`schema.sql`](schema.sql).
-3. Click **Run** to execute the migration. It's idempotent — safe to run again later if you reinstall.
-4. Navigate to **Database → Functions** and verify the four new functions exist:
+1. Apply [`schema.sql`](schema.sql) to your brain: `psql "$DATABASE_URL" -f schema.sql` (or paste it into your SQL console).
+2. Nothing to grant (this fork, SMD-1796): the file adds four `SECURITY INVOKER` functions, executable by any role that can read `thoughts` (upstream's `grant execute … to authenticated, service_role` lines are gone — those roles do not exist off Supabase, and execute is `PUBLIC`'s by default). It's idempotent — safe to run again later if you reinstall.
+3. Navigate to **Database → Functions** and verify the four new functions exist:
    - `brain_stats_daily`
    - `brain_stats_daily_lifelog`
    - `brain_stats_daily_jsonb`
    - `brain_stats_daily_lifelog_jsonb`
-5. Test a call from the SQL Editor:
+4. Test a call from the SQL Editor:
 
    ```sql
    select * from brain_stats_daily(30);
    select brain_stats_daily_jsonb(365);
    ```
 
-6. (Optional) Call the JSONB variant from your dashboard via the Supabase REST API to confirm it's reachable:
+5. (Optional) Call the JSONB variant from your dashboard via the Supabase REST API to confirm it's reachable:
 
    ```bash
    curl -s "$SUPABASE_URL/rest/v1/rpc/brain_stats_daily_jsonb" \
@@ -76,7 +75,7 @@ SUPABASE (from your Open Brain setup)
      -d '{"p_days": 180}'
    ```
 
-7. (Optional) Wire up the source-filter pill row — see [`dashboard-snippets/README.md`](dashboard-snippets/README.md) for copy-paste instructions for `open-brain-dashboard-next`.
+6. (Optional) Wire up the source-filter pill row — see [`dashboard-snippets/README.md`](dashboard-snippets/README.md) for copy-paste instructions for `open-brain-dashboard-next`.
 
 ## Expected Outcome
 

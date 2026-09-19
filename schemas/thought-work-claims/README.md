@@ -33,14 +33,14 @@ Every claim carries `ttl_expires_at`. `claim_thoughts` reaps inline on every cal
 
 - A working Open Brain setup with the canonical `public.thoughts` table ([getting-started guide](../../docs/01-getting-started.md)).
 - `public.thoughts.id` is `UUID` (the canonical Open Brain type). If you run a non-canonical `BIGINT` id, see [ID Type Note](#id-type-note).
-- Access to the Supabase SQL Editor (or the Supabase CLI) with the service role.
-- A `service_role` role (Supabase provides this by default). Workers connect with the service-role key — these RPCs are server-side only and are not exposed to `anon`/`authenticated`.
+- A connection that can create tables and functions (`psql` or your SQL console).
+- Workers connect as a role granted through `bun migrate.ts --grant` (its `worker` group covers migration 015's table); these RPCs are server-side only.
 - Node.js 18+ if you want to run the example worker (it uses the built-in global `fetch`).
 
 ## Steps
 
-1. Open your **Supabase SQL Editor** (Dashboard → SQL Editor).
-2. Paste the full contents of [`schema.sql`](./schema.sql) and run it. Upstream's script is idempotent — it uses `CREATE TABLE IF NOT EXISTS`, `CREATE INDEX IF NOT EXISTS`, and `CREATE OR REPLACE FUNCTION`, so re-running it is safe. **On this fork the file is a stub and installs nothing; skip steps 2–4** — the table and functions the checks in steps 3–4 would find are migration 015's.
+1. Apply [`schema.sql`](./schema.sql) to your brain: `psql "$DATABASE_URL" -f schema.sql` (or paste it into your SQL console).
+2. Upstream's script is idempotent — it uses `CREATE TABLE IF NOT EXISTS`, `CREATE INDEX IF NOT EXISTS`, and `CREATE OR REPLACE FUNCTION`, so re-running it is safe. **On this fork the file is a stub and installs nothing; skip steps 2–4** — the table and functions the checks in steps 3–4 would find are migration 015's.
 3. Confirm the table and RPCs exist:
 
    ```sql

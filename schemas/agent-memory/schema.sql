@@ -272,56 +272,17 @@ BEGIN
 END;
 $$;
 
-ALTER TABLE public.agent_memories ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.agent_memory_source_refs ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.agent_memory_artifacts ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.agent_memory_relations ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.agent_memory_review_actions ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.agent_memory_recall_traces ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.agent_memory_recall_items ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.agent_memory_audit_events ENABLE ROW LEVEL SECURITY;
-
-DROP POLICY IF EXISTS agent_memories_service_role_all ON public.agent_memories;
-CREATE POLICY agent_memories_service_role_all ON public.agent_memories
-  FOR ALL TO service_role USING (true) WITH CHECK (true);
-
-DROP POLICY IF EXISTS agent_memory_source_refs_service_role_all ON public.agent_memory_source_refs;
-CREATE POLICY agent_memory_source_refs_service_role_all ON public.agent_memory_source_refs
-  FOR ALL TO service_role USING (true) WITH CHECK (true);
-
-DROP POLICY IF EXISTS agent_memory_artifacts_service_role_all ON public.agent_memory_artifacts;
-CREATE POLICY agent_memory_artifacts_service_role_all ON public.agent_memory_artifacts
-  FOR ALL TO service_role USING (true) WITH CHECK (true);
-
-DROP POLICY IF EXISTS agent_memory_relations_service_role_all ON public.agent_memory_relations;
-CREATE POLICY agent_memory_relations_service_role_all ON public.agent_memory_relations
-  FOR ALL TO service_role USING (true) WITH CHECK (true);
-
-DROP POLICY IF EXISTS agent_memory_review_actions_service_role_all ON public.agent_memory_review_actions;
-CREATE POLICY agent_memory_review_actions_service_role_all ON public.agent_memory_review_actions
-  FOR ALL TO service_role USING (true) WITH CHECK (true);
-
-DROP POLICY IF EXISTS agent_memory_recall_traces_service_role_all ON public.agent_memory_recall_traces;
-CREATE POLICY agent_memory_recall_traces_service_role_all ON public.agent_memory_recall_traces
-  FOR ALL TO service_role USING (true) WITH CHECK (true);
-
-DROP POLICY IF EXISTS agent_memory_recall_items_service_role_all ON public.agent_memory_recall_items;
-CREATE POLICY agent_memory_recall_items_service_role_all ON public.agent_memory_recall_items
-  FOR ALL TO service_role USING (true) WITH CHECK (true);
-
-DROP POLICY IF EXISTS agent_memory_audit_events_service_role_all ON public.agent_memory_audit_events;
-CREATE POLICY agent_memory_audit_events_service_role_all ON public.agent_memory_audit_events
-  FOR ALL TO service_role USING (true) WITH CHECK (true);
-
-GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.agent_memories TO service_role;
-GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.agent_memory_source_refs TO service_role;
-GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.agent_memory_artifacts TO service_role;
-GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.agent_memory_relations TO service_role;
-GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.agent_memory_review_actions TO service_role;
-GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.agent_memory_recall_traces TO service_role;
-GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.agent_memory_recall_items TO service_role;
-GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.agent_memory_audit_events TO service_role;
-GRANT EXECUTE ON FUNCTION public.agent_memory_hash_text(TEXT) TO service_role;
+-- This fork (SMD-1796): upstream's file ends here with ENABLE ROW LEVEL SECURITY
+-- on the eight tables, a policy FOR service_role on each, and GRANTs TO
+-- service_role. Those are Supabase's: on plain Postgres the first GRANT stops
+-- the file (`role "service_role" does not exist`), and with the role created to
+-- get past it, RLS with no policy for the role you actually connect as denies
+-- that role every row. Removed.
+-- Grant the role your server connects as instead — from db/:
+--   bun migrate.ts --url postgres://… --grant <role>
+-- issues db/config.mjs ROLE_GRANTS' `community` group, which covers this file's
+-- eight tables (SELECT, INSERT, UPDATE, DELETE). agent_memory_hash_text needs no
+-- grant: EXECUTE is PUBLIC's by default. Row-level security: SMD-1716.
 
 NOTIFY pgrst, 'reload schema';
 

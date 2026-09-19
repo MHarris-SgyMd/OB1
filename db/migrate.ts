@@ -65,8 +65,9 @@ import {
   HNSW_SEEDS,
   SHARED_SETTING_SOURCES,
   TRGM_INDEX,
+  grantPresenceSql,
   grantStatements,
-  grantedTables,
+  grantedObjects,
   migrationValues,
   parseSetConfig,
   quoteIdent,
@@ -140,8 +141,10 @@ if (reapply && baseline) {
 // documents — the one executable spelling of db/README.md's "Grants for a
 // capturing role". A standalone mode: it records nothing in the ledger and runs
 // no migration, so it is refused beside --baseline or --reapply. It grants only
-// tables that already exist, so it is safe on a partially-migrated database and
-// again after later migrations bring the rest. It never creates a role or sets a
+// objects that already exist — tables, and since SMD-1796 the community
+// schemas' sequences and functions too — so it is safe on a partially-migrated
+// database, before a community schema is applied, and again after later
+// migrations or schemas bring the rest. It never creates a role or sets a
 // password — a missing role is an error naming CREATE ROLE, not a silent create
 // — so no credential passes through it. --dry-run prints the statements without
 // running them: the list, copyable, for a role you would rather grant by hand.
@@ -163,11 +166,11 @@ if (grantRole !== undefined) {
       await gsql.close();
       process.exit(2);
     }
-    const wanted = grantedTables();
+    const wanted = grantedObjects();
     const present = new Set<string>(
-      ((await gsql`SELECT tbl FROM unnest(${gsql.array(wanted, "TEXT")}::text[]) AS r(tbl) WHERE to_regclass('public.' || tbl) IS NOT NULL`) as { tbl: string }[]).map((r) => r.tbl)
+      ((await gsql.unsafe(grantPresenceSql(wanted))) as { kind: string; name: string; present: boolean }[]).filter((r) => r.present).map((r) => r.name)
     );
-    const missing = wanted.filter((t) => !present.has(t));
+    const missing = wanted.filter((o) => !present.has(o.name)).map((o) => o.name);
     const statements = [`GRANT USAGE ON SCHEMA public TO ${quoteIdent(grantRole)};`, ...grantStatements(grantRole, { present })];
     if (dryRun) {
       console.log(`\n--grant ${grantRole}  (--dry-run: nothing run)\n`);
@@ -179,9 +182,9 @@ if (grantRole !== undefined) {
     await gsql.begin(async (tx) => {
       for (const s of statements) await tx.unsafe(s);
     });
-    console.log(`\nGranted ${grantRole} the capturing-role privileges over ${present.size} table(s):\n`);
+    console.log(`\nGranted ${grantRole} the capturing-role privileges over ${present.size} object(s):\n`);
     for (const s of statements) console.log(`  ${s}`);
-    if (missing.length) console.log(`\n  not yet present, skipped (run --grant again after applying them): ${missing.join(", ")}`);
+    if (missing.length) console.log(`\n  not yet present, skipped (run --grant again after applying the migration or community schema that creates them): ${missing.join(", ")}`);
     await gsql.close();
     process.exit(0);
   } catch (err) {

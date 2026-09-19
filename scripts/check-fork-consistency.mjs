@@ -44,6 +44,12 @@
  *      the two it provides (`env.get`, `serve`) and no specifier Bun cannot
  *      resolve (`jsr:`, `npm:`, a URL) — itself or through the files it
  *      imports — so `bun <file>` serves it (SMD-1480); no exceptions
+ *  12. a .sql file under schemas/ or db/ runs nothing that needs Supabase — no
+ *      `service_role`, `authenticated` or `anon`, no `auth.uid()`, `auth.role()`
+ *      or `auth.users`, no `supabase_`-prefixed name, no RLS or policy —
+ *      comments excepted by a literal-aware strip, string literals included
+ *      (SMD-1796); the rules are db/config.mjs's SUPABASE_SQL_RULES, which
+ *      test-schema [10] and [39] apply from inside the suite; no exceptions
  *
  * Run: bun scripts/check-fork-consistency.mjs   (plain ESM; node runs it too)
  * Exits non-zero on any violation.
@@ -53,7 +59,7 @@ import { readFileSync, existsSync, readdirSync, statSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join, dirname, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { coreColumnCommentStatement, coreFunctionStatement, ownedColumnCommentsIn, ownedFunctionsIn } from "../db/config.mjs";
+import { coreColumnCommentStatement, coreFunctionStatement, ownedColumnCommentsIn, ownedFunctionsIn, supabaseIsmsIn } from "../db/config.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const CATEGORIES = [
@@ -1657,6 +1663,39 @@ function checkShimRuntime() {
   }
 }
 
+// ── 12: schema SQL runs nothing that needs Supabase ──────────────────────────
+//
+// SMD-1796. Twelve of the seventeen SQL files under schemas/ ended with GRANTs
+// TO service_role, RLS enabled with a policy FOR service_role, GRANTs and
+// REVOKEs naming authenticated and anon, and (two) policies on auth.uid().
+// Those are Supabase's roles and GoTrue's schema: on any Postgres that is not
+// Supabase the first such statement stops the file (`role "service_role" does
+// not exist`), and where an operator creates the role to get past it, RLS with
+// no policy for the role they actually connect as denies that role every row.
+// The statements were cut on that ticket (FORK.md change 90), each file left
+// with a note pointing at `migrate.ts --grant`'s `community` group; this keeps
+// the next rebase from bringing them back — and holds db/ to the same rule
+// test-schema [10] has held the migrations to since the start, now one
+// spelling: db/config.mjs's SUPABASE_SQL_RULES over stripSqlComments, which
+// is literal-aware (a `--` inside a string no longer hides the rest of its
+// line — SMD-1316's ask) and scans string literals, since `EXECUTE 'GRANT … TO
+// service_role'` runs the grant as surely as the bare statement. Every .sql
+// under schemas/ and db/ whole; no exceptions. The extension and recipe
+// directories carry thirteen more such files, with per-user `auth.uid() =
+// user_id` policies that need a design of their own — their ticket is the
+// umbrella SMD-1795's.
+
+function checkSupabaseIsms() {
+  for (const dir of ["schemas", "db"]) {
+    const base = join(ROOT, dir);
+    if (!existsSync(base)) continue;
+    for (const file of walk(base, [], /\.sql$/)) {
+      const rel = relOf(file);
+      for (const h of supabaseIsmsIn(readFileSync(file, "utf8"))) fail(`${rel}:${h.line}`, `${h.msg} (SMD-1796)`);
+    }
+  }
+}
+
 // ── Run ──────────────────────────────────────────────────────────────────────
 
 const dirs = contributionDirs();
@@ -1672,6 +1711,7 @@ checkCoreFunctions();
 checkCredentialCompares();
 checkThoughtWritesAround();
 checkShimRuntime();
+checkSupabaseIsms();
 
 /**
  * The embedding default is stated in three places that must agree, and two of them
@@ -1747,12 +1787,14 @@ await checkEmbeddingDefaults();
 
 /**
  * db/README.md's "Grants for a capturing role" names every table db/config.mjs's
- * ROLE_GRANTS requires — the two are one spelling (SMD-1226). Preflight's `write
+ * ROLE_GRANTS requires — and, since SMD-1796, every sequence and function the
+ * community group adds — the two are one spelling (SMD-1226). Preflight's `write
  * privileges` check and `migrate.ts --grant` both read ROLE_GRANTS; the README is
- * the human list. A table added to a group in config without a line in the
+ * the human list. An object added to a group in config without a line in the
  * README would leave a self-hoster's role short a privilege the docs never
- * mention. Matched in backticks, the doc's convention for a table name, so
- * `thoughts` is not satisfied by `thought_chunks` merely containing it.
+ * mention. Matched in backticks, the doc's convention for a name, so `thoughts`
+ * is not satisfied by `thought_chunks` merely containing it; a function is
+ * matched with its argument types, as the row spells them.
  */
 async function checkCapturingGrants() {
   const cfg = await import("../db/config.mjs");
@@ -1772,11 +1814,11 @@ async function checkCapturingGrants() {
   // prose: a table named only in a paragraph would otherwise satisfy the check
   // even if its privilege row were deleted. The rows are where the grant lives.
   const tableRows = section.split("\n").filter((l) => l.trimStart().startsWith("|")).join("\n");
-  for (const table of cfg.grantedTables()) {
-    if (!tableRows.includes("`" + table + "`")) {
+  for (const { kind, name } of cfg.grantedObjects()) {
+    if (!tableRows.includes("`" + name + "`")) {
       violations.push({
         where: "db/README.md",
-        msg: `"Grants for a capturing role" does not name \`${table}\`, which db/config.mjs's ROLE_GRANTS requires — the list and the docs have drifted (SMD-1226)`,
+        msg: `"Grants for a capturing role" does not name the ${kind} \`${name}\`, which db/config.mjs's ROLE_GRANTS requires — the list and the docs have drifted (SMD-1226${kind === "table" ? "" : ", SMD-1796"})`,
       });
     }
   }

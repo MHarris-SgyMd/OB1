@@ -267,16 +267,25 @@ export function parseSetConfig(cfg: string[] | null | undefined): Record<string,
  */
 export function alignVectorSearchPath(sql: import("bun").SQL): Promise<string | null>;
 
-/** One table's requirement in ROLE_GRANTS: the privileges a group needs on it, and the migration that introduced the need. */
-export type RoleGrant = { table: string; privileges: readonly string[]; since: string };
 /**
- * Table privileges the fork's SECURITY INVOKER functions need to run as their
- * caller, grouped by the role that needs each group. The single spelling read by
- * preflight's `write privileges` check, `migrate.ts --grant`, and db/README.md.
+ * One object's requirement in ROLE_GRANTS: the privileges a group needs on it,
+ * and what introduced the need — a migration number, or for the `community`
+ * group the schemas/ file. Exactly one of `table`, `sequence` or `function` is
+ * set; a function is named with its argument types (SMD-1796).
  */
-export const ROLE_GRANTS: Readonly<Record<"capture" | "server" | "worker" | "extraction" | "querylog", readonly RoleGrant[]>>;
+export type RoleGrant = { table?: string; sequence?: string; function?: string; privileges: readonly string[]; since: string };
+/** The groups ROLE_GRANTS is keyed by. */
+export type RoleGrantGroup = "capture" | "server" | "worker" | "extraction" | "querylog" | "community";
+/**
+ * Privileges the fork's SECURITY INVOKER functions need to run as their caller,
+ * grouped by the role that needs each group — tables for the migrations' own
+ * groups; tables, sequences and functions for the community schemas'. The
+ * single spelling read by preflight's `write privileges` check, `migrate.ts
+ * --grant`, and db/README.md.
+ */
+export const ROLE_GRANTS: Readonly<Record<RoleGrantGroup, readonly RoleGrant[]>>;
 /** The order groups are issued and documented in. */
-export const ROLE_GRANT_GROUPS: readonly ("capture" | "server" | "worker" | "extraction" | "querylog")[];
+export const ROLE_GRANT_GROUPS: readonly RoleGrantGroup[];
 /** The (table, privilege) pairs the core capture/edit/search path needs unconditionally — preflight's refusal set. */
 export const CAPTURE_WRITES: readonly { table: string; privilege: string; since: string }[];
 /** The (table, privilege) pairs 016's enqueue trigger adds to the capture path while ob1_config.entity_extraction_key is set — thought_work_claims INSERT/UPDATE, upserted as the caller on every capture. */
@@ -296,7 +305,24 @@ export const QUERY_LOG: Readonly<{
 export function queryLogEnabled(env: Record<string, string | undefined> | undefined | null): boolean;
 /** prune_query_log's retention window in days, from OB1_QUERY_LOG_RETENTION_DAYS or the default. */
 export function queryLogRetentionDays(env: Record<string, string | undefined> | undefined | null): number;
+/** A ROLE_GRANTS row's object — its kind and name (a function's name carries its argument types). */
+export type GrantObject = { kind: "table" | "sequence" | "function"; name: string };
+export function grantObjectOf(row: RoleGrant): GrantObject;
+/** Every object named across the given groups (default: all), in group/list order, de-duplicated by name. */
+export function grantedObjects(groups?: readonly string[]): GrantObject[];
 /** Every table named across the given groups (default: all), in group/list order, de-duplicated. */
 export function grantedTables(groups?: readonly string[]): string[];
-/** GRANT statements giving `role` the privileges the given groups need; `present` skips absent tables; the role is quoted. */
+/** Every sequence named across the given groups (default: all), in order, de-duplicated. */
+export function grantedSequences(groups?: readonly string[]): string[];
+/** Every function (with argument types) named across the given groups (default: all), in order, de-duplicated. */
+export function grantedFunctions(groups?: readonly string[]): string[];
+/** One SELECT returning { kind, name, present } for each object, in order — to_regclass for tables and sequences, to_regprocedure for functions; runs under Bun's SQL and PGlite alike. */
+export function grantPresenceSql(objects: readonly GrantObject[]): string;
+/** GRANT statements giving `role` the privileges the given groups need; `present` (object names) skips absent objects; the role is quoted. */
 export function grantStatements(role: string, opts?: { groups?: readonly string[]; present?: Set<string> | null }): string[];
+/** `text` with its comments blanked in place — literal-aware, dollar-quoted bodies scanned within, newlines kept so line numbers hold (SMD-1796, SMD-1316). */
+export function stripSqlComments(text: string): string;
+/** What a .sql file may not run on this fork: each rule's name, per-line regex and reason (SMD-1796). */
+export const SUPABASE_SQL_RULES: readonly { name: string; re: RegExp; msg: string }[];
+/** Every SUPABASE_SQL_RULES hit in `text`, comments excepted, with the source line number. */
+export function supabaseIsmsIn(text: string): { rule: string; line: number; msg: string }[];

@@ -177,84 +177,23 @@ CREATE TRIGGER trg_queue_entity_extraction
   EXECUTE FUNCTION public.queue_entity_extraction();
 
 -- ============================================================
--- 8. ROW LEVEL SECURITY
---    Defense in depth: service_role bypasses RLS for edge
---    functions and workers; authenticated users get a minimum
---    SELECT hook so dashboards can layer policies later without
---    a write-path-breaking migration. Matches recipes/ob-graph
---    and primitives/rls/ guidance. `anon` has no access.
+-- 8 + 9. ROW LEVEL SECURITY and GRANTS — removed on this fork (SMD-1796)
+--    Upstream's file ENABLEd ROW LEVEL SECURITY on the five tables with
+--    a policy FOR service_role and a SELECT policy FOR authenticated
+--    on each, then GRANTed ALL TO service_role, SELECT TO authenticated,
+--    USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO service_role and
+--    EXECUTE on the trigger function TO service_role. Those are
+--    Supabase's roles: on plain Postgres the first statement naming one
+--    stops the file (`role "service_role" does not exist`), and RLS with
+--    no policy for the role you connect as denies it every row.
+-- Grant the role your server connects as instead — from db/:
+--   bun migrate.ts --url postgres://… --grant <role>
+-- issues db/config.mjs ROLE_GRANTS' `community` group, which covers this file's
+-- five tables (SELECT, INSERT, UPDATE, DELETE) and the three bigserial
+-- sequences by name (USAGE, SELECT — an INSERT needs them), instead of every
+-- sequence in the schema. The trigger function needs no EXECUTE grant: a
+-- trigger fires as the table's owner set it up. Row-level security: SMD-1716.
 -- ============================================================
-
-ALTER TABLE public.entities               ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.edges                  ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.thought_entities       ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.entity_extraction_queue ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.consolidation_log      ENABLE ROW LEVEL SECURITY;
-
--- Service role: full access. Redundant with role bypass but
--- explicit policies keep the security posture legible.
-DROP POLICY IF EXISTS entities_service_role_all               ON public.entities;
-DROP POLICY IF EXISTS edges_service_role_all                  ON public.edges;
-DROP POLICY IF EXISTS thought_entities_service_role_all       ON public.thought_entities;
-DROP POLICY IF EXISTS entity_extraction_queue_service_role_all ON public.entity_extraction_queue;
-DROP POLICY IF EXISTS consolidation_log_service_role_all      ON public.consolidation_log;
-
-CREATE POLICY entities_service_role_all ON public.entities
-  FOR ALL TO service_role USING (true) WITH CHECK (true);
-CREATE POLICY edges_service_role_all ON public.edges
-  FOR ALL TO service_role USING (true) WITH CHECK (true);
-CREATE POLICY thought_entities_service_role_all ON public.thought_entities
-  FOR ALL TO service_role USING (true) WITH CHECK (true);
-CREATE POLICY entity_extraction_queue_service_role_all ON public.entity_extraction_queue
-  FOR ALL TO service_role USING (true) WITH CHECK (true);
-CREATE POLICY consolidation_log_service_role_all ON public.consolidation_log
-  FOR ALL TO service_role USING (true) WITH CHECK (true);
-
--- Authenticated users: SELECT-only hook. These tables have no
--- user_id column yet, so this is the minimum scaffold for future
--- multi-tenancy. When multi-tenant is wired, replace `true` with
--- `auth.uid() = user_id`. No anon policy -- anon has no access.
-DROP POLICY IF EXISTS entities_authenticated_select               ON public.entities;
-DROP POLICY IF EXISTS edges_authenticated_select                  ON public.edges;
-DROP POLICY IF EXISTS thought_entities_authenticated_select       ON public.thought_entities;
-DROP POLICY IF EXISTS entity_extraction_queue_authenticated_select ON public.entity_extraction_queue;
-DROP POLICY IF EXISTS consolidation_log_authenticated_select      ON public.consolidation_log;
-
-CREATE POLICY entities_authenticated_select ON public.entities
-  FOR SELECT TO authenticated USING (true);
-CREATE POLICY edges_authenticated_select ON public.edges
-  FOR SELECT TO authenticated USING (true);
-CREATE POLICY thought_entities_authenticated_select ON public.thought_entities
-  FOR SELECT TO authenticated USING (true);
-CREATE POLICY entity_extraction_queue_authenticated_select ON public.entity_extraction_queue
-  FOR SELECT TO authenticated USING (true);
-CREATE POLICY consolidation_log_authenticated_select ON public.consolidation_log
-  FOR SELECT TO authenticated USING (true);
-
--- ============================================================
--- 9. GRANTS
---    Service role gets full table access for workers and edge
---    functions. Authenticated gets SELECT only (RLS policies
---    above gate the rows). `anon` gets nothing by default --
---    stock OB1 uses the service-role key server-side, so anon
---    is not on the MCP path.
--- ============================================================
-
-GRANT ALL ON public.entities                TO service_role;
-GRANT ALL ON public.edges                   TO service_role;
-GRANT ALL ON public.thought_entities        TO service_role;
-GRANT ALL ON public.entity_extraction_queue TO service_role;
-GRANT ALL ON public.consolidation_log       TO service_role;
-
-GRANT SELECT ON public.entities                TO authenticated;
-GRANT SELECT ON public.edges                   TO authenticated;
-GRANT SELECT ON public.thought_entities        TO authenticated;
-GRANT SELECT ON public.entity_extraction_queue TO authenticated;
-GRANT SELECT ON public.consolidation_log       TO authenticated;
-
-GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO service_role;
-GRANT EXECUTE ON FUNCTION public.queue_entity_extraction()
-  TO service_role;
 
 -- Notify PostgREST to reload schema cache
 NOTIFY pgrst, 'reload schema';

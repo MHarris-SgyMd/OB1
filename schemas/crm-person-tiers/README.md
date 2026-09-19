@@ -30,7 +30,7 @@ The `connected` promotion rule defaults to: `mention_count >= 20 AND last_seen_a
 ## Prerequisites
 
 - Working Open Brain setup ([guide](../../docs/01-getting-started.md))
-- Access to your Supabase SQL Editor or CLI
+- A connection that can create tables and functions (`psql` or your SQL console)
 - Core `thoughts` table already created
 
 > [!IMPORTANT]
@@ -55,8 +55,8 @@ SUPABASE (from your Open Brain setup)
 
 ![Step 1](https://img.shields.io/badge/Step_1-Run_Migration-1E88E5?style=for-the-badge)
 
-1. Open your **Supabase SQL Editor** (Dashboard > SQL Editor)
-2. Paste and run the full contents of `schema.sql`
+1. Apply `schema.sql` to your brain: `psql "$DATABASE_URL" -f schema.sql` (or paste it into your SQL console).
+2. From `db/`, run `bun migrate.ts --url "$DATABASE_URL" --grant <role>` so the role your server connects as can use what the file creates — the file itself grants nothing (this fork, SMD-1796: upstream's `GRANT … TO service_role` lines and its row-level security are gone; `db/README.md`, "Grants for a capturing role", lists the `community` group).
 
 <details>
 <summary>What the migration creates</summary>
@@ -67,7 +67,7 @@ SUPABASE (from your Open Brain setup)
 - Table `public.crm_person_mentions` (person_id + thought_id primary key)
 - Trigger that auto-updates `crm_persons.updated_at`
 - Function `public.crm_person_tiers(p_limit, p_offset, p_search, p_promote_min_mentions, p_promote_within)` (SECURITY INVOKER)
-- Grants: tables → `service_role`; RPC execute → `authenticated` + `service_role` (no `anon`, by design — see Security below)
+- Grants: none in the file (this fork, SMD-1796) — `bun migrate.ts --grant <role>` covers the two tables; the RPC is `SECURITY INVOKER` and executable by `PUBLIC` by default, so it returns what the calling role may read (see Security below)
 - `NOTIFY pgrst, 'reload schema'` so PostgREST picks up the new RPC
 
 </details>
@@ -126,7 +126,7 @@ SUPABASE (from your Open Brain setup)
 
 ## Security
 
-By default, `crm_person_tiers` is `SECURITY INVOKER` with `EXECUTE` granted to `authenticated` and `service_role` only (not `anon`). This is deliberate: if you ship your Supabase **anon** key to a browser or mobile app, any caller with that key could otherwise dump every person's `canonical_name`, `aliases`, and `metadata` from this table. The intended install path is:
+`crm_person_tiers` is `SECURITY INVOKER`: it returns only rows the calling role may read. Upstream granted `EXECUTE` to Supabase's `authenticated` and `service_role` only (not `anon`); on this fork the file grants nothing (SMD-1796) — those roles do not exist off Supabase, and execute is `PUBLIC`'s by default, which on a single-operator brain (SMD-1716) means the roles you created. Upstream's reason for withholding `anon` stands on Supabase: if you ship your Supabase **anon** key to a browser or mobile app, any caller with that key could otherwise dump every person's `canonical_name`, `aliases`, and `metadata` from this table. The intended install path is:
 
 - Call the RPC from a **server-side** client that uses the `service_role` key (Next.js server components, Edge Functions, cron jobs), or
 - Call it from an **authenticated** client after you've enabled Row Level Security on `crm_persons` + `crm_person_mentions` with a policy that matches your auth model (e.g. `owner_id = auth.uid()` if you add an `owner_id` column).

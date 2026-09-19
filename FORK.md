@@ -68,14 +68,14 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Eighty-nine numbered changes on top of the pin. Seven fix defects found in an
+Ninety numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
 data layer (Phase 2). Ten (changes 31, 53, 55, 59, 79, 82, 86, 87, 88, and 89) ship no runtime change at
 all: each is a measurement that decided against building something.
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–89 are the numbered `###` sections** further down, which is
+sections. Changes **18–90 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -14056,6 +14056,127 @@ dynamic version. (LanceDB/graph aside: the entity graph is this fork's own chang
 eval dependency, not the product.)
 
 **Upstream status:** not applicable — the graph and its eval are this fork's.
+
+### 90. The community schemas apply on plain Postgres — twelve `schemas/*.sql` stop granting to Supabase's roles and enabling RLS for them, and `migrate.ts --grant` learns their tables, sequences and functions as a `community` group; one rule refuses the constructs' return in `schemas/` and `db/` (SMD-1796)
+
+Seventeen SQL files live under `schemas/`. Applied to a brain built by
+`db/migrate.ts` with no Supabase role present — the fork's deploy — **twelve
+stopped at their first statement naming one**: `role "service_role" does not
+exist`, or `"authenticated"`, or `"anon"` (measured by applying each to a
+migrated PGlite brain, which is now test-schema [39]). Two more failed only
+because a prerequisite had (readwise-books filters on enhanced-thoughts'
+`source_type`; typed-reasoning-edges alters entity-extraction's `edges`), and
+wiki-pages for `CREATE EXTENSION pgcrypto`, which PGlite does not ship and
+which the file needs only for `gen_random_uuid()`, a core function since
+Postgres 13. Where an operator had created the roles to get past the GRANTs,
+the files' `ENABLE ROW LEVEL SECURITY` with a policy `FOR service_role` did
+the quieter thing: the role they actually connect as is not the table's owner
+and has no `BYPASSRLS`, so RLS with no policy for it denied it every row —
+`thought_audit` included, and 008's audit trigger with it. Smart-ingest's two
+policies on `auth.uid()` and its guarded foreign key into `auth.users` were the
+same fact in GoTrue's schema. `db/migrations/` has been clean of all this since
+001 (test-schema [10] held it there); the community tree was not.
+
+**The statements are gone from the twelve files**, each left with a note at the
+cut saying what stood there, why it fails off Supabase, and where the grant now
+lives. What stays is what plain Postgres understands: the `REVOKE … FROM
+PUBLIC` on the eight SECURITY DEFINER functions and wiki RPCs (a function so
+revoked is callable only by a role granted it — upstream's intent, kept), the
+`NOTIFY pgrst` lines (harmless anywhere), and the comments. Functions upstream
+granted to `authenticated, service_role` without revoking PUBLIC lose the grant
+and nothing else: EXECUTE was PUBLIC's throughout. Wiki-pages loses the
+extension line; smart-ingest loses the `auth.users` foreign key (a
+single-operator brain has no `auth.users`; `user_id` stays a nullable uuid).
+
+**The grant path is `migrate.ts --grant`, widened.** `db/config.mjs`'s
+`ROLE_GRANTS` gains a `community` group — 25 tables, 6 sequences, 8 functions,
+each row naming the `schemas/` file — and its rows now come in three kinds:
+`table`, `sequence` and `function` (the function with its argument types, as
+GRANT and `to_regprocedure` take them). Two facts Supabase's default privileges
+had hidden decide which rows exist beyond the tables, both measured in [39]
+rather than recalled: an INSERT into a `BIGSERIAL` table is refused on the
+sequence (`permission denied for sequence ingestion_jobs_id_seq`) with the
+table fully granted, so the six serial sequences are listed by name (upstream's
+entity-extraction granted `ALL SEQUENCES IN SCHEMA public`); an INSERT into the
+identity-column table (`wiki_section_revisions`) gets past privileges to its
+NOT NULL columns with no sequence grant, so the seventh is not. The privileges
+are upstream's own for its service role (`GRANT ALL` read as the four DML
+verbs; the audit and revision tables keep `SELECT, INSERT`), merged per object
+across groups — `thought_audit` is 008's table with `capture`'s INSERT and the
+community `SELECT` the author-session readers need; `thought_entities` is 016's,
+the one name upstream's entity-extraction shares with the migration, so its row
+widens `extraction`'s privileges rather than reaching a new table. `--grant`
+checks presence per kind through one statement both it and the suites run
+(`grantPresenceSql`: `to_regclass` for tables and sequences, `to_regprocedure`
+for functions), grants what exists, and names the rest as "not yet present,
+skipped" — so it runs before a community schema is applied, and again after.
+Presence is per object, not per file, so the two rows whose tables a migration
+also creates are issued on every migrated brain (`thought_audit` gains `SELECT`,
+`thought_entities` `UPDATE`) — which is how test-preflight's `--grant`
+assertion found the merge: `GRANT SELECT, INSERT ON thought_audit`, not
+`GRANT INSERT`.
+`db/README.md`'s grants table gains the rows, and check-fork-consistency's
+grants check now requires every sequence and function named there too.
+
+**One rule keeps the constructs out**, in two places from one spelling.
+`config.mjs`'s `SUPABASE_SQL_RULES` — `service_role`; `TO`/`FROM` lists ending
+in `authenticated` or `anon`; `auth.uid()`, `auth.role()`, `auth.jwt()`,
+`auth.users`; a `supabase_` name; `ENABLE ROW LEVEL SECURITY` or `CREATE
+POLICY` — applied per line of `stripSqlComments`' output. That strip is
+literal-aware: `--` and slash-star comments go, string literals and quoted
+identifiers stay, and a dollar-quoted body is scanned within with its own
+comments stripped, newlines kept so a hit's line number is the file's. String
+literals are scanned, not skipped: `EXECUTE 'GRANT … TO service_role'` runs the
+grant as surely as the bare statement (recipes/brain-health-monitoring grants
+that way). A header quoting a forbidden statement to explain its absence is
+therefore not a hit, and a statement is — the property test-schema [10] has
+wanted since migration 012's header first tripped its predecessor, now without
+the "no migration puts `--` in a literal" assumption: **SMD-1316 is closed by
+this.** check-fork-consistency check 12 runs the rules over every `.sql` under
+`schemas/` and `db/`, no exceptions; [10] runs them over the migrations from
+inside the suite; [39] over `schemas/`, with a probe of the three shapes the
+old strip could not tell apart (a literal's `--` followed by a statement, a
+body's comment, a body's EXECUTE string).
+
+**Tests.** test-schema [39], on a second PGlite so the files' trigger on
+`thoughts` and new columns meet none of the suite's other sections: every file
+applies in prerequisite order with no Supabase role; every community object is
+present by `--grant`'s probe; every table the files created is in the group
+(23 created of 25 listed — the two pre-existing named), every serial sequence
+and no identity one, every function `REVOKE`d `FROM PUBLIC` and nothing else;
+then a role with nothing, whose `INSERT … DEFAULT VALUES` into every community
+table answers 42501 before any grant (the drop-the-mechanism mutant, run
+first), is still refused on exactly the six serial tables with the tables
+alone granted, and is refused nowhere with the whole group — reads every
+table, takes a value from every sequence, may EXECUTE every function, and
+cannot UPDATE the revision history. test-live [18], the half PGlite cannot do:
+`--grant --dry-run` over TCP names every community object as not yet present
+before the files, the seventeen apply over TCP, `--grant` then issues all of it
+with nothing skipped, and a LOGIN role connecting as itself inserts, takes
+sequence values, executes, calls `wiki_upsert_page` for real and cannot rewrite
+revisions. `dropSchema` drops the community tables with the rest so the next
+run starts clean. Seventeen READMEs: the "open the Supabase SQL Editor and
+paste" step is `psql "$DATABASE_URL" -f schema.sql` then `bun migrate.ts
+--grant <role>` (or "nothing to grant" where the file adds only functions or an
+index), and every sentence that said `service_role` holds something now says
+what the fork does instead.
+
+**Not done here.** Thirteen more SQL files carry the same constructs under
+`extensions/` (five) and `recipes/` (eight) — mostly per-user `auth.uid() =
+user_id` policies, which are a design question (SMD-1716's operator model
+against per-user rows), not a cut; check 12 does not reach those directories,
+and their ticket is SMD-1795's next sub-issue. The READMEs' later steps still
+say "verify in Database → Functions" and "test from the SQL Editor" — Supabase
+dashboard verification, which SMD-1802's docs pass owns. `migrate.ts` does not
+apply community schemas; `psql -f` does, and `--grant` follows.
+
+**Upstream status:** the twelve files now differ from upstream's in their
+grant/RLS sections (plus wiki-pages' extension line and smart-ingest's foreign
+key), which a rebase will show as conflicts wherever upstream edits those
+sections — the cost this fork already carries for the four files change 58 cut.
+Upstream's own path needs none of this: on Supabase the roles exist and
+`service_role` bypasses RLS. The literal-aware strip and the rule are
+portable; the grant group is the fork's.
 
 ## Detached from the fork network
 

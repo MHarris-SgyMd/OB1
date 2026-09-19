@@ -101,12 +101,17 @@ CREATE INDEX IF NOT EXISTS thought_audit_session_id_idx
 CREATE INDEX IF NOT EXISTS thought_audit_created_at_idx
   ON thought_audit (created_at DESC);
 
--- Match the project convention — service role bypasses RLS automatically.
-ALTER TABLE thought_audit ENABLE ROW LEVEL SECURITY;
-
--- Supabase no longer auto-grants CRUD on new tables to service_role.
--- Grant explicitly so the MCP server can write audit rows.
-GRANT SELECT, INSERT ON TABLE public.thought_audit TO service_role;
+-- This fork (SMD-1796): upstream's file here ENABLEd ROW LEVEL SECURITY on the
+-- table ("service role bypasses RLS automatically") and GRANTed SELECT, INSERT
+-- TO service_role. Those are Supabase's: on plain Postgres the GRANT stops the
+-- file (`role "service_role" does not exist`), and RLS with no policy for the
+-- role you connect as denies it every row — 008's audit trigger included.
+-- Removed. On a brain built by db/migrate.ts this table is migration 008's;
+-- Grant the role your server connects as instead — from db/:
+--   bun migrate.ts --url postgres://… --grant <role>
+-- issues db/config.mjs ROLE_GRANTS' `community` group, which covers this file's
+-- SELECT, INSERT (merged with the `capture` group's INSERT). Row-level
+-- security: SMD-1716.
 
 -- The audit table is append-only by intent. We do NOT grant UPDATE or
 -- DELETE, so nothing — not even a buggy Edge Function — can rewrite

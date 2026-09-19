@@ -14,7 +14,7 @@
  */
 
 import { SQL } from "bun";
-import { alignVectorSearchPath, DEFAULT_CHUNK_CONTEXT, DEFAULT_TRGM_INDEX, HNSW_BOUNDS, MATCH_THOUGHTS_SIGNATURE, SEARCH_THOUGHTS_HYBRID_SIGNATURE, SUPERSEDED_SIGNATURES, UPDATE_THOUGHT_SIGNATURE, migrationValues, quoteIdent, substituteMigration } from "./config.mjs";
+import { alignVectorSearchPath, DEFAULT_CHUNK_CONTEXT, DEFAULT_TRGM_INDEX, HNSW_BOUNDS, MATCH_THOUGHTS_SIGNATURE, SEARCH_THOUGHTS_HYBRID_SIGNATURE, SUPERSEDED_SIGNATURES, UPDATE_THOUGHT_SIGNATURE, grantedTables, migrationValues, quoteIdent, substituteMigration } from "./config.mjs";
 import { readdirSync, readFileSync } from "node:fs";
 import { basename, join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -52,6 +52,12 @@ const TABLES = [
   // vouches for, so a suite run in a kept database cannot leave a marker over
   // rows that are gone.
   BENCH_MARKER,
+  // The community schemas' tables (SMD-1796): test-live [18] applies every
+  // schemas/*.sql to the migrated brain, and a reset that left them would hand
+  // the next run tables whose foreign keys to `thoughts` the CASCADE above cut.
+  // Their bigserial sequences go with them; their functions stay (CREATE OR
+  // REPLACE re-applies cleanly, and none is a migration's).
+  ...grantedTables(["community"]),
 ];
 
 /**
