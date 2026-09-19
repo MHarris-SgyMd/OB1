@@ -526,6 +526,14 @@ console.log("\n[11] Undated and infinity rows render through the tools without a
     const inf = JSON.parse(await call("fetch", { id: infinityId }));
     assert(inf.title.startsWith("infinity - ") && !/Invalid Date/.test(inf.title), `fetch titles an infinity thought with its own text (${inf.title})`);
     assert(inf.metadata?.created_at === "infinity", `fetch's created_at metadata keeps "infinity" (${JSON.stringify(inf.metadata?.created_at)})`);
+
+    // The thought_stats range is the fifth renderer. min/max skip the NULL row
+    // (024), so the range over this corpus is the infinity row on both ends —
+    // it must read "infinity", not "Invalid Date" (the pre-fix new Date() form).
+    const stats = await call("thought_stats");
+    const rangeLine = stats.split("\n").find((l) => l.startsWith("Date range")) ?? "";
+    assert(/infinity/.test(rangeLine) && !/Invalid Date/.test(rangeLine) && !/1970/.test(rangeLine),
+           `thought_stats renders the infinity range as text, not Invalid Date/1970 (${JSON.stringify(rangeLine)})`);
   } finally {
     await sql`DELETE FROM thoughts WHERE id = ${undatedId}::uuid OR id = ${infinityId}::uuid`;
     await sql.close();

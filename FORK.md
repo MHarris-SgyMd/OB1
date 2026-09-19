@@ -14021,9 +14021,11 @@ every SELECT. Two mappers this ticket did **not** move — `derivationFields`
 NULL ancestor there fabricates the epoch, and — worse — an `infinity`- or
 BC-dated proposal thought makes `new Date("infinity").toISOString()` **throw**,
 so `list_supersession_proposals` errors out entirely rather than misrendering.
-Those rows are graph walks over captured thoughts, off the list/match/get path
-this ticket scoped and reachable only by a hand-INSERT, so they are the
-follow-up **SMD-1803**, not this change.
+The offline maintainer CLI `db/consolidate.ts` carries the same two defects (its
+`day()` at :277 throws on infinity and fabricates on NULL; its judge-prompt
+`dateOf` feed at :489–490 fabricates on NULL). All of these are graph walks over
+captured thoughts, off the list/match/get path this ticket scoped and reachable
+only by a hand-INSERT, so they are the follow-up **SMD-1803**, not this change.
 
 **A parity note.** Before change 52 the PostgREST store passed a NULL
 `created_at` through as JSON null, so `fetch` returned `created_at: null` while
