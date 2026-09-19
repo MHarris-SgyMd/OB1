@@ -13921,7 +13921,11 @@ carry the new shape and the `COMMENT` predates it.
 
 `evals/utilization.ts` is the pure part: 034's attribution rule (most recent
 prior search by the same agent, within the window, whose results held the id; a
-NULL agent its own bucket — the export's join in TypeScript, compared at the
+NULL agent its own bucket — the export's join in TypeScript, and since a ninth
+pass the export's own implementation too: `export-queries.ts` reads the same
+two row sets and calls `attribute()`, so the fixture's labels and the report's
+uses are one rule by construction rather than two kept in step by hand;
+compared at the
 log's own microsecond grain when read from the log, since a JS `Date` is
 milliseconds and two rows under a millisecond apart would order differently in
 the two; a fixture in whole minutes is unaffected), then per arm (the search tool and its
@@ -14029,9 +14033,9 @@ PostgREST store's `logSearch` fails through `compat/supabase-sql` when
 score-less hit — so a shim-backed deployment can log no search row for such a
 call, silently. Filed on SMD-1602; [11] seeds its search row by SQL and says
 why. Two searches seeded 400 µs apart both
-returning one id, then a fetch: the export's SQL join and the report both
-credit the later search; the millisecond fallback credits the earlier one,
-which is the disagreement `at_us` exists to close. The
+returning one id, then a fetch: the export's SQL join (as it then was) and the
+report both credit the later search; the millisecond fallback credits the
+earlier one, which is the disagreement `at_us` exists to close. The
 database-row coercions the report relies on (bigint as string, the uuid
 literal, a partly deleted result set, `at_us`, a `real`'s float noise) are
 driven in [39] without a database, since no CI job runs the report itself.
@@ -14084,7 +14088,24 @@ pass's cold read moved the distinct-returned count to one definition — the
 reader's, from the parsed ids, where a `count(DISTINCT)` subquery per search
 row had duplicated it under a comment that called it a cardinality — and the
 035 verdict preflight carries between two checks into the block those checks
-share, so a second run in one process starts unset. `bunx tsc --noEmit` in `server-portable/` covers
+share, so a second run in one process starts unset. A ninth pass fired forty
+captures at once at the live server, each citing the two ids one search had
+returned: forty succeeded, eighty cite rows landed, none dropped, nothing on
+the server's stderr, and the report read 2 used of 2 returned; and it seeded
+the window's exact edge at microsecond precision — three agents, each a
+search at T and a fetch of its id at T + 30 min exactly, one microsecond
+inside and one outside — and both readers agreed: the edge and the inside
+fetch attributed, the outside one not, and at a 29-minute window none. That
+parity check was the last one needed by hand: the same pass's cold read made
+the export call `attribute()` instead of running its own SQL join, cast the
+epoch arithmetic to `numeric` so `at_us` is exact on any server, guarded the
+registry read so a role without SELECT on `ob1_agents` gets bare ids and a
+line rather than a stack trace, made preflight's 035 verdict a plain boolean
+(the "could not read" branch was unreachable), and folded the two `uuid[]`
+renderers into one. Recounting a search's distinct ids in `summarise()` after
+`attribute()` built the same set was raised again and declined: a seventh
+pass removed the field that carried it at a reviewer's request, the recount is
+one `Set` per search row, and one code path beats a threaded-out map. `bunx tsc --noEmit` in `server-portable/` covers
 the server files; `evals/utilization.ts`, `query-log.ts` and
 `eval-utilization.ts` have no tsconfig and are **runtime-checked only**,
 through [39] under Bun — the same standing as every other `evals/` file.

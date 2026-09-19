@@ -77,16 +77,16 @@ if (goldPath) {
 const sql = new SQL({ url: URL_, max: 2 });
 await requireQueryLog(sql, "eval-utilization");
 
-// at_us: logged_at at the log's own microsecond grain, so the attribution
-// orders and bounds exactly as export-queries.ts's SQL join does; a Date alone
-// is milliseconds.
+// at_us: logged_at at the log's own microsecond grain (`::numeric`, so the
+// arithmetic is exact on every server — extract() returns numeric from PG 14,
+// double before, where the last digit could go); a Date alone is milliseconds.
 // One lateral pass over the returned ids per search row gives both aggregates;
 // the distinct count of returned ids is the reader's (toSearchRow), so a
 // duplicate in a logged result set neither strips the estimate nor caps
 // utilization below one, and the count has one definition.
 const searchRows = await sql<SearchDbRow[]>`
   SELECT s.id, s.agent_id, s.logged_at,
-         (extract(epoch FROM s.logged_at) * 1000000)::bigint AS at_us,
+         (extract(epoch FROM s.logged_at)::numeric * 1000000)::bigint AS at_us,
          s.tool, s.query, s.match_count, s.threshold, s.recency_weight, s.result_ids,
          c.chars, c.surviving
     FROM query_log s
@@ -96,15 +96,22 @@ const searchRows = await sql<SearchDbRow[]>`
     ) c
    WHERE s.kind = 'search'`;
 const actionRows = await sql<ActionDbRow[]>`
-  SELECT agent_id, logged_at, (extract(epoch FROM logged_at) * 1000000)::bigint AS at_us, tool, target_id
+  SELECT agent_id, logged_at, (extract(epoch FROM logged_at)::numeric * 1000000)::bigint AS at_us, tool, target_id
     FROM query_log WHERE kind = 'action'`;
 // The by-agent table names its rows from the registry beside the log
 // (ob1_agents, migration 010; the label mirrors the key name) — an eighth
 // review pass's two-agent walk read a table of bare uuids. A brain without 010
 // has no registry and the rows keep their ids.
 const agentNames = new Map<string, string>();
-if ((await sql<{ present: boolean }[]>`SELECT to_regclass('public.ob1_agents') IS NOT NULL AS present`)[0].present) {
-  for (const r of await sql<{ id: string; label: string }[]>`SELECT canonical_agent_id AS id, label FROM ob1_agents`) agentNames.set(r.id, r.label);
+try {
+  if ((await sql<{ present: boolean }[]>`SELECT to_regclass('public.ob1_agents') IS NOT NULL AS present`)[0].present) {
+    for (const r of await sql<{ id: string; label: string }[]>`SELECT canonical_agent_id AS id, label FROM ob1_agents`) agentNames.set(r.id, r.label);
+  }
+} catch (e) {
+  // The label is cosmetic: a role that can read the log but not the registry
+  // gets the report with bare ids and one line saying why, not a stack trace
+  // after the log was already read (ninth review pass).
+  process.stderr.write(`  (agent names not read — ${(e as Error).message.split("\n")[0]}; the by-agent table shows ids)\n`);
 }
 await sql.close();
 

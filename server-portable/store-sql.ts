@@ -54,25 +54,16 @@ function toVector(embedding: number[]): string {
 }
 
 /**
- * A Postgres array literal for a `::uuid[]` bind. Bun.sql serialises a JS array
- * by joining with commas — `a,b`, not `{a,b}` — which array_in rejects (the
- * literal must start with `{`), so both array columns are built by hand here as
- * toVector builds a vector. The ids come from our own search results (validated
- * uuids), never from free text. Empty stays `{}`.
+ * A Postgres array literal for a `::uuid[]` bind. Bun binds a JS array to a
+ * text parameter comma-joined — no braces — so the literal is built by hand,
+ * as toVector builds a vector. Ids are validated before they reach here (the
+ * search results' own ids; normaliseActionRows for the query log); a null
+ * element is the NULL element (the log's nullable agent column). By hand
+ * rather than sql.array because the driver renders a null element as the text
+ * `null`, which uuid[] refuses (probed, seventh review pass). Empty stays `{}`.
  */
-function toUuidArray(ids: string[]): string {
-  return `{${ids.join(",")}}`;
-}
-
-/**
- * A Postgres array literal for a `::uuid[]` bind whose elements may be NULL —
- * the query log's agent column. The ids were validated by normaliseActionRows
- * (store.ts), so this only renders; a null is the NULL element. By hand rather
- * than sql.array because the driver renders a null element as the text `null`,
- * which uuid[] refuses (probed, seventh review pass).
- */
-function toNullableUuidArray(xs: (string | null)[]): string {
-  return `{${xs.map((x) => x ?? "NULL").join(",")}}`;
+function toUuidArray(ids: (string | null)[]): string {
+  return `{${ids.map((x) => x ?? "NULL").join(",")}}`;
 }
 
 /**
@@ -429,7 +420,7 @@ export class SqlStore implements ThoughtStore {
       INSERT INTO query_log (kind, tool, agent_id, target_id)
       SELECT 'action', t.tool, t.agent_id, t.target_id
         FROM unnest(${this.sql.array(clean.map((r) => r.tool), "TEXT")}::text[],
-                    ${toNullableUuidArray(clean.map((r) => r.agentId))}::uuid[],
+                    ${toUuidArray(clean.map((r) => r.agentId))}::uuid[],
                     ${toUuidArray(clean.map((r) => r.targetId))}::uuid[]) AS t(tool, agent_id, target_id)`;
   }
 

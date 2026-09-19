@@ -2744,7 +2744,8 @@ is circular as gold; label by hand. With no action rows the report says `n/a`
 and asks whether the log is on, rather than printing 0%; on a brain without
 migration 034 it (and `export-queries.ts`) refuses in words, exit 2, rather
 than dying in the driver. Attribution is the
-export's rule, in `utilization.ts` (pure, tested by `db/test-schema.ts` [39]).
+export's rule, in `utilization.ts` (pure, tested by `db/test-schema.ts` [39]) —
+one implementation, which `export-queries.ts` calls as well.
 A read whose use ends in prose, with no write and no fetch, is invisible here,
 so utilization is a lower bound on use. No ranking changes on this number; if
 it comes out low, the lever is presentation (SMD-1735), not retrieval.

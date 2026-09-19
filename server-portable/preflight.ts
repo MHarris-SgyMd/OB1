@@ -613,9 +613,11 @@ if (configFailed) {
         // `query log` check further down this block (cite rows, SMD-1719, are
         // logged only when that body answers `existed`). One detector of 035,
         // not a second grep of the same body (seventh review pass); scoped to
-        // this block rather than the module so a second run in one process
-        // starts unset (eighth). `undefined` = the body was not read.
-        let threeArgIs035: boolean | undefined;
+        // this block rather than the module (eighth). A boolean, not a
+        // tri-state: the assignment is unconditional once the forms are read,
+        // and a throw before it leaves this block through the catch below,
+        // which reports the query-log check as not run (ninth).
+        let threeArgIs035 = false;
         const forms = (await sql`
           SELECT p.proname || '(' || COALESCE((SELECT string_agg(t.typname, ',' ORDER BY a.n)
                                                  FROM unnest(p.proargtypes) WITH ORDINALITY AS a(o, n)
@@ -2029,11 +2031,9 @@ if (configFailed) {
             // Whether the body is 035's is the atomic-capture check's verdict,
             // read from the sentinel that body declares (threeArgIs035 above).
             const cites = threeArgIs035;
-            add("query log", cites === true ? "ok" : "warn",
+            add("query log", cites ? "ok" : "warn",
               `present; ${on ? "ON (OB1_QUERY_LOG=on) here" : "off by default — set OB1_QUERY_LOG=on to record"}. ` +
-              (cites === true ? "" : cites === false
-                ? "Cite rows (a write naming a returned id as its source, SMD-1719) need migration 035's upsert_thought and will NOT be logged on this brain — utilization would read as callers never citing (the `atomic capture` check above names the remedy). "
-                : "Whether cite rows (SMD-1719) can be logged depends on migration 035's upsert_thought, which the `atomic capture` check could not read. ") +
+              (cites ? "" : "Cite rows (a write naming a returned id as its source, SMD-1719) need migration 035's upsert_thought and will NOT be logged on this brain — utilization would read as callers never citing (the `atomic capture` check above names the remedy). ") +
               `Logs each search and the fetch/edit/delete of a returned id, and a write that cites one (SMD-1719) (query text, arguments, returned ids — personal data at rest), read offline by evals/export-queries.ts and evals/eval-utilization.ts (which also joins the returned ids to thoughts content for a token estimate). ` +
               `Retention: prune_query_log(${days}); a self-hosted role needs query_log INSERT (db/README.md).`);
           }
