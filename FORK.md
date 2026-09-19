@@ -14010,7 +14010,9 @@ the edited id as opened and the superseded id as cited. A run with the cite
 logging removed fails exactly those assertions and nothing else. The bucketed
 attribution was checked against a naive reading of the rule on 400 random logs
 (distinct timestamps, three agents including NULL, five tools, three windows):
-no mismatch. The report script was run against a throwaway Postgres with a
+no mismatch.
+
+The report script was run against a throwaway Postgres with a
 seeded log: the anonymous fetch of an id its search never returned is the one
 unattributed action, tokens per used id came out at exactly what the seeded
 content lengths predict, and the gold arm read 0% ignored where the relevant
@@ -14044,7 +14046,9 @@ duplicate ids, retried actions, an unknown tool, partial token estimates and
 gold on some queries: cited + opened = used at every grain, utilization in
 [0, 1], the per-arm and per-agent tables sum to the overall row, the estimate
 is null exactly when its stated condition holds, and the rendered `all` row
-carries the overall numbers. The operator's path was walked end to end as a
+carries the overall numbers.
+
+The operator's path was walked end to end as a
 separate process — the Dockerfile's entrypoint (`bun preflight.ts && exec bun
 index.ts`) against a throwaway Postgres with a stub provider on a port and
 `OB1_QUERY_LOG=on`, tool calls over HTTP (three captures, a search, a capture
@@ -14054,7 +14058,9 @@ search equals the export's `relevant` per query, the counts match a hand tally
 of the log rows (7 distinct returned, 4 used, 3 cited, 1 opened), preflight
 reads the log as present and on before and after, and the same walk on an
 empty log prints `n/a`, on an opens-only log the 035 warning, and with the
-table absent the refusal above. The hosted path was walked the same way (a
+table absent the refusal above.
+
+The hosted path was walked the same way (a
 seventh pass): the server with `OB1_STORE=postgrest` — the default store —
 and its real supabase-js client, through a prefix-stripping proxy to a real
 PostgREST 12.2 container over the lane's Postgres, the same calls; the log
@@ -14072,7 +14078,9 @@ in [39]: a row whose instant does not parse is never credited and never
 attributed (NaN passes both window tests and would have taken the agent's
 newest search), and a gold id spelled upper-case matches the lower-case id
 the log holds. `test-preflight.ts`'s pre-035 run asserts the `query log`
-warning and its absence once 035 is back. An eighth pass walked two named
+warning and its absence once 035 is back.
+
+An eighth pass walked two named
 agents (`MCP_ACCESS_KEYS`, alice and bob) over the SQL-store server process:
 bob's fetch of an id only alice's search returned and bob's cite of an id his
 own search did not return are the two unattributed actions, bob's cite of an
@@ -14088,7 +14096,9 @@ pass's cold read moved the distinct-returned count to one definition — the
 reader's, from the parsed ids, where a `count(DISTINCT)` subquery per search
 row had duplicated it under a comment that called it a cardinality — and the
 035 verdict preflight carries between two checks into the block those checks
-share, so a second run in one process starts unset. A ninth pass fired forty
+share, so a second run in one process starts unset.
+
+A ninth pass fired forty
 captures at once at the live server, each citing the two ids one search had
 returned: forty succeeded, eighty cite rows landed, none dropped, nothing on
 the server's stderr, and the report read 2 used of 2 returned; and it seeded

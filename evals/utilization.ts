@@ -20,11 +20,12 @@
  *            caller went and looked at, or touched, the row. Click-through
  *            relevance (SMD-1295).
  *
- * Attribution is the export's rule (evals/export-queries.ts), unchanged: an
- * action belongs to the MOST RECENT prior search by the same agent, within the
- * window, whose result set contained the id. A NULL agent is its own bucket. The
- * log carries no request token, so this is the only join there is (FORK.md
- * change 65).
+ * Attribution is 034's rule, and attribute() below is its one implementation —
+ * evals/export-queries.ts calls it for the fixture's labels, this report for
+ * its uses: an action belongs to the MOST RECENT prior search by the same
+ * agent, within the window, whose result set contained the id. A NULL agent is
+ * its own bucket. The log carries no request token, so this is the only join
+ * there is (FORK.md change 65).
  *
  * What is reported, per arm (the search tool and its arguments) and overall:
  *   searches, distinct ids returned, ids used (distinct per search),
@@ -193,8 +194,9 @@ const tick = (r: { loggedAt: Date | string; atUs?: number }): number =>
 /**
  * Each action → the most recent prior search by the same agent (NULL agent is
  * its own bucket), within `windowMinutes` before the action, whose result_ids
- * contain the target. The export's join, in TypeScript so it is testable
- * without a database and so the report and the fixture agree by construction.
+ * contain the target. 034's join in TypeScript, testable without a database;
+ * export-queries.ts calls this too, so the report and the fixture agree by
+ * construction.
  *
  * Searches are grouped by agent and sorted newest first with their times parsed
  * once, so each action scans only its own agent's searches and stops at the

@@ -3,9 +3,11 @@
  * eval-utilization.ts — did the caller use what the search returned? (SMD-1719)
  *
  * Reads the opt-in query log (migration 034) from DATABASE_URL and prints, per
- * arm and overall: ids returned, ids used (cited by a later capture's
- * derived_from/supersedes, or opened by fetch/update/delete), utilization,
- * use rate, the cited/opened split, and approximate tokens returned per id used.
+ * arm, per agent when the log holds more than one (named from ob1_agents when
+ * migration 010 is present), and overall: distinct ids returned, ids used
+ * (cited by a later capture's or edit's derived_from/supersedes, or opened by
+ * fetch/update/delete), utilization, use rate, the cited/opened partition, and
+ * approximate tokens returned per id used.
  * The numbers and their caveats are defined in evals/utilization.ts (pure) and
  * evals/README.md ("Utilization").
  *
