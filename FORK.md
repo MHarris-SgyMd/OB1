@@ -14387,13 +14387,14 @@ Bun's driver hands the store `Date(NaN)` (or an extended-year `Date` that fails
 `SELECT created_at::text` beside every column in `store-sql.ts`. That row reaches
 no capture path, only a hand-written INSERT, and the two drivers disagree at the
 wire; the one odd row is left as each client renders it rather than rewriting
-every SELECT. Two mappers this ticket did **not** move — `derivationFields`
-(025's provenance/derivative walk) and `normaliseProposal`'s local `iso` (029's
-`list_supersession_proposals`, and the `day()` renderer beside it) — still run
-`created_at` through `new Date(...).toISOString()` / `.toLocaleDateString()`: a
-NULL ancestor there fabricates the epoch, and — worse — an `infinity`- or
-BC-dated proposal thought makes `new Date("infinity").toISOString()` **throw**,
-so `list_supersession_proposals` errors out entirely rather than misrendering.
+every SELECT. Two mappers this ticket did **not** move stay on the pre-fix
+convention. `derivationFields` (025's provenance/derivative walk) runs
+`created_at` through `isoTimestamp`, which keeps `infinity` but fabricates the
+epoch on a NULL ancestor. `normaliseProposal`'s local `iso` (029's
+`list_supersession_proposals`, and the `day()` renderer beside it) calls
+`new Date(v).toISOString()` directly, with no such guard — so, worse, an
+`infinity`- or BC-dated proposal thought makes it **throw** and
+`list_supersession_proposals` errors out entirely rather than misrendering.
 The offline maintainer CLI `db/consolidate.ts` carries the same two defects (its
 `day()` at :277 throws on infinity and fabricates on NULL; its judge-prompt
 `dateOf` feed at :489–490 fabricates on NULL). All of these are graph walks over

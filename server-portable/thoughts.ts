@@ -61,7 +61,10 @@ export function normaliseType(raw: unknown): { type: string; raw?: string } {
  *   - anything else (infinity, -infinity, a no-ISO-form date) → its own text.
  */
 export function displayDate(v: string | null | undefined): string | null {
-  if (v == null) return null;
+  // "" is unreachable from a timestamptz column, but returning null for it keeps
+  // the caller's two idioms — `?? "Open Brain"/"undated"` and `captured ? … : []`
+  // — consistent, since "" is falsy but not nullish.
+  if (v == null || v === "") return null;
   const d = new Date(v);
   return Number.isNaN(d.getTime()) ? v : d.toLocaleDateString();
 }

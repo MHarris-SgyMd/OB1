@@ -262,13 +262,9 @@ export function normaliseListItem(r: Record<string, unknown>): ThoughtListItem {
     id: String(r.id),
     content: String(r.content),
     metadata: (r.metadata ?? {}) as Record<string, unknown>,
-    // SMD-1328: the column is nullable and no capture path sets it, so a hand
-    // -planted or migrated row can be NULL. `isoTimestampOrNull` maps that to
-    // null rather than the epoch `isoTimestamp(new Date(null))` fabricated for
-    // every read here; `created_at: string | null` on the item and the three
-    // match shapes that spread it. `infinity`/`-infinity` and a no-ISO-form
-    // date stay their own string (isoTimestamp keeps them) — the tools render
-    // them through thoughts.ts `displayDate`.
+    // SMD-1328: the column is nullable, so map a SQL NULL to null rather than
+    // the epoch `new Date(null)` fabricated. See `isoTimestamp`'s header for the
+    // full decision and `thoughts.ts` `displayDate` for how the tools render it.
     created_at: isoTimestampOrNull(r.created_at),
   };
 }
