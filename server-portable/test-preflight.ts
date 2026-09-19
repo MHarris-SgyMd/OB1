@@ -511,7 +511,13 @@ else {
   const onePin = new SQL({ url: LIVE, max: 1 });
   await onePin.unsafe(`ALTER FUNCTION ${MATCH_THOUGHTS_SIGNATURE} SET enable_nestloop = on`);
   await onePin.close();
-  assert(/candidate scan.*but not enable_nestloop = on and enable_tidscan = on — migration 041 is not applied/s.test((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE })).out), "…and one pin back of two is still the warning: both are 041's, or neither");
+  // One pin back of two — also the state the header's escape hatch leaves
+  // (`ALTER FUNCTION … RESET enable_nestloop`): still the warning, naming the
+  // one pin that is missing and what that setting alone does, and nothing
+  // about the one that holds (review pass 1).
+  const onePinOut = (await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE })).out;
+  assert(/candidate scan.*but not enable_tidscan = on — migration 041 is not applied: on PostgreSQL 18 enable_tidscan = off leaves the gate's probe no TID Range path/s.test(onePinOut) && !/not enable_nestloop = on/.test(onePinOut) && !/reaches every join/.test(onePinOut) && /Apply db\/migrations\/041_match_thoughts_pin_paths\.sql\.\s*$/m.test(onePinOut),
+         "…and one pin back of two is still the warning, naming only the pin that is missing and what its setting alone does, with 041's file as the remedy");
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("041") });
   assert(/candidate scan.*match_thoughts jit = off \(040\) and enable_nestloop = on with enable_tidscan = on \(041\)/s.test((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE })).out), "…and 041 re-applied puts both back");
   // The other wording, with 040 RECORDED: "apply 040" would be a no-op for a

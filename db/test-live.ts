@@ -456,7 +456,7 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
     const [{ pages }] = await sql.unsafe(`SELECT (pg_relation_size(to_regclass('thoughts')) / current_setting('block_size')::int)::int AS pages`);
     assert(Number(pages) > 0 && Number(pages) < ROUTE_ESTIMATE_MIN_PAGES, `${N.toLocaleString()} rows at ${EMBEDDING_DIM} dimensions are ${pages} heap pages (the vectors are TOASTed), under the shipped floor of ${ROUTE_ESTIMATE_MIN_PAGES}`);
 
-    // The deployed body — 040, carrying 038's sample — kept for the timing at the end: by then 020's re-apply has replaced it.
+    // The deployed body — 041, carrying 038's sample — kept for the timing at the end: by then 020's re-apply has replaced it.
     const bodyGate = await body();
 
     // The observable: 014's collection is one scan of the GIN index per call,
@@ -530,12 +530,12 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
     const THIN = '{"thin": true}';
     const gatedBroad = await measure(BROAD);
     const gatedThin = await measure(THIN);
-    assert(gatedBroad.agree === QUERIES, `under the gate (040, carrying 038's), a filter matching every row (${N.toLocaleString()}, the walk) returns the exact top-10 on ${gatedBroad.agree}/${QUERIES} queries — without an HNSW index the walk is exact`);
+    assert(gatedBroad.agree === QUERIES, `under the gate (041, carrying 038's), a filter matching every row (${N.toLocaleString()}, the walk) returns the exact top-10 on ${gatedBroad.agree}/${QUERIES} queries — without an HNSW index the walk is exact`);
     assert(gatedThin.agree === QUERIES, `…and a filter matching ${N / 250} rows (the exact branch) on ${gatedThin.agree}/${QUERIES}`);
 
     // 020's body on the same table — the collection on every filtered call.
     await applyMigrations(URL_, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("020") });
-    assert(!TID_PROBE.test(await body()) && !/v_broad/.test(await body()), "020 re-applied over 040: the body has no sample and no gate (the state a hand re-apply of 020 leaves; preflight's remedy names 040, the last definer, for that reason)");
+    assert(!TID_PROBE.test(await body()) && !/v_broad/.test(await body()), "020 re-applied over 041: the body has no sample and no gate (the state a hand re-apply of 020 leaves; preflight's remedy names 041, the last definer, for that reason)");
     const plainBroad = await measure(BROAD);
     const plainThin = await measure(THIN);
     // The raw scan counts, not the per-call quotients: x/20 − y/20 is not
@@ -550,8 +550,8 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
     // bodies and cancel. Exactly one fewer per call is the band — 037's draw
     // could reach fewer than three pages and missed, which is why this
     // section once accepted five misses in twenty.
-    assert(saved === QUERIES, `on the broad filter the gate makes exactly one fewer GIN scan per call than 020 over ${QUERIES} calls — the collection skipped on every call (020: ${plainBroad.scansPerCall.toFixed(2)} a call, 040: ${gatedBroad.scansPerCall.toFixed(2)}; per call 020 [${plainBroad.perCall.join(" ")}], 040 [${gatedBroad.perCall.join(" ")}])`);
-    assert(plainThin.scans === gatedThin.scans, `on the thin filter both bodies scan the GIN index the same ${gatedThin.scansPerCall.toFixed(2)} times a call — the collection ran, and the exact branch answered (per call 020 [${plainThin.perCall.join(" ")}], 040 [${gatedThin.perCall.join(" ")}])`);
+    assert(saved === QUERIES, `on the broad filter the gate makes exactly one fewer GIN scan per call than 020 over ${QUERIES} calls — the collection skipped on every call (020: ${plainBroad.scansPerCall.toFixed(2)} a call, 041: ${gatedBroad.scansPerCall.toFixed(2)}; per call 020 [${plainBroad.perCall.join(" ")}], 041 [${gatedBroad.perCall.join(" ")}])`);
+    assert(plainThin.scans === gatedThin.scans, `on the thin filter both bodies scan the GIN index the same ${gatedThin.scansPerCall.toFixed(2)} times a call — the collection ran, and the exact branch answered (per call 020 [${plainThin.perCall.join(" ")}], 041 [${gatedThin.perCall.join(" ")}])`);
     assert(plainBroad.agree === QUERIES && plainThin.agree === QUERIES, "…and 020's answers are the same exact top-10 (the gate changed the route, not the answer)");
 
     // The sample's cost against the collection's on this table, printed for the
@@ -573,7 +573,7 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
     throw e;
   } finally {
     // The shipped state back on every path — a throw above would otherwise
-    // leave 25,000 rows and no HNSW index to [6]..[16] (SMD-1463's first review pass): 040
+    // leave 25,000 rows and no HNSW index to [6]..[16] (SMD-1463's first review pass): 041
     // with its floor, and 027, because 020's file also redefines
     // search_thoughts_hybrid as 020 had it, without 027's relative floor, and
     // [15] holds that floor (the first run of this section left 020's hybrid
@@ -829,7 +829,7 @@ console.log("\n[5e] A planner path disabled at session level no longer JIT-compi
     throw e;
   } finally {
     // The shipped state back on every path, as [5d] does: rows out, trigger
-    // on, the heap compacted, the index present, 040 with its floor.
+    // on, the heap compacted, the index present, 041 with its floor and pins.
     try {
       await sql`DELETE FROM thoughts`;
       await sql.unsafe(`ALTER TABLE thoughts ENABLE TRIGGER USER`);
@@ -867,7 +867,7 @@ console.log("\n[5f] Every join in the body keeps its nested loop under an operat
   // pin RESET, what 040's file re-applied by hand leaves — has a Merge or
   // Hash Join and touches the heap several times over; and through the
   // function the pinned call returns the default's rows. Timing at scale is
-  // the bench's and FORK.md change 92's.
+  // the bench's and FORK.md change 93's.
   const N = 12_000;
   await sql`DELETE FROM thoughts`;
   const defs = (await sql.unsafe(`SELECT indexname AS n, indexdef AS d FROM pg_indexes WHERE indexname IN ('thoughts_embedding_idx', 'thought_chunks_embedding_idx') ORDER BY 1`)) as { n: string; d: string }[];

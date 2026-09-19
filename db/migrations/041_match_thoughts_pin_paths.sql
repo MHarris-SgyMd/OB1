@@ -25,10 +25,11 @@
 --   says so with the ALTER FUNCTION that puts both back until `bun
 --   db/migrate.ts --reapply` does. A `Seq Scan on thoughts` under the gate's
 --   probe with `Disabled: true` on it (PostgreSQL 18) means the second is
---   gone, the same way. Since this file the only cost past 1e10 a reader of
---   auto_explain can see on 14–17 is the sample's DISTINCT draw under
---   `enable_hashagg` and `enable_sort` both off — the one disabled path this
---   file does not pin, because the plan under it is the same plan (Design).
+--   gone, the same way. Of the three disabled paths 040 measured, the one
+--   this file leaves at disable_cost on 14–17 is `enable_hashagg` and
+--   `enable_sort` both off: the sample's DISTINCT draw and the body's ORDER
+--   BYs carry it, and the plan under it is the same plan (Design); other
+--   planner settings are not pinned either (Design, the last bullet but one).
 --   A `Seq Scan on thoughts` under the collection or the walk means
 --   row-level security on the table (SMD-1625, unchanged here); a body
 --   carrying TABLESAMPLE means 037 was pasted over 038 and everything since
@@ -172,7 +173,12 @@
 --     takes it for two planner paths, on the same reading. Both tickets asked
 --     the policy question once (SMD-1677 decides it, SMD-1703 follows): the
 --     function pins the paths its statements rely on, and any pins ship in
---     one migration, one preflight check and one clause count.
+--     one migration, one preflight check and one clause count. The clauses
+--     re-enable a path, they do not force one: hash and merge joins stay
+--     available inside the call and the planner still chooses by cost —
+--     which is why the pinned function reads the default's time where the
+--     setting is already on — and the operator's setting still governs
+--     every other statement on the server.
 --   * Not a statement shape. A LATERAL subquery that cannot be pulled up —
 --     `CROSS JOIN LATERAL (SELECT … FROM thoughts t WHERE t.id = b.tid LIMIT
 --     1) t`, the sample's own trick; a bare LATERAL is pulled back up into
@@ -249,7 +255,7 @@
 --   OB1_BENCH_UPTO=040 against the default; measured as the build run of the
 --   kept corpus against a reuse with this file applied onto it, section B
 --   agreed in every row and recall column and its medians sat within the
---   run's spread (FORK.md change 92 has both rows of figures and the one
+--   run's spread (FORK.md change 93 has both rows of figures and the one
 --   confounded run that is not cited). Where the setting IS off the pinned call costs the
 --   default's time in place of 1.3–2.2 s at a million rows (C against A).
 --   At ten million rows (the SMD-1018 corpus brought to this file by hand;
@@ -266,7 +272,7 @@
 --   Seventeen to thirty-four seconds a call without the pin — the merge
 --   join's inner side is an index scan over ten million primary-key
 --   entries, the walk's hash join builds over four million chunk rows.
---   FORK.md change 92 has the full run, including the cold-cache column the
+--   FORK.md change 93 has the full run, including the cold-cache column the
 --   whole-table arm left behind.
 --
 -- What a successor must carry

@@ -1459,7 +1459,12 @@ if (configFailed) {
           } else {
             const seqOff = mt[0].settings["enable_seqscan"] === "off";
             const jitOff = mt[0].settings["jit"] === "off";
-            const pinned = mt[0].settings["enable_nestloop"] === "on" && mt[0].settings["enable_tidscan"] === "on";
+            // Each pin read on its own, so the warning names the one that is
+            // missing — after the header's escape (`ALTER FUNCTION … RESET
+            // enable_nestloop`) one is, and "both" would be false (review pass 1).
+            const nestloopOn = mt[0].settings["enable_nestloop"] === "on";
+            const tidscanOn = mt[0].settings["enable_tidscan"] === "on";
+            const pinned = nestloopOn && tidscanOn;
             const rows = mt[0].rows;
             const kwOff = kwRows !== null && kwRows !== 25;
             const ledgerHas019 = ledger.has("019");
@@ -1492,9 +1497,13 @@ if (configFailed) {
             const jitNote = jitOff
               ? ""
               : `; and it does not carry jit = off${ledgerHas040 ? " although migration 040 is recorded as applied — a later redefinition dropped its SET clause" : " — migration 040 is not applied"}, so a planner path disabled at any level (enable_tidscan, enable_nestloop, hashagg with sort) JIT-compiles the gate's sample on every filtered call, ~50 ms, on PostgreSQL 14–17 (on 18 the clause guards the generic plan's flat estimate; 040's header has the table)${today}`;
-            const pinLedger = ledgerHas041 ? " although migration 041 is recorded as applied — a later redefinition dropped its SET clauses" : " — migration 041 is not applied";
-            const pinWhy = "an operator's enable_nestloop = off at any level reaches every join in the call — the parent lookups and the walk's chunk join become merge and hash joins over the whole table, 1.3–2.2 s a call at a million rows, the unfiltered call included, and the walk's rows change — and on PostgreSQL 18 enable_tidscan = off leaves the gate's probe no TID Range path, so every filtered call scans the whole heap eight times (041's header has the tables)";
-            const pinNote = pinned ? "" : `; and it does not carry enable_nestloop = on and enable_tidscan = on${pinLedger}, so ${pinWhy}`;
+            const missingPins = [...(nestloopOn ? [] : ["enable_nestloop = on"]), ...(tidscanOn ? [] : ["enable_tidscan = on"])].join(" and ");
+            const pinLedger = ledgerHas041 ? ` although migration 041 is recorded as applied — a later redefinition dropped ${nestloopOn || tidscanOn ? "it" : "them"}, or an ALTER FUNCTION … RESET took ${nestloopOn || tidscanOn ? "it" : "them"} off` : " — migration 041 is not applied";
+            const pinWhy = [
+              ...(nestloopOn ? [] : ["an operator's enable_nestloop = off at any level reaches every join in the call — the parent lookups and the walk's chunk join become merge and hash joins over the whole table, 1.3–2.2 s a call at a million rows, the unfiltered call included, and the walk's rows change"]),
+              ...(tidscanOn ? [] : ["on PostgreSQL 18 enable_tidscan = off leaves the gate's probe no TID Range path, so every filtered call scans the whole heap eight times"]),
+            ].join(" — and ") + " (041's header has the tables)";
+            const pinNote = pinned ? "" : `; and it does not carry ${missingPins}${pinLedger}, so ${pinWhy}`;
             if (!missing019 && jitOff && pinned) {
               add("candidate scan", "ok", "match_thoughts declares enable_seqscan = off and ROWS 10, search_thoughts_keyword ROWS 25 (019), match_thoughts jit = off (040) and enable_nestloop = on with enable_tidscan = on (041): the candidate scan takes the HNSW indexes at the shipped width, callers plan against real row counts, no statement of the body is JIT-compiled, and the call's joins and the gate's probe keep their paths whatever the session sets");
             } else if (!seqOff) {
@@ -1511,7 +1520,7 @@ if (configFailed) {
                   remedy);
             } else {
               add("candidate scan", "warn",
-                  `match_thoughts carries enable_seqscan = off, both row estimates hold and jit = off, but not enable_nestloop = on and enable_tidscan = on${pinLedger}: ${pinWhy}`,
+                  `match_thoughts carries enable_seqscan = off, both row estimates hold and jit = off, but not ${missingPins}${pinLedger}: ${pinWhy}`,
                   remedy);
             }
           }
