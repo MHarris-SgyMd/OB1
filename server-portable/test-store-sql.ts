@@ -13,7 +13,7 @@
  */
 
 import { SqlStore } from "./store-sql.ts";
-import { createAssert, ISO_RE, resetSchema } from "../db/test-support.ts";
+import { createAssert, ISO_RE, plantLegacyRow, resetSchema } from "../db/test-support.ts";
 import { MATCH_THOUGHTS_SIGNATURE } from "../db/config.mjs";
 import { createStore } from "./store.ts";
 import { SQL } from "bun";
@@ -239,7 +239,8 @@ console.log("\n[4] listThoughts reproduces the PostgREST filters");
 {
   const all = await store.listThoughts({ limit: 10 });
   assert(all.length === 3, `unfiltered returns everything (got ${all.length})`);
-  assert(all[0].created_at >= all[all.length - 1].created_at, "newest first");
+  const firstDate = all[0].created_at, lastDate = all[all.length - 1].created_at;
+  assert(firstDate != null && lastDate != null && firstDate >= lastDate, "newest first");
 
   const byType = await store.listThoughts({ limit: 10, type: "note" });
   assert(byType.length === 0, "an unmatched type filter returns nothing");
@@ -473,6 +474,31 @@ console.log("\n[10] listSupersessionProposals reads migration 029's queue throug
   assert(all.length === 1 && all[0].status === "accepted" && all[0].supersedingId === newer.id && all[0].reviewNote === "confirmed" && all[0].reviewedAt !== null,
          "null lists every state, and the accepted row names the thought it wrote");
   await admin5.close();
+}
+
+console.log("\n[11] A NULL created_at reads back as null on every read method, not the fabricated epoch (SMD-1328)");
+{
+  // The column is nullable and no capture path sets it — every INSERT takes the
+  // DEFAULT now() — so only a direct INSERT reaches this. When one did, every
+  // mapper here ran the NULL through new Date(null) and returned the epoch
+  // string 1970-01-01T00:00:00.000Z as if it were a real capture date. It is
+  // now null. unit(6) is an axis [3]'s seeds do not use, so the planted row is
+  // the only hit above the threshold.
+  const sql = new SQL({ url: URL_, max: 1 });
+  const undatedId = await plantLegacyRow(sql, "an undated row for SMD-1328", "[" + unit(6).join(",") + "]", null);
+  try {
+    const hit = (await store.matchThoughts({ embedding: unit(6), threshold: 0.5, limit: 5, filter: {} })).find((r) => r.id === undatedId);
+    assert(hit?.created_at === null, `matchThoughts returns null, not the epoch (got ${JSON.stringify(hit?.created_at)})`);
+    const rec = await store.getThought(undatedId);
+    assert(rec?.created_at === null, `getThought returns null (got ${JSON.stringify(rec?.created_at)})`);
+    const listed = (await store.listThoughts({ limit: 50 })).find((r) => r.id === undatedId);
+    assert(listed?.created_at === null, `listThoughts returns null (got ${JSON.stringify(listed?.created_at)})`);
+    // The bug's fingerprint: the fabricated epoch string appears nowhere.
+    assert(rec?.created_at !== "1970-01-01T00:00:00.000Z", "the fabricated epoch string is gone");
+  } finally {
+    await sql`DELETE FROM thoughts WHERE id = ${undatedId}::uuid`;
+    await sql.close();
+  }
 }
 
 await store.close();

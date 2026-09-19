@@ -15,7 +15,7 @@
  */
 
 import { SQL } from "bun";
-import { createAssert, resetSchema } from "../db/test-support.ts";
+import { createAssert, plantLegacyRow, resetSchema } from "../db/test-support.ts";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -501,6 +501,35 @@ console.log("\n[10] query log: a search and its follow-up fetch, recorded and jo
   await qlog`DELETE FROM query_log`;
   await qlog`DELETE FROM thoughts`;
   await qlog.close();
+}
+
+console.log("\n[11] Undated and infinity rows render through the tools without a fabricated date (SMD-1328)");
+{
+  // The corpus is empty here (the section above wiped it). Plant the two rows
+  // only a direct INSERT can make — a NULL created_at and an infinite one — and
+  // drive the two tools that print a date: list_thoughts (the [date] prefix)
+  // and fetch (the title). Neither may print 1/1/1970 or "Invalid Date".
+  const sql = new SQL({ url: URL_, max: 1 });
+  const axis = (i: number) => { const a = new Array(EMBEDDING_DIM).fill(0); a[i] = 1; return "[" + a.join(",") + "]"; };
+  const undatedId = await plantLegacyRow(sql, "an undated e2e thought", axis(0), null);
+  const infinityId = await plantLegacyRow(sql, "an infinity-dated e2e thought", axis(1), "infinity");
+  try {
+    const listed = await call("list_thoughts", { limit: 10 });
+    assert(!/1970/.test(listed) && !/Invalid Date/.test(listed), `list_thoughts prints no fabricated date (${listed.replace(/\n/g, " ⏎ ")})`);
+    assert(/\[undated\]/.test(listed), "the undated row shows [undated], not a date");
+    assert(/\[infinity\]/.test(listed), "the infinity row shows [infinity], its own text");
+
+    const undated = JSON.parse(await call("fetch", { id: undatedId }));
+    assert(/^Open Brain/.test(undated.title) && !/1970/.test(undated.title), `fetch titles an undated thought "Open Brain …", not the epoch (${undated.title})`);
+    assert(undated.metadata?.created_at === null, `fetch's created_at metadata is null for an undated row (${JSON.stringify(undated.metadata?.created_at)})`);
+
+    const inf = JSON.parse(await call("fetch", { id: infinityId }));
+    assert(inf.title.startsWith("infinity - ") && !/Invalid Date/.test(inf.title), `fetch titles an infinity thought with its own text (${inf.title})`);
+    assert(inf.metadata?.created_at === "infinity", `fetch's created_at metadata keeps "infinity" (${JSON.stringify(inf.metadata?.created_at)})`);
+  } finally {
+    await sql`DELETE FROM thoughts WHERE id = ${undatedId}::uuid OR id = ${infinityId}::uuid`;
+    await sql.close();
+  }
 }
 
 server.stop();

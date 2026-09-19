@@ -1,5 +1,5 @@
 
-import { normaliseType, thoughtTitle, thoughtUrl, THOUGHT_TYPES } from "./thoughts.ts";
+import { displayDate, normaliseType, thoughtTitle, thoughtUrl, THOUGHT_TYPES } from "./thoughts.ts";
 import { cleanForDisplay } from "./consolidate.ts";
 import { createEmbedder, providerCall, ProviderError, resolveEmbedConfig, type EmbedConfig, type EmbedKind, type EmbeddedCapture } from "./embed.ts";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -575,8 +575,11 @@ function buildServer(principal: Principal): McpServer {
             // 025: mark a hit a newer thought replaces, and name the replacement,
             // so the reader is not left ranking a superseded version as current.
             if (superseded[t.id]) parts.push(`⚠ Superseded by a newer thought — ID ${superseded[t.id]}`);
+            // SMD-1328: an undated row shows no Captured line rather than a
+            // fabricated 1/1/1970; infinity/a no-ISO-form date shows its text.
+            const captured = displayDate(t.created_at);
             parts.push(
-              `Captured: ${new Date(t.created_at).toLocaleDateString()}`,
+              ...(captured ? [`Captured: ${captured}`] : []),
               `Type: ${m.type || "unknown"}`,
             );
             if (t.matchedNeedles.length) parts.push(`Contains: ${t.matchedNeedles.join(", ")}`);
@@ -706,10 +709,12 @@ function buildServer(principal: Principal): McpServer {
         const total = data[0].totalCount;
         const results = data.map((t, i) => {
           const m = t.metadata || {};
+          // SMD-1328: as the search block above — absent, not a fake 1970.
+          const captured = displayDate(t.created_at);
           const parts = [
             `--- Result ${offset + i + 1} (${t.occurrences} occurrence${t.occurrences === 1 ? "" : "s"}) ---`,
             `ID: ${t.id}`,
-            `Captured: ${new Date(t.created_at).toLocaleDateString()}`,
+            ...(captured ? [`Captured: ${captured}`] : []),
             `Type: ${m.type || "unknown"}`,
           ];
           if (Array.isArray(m.topics) && m.topics.length)
@@ -784,7 +789,9 @@ function buildServer(principal: Principal): McpServer {
             // update_thought and delete_thought take. This compact format has no
             // header group, so it trails the content. SMD-1248.
             const mark = superseded[t.id] ? `\n   ⚠ Superseded by a newer thought — ID ${superseded[t.id]}` : "";
-            return `${i + 1}. [${new Date(t.created_at).toLocaleDateString()}] (${m.type || "??"}${tags ? " - " + tags : ""})\n   ${t.content}\n   ID: ${t.id}${mark}`;
+            // SMD-1328: the date bracket is structural here, so an undated row
+            // reads `[undated]` (never `[1/1/1970]`); a sentinel shows its text.
+            return `${i + 1}. [${displayDate(t.created_at) ?? "undated"}] (${m.type || "??"}${tags ? " - " + tags : ""})\n   ${t.content}\n   ID: ${t.id}${mark}`;
           }
         );
 
@@ -896,10 +903,10 @@ function buildServer(principal: Principal): McpServer {
         const lines: string[] = [
           `Total thoughts: ${total}`,
           `Date range: ${
+            // SMD-1328: min/max already skip NULLs (024), so a real range here
+            // is two real dates; displayDate keeps an infinity edge legible.
             newest && oldest
-              ? new Date(oldest).toLocaleDateString() +
-                " → " +
-                new Date(newest).toLocaleDateString()
+              ? `${displayDate(oldest)} → ${displayDate(newest)}`
               : "N/A"
           }`,
         ];

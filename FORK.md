@@ -13967,6 +13967,73 @@ now checked.
 
 **Upstream status:** not applicable — the eval is this fork's.
 
+### 89. A NULL `created_at` is `null`, not the fabricated epoch, and a timestamp with no ISO form renders as its own text — the decision SMD-1040 documented and left, made once in `isoTimestamp`/`displayDate` (SMD-1328)
+
+`thoughts.created_at` is `timestamptz DEFAULT now()` with no `NOT NULL`
+(migration 001); 020's `recency_score` has an explicit NULL branch and
+`db/test-schema.ts` plants a no-date row and asserts `match_thoughts` returns
+it. But every read mapper ran the column through `new Date(v).toISOString()`,
+and `new Date(null)` is the epoch — so a NULL row came back as the fabricated
+string `1970-01-01T00:00:00.000Z`, silently, on **both** stores, and the five
+`toLocaleDateString` renderers printed **"Invalid Date"** for an `infinity` or a
+BC date. No capture path can make such a row — every insert omits the column and
+takes the DEFAULT — so it needs a direct INSERT; the risk is a fabricated date
+shown as real, not a crash. Change 52 (SMD-1040) put the timestamp convention in
+one place (`isoTimestamp`) and documented that NULL and the no-ISO-form values
+were still open, under types that said `created_at: string`. This is that
+decision.
+
+**The decision.** A SQL NULL is `null` under `created_at: string | null` — the
+widening `updated_at` and `ThoughtMeta.created_at` already carried, with
+`updated_at?: string | null` on `ThoughtRecord` as the precedent — and the tools
+render a null date as **absent**. A value with no ISO form (`infinity`,
+`-infinity`, a BC/extended-year date) stays its **own string**: `isoTimestamp`
+already keeps it, `infinity` is the value 020 ranks by and `[3d]` pins it, and
+the tools show that text rather than "Invalid Date". The two live in two helpers:
+`isoTimestampOrNull` for the read path, `displayDate` (new, in `thoughts.ts`) for
+the render path.
+
+**Where it's applied.** One read-path change: `normaliseListItem` takes
+`isoTimestampOrNull`, so the list item, the three match shapes and the record
+that spread it all read a NULL as null — `match_thoughts`, `getThought` and
+`listThoughts` no longer fabricate. Five renderers move onto `displayDate`:
+`thoughtTitle` (the `search`/`fetch` title — a null date is the existing
+`Open Brain` prefix, not `1/1/1970`); the two `Captured:` lines in
+`search_thoughts`/`search_thoughts_keyword` (omitted when the date is absent);
+the `list_thoughts` `[date]` prefix (`[undated]`, since the bracket is
+structural); and the `thought_stats` range (024's `min`/`max` already skip NULLs,
+so `displayDate` only keeps an `infinity` edge legible).
+
+**Declined.** Recovering the SQL store's *text* for a BC/extended-year date —
+Bun's driver hands the store `Date(NaN)` (or an extended-year `Date` that fails
+`ISO_RE`) before it is seen, where PostgREST's text survives — would mean
+`SELECT created_at::text` beside every column in `store-sql.ts`. That row reaches
+no capture path, only a hand-written INSERT, and the two drivers disagree at the
+wire; the one odd row is left as each client renders it rather than rewriting
+every SELECT. The provenance mappers (`derivationFields`, `normaliseProposal`)
+keep the `string` form — their rows are graph walks over captured thoughts, off
+the list/match/get path this ticket scoped, so a NULL ancestor there is a filed
+follow-up, not this change.
+
+**A parity note.** Before change 52 the PostgREST store passed a NULL
+`created_at` through as JSON null, so `fetch` returned `created_at: null` while
+the SQL store fabricated the epoch; change 52 made **both** return the epoch. This
+change makes both return `null` — the honest value, and the one the PostgREST
+store had before parity was chosen.
+
+**Teeth.** `test-thoughts` [5]/[5b] cover `thoughtTitle` and `displayDate`
+directly, including that a row *genuinely* dated at the epoch still renders
+`1/1/1970` — the fix suppresses fabrication from NULL, not the value 0.
+`test-store-sql` [11] and `test-store-postgrest`'s undated block plant a NULL row
+and assert `null` on `matchThoughts`/`getThought`/`listThoughts`; `test-e2e-sql`
+[11] drives the real tools over MCP and asserts the rendered `list_thoughts`
+shows `[undated]`/`[infinity]` and `fetch` titles an undated thought `Open Brain
+…`, with no `1970` and no `Invalid Date` anywhere.
+
+**Upstream status:** divergence. `server/index.ts` and upstream's store carry the
+same `new Date(...)` fabrication; the fork's fix lives in `server-portable`, and
+this is not filed upstream (an undated row reaches no capture path).
+
 ## Detached from the fork network
 
 This repository was forked from `NateBJones-Projects/OB1` and then detached, for
