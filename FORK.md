@@ -68,14 +68,14 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Ninety numbered changes on top of the pin. Seven fix defects found in an
+Ninety-one numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
 data layer (Phase 2). Ten (changes 31, 53, 55, 59, 79, 82, 86, 87, 88, and 89) ship no runtime change at
 all: each is a measurement that decided against building something.
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–90 are the numbered `###` sections** further down, which is
+sections. Changes **18–91 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -14122,10 +14122,11 @@ column now tells two kinds of use apart by its shape alone:
 
 One consequence for change 65: the export's `relevant` label is every action
 row, so a cite now counts as click-through relevance too — the stronger label,
-and the export's note says so. 034's table `COMMENT` still describes an action
+and the export's note says so. 034's table `COMMENT` still described an action
 as a fetch, edit or delete; a migration's text is not edited after the fact
 (the ledger would read it as drift), so the server, store, preflight and README
-carry the new shape and the `COMMENT` predates it.
+carried the new shape and the `COMMENT` predated it until change 91
+re-commented the table and the column through migration 040.
 
 `evals/utilization.ts` is the pure part: 034's attribution rule (most recent
 prior search by the same agent, within the window, whose results held the id; a
@@ -14170,9 +14171,9 @@ proposed it): declined. MCP tool names cannot contain a slash, so the
 convention cannot collide with a tool; the typed field for *what a write
 cited* belongs on the event itself, which is SMD-1730's event shape (Phase 1
 of SMD-1729), not a column bolted onto 034 now. The column's own `COMMENT`
-still describes three plain names; re-commenting it through a new migration,
-as 028 did for the claim table, is **SMD-1749** (a third pass proposed it;
-a second mechanism for this PR).
+still described three plain names; re-commenting it through a new migration,
+as 028 did for the claim table, was **SMD-1749** (a third pass proposed it;
+a second mechanism for this PR) and is change 91.
 
 An `update_thought` that re-sends the pointer
 the row already holds logs a cite although nothing changed (a third pass):
@@ -14337,6 +14338,113 @@ through [39] under Bun — the same standing as every other `evals/` file.
 The measurement itself — the operator's first week of real use with the log on
 — is the ticket's Verify, not this section's: the number exists when the log
 has rows.
+
+**Upstream status:** not sent — the query log is this fork's (change 65).
+
+
+### 91. The cite shape is stated at the table — `query_log.tool`'s two shapes, and the table's cite clause, carry a COMMENT (SMD-1749)
+
+Change 90 gave `query_log.tool` a second shape on an action row. 034 (change
+65) had one: a plain tool name — `fetch`, `update_thought`, `delete_thought` —
+says the caller opened or touched the target, click-through relevance. Since
+change 90, `<writer>/<pointer>` — `capture_thought/derived_from`,
+`capture_thought/supersedes`, `update_thought/supersedes` — says the writer
+named the target as its source and the database accepted the pointer: a
+**cite**, MERIT's memory-utilization signal. `evals/utilization.ts` splits the
+two on the slash alone, so a new writer that cites names itself the same way
+and is counted without a code change; an MCP tool name cannot contain a slash,
+so the convention cannot collide with a tool. The contract lived in
+`server-portable/index.ts`'s comment beside the writer, `utilization.ts`'s
+header, `evals/README.md` and change 90's section. The **schema said
+nothing**: 034 wrote no `COMMENT ON COLUMN` for `tool` at all — the three
+names are a SQL comment in the file, invisible to a reader of the live table —
+and its `COMMENT ON TABLE` says "one per follow-up fetch/edit/delete of a
+returned id". A reader of the table (`\d+`, a future writer of action rows, an
+operator auditing what personal data the table holds) was told three plain
+names and nothing about the rows a cite writes. 034 is applied and is not
+edited after the fact (`migrate.ts` hashes the file; the ledger would read an
+edit as drift). The repo's mechanism for stating a contract on a column is a
+`COMMENT` in a new migration, as 028 (change 49) did for
+`thought_work_claims.last_error`; change 90's third review pass proposed it
+and declined it there as a second mechanism in a PR about a log convention.
+
+**Migration 040** is a guard and the two statements, and nothing else. The
+guard is 031's shape: on a schema without 034's table both statements would
+fail bare (`relation "query_log" does not exist`), and the brain that meets
+this is one adopted with `--baseline` whose ledger records 034 but whose
+schema never had it — a guide-built brain, or one baselined and never
+re-applied — where a plain run, the compose stack's, gates the server and
+would stop with no remedy named; the file refuses up front naming 034 and
+`--reapply`, as 031 does for 015. Then an idempotent
+`COMMENT ON COLUMN query_log.tool` carrying the **data contract**: on a search
+row, the search tool; on an action row, one of two shapes — a plain name is an
+open, `<writer>/<pointer>` is a cite — with what each means, the three cite
+values written today, the rule as the column's (any value containing a slash is
+a cite, whatever the writer) and why the shapes cannot collide. *When* a cite is
+logged (a pointer the database accepted, so never a re-capture — 035 writes no
+pointer), *which* writers cite, and *how* an action is attributed to a search
+are the server's and the readers' contract and change with them, so the comment
+points at `index.ts` and `utilization.ts`'s header for them rather than
+restating them — 028's shape, and the lesson its four passes paid for. And
+`COMMENT ON TABLE query_log` re-issued with 034's text kept whole and one clause
+added beside fetch/edit/delete: or a write that cited a returned id as its
+source, naming the shape and the ticket. No DDL on data, no function change, no
+ACL change, no placeholder, no `CHECK` change: 034's `tool <> ''` is the only
+constraint on the column and a slashed name satisfies it. The export join, the
+utilization report and the server are unaffected; `test-upgrade`'s shape
+comparison (columns and function signatures) does not see a comment. Neither
+`COMMENT` literal carries `--`: `test-schema` [10] strips that sequence to end
+of line before scanning the migrations and holds that no file puts it inside a
+string literal (the guard's HINT names the two flags, as 030's and 031's do; a
+RAISE is not a comment, and the strip only shortens that line).
+
+The trap a successor must not fall into is 028's: a re-issued `COMMENT`
+replaces the description, so any migration that re-comments `query_log` or
+`query_log.tool` and re-issues 034's text would silently drop the cite clause.
+`test-schema` **[40]** asserts the **live** text of both comments
+(`col_description`, `obj_description`) after every file has applied — both name
+`<writer>/<pointer>`; the column's gives both shapes, what a cite is, the rule
+as the column's and where the readers are; each cite value it names is one
+`utilization.ts` reads as a cite with that pointer and each plain name one it
+reads as an open (so a renamed writer that stranded the applied text fails
+here, and the fix is a migration, not an edit); the table's keeps 034's six
+sentences whole and adds the clause; neither carries `--` — and exercises the
+shape once: a cite row inserted under the documented `tool` lands (034's only
+constraint on the column) and reads back as a cite. Anchored on the rule's
+words, no migration number pinned, so a compliant successor passes and a lossy
+one fails whichever file it is. Two mutants bite: 034's table text re-issued
+verbatim fails the clause assertion; the column statement dropped fails the
+first assertion of the section (a first cut of that mutant removed the
+header's *mention* of the statement instead of the statement and passed
+992/992 — the cut was wrong, not the test). `test-upgrade` **[18]** drives
+the guard against real Postgres: a schema through 033 baselined at a ledger
+through 040, 040's row deleted, and a plain run fails at 040 naming 034 and
+`--reapply` and records nothing; then 034's table applied and the same
+pending file lands, both live comments naming the shape. The first run of
+that suite tripped its own window guard — [7] holds that 030 is among the
+last N migrations "to force this note to be re-read" whenever a migration
+lands past it — so the note was re-read (040 needs only 034 and is recorded
+by the baseline with it, so it never becomes [7]'s plain-run failure point),
+040 added to it and the window widened by one, as the guard asks. The same
+first run also refused `--reapply` because 040's hash had changed under it:
+the mutant script was rewriting the file while the suite hashed it — a race
+between two of this section's own checks, not a defect; the suite was re-run
+alone. The re-run found a real one: [18] passed its `--baseline` and then
+watched the plain run *apply* 040 — exit 0, one applied, thirty-nine skipped
+— on a schema built "without 034". It was not without it. `test-support`'s
+schema reset drops a fixed list of tables and functions, and 034's
+`query_log` and `prune_query_log` were never added to it, so every reset
+since change 65 had carried the previous section's log table across the
+boundary; nothing before this section asked for a brain that lacked it, and
+the by-hand reproduction in a fresh container fired the guard exactly as
+written. The two names are in the lists now, with the reason at the entry. With the
+reset fixed, the guard's own mutant bites: the `DO` block removed, [18]'s
+plain run fails with the bare `relation "query_log" does not exist` and the
+assertion that wants the named message and the remedy fails on it. The
+typed record of what a write cited is
+SMD-1730's event shape (Phase 1a of SMD-1729); when it lands, the migration
+that carries it should re-issue this column's comment to point at it — the
+ticket's note, carried in 040's header.
 
 **Upstream status:** not sent — the query log is this fork's (change 65).
 

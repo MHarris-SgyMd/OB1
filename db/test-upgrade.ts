@@ -436,8 +436,9 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // lock, SMD-1043), 034 (the opt-in query log, SMD-1295), 035 (a
   // re-capture writes no provenance, SMD-1453), 036 (delete_thought's lock
   // order, SMD-1462), 037 (the routing count's gate, SMD-1463) and 038 (the
-  // gate's sample by TID range, SMD-1526) and 039 (the half-precision walk,
-  // SMD-1501) stay recorded and are never tried. 030 is the right one to make
+  // gate's sample by TID range, SMD-1526), 039 (the half-precision walk,
+  // SMD-1501) and 040 (the cite shape stated at the table, SMD-1749) stay
+  // recorded and are never tried. 030 is the right one to make
   // pending
   // because its prerequisites — 015 and 021's embedding_model column — are
   // exactly what a through-020 schema lacks, so it fails by name rather than
@@ -446,11 +447,12 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // 016, 025, 032 and 033; 036 redefines delete_thought and needs only 009's
   // body and 029's supersession lock; 037 redefines 020's match_thoughts and
   // 038 037's; 039 redefines it again and swaps 001's and 007's two indexes,
-  // which every schema has — all recorded by the baseline with their
-  // prerequisites present, so none becomes the
-  // plain-run failure point above).
+  // which every schema has; 040 comments 034's table and column and needs
+  // only 034, refusing by name without it as 031 does without 015 ([18]) —
+  // all recorded by the baseline with their prerequisites present, so none
+  // becomes the plain-run failure point above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 10, `030 is among the last ten migrations (${last})`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 11, `030 is among the last eleven migrations (${last})`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -1368,6 +1370,36 @@ console.log("\n[17] Migration 039 onto a populated 038 — both HNSW indexes swa
   await sql.unsafe(`GRANT EXECUTE ON FUNCTION ${SIX} TO PUBLIC`);
   await sql.unsafe(`DROP OWNED BY ob1_upgrade_searcher38`);
   await sql.unsafe(`DROP ROLE ob1_upgrade_searcher38`);
+  await sql.close();
+}
+
+console.log("\n[18] Migration 040 on a schema without 034 — refused up front, naming 034 and --reapply, and applied once the table exists (SMD-1749)");
+{
+  // A brain adopted with --baseline at a ledger through 040 whose schema stops
+  // before 034 — a guide-built brain, or one baselined and never re-applied.
+  // 040's two COMMENTs would fail bare there (relation "query_log" does not
+  // exist), and a plain run — the compose stack's, gating the server — would
+  // stop with no remedy named; the file opens with 031's guard instead.
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < "034" });
+  const baselined = await migrate("--baseline");
+  assert(baselined.code === 0, `--baseline records every migration over the pre-034 schema (exit ${baselined.code})`);
+  const sql = new SQL({ url: URL_, max: 1 });
+  const the040 = MIGRATIONS.find((f) => f.startsWith("040_"))!;
+  await sql`DELETE FROM schema_migrations WHERE name = ${the040}`;
+  const plain = await migrate();
+  const ok = plain.code === 1 && /040_query_log_tool_comment\.sql\s+FAILED: migration 040 needs 034 \(query_log\); this schema lacks it/.test(plain.out) &&
+    /adopted with --baseline\?\)\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plain.out);
+  assert(ok, `a plain run fails at 040 naming 034 and --reapply, not with a bare "does not exist" (exit ${plain.code})${ok ? "" : `:\n${plain.out}`}`);
+  assert(Number((await sql`SELECT count(*)::int AS c FROM schema_migrations WHERE name = ${the040}`)[0].c) === 0, "…records nothing");
+  // The guard is the only thing between the file and the table: with 034's
+  // table in place the same pending file applies and both comments land.
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("034") });
+  const applied = await migrate();
+  assert(applied.code === 0 && /040_query_log_tool_comment\.sql\s+applied/.test(applied.out), `…and once 034's table exists the plain run applies 040 (exit ${applied.code})${applied.code === 0 ? "" : `:\n${applied.out}`}`);
+  const [{ c: col }] = await sql`SELECT col_description('query_log'::regclass, a.attnum) AS c FROM pg_attribute a WHERE a.attrelid = 'query_log'::regclass AND a.attname = 'tool'`;
+  const [{ t: tbl }] = await sql`SELECT obj_description('query_log'::regclass, 'pg_class') AS t`;
+  assert(/<writer>\/<pointer>/.test(String(col ?? "")) && /<writer>\/<pointer>/.test(String(tbl ?? "")), "…and both live comments name <writer>/<pointer>");
   await sql.close();
 }
 

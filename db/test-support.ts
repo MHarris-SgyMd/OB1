@@ -48,6 +48,13 @@ const TABLES = [
   "ob1_agents",
   "schema_migrations",
   "ob1_config",
+  // 034's opt-in query log (SMD-1295): no foreign key either way, so its place
+  // in the order is free. Absent from this list until SMD-1749's test-upgrade
+  // [18] built a schema "without 034" after a section that had applied every
+  // file, and found the previous section's query_log still standing: the
+  // reset had carried 034's table across every section boundary since it
+  // landed, and a case about a brain that lacks it could not be built.
+  "query_log",
   // bench-hnsw.ts's kept-corpus marker (SMD-1493): dropped with the schema it
   // vouches for, so a suite run in a kept database cannot leave a marker over
   // rows that are gone.
@@ -107,6 +114,8 @@ const FUNCTIONS = [
   "stale_entities(interval, int)",
   // 032 (SMD-1323)
   "validate_derived_from(jsonb)",
+  // 034 (SMD-1295); listed with its table, above.
+  "prune_query_log(int)",
 ];
 
 export type SchemaOptions = {

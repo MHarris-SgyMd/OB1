@@ -4479,4 +4479,67 @@ console.log("\n[39] Memory utilization over the query log: attribution, the cite
   assert(rowLines.length >= 2 && new Set(rowLines.map((l) => l.length)).size === 1, `every table row is the same width (${[...new Set(rowLines.map((l) => l.length))].join(",")})`);
 }
 
+console.log("\n[40] Migration 040: query_log.tool's two shapes, and the table's cite clause, are stated at the table in the live text (SMD-1749)");
+{
+  // 034 commented the table and not the column: the three action names were a
+  // SQL comment in the file, invisible to a reader of the live table, and the
+  // table's text said fetch/edit/delete. SMD-1719 (change 90) made
+  // `<writer>/<pointer>` a cite — a write that named the target as its source
+  // and the pointer was accepted — and utilization.ts splits cited from opened
+  // on the slash. A reader of the table (\d+, a future writer of action rows,
+  // an operator auditing what personal data the table holds) must be able to
+  // learn both shapes from the table, so both comments are asserted here
+  // rather than trusted to prose — of the LIVE text after every file applied,
+  // so a later migration that re-comments either and re-issues 034's text
+  // drops the clause and fails here whichever file it is; no number pinned.
+  const colComment = (await db.query<{ c: string | null }>(
+    `SELECT col_description('query_log'::regclass, a.attnum) AS c
+       FROM pg_attribute a WHERE a.attrelid = 'query_log'::regclass AND a.attname = 'tool'`)).rows[0]?.c ?? "";
+  const tblComment = (await db.query<{ c: string | null }>(
+    `SELECT obj_description('query_log'::regclass, 'pg_class') AS c`)).rows[0]?.c ?? "";
+  assert(colComment.length > 0, "query_log.tool carries a comment (034 wrote none)");
+  assert(/<writer>\/<pointer>/.test(colComment) && /<writer>\/<pointer>/.test(tblComment), "both comments name <writer>/<pointer>");
+  assert(/plain tool name.*is an OPEN/is.test(colComment) && /<writer>\/<pointer>.*is a CITE/is.test(colComment),
+    "…the column's gives both shapes: a plain name is an open, a slashed name a cite");
+  assert(/named the target as its source and the database accepted the pointer/.test(colComment), "…and what a cite is: the writer named the target as its source, and the database accepted the pointer");
+  assert(/any value containing a slash is a cite, whatever the writer/.test(colComment) && /cannot contain a slash/.test(colComment),
+    "…the rule as the column's — any slashed value is a cite — and why the shapes cannot collide (an MCP tool name has no slash)");
+  assert(/server-portable\/index\.ts/.test(colComment) && /evals\/utilization\.ts/.test(colComment),
+    "…and sends a reader to index.ts and utilization.ts for when a cite is logged and how it is attributed, rather than restating them");
+  // The comment's examples agree with the code that splits them: each cite
+  // value it names is what index.ts writes and utilization.ts reads as a cite
+  // with that pointer; each plain name it gives reads as an open. Hard-coded
+  // as [39] hard-codes them: a renamed writer that stranded the applied text
+  // fails here, and the fix is a migration that re-comments, not an edit.
+  for (const t of ["capture_thought/derived_from", "capture_thought/supersedes", "update_thought/supersedes"])
+    assert(colComment.includes(t) && citePointerOf(t) === t.split("/")[1], `…names ${t}, which utilization.ts reads as a cite with pointer ${t.split("/")[1]}`);
+  for (const t of ["fetch", "update_thought", "delete_thought"])
+    assert(new RegExp(`\\b${t}\\b(?!/)`).test(colComment) && citePointerOf(t) === null, `…and names ${t} as a plain name, which it reads as an open`);
+  // 034's table text, whole — the opt-in flag, the personal-data sentence, the
+  // export-time link and the pruning — so a successor that keeps only the
+  // cite clause is caught too.
+  for (const sentence of [
+    "Opt-in (OB1_QUERY_LOG=on), off by default",
+    "one per follow-up fetch/edit/delete of a returned id",
+    "Personal data at rest — every query typed",
+    "the write is best-effort and never fails a search",
+    "linked to its search at export time by (agent_id, target_id, time window), not at write time",
+    "Pruned by prune_query_log(); default retention 30 days (OB1_QUERY_LOG_RETENTION_DAYS)",
+  ]) assert(tblComment.includes(sentence), `the table's comment keeps 034's text: "${sentence.slice(0, 40)}…"`);
+  assert(/or a write that cited a returned id as its source/.test(tblComment) && /SMD-1719/.test(tblComment), "…and adds the cite beside fetch/edit/delete, naming the ticket");
+  // [10] strips `--` to end of line before scanning the migrations, on the
+  // stated assumption that no migration puts that sequence in a string
+  // literal. Asserted of the LIVE text, so it holds whichever file wrote it.
+  assert(!/--/.test(colComment) && !/--/.test(tblComment), "neither comment carries `--`, so [10]'s comment-stripping scan reads every literal whole");
+
+  // The shape the comment describes is one the table admits: 034's only
+  // constraint on the column is tool <> '', so a cite row lands as written and
+  // reads back as a cite. [34] and [39] exercise the join and the split.
+  const T = "33333333-3333-4333-8333-333333333333";
+  const cite = (await db.query<{ id: string; tool: string }>(
+    `INSERT INTO query_log (kind, tool, target_id) VALUES ('action', 'capture_thought/derived_from', $1) RETURNING id, tool`, [T])).rows[0];
+  assert(citePointerOf(cite.tool) === "derived_from", "a cite row inserted under the documented shape reads back as a cite with its pointer");
+  await db.query(`DELETE FROM query_log WHERE id = $1`, [cite.id]);
+}
+
 report();

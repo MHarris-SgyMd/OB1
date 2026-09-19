@@ -164,8 +164,8 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `922 assertions: 922 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports twenty-three migrations applied, and
+`bun test-schema.ts` prints `992 assertions: 992 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports forty migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -201,7 +201,8 @@ thought_chunks` shows five columns since 013 added `context`.
 Migrations 024 onward are described in `FORK.md`, one numbered change each
 (024 change 45, 025 change 46, 026 change 47, 027 change 48, 028 change 49,
 029 change 54, 030 change 56, 031 change 57, 032 change 60, 033 change 63,
-034 change 65, 035 change 66, 036 change 68, 037 change 70, 038 change 80, 039 change 81).
+034 change 65, 035 change 66, 036 change 68, 037 change 70, 038 change 80, 039 change 81,
+040 change 91).
 
 ## What changed relative to the guide
 
