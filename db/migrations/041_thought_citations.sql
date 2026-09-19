@@ -32,10 +32,11 @@
 --      whose kind is not registered is refused (check_violation); a later
 --      migration registers a kind by extending the validate function, not by
 --      a registry table (the proposal's vocabulary registry is not built).
---      A citation is ACTIVE while superseded_by IS NULL and valid_until is NULL
---      or in the future. Only active citations gate a delete; expired and
---      superseded ones are history and never block, though they are marked
---      when their source goes (below), so no row names a thought that is gone.
+--      A citation is ACTIVE while valid_until is NULL or in the future and no
+--      facet that still exists supersedes it (thought_facet_active, the one
+--      spelling). Only active citations gate a delete; expired and superseded
+--      ones are history and never block, though they are marked when their
+--      source goes (below), so no row names a thought that is gone.
 --   2. thoughts_guard_citation_sources — AFTER DELETE ON thoughts, FOR EACH
 --      STATEMENT, the deleted rows as a transition table. It counts the active
 --      citations whose source is a deleted row AND whose own thought SURVIVES
@@ -100,12 +101,22 @@
 -- Lock order, stated
 --   delete_thought:  supersession advisory lock → the thought's row (DELETE) →
 --                    the surviving citing facet rows (the guard's UPDATE).
---   record_citation: supersession advisory lock → KEY SHARE on the source
---                    thought (in the validate trigger) → the facet row (INSERT).
+--   record_citation: supersession advisory lock → KEY SHARE on the citing and
+--                    the source thought (its prechecks; the validate trigger
+--                    re-locks the source) → the facet row (INSERT).
 --   A raw INSERT INTO thought_facets skips the advisory lock and takes only
 --   KEY SHARE; it cannot deadlock delete_thought unless its own transaction goes
 --   on to take the advisory lock — the residue every raw writer on this fork
 --   has, stated as 036's header states the delete's.
+--
+-- Callers that delete around delete_thought
+--   Three vendored servers issue a raw `.delete()` on thoughts —
+--   integrations/rest-api's dedup merge (after it has already rewritten the
+--   survivor's metadata and logged the merge), integrations/delete-thought-mcp
+--   and integrations/open-brain-rest. Each now meets the guard as a bare OB001
+--   message with no detach path, the way every raw writer met 008's rule.
+--   Routing them through delete_thought is SMD-1793 (as SMD-1228 and SMD-1524
+--   did for the writers of content); nothing here changes them.
 --
 -- Cost
 --   Every delete of a thought now reads thought_facets by the partial expression
@@ -259,6 +270,29 @@ CREATE TRIGGER thought_facets_validate
   FOR EACH ROW EXECUTE FUNCTION thought_facets_validate();
 
 -- ---------------------------------------------------------------------------
+-- thought_facet_active — the one spelling of "this facet still counts"
+-- ---------------------------------------------------------------------------
+-- A superseder that no longer exists counts as none: superseded_by's SET NULL
+-- is a nested referential action and fires AFTER the statement-level guard
+-- (measured — first review pass), so when the thought carrying a replacing
+-- citation is deleted in the same statement as the source, the replaced
+-- citation still points at the replacement the cascade has already removed.
+-- The guard would judge it superseded, mark it, and the SET NULL would then
+-- revive it — detached, under refuse mode. Reading the pointer's target instead
+-- says what the SET NULL is about to say, whatever the phase order.
+CREATE OR REPLACE FUNCTION thought_facet_active(f thought_facets)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+AS $$
+  SELECT (f.valid_until IS NULL OR f.valid_until > now())
+     AND (f.superseded_by IS NULL OR NOT EXISTS (SELECT 1 FROM thought_facets x WHERE x.id = f.superseded_by))
+$$;
+
+COMMENT ON FUNCTION thought_facet_active(thought_facets) IS
+  'Whether a facet row still counts: not past valid_until, and not superseded by a later facet that still exists (a superseder already deleted in the statement counts as none, since its SET NULL fires after the guard). The guard, delete_thought''s sample and any reader that labels a citation share this one spelling, so a later definition of "active" changes in one place. Migration 041.';
+
+-- ---------------------------------------------------------------------------
 -- thoughts_guard_citation_sources — the refusal is the table's
 --
 -- Statement-level, over the deleted rows (REFERENCING OLD TABLE AS deleted):
@@ -270,6 +304,23 @@ CREATE TRIGGER thought_facets_validate
 -- An explicit `f.thought_id NOT IN (SELECT id FROM deleted)` was written to
 -- say so and removed: its mutant passed every check, which makes it a clause
 -- that is not a mechanism (test-schema [39] holds the together-delete case).
+--
+-- The guard judges the state the statement LEAVES. Deleting the thought that
+-- carries a replacing citation in the same statement as the source revives the
+-- replaced citation on a note that survives (superseded_by's SET NULL), and
+-- the statement is refused — after it, that note would rest on nothing, which
+-- is the question the guard asks. That SET NULL fires AFTER this trigger, so
+-- thought_facet_active reads whether the superseder still exists rather than
+-- whether the pointer is null ([39] holds the case both ways).
+--
+-- The count and the detach are ONE statement, an UPDATE … RETURNING over the
+-- citing rows: each row is locked and its status read from the version the
+-- lock won, so a citation revived under a concurrent writer — valid_until or
+-- superseded_by cleared between a look and a write — is seen as active, where
+-- a count followed by an UPDATE would have counted the old version and
+-- rewritten the new one (first review pass; db/test-live.ts [6i] arm 4). In
+-- refuse mode with an active row the RAISE below aborts the DELETE statement
+-- and this UPDATE with it, so a refusal rewrites nothing.
 -- ---------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION thoughts_guard_citation_sources()
 RETURNS trigger
@@ -287,13 +338,23 @@ BEGIN
       MESSAGE = format('ob1.cited_delete must be refuse or detach, got %L', v_mode);
   END IF;
 
-  SELECT count(*) FILTER (WHERE f.superseded_by IS NULL AND (f.valid_until IS NULL OR f.valid_until > now()))::int,
-         count(*) FILTER (WHERE NOT (f.superseded_by IS NULL AND (f.valid_until IS NULL OR f.valid_until > now())))::int,
-         count(DISTINCT d.id) FILTER (WHERE f.superseded_by IS NULL AND (f.valid_until IS NULL OR f.valid_until > now()))::int,
-         min(d.id::text) FILTER (WHERE f.superseded_by IS NULL AND (f.valid_until IS NULL OR f.valid_until > now()))::uuid
+  -- Every surviving citing row, active or not, marked with the source it lost
+  -- (source_id null, source_deleted_id / source_deleted_at) — through
+  -- thought_facets_validate, which accepts this shape — and its status read
+  -- back from the locked version. Rolled back with the statement on a refusal.
+  WITH marked AS (
+    UPDATE thought_facets f
+       SET payload = f.payload || jsonb_build_object('source_id', NULL, 'source_deleted_id', d.id, 'source_deleted_at', now())
+      FROM deleted d
+     WHERE f.kind = 'citation' AND f.payload->>'source_id' = d.id::text
+     RETURNING thought_facet_active(f) AS active, d.id AS source
+  )
+  SELECT count(*) FILTER (WHERE active)::int,
+         count(*) FILTER (WHERE NOT active)::int,
+         count(DISTINCT source) FILTER (WHERE active)::int,
+         min(source::text) FILTER (WHERE active)::uuid
     INTO v_active, v_inactive, v_sources, v_first
-    FROM deleted d
-    JOIN thought_facets f ON f.kind = 'citation' AND f.payload->>'source_id' = d.id::text;
+    FROM marked;
 
   IF v_active > 0 AND v_mode = 'refuse' THEN
     RAISE EXCEPTION USING ERRCODE = 'OB001',
@@ -304,15 +365,6 @@ BEGIN
       HINT = 'delete_thought(id, actor, true) detaches them: each keeps its text and stance, loses source_id and records source_deleted_id and source_deleted_at. A raw DELETE does the same under set_config(''ob1.cited_delete'', ''detach'', true).';
   END IF;
 
-  -- Detach — every surviving citing row, active or not, so no row names a
-  -- thought that is gone. Passes through thought_facets_validate, which
-  -- accepts this shape.
-  IF v_active + v_inactive > 0 THEN
-    UPDATE thought_facets f
-       SET payload = f.payload || jsonb_build_object('source_id', NULL, 'source_deleted_id', d.id, 'source_deleted_at', now())
-      FROM deleted d
-     WHERE f.kind = 'citation' AND f.payload->>'source_id' = d.id::text;
-  END IF;
   -- Totals for the caller, summed across the statements of a transaction.
   -- delete_thought zeroes them first and reads them after its one statement.
   PERFORM set_config('ob1.citations_detached',
@@ -348,6 +400,12 @@ LANGUAGE plpgsql
 AS $$
 DECLARE
   v_deleted   uuid;
+  -- The mode as the caller's transaction had it, put back after the DELETE:
+  -- p_detach is this call's, not the transaction's, so a raw DELETE later in
+  -- the same transaction meets the guard's default (or the caller's own
+  -- setting) and not this call's choice (first review pass; [39] holds it).
+  v_prev_mode text := current_setting('ob1.cited_delete', true);
+  v_refused   boolean := false;
   v_cited     int;
   v_citations jsonb;
   v_detached  int;
@@ -375,11 +433,17 @@ BEGIN
   BEGIN
     DELETE FROM thoughts WHERE id = p_id RETURNING id INTO v_deleted;
   EXCEPTION WHEN SQLSTATE 'OB001' THEN
-    -- The guard refused (041). Answer with what cites the row, not the message:
-    -- the count and up to ten citing rows, newest first, read after the
-    -- subtransaction rolled back, in the same transaction — the state the guard
-    -- saw. Only this SQLSTATE is caught: a real foreign_key_violation, a
-    -- permission failure, anything else is the fault it is and propagates.
+    -- The guard refused (041). Only this SQLSTATE is caught: a real
+    -- foreign_key_violation, a permission failure, anything else is the fault
+    -- it is and propagates.
+    v_refused := true;
+  END;
+  PERFORM set_config('ob1.cited_delete', COALESCE(v_prev_mode, ''), true);
+
+  IF v_refused THEN
+    -- Answer with what cites the row, not the message: the count and up to ten
+    -- citing rows, newest first, read after the subtransaction rolled back, in
+    -- the same transaction — the state the guard saw.
     SELECT count(*)::int,
            COALESCE(jsonb_agg(jsonb_build_object('id', f.id, 'thought_id', f.thought_id,
                                                  'stance', f.payload->>'stance', 'text', f.payload->>'text',
@@ -389,10 +453,10 @@ BEGIN
       FROM (SELECT f.*, row_number() OVER (ORDER BY f.created_at DESC, f.id) AS rn
               FROM thought_facets f
              WHERE f.kind = 'citation' AND f.payload->>'source_id' = p_id::text
-               AND f.superseded_by IS NULL AND (f.valid_until IS NULL OR f.valid_until > now())) f;
+               AND thought_facet_active(f)) f;
     RETURN jsonb_build_object('ok', false, 'error', 'CITED', 'id', p_id,
                               'cited_by', COALESCE(v_cited, 0), 'citations', v_citations);
-  END;
+  END IF;
 
   IF v_deleted IS NULL THEN
     -- A distinct outcome, not a silent success. The caller asked to remove a
@@ -442,13 +506,20 @@ BEGIN
   -- or a delete cannot close a cycle with delete_thought, which takes the same
   -- lock before the row this write locks KEY SHARE.
   PERFORM pg_advisory_xact_lock(hashtext('ob1:supersession-review'));
-  IF NOT EXISTS (SELECT 1 FROM thoughts WHERE id = p_thought_id) THEN
+  -- Both rows locked KEY SHARE here, not merely looked at: a delete of either
+  -- in flight is waited out, so a source that vanishes answers
+  -- SOURCE_NOT_FOUND as a value rather than the validate trigger's
+  -- check_violation an instant later (first review pass; db/test-live.ts [6i]
+  -- arm 5), and the trigger's own lock on the source is a re-lock.
+  PERFORM 1 FROM thoughts WHERE id = p_thought_id FOR KEY SHARE;
+  IF NOT FOUND THEN
     RETURN jsonb_build_object('ok', false, 'error', 'NOT_FOUND', 'id', p_thought_id);
   END IF;
-  IF NOT EXISTS (SELECT 1 FROM thoughts WHERE id = p_source_id) THEN
+  PERFORM 1 FROM thoughts WHERE id = p_source_id FOR KEY SHARE;
+  IF NOT FOUND THEN
     RETURN jsonb_build_object('ok', false, 'error', 'SOURCE_NOT_FOUND', 'source_id', p_source_id);
   END IF;
-  -- The INSERT runs the validate trigger, which takes KEY SHARE on the source.
+  -- The INSERT runs the validate trigger, which re-locks the source KEY SHARE.
   INSERT INTO thought_facets (thought_id, kind, payload)
   VALUES (p_thought_id, 'citation', jsonb_build_object('text', p_text, 'stance', p_stance, 'source_id', p_source_id))
   RETURNING id INTO v_id;

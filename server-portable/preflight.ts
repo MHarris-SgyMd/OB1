@@ -94,7 +94,7 @@ const CATALOG_HINT = "run once with OB1_STORE=sql to read the catalog";
 const DIRECT_CHECKS = [
   "vector extension",
   "atomic capture", "write privileges", "fingerprint backfill", "audit trail", "agent identity",
-  "keyword search", "hybrid search", "stats summary", "provenance", "work claims", "search signatures", "edit signature", "filtered search",
+  "keyword search", "hybrid search", "stats summary", "provenance", "work claims", "search signatures", "edit signature", "delete signature", "filtered search",
   "candidate scan", "walk index", "chunk context", "trigram index", "embedding contract", "vector models",
   "updated_at trigger", "re-embed pass", "consolidate pass", "migration ledger", "query log",
 ];
@@ -118,6 +118,7 @@ const RELOAD_HINT = "If the ledger already records it, PostgREST may not have re
 const APPLY_020_POSTGREST = `Apply the migrations through db/migrations/039_match_thoughts_halfvec_index.sql against the project's direct connection (server-portable/README.md §4) — 020 gives both functions the forms the server sends; 027 and 039 last define search_thoughts_hybrid and match_thoughts. ${RELOAD_HINT}`;
 const APPLY_021 = "Apply db/migrations/021_embedding_model_per_row.sql.";
 const APPLY_032 = "Apply db/migrations/032_update_thought_provenance.sql.";
+const APPLY_041 = "Apply db/migrations/041_thought_citations.sql.";
 /**
  * Where the ledger already records the migration a check finds absent — a
  * brain adopted with --baseline whose schema is the guide's — "apply it" is a
@@ -1270,6 +1271,43 @@ if (configFailed) {
           }
         } catch (e) {
           add("edit signature", "warn", `could not verify: ${(e as Error).message}`, "The catalog read behind this check needs SELECT on pg_proc.");
+        }
+
+        /**
+         * Migration 041 changed delete_thought the way 021 and 032 changed
+         * update_thought: a defaulted third parameter (p_detach), the
+         * two-argument form dropped, both stores sending all three. The same
+         * two states break every delete and neither shows in a presence
+         * check: the function predates 041 (the call has no function to
+         * resolve to — a server deployed ahead of the migration fails at the
+         * first user delete, not at start), or the two-argument form was
+         * re-created BESIDE 041's by a hand re-apply of 009 or 036 (every
+         * two-argument caller — the vendored servers' rpc by name, hand SQL —
+         * is "function is not unique").
+         */
+        try {
+          const dt = (await sql`
+            SELECT p.pronargs AS nargs, p.oid::regprocedure::text AS sig
+            FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+            WHERE p.proname = 'delete_thought' AND n.nspname = 'public'
+            ORDER BY (p.pronargs = 3) DESC, p.oid`) as { nargs: number; sig: string }[];
+          const current = dt.filter((r) => Number(r.nargs) === 3);
+          const extra = dt.filter((r) => Number(r.nargs) !== 3).map((r) => r.sig);
+          if (!dt.length) {
+            add("delete signature", "fail", "delete_thought is missing — the delete_thought tool calls it", ledgerRemedy("041", APPLY_041));
+          } else if (current.length && extra.length === 0) {
+            add("delete signature", "ok", `${current[0].sig}: the form the servers call since migration 041, alone`);
+          } else if (current.length) {
+            add("delete signature", "fail",
+                `beside the form the servers call there ${extra.length === 1 ? "is an earlier one" : `are ${extra.length} earlier ones`}: ${extra.join(", ")} — 009 or 036 re-applied by hand over 041 — so every call that sends two arguments to delete_thought, which is every PostgREST caller by name from before this change and every hand-written SELECT, fails with "function is not unique"`,
+                `Drop the earlier form, as 041 does: ${extra.map((sig) => `DROP FUNCTION ${sig};`).join(" ")}`);
+          } else {
+            add("delete signature", "fail",
+                `${extra.join(" and ")} ${extra.length === 1 ? "is the form" : "are the forms"} from before migration 041; the server sends p_detach, which only 041's form takes — so every delete would fail`,
+                ledgerRemedy("041", APPLY_041));
+          }
+        } catch (e) {
+          add("delete signature", "warn", `could not verify: ${(e as Error).message}`, "The catalog read behind this check needs SELECT on pg_proc.");
         }
 
         try {

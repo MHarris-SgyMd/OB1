@@ -281,7 +281,7 @@ function explainRefusal(
     // Migration 041: statements in other thoughts rest on this one. The rows
     // are the function's sample (ten, newest first); the count is the whole.
     case "CITED": {
-      const rows = (r.citations ?? []).map((c) => `  - ${c.thoughtId} (${c.stance}): ${oneLine(c.text, 120)}`);
+      const rows = (r.citations ?? []).map((c) => `  - ${c.thoughtId} (${c.stance}): ${snipText(c.text, 120)}`);
       const total = r.citedBy ?? rows.length;
       const more = total - rows.length;
       return `Refused: ${total} citation${total === 1 ? "" : "s"} on other thoughts rest${total === 1 ? "s" : ""} on ${id} as ${total === 1 ? "its" : "their"} source — deleting it would leave ${total === 1 ? "that statement" : "those statements"} resting on nothing:\n${rows.join("\n")}${more > 0 ? `\n  …and ${more} more` : ""}\nRead the citing thoughts first (fetch takes the id). To delete anyway, pass detach_citations: true — each citation keeps its text and stance, loses its source, and records ${id} and the time as the deleted source.`;
@@ -291,10 +291,15 @@ function explainRefusal(
   }
 }
 
-/** A thought's text on one line of a reply, cut with an ellipsis past `max` characters. */
-function oneLine(text: string, max: number): string {
-  const flat = text.replace(/\s+/g, " ").trim();
-  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+/**
+ * Untrusted text — a thought's, a citation's, a judge's reason — on one line
+ * of a reply: the same cleaner the CLI renders through
+ * (server-portable/consolidate.ts), whitespace collapsed, cut with an ellipsis
+ * past `max` characters. One spelling for every place a reply quotes a thought.
+ */
+function snipText(text: string, max: number): string {
+  const t = cleanForDisplay(text).replace(/\s+/g, " ").trim();
+  return t.length > max ? t.slice(0, max) + "…" : t;
 }
 
 /**
@@ -856,9 +861,9 @@ function buildServer(principal: Principal): McpServer {
           return { content: [{ type: "text" as const, text: `No ${status === "all" ? "" : status + " "}supersession proposals. The consolidation pass proposes them: cd db && bun consolidate.ts --url $DATABASE_URL (after db/extract-entities.ts, which it pairs thoughts by).` }] };
         }
         const day = (d: string) => new Date(d).toLocaleDateString();
-        // Thought content and the judge's reason are untrusted text; the same
-        // cleaner the CLI renders through (server-portable/consolidate.ts).
-        const snip = (c: string) => { const t = cleanForDisplay(c).replace(/\s+/g, " ").trim(); return t.length > 200 ? t.slice(0, 200) + "…" : t; };
+        // Thought content and the judge's reason are untrusted text; snipText
+        // is the one cleaner every reply quotes a thought through.
+        const snip = (c: string) => snipText(c, 200);
         const phrase = (v: string) =>
           v === "newer_supersedes_older" ? "the NEWER thought supersedes the older"
           : v === "older_supersedes_newer" ? "the OLDER thought supersedes the newer"
@@ -1246,7 +1251,7 @@ function buildServer(principal: Principal): McpServer {
     {
       title: "Delete Thought",
       description:
-        "Permanently remove a thought by id, along with its search chunks. `search_thoughts`, `search_thoughts_keyword`, and `list_thoughts` print the id on an `ID:` line under each hit, and `capture_thought` reports it when it saves; read the thought back first to confirm it is the one to remove. The deletion is recorded in the audit trail with the thought's previous content, so it can be reconstructed if removed in error.",
+        "Permanently remove a thought by id, along with its search chunks. `search_thoughts`, `search_thoughts_keyword`, and `list_thoughts` print the id on an `ID:` line under each hit, and `capture_thought` reports it when it saves; read the thought back first to confirm it is the one to remove. The deletion is recorded in the audit trail with the thought's previous content, so it can be reconstructed if removed in error. Refused while statements in other thoughts cite this one as their source — the reply names them — unless `detach_citations` is true.",
       annotations: {
         readOnlyHint: false,
         openWorldHint: false,

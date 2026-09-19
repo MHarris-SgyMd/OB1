@@ -934,6 +934,23 @@ else {
   const reapplied021 = await run(SQL_ENV);
   assert(reapplied021.code === 0 && /edit signature\s+update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text,jsonb\): the form the servers and reembed\.ts call since migration 032/.test(reapplied021.out),
          "…which 032 re-applied performs");
+  // 036 re-applied by hand over 041 puts the two-argument delete_thought back
+  // BESIDE 041's three-argument one: every two-argument caller is "not unique".
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("036") });
+  const twoDeletes = await run(SQL_ENV);
+  assert(twoDeletes.code === 1 && /delete signature\s+beside the form the servers call there is an earlier one: delete_thought\(uuid,jsonb\) — 009 or 036 re-applied by hand over 041/.test(twoDeletes.out) && /DROP FUNCTION delete_thought\(uuid,jsonb\);/.test(twoDeletes.out),
+         "036 re-applied over 041 leaves two delete_thought forms, and the start is refused naming the extra one with its DROP");
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("041") });
+  assert(/delete signature\s+delete_thought\(uuid,jsonb,boolean\): the form the servers call since migration 041, alone/.test((await run(SQL_ENV)).out), "…which 041 re-applied performs");
+  // A brain that stopped at 036 — a server deployed ahead of the migration:
+  // the two-argument form alone. Every delete the server sends would fail at
+  // the first user call, so the start is refused naming 041 instead.
+  await claims.unsafe("DROP FUNCTION delete_thought(uuid, jsonb, boolean)");
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("036") });
+  const preFacet = await run(SQL_ENV);
+  assert(preFacet.code === 1 && /delete signature\s+delete_thought\(uuid,jsonb\) is the form from before migration 041; the server sends p_detach, which only 041's form takes — so every delete would fail/.test(preFacet.out),
+         "a brain at 036 does not start: every delete the server sends would fail, and the check says so before a user finds out");
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("041") });
   // …and 021's CREATE OR REPLACE put its 3-argument upsert_thought back over
   // 035's: a chunkless re-capture would leave the previous vector's windows
   // again. A warning naming 035 — captures work, search is over-inclusive.

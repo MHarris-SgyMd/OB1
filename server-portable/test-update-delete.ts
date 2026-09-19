@@ -368,6 +368,14 @@ console.log("\n[10] A thought cited as a source is refused by name and detached 
   assert(/Refused: 13 citations on other thoughts rest on/.test(msg) && (msg.match(/^  - [0-9a-f-]{36} \(retrieved\): statement \d+$/gm) ?? []).length === 10 && /…and 3 more/.test(msg),
     `thirteen citations: the count says 13, ten are listed, the rest counted (${(msg.match(/^  - /gm) ?? []).length} listed)`);
 
+  // A citation's text in the reply goes through the cleaner every other
+  // thought-derived text does: control characters never reach the terminal.
+  const source4 = idOf(await writer.call("capture_thought", { content: "a source cited with control characters" }));
+  await cite(idOf(await writer.call("capture_thought", { content: "a note whose citation text carries an escape" })), source4, "limit is 600[2J and more");
+  msg = "";
+  try { await writer.call("delete_thought", { id: source4 }); } catch (e) { msg = (e as Error).message; }
+  assert(/limit is 600\[2J and more/.test(msg) && !/[ --]/.test(msg), `the citation's text is cleaned for display in the refusal (${JSON.stringify(msg.match(/limit is 600.{0,12}/)?.[0])})`);
+
   // A real foreign-key failure on the delete is a fault, not CITED: the
   // function catches only the guard's SQLSTATE.
   const pinned = idOf(await writer.call("capture_thought", { content: "a thought a foreign table pins" }));

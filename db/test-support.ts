@@ -114,6 +114,7 @@ const FUNCTIONS = [
   // 041 (SMD-1712)
   "thought_facets_validate()",
   "thoughts_guard_citation_sources()",
+  "thought_facet_active(thought_facets)",
   "record_citation(uuid, uuid, text, text)",
 ];
 

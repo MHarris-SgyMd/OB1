@@ -4434,6 +4434,41 @@ console.log("\n[39] Migration 041: a cited source is refused as a value and deta
   assert(/violates foreign key constraint "zz_1712_pin_thought_id_fkey"/.test(await refuses(`SELECT delete_thought($1::uuid, NULL::jsonb)`, [S8])) && (await exists(S8)), "a foreign-key violation on the DELETE propagates as the fault it is");
   await db.exec(`DROP TABLE zz_1712_pin`);
 
+  // The guard judges the state the statement LEAVES: deleting the citing
+  // thought of a replacing facet in the same statement as the source clears
+  // the replaced facet's superseded_by (SET NULL, a row-level action that runs
+  // first) and revives it — a surviving note then rests on the deleted source,
+  // so the statement is refused, and the SET NULL is rolled back with it; with
+  // that note in the statement too, clean.
+  const S9 = await thought("a source whose replacing citer goes with it");
+  const C9a = await thought("the note with the replaced citation");
+  const C9b = await thought("the note with the replacing citation");
+  const oldF = (await cite(C9a, S9, "the replaced statement")).id!;
+  const newF = (await cite(C9b, S9, "the replacing statement")).id!;
+  await db.query(`UPDATE thought_facets SET superseded_by = $2::uuid WHERE id = $1::uuid`, [oldF, newF]);
+  assert(/1 active citation/.test(await refuses(`DELETE FROM thoughts WHERE id IN ($1::uuid, $2::uuid)`, [S9, C9b])) && (await exists(S9)) && (await exists(C9b)) &&
+           (await one<{ s: string | null }>(`SELECT superseded_by AS s FROM thought_facets WHERE id = $1::uuid`, [oldF])).s === newF,
+    "deleting the source with its replacing citer revives the replaced citation on a surviving note — refused, the SET NULL rolled back with the statement");
+  assert((await refuses(`DELETE FROM thoughts WHERE id IN ($1::uuid, $2::uuid, $3::uuid)`, [S9, C9a, C9b])) === "" && !(await exists(S9)), "…and with both notes in the statement, clean");
+  // delete_thought's mode is the call's, not the transaction's: a raw DELETE
+  // after a detaching call in the same transaction meets the default again.
+  const S10 = await thought("detached by the call");
+  const S11 = await thought("cited, deleted raw after it");
+  const C10 = await thought("a note citing both");
+  await cite(C10, S10, "ten");
+  await cite(C10, S11, "eleven");
+  const leak = await refusesExec(`BEGIN; SELECT delete_thought('${S10}'::uuid, NULL::jsonb, true); DELETE FROM thoughts WHERE id = '${S11}'; COMMIT`);
+  await db.exec(`ROLLBACK`);
+  assert(/is cited as a source by 1 active citation/.test(leak) && (await exists(S10)) && (await exists(S11)),
+    "a raw DELETE after a detaching delete_thought in one transaction is refused — the call put the mode back — and the rollback keeps both");
+  // …and a caller's own detach setting survives a refuse-mode call inside it:
+  // the call is refused on its own mode (a value, the transaction continues),
+  // then the raw DELETE that follows runs on the caller's and detaches.
+  const kept = await refusesExec(`BEGIN; SELECT set_config('ob1.cited_delete', 'detach', true); SELECT delete_thought('${S10}'::uuid, NULL::jsonb, false); DELETE FROM thoughts WHERE id = '${S11}'; COMMIT`);
+  assert(kept === "" && (await exists(S10)) && !(await exists(S11)) &&
+           (await one<{ d: string | null }>(`SELECT payload->>'source_deleted_id' AS d FROM thought_facets WHERE thought_id = $1::uuid AND payload->>'text' = 'eleven'`, [C10])).d === S11,
+    "…and a caller's own detach setting is put back after a refuse-mode call: that call is refused, the raw DELETE after it detaches");
+
   // Re-applying 041 changes nothing: one function, two triggers, every row kept.
   const before = (await one<{ c: number }>(`SELECT count(*)::int AS c FROM thought_facets`)).c;
   await reapply("041");

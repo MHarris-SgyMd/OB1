@@ -502,5 +502,32 @@ console.log("\n[10] listSupersessionProposals's rpc shape over PostgREST (migrat
   await admin.close();
 }
 
+console.log("\n[11] deleteThought's rpc shape over PostgREST: p_detach named and bound as a boolean, the CITED refusal and the detach count normalised (migration 041, SMD-1712)");
+{
+  const admin = new SQL({ url: URL_, max: 1 });
+  const { id: source } = await store.captureThought({ content: "postgrest source: the limit is 600 a minute", payload: { metadata: {} }, embedding: vec(0) });
+  const { id: citer } = await store.captureThought({ content: "postgrest note resting on the source", payload: { metadata: {} }, embedding: vec(1) });
+  const [{ r: wrote }] = (await admin`SELECT record_citation(${citer}::uuid, ${source}::uuid, 'the limit is 600', 'retrieved') AS r`) as { r: { ok: boolean } }[];
+  assert(wrote.ok === true, `record_citation writes the citing row (${JSON.stringify(wrote)})`);
+  // Without detach: refused, the count and the citing row mapped to the store's shape.
+  const refused = await store.deleteThought({ id: source, actor: { name: "importer", source: "postgrest-test" } });
+  assert(refused.ok === false && refused.error === "CITED" && refused.citedBy === 1 && refused.citations?.length === 1 && refused.citations[0].thoughtId === citer && refused.citations[0].stance === "retrieved" && refused.citations[0].text === "the limit is 600" && ISO_RE.test(refused.citations[0].createdAt ?? ""),
+         `the CITED envelope normalises to citedBy and citations, created_at an ISO string (${JSON.stringify(refused)})`);
+  assert(Number((await admin`SELECT count(*)::int AS c FROM thoughts WHERE id = ${source}`)[0].c) === 1, "…and the source stands");
+  const spelled = await store.deleteThought({ id: source, detach: false });
+  assert(spelled.ok === false && spelled.error === "CITED", "detach: false spelled is the default's refusal");
+  // With detach: deleted, the count read back, the actor on the audit row.
+  const detached = await store.deleteThought({ id: source, actor: { name: "importer", source: "postgrest-test" }, detach: true });
+  assert(detached.ok === true && detached.id === source && detached.detached === 1 && detached.inactive === undefined, `p_detach binds and the count comes back (${JSON.stringify(detached)})`);
+  const [ev] = await admin`SELECT actor_name FROM thought_audit WHERE thought_id = ${source} AND action = 'delete'`;
+  assert(ev?.actor_name === "importer", `the delete is attributed over this path too (${ev?.actor_name})`);
+  const [facet] = (await admin`SELECT payload FROM thought_facets WHERE thought_id = ${citer}`) as { payload: Record<string, unknown> }[];
+  assert(facet?.payload?.source_id === null && facet?.payload?.source_deleted_id === source, "the citation records the deleted source");
+  // A named call with p_id and p_actor alone — the vendored servers' rpc shape — still resolves.
+  const { data, error } = await client.rpc("delete_thought", { p_id: citer, p_actor: null });
+  assert(error === null && (data as { ok: boolean }).ok === true, `rpc with p_id and p_actor alone resolves through the default (${JSON.stringify(data ?? error)})`);
+  await admin.close();
+}
+
 await store.close();
 report();

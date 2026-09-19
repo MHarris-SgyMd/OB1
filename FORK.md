@@ -14023,20 +14023,40 @@ citation the join finds, because the cascade on `thought_id` is a row-level
 `AFTER` trigger and Postgres fires those before any statement-level one. A
 `NOT IN (SELECT id FROM deleted)` clause was written to say so explicitly; its
 mutant passed every check, so it was removed rather than kept as a mechanism
-that is not one, and the reliance is stated in the header. If any, and the
-transaction-local `ob1.cited_delete` is not `detach`, it raises **SQLSTATE
-`OB001`** and the whole statement fails. Otherwise it *detaches* every surviving
-citation that named a deleted row, active or not: the row keeps its text and
-stance, `source_id` becomes JSON null and `source_deleted_id` /
-`source_deleted_at` record which thought went and when — the citation survives
-as "rested on a thought deleted at T", which is what a reader of the note needs
-to know, and no row names a thought that is gone. It totals what it did in two
-transaction-local settings, summed across statements. The refusal is the
-*table's*: a bulk `DELETE`, a vendored script, `psql` all meet it, the way
-008's append-only rule is `thought_audit`'s; the way through is the setting,
-which only a caller who names it takes. The price is the transition table — a
-delete of N rows holds the N deleted rows once, vectors included; a single
-delete pays nothing that shows.
+that is not one, and the reliance is stated in the header. The guard judges the
+state the statement *leaves*: deleting the thought that carries a replacing
+citation together with the source revives the replaced citation on a note that
+survives (`superseded_by`'s `SET NULL`), and the statement is refused — after
+it, that note would rest on nothing, which is the question the guard asks. The
+first review pass raised that case, and writing its test found the gap: the
+`SET NULL` is a nested referential action and fires *after* the statement-level
+guard, so the first draft judged the replaced citation still superseded, marked
+it, and the `SET NULL` then revived it — detached, under refuse mode.
+`thought_facet_active` therefore reads whether the superseder still exists,
+not whether the pointer is null, which says what the `SET NULL` is about to say
+whatever the phase order ([39] holds the case both ways). If
+any survive, and the transaction-local `ob1.cited_delete` is not `detach`, it
+raises **SQLSTATE `OB001`** and the whole statement fails. Otherwise it
+*detaches* every surviving citation that named a deleted row, active or not:
+the row keeps its text and stance, `source_id` becomes JSON null and
+`source_deleted_id` / `source_deleted_at` record which thought went and when —
+the citation survives as "rested on a thought deleted at T", which is what a
+reader of the note needs to know, and no row names a thought that is gone. The
+count and the detach are **one `UPDATE … RETURNING`** over the citing rows, so
+each row's status is read from the version its row lock won: a citation revived
+by a concurrent writer — `valid_until` or `superseded_by` cleared between a look
+and a write — is seen as active, where the first draft's count followed by an
+UPDATE would have counted the old version as expired and rewritten the new one
+under refuse mode (the first review pass's top finding; `db/test-live.ts` [6i]
+arm 4 holds it against a real server, and `thought_facet_active(thought_facets)`
+is the one spelling of "still counts" the guard and the function's sample
+share). In refuse mode the raise aborts the statement and the rewrite with it.
+It totals what it did in two transaction-local settings, summed across
+statements. The refusal is the *table's*: a bulk `DELETE`, a vendored script,
+`psql` all meet it, the way 008's append-only rule is `thought_audit`'s; the
+way through is the setting, which only a caller who names it takes. The price
+is the transition table — a delete of N rows holds the N deleted rows once,
+vectors included; a single delete pays nothing that shows.
 
 `delete_thought(uuid, jsonb, boolean)` is **036's body** — the actor and the
 mode set first, *outside* the block (a caught exception rolls back its
@@ -14050,19 +14070,25 @@ same transaction, the state the guard saw. Only that SQLSTATE is caught: a real
 `23503`, a permission failure, anything else propagates as the fault it is —
 the proposal's `WHEN foreign_key_violation` would have reported every FK failure
 on a delete as "cited". Success carries `detached:n` and, when non-zero,
-`inactive:m`. The two-argument overload is **dropped first** (a `DEFAULT` on
-the third parameter beside it makes every two-argument call "not unique");
-two-argument callers — `db/test-live.ts` [6g], the vendored servers' `rpc`
-calls — resolve through the default, which is the old behaviour plus the
-refusal. And `record_citation(uuid, uuid, text, text)` is the one writer,
-because a citation write locks the source `KEY SHARE` and every writer of a
-contended row on this fork has taken the supersession advisory lock *first*
-since changes 63 and 68: the function takes it, then the `INSERT`'s validate
-trigger takes the row lock. Refusals as values: `NOT_FOUND`,
-`SOURCE_NOT_FOUND`, `SELF_CITATION`, `BAD_STANCE`, `EMPTY_TEXT`. **No MCP tool
-calls it yet** — the write side of citations belongs to the epic's event shape
-(SMD-1730) and grounding rule (SMD-1733); this change is the guard, and the
-writer the guard is tested through.
+`inactive:m`. The mode is the *call's*, not the transaction's: the setting that
+was there is put back after the block, so a raw `DELETE` later in the same
+transaction meets the guard's default, or the caller's own setting, and not
+this call's `p_detach` (first review pass; [39]). The two-argument overload is
+**dropped first** (a `DEFAULT` on the third parameter beside it makes every
+two-argument call "not unique"); two-argument callers — `db/test-live.ts`
+[6g], the vendored servers' `rpc` calls — resolve through the default, which
+is the old behaviour plus the refusal. And `record_citation(uuid, uuid, text,
+text)` is the one writer, because a citation write locks the source `KEY
+SHARE` and every writer of a contended row on this fork has taken the
+supersession advisory lock *first* since changes 63 and 68: the function takes
+it, then locks both thoughts `KEY SHARE` in its prechecks — so a source deleted
+in flight is waited out and answers `SOURCE_NOT_FOUND` as a value rather than
+the validate trigger's `check_violation` an instant later ([6i] arm 5) — then
+the `INSERT`'s validate trigger re-locks the source. Refusals as values:
+`NOT_FOUND`, `SOURCE_NOT_FOUND`, `SELF_CITATION`, `BAD_STANCE`, `EMPTY_TEXT`.
+**No MCP tool calls it yet** — the write side of citations belongs to the
+epic's event shape (SMD-1730) and grounding rule (SMD-1733); this change is
+the guard, and the writer the guard is tested through.
 
 **The check is not a precheck, and the race is measured.** The guard fires
 inside the `DELETE`, so a citation committed between a look and the delete is
@@ -14070,14 +14096,18 @@ seen; the validate trigger's `FOR KEY SHARE` on the source is the lock a
 foreign key would take, so a delete of that row waits for the citation's
 transaction and then, under READ COMMITTED with an `AFTER` trigger running
 after the statement's own waits, sees it. `db/test-live.ts` [6i] runs it three
-ways against a real server: a raw `INSERT` holding `KEY SHARE` (the delete
-waits, then is refused, nothing dangles); `record_citation` in a transaction
-that goes on to write `supersedes` (the lock is re-entrant, no cycle, refused
-after the commit); and the residue stated in 041's header — a raw writer whose
-transaction takes the advisory lock *after* the row, through `update_thought`,
-against the waiting delete — which deadlocks, deterministically, and Postgres
-breaks it with nothing dangling either way. That third arm is what
-`record_citation`'s order exists to avoid.
+ways against a real server, five after the first pass: a raw `INSERT` holding
+`KEY SHARE` (the delete waits, then is refused, nothing dangles);
+`record_citation` in a transaction that goes on to write `supersedes` (the lock
+is re-entrant, no cycle, refused after the commit); the residue stated in 041's
+header — a raw writer whose transaction takes the advisory lock *after* the
+row, through `update_thought`, against the waiting delete — which deadlocks,
+deterministically, and Postgres breaks it with nothing dangling either way (that
+arm is what `record_citation`'s order exists to avoid); a citation revived
+under an open transaction while its source is deleted (the delete waits on the
+row and reads the revived version: refused); and a raw delete of the source in
+flight while `record_citation` runs (it waits on the row and answers
+`SOURCE_NOT_FOUND` as a value).
 
 **On the portable server.** `MutationError` gains `CITED`; `deleteThought`
 takes `detach`, both stores send the third argument explicitly (`p_detach`
@@ -14092,7 +14122,19 @@ were marked. The guard runs as the calling role, so `ROLE_GRANTS.capture` gains
 `thought_facets` `SELECT, UPDATE` (`since: "041"`) — a self-hosted server role
 without them cannot delete *any* thought — and preflight's `write privileges`
 names it with its `GRANT`; the README's grants table carries the row (check 7's
-README rule holds the two together).
+README rule holds the two together). Preflight also gains a **`delete
+signature`** check beside `edit signature` (first review pass): both stores now
+send three arguments, so a server deployed ahead of the migration would have
+started green and failed every delete at the first user call with "function
+does not exist", and a hand re-apply of 009 or 036 over 041 would put the
+two-argument form back beside it and make every two-argument caller "not
+unique" — the check names each state with its remedy, as 032's does for
+`update_thought`. And a citation's text in a refusal goes through the same
+`cleanForDisplay` every other thought-derived text in a reply does — the first
+draft had re-implemented the one-line snip without it, the only place a
+thought's text would have reached a terminal with its control characters
+(first review pass; `snipText` is now the one spelling, and the proposals
+tool's snip calls it).
 
 **Held by:** `db/test-schema.ts` [39] on PGlite — the shape (two triggers, the
 guard per statement over `deleted`, one three-argument `delete_thought`, the
@@ -14106,7 +14148,11 @@ a whole-table reset clean — and [36] re-pointed at 041's body for 036's lock
 assertions; `server-portable/test-update-delete.ts` [10] through the tool over
 real Postgres, the FK-fault fixture included; `db/test-live.ts` [6i], the three
 race arms above; `test-upgrade` [7]'s window guard and note moved to eleven;
-`test-preflight` [5]'s capture-role walk names the facet `UPDATE`. Ten
+`test-preflight` [5]'s capture-role walk names the facet `UPDATE` and its
+signature walk re-applies 036 over 041 and drops 041's form for the `delete
+signature` check; `server-portable/test-store-postgrest.ts` [11] drives
+`deleteThought` through the SQL shim — `p_detach` named and bound, the `CITED`
+envelope normalised, a two-argument named `rpc` still resolving. Ten
 mutants, each reverting one mechanism, each failing the suite named for it:
 the lock dropped from `delete_thought` ([36], [39], and [6g]'s forty-race
 deadlock — 13 of 40), the guard raising `foreign_key_violation` ([39]'s
@@ -14122,8 +14168,14 @@ coverage and yield views (each a later ticket if the facet earns its keep);
 `thought_edges` (declined in change 46, and check 7 knows upstream's shape as a
 clobber pattern); a read that labels a citation's expiry or a deleted source
 (SMD-1725's `as_of` read is where labels on facets belong); any writer over
-MCP. `--reapply` (change 56) re-runs 009 and 036 in their turn, each
-re-creating the two-argument form, and 041 drops it again in its.
+MCP. Three vendored servers delete with a raw `.delete()` on `thoughts` —
+`integrations/rest-api`'s dedup merge (after it has rewritten the survivor and
+logged the merge), `integrations/delete-thought-mcp`, `integrations/open-brain-rest`
+— and now meet the guard as a bare `OB001` with no detach path, the way every
+raw writer met 008's rule; routing them through `delete_thought` is
+**SMD-1793**, filed from the first review pass in the shape of changes 69 and
+71. `--reapply` (change 56) re-runs 009 and 036 in their turn, each re-creating
+the two-argument form, and 041 drops it again in its.
 
 **Upstream status:** not applicable — the fork's schema; upstream has no
 citation or facet concept.

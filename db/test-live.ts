@@ -1255,6 +1255,44 @@ console.log("\n[6i] A citation written while a delete of its source is in flight
       `a raw writer that takes the advisory lock after the row closes the cycle record_citation avoids — deadlock detected in one of the two (update: ${updErr.slice(0, 40) || "ok"}; delete: ${(d.r.error ?? "ok").slice(0, 40)})`);
     assert((await dangling(s)) === 0, "…and whichever writer Postgres chose, no citation names a thought that is gone");
   }
+  // Arm 4 — a citation revived under a concurrent writer: T1 clears the
+  // expiry of an expired citation of S and holds the row; the delete of S in
+  // refuse mode meets that row lock inside its one UPDATE … RETURNING, waits,
+  // and reads the revived version — refused, where a count followed by an
+  // UPDATE would have counted the old version as expired and rewritten the new.
+  {
+    const { s, c } = await mk("revived");
+    const f = ((await sql`SELECT record_citation(${c}::uuid, ${s}::uuid, 'was expired', 'retrieved') AS r`)[0].r as { id: string }).id;
+    await sql`UPDATE thought_facets SET valid_until = now() - interval '1 day' WHERE id = ${f}::uuid`;
+    await connW.unsafe("BEGIN");
+    await connW`UPDATE thought_facets SET valid_until = NULL WHERE id = ${f}::uuid`;
+    const del = startDelete(s);
+    assert(await stillWaiting(del), "with the revival uncommitted, the delete waits on the citation's row");
+    await connW.unsafe("COMMIT");
+    const d = await del;
+    assert(d.r.ok === false && d.r.error === "CITED" && d.r.cited_by === 1, `…and reads the revived citation as active: refused, not detached as expired (${JSON.stringify(d.r)})`);
+    const [after] = (await sql`SELECT payload->>'source_id' AS src FROM thought_facets WHERE id = ${f}::uuid`) as { src: string | null }[];
+    assert(after?.src === s && (await dangling(s)) === 0, "the citation still names its source, which stands");
+  }
+  // Arm 5 — record_citation against a raw delete of the source in flight: its
+  // precheck locks the source KEY SHARE, waits, and answers SOURCE_NOT_FOUND as
+  // a value once the delete commits — not the validate trigger's check_violation
+  // an unlocked EXISTS would have run into.
+  {
+    const { s, c } = await mk("vanishing");
+    await connW.unsafe("BEGIN");
+    await connW`DELETE FROM thoughts WHERE id = ${s}::uuid`;
+    const t0 = Date.now();
+    const cite = (async () => {
+      try { return { r: ((await connD`SELECT record_citation(${c}::uuid, ${s}::uuid, 'about to vanish', 'stated') AS r`) as { r: Env }[])[0].r, ms: Date.now() - t0 }; }
+      catch (e) { return { r: { ok: false, error: (e as Error).message } as Env, ms: Date.now() - t0 }; }
+    })();
+    assert(await stillWaiting(cite), "with the raw delete uncommitted, record_citation waits on the source row");
+    await connW.unsafe("COMMIT");
+    const w = await cite;
+    assert(w.r.ok === false && w.r.error === "SOURCE_NOT_FOUND", `…and once it commits the writer answers SOURCE_NOT_FOUND as a value, not a raised check_violation (${JSON.stringify(w.r)})`);
+    assert(Number((await sql`SELECT count(*)::int AS c FROM thought_facets WHERE thought_id = ${c}::uuid`)[0].c) === 0, "nothing was written");
+  }
   await connW.close();
   await connD.close();
   await sql`DELETE FROM thoughts`;
