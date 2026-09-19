@@ -44,7 +44,7 @@ SUPABASE (from your Open Brain setup)
 ## Steps
 
 1. Apply `schema.sql` to your brain: `psql "$DATABASE_URL" -f schema.sql` (or paste it into your SQL console).
-2. Nothing to grant (this fork, SMD-1796): the file adds columns to `thoughts` and functions executable by any role that can read it (upstream's `GRANT EXECUTE … TO authenticated, service_role` lines are gone — those roles do not exist off Supabase, and execute is `PUBLIC`'s by default).
+2. Nothing to grant (this fork, SMD-1796): the file adds columns to `thoughts` and four functions executable by any role by default — the two `SECURITY DEFINER` ones read `thoughts` as their owner, see Security below (upstream's `GRANT EXECUTE … TO authenticated, service_role` lines are gone — those roles do not exist off Supabase, and execute is `PUBLIC`'s by default).
 3. Open **Table Editor** and select the `thoughts` table to confirm the new columns appear: `type`, `sensitivity_tier`, `importance`, `quality_score`, `source_type`, `enriched`
 4. Navigate to **Database > Functions** and verify the new functions exist: `search_thoughts_text`, `brain_stats_aggregate`, `get_thought_connections`, `backfill_thought_types`
 5. If you have existing thoughts with `type` or `source` values stored in the metadata JSONB, the script automatically calls `backfill_thought_types()` with the default canonical allowlist. If your brain uses non-canonical `type` values, re-run `SELECT backfill_thought_types(ARRAY['your','custom','types']);` or `SELECT backfill_thought_types(NULL);` to accept any value

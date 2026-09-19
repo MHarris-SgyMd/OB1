@@ -263,14 +263,16 @@ issues every group at once.
 | | `thought_entities` (016) | `SELECT, INSERT, DELETE` |
 | | `ob1_entity_edges` (016) | `SELECT, INSERT, DELETE` |
 | **querylog** — the opt-in query log (`OB1_QUERY_LOG=on`, off by default, SMD-1295); the server writes it only when enabled, and only inserts | `query_log` (034) | `INSERT` |
-| **community** — the schemas under `schemas/`, applied by hand beside the migrations (SMD-1796). Upstream's files granted these to Supabase's `service_role` and enabled RLS with a policy for it; neither exists off Supabase, so the files grant nothing now and this group does — the privileges upstream gave its service role, plus what Supabase's default privileges hid: `USAGE` on a `BIGSERIAL` column's sequence, and `EXECUTE` on a function `REVOKE`d `FROM PUBLIC`. Issued for whichever files you have applied; the rest are skipped and named | `thought_audit` (schemas/thought-audit — 008's table; the readers `author-session-id.sql` adds need `SELECT`) | `SELECT, INSERT` |
+| **community** — the schemas under `schemas/`, applied by hand beside the migrations (SMD-1796). Upstream's files granted these to Supabase's `service_role` and enabled RLS with a policy for it; neither exists off Supabase, so the files grant nothing now and this group does — the privileges upstream gave its service role, plus what Supabase's default privileges hid: `USAGE` on a `BIGSERIAL` column's sequence, and `EXECUTE` on a function `REVOKE`d `FROM PUBLIC`. Issued for whichever files you have applied; the rest are skipped and named | `thought_audit` (schemas/thought-audit — 008's table; upstream's `SELECT, INSERT`, kept) | `SELECT, INSERT` |
+| | view `thought_provenance` (schemas/thought-audit, `author-session-id.sql` — a view over `thoughts`, which needs its own `SELECT`) | `SELECT` |
 | | `agent_memories`, `agent_memory_source_refs`, `agent_memory_artifacts`, `agent_memory_relations`, `agent_memory_review_actions`, `agent_memory_recall_traces`, `agent_memory_recall_items`, `agent_memory_audit_events` (schemas/agent-memory) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `openbrain_agents`, `agent_memory_keys` (schemas/per-agent-identity) | `SELECT, INSERT, UPDATE, DELETE` |
 | | function `lookup_agent_memory_key(text)` (schemas/per-agent-identity; SECURITY DEFINER, `REVOKE`d `FROM PUBLIC`) | `EXECUTE` |
 | | `ingestion_jobs`, `ingestion_items` (schemas/smart-ingest) | `SELECT, INSERT, UPDATE, DELETE` |
 | | sequences `ingestion_jobs_id_seq`, `ingestion_items_id_seq` (schemas/smart-ingest; `BIGSERIAL` ids) | `USAGE, SELECT` |
 | | function `append_thought_evidence(bigint, jsonb)` (schemas/smart-ingest; SECURITY DEFINER, `REVOKE`d `FROM PUBLIC`) | `EXECUTE` |
-| | `entities`, `edges`, `thought_entities`, `entity_extraction_queue`, `consolidation_log` (schemas/entity-extraction — upstream's tables, not 016's `ob1_*`) | `SELECT, INSERT, UPDATE, DELETE` |
+| | `entities`, `edges`, `entity_extraction_queue`, `consolidation_log` (schemas/entity-extraction — upstream's tables, not 016's `ob1_*`) | `SELECT, INSERT, UPDATE, DELETE` |
+| | `thought_entities` (schemas/entity-extraction names 016's table under `IF NOT EXISTS`; the **extraction** row's privileges exactly, so the merge widens nothing) | `SELECT, INSERT, DELETE` |
 | | sequences `entities_id_seq`, `edges_id_seq`, `consolidation_log_id_seq` (schemas/entity-extraction; `BIGSERIAL` ids) | `USAGE, SELECT` |
 | | `thought_edges` (schemas/typed-reasoning-edges) | `SELECT, INSERT, UPDATE, DELETE` |
 | | sequence `thought_edges_id_seq` (schemas/typed-reasoning-edges; `BIGSERIAL` id) | `USAGE, SELECT` |
@@ -283,7 +285,7 @@ issues every group at once.
 | | functions `merge_thought_provenance_metadata(uuid, jsonb)`, `merge_thought_eval_metadata(uuid, jsonb)` (schemas/provenance-chains; SECURITY DEFINER, `REVOKE`d `FROM PUBLIC`) | `EXECUTE` |
 
 Plus `USAGE ON SCHEMA public`. The migrations' own tables need no sequence
-grant — every primary key is a `uuid` or a natural key — but four community
+grant — every primary key is a `uuid` or a natural key — but three community
 schemas use `BIGSERIAL` ids, and an `INSERT` into such a table needs `USAGE` on
 the sequence (`permission denied for sequence …` with the table fully granted),
 so the **community** group names those six sequences; an identity column
@@ -294,8 +296,9 @@ functions upstream `REVOKE`d `FROM PUBLIC` — the SECURITY DEFINER ones, and th
 wiki RPCs — are listed, for `EXECUTE`; the rest (the brain-stats, enhanced-thoughts,
 readwise and CRM RPCs) need nothing. `ob1_config` appears twice — `SELECT` for
 the server's own read, `INSERT, UPDATE` for a worker's job key — as does
-`thought_audit` (`INSERT` for the capture path, `SELECT` for the audit readers),
-and `--grant` merges each into one `GRANT`.
+`thought_audit` (`INSERT` for the capture path, upstream's `SELECT` beside it),
+and `--grant` merges each into one `GRANT`. A view is granted as a table is,
+and needs it: a role's `SELECT` on `thoughts` does not reach a view over it.
 
 The one executable spelling — run as a role that can grant (the tables' owner or
 a superuser), after the migrations are applied:
@@ -316,8 +319,9 @@ run `--grant` again after applying one; apply a community schema with `psql
 "$DATABASE_URL" -f schemas/<name>/schema.sql`, as its README says. Presence is
 per object, not per file, so the two community rows whose tables a migration
 also creates — `thought_audit` (008) and `thought_entities` (016) — are issued
-on every migrated brain: a `SELECT` on the audit log and an `UPDATE` on the
-mention table, both the operator's. The
+on every migrated brain: the audit row adds only upstream's `SELECT` on the
+log, and the mention row is the **extraction** row's privileges again, so
+neither widens what a brain without the file already grants. The
 **querylog** group is issued too, so `OB1_QUERY_LOG=on` works out
 of the box — but unlike the capture set it is not enforced: the query log is off
 by default and preflight cannot read a server env flag, so a role missing

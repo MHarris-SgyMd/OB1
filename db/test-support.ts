@@ -56,8 +56,10 @@ const TABLES = [
   // schemas/*.sql to the migrated brain, and a reset that left them would hand
   // the next run tables whose foreign keys to `thoughts` the CASCADE above cut.
   // Their bigserial sequences go with them; their functions stay (CREATE OR
-  // REPLACE re-applies cleanly, and none is a migration's).
-  ...grantedTables(["community"]),
+  // REPLACE re-applies cleanly, and none is a migration's). thought_audit and
+  // thought_entities are above already; the view is not a table and goes with
+  // `thoughts`.
+  ...grantedTables(["community"]).filter((t) => t !== "thought_audit" && t !== "thought_entities"),
 ];
 
 /**

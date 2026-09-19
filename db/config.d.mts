@@ -273,7 +273,7 @@ export function alignVectorSearchPath(sql: import("bun").SQL): Promise<string | 
  * group the schemas/ file. Exactly one of `table`, `sequence` or `function` is
  * set; a function is named with its argument types (SMD-1796).
  */
-export type RoleGrant = { table?: string; sequence?: string; function?: string; privileges: readonly string[]; since: string };
+export type RoleGrant = { table?: string; view?: string; sequence?: string; function?: string; privileges: readonly string[]; since: string };
 /** The groups ROLE_GRANTS is keyed by. */
 export type RoleGrantGroup = "capture" | "server" | "worker" | "extraction" | "querylog" | "community";
 /**
@@ -306,12 +306,14 @@ export function queryLogEnabled(env: Record<string, string | undefined> | undefi
 /** prune_query_log's retention window in days, from OB1_QUERY_LOG_RETENTION_DAYS or the default. */
 export function queryLogRetentionDays(env: Record<string, string | undefined> | undefined | null): number;
 /** A ROLE_GRANTS row's object — its kind and name (a function's name carries its argument types). */
-export type GrantObject = { kind: "table" | "sequence" | "function"; name: string };
+export type GrantObject = { kind: "table" | "view" | "sequence" | "function"; name: string };
 export function grantObjectOf(row: RoleGrant): GrantObject;
 /** Every object named across the given groups (default: all), in group/list order, de-duplicated by name. */
 export function grantedObjects(groups?: readonly string[]): GrantObject[];
 /** Every table named across the given groups (default: all), in group/list order, de-duplicated. */
 export function grantedTables(groups?: readonly string[]): string[];
+/** Every view named across the given groups (default: all), in order, de-duplicated. */
+export function grantedViews(groups?: readonly string[]): string[];
 /** Every sequence named across the given groups (default: all), in order, de-duplicated. */
 export function grantedSequences(groups?: readonly string[]): string[];
 /** Every function (with argument types) named across the given groups (default: all), in order, de-duplicated. */

@@ -1475,11 +1475,18 @@ export const ROLE_GRANTS = Object.freeze({
   // 008's, listed here for the SELECT upstream gave beside `capture`'s INSERT.
   // Presence is per object, not per file: the two rows whose tables a
   // migration also creates (thought_audit, thought_entities) are therefore
-  // issued on every migrated brain, community schema applied or not — a SELECT
-  // on the audit log and an UPDATE on the mention table, both the operator's.
+  // issued on every migrated brain, community schema applied or not — so the
+  // audit row adds only the SELECT upstream gave (the operator reading its own
+  // audit log; nothing under schemas/ reads the table — the first review pass
+  // caught the claim that author-session-id's readers do: they read `thoughts`),
+  // and the mention row is kept to exactly what `extraction` already grants, so
+  // the merge widens nothing. A `view` row is a SELECT on a view: GRANT and
+  // to_regclass take a view as a table, but DROP TABLE does not, so it is its
+  // own kind and grantedTables() leaves it out (test-support's drop list).
   community: Object.freeze([
-    // schemas/thought-audit (008's table; the readers upstream's author-session-id.sql adds need SELECT)
+    // schemas/thought-audit (008's table, and author-session-id.sql's view over `thoughts` — a view needs its own SELECT)
     Object.freeze({ table: "thought_audit", privileges: Object.freeze(["SELECT", "INSERT"]), since: "schemas/thought-audit" }),
+    Object.freeze({ view: "thought_provenance", privileges: Object.freeze(["SELECT"]), since: "schemas/thought-audit" }),
     // schemas/agent-memory
     Object.freeze({ table: "agent_memories",              privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/agent-memory" }),
     Object.freeze({ table: "agent_memory_source_refs",    privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/agent-memory" }),
@@ -1501,10 +1508,11 @@ export const ROLE_GRANTS = Object.freeze({
     Object.freeze({ function: "append_thought_evidence(bigint, jsonb)", privileges: Object.freeze(["EXECUTE"]), since: "schemas/smart-ingest" }),
     // schemas/entity-extraction (upstream's `entities`/`edges`, not 016's ob1_* tables; three bigserial ids;
     // `thought_entities` is the one name the two share — on a migrated brain the file's IF NOT EXISTS
-    // leaves 016's table, so this row widens `extraction`'s SELECT, INSERT, DELETE on it with UPDATE)
+    // leaves 016's table, so this row is `extraction`'s privileges exactly, not upstream's GRANT ALL:
+    // a row issued on every migrated brain must not widen what 016's own group grants)
     Object.freeze({ table: "entities",                privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/entity-extraction" }),
     Object.freeze({ table: "edges",                   privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/entity-extraction" }),
-    Object.freeze({ table: "thought_entities",        privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/entity-extraction" }),
+    Object.freeze({ table: "thought_entities",        privileges: Object.freeze(["SELECT", "INSERT", "DELETE"]),           since: "schemas/entity-extraction" }),
     Object.freeze({ table: "entity_extraction_queue", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/entity-extraction" }),
     Object.freeze({ table: "consolidation_log",       privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/entity-extraction" }),
     Object.freeze({ sequence: "entities_id_seq",          privileges: Object.freeze(["USAGE", "SELECT"]), since: "schemas/entity-extraction" }),
@@ -1595,15 +1603,16 @@ export function queryLogRetentionDays(env) {
 }
 
 /**
- * A ROLE_GRANTS row's object: the one of `table`, `sequence` or `function` it
- * names, with its kind. A function is named with its argument types, as GRANT
- * and to_regprocedure take it (SMD-1796).
+ * A ROLE_GRANTS row's object: the one of `table`, `view`, `sequence` or
+ * `function` it names, with its kind. A function is named with its argument
+ * types, as GRANT and to_regprocedure take it (SMD-1796).
  */
 export function grantObjectOf(row) {
   if (row.table) return { kind: "table", name: row.table };
+  if (row.view) return { kind: "view", name: row.view };
   if (row.sequence) return { kind: "sequence", name: row.sequence };
   if (row.function) return { kind: "function", name: row.function };
-  throw new Error(`ROLE_GRANTS row names no table, sequence or function: ${JSON.stringify(row)}`);
+  throw new Error(`ROLE_GRANTS row names no table, view, sequence or function: ${JSON.stringify(row)}`);
 }
 /** Every object named across the given groups (default: all), in group/list order, de-duplicated by name: [{ kind, name }]. */
 export function grantedObjects(groups = ROLE_GRANT_GROUPS) {
@@ -1615,6 +1624,10 @@ export function grantedObjects(groups = ROLE_GRANT_GROUPS) {
 /** Every table named across the given groups (default: all), in group/list order, de-duplicated. */
 export function grantedTables(groups = ROLE_GRANT_GROUPS) {
   return grantedObjects(groups).filter((o) => o.kind === "table").map((o) => o.name);
+}
+/** Every view named across the given groups (default: all), in order, de-duplicated. */
+export function grantedViews(groups = ROLE_GRANT_GROUPS) {
+  return grantedObjects(groups).filter((o) => o.kind === "view").map((o) => o.name);
 }
 /** Every sequence named across the given groups (default: all), in order, de-duplicated. */
 export function grantedSequences(groups = ROLE_GRANT_GROUPS) {
@@ -1671,9 +1684,10 @@ export function grantStatements(role, { groups = ROLE_GRANT_GROUPS, present = nu
   const out = [];
   for (const [name, { kind, set }] of byName) {
     const privs = ORDER.filter((p) => set.has(p)).join(", ");
-    // A sequence's name is a plain identifier; a function's carries its argument
+    // A view is granted as a table is (GRANT takes either without a keyword); a
+    // sequence's name is a plain identifier; a function's carries its argument
     // list, which GRANT ... ON FUNCTION takes as written.
-    out.push(kind === "table" ? `GRANT ${privs} ON ${name} TO ${ident};` : `GRANT ${privs} ON ${kind.toUpperCase()} ${name} TO ${ident};`);
+    out.push(kind === "table" || kind === "view" ? `GRANT ${privs} ON ${name} TO ${ident};` : `GRANT ${privs} ON ${kind.toUpperCase()} ${name} TO ${ident};`);
   }
   return out;
 }
@@ -1718,8 +1732,13 @@ export function stripSqlComments(text) {
       continue;
     }
     if (c === "'" || c === '"') {
+      // An E'…' string (016 has one) escapes with a backslash too: `E'\\''`
+      // is one quote, and read as two plain quotes it would flip the parity of
+      // every literal after it (first review pass).
+      const escaped = c === "'" && /[Ee]$/.test(out) && !/\w[Ee]$/.test(out);
       let j = i + 1;
       while (j < n) {
+        if (escaped && text[j] === "\\") { j += 2; continue; }
         if (text[j] === c) { if (text[j + 1] === c) { j += 2; continue; } break; }
         j++;
       }
@@ -1754,8 +1773,8 @@ export function stripSqlComments(text) {
  */
 export const SUPABASE_SQL_RULES = Object.freeze([
   Object.freeze({ name: "service_role", re: /\bservice_role\b/i,
-    msg: "names Supabase's `service_role` — a Supabase-managed role that does not exist on plain Postgres, where the statement fails (`role \"service_role\" does not exist`) and stops the file; grant the connecting role with `migrate.ts --grant` (db/config.mjs ROLE_GRANTS) instead" }),
-  Object.freeze({ name: "supabase-api-role", re: /\b(?:TO|FROM)\s+(?:(?:"?[A-Za-z_][A-Za-z0-9_]*"?|PUBLIC)\s*,\s*)*(?:authenticated|anon)\b/i,
+    msg: "names Supabase's `service_role` — a Supabase-managed role that does not exist on plain Postgres, where the statement fails (`role \"service_role\" does not exist`) and stops the file; grant the connecting role with `migrate.ts --grant` (db/config.mjs ROLE_GRANTS) instead. String literals count (an EXECUTE string runs; a COMMENT ON … IS '…' is flagged too — reword it or move the word to a `--` comment)" }),
+  Object.freeze({ name: "supabase-api-role", re: /\b(?:TO|FROM)\s+(?:(?:"?[A-Za-z_][A-Za-z0-9_]*"?|PUBLIC)\s*,\s*)*"?(?:authenticated|anon)\b"?/i,
     msg: "grants to, revokes from or scopes a policy to Supabase's `authenticated`/`anon` — API roles that do not exist on plain Postgres (`role \"authenticated\" does not exist` stops the file); EXECUTE is PUBLIC's by default, and the fork's connecting role is granted through `migrate.ts --grant`" }),
   Object.freeze({ name: "auth-schema", re: /\bauth\.(?:uid|role|jwt|email)\s*\(|\bauth\.users\b/i,
     msg: "reaches GoTrue's `auth` schema (`auth.uid()`, `auth.role()`, `auth.users`), which exists only on Supabase — the statement fails elsewhere, and on Supabase the fork's operator is not an Auth user, so such a policy denies every row; the operator model is SMD-1716" }),
@@ -1764,12 +1783,26 @@ export const SUPABASE_SQL_RULES = Object.freeze([
   Object.freeze({ name: "rls", re: /\bENABLE\s+ROW\s+LEVEL\s+SECURITY\b|\bCREATE\s+POLICY\b/i,
     msg: "enables row-level security or creates a policy — on this fork the connecting role is not the table's owner and has no BYPASSRLS, so RLS with no policy for it denies it every row, and every policy here was written for Supabase's roles; isolation is deferred by decision (SMD-1716), so drop the RLS block rather than port it" }),
 ]);
-/** Every SUPABASE_SQL_RULES hit in `text`: [{ rule, line, msg }], line numbers in the source. */
+/**
+ * Every SUPABASE_SQL_RULES hit in `text`: [{ rule, line, msg }], line numbers
+ * in the source, one per (rule, line). Matched over the whole stripped text,
+ * not per line, so a statement broken across lines — `to\n  authenticated`,
+ * `ENABLE ROW LEVEL\n  SECURITY` — is a hit where a per-line scan missed it
+ * (first review pass).
+ */
 export function supabaseIsmsIn(text) {
-  const lines = stripSqlComments(text).split("\n");
+  const sql = stripSqlComments(text);
+  const seen = new Set();
   const hits = [];
   for (const rule of SUPABASE_SQL_RULES) {
-    lines.forEach((line, i) => { if (rule.re.test(line)) hits.push({ rule: rule.name, line: i + 1, msg: rule.msg }); });
+    const re = new RegExp(rule.re.source, rule.re.flags.includes("g") ? rule.re.flags : rule.re.flags + "g");
+    for (const m of sql.matchAll(re)) {
+      const line = sql.slice(0, m.index).split("\n").length;
+      const key = `${rule.name}@${line}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      hits.push({ rule: rule.name, line, msg: rule.msg });
+    }
   }
   return hits.sort((a, b) => a.line - b.line);
 }

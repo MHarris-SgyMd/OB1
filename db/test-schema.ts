@@ -58,6 +58,7 @@ import {
   grantedObjects,
   grantedSequences,
   grantedTables,
+  grantedViews,
   stripSqlComments,
   supabaseIsmsIn,
 } from "./config.mjs";
@@ -4343,17 +4344,19 @@ console.log("\n[39] Every schemas/*.sql applies to a migrated brain with no Supa
   // string (recipes/brain-health-monitoring runs its grants that way).
   const isms = schemaFiles.flatMap((f) => supabaseIsmsIn(readFileSync(join(SCHEMAS, f), "utf8")).map((h) => `${f}:${h.line} ${h.rule}`));
   assert(isms.length === 0, `no schemas/*.sql runs a Supabase-ism (${isms.length}: ${isms.slice(0, 4).join("; ") || "none"})`);
-  const probe = "-- GRANT x TO service_role, in a comment\nSELECT 'a -- literal', 1; GRANT x TO service_role;\nDO $b$ BEGIN -- service_role, in a body's comment\n  EXECUTE 'ALTER TABLE t ENABLE ROW LEVEL SECURITY'; END $b$;\nCREATE POLICY p ON t\n  FOR SELECT\n  TO authenticated USING (true);";
+  const probe = "-- GRANT x TO service_role, in a comment\nSELECT 'a -- literal', 1; GRANT x TO service_role;\nDO $b$ BEGIN -- service_role, in a body's comment\n  EXECUTE 'ALTER TABLE t ENABLE ROW LEVEL SECURITY'; END $b$;\nCREATE POLICY p ON t\n  FOR SELECT\n  TO authenticated USING (true);\nSELECT E'\\'' AS one_quote; -- service_role in a comment after an E-string\ngrant execute on function f()\n  to\n  \"authenticated\";\nALTER TABLE t ENABLE ROW LEVEL\n  SECURITY;";
   const probeHits = supabaseIsmsIn(probe).map((h) => `${h.rule}@${h.line}`);
-  assert(JSON.stringify(probeHits) === JSON.stringify(["service_role@2", "rls@4", "rls@5", "supabase-api-role@7"]),
-    `the scan reads past a literal's -- to the statement after it, skips a body's comment, reads a body's EXECUTE string, and finds a policy's TO on its own line (${probeHits.join(", ")})`);
+  assert(JSON.stringify(probeHits) === JSON.stringify(["service_role@2", "rls@4", "rls@5", "supabase-api-role@7", "supabase-api-role@10", "rls@12"]),
+    `the scan reads past a literal's -- to the statement after it, skips a body's comment, reads a body's EXECUTE string, finds a policy's TO on its own line, keeps its parity through an E'\\'' string, and follows a TO and an ENABLE ROW LEVEL across a line break (${probeHits.join(", ")})`);
 
   const cdb = new PGlite({ extensions: { vector, pg_trgm } });
   for (const f of files) await cdb.exec(subst(readFileSync(join(MIGRATIONS, f), "utf8")));
   const roles = (await cdb.query<{ c: number }>(`SELECT count(*)::int AS c FROM pg_roles WHERE rolname IN ('authenticated', 'anon', 'service_role')`)).rows[0].c;
   assert(roles === 0, "no Supabase role exists in this database");
   const tablesNow = async () => new Set((await cdb.query<{ n: string }>(`SELECT tablename AS n FROM pg_tables WHERE schemaname = 'public'`)).rows.map((r) => r.n));
+  const viewsNow = async () => new Set((await cdb.query<{ n: string }>(`SELECT viewname AS n FROM pg_views WHERE schemaname = 'public'`)).rows.map((r) => r.n));
   const coreTables = await tablesNow();
+  const coreViews = await viewsNow();
   const failed: string[] = [];
   for (const f of schemaFiles) {
     try {
@@ -4385,6 +4388,14 @@ console.log("\n[39] Every schemas/*.sql applies to a migrated brain with no Supa
   const preExisting = [...communityTables].filter((t) => coreTables.has(t)).sort();
   assert(newTables.length === communityTables.size - 2 && unlisted.length === 0 && JSON.stringify(preExisting) === JSON.stringify(["thought_audit", "thought_entities"]),
     `every table the files created is in the community group (${newTables.length} created of ${communityTables.size} listed; ${preExisting.join(" and ")} were the migrations' already; unlisted: ${unlisted.join(", ") || "none"})`);
+  // A view is not in pg_tables, and a role's SELECT on the table beneath does
+  // not reach it — the first review pass found author-session-id.sql's
+  // thought_provenance in no row, so a granted role got `permission denied for
+  // view`. Every view the files created is a row of its own kind.
+  const communityViews = new Set(grantedViews(["community"]));
+  const newViews = [...(await viewsNow())].filter((v) => !coreViews.has(v));
+  assert(newViews.length === 1 && newViews[0] === "thought_provenance" && communityViews.size === 1 && communityViews.has("thought_provenance"),
+    `every view the files created is in the community group, as a view (${newViews.join(", ")})`);
   const seqs = (await cdb.query<{ seq: string; identity: boolean; tbl: string }>(
     `SELECT c.relname AS seq, a.attidentity <> '' AS identity, d.refobjid::regclass::text AS tbl
        FROM pg_class c
@@ -4425,6 +4436,8 @@ console.log("\n[39] Every schemas/*.sql applies to a migrated brain with no Supa
   const before = await insertCodes();
   const notDenied = [...before].filter(([, r]) => r.code !== "42501").map(([t, r]) => `${t}=${r.code}`);
   assert(notDenied.length === 0, `ungranted, the role's INSERT into every community table is refused with 42501 (${before.size} tables; exceptions: ${notDenied.join(", ") || "none"})`);
+  const viewBefore = await asRole(`SELECT 1 FROM thought_provenance LIMIT 0`);
+  assert(viewBefore.code === "42501" && /view thought_provenance/.test(viewBefore.message), `…and so is its SELECT on the view, in the view's name (${viewBefore.code}: ${viewBefore.message})`);
   const fnOids = async (names: string[]) => (await cdb.query<{ o: number }>(`SELECT to_regprocedure('public.' || n)::oid AS o FROM unnest($1::text[]) AS u(n)`, [names])).rows.map((r) => r.o);
   const listedFns = grantedFunctions(["community"]);
   const listedOids = new Set(await fnOids(listedFns));
@@ -4442,8 +4455,8 @@ console.log("\n[39] Every schemas/*.sql applies to a migrated brain with no Supa
   const statements = grantStatements("ob1_community", { groups: ["community"], present });
   const tableGrants = statements.filter((s) => !/ ON (SEQUENCE|FUNCTION) /.test(s));
   const restGrants = statements.filter((s) => / ON (SEQUENCE|FUNCTION) /.test(s));
-  assert(tableGrants.length === communityTables.size && restGrants.length === listedSeqs.size + listedFns.length && statements.every((s) => /TO "ob1_community";$/.test(s)),
-    `--grant's community statements: one per table (${tableGrants.length}), one per sequence and function (${restGrants.length}), the role quoted`);
+  assert(tableGrants.length === communityTables.size + communityViews.size && restGrants.length === listedSeqs.size + listedFns.length && statements.every((s) => /TO "ob1_community";$/.test(s)) && statements.includes(`GRANT SELECT ON thought_provenance TO "ob1_community";`),
+    `--grant's community statements: one per table and view (${tableGrants.length}), one per sequence and function (${restGrants.length}), the role quoted, the view granted as a table is`);
   for (const s of tableGrants) await cdb.exec(s);
   const serialOnly = await asRole(`INSERT INTO ingestion_jobs DEFAULT VALUES`);
   assert(serialOnly.code === "42501" && /sequence ingestion_jobs_id_seq/.test(serialOnly.message), `with the tables granted and the sequences not, an INSERT into a bigserial table is refused on the sequence (${serialOnly.code}: ${serialOnly.message})`);
@@ -4457,8 +4470,8 @@ console.log("\n[39] Every schemas/*.sql applies to a migrated brain with no Supa
   const denied = [...after].filter(([, r]) => r.code === "42501").map(([t, r]) => `${t}: ${r.message}`);
   assert(denied.length === 0, `granted the whole community group, no community table refuses the role's INSERT (${after.size} tables; still refused: ${denied.join("; ") || "none"})`);
   const unreadable: string[] = [];
-  for (const t of communityTables) if ((await asRole(`SELECT 1 FROM ${t} LIMIT 0`)).code !== null) unreadable.push(t);
-  assert(unreadable.length === 0, `…and reads every one (unreadable: ${unreadable.join(", ") || "none"})`);
+  for (const t of [...communityTables, ...communityViews]) if ((await asRole(`SELECT 1 FROM ${t} LIMIT 0`)).code !== null) unreadable.push(t);
+  assert(unreadable.length === 0, `…and reads every one, the view included (unreadable: ${unreadable.join(", ") || "none"})`);
   const seqDenied: string[] = [];
   for (const s of listedSeqs) if ((await asRole(`SELECT nextval('${s}')`)).code !== null) seqDenied.push(s);
   assert(seqDenied.length === 0, `…and takes a value from each listed sequence (refused: ${seqDenied.join(", ") || "none"})`);

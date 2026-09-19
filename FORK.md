@@ -14103,18 +14103,21 @@ NOT NULL columns with no sequence grant, so the seventh is not. The privileges
 are upstream's own for its service role (`GRANT ALL` read as the four DML
 verbs; the audit and revision tables keep `SELECT, INSERT`), merged per object
 across groups — `thought_audit` is 008's table with `capture`'s INSERT and the
-community `SELECT` the author-session readers need; `thought_entities` is 016's,
-the one name upstream's entity-extraction shares with the migration, so its row
-widens `extraction`'s privileges rather than reaching a new table. `--grant`
+`SELECT` upstream gave beside it; `thought_entities` is 016's, the one name
+upstream's entity-extraction shares with the migration, so its row carries
+`extraction`'s privileges exactly and reaches no new table. `--grant`
 checks presence per kind through one statement both it and the suites run
 (`grantPresenceSql`: `to_regclass` for tables and sequences, `to_regprocedure`
 for functions), grants what exists, and names the rest as "not yet present,
 skipped" — so it runs before a community schema is applied, and again after.
 Presence is per object, not per file, so the two rows whose tables a migration
-also creates are issued on every migrated brain (`thought_audit` gains `SELECT`,
-`thought_entities` `UPDATE`) — which is how test-preflight's `--grant`
+also creates are issued on every migrated brain — `thought_audit` gains the
+`SELECT`, `thought_entities` nothing — which is how test-preflight's `--grant`
 assertion found the merge: `GRANT SELECT, INSERT ON thought_audit`, not
-`GRANT INSERT`.
+`GRANT INSERT`. A fourth kind, `view`, carries author-session-id.sql's
+`thought_provenance`: GRANT and `to_regclass` take a view as a table, DROP
+TABLE does not, and a role's `SELECT` on `thoughts` does not reach a view over
+it.
 `db/README.md`'s grants table gains the rows, and check-fork-consistency's
 grants check now requires every sequence and function named there too.
 
@@ -14155,8 +14158,8 @@ before the files, the seventeen apply over TCP, `--grant` then issues all of it
 with nothing skipped, and a LOGIN role connecting as itself inserts, takes
 sequence values, executes, calls `wiki_upsert_page` for real and cannot rewrite
 revisions. `dropSchema` drops the community tables with the rest so the next
-run starts clean. Seventeen READMEs: the "open the Supabase SQL Editor and
-paste" step is `psql "$DATABASE_URL" -f schema.sql` then `bun migrate.ts
+run starts clean. Seventeen README files (the sixteen schemas' and the
+template's): the "open the Supabase SQL Editor and paste" step is `psql "$DATABASE_URL" -f schema.sql` then `bun migrate.ts
 --grant <role>` (or "nothing to grant" where the file adds only functions or an
 index), and every sentence that said `service_role` holds something now says
 what the fork does instead.
@@ -14169,6 +14172,35 @@ and their ticket is SMD-1795's next sub-issue. The READMEs' later steps still
 say "verify in Database → Functions" and "test from the SQL Editor" — Supabase
 dashboard verification, which SMD-1802's docs pass owns. `migrate.ts` does not
 apply community schemas; `psql -f` does, and `--grant` follows.
+
+**Review, first pass** (one cold reviewer beside the author's read, over the
+commit). Fixed: the community `SELECT` on `thought_audit` was justified by
+"the readers author-session-id.sql adds", which read `thoughts`, not the audit
+table — the grant stays as upstream's, the reason is corrected in three places
+(caught: reading the two files the claim named); that same file's view,
+`thought_provenance`, was in no row, so a granted role got `permission denied
+for view` — a `view` kind, a row, and [39]/[18] probe it (caught: the reviewer
+asking what a role's `SELECT` on `thoughts` does not reach); the
+`thought_entities` community row carried `UPDATE`, which — issued on every
+migrated brain by name — widened 016's own `extraction` grant on brains that
+never applied upstream's file; it is now that row's privileges exactly (caught:
+comparing the two rows' verbs); `stripSqlComments` read `E'\''` as two quotes,
+flipping literal parity for the rest of a file — 016 already carries an
+E-string (caught: an adversarial input the reviewer fed the stripper); the rules
+ran per line, so `to\n  authenticated` and `ENABLE ROW LEVEL\n  SECURITY`
+passed — they run over the whole stripped text now, quoted API roles included,
+and [39]'s probe grew the three shapes (caught: the same probing); the README
+said "four" schemas use `BIGSERIAL` where three do; `--grant`'s skipped list
+joined function signatures with the `", "` their argument lists contain; a
+dangling sentence in thought-audit's note; enhanced-thoughts' header called
+the "do NOT grant to `anon`" notes a posture that PUBLIC already includes on
+plain Postgres. Declared, not changed: [18]'s restore does not remove the
+indexes the files build on migration-owned tables (dropSchema does, next run;
+a kept database keeps them — said in the comment); the rules do not name every
+Supabase-ism (`net.http_post`, `vault.`, `current_setting('request.jwt…')`),
+none of which the tree carries; a `FROM anon` table alias would be a false
+positive; `TABLES` in test-support skips its two duplicates now. No finding
+became a ticket.
 
 **Upstream status:** the twelve files now differ from upstream's in their
 grant/RLS sections (plus wiki-pages' extension line and smart-ingest's foreign

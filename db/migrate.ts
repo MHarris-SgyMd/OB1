@@ -175,7 +175,7 @@ if (grantRole !== undefined) {
     if (dryRun) {
       console.log(`\n--grant ${grantRole}  (--dry-run: nothing run)\n`);
       for (const s of statements) console.log(`  ${s}`);
-      if (missing.length) console.log(`\n  not yet present, skipped: ${missing.join(", ")}`);
+      if (missing.length) console.log(`\n  not yet present, skipped: ${missing.join("; ")}`);
       await gsql.close();
       process.exit(0);
     }
@@ -184,7 +184,8 @@ if (grantRole !== undefined) {
     });
     console.log(`\nGranted ${grantRole} the capturing-role privileges over ${present.size} object(s):\n`);
     for (const s of statements) console.log(`  ${s}`);
-    if (missing.length) console.log(`\n  not yet present, skipped (run --grant again after applying the migration or community schema that creates them): ${missing.join(", ")}`);
+    // "; " between names: a function's name carries ", " inside its argument list.
+    if (missing.length) console.log(`\n  not yet present, skipped (run --grant again after applying the migration or community schema that creates them): ${missing.join("; ")}`);
     await gsql.close();
     process.exit(0);
   } catch (err) {

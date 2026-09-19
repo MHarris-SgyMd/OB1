@@ -17,8 +17,11 @@
 -- each of the four functions is gone too (SMD-1796): those are Supabase's
 -- roles, absent on plain Postgres (`role "authenticated" does not exist`
 -- stopped the file there), and EXECUTE is PUBLIC's by default, so nothing
--- replaces them; the "do NOT grant to anon" notes stay as the posture they
--- describe. scripts/check-fork-consistency.mjs check 7 fails the build if the
+-- replaces them. The "do NOT grant to anon" notes stay as upstream's reasoning;
+-- on plain Postgres PUBLIC already includes every role that can connect, so if
+-- the two SECURITY DEFINER RPCs should not read `thoughts` for all of them,
+-- REVOKE EXECUTE … FROM PUBLIC yourself and grant the roles you mean (README,
+-- Security). scripts/check-fork-consistency.mjs check 7 fails the build if the
 -- upsert returns, and its Supabase-isms check if a grant does.
 
 -- ============================================================

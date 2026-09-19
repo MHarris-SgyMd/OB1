@@ -30,7 +30,7 @@
 
 import { SQL } from "bun";
 import { readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
-import { BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, EMBEDDING_DIM, EMBEDDING_MODEL, HNSW_BOUNDS, MATCH_COUNT_CEILING, MATCH_THOUGHTS_SIGNATURE, ROUTE_ESTIMATE_MIN_PAGES, ROUTE_SAMPLE_PAGES, grantedFunctions, grantedSequences, grantedTables, parseSetConfig, versionAtLeast } from "./config.mjs";
+import { BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, EMBEDDING_DIM, EMBEDDING_MODEL, HNSW_BOUNDS, MATCH_COUNT_CEILING, MATCH_THOUGHTS_SIGNATURE, ROUTE_ESTIMATE_MIN_PAGES, ROUTE_SAMPLE_PAGES, grantedFunctions, grantedSequences, grantedTables, grantedViews, parseSetConfig, versionAtLeast } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { TID_PROBE, applyFunctionSettings, applyMigrations, createAssert, sampleStatementOf, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
@@ -3306,8 +3306,12 @@ console.log("\n[18] Every schemas/*.sql applies over TCP with no Supabase role p
   // In CI one service container serves every live suite in turn, so this
   // section puts the database back as it found it: the tables, views and
   // functions the files added are read from the catalog before and after and
-  // dropped in the finally (the columns on `thoughts` go with the next suite's
-  // dropSchema, which also names the community tables should a run die here).
+  // dropped in the finally. What it cannot put back goes with the next suite's
+  // dropSchema (which also names the community tables should a run die here):
+  // the columns the files add to `thoughts`, and the indexes they build on
+  // migration-owned tables (thought_audit's three, thought_entities' two,
+  // enhanced-thoughts' and text-search-trgm's on `thoughts`) — a kept database
+  // (OB1_PG_KEEP) keeps those.
   const catalog = async () => ({
     tables: new Set(((await sql`SELECT tablename AS n FROM pg_tables WHERE schemaname = 'public'`) as { n: string }[]).map((r) => r.n)),
     views: new Set(((await sql`SELECT viewname AS n FROM pg_views WHERE schemaname = 'public'`) as { n: string }[]).map((r) => r.n)),
@@ -3386,6 +3390,11 @@ console.log("\n[18] Every schemas/*.sql applies over TCP with no Supabase role p
         catch (e) { if (/permission denied/.test((e as Error).message)) denied.push(`${t}: ${(e as Error).message.split("\n")[0]}`); }
       }
       assert(denied.length === 0, `the role's INSERT into every community table gets past privileges (${grantedTables(["community"]).length} tables; denied: ${denied.join("; ") || "none"})`);
+      let viewDenied = "";
+      for (const v of grantedViews(["community"])) {
+        try { await asRole.unsafe(`SELECT 1 FROM ${v} LIMIT 0`); } catch (e) { viewDenied += `${v}: ${(e as Error).message.split("\n")[0]}; `; }
+      }
+      assert(viewDenied === "", `…and reads the community view through its own SELECT grant (denied: ${viewDenied || "none"})`);
       const seqDenied: string[] = [];
       for (const s of grantedSequences(["community"])) {
         try { await asRole.unsafe(`SELECT nextval('${s}')`); } catch (e) { seqDenied.push(s); }
