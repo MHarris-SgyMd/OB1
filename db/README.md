@@ -248,7 +248,7 @@ same one, grouped by what the role does. Preflight's `write privileges` check
 refuses a server role missing any of the **capture** group; `migrate.ts --grant`
 issues every group at once.
 
-| Group | Table (migration) | Privileges |
+| Group | Object (migration, or `schemas/` file) | Privileges |
 | --- | --- | --- |
 | **capture** — the server's own connection; preflight refuses a role missing any of it | `thoughts` (001) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `thought_chunks` (007) | `SELECT, INSERT, DELETE` |

@@ -322,6 +322,10 @@ export function grantedFunctions(groups?: readonly string[]): string[];
 export function grantPresenceSql(objects: readonly GrantObject[]): string;
 /** GRANT statements giving `role` the privileges the given groups need; `present` (object names) skips absent objects; the role is quoted. */
 export function grantStatements(role: string, opts?: { groups?: readonly string[]; present?: Set<string> | null }): string[];
+/** The groups' rows merged per object, privileges in a stable order — the one list grantStatements issues and grantVerifySql checks. */
+export function mergedGrants(groups?: readonly string[], present?: Set<string> | null): { kind: GrantObject["kind"]; name: string; privileges: string[] }[];
+/** One SELECT returning { kind, name, privilege, held } for USAGE on schema public and every privilege in `merged` — what a GRANT by a grantor without grant option silently fails to give (SMD-1796). */
+export function grantVerifySql(role: string, merged: readonly { kind: string; name: string; privileges: readonly string[] }[]): string;
 /** `text` with its comments blanked in place — literal-aware, dollar-quoted bodies scanned within, newlines kept so line numbers hold (SMD-1796, SMD-1316). */
 export function stripSqlComments(text: string): string;
 /** What a .sql file may not run on this fork: each rule's name, regex (matched over the whole comment-stripped text) and reason (SMD-1796). */

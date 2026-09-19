@@ -67,7 +67,9 @@ import {
   TRGM_INDEX,
   grantPresenceSql,
   grantStatements,
+  grantVerifySql,
   grantedObjects,
+  mergedGrants,
   migrationValues,
   parseSetConfig,
   quoteIdent,
@@ -148,6 +150,10 @@ if (reapply && baseline) {
 // password — a missing role is an error naming CREATE ROLE, not a silent create
 // — so no credential passes through it. --dry-run prints the statements without
 // running them: the list, copyable, for a role you would rather grant by hand.
+// After the GRANTs, in the same transaction, it asks the catalog whether the
+// role now holds each privilege and rolls back if not: a grantor that holds a
+// privilege without grant option "grants" it with a WARNING and no effect,
+// which the driver does not surface (SMD-1796, third review pass).
 const grantRole = flag("grant");
 if (grantRole !== undefined) {
   if (baseline || reapply) {
@@ -179,17 +185,30 @@ if (grantRole !== undefined) {
       await gsql.close();
       process.exit(0);
     }
+    const merged = mergedGrants(undefined, present);
     await gsql.begin(async (tx) => {
       for (const s of statements) await tx.unsafe(s);
+      const notHeld = ((await tx.unsafe(grantVerifySql(grantRole, merged))) as { kind: string; name: string; privilege: string; held: boolean }[]).filter((r) => !r.held);
+      if (notHeld.length) {
+        throw new Error(
+          `the GRANTs ran but ${notHeld.length} privilege(s) were not granted — Postgres lets a role that holds a privilege without grant option issue the GRANT with only a warning ("no privileges were granted"), which this client does not see. Not held by ${grantRole}: ` +
+            notHeld.map((r) => `${r.privilege} on ${r.kind} ${r.name}`).join("; ") +
+            ". Connect as the objects' owner — the role that ran the migrations or applied the community schema — or a superuser, and run --grant again. Nothing was committed."
+        );
+      }
     });
     console.log(`\nGranted ${grantRole} the capturing-role privileges over ${present.size} object(s):\n`);
     for (const s of statements) console.log(`  ${s}`);
     // "; " between names: a function's name carries ", " inside its argument list.
-    if (missing.length) console.log(`\n  not yet present, skipped (run --grant again after applying the migration or community schema that creates them): ${missing.join("; ")}`);
+    if (missing.length) console.log(`\n  not yet present, skipped (run --grant again after applying the migration or community schema that creates them; a function listed here may instead exist under another argument list, which --grant does not reach): ${missing.join("; ")}`);
     await gsql.close();
     process.exit(0);
   } catch (err) {
-    console.error(`--grant failed: ${(err as Error).message}`);
+    const message = (err as Error).message;
+    // 42501 here is the grantor's, not the grantee's: it holds nothing on the
+    // object at all, so it cannot grant it.
+    const hint = /permission denied/.test(message) ? "\n  This connection's role may not grant that object: connect as its owner (the role that ran the migrations or applied the community schema) or a superuser." : "";
+    console.error(`--grant failed: ${message}${hint}`);
     await gsql.close();
     process.exit(1);
   }

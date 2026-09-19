@@ -1666,10 +1666,27 @@ export function grantPresenceSql(objects) {
  */
 export function grantStatements(role, { groups = ROLE_GRANT_GROUPS, present = null } = {}) {
   const ident = quoteIdent(role);
-  // An object can appear in more than one group with different privileges
-  // (ob1_config: SELECT in `server`, INSERT/UPDATE in `worker`; thought_audit:
-  // INSERT in `capture`, SELECT and INSERT in `community`). Merge per object so
-  // the role gets one GRANT combining them, privileges in a stable order.
+  const out = [];
+  for (const { kind, name, privileges } of mergedGrants(groups, present)) {
+    const privs = privileges.join(", ");
+    // A view is granted as a table is (GRANT takes either without a keyword); a
+    // sequence's name is a plain identifier; a function's carries its argument
+    // list, which GRANT ... ON FUNCTION takes as written.
+    out.push(kind === "table" || kind === "view" ? `GRANT ${privs} ON ${name} TO ${ident};` : `GRANT ${privs} ON ${kind.toUpperCase()} ${name} TO ${ident};`);
+  }
+  return out;
+}
+/**
+ * The groups' rows merged per object — [{ kind, name, privileges }] in
+ * group/list order, privileges in a stable order. An object can appear in
+ * more than one group with different privileges (ob1_config: SELECT in
+ * `server`, INSERT/UPDATE in `worker`; thought_audit: INSERT in `capture`,
+ * SELECT and INSERT in `community`), so the role gets one GRANT combining
+ * them. `present` (object names) drops what a database lacks. Shared by
+ * grantStatements and grantVerifySql so what is granted and what is checked
+ * are one list (SMD-1796, third review pass).
+ */
+export function mergedGrants(groups = ROLE_GRANT_GROUPS, present = null) {
   const ORDER = ["USAGE", "SELECT", "INSERT", "UPDATE", "DELETE", "EXECUTE"];
   const byName = new Map();
   for (const g of groups) {
@@ -1681,15 +1698,36 @@ export function grantStatements(role, { groups = ROLE_GRANT_GROUPS, present = nu
       byName.set(o.name, entry);
     }
   }
-  const out = [];
-  for (const [name, { kind, set }] of byName) {
-    const privs = ORDER.filter((p) => set.has(p)).join(", ");
-    // A view is granted as a table is (GRANT takes either without a keyword); a
-    // sequence's name is a plain identifier; a function's carries its argument
-    // list, which GRANT ... ON FUNCTION takes as written.
-    out.push(kind === "table" || kind === "view" ? `GRANT ${privs} ON ${name} TO ${ident};` : `GRANT ${privs} ON ${kind.toUpperCase()} ${name} TO ${ident};`);
-  }
-  return out;
+  return [...byName].map(([name, { kind, set }]) => ({ kind, name, privileges: ORDER.filter((p) => set.has(p)) }));
+}
+/**
+ * One statement asking whether `role` now holds every privilege in `merged`
+ * (mergedGrants()' shape), plus USAGE on schema public: rows { kind, name,
+ * privilege, held } in order. Why it exists: a GRANT issued by a role that
+ * holds the privilege itself but not WITH GRANT OPTION — the server's own
+ * role, say, set up by an earlier --grant and now used to grant a worker —
+ * does not fail; Postgres answers `WARNING: no privileges were granted` and
+ * the statement succeeds having done nothing, a notice the driver does not
+ * surface. Only a grantor with no privilege at all gets 42501. So `--grant`
+ * runs this after its GRANTs, in the same transaction, and rolls back naming
+ * what was not granted (SMD-1796, third review pass — measured in PGlite: a
+ * role with SELECT alone "grants" INSERT to another and has_table_privilege
+ * says false). has_table_privilege takes a view as a table; a function is
+ * named with its argument types, as the row spells them.
+ */
+export function grantVerifySql(role, merged) {
+  const lit = (v) => `'${String(v).replace(/'/g, "''")}'`;
+  const rows = [{ kind: "schema", name: "public", privilege: "USAGE" }];
+  for (const { kind, name, privileges } of merged) for (const privilege of privileges) rows.push({ kind, name, privilege });
+  const values = rows.map((r, i) => `(${i}, ${lit(r.kind)}, ${lit(r.name)}, ${lit(r.privilege)})`).join(", ");
+  return `SELECT kind, name, privilege,
+       CASE kind
+         WHEN 'schema'   THEN has_schema_privilege(${lit(role)}, name, privilege)
+         WHEN 'sequence' THEN has_sequence_privilege(${lit(role)}, 'public.' || name, privilege)
+         WHEN 'function' THEN has_function_privilege(${lit(role)}, 'public.' || name, privilege)
+         ELSE                 has_table_privilege(${lit(role)}, 'public.' || name, privilege)
+       END AS held
+  FROM (VALUES ${values}) AS v(ord, kind, name, privilege) ORDER BY ord`;
 }
 
 /**

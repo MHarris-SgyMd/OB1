@@ -120,7 +120,7 @@ After running the migration:
 
 - `public.thoughts` has four columns for this: `derived_from JSONB` and `supersedes UUID`, migration 025's on this fork and possibly already set by 025's capture, beside the two this file adds, `derivation_method TEXT` and `derivation_layer TEXT NOT NULL DEFAULT 'primary'`.
 - Every existing row has `derivation_layer = 'primary'` and `derivation_method` NULL — no data loss, no behavior change for existing MCP tools.
-- Four helper SQL functions exist: `trace_provenance` and `find_derivatives` are migrations 025 and 026's, already there on a migrated brain; `merge_thought_provenance_metadata` and `merge_thought_eval_metadata` come from this file, `SECURITY DEFINER`, **granted to `service_role` only** (clients must reach them via the open-brain edge function, not PostgREST as `authenticated`).
+- Four helper SQL functions exist: `trace_provenance` and `find_derivatives` are migrations 025 and 026's, already there on a migrated brain; `merge_thought_provenance_metadata` and `merge_thought_eval_metadata` come from this file, `SECURITY DEFINER` and `REVOKE`d `FROM PUBLIC` — upstream granted them to `service_role` only (clients reached them through its edge function, never as `authenticated`); on this fork `bun migrate.ts --grant <role>` gives the role you connect as `EXECUTE` on both (SMD-1796).
 - Three indexes exist: `idx_thoughts_derived_from` (GIN), `idx_thoughts_derivation_layer` (btree), and `idx_thoughts_supersedes` (partial btree).
 - PostgREST schema cache has been reloaded (`NOTIFY pgrst, 'reload schema'`).
 

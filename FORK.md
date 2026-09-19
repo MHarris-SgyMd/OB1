@@ -14227,6 +14227,42 @@ a redundant index — its README says so now; the file is upstream's. Declared:
 a hit that spans lines is reported at the line its statement starts on. No
 finding became a ticket.
 
+**Review, third pass** (at the user's call after the stop signal; a third
+cold reviewer, given both passes' findings and pointed at what they had not
+read — `--grant`'s runtime path, the real files under the stripper, the notes'
+counts). One finding of substance, outside every previous addition, so the
+second pass's stop call was early: **`--grant` could report "Granted … over N
+object(s)" having granted nothing.** Postgres lets a role that holds a
+privilege without grant option issue the GRANT; it answers `WARNING: no
+privileges were granted` and the statement succeeds as a no-op, a notice the
+driver does not surface, and the transaction commits — measured in PGlite, a
+role with SELECT alone "grants" INSERT to another and `has_table_privilege`
+says false (caught: run-it). Pre-existing since change 62, made likelier by
+the community group: the natural sequence is an admin applying `psql -f
+schema.sql`, then the server's own role — itself `--grant`ed earlier, so
+holding privileges without grant option — granting a worker. `--grant` now
+runs `grantVerifySql` after its GRANTs in the same transaction — one row per
+privilege, USAGE on the schema included, through `has_table_privilege`,
+`has_sequence_privilege`, `has_function_privilege` — and rolls back naming
+what the role does not hold and whom to connect as; a grantor's own 42501
+gets the same hint; `mergedGrants` is the one list both the statements and
+the check are built from; [39] drives the check with the tables alone granted
+and reproduces the silent no-op with a weak grantor (held: test-schema [39]).
+Also fixed: the thought-audit README's optional third step applied
+`author-session-id.sql` after `--grant` and never said to run it again, so
+its view was as unreadable as before the first pass's fix — the step now
+says so and the file carries a note (caught: walkthrough); the
+entity-extraction note still said five tables with four verbs after the
+mention row lost `UPDATE`; the grants table's header said "Table (migration)"
+over views, sequences, functions and files; thought-work-claims' and
+provenance-chains' READMEs kept an "executable by `service_role` only"
+outcome; the skipped-list hint did not say that a function existing under
+another argument list is skipped the same way (caught: cold-read). And the
+two review-pass commits had written their mechanisms mid-bullet, so
+`scripts/mechanism-yield.mjs` counted them implicit — their bodies are
+reworded to end each bullet in the tag, before the push (caught: run-it;
+held: mechanism-yield.mjs). No finding became a ticket.
+
 **Upstream status:** the twelve files now differ from upstream's in their
 grant/RLS sections (plus wiki-pages' extension line and smart-ingest's foreign
 key), which a rebase will show as conflicts wherever upstream edits those

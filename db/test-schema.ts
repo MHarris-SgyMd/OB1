@@ -54,6 +54,8 @@ import {
   ownedFunctionsIn,
   grantPresenceSql,
   grantStatements,
+  grantVerifySql,
+  mergedGrants,
   grantedFunctions,
   grantedObjects,
   grantedSequences,
@@ -4458,6 +4460,19 @@ console.log("\n[39] Every schemas/*.sql applies to a migrated brain with no Supa
   assert(tableGrants.length === communityTables.size + communityViews.size && restGrants.length === listedSeqs.size + listedFns.length && statements.every((s) => /TO "ob1_community";$/.test(s)) && statements.includes(`GRANT SELECT ON thought_provenance TO "ob1_community";`),
     `--grant's community statements: one per table and view (${tableGrants.length}), one per sequence and function (${restGrants.length}), the role quoted, the view granted as a table is`);
   for (const s of tableGrants) await cdb.exec(s);
+  // --grant's own check of what it granted (grantVerifySql): with the tables
+  // and view granted and the rest not, it reports exactly the sequence and
+  // function privileges as not held, and USAGE on the schema as held — the
+  // statement migrate.ts rolls back on when a grantor without grant option
+  // "granted" with no effect (third review pass).
+  const merged = mergedGrants(["community"], present);
+  const verify = async () => (await cdb.query<{ kind: string; name: string; privilege: string; held: boolean }>(grantVerifySql("ob1_community", merged))).rows;
+  const partial = await verify();
+  const notHeld = partial.filter((r) => !r.held);
+  assert(partial.length === 1 + merged.reduce((n, m) => n + m.privileges.length, 0) && partial[0].kind === "schema" && partial[0].held &&
+         notHeld.length === listedSeqs.size * 2 + listedFns.length && notHeld.every((r) => r.kind === "sequence" || r.kind === "function") &&
+         partial.filter((r) => r.kind === "table" || r.kind === "view").every((r) => r.held),
+    `grantVerifySql reports one row per privilege (${partial.length}): with tables and view granted it holds every table, view and schema privilege and none of the ${notHeld.length} sequence and function ones`);
   const serialOnly = await asRole(`INSERT INTO ingestion_jobs DEFAULT VALUES`);
   assert(serialOnly.code === "42501" && /sequence ingestion_jobs_id_seq/.test(serialOnly.message), `with the tables granted and the sequences not, an INSERT into a bigserial table is refused on the sequence (${serialOnly.code}: ${serialOnly.message})`);
   const identityOnly = await asRole(`INSERT INTO wiki_section_revisions DEFAULT VALUES`);
@@ -4466,6 +4481,17 @@ console.log("\n[39] Every schemas/*.sql applies to a migrated brain with no Supa
   assert(JSON.stringify(stillDenied) === JSON.stringify(["consolidation_log", "edges", "entities", "ingestion_items", "ingestion_jobs", "thought_edges"]),
     `exactly the six bigserial tables are still refused (${stillDenied.join(", ")})`);
   for (const s of restGrants) await cdb.exec(s);
+  const full = await verify();
+  assert(full.every((r) => r.held), `…and with the whole group granted every privilege is held (${full.filter((r) => !r.held).map((r) => `${r.privilege} on ${r.name}`).join(", ") || "none missing"})`);
+  // The silent no-op the check exists for, reproduced: a role that holds
+  // SELECT on a table without grant option "grants" INSERT on it to another
+  // — no error — and the grantee holds nothing.
+  await cdb.exec(`CREATE ROLE ob1_weak_grantor NOLOGIN; CREATE ROLE ob1_grantee NOLOGIN; GRANT USAGE ON SCHEMA public TO ob1_weak_grantor; GRANT SELECT ON crm_persons TO ob1_weak_grantor`);
+  let weakError = "";
+  try { await cdb.exec(`SET ROLE ob1_weak_grantor; GRANT INSERT ON crm_persons TO ob1_grantee; RESET ROLE`); } catch (e) { await cdb.exec("RESET ROLE"); weakError = (e as Error).message; }
+  const [{ held: granteeHolds }] = (await cdb.query<{ held: boolean }>(`SELECT has_table_privilege('ob1_grantee', 'public.crm_persons', 'INSERT') AS held`)).rows;
+  assert(weakError === "" && granteeHolds === false, `a grantor holding SELECT without grant option issues GRANT INSERT with no error and no effect (error: ${weakError || "none"}; grantee holds INSERT: ${granteeHolds}) — why --grant verifies`);
+  await cdb.exec(`DROP OWNED BY ob1_weak_grantor; DROP ROLE ob1_weak_grantor; DROP ROLE ob1_grantee`);
   const after = await insertCodes();
   const denied = [...after].filter(([, r]) => r.code === "42501").map(([t, r]) => `${t}: ${r.message}`);
   assert(denied.length === 0, `granted the whole community group, no community table refuses the role's INSERT (${after.size} tables; still refused: ${denied.join("; ") || "none"})`);
