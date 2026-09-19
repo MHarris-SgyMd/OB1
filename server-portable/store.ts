@@ -136,11 +136,13 @@ export type ThoughtHybridMatch = {
  * already carry — and the tools render a null date as absent and a no-ISO-form
  * value as its own text, not "Invalid Date" (thoughts.ts `displayDate`).
  * `infinity` stays a string, the value migration 020 ranks by; [3d] pins it.
- * The provenance mappers (`derivationFields`, `normaliseProposal`) still take
- * this `string` form — their rows are graph walks over captured thoughts, off
- * the list/match/get path this ticket scoped, so a NULL ancestor there is left
- * as a follow-up. `undefined` throws: the column is missing from the row, a
- * bug in the SELECT, not data.
+ * Two mappers stay on the old `new Date(...)` form and are SMD-1803, not this
+ * change: `derivationFields` (025's provenance walk) fabricates the epoch on a
+ * NULL ancestor, and `normaliseProposal`'s local `iso` (029's
+ * `list_supersession_proposals`) THROWS on an `infinity`-dated proposal thought
+ * — both off the list/match/get path and reachable only by a hand-INSERT.
+ * `undefined` throws: the column is missing from the row, a bug in the SELECT,
+ * not data.
  */
 export function isoTimestamp(v: unknown): string {
   if (v === undefined) throw new Error("isoTimestamp: the row has no such column");

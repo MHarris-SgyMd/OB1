@@ -13986,12 +13986,16 @@ decision.
 **The decision.** A SQL NULL is `null` under `created_at: string | null` — the
 widening `updated_at` and `ThoughtMeta.created_at` already carried, with
 `updated_at?: string | null` on `ThoughtRecord` as the precedent — and the tools
-render a null date as **absent**. A value with no ISO form (`infinity`,
-`-infinity`, a BC/extended-year date) stays its **own string**: `isoTimestamp`
-already keeps it, `infinity` is the value 020 ranks by and `[3d]` pins it, and
-the tools show that text rather than "Invalid Date". The two live in two helpers:
-`isoTimestampOrNull` for the read path, `displayDate` (new, in `thoughts.ts`) for
-the render path.
+render a null date as **absent**. `infinity` and `-infinity` stay their **own
+string** on both stores (`isoTimestamp` keeps them, `infinity` is the value 020
+ranks by and `[3d]` pins it), and the tools show that text, not "Invalid Date". A
+BC or extended-year date has no ISO form either, but the stores split on it:
+PostgREST's text survives and renders as itself, while Bun's SQL driver has
+already turned it into `Date(NaN)` before the store is reached, so `isoTimestamp`
+yields the literal string "Invalid Date" and `displayDate` faithfully prints
+*that* — the declined case below, not a value this change makes legible. The rule
+lives in two helpers: `isoTimestampOrNull` for the read path, `displayDate` (new,
+in `thoughts.ts`) for the render path.
 
 **Where it's applied.** One read-path change: `normaliseListItem` takes
 `isoTimestampOrNull`, so the list item, the three match shapes and the record
@@ -14010,10 +14014,16 @@ Bun's driver hands the store `Date(NaN)` (or an extended-year `Date` that fails
 `SELECT created_at::text` beside every column in `store-sql.ts`. That row reaches
 no capture path, only a hand-written INSERT, and the two drivers disagree at the
 wire; the one odd row is left as each client renders it rather than rewriting
-every SELECT. The provenance mappers (`derivationFields`, `normaliseProposal`)
-keep the `string` form — their rows are graph walks over captured thoughts, off
-the list/match/get path this ticket scoped, so a NULL ancestor there is a filed
-follow-up, not this change.
+every SELECT. Two mappers this ticket did **not** move — `derivationFields`
+(025's provenance/derivative walk) and `normaliseProposal`'s local `iso` (029's
+`list_supersession_proposals`, and the `day()` renderer beside it) — still run
+`created_at` through `new Date(...).toISOString()` / `.toLocaleDateString()`: a
+NULL ancestor there fabricates the epoch, and — worse — an `infinity`- or
+BC-dated proposal thought makes `new Date("infinity").toISOString()` **throw**,
+so `list_supersession_proposals` errors out entirely rather than misrendering.
+Those rows are graph walks over captured thoughts, off the list/match/get path
+this ticket scoped and reachable only by a hand-INSERT, so they are the
+follow-up **SMD-1803**, not this change.
 
 **A parity note.** Before change 52 the PostgREST store passed a NULL
 `created_at` through as JSON null, so `fetch` returned `created_at: null` while
@@ -14028,7 +14038,7 @@ directly, including that a row *genuinely* dated at the epoch still renders
 and assert `null` on `matchThoughts`/`getThought`/`listThoughts`; `test-e2e-sql`
 [11] drives the real tools over MCP and asserts the rendered `list_thoughts`
 shows `[undated]`/`[infinity]` and `fetch` titles an undated thought `Open Brain
-…`, with no `1970` and no `Invalid Date` anywhere.
+…`, with no `1970` and no `Invalid Date` in the output over those two rows.
 
 **Upstream status:** divergence. `server/index.ts` and upstream's store carry the
 same `new Date(...)` fabrication; the fork's fix lives in `server-portable`, and
