@@ -4336,10 +4336,12 @@ console.log("\n[39] Migration 041: a cited source is refused as a value and deta
   const src = String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = 'delete_thought(uuid, jsonb, boolean)'::regprocedure`)).s);
   // The one EXCEPTION clause names the one SQLSTATE; the body's comments may
   // mention foreign_key_violation as what it does NOT catch.
-  const caught = [...src.matchAll(/EXCEPTION\s+WHEN\s+(.+?)\s+THEN/g)].map((m) => m[1]);
-  assert(caught.length === 1 && caught[0] === "SQLSTATE 'OB001'", `the function catches the guard's own SQLSTATE and nothing else — a real foreign-key failure is not its to answer (${caught.join(" | ") || "no EXCEPTION clause"})`);
-  assert(src.indexOf("pg_advisory_xact_lock(hashtext('ob1:supersession-review'))") > 0 && src.indexOf("pg_advisory_xact_lock") < src.indexOf("FOR v_try IN 1..2 LOOP") && src.indexOf("FOR v_try IN 1..2 LOOP") < src.indexOf("DELETE FROM thoughts WHERE id = p_id"),
-    "the supersession lock is taken before the loop the DELETE runs in, so a refusal's rollback does not release it");
+  const caught = src.slice(src.indexOf("DELETE FROM thoughts WHERE id = p_id")).match(/EXCEPTION\s+WHEN\s+(.+?)\s+THEN/)?.[1];
+  const clauses = [...src.matchAll(/EXCEPTION\s+WHEN\s+(.+?)\s+THEN/g)].map((m) => m[1]);
+  assert(caught === "SQLSTATE 'OB001'" && clauses.filter((c) => c !== "SQLSTATE 'OB001'").every((c) => c === "OTHERS") && /v_json := v_detail::jsonb;\s+EXCEPTION WHEN OTHERS THEN/.test(src),
+    `the DELETE's block catches the guard's own SQLSTATE and nothing else — a real foreign-key failure is not its to answer — and the only other handler is the detail parse's (${clauses.join(" | ") || "no EXCEPTION clause"})`);
+  assert(src.indexOf("pg_advisory_xact_lock(hashtext('ob1:supersession-review'))") > 0 && src.indexOf("pg_advisory_xact_lock") < src.indexOf("  BEGIN\n    DELETE FROM thoughts WHERE id = p_id") && /GET STACKED DIAGNOSTICS v_detail = PG_EXCEPTION_DETAIL/.test(src),
+    "the supersession lock is taken before the block the DELETE runs in, so a refusal's rollback does not release it — and the refusal's detail is read from the error, not re-read");
   const idx = await q<{ indexdef: string }>(`SELECT indexdef FROM pg_indexes WHERE tablename = 'thought_facets' ORDER BY 1`);
   assert(idx.some((i) => /\(\(payload ->> 'source_id'::text\)\)/.test(i.indexdef) && /WHERE \(kind = 'citation'::text\)/.test(i.indexdef)), `the guard's lookup has its partial expression index (${idx.map((i) => i.indexdef.replace(/^CREATE INDEX /, "").split(" ON ")[0]).join(", ")})`);
   const w = String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = 'record_citation(uuid, uuid, text, text)'::regprocedure`)).s);
@@ -4415,6 +4417,24 @@ console.log("\n[39] Migration 041: a cited source is refused as a value and deta
   // A detached citation is not re-pointed: the reverse transition would leave
   // the deletion keys beside a live source.
   assert(/is not re-pointed at a new source/.test(await refuses(`UPDATE thought_facets SET payload = payload || jsonb_build_object('source_id', $2::uuid) WHERE thought_id = $1::uuid AND payload->>'text' = 'an old claim'`, [C2, upper])), "a detached citation cannot be given a new source — that is a new citation");
+  // …but it follows its own source back when 008/009's recovery restores that
+  // thought under its id: re-attached, the deletion keys gone with the deletion.
+  await db.query(`INSERT INTO thoughts (id, content, metadata) VALUES ($1::uuid, 'the second source, restored from the audit trail', '{}'::jsonb)`, [S2]);
+  assert((await refuses(`UPDATE thought_facets SET payload = payload || jsonb_build_object('source_id', $2::uuid) WHERE thought_id = $1::uuid AND payload->>'text' = 'an old claim'`, [C2, S2])) === "",
+    "a detached citation is re-attached to the source it lost once that thought exists again");
+  const reattached = (await one<{ payload: Record<string, unknown> }>(`SELECT payload FROM thought_facets WHERE thought_id = $1::uuid AND payload->>'text' = 'an old claim'`, [C2])).payload;
+  assert(reattached.source_id === S2 && !("source_deleted_id" in reattached) && !("source_deleted_at" in reattached), `…and the deletion keys are gone with the deletion (${JSON.stringify(reattached)})`);
+  // A detached row inserted whole with an upper-case deleted id is stored canonical, as a live source_id is.
+  await db.query(`INSERT INTO thought_facets (thought_id, kind, payload) VALUES ($1::uuid, 'citation', jsonb_build_object('text', 'restored in caps', 'stance', 'stated', 'source_id', NULL, 'source_deleted_id', upper($2::text), 'source_deleted_at', now()))`, [liveNote, S]);
+  assert((await one<{ d: string }>(`SELECT payload->>'source_deleted_id' AS d FROM thought_facets WHERE thought_id = $1::uuid AND payload->>'text' = 'restored in caps'`, [liveNote])).d === S, "an upper-case source_deleted_id on a restored row is stored canonical");
+  // A detach changes the citing thought's record: its updated_at moves, so a
+  // reader holding an older if_unchanged_since is told STALE_READ, not let through.
+  const U1 = await thought("a source whose detach moves the note's clock");
+  const UN = await thought("the note whose clock moves");
+  await cite(UN, U1, "clocked");
+  const clockBefore = (await one<{ u: string }>(`SELECT updated_at::text AS u FROM thoughts WHERE id = $1::uuid`, [UN])).u;
+  await db.query(`SELECT pg_sleep(0.02)`);
+  assert((await del(U1, true)).detached === 1 && (await one<{ u: string }>(`SELECT updated_at::text AS u FROM thoughts WHERE id = $1::uuid`, [UN])).u > clockBefore, "detaching a note's citation moves the note's updated_at");
   // superseded_by's SET NULL has an index to find the pointing rows by.
   assert(idx.some((i) => /thought_facets_superseded_by_idx/.test(i.indexdef) && /\(superseded_by\)/.test(i.indexdef) && /WHERE \(superseded_by IS NOT NULL\)/.test(i.indexdef)), "the superseder pointer has its partial index, so the SET NULL cascade probes instead of scanning");
   // delete_thought puts the caller's running totals back with its own added: a

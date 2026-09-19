@@ -284,15 +284,10 @@ function explainRefusal(
       const rows = (r.citations ?? []).map((c) => `  - ${c.thoughtId} (${c.stance}): ${snipText(c.text, 120)}`);
       const total = r.citedBy ?? rows.length;
       const more = total - rows.length;
-      // A count of 0 is the function's own: the guard refused twice and the
-      // citing rows were gone each time the sample was read (041 retries once).
-      // No count at all is an envelope the function did not write (a proxy, a
-      // truncated body). Neither is "0 citations rest on it".
-      if (total <= 0) {
-        return r.citedBy === 0
-          ? `Refused: ${id} was cited when the delete ran, and the citing rows were gone by the time the reply was assembled — retry the delete.`
-          : `Refused: other thoughts cite ${id} as their source, but the reply carried no count and no citing rows — re-read the thought (fetch takes the id) before deciding. To delete anyway, pass detach_citations: true.`;
-      }
+      // The count and rows come from the guard's own refusal (041 carries them
+      // in the error), so a CITED envelope with neither is one the function did
+      // not write — a proxy, a truncated body. Say so rather than "0 citations".
+      if (total <= 0) return `Refused: other thoughts cite ${id} as their source, but the reply carried no count and no citing rows — re-read the thought (fetch takes the id) before deciding. To delete anyway, pass detach_citations: true.`;
       return `Refused: ${total} citation${total === 1 ? "" : "s"} on other thoughts rest${total === 1 ? "s" : ""} on ${id} as ${total === 1 ? "its" : "their"} source — deleting it would leave ${total === 1 ? "that statement" : "those statements"} resting on nothing:\n${rows.join("\n")}${more > 0 ? `\n  …and ${more} more` : ""}\nRead the citing thoughts first (fetch takes the id). To delete anyway, pass detach_citations: true — each citation keeps its text and stance, loses its source, and records ${id} and the time as the deleted source.`;
     }
     default:

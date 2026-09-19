@@ -115,7 +115,9 @@ const APPLY_020 = "Apply db/migrations/020_match_thoughts_recency.sql, then 027_
  * has just applied it back to the migrator (first review pass of 021).
  */
 const RELOAD_HINT = "If the ledger already records it, PostgREST may not have reloaded its schema cache: NOTIFY pgrst, 'reload schema';";
-const APPLY_020_POSTGREST = `Apply the migrations through db/migrations/039_match_thoughts_halfvec_index.sql against the project's direct connection (server-portable/README.md §4) — 020 gives both functions the forms the server sends; 027 and 039 last define search_thoughts_hybrid and match_thoughts. ${RELOAD_HINT}`;
+const APPLY_020_POSTGREST = `Apply the migrations through db/migrations/041_thought_citations.sql against the project's direct connection (server-portable/README.md §4) — 020 gives both functions the forms the server sends; 027 and 039 last define search_thoughts_hybrid and match_thoughts, and 041 delete_thought's three-argument form, which the next start checks too. ${RELOAD_HINT}`;
+/** An id no row has: the probes below call a function with it and read the NOT_FOUND it answers, writing nothing. */
+const NOBODY = "00000000-0000-4000-8000-000000000000";
 const APPLY_021 = "Apply db/migrations/021_embedding_model_per_row.sql.";
 const APPLY_032 = "Apply db/migrations/032_update_thought_provenance.sql.";
 const APPLY_041 = "Apply db/migrations/041_thought_citations.sql.";
@@ -506,8 +508,7 @@ if (configFailed) {
          */
         try {
           const { SUPERSEDED_SIGNATURES } = await import("../db/config.mjs");
-          const nobody = "00000000-0000-4000-8000-000000000000";
-          const seven = { p_id: nobody, p_content: null, p_metadata_patch: null, p_embedding: null, p_chunks: null, p_if_unchanged_since: null, p_actor: null };
+          const seven = { p_id: NOBODY, p_content: null, p_metadata_patch: null, p_embedding: null, p_chunks: null, p_if_unchanged_since: null, p_actor: null };
           const { data: nine, error: nineErr } = await legacy.rpc("update_thought", { ...seven, p_embedding_model: null, p_provenance: null });
           if (nineErr && missing(nineErr.message)) {
             add("edit signature", "fail",
@@ -546,8 +547,7 @@ if (configFailed) {
          * before this change (third review pass).
          */
         try {
-          const nobody = "00000000-0000-4000-8000-000000000000";
-          const { data: three, error: threeErr } = await legacy.rpc("delete_thought", { p_id: nobody, p_actor: null, p_detach: false });
+          const { data: three, error: threeErr } = await legacy.rpc("delete_thought", { p_id: NOBODY, p_actor: null, p_detach: false });
           if (threeErr && missing(threeErr.message)) {
             add("delete signature", "fail",
                 "delete_thought does not take p_detach over PostgREST — it is missing or is a form from before migration 041 — and the server sends it on every delete, so every delete_thought call would fail",
@@ -557,7 +557,7 @@ if (configFailed) {
           } else if ((three as { error?: string } | null)?.error !== "NOT_FOUND") {
             add("delete signature", "skip", `delete_thought answered a probe for an id no row has with ${JSON.stringify(three)} rather than NOT_FOUND; ${CATALOG_HINT}`);
           } else {
-            const { error: twoErr } = await legacy.rpc("delete_thought", { p_id: nobody, p_actor: null });
+            const { error: twoErr } = await legacy.rpc("delete_thought", { p_id: NOBODY, p_actor: null });
             if (!twoErr) {
               add("delete signature", "ok", "delete_thought takes 041's arguments over PostgREST, and a 2-argument call resolves to one function — no earlier form beside it");
             } else if (/could not choose|PGRST203|not unique/i.test(twoErr.message)) {

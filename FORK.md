@@ -14004,9 +14004,11 @@ an empty text, a stance outside the three, a `source_id` that is not an existing
 thought or is the citing thought itself, all as `check_violation`; a later
 migration registers a kind by extending the function, not by the proposal's
 vocabulary registry, which is not built. A citation is *active* while
-`superseded_by IS NULL` and `valid_until` is null or future; only active
-citations gate a delete, and a read should label an expired one, never hide it
-(change 46's rule, the ticket's rider on proposal issue 04).
+`valid_until` is null or future and no facet that still exists supersedes it
+(`thought_facet_active`, the one spelling — why "still exists" rather than
+"pointer is null" is below); only active citations gate a delete, and a read
+should label an expired one, never hide it (change 46's rule, the ticket's
+rider on proposal issue 04).
 
 `thoughts_guard_citation_sources` is **`AFTER DELETE … FOR EACH STATEMENT`,
 `REFERENCING OLD TABLE AS deleted`** — not the proposal's row-level `BEFORE`
@@ -14053,22 +14055,47 @@ rewrote the new one under refuse mode (the first review pass's top finding;
 guard and the function's sample share). The rewrite runs only when the delete
 proceeds — the first pass had made count and rewrite one `UPDATE … RETURNING`,
 which rewrote every citing row and discarded the rewrite on each refusal
-(second pass). Nothing can slip in between the locked read and the rewrite: a
-new citation's writer takes `KEY SHARE` on the source and waits on the
-`DELETE`'s own row lock. The detached shape is accepted by the validate trigger
+(second pass); the lock footprint stays and is stated: a refuse-mode delete of
+a source cited N times holds N facet rows until the statement fails (fifth
+pass). Nothing can slip in between the locked read and the rewrite: a new
+citation's writer takes `KEY SHARE` on the source and waits on the `DELETE`'s
+own row lock. A detach also moves the citing thoughts' `updated_at`: a facet
+is part of its thought's record, so a reader holding an older
+`if_unchanged_since` is told `STALE_READ` on its next edit rather than writing
+text that still asserts the statement rests on the deleted source; 008's audit
+trigger sees an empty diff and writes no row, and a facet event on the audit
+trail is the event shape's to define (SMD-1730; fifth pass). The detached shape is accepted by the validate trigger
 only as the guard writes it — from the source the row had, once that thought
 is gone, with a real timestamp — so a raw `UPDATE` cannot detach a live
 citation or forge a deletion; a detached citation is not re-pointed at a new
 source either, since the reverse transition would leave the deletion keys
-beside a live source (third pass); a detached row may arrive *whole* by
+beside a live source (third pass) — though it follows its *own* source back
+when 008/009's recovery restores that thought under its id, the deletion keys
+going with the deletion (fifth pass); a detached row may arrive *whole* by
 `INSERT` under the same checks, since a restore or an import of the facet table
-would otherwise lose exactly the history the detach kept (fourth pass); and
+would otherwise lose exactly the history the detach kept (fourth pass), its
+deleted id stored canonical like a live one (fifth); and
 the source id is stored canonical, since
 the validate regex is case-insensitive and a raw writer's upper-case uuid would
 otherwise have been invisible to the guard's text compare — its source
 deletable from under it (both second pass; [39]). `superseded_by` carries a
 partial index, because its `SET NULL` is a referential action that scans for
 the pointing rows on every facet the `thought_id` cascade removes (third pass).
+It totals what it did in two transaction-local settings, summed across
+statements. The refusal is the *table's*: a bulk `DELETE`, a vendored script,
+`psql` all meet it, the way 008's append-only rule is `thought_audit`'s; the
+way through is the setting, which only a caller who names it takes. The price
+is the transition table, and it was measured rather than asserted (second
+review pass, real server): `DELETE FROM thoughts` over 20,000 rows of
+1,024-dimension vectors ran in 483 ms with the guard and 534 ms with it
+disabled — medians of three, the difference noise — and a single
+`delete_thought` of an uncited row takes 0.43 ms. The deleted tuples are held
+as the statement already holds them; the DELETE's own work is the cost. Above
+that size the reasoning, not a measurement: a transition tuplestore keeps each
+tuple as the heap held it, TOAST pointers included, and at this width the
+vector is out of line — a reset of a million rows spools headers and pointers,
+not gigabytes of vectors, and spills as the DELETE itself does (the fifth pass
+named the scale; no reset has been run at it here).
 
 **Under READ COMMITTED.** Every lock-order argument on this fork — change 40's
 fingerprint lock, 63's one order, 68's delete, this guard — holds because a
@@ -14082,16 +14109,6 @@ isolation`** check that warns — not refuses — when the connection's default 
 not read committed, naming the guarantees that rest on it and the `ALTER ROLE`
 that restores it. The guard itself does not refuse on isolation, since every
 other guarantee here already stands or falls with the same setting.
-It totals what it did in two transaction-local settings, summed across
-statements. The refusal is the *table's*: a bulk `DELETE`, a vendored script,
-`psql` all meet it, the way 008's append-only rule is `thought_audit`'s; the
-way through is the setting, which only a caller who names it takes. The price
-is the transition table, and it was measured rather than asserted (second
-review pass, real server): `DELETE FROM thoughts` over 20,000 rows of
-1,024-dimension vectors ran in 483 ms with the guard and 534 ms with it
-disabled — medians of three, the difference noise — and a single
-`delete_thought` of an uncited row takes 0.43 ms. The deleted tuples are held
-as the statement already holds them; the DELETE's own work is the cost.
 
 `delete_thought(uuid, jsonb, boolean)` is **036's body** — the actor and the
 mode set first, *outside* the block (a caught exception rolls back its
@@ -14100,12 +14117,14 @@ the actor); the supersession advisory lock, also outside the block, since a
 savepoint's rollback releases the advisory locks it acquired and this one must
 outlive a refusal; then the `DELETE` inside `BEGIN … EXCEPTION WHEN SQLSTATE
 'OB001'`, answering `{ok:false, error:'CITED', id, cited_by, citations}` — the
-count and up to ten citing rows, newest first, read after the rollback in the
-same transaction — under a fresh snapshot, so the citing rows the guard saw
-may have gone since, and when the sample comes back empty the delete is tried
-once more rather than a refusal with nothing behind it reported (fourth pass;
-a second empty refusal is reported as `cited_by: 0`, which the tool words as
-"retry"). Only that SQLSTATE is caught: a real
+count and up to ten citing rows, newest first. Those ride in the guard's error
+`DETAIL` as JSON, read from the rows the guard locked, and the function reads
+them back with `GET STACKED DIAGNOSTICS`, so the answer is exactly what the
+guard refused on. The first draft re-read the table after the rollback, under a
+fresh snapshot where the rows could already differ from the ones that refused;
+the fourth pass patched that with a retry when the re-read came back empty,
+and the fifth removed the re-read instead — the guard already held the answer
+(fifth pass). Only that SQLSTATE is caught: a real
 `23503`, a permission failure, anything else propagates as the fault it is —
 the proposal's `WHEN foreign_key_violation` would have reported every FK failure
 on a delete as "cited". Success carries `detached:n` and, when non-zero,
@@ -14185,19 +14204,24 @@ thought's text would have reached a terminal with its control characters
 tool's snip calls it). The refusal's count is coerced with `Number()` and a
 `CITED` body carrying neither count nor rows — one the function did not write
 — is said to be that rather than "0 citations", and the tool types the rows
-with the store's `Citation` (second pass).
+with the store's `Citation` (second pass). The hosted remedy for the search
+signatures names 041 as the last file to apply through, so an operator who
+follows it is not sent back for `delete signature` on the next start (fifth
+pass).
 
 **Held by:** `db/test-schema.ts` [39] on PGlite — the shape (two triggers, the
 guard per statement over `deleted`, one three-argument `delete_thought`, the
-one `EXCEPTION` clause naming the one SQLSTATE, the lock before the block, the
-writer's order, the `KEY SHARE`, the partial expression index), refuse / detach /
+one `EXCEPTION` clause naming the one SQLSTATE, the lock before the block the
+`DELETE` runs in and the refusal read from the error, the writer's order, the
+`KEY SHARE`, both partial indexes),
+refuse / detach /
 history marked / thirteen counted and ten sampled / note and source together
 clean while a third citer refuses it / two sources in one raw detach statement
 totalling 2 / a raw `DELETE` meeting the table's refusal / an unknown mode /
 five raw-insert shapes / a real FK failure propagating / 041 re-applied twice /
 a whole-table reset clean — and [36] re-pointed at 041's body for 036's lock
 assertions; `server-portable/test-update-delete.ts` [10] through the tool over
-real Postgres, the FK-fault fixture included; `db/test-live.ts` [6i], the three
+real Postgres, the FK-fault fixture included; `db/test-live.ts` [6i], the five
 race arms above; `test-upgrade` [7]'s window guard and note moved to eleven;
 `test-preflight` [5]'s capture-role walk names the facet `UPDATE` and its
 signature walk re-applies 036 over 041 and drops 041's form for the `delete
@@ -14213,19 +14237,24 @@ the writer's lock dropped ([6i] arm 2 deadlocks), the guard's default flipped
 to detach, `WHEN OTHERS` (the FK fixture answers `CITED`), the store dropping
 `cited_by`, the tool never passing `detach`. An eleventh — the same-statement
 exclusion dropped — passed every check and is the clause removed above. The
-two review passes added twelve more, one per fix, each biting: the mode never
-put back, the unlocked count-then-detach guard ([6i] arm 4, twice: once as the
-first draft's shape, once as a read without the row lock), the unlocked source
-precheck ([6i] arm 5), a superseder already gone still superseding, the
-citation text skipping the cleaner, preflight treating every `delete_thought`
-form as current, the id stored as written, a live source detached by a raw
-`UPDATE`, a non-timestamp accepted as the deletion time, a `source_deleted_id`
-the row never had, the store's `typeof` guard on the count; and from the third
-pass, a detached citation re-pointed, the superseder index dropped, the totals
-not put back, the isolation check treating every level as read committed; and
-from the fourth, a detached row refused on `INSERT`. The fourth pass's retry
-of an empty refusal has no deterministic fixture — the gap it closes is the
-microseconds between a rollback and a read — and is held by reading.
+four review passes added seventeen more, one per fix, each biting. From the
+first and second: the mode never put back, the unlocked count-then-detach
+guard ([6i] arm 4, twice: once as the first draft's shape, once as a read
+without the row lock), the unlocked source precheck ([6i] arm 5), a superseder
+already gone still superseding, the citation text skipping the cleaner,
+preflight treating every `delete_thought` form as current, the id stored as
+written, a live source detached by a raw `UPDATE`, a non-timestamp accepted as
+the deletion time, a `source_deleted_id` the row never had, the store's
+`typeof` guard on the count. From the third: a detached citation re-pointed,
+the superseder index dropped, the totals not put back, the isolation check
+treating every level as read committed. From the fourth: a detached row
+refused on `INSERT`; and one toothless by design — the guard rewriting by
+predicate rather than by the ids it locked, which coincide by construction.
+From the fifth: the refusal's `DETAIL` dropped — which first crashed the
+function on an empty string as JSON, so the parse is defensive and an `OB001`
+without the guard's JSON answers a count of nothing — a detached citation
+refused its own restored source, the deleted id stored as written, the citing
+thought's clock not moved.
 
 **Considered and kept as is.** The third review pass argued the source pointer
 should be typed columns — `source_id uuid`, `source_deleted_id uuid`,
