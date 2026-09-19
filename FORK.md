@@ -15325,12 +15325,19 @@ ancestor and derivative and an `infinity`/NULL-dated proposal pair, and assert
 `listSupersessionProposals` **returns** rather than throwing, keeping `infinity`
 and `null`. `test-e2e-sql` [12] drives the real tool over MCP: pre-fix the call
 returned `isError` (the `RangeError`), post-fix it renders `older [infinity]` /
-`newer [undated]` with no fabricated date reaching the client.
+`newer [undated]` with no fabricated date reaching the client. `db/test-live` [16]
+is the CLI's teeth — it runs `db/consolidate.ts --list` as a subprocess over a
+planted `infinity`/NULL-dated proposal pair and asserts it exits 0 (pre-fix its
+`day()` threw and `--list` crashed) rendering `[infinity]` / `[undated]`, no
+`[1970-01-01]`.
 
-**Upstream status:** divergence, as change 91. `server/index.ts` and upstream's
-store carry the same `new Date(...)` fabrication; the fork's fix lives in
-`server-portable` (and `db/`), and this is not filed upstream — these rows reach
-no capture path.
+**Upstream status:** these two mappers are fork-only — migrations 025
+(provenance) and 029 (proposals) and their tools are fork additions, and
+`server/index.ts` (the upstream edge) has no provenance or proposal code at all,
+so there is no upstream mapper carrying this bug to fix or file. (server/'s own
+`created_at` read/render path still carries the `new Date(...)` fabrication change
+91 left there by design; that is 91's divergence, not this one's.) Not filed
+upstream — these rows reach no capture path.
 ---
 
 ## Before this touches anything sensitive
