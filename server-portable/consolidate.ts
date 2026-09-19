@@ -72,7 +72,7 @@ export type Judgement = {
  * would sit outside the only region the prompt tells the judge to distrust
  * (review pass 3).
  */
-export type PairSide = { content: string; createdAt: string | Date };
+export type PairSide = { content: string; createdAt: string | Date | null };
 
 /**
  * One user message holding the rules and both thoughts, the shape entities.ts
@@ -116,7 +116,12 @@ export function wrapSide(tag: "thought_a" | "thought_b", content: string): strin
   return `<${tag}>\n${escaped}\n</${tag}>`;
 }
 
-const dateOf = (d: string | Date): string => {
+const dateOf = (d: string | Date | null): string => {
+  // SMD-1803: a NULL created_at is "an unknown date" in the prompt, not the
+  // fabricated 1970-01-01 new Date(null) gave. infinity/BC are already safe:
+  // getTime() is NaN, so String(d) keeps the sentinel ("infinity") rather than
+  // throwing. The rule says the dates decide nothing, so an unknown one is inert.
+  if (d == null) return "an unknown date";
   const t = d instanceof Date ? d : new Date(d);
   return Number.isNaN(t.getTime()) ? String(d) : t.toISOString().slice(0, 10);
 };

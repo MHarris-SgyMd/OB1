@@ -136,11 +136,14 @@ export type ThoughtHybridMatch = {
  * already carry — and the tools render a null date as absent and a no-ISO-form
  * value as its own text, not "Invalid Date" (thoughts.ts `displayDate`).
  * `infinity` stays a string, the value migration 020 ranks by; [3d] pins it.
- * Two mappers stay on the old `new Date(...)` form and are SMD-1803, not this
- * change: `derivationFields` (025's provenance walk) fabricates the epoch on a
- * NULL ancestor, and `normaliseProposal`'s local `iso` (029's
- * `list_supersession_proposals`) THROWS on an `infinity`-dated proposal thought
- * — both off the list/match/get path and reachable only by a hand-INSERT.
+ * SMD-1803 brought the last two mappers onto this rule too: `derivationFields`
+ * (025's provenance walk) and `normaliseProposal` (029's
+ * `list_supersession_proposals`) now take `isoTimestampOrNull`, so their
+ * `created_at` is `string | null` as well. Before it, both fabricated the epoch
+ * on a NULL, and `normaliseProposal`'s local `new Date(v).toISOString()` THREW
+ * RangeError on an `infinity`-dated proposal thought — a whole-tool crash. Every
+ * mapper that reads `created_at` is now null-safe; the CLI twin `db/consolidate.ts`
+ * (`day`, the judge-prompt `dateOf`) went the same way in the same change.
  * `undefined` throws: the column is missing from the row, a bug in the SELECT,
  * not data.
  */
@@ -363,7 +366,7 @@ export type ProvenanceNode = {
   type: string | null;
   sourceType: string | null;
   derivationMethod: string | null;
-  created_at: string;
+  created_at: string | null;
   cycle: boolean;
 };
 
@@ -374,7 +377,7 @@ export type Derivative = {
   type: string | null;
   sourceType: string | null;
   derivationMethod: string | null;
-  created_at: string;
+  created_at: string | null;
 };
 
 /** The five columns 025's two functions share; spread FIRST, so an explicit field can never be overwritten by it. */
@@ -384,7 +387,9 @@ function derivationFields(r: Record<string, unknown>) {
     type: r.type == null ? null : String(r.type),
     sourceType: r.source_type == null ? null : String(r.source_type),
     derivationMethod: r.derivation_method == null ? null : String(r.derivation_method),
-    created_at: isoTimestamp(r.created_at),
+    // SMD-1803: the column is nullable (see isoTimestamp's header). A NULL
+    // ancestor in the walk is null, not the epoch new Date(null) fabricated.
+    created_at: isoTimestampOrNull(r.created_at),
   };
 }
 
@@ -443,14 +448,19 @@ export type SupersessionProposal = {
   reviewNote: string | null;
   /** While accepted: the thought whose supersedes column the acceptance wrote. */
   supersedingId: string | null;
-  /** Each thought as it is now; `edited` when its text has changed since the pair was judged (the verdict was about the earlier text). */
-  older: { id: string; content: string; created_at: string; edited: boolean };
-  newer: { id: string; content: string; created_at: string; edited: boolean };
+  /** Each thought as it is now; `edited` when its text has changed since the pair was judged (the verdict was about the earlier text). `created_at` is `string | null` for the same reason the read path is (SMD-1803). */
+  older: { id: string; content: string; created_at: string | null; edited: boolean };
+  newer: { id: string; content: string; created_at: string | null; edited: boolean };
 };
 
 /** list_supersession_proposals's row → SupersessionProposal; both stores map through here so neither drifts. */
 export function normaliseProposal(r: Record<string, unknown>): SupersessionProposal {
-  const iso = (v: unknown) => new Date(v as string).toISOString();
+  // SMD-1803: the older/newer thought's created_at is the read path's column,
+  // so it takes the read path's rule (isoTimestampOrNull): NULL → null, infinity
+  // → "infinity", no throw. The local `new Date(v).toISOString()` this replaced
+  // fabricated the epoch on NULL and threw RangeError on an infinity-dated
+  // thought, taking the whole tool down. judged_at is NOT NULL (029) so it never
+  // maps to null; reviewed_at is set only on review.
   return {
     id: String(r.id),
     status: String(r.status) as SupersessionProposal["status"],
@@ -459,12 +469,12 @@ export function normaliseProposal(r: Record<string, unknown>): SupersessionPropo
     reason: r.reason == null ? null : String(r.reason),
     similarity: r.similarity == null ? null : Number(r.similarity),
     judgeKey: String(r.judge_key),
-    judgedAt: iso(r.judged_at),
-    reviewedAt: r.reviewed_at == null ? null : iso(r.reviewed_at),
+    judgedAt: isoTimestamp(r.judged_at),
+    reviewedAt: isoTimestampOrNull(r.reviewed_at),
     reviewNote: r.review_note == null ? null : String(r.review_note),
     supersedingId: r.superseding_id == null ? null : String(r.superseding_id),
-    older: { id: String(r.older_id), content: String(r.older_content), created_at: iso(r.older_created_at), edited: r.older_edited === true },
-    newer: { id: String(r.newer_id), content: String(r.newer_content), created_at: iso(r.newer_created_at), edited: r.newer_edited === true },
+    older: { id: String(r.older_id), content: String(r.older_content), created_at: isoTimestampOrNull(r.older_created_at), edited: r.older_edited === true },
+    newer: { id: String(r.newer_id), content: String(r.newer_content), created_at: isoTimestampOrNull(r.newer_created_at), edited: r.newer_edited === true },
   };
 }
 

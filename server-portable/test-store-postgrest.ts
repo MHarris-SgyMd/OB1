@@ -567,5 +567,40 @@ console.log("\n[11] The query log's action rows over PostgREST: one or many thro
   await admin.close();
 }
 
+console.log("\n[12] The provenance and proposal rpc shapes are null-safe too: a NULL created_at maps to null, an infinity-dated proposal thought does not throw (SMD-1803)");
+{
+  const admin = new SQL({ url: URL_, max: 1 });
+  const undatedAncestor = await plantLegacyRow(admin, "postgrest 1803 undated ancestor", "[" + vec(8).join(",") + "]", null);
+  const { id: heir } = await store.captureThought({ content: "postgrest 1803 heir", payload: { metadata: {} }, embedding: vec(9), derivedFrom: [undatedAncestor] });
+  const { id: parent } = await store.captureThought({ content: "postgrest 1803 dated parent", payload: { metadata: {} }, embedding: vec(10) });
+  const undatedChild = await plantLegacyRow(admin, "postgrest 1803 undated derivative", "[" + vec(11).join(",") + "]", null);
+  const infOlder = await plantLegacyRow(admin, "postgrest 1803 proposal thought infinity", "[" + vec(12).join(",") + "]", "infinity");
+  const undatedNewer = await plantLegacyRow(admin, "postgrest 1803 proposal thought undated", "[" + vec(13).join(",") + "]", null);
+  try {
+    // trace UP and walk DOWN, both through derivationFields on the rpc shape.
+    const ancNode = (await store.traceProvenance({ id: heir })).find((n) => n.thoughtId === undatedAncestor);
+    assert(ancNode?.created_at === null, `traceProvenance's rpc shape maps a NULL ancestor to null (got ${JSON.stringify(ancNode?.created_at)})`);
+    await admin`UPDATE thoughts SET derived_from = jsonb_build_array(${parent}::text) WHERE id = ${undatedChild}::uuid`;
+    const derNode = (await store.findDerivatives({ id: parent })).find((d) => d.id === undatedChild);
+    assert(derNode !== undefined && derNode.created_at === null, `findDerivatives's rpc shape maps a NULL derivative to null (got ${JSON.stringify(derNode?.created_at)})`);
+
+    // The tool-crash case over PostgREST: the RPC returns the row and the
+    // mapper keeps "infinity" / null rather than throwing or fabricating.
+    await admin`SELECT record_supersession_proposal(${infOlder}::uuid, ${undatedNewer}::uuid, 'conflict_undirected', 0.7, 'infinity vs undated', 0.9, 'consolidate:smd1803@p1', NULL)`;
+    let proposals: Awaited<ReturnType<typeof store.listSupersessionProposals>> = [];
+    let threw = "";
+    try { proposals = await store.listSupersessionProposals({ status: null }); } catch (e) { threw = (e as Error).message; }
+    assert(threw === "", `listSupersessionProposals returns rather than throwing over PostgREST (threw: ${threw.slice(0, 80)})`);
+    const p = proposals.find((x) => x.older.id === infOlder && x.newer.id === undatedNewer);
+    assert(p?.older.created_at === "infinity", `…infinity kept as its own text (got ${JSON.stringify(p?.older.created_at)})`);
+    assert(p?.newer.created_at === null, `…a NULL proposal thought is null, not the epoch (got ${JSON.stringify(p?.newer.created_at)})`);
+    assert(p != null && p.judgedAt !== "1970-01-01T00:00:00.000Z" && ISO_RE.test(p.judgedAt), `…judged_at is a real timestamp (got ${JSON.stringify(p?.judgedAt)})`);
+  } finally {
+    await admin`DELETE FROM supersession_proposals`;
+    await admin`DELETE FROM thoughts WHERE id IN (${undatedAncestor}::uuid, ${heir}::uuid, ${parent}::uuid, ${undatedChild}::uuid, ${infOlder}::uuid, ${undatedNewer}::uuid)`;
+    await admin.close();
+  }
+}
+
 await store.close();
 report();

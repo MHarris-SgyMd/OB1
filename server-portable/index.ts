@@ -861,7 +861,11 @@ function buildServer(principal: Principal): McpServer {
         if (!data.length) {
           return { content: [{ type: "text" as const, text: `No ${status === "all" ? "" : status + " "}supersession proposals. The consolidation pass proposes them: cd db && bun consolidate.ts --url $DATABASE_URL (after db/extract-entities.ts, which it pairs thoughts by).` }] };
         }
-        const day = (d: string) => new Date(d).toLocaleDateString();
+        // SMD-1803: through displayDate, never new Date() on a raw column — an
+        // undated thought reads "undated", an infinity/BC one its own text, not
+        // a fabricated 12/31/1969 or "Invalid Date". (older/newer.created_at are
+        // string | null now; judgedAt/reviewedAt are non-null where rendered.)
+        const day = (d: string | null) => displayDate(d) ?? "undated";
         // Thought content and the judge's reason are untrusted text; the same
         // cleaner the CLI renders through (server-portable/consolidate.ts).
         const snip = (c: string) => { const t = cleanForDisplay(c).replace(/\s+/g, " ").trim(); return t.length > 200 ? t.slice(0, 200) + "…" : t; };
