@@ -2045,8 +2045,9 @@ console.log("\n[20] Migration 019: the row estimates and the plan setting — ca
   // holds the same across an upgrade; this is the fast loop's copy).
   await reapply("039");
   const mt039 = await proc(MT);
-  assert(mt039.prosrc === mt.prosrc && !("jit" in mt039.settings) && mt039.settings["enable_seqscan"] === "off",
-         `040's body is 039's byte for byte, and 039 re-applied alone carries 019's clauses without 040's (proconfig ${JSON.stringify(mt039.settings)})`);
+  assert(mt039.prosrc === mt.prosrc, "040's body is 039's byte for byte — the clause is the whole change");
+  assert(!("jit" in mt039.settings) && mt039.settings["enable_seqscan"] === "off",
+         `…and 039 re-applied alone carries 019's clauses without 040's, the state a hand re-apply leaves (proconfig ${JSON.stringify(mt039.settings)})`);
   await reapply("012");
   const kw012 = await proc(KW);
   assert(kw012.prosrc === kw.prosrc, "019's search_thoughts_keyword body is 012's, byte for byte");

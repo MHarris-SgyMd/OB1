@@ -453,7 +453,7 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
     assert(Number(pages) > 0 && Number(pages) < ROUTE_ESTIMATE_MIN_PAGES, `${N.toLocaleString()} rows at ${EMBEDDING_DIM} dimensions are ${pages} heap pages (the vectors are TOASTed), under the shipped floor of ${ROUTE_ESTIMATE_MIN_PAGES}`);
 
     // The deployed body — 040, carrying 038's sample — kept for the timing at the end: by then 020's re-apply has replaced it.
-    const body038 = await body();
+    const bodyGate = await body();
 
     // The observable: 014's collection is one scan of the GIN index per call,
     // and nothing else in a call to this table scans it the same way twice — so
@@ -526,12 +526,12 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
     const THIN = '{"thin": true}';
     const gatedBroad = await measure(BROAD);
     const gatedThin = await measure(THIN);
-    assert(gatedBroad.agree === QUERIES, `under 038, a filter matching every row (${N.toLocaleString()}, the walk) returns the exact top-10 on ${gatedBroad.agree}/${QUERIES} queries — without an HNSW index the walk is exact`);
+    assert(gatedBroad.agree === QUERIES, `under the gate (040, carrying 038's), a filter matching every row (${N.toLocaleString()}, the walk) returns the exact top-10 on ${gatedBroad.agree}/${QUERIES} queries — without an HNSW index the walk is exact`);
     assert(gatedThin.agree === QUERIES, `…and a filter matching ${N / 250} rows (the exact branch) on ${gatedThin.agree}/${QUERIES}`);
 
     // 020's body on the same table — the collection on every filtered call.
     await applyMigrations(URL_, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("020") });
-    assert(!TID_PROBE.test(await body()) && !/v_broad/.test(await body()), "020 re-applied over 038: the body has no sample and no gate (the state a hand re-apply of 020 leaves; preflight's remedy names 038 for that reason)");
+    assert(!TID_PROBE.test(await body()) && !/v_broad/.test(await body()), "020 re-applied over 040: the body has no sample and no gate (the state a hand re-apply of 020 leaves; preflight's remedy names 040, the last definer, for that reason)");
     const plainBroad = await measure(BROAD);
     const plainThin = await measure(THIN);
     // The raw scan counts, not the per-call quotients: x/20 − y/20 is not
@@ -546,8 +546,8 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
     // bodies and cancel. Exactly one fewer per call is the band — 037's draw
     // could reach fewer than three pages and missed, which is why this
     // section once accepted five misses in twenty.
-    assert(saved === QUERIES, `on the broad filter 038 makes exactly one fewer GIN scan per call than 020 over ${QUERIES} calls — the collection skipped on every call (020: ${plainBroad.scansPerCall.toFixed(2)} a call, 038: ${gatedBroad.scansPerCall.toFixed(2)}; per call 020 [${plainBroad.perCall.join(" ")}], 038 [${gatedBroad.perCall.join(" ")}])`);
-    assert(plainThin.scans === gatedThin.scans, `on the thin filter both bodies scan the GIN index the same ${gatedThin.scansPerCall.toFixed(2)} times a call — the collection ran, and the exact branch answered (per call 020 [${plainThin.perCall.join(" ")}], 038 [${gatedThin.perCall.join(" ")}])`);
+    assert(saved === QUERIES, `on the broad filter the gate makes exactly one fewer GIN scan per call than 020 over ${QUERIES} calls — the collection skipped on every call (020: ${plainBroad.scansPerCall.toFixed(2)} a call, 040: ${gatedBroad.scansPerCall.toFixed(2)}; per call 020 [${plainBroad.perCall.join(" ")}], 040 [${gatedBroad.perCall.join(" ")}])`);
+    assert(plainThin.scans === gatedThin.scans, `on the thin filter both bodies scan the GIN index the same ${gatedThin.scansPerCall.toFixed(2)} times a call — the collection ran, and the exact branch answered (per call 020 [${plainThin.perCall.join(" ")}], 040 [${gatedThin.perCall.join(" ")}])`);
     assert(plainBroad.agree === QUERIES && plainThin.agree === QUERIES, "…and 020's answers are the same exact top-10 (the gate changed the route, not the answer)");
 
     // The sample's cost against the collection's on this table, printed for the
@@ -559,7 +559,7 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
     };
     // The deployed statement, read out of 038's body rather than a copy kept
     // here — the class of thing review pass 1 removed from [8e].
-    const sampleText = sampleStatementOf(body038, Number(pages), BROAD);
+    const sampleText = sampleStatementOf(bodyGate, Number(pages), BROAD);
     const sampleMs = sampleText === null ? NaN : await timed(sampleText);
     const collectMs = await timed(`SELECT array_agg(s.id) FROM (SELECT t.id FROM thoughts t WHERE t.metadata @> '${BROAD}'::jsonb AND (t.embedding IS NOT NULL OR EXISTS (SELECT 1 FROM thought_chunks k WHERE k.thought_id = t.id)) LIMIT 1001) s`);
     console.log(`      (${ROUTE_SAMPLE_PAGES} pages of ${pages} read by TID range: ${sampleMs.toFixed(2)} ms a call; the collection on the ${N.toLocaleString()}-row filter: ${collectMs.toFixed(2)} ms — round trip included in both)`);
@@ -711,7 +711,10 @@ console.log("\n[5e] A planner path disabled at session level no longer JIT-compi
     };
     const plain = await explained([]);
     assert(!/JIT:/.test(plain) && topCost(plain) < 1e6 && /Tid Range Scan on thoughts/.test(plain), `with every path enabled the sample's plan is the TID Range Scan at a cost far under disable_cost (${topCost(plain)}) with no JIT block`);
-    const baseline = await median([]);
+    // EXPLAIN's JIT total for each forced-on plan: the compile's size on THIS
+    // machine, which the timing teeth below scale their bounds from (run-it,
+    // pass 6 — a literal 20 ms was a machine constant written down).
+    const jitTotals: number[] = [];
     for (const [label, gucs, node18] of CASES) {
       const under = await explained(gucs);
       // One tooth, not two: "no JIT block" means something only at a cost past
@@ -745,35 +748,36 @@ console.log("\n[5e] A planner path disabled at session level no longer JIT-compi
         `${label}: the planner still takes the TID Range Scan, prices the plan at disable_cost (${cost.toExponential(2)}), and under the function's settings ${/JIT:/.test(under) ? "JIT-compiles it — a JIT block is in the plan" : jitAvailable ? "does not JIT-compile it" : "does not JIT-compile it (this server would not compile it whatever the clause said: no JIT, or its own jit off)"}`);
       if (jitAvailable) {
         const forced = await explained(gucs, "on");
+        jitTotals.push(Number(/JIT:[\s\S]*?Timing:[^\n]*?Total ([\d.]+) ms/.exec(forced)?.[1] ?? NaN));
         assert(/JIT:/.test(forced) && /Functions: \d+/.test(forced), `…while the same statement with jit forced on IS compiled (${/JIT:[\s\S]*?Timing: ([^\n]*)/.exec(forced)?.[1] ?? "no timing line"}) — the trigger is real here, so the check above has teeth`);
       }
     }
     if (jitAvailable && disableCost) {
       const [label, gucs] = CASES[0];
+      // The default and the fixed arm back to back, so a load spike on the
+      // shared machine lands on both or neither (run-it, pass 6).
+      const baseline = await median([]);
       const fixed = await median(gucs);
       await sql.unsafe(`ALTER FUNCTION ${MATCH_THOUGHTS_SIGNATURE} RESET jit`);
       assert(!/jit=off/.test(await proconfig()), "the mutant: 040's clause RESET on the function — what a redefinition without it leaves, and what the ledger cannot see");
       const mutant = await median(gucs);
       await applyMigrations(URL_, { ...opts040, routeEstimateMinPages: 0 });
       assert(/(^|,)jit=off(,|$)/.test(await proconfig()), "…and 040 re-applied puts the clause back");
-      // Each arm judged against the default, not against the other: with the
-      // clause deleted from 040 both arms compile and differed by 12.9 ms, so
-      // a `mutant - fixed >= 10` passed with the mechanism removed (run-it,
-      // pass 5). The compile is 40–70 ms over a default of 8–13 (a 45 ms
-      // compiled call over an 11.5 ms default was the closest run); 20 ms of
-      // headroom kills a compiled "fixed" arm and survives the runner's
-      // fixed-minus-default spread of 0.2–4 ms.
-      assert(mutant >= baseline + 20, `through the function under ${label} the mutant pays the compile on every call: ${mutant.toFixed(2)} ms a call against a default of ${baseline.toFixed(2)} (with 040's clause: ${fixed.toFixed(2)})`);
-      // The bound is the compile's size, not a multiple of the default: the
-      // compiled call through the function is 51–105 ms in 040's header and
-      // 45–87 across the review runs (EXPLAIN's JIT total for the sample
-      // alone 40–70), so 25 ms of headroom over the default kills the
-      // mechanism-removed value and survives a noisy runner: fixed against
-      // default read 7.9–8.9 against 8.0–8.2 in pass 1 and 0.2–1.3 ms apart
-      // over pass 2's four runs. The compiled arm itself is the noisy one (two
-      // compiled medians in one run were 31 ms apart), which is why the tooth
-      // above compares it with the uncompiled arm and asks only for 10 ms.
-      assert(fixed <= baseline + 20, `…and with the clause the disabled path costs what the default costs: ${fixed.toFixed(2)} ms against ${baseline.toFixed(2)} (the compiled call is 45–105 ms)`);
+      // Each arm is judged against the default, never against the other:
+      // with the clause deleted from 040 both arms compile and differed by
+      // 12.9 ms in one run and 0.4 in another — the compiled call's own noise
+      // (two compiled medians in one run were 31 ms apart) — so a
+      // `mutant - fixed >= 10` passed with the mechanism removed (run-it,
+      // pass 5). The gap that separates "compiled" from "not" is half the
+      // smallest compile this run saw (EXPLAIN's JIT total, 36–70 ms on the
+      // machines this ran on, so 18–35), never under 10: the fixed arm has
+      // read 0.04–4 ms over the default across every run, the compiled arm
+      // 35–95 over it, and a bound that scales with the machine's compile
+      // keeps both margins on a faster or slower host (run-it, pass 6).
+      const compile = Math.min(...jitTotals.filter(Number.isFinite));
+      const gap = Math.max(10, compile / 2);
+      assert(mutant >= baseline + gap, `the trigger through the function under ${label}: the mutant (040's clause RESET) pays the compile on every call, ${mutant.toFixed(2)} ms against a default of ${baseline.toFixed(2)} (EXPLAIN's smallest JIT total this run ${compile.toFixed(1)} ms, the bound half of it) — the clause's own tooth is the next line`);
+      assert(fixed <= baseline + gap, `…and with the clause the disabled path costs what the default costs: ${fixed.toFixed(2)} ms against ${baseline.toFixed(2)}, within ${gap.toFixed(1)} (the compiled call is 45–105 ms)`);
     } else if (!disableCost) {
       skip("[5e] the mutant arm through the function", "PostgreSQL 18: a disabled path is counted, not costed, so there is no compile to time");
     } else {

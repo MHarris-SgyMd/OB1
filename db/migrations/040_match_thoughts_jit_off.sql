@@ -191,9 +191,9 @@
 --     1,490 on a 3,000-row fixture; eight full scans of the heap per
 --     filtered call at scale): 13's state (038's Prerequisites), the cost
 --     the gate exists to avoid, and no clause on the function reaches it
---     (SMD-1703). The clause
---     stands on 18 for the generic plan's flat estimate, the compile under
---     row-level security and 13's, none of which 18 changed.
+--     (SMD-1703). The clause stands on 18 for the generic plan's flat
+--     estimate, the compile under row-level security and 13's, none of
+--     which 18 changed.
 --   * A server built without JIT, or with its own `jit` off. Supabase — the
 --     fork's stated target since 038's Prerequisites — builds its 15 and 17
 --     images without LLVM JIT (`pg_jit_available()` is false) and its
@@ -227,8 +227,8 @@
 --   heap pages, kept under OB1_PG_KEEP so every arm read ONE corpus with
 --   one set of statistics; 038's function, before 039 landed), the function
 --   with this clause, with it RESET — 038's function — and with it again,
---   twenty seeded queries per tier on a
---   fresh connection each, medians of calls 6–20 / 1–5: identical rows on
+--   twenty seeded queries per tier on a fresh connection each, medians of
+--   calls 6–20 / 1–5: identical rows on
 --   every tier in every arm, the times within the run's spread — 50% 13 /
 --   17 / 14 ms, 10% 66 / 64 / 53, 1% 55 / 43 / 44, 5,000 rows 34 / 26 / 25,
 --   900 rows 12 / 9 / 11, the empty filter 1.3 / 0.7 / 0.8 — and the first
@@ -266,8 +266,8 @@
 -- Prerequisites
 --   Migration 039 (the function this file redefines: 038's gate and sample,
 --   the half-precision walk, 020's signature). PostgreSQL 14 or later as 038
---   requires; the `jit`
---   GUC exists on every supported build, with or without JIT compiled in.
+--   requires; the `jit` GUC exists on every supported build, with or
+--   without JIT compiled in.
 --   The disabled-path trigger under Why is 14–17's (Failure modes has 18).
 --   Applied by `bun db/migrate.ts`.
 --
@@ -278,8 +278,8 @@
 --   the call costs what it costs by default (the table under Why, right
 --   column); at a million rows every tier returns the rows it returned
 --   without the clause in the same time (Cost); at ten million, where
---   FORK.md change
---   28 measured the generic plans paying 30–110 ms of JIT, db/bench-hnsw.ts
+--   FORK.md change 28 measured the generic plans paying 30–110 ms of JIT,
+--   db/bench-hnsw.ts
 --   section C's generic column should read what its "jit off" column read
 --   then (not re-run for this file; the third column is now the compile
 --   the clause removes). pg_proc.proconfig carries `jit=off` beside 014's

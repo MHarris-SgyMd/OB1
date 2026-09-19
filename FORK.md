@@ -202,6 +202,7 @@ extensions/test-tools.ts         # change 77 (new file — every tool of the fiv
 db/test-bench-reuse.ts           # change 76 (new file — the kept bench corpus's oracle cache held to the computation, on one index)
 db/bench-oracle.ts               # change 76 (new file — the cache's pure part: what of a marker's entry a run may trust; test-schema [37])
 db/migrations/039_*.sql          # change 81 (new file — the two HNSW indexes over embedding::halfvec under their names; match_thoughts' walk branches order by the cast)
+db/migrations/040_*.sql          # change 86 (new file — 039's match_thoughts with `SET jit = off`; a disabled planner path no longer JIT-compiles the gate's sample)
 evals/eval-quant.ts              # change 81 (new file — vector, halfvec and binary-with-rerank measured on real vectors at the shipped width; test-schema [38], test-upgrade [16])
 <4 vendored MCP servers, 1 sample> # change 78 (a McpServer built per request — per session in the cost recipe's after sample — in place of one shared and connect()ed to a fresh transport each time)
 <17 pin sites, 3 lockfiles>      # change 83 (@hono/mcp 0.1.1 → 0.1.5: the transport lets go of each POST it has answered; the after sample's sweep closes the transports it drops)
@@ -13980,11 +13981,12 @@ says which term cannot bite rather than splitting it.
 Pass 5, the same two reviewers on the merge. What changed: [5e]'s
 "the mutant pays the compile" tooth had compared the two arms with each
 other — `mutant − fixed ≥ 10` — and passed with the clause deleted from
-040, both arms compiled and 12.9 ms apart, which is the compiled call's own
-noise (the fixed-against-default bound was the tooth in that pair); each
-arm is judged against the default now, the mutant at least 20 ms over it
-and the fixed call at most 20 ms over it, run with the clause deleted:
-44.9 against 11.5 fails, 45.6 against 11.5 passes, as they should.
+040, both arms compiled and 12.9 ms apart in the run that found it, which
+is the compiled call's own noise (the fixed-against-default bound was the
+tooth in that pair); each arm is judged against the default now, the mutant
+at least 20 ms over it and the fixed call at most 20 ms over it, and re-run
+with the clause deleted under the new bounds: the fixed arm at 44.9 against
+a default of 11.5 fails, the mutant at 45.6 passes, as they should.
 [5d]'s "installed" and "restored" assertions read the body's floor and the
 probe, which 039's body satisfies too, so a slip back to applying 039 had
 left 039 as the shipped state for the sections after and nothing said —
@@ -14006,6 +14008,42 @@ changed: main's change 81 still describes the pre-040 tree as fact ("[8e]
 and [20] pin 039", "[5d] applies 039") — numbered sections are history,
 and change 80's pointers were annotated because they were forward references
 to this ticket.
+
+Pass 6, the same two reviewers, the cold one applying pass 5's lesson to
+every assertion of the ticket. What changed: pass 5's bounds were a literal
+20 ms while the compile is a machine constant — EXPLAIN's JIT total ran 36
+to 60 ms on this machine, once 36 where inlining was cheap — so a faster
+host would bring the compiled arm toward the bound and the pair would turn
+vacuous on one side and flaky on the other; each bound is now half the
+smallest compile the run's own forced-on plans reported, never under 10 ms,
+and the default is measured immediately before the fixed arm so a load
+spike on the shared machine lands on both or neither. The comment under the
+fixed-arm bound still described the design pass 5 removed ("25 ms", "the
+tooth above compares it with the uncompiled arm and asks only for 10 ms");
+the trigger assertion's label says it measures the trigger and that the
+clause's tooth is the next line (with the clause deleted it passes, both
+arms compiled 0.4 ms apart — by design, now said). test-schema [20]'s
+`reapply("039")` block asserted the body and 039's settings under one
+label, so a body change printed the settings; two assertions now (926).
+[5d]'s messages still said "038" for the installed function and one claimed
+preflight's remedy names 038, which it has not since 039 landed; "040" and
+"the gate", and the kept body's variable named for what it is. The
+pass-5 paragraph read as one run where it was two; four ragged wraps in the
+header; a 040 line in this file's file list beside 039's. What the run-it
+reviewer verified: the four mutants pass 5 could not finish — a byte in the
+body is killed by test-schema [20] and test-upgrade [18] twice; the server's
+`jit` read forced true by exactly the jit-off-server probe; the remedy
+slipped to 039's file by four probes; [5d] slipped back to 039 by exactly
+pass 5's two new teeth and nothing else — and the clause deleted from 040 is
+killed by the fixed-arm bound at 45.6 against 9.7 while the trigger line
+passes at 45.1 (both compiled, 0.4 apart: pass 5's fix is what kills);
+three clean runs put the compiled arm 28–30 ms over the default and the
+fixed arm 0.04–0.5 over it. Not changed: the four probes that pin the
+remedy string match the filename by regex, and the raw-body probe pins
+039's remedy the same way — one tooth for that string, four for this one,
+recorded so the count is known; a `SET jit = false` in a successor would
+store "false" and fail every regex and [20]'s pin, which is the pin doing
+its job.
 
 **The operator's path, walked.** A brain with rows migrated by `bun
 db/migrate.ts` through 040 (on a brain at 039 it is the one pending file):
