@@ -1865,6 +1865,95 @@ the arms and the scoring are written, and the one-line rule for reading the
 result is the same: the graph has to beat `match_thoughts` on questions
 someone actually asked.
 
+### GraphRAG as an expansion/rerank stage — not a substitute, and conditional (SMD-1738)
+
+SMD-948 raced the graph as a **substitute** (0.51 vs vector 0.98) — the recall tier doing
+the whole match. SMD-1707 named the trap: a retriever declined as a substitute may be a
+good *complement*. So this measures the graph as an **expansion/rerank stage** over vector
+recall, on the same corpus, edges and labelled gold — and, after a first pass flattened the
+graph into a unit-weight adjacency, on the graph's **real typed/weighted structure**.
+
+- **Stage 1 — vector coarse recall:** the ANN returns K′ ≫ k candidates.
+- **Stage 2 — graph expansion + rerank:** seed the graph from *those hits'* entities,
+  expand `hops` over `ob1_entity_edges`, symmetric-RRF rerank the union. `composed` is the
+  untyped walk; **`comp-typed`** weights each hop by a pre-registered relation prior
+  (`depends_on`/`uses`/`works_on` high, `co_occurs_with` low), evidence support
+  a saturating `support/(support+5)` and confidence — the discrete first step toward relevance as diffusion over
+  a typed/weighted graph. `comp-cos` orders the union by cosine only (control). The
+  **pre-registered bar** (SMD-1038): build iff multi-hop recall@10 lifts ≥ 0.05 over vector
+  AND recovers more than it breaks AND does not cut aggregate recall, checked on every cell.
+
+**Recall, vs a full-budget vector (601 issues, 27 questions):**
+
+| arm | multi-hop | aggregation | corpus | all | nDCG (mh) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| vector — the substitute baseline | **1.00** | 0.98 | 0.75 | 0.97 | 0.96 |
+| graph — SMD-948 substitute (question-seeded) | 0.43 | 0.47 | 0.33 | 0.43 | 0.31 |
+| composed — untyped expansion (best cell) | 0.89 | 0.98 | 0.69 | 0.89 | 0.69 |
+| **comp-typed** — edge-aware (relation prior × support × conf) | **0.98** | 0.98 | 0.69 | **0.95** | **0.75** |
+| comp-cos — union by cosine only (control) | **1.00** | 0.98 | 0.75 | 0.97 | 0.96 |
+
+**The bar FAILS — because vector is at ceiling, not because the graph was flattened.**
+comp-cos ties vector exactly: pooling the graph-reached thoughts loses and adds nothing.
+Using the **real typed edges** (comp-typed) lifts recall over the untyped walk (0.89 → 0.95
+all, multi-hop 0.98) and ranking (all-question nDCG 0.73 → 0.77; multi-hop 0.69 → 0.75) — a gentler, more vector-preserving
+rerank — but still **cannot exceed** a ceiling'd vector (the untyped best cell recovers 0,
+breaks 4; no cell of the 8 clears the ≥0.05-lift bar). So the flattening cost some recall,
+but the ceiling caps even the typed version. Recall, though, is one axis, and the ceiling is
+a property of the *question set*. On the axes a graph is built for, the picture turns.
+
+**Beyond recall — the axes vector can't express:**
+
+*Recall-complement under a starved vector budget* — the finding. Constrain the coarse
+budget b; the edge-aware graph becomes a real recall tier where vector runs short:
+
+| b (vector budget) | vector-top-b R@10 | edge-aware composed R@10 | Δ | (multi-hop) vec → composed |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 0.35 | **0.83** | **+0.48** | 0.42 → 0.85 |
+| 3 | 0.78 | 0.90 | +0.12 | 0.90 → 0.96 |
+| 5 | 0.92 | 0.94 | +0.02 | 1.00 → 0.98 |
+| 10 | 0.97 | 0.95 | −0.02 | 1.00 → 0.98 |
+
+At a tight budget the graph recovers what vector misses (+0.48 at b=1), crossing over only
+when vector saturates (b ≈ 10). This is exactly SMD-1707's at-scale regime, where a single
+ANN loses recall and a second tier recovers it — hidden here by the ceiling, not absent.
+
+*Relational structure vector can't see* — of 3,000 issue pairs joined by a strong typed
+edge (`depends_on`/`uses`), **95%** have the linked sibling *outside* the issue's vector
+top-10: a large store of relational neighbours only the graph reaches (descriptive — the
+graph defines the link). *Entity-membership* applies to only 5 of 10 needles (the rest are
+literal-string aggregations, keyword's job); on those the extracted graph trails
+(0.18 vs vector 0.97), limited by SMD-947's extraction coverage. The set poses few true
+relational or entity-membership queries — the shape-of-question gap SMD-948 named.
+
+**Scale (synthetic typed graph, latency only).** Not K′-bounded as written — at 1M
+(6M mentions) a ~2.0 s floor at K′=10 rising to ~5.0 s at K′=1000/2-hop, and at 10M (30M mentions, lighter density) a ~7 s floor essentially FLAT across K′=10–1000 (11.3 s only at K′=1000/2-hop) — the df scan tracks the mention count, not K′ —
+dominated by the per-call `df` full scan (the walk recomputes document frequency each
+call). A **materialized `df`** is the prerequisite to scale; the typed pass adds the
+`edge_w` aggregate on top.
+
+Reproduce:
+
+```
+OB1_METADATA_MODEL=qwen2.5:7b OB1_EVAL_CORPUS=/tmp/linear-corpus-full.json \
+  ../db/with-postgres.sh bun eval-graphrag.ts --no-global --allow-stale-dump   # real corpus, all axes
+OB1_EVAL_EMBED=syn@64 OB1_GRAPH_SCALE_MENTIONS_PER=3 OB1_GRAPH_SCALE_EDGES_PER=1 \
+  OB1_GRAPH_KPRIME=10,100,1000 OB1_GRAPH_HOPS=1,2 OB1_PG_SHM=3g \
+  ../db/with-postgres.sh bun eval-graphrag.ts --scale 10000000                  # 10M synthetic, latency
+```
+
+**Verdict — a conditional tier, not a substitute or an everyday stage.** Against a healthy
+full-budget vector on ordinary questions the graph stage does not pay (ceiling). But where
+vector recall is *scarce* — deep scale, a tight ANN budget, relational/entity-membership
+questions — the edge-aware graph is a real recall/precision complement, the recall tier to
+vector's precision tier that SMD-1707 framed. **Eval-only; not built** — a product path is a
+scale-regime test away (SMD-1038 posture). *Forward-looking:* the value here is the edges'
+type and support; confidence is near-uniform and lineage/supersession is absent from this
+corpus (that is the claim-log SMD-1729 and trust labels SMD-1724). Carrying trust, lineage
+and recency *dynamically* on the edges — relevance as continuous-time diffusion over a
+typed/weighted/temporal graph, a CfC/liquid-network shape — is where this points; the static
+edge-aware expansion is the first discrete step.
+
 ## Hybrid ranking, measured on four query sets
 
 `eval-hybrid.ts`, run as `bun run hybrid` (SMD-958, migration 017). Needs
@@ -2788,7 +2877,15 @@ on to open. This loop captures it and gates PRs on it.
 
 1. **Log** — off by default. `OB1_QUERY_LOG=on` records one row per search (query,
    arguments, and the ids returned in rank order with scores) and one per
-   follow-up fetch/edit/delete of a returned id (migration 034; `db/README.md`).
+   follow-up fetch/edit/delete of a returned id (migration 034; `db/README.md`),
+   and — since SMD-1719 — one per id a later capture or edit cites as its source
+   (`derived_from` / `supersedes`), logged under `<writer>/<pointer>`; a cite is
+   the stronger relevance label and the export includes it. A `supersedes` cite
+   labels the *superseded* row — the one the searcher needed in order to
+   correct it — so a replay on a corpus that has since demoted superseded rows
+   would read that query as a miss; the fork labels such rows at read time and
+   does not demote them (SMD-1720, change 88), and every click-through label is bound to
+   the corpus at export time (`baseline` says which).
    A caller who searches then opens result 3 has labelled result 3 relevant —
    *click-through relevance*, a proxy, kept beside the hand-labelled sets, not
    instead of them.
@@ -2828,6 +2925,41 @@ on to open. This loop captures it and gates PRs on it.
    1.000); the gate proves its floor has teeth by replaying random query vectors
    and watching recall collapse (0.154 < 0.8) — a scrambling regression would
    score the same. The live corpus stays out of CI.
+
+**Utilization — did the caller use what came back (SMD-1719).** Every number
+above is layer one of the four the literature now asks for (evidence retrieval,
+evidence use, task outcome, cost). MERIT (arXiv 2609.05441) measured the second
+and found agents ignore 45–53% of correctly retrieved facts. The query log can
+answer it, because a later `capture_thought` that names a returned id in
+`derived_from` or `supersedes` is logged as an action row under its own tool
+(FORK.md change 90), so a touch is either **cited** (a write named it as a
+source) or **opened** (fetch / update / delete — click-through). Then:
+
+```
+DATABASE_URL=… bun eval-utilization.ts [--gold fixture.json]
+OB1_EXPORT_WINDOW_MIN=30   # the same attribution window as export-queries.ts
+```
+
+prints, per arm (search tool + recorded arguments), per agent when the log
+holds more than one (named from the registry, `ob1_agents.label`, with the
+id's prefix beside it), and overall: ids
+returned, ids used (cited ∪ opened), **util** = used / returned, **use-rate** =
+searches with ≥ 1 use, the cited/opened split, and **tok/used** — approximate
+tokens returned per id used (the ids' content as stored now, chars / 4; a
+search any of whose returned ids has since been deleted carries no estimate
+rather than a partial one, and the header says how many do). With
+`--gold` (a hand-labelled fixture in `export-queries.ts`'s `{ queries: [{ query,
+relevant }] }` shape) it adds the **ignore rate**: searches whose results held a
+relevant id the caller never used. A fixture exported from the same log's touches
+is circular as gold; label by hand. With no action rows the report says `n/a`
+and asks whether the log is on, rather than printing 0%; on a brain without
+migration 034 it (and `export-queries.ts`) refuses in words, exit 2, rather
+than dying in the driver. Attribution is the
+export's rule, in `utilization.ts` (pure, tested by `db/test-schema.ts` [39]) —
+one implementation, which `export-queries.ts` calls as well.
+A read whose use ends in prose, with no write and no fetch, is invisible here,
+so utilization is a lower bound on use. No ranking changes on this number; if
+it comes out low, the lever is presentation (SMD-1735), not retrieval.
 
 **Why two fixtures.** The export fixture (query text + ids) drives the local,
 model-backed `eval-replay.ts` against your own brain — no vectors, because the

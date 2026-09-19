@@ -289,6 +289,27 @@ export function normaliseThoughtMeta(r: Record<string, unknown>): ThoughtMeta {
 export const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
+ * The one contract for a batch of query-log action rows, applied by BOTH
+ * writers before anything reaches a database: an absent agent — null,
+ * undefined or the empty string — is SQL NULL (034's anonymous bucket); a
+ * target must be present; and any id that is not a uuid is refused here,
+ * loudly and naming the column, rather than reaching array_in or PostgREST as
+ * a malformed value the best-effort caller would swallow with the whole batch.
+ * An eighth review pass found the SQL writer holding this rule and the
+ * PostgREST writer sending `""` through as an agent id (22P02, batch dropped);
+ * one function, one contract.
+ */
+export function normaliseActionRows(rows: QueryActionLog[]): { tool: string; agentId: string | null; targetId: string }[] {
+  return rows.map((r) => {
+    const agentId = r.agentId === null || r.agentId === undefined || r.agentId === "" ? null : r.agentId;
+    if (agentId !== null && !UUID_RE.test(agentId)) throw new Error(`logActions: not a uuid for agent_id: ${agentId.slice(0, 40)}`);
+    if (r.targetId === null || r.targetId === undefined || r.targetId === "") throw new Error("logActions: target_id is absent");
+    if (!UUID_RE.test(r.targetId)) throw new Error(`logActions: not a uuid for target_id: ${r.targetId.slice(0, 40)}`);
+    return { tool: r.tool, agentId, targetId: r.targetId };
+  });
+}
+
+/**
  * What thought_stats renders: the corpus total, its date range, and the counts
  * by type, topic and person. The tool sorts each map and renders its own top 10,
  * so a store need only return at least that many, in any order — the maps are not
@@ -669,7 +690,8 @@ export type QuerySearchLog = {
 };
 
 /**
- * An 'action' row for the query log: a fetch/edit/delete of a returned id.
+ * An 'action' row for the query log: a fetch/edit/delete of a returned id, or
+ * (SMD-1719) a write that named it as a source — `tool` is `<writer>/<pointer>`.
  * Carries only the acting tool, the agent, and the id touched — export links it
  * back to the search that returned the id.
  */
@@ -870,14 +892,22 @@ export interface ThoughtStore {
    * when OB1_QUERY_LOG=on, and the call is best-effort: the handler swallows any
    * rejection so a log write can never fail a search, a fetch or a capture.
    * Nothing reads them on the hot path — the export tool reads the table offline.
-   * `logSearch` records one search call and the ids it returned; `logAction`
-   * records a later fetch/edit/delete of a returned id. They are NOT joined at
+   * `logSearch` records one search call and the ids it returned; `logActions`
+   * records, in one statement, the later fetch/edit/delete rows of returned
+   * ids and the rows of a write that cited them (`<writer>/<pointer>`,
+   * SMD-1719) — the one writer of action rows. They are NOT joined at
    * write time (there is no request token in the handlers); export links them by
    * (agent, id, window). A store on a schema before 034 will reject — that is
    * why the calls are guarded and swallowed, not why they are skipped.
    */
   logSearch(row: QuerySearchLog): Promise<void>;
-  logAction(row: QueryActionLog): Promise<void>;
+  /**
+   * The action rows of one call in one round trip — a fetch's single row, an
+   * edit's opened row beside its cite, a capture's cite per source (SMD-1719).
+   * One writer for every action row, so there is one INSERT shape per store
+   * to keep right; an empty list writes nothing.
+   */
+  logActions(rows: QueryActionLog[]): Promise<void>;
 
   close(): Promise<void>;
 }
