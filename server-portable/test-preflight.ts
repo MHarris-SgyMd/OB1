@@ -538,6 +538,18 @@ else {
          "with 019 and 040 recorded, a reset keyword estimate and a dropped jit clause are both named, the clause as recorded-but-dropped");
   assert(/Put it back[^\n]*ALTER FUNCTION match_thoughts\(vector,double precision,integer,jsonb,double precision,double precision\) SET jit = off; ALTER FUNCTION search_thoughts_keyword\(text, int, int, jsonb\) ROWS 25;/.test(recorded040.out),
          "…with one ALTER per function as the remedy — SET jit = off for match_thoughts, ROWS 25 for the keyword function");
+  // And with 041 recorded and both pins RESET beside the jit clause: the
+  // ledger clause says recorded-but-dropped-or-RESET, and the one ALTER
+  // carries all three SETs — the fragment the file remedy never prints, so
+  // nothing else in this suite would catch a typo in it (review pass 1, run-it).
+  const led041 = new SQL({ url: LIVE, max: 1 });
+  await led041.unsafe(`ALTER FUNCTION ${MATCH_THOUGHTS_SIGNATURE} RESET enable_nestloop RESET enable_tidscan`);
+  await led041.close();
+  const recorded041 = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+  assert(/and it does not carry enable_nestloop = on and enable_tidscan = on although migration 041 is recorded as applied — a later redefinition dropped them, or an ALTER FUNCTION … RESET took them off, so an operator's enable_nestloop = off/.test(recorded041.out),
+         "with 041 recorded and both pins RESET, the pins are named as recorded-but-dropped, allowing for a RESET");
+  assert(/Put it back[^\n]*ALTER FUNCTION match_thoughts\(vector,double precision,integer,jsonb,double precision,double precision\) SET jit = off SET enable_nestloop = on SET enable_tidscan = on; ALTER FUNCTION search_thoughts_keyword\(text, int, int, jsonb\) ROWS 25;/.test(recorded041.out),
+         "…and the one ALTER for match_thoughts carries the jit clause and both pins, the keyword function's its ROWS 25");
   const led040b = new SQL({ url: LIVE, max: 1 });
   await led040b.unsafe(`DELETE FROM schema_migrations WHERE name LIKE '040%' OR name LIKE '041%'`);
   await led040b.close();

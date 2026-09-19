@@ -740,7 +740,7 @@ console.log("\n[5e] A planner path disabled at session level no longer JIT-compi
         // whole heap per block that SMD-1703 filed.
         const cost = topCost(under);
         assert(cost < 1e6 && /Tid Range Scan on thoughts/.test(under) && !/Disabled: true/.test(under) && !/JIT:/.test(under) && buffersOf(under) < Number(pages),
-          `${label}: pinned on the function, the sample's plan is the default's — a TID Range Scan at an ordinary cost (${cost.toExponential(2)}), no Disabled node, no JIT block, ${buffersOf(under)} buffers on a ${pages}-page heap`);
+          `${label}: pinned on the function, the sample's plan is the default's — the probe is a ${/(Seq Scan|Tid Range Scan) on thoughts/.exec(under)?.[1] ?? "no scan of thoughts"} at cost ${cost.toExponential(2)}${/Disabled: true/.test(under) ? " with a Disabled node" : ", no Disabled node"}${/JIT:/.test(under) ? ", a JIT block" : ", no JIT block"}, ${buffersOf(under)} buffers on a ${pages}-page heap (expected: TID Range Scan, an ordinary cost, neither, fewer buffers than pages)`);
         await sql.unsafe(`ALTER FUNCTION ${MATCH_THOUGHTS_SIGNATURE} RESET ${gucs[0]}`);
         const mutant = await explained(gucs);
         const mutantCost = topCost(mutant);

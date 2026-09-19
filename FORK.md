@@ -15033,7 +15033,7 @@ scans), naming 041 as the remedy while the ledger does not record it and the
 `ALTER FUNCTION … SET enable_nestloop = on SET enable_tidscan = on` when it
 does; 039 applied alone by hand is reported as two losses with one remedy,
 040 alone as the pins' loss alone, and one pin of two is still the warning
-(test-preflight, 231 assertions). test-schema [20] and [21] pin exactly five
+(test-preflight, 233 assertions). test-schema [20] and [21] pin exactly five
 clauses; [20] re-applies 039 and 040 alone and finds each dropping what the
 later files added; [8e] names 041 the last definer. test-live [5e]'s tidscan
 and nestloop cases now find the default's plan under the session's setting —
@@ -15110,6 +15110,51 @@ a hundred million rows. The bench's own reuse of the SMD-1018 ten-million
 volume is over: a pre-039 kept corpus must be rebuilt for the bench (change
 81's note in db/README.md), and this change migrated that volume by hand
 instead.
+
+**Review** — pass 1, two reviewers (a cold reader over the diff, the header
+and this section; a run-it reviewer mutating the mechanism in its own
+worktree), triaged fix / ticket / no. What changed: main had moved — PR #83
+(SMD-1328) merged after this branch was cut and numbered its section 91
+beside PR #82's 91 — so main was merged, that section renumbered to 92 and
+moved into file order, and this one is 93, with the intro's count and range,
+the file list, change 91's three pointers, the README's inventory, the
+bench's header, 041's header and test-live's pointer following (caught:
+cold-read). preflight's warning after the header's own escape hatch
+(`ALTER FUNCTION … RESET enable_nestloop`) had said both pins were missing
+and that "a later redefinition dropped its SET clauses" when one pin was
+taken off by a RESET; it names the pin that is missing and what that setting
+alone does, its ledger clause allows for a RESET, and test-preflight's
+one-pin probe asserts the single-pin wording and the absence of the other's
+(caught: cold-read; held: test-preflight). test-live [5d]'s six strings that
+still named 040 as the installed body and preflight's remedy, and [5e]'s
+finally comment, say 041 (caught: cold-read). 041's first screen had claimed
+the sample's DISTINCT draw was the only cost left past 1e10 where its own
+Design bullet says the body's ORDER BYs carry it too; and the Design bullet
+now says the clauses re-enable a path and do not force one — hash and merge
+joins stay available and the planner still chooses by cost inside the call
+(caught: cold-read). The ALTER-form remedy with the pin SETs (041 recorded,
+pins RESET) had no probe, so a typo in the fragment would have passed the
+suite; one probe asserts the recorded-but-dropped-or-RESET wording and the
+three-SET ALTER (caught: run-it; held: test-preflight). [5e]'s pinned-case
+message hard-coded the node it expected — under the tidscan mutant on 18 it
+read "a TID Range Scan … 344 buffers" over a Disabled Seq Scan; it prints
+the node, the Disabled and JIT terms it saw (caught: run-it). What the run-it
+reviewer verified: each pin deleted from 041 is caught by all four suites
+(test-schema [20] and [21], test-preflight's shipped-ok and re-apply probes,
+test-upgrade [19], test-live [5d], [5e]'s pinned case with the
+self-incriminating cost 1e10 or 8e10, and [5f]'s three pinned arms reading
+"every join is a Nested Loop (Merge Join)"); the tidscan pin deleted on 18
+fires [5e] by buffers, "344 buffers on a 43-page heap", and by the Disabled
+and Seq Scan terms — SMD-1703's tooth; [5f]'s pinned arm is a tooth on its
+own when the mutant arm's bound is loosened (mutant C), so the two arms are
+independent; preflight's `pinned` forced true fails four probes and the
+pins-alone remedy renamed to 040's file fails two; [19]'s precondition
+catches the section applied onto 039; a database-level `ALTER DATABASE … SET
+enable_nestloop = off` behaves as the session-level SET the tests use, and
+the pinned statements carry no disable_cost term under it. Not changed:
+[20]'s five-settings string loosened to accept three or five passes on the
+shipped state — that mutant cannot fail by construction, and [21] pins the
+count independently, as mutant A showed.
 
 **The operator's path, walked.** A brain at 040 whose operator has `ALTER
 DATABASE … SET enable_nestloop = off`: preflight's `candidate scan` warns
