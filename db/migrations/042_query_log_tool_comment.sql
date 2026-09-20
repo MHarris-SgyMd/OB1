@@ -62,8 +62,8 @@
 --     READERS' contract and change with them, so the comment points at index.ts
 --     and evals/utilization.ts for them rather than restating them.
 --   * COMMENT ON TABLE query_log — re-issued with 034's text kept whole and one
---     clause added beside fetch/edit/delete: "or a write that cited a returned
---     id (SMD-1719)".
+--     clause added beside fetch/edit/delete: a write that cited a returned id
+--     as its source, naming the shape and the ticket.
 --
 -- WHAT A SUCCESSOR MUST CARRY
 --   A re-issued COMMENT replaces the description. Any migration that
