@@ -15486,9 +15486,11 @@ untagged. Bullets that only report a green run are not findings.
 **Re-measure when ten tickets carry tags**: `bun scripts/mechanism-yield.mjs
 --since <first tagged commit>` — that commit and everything committed at or
 after it, so a branch begun earlier contributes only what it committed in the
-tagged era. That run — not this note — decides SMD-1712,
-the citations facet that would give `delete_thought` a `CITED` refusal; it is
-gated on the number. The script is a maintainer report, not a CI gate; it
+tagged era. That run was to decide SMD-1712, the citations facet that gives
+`delete_thought` its `CITED` refusal; the gate was re-decided at three tagged
+tickets under the epic's schedule caveat, the numbers are in change 92, and
+the ten-ticket run now judges the epic's Phase 3 instead. The script is a
+maintainer report, not a CI gate; it
 prints its rules and a sample per class so the tallies can be judged before
 anything is built on them. `--self-check` runs the parser's fixtures.
 
