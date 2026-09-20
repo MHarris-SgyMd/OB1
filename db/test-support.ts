@@ -36,6 +36,7 @@ export async function hasKeptCorpus(sql: SQL): Promise<boolean> {
  * holding them, so anything with a foreign key has to be named before it.
  */
 const TABLES = [
+  "thought_facets",
   "thought_audit",
   "thought_chunks",
   "thought_work_claims",
@@ -80,7 +81,10 @@ const TABLES = [
  */
 const FUNCTIONS = [
   UPDATE_THOUGHT_SIGNATURE,
+  // 042 dropped the two-argument form for the three-argument one; both named,
+  // so a reset after a partial apply leaves neither behind.
   "delete_thought(uuid, jsonb)",
+  "delete_thought(uuid, jsonb, boolean)",
   "thought_audit_refuse_mutation()",
   "thoughts_write_audit()",
   "ob1_current_actor()",
@@ -131,6 +135,11 @@ const FUNCTIONS = [
   "thought_stats_summary()",
   "find_derivatives(uuid, int)",
   "trace_provenance(uuid, int, int)",
+  // 042 (SMD-1712)
+  "thought_facets_validate()",
+  "thoughts_guard_citation_sources()",
+  "thought_facet_active(thought_facets)",
+  "record_citation(uuid, uuid, text, text)",
 ];
 
 /**

@@ -68,14 +68,14 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Ninety-five numbered changes on top of the pin. Seven fix defects found in an
+Ninety-eight numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
 data layer (Phase 2). Ten (changes 31, 53, 55, 59, 79, 82, 86, 87, 88, and 89) ship no runtime change at
 all: each is a measurement that decided against building something.
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–95 are the numbered `###` sections** further down, which is
+sections. Changes **18–98 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -205,7 +205,8 @@ db/bench-oracle.ts               # change 76 (new file — the cache's pure part
 db/migrations/039_*.sql          # change 81 (new file — the two HNSW indexes over embedding::halfvec under their names; match_thoughts' walk branches order by the cast)
 db/migrations/040_*.sql          # change 91 (new file — 039's match_thoughts with `SET jit = off`; a disabled planner path no longer JIT-compiles the gate's sample)
 db/migrations/041_*.sql          # change 94 (new file — 040's match_thoughts with `enable_nestloop = on` and `enable_tidscan = on` pinned; an operator's setting no longer reaches the call's joins or the gate's probe)
-db/migrations/042_*.sql          # change 95 (new file — query_log.tool's two shapes and the table's cite clause as COMMENTs, behind 031's guard; test-schema [41], test-upgrade [20]; [21] keeps test-support's reset lists honest)
+db/migrations/042_*.sql          # change 95 (new file — thought_facets, the citation guard on thoughts, delete_thought(uuid, jsonb, boolean), record_citation)
+db/migrations/043_*.sql          # change 98 (new file — query_log.tool's two shapes and the table's cite clause as COMMENTs, behind 031's guard; test-schema [42], test-upgrade [20]; [21] keeps test-support's reset lists honest)
 evals/eval-quant.ts              # change 81 (new file — vector, halfvec and binary-with-rerank measured on real vectors at the shipped width; test-schema [38], test-upgrade [16])
 <4 vendored MCP servers, 1 sample> # change 78 (a McpServer built per request — per session in the cost recipe's after sample — in place of one shared and connect()ed to a fresh transport each time)
 <17 pin sites, 3 lockfiles>      # change 83 (@hono/mcp 0.1.1 → 0.1.5: the transport lets go of each POST it has answered; the after sample's sweep closes the transports it drops)
@@ -14129,8 +14130,8 @@ row, so a cite now counts as click-through relevance too — the stronger label,
 and the export's note says so. 034's table `COMMENT` still described an action
 as a fetch, edit or delete; a migration's text is not edited after the fact
 (the ledger would read it as drift), so the server, store, preflight and README
-carried the new shape and the `COMMENT` predated it until change 95
-re-commented the table and the column through migration 042.
+carried the new shape and the `COMMENT` predated it until change 98
+re-commented the table and the column through migration 043.
 
 `evals/utilization.ts` is the pure part: 034's attribution rule (most recent
 prior search by the same agent, within the window, whose results held the id; a
@@ -14177,7 +14178,7 @@ cited* belongs on the event itself, which is SMD-1730's event shape (Phase 1
 of SMD-1729), not a column bolted onto 034 now. The column's own `COMMENT`
 still described three plain names; re-commenting it through a new migration,
 as 028 did for the claim table, was **SMD-1749** (a third pass proposed it;
-a second mechanism for this PR) and is change 95.
+a second mechanism for this PR) and is change 98.
 
 An `update_thought` that re-sends the pointer
 the row already holds logs a cite although nothing changed (a third pass):
@@ -15132,7 +15133,6 @@ sections — the cost this fork already carries for the four files change 58 cut
 Upstream's own path needs none of this: on Supabase the roles exist and
 `service_role` bypasses RLS. The literal-aware strip and the rule are
 portable; the grant group is the fork's.
-
 ### 94. `match_thoughts` pins the two planner paths its statements are built around — migration 041 adds `enable_nestloop = on` and `enable_tidscan = on` to 040's function, so an operator's `enable_nestloop = off` no longer turns every join in the call into a merge or hash join over the whole table, and on PostgreSQL 18 `enable_tidscan = off` no longer turns the gate's eight one-page probes into eight scans of the heap (SMD-1677, SMD-1703)
 
 **The mechanism.** Every join in `match_thoughts`' body is a primary-key
@@ -15472,8 +15472,660 @@ unchanged, and preflight names the loss with the `ALTER` that puts both back.
 
 **Upstream status:** not applicable — 014's routing statement, 037's gate and
 038's probe are this fork's, and the pins are clauses on this fork's function.
+### 95. A thought cited as a source cannot be deleted from under the citation — `thought_facets` with one kind, a statement-level guard on `thoughts` that refuses with its own SQLSTATE, `delete_thought` answering it as a value with the citing rows named, and a detach opt-in (SMD-1712)
 
-### 95. The cite shape is stated at the table — `query_log.tool`'s two shapes, and the table's cite clause, carry a COMMENT (SMD-1749)
+Nothing on the fork recorded that one thought is the *source* of a statement
+made in another. Change 46 (migration 025) records what a thought was derived
+from and which thought it replaces — facts about the whole thought. A citation
+is finer: "this statement in note C rests on thought S". Without it,
+`delete_thought(S)` removed a source a later note leaned on, silently, and the
+note read the same afterwards with nothing behind it. The proposal bundle of
+2026-09-12 drafted the fix — a `thought_facets` sidecar with a claim kind, a
+`BEFORE DELETE` guard raising `foreign_key_violation`, `delete_thought`
+catching it — against a `main` that had since moved under every hunk (the
+ticket lists the eleven ways). The idea lands here as migration **042** on the
+fork's own terms.
+
+**The gate, and the number it was decided on.** SMD-1712 was gated on
+SMD-1711's re-measure at ten tagged tickets. When this was built the log held
+three (this file's "Review passes" section explains the tag): 9 review-pass
+commits since the first tagged one, 69 finding rows, **68 tagged (99%)** against
+**0 of 511** before the convention; cold-read caught 82% of the code and
+test-teeth defects, run-it 11%, mutants 7%; defect share 42 / 28 / 62% at passes
+one to three (small n). The epic SMD-1729 says to re-decide the gate on what is
+tagged rather than let it stall Phase 2, and the operator called it: the tag
+convention shows that what is recorded at the moment of the act is recoverable
+and what is not, is not — 0 of 511 before, 68 of 69 after — which is the
+thesis this facet rests on. The ten-ticket re-measure still runs when it can
+(`bun scripts/mechanism-yield.mjs --since fe09f4d`); it now judges Phase 3.
+
+**What 042 adds.** One table, `thought_facets` (`thought_id` → `thoughts`
+`ON DELETE CASCADE`, `kind`, `payload jsonb`, `valid_until`, `superseded_by` →
+a later facet, `ON DELETE SET NULL`), with **one registered kind**, `citation`,
+payload `{text, stance, source_id}` — the statement, whether it was stated /
+retrieved / inferred, the thought it rests on. `thought_facets_validate`
+(`BEFORE INSERT OR UPDATE`) refuses an unregistered kind, a non-object payload,
+an empty text, a stance outside the three, a `source_id` that is not an existing
+thought or is the citing thought itself, all as `check_violation`; a later
+migration registers a kind by extending the function, not by the proposal's
+vocabulary registry, which is not built. A citation is *active* while
+`valid_until` is null or future and no facet that still exists supersedes it
+(`thought_facet_active`, the one spelling — why "still exists" rather than
+"pointer is null" is below); only active citations gate a delete, and a read
+should label an expired one, never hide it (change 46's rule, the ticket's
+rider on proposal issue 04).
+
+`thoughts_guard_citation_sources` is **`AFTER DELETE … FOR EACH STATEMENT`,
+`REFERENCING OLD TABLE AS deleted`** — not the proposal's row-level `BEFORE`
+trigger, and this was found while writing the tests, not designed in. A
+row-level guard sees one row at a time: "delete the note and its source
+together" would be refused or not by the order the rows came in (the note's
+row first cascades its facet and the source then passes; the source's row first
+finds the citation and refuses), and a reset — `DELETE FROM thoughts` — would
+be refused the moment any citation existed. Order-dependent behaviour is the
+class this fork treats as a defect, so the statement is the unit a deletion is
+judged by: the guard counts the active citations whose source is a deleted row
+**and whose own thought the statement leaves standing** — which is every
+citation the join finds, because the cascade on `thought_id` is a row-level
+`AFTER` trigger and Postgres fires those before any statement-level one. A
+`NOT IN (SELECT id FROM deleted)` clause was written to say so explicitly; its
+mutant passed every check, so it was removed rather than kept as a mechanism
+that is not one, and the reliance is stated in the header. The guard judges the
+state the statement *leaves*: deleting the thought that carries a replacing
+citation together with the source revives the replaced citation on a note that
+survives (`superseded_by`'s `SET NULL`), and the statement is refused — after
+it, that note would rest on nothing, which is the question the guard asks. The
+first review pass raised that case, and writing its test found the gap: the
+`SET NULL` is a nested referential action and fires *after* the statement-level
+guard, so the first draft judged the replaced citation still superseded, marked
+it, and the `SET NULL` then revived it — detached, under refuse mode.
+`thought_facet_active` therefore reads whether the superseder still exists,
+not whether the pointer is null, which says what the `SET NULL` is about to say
+whatever the phase order ([41] holds the case both ways). If
+any survive, and the transaction-local `ob1.cited_delete` is not `detach`, it
+raises **SQLSTATE `OB001`** and the whole statement fails. Otherwise it
+*detaches* every surviving citation that named a deleted row, active or not:
+the row keeps its text and stance, `source_id` becomes JSON null and
+`source_deleted_id` / `source_deleted_at` record which thought went and when —
+the citation survives as "rested on a thought deleted at T", which is what a
+reader of the note needs to know, and no row names a thought that is gone. The
+citing rows are read **under a row lock** (`FOR NO KEY UPDATE`) before anything
+is decided, so each row's status comes from the version its lock won: a
+citation revived by a concurrent writer — `valid_until` or `superseded_by`
+cleared between a look and a write — is seen as active, where the first draft's
+unlocked count followed by an UPDATE counted the old version as expired and
+rewrote the new one under refuse mode (the first review pass's top finding;
+`db/test-live.ts` [6i] arm 4 holds it against a real server, and
+`thought_facet_active(thought_facets)` is the one spelling of "still counts" the
+guard and the function's sample share). The rewrite runs only when the delete
+proceeds — the first pass had made count and rewrite one `UPDATE … RETURNING`,
+which rewrote every citing row and discarded the rewrite on each refusal
+(second pass); the lock footprint stays and is stated: a refuse-mode delete of
+a source cited N times holds N facet rows until the statement fails (fifth
+pass). Nothing can slip in between the locked read and the rewrite: a new
+citation's writer takes `KEY SHARE` on the source and waits on the `DELETE`'s
+own row lock. A detach also moves the citing thoughts' `updated_at`: a facet
+is part of its thought's record, so a reader holding an older
+`if_unchanged_since` is told `STALE_READ` on its next edit rather than writing
+text that still asserts the statement rests on the deleted source; only for
+*active* citations, since marking an expired or superseded one is history's
+bookkeeping and moving a clock for it would send an editor with nothing to
+reconcile back to re-read (seventh pass); 008's audit trigger sees an empty
+diff and writes no row, and a facet event on the audit trail is the event
+shape's to define (SMD-1730; fifth pass). That bump locked
+the citing thoughts *after* the facets, which the sixth pass caught as a
+deadlock with a raw delete of a citing thought — that delete holds the
+thought's row while its cascade wants the facets — so the guard now locks the
+citing thoughts' rows *first*, before any facet: whoever wins the thought, the
+other waits and no cycle forms ([6i] arm 6 holds it deterministically). Each
+citing row is judged once, in the locked read; the refusal's sample and the
+rewrite go by the ids that read classed, so count and sample cannot disagree
+(sixth pass). The detached shape is accepted by the validate trigger
+only as the guard writes it — from the source the row had, once that thought
+is gone, with a real timestamp — so a raw `UPDATE` cannot detach a live
+citation or forge a deletion; a detached citation is not re-pointed at a new
+source either, since the reverse transition would leave the deletion keys
+beside a live source (third pass) — though it follows its *own* source back
+when 008/009's recovery restores that thought under its id, the deletion keys
+going with the deletion (fifth pass); a detached row may arrive *whole* by
+`INSERT` under the same checks, since a restore or an import of the facet table
+would otherwise lose exactly the history the detach kept (fourth pass), its
+deleted id stored canonical like a live one (fifth), and re-attached at once
+when its lost source already exists again — a restore that brought the
+thoughts back first (sixth); a citation *with* a source carries no deletion
+keys, written or added, so no row reads as detached from a thought that was
+never deleted (sixth); and
+the source id is stored canonical, since
+the validate regex is case-insensitive and a raw writer's upper-case uuid would
+otherwise have been invisible to the guard's text compare — its source
+deletable from under it (both second pass; [41]). `superseded_by` carries a
+partial index, because its `SET NULL` is a referential action that scans for
+the pointing rows on every facet the `thought_id` cascade removes (third pass).
+It totals what it did in two transaction-local settings, summed across
+statements. The refusal is the *table's*: a bulk `DELETE`, a vendored script,
+`psql` all meet it, the way 008's append-only rule is `thought_audit`'s; the
+way through is the setting, which only a caller who names it takes. The price
+is the transition table, and it was measured rather than asserted (second
+review pass, real server): `DELETE FROM thoughts` over 20,000 rows of
+1,024-dimension vectors ran in 483 ms with the guard and 534 ms with it
+disabled — medians of three, the difference noise — and a single
+`delete_thought` of an uncited row takes 0.43 ms. The deleted tuples are held
+as the statement already holds them; the DELETE's own work is the cost. Above
+that size the reasoning, not a measurement: a transition tuplestore keeps each
+tuple as the heap held it, TOAST pointers included, and at this width the
+vector is out of line — a reset of a million rows spools headers and pointers,
+not gigabytes of vectors, and spills as the DELETE itself does (the fifth pass
+named the scale; no reset has been run at it here).
+
+**Under READ COMMITTED.** Every lock-order argument on this fork — change 40's
+fingerprint lock, 63's one order, 68's delete, this guard — holds because a
+writer that waits on a row lock re-reads the row the lock won. A deleting
+transaction run `REPEATABLE READ` or `SERIALIZABLE` reads its own snapshot in
+the guard, so a citation committed after that snapshot and before the
+`DELETE` is invisible to it and its source goes from under it; a real foreign
+key uses a crosscheck snapshot a trigger cannot. The third review pass named
+it; the header states the assumption, and preflight gains a **`transaction
+isolation`** check that warns — not refuses — when the connection's default is
+not read committed, naming the guarantees that rest on it and the `ALTER ROLE`
+that restores it. The guard itself does not refuse on isolation, since every
+other guarantee here already stands or falls with the same setting.
+
+`delete_thought(uuid, jsonb, boolean)` is **036's body** — the actor and the
+mode set first, *outside* the block (a caught exception rolls back its
+subtransaction, `set_config` included, and 008's audit trigger must still see
+the actor); the supersession advisory lock, also outside the block, since a
+savepoint's rollback releases the advisory locks it acquired and this one must
+outlive a refusal; then the `DELETE` inside `BEGIN … EXCEPTION WHEN SQLSTATE
+'OB001'`, answering `{ok:false, error:'CITED', id, cited_by, citations}` — the
+count and up to ten citing rows, newest first. Those ride in the guard's error
+`DETAIL` as JSON, read from the rows the guard locked, and the function reads
+them back with `GET STACKED DIAGNOSTICS`, so the answer is exactly what the
+guard refused on. The first draft re-read the table after the rollback, under a
+fresh snapshot where the rows could already differ from the ones that refused;
+the fourth pass patched that with a retry when the re-read came back empty,
+and the fifth removed the re-read instead — the guard already held the answer
+(fifth pass). Only that SQLSTATE is caught: a real
+`23503`, a permission failure, anything else propagates as the fault it is —
+the proposal's `WHEN foreign_key_violation` would have reported every FK failure
+on a delete as "cited". Success carries `detached:n` and, when non-zero,
+`inactive:m`. The mode is the *call's*, not the transaction's: the setting that
+was there is put back after the block, so a raw `DELETE` later in the same
+transaction meets the guard's default, or the caller's own setting, and not
+this call's `p_detach` (first review pass; [41]); the two running totals are
+read before and subtracted after — the guard adds to them, a refusal's
+rollback undoes its adding — so this call's own count is the difference and a
+raw detach transaction that calls the function in the middle keeps its sum
+(third pass found the loss, the sixth replaced the zero-and-restore with the
+difference). The two-argument overload is
+**dropped first** (a `DEFAULT` on the third parameter beside it makes every
+two-argument call "not unique"); two-argument callers — `db/test-live.ts`
+[6g], the vendored servers' `rpc` calls — resolve through the default, which
+is the old behaviour plus the refusal. And `record_citation(uuid, uuid, text,
+text)` is the one writer, because a citation write locks the source `KEY
+SHARE` and every writer of a contended row on this fork has taken the
+supersession advisory lock *first* since changes 63 and 68: the function takes
+it, then locks both thoughts `KEY SHARE` in its prechecks — so a source deleted
+in flight is waited out and answers `SOURCE_NOT_FOUND` as a value rather than
+the validate trigger's `check_violation` an instant later ([6i] arm 5) — then
+the `INSERT`'s validate trigger re-locks the source. Refusals as values:
+`NOT_FOUND`, `SOURCE_NOT_FOUND`, `SELF_CITATION`, `BAD_STANCE`, `EMPTY_TEXT`.
+**No MCP tool calls it yet** — the write side of citations belongs to the
+epic's event shape (SMD-1730) and grounding rule (SMD-1733); this change is
+the guard, and the writer the guard is tested through.
+
+**The check is not a precheck, and the race is measured.** The guard fires
+inside the `DELETE`, so a citation committed between a look and the delete is
+seen; the validate trigger's `FOR KEY SHARE` on the source is the lock a
+foreign key would take, so a delete of that row waits for the citation's
+transaction and then, under READ COMMITTED with an `AFTER` trigger running
+after the statement's own waits, sees it. `db/test-live.ts` [6i] runs it three
+ways against a real server, five after the first pass: a raw `INSERT` holding
+`KEY SHARE` (the delete waits, then is refused, nothing dangles), and a sixth
+after the sixth pass — a raw delete of the citing note while the source's
+detaching delete runs, which completes with nothing to detach where the
+fifth pass's lock order deadlocked;
+`record_citation` in a transaction that goes on to write `supersedes` (the lock
+is re-entrant, no cycle, refused after the commit); the residue stated in 042's
+header — a raw writer whose transaction takes the advisory lock *after* the
+row, through `update_thought`, against the waiting delete — which deadlocks,
+deterministically, and Postgres breaks it with nothing dangling either way (that
+arm is what `record_citation`'s order exists to avoid, and a raw `UPDATE` of a
+facet's `valid_until` or `superseded_by` — the only way to expire or supersede
+a citation until the write side lands a writer for it, SMD-1733 — is the same
+residue in the same shape, stated in the header; fourth pass); a citation revived
+under an open transaction while its source is deleted (the delete waits on the
+row and reads the revived version: refused); and a raw delete of the source in
+flight while `record_citation` runs (it waits on the row and answers
+`SOURCE_NOT_FOUND` as a value).
+
+**On the portable server.** `MutationError` gains `CITED`; `deleteThought`
+takes `detach`, both stores send the third argument explicitly (`p_detach`
+named, so PostgREST resolves the one function), and `normaliseMutation` carries
+`citedBy`, `citations`, `detached` and `inactive`. The tool gains
+`detach_citations` (default false); a refusal reads "Refused: 13 citations on
+other thoughts rest on <id> as their source — deleting it would leave those
+statements resting on nothing:", lists the ten sampled `thought_id (stance):
+text` lines, "…and 3 more", then the way through; a success says how many were
+detached and records the deleted id, or how many expired or superseded rows
+were marked. The guard runs as the calling role, so `ROLE_GRANTS.capture` gains
+`thought_facets` `SELECT, UPDATE` (`since: "042"`) — a self-hosted server role
+without them cannot delete *any* thought — and preflight's `write privileges`
+names it with its `GRANT`; the README's grants table carries the row (check 7's
+README rule holds the two together). Preflight also gains a **`delete
+signature`** check beside `edit signature` (first review pass): both stores now
+send three arguments, so a server deployed ahead of the migration would have
+started green and failed every delete at the first user call with "function
+does not exist", and a hand re-apply of 009 or 036 over 042 would put the
+two-argument form back beside it and make every two-argument caller "not
+unique" — the check names each state with its remedy, as 032's does for
+`update_thought`; over PostgREST, where the catalog is out of reach, the same
+check probes `delete_thought` with an id no row has, as the edit check does,
+since the hosted brain is the one that deploys a server ahead of a migration
+(third pass) — and a `permission denied` from that probe is a failure naming
+the `GRANT`, not a skip, since the guard reads `thought_facets` as the caller
+on every delete and the probe itself just met the missing privilege; the
+direct path's `write privileges` says separately what a missing facet
+privilege breaks — every delete — rather than the capture path, so an operator
+whose capture succeeds is not told the check was wrong (seventh pass). And a
+citation's text in a refusal goes through the same
+`cleanForDisplay` every other thought-derived text in a reply does — the first
+draft had re-implemented the one-line snip without it, the only place a
+thought's text would have reached a terminal with its control characters
+(first review pass; `snipText` is now the one spelling, and the proposals
+tool's snip calls it). The refusal's count is coerced with `Number()` and a
+`CITED` body carrying neither count nor rows — one the function did not write
+— is said to be that rather than "0 citations", and the tool types the rows
+with the store's `Citation` (second pass); the count is a number or a string
+of digits and nothing else, since `Number()` alone took `true` and `[5]` for
+counts (seventh pass); and the delete-only refusal fields live on
+`DeleteResult`'s own failure arm rather than the shared `MutationResult`, so
+`UpdateResult` advertises nothing `update_thought` never returns — one
+`MutationEnvelope` is what the normaliser reads and both result types narrow
+(seventh pass). The hosted remedy for the search
+signatures names 042 as the last file to apply through, so an operator who
+follows it is not sent back for `delete signature` on the next start (fifth
+pass).
+
+**Held by:** `db/test-schema.ts` [41] on PGlite — the shape (two triggers, the
+guard per statement over `deleted`, one three-argument `delete_thought`, the
+one `EXCEPTION` clause naming the one SQLSTATE, the lock before the block the
+`DELETE` runs in and the refusal read from the error, the writer's order, the
+`KEY SHARE`, both partial indexes),
+refuse / detach /
+history marked / thirteen counted and ten sampled / note and source together
+clean while a third citer refuses it / two sources in one raw detach statement
+totalling 2 / a raw `DELETE` meeting the table's refusal / an unknown mode /
+five raw-insert shapes / a real FK failure propagating / 042 re-applied twice /
+a whole-table reset clean — and [36] re-pointed at 042's body for 036's lock
+assertions; `server-portable/test-update-delete.ts` [10] through the tool over
+real Postgres, the FK-fault fixture included; `db/test-live.ts` [6i], the five
+race arms above; `test-upgrade` [7]'s window guard and note moved to eleven;
+`test-preflight` [5]'s capture-role walk names the facet `UPDATE` and its
+signature walk re-applies 036 over 042 and drops 042's form for the `delete
+signature` check; `server-portable/test-store-postgrest.ts` [12] drives
+`deleteThought` through the SQL shim — `p_detach` named and bound, the `CITED`
+envelope normalised, a two-argument named `rpc` still resolving. Ten
+mutants, each reverting one mechanism, each failing the suite named for it:
+the lock dropped from `delete_thought` ([36], [41], and [6g]'s forty-race
+deadlock — 13 of 40), the guard raising `foreign_key_violation` ([41]'s
+refusal becomes a fault; [10]), the `KEY SHARE` dropped ([6i] arm 1: the
+delete no longer waits), history counted as active, a self-citation allowed,
+the writer's lock dropped ([6i] arm 2 deadlocks), the guard's default flipped
+to detach, `WHEN OTHERS` (the FK fixture answers `CITED`), the store dropping
+`cited_by`, the tool never passing `detach`. An eleventh — the same-statement
+exclusion dropped — passed every check and is the clause removed above. The
+four review passes added seventeen more, one per fix, each biting. From the
+first and second: the mode never put back, the unlocked count-then-detach
+guard ([6i] arm 4, twice: once as the first draft's shape, once as a read
+without the row lock), the unlocked source precheck ([6i] arm 5), a superseder
+already gone still superseding, the citation text skipping the cleaner,
+preflight treating every `delete_thought` form as current, the id stored as
+written, a live source detached by a raw `UPDATE`, a non-timestamp accepted as
+the deletion time, a `source_deleted_id` the row never had, the store's
+`typeof` guard on the count. From the third: a detached citation re-pointed,
+the superseder index dropped, the totals not put back, the isolation check
+treating every level as read committed. From the fourth: a detached row
+refused on `INSERT`; and one toothless by design — the guard rewriting by
+predicate rather than by the ids it locked, which coincide by construction.
+From the fifth: the refusal's `DETAIL` dropped — which first crashed the
+function on an empty string as JSON, so the parse is defensive and an `OB001`
+without the guard's JSON answers a count of nothing — a detached citation
+refused its own restored source, the deleted id stored as written, the citing
+thought's clock not moved. From the sixth: the citing thoughts locked after
+the facets ([6i] arm 6 deadlocks), a live citation accepting deletion keys, a
+detached row inserted whole refused its restored source, the store throwing
+on a null citation element. From the seventh: the clock moved for an expired
+citation's mark, `true` taken for a count, the facet privilege's failure
+worded as the capture path's.
+
+**Considered and kept as is.** The third review pass argued the source pointer
+should be typed columns — `source_id uuid`, `source_deleted_id uuid`,
+`source_deleted_at timestamptz` — since the upper-case id, the forged detach
+and the non-timestamp findings of passes 1–2 are what jsonb keys cost that
+types give for free. They are; but `thought_facets` is a sidecar of *kinds*,
+each with its own payload, and a column trio for one kind on a table whose
+next kinds (a procedure's trigger predicate, a validity window) carry other
+pointers puts the per-kind shape back into DDL, which is what the payload and
+the one validate function exist to avoid. The validate trigger is the one
+place a kind's shape is checked, and every defect found there is now held by
+a test. Revisit when a second kind carrying a thought pointer lands; if it
+needs the same block, that is the moment for a shared column.
+
+**Not built, and why.** The proposal's vocabulary registry, corrections table,
+coverage and yield views (each a later ticket if the facet earns its keep);
+`thought_edges` (declined in change 46, and check 7 knows upstream's shape as a
+clobber pattern); a read that labels a citation's expiry or a deleted source
+(SMD-1725's `as_of` read is where labels on facets belong); any writer over
+MCP. Three vendored servers delete with a raw `.delete()` on `thoughts` at four
+sites — `integrations/rest-api`'s dedup merge (after it has rewritten the
+survivor and logged the merge) and its delete route,
+`integrations/delete-thought-mcp`, `integrations/open-brain-rest` — and now
+meet the guard as a bare `OB001` with no detach path, the way every
+raw writer met 008's rule; routing them through `delete_thought` is
+**SMD-1793**, filed from the first review pass in the shape of changes 69 and
+71. `--reapply` (change 56) re-runs 009 and 036 in their turn, each re-creating
+the two-argument form, and 042 drops it again in its.
+
+**Upstream status:** not applicable — the fork's schema; upstream has no
+citation or facet concept.
+
+
+### 96. The two `created_at` mappers change 92 scoped out take the same rule — the provenance walk and `list_supersession_proposals` no longer fabricate the epoch on a NULL, and the proposal tool no longer *throws* on an `infinity`-dated thought (SMD-1803)
+
+Change 92 (SMD-1328) settled the null / no-ISO-form decision on the
+list/match/get read path and the five renderers, and in its **Declined** note
+named the two mappers it left on the pre-fix `new Date(...)` convention:
+`derivationFields` (025's `trace_provenance` / `find_derivatives`, feeding
+`ProvenanceNode` and `Derivative`) and `normaliseProposal` (029's
+`list_supersession_proposals`). Both are graph walks over captured thoughts, off
+the path 92 scoped and reachable only by a hand-INSERT, so they were the
+follow-up. This is it: they take 92's rule too.
+
+**What changed.** Both mappers now read `created_at` through
+`isoTimestampOrNull`, so it is `string | null` on `ProvenanceNode`, `Derivative`
+and the proposal's `older` / `newer` — a NULL ancestor or proposal thought reads
+back as `null`, not the fabricated epoch string. `normaliseProposal`'s local
+`iso = (v) => new Date(v).toISOString()` is gone: `older.created_at` /
+`newer.created_at` take `isoTimestampOrNull`, `judgedAt` (029's
+`NOT NULL DEFAULT now()`) takes `isoTimestamp`, and `reviewedAt` (set only on
+review) `isoTimestampOrNull`.
+
+**The severe half.** That local `iso` had no `infinity` branch, so an `infinity`-
+or BC-dated proposal thought made `new Date("infinity").toISOString()` throw
+`RangeError: Invalid time value`, and `list_supersession_proposals` returned an
+error for the **whole queue** rather than misrendering one row — worse than the
+silent epoch fabrication 92 fixed. It now returns, keeping the sentinel as its
+own text.
+
+**Render and CLI.** The proposal `day()` in `index.ts` moves onto `displayDate`
+(`[undated]` for a null date, `infinity` for the sentinel — never the
+`12/31/1969` `toLocaleDateString` gave `new Date(null)`, nor "Invalid Date"). The
+offline maintainer CLI `db/consolidate.ts`, which the tool's text points
+operators at, carried the same two defects: its `day()` now goes through the
+store's `isoTimestampOrNull` (a sentinel has no `T`, so it prints whole rather
+than sliced to a stub), and the judge-prompt `dateOf` feed
+(`server-portable/consolidate.ts`) renders a NULL as `an unknown date` instead of
+feeding the model a fabricated `1970-01-01` — `infinity` was already inert there,
+since `getTime()` is `NaN` and `String(d)` kept it.
+
+**Teeth.** `test-thoughts` [9] asserts `buildJudgeMessages` renders a NULL date as
+`an unknown date` (not the epoch) and an `infinity` one as its own text (not a
+throw). `test-store-sql` [13] and `test-store-postgrest` [12] plant a NULL-dated
+ancestor and derivative and an `infinity`/NULL-dated proposal pair, and assert
+`traceProvenance` / `findDerivatives` map the NULL to `null` and
+`listSupersessionProposals` **returns** rather than throwing, keeping `infinity`
+and `null`. `test-e2e-sql` [12] drives the real tool over MCP: pre-fix the call
+returned `isError` (the `RangeError`), post-fix it renders `older [infinity]` /
+`newer [undated]` with no fabricated date reaching the client. `db/test-live` [16]
+is the CLI's teeth — it runs `db/consolidate.ts --list` as a subprocess over a
+planted `infinity`/NULL-dated proposal pair and asserts it exits 0 (pre-fix its
+`day()` threw and `--list` crashed) rendering `[infinity]` / `[undated]`, no
+`[1970-01-01]`.
+
+**Upstream status:** these two mappers are fork-only — migrations 025
+(provenance) and 029 (proposals) and their tools are fork additions, and
+`server/index.ts` (the upstream edge) has no provenance or proposal code at all,
+so there is no upstream mapper carrying this bug to fix or file. (server/'s own
+`created_at` read/render path still carries the `new Date(...)` fabrication change
+92 left there by design; that is 92's divergence, not this one's.) Not filed
+upstream — these rows reach no capture path.
+---
+
+### 97. The SQL store is the default — `OB1_STORE` unset selects `store-sql.ts`, `preflight.ts` carries no supabase-js client of its own, and the PostgREST store is kept for Cloudflare Workers alone, reported as retired wherever Bun runs (SMD-1797)
+
+**Problem.** `createStore` read `OB1_STORE ?? "postgrest"`: the portable server,
+this fork's reference deployment, reached its brain through Supabase's PostgREST
+API unless told otherwise. `SETUP.md` — "No Supabase account" — held only
+because `deploy/compose.yaml` set `OB1_STORE=sql` by hand, so the default
+contradicted the document written around it, and the two fast suites ran the
+PostgREST store against a stub URL — `test-server.ts` by relying on the default,
+`test-auth.ts` by selecting it — the store no SETUP.md deployment has. `preflight.ts` imported
+`@supabase/supabase-js` for two probes of its own — a 4-argument `match_thoughts`
+and a 7-argument `update_thought`, sent as an outside caller would to catch an
+older overload beside the current form — that no fixture ever drove: test-preflight
+runs the direct-SQL path only, and the PostgREST probes were held by reading
+(the SMD-1712 note on the ticket). Sub-issue 2 of SMD-1795; change 93 was 1.
+
+**The Workers decision, stated rather than hedged.** Cloudflare Workers cannot
+hold a Postgres connection, and `store-sql.ts` imports Bun's client, which does
+not exist there — so the retirement is of the *default* and of preflight's own
+client, not of the file. `store-postgrest.ts`, `test-store-postgrest.ts` and the
+`@supabase/supabase-js` dependency stay in `server-portable/` for that one
+target, and `wrangler.toml` now pins `OB1_STORE = "postgrest"` as a `[vars]`
+binding (a property of the target, not a secret — `wrangler deploy --dry-run`
+lists it), because under the new default a Workers deployment that relied on
+the old one fails at its first tool call — on the SQL store's `DATABASE_URL`
+refusal, or, with a connection string set, at `shims/bun-unavailable.ts`. Whether
+a driver that runs on Workers (Hyperdrive in front of `postgres` or `pg` over
+`connect()`) lets the SQL store run there is **SMD-1847**, filed here as the
+measurement the ticket asked for before any promise; until it lands, Workers is
+PostgREST-only, and SMD-1336, SMD-1245 item 1 and SMD-1040's PostgREST
+normalisers stay open with the file.
+
+**Change.**
+
+- `store.ts`: `DEFAULT_STORE = "sql"`; `storeKind(env)` (lower-cased, defaulted)
+  and `createStore` read it. `databaseUrl(env)` resolves the SQL store's
+  connection string — `DATABASE_URL`, else `SUPABASE_URL` when it holds a
+  `postgres://` URL, the spelling `compat/supabase-sql` takes for every
+  vendored server migrated onto it, so a box running one beside this server
+  sets one name — and says which variable supplied it. `missingDatabaseUrl(env)`
+  is the one refusal for `createStore`'s throw and preflight's `DATABASE_URL`
+  line, problem and fix apart; when `SUPABASE_URL` holds an `https://` URL — the
+  deployment the old default served — it names both ways out: a connection
+  string, or `OB1_STORE=postgrest` to keep reaching the brain through PostgREST.
+  `postgrestOnBunNotice(kind, hasBun)` is the retired line: a string for
+  `postgrest` on a runtime with `Bun`, null on Workers and for every other
+  selection. The unknown-store message names `sql` as the default and
+  `postgrest` as the Workers store. The docblock's cutover rationale — run both
+  stacks and diff — is recorded as done (test-store-postgrest, the shared
+  normalisers) rather than as the reason both files exist.
+- `index.ts`: `db()` logs the notice once, at the moment the selection takes
+  effect; the `Env` comments say which store each variable serves.
+- `preflight.ts`: no `@supabase/supabase-js` import. `store selection` reports
+  `OB1_STORE unset — sql, the default`, or a **warn** for `postgrest` carrying
+  the notice as its fix line, or the fail naming both stores. The connection
+  string is resolved once (`conn`) and every direct-connection check dials
+  *that* — before, the block was gated on `env.DATABASE_URL` by name, which
+  would have skipped every catalog check for a `SUPABASE_URL`-supplied string.
+  Over PostgREST, `search signatures` and `edit signature` probe through the
+  store's own calls (`matchThoughts` with 020's six arguments; `updateThought`
+  on an id no row has, which answers `NOT_FOUND` and writes nothing) — 020's and
+  032's forms are proved, and the overload half, a `pg_proc` fact, is named as
+  the SQL run's with `CATALOG_HINT` rather than probed through a client
+  preflight no longer has. `CATALOG_HINT` itself no longer says
+  `OB1_STORE=sql`.
+- `wrangler.toml` `[vars] OB1_STORE = "postgrest"` with the reason;
+  `shims/bun-unavailable.ts` says how the stub is reached under the new default;
+  `.dev.vars.example` points at the binding; the Dockerfile's env comment lists
+  `DATABASE_URL` first.
+- `deploy/compose.yaml` drops `OB1_STORE: sql`: the "Full stack, no Supabase"
+  job now runs the default, so a default that drifted back would crashloop the
+  reference deployment in CI rather than pass with the variable set by hand.
+- Tests. `test-e2e-sql.ts` leaves `OB1_STORE` unset and asserts it (the
+  data-layer job's tooth: with the default reverted the suite dies at its first
+  tool call — run). `test-auth.ts` runs the default store against
+  `127.0.0.1:1`, refused at once, in place of the stub PostgREST; its [11] says
+  so. `test-server.ts` seeds no store at all — nothing there calls a tool — and
+  its new **[14]** holds the factory: an empty env is `sql`; no connection
+  string is refused as the SQL store naming `DATABASE_URL`, never
+  `SUPABASE_URL`; an `https://` `SUPABASE_URL` under the default is told
+  `OB1_STORE=postgrest`; a `postgres://` one is the connection string, after
+  `DATABASE_URL`, and builds the SQL store; `postgrest` still builds its store;
+  the notice fires for `postgrest` with Bun and for nothing else; the
+  unknown-name refusal names the default. `test-preflight.ts` [1] adds the
+  unset run (exit 1, both lines say `sql`, `SUPABASE_URL` not asked for), the
+  `https://` run (both ways out), the `postgres://`-alias run (masked,
+  attributed, not called unused, failing only at the unreachable database) and
+  the `postgrest` run (a `!` line naming Workers, the notice as its fix, its own
+  config still `✓`); its DIRECT_CHECKS anchor follows the block's new gate.
+  `test-store-sql.ts` [1] builds the store with no `OB1_STORE` and counts rows
+  through it. Reverting `DEFAULT_STORE` to `postgrest` fails test-server [14]
+  (four assertions on the first tree; six, then an abort at the alias build,
+  after the review passes) and crashes test-e2e-sql at its first capture (both run).
+- Docs: `server-portable/README.md`'s store table (sql default; postgrest =
+  Workers, selected by `wrangler.toml`), the paragraph under it, the env block
+  (`DATABASE_URL` required; the Workers variables and the `SUPABASE_URL` alias
+  explained; the `https://`-under-default refusal), the suite counts (177 / 67 /
+  31 / 113 / 112 after the review passes; Workers bundle 342 KiB gzipped,
+  measured — the file said 281 from an earlier stack) and the Workers caveat;
+  `SETUP.md`'s two deployment rows.
+
+**Not done, and why.** The ticket proposed a new `OB1_DATABASE_URL` "that does
+not say Supabase". `DATABASE_URL` already is that name — `db/`, `deploy/`, CI
+and `SETUP.md` all use it and it names no vendor — so a third spelling for one
+value was declined; the `SUPABASE_URL` alias covers the one-box case the ticket
+had in mind. Said on the ticket; reversible in a line.
+
+**Measured.** `bunx wrangler deploy --dry-run`: `env.OB1_STORE ("postgrest")`
+listed as an Environment Variable binding, 342.42 KiB gzipped. Suites on this
+tree after the third review pass: test-server 177, test-auth 67, test-thoughts
+102, test-store-sql 113, test-store-postgrest 99, test-e2e-sql 112,
+test-preflight 253, test-local-provider 31; `tsc --noEmit` clean;
+`check-fork-consistency.mjs` PASS.
+
+**Review, first pass** (one cold reviewer over the diff, the author's own
+read). The reviewer ran preflight with `OB1_STORE=postgrest` beside a
+`SUPABASE_URL` holding a `postgres://` string — the one-box slip this change
+made likely by documenting that variable as a legitimate holder of a connection
+string — and the report printed the URL raw, password included, then handed the
+string to supabase-js and blamed "network reachability" for its `protocol must
+be http:, https: or s3:`. Fixed with one refusal for both callers
+(`postgrestOverPostgresUrl`, thrown by `createStore` and failed by preflight
+before the store is built) and `maskUrl` on every URL a report prints; the
+`m` run in test-preflight [1] holds it, `hunter2` asserted absent. The reviewer
+also ran the old-default deployment and read the report contradicting itself —
+the `DATABASE_URL` failure naming `OB1_STORE=postgrest` as a way out, two lines
+above warns saying to remove the variables that way out needs; the warns now
+wait for a connection string. Two teeth were found loose by reasoning about
+their mutants: the alias run's `/schema\s+/` matched the config-skip line, so
+"fails at the unreachable database" was asserted by exit code alone, and the
+gate the section above singles out (`conn`, not `env.DATABASE_URL`) was held
+by a source-text anchor and nothing behavioural — the run now requires the `✗
+schema` glyph, the absence of the skip text and `vector extension … could not
+verify`, the first direct check carrying the refused connection; and
+`index.ts`'s once-only notice had no test at all — test-server **[15]** boots a
+second module instance (Bun keys its cache on the specifier, so a query string
+yields one) with `postgrest` selected and captures `console.warn` across two
+tool calls. Both drills run: the gate reverted with the refusal dropped fails
+six assertions; the notice silenced fails two. Two claims corrected —
+`test-auth` never ran the default, it selected PostgREST by hand; "holds an
+`https://` URL" said of every non-`postgres://` value, a self-hosted
+`http://` PostgREST included — and six stale sentences (two CI comments, two
+test headers, `store-postgrest.ts`'s docblock, a checker comment) that still
+called `OB1_STORE=sql` the setting every suite runs or PostgREST the default. The author's own read added the schema remedy's
+`--url $DATABASE_URL`, empty under the alias, which now names the variable that
+holds the string or, over PostgREST, what to hand the migrator instead. One
+pre-existing by-catch, fixed because the change rewrote the block: over
+PostgREST with the schema check failed, `edit signature` printed nothing, and
+on every PostgREST run sixteen SQL-only checks (`vector extension` through
+`migration ledger`) printed nothing while the README called them skips — every
+`DIRECT_CHECKS` name not yet reported is now a named skip, and the README
+sentence is true. Checked and left: the removed 4- and 7-argument probes had
+no fixture in the parent, so nothing covered became uncovered; `wrangler.toml`
+has no `[env.*]` sections, so the top-level `[vars]` applies (a named
+environment added later would not inherit it).
+
+**Review, second pass** (a fresh cold reviewer, the author's read) — **STOP
+signal fired**: every finding sits in the first pass's additions, none in the
+change, and none is a behavioural defect. The `w` run's four-name sample of the
+new skip loop was a presence test: the reviewer moved the loop above the
+hand-written PostgREST skips in a copy, four names printed twice, and all eight
+assertions stayed green — the run now reads `DIRECT_CHECKS` from the source, as
+[4] does, and requires every name to print exactly one row, sixteen of them as
+the catalog-only skip. `maskUrl`'s `[^@]*@` stopped at the first `@`: a raw `@`
+inside a password left its tail in the report, and a credential-less URL whose
+query carried one lost its host (the author found the second, the reviewer the
+first) — the userinfo now ends at the last `@` before the first slash, with
+both cases, an IPv6 host and a path-less URL asserted. [15]'s second assertion
+matched two phrases a pasted copy would also carry; it now compares the
+captured line to `postgrestOnBunNotice("postgrest")` byte for byte. One stale
+sentence the first pass's sweep missed (`test-store-postgrest.ts`: "the default
+store speaks PostgREST" — the Workers store does), the README's "every
+direct-connection check is a named skip" corrected to say five are probed
+through the store's own calls (six once main's 042 `delete signature` probe
+merged in — rewritten through the store's `deleteThought`, as the other two
+were, since preflight no longer has a client of its own), the tally above corrected (two test headers and
+a docblock, not three headers), and the `DIRECT_CHECKS` comment now says whose
+order the list is in. Drills run: the loop moved above the hand-written skips
+fails the exactly-once assertion naming the four doubled rows; `maskUrl`
+reverted fails the raw-`@` case. Checked and left by the reviewer: the loop's
+placement (after every hand-written row, before the SQL-only block; `chunk
+context` on is not doubled), the `mismatch` branch's handling of the key, [15]'s
+module isolation (no module-level state in store/auth/agents), and every count
+in this section. The 1796 precedent — pass 2 called STOP and pass 3 found a
+defect — is noted; the signal here rests on a reviewer who ran the code, not
+only read it.
+
+**Review, third pass** (a third cold reviewer, angles the first two had not
+taken: the Workers path by reading, the entrypoint sequence branch by branch,
+every spawn of the server outside its directory; the author ran the compose
+stack). No behavioural defect. One claim error in the change's own text, made
+four times: `wrangler.toml`, the stub's docblock and message, the README and
+this section said a Workers deployment that lost its `[vars]` binding "reaches
+the stub on its first request" — it does not unless it also has a connection
+string, because `createStore` refuses on the missing `DATABASE_URL` before
+`store-sql.ts` is imported (test-server [14]'s `https://` case is that path);
+all four now say which refusal comes first. Three counts this section carried
+had gone stale across the passes (the README's test-server figure, the mutant's
+"four assertions" — six and an abort on the current tree — and the first pass's
+"seven"). And a gap in the second pass's tooth: it counts rows for the names in
+`DIRECT_CHECKS` only, so a hand-written PostgREST row under a misspelt name
+would print beside the loop's correctly named skip with every count intact —
+the `w` run now also requires that every row between `data layer` and the
+provider section be `schema` or a listed name. Drill run: `edit signature`
+misspelt in the PostgREST branch → the total names 27 rows for 26. Checked by
+the reviewer and left: on Workers `initEnv` spreads the bindings over
+`process.env`, which `nodejs_compat` also populates from them, so the binding
+reaches `env()` either way; `typeof Bun` is a default-parameter expression
+evaluated at call time and survives in the bundle; every `createStore` branch
+has the matching preflight verdict through the same helper, so no configuration
+passes the entrypoint and fails the first tool call or the reverse; every
+spawn of the server or preflight outside `server-portable/` (`db/test-live.ts`,
+`db/test-search-path.ts`, `evals/eval-chunking-e2e.ts`) selects the store
+explicitly. **Measured by the author:** `deploy/compose.yaml` brought up as the
+"Full stack, no Supabase" job does, on its own ports, with `OB1_STORE` absent
+from the server's environment — preflight reports `OB1_STORE unset — sql, the
+default` and OK with every direct check green, `smoke.sh` 9 of 9,
+`thought_stats` over MCP reaches the database, no `supabase` binary in the
+image. On the stop signal: the second pass's rule held for code — nothing here
+changed behaviour — and the third pass's finding in the change itself was a
+sentence, four times; the 1796 precedent stands as the reason a third pass was
+worth running.
+
+**Tidied while the files were open** (no behaviour change): test-server [14]'s
+five copies of the try/catch that reads the factory's refusal are one
+`refusal(env)` helper; test-preflight's `w` run builds its report-row regex in
+one `rowRe(name)` rather than twice; preflight's PostgREST configuration block
+is two variables handled in two blocks instead of a loop with a special case
+for one of them. Suites unchanged: test-server 177, test-preflight 253.
+
+**Upstream status.** Upstream has no `server-portable/`; nothing here touches a
+vendored file. The PostgREST store's retirement from Bun is the fork's decision
+and SMD-1847 owns its retirement from Workers.
+
+
+### 98. The cite shape is stated at the table — `query_log.tool`'s two shapes, and the table's cite clause, carry a COMMENT (SMD-1749)
 
 Change 90 gave `query_log.tool` a second shape on an action row. 034 (change 65)
 had one: a plain tool name — `fetch`, `update_thought`, `delete_thought` — says
@@ -15504,7 +16156,7 @@ migration, as 028 (change 49) did for `thought_work_claims.last_error`; change
 90's third review pass proposed it and declined it there as a second mechanism
 in a PR about a log convention.
 
-**Migration 042** is a guard and the two statements, and nothing else. The guard
+**Migration 043** is a guard and the two statements, and nothing else. The guard
 is 031's shape: on a schema without 034's table both statements would fail bare
 (`relation "query_log" does not exist`), and the brain that meets this is one
 adopted with `--baseline` whose ledger records 034 but whose schema never had it
@@ -15532,13 +16184,13 @@ shape comparison (columns and function signatures) does not see a comment.
 Neither `COMMENT` literal carries `--` — 028's convention, from when
 `test-schema` [10] stripped that sequence to end of line; the scan is
 literal-aware since change 93 (SMD-1796), so the guard's HINT naming two flags,
-as 030's and 031's do, is no longer even a consideration, and [41] keeps the
+as 030's and 031's do, is no longer even a consideration, and [42] keeps the
 convention as an assertion of the live text.
 
 The trap a successor must not fall into is 028's: a re-issued `COMMENT` replaces
 the description, so any migration that re-comments `query_log` or
 `query_log.tool` and re-issues 034's text would silently drop the cite clause.
-`test-schema` **[41]** asserts the **live** text of both comments
+`test-schema` **[42]** asserts the **live** text of both comments
 (`col_description`, `obj_description`) after every file has applied — both name
 `<writer>/<pointer>`; the column's gives both shapes, what a cite is, the rule
 as the column's and where the readers are; the three cite values and three plain
@@ -15556,20 +16208,20 @@ assertion; the column statement dropped fails the first assertion of the section
 (a first cut of that mutant removed the header's *mention* of the statement
 instead of the statement and passed 992/992 — the cut was wrong, not the test).
 `test-upgrade` **[20]** drives the guard against real Postgres: a schema through
-033 baselined at a ledger through 042, 042's row deleted, and a plain run fails
-at 042 naming 034 and `--reapply` and records nothing; then 034's table applied
+033 baselined at a ledger through 043, 043's row deleted, and a plain run fails
+at 043 naming 034 and `--reapply` and records nothing; then 034's table applied
 and the same pending file lands, both live comments naming the shape. The first
 run of that suite tripped its own window guard — [7] holds that 030 is among the
 last N migrations "to force this note to be re-read" whenever a migration lands
-past it — so the note was re-read (042 needs only 034 and is recorded by the
-baseline with it, so it never becomes [7]'s plain-run failure point), 042 added
+past it — so the note was re-read (043 needs only 034 and is recorded by the
+baseline with it, so it never becomes [7]'s plain-run failure point), 043 added
 to it and the window widened by one, as the guard asks. The same first run also
-refused `--reapply` because 042's hash had changed under it: the mutant script
+refused `--reapply` because 043's hash had changed under it: the mutant script
 was rewriting the file while the suite hashed it — a race between two of this
 section's own checks, not a defect; the suite was re-run alone.
 
 The re-run found a real one: [20] passed its `--baseline` and then watched the
-plain run *apply* 042 — exit 0, one applied, thirty-nine skipped — on a schema
+plain run *apply* 043 — exit 0, one applied, thirty-nine skipped — on a schema
 built "without 034". It was not without it. `test-support`'s schema reset drops
 a fixed list of tables and functions, and 034's `query_log` and
 `prune_query_log` were never added to it, so every reset since change 65 had
@@ -15594,9 +16246,9 @@ the assertion that wants the named message and the remedy fails on it.
 
 The typed record of what a write cited is SMD-1730's event shape (Phase 1a of
 SMD-1729); when it lands, the migration that carries it should re-issue this
-column's comment to point at it — the ticket's note, carried in 042's header.
+column's comment to point at it — the ticket's note, carried in 043's header.
 
-**Not done here.** A shared helper for the catalog reads that [41] and
+**Not done here.** A shared helper for the catalog reads that [42] and
 `test-upgrade` [20] each spelled (a first review pass counted six copies of the
 `col_description` join across the two suites) was declined in that pass because
 the two suites read through two clients — PGlite's `db.query` and Bun's `sql` —
@@ -15612,7 +16264,7 @@ decides "is this ours?" by a hand list of eighteen pgvector name prefixes where
 is not this ticket's, and is noted on SMD-1819. A generic mapping in
 `migrate.ts` — a pending file failing with `42P01`/`42883` on a ledger that
 records earlier files gets the baseline hint once, retiring the block 030, 031
-and 042 each paste — is **SMD-1811** (the same pass's altitude finding); 042
+and 043 each paste — is **SMD-1811** (the same pass's altitude finding); 043
 keeps its guard.
 
 **One review pass** so far (a cold reader over the diff and the operator's path
@@ -15629,8 +16281,8 @@ moved after it (its heading was its only reference). The same pass caught the
 column comment stating the rule as "any value containing a slash is a cite"
 where `citePointerOf` — the reader the comment points at — treats a slash at
 either end as an open and [39] asserts exactly that; the applied text now states
-the reader's rule (a non-empty name either side of the first slash), and [41]
-anchors on it. And it trimmed [41]: the loops over the six tool names had
+the reader's rule (a non-empty name either side of the first slash), and [42]
+anchors on it. And it trimmed [42]: the loops over the six tool names had
 re-asserted `citePointerOf`'s results — a second copy of [39]'s tooth under a
 label that blamed the migration text — and now ask only that the applied text
 names them.
@@ -15645,7 +16297,7 @@ all taken: the reset list's three other omissions and [21], above; the
 everywhere else; the column comment's "an MCP tool name cannot contain a slash",
 a protocol impossibility the spec does not promise (a SHOULD, a warning in the
 SDK) — stated now as the server's rule with what a foreign slashed name would
-read as and where an unknown plain name is reported; [41]'s two shape assertions
+read as and where an unknown plain name is reported; [42]'s two shape assertions
 had anchored on dot-all spans that could reach the other sentence, so a re-issue
 that *inverted* the meanings would have passed — each shape is anchored inside
 its own sentence now; and its plain-name loop had matched the word anywhere in
@@ -15656,7 +16308,7 @@ its own instead). The guard paste was surfaced again and stays SMD-1811's.
 
 **Third pass** (a cold reader; the run-it arm ran the two mutants the second
 pass's anchors claim to catch — the two meanings inverted in a re-issue fails
-three of [41]'s assertions, the plain-name list dropped with the words kept in
+three of [42]'s assertions, the plain-name list dropped with the words kept in
 prose fails one — and the two remaining suites that reset through
 `test-support`, `test-search-path` and `test-bench-reuse`, on the grown lists).
 The reader found [21]'s sweep blind to the object kinds a future migration is
@@ -15700,7 +16352,7 @@ owns, and on this image the exception hides nothing). Main had moved again:
 SMD-1796 (PR #84) took change 93 and `test-schema` [40], SMD-1677 (PR #86)
 took migration 041, change 94 and `test-upgrade` [19] — and repaired the
 duplicate 91 the same way this branch had. So, a second time: this migration
-is **042**, this section **95**, its `test-schema` section **[41]**, its
+is **043**, this section **98**, its `test-schema` section **[42]**, its
 `test-upgrade` sections **[20]** and **[21]**, [7]'s window thirteen; the
 guard's message, both suites' regexes, the reset list's two pointers, the
 README's ledger and the inventory line follow. Two tickets took the next
@@ -15723,6 +16375,15 @@ object another suite left would have failed it blaming the drop lists. A
 survivor is the fork's when some migration names it — that fails the
 section; one no migration names is reported in the label as another suite's
 and does not.
+
+**Before the push**, a third time. Main had taken SMD-1712 (PR #85: migration
+042, change 95, `test-schema` [41]), SMD-1803 (PR #87, change 96) and SMD-1797
+(PR #88, change 97) since the second merge, so this migration is **043**, this
+section **98**, its `test-schema` section **[42]**, and [7]'s window fourteen;
+the `test-upgrade` sections stay [20] and [21], since none of the three added
+one. The fifth pass's paragraph above says the numbers as they stood after the
+second merge; every pointer in the files says these. Three renumbers in one
+review is the case for SMD-1804.
 
 **Upstream status:** not sent — the query log is this fork's (change 65).
 
@@ -15971,9 +16632,11 @@ untagged. Bullets that only report a green run are not findings.
 **Re-measure when ten tickets carry tags**: `bun scripts/mechanism-yield.mjs
 --since <first tagged commit>` — that commit and everything committed at or
 after it, so a branch begun earlier contributes only what it committed in the
-tagged era. That run — not this note — decides SMD-1712,
-the citations facet that would give `delete_thought` a `CITED` refusal; it is
-gated on the number. The script is a maintainer report, not a CI gate; it
+tagged era. That run was to decide SMD-1712, the citations facet that gives
+`delete_thought` its `CITED` refusal; the gate was re-decided at three tagged
+tickets under the epic's schedule caveat, the numbers are in change 95, and
+the ten-ticket run now judges the epic's Phase 3 instead. The script is a
+maintainer report, not a CI gate; it
 prints its rules and a sample per class so the tallies can be judged before
 anything is built on them. `--self-check` runs the parser's fixtures.
 
@@ -16120,7 +16783,6 @@ Deliberate. Recorded so nobody assumes they were missed.
   for it, and `REINDEX` is not a remedy (a rebuild of an equidistant graph is no
   more connected). See change 85 (SMD-1632) for the measurements and the
   decision.
----
 
 ## Before this touches anything sensitive
 

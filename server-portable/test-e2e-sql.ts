@@ -5,7 +5,8 @@
  * test-store-sql.ts proves the store's methods behave. This proves the thing that
  * actually matters for Phase 2: an MCP client calling the documented tools gets the
  * same answers with PostgREST removed entirely. It drives the real server through
- * real JSON-RPC, with OB1_STORE=sql and no Supabase anywhere.
+ * real JSON-RPC, with OB1_STORE unset — the SQL store is the default (change
+ * 97) and this suite is what proves it — and no Supabase anywhere.
  *
  * The embedding provider is stubbed — the point is the data layer, and hitting
  * OpenRouter would make the suite non-hermetic and cost money. Everything below
@@ -82,7 +83,11 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 const STUB_BASE = "https://stub.invalid/v1";
 process.env.OB1_LLM_BASE_URL = STUB_BASE;
 
-process.env.OB1_STORE = "sql";
+// OB1_STORE is UNSET on purpose (change 97, SMD-1797): the SQL store is the
+// default, and this suite — the whole server over MCP against real Postgres —
+// is what proves it. Setting it here would let the default drift back to
+// PostgREST with every test still green.
+delete process.env.OB1_STORE;
 process.env.DATABASE_URL = URL_;
 process.env.OPENROUTER_API_KEY = "stub";
 process.env.MCP_ACCESS_KEY = "e2e-key";
@@ -125,11 +130,12 @@ async function call(name: string, args: Record<string, unknown> = {}): Promise<s
   return joined;
 }
 
-console.log(`  store: OB1_STORE=${process.env.OB1_STORE}, SUPABASE_URL unset\n`);
+console.log(`  store: OB1_STORE unset (sql, the default), SUPABASE_URL unset\n`);
 
 console.log("[1] The server runs with no Supabase configuration at all");
 {
   assert(process.env.SUPABASE_URL === undefined, "SUPABASE_URL is not set");
+  assert(process.env.OB1_STORE === undefined, "OB1_STORE is not set — the default store is what every section below drives");
   const r = await fetch(BASE, {
     method: "POST",
     headers: H,
@@ -592,6 +598,38 @@ console.log("\n[11] Undated and infinity rows render through the tools without a
            `search_thoughts renders the infinity row's date as text and never fabricates one for the undated row it also returns (${stBoth.replace(/\n/g, " ⏎ ")})`);
   } finally {
     await sql`DELETE FROM thoughts WHERE id = ${undatedId}::uuid OR id = ${infinityId}::uuid`;
+    await sql.close();
+  }
+}
+
+console.log("\n[12] list_supersession_proposals renders an infinity/undated proposal thought instead of crashing the whole tool (SMD-1803)");
+{
+  // The severe half of SMD-1803: normaliseProposal's old local iso ran the
+  // proposal thoughts' created_at through new Date(v).toISOString(), which THREW
+  // RangeError on an infinity-dated one — so the tool returned isError and a
+  // client saw the queue vanish — and fabricated the epoch on a NULL one. Only a
+  // direct INSERT reaches an undated/infinite row; reference both from a proposal
+  // and drive the tool. Pre-fix, call() throws on the tool's isError; post-fix it
+  // returns and each date renders as its own text.
+  const sql = new SQL({ url: URL_, max: 1 });
+  const axis = (i: number) => { const a = new Array(EMBEDDING_DIM).fill(0); a[i] = 1; return "[" + a.join(",") + "]"; };
+  const infOlder = await plantLegacyRow(sql, "smd-1803 e2e proposal older, infinity", axis(0), "infinity");
+  const undatedNewer = await plantLegacyRow(sql, "smd-1803 e2e proposal newer, undated", axis(1), null);
+  try {
+    await sql`SELECT record_supersession_proposal(${infOlder}::uuid, ${undatedNewer}::uuid, 'conflict_undirected', 0.7, 'infinity vs undated', 0.9, 'consolidate:smd1803@p1', NULL)`;
+    // This line itself is the tooth: pre-fix, call() throws on the tool's isError.
+    const listed = await call("list_supersession_proposals", {});
+    assert(/older \[infinity\]/.test(listed), `the infinity-dated thought renders as [infinity], not a throw (${listed.replace(/\n/g, " ⏎ ")})`);
+    assert(/newer \[undated\]/.test(listed), `the undated thought renders as [undated], not the epoch (${listed.replace(/\n/g, " ⏎ ")})`);
+    // TZ/locale-robust: [infinity]/[undated] above are the positives; the epoch
+    // fabrication renders "Invalid Date" (infinity) or an epoch date the render
+    // localises, so key on its two forms rather than a bare year a hex uuid
+    // could carry.
+    assert(!/Invalid Date/.test(listed) && !/1\/1\/1970/.test(listed) && !/12\/31\/1969/.test(listed),
+           `no fabricated date reaches the client (${listed.replace(/\n/g, " ⏎ ")})`);
+  } finally {
+    await sql`DELETE FROM supersession_proposals`;
+    await sql`DELETE FROM thoughts WHERE id = ${infOlder}::uuid OR id = ${undatedNewer}::uuid`;
     await sql.close();
   }
 }

@@ -245,6 +245,16 @@ console.log("\n[9] The supersession judge's prompt and parser (migration 029): a
   assert(/THOUGHT A, captured 2026-03-09:/.test(prompt) && !/source/.test(prompt.split("<thought_a>")[0]), "the header lines carry the dates and nothing a caller controls");
   assert(wrapSide("thought_a", "x".repeat(7000)).length < 6100, "a thought is cut to the content limit before wrapping");
 
+  // SMD-1803: a proposal thought's created_at is nullable and can be a sentinel.
+  // dateOf (the prompt's only date path) must not fabricate the epoch on a NULL
+  // — new Date(null).toISOString() gave "1970-01-01" — nor throw on infinity,
+  // which new Date("infinity").toISOString() does. The rule already tells the
+  // judge the dates decide nothing, so an unknown one is inert.
+  const sentinelPrompt = buildJudgeMessages({ content: "older", createdAt: null }, { content: "newer", createdAt: "infinity" })[0].content;
+  assert(/THOUGHT A, captured an unknown date:/.test(sentinelPrompt) && !/1970/.test(sentinelPrompt),
+         `a NULL createdAt is "an unknown date", not the fabricated epoch (${sentinelPrompt.split("\n").find((l) => l.startsWith("THOUGHT A"))})`);
+  assert(/THOUGHT B, captured infinity:/.test(sentinelPrompt), "an infinity createdAt is kept as its own text, not thrown on");
+
   // The parser: A is the older thought, B the newer; a direction rides only a conflict.
   const a = parseJudgement('{"verdict":"conflict","supersedes":"A","confidence":0.8,"reason":"the older stands"}');
   assert(!a.malformed && a.verdict === "conflict" && a.supersedes === "older" && a.confidence === 0.8, "A maps to older");

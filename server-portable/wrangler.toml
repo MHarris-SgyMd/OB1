@@ -11,8 +11,20 @@ main = "index.ts"
 compatibility_date = "2026-08-01"
 compatibility_flags = ["nodejs_compat"]
 
-# store-sql.ts imports Bun's Postgres client. Workers never selects that store,
-# but the bundler still has to resolve the specifier — map it to a stub that
-# throws with an explanation if it is somehow reached.
+# The store is a property of this target, not a secret: Workers cannot hold a
+# Postgres connection, so the PostgREST store is the one path here — and since
+# change 97 (SMD-1797) the server's DEFAULT is the SQL store. Without this
+# binding a Workers deployment fails at its first tool call: with no connection
+# string, on the SQL store's "DATABASE_URL is not set" refusal (which names
+# OB1_STORE=postgrest as the way out); with one, at the stub below. Said here so
+# a Workers deployment never depends on the default. Selecting `sql` on Workers
+# is unsupported until a Workers-capable Postgres driver is measured
+# (server-portable/README.md, Caveats).
+[vars]
+OB1_STORE = "postgrest"
+
+# store-sql.ts imports Bun's Postgres client. Workers never selects that store
+# (OB1_STORE above), but the bundler still has to resolve the specifier — map it
+# to a stub that throws with an explanation if it is somehow reached.
 [alias]
 bun = "./shims/bun-unavailable.ts"

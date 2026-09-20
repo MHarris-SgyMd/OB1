@@ -7,8 +7,10 @@
  * cast, so both stores present one shape — and one timestamp format — to the
  * tools (SMD-1040).
  *
- * Works anywhere fetch works, including Cloudflare Workers — which is why it stays
- * the default and why it is still worth keeping after the SQL store exists.
+ * Works anywhere fetch works, including Cloudflare Workers — which is why it is
+ * kept: Workers cannot hold a Postgres connection, so this is the one store that
+ * runs there, and wrangler.toml selects it. Everywhere Bun runs the SQL store is
+ * the default (change 97, SMD-1797) and this one is reported as retired.
  */
 
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
@@ -19,7 +21,7 @@ import type {
   CaptureResult,
   Derivative,
   ListFilters,
-  MutationResult,
+  DeleteResult,
   ProvenanceNode,
   QueryActionLog,
   QuerySearchLog,
@@ -355,10 +357,13 @@ export class PostgrestStore implements ThoughtStore {
   async deleteThought(opts: {
     id: string;
     actor?: Actor;
-  }): Promise<MutationResult> {
+    detach?: boolean;
+  }): Promise<DeleteResult> {
     const { data, error } = await this.client.rpc("delete_thought", {
       p_id: opts.id,
       p_actor: actorPayload(opts.actor),
+      // 042: named, so PostgREST resolves the three-argument function.
+      p_detach: opts.detach === true,
     });
     if (error) throw new Error(error.message);
     return normaliseMutation(data as Record<string, unknown>);

@@ -4,9 +4,9 @@
  *
  * Phase 4 of the migration. Without this the server starts happily when
  * misconfigured: `initialize` succeeds, `tools/list` returns every tool, and the
- * first real tool call returns "Error: OB1_STORE=sql requires DATABASE_URL" inside
- * a tool response. Every liveness probe reports green, including the container
- * healthcheck, because the HTTP layer genuinely is fine — the data layer is built
+ * first real tool call returns "Error: OB1_STORE is unset, which selects the SQL
+ * store, and DATABASE_URL is not set. …" inside a tool response. Every liveness
+ * probe reports green, including the container healthcheck, because the HTTP layer genuinely is fine — the data layer is built
  * lazily on first use.
  *
  * On Supabase that mattered less: the platform injected SUPABASE_URL and
@@ -23,8 +23,7 @@
  * Exit codes: 0 all good, 1 something is wrong, 2 could not run the checks.
  */
 
-import { createStore, type StoreEnv } from "./store.ts";
-import { createClient } from "@supabase/supabase-js";
+import { createStore, databaseUrl, DEFAULT_STORE, DIRECT_CHECK_SKIP_OVER_POSTGREST, maskUrl, missingDatabaseUrl, postgrestOnBunNotice, postgrestOverPostgresUrl, storeKind, type StoreEnv } from "./store.ts";
 import { parseKeyRecords } from "./auth.ts";
 import { DEFAULT_MAX_TOKENS } from "./chunk.ts";
 import type { PassCounts } from "../db/config.mjs";
@@ -41,7 +40,7 @@ const add = (name: string, status: Status, detail: string, fix?: string) =>
   results.push({ name, status, detail, fix });
 
 const env = process.env as Record<string, string | undefined>;
-const store = (env.OB1_STORE ?? "postgrest").toLowerCase();
+const store = storeKind(env);
 // Defaults come from db/config.mjs, not from copies. These four were hardcoded
 // here and went stale the moment the defaults changed, so preflight validated
 // openai/text-embedding-3-small @ 1536 while the server ran qwen3-embedding:4b @
@@ -86,15 +85,15 @@ const localProvider = isLocalEndpoint(llmBase);
 const EXPOSURE =
   "a filtered match_thoughts call — direct SQL, a PostgREST RPC, or a community integration's metadata filter; the server's own search_thoughts sends no filter — silently returns fewer rows than match";
 const APPLY_014 = "Apply the migrations through db/migrations/014_filtered_match_thoughts.sql.";
-const CATALOG_HINT = "run once with OB1_STORE=sql to read the catalog";
-// Every check the direct-connection block owns, in the order it reports them.
+const CATALOG_HINT = "run once as the SQL store (OB1_STORE unset, DATABASE_URL set) against the same database to read the catalog";
+// Every check the direct-connection block owns, in the order the SQL path reports them.
 // A throw anywhere in that block lands in one catch, and a check that prints
 // nothing looks like one that passed — so the catch reports each of these
 // that has not reported yet, rather than one name for whatever went wrong.
 const DIRECT_CHECKS = [
   "vector extension",
   "atomic capture", "write privileges", "fingerprint backfill", "audit trail", "agent identity",
-  "keyword search", "hybrid search", "stats summary", "provenance", "work claims", "search signatures", "edit signature", "filtered search",
+  "keyword search", "hybrid search", "stats summary", "provenance", "work claims", "search signatures", "edit signature", "delete signature", "transaction isolation", "filtered search",
   "candidate scan", "walk index", "chunk context", "trigram index", "embedding contract", "vector models",
   "updated_at trigger", "re-embed pass", "consolidate pass", "migration ledger", "query log",
 ];
@@ -115,9 +114,13 @@ const APPLY_020 = "Apply db/migrations/020_match_thoughts_recency.sql, then 027_
  * has just applied it back to the migrator (first review pass of 021).
  */
 const RELOAD_HINT = "If the ledger already records it, PostgREST may not have reloaded its schema cache: NOTIFY pgrst, 'reload schema';";
-const APPLY_020_POSTGREST = `Apply the migrations through db/migrations/041_match_thoughts_pin_paths.sql against the project's direct connection (server-portable/README.md §4) — 020 gives both functions the forms the server sends; 027 and 041 last define search_thoughts_hybrid and match_thoughts. ${RELOAD_HINT}`;
+const APPLY_020_POSTGREST = `Apply the migrations through db/migrations/042_thought_citations.sql against the project's direct connection (server-portable/README.md §4) — 020 gives both functions the forms the server sends; 027 and 041 last define search_thoughts_hybrid and match_thoughts, and 042 delete_thought's three-argument form, which the next start checks too. ${RELOAD_HINT}`;
+/** An id no row has: the probes below call a function with it and read the NOT_FOUND it answers, writing nothing. */
+const NOBODY = "00000000-0000-4000-8000-000000000000";
 const APPLY_021 = "Apply db/migrations/021_embedding_model_per_row.sql.";
 const APPLY_032 = "Apply db/migrations/032_update_thought_provenance.sql.";
+const APPLY_042 = "Apply db/migrations/042_thought_citations.sql.";
+const APPLY_042_POSTGREST = `Apply the migrations through db/migrations/042_thought_citations.sql against the project's direct connection (server-portable/README.md §4). ${RELOAD_HINT}`;
 /**
  * Where the ledger already records the migration a check finds absent — a
  * brain adopted with --baseline whose schema is the guide's — "apply it" is a
@@ -132,11 +135,18 @@ const missing = (msg: string) => /could not find the function|does not exist/i.t
 
 // ── Configuration ────────────────────────────────────────────────────────────
 
+// The SQL store is the default (change 97, SMD-1797); PostgREST is kept for
+// Cloudflare Workers, where the SQL store's driver does not run, and is said to
+// be retired wherever it does — this process runs on Bun, so a PostgREST
+// selection here is that case. A warning, not a failure: the deployment works.
+const retired = postgrestOnBunNotice(store);
 if (store !== "postgrest" && store !== "sql") {
   add("store selection", "fail", `OB1_STORE="${store}" is not a known store`,
-      'Set OB1_STORE to "postgrest" or "sql", or leave it unset for postgrest.');
+      `Set OB1_STORE to "${DEFAULT_STORE}" (the default — leave it unset) or "postgrest" (Cloudflare Workers only).`);
+} else if (retired) {
+  add("store selection", "warn", "OB1_STORE=postgrest — the PostgREST store, kept for Cloudflare Workers", retired);
 } else {
-  add("store selection", "ok", `OB1_STORE=${store}`);
+  add("store selection", "ok", env.OB1_STORE === undefined ? `OB1_STORE unset — ${DEFAULT_STORE}, the default` : `OB1_STORE=${store}`);
 }
 
 // ── Model provider ──────────────────────────────────────────────────────────
@@ -248,20 +258,44 @@ if (!env.MCP_ACCESS_KEYS && !env.MCP_ACCESS_KEY) {
   }
 }
 
+// The connection string comes from DATABASE_URL, or from SUPABASE_URL when it
+// holds a postgres:// URL (store.ts:databaseUrl — the SQL shim's spelling, so a
+// box running a shim-migrated vendored server beside this one sets one name).
+// Read here once and reused by every direct-connection check below, so the
+// checks cannot dial a different database from the one the store was built on.
+const conn = store === "sql" ? databaseUrl(env) : null;
 if (store === "sql") {
-  if (!env.DATABASE_URL) {
-    add("DATABASE_URL", "fail", "not set, but OB1_STORE=sql", "Set DATABASE_URL, or use OB1_STORE=postgrest.");
+  if (!conn) {
+    const { problem, fix } = missingDatabaseUrl(env);
+    add("DATABASE_URL", "fail", problem, fix);
   } else {
-    add("DATABASE_URL", "ok", env.DATABASE_URL.replace(/:\/\/[^@]*@/, "://***@"));
+    add("DATABASE_URL", "ok",
+        maskUrl(conn.url) + (conn.from === "SUPABASE_URL" ? " (from SUPABASE_URL, which holds a postgres:// URL; DATABASE_URL is unset)" : ""));
   }
-  for (const k of ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"]) {
-    if (env[k]) add(k, "warn", "set but unused with OB1_STORE=sql", `Remove ${k} to avoid confusion about which backend is live.`);
+  // The "unused" warns only once the connection string is in hand: with no
+  // DATABASE_URL the fail line above may have just named OB1_STORE=postgrest
+  // as a way out, and a warn telling the operator to remove SUPABASE_URL two
+  // lines later would contradict it (first review pass).
+  if (conn && env.SUPABASE_URL && conn.from !== "SUPABASE_URL") {
+    add("SUPABASE_URL", "warn", "set but unused with the SQL store",
+        "Remove SUPABASE_URL to avoid confusion about which backend is live.");
+  }
+  if (conn && env.SUPABASE_SERVICE_ROLE_KEY) {
+    add("SUPABASE_SERVICE_ROLE_KEY", "warn", "set but unused with the SQL store",
+        "Remove SUPABASE_SERVICE_ROLE_KEY to avoid confusion about which backend is live.");
   }
 } else {
-  for (const k of ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"]) {
-    if (!env[k]) add(k, "fail", `not set, but OB1_STORE=${store}`, `Set ${k}, or use OB1_STORE=sql with DATABASE_URL.`);
-    else add(k, "ok", k.endsWith("URL") ? env[k]! : `set (${env[k]!.length} chars)`);
-  }
+  // A postgres:// URL under the PostgREST selection is the one-box operator's
+  // slip (an old OB1_STORE=postgrest kept beside a shim-migrated neighbour's
+  // SUPABASE_URL): refused here by name, and never printed raw — it carries a
+  // password, and the first version of this branch echoed it (first review pass).
+  const mismatch = postgrestOverPostgresUrl(env);
+  const unset = (k: string) => add(k, "fail", `not set, but OB1_STORE=${store}`, `Set ${k}, or use the SQL store (OB1_STORE unset) with DATABASE_URL.`);
+  if (!env.SUPABASE_URL) unset("SUPABASE_URL");
+  else if (mismatch) add("SUPABASE_URL", "fail", `holds a postgres:// connection string (${maskUrl(env.SUPABASE_URL)}), which the PostgREST store cannot dial`, mismatch);
+  else add("SUPABASE_URL", "ok", maskUrl(env.SUPABASE_URL));
+  if (!env.SUPABASE_SERVICE_ROLE_KEY) unset("SUPABASE_SERVICE_ROLE_KEY");
+  else add("SUPABASE_SERVICE_ROLE_KEY", "ok", `set (${env.SUPABASE_SERVICE_ROLE_KEY.length} chars)`);
 }
 
 const configFailed = results.some((r) => r.status === "fail");
@@ -298,7 +332,7 @@ if (configFailed) {
     if (built.kind !== "sql" && wantCtxAnywhere) {
       add("chunk context", "warn",
           "OB1_CHUNK_CONTEXT is on, but the PostgREST store cannot be checked against the schema from here — if migration 013 is not applied, every blurb is embedded and none is recorded",
-          "Confirm db/migrations/013_chunk_context.sql is applied, or run preflight once with OB1_STORE=sql against the same database.");
+          `Confirm db/migrations/013_chunk_context.sql is applied, or ${CATALOG_HINT}.`);
     }
     // countThoughts is the cheapest call that proves the connection works, the
     // table exists and the credentials are accepted.
@@ -309,9 +343,13 @@ if (configFailed) {
       add("schema", "ok", `thoughts table reachable, ${n} row(s)`);
     } catch (e) {
       const msg = (e as Error).message;
+      // The migrator takes the connection string by name; say the variable
+      // that holds it here (the alias included), and for PostgREST — which has
+      // no connection string of its own — say what to hand it instead.
+      const urlArg = conn ? `$${conn.from}` : "<the brain's postgres:// connection string — Supabase's direct connection, not the pooler>";
       add("schema", "fail", msg,
           /does not exist|relation/i.test(msg)
-            ? "Apply the migrations: cd db && bun migrate.ts --url $DATABASE_URL"
+            ? `Apply the migrations: cd db && bun migrate.ts --url ${urlArg}`
             : "Check credentials and network reachability to the database.");
     }
 
@@ -321,7 +359,7 @@ if (configFailed) {
      * `NULL = '{}' OR metadata @> NULL`, which excluded every row, and 014
      * treats NULL as unfiltered. So one RPC with `filter := null` against a
      * non-empty table returns a row under 014 and nothing under 007. That
-     * proves the body, not the SET clauses — those need OB1_STORE=sql — and
+     * proves the body, not the SET clauses — those need the SQL store — and
      * the message says so. With no rows there is nothing to probe with, and
      * that is reported as a skip rather than as a permanent warning nobody can
      * clear (which is what the first version of this check was).
@@ -383,10 +421,10 @@ if (configFailed) {
 
     /**
      * Migration 017 through PostgREST. `search` and `search_thoughts` call
-     * `search_thoughts_hybrid` unconditionally since SMD-958, and PostgREST is
-     * the default store, so a Supabase project whose migrations stop at 016
-     * would pass every check here, advertise both tools, and fail every call to
-     * them. The catalog cannot be read over PostgREST, but the function can be
+     * `search_thoughts_hybrid` unconditionally since SMD-958, so a Supabase
+     * project served over PostgREST whose migrations stop at 016 would pass
+     * every check here, advertise both tools, and fail every call to them. The
+     * catalog cannot be read over PostgREST, but the function can be
      * called: an RPC with an empty query text and a unit vector returns rows or
      * nothing under 017, and "Could not find the function" without it. The
      * first version of this check lived only on the SQL branch (review pass).
@@ -396,6 +434,8 @@ if (configFailed) {
         add("keyword search", "skip", "not probed — the schema check above failed first");
         add("hybrid search", "skip", "not probed — the schema check above failed first");
         add("search signatures", "skip", "not probed — the schema check above failed first");
+        add("edit signature", "skip", "not probed — the schema check above failed first");
+        add("delete signature", "skip", "not probed — the schema check above failed first");
       } else {
         // 012 first, because 017 calls it: a missing search_thoughts_keyword
         // surfaces inside search_thoughts_hybrid with the same "does not
@@ -438,99 +478,112 @@ if (configFailed) {
           }
         }
         /**
-         * Migration 020's other failure state, over PostgREST. The store's own
-         * calls send every argument by name and resolve uniquely whatever else
-         * is defined, so the probes above cannot see a 4-argument match_thoughts
-         * re-created BESIDE 020's by a hand re-apply of 007/014/019 — while every
-         * PostgREST caller that sends the four arguments the old form took (the
-         * community integrations, a dashboard) fails with PGRST203 on every
-         * call. So probe as such a caller would: four named arguments, count 1.
-         * One function resolves it through its defaults; two make PostgREST
-         * refuse to choose. The SQL branch reads pg_proc instead (first review
-         * pass of 020 — this check lived only there).
+         * Migration 020's form, over PostgREST: the store's own call sends every
+         * argument by name, so a database whose only match_thoughts predates 020
+         * answers it with PGRST202 — reported as such rather than as a resolved
+         * function (second review pass of 020). What this cannot see is 020's
+         * OTHER failure state: a 4-argument match_thoughts re-created BESIDE
+         * 020's by a hand re-apply of 007/014/019, which resolves the store's
+         * six-argument call uniquely while every PostgREST caller that sends
+         * the four arguments the old form took (the community integrations, a
+         * dashboard) fails with PGRST203. Until change 97 this check probed
+         * that as such a caller would, through a supabase-js client of its
+         * own; preflight no longer carries one (the PostgREST store is kept for
+         * Workers, and this file runs on Bun), and the overload count is a
+         * pg_proc fact the SQL branch reads — so the detail says which half is
+         * proved and names the run that proves the rest.
          */
-        // A client of its own for the probes below, which call as an outside
-        // caller would — by name, with the arguments an older form took — rather
-        // than through the store's own shape.
-        const legacy = createClient(env.SUPABASE_URL ?? "", env.SUPABASE_SERVICE_ROLE_KEY ?? "");
         try {
           const probe = new Array(embDim).fill(0);
           probe[0] = 1;
-          // 020's form first, with every argument by name — the store's own
-          // call — so a database whose only match_thoughts predates 020 is
-          // reported as such rather than passing the 4-argument probe below
-          // (second review pass). Then the 4-argument call, which only two
-          // overloads make ambiguous.
-          let current = "";
-          try {
-            await built.matchThoughts({ embedding: probe, threshold: -1, limit: 1, filter: {} });
-          } catch (e) {
-            current = (e as Error).message;
-          }
-          const { error } = current ? { error: null } : await legacy.rpc("match_thoughts", { query_embedding: probe, match_threshold: -1, match_count: 1, filter: {} });
-          if (current && missing(current)) {
+          await built.matchThoughts({ embedding: probe, threshold: -1, limit: 1, filter: {} });
+          add("search signatures", "ok",
+              `match_thoughts takes 020's arguments over PostgREST; whether an earlier form sits beside it — which fails every 4-argument caller by name with PGRST203 — is read from pg_proc (${CATALOG_HINT})`);
+        } catch (e) {
+          const msg = (e as Error).message;
+          if (missing(msg)) {
             add("search signatures", "fail",
                 "match_thoughts does not take recency_weight and half_life_days over PostgREST — it is missing or is the form from before migration 020 — and the server sends them on every search, so every search would fail",
                 APPLY_020_POSTGREST);
-          } else if (current) {
-            add("search signatures", "skip", `could not probe match_thoughts over PostgREST (${current}); ${CATALOG_HINT}`);
-          } else if (!error) {
-            add("search signatures", "ok", "match_thoughts takes 020's arguments over PostgREST, and a 4-argument call resolves to one function — no earlier form beside it");
-          } else if (/could not choose|PGRST203|not unique/i.test(error.message)) {
-            add("search signatures", "fail",
-                "match_thoughts has more than one form — an earlier migration re-applied by hand beside 020's — and PostgREST cannot choose between them for a 4-argument call, so every caller sending four arguments fails",
-                "DROP FUNCTION match_thoughts(vector, float, int, jsonb); against the project's direct connection — the form 020 drops.");
-          } else if (missing(error.message)) {
-            add("search signatures", "fail", "match_thoughts is missing over PostgREST — every search would fail",
-                APPLY_020_POSTGREST);
           } else {
-            add("search signatures", "skip", `could not probe match_thoughts over PostgREST (${error.message}); ${CATALOG_HINT}`);
+            add("search signatures", "skip", `could not probe match_thoughts over PostgREST (${msg}); ${CATALOG_HINT}`);
           }
-        } catch (e) {
-          add("search signatures", "skip", `could not probe match_thoughts over PostgREST (${(e as Error).message}); ${CATALOG_HINT}`);
         }
 
         /**
          * Migration 032 gave update_thought a ninth parameter, the provenance
          * envelope, by dropping the 8-argument form — as 021 gave it the
          * eighth, the model beside the vector, by dropping the seventh — and
-         * the store sends all nine by name on every edit. Probed as the store
-         * calls it, with an id no row has: update_thought answers {ok:false,
-         * error:'NOT_FOUND'} from its row-lock read and writes nothing, so
-         * the probe is free. PGRST202 is a form from before 032 (or no
-         * function). Then seven named arguments, which only two forms — 018's
-         * or 021's re-applied by hand beside 032's — make ambiguous, and that
-         * breaks every PostgREST caller by name that predates this change.
+         * the store sends all nine by name on every edit. Probed AS the store
+         * calls it (its own updateThought), with an id no row has:
+         * update_thought answers {ok:false, error:'NOT_FOUND'} from its
+         * row-lock read and writes nothing, so the probe is free. PGRST202 is a
+         * form from before 032 (or no function). Whether an earlier form —
+         * 018's or 021's re-applied by hand — sits beside 032's, which makes
+         * every call with fewer than nine arguments ambiguous for PostgREST, is
+         * the pg_proc read the SQL branch does; change 97 dropped the 7-argument
+         * probe this check sent through a client of its own (see search
+         * signatures above), so the detail names the run that reads it.
          */
         try {
-          const { SUPERSEDED_SIGNATURES } = await import("../db/config.mjs");
-          const nobody = "00000000-0000-4000-8000-000000000000";
-          const seven = { p_id: nobody, p_content: null, p_metadata_patch: null, p_embedding: null, p_chunks: null, p_if_unchanged_since: null, p_actor: null };
-          const { data: nine, error: nineErr } = await legacy.rpc("update_thought", { ...seven, p_embedding_model: null, p_provenance: null });
-          if (nineErr && missing(nineErr.message)) {
+          const r = await built.updateThought({ id: NOBODY });
+          if (!r.ok && r.error === "NOT_FOUND") {
+            add("edit signature", "ok",
+                `update_thought takes 032's arguments over PostgREST; whether an earlier form sits beside it — which fails every caller by name with fewer than nine arguments — is read from pg_proc (${CATALOG_HINT})`);
+          } else {
+            add("edit signature", "skip", `update_thought answered a probe for an id no row has with ${JSON.stringify(r)} rather than NOT_FOUND; ${CATALOG_HINT}`);
+          }
+        } catch (e) {
+          const msg = (e as Error).message;
+          if (missing(msg)) {
             add("edit signature", "fail",
                 "update_thought does not take p_provenance over PostgREST — it is missing or is a form from before migration 032 — and the server sends it on every edit, so every update_thought call would fail",
                 APPLY_032_POSTGREST);
-          } else if (nineErr) {
-            add("edit signature", "skip", `could not probe update_thought over PostgREST (${nineErr.message}); ${CATALOG_HINT}`);
-          } else if ((nine as { error?: string } | null)?.error !== "NOT_FOUND") {
-            add("edit signature", "skip", `update_thought answered a probe for an id no row has with ${JSON.stringify(nine)} rather than NOT_FOUND; ${CATALOG_HINT}`);
           } else {
-            const { error: sevenErr } = await legacy.rpc("update_thought", seven);
-            if (!sevenErr) {
-              add("edit signature", "ok", "update_thought takes 032's arguments over PostgREST, and a 7-argument call resolves to one function — no earlier form beside it");
-            } else if (/could not choose|PGRST203|not unique/i.test(sevenErr.message)) {
-              add("edit signature", "fail",
-                  "update_thought has more than one form — an earlier migration re-applied by hand beside 032's — and PostgREST cannot choose between them for a call with fewer than nine arguments, so every caller by name from before this change fails",
-                  // IF EXISTS: this path cannot read the catalog, so both older
-                  // forms are named and the absent one must not error when pasted.
-                  `Drop the earlier form, as 032 does, against the project's direct connection — whichever the catalog shows: ${SUPERSEDED_SIGNATURES.filter((s) => s.startsWith("update_thought")).map((s) => `DROP FUNCTION IF EXISTS ${s};`).join(" ")}`);
-            } else {
-              add("edit signature", "skip", `could not probe update_thought over PostgREST (${sevenErr.message}); ${CATALOG_HINT}`);
-            }
+            add("edit signature", "skip", `could not probe update_thought over PostgREST (${msg}); ${CATALOG_HINT}`);
+          }
+        }
+        /**
+         * Migration 042 gave delete_thought a third parameter, p_detach, by
+         * dropping the two-argument form, and the store sends all three by
+         * name on every delete. Probed as the store calls it, with an id no
+         * row has: the function answers {ok:false, error:'NOT_FOUND'} and
+         * writes nothing. PGRST202 is a form from before 042 (or no
+         * function); then two named arguments, which only a two-argument form
+         * re-created beside 042's by a hand re-apply of 009 or 036 makes
+         * ambiguous — and that breaks every PostgREST caller by name from
+         * before this change (third review pass of 042). Probed AS the store
+         * calls it (its own deleteThought) since change 97, which dropped the
+         * supabase-js client preflight sent the two-argument call through: the
+         * overload half is the pg_proc read the SQL branch does, and the detail
+         * names the run that reads it (see search signatures above).
+         */
+        try {
+          const r = await built.deleteThought({ id: NOBODY });
+          if (!r.ok && r.error === "NOT_FOUND") {
+            add("delete signature", "ok",
+                `delete_thought takes 042's arguments over PostgREST; whether a two-argument form sits beside it — which fails every caller by name with two arguments — is read from pg_proc (${CATALOG_HINT})`);
+          } else {
+            add("delete signature", "skip", `delete_thought answered a probe for an id no row has with ${JSON.stringify(r)} rather than NOT_FOUND; ${CATALOG_HINT}`);
           }
         } catch (e) {
-          add("edit signature", "skip", `could not probe update_thought over PostgREST (${(e as Error).message}); ${CATALOG_HINT}`);
+          const msg = (e as Error).message;
+          if (missing(msg)) {
+            add("delete signature", "fail",
+                "delete_thought does not take p_detach over PostgREST — it is missing or is a form from before migration 042 — and the server sends it on every delete, so every delete_thought call would fail",
+                APPLY_042_POSTGREST);
+          } else if (/permission denied/i.test(msg)) {
+            // 042's guard reads and writes thought_facets as the caller on
+            // every delete, a zero-row one included — so the probe itself
+            // meets the missing privilege, and the evidence is in hand: not a
+            // skip (seventh review pass of 042). The direct path's `write
+            // privileges` says the same from the catalog.
+            add("delete signature", "fail",
+                `the connection's role lacks a privilege 042's citation guard needs on every delete (${msg}) — so every delete_thought call would fail`,
+                "GRANT SELECT, UPDATE ON thought_facets TO <the connector's role>; against the project's direct connection (db/README.md, Grants for a capturing role).");
+          } else {
+            add("delete signature", "skip", `could not probe delete_thought over PostgREST (${msg}); ${CATALOG_HINT}`);
+          }
         }
       }
       // The 3-argument upsert_thought's body (022's sentinel) and the role's
@@ -544,15 +597,27 @@ if (configFailed) {
       // A seventh review pass walked the hosted path and found this check
       // printed nothing there — the one shape the comment above forbids.
       add("query log", "skip", `not checked over PostgREST — whether query_log (034) is present, and whether upsert_thought answers \`existed\` (035), without which a write that cites a returned id logs no cite row (SMD-1719), are read from the catalog; ${CATALOG_HINT}`);
+      // The connection's isolation level is a direct-connection read whether or
+      // not the schema check answered — reported beside the other catalog facts,
+      // not inside the rows-present branch (moved at change 97's merge of change 95).
+      add("transaction isolation", "skip", `not checked over PostgREST — the connection's default isolation level is read over a direct connection; ${CATALOG_HINT}`);
+      // The rest of the direct-connection block — catalog reads with no
+      // PostgREST form at all — reported by name too, so this path prints
+      // every check the SQL path does. Before the first review pass of change
+      // 97 sixteen of them printed nothing here, the one shape the DIRECT_CHECKS
+      // comment forbids, while the README said they were skips.
+      for (const name of DIRECT_CHECKS) {
+        if (!results.some((r) => r.name === name)) add(name, "skip", `${DIRECT_CHECK_SKIP_OVER_POSTGREST}; ${CATALOG_HINT}`);
+      }
     }
 
     // The atomic capture path needs migration 004. Its absence is not fatal — the
     // PostgREST store falls back — but the fallback is the failure mode migration
     // 004 exists to remove, so say so.
-    if (built.kind === "sql" && env.DATABASE_URL) {
+    if (built.kind === "sql" && conn) {
       try {
         const { SQL } = await import("bun");
-        const sql = new SQL({ url: env.DATABASE_URL, max: 1 });
+        const sql = new SQL({ url: conn.url, max: 1 });
 
         // Before anything reads the schema: can this connection resolve the
         // bare `vector` type at all? pgvector installed into a schema off the
@@ -848,9 +913,18 @@ if (configFailed) {
           }
           const absent = reqTables.filter((t, i) => reqTables.indexOf(t) === i && !presentTables.has(t));
           const triggerMiss = triggerPresent && (missingByTable.has("ob1_config") || missingByTable.has("thought_work_claims"));
-          const why = triggerMiss
-            ? " — a windowed capture, an edit with content, 008's audit trigger, or 016's enqueue trigger — which as the caller reads ob1_config on every capture, and upserts a work claim while entity extraction is enabled — would fail"
-            : " — so a windowed capture, an edit with content, or 008's audit trigger would fail";
+          // What would fail, by what is missing: the capture path's writers
+          // for any capture-path table, and — 042's guard reads and writes
+          // thought_facets as the caller on every delete — every delete of a
+          // thought for that one, said separately so an operator whose
+          // capture succeeds is not told the check was wrong (seventh pass).
+          const captureMiss = [...missingByTable.keys()].some((t) => t !== "thought_facets");
+          const fails: string[] = [];
+          if (captureMiss) fails.push(triggerMiss
+            ? "a windowed capture, an edit with content, 008's audit trigger, or 016's enqueue trigger — which as the caller reads ob1_config on every capture, and upserts a work claim while entity extraction is enabled —"
+            : "a windowed capture, an edit with content, or 008's audit trigger");
+          if (missingByTable.has("thought_facets")) fails.push("every delete of a thought (042's citation guard reads and writes thought_facets as the caller)");
+          const why = ` — so ${fails.join(", and ")} would fail`;
           if (missingByTable.size) {
             const phrase = [...missingByTable].map(([t, ps]) => `${ps.join(", ")} on ${t}`).join("; ");
             const grants = [...missingByTable].map(([t, ps]) => `GRANT ${ps.join(", ")} ON ${t} TO ${ident};`).join("  ");
@@ -1286,6 +1360,68 @@ if (configFailed) {
           }
         } catch (e) {
           add("edit signature", "warn", `could not verify: ${(e as Error).message}`, "The catalog read behind this check needs SELECT on pg_proc.");
+        }
+
+        /**
+         * Migration 042 changed delete_thought the way 021 and 032 changed
+         * update_thought: a defaulted third parameter (p_detach), the
+         * two-argument form dropped, both stores sending all three. The same
+         * two states break every delete and neither shows in a presence
+         * check: the function predates 042 (the call has no function to
+         * resolve to — a server deployed ahead of the migration fails at the
+         * first user delete, not at start), or the two-argument form was
+         * re-created BESIDE 042's by a hand re-apply of 009 or 036 (every
+         * two-argument caller — the vendored servers' rpc by name, hand SQL —
+         * is "function is not unique").
+         */
+        try {
+          const dt = (await sql`
+            SELECT p.pronargs AS nargs, p.oid::regprocedure::text AS sig
+            FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+            WHERE p.proname = 'delete_thought' AND n.nspname = 'public'
+            ORDER BY (p.pronargs = 3) DESC, p.oid`) as { nargs: number; sig: string }[];
+          const current = dt.filter((r) => Number(r.nargs) === 3);
+          const extra = dt.filter((r) => Number(r.nargs) !== 3).map((r) => r.sig);
+          if (!dt.length) {
+            add("delete signature", "fail", "delete_thought is missing — the delete_thought tool calls it", ledgerRemedy("042", APPLY_042));
+          } else if (current.length && extra.length === 0) {
+            add("delete signature", "ok", `${current[0].sig}: the form the servers call since migration 042, alone`);
+          } else if (current.length) {
+            add("delete signature", "fail",
+                `beside the form the servers call there ${extra.length === 1 ? "is an earlier one" : `are ${extra.length} earlier ones`}: ${extra.join(", ")} — 009 or 036 re-applied by hand over 042 — so every call that sends two arguments to delete_thought, which is every PostgREST caller by name from before this change and every hand-written SELECT, fails with "function is not unique"`,
+                `Drop the earlier form, as 042 does: ${extra.map((sig) => `DROP FUNCTION ${sig};`).join(" ")}`);
+          } else {
+            add("delete signature", "fail",
+                `${extra.join(" and ")} ${extra.length === 1 ? "is the form" : "are the forms"} from before migration 042; the server sends p_detach, which only 042's form takes — so every delete would fail`,
+                ledgerRemedy("042", APPLY_042));
+          }
+        } catch (e) {
+          add("delete signature", "warn", `could not verify: ${(e as Error).message}`, "The catalog read behind this check needs SELECT on pg_proc.");
+        }
+
+        /**
+         * Every lock-order argument on this fork — 018's fingerprint lock,
+         * 033's one order for the writers, 036's delete, 042's citation guard
+         * — holds under READ COMMITTED, Postgres's default: a writer that
+         * waits on a row lock re-reads the row the lock won. A connection whose
+         * default is REPEATABLE READ or SERIALIZABLE (a role or database
+         * setting, a pooler) reads its transaction's snapshot instead, and
+         * 042's guard then cannot see a citation committed after that
+         * snapshot — its source goes from under it. A warning, not a refusal:
+         * the server still works, the guarantees named do not (third review
+         * pass, SMD-1712).
+         */
+        try {
+          const [{ level }] = (await sql`SELECT current_setting('default_transaction_isolation') AS level`) as { level: string }[];
+          if (/^read (committed|uncommitted)$/i.test(level)) {
+            add("transaction isolation", "ok", `default_transaction_isolation is ${level} — the level the writers' lock order (018/033/036) and the citation guard (042) are argued under`);
+          } else {
+            add("transaction isolation", "warn",
+                `default_transaction_isolation is ${level}: the writers' lock order (018/033/036) and the citation guard (042) are argued under read committed — under ${level} a transaction reads its own snapshot, so a citation committed after it began is invisible to a delete of its source`,
+                `Set the connection's default back: ALTER ROLE ${ident} SET default_transaction_isolation = 'read committed'; (or at the database or pooler where it was changed).`);
+          }
+        } catch (e) {
+          add("transaction isolation", "warn", `could not verify: ${(e as Error).message}`);
         }
 
         try {

@@ -7,15 +7,24 @@
  * that lets the PostgREST client be swapped for direct SQL without the tool
  * definitions knowing.
  *
- * Both implementations are kept, deliberately:
+ * Two implementations, one default:
  *
- *   - The plan's cutover step runs both stacks against the same data and diffs the
- *     results. That is impossible if the old path is deleted in the same change.
- *   - Cloudflare Workers cannot hold a Postgres connection pool, so PostgREST
- *     stays the sensible pairing there. Selecting at runtime keeps the runtime
- *     decision and the data-layer decision independent.
+ *   - `sql` (store-sql.ts) — Postgres directly, through Bun's client. THE
+ *     DEFAULT since change 97 (SMD-1797): it is the store SETUP.md's container
+ *     runs, the one every CI job against real Postgres exercises, and the one
+ *     that needs no Supabase project. Unset OB1_STORE selects it.
+ *   - `postgrest` (store-postgrest.ts) — PostgREST over HTTP, via supabase-js.
+ *     Kept for Cloudflare Workers, which cannot hold a Postgres connection, so
+ *     the Bun client that store-sql.ts imports does not run there. Selected
+ *     explicitly with OB1_STORE=postgrest; on a runtime that has Bun the
+ *     selection is reported as retired (postgrestOnBunNotice), since the SQL
+ *     store is available there and is what every other path runs.
  *
- * Select with OB1_STORE=postgrest (default) or OB1_STORE=sql.
+ * The cutover rationale the first version of this file gave — run both stacks
+ * against the same data and diff — is done: test-store-postgrest.ts holds the
+ * PostgREST store's argument shapes against real Postgres through the SQL shim,
+ * and the two stores share every normaliser below so they cannot present two
+ * shapes to the tools (SMD-1040, SMD-1328).
  */
 
 export type ThoughtMatch = {
@@ -136,11 +145,15 @@ export type ThoughtHybridMatch = {
  * already carry — and the tools render a null date as absent and a no-ISO-form
  * value as its own text, not "Invalid Date" (thoughts.ts `displayDate`).
  * `infinity` stays a string, the value migration 020 ranks by; [3d] pins it.
- * Two mappers stay on the old `new Date(...)` form and are SMD-1803, not this
- * change: `derivationFields` (025's provenance walk) fabricates the epoch on a
- * NULL ancestor, and `normaliseProposal`'s local `iso` (029's
- * `list_supersession_proposals`) THROWS on an `infinity`-dated proposal thought
- * — both off the list/match/get path and reachable only by a hand-INSERT.
+ * SMD-1803 brought the last two mappers onto this rule too: `derivationFields`
+ * (025's provenance walk) and `normaliseProposal` (029's
+ * `list_supersession_proposals`) now take `isoTimestampOrNull`, so their
+ * `created_at` is `string | null` as well. Before it, both fabricated the epoch
+ * on a NULL, and `normaliseProposal`'s local `new Date(v).toISOString()` THREW
+ * RangeError on an `infinity`-dated proposal thought — a whole-tool crash. Every
+ * mapper that reads `created_at` is now null-safe; the CLI's `day`
+ * (`db/consolidate.ts`) and the judge-prompt `dateOf` (`consolidate.ts`) went the
+ * same way in the same change.
  * `undefined` throws: the column is missing from the row, a bug in the SELECT,
  * not data.
  */
@@ -363,7 +376,7 @@ export type ProvenanceNode = {
   type: string | null;
   sourceType: string | null;
   derivationMethod: string | null;
-  created_at: string;
+  created_at: string | null;
   cycle: boolean;
 };
 
@@ -374,7 +387,7 @@ export type Derivative = {
   type: string | null;
   sourceType: string | null;
   derivationMethod: string | null;
-  created_at: string;
+  created_at: string | null;
 };
 
 /** The five columns 025's two functions share; spread FIRST, so an explicit field can never be overwritten by it. */
@@ -384,7 +397,9 @@ function derivationFields(r: Record<string, unknown>) {
     type: r.type == null ? null : String(r.type),
     sourceType: r.source_type == null ? null : String(r.source_type),
     derivationMethod: r.derivation_method == null ? null : String(r.derivation_method),
-    created_at: isoTimestamp(r.created_at),
+    // SMD-1803: the column is nullable (see isoTimestamp's header). A NULL
+    // ancestor in the walk is null, not the epoch new Date(null) fabricated.
+    created_at: isoTimestampOrNull(r.created_at),
   };
 }
 
@@ -443,14 +458,17 @@ export type SupersessionProposal = {
   reviewNote: string | null;
   /** While accepted: the thought whose supersedes column the acceptance wrote. */
   supersedingId: string | null;
-  /** Each thought as it is now; `edited` when its text has changed since the pair was judged (the verdict was about the earlier text). */
-  older: { id: string; content: string; created_at: string; edited: boolean };
-  newer: { id: string; content: string; created_at: string; edited: boolean };
+  /** Each thought as it is now; `edited` when its text has changed since the pair was judged (the verdict was about the earlier text). `created_at` is `string | null` for the same reason the read path is (SMD-1803). */
+  older: { id: string; content: string; created_at: string | null; edited: boolean };
+  newer: { id: string; content: string; created_at: string | null; edited: boolean };
 };
 
 /** list_supersession_proposals's row → SupersessionProposal; both stores map through here so neither drifts. */
 export function normaliseProposal(r: Record<string, unknown>): SupersessionProposal {
-  const iso = (v: unknown) => new Date(v as string).toISOString();
+  // SMD-1803: older/newer.created_at take the read path's rule — isoTimestampOrNull
+  // (NULL → null, infinity kept, no throw); see isoTimestamp's header for why the
+  // local new Date(v).toISOString() this replaced was wrong. judged_at is NOT NULL
+  // (029) so it stays isoTimestamp; reviewed_at is set only on review.
   return {
     id: String(r.id),
     status: String(r.status) as SupersessionProposal["status"],
@@ -459,12 +477,12 @@ export function normaliseProposal(r: Record<string, unknown>): SupersessionPropo
     reason: r.reason == null ? null : String(r.reason),
     similarity: r.similarity == null ? null : Number(r.similarity),
     judgeKey: String(r.judge_key),
-    judgedAt: iso(r.judged_at),
-    reviewedAt: r.reviewed_at == null ? null : iso(r.reviewed_at),
+    judgedAt: isoTimestamp(r.judged_at),
+    reviewedAt: isoTimestampOrNull(r.reviewed_at),
     reviewNote: r.review_note == null ? null : String(r.review_note),
     supersedingId: r.superseding_id == null ? null : String(r.superseding_id),
-    older: { id: String(r.older_id), content: String(r.older_content), created_at: iso(r.older_created_at), edited: r.older_edited === true },
-    newer: { id: String(r.newer_id), content: String(r.newer_content), created_at: iso(r.newer_created_at), edited: r.newer_edited === true },
+    older: { id: String(r.older_id), content: String(r.older_content), created_at: isoTimestampOrNull(r.older_created_at), edited: r.older_edited === true },
+    newer: { id: String(r.newer_id), content: String(r.newer_content), created_at: isoTimestampOrNull(r.newer_created_at), edited: r.newer_edited === true },
   };
 }
 
@@ -481,12 +499,36 @@ export function normaliseProposal(r: Record<string, unknown>): SupersessionPropo
 /**
  * What update_thought / delete_thought refuse with. SUPERSEDES_NOT_FOUND and
  * WOULD_CYCLE (migration 032): the provenance envelope named a thought that
- * does not exist, or a pointer that would close a supersession loop.
+ * does not exist, or a pointer that would close a supersession loop. CITED
+ * (migration 042): active citations rest on the thought a delete named, and
+ * the caller did not ask to detach them — `citedBy` counts them, `citations`
+ * is up to ten of the citing rows, newest first.
  */
-export type MutationError = "NOT_FOUND" | "STALE_READ" | "DUPLICATE_CONTENT" | "SUPERSEDES_NOT_FOUND" | "WOULD_CYCLE";
+export type MutationError = "NOT_FOUND" | "STALE_READ" | "DUPLICATE_CONTENT" | "SUPERSEDES_NOT_FOUND" | "WOULD_CYCLE" | "CITED";
+/** One citing row of a CITED refusal: the facet, the thought it is on, its stance and text (migration 042). */
+export type Citation = { id: string; thoughtId: string; stance: string; text: string; createdAt?: string };
 export type MutationResult =
   | { ok: true; id: string }
   | { ok: false; error: MutationError; currentUpdatedAt?: string };
+/**
+ * What delete_thought answers (migration 042). Success: `detached`, the active
+ * citations the delete detached from the removed source — non-zero only when
+ * `detach` was asked — and `inactive`, when present, the expired or superseded
+ * citations that named it and were marked the same way in either mode. A
+ * refusal may carry CITED's `citedBy` and `citations`; update_thought's never
+ * does, so those live here and not on MutationResult (seventh review pass).
+ */
+export type DeleteResult =
+  | { ok: true; id: string; detached?: number; inactive?: number }
+  | { ok: false; error: MutationError; currentUpdatedAt?: string; citedBy?: number; citations?: Citation[] };
+/**
+ * Both functions' envelopes as one normaliser reads them — the superset that
+ * UpdateResult and DeleteResult each narrow. Shared so the two stores cannot
+ * disagree about what a refusal looks like.
+ */
+export type MutationEnvelope =
+  | { ok: true; id: string; updatedAt?: string; duplicateOf?: string; fingerprintHeldBy?: string; detached?: number; inactive?: number }
+  | { ok: false; error: MutationError; currentUpdatedAt?: string; citedBy?: number; citations?: Citation[] };
 /**
  * `duplicateOf` (migration 018): the edit's text normalises to what the row
  * already held AND another thought carries that fingerprint — a pair from
@@ -500,12 +542,15 @@ export type UpdateResult = MutationResult & { updatedAt?: string; duplicateOf?: 
  * the store's discriminated union. Shared so the two stores cannot disagree
  * about what a refusal looks like — the class of bug the audit work hit twice.
  */
-export function normaliseMutation(r: Record<string, unknown> | undefined): UpdateResult {
+export function normaliseMutation(r: Record<string, unknown> | undefined): MutationEnvelope {
   if (!r) return { ok: false, error: "NOT_FOUND" };
   if (r.ok === true) {
     return {
       ok: true,
       id: String(r.id),
+      // 042's delete counts; absent on an edit's envelope and on a pre-042 body.
+      detached: typeof r.detached === "number" ? r.detached : undefined,
+      inactive: typeof r.inactive === "number" ? r.inactive : undefined,
       // isoTimestamp, not String: the function returns jsonb, so this arrives
       // as Postgres's `+00:00` spelling on both clients, and `fetch` prints the
       // same column through normaliseThoughtRecord. Passing the ISO value back
@@ -522,6 +567,24 @@ export function normaliseMutation(r: Record<string, unknown> | undefined): Updat
     ok: false,
     error: (r.error as MutationError) ?? "NOT_FOUND",
     currentUpdatedAt: isoTimestampOpt(r.current_updated_at),
+    // 042's CITED refusal: the count, and the citing rows the function sampled.
+    // A number, or a string of digits (a proxy, a hand-made envelope) — and
+    // nothing else: Number() alone took `true`, `""` and `[5]` for counts
+    // (seventh review pass).
+    citedBy: typeof r.cited_by === "number" && Number.isFinite(r.cited_by) ? r.cited_by
+      : typeof r.cited_by === "string" && /^\d+$/.test(r.cited_by) ? Number(r.cited_by)
+      : undefined,
+    // Elements that are not objects (a truncating proxy's null) are dropped,
+    // not thrown on: the refusal is still a refusal.
+    citations: Array.isArray(r.citations)
+      ? (r.citations as unknown[]).filter((c): c is Record<string, unknown> => c !== null && typeof c === "object").map((c) => ({
+          id: String(c.id),
+          thoughtId: String(c.thought_id),
+          stance: String(c.stance ?? ""),
+          text: String(c.text ?? ""),
+          createdAt: isoTimestampOpt(c.created_at),
+        }))
+      : undefined,
   };
 }
 
@@ -835,11 +898,18 @@ export interface ThoughtStore {
     provenance?: UpdateProvenance;
   }): Promise<UpdateResult>;
 
-  /** Hard delete. Chunks cascade; migration 008 preserves the prior content. */
+  /**
+   * Hard delete. Chunks cascade; migration 008 preserves the prior content.
+   * Refused as CITED (migration 042) while active citations rest on the
+   * thought, unless `detach` — then each citing row keeps its text and stance,
+   * loses its source and records the deleted id and time, and the result
+   * says how many.
+   */
   deleteThought(opts: {
     id: string;
     actor?: Actor;
-  }): Promise<MutationResult>;
+    detach?: boolean;
+  }): Promise<DeleteResult>;
 
   /**
    * Resolve a key digest and its configured name to a stable agent id,
@@ -909,11 +979,111 @@ export interface ThoughtStore {
 }
 
 export type StoreEnv = {
+  /**
+   * The PostgREST store's base URL — or, holding a postgres:// URL, the SQL
+   * store's connection string (see databaseUrl): compat/supabase-sql reads a
+   * Postgres URL from this name for every vendored server migrated onto it, so
+   * a box running one of those beside this server sets one variable, not two.
+   */
   SUPABASE_URL?: string;
   SUPABASE_SERVICE_ROLE_KEY?: string;
+  /** The SQL store's connection string. Read before SUPABASE_URL. */
   DATABASE_URL?: string;
+  /** "sql" (the default when unset) or "postgrest" (Cloudflare Workers). */
   OB1_STORE?: string;
 };
+
+/** What an unset OB1_STORE selects. */
+export const DEFAULT_STORE = "sql";
+
+/** The store OB1_STORE names, lower-cased; DEFAULT_STORE when it is unset. */
+export function storeKind(env: StoreEnv): string {
+  return (env.OB1_STORE ?? DEFAULT_STORE).toLowerCase();
+}
+
+/** A libpq-style connection string — what the SQL store dials and PostgREST never is. */
+export function isPostgresUrl(value: string | undefined): boolean {
+  return typeof value === "string" && /^postgres(ql)?:\/\//i.test(value.trim());
+}
+
+/**
+ * The SQL store's connection string and which variable supplied it:
+ * DATABASE_URL first; else SUPABASE_URL when it holds a postgres:// URL — the
+ * spelling compat/supabase-sql takes, so a deployment of a shim-migrated
+ * vendored server beside this one sets that name once and both read it. An
+ * https:// SUPABASE_URL is PostgREST's and is never dialled as Postgres: the
+ * caller reports it as the PostgREST store's configuration under an SQL
+ * selection (missingDatabaseUrl names both fixes).
+ */
+export function databaseUrl(env: StoreEnv): { url: string; from: "DATABASE_URL" | "SUPABASE_URL" } | null {
+  if (env.DATABASE_URL) return { url: env.DATABASE_URL, from: "DATABASE_URL" };
+  if (isPostgresUrl(env.SUPABASE_URL)) return { url: env.SUPABASE_URL!.trim(), from: "SUPABASE_URL" };
+  return null;
+}
+
+/**
+ * Why an SQL selection with no connection string is refused — one message for
+ * createStore's throw and preflight's DATABASE_URL check, so the two cannot
+ * disagree about what to set. Names the PostgREST route when SUPABASE_URL holds
+ * an https:// URL: that is the deployment the old default served, and it keeps
+ * working under an explicit OB1_STORE=postgrest.
+ */
+export function missingDatabaseUrl(env: StoreEnv): { problem: string; fix: string } {
+  const selected = env.OB1_STORE === undefined ? "OB1_STORE is unset, which selects the SQL store" : `OB1_STORE=${env.OB1_STORE} selects the SQL store`;
+  const postgrestUrl = Boolean(env.SUPABASE_URL) && !isPostgresUrl(env.SUPABASE_URL);
+  return {
+    problem: `${selected}, and DATABASE_URL is not set${postgrestUrl ? " — SUPABASE_URL holds a non-postgres:// URL, the PostgREST store's base URL rather than a connection string" : ""}`,
+    fix: postgrestUrl
+      ? "Set DATABASE_URL to the brain's postgres:// connection string — or, to keep reaching this brain through PostgREST at SUPABASE_URL (kept for Cloudflare Workers), set OB1_STORE=postgrest."
+      : "Set DATABASE_URL to the brain's postgres:// connection string.",
+  };
+}
+
+/**
+ * The other mismatch: the PostgREST store selected while SUPABASE_URL holds a
+ * postgres:// connection string — the one-box operator who kept an old
+ * OB1_STORE=postgrest beside a shim-migrated neighbour's variable. supabase-js
+ * would take the string as a base URL and fail at the first call with
+ * "protocol must be http:, https: or s3:", a message that names neither the
+ * variable nor the fix; and the string carries a password, which no report
+ * may print. One refusal for createStore and preflight; null when the
+ * selection and the URL agree.
+ */
+export function postgrestOverPostgresUrl(env: StoreEnv): string | null {
+  if (storeKind(env) !== "postgrest" || !isPostgresUrl(env.SUPABASE_URL)) return null;
+  return "OB1_STORE=postgrest selects the PostgREST store, but SUPABASE_URL holds a postgres:// connection string, which PostgREST cannot dial (its base URL is http(s)://). " +
+    "Unset OB1_STORE — the SQL store reads that URL as its connection string — or set SUPABASE_URL to the PostgREST base URL.";
+}
+
+/** preflight's wording for a direct-connection check that has no PostgREST form; exported so the suite can name it. */
+export const DIRECT_CHECK_SKIP_OVER_POSTGREST = "not checked over PostgREST — a catalog read with no PostgREST form";
+
+/**
+ * A connection string with its credentials blanked, for any line a report
+ * prints. The userinfo ends at the first `/` after the scheme and the LAST `@`
+ * before that closes it: a raw `@` inside a password (invalid, but seen) is
+ * blanked with the rest, and an `@` later in the URL — a query parameter's
+ * value — is not taken for one. The first version's `[^@]*@` stopped at the
+ * first `@`, printing a password's tail and blanking such a host (second
+ * review pass).
+ */
+export function maskUrl(url: string): string {
+  return url.replace(/:\/\/[^/]*@/, "://***@");
+}
+
+/**
+ * The line a PostgREST selection earns on a runtime where the SQL store runs.
+ * Null on Workers (no Bun, no SQL store, PostgREST is the path) and for every
+ * other selection. `hasBun` is a parameter so the test can ask both answers on
+ * one runtime; production passes nothing and gets the runtime's own.
+ */
+export function postgrestOnBunNotice(kind: string, hasBun: boolean = typeof Bun !== "undefined"): string | null {
+  if (kind !== "postgrest" || !hasBun) return null;
+  return "OB1_STORE=postgrest selects the PostgREST store, which this fork keeps for Cloudflare Workers only: " +
+    "this process runs on Bun, where the SQL store (OB1_STORE unset or sql, DATABASE_URL set to the brain's postgres:// URL) " +
+    "reaches the same database directly, needs no Supabase project and is what every test and the container run. " +
+    "FORK.md change 97 (SMD-1797).";
+}
 
 /**
  * Build the configured store.
@@ -921,26 +1091,32 @@ export type StoreEnv = {
  * The SQL implementation is imported dynamically on purpose: it pulls in Bun's
  * Postgres client, which does not exist on Cloudflare Workers. A static import
  * would break the Workers build for every deployment, including the ones that
- * only ever use PostgREST.
+ * only ever use PostgREST. (wrangler.toml aliases the `bun` specifier to a stub
+ * for the bundler's sake, and sets OB1_STORE=postgrest so the default here is
+ * never what a Workers deployment gets.)
  */
 export async function createStore(env: StoreEnv): Promise<ThoughtStore> {
-  const kind = (env.OB1_STORE ?? "postgrest").toLowerCase();
+  const kind = storeKind(env);
 
   if (kind === "sql") {
-    if (!env.DATABASE_URL) {
-      throw new Error("OB1_STORE=sql requires DATABASE_URL");
+    const conn = databaseUrl(env);
+    if (!conn) {
+      const { problem, fix } = missingDatabaseUrl(env);
+      throw new Error(`${problem}. ${fix}`);
     }
     const { SqlStore } = await import("./store-sql.ts");
-    return new SqlStore(env.DATABASE_URL);
+    return new SqlStore(conn.url);
   }
 
   if (kind === "postgrest") {
     if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) {
       throw new Error("OB1_STORE=postgrest requires SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY");
     }
+    const mismatch = postgrestOverPostgresUrl(env);
+    if (mismatch) throw new Error(mismatch);
     const { PostgrestStore } = await import("./store-postgrest.ts");
     return new PostgrestStore(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY);
   }
 
-  throw new Error(`Unknown OB1_STORE "${kind}" — expected "postgrest" or "sql"`);
+  throw new Error(`Unknown OB1_STORE "${kind}" — expected "sql" (the default) or "postgrest" (Cloudflare Workers)`);
 }

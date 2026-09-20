@@ -15,6 +15,7 @@ import { join, dirname } from "node:path";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { applyMigrations, createAssert, dropSchema, runScript } from "../db/test-support.ts";
+import { DIRECT_CHECK_SKIP_OVER_POSTGREST } from "./store.ts";
 import { ACCEPTED_CAVEAT_PREFIX, MATCH_THOUGHTS_SIGNATURE, SEARCH_THOUGHTS_HYBRID_SIGNATURE, UPDATE_THOUGHT_SIGNATURE } from "../db/config.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -74,6 +75,83 @@ console.log("[1] Missing configuration fails, with an actionable fix");
 
   const b = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "typo" });
   assert(b.code === 1, "an unrecognised OB1_STORE exits 1 rather than defaulting");
+  assert(/"sql" \(the default/.test(b.out), "…naming sql as the default");
+
+  // Change 97 (SMD-1797): unset selects the SQL store, and every line says so.
+  const d = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: undefined });
+  assert(d.code === 1, "OB1_STORE unset without DATABASE_URL exits 1");
+  assert(/store selection\s+OB1_STORE unset — sql, the default/.test(d.out), "…the store selection line says unset means sql");
+  assert(/DATABASE_URL\s+OB1_STORE is unset, which selects the SQL store, and DATABASE_URL is not set/.test(d.out), "…the DATABASE_URL line says which selection wants it");
+  assert(!/SUPABASE_URL\s+not set/.test(d.out), "…and SUPABASE_URL is not asked for");
+
+  // The deployment the old default served — an https:// SUPABASE_URL, no
+  // OB1_STORE — is told both ways out rather than asked for a DATABASE_URL alone.
+  const h = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: undefined, SUPABASE_URL: "https://x.supabase.co", SUPABASE_SERVICE_ROLE_KEY: "k" });
+  assert(h.code === 1, "an https:// SUPABASE_URL under the default exits 1");
+  assert(/the PostgREST store's base URL/.test(h.out) && /set OB1_STORE=postgrest/.test(h.out), "…naming OB1_STORE=postgrest as the way to keep reaching the brain through it");
+  assert(!/set but unused/.test(h.out), "…and does not, two lines later, tell the operator to remove the variables that way out needs");
+
+  // SUPABASE_URL holding a postgres:// URL is the connection string: the
+  // configuration passes, masked and attributed, and the run fails only at the
+  // unreachable database — the same failure [4] asserts for DATABASE_URL.
+  const a = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: undefined, SUPABASE_URL: "postgres://u:hunter2@127.0.0.1:1/x" });
+  assert(/DATABASE_URL\s+postgres:\/\/\*\*\*@127\.0\.0\.1:1\/x \(from SUPABASE_URL, which holds a postgres:\/\/ URL; DATABASE_URL is unset\)/.test(a.out),
+         "a postgres:// SUPABASE_URL is read as the connection string, masked, and said to be");
+  assert(!/hunter2/.test(a.out), "…with its password masked too");
+  assert(!/SUPABASE_URL\s+set but unused/.test(a.out), "…and not called unused");
+  // The ✗ glyph and the absence of the config-skip text are the teeth: with the
+  // alias ignored, DATABASE_URL fails and this line reads `·  schema  skipped —
+  // fix the configuration above first`, which a bare /schema/ also matched.
+  assert(a.code === 1 && /✗\s+schema\s+/.test(a.out) && !/skipped — fix the configuration/.test(a.out) && !/store selection\s+OB1_STORE=/.test(a.out),
+         "…so the run reaches the database and fails THERE (✗ schema, not the config skip), under the default selection");
+  // The direct-connection block dialled the alias: its first check carries the
+  // refused connection. Gated on env.DATABASE_URL by name — the first
+  // version — the block is skipped whole and this line is absent.
+  assert(/vector extension\s+could not verify/.test(a.out), "…and the direct-connection block dialled it too (vector extension carries the refused connection)");
+
+  // The mirror slip: OB1_STORE=postgrest kept beside a SUPABASE_URL that holds a
+  // postgres:// string. Refused by name, the password masked — the first version
+  // printed the URL raw and then blamed network reachability (first review pass).
+  const m = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "postgrest", SUPABASE_URL: "postgres://u:hunter2@127.0.0.1:1/x", SUPABASE_SERVICE_ROLE_KEY: "k" });
+  assert(m.code === 1, "OB1_STORE=postgrest with a postgres:// SUPABASE_URL exits 1");
+  assert(/✗\s+SUPABASE_URL\s+holds a postgres:\/\/ connection string \(postgres:\/\/\*\*\*@127\.0\.0\.1:1\/x\), which the PostgREST store cannot dial/.test(m.out), "…refused by name, with the string masked");
+  assert(!/hunter2/.test(m.out), "…and the password appears nowhere in the report");
+  assert(/→ .*Unset OB1_STORE — the SQL store reads that URL/.test(m.out), "…with the fix naming the SQL store as the reader of that URL");
+  assert(/data layer\s+skipped — fix the configuration/.test(m.out) && !/protocol must be/.test(m.out), "…and the store is never built on it, so supabase-js's protocol error never appears");
+
+  // PostgREST stays selectable. On Bun the selection is a WARNING that names
+  // Workers and carries the notice as its fix line — not a failure of the config.
+  const w = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "postgrest", SUPABASE_URL: "https://stub.invalid", SUPABASE_SERVICE_ROLE_KEY: "k", OB1_CHUNK_CONTEXT: undefined });
+  assert(/!\s+store selection\s+OB1_STORE=postgrest — the PostgREST store, kept for Cloudflare Workers/.test(w.out), "OB1_STORE=postgrest is a warning naming Workers");
+  assert(/→ OB1_STORE=postgrest selects the PostgREST store, which this fork keeps for Cloudflare Workers only: this process runs on Bun/.test(w.out), "…with the retired notice as its fix line");
+  assert(/✓\s+SUPABASE_URL\s+https:\/\/stub\.invalid/.test(w.out), "…and its own configuration still passes");
+  // Over PostgREST with the schema check failed, every direct-connection check
+  // still prints — the file's own rule. Before the first review pass `edit
+  // signature` was silent on this path, and sixteen SQL-only checks were silent
+  // on every PostgREST run (pre-existing; by-catch).
+  assert(/edit signature\s+not probed — the schema check above failed first/.test(w.out), "edit signature reports when the schema check failed over PostgREST");
+  // Every name in DIRECT_CHECKS, read from the source as [4] does, exactly ONCE
+  // as a report row — the loop that fills the gaps must neither miss a name nor
+  // double one already reported by hand (second review pass: a four-name sample
+  // could not see the loop moved above the hand-written skips, which then printed
+  // twice). The row shape is the glyph, the name, whitespace.
+  const listedNames = [...readFileSync(join(HERE, "preflight.ts"), "utf8").match(/const DIRECT_CHECKS = \[([\s\S]*?)\];/)![1].matchAll(/"([^"]+)"/g)].map((mm) => mm[1]);
+  assert(listedNames.length >= 20, `DIRECT_CHECKS parsed from the source (${listedNames.length} names)`);
+  /** A report row for `name`: the glyph, the name, whitespace (fix lines start with →, so they never match). */
+  const rowRe = (name: string, flags = "") => new RegExp(`^\\s*[✓✗!·]\\s+${name}\\s`, flags);
+  const rowCounts = listedNames.map((name) => [name, (w.out.match(rowRe(name, "gm")) ?? []).length] as const);
+  assert(rowCounts.every(([, n]) => n === 1), `over PostgREST every direct-connection check prints exactly one row (${rowCounts.filter(([, n]) => n !== 1).map(([name, n]) => `${name}×${n}`).join(", ") || "all once"})`);
+  assert(rowCounts.filter(([name]) => new RegExp(`·\\s+${name}\\s+${DIRECT_CHECK_SKIP_OVER_POSTGREST}`).test(w.out)).length === 16, "…sixteen of them as the catalog-only skip, the rest by their own hand-written rows");
+  // And nothing else: every row between `data layer` and the provider section is
+  // `schema` or one of the listed names. A hand-written PostgREST row under a
+  // misspelt name would print beside the loop's correctly named skip with every
+  // count above intact (third review pass); this total sees it.
+  const lines = w.out.split("\n");
+  const rowOf = (name: string) => lines.findIndex((l) => rowRe(name).test(l));
+  const fromRow = rowOf("data layer"), toRow = rowOf("embedding provider");
+  const rows = lines.slice(fromRow + 1, toRow).filter((l) => /^\s*[✓✗!·]\s+\S/.test(l));
+  assert(fromRow > 0 && toRow > fromRow && rows.length === listedNames.length + 1,
+         `…and nothing else prints between the data layer and the provider: schema plus the ${listedNames.length} names (${rows.length} rows)`);
 }
 
 console.log("\n[2] Weak secrets warn without blocking");
@@ -138,7 +216,7 @@ console.log("\n[4] Unreachable database fails rather than hanging");
   // else would (a renamed or added check would otherwise be blamed or silent).
   const src = readFileSync(join(HERE, "preflight.ts"), "utf8");
   const listed = [...src.match(/const DIRECT_CHECKS = \[([\s\S]*?)\];/)![1].matchAll(/"([^"]+)"/g)].map((m) => m[1]);
-  const from = src.indexOf('if (built.kind === "sql" && env.DATABASE_URL) {'), to = src.indexOf("const missing = DIRECT_CHECKS.filter");
+  const from = src.indexOf('if (built.kind === "sql" && conn) {'), to = src.indexOf("const missing = DIRECT_CHECKS.filter");
   assert(from > 0 && to > from, "the block's two anchors are found in preflight.ts");
   const block = src.slice(from, to);
   // First appearance in the source is the order the block reports in, and the
@@ -1056,6 +1134,36 @@ else {
   const reapplied021 = await run(SQL_ENV);
   assert(reapplied021.code === 0 && /edit signature\s+update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text,jsonb\): the form the servers and reembed\.ts call since migration 032/.test(reapplied021.out),
          "…which 032 re-applied performs");
+  // 036 re-applied by hand over 042 puts the two-argument delete_thought back
+  // BESIDE 042's three-argument one: every two-argument caller is "not unique".
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("036") });
+  const twoDeletes = await run(SQL_ENV);
+  assert(twoDeletes.code === 1 && /delete signature\s+beside the form the servers call there is an earlier one: delete_thought\(uuid,jsonb\) — 009 or 036 re-applied by hand over 042/.test(twoDeletes.out) && /DROP FUNCTION delete_thought\(uuid,jsonb\);/.test(twoDeletes.out),
+         "036 re-applied over 042 leaves two delete_thought forms, and the start is refused naming the extra one with its DROP");
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("042") });
+  assert(/delete signature\s+delete_thought\(uuid,jsonb,boolean\): the form the servers call since migration 042, alone/.test((await run(SQL_ENV)).out), "…which 042 re-applied performs");
+  // A brain that stopped at 036 — a server deployed ahead of the migration:
+  // the two-argument form alone. Every delete the server sends would fail at
+  // the first user call, so the start is refused naming 042 instead.
+  await claims.unsafe("DROP FUNCTION delete_thought(uuid, jsonb, boolean)");
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("036") });
+  const preFacet = await run(SQL_ENV);
+  assert(preFacet.code === 1 && /delete signature\s+delete_thought\(uuid,jsonb\) is the form from before migration 042; the server sends p_detach, which only 042's form takes — so every delete would fail/.test(preFacet.out),
+         "a brain at 036 does not start: every delete the server sends would fail, and the check says so before a user finds out");
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("042") });
+  // The isolation level every lock-order argument assumes, read from the
+  // connection's default: ok at read committed, a warning naming the guarantees
+  // at any other, with the ALTER ROLE that puts it back. Set on the role, so a
+  // fresh session (preflight's) inherits it; reset after.
+  assert(/transaction isolation\s+default_transaction_isolation is read committed/.test((await run(SQL_ENV)).out), "the connection's default isolation is read committed, and the check says which guarantees rest on it");
+  await claims.unsafe("ALTER ROLE current_user SET default_transaction_isolation = 'repeatable read'");
+  try {
+    const rr = await run(SQL_ENV);
+    assert(rr.code === 0 && /transaction isolation\s+default_transaction_isolation is repeatable read: the writers' lock order \(018\/033\/036\) and the citation guard \(042\) are argued under read committed/.test(rr.out) && /ALTER ROLE \S+ SET default_transaction_isolation = 'read committed';/.test(rr.out),
+           `a role defaulting to repeatable read starts with a warning naming the guarantees that rest on read committed and the ALTER ROLE that restores it (exit ${rr.code})`);
+  } finally {
+    await claims.unsafe("ALTER ROLE current_user RESET default_transaction_isolation");
+  }
   // …and 021's CREATE OR REPLACE put its 3-argument upsert_thought back over
   // 035's: a chunkless re-capture would leave the previous vector's windows
   // again. A warning naming 035 — captures work, search is over-inclusive.
@@ -1193,30 +1301,39 @@ else {
       await claims.unsafe("GRANT SELECT ON ALL TABLES IN SCHEMA public TO ob1_pf_capture");
       await claims.unsafe("GRANT INSERT, UPDATE, DELETE ON thoughts TO ob1_pf_capture");
 
-      // thoughts satisfied, but no INSERT/DELETE on thought_chunks and no INSERT
-      // on thought_audit: refused, both tables named in CAPTURE_WRITES order,
-      // each with its GRANT.
+      // thoughts satisfied, but no INSERT/DELETE on thought_chunks, no INSERT
+      // on thought_audit and no UPDATE on thought_facets (042's delete guard
+      // writes the detached citations as the caller): refused, the three
+      // tables named in CAPTURE_WRITES order, each with its GRANT.
       const missingBoth = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
       const writeLine = (out: string) => out.split("\n").find((l) => /write privileges/.test(l)) ?? "";
       assert(missingBoth.code === 1 &&
              /write privileges\s+this connection's role \(ob1_pf_capture\) is missing privileges the capture path's writers need/.test(missingBoth.out) &&
-             /INSERT, DELETE on thought_chunks; INSERT on thought_audit/.test(writeLine(missingBoth.out)) &&
-             /GRANT INSERT, DELETE ON thought_chunks TO ob1_pf_capture;\s+GRANT INSERT ON thought_audit TO ob1_pf_capture;/.test(missingBoth.out),
-             `a role missing the chunk and audit writes does not start, each named in order with its GRANT (exit ${missingBoth.code})`);
+             /INSERT, DELETE on thought_chunks; INSERT on thought_audit; UPDATE on thought_facets/.test(writeLine(missingBoth.out)) &&
+             /GRANT INSERT, DELETE ON thought_chunks TO ob1_pf_capture;\s+GRANT INSERT ON thought_audit TO ob1_pf_capture;\s+GRANT UPDATE ON thought_facets TO ob1_pf_capture;/.test(missingBoth.out),
+             `a role missing the chunk, audit and facet writes does not start, each named in order with its GRANT (exit ${missingBoth.code})`);
+      assert(/a windowed capture, an edit with content, or 008's audit trigger, and every delete of a thought \(042's citation guard reads and writes thought_facets as the caller\) would fail/.test(writeLine(missingBoth.out)),
+             "…and says what each missing privilege breaks: the capture path for the chunk and audit writes, every delete for the facet one");
       assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, both 035's/.test(missingBoth.out), "…while atomic capture, a separate fact, is ok for it");
 
-      // Grant the chunk writes by hand; only the audit INSERT remains named.
+      // Grant the chunk writes by hand; the audit INSERT and the facet UPDATE remain named.
       await claims.unsafe("GRANT INSERT, DELETE ON thought_chunks TO ob1_pf_capture");
       const missingAudit = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
       assert(missingAudit.code === 1 &&
-             /INSERT on thought_audit/.test(writeLine(missingAudit.out)) &&
+             /INSERT on thought_audit; UPDATE on thought_facets/.test(writeLine(missingAudit.out)) &&
              !/thought_chunks/.test(writeLine(missingAudit.out)) &&
-             /GRANT INSERT ON thought_audit TO ob1_pf_capture;/.test(missingAudit.out),
-             `with the chunk writes granted, only the audit INSERT is named (exit ${missingAudit.code})`);
-
-      // Grant the audit INSERT by hand so the base capture set is satisfied — the
-      // extraction conditional is the remaining lever.
+             /GRANT INSERT ON thought_audit TO ob1_pf_capture;\s+GRANT UPDATE ON thought_facets TO ob1_pf_capture;/.test(missingAudit.out),
+             `with the chunk writes granted, the audit INSERT and the facet UPDATE are named, the chunks no longer (exit ${missingAudit.code})`);
+      // Grant the audit INSERT alone: only the facet UPDATE remains, and the
+      // sentence names only deletes — a capture would succeed, and says so.
       await claims.unsafe("GRANT INSERT ON thought_audit TO ob1_pf_capture");
+      const facetOnly = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
+      assert(facetOnly.code === 1 && /UPDATE on thought_facets — so every delete of a thought \(042's citation guard reads and writes thought_facets as the caller\) would fail/.test(writeLine(facetOnly.out)) && !/windowed capture/.test(writeLine(facetOnly.out)),
+             `with only the facet UPDATE missing, the check names deletes and not captures as what would fail (exit ${facetOnly.code})`);
+
+      // Grant the facet UPDATE by hand so the base capture set is satisfied —
+      // the extraction conditional is the remaining lever.
+      await claims.unsafe("GRANT UPDATE ON thought_facets TO ob1_pf_capture");
       const baseOk = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
       assert(baseOk.code === 0 && /write privileges\s+ob1_pf_capture holds the capture path's privileges/.test(baseOk.out) && !/thought_work_claims/.test(writeLine(baseOk.out)),
              `with the audit INSERT granted and extraction off, the base capture set is ok and says nothing of thought_work_claims (exit ${baseOk.code})`);

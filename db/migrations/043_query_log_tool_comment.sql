@@ -1,5 +1,5 @@
 -- =============================================================================
--- Migration 042: the cite shape, stated at the table — query_log.tool's two
+-- Migration 043: the cite shape, stated at the table — query_log.tool's two
 --                shapes and what each means, and the table's COMMENT re-issued
 --                to name a cite beside fetch/edit/delete (SMD-1749)
 -- =============================================================================
@@ -68,7 +68,7 @@
 -- WHAT A SUCCESSOR MUST CARRY
 --   A re-issued COMMENT replaces the description. Any migration that
 --   re-comments `query_log` or `query_log.tool` and re-issues 034's text would
---   silently drop the cite clause. db/test-schema.ts [41] asserts the LIVE text
+--   silently drop the cite clause. db/test-schema.ts [42] asserts the LIVE text
 --   of both comments after every file has applied — both name
 --   `<writer>/<pointer>` — so the drop fails the suite whichever migration
 --   causes it. The typed record of what a write cited is SMD-1730's event
@@ -78,7 +78,7 @@
 --   No flag and no double dash inside either COMMENT literal: 028 set that
 --   convention when test-schema [10]'s scan stripped `--` to end of line;
 --   the scan is literal-aware since change 93 (SMD-1796), so nothing depends
---   on it now, and [41] keeps asserting it of the LIVE text as the
+--   on it now, and [42] keeps asserting it of the LIVE text as the
 --   convention, so a successor's re-issue is held to it too. (The guard's
 --   HINT names the two flags, as 030's and 031's do.)
 --
@@ -95,7 +95,7 @@ DO $qc$
 BEGIN
   IF to_regclass('query_log') IS NULL THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'migration 042 needs 034 (query_log); this schema lacks it',
+      MESSAGE = 'migration 043 needs 034 (query_log); this schema lacks it',
       -- ASCII only: Bun's client hands a HINT holding a non-ASCII character back mis-decoded (030's fourth review pass).
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
       ERRCODE = 'invalid_schema_definition';

@@ -2,8 +2,8 @@
 /**
  * test-store-postgrest.ts — the PostgREST store against a real database.
  *
- * This path had no test at all. Everything else in the suite exercises
- * OB1_STORE=sql, so `PostgrestStore`'s RPC argument shapes were only ever verified
+ * This path had no test at all. Everything else in the suite exercises the SQL
+ * store (the default since change 97), so `PostgrestStore`'s RPC argument shapes were only ever verified
  * by running against a live PostgREST, which nothing in CI does. That went
  * unnoticed until chunking added a fourth argument to `upsert_thought` and there
  * was no way to check it arrived.
@@ -25,7 +25,7 @@ import { SQL } from "bun";
 import { createAssert, ISO_RE, plantLegacyRow, resetSchema } from "../db/test-support.ts";
 import { createClient } from "../compat/supabase-sql/index.ts";
 import { PostgrestStore } from "./store-postgrest.ts";
-import { isoTimestamp, isoTimestampOrNull } from "./store.ts";
+import { isoTimestamp, isoTimestampOrNull, normaliseMutation } from "./store.ts";
 
 const URL_ = process.env.DATABASE_URL;
 if (!URL_) {
@@ -362,7 +362,7 @@ console.log("\n[7] resolveAgent's RPC argument shape, and the id it produces");
 {
   /**
    * The same gap [1b] exists for, one migration later. Every other suite runs
-   * OB1_STORE=sql, so `resolve_agent`'s three named arguments on this path —
+   * the SQL store, so `resolve_agent`'s three named arguments on this path —
    * p_key_hash, p_label, p_scope — were unverified. A Workers deployment
    * speaking PostgREST would have silently gone unattributed.
    */
@@ -469,7 +469,7 @@ console.log("\n[9] Provenance rides the envelope and reads back over PostgREST t
   });
 
   // The RPC argument shapes for the two read functions, verified on this store —
-  // the reason this suite exists (the default store speaks PostgREST).
+  // the reason this suite exists (the Workers store speaks PostgREST).
   const anc = await store.traceProvenance({ id: child });
   assert(anc.some((n) => n.thoughtId === parent && n.depth === 1), "traceProvenance's rpc shape returns the source at depth 1");
   const der = await store.findDerivatives({ id: parent });
@@ -565,6 +565,77 @@ console.log("\n[11] The query log's action rows over PostgREST: one or many thro
   assert(from_query === "postgrest log", `034's join attributes the cite this store wrote (${from_query})`);
   await admin`DELETE FROM query_log`;
   await admin.close();
+}
+
+console.log("\n[12] deleteThought's rpc shape over PostgREST: p_detach named and bound as a boolean, the CITED refusal and the detach count normalised (migration 042, SMD-1712)");
+{
+  const admin = new SQL({ url: URL_, max: 1 });
+  const { id: source } = await store.captureThought({ content: "postgrest source: the limit is 600 a minute", payload: { metadata: {} }, embedding: vec(0) });
+  const { id: citer } = await store.captureThought({ content: "postgrest note resting on the source", payload: { metadata: {} }, embedding: vec(1) });
+  const [{ r: wrote }] = (await admin`SELECT record_citation(${citer}::uuid, ${source}::uuid, 'the limit is 600', 'retrieved') AS r`) as { r: { ok: boolean } }[];
+  assert(wrote.ok === true, `record_citation writes the citing row (${JSON.stringify(wrote)})`);
+  // Without detach: refused, the count and the citing row mapped to the store's shape.
+  const refused = await store.deleteThought({ id: source, actor: { name: "importer", source: "postgrest-test" } });
+  assert(refused.ok === false && refused.error === "CITED" && refused.citedBy === 1 && refused.citations?.length === 1 && refused.citations[0].thoughtId === citer && refused.citations[0].stance === "retrieved" && refused.citations[0].text === "the limit is 600" && ISO_RE.test(refused.citations[0].createdAt ?? ""),
+         `the CITED envelope normalises to citedBy and citations, created_at an ISO string (${JSON.stringify(refused)})`);
+  assert(Number((await admin`SELECT count(*)::int AS c FROM thoughts WHERE id = ${source}`)[0].c) === 1, "…and the source stands");
+  const spelled = await store.deleteThought({ id: source, detach: false });
+  assert(spelled.ok === false && spelled.error === "CITED", "detach: false spelled is the default's refusal");
+  // With detach: deleted, the count read back, the actor on the audit row.
+  const detached = await store.deleteThought({ id: source, actor: { name: "importer", source: "postgrest-test" }, detach: true });
+  assert(detached.ok === true && detached.id === source && detached.detached === 1 && detached.inactive === undefined, `p_detach binds and the count comes back (${JSON.stringify(detached)})`);
+  const [ev] = await admin`SELECT actor_name FROM thought_audit WHERE thought_id = ${source} AND action = 'delete'`;
+  assert(ev?.actor_name === "importer", `the delete is attributed over this path too (${ev?.actor_name})`);
+  const [facet] = (await admin`SELECT payload FROM thought_facets WHERE thought_id = ${citer}`) as { payload: Record<string, unknown> }[];
+  assert(facet?.payload?.source_id === null && facet?.payload?.source_deleted_id === source, "the citation records the deleted source");
+  // The count coerced: a body whose cited_by arrives as a string still counts; garbage does not.
+  const coerced = normaliseMutation({ ok: false, error: "CITED", cited_by: "3", citations: [] });
+  const garbage = normaliseMutation({ ok: false, error: "CITED", cited_by: "many" });
+  const truthy = normaliseMutation({ ok: false, error: "CITED", cited_by: true });
+  const listy = normaliseMutation({ ok: false, error: "CITED", cited_by: [5] });
+  assert(coerced.ok === false && coerced.citedBy === 3 && garbage.ok === false && garbage.citedBy === undefined && truthy.ok === false && truthy.citedBy === undefined && listy.ok === false && listy.citedBy === undefined,
+    "a cited_by that arrives as a numeric string is a number to the tool; a word, a boolean or a list is no count");
+  const holed = normaliseMutation({ ok: false, error: "CITED", cited_by: 2, citations: [null, { id: "a", thought_id: "b", stance: "stated", text: "t" }] });
+  assert(holed.ok === false && holed.citations?.length === 1 && holed.citations[0].thoughtId === "b", "a citation element that is not an object is dropped, not thrown on — the refusal stays a refusal");
+  // A named call with p_id and p_actor alone — the vendored servers' rpc shape — still resolves.
+  const { data, error } = await client.rpc("delete_thought", { p_id: citer, p_actor: null });
+  assert(error === null && (data as { ok: boolean }).ok === true, `rpc with p_id and p_actor alone resolves through the default (${JSON.stringify(data ?? error)})`);
+  await admin.close();
+}
+
+console.log("\n[13] The provenance and proposal rpc shapes are null-safe too: a NULL created_at maps to null, an infinity-dated proposal thought does not throw (SMD-1803)");
+{
+  const admin = new SQL({ url: URL_, max: 1 });
+  const undatedAncestor = await plantLegacyRow(admin, "postgrest 1803 undated ancestor", "[" + vec(8).join(",") + "]", null);
+  const { id: heir } = await store.captureThought({ content: "postgrest 1803 heir", payload: { metadata: {} }, embedding: vec(9), derivedFrom: [undatedAncestor] });
+  const { id: parent } = await store.captureThought({ content: "postgrest 1803 dated parent", payload: { metadata: {} }, embedding: vec(10) });
+  const undatedChild = await plantLegacyRow(admin, "postgrest 1803 undated derivative", "[" + vec(11).join(",") + "]", null);
+  const infOlder = await plantLegacyRow(admin, "postgrest 1803 proposal thought infinity", "[" + vec(12).join(",") + "]", "infinity");
+  const undatedNewer = await plantLegacyRow(admin, "postgrest 1803 proposal thought undated", "[" + vec(13).join(",") + "]", null);
+  try {
+    // trace UP and walk DOWN, both through derivationFields on the rpc shape.
+    const ancNode = (await store.traceProvenance({ id: heir })).find((n) => n.thoughtId === undatedAncestor);
+    assert(ancNode?.created_at === null, `traceProvenance's rpc shape maps a NULL ancestor to null (got ${JSON.stringify(ancNode?.created_at)})`);
+    await admin`UPDATE thoughts SET derived_from = jsonb_build_array(${parent}::text) WHERE id = ${undatedChild}::uuid`;
+    const derNode = (await store.findDerivatives({ id: parent })).find((d) => d.id === undatedChild);
+    assert(derNode !== undefined && derNode.created_at === null, `findDerivatives's rpc shape maps a NULL derivative to null (got ${JSON.stringify(derNode?.created_at)})`);
+
+    // The tool-crash case over PostgREST: the RPC returns the row and the
+    // mapper keeps "infinity" / null rather than throwing or fabricating.
+    await admin`SELECT record_supersession_proposal(${infOlder}::uuid, ${undatedNewer}::uuid, 'conflict_undirected', 0.7, 'infinity vs undated', 0.9, 'consolidate:smd1803@p1', NULL)`;
+    let proposals: Awaited<ReturnType<typeof store.listSupersessionProposals>> = [];
+    let threw = "";
+    try { proposals = await store.listSupersessionProposals({ status: null }); } catch (e) { threw = (e as Error).message; }
+    assert(threw === "", `listSupersessionProposals returns rather than throwing over PostgREST (threw: ${threw.slice(0, 80)})`);
+    const p = proposals.find((x) => x.older.id === infOlder && x.newer.id === undatedNewer);
+    assert(p?.older.created_at === "infinity", `…infinity kept as its own text (got ${JSON.stringify(p?.older.created_at)})`);
+    assert(p?.newer.created_at === null, `…a NULL proposal thought is null, not the epoch (got ${JSON.stringify(p?.newer.created_at)})`);
+    assert(p != null && p.judgedAt !== "1970-01-01T00:00:00.000Z" && ISO_RE.test(p.judgedAt), `…judged_at is a real timestamp (got ${JSON.stringify(p?.judgedAt)})`);
+  } finally {
+    await admin`DELETE FROM supersession_proposals`;
+    await admin`DELETE FROM thoughts WHERE id IN (${undatedAncestor}::uuid, ${heir}::uuid, ${parent}::uuid, ${undatedChild}::uuid, ${infOlder}::uuid, ${undatedNewer}::uuid)`;
+    await admin.close();
+  }
 }
 
 await store.close();
