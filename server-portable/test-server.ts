@@ -27,7 +27,7 @@ const { assert, report } = createAssert();
 
 // Seed env before importing: the module itself no longer reads it at import
 // time, but the first request will, and Workers-style bindings are absent here.
-// No store configuration, on purpose (change 94, SMD-1797): nothing below calls
+// No store configuration, on purpose (change 97, SMD-1797): nothing below calls
 // a tool, so the server never builds a store — [14] exercises the factory
 // directly — and a section that did reach one would surface the SQL store's
 // own "DATABASE_URL is not set" refusal inside a tool error, not a request to

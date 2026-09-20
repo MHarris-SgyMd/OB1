@@ -106,7 +106,7 @@ function env(): Env {
 // Built once, on first use. createStore() dynamically imports whichever backend
 // is configured, so a Cloudflare build never pulls in the Postgres client. The
 // PostgREST store selected where the SQL store runs is said once, here, at the
-// moment the selection takes effect (change 94); preflight says it at the
+// moment the selection takes effect (change 97); preflight says it at the
 // entrypoint as well, so a container sees it before the first request.
 let _store: Promise<ThoughtStore> | null = null;
 function db(): Promise<ThoughtStore> {

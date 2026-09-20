@@ -6,7 +6,7 @@
  * actually matters for Phase 2: an MCP client calling the documented tools gets the
  * same answers with PostgREST removed entirely. It drives the real server through
  * real JSON-RPC, with OB1_STORE unset — the SQL store is the default (change
- * 94) and this suite is what proves it — and no Supabase anywhere.
+ * 97) and this suite is what proves it — and no Supabase anywhere.
  *
  * The embedding provider is stubbed — the point is the data layer, and hitting
  * OpenRouter would make the suite non-hermetic and cost money. Everything below
@@ -83,7 +83,7 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 const STUB_BASE = "https://stub.invalid/v1";
 process.env.OB1_LLM_BASE_URL = STUB_BASE;
 
-// OB1_STORE is UNSET on purpose (change 94, SMD-1797): the SQL store is the
+// OB1_STORE is UNSET on purpose (change 97, SMD-1797): the SQL store is the
 // default, and this suite — the whole server over MCP against real Postgres —
 // is what proves it. Setting it here would let the default drift back to
 // PostgREST with every test still green.

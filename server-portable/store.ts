@@ -10,7 +10,7 @@
  * Two implementations, one default:
  *
  *   - `sql` (store-sql.ts) — Postgres directly, through Bun's client. THE
- *     DEFAULT since change 94 (SMD-1797): it is the store SETUP.md's container
+ *     DEFAULT since change 97 (SMD-1797): it is the store SETUP.md's container
  *     runs, the one every CI job against real Postgres exercises, and the one
  *     that needs no Supabase project. Unset OB1_STORE selects it.
  *   - `postgrest` (store-postgrest.ts) — PostgREST over HTTP, via supabase-js.
@@ -1021,7 +1021,7 @@ export function postgrestOnBunNotice(kind: string, hasBun: boolean = typeof Bun 
   return "OB1_STORE=postgrest selects the PostgREST store, which this fork keeps for Cloudflare Workers only: " +
     "this process runs on Bun, where the SQL store (OB1_STORE unset or sql, DATABASE_URL set to the brain's postgres:// URL) " +
     "reaches the same database directly, needs no Supabase project and is what every test and the container run. " +
-    "FORK.md change 94 (SMD-1797).";
+    "FORK.md change 97 (SMD-1797).";
 }
 
 /**

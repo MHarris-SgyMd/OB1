@@ -3,7 +3,7 @@
  * test-store-postgrest.ts — the PostgREST store against a real database.
  *
  * This path had no test at all. Everything else in the suite exercises the SQL
- * store (the default since change 94), so `PostgrestStore`'s RPC argument shapes were only ever verified
+ * store (the default since change 97), so `PostgrestStore`'s RPC argument shapes were only ever verified
  * by running against a live PostgREST, which nothing in CI does. That went
  * unnoticed until chunking added a fourth argument to `upsert_thought` and there
  * was no way to check it arrived.

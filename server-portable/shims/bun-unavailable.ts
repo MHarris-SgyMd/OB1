@@ -10,7 +10,7 @@
  * Mapped here via `[alias]` in wrangler.toml. Nothing in this file should ever
  * run: reaching it means a Workers deployment selected the SQL store — by
  * setting OB1_STORE=sql, or by losing the binding and getting the server's
- * default (change 94) — AND had a connection string (DATABASE_URL, or a
+ * default (change 97) — AND had a connection string (DATABASE_URL, or a
  * postgres:// SUPABASE_URL) for the store to open: without one, createStore
  * refuses on the missing DATABASE_URL before this module is imported, and that
  * refusal names OB1_STORE=postgrest as the way out. Either way the SQL store
@@ -22,7 +22,7 @@ const message =
   "The SQL store is not supported on Cloudflare Workers: it needs a pooled Postgres " +
   "connection, which Workers cannot hold. wrangler.toml sets OB1_STORE=postgrest for this " +
   "target — a deployment that set OB1_STORE=sql, or lost that binding and so got the server's " +
-  "default (change 94), and has a connection string to open, lands here. Set OB1_STORE=postgrest " +
+  "default (change 97), and has a connection string to open, lands here. Set OB1_STORE=postgrest " +
   "on Workers, or deploy to a container runtime (Bun) for the SQL store.";
 
 export class SQL {

@@ -131,7 +131,7 @@ const missing = (msg: string) => /could not find the function|does not exist/i.t
 
 // ── Configuration ────────────────────────────────────────────────────────────
 
-// The SQL store is the default (change 94, SMD-1797); PostgREST is kept for
+// The SQL store is the default (change 97, SMD-1797); PostgREST is kept for
 // Cloudflare Workers, where the SQL store's driver does not run, and is said to
 // be retired wherever it does — this process runs on Bun, so a PostgREST
 // selection here is that case. A warning, not a failure: the deployment works.
@@ -481,7 +481,7 @@ if (configFailed) {
          * 020's by a hand re-apply of 007/014/019, which resolves the store's
          * six-argument call uniquely while every PostgREST caller that sends
          * the four arguments the old form took (the community integrations, a
-         * dashboard) fails with PGRST203. Until change 94 this check probed
+         * dashboard) fails with PGRST203. Until change 97 this check probed
          * that as such a caller would, through a supabase-js client of its
          * own; preflight no longer carries one (the PostgREST store is kept for
          * Workers, and this file runs on Bun), and the overload count is a
@@ -516,7 +516,7 @@ if (configFailed) {
          * form from before 032 (or no function). Whether an earlier form —
          * 018's or 021's re-applied by hand — sits beside 032's, which makes
          * every call with fewer than nine arguments ambiguous for PostgREST, is
-         * the pg_proc read the SQL branch does; change 94 dropped the 7-argument
+         * the pg_proc read the SQL branch does; change 97 dropped the 7-argument
          * probe this check sent through a client of its own (see search
          * signatures above), so the detail names the run that reads it.
          */
@@ -554,7 +554,7 @@ if (configFailed) {
       // The rest of the direct-connection block — catalog reads with no
       // PostgREST form at all — reported by name too, so this path prints
       // every check the SQL path does. Before the first review pass of change
-      // 94 sixteen of them printed nothing here, the one shape the DIRECT_CHECKS
+      // 97 sixteen of them printed nothing here, the one shape the DIRECT_CHECKS
       // comment forbids, while the README said they were skips.
       for (const name of DIRECT_CHECKS) {
         if (!results.some((r) => r.name === name)) add(name, "skip", `${DIRECT_CHECK_SKIP_OVER_POSTGREST}; ${CATALOG_HINT}`);

@@ -68,14 +68,14 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Ninety-four numbered changes on top of the pin. Seven fix defects found in an
+Ninety-seven numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
 data layer (Phase 2). Ten (changes 31, 53, 55, 59, 79, 82, 86, 87, 88, and 89) ship no runtime change at
 all: each is a measurement that decided against building something.
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–94 are the numbered `###` sections** further down, which is
+sections. Changes **18–97 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -15129,7 +15129,7 @@ Upstream's own path needs none of this: on Supabase the roles exist and
 `service_role` bypasses RLS. The literal-aware strip and the rule are
 portable; the grant group is the fork's.
 
-### 94. The SQL store is the default — `OB1_STORE` unset selects `store-sql.ts`, `preflight.ts` carries no supabase-js client of its own, and the PostgREST store is kept for Cloudflare Workers alone, reported as retired wherever Bun runs (SMD-1797)
+### 97. The SQL store is the default — `OB1_STORE` unset selects `store-sql.ts`, `preflight.ts` carries no supabase-js client of its own, and the PostgREST store is kept for Cloudflare Workers alone, reported as retired wherever Bun runs (SMD-1797)
 
 **Problem.** `createStore` read `OB1_STORE ?? "postgrest"`: the portable server,
 this fork's reference deployment, reached its brain through Supabase's PostgREST

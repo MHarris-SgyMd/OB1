@@ -114,7 +114,7 @@ services:
       dockerfile: server-portable/Dockerfile
     environment:
       # No OB1_STORE on purpose: the SQL store is the server's default (FORK.md
-      # change 94), and this stack — the "Full stack, no Supabase" CI job — is
+      # change 97), and this stack — the "Full stack, no Supabase" CI job — is
       # the deployment that proves it. Setting it here would let the default
       # drift back to PostgREST with nothing in CI noticing.
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@postgres:5432/openbrain

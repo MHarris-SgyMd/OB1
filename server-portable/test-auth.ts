@@ -127,9 +127,9 @@ console.log("\n[6] The legacy single key still works, with write scope");
 
 // ── The tool surface actually changes with scope ─────────────────────────────
 
-// The default store (sql, change 94) against a port nothing listens on: the
+// The default store (sql, change 97) against a port nothing listens on: the
 // connection is refused at once, and [11] asserts that a registry the store
-// cannot reach denies nobody service. Before change 94 this ran the PostgREST
+// cannot reach denies nobody service. Before change 97 this ran the PostgREST
 // store against a stub host for the same reason.
 delete process.env.OB1_STORE;
 process.env.DATABASE_URL = "postgres://ob1:x@127.0.0.1:1/ob1";

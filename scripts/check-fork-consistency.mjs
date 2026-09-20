@@ -1840,7 +1840,7 @@ await checkCapturingGrants();
  * Deliberately one-directional: compose may legitimately set variables the
  * example does not mention (OB1_PG_POOL, PORT), because those are properties
  * of the stack rather than choices the operator makes in .env. (OB1_STORE was
- * the example until change 94 made the SQL store the default and compose
+ * the example until change 97 made the SQL store the default and compose
  * stopped setting it.)
  */
 function checkComposeForwardsDocumentedEnv() {

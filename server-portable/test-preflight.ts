@@ -77,7 +77,7 @@ console.log("[1] Missing configuration fails, with an actionable fix");
   assert(b.code === 1, "an unrecognised OB1_STORE exits 1 rather than defaulting");
   assert(/"sql" \(the default/.test(b.out), "…naming sql as the default");
 
-  // Change 94 (SMD-1797): unset selects the SQL store, and every line says so.
+  // Change 97 (SMD-1797): unset selects the SQL store, and every line says so.
   const d = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: undefined });
   assert(d.code === 1, "OB1_STORE unset without DATABASE_URL exits 1");
   assert(/store selection\s+OB1_STORE unset — sql, the default/.test(d.out), "…the store selection line says unset means sql");

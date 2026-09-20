@@ -54,7 +54,7 @@ console.log("[1] The factory selects and validates");
   assert(s.kind === "sql", "OB1_STORE=sql yields the SQL store");
   await s.close();
 
-  // Change 94 (SMD-1797): so does no OB1_STORE at all — the default this job
+  // Change 97 (SMD-1797): so does no OB1_STORE at all — the default this job
   // runs against real Postgres. The factory's refusals are test-server [14]'s.
   const d = await createStore({ DATABASE_URL: URL_ });
   assert(d.kind === "sql", "OB1_STORE unset yields the SQL store — the default");

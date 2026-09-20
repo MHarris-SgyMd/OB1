@@ -345,7 +345,7 @@ jobs:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
 
       # The one that matters: the real MCP server, driven over JSON-RPC, with
-      # OB1_STORE unset — the SQL store is the default (change 94) and this is
+      # OB1_STORE unset — the SQL store is the default (change 97) and this is
       # the job that proves it — and no Supabase configuration present at all.
       - name: End-to-end over MCP with no Supabase
         working-directory: server-portable
@@ -399,7 +399,7 @@ jobs:
         env:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
 
-      # The PostgREST store — kept for Cloudflare Workers (change 94); every
+      # The PostgREST store — kept for Cloudflare Workers (change 97); every
       # other suite runs the SQL store. Uses compat/supabase-sql as the fixture: real SQL against
       # real Postgres, so a wrong RPC argument shape fails here as it would live.
       - name: PostgREST store argument shapes

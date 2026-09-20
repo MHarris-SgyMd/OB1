@@ -109,7 +109,7 @@ direct-connection check — this one included — prints a row: five are probed
 through the store's own calls (`filtered search`, `keyword search`, `hybrid
 search`, `search signatures`, `edit signature`), four say what catalog fact they
 would have read, and the sixteen catalog-only ones say they have no PostgREST
-form (change 94's first review pass; before it those sixteen printed nothing on
+form (change 97's first review pass; before it those sixteen printed nothing on
 that path).
 
 ## Choosing a data layer
@@ -119,7 +119,7 @@ that path).
 | `sql` *(the default — leave `OB1_STORE` unset)* | Postgres directly, via `Bun.sql` | `DATABASE_URL` (or `SUPABASE_URL` holding a `postgres://` URL) | Bun: the container, a bare `bun index.ts` |
 | `postgrest` | PostgREST over HTTP, via `supabase-js` | `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` | Cloudflare Workers, where `wrangler.toml` selects it |
 
-The SQL store is the default (FORK.md change 94, SMD-1797): it is what `SETUP.md`'s
+The SQL store is the default (FORK.md change 97, SMD-1797): it is what `SETUP.md`'s
 container runs, what every CI job against real Postgres drives, and the one that
 needs no Supabase project. The PostgREST store is kept for one reason — Cloudflare
 Workers cannot hold a Postgres connection, so the Bun client `store-sql.ts`
@@ -257,7 +257,7 @@ bun test-auth.ts          # 67 — scoped, hashed, named keys
 bun run test:local        # 31 — fully local provider, no credential
 bun run test:sql          # 113 — store conformance, real Postgres in a container
 bun run test:e2e          # 112 — the whole server over MCP with no Supabase at all, OB1_STORE unset
-bun run cf:build          # ~342 KiB gzipped (measured 2026-09-20 at change 94; the PostgREST store and supabase-js are in it)
+bun run cf:build          # ~342 KiB gzipped (measured 2026-09-20 at change 97; the PostgREST store and supabase-js are in it)
 ```
 
 `test:sql` and `test:e2e` need podman or docker; they use `../db/with-postgres.sh`
