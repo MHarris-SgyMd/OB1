@@ -112,20 +112,26 @@ have read: none is reachable there.
 
 | `OB1_STORE` | Talks to | Needs | Runs on |
 | --- | --- | --- | --- |
-| `postgrest` *(default)* | PostgREST over HTTP, via `supabase-js` | `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` | anywhere, Workers included |
-| `sql` | Postgres directly, via `Bun.sql` | `DATABASE_URL` | container runtimes only |
+| `sql` *(the default — leave `OB1_STORE` unset)* | Postgres directly, via `Bun.sql` | `DATABASE_URL` (or `SUPABASE_URL` holding a `postgres://` URL) | Bun: the container, a bare `bun index.ts` |
+| `postgrest` | PostgREST over HTTP, via `supabase-js` | `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` | Cloudflare Workers, where `wrangler.toml` selects it |
 
-Both are kept on purpose. The cutover step in the migration plan runs the two
-stacks against the same data and diffs the results, which is impossible if the old
-path is deleted in the same change. And Cloudflare Workers cannot hold a
-connection pool, so PostgREST stays the right pairing there — selecting at runtime
-keeps the runtime decision and the data-layer decision independent.
+The SQL store is the default (FORK.md change 94, SMD-1797): it is what `SETUP.md`'s
+container runs, what every CI job against real Postgres drives, and the one that
+needs no Supabase project. The PostgREST store is kept for one reason — Cloudflare
+Workers cannot hold a Postgres connection, so the Bun client `store-sql.ts`
+imports does not run there — and `wrangler.toml` pins `OB1_STORE=postgrest` for
+that target as a `[vars]` binding, a property of the target rather than a secret.
+Selected anywhere Bun runs, the PostgREST store is reported as retired: `preflight.ts`
+warns under `store selection`, and the server logs the same line once when it
+builds the store. Whether the SQL store can run on Workers through a driver that
+runs there (Hyperdrive in front of `postgres` or `pg` over `connect()`) is
+SMD-1847's measurement; until it lands, Workers is PostgREST-only.
 
 `store-sql.ts` is imported **dynamically**, so a Workers build never pulls in the
 Postgres client. Wrangler's bundler still resolves the specifier statically, so
 `wrangler.toml` aliases `bun` to `shims/bun-unavailable.ts` — a stub that throws
-with an explanation if a Workers deployment is somehow configured with
-`OB1_STORE=sql`.
+with an explanation if a Workers deployment somehow selects the SQL store, by
+setting `OB1_STORE=sql` or by losing the `[vars]` binding and getting the default.
 
 ### Two behaviours the SQL port had to preserve exactly
 
@@ -178,10 +184,20 @@ Required in every environment:
 
 ```
 MCP_ACCESS_KEYS              name:scope:sha256 entries — bun keygen.ts mints one (or the legacy MCP_ACCESS_KEY, one raw key, write scope)
-SUPABASE_URL                 PostgREST base URL (or your replacement)
-SUPABASE_SERVICE_ROLE_KEY    service credential
-OPENROUTER_API_KEY           embeddings + metadata extraction
+DATABASE_URL                 the brain's postgres:// connection string — the SQL store, the default
+OPENROUTER_API_KEY           embeddings + metadata extraction (not needed when OB1_LLM_BASE_URL is a local provider)
 ```
+
+On Cloudflare Workers, where `wrangler.toml` selects the PostgREST store,
+`SUPABASE_URL` (the PostgREST base URL) and `SUPABASE_SERVICE_ROLE_KEY` replace
+`DATABASE_URL`. A box that also runs a vendored server migrated onto
+`compat/supabase-sql` — which reads a `postgres://` URL from `SUPABASE_URL` — may
+set that one name for both: this server reads a `postgres://` `SUPABASE_URL` as
+`DATABASE_URL` when the latter is unset (`store.ts:databaseUrl`), and preflight
+says which variable supplied the string. An `https://` `SUPABASE_URL` with no
+`OB1_STORE` — the deployment the old default served — is refused by preflight and
+by the store's first use with both ways out named: set `DATABASE_URL`, or set
+`OB1_STORE=postgrest` to keep reaching the brain through PostgREST.
 
 Optional: `OPEN_BRAIN_CITATION_BASE_URL`, `PORT`.
 
@@ -226,12 +242,12 @@ SMD-1451 is the migrator refusing it).
 ## Expected outcome
 
 ```bash
-bun test-server.ts        # 151 — transport, auth, tool surface, OAuth discovery, the method guard and /health
-bun test-auth.ts          # 43 — scoped, hashed, named keys
-bun run test:local        # 22 — fully local provider, no credential
-bun run test:sql          # 53 — store conformance, real Postgres in a container
-bun run test:e2e          # 59 — the whole server over MCP with no Supabase at all
-bun run cf:build          # ~281 KiB gzipped
+bun test-server.ts        # 169 — transport, auth, tool surface, OAuth discovery, the method guard, /health and the store default
+bun test-auth.ts          # 67 — scoped, hashed, named keys
+bun run test:local        # 31 — fully local provider, no credential
+bun run test:sql          # 113 — store conformance, real Postgres in a container
+bun run test:e2e          # 112 — the whole server over MCP with no Supabase at all, OB1_STORE unset
+bun run cf:build          # ~342 KiB gzipped (measured 2026-09-20 at change 94; the PostgREST store and supabase-js are in it)
 ```
 
 `test:sql` and `test:e2e` need podman or docker; they use `../db/with-postgres.sh`
@@ -252,9 +268,9 @@ The fork's answer over there is a drift guard that greps `index.ts` as text, whi
 detects the divergence but does not prevent it. Here there is nothing to diverge
 from, so the guards are unnecessary and absent.
 
-`test-e2e-sql.ts` goes further: it boots the real server with `OB1_STORE=sql`,
-deletes `SUPABASE_URL` from the environment, and drives the tools over real
-JSON-RPC against real Postgres. Only the model provider is stubbed, so the suite
+`test-e2e-sql.ts` goes further: it boots the real server with `OB1_STORE` unset —
+the default store is what it drives — and `SUPABASE_URL` deleted from the
+environment, and drives the tools over real JSON-RPC against real Postgres. Only the model provider is stubbed, so the suite
 stays hermetic and free.
 
 **Not yet ported:** `test-stats-pagination.mjs` and `test-capture-atomicity.mjs`
@@ -264,9 +280,10 @@ directly testable — but the Deno build still needs them.
 
 ## Caveats
 
-- **Workers cannot pool Postgres connections.** `OB1_STORE=sql` is unsupported
-  there and fails loudly via the shim. Use `postgrest` on Workers, or add
-  Hyperdrive and a Workers-compatible driver.
+- **Workers cannot pool Postgres connections.** `wrangler.toml` pins
+  `OB1_STORE=postgrest` there; the SQL store, selected by hand or by a lost
+  binding, fails loudly via the shim. Whether Hyperdrive and a Workers-capable
+  driver let the SQL store run there is SMD-1847 — measured before promised.
 - **The SQL store's pool is bounded** at `OB1_PG_POOL` (default 10). PostgREST was
   stateless HTTP, so nothing upstream limits concurrency any more — an unbounded
   pool would let a burst of captures exhaust the server's connection slots.

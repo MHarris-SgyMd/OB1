@@ -27,8 +27,15 @@ const { assert, report } = createAssert();
 
 // Seed env before importing: the module itself no longer reads it at import
 // time, but the first request will, and Workers-style bindings are absent here.
-process.env.SUPABASE_URL = "https://stub.invalid";
-process.env.SUPABASE_SERVICE_ROLE_KEY = "stub-service-role";
+// No store configuration, on purpose (change 94, SMD-1797): nothing below calls
+// a tool, so the server never builds a store — [14] exercises the factory
+// directly — and a section that did reach one would surface the SQL store's
+// own "DATABASE_URL is not set" refusal inside a tool error, not a request to
+// a stub PostgREST that no SETUP.md deployment runs.
+delete process.env.OB1_STORE;
+delete process.env.DATABASE_URL;
+delete process.env.SUPABASE_URL;
+delete process.env.SUPABASE_SERVICE_ROLE_KEY;
 process.env.OPENROUTER_API_KEY = "stub-openrouter";
 process.env.MCP_ACCESS_KEY = "test-key-xyz";
 
@@ -377,6 +384,57 @@ console.log("\n[13] The MCP endpoint answers GET with 405, not an SSE stream not
   // JSON-RPC refusal a keyless POST gets anywhere.
   const postHealth = await fetch(`${BASE}/health`, { method: "POST", headers: AUTH, body: INIT, signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) });
   assert(postHealth.status === 200 && (await mcpBody(postHealth))?.result != null, `POST /health with the key is the MCP endpoint (${postHealth.status})`);
+}
+
+console.log("\n[14] OB1_STORE unset selects the SQL store; PostgREST stays selectable and is said to be retired here (SMD-1797)");
+{
+  const { createStore, databaseUrl, DEFAULT_STORE, isPostgresUrl, missingDatabaseUrl, postgrestOnBunNotice, storeKind } = await import("./store.ts");
+  assert(DEFAULT_STORE === "sql" && storeKind({}) === "sql", "an empty env selects sql");
+  assert(storeKind({ OB1_STORE: "PostgREST" }) === "postgrest", "the name is read case-insensitively");
+
+  // No connection string at all: refused as the SQL store, naming DATABASE_URL —
+  // not as the PostgREST store asking for SUPABASE_URL, which the old default did.
+  let msg = "";
+  try { await createStore({}); } catch (e) { msg = (e as Error).message; }
+  assert(/OB1_STORE is unset, which selects the SQL store, and DATABASE_URL is not set/.test(msg) && /Set DATABASE_URL to the brain's postgres:\/\/ connection string/.test(msg),
+         `…and without DATABASE_URL is refused as the SQL store, with the fix (${msg.slice(0, 48)}…)`);
+  assert(!/requires SUPABASE_URL/.test(msg), "…not as the PostgREST store");
+
+  // The deployment the old default served — an https:// SUPABASE_URL and no
+  // OB1_STORE — is told both ways out: a connection string, or the explicit selection.
+  msg = "";
+  try { await createStore({ SUPABASE_URL: "https://x.supabase.co", SUPABASE_SERVICE_ROLE_KEY: "k" }); } catch (e) { msg = (e as Error).message; }
+  assert(/SUPABASE_URL holds an https:\/\/ URL, which is the PostgREST store's/.test(msg) && /set OB1_STORE=postgrest/.test(msg),
+         "an https:// SUPABASE_URL under the default names OB1_STORE=postgrest as the way to keep it");
+
+  // SUPABASE_URL holding a postgres:// URL IS the connection string — the SQL
+  // shim's spelling — read after DATABASE_URL.
+  assert(isPostgresUrl("postgres://u:p@h/db") && isPostgresUrl(" postgresql://h/db") && !isPostgresUrl("https://x.supabase.co") && !isPostgresUrl(undefined),
+         "isPostgresUrl: both schemes, trimmed; neither https nor unset");
+  assert(databaseUrl({ SUPABASE_URL: "postgres://u:p@127.0.0.1:1/x" })?.from === "SUPABASE_URL", "a postgres:// SUPABASE_URL is read as the connection string…");
+  assert(databaseUrl({ DATABASE_URL: "postgres://a/1", SUPABASE_URL: "postgres://b/2" })?.url === "postgres://a/1", "…after DATABASE_URL");
+  assert(databaseUrl({ SUPABASE_URL: "https://x.supabase.co" }) === null, "…and an https:// one is not a connection string");
+  const viaAlias = await createStore({ SUPABASE_URL: "postgres://u:p@127.0.0.1:1/x" });
+  assert(viaAlias.kind === "sql", "createStore builds the SQL store from it (Bun's client connects on first use; nothing is dialled here)");
+  await viaAlias.close();
+
+  // PostgREST is still selectable, explicitly — the Workers path.
+  const pg = await createStore({ OB1_STORE: "postgrest", SUPABASE_URL: "https://stub.invalid", SUPABASE_SERVICE_ROLE_KEY: "k" });
+  assert(pg.kind === "postgrest", "OB1_STORE=postgrest still builds the PostgREST store");
+  await pg.close();
+
+  // The retired notice: for postgrest, on a runtime that has Bun, and nowhere else.
+  const notice = postgrestOnBunNotice("postgrest");
+  assert(typeof notice === "string" && /Cloudflare Workers only/.test(notice) && /runs on Bun/.test(notice), "selecting postgrest on Bun earns the notice, naming Workers and Bun");
+  assert(postgrestOnBunNotice("postgrest", false) === null, "…not on a runtime without Bun (Workers)");
+  assert(postgrestOnBunNotice("sql") === null && postgrestOnBunNotice("sql", true) === null, "…and sql never does");
+
+  // An unknown name is refused naming the default; an explicit sql selection is named as such.
+  msg = "";
+  try { await createStore({ OB1_STORE: "typo" }); } catch (e) { msg = (e as Error).message; }
+  assert(/"sql" \(the default\)/.test(msg) && /"postgrest" \(Cloudflare Workers\)/.test(msg), "an unknown OB1_STORE is refused naming sql as the default and postgrest as the Workers store");
+  const { problem, fix } = missingDatabaseUrl({ OB1_STORE: "sql" });
+  assert(/^OB1_STORE=sql selects the SQL store, and DATABASE_URL is not set$/.test(problem) && /^Set DATABASE_URL/.test(fix), "an explicit sql selection without DATABASE_URL is named as such, problem and fix apart");
 }
 
 server.stop();

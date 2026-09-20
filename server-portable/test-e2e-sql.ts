@@ -82,7 +82,11 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 const STUB_BASE = "https://stub.invalid/v1";
 process.env.OB1_LLM_BASE_URL = STUB_BASE;
 
-process.env.OB1_STORE = "sql";
+// OB1_STORE is UNSET on purpose (change 94, SMD-1797): the SQL store is the
+// default, and this suite — the whole server over MCP against real Postgres —
+// is what proves it. Setting it here would let the default drift back to
+// PostgREST with every test still green.
+delete process.env.OB1_STORE;
 process.env.DATABASE_URL = URL_;
 process.env.OPENROUTER_API_KEY = "stub";
 process.env.MCP_ACCESS_KEY = "e2e-key";
@@ -125,11 +129,12 @@ async function call(name: string, args: Record<string, unknown> = {}): Promise<s
   return joined;
 }
 
-console.log(`  store: OB1_STORE=${process.env.OB1_STORE}, SUPABASE_URL unset\n`);
+console.log(`  store: OB1_STORE unset (sql, the default), SUPABASE_URL unset\n`);
 
 console.log("[1] The server runs with no Supabase configuration at all");
 {
   assert(process.env.SUPABASE_URL === undefined, "SUPABASE_URL is not set");
+  assert(process.env.OB1_STORE === undefined, "OB1_STORE is not set — the default store is what every section below drives");
   const r = await fetch(BASE, {
     method: "POST",
     headers: H,

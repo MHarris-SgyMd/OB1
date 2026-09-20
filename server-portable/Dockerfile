@@ -21,9 +21,11 @@ COPY server-portable/shims ./shims
 COPY db/config.mjs db/config.d.mts /db/
 
 # Secrets are injected at runtime, never baked in:
-#   MCP_ACCESS_KEY, OPENROUTER_API_KEY
-#   OB1_STORE=postgrest  → SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
-#   OB1_STORE=sql        → DATABASE_URL
+#   MCP_ACCESS_KEYS (or the legacy MCP_ACCESS_KEY), OPENROUTER_API_KEY
+#   DATABASE_URL — the SQL store, which is the default (OB1_STORE unset or sql;
+#                  SUPABASE_URL holding a postgres:// URL is read as the same thing)
+#   OB1_STORE=postgrest → SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY (kept for
+#                  Cloudflare Workers; preflight reports it as retired on Bun)
 # Optional: OPEN_BRAIN_CITATION_BASE_URL, PORT (default 8000), OB1_PG_POOL
 EXPOSE 8000
 USER bun

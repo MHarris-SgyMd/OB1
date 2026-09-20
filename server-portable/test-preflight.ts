@@ -74,6 +74,37 @@ console.log("[1] Missing configuration fails, with an actionable fix");
 
   const b = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "typo" });
   assert(b.code === 1, "an unrecognised OB1_STORE exits 1 rather than defaulting");
+  assert(/"sql" \(the default/.test(b.out), "…naming sql as the default");
+
+  // Change 94 (SMD-1797): unset selects the SQL store, and every line says so.
+  const d = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: undefined });
+  assert(d.code === 1, "OB1_STORE unset without DATABASE_URL exits 1");
+  assert(/store selection\s+OB1_STORE unset — sql, the default/.test(d.out), "…the store selection line says unset means sql");
+  assert(/DATABASE_URL\s+OB1_STORE is unset, which selects the SQL store, and DATABASE_URL is not set/.test(d.out), "…the DATABASE_URL line says which selection wants it");
+  assert(!/SUPABASE_URL\s+not set/.test(d.out), "…and SUPABASE_URL is not asked for");
+
+  // The deployment the old default served — an https:// SUPABASE_URL, no
+  // OB1_STORE — is told both ways out rather than asked for a DATABASE_URL alone.
+  const h = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: undefined, SUPABASE_URL: "https://x.supabase.co", SUPABASE_SERVICE_ROLE_KEY: "k" });
+  assert(h.code === 1, "an https:// SUPABASE_URL under the default exits 1");
+  assert(/which is the PostgREST store's/.test(h.out) && /set OB1_STORE=postgrest/.test(h.out), "…naming OB1_STORE=postgrest as the way to keep reaching the brain through it");
+
+  // SUPABASE_URL holding a postgres:// URL is the connection string: the
+  // configuration passes, masked and attributed, and the run fails only at the
+  // unreachable database — the same failure [4] asserts for DATABASE_URL.
+  const a = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: undefined, SUPABASE_URL: "postgres://u:hunter2@127.0.0.1:1/x" });
+  assert(/DATABASE_URL\s+postgres:\/\/\*\*\*@127\.0\.0\.1:1\/x \(from SUPABASE_URL, which holds a postgres:\/\/ URL; DATABASE_URL is unset\)/.test(a.out),
+         "a postgres:// SUPABASE_URL is read as the connection string, masked, and said to be");
+  assert(!/hunter2/.test(a.out), "…with its password masked too");
+  assert(!/SUPABASE_URL\s+set but unused/.test(a.out), "…and not called unused");
+  assert(a.code === 1 && /schema\s+/.test(a.out) && !/store selection\s+OB1_STORE=/.test(a.out), "…so the run reaches the database and fails there, under the default selection");
+
+  // PostgREST stays selectable. On Bun the selection is a WARNING that names
+  // Workers and carries the notice as its fix line — not a failure of the config.
+  const w = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "postgrest", SUPABASE_URL: "https://stub.invalid", SUPABASE_SERVICE_ROLE_KEY: "k" });
+  assert(/!\s+store selection\s+OB1_STORE=postgrest — the PostgREST store, kept for Cloudflare Workers/.test(w.out), "OB1_STORE=postgrest is a warning naming Workers");
+  assert(/→ OB1_STORE=postgrest selects the PostgREST store, which this fork keeps for Cloudflare Workers only: this process runs on Bun/.test(w.out), "…with the retired notice as its fix line");
+  assert(/✓\s+SUPABASE_URL\s+https:\/\/stub\.invalid/.test(w.out), "…and its own configuration still passes");
 }
 
 console.log("\n[2] Weak secrets warn without blocking");
@@ -138,7 +169,7 @@ console.log("\n[4] Unreachable database fails rather than hanging");
   // else would (a renamed or added check would otherwise be blamed or silent).
   const src = readFileSync(join(HERE, "preflight.ts"), "utf8");
   const listed = [...src.match(/const DIRECT_CHECKS = \[([\s\S]*?)\];/)![1].matchAll(/"([^"]+)"/g)].map((m) => m[1]);
-  const from = src.indexOf('if (built.kind === "sql" && env.DATABASE_URL) {'), to = src.indexOf("const missing = DIRECT_CHECKS.filter");
+  const from = src.indexOf('if (built.kind === "sql" && conn) {'), to = src.indexOf("const missing = DIRECT_CHECKS.filter");
   assert(from > 0 && to > from, "the block's two anchors are found in preflight.ts");
   const block = src.slice(from, to);
   // First appearance in the source is the order the block reports in, and the

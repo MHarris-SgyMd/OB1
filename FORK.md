@@ -68,14 +68,14 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Ninety-three numbered changes on top of the pin. Seven fix defects found in an
+Ninety-four numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
 data layer (Phase 2). Ten (changes 31, 53, 55, 59, 79, 82, 86, 87, 88, and 89) ship no runtime change at
 all: each is a measurement that decided against building something.
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–93 are the numbered `###` sections** further down, which is
+sections. Changes **18–94 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -15128,6 +15128,120 @@ sections — the cost this fork already carries for the four files change 58 cut
 Upstream's own path needs none of this: on Supabase the roles exist and
 `service_role` bypasses RLS. The literal-aware strip and the rule are
 portable; the grant group is the fork's.
+
+### 94. The SQL store is the default — `OB1_STORE` unset selects `store-sql.ts`, `preflight.ts` carries no supabase-js client of its own, and the PostgREST store is kept for Cloudflare Workers alone, reported as retired wherever Bun runs (SMD-1797)
+
+**Problem.** `createStore` read `OB1_STORE ?? "postgrest"`: the portable server,
+this fork's reference deployment, reached its brain through Supabase's PostgREST
+API unless told otherwise. `SETUP.md` — "No Supabase account" — held only
+because `deploy/compose.yaml` set `OB1_STORE=sql` by hand, so the default
+contradicted the document written around it, and the two suites that ran the
+default (`test-server.ts`, `test-auth.ts`) ran it against a stub PostgREST URL:
+the store no SETUP.md deployment has. `preflight.ts` imported
+`@supabase/supabase-js` for two probes of its own — a 4-argument `match_thoughts`
+and a 7-argument `update_thought`, sent as an outside caller would to catch an
+older overload beside the current form — that no fixture ever drove: test-preflight
+runs the direct-SQL path only, and the PostgREST probes were held by reading
+(the SMD-1712 note on the ticket). Sub-issue 2 of SMD-1795; change 93 was 1.
+
+**The Workers decision, stated rather than hedged.** Cloudflare Workers cannot
+hold a Postgres connection, and `store-sql.ts` imports Bun's client, which does
+not exist there — so the retirement is of the *default* and of preflight's own
+client, not of the file. `store-postgrest.ts`, `test-store-postgrest.ts` and the
+`@supabase/supabase-js` dependency stay in `server-portable/` for that one
+target, and `wrangler.toml` now pins `OB1_STORE = "postgrest"` as a `[vars]`
+binding (a property of the target, not a secret — `wrangler deploy --dry-run`
+lists it), because under the new default a Workers deployment that relied on
+the old one would reach `shims/bun-unavailable.ts` on its first request. Whether
+a driver that runs on Workers (Hyperdrive in front of `postgres` or `pg` over
+`connect()`) lets the SQL store run there is **SMD-1847**, filed here as the
+measurement the ticket asked for before any promise; until it lands, Workers is
+PostgREST-only, and SMD-1336, SMD-1245 item 1 and SMD-1040's PostgREST
+normalisers stay open with the file.
+
+**Change.**
+
+- `store.ts`: `DEFAULT_STORE = "sql"`; `storeKind(env)` (lower-cased, defaulted)
+  and `createStore` read it. `databaseUrl(env)` resolves the SQL store's
+  connection string — `DATABASE_URL`, else `SUPABASE_URL` when it holds a
+  `postgres://` URL, the spelling `compat/supabase-sql` takes for every
+  vendored server migrated onto it, so a box running one beside this server
+  sets one name — and says which variable supplied it. `missingDatabaseUrl(env)`
+  is the one refusal for `createStore`'s throw and preflight's `DATABASE_URL`
+  line, problem and fix apart; when `SUPABASE_URL` holds an `https://` URL — the
+  deployment the old default served — it names both ways out: a connection
+  string, or `OB1_STORE=postgrest` to keep reaching the brain through PostgREST.
+  `postgrestOnBunNotice(kind, hasBun)` is the retired line: a string for
+  `postgrest` on a runtime with `Bun`, null on Workers and for every other
+  selection. The unknown-store message names `sql` as the default and
+  `postgrest` as the Workers store. The docblock's cutover rationale — run both
+  stacks and diff — is recorded as done (test-store-postgrest, the shared
+  normalisers) rather than as the reason both files exist.
+- `index.ts`: `db()` logs the notice once, at the moment the selection takes
+  effect; the `Env` comments say which store each variable serves.
+- `preflight.ts`: no `@supabase/supabase-js` import. `store selection` reports
+  `OB1_STORE unset — sql, the default`, or a **warn** for `postgrest` carrying
+  the notice as its fix line, or the fail naming both stores. The connection
+  string is resolved once (`conn`) and every direct-connection check dials
+  *that* — before, the block was gated on `env.DATABASE_URL` by name, which
+  would have skipped every catalog check for a `SUPABASE_URL`-supplied string.
+  Over PostgREST, `search signatures` and `edit signature` probe through the
+  store's own calls (`matchThoughts` with 020's six arguments; `updateThought`
+  on an id no row has, which answers `NOT_FOUND` and writes nothing) — 020's and
+  032's forms are proved, and the overload half, a `pg_proc` fact, is named as
+  the SQL run's with `CATALOG_HINT` rather than probed through a client
+  preflight no longer has. `CATALOG_HINT` itself no longer says
+  `OB1_STORE=sql`.
+- `wrangler.toml` `[vars] OB1_STORE = "postgrest"` with the reason;
+  `shims/bun-unavailable.ts` says how the stub is reached under the new default;
+  `.dev.vars.example` points at the binding; the Dockerfile's env comment lists
+  `DATABASE_URL` first.
+- `deploy/compose.yaml` drops `OB1_STORE: sql`: the "Full stack, no Supabase"
+  job now runs the default, so a default that drifted back would crashloop the
+  reference deployment in CI rather than pass with the variable set by hand.
+- Tests. `test-e2e-sql.ts` leaves `OB1_STORE` unset and asserts it (the
+  data-layer job's tooth: with the default reverted the suite dies at its first
+  tool call — run). `test-auth.ts` runs the default store against
+  `127.0.0.1:1`, refused at once, in place of the stub PostgREST; its [11] says
+  so. `test-server.ts` seeds no store at all — nothing there calls a tool — and
+  its new **[14]** holds the factory: an empty env is `sql`; no connection
+  string is refused as the SQL store naming `DATABASE_URL`, never
+  `SUPABASE_URL`; an `https://` `SUPABASE_URL` under the default is told
+  `OB1_STORE=postgrest`; a `postgres://` one is the connection string, after
+  `DATABASE_URL`, and builds the SQL store; `postgrest` still builds its store;
+  the notice fires for `postgrest` with Bun and for nothing else; the
+  unknown-name refusal names the default. `test-preflight.ts` [1] adds the
+  unset run (exit 1, both lines say `sql`, `SUPABASE_URL` not asked for), the
+  `https://` run (both ways out), the `postgres://`-alias run (masked,
+  attributed, not called unused, failing only at the unreachable database) and
+  the `postgrest` run (a `!` line naming Workers, the notice as its fix, its own
+  config still `✓`); its DIRECT_CHECKS anchor follows the block's new gate.
+  `test-store-sql.ts` [1] builds the store with no `OB1_STORE` and counts rows
+  through it. Reverting `DEFAULT_STORE` to `postgrest` fails test-server [14]
+  on four assertions and crashes test-e2e-sql at its first capture (both run).
+- Docs: `server-portable/README.md`'s store table (sql default; postgrest =
+  Workers, selected by `wrangler.toml`), the paragraph under it, the env block
+  (`DATABASE_URL` required; the Workers variables and the `SUPABASE_URL` alias
+  explained; the `https://`-under-default refusal), the suite counts (169 / 67 /
+  31 / 113 / 112; Workers bundle 342 KiB gzipped, measured — the file said 281
+  from an earlier stack) and the Workers caveat; `SETUP.md`'s two deployment
+  rows.
+
+**Not done, and why.** The ticket proposed a new `OB1_DATABASE_URL` "that does
+not say Supabase". `DATABASE_URL` already is that name — `db/`, `deploy/`, CI
+and `SETUP.md` all use it and it names no vendor — so a third spelling for one
+value was declined; the `SUPABASE_URL` alias covers the one-box case the ticket
+had in mind. Said on the ticket; reversible in a line.
+
+**Measured.** `bunx wrangler deploy --dry-run`: `env.OB1_STORE ("postgrest")`
+listed as an Environment Variable binding, 342.42 KiB gzipped. Suites on this
+tree: test-server 169, test-auth 67, test-thoughts 102, test-store-sql 113,
+test-store-postgrest 99, test-e2e-sql 112, test-preflight 241,
+test-local-provider 31; `tsc --noEmit` clean; `check-fork-consistency.mjs` PASS.
+
+**Upstream status.** Upstream has no `server-portable/`; nothing here touches a
+vendored file. The PostgREST store's retirement from Bun is the fork's decision
+and SMD-1847 owns its retirement from Workers.
 
 ## Detached from the fork network
 

@@ -1,3 +1,5 @@
+# wrangler.toml already sets OB1_STORE=postgrest for this target; `wrangler dev`
+# reads [vars] too, so it is not repeated here. The SQL store does not run on Workers.
 MCP_ACCESS_KEY=your-access-key
 SUPABASE_URL=https://your-project.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=your-secret-key
