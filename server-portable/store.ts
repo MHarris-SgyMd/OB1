@@ -145,11 +145,15 @@ export type ThoughtHybridMatch = {
  * already carry — and the tools render a null date as absent and a no-ISO-form
  * value as its own text, not "Invalid Date" (thoughts.ts `displayDate`).
  * `infinity` stays a string, the value migration 020 ranks by; [3d] pins it.
- * Two mappers stay on the old `new Date(...)` form and are SMD-1803, not this
- * change: `derivationFields` (025's provenance walk) fabricates the epoch on a
- * NULL ancestor, and `normaliseProposal`'s local `iso` (029's
- * `list_supersession_proposals`) THROWS on an `infinity`-dated proposal thought
- * — both off the list/match/get path and reachable only by a hand-INSERT.
+ * SMD-1803 brought the last two mappers onto this rule too: `derivationFields`
+ * (025's provenance walk) and `normaliseProposal` (029's
+ * `list_supersession_proposals`) now take `isoTimestampOrNull`, so their
+ * `created_at` is `string | null` as well. Before it, both fabricated the epoch
+ * on a NULL, and `normaliseProposal`'s local `new Date(v).toISOString()` THREW
+ * RangeError on an `infinity`-dated proposal thought — a whole-tool crash. Every
+ * mapper that reads `created_at` is now null-safe; the CLI's `day`
+ * (`db/consolidate.ts`) and the judge-prompt `dateOf` (`consolidate.ts`) went the
+ * same way in the same change.
  * `undefined` throws: the column is missing from the row, a bug in the SELECT,
  * not data.
  */
@@ -372,7 +376,7 @@ export type ProvenanceNode = {
   type: string | null;
   sourceType: string | null;
   derivationMethod: string | null;
-  created_at: string;
+  created_at: string | null;
   cycle: boolean;
 };
 
@@ -383,7 +387,7 @@ export type Derivative = {
   type: string | null;
   sourceType: string | null;
   derivationMethod: string | null;
-  created_at: string;
+  created_at: string | null;
 };
 
 /** The five columns 025's two functions share; spread FIRST, so an explicit field can never be overwritten by it. */
@@ -393,7 +397,9 @@ function derivationFields(r: Record<string, unknown>) {
     type: r.type == null ? null : String(r.type),
     sourceType: r.source_type == null ? null : String(r.source_type),
     derivationMethod: r.derivation_method == null ? null : String(r.derivation_method),
-    created_at: isoTimestamp(r.created_at),
+    // SMD-1803: the column is nullable (see isoTimestamp's header). A NULL
+    // ancestor in the walk is null, not the epoch new Date(null) fabricated.
+    created_at: isoTimestampOrNull(r.created_at),
   };
 }
 
@@ -452,14 +458,17 @@ export type SupersessionProposal = {
   reviewNote: string | null;
   /** While accepted: the thought whose supersedes column the acceptance wrote. */
   supersedingId: string | null;
-  /** Each thought as it is now; `edited` when its text has changed since the pair was judged (the verdict was about the earlier text). */
-  older: { id: string; content: string; created_at: string; edited: boolean };
-  newer: { id: string; content: string; created_at: string; edited: boolean };
+  /** Each thought as it is now; `edited` when its text has changed since the pair was judged (the verdict was about the earlier text). `created_at` is `string | null` for the same reason the read path is (SMD-1803). */
+  older: { id: string; content: string; created_at: string | null; edited: boolean };
+  newer: { id: string; content: string; created_at: string | null; edited: boolean };
 };
 
 /** list_supersession_proposals's row → SupersessionProposal; both stores map through here so neither drifts. */
 export function normaliseProposal(r: Record<string, unknown>): SupersessionProposal {
-  const iso = (v: unknown) => new Date(v as string).toISOString();
+  // SMD-1803: older/newer.created_at take the read path's rule — isoTimestampOrNull
+  // (NULL → null, infinity kept, no throw); see isoTimestamp's header for why the
+  // local new Date(v).toISOString() this replaced was wrong. judged_at is NOT NULL
+  // (029) so it stays isoTimestamp; reviewed_at is set only on review.
   return {
     id: String(r.id),
     status: String(r.status) as SupersessionProposal["status"],
@@ -468,12 +477,12 @@ export function normaliseProposal(r: Record<string, unknown>): SupersessionPropo
     reason: r.reason == null ? null : String(r.reason),
     similarity: r.similarity == null ? null : Number(r.similarity),
     judgeKey: String(r.judge_key),
-    judgedAt: iso(r.judged_at),
-    reviewedAt: r.reviewed_at == null ? null : iso(r.reviewed_at),
+    judgedAt: isoTimestamp(r.judged_at),
+    reviewedAt: isoTimestampOrNull(r.reviewed_at),
     reviewNote: r.review_note == null ? null : String(r.review_note),
     supersedingId: r.superseding_id == null ? null : String(r.superseding_id),
-    older: { id: String(r.older_id), content: String(r.older_content), created_at: iso(r.older_created_at), edited: r.older_edited === true },
-    newer: { id: String(r.newer_id), content: String(r.newer_content), created_at: iso(r.newer_created_at), edited: r.newer_edited === true },
+    older: { id: String(r.older_id), content: String(r.older_content), created_at: isoTimestampOrNull(r.older_created_at), edited: r.older_edited === true },
+    newer: { id: String(r.newer_id), content: String(r.newer_content), created_at: isoTimestampOrNull(r.newer_created_at), edited: r.newer_edited === true },
   };
 }
 
@@ -490,12 +499,36 @@ export function normaliseProposal(r: Record<string, unknown>): SupersessionPropo
 /**
  * What update_thought / delete_thought refuse with. SUPERSEDES_NOT_FOUND and
  * WOULD_CYCLE (migration 032): the provenance envelope named a thought that
- * does not exist, or a pointer that would close a supersession loop.
+ * does not exist, or a pointer that would close a supersession loop. CITED
+ * (migration 042): active citations rest on the thought a delete named, and
+ * the caller did not ask to detach them — `citedBy` counts them, `citations`
+ * is up to ten of the citing rows, newest first.
  */
-export type MutationError = "NOT_FOUND" | "STALE_READ" | "DUPLICATE_CONTENT" | "SUPERSEDES_NOT_FOUND" | "WOULD_CYCLE";
+export type MutationError = "NOT_FOUND" | "STALE_READ" | "DUPLICATE_CONTENT" | "SUPERSEDES_NOT_FOUND" | "WOULD_CYCLE" | "CITED";
+/** One citing row of a CITED refusal: the facet, the thought it is on, its stance and text (migration 042). */
+export type Citation = { id: string; thoughtId: string; stance: string; text: string; createdAt?: string };
 export type MutationResult =
   | { ok: true; id: string }
   | { ok: false; error: MutationError; currentUpdatedAt?: string };
+/**
+ * What delete_thought answers (migration 042). Success: `detached`, the active
+ * citations the delete detached from the removed source — non-zero only when
+ * `detach` was asked — and `inactive`, when present, the expired or superseded
+ * citations that named it and were marked the same way in either mode. A
+ * refusal may carry CITED's `citedBy` and `citations`; update_thought's never
+ * does, so those live here and not on MutationResult (seventh review pass).
+ */
+export type DeleteResult =
+  | { ok: true; id: string; detached?: number; inactive?: number }
+  | { ok: false; error: MutationError; currentUpdatedAt?: string; citedBy?: number; citations?: Citation[] };
+/**
+ * Both functions' envelopes as one normaliser reads them — the superset that
+ * UpdateResult and DeleteResult each narrow. Shared so the two stores cannot
+ * disagree about what a refusal looks like.
+ */
+export type MutationEnvelope =
+  | { ok: true; id: string; updatedAt?: string; duplicateOf?: string; fingerprintHeldBy?: string; detached?: number; inactive?: number }
+  | { ok: false; error: MutationError; currentUpdatedAt?: string; citedBy?: number; citations?: Citation[] };
 /**
  * `duplicateOf` (migration 018): the edit's text normalises to what the row
  * already held AND another thought carries that fingerprint — a pair from
@@ -509,12 +542,15 @@ export type UpdateResult = MutationResult & { updatedAt?: string; duplicateOf?: 
  * the store's discriminated union. Shared so the two stores cannot disagree
  * about what a refusal looks like — the class of bug the audit work hit twice.
  */
-export function normaliseMutation(r: Record<string, unknown> | undefined): UpdateResult {
+export function normaliseMutation(r: Record<string, unknown> | undefined): MutationEnvelope {
   if (!r) return { ok: false, error: "NOT_FOUND" };
   if (r.ok === true) {
     return {
       ok: true,
       id: String(r.id),
+      // 042's delete counts; absent on an edit's envelope and on a pre-042 body.
+      detached: typeof r.detached === "number" ? r.detached : undefined,
+      inactive: typeof r.inactive === "number" ? r.inactive : undefined,
       // isoTimestamp, not String: the function returns jsonb, so this arrives
       // as Postgres's `+00:00` spelling on both clients, and `fetch` prints the
       // same column through normaliseThoughtRecord. Passing the ISO value back
@@ -531,6 +567,24 @@ export function normaliseMutation(r: Record<string, unknown> | undefined): Updat
     ok: false,
     error: (r.error as MutationError) ?? "NOT_FOUND",
     currentUpdatedAt: isoTimestampOpt(r.current_updated_at),
+    // 042's CITED refusal: the count, and the citing rows the function sampled.
+    // A number, or a string of digits (a proxy, a hand-made envelope) — and
+    // nothing else: Number() alone took `true`, `""` and `[5]` for counts
+    // (seventh review pass).
+    citedBy: typeof r.cited_by === "number" && Number.isFinite(r.cited_by) ? r.cited_by
+      : typeof r.cited_by === "string" && /^\d+$/.test(r.cited_by) ? Number(r.cited_by)
+      : undefined,
+    // Elements that are not objects (a truncating proxy's null) are dropped,
+    // not thrown on: the refusal is still a refusal.
+    citations: Array.isArray(r.citations)
+      ? (r.citations as unknown[]).filter((c): c is Record<string, unknown> => c !== null && typeof c === "object").map((c) => ({
+          id: String(c.id),
+          thoughtId: String(c.thought_id),
+          stance: String(c.stance ?? ""),
+          text: String(c.text ?? ""),
+          createdAt: isoTimestampOpt(c.created_at),
+        }))
+      : undefined,
   };
 }
 
@@ -844,11 +898,18 @@ export interface ThoughtStore {
     provenance?: UpdateProvenance;
   }): Promise<UpdateResult>;
 
-  /** Hard delete. Chunks cascade; migration 008 preserves the prior content. */
+  /**
+   * Hard delete. Chunks cascade; migration 008 preserves the prior content.
+   * Refused as CITED (migration 042) while active citations rest on the
+   * thought, unless `detach` — then each citing row keeps its text and stance,
+   * loses its source and records the deleted id and time, and the result
+   * says how many.
+   */
   deleteThought(opts: {
     id: string;
     actor?: Actor;
-  }): Promise<MutationResult>;
+    detach?: boolean;
+  }): Promise<DeleteResult>;
 
   /**
    * Resolve a key digest and its configured name to a stable agent id,

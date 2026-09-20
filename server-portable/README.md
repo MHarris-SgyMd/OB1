@@ -105,12 +105,12 @@ best-effort. When `query_log` is present the check names it and whether
 retention, and points at `evals/export-queries.ts` and `evals/eval-utilization.ts`;
 absent, it is a skip; present without migration 035 it warns, since a write that
 cites a returned id logs no cite row there (SMD-1719). Over PostgREST every
-direct-connection check — this one included — prints a row: five are probed
+direct-connection check — this one included — prints a row: six are probed
 through the store's own calls (`filtered search`, `keyword search`, `hybrid
-search`, `search signatures`, `edit signature`), four say what catalog fact they
-would have read, and the sixteen catalog-only ones say they have no PostgREST
-form (change 97's first review pass; before it those sixteen printed nothing on
-that path).
+search`, `search signatures`, `edit signature`, `delete signature`), five say
+what catalog fact they would have read, and the sixteen catalog-only ones say
+they have no PostgREST form (change 97's first review pass; before it those
+sixteen printed nothing on that path).
 
 ## Choosing a data layer
 

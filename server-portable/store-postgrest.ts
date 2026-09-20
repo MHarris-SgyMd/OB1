@@ -21,7 +21,7 @@ import type {
   CaptureResult,
   Derivative,
   ListFilters,
-  MutationResult,
+  DeleteResult,
   ProvenanceNode,
   QueryActionLog,
   QuerySearchLog,
@@ -357,10 +357,13 @@ export class PostgrestStore implements ThoughtStore {
   async deleteThought(opts: {
     id: string;
     actor?: Actor;
-  }): Promise<MutationResult> {
+    detach?: boolean;
+  }): Promise<DeleteResult> {
     const { data, error } = await this.client.rpc("delete_thought", {
       p_id: opts.id,
       p_actor: actorPayload(opts.actor),
+      // 042: named, so PostgREST resolves the three-argument function.
+      p_detach: opts.detach === true,
     });
     if (error) throw new Error(error.message);
     return normaliseMutation(data as Record<string, unknown>);

@@ -602,6 +602,38 @@ console.log("\n[11] Undated and infinity rows render through the tools without a
   }
 }
 
+console.log("\n[12] list_supersession_proposals renders an infinity/undated proposal thought instead of crashing the whole tool (SMD-1803)");
+{
+  // The severe half of SMD-1803: normaliseProposal's old local iso ran the
+  // proposal thoughts' created_at through new Date(v).toISOString(), which THREW
+  // RangeError on an infinity-dated one — so the tool returned isError and a
+  // client saw the queue vanish — and fabricated the epoch on a NULL one. Only a
+  // direct INSERT reaches an undated/infinite row; reference both from a proposal
+  // and drive the tool. Pre-fix, call() throws on the tool's isError; post-fix it
+  // returns and each date renders as its own text.
+  const sql = new SQL({ url: URL_, max: 1 });
+  const axis = (i: number) => { const a = new Array(EMBEDDING_DIM).fill(0); a[i] = 1; return "[" + a.join(",") + "]"; };
+  const infOlder = await plantLegacyRow(sql, "smd-1803 e2e proposal older, infinity", axis(0), "infinity");
+  const undatedNewer = await plantLegacyRow(sql, "smd-1803 e2e proposal newer, undated", axis(1), null);
+  try {
+    await sql`SELECT record_supersession_proposal(${infOlder}::uuid, ${undatedNewer}::uuid, 'conflict_undirected', 0.7, 'infinity vs undated', 0.9, 'consolidate:smd1803@p1', NULL)`;
+    // This line itself is the tooth: pre-fix, call() throws on the tool's isError.
+    const listed = await call("list_supersession_proposals", {});
+    assert(/older \[infinity\]/.test(listed), `the infinity-dated thought renders as [infinity], not a throw (${listed.replace(/\n/g, " ⏎ ")})`);
+    assert(/newer \[undated\]/.test(listed), `the undated thought renders as [undated], not the epoch (${listed.replace(/\n/g, " ⏎ ")})`);
+    // TZ/locale-robust: [infinity]/[undated] above are the positives; the epoch
+    // fabrication renders "Invalid Date" (infinity) or an epoch date the render
+    // localises, so key on its two forms rather than a bare year a hex uuid
+    // could carry.
+    assert(!/Invalid Date/.test(listed) && !/1\/1\/1970/.test(listed) && !/12\/31\/1969/.test(listed),
+           `no fabricated date reaches the client (${listed.replace(/\n/g, " ⏎ ")})`);
+  } finally {
+    await sql`DELETE FROM supersession_proposals`;
+    await sql`DELETE FROM thoughts WHERE id = ${infOlder}::uuid OR id = ${undatedNewer}::uuid`;
+    await sql.close();
+  }
+}
+
 server.stop();
 globalThis.fetch = realFetch;
 

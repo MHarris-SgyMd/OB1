@@ -471,7 +471,8 @@ console.log("\n[10] listSupersessionProposals reads migration 029's queue throug
   const row = pending[0];
   assert(row.status === "pending" && row.verdict === "newer_supersedes_older" && row.confidence === 0.85 && row.reason === "monthly versus annual" && Math.abs((row.similarity ?? 0) - 0.97) < 1e-5 && row.judgeKey === "consolidate:stub@p1",
          `…mapped: status, verdict, a numeric confidence, the reason, the cosine and the judge key (${JSON.stringify({ ...row, older: undefined, newer: undefined })})`);
-  assert(row.older.id === older.id && /monthly/.test(row.older.content) && row.newer.id === newer.id && /annually/.test(row.newer.content) && row.older.created_at < row.newer.created_at,
+  assert(row.older.id === older.id && /monthly/.test(row.older.content) && row.newer.id === newer.id && /annually/.test(row.newer.content)
+         && row.older.created_at != null && row.newer.created_at != null && row.older.created_at < row.newer.created_at,
          "…with both thoughts inline, the older captured first");
   assert(row.reviewedAt === null && row.reviewNote === null && row.supersedingId === null, "…and the review fields null while pending");
   assert((await store.listSupersessionProposals({ status: "accepted" })).length === 0, "a status filter applies");
@@ -545,6 +546,51 @@ console.log("\n[12] A NULL created_at reads back as null on every read method, n
     assert(rec?.created_at !== "1970-01-01T00:00:00.000Z", "the fabricated epoch string is gone");
   } finally {
     await sql`DELETE FROM thoughts WHERE id = ${undatedId}::uuid`;
+    await sql.close();
+  }
+}
+
+console.log("\n[13] A NULL/infinity created_at survives the provenance and proposal mappers — null or its own text, never the fabricated epoch, and list_supersession_proposals no longer THROWS on infinity (SMD-1803)");
+{
+  const sql = new SQL({ url: URL_, max: 1 });
+  const undatedAncestor = await plantLegacyRow(sql, "smd-1803 undated ancestor", "[" + unit(7).join(",") + "]", null);
+  const heir = await store.captureThought({ content: "smd-1803 heir of an undated ancestor", payload: { metadata: {} }, embedding: unit(8), derivedFrom: [undatedAncestor] });
+  const parent = await store.captureThought({ content: "smd-1803 dated parent of an undated derivative", payload: { metadata: {} }, embedding: unit(9) });
+  const undatedChild = await plantLegacyRow(sql, "smd-1803 undated derivative", "[" + unit(10).join(",") + "]", null);
+  const infOlder = await plantLegacyRow(sql, "smd-1803 proposal thought dated infinity", "[" + unit(11).join(",") + "]", "infinity");
+  const undatedNewer = await plantLegacyRow(sql, "smd-1803 proposal thought undated", "[" + unit(12).join(",") + "]", null);
+  try {
+    // (a) trace UP: the NULL ancestor maps to null, not the epoch string
+    // derivationFields fabricated with new Date(null).toISOString() before 1803.
+    const anc = await store.traceProvenance({ id: heir.id });
+    const ancNode = anc.find((n) => n.thoughtId === undatedAncestor);
+    assert(ancNode?.created_at === null, `traceProvenance maps a NULL ancestor to null (got ${JSON.stringify(ancNode?.created_at)})`);
+
+    // (b) walk DOWN: same shared mapper (derivationFields), so a NULL-dated
+    // derivative is null too. A hand-set derived_from reaches this; no capture
+    // path leaves created_at NULL.
+    await sql`UPDATE thoughts SET derived_from = jsonb_build_array(${parent.id}::text) WHERE id = ${undatedChild}::uuid`;
+    const der = await store.findDerivatives({ id: parent.id });
+    const derNode = der.find((d) => d.id === undatedChild);
+    assert(derNode !== undefined && derNode.created_at === null, `findDerivatives maps a NULL derivative to null (got ${JSON.stringify(derNode?.created_at)})`);
+
+    // (c) the more severe half: normaliseProposal's old local iso THREW
+    // RangeError on an infinity-dated proposal thought, taking the whole tool
+    // down; a NULL one it fabricated to the epoch. Both now render as their own
+    // value, and the call returns.
+    await sql`SELECT record_supersession_proposal(${infOlder}::uuid, ${undatedNewer}::uuid, 'conflict_undirected', 0.7, 'infinity vs undated', 0.9, 'consolidate:smd1803@p1', NULL)`;
+    let proposals: Awaited<ReturnType<typeof store.listSupersessionProposals>> = [];
+    let threw = "";
+    try { proposals = await store.listSupersessionProposals({ status: null }); } catch (e) { threw = (e as Error).message; }
+    assert(threw === "", `listSupersessionProposals returns rather than throwing on an infinity/NULL-dated pair (threw: ${threw.slice(0, 80)})`);
+    const p = proposals.find((x) => x.older.id === infOlder && x.newer.id === undatedNewer);
+    assert(p !== undefined, "…the planted proposal is listed");
+    assert(p!.older.created_at === "infinity", `…infinity is kept as its own text, not "Invalid Date" or a throw (got ${JSON.stringify(p!.older.created_at)})`);
+    assert(p!.newer.created_at === null, `…a NULL proposal thought is null, not the epoch (got ${JSON.stringify(p!.newer.created_at)})`);
+    assert(p!.judgedAt !== "1970-01-01T00:00:00.000Z" && ISO_RE.test(p!.judgedAt), `…judged_at (NOT NULL) is still a real timestamp (got ${JSON.stringify(p!.judgedAt)})`);
+  } finally {
+    await sql`DELETE FROM supersession_proposals`;
+    await sql`DELETE FROM thoughts WHERE id IN (${undatedAncestor}::uuid, ${heir.id}::uuid, ${parent.id}::uuid, ${undatedChild}::uuid, ${infOlder}::uuid, ${undatedNewer}::uuid)`;
     await sql.close();
   }
 }
