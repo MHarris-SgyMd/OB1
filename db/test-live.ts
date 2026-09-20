@@ -3297,11 +3297,11 @@ console.log("\n[17] Over near-equidistant vectors the HNSW walk misses live rows
 
 console.log("\n[18] Every schemas/*.sql applies over TCP with no Supabase role present, and migrate.ts --grant makes a LOGIN role able to use them (SMD-1796)");
 {
-  // test-schema [39] is the PGlite half of this; here is what PGlite cannot do:
+  // test-schema [40] is the PGlite half of this; here is what PGlite cannot do:
   // the migrator's --grant over TCP — its presence probe against a real
   // server's to_regclass/to_regprocedure, its "not yet present, skipped" list
   // before the files are applied and its full list after — and a role that
-  // CONNECTS as itself rather than SET ROLE. Same files, same order as [39].
+  // CONNECTS as itself rather than SET ROLE. Same files, same order as [40].
   // Last in the suite because the files add a trigger and columns to `thoughts`.
   // In CI one service container serves every live suite in turn, so this
   // section puts the database back as it found it: the tables, views and
@@ -3377,7 +3377,7 @@ console.log("\n[18] Every schemas/*.sql applies over TCP with no Supabase role p
              "…a sequence, a function with its argument types, and thought_audit's merged capture + community privileges among them");
 
       // The role, connecting as itself. An INSERT of DEFAULT VALUES asks for
-      // every privilege an insert needs and nothing else ([39]'s probe): a
+      // every privilege an insert needs and nothing else ([40]'s probe): a
       // permission error means the grant is short; a NOT NULL or foreign-key
       // error, or success, means it is not.
       asRole = new SQL({ url: ROLE_URL, max: 1 });

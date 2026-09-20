@@ -974,7 +974,7 @@ console.log("\n[10] Migrations carry nothing Supabase-specific");
    * within, its own comments stripped. The rules are SUPABASE_SQL_RULES — the
    * list check-fork-consistency holds every .sql under schemas/ and db/ to —
    * so the migrations and the community schemas answer to one spelling, and
-   * [39] runs the same scan over schemas/ from inside this suite.
+   * [40] runs the same scan over schemas/ from inside this suite.
    */
   const hits = files.flatMap((f) => supabaseIsmsIn(subst(readFileSync(join(MIGRATIONS, f), "utf8"))).map((h) => `${f}:${h.line} ${h.rule}`));
   assert(hits.length === 0, `no migration runs a Supabase-ism — no auth.uid()/auth.role() (GoTrue), no service_role/authenticated/anon (Supabase's roles), no RLS (it never fired anyway) (${hits.join("; ") || "none"})`);
@@ -3396,7 +3396,7 @@ console.log("\n[31] A vendored schema applied to a migrated brain replaces no fu
   // The vendored file as fixed — its section 6 gone, and since SMD-1796 its
   // GRANTs to Supabase's roles gone too — applied whole. This block used to
   // create authenticated, service_role and anon first so those GRANTs would
-  // run; no role is created now, and [39] applies every schemas/*.sql the
+  // run; no role is created now, and [40] applies every schemas/*.sql the
   // same way.
   const vendored = readFileSync(join(HERE, "..", "schemas", "enhanced-thoughts", "schema.sql"), "utf8");
   assert(![...owned.keys()].some((fn) => coreFunctionStatement(fn).test(vendored)) && ![...ownedCols.keys()].some((col) => coreColumnCommentStatement(col).test(vendored)),
@@ -4312,9 +4312,9 @@ console.log("\n[38] Migration 039: the walk's index is half precision — the sw
   await db.exec(`DELETE FROM thoughts`);
 }
 
-// ── 39. The community schemas on a plain-Postgres brain ──────────────────────
+// ── 40. The community schemas on a plain-Postgres brain ──────────────────────
 
-console.log("\n[39] Every schemas/*.sql applies to a migrated brain with no Supabase role present, and --grant's community group is what makes it usable (SMD-1796)");
+console.log("\n[40] Every schemas/*.sql applies to a migrated brain with no Supabase role present, and --grant's community group is what makes it usable (SMD-1796)");
 {
   // A second PGlite: the files add a trigger on `thoughts` (entity-extraction's
   // queue) and columns to it (enhanced-thoughts, provenance-chains), and the

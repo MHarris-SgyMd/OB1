@@ -228,7 +228,7 @@ introduce multi-tenancy; do not port this one.
 connects as — and to more than `thoughts`: see [Grants for a capturing
 role](#grants-for-a-capturing-role) below. The community schemas under
 `schemas/` carried the same grants, and RLS with a policy for that role, until
-change 90 (SMD-1796) cut them; their tables are the **community** group there.
+change 93 (SMD-1796) cut them; their tables are the **community** group there.
 
 ## Grants for a capturing role
 
@@ -290,7 +290,7 @@ schemas use `BIGSERIAL` ids, and an `INSERT` into such a table needs `USAGE` on
 the sequence (`permission denied for sequence …` with the table fully granted),
 so the **community** group names those six sequences; an identity column
 (`wiki_section_revisions.id`) needs none. Both are measured, not recalled:
-test-schema [39] grants the tables alone and watches which inserts are still
+test-schema [40] grants the tables alone and watches which inserts are still
 refused. Functions are executable by `PUBLIC` by default, so only the community
 functions upstream `REVOKE`d `FROM PUBLIC` — the SECURITY DEFINER ones, and the
 wiki RPCs — are listed, for `EXECUTE`; the rest (the brain-stats, enhanced-thoughts,

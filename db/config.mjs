@@ -1468,7 +1468,7 @@ export const ROLE_GRANTS = Object.freeze({
   // (GRANT ALL read as the four DML verbs; append-only tables keep SELECT,
   // INSERT), plus the two things Supabase's default privileges hid: a
   // BIGSERIAL column needs USAGE on its sequence (an identity column does not —
-  // test-schema [39] measures both), and a function REVOKEd FROM PUBLIC needs
+  // test-schema [40] measures both), and a function REVOKEd FROM PUBLIC needs
   // an EXECUTE. Functions upstream left executable by PUBLIC are not listed:
   // EXECUTE is PUBLIC's by default. thought-work-claims adds nothing a grant
   // could cover (015 already created what it creates); thought-audit's table is
@@ -1642,7 +1642,7 @@ export function grantedFunctions(groups = ROLE_GRANT_GROUPS) {
  * `public`, as rows { kind, name, present } in the order given — tables and
  * sequences through to_regclass, functions through to_regprocedure (which takes
  * the argument types as the row spells them). The same text runs under Bun's
- * SQL (`migrate.ts --grant`) and PGlite (test-schema [39]), so the two cannot
+ * SQL (`migrate.ts --grant`) and PGlite (test-schema [40]), so the two cannot
  * disagree on what "present" means. Names are config's own literals, quoted as
  * SQL strings all the same.
  */

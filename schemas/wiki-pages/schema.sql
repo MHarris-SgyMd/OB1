@@ -153,7 +153,7 @@ CREATE INDEX IF NOT EXISTS idx_wiki_section_revisions_section
 -- wiki_section_revisions SELECT, INSERT — the append-only intent kept) and
 -- EXECUTE on the three RPCs below, each REVOKEd FROM PUBLIC as upstream had
 -- them. The revisions' identity id needs no sequence grant (db/test-schema.ts
--- [39] measures that; a bigserial would). Row-level security: SMD-1716.
+-- [40] measures that; a bigserial would). Row-level security: SMD-1716.
 
 COMMENT ON TABLE public.wiki_pages IS
   'Persistent wiki pages. One row per page, keyed by slug. No thought/entity FK — a page is identified by its slug.';

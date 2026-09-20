@@ -49,7 +49,7 @@
  *      or `auth.users`, no `supabase_`-prefixed name, no RLS or policy —
  *      comments excepted by a literal-aware strip, string literals included
  *      (SMD-1796); the rules are db/config.mjs's SUPABASE_SQL_RULES, which
- *      test-schema [10] and [39] apply from inside the suite; no exceptions
+ *      test-schema [10] and [40] apply from inside the suite; no exceptions
  *
  * Run: bun scripts/check-fork-consistency.mjs   (plain ESM; node runs it too)
  * Exits non-zero on any violation.
@@ -1672,7 +1672,7 @@ function checkShimRuntime() {
 // Supabase the first such statement stops the file (`role "service_role" does
 // not exist`), and where an operator creates the role to get past it, RLS with
 // no policy for the role they actually connect as denies that role every row.
-// The statements were cut on that ticket (FORK.md change 90), each file left
+// The statements were cut on that ticket (FORK.md change 93), each file left
 // with a note pointing at `migrate.ts --grant`'s `community` group; this keeps
 // the next rebase from bringing them back — and holds db/ to the same rule
 // test-schema [10] has held the migrations to since the start, now one

@@ -68,14 +68,14 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Ninety numbered changes on top of the pin. Seven fix defects found in an
+Ninety-three numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
 data layer (Phase 2). Ten (changes 31, 53, 55, 59, 79, 82, 86, 87, 88, and 89) ship no runtime change at
 all: each is a measurement that decided against building something.
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–90 are the numbered `###` sections** further down, which is
+sections. Changes **18–93 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -14057,13 +14057,13 @@ eval dependency, not the product.)
 
 **Upstream status:** not applicable — the graph and its eval are this fork's.
 
-### 90. The community schemas apply on plain Postgres — twelve `schemas/*.sql` stop granting to Supabase's roles and enabling RLS for them, and `migrate.ts --grant` learns their tables, sequences and functions as a `community` group; one rule refuses the constructs' return in `schemas/` and `db/` (SMD-1796)
+### 93. The community schemas apply on plain Postgres — twelve `schemas/*.sql` stop granting to Supabase's roles and enabling RLS for them, and `migrate.ts --grant` learns their tables, sequences and functions as a `community` group; one rule refuses the constructs' return in `schemas/` and `db/` (SMD-1796)
 
 Seventeen SQL files live under `schemas/`. Applied to a brain built by
 `db/migrate.ts` with no Supabase role present — the fork's deploy — **twelve
 stopped at their first statement naming one**: `role "service_role" does not
 exist`, or `"authenticated"`, or `"anon"` (measured by applying each to a
-migrated PGlite brain, which is now test-schema [39]). Two more failed only
+migrated PGlite brain, which is now test-schema [40]). Two more failed only
 because a prerequisite had (readwise-books filters on enhanced-thoughts'
 `source_type`; typed-reasoning-edges alters entity-extraction's `edges`), and
 wiki-pages for `CREATE EXTENSION pgcrypto`, which PGlite does not ship and
@@ -14093,7 +14093,7 @@ single-operator brain has no `auth.users`; `user_id` stays a nullable uuid).
 each row naming the `schemas/` file — and its rows now come in three kinds:
 `table`, `sequence` and `function` (the function with its argument types, as
 GRANT and `to_regprocedure` take them). Two facts Supabase's default privileges
-had hidden decide which rows exist beyond the tables, both measured in [39]
+had hidden decide which rows exist beyond the tables, both measured in [40]
 rather than recalled: an INSERT into a `BIGSERIAL` table is refused on the
 sequence (`permission denied for sequence ingestion_jobs_id_seq`) with the
 table fully granted, so the six serial sequences are listed by name (upstream's
@@ -14138,11 +14138,11 @@ wanted since migration 012's header first tripped its predecessor, now without
 the "no migration puts `--` in a literal" assumption: **SMD-1316 is closed by
 this.** check-fork-consistency check 12 runs the rules over every `.sql` under
 `schemas/` and `db/`, no exceptions; [10] runs them over the migrations from
-inside the suite; [39] over `schemas/`, with a probe of the three shapes the
+inside the suite; [40] over `schemas/`, with a probe of the three shapes the
 old strip could not tell apart (a literal's `--` followed by a statement, a
 body's comment, a body's EXECUTE string).
 
-**Tests.** test-schema [39], on a second PGlite so the files' trigger on
+**Tests.** test-schema [40], on a second PGlite so the files' trigger on
 `thoughts` and new columns meet none of the suite's other sections: every file
 applies in prerequisite order with no Supabase role; every community object is
 present by `--grant`'s probe; every table the files created is in the group
@@ -14180,7 +14180,7 @@ commit). Fixed: the community `SELECT` on `thought_audit` was justified by
 table — the grant stays as upstream's, the reason is corrected in three places
 (caught: reading the two files the claim named); that same file's view,
 `thought_provenance`, was in no row, so a granted role got `permission denied
-for view` — a `view` kind, a row, and [39]/[18] probe it (caught: the reviewer
+for view` — a `view` kind, a row, and [40]/[18] probe it (caught: the reviewer
 asking what a role's `SELECT` on `thoughts` does not reach); the
 `thought_entities` community row carried `UPDATE`, which — issued on every
 migrated brain by name — widened 016's own `extraction` grant on brains that
@@ -14190,7 +14190,7 @@ flipping literal parity for the rest of a file — 016 already carries an
 E-string (caught: an adversarial input the reviewer fed the stripper); the rules
 ran per line, so `to\n  authenticated` and `ENABLE ROW LEVEL\n  SECURITY`
 passed — they run over the whole stripped text now, quoted API roles included,
-and [39]'s probe grew the three shapes (caught: the same probing); the README
+and [40]'s probe grew the three shapes (caught: the same probing); the README
 said "four" schemas use `BIGSERIAL` where three do; `--grant`'s skipped list
 joined function signatures with the `", "` their argument lists contain; a
 dangling sentence in thought-audit's note; enhanced-thoughts' header called
@@ -14246,8 +14246,8 @@ privilege, USAGE on the schema included, through `has_table_privilege`,
 `has_sequence_privilege`, `has_function_privilege` — and rolls back naming
 what the role does not hold and whom to connect as; a grantor's own 42501
 gets the same hint; `mergedGrants` is the one list both the statements and
-the check are built from; [39] drives the check with the tables alone granted
-and reproduces the silent no-op with a weak grantor (held: test-schema [39]).
+the check are built from; [40] drives the check with the tables alone granted
+and reproduces the silent no-op with a weak grantor (held: test-schema [40]).
 Also fixed: the thought-audit README's optional third step applied
 `author-session-id.sql` after `--grant` and never said to run it again, so
 its view was as unreadable as before the first pass's fix — the step now
@@ -14271,7 +14271,7 @@ catch — was reasoned about, not run; test-live [18] now runs `--grant`
 connected as its granted LOGIN role (every privilege held, none with grant
 option) against a third role and reads exit 1, the "were not granted" line
 naming that role, no 42501 hint, and the third role holding nothing (caught:
-cold-read; held: test-live [18]); [39]'s weak-grantor cleanup dropped the
+cold-read; held: test-live [18]); [40]'s weak-grantor cleanup dropped the
 grantee role without revoking its privileges first, so had the GRANT ever
 taken effect the DROP ROLE would have aborted the suite instead of recording
 one failure (caught: run-it); `--dry-run` kept the short skipped hint after
@@ -14286,7 +14286,7 @@ hardened database; two `run-it` tags on grep-driven index comparisons are
 closer to a tooling-assisted cold read.
 
 **Tidied while the files were open.** The listing of the community SQL files
-in prerequisite order lived twice, in test-schema [39] and test-live [18];
+in prerequisite order lived twice, in test-schema [40] and test-live [18];
 it is test-support's `communitySchemaFiles()` now, with the order's reasons in
 one docblock. The template README's install step had grown into one run-on
 sentence; it is the two steps every schema README has. Wiki-pages' three

@@ -478,7 +478,7 @@ export const SCHEMAS_DIR = join(HERE, "..", "schemas");
 export const SCHEMA_FILES_FIRST: readonly string[] = ["enhanced-thoughts/schema.sql", "text-search-trgm/schema.sql", "readwise-books/schema.sql", "entity-extraction/schema.sql", "typed-reasoning-edges/schema.sql"];
 /**
  * Every SQL file under schemas/, as `<dir>/<file>`, SCHEMA_FILES_FIRST first
- * and the rest alphabetical — the order test-schema [39] and test-live [18]
+ * and the rest alphabetical — the order test-schema [40] and test-live [18]
  * apply them in (SMD-1796). Read from the tree, never listed, so a new
  * community schema is applied by both suites the day it lands.
  */
