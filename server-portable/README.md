@@ -134,8 +134,11 @@ SMD-1847's measurement; until it lands, Workers is PostgREST-only.
 `store-sql.ts` is imported **dynamically**, so a Workers build never pulls in the
 Postgres client. Wrangler's bundler still resolves the specifier statically, so
 `wrangler.toml` aliases `bun` to `shims/bun-unavailable.ts` — a stub that throws
-with an explanation if a Workers deployment somehow selects the SQL store, by
-setting `OB1_STORE=sql` or by losing the `[vars]` binding and getting the default.
+with an explanation if a Workers deployment somehow selects the SQL store (by
+setting `OB1_STORE=sql`, or by losing the `[vars]` binding and getting the
+default) and has a connection string for it to open. Without one, the factory
+refuses first on the missing `DATABASE_URL`, naming `OB1_STORE=postgrest` as the
+way out, and the stub is never imported.
 
 ### Two behaviours the SQL port had to preserve exactly
 

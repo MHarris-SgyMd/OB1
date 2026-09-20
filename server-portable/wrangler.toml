@@ -13,10 +13,13 @@ compatibility_flags = ["nodejs_compat"]
 
 # The store is a property of this target, not a secret: Workers cannot hold a
 # Postgres connection, so the PostgREST store is the one path here — and since
-# change 94 (SMD-1797) the server's DEFAULT is the SQL store, which would reach
-# the stub below on the first request. Said here so a Workers deployment never
-# depends on the default. Selecting `sql` on Workers is unsupported until a
-# Workers-capable Postgres driver is measured (server-portable/README.md, Caveats).
+# change 94 (SMD-1797) the server's DEFAULT is the SQL store. Without this
+# binding a Workers deployment fails at its first tool call: with no connection
+# string, on the SQL store's "DATABASE_URL is not set" refusal (which names
+# OB1_STORE=postgrest as the way out); with one, at the stub below. Said here so
+# a Workers deployment never depends on the default. Selecting `sql` on Workers
+# is unsupported until a Workers-capable Postgres driver is measured
+# (server-portable/README.md, Caveats).
 [vars]
 OB1_STORE = "postgrest"
 

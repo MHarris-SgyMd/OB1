@@ -121,7 +121,7 @@ console.log("[1] Missing configuration fails, with an actionable fix");
 
   // PostgREST stays selectable. On Bun the selection is a WARNING that names
   // Workers and carries the notice as its fix line — not a failure of the config.
-  const w = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "postgrest", SUPABASE_URL: "https://stub.invalid", SUPABASE_SERVICE_ROLE_KEY: "k" });
+  const w = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "postgrest", SUPABASE_URL: "https://stub.invalid", SUPABASE_SERVICE_ROLE_KEY: "k", OB1_CHUNK_CONTEXT: undefined });
   assert(/!\s+store selection\s+OB1_STORE=postgrest — the PostgREST store, kept for Cloudflare Workers/.test(w.out), "OB1_STORE=postgrest is a warning naming Workers");
   assert(/→ OB1_STORE=postgrest selects the PostgREST store, which this fork keeps for Cloudflare Workers only: this process runs on Bun/.test(w.out), "…with the retired notice as its fix line");
   assert(/✓\s+SUPABASE_URL\s+https:\/\/stub\.invalid/.test(w.out), "…and its own configuration still passes");
@@ -140,6 +140,16 @@ console.log("[1] Missing configuration fails, with an actionable fix");
   const rowCounts = listedNames.map((name) => [name, (w.out.match(new RegExp(`^\\s*[✓✗!·]\\s+${name}\\s`, "gm")) ?? []).length] as const);
   assert(rowCounts.every(([, n]) => n === 1), `over PostgREST every direct-connection check prints exactly one row (${rowCounts.filter(([, n]) => n !== 1).map(([name, n]) => `${name}×${n}`).join(", ") || "all once"})`);
   assert(rowCounts.filter(([name]) => new RegExp(`·\\s+${name}\\s+${DIRECT_CHECK_SKIP_OVER_POSTGREST}`).test(w.out)).length === 16, "…sixteen of them as the catalog-only skip, the rest by their own hand-written rows");
+  // And nothing else: every row between `data layer` and the provider section is
+  // `schema` or one of the listed names. A hand-written PostgREST row under a
+  // misspelt name would print beside the loop's correctly named skip with every
+  // count above intact (third review pass); this total sees it.
+  const lines = w.out.split("\n");
+  const rowOf = (name: string) => lines.findIndex((l) => new RegExp(`^\\s*[✓✗!·]\\s+${name}\\s`).test(l));
+  const fromRow = rowOf("data layer"), toRow = rowOf("embedding provider");
+  const rows = lines.slice(fromRow + 1, toRow).filter((l) => /^\s*[✓✗!·]\s+\S/.test(l));
+  assert(fromRow > 0 && toRow > fromRow && rows.length === listedNames.length + 1,
+         `…and nothing else prints between the data layer and the provider: schema plus the ${listedNames.length} names (${rows.length} rows)`);
 }
 
 console.log("\n[2] Weak secrets warn without blocking");

@@ -15152,7 +15152,8 @@ client, not of the file. `store-postgrest.ts`, `test-store-postgrest.ts` and the
 target, and `wrangler.toml` now pins `OB1_STORE = "postgrest"` as a `[vars]`
 binding (a property of the target, not a secret — `wrangler deploy --dry-run`
 lists it), because under the new default a Workers deployment that relied on
-the old one would reach `shims/bun-unavailable.ts` on its first request. Whether
+the old one fails at its first tool call — on the SQL store's `DATABASE_URL`
+refusal, or, with a connection string set, at `shims/bun-unavailable.ts`. Whether
 a driver that runs on Workers (Hyperdrive in front of `postgres` or `pg` over
 `connect()`) lets the SQL store run there is **SMD-1847**, filed here as the
 measurement the ticket asked for before any promise; until it lands, Workers is
@@ -15218,14 +15219,15 @@ normalisers stay open with the file.
   config still `✓`); its DIRECT_CHECKS anchor follows the block's new gate.
   `test-store-sql.ts` [1] builds the store with no `OB1_STORE` and counts rows
   through it. Reverting `DEFAULT_STORE` to `postgrest` fails test-server [14]
-  on four assertions and crashes test-e2e-sql at its first capture (both run).
+  (four assertions on the first tree; six, then an abort at the alias build,
+  after the review passes) and crashes test-e2e-sql at its first capture (both run).
 - Docs: `server-portable/README.md`'s store table (sql default; postgrest =
   Workers, selected by `wrangler.toml`), the paragraph under it, the env block
   (`DATABASE_URL` required; the Workers variables and the `SUPABASE_URL` alias
-  explained; the `https://`-under-default refusal), the suite counts (169 / 67 /
-  31 / 113 / 112; Workers bundle 342 KiB gzipped, measured — the file said 281
-  from an earlier stack) and the Workers caveat; `SETUP.md`'s two deployment
-  rows.
+  explained; the `https://`-under-default refusal), the suite counts (177 / 67 /
+  31 / 113 / 112 after the review passes; Workers bundle 342 KiB gzipped,
+  measured — the file said 281 from an earlier stack) and the Workers caveat;
+  `SETUP.md`'s two deployment rows.
 
 **Not done, and why.** The ticket proposed a new `OB1_DATABASE_URL` "that does
 not say Supabase". `DATABASE_URL` already is that name — `db/`, `deploy/`, CI
@@ -15235,9 +15237,9 @@ had in mind. Said on the ticket; reversible in a line.
 
 **Measured.** `bunx wrangler deploy --dry-run`: `env.OB1_STORE ("postgrest")`
 listed as an Environment Variable binding, 342.42 KiB gzipped. Suites on this
-tree after the second review pass: test-server 177, test-auth 67, test-thoughts
+tree after the third review pass: test-server 177, test-auth 67, test-thoughts
 102, test-store-sql 113, test-store-postgrest 99, test-e2e-sql 112,
-test-preflight 252, test-local-provider 31; `tsc --noEmit` clean;
+test-preflight 253, test-local-provider 31; `tsc --noEmit` clean;
 `check-fork-consistency.mjs` PASS.
 
 **Review, first pass** (one cold reviewer over the diff, the author's own
@@ -15286,7 +15288,7 @@ environment added later would not inherit it).
 signal fired**: every finding sits in the first pass's additions, none in the
 change, and none is a behavioural defect. The `w` run's four-name sample of the
 new skip loop was a presence test: the reviewer moved the loop above the
-hand-written PostgREST skips in a copy, four names printed twice, and all seven
+hand-written PostgREST skips in a copy, four names printed twice, and all eight
 assertions stayed green — the run now reads `DIRECT_CHECKS` from the source, as
 [4] does, and requires every name to print exactly one row, sixteen of them as
 the catalog-only skip. `maskUrl`'s `[^@]*@` stopped at the first `@`: a raw `@`
@@ -15310,6 +15312,42 @@ module isolation (no module-level state in store/auth/agents), and every count
 in this section. The 1796 precedent — pass 2 called STOP and pass 3 found a
 defect — is noted; the signal here rests on a reviewer who ran the code, not
 only read it.
+
+**Review, third pass** (a third cold reviewer, angles the first two had not
+taken: the Workers path by reading, the entrypoint sequence branch by branch,
+every spawn of the server outside its directory; the author ran the compose
+stack). No behavioural defect. One claim error in the change's own text, made
+four times: `wrangler.toml`, the stub's docblock and message, the README and
+this section said a Workers deployment that lost its `[vars]` binding "reaches
+the stub on its first request" — it does not unless it also has a connection
+string, because `createStore` refuses on the missing `DATABASE_URL` before
+`store-sql.ts` is imported (test-server [14]'s `https://` case is that path);
+all four now say which refusal comes first. Three counts this section carried
+had gone stale across the passes (the README's test-server figure, the mutant's
+"four assertions" — six and an abort on the current tree — and the first pass's
+"seven"). And a gap in the second pass's tooth: it counts rows for the names in
+`DIRECT_CHECKS` only, so a hand-written PostgREST row under a misspelt name
+would print beside the loop's correctly named skip with every count intact —
+the `w` run now also requires that every row between `data layer` and the
+provider section be `schema` or a listed name. Drill run: `edit signature`
+misspelt in the PostgREST branch → the total names 27 rows for 26. Checked by
+the reviewer and left: on Workers `initEnv` spreads the bindings over
+`process.env`, which `nodejs_compat` also populates from them, so the binding
+reaches `env()` either way; `typeof Bun` is a default-parameter expression
+evaluated at call time and survives in the bundle; every `createStore` branch
+has the matching preflight verdict through the same helper, so no configuration
+passes the entrypoint and fails the first tool call or the reverse; every
+spawn of the server or preflight outside `server-portable/` (`db/test-live.ts`,
+`db/test-search-path.ts`, `evals/eval-chunking-e2e.ts`) selects the store
+explicitly. **Measured by the author:** `deploy/compose.yaml` brought up as the
+"Full stack, no Supabase" job does, on its own ports, with `OB1_STORE` absent
+from the server's environment — preflight reports `OB1_STORE unset — sql, the
+default` and OK with every direct check green, `smoke.sh` 9 of 9,
+`thought_stats` over MCP reaches the database, no `supabase` binary in the
+image. On the stop signal: the second pass's rule held for code — nothing here
+changed behaviour — and the third pass's finding in the change itself was a
+sentence, four times; the 1796 precedent stands as the reason a third pass was
+worth running.
 
 **Upstream status.** Upstream has no `server-portable/`; nothing here touches a
 vendored file. The PostgREST store's retirement from Bun is the fork's decision
