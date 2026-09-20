@@ -21,7 +21,7 @@
 import { SQL } from "bun";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { TID_PROBE, applyMigrations, createAssert, dropSchema, ledgerStrangers, loadChunkRows, migrationFiles, migratorEnv, plantLegacyRow, requireDatabaseUrl, resetSchema, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
+import { COLUMN_COMMENT_SQL, TABLE_COMMENT_SQL, TID_PROBE, applyMigrations, createAssert, dropSchema, ledgerStrangers, loadChunkRows, migrationFiles, migratorEnv, plantLegacyRow, requireDatabaseUrl, resetSchema, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
 import { ACCEPTED_CAVEAT_PREFIX, ACCEPTED_CLAIM_SQL, LOCK_TIMEOUT_S, UPDATE_THOUGHT_SIGNATURE, reembedKey } from "./config.mjs";
 
 const URL_ = requireDatabaseUrl("test-upgrade.ts");
@@ -438,9 +438,10 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // order, SMD-1462), 037 (the routing count's gate, SMD-1463) and 038 (the
   // gate's sample by TID range, SMD-1526), 039 (the half-precision walk,
   // SMD-1501), 040 (jit off on the function, SMD-1624), 041 (its two planner
-  // paths pinned, SMD-1677 and SMD-1703) and 042 (the citations facet and
-  // delete_thought's third argument, SMD-1712) stay recorded and
-  // are never tried. 030 is the right one to make
+  // paths pinned, SMD-1677 and SMD-1703), 042 (the citations facet and
+  // delete_thought's third argument, SMD-1712) and 043 (the cite shape stated
+  // at the table, SMD-1749) stay recorded and are never tried. 030 is the
+  // right one to make
   // pending
   // because its prerequisites — 015 and 021's embedding_model column — are
   // exactly what a through-020 schema lacks, so it fails by name rather than
@@ -451,11 +452,13 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // 038 037's; 039 redefines it again and swaps 001's and 007's two indexes,
   // which every schema has; 040 and 041 redefine it once more each, with SET
   // clauses only; 042 adds a table on 001's and redefines delete_thought on
-  // 009's body and 036's lock key, all present — all recorded by the baseline
-  // with their prerequisites present, so none
+  // 009's body and 036's lock key, all present; 043 comments 034's table and
+  // column and needs only 034, refusing by name without it as 031 does without
+  // 015 ([20]) — all recorded by the baseline with their prerequisites
+  // present, so none
   // becomes the plain-run failure point above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 13, `030 is among the last thirteen migrations (${last})`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 14, `030 is among the last fourteen migrations (${last})`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -1508,6 +1511,118 @@ console.log("\n[19] Migration 041 onto a populated 040 — match_thoughts gains 
   await sql.unsafe(`DROP OWNED BY ob1_upgrade_searcher41`);
   await sql.unsafe(`DROP ROLE ob1_upgrade_searcher41`);
   await sql.close();
+}
+
+console.log("\n[20] Migration 043 on a schema without 034 — refused up front, naming 034 and --reapply, and applied once the table exists (SMD-1749)");
+{
+  // A brain adopted with --baseline at a ledger through 043 whose schema stops
+  // before 034 — a guide-built brain, or one baselined and never re-applied.
+  // 043's two COMMENTs would fail bare there (relation "query_log" does not
+  // exist), and a plain run — the compose stack's, gating the server — would
+  // stop with no remedy named; the file opens with 031's guard instead.
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < "034" });
+  const baselined = await migrate("--baseline");
+  assert(baselined.code === 0, `--baseline records every migration over the pre-034 schema (exit ${baselined.code})`);
+  const sql = new SQL({ url: URL_, max: 1 });
+  const the043 = MIGRATIONS.find((f) => f.startsWith("043_"))!;
+  await sql`DELETE FROM schema_migrations WHERE name = ${the043}`;
+  const plain = await migrate();
+  const ok = plain.code === 1 && /043_query_log_tool_comment\.sql\s+FAILED: migration 043 needs 034 \(query_log\); this schema lacks it/.test(plain.out) &&
+    /adopted with --baseline\?\)\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plain.out);
+  assert(ok, `a plain run fails at 043 naming 034 and --reapply, not with a bare "does not exist" (exit ${plain.code})${ok ? "" : `:\n${plain.out}`}`);
+  assert(Number((await sql`SELECT count(*)::int AS c FROM schema_migrations WHERE name = ${the043}`)[0].c) === 0, "…records nothing");
+  // The guard is the only thing between the file and the table: with 034's
+  // table in place the same pending file applies and both comments land.
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("034") });
+  const applied = await migrate();
+  assert(applied.code === 0 && /043_query_log_tool_comment\.sql\s+applied/.test(applied.out), `…and once 034's table exists the plain run applies 043 (exit ${applied.code})${applied.code === 0 ? "" : `:\n${applied.out}`}`);
+  const [{ c: col }] = (await sql.unsafe(COLUMN_COMMENT_SQL, ["query_log", "tool"])) as { c: string | null }[];
+  const [{ c: tbl }] = (await sql.unsafe(TABLE_COMMENT_SQL, ["query_log"])) as { c: string | null }[];
+  assert(/<writer>\/<pointer>/.test(col ?? "") && /<writer>\/<pointer>/.test(tbl ?? ""), "…and both live comments name <writer>/<pointer>");
+  await sql.close();
+  // The ledger records 035–043 already; applying them completes the schema
+  // behind it, so this section leaves a full brain as every section before it
+  // did, and [21] can start from it (second and fourth review passes). Bounded
+  // at the file under test, which the migrator has just applied and recorded:
+  // an open-ended `>= "035"` re-applied it bare a second time (fifth pass).
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f >= "035" && f < the043 });
+}
+
+console.log("\n[21] test-support's schema reset leaves nothing of the fork's in public — every table, function and type a migration creates is on its drop lists (SMD-1749)");
+{
+  // The reset drops a hand-kept list, and a name a migration added without a
+  // line there survives every section boundary: 034's table did until [20]
+  // built a schema "without 034" and found it standing, and three functions
+  // (024, 025, 026) did until SMD-1749's second review pass listed the
+  // survivors on a fully applied brain. So the catalog is asked here, after a
+  // reset of a full brain, and the next omission fails in this section rather
+  // than in whichever section happens to need the object gone. Members of an
+  // extension (pgvector and pg_trgm install into public) are excepted — by
+  // pg_depend's (classid, objid), the pair that names an object, not objid
+  // alone (third review pass).
+  //
+  // The sweep is asked of itself first: five objects of the kinds the drop
+  // lists do not cover — a standalone composite type, a partitioned table, an
+  // enum, a domain, a function — are planted beside the fork's, and after the
+  // reset each must be seen. A third pass found the first sweep blind to
+  // exactly those: relkind 'c', 'p' and 'f' were outside its relation query,
+  // and its type query excluded every composite, a table's row type and a
+  // CREATE TYPE … AS alike. Then they are dropped by hand and the sweep must
+  // come back empty. The brain is the full one [20] leaves.
+  const sql = new SQL({ url: URL_, max: 1 });
+  for (const ddl of [
+    `CREATE TYPE ob1_probe_rowtype AS (a int)`,
+    `CREATE TYPE ob1_probe_enum AS ENUM ('x')`,
+    `CREATE DOMAIN ob1_probe_domain AS int`,
+    `CREATE TABLE ob1_probe_part (k int) PARTITION BY RANGE (k)`,
+    `CREATE FUNCTION ob1_probe_fn() RETURNS int LANGUAGE sql AS 'SELECT 1'`,
+  ]) await sql.unsafe(ddl);
+  await dropSchema(URL_);
+  const notExt = (catalog: string, oid: string) => `NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = '${catalog}'::regclass AND d.objid = ${oid} AND d.deptype = 'e')`;
+  // An extension's composite type records its membership on the TYPE, not on
+  // the relation behind it, and a sequence behind an extension table's serial
+  // or identity column records only an 'a' or 'i' dependency on that column —
+  // so a relation is an extension's when it, its row type, or the table that
+  // owns it is (fourth and fifth review passes; pgvector and pg_trgm ship
+  // neither today, so this is for the next extension the test image gains).
+  const notExtRel = `NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.deptype = 'e' AND (
+      (d.classid = 'pg_class'::regclass AND d.objid = c.oid)
+      OR (d.classid = 'pg_type'::regclass AND d.objid = c.reltype)
+      OR (d.classid = 'pg_class'::regclass AND d.objid = (SELECT a.refobjid FROM pg_depend a WHERE a.classid = 'pg_class'::regclass AND a.objid = c.oid AND a.deptype IN ('a','i') LIMIT 1))))`;
+  const sweep = async () => ({
+    // Every relation kind: tables, partitioned and foreign tables, views,
+    // materialized views, sequences, and the relation a standalone composite
+    // type is backed by.
+    rels: ((await sql.unsafe(`SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' AND c.relkind IN ('r','p','f','v','m','S','c') AND ${notExtRel} ORDER BY 1`)) as { relname: string }[]).map((r) => r.relname),
+    fns: ((await sql.unsafe(`SELECT p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')' AS sig FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public' AND ${notExt("pg_proc", "p.oid")} ORDER BY 1`)) as { sig: string }[]).map((r) => r.sig),
+    // The type kinds no relation backs: enums, domains, ranges, multiranges.
+    types: ((await sql.unsafe(`SELECT t.typname FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace WHERE n.nspname = 'public' AND t.typtype IN ('e','d','r','m') AND ${notExt("pg_type", "t.oid")} ORDER BY 1`)) as { typname: string }[]).map((r) => r.typname),
+  });
+  const planted = await sweep();
+  assert(planted.rels.includes("ob1_probe_rowtype") && planted.rels.includes("ob1_probe_part") && planted.fns.includes("ob1_probe_fn()") && planted.types.includes("ob1_probe_enum") && planted.types.includes("ob1_probe_domain"),
+    `the sweep sees what the reset does not drop — a composite type, a partitioned table, a function, an enum and a domain planted beside the fork's objects (${[...planted.rels, ...planted.fns, ...planted.types].join(", ")})`);
+  for (const ddl of [`DROP TABLE ob1_probe_part`, `DROP FUNCTION ob1_probe_fn()`, `DROP TYPE ob1_probe_rowtype`, `DROP TYPE ob1_probe_enum`, `DROP DOMAIN ob1_probe_domain`]) await sql.unsafe(ddl);
+  // A survivor is the fork's when some migration names it — then a line is
+  // missing from test-support's lists and this section fails. One no migration
+  // names is another suite's: CI's data-layer job runs five server-portable
+  // suites before this one on one database, and a local run against a kept
+  // database meets whatever the last suite left. Those are reported in the
+  // label and do not fail the section, which is about the drop lists, not
+  // about the neighbours (fifth review pass).
+  const texts = await Promise.all(MIGRATIONS.map((f) => Bun.file(join(HERE, "migrations", f)).text()));
+  const named = (name: string) => texts.some((t) => new RegExp(`\\b${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`).test(t));
+  const split = (all: string[], base: (x: string) => string) => {
+    const ours = all.filter((x) => named(base(x))), foreign = all.filter((x) => !named(base(x)));
+    return { ours, note: foreign.length ? `; present but named by no migration, so another suite's: ${foreign.join(", ")}` : "" };
+  };
+  const left = await sweep();
+  const rels = split(left.rels, (x) => x), fns = split(left.fns, (x) => x.slice(0, x.indexOf("("))), types = split(left.types, (x) => x);
+  assert(rels.ours.length === 0, `no relation of the fork's survives the reset (${rels.ours.join(", ") || "none"}${rels.note})`);
+  assert(fns.ours.length === 0, `no function of the fork's survives the reset (${fns.ours.join(", ") || "none"}${fns.note})`);
+  assert(types.ours.length === 0, `no type of the fork's survives the reset (${types.ours.join(", ") || "none"}${types.note})`);
+  await sql.close();
+  await applyMigrations(URL_, OPTS);
 }
 
 report();

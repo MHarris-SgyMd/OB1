@@ -49,6 +49,11 @@ const TABLES = [
   "ob1_agents",
   "schema_migrations",
   "ob1_config",
+  // 034's opt-in query log (SMD-1295): no foreign key either way, so its place
+  // in the order is free. Missing until SMD-1749's test-upgrade [20] built a
+  // schema "without 034" and found the previous section's table standing —
+  // the reset had carried it across every boundary since 034 landed.
+  "query_log",
   // bench-hnsw.ts's kept-corpus marker (SMD-1493): dropped with the schema it
   // vouches for, so a suite run in a kept database cannot leave a marker over
   // rows that are gone.
@@ -120,12 +125,37 @@ const FUNCTIONS = [
   "stale_entities(interval, int)",
   // 032 (SMD-1323)
   "validate_derived_from(jsonb)",
+  // 034 (SMD-1295); listed with its table, above.
+  "prune_query_log(int)",
+  // 024, 025 and 026: the three this list had also missed, found when
+  // SMD-1749's second review pass listed what survives a reset on a fully
+  // applied brain. test-upgrade [21] asks the catalog the same question after
+  // every run, so the next name a migration adds without a line here fails
+  // there rather than in the section that happens to need it gone.
+  "thought_stats_summary()",
+  "find_derivatives(uuid, int)",
+  "trace_provenance(uuid, int, int)",
   // 042 (SMD-1712)
   "thought_facets_validate()",
   "thoughts_guard_citation_sources()",
   "thought_facet_active(thought_facets)",
   "record_citation(uuid, uuid, text, text)",
 ];
+
+/**
+ * The two catalog reads a COMMENT-asserting section makes, as SQL text: both
+ * clients take a string with positional parameters (PGlite's `db.query(text,
+ * params)`, Bun's `sql.unsafe(text, params)`), so one spelling serves
+ * test-schema and test-upgrade without a query callback. `$1` is the table
+ * (cast to regclass), `$2` the column; the row's one field is `c`. Dropped
+ * columns keep a pg_attribute row under a mangled name and are excluded.
+ * (SMD-1749's third review pass; the first had declined a helper because the
+ * clients differ — a constant does not care.)
+ */
+export const COLUMN_COMMENT_SQL = "SELECT col_description(a.attrelid, a.attnum) AS c FROM pg_attribute a WHERE a.attrelid = $1::regclass AND a.attname = $2 AND NOT a.attisdropped";
+export const TABLE_COMMENT_SQL = "SELECT obj_description($1::regclass, 'pg_class') AS c";
+/** The function form: `$1` is a signature text (`name(argtypes)`), cast to regprocedure; the row's one field is `c`. */
+export const FUNCTION_COMMENT_SQL = "SELECT obj_description($1::regprocedure, 'pg_proc') AS c";
 
 export type SchemaOptions = {
   /** Vector width to substitute for `{{EMBEDDING_DIM}}`. */
