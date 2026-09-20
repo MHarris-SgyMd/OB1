@@ -142,8 +142,9 @@ export type ThoughtHybridMatch = {
  * `created_at` is `string | null` as well. Before it, both fabricated the epoch
  * on a NULL, and `normaliseProposal`'s local `new Date(v).toISOString()` THREW
  * RangeError on an `infinity`-dated proposal thought — a whole-tool crash. Every
- * mapper that reads `created_at` is now null-safe; the CLI twin `db/consolidate.ts`
- * (`day`, the judge-prompt `dateOf`) went the same way in the same change.
+ * mapper that reads `created_at` is now null-safe; the CLI's `day`
+ * (`db/consolidate.ts`) and the judge-prompt `dateOf` (`consolidate.ts`) went the
+ * same way in the same change.
  * `undefined` throws: the column is missing from the row, a bug in the SELECT,
  * not data.
  */
@@ -455,12 +456,10 @@ export type SupersessionProposal = {
 
 /** list_supersession_proposals's row → SupersessionProposal; both stores map through here so neither drifts. */
 export function normaliseProposal(r: Record<string, unknown>): SupersessionProposal {
-  // SMD-1803: the older/newer thought's created_at is the read path's column,
-  // so it takes the read path's rule (isoTimestampOrNull): NULL → null, infinity
-  // → "infinity", no throw. The local `new Date(v).toISOString()` this replaced
-  // fabricated the epoch on NULL and threw RangeError on an infinity-dated
-  // thought, taking the whole tool down. judged_at is NOT NULL (029) so it never
-  // maps to null; reviewed_at is set only on review.
+  // SMD-1803: older/newer.created_at take the read path's rule — isoTimestampOrNull
+  // (NULL → null, infinity kept, no throw); see isoTimestamp's header for why the
+  // local new Date(v).toISOString() this replaced was wrong. judged_at is NOT NULL
+  // (029) so it stays isoTimestamp; reviewed_at is set only on review.
   return {
     id: String(r.id),
     status: String(r.status) as SupersessionProposal["status"],
