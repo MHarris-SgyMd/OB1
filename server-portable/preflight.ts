@@ -100,14 +100,14 @@ const DIRECT_CHECKS = [
 ];
 /**
  * 020 gave match_thoughts and search_thoughts_hybrid the forms the servers
- * call; 027 last defines search_thoughts_hybrid (the relative floor) and 039
- * match_thoughts (the half-precision walk, over 038's gate), both under 020's
- * signatures. A remedy
+ * call; 027 last defines search_thoughts_hybrid (the relative floor) and 040
+ * match_thoughts (039's half-precision walk over 038's gate, run with jit
+ * off), both under 020's signatures. A remedy
  * that applied 020 alone would leave 020's bodies over theirs — the
  * stale-body state the ledger then cannot see — so the signature remedies
  * name all three, in order.
  */
-const APPLY_020 = "Apply db/migrations/020_match_thoughts_recency.sql, then 027_search_thoughts_relative_floor.sql and 039_match_thoughts_halfvec_index.sql (the last definers of search_thoughts_hybrid and match_thoughts).";
+const APPLY_020 = "Apply db/migrations/020_match_thoughts_recency.sql, then 027_search_thoughts_relative_floor.sql and 040_match_thoughts_jit_off.sql (the last definers of search_thoughts_hybrid and match_thoughts).";
 /**
  * PostgREST answers a call it cannot resolve with PGRST202 both when the
  * function is missing and while its schema cache predates the migration that
@@ -115,7 +115,7 @@ const APPLY_020 = "Apply db/migrations/020_match_thoughts_recency.sql, then 027_
  * has just applied it back to the migrator (first review pass of 021).
  */
 const RELOAD_HINT = "If the ledger already records it, PostgREST may not have reloaded its schema cache: NOTIFY pgrst, 'reload schema';";
-const APPLY_020_POSTGREST = `Apply the migrations through db/migrations/039_match_thoughts_halfvec_index.sql against the project's direct connection (server-portable/README.md §4) — 020 gives both functions the forms the server sends; 027 and 039 last define search_thoughts_hybrid and match_thoughts. ${RELOAD_HINT}`;
+const APPLY_020_POSTGREST = `Apply the migrations through db/migrations/040_match_thoughts_jit_off.sql against the project's direct connection (server-portable/README.md §4) — 020 gives both functions the forms the server sends; 027 and 040 last define search_thoughts_hybrid and match_thoughts. ${RELOAD_HINT}`;
 const APPLY_021 = "Apply db/migrations/021_embedding_model_per_row.sql.";
 const APPLY_032 = "Apply db/migrations/032_update_thought_provenance.sql.";
 /**
@@ -539,6 +539,11 @@ if (configFailed) {
       add("atomic capture", "skip", `not checked over PostgREST — whether the 3-argument upsert_thought is 022's is read from the catalog; ${CATALOG_HINT}`);
       add("write privileges", "skip", `not checked over PostgREST — the capture path's table privileges are read over a direct connection; ${CATALOG_HINT}`);
       add("fingerprint backfill", "skip", `not checked over PostgREST — whether a thought without a fingerprint has one waiting is decided by hashing rows on the server; ${CATALOG_HINT}`);
+      // The query log (034) and whether upsert_thought answers `existed` (035,
+      // without which no cite row is logged, SMD-1719) are catalog facts too.
+      // A seventh review pass walked the hosted path and found this check
+      // printed nothing there — the one shape the comment above forbids.
+      add("query log", "skip", `not checked over PostgREST — whether query_log (034) is present, and whether upsert_thought answers \`existed\` (035), without which a write that cites a returned id logs no cite row (SMD-1719), are read from the catalog; ${CATALOG_HINT}`);
     }
 
     // The atomic capture path needs migration 004. Its absence is not fatal — the
@@ -603,6 +608,16 @@ if (configFailed) {
         // path (the shape the `vector extension` check above fails), and a
         // pick by it would then have called a present form missing (second
         // review pass, SMD-1250).
+        // Whether the 3-argument upsert_thought carries 035's sentinel — set by
+        // the `atomic capture` check from the body it reads below, read by the
+        // `query log` check further down this block (cite rows, SMD-1719, are
+        // logged only when that body answers `existed`). One detector of 035,
+        // not a second grep of the same body (seventh review pass); scoped to
+        // this block rather than the module (eighth). A boolean, not a
+        // tri-state: the assignment is unconditional once the forms are read,
+        // and a throw before it leaves this block through the catch below,
+        // which reports the query-log check as not run (ninth).
+        let threeArgIs035 = false;
         const forms = (await sql`
           SELECT p.proname || '(' || COALESCE((SELECT string_agg(t.typname, ',' ORDER BY a.n)
                                                  FROM unnest(p.proargtypes) WITH ORDINALITY AS a(o, n)
@@ -655,6 +670,7 @@ if (configFailed) {
         // (first review pass; SMD-1245's arity-alone finding).
         const three = forms.find((f) => f.sig === "upsert_thought(text,jsonb,vector)");
         const two = forms.find((f) => f.sig === "upsert_thought(text,jsonb)");
+        threeArgIs035 = three !== undefined && /ob1:re-capture-writes-no-provenance/.test(three.src);
         // 007/013's 4-argument form — the windowed capture the servers call —
         // is the third form the migrations define; anything else is a
         // vendored file's, and is named.
@@ -1346,7 +1362,7 @@ if (configFailed) {
           const seedBounds =
             `Run as the database owner, in one session: SELECT '[1]'::vector; ${Object.entries(HNSW_SEEDS).map(([n, v]) => `ALTER DATABASE <db> SET ${n} = ${v};`).join(" ")}  then restart the server so its pool reconnects.`;
           const putBack =
-            `Put it back: SELECT '[1]'::vector; ALTER FUNCTION ${mt[0]?.sig ?? "match_thoughts"} SET hnsw.iterative_scan = relaxed_order;  — a redefinition that dropped this clause dropped 019's too (the candidate scan check below says) — and carry them into the migration that redefined it.`;
+            `Put it back: SELECT '[1]'::vector; ALTER FUNCTION ${mt[0]?.sig ?? "match_thoughts"} SET hnsw.iterative_scan = relaxed_order;  — a redefinition that dropped this clause dropped 019's and 040's too (the candidate scan check below says) — and carry them into the migration that redefined it.`;
           const staleRecord = installedOld && libraryNew;
 
           if (mt.length === 0) {
@@ -1418,7 +1434,14 @@ if (configFailed) {
          * (CI proves the plan; db/test-live.ts [5c]). The two row estimates 019
          * declares — match_thoughts ROWS 10, search_thoughts_keyword ROWS 25 —
          * are read beside it, since the same kind of redefinition resets each.
-         * A WARNING: every search still answers, at the seq scan's cost.
+         * So is 040's `SET jit = off` (SMD-1624): without it a planner path an
+         * operator disables at any level — enable_tidscan, enable_nestloop,
+         * hashagg with sort — adds disable_cost to the gate's sample on
+         * PostgreSQL 14–17 and the executor JIT-compiles it on every filtered
+         * call, ~50 ms, with the plan, the rows and the ledger unchanged (040's
+         * header has the table; 18 counts disabled nodes instead, and there
+         * the clause guards the generic plan's flat estimate). A WARNING: every
+         * search still answers, at the seq scan's or the compiler's cost.
          */
         try {
           if (catalog instanceof Error) throw catalog;
@@ -1427,30 +1450,51 @@ if (configFailed) {
             add("candidate scan", "skip", "not checked — match_thoughts is not defined (filtered search says so)");
           } else {
             const seqOff = mt[0].settings["enable_seqscan"] === "off";
+            const jitOff = mt[0].settings["jit"] === "off";
             const rows = mt[0].rows;
             const kwOff = kwRows !== null && kwRows !== 25;
             const ledgerHas019 = ledger.has("019");
-            // One statement per function that needs it, in the order to run them.
-            const alters = [
-              ...(!seqOff || rows !== 10 ? [`ALTER FUNCTION ${mt[0].sig}${seqOff ? "" : " SET enable_seqscan = off"}${rows !== 10 ? " ROWS 10" : ""};`] : []),
-              ...(kwOff ? ["ALTER FUNCTION search_thoughts_keyword(text, int, int, jsonb) ROWS 25;"] : []),
-            ];
-            const remedy = ledgerHas019
-              ? `Put it back — after any re-apply of a migration body, since CREATE OR REPLACE resets these: SELECT '[1]'::vector; ${alters.join(" ")}  and carry them into the migration that redefined the function.`
-              : "Apply db/migrations/019_match_thoughts_plan_and_rows.sql.";
+            const ledgerHas040 = ledger.has("040");
+            // Whether THIS server would compile at all: Supabase's images are
+            // built without LLVM JIT and its upgrades set jit = off, so there a
+            // missing clause costs nothing today and the warning says so.
+            const [{ jitOn }] = await sql`SELECT pg_jit_available() AND current_setting('jit') = 'on' AS "jitOn"`;
+            const today = jitOn ? "" : " (not on this server today: it has no JIT, or its own jit is off — Supabase ships both; the clause is for a server that compiles)";
+            const missing019 = !seqOff || rows !== 10 || kwOff;
+            const mtMissing = !seqOff || rows !== 10 || !jitOff;
+            // match_thoughts' three clauses and its row estimate are restored by
+            // its LAST definer, 040 — never by 019's file, whose CREATE is the
+            // 4-argument form 020 dropped and would put a second overload beside
+            // the shipped one on any brain past 020 (review pass 2) — named
+            // while the ledger does not record 040, ALTERed once it does (a
+            // plain run skips a recorded file). The keyword estimate is 019's
+            // and 040 does not define that function, so its remedy is the ALTER
+            // in either case, beside the file or in the Put-it-back list.
+            const mtAlter = mtMissing ? `ALTER FUNCTION ${mt[0].sig}${seqOff ? "" : " SET enable_seqscan = off"}${jitOff ? "" : " SET jit = off"}${rows !== 10 ? " ROWS 10" : ""};` : "";
+            const kwAlter = kwOff ? "ALTER FUNCTION search_thoughts_keyword(text, int, int, jsonb) ROWS 25;" : "";
+            const remedy = mtMissing && !ledgerHas040
+              ? `Apply db/migrations/040_match_thoughts_jit_off.sql${!seqOff || rows !== 10 ? " — the last definer of match_thoughts, which carries 019's clauses and ROWS 10 with its own (019's file alone would re-create the 4-argument form 020 dropped)" : ""}.${kwOff ? ` Then put the keyword estimate back: SELECT '[1]'::vector; ${kwAlter}  and carry it into the migration that redefined that function.` : ""}`
+              : `Put it back — after any re-apply of a migration body, since CREATE OR REPLACE resets these: SELECT '[1]'::vector; ${[mtAlter, kwAlter].filter(Boolean).join(" ")}  and carry them into the migration that redefined the function.`;
             const estimates = [
               ...(rows !== 10 ? [`match_thoughts' row estimate is ${rows} rather than 10`] : []),
               ...(kwOff ? [`search_thoughts_keyword's row estimate is ${kwRows} rather than 25`] : []),
             ];
-            if (seqOff && rows === 10 && !kwOff) {
-              add("candidate scan", "ok", "match_thoughts declares enable_seqscan = off and ROWS 10, search_thoughts_keyword ROWS 25 (019): the candidate scan takes the HNSW indexes at the shipped width and callers plan against real row counts");
+            const jitNote = jitOff
+              ? ""
+              : `; and it does not carry jit = off${ledgerHas040 ? " although migration 040 is recorded as applied — a later redefinition dropped its SET clause" : " — migration 040 is not applied"}, so a planner path disabled at any level (enable_tidscan, enable_nestloop, hashagg with sort) JIT-compiles the gate's sample on every filtered call, ~50 ms, on PostgreSQL 14–17 (on 18 the clause guards the generic plan's flat estimate; 040's header has the table)${today}`;
+            if (!missing019 && jitOff) {
+              add("candidate scan", "ok", "match_thoughts declares enable_seqscan = off and ROWS 10, search_thoughts_keyword ROWS 25 (019), and match_thoughts jit = off (040): the candidate scan takes the HNSW indexes at the shipped width, callers plan against real row counts, and no statement of the body is JIT-compiled");
             } else if (!seqOff) {
               add("candidate scan", "warn",
-                  `match_thoughts does not carry enable_seqscan = off${ledgerHas019 ? " although migration 019 is recorded as applied — a later redefinition dropped its SET clause" : " — migration 019 is not applied"}${estimates.length ? `, and ${estimates.join(", and ")}` : ""} — so at the shipped width the planner seq-scans the chunk table on every search and both tables above the default count, on brains up to some tens of thousands of thoughts (019's header has the numbers)`,
+                  `match_thoughts does not carry enable_seqscan = off${ledgerHas019 ? " although migration 019 is recorded as applied — a later redefinition dropped its SET clause" : " — migration 019 is not applied"}${estimates.length ? `, and ${estimates.join(", and ")}` : ""} — so at the shipped width the planner seq-scans the chunk table on every search and both tables above the default count, on brains up to some tens of thousands of thoughts (019's header has the numbers)${jitNote}`,
+                  remedy);
+            } else if (estimates.length) {
+              add("candidate scan", "warn",
+                  `match_thoughts carries enable_seqscan = off but ${estimates.join(", and ")}${ledgerHas019 ? " — a redefinition reset what 019 declared" : " — migration 019 is not applied"}; every query composing the function is planned against that count (017's header records what a 1,000-row estimate cost)${jitNote}`,
                   remedy);
             } else {
               add("candidate scan", "warn",
-                  `match_thoughts carries enable_seqscan = off but ${estimates.join(", and ")}${ledgerHas019 ? " — a redefinition reset what 019 declared" : " — migration 019 is not applied"}; every query composing the function is planned against that count (017's header records what a 1,000-row estimate cost)`,
+                  `match_thoughts carries enable_seqscan = off and both row estimates hold, but not jit = off${ledgerHas040 ? " although migration 040 is recorded as applied — a later redefinition dropped its SET clause" : " — migration 040 is not applied"}: a planner path disabled at any level (enable_tidscan, enable_nestloop, hashagg with sort) JIT-compiles the gate's sample on every filtered call, ~50 ms, with the plan, the rows and the ledger unchanged, on PostgreSQL 14–17 (on 18 the clause guards the generic plan's flat estimate; 040's header has the table)${today}`,
                   remedy);
             }
           }
@@ -2008,9 +2052,17 @@ if (configFailed) {
             const { queryLogEnabled, queryLogRetentionDays } = await import("../db/config.mjs");
             const on = queryLogEnabled(env as unknown as Record<string, string | undefined>);
             const days = queryLogRetentionDays(env as unknown as Record<string, string | undefined>);
-            add("query log", "ok",
+            // Cite rows (SMD-1719) are logged only when 035's upsert_thought
+            // answers `existed` — the store's affirmative "fresh row". On a
+            // brain at 034 without 035 the log records opens and never a cite,
+            // and a utilization report would read that as callers never citing.
+            // Whether the body is 035's is the atomic-capture check's verdict,
+            // read from the sentinel that body declares (threeArgIs035 above).
+            const cites = threeArgIs035;
+            add("query log", cites ? "ok" : "warn",
               `present; ${on ? "ON (OB1_QUERY_LOG=on) here" : "off by default — set OB1_QUERY_LOG=on to record"}. ` +
-              `Logs each search and the fetch/edit/delete of a returned id (query text, arguments, returned ids — personal data at rest), read offline by evals/export-queries.ts. ` +
+              (cites ? "" : "Cite rows (a write naming a returned id as its source, SMD-1719) need migration 035's upsert_thought and will NOT be logged on this brain — utilization would read as callers never citing (the `atomic capture` check above names the remedy). ") +
+              `Logs each search and the fetch/edit/delete of a returned id, and a write that cites one (SMD-1719) (query text, arguments, returned ids — personal data at rest), read offline by evals/export-queries.ts and evals/eval-utilization.ts (which also joins the returned ids to thoughts content for a token estimate). ` +
               `Retention: prune_query_log(${days}); a self-hosted role needs query_log INSERT (db/README.md).`);
           }
         } catch (e) {

@@ -15,7 +15,7 @@
 
 import { createAssert } from "../db/test-support.ts";
 import { applyChunkContextPrompt, applyEmbeddingPrompt, CHUNK_CONTEXT_PROMPTS, MAX_WHOLE_TOKENS } from "../db/config.mjs";
-import { normaliseType, thoughtTitle, thoughtUrl, THOUGHT_TYPES, TYPE_ALIASES } from "./thoughts.ts";
+import { displayDate, normaliseType, thoughtTitle, thoughtUrl, THOUGHT_TYPES, TYPE_ALIASES } from "./thoughts.ts";
 import { DEFAULT_LLM_TIMEOUT_S, resolveEmbedConfig } from "./embed.ts";
 import { parseExtraction } from "./entities.ts";
 import { buildJudgeMessages, cleanForDisplay, parseJudgement, wrapSide } from "./consolidate.ts";
@@ -71,6 +71,30 @@ console.log("\n[5] Titles collapse whitespace and truncate");
   assert(/^Open Brain/.test(thoughtTitle("something")), "no date yields the Open Brain prefix");
   assert(/thought$/.test(thoughtTitle("")), "empty content still produces a usable title");
   assert(/thought$/.test(thoughtTitle("   ")), "whitespace-only content counts as empty");
+
+  // SMD-1328: created_at is `string | null`. A null date is the Open Brain
+  // fallback, never the fabricated epoch; a no-ISO-form value is its own text.
+  assert(/^Open Brain/.test(thoughtTitle("x", null)) && !/1970/.test(thoughtTitle("x", null)),
+         "a null date yields the Open Brain prefix, not 1/1/1970");
+  assert(thoughtTitle("x", "infinity").startsWith("infinity - "),
+         "an infinity date renders its own text in the title, not Invalid Date");
+}
+
+console.log("\n[5b] displayDate maps NULL and no-ISO-form timestamps for the tools (SMD-1328)");
+{
+  assert(displayDate(null) === null && displayDate(undefined) === null,
+         "null/undefined → null, so the caller renders the date as absent instead of new Date(null)'s epoch");
+  assert(displayDate("infinity") === "infinity" && displayDate("-infinity") === "-infinity",
+         "an infinite timestamp keeps its own text, not \"Invalid Date\"");
+  assert(displayDate("0044-03-15T00:00:00+00:00 BC") === "0044-03-15T00:00:00+00:00 BC",
+         "a value with no ISO form passes through unchanged, as isoTimestamp keeps it");
+  const finite = displayDate("2026-01-15T10:00:00Z");
+  assert(finite !== null && !/1970|Invalid/.test(finite) && finite === new Date("2026-01-15T10:00:00Z").toLocaleDateString(),
+         `a finite timestamp becomes the locale date (${finite})`);
+  // Teeth: the fix bans FABRICATION from NULL, not the value 0. A row genuinely
+  // dated at the epoch still renders as the epoch.
+  assert(displayDate("1970-01-01T00:00:00.000Z") === new Date(0).toLocaleDateString(),
+         "a genuine epoch timestamp still renders — the null case is the only one suppressed");
 }
 
 console.log("\n[6] Citation URLs join cleanly whatever the base looks like");

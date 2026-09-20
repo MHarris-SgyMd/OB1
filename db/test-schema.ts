@@ -68,6 +68,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { SAMPLE_STATEMENT, SCHEMAS_DIR, SCHEMA_FILES_FIRST, TID_PROBE, buffersOf, communitySchemaFiles, createAssert, sampleStatementOf, seededRandom } from "./test-support.ts";
 import { markerAnswers } from "./bench-oracle.ts";
+import { agentLabel, armOf, attribute, citePointerOf, goldFromFixture, renderReport, summarise, toActionRow, toSearchRow, type ActionRow, type SearchRow } from "../evals/utilization.ts";
 import { ENTITY_TYPES, RELATIONS } from "../server-portable/entities.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -724,7 +725,7 @@ console.log("\n[8e] Migrations 037 and 038: the routing count is gated by a samp
 {
   const shipped = async () => String((await db.query<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = '${MATCH_THOUGHTS_SIGNATURE}'::regprocedure`)).rows[0].s);
   const src = await shipped();
-  assert(lastDefinerOf("match_thoughts").startsWith("039"), `039 is the last definer of match_thoughts, carrying 038's gate (${lastDefinerOf("match_thoughts")})`);
+  assert(lastDefinerOf("match_thoughts").startsWith("040"), `040 is the last definer of match_thoughts — 039's body, run with jit off, carrying 038's gate (${lastDefinerOf("match_thoughts")})`);
   assert(TID_PROBE.test(src) && /INTO v_hits, v_hit_pages, v_pages_seen/.test(src) && !/TABLESAMPLE/.test(src),
     "the shipped body samples the heap by TID range — every tuple of one block, half-open at the next — into the three counts the gate reads, and carries no TABLESAMPLE");
   assert(new RegExp(`floor\\(random\\(\\) \\* v_pages\\)::bigint AS blk\\s+FROM generate_series\\(1, ${ROUTE_SAMPLE_PAGES}\\)`).test(src) && new RegExp(`IF v_pages >= ${ROUTE_ESTIMATE_MIN_PAGES} THEN`).test(src),
@@ -926,7 +927,7 @@ console.log("\n[8e] Migrations 037 and 038: the routing count is gated by a samp
       `on the heap with ${ROUTE_SAMPLE_PAGES} of ${pages} pages emptied every random draw still reaches 2 to ${ROUTE_SAMPLE_PAGES} pages and the rule still says "collect" (hits/hit pages/pages drawn: ${sparse.join(", ")})`);
   }
   const restored = await restoreShipped("match_thoughts");
-  assert(restored.length === 1 && restored[0].startsWith("039") && new RegExp(`IF v_pages >= ${ROUTE_ESTIMATE_MIN_PAGES} THEN`).test(await shipped()),
+  assert(restored.length === 1 && restored[0].startsWith("040") && new RegExp(`IF v_pages >= ${ROUTE_ESTIMATE_MIN_PAGES} THEN`).test(await shipped()),
     "…and the shipped floor is back for the sections after");
 }
 
@@ -1990,8 +1991,11 @@ console.log("\n[20] Migration 019: the row estimates and the plan setting — ca
   assert(Number(mt.prorows) === 10, `match_thoughts declares ROWS 10 (prorows ${mt.prorows})`);
   assert(Number(kw.prorows) === 25, `search_thoughts_keyword declares ROWS 25 (prorows ${kw.prorows})`);
   assert(mt.provolatile === "s" && kw.provolatile === "s", "both are still STABLE");
-  assert(Object.keys(mt.settings).sort().join(",") === "enable_seqscan,hnsw.iterative_scan" && mt.settings["enable_seqscan"] === "off" && mt.settings["hnsw.iterative_scan"] === "relaxed_order",
-         `match_thoughts carries exactly the scan mode and the plan setting (${JSON.stringify(mt.settings)})`);
+  // Exactly three clauses — 014's scan mode, 019's plan setting, 040's jit
+  // off — and no walk bound or plan mode (019's rule). A successor that adds
+  // or drops one fails here on purpose.
+  assert(Object.keys(mt.settings).sort().join(",") === "enable_seqscan,hnsw.iterative_scan,jit" && mt.settings["enable_seqscan"] === "off" && mt.settings["hnsw.iterative_scan"] === "relaxed_order" && mt.settings["jit"] === "off",
+         `match_thoughts carries exactly the scan mode, the plan setting and jit off (${JSON.stringify(mt.settings)})`);
   assert(Object.keys(kw.settings).length === 0, `search_thoughts_keyword carries no SET clause (${JSON.stringify(kw.settings)})`);
   assert(/ob1:filter-inside-scan/.test(mt.prosrc), "the ob1:filter-inside-scan sentinel is in the shipped body");
 
@@ -2044,22 +2048,32 @@ console.log("\n[20] Migration 019: the row estimates and the plan setting — ca
     ambiguous = (e as Error).message;
   }
   assert(/not unique/.test(ambiguous), `with two match_thoughts a 4-argument call is ambiguous (${ambiguous.split("\n")[0] || "it succeeded"})`);
+  // 040's body is 039's byte for byte — the clause is the whole change — and
+  // 039's file re-applied alone (its index swap is idempotent; its CREATE
+  // carries 019's clauses and not 040's) drops it, which is what a hand
+  // re-apply leaves and preflight's candidate scan reports (test-upgrade [18]
+  // holds the same across an upgrade; this is the fast loop's copy).
+  await reapply("039");
+  const mt039 = await proc(MT);
+  assert(mt039.prosrc === mt.prosrc, "040's body is 039's byte for byte — the clause is the whole change");
+  assert(!("jit" in mt039.settings) && mt039.settings["enable_seqscan"] === "off",
+         `…and 039 re-applied alone carries 019's clauses without 040's, the state a hand re-apply leaves (proconfig ${JSON.stringify(mt039.settings)})`);
   await reapply("012");
   const kw012 = await proc(KW);
   assert(kw012.prosrc === kw.prosrc, "019's search_thoughts_keyword body is 012's, byte for byte");
   assert(Number(kw012.prorows) === 1000, `…and re-applying 012 alone resets its estimate to 1,000 (prorows ${kw012.prorows})`);
   const restored = await restoreShipped("match_thoughts", "search_thoughts_keyword");
   const back = await proc(MT);
-  assert(Number(back.prorows) === 10 && back.settings["enable_seqscan"] === "off" && Number((await proc(KW)).prorows) === 25,
+  assert(Number(back.prorows) === 10 && back.settings["enable_seqscan"] === "off" && back.settings["jit"] === "off" && Number((await proc(KW)).prorows) === 25,
          `re-applying the migrations that last define each (${restored.join(", ")}) restores both — the shipped state, for whatever runs after`);
   assert((await functionsNamed("match_thoughts")) === 1 && (await functionsNamed("search_thoughts_keyword")) === 1, "…and 020's DROP removed the 4-argument function again: one match_thoughts, one search_thoughts_keyword");
   // Deliberately pinned, as [20] pinned 019 before 020 landed, 020 before
-  // 037, 037 before 038 and 038 before 039: 019 last defines the keyword
-  // function, 039
-  // match_thoughts. A successor that redefines either fails here on purpose,
-  // and the expectations move with the clauses it must carry.
-  assert(restored.length === 2 && restored[0].startsWith("019") && restored[1].startsWith("039"),
-         `019 is the last definer of search_thoughts_keyword and 039 of match_thoughts (${restored.join(", ")})`);
+  // 037, 037 before 038, 038 before 039 and 039 before 040: 019 last defines
+  // the keyword function, 040 match_thoughts. A successor that redefines
+  // either fails here on purpose, and the expectations move with the clauses
+  // it must carry.
+  assert(restored.length === 2 && restored[0].startsWith("019") && restored[1].startsWith("040"),
+         `019 is the last definer of search_thoughts_keyword and 040 of match_thoughts (${restored.join(", ")})`);
 
   // The migrator's floor line, since whichever file last defines the function
   // redefines it with the hnsw.* clause 014 needed pgvector 0.8 for.
@@ -2087,8 +2101,10 @@ console.log("\n[21] Migration 020: the recency blend — identical at weight 0, 
     `SELECT prorows, proconfig AS cfg, prosrc FROM pg_proc WHERE oid = $1::regprocedure`, [MT])).rows[0];
   assert((await functionsNamed("match_thoughts")) === 1 && (await functionsNamed("search_thoughts_hybrid")) === 1, "one match_thoughts, one search_thoughts_hybrid: 020 replaced both signatures rather than adding overloads");
   const settings = parseSetConfig(proc.cfg);
-  assert(Number(proc.prorows) === 10 && settings["enable_seqscan"] === "off" && settings["hnsw.iterative_scan"] === "relaxed_order" && Object.keys(settings).length === 2 && /ob1:filter-inside-scan/.test(proc.prosrc),
-         "020 carries what 019 handed over: ROWS 10, exactly the two settings, the sentinel");
+  // The shipped body: 020's clauses as 019 handed them over, and 040's jit
+  // off beside them — three settings and no other ([20] pins the same set).
+  assert(Number(proc.prorows) === 10 && settings["enable_seqscan"] === "off" && settings["hnsw.iterative_scan"] === "relaxed_order" && settings["jit"] === "off" && Object.keys(settings).length === 3 && /ob1:filter-inside-scan/.test(proc.prosrc),
+         "the shipped body carries what 019 handed 020: ROWS 10, its two settings and the sentinel — and 040's jit = off, exactly three settings");
   const cols = (await db.query<{ n: string }>(
     `SELECT a.attname AS n FROM pg_proc p, unnest(p.proallargtypes, p.proargmodes, p.proargnames) WITH ORDINALITY AS a(t, m, attname, o)
      WHERE p.oid = $1::regprocedure AND a.m = 't' ORDER BY a.o`, [MT])).rows.map((r) => r.n);
@@ -4310,6 +4326,181 @@ console.log("\n[38] Migration 039: the walk's index is half precision — the sw
   // and PGlite refuses the catalog write ("tuple concurrently updated") where
   // a server does not.
   await db.exec(`DELETE FROM thoughts`);
+}
+
+console.log("\n[39] Memory utilization over the query log: attribution, the cited/opened split, the rates, and what the report refuses to print (SMD-1719, evals/utilization.ts)");
+{
+  // No database: the pure module over hand-made rows. The fixture is one agent
+  // (AG) who searches twice, an anonymous caller who searches once, and the
+  // touches that follow. Times are minutes on one clock so the window is exact.
+  const t = (min: number) => new Date(Date.UTC(2026, 8, 18, 12, min)).toISOString();
+  const A = "aaaaaaaa-0000-4000-8000-000000000001";
+  const B = "aaaaaaaa-0000-4000-8000-000000000002";
+  const C = "aaaaaaaa-0000-4000-8000-000000000003";
+  const D = "aaaaaaaa-0000-4000-8000-000000000004";
+  const AG = "99999999-9999-4999-8999-999999999999";
+  const search = (id: string, agentId: string | null, min: number, query: string, ids: string[], tokens: number | null, tool = "search_thoughts"): SearchRow =>
+    ({ id, agentId, loggedAt: t(min), tool, query, matchCount: 5, threshold: 0, recencyWeight: 0, resultIds: ids, resultTokens: tokens });
+  const act = (agentId: string | null, min: number, tool: string, targetId: string): ActionRow => ({ agentId, loggedAt: t(min), tool, targetId });
+
+  const searches: SearchRow[] = [
+    search("s1", AG, 0, "first", [A, B, C], 300),   // AG's first search: A B C returned, ~300 tokens
+    search("s2", AG, 10, "second", [C, D], 100),    // AG's second: C D
+    search("s3", null, 0, "anon", [A, B], null),    // anonymous: A B, no token estimate
+  ];
+  const actions: ActionRow[] = [
+    act(AG, 2, "fetch", A),                              // opened A → s1
+    act(AG, 3, "capture_thought/derived_from", B),       // cited B → s1
+    act(AG, 12, "update_thought/supersedes", C),         // cited C → s2 (most recent prior search returning C, not s1); an edit's pointer is a cite too
+    act(AG, 50, "fetch", D),                             // 40 min after s2 → outside a 30-min window → unattributed
+    act(null, 1, "fetch", A),                            // anonymous fetch of A → s3, never AG's s1 (NULL agent is its own bucket)
+    act(AG, 4, "delete_thought", "aaaaaaaa-0000-4000-8000-00000000ffff"), // an id no search returned → unattributed
+  ];
+
+  // The split is read from the tool's shape alone: `<writer>/<pointer>` is a
+  // cite whatever the writer, a plain name is an open.
+  assert(citePointerOf("capture_thought/derived_from") === "derived_from" && citePointerOf("update_thought/supersedes") === "supersedes" && citePointerOf("some_future_tool/derived_from") === "derived_from",
+    "a `<writer>/<pointer>` tool names its pointer, for any writer");
+  assert(citePointerOf("fetch") === null && citePointerOf("update_thought") === null && citePointerOf("odd/") === null && citePointerOf("/x") === null,
+    "a plain tool, or a malformed slash form, is not a cite");
+
+  const attr = attribute(searches, actions, 30);
+  const s1 = attr.bySearch.get("s1")!;
+  const s2 = attr.bySearch.get("s2")!;
+  const s3 = attr.bySearch.get("s3")!;
+  assert([...s1.used].sort().join() === [A, B].join() && s1.opened.has(A) && s1.cited.has(B) && !s1.cited.has(A), "s1: A opened, B cited — the tool column splits the two kinds of use");
+  assert([...s2.used].join() === C && s2.cited.has(C) && !s1.used.has(C), "a cite of C goes to the MOST RECENT prior search that returned it (s2), not the older s1");
+  assert([...s3.used].join() === A && s3.opened.has(A), "the anonymous fetch attributes to the anonymous search");
+  assert(s3.used.size === 1 && s1.used.size === 2 && !s1.used.has(D), "…and a NULL agent is its own bucket: AG's search did not absorb the anonymous touch, nor the anonymous search AG's");
+  assert(attr.unattributed.length === 2 && attr.unattributed.some((a) => a.targetId === D) && attr.unattributed.some((a) => a.tool === "delete_thought"),
+    `a touch 40 min after its search, and a touch of an id no search returned, attribute to nothing and are counted (${attr.unattributed.length})`);
+
+  const sum = summarise(searches, actions, 30);
+  assert(sum.overall.searches === 3 && sum.overall.returned === 7 && sum.overall.used === 4, `overall: 3 searches, 7 ids returned, 4 used (${sum.overall.returned}, ${sum.overall.used})`);
+  assert(Math.abs((sum.overall.utilization ?? 0) - 4 / 7) < 1e-9, `utilization = used / returned = 4/7 (${sum.overall.utilization})`);
+  assert(sum.overall.useRate === 1, "every search had at least one use → use rate 1");
+  assert(sum.overall.cited === 2 && sum.overall.opened === 2, `cited 2, opened 2 (${sum.overall.cited}, ${sum.overall.opened})`);
+  assert(sum.actionsTotal === 6 && sum.unattributed === 2, "the report carries the action count and how many attributed to nothing");
+  // Tokens per used id is computed only over searches that carry an estimate:
+  // s1 (300 tokens, 2 used) and s2 (100 tokens, 1 used) → 400 / 3; s3 has none.
+  assert(Math.abs((sum.overall.tokensPerUsed ?? 0) - 400 / 3) < 1e-9 && sum.overall.searchesWithTokens === 2, `tokens per used id over the searches with an estimate (${sum.overall.tokensPerUsed})`);
+  // Per arm: the fixture is one arm; per agent: AG and (anonymous).
+  assert(sum.arms.size === 1 && [...sum.arms.keys()][0] === "search_thoughts k=5 thr=0 rw=0", `one arm, named from the row's tool and arguments (${[...sum.arms.keys()][0]})`);
+  assert(sum.agents.get(AG)?.searches === 2 && sum.agents.get("(anonymous)")?.searches === 1, "per-agent rows: AG's two searches and the anonymous one");
+
+  // The mutant this section is for: drop the cite rows (the SMD-1719 server
+  // change) and the number moves — utilization falls to the opened-only 2/7 and
+  // cited reads 0. A report that did not move here would not be measuring cites.
+  const noCites = summarise(searches, actions.filter((a) => citePointerOf(a.tool) === null), 30);
+  assert(noCites.overall.cited === 0 && Math.abs((noCites.overall.utilization ?? 0) - 2 / 7) < 1e-9, `without the cite rows: cited 0, utilization 2/7 (${noCites.overall.utilization}) — the cites are what the number measures`);
+
+  // Gold: a hand-labelled map says s1's relevant id was C (never used) and s2's
+  // was C (used). Ignore rate over searches whose results held a gold id: 1 of 2.
+  const gold = new Map<string, Set<string>>([["first", new Set([C])], ["second", new Set([C])]]);
+  const withGold = summarise(searches, actions, 30, gold);
+  assert(withGold.overall.gold?.withGold === 2 && withGold.overall.gold?.ignored === 1 && withGold.overall.gold?.ignoreRate === 0.5,
+    `ignore rate: of 2 searches that returned a gold id, 1 used none of them (${JSON.stringify(withGold.overall.gold)})`);
+
+  // What the report refuses to print: with no action rows at all it says n/a
+  // and asks whether the log is on, rather than 0% over an empty join.
+  const none = renderReport(summarise(searches, [], 30));
+  assert(/utilization: n\/a/.test(none) && /NO action rows/.test(none) && !/0%/.test(none), "no action rows → 'n/a', not 0%");
+  const full = renderReport(sum);
+  assert(/all\s+3\s+7\s+4\s+57%/.test(full) && /2 attributed to no search/.test(full), `the rendered table carries the overall row and the unattributed count (${full.split("\n").find((l) => l.startsWith("all"))})`);
+  assert(/token estimate for 2 of 3 search/.test(full), "…and says how many searches carry a token estimate, so tok/used is read over the right denominator");
+  assert(/by agent/.test(full) && /\(anonymous\)/.test(full), "two agents → a by-agent block naming the anonymous bucket");
+  assert(!/WARN/.test(full) && sum.unknownTools.size === 0, "every plain tool in the fixture is a known open — no warning");
+
+  // A plain tool name outside the known opens is counted as opened (never
+  // dropped) AND flagged: a writer that forgot the `<writer>/<pointer>` form
+  // is seen, not folded silently into click-through.
+  // B was already cited by s1's capture, so this open of B changes nothing in
+  // the partition (cited wins); an unknown tool on an UNCITED id is counted as
+  // opened — both shown.
+  const odd = summarise(searches, [...actions, act(AG, 5, "new_tool_that_forgot", B)], 30);
+  assert(odd.unknownTools.get("new_tool_that_forgot") === 1 && odd.overall.opened === 2 && odd.overall.cited === 2, `an unknown plain tool is reported, and an open of an already-cited id leaves the partition alone (${JSON.stringify([...odd.unknownTools])}, opened ${odd.overall.opened})`);
+  const oddUncited = summarise(searches, [...actions, act(AG, 11, "new_tool_that_forgot", D)], 30);
+  assert(oddUncited.overall.opened === 3 && oddUncited.unknownTools.get("new_tool_that_forgot") === 1, `an unknown plain tool on an uncited id is counted as opened (${oddUncited.overall.opened})`);
+  assert(/WARN new_tool_that_forgot ×1/.test(renderReport(odd)), "…and the report warns by name");
+  // The by-agent table (two or more agents) names a row from the registry
+  // when the reader hands the names over, id prefix beside it; an id the
+  // registry does not know, and the anonymous bucket, keep their labels.
+  {
+    const named = renderReport(sum, new Map([[AG, "laptop"]]));
+    assert(new RegExp(`^laptop \\(${AG.slice(0, 8)}\\)\\s+\\d`, "m").test(named), "a by-agent row reads `label (id prefix)` when the registry names the id");
+    assert(/^\(anonymous\)\s+\d/m.test(named) && !new RegExp(`^${AG}\\s`, "m").test(named), "the anonymous bucket keeps its name, and the named id no longer prints bare");
+    assert(new RegExp(`^${AG}\\s+\\d`, "m").test(renderReport(sum)), "…while without names the id prints as itself");
+    assert(agentLabel("x", new Map()) === "x" && agentLabel("(anonymous)") === "(anonymous)", "agentLabel falls back to the key itself");
+  }
+
+  // The database-row coercions the report script relies on, driven here
+  // without a database (third review pass: the script itself runs in no CI
+  // job). bigint columns arrive as strings under Bun; uuid[] as the `{a,b}`
+  // literal; the token estimate is whole or absent.
+  const dbRow = (over: Partial<Parameters<typeof toSearchRow>[0]> = {}) => toSearchRow({
+    id: "s9", agent_id: AG, logged_at: t(0), at_us: "1789816800000000", tool: "search_thoughts", query: "q",
+    match_count: 5, threshold: 0.30000001192092896, recency_weight: 0, result_ids: `{${A},${B}}`, chars: "1200", surviving: "2", ...over,
+  });
+  const whole = dbRow();
+  assert(whole.resultIds.join() === [A, B].join() && whole.resultTokens === 300 && whole.atUs === 1789816800000000, `a whole result set: ids parsed from the literal, chars/4 as tokens, at_us as a number (${JSON.stringify([whole.resultIds.length, whole.resultTokens, whole.atUs])})`);
+  assert(dbRow({ surviving: "1" }).resultTokens === null, "one returned id since deleted → no estimate, not a partial one");
+  assert(dbRow({ chars: null, surviving: "0", result_ids: "{}" }).resultTokens === null, "nothing returned → no estimate");
+  assert(armOf(whole) === "search_thoughts k=5 thr=0.3 rw=0", `a real's float32 noise does not reach the arm name (${armOf(whole)})`);
+  const actDb = toActionRow({ agent_id: null, logged_at: t(1), at_us: "1789816860000000", tool: "fetch", target_id: A });
+  assert(actDb.agentId === null && actDb.atUs === 1789816860000000, "an action row's NULL agent and at_us survive the coercion");
+  const goldFx = goldFromFixture({ queries: [{ query: "first", relevant: `{${C},"${D}"}` }, { query: "second", relevant: [C] }] });
+  assert(goldFx.get("first")?.has(C) && goldFx.get("first")?.has(D) && goldFx.get("second")?.size === 1, "a gold fixture reads a `{a,b}` literal (quoted or not) and an array alike");
+  assert(goldFromFixture({ queries: [{ query: "up", relevant: [C.toUpperCase()] }] }).get("up")?.has(C) === true, "a gold id spelled upper-case matches the lower-case id the log holds (seventh pass)");
+  // An instant that does not parse credits nothing and takes nothing: a
+  // search row with an unreadable timestamp is never a hit, an action row
+  // with one is unattributed — not attributed to the agent's newest search
+  // because every comparison against NaN is false (seventh pass).
+  {
+    const badSearch = { ...search("bad", AG, 0, "q", [A], null), loggedAt: "not a date" };
+    const goodSearch = search("good", AG, 0, "q", [A], null);
+    const r1 = attribute([badSearch], [act(AG, 1, "fetch", A)], 30);
+    assert(r1.unattributed.length === 1 && !r1.bySearch.has("bad"), "a search with an unreadable instant is never credited");
+    const r2 = attribute([goodSearch], [{ ...act(AG, 1, "fetch", A), loggedAt: "" }], 30);
+    assert(r2.unattributed.length === 1 && !r2.bySearch.has("good"), "an action with an unreadable instant is unattributed, not handed to the newest search");
+  }
+
+  // Microsecond grain: two searches by one agent 400 µs apart both return X,
+  // then a fetch of X. The SQL join (ORDER BY logged_at DESC) credits the
+  // later one; so does attribute() when the rows carry at_us — a Date alone
+  // would tie them at the millisecond.
+  const base = 1789816800000000;
+  const closeSearches: SearchRow[] = [
+    { ...search("c1", AG, 0, "q", [A], null), atUs: base },
+    { ...search("c2", AG, 0, "q", [A], null), atUs: base + 400 },
+  ];
+  const closeAttr = attribute(closeSearches, [{ ...act(AG, 0, "fetch", A), atUs: base + 800 }], 30);
+  assert(closeAttr.bySearch.has("c2") && !closeAttr.bySearch.has("c1"), "with at_us, the fetch attributes to the later of two searches 400 µs apart, as the SQL join does");
+  assert(attribute(closeSearches, [{ ...act(AG, 0, "fetch", A), atUs: base + 200 }], 30).bySearch.has("c1"), "…and a fetch between them attributes to the earlier one, not the one 200 µs later");
+
+  // The rendered rows align: a numeric util and an n/a util print at the
+  // same width, so the columns under the header line up (third pass).
+  // cited and opened partition used (fourth pass): an id fetched AND then cited
+  // within one search's window is cited, not both; cited + opened = used.
+  const both = summarise([search("p1", AG, 0, "p", [A, B], null)], [act(AG, 1, "fetch", A), act(AG, 2, "capture_thought/derived_from", A), act(AG, 3, "fetch", B)], 30);
+  assert(both.overall.used === 2 && both.overall.cited === 1 && both.overall.opened === 1, `opened then cited → cited 1, opened 1 (B only), used 2 (${both.overall.cited}, ${both.overall.opened}, ${both.overall.used})`);
+  const citedFirst = summarise([search("p2", AG, 0, "p", [A], null)], [act(AG, 1, "capture_thought/derived_from", A), act(AG, 2, "fetch", A)], 30);
+  assert(citedFirst.overall.cited === 1 && citedFirst.overall.opened === 0, "cited then opened → still cited, not opened: order does not matter");
+
+  // A duplicate id in a logged result set is one id returned: utilization can
+  // reach 1 and the whole-set estimate holds (the reader counts distinct ids).
+  const dup = summarise([search("d1", AG, 0, "d", [A, A, B], 120)], [act(AG, 1, "fetch", A), act(AG, 2, "fetch", B)], 30);
+  assert(dup.overall.returned === 2 && dup.overall.utilization === 1, `duplicates collapse: returned 2, utilization 1 (${dup.overall.returned}, ${dup.overall.utilization})`);
+  assert(dbRow({ result_ids: `{${A},${A},${B}}`, surviving: "2" }).resultTokens === 300, "a database row with a duplicated id keeps its whole estimate: the reader counts distinct ids and they match the survivors");
+
+  // A log with actions but no cite-shaped tool anywhere reads as "unknown, not
+  // zero use": either nothing has cited yet or the brain lacks 035 (fifth pass).
+  assert(sum.citeRows === 2 && !/no cite row in the log/.test(renderReport(sum)), `the fixture's two cite rows are counted, so no schema warning (${sum.citeRows})`);
+  const opensOnly = summarise(searches, actions.filter((a) => citePointerOf(a.tool) === null), 30);
+  assert(opensOnly.citeRows === 0 && /WARN no cite row in the log/.test(renderReport(opensOnly)) && /migration 035/.test(renderReport(opensOnly)), "actions but no cite row → the report warns and names 035");
+
+  const aligned = renderReport(summarise([...searches, search("s0", AG, 20, "empty", [], null)], actions, 30));
+  const rowLines = aligned.split("\n").filter((l) => /^(search_thoughts|all|9999|\(anon)/.test(l));
+  assert(rowLines.length >= 2 && new Set(rowLines.map((l) => l.length)).size === 1, `every table row is the same width (${[...new Set(rowLines.map((l) => l.length))].join(",")})`);
 }
 
 // ── 40. The community schemas on a plain-Postgres brain ──────────────────────

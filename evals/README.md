@@ -2877,7 +2877,15 @@ on to open. This loop captures it and gates PRs on it.
 
 1. **Log** — off by default. `OB1_QUERY_LOG=on` records one row per search (query,
    arguments, and the ids returned in rank order with scores) and one per
-   follow-up fetch/edit/delete of a returned id (migration 034; `db/README.md`).
+   follow-up fetch/edit/delete of a returned id (migration 034; `db/README.md`),
+   and — since SMD-1719 — one per id a later capture or edit cites as its source
+   (`derived_from` / `supersedes`), logged under `<writer>/<pointer>`; a cite is
+   the stronger relevance label and the export includes it. A `supersedes` cite
+   labels the *superseded* row — the one the searcher needed in order to
+   correct it — so a replay on a corpus that has since demoted superseded rows
+   would read that query as a miss; the fork labels such rows at read time and
+   does not demote them (SMD-1720, change 88), and every click-through label is bound to
+   the corpus at export time (`baseline` says which).
    A caller who searches then opens result 3 has labelled result 3 relevant —
    *click-through relevance*, a proxy, kept beside the hand-labelled sets, not
    instead of them.
@@ -2917,6 +2925,41 @@ on to open. This loop captures it and gates PRs on it.
    1.000); the gate proves its floor has teeth by replaying random query vectors
    and watching recall collapse (0.154 < 0.8) — a scrambling regression would
    score the same. The live corpus stays out of CI.
+
+**Utilization — did the caller use what came back (SMD-1719).** Every number
+above is layer one of the four the literature now asks for (evidence retrieval,
+evidence use, task outcome, cost). MERIT (arXiv 2609.05441) measured the second
+and found agents ignore 45–53% of correctly retrieved facts. The query log can
+answer it, because a later `capture_thought` that names a returned id in
+`derived_from` or `supersedes` is logged as an action row under its own tool
+(FORK.md change 90), so a touch is either **cited** (a write named it as a
+source) or **opened** (fetch / update / delete — click-through). Then:
+
+```
+DATABASE_URL=… bun eval-utilization.ts [--gold fixture.json]
+OB1_EXPORT_WINDOW_MIN=30   # the same attribution window as export-queries.ts
+```
+
+prints, per arm (search tool + recorded arguments), per agent when the log
+holds more than one (named from the registry, `ob1_agents.label`, with the
+id's prefix beside it), and overall: ids
+returned, ids used (cited ∪ opened), **util** = used / returned, **use-rate** =
+searches with ≥ 1 use, the cited/opened split, and **tok/used** — approximate
+tokens returned per id used (the ids' content as stored now, chars / 4; a
+search any of whose returned ids has since been deleted carries no estimate
+rather than a partial one, and the header says how many do). With
+`--gold` (a hand-labelled fixture in `export-queries.ts`'s `{ queries: [{ query,
+relevant }] }` shape) it adds the **ignore rate**: searches whose results held a
+relevant id the caller never used. A fixture exported from the same log's touches
+is circular as gold; label by hand. With no action rows the report says `n/a`
+and asks whether the log is on, rather than printing 0%; on a brain without
+migration 034 it (and `export-queries.ts`) refuses in words, exit 2, rather
+than dying in the driver. Attribution is the
+export's rule, in `utilization.ts` (pure, tested by `db/test-schema.ts` [39]) —
+one implementation, which `export-queries.ts` calls as well.
+A read whose use ends in prose, with no write and no fetch, is invisible here,
+so utilization is a lower bound on use. No ranking changes on this number; if
+it comes out low, the lever is presentation (SMD-1735), not retrieval.
 
 **Why two fixtures.** The export fixture (query text + ids) drives the local,
 model-backed `eval-replay.ts` against your own brain — no vectors, because the

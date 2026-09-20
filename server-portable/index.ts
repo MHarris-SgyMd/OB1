@@ -1,5 +1,5 @@
 
-import { normaliseType, thoughtTitle, thoughtUrl, THOUGHT_TYPES } from "./thoughts.ts";
+import { displayDate, normaliseType, thoughtTitle, thoughtUrl, THOUGHT_TYPES } from "./thoughts.ts";
 import { cleanForDisplay } from "./consolidate.ts";
 import { createEmbedder, providerCall, ProviderError, resolveEmbedConfig, type EmbedConfig, type EmbedKind, type EmbeddedCapture } from "./embed.ts";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -56,7 +56,8 @@ type Env = {
   OB1_CHUNK_CONTEXT?: string;
   /**
    * "on" to record the opt-in query log (migration 034, SMD-1295): one row per
-   * search and one per follow-up fetch/edit/delete of a returned id, so a
+   * search and one per follow-up fetch/edit/delete of a returned id — or, since
+   * SMD-1719, per id a write cited as its source — so a
    * retrieval change can be replayed against real use (evals/eval-replay.ts).
    * Off by default — anything but "on" writes nothing. Personal data at rest
    * (every query typed); see SETUP.md. The write is best-effort and never fails
@@ -340,13 +341,40 @@ function buildServer(principal: Principal): McpServer {
       // best-effort: a log failure must never reach the caller.
     }
   };
-  const logActionCall = async (tool: string, targetId: string): Promise<void> => {
-    if (!queryLogEnabled(env())) return;
+  // `tool` is the action's kind as well as its writer. A plain tool name —
+  // `fetch`, `update_thought`, `delete_thought` — says the caller opened or
+  // touched the target (034's click-through). `<writer>/<pointer>` —
+  // `capture_thought/derived_from`, `capture_thought/supersedes`,
+  // `update_thought/supersedes` — says the writer named the target as a source
+  // and the database accepted the pointer (SMD-1719's cite). evals/utilization.ts
+  // splits cited from opened on the `/` alone, so a new writer that cites names
+  // itself the same way and is counted without a code change there.
+  const logActionCalls = async (rows: { tool: string; targetId: string }[]): Promise<void> => {
+    if (!queryLogEnabled(env()) || rows.length === 0) return;
     try {
-      await (await db()).logAction({ tool, agentId: principal.agentId, targetId });
+      // One round trip and one writer for the batch, whatever its size: a
+      // synthesis citing forty sources is forty rows in one INSERT, not forty
+      // on the pool, and there is one INSERT shape per store to keep right,
+      // no single-row twin to drift from it. Best-effort as a whole: a
+      // failure drops the batch, never the write it followed.
+      await (await db()).logActions(rows.map((r) => ({ tool: r.tool, agentId: principal.agentId, targetId: r.targetId })));
     } catch {
       // best-effort.
     }
+  };
+  const logActionCall = (tool: string, targetId: string): Promise<void> => logActionCalls([{ tool, targetId }]);
+  // The cite rows of one write: one per distinct id it named as a source,
+  // lower-cased before the dedup (UUID_RE admits either case, and two spellings
+  // of one id are one cite), tool `<writer>/<pointer>`, first pointer wins for
+  // an id named twice. Returns the rows so a caller can batch them with its own.
+  const citeRows = (writer: string, pointers: { derived_from?: string[]; supersedes?: string }): { tool: string; targetId: string }[] => {
+    const rows = new Map<string, string>();
+    for (const id of pointers.derived_from ?? []) rows.set(id.toLowerCase(), `${writer}/derived_from`);
+    if (pointers.supersedes) {
+      const id = pointers.supersedes.toLowerCase();
+      if (!rows.has(id)) rows.set(id, `${writer}/supersedes`);
+    }
+    return [...rows].map(([targetId, tool]) => ({ tool, targetId }));
   };
 
   // ChatGPT compatibility: restricted connector surfaces, company knowledge, and deep
@@ -575,8 +603,11 @@ function buildServer(principal: Principal): McpServer {
             // 025: mark a hit a newer thought replaces, and name the replacement,
             // so the reader is not left ranking a superseded version as current.
             if (superseded[t.id]) parts.push(`⚠ Superseded by a newer thought — ID ${superseded[t.id]}`);
+            // SMD-1328: an undated row shows no Captured line rather than a
+            // fabricated 1/1/1970; infinity/a no-ISO-form date shows its text.
+            const captured = displayDate(t.created_at);
             parts.push(
-              `Captured: ${new Date(t.created_at).toLocaleDateString()}`,
+              ...(captured ? [`Captured: ${captured}`] : []),
               `Type: ${m.type || "unknown"}`,
             );
             if (t.matchedNeedles.length) parts.push(`Contains: ${t.matchedNeedles.join(", ")}`);
@@ -706,10 +737,12 @@ function buildServer(principal: Principal): McpServer {
         const total = data[0].totalCount;
         const results = data.map((t, i) => {
           const m = t.metadata || {};
+          // SMD-1328: as the search block above — absent, not a fake 1970.
+          const captured = displayDate(t.created_at);
           const parts = [
             `--- Result ${offset + i + 1} (${t.occurrences} occurrence${t.occurrences === 1 ? "" : "s"}) ---`,
             `ID: ${t.id}`,
-            `Captured: ${new Date(t.created_at).toLocaleDateString()}`,
+            ...(captured ? [`Captured: ${captured}`] : []),
             `Type: ${m.type || "unknown"}`,
           ];
           if (Array.isArray(m.topics) && m.topics.length)
@@ -784,7 +817,9 @@ function buildServer(principal: Principal): McpServer {
             // update_thought and delete_thought take. This compact format has no
             // header group, so it trails the content. SMD-1248.
             const mark = superseded[t.id] ? `\n   ⚠ Superseded by a newer thought — ID ${superseded[t.id]}` : "";
-            return `${i + 1}. [${new Date(t.created_at).toLocaleDateString()}] (${m.type || "??"}${tags ? " - " + tags : ""})\n   ${t.content}\n   ID: ${t.id}${mark}`;
+            // SMD-1328: the date bracket is structural here, so an undated row
+            // reads `[undated]` (never `[1/1/1970]`); a sentinel shows its text.
+            return `${i + 1}. [${displayDate(t.created_at) ?? "undated"}] (${m.type || "??"}${tags ? " - " + tags : ""})\n   ${t.content}\n   ID: ${t.id}${mark}`;
           }
         );
 
@@ -896,10 +931,10 @@ function buildServer(principal: Principal): McpServer {
         const lines: string[] = [
           `Total thoughts: ${total}`,
           `Date range: ${
+            // SMD-1328: min/max already skip NULLs (024), so a real range here
+            // is two real dates; displayDate keeps an infinity edge legible.
             newest && oldest
-              ? new Date(oldest).toLocaleDateString() +
-                " → " +
-                new Date(newest).toLocaleDateString()
+              ? `${displayDate(oldest)} → ${displayDate(newest)}`
               : "N/A"
           }`,
         ];
@@ -1015,6 +1050,25 @@ function buildServer(principal: Principal): McpServer {
           derivedFrom: derived_from,
           supersedes,
         });
+
+        // Memory utilization (SMD-1719, over 034's log): a capture that names a
+        // returned id as its source — `derived_from`, or `supersedes` — is the
+        // caller USING a search result in a write, the signal MERIT calls memory
+        // utilization and this fork's fetch/edit/delete rows cannot carry (they
+        // say the caller looked, not that the fact reached a write). A cite row
+        // is a pointer the database ACCEPTED: on a fresh row upsert_thought
+        // validated every id (a ghost or a loop threw, and nothing reaches
+        // here); on a re-capture (`existed`) 035 wrote no pointer and validated
+        // none, so nothing is logged — the note below sends the caller to
+        // update_thought, which logs the cite when it writes the pointer. The
+        // store says `existed: false` only when 035's function answered; a
+        // brain without 035 reports nothing, and nothing is logged there
+        // either (second review pass: `!== true` had read an absent flag as
+        // "fresh" on the one schema where the pointer's fate is unknown). The
+        // vector attaching or not does not change what was written.
+        if (captured.existed === false) {
+          await logActionCalls(citeRows("capture_thought", { derived_from, supersedes }));
+        }
 
         if (captured.embeddingFailed) {
           return {
@@ -1188,8 +1242,16 @@ function buildServer(principal: Principal): McpServer {
         if (!result.ok) return toolError(explainRefusal(result, id));
 
         // Click-through relevance (034): the caller edited this id after a
-        // search. Only on a written edit, not a refusal.
-        await logActionCall("update_thought", id);
+        // search. Only on a written edit, not a refusal. SMD-1719: an edit that
+        // sets `supersedes` also names a returned id as this thought's source —
+        // the same act as a capture's pointer, and the path capture_thought's
+        // re-capture note sends the caller down. The function accepted the
+        // pointer (a ghost or a loop was refused above), so it is a cite of the
+        // SUPERSEDED id; the edited id stays "opened". One batch, one round trip.
+        await logActionCalls([
+          { tool: "update_thought", targetId: id },
+          ...(typeof supersedes === "string" ? citeRows("update_thought", { supersedes }) : []),
+        ]);
 
         const what = [
           content !== undefined ? "content re-embedded" : null,

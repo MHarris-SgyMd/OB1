@@ -196,7 +196,7 @@ console.log("\n[3b] keywordThoughts over PostgREST returns the same shape");
   // The two stores must agree on the SHAPE of a field, not merely have one. This
   // path returned a locale- and timezone-formatted date where the SQL store
   // returns ISO, and every assertion that only checked presence passed.
-  assert(ISO_RE.test(hits[0].created_at),
+  assert(typeof hits[0].created_at === "string" && ISO_RE.test(hits[0].created_at),
          `created_at is an ISO string, as the SQL store returns (got ${hits[0].created_at})`);
 
   // The p_filter argument, which is the jsonb one and therefore the one that
@@ -225,7 +225,7 @@ console.log("\n[3c] hybridThoughts over PostgREST — the path every search take
   assert(rows[0].needleCounts.length === 1 && rows[0].needleCounts[0] === 1, `needle_counts is mapped to numbers (${JSON.stringify(rows[0].needleCounts)})`);
   assert(rows[0].literalOnly === true && rows[0].commonNeedles.length === 0, "literal_only and common_needles are mapped, not left undefined");
   assert(typeof rows[0].similarity === "number" && Math.abs(rows[0].similarity) < 1e-6, `a keyword hit orthogonal to the query reports similarity 0, not null (${rows[0].similarity})`);
-  assert(ISO_RE.test(rows[0].created_at), `created_at is an ISO string (got ${rows[0].created_at})`);
+  assert(typeof rows[0].created_at === "string" && ISO_RE.test(rows[0].created_at), `created_at is an ISO string (got ${rows[0].created_at})`);
 
   const plain = await store.hybridThoughts({ query: "windows", embedding: vec(3), threshold: 0.5, limit: 5, filter: {} });
   const vector = await store.matchThoughts({ embedding: vec(3), threshold: 0.5, limit: 5, filter: {} });
@@ -247,7 +247,7 @@ console.log("\n[3d] Every read method returns the SQL store's timestamp form —
   const kw = await store.keywordThoughts({ query: "PGRST202", limit: 1, offset: 0, filter: {} });
   assert(kw.length === 1, `[3b]'s keyword thought is still there to read back (${kw.length})`);
   const rec = await store.getThought(kw[0].id);
-  assert(rec !== null && ISO_RE.test(rec.created_at), `getThought's created_at is ISO (got ${String(rec?.created_at)})`);
+  assert(rec !== null && typeof rec.created_at === "string" && ISO_RE.test(rec.created_at), `getThought's created_at is ISO (got ${String(rec?.created_at)})`);
   assert(rec !== null && (rec.updated_at == null || ISO_RE.test(rec.updated_at)), `getThought's updated_at is null or ISO (got ${String(rec?.updated_at)})`);
   assert((await store.getThought("not-a-uuid")) === null, "a malformed id is null on this store too, not a uuid cast error");
 
@@ -266,7 +266,7 @@ console.log("\n[3d] Every read method returns the SQL store's timestamp form —
     // By id, not position: a NULL created_at sorts above +infinity under DESC,
     // so a later undated fixture must not turn this into a misleading failure.
     const list = await store.listThoughts({ limit: 50 });
-    assert(list.find((r) => r.id === plantedId)?.created_at === "infinity" && list.filter((r) => r.id !== plantedId).every((r) => ISO_RE.test(r.created_at)),
+    assert(list.find((r) => r.id === plantedId)?.created_at === "infinity" && list.filter((r) => r.id !== plantedId).every((r) => typeof r.created_at === "string" && ISO_RE.test(r.created_at)),
            `listThoughts: the planted row is "infinity", every other created_at is ISO (${list.map((r) => r.created_at).join(" ").slice(0, 80)})`);
     const page = await store.pageThoughtMeta(0, 50);
     assert(page.some((r) => r.created_at === "infinity") && page.filter((r) => r.created_at !== "infinity").every((r) => r.created_at !== null && ISO_RE.test(r.created_at)),
@@ -420,6 +420,16 @@ console.log("\n[8] statsSummary aggregates the corpus through the page walk this
   const undatedId = await plantLegacyRow(sql, "a row with no date", "[" + vec(7).join(",") + "]", null);
   const s = await (async () => {
     try {
+      // SMD-1328: the undated row reads back as null on every read method, not
+      // the fabricated epoch new Date(null) gave (the parity change [3d] notes
+      // made both stores return the epoch here; now both return null). vec(7)
+      // is the axis this row was planted on, so it is the only hit.
+      const hit = (await store.matchThoughts({ embedding: vec(7), threshold: 0.5, limit: 5, filter: {} })).find((r) => r.id === undatedId);
+      assert(hit?.created_at === null, `matchThoughts: an undated row is null, not the epoch (got ${JSON.stringify(hit?.created_at)})`);
+      const rec = await store.getThought(undatedId);
+      assert(rec?.created_at === null, `getThought: null (got ${JSON.stringify(rec?.created_at)})`);
+      const listed = (await store.listThoughts({ limit: 50 })).find((r) => r.id === undatedId);
+      assert(listed?.created_at === null, `listThoughts: null (got ${JSON.stringify(listed?.created_at)})`);
       const [range] = await sql`SELECT min(created_at) AS oldest, max(created_at) AS newest FROM thoughts`;
       const s = await store.statsSummary();
       // The store's own formatter as the oracle, not a second one: on the edges
@@ -499,6 +509,61 @@ console.log("\n[10] listSupersessionProposals's rpc shape over PostgREST (migrat
   assert(pending[0].older.id === older && pending[0].newer.id === newer && /monthly/.test(pending[0].older.content), "…with both thoughts inline");
   assert((await store.listSupersessionProposals({ status: null, limit: 5 })).length === 1, "p_status NULL and an explicit limit bind");
   assert((await store.listSupersessionProposals({ status: "rejected" })).length === 0, "…and a status with no rows is an empty list, not an error");
+  await admin.close();
+}
+
+console.log("\n[11] The query log's action rows over PostgREST: one or many through the one writer (migration 034, SMD-1719)");
+{
+  // The hosted deployment's path for every fetch, edit and cite: logActions'
+  // ARRAY insert through the client. Read back by SQL so the rows are checked
+  // as stored, not as the client echoed them. The search row is seeded by SQL:
+  // logSearch through THIS shim is a pre-existing divergence (uuid[] + real[]
+  // with a null element — see SMD-1602), not this ticket's writer.
+  const admin = new SQL({ url: URL_, max: 1 });
+  await admin`DELETE FROM query_log`;
+  const AG = "99999999-9999-4999-8999-999999999999";
+  const X = "aaaaaaaa-0000-4000-8000-000000000001";
+  const Y = "aaaaaaaa-0000-4000-8000-000000000002";
+  await admin`
+    INSERT INTO query_log (kind, tool, agent_id, query, match_count, threshold, recency_weight, filter, result_ids, result_scores)
+    VALUES ('search', 'search_thoughts', ${AG}::uuid, 'postgrest log', 5, 0, 0, '{}'::jsonb, ARRAY[${X},${Y}]::uuid[], ARRAY[0.9, NULL]::real[])`;
+  await store.logActions([]);
+  await store.logActions([{ tool: "fetch", agentId: AG, targetId: X }]);
+  await store.logActions([
+    { tool: "update_thought", agentId: AG, targetId: Y },
+    { tool: "update_thought/supersedes", agentId: AG, targetId: X },
+    { tool: "capture_thought/derived_from", agentId: undefined, targetId: Y },
+  ]);
+  const rows = await admin<{ kind: string; tool: string; agent_id: string | null; target_id: string | null; query: string | null; n_ids: number | null }[]>`
+    SELECT kind, tool, agent_id, target_id, query, cardinality(result_ids) AS n_ids FROM query_log ORDER BY kind, tool, target_id`;
+  const search = rows.filter((r) => r.kind === "search");
+  const acts = rows.filter((r) => r.kind === "action");
+  assert(search.length === 1 && search[0].query === "postgrest log" && search[0].n_ids === 2 && search[0].agent_id === AG, `one search row with its two ids (${JSON.stringify(search[0])})`);
+  assert(acts.length === 4, `an empty batch wrote nothing; a batch of one and a batch of three wrote four action rows (${acts.length})`);
+  assert(acts.some((r) => r.tool === "fetch" && r.target_id === X && r.agent_id === AG), "the single-row batch landed as a plain open");
+  assert(acts.some((r) => r.tool === "update_thought/supersedes" && r.target_id === X), "a cite row keeps its <writer>/<pointer> tool through the array insert");
+  assert(acts.some((r) => r.tool === "capture_thought/derived_from" && r.agent_id === null), "an undefined agent lands as SQL NULL through the array insert");
+  // The same contract as the SQL writer (normaliseActionRows): an empty-string
+  // agent is NULL, not a 22P02 that drops the batch (eighth review pass); a
+  // malformed id is refused by column before the request, nothing written.
+  await store.logActions([{ tool: "delete_thought", agentId: "", targetId: Y }]);
+  const [{ n_empty }] = await admin<{ n_empty: number }[]>`SELECT count(*)::int AS n_empty FROM query_log WHERE kind = 'action' AND tool = 'delete_thought' AND agent_id IS NULL`;
+  assert(n_empty === 1, "an empty-string agent lands as SQL NULL through the array insert too");
+  let refused = "";
+  try { await store.logActions([{ tool: "fetch", agentId: "not-a-uuid", targetId: X }]); } catch (e) { refused = (e as Error).message; }
+  assert(/logActions: not a uuid for agent_id: not-a-uuid/.test(refused), `a malformed agent is refused by column on the hosted writer (${refused.slice(0, 60)})`);
+  refused = "";
+  try { await store.logActions([{ tool: "fetch", agentId: AG, targetId: X }, { tool: "fetch", agentId: AG, targetId: "abc}" }]); } catch (e) { refused = (e as Error).message; }
+  assert(/logActions: not a uuid for target_id: abc\}/.test(refused), `a malformed target is refused by column on the hosted writer (${refused.slice(0, 60)})`);
+  const [{ n_all }] = await admin<{ n_all: number }[]>`SELECT count(*)::int AS n_all FROM query_log WHERE kind = 'action'`;
+  assert(n_all === 5, `…and the refused batches wrote nothing (${n_all})`);
+  // The export join over what this store wrote: the cite of X links to the search.
+  const [{ from_query }] = await admin<{ from_query: string | null }[]>`
+    SELECT (SELECT s.query FROM query_log s WHERE s.kind='search' AND s.agent_id IS NOT DISTINCT FROM act.agent_id
+              AND s.logged_at <= act.logged_at AND s.result_ids @> ARRAY[act.target_id] ORDER BY s.logged_at DESC LIMIT 1) AS from_query
+      FROM query_log act WHERE act.kind='action' AND act.tool = 'update_thought/supersedes'`;
+  assert(from_query === "postgrest log", `034's join attributes the cite this store wrote (${from_query})`);
+  await admin`DELETE FROM query_log`;
   await admin.close();
 }
 

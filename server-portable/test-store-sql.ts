@@ -13,7 +13,7 @@
  */
 
 import { SqlStore } from "./store-sql.ts";
-import { createAssert, ISO_RE, resetSchema } from "../db/test-support.ts";
+import { createAssert, ISO_RE, plantLegacyRow, resetSchema } from "../db/test-support.ts";
 import { MATCH_THOUGHTS_SIGNATURE } from "../db/config.mjs";
 import { createStore } from "./store.ts";
 import { SQL } from "bun";
@@ -239,7 +239,8 @@ console.log("\n[4] listThoughts reproduces the PostgREST filters");
 {
   const all = await store.listThoughts({ limit: 10 });
   assert(all.length === 3, `unfiltered returns everything (got ${all.length})`);
-  assert(all[0].created_at >= all[all.length - 1].created_at, "newest first");
+  const firstDate = all[0].created_at, lastDate = all[all.length - 1].created_at;
+  assert(firstDate != null && lastDate != null && firstDate >= lastDate, "newest first");
 
   const byType = await store.listThoughts({ limit: 10, type: "note" });
   assert(byType.length === 0, "an unmatched type filter returns nothing");
@@ -473,6 +474,72 @@ console.log("\n[10] listSupersessionProposals reads migration 029's queue throug
   assert(all.length === 1 && all[0].status === "accepted" && all[0].supersedingId === newer.id && all[0].reviewNote === "confirmed" && all[0].reviewedAt !== null,
          "null lists every state, and the accepted row names the thought it wrote");
   await admin5.close();
+}
+
+console.log("\n[11] logActions: the one writer of action rows — a batch in one statement, an absent agent as SQL NULL, a malformed agent or target refused loudly by column (migration 034, SMD-1719)");
+{
+  const admin6 = new SQL({ url: URL_, max: 1 });
+  await admin6`DELETE FROM query_log`;
+  const AG = "99999999-9999-4999-8999-999999999999";
+  const X = "aaaaaaaa-0000-4000-8000-000000000001";
+  const Y = "aaaaaaaa-0000-4000-8000-000000000002";
+  await store.logActions([]);
+  assert((await admin6<{ n: number }[]>`SELECT count(*)::int AS n FROM query_log`)[0].n === 0, "an empty batch writes nothing");
+  // undefined AND the empty string are absent agents — `??` alone would have
+  // let "" through as a malformed array element (fifth review pass).
+  await store.logActions([
+    { tool: "fetch", agentId: AG, targetId: X },
+    { tool: "capture_thought/derived_from", agentId: undefined, targetId: Y },
+    { tool: "update_thought/supersedes", agentId: "", targetId: X },
+  ]);
+  const rows = await admin6<{ tool: string; agent_id: string | null; target_id: string }[]>`SELECT tool, agent_id, target_id FROM query_log ORDER BY tool`;
+  assert(rows.length === 3, `three rows in one statement (${rows.length})`);
+  assert(rows.find((r) => r.tool === "fetch")?.agent_id === AG, "a present agent lands");
+  assert(rows.find((r) => r.tool === "capture_thought/derived_from")?.agent_id === null, "an undefined agent lands as SQL NULL");
+  assert(rows.find((r) => r.tool === "update_thought/supersedes")?.agent_id === null, "an empty-string agent lands as SQL NULL, not as a malformed literal");
+  // A non-uuid agent is refused before the statement, loudly, so a caller's
+  // best-effort catch drops a batch it can name rather than array_in failing
+  // on a literal it cannot.
+  let refused = "";
+  try { await store.logActions([{ tool: "fetch", agentId: "not-a-uuid", targetId: X }]); } catch (e) { refused = (e as Error).message; }
+  assert(/logActions: not a uuid for agent_id: not-a-uuid/.test(refused), `a malformed agent id is refused by name (${refused.slice(0, 60)})`);
+  // The target column too (sixth review pass: agents were checked and targets
+  // trusted — one bad target in a batch of three would have malformed the
+  // literal and lost all three, with no message naming the culprit).
+  refused = "";
+  try { await store.logActions([{ tool: "fetch", agentId: AG, targetId: X }, { tool: "fetch", agentId: AG, targetId: "abc}" }]); } catch (e) { refused = (e as Error).message; }
+  assert(/logActions: not a uuid for target_id: abc\}/.test(refused), `a malformed target id is refused by name (${refused.slice(0, 60)})`);
+  refused = "";
+  try { await store.logActions([{ tool: "fetch", agentId: AG, targetId: "" }]); } catch (e) { refused = (e as Error).message; }
+  assert(/logActions: target_id is absent/.test(refused), `an absent target is refused, not bound as NULL for the CHECK to catch (${refused.slice(0, 60)})`);
+  assert((await admin6<{ n: number }[]>`SELECT count(*)::int AS n FROM query_log`)[0].n === 3, "…and none of the refused batches wrote a row");
+  await admin6`DELETE FROM query_log`;
+  await admin6.close();
+}
+
+console.log("\n[12] A NULL created_at reads back as null on every read method, not the fabricated epoch (SMD-1328)");
+{
+  // The column is nullable and no capture path sets it — every INSERT takes the
+  // DEFAULT now() — so only a direct INSERT reaches this. When one did, every
+  // mapper here ran the NULL through new Date(null) and returned the epoch
+  // string 1970-01-01T00:00:00.000Z as if it were a real capture date. It is
+  // now null. unit(6) is an axis [3]'s seeds do not use, so the planted row is
+  // the only hit above the threshold.
+  const sql = new SQL({ url: URL_, max: 1 });
+  const undatedId = await plantLegacyRow(sql, "an undated row for SMD-1328", "[" + unit(6).join(",") + "]", null);
+  try {
+    const hit = (await store.matchThoughts({ embedding: unit(6), threshold: 0.5, limit: 5, filter: {} })).find((r) => r.id === undatedId);
+    assert(hit?.created_at === null, `matchThoughts returns null, not the epoch (got ${JSON.stringify(hit?.created_at)})`);
+    const rec = await store.getThought(undatedId);
+    assert(rec?.created_at === null, `getThought returns null (got ${JSON.stringify(rec?.created_at)})`);
+    const listed = (await store.listThoughts({ limit: 50 })).find((r) => r.id === undatedId);
+    assert(listed?.created_at === null, `listThoughts returns null (got ${JSON.stringify(listed?.created_at)})`);
+    // The bug's fingerprint: the fabricated epoch string appears nowhere.
+    assert(rec?.created_at !== "1970-01-01T00:00:00.000Z", "the fabricated epoch string is gone");
+  } finally {
+    await sql`DELETE FROM thoughts WHERE id = ${undatedId}::uuid`;
+    await sql.close();
+  }
 }
 
 await store.close();
