@@ -1,5 +1,5 @@
 -- =============================================================================
--- Migration 041: the cite shape, stated at the table — query_log.tool's two
+-- Migration 042: the cite shape, stated at the table — query_log.tool's two
 --                shapes and what each means, and the table's COMMENT re-issued
 --                to name a cite beside fetch/edit/delete (SMD-1749)
 -- =============================================================================
@@ -48,7 +48,7 @@
 --     baselined and never re-applied); a plain run there, the compose stack's,
 --     gates the server and would stop with no remedy named. The file refuses
 --     up front naming 034 and --reapply, as 031 does for 015. db/test-upgrade.ts
---     [19] drives it, and drives the same pending file applying once 034's
+--     [20] drives it, and drives the same pending file applying once 034's
 --     table exists.
 --   * COMMENT ON COLUMN query_log.tool — the DATA CONTRACT: on a search row,
 --     the search tool; on an action row, one of two shapes — a plain tool name
@@ -67,20 +67,19 @@
 -- WHAT A SUCCESSOR MUST CARRY
 --   A re-issued COMMENT replaces the description. Any migration that
 --   re-comments `query_log` or `query_log.tool` and re-issues 034's text would
---   silently drop the cite clause. db/test-schema.ts [40] asserts the LIVE text
+--   silently drop the cite clause. db/test-schema.ts [41] asserts the LIVE text
 --   of both comments after every file has applied — both name
 --   `<writer>/<pointer>` — so the drop fails the suite whichever migration
 --   causes it. The typed record of what a write cited is SMD-1730's event
 --   shape (Phase 1a of SMD-1729); when it lands, the migration that carries it
 --   should re-issue this column's comment to point at it.
 --
---   No flag and no double dash inside either COMMENT literal: test-schema
---   [10] strips `--` to end of line before scanning the migrations for
---   Supabase-specific text, and its header holds that no migration puts that
---   sequence inside a string literal. [40] asserts it of the LIVE text, so a
---   successor's re-issue is held to it too. (The guard's HINT names the two
---   flags, as 030's and 031's do; a RAISE is not a comment, and the strip
---   only shortens that line.)
+--   No flag and no double dash inside either COMMENT literal: 028 set that
+--   convention when test-schema [10]'s scan stripped `--` to end of line;
+--   the scan is literal-aware since change 93 (SMD-1796), so nothing depends
+--   on it now, and [41] keeps asserting it of the LIVE text as the
+--   convention, so a successor's re-issue is held to it too. (The guard's
+--   HINT names the two flags, as 030's and 031's do.)
 --
 -- SAFETY
 --   COMMENT ON is idempotent (it replaces the description). No DDL on data,
@@ -95,7 +94,7 @@ DO $qc$
 BEGIN
   IF to_regclass('query_log') IS NULL THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'migration 041 needs 034 (query_log); this schema lacks it',
+      MESSAGE = 'migration 042 needs 034 (query_log); this schema lacks it',
       -- ASCII only: Bun's client hands a HINT holding a non-ASCII character back mis-decoded (030's fourth review pass).
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
       ERRCODE = 'invalid_schema_definition';

@@ -29,13 +29,12 @@ SUPABASE (from your Open Brain setup)
 
 ## Steps
 
-1. Open your Supabase dashboard and navigate to the **SQL Editor**
-2. Create a new query and paste the full contents of `schema.sql`
-3. Click **Run** to execute the migration. It will hard-fail with a clear message if `public.thoughts` or `public.edges` is missing, so set up those tables first.
-4. Open **Table Editor** and confirm the new `thought_edges` table appears with the following columns:
+1. Apply `schema.sql` to your brain: `psql "$DATABASE_URL" -f schema.sql` (or paste it into your SQL console).
+2. From `db/`, run `bun migrate.ts --url "$DATABASE_URL" --grant <role>` so the role your server connects as can use what the file creates — the file itself grants nothing (this fork, SMD-1796: upstream's `GRANT … TO service_role` lines and its row-level security are gone; `db/README.md`, "Grants for a capturing role", lists the `community` group). The file hard-fails with a clear message if `public.thoughts` or `public.edges` is missing, so apply `schemas/entity-extraction` first.
+3. Open **Table Editor** and confirm the new `thought_edges` table appears with the following columns:
    - `id`, `from_thought_id`, `to_thought_id`, `relation`, `confidence`, `decay_weight`, `valid_from`, `valid_until`, `classifier_version`, `support_count`, `metadata`, `created_at`, `updated_at`
-5. Confirm the existing `edges` table now also has `valid_from`, `valid_until`, `decay_weight` columns (SQL Editor → `SELECT column_name FROM information_schema.columns WHERE table_name = 'edges';`)
-6. Verify the indexes were created:
+4. Confirm the existing `edges` table now also has `valid_from`, `valid_until`, `decay_weight` columns (SQL Editor → `SELECT column_name FROM information_schema.columns WHERE table_name = 'edges';`)
+5. Verify the indexes were created:
 
    ```sql
    SELECT indexname FROM pg_indexes
@@ -43,7 +42,7 @@ SUPABASE (from your Open Brain setup)
    ORDER BY tablename, indexname;
    ```
 
-7. Install [`recipes/typed-edge-classifier/`](../../recipes/typed-edge-classifier/) to start populating the new table (or do manual INSERTs if you prefer)
+6. Install [`recipes/typed-edge-classifier/`](../../recipes/typed-edge-classifier/) to start populating the new table (or do manual INSERTs if you prefer)
 
 ## Expected Outcome
 
@@ -53,11 +52,11 @@ After running the migration:
 - Four indexes on `thought_edges`: outgoing `(from_thought_id, relation)`, incoming `(to_thought_id, relation)`, "currently valid" partial index (`valid_until IS NULL`), and a decay-sweep index on `valid_until`.
 - Three new columns on `edges`: `valid_from`, `valid_until`, `decay_weight`, plus a range-check constraint and two new indexes for temporal queries.
 - An `updated_at` trigger on `thought_edges`.
-- Row Level Security enabled on `thought_edges`: **`service_role` only** — `authenticated` and `anon` have no access. This matches the posture of `public.thoughts` in [`docs/01-getting-started.md`](../../docs/01-getting-started.md). See [RLS posture](#rls-posture-service-role-only) below.
+- No row-level security and no grants in the file (this fork, SMD-1796): upstream enabled RLS on `thought_edges` for Supabase's `service_role` only, a role that does not exist off Supabase; `bun migrate.ts --grant <role>` gives the role you connect as the table, its sequence and `EXECUTE` on `thought_edges_upsert`. Upstream's posture: `authenticated` and `anon` have no access. This matches the posture of `public.thoughts` in [`docs/01-getting-started.md`](../../docs/01-getting-started.md). See [RLS posture](#rls-posture-service-role-only) below.
 
 ## RLS posture (service-role only)
 
-`thought_edges` is readable and writable **only by `service_role`**. We deliberately do **not** grant `SELECT` to `authenticated`.
+Upstream's posture, kept in spirit: `thought_edges` was readable and writable **only by `service_role`**, with no `SELECT` for `authenticated`. On this fork those roles do not exist and the file grants nothing (SMD-1796); the table is readable and writable by its owner and by the roles `bun migrate.ts --grant` covers, which on a single-operator brain (SMD-1716) is the same boundary `public.thoughts` has.
 
 **Why.** Each row carries `from_thought_id`, `to_thought_id`, and `metadata.rationale`. Together those expose derived relationships between private thoughts. Since the underlying `public.thoughts` table is service-role-only in stock Open Brain, exposing `thought_edges` to `authenticated` via PostgREST would leak derived private-thought relationships that the base table intentionally hides. The only safe posture is to mirror `public.thoughts`.
 

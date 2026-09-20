@@ -44,10 +44,9 @@ SUPABASE (from your Open Brain setup)
 
 ## Steps
 
-1. Open your Supabase dashboard and navigate to the **SQL Editor**
-2. Create a new query and paste the full contents of `schema.sql`
-3. Click **Run** to execute the migration
-4. Navigate to **Database → Functions** and confirm `match_thoughts_recency` now appears alongside `match_thoughts`
+1. Apply `schema.sql` to your brain: `psql "$DATABASE_URL" -f schema.sql` (or paste it into your SQL console).
+2. Nothing to grant (this fork, SMD-1796): the file adds one function, executable by any role that can read `thoughts`.
+3. Navigate to **Database → Functions** and confirm `match_thoughts_recency` now appears alongside `match_thoughts`
 
 ## Expected Outcome
 

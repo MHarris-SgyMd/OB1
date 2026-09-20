@@ -14,7 +14,7 @@
  */
 
 import { SQL } from "bun";
-import { alignVectorSearchPath, DEFAULT_CHUNK_CONTEXT, DEFAULT_TRGM_INDEX, HNSW_BOUNDS, MATCH_THOUGHTS_SIGNATURE, SEARCH_THOUGHTS_HYBRID_SIGNATURE, SUPERSEDED_SIGNATURES, UPDATE_THOUGHT_SIGNATURE, migrationValues, quoteIdent, substituteMigration } from "./config.mjs";
+import { alignVectorSearchPath, DEFAULT_CHUNK_CONTEXT, DEFAULT_TRGM_INDEX, HNSW_BOUNDS, MATCH_THOUGHTS_SIGNATURE, SEARCH_THOUGHTS_HYBRID_SIGNATURE, SUPERSEDED_SIGNATURES, UPDATE_THOUGHT_SIGNATURE, grantedTables, migrationValues, quoteIdent, substituteMigration } from "./config.mjs";
 import { readdirSync, readFileSync } from "node:fs";
 import { basename, join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -50,7 +50,7 @@ const TABLES = [
   "ob1_config",
   // 034's opt-in query log (SMD-1295): no foreign key either way, so its place
   // in the order is free. Absent from this list until SMD-1749's test-upgrade
-  // [19] built a schema "without 034" after a section that had applied every
+  // [20] built a schema "without 034" after a section that had applied every
   // file, and found the previous section's query_log still standing: the
   // reset had carried 034's table across every section boundary since it
   // landed, and a case about a brain that lacks it could not be built.
@@ -59,6 +59,15 @@ const TABLES = [
   // vouches for, so a suite run in a kept database cannot leave a marker over
   // rows that are gone.
   BENCH_MARKER,
+  // The community schemas' tables (SMD-1796): test-live [18] applies every
+  // schemas/*.sql to the migrated brain, and a reset that left them would hand
+  // the next run tables whose foreign keys to `thoughts` the CASCADE above cut.
+  // Their bigserial sequences go with them; their functions stay (CREATE OR
+  // REPLACE re-applies cleanly, and none is a migration's). thought_audit and
+  // thought_entities are above already; the view is not a table and goes with
+  // `thoughts`. They follow `thoughts` although several reference it: the
+  // CASCADE above has already cut those constraints by the time they drop.
+  ...grantedTables(["community"]).filter((t) => t !== "thought_audit" && t !== "thought_entities"),
 ];
 
 /**
@@ -118,7 +127,7 @@ const FUNCTIONS = [
   "prune_query_log(int)",
   // 024, 025 and 026: the three this list had also missed, found when
   // SMD-1749's second review pass listed what survives a reset on a fully
-  // applied brain. test-upgrade [20] asks the catalog the same question after
+  // applied brain. test-upgrade [21] asks the catalog the same question after
   // every run, so the next name a migration adds without a line here fails
   // there rather than in the section that happens to need it gone.
   "thought_stats_summary()",
@@ -487,6 +496,32 @@ export function runMigrator(url: string, env: Record<string, string> | undefined
 }
 
 /** The migration files, sorted — the one listing for the bare apply, the ledger comparison and the suites that count them. */
+/** The community schemas' directory, `schemas/` beside `db/`. */
+export const SCHEMAS_DIR = join(HERE, "..", "schemas");
+/**
+ * The community SQL files with a prerequisite, in the order it requires:
+ * enhanced-thoughts before readwise-books (whose function filters on its
+ * source_type column) and text-search-trgm; entity-extraction before
+ * typed-reasoning-edges (which alters its edges table). The rest of the files
+ * follow alphabetically.
+ */
+export const SCHEMA_FILES_FIRST: readonly string[] = ["enhanced-thoughts/schema.sql", "text-search-trgm/schema.sql", "readwise-books/schema.sql", "entity-extraction/schema.sql", "typed-reasoning-edges/schema.sql"];
+/**
+ * Every SQL file under schemas/, as `<dir>/<file>`, SCHEMA_FILES_FIRST first
+ * and the rest alphabetical — the order test-schema [40] and test-live [18]
+ * apply them in (SMD-1796). Read from the tree, never listed, so a new
+ * community schema is applied by both suites the day it lands.
+ */
+export function communitySchemaFiles(): string[] {
+  const rank = (f: string) => (SCHEMA_FILES_FIRST.indexOf(f) === -1 ? SCHEMA_FILES_FIRST.length : SCHEMA_FILES_FIRST.indexOf(f));
+  const files: string[] = [];
+  for (const d of readdirSync(SCHEMAS_DIR, { withFileTypes: true })) {
+    if (!d.isDirectory()) continue;
+    for (const f of readdirSync(join(SCHEMAS_DIR, d.name))) if (f.endsWith(".sql")) files.push(`${d.name}/${f}`);
+  }
+  return files.sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
+}
+
 export function migrationFiles(): string[] {
   return readdirSync(MIGRATIONS)
     .filter((f) => f.endsWith(".sql"))

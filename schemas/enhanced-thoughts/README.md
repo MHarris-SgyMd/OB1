@@ -19,7 +19,7 @@ This schema extension adds six new columns to the `thoughts` table (`type`, `sen
 - **`get_thought_connections`** -- Finds thoughts that share metadata topics or people with a given thought.
 - **`backfill_thought_types(p_allowed_types TEXT[])`** -- Populates the new top-level `type` column from `metadata->>'type'`. The default allowlist covers the canonical eight values (`idea`, `task`, `person_note`, `reference`, `decision`, `lesson`, `meeting`, `journal`). Pass a custom array to accept additional values, or pass `NULL` to backfill whatever `metadata->>'type'` contains.
 
-> **This fork (SMD-1250):** upstream's `schema.sql` ended with a section that redefined `upsert_thought(text, jsonb)` so these columns were mirrored on every write. On a brain built by `db/migrate.ts` that statement replaces the body migration 005 installed, silently, so it is removed here: the columns are filled by `backfill_thought_types()` and the `UPDATE` in the script, and a capture does not update them. Two more things on a migrated brain: the script's backfill moves `updated_at` on every row with a `type` or `source` in its metadata, which on this fork gates the accepted-vector caveat and the edited-since rules — run it between re-embed passes; and on plain Postgres its `GRANT`s to Supabase's roles fail (`role "authenticated" does not exist`) — create `authenticated`, `service_role` and `anon` as `NOLOGIN` roles first, or delete those lines. `scripts/check-fork-consistency.mjs` check 7 keeps the upsert out.
+> **This fork (SMD-1250):** upstream's `schema.sql` ended with a section that redefined `upsert_thought(text, jsonb)` so these columns were mirrored on every write. On a brain built by `db/migrate.ts` that statement replaces the body migration 005 installed, silently, so it is removed here: the columns are filled by `backfill_thought_types()` and the `UPDATE` in the script, and a capture does not update them. Two more things on a migrated brain: the script's backfill moves `updated_at` on every row with a `type` or `source` in its metadata, which on this fork gates the accepted-vector caveat and the edited-since rules — run it between re-embed passes; and its `GRANT`s to Supabase's roles are gone too (SMD-1796) — they failed on plain Postgres (`role "authenticated" does not exist`), and execute is `PUBLIC`'s by default. `scripts/check-fork-consistency.mjs` check 7 keeps the upsert out, check 12 the grants.
 
 ## Prerequisites
 
@@ -43,12 +43,11 @@ SUPABASE (from your Open Brain setup)
 
 ## Steps
 
-1. Open your Supabase dashboard and navigate to the **SQL Editor**
-2. Create a new query and paste the full contents of `schema.sql`
-3. Click **Run** to execute the migration
-4. Open **Table Editor** and select the `thoughts` table to confirm the new columns appear: `type`, `sensitivity_tier`, `importance`, `quality_score`, `source_type`, `enriched`
-5. Navigate to **Database > Functions** and verify the new functions exist: `search_thoughts_text`, `brain_stats_aggregate`, `get_thought_connections`, `backfill_thought_types`
-6. If you have existing thoughts with `type` or `source` values stored in the metadata JSONB, the script automatically calls `backfill_thought_types()` with the default canonical allowlist. If your brain uses non-canonical `type` values, re-run `SELECT backfill_thought_types(ARRAY['your','custom','types']);` or `SELECT backfill_thought_types(NULL);` to accept any value
+1. Apply `schema.sql` to your brain: `psql "$DATABASE_URL" -f schema.sql` (or paste it into your SQL console).
+2. Nothing to grant (this fork, SMD-1796): the file adds columns to `thoughts` and four functions executable by any role by default — the two `SECURITY DEFINER` ones read `thoughts` as their owner, see Security below (upstream's `GRANT EXECUTE … TO authenticated, service_role` lines are gone — those roles do not exist off Supabase, and execute is `PUBLIC`'s by default).
+3. Open **Table Editor** and select the `thoughts` table to confirm the new columns appear: `type`, `sensitivity_tier`, `importance`, `quality_score`, `source_type`, `enriched`
+4. Navigate to **Database > Functions** and verify the new functions exist: `search_thoughts_text`, `brain_stats_aggregate`, `get_thought_connections`, `backfill_thought_types`
+5. If you have existing thoughts with `type` or `source` values stored in the metadata JSONB, the script automatically calls `backfill_thought_types()` with the default canonical allowlist. If your brain uses non-canonical `type` values, re-run `SELECT backfill_thought_types(ARRAY['your','custom','types']);` or `SELECT backfill_thought_types(NULL);` to accept any value
 
 ## Expected Outcome
 
@@ -67,11 +66,11 @@ After running the migration:
 
 ## Security
 
-This schema follows stock Open Brain's "service_role only" posture:
+Upstream's file followed stock Open Brain's "service_role only" posture; on this fork its grants are gone (SMD-1796) and what remains is:
 
 - `brain_stats_aggregate` and `get_thought_connections` are `SECURITY DEFINER` with `SET search_path = public` (defense in depth against search-path hijacks). They can read the full `thoughts` table regardless of RLS.
 - `search_thoughts_text` is `SECURITY INVOKER` and respects RLS.
-- **None of the three RPCs are granted to `anon`.** Execute privilege is limited to `authenticated` and `service_role`. The publishable anon key cannot call them.
+- **No grant to any Supabase role.** Upstream limited execute to `authenticated` and `service_role`; those roles do not exist off Supabase, so the file no longer grants, and execute is `PUBLIC`'s by default — on a single-operator brain (SMD-1716), the roles you created. The two `SECURITY DEFINER` RPCs therefore read the whole `thoughts` table for any role that can connect, as they did upstream (its grants never revoked `PUBLIC`); if that is not your trust boundary, `REVOKE EXECUTE … FROM PUBLIC` and grant the roles you mean.
 
 If you want to expose any of these to `anon` (for example, a public-read dashboard), add your own `GRANT EXECUTE ... TO anon;` in a follow-up migration and confirm that `p_exclude_restricted := true` (the default) plus your sensitivity-tier hygiene gives you the exposure surface you actually want. This is an explicit opt-in: the default stance is private.
 

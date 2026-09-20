@@ -52,10 +52,21 @@ import {
   coreFunctionStatement,
   ownedColumnCommentsIn,
   ownedFunctionsIn,
+  grantPresenceSql,
+  grantStatements,
+  grantVerifySql,
+  mergedGrants,
+  grantedFunctions,
+  grantedObjects,
+  grantedSequences,
+  grantedTables,
+  grantedViews,
+  stripSqlComments,
+  supabaseIsmsIn,
 } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { buffersOf, COLUMN_COMMENT_SQL, createAssert, SAMPLE_STATEMENT, sampleStatementOf, seededRandom, TABLE_COMMENT_SQL, TID_PROBE } from "./test-support.ts";
+import { buffersOf, COLUMN_COMMENT_SQL, communitySchemaFiles, createAssert, SAMPLE_STATEMENT, sampleStatementOf, SCHEMA_FILES_FIRST, SCHEMAS_DIR, seededRandom, TABLE_COMMENT_SQL, TID_PROBE } from "./test-support.ts";
 import { markerAnswers } from "./bench-oracle.ts";
 import { agentLabel, armOf, attribute, citePointerOf, goldFromFixture, renderReport, summarise, toActionRow, toSearchRow, type ActionRow, type SearchRow } from "../evals/utilization.ts";
 import { ENTITY_TYPES, RELATIONS } from "../server-portable/entities.ts";
@@ -714,7 +725,7 @@ console.log("\n[8e] Migrations 037 and 038: the routing count is gated by a samp
 {
   const shipped = async () => String((await db.query<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = '${MATCH_THOUGHTS_SIGNATURE}'::regprocedure`)).rows[0].s);
   const src = await shipped();
-  assert(lastDefinerOf("match_thoughts").startsWith("040"), `040 is the last definer of match_thoughts — 039's body, run with jit off, carrying 038's gate (${lastDefinerOf("match_thoughts")})`);
+  assert(lastDefinerOf("match_thoughts").startsWith("041"), `041 is the last definer of match_thoughts — 039's body, run with jit off (040) and its two planner paths pinned (041), carrying 038's gate (${lastDefinerOf("match_thoughts")})`);
   assert(TID_PROBE.test(src) && /INTO v_hits, v_hit_pages, v_pages_seen/.test(src) && !/TABLESAMPLE/.test(src),
     "the shipped body samples the heap by TID range — every tuple of one block, half-open at the next — into the three counts the gate reads, and carries no TABLESAMPLE");
   assert(new RegExp(`floor\\(random\\(\\) \\* v_pages\\)::bigint AS blk\\s+FROM generate_series\\(1, ${ROUTE_SAMPLE_PAGES}\\)`).test(src) && new RegExp(`IF v_pages >= ${ROUTE_ESTIMATE_MIN_PAGES} THEN`).test(src),
@@ -916,7 +927,7 @@ console.log("\n[8e] Migrations 037 and 038: the routing count is gated by a samp
       `on the heap with ${ROUTE_SAMPLE_PAGES} of ${pages} pages emptied every random draw still reaches 2 to ${ROUTE_SAMPLE_PAGES} pages and the rule still says "collect" (hits/hit pages/pages drawn: ${sparse.join(", ")})`);
   }
   const restored = await restoreShipped("match_thoughts");
-  assert(restored.length === 1 && restored[0].startsWith("040") && new RegExp(`IF v_pages >= ${ROUTE_ESTIMATE_MIN_PAGES} THEN`).test(await shipped()),
+  assert(restored.length === 1 && restored[0].startsWith("041") && new RegExp(`IF v_pages >= ${ROUTE_ESTIMATE_MIN_PAGES} THEN`).test(await shipped()),
     "…and the shipped floor is back for the sections after");
 }
 
@@ -958,25 +969,17 @@ console.log("\n[10] Migrations carry nothing Supabase-specific");
    *
    * Stripping first makes the check strictly sharper, not laxer: it still sees
    * every executable statement, and it stops seeing text that only describes
-   * one. `--` to end of line, and `/* *\/` blocks. Three migrations put `--`
-   * inside a string literal — the RAISE HINTs of 030, 031 and 041 name the
-   * `--baseline` and `--reapply` flags — and the strip shortens each of those
-   * lines to the quote before the flag. The scan below is a word search, so a
-   * shortened literal loses nothing it checks; no COMMENT literal carries the
-   * sequence ([27] and [40] assert that of the live text). A literal that
-   * needed `--` before a word this scan looks for would be a reason to parse
-   * rather than to widen this (the header used to deny the case outright;
-   * SMD-1749's fourth review pass).
+   * one. The strip is config.mjs's stripSqlComments, literal-aware since
+   * SMD-1796 (what SMD-1316 asked for): a `--` inside a string literal no
+   * longer hides the rest of its line, and a dollar-quoted body is scanned
+   * within, its own comments stripped. The rules are SUPABASE_SQL_RULES — the
+   * list check-fork-consistency holds every .sql under schemas/ and db/ to —
+   * so the migrations and the community schemas answer to one spelling, and
+   * [40] runs the same scan over schemas/ from inside this suite.
    */
-  const executable = (sql: string) =>
-    sql.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/--[^\n]*/g, " ");
-  const all = files
-    .map((f) => executable(subst(readFileSync(join(MIGRATIONS, f), "utf8"))))
-    .join("\n");
-  assert(!/auth\.uid\(\)/.test(all), "no auth.uid() — GoTrue does not exist off Supabase");
-  assert(!/auth\.role\(\)/.test(all), "no auth.role() — the core RLS policy is dropped deliberately");
-  assert(!/\bTO service_role\b/.test(all), "no GRANT TO service_role — that role is Supabase-managed");
-  assert(!/ENABLE ROW LEVEL SECURITY/i.test(all), "no RLS enabled — it never fired anyway");
+  const hits = files.flatMap((f) => supabaseIsmsIn(subst(readFileSync(join(MIGRATIONS, f), "utf8"))).map((h) => `${f}:${h.line} ${h.rule}`));
+  assert(hits.length === 0, `no migration runs a Supabase-ism — no auth.uid()/auth.role() (GoTrue), no service_role/authenticated/anon (Supabase's roles), no RLS (it never fired anyway) (${hits.join("; ") || "none"})`);
+  const all = files.map((f) => stripSqlComments(subst(readFileSync(join(MIGRATIONS, f), "utf8")))).join("\n");
   assert(!/pgcrypto/i.test(all) || /NOT pgcrypto/.test(all), "pgcrypto not required (gen_random_uuid + sha256 are built-ins)");
 }
 
@@ -1988,11 +1991,11 @@ console.log("\n[20] Migration 019: the row estimates and the plan setting — ca
   assert(Number(mt.prorows) === 10, `match_thoughts declares ROWS 10 (prorows ${mt.prorows})`);
   assert(Number(kw.prorows) === 25, `search_thoughts_keyword declares ROWS 25 (prorows ${kw.prorows})`);
   assert(mt.provolatile === "s" && kw.provolatile === "s", "both are still STABLE");
-  // Exactly three clauses — 014's scan mode, 019's plan setting, 040's jit
-  // off — and no walk bound or plan mode (019's rule). A successor that adds
-  // or drops one fails here on purpose.
-  assert(Object.keys(mt.settings).sort().join(",") === "enable_seqscan,hnsw.iterative_scan,jit" && mt.settings["enable_seqscan"] === "off" && mt.settings["hnsw.iterative_scan"] === "relaxed_order" && mt.settings["jit"] === "off",
-         `match_thoughts carries exactly the scan mode, the plan setting and jit off (${JSON.stringify(mt.settings)})`);
+  // Exactly five clauses — 014's scan mode, 019's plan setting, 040's jit
+  // off, 041's two pinned paths — and no walk bound or plan mode (019's
+  // rule). A successor that adds or drops one fails here on purpose.
+  assert(Object.keys(mt.settings).sort().join(",") === "enable_nestloop,enable_seqscan,enable_tidscan,hnsw.iterative_scan,jit" && mt.settings["enable_seqscan"] === "off" && mt.settings["hnsw.iterative_scan"] === "relaxed_order" && mt.settings["jit"] === "off" && mt.settings["enable_nestloop"] === "on" && mt.settings["enable_tidscan"] === "on",
+         `match_thoughts carries exactly the scan mode, the plan setting, jit off and the two pinned paths (${JSON.stringify(mt.settings)})`);
   assert(Object.keys(kw.settings).length === 0, `search_thoughts_keyword carries no SET clause (${JSON.stringify(kw.settings)})`);
   assert(/ob1:filter-inside-scan/.test(mt.prosrc), "the ob1:filter-inside-scan sentinel is in the shipped body");
 
@@ -2045,32 +2048,37 @@ console.log("\n[20] Migration 019: the row estimates and the plan setting — ca
     ambiguous = (e as Error).message;
   }
   assert(/not unique/.test(ambiguous), `with two match_thoughts a 4-argument call is ambiguous (${ambiguous.split("\n")[0] || "it succeeded"})`);
-  // 040's body is 039's byte for byte — the clause is the whole change — and
-  // 039's file re-applied alone (its index swap is idempotent; its CREATE
-  // carries 019's clauses and not 040's) drops it, which is what a hand
+  // 041's body is 039's byte for byte — 040's clause and 041's two are the
+  // whole change — and 039's file re-applied alone (its index swap is
+  // idempotent; its CREATE carries 019's clauses and neither 040's nor 041's)
+  // drops all three, 040's alone drops 041's two: each is what a hand
   // re-apply leaves and preflight's candidate scan reports (test-upgrade [18]
-  // holds the same across an upgrade; this is the fast loop's copy).
+  // and [19] hold the same across an upgrade; this is the fast loop's copy).
   await reapply("039");
   const mt039 = await proc(MT);
-  assert(mt039.prosrc === mt.prosrc, "040's body is 039's byte for byte — the clause is the whole change");
-  assert(!("jit" in mt039.settings) && mt039.settings["enable_seqscan"] === "off",
-         `…and 039 re-applied alone carries 019's clauses without 040's, the state a hand re-apply leaves (proconfig ${JSON.stringify(mt039.settings)})`);
+  assert(mt039.prosrc === mt.prosrc, "041's body is 039's byte for byte — 040's clause and 041's two are the whole change");
+  assert(!("jit" in mt039.settings) && !("enable_nestloop" in mt039.settings) && !("enable_tidscan" in mt039.settings) && mt039.settings["enable_seqscan"] === "off",
+         `…and 039 re-applied alone carries 019's clauses without 040's or 041's, the state a hand re-apply leaves (proconfig ${JSON.stringify(mt039.settings)})`);
+  await reapply("040");
+  const mt040 = await proc(MT);
+  assert(mt040.prosrc === mt.prosrc && mt040.settings["jit"] === "off" && !("enable_nestloop" in mt040.settings) && !("enable_tidscan" in mt040.settings),
+         `…and 040 re-applied alone carries jit = off without 041's two pins, the state that hand re-apply leaves (proconfig ${JSON.stringify(mt040.settings)})`);
   await reapply("012");
   const kw012 = await proc(KW);
   assert(kw012.prosrc === kw.prosrc, "019's search_thoughts_keyword body is 012's, byte for byte");
   assert(Number(kw012.prorows) === 1000, `…and re-applying 012 alone resets its estimate to 1,000 (prorows ${kw012.prorows})`);
   const restored = await restoreShipped("match_thoughts", "search_thoughts_keyword");
   const back = await proc(MT);
-  assert(Number(back.prorows) === 10 && back.settings["enable_seqscan"] === "off" && back.settings["jit"] === "off" && Number((await proc(KW)).prorows) === 25,
+  assert(Number(back.prorows) === 10 && back.settings["enable_seqscan"] === "off" && back.settings["jit"] === "off" && back.settings["enable_nestloop"] === "on" && back.settings["enable_tidscan"] === "on" && Number((await proc(KW)).prorows) === 25,
          `re-applying the migrations that last define each (${restored.join(", ")}) restores both — the shipped state, for whatever runs after`);
   assert((await functionsNamed("match_thoughts")) === 1 && (await functionsNamed("search_thoughts_keyword")) === 1, "…and 020's DROP removed the 4-argument function again: one match_thoughts, one search_thoughts_keyword");
   // Deliberately pinned, as [20] pinned 019 before 020 landed, 020 before
-  // 037, 037 before 038, 038 before 039 and 039 before 040: 019 last defines
-  // the keyword function, 040 match_thoughts. A successor that redefines
+  // 037, 037 before 038, 038 before 039, 039 before 040 and 040 before 041:
+  // 019 last defines the keyword function, 041 match_thoughts. A successor that redefines
   // either fails here on purpose, and the expectations move with the clauses
   // it must carry.
-  assert(restored.length === 2 && restored[0].startsWith("019") && restored[1].startsWith("040"),
-         `019 is the last definer of search_thoughts_keyword and 040 of match_thoughts (${restored.join(", ")})`);
+  assert(restored.length === 2 && restored[0].startsWith("019") && restored[1].startsWith("041"),
+         `019 is the last definer of search_thoughts_keyword and 041 of match_thoughts (${restored.join(", ")})`);
 
   // The migrator's floor line, since whichever file last defines the function
   // redefines it with the hnsw.* clause 014 needed pgvector 0.8 for.
@@ -2098,10 +2106,11 @@ console.log("\n[21] Migration 020: the recency blend — identical at weight 0, 
     `SELECT prorows, proconfig AS cfg, prosrc FROM pg_proc WHERE oid = $1::regprocedure`, [MT])).rows[0];
   assert((await functionsNamed("match_thoughts")) === 1 && (await functionsNamed("search_thoughts_hybrid")) === 1, "one match_thoughts, one search_thoughts_hybrid: 020 replaced both signatures rather than adding overloads");
   const settings = parseSetConfig(proc.cfg);
-  // The shipped body: 020's clauses as 019 handed them over, and 040's jit
-  // off beside them — three settings and no other ([20] pins the same set).
-  assert(Number(proc.prorows) === 10 && settings["enable_seqscan"] === "off" && settings["hnsw.iterative_scan"] === "relaxed_order" && settings["jit"] === "off" && Object.keys(settings).length === 3 && /ob1:filter-inside-scan/.test(proc.prosrc),
-         "the shipped body carries what 019 handed 020: ROWS 10, its two settings and the sentinel — and 040's jit = off, exactly three settings");
+  // The shipped body: 020's clauses as 019 handed them over, 040's jit off
+  // and 041's two pinned paths beside them — five settings and no other ([20]
+  // pins the same set).
+  assert(Number(proc.prorows) === 10 && settings["enable_seqscan"] === "off" && settings["hnsw.iterative_scan"] === "relaxed_order" && settings["jit"] === "off" && settings["enable_nestloop"] === "on" && settings["enable_tidscan"] === "on" && Object.keys(settings).length === 5 && /ob1:filter-inside-scan/.test(proc.prosrc),
+         "the shipped body carries what 019 handed 020: ROWS 10, its two settings and the sentinel — 040's jit = off and 041's enable_nestloop = on and enable_tidscan = on, exactly five settings");
   const cols = (await db.query<{ n: string }>(
     `SELECT a.attname AS n FROM pg_proc p, unnest(p.proallargtypes, p.proargmodes, p.proargnames) WITH ORDINALITY AS a(t, m, attname, o)
      WHERE p.oid = $1::regprocedure AND a.m = 't' ORDER BY a.o`, [MT])).rows.map((r) => r.n);
@@ -2954,11 +2963,11 @@ console.log("\n[27] Migration 028: thought_work_claims.last_error and release_th
   assert(/p_error is stored in last_error whatever p_status is/.test(fnComment), "…and says p_error is stored whatever the status");
   assert(/on succeeded, when given, a caveat/.test(fnComment) && /the write stands/.test(fnComment) && /Pass NULL for a clean success/.test(fnComment),
     "…what it means on success, and what to pass for a clean one");
-  // [10] strips `--` to end of line before scanning the migrations, on the
-  // stated assumption that no migration puts that sequence in a string literal
-  // (SMD-1316 would make that strip literal-aware). Asserted of the LIVE text,
-  // so it holds whichever file wrote the comment.
-  assert(!/--/.test(colComment) && !/--/.test(fnComment), "neither comment carries `--`, so [10]'s comment-stripping scan reads every literal whole");
+  // [10]'s strip has been literal-aware since SMD-1796 (SMD-1316's ask), so a
+  // `--` inside one of these literals would no longer hide the rest of its
+  // line from the scan; the contract is still plainer without one. Asserted
+  // of the LIVE text, so it holds whichever file wrote the comment.
+  assert(!/--/.test(colComment) && !/--/.test(fnComment), "neither comment carries `--` — the comment-stripping scan does not need to be literal-aware for these two, though it is");
   // Those are checks of the LIVE text after every file has applied, so a later
   // migration that redefines release_thought and re-issues 015's one-sentence
   // COMMENT — CREATE OR REPLACE keeps a comment, a re-issued COMMENT replaces
@@ -3403,14 +3412,14 @@ console.log("\n[31] A vendored schema applied to a migrated brain replaces no fu
   assert(RELEASE_SHIPPED_RE.test(await srcOf("release_thought(uuid,text,text,text,text)")) && RELEASE_SHIPPED_RE.test(await srcOf("release_claims_for_worker(text,text)")) && THOUGHT_STATS_SHIPPED_RE.test(await srcOf("thought_stats_summary()")),
     "…and for 015's two release bodies (the lease cleared) and 024's thought_stats_summary (topics guarded by type)");
 
-  // The vendored file as fixed — its section 6 gone — applied whole. The
-  // Supabase roles its GRANTs name do not exist in PGlite.
+  // The vendored file as fixed — its section 6 gone, and since SMD-1796 its
+  // GRANTs to Supabase's roles gone too — applied whole. This block used to
+  // create authenticated, service_role and anon first so those GRANTs would
+  // run; no role is created now, and [40] applies every schemas/*.sql the
+  // same way.
   const vendored = readFileSync(join(HERE, "..", "schemas", "enhanced-thoughts", "schema.sql"), "utf8");
   assert(![...owned.keys()].some((fn) => coreFunctionStatement(fn).test(vendored)) && ![...ownedCols.keys()].some((col) => coreColumnCommentStatement(col).test(vendored)),
     "schemas/enhanced-thoughts/schema.sql names no owned function or column comment in a statement, by check 7's own rules");
-  for (const role of ["authenticated", "service_role", "anon"]) {
-    await db.exec(`DO $r$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${role}') THEN CREATE ROLE ${role} NOLOGIN; END IF; END $r$`);
-  }
   await db.exec(`DELETE FROM thoughts`);
   await db.exec(vendored);
   assert(JSON.stringify(await bodies()) === JSON.stringify(shipped), "applied to a migrated brain, it leaves every owned function's body and overload set exactly as the migrations left them");
@@ -4497,7 +4506,200 @@ console.log("\n[39] Memory utilization over the query log: attribution, the cite
   assert(rowLines.length >= 2 && new Set(rowLines.map((l) => l.length)).size === 1, `every table row is the same width (${[...new Set(rowLines.map((l) => l.length))].join(",")})`);
 }
 
-console.log("\n[40] Migration 041: query_log.tool's two shapes, and the table's cite clause, are stated at the table in the live text (SMD-1749)");
+// ── 40. The community schemas on a plain-Postgres brain ──────────────────────
+
+console.log("\n[40] Every schemas/*.sql applies to a migrated brain with no Supabase role present, and --grant's community group is what makes it usable (SMD-1796)");
+{
+  // A second PGlite: the files add a trigger on `thoughts` (entity-extraction's
+  // queue) and columns to it (enhanced-thoughts, provenance-chains), and the
+  // sections above must not meet them. Fresh migrations, then every SQL file
+  // under schemas/ in the order test-support's communitySchemaFiles gives —
+  // the five with a prerequisite first, the rest alphabetical. Twelve of the
+  // seventeen ended with GRANTs TO service_role, RLS and policies for it, and
+  // two with policies on auth.uid(): on any Postgres that is not Supabase the
+  // first such statement stopped the file (`role "service_role" does not
+  // exist`). [31] used to create the three roles for the one file it applied;
+  // nothing does now.
+  const SCHEMAS = SCHEMAS_DIR;
+  const schemaFiles = communitySchemaFiles();
+  assert(schemaFiles.length >= 17 && SCHEMA_FILES_FIRST.every((f) => schemaFiles.includes(f)), `${schemaFiles.length} SQL files under schemas/ (17 when this was written; the set can only grow), the five with prerequisites among them`);
+
+  // The rule check-fork-consistency holds these files to, from inside the
+  // suite: none runs a Supabase-ism, comments excepted. And the strip's teeth,
+  // on the three shapes the old `--`-to-end-of-line strip could not tell apart:
+  // a literal carrying `--` followed by a statement on the same line, a
+  // comment inside a dollar-quoted body, and a statement inside an EXECUTE
+  // string (recipes/brain-health-monitoring runs its grants that way).
+  const isms = schemaFiles.flatMap((f) => supabaseIsmsIn(readFileSync(join(SCHEMAS, f), "utf8")).map((h) => `${f}:${h.line} ${h.rule}`));
+  assert(isms.length === 0, `no schemas/*.sql runs a Supabase-ism (${isms.length}: ${isms.slice(0, 4).join("; ") || "none"})`);
+  const probe = "-- GRANT x TO service_role, in a comment\nSELECT 'a -- literal', 1; GRANT x TO service_role;\nDO $b$ BEGIN -- service_role, in a body's comment\n  EXECUTE 'ALTER TABLE t ENABLE ROW LEVEL SECURITY'; END $b$;\nCREATE POLICY p ON t\n  FOR SELECT\n  TO authenticated USING (true);\nSELECT E'\\'' AS one_quote; -- service_role in a comment after an E-string\ngrant execute on function f()\n  to\n  \"authenticated\";\nALTER TABLE t ENABLE ROW LEVEL\n  SECURITY;";
+  const probeHits = supabaseIsmsIn(probe).map((h) => `${h.rule}@${h.line}`);
+  assert(JSON.stringify(probeHits) === JSON.stringify(["service_role@2", "rls@4", "rls@5", "supabase-api-role@7", "supabase-api-role@10", "rls@12"]),
+    `the scan reads past a literal's -- to the statement after it, skips a body's comment, reads a body's EXECUTE string, finds a policy's TO on its own line, keeps its parity through an E'\\'' string, and follows a TO and an ENABLE ROW LEVEL across a line break (${probeHits.join(", ")})`);
+
+  const cdb = new PGlite({ extensions: { vector, pg_trgm } });
+  for (const f of files) await cdb.exec(subst(readFileSync(join(MIGRATIONS, f), "utf8")));
+  const roles = (await cdb.query<{ c: number }>(`SELECT count(*)::int AS c FROM pg_roles WHERE rolname IN ('authenticated', 'anon', 'service_role')`)).rows[0].c;
+  assert(roles === 0, "no Supabase role exists in this database");
+  const tablesNow = async () => new Set((await cdb.query<{ n: string }>(`SELECT tablename AS n FROM pg_tables WHERE schemaname = 'public'`)).rows.map((r) => r.n));
+  const viewsNow = async () => new Set((await cdb.query<{ n: string }>(`SELECT viewname AS n FROM pg_views WHERE schemaname = 'public'`)).rows.map((r) => r.n));
+  const coreTables = await tablesNow();
+  const coreViews = await viewsNow();
+  const failed: string[] = [];
+  for (const f of schemaFiles) {
+    try {
+      await cdb.exec(readFileSync(join(SCHEMAS, f), "utf8"));
+    } catch (e) {
+      failed.push(`${f}: ${(e as Error).message.split("\n")[0]}`);
+      try { await cdb.exec("ROLLBACK"); } catch { /* the file opened no transaction */ }
+    }
+  }
+  assert(failed.length === 0, `every file applies, in that order (${failed.length} failed: ${failed.join(" | ") || "none"})`);
+
+  // What the community group names is present — by the probe migrate.ts
+  // --grant runs — and the group names everything the files created that a
+  // grant can reach: every new table, every bigserial sequence (an identity
+  // column's sequence needs no grant, measured below), and every function the
+  // files REVOKEd FROM PUBLIC. A new community table or definer with no row in
+  // ROLE_GRANTS.community would be one --grant does not reach.
+  const objects = grantedObjects(["community"]);
+  const presence = (await cdb.query<{ kind: string; name: string; present: boolean }>(grantPresenceSql(objects))).rows;
+  const absent = presence.filter((r) => !r.present).map((r) => `${r.kind} ${r.name}`);
+  assert(presence.length === objects.length && absent.length === 0, `every object the community group names exists once the files are applied (${objects.length}; absent: ${absent.join(", ") || "none"})`);
+  const communityTables = new Set(grantedTables(["community"]));
+  const newTables = [...(await tablesNow())].filter((t) => !coreTables.has(t));
+  const unlisted = newTables.filter((t) => !communityTables.has(t));
+  // 25 listed, 23 created: thought_audit is 008's and thought_entities 016's
+  // (upstream's entity-extraction file names the same table under IF NOT
+  // EXISTS, so on a migrated brain it is 016's shape the grant reaches), and
+  // the first run of this section found the second of those.
+  const preExisting = [...communityTables].filter((t) => coreTables.has(t)).sort();
+  assert(newTables.length === communityTables.size - 2 && unlisted.length === 0 && JSON.stringify(preExisting) === JSON.stringify(["thought_audit", "thought_entities"]),
+    `every table the files created is in the community group (${newTables.length} created of ${communityTables.size} listed; ${preExisting.join(" and ")} were the migrations' already; unlisted: ${unlisted.join(", ") || "none"})`);
+  // A view is not in pg_tables, and a role's SELECT on the table beneath does
+  // not reach it — the first review pass found author-session-id.sql's
+  // thought_provenance in no row, so a granted role got `permission denied for
+  // view`. Every view the files created is a row of its own kind.
+  const communityViews = new Set(grantedViews(["community"]));
+  const newViews = [...(await viewsNow())].filter((v) => !coreViews.has(v));
+  assert(newViews.length === 1 && newViews[0] === "thought_provenance" && communityViews.size === 1 && communityViews.has("thought_provenance"),
+    `every view the files created is in the community group, as a view (${newViews.join(", ")})`);
+  const seqs = (await cdb.query<{ seq: string; identity: boolean; tbl: string }>(
+    `SELECT c.relname AS seq, a.attidentity <> '' AS identity, d.refobjid::regclass::text AS tbl
+       FROM pg_class c
+       JOIN pg_depend d ON d.objid = c.oid AND d.classid = 'pg_class'::regclass AND d.refclassid = 'pg_class'::regclass AND d.deptype IN ('a', 'i')
+       JOIN pg_attribute a ON a.attrelid = d.refobjid AND a.attnum = d.refobjsubid
+      WHERE c.relkind = 'S' AND c.relnamespace = 'public'::regnamespace`)).rows;
+  const listedSeqs = new Set(grantedSequences(["community"]));
+  const serialSeqs = seqs.filter((s) => !s.identity && communityTables.has(s.tbl)).map((s) => s.seq);
+  const identitySeqs = seqs.filter((s) => s.identity && communityTables.has(s.tbl)).map((s) => s.seq);
+  assert(serialSeqs.length === 6 && serialSeqs.every((s) => listedSeqs.has(s)) && listedSeqs.size === serialSeqs.length,
+    `the community group names exactly the bigserial sequences the files created (${serialSeqs.length}: ${serialSeqs.sort().join(", ")})`);
+  assert(identitySeqs.length === 1 && identitySeqs[0] === "wiki_section_revisions_id_seq" && !listedSeqs.has(identitySeqs[0]),
+    `…and not the one identity column's (${identitySeqs.join(", ")})`);
+
+  // The role: created here with nothing, granted USAGE on the schema, then
+  // probed as the connecting role. An INSERT of DEFAULT VALUES asks for every
+  // privilege an insert needs and nothing else: it answers 42501 when the
+  // table or its sequence is not granted, and some other code (23502 not-null,
+  // 23503 foreign key, 23514 check) or success when they are — so the probe
+  // separates the grant from the row's shape. Before any grant every community
+  // table answers 42501: the drop-the-mechanism mutant, run first.
+  await cdb.exec(`CREATE ROLE ob1_community NOLOGIN`);
+  await cdb.exec(`GRANT USAGE ON SCHEMA public TO ob1_community`);
+  const asRole = async (sql: string): Promise<{ code: string | null; message: string }> => {
+    try {
+      await cdb.exec(`BEGIN; SET ROLE ob1_community; ${sql}; ROLLBACK;`);
+      return { code: null, message: "" };
+    } catch (e) {
+      try { await cdb.exec("ROLLBACK"); } catch { /* already rolled back */ }
+      return { code: String((e as { code?: string }).code ?? "?"), message: (e as Error).message.split("\n")[0] };
+    }
+  };
+  const insertCodes = async () => {
+    const out = new Map<string, { code: string | null; message: string }>();
+    for (const t of communityTables) out.set(t, await asRole(`INSERT INTO ${t} DEFAULT VALUES`));
+    return out;
+  };
+  const before = await insertCodes();
+  const notDenied = [...before].filter(([, r]) => r.code !== "42501").map(([t, r]) => `${t}=${r.code}`);
+  assert(notDenied.length === 0, `ungranted, the role's INSERT into every community table is refused with 42501 (${before.size} tables; exceptions: ${notDenied.join(", ") || "none"})`);
+  const viewBefore = await asRole(`SELECT 1 FROM thought_provenance LIMIT 0`);
+  assert(viewBefore.code === "42501" && /view thought_provenance/.test(viewBefore.message), `…and so is its SELECT on the view, in the view's name (${viewBefore.code}: ${viewBefore.message})`);
+  const fnOids = async (names: string[]) => (await cdb.query<{ o: number }>(`SELECT to_regprocedure('public.' || n)::oid AS o FROM unnest($1::text[]) AS u(n)`, [names])).rows.map((r) => r.o);
+  const listedFns = grantedFunctions(["community"]);
+  const listedOids = new Set(await fnOids(listedFns));
+  const definersWithoutPublic = (await cdb.query<{ sig: string; oid: number }>(
+    `SELECT p.oid::regprocedure::text AS sig, p.oid FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND NOT has_function_privilege('ob1_community', p.oid, 'EXECUTE') ORDER BY 1`)).rows;
+  const unlistedFns = definersWithoutPublic.filter((f) => !listedOids.has(f.oid)).map((f) => f.sig);
+  assert(definersWithoutPublic.length === listedFns.length && unlistedFns.length === 0,
+    `every function the files REVOKEd FROM PUBLIC is in the community group, and nothing else is (${definersWithoutPublic.length}: ${definersWithoutPublic.map((f) => f.sig.split("(")[0]).join(", ")}; unlisted: ${unlistedFns.join(", ") || "none"})`);
+
+  // Tables alone, first: the bigserial tables are still refused — on the
+  // sequence, not the table — and the identity table is not. That is the
+  // measurement db/README.md and ROLE_GRANTS.community cite for why six
+  // sequences are listed and the seventh is not.
+  const present = new Set(presence.map((r) => r.name));
+  const statements = grantStatements("ob1_community", { groups: ["community"], present });
+  const tableGrants = statements.filter((s) => !/ ON (SEQUENCE|FUNCTION) /.test(s));
+  const restGrants = statements.filter((s) => / ON (SEQUENCE|FUNCTION) /.test(s));
+  assert(tableGrants.length === communityTables.size + communityViews.size && restGrants.length === listedSeqs.size + listedFns.length && statements.every((s) => /TO "ob1_community";$/.test(s)) && statements.includes(`GRANT SELECT ON thought_provenance TO "ob1_community";`),
+    `--grant's community statements: one per table and view (${tableGrants.length}), one per sequence and function (${restGrants.length}), the role quoted, the view granted as a table is`);
+  for (const s of tableGrants) await cdb.exec(s);
+  // --grant's own check of what it granted (grantVerifySql): with the tables
+  // and view granted and the rest not, it reports exactly the sequence and
+  // function privileges as not held, and USAGE on the schema as held — the
+  // statement migrate.ts rolls back on when a grantor without grant option
+  // "granted" with no effect (third review pass).
+  const merged = mergedGrants(["community"], present);
+  const verify = async () => (await cdb.query<{ kind: string; name: string; privilege: string; held: boolean }>(grantVerifySql("ob1_community", merged))).rows;
+  const partial = await verify();
+  const notHeld = partial.filter((r) => !r.held);
+  assert(partial.length === 1 + merged.reduce((n, m) => n + m.privileges.length, 0) && partial[0].kind === "schema" && partial[0].held &&
+         notHeld.length === listedSeqs.size * 2 + listedFns.length && notHeld.every((r) => r.kind === "sequence" || r.kind === "function") &&
+         partial.filter((r) => r.kind === "table" || r.kind === "view").every((r) => r.held),
+    `grantVerifySql reports one row per privilege (${partial.length}): with tables and view granted it holds every table, view and schema privilege and none of the ${notHeld.length} sequence and function ones`);
+  const serialOnly = await asRole(`INSERT INTO ingestion_jobs DEFAULT VALUES`);
+  assert(serialOnly.code === "42501" && /sequence ingestion_jobs_id_seq/.test(serialOnly.message), `with the tables granted and the sequences not, an INSERT into a bigserial table is refused on the sequence (${serialOnly.code}: ${serialOnly.message})`);
+  const identityOnly = await asRole(`INSERT INTO wiki_section_revisions DEFAULT VALUES`);
+  assert(identityOnly.code === "23502", `…and an INSERT into the identity-column table gets past privileges to its NOT NULL columns with no sequence grant (${identityOnly.code}: ${identityOnly.message})`);
+  const stillDenied = [...(await insertCodes())].filter(([, r]) => r.code === "42501").map(([t]) => t).sort();
+  assert(JSON.stringify(stillDenied) === JSON.stringify(["consolidation_log", "edges", "entities", "ingestion_items", "ingestion_jobs", "thought_edges"]),
+    `exactly the six bigserial tables are still refused (${stillDenied.join(", ")})`);
+  for (const s of restGrants) await cdb.exec(s);
+  const full = await verify();
+  assert(full.every((r) => r.held), `…and with the whole group granted every privilege is held (${full.filter((r) => !r.held).map((r) => `${r.privilege} on ${r.name}`).join(", ") || "none missing"})`);
+  // The silent no-op the check exists for, reproduced: a role that holds
+  // SELECT on a table without grant option "grants" INSERT on it to another
+  // — no error — and the grantee holds nothing.
+  await cdb.exec(`CREATE ROLE ob1_weak_grantor NOLOGIN; CREATE ROLE ob1_grantee NOLOGIN; GRANT USAGE ON SCHEMA public TO ob1_weak_grantor; GRANT SELECT ON crm_persons TO ob1_weak_grantor`);
+  let weakError = "";
+  try { await cdb.exec(`SET ROLE ob1_weak_grantor; GRANT INSERT ON crm_persons TO ob1_grantee; RESET ROLE`); } catch (e) { await cdb.exec("RESET ROLE"); weakError = (e as Error).message; }
+  const [{ held: granteeHolds }] = (await cdb.query<{ held: boolean }>(`SELECT has_table_privilege('ob1_grantee', 'public.crm_persons', 'INSERT') AS held`)).rows;
+  assert(weakError === "" && granteeHolds === false, `a grantor holding SELECT without grant option issues GRANT INSERT with no error and no effect (error: ${weakError || "none"}; grantee holds INSERT: ${granteeHolds}) — why --grant verifies`);
+  // Both roles' privileges revoked before the drops: were the GRANT ever to
+  // take effect (the assertion's own mutant), DROP ROLE ob1_grantee would
+  // raise 2BP01 and abort the suite instead of leaving one recorded failure.
+  await cdb.exec(`DROP OWNED BY ob1_weak_grantor, ob1_grantee; DROP ROLE ob1_weak_grantor; DROP ROLE ob1_grantee`);
+  const after = await insertCodes();
+  const denied = [...after].filter(([, r]) => r.code === "42501").map(([t, r]) => `${t}: ${r.message}`);
+  assert(denied.length === 0, `granted the whole community group, no community table refuses the role's INSERT (${after.size} tables; still refused: ${denied.join("; ") || "none"})`);
+  const unreadable: string[] = [];
+  for (const t of [...communityTables, ...communityViews]) if ((await asRole(`SELECT 1 FROM ${t} LIMIT 0`)).code !== null) unreadable.push(t);
+  assert(unreadable.length === 0, `…and reads every one, the view included (unreadable: ${unreadable.join(", ") || "none"})`);
+  const seqDenied: string[] = [];
+  for (const s of listedSeqs) if ((await asRole(`SELECT nextval('${s}')`)).code !== null) seqDenied.push(s);
+  assert(seqDenied.length === 0, `…and takes a value from each listed sequence (refused: ${seqDenied.join(", ") || "none"})`);
+  const fnDenied = (await cdb.query<{ sig: string }>(`SELECT p.oid::regprocedure::text AS sig FROM pg_proc p WHERE p.oid = ANY($1::oid[]) AND NOT has_function_privilege('ob1_community', p.oid, 'EXECUTE')`, [[...listedOids]])).rows.map((r) => r.sig);
+  assert(fnDenied.length === 0, `…and may EXECUTE every listed function (refused: ${fnDenied.join(", ") || "none"})`);
+  // Upstream's append-only intent, kept: the revision history takes SELECT and
+  // INSERT only, so the role cannot rewrite it.
+  const rewrite = await asRole(`UPDATE wiki_section_revisions SET body_md = '' WHERE false`);
+  assert(rewrite.code === "42501", `the role cannot UPDATE wiki_section_revisions — the append-only grant upstream gave its service role is kept (${rewrite.code})`);
+  await cdb.close();
+}
+
+console.log("\n[41] Migration 042: query_log.tool's two shapes, and the table's cite clause, are stated at the table in the live text (SMD-1749)");
 {
   // 034 commented the table and not the column: the three action names were a
   // SQL comment in the file, invisible to a reader of the live table, and the
@@ -4550,10 +4752,11 @@ console.log("\n[40] Migration 041: query_log.tool's two shapes, and the table's 
     "Pruned by prune_query_log(); default retention 30 days (OB1_QUERY_LOG_RETENTION_DAYS)",
   ]) assert(tblComment.includes(sentence), `the table's comment keeps 034's text: "${sentence.slice(0, 40)}…"`);
   assert(/or a write that cited a returned id as its source/.test(tblComment) && /SMD-1719/.test(tblComment), "…and adds the cite beside fetch/edit/delete, naming the ticket");
-  // [10] strips `--` to end of line before scanning the migrations, on the
-  // stated assumption that no migration puts that sequence in a string
-  // literal. Asserted of the LIVE text, so it holds whichever file wrote it.
-  assert(!/--/.test(colComment) && !/--/.test(tblComment), "neither comment carries `--`, so [10]'s comment-stripping scan reads every literal whole");
+  // 028's convention for a COMMENT literal, from when [10]'s scan stripped `--`
+  // to end of line; the scan is literal-aware since change 93 (SMD-1796), so
+  // nothing depends on it now, and it is kept as the convention — asserted of
+  // the LIVE text, so it holds whichever file wrote it.
+  assert(!/--/.test(colComment) && !/--/.test(tblComment), "neither comment carries `--` — 028's convention for a COMMENT literal, kept");
 
   // The shape the comment describes is one the table admits: 034's only
   // constraint on the column is tool <> '', so a cite row lands as written and

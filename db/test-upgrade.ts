@@ -437,9 +437,10 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // re-capture writes no provenance, SMD-1453), 036 (delete_thought's lock
   // order, SMD-1462), 037 (the routing count's gate, SMD-1463) and 038 (the
   // gate's sample by TID range, SMD-1526), 039 (the half-precision walk,
-  // SMD-1501), 040 (jit off on the function, SMD-1624) and 041 (the cite
-  // shape stated at the table, SMD-1749) stay recorded and are never tried.
-  // 030 is the right one to make
+  // SMD-1501), 040 (jit off on the function, SMD-1624), 041 (its two
+  // planner paths pinned, SMD-1677 and SMD-1703) and 042 (the cite shape
+  // stated at the table, SMD-1749) stay recorded and are never tried. 030
+  // is the right one to make
   // pending
   // because its prerequisites — 015 and 021's embedding_model column — are
   // exactly what a through-020 schema lacks, so it fails by name rather than
@@ -448,13 +449,13 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // 016, 025, 032 and 033; 036 redefines delete_thought and needs only 009's
   // body and 029's supersession lock; 037 redefines 020's match_thoughts and
   // 038 037's; 039 redefines it again and swaps 001's and 007's two indexes,
-  // which every schema has; 040 redefines it once more with one SET clause;
-  // 041 comments 034's table and column and needs only 034, refusing by
-  // name without it as 031 does without 015 ([19]) —
+  // which every schema has; 040 and 041 redefine it once more each, with SET
+  // clauses only; 042 comments 034's table and column and needs only 034,
+  // refusing by name without it as 031 does without 015 ([20]) —
   // all recorded by the baseline with their prerequisites present, so none
   // becomes the plain-run failure point above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 12, `030 is among the last twelve migrations (${last})`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 13, `030 is among the last thirteen migrations (${last})`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -1442,11 +1443,78 @@ console.log("\n[18] Migration 040 onto a populated 039 — match_thoughts gains 
   await sql.close();
 }
 
-console.log("\n[19] Migration 041 on a schema without 034 — refused up front, naming 034 and --reapply, and applied once the table exists (SMD-1749)");
+console.log("\n[19] Migration 041 onto a populated 040 — match_thoughts gains enable_nestloop = on and enable_tidscan = on and nothing else: the body byte for byte 040's (039's), no signature, row or privilege moves, and a hand-re-applied 014's 4-argument form is dropped as 020 dropped it (SMD-1677, SMD-1703)");
 {
-  // A brain adopted with --baseline at a ledger through 041 whose schema stops
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < "041" });
+  const sql = new SQL({ url: URL_, max: 1 });
+  const vec = (axis: number) => `[${Array.from({ length: OPTS.dim }, (_, i) => (i === axis ? 1 : 0)).join(",")}]`;
+  const SIX = "match_thoughts(vector, float, int, jsonb, float, float)";
+  const bodyOf = async (sig: string) => (await sql`SELECT prosrc FROM pg_proc WHERE oid = ${sig}::regprocedure`)[0].prosrc as string;
+  const aclOf = async (sig: string) => String((await sql`SELECT proacl::text AS a FROM pg_proc WHERE oid = ${sig}::regprocedure`)[0].a ?? "");
+  const settingsOf = async (sig: string) => String((await sql`SELECT array_to_string(proconfig, ',') AS c FROM pg_proc WHERE oid = ${sig}::regprocedure`)[0].c ?? "");
+  const forms = async () => Number((await sql`SELECT count(*)::int AS c FROM pg_proc WHERE proname = 'match_thoughts'`)[0].c);
+  const answer = async (kind: string) => JSON.stringify((await sql`SELECT id FROM match_thoughts(${vec(0)}::vector, -1.0, 10, ${{ kind }}::jsonb)`).map((r: { id: string }) => r.id).sort());
+
+  // A corpus at 040 — thirty rows of two kinds, both filters under the exact
+  // threshold and the table far under the gate's floor — and a hardened
+  // 6-argument form.
+  for (let i = 0; i < 30; i++) {
+    await sql`SELECT upsert_thought(${`upgrade 041: note ${i}`}, ${{ metadata: { kind: i % 10 === 0 ? "rare" : "common" } }}::jsonb, ${vec(i % OPTS.dim)}::vector)`;
+  }
+  await sql.unsafe(`DO $r$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob1_upgrade_searcher41') THEN CREATE ROLE ob1_upgrade_searcher41 NOLOGIN; END IF; END $r$`);
+  await sql.unsafe(`REVOKE ALL ON FUNCTION ${SIX} FROM PUBLIC`);
+  await sql.unsafe(`GRANT EXECUTE ON FUNCTION ${SIX} TO ob1_upgrade_searcher41`);
+  const acl = await aclOf(SIX);
+  const before = await shape(sql);
+  const snapshot = async () => JSON.stringify(await sql`SELECT id, content_fingerprint, metadata, updated_at::text AS u FROM thoughts ORDER BY id`);
+  const rows = await snapshot();
+  const rareBefore = await answer("rare");
+  const commonBefore = await answer("common");
+  const body040 = await bodyOf(SIX);
+  const settings040 = await settingsOf(SIX);
+  assert(TID_PROBE.test(body040) && /enable_seqscan=off/.test(settings040) && /(^|,)jit=off(,|$)/.test(settings040) && !/enable_nestloop/.test(settings040) && !/enable_tidscan/.test(settings040) && (await forms()) === 1, `at 040 match_thoughts samples by TID range, carries 014's, 019's and 040's clauses and no pinned path (${settings040}), and has one form`);
+
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("041") });
+
+  const after = await shape(sql);
+  assert(before.columns === after.columns && before.functions === after.functions, "041 adds no column and changes no signature — one match_thoughts, as before");
+  assert((await snapshot()) === rows, "no row moved — nothing here is a backfill");
+  assert((await aclOf(SIX)) === acl && !/(^\{|,)=X\//.test(acl), `CREATE OR REPLACE under the same signature keeps the hardened ACL: PUBLIC still revoked, the role still granted (${acl})`);
+  assert((await bodyOf(SIX)) === body040, "…the body is 040's byte for byte — 041 adds two SET clauses and changes no statement");
+  const [{ cfg, prorows }] = await sql`SELECT array_to_string(proconfig, ',') AS cfg, prorows FROM pg_proc WHERE oid = ${SIX}::regprocedure`;
+  assert(/hnsw\.iterative_scan=relaxed_order/.test(String(cfg)) && /enable_seqscan=off/.test(String(cfg)) && /(^|,)jit=off(,|$)/.test(String(cfg)) && /(^|,)enable_nestloop=on(,|$)/.test(String(cfg)) && /(^|,)enable_tidscan=on(,|$)/.test(String(cfg)) && Number(prorows) === 10, `…with 014's, 019's and 040's clauses carried and the two pins beside them (${cfg}; ROWS ${prorows})`);
+  assert((await answer("rare")) === rareBefore && (await answer("common")) === commonBefore, "…and both filters — 3 and 27 matching rows — return exactly the rows they returned at 040");
+
+  // The state a hand re-apply of 014 leaves — the 4-argument form back beside
+  // the 6-argument one, every 4-argument call ambiguous — and what the last
+  // definer applied ALONE does about it, since that is what preflight's
+  // remedy and the suites' restoreShipped apply: 041 carries 020's DROP.
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("014") });
+  assert((await forms()) === 2, "014 re-applied by hand puts the 4-argument form back beside 041's");
+  let ambiguous = "";
+  try {
+    await sql`SELECT count(*) FROM match_thoughts(${vec(0)}::vector, 0.0, 10, '{}'::jsonb)`;
+  } catch (e) {
+    ambiguous = (e as Error).message;
+  }
+  assert(/not unique/.test(ambiguous), `…and a 4-argument call is ambiguous (${ambiguous.split("\n")[0] || "it succeeded"})`);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("041") });
+  assert((await forms()) === 1 && (await aclOf(SIX)) === acl && (await bodyOf(SIX)) === body040 && /(^|,)jit=off(,|$)/.test(await settingsOf(SIX)) && /(^|,)enable_nestloop=on(,|$)/.test(await settingsOf(SIX)) && /(^|,)enable_tidscan=on(,|$)/.test(await settingsOf(SIX)),
+         "re-applying 041 alone drops the 4-argument form again and leaves the 6-argument form's ACL, body and clauses as they were — the last definer restores the shipped state by itself");
+  assert((await answer("rare")) === rareBefore, "…and the filtered call answers as before");
+  await sql.unsafe(`REVOKE ALL ON FUNCTION ${SIX} FROM ob1_upgrade_searcher41`);
+  await sql.unsafe(`GRANT EXECUTE ON FUNCTION ${SIX} TO PUBLIC`);
+  await sql.unsafe(`DROP OWNED BY ob1_upgrade_searcher41`);
+  await sql.unsafe(`DROP ROLE ob1_upgrade_searcher41`);
+  await sql.close();
+}
+
+console.log("\n[20] Migration 042 on a schema without 034 — refused up front, naming 034 and --reapply, and applied once the table exists (SMD-1749)");
+{
+  // A brain adopted with --baseline at a ledger through 042 whose schema stops
   // before 034 — a guide-built brain, or one baselined and never re-applied.
-  // 041's two COMMENTs would fail bare there (relation "query_log" does not
+  // 042's two COMMENTs would fail bare there (relation "query_log" does not
   // exist), and a plain run — the compose stack's, gating the server — would
   // stop with no remedy named; the file opens with 031's guard instead.
   await dropSchema(URL_);
@@ -1454,32 +1522,32 @@ console.log("\n[19] Migration 041 on a schema without 034 — refused up front, 
   const baselined = await migrate("--baseline");
   assert(baselined.code === 0, `--baseline records every migration over the pre-034 schema (exit ${baselined.code})`);
   const sql = new SQL({ url: URL_, max: 1 });
-  const the041 = MIGRATIONS.find((f) => f.startsWith("041_"))!;
-  await sql`DELETE FROM schema_migrations WHERE name = ${the041}`;
+  const the042 = MIGRATIONS.find((f) => f.startsWith("042_"))!;
+  await sql`DELETE FROM schema_migrations WHERE name = ${the042}`;
   const plain = await migrate();
-  const ok = plain.code === 1 && /041_query_log_tool_comment\.sql\s+FAILED: migration 041 needs 034 \(query_log\); this schema lacks it/.test(plain.out) &&
+  const ok = plain.code === 1 && /042_query_log_tool_comment\.sql\s+FAILED: migration 042 needs 034 \(query_log\); this schema lacks it/.test(plain.out) &&
     /adopted with --baseline\?\)\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plain.out);
-  assert(ok, `a plain run fails at 041 naming 034 and --reapply, not with a bare "does not exist" (exit ${plain.code})${ok ? "" : `:\n${plain.out}`}`);
-  assert(Number((await sql`SELECT count(*)::int AS c FROM schema_migrations WHERE name = ${the041}`)[0].c) === 0, "…records nothing");
+  assert(ok, `a plain run fails at 042 naming 034 and --reapply, not with a bare "does not exist" (exit ${plain.code})${ok ? "" : `:\n${plain.out}`}`);
+  assert(Number((await sql`SELECT count(*)::int AS c FROM schema_migrations WHERE name = ${the042}`)[0].c) === 0, "…records nothing");
   // The guard is the only thing between the file and the table: with 034's
   // table in place the same pending file applies and both comments land.
   await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("034") });
   const applied = await migrate();
-  assert(applied.code === 0 && /041_query_log_tool_comment\.sql\s+applied/.test(applied.out), `…and once 034's table exists the plain run applies 041 (exit ${applied.code})${applied.code === 0 ? "" : `:\n${applied.out}`}`);
+  assert(applied.code === 0 && /042_query_log_tool_comment\.sql\s+applied/.test(applied.out), `…and once 034's table exists the plain run applies 042 (exit ${applied.code})${applied.code === 0 ? "" : `:\n${applied.out}`}`);
   const [{ c: col }] = (await sql.unsafe(COLUMN_COMMENT_SQL, ["query_log", "tool"])) as { c: string | null }[];
   const [{ c: tbl }] = (await sql.unsafe(TABLE_COMMENT_SQL, ["query_log"])) as { c: string | null }[];
   assert(/<writer>\/<pointer>/.test(col ?? "") && /<writer>\/<pointer>/.test(tbl ?? ""), "…and both live comments name <writer>/<pointer>");
   await sql.close();
   // The ledger records 035–040 already; applying them completes the schema
   // behind it, so this section leaves a full brain as every section before it
-  // did, and [20] can start from it (second and fourth review passes).
+  // did, and [21] can start from it (second and fourth review passes).
   await applyMigrations(URL_, { ...OPTS, only: (f) => f >= "035" });
 }
 
-console.log("\n[20] test-support's schema reset leaves nothing of the fork's in public — every table, function and type a migration creates is on its drop lists (SMD-1749)");
+console.log("\n[21] test-support's schema reset leaves nothing of the fork's in public — every table, function and type a migration creates is on its drop lists (SMD-1749)");
 {
   // The reset drops a hand-kept list, and a name a migration added without a
-  // line there survives every section boundary: 034's table did until [19]
+  // line there survives every section boundary: 034's table did until [20]
   // built a schema "without 034" and found it standing, and three functions
   // (024, 025, 026) did until SMD-1749's second review pass listed the
   // survivors on a fully applied brain. So the catalog is asked here, after a
@@ -1496,7 +1564,7 @@ console.log("\n[20] test-support's schema reset leaves nothing of the fork's in 
   // exactly those: relkind 'c', 'p' and 'f' were outside its relation query,
   // and its type query excluded every composite, a table's row type and a
   // CREATE TYPE … AS alike. Then they are dropped by hand and the sweep must
-  // come back empty. The brain is the full one [19] leaves.
+  // come back empty. The brain is the full one [20] leaves.
   const sql = new SQL({ url: URL_, max: 1 });
   for (const ddl of [
     `CREATE TYPE ob1_probe_rowtype AS (a int)`,

@@ -68,14 +68,14 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Ninety-three numbered changes on top of the pin. Seven fix defects found in an
+Ninety-five numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
 data layer (Phase 2). Ten (changes 31, 53, 55, 59, 79, 82, 86, 87, 88, and 89) ship no runtime change at
 all: each is a measurement that decided against building something.
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–93 are the numbered `###` sections** further down, which is
+sections. Changes **18–95 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -204,7 +204,8 @@ db/test-bench-reuse.ts           # change 76 (new file — the kept bench corpus
 db/bench-oracle.ts               # change 76 (new file — the cache's pure part: what of a marker's entry a run may trust; test-schema [37])
 db/migrations/039_*.sql          # change 81 (new file — the two HNSW indexes over embedding::halfvec under their names; match_thoughts' walk branches order by the cast)
 db/migrations/040_*.sql          # change 91 (new file — 039's match_thoughts with `SET jit = off`; a disabled planner path no longer JIT-compiles the gate's sample)
-db/migrations/041_*.sql          # change 93 (new file — query_log.tool's two shapes and the table's cite clause as COMMENTs, behind 031's guard; test-schema [40], test-upgrade [19]; [20] keeps test-support's reset lists honest)
+db/migrations/041_*.sql          # change 94 (new file — 040's match_thoughts with `enable_nestloop = on` and `enable_tidscan = on` pinned; an operator's setting no longer reaches the call's joins or the gate's probe)
+db/migrations/042_*.sql          # change 95 (new file — query_log.tool's two shapes and the table's cite clause as COMMENTs, behind 031's guard; test-schema [41], test-upgrade [20]; [21] keeps test-support's reset lists honest)
 evals/eval-quant.ts              # change 81 (new file — vector, halfvec and binary-with-rerank measured on real vectors at the shipped width; test-schema [38], test-upgrade [16])
 <4 vendored MCP servers, 1 sample> # change 78 (a McpServer built per request — per session in the cost recipe's after sample — in place of one shared and connect()ed to a fresh transport each time)
 <17 pin sites, 3 lockfiles>      # change 83 (@hono/mcp 0.1.1 → 0.1.5: the transport lets go of each POST it has answered; the after sample's sweep closes the transports it drops)
@@ -14128,8 +14129,8 @@ row, so a cite now counts as click-through relevance too — the stronger label,
 and the export's note says so. 034's table `COMMENT` still described an action
 as a fetch, edit or delete; a migration's text is not edited after the fact
 (the ledger would read it as drift), so the server, store, preflight and README
-carried the new shape and the `COMMENT` predated it until change 93
-re-commented the table and the column through migration 041.
+carried the new shape and the `COMMENT` predated it until change 95
+re-commented the table and the column through migration 042.
 
 `evals/utilization.ts` is the pure part: 034's attribution rule (most recent
 prior search by the same agent, within the window, whose results held the id; a
@@ -14176,7 +14177,7 @@ cited* belongs on the event itself, which is SMD-1730's event shape (Phase 1
 of SMD-1729), not a column bolted onto 034 now. The column's own `COMMENT`
 still described three plain names; re-commenting it through a new migration,
 as 028 did for the claim table, was **SMD-1749** (a third pass proposed it;
-a second mechanism for this PR) and is change 93.
+a second mechanism for this PR) and is change 95.
 
 An `update_thought` that re-sends the pointer
 the row already holds logs a cite although nothing changed (a third pass):
@@ -14501,7 +14502,8 @@ parent lookups become joins over the whole chunk table, 2–3 s on every
 filtered call with rows, identical rows and the same under 038. Pinning
 `enable_nestloop = on` on the function would remove that — and would
 override the operator's setting for every statement of the call, a second
-mechanism and its own decision: SMD-1677, filed with this table.
+mechanism and its own decision: SMD-1677, filed with this table (done:
+migration 041, change 94).
 
 **What the clause does not fix.** Under row-level security the collection
 and the walk's direct CTE are sequential scans of the heap (`jsonb_contains`
@@ -14550,7 +14552,7 @@ default column in the table above is within the run's spread (0.99–1.30 ms
 across the six cells that ran without JIT under either function).
 
 **Not done here.** The walk under an operator's `enable_nestloop = off`
-(SMD-1677, the table above); the plan mode of the walk and the threshold
+(SMD-1677, the table above; done: migration 041, change 94); the plan mode of the walk and the threshold
 (SMD-1464); row-level security's sequential scan (SMD-1625); preflight's
 recogniser for the gate's body (change 80's "Not done here"). The
 ten-million arm was not re-run; a hundred million rows was not run.
@@ -14641,7 +14643,7 @@ ad hoc 2,469-page heap 19,752 buffers and 152 ms for the statement, the
 empty-filter call 22 → 164 ms. That is 13's state (038's Prerequisites)
 reached on a supported version by an operator's setting, the cost the gate
 exists to avoid, and no clause on the function reaches it — SMD-1703, filed
-with the table. Pass 2's 18 branch had asserted `Disabled: true` and no JIT
+with the table (done: migration 041 pins `enable_tidscan = on`, change 94). Pass 2's 18 branch had asserted `Disabled: true` and no JIT
 block and passed over that plan without naming it (the `Disabled: true`
 it matched was the sequential scan's); [5e] now asserts the node per case
 on 18 — a `Seq Scan` under `enable_tidscan = off`, the TID Range Scan under
@@ -14886,8 +14888,592 @@ shows `[undated]`/`[infinity]` and `fetch` titles an undated thought `Open Brain
 same `new Date(...)` fabrication; the fork's fix lives in `server-portable`, and
 this is not filed upstream (an undated row reaches no capture path).
 
+### 93. The community schemas apply on plain Postgres — twelve `schemas/*.sql` stop granting to Supabase's roles and enabling RLS for them, and `migrate.ts --grant` learns their tables, sequences and functions as a `community` group; one rule refuses the constructs' return in `schemas/` and `db/` (SMD-1796)
 
-### 93. The cite shape is stated at the table — `query_log.tool`'s two shapes, and the table's cite clause, carry a COMMENT (SMD-1749)
+Seventeen SQL files live under `schemas/`. Applied to a brain built by
+`db/migrate.ts` with no Supabase role present — the fork's deploy — **twelve
+stopped at their first statement naming one**: `role "service_role" does not
+exist`, or `"authenticated"`, or `"anon"` (measured by applying each to a
+migrated PGlite brain, which is now test-schema [40]). Two more failed only
+because a prerequisite had (readwise-books filters on enhanced-thoughts'
+`source_type`; typed-reasoning-edges alters entity-extraction's `edges`), and
+wiki-pages for `CREATE EXTENSION pgcrypto`, which PGlite does not ship and
+which the file needs only for `gen_random_uuid()`, a core function since
+Postgres 13. Where an operator had created the roles to get past the GRANTs,
+the files' `ENABLE ROW LEVEL SECURITY` with a policy `FOR service_role` did
+the quieter thing: the role they actually connect as is not the table's owner
+and has no `BYPASSRLS`, so RLS with no policy for it denied it every row —
+`thought_audit` included, and 008's audit trigger with it. Smart-ingest's two
+policies on `auth.uid()` and its guarded foreign key into `auth.users` were the
+same fact in GoTrue's schema. `db/migrations/` has been clean of all this since
+001 (test-schema [10] held it there); the community tree was not.
+
+**The statements are gone from the twelve files**, each left with a note at the
+cut saying what stood there, why it fails off Supabase, and where the grant now
+lives. What stays is what plain Postgres understands: the `REVOKE … FROM
+PUBLIC` on the eight SECURITY DEFINER functions and wiki RPCs (a function so
+revoked is callable only by a role granted it — upstream's intent, kept), the
+`NOTIFY pgrst` lines (harmless anywhere), and the comments. Functions upstream
+granted to `authenticated, service_role` without revoking PUBLIC lose the grant
+and nothing else: EXECUTE was PUBLIC's throughout. Wiki-pages loses the
+extension line; smart-ingest loses the `auth.users` foreign key (a
+single-operator brain has no `auth.users`; `user_id` stays a nullable uuid).
+
+**The grant path is `migrate.ts --grant`, widened.** `db/config.mjs`'s
+`ROLE_GRANTS` gains a `community` group — 25 tables, 6 sequences, 8 functions,
+each row naming the `schemas/` file — and its rows now come in three kinds:
+`table`, `sequence` and `function` (the function with its argument types, as
+GRANT and `to_regprocedure` take them). Two facts Supabase's default privileges
+had hidden decide which rows exist beyond the tables, both measured in [40]
+rather than recalled: an INSERT into a `BIGSERIAL` table is refused on the
+sequence (`permission denied for sequence ingestion_jobs_id_seq`) with the
+table fully granted, so the six serial sequences are listed by name (upstream's
+entity-extraction granted `ALL SEQUENCES IN SCHEMA public`); an INSERT into the
+identity-column table (`wiki_section_revisions`) gets past privileges to its
+NOT NULL columns with no sequence grant, so the seventh is not. The privileges
+are upstream's own for its service role (`GRANT ALL` read as the four DML
+verbs; the audit and revision tables keep `SELECT, INSERT`), merged per object
+across groups — `thought_audit` is 008's table with `capture`'s INSERT and the
+`SELECT` upstream gave beside it; `thought_entities` is 016's, the one name
+upstream's entity-extraction shares with the migration, so its row carries
+`extraction`'s privileges exactly and reaches no new table. `--grant`
+checks presence per kind through one statement both it and the suites run
+(`grantPresenceSql`: `to_regclass` for tables and sequences, `to_regprocedure`
+for functions), grants what exists, and names the rest as "not yet present,
+skipped" — so it runs before a community schema is applied, and again after.
+Presence is per object, not per file, so the two rows whose tables a migration
+also creates are issued on every migrated brain — `thought_audit` gains the
+`SELECT`, `thought_entities` nothing — which is how test-preflight's `--grant`
+assertion found the merge: `GRANT SELECT, INSERT ON thought_audit`, not
+`GRANT INSERT`. A fourth kind, `view`, carries author-session-id.sql's
+`thought_provenance`: GRANT and `to_regclass` take a view as a table, DROP
+TABLE does not, and a role's `SELECT` on `thoughts` does not reach a view over
+it.
+`db/README.md`'s grants table gains the rows, and check-fork-consistency's
+grants check now requires every view, sequence and function named there too.
+
+**One rule keeps the constructs out**, in two places from one spelling.
+`config.mjs`'s `SUPABASE_SQL_RULES` — `service_role`; `TO`/`FROM` lists ending
+in `authenticated` or `anon`; `auth.uid()`, `auth.role()`, `auth.jwt()`,
+`auth.users`; a `supabase_` name; `ENABLE ROW LEVEL SECURITY` or `CREATE
+POLICY` — matched over the whole of `stripSqlComments`' output, one hit per rule
+and line, so a statement broken across lines is a hit. That strip is
+literal-aware: `--` and slash-star comments go, string literals and quoted
+identifiers stay, and a dollar-quoted body is scanned within with its own
+comments stripped, newlines kept so a hit's line number is the file's. String
+literals are scanned, not skipped: `EXECUTE 'GRANT … TO service_role'` runs the
+grant as surely as the bare statement (recipes/brain-health-monitoring grants
+that way). A header quoting a forbidden statement to explain its absence is
+therefore not a hit, and a statement is — the property test-schema [10] has
+wanted since migration 012's header first tripped its predecessor, now without
+the "no migration puts `--` in a literal" assumption: **SMD-1316 is closed by
+this.** check-fork-consistency check 12 runs the rules over every `.sql` under
+`schemas/` and `db/`, no exceptions; [10] runs them over the migrations from
+inside the suite; [40] over `schemas/`, with a probe of the three shapes the
+old strip could not tell apart (a literal's `--` followed by a statement, a
+body's comment, a body's EXECUTE string).
+
+**Tests.** test-schema [40], on a second PGlite so the files' trigger on
+`thoughts` and new columns meet none of the suite's other sections: every file
+applies in prerequisite order with no Supabase role; every community object is
+present by `--grant`'s probe; every table the files created is in the group
+(23 created of 25 listed — the two pre-existing named), every serial sequence
+and no identity one, every function `REVOKE`d `FROM PUBLIC` and nothing else;
+then a role with nothing, whose `INSERT … DEFAULT VALUES` into every community
+table answers 42501 before any grant (the drop-the-mechanism mutant, run
+first), is still refused on exactly the six serial tables with the tables
+alone granted, and is refused nowhere with the whole group — reads every
+table, takes a value from every sequence, may EXECUTE every function, and
+cannot UPDATE the revision history. test-live [18], the half PGlite cannot do:
+`--grant --dry-run` over TCP names every community object as not yet present
+before the files, the seventeen apply over TCP, `--grant` then issues all of it
+with nothing skipped, and a LOGIN role connecting as itself inserts, takes
+sequence values, executes, calls `wiki_upsert_page` for real and cannot rewrite
+revisions. `dropSchema` drops the community tables with the rest so the next
+run starts clean. Seventeen README files (the sixteen schemas' and the
+template's): the "open the Supabase SQL Editor and paste" step is `psql "$DATABASE_URL" -f schema.sql` then `bun migrate.ts
+--grant <role>` (or "nothing to grant" where the file adds only functions or an
+index), and every sentence that said `service_role` holds something now says
+what the fork does instead.
+
+**Not done here.** Thirteen more SQL files carry the same constructs under
+`extensions/` (five) and `recipes/` (eight) — mostly per-user `auth.uid() =
+user_id` policies, which are a design question (SMD-1716's operator model
+against per-user rows), not a cut; check 12 does not reach those directories,
+and their ticket is SMD-1795's next sub-issue. The READMEs' later steps still
+say "verify in Database → Functions" and "test from the SQL Editor" — Supabase
+dashboard verification, which SMD-1802's docs pass owns. `migrate.ts` does not
+apply community schemas; `psql -f` does, and `--grant` follows.
+
+**Review, first pass** (one cold reviewer beside the author's read, over the
+commit). Fixed: the community `SELECT` on `thought_audit` was justified by
+"the readers author-session-id.sql adds", which read `thoughts`, not the audit
+table — the grant stays as upstream's, the reason is corrected in three places
+(caught: reading the two files the claim named); that same file's view,
+`thought_provenance`, was in no row, so a granted role got `permission denied
+for view` — a `view` kind, a row, and [40]/[18] probe it (caught: the reviewer
+asking what a role's `SELECT` on `thoughts` does not reach); the
+`thought_entities` community row carried `UPDATE`, which — issued on every
+migrated brain by name — widened 016's own `extraction` grant on brains that
+never applied upstream's file; it is now that row's privileges exactly (caught:
+comparing the two rows' verbs); `stripSqlComments` read `E'\''` as two quotes,
+flipping literal parity for the rest of a file — 016 already carries an
+E-string (caught: an adversarial input the reviewer fed the stripper); the rules
+ran per line, so `to\n  authenticated` and `ENABLE ROW LEVEL\n  SECURITY`
+passed — they run over the whole stripped text now, quoted API roles included,
+and [40]'s probe grew the three shapes (caught: the same probing); the README
+said "four" schemas use `BIGSERIAL` where three do; `--grant`'s skipped list
+joined function signatures with the `", "` their argument lists contain; a
+dangling sentence in thought-audit's note; enhanced-thoughts' header called
+the "do NOT grant to `anon`" notes a posture that PUBLIC already includes on
+plain Postgres. Declared, not changed: [18]'s restore does not remove the
+indexes the files build on migration-owned tables (dropSchema does, next run;
+a kept database keeps them — said in the comment); the rules do not name every
+Supabase-ism (`net.http_post`, `vault.`, `current_setting('request.jwt…')`),
+none of which the tree carries; a `FROM anon` table alias would be a false
+positive; `TABLES` in test-support skips its two duplicates now. No finding
+became a ticket.
+
+**Review, second pass** (a second cold reviewer, given the first pass's
+findings, beside the author's re-read of what that pass added). Its findings
+sat in the first pass's additions, which is the stop signal: three sentences
+still said the rules ran "per line" after that pass moved them to the whole
+text (config's rule doc, the type declaration, this section — caught: reading
+the doc against the code); the row type's doc named three kinds where the type
+declares four; the live section's comment on the indexes its restore cannot
+remove miscounted them twice over — enhanced-thoughts builds five on `thoughts`,
+not four, and provenance-chains one nobody had named (caught: grepping every
+`CREATE INDEX` in the files against the migrations' own names); the
+entity-extraction note said a trigger "fires as the table's owner set it up",
+where Postgres checks EXECUTE on a trigger function at CREATE TRIGGER, not when
+it fires — right conclusion, wrong mechanism; test-support's drop-list header
+says a table with a foreign key must precede `thoughts`, and the community
+tables it now appends follow it — harmless, since the CASCADE cuts the
+constraints, and the comment says so now. The author's own re-read added the
+view to every sentence that listed the kinds, and to the live section's
+dry-run assertion. By-catch, pre-existing: thought-audit's file builds
+`thought_audit_session_id_idx`, the same column and predicate as 008's
+`thought_audit_session_idx` under another name, so on a migrated brain it adds
+a redundant index — its README says so now; the file is upstream's. Declared:
+a hit that spans lines is reported at the line its statement starts on. No
+finding became a ticket.
+
+**Review, third pass** (at the user's call after the stop signal; a third
+cold reviewer, given both passes' findings and pointed at what they had not
+read — `--grant`'s runtime path, the real files under the stripper, the notes'
+counts). One finding of substance, outside every previous addition, so the
+second pass's stop call was early: **`--grant` could report "Granted … over N
+object(s)" having granted nothing.** Postgres lets a role that holds a
+privilege without grant option issue the GRANT; it answers `WARNING: no
+privileges were granted` and the statement succeeds as a no-op, a notice the
+driver does not surface, and the transaction commits — measured in PGlite, a
+role with SELECT alone "grants" INSERT to another and `has_table_privilege`
+says false (caught: run-it). Pre-existing since change 62, made likelier by
+the community group: the natural sequence is an admin applying `psql -f
+schema.sql`, then the server's own role — itself `--grant`ed earlier, so
+holding privileges without grant option — granting a worker. `--grant` now
+runs `grantVerifySql` after its GRANTs in the same transaction — one row per
+privilege, USAGE on the schema included, through `has_table_privilege`,
+`has_sequence_privilege`, `has_function_privilege` — and rolls back naming
+what the role does not hold and whom to connect as; a grantor's own 42501
+gets the same hint; `mergedGrants` is the one list both the statements and
+the check are built from; [40] drives the check with the tables alone granted
+and reproduces the silent no-op with a weak grantor (held: test-schema [40]).
+Also fixed: the thought-audit README's optional third step applied
+`author-session-id.sql` after `--grant` and never said to run it again, so
+its view was as unreadable as before the first pass's fix — the step now
+says so and the file carries a note (caught: walkthrough); the
+entity-extraction note still said five tables with four verbs after the
+mention row lost `UPDATE`; the grants table's header said "Table (migration)"
+over views, sequences, functions and files; thought-work-claims' and
+provenance-chains' READMEs kept an "executable by `service_role` only"
+outcome; the skipped-list hint did not say that a function existing under
+another argument list is skipped the same way (caught: cold-read). And the
+two review-pass commits had written their mechanisms mid-bullet, so
+`scripts/mechanism-yield.mjs` counted them implicit — their bodies are
+reworded to end each bullet in the tag, before the push (caught: run-it;
+held: mechanism-yield.mjs). No finding became a ticket.
+
+**Review, fourth pass** (a fourth cold reviewer, aimed at what the third
+added). Every finding sat in the third pass's additions — the stop signal,
+this time by its own rule. Fixed: the verify's rollback path — the throw
+inside Bun's `begin`, the rollback, the thrown message reaching the outer
+catch — was reasoned about, not run; test-live [18] now runs `--grant`
+connected as its granted LOGIN role (every privilege held, none with grant
+option) against a third role and reads exit 1, the "were not granted" line
+naming that role, no 42501 hint, and the third role holding nothing (caught:
+cold-read; held: test-live [18]); [40]'s weak-grantor cleanup dropped the
+grantee role without revoking its privileges first, so had the GRANT ever
+taken effect the DROP ROLE would have aborted the suite instead of recording
+one failure (caught: run-it); `--dry-run` kept the short skipped hint after
+the live path's grew — one string now; `db/README.md` said nothing of the
+verify — one sentence; thought-work-claims' README implied an EXECUTE grant
+gates 015's RPCs, which revoke nothing from PUBLIC — what a caller needs is
+the `worker` group's table privileges; the FORK-paragraph bullets in two pass
+commits carried no tag and counted as implicit findings — folded into the
+bullets before them. Noted, no change: a fresh role holds USAGE on `public`
+through PUBLIC on stock Postgres, so the verify's schema row bites only on a
+hardened database; two `run-it` tags on grep-driven index comparisons are
+closer to a tooling-assisted cold read.
+
+**Tidied while the files were open.** The listing of the community SQL files
+in prerequisite order lived twice, in test-schema [40] and test-live [18];
+it is test-support's `communitySchemaFiles()` now, with the order's reasons in
+one docblock. The template README's install step had grown into one run-on
+sentence; it is the two steps every schema README has. Wiki-pages' three
+identical parentheticals after its REVOKEs point at the note above them
+instead of repeating it. No behaviour change; the blank-line runs the diff
+touches are the files' own.
+
+**Upstream status:** the twelve files now differ from upstream's in their
+grant/RLS sections (plus wiki-pages' extension line and smart-ingest's foreign
+key), which a rebase will show as conflicts wherever upstream edits those
+sections — the cost this fork already carries for the four files change 58 cut.
+Upstream's own path needs none of this: on Supabase the roles exist and
+`service_role` bypasses RLS. The literal-aware strip and the rule are
+portable; the grant group is the fork's.
+
+### 94. `match_thoughts` pins the two planner paths its statements are built around — migration 041 adds `enable_nestloop = on` and `enable_tidscan = on` to 040's function, so an operator's `enable_nestloop = off` no longer turns every join in the call into a merge or hash join over the whole table, and on PostgreSQL 18 `enable_tidscan = off` no longer turns the gate's eight one-page probes into eight scans of the heap (SMD-1677, SMD-1703)
+
+**The mechanism.** Every join in `match_thoughts`' body is a primary-key
+probe driven by an outer the statement itself bounds: the parent lookup that
+closes each of the three `RETURN QUERY` branches (`FROM best b JOIN thoughts
+t ON t.id = b.tid`, over at most 2 × v_fetch candidates or v_exact rows), the
+broad walk's chunk side (`JOIN thoughts p ON p.id = c.thought_id`, one probe
+per HNSW-ordered candidate, stopping at v_fetch), and the gate's sample
+(eight block numbers to eight TID range probes). A nested loop with an index
+probe inside is the plan for each by construction; the nested-loop disaster
+that `SET enable_nestloop = off` exists to tame — a misestimated outer of
+millions of rows — cannot happen here. But the setting is one operators put
+at database level to stop such a plan elsewhere, and it reaches every call
+to this function. Change 91's million-row A/B ran the function under it and
+found every filtered tier with rows at 2–3 s, the same under 038 and 040,
+identical rows — and filed this. What the planner had done, read out of the
+installed body with `extractBody` and explained under the function's own
+settings on 100,000 rows at 64 dimensions (4,767 heap pages, 50,000 chunk
+rows), custom plan, warm:
+
+| statement | default | `enable_nestloop = off` | what replaced the nested loop |
+| --- | ---: | ---: | --- |
+| unfiltered | 1.10 ms / 3,436 buffers | 41.6 ms / 101,458 | Merge Join, inner `Index Scan using thoughts_pkey` over the whole table (97,800 rows, 35.7 ms) |
+| walk, 50% filter | 2.01 / 4,631 | 82.3 / 156,453 | the same Merge Join (30.7 ms) — and the chunk side a Sort over a Hash Join of every chunk row against a Bitmap Heap Scan of every filtered parent (46 ms) |
+| exact, 900 rows | 2.38 / 8,213 | 39.6 / 104,924 | the same Merge Join (33.4 ms) |
+
+Two things the ticket's table had not shown. The **unfiltered** branch is
+hit too — the closing join is the same in all three branches, so every call
+to a brain whose operator turned nested loops off pays it, not only the
+filtered ones. And the walk's **answer changes**: the hash join computes an
+exact top-v_fetch over all chunks where the nested loop takes the HNSW's,
+so the 50% and 10% tiers return different rows under the setting (marked ≠
+below) and the same rows again once the pin is on.
+
+**Measured at a million rows**, one corpus (the bench's, built under this
+tree and kept as `OB1_PG_KEEP=nl1m`; 49,999 heap pages, 400,000 chunk rows),
+040's function with the two pins applied as an `ALTER FUNCTION` for the
+pinned arms, twenty seeded queries per tier on a fresh connection per cell,
+median of calls 6–20 / 1–5, PostgreSQL 16; ≠ marks rows differing from arm
+A's:
+
+| tier | A default | B `enable_nestloop = off` | C off, pinned | D `enable_tidscan = off` | E off, pinned | F default, pinned | A′ default again |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| unfiltered | 6.12 / 10.4 | 1,330 / 1,348 | 6.85 / 10.1 | 5.93 / 8.68 | 6.29 / 9.20 | 6.94 / 9.95 | 6.59 / 9.16 |
+| 50% | 10.6 / 10.8 | 2,154 / 1,868 ≠ | 10.9 / 11.5 | 9.85 / 10.4 | 10.6 / 13.9 | 11.0 / 12.8 | 11.6 / 11.9 |
+| 10% | 32.4 / 29.7 | 1,757 / 1,662 ≠ | 36.5 / 34.2 | 33.0 / 32.7 | 36.2 / 37.8 | 38.6 / 36.9 | 39.7 / 37.8 |
+| 1% | 31.8 / 35.1 | 1,813 / 1,784 | 35.0 / 35.5 | 34.6 / 33.5 | 33.9 / 36.3 | 34.5 / 47.0 | 36.5 / 33.7 |
+| 5,000 rows | 18.9 / 19.6 | 1,732 / 1,687 | 20.4 / 21.8 | 22.8 / 21.8 | 22.6 / 22.0 | 20.5 / 21.4 | 21.4 / 22.7 |
+| 2,000 rows | 9.47 / 12.3 | 1,830 / 2,143 | 11.9 / 12.9 | 10.8 / 13.1 | 13.6 / 14.8 | 11.1 / 12.2 | 12.0 / 12.6 |
+| 0.1% | 7.67 / 7.52 | 1,820 / 1,847 | 7.50 / 8.63 | 7.62 / 8.02 | 8.78 / 10.9 | 8.08 / 8.06 | 8.92 / 9.51 |
+| 900 rows | 5.59 / 6.90 | 1,649 / 1,647 | 5.27 / 6.78 | 6.68 / 6.27 | 6.95 / 8.77 | 6.25 / 8.31 | 7.07 / 7.80 |
+| 0.01% | 1.13 / 1.53 | 1,524 / 1,534 | 1.09 / 1.51 | 1.17 / 1.76 | 1.31 / 1.84 | 1.10 / 1.23 | 1.26 / 1.84 |
+| nothing | 0.43 / 0.58 | 0.44 / 0.68 | 0.41 / 0.55 | 0.43 / 0.58 | 0.49 / 0.63 | 0.40 / 0.52 | 0.44 / 0.51 |
+
+C against A is what the pin buys where the setting is off: the default's
+time and the default's rows in every tier. F against A and A′ is what it
+costs where the setting was already on: nothing outside the run's own
+spread. The `nothing` tier never paid — its exact branch has an empty
+candidate set, and a hash join with an empty build side reads no probe
+side. Column D is 16: `enable_tidscan = off` there changes the cost figure
+(disable_cost on the probe, which 040 stopped compiling) and nothing else.
+
+**The second pin is SMD-1703's**, measured on PostgreSQL 18.6 with the same
+100,000-row corpus. On 14–17 `enable_tidscan = off` leaves the probe's TID
+Range path in place at disable_cost; on 18 tidpath.c never builds it, so the
+probe's only plan is a sequential scan of the heap with the ctid range as a
+filter, `Disabled: true`, taken anyway, once per block drawn:
+
+| session (18.6) | probe node | buffers | exec |
+| --- | --- | ---: | ---: |
+| default | Tid Range Scan | 8 | 0.35 ms |
+| `enable_tidscan = off` | Seq Scan, `Disabled: true` | 38,136 (8 × 4,767 pages) | 74.7 ms |
+| off, pinned | Tid Range Scan | 8 | 0.25 ms |
+
+Through the function on 18 under the setting every filtered tier cost 78–83
+ms against 0.7–4.8 by default — the empty-match filter included, at 78 ms,
+since the sample runs before the collection — and with the pin every tier
+read the default's time and rows. Under `enable_nestloop = off` 18 behaves
+as 16 does (its disabled-node count still prefers the merge and hash joins:
+unfiltered 38.9 ms, 50% 100 ms, 900 rows 36 ms at 100,000 rows) and the pin
+restores the default there too.
+
+**Migration 041** is 040's `CREATE OR REPLACE` with two clauses after `SET
+jit = off`: `SET enable_nestloop = on` and `SET enable_tidscan = on`. The
+body is 040's — 039's — byte for byte (test-upgrade [19] compares `prosrc`
+across the upgrade; test-schema [20] re-applies 039 and 040 alone and
+compares), with everything 040 carried; this file is the last definer, which
+preflight's remedy and the suites' `restoreShipped` apply alone.
+
+**Why pin here where 040 declined to.** 040 was about a compile: JIT fired
+on a cost figure, and one clause on the executor removed it in every case —
+a disabled path, a generic plan's flat estimate, row-level security — where
+pinning paths would have covered one case each and overridden the operator
+for nothing. This is about a plan: under the setting the planner chooses a
+different, worse plan, and only a pin or a statement shape that admits no
+other plan can give the right one back. The argument is 019's for
+`enable_seqscan = off` — the body's statements are built around one path
+each, and a planner setting made for tables not shaped like that does not
+tune this call, it defeats it — applied to two more paths. 019's "no other
+SET" was written about the walk's bounds and a plan mode; 040 took the
+exception for `jit`, and 041 takes it for two planner paths on the same
+reading. Both tickets asked the policy question once and SMD-1703's update
+made SMD-1677 the place it is decided: the function pins the paths its
+statements rely on, and any pins ship in one migration, one preflight check
+and one clause count.
+
+**Not a statement shape.** A LATERAL subquery that cannot be pulled up —
+`CROSS JOIN LATERAL (SELECT … FROM thoughts t WHERE t.id = b.tid LIMIT 1)
+t`, the sample's own trick; a bare LATERAL is flattened back into the join,
+as the exact branch's comment records — admits only a nested loop, and under
+`enable_nestloop = off` it held the default's plan, buffers and time in all
+three branches (1.46 / 1.37 / 2.43 ms at 100,000 rows). It is the same
+decision, the function choosing its join method, written into four
+statements instead of one clause: it changes the texts test-schema [20]
+compares, swaps the plan aliases (`t`/`t_1`) the bench attributes nodes by,
+carries disable_cost in the estimate (1e10 per join, 2e10 in the walk —
+harmless since 040, but a reader of auto_explain sees it), rests on a
+planner-internals rule (a subquery with LIMIT is not flattened) where a SET
+clause rests on a documented one, and has no answer for the TID range probe,
+whose path on 18 is not costed away but never built.
+
+**Not pinned, deliberately.** `enable_hashagg` and `enable_sort`: with both
+off the sample's DISTINCT draw and every ORDER BY carry disable_cost and the
+planner takes them anyway — the same plan, the same rows, and since 040 no
+compile (change 91's table); pinning them would override the operator for
+no measured gain, so a reader of auto_explain still sees a cost past 1e10 on
+14–17 under those two, and 041's first screen says so. `enable_indexscan`,
+`enable_bitmapscan`, `enable_hashjoin`, `enable_mergejoin`: no measured case,
+no operator reason to set them database-wide, and a function that pins every
+planner setting is a plan mode by another name. The two pinned are the two an
+operator's setting was measured defeating. The operator's escape is 040's:
+`ALTER FUNCTION … RESET enable_nestloop` takes a pin off for a brain whose
+operator wants the session's setting inside the call, and preflight warns
+until the migrator re-applies 041.
+
+**What it does not fix.** Row-level security's sequential scans of the heap
+(SMD-1625); PostgreSQL 13, where the probe has no TID Range path whatever the
+setting (038's Prerequisites); the plan mode of the walk and the threshold
+(SMD-1464).
+
+**What holds it.** preflight's `candidate scan` reads both pins beside 019's
+clause and 040's: ok names all three files; a body missing the pins warns
+with what each setting does without them (the whole-table joins, 18's heap
+scans), naming 041 as the remedy while the ledger does not record it and the
+`ALTER FUNCTION … SET enable_nestloop = on SET enable_tidscan = on` when it
+does; 039 applied alone by hand is reported as two losses with one remedy,
+040 alone as the pins' loss alone, and one pin of two is still the warning
+(test-preflight, 233 assertions). test-schema [20] and [21] pin exactly five
+clauses; [20] re-applies 039 and 040 alone and finds each dropping what the
+later files added; [8e] names 041 the last definer. test-live [5e]'s tidscan
+and nestloop cases now find the default's plan under the session's setting —
+a TID Range Scan at an ordinary cost, no `Disabled` node on 18, the sample's
+buffers on a heap they could have read whole — and, with the pin `RESET`
+(the mutant, what 040's file re-applied by hand leaves), disable_cost back on
+14–17 and on 18 the disabled node back and, under `enable_tidscan = off`, the
+probe a sequential scan reading the whole heap per block; the compile story
+(the forced-on JIT block, the timing mutant) moves to the one path 041 leaves
+unpinned. New [5f] loads 12,000 rows with chunks, both HNSW indexes rebuilt,
+and under a session `enable_nestloop = off` explains the three `RETURN
+QUERY` statements read out of the body under the function's settings: every
+join a Nested Loop touching the default's buffers (within a tenth, plus 64 —
+byte-identical in every run so far); with the pin RESET a Merge or Hash Join
+touching at least the heap's page count more; and through
+the function the pinned call returns the default's ten rows, in order, under
+the setting — the buffer count is the tooth because it does not depend on
+the machine, and the timing at scale is the tables above. test-upgrade [19]
+applies 041 onto a populated 040: no column, signature, row or privilege
+moves, the body byte for byte, the two pins beside 014's, 019's and 040's
+clauses, and after a hand re-apply of 014 puts the 4-argument form back, 041
+alone drops it again; [7]'s tripwire reads "last twelve". db/bench-hnsw.ts's
+before arm for this change is `OB1_BENCH_UPTO=040`, and under default
+session settings its section B should agree with the default row for
+row.
+
+**What it costs where it does nothing.** Two more `proconfig` entries, set at
+call entry and restored at exit — microseconds, what 014, 019 and 040 pay —
+and column F above. The bench's own pair on the same kept corpus (its build
+run, then a reuse with 041 applied onto it, on an idle VM) agrees: section B
+returns the same rows and the same recall in every tier, and its medians
+read 9.7 / 34.7 / 26.4 / 15.1 / 8.1 / 6.9 / 5.6 / 1.0 / 0.3 ms after against
+10.8 / 34.4 / 32.4 / 18.8 / 10.4 / 9.6 / 5.3 / 1.0 / 0.3 before, the 50% tier
+down to the 0.01% and `nothing`. (A first after-run, taken while the
+ten-million rebuild shared the VM, read 20–90% above the before-run in
+every tier with the same rows — the confound, not the pins, and it is not
+cited.)
+
+**Ten million rows.** The SMD-1018 corpus kept from change 76
+(`OB1_PG_KEEP=hnsw10m`, 499,999 heap pages, four million chunk rows; its
+ledger stopped at 037) was brought to 041 by hand — 039's two index rebuilds
+under a database-level `maintenance_work_mem` of 9 GB took twenty minutes —
+and measured through the function, ten seeded queries per tier on a fresh
+connection per cell, median of calls 4–10 / 1–3, PostgreSQL 16. First with
+the whole-table arm in the middle (B, the pins RESET), which took twenty
+minutes on its own; then the pinned arms alone, back to back, on the warm
+cache B had evicted:
+
+| tier | A default (041) | B `enable_nestloop = off`, pins RESET | C off (041), after B | D default, pins RESET | A′ | A (warm) | C off (041), warm | A′ (warm) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| unfiltered | 20.6 / 26.3 | 18,075 / 18,465 | 82.9 / 82.8 | 36.7 / 44.0 | 36.0 / 32.7 | 7.6 / 8.4 | 12.0 / 9.7 | 10.9 / 9.0 |
+| 50% | 22.2 / 28.3 | 28,726 / 33,886 ≠ | 52.8 / 16.8 | 14.1 / 17.7 | 15.0 / 23.7 | 11.4 / 20.9 | 13.4 / 18.2 | 14.3 / 19.7 |
+| 1% | 977 / 879 | 21,510 / 23,355 ≠ | 949 / 821 | 941 / 571 | 963 / 580 | 491 / 339 | 463 / 406 | 428 / 391 |
+| 5,000 rows | 56.9 / 56.2 | 19,884 / 19,806 | 51.8 / 50.6 | 47.6 / 48.7 | 47.5 / 48.4 | 54.4 / 54.5 | 52.8 / 53.9 | 51.7 / 52.8 |
+| 900 rows | 10.6 / 11.2 | 16,779 / 16,806 | 9.4 / 10.1 | 8.0 / 8.8 | 8.2 / 8.9 | 11.0 / 13.4 | 10.7 / 11.5 | 10.1 / 10.8 |
+| nothing | 1.1 / 1.1 | 0.4 / 0.6 | 0.6 / 0.7 | 0.5 / 0.6 | 0.5 / 0.8 | 0.5 / 0.8 | 0.6 / 0.7 | 0.5 / 0.8 |
+
+Seventeen to thirty-four seconds a call under the setting without the pin —
+the merge join's inner side is an index scan over ten million primary-key
+entries, the walk's hash join builds over four million chunk rows — the
+unfiltered call among them, and the walk's rows changed; with the pin, tens
+of milliseconds. Column C after B reads higher than A on the unfiltered and
+50% tiers because B's whole-table scans had just evicted the buffer cache
+(its first-three-calls median says the same), which is why the pinned arms
+were run again alone: warm, C is within A and A′'s spread in every tier. The
+1% tier's 400–1,000 ms is the same in every arm and is not this change's:
+a hundred thousand matching rows walk the index to its seeded bound, change
+28's knife edge at that tier. The bench's own reuse of this volume is over
+(its marker's fingerprint refuses rebuilt indexes; db/README.md says a
+pre-039 corpus must be rebuilt); `podman volume rm ob1-pg-keep-hnsw10m`
+when it is no longer wanted.
+
+**Not done here.** A hundred million rows. Row-level security and the plan
+mode are under What it does not fix; the ten-million volume's retirement
+from the bench is under Ten million rows.
+
+**Review** — pass 1, two reviewers (a cold reader over the diff, the header
+and this section; a run-it reviewer mutating the mechanism in its own
+worktree), triaged fix / ticket / no. What changed: main had moved — PR #83
+(SMD-1328) merged after this branch was cut and numbered its section 91
+beside PR #82's 91 — so main was merged, that section renumbered to 92 and
+moved into file order, and this one is 93 — 94 once PR #84 (SMD-1796) took 93 before this
+was pushed — with the intro's count and range,
+the file list, change 91's three pointers, the README's inventory, the
+bench's header, 041's header and test-live's pointer following (caught:
+cold-read). preflight's warning after the header's own escape hatch
+(`ALTER FUNCTION … RESET enable_nestloop`) had said both pins were missing
+and that "a later redefinition dropped its SET clauses" when one pin was
+taken off by a RESET; it names the pin that is missing and what that setting
+alone does, its ledger clause allows for a RESET, and test-preflight's
+one-pin probe asserts the single-pin wording and the absence of the other's
+(caught: cold-read; held: test-preflight). test-live [5d]'s six strings that
+still named 040 as the installed body and preflight's remedy, and [5e]'s
+finally comment, say 041 (caught: cold-read). 041's first screen had claimed
+the sample's DISTINCT draw was the only cost left past 1e10 where its own
+Design bullet says the body's ORDER BYs carry it too; and the Design bullet
+now says the clauses re-enable a path and do not force one — hash and merge
+joins stay available and the planner still chooses by cost inside the call
+(caught: cold-read). The ALTER-form remedy with the pin SETs (041 recorded,
+pins RESET) had no probe, so a typo in the fragment would have passed the
+suite; one probe asserts the recorded-but-dropped-or-RESET wording and the
+three-SET ALTER (caught: run-it; held: test-preflight). [5e]'s pinned-case
+message hard-coded the node it expected — under the tidscan mutant on 18 it
+read "a TID Range Scan … 344 buffers" over a Disabled Seq Scan; it prints
+the node, the Disabled and JIT terms it saw (caught: run-it). What the run-it
+reviewer verified: each pin deleted from 041 is caught by all four suites
+(test-schema [20] and [21], test-preflight's shipped-ok and re-apply probes,
+test-upgrade [19], test-live [5d], [5e]'s pinned case with the
+self-incriminating cost 1e10 or 8e10, and [5f]'s three pinned arms reading
+"every join is a Nested Loop (Merge Join)"); the tidscan pin deleted on 18
+fires [5e] by buffers, "344 buffers on a 43-page heap", and by the Disabled
+and Seq Scan terms — SMD-1703's tooth; [5f]'s pinned arm is a tooth on its
+own when the mutant arm's bound is loosened (mutant C), so the two arms are
+independent; preflight's `pinned` forced true fails four probes and the
+pins-alone remedy renamed to 040's file fails two; [19]'s precondition
+catches the section applied onto 039; a database-level `ALTER DATABASE … SET
+enable_nestloop = off` behaves as the session-level SET the tests use, and
+the pinned statements carry no disable_cost term under it. Not changed:
+[20]'s five-settings string loosened to accept three or five passes on the
+shipped state — that mutant cannot fail by construction, and [21] pins the
+count independently, as mutant A showed.
+
+Pass 2, the same two reviewers, aimed at pass 1's additions. No defect in
+the mechanism, the preflight logic or the tests; what changed is text. The
+`SET jit = off` comment carried from 040 into 041's CREATE said "this file"
+meaning 040 and ended "not the enable_* paths pinned" two lines above the
+two pins — the one place a reader of the installed file was told something
+false; it attributes itself to 040 and points at this header (caught:
+cold-read). The header's ten-million sentence said "seventeen to thirty-four
+seconds" under a table whose largest median is 28,726 ms — the 34 is the
+first-three-calls figure of the 50% tier that only this section's table
+carries; it says so (caught: cold-read). This section and the README
+described [5f]'s bounds as "at most twice" and "three times as many or
+more" where the code asserts within a tenth plus 64 and at least the heap's
+page count more (caught: cold-read), and the README's "the sample's eight
+buffers" for [5e]'s pinned case is "fewer buffers than the heap has pages",
+the tooth as written (caught: cold-read). preflight's ALTER remedy named
+both pins whenever either was missing, where pass 1 had made the message
+name only the missing one; the remedy follows the message (caught:
+cold-read). test-preflight's comment on the unrecorded-041 probe still
+described the state before pass 1 inserted the recorded-041 probe ahead of
+it, which leaves both pins RESET too (caught: cold-read). [5e]'s timing
+bound is scaled from the run's own EXPLAIN JIT total, and with the pinned
+cases skipping the forced-on arm the list has one entry, pushed only where
+the server compiles: the `jitAvailable` guard alone kept an empty list — and
+an infinite bound that makes the fixed-arm line vacuous — out of the suite;
+an assertion says so if the guard ever moves (caught: run-it). What the
+run-it reviewer verified: every pass-1 wording seam is held — the pin names'
+order swapped, the ledger clause forced to its recorded branch, either
+`pinWhy` sentence dropped, and `pinned` made a disjunction each fail at
+least one probe, the last exactly the one-pin probe written for it; the
+recorded-041 probe reaches preflight's ALTER branch (a misspelt SET fragment
+fails it and nothing else); on the shipped code a database-level `jit = off`
+skips [5e]'s timing arm cleanly on 16 (534 + 1 skipped) as 18 does; with
+`enable_nestloop`, `enable_hashagg` and `enable_sort` all off at database
+level the pinned function returns the default's rows in the default's time
+and the only disable_cost in any statement is the sorts' — the "not pinned,
+deliberately" claim, live; and [5f]'s pinned and default buffer counts were
+byte-identical in every pair over three runs and two queries. Not changed:
+[5f]'s `within a tenth plus 64` could be equality on that evidence, and
+stays a bound so a drift in the walk's reads fails as a drift and not as the
+pin (a boyscout candidate either way). The stop signal fired here: pass 2's
+findings were polish in pass 1's additions and in prose, and the two
+reviewers' mechanism checks were clean twice over. Boyscout, after the
+signal: the tidy-ups both passes cut for space, in the touched files — the
+header's million-row table gains the column E its own sentence counted, its
+four over-long prose lines are rewrapped, this section's Not done here no
+longer repeats What it does not fix and Ten million rows, "column for
+column" is "row for row", test-live's fixture comment names PostgreSQL's
+64 MB default rather than the container's, [5f] asserts the default arm's
+joins are all Nested Loops before it judges the pinned arm against them
+(three assertions, so a planner that ever preferred a hash join on the
+fixture fails as itself and not as the pin) and says its rows check is
+no-harm, test-upgrade [19]'s last assertion reads the tidscan pin beside
+the nestloop one, and preflight's recorded-but-one-pin-missing sentence
+leads with the RESET, since a redefinition would have dropped both. No
+behaviour change.
+
+**The operator's path, walked.** A brain at 040 whose operator has `ALTER
+DATABASE … SET enable_nestloop = off`: preflight's `candidate scan` warns
+"…but not enable_nestloop = on and enable_tidscan = on — migration 041 is not
+applied: an operator's enable_nestloop = off at any level reaches every join
+in the call…", remedy `Apply db/migrations/041_match_thoughts_pin_paths.sql`;
+`bun db/migrate.ts` applies it (one `CREATE OR REPLACE`, no rows touched); the
+next call takes the default's plan under the operator's setting, which stays
+where it was for every other statement on the server. A brain at 041 whose
+operator re-applies 040's file by hand: the pins are gone, the ledger
+unchanged, and preflight names the loss with the `ALTER` that puts both back.
+
+**Upstream status:** not applicable — 014's routing statement, 037's gate and
+038's probe are this fork's, and the pins are clauses on this fork's function.
+
+### 95. The cite shape is stated at the table — `query_log.tool`'s two shapes, and the table's cite clause, carry a COMMENT (SMD-1749)
 
 Change 90 gave `query_log.tool` a second shape on an action row. 034 (change
 65) had one: a plain tool name — `fetch`, `update_thought`, `delete_thought` —
@@ -14917,7 +15503,7 @@ edit as drift). The repo's mechanism for stating a contract on a column is a
 `thought_work_claims.last_error`; change 90's third review pass proposed it
 and declined it there as a second mechanism in a PR about a log convention.
 
-**Migration 041** is a guard and the two statements, and nothing else. The
+**Migration 042** is a guard and the two statements, and nothing else. The
 guard is 031's shape: on a schema without 034's table both statements would
 fail bare (`relation "query_log" does not exist`), and the brain that meets
 this is one adopted with `--baseline` whose ledger records 034 but whose
@@ -14943,15 +15529,16 @@ ACL change, no placeholder, no `CHECK` change: 034's `tool <> ''` is the only
 constraint on the column and a slashed name satisfies it. The export join, the
 utilization report and the server are unaffected; `test-upgrade`'s shape
 comparison (columns and function signatures) does not see a comment. Neither
-`COMMENT` literal carries `--`: `test-schema` [10] strips that sequence to end
-of line before scanning the migrations and holds that no file puts it inside a
-string literal (the guard's HINT names the two flags, as 030's and 031's do; a
-RAISE is not a comment, and the strip only shortens that line).
+`COMMENT` literal carries `--` — 028's convention, from when `test-schema`
+[10] stripped that sequence to end of line; the scan is literal-aware since
+change 93 (SMD-1796), so the guard's HINT naming two flags, as 030's and 031's
+do, is no longer even a consideration, and [41] keeps the convention as an
+assertion of the live text.
 
 The trap a successor must not fall into is 028's: a re-issued `COMMENT`
 replaces the description, so any migration that re-comments `query_log` or
 `query_log.tool` and re-issues 034's text would silently drop the cite clause.
-`test-schema` **[40]** asserts the **live** text of both comments
+`test-schema` **[41]** asserts the **live** text of both comments
 (`col_description`, `obj_description`) after every file has applied — both name
 `<writer>/<pointer>`; the column's gives both shapes, what a cite is, the rule
 as the column's and where the readers are; the three cite values and three
@@ -14966,21 +15553,21 @@ one fails whichever file it is. Two mutants bite: 034's table text re-issued
 verbatim fails the clause assertion; the column statement dropped fails the
 first assertion of the section (a first cut of that mutant removed the
 header's *mention* of the statement instead of the statement and passed
-992/992 — the cut was wrong, not the test). `test-upgrade` **[19]** drives
+992/992 — the cut was wrong, not the test). `test-upgrade` **[20]** drives
 the guard against real Postgres: a schema through 033 baselined at a ledger
-through 041, 041's row deleted, and a plain run fails at 041 naming 034 and
+through 042, 042's row deleted, and a plain run fails at 042 naming 034 and
 `--reapply` and records nothing; then 034's table applied and the same
 pending file lands, both live comments naming the shape. The first run of
 that suite tripped its own window guard — [7] holds that 030 is among the
 last N migrations "to force this note to be re-read" whenever a migration
-lands past it — so the note was re-read (041 needs only 034 and is recorded
+lands past it — so the note was re-read (042 needs only 034 and is recorded
 by the baseline with it, so it never becomes [7]'s plain-run failure point),
-041 added to it and the window widened by one, as the guard asks. The same
-first run also refused `--reapply` because 041's hash had changed under it:
+042 added to it and the window widened by one, as the guard asks. The same
+first run also refused `--reapply` because 042's hash had changed under it:
 the mutant script was rewriting the file while the suite hashed it — a race
 between two of this section's own checks, not a defect; the suite was re-run
-alone. The re-run found a real one: [19] passed its `--baseline` and then
-watched the plain run *apply* 041 — exit 0, one applied, thirty-nine skipped
+alone. The re-run found a real one: [20] passed its `--baseline` and then
+watched the plain run *apply* 042 — exit 0, one applied, thirty-nine skipped
 — on a schema built "without 034". It was not without it. `test-support`'s
 schema reset drops a fixed list of tables and functions, and 034's
 `query_log` and `prune_query_log` were never added to it, so every reset
@@ -14991,7 +15578,7 @@ written. The two names are in the lists now, with the reason at the entry —
 and a second pass, listing what survives a reset on a fully applied brain,
 found three more: `thought_stats_summary()` (024), `find_derivatives` (025)
 and `trace_provenance` (025/026), never dropped either. Those are listed
-too, and `test-upgrade` **[20]** now asks the catalog the same question after
+too, and `test-upgrade` **[21]** now asks the catalog the same question after
 every run — a reset of a full brain leaves no non-extension relation,
 function or type in `public` — so the next name a migration adds without a
 line in the list fails there rather than in whichever section happens to
@@ -14999,16 +15586,16 @@ need the object gone. Deriving the lists from the migrations instead
 (`config.mjs` already reads the owned function set from them for the
 vendored-SQL check) is **SMD-1819**; the tooth makes the hand-kept list safe
 until then. With the
-reset fixed, the guard's own mutant bites: the `DO` block removed, [19]'s
+reset fixed, the guard's own mutant bites: the `DO` block removed, [20]'s
 plain run fails with the bare `relation "query_log" does not exist` and the
 assertion that wants the named message and the remedy fails on it. The
 typed record of what a write cited is
 SMD-1730's event shape (Phase 1a of SMD-1729); when it lands, the migration
 that carries it should re-issue this column's comment to point at it — the
-ticket's note, carried in 041's header.
+ticket's note, carried in 042's header.
 
-**Not done here.** A shared helper for the catalog reads that [40] and
-`test-upgrade` [19] each spelled (a first review pass counted six copies of
+**Not done here.** A shared helper for the catalog reads that [41] and
+`test-upgrade` [20] each spelled (a first review pass counted six copies of
 the `col_description` join across the two suites) was declined in that pass
 because the two suites read through two clients — PGlite's `db.query` and
 Bun's `sql` — and a helper would take a query callback to save two lines. A
@@ -15019,13 +15606,13 @@ them — and so do [27] and [31], the two earlier pure reads (a fourth pass:
 "the diff is the moment the copies are all in view"); [26]'s read joins
 `information_schema` for the column's type and stays its own. Still not done: `test-upgrade`'s
 `shape()` decides "is this ours?" by a hand list of eighteen pgvector name
-prefixes where [20] asks `pg_depend`; changing the predicate every upgrade
+prefixes where [21] asks `pg_depend`; changing the predicate every upgrade
 section compares on is not this ticket's, and is noted on SMD-1819. A
 generic mapping in
 `migrate.ts` — a pending file failing with `42P01`/`42883` on a ledger that
 records earlier files gets the baseline hint once, retiring the block 030,
-031 and 041 each paste — is **SMD-1811** (the same pass's altitude finding);
-041 keeps its guard.
+031 and 042 each paste — is **SMD-1811** (the same pass's altitude finding);
+042 keeps its guard.
 
 **One review pass** so far (a cold reader over the diff and the operator's
 path walked: a fresh brain migrated by the runner, a second plain run, a
@@ -15033,45 +15620,46 @@ path walked: a fresh brain migrated by the runner, a second plain run, a
 and by a role holding only SELECT on the table). The cold reader found the
 number taken: while this branch was in review, main merged SMD-1624 (PR #82,
 migration 040, change 91) and SMD-1328 (PR #83, also claiming change 91), so
-this migration is **041**, `test-upgrade`'s section is **[19]**, [7]'s window
-is twelve, and this section is **93** — and main's own duplicate is repaired
+this migration moved to 042, `test-upgrade`'s section to [20], [7]'s window
+to twelve and this section to 93 (a second merge moved each once more — the
+fifth pass, below) — and main's own duplicate is repaired
 in the merge: SMD-1624 merged first and carries three code pointers to 91, so
 it keeps 91; SMD-1328's section is renumbered **92** and moved after it (its
 heading was its only reference). The same pass caught the column comment
 stating the rule as "any value containing a slash is a cite" where
 `citePointerOf` — the reader the comment points at — treats a slash at either
 end as an open and [39] asserts exactly that; the applied text now states the
-reader's rule (a non-empty name either side of the first slash), and [40]
-anchors on it. And it trimmed [40]: the loops over the six tool names had
+reader's rule (a non-empty name either side of the first slash), and [41]
+anchors on it. And it trimmed [41]: the loops over the six tool names had
 re-asserted `citePointerOf`'s results — a second copy of [39]'s tooth under a
 label that blamed the migration text — and now ask only that the applied text
 names them.
 
 **Second pass** (a cold reader over the merged branch; the run-it arm walked
 an upgrade — a brain built by main's own runner and files, then this branch's
-runner over it: 041 applied, forty skipped, no hash refusal, `--dry-run` quiet,
+runner over it: 042 applied, forty skipped, no hash refusal, `--dry-run` quiet,
 preflight's query-log line reading the shape — and the three server-portable
 suites that share the reset on the merged tree). Its findings, all taken: the
-reset list's three other omissions and [20], above; the `test-support` entry's
-pointer to "[18]", which the merge had renumbered to [19] everywhere else; the
+reset list's three other omissions and [21], above; the `test-support` entry's
+pointer to "[18]", which the merge had renumbered to [20] everywhere else; the
 column comment's "an MCP tool name cannot contain a slash", a protocol
 impossibility the spec does not promise (a SHOULD, a warning in the SDK) —
 stated now as the server's rule with what a foreign slashed name would read as
-and where an unknown plain name is reported; [40]'s two shape assertions had
+and where an unknown plain name is reported; [41]'s two shape assertions had
 anchored on dot-all spans that could reach the other sentence, so a re-issue
 that *inverted* the meanings would have passed — each shape is anchored inside
 its own sentence now; and its plain-name loop had matched the word anywhere in
 the prose ("follow-up fetch" would do), so the two enumerated lists are
-asserted as strings beside their shapes instead. [19] leaves a ledger ahead of
-its schema; [20] starts from a full brain and ends with one, and [19] says so.
+asserted as strings beside their shapes instead. [20] leaves a ledger ahead of
+its schema; [21] starts from a full brain and ends with one, and [20] says so.
 The guard paste was surfaced again and stays SMD-1811's.
 
 **Third pass** (a cold reader; the run-it arm ran the two mutants the second
 pass's anchors claim to catch — the two meanings inverted in a re-issue fails
-three of [40]'s assertions, the plain-name list dropped with the words kept in
+three of [41]'s assertions, the plain-name list dropped with the words kept in
 prose fails one — and the two remaining suites that reset through
 `test-support`, `test-search-path` and `test-bench-reuse`, on the grown lists).
-The reader found [20]'s sweep blind to the object kinds a future migration is
+The reader found [21]'s sweep blind to the object kinds a future migration is
 most likely to add: its relation query stopped at `r`, `v`, `m` and `S`, so a
 partitioned or foreign table and the relation behind a standalone composite
 type were invisible, and its type query excluded every composite — a table's
@@ -15085,23 +15673,39 @@ README's second count line still said 973, and this file's list of new files
 stopped at 040. And the helper decline was reversed, above.
 
 **Fourth pass** (a cold reader who ran both suites; the run-it arm regressed
-[20]'s sweep to the second pass's kinds and watched the planted-probe
+[21]'s sweep to the second pass's kinds and watched the planted-probe
 assertion fail on exactly the composite type and the partitioned table, so
 the self-check has teeth). Nothing touched the migration or its contract. The
 sweep's exception for an extension's members was too narrow in the other
 direction: an extension's composite type records its membership on the type,
 not on the relation behind it, and a sequence behind an extension table's
 serial column records only its ownership of the column, so an image that
-gained such an extension would have failed [20] on a reset that dropped
+gained such an extension would have failed [21] on a reset that dropped
 everything of the fork's — a relation is excepted now when it, its row type
-or its owning table is an extension's. [20] had also built the full brain it
-then dropped, twice over; [19] completes its own brain now (035–040 are on
-the ledger already) and [20] starts from it. `test-schema` [10]'s header still
+or its owning table is an extension's. [21] had also built the full brain it
+then dropped, twice over; [20] completes its own brain now (035–040 are on
+the ledger already) and [21] starts from it. `test-schema` [10]'s header still
 denied that any migration puts `--` inside a string literal, three RAISE HINTs
-after that stopped being true; it says what is true and why the strip is
-still safe. Two `String(…)` wrappers over values already typed as strings are
+after that stopped being true; the pass corrected it — and main's change 93
+then made the strip literal-aware and rewrote that header, so the correction
+was overtaken in the next merge and main's text stands. Two `String(…)` wrappers over values already typed as strings are
 gone. A claim that CI runs neither `test-upgrade` nor its container was
 checked and does not hold: the "Schema against real Postgres" job runs it.
+
+**Fifth pass** (a cold reader; the run-it arm planted a serial table, its
+sequence, a loose sequence and a view beside the fork's objects and ran [21]'s
+relation sweep over the reset: all four seen, nothing excepted — the
+ownership path the fourth pass added excepts only what an *extension's* table
+owns, and on this image the exception hides nothing). Main had moved again:
+SMD-1796 (PR #84) took change 93 and `test-schema` [40], SMD-1677 (PR #86)
+took migration 041, change 94 and `test-upgrade` [19] — and repaired the
+duplicate 91 the same way this branch had. So, a second time: this migration
+is **042**, this section **95**, its `test-schema` section **[41]**, its
+`test-upgrade` sections **[20]** and **[21]**, [7]'s window thirteen; the
+guard's message, both suites' regexes, the reset list's two pointers, the
+README's ledger and the inventory line follow. Two tickets took the next
+number in one afternoon, then two more overnight: the renumber trap SMD-1804
+means to retire.
 
 **Upstream status:** not sent — the query log is this fork's (change 65).
 
