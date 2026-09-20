@@ -3685,6 +3685,25 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
   const [{ n: actorRows }] = await sql`SELECT count(*)::int AS n FROM thought_audit WHERE actor_name = 'consolidator'`;
   assert(Number(actorRows) === 5, `the worker's audit rows are exactly the reviews: three accepts and two cleared rejects (${actorRows})`);
 
+  // SMD-1803: the CLI's day() over a proposal thought with no ISO-form date.
+  // Every --list above ran on real dates, where the pre-fix new Date().toISOString()
+  // and the fix agree — so a revert of db/consolidate.ts's null/infinity handling
+  // survives every assertion so far. Plant an infinity- and a NULL-dated thought,
+  // propose the pair, and list it: pre-fix, day() throws on the infinity row and
+  // the whole --list exits non-zero; the NULL row fabricates 1970-01-01.
+  {
+    const infId = await seed("smd-1803 live: proposal thought dated infinity", 7, 0);
+    const nullId = await seed("smd-1803 live: proposal thought undated", 8, 0);
+    await sql`UPDATE thoughts SET created_at = 'infinity' WHERE id = ${infId}::uuid`;
+    await sql`UPDATE thoughts SET created_at = NULL WHERE id = ${nullId}::uuid`;
+    await sql`SELECT record_supersession_proposal(${infId}::uuid, ${nullId}::uuid, 'conflict_undirected', 0.7, 'infinity vs undated', 0.9, ${KEY}, NULL)`;
+    const oddList = await consolidate("--list", "all");
+    assert(oddList.code === 0, `--list does not crash on a proposal thought with no ISO-form date (exit ${oddList.code}: ${oddList.out.split("\n").filter(Boolean).slice(-2).join(" | ").slice(0, 200)})`);
+    assert(/older \[infinity\]/.test(oddList.out) && /newer \[undated\]/.test(oddList.out),
+           `…the CLI's day() renders infinity and NULL as their own text (${oddList.out.split("\n").filter((l) => /\[(infinity|undated|Invalid|1970)/.test(l)).join(" | ").slice(0, 200)})`);
+    assert(!/\[1970-01-01\]/.test(oddList.out) && !/Invalid Date/.test(oddList.out), "…and fabricates no epoch date");
+  }
+
   judge.stop(true);
   try { unlinkSync(dump); } catch { /* already gone */ }
   await sql`DELETE FROM thoughts`;

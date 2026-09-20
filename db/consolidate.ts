@@ -91,6 +91,7 @@ import {
   type Judgement,
 } from "../server-portable/consolidate.ts";
 import { hashKey, parseKeyRecords } from "../server-portable/auth.ts";
+import { isoTimestampOrNull } from "../server-portable/store.ts";
 import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, reportLost, startHeartbeat } from "./lease.ts";
 
 const args = process.argv.slice(2);
@@ -268,13 +269,21 @@ if (WRITES) {
 type Listed = {
   id: string; status: string; verdict: string; confidence: string; reason: string | null; similarity: number | null;
   judge_key: string; judged_at: string; reviewed_at: string | null; review_note: string | null; superseding_id: string | null;
-  older_id: string; older_content: string; older_created_at: string; newer_id: string; newer_content: string; newer_created_at: string;
+  older_id: string; older_content: string; older_created_at: string | null; newer_id: string; newer_content: string; newer_created_at: string | null;
   older_edited: boolean; newer_edited: boolean;
 };
 // Thought content and entity names are untrusted; cleanForDisplay strips what
 // would move the cursor or rewrite the ID: line a reviewer is about to paste.
 const snippet = (s: string, n = 160) => { const t = cleanForDisplay(s).replace(/\s+/g, " ").trim(); return t.slice(0, n) + (t.length > n ? "…" : ""); };
-const day = (d: string) => new Date(d).toISOString().slice(0, 10);
+// SMD-1803: the CLI twin of the server's proposal renderer. Through the store's
+// canonical rule (isoTimestampOrNull), not new Date().toISOString(), which
+// fabricated 1970-01-01 on a NULL created_at and THREW on an infinity-dated one,
+// taking the whole listing down. A sentinel ("infinity") or no-ISO-form value
+// has no "T", so it prints whole rather than being sliced to a stub.
+const day = (d: string | null) => {
+  const iso = isoTimestampOrNull(d);
+  return iso == null ? "undated" : iso.includes("T") ? iso.slice(0, 10) : iso;
+};
 const verdictPhrase = (v: string) =>
   v === "newer_supersedes_older" ? "the NEWER thought supersedes the older"
   : v === "older_supersedes_newer" ? "the OLDER thought supersedes the newer"
@@ -462,7 +471,7 @@ function progress(force = false): void {
 }
 
 /** A thought as read for judging: the text and 016's hash of it, taken together, so the proposal records what the judge saw. */
-type Row = { id: string; content: string; created_at: string; fingerprint: string };
+type Row = { id: string; content: string; created_at: string | null; fingerprint: string };
 type Candidate = { older_id: string; similarity: number; shared_entities: number };
 type Outcome = { outcome: "succeeded" } | { outcome: "failed"; error: string } | { outcome: "vanished" };
 
