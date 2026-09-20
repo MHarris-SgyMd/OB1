@@ -1498,7 +1498,7 @@ console.log("\n[19] Migration 041 onto a populated 040 — match_thoughts gains 
   }
   assert(/not unique/.test(ambiguous), `…and a 4-argument call is ambiguous (${ambiguous.split("\n")[0] || "it succeeded"})`);
   await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("041") });
-  assert((await forms()) === 1 && (await aclOf(SIX)) === acl && (await bodyOf(SIX)) === body040 && /(^|,)jit=off(,|$)/.test(await settingsOf(SIX)) && /(^|,)enable_nestloop=on(,|$)/.test(await settingsOf(SIX)),
+  assert((await forms()) === 1 && (await aclOf(SIX)) === acl && (await bodyOf(SIX)) === body040 && /(^|,)jit=off(,|$)/.test(await settingsOf(SIX)) && /(^|,)enable_nestloop=on(,|$)/.test(await settingsOf(SIX)) && /(^|,)enable_tidscan=on(,|$)/.test(await settingsOf(SIX)),
          "re-applying 041 alone drops the 4-argument form again and leaves the 6-argument form's ACL, body and clauses as they were — the last definer restores the shipped state by itself");
   assert((await answer("rare")) === rareBefore, "…and the filtered call answers as before");
   await sql.unsafe(`REVOKE ALL ON FUNCTION ${SIX} FROM ob1_upgrade_searcher41`);

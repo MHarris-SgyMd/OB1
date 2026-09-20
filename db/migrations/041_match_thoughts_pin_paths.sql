@@ -76,8 +76,8 @@
 --   branch is hit too: SMD-1624's table, which filed this, had only the
 --   filtered tiers.
 --
---   Through the function on the same corpus — median of calls 6–20 / 1–5 on
---   one fresh connection per cell, rows compared across arms:
+--   Through the function on the same corpus — median of calls 6–20 / 1–5
+--   on one fresh connection per cell, rows compared across arms:
 --
 --     tier         default        enable_nestloop = off    off, this file
 --     unfiltered    2.39 /  4.14     34.8 /  36.7             3.32 / 3.38
@@ -92,17 +92,17 @@
 --   run, arm by arm, on 040's function with the two pins applied as an ALTER
 --   for the pinned arms), PostgreSQL 16, twenty seeded queries per tier:
 --
---     tier         A default        B nestloop off        C off, pinned    D tidscan off   F default, pinned   A′ default again
---     unfiltered    6.12 / 10.4     1,330 / 1,348          6.85 / 10.1      5.93 /  8.68    6.94 /  9.95        6.59 /  9.16
---     50%          10.6  / 10.8     2,154 / 1,868 (≠)     10.9  / 11.5      9.85 / 10.4    11.0  / 12.8        11.6  / 11.9
---     10%          32.4  / 29.7     1,757 / 1,662 (≠)     36.5  / 34.2     33.0  / 32.7    38.6  / 36.9        39.7  / 37.8
---     1%           31.8  / 35.1     1,813 / 1,784         35.0  / 35.5     34.6  / 33.5    34.5  / 47.0        36.5  / 33.7
---     5,000 rows   18.9  / 19.6     1,732 / 1,687         20.4  / 21.8     22.8  / 21.8    20.5  / 21.4        21.4  / 22.7
---     2,000 rows    9.47 / 12.3     1,830 / 2,143         11.9  / 12.9     10.8  / 13.1    11.1  / 12.2        12.0  / 12.6
---     0.1%          7.67 /  7.52    1,820 / 1,847          7.50 /  8.63     7.62 /  8.02    8.08 /  8.06        8.92 /  9.51
---     900 rows      5.59 /  6.90    1,649 / 1,647          5.27 /  6.78     6.68 /  6.27    6.25 /  8.31        7.07 /  7.80
---     0.01%         1.13 /  1.53    1,524 / 1,534          1.09 /  1.51     1.17 /  1.76    1.10 /  1.23        1.26 /  1.84
---     nothing       0.43 /  0.58        0.44 / 0.68        0.41 /  0.55     0.43 /  0.58    0.40 /  0.52        0.44 /  0.51
+--     tier         A default        B nestloop off        C off, pinned    D tidscan off   E off, pinned    F default, pinned   A′ default again
+--     unfiltered    6.12 / 10.4     1,330 / 1,348          6.85 / 10.1      5.93 /  8.68    6.29 /  9.20     6.94 /  9.95        6.59 /  9.16
+--     50%          10.6  / 10.8     2,154 / 1,868 (≠)     10.9  / 11.5      9.85 / 10.4    10.6  / 13.9    11.0  / 12.8        11.6  / 11.9
+--     10%          32.4  / 29.7     1,757 / 1,662 (≠)     36.5  / 34.2     33.0  / 32.7    36.2  / 37.8    38.6  / 36.9        39.7  / 37.8
+--     1%           31.8  / 35.1     1,813 / 1,784         35.0  / 35.5     34.6  / 33.5    33.9  / 36.3    34.5  / 47.0        36.5  / 33.7
+--     5,000 rows   18.9  / 19.6     1,732 / 1,687         20.4  / 21.8     22.8  / 21.8    22.6  / 22.0    20.5  / 21.4        21.4  / 22.7
+--     2,000 rows    9.47 / 12.3     1,830 / 2,143         11.9  / 12.9     10.8  / 13.1    13.6  / 14.8    11.1  / 12.2        12.0  / 12.6
+--     0.1%          7.67 /  7.52    1,820 / 1,847          7.50 /  8.63     7.62 /  8.02    8.78 / 10.9     8.08 /  8.06        8.92 /  9.51
+--     900 rows      5.59 /  6.90    1,649 / 1,647          5.27 /  6.78     6.68 /  6.27    6.95 /  8.77    6.25 /  8.31        7.07 /  7.80
+--     0.01%         1.13 /  1.53    1,524 / 1,534          1.09 /  1.51     1.17 /  1.76    1.31 /  1.84    1.10 /  1.23        1.26 /  1.84
+--     nothing       0.43 /  0.58        0.44 / 0.68        0.41 /  0.55     0.43 /  0.58    0.49 /  0.63    0.40 /  0.52        0.44 /  0.51
 --
 --   Every arm but B returned arm A's rows in every tier; B's 50% and 10%
 --   tiers did not (the hash-join walk's answer). The `nothing` tier is the
@@ -205,15 +205,16 @@
 --     figure used to trigger, and nothing else about the call changes (040's
 --     table). Pinning them would override the operator for no measured gain.
 --     Under those two settings a reader of auto_explain still sees a cost
---     past 1e10 on 14–17 and `Disabled: true` on 18; the first screen says so.
+--     past 1e10 on 14–17 and `Disabled: true` on 18; the first screen says
+--     so.
 --   * Not every planner GUC. `enable_indexscan = off` or `enable_bitmapscan
 --     = off` would defeat every index in the body — 019's clause, the GIN
---     collection, the HNSW walk — and `enable_hashjoin` with `enable_mergejoin`
---     off leaves only the nested loops this file wants. No measured case, no
---     operator reason to set them database-wide, and a function that pins
---     every planner setting is a plan_cache_mode by another name: the wrong
---     altitude. The two pinned here are the two an operator's setting was
---     measured defeating.
+--     collection, the HNSW walk — and `enable_hashjoin` with
+--     `enable_mergejoin` off leaves only the nested loops this file wants.
+--     No measured case, no operator reason to set them database-wide, and a
+--     function that pins every planner setting is a plan_cache_mode by
+--     another name: the wrong altitude. The two pinned here are the two an
+--     operator's setting was measured defeating.
 --   * The operator's escape is 040's: `ALTER FUNCTION match_thoughts(vector,
 --     float, int, jsonb, float, float) RESET enable_nestloop` (or
 --     `enable_tidscan`) takes a pin off for a brain whose operator wants the
@@ -248,16 +249,17 @@
 -- Cost
 --   Two more proconfig entries: GUCs set at call entry and restored at exit,
 --   microseconds, what 014, 019 and 040 pay. Under default session settings
---   the pins change nothing — the paths are on already — and the million-row
---   table under Why holds the pinned function (F) against the unpinned one
---   before and after it (A, A′): every tier within the run's spread, every
---   tier the same rows. The bench's before/after for this file is
---   OB1_BENCH_UPTO=040 against the default; measured as the build run of the
---   kept corpus against a reuse with this file applied onto it, section B
---   agreed in every row and recall column and its medians sat within the
+--   the pins change nothing — the paths are on already — and the
+--   million-row table under Why holds the pinned function (F) against the
+--   unpinned one before and after it (A, A′): every tier within the run's
+--   spread, every tier the same rows. The bench's before/after for this file
+--   is OB1_BENCH_UPTO=040 against the default; measured as the build run of
+--   the kept corpus against a reuse with this file applied onto it, section
+--   B agreed in every row and recall column and its medians sat within the
 --   run's spread (FORK.md change 93 has both rows of figures and the one
---   confounded run that is not cited). Where the setting IS off the pinned call costs the
---   default's time in place of 1.3–2.2 s at a million rows (C against A).
+--   confounded run that is not cited). Where the setting IS off the pinned
+--   call costs the default's time in place of 1.3–2.2 s at a million rows
+--   (C against A).
 --   At ten million rows (the SMD-1018 corpus brought to this file by hand;
 --   ten queries per tier, median of calls 4–10, PostgreSQL 16), through the
 --   function:

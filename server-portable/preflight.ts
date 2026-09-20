@@ -1498,7 +1498,13 @@ if (configFailed) {
               ? ""
               : `; and it does not carry jit = off${ledgerHas040 ? " although migration 040 is recorded as applied — a later redefinition dropped its SET clause" : " — migration 040 is not applied"}, so a planner path disabled at any level (enable_tidscan, enable_nestloop, hashagg with sort) JIT-compiles the gate's sample on every filtered call, ~50 ms, on PostgreSQL 14–17 (on 18 the clause guards the generic plan's flat estimate; 040's header has the table)${today}`;
             const missingPins = [...(nestloopOn ? [] : ["enable_nestloop = on"]), ...(tidscanOn ? [] : ["enable_tidscan = on"])].join(" and ");
-            const pinLedger = ledgerHas041 ? ` although migration 041 is recorded as applied — a later redefinition dropped ${nestloopOn || tidscanOn ? "it" : "them"}, or an ALTER FUNCTION … RESET took ${nestloopOn || tidscanOn ? "it" : "them"} off` : " — migration 041 is not applied";
+            // One pin gone of two can only be a RESET — a redefinition drops both —
+            // so that sentence leads with it (review pass 2, cut for space).
+            const pinLedger = ledgerHas041
+              ? (nestloopOn || tidscanOn
+                ? " although migration 041 is recorded as applied — an ALTER FUNCTION … RESET took it off (a redefinition would have dropped both)"
+                : " although migration 041 is recorded as applied — a later redefinition dropped them, or an ALTER FUNCTION … RESET took them off")
+              : " — migration 041 is not applied";
             const pinWhy = [
               ...(nestloopOn ? [] : ["an operator's enable_nestloop = off at any level reaches every join in the call — the parent lookups and the walk's chunk join become merge and hash joins over the whole table, 1.3–2.2 s a call at a million rows, the unfiltered call included, and the walk's rows change"]),
               ...(tidscanOn ? [] : ["on PostgreSQL 18 enable_tidscan = off leaves the gate's probe no TID Range path, so every filtered call scans the whole heap eight times"]),

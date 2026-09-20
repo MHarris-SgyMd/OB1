@@ -15057,8 +15057,8 @@ moves, the body byte for byte, the two pins beside 014's, 019's and 040's
 clauses, and after a hand re-apply of 014 puts the 4-argument form back, 041
 alone drops it again; [7]'s tripwire reads "last twelve". db/bench-hnsw.ts's
 before arm for this change is `OB1_BENCH_UPTO=040`, and under default
-session settings its section B should agree with the default column for
-column.
+session settings its section B should agree with the default row for
+row.
 
 **What it costs where it does nothing.** Two more `proconfig` entries, set at
 call entry and restored at exit — microseconds, what 014, 019 and 040 pay —
@@ -15106,11 +15106,9 @@ a hundred thousand matching rows walk the index to its seeded bound, change
 pre-039 corpus must be rebuilt); `podman volume rm ob1-pg-keep-hnsw10m`
 when it is no longer wanted.
 
-**Not done here.** Row-level security (SMD-1625); the plan mode (SMD-1464);
-a hundred million rows. The bench's own reuse of the SMD-1018 ten-million
-volume is over: a pre-039 kept corpus must be rebuilt for the bench (change
-81's note in db/README.md), and this change migrated that volume by hand
-instead.
+**Not done here.** A hundred million rows. Row-level security and the plan
+mode are under What it does not fix; the ten-million volume's retirement
+from the bench is under Ten million rows.
 
 **Review** — pass 1, two reviewers (a cold reader over the diff, the header
 and this section; a run-it reviewer mutating the mechanism in its own
@@ -15198,7 +15196,20 @@ byte-identical in every pair over three runs and two queries. Not changed:
 stays a bound so a drift in the walk's reads fails as a drift and not as the
 pin (a boyscout candidate either way). The stop signal fired here: pass 2's
 findings were polish in pass 1's additions and in prose, and the two
-reviewers' mechanism checks were clean twice over.
+reviewers' mechanism checks were clean twice over. Boyscout, after the
+signal: the tidy-ups both passes cut for space, in the touched files — the
+header's million-row table gains the column E its own sentence counted, its
+four over-long prose lines are rewrapped, this section's Not done here no
+longer repeats What it does not fix and Ten million rows, "column for
+column" is "row for row", test-live's fixture comment names PostgreSQL's
+64 MB default rather than the container's, [5f] asserts the default arm's
+joins are all Nested Loops before it judges the pinned arm against them
+(three assertions, so a planner that ever preferred a hash join on the
+fixture fails as itself and not as the pin) and says its rows check is
+no-harm, test-upgrade [19]'s last assertion reads the tidscan pin beside
+the nestloop one, and preflight's recorded-but-one-pin-missing sentence
+leads with the RESET, since a redefinition would have dropped both. No
+behaviour change.
 
 **The operator's path, walked.** A brain at 040 whose operator has `ALTER
 DATABASE … SET enable_nestloop = off`: preflight's `candidate scan` warns

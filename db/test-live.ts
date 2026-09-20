@@ -899,7 +899,7 @@ console.log("\n[5f] Every join in the body keeps its nested loop under an operat
     await sql.unsafe(`ALTER TABLE thoughts ENABLE TRIGGER USER`);
     // Both indexes back over the loaded rows, in memory (the graph over
     // 18,000 vectors at the shipped width wants a few hundred MB; the
-    // container's 64 MB default would build it on disk).
+    // server's 64 MB maintenance_work_mem default would build it on disk).
     await sql.begin(async (tx: SQL) => {
       await tx.unsafe(`SET LOCAL maintenance_work_mem = '512MB'`);
       for (const { d } of defs) await tx.unsafe(d);
@@ -933,6 +933,12 @@ console.log("\n[5f] Every join in the body keeps its nested loop under an operat
       const body = await extractBody(sql, branch, EMBEDDING_DIM);
       bodies.set(branch, body);
       const byDefault = await explainUnder(body, filter, false);
+      // The default arm's own plan first, so a failure below names its cause:
+      // were the planner ever to prefer a hash join by cost on this fixture,
+      // the pinned arm would fail for a reason that is not the pin's (review
+      // pass 1, cut for space).
+      const defaultJoins = joinsOf(byDefault.text);
+      assert(defaultJoins.length > 0 && defaultJoins.every((j) => j === "Nested Loop"), `${branch}: by default every join is a Nested Loop (${defaultJoins.join(", ")}) — the plan the pin keeps`);
       const pinnedOff = await explainUnder(body, filter, true);
       const joins = joinsOf(pinnedOff.text);
       assert(joins.length > 0 && joins.every((j) => j === "Nested Loop") && pinnedOff.buffers <= byDefault.buffers * 1.1 + 64,
@@ -951,7 +957,10 @@ console.log("\n[5f] Every join in the body keeps its nested loop under an operat
     await applyMigrations(URL_, opts041);
     assert(/(^|,)enable_nestloop=on(,|$)/.test(await proconfig()), "…and 041 re-applied puts the pin back");
     // Through the function, on a fresh connection per cell as an operator's
-    // session would be: the rows under the setting are the default's.
+    // session would be: the rows under the setting are the default's. A
+    // no-harm check, not a tooth — on a fixture this size the walk may return
+    // the same rows without the pin too; the join and buffer pair above is
+    // what bites (review pass 1, cut for space).
     const rowsUnder = async (filter: string, session: string[]) => {
       const one = new SQL({ url: URL_, max: 1 });
       try {
