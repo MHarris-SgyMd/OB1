@@ -466,6 +466,32 @@ export function runMigrator(url: string, env: Record<string, string> | undefined
 }
 
 /** The migration files, sorted — the one listing for the bare apply, the ledger comparison and the suites that count them. */
+/** The community schemas' directory, `schemas/` beside `db/`. */
+export const SCHEMAS_DIR = join(HERE, "..", "schemas");
+/**
+ * The community SQL files with a prerequisite, in the order it requires:
+ * enhanced-thoughts before readwise-books (whose function filters on its
+ * source_type column) and text-search-trgm; entity-extraction before
+ * typed-reasoning-edges (which alters its edges table). The rest of the files
+ * follow alphabetically.
+ */
+export const SCHEMA_FILES_FIRST: readonly string[] = ["enhanced-thoughts/schema.sql", "text-search-trgm/schema.sql", "readwise-books/schema.sql", "entity-extraction/schema.sql", "typed-reasoning-edges/schema.sql"];
+/**
+ * Every SQL file under schemas/, as `<dir>/<file>`, SCHEMA_FILES_FIRST first
+ * and the rest alphabetical — the order test-schema [39] and test-live [18]
+ * apply them in (SMD-1796). Read from the tree, never listed, so a new
+ * community schema is applied by both suites the day it lands.
+ */
+export function communitySchemaFiles(): string[] {
+  const rank = (f: string) => (SCHEMA_FILES_FIRST.indexOf(f) === -1 ? SCHEMA_FILES_FIRST.length : SCHEMA_FILES_FIRST.indexOf(f));
+  const files: string[] = [];
+  for (const d of readdirSync(SCHEMAS_DIR, { withFileTypes: true })) {
+    if (!d.isDirectory()) continue;
+    for (const f of readdirSync(join(SCHEMAS_DIR, d.name))) if (f.endsWith(".sql")) files.push(`${d.name}/${f}`);
+  }
+  return files.sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
+}
+
 export function migrationFiles(): string[] {
   return readdirSync(MIGRATIONS)
     .filter((f) => f.endsWith(".sql"))

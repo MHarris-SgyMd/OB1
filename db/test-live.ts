@@ -29,11 +29,11 @@
  */
 
 import { SQL } from "bun";
-import { readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, EMBEDDING_DIM, EMBEDDING_MODEL, HNSW_BOUNDS, MATCH_COUNT_CEILING, MATCH_THOUGHTS_SIGNATURE, ROUTE_ESTIMATE_MIN_PAGES, ROUTE_SAMPLE_PAGES, grantedFunctions, grantedSequences, grantedTables, grantedViews, parseSetConfig, versionAtLeast } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { TID_PROBE, applyFunctionSettings, applyMigrations, createAssert, sampleStatementOf, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
+import { SCHEMAS_DIR, TID_PROBE, applyFunctionSettings, applyMigrations, communitySchemaFiles, createAssert, sampleStatementOf, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
 import { heartbeatFor, leaseRefusal } from "./lease.ts";
 import { reachabilityReport, readHnswGraph, reachableFromEntry, type HnswElement, type HnswGraph } from "./hnsw-graph.ts";
 
@@ -3327,15 +3327,8 @@ console.log("\n[18] Every schemas/*.sql applies over TCP with no Supabase role p
     for (const t of after18.tables) if (!before18.tables.has(t)) await sql.unsafe(`DROP TABLE IF EXISTS ${t} CASCADE`);
     for (const f of after18.fns) if (!before18.fns.has(f)) await sql.unsafe(`DROP FUNCTION IF EXISTS ${f} CASCADE`);
   };
-  const SCHEMAS = join(HERE, "..", "schemas");
-  const FIRST = ["enhanced-thoughts/schema.sql", "text-search-trgm/schema.sql", "readwise-books/schema.sql", "entity-extraction/schema.sql", "typed-reasoning-edges/schema.sql"];
-  const rank = (f: string) => (FIRST.indexOf(f) === -1 ? FIRST.length : FIRST.indexOf(f));
-  const schemaFiles: string[] = [];
-  for (const d of readdirSync(SCHEMAS, { withFileTypes: true })) {
-    if (!d.isDirectory()) continue;
-    for (const f of readdirSync(join(SCHEMAS, d.name))) if (f.endsWith(".sql")) schemaFiles.push(`${d.name}/${f}`);
-  }
-  schemaFiles.sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
+  const SCHEMAS = SCHEMAS_DIR;
+  const schemaFiles = communitySchemaFiles();
   const [{ c: supabaseRoles }] = (await sql`SELECT count(*)::int AS c FROM pg_roles WHERE rolname IN ('authenticated', 'anon', 'service_role')`) as { c: number }[];
   assert(supabaseRoles === 0, "no Supabase role exists on this server");
 

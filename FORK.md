@@ -14285,6 +14285,15 @@ through PUBLIC on stock Postgres, so the verify's schema row bites only on a
 hardened database; two `run-it` tags on grep-driven index comparisons are
 closer to a tooling-assisted cold read.
 
+**Tidied while the files were open.** The listing of the community SQL files
+in prerequisite order lived twice, in test-schema [39] and test-live [18];
+it is test-support's `communitySchemaFiles()` now, with the order's reasons in
+one docblock. The template README's install step had grown into one run-on
+sentence; it is the two steps every schema README has. Wiki-pages' three
+identical parentheticals after its REVOKEs point at the note above them
+instead of repeating it. No behaviour change; the blank-line runs the diff
+touches are the files' own.
+
 **Upstream status:** the twelve files now differ from upstream's in their
 grant/RLS sections (plus wiki-pages' extension line and smart-ingest's foreign
 key), which a rebase will show as conflicts wherever upstream edits those

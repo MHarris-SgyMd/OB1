@@ -212,7 +212,7 @@ END;
 $$;
 
 REVOKE ALL ON FUNCTION public.wiki_upsert_page(TEXT, TEXT, TEXT, JSONB, TEXT) FROM PUBLIC;
--- (Upstream's GRANT EXECUTE … TO service_role is `migrate.ts --grant`'s here — SMD-1796.)
+-- (upstream GRANTed EXECUTE TO service_role here; see the RLS + grants note above)
 
 COMMENT ON FUNCTION public.wiki_upsert_page IS
   'Create or update a wiki page by slug. Returns {page_id, created}. Shared by generators and REST callers.';
@@ -327,7 +327,7 @@ END;
 $$;
 
 REVOKE ALL ON FUNCTION public.wiki_write_section(UUID, TEXT, TEXT, TEXT, TEXT, JSONB, UUID[], INTEGER, TEXT) FROM PUBLIC;
--- (Upstream's GRANT EXECUTE … TO service_role is `migrate.ts --grant`'s here — SMD-1796.)
+-- (upstream GRANTed EXECUTE TO service_role here; see the RLS + grants note above)
 
 COMMENT ON FUNCTION public.wiki_write_section IS
   'The single write guard for section content. A generated write to a human-owned (manual/locked) section parks a pending draft instead of overwriting; all other writes update in place and snapshot a revision. Returns {section_id, action} where action is created|pending|updated.';
@@ -376,7 +376,7 @@ END;
 $$;
 
 REVOKE ALL ON FUNCTION public.wiki_accept_pending(UUID, TEXT) FROM PUBLIC;
--- (Upstream's GRANT EXECUTE … TO service_role is `migrate.ts --grant`'s here — SMD-1796.)
+-- (upstream GRANTed EXECUTE TO service_role here; see the RLS + grants note above)
 
 COMMENT ON FUNCTION public.wiki_accept_pending IS
   'Promote a parked pending draft to the live section body, snapshot a revision, and keep the section human-owned. No-op when there is no pending draft.';

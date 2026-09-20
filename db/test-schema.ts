@@ -66,7 +66,7 @@ import {
 } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { SAMPLE_STATEMENT, TID_PROBE, buffersOf, createAssert, sampleStatementOf, seededRandom } from "./test-support.ts";
+import { SAMPLE_STATEMENT, SCHEMAS_DIR, SCHEMA_FILES_FIRST, TID_PROBE, buffersOf, communitySchemaFiles, createAssert, sampleStatementOf, seededRandom } from "./test-support.ts";
 import { markerAnswers } from "./bench-oracle.ts";
 import { ENTITY_TYPES, RELATIONS } from "../server-portable/entities.ts";
 
@@ -4319,24 +4319,16 @@ console.log("\n[39] Every schemas/*.sql applies to a migrated brain with no Supa
   // A second PGlite: the files add a trigger on `thoughts` (entity-extraction's
   // queue) and columns to it (enhanced-thoughts, provenance-chains), and the
   // sections above must not meet them. Fresh migrations, then every SQL file
-  // under schemas/, in the order their prerequisites require — enhanced-thoughts
-  // before readwise-books (whose function filters on its source_type column)
-  // and text-search-trgm; entity-extraction before typed-reasoning-edges (which
-  // alters its edges table) — the rest alphabetical. Twelve of the seventeen
-  // ended with GRANTs TO service_role, RLS and policies for it, and two with
-  // policies on auth.uid(): on any Postgres that is not Supabase the first such
-  // statement stopped the file (`role "service_role" does not exist`). [31]
-  // used to create the three roles for the one file it applied; nothing does now.
-  const SCHEMAS = join(HERE, "..", "schemas");
-  const FIRST = ["enhanced-thoughts/schema.sql", "text-search-trgm/schema.sql", "readwise-books/schema.sql", "entity-extraction/schema.sql", "typed-reasoning-edges/schema.sql"];
-  const rank = (f: string) => (FIRST.indexOf(f) === -1 ? FIRST.length : FIRST.indexOf(f));
-  const schemaFiles: string[] = [];
-  for (const d of readdirSync(SCHEMAS, { withFileTypes: true })) {
-    if (!d.isDirectory()) continue;
-    for (const f of readdirSync(join(SCHEMAS, d.name))) if (f.endsWith(".sql")) schemaFiles.push(`${d.name}/${f}`);
-  }
-  schemaFiles.sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
-  assert(schemaFiles.length >= 17 && FIRST.every((f) => schemaFiles.includes(f)), `${schemaFiles.length} SQL files under schemas/ (17 when this was written; the set can only grow), the five with prerequisites among them`);
+  // under schemas/ in the order test-support's communitySchemaFiles gives —
+  // the five with a prerequisite first, the rest alphabetical. Twelve of the
+  // seventeen ended with GRANTs TO service_role, RLS and policies for it, and
+  // two with policies on auth.uid(): on any Postgres that is not Supabase the
+  // first such statement stopped the file (`role "service_role" does not
+  // exist`). [31] used to create the three roles for the one file it applied;
+  // nothing does now.
+  const SCHEMAS = SCHEMAS_DIR;
+  const schemaFiles = communitySchemaFiles();
+  assert(schemaFiles.length >= 17 && SCHEMA_FILES_FIRST.every((f) => schemaFiles.includes(f)), `${schemaFiles.length} SQL files under schemas/ (17 when this was written; the set can only grow), the five with prerequisites among them`);
 
   // The rule check-fork-consistency holds these files to, from inside the
   // suite: none runs a Supabase-ism, comments excepted. And the strip's teeth,
