@@ -971,11 +971,35 @@ export function missingDatabaseUrl(env: StoreEnv): { problem: string; fix: strin
   const selected = env.OB1_STORE === undefined ? "OB1_STORE is unset, which selects the SQL store" : `OB1_STORE=${env.OB1_STORE} selects the SQL store`;
   const postgrestUrl = Boolean(env.SUPABASE_URL) && !isPostgresUrl(env.SUPABASE_URL);
   return {
-    problem: `${selected}, and DATABASE_URL is not set${postgrestUrl ? " — SUPABASE_URL holds an https:// URL, which is the PostgREST store's, not a connection string" : ""}`,
+    problem: `${selected}, and DATABASE_URL is not set${postgrestUrl ? " — SUPABASE_URL holds a non-postgres:// URL, the PostgREST store's base URL rather than a connection string" : ""}`,
     fix: postgrestUrl
       ? "Set DATABASE_URL to the brain's postgres:// connection string — or, to keep reaching this brain through PostgREST at SUPABASE_URL (kept for Cloudflare Workers), set OB1_STORE=postgrest."
       : "Set DATABASE_URL to the brain's postgres:// connection string.",
   };
+}
+
+/**
+ * The other mismatch: the PostgREST store selected while SUPABASE_URL holds a
+ * postgres:// connection string — the one-box operator who kept an old
+ * OB1_STORE=postgrest beside a shim-migrated neighbour's variable. supabase-js
+ * would take the string as a base URL and fail at the first call with
+ * "protocol must be http:, https: or s3:", a message that names neither the
+ * variable nor the fix; and the string carries a password, which no report
+ * may print. One refusal for createStore and preflight; null when the
+ * selection and the URL agree.
+ */
+export function postgrestOverPostgresUrl(env: StoreEnv): string | null {
+  if (storeKind(env) !== "postgrest" || !isPostgresUrl(env.SUPABASE_URL)) return null;
+  return "OB1_STORE=postgrest selects the PostgREST store, but SUPABASE_URL holds a postgres:// connection string, which PostgREST cannot dial (its base URL is http(s)://). " +
+    "Unset OB1_STORE — the SQL store reads that URL as its connection string — or set SUPABASE_URL to the PostgREST base URL.";
+}
+
+/** preflight's wording for a direct-connection check that has no PostgREST form; exported so the suite can name it. */
+export const DIRECT_CHECK_SKIP_OVER_POSTGREST = "not checked over PostgREST — a catalog read with no PostgREST form";
+
+/** A connection string with its credentials blanked, for any line a report prints. */
+export function maskUrl(url: string): string {
+  return url.replace(/:\/\/[^@]*@/, "://***@");
 }
 
 /**
@@ -1019,6 +1043,8 @@ export async function createStore(env: StoreEnv): Promise<ThoughtStore> {
     if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) {
       throw new Error("OB1_STORE=postgrest requires SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY");
     }
+    const mismatch = postgrestOverPostgresUrl(env);
+    if (mismatch) throw new Error(mismatch);
     const { PostgrestStore } = await import("./store-postgrest.ts");
     return new PostgrestStore(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY);
   }

@@ -104,9 +104,11 @@ best-effort. When `query_log` is present the check names it and whether
 `OB1_QUERY_LOG=on` here, says what it stores (personal data at rest) and its
 retention, and points at `evals/export-queries.ts` and `evals/eval-utilization.ts`;
 absent, it is a skip; present without migration 035 it warns, since a write that
-cites a returned id logs no cite row there (SMD-1719). Over PostgREST the
-direct-connection checks — this one included — are skips naming what they would
-have read: none is reachable there.
+cites a returned id logs no cite row there (SMD-1719). Over PostgREST every
+direct-connection check — this one included — is a named skip: the ones with a
+PostgREST form say what they would have read, the rest that they are catalog
+reads with no PostgREST form (change 94's first review pass; before it sixteen
+of them printed nothing on that path).
 
 ## Choosing a data layer
 
@@ -197,7 +199,10 @@ set that one name for both: this server reads a `postgres://` `SUPABASE_URL` as
 says which variable supplied the string. An `https://` `SUPABASE_URL` with no
 `OB1_STORE` — the deployment the old default served — is refused by preflight and
 by the store's first use with both ways out named: set `DATABASE_URL`, or set
-`OB1_STORE=postgrest` to keep reaching the brain through PostgREST.
+`OB1_STORE=postgrest` to keep reaching the brain through PostgREST. The mirror
+slip — `OB1_STORE=postgrest` kept beside a `SUPABASE_URL` that holds a
+`postgres://` string — is refused by name too, the string masked, rather than
+handed to supabase-js as a base URL.
 
 Optional: `OPEN_BRAIN_CITATION_BASE_URL`, `PORT`.
 
@@ -242,7 +247,7 @@ SMD-1451 is the migrator refusing it).
 ## Expected outcome
 
 ```bash
-bun test-server.ts        # 169 — transport, auth, tool surface, OAuth discovery, the method guard, /health and the store default
+bun test-server.ts        # 175 — transport, auth, tool surface, OAuth discovery, the method guard, /health and the store default
 bun test-auth.ts          # 67 — scoped, hashed, named keys
 bun run test:local        # 31 — fully local provider, no credential
 bun run test:sql          # 113 — store conformance, real Postgres in a container

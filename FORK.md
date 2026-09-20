@@ -15135,9 +15135,9 @@ portable; the grant group is the fork's.
 this fork's reference deployment, reached its brain through Supabase's PostgREST
 API unless told otherwise. `SETUP.md` — "No Supabase account" — held only
 because `deploy/compose.yaml` set `OB1_STORE=sql` by hand, so the default
-contradicted the document written around it, and the two suites that ran the
-default (`test-server.ts`, `test-auth.ts`) ran it against a stub PostgREST URL:
-the store no SETUP.md deployment has. `preflight.ts` imported
+contradicted the document written around it, and the two fast suites ran the
+PostgREST store against a stub URL — `test-server.ts` by relying on the default,
+`test-auth.ts` by selecting it — the store no SETUP.md deployment has. `preflight.ts` imported
 `@supabase/supabase-js` for two probes of its own — a 4-argument `match_thoughts`
 and a 7-argument `update_thought`, sent as an outside caller would to catch an
 older overload beside the current form — that no fixture ever drove: test-preflight
@@ -15235,9 +15235,52 @@ had in mind. Said on the ticket; reversible in a line.
 
 **Measured.** `bunx wrangler deploy --dry-run`: `env.OB1_STORE ("postgrest")`
 listed as an Environment Variable binding, 342.42 KiB gzipped. Suites on this
-tree: test-server 169, test-auth 67, test-thoughts 102, test-store-sql 113,
-test-store-postgrest 99, test-e2e-sql 112, test-preflight 241,
-test-local-provider 31; `tsc --noEmit` clean; `check-fork-consistency.mjs` PASS.
+tree after the first review pass: test-server 175, test-auth 67, test-thoughts
+102, test-store-sql 113, test-store-postgrest 99, test-e2e-sql 112,
+test-preflight 253, test-local-provider 31; `tsc --noEmit` clean;
+`check-fork-consistency.mjs` PASS.
+
+**Review, first pass** (one cold reviewer over the diff, the author's own
+read). The reviewer ran preflight with `OB1_STORE=postgrest` beside a
+`SUPABASE_URL` holding a `postgres://` string — the one-box slip this change
+made likely by documenting that variable as a legitimate holder of a connection
+string — and the report printed the URL raw, password included, then handed the
+string to supabase-js and blamed "network reachability" for its `protocol must
+be http:, https: or s3:`. Fixed with one refusal for both callers
+(`postgrestOverPostgresUrl`, thrown by `createStore` and failed by preflight
+before the store is built) and `maskUrl` on every URL a report prints; the
+`m` run in test-preflight [1] holds it, `hunter2` asserted absent. The reviewer
+also ran the old-default deployment and read the report contradicting itself —
+the `DATABASE_URL` failure naming `OB1_STORE=postgrest` as a way out, two lines
+above warns saying to remove the variables that way out needs; the warns now
+wait for a connection string. Two teeth were found loose by reasoning about
+their mutants: the alias run's `/schema\s+/` matched the config-skip line, so
+"fails at the unreachable database" was asserted by exit code alone, and the
+gate the section above singles out (`conn`, not `env.DATABASE_URL`) was held
+by a source-text anchor and nothing behavioural — the run now requires the `✗
+schema` glyph, the absence of the skip text and `vector extension … could not
+verify`, the first direct check carrying the refused connection; and
+`index.ts`'s once-only notice had no test at all — test-server **[15]** boots a
+second module instance (Bun keys its cache on the specifier, so a query string
+yields one) with `postgrest` selected and captures `console.warn` across two
+tool calls. Both drills run: the gate reverted with the refusal dropped fails
+six assertions; the notice silenced fails two. Two claims corrected —
+`test-auth` never ran the default, it selected PostgREST by hand; "holds an
+`https://` URL" said of every non-`postgres://` value, a self-hosted
+`http://` PostgREST included — and six stale sentences (CI comments, three
+test headers, a checker comment) that still called `OB1_STORE=sql` the setting
+every suite runs. The author's own read added the schema remedy's
+`--url $DATABASE_URL`, empty under the alias, which now names the variable that
+holds the string or, over PostgREST, what to hand the migrator instead. One
+pre-existing by-catch, fixed because the change rewrote the block: over
+PostgREST with the schema check failed, `edit signature` printed nothing, and
+on every PostgREST run sixteen SQL-only checks (`vector extension` through
+`migration ledger`) printed nothing while the README called them skips — every
+`DIRECT_CHECKS` name not yet reported is now a named skip, and the README
+sentence is true. Checked and left: the removed 4- and 7-argument probes had
+no fixture in the parent, so nothing covered became uncovered; `wrangler.toml`
+has no `[env.*]` sections, so the top-level `[vars]` applies (a named
+environment added later would not inherit it).
 
 **Upstream status.** Upstream has no `server-portable/`; nothing here touches a
 vendored file. The PostgREST store's retirement from Bun is the fork's decision

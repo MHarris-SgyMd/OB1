@@ -5,7 +5,8 @@
  * test-store-sql.ts proves the store's methods behave. This proves the thing that
  * actually matters for Phase 2: an MCP client calling the documented tools gets the
  * same answers with PostgREST removed entirely. It drives the real server through
- * real JSON-RPC, with OB1_STORE=sql and no Supabase anywhere.
+ * real JSON-RPC, with OB1_STORE unset — the SQL store is the default (change
+ * 94) and this suite is what proves it — and no Supabase anywhere.
  *
  * The embedding provider is stubbed — the point is the data layer, and hitting
  * OpenRouter would make the suite non-hermetic and cost money. Everything below

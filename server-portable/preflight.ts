@@ -23,7 +23,7 @@
  * Exit codes: 0 all good, 1 something is wrong, 2 could not run the checks.
  */
 
-import { createStore, databaseUrl, DEFAULT_STORE, missingDatabaseUrl, postgrestOnBunNotice, storeKind, type StoreEnv } from "./store.ts";
+import { createStore, databaseUrl, DEFAULT_STORE, DIRECT_CHECK_SKIP_OVER_POSTGREST, maskUrl, missingDatabaseUrl, postgrestOnBunNotice, postgrestOverPostgresUrl, storeKind, type StoreEnv } from "./store.ts";
 import { parseKeyRecords } from "./auth.ts";
 import { DEFAULT_MAX_TOKENS } from "./chunk.ts";
 import type { PassCounts } from "../db/config.mjs";
@@ -266,20 +266,30 @@ if (store === "sql") {
     add("DATABASE_URL", "fail", problem, fix);
   } else {
     add("DATABASE_URL", "ok",
-        conn.url.replace(/:\/\/[^@]*@/, "://***@") + (conn.from === "SUPABASE_URL" ? " (from SUPABASE_URL, which holds a postgres:// URL; DATABASE_URL is unset)" : ""));
+        maskUrl(conn.url) + (conn.from === "SUPABASE_URL" ? " (from SUPABASE_URL, which holds a postgres:// URL; DATABASE_URL is unset)" : ""));
   }
-  if (env.SUPABASE_URL && conn?.from !== "SUPABASE_URL") {
+  // The "unused" warns only once the connection string is in hand: with no
+  // DATABASE_URL the fail line above may have just named OB1_STORE=postgrest
+  // as a way out, and a warn telling the operator to remove SUPABASE_URL two
+  // lines later would contradict it (first review pass).
+  if (conn && env.SUPABASE_URL && conn.from !== "SUPABASE_URL") {
     add("SUPABASE_URL", "warn", "set but unused with the SQL store",
         "Remove SUPABASE_URL to avoid confusion about which backend is live.");
   }
-  if (env.SUPABASE_SERVICE_ROLE_KEY) {
+  if (conn && env.SUPABASE_SERVICE_ROLE_KEY) {
     add("SUPABASE_SERVICE_ROLE_KEY", "warn", "set but unused with the SQL store",
         "Remove SUPABASE_SERVICE_ROLE_KEY to avoid confusion about which backend is live.");
   }
 } else {
+  // A postgres:// URL under the PostgREST selection is the one-box operator's
+  // slip (an old OB1_STORE=postgrest kept beside a shim-migrated neighbour's
+  // SUPABASE_URL): refused here by name, and never printed raw — it carries a
+  // password, and the first version of this branch echoed it (first review pass).
+  const mismatch = postgrestOverPostgresUrl(env);
   for (const k of ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"]) {
     if (!env[k]) add(k, "fail", `not set, but OB1_STORE=${store}`, `Set ${k}, or use the SQL store (OB1_STORE unset) with DATABASE_URL.`);
-    else add(k, "ok", k.endsWith("URL") ? env[k]! : `set (${env[k]!.length} chars)`);
+    else if (k === "SUPABASE_URL" && mismatch) add(k, "fail", `holds a postgres:// connection string (${maskUrl(env[k]!)}), which the PostgREST store cannot dial`, mismatch);
+    else add(k, "ok", k.endsWith("URL") ? maskUrl(env[k]!) : `set (${env[k]!.length} chars)`);
   }
 }
 
@@ -328,9 +338,13 @@ if (configFailed) {
       add("schema", "ok", `thoughts table reachable, ${n} row(s)`);
     } catch (e) {
       const msg = (e as Error).message;
+      // The migrator takes the connection string by name; say the variable
+      // that holds it here (the alias included), and for PostgREST — which has
+      // no connection string of its own — say what to hand it instead.
+      const urlArg = conn ? `$${conn.from}` : "<the brain's postgres:// connection string — Supabase's direct connection, not the pooler>";
       add("schema", "fail", msg,
           /does not exist|relation/i.test(msg)
-            ? "Apply the migrations: cd db && bun migrate.ts --url $DATABASE_URL"
+            ? `Apply the migrations: cd db && bun migrate.ts --url ${urlArg}`
             : "Check credentials and network reachability to the database.");
     }
 
@@ -415,6 +429,7 @@ if (configFailed) {
         add("keyword search", "skip", "not probed — the schema check above failed first");
         add("hybrid search", "skip", "not probed — the schema check above failed first");
         add("search signatures", "skip", "not probed — the schema check above failed first");
+        add("edit signature", "skip", "not probed — the schema check above failed first");
       } else {
         // 012 first, because 017 calls it: a missing search_thoughts_keyword
         // surfaces inside search_thoughts_hybrid with the same "does not
@@ -535,6 +550,14 @@ if (configFailed) {
       // A seventh review pass walked the hosted path and found this check
       // printed nothing there — the one shape the comment above forbids.
       add("query log", "skip", `not checked over PostgREST — whether query_log (034) is present, and whether upsert_thought answers \`existed\` (035), without which a write that cites a returned id logs no cite row (SMD-1719), are read from the catalog; ${CATALOG_HINT}`);
+      // The rest of the direct-connection block — catalog reads with no
+      // PostgREST form at all — reported by name too, so this path prints
+      // every check the SQL path does. Before the first review pass of change
+      // 94 sixteen of them printed nothing here, the one shape the DIRECT_CHECKS
+      // comment forbids, while the README said they were skips.
+      for (const name of DIRECT_CHECKS) {
+        if (!results.some((r) => r.name === name)) add(name, "skip", `${DIRECT_CHECK_SKIP_OVER_POSTGREST}; ${CATALOG_HINT}`);
+      }
     }
 
     // The atomic capture path needs migration 004. Its absence is not fatal — the
