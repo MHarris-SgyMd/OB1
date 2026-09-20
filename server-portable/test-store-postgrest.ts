@@ -469,7 +469,7 @@ console.log("\n[9] Provenance rides the envelope and reads back over PostgREST t
   });
 
   // The RPC argument shapes for the two read functions, verified on this store —
-  // the reason this suite exists (the default store speaks PostgREST).
+  // the reason this suite exists (the Workers store speaks PostgREST).
   const anc = await store.traceProvenance({ id: child });
   assert(anc.some((n) => n.thoughtId === parent && n.depth === 1), "traceProvenance's rpc shape returns the source at depth 1");
   const der = await store.findDerivatives({ id: parent });

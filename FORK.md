@@ -15235,9 +15235,9 @@ had in mind. Said on the ticket; reversible in a line.
 
 **Measured.** `bunx wrangler deploy --dry-run`: `env.OB1_STORE ("postgrest")`
 listed as an Environment Variable binding, 342.42 KiB gzipped. Suites on this
-tree after the first review pass: test-server 175, test-auth 67, test-thoughts
+tree after the second review pass: test-server 177, test-auth 67, test-thoughts
 102, test-store-sql 113, test-store-postgrest 99, test-e2e-sql 112,
-test-preflight 253, test-local-provider 31; `tsc --noEmit` clean;
+test-preflight 252, test-local-provider 31; `tsc --noEmit` clean;
 `check-fork-consistency.mjs` PASS.
 
 **Review, first pass** (one cold reviewer over the diff, the author's own
@@ -15267,9 +15267,9 @@ tool calls. Both drills run: the gate reverted with the refusal dropped fails
 six assertions; the notice silenced fails two. Two claims corrected —
 `test-auth` never ran the default, it selected PostgREST by hand; "holds an
 `https://` URL" said of every non-`postgres://` value, a self-hosted
-`http://` PostgREST included — and six stale sentences (CI comments, three
-test headers, a checker comment) that still called `OB1_STORE=sql` the setting
-every suite runs. The author's own read added the schema remedy's
+`http://` PostgREST included — and six stale sentences (two CI comments, two
+test headers, `store-postgrest.ts`'s docblock, a checker comment) that still
+called `OB1_STORE=sql` the setting every suite runs or PostgREST the default. The author's own read added the schema remedy's
 `--url $DATABASE_URL`, empty under the alias, which now names the variable that
 holds the string or, over PostgREST, what to hand the migrator instead. One
 pre-existing by-catch, fixed because the change rewrote the block: over
@@ -15281,6 +15281,35 @@ sentence is true. Checked and left: the removed 4- and 7-argument probes had
 no fixture in the parent, so nothing covered became uncovered; `wrangler.toml`
 has no `[env.*]` sections, so the top-level `[vars]` applies (a named
 environment added later would not inherit it).
+
+**Review, second pass** (a fresh cold reviewer, the author's read) — **STOP
+signal fired**: every finding sits in the first pass's additions, none in the
+change, and none is a behavioural defect. The `w` run's four-name sample of the
+new skip loop was a presence test: the reviewer moved the loop above the
+hand-written PostgREST skips in a copy, four names printed twice, and all seven
+assertions stayed green — the run now reads `DIRECT_CHECKS` from the source, as
+[4] does, and requires every name to print exactly one row, sixteen of them as
+the catalog-only skip. `maskUrl`'s `[^@]*@` stopped at the first `@`: a raw `@`
+inside a password left its tail in the report, and a credential-less URL whose
+query carried one lost its host (the author found the second, the reviewer the
+first) — the userinfo now ends at the last `@` before the first slash, with
+both cases, an IPv6 host and a path-less URL asserted. [15]'s second assertion
+matched two phrases a pasted copy would also carry; it now compares the
+captured line to `postgrestOnBunNotice("postgrest")` byte for byte. One stale
+sentence the first pass's sweep missed (`test-store-postgrest.ts`: "the default
+store speaks PostgREST" — the Workers store does), the README's "every
+direct-connection check is a named skip" corrected to say five are probed
+through the store's own calls, the tally above corrected (two test headers and
+a docblock, not three headers), and the `DIRECT_CHECKS` comment now says whose
+order the list is in. Drills run: the loop moved above the hand-written skips
+fails the exactly-once assertion naming the four doubled rows; `maskUrl`
+reverted fails the raw-`@` case. Checked and left by the reviewer: the loop's
+placement (after every hand-written row, before the SQL-only block; `chunk
+context` on is not doubled), the `mismatch` branch's handling of the key, [15]'s
+module isolation (no module-level state in store/auth/agents), and every count
+in this section. The 1796 precedent — pass 2 called STOP and pass 3 found a
+defect — is noted; the signal here rests on a reviewer who ran the code, not
+only read it.
 
 **Upstream status.** Upstream has no `server-portable/`; nothing here touches a
 vendored file. The PostgREST store's retirement from Bun is the fork's decision

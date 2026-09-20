@@ -105,10 +105,12 @@ best-effort. When `query_log` is present the check names it and whether
 retention, and points at `evals/export-queries.ts` and `evals/eval-utilization.ts`;
 absent, it is a skip; present without migration 035 it warns, since a write that
 cites a returned id logs no cite row there (SMD-1719). Over PostgREST every
-direct-connection check — this one included — is a named skip: the ones with a
-PostgREST form say what they would have read, the rest that they are catalog
-reads with no PostgREST form (change 94's first review pass; before it sixteen
-of them printed nothing on that path).
+direct-connection check — this one included — prints a row: five are probed
+through the store's own calls (`filtered search`, `keyword search`, `hybrid
+search`, `search signatures`, `edit signature`), four say what catalog fact they
+would have read, and the sixteen catalog-only ones say they have no PostgREST
+form (change 94's first review pass; before it those sixteen printed nothing on
+that path).
 
 ## Choosing a data layer
 
@@ -247,7 +249,7 @@ SMD-1451 is the migrator refusing it).
 ## Expected outcome
 
 ```bash
-bun test-server.ts        # 175 — transport, auth, tool surface, OAuth discovery, the method guard, /health and the store default
+bun test-server.ts        # 177 — transport, auth, tool surface, OAuth discovery, the method guard, /health and the store default
 bun test-auth.ts          # 67 — scoped, hashed, named keys
 bun run test:local        # 31 — fully local provider, no credential
 bun run test:sql          # 113 — store conformance, real Postgres in a container

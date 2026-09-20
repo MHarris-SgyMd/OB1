@@ -997,9 +997,17 @@ export function postgrestOverPostgresUrl(env: StoreEnv): string | null {
 /** preflight's wording for a direct-connection check that has no PostgREST form; exported so the suite can name it. */
 export const DIRECT_CHECK_SKIP_OVER_POSTGREST = "not checked over PostgREST — a catalog read with no PostgREST form";
 
-/** A connection string with its credentials blanked, for any line a report prints. */
+/**
+ * A connection string with its credentials blanked, for any line a report
+ * prints. The userinfo ends at the first `/` after the scheme and the LAST `@`
+ * before that closes it: a raw `@` inside a password (invalid, but seen) is
+ * blanked with the rest, and an `@` later in the URL — a query parameter's
+ * value — is not taken for one. The first version's `[^@]*@` stopped at the
+ * first `@`, printing a password's tail and blanking such a host (second
+ * review pass).
+ */
 export function maskUrl(url: string): string {
-  return url.replace(/:\/\/[^@]*@/, "://***@");
+  return url.replace(/:\/\/[^/]*@/, "://***@");
 }
 
 /**

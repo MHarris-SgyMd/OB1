@@ -419,6 +419,10 @@ console.log("\n[14] OB1_STORE unset selects the SQL store; PostgREST stays selec
   assert(postgrestOverPostgresUrl({ OB1_STORE: "postgrest", SUPABASE_URL: "https://x.supabase.co" }) === null && postgrestOverPostgresUrl({ SUPABASE_URL: "postgres://u:p@h/x" }) === null,
          "…and neither a PostgREST base URL under postgrest nor a postgres:// URL under the default is a mismatch");
   assert(maskUrl("postgres://u:hunter2@h:5432/x") === "postgres://***@h:5432/x" && maskUrl("https://x.supabase.co") === "https://x.supabase.co", "maskUrl blanks the credentials of a URL that has them and leaves one without alone");
+  assert(maskUrl("postgres://u:p@ss@h/x") === "postgres://***@h/x" && maskUrl("postgres://u:p@[::1]:5432/x") === "postgres://***@[::1]:5432/x" && maskUrl("postgres://u:p@h") === "postgres://***@h",
+         "…a raw @ inside the password goes with it, an IPv6 host and a path-less URL are kept");
+  assert(maskUrl("postgres://h/db?application_name=a@b") === "postgres://h/db?application_name=a@b" && maskUrl("postgres://u:p%40w@h/db?x=a@b") === "postgres://***@h/db?x=a@b",
+         "…and an @ past the first slash is not taken for credentials, while real credentials before it still are");
 
   // SUPABASE_URL holding a postgres:// URL IS the connection string — the SQL
   // shim's spelling — read after DATABASE_URL.
@@ -483,7 +487,8 @@ console.log("\n[15] The server says once, when it builds the store, that PostgRE
   }
   const notices = warned.filter((w) => /keeps for Cloudflare Workers only/.test(w));
   assert(notices.length === 1, `the retired notice is logged exactly once across two tool calls (${notices.length} of ${warned.length} warnings)`);
-  assert(/OB1_STORE=postgrest selects the PostgREST store/.test(notices[0] ?? ""), "…and it is store.ts's line, not a copy");
+  const { postgrestOnBunNotice: noticeOf } = await import("./store.ts");
+  assert(notices[0] === noticeOf("postgrest"), "…and it is store.ts's line itself, byte for byte — not a copy carrying the same phrases");
 }
 
 server.stop();

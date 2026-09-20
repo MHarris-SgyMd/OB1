@@ -130,9 +130,16 @@ console.log("[1] Missing configuration fails, with an actionable fix");
   // signature` was silent on this path, and sixteen SQL-only checks were silent
   // on every PostgREST run (pre-existing; by-catch).
   assert(/edit signature\s+not probed — the schema check above failed first/.test(w.out), "edit signature reports when the schema check failed over PostgREST");
-  for (const name of ["vector extension", "audit trail", "candidate scan", "migration ledger"]) {
-    assert(new RegExp(`·\\s+${name}\\s+${DIRECT_CHECK_SKIP_OVER_POSTGREST}`).test(w.out), `${name} is a named skip over PostgREST, not silence`);
-  }
+  // Every name in DIRECT_CHECKS, read from the source as [4] does, exactly ONCE
+  // as a report row — the loop that fills the gaps must neither miss a name nor
+  // double one already reported by hand (second review pass: a four-name sample
+  // could not see the loop moved above the hand-written skips, which then printed
+  // twice). The row shape is the glyph, the name, whitespace.
+  const listedNames = [...readFileSync(join(HERE, "preflight.ts"), "utf8").match(/const DIRECT_CHECKS = \[([\s\S]*?)\];/)![1].matchAll(/"([^"]+)"/g)].map((mm) => mm[1]);
+  assert(listedNames.length >= 20, `DIRECT_CHECKS parsed from the source (${listedNames.length} names)`);
+  const rowCounts = listedNames.map((name) => [name, (w.out.match(new RegExp(`^\\s*[✓✗!·]\\s+${name}\\s`, "gm")) ?? []).length] as const);
+  assert(rowCounts.every(([, n]) => n === 1), `over PostgREST every direct-connection check prints exactly one row (${rowCounts.filter(([, n]) => n !== 1).map(([name, n]) => `${name}×${n}`).join(", ") || "all once"})`);
+  assert(rowCounts.filter(([name]) => new RegExp(`·\\s+${name}\\s+${DIRECT_CHECK_SKIP_OVER_POSTGREST}`).test(w.out)).length === 16, "…sixteen of them as the catalog-only skip, the rest by their own hand-written rows");
 }
 
 console.log("\n[2] Weak secrets warn without blocking");
