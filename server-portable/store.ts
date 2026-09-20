@@ -7,15 +7,24 @@
  * that lets the PostgREST client be swapped for direct SQL without the tool
  * definitions knowing.
  *
- * Both implementations are kept, deliberately:
+ * Two implementations, one default:
  *
- *   - The plan's cutover step runs both stacks against the same data and diffs the
- *     results. That is impossible if the old path is deleted in the same change.
- *   - Cloudflare Workers cannot hold a Postgres connection pool, so PostgREST
- *     stays the sensible pairing there. Selecting at runtime keeps the runtime
- *     decision and the data-layer decision independent.
+ *   - `sql` (store-sql.ts) — Postgres directly, through Bun's client. THE
+ *     DEFAULT since change 97 (SMD-1797): it is the store SETUP.md's container
+ *     runs, the one every CI job against real Postgres exercises, and the one
+ *     that needs no Supabase project. Unset OB1_STORE selects it.
+ *   - `postgrest` (store-postgrest.ts) — PostgREST over HTTP, via supabase-js.
+ *     Kept for Cloudflare Workers, which cannot hold a Postgres connection, so
+ *     the Bun client that store-sql.ts imports does not run there. Selected
+ *     explicitly with OB1_STORE=postgrest; on a runtime that has Bun the
+ *     selection is reported as retired (postgrestOnBunNotice), since the SQL
+ *     store is available there and is what every other path runs.
  *
- * Select with OB1_STORE=postgrest (default) or OB1_STORE=sql.
+ * The cutover rationale the first version of this file gave — run both stacks
+ * against the same data and diff — is done: test-store-postgrest.ts holds the
+ * PostgREST store's argument shapes against real Postgres through the SQL shim,
+ * and the two stores share every normaliser below so they cannot present two
+ * shapes to the tools (SMD-1040, SMD-1328).
  */
 
 export type ThoughtMatch = {
@@ -970,11 +979,111 @@ export interface ThoughtStore {
 }
 
 export type StoreEnv = {
+  /**
+   * The PostgREST store's base URL — or, holding a postgres:// URL, the SQL
+   * store's connection string (see databaseUrl): compat/supabase-sql reads a
+   * Postgres URL from this name for every vendored server migrated onto it, so
+   * a box running one of those beside this server sets one variable, not two.
+   */
   SUPABASE_URL?: string;
   SUPABASE_SERVICE_ROLE_KEY?: string;
+  /** The SQL store's connection string. Read before SUPABASE_URL. */
   DATABASE_URL?: string;
+  /** "sql" (the default when unset) or "postgrest" (Cloudflare Workers). */
   OB1_STORE?: string;
 };
+
+/** What an unset OB1_STORE selects. */
+export const DEFAULT_STORE = "sql";
+
+/** The store OB1_STORE names, lower-cased; DEFAULT_STORE when it is unset. */
+export function storeKind(env: StoreEnv): string {
+  return (env.OB1_STORE ?? DEFAULT_STORE).toLowerCase();
+}
+
+/** A libpq-style connection string — what the SQL store dials and PostgREST never is. */
+export function isPostgresUrl(value: string | undefined): boolean {
+  return typeof value === "string" && /^postgres(ql)?:\/\//i.test(value.trim());
+}
+
+/**
+ * The SQL store's connection string and which variable supplied it:
+ * DATABASE_URL first; else SUPABASE_URL when it holds a postgres:// URL — the
+ * spelling compat/supabase-sql takes, so a deployment of a shim-migrated
+ * vendored server beside this one sets that name once and both read it. An
+ * https:// SUPABASE_URL is PostgREST's and is never dialled as Postgres: the
+ * caller reports it as the PostgREST store's configuration under an SQL
+ * selection (missingDatabaseUrl names both fixes).
+ */
+export function databaseUrl(env: StoreEnv): { url: string; from: "DATABASE_URL" | "SUPABASE_URL" } | null {
+  if (env.DATABASE_URL) return { url: env.DATABASE_URL, from: "DATABASE_URL" };
+  if (isPostgresUrl(env.SUPABASE_URL)) return { url: env.SUPABASE_URL!.trim(), from: "SUPABASE_URL" };
+  return null;
+}
+
+/**
+ * Why an SQL selection with no connection string is refused — one message for
+ * createStore's throw and preflight's DATABASE_URL check, so the two cannot
+ * disagree about what to set. Names the PostgREST route when SUPABASE_URL holds
+ * an https:// URL: that is the deployment the old default served, and it keeps
+ * working under an explicit OB1_STORE=postgrest.
+ */
+export function missingDatabaseUrl(env: StoreEnv): { problem: string; fix: string } {
+  const selected = env.OB1_STORE === undefined ? "OB1_STORE is unset, which selects the SQL store" : `OB1_STORE=${env.OB1_STORE} selects the SQL store`;
+  const postgrestUrl = Boolean(env.SUPABASE_URL) && !isPostgresUrl(env.SUPABASE_URL);
+  return {
+    problem: `${selected}, and DATABASE_URL is not set${postgrestUrl ? " — SUPABASE_URL holds a non-postgres:// URL, the PostgREST store's base URL rather than a connection string" : ""}`,
+    fix: postgrestUrl
+      ? "Set DATABASE_URL to the brain's postgres:// connection string — or, to keep reaching this brain through PostgREST at SUPABASE_URL (kept for Cloudflare Workers), set OB1_STORE=postgrest."
+      : "Set DATABASE_URL to the brain's postgres:// connection string.",
+  };
+}
+
+/**
+ * The other mismatch: the PostgREST store selected while SUPABASE_URL holds a
+ * postgres:// connection string — the one-box operator who kept an old
+ * OB1_STORE=postgrest beside a shim-migrated neighbour's variable. supabase-js
+ * would take the string as a base URL and fail at the first call with
+ * "protocol must be http:, https: or s3:", a message that names neither the
+ * variable nor the fix; and the string carries a password, which no report
+ * may print. One refusal for createStore and preflight; null when the
+ * selection and the URL agree.
+ */
+export function postgrestOverPostgresUrl(env: StoreEnv): string | null {
+  if (storeKind(env) !== "postgrest" || !isPostgresUrl(env.SUPABASE_URL)) return null;
+  return "OB1_STORE=postgrest selects the PostgREST store, but SUPABASE_URL holds a postgres:// connection string, which PostgREST cannot dial (its base URL is http(s)://). " +
+    "Unset OB1_STORE — the SQL store reads that URL as its connection string — or set SUPABASE_URL to the PostgREST base URL.";
+}
+
+/** preflight's wording for a direct-connection check that has no PostgREST form; exported so the suite can name it. */
+export const DIRECT_CHECK_SKIP_OVER_POSTGREST = "not checked over PostgREST — a catalog read with no PostgREST form";
+
+/**
+ * A connection string with its credentials blanked, for any line a report
+ * prints. The userinfo ends at the first `/` after the scheme and the LAST `@`
+ * before that closes it: a raw `@` inside a password (invalid, but seen) is
+ * blanked with the rest, and an `@` later in the URL — a query parameter's
+ * value — is not taken for one. The first version's `[^@]*@` stopped at the
+ * first `@`, printing a password's tail and blanking such a host (second
+ * review pass).
+ */
+export function maskUrl(url: string): string {
+  return url.replace(/:\/\/[^/]*@/, "://***@");
+}
+
+/**
+ * The line a PostgREST selection earns on a runtime where the SQL store runs.
+ * Null on Workers (no Bun, no SQL store, PostgREST is the path) and for every
+ * other selection. `hasBun` is a parameter so the test can ask both answers on
+ * one runtime; production passes nothing and gets the runtime's own.
+ */
+export function postgrestOnBunNotice(kind: string, hasBun: boolean = typeof Bun !== "undefined"): string | null {
+  if (kind !== "postgrest" || !hasBun) return null;
+  return "OB1_STORE=postgrest selects the PostgREST store, which this fork keeps for Cloudflare Workers only: " +
+    "this process runs on Bun, where the SQL store (OB1_STORE unset or sql, DATABASE_URL set to the brain's postgres:// URL) " +
+    "reaches the same database directly, needs no Supabase project and is what every test and the container run. " +
+    "FORK.md change 97 (SMD-1797).";
+}
 
 /**
  * Build the configured store.
@@ -982,26 +1091,32 @@ export type StoreEnv = {
  * The SQL implementation is imported dynamically on purpose: it pulls in Bun's
  * Postgres client, which does not exist on Cloudflare Workers. A static import
  * would break the Workers build for every deployment, including the ones that
- * only ever use PostgREST.
+ * only ever use PostgREST. (wrangler.toml aliases the `bun` specifier to a stub
+ * for the bundler's sake, and sets OB1_STORE=postgrest so the default here is
+ * never what a Workers deployment gets.)
  */
 export async function createStore(env: StoreEnv): Promise<ThoughtStore> {
-  const kind = (env.OB1_STORE ?? "postgrest").toLowerCase();
+  const kind = storeKind(env);
 
   if (kind === "sql") {
-    if (!env.DATABASE_URL) {
-      throw new Error("OB1_STORE=sql requires DATABASE_URL");
+    const conn = databaseUrl(env);
+    if (!conn) {
+      const { problem, fix } = missingDatabaseUrl(env);
+      throw new Error(`${problem}. ${fix}`);
     }
     const { SqlStore } = await import("./store-sql.ts");
-    return new SqlStore(env.DATABASE_URL);
+    return new SqlStore(conn.url);
   }
 
   if (kind === "postgrest") {
     if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) {
       throw new Error("OB1_STORE=postgrest requires SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY");
     }
+    const mismatch = postgrestOverPostgresUrl(env);
+    if (mismatch) throw new Error(mismatch);
     const { PostgrestStore } = await import("./store-postgrest.ts");
     return new PostgrestStore(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY);
   }
 
-  throw new Error(`Unknown OB1_STORE "${kind}" — expected "postgrest" or "sql"`);
+  throw new Error(`Unknown OB1_STORE "${kind}" — expected "sql" (the default) or "postgrest" (Cloudflare Workers)`);
 }

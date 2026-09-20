@@ -2,8 +2,8 @@
 /**
  * test-store-postgrest.ts — the PostgREST store against a real database.
  *
- * This path had no test at all. Everything else in the suite exercises
- * OB1_STORE=sql, so `PostgrestStore`'s RPC argument shapes were only ever verified
+ * This path had no test at all. Everything else in the suite exercises the SQL
+ * store (the default since change 97), so `PostgrestStore`'s RPC argument shapes were only ever verified
  * by running against a live PostgREST, which nothing in CI does. That went
  * unnoticed until chunking added a fourth argument to `upsert_thought` and there
  * was no way to check it arrived.
@@ -362,7 +362,7 @@ console.log("\n[7] resolveAgent's RPC argument shape, and the id it produces");
 {
   /**
    * The same gap [1b] exists for, one migration later. Every other suite runs
-   * OB1_STORE=sql, so `resolve_agent`'s three named arguments on this path —
+   * the SQL store, so `resolve_agent`'s three named arguments on this path —
    * p_key_hash, p_label, p_scope — were unverified. A Workers deployment
    * speaking PostgREST would have silently gone unattributed.
    */
@@ -469,7 +469,7 @@ console.log("\n[9] Provenance rides the envelope and reads back over PostgREST t
   });
 
   // The RPC argument shapes for the two read functions, verified on this store —
-  // the reason this suite exists (the default store speaks PostgREST).
+  // the reason this suite exists (the Workers store speaks PostgREST).
   const anc = await store.traceProvenance({ id: child });
   assert(anc.some((n) => n.thoughtId === parent && n.depth === 1), "traceProvenance's rpc shape returns the source at depth 1");
   const der = await store.findDerivatives({ id: parent });

@@ -8,7 +8,8 @@
  * embedded in a URL will end up in access logs and browser history. Scopes are
  * what make that survivable.
  *
- * Run: bun test-auth.ts   (no database needed — nothing here reaches the store)
+ * Run: bun test-auth.ts   (no database needed — the store is dialled at a port
+ *                           nothing listens on and refused at once; [11] says why)
  */
 
 import { authenticate, hashKey, parseKeyRecords, canWrite, secretMatches } from "./auth.ts";
@@ -126,9 +127,14 @@ console.log("\n[6] The legacy single key still works, with write scope");
 
 // ── The tool surface actually changes with scope ─────────────────────────────
 
-process.env.OB1_STORE = "postgrest";
-process.env.SUPABASE_URL = "https://stub.invalid";
-process.env.SUPABASE_SERVICE_ROLE_KEY = "stub";
+// The default store (sql, change 97) against a port nothing listens on: the
+// connection is refused at once, and [11] asserts that a registry the store
+// cannot reach denies nobody service. Before change 97 this ran the PostgREST
+// store against a stub host for the same reason.
+delete process.env.OB1_STORE;
+process.env.DATABASE_URL = "postgres://ob1:x@127.0.0.1:1/ob1";
+delete process.env.SUPABASE_URL;
+delete process.env.SUPABASE_SERVICE_ROLE_KEY;
 process.env.OPENROUTER_API_KEY = "stub";
 process.env.MCP_ACCESS_KEYS = KEYS;
 delete process.env.MCP_ACCESS_KEY;
@@ -223,8 +229,8 @@ console.log("\n[10] The audit actor is serialised in the shape the trigger reads
 console.log("\n[11] An unreachable agent registry does not deny service");
 {
   /**
-   * Every request above ran against SUPABASE_URL=https://stub.invalid, so
-   * resolve_agent could never be called. Asserting it explicitly rather than
+   * Every request above ran the default store against DATABASE_URL at
+   * 127.0.0.1:1, a port nothing listens on, so resolve_agent could never be called. Asserting it explicitly rather than
    * leaving it implied: a resolver that threw, or that treated a failed lookup
    * as a revocation, would have made all of [7] and [8] fail — but only this
    * line says that outcome was the point rather than a coincidence.

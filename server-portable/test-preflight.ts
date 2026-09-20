@@ -15,6 +15,7 @@ import { join, dirname } from "node:path";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { applyMigrations, createAssert, dropSchema, runScript } from "../db/test-support.ts";
+import { DIRECT_CHECK_SKIP_OVER_POSTGREST } from "./store.ts";
 import { ACCEPTED_CAVEAT_PREFIX, MATCH_THOUGHTS_SIGNATURE, SEARCH_THOUGHTS_HYBRID_SIGNATURE, UPDATE_THOUGHT_SIGNATURE } from "../db/config.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -74,6 +75,83 @@ console.log("[1] Missing configuration fails, with an actionable fix");
 
   const b = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "typo" });
   assert(b.code === 1, "an unrecognised OB1_STORE exits 1 rather than defaulting");
+  assert(/"sql" \(the default/.test(b.out), "…naming sql as the default");
+
+  // Change 97 (SMD-1797): unset selects the SQL store, and every line says so.
+  const d = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: undefined });
+  assert(d.code === 1, "OB1_STORE unset without DATABASE_URL exits 1");
+  assert(/store selection\s+OB1_STORE unset — sql, the default/.test(d.out), "…the store selection line says unset means sql");
+  assert(/DATABASE_URL\s+OB1_STORE is unset, which selects the SQL store, and DATABASE_URL is not set/.test(d.out), "…the DATABASE_URL line says which selection wants it");
+  assert(!/SUPABASE_URL\s+not set/.test(d.out), "…and SUPABASE_URL is not asked for");
+
+  // The deployment the old default served — an https:// SUPABASE_URL, no
+  // OB1_STORE — is told both ways out rather than asked for a DATABASE_URL alone.
+  const h = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: undefined, SUPABASE_URL: "https://x.supabase.co", SUPABASE_SERVICE_ROLE_KEY: "k" });
+  assert(h.code === 1, "an https:// SUPABASE_URL under the default exits 1");
+  assert(/the PostgREST store's base URL/.test(h.out) && /set OB1_STORE=postgrest/.test(h.out), "…naming OB1_STORE=postgrest as the way to keep reaching the brain through it");
+  assert(!/set but unused/.test(h.out), "…and does not, two lines later, tell the operator to remove the variables that way out needs");
+
+  // SUPABASE_URL holding a postgres:// URL is the connection string: the
+  // configuration passes, masked and attributed, and the run fails only at the
+  // unreachable database — the same failure [4] asserts for DATABASE_URL.
+  const a = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: undefined, SUPABASE_URL: "postgres://u:hunter2@127.0.0.1:1/x" });
+  assert(/DATABASE_URL\s+postgres:\/\/\*\*\*@127\.0\.0\.1:1\/x \(from SUPABASE_URL, which holds a postgres:\/\/ URL; DATABASE_URL is unset\)/.test(a.out),
+         "a postgres:// SUPABASE_URL is read as the connection string, masked, and said to be");
+  assert(!/hunter2/.test(a.out), "…with its password masked too");
+  assert(!/SUPABASE_URL\s+set but unused/.test(a.out), "…and not called unused");
+  // The ✗ glyph and the absence of the config-skip text are the teeth: with the
+  // alias ignored, DATABASE_URL fails and this line reads `·  schema  skipped —
+  // fix the configuration above first`, which a bare /schema/ also matched.
+  assert(a.code === 1 && /✗\s+schema\s+/.test(a.out) && !/skipped — fix the configuration/.test(a.out) && !/store selection\s+OB1_STORE=/.test(a.out),
+         "…so the run reaches the database and fails THERE (✗ schema, not the config skip), under the default selection");
+  // The direct-connection block dialled the alias: its first check carries the
+  // refused connection. Gated on env.DATABASE_URL by name — the first
+  // version — the block is skipped whole and this line is absent.
+  assert(/vector extension\s+could not verify/.test(a.out), "…and the direct-connection block dialled it too (vector extension carries the refused connection)");
+
+  // The mirror slip: OB1_STORE=postgrest kept beside a SUPABASE_URL that holds a
+  // postgres:// string. Refused by name, the password masked — the first version
+  // printed the URL raw and then blamed network reachability (first review pass).
+  const m = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "postgrest", SUPABASE_URL: "postgres://u:hunter2@127.0.0.1:1/x", SUPABASE_SERVICE_ROLE_KEY: "k" });
+  assert(m.code === 1, "OB1_STORE=postgrest with a postgres:// SUPABASE_URL exits 1");
+  assert(/✗\s+SUPABASE_URL\s+holds a postgres:\/\/ connection string \(postgres:\/\/\*\*\*@127\.0\.0\.1:1\/x\), which the PostgREST store cannot dial/.test(m.out), "…refused by name, with the string masked");
+  assert(!/hunter2/.test(m.out), "…and the password appears nowhere in the report");
+  assert(/→ .*Unset OB1_STORE — the SQL store reads that URL/.test(m.out), "…with the fix naming the SQL store as the reader of that URL");
+  assert(/data layer\s+skipped — fix the configuration/.test(m.out) && !/protocol must be/.test(m.out), "…and the store is never built on it, so supabase-js's protocol error never appears");
+
+  // PostgREST stays selectable. On Bun the selection is a WARNING that names
+  // Workers and carries the notice as its fix line — not a failure of the config.
+  const w = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "postgrest", SUPABASE_URL: "https://stub.invalid", SUPABASE_SERVICE_ROLE_KEY: "k", OB1_CHUNK_CONTEXT: undefined });
+  assert(/!\s+store selection\s+OB1_STORE=postgrest — the PostgREST store, kept for Cloudflare Workers/.test(w.out), "OB1_STORE=postgrest is a warning naming Workers");
+  assert(/→ OB1_STORE=postgrest selects the PostgREST store, which this fork keeps for Cloudflare Workers only: this process runs on Bun/.test(w.out), "…with the retired notice as its fix line");
+  assert(/✓\s+SUPABASE_URL\s+https:\/\/stub\.invalid/.test(w.out), "…and its own configuration still passes");
+  // Over PostgREST with the schema check failed, every direct-connection check
+  // still prints — the file's own rule. Before the first review pass `edit
+  // signature` was silent on this path, and sixteen SQL-only checks were silent
+  // on every PostgREST run (pre-existing; by-catch).
+  assert(/edit signature\s+not probed — the schema check above failed first/.test(w.out), "edit signature reports when the schema check failed over PostgREST");
+  // Every name in DIRECT_CHECKS, read from the source as [4] does, exactly ONCE
+  // as a report row — the loop that fills the gaps must neither miss a name nor
+  // double one already reported by hand (second review pass: a four-name sample
+  // could not see the loop moved above the hand-written skips, which then printed
+  // twice). The row shape is the glyph, the name, whitespace.
+  const listedNames = [...readFileSync(join(HERE, "preflight.ts"), "utf8").match(/const DIRECT_CHECKS = \[([\s\S]*?)\];/)![1].matchAll(/"([^"]+)"/g)].map((mm) => mm[1]);
+  assert(listedNames.length >= 20, `DIRECT_CHECKS parsed from the source (${listedNames.length} names)`);
+  /** A report row for `name`: the glyph, the name, whitespace (fix lines start with →, so they never match). */
+  const rowRe = (name: string, flags = "") => new RegExp(`^\\s*[✓✗!·]\\s+${name}\\s`, flags);
+  const rowCounts = listedNames.map((name) => [name, (w.out.match(rowRe(name, "gm")) ?? []).length] as const);
+  assert(rowCounts.every(([, n]) => n === 1), `over PostgREST every direct-connection check prints exactly one row (${rowCounts.filter(([, n]) => n !== 1).map(([name, n]) => `${name}×${n}`).join(", ") || "all once"})`);
+  assert(rowCounts.filter(([name]) => new RegExp(`·\\s+${name}\\s+${DIRECT_CHECK_SKIP_OVER_POSTGREST}`).test(w.out)).length === 16, "…sixteen of them as the catalog-only skip, the rest by their own hand-written rows");
+  // And nothing else: every row between `data layer` and the provider section is
+  // `schema` or one of the listed names. A hand-written PostgREST row under a
+  // misspelt name would print beside the loop's correctly named skip with every
+  // count above intact (third review pass); this total sees it.
+  const lines = w.out.split("\n");
+  const rowOf = (name: string) => lines.findIndex((l) => rowRe(name).test(l));
+  const fromRow = rowOf("data layer"), toRow = rowOf("embedding provider");
+  const rows = lines.slice(fromRow + 1, toRow).filter((l) => /^\s*[✓✗!·]\s+\S/.test(l));
+  assert(fromRow > 0 && toRow > fromRow && rows.length === listedNames.length + 1,
+         `…and nothing else prints between the data layer and the provider: schema plus the ${listedNames.length} names (${rows.length} rows)`);
 }
 
 console.log("\n[2] Weak secrets warn without blocking");
@@ -138,7 +216,7 @@ console.log("\n[4] Unreachable database fails rather than hanging");
   // else would (a renamed or added check would otherwise be blamed or silent).
   const src = readFileSync(join(HERE, "preflight.ts"), "utf8");
   const listed = [...src.match(/const DIRECT_CHECKS = \[([\s\S]*?)\];/)![1].matchAll(/"([^"]+)"/g)].map((m) => m[1]);
-  const from = src.indexOf('if (built.kind === "sql" && env.DATABASE_URL) {'), to = src.indexOf("const missing = DIRECT_CHECKS.filter");
+  const from = src.indexOf('if (built.kind === "sql" && conn) {'), to = src.indexOf("const missing = DIRECT_CHECKS.filter");
   assert(from > 0 && to > from, "the block's two anchors are found in preflight.ts");
   const block = src.slice(from, to);
   // First appearance in the source is the order the block reports in, and the

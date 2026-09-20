@@ -1838,8 +1838,10 @@ await checkCapturingGrants();
  * OB1_EMBEDDING_DIMENSIONS, OB1_LLM_API_KEY and OB1_AGENT_CACHE_TTL_MS.
  *
  * Deliberately one-directional: compose may legitimately set variables the
- * example does not mention (OB1_STORE, OB1_PG_POOL, PORT), because those are
- * properties of the stack rather than choices the operator makes in .env.
+ * example does not mention (OB1_PG_POOL, PORT), because those are properties
+ * of the stack rather than choices the operator makes in .env. (OB1_STORE was
+ * the example until change 97 made the SQL store the default and compose
+ * stopped setting it.)
  */
 function checkComposeForwardsDocumentedEnv() {
   const example = readFileSync(join(ROOT, "deploy", ".env.example"), "utf8");

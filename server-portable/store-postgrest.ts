@@ -7,8 +7,10 @@
  * cast, so both stores present one shape — and one timestamp format — to the
  * tools (SMD-1040).
  *
- * Works anywhere fetch works, including Cloudflare Workers — which is why it stays
- * the default and why it is still worth keeping after the SQL store exists.
+ * Works anywhere fetch works, including Cloudflare Workers — which is why it is
+ * kept: Workers cannot hold a Postgres connection, so this is the one store that
+ * runs there, and wrangler.toml selects it. Everywhere Bun runs the SQL store is
+ * the default (change 97, SMD-1797) and this one is reported as retired.
  */
 
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";

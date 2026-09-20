@@ -6,7 +6,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPTransport } from "@hono/mcp";
 import { Hono } from "hono";
 import { z } from "zod";
-import { createStore, UUID_RE, type Citation, type ThoughtStore } from "./store.ts";
+import { createStore, postgrestOnBunNotice, storeKind, UUID_RE, type Citation, type ThoughtStore } from "./store.ts";
 import { queryLogEnabled } from "../db/config.mjs";
 import { authenticateRequest, canWrite, type Principal } from "./auth.ts";
 import { AgentResolver, cacheTtlFromEnv } from "./agents.ts";
@@ -25,12 +25,15 @@ type Env = {
   MCP_ACCESS_KEYS?: string;
   /** Legacy single raw key — full write access. See auth.ts. */
   MCP_ACCESS_KEY?: string;
-  /** Which data layer to use: "postgrest" (default) or "sql". */
+  /** Which data layer to use: "sql" (the default when unset) or "postgrest" (Cloudflare Workers). */
   OB1_STORE?: string;
-  /** Required when OB1_STORE=postgrest. */
+  /**
+   * Required when OB1_STORE=postgrest. Holding a postgres:// URL, SUPABASE_URL
+   * also serves as the SQL store's connection string (store.ts:databaseUrl).
+   */
   SUPABASE_URL?: string;
   SUPABASE_SERVICE_ROLE_KEY?: string;
-  /** Required when OB1_STORE=sql. */
+  /** The SQL store's connection string — required unless SUPABASE_URL holds one. */
   DATABASE_URL?: string;
   /** Must match the width of thoughts.embedding — see db/config.mjs. */
   OB1_EMBEDDING_DIM?: string;
@@ -101,10 +104,17 @@ function env(): Env {
 }
 
 // Built once, on first use. createStore() dynamically imports whichever backend
-// is configured, so a Cloudflare build never pulls in the Postgres client.
+// is configured, so a Cloudflare build never pulls in the Postgres client. The
+// PostgREST store selected where the SQL store runs is said once, here, at the
+// moment the selection takes effect (change 97); preflight says it at the
+// entrypoint as well, so a container sees it before the first request.
 let _store: Promise<ThoughtStore> | null = null;
 function db(): Promise<ThoughtStore> {
-  if (!_store) _store = createStore(env());
+  if (!_store) {
+    const notice = postgrestOnBunNotice(storeKind(env()));
+    if (notice) console.warn(notice);
+    _store = createStore(env());
+  }
   return _store;
 }
 
