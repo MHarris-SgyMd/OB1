@@ -15482,8 +15482,9 @@ change 90, `<writer>/<pointer>` — `capture_thought/derived_from`,
 `capture_thought/supersedes`, `update_thought/supersedes` — says the writer
 named the target as its source and the database accepted the pointer: a
 **cite**, MERIT's memory-utilization signal. `evals/utilization.ts` splits the
-two on the slash alone, so a new writer that cites names itself the same way
-and is counted without a code change. Neither this server's tool names nor
+two on the first slash — a non-empty name either side is a cite, a slash at
+either end is not — so a new writer that cites names itself the same way and
+is counted without a code change. Neither this server's tool names nor
 the MCP tool-name grammar (`[A-Za-z0-9._-]`, the spec's SHOULD, which the SDK
 enforces as a warning) carry a slash, so the two shapes do not collide here —
 the server's rule, not a protocol guarantee: a foreign tool logged under a
@@ -15705,7 +15706,24 @@ is **042**, this section **95**, its `test-schema` section **[41]**, its
 guard's message, both suites' regexes, the reset list's two pointers, the
 README's ledger and the inventory line follow. Two tickets took the next
 number in one afternoon, then two more overnight: the renumber trap SMD-1804
-means to retire.
+means to retire. The same pass's cold read, over the mid-merge tree, found
+the collision first and four things besides, all taken: [20]'s
+brain-completing apply was open-ended (`>= "035"`), so it re-applied the file
+under test bare a second time and, on the merged tree, main's 041 too — bounded
+at the file under test now; [21]'s ownership exception followed only a serial
+column's `'a'` dependency, so a sequence behind an extension table's
+*identity* column would have read as a survivor — `'i'` too; this file's and
+the migration header's "splits the two on the slash alone" contradicted the
+literal they introduce, and say the literal's rule now; and the three
+function-comment reads in `test-schema` ([27], [31], [36]) go through a
+sibling `FUNCTION_COMMENT_SQL`, one of them losing a bare `.rows[0].d` that
+threw where the others fail softly. One finding changed [21]'s shape: it
+swept the whole of `public`, and CI's data-layer job runs five
+server-portable suites before `test-upgrade` on one database, so a stray
+object another suite left would have failed it blaming the drop lists. A
+survivor is the fork's when some migration names it — that fails the
+section; one no migration names is reported in the label as another suite's
+and does not.
 
 **Upstream status:** not sent — the query log is this fork's (change 65).
 

@@ -66,7 +66,7 @@ import {
 } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { buffersOf, COLUMN_COMMENT_SQL, communitySchemaFiles, createAssert, SAMPLE_STATEMENT, sampleStatementOf, SCHEMA_FILES_FIRST, SCHEMAS_DIR, seededRandom, TABLE_COMMENT_SQL, TID_PROBE } from "./test-support.ts";
+import { buffersOf, COLUMN_COMMENT_SQL, communitySchemaFiles, createAssert, FUNCTION_COMMENT_SQL, SAMPLE_STATEMENT, sampleStatementOf, SCHEMA_FILES_FIRST, SCHEMAS_DIR, seededRandom, TABLE_COMMENT_SQL, TID_PROBE } from "./test-support.ts";
 import { markerAnswers } from "./bench-oracle.ts";
 import { agentLabel, armOf, attribute, citePointerOf, goldFromFixture, renderReport, summarise, toActionRow, toSearchRow, type ActionRow, type SearchRow } from "../evals/utilization.ts";
 import { ENTITY_TYPES, RELATIONS } from "../server-portable/entities.ts";
@@ -2954,8 +2954,7 @@ console.log("\n[27] Migration 028: thought_work_claims.last_error and release_th
   assert(/ACCEPTED_CAVEAT_PREFIX/.test(colComment) && !colComment.includes(ACCEPTED_CAVEAT_PREFIX.trim()),
     "…and names the acceptance prefix by its constant rather than quoting a second spelling of it");
 
-  const fnComment = (await db.query<{ c: string | null }>(
-    `SELECT obj_description('release_thought(uuid, text, text, text, text)'::regprocedure, 'pg_proc') AS c`)).rows[0]?.c ?? "";
+  const fnComment = (await db.query<{ c: string | null }>(FUNCTION_COMMENT_SQL, ["release_thought(uuid, text, text, text, text)"])).rows[0]?.c ?? "";
   // 015's comment, whole — purpose, holder rule and the three-case enumeration —
   // so a successor that keeps only the middle clause is caught.
   assert(fnComment.includes("Mark one claim succeeded or failed. Only the holder of a still-claimed row may; returns false otherwise (expired and re-leased, deleted, or never held)."),
@@ -3372,7 +3371,7 @@ console.log("\n[30] Migration 031: renew_claims moves every lease the worker hol
   // The two comments 031 writes, and the literal shape [10] requires of them.
   const colComment = (await db.query<{ c: string | null }>(COLUMN_COMMENT_SQL, ["thought_work_claims", "ttl_expires_at"])).rows[0]?.c ?? "";
   assert(/renew_claims/.test(colComment) && /missed heartbeat/.test(colComment), "ttl_expires_at's comment names the heartbeat and what the lease now means");
-  const fnComment = (await db.query<{ c: string | null }>(`SELECT obj_description('renew_claims(text, text, int)'::regprocedure, 'pg_proc') AS c`)).rows[0].c ?? "";
+  const fnComment = (await db.query<{ c: string | null }>(FUNCTION_COMMENT_SQL, ["renew_claims(text, text, int)"])).rows[0]?.c ?? "";
   assert(/never backward/.test(fnComment) && !/--/.test(fnComment) && !/--/.test(colComment), "renew_claims's comment states the rule, and neither literal spells a flag with its dashes");
   await db.exec(`DELETE FROM thoughts`);
 }
@@ -3989,7 +3988,7 @@ console.log("\n[35] Migration 035: a re-capture writes no provenance — the env
   const FOUR = "upsert_thought(text, jsonb, vector, jsonb)";
   const REVIEW = "review_supersession_proposal(uuid, text, text, text, jsonb, boolean)";
   const srcOf = async (sig: string) => String((await db.query<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = $1::regprocedure`, [sig])).rows[0].s);
-  const commentOf = async (sig: string) => String((await db.query<{ d: string }>(`SELECT obj_description($1::regprocedure, 'pg_proc') AS d`, [sig])).rows[0].d);
+  const commentOf = async (sig: string) => (await db.query<{ c: string | null }>(FUNCTION_COMMENT_SQL, [sig])).rows[0]?.c ?? "";
   const three = await srcOf(THREE);
   type R = { id: string; fingerprint: string; existed?: boolean; supersedes?: string | null; chunks?: number };
   const cap = async (content: string, payload: Record<string, unknown>, vec: string | null) =>

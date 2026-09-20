@@ -1538,10 +1538,12 @@ console.log("\n[20] Migration 042 on a schema without 034 — refused up front, 
   const [{ c: tbl }] = (await sql.unsafe(TABLE_COMMENT_SQL, ["query_log"])) as { c: string | null }[];
   assert(/<writer>\/<pointer>/.test(col ?? "") && /<writer>\/<pointer>/.test(tbl ?? ""), "…and both live comments name <writer>/<pointer>");
   await sql.close();
-  // The ledger records 035–040 already; applying them completes the schema
+  // The ledger records 035–041 already; applying them completes the schema
   // behind it, so this section leaves a full brain as every section before it
-  // did, and [21] can start from it (second and fourth review passes).
-  await applyMigrations(URL_, { ...OPTS, only: (f) => f >= "035" });
+  // did, and [21] can start from it (second and fourth review passes). Bounded
+  // at the file under test, which the migrator has just applied and recorded:
+  // an open-ended `>= "035"` re-applied it bare a second time (fifth pass).
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f >= "035" && f < the042 });
 }
 
 console.log("\n[21] test-support's schema reset leaves nothing of the fork's in public — every table, function and type a migration creates is on its drop lists (SMD-1749)");
@@ -1577,14 +1579,14 @@ console.log("\n[21] test-support's schema reset leaves nothing of the fork's in 
   const notExt = (catalog: string, oid: string) => `NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = '${catalog}'::regclass AND d.objid = ${oid} AND d.deptype = 'e')`;
   // An extension's composite type records its membership on the TYPE, not on
   // the relation behind it, and a sequence behind an extension table's serial
-  // column records only an 'a' dependency on that column — so a relation is an
-  // extension's when it, its row type, or the table that owns it is (fourth
-  // review pass; pgvector and pg_trgm ship neither today, so this is for the
-  // next extension the test image gains).
+  // or identity column records only an 'a' or 'i' dependency on that column —
+  // so a relation is an extension's when it, its row type, or the table that
+  // owns it is (fourth and fifth review passes; pgvector and pg_trgm ship
+  // neither today, so this is for the next extension the test image gains).
   const notExtRel = `NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.deptype = 'e' AND (
       (d.classid = 'pg_class'::regclass AND d.objid = c.oid)
       OR (d.classid = 'pg_type'::regclass AND d.objid = c.reltype)
-      OR (d.classid = 'pg_class'::regclass AND d.objid = (SELECT a.refobjid FROM pg_depend a WHERE a.classid = 'pg_class'::regclass AND a.objid = c.oid AND a.deptype = 'a' LIMIT 1))))`;
+      OR (d.classid = 'pg_class'::regclass AND d.objid = (SELECT a.refobjid FROM pg_depend a WHERE a.classid = 'pg_class'::regclass AND a.objid = c.oid AND a.deptype IN ('a','i') LIMIT 1))))`;
   const sweep = async () => ({
     // Every relation kind: tables, partitioned and foreign tables, views,
     // materialized views, sequences, and the relation a standalone composite
@@ -1598,10 +1600,24 @@ console.log("\n[21] test-support's schema reset leaves nothing of the fork's in 
   assert(planted.rels.includes("ob1_probe_rowtype") && planted.rels.includes("ob1_probe_part") && planted.fns.includes("ob1_probe_fn()") && planted.types.includes("ob1_probe_enum") && planted.types.includes("ob1_probe_domain"),
     `the sweep sees what the reset does not drop — a composite type, a partitioned table, a function, an enum and a domain planted beside the fork's objects (${[...planted.rels, ...planted.fns, ...planted.types].join(", ")})`);
   for (const ddl of [`DROP TABLE ob1_probe_part`, `DROP FUNCTION ob1_probe_fn()`, `DROP TYPE ob1_probe_rowtype`, `DROP TYPE ob1_probe_enum`, `DROP DOMAIN ob1_probe_domain`]) await sql.unsafe(ddl);
+  // A survivor is the fork's when some migration names it — then a line is
+  // missing from test-support's lists and this section fails. One no migration
+  // names is another suite's: CI's data-layer job runs five server-portable
+  // suites before this one on one database, and a local run against a kept
+  // database meets whatever the last suite left. Those are reported in the
+  // label and do not fail the section, which is about the drop lists, not
+  // about the neighbours (fifth review pass).
+  const texts = await Promise.all(MIGRATIONS.map((f) => Bun.file(join(HERE, "migrations", f)).text()));
+  const named = (name: string) => texts.some((t) => new RegExp(`\\b${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`).test(t));
+  const split = (all: string[], base: (x: string) => string) => {
+    const ours = all.filter((x) => named(base(x))), foreign = all.filter((x) => !named(base(x)));
+    return { ours, note: foreign.length ? `; present but named by no migration, so another suite's: ${foreign.join(", ")}` : "" };
+  };
   const left = await sweep();
-  assert(left.rels.length === 0, `no relation of the fork's survives the reset (${left.rels.join(", ") || "none"})`);
-  assert(left.fns.length === 0, `no function of the fork's survives the reset (${left.fns.join(", ") || "none"})`);
-  assert(left.types.length === 0, `no type of the fork's survives the reset (${left.types.join(", ") || "none"})`);
+  const rels = split(left.rels, (x) => x), fns = split(left.fns, (x) => x.slice(0, x.indexOf("("))), types = split(left.types, (x) => x);
+  assert(rels.ours.length === 0, `no relation of the fork's survives the reset (${rels.ours.join(", ") || "none"}${rels.note})`);
+  assert(fns.ours.length === 0, `no function of the fork's survives the reset (${fns.ours.join(", ") || "none"}${fns.note})`);
+  assert(types.ours.length === 0, `no type of the fork's survives the reset (${types.ours.join(", ") || "none"}${types.note})`);
   await sql.close();
   await applyMigrations(URL_, OPTS);
 }

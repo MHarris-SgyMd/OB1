@@ -147,6 +147,8 @@ const FUNCTIONS = [
  */
 export const COLUMN_COMMENT_SQL = "SELECT col_description(a.attrelid, a.attnum) AS c FROM pg_attribute a WHERE a.attrelid = $1::regclass AND a.attname = $2 AND NOT a.attisdropped";
 export const TABLE_COMMENT_SQL = "SELECT obj_description($1::regclass, 'pg_class') AS c";
+/** The function form: `$1` is a signature text (`name(argtypes)`), cast to regprocedure; the row's one field is `c`. */
+export const FUNCTION_COMMENT_SQL = "SELECT obj_description($1::regprocedure, 'pg_proc') AS c";
 
 export type SchemaOptions = {
   /** Vector width to substitute for `{{EMBEDDING_DIM}}`. */

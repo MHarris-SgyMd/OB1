@@ -16,7 +16,8 @@
 --   OPEN: the caller went and looked at, or touched, the row (034's
 --   click-through relevance). A slashed name is a CITE: the fact reached a
 --   write (MERIT's memory-utilization signal). `evals/utilization.ts` splits
---   the two on the slash alone, so a new writer that cites names itself the
+--   the two on the first slash — a non-empty name either side is a cite, a
+--   slash at either end is not — so a new writer that cites names itself the
 --   same way and is counted without a code change there. Neither this
 --   server's tool names nor the MCP tool-name grammar ([A-Za-z0-9._-], the
 --   spec's SHOULD, which the SDK enforces as a warning) carry a slash, so the
