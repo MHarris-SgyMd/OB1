@@ -4705,7 +4705,7 @@ console.log("\n[41] Migration 042: query_log.tool's two shapes, and the table's 
   // table's text said fetch/edit/delete. SMD-1719 (change 90) made
   // `<writer>/<pointer>` a cite — a write that named the target as its source
   // and the pointer was accepted — and utilization.ts splits cited from opened
-  // on the slash. A reader of the table (\d+, a future writer of action rows,
+  // on the first slash. A reader of the table (\d+, a future writer of action rows,
   // an operator auditing what personal data the table holds) must be able to
   // learn both shapes from the table, so both comments are asserted here
   // rather than trusted to prose — of the LIVE text after every file applied,

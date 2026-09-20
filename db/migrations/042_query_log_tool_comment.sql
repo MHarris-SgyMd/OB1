@@ -7,8 +7,8 @@
 -- WHY
 --   034 gave `query_log.tool` one meaning on an action row: which tool touched
 --   the target — `fetch`, `update_thought`, `delete_thought` — and the inline
---   comment beside the column says exactly those three names. SMD-1719
---   (FORK.md change 90) gave the column a second shape: `<writer>/<pointer>` —
+--   comment beside the column says exactly those three names. SMD-1719 (FORK.md
+--   change 90) gave the column a second shape: `<writer>/<pointer>` —
 --   `capture_thought/derived_from`, `capture_thought/supersedes`,
 --   `update_thought/supersedes` — written when a capture or an edit named the
 --   target as its source and the database accepted the pointer (035 writes no
@@ -18,12 +18,12 @@
 --   write (MERIT's memory-utilization signal). `evals/utilization.ts` splits
 --   the two on the first slash — a non-empty name either side is a cite, a
 --   slash at either end is not — so a new writer that cites names itself the
---   same way and is counted without a code change there. Neither this
---   server's tool names nor the MCP tool-name grammar ([A-Za-z0-9._-], the
---   spec's SHOULD, which the SDK enforces as a warning) carry a slash, so the
---   two shapes do not collide here — the server's rule, not a protocol
---   guarantee: a foreign tool logged under a slashed name would read as a
---   cite, and utilization.ts reports a plain name it does not know as unknown
+--   same way and is counted without a code change there. Neither this server's
+--   tool names nor the MCP tool-name grammar ([A-Za-z0-9._-], the spec's
+--   SHOULD, which the SDK enforces as a warning) carry a slash, so the two
+--   shapes do not collide here — the server's rule, not a protocol guarantee: a
+--   foreign tool logged under a slashed name would read as a cite, and
+--   utilization.ts reports a plain name it does not know as unknown
 --   (OPEN_TOOLS) rather than folding it in silently.
 --
 --   The contract lives in server-portable/index.ts's comment beside the writer,
@@ -44,23 +44,23 @@
 -- WHAT
 --   * A guard first, 031's shape: on a schema without 034's table, both
 --     statements would fail bare ("relation query_log does not exist"). The
---     brain that meets this is one adopted with --baseline whose ledger
---     records 034 but whose schema never had it (a guide-built brain, or one
---     baselined and never re-applied); a plain run there, the compose stack's,
---     gates the server and would stop with no remedy named. The file refuses
---     up front naming 034 and --reapply, as 031 does for 015. db/test-upgrade.ts
---     [20] drives it, and drives the same pending file applying once 034's
---     table exists.
+--     brain that meets this is one adopted with --baseline whose ledger records
+--     034 but whose schema never had it (a guide-built brain, or one baselined
+--     and never re-applied); a plain run there, the compose stack's, gates the
+--     server and would stop with no remedy named. The file refuses up front
+--     naming 034 and --reapply, as 031 does for 015. db/test-upgrade.ts [20]
+--     drives it, and drives the same pending file applying once 034's table
+--     exists.
 --   * COMMENT ON COLUMN query_log.tool — the DATA CONTRACT: on a search row,
 --     the search tool; on an action row, one of two shapes — a plain tool name
 --     is an open, `<writer>/<pointer>` is a cite — with what each shape means,
---     the three cite values written today, the rule that a value with a non-empty name either side of its first
---     slash is a cite whatever the writer, and where the readers are. Which rows a cite
---     is logged for (a pointer the database accepted, so never a re-capture),
---     which writers cite, and how a cite is attributed to a search are the
---     SERVER's and the READERS' contract and change with them, so the comment
---     points at index.ts and evals/utilization.ts for them rather than
---     restating them.
+--     the three cite values written today, the rule that a value with a
+--     non-empty name either side of its first slash is a cite whatever the
+--     writer, and where the readers are. Which rows a cite is logged for (a
+--     pointer the database accepted, so never a re-capture), which writers
+--     cite, and how a cite is attributed to a search are the SERVER's and the
+--     READERS' contract and change with them, so the comment points at index.ts
+--     and evals/utilization.ts for them rather than restating them.
 --   * COMMENT ON TABLE query_log — re-issued with 034's text kept whole and one
 --     clause added beside fetch/edit/delete: "or a write that cited a returned
 --     id (SMD-1719)".

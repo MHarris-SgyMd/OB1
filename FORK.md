@@ -15475,66 +15475,65 @@ unchanged, and preflight names the loss with the `ALTER` that puts both back.
 
 ### 95. The cite shape is stated at the table — `query_log.tool`'s two shapes, and the table's cite clause, carry a COMMENT (SMD-1749)
 
-Change 90 gave `query_log.tool` a second shape on an action row. 034 (change
-65) had one: a plain tool name — `fetch`, `update_thought`, `delete_thought` —
-says the caller opened or touched the target, click-through relevance. Since
-change 90, `<writer>/<pointer>` — `capture_thought/derived_from`,
+Change 90 gave `query_log.tool` a second shape on an action row. 034 (change 65)
+had one: a plain tool name — `fetch`, `update_thought`, `delete_thought` — says
+the caller opened or touched the target, click-through relevance. Since change
+90, `<writer>/<pointer>` — `capture_thought/derived_from`,
 `capture_thought/supersedes`, `update_thought/supersedes` — says the writer
 named the target as its source and the database accepted the pointer: a
 **cite**, MERIT's memory-utilization signal. `evals/utilization.ts` splits the
 two on the first slash — a non-empty name either side is a cite, a slash at
-either end is not — so a new writer that cites names itself the same way and
-is counted without a code change. Neither this server's tool names nor
-the MCP tool-name grammar (`[A-Za-z0-9._-]`, the spec's SHOULD, which the SDK
-enforces as a warning) carry a slash, so the two shapes do not collide here —
-the server's rule, not a protocol guarantee: a foreign tool logged under a
-slashed name would read as a cite, and `utilization.ts` reports a plain name
-it does not know as unknown (`OPEN_TOOLS`) rather than folding it in. The contract lived in
+either end is not — so a new writer that cites names itself the same way and is
+counted without a code change. Neither this server's tool names nor the MCP
+tool-name grammar (`[A-Za-z0-9._-]`, the spec's SHOULD, which the SDK enforces
+as a warning) carry a slash, so the two shapes do not collide here — the
+server's rule, not a protocol guarantee: a foreign tool logged under a slashed
+name would read as a cite, and `utilization.ts` reports a plain name it does not
+know as unknown (`OPEN_TOOLS`) rather than folding it in. The contract lived in
 `server-portable/index.ts`'s comment beside the writer, `utilization.ts`'s
-header, `evals/README.md` and change 90's section. The **schema said
-nothing**: 034 wrote no `COMMENT ON COLUMN` for `tool` at all — the three
-names are a SQL comment in the file, invisible to a reader of the live table —
-and its `COMMENT ON TABLE` says "one per follow-up fetch/edit/delete of a
-returned id". A reader of the table (`\d+`, a future writer of action rows, an
-operator auditing what personal data the table holds) was told three plain
-names and nothing about the rows a cite writes. 034 is applied and is not
-edited after the fact (`migrate.ts` hashes the file; the ledger would read an
-edit as drift). The repo's mechanism for stating a contract on a column is a
-`COMMENT` in a new migration, as 028 (change 49) did for
-`thought_work_claims.last_error`; change 90's third review pass proposed it
-and declined it there as a second mechanism in a PR about a log convention.
+header, `evals/README.md` and change 90's section. The **schema said nothing**:
+034 wrote no `COMMENT ON COLUMN` for `tool` at all — the three names are a SQL
+comment in the file, invisible to a reader of the live table — and its `COMMENT
+ON TABLE` says "one per follow-up fetch/edit/delete of a returned id". A reader
+of the table (`\d+`, a future writer of action rows, an operator auditing what
+personal data the table holds) was told three plain names and nothing about the
+rows a cite writes. 034 is applied and is not edited after the fact
+(`migrate.ts` hashes the file; the ledger would read an edit as drift). The
+repo's mechanism for stating a contract on a column is a `COMMENT` in a new
+migration, as 028 (change 49) did for `thought_work_claims.last_error`; change
+90's third review pass proposed it and declined it there as a second mechanism
+in a PR about a log convention.
 
-**Migration 042** is a guard and the two statements, and nothing else. The
-guard is 031's shape: on a schema without 034's table both statements would
-fail bare (`relation "query_log" does not exist`), and the brain that meets
-this is one adopted with `--baseline` whose ledger records 034 but whose
-schema never had it — a guide-built brain, or one baselined and never
-re-applied — where a plain run, the compose stack's, gates the server and
-would stop with no remedy named; the file refuses up front naming 034 and
-`--reapply`, as 031 does for 015. Then an idempotent
-`COMMENT ON COLUMN query_log.tool` carrying the **data contract**: on a search
-row, the search tool; on an action row, one of two shapes — a plain name is an
-open, `<writer>/<pointer>` is a cite — with what each means, the three cite
-values written today, the rule as the column's (a non-empty name either side of the
-first slash is a cite, whatever the writer; a slash at either end is not —
-`citePointerOf`'s rule, as [39] holds it) and why the shapes cannot collide. *When* a cite is
-logged (a pointer the database accepted, so never a re-capture — 035 writes no
-pointer), *which* writers cite, and *how* an action is attributed to a search
-are the server's and the readers' contract and change with them, so the comment
-points at `index.ts` and `utilization.ts`'s header for them rather than
-restating them — 028's shape, and the lesson its four passes paid for. And
-`COMMENT ON TABLE query_log` re-issued with 034's text kept whole and one clause
-added beside fetch/edit/delete: or a write that cited a returned id as its
-source, naming the shape and the ticket. No DDL on data, no function change, no
-ACL change, no placeholder, no `CHECK` change: 034's `tool <> ''` is the only
-constraint on the column and a slashed name satisfies it. The export join, the
-utilization report and the server are unaffected; `test-upgrade`'s shape
-comparison (columns and function signatures) does not see a comment. Neither
-`COMMENT` literal carries `--` — 028's convention, from when `test-schema`
-[10] stripped that sequence to end of line; the scan is literal-aware since
-change 93 (SMD-1796), so the guard's HINT naming two flags, as 030's and 031's
-do, is no longer even a consideration, and [41] keeps the convention as an
-assertion of the live text.
+**Migration 042** is a guard and the two statements, and nothing else. The guard
+is 031's shape: on a schema without 034's table both statements would fail bare
+(`relation "query_log" does not exist`), and the brain that meets this is one
+adopted with `--baseline` whose ledger records 034 but whose schema never had it
+— a guide-built brain, or one baselined and never re-applied — where a plain
+run, the compose stack's, gates the server and would stop with no remedy named;
+the file refuses up front naming 034 and `--reapply`, as 031 does for 015. Then
+an idempotent `COMMENT ON COLUMN query_log.tool` carrying the **data contract**:
+on a search row, the search tool; on an action row, one of two shapes — a plain
+name is an open, `<writer>/<pointer>` is a cite — with what each means, the
+three cite values written today, the rule as the column's (a non-empty name
+either side of the first slash is a cite, whatever the writer; a slash at either
+end is not — `citePointerOf`'s rule, as [39] holds it) and why the shapes cannot
+collide. *When* a cite is logged (a pointer the database accepted, so never a
+re-capture — 035 writes no pointer), *which* writers cite, and *how* an action
+is attributed to a search are the server's and the readers' contract and change
+with them, so the comment points at `index.ts` and `utilization.ts`'s header for
+them rather than restating them — 028's shape, and the lesson its four passes
+paid for. And `COMMENT ON TABLE query_log` re-issued with 034's text kept whole
+and one clause added beside fetch/edit/delete: or a write that cited a returned
+id as its source, naming the shape and the ticket. No DDL on data, no function
+change, no ACL change, no placeholder, no `CHECK` change: 034's `tool <> ''` is
+the only constraint on the column and a slashed name satisfies it. The export
+join, the utilization report and the server are unaffected; `test-upgrade`'s
+shape comparison (columns and function signatures) does not see a comment.
+Neither `COMMENT` literal carries `--` — 028's convention, from when
+`test-schema` [10] stripped that sequence to end of line; the scan is
+literal-aware since change 93 (SMD-1796), so the guard's HINT naming two flags,
+as 030's and 031's do, is no longer even a consideration, and [41] keeps the
+convention as an assertion of the live text.
 
 The trap a successor must not fall into is 028's: a re-issued `COMMENT`
 replaces the description, so any migration that re-comments `query_log` or
@@ -15596,24 +15595,23 @@ that carries it should re-issue this column's comment to point at it — the
 ticket's note, carried in 042's header.
 
 **Not done here.** A shared helper for the catalog reads that [41] and
-`test-upgrade` [20] each spelled (a first review pass counted six copies of
-the `col_description` join across the two suites) was declined in that pass
-because the two suites read through two clients — PGlite's `db.query` and
-Bun's `sql` — and a helper would take a query callback to save two lines. A
-third pass pointed out that a SQL *string* needs no callback: both clients
-take text with positional parameters. So `test-support` now exports
-`COLUMN_COMMENT_SQL` and `TABLE_COMMENT_SQL` and both sections read through
-them — and so do [27] and [31], the two earlier pure reads (a fourth pass:
-"the diff is the moment the copies are all in view"); [26]'s read joins
-`information_schema` for the column's type and stays its own. Still not done: `test-upgrade`'s
-`shape()` decides "is this ours?" by a hand list of eighteen pgvector name
-prefixes where [21] asks `pg_depend`; changing the predicate every upgrade
-section compares on is not this ticket's, and is noted on SMD-1819. A
-generic mapping in
+`test-upgrade` [20] each spelled (a first review pass counted six copies of the
+`col_description` join across the two suites) was declined in that pass because
+the two suites read through two clients — PGlite's `db.query` and Bun's `sql` —
+and a helper would take a query callback to save two lines. A third pass pointed
+out that a SQL *string* needs no callback: both clients take text with
+positional parameters. So `test-support` now exports `COLUMN_COMMENT_SQL` and
+`TABLE_COMMENT_SQL` and both sections read through them — and so do [27] and
+[31], the two earlier pure reads (a fourth pass: "the diff is the moment the
+copies are all in view"); [26]'s read joins `information_schema` for the
+column's type and stays its own. Still not done: `test-upgrade`'s `shape()`
+decides "is this ours?" by a hand list of eighteen pgvector name prefixes where
+[21] asks `pg_depend`; changing the predicate every upgrade section compares on
+is not this ticket's, and is noted on SMD-1819. A generic mapping in
 `migrate.ts` — a pending file failing with `42P01`/`42883` on a ledger that
-records earlier files gets the baseline hint once, retiring the block 030,
-031 and 042 each paste — is **SMD-1811** (the same pass's altitude finding);
-042 keeps its guard.
+records earlier files gets the baseline hint once, retiring the block 030, 031
+and 042 each paste — is **SMD-1811** (the same pass's altitude finding); 042
+keeps its guard.
 
 **One review pass** so far (a cold reader over the diff and the operator's
 path walked: a fresh brain migrated by the runner, a second plain run, a
@@ -15674,24 +15672,24 @@ README's second count line still said 973, and this file's list of new files
 stopped at 040. And the helper decline was reversed, above.
 
 **Fourth pass** (a cold reader who ran both suites; the run-it arm regressed
-[21]'s sweep to the second pass's kinds and watched the planted-probe
-assertion fail on exactly the composite type and the partitioned table, so
-the self-check has teeth). Nothing touched the migration or its contract. The
-sweep's exception for an extension's members was too narrow in the other
-direction: an extension's composite type records its membership on the type,
-not on the relation behind it, and a sequence behind an extension table's
-serial column records only its ownership of the column, so an image that
-gained such an extension would have failed [21] on a reset that dropped
-everything of the fork's — a relation is excepted now when it, its row type
-or its owning table is an extension's. [21] had also built the full brain it
-then dropped, twice over; [20] completes its own brain now (035–040 are on
-the ledger already) and [21] starts from it. `test-schema` [10]'s header still
-denied that any migration puts `--` inside a string literal, three RAISE HINTs
-after that stopped being true; the pass corrected it — and main's change 93
-then made the strip literal-aware and rewrote that header, so the correction
-was overtaken in the next merge and main's text stands. Two `String(…)` wrappers over values already typed as strings are
-gone. A claim that CI runs neither `test-upgrade` nor its container was
-checked and does not hold: the "Schema against real Postgres" job runs it.
+[21]'s sweep to the second pass's kinds and watched the planted-probe assertion
+fail on exactly the composite type and the partitioned table, so the self-check
+has teeth). Nothing touched the migration or its contract. The sweep's exception
+for an extension's members was too narrow in the other direction: an extension's
+composite type records its membership on the type, not on the relation behind
+it, and a sequence behind an extension table's serial column records only its
+ownership of the column, so an image that gained such an extension would have
+failed [21] on a reset that dropped everything of the fork's — a relation is
+excepted now when it, its row type or its owning table is an extension's. [21]
+had also built the full brain it then dropped, twice over; [20] completes its
+own brain now (035–040 are on the ledger already) and [21] starts from it.
+`test-schema` [10]'s header still denied that any migration puts `--` inside a
+string literal, three RAISE HINTs after that stopped being true; the pass
+corrected it — and main's change 93 then made the strip literal-aware and
+rewrote that header, so the correction was overtaken in the next merge and
+main's text stands. Two `String(…)` wrappers over values already typed as
+strings are gone. A claim that CI runs neither `test-upgrade` nor its container
+was checked and does not hold: the "Schema against real Postgres" job runs it.
 
 **Fifth pass** (a cold reader; the run-it arm planted a serial table, its
 sequence, a loose sequence and a view beside the fork's objects and ran [21]'s
