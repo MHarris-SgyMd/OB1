@@ -43,11 +43,10 @@ SUPABASE (from your Open Brain setup)
 
 ## Steps
 
-1. Open your Supabase dashboard and navigate to the **SQL Editor**
-2. Create a new query and paste the full contents of `schema.sql`
-3. Click **Run** to execute the migration
-4. Open **Table Editor** and confirm the `readwise_books` table appears with the expected columns
-5. Navigate to **Database > Functions** and verify two new functions exist: `get_book_highlights`, `increment_book_highlight_count`
+1. Apply `schema.sql` to your brain: `psql "$DATABASE_URL" -f schema.sql` (or paste it into your SQL console).
+2. From `db/`, run `bun migrate.ts --url "$DATABASE_URL" --grant <role>` so the role your server connects as can use what the file creates — the file itself grants nothing (this fork, SMD-1796: upstream's `GRANT … TO service_role` lines and its row-level security are gone; `db/README.md`, "Grants for a capturing role", lists the `community` group).
+3. Open **Table Editor** and confirm the `readwise_books` table appears with the expected columns
+4. Navigate to **Database > Functions** and verify two new functions exist: `get_book_highlights`, `increment_book_highlight_count`
 
 ## Expected Outcome
 

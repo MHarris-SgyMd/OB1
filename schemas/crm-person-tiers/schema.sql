@@ -237,11 +237,16 @@ $$;
 --        you've added RLS policies you're comfortable with.
 -- ============================================================
 
-GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.crm_persons         TO service_role;
-GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.crm_person_mentions TO service_role;
-
-GRANT EXECUTE ON FUNCTION public.crm_person_tiers(INTEGER, INTEGER, TEXT, INTEGER, INTERVAL)
-  TO authenticated, service_role;
+-- This fork (SMD-1796): the grants the section above describes — the two
+-- tables TO service_role, EXECUTE on crm_person_tiers TO authenticated and
+-- service_role — are gone. Those are Supabase's roles: on plain Postgres the
+-- first GRANT stops the file (`role "service_role" does not exist`).
+-- Grant the role your server connects as instead — from db/:
+--   bun migrate.ts --url postgres://… --grant <role>
+-- issues db/config.mjs ROLE_GRANTS' `community` group, which covers this file's
+-- two tables (SELECT, INSERT, UPDATE, DELETE). crm_person_tiers needs no grant:
+-- EXECUTE is PUBLIC's by default, and it is SECURITY INVOKER — the caller's own
+-- privileges on `thoughts` and the two tables govern what it returns.
 
 COMMENT ON FUNCTION public.crm_person_tiers(INTEGER, INTEGER, TEXT, INTEGER, INTERVAL) IS
   'Paginated list of CRM persons with per-row relationship_tier and a computed effective_tier that promotes high-activity recent contacts to "connected".';

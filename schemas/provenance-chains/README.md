@@ -11,7 +11,7 @@ Open Brain captures atomic thoughts, but as soon as you start synthesizing — w
 - `derivation_layer` (TEXT): `'primary'` (atomic capture) or `'derived'` (regenerable artifact). Defaults to `'primary'` so all existing rows keep working.
 - `supersedes` (UUID): optional pointer to a prior thought this one replaces — e.g., a regenerated digest replacing yesterday's.
 
-Upstream's file also installs four helper functions (all `SECURITY DEFINER`, all **granted to `service_role` only** — call them from your edge function, not from client code). **On this fork the first two are migrations 025 and 026's** — the same names and argument lists, so the calls below run, but they return the fork's columns (no `derivation_layer`, `sensitivity_tier` or `restricted` flag), are `SECURITY INVOKER` and ungranted, and redact nothing by tier (025's header, departures 1 and 2) — and the file installs only the last two (SMD-1250; the note at the top of `schema.sql` says why). On plain Postgres — this fork's deploy — the file's `GRANT`/`REVOKE` to Supabase's roles fail (`role "authenticated" does not exist`): create `authenticated`, `service_role` and `anon` as `NOLOGIN` roles first, or delete those lines.
+Upstream's file also installs four helper functions (all `SECURITY DEFINER`, all **granted to `service_role` only** — call them from your edge function, not from client code). **On this fork the first two are migrations 025 and 026's** — the same names and argument lists, so the calls below run, but they return the fork's columns (no `derivation_layer`, `sensitivity_tier` or `restricted` flag), are `SECURITY INVOKER` and ungranted, and redact nothing by tier (025's header, departures 1 and 2) — and the file installs only the last two (SMD-1250; the note at the top of `schema.sql` says why). On plain Postgres — this fork's deploy — upstream's `GRANT`/`REVOKE` to Supabase's roles would fail (`role "authenticated" does not exist`), so they are gone too (SMD-1796): the two merges stay `REVOKE`d `FROM PUBLIC`, and `bun migrate.ts --grant <role>` gives the role you connect as `EXECUTE` on them.
 
 - `trace_provenance(thought_id UUID, max_depth INT, node_cap INT)` — upstream's walks `derived_from` upward and returns a flat ancestor rowset with depth, cycle detection, and restricted-tier redaction; the fork's (026) is a bounded walk-global BFS with the same depth and cycle columns and no redaction.
 - `find_derivatives(thought_id UUID, limit INT)` — reverse lookup via the GIN index; "what derived artifacts cite this atomic thought?" Upstream's always filters restricted rows out; the fork's (025) returns every derivative.
@@ -27,7 +27,7 @@ Upstream's canonical `upsert_thought` RPC only preserves the `metadata` blob on 
 ## Prerequisites
 
 - Working Open Brain setup ([guide](../../docs/01-getting-started.md))
-- Access to the Supabase SQL Editor or CLI
+- A connection that can alter `thoughts` and create functions (`psql` or your SQL console)
 
 ### Canonical-schema compatibility
 
@@ -63,8 +63,8 @@ SUPABASE (from your Open Brain setup)
 
 ![Step 1](https://img.shields.io/badge/Step_1-Run_Migration-1E88E5?style=for-the-badge)
 
-1. Open your **Supabase SQL Editor** (Dashboard > SQL Editor)
-2. Paste the contents of [`schema.sql`](./schema.sql) and run it.
+1. Apply [`schema.sql`](./schema.sql) to your brain: `psql "$DATABASE_URL" -f schema.sql` (or paste it into your SQL console).
+2. From `db/`, run `bun migrate.ts --url "$DATABASE_URL" --grant <role>`: the role you connect as gets `EXECUTE` on the two `SECURITY DEFINER` merges the file installs, which stay `REVOKE`d `FROM PUBLIC` — the file itself grants nothing (this fork, SMD-1796).
 
 The migration is idempotent — safe to re-run. It uses `ADD COLUMN IF NOT EXISTS`, `CREATE OR REPLACE FUNCTION`, and `CREATE INDEX IF NOT EXISTS` throughout.
 
@@ -120,7 +120,7 @@ After running the migration:
 
 - `public.thoughts` has four columns for this: `derived_from JSONB` and `supersedes UUID`, migration 025's on this fork and possibly already set by 025's capture, beside the two this file adds, `derivation_method TEXT` and `derivation_layer TEXT NOT NULL DEFAULT 'primary'`.
 - Every existing row has `derivation_layer = 'primary'` and `derivation_method` NULL — no data loss, no behavior change for existing MCP tools.
-- Four helper SQL functions exist: `trace_provenance` and `find_derivatives` are migrations 025 and 026's, already there on a migrated brain; `merge_thought_provenance_metadata` and `merge_thought_eval_metadata` come from this file, `SECURITY DEFINER`, **granted to `service_role` only** (clients must reach them via the open-brain edge function, not PostgREST as `authenticated`).
+- Four helper SQL functions exist: `trace_provenance` and `find_derivatives` are migrations 025 and 026's, already there on a migrated brain; `merge_thought_provenance_metadata` and `merge_thought_eval_metadata` come from this file, `SECURITY DEFINER` and `REVOKE`d `FROM PUBLIC` — upstream granted them to `service_role` only (clients reached them through its edge function, never as `authenticated`); on this fork `bun migrate.ts --grant <role>` gives the role you connect as `EXECUTE` on both (SMD-1796).
 - Three indexes exist: `idx_thoughts_derived_from` (GIN), `idx_thoughts_derivation_layer` (btree), and `idx_thoughts_supersedes` (partial btree).
 - PostgREST schema cache has been reloaded (`NOTIFY pgrst, 'reload schema'`).
 

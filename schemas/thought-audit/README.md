@@ -16,7 +16,7 @@ The schema is strictly **additive**. No existing columns on the `thoughts` table
 
 1. **`thought_audit` table.** Append-only. Records an action (`capture` / `update` / `delete`), a source tag, an optional session id, and a compact JSONB diff — for deletes, the prior content is preserved so the event is recoverable from the audit log alone.
 2. **Deliberate non-FK.** `thought_audit.thought_id` has no foreign key to `thoughts(id)`. Audit rows must outlive the thoughts they describe.
-3. **Grants are INSERT-only.** The audit table is append-only by design. `service_role` gets `SELECT, INSERT` — never `UPDATE` or `DELETE`. Nothing downstream can rewrite history without an explicit migration.
+3. **Grants are INSERT-only.** The audit table is append-only by design. The role you connect as gets `SELECT, INSERT` through `bun migrate.ts --grant` — never `UPDATE` or `DELETE` (upstream granted Supabase's `service_role` the same; this fork's file grants nothing, SMD-1796). Nothing downstream can rewrite history without an explicit migration.
 4. **`author_session_id` convention.** A short opaque string your capture tools tuck into `thoughts.metadata.author_session_id`. No schema change needed — it is just a convention on the existing JSONB column. The optional second SQL file adds a helper view and RPC for querying by session.
 
 **Example audit timeline:**
@@ -51,9 +51,9 @@ SUPABASE (from your Open Brain setup)
 
 ## Steps
 
-1. Open your Supabase dashboard → **SQL Editor → New query**.
-2. Paste the full contents of `schema.sql` and click **Run**. This creates the `thought_audit` table, its indexes, RLS, and the INSERT-only grant for `service_role`.
-3. *(Optional)* Open a new query, paste the full contents of `author-session-id.sql`, and click **Run**. This creates the `thought_provenance` view and `thoughts_by_session()` RPC used to query by session id.
+1. Apply `schema.sql` to your brain: `psql "$DATABASE_URL" -f schema.sql` (or paste it into your SQL console). This creates the `thought_audit` table and its indexes — on a brain built by `db/migrate.ts`, migration 008 already did, and the file is idempotent, with one wrinkle: its `thought_audit_session_id_idx` is 008's `thought_audit_session_idx` (same column, same predicate) under another name, so applying the file there builds one redundant index; drop it, or skip the file.
+2. From `db/`, run `bun migrate.ts --url "$DATABASE_URL" --grant <role>`: the role your server connects as gets `SELECT, INSERT` on the table — append-only, as upstream's grant to Supabase's `service_role` was; the file itself grants nothing and enables no RLS (this fork, SMD-1796).
+3. *(Optional)* Apply `author-session-id.sql` the same way (`psql "$DATABASE_URL" -f author-session-id.sql`), then run `--grant` again: it creates the `thought_provenance` view and `thoughts_by_session()` RPC used to query by session id, and a view needs its own `SELECT` — your role's `SELECT` on `thoughts` does not reach it (this fork, SMD-1796).
 4. **Wire audit writes into your mutation tools.** This schema is storage only — no trigger, no hidden magic. You (or a mutation integration like `integrations/update-thought-mcp` and `integrations/delete-thought-mcp`) are responsible for inserting a row after each capture / update / delete. See the "How to write audit rows" section below for copy-paste examples.
 5. Navigate to **Table Editor** → confirm `thought_audit` appears with columns `id, thought_id, action, source, author_session_id, diff, actor_context, created_at`.
 6. Run `insert into thought_audit (thought_id, action, source) values (gen_random_uuid(), 'capture', 'manual-test');` then `select * from thought_audit order by created_at desc limit 1;` to confirm writes land.
@@ -61,8 +61,8 @@ SUPABASE (from your Open Brain setup)
 ## Expected Outcome
 
 - A new `thought_audit` table with three indexes (`thought_id`, `author_session_id`, `created_at desc`).
-- `service_role` holds `SELECT, INSERT` on the table — **not** `UPDATE` or `DELETE`. This is deliberate: the audit log is append-only.
-- RLS is enabled (service_role bypasses RLS by default, matching the existing project convention).
+- The role you grant with `bun migrate.ts --grant` holds `SELECT, INSERT` on the table — **not** `UPDATE` or `DELETE`. This is deliberate: the audit log is append-only.
+- No RLS (this fork, SMD-1796): upstream enabled it relying on Supabase's `service_role` bypass; the role you connect as has no bypass, so RLS here would deny it every row — 008's audit trigger included.
 - *(If you ran `author-session-id.sql`)* A read-only `thought_provenance` view and a `thoughts_by_session(p_session_id text)` RPC.
 
 ## How To Write Audit Rows
@@ -149,11 +149,11 @@ Both are standalone — installing this schema without those integrations is per
 
 ## Troubleshooting
 
-**Issue: `permission denied for table thought_audit` when inserting from an Edge Function**
-Solution: Re-run the `GRANT SELECT, INSERT ON TABLE public.thought_audit TO service_role;` statement from `schema.sql`. Supabase does not grant CRUD on new tables to `service_role` by default.
+**Issue: `permission denied for table thought_audit` when inserting**
+Solution: From `db/`, run `bun migrate.ts --url … --grant <role>` for the role your server connects as; the server's preflight `write privileges` check names this exact gap at start-up.
 
 **Issue: Trying to `DELETE FROM thought_audit` fails**
-Solution: This is intentional. `service_role` is granted only `SELECT, INSERT`. If you need to prune old rows, write a deliberate migration that temporarily grants `DELETE`, removes the rows with a precise `WHERE`, and revokes again. That way pruning is a reviewed operation, not an accident.
+Solution: This is intentional. The connecting role is granted only `SELECT, INSERT`. If you need to prune old rows, write a deliberate migration that temporarily grants `DELETE`, removes the rows with a precise `WHERE`, and revokes again. That way pruning is a reviewed operation, not an accident.
 
 **Issue: `author_session_id` is always NULL in the audit rows**
 Solution: The audit table stores whatever the caller inserts. If your capture tools do not set `metadata.author_session_id` (or do not pass it to the audit insert), the column stays NULL. That is fine — legacy traffic is allowed to predate the convention. Start tagging new writes and those sessions will become queryable immediately.

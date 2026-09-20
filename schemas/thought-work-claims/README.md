@@ -33,14 +33,14 @@ Every claim carries `ttl_expires_at`. `claim_thoughts` reaps inline on every cal
 
 - A working Open Brain setup with the canonical `public.thoughts` table ([getting-started guide](../../docs/01-getting-started.md)).
 - `public.thoughts.id` is `UUID` (the canonical Open Brain type). If you run a non-canonical `BIGINT` id, see [ID Type Note](#id-type-note).
-- Access to the Supabase SQL Editor (or the Supabase CLI) with the service role.
-- A `service_role` role (Supabase provides this by default). Workers connect with the service-role key — these RPCs are server-side only and are not exposed to `anon`/`authenticated`.
+- A connection that can create tables and functions (`psql` or your SQL console).
+- Workers connect as a role granted through `bun migrate.ts --grant` (its `worker` group covers migration 015's table); these RPCs are server-side only.
 - Node.js 18+ if you want to run the example worker (it uses the built-in global `fetch`).
 
 ## Steps
 
-1. Open your **Supabase SQL Editor** (Dashboard → SQL Editor).
-2. Paste the full contents of [`schema.sql`](./schema.sql) and run it. Upstream's script is idempotent — it uses `CREATE TABLE IF NOT EXISTS`, `CREATE INDEX IF NOT EXISTS`, and `CREATE OR REPLACE FUNCTION`, so re-running it is safe. **On this fork the file is a stub and installs nothing; skip steps 2–4** — the table and functions the checks in steps 3–4 would find are migration 015's.
+1. Apply [`schema.sql`](./schema.sql) to your brain: `psql "$DATABASE_URL" -f schema.sql` (or paste it into your SQL console).
+2. Upstream's script is idempotent — it uses `CREATE TABLE IF NOT EXISTS`, `CREATE INDEX IF NOT EXISTS`, and `CREATE OR REPLACE FUNCTION`, so re-running it is safe. **On this fork the file is a stub and installs nothing; skip steps 2–4** — the table and functions the checks in steps 3–4 would find are migration 015's.
 3. Confirm the table and RPCs exist:
 
    ```sql
@@ -280,9 +280,9 @@ WHERE work_type = 'enrichment' AND status IN ('succeeded', 'failed');
 
 After running the migration:
 
-- A table `public.thought_work_claims` exists with `thought_id UUID REFERENCES public.thoughts(id)`, a `(thought_id, work_type)` primary key, a `status` check constraint, RLS enabled, `SELECT, INSERT, UPDATE, DELETE` granted to `service_role` only, and all privileges explicitly revoked from `anon` and `authenticated`.
+- Upstream's outcome: a table `public.thought_work_claims` with `thought_id UUID REFERENCES public.thoughts(id)`, a `(thought_id, work_type)` primary key, a `status` check constraint, RLS enabled, `SELECT, INSERT, UPDATE, DELETE` granted to `service_role` only, and all privileges explicitly revoked from `anon` and `authenticated`. On this fork the table is migration 015's — no RLS, no Supabase roles; `bun migrate.ts --grant`'s `worker` group covers it (SMD-1796).
 - Two indexes exist: `idx_twc_status_ttl` (the reaper / work-type queries) and the partial `idx_twc_worker` (a worker's open claims).
-- Three RPCs exist — `claim_thoughts`, `release_thought`, `release_claims_for_worker` — each `SECURITY INVOKER`, executable by `service_role` only.
+- Three RPCs exist — `claim_thoughts`, `release_thought`, `release_claims_for_worker` — each `SECURITY INVOKER`; upstream granted them to `service_role` only. On this fork they are 015's — executable by any role, since 015 revokes nothing from PUBLIC; what a caller needs is the `worker` group's privileges on the table.
 - Running two workers against the same `work_type` divides the pool with no overlap: each thought is processed exactly once.
 - A claim whose worker dies is automatically reclaimable after its TTL expires, on the next `claim_thoughts` call for that `work_type`.
 - No column on `public.thoughts` is altered or dropped — the change is purely additive.

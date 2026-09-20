@@ -53,14 +53,14 @@ OB1's canonical `public.thoughts.id` is a `UUID`, and every id here is UUID-alig
 ## Prerequisites
 
 - A working Open Brain setup ([getting-started guide](../../docs/01-getting-started.md)). This schema is additive and standalone — it does not alter `public.thoughts`. The only cross-reference is the optional `evidence_thought_ids` array, which holds `public.thoughts(id)` values when you want to cite supporting thoughts.
-- Access to the Supabase SQL Editor (or the Supabase CLI) with the service role.
-- The `pgcrypto` extension for `gen_random_uuid()`. The script enables it with `CREATE EXTENSION IF NOT EXISTS pgcrypto`; on Supabase / Postgres 13+ this is already present and the line is a no-op.
-- Pages are written by server-side jobs running as the `service_role`. The tables are RLS-on and granted to `service_role` only — they are not exposed to `anon` / `authenticated`.
+- A connection that can create tables and functions (`psql` or your SQL console).
+- Postgres 13+, for `gen_random_uuid()` — a core function; upstream's `CREATE EXTENSION IF NOT EXISTS pgcrypto` is gone on this fork (SMD-1796), since PGlite, where `db/test-schema.ts` applies the file, does not ship the extension.
+- Pages are written by server-side jobs. Upstream's file enabled RLS and granted the tables to Supabase's `service_role` only; on this fork the file grants nothing, and `bun migrate.ts --grant <role>` gives the role your jobs connect as the three tables (revisions `SELECT, INSERT` only) and the three RPCs (SMD-1796).
 
 ## Steps
 
-1. Open your **Supabase SQL Editor** (Dashboard → SQL Editor).
-2. Paste the full contents of [`schema.sql`](./schema.sql) and run it. The script is idempotent — `CREATE TABLE IF NOT EXISTS`, `CREATE INDEX IF NOT EXISTS`, `CREATE OR REPLACE FUNCTION`, and a guarded `ON CONFLICT` seed — so re-running it is safe.
+1. Apply [`schema.sql`](./schema.sql) to your brain: `psql "$DATABASE_URL" -f schema.sql` (or paste it into your SQL console). The script is idempotent — `CREATE TABLE IF NOT EXISTS`, `CREATE INDEX IF NOT EXISTS`, `CREATE OR REPLACE FUNCTION`, and a guarded `ON CONFLICT` seed — so re-running it is safe.
+2. From `db/`, run `bun migrate.ts --url "$DATABASE_URL" --grant <role>` so the role your server connects as can use what the file creates — the file itself grants nothing (this fork, SMD-1796: upstream's `GRANT … TO service_role` lines and its row-level security are gone; `db/README.md`, "Grants for a capturing role", lists the `community` group).
 3. Confirm the tables and RPCs exist:
 
    ```sql
@@ -178,9 +178,9 @@ WHERE id = (SELECT id FROM public.wiki_sections s
 
 After running the migration:
 
-- Three tables exist — `public.wiki_pages`, `public.wiki_sections`, `public.wiki_section_revisions` — all RLS-enabled and granted to `service_role` only (revoked from `PUBLIC` / `anon` / `authenticated`).
+- Three tables exist — `public.wiki_pages`, `public.wiki_sections`, `public.wiki_section_revisions` — with no RLS and no grants in the file; `bun migrate.ts --grant <role>` covers them (this fork, SMD-1796).
 - The id chain is UUID throughout: `wiki_sections.page_id` and `wiki_section_revisions.section_id` are `UUID` foreign keys, and `evidence_thought_ids` is `UUID[]`.
-- Three RPCs exist — `wiki_upsert_page`, `wiki_write_section`, `wiki_accept_pending` — each `SECURITY INVOKER` and executable by `service_role` only.
+- Three RPCs exist — `wiki_upsert_page`, `wiki_write_section`, `wiki_accept_pending` — each `SECURITY INVOKER`, `REVOKE`d `FROM PUBLIC` and executable by the roles `--grant` covers.
 - One fictional seed page (`getting-started`) exists with a single generated section (`intro`). Re-running `schema.sql` does not duplicate it.
 - The regen guard behaves as in the worked example: a generated write to a human-owned section returns `action: "pending"` and leaves the live body untouched; `wiki_accept_pending` promotes the parked draft and records a revision.
 - No column on `public.thoughts` is altered or dropped.

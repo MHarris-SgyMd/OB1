@@ -13,10 +13,16 @@
 -- every row with a type or source in its metadata (001's trigger), and on
 -- this fork updated_at gates the accepted-vector caveat and the edited-since
 -- rules (FORK.md changes 39 and 40) — run it between re-embed passes, not
--- during one; and the GRANTs to Supabase's roles fail on plain Postgres
--- (role "authenticated" does not exist) — create authenticated, service_role
--- and anon as NOLOGIN roles first, or delete those lines.
--- scripts/check-fork-consistency.mjs check 7 fails the build if it returns.
+-- during one. The GRANT EXECUTE … TO authenticated, service_role that followed
+-- each of the four functions is gone too (SMD-1796): those are Supabase's
+-- roles, absent on plain Postgres (`role "authenticated" does not exist`
+-- stopped the file there), and EXECUTE is PUBLIC's by default, so nothing
+-- replaces them. The "do NOT grant to anon" notes stay as upstream's reasoning;
+-- on plain Postgres PUBLIC already includes every role that can connect, so if
+-- the two SECURITY DEFINER RPCs should not read `thoughts` for all of them,
+-- REVOKE EXECUTE … FROM PUBLIC yourself and grant the roles you mean (README,
+-- Security). scripts/check-fork-consistency.mjs check 7 fails the build if the
+-- upsert returns, and its Supabase-isms check if a grant does.
 
 -- ============================================================
 -- 1. NEW COLUMNS
@@ -161,9 +167,6 @@ $$;
 -- (service_role only). Broadening execution to the publishable anon key
 -- would expose the entire brain to anyone who knows the project URL.
 -- See README "Security" section.
-GRANT EXECUTE ON FUNCTION search_thoughts_text(TEXT, INTEGER, JSONB, INTEGER)
-  TO authenticated, service_role;
-
 -- ============================================================
 -- 3. BRAIN STATS AGGREGATE RPC
 --    Returns total count, top types, and top topics as JSONB.
@@ -220,9 +223,6 @@ $$;
 
 -- Do NOT grant to `anon`. This RPC is SECURITY DEFINER and would bypass
 -- RLS on the thoughts table. See README "Security" section.
-GRANT EXECUTE ON FUNCTION brain_stats_aggregate(INTEGER, BOOLEAN)
-  TO authenticated, service_role;
-
 -- ============================================================
 -- 4. THOUGHT CONNECTIONS RPC
 --    Finds thoughts sharing metadata topics or people with a
@@ -318,9 +318,6 @@ $$;
 -- a 200-char content preview plus metadata for any thought by UUID;
 -- granting to anon would let anyone with the project URL pull content.
 -- See README "Security" section.
-GRANT EXECUTE ON FUNCTION get_thought_connections(UUID, INT, BOOLEAN)
-  TO authenticated, service_role;
-
 -- ============================================================
 -- 5. BACKFILL EXISTING DATA
 --    Populates new columns from metadata for rows that already
@@ -357,9 +354,6 @@ END;
 $$;
 
 -- Do NOT grant to `anon`. This RPC writes to the thoughts table.
-GRANT EXECUTE ON FUNCTION backfill_thought_types(TEXT[])
-  TO authenticated, service_role;
-
 -- Run the backfill with the default allowlist so the paste-and-run
 -- flow still auto-populates `type` for canonical values.
 SELECT backfill_thought_types();

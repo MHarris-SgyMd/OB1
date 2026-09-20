@@ -107,8 +107,12 @@ begin
 end;
 $$;
 
-grant execute on function public.brain_stats_daily(integer, text, boolean)
-  to authenticated, service_role;
+-- This fork (SMD-1796): upstream's `grant execute … to authenticated,
+-- service_role` after each of the four functions is gone. Those are Supabase's
+-- roles — on plain Postgres the first grant stops the file (`role
+-- "authenticated" does not exist`) — and EXECUTE is PUBLIC's by default, so
+-- nothing replaces them: all four are SECURITY INVOKER and read `thoughts` with
+-- the caller's own privileges.
 
 comment on function public.brain_stats_daily(integer, text, boolean) is
   'Returns (date, count) buckets of thought captures over the last p_days calendar days (UTC) by created_at. Used by dashboard heatmaps.';
@@ -197,9 +201,6 @@ begin
 end;
 $$;
 
-grant execute on function public.brain_stats_daily_lifelog(integer, boolean)
-  to authenticated, service_role;
-
 comment on function public.brain_stats_daily_lifelog(integer, boolean) is
   'Daily buckets of life-log thoughts across dated-event source_types. Date resolved via metadata fields (each parsed independently) with fallback to created_at. Restricted-tier thoughts excluded by default.';
 
@@ -245,9 +246,6 @@ begin
   return v_rows;
 end;
 $$;
-
-grant execute on function public.brain_stats_daily_jsonb(integer, text, boolean)
-  to authenticated, service_role;
 
 comment on function public.brain_stats_daily_jsonb(integer, text, boolean) is
   'JSONB variant of brain_stats_daily — bypasses the PostgREST 1000-row cap by returning a single jsonb array. Use for 1+ year windows.';
@@ -331,9 +329,6 @@ begin
   return v_rows;
 end;
 $$;
-
-grant execute on function public.brain_stats_daily_lifelog_jsonb(integer, boolean)
-  to authenticated, service_role;
 
 comment on function public.brain_stats_daily_lifelog_jsonb(integer, boolean) is
   'JSONB variant of brain_stats_daily_lifelog — single-row response, no PostgREST row-cap clipping.';

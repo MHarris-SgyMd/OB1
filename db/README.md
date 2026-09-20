@@ -202,7 +202,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 (024 change 45, 025 change 46, 026 change 47, 027 change 48, 028 change 49,
 029 change 54, 030 change 56, 031 change 57, 032 change 60, 033 change 63,
 034 change 65, 035 change 66, 036 change 68, 037 change 70, 038 change 80, 039 change 81,
-040 change 91, 041 change 92).
+040 change 91, 041 change 94).
 
 ## What changed relative to the guide
 
@@ -227,7 +227,9 @@ introduce multi-tenancy; do not port this one.
 
 **No `GRANT … TO service_role`.** Grant to whichever role your application
 connects as — and to more than `thoughts`: see [Grants for a capturing
-role](#grants-for-a-capturing-role) below.
+role](#grants-for-a-capturing-role) below. The community schemas under
+`schemas/` carried the same grants, and RLS with a policy for that role, until
+change 93 (SMD-1796) cut them; their tables are the **community** group there.
 
 ## Grants for a capturing role
 
@@ -247,7 +249,7 @@ same one, grouped by what the role does. Preflight's `write privileges` check
 refuses a server role missing any of the **capture** group; `migrate.ts --grant`
 issues every group at once.
 
-| Group | Table (migration) | Privileges |
+| Group | Object (migration, or `schemas/` file) | Privileges |
 | --- | --- | --- |
 | **capture** — the server's own connection; preflight refuses a role missing any of it | `thoughts` (001) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `thought_chunks` (007) | `SELECT, INSERT, DELETE` |
@@ -263,11 +265,42 @@ issues every group at once.
 | | `thought_entities` (016) | `SELECT, INSERT, DELETE` |
 | | `ob1_entity_edges` (016) | `SELECT, INSERT, DELETE` |
 | **querylog** — the opt-in query log (`OB1_QUERY_LOG=on`, off by default, SMD-1295); the server writes it only when enabled, and only inserts | `query_log` (034) | `INSERT` |
+| **community** — the schemas under `schemas/`, applied by hand beside the migrations (SMD-1796). Upstream's files granted these to Supabase's `service_role` and enabled RLS with a policy for it; neither exists off Supabase, so the files grant nothing now and this group does — the privileges upstream gave its service role, plus what Supabase's default privileges hid: `USAGE` on a `BIGSERIAL` column's sequence, and `EXECUTE` on a function `REVOKE`d `FROM PUBLIC`. Issued for whichever files you have applied; the rest are skipped and named | `thought_audit` (schemas/thought-audit — 008's table; upstream's `SELECT, INSERT`, kept) | `SELECT, INSERT` |
+| | view `thought_provenance` (schemas/thought-audit, `author-session-id.sql` — a view over `thoughts`, which needs its own `SELECT`) | `SELECT` |
+| | `agent_memories`, `agent_memory_source_refs`, `agent_memory_artifacts`, `agent_memory_relations`, `agent_memory_review_actions`, `agent_memory_recall_traces`, `agent_memory_recall_items`, `agent_memory_audit_events` (schemas/agent-memory) | `SELECT, INSERT, UPDATE, DELETE` |
+| | `openbrain_agents`, `agent_memory_keys` (schemas/per-agent-identity) | `SELECT, INSERT, UPDATE, DELETE` |
+| | function `lookup_agent_memory_key(text)` (schemas/per-agent-identity; SECURITY DEFINER, `REVOKE`d `FROM PUBLIC`) | `EXECUTE` |
+| | `ingestion_jobs`, `ingestion_items` (schemas/smart-ingest) | `SELECT, INSERT, UPDATE, DELETE` |
+| | sequences `ingestion_jobs_id_seq`, `ingestion_items_id_seq` (schemas/smart-ingest; `BIGSERIAL` ids) | `USAGE, SELECT` |
+| | function `append_thought_evidence(bigint, jsonb)` (schemas/smart-ingest; SECURITY DEFINER, `REVOKE`d `FROM PUBLIC`) | `EXECUTE` |
+| | `entities`, `edges`, `entity_extraction_queue`, `consolidation_log` (schemas/entity-extraction — upstream's tables, not 016's `ob1_*`) | `SELECT, INSERT, UPDATE, DELETE` |
+| | `thought_entities` (schemas/entity-extraction names 016's table under `IF NOT EXISTS`; the **extraction** row's privileges exactly, so the merge widens nothing) | `SELECT, INSERT, DELETE` |
+| | sequences `entities_id_seq`, `edges_id_seq`, `consolidation_log_id_seq` (schemas/entity-extraction; `BIGSERIAL` ids) | `USAGE, SELECT` |
+| | `thought_edges` (schemas/typed-reasoning-edges) | `SELECT, INSERT, UPDATE, DELETE` |
+| | sequence `thought_edges_id_seq` (schemas/typed-reasoning-edges; `BIGSERIAL` id) | `USAGE, SELECT` |
+| | function `thought_edges_upsert(uuid, uuid, text, numeric, integer, text, timestamptz, timestamptz, jsonb)` (schemas/typed-reasoning-edges; `REVOKE`d `FROM PUBLIC`) | `EXECUTE` |
+| | `wiki_pages`, `wiki_sections` (schemas/wiki-pages) | `SELECT, INSERT, UPDATE, DELETE` |
+| | `wiki_section_revisions` (schemas/wiki-pages; append-only — upstream's intent, kept) | `SELECT, INSERT` |
+| | functions `wiki_upsert_page(text, text, text, jsonb, text)`, `wiki_write_section(uuid, text, text, text, text, jsonb, uuid[], integer, text)`, `wiki_accept_pending(uuid, text)` (schemas/wiki-pages; `REVOKE`d `FROM PUBLIC`) | `EXECUTE` |
+| | `crm_persons`, `crm_person_mentions` (schemas/crm-person-tiers) | `SELECT, INSERT, UPDATE, DELETE` |
+| | `readwise_books` (schemas/readwise-books — upstream granted the table nothing; its integration wrote it through Supabase's default privileges) | `SELECT, INSERT, UPDATE, DELETE` |
+| | functions `merge_thought_provenance_metadata(uuid, jsonb)`, `merge_thought_eval_metadata(uuid, jsonb)` (schemas/provenance-chains; SECURITY DEFINER, `REVOKE`d `FROM PUBLIC`) | `EXECUTE` |
 
-Plus `USAGE ON SCHEMA public`. There are no sequences to grant: every table's
-primary key is a `uuid` or a natural key, so `INSERT` needs no sequence `USAGE`.
-`ob1_config` appears twice — `SELECT` for the server's own read, `INSERT, UPDATE`
-for a worker's job key — and `--grant` merges them into one `GRANT`.
+Plus `USAGE ON SCHEMA public`. The migrations' own tables need no sequence
+grant — every primary key is a `uuid` or a natural key — but three community
+schemas use `BIGSERIAL` ids, and an `INSERT` into such a table needs `USAGE` on
+the sequence (`permission denied for sequence …` with the table fully granted),
+so the **community** group names those six sequences; an identity column
+(`wiki_section_revisions.id`) needs none. Both are measured, not recalled:
+test-schema [40] grants the tables alone and watches which inserts are still
+refused. Functions are executable by `PUBLIC` by default, so only the community
+functions upstream `REVOKE`d `FROM PUBLIC` — the SECURITY DEFINER ones, and the
+wiki RPCs — are listed, for `EXECUTE`; the rest (the brain-stats, enhanced-thoughts,
+readwise and CRM RPCs) need nothing. `ob1_config` appears twice — `SELECT` for
+the server's own read, `INSERT, UPDATE` for a worker's job key — as does
+`thought_audit` (`INSERT` for the capture path, upstream's `SELECT` beside it),
+and `--grant` merges each into one `GRANT`. A view is granted as a table is,
+and needs it: a role's `SELECT` on `thoughts` does not reach a view over it.
 
 The one executable spelling — run as a role that can grant (the tables' owner or
 a superuser), after the migrations are applied:
@@ -276,13 +309,26 @@ a superuser), after the migrations are applied:
 bun migrate.ts --url ... --grant your_role
 ```
 
-`--grant` issues exactly the list above for the tables that exist, in one
-transaction; it never creates the role or sets a password, so create the role
-first. `--grant --dry-run` prints the statements without running them, so a
-locked-down deployment can grant a subset by hand. A role that only ever runs the
-server needs the **capture** and **server** groups; add **worker** for the role
-your bulk passes connect as, and **extraction** on top of that for entity
-extraction. The **querylog** group is issued too, so `OB1_QUERY_LOG=on` works out
+`--grant` issues exactly the list above for the tables, views, sequences and
+functions that exist, in one transaction — and before committing it asks the
+catalog whether the role now holds each privilege, because a grantor that holds
+a privilege without grant option "grants" it with only a warning and no effect;
+if anything is not held it rolls back, names the privileges, and says to connect
+as the objects' owner or a superuser; it never creates the role or sets a password, so
+create the role first. `--grant --dry-run` prints the statements without running
+them, so a locked-down deployment can grant a subset by hand. A role that only
+ever runs the server needs the **capture** and **server** groups; add **worker**
+for the role your bulk passes connect as, and **extraction** on top of that for
+entity extraction. The **community** group is issued for whichever `schemas/`
+files you have applied — the objects not yet present are skipped and named, so
+run `--grant` again after applying one; apply a community schema with `psql
+"$DATABASE_URL" -f schemas/<name>/schema.sql`, as its README says. Presence is
+per object, not per file, so the two community rows whose tables a migration
+also creates — `thought_audit` (008) and `thought_entities` (016) — are issued
+on every migrated brain: the audit row adds only upstream's `SELECT` on the
+log, and the mention row is the **extraction** row's privileges again, so
+neither widens what a brain without the file already grants. The
+**querylog** group is issued too, so `OB1_QUERY_LOG=on` works out
 of the box — but unlike the capture set it is not enforced: the query log is off
 by default and preflight cannot read a server env flag, so a role missing
 `query_log` `INSERT` is reported by the `query log` check, not refused (the log's
