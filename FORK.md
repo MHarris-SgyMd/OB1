@@ -15349,6 +15349,13 @@ changed behaviour — and the third pass's finding in the change itself was a
 sentence, four times; the 1796 precedent stands as the reason a third pass was
 worth running.
 
+**Tidied while the files were open** (no behaviour change): test-server [14]'s
+five copies of the try/catch that reads the factory's refusal are one
+`refusal(env)` helper; test-preflight's `w` run builds its report-row regex in
+one `rowRe(name)` rather than twice; preflight's PostgREST configuration block
+is two variables handled in two blocks instead of a loop with a special case
+for one of them. Suites unchanged: test-server 177, test-preflight 253.
+
 **Upstream status.** Upstream has no `server-portable/`; nothing here touches a
 vendored file. The PostgREST store's retirement from Bun is the fork's decision
 and SMD-1847 owns its retirement from Workers.

@@ -286,11 +286,12 @@ if (store === "sql") {
   // SUPABASE_URL): refused here by name, and never printed raw — it carries a
   // password, and the first version of this branch echoed it (first review pass).
   const mismatch = postgrestOverPostgresUrl(env);
-  for (const k of ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"]) {
-    if (!env[k]) add(k, "fail", `not set, but OB1_STORE=${store}`, `Set ${k}, or use the SQL store (OB1_STORE unset) with DATABASE_URL.`);
-    else if (k === "SUPABASE_URL" && mismatch) add(k, "fail", `holds a postgres:// connection string (${maskUrl(env[k]!)}), which the PostgREST store cannot dial`, mismatch);
-    else add(k, "ok", k.endsWith("URL") ? maskUrl(env[k]!) : `set (${env[k]!.length} chars)`);
-  }
+  const unset = (k: string) => add(k, "fail", `not set, but OB1_STORE=${store}`, `Set ${k}, or use the SQL store (OB1_STORE unset) with DATABASE_URL.`);
+  if (!env.SUPABASE_URL) unset("SUPABASE_URL");
+  else if (mismatch) add("SUPABASE_URL", "fail", `holds a postgres:// connection string (${maskUrl(env.SUPABASE_URL)}), which the PostgREST store cannot dial`, mismatch);
+  else add("SUPABASE_URL", "ok", maskUrl(env.SUPABASE_URL));
+  if (!env.SUPABASE_SERVICE_ROLE_KEY) unset("SUPABASE_SERVICE_ROLE_KEY");
+  else add("SUPABASE_SERVICE_ROLE_KEY", "ok", `set (${env.SUPABASE_SERVICE_ROLE_KEY.length} chars)`);
 }
 
 const configFailed = results.some((r) => r.status === "fail");

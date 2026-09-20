@@ -137,7 +137,9 @@ console.log("[1] Missing configuration fails, with an actionable fix");
   // twice). The row shape is the glyph, the name, whitespace.
   const listedNames = [...readFileSync(join(HERE, "preflight.ts"), "utf8").match(/const DIRECT_CHECKS = \[([\s\S]*?)\];/)![1].matchAll(/"([^"]+)"/g)].map((mm) => mm[1]);
   assert(listedNames.length >= 20, `DIRECT_CHECKS parsed from the source (${listedNames.length} names)`);
-  const rowCounts = listedNames.map((name) => [name, (w.out.match(new RegExp(`^\\s*[✓✗!·]\\s+${name}\\s`, "gm")) ?? []).length] as const);
+  /** A report row for `name`: the glyph, the name, whitespace (fix lines start with →, so they never match). */
+  const rowRe = (name: string, flags = "") => new RegExp(`^\\s*[✓✗!·]\\s+${name}\\s`, flags);
+  const rowCounts = listedNames.map((name) => [name, (w.out.match(rowRe(name, "gm")) ?? []).length] as const);
   assert(rowCounts.every(([, n]) => n === 1), `over PostgREST every direct-connection check prints exactly one row (${rowCounts.filter(([, n]) => n !== 1).map(([name, n]) => `${name}×${n}`).join(", ") || "all once"})`);
   assert(rowCounts.filter(([name]) => new RegExp(`·\\s+${name}\\s+${DIRECT_CHECK_SKIP_OVER_POSTGREST}`).test(w.out)).length === 16, "…sixteen of them as the catalog-only skip, the rest by their own hand-written rows");
   // And nothing else: every row between `data layer` and the provider section is
@@ -145,7 +147,7 @@ console.log("[1] Missing configuration fails, with an actionable fix");
   // misspelt name would print beside the loop's correctly named skip with every
   // count above intact (third review pass); this total sees it.
   const lines = w.out.split("\n");
-  const rowOf = (name: string) => lines.findIndex((l) => new RegExp(`^\\s*[✓✗!·]\\s+${name}\\s`).test(l));
+  const rowOf = (name: string) => lines.findIndex((l) => rowRe(name).test(l));
   const fromRow = rowOf("data layer"), toRow = rowOf("embedding provider");
   const rows = lines.slice(fromRow + 1, toRow).filter((l) => /^\s*[✓✗!·]\s+\S/.test(l));
   assert(fromRow > 0 && toRow > fromRow && rows.length === listedNames.length + 1,

@@ -394,26 +394,24 @@ console.log("\n[14] OB1_STORE unset selects the SQL store; PostgREST stays selec
 
   // No connection string at all: refused as the SQL store, naming DATABASE_URL —
   // not as the PostgREST store asking for SUPABASE_URL, which the old default did.
-  let msg = "";
-  try { await createStore({}); } catch (e) { msg = (e as Error).message; }
+  /** The factory's refusal for an env, or "" when it builds — every case below is a refusal. */
+  const refusal = async (env: Parameters<typeof createStore>[0]) => { try { await createStore(env); return ""; } catch (e) { return (e as Error).message; } };
+  let msg = await refusal({});
   assert(/OB1_STORE is unset, which selects the SQL store, and DATABASE_URL is not set/.test(msg) && /Set DATABASE_URL to the brain's postgres:\/\/ connection string/.test(msg),
          `…and without DATABASE_URL is refused as the SQL store, with the fix (${msg.slice(0, 48)}…)`);
   assert(!/requires SUPABASE_URL/.test(msg), "…not as the PostgREST store");
 
   // The deployment the old default served — an https:// SUPABASE_URL and no
   // OB1_STORE — is told both ways out: a connection string, or the explicit selection.
-  msg = "";
-  try { await createStore({ SUPABASE_URL: "https://x.supabase.co", SUPABASE_SERVICE_ROLE_KEY: "k" }); } catch (e) { msg = (e as Error).message; }
+  msg = await refusal({ SUPABASE_URL: "https://x.supabase.co", SUPABASE_SERVICE_ROLE_KEY: "k" });
   assert(/SUPABASE_URL holds a non-postgres:\/\/ URL, the PostgREST store's base URL/.test(msg) && /set OB1_STORE=postgrest/.test(msg),
          "an https:// SUPABASE_URL under the default names OB1_STORE=postgrest as the way to keep it");
-  msg = "";
-  try { await createStore({ SUPABASE_URL: "http://localhost:3000", SUPABASE_SERVICE_ROLE_KEY: "k" }); } catch (e) { msg = (e as Error).message; }
+  msg = await refusal({ SUPABASE_URL: "http://localhost:3000", SUPABASE_SERVICE_ROLE_KEY: "k" });
   assert(/non-postgres:\/\/ URL/.test(msg) && !/https:\/\/ URL/.test(msg), "…and a self-hosted http:// one is not called https");
 
   // The mirror slip: the PostgREST store selected while SUPABASE_URL holds a
   // connection string. Refused by name before supabase-js sees the string.
-  msg = "";
-  try { await createStore({ OB1_STORE: "postgrest", SUPABASE_URL: "postgres://u:p@127.0.0.1:1/x", SUPABASE_SERVICE_ROLE_KEY: "k" }); } catch (e) { msg = (e as Error).message; }
+  msg = await refusal({ OB1_STORE: "postgrest", SUPABASE_URL: "postgres://u:p@127.0.0.1:1/x", SUPABASE_SERVICE_ROLE_KEY: "k" });
   assert(/SUPABASE_URL holds a postgres:\/\/ connection string, which PostgREST cannot dial/.test(msg) && /Unset OB1_STORE/.test(msg),
          "OB1_STORE=postgrest with a postgres:// SUPABASE_URL is refused naming the SQL store as the reader of that URL");
   assert(postgrestOverPostgresUrl({ OB1_STORE: "postgrest", SUPABASE_URL: "https://x.supabase.co" }) === null && postgrestOverPostgresUrl({ SUPABASE_URL: "postgres://u:p@h/x" }) === null,
@@ -447,8 +445,7 @@ console.log("\n[14] OB1_STORE unset selects the SQL store; PostgREST stays selec
   assert(postgrestOnBunNotice("sql") === null && postgrestOnBunNotice("sql", true) === null, "…and sql never does");
 
   // An unknown name is refused naming the default; an explicit sql selection is named as such.
-  msg = "";
-  try { await createStore({ OB1_STORE: "typo" }); } catch (e) { msg = (e as Error).message; }
+  msg = await refusal({ OB1_STORE: "typo" });
   assert(/"sql" \(the default\)/.test(msg) && /"postgrest" \(Cloudflare Workers\)/.test(msg), "an unknown OB1_STORE is refused naming sql as the default and postgrest as the Workers store");
   const { problem, fix } = missingDatabaseUrl({ OB1_STORE: "sql" });
   assert(/^OB1_STORE=sql selects the SQL store, and DATABASE_URL is not set$/.test(problem) && /^Set DATABASE_URL/.test(fix), "an explicit sql selection without DATABASE_URL is named as such, problem and fix apart");
