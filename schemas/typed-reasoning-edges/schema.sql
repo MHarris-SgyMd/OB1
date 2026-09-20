@@ -163,26 +163,19 @@ CREATE TRIGGER trg_thought_edges_updated_at
 --    explicit product decision, not a default.
 -- ============================================================
 
-ALTER TABLE public.thought_edges ENABLE ROW LEVEL SECURITY;
-
-DROP POLICY IF EXISTS "service_role full access" ON public.thought_edges;
-CREATE POLICY "service_role full access"
-  ON public.thought_edges
-  FOR ALL
-  TO service_role
-  USING (true)
-  WITH CHECK (true);
-
--- Explicitly drop any previously-granted authenticated read policy so
--- re-applying this migration on an older deployment tightens the posture.
-DROP POLICY IF EXISTS "authenticated read" ON public.thought_edges;
-
-GRANT SELECT, INSERT, UPDATE, DELETE ON public.thought_edges TO service_role;
-GRANT USAGE, SELECT ON SEQUENCE public.thought_edges_id_seq TO service_role;
--- Revoke any inherited or previously-granted read from authenticated /
--- anon to keep the posture aligned with public.thoughts.
-REVOKE ALL ON public.thought_edges FROM authenticated;
-REVOKE ALL ON public.thought_edges FROM anon;
+-- This fork (SMD-1796): the posture above was upstream's ENABLE ROW LEVEL
+-- SECURITY with a "service_role full access" policy, GRANTs on the table and
+-- its sequence TO service_role, and REVOKEs FROM authenticated and anon. Those
+-- are Supabase's roles: on plain Postgres the GRANT stops the file (`role
+-- "service_role" does not exist`), and RLS with no policy for the role you
+-- connect as denies it every row. Removed — the table is as private as any
+-- other on a plain-Postgres brain: readable by its owner and the roles granted.
+-- Grant the role your server connects as instead — from db/:
+--   bun migrate.ts --url postgres://… --grant <role>
+-- issues db/config.mjs ROLE_GRANTS' `community` group, which covers this file's
+-- table (SELECT, INSERT, UPDATE, DELETE), its bigserial sequence (USAGE,
+-- SELECT — an INSERT needs it) and EXECUTE on thought_edges_upsert below.
+-- Row-level security: SMD-1716.
 
 -- ============================================================
 -- 4b. UPSERT RPC
@@ -260,9 +253,7 @@ COMMENT ON FUNCTION public.thought_edges_upsert IS
 REVOKE ALL ON FUNCTION public.thought_edges_upsert(
   UUID, UUID, TEXT, NUMERIC, INT, TEXT, TIMESTAMPTZ, TIMESTAMPTZ, JSONB
 ) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION public.thought_edges_upsert(
-  UUID, UUID, TEXT, NUMERIC, INT, TEXT, TIMESTAMPTZ, TIMESTAMPTZ, JSONB
-) TO service_role;
+-- (Upstream's GRANT EXECUTE … TO service_role is `migrate.ts --grant`'s here — SMD-1796, see section 4.)
 
 -- ============================================================
 -- 5. TEMPORAL VALIDITY ON ENTITY `edges`

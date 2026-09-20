@@ -74,19 +74,17 @@ $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
 
 REVOKE ALL ON FUNCTION public.lookup_agent_memory_key(TEXT) FROM PUBLIC;
 
-ALTER TABLE public.openbrain_agents ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.agent_memory_keys ENABLE ROW LEVEL SECURITY;
-
-DROP POLICY IF EXISTS openbrain_agents_service_role_all ON public.openbrain_agents;
-CREATE POLICY openbrain_agents_service_role_all ON public.openbrain_agents
-  FOR ALL TO service_role USING (true) WITH CHECK (true);
-
-DROP POLICY IF EXISTS agent_memory_keys_service_role_all ON public.agent_memory_keys;
-CREATE POLICY agent_memory_keys_service_role_all ON public.agent_memory_keys
-  FOR ALL TO service_role USING (true) WITH CHECK (true);
-
-GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.openbrain_agents TO service_role;
-GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.agent_memory_keys TO service_role;
-GRANT EXECUTE ON FUNCTION public.lookup_agent_memory_key(TEXT) TO service_role;
+-- This fork (SMD-1796): upstream's file went on to ENABLE ROW LEVEL SECURITY on
+-- both tables with a policy FOR service_role, GRANT the tables TO service_role
+-- and GRANT EXECUTE on the lookup TO service_role. Those are Supabase's: on
+-- plain Postgres the first GRANT stops the file (`role "service_role" does not
+-- exist`), and RLS with no policy for the role you connect as denies it every
+-- row. Removed; the REVOKE above stays, so the SECURITY DEFINER lookup is
+-- callable only by a role granted it.
+-- Grant the role your server connects as instead — from db/:
+--   bun migrate.ts --url postgres://… --grant <role>
+-- issues db/config.mjs ROLE_GRANTS' `community` group, which covers this file's
+-- two tables (SELECT, INSERT, UPDATE, DELETE) and EXECUTE on
+-- lookup_agent_memory_key(text). Row-level security: SMD-1716.
 
 COMMIT;

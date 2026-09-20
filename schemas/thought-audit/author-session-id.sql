@@ -6,6 +6,12 @@
 -- small helper views/functions for querying by session, plus
 -- documentation via COMMENT ON.
 --
+-- This fork (SMD-1796): the view below needs its own SELECT — a role's
+-- SELECT on `thoughts` does not reach a view over it — so after applying
+-- this file run, from db/, `bun migrate.ts --url … --grant <role>` again;
+-- its `community` group names thought_provenance. The function is
+-- executable by PUBLIC by default and needs nothing.
+--
 -- Convention:
 --   thoughts.metadata.author_session_id — short opaque string
 --     generated at session start by the capturing agent. Groups

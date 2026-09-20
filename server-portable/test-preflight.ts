@@ -1208,10 +1208,14 @@ else {
       // set — the server, worker and extraction groups too, quoted role — so the
       // role holds everything the writers need and preflight is ok.
       const grant = await migrate(["--grant", "ob1_pf_capture", "--url", LIVE]);
+      // thought_audit's GRANT merges the capture group's INSERT with the
+      // community group's SELECT (SMD-1796): 008's table is present on every
+      // migrated brain, so that row is issued whether or not the community
+      // schema that names it was applied.
       assert(grant.code === 0 &&
-             /GRANT INSERT ON thought_audit TO "ob1_pf_capture";/.test(grant.out) &&
+             /GRANT SELECT, INSERT ON thought_audit TO "ob1_pf_capture";/.test(grant.out) &&
              /GRANT SELECT, INSERT, UPDATE, DELETE ON thought_work_claims TO "ob1_pf_capture";/.test(grant.out),
-             `migrate.ts --grant issues the documented set (exit ${grant.code}: ${grant.out.trim().split("\n").slice(-1)[0]})`);
+             `migrate.ts --grant issues the documented set (exit ${grant.code}: ${grant.out.trim().split("\n").find((l) => /Granted/.test(l)) ?? grant.out.trim().split("\n").slice(-1)[0]})`);
       assert(/GRANT INSERT ON query_log TO "ob1_pf_capture";/.test(grant.out),
              "…including the opt-in query log's INSERT (querylog group, SMD-1295)");
       const okRun = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });

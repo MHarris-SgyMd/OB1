@@ -45,18 +45,17 @@ AGENT KEYS (raw values are shown once, then stored only in your secret manager)
 
 ## Steps
 
-1. Open your Supabase dashboard and navigate to the **SQL Editor**.
-2. Create a new query and paste the full contents of `schema.sql`.
-3. Click **Run** to execute the migration.
-4. Open **Table Editor** and confirm two new tables exist: `openbrain_agents` and `agent_memory_keys`.
-5. Open **Database > Functions** and confirm `lookup_agent_memory_key` exists.
-6. Create one row in `openbrain_agents` for each runtime agent.
-7. Generate a high-entropy raw key for each agent in your server or secret manager.
-8. Store only the lowercase SHA-256 hash of that raw key in `agent_memory_keys.key_hash`.
-9. At request time, keep your normal `MCP_ACCESS_KEY` check, then read `x-agent-memory-key` or an equivalent server-controlled parameter.
-10. Hash that raw key with SHA-256 and call `lookup_agent_memory_key(hash)`.
-11. Treat the returned `canonical_agent_id` as the authenticated identity for attribution, revocation, and future lane policy.
-12. Reject requests where a model- or client-supplied `agent_id` disagrees with the authenticated `canonical_agent_id`.
+1. Apply `schema.sql` to your brain: `psql "$DATABASE_URL" -f schema.sql` (or paste it into your SQL console).
+2. From `db/`, run `bun migrate.ts --url "$DATABASE_URL" --grant <role>` so the role your server connects as can use what the file creates — the file itself grants nothing (this fork, SMD-1796: upstream's `GRANT … TO service_role` lines and its row-level security are gone; `db/README.md`, "Grants for a capturing role", lists the `community` group).
+3. Open **Table Editor** and confirm two new tables exist: `openbrain_agents` and `agent_memory_keys`.
+4. Open **Database > Functions** and confirm `lookup_agent_memory_key` exists.
+5. Create one row in `openbrain_agents` for each runtime agent.
+6. Generate a high-entropy raw key for each agent in your server or secret manager.
+7. Store only the lowercase SHA-256 hash of that raw key in `agent_memory_keys.key_hash`.
+8. At request time, keep your normal `MCP_ACCESS_KEY` check, then read `x-agent-memory-key` or an equivalent server-controlled parameter.
+9. Hash that raw key with SHA-256 and call `lookup_agent_memory_key(hash)`.
+10. Treat the returned `canonical_agent_id` as the authenticated identity for attribution, revocation, and future lane policy.
+11. Reject requests where a model- or client-supplied `agent_id` disagrees with the authenticated `canonical_agent_id`.
 
 ## Expected Outcome
 

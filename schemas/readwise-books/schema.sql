@@ -72,8 +72,16 @@ AS $$
   LIMIT p_limit;
 $$;
 
-GRANT EXECUTE ON FUNCTION get_book_highlights(BIGINT, INTEGER)
-  TO authenticated, anon, service_role;
+-- This fork (SMD-1796): upstream's `GRANT EXECUTE … TO authenticated, anon,
+-- service_role` after this function and the next is gone. Those are Supabase's
+-- roles — on plain Postgres the GRANT stops the file (`role "authenticated"
+-- does not exist`) — and EXECUTE is PUBLIC's by default, so nothing replaces
+-- them. The table upstream never granted (its integration wrote it through
+-- Supabase's default privileges).
+-- Grant the role your server connects as instead — from db/:
+--   bun migrate.ts --url postgres://… --grant <role>
+-- issues db/config.mjs ROLE_GRANTS' `community` group, which covers this file's
+-- table (SELECT, INSERT, UPDATE, DELETE).
 
 -- ============================================================
 -- 3. INCREMENT HIGHLIGHT COUNT
@@ -99,9 +107,6 @@ AS $$
     updated_at = now()
   WHERE book_id = p_book_id;
 $$;
-
-GRANT EXECUTE ON FUNCTION increment_book_highlight_count(BIGINT, TIMESTAMPTZ)
-  TO authenticated, anon, service_role;
 
 -- Reload PostgREST schema cache so the new RPCs are immediately callable.
 NOTIFY pgrst, 'reload schema';
