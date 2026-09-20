@@ -164,8 +164,8 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `973 assertions: 973 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports forty migrations applied, and
+`bun test-schema.ts` prints `998 assertions: 998 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports forty-one migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -202,7 +202,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 (024 change 45, 025 change 46, 026 change 47, 027 change 48, 028 change 49,
 029 change 54, 030 change 56, 031 change 57, 032 change 60, 033 change 63,
 034 change 65, 035 change 66, 036 change 68, 037 change 70, 038 change 80, 039 change 81,
-040 change 91).
+040 change 91, 041 change 94).
 
 ## What changed relative to the guide
 
@@ -1294,8 +1294,8 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 973 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 523 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
+bun test-schema.ts                          # 998 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 558 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 ```
 
@@ -1455,7 +1455,8 @@ first assumed. See FORK.md's SMD-1632 section.
   takes the supersession lock.
 - **The routing count is gated by a sample of the heap, drawn by TID range**
   (migrations 037 and 038). [5d] loads 25,000 rows at the configured width,
-  applies the last definer (040 — 039's body, run with `jit = off`) with its
+  applies the last definer (041 — 039's body, run with `jit = off` and its
+  two planner paths pinned) with its
   floor lowered to zero, and counts GIN index scans per call: the broad
   filter makes exactly one fewer under the gate than under 020's
   body (the collection skipped on every call — 037's TABLESAMPLE draw could
@@ -1490,20 +1491,38 @@ first assumed. See FORK.md's SMD-1632 section.
 - **match_thoughts runs with `jit = off`** (migration 040). [5e] turns off
   each planner path the sample has exactly one of (`enable_tidscan`,
   `enable_nestloop`, `enable_hashagg` with `enable_sort`) at session level
-  on a heap with the floor lowered: the statement read out of the body,
-  explained under the function's settings, keeps its TID Range Scan at
-  `disable_cost` and has no JIT block, the same statement with `jit` forced
-  on has one, and through the function the mutant with 040's clause RESET
-  pays the compile on every call (~50 ms) where the clause costs the
-  default's time — on PostgreSQL 14–17; on 18, which counts disabled nodes
-  instead of costing them, [5e] asserts that nothing is compiled either way
-  and names the node each path leaves (a sequential scan of the heap per
-  probe under `enable_tidscan = off`, which no clause reaches — SMD-1703),
-  and skips the mutant arm. `test-upgrade.ts` [18] applies 040 onto a populated 039:
-  the body byte for byte 039's, `jit=off` beside 014's and 019's clauses, no
+  on a heap with the floor lowered. For the one path 041 leaves unpinned
+  (hashagg with sort): the statement read out of the body, explained under
+  the function's settings, keeps its TID Range Scan at `disable_cost` and
+  has no JIT block, the same statement with `jit` forced on has one, and
+  through the function the mutant with 040's clause RESET pays the compile
+  on every call (~50 ms) where the clause costs the default's time — on
+  PostgreSQL 14–17; on 18, which counts disabled nodes instead of costing
+  them, [5e] asserts that nothing is compiled either way and skips the
+  mutant arm. `test-upgrade.ts` [18] applies 040 onto a populated 039: the
+  body byte for byte 039's, `jit=off` beside 014's and 019's clauses, no
   row or privilege moves, and the last definer applied alone drops a
-  hand-re-applied 014's 4-argument form. `test-schema.ts` [20] pins the
-  three clauses; preflight's `candidate scan` reads the third beside 019's.
+  hand-re-applied 014's 4-argument form.
+- **match_thoughts pins the two planner paths its statements are built
+  around** (migration 041: `enable_nestloop = on`, `enable_tidscan = on`).
+  [5e]'s tidscan and nestloop cases now find the default's plan under the
+  session's setting — a TID Range Scan at an ordinary cost, no `Disabled`
+  node on 18, fewer buffers than the heap has pages — and, with the pin RESET (the
+  mutant), `disable_cost` back on 14–17 and on 18 the disabled node back and,
+  under `enable_tidscan = off`, the probe a sequential scan of the whole heap
+  per block (SMD-1703's state). [5f] loads 12,000 rows with chunks and, under
+  a session `enable_nestloop = off`, explains the three RETURN QUERY
+  statements read out of the body under the function's settings: every join
+  a Nested Loop touching the default's buffers; with the pin RESET a Merge or
+  Hash Join touching at least the heap's page count more (the whole primary
+  key, and every chunk row on the walk); and through the function the pinned
+  call returns the default's ten rows under the setting. `test-upgrade.ts`
+  [19] applies 041 onto a populated 040: the body byte for byte 040's, the two
+  pins beside 014's, 019's and 040's clauses, no row or privilege moves, and
+  the last definer applied alone drops a hand-re-applied 014's 4-argument
+  form. `test-schema.ts` [20] and [21] pin exactly five clauses; preflight's
+  `candidate scan` reads the pins beside 019's clause and 040's and names
+  041, the last definer, as the remedy.
 - **The backfill holds the table** (migration 023). [6c] plants a legacy
   singleton and two twins, runs `backfill_content_fingerprints()` on one
   connection inside an open transaction, and has a second capture the

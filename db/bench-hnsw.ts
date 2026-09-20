@@ -141,7 +141,7 @@
  *   # a million rows and up: one scale per container, with the shared memory
  *   # the parallel build needs — the two commands are in db/README.md
  *   ./with-postgres.sh bun bench-hnsw.ts --plans     # print the full plans
- *   OB1_BENCH_UPTO=039 ./with-postgres.sh bun bench-hnsw.ts   # the after arm's schema stops at 039: the function before 040 (038 and 037 for the ones before 039 and 038)
+ *   OB1_BENCH_UPTO=040 ./with-postgres.sh bun bench-hnsw.ts   # the after arm's schema stops at 040: the function before 041 (039, 038 and 037 for the ones before 040, 039 and 038)
  *
  *   # Keep the ten-million-row corpus between passes: the first run builds it
  *   # and records the exact pass's answers in its marker; every later run under
@@ -183,7 +183,14 @@
  * an operator disabled had JIT-compiled the sample on every call, and a
  * generic plan's flat estimate the walk — and its before/after is
  * OB1_BENCH_UPTO=039 against the default; section C's third column is what
- * the clause saves the generic plan.
+ * the clause saves the generic plan. Migration 041 (SMD-1677 and SMD-1703,
+ * change 94) pins `enable_nestloop = on` and `enable_tidscan = on` on the
+ * function — under an operator's `enable_nestloop = off` every join in the
+ * call had become a merge or hash join over the whole table, and on
+ * PostgreSQL 18 under `enable_tidscan = off` each of the gate's probes a scan
+ * of the whole heap — and its before/after is OB1_BENCH_UPTO=040 against the
+ * default, which under default session settings should agree in every column:
+ * the pins change nothing where the paths are on.
  *
  * The before arm — the function as shipped by 001–013 — runs at the published
  * scales only (up to 100,000 rows). Its defect is established there; at a
