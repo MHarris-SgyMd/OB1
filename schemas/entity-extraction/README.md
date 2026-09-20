@@ -41,21 +41,20 @@ SUPABASE (from your Open Brain setup)
 
 ## Steps
 
-1. Open your Supabase dashboard and navigate to the **SQL Editor**
-2. Create a new query and paste the full contents of `schema.sql`
-3. Click **Run** to execute the migration
-4. Open **Table Editor** and confirm five new tables appear: `entities`, `edges`, `thought_entities`, `entity_extraction_queue`, `consolidation_log`
-5. Navigate to **Database > Functions** and verify the `queue_entity_extraction` function exists
-6. Navigate to **Database > Triggers** on the `thoughts` table and verify `trg_queue_entity_extraction` is attached
-7. Test the trigger by capturing a new thought (via the MCP server or direct insert) and checking the queue:
+1. Apply `schema.sql` to your brain: `psql "$DATABASE_URL" -f schema.sql` (or paste it into your SQL console).
+2. From `db/`, run `bun migrate.ts --url "$DATABASE_URL" --grant <role>` so the role your server connects as can use what the file creates — the file itself grants nothing (this fork, SMD-1796: upstream's `GRANT … TO service_role` lines and its row-level security are gone; `db/README.md`, "Grants for a capturing role", lists the `community` group).
+3. Open **Table Editor** and confirm five new tables appear: `entities`, `edges`, `thought_entities`, `entity_extraction_queue`, `consolidation_log`
+4. Navigate to **Database > Functions** and verify the `queue_entity_extraction` function exists
+5. Navigate to **Database > Triggers** on the `thoughts` table and verify `trg_queue_entity_extraction` is attached
+6. Test the trigger by capturing a new thought (via the MCP server or direct insert) and checking the queue:
 
    ```sql
    SELECT count(*) FROM entity_extraction_queue WHERE status = 'pending';
    -- Should return at least 1 after capturing a thought
    ```
 
-8. *(Optional — existing brains only)* To backfill the extraction queue with pre-existing thoughts, uncomment and run the backfill section at the bottom of `schema.sql`
-9. Install the companion [`integrations/entity-extraction-worker/`](../../integrations/entity-extraction-worker/) edge function to actually process the queue (separate PR)
+7. *(Optional — existing brains only)* To backfill the extraction queue with pre-existing thoughts, uncomment and run the backfill section at the bottom of `schema.sql`
+8. Install the companion [`integrations/entity-extraction-worker/`](../../integrations/entity-extraction-worker/) edge function to actually process the queue (separate PR)
 
 ## Expected Outcome
 
@@ -65,7 +64,7 @@ After running the migration:
 - Eight indexes for efficient querying: entity type and normalized name lookups, edge traversal by source/target/relation, thought-entity joins, and a partial index on pending queue items.
 - One trigger function (`queue_entity_extraction`) that automatically enqueues thoughts for extraction on insert or content/metadata change, with guards for system-generated artifacts and no-op fingerprint changes.
 - One trigger (`trg_queue_entity_extraction`) attached to the `thoughts` table firing after insert or update of content/metadata.
-- Row Level Security enabled on all five tables. `service_role` bypasses RLS (used by the MCP server and workers via the service-role key server-side) and has a full-access policy. `authenticated` has a minimum `SELECT`-only policy as a scaffold for future multi-tenant dashboards -- when per-user ownership is wired, tighten to `auth.uid() = user_id`. `anon` has no access: stock Open Brain's MCP path is an Edge Function using the service-role key, not the anon key, so no anon grant is needed.
+- No row-level security and no grants in the file (this fork, SMD-1796): upstream enabled RLS on all five tables with a full-access policy for Supabase's `service_role` and a `SELECT` scaffold for `authenticated`, roles that do not exist off Supabase, and RLS with no policy for the role you connect as denies it every row. `bun migrate.ts --grant <role>` gives the role your server and workers connect as the five tables and their three sequences (the `community` group in `db/README.md`). Upstream's posture, for the record: `service_role` bypasses RLS (used by the MCP server and workers via the service-role key server-side) and has a full-access policy. `authenticated` has a minimum `SELECT`-only policy as a scaffold for future multi-tenant dashboards -- when per-user ownership is wired, tighten to `auth.uid() = user_id`. `anon` has no access: stock Open Brain's MCP path is an Edge Function using the service-role key, not the anon key, so no anon grant is needed.
 - New thoughts are automatically queued for entity extraction. Pre-existing thoughts require the optional backfill step.
 
 ## How This Differs From `ob-graph`

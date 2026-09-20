@@ -256,7 +256,7 @@
 --   is OB1_BENCH_UPTO=040 against the default; measured as the build run of
 --   the kept corpus against a reuse with this file applied onto it, section
 --   B agreed in every row and recall column and its medians sat within the
---   run's spread (FORK.md change 93 has both rows of figures and the one
+--   run's spread (FORK.md change 94 has both rows of figures and the one
 --   confounded run that is not cited). Where the setting IS off the pinned
 --   call costs the default's time in place of 1.3–2.2 s at a million rows
 --   (C against A).
@@ -275,7 +275,7 @@
 --   (thirty-four on the first three calls of the 50% tier) — the merge
 --   join's inner side is an index scan over ten million primary-key
 --   entries, the walk's hash join builds over four million chunk rows.
---   FORK.md change 93 has the full run, including the cold-cache column the
+--   FORK.md change 94 has the full run, including the cold-cache column the
 --   whole-table arm left behind.
 --
 -- What a successor must carry

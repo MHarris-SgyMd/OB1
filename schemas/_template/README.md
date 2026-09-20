@@ -28,8 +28,8 @@ SUPABASE (from your Open Brain setup)
 
 ## Steps
 
-1. Open your Supabase SQL Editor
-2. Run the SQL migration:
+1. Apply the SQL migration below: `psql "$DATABASE_URL" -f schema.sql` (or paste it into your SQL console).
+2. From `db/`, run `bun migrate.ts --url "$DATABASE_URL" --grant <role>` so the role your server connects as can use what the file creates. Grant nothing to Supabase's roles in the file itself, and enable no RLS: `scripts/check-fork-consistency.mjs` check 12 refuses both, and `db/config.mjs` ROLE_GRANTS' `community` group is where a new table's grant goes (this fork, SMD-1796).
 
    ```sql
    -- Paste the SQL here or reference the file

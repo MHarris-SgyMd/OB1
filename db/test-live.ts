@@ -30,10 +30,10 @@
 
 import { SQL } from "bun";
 import { readFileSync, unlinkSync, writeFileSync } from "node:fs";
-import { BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, EMBEDDING_DIM, EMBEDDING_MODEL, HNSW_BOUNDS, MATCH_COUNT_CEILING, MATCH_THOUGHTS_SIGNATURE, ROUTE_ESTIMATE_MIN_PAGES, ROUTE_SAMPLE_PAGES, parseSetConfig, versionAtLeast } from "./config.mjs";
+import { BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, EMBEDDING_DIM, EMBEDDING_MODEL, HNSW_BOUNDS, MATCH_COUNT_CEILING, MATCH_THOUGHTS_SIGNATURE, ROUTE_ESTIMATE_MIN_PAGES, ROUTE_SAMPLE_PAGES, grantedFunctions, grantedSequences, grantedTables, grantedViews, parseSetConfig, versionAtLeast } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { TID_PROBE, applyFunctionSettings, applyMigrations, buffersOf, createAssert, sampleStatementOf, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
+import { SCHEMAS_DIR, TID_PROBE, applyFunctionSettings, applyMigrations, buffersOf, communitySchemaFiles, createAssert, sampleStatementOf, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
 import { heartbeatFor, leaseRefusal } from "./lease.ts";
 import { reachabilityReport, readHnswGraph, reachableFromEntry, type HnswElement, type HnswGraph } from "./hnsw-graph.ts";
 
@@ -874,7 +874,7 @@ console.log("\n[5f] Every join in the body keeps its nested loop under an operat
   // pin RESET, what 040's file re-applied by hand leaves — has a Merge or
   // Hash Join and touches the heap several times over; and through the
   // function the pinned call returns the default's rows. Timing at scale is
-  // the bench's and FORK.md change 93's.
+  // the bench's and FORK.md change 94's.
   const N = 12_000;
   await sql`DELETE FROM thoughts`;
   const defs = (await sql.unsafe(`SELECT indexname AS n, indexdef AS d FROM pg_indexes WHERE indexname IN ('thoughts_embedding_idx', 'thought_chunks_embedding_idx') ORDER BY 1`)) as { n: string; d: string }[];
@@ -3698,6 +3698,153 @@ console.log("\n[17] Over near-equidistant vectors the HNSW walk misses live rows
   assert(g.meta.entry !== null && reachableFromEntry(g).size > 0, "the decoder reads the meta page's entry point and walks from it");
 
   await sql`DELETE FROM thoughts`;
+}
+
+// ── 18. The community schemas over TCP ───────────────────────────────────────
+
+console.log("\n[18] Every schemas/*.sql applies over TCP with no Supabase role present, and migrate.ts --grant makes a LOGIN role able to use them (SMD-1796)");
+{
+  // test-schema [40] is the PGlite half of this; here is what PGlite cannot do:
+  // the migrator's --grant over TCP — its presence probe against a real
+  // server's to_regclass/to_regprocedure, its "not yet present, skipped" list
+  // before the files are applied and its full list after — and a role that
+  // CONNECTS as itself rather than SET ROLE. Same files, same order as [40].
+  // Last in the suite because the files add a trigger and columns to `thoughts`.
+  // In CI one service container serves every live suite in turn, so this
+  // section puts the database back as it found it: the tables, views and
+  // functions the files added are read from the catalog before and after and
+  // dropped in the finally. What it cannot put back goes with the next suite's
+  // dropSchema (which also names the community tables should a run die here):
+  // the columns the files add to `thoughts`, and the indexes they build on
+  // migration-owned tables — enhanced-thoughts' five and provenance-chains'
+  // one on `thoughts`, entity-extraction's two on thought_entities,
+  // thought-audit's one whose name 008 does not already use
+  // (thought_audit_session_id_idx; its other two and text-search-trgm's are
+  // the migrations' own names, so IF NOT EXISTS adds nothing) — a kept
+  // database (OB1_PG_KEEP) keeps those.
+  const catalog = async () => ({
+    tables: new Set(((await sql`SELECT tablename AS n FROM pg_tables WHERE schemaname = 'public'`) as { n: string }[]).map((r) => r.n)),
+    views: new Set(((await sql`SELECT viewname AS n FROM pg_views WHERE schemaname = 'public'`) as { n: string }[]).map((r) => r.n)),
+    fns: new Set(((await sql`SELECT p.oid::regprocedure::text AS n FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace`) as { n: string }[]).map((r) => r.n)),
+  });
+  const before18 = await catalog();
+  const restore = async () => {
+    const after18 = await catalog();
+    for (const v of after18.views) if (!before18.views.has(v)) await sql.unsafe(`DROP VIEW IF EXISTS ${v} CASCADE`);
+    for (const t of after18.tables) if (!before18.tables.has(t)) await sql.unsafe(`DROP TABLE IF EXISTS ${t} CASCADE`);
+    for (const f of after18.fns) if (!before18.fns.has(f)) await sql.unsafe(`DROP FUNCTION IF EXISTS ${f} CASCADE`);
+  };
+  const SCHEMAS = SCHEMAS_DIR;
+  const schemaFiles = communitySchemaFiles();
+  const [{ c: supabaseRoles }] = (await sql`SELECT count(*)::int AS c FROM pg_roles WHERE rolname IN ('authenticated', 'anon', 'service_role')`) as { c: number }[];
+  assert(supabaseRoles === 0, "no Supabase role exists on this server");
+
+  const ROLE = "ob1_live_community";
+  const ROLE_URL = URL_.replace(/\/\/[^@]*@/, `//${ROLE}:ob1community@`);
+  const [{ mayCreate }] = (await sql`SELECT (rolsuper OR rolcreaterole) AS "mayCreate" FROM pg_roles WHERE rolname = current_user`) as { mayCreate: boolean }[];
+  const dropRole = () => sql.unsafe(`DO $$ BEGIN
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${ROLE}') THEN
+      EXECUTE 'DROP OWNED BY ${ROLE}'; EXECUTE 'DROP ROLE ${ROLE}';
+    END IF; END $$`);
+  if (ROLE_URL === URL_) {
+    skip("a LOGIN role granted by migrate.ts --grant uses the community schemas", "DATABASE_URL carries no credentials to swap for the role's");
+  } else if (!mayCreate) {
+    skip("a LOGIN role granted by migrate.ts --grant uses the community schemas", "the connection's role cannot CREATE ROLE");
+  } else {
+    await dropRole();
+    let asRole: SQL | null = null;
+    try {
+      await sql.unsafe(`CREATE ROLE ${ROLE} LOGIN PASSWORD 'ob1community'`);
+
+      // Before the files: --grant --dry-run knows the community objects are
+      // absent — every one named as skipped, none granted — while the
+      // migrations' own tables are granted. The presence probe, over TCP.
+      const dry = await migrate("--grant", ROLE, "--dry-run");
+      const skippedLine = dry.out.split("\n").find((l) => /not yet present, skipped/.test(l)) ?? "";
+      const communityTables = grantedTables(["community"]).filter((t) => t !== "thought_audit" && t !== "thought_entities");
+      assert(dry.code === 0 && communityTables.every((t) => skippedLine.includes(t)) && grantedViews(["community"]).every((v) => skippedLine.includes(v)) && grantedSequences(["community"]).every((s) => skippedLine.includes(s)) && grantedFunctions(["community"]).every((f) => skippedLine.includes(f)),
+             `before the files are applied, --grant --dry-run names every community table, view, sequence and function as not yet present (exit ${dry.code}; ${skippedLine.length} chars of skipped list)`);
+      assert(!/ON SEQUENCE|ON FUNCTION|agent_memories/.test(dry.out.replace(skippedLine, "")) && /GRANT SELECT, INSERT, UPDATE, DELETE ON thoughts TO "ob1_live_community";/.test(dry.out),
+             "…grants nothing of the community group, and grants the migrations' tables");
+
+      const failed: string[] = [];
+      for (const f of schemaFiles) {
+        try { await sql.unsafe(readFileSync(join(SCHEMAS, f), "utf8")); }
+        catch (e) { failed.push(`${f}: ${(e as Error).message.split("\n")[0]}`); }
+      }
+      assert(schemaFiles.length >= 17 && failed.length === 0, `every schemas/*.sql applies over TCP with no Supabase role (${schemaFiles.length} files; failed: ${failed.join(" | ") || "none"})`);
+
+      // After: --grant issues the whole community group, over TCP, in one
+      // transaction — views as tables, sequences and functions spelled as GRANT
+      // takes them.
+      const grant = await migrate("--grant", ROLE);
+      assert(grant.code === 0 && !/not yet present/.test(grant.out) && /over \d+ object\(s\)/.test(grant.out),
+             `--grant issues everything, nothing skipped (exit ${grant.code}: ${grant.out.trim().split("\n").find((l) => /Granted/.test(l)) ?? grant.out.trim().split("\n").slice(-1)[0]})`);
+      assert(/GRANT USAGE, SELECT ON SEQUENCE ingestion_jobs_id_seq TO "ob1_live_community";/.test(grant.out) && /GRANT EXECUTE ON FUNCTION wiki_accept_pending\(uuid, text\) TO "ob1_live_community";/.test(grant.out) && /GRANT SELECT, INSERT ON thought_audit TO "ob1_live_community";/.test(grant.out),
+             "…a sequence, a function with its argument types, and thought_audit's merged capture + community privileges among them");
+
+      // The role, connecting as itself. An INSERT of DEFAULT VALUES asks for
+      // every privilege an insert needs and nothing else ([40]'s probe): a
+      // permission error means the grant is short; a NOT NULL or foreign-key
+      // error, or success, means it is not.
+      asRole = new SQL({ url: ROLE_URL, max: 1 });
+      const denied: string[] = [];
+      for (const t of grantedTables(["community"])) {
+        try { await asRole.unsafe(`INSERT INTO ${t} DEFAULT VALUES`); }
+        catch (e) { if (/permission denied/.test((e as Error).message)) denied.push(`${t}: ${(e as Error).message.split("\n")[0]}`); }
+      }
+      assert(denied.length === 0, `the role's INSERT into every community table gets past privileges (${grantedTables(["community"]).length} tables; denied: ${denied.join("; ") || "none"})`);
+      let viewDenied = "";
+      for (const v of grantedViews(["community"])) {
+        try { await asRole.unsafe(`SELECT 1 FROM ${v} LIMIT 0`); } catch (e) { viewDenied += `${v}: ${(e as Error).message.split("\n")[0]}; `; }
+      }
+      assert(viewDenied === "", `…and reads the community view through its own SELECT grant (denied: ${viewDenied || "none"})`);
+      const seqDenied: string[] = [];
+      for (const s of grantedSequences(["community"])) {
+        try { await asRole.unsafe(`SELECT nextval('${s}')`); } catch (e) { seqDenied.push(s); }
+      }
+      assert(seqDenied.length === 0, `…and takes a value from each of the ${grantedSequences(["community"]).length} listed sequences (denied: ${seqDenied.join(", ") || "none"})`);
+      // (one call per function: Bun binds a JS array as a comma-joined string,
+      // not a Postgres array — migrate.ts's sql.array() is the other way round)
+      const fnDenied: string[] = [];
+      for (const n of grantedFunctions(["community"])) {
+        const [{ ok }] = (await sql`SELECT has_function_privilege(${ROLE}, to_regprocedure(${"public." + n}), 'EXECUTE') AS ok`) as { ok: boolean }[];
+        if (!ok) fnDenied.push(n);
+      }
+      assert(fnDenied.length === 0, `…and may EXECUTE each of the ${grantedFunctions(["community"]).length} listed functions (denied: ${fnDenied.join(", ") || "none"})`);
+      // and the one call a community RPC makes for real: wiki_upsert_page, as
+      // the role — SECURITY INVOKER, REVOKEd FROM PUBLIC, writing wiki_pages
+      const page = (await asRole.unsafe(`SELECT wiki_upsert_page('smd-1796', 'Granted', 'topic', '{}'::jsonb, 'test-live') AS r`)) as { r: { page_id: string; created: boolean } }[];
+      assert(typeof page[0]?.r?.page_id === "string", `…and calls wiki_upsert_page through its grant, writing wiki_pages as itself (${JSON.stringify(page[0]?.r)})`);
+      let rewrite = "";
+      try { await asRole.unsafe(`UPDATE wiki_section_revisions SET body_md = '' WHERE false`); } catch (e) { rewrite = (e as Error).message; }
+      assert(/permission denied/.test(rewrite), `…but cannot UPDATE wiki_section_revisions — append-only, as upstream had it (${rewrite.split("\n")[0] || "the UPDATE was allowed"})`);
+
+      // The rollback path, over TCP: --grant connected as THIS role — every
+      // privilege held, none with grant option — granting a third role. Every
+      // GRANT "succeeds" with a warning and no effect, the verify inside the
+      // transaction finds the third role holding nothing, and --grant exits 1
+      // naming it, with nothing committed (the third pass's check, run through
+      // Bun's begin/rollback rather than reasoned about — fourth pass).
+      await sql.unsafe(`CREATE ROLE ob1_live_third NOLOGIN`);
+      try {
+        const weak = await runMigrator(ROLE_URL, undefined, "--grant", "ob1_live_third");
+        assert(weak.code === 1 && /were not granted/.test(weak.out) && /Not held by ob1_live_third/.test(weak.out) && /Connect as the objects' owner/.test(weak.out) && !/permission denied/.test(weak.out),
+               `--grant run as a role without grant option exits 1 and names what was not granted, without the 42501 hint (exit ${weak.code}: ${(weak.out.split("\n").find((l) => /not granted/.test(l)) ?? weak.out).trim().slice(0, 140)})`);
+        const [{ held }] = (await sql`SELECT has_table_privilege('ob1_live_third', 'public.thought_audit', 'SELECT') AS held`) as { held: boolean }[];
+        assert(held === false, "…and the third role holds nothing: the transaction rolled back");
+      } finally {
+        await sql.unsafe(`DROP OWNED BY ob1_live_third; DROP ROLE ob1_live_third`);
+      }
+    } finally {
+      if (asRole) await asRole.close();
+      await dropRole();
+    }
+  }
+  await restore();
+  const left = await catalog();
+  assert(left.tables.size === before18.tables.size && left.views.size === before18.views.size && left.fns.size === before18.fns.size,
+    `the section leaves the database's tables, views and functions as it found them (${left.tables.size}/${left.views.size}/${left.fns.size})`);
 }
 
 await sql.close();

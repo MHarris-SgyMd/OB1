@@ -65,8 +65,11 @@ import {
   HNSW_SEEDS,
   SHARED_SETTING_SOURCES,
   TRGM_INDEX,
+  grantPresenceSql,
   grantStatements,
-  grantedTables,
+  grantVerifySql,
+  grantedObjects,
+  mergedGrants,
   migrationValues,
   parseSetConfig,
   quoteIdent,
@@ -140,11 +143,17 @@ if (reapply && baseline) {
 // documents — the one executable spelling of db/README.md's "Grants for a
 // capturing role". A standalone mode: it records nothing in the ledger and runs
 // no migration, so it is refused beside --baseline or --reapply. It grants only
-// tables that already exist, so it is safe on a partially-migrated database and
-// again after later migrations bring the rest. It never creates a role or sets a
+// objects that already exist — tables, and since SMD-1796 the community
+// schemas' views, sequences and functions too — so it is safe on a partially-migrated
+// database, before a community schema is applied, and again after later
+// migrations or schemas bring the rest. It never creates a role or sets a
 // password — a missing role is an error naming CREATE ROLE, not a silent create
 // — so no credential passes through it. --dry-run prints the statements without
 // running them: the list, copyable, for a role you would rather grant by hand.
+// After the GRANTs, in the same transaction, it asks the catalog whether the
+// role now holds each privilege and rolls back if not: a grantor that holds a
+// privilege without grant option "grants" it with a WARNING and no effect,
+// which the driver does not surface (SMD-1796, third review pass).
 const grantRole = flag("grant");
 if (grantRole !== undefined) {
   if (baseline || reapply) {
@@ -163,29 +172,44 @@ if (grantRole !== undefined) {
       await gsql.close();
       process.exit(2);
     }
-    const wanted = grantedTables();
+    const wanted = grantedObjects();
     const present = new Set<string>(
-      ((await gsql`SELECT tbl FROM unnest(${gsql.array(wanted, "TEXT")}::text[]) AS r(tbl) WHERE to_regclass('public.' || tbl) IS NOT NULL`) as { tbl: string }[]).map((r) => r.tbl)
+      ((await gsql.unsafe(grantPresenceSql(wanted))) as { kind: string; name: string; present: boolean }[]).filter((r) => r.present).map((r) => r.name)
     );
-    const missing = wanted.filter((t) => !present.has(t));
+    const missing = wanted.filter((o) => !present.has(o.name)).map((o) => o.name);
+    // "; " between names: a function's name carries ", " inside its argument list.
+    const skippedHint = `not yet present, skipped (run --grant again after applying the migration or community schema that creates them; a function listed here may instead exist under another argument list, which --grant does not reach): ${missing.join("; ")}`;
     const statements = [`GRANT USAGE ON SCHEMA public TO ${quoteIdent(grantRole)};`, ...grantStatements(grantRole, { present })];
     if (dryRun) {
       console.log(`\n--grant ${grantRole}  (--dry-run: nothing run)\n`);
       for (const s of statements) console.log(`  ${s}`);
-      if (missing.length) console.log(`\n  not yet present, skipped: ${missing.join(", ")}`);
+      if (missing.length) console.log(`\n  ${skippedHint}`);
       await gsql.close();
       process.exit(0);
     }
+    const merged = mergedGrants(undefined, present);
     await gsql.begin(async (tx) => {
       for (const s of statements) await tx.unsafe(s);
+      const notHeld = ((await tx.unsafe(grantVerifySql(grantRole, merged))) as { kind: string; name: string; privilege: string; held: boolean }[]).filter((r) => !r.held);
+      if (notHeld.length) {
+        throw new Error(
+          `the GRANTs ran but ${notHeld.length} privilege(s) were not granted — Postgres lets a role that holds a privilege without grant option issue the GRANT with only a warning ("no privileges were granted"), which this client does not see. Not held by ${grantRole}: ` +
+            notHeld.map((r) => `${r.privilege} on ${r.kind} ${r.name}`).join("; ") +
+            ". Connect as the objects' owner — the role that ran the migrations or applied the community schema — or a superuser, and run --grant again. Nothing was committed."
+        );
+      }
     });
-    console.log(`\nGranted ${grantRole} the capturing-role privileges over ${present.size} table(s):\n`);
+    console.log(`\nGranted ${grantRole} the capturing-role privileges over ${present.size} object(s):\n`);
     for (const s of statements) console.log(`  ${s}`);
-    if (missing.length) console.log(`\n  not yet present, skipped (run --grant again after applying them): ${missing.join(", ")}`);
+    if (missing.length) console.log(`\n  ${skippedHint}`);
     await gsql.close();
     process.exit(0);
   } catch (err) {
-    console.error(`--grant failed: ${(err as Error).message}`);
+    const message = (err as Error).message;
+    // 42501 here is the grantor's, not the grantee's: it holds nothing on the
+    // object at all, so it cannot grant it.
+    const hint = /permission denied/.test(message) ? "\n  This connection's role may not grant that object: connect as its owner (the role that ran the migrations or applied the community schema) or a superuser." : "";
+    console.error(`--grant failed: ${message}${hint}`);
     await gsql.close();
     process.exit(1);
   }

@@ -69,46 +69,19 @@ CREATE INDEX IF NOT EXISTS idx_ingestion_items_pending
 --     deployments can isolate ingestion history per user. Stock
 --     single-tenant OB1 setups can leave user_id NULL on every row.
 --
---     The FK to auth.users is added only when Supabase's auth schema
---     exists, so these statements are safe to run on non-Supabase
---     Postgres instances too.
+--     This fork (SMD-1796): upstream's file went on to add a foreign key
+--     from user_id to Supabase's auth.users(id), inside a DO block that
+--     ran only where the auth schema exists. Guarded or not, it is a
+--     reference into GoTrue's schema, which the fork's SQL rule refuses
+--     (scripts/check-fork-consistency.mjs check 12); a single-operator
+--     brain (SMD-1716) has no auth.users to point at, so the column
+--     stays a plain nullable uuid and the block is gone.
 -- ============================================================
 
 ALTER TABLE public.ingestion_jobs
   ADD COLUMN IF NOT EXISTS user_id uuid;
 ALTER TABLE public.ingestion_items
   ADD COLUMN IF NOT EXISTS user_id uuid;
-
-DO $$
-BEGIN
-  IF EXISTS (
-    SELECT 1 FROM pg_namespace WHERE nspname = 'auth'
-  ) AND EXISTS (
-    SELECT 1
-      FROM pg_class c
-      JOIN pg_namespace n ON n.oid = c.relnamespace
-     WHERE n.nspname = 'auth' AND c.relname = 'users'
-  ) THEN
-    IF NOT EXISTS (
-      SELECT 1 FROM pg_constraint
-       WHERE conname = 'ingestion_jobs_user_id_fkey'
-    ) THEN
-      ALTER TABLE public.ingestion_jobs
-        ADD CONSTRAINT ingestion_jobs_user_id_fkey
-        FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE;
-    END IF;
-
-    IF NOT EXISTS (
-      SELECT 1 FROM pg_constraint
-       WHERE conname = 'ingestion_items_user_id_fkey'
-    ) THEN
-      ALTER TABLE public.ingestion_items
-        ADD CONSTRAINT ingestion_items_user_id_fkey
-        FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE;
-    END IF;
-  END IF;
-END
-$$;
 
 -- ============================================================
 -- 3. APPEND THOUGHT EVIDENCE RPC
@@ -197,77 +170,24 @@ $$;
 -- 4. GRANTS
 -- ============================================================
 
-GRANT ALL ON TABLE public.ingestion_jobs TO service_role;
-GRANT ALL ON TABLE public.ingestion_items TO service_role;
-GRANT USAGE, SELECT ON SEQUENCE public.ingestion_jobs_id_seq TO service_role;
-GRANT USAGE, SELECT ON SEQUENCE public.ingestion_items_id_seq TO service_role;
 REVOKE EXECUTE ON FUNCTION public.append_thought_evidence(bigint, jsonb) FROM public;
-GRANT EXECUTE ON FUNCTION public.append_thought_evidence(bigint, jsonb)
-  TO service_role;
 
--- ============================================================
--- 5. ROW LEVEL SECURITY
---    Belt-and-suspenders defence against anon/authenticated roles
---    getting table-level privileges at the schema layer. service_role
---    bypasses RLS automatically, so worker writes still succeed.
---    authenticated users can read their own rows once user_id is
---    populated (see section 2a). The user-scoped SELECT policies are
---    only created when Supabase's auth.uid() exists; on non-Supabase
---    Postgres, RLS is still enabled but no authenticated policy is
---    created (deny-by-default for anyone except service_role).
--- ============================================================
-
-ALTER TABLE public.ingestion_jobs  ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.ingestion_items ENABLE ROW LEVEL SECURITY;
-
--- Drop existing policies if present so this file stays idempotent.
-DROP POLICY IF EXISTS ingestion_jobs_service_all  ON public.ingestion_jobs;
-DROP POLICY IF EXISTS ingestion_jobs_user_select  ON public.ingestion_jobs;
-DROP POLICY IF EXISTS ingestion_items_service_all ON public.ingestion_items;
-DROP POLICY IF EXISTS ingestion_items_user_select ON public.ingestion_items;
-
-CREATE POLICY ingestion_jobs_service_all
-  ON public.ingestion_jobs
-  FOR ALL
-  TO service_role
-  USING (true)
-  WITH CHECK (true);
-
-CREATE POLICY ingestion_items_service_all
-  ON public.ingestion_items
-  FOR ALL
-  TO service_role
-  USING (true)
-  WITH CHECK (true);
-
--- Authenticated SELECT policies depend on auth.uid(); only create them
--- on Supabase (where the auth schema ships the uid() function).
-DO $$
-BEGIN
-  IF EXISTS (
-    SELECT 1
-      FROM pg_proc p
-      JOIN pg_namespace n ON n.oid = p.pronamespace
-     WHERE n.nspname = 'auth' AND p.proname = 'uid'
-  ) THEN
-    EXECUTE $policy$
-      CREATE POLICY ingestion_jobs_user_select
-        ON public.ingestion_jobs
-        FOR SELECT
-        TO authenticated
-        USING (user_id IS NOT NULL AND user_id = auth.uid())
-    $policy$;
-
-    EXECUTE $policy$
-      CREATE POLICY ingestion_items_user_select
-        ON public.ingestion_items
-        FOR SELECT
-        TO authenticated
-        USING (user_id IS NOT NULL AND user_id = auth.uid())
-    $policy$;
-  END IF;
-END
-$$;
+-- This fork (SMD-1796): upstream's section 4 also GRANTed ALL on both tables,
+-- USAGE, SELECT on their two sequences and EXECUTE on the append TO
+-- service_role, and a section 5 ENABLEd ROW LEVEL SECURITY on both tables with
+-- a policy FOR service_role and, where Supabase's auth.uid() exists, a SELECT
+-- policy FOR authenticated scoped to it. Those are Supabase's: on plain
+-- Postgres the first GRANT stops the file (`role "service_role" does not
+-- exist`), and the section's own comment says what RLS then does — "deny-by-
+-- default for anyone except service_role", which on this fork is the role you
+-- connect as. Removed; the REVOKE above stays, so the SECURITY DEFINER append
+-- is callable only by a role granted it.
+-- Grant the role your server connects as instead — from db/:
+--   bun migrate.ts --url postgres://… --grant <role>
+-- issues db/config.mjs ROLE_GRANTS' `community` group, which covers this file's
+-- two tables (SELECT, INSERT, UPDATE, DELETE), the two bigserial sequences
+-- (USAGE, SELECT — an INSERT needs the sequence) and EXECUTE on
+-- append_thought_evidence(bigint, jsonb). Row-level security: SMD-1716.
 
 -- Notify PostgREST to reload schema cache
 NOTIFY pgrst, 'reload schema';
