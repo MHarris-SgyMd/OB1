@@ -15535,64 +15535,66 @@ literal-aware since change 93 (SMD-1796), so the guard's HINT naming two flags,
 as 030's and 031's do, is no longer even a consideration, and [41] keeps the
 convention as an assertion of the live text.
 
-The trap a successor must not fall into is 028's: a re-issued `COMMENT`
-replaces the description, so any migration that re-comments `query_log` or
+The trap a successor must not fall into is 028's: a re-issued `COMMENT` replaces
+the description, so any migration that re-comments `query_log` or
 `query_log.tool` and re-issues 034's text would silently drop the cite clause.
 `test-schema` **[41]** asserts the **live** text of both comments
 (`col_description`, `obj_description`) after every file has applied — both name
 `<writer>/<pointer>`; the column's gives both shapes, what a cite is, the rule
-as the column's and where the readers are; the three cite values and three
-plain names it gives are the ones `index.ts` writes today, hard-coded as [39]
-hard-codes them (so a renamed writer that stranded the applied text fails
-here, and the fix is a migration, not an edit); the table's keeps 034's six
-sentences whole and adds the clause; neither carries `--` — and exercises the
-shape once: a cite row inserted under the documented `tool` lands (034's only
-constraint on the column) and reads back as a cite. Anchored on the rule's
-words, no migration number pinned, so a compliant successor passes and a lossy
-one fails whichever file it is. Two mutants bite: 034's table text re-issued
-verbatim fails the clause assertion; the column statement dropped fails the
-first assertion of the section (a first cut of that mutant removed the
-header's *mention* of the statement instead of the statement and passed
-992/992 — the cut was wrong, not the test). `test-upgrade` **[20]** drives
-the guard against real Postgres: a schema through 033 baselined at a ledger
-through 042, 042's row deleted, and a plain run fails at 042 naming 034 and
-`--reapply` and records nothing; then 034's table applied and the same
-pending file lands, both live comments naming the shape. The first run of
-that suite tripped its own window guard — [7] holds that 030 is among the
-last N migrations "to force this note to be re-read" whenever a migration
-lands past it — so the note was re-read (042 needs only 034 and is recorded
-by the baseline with it, so it never becomes [7]'s plain-run failure point),
-042 added to it and the window widened by one, as the guard asks. The same
-first run also refused `--reapply` because 042's hash had changed under it:
-the mutant script was rewriting the file while the suite hashed it — a race
-between two of this section's own checks, not a defect; the suite was re-run
-alone. The re-run found a real one: [20] passed its `--baseline` and then
-watched the plain run *apply* 042 — exit 0, one applied, thirty-nine skipped
-— on a schema built "without 034". It was not without it. `test-support`'s
-schema reset drops a fixed list of tables and functions, and 034's
-`query_log` and `prune_query_log` were never added to it, so every reset
-since change 65 had carried the previous section's log table across the
-boundary; nothing before this section asked for a brain that lacked it, and
-the by-hand reproduction in a fresh container fired the guard exactly as
-written. The two names are in the lists now, with the reason at the entry —
-and a second pass, listing what survives a reset on a fully applied brain,
-found three more: `thought_stats_summary()` (024), `find_derivatives` (025)
-and `trace_provenance` (025/026), never dropped either. Those are listed
-too, and `test-upgrade` **[21]** now asks the catalog the same question after
-every run — a reset of a full brain leaves no non-extension relation,
-function or type in `public` — so the next name a migration adds without a
-line in the list fails there rather than in whichever section happens to
-need the object gone. Deriving the lists from the migrations instead
-(`config.mjs` already reads the owned function set from them for the
-vendored-SQL check) is **SMD-1819**; the tooth makes the hand-kept list safe
-until then. With the
-reset fixed, the guard's own mutant bites: the `DO` block removed, [20]'s
-plain run fails with the bare `relation "query_log" does not exist` and the
-assertion that wants the named message and the remedy fails on it. The
-typed record of what a write cited is
-SMD-1730's event shape (Phase 1a of SMD-1729); when it lands, the migration
-that carries it should re-issue this column's comment to point at it — the
-ticket's note, carried in 042's header.
+as the column's and where the readers are; the three cite values and three plain
+names it gives are the ones `index.ts` writes today, hard-coded as [39]
+hard-codes them (so a renamed writer that stranded the applied text fails here,
+and the fix is a migration, not an edit); the table's keeps 034's six sentences
+whole and adds the clause; neither carries `--` — and exercises the shape once:
+a cite row inserted under the documented `tool` lands (034's only constraint on
+the column) and reads back as a cite. Anchored on the rule's words, no migration
+number pinned, so a compliant successor passes and a lossy one fails whichever
+file it is.
+
+Two mutants bite: 034's table text re-issued verbatim fails the clause
+assertion; the column statement dropped fails the first assertion of the section
+(a first cut of that mutant removed the header's *mention* of the statement
+instead of the statement and passed 992/992 — the cut was wrong, not the test).
+`test-upgrade` **[20]** drives the guard against real Postgres: a schema through
+033 baselined at a ledger through 042, 042's row deleted, and a plain run fails
+at 042 naming 034 and `--reapply` and records nothing; then 034's table applied
+and the same pending file lands, both live comments naming the shape. The first
+run of that suite tripped its own window guard — [7] holds that 030 is among the
+last N migrations "to force this note to be re-read" whenever a migration lands
+past it — so the note was re-read (042 needs only 034 and is recorded by the
+baseline with it, so it never becomes [7]'s plain-run failure point), 042 added
+to it and the window widened by one, as the guard asks. The same first run also
+refused `--reapply` because 042's hash had changed under it: the mutant script
+was rewriting the file while the suite hashed it — a race between two of this
+section's own checks, not a defect; the suite was re-run alone.
+
+The re-run found a real one: [20] passed its `--baseline` and then watched the
+plain run *apply* 042 — exit 0, one applied, thirty-nine skipped — on a schema
+built "without 034". It was not without it. `test-support`'s schema reset drops
+a fixed list of tables and functions, and 034's `query_log` and
+`prune_query_log` were never added to it, so every reset since change 65 had
+carried the previous section's log table across the boundary; nothing before
+this section asked for a brain that lacked it, and the by-hand reproduction in a
+fresh container fired the guard exactly as written. The two names are in the
+lists now, with the reason at the entry — and a second pass, listing what
+survives a reset on a fully applied brain, found three more:
+`thought_stats_summary()` (024), `find_derivatives` (025) and `trace_provenance`
+(025/026), never dropped either. Those are listed too, and `test-upgrade`
+**[21]** now asks the catalog the same question after every run — a reset of a
+full brain leaves no non-extension relation, function or type in `public` — so
+the next name a migration adds without a line in the list fails there rather
+than in whichever section happens to need the object gone. Deriving the lists
+from the migrations instead (`config.mjs` already reads the owned function set
+from them for the vendored-SQL check) is **SMD-1819**; the tooth makes the
+hand-kept list safe until then.
+
+With the reset fixed, the guard's own mutant bites: the `DO` block removed,
+[20]'s plain run fails with the bare `relation "query_log" does not exist` and
+the assertion that wants the named message and the remedy fails on it.
+
+The typed record of what a write cited is SMD-1730's event shape (Phase 1a of
+SMD-1729); when it lands, the migration that carries it should re-issue this
+column's comment to point at it — the ticket's note, carried in 042's header.
 
 **Not done here.** A shared helper for the catalog reads that [41] and
 `test-upgrade` [20] each spelled (a first review pass counted six copies of the
@@ -15613,45 +15615,44 @@ records earlier files gets the baseline hint once, retiring the block 030, 031
 and 042 each paste — is **SMD-1811** (the same pass's altitude finding); 042
 keeps its guard.
 
-**One review pass** so far (a cold reader over the diff and the operator's
-path walked: a fresh brain migrated by the runner, a second plain run, a
-`--reapply`, both live texts read back through psql with no quoting artifact
-and by a role holding only SELECT on the table). The cold reader found the
-number taken: while this branch was in review, main merged SMD-1624 (PR #82,
-migration 040, change 91) and SMD-1328 (PR #83, also claiming change 91), so
-this migration moved to 042, `test-upgrade`'s section to [20], [7]'s window
-to twelve and this section to 93 (a second merge moved each once more — the
-fifth pass, below) — and main's own duplicate is repaired
-in the merge: SMD-1624 merged first and carries three code pointers to 91, so
-it keeps 91; SMD-1328's section is renumbered **92** and moved after it (its
-heading was its only reference). The same pass caught the column comment
-stating the rule as "any value containing a slash is a cite" where
-`citePointerOf` — the reader the comment points at — treats a slash at either
-end as an open and [39] asserts exactly that; the applied text now states the
-reader's rule (a non-empty name either side of the first slash), and [41]
+**One review pass** so far (a cold reader over the diff and the operator's path
+walked: a fresh brain migrated by the runner, a second plain run, a `--reapply`,
+both live texts read back through psql with no quoting artifact and by a role
+holding only SELECT on the table). The cold reader found the number taken: while
+this branch was in review, main merged SMD-1624 (PR #82, migration 040, change
+91) and SMD-1328 (PR #83, also claiming change 91), so this migration moved to
+041, `test-upgrade`'s section to [19], [7]'s window to twelve and this section
+to 93 (a second merge moved each once more — the fifth pass, below) — and main's
+own duplicate is repaired in the merge: SMD-1624 merged first and carries three
+code pointers to 91, so it keeps 91; SMD-1328's section is renumbered **92** and
+moved after it (its heading was its only reference). The same pass caught the
+column comment stating the rule as "any value containing a slash is a cite"
+where `citePointerOf` — the reader the comment points at — treats a slash at
+either end as an open and [39] asserts exactly that; the applied text now states
+the reader's rule (a non-empty name either side of the first slash), and [41]
 anchors on it. And it trimmed [41]: the loops over the six tool names had
 re-asserted `citePointerOf`'s results — a second copy of [39]'s tooth under a
 label that blamed the migration text — and now ask only that the applied text
 names them.
 
-**Second pass** (a cold reader over the merged branch; the run-it arm walked
-an upgrade — a brain built by main's own runner and files, then this branch's
-runner over it: 042 applied, forty skipped, no hash refusal, `--dry-run` quiet,
-preflight's query-log line reading the shape — and the three server-portable
-suites that share the reset on the merged tree). Its findings, all taken: the
-reset list's three other omissions and [21], above; the `test-support` entry's
-pointer to "[18]", which the merge had renumbered to [20] everywhere else; the
-column comment's "an MCP tool name cannot contain a slash", a protocol
-impossibility the spec does not promise (a SHOULD, a warning in the SDK) —
-stated now as the server's rule with what a foreign slashed name would read as
-and where an unknown plain name is reported; [41]'s two shape assertions had
-anchored on dot-all spans that could reach the other sentence, so a re-issue
+**Second pass** (a cold reader over the merged branch; the run-it arm walked an
+upgrade — a brain built by main's own runner and files, then this branch's
+runner over it: the file applied, forty skipped, no hash refusal, `--dry-run`
+quiet, preflight's query-log line reading the shape — and the three
+server-portable suites that share the reset on the merged tree). Its findings,
+all taken: the reset list's three other omissions and [21], above; the
+`test-support` entry's pointer to "[18]", which the merge had renumbered
+everywhere else; the column comment's "an MCP tool name cannot contain a slash",
+a protocol impossibility the spec does not promise (a SHOULD, a warning in the
+SDK) — stated now as the server's rule with what a foreign slashed name would
+read as and where an unknown plain name is reported; [41]'s two shape assertions
+had anchored on dot-all spans that could reach the other sentence, so a re-issue
 that *inverted* the meanings would have passed — each shape is anchored inside
 its own sentence now; and its plain-name loop had matched the word anywhere in
-the prose ("follow-up fetch" would do), so the two enumerated lists are
-asserted as strings beside their shapes instead. [20] leaves a ledger ahead of
-its schema; [21] starts from a full brain and ends with one, and [20] says so.
-The guard paste was surfaced again and stays SMD-1811's.
+the prose ("follow-up fetch" would do), so the two enumerated lists are asserted
+as strings beside their shapes instead. [20] left a ledger ahead of its schema,
+so [21] began from a full brain of its own (the fourth pass has [20] complete
+its own instead). The guard paste was surfaced again and stays SMD-1811's.
 
 **Third pass** (a cold reader; the run-it arm ran the two mutants the second
 pass's anchors claim to catch — the two meanings inverted in a re-issue fails
@@ -15682,7 +15683,7 @@ ownership of the column, so an image that gained such an extension would have
 failed [21] on a reset that dropped everything of the fork's — a relation is
 excepted now when it, its row type or its owning table is an extension's. [21]
 had also built the full brain it then dropped, twice over; [20] completes its
-own brain now (035–040 are on the ledger already) and [21] starts from it.
+own brain now (035 onward are on the ledger already) and [21] starts from it.
 `test-schema` [10]'s header still denied that any migration puts `--` inside a
 string literal, three RAISE HINTs after that stopped being true; the pass
 corrected it — and main's change 93 then made the strip literal-aware and
