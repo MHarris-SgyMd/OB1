@@ -437,8 +437,9 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // re-capture writes no provenance, SMD-1453), 036 (delete_thought's lock
   // order, SMD-1462), 037 (the routing count's gate, SMD-1463) and 038 (the
   // gate's sample by TID range, SMD-1526), 039 (the half-precision walk,
-  // SMD-1501) and 041 (the citations facet and delete_thought's third
-  // argument, SMD-1712) stay recorded and are never tried. 030 is the right one to make
+  // SMD-1501), 040 (jit off on the function, SMD-1624) and 041 (the citations
+  // facet and delete_thought's third argument, SMD-1712) stay recorded and
+  // are never tried. 030 is the right one to make
   // pending
   // because its prerequisites — 015 and 021's embedding_model column — are
   // exactly what a through-020 schema lacks, so it fails by name rather than
@@ -447,12 +448,13 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // 016, 025, 032 and 033; 036 redefines delete_thought and needs only 009's
   // body and 029's supersession lock; 037 redefines 020's match_thoughts and
   // 038 037's; 039 redefines it again and swaps 001's and 007's two indexes,
-  // which every schema has; 041 adds a table on 001's and redefines
-  // delete_thought on 009's body and 036's lock key, all present — all
-  // recorded by the baseline with their prerequisites present, so none
+  // which every schema has; 040 redefines it once more with one SET clause;
+  // 041 adds a table on 001's and redefines delete_thought on 009's body and
+  // 036's lock key, all present — all recorded by the baseline with their
+  // prerequisites present, so none
   // becomes the plain-run failure point above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 11, `030 is among the last eleven migrations (${last})`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 12, `030 is among the last twelve migrations (${last})`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -1370,6 +1372,73 @@ console.log("\n[17] Migration 039 onto a populated 038 — both HNSW indexes swa
   await sql.unsafe(`GRANT EXECUTE ON FUNCTION ${SIX} TO PUBLIC`);
   await sql.unsafe(`DROP OWNED BY ob1_upgrade_searcher38`);
   await sql.unsafe(`DROP ROLE ob1_upgrade_searcher38`);
+  await sql.close();
+}
+
+console.log("\n[18] Migration 040 onto a populated 039 — match_thoughts gains jit = off and nothing else: the body byte for byte 039's, no signature, row or privilege moves, and a hand-re-applied 014's 4-argument form is dropped as 020 dropped it (SMD-1624)");
+{
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < "040" });
+  const sql = new SQL({ url: URL_, max: 1 });
+  const vec = (axis: number) => `[${Array.from({ length: OPTS.dim }, (_, i) => (i === axis ? 1 : 0)).join(",")}]`;
+  const SIX = "match_thoughts(vector, float, int, jsonb, float, float)";
+  const bodyOf = async (sig: string) => (await sql`SELECT prosrc FROM pg_proc WHERE oid = ${sig}::regprocedure`)[0].prosrc as string;
+  const aclOf = async (sig: string) => String((await sql`SELECT proacl::text AS a FROM pg_proc WHERE oid = ${sig}::regprocedure`)[0].a ?? "");
+  const settingsOf = async (sig: string) => String((await sql`SELECT array_to_string(proconfig, ',') AS c FROM pg_proc WHERE oid = ${sig}::regprocedure`)[0].c ?? "");
+  const forms = async () => Number((await sql`SELECT count(*)::int AS c FROM pg_proc WHERE proname = 'match_thoughts'`)[0].c);
+  const answer = async (kind: string) => JSON.stringify((await sql`SELECT id FROM match_thoughts(${vec(0)}::vector, -1.0, 10, ${{ kind }}::jsonb)`).map((r: { id: string }) => r.id).sort());
+
+  // A corpus at 039 — thirty rows of two kinds, both filters under the exact
+  // threshold and the table far under the gate's floor — and a hardened
+  // 6-argument form.
+  for (let i = 0; i < 30; i++) {
+    await sql`SELECT upsert_thought(${`upgrade 040: note ${i}`}, ${{ metadata: { kind: i % 10 === 0 ? "rare" : "common" } }}::jsonb, ${vec(i % OPTS.dim)}::vector)`;
+  }
+  await sql.unsafe(`DO $r$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob1_upgrade_searcher40') THEN CREATE ROLE ob1_upgrade_searcher40 NOLOGIN; END IF; END $r$`);
+  await sql.unsafe(`REVOKE ALL ON FUNCTION ${SIX} FROM PUBLIC`);
+  await sql.unsafe(`GRANT EXECUTE ON FUNCTION ${SIX} TO ob1_upgrade_searcher40`);
+  const acl = await aclOf(SIX);
+  const before = await shape(sql);
+  const snapshot = async () => JSON.stringify(await sql`SELECT id, content_fingerprint, metadata, updated_at::text AS u FROM thoughts ORDER BY id`);
+  const rows = await snapshot();
+  const rareBefore = await answer("rare");
+  const commonBefore = await answer("common");
+  const body039 = await bodyOf(SIX);
+  const settings039 = await settingsOf(SIX);
+  assert(TID_PROBE.test(body039) && /enable_seqscan=off/.test(settings039) && !/jit=off/.test(settings039) && (await forms()) === 1, `at 039 match_thoughts samples by TID range, carries 014's and 019's clauses and no jit clause (${settings039}), and has one form`);
+
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("040") });
+
+  const after = await shape(sql);
+  assert(before.columns === after.columns && before.functions === after.functions, "040 adds no column and changes no signature — one match_thoughts, as before");
+  assert((await snapshot()) === rows, "no row moved — nothing here is a backfill");
+  assert((await aclOf(SIX)) === acl && !/(^\{|,)=X\//.test(acl), `CREATE OR REPLACE under the same signature keeps the hardened ACL: PUBLIC still revoked, the role still granted (${acl})`);
+  assert((await bodyOf(SIX)) === body039, "…the body is 039's byte for byte — 040 adds a SET clause and changes no statement");
+  const [{ cfg, prorows }] = await sql`SELECT array_to_string(proconfig, ',') AS cfg, prorows FROM pg_proc WHERE oid = ${SIX}::regprocedure`;
+  assert(/hnsw\.iterative_scan=relaxed_order/.test(String(cfg)) && /enable_seqscan=off/.test(String(cfg)) && /(^|,)jit=off(,|$)/.test(String(cfg)) && Number(prorows) === 10, `…with 014's and 019's clauses carried and jit = off beside them (${cfg}; ROWS ${prorows})`);
+  assert((await answer("rare")) === rareBefore && (await answer("common")) === commonBefore, "…and both filters — 3 and 27 matching rows — return exactly the rows they returned at 039");
+
+  // The state a hand re-apply of 014 leaves — the 4-argument form back beside
+  // the 6-argument one, every 4-argument call ambiguous — and what the last
+  // definer applied ALONE does about it, since that is what preflight's
+  // remedy and the suites' restoreShipped apply: 040 carries 020's DROP.
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("014") });
+  assert((await forms()) === 2, "014 re-applied by hand puts the 4-argument form back beside 040's");
+  let ambiguous = "";
+  try {
+    await sql`SELECT count(*) FROM match_thoughts(${vec(0)}::vector, 0.0, 10, '{}'::jsonb)`;
+  } catch (e) {
+    ambiguous = (e as Error).message;
+  }
+  assert(/not unique/.test(ambiguous), `…and a 4-argument call is ambiguous (${ambiguous.split("\n")[0] || "it succeeded"})`);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("040") });
+  assert((await forms()) === 1 && (await aclOf(SIX)) === acl && (await bodyOf(SIX)) === body039 && /(^|,)jit=off(,|$)/.test(await settingsOf(SIX)),
+         "re-applying 040 alone drops the 4-argument form again and leaves the 6-argument form's ACL, body and clauses as they were — the last definer restores the shipped state by itself");
+  assert((await answer("rare")) === rareBefore, "…and the filtered call answers as before");
+  await sql.unsafe(`REVOKE ALL ON FUNCTION ${SIX} FROM ob1_upgrade_searcher40`);
+  await sql.unsafe(`GRANT EXECUTE ON FUNCTION ${SIX} TO PUBLIC`);
+  await sql.unsafe(`DROP OWNED BY ob1_upgrade_searcher40`);
+  await sql.unsafe(`DROP ROLE ob1_upgrade_searcher40`);
   await sql.close();
 }
 

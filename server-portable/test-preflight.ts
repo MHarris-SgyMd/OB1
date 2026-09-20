@@ -379,17 +379,28 @@ else {
   assert(noClause.code === 0, "a recorded 014 whose function lost only its SET clause still starts");
   assert(/has 014's body but no iterative scan in force although migration 014 is recorded as applied — a later redefinition dropped its SET clause/.test(noClause.out), "…is described as 014's body without its clause");
   assert(/ALTER FUNCTION match_thoughts\(vector,double precision,integer,jsonb,double precision,double precision\) SET hnsw\.iterative_scan = relaxed_order/.test(noClause.out), "…with the ALTER FUNCTION that puts the clause back as the remedy, naming the signature the catalog holds");
-  // RESET ALL took 019's clause with it, and CREATE OR REPLACE would have
-  // reset the row estimate too: the second check names both, as a warning, with
-  // the migration as the remedy since this ledger does not record 019.
+  // RESET ALL took 019's clause with it (prorows it leaves alone): the second
+  // check names the clause, as a warning, with 040's file as the remedy since
+  // this ledger records neither 019 nor 040 — 040 is the last definer and
+  // carries 019's clauses; 019's own file is never named (review pass 2).
   assert(/candidate scan.*does not carry enable_seqscan = off — migration 019 is not applied/s.test(noClause.out), "the candidate-scan check reports 019's clause missing");
-  assert(/019_match_thoughts_plan_and_rows\.sql/.test(noClause.out), "…with 019 as the remedy while the ledger does not record it");
+  // The remedy is the LAST definer, not 019's file: on this 6-argument brain
+  // 019's CREATE would put the 4-argument form back beside it (the state the
+  // twoForms section below fails the start on), while 040 carries 019's
+  // clauses and ROWS 10 with its own and drops that form (review pass 2).
+  assert(/Apply db\/migrations\/040_match_thoughts_jit_off\.sql — the last definer of match_thoughts, which carries 019's clauses and ROWS 10 with its own \(019's file alone would re-create the 4-argument form 020 dropped\)\.\s*$/m.test(noClause.out) && !/Apply db\/migrations\/019/.test(noClause.out) && !/Then put the keyword estimate back/.test(noClause.out),
+         "…with 040, the last definer, as the whole remedy while the ledger records neither 019 nor 040 — never 019's own file, and no keyword ALTER while that estimate holds");
   // The other remedy: 019 recorded, the clause gone — the ALTER that restores both.
   const led019 = new SQL({ url: LIVE, max: 1 });
-  await led019.unsafe(`INSERT INTO schema_migrations (name, sha256) VALUES ('019_match_thoughts_plan_and_rows.sql', 'test')`);
+  // 040 recorded beside 019: a brain whose function carries 040's clause and
+  // whose ledger records 019 records 040 too, and a recorded last definer is
+  // what makes the ALTER, not a file, the remedy (review pass 2).
+  await led019.unsafe(`INSERT INTO schema_migrations (name, sha256) VALUES ('019_match_thoughts_plan_and_rows.sql', 'test'), ('040_match_thoughts_jit_off.sql', 'test')`);
   // RESET ALL leaves prorows alone; a CREATE OR REPLACE would not, so reset it by hand as a redefinition would —
-  // and reset the keyword function's too, as re-applying 012 alone does.
-  await led019.unsafe(`ALTER FUNCTION ${MATCH_THOUGHTS_SIGNATURE} SET hnsw.iterative_scan = relaxed_order ROWS 1000`);
+  // and reset the keyword function's too, as re-applying 012 alone does. 040's
+  // jit clause is put back here so this fixture is 019's loss alone; its own
+  // loss is probed after the walk-index probes below.
+  await led019.unsafe(`ALTER FUNCTION ${MATCH_THOUGHTS_SIGNATURE} SET hnsw.iterative_scan = relaxed_order SET jit = off ROWS 1000`);
   await led019.unsafe(`ALTER FUNCTION search_thoughts_keyword(text, int, int, jsonb) ROWS 1000`);
   await led019.close();
   const noSeq = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
@@ -399,7 +410,7 @@ else {
   assert(/ALTER FUNCTION match_thoughts\(vector,double precision,integer,jsonb,double precision,double precision\) SET enable_seqscan = off ROWS 10; ALTER FUNCTION search_thoughts_keyword\(text, int, int, jsonb\) ROWS 25;/.test(noSeq.out), "…with one ALTER FUNCTION per function as the remedy, after any body re-apply");
   // Only the keyword estimate gone: the clause is fine, one ALTER, the other function not named.
   const kwOnly = new SQL({ url: LIVE, max: 1 });
-  await kwOnly.unsafe(`ALTER FUNCTION ${MATCH_THOUGHTS_SIGNATURE} SET enable_seqscan = off ROWS 10`);
+  await kwOnly.unsafe(`ALTER FUNCTION ${MATCH_THOUGHTS_SIGNATURE} SET enable_seqscan = off SET jit = off ROWS 10`);
   await kwOnly.close();
   const kwReset = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
   assert(/candidate scan.*carries enable_seqscan = off but search_thoughts_keyword's row estimate is 1000 rather than 25 — a redefinition reset what 019 declared/s.test(kwReset.out), "a reset keyword estimate alone is named alone");
@@ -412,7 +423,7 @@ else {
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f >= "013" });
   // Everything shipped again: both estimates and the clause, reported as ok.
   const shipped = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
-  assert(/candidate scan.*declares enable_seqscan = off and ROWS 10, search_thoughts_keyword ROWS 25/s.test(shipped.out), "with every migration re-applied, the candidate-scan check reports 019's clause and both row estimates");
+  assert(/candidate scan.*declares enable_seqscan = off and ROWS 10, search_thoughts_keyword ROWS 25 \(019\), and match_thoughts jit = off \(040\)/s.test(shipped.out), "with every migration re-applied, the candidate-scan check reports 019's clause, both row estimates and 040's clause");
   assert(shipped.code === 0 && /search signatures.*one of each/s.test(shipped.out), "…and the signature check is satisfied");
   // 039: the walk's cast and the index's expression are one contract in two
   // halves, and each half moves by hand without the other — 037 re-applied
@@ -461,6 +472,74 @@ else {
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("039") });
   const restored039 = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
   assert(/walk index.*over that expression \(039\)/s.test(restored039.out), "…and 039 builds it where the name is free");
+  // 039's file alone, as the walk-index probes above applied it, is the state
+  // its header names for 040's clause: 039's CREATE carries 019's clauses and
+  // not 040's, so the candidate-scan check warns — and 040 puts it back.
+  assert(/candidate scan.*but not jit = off — migration 040 is not applied/s.test(restored039.out) && /040_match_thoughts_jit_off\.sql/.test(restored039.out),
+         "…while 039 applied alone has dropped 040's clause: the candidate-scan check names it and 040 as the remedy");
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("040") });
+  assert(/candidate scan.*and match_thoughts jit = off \(040\)/s.test((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE })).out), "…and 040 applied over it is reported as carrying the clause");
+  // 040's clause alone gone — what a redefinition that carried 019's clauses
+  // and not 040's leaves: a warning naming the compile it lets back in, with
+  // the migration as the remedy while no ledger records 040, then ok again
+  // once 040 is re-applied.
+  const jitReset = new SQL({ url: LIVE, max: 1 });
+  await jitReset.unsafe(`ALTER FUNCTION ${MATCH_THOUGHTS_SIGNATURE} RESET jit`);
+  await jitReset.close();
+  const noJit = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+  assert(noJit.code === 0 && /candidate scan.*carries enable_seqscan = off and both row estimates hold, but not jit = off — migration 040 is not applied: a planner path disabled at any level/s.test(noJit.out) && /040_match_thoughts_jit_off\.sql/.test(noJit.out),
+         "match_thoughts without 040's jit clause still starts, and the candidate-scan check names the clause, the compile it lets back in and 040 as the remedy");
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("040") });
+  assert(/candidate scan.*and match_thoughts jit = off \(040\)/s.test((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE })).out), "…and 040 re-applied is reported as carrying it");
+  // The other wording, with 040 RECORDED: "apply 040" would be a no-op for a
+  // plain run, so the remedy is the ALTER that puts the clause back — and,
+  // with the keyword estimate reset beside it and 019 recorded too, the
+  // Put-it-back list names both functions. Then 019 recorded but the ledger
+  // lacking 040, the keyword estimate reset: the file for 040's clause and
+  // the keyword ALTER beside it, since 040 does not define that function
+  // (review pass 1). The ledger is created for these probes and dropped after.
+  const led040 = new SQL({ url: LIVE, max: 1 });
+  await led040.unsafe(`CREATE TABLE schema_migrations (name text PRIMARY KEY, sha256 text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())`);
+  await led040.unsafe(`INSERT INTO schema_migrations (name, sha256) VALUES ('019_match_thoughts_plan_and_rows.sql', 'test'), ('040_match_thoughts_jit_off.sql', 'test')`);
+  await led040.unsafe(`ALTER FUNCTION ${MATCH_THOUGHTS_SIGNATURE} RESET jit`);
+  await led040.unsafe(`ALTER FUNCTION search_thoughts_keyword(text, int, int, jsonb) ROWS 1000`);
+  await led040.close();
+  const recorded040 = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+  assert(/candidate scan.*carries enable_seqscan = off but search_thoughts_keyword's row estimate is 1000 rather than 25 — a redefinition reset what 019 declared; every query[^\n]*; and it does not carry jit = off although migration 040 is recorded as applied — a later redefinition dropped its SET clause/s.test(recorded040.out),
+         "with 019 and 040 recorded, a reset keyword estimate and a dropped jit clause are both named, the clause as recorded-but-dropped");
+  assert(/Put it back[^\n]*ALTER FUNCTION match_thoughts\(vector,double precision,integer,jsonb,double precision,double precision\) SET jit = off; ALTER FUNCTION search_thoughts_keyword\(text, int, int, jsonb\) ROWS 25;/.test(recorded040.out),
+         "…with one ALTER per function as the remedy — SET jit = off for match_thoughts, ROWS 25 for the keyword function");
+  const led040b = new SQL({ url: LIVE, max: 1 });
+  await led040b.unsafe(`DELETE FROM schema_migrations WHERE name LIKE '040%'`);
+  await led040b.close();
+  const unrecorded040 = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+  // Only the jit clause and the keyword estimate are missing here, so the file
+  // is named without the parenthetical about 019's clauses (review pass 3).
+  assert(/Apply db\/migrations\/040_match_thoughts_jit_off\.sql\. Then put the keyword estimate back: SELECT '\[1\]'::vector; ALTER FUNCTION search_thoughts_keyword\(text, int, int, jsonb\) ROWS 25;/.test(unrecorded040.out),
+         "…and with 040 not recorded the remedy is 040's file for the clause and the keyword ALTER beside it, which 040 cannot restore");
+  assert(!/the last definer of match_thoughts/.test(unrecorded040.out), "…without the note about 019's clauses, which hold here");
+  const unled040 = new SQL({ url: LIVE, max: 1 });
+  await unled040.unsafe(`DROP TABLE schema_migrations`);
+  await unled040.unsafe(`ALTER FUNCTION search_thoughts_keyword(text, int, int, jsonb) ROWS 25`);
+  await unled040.close();
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("040") });
+  assert(/candidate scan.*declares enable_seqscan = off and ROWS 10, search_thoughts_keyword ROWS 25 \(019\), and match_thoughts jit = off \(040\)/s.test((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE })).out), "…and everything put back is reported ok again");
+  // A server that would not compile — Supabase's, whose images have no LLVM
+  // JIT and whose upgrades set jit off; here the database's own jit off, the
+  // setting a fresh connection (preflight's) inherits — is told the missing
+  // clause costs it nothing today (review pass 4).
+  const dbJit = new SQL({ url: LIVE, max: 1 });
+  await dbJit.unsafe(`DO $j$ BEGIN EXECUTE format('ALTER DATABASE %I SET jit = off', current_database()); END $j$`);
+  await dbJit.unsafe(`ALTER FUNCTION ${MATCH_THOUGHTS_SIGNATURE} RESET jit`);
+  await dbJit.close();
+  const noJitServer = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+  assert(/candidate scan.*but not jit = off — migration 040 is not applied[^\n]*\(not on this server today: it has no JIT, or its own jit is off/s.test(noJitServer.out),
+         "on a server whose own jit is off the missing clause is still named, with the note that it costs nothing there today");
+  const dbJitBack = new SQL({ url: LIVE, max: 1 });
+  await dbJitBack.unsafe(`DO $j$ BEGIN EXECUTE format('ALTER DATABASE %I RESET jit', current_database()); END $j$`);
+  await dbJitBack.close();
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("040") });
+  assert(!/not on this server today/.test((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE })).out), "…and with the database's jit back on and 040 applied, neither the warning nor the note appears");
 
   /**
    * The other state 020's header names: an earlier migration re-applied by hand
@@ -998,8 +1077,15 @@ else {
   const reapplied033 = await run(SQL_ENV);
   assert(reapplied033.code === 0 && /atomic capture\s+the 2- and 3-argument upsert_thought present, and the 3-argument body carries 022's rule, 025's envelope and the fingerprint lock, but it is from before migration 035 \(migration 035 is not yet applied, or 033 was re-applied by hand\): a re-capture naming supersedes fills a NULL pointer without walking the chain, so a dedup can write a two-row loop, and every capture naming supersedes holds the supersession lock through its insert/.test(reapplied033.out) && /Apply db\/migrations\/035_recapture_writes_no_provenance\.sql\./.test(reapplied033.out) && !/either/.test(reapplied033.out) && !/2-argument body is not/.test(reapplied033.out),
          "033 re-applied over 035 puts the fill and the supersession lock back, and the start warns naming 035 — the cause hedged with no ledger — with the 2-argument body not mentioned");
+  // The query-log check reads the same verdict (SMD-1719): a body from before
+  // 035 answers no `existed`, so no cite row is ever logged on this brain, and
+  // the line says so rather than reporting the log as complete.
+  assert(/query log\s+present; .*Cite rows \(a write naming a returned id as its source, SMD-1719\) need migration 035's upsert_thought and will NOT be logged on this brain/.test(reapplied033.out) && /!  query log/.test(reapplied033.out),
+         "…and the query-log line warns that cite rows will not be logged under the pre-035 body");
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("035") });
-  assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, both 035's/.test((await run(SQL_ENV)).out), "…and 035 after it is the shipped pair again");
+  const shippedAgain = await run(SQL_ENV);
+  assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, both 035's/.test(shippedAgain.out), "…and 035 after it is the shipped pair again");
+  assert(/✓  query log\s+present; /.test(shippedAgain.out) && !/will NOT be logged/.test(shippedAgain.out), "…and the query-log line is ok again, without the cite warning");
   // The 2-argument form from before 005 — what the getting-started guide, the
   // fingerprint recipe's Step 2 and upstream's enhanced-thoughts schema all
   // carry — over 035's (SMD-1250): 003 re-applied is that statement. A warning

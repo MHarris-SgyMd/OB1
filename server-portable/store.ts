@@ -24,7 +24,7 @@ export type ThoughtMatch = {
   metadata: Record<string, unknown>;
   /** The raw cosine similarity — what the threshold gates. Unchanged by a recency weight. */
   similarity: number;
-  created_at: string;
+  created_at: string | null;
   /**
    * What the rows are ordered by (migration 020): `similarity` blended with
    * 0.5 ^ (age_days / half_life_days) at the call's recency weight; equal to
@@ -64,7 +64,7 @@ export type ThoughtKeywordMatch = {
   id: string;
   content: string;
   metadata: Record<string, unknown>;
-  created_at: string;
+  created_at: string | null;
   /** Case-insensitive occurrences of the needle in this thought's content. */
   occurrences: number;
   /** Matches across the whole corpus, before limit and offset. */
@@ -86,7 +86,7 @@ export type ThoughtHybridMatch = {
   id: string;
   content: string;
   metadata: Record<string, unknown>;
-  created_at: string;
+  created_at: string | null;
   /** Best of the thought's vector and its chunks; null when it has neither. */
   similarity: number | null;
   /** The needles this row contains, in query order. Empty for a vector-only row. */
@@ -124,12 +124,25 @@ export type ThoughtHybridMatch = {
  * driver has already turned it into `Date(NaN)` — or, on a parameterised
  * query, a Date whose `toISOString` is the extended-year form — before the
  * store sees it, so the SQL store hands back JS's "Invalid Date". Recovering
- * the text there means selecting `created_at::text` beside the column; that,
- * and whether NULL (the epoch, the Date(null) convention every mapper here
- * has always had) and the no-ISO-form rows should be `null` under a widened
- * type, and what the tools print for them (today "Invalid Date"), is
- * SMD-1328. `undefined` throws: the column is missing from the row, a bug in
- * the SELECT, not data.
+ * the text there would mean selecting `created_at::text` beside every column;
+ * SMD-1328 decided not to — a BC/extended-year date reaches no capture path,
+ * only a hand-written INSERT, and the two drivers disagree at the wire, so the
+ * one odd row is left as each client renders it rather than rewriting every
+ * SELECT. SMD-1328 did settle the two cases that reach the read/display path:
+ * a SQL NULL is `null`, not the fabricated epoch `new Date(null)` gave every
+ * mapper here — `normaliseListItem` takes `isoTimestampOrNull`, so `created_at`
+ * is `string | null` on the list item and the three match shapes and the
+ * record that spread it, the same widening `updated_at` and `ThoughtMeta`
+ * already carry — and the tools render a null date as absent and a no-ISO-form
+ * value as its own text, not "Invalid Date" (thoughts.ts `displayDate`).
+ * `infinity` stays a string, the value migration 020 ranks by; [3d] pins it.
+ * Two mappers stay on the old `new Date(...)` form and are SMD-1803, not this
+ * change: `derivationFields` (025's provenance walk) fabricates the epoch on a
+ * NULL ancestor, and `normaliseProposal`'s local `iso` (029's
+ * `list_supersession_proposals`) THROWS on an `infinity`-dated proposal thought
+ * — both off the list/match/get path and reachable only by a hand-INSERT.
+ * `undefined` throws: the column is missing from the row, a bug in the SELECT,
+ * not data.
  */
 export function isoTimestamp(v: unknown): string {
   if (v === undefined) throw new Error("isoTimestamp: the row has no such column");
@@ -214,7 +227,7 @@ export type ThoughtRecord = {
   id: string;
   content: string;
   metadata: Record<string, unknown>;
-  created_at: string;
+  created_at: string | null;
   updated_at?: string | null;
 };
 
@@ -222,7 +235,7 @@ export type ThoughtListItem = {
   id: string;
   content: string;
   metadata: Record<string, unknown>;
-  created_at: string;
+  created_at: string | null;
 };
 
 /**
@@ -249,7 +262,10 @@ export function normaliseListItem(r: Record<string, unknown>): ThoughtListItem {
     id: String(r.id),
     content: String(r.content),
     metadata: (r.metadata ?? {}) as Record<string, unknown>,
-    created_at: isoTimestamp(r.created_at),
+    // SMD-1328: the column is nullable, so map a SQL NULL to null rather than
+    // the epoch `new Date(null)` fabricated. See `isoTimestamp`'s header for the
+    // full decision and `thoughts.ts` `displayDate` for how the tools render it.
+    created_at: isoTimestampOrNull(r.created_at),
   };
 }
 
@@ -267,6 +283,27 @@ export function normaliseThoughtMeta(r: Record<string, unknown>): ThoughtMeta {
  * error string — the same answer whichever store is configured.
  */
 export const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * The one contract for a batch of query-log action rows, applied by BOTH
+ * writers before anything reaches a database: an absent agent — null,
+ * undefined or the empty string — is SQL NULL (034's anonymous bucket); a
+ * target must be present; and any id that is not a uuid is refused here,
+ * loudly and naming the column, rather than reaching array_in or PostgREST as
+ * a malformed value the best-effort caller would swallow with the whole batch.
+ * An eighth review pass found the SQL writer holding this rule and the
+ * PostgREST writer sending `""` through as an agent id (22P02, batch dropped);
+ * one function, one contract.
+ */
+export function normaliseActionRows(rows: QueryActionLog[]): { tool: string; agentId: string | null; targetId: string }[] {
+  return rows.map((r) => {
+    const agentId = r.agentId === null || r.agentId === undefined || r.agentId === "" ? null : r.agentId;
+    if (agentId !== null && !UUID_RE.test(agentId)) throw new Error(`logActions: not a uuid for agent_id: ${agentId.slice(0, 40)}`);
+    if (r.targetId === null || r.targetId === undefined || r.targetId === "") throw new Error("logActions: target_id is absent");
+    if (!UUID_RE.test(r.targetId)) throw new Error(`logActions: not a uuid for target_id: ${r.targetId.slice(0, 40)}`);
+    return { tool: r.tool, agentId, targetId: r.targetId };
+  });
+}
 
 /**
  * What thought_stats renders: the corpus total, its date range, and the counts
@@ -694,7 +731,8 @@ export type QuerySearchLog = {
 };
 
 /**
- * An 'action' row for the query log: a fetch/edit/delete of a returned id.
+ * An 'action' row for the query log: a fetch/edit/delete of a returned id, or
+ * (SMD-1719) a write that named it as a source — `tool` is `<writer>/<pointer>`.
  * Carries only the acting tool, the agent, and the id touched — export links it
  * back to the search that returned the id.
  */
@@ -902,14 +940,22 @@ export interface ThoughtStore {
    * when OB1_QUERY_LOG=on, and the call is best-effort: the handler swallows any
    * rejection so a log write can never fail a search, a fetch or a capture.
    * Nothing reads them on the hot path — the export tool reads the table offline.
-   * `logSearch` records one search call and the ids it returned; `logAction`
-   * records a later fetch/edit/delete of a returned id. They are NOT joined at
+   * `logSearch` records one search call and the ids it returned; `logActions`
+   * records, in one statement, the later fetch/edit/delete rows of returned
+   * ids and the rows of a write that cited them (`<writer>/<pointer>`,
+   * SMD-1719) — the one writer of action rows. They are NOT joined at
    * write time (there is no request token in the handlers); export links them by
    * (agent, id, window). A store on a schema before 034 will reject — that is
    * why the calls are guarded and swallowed, not why they are skipped.
    */
   logSearch(row: QuerySearchLog): Promise<void>;
-  logAction(row: QueryActionLog): Promise<void>;
+  /**
+   * The action rows of one call in one round trip — a fetch's single row, an
+   * edit's opened row beside its cite, a capture's cite per source (SMD-1719).
+   * One writer for every action row, so there is one INSERT shape per store
+   * to keep right; an empty list writes nothing.
+   */
+  logActions(rows: QueryActionLog[]): Promise<void>;
 
   close(): Promise<void>;
 }

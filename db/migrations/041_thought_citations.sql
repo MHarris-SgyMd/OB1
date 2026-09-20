@@ -128,10 +128,11 @@
 --   same shape (fourth review pass).
 --
 -- Callers that delete around delete_thought
---   Three vendored servers issue a raw `.delete()` on thoughts —
+--   Three vendored servers issue a raw `.delete()` on thoughts at four sites —
 --   integrations/rest-api's dedup merge (after it has already rewritten the
---   survivor's metadata and logged the merge), integrations/delete-thought-mcp
---   and integrations/open-brain-rest. Each now meets the guard as a bare OB001
+--   survivor's metadata and logged the merge) and its delete route,
+--   integrations/delete-thought-mcp and integrations/open-brain-rest. Each now
+--   meets the guard as a bare OB001
 --   message with no detach path, the way every raw writer met 008's rule.
 --   Routing them through delete_thought is SMD-1793 (as SMD-1228 and SMD-1524
 --   did for the writers of content); nothing here changes them.
@@ -415,7 +416,7 @@ COMMENT ON FUNCTION thought_facet_active(thought_facets) IS
 -- the citations on thoughts this statement deletes are gone when this runs.
 -- An explicit `f.thought_id NOT IN (SELECT id FROM deleted)` was written to
 -- say so and removed: its mutant passed every check, which makes it a clause
--- that is not a mechanism (test-schema [39] holds the together-delete case).
+-- that is not a mechanism (test-schema [40] holds the together-delete case).
 --
 -- The guard judges the state the statement LEAVES. Deleting the thought that
 -- carries a replacing citation in the same statement as the source revives the
@@ -423,7 +424,7 @@ COMMENT ON FUNCTION thought_facet_active(thought_facets) IS
 -- the statement is refused — after it, that note would rest on nothing, which
 -- is the question the guard asks. That SET NULL fires AFTER this trigger, so
 -- thought_facet_active reads whether the superseder still exists rather than
--- whether the pointer is null ([39] holds the case both ways).
+-- whether the pointer is null ([40] holds the case both ways).
 --
 -- The citing rows are read under a row lock (FOR NO KEY UPDATE) before
 -- anything is decided: each row's status comes from the version the lock won,
@@ -588,7 +589,7 @@ DECLARE
   -- The mode as the caller's transaction had it, put back after the DELETE:
   -- p_detach is this call's, not the transaction's, so a raw DELETE later in
   -- the same transaction meets the guard's default (or the caller's own
-  -- setting) and not this call's choice (first review pass; [39] holds it).
+  -- setting) and not this call's choice (first review pass; [40] holds it).
   v_prev_mode text := current_setting('ob1.cited_delete', true);
   -- The running totals as the caller's transaction has them, read before and
   -- subtracted after: the guard ADDS to them, a refusal's rollback undoes its

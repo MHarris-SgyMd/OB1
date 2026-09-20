@@ -15,7 +15,7 @@
  */
 
 import { SQL } from "bun";
-import { createAssert, resetSchema } from "../db/test-support.ts";
+import { createAssert, plantLegacyRow, resetSchema } from "../db/test-support.ts";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -498,9 +498,102 @@ console.log("\n[10] query log: a search and its follow-up fetch, recorded and jo
       FROM query_log act WHERE act.kind='action'`;
   assert(joined[0]?.from_query === "gamma", `the export join ties the fetch back to its search (${JSON.stringify(joined[0])})`);
 
+  // SMD-1719: a capture that cites the returned id — derived_from — is the
+  // caller USING the result in a write, and is logged as an action row with
+  // tool `capture_thought/derived_from` and the cited id as target, one per id
+  // named. A capture that cites nothing writes no action row. The same join
+  // attributes the cite to the search that returned the id, so
+  // eval-utilization.ts can count it as "cited" beside the fetch's "opened".
+  const built = await call("capture_thought", { content: "a note built on the gamma note", derived_from: [hitId!] });
+  const builtId = built.match(/id ([0-9a-f-]{36})/)?.[1];
+  await call("capture_thought", { content: "an unrelated note that cites nothing" });
+  const cites = await qlog<{ tool: string; target_id: string }[]>`
+    SELECT tool, target_id FROM query_log WHERE kind = 'action' AND tool LIKE '%/%'`;
+  assert(cites.length === 1 && cites[0].tool === "capture_thought/derived_from" && cites[0].target_id === hitId,
+    `the citing capture logged one action row for the id it named, under <writer>/<pointer> (${JSON.stringify(cites)})`);
+  let actionCount = (await qlog<{ n: number }[]>`SELECT count(*)::int AS n FROM query_log WHERE kind = 'action'`)[0].n;
+  assert(actionCount === 2, `the non-citing capture logged nothing: fetch + cite = 2 action rows (${actionCount})`);
+  const citeJoined = await qlog<{ from_query: string | null }[]>`
+    SELECT (SELECT s.query FROM query_log s
+             WHERE s.kind='search' AND s.agent_id IS NOT DISTINCT FROM act.agent_id
+               AND s.logged_at <= act.logged_at AND s.result_ids @> ARRAY[act.target_id]
+             ORDER BY s.logged_at DESC LIMIT 1) AS from_query
+      FROM query_log act WHERE act.kind='action' AND act.tool = 'capture_thought/derived_from'`;
+  assert(citeJoined[0]?.from_query === "gamma", `the cite attributes to the search that returned the id (${JSON.stringify(citeJoined[0])})`);
+
+  // A cite row is a pointer the database ACCEPTED. A re-capture of existing
+  // text writes no pointer (035) and validated none, so it logs no cite even
+  // when it names one — the reply's note sends the caller to update_thought,
+  // and THAT edit, which writes the pointer, logs the cite under its own
+  // writer: `update_thought/supersedes` for the superseded id, beside the
+  // plain `update_thought` row for the edited id.
+  const recapture = await call("capture_thought", { content: "a note built on the gamma note", supersedes: hitId! });
+  assert(/already captured as/.test(recapture) && /not written/.test(recapture), "a re-capture naming a pointer says the pointer was not written");
+  actionCount = (await qlog<{ n: number }[]>`SELECT count(*)::int AS n FROM query_log WHERE kind = 'action'`)[0].n;
+  assert(actionCount === 2, `…and logs no cite for a pointer it did not write (${actionCount})`);
+  await call("update_thought", { id: builtId!, supersedes: hitId! });
+  const editRows = await qlog<{ tool: string; target_id: string }[]>`
+    SELECT tool, target_id FROM query_log WHERE kind = 'action' AND tool LIKE 'update_thought%' ORDER BY tool`;
+  assert(editRows.length === 2 && editRows[0].tool === "update_thought" && editRows[0].target_id === builtId && editRows[1].tool === "update_thought/supersedes" && editRows[1].target_id === hitId,
+    `the edit that writes the pointer logs the edited id as opened and the superseded id as cited (${JSON.stringify(editRows)})`);
+
   await qlog`DELETE FROM query_log`;
   await qlog`DELETE FROM thoughts`;
   await qlog.close();
+}
+
+console.log("\n[11] Undated and infinity rows render through the tools without a fabricated date (SMD-1328)");
+{
+  // The corpus is empty here (the section above wiped it). Plant the two rows
+  // only a direct INSERT can make — a NULL created_at and an infinite one — and
+  // drive the two tools that print a date: list_thoughts (the [date] prefix)
+  // and fetch (the title). Neither may print 1/1/1970 or "Invalid Date".
+  const sql = new SQL({ url: URL_, max: 1 });
+  const axis = (i: number) => { const a = new Array(EMBEDDING_DIM).fill(0); a[i] = 1; return "[" + a.join(",") + "]"; };
+  const undatedId = await plantLegacyRow(sql, "an undated e2e thought", axis(0), null);
+  const infinityId = await plantLegacyRow(sql, "an infinity-dated e2e thought", axis(1), "infinity");
+  try {
+    const listed = await call("list_thoughts", { limit: 10 });
+    assert(!/1970/.test(listed) && !/Invalid Date/.test(listed), `list_thoughts prints no fabricated date (${listed.replace(/\n/g, " ⏎ ")})`);
+    assert(/\[undated\]/.test(listed), "the undated row shows [undated], not a date");
+    assert(/\[infinity\]/.test(listed), "the infinity row shows [infinity], its own text");
+
+    const undated = JSON.parse(await call("fetch", { id: undatedId }));
+    assert(/^Open Brain/.test(undated.title) && !/1970/.test(undated.title), `fetch titles an undated thought "Open Brain …", not the epoch (${undated.title})`);
+    assert(undated.metadata?.created_at === null, `fetch's created_at metadata is null for an undated row (${JSON.stringify(undated.metadata?.created_at)})`);
+
+    const inf = JSON.parse(await call("fetch", { id: infinityId }));
+    assert(inf.title.startsWith("infinity - ") && !/Invalid Date/.test(inf.title), `fetch titles an infinity thought with its own text (${inf.title})`);
+    assert(inf.metadata?.created_at === "infinity", `fetch's created_at metadata keeps "infinity" (${JSON.stringify(inf.metadata?.created_at)})`);
+
+    // The thought_stats range is the fifth renderer. min/max skip the NULL row
+    // (024), so the range over this corpus is the infinity row on both ends —
+    // it must read "infinity", not "Invalid Date" (the pre-fix new Date() form).
+    const stats = await call("thought_stats");
+    const rangeLine = stats.split("\n").find((l) => l.startsWith("Date range")) ?? "";
+    assert(/infinity/.test(rangeLine) && !/Invalid Date/.test(rangeLine) && !/1970/.test(rangeLine),
+           `thought_stats renders the infinity range as text, not Invalid Date/1970 (${JSON.stringify(rangeLine)})`);
+
+    // The two remaining renderers are the `Captured:` lines of search_thoughts
+    // and search_thoughts_keyword. Every other search in this suite runs over
+    // dated rows, where displayDate and the pre-fix new Date() agree — so drive
+    // both tools over the planted rows here, or a revert ships silently. The
+    // negatives avoid a bare /1970/ (a hex uuid could carry those digits): the
+    // fabrications are "Invalid Date" (infinity) and a digit right after
+    // "Captured: " (the epoch), neither of which a correct render produces.
+    const kwInf = await call("search_thoughts_keyword", { query: "infinity" });
+    assert(/Captured: infinity/.test(kwInf) && !/Invalid Date/.test(kwInf),
+           `search_thoughts_keyword renders the infinity row's date as its own text (${kwInf.replace(/\n/g, " ⏎ ")})`);
+    const kwUndated = await call("search_thoughts_keyword", { query: "undated" });
+    assert(!/Captured:/.test(kwUndated) && !/Invalid Date/.test(kwUndated),
+           `search_thoughts_keyword omits the Captured line for the undated row (${kwUndated.replace(/\n/g, " ⏎ ")})`);
+    const stBoth = await call("search_thoughts", { query: "infinity", threshold: -1 });
+    assert(/Captured: infinity/.test(stBoth) && !/Invalid Date/.test(stBoth) && !/Captured:\s*\d/.test(stBoth),
+           `search_thoughts renders the infinity row's date as text and never fabricates one for the undated row it also returns (${stBoth.replace(/\n/g, " ⏎ ")})`);
+  } finally {
+    await sql`DELETE FROM thoughts WHERE id = ${undatedId}::uuid OR id = ${infinityId}::uuid`;
+    await sql.close();
+  }
 }
 
 server.stop();

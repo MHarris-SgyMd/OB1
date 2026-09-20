@@ -68,14 +68,14 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Eighty-eight numbered changes on top of the pin. Seven fix defects found in an
+Ninety-one numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
-data layer (Phase 2). Nine (changes 31, 53, 55, 59, 79, 82, 86, 87 and 88) ship no runtime change at
+data layer (Phase 2). Ten (changes 31, 53, 55, 59, 79, 82, 86, 87, 88, and 89) ship no runtime change at
 all: each is a measurement that decided against building something.
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–88 are the numbered `###` sections** further down, which is
+sections. Changes **18–92 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -203,6 +203,8 @@ extensions/test-tools.ts         # change 77 (new file — every tool of the fiv
 db/test-bench-reuse.ts           # change 76 (new file — the kept bench corpus's oracle cache held to the computation, on one index)
 db/bench-oracle.ts               # change 76 (new file — the cache's pure part: what of a marker's entry a run may trust; test-schema [37])
 db/migrations/039_*.sql          # change 81 (new file — the two HNSW indexes over embedding::halfvec under their names; match_thoughts' walk branches order by the cast)
+db/migrations/040_*.sql          # change 91 (new file — 039's match_thoughts with `SET jit = off`; a disabled planner path no longer JIT-compiles the gate's sample)
+db/migrations/041_*.sql          # change 92 (new file — thought_facets, the citation guard on thoughts, delete_thought(uuid, jsonb, boolean), record_citation)
 evals/eval-quant.ts              # change 81 (new file — vector, halfvec and binary-with-rerank measured on real vectors at the shipped width; test-schema [38], test-upgrade [16])
 <4 vendored MCP servers, 1 sample> # change 78 (a McpServer built per request — per session in the cost recipe's after sample — in place of one shared and connect()ed to a fresh transport each time)
 <17 pin sites, 3 lockfiles>      # change 83 (@hono/mcp 0.1.1 → 0.1.5: the transport lets go of each POST it has answered; the after sample's sweep closes the transports it drops)
@@ -410,8 +412,9 @@ nothing else:
   migration 012), `getThought` / `listThoughts` / `countThoughts` /
   `statsSummary` / `pageThoughtMeta`, `resolveAgent` and the work-claim tables
   (SMD-946), `traceProvenance` / `findDerivatives` / `supersededAmong` /
-  `listSupersessionProposals` (migrations 025/029), `logSearch` / `logAction`
-  (the query log, SMD-1295, migration 034), and every non-vector table:
+  `listSupersessionProposals` (migrations 025/029), `logSearch` / `logActions`
+  (the query log, SMD-1295, migration 034; the one writer of action rows since
+  change 90), and every non-vector table:
   `thought_audit`, `thought_work_claims`, the entity tables, `ob1_config`.
 
 The split is the point: the store holds one column of one table plus the
@@ -12491,8 +12494,9 @@ a real Postgres before the file was written.**
   too (85 ms against 81). A function-level `SET jit = off` removes all three
   (measured) but also changes what the walk pays under a generic plan, which
   is SMD-1464's question; pinning the two `enable_*` GUCs on the function
-  overrides an operator's setting for the walk as well. The decision is
-  SMD-1624; the header states the premise. Row-level security on `thoughts`
+  overrides an operator's setting for the walk as well. The decision was
+  SMD-1624 (done: migration 040, change 91 — `SET jit = off` on the
+  function); 038's header states the premise. Row-level security on `thoughts`
   is a fourth trigger, and the one operators actually set: `jsonb_contains`
   is not leakproof, so under a policy `metadata @> filter` cannot be an index
   qual and 014's collection and the walk's direct CTE become sequential scans
@@ -12702,7 +12706,7 @@ the line for the next preflight change. The threshold, the plan mode of the
 *walk* statement (which flips onto a generic plan under a recency weight at
 the ceiling and changes answers; change 70's "Not done here") and the seeded
 bounds are SMD-1464; `ef_search` on real vectors SMD-1465. The `hit_pages ≥
-4` knob is stated, not turned. The disabled-path JIT premise is SMD-1624; row-level security, which has cost `@>` its index since 014 and is a fourth trigger of the same JIT, is SMD-1625. A hundred million rows was not run, for the
+4` knob is stated, not turned. The disabled-path JIT premise was SMD-1624 (done: migration 040, change 91); row-level security, which has cost `@>` its index since 014 and is a fourth trigger of the same JIT, is SMD-1625. A hundred million rows was not run, for the
 reasons change 28 gives; what this change establishes is that the sample's
 cost no longer depends on it. The bench's before arm (`OB1_BENCH_UPTO=037`)
 does not combine with a kept corpus — change 72's rule: a corpus built under
@@ -12761,7 +12765,7 @@ x/20 − y/20 wrong for 52 exact deltas). What changed the documents: the
 "no JIT at any size" premise (a disabled planner path adds `disable_cost`
 and JIT-compiles the sample on every call, 41 ms against 0.46 — SMD-1624, the
 decision between `SET jit = off` and pinning the paths, since either touches
-the walk); row-level security as a fourth trigger, pre-existing since 014
+the walk; done: migration 040, change 91); row-level security as a fourth trigger, pre-existing since 014
 (`jsonb_contains` is not leakproof, 150 ms against 7 — SMD-1625); "every
 page in `shared_buffers`" corrected to the OS page cache (the larger two
 heaps never fit the image's 128 MB; change 70's sentence carried the same
@@ -13847,8 +13851,6 @@ product.)
 
 **Upstream status:** not applicable — the store comparison is this fork's eval.
 
-
-
 ### 88. The knowledge-update slice was already reported and is the best one — and the number cannot see the failure MERIT means: the shipped read puts the stale value first on half the questions, and the resolving read, fed perfect chains, fixes that by changing what counts as relevant (SMD-1720)
 
 SMD-1720 read MERIT's hardest tier — a fact updated later, embedding retrieval
@@ -13967,7 +13969,923 @@ now checked.
 
 **Upstream status:** not applicable — the eval is this fork's.
 
-### 91. A thought cited as a source cannot be deleted from under the citation — `thought_facets` with one kind, a statement-level guard on `thoughts` that refuses with its own SQLSTATE, `delete_thought` answering it as a value with the citing rows named, and a detach opt-in (SMD-1712)
+
+
+### 89. GraphRAG as an expansion/rerank stage, measured on the *typed* graph and beyond recall — not a substitute and not an everyday stage over a vector already at ceiling, but a real recall complement exactly where a single vector pass runs short (SMD-1738)
+
+Change 31 (SMD-948) declined GraphRAG on a head-to-head: vector recall@10 0.98, graph
+0.51 over twenty-seven hand-labelled questions. But that raced the graph as a
+**substitute** — the recall tier doing the whole match, seeding its own entities from the
+question — the substitute-vs-complement error change 87 (SMD-1707) named. A graph is
+rarely a good recall tier and might be a good **expansion/precision** stage: pull the
+neighbours of the *vector* hits along the change-30 entity edges and rerank the union.
+This measures that shape, on the same `eval-graphrag.ts` corpus and labelled gold. Like
+changes 31, 53, 55, 59, 79, 82, 86, 87 and 88 it ships no runtime change; the numbers are
+in evals/README.md, under "GraphRAG…".
+
+`eval-graphrag.ts` gains a **composed arm** (vector coarse recall K′ → seed the graph from
+*those* hits' entities → expand `hops` over `ob1_entity_edges` → symmetric-RRF rerank the
+union) and, because a first pass flattened the graph, a **comp-typed** arm that uses the
+graph's real structure: a *typed, weighted* walk (undirected traversal) weighting each hop by a
+pre-registered relation prior (a `depends_on`/`uses` edge carries more relevance than a
+`co_occurs_with` one), the edge's evidence support (a saturating `support/(support+5)`) and its confidence,
+propagated as decaying spreading activation. A **comp-cos** control orders the union by
+cosine only. The **pre-registered bar** (SMD-1038 posture, committed before the numbers):
+build iff multi-hop recall lifts ≥ 0.05 over vector AND recovers more than it breaks AND
+does not cut aggregate recall — checked on every cell of the K′×hop sweep, so a FAIL means
+no cell cleared all three.
+
+**Recall, against a full-budget vector: the bar FAILS, because vector is already at
+ceiling.** Vector gets multi-hop recall@10 **1.00** (601 issues, 1024-dim, 27 questions);
+the substitute graph reproduces change 31 at **0.43**. The best composed cell scores
+**0.89** multi-hop — below vector — and **recovers 0** of vector's answers. The control
+says why: **comp-cos ties vector exactly (1.00)** — pooling the graph-reached thoughts
+loses nothing and adds nothing, vector already held every answer, so the rerank can only
+subtract. **Using the real typed edges makes the rerank gentler** — comp-typed lifts recall
+over the untyped walk (0.89 → 0.95 all, multi-hop **0.98**) and ranking (all-question nDCG 0.73 → 0.77; multi-hop 0.69 → 0.75)
+by weighting the graph score down where the edge is weak, so it preserves more of vector's
+order — but it still **cannot exceed** a ceiling'd vector (comp-cos = vector). So the
+flattening cost some recall, and the ceiling caps even the typed version.
+
+**But recall is one axis, and the ceiling is a property of the *question set*, not of the
+graph. On the axes a graph is built for, the picture turns.**
+
+- **Recall-complement under a starved vector budget — the finding.** Constrain the vector
+  coarse budget b and the edge-aware graph becomes a real recall tier: at **b = 1** vector
+  alone gets recall@10 **0.35** and the composed stage **0.83** (**+0.48**; multi-hop 0.42
+  → 0.85), at b = 3 0.78 → 0.90, crossing over only at b ≈ 10 where vector reaches its
+  ceiling (0.97 → 0.95). That is exactly the regime change 87 found a single ANN falls
+  into *at scale* — recall degrades and the second tier recovers it. The ceiling here hides
+  it; a corpus or scale where vector is not saturated does not.
+- **Relational structure a vector pass cannot see.** Of 3,000 issue pairs joined by a
+  strong typed edge (`depends_on`/`uses`), **95%** have the linked sibling *outside* the
+  issue's vector top-10 — a large store of relational neighbours only the graph reaches
+  (the raw material the scarcity probe turns into recovered recall). Descriptive: the graph
+  both defines and answers the link, so it measures vector's blind spot, not a scored win.
+- **Exact entity-membership** applies to only 5 of the 10 needle questions — the rest are
+  literal-string aggregations (`Decision:`, `Promote`), keyword's job. On the 5 that name
+  an entity the extracted graph trails (0.18 vs vector 0.97), limited by change-30's
+  extraction coverage (most entities are mentioned once). The set poses few true
+  entity-membership or relational queries — the same shape-of-question gap change 31 named.
+
+**Scale (synthetic, latency only).** A synthetic typed graph times the expansion stage
+alone. It is **not** K′-bounded as written: at 1M (6M mentions) a ~2.0 s floor at K′=10
+rising to ~5.0 s at K′=1000/2-hop, and at 10M (30M mentions, lighter density) a ~7 s floor essentially FLAT across K′=10–1000 (11.3 s only at K′=1000/2-hop) — the df scan tracks the mention count, not K′ — dominated by the per-call `df` full scan
+over every mention (the change-31 walk recomputes document frequency each call). Rows-read
+bounded ≠ wall-clock bounded (change 87); a **materialized `df`** refreshed on write is the
+prerequisite for the stage to scale, and the typed pass adds the `edge_w` aggregate cost on
+top. So the mechanism needs a standing df table before the scarce-recall regime it wins in
+is reachable in production.
+
+**Verdict — not a substitute, not an everyday stage, a *conditional* tier.** Against a
+healthy full-budget vector on ordinary questions the graph stage does not pay (bar FAILS;
+ceiling). But where vector recall is *scarce* — deep scale, a tight ANN budget, relational
+or entity-membership questions this corpus barely poses — the edge-aware graph is a real
+recall/precision complement, the recall tier to Postgres/vector's precision tier that
+change 87 framed. This sharpens change 31's "do not build" rather than overturning it: not
+built, and a product path is a **scale-regime test** away (SMD-1038 posture), not a
+here-and-now build.
+
+**Forward-looking — truthiness, lineage, and edges that carry relevance.** The value seen
+here comes from the edges' *type and support*; their `confidence` is nearly uniform (a weak
+signal), and **lineage/supersession is absent** from the Linear corpus — that is the fork's
+claim-log machinery (SMD-1729) and trust labels (SMD-1724), not this eval's data. Carrying
+trust, lineage and recency *dynamically* on the edges — relevance as continuous-time
+diffusion over a typed/weighted/temporal graph, a CfC/liquid-network shape — is where this
+points; the static edge-aware expansion here is the discrete first step, and it would need
+the claim-log lineage and trust labels the fork has scoped but not built to become the
+dynamic version. (LanceDB/graph aside: the entity graph is this fork's own change 30, an
+eval dependency, not the product.)
+
+**Upstream status:** not applicable — the graph and its eval are this fork's.
+
+### 90. A capture that cites a returned id is logged as a use of it, and `eval-utilization.ts` reads the query log for the layer every other number here skips — did the caller use what came back (SMD-1719)
+
+Every retrieval number in this file asks whether the right rows came back.
+MERIT (arXiv 2609.05441, September 2026) measured the next layer — whether a
+retrieved fact changed what the agent did — and found agents ignore 45–53% of
+correctly retrieved facts, even under full replay; MemoryArena found models
+near-perfect on LoCoMo fall to 40–60% when later subtasks depend on earlier
+ones. The evaluation stack the literature now asks for is four layers: evidence
+retrieval, evidence use, task outcome, cost. The fork had the first (every
+`evals/` harness) and the fourth (tokens priced on every decision), and no
+number for the second.
+
+**What the log already had, and what it lacked.** Migration 034 (change 65)
+records a `search` row per call with the ids returned and an `action` row when
+the same agent fetches, edits or deletes a returned id — click-through
+relevance: the caller *looked*. It did not record the one act that says the
+fact reached a write: a later capture naming the id as its source. `derived_from`
+(025) and `supersedes` on `capture_thought` are exactly that act, and they
+were not logged.
+
+**What changed.** No migration. 034's `tool` column is free text and its
+`action` shape needs only a target, so a write that names a returned id as its
+source now logs one action row per id, target the cited id, tool
+`<writer>/<pointer>` — `capture_thought/derived_from`,
+`capture_thought/supersedes`, `update_thought/supersedes` — under the same
+`OB1_QUERY_LOG=on` flag, best-effort like every log write, the rows for one
+call in one `INSERT` (`logActions`, the one writer of action rows — a fetch's
+single row, a forty-source synthesis, an edit's opened row beside its cite —
+so each store has one INSERT shape to keep right; a single-row twin existed
+for two passes and was removed as a parity obligation with no reader), the
+batch's contract one function both stores call before anything reaches a
+database — `normaliseActionRows`: an absent agent (null, undefined, `""`) is
+SQL NULL, a target must be present, any id that is not a uuid is refused by
+column name rather than reaching `array_in` or PostgREST as a value the
+best-effort caller would swallow with the whole batch (a fifth pass found the
+agent column bound through a text sentinel, a sixth the target column trusted
+while the agent column was checked, an eighth the PostgREST writer sending
+`""` through as an agent id and dropping the batch on the 22P02) — ids
+lower-cased before the dedup (`UUID_RE` admits either case; two spellings are
+one cite). A cite row is written for every id a write names, whether or not a
+search returned it; the link to a search is made when the log is read. **A cite row is a pointer the
+database accepted**, which is what makes it a use and not a wish: on a fresh
+row `upsert_thought` validated every id (a ghost or a loop threw, and nothing
+was logged); on a re-capture 035 wrote no pointer and validated none, so nothing
+is logged there either — the reply's note sends the caller to `update_thought`,
+and that edit, which writes the pointer, logs the cite under its own writer.
+The guard is `existed === false`, the store's affirmative "fresh row" from
+035's function: a brain at 034 without 035 reports no flag, and logs no cite,
+because there the pointer's fate is unknown (a second pass caught `!== true`
+reading the absent flag as fresh). Preflight's `query log` check says so on
+such a brain, and reads whether the body is 035's from the verdict the
+`atomic capture` check already reached over the sentinel that body declares
+— one detector, not a second grep of the same source for the word `existed`
+(a seventh pass); over PostgREST it is a skip naming both facts.
+(The first cut logged on the *act* of citing and a review pass found it would
+have counted a ghost or self-pointer a re-capture never checked.) The tool
+column now tells two kinds of use apart by its shape alone:
+
+- **cited** — `<writer>/<pointer>`: a write named the id as a source and the
+  pointer was written (MERIT's memory-utilization signal). A new writer that
+  cites names itself the same way and is counted without a code change.
+- **opened** — a plain tool name, `fetch`, `update_thought`, `delete_thought`:
+  the caller went and looked at, or touched, the row (034's click-through).
+
+One consequence for change 65: the export's `relevant` label is every action
+row, so a cite now counts as click-through relevance too — the stronger label,
+and the export's note says so. 034's table `COMMENT` still describes an action
+as a fetch, edit or delete; a migration's text is not edited after the fact
+(the ledger would read it as drift), so the server, store, preflight and README
+carry the new shape and the `COMMENT` predates it.
+
+`evals/utilization.ts` is the pure part: 034's attribution rule (most recent
+prior search by the same agent, within the window, whose results held the id; a
+NULL agent its own bucket — the export's join in TypeScript, and since a ninth
+pass the export's own implementation too: `export-queries.ts` reads the same
+two row sets and calls `attribute()`, so the fixture's labels and the report's
+uses are one rule by construction rather than two kept in step by hand;
+compared at the
+log's own microsecond grain when read from the log, since a JS `Date` is
+milliseconds and two rows under a millisecond apart would order differently in
+the two; a fixture in whole minutes is unaffected), then per arm (the search tool and its
+recorded arguments), per agent when the log holds more than one — named from the registry (`ob1_agents.label`, 010) with the id's prefix beside it — and overall: distinct ids returned, ids used
+(distinct per search), **utilization** = used / returned, **use rate** =
+searches with at least one use, the cited / opened **partition** of used (an
+id that reached a write is cited even if it was also fetched; opened is what
+was only looked at; the two sum to used, so cited / used is the share of use
+that reached a write — a fourth pass found the first cut counted an id in
+both), and **tokens per used
+id** — approximate, the returned ids' content as stored *now* at four
+characters a token, over the searches that carry an estimate — MERIT's
+cost-adjusted marginal utility in this fork's units. With a gold map (a
+hand-labelled fixture in `export-queries.ts`'s shape), the **ignore rate**:
+searches whose results held a relevant id the caller never used.
+`evals/eval-utilization.ts` reads the log from `DATABASE_URL` and prints it.
+
+**What the report refuses to print.** With no action rows at all it says `n/a`
+and asks whether the log is on, rather than 0% over an empty join — the mutant
+[39] runs: drop the cite rows and cited reads 0 and utilization falls to the
+opened-only share, so the number is measuring the cites and not something that
+would survive their absence. Actions that attribute to no search (a touch
+outside the window, an id no search returned) are counted and shown, not
+dropped. Nothing changes ranking: the number first. On a brain the log
+table is not on (034 not applied) both readers refuse in their own words —
+"query_log is not present", apply 034, turn the log on — exit 2, where a sixth
+pass found each dying in the driver on its first query (`relation "query_log"
+does not exist`, a stack trace) while preflight's own check says it plainly;
+the check is one shared helper, `evals/query-log.ts`'s `requireQueryLog`.
+
+**Not done here.** A typed `pointer` column on `query_log` in place of the
+`<writer>/<pointer>` convention in the free-text `tool` (a second review pass
+proposed it): declined. MCP tool names cannot contain a slash, so the
+convention cannot collide with a tool; the typed field for *what a write
+cited* belongs on the event itself, which is SMD-1730's event shape (Phase 1
+of SMD-1729), not a column bolted onto 034 now. The column's own `COMMENT`
+still describes three plain names; re-commenting it through a new migration,
+as 028 did for the claim table, is **SMD-1749** (a third pass proposed it;
+a second mechanism for this PR).
+
+An `update_thought` that re-sends the pointer
+the row already holds logs a cite although nothing changed (a third pass):
+kept. `used` is a set per search, so a retry inside one search's window counts
+once; a re-send after a *new* search that returned the id is that search's
+result reaching a write, which is what the number asks; and telling a
+confirmed pointer from a written one needs 032's function to return the prior
+value, a migration, and would undercount the confirmations SMD-1736 wants to
+see.
+
+A `supersedes` cite labels the *superseded* row as relevant in the
+export's fixture (a sixth pass): kept. That row is what the searcher needed in
+order to correct it, so the search that surfaced it did its job; the fork
+labels superseded rows at read time and does not demote them (SMD-1720, change 88), and
+a click-through label is bound to the corpus at export time in any case —
+`eval-replay.ts` reads `baseline` beside `relevant` for that reason. Labelling
+the superseder too would need the fixture to follow `thoughts.supersedes` at
+export, a different fixture; the README says which row the label names.
+
+Gating the cite on 035's flag rather than on
+"a pointer was written" (a seventh pass): on a brain at 025–034 a fresh
+3-argument capture does validate and write `derived_from`, and logs no cite
+here. Kept: before 035 the function wrote pointers on a re-capture too (the
+NULL fill 035 removed) and answered nothing about which path it took, so the
+store cannot tell a written pointer from a filled or ignored one there; the
+shipped schema is 035's (the `atomic capture` check warns on every earlier
+body and names the file), and the gap is said twice — by preflight and by
+the report.
+
+Per-*model* arms: the log does
+not record the embedding model a search ran under, and 034's `filter` column
+is dead on `search_thoughts` (SMD-1490) — whether to carry the arm there or in
+a column is that ticket's call. A read whose use ends in prose to the user, with no write and no fetch,
+is invisible to this log, so utilization here is a **lower bound** on use and
+the ignore rate an upper bound; the write-path eval (SMD-1713) is where a
+planted fact's survival becomes observable. A fixture exported from this log's
+own touches is circular as gold (its `relevant` IS the touches); the honest gold
+is a hand-labelled set. SMD-1737's four-layer report consumes this as layer 2.
+
+**Verified.** `db/test-schema.ts` [39] drives the pure module over hand-made
+rows: attribution by agent, window and recency; the cited/opened split; the
+rates; tokens per used id over searches with an estimate; the no-cites mutant;
+the gold ignore rate; the `n/a` rule; the rendered table.
+`server-portable/test-e2e-sql.ts` [10] extends 034's section: a capture with
+`derived_from` after a search writes one `capture_thought/derived_from` row for
+the id it named and a plain capture writes none; the join attributes the cite
+to the search that returned the id; a re-capture naming a pointer logs no cite
+(the pointer was not written); the `update_thought` that then writes it logs
+the edited id as opened and the superseded id as cited. A run with the cite
+logging removed fails exactly those assertions and nothing else. The bucketed
+attribution was checked against a naive reading of the rule on 400 random logs
+(distinct timestamps, three agents including NULL, five tools, three windows):
+no mismatch.
+
+The report script was run against a throwaway Postgres with a
+seeded log: the anonymous fetch of an id its search never returned is the one
+unattributed action, tokens per used id came out at exactly what the seeded
+content lengths predict, and the gold arm read 0% ignored where the relevant
+id was cited and n/a where it was never returned. The SQL writer was probed
+against Postgres with an empty batch, a NULL agent, a tool name carrying a
+quote and a backslash, and forty rows; a mutant that keeps only the first row
+of a batch fails exactly the assertion that reads the second and nothing else.
+`test-store-sql.ts` [11] drives the SQL writer's own contract: a batch of three
+in one statement, an undefined and an empty-string agent landing as SQL NULL,
+and a malformed agent, a malformed target and an absent target each refused by
+column before the statement with nothing written (a fifth pass found the
+agent column bound through a text sentinel; a sixth found the target column
+trusted while the agent column was checked).
+`test-store-postgrest.ts` [11] drives the PostgREST writer — the hosted
+deployment's path — through the shim: an empty batch, a batch of one and of
+three, a NULL agent, the cite tool through the array insert, and 034's join
+over what it wrote. Writing that section found a pre-existing shim gap: the
+PostgREST store's `logSearch` fails through `compat/supabase-sql` when
+`result_scores` carries a null element, which the server sends for a
+score-less hit — so a shim-backed deployment can log no search row for such a
+call, silently. Filed on SMD-1602; [11] seeds its search row by SQL and says
+why. Two searches seeded 400 µs apart both
+returning one id, then a fetch: the export's SQL join (as it then was) and the
+report both credit the later search; the millisecond fallback credits the
+earlier one, which is the disagreement `at_us` exists to close. The
+database-row coercions the report relies on (bigint as string, the uuid
+literal, a partly deleted result set, `at_us`, a `real`'s float noise) are
+driven in [39] without a database, since no CI job runs the report itself.
+The number's definition was checked as invariants over 600 random logs with
+duplicate ids, retried actions, an unknown tool, partial token estimates and
+gold on some queries: cited + opened = used at every grain, utilization in
+[0, 1], the per-arm and per-agent tables sum to the overall row, the estimate
+is null exactly when its stated condition holds, and the rendered `all` row
+carries the overall numbers.
+
+The operator's path was walked end to end as a
+separate process — the Dockerfile's entrypoint (`bun preflight.ts && exec bun
+index.ts`) against a throwaway Postgres with a stub provider on a port and
+`OB1_QUERY_LOG=on`, tool calls over HTTP (three captures, a search, a capture
+citing two returned ids, a second search, a fetch, an edit that supersedes, a
+re-capture naming a pointer), then both readers: the report's used set per
+search equals the export's `relevant` per query, the counts match a hand tally
+of the log rows (7 distinct returned, 4 used, 3 cited, 1 opened), preflight
+reads the log as present and on before and after, and the same walk on an
+empty log prints `n/a`, on an opens-only log the 035 warning, and with the
+table absent the refusal above.
+
+The hosted path was walked the same way (a
+seventh pass): the server with `OB1_STORE=postgrest` — the default store —
+and its real supabase-js client, through a prefix-stripping proxy to a real
+PostgREST 12.2 container over the lane's Postgres, the same calls; the log
+rows, the report and the export came out identical to the SQL walk. That walk
+found preflight printing no `query log` line at all over PostgREST — the
+check lived only in the direct-connection branch, so the hosted operator got
+neither the presence verdict nor the 035 warning; it is now a skip there
+naming both facts, like its siblings. The same pass moved the tool column of
+an action batch onto the driver's own `sql.array` after probing that it
+carries a quote, a backslash, a comma and a brace through `unnest` intact;
+the uuid columns keep the by-hand literal because `sql.array` renders a null
+element as the text `null`, which `uuid[]` refuses, and the agent column is
+nullable — probed, not assumed. Two fixture-side guards were added and held
+in [39]: a row whose instant does not parse is never credited and never
+attributed (NaN passes both window tests and would have taken the agent's
+newest search), and a gold id spelled upper-case matches the lower-case id
+the log holds. `test-preflight.ts`'s pre-035 run asserts the `query log`
+warning and its absence once 035 is back.
+
+An eighth pass walked two named
+agents (`MCP_ACCESS_KEYS`, alice and bob) over the SQL-store server process:
+bob's fetch of an id only alice's search returned and bob's cite of an id his
+own search did not return are the two unattributed actions, bob's cite of an
+id his later search did return is attributed to that search, alice's delete of
+a returned id is her search's one use and strips the token estimate from both
+searches that had returned it while the third keeps its own; the by-agent
+table split the two as the log rows say. That table printed bare uuids, with
+the registry that names them one table away — the report now reads
+`ob1_agents.label` when 010 is present and prints `label (id prefix)`, held
+in [39]. A capture whose embedding the provider refuses fails before any
+write and logs nothing, which is the rule (no pointer was accepted). The same
+pass's cold read moved the distinct-returned count to one definition — the
+reader's, from the parsed ids, where a `count(DISTINCT)` subquery per search
+row had duplicated it under a comment that called it a cardinality — and the
+035 verdict preflight carries between two checks into the block those checks
+share, so a second run in one process starts unset.
+
+A ninth pass fired forty
+captures at once at the live server, each citing the two ids one search had
+returned: forty succeeded, eighty cite rows landed, none dropped, nothing on
+the server's stderr, and the report read 2 used of 2 returned; and it seeded
+the window's exact edge at microsecond precision — three agents, each a
+search at T and a fetch of its id at T + 30 min exactly, one microsecond
+inside and one outside — and both readers agreed: the edge and the inside
+fetch attributed, the outside one not, and at a 29-minute window none. That
+parity check was the last one needed by hand: the same pass's cold read made
+the export call `attribute()` instead of running its own SQL join, cast the
+epoch arithmetic to `numeric` so `at_us` is exact on any server, guarded the
+registry read so a role without SELECT on `ob1_agents` gets bare ids and a
+line rather than a stack trace, made preflight's 035 verdict a plain boolean
+(the "could not read" branch was unreachable), and folded the two `uuid[]`
+renderers into one. Recounting a search's distinct ids in `summarise()` after
+`attribute()` built the same set was raised again and declined: a seventh
+pass removed the field that carried it at a reviewer's request, the recount is
+one `Set` per search row, and one code path beats a threaded-out map. `bunx tsc --noEmit` in `server-portable/` covers
+the server files; `evals/utilization.ts`, `query-log.ts` and
+`eval-utilization.ts` have no tsconfig and are **runtime-checked only**,
+through [39] under Bun — the same standing as every other `evals/` file.
+The measurement itself — the operator's first week of real use with the log on
+— is the ticket's Verify, not this section's: the number exists when the log
+has rows.
+
+**Upstream status:** not sent — the query log is this fork's (change 65).
+
+### 91. A NULL `created_at` is `null`, not the fabricated epoch, and a timestamp with no ISO form renders as its own text — the decision SMD-1040 documented and left, made once in `isoTimestamp`/`displayDate` (SMD-1328)
+
+`thoughts.created_at` is `timestamptz DEFAULT now()` with no `NOT NULL`
+(migration 001); 020's `recency_score` has an explicit NULL branch and
+`db/test-schema.ts` plants a no-date row and asserts `match_thoughts` returns
+it. But every read mapper ran the column through `new Date(v).toISOString()`,
+and `new Date(null)` is the epoch — so a NULL row came back as the fabricated
+string `1970-01-01T00:00:00.000Z`, silently, on **both** stores, and the five
+`toLocaleDateString` renderers printed **"Invalid Date"** for an `infinity` or a
+BC date. No capture path can make such a row — every insert omits the column and
+takes the DEFAULT — so it needs a direct INSERT; the risk is a fabricated date
+shown as real, not a crash. Change 52 (SMD-1040) put the timestamp convention in
+one place (`isoTimestamp`) and documented that NULL and the no-ISO-form values
+were still open, under types that said `created_at: string`. This is that
+decision.
+
+**The decision.** A SQL NULL is `null` under `created_at: string | null` — the
+widening `updated_at` and `ThoughtMeta.created_at` already carried, with
+`updated_at?: string | null` on `ThoughtRecord` as the precedent — and the tools
+render a null date as **absent**. `infinity` and `-infinity` stay their **own
+string** on both stores (`isoTimestamp` keeps them, `infinity` is the value 020
+ranks by and `[3d]` pins it), and the tools show that text, not "Invalid Date". A
+BC or extended-year date has no ISO form either, but the stores split on it:
+PostgREST's text survives and renders as itself, while Bun's SQL driver has
+already turned it into `Date(NaN)` before the store is reached, so `isoTimestamp`
+yields the literal string "Invalid Date" and `displayDate` faithfully prints
+*that* — the declined case below, not a value this change makes legible. The rule
+lives in two helpers: `isoTimestampOrNull` for the read path, `displayDate` (new,
+in `thoughts.ts`) for the render path.
+
+**Where it's applied.** One read-path change: `normaliseListItem` takes
+`isoTimestampOrNull`, so the list item, the three match shapes and the record
+that spread it all read a NULL as null — `match_thoughts`, `getThought` and
+`listThoughts` no longer fabricate. Five renderers move onto `displayDate`:
+`thoughtTitle` (the `search`/`fetch` title — a null date is the existing
+`Open Brain` prefix, not `1/1/1970`); the two `Captured:` lines in
+`search_thoughts`/`search_thoughts_keyword` (omitted when the date is absent);
+the `list_thoughts` `[date]` prefix (`[undated]`, since the bracket is
+structural); and the `thought_stats` range (024's `min`/`max` already skip NULLs,
+so `displayDate` only keeps an `infinity` edge legible).
+
+**Declined.** Recovering the SQL store's *text* for a BC/extended-year date —
+Bun's driver hands the store `Date(NaN)` (or an extended-year `Date` that fails
+`ISO_RE`) before it is seen, where PostgREST's text survives — would mean
+`SELECT created_at::text` beside every column in `store-sql.ts`. That row reaches
+no capture path, only a hand-written INSERT, and the two drivers disagree at the
+wire; the one odd row is left as each client renders it rather than rewriting
+every SELECT. Two mappers this ticket did **not** move stay on the pre-fix
+convention. `derivationFields` (025's provenance/derivative walk) runs
+`created_at` through `isoTimestamp`, which keeps `infinity` but fabricates the
+epoch on a NULL ancestor. `normaliseProposal`'s local `iso` (029's
+`list_supersession_proposals`, and the `day()` renderer beside it) calls
+`new Date(v).toISOString()` directly, with no such guard — so, worse, an
+`infinity`- or BC-dated proposal thought makes it **throw** and
+`list_supersession_proposals` errors out entirely rather than misrendering.
+The offline maintainer CLI `db/consolidate.ts` carries the same two defects (its
+`day()` at :277 throws on infinity and fabricates on NULL; its judge-prompt
+`dateOf` feed at :489–490 fabricates on NULL). All of these are graph walks over
+captured thoughts, off the list/match/get path this ticket scoped and reachable
+only by a hand-INSERT, so they are the follow-up **SMD-1803**, not this change.
+
+**A parity note.** Before change 52 the PostgREST store passed a NULL
+`created_at` through as JSON null, so `fetch` returned `created_at: null` while
+the SQL store fabricated the epoch; change 52 made **both** return the epoch. This
+change makes both return `null` — the honest value, and the one the PostgREST
+store had before parity was chosen.
+
+**Teeth.** `test-thoughts` [5]/[5b] cover `thoughtTitle` and `displayDate`
+directly, including that a row *genuinely* dated at the epoch still renders
+`1/1/1970` — the fix suppresses fabrication from NULL, not the value 0.
+`test-store-sql` [11] and `test-store-postgrest`'s undated block plant a NULL row
+and assert `null` on `matchThoughts`/`getThought`/`listThoughts`; `test-e2e-sql`
+[11] drives the real tools over MCP and asserts the rendered `list_thoughts`
+shows `[undated]`/`[infinity]` and `fetch` titles an undated thought `Open Brain
+…`, with no `1970` and no `Invalid Date` in the output over those two rows.
+
+**Upstream status:** divergence. `server/index.ts` and upstream's store carry the
+same `new Date(...)` fabrication; the fork's fix lives in `server-portable`, and
+this is not filed upstream (an undated row reaches no capture path).
+
+### 91. `match_thoughts` runs with `jit = off` — migration 040 adds 017's clause to 039's function, so a planner path an operator disables no longer JIT-compiles the gate's sample on every call, and a generic plan's flat estimate no longer compiles the walk (SMD-1624)
+
+Change 80 shipped with a premise stated in its header: 038's sample statement
+has, in every piece, exactly one viable planner path — a TID Range Scan for
+the block (019's `enable_seqscan = off` is on the function), a Nested Loop
+for the `LATERAL` join, Sort/Unique or HashAggregate for the `DISTINCT` draw
+— and when a session, role or database turns that path off the planner still
+takes it and adds `disable_cost`, 1e10. The statement's cost is then far past
+`jit_above_cost` and its inlining and optimisation thresholds, and the
+executor compiles the sample on every execution: the same plan node, the
+same eight buffers, the same rows, nothing in preflight or the ledger, and
+some fifty milliseconds of compiler on every filtered call. `ALTER DATABASE …
+SET enable_nestloop = off` is a spelling operators use to tame a nested-loop
+disaster elsewhere, and it would have given every fresh connection that.
+SMD-1624 asked for the decision between a function-level `SET jit = off`,
+pinning the paths, and leaving the premise stated.
+
+Main took change 81 — migration 039, the half-precision index, which
+redefines `match_thoughts`' walk `ORDER BY` and nothing in the sample — and
+changes 82 to 85 while this change was in review, so it is migration 040 and
+change 91. The measurements below were taken on 038's function; the statement
+they are about is the same in 038, 039 and 040, byte for byte.
+
+**Measured first.** The ticket's table reproduced on this tree through the
+function — 25,000 rows at 1,024 dimensions (385 heap pages; the HNSW index
+dropped, so the 50% column is a GIN bitmap and a sort, the fixture's cost),
+the floor lowered to 0 so the sample runs, medians of nine calls after three
+warm ones, round trip included, an empty-match filter / a filter matching
+half the rows:
+
+| setting (session) | 038's function | 038's + `jit = off` on the function |
+| --- | ---: | ---: |
+| default | 0.99 / 59 ms | 1.30 / 66 |
+| `enable_tidscan = off` | **51.3 / 108** | 1.28 / 62 |
+| `enable_nestloop = off` | **59.0 / 108** | 1.07 / 66 |
+| `enable_hashagg = off`, `enable_sort = off` | **105 / 270** | 0.99 / 65 |
+| `enable_tidscan = off`, session `jit = off` | 1.04 / 66 | 1.11 / 60 |
+
+The sample statement alone under `enable_tidscan = off`: total cost
+80,000,000,070 (eight times `disable_cost`), 52 ms with the JIT block —
+Inlining 7.4, Optimization 23.4, Emission 20.9 — and 0.18 ms without it. The
+hashagg-and-sort case costs more than the other two because every `ORDER BY`
+in the body carries `disable_cost` with sort disabled: the walk's statements
+were compiled too. The tidscan and nestloop sensitivities are 038's; the sort
+one is 037's (`count(DISTINCT …)` sorted). A row-level-security policy of
+`USING (true)` reproduced nothing — the planner folds a constant policy — so
+SMD-1625 stands on its own fixture, not this one.
+
+**Migration 040.** 039's `CREATE OR REPLACE` with one clause added between
+019's `SET enable_seqscan = off` and `AS $$`: `SET jit = off`. The body is
+039's byte for byte — test-upgrade [18] compares `prosrc` across the upgrade,
+test-schema [20] re-applies 039 alone and compares too — and with it 039's
+half-precision cast in the walk's `ORDER BY`, 014's sentinel, the two
+template constants, 019's two clauses and `ROWS 10`, 020's `DROP` of the
+4-argument form with its ACL capture and replay; 040 is the last definer of
+the function, which preflight's remedies and the suites' `restoreShipped`
+apply alone. 039's index swap is not carried: it is a one-time move of two
+indexes, not part of the function, and 039's own successor list names the
+cast and not the swap; preflight's `walk index` check still names 039 for an
+index out of step with the body, and after a hand re-apply of 039 the
+`candidate scan` check names 040 for the clause 039's `CREATE` resets. It is 017's clause for 017's reason: nothing in
+this body has enough rows for JIT to pay for itself — the walk passes a few
+hundred tuples under the seeded bounds, the exact branch scores at most
+`v_exact` rows, the collection stops at `v_exact + 1`, the sample reads eight
+pages — and what prices its statements past the threshold is never the
+work. It is `disable_cost`, or a generic plan's flat estimate: change 28
+measured every generic plan at ten million rows carrying 30–110 ms its custom
+twin did not (the routing count on the empty filter 31 ms against 0.03, the
+exact branch 108 against 24, the 2,000-row walk 136 against 20) and, with
+`jit = off`, 0.03, 11 and 23. The one generic plan whose cost is not JIT —
+the 50% walk's GIN bitmap over five million rows sorted by distance, 11.6 s
+against 15 ms custom, 11.7 with jit off — this change does not touch; that
+is the plan mode, SMD-1464's.
+
+**Why not the alternatives.** Pinning `enable_tidscan = on` would be
+harmless and cover one case; `enable_nestloop = on` covers a second and
+overrides an operator's setting for the walk's chunk join too; the third
+needs `enable_sort = on` as well, over every `ORDER BY` in the body — and none
+of the three touches the generic plan's JIT at scale, the compile under
+row-level security (SMD-1625) or PostgreSQL 13's (038's Prerequisites). One
+clause removes the compile in every case and changes nothing about which
+plan the operator's settings choose. A higher `jit_above_cost` on the
+function has no finite value safely above 1e10 per disabled node. Leaving
+the premise stated was what 038 did. Not a plan mode: 038's sample adopts
+the generic plan by design, the walk's mode is SMD-1464's, and 019's rule
+stands — 019's "no other SET" was written about the walk bounds (the
+operator's database-level knob) and a plan mode, and `jit` is neither; 017
+and 027 have carried it since.
+
+**The bench at a million rows, and what the pair could not say.** Run on
+the tree before 039 landed, where 038 was the function before this one: the
+before arm (`OB1_BENCH_UPTO=038` there) and the after arm, each on its own
+container and corpus, agreed on every tier but two: the 5,000-row and 1%
+tiers — both routed to the walk branch, with K=10 the exact threshold is
+1,000 — ran the walk statement as an HNSW walk under 038 (546 and 424 ms,
+8.8 and 8.9 of the exact top-10) and as a GIN bitmap with a sort under 040
+(61 and 86 ms, 10 of 10). That is not the clause. It is the edge change 28
+documented for exactly those two tiers: "between about half a percent and
+one percent of the table, the walk branch is on the planner's edge, and
+which side it lands on is decided by the statistics sample" — 332 and 283 ms
+walking HNSW in two of its passes, 23 and 38 served from GIN in the third,
+same rows, a fresh `ANALYZE` each time. Two containers are two statistics
+samples; a second after run on a fresh corpus fell the GIN way too (30 and
+53 ms, 10 of 10), and a third could have fallen either way. So the
+attribution was done
+on ONE corpus, kept under `OB1_PG_KEEP=jit1m`: the function with the clause
+(A), with it `RESET` — 038's function — (B), and with it again (A′), twenty
+seeded queries per tier on a fresh connection each, so every arm walks the
+same plan-cache trajectory (custom plans for five calls, then generic where
+not costlier); median of calls 6–20 / 1–5:
+
+| tier | A: 040 | B: clause RESET (038's) | A′: 040 again | rows identical |
+| --- | ---: | ---: | ---: | :---: |
+| 50% | 13.0 / 18.7 ms | 16.8 / 17.4 | 13.9 / 15.4 | yes |
+| 10% | 66.2 / 52.9 | 63.6 / 63.0 | 52.6 / 51.1 | yes |
+| 1% | 54.8 / 45.3 | 43.4 / 52.7 | 43.6 / 48.4 | yes |
+| 5,000 rows | 33.6 / 32.9 | 25.8 / 26.0 | 25.5 / 23.2 | yes |
+| 2,000 rows | 17.0 / 20.0 | 13.9 / 14.0 | 13.2 / 13.4 | yes |
+| 0.1% | 11.8 / 12.3 | 10.7 / 10.0 | 11.1 / 10.9 | yes |
+| 900 rows | 12.0 / 12.5 | 8.9 / 10.9 | 10.7 / 11.0 | yes |
+| 0.01% | 3.1 / 3.1 | 1.7 / 2.4 | 2.1 / 3.2 | yes |
+| nothing | 1.3 / 1.5 | 0.7 / 1.0 | 0.8 / 0.9 | yes |
+
+Identical rows in every cell, the arms within the run's spread (the first
+arm ran coldest), and the first five calls costing what the rest cost under
+both functions: at a million rows no generic plan of this body is priced
+past `jit_above_cost` yet — change 28 put that between a million and ten
+million — so the clause removes nothing here and costs nothing. Section C's
+third column, "generic, jit on", read within noise of the generic column on
+every branch (walk 0.1% 477 against 487 ms, route 50% 32.0 against 31.7,
+estimate 0.11–0.14 against 0.12–0.16): agreement, as a flat estimate under
+the threshold predicts. The ten-million arm was not re-run for this change
+— the machine was carrying another session's ten-million containers — and
+change 28's "generic, jit off" column (0.03 / 11 / 23 ms against 31 / 108 /
+136) is what the function's generic plans now pay there; the third column
+is where the next ten-million run reads it.
+
+**The walk under the operator's `enable_nestloop = off`, measured.** The
+ticket asked what the walk does under the setting that pinning would have
+overridden. On the same corpus, the same three arms, session-level `SET
+enable_nestloop = off`, median of calls 6–20 / 1–5:
+
+| tier | A: 040 | B: clause RESET (038's) | A′: 040 again |
+| --- | ---: | ---: | ---: |
+| 50% | 3,022 / 2,747 ms | 2,830 / 2,502 | 3,473 / 3,215 |
+| 1% | 2,320 / 2,265 | 2,340 / 2,640 | 2,799 / 2,901 |
+| 5,000 rows | 2,404 / 2,195 | 2,849 / 2,851 | 2,907 / 2,790 |
+| 900 rows | 2,141 / 2,047 | 2,454 / 2,484 | 2,754 / 2,662 |
+| nothing | 0.62 / 1.08 | **66.8 / 66.8** | 1.19 / 1.73 |
+
+The `nothing` row is this change: the sample's compile, 66 ms on every call
+to a brain whose operator turned nested loops off, gone. The other rows are
+not: without a nested loop the walk's chunk join and the exact branch's
+parent lookups become joins over the whole chunk table, 2–3 s on every
+filtered call with rows, identical rows and the same under 038. Pinning
+`enable_nestloop = on` on the function would remove that — and would
+override the operator's setting for every statement of the call, a second
+mechanism and its own decision: SMD-1677, filed with this table.
+
+**What the clause does not fix.** Under row-level security the collection
+and the walk's direct CTE are sequential scans of the heap (`jsonb_contains`
+is not leakproof): the compile goes, the scan stays — SMD-1625. On
+PostgreSQL 13 the probe has no TID Range path and is a sequential scan per
+block; the same. `disable_cost` is still in the estimate under a disabled
+path — the TID Range Scan at 8e10, the Nested Loop at 1e10 — and a reader of
+auto_explain sees the cost and no JIT block; the plan and the eight buffers
+are the same. On a server built without JIT (`pg_jit_available()` false:
+PGlite, some managed images) the clause is accepted and does nothing.
+
+**What holds it.** `CREATE OR REPLACE` resets `proconfig`, exactly as it
+resets 014's and 019's clauses, and the ledger cannot see it — the class of
+loss change 70 and 80 could only state. preflight's `candidate scan` check
+(019's) now reads `jit = off` beside `enable_seqscan = off` and `ROWS 10`: ok
+names all three; a body carrying 019's clauses and not 040's warns with the
+compile it lets back in, the migration as the remedy while the ledger does
+not record 040 and the `ALTER FUNCTION … SET jit = off` when it does;
+test-preflight's fixtures that model 019's loss restore the jit clause so
+they stay 019's, and a new probe models 040's alone. test-schema [20] and
+[21] pin exactly three clauses on the shipped body — a successor that adds
+or drops one fails there on purpose. test-live [5e], on a 3,000-row heap
+with the floor lowered: under each of the three disabled paths the statement
+read out of the installed body, explained under the function's own settings,
+keeps its TID Range Scan at `disable_cost` and has no JIT block; the same
+statement with `jit` forced back on has one — Generation, Inlining,
+Optimization, Emission, EXPLAIN's JIT total 41–45 ms on the CI image in that
+run, 40–70 across the pass-1 runs — so the first check has
+teeth; and through the function the mutant, 040's clause `RESET` (what a
+redefinition without it leaves), pays the compile on every call: 55 ms a call
+against 8 with the clause, 8 by default on that fixture. The forced-on plan
+and the timing run only where the server has JIT and its own `jit` is on,
+on 14–17, and are one skipped group otherwise; the catalog and plan
+checks run everywhere. test-upgrade [18] applies 040 onto a populated 039:
+no column, signature, row or privilege moves, the body byte for byte,
+`jit=off` beside 014's and 019's clauses, and after a hand re-apply of 014
+puts the 4-argument form back, 040 alone drops it again. db/bench-hnsw.ts
+section C's third arm, which had been the generic plan with `jit = off`,
+now forces `jit = on` over the function's clause: the column is what the
+clause saves, and on a body before 040 (`OB1_BENCH_UPTO=039`, the new before
+arm) the last two columns agree.
+
+**What it costs where it does nothing.** One more `proconfig` entry, set at
+call entry and restored at exit — microseconds, what 017 and 027 pay. The
+default column in the table above is within the run's spread (0.99–1.30 ms
+across the six cells that ran without JIT under either function).
+
+**Not done here.** The walk under an operator's `enable_nestloop = off`
+(SMD-1677, the table above); the plan mode of the walk and the threshold
+(SMD-1464); row-level security's sequential scan (SMD-1625); preflight's
+recogniser for the gate's body (change 80's "Not done here"). The
+ten-million arm was not re-run; a hundred million rows was not run.
+
+**Review** — pass 1, two reviewers (a cold reader over the diff and the
+documents; a run-it reviewer mutating the mechanism in its own worktree),
+triaged fix / ticket / no. What changed: the header and this section had
+cited a change-28 line that does not exist for the two-tier disagreement —
+the sentence change 28 does have is quoted now, and the flip is named as
+the walk statement's plan, not the branch; preflight's file remedy dropped
+the keyword ALTER that 040 cannot restore in one reachable state (019
+recorded, 040 not, the keyword estimate reset), and the ledger-records-040
+wording with its `SET jit = off` ALTER had no test — test-preflight probes
+both states now (211); [5e]'s "not JIT-compiled" check was vacuous on its
+own for the tidscan case (without the function's settings the plan is a
+cheap sequential scan no JIT would touch, and the bare check passed with
+the clause absent) — it is one tooth with the disable-cost assertion now;
+[5e] runs its timing only where the server's own `jit` is on (an operator's
+database-level `jit = off` made the mutant compile nothing and the tooth
+fail with 040 correct) and bounds the fixed call at the default plus 25 ms,
+the compile's size, where `3 × default` was loose; the "byte for byte"
+claim is checked in the fast loop too (test-schema [20] re-applies 038
+alone: same body, no jit clause — 039 since the merge; 904 then, 925 on the
+merged tree); README's [5d] paragraph and two
+header figures corrected. What the run-it reviewer verified: the clause
+deleted from 040 is killed in all four suites — test-schema [20] and [21],
+test-upgrade [18] twice, test-live [5e] eight times including all three
+plan checks, test-preflight three times; preflight blinded to the clause is
+killed by exactly the new probe; the forced-on arm neutered is killed by
+exactly its three assertions; a line added to 040's body is killed by
+[18]'s byte-for-byte assertion; three runs of [5e] put the mutant at 51–56
+ms against 7.9–8.9 fixed and 8.0–8.2 default, four times the bound. Not
+changed: the timing message's "with 040's clause" label reads from the
+file's intent, not the catalog, and would mislead only after the catalog
+assertion before it has already failed.
+
+Pass 2, the same two reviewers on pass 1's additions first. What changed:
+PostgreSQL 18 replaced the `disable_cost` penalty with a count of disabled
+nodes kept beside the cost (`Disabled: true` in the plan), so on 18 a
+disabled path no longer carries the sample past `jit_above_cost` and the
+compile this change removes cannot be triggered that way — run on 18.6, the
+plan under each disabled path cost 36–1,490, nothing was compiled with the
+clause or without it, the mutant timed 10.35 against 10.11, and seven [5e]
+assertions failed against a correct 040; [5e] reads the server version and
+on 18 asserts the absence (no JIT block with or without the clause,
+`Disabled: true`, an ordinary cost) and skips the mutant arm with a line
+saying why, and the header's first screen, Failure modes and Prerequisites
+say 14–17 for the trigger and what 18 does (the clause stands on 18 for the
+generic plan's flat estimate, row-level security's compile and 13's).
+preflight's file remedy had named 019's file whenever the ledger lacked 019
+— pre-existing, rewritten by pass 1 — and 019's `CREATE` is the 4-argument
+form 020 dropped: on any brain past 020 it re-creates the overload the
+`search signatures` check then fails the start on, and restores none of the
+6-argument function's clauses; the remedy now names 040, the last definer,
+which carries 019's clauses and `ROWS 10` with its own and drops that form,
+with the keyword `ALTER` beside it (019's file is never named), and the
+`RESET ALL` probe asserts the whole string. [5e]'s `jit` gate was read on
+the suite's pool while the timing ran on fresh connections, so a
+database-level `jit = off` set after the pool connected read as "on", the
+timing ran, and its tooth failed at 7.97 against 8.05 for the wrong reason
+(run-it, M4a); the gate is read on a fresh connection now. The 019-loss
+fixture in test-preflight records 040 beside 019 (a brain whose function
+carries the clause and whose ledger records 019 records 040), one probe's
+comment had the ledger state inverted, this paragraph undercounted the
+clause-deleted mutant's test-preflight kills (three, not two), and the
+compile's figures name their quantity. What the run-it reviewer verified:
+pass 1's fold is load-bearing — without the `!/JIT:/` term all three plan
+assertions passed with the clause deleted, each printing "— but a JIT block
+is in the plan"; with it all three fail; `keywordAlter` (pass 2 renamed it
+`kwAlter`) emptied and
+`ledgerHas040` ignored were each killed by exactly the probes written for
+them; a body edit and the clause deleted are killed in test-schema by
+exactly the pinned assertions; over four more [5e] runs the fixed call was
+0.2–1.3 ms over the default against a 25 ms bound while the compiled arm
+ranged 52–87 ms and two compiled medians in one run were 31 ms apart — the
+teeth compare the uncompiled arms and leave the compiled one its noise. Not
+changed: "30–130 ms of startup" in two pre-existing comments where change
+28 and this section say 30–110 (boyscout).
+
+Pass 3, the same two reviewers on pass 2's additions first. What changed:
+on PostgreSQL 18 `enable_tidscan = off` does not price the TID Range path,
+it never builds it — tidpath.c returns before `create_tidrangescan_path`
+where 14–17 built the path and priced it — so the probe's only path is a
+sequential scan of the heap with the ctid range as a filter, disabled and
+taken anyway: `Seq Scan on thoughts t`, `Disabled: true`, 258 buffers
+against 8 on the 43-page fixture (43 pages × 6 distinct blocks), and on an
+ad hoc 2,469-page heap 19,752 buffers and 152 ms for the statement, the
+empty-filter call 22 → 164 ms. That is 13's state (038's Prerequisites)
+reached on a supported version by an operator's setting, the cost the gate
+exists to avoid, and no clause on the function reaches it — SMD-1703, filed
+with the table. Pass 2's 18 branch had asserted `Disabled: true` and no JIT
+block and passed over that plan without naming it (the `Disabled: true`
+it matched was the sequential scan's); [5e] now asserts the node per case
+on 18 — a `Seq Scan` under `enable_tidscan = off`, the TID Range Scan under
+the other two — and names the failing term, and the header's first screen,
+the 18 bullet and Prerequisites say what 18 does under each. Pass 2's "the
+plan under each disabled path cost 36–1,490" was this finding unread. Also:
+[5e] reports the arms that do not run through the suite's `skip()` rather
+than a printed line, so the count reads as 514 on 14–17 with JIT and fewer
+with skips elsewhere (the README count line says so); the pending-040
+remedy carries its note about 019's clauses only when those are missing,
+not for the common brain at 039 with the jit clause alone to gain;
+preflight's warn strings and the README's [5e] paragraph say 14–17 for the
+compile and what the clause guards on 18; the bound's comment cited seven
+runs for a figure four support and a 150 ms figure that was row-level
+security's; the first screen's wrap; a stale probe comment; this
+paragraph's `keywordAlter`, which pass 2 had renamed. What the run-it
+reviewer verified: the clause deleted from 040 on 18 is killed by the two
+proconfig assertions and nothing else — the three plan lines are green with
+or without it, as designed and now said in the comment; `disableCost`
+forced false on 16 fails all three 18 assertions (the branch cannot take
+18's path on 16); the remedy naming 019's file again is killed by three
+probes, `kwAlter` emptied by four; the stale-pool gate reproduced pass 2's
+wrong-reason failure and the fresh-connection gate skips instead; the whole
+of test-live on 18.6 passes, 507 of 507, the seven fewer being [5e]'s
+skipped arms and no other section differing. Not changed: the first
+`median([])` runs colder than the later arms (12–13 ms against 9–11), a few
+milliseconds of headroom the 25 ms bound does not need; the wording
+"migration 019 is not applied" where the ledger records neither 019 nor
+040, which is the ledger's word and 019's precedent.
+
+Pass 4, the same two reviewers, the cold one also reading as an operator on
+Supabase and as the maintainer merging. What changed: main had moved — 039
+(change 81, the half-precision index, which redefines `match_thoughts`) and
+changes 82 to 85 landed while this was in review — so this is migration 040
+on 039's body, change 91 and test-upgrade [18]; every pin, remedy string,
+count and pointer was re-applied onto main's text (the reliable pattern:
+take main's file at every stop, re-apply the section once), test-upgrade
+[7]'s tripwire reads "last eleven", and the section says what was measured
+on which body. Supabase's images are built without LLVM JIT and its
+upgrades set `jit = off`, so on the fork's stated target the compile this
+change removes cannot happen today: the header's first screen and the
+without-JIT bullet say so, and preflight's warning appends "(not on this
+server today …)" when the server it reads has no JIT or its own `jit` off
+— the clause still guards a self-hosted or future server, and the generic
+plan wherever JIT is on. The 18 bullet's "13's state under Prerequisites"
+pointed at this file's Prerequisites, which do not describe 13 (038's do);
+"eight heap reads per filtered call" read as page reads where it meant
+whole-heap scans; the first screen's parenthetical had grown to five ragged
+lines and said "Failure modes below" twice; a bullet ended with "call"
+alone on a line; [5e]'s 18
+message named the node it expected rather than the one the plan had, and
+its 14–17 label claimed a JIT term that cannot bite on a server without JIT
+or with its own `jit` off (the proconfig assertions are the clause's teeth
+there, as on 18); the `failed` list could blame a forced-on plan that was
+never forced; SMD-1703's table gained the 2,469-page row this section
+already quoted.
+What the run-it reviewer verified: every mutant of pass 3's additions was
+killed by exactly the predicted assertion — the node regexes swapped (each
+message ending "— but: no Tid Range Scan" or "— but: no Seq Scan"), the
+`Disabled: true` and cost terms inverted, the 019 note made unconditional
+(one probe) or never appended (the other), the keyword `ALTER` dropped from
+the file form; a database-level `jit = off` set before the pool connects
+takes the skip path on 16; pass 1's fold still kills (without its JIT term
+the three plan lines pass with the clause deleted, printing the
+self-incriminating "— but a JIT block is in the plan"); the compiled call
+was 49.6 ms once, so "never under 50" became "49.6–87"; a `skip()` counts
+once for the seven assertions it stands for, which the count lines now call
+a skipped group. Not changed: the 14–17 assertion's JIT term is still one
+conjunction with the cost and node terms; on a server without JIT the label
+says which term cannot bite rather than splitting it.
+
+Pass 5, the same two reviewers on the merge. What changed: [5e]'s
+"the mutant pays the compile" tooth had compared the two arms with each
+other — `mutant − fixed ≥ 10` — and passed with the clause deleted from
+040, both arms compiled and 12.9 ms apart in the run that found it, which
+is the compiled call's own noise (the fixed-against-default bound was the
+tooth in that pair); each arm is judged against the default now, the mutant
+at least 20 ms over it and the fixed call at most 20 ms over it, and re-run
+with the clause deleted under the new bounds: the fixed arm at 44.9 against
+a default of 11.5 fails, the mutant at 45.6 passes, as they should.
+[5d]'s "installed" and "restored" assertions read the body's floor and the
+probe, which 039's body satisfies too, so a slip back to applying 039 had
+left 039 as the shipped state for the sections after and nothing said —
+both read the `jit=off` clause now. Prose the renumber left behind: the
+operator's-path paragraph described a 38-file tree, a brain "at 038" with
+one pending file and 038's file pasted over 040 (which also loses 039's
+cast and trips the `walk index` check) — it is 039's file, 40 files, a
+brain at 039; "test-upgrade [18] onto a populated 038" and "`OB1_BENCH_UPTO=038`,
+the new before arm" said 038 where the code says 039; the header's
+`enable_nestloop` table pointer said change 81, which is SMD-1501's; this
+Review had re-recorded three pass-3 fixes under pass 4; "test-schema [20]
+re-applies 038 alone" and "the common brain at 038" said 038 for 039. What
+the run-it reviewer verified on the merged tree: clean controls 925 / 221 /
+523 on 16 and 516 with one skipped group on 18 / 224; the clause deleted
+from 040 is killed in test-schema three times (the `reapply("039")` block
+passes by design — it pins 039's clauses, not 040's), test-upgrade [18]
+twice, test-live [5e] seven times and test-preflight four times. Not
+changed: main's change 81 still describes the pre-040 tree as fact ("[8e]
+and [20] pin 039", "[5d] applies 039") — numbered sections are history,
+and change 80's pointers were annotated because they were forward references
+to this ticket.
+
+Pass 6, the same two reviewers, the cold one applying pass 5's lesson to
+every assertion of the ticket. What changed: pass 5's bounds were a literal
+20 ms while the compile is a machine constant — EXPLAIN's JIT total ran 36
+to 60 ms on this machine, once 36 where inlining was cheap — so a faster
+host would bring the compiled arm toward the bound and the pair would turn
+vacuous on one side and flaky on the other; each bound is now half the
+smallest compile the run's own forced-on plans reported, never under 10 ms,
+and the default is measured immediately before the fixed arm so a load
+spike on the shared machine lands on both or neither. The comment under the
+fixed-arm bound still described the design pass 5 removed ("25 ms", "the
+tooth above compares it with the uncompiled arm and asks only for 10 ms");
+the trigger assertion's label says it measures the trigger and that the
+clause's tooth is the next line (with the clause deleted it passes, both
+arms compiled 0.4 ms apart — by design, now said). test-schema [20]'s
+`reapply("039")` block asserted the body and 039's settings under one
+label, so a body change printed the settings; two assertions now (926).
+[5d]'s messages still said "038" for the installed function and one claimed
+preflight's remedy names 038, which it has not since 039 landed; "040" and
+"the gate", and the kept body's variable named for what it is. The
+pass-5 paragraph read as one run where it was two; four ragged wraps in the
+header; a 040 line in this file's file list beside 039's. What the run-it
+reviewer verified: the four mutants pass 5 could not finish — a byte in the
+body is killed by test-schema [20] and test-upgrade [18] twice; the server's
+`jit` read forced true by exactly the jit-off-server probe; the remedy
+slipped to 039's file by four probes; [5d] slipped back to 039 by exactly
+pass 5's two new teeth and nothing else — and the clause deleted from 040 is
+killed by the fixed-arm bound at 45.6 against 9.7 while the trigger line
+passes at 45.1 (both compiled, 0.4 apart: pass 5's fix is what kills);
+three clean runs put the compiled arm 28–30 ms over the default and the
+fixed arm 0.04–0.5 over it. Not changed: the four probes that pin the
+remedy string match the filename by regex, and the raw-body probe pins
+039's remedy the same way — one tooth for that string, four for this one,
+recorded so the count is known; a `SET jit = false` in a successor would
+store "false" and fail every regex and [20]'s pin, which is the pin doing
+its job.
+
+Boyscout, after the passes: the two pre-existing comments that said "30–130
+ms of startup" for the generic plans at ten million rows (db/bench-hnsw.ts,
+db/test-support.ts) say 30–110, change 28's figure; db/README.md's "twenty-three
+migrations applied" says forty. A second look: the unrecorded-040 probe
+asserts its two claims under two labels (225), the test-live count line's
+parenthetical is a clause, and [5d]'s comment on applying before the index
+drop says whose order it keeps — no behaviour change.
+
+**The operator's path, walked.** A brain with rows migrated by `bun
+db/migrate.ts` through 040 (on a brain at 039 it is the one pending file):
+one `match_thoughts` whose `proconfig` reads `hnsw.iterative_scan=relaxed_order,
+enable_seqscan=off, jit=off`, preflight's `candidate scan` ok naming all
+three, a filtered call answering as before. The same brain with 039's file
+pasted over 040 by hand (for its index swap, say): the plain run reports
+"applied 0, skipped 40", the body is unchanged — 039's and 040's are the
+same — and what is lost is the clause — `candidate scan` warns
+"carries enable_seqscan = off and both row estimates hold, but not jit = off
+although migration 040 is recorded as applied — a later redefinition dropped
+its SET clause" with `ALTER FUNCTION match_thoughts(…) SET jit = off;` as
+the remedy, and `migrate.ts --reapply` (40 re-applied) restores it with
+everything else, after which the check is ok again. The PostgREST contract
+is byte-identical to 020's.
+
+**Upstream status:** not applicable — 014's routing statement, 037's gate and
+038's sample are this fork's.
+
+### 92. A thought cited as a source cannot be deleted from under the citation — `thought_facets` with one kind, a statement-level guard on `thoughts` that refuses with its own SQLSTATE, `delete_thought` answering it as a value with the citing rows named, and a detach opt-in (SMD-1712)
 
 Nothing on the fork recorded that one thought is the *source* of a statement
 made in another. Change 46 (migration 025) records what a thought was derived
@@ -14036,7 +14954,7 @@ guard, so the first draft judged the replaced citation still superseded, marked
 it, and the `SET NULL` then revived it — detached, under refuse mode.
 `thought_facet_active` therefore reads whether the superseder still exists,
 not whether the pointer is null, which says what the `SET NULL` is about to say
-whatever the phase order ([39] holds the case both ways). If
+whatever the phase order ([40] holds the case both ways). If
 any survive, and the transaction-local `ob1.cited_delete` is not `detach`, it
 raises **SQLSTATE `OB001`** and the whole statement fails. Otherwise it
 *detaches* every surviving citation that named a deleted row, active or not:
@@ -14093,7 +15011,7 @@ never deleted (sixth); and
 the source id is stored canonical, since
 the validate regex is case-insensitive and a raw writer's upper-case uuid would
 otherwise have been invisible to the guard's text compare — its source
-deletable from under it (both second pass; [39]). `superseded_by` carries a
+deletable from under it (both second pass; [40]). `superseded_by` carries a
 partial index, because its `SET NULL` is a referential action that scans for
 the pointing rows on every facet the `thought_id` cascade removes (third pass).
 It totals what it did in two transaction-local settings, summed across
@@ -14146,7 +15064,7 @@ on a delete as "cited". Success carries `detached:n` and, when non-zero,
 `inactive:m`. The mode is the *call's*, not the transaction's: the setting that
 was there is put back after the block, so a raw `DELETE` later in the same
 transaction meets the guard's default, or the caller's own setting, and not
-this call's `p_detach` (first review pass; [39]); the two running totals are
+this call's `p_detach` (first review pass; [40]); the two running totals are
 read before and subtracted after — the guard adds to them, a refusal's
 rollback undoes its adding — so this call's own count is the difference and a
 raw detach transaction that calls the function in the middle keeps its sum
@@ -14241,7 +15159,7 @@ signatures names 041 as the last file to apply through, so an operator who
 follows it is not sent back for `delete signature` on the next start (fifth
 pass).
 
-**Held by:** `db/test-schema.ts` [39] on PGlite — the shape (two triggers, the
+**Held by:** `db/test-schema.ts` [40] on PGlite — the shape (two triggers, the
 guard per statement over `deleted`, one three-argument `delete_thought`, the
 one `EXCEPTION` clause naming the one SQLSTATE, the lock before the block the
 `DELETE` runs in and the refusal read from the error, the writer's order, the
@@ -14257,12 +15175,12 @@ real Postgres, the FK-fault fixture included; `db/test-live.ts` [6i], the five
 race arms above; `test-upgrade` [7]'s window guard and note moved to eleven;
 `test-preflight` [5]'s capture-role walk names the facet `UPDATE` and its
 signature walk re-applies 036 over 041 and drops 041's form for the `delete
-signature` check; `server-portable/test-store-postgrest.ts` [11] drives
+signature` check; `server-portable/test-store-postgrest.ts` [12] drives
 `deleteThought` through the SQL shim — `p_detach` named and bound, the `CITED`
 envelope normalised, a two-argument named `rpc` still resolving. Ten
 mutants, each reverting one mechanism, each failing the suite named for it:
-the lock dropped from `delete_thought` ([36], [39], and [6g]'s forty-race
-deadlock — 13 of 40), the guard raising `foreign_key_violation` ([39]'s
+the lock dropped from `delete_thought` ([36], [40], and [6g]'s forty-race
+deadlock — 13 of 40), the guard raising `foreign_key_violation` ([40]'s
 refusal becomes a fault; [10]), the `KEY SHARE` dropped ([6i] arm 1: the
 delete no longer waits), history counted as active, a self-citation allowed,
 the writer's lock dropped ([6i] arm 2 deadlocks), the guard's default flipped
@@ -14311,10 +15229,11 @@ coverage and yield views (each a later ticket if the facet earns its keep);
 `thought_edges` (declined in change 46, and check 7 knows upstream's shape as a
 clobber pattern); a read that labels a citation's expiry or a deleted source
 (SMD-1725's `as_of` read is where labels on facets belong); any writer over
-MCP. Three vendored servers delete with a raw `.delete()` on `thoughts` —
-`integrations/rest-api`'s dedup merge (after it has rewritten the survivor and
-logged the merge), `integrations/delete-thought-mcp`, `integrations/open-brain-rest`
-— and now meet the guard as a bare `OB001` with no detach path, the way every
+MCP. Three vendored servers delete with a raw `.delete()` on `thoughts` at four
+sites — `integrations/rest-api`'s dedup merge (after it has rewritten the
+survivor and logged the merge) and its delete route,
+`integrations/delete-thought-mcp`, `integrations/open-brain-rest` — and now
+meet the guard as a bare `OB001` with no detach path, the way every
 raw writer met 008's rule; routing them through `delete_thought` is
 **SMD-1793**, filed from the first review pass in the shape of changes 69 and
 71. `--reapply` (change 56) re-runs 009 and 036 in their turn, each re-creating

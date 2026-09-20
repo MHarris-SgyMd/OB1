@@ -23,7 +23,7 @@
  */
 
 import { SQL } from "bun";
-import { actorPayload, captureEnvelope, isoTimestampOrNull, normaliseAgentResolution, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, normaliseThoughtMeta, normaliseThoughtRecord, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE } from "./store.ts";
+import { actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, normaliseThoughtMeta, normaliseThoughtRecord, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
@@ -54,14 +54,16 @@ function toVector(embedding: number[]): string {
 }
 
 /**
- * A Postgres array literal for a `::uuid[]` bind. Bun.sql serialises a JS array
- * by joining with commas — `a,b`, not `{a,b}` — which array_in rejects (the
- * literal must start with `{`), so both array columns are built by hand here as
- * toVector builds a vector. The ids come from our own search results (validated
- * uuids), never from free text. Empty stays `{}`.
+ * A Postgres array literal for a `::uuid[]` bind. Bun binds a JS array to a
+ * text parameter comma-joined — no braces — so the literal is built by hand,
+ * as toVector builds a vector. Ids are validated before they reach here (the
+ * search results' own ids; normaliseActionRows for the query log); a null
+ * element is the NULL element (the log's nullable agent column). By hand
+ * rather than sql.array because the driver renders a null element as the text
+ * `null`, which uuid[] refuses (probed, seventh review pass). Empty stays `{}`.
  */
-function toUuidArray(ids: string[]): string {
-  return `{${ids.join(",")}}`;
+function toUuidArray(ids: (string | null)[]): string {
+  return `{${ids.map((x) => x ?? "NULL").join(",")}}`;
 }
 
 /**
@@ -404,10 +406,25 @@ export class SqlStore implements ThoughtStore {
          ${row.filter}::jsonb, ${toUuidArray(row.resultIds)}::uuid[], ${toRealArray(row.resultScores)}::real[])`;
   }
 
-  async logAction(row: QueryActionLog): Promise<void> {
+  async logActions(rows: QueryActionLog[]): Promise<void> {
+    if (rows.length === 0) return;
+    // The batch's contract — absent agent → NULL, every id a uuid, refused by
+    // column before the statement — is normaliseActionRows (store.ts), the
+    // same call the PostgREST writer makes. One statement for one row or
+    // forty: the tools, agents and targets as aligned arrays, unnested side by
+    // side. The tool column binds through the driver's own sql.array (a quote,
+    // a backslash, a comma and a brace carried intact — probed); the uuid
+    // columns as by-hand literals, because sql.array renders a null element as
+    // the text `null` and the agent column is nullable. The one writer of
+    // action rows — a single-row VALUES twin was removed so there is one
+    // INSERT shape to keep right (SMD-1719, fourth pass).
+    const clean = normaliseActionRows(rows);
     await this.sql`
       INSERT INTO query_log (kind, tool, agent_id, target_id)
-      VALUES ('action', ${row.tool}::text, ${row.agentId ?? null}::uuid, ${row.targetId}::uuid)`;
+      SELECT 'action', t.tool, t.agent_id, t.target_id
+        FROM unnest(${this.sql.array(clean.map((r) => r.tool), "TEXT")}::text[],
+                    ${toUuidArray(clean.map((r) => r.agentId))}::uuid[],
+                    ${toUuidArray(clean.map((r) => r.targetId))}::uuid[]) AS t(tool, agent_id, target_id)`;
   }
 
   async close(): Promise<void> {
