@@ -48,12 +48,11 @@ SUPABASE (from your Open Brain setup)
 
 ## Steps
 
-1. Open your Supabase dashboard and navigate to the **SQL Editor**
-2. Create a new query and paste the full contents of `schema.sql`
-3. Click **Run** to execute the migration (the `CREATE INDEX` will briefly lock the `thoughts` table against writes; ~1-2 minutes at 90K rows)
-4. In a new query, run `ANALYZE public.thoughts;` to refresh planner statistics so the new index is picked up immediately. `ANALYZE` cannot run inside the migration's transaction, so it must be a separate command.
-5. Navigate to **Database > Extensions** and confirm `pg_trgm` is enabled
-6. Navigate to **Database > Indexes** (or run the verification query below) and confirm `idx_thoughts_content_trgm` exists on `public.thoughts`
+1. Apply `schema.sql` to your brain: `psql "$DATABASE_URL" -f schema.sql` (or paste it into your SQL console).
+2. Nothing to grant (this fork, SMD-1796): the file adds an index only. The `CREATE INDEX` briefly locks the `thoughts` table against writes (~1-2 minutes at 90K rows).
+3. In a new query, run `ANALYZE public.thoughts;` to refresh planner statistics so the new index is picked up immediately. `ANALYZE` cannot run inside the migration's transaction, so it must be a separate command.
+4. Navigate to **Database > Extensions** and confirm `pg_trgm` is enabled
+5. Navigate to **Database > Indexes** (or run the verification query below) and confirm `idx_thoughts_content_trgm` exists on `public.thoughts`
 
 ## Expected Outcome
 

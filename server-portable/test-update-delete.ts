@@ -313,6 +313,80 @@ console.log("\n[9] `supersedes` through the tool: set, clear, a loop and a ghost
   assert(/supersedes cleared/.test(cleared) && (await pointer(newer)) === null, `null clears it, and the reply says so (${cleared.split("\n")[0]})`);
 }
 
+console.log("\n[10] A thought cited as a source is refused by name and detached on request; expired and superseded citations never block and are marked; thirteen are counted and ten shown; a real foreign-key failure is a fault, not a refusal (migration 042)");
+{
+  const idOf = (reply: string) => reply.match(/id ([0-9a-f-]{36})/)?.[1] ?? "";
+  const cite = async (thought: string, src: string, text: string, stance = "retrieved") =>
+    ((await sql`SELECT record_citation(${thought}::uuid, ${src}::uuid, ${text}, ${stance}) AS r`)[0] as { r: { ok: boolean; id?: string; error?: string } }).r;
+  const source = idOf(await writer.call("capture_thought", { content: "the source: the API allows 600 calls a minute" }));
+  const note = idOf(await writer.call("capture_thought", { content: "the note: our ceiling is 500 a minute because of the limit" }));
+  const c1 = await cite(note, source, "the limit is 600 a minute");
+  assert(c1.ok === true, `record_citation writes the citing row (${JSON.stringify(c1)})`);
+
+  // Refused in the tool's words, the citing thought and its statement named,
+  // the way through spelled; nothing deleted, nothing audited.
+  let msg = "";
+  try { await writer.call("delete_thought", { id: source }); } catch (e) { msg = (e as Error).message; }
+  assert(/Refused: 1 citation on other thoughts rests on/.test(msg) && new RegExp(`- ${note} \\(retrieved\\): the limit is 600 a minute`).test(msg) && /pass detach_citations: true/.test(msg),
+    `deleting the source is refused, the citing thought and its statement named, the way through spelled (${msg.slice(0, 70)})`);
+  assert(Number((await sql`SELECT count(*)::int AS c FROM thoughts WHERE id = ${source}::uuid`)[0].c) === 1 &&
+         Number((await sql`SELECT count(*)::int AS c FROM thought_audit WHERE thought_id = ${source}::uuid AND action = 'delete'`)[0].c) === 0,
+    "…and the source stands, no audit delete row written");
+  // Detach: deleted, the reply counts, the citation keeps its text and records the source.
+  const detached = await writer.call("delete_thought", { id: source, detach_citations: true });
+  assert(new RegExp(`^Deleted ${source}\\. Its previous content is preserved in the audit trail\\.`).test(detached) && /1 citation on other thoughts rested on it and was detached/.test(detached) && new RegExp(`records ${source} as its deleted source`).test(detached),
+    `with detach_citations the source is deleted and the reply says what became of the citation (${detached.slice(0, 60)})`);
+  const [facet] = (await sql`SELECT payload FROM thought_facets WHERE thought_id = ${note}::uuid`) as { payload: Record<string, unknown> }[];
+  assert(facet?.payload?.source_id === null && facet?.payload?.source_deleted_id === source && typeof facet?.payload?.source_deleted_at === "string" && facet?.payload?.text === "the limit is 600 a minute" && facet?.payload?.stance === "retrieved",
+    `the citation keeps its text and stance, loses its source and records which thought was deleted and when (${JSON.stringify(facet?.payload)})`);
+  const [ev] = await sql`SELECT actor_name, diff FROM thought_audit WHERE thought_id = ${source}::uuid AND action = 'delete'`;
+  assert(ev?.actor_name === "laptop" && /600 calls a minute/.test(String(ev?.diff?.previous_content)), "…and the delete is audited under the key's name with the previous content — the actor was set outside the block the refusal rolls back");
+
+  // Expired and superseded citations never block, and are marked when the source goes.
+  const source2 = idOf(await writer.call("capture_thought", { content: "a second source with only stale citations" }));
+  const note2 = idOf(await writer.call("capture_thought", { content: "a note whose citations of the second source are history" }));
+  const expired = (await cite(note2, source2, "an old claim")).id!;
+  await sql`UPDATE thought_facets SET valid_until = now() - interval '1 day' WHERE id = ${expired}::uuid`;
+  const replaced = (await cite(note2, source2, "a replaced claim")).id!;
+  const replacing = (await cite(note2, source2, "the replacing claim")).id!;
+  await sql`UPDATE thought_facets SET superseded_by = ${replacing}::uuid WHERE id = ${replaced}::uuid`;
+  msg = "";
+  try { await writer.call("delete_thought", { id: source2 }); } catch (e) { msg = (e as Error).message; }
+  assert(/Refused: 1 citation/.test(msg) && /the replacing claim/.test(msg) && !/an old claim|a replaced claim/.test(msg), `only the active citation counts and is named — the expired and the superseded are not (${msg.slice(0, 50)})`);
+  await sql`UPDATE thought_facets SET valid_until = now() - interval '1 hour' WHERE id = ${replacing}::uuid`;
+  const clean = await writer.call("delete_thought", { id: source2 });
+  assert(new RegExp(`^Deleted ${source2}\\.`).test(clean) && /3 expired or superseded citations that named it were marked with the deletion/.test(clean) && !/detached/.test(clean),
+    `with every citation expired or superseded the delete goes through without detach_citations, and the reply says the three were marked (${clean.slice(0, 60)})`);
+  const marked = (await sql`SELECT payload->>'source_id' AS s, payload->>'source_deleted_id' AS d FROM thought_facets WHERE thought_id = ${note2}::uuid`) as { s: string | null; d: string }[];
+  assert(marked.length === 3 && marked.every((m) => m.s === null && m.d === source2), "…and all three record the deleted source, so no row names a thought that is gone");
+
+  // Thirteen citing thoughts: the count is the whole, the sample ten.
+  const source3 = idOf(await writer.call("capture_thought", { content: "a source thirteen notes cite" }));
+  for (let i = 0; i < 13; i++) await cite(idOf(await writer.call("capture_thought", { content: `citing note number ${i} of thirteen` })), source3, `statement ${i}`);
+  msg = "";
+  try { await writer.call("delete_thought", { id: source3 }); } catch (e) { msg = (e as Error).message; }
+  assert(/Refused: 13 citations on other thoughts rest on/.test(msg) && (msg.match(/^  - [0-9a-f-]{36} \(retrieved\): statement \d+$/gm) ?? []).length === 10 && /…and 3 more/.test(msg),
+    `thirteen citations: the count says 13, ten are listed, the rest counted (${(msg.match(/^  - /gm) ?? []).length} listed)`);
+
+  // A citation's text in the reply goes through the cleaner every other
+  // thought-derived text does: control characters never reach the terminal.
+  const source4 = idOf(await writer.call("capture_thought", { content: "a source cited with control characters" }));
+  await cite(idOf(await writer.call("capture_thought", { content: "a note whose citation text carries an escape" })), source4, "limit is 600[2J and more");
+  msg = "";
+  try { await writer.call("delete_thought", { id: source4 }); } catch (e) { msg = (e as Error).message; }
+  assert(/limit is 600\[2J and more/.test(msg) && !/[ --]/.test(msg), `the citation's text is cleaned for display in the refusal (${JSON.stringify(msg.match(/limit is 600.{0,12}/)?.[0])})`);
+
+  // A real foreign-key failure on the delete is a fault, not CITED: the
+  // function catches only the guard's SQLSTATE.
+  const pinned = idOf(await writer.call("capture_thought", { content: "a thought a foreign table pins" }));
+  await sql`CREATE TABLE zz_pin_1712 (thought_id uuid REFERENCES thoughts(id))`;
+  await sql`INSERT INTO zz_pin_1712 VALUES (${pinned}::uuid)`;
+  msg = "";
+  try { await writer.call("delete_thought", { id: pinned }); } catch (e) { msg = (e as Error).message; }
+  assert(/delete_thought failed: .*violates foreign key constraint "zz_pin_1712_thought_id_fkey"/.test(msg) && !/Refused/.test(msg), `a foreign-key violation surfaces as the fault it is, not as a refusal (${msg.slice(0, 80)})`);
+  await sql`DROP TABLE zz_pin_1712`;
+}
+
 await sql.close();
 server.stop();
 provider.stop();

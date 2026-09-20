@@ -105,9 +105,9 @@ configured as the brain is, or change the record on purpose with `reembed.ts
 own definition is the update). The checks read the catalog and `ob1_config`
 under a 10 s lock timeout of their own. A plain run on the baselined brain,
 where 030 is pending, fails at 030 with what is missing and this command,
-rather than a bare "does not exist"; preflight's `edit signature`, `vector
-models` and `atomic capture` remedies name it where the ledger records the
-migration they find absent.
+rather than a bare "does not exist"; preflight's `edit signature`, `delete
+signature`, `vector models` and `atomic capture` remedies name it where the
+ledger records the migration they find absent.
 
 **021's evidence backfill runs with the operator's acceptances out of its
 sight** — on the re-run, and on a plain run where 021 is pending (a brain built
@@ -164,8 +164,8 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `973 assertions: 973 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports forty migrations applied, and
+`bun test-schema.ts` prints `998 assertions: 998 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports forty-one migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -202,7 +202,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 (024 change 45, 025 change 46, 026 change 47, 027 change 48, 028 change 49,
 029 change 54, 030 change 56, 031 change 57, 032 change 60, 033 change 63,
 034 change 65, 035 change 66, 036 change 68, 037 change 70, 038 change 80, 039 change 81,
-040 change 91).
+040 change 91, 041 change 94, 042 change 95).
 
 ## What changed relative to the guide
 
@@ -227,7 +227,9 @@ introduce multi-tenancy; do not port this one.
 
 **No `GRANT … TO service_role`.** Grant to whichever role your application
 connects as — and to more than `thoughts`: see [Grants for a capturing
-role](#grants-for-a-capturing-role) below.
+role](#grants-for-a-capturing-role) below. The community schemas under
+`schemas/` carried the same grants, and RLS with a policy for that role, until
+change 93 (SMD-1796) cut them; their tables are the **community** group there.
 
 ## Grants for a capturing role
 
@@ -247,11 +249,12 @@ same one, grouped by what the role does. Preflight's `write privileges` check
 refuses a server role missing any of the **capture** group; `migrate.ts --grant`
 issues every group at once.
 
-| Group | Table (migration) | Privileges |
+| Group | Object (migration, or `schemas/` file) | Privileges |
 | --- | --- | --- |
 | **capture** — the server's own connection; preflight refuses a role missing any of it | `thoughts` (001) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `thought_chunks` (007) | `SELECT, INSERT, DELETE` |
 | | `thought_audit` (008) | `INSERT` |
+| | `thought_facets` (042) | `SELECT, UPDATE` — the delete guard reads the citations that name a thought and, detaching, writes them, on every delete |
 | **server** — the server's soft extras, beyond capture; never fatal to a bare capture, but `resolve_agent` *upserts* the agent tables, so attribution needs the writes, not just `SELECT` | `ob1_config` (006) | `SELECT` |
 | | `ob1_agents` (010) | `SELECT, INSERT, UPDATE` |
 | | `ob1_agent_keys` (010) | `SELECT, INSERT, UPDATE` |
@@ -262,11 +265,42 @@ issues every group at once.
 | | `thought_entities` (016) | `SELECT, INSERT, DELETE` |
 | | `ob1_entity_edges` (016) | `SELECT, INSERT, DELETE` |
 | **querylog** — the opt-in query log (`OB1_QUERY_LOG=on`, off by default, SMD-1295); the server writes it only when enabled, and only inserts | `query_log` (034) | `INSERT` |
+| **community** — the schemas under `schemas/`, applied by hand beside the migrations (SMD-1796). Upstream's files granted these to Supabase's `service_role` and enabled RLS with a policy for it; neither exists off Supabase, so the files grant nothing now and this group does — the privileges upstream gave its service role, plus what Supabase's default privileges hid: `USAGE` on a `BIGSERIAL` column's sequence, and `EXECUTE` on a function `REVOKE`d `FROM PUBLIC`. Issued for whichever files you have applied; the rest are skipped and named | `thought_audit` (schemas/thought-audit — 008's table; upstream's `SELECT, INSERT`, kept) | `SELECT, INSERT` |
+| | view `thought_provenance` (schemas/thought-audit, `author-session-id.sql` — a view over `thoughts`, which needs its own `SELECT`) | `SELECT` |
+| | `agent_memories`, `agent_memory_source_refs`, `agent_memory_artifacts`, `agent_memory_relations`, `agent_memory_review_actions`, `agent_memory_recall_traces`, `agent_memory_recall_items`, `agent_memory_audit_events` (schemas/agent-memory) | `SELECT, INSERT, UPDATE, DELETE` |
+| | `openbrain_agents`, `agent_memory_keys` (schemas/per-agent-identity) | `SELECT, INSERT, UPDATE, DELETE` |
+| | function `lookup_agent_memory_key(text)` (schemas/per-agent-identity; SECURITY DEFINER, `REVOKE`d `FROM PUBLIC`) | `EXECUTE` |
+| | `ingestion_jobs`, `ingestion_items` (schemas/smart-ingest) | `SELECT, INSERT, UPDATE, DELETE` |
+| | sequences `ingestion_jobs_id_seq`, `ingestion_items_id_seq` (schemas/smart-ingest; `BIGSERIAL` ids) | `USAGE, SELECT` |
+| | function `append_thought_evidence(bigint, jsonb)` (schemas/smart-ingest; SECURITY DEFINER, `REVOKE`d `FROM PUBLIC`) | `EXECUTE` |
+| | `entities`, `edges`, `entity_extraction_queue`, `consolidation_log` (schemas/entity-extraction — upstream's tables, not 016's `ob1_*`) | `SELECT, INSERT, UPDATE, DELETE` |
+| | `thought_entities` (schemas/entity-extraction names 016's table under `IF NOT EXISTS`; the **extraction** row's privileges exactly, so the merge widens nothing) | `SELECT, INSERT, DELETE` |
+| | sequences `entities_id_seq`, `edges_id_seq`, `consolidation_log_id_seq` (schemas/entity-extraction; `BIGSERIAL` ids) | `USAGE, SELECT` |
+| | `thought_edges` (schemas/typed-reasoning-edges) | `SELECT, INSERT, UPDATE, DELETE` |
+| | sequence `thought_edges_id_seq` (schemas/typed-reasoning-edges; `BIGSERIAL` id) | `USAGE, SELECT` |
+| | function `thought_edges_upsert(uuid, uuid, text, numeric, integer, text, timestamptz, timestamptz, jsonb)` (schemas/typed-reasoning-edges; `REVOKE`d `FROM PUBLIC`) | `EXECUTE` |
+| | `wiki_pages`, `wiki_sections` (schemas/wiki-pages) | `SELECT, INSERT, UPDATE, DELETE` |
+| | `wiki_section_revisions` (schemas/wiki-pages; append-only — upstream's intent, kept) | `SELECT, INSERT` |
+| | functions `wiki_upsert_page(text, text, text, jsonb, text)`, `wiki_write_section(uuid, text, text, text, text, jsonb, uuid[], integer, text)`, `wiki_accept_pending(uuid, text)` (schemas/wiki-pages; `REVOKE`d `FROM PUBLIC`) | `EXECUTE` |
+| | `crm_persons`, `crm_person_mentions` (schemas/crm-person-tiers) | `SELECT, INSERT, UPDATE, DELETE` |
+| | `readwise_books` (schemas/readwise-books — upstream granted the table nothing; its integration wrote it through Supabase's default privileges) | `SELECT, INSERT, UPDATE, DELETE` |
+| | functions `merge_thought_provenance_metadata(uuid, jsonb)`, `merge_thought_eval_metadata(uuid, jsonb)` (schemas/provenance-chains; SECURITY DEFINER, `REVOKE`d `FROM PUBLIC`) | `EXECUTE` |
 
-Plus `USAGE ON SCHEMA public`. There are no sequences to grant: every table's
-primary key is a `uuid` or a natural key, so `INSERT` needs no sequence `USAGE`.
-`ob1_config` appears twice — `SELECT` for the server's own read, `INSERT, UPDATE`
-for a worker's job key — and `--grant` merges them into one `GRANT`.
+Plus `USAGE ON SCHEMA public`. The migrations' own tables need no sequence
+grant — every primary key is a `uuid` or a natural key — but three community
+schemas use `BIGSERIAL` ids, and an `INSERT` into such a table needs `USAGE` on
+the sequence (`permission denied for sequence …` with the table fully granted),
+so the **community** group names those six sequences; an identity column
+(`wiki_section_revisions.id`) needs none. Both are measured, not recalled:
+test-schema [40] grants the tables alone and watches which inserts are still
+refused. Functions are executable by `PUBLIC` by default, so only the community
+functions upstream `REVOKE`d `FROM PUBLIC` — the SECURITY DEFINER ones, and the
+wiki RPCs — are listed, for `EXECUTE`; the rest (the brain-stats, enhanced-thoughts,
+readwise and CRM RPCs) need nothing. `ob1_config` appears twice — `SELECT` for
+the server's own read, `INSERT, UPDATE` for a worker's job key — as does
+`thought_audit` (`INSERT` for the capture path, upstream's `SELECT` beside it),
+and `--grant` merges each into one `GRANT`. A view is granted as a table is,
+and needs it: a role's `SELECT` on `thoughts` does not reach a view over it.
 
 The one executable spelling — run as a role that can grant (the tables' owner or
 a superuser), after the migrations are applied:
@@ -275,13 +309,26 @@ a superuser), after the migrations are applied:
 bun migrate.ts --url ... --grant your_role
 ```
 
-`--grant` issues exactly the list above for the tables that exist, in one
-transaction; it never creates the role or sets a password, so create the role
-first. `--grant --dry-run` prints the statements without running them, so a
-locked-down deployment can grant a subset by hand. A role that only ever runs the
-server needs the **capture** and **server** groups; add **worker** for the role
-your bulk passes connect as, and **extraction** on top of that for entity
-extraction. The **querylog** group is issued too, so `OB1_QUERY_LOG=on` works out
+`--grant` issues exactly the list above for the tables, views, sequences and
+functions that exist, in one transaction — and before committing it asks the
+catalog whether the role now holds each privilege, because a grantor that holds
+a privilege without grant option "grants" it with only a warning and no effect;
+if anything is not held it rolls back, names the privileges, and says to connect
+as the objects' owner or a superuser; it never creates the role or sets a password, so
+create the role first. `--grant --dry-run` prints the statements without running
+them, so a locked-down deployment can grant a subset by hand. A role that only
+ever runs the server needs the **capture** and **server** groups; add **worker**
+for the role your bulk passes connect as, and **extraction** on top of that for
+entity extraction. The **community** group is issued for whichever `schemas/`
+files you have applied — the objects not yet present are skipped and named, so
+run `--grant` again after applying one; apply a community schema with `psql
+"$DATABASE_URL" -f schemas/<name>/schema.sql`, as its README says. Presence is
+per object, not per file, so the two community rows whose tables a migration
+also creates — `thought_audit` (008) and `thought_entities` (016) — are issued
+on every migrated brain: the audit row adds only upstream's `SELECT` on the
+log, and the mention row is the **extraction** row's privileges again, so
+neither widens what a brain without the file already grants. The
+**querylog** group is issued too, so `OB1_QUERY_LOG=on` works out
 of the box — but unlike the capture set it is not enforced: the query log is off
 by default and preflight cannot read a server env flag, so a role missing
 `query_log` `INSERT` is reported by the `query log` check, not refused (the log's
@@ -494,7 +541,10 @@ missing under a server that writes it. `edit signature` beside it checks that
 the nine-argument `update_thought` (032) is present and alone — an earlier form
 re-created beside it by a hand re-apply of 018 or 021 makes every call with
 fewer arguments, this tool's positional eight among them, `function is not
-unique`, and the DROP is the remedy — and `updated_at
+unique`, and the DROP is the remedy — `delete signature` does the same for the
+three-argument `delete_thought` (042: a brain still at 036 fails every delete
+the server sends, and 009 or 036 re-applied by hand puts the two-argument form
+back beside it) — and `updated_at
 trigger` that 001's trigger is still enabled after 021's backfill held it off. `--status` and the end of a run print `preflight will
 warn until this finishes:` with the same counts, so the two never disagree. A
 `--job` key without the prefix is accepted and noted: preflight will not report
@@ -1248,8 +1298,8 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 973 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 523 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
+bun test-schema.ts                          # 998 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 558 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 ```
 
@@ -1409,7 +1459,8 @@ first assumed. See FORK.md's SMD-1632 section.
   takes the supersession lock.
 - **The routing count is gated by a sample of the heap, drawn by TID range**
   (migrations 037 and 038). [5d] loads 25,000 rows at the configured width,
-  applies the last definer (040 — 039's body, run with `jit = off`) with its
+  applies the last definer (041 — 039's body, run with `jit = off` and its
+  two planner paths pinned) with its
   floor lowered to zero, and counts GIN index scans per call: the broad
   filter makes exactly one fewer under the gate than under 020's
   body (the collection skipped on every call — 037's TABLESAMPLE draw could
@@ -1444,20 +1495,38 @@ first assumed. See FORK.md's SMD-1632 section.
 - **match_thoughts runs with `jit = off`** (migration 040). [5e] turns off
   each planner path the sample has exactly one of (`enable_tidscan`,
   `enable_nestloop`, `enable_hashagg` with `enable_sort`) at session level
-  on a heap with the floor lowered: the statement read out of the body,
-  explained under the function's settings, keeps its TID Range Scan at
-  `disable_cost` and has no JIT block, the same statement with `jit` forced
-  on has one, and through the function the mutant with 040's clause RESET
-  pays the compile on every call (~50 ms) where the clause costs the
-  default's time — on PostgreSQL 14–17; on 18, which counts disabled nodes
-  instead of costing them, [5e] asserts that nothing is compiled either way
-  and names the node each path leaves (a sequential scan of the heap per
-  probe under `enable_tidscan = off`, which no clause reaches — SMD-1703),
-  and skips the mutant arm. `test-upgrade.ts` [18] applies 040 onto a populated 039:
-  the body byte for byte 039's, `jit=off` beside 014's and 019's clauses, no
+  on a heap with the floor lowered. For the one path 041 leaves unpinned
+  (hashagg with sort): the statement read out of the body, explained under
+  the function's settings, keeps its TID Range Scan at `disable_cost` and
+  has no JIT block, the same statement with `jit` forced on has one, and
+  through the function the mutant with 040's clause RESET pays the compile
+  on every call (~50 ms) where the clause costs the default's time — on
+  PostgreSQL 14–17; on 18, which counts disabled nodes instead of costing
+  them, [5e] asserts that nothing is compiled either way and skips the
+  mutant arm. `test-upgrade.ts` [18] applies 040 onto a populated 039: the
+  body byte for byte 039's, `jit=off` beside 014's and 019's clauses, no
   row or privilege moves, and the last definer applied alone drops a
-  hand-re-applied 014's 4-argument form. `test-schema.ts` [20] pins the
-  three clauses; preflight's `candidate scan` reads the third beside 019's.
+  hand-re-applied 014's 4-argument form.
+- **match_thoughts pins the two planner paths its statements are built
+  around** (migration 041: `enable_nestloop = on`, `enable_tidscan = on`).
+  [5e]'s tidscan and nestloop cases now find the default's plan under the
+  session's setting — a TID Range Scan at an ordinary cost, no `Disabled`
+  node on 18, fewer buffers than the heap has pages — and, with the pin RESET (the
+  mutant), `disable_cost` back on 14–17 and on 18 the disabled node back and,
+  under `enable_tidscan = off`, the probe a sequential scan of the whole heap
+  per block (SMD-1703's state). [5f] loads 12,000 rows with chunks and, under
+  a session `enable_nestloop = off`, explains the three RETURN QUERY
+  statements read out of the body under the function's settings: every join
+  a Nested Loop touching the default's buffers; with the pin RESET a Merge or
+  Hash Join touching at least the heap's page count more (the whole primary
+  key, and every chunk row on the walk); and through the function the pinned
+  call returns the default's ten rows under the setting. `test-upgrade.ts`
+  [19] applies 041 onto a populated 040: the body byte for byte 040's, the two
+  pins beside 014's, 019's and 040's clauses, no row or privilege moves, and
+  the last definer applied alone drops a hand-re-applied 014's 4-argument
+  form. `test-schema.ts` [20] and [21] pin exactly five clauses; preflight's
+  `candidate scan` reads the pins beside 019's clause and 040's and names
+  041, the last definer, as the remedy.
 - **The backfill holds the table** (migration 023). [6c] plants a legacy
   singleton and two twins, runs `backfill_content_fingerprints()` on one
   connection inside an open transaction, and has a second capture the

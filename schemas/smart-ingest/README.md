@@ -36,12 +36,11 @@ SUPABASE (from your Open Brain setup)
 
 ## Steps
 
-1. Open your Supabase dashboard and navigate to the **SQL Editor**
-2. Create a new query and paste the full contents of `schema.sql`
-3. Click **Run** to execute the migration
-4. Open **Table Editor** and confirm two new tables appear: `ingestion_jobs` and `ingestion_items`
-5. Navigate to **Database > Functions** and verify the `append_thought_evidence` function exists
-6. Test the function by running a quick validation query in the SQL Editor:
+1. Apply `schema.sql` to your brain: `psql "$DATABASE_URL" -f schema.sql` (or paste it into your SQL console).
+2. From `db/`, run `bun migrate.ts --url "$DATABASE_URL" --grant <role>` so the role your server connects as can use what the file creates — the file itself grants nothing (this fork, SMD-1796: upstream's `GRANT … TO service_role` lines and its row-level security are gone; `db/README.md`, "Grants for a capturing role", lists the `community` group).
+3. Open **Table Editor** and confirm two new tables appear: `ingestion_jobs` and `ingestion_items`
+4. Navigate to **Database > Functions** and verify the `append_thought_evidence` function exists
+5. Test the function by running a quick validation query in the SQL Editor:
 
    ```sql
    SELECT count(*) FROM ingestion_jobs;
@@ -52,11 +51,11 @@ SUPABASE (from your Open Brain setup)
 
 After running the migration:
 
-- Two new tables: `ingestion_jobs` (tracks job lifecycle with status, counters, and metadata) and `ingestion_items` (stores extracted thoughts with action codes, dedup reasons, and execution results). Both tables include a nullable `user_id uuid` column; on Supabase it references `auth.users(id) ON DELETE CASCADE`.
+- Two new tables: `ingestion_jobs` (tracks job lifecycle with status, counters, and metadata) and `ingestion_items` (stores extracted thoughts with action codes, dedup reasons, and execution results). Both tables include a nullable `user_id uuid` column (upstream's foreign key into Supabase's `auth.users` is gone on this fork — SMD-1796).
 - Three indexes: `ingestion_items_job_idx` on `ingestion_items(job_id)` for fast job-to-item lookups, plus partial indexes `idx_ingestion_jobs_pending` (jobs in `status = 'pending'`) and `idx_ingestion_items_pending` (items in `status IN ('pending','ready')`) to keep the worker's queue polling small.
-- Row Level Security enabled on both tables with a `service_role ALL` policy on each, and — on Supabase — an `authenticated SELECT` policy scoped to `user_id = auth.uid()` so a signed-in user can read only their own rows.
+- No row-level security in the file (this fork, SMD-1796): upstream enabled RLS on both tables with a `service_role ALL` policy and, on Supabase, an `authenticated SELECT` policy scoped to `user_id = auth.uid()`; neither role exists off Supabase, and RLS with no policy for the role you connect as denies it every row.
 - One RPC function `append_thought_evidence(bigint, jsonb)` that idempotently appends evidence entries to a thought's metadata.
-- Service role has full access to both tables and their sequences. The `append_thought_evidence` RPC is **service-role only** — it is `SECURITY DEFINER` and bypasses RLS on `thoughts`, so it is revoked from `public` and granted only to `service_role`. The companion Edge Function (`integrations/smart-ingest/`) must call it with the Supabase service role key, never the anon key.
+- The file grants nothing; `bun migrate.ts --grant <role>` gives the role your worker connects as both tables, their two sequences (an `INSERT` into a `bigserial` table needs `USAGE` on its sequence) and `EXECUTE` on `append_thought_evidence`, which stays `REVOKE`d `FROM PUBLIC` — it is `SECURITY DEFINER` and writes `thoughts.metadata`, so only a role granted it may call it (upstream granted Supabase's `service_role`; the companion Edge Function called it with that key).
 
 ## Job Claim Semantics
 

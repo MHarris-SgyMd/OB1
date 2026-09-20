@@ -380,27 +380,27 @@ else {
   assert(/has 014's body but no iterative scan in force although migration 014 is recorded as applied — a later redefinition dropped its SET clause/.test(noClause.out), "…is described as 014's body without its clause");
   assert(/ALTER FUNCTION match_thoughts\(vector,double precision,integer,jsonb,double precision,double precision\) SET hnsw\.iterative_scan = relaxed_order/.test(noClause.out), "…with the ALTER FUNCTION that puts the clause back as the remedy, naming the signature the catalog holds");
   // RESET ALL took 019's clause with it (prorows it leaves alone): the second
-  // check names the clause, as a warning, with 040's file as the remedy since
-  // this ledger records neither 019 nor 040 — 040 is the last definer and
+  // check names the clause, as a warning, with 041's file as the remedy since
+  // this ledger records neither 019 nor 041 — 041 is the last definer and
   // carries 019's clauses; 019's own file is never named (review pass 2).
   assert(/candidate scan.*does not carry enable_seqscan = off — migration 019 is not applied/s.test(noClause.out), "the candidate-scan check reports 019's clause missing");
   // The remedy is the LAST definer, not 019's file: on this 6-argument brain
   // 019's CREATE would put the 4-argument form back beside it (the state the
-  // twoForms section below fails the start on), while 040 carries 019's
+  // twoForms section below fails the start on), while 041 carries 019's
   // clauses and ROWS 10 with its own and drops that form (review pass 2).
-  assert(/Apply db\/migrations\/040_match_thoughts_jit_off\.sql — the last definer of match_thoughts, which carries 019's clauses and ROWS 10 with its own \(019's file alone would re-create the 4-argument form 020 dropped\)\.\s*$/m.test(noClause.out) && !/Apply db\/migrations\/019/.test(noClause.out) && !/Then put the keyword estimate back/.test(noClause.out),
-         "…with 040, the last definer, as the whole remedy while the ledger records neither 019 nor 040 — never 019's own file, and no keyword ALTER while that estimate holds");
+  assert(/Apply db\/migrations\/041_match_thoughts_pin_paths\.sql — the last definer of match_thoughts, which carries 019's clauses and ROWS 10 with its own \(019's file alone would re-create the 4-argument form 020 dropped\)\.\s*$/m.test(noClause.out) && !/Apply db\/migrations\/019/.test(noClause.out) && !/Then put the keyword estimate back/.test(noClause.out),
+         "…with 041, the last definer, as the whole remedy while the ledger records neither 019 nor 041 — never 019's own file, and no keyword ALTER while that estimate holds");
   // The other remedy: 019 recorded, the clause gone — the ALTER that restores both.
   const led019 = new SQL({ url: LIVE, max: 1 });
-  // 040 recorded beside 019: a brain whose function carries 040's clause and
-  // whose ledger records 019 records 040 too, and a recorded last definer is
-  // what makes the ALTER, not a file, the remedy (review pass 2).
-  await led019.unsafe(`INSERT INTO schema_migrations (name, sha256) VALUES ('019_match_thoughts_plan_and_rows.sql', 'test'), ('040_match_thoughts_jit_off.sql', 'test')`);
+  // 040 and 041 recorded beside 019: a brain whose function carries their
+  // clauses and whose ledger records 019 records them too, and a recorded
+  // last definer is what makes the ALTER, not a file, the remedy (review pass 2).
+  await led019.unsafe(`INSERT INTO schema_migrations (name, sha256) VALUES ('019_match_thoughts_plan_and_rows.sql', 'test'), ('040_match_thoughts_jit_off.sql', 'test'), ('041_match_thoughts_pin_paths.sql', 'test')`);
   // RESET ALL leaves prorows alone; a CREATE OR REPLACE would not, so reset it by hand as a redefinition would —
   // and reset the keyword function's too, as re-applying 012 alone does. 040's
-  // jit clause is put back here so this fixture is 019's loss alone; its own
-  // loss is probed after the walk-index probes below.
-  await led019.unsafe(`ALTER FUNCTION ${MATCH_THOUGHTS_SIGNATURE} SET hnsw.iterative_scan = relaxed_order SET jit = off ROWS 1000`);
+  // jit clause and 041's two pins are put back here so this fixture is 019's
+  // loss alone; their own losses are probed after the walk-index probes below.
+  await led019.unsafe(`ALTER FUNCTION ${MATCH_THOUGHTS_SIGNATURE} SET hnsw.iterative_scan = relaxed_order SET jit = off SET enable_nestloop = on SET enable_tidscan = on ROWS 1000`);
   await led019.unsafe(`ALTER FUNCTION search_thoughts_keyword(text, int, int, jsonb) ROWS 1000`);
   await led019.close();
   const noSeq = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
@@ -410,7 +410,7 @@ else {
   assert(/ALTER FUNCTION match_thoughts\(vector,double precision,integer,jsonb,double precision,double precision\) SET enable_seqscan = off ROWS 10; ALTER FUNCTION search_thoughts_keyword\(text, int, int, jsonb\) ROWS 25;/.test(noSeq.out), "…with one ALTER FUNCTION per function as the remedy, after any body re-apply");
   // Only the keyword estimate gone: the clause is fine, one ALTER, the other function not named.
   const kwOnly = new SQL({ url: LIVE, max: 1 });
-  await kwOnly.unsafe(`ALTER FUNCTION ${MATCH_THOUGHTS_SIGNATURE} SET enable_seqscan = off SET jit = off ROWS 10`);
+  await kwOnly.unsafe(`ALTER FUNCTION ${MATCH_THOUGHTS_SIGNATURE} SET enable_seqscan = off SET jit = off SET enable_nestloop = on SET enable_tidscan = on ROWS 10`);
   await kwOnly.close();
   const kwReset = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
   assert(/candidate scan.*carries enable_seqscan = off but search_thoughts_keyword's row estimate is 1000 rather than 25 — a redefinition reset what 019 declared/s.test(kwReset.out), "a reset keyword estimate alone is named alone");
@@ -423,7 +423,7 @@ else {
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f >= "013" });
   // Everything shipped again: both estimates and the clause, reported as ok.
   const shipped = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
-  assert(/candidate scan.*declares enable_seqscan = off and ROWS 10, search_thoughts_keyword ROWS 25 \(019\), and match_thoughts jit = off \(040\)/s.test(shipped.out), "with every migration re-applied, the candidate-scan check reports 019's clause, both row estimates and 040's clause");
+  assert(/candidate scan.*declares enable_seqscan = off and ROWS 10, search_thoughts_keyword ROWS 25 \(019\), match_thoughts jit = off \(040\) and enable_nestloop = on with enable_tidscan = on \(041\)/s.test(shipped.out), "with every migration re-applied, the candidate-scan check reports 019's clause, both row estimates, 040's clause and 041's two pins");
   assert(shipped.code === 0 && /search signatures.*one of each/s.test(shipped.out), "…and the signature check is satisfied");
   // 039: the walk's cast and the index's expression are one contract in two
   // halves, and each half moves by hand without the other — 037 re-applied
@@ -473,24 +473,53 @@ else {
   const restored039 = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
   assert(/walk index.*over that expression \(039\)/s.test(restored039.out), "…and 039 builds it where the name is free");
   // 039's file alone, as the walk-index probes above applied it, is the state
-  // its header names for 040's clause: 039's CREATE carries 019's clauses and
-  // not 040's, so the candidate-scan check warns — and 040 puts it back.
-  assert(/candidate scan.*but not jit = off — migration 040 is not applied/s.test(restored039.out) && /040_match_thoughts_jit_off\.sql/.test(restored039.out),
-         "…while 039 applied alone has dropped 040's clause: the candidate-scan check names it and 040 as the remedy");
+  // 040's header names for its clause and 041's for its pins: 039's CREATE
+  // carries 019's clauses and neither 040's nor 041's, so the candidate-scan
+  // check warns for both — with 041, the last definer, as the one remedy.
+  // 040 applied over it puts the jit clause back and not the pins, which the
+  // check then names alone; 041 puts everything back.
+  assert(/candidate scan.*but not jit = off — migration 040 is not applied[^\n]*; and it does not carry enable_nestloop = on and enable_tidscan = on — migration 041 is not applied, so an operator's enable_nestloop = off/s.test(restored039.out) && /041_match_thoughts_pin_paths\.sql/.test(restored039.out) && !/040_match_thoughts_jit_off\.sql/.test(restored039.out),
+         "…while 039 applied alone has dropped 040's clause and 041's pins: the candidate-scan check names both losses and 041, the last definer, as the remedy — not 040's file");
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("040") });
-  assert(/candidate scan.*and match_thoughts jit = off \(040\)/s.test((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE })).out), "…and 040 applied over it is reported as carrying the clause");
+  const only040 = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+  assert(only040.code === 0 && /candidate scan.*carries enable_seqscan = off, both row estimates hold and jit = off, but not enable_nestloop = on and enable_tidscan = on — migration 041 is not applied: an operator's enable_nestloop = off at any level reaches every join in the call/s.test(only040.out) && /041_match_thoughts_pin_paths\.sql/.test(only040.out) && !/not carry jit = off/.test(only040.out),
+         "…040 applied over it carries the jit clause and not the pins: the check names the pins alone, with what an operator's setting does without them, and 041 as the remedy");
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("041") });
+  assert(/candidate scan.*match_thoughts jit = off \(040\) and enable_nestloop = on with enable_tidscan = on \(041\)/s.test((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE })).out), "…and 041 applied over it is reported as carrying the clause and both pins");
   // 040's clause alone gone — what a redefinition that carried 019's clauses
-  // and not 040's leaves: a warning naming the compile it lets back in, with
-  // the migration as the remedy while no ledger records 040, then ok again
-  // once 040 is re-applied.
+  // and 041's pins and not 040's leaves: a warning naming the compile it lets
+  // back in, with 041, the last definer, as the remedy while no ledger records
+  // it, then ok again once 041 is re-applied.
   const jitReset = new SQL({ url: LIVE, max: 1 });
   await jitReset.unsafe(`ALTER FUNCTION ${MATCH_THOUGHTS_SIGNATURE} RESET jit`);
   await jitReset.close();
   const noJit = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
-  assert(noJit.code === 0 && /candidate scan.*carries enable_seqscan = off and both row estimates hold, but not jit = off — migration 040 is not applied: a planner path disabled at any level/s.test(noJit.out) && /040_match_thoughts_jit_off\.sql/.test(noJit.out),
-         "match_thoughts without 040's jit clause still starts, and the candidate-scan check names the clause, the compile it lets back in and 040 as the remedy");
-  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("040") });
-  assert(/candidate scan.*and match_thoughts jit = off \(040\)/s.test((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE })).out), "…and 040 re-applied is reported as carrying it");
+  assert(noJit.code === 0 && /candidate scan.*carries enable_seqscan = off and both row estimates hold, but not jit = off — migration 040 is not applied: a planner path disabled at any level/s.test(noJit.out) && /041_match_thoughts_pin_paths\.sql/.test(noJit.out) && !/enable_nestloop = on and enable_tidscan = on — migration 041/.test(noJit.out),
+         "match_thoughts without 040's jit clause still starts, and the candidate-scan check names the clause, the compile it lets back in and 041 — the last definer — as the remedy, with nothing said of the pins, which hold");
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("041") });
+  assert(/candidate scan.*match_thoughts jit = off \(040\) and enable_nestloop = on with enable_tidscan = on \(041\)/s.test((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE })).out), "…and 041 re-applied is reported as carrying it");
+  // 041's two pins alone gone — what 040's file re-applied by hand leaves, or
+  // a redefinition that carried 040's clause and not 041's: the last branch
+  // of the check, naming what an operator's setting does without them, 041's
+  // file as the remedy while no ledger records it (SMD-1677).
+  const pinsReset = new SQL({ url: LIVE, max: 1 });
+  await pinsReset.unsafe(`ALTER FUNCTION ${MATCH_THOUGHTS_SIGNATURE} RESET enable_nestloop RESET enable_tidscan`);
+  await pinsReset.close();
+  const noPins = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+  assert(noPins.code === 0 && /candidate scan.*carries enable_seqscan = off, both row estimates hold and jit = off, but not enable_nestloop = on and enable_tidscan = on — migration 041 is not applied: an operator's enable_nestloop = off at any level reaches every join in the call[^\n]*on PostgreSQL 18 enable_tidscan = off leaves the gate's probe no TID Range path/s.test(noPins.out) && /Apply db\/migrations\/041_match_thoughts_pin_paths\.sql\.\s*$/m.test(noPins.out),
+         "match_thoughts without 041's pins still starts, and the candidate-scan check names both pins, what each setting does without them, and 041's file as the whole remedy");
+  const onePin = new SQL({ url: LIVE, max: 1 });
+  await onePin.unsafe(`ALTER FUNCTION ${MATCH_THOUGHTS_SIGNATURE} SET enable_nestloop = on`);
+  await onePin.close();
+  // One pin back of two — also the state the header's escape hatch leaves
+  // (`ALTER FUNCTION … RESET enable_nestloop`): still the warning, naming the
+  // one pin that is missing and what that setting alone does, and nothing
+  // about the one that holds (review pass 1).
+  const onePinOut = (await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE })).out;
+  assert(/candidate scan.*but not enable_tidscan = on — migration 041 is not applied: on PostgreSQL 18 enable_tidscan = off leaves the gate's probe no TID Range path/s.test(onePinOut) && !/not enable_nestloop = on/.test(onePinOut) && !/reaches every join/.test(onePinOut) && /Apply db\/migrations\/041_match_thoughts_pin_paths\.sql\.\s*$/m.test(onePinOut),
+         "…and one pin back of two is still the warning, naming only the pin that is missing and what its setting alone does, with 041's file as the remedy");
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("041") });
+  assert(/candidate scan.*match_thoughts jit = off \(040\) and enable_nestloop = on with enable_tidscan = on \(041\)/s.test((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE })).out), "…and 041 re-applied puts both back");
   // The other wording, with 040 RECORDED: "apply 040" would be a no-op for a
   // plain run, so the remedy is the ALTER that puts the clause back — and,
   // with the keyword estimate reset beside it and 019 recorded too, the
@@ -500,7 +529,7 @@ else {
   // (review pass 1). The ledger is created for these probes and dropped after.
   const led040 = new SQL({ url: LIVE, max: 1 });
   await led040.unsafe(`CREATE TABLE schema_migrations (name text PRIMARY KEY, sha256 text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())`);
-  await led040.unsafe(`INSERT INTO schema_migrations (name, sha256) VALUES ('019_match_thoughts_plan_and_rows.sql', 'test'), ('040_match_thoughts_jit_off.sql', 'test')`);
+  await led040.unsafe(`INSERT INTO schema_migrations (name, sha256) VALUES ('019_match_thoughts_plan_and_rows.sql', 'test'), ('040_match_thoughts_jit_off.sql', 'test'), ('041_match_thoughts_pin_paths.sql', 'test')`);
   await led040.unsafe(`ALTER FUNCTION ${MATCH_THOUGHTS_SIGNATURE} RESET jit`);
   await led040.unsafe(`ALTER FUNCTION search_thoughts_keyword(text, int, int, jsonb) ROWS 1000`);
   await led040.close();
@@ -509,21 +538,35 @@ else {
          "with 019 and 040 recorded, a reset keyword estimate and a dropped jit clause are both named, the clause as recorded-but-dropped");
   assert(/Put it back[^\n]*ALTER FUNCTION match_thoughts\(vector,double precision,integer,jsonb,double precision,double precision\) SET jit = off; ALTER FUNCTION search_thoughts_keyword\(text, int, int, jsonb\) ROWS 25;/.test(recorded040.out),
          "…with one ALTER per function as the remedy — SET jit = off for match_thoughts, ROWS 25 for the keyword function");
+  // And with 041 recorded and both pins RESET beside the jit clause: the
+  // ledger clause says recorded-but-dropped-or-RESET, and the one ALTER
+  // carries all three SETs — the fragment the file remedy never prints, so
+  // nothing else in this suite would catch a typo in it (review pass 1, run-it).
+  const led041 = new SQL({ url: LIVE, max: 1 });
+  await led041.unsafe(`ALTER FUNCTION ${MATCH_THOUGHTS_SIGNATURE} RESET enable_nestloop RESET enable_tidscan`);
+  await led041.close();
+  const recorded041 = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+  assert(/and it does not carry enable_nestloop = on and enable_tidscan = on although migration 041 is recorded as applied — a later redefinition dropped them, or an ALTER FUNCTION … RESET took them off, so an operator's enable_nestloop = off/.test(recorded041.out),
+         "with 041 recorded and both pins RESET, the pins are named as recorded-but-dropped, allowing for a RESET");
+  assert(/Put it back[^\n]*ALTER FUNCTION match_thoughts\(vector,double precision,integer,jsonb,double precision,double precision\) SET jit = off SET enable_nestloop = on SET enable_tidscan = on; ALTER FUNCTION search_thoughts_keyword\(text, int, int, jsonb\) ROWS 25;/.test(recorded041.out),
+         "…and the one ALTER for match_thoughts carries the jit clause and both pins, the keyword function's its ROWS 25");
   const led040b = new SQL({ url: LIVE, max: 1 });
-  await led040b.unsafe(`DELETE FROM schema_migrations WHERE name LIKE '040%'`);
+  await led040b.unsafe(`DELETE FROM schema_migrations WHERE name LIKE '040%' OR name LIKE '041%'`);
   await led040b.close();
   const unrecorded040 = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
-  // Only the jit clause and the keyword estimate are missing here, so the file
-  // is named without the parenthetical about 019's clauses (review pass 3).
-  assert(/Apply db\/migrations\/040_match_thoughts_jit_off\.sql\. Then put the keyword estimate back: SELECT '\[1\]'::vector; ALTER FUNCTION search_thoughts_keyword\(text, int, int, jsonb\) ROWS 25;/.test(unrecorded040.out),
-         "…and with 040 not recorded the remedy is 040's file for the clause and the keyword ALTER beside it, which 040 cannot restore");
+  // The jit clause, both pins and the keyword estimate are missing here (the
+  // recorded-041 probe above RESET the pins); 019's clause and ROWS 10 hold,
+  // so the file is named without the parenthetical about 019's clauses
+  // (review pass 3 of SMD-1624; pass 2 of SMD-1677 for the pins).
+  assert(/Apply db\/migrations\/041_match_thoughts_pin_paths\.sql\. Then put the keyword estimate back: SELECT '\[1\]'::vector; ALTER FUNCTION search_thoughts_keyword\(text, int, int, jsonb\) ROWS 25;/.test(unrecorded040.out),
+         "…and with neither 040 nor 041 recorded the remedy is 041's file — the last definer, which carries 040's clause and its own pins — and the keyword ALTER beside it, which 041 cannot restore");
   assert(!/the last definer of match_thoughts/.test(unrecorded040.out), "…without the note about 019's clauses, which hold here");
   const unled040 = new SQL({ url: LIVE, max: 1 });
   await unled040.unsafe(`DROP TABLE schema_migrations`);
   await unled040.unsafe(`ALTER FUNCTION search_thoughts_keyword(text, int, int, jsonb) ROWS 25`);
   await unled040.close();
-  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("040") });
-  assert(/candidate scan.*declares enable_seqscan = off and ROWS 10, search_thoughts_keyword ROWS 25 \(019\), and match_thoughts jit = off \(040\)/s.test((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE })).out), "…and everything put back is reported ok again");
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("041") });
+  assert(/candidate scan.*declares enable_seqscan = off and ROWS 10, search_thoughts_keyword ROWS 25 \(019\), match_thoughts jit = off \(040\) and enable_nestloop = on with enable_tidscan = on \(041\)/s.test((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE })).out), "…and everything put back is reported ok again");
   // A server that would not compile — Supabase's, whose images have no LLVM
   // JIT and whose upgrades set jit off; here the database's own jit off, the
   // setting a fresh connection (preflight's) inherits — is told the missing
@@ -538,8 +581,8 @@ else {
   const dbJitBack = new SQL({ url: LIVE, max: 1 });
   await dbJitBack.unsafe(`DO $j$ BEGIN EXECUTE format('ALTER DATABASE %I RESET jit', current_database()); END $j$`);
   await dbJitBack.close();
-  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("040") });
-  assert(!/not on this server today/.test((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE })).out), "…and with the database's jit back on and 040 applied, neither the warning nor the note appears");
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("041") });
+  assert(!/not on this server today/.test((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE })).out), "…and with the database's jit back on and 041 applied, neither the warning nor the note appears");
 
   /**
    * The other state 020's header names: an earlier migration re-applied by hand
@@ -1013,6 +1056,36 @@ else {
   const reapplied021 = await run(SQL_ENV);
   assert(reapplied021.code === 0 && /edit signature\s+update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text,jsonb\): the form the servers and reembed\.ts call since migration 032/.test(reapplied021.out),
          "…which 032 re-applied performs");
+  // 036 re-applied by hand over 042 puts the two-argument delete_thought back
+  // BESIDE 042's three-argument one: every two-argument caller is "not unique".
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("036") });
+  const twoDeletes = await run(SQL_ENV);
+  assert(twoDeletes.code === 1 && /delete signature\s+beside the form the servers call there is an earlier one: delete_thought\(uuid,jsonb\) — 009 or 036 re-applied by hand over 042/.test(twoDeletes.out) && /DROP FUNCTION delete_thought\(uuid,jsonb\);/.test(twoDeletes.out),
+         "036 re-applied over 042 leaves two delete_thought forms, and the start is refused naming the extra one with its DROP");
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("042") });
+  assert(/delete signature\s+delete_thought\(uuid,jsonb,boolean\): the form the servers call since migration 042, alone/.test((await run(SQL_ENV)).out), "…which 042 re-applied performs");
+  // A brain that stopped at 036 — a server deployed ahead of the migration:
+  // the two-argument form alone. Every delete the server sends would fail at
+  // the first user call, so the start is refused naming 042 instead.
+  await claims.unsafe("DROP FUNCTION delete_thought(uuid, jsonb, boolean)");
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("036") });
+  const preFacet = await run(SQL_ENV);
+  assert(preFacet.code === 1 && /delete signature\s+delete_thought\(uuid,jsonb\) is the form from before migration 042; the server sends p_detach, which only 042's form takes — so every delete would fail/.test(preFacet.out),
+         "a brain at 036 does not start: every delete the server sends would fail, and the check says so before a user finds out");
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("042") });
+  // The isolation level every lock-order argument assumes, read from the
+  // connection's default: ok at read committed, a warning naming the guarantees
+  // at any other, with the ALTER ROLE that puts it back. Set on the role, so a
+  // fresh session (preflight's) inherits it; reset after.
+  assert(/transaction isolation\s+default_transaction_isolation is read committed/.test((await run(SQL_ENV)).out), "the connection's default isolation is read committed, and the check says which guarantees rest on it");
+  await claims.unsafe("ALTER ROLE current_user SET default_transaction_isolation = 'repeatable read'");
+  try {
+    const rr = await run(SQL_ENV);
+    assert(rr.code === 0 && /transaction isolation\s+default_transaction_isolation is repeatable read: the writers' lock order \(018\/033\/036\) and the citation guard \(042\) are argued under read committed/.test(rr.out) && /ALTER ROLE \S+ SET default_transaction_isolation = 'read committed';/.test(rr.out),
+           `a role defaulting to repeatable read starts with a warning naming the guarantees that rest on read committed and the ALTER ROLE that restores it (exit ${rr.code})`);
+  } finally {
+    await claims.unsafe("ALTER ROLE current_user RESET default_transaction_isolation");
+  }
   // …and 021's CREATE OR REPLACE put its 3-argument upsert_thought back over
   // 035's: a chunkless re-capture would leave the previous vector's windows
   // again. A warning naming 035 — captures work, search is over-inclusive.
@@ -1150,30 +1223,39 @@ else {
       await claims.unsafe("GRANT SELECT ON ALL TABLES IN SCHEMA public TO ob1_pf_capture");
       await claims.unsafe("GRANT INSERT, UPDATE, DELETE ON thoughts TO ob1_pf_capture");
 
-      // thoughts satisfied, but no INSERT/DELETE on thought_chunks and no INSERT
-      // on thought_audit: refused, both tables named in CAPTURE_WRITES order,
-      // each with its GRANT.
+      // thoughts satisfied, but no INSERT/DELETE on thought_chunks, no INSERT
+      // on thought_audit and no UPDATE on thought_facets (042's delete guard
+      // writes the detached citations as the caller): refused, the three
+      // tables named in CAPTURE_WRITES order, each with its GRANT.
       const missingBoth = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
       const writeLine = (out: string) => out.split("\n").find((l) => /write privileges/.test(l)) ?? "";
       assert(missingBoth.code === 1 &&
              /write privileges\s+this connection's role \(ob1_pf_capture\) is missing privileges the capture path's writers need/.test(missingBoth.out) &&
-             /INSERT, DELETE on thought_chunks; INSERT on thought_audit/.test(writeLine(missingBoth.out)) &&
-             /GRANT INSERT, DELETE ON thought_chunks TO ob1_pf_capture;\s+GRANT INSERT ON thought_audit TO ob1_pf_capture;/.test(missingBoth.out),
-             `a role missing the chunk and audit writes does not start, each named in order with its GRANT (exit ${missingBoth.code})`);
+             /INSERT, DELETE on thought_chunks; INSERT on thought_audit; UPDATE on thought_facets/.test(writeLine(missingBoth.out)) &&
+             /GRANT INSERT, DELETE ON thought_chunks TO ob1_pf_capture;\s+GRANT INSERT ON thought_audit TO ob1_pf_capture;\s+GRANT UPDATE ON thought_facets TO ob1_pf_capture;/.test(missingBoth.out),
+             `a role missing the chunk, audit and facet writes does not start, each named in order with its GRANT (exit ${missingBoth.code})`);
+      assert(/a windowed capture, an edit with content, or 008's audit trigger, and every delete of a thought \(042's citation guard reads and writes thought_facets as the caller\) would fail/.test(writeLine(missingBoth.out)),
+             "…and says what each missing privilege breaks: the capture path for the chunk and audit writes, every delete for the facet one");
       assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, both 035's/.test(missingBoth.out), "…while atomic capture, a separate fact, is ok for it");
 
-      // Grant the chunk writes by hand; only the audit INSERT remains named.
+      // Grant the chunk writes by hand; the audit INSERT and the facet UPDATE remain named.
       await claims.unsafe("GRANT INSERT, DELETE ON thought_chunks TO ob1_pf_capture");
       const missingAudit = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
       assert(missingAudit.code === 1 &&
-             /INSERT on thought_audit/.test(writeLine(missingAudit.out)) &&
+             /INSERT on thought_audit; UPDATE on thought_facets/.test(writeLine(missingAudit.out)) &&
              !/thought_chunks/.test(writeLine(missingAudit.out)) &&
-             /GRANT INSERT ON thought_audit TO ob1_pf_capture;/.test(missingAudit.out),
-             `with the chunk writes granted, only the audit INSERT is named (exit ${missingAudit.code})`);
-
-      // Grant the audit INSERT by hand so the base capture set is satisfied — the
-      // extraction conditional is the remaining lever.
+             /GRANT INSERT ON thought_audit TO ob1_pf_capture;\s+GRANT UPDATE ON thought_facets TO ob1_pf_capture;/.test(missingAudit.out),
+             `with the chunk writes granted, the audit INSERT and the facet UPDATE are named, the chunks no longer (exit ${missingAudit.code})`);
+      // Grant the audit INSERT alone: only the facet UPDATE remains, and the
+      // sentence names only deletes — a capture would succeed, and says so.
       await claims.unsafe("GRANT INSERT ON thought_audit TO ob1_pf_capture");
+      const facetOnly = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
+      assert(facetOnly.code === 1 && /UPDATE on thought_facets — so every delete of a thought \(042's citation guard reads and writes thought_facets as the caller\) would fail/.test(writeLine(facetOnly.out)) && !/windowed capture/.test(writeLine(facetOnly.out)),
+             `with only the facet UPDATE missing, the check names deletes and not captures as what would fail (exit ${facetOnly.code})`);
+
+      // Grant the facet UPDATE by hand so the base capture set is satisfied —
+      // the extraction conditional is the remaining lever.
+      await claims.unsafe("GRANT UPDATE ON thought_facets TO ob1_pf_capture");
       const baseOk = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
       assert(baseOk.code === 0 && /write privileges\s+ob1_pf_capture holds the capture path's privileges/.test(baseOk.out) && !/thought_work_claims/.test(writeLine(baseOk.out)),
              `with the audit INSERT granted and extraction off, the base capture set is ok and says nothing of thought_work_claims (exit ${baseOk.code})`);
@@ -1208,10 +1290,14 @@ else {
       // set — the server, worker and extraction groups too, quoted role — so the
       // role holds everything the writers need and preflight is ok.
       const grant = await migrate(["--grant", "ob1_pf_capture", "--url", LIVE]);
+      // thought_audit's GRANT merges the capture group's INSERT with the
+      // community group's SELECT (SMD-1796): 008's table is present on every
+      // migrated brain, so that row is issued whether or not the community
+      // schema that names it was applied.
       assert(grant.code === 0 &&
-             /GRANT INSERT ON thought_audit TO "ob1_pf_capture";/.test(grant.out) &&
+             /GRANT SELECT, INSERT ON thought_audit TO "ob1_pf_capture";/.test(grant.out) &&
              /GRANT SELECT, INSERT, UPDATE, DELETE ON thought_work_claims TO "ob1_pf_capture";/.test(grant.out),
-             `migrate.ts --grant issues the documented set (exit ${grant.code}: ${grant.out.trim().split("\n").slice(-1)[0]})`);
+             `migrate.ts --grant issues the documented set (exit ${grant.code}: ${grant.out.trim().split("\n").find((l) => /Granted/.test(l)) ?? grant.out.trim().split("\n").slice(-1)[0]})`);
       assert(/GRANT INSERT ON query_log TO "ob1_pf_capture";/.test(grant.out),
              "…including the opt-in query log's INSERT (querylog group, SMD-1295)");
       const okRun = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });

@@ -13,7 +13,7 @@ Only `task` and `idea` thought types use the status field. All other types have 
 ## Prerequisites
 
 - Working Open Brain setup ([guide](../../docs/01-getting-started.md))
-- Access to the Supabase SQL Editor or CLI
+- A connection that can create functions (`psql` or your SQL console)
 
 ## Credential Tracker
 
@@ -32,8 +32,7 @@ SUPABASE (from your Open Brain setup)
 
 ![Step 1](https://img.shields.io/badge/Step_1-Run_Migration-1E88E5?style=for-the-badge)
 
-1. Open your **Supabase SQL Editor** (Dashboard > SQL Editor)
-2. Paste and run the migration:
+1. Apply the migration below — `psql "$DATABASE_URL" -f migration.sql`, or paste it into your SQL console. It adds nothing a grant could cover:
 
 <details>
 <summary>SQL: Add status columns and backfill existing tasks/ideas</summary>

@@ -14,7 +14,7 @@
  */
 
 import { SQL } from "bun";
-import { alignVectorSearchPath, DEFAULT_CHUNK_CONTEXT, DEFAULT_TRGM_INDEX, HNSW_BOUNDS, MATCH_THOUGHTS_SIGNATURE, SEARCH_THOUGHTS_HYBRID_SIGNATURE, SUPERSEDED_SIGNATURES, UPDATE_THOUGHT_SIGNATURE, migrationValues, quoteIdent, substituteMigration } from "./config.mjs";
+import { alignVectorSearchPath, DEFAULT_CHUNK_CONTEXT, DEFAULT_TRGM_INDEX, HNSW_BOUNDS, MATCH_THOUGHTS_SIGNATURE, SEARCH_THOUGHTS_HYBRID_SIGNATURE, SUPERSEDED_SIGNATURES, UPDATE_THOUGHT_SIGNATURE, grantedTables, migrationValues, quoteIdent, substituteMigration } from "./config.mjs";
 import { readdirSync, readFileSync } from "node:fs";
 import { basename, join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -36,6 +36,7 @@ export async function hasKeptCorpus(sql: SQL): Promise<boolean> {
  * holding them, so anything with a foreign key has to be named before it.
  */
 const TABLES = [
+  "thought_facets",
   "thought_audit",
   "thought_chunks",
   "thought_work_claims",
@@ -52,6 +53,15 @@ const TABLES = [
   // vouches for, so a suite run in a kept database cannot leave a marker over
   // rows that are gone.
   BENCH_MARKER,
+  // The community schemas' tables (SMD-1796): test-live [18] applies every
+  // schemas/*.sql to the migrated brain, and a reset that left them would hand
+  // the next run tables whose foreign keys to `thoughts` the CASCADE above cut.
+  // Their bigserial sequences go with them; their functions stay (CREATE OR
+  // REPLACE re-applies cleanly, and none is a migration's). thought_audit and
+  // thought_entities are above already; the view is not a table and goes with
+  // `thoughts`. They follow `thoughts` although several reference it: the
+  // CASCADE above has already cut those constraints by the time they drop.
+  ...grantedTables(["community"]).filter((t) => t !== "thought_audit" && t !== "thought_entities"),
 ];
 
 /**
@@ -66,7 +76,10 @@ const TABLES = [
  */
 const FUNCTIONS = [
   UPDATE_THOUGHT_SIGNATURE,
+  // 042 dropped the two-argument form for the three-argument one; both named,
+  // so a reset after a partial apply leaves neither behind.
   "delete_thought(uuid, jsonb)",
+  "delete_thought(uuid, jsonb, boolean)",
   "thought_audit_refuse_mutation()",
   "thoughts_write_audit()",
   "ob1_current_actor()",
@@ -107,6 +120,11 @@ const FUNCTIONS = [
   "stale_entities(interval, int)",
   // 032 (SMD-1323)
   "validate_derived_from(jsonb)",
+  // 042 (SMD-1712)
+  "thought_facets_validate()",
+  "thoughts_guard_citation_sources()",
+  "thought_facet_active(thought_facets)",
+  "record_citation(uuid, uuid, text, text)",
 ];
 
 export type SchemaOptions = {
@@ -457,6 +475,32 @@ export function runMigrator(url: string, env: Record<string, string> | undefined
 }
 
 /** The migration files, sorted — the one listing for the bare apply, the ledger comparison and the suites that count them. */
+/** The community schemas' directory, `schemas/` beside `db/`. */
+export const SCHEMAS_DIR = join(HERE, "..", "schemas");
+/**
+ * The community SQL files with a prerequisite, in the order it requires:
+ * enhanced-thoughts before readwise-books (whose function filters on its
+ * source_type column) and text-search-trgm; entity-extraction before
+ * typed-reasoning-edges (which alters its edges table). The rest of the files
+ * follow alphabetically.
+ */
+export const SCHEMA_FILES_FIRST: readonly string[] = ["enhanced-thoughts/schema.sql", "text-search-trgm/schema.sql", "readwise-books/schema.sql", "entity-extraction/schema.sql", "typed-reasoning-edges/schema.sql"];
+/**
+ * Every SQL file under schemas/, as `<dir>/<file>`, SCHEMA_FILES_FIRST first
+ * and the rest alphabetical — the order test-schema [40] and test-live [18]
+ * apply them in (SMD-1796). Read from the tree, never listed, so a new
+ * community schema is applied by both suites the day it lands.
+ */
+export function communitySchemaFiles(): string[] {
+  const rank = (f: string) => (SCHEMA_FILES_FIRST.indexOf(f) === -1 ? SCHEMA_FILES_FIRST.length : SCHEMA_FILES_FIRST.indexOf(f));
+  const files: string[] = [];
+  for (const d of readdirSync(SCHEMAS_DIR, { withFileTypes: true })) {
+    if (!d.isDirectory()) continue;
+    for (const f of readdirSync(join(SCHEMAS_DIR, d.name))) if (f.endsWith(".sql")) files.push(`${d.name}/${f}`);
+  }
+  return files.sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
+}
+
 export function migrationFiles(): string[] {
   return readdirSync(MIGRATIONS)
     .filter((f) => f.endsWith(".sql"))

@@ -172,10 +172,16 @@ $$;
 -- letting `authenticated` invoke this directly would let signed-in users
 -- rewrite arbitrary rows' metadata.provenance subtree).
 REVOKE EXECUTE ON FUNCTION public.merge_thought_provenance_metadata(UUID, JSONB) FROM PUBLIC;
-REVOKE EXECUTE ON FUNCTION public.merge_thought_provenance_metadata(UUID, JSONB) FROM authenticated;
-REVOKE EXECUTE ON FUNCTION public.merge_thought_provenance_metadata(UUID, JSONB) FROM anon;
-GRANT EXECUTE ON FUNCTION public.merge_thought_provenance_metadata(UUID, JSONB)
-  TO service_role;
+-- This fork (SMD-1796): upstream also REVOKEd this and the next merge FROM
+-- authenticated and anon and GRANTed them TO service_role. Those are Supabase's
+-- roles: on plain Postgres the REVOKE stops the file (`role "authenticated"
+-- does not exist`). Removed; the REVOKE FROM PUBLIC stays, so each SECURITY
+-- DEFINER merge is callable only by a role granted it.
+-- Grant the role your server connects as instead — from db/:
+--   bun migrate.ts --url postgres://… --grant <role>
+-- issues db/config.mjs ROLE_GRANTS' `community` group, which covers this file's
+-- two functions: EXECUTE on merge_thought_provenance_metadata(uuid, jsonb)
+-- and merge_thought_eval_metadata(uuid, jsonb).
 
 -- ============================================================
 -- 8. HELPER: merge_thought_eval_metadata
@@ -227,10 +233,7 @@ $$;
 
 -- Service-role-only (same reasoning as the other provenance RPCs).
 REVOKE EXECUTE ON FUNCTION public.merge_thought_eval_metadata(UUID, JSONB) FROM PUBLIC;
-REVOKE EXECUTE ON FUNCTION public.merge_thought_eval_metadata(UUID, JSONB) FROM authenticated;
-REVOKE EXECUTE ON FUNCTION public.merge_thought_eval_metadata(UUID, JSONB) FROM anon;
-GRANT EXECUTE ON FUNCTION public.merge_thought_eval_metadata(UUID, JSONB)
-  TO service_role;
+-- (Upstream's REVOKEs FROM authenticated/anon and GRANT TO service_role: see the note on the previous function — SMD-1796.)
 
 -- ============================================================
 -- 9. RELOAD PostgREST SCHEMA CACHE
