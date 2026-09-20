@@ -1249,7 +1249,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 976 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 539 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
+./with-postgres.sh bun test-live.ts         # 540 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 ```
 
@@ -1461,14 +1461,14 @@ first assumed. See FORK.md's SMD-1632 section.
   around** (migration 041: `enable_nestloop = on`, `enable_tidscan = on`).
   [5e]'s tidscan and nestloop cases now find the default's plan under the
   session's setting — a TID Range Scan at an ordinary cost, no `Disabled`
-  node on 18, the sample's eight buffers — and, with the pin RESET (the
+  node on 18, fewer buffers than the heap has pages — and, with the pin RESET (the
   mutant), `disable_cost` back on 14–17 and on 18 the disabled node back and,
   under `enable_tidscan = off`, the probe a sequential scan of the whole heap
   per block (SMD-1703's state). [5f] loads 12,000 rows with chunks and, under
   a session `enable_nestloop = off`, explains the three RETURN QUERY
   statements read out of the body under the function's settings: every join
-  a Nested Loop touching about the default's buffers; with the pin RESET a
-  Merge or Hash Join touching three times as many or more (the whole primary
+  a Nested Loop touching the default's buffers; with the pin RESET a Merge or
+  Hash Join touching at least the heap's page count more (the whole primary
   key, and every chunk row on the walk); and through the function the pinned
   call returns the default's ten rows under the setting. `test-upgrade.ts`
   [19] applies 041 onto a populated 040: the body byte for byte 040's, the two

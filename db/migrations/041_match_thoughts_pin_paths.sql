@@ -269,7 +269,8 @@
 --     900 rows      11.0         16,779                     10.7
 --     nothing        0.5              0.4                     0.6
 --
---   Seventeen to thirty-four seconds a call without the pin — the merge
+--   Seventeen to twenty-nine seconds a call by the median without the pin
+--   (thirty-four on the first three calls of the 50% tier) — the merge
 --   join's inner side is an index scan over ten million primary-key
 --   entries, the walk's hash join builds over four million chunk rows.
 --   FORK.md change 93 has the full run, including the cold-cache column the
@@ -366,7 +367,7 @@ SET hnsw.iterative_scan = relaxed_order
 -- relation with no usable index still seq-scans, and every statement in this
 -- body has one — see 019's header for the measurement and for what was not chosen.
 SET enable_seqscan = off
--- JIT off for the call (this file, SMD-1624; 017's clause, for 017's reason).
+-- JIT off for the call (040, SMD-1624; 017's clause, for 017's reason).
 -- Nothing in this body has enough rows for JIT to pay for itself — the walk
 -- passes a few hundred tuples, the exact branch scores at most v_exact rows,
 -- the sample reads eight pages — and what prices its statements past
@@ -374,8 +375,9 @@ SET enable_seqscan = off
 -- disable_cost (1e10) on PostgreSQL 14–17 and the sample was compiled on
 -- every call, ~50 ms; a generic plan's flat estimate at ten million rows
 -- compiled the route, exact and walk statements for 30–110 ms (FORK.md
--- change 28). The header has the table, and why this is not a plan mode and
--- not the enable_* paths pinned.
+-- change 28). 040's header has the table, and why the clause is not a plan
+-- mode; the two paths pinned below are this file's, and its header says why
+-- a compile and a plan are different questions.
 SET jit = off
 -- The two planner paths this body is built around, pinned for the call (this
 -- file, SMD-1677 and SMD-1703). Every join here is a primary-key probe driven

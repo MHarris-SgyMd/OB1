@@ -554,10 +554,12 @@ else {
   await led040b.unsafe(`DELETE FROM schema_migrations WHERE name LIKE '040%' OR name LIKE '041%'`);
   await led040b.close();
   const unrecorded040 = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
-  // Only the jit clause and the keyword estimate are missing here, so the file
-  // is named without the parenthetical about 019's clauses (review pass 3).
+  // The jit clause, both pins and the keyword estimate are missing here (the
+  // recorded-041 probe above RESET the pins); 019's clause and ROWS 10 hold,
+  // so the file is named without the parenthetical about 019's clauses
+  // (review pass 3 of SMD-1624; pass 2 of SMD-1677 for the pins).
   assert(/Apply db\/migrations\/041_match_thoughts_pin_paths\.sql\. Then put the keyword estimate back: SELECT '\[1\]'::vector; ALTER FUNCTION search_thoughts_keyword\(text, int, int, jsonb\) ROWS 25;/.test(unrecorded040.out),
-         "…and with neither 040 nor 041 recorded the remedy is 041's file — the last definer, which carries 040's clause — and the keyword ALTER beside it, which 041 cannot restore");
+         "…and with neither 040 nor 041 recorded the remedy is 041's file — the last definer, which carries 040's clause and its own pins — and the keyword ALTER beside it, which 041 cannot restore");
   assert(!/the last definer of match_thoughts/.test(unrecorded040.out), "…without the note about 019's clauses, which hold here");
   const unled040 = new SQL({ url: LIVE, max: 1 });
   await unled040.unsafe(`DROP TABLE schema_migrations`);

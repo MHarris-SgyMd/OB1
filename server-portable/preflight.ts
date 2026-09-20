@@ -1485,7 +1485,7 @@ if (configFailed) {
             // plain run skips a recorded file). The keyword estimate is 019's
             // and 041 does not define that function, so its remedy is the ALTER
             // in either case, beside the file or in the Put-it-back list.
-            const mtAlter = mtMissing ? `ALTER FUNCTION ${mt[0].sig}${seqOff ? "" : " SET enable_seqscan = off"}${jitOff ? "" : " SET jit = off"}${pinned ? "" : " SET enable_nestloop = on SET enable_tidscan = on"}${rows !== 10 ? " ROWS 10" : ""};` : "";
+            const mtAlter = mtMissing ? `ALTER FUNCTION ${mt[0].sig}${seqOff ? "" : " SET enable_seqscan = off"}${jitOff ? "" : " SET jit = off"}${nestloopOn ? "" : " SET enable_nestloop = on"}${tidscanOn ? "" : " SET enable_tidscan = on"}${rows !== 10 ? " ROWS 10" : ""};` : "";
             const kwAlter = kwOff ? "ALTER FUNCTION search_thoughts_keyword(text, int, int, jsonb) ROWS 25;" : "";
             const remedy = mtMissing && !ledgerHas041
               ? `Apply db/migrations/041_match_thoughts_pin_paths.sql${!seqOff || rows !== 10 ? " — the last definer of match_thoughts, which carries 019's clauses and ROWS 10 with its own (019's file alone would re-create the 4-argument form 020 dropped)" : ""}.${kwOff ? ` Then put the keyword estimate back: SELECT '[1]'::vector; ${kwAlter}  and carry it into the migration that redefined that function.` : ""}`

@@ -816,6 +816,13 @@ console.log("\n[5e] A planner path disabled at session level no longer JIT-compi
       // 35–95 over it, and a bound that scales with the machine's compile
       // keeps both margins on a faster or slower host (run-it, pass 6).
       const compile = Math.min(...jitTotals.filter(Number.isFinite));
+      // The bound is scaled from a measurement this run made; with no JIT
+      // total pushed (the pinned cases skip the forced-on arm, and the
+      // unpinned one pushes only where the server compiles) Math.min() is
+      // Infinity and the two lines below would say nothing — the jitAvailable
+      // guard above keeps that out, and this says so if the guard ever moves
+      // (review pass 2, run-it).
+      assert(Number.isFinite(compile), `the forced-on plan of the unpinned path gave EXPLAIN a JIT total to scale the bound from (${jitTotals.length} measured)`);
       const gap = Math.max(10, compile / 2);
       assert(mutant >= baseline + gap, `the trigger through the function under ${label}: the mutant (040's clause RESET) pays the compile on every call, ${mutant.toFixed(2)} ms against a default of ${baseline.toFixed(2)} (EXPLAIN's smallest JIT total this run ${compile.toFixed(1)} ms, the bound half of it) — the clause's own tooth is the next line`);
       assert(fixed <= baseline + gap, `…and with the clause the disabled path costs what the default costs: ${fixed.toFixed(2)} ms against ${baseline.toFixed(2)}, within ${gap.toFixed(1)} (the compiled call is 45–105 ms)`);

@@ -15046,8 +15046,9 @@ probe a sequential scan reading the whole heap per block; the compile story
 unpinned. New [5f] loads 12,000 rows with chunks, both HNSW indexes rebuilt,
 and under a session `enable_nestloop = off` explains the three `RETURN
 QUERY` statements read out of the body under the function's settings: every
-join a Nested Loop touching at most twice the default's buffers; with the pin
-RESET a Merge or Hash Join touching three times as many or more; and through
+join a Nested Loop touching the default's buffers (within a tenth, plus 64 —
+byte-identical in every run so far); with the pin RESET a Merge or Hash Join
+touching at least the heap's page count more; and through
 the function the pinned call returns the default's ten rows, in order, under
 the setting — the buffer count is the tooth because it does not depend on
 the machine, and the timing at scale is the tables above. test-upgrade [19]
@@ -15155,6 +15156,49 @@ the pinned statements carry no disable_cost term under it. Not changed:
 [20]'s five-settings string loosened to accept three or five passes on the
 shipped state — that mutant cannot fail by construction, and [21] pins the
 count independently, as mutant A showed.
+
+Pass 2, the same two reviewers, aimed at pass 1's additions. No defect in
+the mechanism, the preflight logic or the tests; what changed is text. The
+`SET jit = off` comment carried from 040 into 041's CREATE said "this file"
+meaning 040 and ended "not the enable_* paths pinned" two lines above the
+two pins — the one place a reader of the installed file was told something
+false; it attributes itself to 040 and points at this header (caught:
+cold-read). The header's ten-million sentence said "seventeen to thirty-four
+seconds" under a table whose largest median is 28,726 ms — the 34 is the
+first-three-calls figure of the 50% tier that only this section's table
+carries; it says so (caught: cold-read). This section and the README
+described [5f]'s bounds as "at most twice" and "three times as many or
+more" where the code asserts within a tenth plus 64 and at least the heap's
+page count more (caught: cold-read), and the README's "the sample's eight
+buffers" for [5e]'s pinned case is "fewer buffers than the heap has pages",
+the tooth as written (caught: cold-read). preflight's ALTER remedy named
+both pins whenever either was missing, where pass 1 had made the message
+name only the missing one; the remedy follows the message (caught:
+cold-read). test-preflight's comment on the unrecorded-041 probe still
+described the state before pass 1 inserted the recorded-041 probe ahead of
+it, which leaves both pins RESET too (caught: cold-read). [5e]'s timing
+bound is scaled from the run's own EXPLAIN JIT total, and with the pinned
+cases skipping the forced-on arm the list has one entry, pushed only where
+the server compiles: the `jitAvailable` guard alone kept an empty list — and
+an infinite bound that makes the fixed-arm line vacuous — out of the suite;
+an assertion says so if the guard ever moves (caught: run-it). What the
+run-it reviewer verified: every pass-1 wording seam is held — the pin names'
+order swapped, the ledger clause forced to its recorded branch, either
+`pinWhy` sentence dropped, and `pinned` made a disjunction each fail at
+least one probe, the last exactly the one-pin probe written for it; the
+recorded-041 probe reaches preflight's ALTER branch (a misspelt SET fragment
+fails it and nothing else); on the shipped code a database-level `jit = off`
+skips [5e]'s timing arm cleanly on 16 (534 + 1 skipped) as 18 does; with
+`enable_nestloop`, `enable_hashagg` and `enable_sort` all off at database
+level the pinned function returns the default's rows in the default's time
+and the only disable_cost in any statement is the sorts' — the "not pinned,
+deliberately" claim, live; and [5f]'s pinned and default buffer counts were
+byte-identical in every pair over three runs and two queries. Not changed:
+[5f]'s `within a tenth plus 64` could be equality on that evidence, and
+stays a bound so a drift in the walk's reads fails as a drift and not as the
+pin (a boyscout candidate either way). The stop signal fired here: pass 2's
+findings were polish in pass 1's additions and in prose, and the two
+reviewers' mechanism checks were clean twice over.
 
 **The operator's path, walked.** A brain at 040 whose operator has `ALTER
 DATABASE … SET enable_nestloop = off`: preflight's `candidate scan` warns
