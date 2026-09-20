@@ -20,7 +20,6 @@ import type {
   Derivative,
   ListFilters,
   DeleteResult,
-  MutationResult,
   ProvenanceNode,
   QueryActionLog,
   QuerySearchLog,
