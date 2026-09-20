@@ -1056,6 +1056,36 @@ else {
   const reapplied021 = await run(SQL_ENV);
   assert(reapplied021.code === 0 && /edit signature\s+update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text,jsonb\): the form the servers and reembed\.ts call since migration 032/.test(reapplied021.out),
          "…which 032 re-applied performs");
+  // 036 re-applied by hand over 042 puts the two-argument delete_thought back
+  // BESIDE 042's three-argument one: every two-argument caller is "not unique".
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("036") });
+  const twoDeletes = await run(SQL_ENV);
+  assert(twoDeletes.code === 1 && /delete signature\s+beside the form the servers call there is an earlier one: delete_thought\(uuid,jsonb\) — 009 or 036 re-applied by hand over 042/.test(twoDeletes.out) && /DROP FUNCTION delete_thought\(uuid,jsonb\);/.test(twoDeletes.out),
+         "036 re-applied over 042 leaves two delete_thought forms, and the start is refused naming the extra one with its DROP");
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("042") });
+  assert(/delete signature\s+delete_thought\(uuid,jsonb,boolean\): the form the servers call since migration 042, alone/.test((await run(SQL_ENV)).out), "…which 042 re-applied performs");
+  // A brain that stopped at 036 — a server deployed ahead of the migration:
+  // the two-argument form alone. Every delete the server sends would fail at
+  // the first user call, so the start is refused naming 042 instead.
+  await claims.unsafe("DROP FUNCTION delete_thought(uuid, jsonb, boolean)");
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("036") });
+  const preFacet = await run(SQL_ENV);
+  assert(preFacet.code === 1 && /delete signature\s+delete_thought\(uuid,jsonb\) is the form from before migration 042; the server sends p_detach, which only 042's form takes — so every delete would fail/.test(preFacet.out),
+         "a brain at 036 does not start: every delete the server sends would fail, and the check says so before a user finds out");
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("042") });
+  // The isolation level every lock-order argument assumes, read from the
+  // connection's default: ok at read committed, a warning naming the guarantees
+  // at any other, with the ALTER ROLE that puts it back. Set on the role, so a
+  // fresh session (preflight's) inherits it; reset after.
+  assert(/transaction isolation\s+default_transaction_isolation is read committed/.test((await run(SQL_ENV)).out), "the connection's default isolation is read committed, and the check says which guarantees rest on it");
+  await claims.unsafe("ALTER ROLE current_user SET default_transaction_isolation = 'repeatable read'");
+  try {
+    const rr = await run(SQL_ENV);
+    assert(rr.code === 0 && /transaction isolation\s+default_transaction_isolation is repeatable read: the writers' lock order \(018\/033\/036\) and the citation guard \(042\) are argued under read committed/.test(rr.out) && /ALTER ROLE \S+ SET default_transaction_isolation = 'read committed';/.test(rr.out),
+           `a role defaulting to repeatable read starts with a warning naming the guarantees that rest on read committed and the ALTER ROLE that restores it (exit ${rr.code})`);
+  } finally {
+    await claims.unsafe("ALTER ROLE current_user RESET default_transaction_isolation");
+  }
   // …and 021's CREATE OR REPLACE put its 3-argument upsert_thought back over
   // 035's: a chunkless re-capture would leave the previous vector's windows
   // again. A warning naming 035 — captures work, search is over-inclusive.
@@ -1193,30 +1223,39 @@ else {
       await claims.unsafe("GRANT SELECT ON ALL TABLES IN SCHEMA public TO ob1_pf_capture");
       await claims.unsafe("GRANT INSERT, UPDATE, DELETE ON thoughts TO ob1_pf_capture");
 
-      // thoughts satisfied, but no INSERT/DELETE on thought_chunks and no INSERT
-      // on thought_audit: refused, both tables named in CAPTURE_WRITES order,
-      // each with its GRANT.
+      // thoughts satisfied, but no INSERT/DELETE on thought_chunks, no INSERT
+      // on thought_audit and no UPDATE on thought_facets (042's delete guard
+      // writes the detached citations as the caller): refused, the three
+      // tables named in CAPTURE_WRITES order, each with its GRANT.
       const missingBoth = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
       const writeLine = (out: string) => out.split("\n").find((l) => /write privileges/.test(l)) ?? "";
       assert(missingBoth.code === 1 &&
              /write privileges\s+this connection's role \(ob1_pf_capture\) is missing privileges the capture path's writers need/.test(missingBoth.out) &&
-             /INSERT, DELETE on thought_chunks; INSERT on thought_audit/.test(writeLine(missingBoth.out)) &&
-             /GRANT INSERT, DELETE ON thought_chunks TO ob1_pf_capture;\s+GRANT INSERT ON thought_audit TO ob1_pf_capture;/.test(missingBoth.out),
-             `a role missing the chunk and audit writes does not start, each named in order with its GRANT (exit ${missingBoth.code})`);
+             /INSERT, DELETE on thought_chunks; INSERT on thought_audit; UPDATE on thought_facets/.test(writeLine(missingBoth.out)) &&
+             /GRANT INSERT, DELETE ON thought_chunks TO ob1_pf_capture;\s+GRANT INSERT ON thought_audit TO ob1_pf_capture;\s+GRANT UPDATE ON thought_facets TO ob1_pf_capture;/.test(missingBoth.out),
+             `a role missing the chunk, audit and facet writes does not start, each named in order with its GRANT (exit ${missingBoth.code})`);
+      assert(/a windowed capture, an edit with content, or 008's audit trigger, and every delete of a thought \(042's citation guard reads and writes thought_facets as the caller\) would fail/.test(writeLine(missingBoth.out)),
+             "…and says what each missing privilege breaks: the capture path for the chunk and audit writes, every delete for the facet one");
       assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, both 035's/.test(missingBoth.out), "…while atomic capture, a separate fact, is ok for it");
 
-      // Grant the chunk writes by hand; only the audit INSERT remains named.
+      // Grant the chunk writes by hand; the audit INSERT and the facet UPDATE remain named.
       await claims.unsafe("GRANT INSERT, DELETE ON thought_chunks TO ob1_pf_capture");
       const missingAudit = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
       assert(missingAudit.code === 1 &&
-             /INSERT on thought_audit/.test(writeLine(missingAudit.out)) &&
+             /INSERT on thought_audit; UPDATE on thought_facets/.test(writeLine(missingAudit.out)) &&
              !/thought_chunks/.test(writeLine(missingAudit.out)) &&
-             /GRANT INSERT ON thought_audit TO ob1_pf_capture;/.test(missingAudit.out),
-             `with the chunk writes granted, only the audit INSERT is named (exit ${missingAudit.code})`);
-
-      // Grant the audit INSERT by hand so the base capture set is satisfied — the
-      // extraction conditional is the remaining lever.
+             /GRANT INSERT ON thought_audit TO ob1_pf_capture;\s+GRANT UPDATE ON thought_facets TO ob1_pf_capture;/.test(missingAudit.out),
+             `with the chunk writes granted, the audit INSERT and the facet UPDATE are named, the chunks no longer (exit ${missingAudit.code})`);
+      // Grant the audit INSERT alone: only the facet UPDATE remains, and the
+      // sentence names only deletes — a capture would succeed, and says so.
       await claims.unsafe("GRANT INSERT ON thought_audit TO ob1_pf_capture");
+      const facetOnly = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
+      assert(facetOnly.code === 1 && /UPDATE on thought_facets — so every delete of a thought \(042's citation guard reads and writes thought_facets as the caller\) would fail/.test(writeLine(facetOnly.out)) && !/windowed capture/.test(writeLine(facetOnly.out)),
+             `with only the facet UPDATE missing, the check names deletes and not captures as what would fail (exit ${facetOnly.code})`);
+
+      // Grant the facet UPDATE by hand so the base capture set is satisfied —
+      // the extraction conditional is the remaining lever.
+      await claims.unsafe("GRANT UPDATE ON thought_facets TO ob1_pf_capture");
       const baseOk = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
       assert(baseOk.code === 0 && /write privileges\s+ob1_pf_capture holds the capture path's privileges/.test(baseOk.out) && !/thought_work_claims/.test(writeLine(baseOk.out)),
              `with the audit INSERT granted and extraction off, the base capture set is ok and says nothing of thought_work_claims (exit ${baseOk.code})`);

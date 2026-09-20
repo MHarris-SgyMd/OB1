@@ -25,7 +25,7 @@ import { SQL } from "bun";
 import { createAssert, ISO_RE, plantLegacyRow, resetSchema } from "../db/test-support.ts";
 import { createClient } from "../compat/supabase-sql/index.ts";
 import { PostgrestStore } from "./store-postgrest.ts";
-import { isoTimestamp, isoTimestampOrNull } from "./store.ts";
+import { isoTimestamp, isoTimestampOrNull, normaliseMutation } from "./store.ts";
 
 const URL_ = process.env.DATABASE_URL;
 if (!URL_) {
@@ -564,6 +564,42 @@ console.log("\n[11] The query log's action rows over PostgREST: one or many thro
       FROM query_log act WHERE act.kind='action' AND act.tool = 'update_thought/supersedes'`;
   assert(from_query === "postgrest log", `034's join attributes the cite this store wrote (${from_query})`);
   await admin`DELETE FROM query_log`;
+  await admin.close();
+}
+
+console.log("\n[12] deleteThought's rpc shape over PostgREST: p_detach named and bound as a boolean, the CITED refusal and the detach count normalised (migration 042, SMD-1712)");
+{
+  const admin = new SQL({ url: URL_, max: 1 });
+  const { id: source } = await store.captureThought({ content: "postgrest source: the limit is 600 a minute", payload: { metadata: {} }, embedding: vec(0) });
+  const { id: citer } = await store.captureThought({ content: "postgrest note resting on the source", payload: { metadata: {} }, embedding: vec(1) });
+  const [{ r: wrote }] = (await admin`SELECT record_citation(${citer}::uuid, ${source}::uuid, 'the limit is 600', 'retrieved') AS r`) as { r: { ok: boolean } }[];
+  assert(wrote.ok === true, `record_citation writes the citing row (${JSON.stringify(wrote)})`);
+  // Without detach: refused, the count and the citing row mapped to the store's shape.
+  const refused = await store.deleteThought({ id: source, actor: { name: "importer", source: "postgrest-test" } });
+  assert(refused.ok === false && refused.error === "CITED" && refused.citedBy === 1 && refused.citations?.length === 1 && refused.citations[0].thoughtId === citer && refused.citations[0].stance === "retrieved" && refused.citations[0].text === "the limit is 600" && ISO_RE.test(refused.citations[0].createdAt ?? ""),
+         `the CITED envelope normalises to citedBy and citations, created_at an ISO string (${JSON.stringify(refused)})`);
+  assert(Number((await admin`SELECT count(*)::int AS c FROM thoughts WHERE id = ${source}`)[0].c) === 1, "…and the source stands");
+  const spelled = await store.deleteThought({ id: source, detach: false });
+  assert(spelled.ok === false && spelled.error === "CITED", "detach: false spelled is the default's refusal");
+  // With detach: deleted, the count read back, the actor on the audit row.
+  const detached = await store.deleteThought({ id: source, actor: { name: "importer", source: "postgrest-test" }, detach: true });
+  assert(detached.ok === true && detached.id === source && detached.detached === 1 && detached.inactive === undefined, `p_detach binds and the count comes back (${JSON.stringify(detached)})`);
+  const [ev] = await admin`SELECT actor_name FROM thought_audit WHERE thought_id = ${source} AND action = 'delete'`;
+  assert(ev?.actor_name === "importer", `the delete is attributed over this path too (${ev?.actor_name})`);
+  const [facet] = (await admin`SELECT payload FROM thought_facets WHERE thought_id = ${citer}`) as { payload: Record<string, unknown> }[];
+  assert(facet?.payload?.source_id === null && facet?.payload?.source_deleted_id === source, "the citation records the deleted source");
+  // The count coerced: a body whose cited_by arrives as a string still counts; garbage does not.
+  const coerced = normaliseMutation({ ok: false, error: "CITED", cited_by: "3", citations: [] });
+  const garbage = normaliseMutation({ ok: false, error: "CITED", cited_by: "many" });
+  const truthy = normaliseMutation({ ok: false, error: "CITED", cited_by: true });
+  const listy = normaliseMutation({ ok: false, error: "CITED", cited_by: [5] });
+  assert(coerced.ok === false && coerced.citedBy === 3 && garbage.ok === false && garbage.citedBy === undefined && truthy.ok === false && truthy.citedBy === undefined && listy.ok === false && listy.citedBy === undefined,
+    "a cited_by that arrives as a numeric string is a number to the tool; a word, a boolean or a list is no count");
+  const holed = normaliseMutation({ ok: false, error: "CITED", cited_by: 2, citations: [null, { id: "a", thought_id: "b", stance: "stated", text: "t" }] });
+  assert(holed.ok === false && holed.citations?.length === 1 && holed.citations[0].thoughtId === "b", "a citation element that is not an object is dropped, not thrown on — the refusal stays a refusal");
+  // A named call with p_id and p_actor alone — the vendored servers' rpc shape — still resolves.
+  const { data, error } = await client.rpc("delete_thought", { p_id: citer, p_actor: null });
+  assert(error === null && (data as { ok: boolean }).ok === true, `rpc with p_id and p_actor alone resolves through the default (${JSON.stringify(data ?? error)})`);
   await admin.close();
 }
 

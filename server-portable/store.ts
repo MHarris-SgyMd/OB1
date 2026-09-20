@@ -481,12 +481,36 @@ export function normaliseProposal(r: Record<string, unknown>): SupersessionPropo
 /**
  * What update_thought / delete_thought refuse with. SUPERSEDES_NOT_FOUND and
  * WOULD_CYCLE (migration 032): the provenance envelope named a thought that
- * does not exist, or a pointer that would close a supersession loop.
+ * does not exist, or a pointer that would close a supersession loop. CITED
+ * (migration 042): active citations rest on the thought a delete named, and
+ * the caller did not ask to detach them — `citedBy` counts them, `citations`
+ * is up to ten of the citing rows, newest first.
  */
-export type MutationError = "NOT_FOUND" | "STALE_READ" | "DUPLICATE_CONTENT" | "SUPERSEDES_NOT_FOUND" | "WOULD_CYCLE";
+export type MutationError = "NOT_FOUND" | "STALE_READ" | "DUPLICATE_CONTENT" | "SUPERSEDES_NOT_FOUND" | "WOULD_CYCLE" | "CITED";
+/** One citing row of a CITED refusal: the facet, the thought it is on, its stance and text (migration 042). */
+export type Citation = { id: string; thoughtId: string; stance: string; text: string; createdAt?: string };
 export type MutationResult =
   | { ok: true; id: string }
   | { ok: false; error: MutationError; currentUpdatedAt?: string };
+/**
+ * What delete_thought answers (migration 042). Success: `detached`, the active
+ * citations the delete detached from the removed source — non-zero only when
+ * `detach` was asked — and `inactive`, when present, the expired or superseded
+ * citations that named it and were marked the same way in either mode. A
+ * refusal may carry CITED's `citedBy` and `citations`; update_thought's never
+ * does, so those live here and not on MutationResult (seventh review pass).
+ */
+export type DeleteResult =
+  | { ok: true; id: string; detached?: number; inactive?: number }
+  | { ok: false; error: MutationError; currentUpdatedAt?: string; citedBy?: number; citations?: Citation[] };
+/**
+ * Both functions' envelopes as one normaliser reads them — the superset that
+ * UpdateResult and DeleteResult each narrow. Shared so the two stores cannot
+ * disagree about what a refusal looks like.
+ */
+export type MutationEnvelope =
+  | { ok: true; id: string; updatedAt?: string; duplicateOf?: string; fingerprintHeldBy?: string; detached?: number; inactive?: number }
+  | { ok: false; error: MutationError; currentUpdatedAt?: string; citedBy?: number; citations?: Citation[] };
 /**
  * `duplicateOf` (migration 018): the edit's text normalises to what the row
  * already held AND another thought carries that fingerprint — a pair from
@@ -500,12 +524,15 @@ export type UpdateResult = MutationResult & { updatedAt?: string; duplicateOf?: 
  * the store's discriminated union. Shared so the two stores cannot disagree
  * about what a refusal looks like — the class of bug the audit work hit twice.
  */
-export function normaliseMutation(r: Record<string, unknown> | undefined): UpdateResult {
+export function normaliseMutation(r: Record<string, unknown> | undefined): MutationEnvelope {
   if (!r) return { ok: false, error: "NOT_FOUND" };
   if (r.ok === true) {
     return {
       ok: true,
       id: String(r.id),
+      // 042's delete counts; absent on an edit's envelope and on a pre-042 body.
+      detached: typeof r.detached === "number" ? r.detached : undefined,
+      inactive: typeof r.inactive === "number" ? r.inactive : undefined,
       // isoTimestamp, not String: the function returns jsonb, so this arrives
       // as Postgres's `+00:00` spelling on both clients, and `fetch` prints the
       // same column through normaliseThoughtRecord. Passing the ISO value back
@@ -522,6 +549,24 @@ export function normaliseMutation(r: Record<string, unknown> | undefined): Updat
     ok: false,
     error: (r.error as MutationError) ?? "NOT_FOUND",
     currentUpdatedAt: isoTimestampOpt(r.current_updated_at),
+    // 042's CITED refusal: the count, and the citing rows the function sampled.
+    // A number, or a string of digits (a proxy, a hand-made envelope) — and
+    // nothing else: Number() alone took `true`, `""` and `[5]` for counts
+    // (seventh review pass).
+    citedBy: typeof r.cited_by === "number" && Number.isFinite(r.cited_by) ? r.cited_by
+      : typeof r.cited_by === "string" && /^\d+$/.test(r.cited_by) ? Number(r.cited_by)
+      : undefined,
+    // Elements that are not objects (a truncating proxy's null) are dropped,
+    // not thrown on: the refusal is still a refusal.
+    citations: Array.isArray(r.citations)
+      ? (r.citations as unknown[]).filter((c): c is Record<string, unknown> => c !== null && typeof c === "object").map((c) => ({
+          id: String(c.id),
+          thoughtId: String(c.thought_id),
+          stance: String(c.stance ?? ""),
+          text: String(c.text ?? ""),
+          createdAt: isoTimestampOpt(c.created_at),
+        }))
+      : undefined,
   };
 }
 
@@ -835,11 +880,18 @@ export interface ThoughtStore {
     provenance?: UpdateProvenance;
   }): Promise<UpdateResult>;
 
-  /** Hard delete. Chunks cascade; migration 008 preserves the prior content. */
+  /**
+   * Hard delete. Chunks cascade; migration 008 preserves the prior content.
+   * Refused as CITED (migration 042) while active citations rest on the
+   * thought, unless `detach` — then each citing row keeps its text and stance,
+   * loses its source and records the deleted id and time, and the result
+   * says how many.
+   */
   deleteThought(opts: {
     id: string;
     actor?: Actor;
-  }): Promise<MutationResult>;
+    detach?: boolean;
+  }): Promise<DeleteResult>;
 
   /**
    * Resolve a key digest and its configured name to a stable agent id,

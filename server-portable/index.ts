@@ -6,7 +6,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPTransport } from "@hono/mcp";
 import { Hono } from "hono";
 import { z } from "zod";
-import { createStore, UUID_RE, type ThoughtStore } from "./store.ts";
+import { createStore, UUID_RE, type Citation, type ThoughtStore } from "./store.ts";
 import { queryLogEnabled } from "../db/config.mjs";
 import { authenticateRequest, canWrite, type Principal } from "./auth.ts";
 import { AgentResolver, cacheTtlFromEnv } from "./agents.ts";
@@ -261,7 +261,10 @@ function toolError(text: string) {
  * fault — it is a race the caller can resolve by refetching — so the message
  * says what to do rather than only what went wrong.
  */
-function explainRefusal(r: { error: string; currentUpdatedAt?: string }, id: string): string {
+function explainRefusal(
+  r: { error: string; currentUpdatedAt?: string; citedBy?: number; citations?: Citation[] },
+  id: string,
+): string {
   switch (r.error) {
     case "NOT_FOUND":
       return `No thought with id ${id}. It may already have been deleted — check the audit trail, which keeps the previous content.`;
@@ -276,9 +279,53 @@ function explainRefusal(r: { error: string; currentUpdatedAt?: string }, id: str
       return `Refused: no thought with the id given as supersedes. Pass the id of an existing thought — the ID: line of a search result — or null to clear the pointer.`;
     case "WOULD_CYCLE":
       return `Refused: that supersedes pointer would close a loop — the thought named already supersedes ${id}, directly or through a chain (or is ${id} itself). A version chain runs one way; point the newer thought at the older, or clear the older's pointer first.`;
+    // Migration 042: statements in other thoughts rest on this one. The rows
+    // are the function's sample (ten, newest first); the count is the whole.
+    case "CITED": {
+      const rows = (r.citations ?? []).map((c) => `  - ${c.thoughtId} (${c.stance}): ${snipText(c.text, 120)}`);
+      const total = r.citedBy ?? rows.length;
+      const more = total - rows.length;
+      // One subject, one way through, three shapes: the number and its grammar
+      // spelled once (seventh review pass).
+      const one = total === 1;
+      const subject = `${total} citation${one ? "" : "s"} on other thoughts rest${one ? "s" : ""} on ${id} as ${one ? "its" : "their"} source`;
+      const through = `To delete anyway, pass detach_citations: true`;
+      const reread = `re-read the thought (fetch takes the id) before deciding. ${through}.`;
+      // The count and rows come from the guard's own refusal (042 carries them
+      // in the error), so a CITED envelope with neither is one the function did
+      // not write — a proxy, a truncated body. Say so rather than "0 citations".
+      if (total <= 0) return `Refused: other thoughts cite ${id} as their source, but the reply carried no count and no citing rows — ${reread}`;
+      // A count with no rows (a proxy that dropped the array): no list, no
+      // dangling colon, the same advice.
+      if (rows.length === 0) return `Refused: ${subject}, but the citing rows were not returned — ${reread}`;
+      return `Refused: ${subject} — deleting it would leave ${one ? "that statement" : "those statements"} resting on nothing:\n${rows.join("\n")}${more > 0 ? `\n  …and ${more} more` : ""}\nRead the citing thoughts first (fetch takes the id). ${through} — each citation keeps its text and stance, loses its source, and records ${id} and the time as the deleted source.`;
+    }
     default:
       return `Refused: ${r.error}`;
   }
+}
+
+/**
+ * Untrusted text — a thought's, a citation's, a judge's reason — on one line
+ * of a reply: the same cleaner the CLI renders through
+ * (server-portable/consolidate.ts), whitespace collapsed, cut with an ellipsis
+ * past `max` characters. One spelling for every place a reply quotes a thought.
+ */
+function snipText(text: string, max: number): string {
+  const t = cleanForDisplay(text).replace(/\s+/g, " ").trim();
+  return t.length > max ? t.slice(0, max) + "…" : t;
+}
+
+/**
+ * What a successful delete did to the citations that named the thought
+ * (migration 042): the active ones it detached — only when asked — and the
+ * expired or superseded ones it marked in either mode. Silent when neither.
+ */
+function explainDetached(r: { detached?: number; inactive?: number }, id: string): string {
+  const parts: string[] = [];
+  if (r.detached) parts.push(`${r.detached} citation${r.detached === 1 ? "" : "s"} on other thoughts rested on it and ${r.detached === 1 ? "was" : "were"} detached: each keeps its text and stance and records ${id} as its deleted source.`);
+  if (r.inactive) parts.push(`${r.inactive} expired or superseded citation${r.inactive === 1 ? "" : "s"} that named it ${r.inactive === 1 ? "was" : "were"} marked with the deletion.`);
+  return parts.length ? ` ${parts.join(" ")}` : "";
 }
 
 /**
@@ -862,9 +909,9 @@ function buildServer(principal: Principal): McpServer {
           return { content: [{ type: "text" as const, text: `No ${status === "all" ? "" : status + " "}supersession proposals. The consolidation pass proposes them: cd db && bun consolidate.ts --url $DATABASE_URL (after db/extract-entities.ts, which it pairs thoughts by).` }] };
         }
         const day = (d: string) => new Date(d).toLocaleDateString();
-        // Thought content and the judge's reason are untrusted text; the same
-        // cleaner the CLI renders through (server-portable/consolidate.ts).
-        const snip = (c: string) => { const t = cleanForDisplay(c).replace(/\s+/g, " ").trim(); return t.length > 200 ? t.slice(0, 200) + "…" : t; };
+        // Thought content and the judge's reason are untrusted text; snipText
+        // is the one cleaner every reply quotes a thought through.
+        const snip = (c: string) => snipText(c, 200);
         const phrase = (v: string) =>
           v === "newer_supersedes_older" ? "the NEWER thought supersedes the older"
           : v === "older_supersedes_newer" ? "the OLDER thought supersedes the newer"
@@ -1279,7 +1326,7 @@ function buildServer(principal: Principal): McpServer {
     {
       title: "Delete Thought",
       description:
-        "Permanently remove a thought by id, along with its search chunks. `search_thoughts`, `search_thoughts_keyword`, and `list_thoughts` print the id on an `ID:` line under each hit, and `capture_thought` reports it when it saves; read the thought back first to confirm it is the one to remove. The deletion is recorded in the audit trail with the thought's previous content, so it can be reconstructed if removed in error.",
+        "Permanently remove a thought by id, along with its search chunks. `search_thoughts`, `search_thoughts_keyword`, and `list_thoughts` print the id on an `ID:` line under each hit, and `capture_thought` reports it when it saves; read the thought back first to confirm it is the one to remove. The deletion is recorded in the audit trail with the thought's previous content, so it can be reconstructed if removed in error. Refused while statements in other thoughts cite this one as their source — the reply names them — unless `detach_citations` is true.",
       annotations: {
         readOnlyHint: false,
         openWorldHint: false,
@@ -1288,13 +1335,18 @@ function buildServer(principal: Principal): McpServer {
       },
       inputSchema: {
         id: z.string().describe("UUID of the thought to delete — the id on an `ID:` line of a search_thoughts, search_thoughts_keyword, or list_thoughts result, or the one capture_thought reported when it saved"),
+        detach_citations: z.boolean().optional().describe(
+          "When statements in other thoughts cite this one as their source, the delete is refused and the reply names them. Pass true to delete anyway: each citation keeps its text and stance, loses its source, and records this id and the time as the deleted source. Default false.",
+        ),
       },
     },
-    async ({ id }) => {
+    async ({ id, detach_citations }) => {
       try {
         const result = await (await db()).deleteThought({
           id,
           actor: { name: principal.name, agentId: principal.agentId, source: "mcp" },
+          // 042: the refusal is the default; the way through is named here.
+          detach: detach_citations === true,
         });
         if (!result.ok) return toolError(explainRefusal(result, id));
 
@@ -1305,7 +1357,7 @@ function buildServer(principal: Principal): McpServer {
         return {
           content: [{
             type: "text" as const,
-            text: `Deleted ${id}. Its previous content is preserved in the audit trail.`,
+            text: `Deleted ${id}. Its previous content is preserved in the audit trail.${explainDetached(result, id)}`,
           }],
         };
       } catch (e) {

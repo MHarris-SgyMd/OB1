@@ -105,9 +105,9 @@ configured as the brain is, or change the record on purpose with `reembed.ts
 own definition is the update). The checks read the catalog and `ob1_config`
 under a 10 s lock timeout of their own. A plain run on the baselined brain,
 where 030 is pending, fails at 030 with what is missing and this command,
-rather than a bare "does not exist"; preflight's `edit signature`, `vector
-models` and `atomic capture` remedies name it where the ledger records the
-migration they find absent.
+rather than a bare "does not exist"; preflight's `edit signature`, `delete
+signature`, `vector models` and `atomic capture` remedies name it where the
+ledger records the migration they find absent.
 
 **021's evidence backfill runs with the operator's acceptances out of its
 sight** — on the re-run, and on a plain run where 021 is pending (a brain built
@@ -202,7 +202,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 (024 change 45, 025 change 46, 026 change 47, 027 change 48, 028 change 49,
 029 change 54, 030 change 56, 031 change 57, 032 change 60, 033 change 63,
 034 change 65, 035 change 66, 036 change 68, 037 change 70, 038 change 80, 039 change 81,
-040 change 91, 041 change 94).
+040 change 91, 041 change 94, 042 change 95).
 
 ## What changed relative to the guide
 
@@ -254,6 +254,7 @@ issues every group at once.
 | **capture** — the server's own connection; preflight refuses a role missing any of it | `thoughts` (001) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `thought_chunks` (007) | `SELECT, INSERT, DELETE` |
 | | `thought_audit` (008) | `INSERT` |
+| | `thought_facets` (042) | `SELECT, UPDATE` — the delete guard reads the citations that name a thought and, detaching, writes them, on every delete |
 | **server** — the server's soft extras, beyond capture; never fatal to a bare capture, but `resolve_agent` *upserts* the agent tables, so attribution needs the writes, not just `SELECT` | `ob1_config` (006) | `SELECT` |
 | | `ob1_agents` (010) | `SELECT, INSERT, UPDATE` |
 | | `ob1_agent_keys` (010) | `SELECT, INSERT, UPDATE` |
@@ -540,7 +541,10 @@ missing under a server that writes it. `edit signature` beside it checks that
 the nine-argument `update_thought` (032) is present and alone — an earlier form
 re-created beside it by a hand re-apply of 018 or 021 makes every call with
 fewer arguments, this tool's positional eight among them, `function is not
-unique`, and the DROP is the remedy — and `updated_at
+unique`, and the DROP is the remedy — `delete signature` does the same for the
+three-argument `delete_thought` (042: a brain still at 036 fails every delete
+the server sends, and 009 or 036 re-applied by hand puts the two-argument form
+back beside it) — and `updated_at
 trigger` that 001's trigger is still enabled after 021's backfill held it off. `--status` and the end of a run print `preflight will
 warn until this finishes:` with the same counts, so the two never disagree. A
 `--job` key without the prefix is accepted and noted: preflight will not report
