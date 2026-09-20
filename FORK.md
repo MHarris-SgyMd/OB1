@@ -15015,8 +15015,9 @@ Bun's `sql` — and a helper would take a query callback to save two lines. A
 third pass pointed out that a SQL *string* needs no callback: both clients
 take text with positional parameters. So `test-support` now exports
 `COLUMN_COMMENT_SQL` and `TABLE_COMMENT_SQL` and both sections read through
-them; the four earlier copies ([27], [31] and two more) are left for a
-boyscout or for SMD-1730's re-issue. Still not done: `test-upgrade`'s
+them — and so do [27] and [31], the two earlier pure reads (a fourth pass:
+"the diff is the moment the copies are all in view"); [26]'s read joins
+`information_schema` for the column's type and stays its own. Still not done: `test-upgrade`'s
 `shape()` decides "is this ours?" by a hand list of eighteen pgvector name
 prefixes where [20] asks `pg_depend`; changing the predicate every upgrade
 section compares on is not this ticket's, and is noted on SMD-1819. A
@@ -15082,6 +15083,25 @@ fork's objects, each must be seen after the reset, then dropped by hand, and
 the sweep must come back empty. Two inventories had not followed: the
 README's second count line still said 973, and this file's list of new files
 stopped at 040. And the helper decline was reversed, above.
+
+**Fourth pass** (a cold reader who ran both suites; the run-it arm regressed
+[20]'s sweep to the second pass's kinds and watched the planted-probe
+assertion fail on exactly the composite type and the partitioned table, so
+the self-check has teeth). Nothing touched the migration or its contract. The
+sweep's exception for an extension's members was too narrow in the other
+direction: an extension's composite type records its membership on the type,
+not on the relation behind it, and a sequence behind an extension table's
+serial column records only its ownership of the column, so an image that
+gained such an extension would have failed [20] on a reset that dropped
+everything of the fork's — a relation is excepted now when it, its row type
+or its owning table is an extension's. [20] had also built the full brain it
+then dropped, twice over; [19] completes its own brain now (035–040 are on
+the ledger already) and [20] starts from it. `test-schema` [10]'s header still
+denied that any migration puts `--` inside a string literal, three RAISE HINTs
+after that stopped being true; it says what is true and why the strip is
+still safe. Two `String(…)` wrappers over values already typed as strings are
+gone. A claim that CI runs neither `test-upgrade` nor its container was
+checked and does not hold: the "Schema against real Postgres" job runs it.
 
 **Upstream status:** not sent — the query log is this fork's (change 65).
 

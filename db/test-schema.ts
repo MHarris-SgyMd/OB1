@@ -958,9 +958,15 @@ console.log("\n[10] Migrations carry nothing Supabase-specific");
    *
    * Stripping first makes the check strictly sharper, not laxer: it still sees
    * every executable statement, and it stops seeing text that only describes
-   * one. `--` to end of line, and `/* *\/` blocks; no migration here puts either
-   * sequence inside a string literal, and one that did would be a reason to
-   * parse rather than to widen this.
+   * one. `--` to end of line, and `/* *\/` blocks. Three migrations put `--`
+   * inside a string literal — the RAISE HINTs of 030, 031 and 041 name the
+   * `--baseline` and `--reapply` flags — and the strip shortens each of those
+   * lines to the quote before the flag. The scan below is a word search, so a
+   * shortened literal loses nothing it checks; no COMMENT literal carries the
+   * sequence ([27] and [40] assert that of the live text). A literal that
+   * needed `--` before a word this scan looks for would be a reason to parse
+   * rather than to widen this (the header used to deny the case outright;
+   * SMD-1749's fourth review pass).
    */
   const executable = (sql: string) =>
     sql.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/--[^\n]*/g, " ");
@@ -2923,9 +2929,7 @@ console.log("\n[27] Migration 028: thought_work_claims.last_error and release_th
   // mis-stated one such detail in the literal before the fourth chose this
   // shape. So the anchors below are the rule's words, not reader mechanics
   // (SMD-1313 is the generic form of the live-text check).
-  const colComment = (await db.query<{ c: string | null }>(
-    `SELECT col_description('thought_work_claims'::regclass, a.attnum) AS c
-       FROM pg_attribute a WHERE a.attrelid = 'thought_work_claims'::regclass AND a.attname = 'last_error'`)).rows[0]?.c ?? "";
+  const colComment = (await db.query<{ c: string | null }>(COLUMN_COMMENT_SQL, ["thought_work_claims", "last_error"])).rows[0]?.c ?? "";
   assert(colComment.length > 0, "thought_work_claims.last_error carries a comment");
   assert(/failed row:.*why it failed/is.test(colComment), "…that gives the failed-row meaning (why it failed)");
   assert(/succeeded row, when set:.*caveat/is.test(colComment) && /the write stands/.test(colComment) && /what the worker could not do/.test(colComment),
@@ -3357,8 +3361,7 @@ console.log("\n[30] Migration 031: renew_claims moves every lease the worker hol
   assert(/check constraint/.test(await raises(`UPDATE thought_work_claims SET ttl_expires_at = NULL WHERE thought_id = $1 AND work_type = $2`, [c[0], JOB])),
     "015's CHECK still keeps status and lease in step — asserted here so a later writer of ttl_expires_at is held to it");
   // The two comments 031 writes, and the literal shape [10] requires of them.
-  const colComment = (await db.query<{ c: string | null }>(
-    `SELECT col_description('thought_work_claims'::regclass, attnum) AS c FROM pg_attribute WHERE attrelid = 'thought_work_claims'::regclass AND attname = 'ttl_expires_at'`)).rows[0].c ?? "";
+  const colComment = (await db.query<{ c: string | null }>(COLUMN_COMMENT_SQL, ["thought_work_claims", "ttl_expires_at"])).rows[0]?.c ?? "";
   assert(/renew_claims/.test(colComment) && /missed heartbeat/.test(colComment), "ttl_expires_at's comment names the heartbeat and what the lease now means");
   const fnComment = (await db.query<{ c: string | null }>(`SELECT obj_description('renew_claims(text, text, int)'::regprocedure, 'pg_proc') AS c`)).rows[0].c ?? "";
   assert(/never backward/.test(fnComment) && !/--/.test(fnComment) && !/--/.test(colComment), "renew_claims's comment states the rule, and neither literal spells a flag with its dashes");
