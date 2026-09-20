@@ -1,5 +1,5 @@
 -- ============================================================================
--- 041 — a thought cited as a source cannot be deleted from under the citation:
+-- 042 — a thought cited as a source cannot be deleted from under the citation:
 --        thought_facets with one registered kind, `citation`; a statement-level
 --        guard on thoughts that refuses with its own SQLSTATE; delete_thought
 --        answering that refusal as a value, with the citing rows named, and a
@@ -195,9 +195,9 @@ CREATE TABLE IF NOT EXISTS thought_facets (
 );
 
 COMMENT ON TABLE thought_facets IS
-  'Typed rows on a thought, one kind registered: citation, payload {text, stance, source_id} — a statement in thought_id that rests on thought source_id. Validated by kind in thought_facets_validate (check_violation for an unregistered kind or a malformed payload). Active while valid_until is NULL or future and no facet that still exists supersedes it (thought_facet_active); only active citations make thoughts_guard_citation_sources refuse a delete of their source. Written through record_citation. Migration 041 / SMD-1712.';
+  'Typed rows on a thought, one kind registered: citation, payload {text, stance, source_id} — a statement in thought_id that rests on thought source_id. Validated by kind in thought_facets_validate (check_violation for an unregistered kind or a malformed payload). Active while valid_until is NULL or future and no facet that still exists supersedes it (thought_facet_active); only active citations make thoughts_guard_citation_sources refuse a delete of their source. Written through record_citation. Migration 042 / SMD-1712.';
 COMMENT ON COLUMN thought_facets.kind IS
-  'The registered kind; citation is the only one (041). A later migration registers another by extending thought_facets_validate, not by a registry table.';
+  'The registered kind; citation is the only one (042). A later migration registers another by extending thought_facets_validate, not by a registry table.';
 COMMENT ON COLUMN thought_facets.payload IS
   'Shaped by kind. citation: text (non-empty), stance (stated | retrieved | inferred), source_id (an existing thought, not thought_id itself, stored lower-case). After the source is deleted: source_id null, source_deleted_id and source_deleted_at set by the guard — a shape a restore may insert whole, and that is never re-pointed at a new source.';
 COMMENT ON COLUMN thought_facets.valid_until IS
@@ -252,7 +252,7 @@ BEGIN
   IF NEW.kind IS DISTINCT FROM 'citation' THEN
     RAISE EXCEPTION USING ERRCODE = 'check_violation',
       MESSAGE = format('thought_facets.kind %L is not a registered facet kind', NEW.kind),
-      HINT = 'The registered kinds are: citation (migration 041). A new kind is registered by a migration that extends thought_facets_validate.';
+      HINT = 'The registered kinds are: citation (migration 042). A new kind is registered by a migration that extends thought_facets_validate.';
   END IF;
 
   v_text    := NEW.payload->>'text';
@@ -375,7 +375,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION thought_facets_validate() IS
-  'BEFORE INSERT OR UPDATE on thought_facets: refuses an unregistered kind and, for a citation, a missing text, a stance outside stated | retrieved | inferred, a source_id that is not an existing thought or is the citing thought itself — all as check_violation — stores source_id lower-case, and locks the source row FOR KEY SHARE so a concurrent delete of it waits and then sees the citation. source_id may be null only in the detached shape — source_deleted_id the source the row had (or, inserted whole, any thought that is gone), source_deleted_at a timestamp — and a detached row keeps what it lost and is not re-pointed. Migration 041.';
+  'BEFORE INSERT OR UPDATE on thought_facets: refuses an unregistered kind and, for a citation, a missing text, a stance outside stated | retrieved | inferred, a source_id that is not an existing thought or is the citing thought itself — all as check_violation — stores source_id lower-case, and locks the source row FOR KEY SHARE so a concurrent delete of it waits and then sees the citation. source_id may be null only in the detached shape — source_deleted_id the source the row had (or, inserted whole, any thought that is gone), source_deleted_at a timestamp — and a detached row keeps what it lost and is not re-pointed. Migration 042.';
 
 DROP TRIGGER IF EXISTS thought_facets_validate ON thought_facets;
 CREATE TRIGGER thought_facets_validate
@@ -403,7 +403,7 @@ AS $$
 $$;
 
 COMMENT ON FUNCTION thought_facet_active(thought_facets) IS
-  'Whether a facet row still counts: not past valid_until, and not superseded by a later facet that still exists (a superseder already deleted in the statement counts as none, since its SET NULL fires after the guard). The guard, delete_thought''s sample and any reader that labels a citation share this one spelling, so a later definition of "active" changes in one place. Migration 041.';
+  'Whether a facet row still counts: not past valid_until, and not superseded by a later facet that still exists (a superseder already deleted in the statement counts as none, since its SET NULL fires after the guard). The guard, delete_thought''s sample and any reader that labels a citation share this one spelling, so a later definition of "active" changes in one place. Migration 042.';
 
 -- ---------------------------------------------------------------------------
 -- thoughts_guard_citation_sources — the refusal is the table's
@@ -562,7 +562,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION thoughts_guard_citation_sources() IS
-  'AFTER DELETE on thoughts, per statement over the deleted rows: with active citations resting on a deleted row from thoughts the statement leaves standing, and ob1.cited_delete not ''detach'' (the transaction-local default is refuse), raises SQLSTATE OB001 and the whole DELETE fails — for every deleter, not only delete_thought. Otherwise detaches every surviving citation that named a deleted row (source_id null, source_deleted_id / source_deleted_at set) and adds what it did to ob1.citations_detached (active) and ob1.citations_inactive (expired or superseded). A citation on a thought the same statement deletes goes with it and never counts. Migration 041 / SMD-1712.';
+  'AFTER DELETE on thoughts, per statement over the deleted rows: with active citations resting on a deleted row from thoughts the statement leaves standing, and ob1.cited_delete not ''detach'' (the transaction-local default is refuse), raises SQLSTATE OB001 and the whole DELETE fails — for every deleter, not only delete_thought. Otherwise detaches every surviving citation that named a deleted row (source_id null, source_deleted_id / source_deleted_at set) and adds what it did to ob1.citations_detached (active) and ob1.citations_inactive (expired or superseded). A citation on a thought the same statement deletes goes with it and never counts. Migration 042 / SMD-1712.';
 
 DROP TRIGGER IF EXISTS thoughts_guard_citation_sources ON thoughts;
 CREATE TRIGGER thoughts_guard_citation_sources
@@ -625,7 +625,7 @@ BEGIN
   BEGIN
     DELETE FROM thoughts WHERE id = p_id RETURNING id INTO v_deleted;
   EXCEPTION WHEN SQLSTATE 'OB001' THEN
-    -- The guard refused (041). Only this SQLSTATE is caught: a real
+    -- The guard refused (042). Only this SQLSTATE is caught: a real
     -- foreign_key_violation, a permission failure, anything else is the fault
     -- it is and propagates. What it refused on — the count and up to ten of
     -- the citing rows, read from the rows the guard locked — rides in the
@@ -672,7 +672,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION delete_thought(uuid, jsonb, boolean) IS
-  'Hard-delete a thought by id. Chunks go by cascade; migration 008 audits the delete with previous_content preserved, which is what makes a hard delete recoverable. Takes the supersession advisory lock before the DELETE (036) — the one review_supersession_proposal and update_thought take — so a delete of a superseded thought serialises with an acceptance writing that pointer rather than deadlocking against 029''s ON DELETE CASCADE. Returns {ok:false, error:NOT_FOUND} rather than succeeding silently, and since 041 {ok:false, error:CITED, id, cited_by, citations[≤10]} when active citations rest on the row and p_detach is false; p_detach = true detaches them (each keeps text and stance, source_id → null, source_deleted_id/at recorded) and success carries detached:n, plus inactive:m when expired or superseded citations were marked the same way. Two-argument calls resolve through the default. Migration 009 / 036 / 041.';
+  'Hard-delete a thought by id. Chunks go by cascade; migration 008 audits the delete with previous_content preserved, which is what makes a hard delete recoverable. Takes the supersession advisory lock before the DELETE (036) — the one review_supersession_proposal and update_thought take — so a delete of a superseded thought serialises with an acceptance writing that pointer rather than deadlocking against 029''s ON DELETE CASCADE. Returns {ok:false, error:NOT_FOUND} rather than succeeding silently, and since 042 {ok:false, error:CITED, id, cited_by, citations[≤10]} when active citations rest on the row and p_detach is false; p_detach = true detaches them (each keeps text and stance, source_id → null, source_deleted_id/at recorded) and success carries detached:n, plus inactive:m when expired or superseded citations were marked the same way. Two-argument calls resolve through the default. Migration 009 / 036 / 042.';
 
 -- ---------------------------------------------------------------------------
 -- record_citation — the writer, in the writers' lock order
@@ -725,4 +725,4 @@ END;
 $$;
 
 COMMENT ON FUNCTION record_citation(uuid, uuid, text, text) IS
-  'Writes one citation facet: thought p_thought_id rests on p_source_id for the statement p_text, with stance stated | retrieved | inferred. Takes the supersession advisory lock first (the writers'' order, 033/036), then the INSERT locks the source KEY SHARE through thought_facets_validate. Refusals as values: BAD_STANCE, EMPTY_TEXT, SELF_CITATION, NOT_FOUND (the citing thought), SOURCE_NOT_FOUND. No MCP tool calls it yet. Migration 041 / SMD-1712.';
+  'Writes one citation facet: thought p_thought_id rests on p_source_id for the statement p_text, with stance stated | retrieved | inferred. Takes the supersession advisory lock first (the writers'' order, 033/036), then the INSERT locks the source KEY SHARE through thought_facets_validate. Refusals as values: BAD_STANCE, EMPTY_TEXT, SELF_CITATION, NOT_FOUND (the citing thought), SOURCE_NOT_FOUND. No MCP tool calls it yet. Migration 042 / SMD-1712.';

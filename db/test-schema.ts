@@ -4119,13 +4119,13 @@ console.log("\n[36] Migration 036: delete_thought and review_supersession_propos
   // 032/029/009 without restoring would otherwise silently give us a stale body.
   await restoreShipped("delete_thought", "review_supersession_proposal");
   await db.exec(`DELETE FROM thoughts`);
-  // 036 added one advisory-lock line to 009's body; 041 carried that body
+  // 036 added one advisory-lock line to 009's body; 042 carried that body
   // forward under a third parameter, the two-argument form dropped so there is
   // still one function. A future edit that drops the lock — reopening the
   // accept-vs-delete deadlock db/test-live.ts [6g] proves — is caught here, in
-  // the fast suite, without a live server. [41] holds what 041 added.
-  assert((await functionsNamed("delete_thought")) === 1 && lastDefinerOf("delete_thought").startsWith("041"),
-    `one delete_thought, 041 the last definer carrying 036's lock (${lastDefinerOf("delete_thought")})`);
+  // the fast suite, without a live server. [41] holds what 042 added.
+  assert((await functionsNamed("delete_thought")) === 1 && lastDefinerOf("delete_thought").startsWith("042"),
+    `one delete_thought, 042 the last definer carrying 036's lock (${lastDefinerOf("delete_thought")})`);
   const src = String((await db.query<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = $1::regprocedure`, ["delete_thought(uuid, jsonb, boolean)"])).rows[0].s);
   const iLock = src.indexOf("pg_advisory_xact_lock(hashtext('ob1:supersession-review'))");
   const iDelete = src.indexOf("DELETE FROM thoughts WHERE id = p_id");
@@ -4697,7 +4697,7 @@ console.log("\n[40] Every schemas/*.sql applies to a migrated brain with no Supa
   await cdb.close();
 }
 
-console.log("\n[41] Migration 041: a cited source is refused as a value and detached on request, a citation on a thought the same statement deletes never counts, history never blocks, the writer joins the lock order, and the shape re-applies (SMD-1712)");
+console.log("\n[41] Migration 042: a cited source is refused as a value and detached on request, a citation on a thought the same statement deletes never counts, history never blocks, the writer joins the lock order, and the shape re-applies (SMD-1712)");
 {
   await restoreShipped("delete_thought");
   await db.exec(`DELETE FROM thoughts`);
@@ -4725,7 +4725,7 @@ console.log("\n[41] Migration 041: a cited source is refused as a value and deta
   assert(Number(trg[1].tgtype) === 8 && trg[1].old_table === "deleted", `the guard fires AFTER DELETE FOR EACH STATEMENT with the deleted rows as a transition table (tgtype ${trg[1].tgtype}, old table ${trg[1].old_table})`);
   assert((Number(trg[0].tgtype) & 3) === 3 && (Number(trg[0].tgtype) & 20) === 20, `the validate trigger is BEFORE INSERT OR UPDATE FOR EACH ROW (tgtype ${trg[0].tgtype})`);
   const forms = await one<{ three: boolean; two: boolean }>(`SELECT to_regprocedure('delete_thought(uuid, jsonb, boolean)') IS NOT NULL AS three, to_regprocedure('delete_thought(uuid, jsonb)') IS NULL AS two`);
-  assert((await functionsNamed("delete_thought")) === 1 && forms.three && forms.two && lastDefinerOf("delete_thought").startsWith("041"), `one delete_thought, of three arguments, the two-argument form dropped (${lastDefinerOf("delete_thought")})`);
+  assert((await functionsNamed("delete_thought")) === 1 && forms.three && forms.two && lastDefinerOf("delete_thought").startsWith("042"), `one delete_thought, of three arguments, the two-argument form dropped (${lastDefinerOf("delete_thought")})`);
   const src = String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = 'delete_thought(uuid, jsonb, boolean)'::regprocedure`)).s);
   // The one EXCEPTION clause names the one SQLSTATE; the body's comments may
   // mention foreign_key_violation as what it does NOT catch.
@@ -4943,12 +4943,12 @@ console.log("\n[41] Migration 041: a cited source is refused as a value and deta
            (await one<{ d: string | null }>(`SELECT payload->>'source_deleted_id' AS d FROM thought_facets WHERE thought_id = $1::uuid AND payload->>'text' = 'eleven'`, [C10])).d === S11,
     "…and a caller's own detach setting is put back after a refuse-mode call: that call is refused, the raw DELETE after it detaches");
 
-  // Re-applying 041 changes nothing: one function, two triggers, every row kept.
+  // Re-applying 042 changes nothing: one function, two triggers, every row kept.
   const before = (await one<{ c: number }>(`SELECT count(*)::int AS c FROM thought_facets`)).c;
-  await reapply("041");
-  await reapply("041");
+  await reapply("042");
+  await reapply("042");
   const again = await q<{ tgname: string }>(`SELECT tgname FROM pg_trigger WHERE NOT tgisinternal AND tgname IN ('thoughts_guard_citation_sources', 'thought_facets_validate')`);
-  assert(again.length === 2 && (await functionsNamed("delete_thought")) === 1 && before > 0 && (await one<{ c: number }>(`SELECT count(*)::int AS c FROM thought_facets`)).c === before, `041 re-applied twice leaves two triggers, one delete_thought and every facet row (${before})`);
+  assert(again.length === 2 && (await functionsNamed("delete_thought")) === 1 && before > 0 && (await one<{ c: number }>(`SELECT count(*)::int AS c FROM thought_facets`)).c === before, `042 re-applied twice leaves two triggers, one delete_thought and every facet row (${before})`);
   // A reset of the whole table: every citing thought goes with its source, so nothing survives and the statement is clean.
   await db.exec(`DELETE FROM thoughts`);
   assert((await one<{ c: number }>(`SELECT count(*)::int AS c FROM thought_facets`)).c === 0, "DELETE FROM thoughts with citations among the rows is clean — nothing survives to rest on nothing — and the facets cascade");

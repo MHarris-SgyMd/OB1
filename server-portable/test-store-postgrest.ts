@@ -567,7 +567,7 @@ console.log("\n[11] The query log's action rows over PostgREST: one or many thro
   await admin.close();
 }
 
-console.log("\n[12] deleteThought's rpc shape over PostgREST: p_detach named and bound as a boolean, the CITED refusal and the detach count normalised (migration 041, SMD-1712)");
+console.log("\n[12] deleteThought's rpc shape over PostgREST: p_detach named and bound as a boolean, the CITED refusal and the detach count normalised (migration 042, SMD-1712)");
 {
   const admin = new SQL({ url: URL_, max: 1 });
   const { id: source } = await store.captureThought({ content: "postgrest source: the limit is 600 a minute", payload: { metadata: {} }, embedding: vec(0) });

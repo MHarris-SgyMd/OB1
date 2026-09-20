@@ -1397,7 +1397,7 @@ console.log("\n[6h] update_thought naming supersedes races a delete of that targ
   await sql`DELETE FROM thoughts`;
 }
 
-console.log("\n[6i] A citation written while a delete of its source is in flight: the citation's transaction holds the source KEY SHARE (a raw insert) or the writers' advisory lock (record_citation), the delete waits and then sees it — refused, never a dangling source; and the raw-writer residue the lock order exists for, reproduced (migration 041, SMD-1712)");
+console.log("\n[6i] A citation written while a delete of its source is in flight: the citation's transaction holds the source KEY SHARE (a raw insert) or the writers' advisory lock (record_citation), the delete waits and then sees it — refused, never a dangling source; and the raw-writer residue the lock order exists for, reproduced (migration 042, SMD-1712)");
 {
   await sql`DELETE FROM thoughts`;
   const mk = async (tag: string) => ({

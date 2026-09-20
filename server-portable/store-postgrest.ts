@@ -360,7 +360,7 @@ export class PostgrestStore implements ThoughtStore {
     const { data, error } = await this.client.rpc("delete_thought", {
       p_id: opts.id,
       p_actor: actorPayload(opts.actor),
-      // 041: named, so PostgREST resolves the three-argument function.
+      // 042: named, so PostgREST resolves the three-argument function.
       p_detach: opts.detach === true,
     });
     if (error) throw new Error(error.message);

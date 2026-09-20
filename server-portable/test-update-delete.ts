@@ -313,7 +313,7 @@ console.log("\n[9] `supersedes` through the tool: set, clear, a loop and a ghost
   assert(/supersedes cleared/.test(cleared) && (await pointer(newer)) === null, `null clears it, and the reply says so (${cleared.split("\n")[0]})`);
 }
 
-console.log("\n[10] A thought cited as a source is refused by name and detached on request; expired and superseded citations never block and are marked; thirteen are counted and ten shown; a real foreign-key failure is a fault, not a refusal (migration 041)");
+console.log("\n[10] A thought cited as a source is refused by name and detached on request; expired and superseded citations never block and are marked; thirteen are counted and ten shown; a real foreign-key failure is a fault, not a refusal (migration 042)");
 {
   const idOf = (reply: string) => reply.match(/id ([0-9a-f-]{36})/)?.[1] ?? "";
   const cite = async (thought: string, src: string, text: string, stance = "retrieved") =>

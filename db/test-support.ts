@@ -76,7 +76,7 @@ const TABLES = [
  */
 const FUNCTIONS = [
   UPDATE_THOUGHT_SIGNATURE,
-  // 041 dropped the two-argument form for the three-argument one; both named,
+  // 042 dropped the two-argument form for the three-argument one; both named,
   // so a reset after a partial apply leaves neither behind.
   "delete_thought(uuid, jsonb)",
   "delete_thought(uuid, jsonb, boolean)",
@@ -120,7 +120,7 @@ const FUNCTIONS = [
   "stale_entities(interval, int)",
   // 032 (SMD-1323)
   "validate_derived_from(jsonb)",
-  // 041 (SMD-1712)
+  // 042 (SMD-1712)
   "thought_facets_validate()",
   "thoughts_guard_citation_sources()",
   "thought_facet_active(thought_facets)",

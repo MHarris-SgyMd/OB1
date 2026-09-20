@@ -204,7 +204,7 @@ db/test-bench-reuse.ts           # change 76 (new file — the kept bench corpus
 db/bench-oracle.ts               # change 76 (new file — the cache's pure part: what of a marker's entry a run may trust; test-schema [37])
 db/migrations/039_*.sql          # change 81 (new file — the two HNSW indexes over embedding::halfvec under their names; match_thoughts' walk branches order by the cast)
 db/migrations/040_*.sql          # change 91 (new file — 039's match_thoughts with `SET jit = off`; a disabled planner path no longer JIT-compiles the gate's sample)
-db/migrations/041_*.sql          # change 94 (new file — thought_facets, the citation guard on thoughts, delete_thought(uuid, jsonb, boolean), record_citation)
+db/migrations/042_*.sql          # change 94 (new file — thought_facets, the citation guard on thoughts, delete_thought(uuid, jsonb, boolean), record_citation)
 evals/eval-quant.ts              # change 81 (new file — vector, halfvec and binary-with-rerank measured on real vectors at the shipped width; test-schema [38], test-upgrade [16])
 <4 vendored MCP servers, 1 sample> # change 78 (a McpServer built per request — per session in the cost recipe's after sample — in place of one shared and connect()ed to a fresh transport each time)
 <17 pin sites, 3 lockfiles>      # change 83 (@hono/mcp 0.1.1 → 0.1.5: the transport lets go of each POST it has answered; the after sample's sweep closes the transports it drops)
@@ -15140,7 +15140,7 @@ note read the same afterwards with nothing behind it. The proposal bundle of
 2026-09-12 drafted the fix — a `thought_facets` sidecar with a claim kind, a
 `BEFORE DELETE` guard raising `foreign_key_violation`, `delete_thought`
 catching it — against a `main` that had since moved under every hunk (the
-ticket lists the eleven ways). The idea lands here as migration **041** on the
+ticket lists the eleven ways). The idea lands here as migration **042** on the
 fork's own terms.
 
 **The gate, and the number it was decided on.** SMD-1712 was gated on
@@ -15156,7 +15156,7 @@ and what is not, is not — 0 of 511 before, 68 of 69 after — which is the
 thesis this facet rests on. The ten-ticket re-measure still runs when it can
 (`bun scripts/mechanism-yield.mjs --since fe09f4d`); it now judges Phase 3.
 
-**What 041 adds.** One table, `thought_facets` (`thought_id` → `thoughts`
+**What 042 adds.** One table, `thought_facets` (`thought_id` → `thoughts`
 `ON DELETE CASCADE`, `kind`, `payload jsonb`, `valid_until`, `superseded_by` →
 a later facet, `ON DELETE SET NULL`), with **one registered kind**, `citation`,
 payload `{text, stance, source_id}` — the statement, whether it was stated /
@@ -15342,7 +15342,7 @@ after the sixth pass — a raw delete of the citing note while the source's
 detaching delete runs, which completes with nothing to detach where the
 fifth pass's lock order deadlocked;
 `record_citation` in a transaction that goes on to write `supersedes` (the lock
-is re-entrant, no cycle, refused after the commit); the residue stated in 041's
+is re-entrant, no cycle, refused after the commit); the residue stated in 042's
 header — a raw writer whose transaction takes the advisory lock *after* the
 row, through `update_thought`, against the waiting delete — which deadlocks,
 deterministically, and Postgres breaks it with nothing dangling either way (that
@@ -15365,14 +15365,14 @@ statements resting on nothing:", lists the ten sampled `thought_id (stance):
 text` lines, "…and 3 more", then the way through; a success says how many were
 detached and records the deleted id, or how many expired or superseded rows
 were marked. The guard runs as the calling role, so `ROLE_GRANTS.capture` gains
-`thought_facets` `SELECT, UPDATE` (`since: "041"`) — a self-hosted server role
+`thought_facets` `SELECT, UPDATE` (`since: "042"`) — a self-hosted server role
 without them cannot delete *any* thought — and preflight's `write privileges`
 names it with its `GRANT`; the README's grants table carries the row (check 7's
 README rule holds the two together). Preflight also gains a **`delete
 signature`** check beside `edit signature` (first review pass): both stores now
 send three arguments, so a server deployed ahead of the migration would have
 started green and failed every delete at the first user call with "function
-does not exist", and a hand re-apply of 009 or 036 over 041 would put the
+does not exist", and a hand re-apply of 009 or 036 over 042 would put the
 two-argument form back beside it and make every two-argument caller "not
 unique" — the check names each state with its remedy, as 032's does for
 `update_thought`; over PostgREST, where the catalog is out of reach, the same
@@ -15399,7 +15399,7 @@ counts (seventh pass); and the delete-only refusal fields live on
 `UpdateResult` advertises nothing `update_thought` never returns — one
 `MutationEnvelope` is what the normaliser reads and both result types narrow
 (seventh pass). The hosted remedy for the search
-signatures names 041 as the last file to apply through, so an operator who
+signatures names 042 as the last file to apply through, so an operator who
 follows it is not sent back for `delete signature` on the next start (fifth
 pass).
 
@@ -15412,13 +15412,13 @@ refuse / detach /
 history marked / thirteen counted and ten sampled / note and source together
 clean while a third citer refuses it / two sources in one raw detach statement
 totalling 2 / a raw `DELETE` meeting the table's refusal / an unknown mode /
-five raw-insert shapes / a real FK failure propagating / 041 re-applied twice /
-a whole-table reset clean — and [36] re-pointed at 041's body for 036's lock
+five raw-insert shapes / a real FK failure propagating / 042 re-applied twice /
+a whole-table reset clean — and [36] re-pointed at 042's body for 036's lock
 assertions; `server-portable/test-update-delete.ts` [10] through the tool over
 real Postgres, the FK-fault fixture included; `db/test-live.ts` [6i], the five
 race arms above; `test-upgrade` [7]'s window guard and note moved to eleven;
 `test-preflight` [5]'s capture-role walk names the facet `UPDATE` and its
-signature walk re-applies 036 over 041 and drops 041's form for the `delete
+signature walk re-applies 036 over 042 and drops 042's form for the `delete
 signature` check; `server-portable/test-store-postgrest.ts` [12] drives
 `deleteThought` through the SQL shim — `p_detach` named and bound, the `CITED`
 envelope normalised, a two-argument named `rpc` still resolving. Ten
@@ -15481,7 +15481,7 @@ meet the guard as a bare `OB001` with no detach path, the way every
 raw writer met 008's rule; routing them through `delete_thought` is
 **SMD-1793**, filed from the first review pass in the shape of changes 69 and
 71. `--reapply` (change 56) re-runs 009 and 036 in their turn, each re-creating
-the two-argument form, and 041 drops it again in its.
+the two-argument form, and 042 drops it again in its.
 
 **Upstream status:** not applicable — the fork's schema; upstream has no
 citation or facet concept.

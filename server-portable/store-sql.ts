@@ -335,7 +335,7 @@ export class SqlStore implements ThoughtStore {
     actor?: Actor;
     detach?: boolean;
   }): Promise<DeleteResult> {
-    // 041's third argument, always sent: the function's default is false, and
+    // 042's third argument, always sent: the function's default is false, and
     // spelling it keeps the call one signature on both stores.
     const rows = await this.sql`
       SELECT delete_thought(${opts.id}::uuid, ${actorPayload(opts.actor)}::jsonb, ${opts.detach === true}::boolean) AS r`;

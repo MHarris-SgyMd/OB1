@@ -115,13 +115,13 @@ const APPLY_020 = "Apply db/migrations/020_match_thoughts_recency.sql, then 027_
  * has just applied it back to the migrator (first review pass of 021).
  */
 const RELOAD_HINT = "If the ledger already records it, PostgREST may not have reloaded its schema cache: NOTIFY pgrst, 'reload schema';";
-const APPLY_020_POSTGREST = `Apply the migrations through db/migrations/041_thought_citations.sql against the project's direct connection (server-portable/README.md §4) — 020 gives both functions the forms the server sends; 027 and 040 last define search_thoughts_hybrid and match_thoughts, and 041 delete_thought's three-argument form, which the next start checks too. ${RELOAD_HINT}`;
+const APPLY_020_POSTGREST = `Apply the migrations through db/migrations/042_thought_citations.sql against the project's direct connection (server-portable/README.md §4) — 020 gives both functions the forms the server sends; 027 and 040 last define search_thoughts_hybrid and match_thoughts, and 042 delete_thought's three-argument form, which the next start checks too. ${RELOAD_HINT}`;
 /** An id no row has: the probes below call a function with it and read the NOT_FOUND it answers, writing nothing. */
 const NOBODY = "00000000-0000-4000-8000-000000000000";
 const APPLY_021 = "Apply db/migrations/021_embedding_model_per_row.sql.";
 const APPLY_032 = "Apply db/migrations/032_update_thought_provenance.sql.";
-const APPLY_041 = "Apply db/migrations/041_thought_citations.sql.";
-const APPLY_041_POSTGREST = `Apply the migrations through db/migrations/041_thought_citations.sql against the project's direct connection (server-portable/README.md §4). ${RELOAD_HINT}`;
+const APPLY_042 = "Apply db/migrations/042_thought_citations.sql.";
+const APPLY_042_POSTGREST = `Apply the migrations through db/migrations/042_thought_citations.sql against the project's direct connection (server-portable/README.md §4). ${RELOAD_HINT}`;
 /**
  * Where the ledger already records the migration a check finds absent — a
  * brain adopted with --baseline whose schema is the guide's — "apply it" is a
@@ -536,13 +536,13 @@ if (configFailed) {
           add("edit signature", "skip", `could not probe update_thought over PostgREST (${(e as Error).message}); ${CATALOG_HINT}`);
         }
         /**
-         * Migration 041 gave delete_thought a third parameter, p_detach, by
+         * Migration 042 gave delete_thought a third parameter, p_detach, by
          * dropping the two-argument form, and the store sends all three by
          * name on every delete. Probed as the store calls it, with an id no
          * row has: the function answers {ok:false, error:'NOT_FOUND'} and
-         * writes nothing. PGRST202 is a form from before 041 (or no
+         * writes nothing. PGRST202 is a form from before 042 (or no
          * function); then two named arguments, which only a two-argument form
-         * re-created beside 041's by a hand re-apply of 009 or 036 makes
+         * re-created beside 042's by a hand re-apply of 009 or 036 makes
          * ambiguous — and that breaks every PostgREST caller by name from
          * before this change (third review pass).
          */
@@ -550,16 +550,16 @@ if (configFailed) {
           const { data: three, error: threeErr } = await legacy.rpc("delete_thought", { p_id: NOBODY, p_actor: null, p_detach: false });
           if (threeErr && missing(threeErr.message)) {
             add("delete signature", "fail",
-                "delete_thought does not take p_detach over PostgREST — it is missing or is a form from before migration 041 — and the server sends it on every delete, so every delete_thought call would fail",
-                APPLY_041_POSTGREST);
+                "delete_thought does not take p_detach over PostgREST — it is missing or is a form from before migration 042 — and the server sends it on every delete, so every delete_thought call would fail",
+                APPLY_042_POSTGREST);
           } else if (threeErr && /permission denied/i.test(threeErr.message)) {
-            // 041's guard reads and writes thought_facets as the caller on
+            // 042's guard reads and writes thought_facets as the caller on
             // every delete, a zero-row one included — so the probe itself
             // meets the missing privilege, and the evidence is in hand: not a
             // skip (seventh review pass). The direct path's `write privileges`
             // says the same from the catalog.
             add("delete signature", "fail",
-                `the connection's role lacks a privilege 041's citation guard needs on every delete (${threeErr.message}) — so every delete_thought call would fail`,
+                `the connection's role lacks a privilege 042's citation guard needs on every delete (${threeErr.message}) — so every delete_thought call would fail`,
                 "GRANT SELECT, UPDATE ON thought_facets TO <the connector's role>; against the project's direct connection (db/README.md, Grants for a capturing role).");
           } else if (threeErr) {
             add("delete signature", "skip", `could not probe delete_thought over PostgREST (${threeErr.message}); ${CATALOG_HINT}`);
@@ -568,11 +568,11 @@ if (configFailed) {
           } else {
             const { error: twoErr } = await legacy.rpc("delete_thought", { p_id: NOBODY, p_actor: null });
             if (!twoErr) {
-              add("delete signature", "ok", "delete_thought takes 041's arguments over PostgREST, and a 2-argument call resolves to one function — no earlier form beside it");
+              add("delete signature", "ok", "delete_thought takes 042's arguments over PostgREST, and a 2-argument call resolves to one function — no earlier form beside it");
             } else if (/could not choose|PGRST203|not unique/i.test(twoErr.message)) {
               add("delete signature", "fail",
-                  "delete_thought has more than one form — 009 or 036 re-applied by hand beside 041's — and PostgREST cannot choose between them for a call with two arguments, so every caller by name from before this change fails",
-                  "Drop the earlier form, as 041 does, against the project's direct connection: DROP FUNCTION IF EXISTS delete_thought(uuid, jsonb);");
+                  "delete_thought has more than one form — 009 or 036 re-applied by hand beside 042's — and PostgREST cannot choose between them for a call with two arguments, so every caller by name from before this change fails",
+                  "Drop the earlier form, as 042 does, against the project's direct connection: DROP FUNCTION IF EXISTS delete_thought(uuid, jsonb);");
             } else {
               add("delete signature", "skip", `could not probe delete_thought over PostgREST (${twoErr.message}); ${CATALOG_HINT}`);
             }
@@ -898,7 +898,7 @@ if (configFailed) {
           const absent = reqTables.filter((t, i) => reqTables.indexOf(t) === i && !presentTables.has(t));
           const triggerMiss = triggerPresent && (missingByTable.has("ob1_config") || missingByTable.has("thought_work_claims"));
           // What would fail, by what is missing: the capture path's writers
-          // for any capture-path table, and — 041's guard reads and writes
+          // for any capture-path table, and — 042's guard reads and writes
           // thought_facets as the caller on every delete — every delete of a
           // thought for that one, said separately so an operator whose
           // capture succeeds is not told the check was wrong (seventh pass).
@@ -907,7 +907,7 @@ if (configFailed) {
           if (captureMiss) fails.push(triggerMiss
             ? "a windowed capture, an edit with content, 008's audit trigger, or 016's enqueue trigger — which as the caller reads ob1_config on every capture, and upserts a work claim while entity extraction is enabled —"
             : "a windowed capture, an edit with content, or 008's audit trigger");
-          if (missingByTable.has("thought_facets")) fails.push("every delete of a thought (041's citation guard reads and writes thought_facets as the caller)");
+          if (missingByTable.has("thought_facets")) fails.push("every delete of a thought (042's citation guard reads and writes thought_facets as the caller)");
           const why = ` — so ${fails.join(", and ")} would fail`;
           if (missingByTable.size) {
             const phrase = [...missingByTable].map(([t, ps]) => `${ps.join(", ")} on ${t}`).join("; ");
@@ -1347,14 +1347,14 @@ if (configFailed) {
         }
 
         /**
-         * Migration 041 changed delete_thought the way 021 and 032 changed
+         * Migration 042 changed delete_thought the way 021 and 032 changed
          * update_thought: a defaulted third parameter (p_detach), the
          * two-argument form dropped, both stores sending all three. The same
          * two states break every delete and neither shows in a presence
-         * check: the function predates 041 (the call has no function to
+         * check: the function predates 042 (the call has no function to
          * resolve to — a server deployed ahead of the migration fails at the
          * first user delete, not at start), or the two-argument form was
-         * re-created BESIDE 041's by a hand re-apply of 009 or 036 (every
+         * re-created BESIDE 042's by a hand re-apply of 009 or 036 (every
          * two-argument caller — the vendored servers' rpc by name, hand SQL —
          * is "function is not unique").
          */
@@ -1367,17 +1367,17 @@ if (configFailed) {
           const current = dt.filter((r) => Number(r.nargs) === 3);
           const extra = dt.filter((r) => Number(r.nargs) !== 3).map((r) => r.sig);
           if (!dt.length) {
-            add("delete signature", "fail", "delete_thought is missing — the delete_thought tool calls it", ledgerRemedy("041", APPLY_041));
+            add("delete signature", "fail", "delete_thought is missing — the delete_thought tool calls it", ledgerRemedy("042", APPLY_042));
           } else if (current.length && extra.length === 0) {
-            add("delete signature", "ok", `${current[0].sig}: the form the servers call since migration 041, alone`);
+            add("delete signature", "ok", `${current[0].sig}: the form the servers call since migration 042, alone`);
           } else if (current.length) {
             add("delete signature", "fail",
-                `beside the form the servers call there ${extra.length === 1 ? "is an earlier one" : `are ${extra.length} earlier ones`}: ${extra.join(", ")} — 009 or 036 re-applied by hand over 041 — so every call that sends two arguments to delete_thought, which is every PostgREST caller by name from before this change and every hand-written SELECT, fails with "function is not unique"`,
-                `Drop the earlier form, as 041 does: ${extra.map((sig) => `DROP FUNCTION ${sig};`).join(" ")}`);
+                `beside the form the servers call there ${extra.length === 1 ? "is an earlier one" : `are ${extra.length} earlier ones`}: ${extra.join(", ")} — 009 or 036 re-applied by hand over 042 — so every call that sends two arguments to delete_thought, which is every PostgREST caller by name from before this change and every hand-written SELECT, fails with "function is not unique"`,
+                `Drop the earlier form, as 042 does: ${extra.map((sig) => `DROP FUNCTION ${sig};`).join(" ")}`);
           } else {
             add("delete signature", "fail",
-                `${extra.join(" and ")} ${extra.length === 1 ? "is the form" : "are the forms"} from before migration 041; the server sends p_detach, which only 041's form takes — so every delete would fail`,
-                ledgerRemedy("041", APPLY_041));
+                `${extra.join(" and ")} ${extra.length === 1 ? "is the form" : "are the forms"} from before migration 042; the server sends p_detach, which only 042's form takes — so every delete would fail`,
+                ledgerRemedy("042", APPLY_042));
           }
         } catch (e) {
           add("delete signature", "warn", `could not verify: ${(e as Error).message}`, "The catalog read behind this check needs SELECT on pg_proc.");
@@ -1385,12 +1385,12 @@ if (configFailed) {
 
         /**
          * Every lock-order argument on this fork — 018's fingerprint lock,
-         * 033's one order for the writers, 036's delete, 041's citation guard
+         * 033's one order for the writers, 036's delete, 042's citation guard
          * — holds under READ COMMITTED, Postgres's default: a writer that
          * waits on a row lock re-reads the row the lock won. A connection whose
          * default is REPEATABLE READ or SERIALIZABLE (a role or database
          * setting, a pooler) reads its transaction's snapshot instead, and
-         * 041's guard then cannot see a citation committed after that
+         * 042's guard then cannot see a citation committed after that
          * snapshot — its source goes from under it. A warning, not a refusal:
          * the server still works, the guarantees named do not (third review
          * pass, SMD-1712).
@@ -1398,10 +1398,10 @@ if (configFailed) {
         try {
           const [{ level }] = (await sql`SELECT current_setting('default_transaction_isolation') AS level`) as { level: string }[];
           if (/^read (committed|uncommitted)$/i.test(level)) {
-            add("transaction isolation", "ok", `default_transaction_isolation is ${level} — the level the writers' lock order (018/033/036) and the citation guard (041) are argued under`);
+            add("transaction isolation", "ok", `default_transaction_isolation is ${level} — the level the writers' lock order (018/033/036) and the citation guard (042) are argued under`);
           } else {
             add("transaction isolation", "warn",
-                `default_transaction_isolation is ${level}: the writers' lock order (018/033/036) and the citation guard (041) are argued under read committed — under ${level} a transaction reads its own snapshot, so a citation committed after it began is invisible to a delete of its source`,
+                `default_transaction_isolation is ${level}: the writers' lock order (018/033/036) and the citation guard (042) are argued under read committed — under ${level} a transaction reads its own snapshot, so a citation committed after it began is invisible to a delete of its source`,
                 `Set the connection's default back: ALTER ROLE ${ident} SET default_transaction_isolation = 'read committed'; (or at the database or pooler where it was changed).`);
           }
         } catch (e) {

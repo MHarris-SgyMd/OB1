@@ -437,7 +437,7 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // re-capture writes no provenance, SMD-1453), 036 (delete_thought's lock
   // order, SMD-1462), 037 (the routing count's gate, SMD-1463) and 038 (the
   // gate's sample by TID range, SMD-1526), 039 (the half-precision walk,
-  // SMD-1501), 040 (jit off on the function, SMD-1624) and 041 (the citations
+  // SMD-1501), 040 (jit off on the function, SMD-1624) and 042 (the citations
   // facet and delete_thought's third argument, SMD-1712) stay recorded and
   // are never tried. 030 is the right one to make
   // pending
@@ -449,7 +449,7 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // body and 029's supersession lock; 037 redefines 020's match_thoughts and
   // 038 037's; 039 redefines it again and swaps 001's and 007's two indexes,
   // which every schema has; 040 redefines it once more with one SET clause;
-  // 041 adds a table on 001's and redefines delete_thought on 009's body and
+  // 042 adds a table on 001's and redefines delete_thought on 009's body and
   // 036's lock key, all present — all recorded by the baseline with their
   // prerequisites present, so none
   // becomes the plain-run failure point above).

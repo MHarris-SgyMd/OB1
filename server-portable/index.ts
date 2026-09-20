@@ -279,7 +279,7 @@ function explainRefusal(
       return `Refused: no thought with the id given as supersedes. Pass the id of an existing thought — the ID: line of a search result — or null to clear the pointer.`;
     case "WOULD_CYCLE":
       return `Refused: that supersedes pointer would close a loop — the thought named already supersedes ${id}, directly or through a chain (or is ${id} itself). A version chain runs one way; point the newer thought at the older, or clear the older's pointer first.`;
-    // Migration 041: statements in other thoughts rest on this one. The rows
+    // Migration 042: statements in other thoughts rest on this one. The rows
     // are the function's sample (ten, newest first); the count is the whole.
     case "CITED": {
       const rows = (r.citations ?? []).map((c) => `  - ${c.thoughtId} (${c.stance}): ${snipText(c.text, 120)}`);
@@ -291,7 +291,7 @@ function explainRefusal(
       const subject = `${total} citation${one ? "" : "s"} on other thoughts rest${one ? "s" : ""} on ${id} as ${one ? "its" : "their"} source`;
       const through = `To delete anyway, pass detach_citations: true`;
       const reread = `re-read the thought (fetch takes the id) before deciding. ${through}.`;
-      // The count and rows come from the guard's own refusal (041 carries them
+      // The count and rows come from the guard's own refusal (042 carries them
       // in the error), so a CITED envelope with neither is one the function did
       // not write — a proxy, a truncated body. Say so rather than "0 citations".
       if (total <= 0) return `Refused: other thoughts cite ${id} as their source, but the reply carried no count and no citing rows — ${reread}`;
@@ -318,7 +318,7 @@ function snipText(text: string, max: number): string {
 
 /**
  * What a successful delete did to the citations that named the thought
- * (migration 041): the active ones it detached — only when asked — and the
+ * (migration 042): the active ones it detached — only when asked — and the
  * expired or superseded ones it marked in either mode. Silent when neither.
  */
 function explainDetached(r: { detached?: number; inactive?: number }, id: string): string {
@@ -1345,7 +1345,7 @@ function buildServer(principal: Principal): McpServer {
         const result = await (await db()).deleteThought({
           id,
           actor: { name: principal.name, agentId: principal.agentId, source: "mcp" },
-          // 041: the refusal is the default; the way through is named here.
+          // 042: the refusal is the default; the way through is named here.
           detach: detach_citations === true,
         });
         if (!result.ok) return toolError(explainRefusal(result, id));
