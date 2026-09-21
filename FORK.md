@@ -16433,15 +16433,18 @@ compose had read since change 16 and the example never named.
 
 **Held two ways.** `scripts/check-fork-consistency.mjs` check 13 reads every
 `*.yaml` under `deploy/` and refuses a mapping that drops the address, a
-`_BIND` default other than `127.0.0.1`, the long form (which the rule cannot
-read — use the short one), a knob `.env.example` does not document, and a
-`ports:` on any base-file service but `server`; eleven probes hold the rule to
-its own text on every run, and five drop-the-mechanism mutants on the real
-files each fail with the intended message. The "Full stack, no Supabase" job
-reads what compose *makes* of the file, `config --format json`: one port in the
-base file on `127.0.0.1` at the job's `SERVER_PORT`, three with the overlay and
-the profile, all on loopback, and under `SERVER_BIND=0.0.0.0` the server on
-`0.0.0.0` and the other two still on loopback — so the knob opens the server
+`_BIND` default other than the literal `127.0.0.1`, the long and inline forms
+(which the rule does not read — use the short one), a knob `.env.example` does
+not document, a merge key or a `ports:` outside `services:`; and it holds an
+inventory, `PUBLISHES`, of which service publishes from which file, so a
+mapping it cannot read fails as missing and a new one as unlisted (the two
+review passes below say how each rule got there; the probes hold the rule to
+its own text on every run, and the mutants on the real files are in the pass
+paragraphs). The "Full stack, no Supabase" job reads what compose *makes* of
+the file, `config --format json`: one port in the base file on `127.0.0.1` at
+the job's `SERVER_PORT`, three with the overlay and the profile, all on
+loopback, and under `SERVER_BIND=0.0.0.0` the *server's* port on `0.0.0.0`
+with postgres's and ollama's still on loopback — so the knob opens the server
 and only the server. The job's `POSTGRES_PORT=55433` is gone with the mapping
 it parameterised.
 
@@ -16504,6 +16507,49 @@ that return. Left alone: `smoke.sh`'s pre-existing handling of a present but
 blank `SERVER_PORT=` (it builds `http://127.0.0.1:`), and the address-less
 Ollama mapping in `recipes/local-brain-no-mcp/docker-compose.yml`, a community
 recipe outside `deploy/` — the maintainer decides whether the rule widens.
+
+**Second review pass** (same pairing, aimed at the seams the first added).
+The walk had a way round it that no indentation fixes: a top-level `x-open:
+&open` block holding `ports: ["5432:5432"]`, merged into `postgres` with `<<:
+*open`, passed the check — the server's own mapping still matched the
+inventory — while `compose config` rendered the database with `host_ip:
+null`, back on every interface (caught: mutant, by the cold read). The walk
+does not follow anchors, so it refuses what an anchor needs: a `<<:` merge key
+anywhere in the file, and a `ports:` key outside `services:`, each in its own
+words; the probe that had asserted a `ports:` under `volumes:` is *ignored* now
+asserts it is refused. The CI step's third line compared a *sorted multiset*
+of the three `host_ip`s to `["0.0.0.0", "127.0.0.1", "127.0.0.1"]` — true
+just as well with `OLLAMA_BIND=0.0.0.0` and the server on loopback, run and
+shown — so it proved one of three was open, not which (caught: run-it, on the
+author's own suspicion handed to the reviewer); the line names the server's
+port and the other two now. The `.env.example` "documented" regex was
+satisfied by the prose line `# SERVER_BIND=0.0.0.0 is the one an operator
+sets…`, so deleting the real `# SERVER_BIND=127.0.0.1` line passed (caught:
+mutant, run-it); it matches a bare assignment now. Four things the documents
+said that were not so or not enough (all caught: cold-read): the connector URL
+said `localhost` while the mapping binds the IPv4 loopback alone, so a client
+resolving `localhost` to `::1` first without a fallback is refused — the URLs
+say `127.0.0.1`, as `smoke.sh` always has; adding or dropping the host-ports
+overlay changes postgres's mapping, so `up -d` recreates that container and,
+through `depends_on`, the server, a cost the overlay's header and the README
+row now name (choose it when the stack comes up); the overlay's worked
+`DATABASE_URL` expanded `$POSTGRES_PASSWORD` from a shell that does not have
+it and hard-coded 5432 — it sources `deploy/.env` first and reads
+`${POSTGRES_PORT:-5432}`; and the README's `lsof` grep was unanchored, so a
+Supabase CLI stack on 54321/54322 read as the database leaking — a trailing
+space anchors the port. The "Held two ways" paragraph above still described
+the first pass's rule and counts; it describes the mechanism now and leaves the
+counts to the pass paragraphs (caught: cold-read). The walk's `flow-ports`
+message said "flow sequence" for an alias or a scalar too; the kind is
+`inline-ports` and the message names all three (caught: run-it). `db/README.md`'s
+bulk-pass section and the deploy README's "not covered" bullets said "run from
+a checkout" with no word that the stack no longer publishes the database — one
+pointer each to the overlay (caught: run-it). Not taken: the walk's wrong-story
+messages for inputs YAML itself rejects (a `#` inside an env default, an IPv6
+literal address) — each still fails; the inventory's multiset maps where a set
+difference would do, and an unreachable `else` — tidy-ups for the boyscout
+pass. Twenty-seven probes now; the three new mutants (the anchored block,
+`OLLAMA_BIND=0.0.0.0` against the CI line, the prose-only knob) each fail.
 
 **Upstream status:** not sent — upstream has no `deploy/`; the stack is this
 fork's (change 16 and the migration plan's Phase 4).

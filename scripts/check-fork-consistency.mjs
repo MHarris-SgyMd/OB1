@@ -1728,7 +1728,11 @@ function checkSupabaseIsms() {
 // a `/tcp` suffix, a knob not named `_BIND`), a default other than the literal
 // `127.0.0.1` (smoke.sh and the CI step dial it), a knob `.env.example` does
 // not document, or the long form and the flow form, which this rule does not
-// read — use the short one. The second is an inventory: PUBLISHES names which
+// read — use the short one; and, since the second review pass, a `<<:` merge
+// key anywhere in the file and a `ports:` key outside `services:` (a top-level
+// `x-*` block an anchor would carry into a service), because an anchored block
+// merged into a service published the database on 0.0.0.0 with the walk none
+// the wiser. The second is an inventory: PUBLISHES names which
 // service publishes from which file, one mapping each, and a file's readable
 // mappings must equal its entry exactly — so the server's mapping laid out in
 // a form the walk does not read fails as MISSING, a new file or service that
@@ -1776,8 +1780,10 @@ function publishedPortGapsIn(text, { documented }) {
     if (!line.trim() || /^\s*#/.test(line)) continue;
     const indent = /^ */.exec(line)[0].length;
     const body = line.trim();
-    if (indent === 0) { closePorts(); service = null; inServices = body === "services:"; if (inServices) sawServices = true; continue; }
-    if (!inServices) continue;
+    if (/^<<\s*:/.test(body)) { gaps.push(["merge-key", service, i + 1, body]); continue; }
+    if (indent === 0) { closePorts(); service = null; inServices = body === "services:"; if (inServices) sawServices = true; }
+    if (!inServices) { if (/^ports:/.test(body)) gaps.push(["ports-outside-services", null, i + 1, body]); continue; }
+    if (indent === 0) continue;
     if (service === null || indent <= serviceIndent) {
       closePorts();
       const m = /^("[^"]+"|'[^']+'|[A-Za-z0-9_.-]+):(?:\s*&\S+)?$/.exec(body);
@@ -1801,7 +1807,7 @@ function publishedPortGapsIn(text, { documented }) {
     closePorts();
     const pm = /^ports:(.*)$/.exec(body);
     if (!pm) continue;
-    if (pm[1].trim()) { gaps.push(["flow-ports", service, i + 1, pm[1].trim()]); continue; }
+    if (pm[1].trim()) { gaps.push(["inline-ports", service, i + 1, pm[1].trim()]); continue; }
     ports = { indent, line: i + 1, items: 0 };
   }
   closePorts();
@@ -1829,7 +1835,11 @@ const PORT_PROBES = [
   [`services:\n  server:\n    ports:\n      - "\${SERVER_BIND:-0.0.0.0}:\${SERVER_PORT:-8000}:8000"\n`, ["default-not-loopback"], []],
   [`services:\n  server:\n    ports:\n      - "\${SERVER_BIND:-[::1]}:\${SERVER_PORT:-8000}:8000"\n`, ["default-not-loopback"], []],
   [`services:\n  server:\n    ports:\n      - target: 8000\n        published: 8000\n        host_ip: 127.0.0.1\n`, ["long-form"], []],
-  [`services:\n  server:\n    ports: [${GOOD}]\n`, ["flow-ports"], []],
+  [`services:\n  server:\n    ports: [${GOOD}]\n`, ["inline-ports"], []],
+  [`services:\n  server:\n    ports: *ports\n`, ["inline-ports"], []],
+  // The second review pass's bypass: an anchored block carrying ports:, merged into a service.
+  [`x-open: &open\n  ports:\n    - "5432:5432"\nservices:\n  postgres:\n    <<: *open\n    image: x\n`, ["ports-outside-services", "merge-key"], []],
+  [`ports:\n  - "8000:8000"\nservices:\n  server:\n    image: x\n`, ["ports-outside-services"], []],
   [`services:\n  server:\n    ports:\n    image: x\n`, ["empty-ports"], []],
   [`services:\n  server:\n    ports:\n      - "\${OTHER_BIND:-127.0.0.1}:\${SERVER_PORT:-8000}:8000"\n`, ["undocumented-knob"], []],
   [`services:\n  server:\n\tports:\n`, ["tab"], []],
@@ -1839,14 +1849,16 @@ const PORT_PROBES = [
   [`services:\n  server:\n    ports:\n      - ${GOOD}\n      - "9000:9000"\n  postgres:\n    ports:\n      - "\${POSTGRES_BIND:-127.0.0.1}:\${POSTGRES_PORT:-5432}:5432"\n`, ["no-address"], ["server", "postgres"]],
   // A comment after the item, and a commented-out mapping, are not mappings; an anchored key is a key.
   [`services:\n  server: &srv\n    ports:\n      # - "8000:8000"\n      - ${GOOD}  # loopback\n`, [], ["server"]],
-  // ports: under a top-level key that is not services is not read.
-  [`services:\n  server:\n    image: x\nvolumes:\n  ports:\n      - "8000:8000"\n`, [], []],
+  // ports: under a top-level key that is not services is refused, not skipped.
+  [`services:\n  server:\n    image: x\nvolumes:\n  ports:\n      - "8000:8000"\n`, ["ports-outside-services"], []],
 ];
 
 function checkPublishedPorts() {
   const SELF = "scripts/check-fork-consistency.mjs";
   const documented = new Set(
-    [...readFileSync(join(ROOT, "deploy", ".env.example"), "utf8").matchAll(/^#?\s*([A-Z0-9_]+_BIND)=/gm)].map((m) => m[1])
+    // A knob line, live or commented out, with nothing after the value: the
+    // prose line "# SERVER_BIND=0.0.0.0 is the one an operator sets…" is not it.
+    [...readFileSync(join(ROOT, "deploy", ".env.example"), "utf8").matchAll(/^#?\s*([A-Z0-9_]+_BIND)=\S*\s*$/gm)].map((m) => m[1])
   );
   const probeDocs = new Set(["SERVER_BIND", "POSTGRES_BIND"]);
   for (const [text, kinds, services] of PORT_PROBES) {
@@ -1875,7 +1887,9 @@ function checkPublishedPorts() {
       else if (kind === "default-not-loopback") fail(at, `${svc}: ${detail} — the default is the literal 127.0.0.1, which smoke.sh and the CI step dial; an operator who wants another address sets the knob (SMD-1844)`);
       else if (kind === "undocumented-knob") fail(at, `${svc} reads \`${detail}\`, which deploy/.env.example does not document — an operator cannot find the knob that opens the port (SMD-1844)`);
       else if (kind === "long-form") fail(at, `${svc} publishes a port in the long form, which this rule does not read — use the short form ${HOUSE} (SMD-1844)`);
-      else if (kind === "flow-ports") fail(at, `${svc} writes \`ports: ${detail}\` as a flow sequence, which this rule does not read — one \`- \` item per line (SMD-1844)`);
+      else if (kind === "inline-ports") fail(at, `${svc} writes \`ports: ${detail}\` with an inline value — a flow sequence, an alias or a scalar — which this rule does not read; one \`- \` item per line (SMD-1844)`);
+      else if (kind === "merge-key") fail(at, `\`${detail}\` — a YAML merge key can carry a \`ports:\` block this rule never sees into a service (an anchored top-level block did, in review); write the keys out (SMD-1844)`);
+      else if (kind === "ports-outside-services") fail(at, `a \`ports:\` key outside \`services:\` — only a service publishes, and a block held for an anchor is how a mapping reaches one unread; put it on the service (SMD-1844)`);
       else if (kind === "empty-ports") fail(at, `${svc} has a \`ports:\` key with no item this rule could read (SMD-1844)`);
       else if (kind === "tab") fail(at, `a tab in the indentation — YAML forbids it and this rule does not read it (SMD-1844)`);
       else if (kind === "unreadable") fail(at, `\`${detail}\` sits at the service level of \`services:\` and is not a service key, so this rule cannot tell which service the lines under it belong to (SMD-1844)`);

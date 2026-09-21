@@ -51,11 +51,14 @@ Three services, in order:
 ### 4. Connect a client
 
 ```
-http://localhost:8000/?key=<MCP_ACCESS_KEY>
+http://127.0.0.1:8000/?key=<MCP_ACCESS_KEY>
 ```
 
 That URL works from this machine and nowhere else, by default — see the next
-section before handing it to a remote client.
+section before handing it to a remote client. `127.0.0.1`, not `localhost`: the
+mapping binds the IPv4 loopback only, and a client that resolves `localhost` to
+`::1` first without falling back is refused (`smoke.sh` dials `127.0.0.1` for the
+same reason).
 
 ## What is reachable from where
 
@@ -70,12 +73,13 @@ the repo root, with whatever `-f` files the stack was started with:
 | Service | On the compose network | On the host | From another machine |
 | --- | --- | --- | --- |
 | `server` | `server:8000` | `127.0.0.1:${SERVER_PORT:-8000}` — the stack's only published port | Only with `SERVER_BIND=0.0.0.0` in `deploy/.env`, and then the key rides every request in clear: put TLS or a tunnel in front first |
-| `postgres` | `postgres:5432` — the server and the migrator | Nothing. `compose exec postgres psql -U postgres openbrain` for psql, `compose exec -T postgres pg_dump -U postgres openbrain > dump.sql` for a backup. A tool run from a checkout (`db/reembed.ts`, `db/extract-entities.ts`, `db/consolidate.ts`, the evals) adds `-f deploy/compose.host-ports.yaml`, which publishes it on `127.0.0.1:${POSTGRES_PORT:-5432}` | Never. `POSTGRES_BIND` exists for a firewalled host you have looked at; it is the superuser on the whole brain |
+| `postgres` | `postgres:5432` — the server and the migrator | Nothing. `compose exec postgres psql -U postgres openbrain` for psql, `compose exec -T postgres pg_dump -U postgres openbrain > dump.sql` for a backup. A tool run from a checkout (`db/reembed.ts`, `db/extract-entities.ts`, `db/consolidate.ts`, the evals) adds `-f deploy/compose.host-ports.yaml`, which publishes it on `127.0.0.1:${POSTGRES_PORT:-5432}` — choose that when the stack comes up: adding or dropping the file later recreates `postgres` and, through `depends_on`, `server` | Never. `POSTGRES_BIND` exists for a firewalled host you have looked at; it is the superuser on the whole brain |
 | `ollama` (`--profile local-models`) | `ollama:11434` — the server and `ollama-pull` | Nothing. `compose exec ollama ollama pull <model>`; the host-ports file publishes it on `127.0.0.1:${OLLAMA_PORT:-11434}` for an eval run from a checkout | Not intended; an unauthenticated model API |
 
 `docker compose -f deploy/compose.yaml config` renders each mapping with
 `host_ip: 127.0.0.1`, and `scripts/check-fork-consistency.mjs` check 13 refuses
-a mapping under `deploy/` that drops the address, and holds an inventory of
+a mapping under `deploy/` that drops the address (or reaches a service through
+a YAML anchor and merge key, which the check cannot follow), and holds an inventory of
 which service publishes from which file — the server from `compose.yaml`, the
 database and Ollama from the host-ports file — so a new published port is
 named there deliberately, with its row in the table above; the "Full stack, no
@@ -85,8 +89,11 @@ On podman machine and Docker Desktop the listener you can see is the VM's
 proxy (`gvproxy`, `vpnkit`), not the container, so the check is on the Mac:
 
 ```bash
-lsof -nP -iTCP -sTCP:LISTEN | grep -E ":(5432|${SERVER_PORT:-8000}|11434)"
+lsof -nP -iTCP -sTCP:LISTEN | grep -E ":(5432|${SERVER_PORT:-8000}|11434) "
 ```
+
+(The trailing space anchors the port: without it a Supabase CLI stack on 54321
+and 54322 matches `5432` and reads as the database leaking.)
 
 shows `127.0.0.1:<SERVER_PORT>` for the server and nothing for 5432; a line on
 11434 is a host-installed Ollama (SETUP.md's macOS path), which binds loopback
@@ -188,7 +195,9 @@ there, for that check to pass.
   cron job, a Kubernetes CronJob, or a scheduled workflow. Not ported here.
 - **Data migration.** `pg_dump --data-only` from the old database, plus a full
   re-embed if the embedding model family changes — `db/reembed.ts`, run from a
-  checkout with the provider reachable, not from this stack.
+  checkout with the provider reachable, not from this stack. A checkout reaches
+  this stack's database only with `-f deploy/compose.host-ports.yaml` ("What is
+  reachable from where", above); the same goes for the two workers below.
 - **Entity extraction.** `db/extract-entities.ts --follow` is a long-running
   worker with a per-thought model cost; it is not a service here. Run it from a
   checkout, with `OB1_WORKER_KEY` set to a key whose hash is in

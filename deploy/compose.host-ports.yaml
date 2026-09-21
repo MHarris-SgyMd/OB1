@@ -1,8 +1,12 @@
 # Publishes the stack's two internal services to the host, for tools run from a
-# checkout rather than inside the compose network. A second -f, never the default:
+# checkout rather than inside the compose network. A second -f, never the default,
+# and chosen when the stack comes up: adding or dropping it later changes the
+# postgres service's mapping, so `up -d` recreates that container and, through
+# depends_on, the server — a live brain's connector is down for the health window.
 #
 #   podman compose -f deploy/compose.yaml -f deploy/compose.host-ports.yaml up -d
-#   DATABASE_URL=postgres://postgres:$POSTGRES_PASSWORD@127.0.0.1:5432/openbrain bun db/reembed.ts
+#   set -a; . deploy/.env; set +a      # the password lives there, not in your shell
+#   DATABASE_URL="postgres://postgres:$POSTGRES_PASSWORD@127.0.0.1:${POSTGRES_PORT:-5432}/openbrain" bun db/reembed.ts
 #
 # compose.yaml publishes only the server (SMD-1844). The database is the postgres
 # superuser on the whole brain behind one password; Ollama is an unauthenticated

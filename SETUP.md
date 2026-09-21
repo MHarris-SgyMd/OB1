@@ -343,11 +343,12 @@ OB1_SMOKE_KEY=<your-raw-key> ./deploy/smoke.sh
 ### 4. Connect a client
 
 ```
-http://localhost:8000/?key=<your-raw-key>
+http://127.0.0.1:8000/?key=<your-raw-key>
 ```
 
 In Claude Desktop: Settings → Connectors → Add custom connector, and paste that
-URL. By default nothing outside your machine can reach it: the server is the
+URL — `127.0.0.1` rather than `localhost`, since the port binds the IPv4
+loopback only. By default nothing outside your machine can reach it: the server is the
 stack's only published port and it binds `127.0.0.1`; the database and Ollama
 are not published at all (`deploy/README.md`, "What is reachable from where").
 `SERVER_BIND=0.0.0.0` in `deploy/.env` opens the server, and only the server, to
