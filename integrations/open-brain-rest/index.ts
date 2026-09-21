@@ -10,7 +10,7 @@
 // (021) and the chunk rows (022) follow the text and vector, and the actor
 // reaches the audit (008). FORK.md change 69; extensions/test-writes.ts drives it
 // against Postgres, and scripts/check-fork-consistency.mjs check 10 holds it.
-// SMD-1541 (change 100): the key's name rides as the actor — p_actor on
+// SMD-1541 (change 101): the key's name rides as the actor — p_actor on
 // update_thought, actor in upsert_thought's payload — so 008's row names it;
 // change 69 passed none, and the clause above was false until then.
 // ob1-fork (SMD-1455): access keys go through ../_shared/auth.ts — the core server's
@@ -433,10 +433,12 @@ async function createThought(body: z.infer<typeof captureSchema>, actorName: str
   const embedding = await getEmbedding(content);
   const upsert = await supabase.rpc("upsert_thought", {
     p_content: content,
-    // 008's actor, read from the payload into ob1.actor: the key's name, and
-    // the capture's declared source as the main server passes it (SMD-1541).
-    // Without it the audit row named nobody.
-    p_payload: { metadata, embedding_model: EMBEDDING_MODEL, actor: { name: actorName, source: sourceType } },
+    // 008's actor, read from the payload into ob1.actor: the key's name
+    // (SMD-1541). Without it the audit row named nobody. No source: the
+    // trigger reads the row's metadata.source — `sourceType` above — on its
+    // own, and a copy of it here would be a second spelling the write suite
+    // cannot tell from the first.
+    p_payload: { metadata, embedding_model: EMBEDDING_MODEL, actor: { name: actorName } },
     p_embedding: embedding,
   });
   if (upsert.error) throw new Error(upsert.error.message);

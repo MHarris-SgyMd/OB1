@@ -4,7 +4,7 @@
 // (021) and the chunk rows (022) follow the text and vector, and the actor
 // reaches the audit (008). FORK.md change 69; extensions/test-writes.ts drives it
 // against Postgres, and scripts/check-fork-consistency.mjs check 10 holds it.
-// SMD-1541 (change 100): the key's name rides as the actor in upsert_thought's
+// SMD-1541 (change 101): the key's name rides as the actor in upsert_thought's
 // payload — so 008's row names it, and the write-back's runtime rides in its
 // actor_context; change 69 passed none, and the clause above was false until then.
 // ob1-fork (SMD-1455): access keys go through ../_shared/auth.ts — the core server's
@@ -519,11 +519,12 @@ app.post("/writeback", requireWrite, async (c) => {
       p_embedding: embedding,
       p_payload: {
         embedding_model: EMBEDDING_MODEL,
-        // 008's actor, read from the payload into ob1.actor: the key's name and
-        // the source the metadata declares; the runtime that wrote back lands
-        // in actor_context, the row's column for what the actor carries beyond
-        // name, source and session (SMD-1541). Without it the row named nobody.
-        actor: { name: principal.name, source: "agent_memory", runtime: req.runtime.name },
+        // 008's actor, read from the payload into ob1.actor: the key's name;
+        // the runtime that wrote back lands in actor_context, the row's column
+        // for what the actor carries beyond name, source and session
+        // (SMD-1541). Without it the row named nobody. No source: the trigger
+        // reads metadata.source below on its own.
+        actor: { name: principal.name, runtime: req.runtime.name },
         metadata: {
           source: "agent_memory",
           source_type: "agent_memory",

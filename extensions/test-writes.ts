@@ -42,7 +42,7 @@
  * with the previous profile found through three path equalities and the
  * profile's own row kept out of its sources.
  *
- * SMD-1541 (FORK.md change 100) reads 008's row after every driven capture and
+ * SMD-1541 (FORK.md change 101) reads 008's row after every driven capture and
  * edit through change 69's five servers. Their headers said "the actor reaches
  * the audit (008)" and none passed one — the functions set `ob1.actor` only
  * from `p_actor` / `p_payload.actor` — so `thought_audit.actor_name` was NULL
@@ -50,9 +50,12 @@
  * names the key: `principal.name` where the server authenticates through
  * `_shared/auth.ts` (three), the constant `MCP_ACCESS_KEY` where it holds
  * that one key and compares it in place (`enhanced-mcp`, `rest-api`) — both
- * `MCP_ACCESS_KEY` under this suite's legacy single key. The row's `source` is
- * the capture's declared source, as the main server passes it, and the
- * server's name on an edit; the write-back's runtime lands in `actor_context`.
+ * `MCP_ACCESS_KEY` under this suite's legacy single key. A capture's actor
+ * carries no source — 008 reads the row's `metadata.source` on its own, and a
+ * copy of it in the actor was indistinguishable from that fallback under the
+ * mutant run — so the capture arms below hold the row's value by 008's rule;
+ * an edit's actor carries the server's name, which no row's metadata holds;
+ * the write-back's runtime lands in `actor_context`.
  *
  * The files are imported under the stand-in extensions/test-auth.ts uses for
  * Deno's two globals and its loader for Deno's specifiers, plus one more
@@ -321,10 +324,16 @@ function judgeCapture(label: string, r: Row, text: string) {
   assert(r.chunks === 0, `${label}: no chunk rows (the writer made none; nothing here plants any under a capture)`);
 }
 type Audit = { actor_name: string | null; source: string | null; actor_context: Record<string, unknown> | null };
-/** 008's latest row of one action for a thought: who the function was told wrote it, and from where. */
+/**
+ * 008's latest row of one action for a thought: who the function was told wrote it, and from where. `created_at` is
+ * `now()`, transaction-start time, so two rows one transaction wrote would tie and "latest" would be arbitrary: a tie
+ * fails here by name rather than passing by luck. None of the driven writes makes one today (each call is its own
+ * transaction under the shim and over PostgREST alike).
+ */
 async function auditRow(id: string, action: "capture" | "update"): Promise<Audit | undefined> {
-  const [r] = await sql`SELECT actor_name, source, actor_context FROM thought_audit WHERE thought_id = ${id} AND action = ${action} ORDER BY created_at DESC LIMIT 1`;
-  return r as Audit | undefined;
+  const rows = await sql`SELECT actor_name, source, actor_context, created_at FROM thought_audit WHERE thought_id = ${id} AND action = ${action} ORDER BY created_at DESC LIMIT 2`;
+  assert(rows.length < 2 || +new Date(rows[0].created_at) !== +new Date(rows[1].created_at), `008's latest ${action} row for the thought is one row, not a tie in created_at`);
+  return rows[0] as Audit | undefined;
 }
 /** The audit row a write through a server holding a key must leave (SMD-1541): the key's name, and the source named. */
 function judgeActor(label: string, a: Audit | undefined, source: string) {
@@ -394,7 +403,7 @@ try {
   const cid = String(c.structured?.thought_id);
   if (UUID.test(cid)) {
     judgeCapture("enhanced-mcp capture", await row(cid, captured), captured);
-    judgeActor("enhanced-mcp capture", await auditRow(cid, "capture"), "mcp"); // the tool's default `source`, as the metadata carries it
+    judgeActor("enhanced-mcp capture", await auditRow(cid, "capture"), "mcp"); // 008's own reading of metadata.source: the tool's default
     assert(typeof c.structured?.content_fingerprint === "string" && c.structured.content_fingerprint.length === 64, "…and reports the fingerprint the function computed");
     const [cside] = await sql`SELECT type, source_type FROM thoughts WHERE id = ${cid}`;
     assert(cside.type === "idea" && cside.source_type === "mcp", "the enhanced-thoughts columns follow the capture");
@@ -425,7 +434,7 @@ try {
   if (id) {
     judgeCapture("agent-memory-api writeback", await row(id, decision), decision);
     const audit = await auditRow(id, "capture");
-    judgeActor("agent-memory-api writeback", audit, "agent_memory");
+    judgeActor("agent-memory-api writeback", audit, "agent_memory"); // 008's own reading of metadata.source
     assert(audit?.actor_context?.runtime === "test", `…and the runtime that wrote back rides in actor_context (${JSON.stringify(audit?.actor_context)})`);
     const [m] = await sql`SELECT thought_id FROM agent_memories WHERE content = ${decision}`;
     assert(m?.thought_id === id, "the memory row points at the thought");
@@ -444,7 +453,7 @@ try {
   const cid = String(c.json?.thought_id);
   if (UUID.test(cid)) {
     judgeCapture("open-brain-rest capture", await row(cid, captured), captured);
-    judgeActor("open-brain-rest capture", await auditRow(cid, "capture"), "dashboard"); // the route's default source_type, as the metadata carries it
+    judgeActor("open-brain-rest capture", await auditRow(cid, "capture"), "dashboard"); // 008's own reading of metadata.source: the route's default source_type
     const [cside] = await sql`SELECT type, source_type, importance FROM thoughts WHERE id = ${cid}`;
     assert(cside.type === "idea" && cside.source_type === "dashboard" && Number(cside.importance) === 4, "the enhanced-thoughts columns follow the capture, without content or vector");
     // A re-capture of the same text: the function refreshes vector and metadata; the enhanced columns are the owner's.
@@ -485,7 +494,7 @@ try {
   const cid = String(c.json?.thought_id);
   if (UUID.test(cid)) {
     judgeCapture("rest-api capture", await row(cid, captured), captured);
-    judgeActor("rest-api capture", await auditRow(cid, "capture"), "rest_api"); // the route's default `source`, as the metadata carries it
+    judgeActor("rest-api capture", await auditRow(cid, "capture"), "rest_api"); // 008's own reading of metadata.source: the route's default
     assert(typeof c.json?.content_fingerprint === "string" && c.json.content_fingerprint.length === 64, "…and reports the fingerprint the function computed");
     await sql`UPDATE thoughts SET sensitivity_tier = 'personal' WHERE id = ${cid}`;
     const again = await send(h, "POST", "/capture", { content: captured });
@@ -747,6 +756,11 @@ spells("recipes/readwise-import/import-readwise.py", /if not data\.get\("id"\):[
 for (const sample of ["integrations/telegram-capture/README.md", "integrations/slack-capture/README.md"]) {
   spells(sample, /rpc\("upsert_thought", \{\s*p_content: messageText,\s*p_payload: \{\s*metadata: \{[^}]*\},\s*embedding_model: EMBEDDING_MODEL,\s*\},\s*p_embedding: embedding,/s, "'s sample captures through the 3-argument upsert_thought with the label beside the vector");
 }
+// SMD-1541: the two servers that compare one key in place spell the legacy key's name themselves. The name is the one
+// auth.ts gives the same key, so one physical key reads the same in `actor_name` whichever module compared it; the
+// arms above assert the one literal for all five, and these hold the spelling at its two sources.
+spells("extensions/_shared/auth.ts", /found = \{ name: "MCP_ACCESS_KEY", scope: "write"/, " names the legacy single key MCP_ACCESS_KEY");
+for (const f of ["integrations/enhanced-mcp/index.ts", "integrations/rest-api/index.ts"]) spells(f, /^const ACTOR_NAME = "MCP_ACCESS_KEY";$/m, " spells the same name as its ACTOR_NAME");
 // The three that own their database say they bypass the functions, in the file and in the README.
 for (const [file, readme] of [["integrations/kubernetes-deployment/index.ts", "integrations/kubernetes-deployment/README.md"], ["recipes/vercel-neon-telegram/src/lib/db.ts", "recipes/vercel-neon-telegram/README.md"], ["recipes/schema-aware-routing/index.ts", "recipes/schema-aware-routing/README.md"]]) {
   spells(file, /ob1-fork \(SMD-1524\):[^\n]*raw (?:INSERT|insert), by design/, " says its raw insert is by design — a database of its own");
