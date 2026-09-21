@@ -116,7 +116,7 @@ const DIRECT_CHECKS = [
   "atomic capture", "write privileges", "fingerprint backfill", "audit trail", "agent identity",
   "keyword search", "hybrid search", "stats summary", "provenance", "work claims", "search signatures", "edit signature", "delete signature", "transaction isolation", "filtered search",
   "candidate scan", "walk index", "chunk context", "trigram index", "embedding contract", "vector models",
-  "updated_at trigger", "re-embed pass", "consolidate pass", "migration ledger", "query log",
+  "updated_at trigger", "re-embed pass", "consolidate pass", "migration ledger", "schema version", "query log",
 ];
 /**
  * 020 gave match_thoughts and search_thoughts_hybrid the forms the servers
@@ -2254,6 +2254,46 @@ if (configFailed) {
           add("migration ledger", "warn", "no schema_migrations table — the schema was applied by hand",
               "Adopt it with: cd db && bun migrate.ts --url $DATABASE_URL --baseline");
         else add("migration ledger", "ok", "schema_migrations present");
+
+        // The version the brain was migrated under (044, SMD-1804): schema_version
+        // in ob1_config, reported beside the highest migration the ledger records.
+        // The server carries its own FORK_VERSION (db/version.mjs). A mismatch is a
+        // named warning, never a refusal — a brain and a server at different
+        // releases still serve; the operator decides whether that is intended.
+        try {
+          // Dynamic import, as the config.mjs value reads above are: a static
+          // value import of a .mjs trips noImplicitAny (TS7016) under this tsconfig.
+          const { FORK_VERSION, semverCompare, readReleases, highestReleasedMigration } = await import("../db/version.mjs");
+          const numbers = ledgerRead ? [...ledger].map(Number).filter((n) => !Number.isNaN(n)) : [];
+          const highestApplied = numbers.length ? Math.max(...numbers) : null;
+          const highest = highestApplied === null ? "unknown" : String(highestApplied).padStart(3, "0");
+          const [row] = (await sql`SELECT value FROM ob1_config WHERE key = 'schema_version'`) as { value: string }[];
+          const brain = row?.value;
+          if (!brain) {
+            add("schema version", "warn",
+              `ob1_config records no schema_version — this brain predates migration 044 (highest migration ${highest}); the server runs ${FORK_VERSION}`,
+              "Apply the migrations: cd db && bun migrate.ts --url $DATABASE_URL — a plain run applies 044, or --reapply if the ledger already records it.");
+          } else {
+            const releasedHi = highestReleasedMigration(readReleases());
+            // semverCompare ignores build metadata, so 0.0.0+upstream.<a> and
+            // 0.0.0+upstream.<b> compare equal — a fresh brain at the baseline is ok.
+            const cmp = semverCompare(FORK_VERSION, brain);
+            if (cmp < 0) {
+              add("schema version", "warn",
+                `the brain is at ${brain} but this server is ${FORK_VERSION} — a server older than the brain it serves`,
+                "Deploy the server for the brain's release (its tag names the server commit), or roll the brain back to a server that matches.");
+            } else if (highestApplied !== null && releasedHi > 0 && highestApplied > releasedHi) {
+              add("schema version", "warn",
+                `the brain reports ${brain} but its ledger reaches migration ${highest}, past that release's range (…${String(releasedHi).padStart(3, "0")}) — migrations applied beyond the version it names`,
+                "Cut a release that closes the new range, or roll the extra migrations back; releases.json maps versions to ranges.");
+            } else {
+              add("schema version", "ok", `${brain} · highest migration ${highest}${cmp > 0 ? ` (server ${FORK_VERSION} is newer)` : ""}`);
+            }
+          }
+        } catch (e) {
+          add("schema version", "warn", `could not verify: ${(e as Error).message}`,
+              "The check reads ob1_config.schema_version and db/version.mjs.");
+        }
 
         // The opt-in query log (034, SMD-1295). Never fatal: it is off by default
         // and its write is best-effort, so this reports its presence and setting
