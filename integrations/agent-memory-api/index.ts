@@ -4,6 +4,9 @@
 // (021) and the chunk rows (022) follow the text and vector, and the actor
 // reaches the audit (008). FORK.md change 69; extensions/test-writes.ts drives it
 // against Postgres, and scripts/check-fork-consistency.mjs check 10 holds it.
+// SMD-1541 (change 103): the key's name rides as the actor in upsert_thought's
+// payload — so 008's row names it, and the write-back's runtime rides in its
+// actor_context; change 69 passed none, and the clause above was false until then.
 // ob1-fork (SMD-1455): access keys go through ../_shared/auth.ts — the core server's
 // server-portable/auth.ts, copied so Supabase bundles it with the function — named,
 // scoped, hashed entries in MCP_ACCESS_KEYS (the older single MCP_ACCESS_KEY still
@@ -463,6 +466,7 @@ app.post("/recall", async (c) => {
 });
 
 app.post("/writeback", requireWrite, async (c) => {
+  const principal = c.get("principal");
   const parsed = writebackSchema.safeParse(await c.req.json());
   if (!parsed.success) return c.json({ error: "Invalid write-back payload", details: parsed.error.flatten() }, 400, corsHeaders);
   const req = parsed.data;
@@ -515,6 +519,9 @@ app.post("/writeback", requireWrite, async (c) => {
       p_embedding: embedding,
       p_payload: {
         embedding_model: EMBEDDING_MODEL,
+        // 008's actor, read from the payload: the key's name, this server as `via`, the runtime that wrote back
+        // (both kept in actor_context), no source (SMD-1541; FORK.md change 103 has the why).
+        actor: { name: principal.name, via: "agent-memory-api", runtime: req.runtime.name },
         metadata: {
           source: "agent_memory",
           source_type: "agent_memory",
