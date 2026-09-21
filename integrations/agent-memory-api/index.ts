@@ -4,7 +4,7 @@
 // (021) and the chunk rows (022) follow the text and vector, and the actor
 // reaches the audit (008). FORK.md change 69; extensions/test-writes.ts drives it
 // against Postgres, and scripts/check-fork-consistency.mjs check 10 holds it.
-// SMD-1541 (change 102): the key's name rides as the actor in upsert_thought's
+// SMD-1541 (change 103): the key's name rides as the actor in upsert_thought's
 // payload — so 008's row names it, and the write-back's runtime rides in its
 // actor_context; change 69 passed none, and the clause above was false until then.
 // ob1-fork (SMD-1455): access keys go through ../_shared/auth.ts — the core server's

@@ -10,7 +10,7 @@
 // (021) and the chunk rows (022) follow the text and vector, and the actor
 // reaches the audit (008). FORK.md change 69; extensions/test-writes.ts drives it
 // against Postgres, and scripts/check-fork-consistency.mjs check 10 holds it.
-// SMD-1541 (change 102): the key's name rides as the actor — p_actor on
+// SMD-1541 (change 103): the key's name rides as the actor — p_actor on
 // update_thought, actor in upsert_thought's payload — so 008's row names it;
 // change 69 passed none, and the clause above was false until then. This server
 // holds one key, MCP_ACCESS_KEY, so the name is the variable's (ACTOR_NAME below).

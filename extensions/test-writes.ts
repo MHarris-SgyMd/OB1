@@ -42,7 +42,7 @@
  * with the previous profile found through three path equalities and the
  * profile's own row kept out of its sources.
  *
- * SMD-1541 (FORK.md change 102) reads 008's row after every driven capture and
+ * SMD-1541 (FORK.md change 103) reads 008's row after every driven capture and
  * edit through change 69's five servers. Their headers said "the actor reaches
  * the audit (008)" and none passed one — the functions set `ob1.actor` only
  * from `p_actor` / `p_payload.actor` — so `thought_audit.actor_name` was NULL
@@ -511,6 +511,15 @@ try {
     const [kept] = await sql`SELECT sensitivity_tier, importance FROM thoughts WHERE id = ${cid}`;
     assert(again.status === 200 && again.json?.thought_id === cid && again.json?.action === "updated", `a re-capture answers the same id as updated (${again.status} ${again.json?.action})`);
     assert(kept.sensitivity_tier === "personal" && Number(kept.importance) === 6, "…and leaves a hand-set tier and importance as they were — a fresh row's columns only");
+  }
+
+  // POST /ingest captures through the same createThought with the same actor (the README says so; this holds it).
+  const ingested = "a fresh thought ingested through open-brain-rest";
+  const ing = await send(h, "POST", "/ingest", { text: ingested });
+  assert(ing.status === 200 && UUID.test(String(ing.json?.thought_id)), `POST /ingest answers the thought's id (${ing.status} ${JSON.stringify(ing.json).slice(0, 80)})`);
+  if (UUID.test(String(ing.json?.thought_id))) {
+    judgeCapture("open-brain-rest ingest", await row(String(ing.json.thought_id), ingested), ingested);
+    judgeActor("open-brain-rest ingest", await auditRow(String(ing.json.thought_id), "capture"), "open-brain-rest");
   }
 
   const id = await plant("open-brain-rest");
