@@ -12,7 +12,7 @@
 #
 # psql and pg_dump need none of this: `compose exec postgres psql -U postgres
 # openbrain` and `compose exec -T postgres pg_dump -U postgres openbrain > dump.sql`
-# run inside the container.
+# run inside the container (`compose` with the -f files the stack runs with).
 #
 # The ollama entry applies only with `--profile local-models`; without the
 # profile the service does not exist and the entry is inert.

@@ -67,8 +67,8 @@ services:
     # alone, is not published to the host by default — the mapping this used to
     # carry bound 0.0.0.0, so a LAN peer reached it on the password. The server
     # and the migrator reach it as `postgres:5432` on the compose network. For
-    # psql or pg_dump: `compose exec postgres psql -U postgres openbrain`. For a
-    # tool run from a checkout (reembed.ts, extract-entities.ts, consolidate.ts,
+    # psql or pg_dump: `compose exec postgres psql -U postgres openbrain` (with
+    # the -f files the stack runs with). For a tool run from a checkout (reembed.ts, extract-entities.ts, consolidate.ts,
     # the evals): add `-f compose.host-ports.yaml`, which publishes it on
     # loopback (SMD-1844; deploy/README.md, "What is reachable from where").
     healthcheck:
@@ -186,8 +186,8 @@ services:
       - ollama:/root/.ollama
     # No `ports:`. An unauthenticated model API; the server and ollama-pull reach
     # it as `ollama:11434` on the compose network, and nothing in the stack needs
-    # it from the host. `compose exec ollama ollama pull <model>` for a third
-    # model; compose.host-ports.yaml publishes it on loopback for an eval run
+    # it from the host. `compose exec ollama ollama pull <model>` (with the -f
+    # files the stack runs with) for a third model; compose.host-ports.yaml publishes it on loopback for an eval run
     # from a checkout (SMD-1844).
     healthcheck:
       test: ["CMD-SHELL", "ollama list >/dev/null 2>&1"]

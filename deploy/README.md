@@ -63,7 +63,9 @@ Compose binds an address-less `"8000:8000"` to `0.0.0.0`, every interface, so th
 first stack this fork ran on (podman on macOS) offered the database superuser and
 the MCP server to the whole LAN on a password and a key over plain HTTP. Since
 SMD-1844 every published port names its address, the default is loopback, and
-the database and Ollama are not published at all:
+the database and Ollama are not published at all. `compose …` in this section
+stands for `podman compose -f deploy/compose.yaml …` (or `docker compose`) from
+the repo root, with whatever `-f` files the stack was started with:
 
 | Service | On the compose network | On the host | From another machine |
 | --- | --- | --- | --- |
@@ -73,19 +75,23 @@ the database and Ollama are not published at all:
 
 `docker compose -f deploy/compose.yaml config` renders each mapping with
 `host_ip: 127.0.0.1`, and `scripts/check-fork-consistency.mjs` check 13 refuses
-a mapping under `deploy/` that drops the address or a service other than the
-server publishing from `compose.yaml`; the "Full stack, no Supabase" CI job
-reads the rendered config the same way.
+a mapping under `deploy/` that drops the address, and holds an inventory of
+which service publishes from which file — the server from `compose.yaml`, the
+database and Ollama from the host-ports file — so a new published port is
+named there deliberately, with its row in the table above; the "Full stack, no
+Supabase" CI job reads the rendered config the same way.
 
 On podman machine and Docker Desktop the listener you can see is the VM's
 proxy (`gvproxy`, `vpnkit`), not the container, so the check is on the Mac:
 
 ```bash
-lsof -nP -iTCP -sTCP:LISTEN | grep -E ':(5432|8000|11434)'
+lsof -nP -iTCP -sTCP:LISTEN | grep -E ":(5432|${SERVER_PORT:-8000}|11434)"
 ```
 
-shows `127.0.0.1:8000` and nothing for the other two; `ss` inside the VM does not
-answer the question. Measured on podman 5 (libkrun machine, macOS): gvproxy
+shows `127.0.0.1:<SERVER_PORT>` for the server and nothing for 5432; a line on
+11434 is a host-installed Ollama (SETUP.md's macOS path), which binds loopback
+on its own and is not the stack's. `ss` inside the VM does not answer the
+question. Measured on podman 5 (libkrun machine, macOS): gvproxy
 honours the address — with `SERVER_BIND=0.0.0.0` it listens on `*:8000` and a
 connection to the Mac's LAN address succeeds; with the default it listens on
 `127.0.0.1:8000` and the same connection gets nothing. "Nothing" is a timeout,

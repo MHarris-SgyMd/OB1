@@ -16463,6 +16463,48 @@ application firewall in stealth mode a probe of a closed port on the LAN
 address *times out* rather than being refused, so the check on a Mac is
 `lsof`, not the connection error's spelling.
 
+**First review pass** (a cold read at high effort beside a run-it reviewer
+with a mutation harness over the real files). The walk in check 13 matched an
+item only at exactly six spaces: an address-less `"8000:8000"` indented eight
+passed the check while `compose config` rendered it with no `host_ip` at all —
+the tooth gone, and the header's "fails loudly" false (caught: mutant, by the
+run-it reviewer; the cold read's extracted-parser probe found the same and
+four more layouts — items at the key's indent, a flow sequence, four-space
+services, an anchored key). Its altitude proposal is taken the first time it
+appears: a positive **inventory**, `PUBLISHES`, names which service publishes
+from which file, one mapping each, and a file's readable mappings must equal
+its entry — so a mapping the walk cannot read fails as *missing*, a new file
+or service that publishes fails as *unlisted* until named there with its
+README row, and the overlay must exist (two of the run-it reviewer's notes,
+now held). The walk reads by relative indentation, and tabs, a flow sequence,
+an empty `ports:` and a service-level line that is not a key each fail in
+their own words. The `no-address` message had been a catch-all — it told an
+operator whose item *had* an address (unquoted, single-quoted, a literal
+port) that compose would bind 0.0.0.0, and called an unquoted `8000:8000`
+"long form" (caught: run-it, cold-read); the kinds are now decided by the
+value's shape, quoting is accepted as compose accepts it, and the default the
+rule wants is named as the literal `127.0.0.1` that smoke.sh and the CI step
+dial rather than "loopback", since `[::1]` is loopback too (caught:
+cold-read). Twenty-four probes hold the rule to its own text, and the twelve
+mutants on the real files each fail with the intended message or, for the
+two other quoting styles and the eight-space house-form item, pass as they
+should. In the README the `lsof` line grepped a literal 8000 and 11434, which
+on the very Mac it was measured on matches nothing for the server (it runs
+on 8010) and shows the host's own Ollama as if it were the stack's (caught:
+cold-read); it reads `${SERVER_PORT:-8000}` now and says what a line on 11434
+is. And the `compose exec postgres …` recipes were spelled without the `-f`
+files every other command in the README carries, so typed from the repo root
+they find no configuration file (caught: cold-read); the README says once
+what `compose` stands for in that section and the comments say "with the -f
+files the stack runs with". One side observation from the run-it reviewer,
+recorded: compose *appends* an overlay's `ports:` to the base file's rather
+than replacing them, so had the base kept its postgres mapping the overlay
+would have published the database twice — the inventory is what prevents
+that return. Left alone: `smoke.sh`'s pre-existing handling of a present but
+blank `SERVER_PORT=` (it builds `http://127.0.0.1:`), and the address-less
+Ollama mapping in `recipes/local-brain-no-mcp/docker-compose.yml`, a community
+recipe outside `deploy/` — the maintainer decides whether the rule widens.
+
 **Upstream status:** not sent — upstream has no `deploy/`; the stack is this
 fork's (change 16 and the migration plan's Phase 4).
 
