@@ -198,7 +198,7 @@ Required in every environment:
 ```
 MCP_ACCESS_KEYS              name:scope:sha256 entries — bun keygen.ts mints one (or the legacy MCP_ACCESS_KEY, one raw key, write scope)
 DATABASE_URL                 the brain's postgres:// connection string — the SQL store, the default
-OPENROUTER_API_KEY           embeddings + metadata extraction (not needed when OB1_LLM_BASE_URL is a local provider)
+OPENROUTER_API_KEY           embeddings, and metadata extraction unless OB1_CHAT_BASE_URL gives chat its own endpoint — then OB1_CHAT_API_KEY (neither needed for a local endpoint)
 ```
 
 On Cloudflare Workers, where `wrangler.toml` selects the PostgREST store,
