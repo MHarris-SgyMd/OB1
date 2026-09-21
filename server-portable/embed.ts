@@ -220,6 +220,18 @@ export type EmbedConfig = {
   timeoutMs: number;
 };
 
+/** A string knob: trimmed, and "" or whitespace is unset. `qwen2.5:7b ` from a .env file is not a model. */
+export function stringOr(raw: string | undefined, fallback: string): string {
+  const v = raw?.trim();
+  return v ? v : fallback;
+}
+
+/** A base-URL knob: stringOr, then trailing slashes off — and a value that was slashes alone is unset too. */
+export function baseUrlOr(raw: string | undefined, fallback: string): string {
+  const bare = fallback.replace(/\/+$/, "");
+  return stringOr(stringOr(raw, bare).replace(/\/+$/, ""), bare);
+}
+
 /**
  * Resolve the embedding configuration from an environment record.
  *
@@ -227,12 +239,6 @@ export type EmbedConfig = {
  * are unchanged in what they decide; only where they live moved. An empty
  * string is treated as unset throughout, matching db/config.mjs.
  */
-/** A string knob: trimmed, and "" or whitespace is unset. `qwen2.5:7b ` from a .env file is not a model. */
-export function stringOr(raw: string | undefined, fallback: string): string {
-  const v = raw?.trim();
-  return v ? v : fallback;
-}
-
 export function resolveEmbedConfig(env: EmbedEnv): EmbedConfig {
   const model = stringOr(env.OB1_EMBEDDING_MODEL, DEFAULT_EMBEDDING_MODEL);
   const dim = env.OB1_EMBEDDING_DIM ? Number(env.OB1_EMBEDDING_DIM) : DEFAULT_EMBEDDING_DIM;
@@ -251,7 +257,7 @@ export function resolveEmbedConfig(env: EmbedEnv): EmbedConfig {
   // size at or under the constant, and an unknown model keeps the constant.
   const chunk = resolveChunkTokens(env.OB1_CHUNK_TOKENS, model, DEFAULT_MAX_TOKENS);
   return {
-    llmBase: stringOr(env.OB1_LLM_BASE_URL, DEFAULT_LLM_BASE_URL).replace(/\/+$/, ""),
+    llmBase: baseUrlOr(env.OB1_LLM_BASE_URL, DEFAULT_LLM_BASE_URL),
     headers: key
       ? { Authorization: `Bearer ${key}`, "Content-Type": "application/json" }
       : { "Content-Type": "application/json" },

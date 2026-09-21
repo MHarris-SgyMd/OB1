@@ -26,6 +26,7 @@
 import { createStore, databaseUrl, DEFAULT_STORE, DIRECT_CHECK_SKIP_OVER_POSTGREST, maskUrl, missingDatabaseUrl, postgrestOnBunNotice, postgrestOverPostgresUrl, storeKind, type StoreEnv } from "./store.ts";
 import { parseKeyRecords } from "./auth.ts";
 import { DEFAULT_MAX_TOKENS } from "./chunk.ts";
+import { baseUrlOr, stringOr } from "./embed.ts";
 import type { PassCounts } from "../db/config.mjs";
 
 type Status = "ok" | "fail" | "warn" | "skip";
@@ -59,11 +60,10 @@ const {
 
 // The same three string reads as embed.ts's resolveEmbedConfig, trimmed the
 // same way, so the gate judges the values the server will use.
-const { stringOr } = await import("./embed.ts");
 const embModel = stringOr(env.OB1_EMBEDDING_MODEL, DEF_EMB);
 const embDim = env.OB1_EMBEDDING_DIM ? Number(env.OB1_EMBEDDING_DIM) : DEF_DIM;
 const metaModel = stringOr(env.OB1_METADATA_MODEL, DEF_META);
-const llmBase = stringOr(env.OB1_LLM_BASE_URL, DEF_BASE).replace(/\/+$/, "");
+const llmBase = baseUrlOr(env.OB1_LLM_BASE_URL, DEF_BASE);
 const llmKey = env.OB1_LLM_API_KEY || env.OPENROUTER_API_KEY;
 
 /**

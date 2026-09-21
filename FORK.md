@@ -16777,7 +16777,8 @@ not open); and `OB1_LLM_BASE_URL`'s fallback, if it has one, names a service
 in the file. Three probes hold the `type Env` reader and eight (seven at the
 first commit) the environment reader to their own text on every run; under a runtime with no `Bun.YAML` the
 check fails in words beside check 13's (no node on this Mac — measured by
-deleting `Bun.YAML` and importing the script). Fourteen mutants on the real
+deleting `Bun.YAML` and importing the script; measured again after the
+seventh pass, which found pass 3 had broken it and put it back). Fourteen mutants on the real
 files bite: the ticket's three knobs each removed; the base-URL line commented
 out (its name still in the text — the old rule's hole, two reports, not zero);
 `${OB1_QUERY_LOGS:-}` under `OB1_QUERY_LOG`; a literal `"on"`; `env_file`; a
@@ -17046,6 +17047,38 @@ rows (run-it). Not taken: two preflight wordings outside the diff — a key
 beside a local endpoint prints two `provider credential` rows, and the skip
 line names OpenRouter for an Ollama provider; SMD-1875 (a fifth time);
 SMD-1876 for the server README's knob list.
+
+**Review pass 7** (the same pair). The run-it reviewer ran the CI job's shape
+locally with its exact `.env` — a second throwaway project, the three greps
+and the three `jq` lines verbatim (`host.docker.internal` this time), `smoke.sh`
+9 of 9, torn down — and the compat suite again, 179 of 179; pass 6's `stringOr`
+differs from the `||` it replaced only on whitespace-only strings and trims;
+preflight's new import of `embed.ts` costs nothing measurable and Workers
+never bundles preflight. The cold read found a regression of pass 3's:
+`DECISION_PROBES` parsed their YAML at module scope, so under a runtime with
+no `Bun.YAML` the script threw before any check reported — where the "Held two
+ways" paragraph promised, and had measured, a failure in words beside check
+13's. The probes hold text and parse inside the check, after its guard;
+measured again the same way, both checks fail in words and nothing throws.
+It also found the author's second orphaned docblock in one branch: `stringOr`
+sat between `resolveEmbedConfig`'s JSDoc and the function, exactly the
+misplacement pass 5 fixed for `LOCAL_PROVIDER_SERVICES`; the helpers sit above
+the block now. Pass 6 had the server trim its three string knobs while
+`db/config.mjs`'s `ENV` proxy — the migrator's reader, and preflight's through
+`TRGM_INDEX` — did not, so a quoted, padded `"qwen3-embedding:4b "` in
+`deploy/.env` would have been recorded by the migrator with the space and
+compared by preflight without it (cold read); the proxy trims, one rule, and
+`resolveEmbedConfig`'s "matching db/config.mjs" is true again (measured: the
+proxy returns `qwen3-embedding:4b` for `" qwen3-embedding:4b "` and the default
+for spaces). The dynamic `await import("./embed.ts")` in preflight is a static
+import like its siblings' (cold read). A base URL of slashes alone stripped to
+`""` — since before this change, the run-it reviewer measured on `main` — and
+`baseUrlOr` applies the unset rule after the strip; one assertion. And the
+universe's prefix limit is stated in the check's header and above: `type Env`'s
+other names — `DATABASE_URL`, the key material, `SUPABASE_*`, the legacy
+`MCP_ACCESS_KEY` — are the stack's wiring or another target's, and outside the
+rule (cold read: the legacy key is declared, read by `auth.ts`, and forwarded
+by nothing, which is the design). Not taken: the two pool readers (SMD-1881).
 
 **Upstream status:** not sent — upstream has no `deploy/`; the stack is this
 fork's (change 16 and the migration plan's Phase 4).

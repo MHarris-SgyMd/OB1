@@ -24,7 +24,10 @@ const RAW_ENV = /** @type {Record<string, string|undefined>} */ (
 );
 
 /**
- * An empty variable means unset, not "".
+ * An empty variable means unset, not "", and whitespace around a value is not
+ * part of it — the server trims its own reads the same way (embed.ts stringOr),
+ * so a quoted `"qwen3-embedding:4b "` in deploy/.env is one model name to the
+ * migrator that records it and the server that checks the record (SMD-1843).
  *
  * `??` only catches undefined, so `OB1_EMBEDDING_DIM=` — trivially produced by a
  * blank line in a .env file or a compose `${VAR}` that resolves to nothing — gave
@@ -36,7 +39,8 @@ const RAW_ENV = /** @type {Record<string, string|undefined>} */ (
 const ENV = new Proxy(/** @type {Record<string, string|undefined>} */ ({}), {
   get: (_t, k) => {
     const v = RAW_ENV[/** @type {string} */ (k)];
-    return v === "" ? undefined : v;
+    const t = typeof v === "string" ? v.trim() : v;
+    return t === "" ? undefined : t;
   },
 });
 

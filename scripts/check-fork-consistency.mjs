@@ -62,8 +62,10 @@
  *      parsed with Bun.YAML (SMD-1844); no exceptions
  *  14. every knob the server reads reaches the container: each `OB1_*` /
  *      `OPEN_BRAIN_*` name server-portable/index.ts declares in its `type Env`
- *      — and a server source reading one straight from the environment
- *      declares it there — is forwarded by deploy/compose.yaml's
+ *      (the block's other names — DATABASE_URL, the key material, SUPABASE_*,
+ *      the legacy MCP_ACCESS_KEY — are the stack's own wiring or another
+ *      target's, outside this rule) — and a server source reading one
+ *      straight from the environment declares it there — is forwarded by deploy/compose.yaml's
  *      `server.environment` as `${NAME}` or `${NAME:-…}` under its own name
  *      (a bare list item is refused; or excused by name in NOT_FORWARDED,
  *      with the reason) and documented in deploy/.env.example; a forwarded
@@ -2142,7 +2144,10 @@ await checkCapturingGrants();
  * failed in 7 ms with "Unable to connect" and the server logged nothing.
  *
  * So the universe is what the SERVER declares — the `OB1_*` and `OPEN_BRAIN_*`
- * names in server-portable/index.ts's `type Env` — held honest by a scan of
+ * names in server-portable/index.ts's `type Env`; the block's other names
+ * (DATABASE_URL, the key material, SUPABASE_*, the legacy MCP_ACCESS_KEY) are
+ * the stack's own wiring or another target's, and outside this rule — held
+ * honest by a scan of
  * every non-test server source for a direct read (`process.env.OB1_X`,
  * `env.OB1_X`, `env["OB1_X"]`) of a name the block does not declare; and
  * "forwarded" is read from the parsed documents' `services.*.environment`,
@@ -2408,8 +2413,11 @@ function serverEnvGapsIn(declared, documented, files, excused = NOT_FORWARDED) {
   }
   return gaps;
 }
-const BASE = (yaml) => ({ name: "compose.yaml", doc: Bun.YAML.parse(yaml) });
-const OVERLAY = (yaml) => ({ name: "compose.x.yaml", doc: Bun.YAML.parse(yaml) });
+// Text, not documents: the probes are parsed inside the check, after its
+// Bun.YAML guard — parsing here at module scope made the whole script throw
+// under node before any check reported (the seventh review pass).
+const BASE = (yaml) => ({ name: "compose.yaml", yaml });
+const OVERLAY = (yaml) => ({ name: "compose.x.yaml", yaml });
 const SRV = (env) => `services:\n  server:\n    environment:\n${env}`;
 const DECISION_PROBES = [
   // [declared, documented, files, expected "kind:name" list, excused (none unless given)]
@@ -2483,9 +2491,10 @@ function checkServerEnvForwarded() {
       fail(SELF, `forwarded-env reader no longer reports ${JSON.stringify(kinds)} / ${JSON.stringify(server)} for its probe (reported ${JSON.stringify(gotKinds)} / ${JSON.stringify(gotServer)}): ${JSON.stringify(yaml)}`);
     }
   }
-  for (const [declared, documented, files, expected, excused] of DECISION_PROBES) {
+  for (const [declared, documented, probeFiles, expected, excused] of DECISION_PROBES) {
+    const files = probeFiles.map(({ name, yaml }) => ({ name, doc: Bun.YAML.parse(yaml) }));
     const got = serverEnvGapsIn(declared, new Set(documented), files, excused ?? {}).map(([kind, , , name]) => `${kind}:${name ?? ""}`);
-    if (JSON.stringify(got) !== JSON.stringify(expected)) fail(SELF, `check 14's decision no longer reports ${JSON.stringify(expected)} for its probe (reported ${JSON.stringify(got)}): declared ${JSON.stringify(declared)}, documented ${JSON.stringify(documented)}, ${files.map((f) => f.name).join(" + ")}`);
+    if (JSON.stringify(got) !== JSON.stringify(expected)) fail(SELF, `check 14's decision no longer reports ${JSON.stringify(expected)} for its probe (reported ${JSON.stringify(got)}): declared ${JSON.stringify(declared)}, documented ${JSON.stringify(documented)}, ${probeFiles.map((f) => f.name).join(" + ")}`);
   }
 
   const knobs = documentedEnvKnobs(KNOB);

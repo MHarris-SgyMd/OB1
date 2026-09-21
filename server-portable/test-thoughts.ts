@@ -158,6 +158,8 @@ console.log("\n[7] Prompt templates and provider settings take their inputs lite
          resolveEmbedConfig({ OB1_METADATA_MODEL: " m:1b " }).metadataModel === "m:1b" && resolveEmbedConfig({ OB1_EMBEDDING_MODEL: "\te:1b\n" }).embeddingModel === "e:1b",
          "OB1_LLM_BASE_URL, OB1_METADATA_MODEL and OB1_EMBEDDING_MODEL are trimmed; whitespace alone is unset");
   assert(resolveEmbedConfig({ OB1_METADATA_MODEL: "   " }).metadataModel === DEFAULT_METADATA_MODEL, "OB1_METADATA_MODEL of spaces alone is the default");
+  assert(resolveEmbedConfig({ OB1_LLM_BASE_URL: " / " }).llmBase === DEFAULT_LLM_BASE_URL.replace(/\/+$/, "") && resolveEmbedConfig({ OB1_LLM_BASE_URL: "http://a/v1//" }).llmBase === "http://a/v1",
+         "OB1_LLM_BASE_URL of slashes alone is the default, not an empty base (it was '' — the seventh review pass); trailing slashes come off");
   assert(resolveEmbedConfig({ OB1_METADATA_MODEL: "" }).metadataModel === DEFAULT_METADATA_MODEL, "OB1_METADATA_MODEL='' is the default model, not a model named ''");
   assert(resolveEmbedConfig({ OB1_METADATA_TEMPERATURE: "" }).metadataTemperature === unset.metadataTemperature && unset.metadataTemperature === 0,
          "OB1_METADATA_TEMPERATURE='' is the default temperature (0), not NaN");
