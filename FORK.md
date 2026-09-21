@@ -16613,6 +16613,53 @@ quoted key, `extends`, `include`, `network_mode` and the earlier mutants each
 fail with their own message. On a redesigned mechanism the count restarts: the
 next pass reads the parser rule, not the walk.
 
+**Fourth review pass** (same pairing; the first read of the parser rule as a
+mechanism of its own). No hole in the rule: the run-it reviewer drove
+`Bun.YAML.parse` through merge precedence (a service's own `ports` wins over the
+anchor's in either order, first-wins in a merge list — compose agrees),
+duplicate keys (Bun keeps the last, compose refuses the file — so nothing
+publishable hides there), YAML 1.1 scalars (`8000:8000` is a string, not a
+sexagesimal number; compose agrees), tags, numbers, nulls, aliased services
+and whole aliased `services:` maps, a leading `---` (one object, no false
+positive), an empty file, and the `no-parser` path under a nulled `Bun.YAML`
+(one violation, in words, no probe spam). The two findings with weight were
+in the documents, both cold-read. `deploy/.env.example`'s values were held by
+nothing: a live `SERVER_BIND=0.0.0.0` in the file every operator copies to
+`deploy/.env` passed check 13 (it counted as documented) and the CI step
+(which writes its own `.env`), so the default of every stack brought up from
+it would have been the exposure this change removed — check 13 now refuses a
+live `_BIND` line whose value is not `127.0.0.1`, and guards the read of the
+file (a rename crashed the script instead of failing in words). And the advice
+"`SERVER_BIND=0.0.0.0` behind TLS or a tunnel" told a same-host proxy user to
+open every interface for nothing: caddy, cloudflared and `tailscale serve` on
+this host dial `127.0.0.1` themselves, so the loopback default serves the
+remote-client case and `SERVER_BIND` changes only when the proxy is on another
+machine — said now in the example, the compose comment, both READMEs and
+SETUP.md. Also cold-read: SETUP.md's macOS path ran `OLLAMA_HOST=0.0.0.0:11434
+ollama serve` "so containers can reach it", and this file's known-issues
+bullet repeated it, while the README's new `lsof` reading called a host Ollama
+"loopback on its own" — measured from inside the running server container,
+`host.containers.internal:11434` answers a host Ollama bound to `127.0.0.1`
+(gvproxy forwards to the host's loopback), so the `0.0.0.0` put an
+unauthenticated model API on the LAN for nothing; SETUP.md and the bullet say
+the default is enough, and the README says what `*:11434` means. The deploy
+README's `claude mcp add` lacked `--scope user` while calling itself the
+user-scope command (caught: cold-read, run-it — the installed CLI defaults to
+local scope). Smaller, in pass 3's own additions: `unresolvedMergeKeys` was
+dead code (Bun folds every merge spelling a probe could find, and the one it
+leaves — a scalar merge value — compose refuses), removed with its kind; a root
+sequence was reported as "N documents", so the kind is `not-a-mapping` and
+the message names both readings; `lineOf` pointed at a comment when the word
+appeared there first, so it skips comments (caught: run-it); the `extends` and
+`network_mode` messages named one value each while refusing any (caught:
+run-it); the overlay's recipe says a hex password needs no URL encoding and
+what does. Confirmed unchanged: same-file `extends` is refused too, since the
+child would inherit the parent's mapping uncounted; `network_mode: bridge` is
+refused with the rest, a harmless false positive by design; a compose file in
+a subdirectory is read by neither rule nor CI. Thirty-eight probes. The
+findings in the mechanism this pass were tidy-ups in the previous pass's
+additions and the rest were documents: the stop signal.
+
 **Upstream status:** not sent — upstream has no `deploy/`; the stack is this
 fork's (change 16 and the migration plan's Phase 4).
 
@@ -16983,9 +17030,12 @@ Deliberate. Recorded so nobody assumes they were missed.
   remain: Ollama was installed **natively** (Homebrew), because a Linux container
   on Apple Silicon gets no Metal passthrough and runs inference on CPU — the
   compose `local-models` profile is for Linux hosts and CI. And a container
-  reaching a host-native Ollama needs `OLLAMA_HOST=0.0.0.0` plus
-  `OB1_LLM_BASE_URL=http://host.containers.internal:11434/v1`, since Ollama binds
-  loopback by default.
+  reaching a host-native Ollama needs
+  `OB1_LLM_BASE_URL=http://host.containers.internal:11434/v1` — and nothing
+  more: Ollama's loopback default is reachable through that name on podman
+  machine (measured in change 99's fourth review pass; `OLLAMA_HOST=0.0.0.0`,
+  which this bullet used to prescribe, put an unauthenticated model API on the
+  LAN for nothing).
 - **The 24 shim-migrated files are not individually tested.** Most need live
   credentials (Gmail, Slack, Readwise). The shim itself has 61 assertions against
   real Postgres, and CI checks every migrated file still parses and that the

@@ -131,12 +131,18 @@ uses the GPU and host memory, leaving the podman VM untouched:
 
 ```bash
 brew install ollama
-OLLAMA_HOST=0.0.0.0:11434 ollama serve          # 0.0.0.0 so containers can reach it
+ollama serve                                     # its default, 127.0.0.1:11434, is enough
 ollama pull qwen3-embedding:4b && ollama pull qwen2.5:7b
 ```
 
-Then point the server at the host rather than the compose network, and skip the
-profile:
+Leave Ollama on its loopback default: on podman machine and Docker Desktop the
+container's `host.containers.internal` / `host.docker.internal` reaches the
+host's loopback (measured on podman 5, libkrun), and `OLLAMA_HOST=0.0.0.0` would
+put an unauthenticated model API on every interface for nothing. (On Linux
+Docker the container reaches the host by its bridge address, so there Ollama
+must listen on that address or all — that is the case the compose
+`local-models` profile exists for.) Then point the server at the host rather
+than the compose network, and skip the profile:
 
 ```bash
 # deploy/.env
@@ -358,10 +364,12 @@ only. By default nothing outside your machine can reach it: the server is the
 stack's only published port and it binds `127.0.0.1`; the database and Ollama
 are not published at all (`deploy/README.md`, "What is reachable from where").
 A claude.ai or Claude Desktop custom connector (Settings → Connectors → Add
-custom connector) connects from Anthropic's side, not from your machine, so for
-that client set `SERVER_BIND=0.0.0.0` in `deploy/.env` — it opens the server,
-and only the server, to the network — and put TLS or a tunnel in front first,
-since the key rides every request.
+custom connector) connects from Anthropic's side, not from your machine, so it
+needs a TLS proxy or a tunnel in front. One on this host (caddy, cloudflared,
+`tailscale serve`) dials `127.0.0.1:8000` itself, and the loopback default
+serves it. Only a proxy on another machine needs `SERVER_BIND=0.0.0.0` in
+`deploy/.env` — it opens the server, and only the server, to the network, with
+the key in clear on every request until the proxy.
 
 A write key sees ten tools; a read key sees seven. `capture_thought`,
 `update_thought` and `delete_thought` are never registered for a read key, so

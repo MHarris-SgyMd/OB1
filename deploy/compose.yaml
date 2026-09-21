@@ -165,10 +165,11 @@ services:
       PORT: "8000"
     ports:
       # Loopback unless SERVER_BIND says otherwise. The one published port of the
-      # stack. `SERVER_BIND=0.0.0.0` is for remote clients — a claude.ai connector,
-      # another machine — and puts the key on the wire in clear on every request:
-      # the header is as visible as `?key=` over plain HTTP. Behind TLS or a
-      # tunnel first (SMD-1844).
+      # stack. A remote client — a claude.ai connector, another machine — goes
+      # through a TLS proxy or a tunnel; one on this host dials 127.0.0.1 and
+      # needs no change here. `SERVER_BIND=0.0.0.0` is for a proxy on another
+      # machine, and puts the key on the wire in clear on every request: the
+      # header is as visible as `?key=` over plain HTTP (SMD-1844).
       - "${SERVER_BIND:-127.0.0.1}:${SERVER_PORT:-8000}:8000"
     depends_on:
       postgres:

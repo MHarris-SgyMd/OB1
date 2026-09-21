@@ -6,7 +6,7 @@
 #
 #   podman compose -f deploy/compose.yaml -f deploy/compose.host-ports.yaml up -d
 #   PW="$(grep -E '^POSTGRES_PASSWORD=' deploy/.env | cut -d= -f2-)"   # one key, read from the file — do not source it into your shell
-#   DATABASE_URL="postgres://postgres:$PW@127.0.0.1:5432/openbrain" bun db/reembed.ts   # your POSTGRES_PORT in place of 5432 if you set one
+#   DATABASE_URL="postgres://postgres:$PW@127.0.0.1:5432/openbrain" bun db/reembed.ts   # your POSTGRES_PORT in place of 5432 if you set one; a hex password (openssl rand -hex 24) needs no encoding, anything with @ / # ? % : does
 #
 # compose.yaml publishes only the server (SMD-1844). The database is the postgres
 # superuser on the whole brain behind one password; Ollama is an unauthenticated

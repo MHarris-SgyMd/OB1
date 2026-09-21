@@ -55,11 +55,13 @@ http://127.0.0.1:8000/?key=<MCP_ACCESS_KEY>
 ```
 
 That URL works from this machine and nowhere else, by default — a client on
-this machine, such as Claude Code's user-scope server
-(`claude mcp add --transport http open-brain http://127.0.0.1:8000/ --header
-"x-brain-key: <key>"`). A claude.ai or Claude Desktop custom connector connects
-from Anthropic's side, not from your machine, so it needs the server on the
-network: `SERVER_BIND=0.0.0.0` behind TLS or a tunnel, as the next section says.
+this machine, such as Claude Code at user scope
+(`claude mcp add --transport http --scope user open-brain http://127.0.0.1:8000/
+--header "x-brain-key: <key>"`). A claude.ai or Claude Desktop custom connector
+connects from Anthropic's side, not from your machine, so it needs a TLS proxy
+or a tunnel in front; one on this host (caddy, cloudflared, `tailscale serve`)
+dials `127.0.0.1:8000` itself and the loopback default serves it — `SERVER_BIND`
+changes only when the proxy is on another machine, as the next section says.
 `127.0.0.1`, not `localhost`: the mapping binds the IPv4 loopback only, and a
 client that resolves `localhost` to `::1` first without falling back is refused
 (`smoke.sh` dials `127.0.0.1` for the same reason).
@@ -76,7 +78,7 @@ the repo root, with whatever `-f` files the stack was started with:
 
 | Service | On the compose network | On the host | From another machine |
 | --- | --- | --- | --- |
-| `server` | `server:8000` | `127.0.0.1:${SERVER_PORT:-8000}` — the stack's only published port | Only with `SERVER_BIND=0.0.0.0` in `deploy/.env`, and then the key rides every request in clear: put TLS or a tunnel in front first |
+| `server` | `server:8000` | `127.0.0.1:${SERVER_PORT:-8000}` — the stack's only published port | Through a TLS proxy or tunnel. One on this host dials `127.0.0.1` and needs no knob; only a proxy on another machine needs `SERVER_BIND=0.0.0.0` in `deploy/.env`, and then the key rides every request in clear until the proxy |
 | `postgres` | `postgres:5432` — the server and the migrator | Nothing. `compose exec postgres psql -U postgres openbrain` for psql, `compose exec -T postgres pg_dump -U postgres openbrain > dump.sql` for a backup. A tool run from a checkout (`db/reembed.ts`, `db/extract-entities.ts`, `db/consolidate.ts`, the evals) adds `-f deploy/compose.host-ports.yaml`, which publishes it on `127.0.0.1:${POSTGRES_PORT:-5432}` — choose that when the stack comes up: adding or dropping the file later recreates `postgres` and, through `depends_on`, `server` | Never. `POSTGRES_BIND` exists for a firewalled host you have looked at; it is the superuser on the whole brain |
 | `ollama` (`--profile local-models`) | `ollama:11434` — the server and `ollama-pull` | Nothing. `compose exec ollama ollama pull <model>`; the host-ports file publishes it on `127.0.0.1:${OLLAMA_PORT:-11434}` for an eval run from a checkout | Not intended; an unauthenticated model API |
 
@@ -104,8 +106,11 @@ reads as the database leaking)
 
 shows `127.0.0.1:<port>` for the server, and for 5432 nothing without the
 host-ports file and `127.0.0.1:5432` with it; a line on 11434 is a
-host-installed Ollama (SETUP.md's macOS path), which binds loopback on its own
-and is not the stack's. `ss` inside the VM does not answer the
+host-installed Ollama (SETUP.md's macOS path), not the stack's — `127.0.0.1` is
+its own default and enough, since `host.containers.internal` reaches the host's
+loopback from the VM (measured); `*:11434` there means someone set
+`OLLAMA_HOST=0.0.0.0` and an unauthenticated model API is on the LAN. `ss`
+inside the VM does not answer the
 question. Measured on podman 5 (libkrun machine, macOS): gvproxy
 honours the address — with `SERVER_BIND=0.0.0.0` it listens on `*:8000` and a
 connection to the Mac's LAN address succeeds; with the default it listens on
