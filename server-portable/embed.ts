@@ -44,6 +44,10 @@ export type EmbedEnv = {
   OB1_LLM_BASE_URL?: string;
   OB1_LLM_API_KEY?: string;
   OPENROUTER_API_KEY?: string;
+  /** Where the chat calls go when it is not where the embeddings go; see resolveProviderEndpoints (SMD-1902). */
+  OB1_CHAT_BASE_URL?: string;
+  /** The chat endpoint's own credential. */
+  OB1_CHAT_API_KEY?: string;
   OB1_EMBEDDING_MODEL?: string;
   OB1_EMBEDDING_DIM?: string;
   OB1_EMBEDDING_DIMENSIONS?: string;
@@ -119,13 +123,17 @@ export class ProviderError extends Error {
  */
 export async function providerCall<T>(cfg: EmbedConfig, path: "/embeddings" | "/chat/completions", body: unknown): Promise<T> {
   const what = path === "/embeddings" ? "Embeddings" : "Chat completion";
+  // The endpoint the PATH selects, and the one every message below names: a
+  // chat call that fails names the chat base, which since SMD-1902 need not be
+  // the embeddings base.
+  const at = endpointFor(cfg, path);
   const timedOut = () =>
-    new ProviderError(`${what} request to ${cfg.llmBase} timed out after ${cfg.timeoutMs / 1000} s (OB1_LLM_TIMEOUT)`, "timeout");
+    new ProviderError(`${what} request to ${at.base} timed out after ${cfg.timeoutMs / 1000} s (OB1_LLM_TIMEOUT)`, "timeout");
   let r: Response;
   try {
-    r = await fetch(`${cfg.llmBase}${path}`, {
+    r = await fetch(`${at.base}${path}`, {
       method: "POST",
-      headers: cfg.headers,
+      headers: at.headers,
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(cfg.timeoutMs),
     });
@@ -151,13 +159,18 @@ export async function providerCall<T>(cfg: EmbedConfig, path: "/embeddings" | "/
     // The status is a field rather than parsed back out of the message:
     // embedCapture has to distinguish "this input is too large for this model",
     // which is a stable property, from a transient outage, which is not.
-    throw new ProviderError(`${what} request to ${cfg.llmBase} failed: ${r.status} ${capped}`, "http", r.status, capped);
+    throw new ProviderError(`${what} request to ${at.base} failed: ${r.status} ${capped}`, "http", r.status, capped);
   }
   try {
     return JSON.parse(text) as T;
   } catch {
-    throw new ProviderError(`${cfg.llmBase} answered ${r.status} with a body that is not JSON`, "body", r.status, capped);
+    throw new ProviderError(`${at.base} answered ${r.status} with a body that is not JSON`, "body", r.status, capped);
   }
+}
+
+/** The endpoint a path is served by: /embeddings by the embeddings one, /chat/completions by the chat one. */
+export function endpointFor(cfg: Pick<EmbedConfig, "embeddings" | "chat">, path: "/embeddings" | "/chat/completions"): ProviderEndpoint {
+  return path === "/embeddings" ? cfg.embeddings : cfg.chat;
 }
 
 /**
@@ -187,11 +200,68 @@ export function refusesLength(status: number | undefined, body: string): boolean
   return /context|length|too long|too_long|tokens|too large/i.test(words);
 }
 
-export type EmbedConfig = {
-  /** Provider base URL, trailing slashes stripped. */
-  llmBase: string;
+/**
+ * One OpenAI-compatible endpoint: where a call goes and what it carries. The
+ * server has two — `/embeddings` and `/chat/completions` need not be served by
+ * one provider (SMD-1902) — and every dialler reads the pair off the config
+ * rather than a base URL and a header set that silently meant "both".
+ */
+export type ProviderEndpoint = {
+  /** Base URL, trailing slashes stripped. */
+  base: string;
+  /**
+   * The credential, when there is one. Preflight reports that it is set and how
+   * long it is, never the value; everything else reads `headers`.
+   */
+  key: string | undefined;
   /** Request headers; carries Authorization only when there is a key. */
   headers: Record<string, string>;
+};
+
+/** An endpoint from its parts, with the one header rule every call shares. */
+export function providerEndpoint(base: string, key: string | undefined): ProviderEndpoint {
+  return {
+    base: base.replace(/\/+$/, ""),
+    key,
+    // A local endpoint needs no credential, so the key is optional there.
+    // Sending `Authorization: Bearer undefined` to Ollama is harmless but
+    // confusing in logs, so the header is omitted entirely when there is no key.
+    headers: key
+      ? { Authorization: `Bearer ${key}`, "Content-Type": "application/json" }
+      : { "Content-Type": "application/json" },
+  };
+}
+
+/**
+ * The two endpoints, from the environment. `OB1_LLM_BASE_URL` (key
+ * `OB1_LLM_API_KEY`, else `OPENROUTER_API_KEY`) is the embeddings endpoint and,
+ * unless `OB1_CHAT_BASE_URL` names another, the chat endpoint too — with the
+ * same key, so a deployment that sets neither chat knob sends exactly what it
+ * sent before this split.
+ *
+ * A credential belongs to an endpoint, not to the environment. A chat base
+ * that is a different endpoint gets `OB1_CHAT_API_KEY` and nothing else: a
+ * local chat model beside a hosted embedder (the Edge0 shape, SMD-1880) must
+ * not be handed the hosted provider's key, and there is no other way to say
+ * "no key here" while `OB1_LLM_API_KEY` is set (empty means unset throughout).
+ * Two spellings of the same base are the same endpoint and share the key. A
+ * hosted chat base with no key of its own is a configuration preflight fails
+ * by name, not one this function papers over.
+ */
+export function resolveProviderEndpoints(env: EmbedEnv): { embeddings: ProviderEndpoint; chat: ProviderEndpoint } {
+  const embeddings = providerEndpoint(env.OB1_LLM_BASE_URL || DEFAULT_LLM_BASE_URL, env.OB1_LLM_API_KEY || env.OPENROUTER_API_KEY);
+  const chatBase = (env.OB1_CHAT_BASE_URL || embeddings.base).replace(/\/+$/, "");
+  const chat = env.OB1_CHAT_API_KEY
+    ? providerEndpoint(chatBase, env.OB1_CHAT_API_KEY)
+    : chatBase === embeddings.base ? embeddings : providerEndpoint(chatBase, undefined);
+  return { embeddings, chat };
+}
+
+export type EmbedConfig = {
+  /** Where `/embeddings` is dialled: OB1_LLM_BASE_URL and its key. */
+  embeddings: ProviderEndpoint;
+  /** Where `/chat/completions` is dialled: the embeddings endpoint unless OB1_CHAT_BASE_URL names another. */
+  chat: ProviderEndpoint;
   embeddingModel: string;
   embeddingDim: number;
   /** Whether to send the OpenAI `dimensions` parameter. */
@@ -230,10 +300,6 @@ export type EmbedConfig = {
 export function resolveEmbedConfig(env: EmbedEnv): EmbedConfig {
   const model = env.OB1_EMBEDDING_MODEL || DEFAULT_EMBEDDING_MODEL;
   const dim = env.OB1_EMBEDDING_DIM ? Number(env.OB1_EMBEDDING_DIM) : DEFAULT_EMBEDDING_DIM;
-  // A local endpoint needs no credential, so the key is optional there. Sending
-  // `Authorization: Bearer undefined` to Ollama is harmless but confusing in
-  // logs, so the header is omitted entirely when there is no key.
-  const key = env.OB1_LLM_API_KEY || env.OPENROUTER_API_KEY;
   // The window a capture is split at. Until SMD-1305 this was chunk.ts's
   // constant for every model — 1200, chosen for Ollama's 2048-token batch —
   // while the default model embeds 18,919 tokens whole and a 512-token model
@@ -245,10 +311,7 @@ export function resolveEmbedConfig(env: EmbedEnv): EmbedConfig {
   // size at or under the constant, and an unknown model keeps the constant.
   const chunk = resolveChunkTokens(env.OB1_CHUNK_TOKENS, model, DEFAULT_MAX_TOKENS);
   return {
-    llmBase: (env.OB1_LLM_BASE_URL || DEFAULT_LLM_BASE_URL).replace(/\/+$/, ""),
-    headers: key
-      ? { Authorization: `Bearer ${key}`, "Content-Type": "application/json" }
-      : { "Content-Type": "application/json" },
+    ...resolveProviderEndpoints(env),
     embeddingModel: model,
     embeddingDim: dim,
     /**
@@ -440,7 +503,7 @@ export function createEmbedder(config: () => EmbedConfig, opts: { rememberRefusa
     });
     const embedding = d?.data?.[0]?.embedding;
     if (!Array.isArray(embedding)) {
-      throw new Error(`${cfg.llmBase} returned no embedding for model ${cfg.embeddingModel}`);
+      throw new Error(`${cfg.embeddings.base} returned no embedding for model ${cfg.embeddingModel}`);
     }
 
     // Refuse a width the column cannot hold. Postgres would reject the insert

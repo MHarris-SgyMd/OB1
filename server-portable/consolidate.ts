@@ -224,9 +224,9 @@ export function proposalVerdict(j: Judgement): "newer_supersedes_older" | "older
  * it blindly.
  */
 export async function judgePair(older: PairSide, newer: PairSide, cfg: EmbedConfig, signal?: AbortSignal): Promise<Judgement> {
-  const r = await fetch(`${cfg.llmBase}/chat/completions`, {
+  const r = await fetch(`${cfg.chat.base}/chat/completions`, {
     method: "POST",
-    headers: cfg.headers,
+    headers: cfg.chat.headers,
     signal,
     body: JSON.stringify({
       model: cfg.metadataModel,
@@ -238,7 +238,7 @@ export async function judgePair(older: PairSide, newer: PairSide, cfg: EmbedConf
   });
   if (!r.ok) {
     const msg = await r.text().catch(() => "");
-    const err = new Error(`Judge request to ${cfg.llmBase} failed: ${r.status} ${msg.slice(0, 300)}`);
+    const err = new Error(`Judge request to ${cfg.chat.base} failed: ${r.status} ${msg.slice(0, 300)}`);
     (err as Error & { status?: number }).status = r.status;
     throw err;
   }

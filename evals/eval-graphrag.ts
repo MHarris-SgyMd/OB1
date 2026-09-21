@@ -163,7 +163,7 @@ const lit = (v: number[]) => `[${v.join(",")}]`;
 
 if (!SCALE) {
   console.log(`  corpus: ${docs.length} documents from ${corpusPath}; ${questions.length} questions; k = ${K}`);
-  console.log(`  embed:  ${EMBED_MODEL} @ ${DIM}; graph from ${answersPath}; extraction and summaries by ${cfg.metadataModel} at temperature ${cfg.metadataTemperature} via ${cfg.llmBase}\n`);
+  console.log(`  embed:  ${EMBED_MODEL} @ ${DIM}; graph from ${answersPath}; extraction and summaries by ${cfg.metadataModel} at temperature ${cfg.metadataTemperature} via ${cfg.chat.base}\n`);
 }
 
 // ── Load: thoughts with vectors, then the graph ──────────────────────────────
@@ -709,8 +709,8 @@ if (GLOBAL) {
     promptHashes.push(Bun.hash.xxHash64(prompt).toString(16).slice(0, 6));
     const ts = Date.now();
     try {
-      const r = await fetch(`${cfg.llmBase}/chat/completions`, {
-        method: "POST", headers: cfg.headers, signal: AbortSignal.timeout(120_000),
+      const r = await fetch(`${cfg.chat.base}/chat/completions`, {
+        method: "POST", headers: cfg.chat.headers, signal: AbortSignal.timeout(120_000),
         body: JSON.stringify({ model: cfg.metadataModel, temperature: cfg.metadataTemperature, ...cfg.metadataReasoning, messages: [{ role: "user", content: prompt }] }),
       });
       if (!r.ok) throw new Error(`${r.status} ${(await r.text().catch(() => "")).slice(0, 160)}`);
