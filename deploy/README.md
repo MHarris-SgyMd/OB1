@@ -54,11 +54,15 @@ Three services, in order:
 http://127.0.0.1:8000/?key=<MCP_ACCESS_KEY>
 ```
 
-That URL works from this machine and nowhere else, by default — see the next
-section before handing it to a remote client. `127.0.0.1`, not `localhost`: the
-mapping binds the IPv4 loopback only, and a client that resolves `localhost` to
-`::1` first without falling back is refused (`smoke.sh` dials `127.0.0.1` for the
-same reason).
+That URL works from this machine and nowhere else, by default — a client on
+this machine, such as Claude Code's user-scope server
+(`claude mcp add --transport http open-brain http://127.0.0.1:8000/ --header
+"x-brain-key: <key>"`). A claude.ai or Claude Desktop custom connector connects
+from Anthropic's side, not from your machine, so it needs the server on the
+network: `SERVER_BIND=0.0.0.0` behind TLS or a tunnel, as the next section says.
+`127.0.0.1`, not `localhost`: the mapping binds the IPv4 loopback only, and a
+client that resolves `localhost` to `::1` first without falling back is refused
+(`smoke.sh` dials `127.0.0.1` for the same reason).
 
 ## What is reachable from where
 
@@ -77,10 +81,11 @@ the repo root, with whatever `-f` files the stack was started with:
 | `ollama` (`--profile local-models`) | `ollama:11434` — the server and `ollama-pull` | Nothing. `compose exec ollama ollama pull <model>`; the host-ports file publishes it on `127.0.0.1:${OLLAMA_PORT:-11434}` for an eval run from a checkout | Not intended; an unauthenticated model API |
 
 `docker compose -f deploy/compose.yaml config` renders each mapping with
-`host_ip: 127.0.0.1`, and `scripts/check-fork-consistency.mjs` check 13 refuses
-a mapping under `deploy/` that drops the address (or reaches a service through
-a YAML anchor and merge key, which the check cannot follow), and holds an inventory of
-which service publishes from which file — the server from `compose.yaml`, the
+`host_ip: 127.0.0.1`, and `scripts/check-fork-consistency.mjs` check 13 parses
+every `compose*.yaml` under `deploy/` and refuses a mapping that drops the
+address, a service that reaches outside the file (`extends`, `include`) or onto
+the host without a port (`network_mode`), and holds an inventory of which
+service publishes from which file — the server from `compose.yaml`, the
 database and Ollama from the host-ports file — so a new published port is
 named there deliberately, with its row in the table above; the "Full stack, no
 Supabase" CI job reads the rendered config the same way.
@@ -89,15 +94,18 @@ On podman machine and Docker Desktop the listener you can see is the VM's
 proxy (`gvproxy`, `vpnkit`), not the container, so the check is on the Mac:
 
 ```bash
-lsof -nP -iTCP -sTCP:LISTEN | grep -E ":(5432|${SERVER_PORT:-8000}|11434) "
+lsof -nP -iTCP -sTCP:LISTEN | grep -E ":(5432|8000|11434) "
 ```
 
-(The trailing space anchors the port: without it a Supabase CLI stack on 54321
-and 54322 matches `5432` and reads as the database leaking.)
+(with your `SERVER_PORT` from `deploy/.env` in place of 8000 if you set one —
+the shell does not read that file; and the trailing space anchors the port,
+since without it a Supabase CLI stack on 54321 and 54322 matches `5432` and
+reads as the database leaking)
 
-shows `127.0.0.1:<SERVER_PORT>` for the server and nothing for 5432; a line on
-11434 is a host-installed Ollama (SETUP.md's macOS path), which binds loopback
-on its own and is not the stack's. `ss` inside the VM does not answer the
+shows `127.0.0.1:<port>` for the server, and for 5432 nothing without the
+host-ports file and `127.0.0.1:5432` with it; a line on 11434 is a
+host-installed Ollama (SETUP.md's macOS path), which binds loopback on its own
+and is not the stack's. `ss` inside the VM does not answer the
 question. Measured on podman 5 (libkrun machine, macOS): gvproxy
 honours the address — with `SERVER_BIND=0.0.0.0` it listens on `*:8000` and a
 connection to the Mac's LAN address succeeds; with the default it listens on

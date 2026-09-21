@@ -346,13 +346,22 @@ OB1_SMOKE_KEY=<your-raw-key> ./deploy/smoke.sh
 http://127.0.0.1:8000/?key=<your-raw-key>
 ```
 
-In Claude Desktop: Settings → Connectors → Add custom connector, and paste that
-URL — `127.0.0.1` rather than `localhost`, since the port binds the IPv4
-loopback only. By default nothing outside your machine can reach it: the server is the
+From a client on this machine — Claude Code, at user scope so every project
+sees it:
+
+```bash
+claude mcp add --transport http --scope user open-brain http://127.0.0.1:8000/ --header "x-brain-key: <your-raw-key>"
+```
+
+`127.0.0.1` rather than `localhost`, since the port binds the IPv4 loopback
+only. By default nothing outside your machine can reach it: the server is the
 stack's only published port and it binds `127.0.0.1`; the database and Ollama
 are not published at all (`deploy/README.md`, "What is reachable from where").
-`SERVER_BIND=0.0.0.0` in `deploy/.env` opens the server, and only the server, to
-the network — put it behind TLS first, since the key rides every request.
+A claude.ai or Claude Desktop custom connector (Settings → Connectors → Add
+custom connector) connects from Anthropic's side, not from your machine, so for
+that client set `SERVER_BIND=0.0.0.0` in `deploy/.env` — it opens the server,
+and only the server, to the network — and put TLS or a tunnel in front first,
+since the key rides every request.
 
 A write key sees ten tools; a read key sees seven. `capture_thought`,
 `update_thought` and `delete_thought` are never registered for a read key, so

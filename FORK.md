@@ -16431,22 +16431,25 @@ host can reach", with the sentence that `SERVER_BIND=0.0.0.0` puts the key on
 the wire in clear and belongs behind TLS or a tunnel, and `OLLAMA_PORT`, which
 compose had read since change 16 and the example never named.
 
-**Held two ways.** `scripts/check-fork-consistency.mjs` check 13 reads every
-`*.yaml` under `deploy/` and refuses a mapping that drops the address, a
-`_BIND` default other than the literal `127.0.0.1`, the long and inline forms
-(which the rule does not read — use the short one), a knob `.env.example` does
-not document, a merge key or a `ports:` outside `services:`; and it holds an
-inventory, `PUBLISHES`, of which service publishes from which file, so a
-mapping it cannot read fails as missing and a new one as unlisted (the two
-review passes below say how each rule got there; the probes hold the rule to
-its own text on every run, and the mutants on the real files are in the pass
-paragraphs). The "Full stack, no Supabase" job reads what compose *makes* of
-the file, `config --format json`: one port in the base file on `127.0.0.1` at
-the job's `SERVER_PORT`, three with the overlay and the profile, all on
-loopback, and under `SERVER_BIND=0.0.0.0` the *server's* port on `0.0.0.0`
-with postgres's and ollama's still on loopback — so the knob opens the server
-and only the server. The job's `POSTGRES_PORT=55433` is gone with the mapping
-it parameterised.
+**Held two ways.** `scripts/check-fork-consistency.mjs` check 13 *parses*
+every `compose*.yaml` under `deploy/` with `Bun.YAML` and refuses a mapping
+that drops the address, a `_BIND` default other than the literal `127.0.0.1`,
+the long form (an object — use the short one), a knob `.env.example` does not
+document, and three things that reach past what the parser sees: a service's
+`extends`, a top-level `include` (each imports a service body from a file the
+rule does not open) and `network_mode` (`host` puts a service on the host's
+interfaces with no `ports:` at all); and it holds an inventory, `PUBLISHES`, of
+which service publishes from which file, so a mapping that is gone or refused
+fails as missing and a new one as unlisted (the three review passes below say
+how each rule got there — the parser replaced a text walk on the third; the
+probes hold the rule to its own text on every run, and the mutants on the real
+files are in the pass paragraphs). The "Full stack, no Supabase" job reads what
+compose *makes* of the file, `config --format json`: one port in the base file
+on `127.0.0.1` at the job's `SERVER_PORT`, three with the overlay and the
+profile, all on loopback, no service with a `network_mode`, and under
+`SERVER_BIND=0.0.0.0` the *server's* port on `0.0.0.0` with postgres's and
+ollama's still on loopback — so the knob opens the server and only the server.
+The job's `POSTGRES_PORT=55433` is gone with the mapping it parameterised.
 
 **Measured on the dogfood stack** (podman 5, libkrun machine, macOS; the stack
 recreated in place with the canonical `deploy/.env` and the SMD-1843 override,
@@ -16550,6 +16553,65 @@ literal address) — each still fails; the inventory's multiset maps where a set
 difference would do, and an unreachable `else` — tidy-ups for the boyscout
 pass. Twenty-seven probes now; the three new mutants (the anchored block,
 `OLLAMA_BIND=0.0.0.0` against the CI line, the prose-only knob) each fail.
+
+**Third review pass** (same pairing, aimed at the definition: what can compose
+publish that neither rule sees). The cold read found the third spelling in a
+row that the text walk did not read — a quoted `"ports":` key and a `ports :`
+with a space, each skipped as an unknown key while compose rendered the
+mapping with no `host_ip` (caught: cold-read, with an extracted-parser probe)
+— and both reviewers found compose-level imports the walk could never follow:
+a service's `extends:` and a top-level `include:` reach a file outside
+`deploy/`, and under a profile the imported service is invisible to the CI
+render too (caught: cold-read; run-it ran it end to end). Three consecutive
+passes each finding a seam in the same mechanism is the rule's verdict on the
+mechanism ([[review-loop-discipline]]: SMD-1421, SMD-1252), not on the seams:
+a walk over YAML text is not a YAML reader, and the fourth spelling was a pass
+away. Check 13 now **parses** each file with `Bun.YAML.parse` — Bun 1.4.0 is
+what CI and the Dockerfile pin, and a probe showed it resolving anchors,
+aliases and merge keys, normalising `"ports"` and `ports :`, reading flow and
+block sequences alike and throwing on a tab — so the tree the rule reads is
+the tree compose reads, and the whole spelling class (indentation, quoting,
+anchors, merge keys, flow form, key spelling: the subject of two passes' fixes)
+is gone as a class; the long form is read as an object and still refused for
+one shape's sake. What the parser cannot see is refused by name: `extends`,
+`include`, and — the run-it reviewer's one hole in the definition —
+`network_mode`, since `network_mode: host` puts a service on the host's
+interfaces with no `ports:` item at all; the walk passed it, both CI lines
+passed it (they count ports), compose rendered it (caught: run-it, the
+definition angle). The CI's first two lines now also assert no service sets
+`network_mode`. Under node, which has no `Bun.YAML`, the rule fails in words
+rather than passing; the header's "node runs it too" carries that exception.
+The check reads only files named as compose names them (`compose*.yaml`,
+`docker-compose*.yml`): the first non-compose YAML under `deploy/` — SMD-1849's
+collector configuration — would otherwise have failed the gate as "no
+services" (caught: cold-read). The inventory's two multiset maps are a set
+difference now and the unreachable `else` a `throw`, since the rewrite had the
+code open. Four document findings, all cold-read: the `lsof` line expanded
+`${SERVER_PORT:-8000}` in the operator's shell, which does not have it —
+pass 1's own fix, one level up — so it says 8000 with the sentence that says
+when to substitute; its reading "nothing for 5432" is now conditioned on the
+host-ports file, under which `127.0.0.1:5432` is the correct sight; the
+overlay's recipe sourced `deploy/.env` into the shell, exporting every secret
+to every child process and reading dotenv as shell — it reads one key with
+`grep | cut`, as `smoke.sh` reads `SERVER_PORT`; and SETUP.md's connect step
+pasted the loopback URL into Claude Desktop's custom-connector UI, a client
+that connects from Anthropic's side and so can never reach `127.0.0.1` — the
+step names Claude Code at user scope as the local client (the dogfood stack's
+own, `claude mcp add --transport http --scope user …`) and sends the connector
+case to `SERVER_BIND=0.0.0.0` behind TLS, in both SETUP.md and the deploy
+README. Confirmed by the run-it reviewer, not changed: `expose:` and `x-`
+keys publish nothing; a whole-mapping env var is refused (one field); an
+operator's `SERVER_PORT=0.0.0.0:8000` or `SERVER_BIND=*` is refused by compose
+itself (`invalid IP address`); `compose.override.yaml` is not auto-loaded when
+`-f` is given, so CI never sees one, and check 13 reads it locally; a
+profile-hidden service is invisible to the CI render but not to the text rule,
+and the reverse for a hidden `server`; compose 2.38.2 (the `ubuntu-latest`
+runner's) has `config --format json` and compose-go emits `host_ip` only when
+set, so `all(.host_ip == "127.0.0.1")` is false on an address-less mapping
+there as here. Thirty-seven probes; on the real files the anchored block, the
+quoted key, `extends`, `include`, `network_mode` and the earlier mutants each
+fail with their own message. On a redesigned mechanism the count restarts: the
+next pass reads the parser rule, not the walk.
 
 **Upstream status:** not sent — upstream has no `deploy/`; the stack is this
 fork's (change 16 and the migration plan's Phase 4).

@@ -53,13 +53,16 @@
  *  13. every port a compose file under deploy/ publishes names its host address
  *      as a knob that defaults to the literal 127.0.0.1 — the short form
  *      `"${X_BIND:-127.0.0.1}:${X_PORT:-n}:n"`, each `X_BIND` documented in
- *      deploy/.env.example — and PUBLISHES names which service publishes from
- *      which file, one mapping each, so a mapping the reader cannot see fails
- *      as missing: compose.yaml publishes the server alone; the database and
- *      Ollama publish through compose.host-ports.yaml, a second -f (SMD-1844);
- *      no exceptions
+ *      deploy/.env.example — no service reaches outside the file (`extends`,
+ *      `include`) or onto the host without a port (`network_mode`), and
+ *      PUBLISHES names which service publishes from which file, one mapping
+ *      each, so a mapping that is gone or refused fails as missing:
+ *      compose.yaml publishes the server alone; the database and Ollama
+ *      publish through compose.host-ports.yaml, a second -f. The files are
+ *      parsed with Bun.YAML (SMD-1844); no exceptions
  *
- * Run: bun scripts/check-fork-consistency.mjs   (plain ESM; node runs it too)
+ * Run: bun scripts/check-fork-consistency.mjs   (plain ESM; node runs it too,
+ * except check 13, which parses YAML with Bun.YAML and fails in words under node)
  * Exits non-zero on any violation.
  */
 
@@ -1721,97 +1724,99 @@ function checkSupabaseIsms() {
 // through compose.host-ports.yaml, a second -f an operator adds for a tool run
 // from a checkout.
 //
-// Two rules, so that a mapping this reader cannot see fails rather than passes.
-// The first reads every `ports:` item under every service of every *.yaml under
-// deploy/ and refuses one that is not the house form: no host address (fewer
-// than three fields), an address but not the form (a literal address or port,
-// a `/tcp` suffix, a knob not named `_BIND`), a default other than the literal
-// `127.0.0.1` (smoke.sh and the CI step dial it), a knob `.env.example` does
-// not document, or the long form and the flow form, which this rule does not
-// read — use the short one; and, since the second review pass, a `<<:` merge
-// key anywhere in the file and a `ports:` key outside `services:` (a top-level
-// `x-*` block an anchor would carry into a service), because an anchored block
-// merged into a service published the database on 0.0.0.0 with the walk none
-// the wiser. The second is an inventory: PUBLISHES names which
-// service publishes from which file, one mapping each, and a file's readable
-// mappings must equal its entry exactly — so the server's mapping laid out in
-// a form the walk does not read fails as MISSING, a new file or service that
-// publishes fails as UNLISTED until it is named here deliberately (with its
-// README row), and the overlay must exist. The first review pass found the
-// walk's fixed six-space item regex passing an eight-space `"8000:8000"`
-// that compose rendered with no host_ip at all; the inventory is the answer
-// at the mechanism, and the walk now reads by relative indentation. The
-// reading is still indentation-based over the two-space house layout rather
-// than a YAML parser: a service key is any line indented under `services:`
-// at the first level, a `ports:` key any line under it, an item any `- ` line
-// at or under the `ports:` indent; tabs (which YAML forbids in indentation)
-// and a service-level line that is not a key fail loudly.
+// The file is PARSED, not scanned. Three review passes each found a spelling
+// the text walk before this did not read — an item at another indentation, a
+// `ports:` block carried in through an anchor and `<<:` merge key, a quoted
+// `"ports":` key — and each time compose rendered the mapping with no host_ip
+// while the check passed; a walk over YAML text is not a YAML reader, and the
+// fourth spelling would have been found by the next pass. Bun.YAML.parse
+// (Bun 1.2+; CI and the Dockerfile pin 1.4.0) resolves anchors, aliases and
+// merge keys, normalises key spellings, reads flow and block sequences alike
+// and refuses tabs, so what this rule sees is what compose sees — with two
+// exceptions it refuses by name, because they reach outside the file: a
+// service's `extends:` and a top-level `include:`, each of which imports a
+// service body from a file the rule does not open; and `network_mode:`, which
+// with the value `host` puts a service on the host's interfaces with no
+// `ports:` at all (the third pass's one hole in the definition). Under node,
+// which has no Bun.YAML, the rule fails in words rather than passing.
+//
+// Two rules. The first, per service: `ports` is a list whose every item is the
+// short form — no host address (fewer than three fields), an address but not
+// the form (a literal address or port, a `/tcp` suffix, a knob not named
+// `_BIND`), a default other than the literal `127.0.0.1` (smoke.sh and the CI
+// step dial it), a knob `.env.example` does not document, and the long form
+// (an object) are each refused in their own words. The second is an
+// inventory: PUBLISHES names which service publishes from which compose file,
+// one mapping each, and a file's readable mappings must equal its entry — so
+// a mapping that is gone, or refused above, fails as MISSING too, a new file
+// or service that publishes fails as UNLISTED until named here deliberately
+// (with its row in deploy/README.md), and the overlay must exist. Only files
+// named as compose names them (`compose*.yaml`, `docker-compose*.yml`) are
+// read: SMD-1849's collector configuration under deploy/ is not a stack.
 
-/** file under deploy/ → the services that publish one mapping each from it. */
+/** compose file under deploy/ → the services that publish one mapping each from it. */
 const PUBLISHES = {
   "compose.yaml": ["server"],
   "compose.host-ports.yaml": ["postgres", "ollama"],
 };
+const COMPOSE_FILE = /^(docker-)?compose.*\.ya?ml$/;
 
 const PORT_ITEM = /^\$\{([A-Z0-9_]+)_BIND:-([^}]*)\}:\$\{[A-Z0-9_]+_PORT:-\d+\}:\d+$/;
-const unquote = (v) => { const m = /^(["'])(.*)\1$/.exec(v); return m ? m[2] : v; };
 /** Colon-separated fields of a short-form mapping, `${…}` contents not counted. */
 function portFields(v) {
   let depth = 0, n = 1;
   for (const ch of v) { if (ch === "{") depth++; else if (ch === "}") depth--; else if (ch === ":" && depth === 0) n++; }
   return n;
 }
+/** 1-based line of the first line containing `needle`, for the report; 0 if none. */
+function lineOf(text, needle) {
+  const i = text.split("\n").findIndex((l) => l.includes(needle));
+  return i < 0 ? 0 : i + 1;
+}
+/** Every object key named `<<` left in a parsed tree — a merge key the parser did not resolve. */
+function unresolvedMergeKeys(node, path, out) {
+  if (Array.isArray(node)) node.forEach((v, i) => unresolvedMergeKeys(v, `${path}[${i}]`, out));
+  else if (node && typeof node === "object") for (const [k, v] of Object.entries(node)) { if (k === "<<") out.push(path); unresolvedMergeKeys(v, `${path}.${k}`, out); }
+  return out;
+}
 
 /**
  * One compose file's published ports: `{ gaps: [[kind, service, line, detail]],
- * published: [service, …] }` — `published` lists a service once per readable
- * house-form mapping, for the inventory.
+ * published: [service, …] }` — `published` lists a service once per house-form
+ * mapping, for the inventory.
  */
 function publishedPortGapsIn(text, { documented }) {
   const gaps = [], published = [];
-  const lines = text.split("\n");
-  let inServices = false, sawServices = false;
-  let service = null, serviceIndent = 0, ports = null;
-  const closePorts = () => { if (ports && ports.items === 0) gaps.push(["empty-ports", service, ports.line, ""]); ports = null; };
-  for (let i = 0; i < lines.length; i++) {
-    const raw = lines[i];
-    if (/^ *\t/.test(raw)) { gaps.push(["tab", service, i + 1, ""]); continue; }
-    const line = raw.replace(/\s+#.*$/, "").trimEnd();
-    if (!line.trim() || /^\s*#/.test(line)) continue;
-    const indent = /^ */.exec(line)[0].length;
-    const body = line.trim();
-    if (/^<<\s*:/.test(body)) { gaps.push(["merge-key", service, i + 1, body]); continue; }
-    if (indent === 0) { closePorts(); service = null; inServices = body === "services:"; if (inServices) sawServices = true; }
-    if (!inServices) { if (/^ports:/.test(body)) gaps.push(["ports-outside-services", null, i + 1, body]); continue; }
-    if (indent === 0) continue;
-    if (service === null || indent <= serviceIndent) {
-      closePorts();
-      const m = /^("[^"]+"|'[^']+'|[A-Za-z0-9_.-]+):(?:\s*&\S+)?$/.exec(body);
-      if (!m) { gaps.push(["unreadable", service, i + 1, body]); service = null; continue; }
-      service = unquote(m[1]); serviceIndent = indent; continue;
-    }
-    if (ports && indent >= ports.indent && body.startsWith("- ")) {
-      ports.items++;
-      const v = body.slice(2).trim();
-      if (/^[A-Za-z_][\w-]*:(\s|$)/.test(v)) { gaps.push(["long-form", service, i + 1, v]); continue; }
-      const u = unquote(v);
-      if (portFields(u) < 3) { gaps.push(["no-address", service, i + 1, v]); continue; }
-      const m = PORT_ITEM.exec(u);
-      if (!m) { gaps.push(["not-house-form", service, i + 1, v]); continue; }
-      if (m[2] !== "127.0.0.1") gaps.push(["default-not-loopback", service, i + 1, `${m[1]}_BIND defaults to "${m[2]}"`]);
-      else if (documented && !documented.has(`${m[1]}_BIND`)) gaps.push(["undocumented-knob", service, i + 1, `${m[1]}_BIND`]);
-      else published.push(service);
-      continue;
-    }
-    if (ports && indent > ports.indent) continue; // a long-form item's continuation lines
-    closePorts();
-    const pm = /^ports:(.*)$/.exec(body);
-    if (!pm) continue;
-    if (pm[1].trim()) { gaps.push(["inline-ports", service, i + 1, pm[1].trim()]); continue; }
-    ports = { indent, line: i + 1, items: 0 };
+  if (typeof Bun === "undefined" || typeof Bun.YAML?.parse !== "function") return { gaps: [["no-parser", null, 0, ""]], published };
+  let doc;
+  try { doc = Bun.YAML.parse(text); } catch (e) { return { gaps: [["unparseable", null, 0, String(e.message ?? e)]], published }; }
+  if (Array.isArray(doc)) return { gaps: [["multi-document", null, 0, `${doc.length} documents`]], published };
+  if (!doc || typeof doc !== "object" || !doc.services || typeof doc.services !== "object" || Array.isArray(doc.services)) {
+    return { gaps: [["no-services", null, 0, ""]], published };
   }
-  closePorts();
-  if (!sawServices) gaps.push(["no-services", null, 0, ""]);
+  for (const at of unresolvedMergeKeys(doc, "$", [])) gaps.push(["merge-key", null, lineOf(text, "<<"), at]);
+  if ("include" in doc) gaps.push(["include", null, lineOf(text, "include"), ""]);
+  for (const [service, def] of Object.entries(doc.services)) {
+    const at = lineOf(text, `${service}:`) || lineOf(text, service);
+    if (!def || typeof def !== "object" || Array.isArray(def)) { gaps.push(["unreadable", service, at, JSON.stringify(def)]); continue; }
+    if ("extends" in def) gaps.push(["extends", service, lineOf(text, "extends"), JSON.stringify(def.extends)]);
+    if ("network_mode" in def) gaps.push(["network-mode", service, lineOf(text, "network_mode"), String(def.network_mode)]);
+    if (!("ports" in def)) continue;
+    const ports = def.ports;
+    if (!Array.isArray(ports)) { gaps.push(["ports-not-list", service, lineOf(text, "ports"), JSON.stringify(ports)]); continue; }
+    if (ports.length === 0) gaps.push(["empty-ports", service, lineOf(text, "ports"), ""]);
+    for (const item of ports) {
+      if (item === null || typeof item === "object") { gaps.push(["long-form", service, lineOf(text, "target"), JSON.stringify(item)]); continue; }
+      const v = String(item);
+      const line = lineOf(text, v) || lineOf(text, "ports");
+      if (portFields(v) < 3) { gaps.push(["no-address", service, line, v]); continue; }
+      const m = PORT_ITEM.exec(v);
+      if (!m) { gaps.push(["not-house-form", service, line, v]); continue; }
+      if (m[2] !== "127.0.0.1") gaps.push(["default-not-loopback", service, line, `${m[1]}_BIND defaults to "${m[2]}"`]);
+      else if (documented && !documented.has(`${m[1]}_BIND`)) gaps.push(["undocumented-knob", service, line, `${m[1]}_BIND`]);
+      else published.push(service);
+    }
+  }
   return { gaps, published };
 }
 
@@ -1819,14 +1824,22 @@ const GOOD = `"\${SERVER_BIND:-127.0.0.1}:\${SERVER_PORT:-8000}:8000"`;
 const PORT_PROBES = [
   // [text, expected gap kinds, expected published services]
   [`services:\n  server:\n    ports:\n      - ${GOOD}\n`, [], ["server"]],
-  // Quoting is compose's business, not the rule's; all three spell one mapping.
+  // Spellings a parser makes one: quoting, indentation, a flow sequence, a quoted or spaced key, an alias, an anchored block merged in.
   [`services:\n  server:\n    ports:\n      - ${GOOD.replace(/"/g, "'")}\n`, [], ["server"]],
   [`services:\n  server:\n    ports:\n      - ${GOOD.replace(/"/g, "")}\n`, [], ["server"]],
-  // The layouts the first review pass found the fixed-indent walk skipping.
   [`services:\n  server:\n    ports:\n        - ${GOOD}\n`, [], ["server"]],
   [`services:\n  server:\n    ports:\n    - ${GOOD}\n`, [], ["server"]],
   [`services:\n    server:\n        ports:\n            - ${GOOD}\n`, [], ["server"]],
+  [`services:\n  server:\n    ports: [${GOOD}]\n`, [], ["server"]],
+  [`services:\n  server:\n    "ports":\n      - ${GOOD}\n`, [], ["server"]],
+  [`services:\n  server:\n    ports :\n      - ${GOOD}\n`, [], ["server"]],
+  [`x-p: &p\n  - ${GOOD}\nservices:\n  server:\n    ports: *p\n`, [], ["server"]],
+  [`x-open: &open\n  ports:\n    - ${GOOD}\nservices:\n  server:\n    <<: *open\n    image: x\n`, [], ["server"]],
+  // …and the same spellings carrying a bare mapping are read, and refused.
   [`services:\n  server:\n    ports:\n        - "8000:8000"\n`, ["no-address"], []],
+  [`services:\n  server:\n    "ports":\n      - "5432:5432"\n`, ["no-address"], []],
+  [`x-open: &open\n  ports:\n    - "5432:5432"\nservices:\n  postgres:\n    <<: *open\n    image: x\n`, ["no-address"], []],
+  [`services:\n  server:\n    ports: ["8000:8000"]\n`, ["no-address"], []],
   [`services:\n  server:\n    ports:\n      - "\${SERVER_PORT:-8000}:8000"\n`, ["no-address"], []],
   [`services:\n  server:\n    ports:\n      - 8000:8000\n`, ["no-address"], []],
   [`services:\n  server:\n    ports:\n      - "\${SERVER_BIND:-127.0.0.1}:8000:8000"\n`, ["not-house-form"], []],
@@ -1835,22 +1848,24 @@ const PORT_PROBES = [
   [`services:\n  server:\n    ports:\n      - "\${SERVER_BIND:-0.0.0.0}:\${SERVER_PORT:-8000}:8000"\n`, ["default-not-loopback"], []],
   [`services:\n  server:\n    ports:\n      - "\${SERVER_BIND:-[::1]}:\${SERVER_PORT:-8000}:8000"\n`, ["default-not-loopback"], []],
   [`services:\n  server:\n    ports:\n      - target: 8000\n        published: 8000\n        host_ip: 127.0.0.1\n`, ["long-form"], []],
-  [`services:\n  server:\n    ports: [${GOOD}]\n`, ["inline-ports"], []],
-  [`services:\n  server:\n    ports: *ports\n`, ["inline-ports"], []],
-  // The second review pass's bypass: an anchored block carrying ports:, merged into a service.
-  [`x-open: &open\n  ports:\n    - "5432:5432"\nservices:\n  postgres:\n    <<: *open\n    image: x\n`, ["ports-outside-services", "merge-key"], []],
-  [`ports:\n  - "8000:8000"\nservices:\n  server:\n    image: x\n`, ["ports-outside-services"], []],
-  [`services:\n  server:\n    ports:\n    image: x\n`, ["empty-ports"], []],
+  [`services:\n  server:\n    ports: 8000\n`, ["ports-not-list"], []],
+  [`services:\n  server:\n    ports: []\n`, ["empty-ports"], []],
   [`services:\n  server:\n    ports:\n      - "\${OTHER_BIND:-127.0.0.1}:\${SERVER_PORT:-8000}:8000"\n`, ["undocumented-knob"], []],
-  [`services:\n  server:\n\tports:\n`, ["tab"], []],
-  [`services:\n  - server\n`, ["unreadable"], []],
+  // What reaches outside the file, or the host, without a ports: item.
+  [`services:\n  postgres:\n    extends:\n      file: base/pg.yaml\n      service: pg\n`, ["extends"], []],
+  [`include:\n  - other.yaml\nservices:\n  server:\n    ports:\n      - ${GOOD}\n`, ["include"], ["server"]],
+  [`services:\n  postgres:\n    network_mode: host\n`, ["network-mode"], []],
+  [`services:\n  server:\n    network_mode: host\n    ports:\n      - ${GOOD}\n`, ["network-mode"], ["server"]],
+  // What is not a stack this rule can read.
+  [`services:\n  server:\n\tports:\n`, ["unparseable"], []],
+  [`services:\n  - server\n`, ["no-services"], []],
+  [`services:\n  server: x\n`, ["unreadable"], []],
   [`version: "3"\n`, ["no-services"], []],
-  // Two items are two mappings; a second service is read after the first.
-  [`services:\n  server:\n    ports:\n      - ${GOOD}\n      - "9000:9000"\n  postgres:\n    ports:\n      - "\${POSTGRES_BIND:-127.0.0.1}:\${POSTGRES_PORT:-5432}:5432"\n`, ["no-address"], ["server", "postgres"]],
-  // A comment after the item, and a commented-out mapping, are not mappings; an anchored key is a key.
-  [`services:\n  server: &srv\n    ports:\n      # - "8000:8000"\n      - ${GOOD}  # loopback\n`, [], ["server"]],
-  // ports: under a top-level key that is not services is refused, not skipped.
-  [`services:\n  server:\n    image: x\nvolumes:\n  ports:\n      - "8000:8000"\n`, ["ports-outside-services"], []],
+  [`a: 1\n---\nb: 2\n`, ["multi-document"], []],
+  // Two items are two mappings; a second service is read after the first; comments are not mappings.
+  [`services:\n  server:\n    ports:\n      - ${GOOD}\n      - "9000:9000"\n  postgres:\n    ports:\n      # - "5432:5432"\n      - "\${POSTGRES_BIND:-127.0.0.1}:\${POSTGRES_PORT:-5432}:5432"  # loopback\n`, ["no-address"], ["server", "postgres"]],
+  // A ports: key under a top-level block nothing merges into publishes nothing.
+  [`services:\n  server:\n    image: x\nvolumes:\n  ports:\n      - "8000:8000"\n`, [], []],
 ];
 
 function checkPublishedPorts() {
@@ -1864,13 +1879,14 @@ function checkPublishedPorts() {
   for (const [text, kinds, services] of PORT_PROBES) {
     const got = publishedPortGapsIn(text, { documented: probeDocs });
     const gotKinds = got.gaps.map((g) => g[0]);
+    if (gotKinds.length === 1 && gotKinds[0] === "no-parser") break; // reported once, below
     if (JSON.stringify(gotKinds) !== JSON.stringify(kinds) || JSON.stringify(got.published) !== JSON.stringify(services)) {
       fail(SELF, `published-port rule no longer reports exactly ${JSON.stringify(kinds)} / ${JSON.stringify(services)} for its probe (reported ${JSON.stringify(gotKinds)} / ${JSON.stringify(got.published)}): ${JSON.stringify(text)}`);
     }
   }
 
   const dir = join(ROOT, "deploy");
-  const files = readdirSync(dir).filter((f) => /\.ya?ml$/.test(f)).sort();
+  const files = readdirSync(dir).filter((f) => COMPOSE_FILE.test(f) && statSync(join(dir, f)).isFile()).sort();
   for (const name of Object.keys(PUBLISHES)) {
     if (!files.includes(name)) fail(`deploy/${name}`, `missing — PUBLISHES in ${SELF} says ${PUBLISHES[name].map((s) => `\`${s}\``).join(" and ")} publish from it (SMD-1844)`);
   }
@@ -1882,30 +1898,33 @@ function checkPublishedPorts() {
       const at = line ? `${rel}:${line}` : rel;
       const svc = service ? `service \`${service}\`` : "the file";
       const knob = `${(service || "X").toUpperCase().replace(/-/g, "_")}_BIND`;
-      if (kind === "no-address") fail(at, `${svc} publishes \`${detail}\` with no host address — compose binds that to 0.0.0.0, every interface; write ${HOUSE} with \`${knob}\` and document the knob in deploy/.env.example (SMD-1844)`);
-      else if (kind === "not-house-form") fail(at, `${svc} publishes \`${detail}\`, which names an address but is not the house form ${HOUSE} — the knob must end in _BIND, the host port must be a \`_PORT\` knob (smoke.sh and the CI step read SERVER_PORT), and no suffix (SMD-1844)`);
-      else if (kind === "default-not-loopback") fail(at, `${svc}: ${detail} — the default is the literal 127.0.0.1, which smoke.sh and the CI step dial; an operator who wants another address sets the knob (SMD-1844)`);
-      else if (kind === "undocumented-knob") fail(at, `${svc} reads \`${detail}\`, which deploy/.env.example does not document — an operator cannot find the knob that opens the port (SMD-1844)`);
-      else if (kind === "long-form") fail(at, `${svc} publishes a port in the long form, which this rule does not read — use the short form ${HOUSE} (SMD-1844)`);
-      else if (kind === "inline-ports") fail(at, `${svc} writes \`ports: ${detail}\` with an inline value — a flow sequence, an alias or a scalar — which this rule does not read; one \`- \` item per line (SMD-1844)`);
-      else if (kind === "merge-key") fail(at, `\`${detail}\` — a YAML merge key can carry a \`ports:\` block this rule never sees into a service (an anchored top-level block did, in review); write the keys out (SMD-1844)`);
-      else if (kind === "ports-outside-services") fail(at, `a \`ports:\` key outside \`services:\` — only a service publishes, and a block held for an anchor is how a mapping reaches one unread; put it on the service (SMD-1844)`);
-      else if (kind === "empty-ports") fail(at, `${svc} has a \`ports:\` key with no item this rule could read (SMD-1844)`);
-      else if (kind === "tab") fail(at, `a tab in the indentation — YAML forbids it and this rule does not read it (SMD-1844)`);
-      else if (kind === "unreadable") fail(at, `\`${detail}\` sits at the service level of \`services:\` and is not a service key, so this rule cannot tell which service the lines under it belong to (SMD-1844)`);
-      else if (kind === "no-services") fail(rel, `no top-level \`services:\` block this rule can read (SMD-1844)`);
-      else fail(at, `${kind} ${detail} (SMD-1844)`);
+      switch (kind) {
+        case "no-parser": fail(SELF, `check 13 parses compose files with Bun.YAML (Bun 1.2+) and this runtime has none — run \`bun ${SELF}\`, as CI does (SMD-1844)`); return;
+        case "unparseable": fail(rel, `does not parse as YAML: ${detail} (SMD-1844)`); break;
+        case "multi-document": fail(rel, `holds ${detail} — a compose file is one document (SMD-1844)`); break;
+        case "no-services": fail(rel, `has no top-level \`services:\` mapping — every compose*.yaml under deploy/ is a stack this rule reads (SMD-1844)`); break;
+        case "merge-key": fail(at, `an unresolved \`<<\` merge key at ${detail} — the parser did not fold it, so a \`ports:\` block could ride in unread; write the keys out (SMD-1844)`); break;
+        case "include": fail(at, `a top-level \`include:\` imports services from a file this rule does not open — put the services in this file (SMD-1844)`); break;
+        case "extends": fail(at, `${svc} \`extends\` ${detail}, a service body from a file this rule does not open — write the service out (SMD-1844)`); break;
+        case "network-mode": fail(at, `${svc} sets \`network_mode: ${detail}\` — \`host\` puts the service on the host's interfaces with no \`ports:\` at all, and the stack needs no mode but the default network; remove it (SMD-1844)`); break;
+        case "unreadable": fail(at, `${svc} is ${detail}, not a mapping (SMD-1844)`); break;
+        case "ports-not-list": fail(at, `${svc} has \`ports: ${detail}\`, not a list (SMD-1844)`); break;
+        case "empty-ports": fail(at, `${svc} has an empty \`ports:\` list (SMD-1844)`); break;
+        case "long-form": fail(at, `${svc} publishes ${detail} in the long form — use the short form ${HOUSE}, the one shape this rule and the README teach (SMD-1844)`); break;
+        case "no-address": fail(at, `${svc} publishes \`${detail}\` with no host address — compose binds that to 0.0.0.0, every interface; write ${HOUSE} with \`${knob}\` and document the knob in deploy/.env.example (SMD-1844)`); break;
+        case "not-house-form": fail(at, `${svc} publishes \`${detail}\`, which names an address but is not the house form ${HOUSE} — the knob must end in _BIND, the host port must be a \`_PORT\` knob (smoke.sh and the CI step read SERVER_PORT), and no suffix (SMD-1844)`); break;
+        case "default-not-loopback": fail(at, `${svc}: ${detail} — the default is the literal 127.0.0.1, which smoke.sh and the CI step dial; an operator who wants another address sets the knob (SMD-1844)`); break;
+        case "undocumented-knob": fail(at, `${svc} reads \`${detail}\`, which deploy/.env.example does not document — an operator cannot find the knob that opens the port (SMD-1844)`); break;
+        default: throw new Error(`check 13: no message for kind ${kind}`);
+      }
     }
     const expected = PUBLISHES[name] ?? [];
-    const count = (arr) => arr.reduce((m, s) => m.set(s, (m.get(s) ?? 0) + 1), new Map());
-    const want = count(expected), have = count(published);
-    for (const [service, n] of want) {
-      const got = have.get(service) ?? 0;
-      if (got < n) fail(rel, `publishes ${got === 0 ? "no readable mapping" : `${got} readable mapping${got === 1 ? "" : "s"}`} for service \`${service}\`, and PUBLISHES in ${SELF} says ${n} — the port is gone, or written in a form this rule did not read (the messages above say which) (SMD-1844)`);
+    for (const service of expected) {
+      if (!published.includes(service)) fail(rel, `publishes no house-form mapping for service \`${service}\`, and PUBLISHES in ${SELF} says it does — the port is gone, or refused above (SMD-1844)`);
     }
-    for (const [service, n] of have) {
-      const w = want.get(service) ?? 0;
-      if (n > w) fail(rel, `service \`${service}\` publishes ${n} mapping${n === 1 ? "" : "s"} from this file and PUBLISHES in ${SELF} lists ${w} — ${name === "compose.yaml" ? "the base file publishes the server alone; the database and Ollama publish through compose.host-ports.yaml, a second -f, and " : ""}a new published port is named in PUBLISHES deliberately, with its row in deploy/README.md's "What is reachable from where" (SMD-1844)`);
+    for (const service of new Set(published)) {
+      const n = published.filter((s) => s === service).length;
+      if (!expected.includes(service) || n > 1) fail(rel, `service \`${service}\` publishes ${n} mapping${n === 1 ? "" : "s"} from this file and PUBLISHES in ${SELF} lists ${expected.includes(service) ? "one" : "none"} — ${name === "compose.yaml" ? "the base file publishes the server alone; the database and Ollama publish through compose.host-ports.yaml, a second -f, and " : ""}a new published port is named in PUBLISHES deliberately, with its row in deploy/README.md's "What is reachable from where" (SMD-1844)`);
     }
   }
 }

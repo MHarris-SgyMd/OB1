@@ -503,15 +503,17 @@ jobs:
       # (the server) and, with the host-ports overlay and the local-models
       # profile, three — every one on loopback; and SERVER_BIND opens the server
       # by name, the other two still on loopback (a sorted multiset passed with
-      # Ollama opened instead — the second review pass). check-fork-consistency.mjs
-      # 13 holds the text to the same rule; this holds what compose makes of it.
+      # Ollama opened instead — the second review pass); and no service sets
+      # network_mode, since `host` reaches the host's interfaces with no port
+      # published (the third pass). check-fork-consistency.mjs 13 holds the
+      # files to the same rule; this holds what compose makes of them.
       - name: Every published port binds loopback
         working-directory: deploy
         run: |
           docker compose -f compose.yaml --profile local-models config --format json \
-            | jq -e '[.services[].ports[]?] | length == 1 and all(.host_ip == "127.0.0.1") and (.[0].published == "8010")'
+            | jq -e '([.services[].ports[]?] | length == 1 and all(.host_ip == "127.0.0.1") and (.[0].published == "8010")) and ([.services[] | select(.network_mode != null)] | length == 0)'
           docker compose -f compose.yaml -f compose.host-ports.yaml --profile local-models config --format json \
-            | jq -e '[.services[].ports[]?] | length == 3 and all(.host_ip == "127.0.0.1")'
+            | jq -e '([.services[].ports[]?] | length == 3 and all(.host_ip == "127.0.0.1")) and ([.services[] | select(.network_mode != null)] | length == 0)'
           SERVER_BIND=0.0.0.0 docker compose -f compose.yaml -f compose.host-ports.yaml --profile local-models config --format json \
             | jq -e '([.services[].ports[]?] | length == 3) and .services.server.ports[0].host_ip == "0.0.0.0" and ([.services.postgres.ports[].host_ip, .services.ollama.ports[].host_ip] == ["127.0.0.1", "127.0.0.1"])'
 
