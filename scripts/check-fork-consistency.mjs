@@ -50,6 +50,12 @@
  *      comments excepted by a literal-aware strip, string literals included
  *      (SMD-1796); the rules are db/config.mjs's SUPABASE_SQL_RULES, which
  *      test-schema [10] and [40] apply from inside the suite; no exceptions
+ *  13. every port a compose file under deploy/ publishes names its host address
+ *      as a knob that defaults to loopback — the short form
+ *      `"${X_BIND:-127.0.0.1}:${X_PORT:-n}:n"`, each `X_BIND` documented in
+ *      deploy/.env.example — and in compose.yaml itself only the `server`
+ *      service publishes at all; the database and Ollama publish through
+ *      compose.host-ports.yaml, a second -f (SMD-1844); no exceptions
  *
  * Run: bun scripts/check-fork-consistency.mjs   (plain ESM; node runs it too)
  * Exits non-zero on any violation.
@@ -1696,6 +1702,110 @@ function checkSupabaseIsms() {
   }
 }
 
+// ── 13: a compose file publishes a port on loopback, by a knob, or not at all ──
+//
+// SMD-1844. deploy/compose.yaml carried `"${POSTGRES_PORT:-5432}:5432"`,
+// `"${SERVER_PORT:-8000}:8000"` and `"${OLLAMA_PORT:-11434}:11434"`: an
+// address-less mapping, which compose binds to 0.0.0.0. On the first stack the
+// fork ran (podman machine, macOS) `lsof` showed gvproxy on `*:5432` and
+// `*:8010` — the postgres superuser on the whole brain behind its password, and
+// the MCP server with its key in clear on every request, offered to every host
+// on the LAN. The file's own comment said to drop the database port in
+// production; the default was the exposed one and no README said to. Since the
+// fix every published mapping is the short form `"${X_BIND:-127.0.0.1}:
+// ${X_PORT:-n}:n"` — loopback unless the operator names an address, in a knob
+// deploy/.env.example documents — and the base file publishes the server alone;
+// the database and Ollama reach the host only through compose.host-ports.yaml,
+// a second -f an operator adds for a tool run from a checkout. This holds both:
+// a mapping that drops the address, a default other than loopback, the long
+// form (which this rule cannot read; use the short one), an undocumented knob,
+// or a `ports:` on any base-file service but `server`. Every *.yaml under
+// deploy/; the reading is indentation-based over the house layout (two-space
+// services, four-space keys, six-space items) rather than a YAML parser, so a
+// file laid out otherwise fails loudly as "no services block" and is fixed by
+// hand rather than passed by accident.
+
+const PORT_ITEM = /^"\$\{([A-Z0-9_]+)_BIND:-([^}]*)\}:\$\{[A-Z0-9_]+_PORT:-\d+\}:\d+"$/;
+
+/** Gaps in one compose file's published ports: `[kind, service, detail]`. */
+function publishedPortGapsIn(text, { base, documented }) {
+  const gaps = [];
+  const lines = text.split("\n");
+  let inServices = false, service = null, inPorts = false, sawServices = false;
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i];
+    const line = raw.replace(/\s+#.*$/, "").trimEnd();
+    if (!line.trim() || /^\s*#/.test(line)) continue;
+    if (/^\S/.test(line)) { inServices = line === "services:"; if (inServices) sawServices = true; service = null; inPorts = false; continue; }
+    if (!inServices) continue;
+    const m2 = /^  ([A-Za-z0-9_-]+):\s*$/.exec(line);
+    if (m2) { service = m2[1]; inPorts = false; continue; }
+    if (service === null) continue;
+    if (/^    ports:\s*$/.test(line)) {
+      inPorts = true;
+      if (base && service !== "server") gaps.push(["published-in-base", service, `${i + 1}`]);
+      continue;
+    }
+    if (/^    \S/.test(line)) { inPorts = false; continue; }
+    if (!inPorts) continue;
+    const item = /^      - (.*)$/.exec(line);
+    if (!item) continue;
+    const m = PORT_ITEM.exec(item[1].trim());
+    if (!m) { gaps.push([/^\w+:/.test(item[1].trim()) ? "long-form" : "no-address", service, `${i + 1}: ${item[1].trim()}`]); continue; }
+    if (m[2] !== "127.0.0.1") gaps.push(["default-not-loopback", service, `${i + 1}: ${m[1]}_BIND defaults to "${m[2]}"`]);
+    if (documented && !documented.has(`${m[1]}_BIND`)) gaps.push(["undocumented-knob", service, `${i + 1}: ${m[1]}_BIND`]);
+  }
+  if (!sawServices) gaps.push(["no-services", null, "no top-level services: block this rule can read"]);
+  return gaps;
+}
+
+const PORT_PROBES = [
+  // [text, base?, expected kinds]
+  [`services:\n  server:\n    ports:\n      - "\${SERVER_BIND:-127.0.0.1}:\${SERVER_PORT:-8000}:8000"\n`, true, []],
+  [`services:\n  server:\n    ports:\n      - "\${SERVER_PORT:-8000}:8000"\n`, true, ["no-address"]],
+  [`services:\n  server:\n    ports:\n      - "8000:8000"\n`, true, ["no-address"]],
+  [`services:\n  server:\n    ports:\n      - "\${SERVER_BIND:-0.0.0.0}:\${SERVER_PORT:-8000}:8000"\n`, true, ["default-not-loopback"]],
+  [`services:\n  server:\n    ports:\n      - target: 8000\n        published: 8000\n        host_ip: 127.0.0.1\n`, true, ["long-form"]],
+  [`services:\n  postgres:\n    ports:\n      - "\${POSTGRES_BIND:-127.0.0.1}:\${POSTGRES_PORT:-5432}:5432"\n`, true, ["published-in-base"]],
+  [`services:\n  postgres:\n    ports:\n      - "\${POSTGRES_BIND:-127.0.0.1}:\${POSTGRES_PORT:-5432}:5432"\n`, false, []],
+  [`services:\n  server:\n    ports:\n      - "\${OTHER_BIND:-127.0.0.1}:\${SERVER_PORT:-8000}:8000"\n`, true, ["undocumented-knob"]],
+  // A comment after the item, and a commented-out mapping, are not mappings.
+  [`services:\n  server:\n    ports:\n      # - "8000:8000"\n      - "\${SERVER_BIND:-127.0.0.1}:\${SERVER_PORT:-8000}:8000"  # loopback\n`, true, []],
+  // ports: under a key that is not a service (a top-level volumes block) is not read.
+  [`services:\n  server:\n    image: x\nvolumes:\n  ports:\n      - "8000:8000"\n`, true, []],
+  [`version: "3"\n`, true, ["no-services"]],
+];
+
+function checkPublishedPorts() {
+  const SELF = "scripts/check-fork-consistency.mjs";
+  const documented = new Set(
+    [...readFileSync(join(ROOT, "deploy", ".env.example"), "utf8").matchAll(/^#?\s*([A-Z0-9_]+_BIND)=/gm)].map((m) => m[1])
+  );
+  const probeDocs = new Set(["SERVER_BIND", "POSTGRES_BIND", "OLLAMA_BIND"]);
+  for (const [text, base, kinds] of PORT_PROBES) {
+    const got = publishedPortGapsIn(text, { base, documented: probeDocs }).map((g) => g[0]);
+    if (JSON.stringify(got) !== JSON.stringify(kinds)) fail(SELF, `published-port rule no longer reports exactly ${JSON.stringify(kinds)} for its probe (reported ${JSON.stringify(got)}): ${JSON.stringify(text)}`);
+  }
+
+  const dir = join(ROOT, "deploy");
+  const files = readdirSync(dir).filter((f) => /\.ya?ml$/.test(f)).sort();
+  if (!files.includes("compose.yaml")) fail("deploy/compose.yaml", "missing — the stack this rule holds to loopback (SMD-1844)");
+  for (const name of files) {
+    const rel = `deploy/${name}`;
+    const base = name === "compose.yaml";
+    for (const [kind, service, detail] of publishedPortGapsIn(readFileSync(join(dir, name), "utf8"), { base, documented })) {
+      const at = /^(\d+)/.test(detail) ? `${rel}:${detail.split(":")[0]}` : rel;
+      const svc = service ? `service \`${service}\`` : "";
+      if (kind === "no-address") fail(at, `${svc} publishes \`${detail.replace(/^\d+: /, "")}\` with no host address — compose binds that to 0.0.0.0, every interface; write \`"\${${(service || "X").toUpperCase().replace(/-/g, "_")}_BIND:-127.0.0.1}:\${…_PORT:-n}:n"\` and document the knob in deploy/.env.example (SMD-1844)`);
+      else if (kind === "default-not-loopback") fail(at, `${svc}: ${detail.replace(/^\d+: /, "")} — the default is loopback; an operator who wants the network sets the knob (SMD-1844)`);
+      else if (kind === "long-form") fail(at, `${svc} publishes a port in the long form, which this rule cannot read — use the short form \`"\${X_BIND:-127.0.0.1}:\${X_PORT:-n}:n"\` (SMD-1844)`);
+      else if (kind === "undocumented-knob") fail(at, `${svc} reads \`${detail.replace(/^\d+: /, "")}\`, which deploy/.env.example does not document — an operator cannot find the knob that opens the port (SMD-1844)`);
+      else if (kind === "published-in-base") fail(at, `${svc} publishes a port from compose.yaml — the base file publishes the server alone; the database and Ollama publish through compose.host-ports.yaml, a second -f (SMD-1844)`);
+      else fail(rel, `${detail} (SMD-1844)`);
+    }
+  }
+}
+
 // ── Run ──────────────────────────────────────────────────────────────────────
 
 const dirs = contributionDirs();
@@ -1712,6 +1822,7 @@ checkCredentialCompares();
 checkThoughtWritesAround();
 checkShimRuntime();
 checkSupabaseIsms();
+checkPublishedPorts();
 
 /**
  * The embedding default is stated in three places that must agree, and two of them

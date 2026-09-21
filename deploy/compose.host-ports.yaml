@@ -1,0 +1,27 @@
+# Publishes the stack's two internal services to the host, for tools run from a
+# checkout rather than inside the compose network. A second -f, never the default:
+#
+#   podman compose -f deploy/compose.yaml -f deploy/compose.host-ports.yaml up -d
+#   DATABASE_URL=postgres://postgres:$POSTGRES_PASSWORD@127.0.0.1:5432/openbrain bun db/reembed.ts
+#
+# compose.yaml publishes only the server (SMD-1844). The database is the postgres
+# superuser on the whole brain behind one password; Ollama is an unauthenticated
+# model API. Both reach the host on loopback here, and only the operator who
+# sets `POSTGRES_BIND` / `OLLAMA_BIND` to `0.0.0.0` puts either on the network —
+# do that behind a firewall you have looked at, and never for the database.
+#
+# psql and pg_dump need none of this: `compose exec postgres psql -U postgres
+# openbrain` and `compose exec -T postgres pg_dump -U postgres openbrain > dump.sql`
+# run inside the container.
+#
+# The ollama entry applies only with `--profile local-models`; without the
+# profile the service does not exist and the entry is inert.
+
+services:
+  postgres:
+    ports:
+      - "${POSTGRES_BIND:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
+
+  ollama:
+    ports:
+      - "${OLLAMA_BIND:-127.0.0.1}:${OLLAMA_PORT:-11434}:11434"

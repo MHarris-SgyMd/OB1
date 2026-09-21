@@ -68,14 +68,14 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Ninety-eight numbered changes on top of the pin. Seven fix defects found in an
+Ninety-nine numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
 data layer (Phase 2). Ten (changes 31, 53, 55, 59, 79, 82, 86, 87, 88, and 89) ship no runtime change at
 all: each is a measurement that decided against building something.
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–98 are the numbered `###` sections** further down, which is
+sections. Changes **18–99 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -16386,6 +16386,85 @@ second merge; every pointer in the files says these. Three renumbers in one
 review is the case for SMD-1804.
 
 **Upstream status:** not sent — the query log is this fork's (change 65).
+
+### 99. The stack publishes one port, on loopback — `deploy/compose.yaml` names the address of everything it publishes, the server is the only thing it publishes, and the database and Ollama reach the host through a second file an operator adds (SMD-1844)
+
+`deploy/compose.yaml` published three ports with no host address:
+`"${POSTGRES_PORT:-5432}:5432"`, `"${SERVER_PORT:-8000}:8000"` and, under the
+`local-models` profile, `"${OLLAMA_PORT:-11434}:11434"`. Compose binds an
+address-less mapping to `0.0.0.0`, every interface. On the first stack this
+fork ran for real (podman machine on macOS, 2026-09-19) `lsof -nP -iTCP
+-sTCP:LISTEN` showed `gvproxy *:5432` and `gvproxy *:8010`: the `postgres`
+superuser on the whole brain — every thought, the audit log, the query log,
+"personal data at rest" in SETUP.md's words — offered to every host on the LAN
+on `POSTGRES_PASSWORD` alone, and the MCP server, whose key rides every request
+in clear over plain HTTP (a header is as visible as `?key=` to a listener on the
+segment), beside it. The file's own comment on the database port said "Exposed
+for psql and pg_dump during a migration. Drop this in production." — the
+default was the exposed one and no README said to drop it. SETUP.md and
+`deploy/README.md` present this stack as the way to run the fork with no
+Supabase, and SMD-1802 will point every deploy instruction at it, so the default
+binding was the fork's default exposure. The host's own Ollama, for contrast,
+binds `127.0.0.1:11434`.
+
+**What changed.** The server's mapping is
+`"${SERVER_BIND:-127.0.0.1}:${SERVER_PORT:-8000}:8000"` — loopback unless the
+operator names an address — and it is the only `ports:` in the file. The
+database and Ollama publish nothing: the server and the migrator reach
+`postgres:5432` and the server and `ollama-pull` reach `ollama:11434` on the
+compose network, by service name, as they always did; psql and pg_dump run as
+`compose exec postgres …` inside the container. The ticket's sketch put the
+database port under a profile; a profile gates a *service*, not a port, and the
+postgres service cannot be optional — so "not published by default" is a second
+file, `deploy/compose.host-ports.yaml`, that adds
+`"${POSTGRES_BIND:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"` and the Ollama
+equivalent when passed as a second `-f`. That file exists for the tools the
+READMEs say to run from a checkout rather than inside the network —
+`db/reembed.ts`, `db/extract-entities.ts`, `db/consolidate.ts`, the evals, a
+canary or replay gate reading `query_log` — each of which takes a
+`DATABASE_URL` the host can dial; without the overlay none of them reaches the
+stack, and that is the intended default. Publishing the database on loopback by
+default would have closed the LAN exposure the ticket named and nothing else;
+not publishing it makes "who can reach the database" a question one file
+answers. `deploy/.env.example` documents the three `*_BIND` knobs under "What the
+host can reach", with the sentence that `SERVER_BIND=0.0.0.0` puts the key on
+the wire in clear and belongs behind TLS or a tunnel, and `OLLAMA_PORT`, which
+compose had read since change 16 and the example never named.
+
+**Held two ways.** `scripts/check-fork-consistency.mjs` check 13 reads every
+`*.yaml` under `deploy/` and refuses a mapping that drops the address, a
+`_BIND` default other than `127.0.0.1`, the long form (which the rule cannot
+read — use the short one), a knob `.env.example` does not document, and a
+`ports:` on any base-file service but `server`; eleven probes hold the rule to
+its own text on every run, and five drop-the-mechanism mutants on the real
+files each fail with the intended message. The "Full stack, no Supabase" job
+reads what compose *makes* of the file, `config --format json`: one port in the
+base file on `127.0.0.1` at the job's `SERVER_PORT`, three with the overlay and
+the profile, all on loopback, and under `SERVER_BIND=0.0.0.0` the server on
+`0.0.0.0` and the other two still on loopback — so the knob opens the server
+and only the server. The job's `POSTGRES_PORT=55433` is gone with the mapping
+it parameterised.
+
+**Measured on the dogfood stack** (podman 5, libkrun machine, macOS; the stack
+recreated in place with the canonical `deploy/.env` and the SMD-1843 override,
+the data volume untouched): `podman ps` shows `127.0.0.1:8010->8000/tcp` for
+the server and a bare `5432/tcp` for postgres; on the Mac `lsof` shows gvproxy
+on `127.0.0.1:8010` where it held `*:8010`, and nothing on 5432 where it held
+`*:5432` — podman machine's proxy honours the address. `nc` to
+`127.0.0.1:8010` connects; to `127.0.0.1:5432` is refused; to the Mac's LAN
+address on 8010 is not answered. The A/B that says it is the binding and not
+the firewall: the server brought up once with `SERVER_BIND=0.0.0.0` shows
+`0.0.0.0:8010->8000/tcp`, gvproxy back on `*:8010`, and the same `nc` to the
+LAN address *connects*; restored to the default it is `127.0.0.1:8010` again
+and the probe gets nothing. `preflight OK`, `/health` → `ok`, `smoke.sh` 9 of
+9 — the server reaches Postgres over the service network, unaffected by what
+the host publishes. One podman-specific note for the README: with the macOS
+application firewall in stealth mode a probe of a closed port on the LAN
+address *times out* rather than being refused, so the check on a Mac is
+`lsof`, not the connection error's spelling.
+
+**Upstream status:** not sent — upstream has no `deploy/`; the stack is this
+fork's (change 16 and the migration plan's Phase 4).
 
 
 ## Detached from the fork network

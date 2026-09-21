@@ -12,6 +12,16 @@
 # Secrets come from deploy/.env, which is gitignored. Copy .env.example first.
 # Nothing here is production-shaped — no TLS, no backups, no resource limits — it
 # is a working reference for what the pieces are once Supabase is gone.
+#
+# What the host can reach: only the server, and only from the host itself. Every
+# published port here names its address, `127.0.0.1` unless the operator sets
+# the `*_BIND` knob, because an address-less `"8000:8000"` binds 0.0.0.0 — every
+# interface — and this stack holds a brain (personal data at rest) behind one
+# password and one key over plain HTTP. Postgres and Ollama publish nothing;
+# the server reaches both over the compose network by service name, and a tool
+# run from a checkout gets them through compose.host-ports.yaml (a second -f),
+# loopback again unless told otherwise. scripts/check-fork-consistency.mjs
+# check 13 refuses a mapping that drops the address (SMD-1844).
 
 name: open-brain
 
@@ -53,9 +63,14 @@ services:
       POSTGRES_USER: postgres
     volumes:
       - pgdata:/var/lib/postgresql/data
-    ports:
-      # Exposed for psql and pg_dump during a migration. Drop this in production.
-      - "${POSTGRES_PORT:-5432}:5432"
+    # No `ports:`. The superuser on the whole brain, guarded by POSTGRES_PASSWORD
+    # alone, is not published to the host by default — the mapping this used to
+    # carry bound 0.0.0.0, so a LAN peer reached it on the password. The server
+    # and the migrator reach it as `postgres:5432` on the compose network. For
+    # psql or pg_dump: `compose exec postgres psql -U postgres openbrain`. For a
+    # tool run from a checkout (reembed.ts, extract-entities.ts, consolidate.ts,
+    # the evals): add `-f compose.host-ports.yaml`, which publishes it on
+    # loopback (SMD-1844; deploy/README.md, "What is reachable from where").
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d openbrain"]
       interval: 5s
@@ -146,7 +161,12 @@ services:
       OB1_PG_POOL: ${OB1_PG_POOL:-10}
       PORT: "8000"
     ports:
-      - "${SERVER_PORT:-8000}:8000"
+      # Loopback unless SERVER_BIND says otherwise. The one published port of the
+      # stack. `SERVER_BIND=0.0.0.0` is for remote clients — a claude.ai connector,
+      # another machine — and puts the key on the wire in clear on every request:
+      # the header is as visible as `?key=` over plain HTTP. Behind TLS or a
+      # tunnel first (SMD-1844).
+      - "${SERVER_BIND:-127.0.0.1}:${SERVER_PORT:-8000}:8000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -164,8 +184,11 @@ services:
     profiles: ["local-models"]
     volumes:
       - ollama:/root/.ollama
-    ports:
-      - "${OLLAMA_PORT:-11434}:11434"
+    # No `ports:`. An unauthenticated model API; the server and ollama-pull reach
+    # it as `ollama:11434` on the compose network, and nothing in the stack needs
+    # it from the host. `compose exec ollama ollama pull <model>` for a third
+    # model; compose.host-ports.yaml publishes it on loopback for an eval run
+    # from a checkout (SMD-1844).
     healthcheck:
       test: ["CMD-SHELL", "ollama list >/dev/null 2>&1"]
       interval: 5s

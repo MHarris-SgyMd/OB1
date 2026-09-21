@@ -54,6 +54,44 @@ Three services, in order:
 http://localhost:8000/?key=<MCP_ACCESS_KEY>
 ```
 
+That URL works from this machine and nowhere else, by default — see the next
+section before handing it to a remote client.
+
+## What is reachable from where
+
+Compose binds an address-less `"8000:8000"` to `0.0.0.0`, every interface, so the
+first stack this fork ran on (podman on macOS) offered the database superuser and
+the MCP server to the whole LAN on a password and a key over plain HTTP. Since
+SMD-1844 every published port names its address, the default is loopback, and
+the database and Ollama are not published at all:
+
+| Service | On the compose network | On the host | From another machine |
+| --- | --- | --- | --- |
+| `server` | `server:8000` | `127.0.0.1:${SERVER_PORT:-8000}` — the stack's only published port | Only with `SERVER_BIND=0.0.0.0` in `deploy/.env`, and then the key rides every request in clear: put TLS or a tunnel in front first |
+| `postgres` | `postgres:5432` — the server and the migrator | Nothing. `compose exec postgres psql -U postgres openbrain` for psql, `compose exec -T postgres pg_dump -U postgres openbrain > dump.sql` for a backup. A tool run from a checkout (`db/reembed.ts`, `db/extract-entities.ts`, `db/consolidate.ts`, the evals) adds `-f deploy/compose.host-ports.yaml`, which publishes it on `127.0.0.1:${POSTGRES_PORT:-5432}` | Never. `POSTGRES_BIND` exists for a firewalled host you have looked at; it is the superuser on the whole brain |
+| `ollama` (`--profile local-models`) | `ollama:11434` — the server and `ollama-pull` | Nothing. `compose exec ollama ollama pull <model>`; the host-ports file publishes it on `127.0.0.1:${OLLAMA_PORT:-11434}` for an eval run from a checkout | Not intended; an unauthenticated model API |
+
+`docker compose -f deploy/compose.yaml config` renders each mapping with
+`host_ip: 127.0.0.1`, and `scripts/check-fork-consistency.mjs` check 13 refuses
+a mapping under `deploy/` that drops the address or a service other than the
+server publishing from `compose.yaml`; the "Full stack, no Supabase" CI job
+reads the rendered config the same way.
+
+On podman machine and Docker Desktop the listener you can see is the VM's
+proxy (`gvproxy`, `vpnkit`), not the container, so the check is on the Mac:
+
+```bash
+lsof -nP -iTCP -sTCP:LISTEN | grep -E ':(5432|8000|11434)'
+```
+
+shows `127.0.0.1:8000` and nothing for the other two; `ss` inside the VM does not
+answer the question. Measured on podman 5 (libkrun machine, macOS): gvproxy
+honours the address — with `SERVER_BIND=0.0.0.0` it listens on `*:8000` and a
+connection to the Mac's LAN address succeeds; with the default it listens on
+`127.0.0.1:8000` and the same connection gets nothing. "Nothing" is a timeout,
+not a refusal, when the macOS application firewall's stealth mode is on (it
+drops a probe of a closed port), so read `lsof`, not the error's wording.
+
 ## Expected outcome
 
 `migrate` exits 0 having applied every migration under `db/migrations/` (it needs no `bun install` —

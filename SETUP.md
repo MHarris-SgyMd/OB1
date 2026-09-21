@@ -347,7 +347,11 @@ http://localhost:8000/?key=<your-raw-key>
 ```
 
 In Claude Desktop: Settings → Connectors → Add custom connector, and paste that
-URL. For anything reachable from outside your machine, put it behind TLS first.
+URL. By default nothing outside your machine can reach it: the server is the
+stack's only published port and it binds `127.0.0.1`; the database and Ollama
+are not published at all (`deploy/README.md`, "What is reachable from where").
+`SERVER_BIND=0.0.0.0` in `deploy/.env` opens the server, and only the server, to
+the network — put it behind TLS first, since the key rides every request.
 
 A write key sees ten tools; a read key sees seven. `capture_thought`,
 `update_thought` and `delete_thought` are never registered for a read key, so
