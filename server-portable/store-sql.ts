@@ -75,6 +75,21 @@ function toRealArray(xs: (number | null)[]): string {
   return `{${xs.map((x) => (x === null || !Number.isFinite(x as number) ? "NULL" : String(x))).join(",")}}`;
 }
 
+/** The pool size when OB1_PG_POOL is unset. */
+export const DEFAULT_PG_POOL = 10;
+
+/**
+ * OB1_PG_POOL as a pool size: a positive integer, else the default. `""` is
+ * unset — deploy/compose.yaml forwards every optional knob as `${VAR:-}`, so a
+ * composed server sees "" wherever deploy/.env set nothing, and Number("") is
+ * 0, a pool that can open nothing (SMD-1843; the same rule as embed.ts's
+ * numberOr and db/config.mjs's ENV proxy).
+ */
+export function poolSizeFrom(raw: string | undefined, fallback = DEFAULT_PG_POOL): number {
+  const n = raw && raw.trim() ? Number(raw.trim()) : NaN;
+  return Number.isInteger(n) && n > 0 ? n : fallback;
+}
+
 export class SqlStore implements ThoughtStore {
   readonly kind = "sql" as const;
   private sql: SQL;
@@ -83,7 +98,7 @@ export class SqlStore implements ThoughtStore {
     // A bounded pool. PostgREST was stateless HTTP, so nothing upstream limits
     // concurrency for us any more — an unbounded pool would let a burst of
     // captures exhaust the server's connection slots.
-    this.sql = new SQL({ url, max: opts.max ?? Number(process.env.OB1_PG_POOL ?? 10) });
+    this.sql = new SQL({ url, max: opts.max ?? poolSizeFrom(process.env.OB1_PG_POOL) });
   }
 
   async matchThoughts(opts: {

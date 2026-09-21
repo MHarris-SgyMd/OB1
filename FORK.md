@@ -16809,6 +16809,55 @@ with an empty one. `check-fork-consistency` PASS, `tsc` clean, `test-thoughts`
 The dogfood stack's override file is now redundant; it comes out when the
 stack next restarts.
 
+**Review pass 1** (a cold read and a run-it reviewer with the mutation
+harness, both against the real files and the throwaway stack). The rule's
+pointers were wrong before its words were: `lineOf` searches the whole file,
+so a fault in the server's block was reported at *migrate's* line for every
+knob both forward — a literal `"on"` on the server's `OB1_TRGM_INDEX` at 151
+said `deploy/compose.yaml:102`, where the migrator's correct line sits (both
+reviewers; five knobs measured). A `lineIn(text, service, needle)` reads
+inside one service's block — from its key, at the indentation the first key
+under `services:` has, to the next key at that indentation — and takes a
+quoted or spaced key too (`"OB1_QUERY_LOG":` and `OB1_QUERY_LOG :` had lost
+the line altogether); six probes hold it, and breaking the reader to search
+from the top fails two of them. The fallback rule held its host to *a*
+service, so `http://ollama-pull:11434/v1`, `http://postgres:5432/v1` and the
+port-less `http://ollama/v1` all passed while preflight's own list of local
+service names was the literal `["ollama"]` in `preflight.ts` — a fallback the
+check accepted could be one the container refuses as remote (cold read,
+measured with `postgres`). `db/config.mjs` now exports
+`LOCAL_PROVIDER_SERVICES`, preflight reads it, and the rule wants exactly
+`http://<one of them>:11434/v1` for a service the file defines; renaming the
+list's entry fails the real file. Check 14 read the base file alone, so an
+overlay's `server: environment: { OB1_STORE: postgrest }` landed in the same
+container unread and a miswire under `migrate` passed (run-it): every
+`compose*.yaml` under `deploy/` is now held to the shape rule and the server's
+names, the base file alone to the universe. A bare list item `- OB1_QUERY_LOG`
+— compose's pass-through of the host's value, semantically `${OB1_QUERY_LOG}`
+— was refused as "a literal" (cold read); it is a forward now, and the shape
+message names what it found instead (a single dash keeps an empty value; `:?`
+aborts compose; bare `$X` and a nested `${…${…}}` are forms the rule does not
+read; a literal; a miswire). Beyond the rule: `store-sql.ts` read the pool
+size as `Number(process.env.OB1_PG_POOL ?? 10)`, so the `""` compose's
+no-fallback form sends is a pool of **0** — the file kept `${OB1_PG_POOL:-10}`,
+a copy of the code's default its own comments call the recurring defect, and
+this change had declared the knob without asserting it (cold read);
+`poolSizeFrom` reads a positive integer or the default, the copy is gone, and
+the assertion sits with the six others. `metadataReasoning` lowercased but
+never trimmed, so `OB1_METADATA_REASONING=low ` from a `.env` file reached the
+provider as `"low "`; it trims like every sibling, and the example's line says
+what off/false/0 mean. And Option C of the example left its URL line
+commented beside the live key: with the new fallback a key alone dials the
+stack's Ollama and sends the key there — preflight warns and says OK, the
+first capture fails on a host that does not exist without the profile (cold
+read). The example says so in words; the failing capture is SMD-1875's case.
+Not taken: the example reader refuses `# OB1_X = on` with spaces, which
+compose's own dotenv accepts — the example has no such line, and check 13's
+reader is the same one; a duplicate or nested name in `type Env` — tsc owns
+the first, nothing writes the second. Eleven more mutants on the real files
+bite as their paragraphs say; the list form with a bare item passes; the
+throwaway client moved out of `server-portable/` into the scratchpad.
+
 **Upstream status:** not sent — upstream has no `deploy/`; the stack is this
 fork's (change 16 and the migration plan's Phase 4).
 

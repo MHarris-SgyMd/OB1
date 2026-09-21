@@ -1099,6 +1099,16 @@ export function versionAtLeast(version, major, minor = 0, patch = 0) {
  * @param {string[]} [serviceNames]  compose service names to accept, e.g. ["postgres"]
  * @returns {boolean}
  */
+/**
+ * The compose service names a model endpoint may live at — the `ollama`
+ * service deploy/compose.yaml's `local-models` profile adds. preflight.ts
+ * passes these to isLocalHostname (a service name is local: the compose
+ * network), and check 14 of scripts/check-fork-consistency.mjs holds
+ * compose.yaml's OB1_LLM_BASE_URL fallback to one of them — so the address
+ * the file defaults to is one the container will call local (SMD-1843).
+ */
+export const LOCAL_PROVIDER_SERVICES = Object.freeze(["ollama"]);
+
 export function isLocalHostname(host, serviceNames = []) {
   const h = String(host).toLowerCase();
   if (h === "") return false;

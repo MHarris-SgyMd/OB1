@@ -67,8 +67,11 @@
  *      NOT_FORWARDED, with the reason) and documented in deploy/.env.example;
  *      a forwarded name the server does not declare is a typo; a documented
  *      knob no service forwards is a dead switch; `env_file` is refused (a
- *      file this rule does not open); and OB1_LLM_BASE_URL's fallback, if
- *      any, names a service in the file. The environment is read from the
+ *      file this rule does not open); every compose*.yaml under deploy/ is
+ *      held to the shape and to the server's names, since an overlay lands
+ *      in the same container; and OB1_LLM_BASE_URL's fallback, if any, is
+ *      `http://<service>:11434/v1` for a service the file defines and
+ *      db/config.mjs's LOCAL_PROVIDER_SERVICES names. The environment is read from the
  *      parsed document — a name in a comment or on a command line is not a
  *      forward, which is how three knobs passed the text rule this replaces
  *      (SMD-1843)
@@ -82,7 +85,7 @@ import { readFileSync, existsSync, readdirSync, statSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join, dirname, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { coreColumnCommentStatement, coreFunctionStatement, ownedColumnCommentsIn, ownedFunctionsIn, supabaseIsmsIn } from "../db/config.mjs";
+import { coreColumnCommentStatement, coreFunctionStatement, LOCAL_PROVIDER_SERVICES, ownedColumnCommentsIn, ownedFunctionsIn, supabaseIsmsIn } from "../db/config.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const CATEGORIES = [
@@ -2204,6 +2207,51 @@ function forwardedEnvIn(doc) {
   return { gaps, forwarded };
 }
 
+/**
+ * 1-based line of `needle` inside one service's block — the first non-comment
+ * line after the service's own key (at the indentation the first key under
+ * `services:` has) and before the next key at that indentation, whose text
+ * holds `needle` or is a key spelled `needle`, quoted or spaced. 0 when not
+ * found. lineOf() searches the whole file, and the first review pass found a
+ * server-side fault reported at migrate's line for every knob both forward.
+ */
+function lineIn(text, service, needle) {
+  const lines = text.split("\n");
+  const comment = (l) => /^\s*#/.test(l) || !l.trim();
+  const isKey = (l, name) => new RegExp(`^\\s*"?${name}"?\\s*:`).test(l);
+  const top = lines.findIndex((l) => /^"?services"?\s*:/.test(l));
+  if (top < 0) return 0;
+  const firstKey = lines.findIndex((l, i) => i > top && !comment(l));
+  if (firstKey < 0) return 0;
+  const indent = /^\s*/.exec(lines[firstKey])[0].length;
+  const atIndent = (l) => !comment(l) && /^\s*/.exec(l)[0].length === indent;
+  const start = lines.findIndex((l, i) => i > top && atIndent(l) && isKey(l, service));
+  if (start < 0) return 0;
+  let stop = lines.findIndex((l, i) => i > start && (atIndent(l) || /^\S/.test(l)));
+  if (stop < 0) stop = lines.length;
+  const i = lines.findIndex((l, i) => i > start && i < stop && !comment(l) && (isKey(l, needle) || l.replace(/\s+#.*$/, "").includes(needle)));
+  return i < 0 ? 0 : i + 1;
+}
+const LINE_PROBES = [
+  // [yaml, service, needle, expected line]
+  ["services:\n  migrate:\n    environment:\n      OB1_A: ${OB1_A:-}\n  server:\n    environment:\n      OB1_A: ${OB1_A:-}\n", "server", "OB1_A", 7],
+  ["services:\n  migrate:\n    environment:\n      OB1_A: ${OB1_A:-}\n  server:\n    environment:\n      OB1_A: ${OB1_A:-}\n", "migrate", "OB1_A", 4],
+  ["services:\n  server:\n    # OB1_A: in a comment\n    environment:\n      \"OB1_A\": ${OB1_A:-}\n", "server", "OB1_A", 5],
+  ["services:\n  server:\n    environment:\n      OB1_A : ${OB1_A:-}\n", "server", "OB1_A", 4],
+  ["services:\n  server:\n    environment:\n      OB1_B: 1\n  ollama:\n    environment:\n      OB1_A: 1\n", "server", "OB1_A", 0],
+  ["services:\n    server:\n        environment:\n            OB1_A: 1\n", "server", "OB1_A", 4],
+];
+
+/** What a value that is not `${NAME}` / `${NAME:-…}` is, for the message. */
+function forwardForm(v) {
+  if (/^\$\{[A-Z0-9_]+-/.test(v)) return "`${X-…}`, a single dash, keeps an EMPTY value from deploy/.env instead of the default";
+  if (/^\$\{[A-Z0-9_]+:\?/.test(v)) return "`${X:?…}` aborts compose on an unset knob that has a default in the code";
+  if (/^\$[A-Z0-9_]+$/.test(v)) return "a bare `$X` is the form this rule does not read";
+  if (/\$\{[^}]*\$\{/.test(v)) return "a nested `${…${…}}` is the form this rule does not read";
+  if (/^\$\{/.test(v)) return "another variable's name is a miswire";
+  return "a literal pins the operator out";
+}
+
 const ENV_SOURCE_PROBES = [
   // [source, expected names]
   ["type Env = {\n  A?: string;\n  /** doc with a colon: here */\n  OB1_B: string;\n  lower?: string;\n};\n", ["A", "OB1_B"]],
@@ -2233,6 +2281,10 @@ function checkServerEnvForwarded() {
     const got = declaredEnvIn(source);
     if (JSON.stringify(got) !== JSON.stringify(names)) fail(SELF, `env-declaration reader no longer reports ${JSON.stringify(names)} for its probe (reported ${JSON.stringify(got)}): ${JSON.stringify(source)}`);
   }
+  for (const [yaml, service, needle, line] of LINE_PROBES) {
+    const got = lineIn(yaml, service, needle);
+    if (got !== line) fail(SELF, `service-line reader no longer reports line ${line} for \`${needle}\` under \`${service}\` (reported ${got}): ${JSON.stringify(yaml)}`);
+  }
   for (const [yaml, kinds, server] of FORWARD_PROBES) {
     const got = forwardedEnvIn(Bun.YAML.parse(yaml));
     const gotKinds = got.gaps.map((g) => g[0]);
@@ -2253,57 +2305,81 @@ function checkServerEnvForwarded() {
   const declaredKnobs = declared.filter((n) => KNOB.test(n));
   if (declaredKnobs.length === 0) { fail(SERVER_ENV_SOURCE, `\`type Env\` declares no OB1_* or OPEN_BRAIN_* name — check 14 has nothing to hold the compose file to, which cannot be right (SMD-1843)`); return; }
 
-  const text = readFileSync(join(ROOT, rel), "utf8");
-  let doc;
-  try { doc = Bun.YAML.parse(text); } catch { return; } // check 13 reports the parse failure
-  const { gaps, forwarded } = forwardedEnvIn(doc);
-  for (const [kind, service, detail] of gaps) {
-    switch (kind) {
-      case "no-services": case "unreadable": break; // check 13 reports these
-      case "env-file": fail(`${rel}:${lineOf(text, "env_file")}`, `service \`${service}\` has \`env_file: ${detail}\` — a file this rule does not open, forwarding whatever it holds; name each knob in \`environment:\` instead (SMD-1843)`); break;
-      case "environment-not-mapping": fail(`${rel}:${lineOf(text, "environment")}`, `service \`${service}\` has \`environment: ${detail}\`, neither a mapping nor a list (SMD-1843)`); break;
-      default: throw new Error(`check 14: no message for kind ${kind}`);
-    }
-  }
-  const server = forwarded.get("server");
-  if (!server) { fail(rel, `has no \`server\` service — check 14 reads what it forwards to the server (SMD-1843)`); return; }
-
-  const at = (name) => { const l = lineOf(text, `${name}:`); return l ? `${rel}:${l}` : rel; };
-  for (const name of declaredKnobs) {
-    if (name in NOT_FORWARDED) {
-      if (server.has(name)) fail(at(name), `forwards \`${name}\`, which NOT_FORWARDED in ${SELF} says the stack must not: ${NOT_FORWARDED[name]} (SMD-1843)`);
-      continue;
-    }
-    if (!server.has(name)) {
-      fail(`${rel}:${lineOf(text, "server:")}`, `the server reads \`${name}\` (${SERVER_ENV_SOURCE}, type Env) and \`server.environment\` never forwards it, so a value in deploy/.env does nothing and says nothing — add \`${name}: \${${name}:-}\` (or, when the stack must not forward it, the name and the reason to NOT_FORWARDED in ${SELF}) (SMD-1843)`);
-    } else {
-      const v = server.get(name);
-      if (v === null || !new RegExp(`^\\$\\{${name}(:-[^}]*)?\\}$`).test(v)) {
-        fail(at(name), `\`${name}: ${v}\` — the server's knob is forwarded as \`\${${name}}\` or \`\${${name}:-…}\`, the operator's value under its own name; a literal pins the operator out, and another variable's name is a miswire (SMD-1843)`);
+  // Every compose file under deploy/ is read for the shape rules — a knob
+  // under ANY service is `${NAME}` or `${NAME:-…}` under its own name (or a
+  // bare list item, compose's pass-through of the host's value), no service
+  // has `env_file`, and the server, wherever a file names it, forwards no name
+  // it does not declare and none NOT_FORWARDED excuses — since an overlay's
+  // `server:` block lands in the same container. The base file alone holds
+  // the universe (declared → forwarded → documented) and the fallback.
+  const dir = join(ROOT, "deploy");
+  const files = readdirSync(dir).filter((f) => COMPOSE_FILE.test(f) && statSync(join(dir, f)).isFile()).sort();
+  let server = null, baseText = null;
+  const anywhere = new Set();
+  for (const name of files) {
+    const frel = `deploy/${name}`;
+    const text = readFileSync(join(dir, name), "utf8");
+    let doc;
+    try { doc = Bun.YAML.parse(text); } catch { continue; } // check 13 reports the parse failure
+    const { gaps, forwarded } = forwardedEnvIn(doc);
+    const at = (service, needle) => { const l = lineIn(text, service, needle); return l ? `${frel}:${l}` : frel; };
+    for (const [kind, service, detail] of gaps) {
+      switch (kind) {
+        case "no-services": case "unreadable": break; // check 13 reports these
+        case "env-file": fail(at(service, "env_file"), `service \`${service}\` has \`env_file: ${detail}\` — a file this rule does not open, forwarding whatever it holds; name each knob in \`environment:\` instead (SMD-1843)`); break;
+        case "environment-not-mapping": fail(at(service, "environment"), `service \`${service}\` has \`environment: ${detail}\`, neither a mapping nor a list (SMD-1843)`); break;
+        default: throw new Error(`check 14: no message for kind ${kind}`);
       }
     }
-    if (!documented.has(name)) fail("deploy/.env.example", `does not document \`${name}\`, which the server reads and compose forwards — an operator cannot find the knob; add a \`# ${name}=\` line with what it does (SMD-1843)`);
+    for (const [service, env] of forwarded) {
+      for (const [k, v] of env) {
+        if (!KNOB.test(k)) continue;
+        anywhere.add(k);
+        if (v !== null && !new RegExp(`^\\$\\{${k}(:-[^$}]*)?\\}$`).test(v)) {
+          fail(at(service, k), `\`${k}: ${v}\` under \`${service}\` — ${forwardForm(v)}; a knob is forwarded as \`\${${k}}\` or \`\${${k}:-…}\`, the operator's value under its own name (SMD-1843)`);
+        }
+        if (service === "server") {
+          if (!declared.includes(k)) fail(at("server", k), `\`server.environment\` forwards \`${k}\`, which ${SERVER_ENV_SOURCE} does not declare — \`type Env\` there is the one list of what the container's process reads, so this is a typo, a knob that died, or a knob preflight.ts or a store reads through process.env without declaring (two were, when this rule first ran): declare it there with what it does, or drop it here (SMD-1843)`);
+          else if (k in NOT_FORWARDED) fail(at("server", k), `forwards \`${k}\`, which NOT_FORWARDED in ${SELF} says the stack must not: ${NOT_FORWARDED[k]} (SMD-1843)`);
+        }
+      }
+    }
+    if (name === "compose.yaml") {
+      baseText = text;
+      server = forwarded.get("server") ?? null;
+      if (!server && !gaps.some(([kind]) => kind === "no-services")) fail(rel, `has no \`server\` service — check 14 reads what it forwards to the server (SMD-1843)`);
+    }
   }
-  for (const [name] of server) {
-    if (KNOB.test(name) && !declared.includes(name)) fail(at(name), `\`server.environment\` forwards \`${name}\`, which ${SERVER_ENV_SOURCE} does not declare — \`type Env\` there is the one list of what the container's process reads, so this is a typo, a knob that died, or a knob preflight.ts or a store reads through process.env without declaring (two were, when this rule first ran): declare it there with what it does, or drop it here (SMD-1843)`);
+  if (!server) return;
+
+  const at = (needle) => { const l = lineIn(baseText, "server", needle); return l ? `${rel}:${l}` : rel; };
+  for (const name of declaredKnobs) {
+    if (name in NOT_FORWARDED) continue; // forwarding it is refused above
+    if (!server.has(name)) {
+      fail(at("environment"), `the server reads \`${name}\` (${SERVER_ENV_SOURCE}, type Env) and \`server.environment\` never forwards it, so a value in deploy/.env does nothing and says nothing — add \`${name}: \${${name}:-}\` (or, when the stack must not forward it, the name and the reason to NOT_FORWARDED in ${SELF}) (SMD-1843)`);
+    }
+    if (!documented.has(name)) fail("deploy/.env.example", `does not document \`${name}\`, which the server reads and compose forwards — an operator cannot find the knob; add a \`# ${name}=\` line with what it does (SMD-1843)`);
   }
   for (const name of Object.keys(NOT_FORWARDED)) {
     if (!declared.includes(name)) fail(SELF, `NOT_FORWARDED excuses \`${name}\`, which ${SERVER_ENV_SOURCE} no longer declares — drop the entry (SMD-1843)`);
   }
-  const anywhere = new Set();
-  for (const env of forwarded.values()) for (const k of env.keys()) anywhere.add(k);
   const reported = new Set();
   for (const k of knobs) {
     if (anywhere.has(k.name) || reported.has(k.name)) continue;
     reported.add(k.name);
-    fail(`deploy/.env.example:${k.line}`, `documents \`${k.name}\`, and no service's \`environment:\` in ${rel} forwards it, so setting it in deploy/.env does nothing and says nothing — a mention in a comment or on a command line is not a forward (SMD-1843)`);
+    fail(`deploy/.env.example:${k.line}`, `documents \`${k.name}\`, and no service's \`environment:\` in any deploy/compose*.yaml forwards it, so setting it in deploy/.env does nothing and says nothing — a mention in a comment or on a command line is not a forward (SMD-1843)`);
   }
+  // The fallback is exactly the stack's own model service: a name preflight
+  // calls local (LOCAL_PROVIDER_SERVICES — the first review pass found
+  // `postgres`, `ollama-pull` and a port-less `http://ollama/v1` all passing
+  // "a service in this file"), on Ollama's port, and defined in this file.
   const base = server.get("OB1_LLM_BASE_URL");
   const fb = /^\$\{OB1_LLM_BASE_URL:-(.+)\}$/.exec(base ?? "");
   if (fb) {
-    let host = null;
-    try { host = new URL(fb[1]).hostname; } catch { /* not a URL */ }
-    if (!host || !forwarded.has(host)) fail(at("OB1_LLM_BASE_URL"), `OB1_LLM_BASE_URL falls back to \`${fb[1]}\`, whose host ${host ? `\`${host}\` is not a service in this file` : "is not a URL's"} — the fallback is the stack's own Ollama (\`ollama\`, the local-models profile), the one address that means something inside the compose network; any other default belongs in db/config.mjs or the operator's deploy/.env (SMD-1843)`);
+    const m = /^http:\/\/([a-z0-9][a-z0-9_-]*):11434\/v1$/.exec(fb[1]);
+    const doc = Bun.YAML.parse(baseText);
+    const ok = m && LOCAL_PROVIDER_SERVICES.includes(m[1]) && doc?.services && m[1] in doc.services;
+    if (!ok) fail(at("OB1_LLM_BASE_URL"), `OB1_LLM_BASE_URL falls back to \`${fb[1]}\` — the fallback is \`http://<service>:11434/v1\` for a service this file defines and db/config.mjs's LOCAL_PROVIDER_SERVICES names (${LOCAL_PROVIDER_SERVICES.map((n) => `\`${n}\``).join(", ")}: what preflight calls local), the one address that means something inside the compose network; any other default belongs in db/config.mjs or the operator's deploy/.env (SMD-1843)`);
   }
 }
 checkServerEnvForwarded();

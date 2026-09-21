@@ -317,7 +317,9 @@ function numberOr(raw: string | undefined, fallback: number, range: "positive" |
  * honours, and it is harmless to models with no reasoning mode.
  */
 function metadataReasoning(rawValue: string | undefined): Record<string, unknown> {
-  const raw = (rawValue ?? "").toLowerCase();
+  // Trimmed like every sibling knob: `OB1_METADATA_REASONING=low ` from a .env
+  // file went to the provider as "low " and every extraction 400ed (SMD-1843).
+  const raw = (rawValue ?? "").trim().toLowerCase();
   if (raw === "on" || raw === "true" || raw === "1") return {};
   if (raw && raw !== "off" && raw !== "false" && raw !== "0") return { reasoning_effort: raw };
   return { reasoning_effort: "none" };

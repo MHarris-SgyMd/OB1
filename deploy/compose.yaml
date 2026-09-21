@@ -171,7 +171,9 @@ services:
       # on the host is http://host.containers.internal:11434/v1 (podman; Docker
       # Desktop: host.docker.internal); OpenRouter is https://openrouter.ai/api/v1
       # with a key — deploy/.env.example, "Model provider". Check 14 holds this
-      # fallback to a service in this file.
+      # fallback to exactly http://<service>:11434/v1 for a service in this file
+      # that db/config.mjs's LOCAL_PROVIDER_SERVICES names — the list preflight
+      # calls local — so the default here is one the container will accept.
       OB1_LLM_BASE_URL: ${OB1_LLM_BASE_URL:-http://ollama:11434/v1}
       # Metadata extraction: the model (db/config.mjs owns the default —
       # ollama-pull's fallback below is a copy checkEmbeddingDefaults holds
@@ -191,7 +193,10 @@ services:
       OB1_QUERY_LOG_RETENTION_DAYS: ${OB1_QUERY_LOG_RETENTION_DAYS:-}
       OB1_AGENT_CACHE_TTL_MS: ${OB1_AGENT_CACHE_TTL_MS:-}
       OPEN_BRAIN_CITATION_BASE_URL: ${OPEN_BRAIN_CITATION_BASE_URL:-}
-      OB1_PG_POOL: ${OB1_PG_POOL:-10}
+      # No `:-10` here any more: store-sql.ts owns the default and reads "" as
+      # unset (it read Number("") = 0 — a pool that opens nothing — until the
+      # first review pass of SMD-1843 found the copy and the reader together).
+      OB1_PG_POOL: ${OB1_PG_POOL:-}
       PORT: "8000"
     ports:
       # Loopback unless SERVER_BIND says otherwise. The one published port of the

@@ -17,6 +17,7 @@ import { createAssert } from "../db/test-support.ts";
 import { applyChunkContextPrompt, applyEmbeddingPrompt, CHUNK_CONTEXT_PROMPTS, DEFAULT_LLM_BASE_URL, DEFAULT_METADATA_MODEL, MAX_WHOLE_TOKENS } from "../db/config.mjs";
 import { displayDate, normaliseType, thoughtTitle, thoughtUrl, THOUGHT_TYPES, TYPE_ALIASES } from "./thoughts.ts";
 import { DEFAULT_LLM_TIMEOUT_S, resolveEmbedConfig } from "./embed.ts";
+import { DEFAULT_PG_POOL, poolSizeFrom } from "./store-sql.ts";
 import { parseExtraction } from "./entities.ts";
 import { buildJudgeMessages, cleanForDisplay, parseJudgement, wrapSide } from "./consolidate.ts";
 import { chunkContent, DEFAULT_MAX_TOKENS, DEFAULT_OVERLAP_TOKENS, estimateTokens } from "./chunk.ts";
@@ -159,6 +160,16 @@ console.log("\n[7] Prompt templates and provider settings take their inputs lite
          "OB1_METADATA_REASONING='' is the default (no reasoning pass), not a reasoning_effort of ''");
   assert(resolveEmbedConfig({ OB1_METADATA_TEMPERATURE: "0.3" }).metadataTemperature === 0.3 && resolveEmbedConfig({ OB1_METADATA_MODEL: "x:1b" }).metadataModel === "x:1b",
          "…while explicit values are read");
+  assert(JSON.stringify(resolveEmbedConfig({ OB1_METADATA_REASONING: " low " }).metadataReasoning) === JSON.stringify({ reasoning_effort: "low" }),
+         "OB1_METADATA_REASONING is trimmed like its siblings — 'low ' from a .env file is an effort of low, not 'low '");
+  assert(JSON.stringify(resolveEmbedConfig({ OB1_METADATA_REASONING: "OFF" }).metadataReasoning) === JSON.stringify({ reasoning_effort: "none" }),
+         "…and off/false/0 mean none, as .env.example says");
+  // The pool size took the same "" (compose's unset) and made a pool of 0.
+  assert(poolSizeFrom(undefined) === DEFAULT_PG_POOL && poolSizeFrom("") === DEFAULT_PG_POOL && poolSizeFrom("  ") === DEFAULT_PG_POOL,
+         `OB1_PG_POOL unset or '' is the default pool (${DEFAULT_PG_POOL}), not a pool of Number('') = 0`);
+  assert(poolSizeFrom("0") === DEFAULT_PG_POOL && poolSizeFrom("-2") === DEFAULT_PG_POOL && poolSizeFrom("2.5") === DEFAULT_PG_POOL && poolSizeFrom("ten") === DEFAULT_PG_POOL,
+         "a pool that could open nothing, or is not a whole number, is the default");
+  assert(poolSizeFrom("5") === 5 && poolSizeFrom(" 12 ") === 12, "…while a positive integer is read");
 
   // The windowing rule follows the model's window (SMD-1305). 1200 was set
   // for Ollama's 2048-token batch and applied to every model: the default

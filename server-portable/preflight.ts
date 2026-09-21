@@ -53,6 +53,7 @@ const {
   DEFAULT_METADATA_MODEL: DEF_META,
   DEFAULT_LLM_BASE_URL: DEF_BASE,
   isLocalHostname,
+  LOCAL_PROVIDER_SERVICES,
   REAPPLY_COMMAND,
 } = await import("../db/config.mjs");
 
@@ -69,7 +70,7 @@ const llmKey = env.OB1_LLM_API_KEY || env.OPENROUTER_API_KEY;
  */
 function isLocalEndpoint(url: string): boolean {
   try {
-    return isLocalHostname(new URL(url).hostname, ["ollama"]); // "ollama" is the compose service name
+    return isLocalHostname(new URL(url).hostname, [...LOCAL_PROVIDER_SERVICES]); // the compose service name, from the contract
   } catch {
     return false;
   }
