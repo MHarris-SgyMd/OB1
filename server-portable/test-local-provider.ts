@@ -5,6 +5,8 @@
  * Proves the provider is a configuration choice rather than a hard dependency:
  * the server sends both calls to OB1_LLM_BASE_URL, uses OB1_EMBEDDING_MODEL and
  * OB1_METADATA_MODEL, and sends NO Authorization header when no key is set.
+ * [8] is the other half: with OB1_CHAT_BASE_URL / OB1_CHAT_API_KEY the chat
+ * calls go to an endpoint of their own with its own credential (SMD-1902).
  *
  * The stub speaks the OpenAI-compatible shapes Ollama exposes at /v1. It asserts
  * on what the server SENDS as much as what it does with the reply, because that is

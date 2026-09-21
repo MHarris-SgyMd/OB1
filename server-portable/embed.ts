@@ -250,11 +250,10 @@ export function providerEndpoint(base: string, key: string | undefined): Provide
  */
 export function resolveProviderEndpoints(env: EmbedEnv): { embeddings: ProviderEndpoint; chat: ProviderEndpoint } {
   const embeddings = providerEndpoint(env.OB1_LLM_BASE_URL || DEFAULT_LLM_BASE_URL, env.OB1_LLM_API_KEY || env.OPENROUTER_API_KEY);
-  const chatBase = (env.OB1_CHAT_BASE_URL || embeddings.base).replace(/\/+$/, "");
-  const chat = env.OB1_CHAT_API_KEY
-    ? providerEndpoint(chatBase, env.OB1_CHAT_API_KEY)
-    : chatBase === embeddings.base ? embeddings : providerEndpoint(chatBase, undefined);
-  return { embeddings, chat };
+  const chat = providerEndpoint(env.OB1_CHAT_BASE_URL || embeddings.base, env.OB1_CHAT_API_KEY);
+  // No key of its own and the same base: it IS the embeddings endpoint, key
+  // and all. Anything else — its own key, or a different base — stands alone.
+  return { embeddings, chat: !chat.key && chat.base === embeddings.base ? embeddings : chat };
 }
 
 export type EmbedConfig = {

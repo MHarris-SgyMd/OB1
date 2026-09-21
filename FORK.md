@@ -16803,6 +16803,16 @@ which content may — the choice of endpoint is the whole policy until SMD-1903.
 The defaults still share one base, so `checkEmbeddingDefaults`' "the three
 provider-facing defaults move together" stands. The timeout stays one knob.
 
+Two review passes: the failed-tagging note in `index.ts` named
+`env().OPENROUTER_API_KEY` (upstream's text) and now names the chat endpoint
+it dialled; the re-embed summary says where blurbs go; and the docs say that
+`OPENROUTER_API_KEY` belongs to the embeddings endpoint too, whatever its name
+suggests — local embeddings with OpenRouter for chat is `OB1_CHAT_API_KEY`,
+which preflight's fix line already said. Boyscout: the resolver builds the chat
+endpoint once and hands back the embeddings one when it has no key of its own
+and the same base, instead of stripping the slash twice and branching three
+ways.
+
 **Upstream status:** not sent — upstream has one provider constant and no
 preflight; this is the fork's own provider layer (change 16 and since).
 
