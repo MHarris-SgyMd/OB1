@@ -95,7 +95,7 @@ type Labels = { pairs: LabelPair[]; proposals?: GradedProposal[] };
 const labels = JSON.parse(readFileSync(join(HERE, "consolidate-labels.json"), "utf8")) as Labels;
 
 console.log(`  corpus: ${docs.length} documents from ${corpusPath}; ${labels.pairs.length} labelled pairs, ${labels.proposals?.length ?? 0} graded proposals`);
-console.log(`  embed:  ${EMBED_MODEL} @ ${DIM}; graph from ${answersPath}; judge ${cfg.metadataModel} at temperature ${cfg.metadataTemperature} via ${cfg.llmBase}; key ${JOB}`);
+console.log(`  embed:  ${EMBED_MODEL} @ ${DIM}; graph from ${answersPath}; judge ${cfg.metadataModel} at temperature ${cfg.metadataTemperature} via ${cfg.chat.base}; key ${JOB}`);
 console.log(`  k ${K}, cosine floor ${MIN_SIM}${REPLAY ? `; verdicts replayed from ${REPLAY}` : ""}\n`);
 
 // ── Load: thoughts with vectors AND their capture dates, then the graph ──────

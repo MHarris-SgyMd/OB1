@@ -7,7 +7,7 @@ import { StreamableHTTPTransport } from "@hono/mcp";
 import { Hono } from "hono";
 import { z } from "zod";
 import { createStore, postgrestOnBunNotice, storeKind, UUID_RE, type Citation, type ThoughtStore } from "./store.ts";
-import { queryLogEnabled } from "../db/config.mjs";
+import { queryLogEnabled, trimmedEnv } from "../db/config.mjs";
 import { authenticateRequest, canWrite, type Principal } from "./auth.ts";
 import { AgentResolver, cacheTtlFromEnv } from "./agents.ts";
 
@@ -35,6 +35,16 @@ type Env = {
   SUPABASE_SERVICE_ROLE_KEY?: string;
   /** The SQL store's connection string — required unless SUPABASE_URL holds one. */
   DATABASE_URL?: string;
+  /** The SQL store's connection pool size (store-sql.ts); default 10. */
+  OB1_PG_POOL?: string;
+  /**
+   * The opt-in trigram index. The migrator builds it; in the server's process
+   * db/config.mjs reads it (TRGM_INDEX), which preflight.ts imports to tell the
+   * setting and the database apart. Declared here because this block is the
+   * one list of what the container's process reads — check 14 holds
+   * deploy/compose.yaml to it (SMD-1843).
+   */
+  OB1_TRGM_INDEX?: string;
   /** Must match the width of thoughts.embedding — see db/config.mjs. */
   OB1_EMBEDDING_DIM?: string;
   OB1_EMBEDDING_MODEL?: string;
@@ -73,12 +83,21 @@ type Env = {
   OB1_METADATA_MODEL?: string;
   /** Sampling temperature for extraction. Defaults to 0 — see metadataTemperature. */
   OB1_METADATA_TEMPERATURE?: string;
-  /** "on" to let a thinking model reason; anything else disables it. Default off. */
+  /**
+   * Whether a thinking model reasons before extracting. Unset, off/false/0: no
+   * reasoning pass (`reasoning_effort: none`); on/true/1: the model's default
+   * effort; any other word (low, medium, high) is sent as the effort. See
+   * embed.ts metadataReasoning.
+   */
   OB1_METADATA_REASONING?: string;
-  /** Any OpenAI-compatible base URL. Point it at Ollama for a fully local brain. */
+  /** Any OpenAI-compatible base URL. Point it at Ollama for a fully local brain. Embeddings, and chat unless OB1_CHAT_BASE_URL says otherwise. */
   OB1_LLM_BASE_URL?: string;
   /** Preferred over OPENROUTER_API_KEY. Not needed for a loopback endpoint. */
   OB1_LLM_API_KEY?: string;
+  /** Where the chat calls (metadata, blurbs, the judge) go when it is not OB1_LLM_BASE_URL — see embed.ts resolveProviderEndpoints (SMD-1902). */
+  OB1_CHAT_BASE_URL?: string;
+  /** The chat endpoint's own credential; a different chat endpoint never inherits OB1_LLM_API_KEY. */
+  OB1_CHAT_API_KEY?: string;
   /** Seconds a single provider call — embedding, blurb or metadata extraction — may take. Default 120 — see embed.ts. */
   OB1_LLM_TIMEOUT?: string;
   OPEN_BRAIN_CITATION_BASE_URL?: string;
@@ -95,7 +114,9 @@ let ENV: Env | null = null;
 function initEnv(bindings?: Record<string, unknown>): void {
   if (ENV) return;
   const globals = (globalThis as { process?: { env?: Record<string, string> } }).process?.env ?? {};
-  ENV = { ...globals, ...(bindings ?? {}) } as Env;
+  // Trimmed once here, for every knob: a quoted `"sk-abc "` in deploy/.env
+  // reaches the provider as the key, not the key and a space (SMD-1843).
+  ENV = trimmedEnv({ ...globals, ...(bindings ?? {}) }) as Env;
 }
 
 function env(): Env {
@@ -1168,7 +1189,7 @@ function buildServer(principal: Principal): McpServer {
             `\n\nNote: ${contextFailures} of ${chunks.length} search chunks were embedded without ` +
             `their situating context — the call failed, or returned a blurb too long to be one. ` +
             `They are stored and searchable; re-capture to regenerate, or check the model at ` +
-            `OB1_LLM_BASE_URL.`;
+            `${embedConfig().chat.base}.`;
         }
         confirmation += explainHeadWindow(embedded);
 
@@ -1202,12 +1223,14 @@ function buildServer(principal: Principal): McpServer {
         }
 
         // Tell the user when tags are placeholders rather than real extraction,
-        // so a broken env().OPENROUTER_API_KEY does not look like a successful capture.
+        // so a broken credential does not look like a successful capture. The
+        // remedy names the endpoint the tagging call dialled — the chat one,
+        // which since SMD-1902 need not be where the embedding went.
         if (typeof meta.metadata_extraction_failed === "string") {
           confirmation +=
             `\n\nNote: the thought was saved, but automatic tagging failed ` +
             `(${meta.metadata_extraction_failed}) — topics and people are placeholders. ` +
-            `Check env().OPENROUTER_API_KEY and the function logs.`;
+            `Check the chat endpoint (${embedConfig().chat.base}), its credential, and the server logs.`;
         }
 
         return {

@@ -23,7 +23,9 @@ COPY server-portable/shims ./shims
 COPY db/config.mjs db/config.d.mts db/version.mjs db/version.d.mts /db/
 
 # Secrets are injected at runtime, never baked in:
-#   MCP_ACCESS_KEYS (or the legacy MCP_ACCESS_KEY), OPENROUTER_API_KEY
+#   MCP_ACCESS_KEYS (or the legacy MCP_ACCESS_KEY), OPENROUTER_API_KEY or
+#                  OB1_LLM_API_KEY (and OB1_CHAT_API_KEY when OB1_CHAT_BASE_URL
+#                  names a hosted chat endpoint of its own)
 #   DATABASE_URL — the SQL store, which is the default (OB1_STORE unset or sql;
 #                  SUPABASE_URL holding a postgres:// URL is read as the same thing)
 #   OB1_STORE=postgrest → SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY (kept for
