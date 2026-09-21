@@ -149,6 +149,34 @@ than the compose network, and skip the profile:
 OB1_LLM_BASE_URL=http://host.containers.internal:11434/v1   # docker: host.docker.internal
 ```
 
+#### Half local: embeddings at home, tagging elsewhere
+
+The two calls need not share a provider. `OB1_LLM_BASE_URL` is where the
+embedding goes, and where the chat calls — metadata extraction, the chunk
+blurbs, the supersession judge — go too unless `OB1_CHAT_BASE_URL` names
+another endpoint. The text of every capture then stays on the host for the
+vector and leaves only for tagging; or a second local runtime that serves chat
+only sits beside Ollama:
+
+```bash
+# deploy/.env — local embeddings, hosted chat
+OB1_LLM_BASE_URL=http://host.containers.internal:11434/v1
+OB1_EMBEDDING_MODEL=qwen3-embedding:4b
+OB1_EMBEDDING_DIM=1024
+OB1_CHAT_BASE_URL=https://openrouter.ai/api/v1
+OB1_CHAT_API_KEY=sk-or-…
+OB1_METADATA_MODEL=openai/gpt-4o-mini        # a model the CHAT endpoint serves
+```
+
+A credential belongs to an endpoint: a different chat endpoint gets
+`OB1_CHAT_API_KEY` and never inherits `OB1_LLM_API_KEY`, so a local chat model
+beside a hosted embedder is not handed the hosted key. `preflight.ts` prints a
+row for each endpoint, fails a hosted one with no key of its own, and with
+`--deep` probes each by name — a chat endpoint that is down fails its own row
+while the embeddings row still passes. Note what leaves the host under this
+shape: every capture's full text, for tagging. Nothing here decides which
+content may (SMD-1903); the choice of endpoint is the whole policy.
+
 #### These two were chosen by measurement
 
 `qwen3-embedding:4b` and `qwen2.5:7b` are not the smallest or most obvious picks —
@@ -322,9 +350,12 @@ takes effect within a minute and the agent's history stays queryable.
 The shipped defaults are **local**: `qwen3-embedding:4b` at 1024 dimensions for
 embeddings and `qwen2.5:7b` for metadata, both via Ollama, with no credential
 needed. To use OpenRouter instead, set `OPENROUTER_API_KEY` and override both
-models — they are changed as a pair, since mixing a local embedding model with a
-hosted metadata model means every capture 404s and silently stores no topics,
-people or type. `scripts/check-fork-consistency.mjs` fails on that combination.
+models — they are changed as a pair, since a local model name sent to a hosted
+endpoint 404s on every capture and silently stores no topics, people or type.
+`scripts/check-fork-consistency.mjs` fails on that combination in the defaults.
+To mix them on purpose — local embeddings, hosted tagging — give the chat calls
+their own endpoint with `OB1_CHAT_BASE_URL` and `OB1_CHAT_API_KEY`; see
+"Running the models locally" below.
 
 ### 2. Bring it up
 
