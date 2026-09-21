@@ -845,9 +845,11 @@ const BYPASS_1524 = ["integrations/kubernetes-deployment/index.ts", "recipes/ver
 const DRIVEN_1544 = [BIO];
 const DRIVEN_1541 = ["integrations/update-thought-mcp/index.ts", "integrations/enhanced-mcp/index.ts", "integrations/agent-memory-api/index.ts",
   "integrations/open-brain-rest/index.ts", "integrations/rest-api/index.ts"]; // change 69's five servers: the ones that hold a key
+// Every vendored .ts, read once; each ticket's rule tests the same texts.
+const HEADED = [...new Bun.Glob("{recipes,integrations}/**/*.ts").scanSync({ cwd: ROOT })]
+  .filter((f) => !f.includes("node_modules")).map((f) => [f, readFileSync(join(ROOT, f), "utf8")] as const);
 for (const [ticket, files] of [["SMD-1228", [...DRIVEN, ...TEXT_ONLY]], ["SMD-1524", [...DRIVEN_1524, ...TEXT_ONLY_1524, ...BYPASS_1524]], ["SMD-1544", DRIVEN_1544], ["SMD-1541", DRIVEN_1541]] as const) {
-  const headed = [...new Bun.Glob("{recipes,integrations}/**/*.ts").scanSync({ cwd: ROOT })]
-    .filter((f) => !f.includes("node_modules") && new RegExp(ticket).test(readFileSync(join(ROOT, f), "utf8"))).sort();
+  const headed = HEADED.filter(([, text]) => new RegExp(ticket).test(text)).map(([f]) => f).sort();
   assert(headed.join() === [...files].sort().join(), `every .ts file that names ${ticket} is driven here or read here, and vice versa (${headed.join(", ")})`);
 }
 {

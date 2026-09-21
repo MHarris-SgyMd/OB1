@@ -16985,6 +16985,17 @@ change. The comment at the three principal servers' sites is the boyscout's,
 as pass 5 said. One arm for a sentence already written and a renumber main
 forced: the signal stands.
 
+**Tidied while the file was open** (no behaviour change): the header-set
+guard in `test-writes.ts` globbed and read every vendored `.ts` once per
+ticket — four sweeps of the same files since this change added the fourth
+entry — and reads them once now, each ticket's rule testing the same texts
+(pass 5's finding); and the four-to-six-line actor comment at the three
+principal servers' four sites, which passes 2 and 3 had each corrected in
+every copy, is one line per site naming the three facts (the key's name,
+`via`, no source) and pointing here for the why, as `ACTOR`'s comment already
+does for the two in-place-compare servers (passes 5 and 6's finding). Suite
+unchanged in count and in what it holds.
+
 **Upstream status:** not applicable — the functions and the audit trigger are
 this fork's; upstream's servers write the row directly and have no actor to
 carry.

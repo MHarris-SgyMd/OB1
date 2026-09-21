@@ -434,12 +434,7 @@ async function createThought(body: z.infer<typeof captureSchema>, actorName: str
   const embedding = await getEmbedding(content);
   const upsert = await supabase.rpc("upsert_thought", {
     p_content: content,
-    // 008's actor, read from the payload into ob1.actor (SMD-1541): the key's
-    // name, and this server as `via`, which the trigger (008; its body is 025's
-    // now) keeps in actor_context.
-    // No source: the row's `source` is its own metadata.source, read by the
-    // trigger — the column says where the thought came from, actor_context
-    // which door wrote it. Without the name the audit row named nobody.
+    // 008's actor, read from the payload: the key's name, this server as `via`, no source (SMD-1541; FORK.md change 103 has the why).
     p_payload: { metadata, embedding_model: EMBEDDING_MODEL, actor: { name: actorName, via: "open-brain-rest" } },
     p_embedding: embedding,
   });
@@ -565,10 +560,7 @@ app.put("/thought/:id", requireWrite, async (c) => {
       p_metadata_patch: metadata,
       p_embedding: embedding,
       p_embedding_model: embedding ? EMBEDDING_MODEL : null,
-      // 008's actor (SMD-1541; the trigger's body is 025's now): the key's name,
-      // and this server as `via`, kept in actor_context; the row's source stays
-      // its metadata's, by the trigger's own reading. Without the name the audit
-      // row named nobody.
+      // 008's actor: the key's name, this server as `via`, no source (SMD-1541; FORK.md change 103 has the why).
       p_actor: { name: c.get("principal").name, via: "open-brain-rest" },
     });
     if (edit.error) return c.json({ error: edit.error.message }, 500, corsHeaders);
