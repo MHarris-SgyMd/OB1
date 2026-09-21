@@ -30,7 +30,7 @@ export const START = "<!-- changes-index:start — generated from changes/ by sc
 export const END = "<!-- changes-index:end -->";
 export const NUMBERED = /^(\d{3})-([a-z0-9]+(?:-[a-z0-9]+)*)\.md$/;
 export const FRAGMENT = /^smd-(\d+)\.md$/;
-export const H1 = /^# (\d+)\. (.+?)\s*$/;
+export const H1 = /^# ([1-9]\d*)\. (.+?)\s*$/;
 
 /** `{ n, title }` from a change file's first line, or null when it is not `# N. Title`. */
 export function headingOf(text) {
@@ -70,7 +70,7 @@ export function slugOf(title) {
   let len = 0;
   for (const w of words) {
     if (len + w.length + 1 > 48 && out.length >= 3) break;
-    out.push(w);
+    out.push(w.slice(0, 48)); // one word longer than the whole budget is cut too
     len += w.length + 1;
   }
   while (out.length > 3 && STOP_WORDS.has(out[out.length - 1])) out.pop();
@@ -96,23 +96,23 @@ export function classifyChanges(entries) {
     const frag = FRAGMENT.exec(name);
     const lines = text.endsWith("\n") ? text.split("\n").length - 1 : text.split("\n").length;
     if (num) numbered.push({ name, n: Number(num[1]), heading: headingOf(text), lines });
-    else if (frag) fragments.push({ name, ticket: `SMD-${frag[1]}`, lines });
-    else if (name !== "README.md") other.push(name);
+    else if (frag) fragments.push({ name, ticket: `SMD-${Number(frag[1])}`, lines });
+    else if (name !== "README.md" && !name.startsWith(".")) other.push(name); // a dotfile is the OS's, not a record
   }
   numbered.sort((a, b) => a.n - b.n || a.name.localeCompare(b.name));
   fragments.sort((a, b) => a.name.localeCompare(b.name));
   return { numbered, fragments, other };
 }
 
-export function readChanges(root) {
+/** Every entry of changes/ (any extension — a stray is a finding), as `{ name, text }`. */
+export function readChangeEntries(root) {
   const dir = join(root, CHANGES_DIR);
-  if (!existsSync(dir)) return classifyChanges([]);
-  return classifyChanges(
-    readdirSync(dir)
-      .filter((name) => name.endsWith(".md"))
-      .sort()
-      .map((name) => ({ name, text: readFileSync(join(dir, name), "utf8") })),
-  );
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir).sort().map((name) => ({ name, text: readFileSync(join(dir, name), "utf8") }));
+}
+
+export function readChanges(root) {
+  return classifyChanges(readChangeEntries(root));
 }
 
 /** The index block, markers excluded. One definition for the writer and the check. */
@@ -141,14 +141,24 @@ export function renderIndex({ numbered, fragments }) {
   return lines.join("\n") + "\n";
 }
 
-/** FORK.md with the block between the markers replaced; throws when the markers are not exactly one pair. */
-export function spliceIndex(forkText, block) {
+/**
+ * Where the generated block sits: `{ s, e }` — the offsets just after START and
+ * at END. Throws when FORK.md does not carry exactly one pair in order; the check
+ * and the writer use the same test.
+ */
+export function indexSpan(forkText) {
   const s = forkText.indexOf(START);
   const e = forkText.indexOf(END);
   if (s < 0 || e < 0 || e < s || forkText.indexOf(START, s + 1) >= 0 || forkText.indexOf(END, e + 1) >= 0) {
     throw new Error(`FORK.md must carry exactly one \`${START.slice(0, 27)}…\` / \`${END}\` pair`);
   }
-  return forkText.slice(0, s + START.length) + "\n" + block + forkText.slice(e);
+  return { s: s + START.length, e };
+}
+
+/** FORK.md with the block between the markers replaced. */
+export function spliceIndex(forkText, block) {
+  const { s, e } = indexSpan(forkText);
+  return forkText.slice(0, s) + "\n" + block + forkText.slice(e);
 }
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");

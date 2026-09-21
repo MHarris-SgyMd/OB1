@@ -6,7 +6,7 @@ All notable changes to the OB1 fork are recorded here, newest first, following
 
 This page is the short companion to the fork's design record — [`FORK.md`](FORK.md),
 the front door, and one file per change under [`changes/`](changes/README.md): why
-each change was made, what was measured, what was declined. Changes 1–102 predate
+each change was made, what was measured, what was declined. Changes 1–103 predate
 the first release; this changelog begins at the first cut. FORK.md's "Versioning"
 section has the scheme and how a release is assembled from `changes/smd-NNNN.md`
 fragments.

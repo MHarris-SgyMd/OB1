@@ -2,7 +2,7 @@
  * fragments.mjs — read a changes/<ticket>.md release fragment (SMD-1804).
  *
  * One definition of what a fragment is, shared by the check that validates them
- * (check-fork-consistency.mjs, check 15) and the assembler that consumes them
+ * (check-fork-consistency.mjs, check 16) and the assembler that consumes them
  * (assemble-release.mjs), so the two cannot disagree. Plain string work — node
  * and bun both run it.
  */

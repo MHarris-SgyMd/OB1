@@ -85,7 +85,7 @@ section and its cross-references. A PR ships a fragment, `changes/smd-NNNN.md`
 and a `## FORK` body), with no change number; the release step assigns the
 numbers once, at assembly, writing each fragment as the next
 `changes/NNN-<slug>.md` in merge order and regenerating the index below
-(SMD-1804, SMD-1917). Changes 1–102 keep their numbers — the code comments cite
+(SMD-1804, SMD-1917). Changes 1–103 keep their numbers — the code comments cite
 them — as the table and the files they are.
 
 `CHANGELOG.md` (root, **Keep a Changelog 1.1.0**) is the short page beside this

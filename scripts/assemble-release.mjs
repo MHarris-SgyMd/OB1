@@ -32,7 +32,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { FORK_VERSION, UPSTREAM_PIN, migrationSha, readReleases, highestReleasedMigration } from "../db/version.mjs";
 import { parseFragment, fragmentSection } from "./fragments.mjs";
-import { CHANGES_DIR as CHANGES_REL, changeFileName, readChanges, renderIndex, spliceIndex } from "./fork-index.mjs";
+import { CHANGES_DIR as CHANGES_REL, FRAGMENT, changeFileName, classifyChanges, readChangeEntries, readChanges, renderIndex, spliceIndex } from "./fork-index.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const CHANGES_DIR = join(ROOT, "changes");
@@ -74,7 +74,7 @@ export function highestChangeNumber(numbered) {
  */
 export function renderChangeFile(number, forkBody) {
   const lines = forkBody.trim().split("\n");
-  const title = lines[0].trim();
+  const title = lines[0].replace(/^#+\s*/, "").trim(); // check 16 refuses a heading here; the writer strips one anyway
   const rest = lines.slice(1).join("\n").trim();
   return { name: changeFileName(number, title), title, text: `# ${number}. ${title}` + (rest ? `\n\n${rest}` : "") + "\n" };
 }
@@ -124,7 +124,7 @@ export function frozenShasForRange(lo, hi, readMig) {
 /** Fragment files, in merge order: git add-time, then ticket number as a tiebreak. */
 function fragmentFiles() {
   if (!existsSync(CHANGES_DIR)) return [];
-  const names = readdirSync(CHANGES_DIR).filter((n) => /^smd-\d+\.md$/i.test(n));
+  const names = readdirSync(CHANGES_DIR).filter((n) => FRAGMENT.test(n)); // one definition of a fragment's name (fork-index.mjs), case and all
   const addedAt = (name) => {
     try {
       const out = execFileSync("git", ["log", "--diff-filter=A", "--format=%ct", "--", `changes/${name}`], { cwd: ROOT, encoding: "utf8" }).trim().split("\n").pop();
@@ -145,15 +145,27 @@ function readMig(n) {
 function buildPlan() {
   const releases = readReleases();
   const files = fragmentFiles();
-  if (files.length === 0) throw new Error("no changes/*.md fragments to assemble");
+  if (files.length === 0) throw new Error(`nothing to release — no ${CHANGES_REL}/smd-NNNN.md fragment has landed since the last cut`);
   const fragments = files.map((name) => {
     const parsed = parseFragment(readFileSync(join(CHANGES_DIR, name), "utf8"));
     if (!parsed) throw new Error(`${name}: no front matter (run check-fork-consistency)`);
-    return { name, ...parsed };
+    const fork = fragmentSection(parsed.body, "FORK");
+    if (!fork || !fork.trim()) throw new Error(`${name}: no \`## FORK\` body to number (run check-fork-consistency)`);
+    return { name, ...parsed, fork };
   });
   const version = nextVersion(releases, fragments.map((f) => f.fm.bump));
-  let n = highestChangeNumber(readChanges(ROOT).numbered);
-  const numbered = fragments.map((f) => ({ number: ++n, ...f, file: renderChangeFile(n, fragmentSection(f.body, "FORK")) }));
+  const entries = readChangeEntries(ROOT);
+  let n = highestChangeNumber(classifyChanges(entries).numbered);
+  const numbered = fragments.map((f) => ({ number: ++n, ...f, file: renderChangeFile(n, f.fork) }));
+  // The index as it will read after the cut, from the plan — rendered (and the
+  // marker pair checked) before a single file is written, so a FORK.md this step
+  // cannot write into is refused with nothing half-applied.
+  const after = classifyChanges([
+    ...entries.filter((e) => !numbered.some((f) => f.name === e.name)),
+    ...numbered.map((f) => ({ name: f.file.name, text: f.file.text })),
+  ]);
+  const forkPath = join(ROOT, "FORK.md");
+  const forkAfter = spliceIndex(readFileSync(forkPath, "utf8"), renderIndex(after));
 
   const migNums = readdirSync(MIGRATIONS_DIR).filter((f) => /^\d{3}_.*\.sql$/.test(f)).map((f) => Number(f.slice(0, 3)));
   const lo = highestReleasedMigration(releases) + 1;
@@ -161,7 +173,7 @@ function buildPlan() {
   const range = hi >= lo ? [lo, hi] : null; // a docs/server-only cut closes no migration
   const tickets = [...new Set(fragments.flatMap((f) => f.fm.tickets))];
 
-  return { releases, fragments: numbered, version, range, tickets };
+  return { releases, fragments: numbered, version, range, tickets, forkAfter };
 }
 
 function printPlan(plan) {
@@ -191,8 +203,7 @@ function write(plan) {
     writeFileSync(join(CHANGES_DIR, f.file.name), f.file.text);
     unlinkSync(join(CHANGES_DIR, f.name));
   }
-  const forkPath = join(ROOT, "FORK.md");
-  writeFileSync(forkPath, spliceIndex(readFileSync(forkPath, "utf8"), renderIndex(readChanges(ROOT))));
+  writeFileSync(join(ROOT, "FORK.md"), plan.forkAfter);
 
   // CHANGELOG.md: the version section under Unreleased, with its compare link.
   const cl = readFileSync(join(ROOT, "CHANGELOG.md"), "utf8");
@@ -225,6 +236,8 @@ function selfCheck() {
   const cf = renderChangeFile(101, "A title — a consequence (SMD-1)\n\nBody line.");
   ok(cf.name === "101-a-title.md" && cf.text === "# 101. A title — a consequence (SMD-1)\n\nBody line.\n", "a change file from a fragment body: name from the title's first clause, `# N.` heading, the body");
   ok(renderChangeFile(102, "Only a title (SMD-2)").text === "# 102. Only a title (SMD-2)\n", "a body of one line is a heading alone");
+  ok(renderChangeFile(103, "### A title (SMD-3)\n\nBody.").text.startsWith("# 103. A title (SMD-3)\n"), "a heading mark on the title line is stripped, not doubled");
+  ok(changeFileName(104, "A".repeat(200) + " (SMD-4)").length <= 60, "one long word is cut to the slug budget");
   const frags = [
     { fm: { type: "fixed" }, body: "## Changelog\nfixed a thing (SMD-2)\n" },
     { fm: { type: "added" }, body: "## Changelog\nadded a thing (SMD-1)\n" },
@@ -252,7 +265,15 @@ function selfCheck() {
 if (import.meta.main) {
   const args = process.argv.slice(2);
   if (args.includes("--self-check")) process.exit(selfCheck());
-  const plan = buildPlan();
-  if (args.includes("--write")) write(plan);
-  else printPlan(plan);
+  try {
+    const plan = buildPlan();
+    if (args.includes("--write")) write(plan);
+    else printPlan(plan);
+  } catch (e) {
+    // Nothing to release, a fragment this step cannot number, a FORK.md it cannot
+    // write into: a sentence, not a stack trace, and a non-zero exit so a release
+    // job stops here (SMD-1805).
+    console.error(`assemble-release: ${e.message}`);
+    process.exit(1);
+  }
 }

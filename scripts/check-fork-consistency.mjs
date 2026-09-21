@@ -113,12 +113,12 @@
  * Exits non-zero on any violation.
  */
 
-import { readFileSync, existsSync, readdirSync, statSync } from "node:fs";
+import { readFileSync, existsSync, readdirSync, statSync, lstatSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join, dirname, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { coreColumnCommentStatement, coreFunctionStatement, LOCAL_PROVIDER_SERVICES, ownedColumnCommentsIn, ownedFunctionsIn, supabaseIsmsIn } from "../db/config.mjs";
-import { CHANGES_DIR, FIRST_FILED, END as INDEX_END, START as INDEX_START, classifyChanges, readChanges, renderIndex } from "./fork-index.mjs";
+import { CHANGES_DIR, END as INDEX_END, START as INDEX_START, FIRST_FILED, FRAGMENT, classifyChanges, indexSpan, readChangeEntries, readChanges, renderIndex } from "./fork-index.mjs";
 import { FORK_VERSION, migrationSha, readReleases, semverCompare } from "../db/version.mjs";
 import { parseFragment, fragmentSection } from "./fragments.mjs";
 
@@ -2833,23 +2833,30 @@ const OVERSIZE_AT_SPLIT = {
 };
 
 /**
- * Change numbers a text cites by the two explicit shapes every file may use:
- * "FORK.md change N" (also "changes N and M", "FORK.md, change N", "FORK.md §N",
- * "FORK.md section N"), a `changes/NNN` path, and db/README.md's migration map
- * row "NNN change M". `record` adds the bare
- * "change N" / "Change N" the record itself uses (FORK.md and the change files,
- * where "change" means nothing else). Returns [{ n, index }].
+ * Change numbers a text cites by the explicit shapes every file may use:
+ * "FORK.md change N" — also "FORK change N", "FORK.md's change N", "changes N
+ * and M", "changes N, M, and O", "FORK.md, change N", "FORK.md §N", "FORK.md
+ * section N" — a `changes/NNN` path, and db/README.md's migration map row
+ * "NNN change M". `record` adds the bare "change N" / "Change N" (and the same
+ * lists) the record itself uses (FORK.md and the change files, where "change"
+ * means nothing else). A number followed by `-NN-` is a date, not a change;
+ * "18-20" with a plain hyphen is still a range.
+ * Returns [{ n, index }].
  */
-const EXPLICIT_CITATION = /\bFORK\.md,? (?:change|section|§) ?s? ?(\d+)((?:(?:,| and|–|—|-|\/) ?(?:change )?\d+)*)|\bchanges\/(\d{3})(?=-|\b)|\b\d{3} change (\d+)\b/g;
-const BARE_CITATION = /\b[Cc]hanges? (\d+)\b/g;
+const CITED_LIST = String.raw`(\d+)\b(?!-\d\d-)((?:(?:,? and|,|–|—|-|\/) ?(?:change )?\d+\b(?!-\d\d-))*)`;
+const EXPLICIT_CITATION = new RegExp(String.raw`\bFORK(?:\.md)?(?:'s)?,? (?:change|section|§) ?s? ?${CITED_LIST}|\bchanges\/(\d{3})(?=-|\b)|\b\d{3} change (\d+)\b`, "g");
+const BARE_CITATION = new RegExp(String.raw`\b[Cc]hanges? ${CITED_LIST}`, "g");
 function citedChangesIn(text, { record = false } = {}) {
   const out = [];
-  for (const m of text.matchAll(EXPLICIT_CITATION)) {
-    if (m[3] !== undefined || m[4] !== undefined) { out.push({ n: Number(m[3] ?? m[4]), index: m.index }); continue; }
+  const list = (m) => {
     out.push({ n: Number(m[1]), index: m.index });
     for (const t of m[2].matchAll(/\d+/g)) out.push({ n: Number(t[0]), index: m.index });
+  };
+  for (const m of text.matchAll(EXPLICIT_CITATION)) {
+    if (m[3] !== undefined || m[4] !== undefined) out.push({ n: Number(m[3] ?? m[4]), index: m.index });
+    else list(m);
   }
-  if (record) for (const m of text.matchAll(BARE_CITATION)) out.push({ n: Number(m[1]), index: m.index });
+  if (record) for (const m of text.matchAll(BARE_CITATION)) list(m);
   return out;
 }
 const CITATION_PROBES = [
@@ -2858,9 +2865,14 @@ const CITATION_PROBES = [
   ["(FORK.md, change 64) and FORK.md §50 and FORK.md section 12", false, [64, 50, 12]],
   ["[the file](changes/102-every-knob.md) and changes/018-long.md", false, [102, 18]],
   ["changes/README.md and change 42 in prose", false, []],
-  ["change 42 in prose, Changes 3 and 4, changed 5 times", true, [42, 3]],
+  ["change 42 in prose, Changes 3 and 4, changed 5 times", true, [42, 3, 4]],
+  ["FORK.md changes 18-20 and 22", false, [18, 20, 22]],
   ["since FORK.md change 90, one per id a capture names", false, [90]],
   ["024 change 45\n025 change 46\n044 SMD-1804", false, [45, 46]],
+  ["033's header and FORK change 62 state it; FORK §79; FORK.md's change 12", false, [62, 79, 12]],
+  ["Ten (changes 31, 53, 55, and 89) ship nothing", true, [31, 53, 55, 89]],
+  ["measured on change 2026-09-21 and change 42", true, [42]],
+  ["FORK.md change 2026-09-21 is a date", false, []],
 ];
 
 /**
@@ -2874,6 +2886,11 @@ function forkLayoutProblems({ entries, forkText, citations = [], ceilings = OVER
   const changes = classifyChanges(entries);
   const { numbered, other } = changes;
   for (const name of other) at(`${CHANGES_DIR}/${name}`, "bad-name", "is neither a numbered change (NNN-<slug>.md: three digits, a dash, lower-case ASCII words) nor a release fragment (smd-NNNN.md) — the index cannot list it");
+  const byTicket = new Map();
+  for (const f of changes.fragments) {
+    if (byTicket.has(f.ticket)) at(`${CHANGES_DIR}/${f.name}`, "duplicate-fragment", `is a second fragment for ${f.ticket} beside ${CHANGES_DIR}/${byTicket.get(f.ticket)} — one PR, one fragment; the release step would number both`);
+    else byTicket.set(f.ticket, f.name);
+  }
   if (numbered.length === 0) { at(CHANGES_DIR, "no-files", `holds no numbered change file — every change from ${FIRST_FILED} on is one`); }
   const byN = new Map();
   for (const c of numbered) {
@@ -2895,12 +2912,11 @@ function forkLayoutProblems({ entries, forkText, citations = [], ceilings = OVER
   for (const f of changes.fragments) if (f.lines > cap) at(`${CHANGES_DIR}/${f.name}`, "oversize", `is ${f.lines} lines; a fragment becomes a change file and is held to the same ${cap} — a review pass is a table row (changes/README.md)`);
   const bytes = Buffer.byteLength(forkText, "utf8");
   if (bytes > forkCeiling) at("FORK.md", "fork-oversize", `is ${bytes} bytes; the front door stays under ${forkCeiling} — a change's record belongs in its file under ${CHANGES_DIR}/, not here`);
-  const sec = /^### (\d+)\. /m.exec(forkText);
-  if (sec) at("FORK.md", "section-in-fork", `carries a \`### ${sec[1]}.\` section — a numbered change is a file, ${CHANGES_DIR}/${String(sec[1]).padStart(3, "0")}-<slug>.md, and this file lists it`);
-  const s = forkText.indexOf(INDEX_START);
-  const e = forkText.indexOf(INDEX_END);
-  if (s < 0 || e < 0 || e < s) at("FORK.md", "index-missing", `has no \`${INDEX_START.slice(5, 24)}\` … \`${INDEX_END.slice(5, 22)}\` marker pair for the generated index`);
-  else if (forkText.slice(s + INDEX_START.length, e) !== "\n" + renderIndex(changes)) at("FORK.md", "index-stale", `the index between the markers is not what ${CHANGES_DIR}/ renders to — run \`bun scripts/fork-index.mjs\``);
+  const sec = /^(#{2,4}) (\d+)\. /m.exec(forkText);
+  if (sec) at("FORK.md", "section-in-fork", `carries a \`${sec[1]} ${sec[2]}.\` section — a numbered change is a file, ${CHANGES_DIR}/${String(sec[2]).padStart(3, "0")}-<slug>.md, and this file lists it`);
+  let span = null;
+  try { span = indexSpan(forkText); } catch (e) { at("FORK.md", "index-missing", `${e.message} — the generated index lives between them`); }
+  if (span && forkText.slice(span.s, span.e) !== "\n" + renderIndex(changes)) at("FORK.md", "index-stale", `the index between the markers is not what ${CHANGES_DIR}/ renders to — run \`bun scripts/fork-index.mjs\``);
   for (const c of citations) {
     if (c.n < 1 || (c.n >= FIRST_FILED && !byN.has(c.n))) at(c.where, "dangling", `cites change ${c.n}, which has no file under ${CHANGES_DIR}/ (1–${FIRST_FILED - 1} are FORK.md's table; the highest with a file is ${hi}) — a renumber left this behind, or the file is missing`);
   }
@@ -2930,6 +2946,12 @@ const LAYOUT_PROBES = [
   ["FORK.md over its ceiling", () => { const en = LAYOUT_ENTRIES(CH(18)); return { entries: en, forkText: FORK_FOR(en, "x".repeat(100)), ceilings: {}, forkCeiling: 150 }; }, ["fork-oversize"]],
   ["a numbered section left in FORK.md", () => { const en = LAYOUT_ENTRIES(CH(18)); return { entries: en, forkText: FORK_FOR(en, "\n### 19. Left behind\n"), ceilings: {} }; }, ["section-in-fork"]],
   ["no index markers", () => { const en = LAYOUT_ENTRIES(CH(18)); return { entries: en, forkText: "# FORK\nno markers\n", ceilings: {} }; }, ["index-missing"]],
+  ["a duplicated end marker", () => { const en = LAYOUT_ENTRIES(CH(18)); return { entries: en, forkText: FORK_FOR(en, INDEX_END + "\n"), ceilings: {} }; }, ["index-missing"]],
+  ["a `## N.` section left in FORK.md", () => { const en = LAYOUT_ENTRIES(CH(18)); return { entries: en, forkText: FORK_FOR(en, "\n## 19. Left behind\n"), ceilings: {} }; }, ["section-in-fork"]],
+  ["a leading zero in the heading", () => { const en = LAYOUT_ENTRIES(["018-a-thing.md", "# 018. A thing\n"]); return { entries: en, forkText: FORK_FOR(en), ceilings: {} }; }, ["heading"]],
+  ["a stray file of another extension", () => { const en = LAYOUT_ENTRIES(CH(18), ["notes.txt", "x"]); return { entries: en, forkText: FORK_FOR(en), ceilings: {} }; }, ["bad-name"]],
+  ["a dotfile the OS left", () => { const en = LAYOUT_ENTRIES(CH(18), [".DS_Store", "x"]); return { entries: en, forkText: FORK_FOR(en), ceilings: {} }; }, []],
+  ["two fragments for one ticket", () => { const en = LAYOUT_ENTRIES(CH(18), ["smd-9.md", "---\n"], ["smd-09.md", "---\n"]); return { entries: en, forkText: FORK_FOR(en), ceilings: {} }; }, ["duplicate-fragment"]],
   ["a stale index", () => { const en = LAYOUT_ENTRIES(CH(18), CH(19)); return { entries: en, forkText: FORK_FOR(en.slice(0, 1)), ceilings: {} }; }, ["index-stale"]],
   ["a citation above the highest", () => { const en = LAYOUT_ENTRIES(CH(18)); return { entries: en, forkText: FORK_FOR(en), ceilings: {}, citations: [{ where: "a.ts:1", n: 19 }] }; }, ["dangling"]],
   ["a citation of change 0", () => { const en = LAYOUT_ENTRIES(CH(18)); return { entries: en, forkText: FORK_FOR(en), ceilings: {}, citations: [{ where: "a.ts:1", n: 0 }] }; }, ["dangling"]],
@@ -2937,16 +2959,34 @@ const LAYOUT_PROBES = [
 ];
 
 const SKIP_DIRS = new Set([".git", "node_modules", ".planning", ".cf-out", ".claude", "dist", "build", ".wrangler"]);
-/** Every non-binary, non-ignored file under the tree, as repo-relative paths. */
-function trackedTextFiles(dir = ROOT, out = []) {
-  for (const name of readdirSync(dir).sort()) {
-    const full = join(dir, name);
-    const st = statSync(full);
-    if (st.isDirectory()) { if (!SKIP_DIRS.has(name)) trackedTextFiles(full, out); continue; }
-    if (BINARY_FILES.test(name) || st.size > 4 * 1024 * 1024) continue;
-    out.push(relative(ROOT, full).split(sep).join("/"));
+/**
+ * Every text file a citation can live in: what git tracks plus what it would
+ * track (untracked, not ignored) — so a change file not yet added is read, and a
+ * pulled email under an ignored data/ directory, an .env or a local corpus is
+ * not, as .gitignore promises of this check. Without git (a copied tree), a walk
+ * that skips the usual build and tool directories, symlinks left alone. Binary
+ * names and files over 4 MB are skipped either way. Repo-relative paths.
+ */
+function citationFiles() {
+  let names;
+  try {
+    names = execFileSync("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard"], { cwd: ROOT, encoding: "utf8", maxBuffer: Infinity })
+      .split("\0").filter(Boolean).filter((rel) => existsSync(join(ROOT, rel)));
+  } catch (e) {
+    console.warn(`  (git ls-files failed — ${e.message.split("\n")[0]} — walking the tree for citations, ignored files too)`);
+    names = [];
+    const walkFor = (dir) => {
+      for (const name of readdirSync(dir).sort()) {
+        const full = join(dir, name);
+        const st = lstatSync(full);
+        if (st.isSymbolicLink()) continue;
+        if (st.isDirectory()) { if (!SKIP_DIRS.has(name)) walkFor(full); continue; }
+        names.push(relative(ROOT, full).split(sep).join("/"));
+      }
+    };
+    walkFor(ROOT);
   }
-  return out;
+  return names.filter((rel) => !BINARY_FILES.test(rel) && !rel.split("/").includes("node_modules") && statSync(join(ROOT, rel)).size <= 4 * 1024 * 1024);
 }
 
 function checkForkLayout() {
@@ -2960,12 +3000,9 @@ function checkForkLayout() {
   }
 
   const forkText = readFileSync(join(ROOT, "FORK.md"), "utf8");
-  const dir = join(ROOT, CHANGES_DIR);
-  const entries = existsSync(dir)
-    ? readdirSync(dir).filter((n) => n.endsWith(".md")).sort().map((name) => ({ name, text: readFileSync(join(dir, name), "utf8") }))
-    : [];
+  const entries = readChangeEntries(ROOT); // every entry, any extension — a stray is a finding
   const citations = [];
-  for (const rel of trackedTextFiles()) {
+  for (const rel of citationFiles()) {
     const text = readFileSync(join(ROOT, rel), "utf8");
     const record = rel === "FORK.md" || rel.startsWith(`${CHANGES_DIR}/`);
     for (const c of citedChangesIn(text, { record })) {
@@ -3016,7 +3053,12 @@ function fragmentProblems(text) {
     if (n < 1 || n > 3) problems.push(`the \`## Changelog\` body is ${n} line(s); Keep a Changelog wants 1–3`);
   }
   if (!fork) problems.push("missing a `## FORK` body");
-  else if (/(?:^|\n)#{1,3}\s*\d+\.\s|# change \d+/i.test(fork)) problems.push("the `## FORK` body carries a numbered heading — the release step assigns the change number and writes the `# N.` heading; the body starts with the title line");
+  else {
+    const [first, second = ""] = fork.split("\n");
+    if (/^#/.test(first)) problems.push("the `## FORK` body opens with a heading — its first line is the plain title (what follows `# N. ` once numbered); the release step writes the heading");
+    else if (second.trim() !== "") problems.push("the `## FORK` body's title runs onto a second line — one line for the title, then a blank line, then the record (a wrapped title would become the file's first paragraph)");
+    if (/\n#{1,4}\s*\d+\.\s|# change \d+/i.test("\n" + fork)) problems.push("the `## FORK` body carries a numbered heading — the release step assigns the change number and writes the `# N.` heading");
+  }
   return problems;
 }
 function checkFragments() {
@@ -3026,6 +3068,13 @@ function checkFragments() {
     ["---\ntype: added\nbump: patch\ntickets: [SMD-1]\nmigrations: [044]\n---\n\n## Changelog\nx\n\n## FORK\ny\n", "a patch that ships a migration"],
     ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\nmigrations: []\n---\n\n## Changelog\nx\n\n## FORK\n# 103. A title\n\nbody\n", "a numbered heading in the FORK body"],
     ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\nmigrations: []\n---\n\n## Changelog\nx\n\n## FORK\nA title\n\n### 103. sub\n", "a numbered `### N.` heading in the FORK body"],
+    ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\nmigrations: []\n---\n\n## Changelog\nx\n\n## FORK\n### A title\n\nbody\n", "an unnumbered heading as the FORK body's title"],
+    ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\nmigrations: []\n---\n\n## Changelog\nx\n\n## FORK\nA title that\nwraps (SMD-1)\n\nbody\n", "a title wrapped onto a second line"],
+    ["---\ntype: added\nbump: patch2\ntickets: [SMD-1]\n---\n\n## Changelog\nx\n\n## FORK\ny\n", "a bump off the three"],
+    ["---\ntype: added\nbump: minor\ntickets: [SMD-x]\n---\n\n## Changelog\nx\n\n## FORK\ny\n", "a ticket that is not SMD-####"],
+    ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\nmigrations: [44]\n---\n\n## Changelog\nx\n\n## FORK\ny\n", "a migration number of two digits"],
+    ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\n---\n\n## Changelog\na\nb\nc\nd\n\n## FORK\ny\n", "a four-line Changelog body"],
+    ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\n---\n\n## Changelog\nx\n", "a missing FORK body"],
     ["---\ntype: whatever\nbump: minor\ntickets: [SMD-1]\n---\n\n## Changelog\nx\n\n## FORK\ny\n", "a type off the six"],
     ["---\ntype: added\nbump: minor\ntickets: []\n---\n\n## Changelog\nx\n\n## FORK\ny\n", "an empty ticket list"],
     ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\n---\n\n## FORK\ny\n", "a missing Changelog body"],
@@ -3035,7 +3084,7 @@ function checkFragments() {
   const dir = join(ROOT, "changes");
   if (!existsSync(dir)) return;
   for (const name of readdirSync(dir).sort()) {
-    if (!/^smd-\d+\.md$/.test(name)) continue; // numbered files and stray names are check 15's
+    if (!FRAGMENT.test(name)) continue; // numbered files and stray names are check 15's (one definition of a fragment's name: fork-index.mjs)
     for (const p of fragmentProblems(readFileSync(join(dir, name), "utf8"))) fail(`changes/${name}`, `${p} (SMD-1804)`);
   }
 }
@@ -3132,18 +3181,25 @@ function checkChangelogForkPairing() {
   if (pairingProblems([{ version: "1.0.0+upstream.9543c29", tickets: ["SMD-1"] }], clGood, fork).length) fail(SELF_1804, "check 17b false-positives on a matched release whose releases.json version carries the +upstream build metadata (its own probe)");
   for (const [rel, cl, forks, why] of [
     [[{ version: "1.0.0", tickets: ["SMD-1"] }], "## [1.0.0] - 2026-09-30\n- x (SMD-2)\n", fork, "a ticket in releases.json missing from the changelog"],
+    [[{ version: "1.0.0", tickets: ["SMD-1"] }], "## [Unreleased]\n", fork, "a release with no CHANGELOG section of its version (and no other section to blame)"],
+    [[{ version: "1.0.0", tickets: ["SMD-1", "SMD-2"] }], "## [1.0.0] - 2026-09-30\n- x (SMD-1)\n", new Set(["SMD-1", "SMD-2"]), "a release ticket the CHANGELOG section omits (its other ticket present, so only that branch fires)"],
+    [[{ version: "1.0.0", tickets: ["SMD-1"] }], "## [1.0.0] - 2026-09-30\n- x (SMD-1)\n- y (SMD-2)\n", new Set(["SMD-1", "SMD-2"]), "a changelog ticket missing from releases.json"],
     [[{ version: "1.0.0", tickets: ["SMD-9"] }], "## [1.0.0] - 2026-09-30\n- x (SMD-9)\n", fork, "a released ticket with no FORK section"],
     [[], "## [1.0.0] - 2026-09-30\n- x (SMD-1)\n", fork, "a changelog release with no releases.json entry"],
   ]) if (pairingProblems(rel, cl, forks).length === 0) fail(SELF_1804, `check 17b no longer catches ${why} (its own probe)`);
 
   const clPath = join(ROOT, "CHANGELOG.md");
   if (!existsSync(clPath)) return;
-  // A released ticket has a record: a numbered change file's title (the release step
-  // wrote it from the fragment) or FORK.md's 1–17 table. Fragments are excluded —
-  // a release that left one unnumbered is the drift this catches (SMD-1917).
+  // A released ticket has a record: a numbered change file (the release step wrote
+  // it from the fragment; the ticket may sit in the title or the body, as a
+  // "(SMD-1301 / 1302)" title names only the first in full) or FORK.md's 1–17
+  // table. Fragments are excluded — a release that left one unnumbered is the
+  // drift this catches (SMD-1917).
   const forkText = readFileSync(join(ROOT, "FORK.md"), "utf8");
   const recordTickets = new Set([...forkText.matchAll(/\bSMD-(\d+)\b/g)].map((m) => `SMD-${m[1]}`));
-  for (const c of readChanges(ROOT).numbered) for (const m of (c.heading?.title ?? "").matchAll(/\bSMD-(\d+)\b/g)) recordTickets.add(`SMD-${m[1]}`);
+  for (const c of readChanges(ROOT).numbered) {
+    for (const m of readFileSync(join(ROOT, CHANGES_DIR, c.name), "utf8").matchAll(/\bSMD-(\d+)\b/g)) recordTickets.add(`SMD-${m[1]}`);
+  }
   for (const p of pairingProblems(readReleases(), readFileSync(clPath, "utf8"), recordTickets)) fail("CHANGELOG.md", `${p} (SMD-1804)`);
 }
 checkChangelogForkPairing();

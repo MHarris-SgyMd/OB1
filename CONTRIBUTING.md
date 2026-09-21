@@ -270,7 +270,7 @@ than by editing a hand-numbered FORK.md section:
 - The release step assembles the accumulated fragments into numbered change
   files (`changes/NNN-<slug>.md`), FORK.md's index and `CHANGELOG.md` in one
   commit and cuts the tag; **do not hand-number a new change file or edit
-  `CHANGELOG.md` by hand.** (Changes 1–102 predate this and keep their numbers;
+  `CHANGELOG.md` by hand.** (Changes 1–103 predate this and keep their numbers;
   a `### N.` section in FORK.md is refused by `check-fork-consistency`.)
 - A migration inside a released range is **frozen** — append a new migration file
   rather than editing an old one; `check-fork-consistency` enforces it.
