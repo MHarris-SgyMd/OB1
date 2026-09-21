@@ -113,7 +113,7 @@ const CATALOG_HINT = "run once as the SQL store (OB1_STORE unset, DATABASE_URL s
 // that has not reported yet, rather than one name for whatever went wrong.
 const DIRECT_CHECKS = [
   "vector extension",
-  "atomic capture", "write privileges", "fingerprint backfill", "audit trail", "agent identity",
+  "atomic capture", "write privileges", "fingerprint backfill", "audit trail", "audit events", "agent identity",
   "keyword search", "hybrid search", "stats summary", "provenance", "work claims", "search signatures", "edit signature", "delete signature", "transaction isolation", "filtered search",
   "candidate scan", "walk index", "chunk context", "trigram index", "embedding contract", "vector models",
   "updated_at trigger", "re-embed pass", "consolidate pass", "migration ledger", "schema version", "query log",
@@ -141,6 +141,7 @@ const NOBODY = "00000000-0000-4000-8000-000000000000";
 const APPLY_021 = "Apply db/migrations/021_embedding_model_per_row.sql.";
 const APPLY_032 = "Apply db/migrations/032_update_thought_provenance.sql.";
 const APPLY_042 = "Apply db/migrations/042_thought_citations.sql.";
+const APPLY_045 = "Apply db/migrations/045_thought_audit_event_shape.sql.";
 const APPLY_042_POSTGREST = `Apply the migrations through db/migrations/042_thought_citations.sql against the project's direct connection (server-portable/README.md §4). ${RELOAD_HINT}`;
 /**
  * Where the ledger already records the migration a check finds absent — a
@@ -807,13 +808,14 @@ if (configFailed) {
         // the getting-started guide pasted again, a vendored schema or recipe
         // (SMD-1250) — replaces a body with no error when the signature
         // matches; this is where the operator learns which body is there, and
-        // which migration owns it. 035 is the last definer of BOTH forms (the
-        // 2-argument body carried verbatim from 033), so one file is the
-        // remedy for every stale state.
-        const LAST = "035_recapture_writes_no_provenance.sql";
+        // which migration owns it. 045 is the last definer of BOTH forms
+        // (035's bodies, each with the write event set beside the actor —
+        // SMD-1730; the recognisers below still tell 035's shape, which 045
+        // carries), so one file is the remedy for every stale state.
+        const LAST = "045_thought_audit_event_shape.sql";
         const LOCKED = /ob1:capture-takes-fingerprint-lock/;
         const NO_FILL = /ob1:re-capture-writes-no-provenance/;
-        const applyLast = (why: string) => ledgerRemedy("035", `Apply db/migrations/${LAST}${why}`);
+        const applyLast = (why: string) => ledgerRemedy("045", `Apply db/migrations/${LAST}${why}`);
         // The 2-argument body is judged on its own and said beside whichever
         // 3-argument state fires, so a brain with both replaced hears it once
         // rather than on the run after the first remedy (first review pass).
@@ -840,10 +842,10 @@ if (configFailed) {
               : `${pending} not yet applied, or ${earlier} was re-applied by hand`;
         };
         const TWO_UNLOCKED_WHY = `it is from before migration 033 (${pre("033", "005")}): it takes no fingerprint lock, so a capture through it racing an edit of the same text raises the unique violation`;
-        const andTwo = twoStale ? `; and the 2-argument body is not 005's either — ${TWO_STALE_WHY}` : twoUnlocked ? `; and the 2-argument body is not 035's either — ${TWO_UNLOCKED_WHY}` : "";
+        const andTwo = twoStale ? `; and the 2-argument body is not 005's either — ${TWO_STALE_WHY}` : twoUnlocked ? `; and the 2-argument body is not 045's either — ${TWO_UNLOCKED_WHY}` : "";
         if (!three) {
-          add("atomic capture", "fail", `${forms.length} upsert_thought overload(s) — the 3-argument form, the atomic capture, is missing${twoStale ? `; and the 2-argument body present is not 005's — ${TWO_STALE_WHY}` : twoUnlocked ? `; and the 2-argument body present is not 035's — ${TWO_UNLOCKED_WHY}` : ""}${andOthers}`,
-              applyLast(" — the last definer of both forms (004 created the 3-argument one; 005, 008, 021, 022, 025, 033 and 035 redefined it, and an earlier file's body alone would drop what every later one added)."));
+          add("atomic capture", "fail", `${forms.length} upsert_thought overload(s) — the 3-argument form, the atomic capture, is missing${twoStale ? `; and the 2-argument body present is not 005's — ${TWO_STALE_WHY}` : twoUnlocked ? `; and the 2-argument body present is not 045's — ${TWO_UNLOCKED_WHY}` : ""}${andOthers}`,
+              applyLast(" — the last definer of both forms (004 created the 3-argument one; 005, 008, 021, 022, 025, 033, 035 and 045 redefined it, and an earlier file's body alone would drop what every later one added)."));
         } else if (!two) {
           // This server never calls the 2-argument form; PostgREST callers by
           // name and the two-step fallback do. A warning.
@@ -851,7 +853,7 @@ if (configFailed) {
               applyLast(" — the last definer of the 2-argument form as well."));
         } else if (!/ob1:vector-replaces-chunks/.test(three.src)) {
           add("atomic capture", "warn",
-              `the 2- and 3-argument upsert_thought present, but the 3-argument body is from before migration 022 (004, 005, 008 or 021 re-applied by hand without 035 after them): a re-capture that makes no windows — the Edge Function server, or a window that grew — at another model replaces the vector and leaves the previous vector's chunk rows under it, so search finds the thought by windows it no longer has; and it takes no fingerprint lock${andTwo}${andOthers}`,
+              `the 2- and 3-argument upsert_thought present, but the 3-argument body is from before migration 022 (004, 005, 008 or 021 re-applied by hand without 045 after them): a re-capture that makes no windows — the Edge Function server, or a window that grew — at another model replaces the vector and leaves the previous vector's chunk rows under it, so search finds the thought by windows it no longer has; and it takes no fingerprint lock${andTwo}${andOthers}`,
               applyLast(" — the last definer; 022's or 025's file alone would leave what the later ones added out."));
         } else if (!UPSERT_THREE_ARG_SHIPPED_RE.test(three.src)) {
           add("atomic capture", "warn",
@@ -870,10 +872,10 @@ if (configFailed) {
               applyLast("."));
         } else if (twoStale || twoUnlocked) {
           add("atomic capture", "warn",
-              `the 2- and 3-argument upsert_thought present and the 3-argument body is 035's, but the 2-argument body is ${twoStale ? `not 005's — ${TWO_STALE_WHY}` : `not 035's — ${TWO_UNLOCKED_WHY}`}${andOthers}`,
+              `the 2- and 3-argument upsert_thought present and the 3-argument body is 045's, but the 2-argument body is ${twoStale ? `not 005's — ${TWO_STALE_WHY}` : `not 045's — ${TWO_UNLOCKED_WHY}`}${andOthers}`,
               applyLast(" — the last definer of the 2-argument form as well."));
         } else {
-          add("atomic capture", "ok", `the 2- and 3-argument upsert_thought present, both 035's — the 3-argument body carries 022's rule, so a re-capture's windows stay only while the label vouches for them, 025's provenance envelope, the fingerprint lock, so a capture and an edit of one text are serialised, and writes provenance on a first capture only, so no capture can close a supersession loop; the 2-argument body refuses a non-object payload (005) and takes the lock${andOthers}`);
+          add("atomic capture", "ok", `the 2- and 3-argument upsert_thought present, both 045's — the 3-argument body carries 022's rule, so a re-capture's windows stay only while the label vouches for them, 025's provenance envelope, the fingerprint lock, so a capture and an edit of one text are serialised, and writes provenance on a first capture only, so no capture can close a supersession loop, and both set the write event beside the actor (045); the 2-argument body refuses a non-object payload (005) and takes the lock${andOthers}`);
         }
 
         // The privileges the capture path's SECURITY INVOKER writers need to run
@@ -1081,6 +1083,64 @@ if (configFailed) {
         if (Number(audit[0].c) >= 1) add("audit trail", "ok", "thoughts_audit trigger present");
         else add("audit trail", "fail", "the thoughts_audit trigger is missing — mutations would go unrecorded",
                  "Apply db/migrations/008_thought_audit.sql.");
+
+        /**
+         * 045's event shape (SMD-1730): the columns the log of record carries
+         * beyond 008's and 010's; the trigger body that derives actor_kind and
+         * trust from the key and stamps the event (its sentinel); the refusal
+         * trigger's one lawful amendment (its sentinel). The columns are FATAL
+         * as the trail is: 045's upsert_thought and update_thought fire a
+         * trigger that INSERTs into them, so without them every write through
+         * this server fails. An older body over the columns is a WARN: writes
+         * go through and every row records an unknown kind and no event — the
+         * backfill fills the kind later, the event is lost. Then the census:
+         * keys nobody has classified and rows waiting on one, with the remedy
+         * — a WARN, since NULL is the honest value until the operator says.
+         */
+        try {
+          const EVENT_COLUMNS = ["actor_kind", "trust", "origin", "stance", "cites", "valid_from", "valid_until", "backfilled_at"];
+          // The eight names spelled into the query, not bound as an array: Bun's
+          // SQL binds a JS array to ANY() as one text value (SMD-1803's trap).
+          const evCols = (await sql`
+            SELECT column_name AS c FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = 'thought_audit'
+              AND column_name IN ('actor_kind', 'trust', 'origin', 'stance', 'cites', 'valid_from', 'valid_until', 'backfilled_at')`) as { c: string }[];
+          const missingCols = EVENT_COLUMNS.filter((c) => !evCols.some((r) => r.c === c));
+          const bodies = (await sql`
+            SELECT p.proname AS name, p.prosrc AS src
+            FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+            WHERE n.nspname = 'public' AND p.proname IN ('thoughts_write_audit', 'thought_audit_refuse_mutation')`) as { name: string; src: string }[];
+          const trigSrc = String(bodies.find((b) => b.name === "thoughts_write_audit")?.src ?? "");
+          const refuseSrc = String(bodies.find((b) => b.name === "thought_audit_refuse_mutation")?.src ?? "");
+          if (missingCols.length) {
+            add("audit events", "fail",
+                `thought_audit lacks ${missingCols.length} of 045's eight columns (${missingCols.join(", ")}) — the brain predates migration 045, and every write through 045's upsert_thought or update_thought would fail in the audit trigger, which writes them`,
+                ledgerRemedy("045", APPLY_045));
+          } else if (!/ob1:audit-event-from-the-key/.test(trigSrc)) {
+            add("audit events", "warn",
+                "the columns are there but the audit trigger's body is from before 045 (025 or an earlier file re-applied by hand): every write records an unknown kind, no door and no event — the backfill can fill the kind and the door later, the event is lost",
+                ledgerRemedy("045", APPLY_045));
+          } else if (!/ob1:audit-amend-fills-null-only/.test(refuseSrc)) {
+            add("audit events", "warn",
+                "the refusal trigger's body is from before 045 (008 re-applied by hand): every UPDATE of thought_audit is refused, the backfill's included, so rows written before a key was classified can never gain their kind",
+                ledgerRemedy("045", APPLY_045));
+          } else {
+            const [census] = await sql`
+              SELECT (SELECT count(*)::int FROM ob1_agents WHERE kind IS NULL) AS unclassified,
+                     (SELECT string_agg(label, ', ' ORDER BY label) FROM ob1_agents WHERE kind IS NULL) AS labels,
+                     (SELECT count(*)::int FROM thought_audit WHERE actor_kind IS NULL AND actor_name IS NOT NULL) AS awaiting`;
+            const unclassified = Number(census.unclassified), awaiting = Number(census.awaiting);
+            if (unclassified > 0 || awaiting > 0) {
+              add("audit events", "warn",
+                  `${unclassified} key(s) with no kind${unclassified ? ` (${census.labels})` : ""} and ${awaiting} audit row(s) naming a key with no kind — every write through an unclassified key is recorded with actor_kind and trust unknown, which every read built on them will say`,
+                  "For each key: SELECT set_agent_kind('<label>', '<operator | agent | ingested>'); then SELECT backfill_thought_audit_events(); fills the rows already written (db/README.md).");
+            } else {
+              add("audit events", "ok", "045's event shape present — the columns, the trigger that derives the kind from the key, the one lawful amendment — and every key classified");
+            }
+          }
+        } catch (e) {
+          add("audit events", "warn", `could not verify: ${(e as Error).message}`, "The check reads information_schema.columns, pg_proc, ob1_agents and thought_audit.");
+        }
 
         /**
          * The agent registry, treated as a WARNING where audit is fatal.
@@ -1389,20 +1449,31 @@ if (configFailed) {
             SELECT p.pronargs AS nargs, p.oid::regprocedure::text AS sig
             FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
             WHERE p.proname = 'update_thought' AND n.nspname = 'public'
-            ORDER BY (p.pronargs = 9) DESC, p.oid`) as { nargs: number; sig: string }[];
-          const current = ut.filter((r) => Number(r.nargs) === 9);
-          const extra = ut.filter((r) => Number(r.nargs) !== 9).map((r) => r.sig);
+            ORDER BY (p.pronargs = 10) DESC, p.oid`) as { nargs: number; sig: string }[];
+          // 045 (SMD-1730) gave update_thought a tenth argument, the write
+          // event, by dropping the 9-argument form — 032's mechanism, one form
+          // later. A 9-argument form ALONE is a brain that predates 045: every
+          // edit still resolves (the servers send nine by name; a defaulted
+          // tenth is the same call), so it is a WARN naming what is lost — the
+          // event — where a 7- or 8-argument form alone is the FAIL it was.
+          const current = ut.filter((r) => Number(r.nargs) === 10);
+          const extra = ut.filter((r) => Number(r.nargs) !== 10).map((r) => r.sig);
+          const nineAlone = ut.length === 1 && Number(ut[0].nargs) === 9;
           if (!ut.length) {
-            add("edit signature", "fail", "update_thought is missing — the update_thought tool and db/reembed.ts call it", ledgerRemedy("032", APPLY_032));
+            add("edit signature", "fail", "update_thought is missing — the update_thought tool and db/reembed.ts call it", ledgerRemedy("045", APPLY_045));
           } else if (current.length && extra.length === 0) {
-            add("edit signature", "ok", `${current[0].sig}: the form the servers and reembed.ts call since migration 032 (${UPDATE_THOUGHT_SIGNATURE}), alone`);
+            add("edit signature", "ok", `${current[0].sig}: the form the servers and reembed.ts call since migration 045 (${UPDATE_THOUGHT_SIGNATURE}), alone`);
           } else if (current.length) {
             add("edit signature", "fail",
-                `beside the form the servers call there ${extra.length === 1 ? "is an earlier one" : `are ${extra.length} earlier ones`}: ${extra.join(", ")} — an earlier migration re-applied by hand over 032 — so every call that sends fewer than nine arguments to update_thought, which is every PostgREST caller by name from before this change, every hand-written SELECT and db/reembed.ts's positional eight, fails with "function is not unique"`,
-                `Drop the earlier form, as 032 does: ${extra.map((sig) => `DROP FUNCTION ${sig};`).join(" ")}`);
+                `beside the form the servers call there ${extra.length === 1 ? "is an earlier one" : `are ${extra.length} earlier ones`}: ${extra.join(", ")} — an earlier migration re-applied by hand over 045 — so every call that sends fewer than ten arguments to update_thought, which is every PostgREST caller by name, every hand-written SELECT and db/reembed.ts's positional nine, fails with "function is not unique"`,
+                `Drop the earlier form, as 045 does: ${extra.map((sig) => `DROP FUNCTION ${sig};`).join(" ")}`);
+          } else if (nineAlone) {
+            add("edit signature", "warn",
+                `${ut[0].sig} is the form from before migration 045: every edit resolves, but no write event (p_event — stance, cites, the valid window, trust) reaches the audit row, and db/reembed.ts, which resolves the body by ${UPDATE_THOUGHT_SIGNATURE}, refuses to run`,
+                ledgerRemedy("045", APPLY_045));
           } else {
             add("edit signature", "fail",
-                `${extra.join(" and ")} ${extra.length === 1 ? "is the form" : "are the forms"} from before migration 032; the server sends p_provenance, which only 032's form takes — so every edit would fail, and db/reembed.ts refuses to run`,
+                `${extra.join(" and ")} ${extra.length === 1 ? "is the form" : "are the forms"} from before migration 032; the server sends p_provenance, which only 032's form and its successors take — so every edit would fail, and db/reembed.ts refuses to run`,
                 ledgerRemedy("032", APPLY_032));
           }
         } catch (e) {

@@ -416,7 +416,9 @@ async function upsertProfile(
   sourceCount: number,
   existingId: string | null,
   subject: string,
-  actor: { name: string; source: string },
+  // The key's name and this worker as the door (`via`, 045's origin column —
+  // SMD-1730; it was `source` until then, a third vocabulary in that column).
+  actor: { name: string; via: string },
 ): Promise<{ id: string; created: boolean }> {
   const now = new Date().toISOString();
 
@@ -609,7 +611,7 @@ Deno.serve(async (req) => {
     let result: { id: string | null; created: boolean } = { id: null, created: false };
     if (!dryRun) {
       result = await upsertProfile(profileContent, sources.length, existing?.id ?? null, subject,
-        { name: principal.name, source: "consolidation-bio" });
+        { name: principal.name, via: "consolidation-bio" });
       await logConsolidation(result.id!, sources.length, result.created);
     }
 

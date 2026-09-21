@@ -95,7 +95,7 @@ The API accepts the runtime-neutral core schema versions and the OpenClaw launch
 | --- | --- | --- |
 | `/health` | GET | Verify deployment |
 | `/recall` | POST | Retrieve scoped memories before work starts (under a `read` key no trace is stored and `request_id` is `null`) |
-| `/writeback` | POST | Save compact operational memory after work finishes — each memory's thought through the 3-argument `upsert_thought`, its vector and model label in the same call (FORK.md change 69; the vector is `openai/text-embedding-3-small`'s, so the brain must be at that model and width — 1536, not the fork's 1024 default — or every write-back fails whole); since change 103 (SMD-1541) the thought's audit row names the key that wrote back, with `via` and `runtime` (the runtime's name) in its `actor_context` |
+| `/writeback` | POST | Save compact operational memory after work finishes — each memory's thought through the 3-argument `upsert_thought`, its vector and model label in the same call (FORK.md change 69; the vector is `openai/text-embedding-3-small`'s, so the brain must be at that model and width — 1536, not the fork's 1024 default — or every write-back fails whole); since change 103 (SMD-1541) the thought's audit row names the key that wrote back, with this server as the row's `origin` (since migration `045`, SMD-1730; `via` in its `actor_context` before it) and `runtime` (the runtime's name) in its `actor_context` |
 | `/recall/:request_id/usage` | POST | Report which recalled memories were used or ignored |
 | `/memories` | GET | List memories by workspace, project, status, runtime, type, or task prefix |
 | `/memories/review` | GET | List pending agent-written memories |

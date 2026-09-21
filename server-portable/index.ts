@@ -385,9 +385,16 @@ function explainPair(r: { duplicateOf?: string; fingerprintHeldBy?: string }): s
   return "";
 }
 
+/**
+ * This server's name: what MCP clients see in `initialize`, and the door every
+ * write names in its actor (`via`), which migration 045 stamps as
+ * thought_audit.origin (SMD-1730). One constant, so the two cannot drift.
+ */
+const SERVER_NAME = "open-brain";
+
 function buildServer(principal: Principal): McpServer {
   const server = new McpServer({
-    name: "open-brain",
+    name: SERVER_NAME,
     version: "1.0.0",
   });
 
@@ -1115,12 +1122,11 @@ function buildServer(principal: Principal): McpServer {
           // auth.ts; `agentId` is the stable id migration 010 resolved it to,
           // and is absent when the registry could not answer — see agents.ts.
           // Both are recorded: the name is what the agent was CALLED at the time
-          // of writing, which a later rename would otherwise erase.
-          actor: {
-            name: principal.name,
-            agentId: principal.agentId,
-            source: String(payload.metadata.source ?? "mcp"),
-          },
+          // of writing, which a later rename would otherwise erase. `via` is
+          // this server, the door (045's origin column); the row's source is
+          // its own metadata.source, "mcp" above, which the trigger reads
+          // itself (SMD-1730).
+          actor: { name: principal.name, agentId: principal.agentId, via: SERVER_NAME },
           embedding,
           // The model this vector came from, recorded on the row (021) — the
           // one the embedder used, not the one ob1_config records: they differ
@@ -1315,7 +1321,7 @@ function buildServer(principal: Principal): McpServer {
           embedding: embedded?.embedding,
           chunks: embedded?.chunks,
           ifUnchangedSince: if_unchanged_since,
-          actor: { name: principal.name, agentId: principal.agentId, source: "mcp" },
+          actor: { name: principal.name, agentId: principal.agentId, via: SERVER_NAME },
           // Read by update_thought only with content, when the vector moves (021).
           embeddingModel: embedded?.model,
           // 032: only the key the caller named reaches the envelope — absent
@@ -1381,7 +1387,7 @@ function buildServer(principal: Principal): McpServer {
       try {
         const result = await (await db()).deleteThought({
           id,
-          actor: { name: principal.name, agentId: principal.agentId, source: "mcp" },
+          actor: { name: principal.name, agentId: principal.agentId, via: SERVER_NAME },
           // 042: the refusal is the default; the way through is named here.
           detach: detach_citations === true,
         });

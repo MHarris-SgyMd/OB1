@@ -341,36 +341,40 @@ function judgeCapture(label: string, r: Row, text: string) {
   assert(r.embedding_model === MODEL, `${label}: embedding_model is the model that made it (021) — the raw update after the 2-argument form left NULL (got ${r.embedding_model})`);
   assert(r.chunks === 0, `${label}: no chunk rows (the writer made none; nothing here plants any under a capture)`);
 }
-type Audit = { actor_name: string | null; source: string | null; origin: string | null; actor_context: Record<string, unknown> | null };
+type Audit = { actor_name: string | null; source: string | null; own_source: string | null; origin: string | null; actor_context: Record<string, unknown> | null };
 /**
- * 008's latest row of one action for a thought: who the function was told wrote it, and from where. `created_at` is
- * `now()`, transaction-start time, so two rows one transaction wrote would tie and "latest" would be arbitrary: a tie
- * fails here by name rather than passing by luck. Compared as Postgres's text — microseconds — not through a JS Date,
- * whose millisecond grain would call two transactions under a millisecond apart a tie. None of the driven writes makes
- * one today (each call is its own transaction under the shim and over PostgREST alike).
+ * 008's latest row of one action for a thought: who the function was told wrote it, through which door (045's
+ * `origin`), and the row's own metadata.source beside the column that copies it. `created_at` is `now()`,
+ * transaction-start time, so two rows one transaction wrote would tie and "latest" would be arbitrary: a tie fails
+ * here by name rather than passing by luck. Compared as Postgres's text — microseconds — not through a JS Date, whose
+ * millisecond grain would call two transactions under a millisecond apart a tie. None of the driven writes makes one
+ * today (each call is its own transaction under the shim and over PostgREST alike).
  */
 async function auditRow(id: string, action: "capture" | "update"): Promise<Audit | undefined> {
-  const rows = await sql`SELECT a.actor_name, a.source, a.actor_context, a.created_at::text AS at, t.metadata->>'source' AS origin
+  const rows = await sql`SELECT a.actor_name, a.source, a.origin, a.actor_context, a.created_at::text AS at, t.metadata->>'source' AS own_source
     FROM thought_audit a JOIN thoughts t ON t.id = a.thought_id WHERE a.thought_id = ${id} AND a.action = ${action} ORDER BY a.created_at DESC LIMIT 2`;
   assert(rows.length < 2 || rows[0].at !== rows[1].at, `008's latest ${action} row for the thought is one row, not a tie in created_at`);
   if (!rows[0]) return undefined;
-  const { actor_name, source, origin, actor_context } = rows[0];
-  return { actor_name, source, origin, actor_context };
+  const { actor_name, source, own_source, origin, actor_context } = rows[0];
+  return { actor_name, source, own_source, origin, actor_context };
 }
 /**
- * The audit row a write through a server holding a key must leave (SMD-1541): the key's name; the server as `via` in
- * actor_context — the field no fallback supplies, so the arm that proves the actor arrived; and a `source` equal to the
- * thought's own metadata.source, which is what the trigger writes when no actor names one — so a server that starts
- * naming a source of its own (the first draft's server name on an edit: a third vocabulary in the column) fails here,
- * and only a copy of the origin, the one case the rule allows, passes. Pass 3 had dropped a source arm that compared
- * the column with constants and with itself; this one compares it with the rule.
+ * The audit row a write through a server holding a key must leave (SMD-1541): the key's name; the server as the door
+ * — `via` in the envelope, which migration 045 stamps as the `origin` column (SMD-1730; in actor_context until then)
+ * and strips from the blob, so the blob is NULL unless something else rode along — the field no fallback supplies, so
+ * the arm that proves the actor arrived; and a `source` equal to the thought's own metadata.source, which since 045 is
+ * the only thing the trigger writes there (until then, what the trigger wrote when no actor named one) — so a server
+ * that starts naming a source of its own (the first draft's server name on an edit: a third vocabulary in the column)
+ * fails here, and only a copy of the origin, the one case the rule allows, passes. Pass 3 had dropped a source arm
+ * that compared the column with constants and with itself; this one compares it with the rule.
  */
 function judgeActor(label: string, a: Audit | undefined, via: string, name = "MCP_ACCESS_KEY") {
   assert(a !== undefined, `${label}: 008 has a row for the write`);
-  if (a === undefined) return; // one missing row is one failure, not three
+  if (a === undefined) return; // one missing row is one failure, not four
   assert(a.actor_name === name, `${label}: 008's row names the key, ${name} (SMD-1541) — change 69 passed no actor, so the row named nobody (got ${a.actor_name})`);
-  assert(a.actor_context?.via === via, `${label}: …actor_context names the door, via ${via} (got ${JSON.stringify(a.actor_context)})`);
-  assert(a.source === a.origin, `${label}: …and its source is the thought's own origin, ${a.origin} — no actor names a source (got ${a.source})`);
+  assert(a.origin === via, `${label}: …origin names the door, ${via} (SMD-1730; got ${a.origin})`);
+  assert(a.actor_context?.via === undefined, `${label}: …and via is not also left in actor_context (got ${JSON.stringify(a.actor_context)})`);
+  assert(a.source === a.own_source, `${label}: …and its source is the thought's own origin, ${a.own_source} — no actor names a source (got ${a.source})`);
 }
 
 // Everything below runs inside one try so the sidecars are dropped however it ends.
@@ -739,8 +743,9 @@ try {
     assert(side.type === "person_note" && Number(side.importance) === 5 && side.source_type === "system_profile", "the enhanced-thoughts columns follow, by the raw update that carries neither content nor vector");
     assert(side.metadata.generated_by === "consolidation-bio" && side.metadata.subject === "Test" && side.metadata.artifact_type === "biographical_profile" && side.metadata.source_thought_count === 3,
       "the profile's metadata names its generator, subject, kind and source count");
-    const [audit] = await sql`SELECT actor_name, source FROM thought_audit WHERE thought_id = ${id} AND action = 'capture'`;
-    assert(audit?.actor_name === "MCP_ACCESS_KEY" && audit?.source === "consolidation-bio", `008's capture row names the key and the worker (${audit?.actor_name} ${audit?.source})`);
+    const [audit] = await sql`SELECT actor_name, source, origin FROM thought_audit WHERE thought_id = ${id} AND action = 'capture'`;
+    assert(audit?.actor_name === "MCP_ACCESS_KEY" && audit?.origin === "consolidation-bio" && audit?.source === null,
+      `008's capture row names the key and the worker as the door (045's origin — SMD-1730; the worker's name was in source until then), and no source: the profile's metadata declares none (${audit?.actor_name} ${audit?.origin} ${audit?.source})`);
     const [log] = await sql`SELECT operation, survivor_id, details FROM consolidation_log ORDER BY id DESC LIMIT 1`;
     assert(log?.operation === "biographical_profile" && log?.survivor_id === id && log?.details?.action === "created", "the run is logged to consolidation_log as created");
 
@@ -761,8 +766,8 @@ try {
     const [side2] = await sql`SELECT type, importance, source_type, metadata FROM thoughts WHERE id = ${id}`;
     assert(side2.type === "person_note" && Number(side2.importance) === 5 && side2.source_type === "system_profile" && side2.metadata.source_thought_count === 3 && side2.metadata.subject === "Test",
       "the enhanced columns and the metadata are rewritten");
-    const [audit2] = await sql`SELECT actor_name, source FROM thought_audit WHERE thought_id = ${id} AND action = 'update' ORDER BY created_at DESC LIMIT 1`;
-    assert(audit2?.actor_name === "MCP_ACCESS_KEY" && audit2?.source === "consolidation-bio", `008's update row names the key and the worker (${audit2?.actor_name} ${audit2?.source})`);
+    const [audit2] = await sql`SELECT actor_name, source, origin FROM thought_audit WHERE thought_id = ${id} AND action = 'update' ORDER BY created_at DESC LIMIT 1`;
+    assert(audit2?.actor_name === "MCP_ACCESS_KEY" && audit2?.origin === "consolidation-bio", `008's update row names the key and the worker as the door (${audit2?.actor_name} ${audit2?.origin})`);
     const [log2] = await sql`SELECT details FROM consolidation_log ORDER BY id DESC LIMIT 1`;
     assert(log2?.details?.action === "updated", "the run is logged as updated");
 

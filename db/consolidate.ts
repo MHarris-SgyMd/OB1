@@ -332,7 +332,9 @@ if (REVIEW_ONLY) {
   if (ACCEPT || REJECT) {
     const decision = ACCEPT ? "accept" : "reject";
     const id = (ACCEPT ?? REJECT)!;
-    const actor = { name: actorName, source: "consolidate", session: JOB, ...(agentId ? { agent_id: agentId } : {}) };
+    // `via`, the door (045's origin column) — `source` until SMD-1730, when
+    // the trigger stopped reading an actor's source.
+    const actor = { name: actorName, via: "consolidate", session: JOB, ...(agentId ? { agent_id: agentId } : {}) };
     const [{ r }] = await sql`
       SELECT review_supersession_proposal(${id}::uuid, ${decision}::text, ${NOTE ?? null}::text, ${DIRECTION ?? null}::text, ${actor}::jsonb, ${FORCE}::boolean) AS r`;
     const res = r as { ok: boolean; error?: string; status?: string; superseding_id?: string; superseded_id?: string; written?: boolean; cleared?: boolean; current?: string; verdict?: string; older_edited?: boolean; newer_edited?: boolean };

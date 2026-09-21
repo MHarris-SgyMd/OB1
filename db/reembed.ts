@@ -1398,7 +1398,9 @@ if (total === 0) {
 }
 
 const toVector = (v: number[]) => `[${v.join(",")}]`;
-const actor = { name: "reembed", source: "db/reembed.ts", session: JOB };
+// `via`, the door (045's origin column) — `source` until SMD-1730, when the
+// trigger stopped reading an actor's source; the row's own stays the column.
+const actor = { name: "reembed", via: "db/reembed.ts", session: JOB };
 
 let stopping = false;
 let done = 0;
