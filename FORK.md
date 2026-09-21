@@ -17118,6 +17118,19 @@ padded `OB1_BACKFILL_LIMIT=" 5 "` threw before and is 5 now); the server
 rebuilt from the tip, `smoke.sh` 9 of 9; `db/test-upgrade` 241, `test-live`
 579, `test-search-path` 23, `test-replay` 2, all green.
 
+**Tidied while the file was open** (no verdict changes): the house-form shape
+was spelled three ways in check 14 — the per-knob test, the fallback's own
+regex, and `forwardForm`'s partials; one `HOUSE_FORM(k)` with the default
+captured is the rule, and the fallback reads its capture, so a value the shape
+rule refused (a `$` in the default, say) draws its one report and no second
+from the fallback rule where before it drew two. `index.ts` was read from disk
+twice — once for the declaration, again in the read scan; once. And the
+script's own path, `const SELF`, was spelled inside eight functions (checks 6
+through 14, a pattern this file grew by accretion); one module constant. Run:
+every fallback, shape and scan mutant reports as before, a broken probe still
+names the script, and the runtime-without-`Bun.YAML` emulation still fails the
+two parser checks in words.
+
 **Upstream status:** not sent — upstream has no `deploy/`; the stack is this
 fork's (change 16 and the migration plan's Phase 4).
 

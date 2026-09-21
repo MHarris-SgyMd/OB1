@@ -105,6 +105,8 @@ const CATEGORIES = [
 
 const violations = [];
 const fail = (where, msg) => violations.push({ where, msg });
+/** This script, as the `where` of a violation in its own probes and inventories. */
+const SELF = "scripts/check-fork-consistency.mjs";
 
 const schema = JSON.parse(readFileSync(join(ROOT, ".github/metadata.schema.json"), "utf8"));
 const props = schema.properties;
@@ -511,7 +513,6 @@ function hazardsIn(text, rel = "probe.md") {
 }
 
 function checkShellHazards(dirs) {
-  const SELF = "scripts/check-fork-consistency.mjs";
   for (const [name, probe] of SHELL_HAZARD_PROBES) {
     if (!hazardsIn(probe).has(name)) fail(SELF, `shell-hazard pattern '${name}' no longer catches its probe: ${probe}`);
   }
@@ -687,7 +688,6 @@ const coreStatementsIn = (text) => namedIn(OWNED_FUNCTIONS, coreFunctionStatemen
 const columnCommentsIn = (text) => namedIn(OWNED_COLUMN_COMMENTS, coreColumnCommentStatement, text);
 
 function checkCoreFunctions() {
-  const SELF = "scripts/check-fork-consistency.mjs";
   if (OWNED_FUNCTIONS.size === 0) return fail(SELF, "no migration under db/migrations defines a function — the owned set is empty and check 7 would pass everything");
   for (const [fn, probe] of CORE_FUNCTION_PROBES) {
     if (!OWNED_FUNCTIONS.has(fn)) fail(SELF, `core-function probe names '${fn}', which no migration defines — the probe or the owned set is stale`);
@@ -1001,7 +1001,6 @@ const CREDENTIAL_COMPARE_NON_PROBES = [
 const CREDENTIAL_COMPARE_EXCEPTIONS = new Map([]);
 
 function checkCredentialCompares() {
-  const SELF = "scripts/check-fork-consistency.mjs";
   for (const probe of CREDENTIAL_COMPARE_PROBES) {
     // Every line of a probe that carries a compare must be caught — a probe with
     // two routes is two compares, and the second binding is not a shadow of the first.
@@ -1435,7 +1434,6 @@ const THOUGHT_WRITE_EXCEPTIONS = new Map([
 ]);
 
 function checkThoughtWritesAround() {
-  const SELF = "scripts/check-fork-consistency.mjs";
   for (const probe of THOUGHT_WRITE_PROBES) {
     // Caught on exactly one line, and that line is the verb's (or the UPDATE's): the second review
     // pass found an upsert chain reported on the line before its verb, which a count alone passed.
@@ -1641,7 +1639,6 @@ const SHIM_RUNTIME_NON_PROBES = [
 ];
 
 function checkShimRuntime() {
-  const SELF = "scripts/check-fork-consistency.mjs";
   for (const [probe, gap] of SHIM_RUNTIME_PROBES) {
     const got = shimRuntimeGapsIn(probe);
     if (got.length !== 1 || got[0] !== gap) fail(SELF, `shim-runtime rule no longer reports exactly "${gap}" for its probe (reported ${JSON.stringify(got)}): ${JSON.stringify(probe)}`);
@@ -1804,7 +1801,6 @@ const ENV_KNOB_PROBES = [
   ["# SERVER_BIND=0.0.0.0 is the one an operator sets\n# SERVER_BIND=127.0.0.1\n", /_BIND$/, ["SERVER_BIND"]],
 ];
 function documentedEnvKnobs(pattern) {
-  const SELF = "scripts/check-fork-consistency.mjs";
   for (const [text, pat, names] of ENV_KNOB_PROBES) {
     const got = envKnobsIn(text, pat).map((k) => k.name);
     if (JSON.stringify(got) !== JSON.stringify(names)) fail(SELF, `env-knob reader no longer reports exactly ${JSON.stringify(names)} for its probe (reported ${JSON.stringify(got)}): ${JSON.stringify(text)}`);
@@ -1927,7 +1923,6 @@ const PORT_PROBES = [
 ];
 
 function checkPublishedPorts() {
-  const SELF = "scripts/check-fork-consistency.mjs";
   const knobs = documentedEnvKnobs(/_BIND$/);
   if (knobs === null) return;
   const documented = new Set(knobs.map((k) => k.name));
@@ -2175,6 +2170,8 @@ await checkCapturingGrants();
  */
 const SERVER_ENV_SOURCE = "server-portable/index.ts";
 const KNOB = /^(OB1_|OPEN_BRAIN_)[A-Z0-9_]+$/;
+/** The one shape a knob is forwarded in — `${NAME}` or `${NAME:-default}` — with the default captured; the fallback rule reads the capture. */
+const HOUSE_FORM = (k) => new RegExp(`^\\$\\{${k}(?::-([^$}]*))?\\}$`);
 /** Knobs the server declares that compose.yaml must NOT forward, with the reason its own comment gives. */
 const NOT_FORWARDED = {
   OB1_STORE: "the SQL store is the server's default (FORK.md change 97) and this stack is the deployment that proves it — forwarding it would let the default drift back to PostgREST with nothing in CI noticing",
@@ -2373,7 +2370,7 @@ function serverEnvGapsIn(declared, documented, files, excused = NOT_FORWARDED) {
         if (!KNOB.test(k)) continue;
         anywhere.add(k);
         if (v === null) gaps.push(["bare-item", name, service, k, ""]);
-        else if (!new RegExp(`^\\$\\{${k}(:-[^$}]*)?\\}$`).test(v)) gaps.push(["not-house-form", name, service, k, v]);
+        else if (!HOUSE_FORM(k).test(v)) gaps.push(["not-house-form", name, service, k, v]);
         if (service === "server") {
           if (!declared.includes(k)) gaps.push(["undeclared", name, "server", k, v]);
           else if (k in excused) gaps.push(["excused-forwarded", name, "server", k, excused[k]]);
@@ -2406,8 +2403,9 @@ function serverEnvGapsIn(declared, documented, files, excused = NOT_FORWARDED) {
   // service may be defined in that file or the base.
   for (const { name, doc } of files) {
     const env = forwardedBy.get(name).get("server");
-    const fb = /^\$\{OB1_LLM_BASE_URL:-(.+)\}$/.exec(env?.get("OB1_LLM_BASE_URL") ?? "");
-    if (!fb) continue;
+    // The captured default of a house-form value; a value the shape rule refused was reported above and draws no second report here.
+    const fb = HOUSE_FORM("OB1_LLM_BASE_URL").exec(env?.get("OB1_LLM_BASE_URL") ?? "");
+    if (!fb?.[1]) continue;
     // Names compare as DNS and preflight's isLocalHostname do: case-insensitively.
     const m = /^http:\/\/([A-Za-z0-9][A-Za-z0-9_.-]*):11434\/v1$/.exec(fb[1]);
     const host = m ? m[1].toLowerCase() : null;
@@ -2463,7 +2461,6 @@ const DECISION_PROBES = [
 ];
 
 function checkServerEnvForwarded() {
-  const SELF = "scripts/check-fork-consistency.mjs";
   const rel = "deploy/compose.yaml";
   if (typeof Bun === "undefined" || typeof Bun.YAML?.parse !== "function") {
     fail(SELF, `check 14 parses deploy/compose*.yaml with Bun.YAML (Bun 1.2+) and this runtime has none — run \`bun ${SELF}\`, as CI does (SMD-1843)`);
@@ -2510,7 +2507,8 @@ function checkServerEnvForwarded() {
 
   const sourcePath = join(ROOT, SERVER_ENV_SOURCE);
   if (!existsSync(sourcePath)) { fail(SERVER_ENV_SOURCE, `missing — check 14 reads the knobs the server declares from its \`type Env\` block (SMD-1843)`); return; }
-  const declared = declaredEnvIn(readFileSync(sourcePath, "utf8"));
+  const indexSource = readFileSync(sourcePath, "utf8"); // read once: the declaration here, the read scan below
+  const declared = declaredEnvIn(indexSource);
   if (declared === null) { fail(SERVER_ENV_SOURCE, `has no \`type Env = { … };\` block — check 14 reads the knobs the server declares from it; if the declaration moved, move the reader (SMD-1843)`); return; }
   if (!declared.some((n) => KNOB.test(n))) { fail(SERVER_ENV_SOURCE, `\`type Env\` declares no OB1_* or OPEN_BRAIN_* name — check 14 has nothing to hold the compose file to, which cannot be right (SMD-1843)`); return; }
 
@@ -2534,7 +2532,7 @@ function checkServerEnvForwarded() {
   sources.push("db/config.mjs");
   const readSomewhere = new Set();
   for (const srcRel of sources) {
-    const source = readFileSync(join(ROOT, srcRel), "utf8");
+    const source = srcRel === SERVER_ENV_SOURCE ? indexSource : readFileSync(join(ROOT, srcRel), "utf8");
     for (const [name, index] of envReadsIn(source)) {
       readSomewhere.add(name);
       if (declared.includes(name) || (srcRel === "db/config.mjs" && name in READ_FOR_MIGRATOR)) continue;
@@ -2609,7 +2607,6 @@ checkServerEnvForwarded();
  * SETUP.md/FORK.md say so. Only the synthetic replay-fixture is truly content-free.
  */
 function checkFixtureRedaction() {
-  const SELF = "scripts/check-fork-consistency.mjs";
   const FREE_TEXT_KEYS = new Set(["query", "note", "origin", "generated"]);
   const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   // A structural field name — the only shape an object key legitimately takes in
