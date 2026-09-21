@@ -2351,9 +2351,11 @@ const FORWARD_PROBES = [
 function serverEnvGapsIn(declared, documented, files, excused = NOT_FORWARDED) {
   const gaps = [];
   const anywhere = new Set();
+  const forwardedBy = new Map(); // file name → its services' environments, read once
   let server = null, baseDoc = null, baseSeen = false;
   for (const { name, doc } of files) {
     const { gaps: read, forwarded } = forwardedEnvIn(doc);
+    forwardedBy.set(name, forwarded);
     for (const [kind, service, detail] of read) {
       if (kind !== "no-services" && kind !== "unreadable") gaps.push([kind, name, service, null, detail]); // check 13 reports those two
     }
@@ -2394,7 +2396,7 @@ function serverEnvGapsIn(declared, documented, files, excused = NOT_FORWARDED) {
   // container (the fifth pass found only the base file's read) — and the
   // service may be defined in that file or the base.
   for (const { name, doc } of files) {
-    const env = forwardedEnvIn(doc).forwarded.get("server");
+    const env = forwardedBy.get(name).get("server");
     const fb = /^\$\{OB1_LLM_BASE_URL:-(.+)\}$/.exec(env?.get("OB1_LLM_BASE_URL") ?? "");
     if (!fb) continue;
     // Names compare as DNS and preflight's isLocalHostname do: case-insensitively.
@@ -2498,8 +2500,9 @@ function checkServerEnvForwarded() {
   if (!declared.some((n) => KNOB.test(n))) { fail(SERVER_ENV_SOURCE, `\`type Env\` declares no OB1_* or OPEN_BRAIN_* name — check 14 has nothing to hold the compose file to, which cannot be right (SMD-1843)`); return; }
 
   // The declaration is held honest: a source the container's process loads —
-  // every non-test server-portable/*.ts, index.ts included (its typed reads
-  // yield nothing; a `process.env.OB1_X` there would), and db/config.mjs,
+  // every non-test server-portable/*.ts, index.ts included (its `env().X`
+  // reads are matched and declared by construction, since env() returns Env;
+  // a `process.env.OB1_X` there would not be), and db/config.mjs,
   // which the server imports and which reads eight knobs through its ENV
   // proxy — that reads a knob straight from the environment declares it, or
   // the universe is short of what runs. The migrator's own knob is excused.

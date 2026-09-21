@@ -151,8 +151,13 @@ console.log("\n[7] Prompt templates and provider settings take their inputs lite
   // "" is unset — the default endpoint and model, temperature 0, no reasoning —
   // not a URL of "", a model named "", or a NaN temperature.
   const unset = resolveEmbedConfig({});
-  assert(resolveEmbedConfig({ OB1_LLM_BASE_URL: "" }).llmBase === DEFAULT_LLM_BASE_URL.replace(/\/+$/, "") && unset.llmBase === resolveEmbedConfig({ OB1_LLM_BASE_URL: "" }).llmBase,
+  assert(resolveEmbedConfig({ OB1_LLM_BASE_URL: "" }).llmBase === DEFAULT_LLM_BASE_URL.replace(/\/+$/, ""),
          "OB1_LLM_BASE_URL='' is the default endpoint, not an empty URL");
+  // …and the three string knobs are trimmed: a trailing space from a .env file is not part of a model name or a URL.
+  assert(resolveEmbedConfig({ OB1_LLM_BASE_URL: " http://h:1/v1/ ", OB1_METADATA_MODEL: " m:1b ", OB1_EMBEDDING_MODEL: "\te:1b\n" }).llmBase === "http://h:1/v1" &&
+         resolveEmbedConfig({ OB1_METADATA_MODEL: " m:1b " }).metadataModel === "m:1b" && resolveEmbedConfig({ OB1_EMBEDDING_MODEL: "\te:1b\n" }).embeddingModel === "e:1b",
+         "OB1_LLM_BASE_URL, OB1_METADATA_MODEL and OB1_EMBEDDING_MODEL are trimmed; whitespace alone is unset");
+  assert(resolveEmbedConfig({ OB1_METADATA_MODEL: "   " }).metadataModel === DEFAULT_METADATA_MODEL, "OB1_METADATA_MODEL of spaces alone is the default");
   assert(resolveEmbedConfig({ OB1_METADATA_MODEL: "" }).metadataModel === DEFAULT_METADATA_MODEL, "OB1_METADATA_MODEL='' is the default model, not a model named ''");
   assert(resolveEmbedConfig({ OB1_METADATA_TEMPERATURE: "" }).metadataTemperature === unset.metadataTemperature && unset.metadataTemperature === 0,
          "OB1_METADATA_TEMPERATURE='' is the default temperature (0), not NaN");
@@ -166,9 +171,9 @@ console.log("\n[7] Prompt templates and provider settings take their inputs lite
          "…and off/false/0 mean none, as .env.example says");
   // The pool size took the same "" (compose's unset) and made a pool of 0.
   assert(poolSizeFrom(undefined) === DEFAULT_PG_POOL && poolSizeFrom("") === DEFAULT_PG_POOL && poolSizeFrom("  ") === DEFAULT_PG_POOL,
-         `OB1_PG_POOL unset or '' is the default pool (${DEFAULT_PG_POOL}), not a pool of Number('') = 0`);
+         `OB1_PG_POOL unset or '' is the default pool (${DEFAULT_PG_POOL}), not Number('') = 0, which Bun's SQL refuses at construction`);
   assert(poolSizeFrom("0") === DEFAULT_PG_POOL && poolSizeFrom("-2") === DEFAULT_PG_POOL && poolSizeFrom("2.5") === DEFAULT_PG_POOL && poolSizeFrom("ten") === DEFAULT_PG_POOL,
-         "a pool that could open nothing, or is not a whole number, is the default");
+         "a size Bun's SQL would refuse, or that is not a whole number, is the default");
   assert(poolSizeFrom("5") === 5 && poolSizeFrom(" 12 ") === 12, "…while a positive integer is read");
 
   // The windowing rule follows the model's window (SMD-1305). 1200 was set

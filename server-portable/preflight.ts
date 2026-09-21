@@ -57,10 +57,13 @@ const {
   REAPPLY_COMMAND,
 } = await import("../db/config.mjs");
 
-const embModel = env.OB1_EMBEDDING_MODEL || DEF_EMB;
+// The same three string reads as embed.ts's resolveEmbedConfig, trimmed the
+// same way, so the gate judges the values the server will use.
+const { stringOr } = await import("./embed.ts");
+const embModel = stringOr(env.OB1_EMBEDDING_MODEL, DEF_EMB);
 const embDim = env.OB1_EMBEDDING_DIM ? Number(env.OB1_EMBEDDING_DIM) : DEF_DIM;
-const metaModel = env.OB1_METADATA_MODEL || DEF_META;
-const llmBase = (env.OB1_LLM_BASE_URL || DEF_BASE).replace(/\/+$/, "");
+const metaModel = stringOr(env.OB1_METADATA_MODEL, DEF_META);
+const llmBase = stringOr(env.OB1_LLM_BASE_URL, DEF_BASE).replace(/\/+$/, "");
 const llmKey = env.OB1_LLM_API_KEY || env.OPENROUTER_API_KEY;
 
 /**

@@ -321,7 +321,7 @@ takes effect within a minute and the agent's history stays queryable.
 
 The shipped defaults are **local**: `qwen3-embedding:4b` at 1024 dimensions for
 embeddings and `qwen2.5:7b` for metadata, both via Ollama, with no credential
-needed. To use OpenRouter instead, set all three — `OB1_LLM_BASE_URL=https://openrouter.ai/api/v1`,
+needed. To use OpenRouter instead, set all four — `OB1_LLM_BASE_URL=https://openrouter.ai/api/v1`,
 `OPENROUTER_API_KEY`, and both models — not the key alone: with the URL unset
 the compose file points the server at the stack's own Ollama and the key is
 sent there (`deploy/.env.example`, Option C). The models are changed as a pair,

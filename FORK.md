@@ -16841,7 +16841,10 @@ message names what it found instead (a single dash keeps an empty value; `:?`
 aborts compose; bare `$X` and a nested `${…${…}}` are forms the rule does not
 read; a literal; a miswire). Beyond the rule: `store-sql.ts` read the pool
 size as `Number(process.env.OB1_PG_POOL ?? 10)`, so the `""` compose's
-no-fallback form sends is a pool of **0** — the file kept `${OB1_PG_POOL:-10}`,
+no-fallback form sends is a pool of **0** (which Bun's SQL refuses at
+construction — the sixth pass measured it in the container — so the failure
+would have been preflight refusing at the data layer, loud, over a default
+that should have been 10) — the file kept `${OB1_PG_POOL:-10}`,
 a copy of the code's default its own comments call the recurring defect, and
 this change had declared the knob without asserting it (cold read);
 `poolSizeFrom` reads a positive integer or the default, the copy is gone, and
@@ -17011,6 +17014,38 @@ shared numeric reader (SMD-1881); a universe derived from the reads rather
 than declared and held. For the boyscout: `index.ts` read from disk twice
 in check 14, the script's own path spelled per function, and the house-form
 shape spelled three ways.
+
+**Review pass 6** (the same pair, the whole branch; the run-it reviewer
+rebuilt the throwaway server from the branch tip, which nothing had done since
+pass 1 changed four server files). The rebuilt container: preflight names the
+host's Ollama, `qwen2.5:7b`, the query log `ON`; `smoke.sh` 9 of 9; a capture
+lands in 1.2 s with topics extracted, a search in 81 ms writes its
+`query_log` row — with both models warm the SMD-1864 reset does not fire. Two
+findings both reviewers made: `compat/supabase-sql/index.ts` — the shim
+sixteen extension and integration servers import — had the same
+`Number(process.env.OB1_PG_POOL ?? 10)` read `store-sql.ts` lost in pass 1;
+it has the same `poolSizeFrom` now, asserted in its own suite, and SMD-1881
+is one reader for both. And the sentence that read was fixed under was
+wrong: `Number("")` is 0, and Bun's SQL *refuses* a pool of 0 at construction
+(`options.max` must be at least 1 — measured in the container), so the server
+would have failed preflight at the data layer, loudly, over a default that
+should have been 10, rather than run with "a pool that opens nothing" as four
+sentences said; all four say what happens now. Beside the trimmed reasoning
+knob, the model and URL knobs were not trimmed, while the comment said "like
+every sibling" (cold read): one `stringOr` trims the three string knobs in
+`embed.ts`, and preflight reads them through it so the gate judges the values
+the server uses; and the trim's motivating sentence overstated its case —
+compose's own dotenv trims an unquoted value (measured, v5.5), so the case is
+a quoted `"low "` or another loader (run-it); the comment says so. Smaller:
+the fallback loop parsed each file's environment a second time (cold read;
+the first pass's maps are kept); the read-scan comment said `index.ts`'s typed
+reads "yield nothing" while `env().X` is matched (cold read; it says they are
+matched and declared by construction); SETUP.md said "all three" of four
+settings (cold read); the README's service table lacked the profile's two
+rows (run-it). Not taken: two preflight wordings outside the diff — a key
+beside a local endpoint prints two `provider credential` rows, and the skip
+line names OpenRouter for an Ollama provider; SMD-1875 (a fifth time);
+SMD-1876 for the server README's knob list.
 
 **Upstream status:** not sent — upstream has no `deploy/`; the stack is this
 fork's (change 16 and the migration plan's Phase 4).

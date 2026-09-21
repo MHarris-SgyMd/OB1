@@ -82,7 +82,9 @@ export const DEFAULT_PG_POOL = 10;
  * OB1_PG_POOL as a pool size: a positive integer, else the default. `""` is
  * unset — deploy/compose.yaml forwards every optional knob as `${VAR:-}`, so a
  * composed server sees "" wherever deploy/.env set nothing, and Number("") is
- * 0, a pool that can open nothing (SMD-1843; the same rule as embed.ts's
+ * 0, which Bun's SQL refuses at construction (`options.max` must be at least
+ * 1) — the server would have failed preflight at the data layer over a
+ * default that should have been 10 (SMD-1843; the same rule as embed.ts's
  * numberOr and db/config.mjs's ENV proxy).
  */
 export function poolSizeFrom(raw: string | undefined, fallback = DEFAULT_PG_POOL): number {

@@ -227,8 +227,14 @@ export type EmbedConfig = {
  * are unchanged in what they decide; only where they live moved. An empty
  * string is treated as unset throughout, matching db/config.mjs.
  */
+/** A string knob: trimmed, and "" or whitespace is unset. `qwen2.5:7b ` from a .env file is not a model. */
+export function stringOr(raw: string | undefined, fallback: string): string {
+  const v = raw?.trim();
+  return v ? v : fallback;
+}
+
 export function resolveEmbedConfig(env: EmbedEnv): EmbedConfig {
-  const model = env.OB1_EMBEDDING_MODEL || DEFAULT_EMBEDDING_MODEL;
+  const model = stringOr(env.OB1_EMBEDDING_MODEL, DEFAULT_EMBEDDING_MODEL);
   const dim = env.OB1_EMBEDDING_DIM ? Number(env.OB1_EMBEDDING_DIM) : DEFAULT_EMBEDDING_DIM;
   // A local endpoint needs no credential, so the key is optional there. Sending
   // `Authorization: Bearer undefined` to Ollama is harmless but confusing in
@@ -245,7 +251,7 @@ export function resolveEmbedConfig(env: EmbedEnv): EmbedConfig {
   // size at or under the constant, and an unknown model keeps the constant.
   const chunk = resolveChunkTokens(env.OB1_CHUNK_TOKENS, model, DEFAULT_MAX_TOKENS);
   return {
-    llmBase: (env.OB1_LLM_BASE_URL || DEFAULT_LLM_BASE_URL).replace(/\/+$/, ""),
+    llmBase: stringOr(env.OB1_LLM_BASE_URL, DEFAULT_LLM_BASE_URL).replace(/\/+$/, ""),
     headers: key
       ? { Authorization: `Bearer ${key}`, "Content-Type": "application/json" }
       : { "Content-Type": "application/json" },
@@ -279,7 +285,7 @@ export function resolveEmbedConfig(env: EmbedEnv): EmbedConfig {
       chunk.from === "window" && chunk.tokens < DEFAULT_MAX_TOKENS ? Math.floor((DEFAULT_OVERLAP_TOKENS * chunk.tokens) / DEFAULT_MAX_TOKENS) : DEFAULT_OVERLAP_TOKENS,
       "non-negative"),
     chunkContext: resolveChunkContext(env.OB1_CHUNK_CONTEXT),
-    metadataModel: env.OB1_METADATA_MODEL || DEFAULT_METADATA_MODEL,
+    metadataModel: stringOr(env.OB1_METADATA_MODEL, DEFAULT_METADATA_MODEL),
     // Deterministic by default; overridable for anyone who wants variety.
     metadataTemperature: numberOr(env.OB1_METADATA_TEMPERATURE, 0, "non-negative"),
     metadataReasoning: metadataReasoning(env.OB1_METADATA_REASONING),
@@ -317,8 +323,11 @@ function numberOr(raw: string | undefined, fallback: number, range: "positive" |
  * honours, and it is harmless to models with no reasoning mode.
  */
 function metadataReasoning(rawValue: string | undefined): Record<string, unknown> {
-  // Trimmed like every sibling knob: `OB1_METADATA_REASONING=low ` from a .env
-  // file went to the provider as "low " and every extraction 400ed (SMD-1843).
+  // Trimmed like the model, URL and numeric knobs. Compose's own dotenv trims
+  // an unquoted value (measured, v5.5), so the case is a quoted `"low "` in a
+  // .env file, or any other loader: that reached the provider as "low " and
+  // every extraction 400ed (SMD-1843; the model and URL were trimmed one pass
+  // later, on the same finding).
   const raw = (rawValue ?? "").trim().toLowerCase();
   if (raw === "on" || raw === "true" || raw === "1") return {};
   if (raw && raw !== "off" && raw !== "false" && raw !== "0") return { reasoning_effort: raw };

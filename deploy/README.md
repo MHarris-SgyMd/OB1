@@ -49,6 +49,8 @@ Three services, in order (five with the profile):
 | `postgres` | The Supabase-hosted database (`pgvector/pgvector:0.8.6-pg16`) |
 | `migrate` | Pasting SQL into the Supabase dashboard — runs `db/migrate.ts`, then exits |
 | `server` | The Edge Function and `supabase functions deploy` |
+| `ollama` (profile) | OpenRouter — the model endpoint the server defaults to |
+| `ollama-pull` (profile) | Pulling both models by hand; runs once, then exits |
 
 ### 3. Verify
 

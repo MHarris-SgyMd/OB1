@@ -197,8 +197,10 @@ services:
       OB1_AGENT_CACHE_TTL_MS: ${OB1_AGENT_CACHE_TTL_MS:-}
       OPEN_BRAIN_CITATION_BASE_URL: ${OPEN_BRAIN_CITATION_BASE_URL:-}
       # No `:-10` here any more: store-sql.ts owns the default and reads "" as
-      # unset (it read Number("") = 0 — a pool that opens nothing — until the
-      # first review pass of SMD-1843 found the copy and the reader together).
+      # unset (it read Number("") = 0 until SMD-1843's first review pass found
+      # the copy and the reader together — Bun's SQL refuses a pool of 0 at
+      # construction, so the server would have failed preflight at the data
+      # layer, loudly, over a default that should have been 10).
       OB1_PG_POOL: ${OB1_PG_POOL:-}
       PORT: "8000"
     ports:
