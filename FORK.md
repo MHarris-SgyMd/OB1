@@ -35,6 +35,69 @@ patches apply to.
 
 **Never deploy from upstream `main`.** Deploy from this branch.
 
+### Versioning
+
+The fork ships continuously from `main`, so for a long time nothing named what
+shipped: one tag (the pin above), no releases, and a brain identified only by the
+highest migration its ledger recorded. The version scheme (SMD-1804) gives it a
+name:
+
+```
+MAJOR.MINOR.PATCH+upstream.<sha>
+```
+
+The build metadata carries the upstream pin, so a version says both what the fork
+is and what it sits on (`1.0.0+upstream.9543c29`). The bump is chosen by the
+contracts the fork already enforces — the rules are here, and checked, not
+remembered:
+
+- **MAJOR** — a migration changes a shipped function's signature or return shape
+  (020's `match_thoughts`, 014's sentinel), drops or renames a shipped
+  table/column/index a client can see, or changes the MCP tool surface
+  incompatibly (a tool removed, an argument's meaning changed). A client written
+  against `N.x` keeps working on `N.y`.
+- **MINOR** — an additive migration (a new function; a new column with
+  `IF NOT EXISTS`; an index swapped under the same names), a new tool, a new
+  worker, a new preflight check.
+- **PATCH** — no schema change: server, docs, evals, tests, or a migration that
+  only re-comments (028, 043).
+
+**The brain reports its version.** Migration 044 writes `schema_version` into
+`ob1_config`; `preflight` prints it beside the ledger's highest migration and
+warns, by name, when a brain is past its version's range or a server is older than
+the brain it serves. `db/version.mjs` is the one definition of the current version
+(`FORK_VERSION`), and `migrate.ts --dry-run` names the release each pending
+migration belongs to. The value 044 writes is `0.0.0+upstream.9543c29`, the
+pre-first-release baseline: the machinery is in place, no release has been cut yet.
+
+**A release is a tag naming three things**: the migration range it closes
+(`001..043`), the server commit, and the upstream pin. The committed
+`releases.json` is the machine-readable mirror CI reads with no network. Migrations
+inside a released range are **frozen** — the ledger's sha check already refuses
+drift at apply time; `check-fork-consistency` adds the rule that a renumber or
+edit of a released migration fails at review time (a released migration is
+append-only; add a new file).
+
+**The change counter is retiring.** Numbered `### N.` sections were assigned by
+hand at PR time, so every merge of `main` while a PR was in review renumbered a
+section and its cross-references. From now on a PR ships a fragment,
+`changes/<ticket>.md` (front matter — `type`, `bump`, `tickets`, `migrations` —
+and a `## Changelog` and a `## FORK` body), citing ticket and migration numbers,
+which are stable, never a change number, which the release step assigns once at
+assembly. Sections **1–100 remain the record**; the release step assembles
+fragments into new `### N.` sections in merge order and generates the intro counts
+then. During the transition both are accepted — a hand-numbered section still
+lands — so in-flight branches need no rework.
+
+`CHANGELOG.md` (root, **Keep a Changelog 1.1.0**) is the short page beside this
+design record: `## [Unreleased]` first, one dated section per release with entries
+under the six headings, each entry ending in its ticket and migration numbers. The
+release step writes it and FORK.md from the same fragments in one commit, and
+`check-fork-consistency` pairs the two both ways. Conventional Commits is **not**
+adopted — the fragment's fields give tooling what it needs, and the `[fork]` prefix
+and `(caught: …)` tags stay. (The orphaned `.github/release-drafter.yml`, an
+upstream leftover no workflow ran, is removed so there is one release mechanism.)
+
 ### Deploying
 
 For a non-Supabase deployment, see [`SETUP.md`](SETUP.md) — that is the intended
@@ -68,7 +131,7 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-One hundred numbered changes on top of the pin. Seven fix defects found in an
+One hundred (100) numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
 data layer (Phase 2). Ten (changes 31, 53, 55, 59, 79, 82, 86, 87, 88, and 89) ship no runtime change at

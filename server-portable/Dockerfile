@@ -16,9 +16,11 @@ COPY --from=deps /app/node_modules ./node_modules
 # .dockerignore keeps tests and tooling out.
 COPY server-portable/*.ts server-portable/package.json ./
 COPY server-portable/shims ./shims
-# The embedding contract, imported by preflight.ts. Kept at ../db/ inside the
-# image so the import path is identical in the container and in a checkout.
-COPY db/config.mjs db/config.d.mts /db/
+# The embedding contract and the version helpers, both imported by preflight.ts.
+# Kept at ../db/ inside the image so the import path is identical in the container
+# and in a checkout. releases.json is not copied — a deployed brain that has none
+# reads as "no release cut" (version.mjs returns []), which is correct off a tag.
+COPY db/config.mjs db/config.d.mts db/version.mjs db/version.d.mts /db/
 
 # Secrets are injected at runtime, never baked in:
 #   MCP_ACCESS_KEYS (or the legacy MCP_ACCESS_KEY), OPENROUTER_API_KEY

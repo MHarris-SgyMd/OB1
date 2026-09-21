@@ -66,6 +66,32 @@ changes only when the proxy is on another machine, as the next section says.
 client that resolves `localhost` to `::1` first without falling back is refused
 (`smoke.sh` dials `127.0.0.1` for the same reason).
 
+## Pinning a release
+
+The stack builds `server` from the checkout and pins `postgres` and `migrate` by
+tag; `ollama` still floats on `:latest`. Once the fork cuts releases (SMD-1804 —
+`MAJOR.MINOR.PATCH+upstream.<sha>`, see [`FORK.md`](../FORK.md) "Versioning"), a
+production deployment pins to one so the server, the migrations and the models it
+was verified against move together:
+
+```yaml
+# deploy/compose.yaml, per release
+services:
+  server:
+    image: ghcr.io/mharris-sgymd/ob1-server:<tag>   # instead of `build:`
+  migrate:
+    image: ghcr.io/mharris-sgymd/ob1-migrate:<tag>
+  ollama:
+    image: ollama/ollama@sha256:<digest>            # a digest, not :latest
+```
+
+The published `ob1-server`/`ob1-migrate` images and the per-release ollama digest
+are produced by the release job (SMD-1805) and are not built yet; until then the
+checkout build is the supported path. `releases.json` at the repo root records
+which migration range, server commit and upstream pin each `<tag>` closed, and
+`preflight` prints the running brain's `schema_version` so a mismatch between a
+pinned server and the brain it opens is caught before traffic.
+
 ## What is reachable from where
 
 Compose binds an address-less `"8000:8000"` to `0.0.0.0`, every interface, so the
