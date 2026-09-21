@@ -509,12 +509,15 @@ jobs:
       # provider URL .env set and the query log ON, and the container passed
       # preflight with no credential set. check-fork-consistency.mjs 14 holds
       # the file to forwarding every knob the server declares; this holds the
-      # running container to what .env said.
+      # running container to what .env said. The first line reads the URL and
+      # preflight's "local" clause and nothing between them: SMD-1902 put
+      # "— embeddings and chat" there while this step was in review, and the
+      # exact form failed the merged tree (caught: CI, PR #93).
       - name: The server sees what deploy/.env says
         working-directory: deploy
         run: |
           LOG="$(docker compose -f compose.yaml logs --no-color server)"
-          grep -E 'model provider +http://host\.docker\.internal:11434/v1 \(local — no credential needed\)' <<<"$LOG"
+          grep -E 'model provider +http://host\.docker\.internal:11434/v1\b.*\(local — no credential needed\)' <<<"$LOG"
           grep -F 'ON (OB1_QUERY_LOG=on) here' <<<"$LOG"
           grep -F 'preflight OK' <<<"$LOG"
 

@@ -17274,7 +17274,15 @@ two parser checks in words.
 eight passes ran, so it is 102 — the hand renumber SMD-1917 is filed to end.
 SMD-1902's `OB1_CHAT_BASE_URL` and `OB1_CHAT_API_KEY` arrived declared,
 forwarded and documented, so check 14 passed the merged tree unchanged; its
-`resolveProviderEndpoints` now reads both bases through `baseUrlOr`.
+`resolveProviderEndpoints` now reads both bases through `baseUrlOr`. One thing
+the merge's local checks did not run was the CI job's own grep against a
+container rebuilt from the merged tree: SMD-1902 had put "— embeddings and
+chat" between the provider URL and preflight's "(local — no credential
+needed)" clause, and the step's exact pattern failed on the first CI run of
+PR #93 (caught: CI). The pattern reads the URL and the clause and nothing
+between them now, and the job's shape was rerun locally — a CI-shaped `.env`,
+a throwaway project rebuilt from the tree, the three greps, the three `jq`
+lines, `smoke.sh` 9 of 9 — before the second push.
 
 **Upstream status:** not sent — upstream has no `deploy/`; the stack is this
 fork's (change 16 and the migration plan's Phase 4).
