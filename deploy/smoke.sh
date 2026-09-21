@@ -119,14 +119,26 @@ pv=$(rpc '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersi
   | unwrap | python3 -c 'import sys,json;print(json.load(sys.stdin).get("result",{}).get("protocolVersion",""))' 2>/dev/null)
 [ -n "$pv" ] && ok "initialize (protocol $pv)" || bad "initialize returned no protocolVersion"
 
-# 6. The full documented tool surface.
+# 6. The full documented tool surface, read from server-portable/tools.json —
+#    generated from the typed source server-portable/tools.ts, which the test
+#    suites read too, so this check and they stay one source (SMD-1805). A write
+#    key sees every tool; capture_thought,
+#    update_thought and delete_thought are scope-gated, so a read key would
+#    legitimately show fewer — this smoke test authenticates as a writer.
+#    Run standalone against a remote with no checkout, the manifest is absent:
+#    the surface is reported rather than asserted, so the other checks still run.
 tools=$(rpc '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
   | unwrap | python3 -c 'import sys,json;print(",".join(sorted(t["name"] for t in json.load(sys.stdin)["result"]["tools"])))' 2>/dev/null)
-# Ten for a write key. capture_thought, update_thought and delete_thought are
-# scope-gated, so a read key would legitimately show seven — this smoke test
-# authenticates as a writer.
-expected="capture_thought,delete_thought,fetch,list_supersession_proposals,list_thoughts,search,search_thoughts,search_thoughts_keyword,thought_stats,update_thought"
-[ "$tools" = "$expected" ] && ok "all ten tools exposed" || bad "tool surface is '$tools'"
+manifest="$HERE/../server-portable/tools.json"
+if [ -r "$manifest" ]; then
+  expected=$(python3 -c 'import sys,json;print(",".join(sorted(t["name"] for t in json.load(open(sys.argv[1]))["tools"])))' "$manifest" 2>/dev/null)
+  { [ -n "$expected" ] && [ "$tools" = "$expected" ]; } \
+    && ok "tool surface matches the manifest ($expected)" \
+    || bad "tool surface is '$tools' (manifest expects '$expected')"
+else
+  [ -n "$tools" ] && ok "tool surface exposed (no manifest present to assert against): $tools" \
+                  || bad "tools/list returned no tools"
+fi
 
 # 7. A read that actually reaches the database. This is the check that catches a
 #    server which starts, answers the handshake, and has no working data layer.

@@ -68,14 +68,14 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Ninety-nine numbered changes on top of the pin. Seven fix defects found in an
+One hundred numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
 data layer (Phase 2). Ten (changes 31, 53, 55, 59, 79, 82, 86, 87, 88, and 89) ship no runtime change at
 all: each is a measurement that decided against building something.
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–99 are the numbered `###` sections** further down, which is
+sections. Changes **18–100 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -211,6 +211,15 @@ evals/eval-quant.ts              # change 81 (new file — vector, halfvec and b
 <4 vendored MCP servers, 1 sample> # change 78 (a McpServer built per request — per session in the cost recipe's after sample — in place of one shared and connect()ed to a fresh transport each time)
 <17 pin sites, 3 lockfiles>      # change 83 (@hono/mcp 0.1.1 → 0.1.5: the transport lets go of each POST it has answered; the after sample's sweep closes the transports it drops)
 <19 pin sites, 3 lockfiles, 15 servers, 20 SDK importers> # change 84 (SDK 1.30.0, @hono/mcp 0.3.2, hono 4.13.8, zod 4.6.5 together; the Accept patches removed; an @ts-types pragma on every SDK import so Deno types it)
+server-portable/tools.ts         # change 100 (new file — the typed source of the MCP tool surface: TOOLS as const, ToolName, visibleToolNames())
+server-portable/tools.json       # change 100 (new file — GENERATED from tools.ts by scripts/gen-tools.mjs; deploy/smoke.sh reads it)
+scripts/gen-tools.mjs            # change 100 (new file — writes tools.json from tools.ts; renderToolsJson() shared with the round-trip check)
+<4 suites + deploy/smoke.sh>     # change 100 (test-server/-auth/-e2e-sql/-agents and smoke.sh read the manifest; test-server's tools/list is the live drift guard; test-auth's mutating list is typed ToolName[])
+db/test-support.ts               # change 100 (createAssert gains total()/skipped()/docCheck — a doc check counted apart from the total it verifies)
+db/test-schema.ts, db/test-live.ts # change 100 (each holds db/README.md's quoted assertion total to the run's own; test-live only on a full run)
+scripts/check-fork-consistency.mjs # change 100 (grant privileges per group [SMD-1471]; every migration documented once and the count checked; tools.json round-tripped against tools.ts [SMD-1805])
+db/config.mjs                    # change 100 (grantRows() — every ROLE_GRANTS row undeduped, for the per-group privilege check)
+db/README.md                     # change 100 (the applied-migration count stated as a digit so the check can read it)
 docs/01-getting-started.md       # fix 6
 recipes/content-fingerprint-dedup/README.md  # fix 6
 recipes/email-history-import/README.md       # fix 6
@@ -16676,6 +16685,60 @@ properly. Suite unchanged: 38 probes, every pass-4 mutant as before.
 
 **Upstream status:** not sent — upstream has no `deploy/`; the stack is this
 fork's (change 16 and the migration plan's Phase 4).
+
+
+### 100. Two counted surfaces read one typed source instead of drifting by hand — the MCP tool list is a `ToolName`-typed manifest the suites and the smoke test read, `db/README.md`'s assertion totals and migration list are checked against what the suites and `db/migrations/` hold, and the grant check compares privileges, not just names (SMD-1805, SMD-1471)
+
+`server-portable/tools.ts` is the fork's ten tools as `const TOOLS = [{ name,
+scope }, …] as const satisfies readonly ToolEntry[]` — the single, typed place
+the surface is written. Because the names are `as const`, `ToolName` is a real
+union TypeScript checks a name against (a JSON import would widen every name to
+`string`), and `satisfies` fails a bad `scope` at the source. `scripts/gen-tools.mjs`
+writes `server-portable/tools.json` from it for `deploy/smoke.sh`, which is bash
+(and the deploy CI job has no bun); `check-fork-consistency.mjs` round-trips the
+two — regenerate in memory, compare to the committed copy — the way the codemod
+check round-trips the shim, so they cannot drift. `test-server.ts`,
+`test-auth.ts`, `test-e2e-sql.ts`, `test-agents.ts` and `smoke.sh` read the
+manifest in place of a hardcoded count or list, and the drift guards derive the
+expected surface per scope from `visibleToolNames({ write })` rather than a fixed
+number — so a gated or optional tool later changes what that returns, not a test.
+`test-server.ts`'s `tools/list` case is the live drift guard: it compares the
+running server to the manifest, so a `registerTool` added to or removed from
+`index.ts` without a manifest entry fails there. `test-auth.ts` still names the
+three mutating tools independently of the manifest — a manifest-and-server
+co-rename is caught — but as a `ToolName[]`, so a typo in that list is a compile
+error, not a runtime surprise. Before this the count was hardcoded in four suites
+and the smoke test, and the ticket's claim that it lived in five —
+`test-update-delete.ts` among them — was wrong; that suite asserts no count.
+`index.ts`'s `registerTool` name literals are left as they are: the live drift
+guard ties them to the manifest, and adopting the constants there (so the server
+registers from `ToolName`) is a deliberate follow-up.
+
+`db/README.md` quoted `test-schema.ts`'s and `test-live.ts`'s assertion totals
+by hand. `createAssert` gains `total()`, `skipped()` and a `docCheck` — counted
+apart from the headline total, so a check verifies that number without moving it
+— and each suite holds every count the README gives it to what the run
+produced (`test-live.ts` only on a full run, since a skipped group on
+PostgreSQL 18 or with JIT off legitimately lowers it). The migration list was
+edited by hand too and drifted an intro count once (SMD-1696);
+`check-fork-consistency.mjs` now holds every file under `db/migrations/` to
+being documented exactly once across "The migrations" table and the "024
+onward" map, the applied count stated as a digit and checked against the file
+count — distinct from check 5b, which only forbids two files sharing a number.
+
+The same script's grant check named every `ROLE_GRANTS` object in the README
+but never its privileges (SMD-1471). `db/config.mjs` gains `grantRows()` — every
+row undeduped, since an object carries a different set in two groups
+(`ob1_config`, `thought_audit`) — and the check now compares each group's
+documented privilege set to what the group grants, so a `SELECT` the docs claim
+but the config drops, or the reverse, fails with the object and the difference.
+
+**Upstream status:** not sent — upstream runs no tests and has none of these
+suites, the manifest, or the consistency script; this is the fork's own
+machinery. Steps 1–2 and 4–7 of SMD-1805 — the branch-protection ruleset, the
+merge queue, changelog fragments, the GHCR release job, frozen migrations, and
+the commit and workflow linters of SMD-1808 — are follow-ups; the release job
+and the frozen-migration check wait on SMD-1804's first tag.
 
 
 ## Detached from the fork network
