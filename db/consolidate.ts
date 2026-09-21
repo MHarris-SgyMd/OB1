@@ -198,7 +198,10 @@ const cfg = resolveEmbedConfig(process.env);
 const JOB = consolidateKey(cfg.judgeModel);
 
 console.log(`  job:    ${JOB}`);
-if (!REVIEW_ONLY) console.log(`  model:  ${cfg.judgeModel}${process.env.OB1_JUDGE_MODEL ? " (OB1_JUDGE_MODEL)" : " (the metadata model; OB1_JUDGE_MODEL gives the judge its own)"} via ${cfg.chat.base}, temperature ${cfg.metadataTemperature}; up to ${K} older neighbour(s) per thought at cosine >= ${MIN_SIM}, conflicts recorded at confidence >= ${MIN_CONFIDENCE}`);
+// Which knob named it is read off the resolved pair, not the raw variable: a
+// value the resolver treats as unset (empty, or the metadata model's own name)
+// is the metadata model here too, however it was spelled.
+if (!REVIEW_ONLY) console.log(`  model:  ${cfg.judgeModel}${cfg.judgeModel !== cfg.metadataModel ? " (OB1_JUDGE_MODEL)" : " (the metadata model; OB1_JUDGE_MODEL gives the judge its own)"} via ${cfg.chat.base}, temperature ${cfg.metadataTemperature}; up to ${K} older neighbour(s) per thought at cosine >= ${MIN_SIM}, conflicts recorded at confidence >= ${MIN_CONFIDENCE}`);
 
 // One connection per worker and one spare: the heartbeat (db/lease.ts) beats
 // through the pool, and a worker parked on a lock or a long statement holds

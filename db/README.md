@@ -867,7 +867,7 @@ are the worker's `--k` and `--min-sim`.
 
 **The judge.** One call per pair to the judge model — `OB1_JUDGE_MODEL`, else
 the metadata model, so the harder task can run on a stronger model than every
-capture's tagging (SMD-1901) — (`server-portable/consolidate.ts` holds the prompt): thought A (older) and B
+capture's tagging (SMD-1901). `server-portable/consolidate.ts` holds the prompt: thought A (older) and B
 (newer), dated, and one question — agree, unrelated, or conflict, and for a
 conflict which is current, decided from what the texts say and not from the
 dates. A conflict whose texts do not say is recorded `conflict_undirected` for
