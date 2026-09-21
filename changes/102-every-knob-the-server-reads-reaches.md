@@ -109,11 +109,11 @@ a wrong local URL (the `ollama` fallback with no profile) still passes and fails
 at the first capture (argued in six passes, not taken here). SMD-1876 — SETUP.md
 twice and the server README say the default provider is OpenRouter; the code's
 default is local. SMD-1881 — five hand-rolled "empty means unset" numeric
-readers, one shared reader. SMD-1917 — this record was 457 lines before change
-103 cut it to this shape.
+readers, one shared reader. SMD-1917 — this record was 470 lines before that
+change cut it to this shape.
 
 **Numbered at the merge.** 100 on its branch; `main` took 100 and 101 while the
-passes ran, so 102 — the last hand renumber, change 103 ends them.
+passes ran, so 102 — the last hand renumber; SMD-1917 ends them.
 
 **Upstream status:** not sent — upstream has no `deploy/`; the stack is this
 fork's (change 16 and the migration plan's Phase 4).

@@ -62,7 +62,7 @@ build completed).
 
 ## A second vector store beside Postgres: the shape, and the bar it would have to clear
 
-*Written for SMD-1038 beside change 19, before change 79 measured it; moved here at the split (change 103) as the shape that measurement was held to.*
+*Written for SMD-1038 beside change 19, before change 79 measured it; moved here at the split (SMD-1917) as the shape that measurement was held to.*
 
 Every retrieval change since the pin has been made inside Postgres — the filter
 pushed into the scan (SMD-968, migration 014), the keyword arm (migration 012),

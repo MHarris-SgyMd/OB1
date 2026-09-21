@@ -49,6 +49,39 @@ export function headOf(title) {
   return title.replace(/\s*\((SMD-\d+(?:\s*[/,]\s*(?:SMD-)?\d+)*)\)\s*$/, "").split(" — ")[0].trim();
 }
 
+const STOP_WORDS = new Set(["of", "so", "the", "and", "a", "an", "its", "not", "to", "is", "was", "as", "be", "for", "with", "on", "in", "at", "that", "which", "into", "s", "it", "by", "or", "no", "only"]);
+/**
+ * The slug a change file's name carries, from its title: the first clause, ASCII
+ * lower-case words joined by dashes, cut around 48 characters and never ending on
+ * a stop word. The release step names a numbered file with it; the split did too.
+ */
+export function slugOf(title) {
+  const words = headOf(title)
+    .replace(/`/g, "")
+    .replace(/→/g, " to ")
+    .normalize("NFKD")
+    .replace(/[^\x00-\x7F]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  const out = [];
+  let len = 0;
+  for (const w of words) {
+    if (len + w.length + 1 > 48 && out.length >= 3) break;
+    out.push(w);
+    len += w.length + 1;
+  }
+  while (out.length > 3 && STOP_WORDS.has(out[out.length - 1])) out.pop();
+  return out.join("-") || "change";
+}
+
+/** The file name a numbered change takes: `NNN-<slug>.md`. */
+export function changeFileName(n, title) {
+  return `${String(n).padStart(3, "0")}-${slugOf(title)}.md`;
+}
+
 /**
  * What changes/ holds: numbered files (with their heading, line count and the
  * number their name carries), SMD-1804 fragments, and anything else. Pure over
@@ -61,10 +94,9 @@ export function classifyChanges(entries) {
   for (const { name, text } of entries) {
     const num = NUMBERED.exec(name);
     const frag = FRAGMENT.exec(name);
-    if (num) {
-      const lines = text.endsWith("\n") ? text.split("\n").length - 1 : text.split("\n").length;
-      numbered.push({ name, n: Number(num[1]), heading: headingOf(text), lines });
-    } else if (frag) fragments.push({ name, ticket: `SMD-${frag[1]}` });
+    const lines = text.endsWith("\n") ? text.split("\n").length - 1 : text.split("\n").length;
+    if (num) numbered.push({ name, n: Number(num[1]), heading: headingOf(text), lines });
+    else if (frag) fragments.push({ name, ticket: `SMD-${frag[1]}`, lines });
     else if (name !== "README.md") other.push(name);
   }
   numbered.sort((a, b) => a.n - b.n || a.name.localeCompare(b.name));

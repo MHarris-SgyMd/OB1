@@ -35,6 +35,68 @@ patches apply to.
 
 **Never deploy from upstream `main`.** Deploy from this branch.
 
+### Versioning
+
+The fork ships continuously from `main`, so for a long time nothing named what
+shipped: one tag (the pin above), no releases, and a brain identified only by the
+highest migration its ledger recorded. The version scheme (SMD-1804) gives it a
+name:
+
+```
+MAJOR.MINOR.PATCH+upstream.<sha>
+```
+
+The build metadata carries the upstream pin, so a version says both what the fork
+is and what it sits on (`1.0.0+upstream.9543c29`). The bump is chosen by the
+contracts the fork already enforces — the rules are here, and checked, not
+remembered:
+
+- **MAJOR** — a migration changes a shipped function's signature or return shape
+  (020's `match_thoughts`, 014's sentinel), drops or renames a shipped
+  table/column/index a client can see, or changes the MCP tool surface
+  incompatibly (a tool removed, an argument's meaning changed). A client written
+  against `N.x` keeps working on `N.y`.
+- **MINOR** — an additive migration (a new function; a new column with
+  `IF NOT EXISTS`; an index swapped under the same names), a new tool, a new
+  worker, a new preflight check.
+- **PATCH** — no schema change: server, docs, evals, tests, or a migration that
+  only re-comments (028, 043).
+
+**The brain reports its version.** Migration 044 writes `schema_version` into
+`ob1_config`; `preflight` prints it beside the ledger's highest migration and
+warns, by name, when a brain is past its version's range or a server is older than
+the brain it serves. `db/version.mjs` is the one definition of the current version
+(`FORK_VERSION`), and `migrate.ts --dry-run` names the release each pending
+migration belongs to. The value 044 writes is `0.0.0+upstream.9543c29`, the
+pre-first-release baseline: the machinery is in place, no release has been cut yet.
+
+**A release is a tag naming three things**: the migration range it closes
+(the first cut, `001..044`), the server commit, and the upstream pin. The committed
+`releases.json` is the machine-readable mirror CI reads with no network. Migrations
+inside a released range are **frozen** — the ledger's sha check already refuses
+drift at apply time; `check-fork-consistency` adds the rule that a renumber or
+edit of a released migration fails at review time (a released migration is
+append-only; add a new file).
+
+**The change counter is retired.** Numbered `### N.` sections were assigned by
+hand at PR time, so every merge of `main` while a PR was in review renumbered a
+section and its cross-references. A PR ships a fragment, `changes/smd-NNNN.md`
+(front matter — `type`, `bump`, `tickets`, `migrations` — and a `## Changelog`
+and a `## FORK` body), with no change number; the release step assigns the
+numbers once, at assembly, writing each fragment as the next
+`changes/NNN-<slug>.md` in merge order and regenerating the index below
+(SMD-1804, SMD-1917). Changes 1–102 keep their numbers — the code comments cite
+them — as the table and the files they are.
+
+`CHANGELOG.md` (root, **Keep a Changelog 1.1.0**) is the short page beside this
+design record: `## [Unreleased]` first, one dated section per release with entries
+under the six headings, each entry ending in its ticket and migration numbers. The
+release step writes it and the change files from the same fragments in one commit,
+and `check-fork-consistency` pairs the two both ways. Conventional Commits is **not**
+adopted — the fragment's fields give tooling what it needs, and the `[fork]` prefix
+and `(caught: …)` tags stay. (The orphaned `.github/release-drafter.yml`, an
+upstream leftover no workflow ran, is removed so there is one release mechanism.)
+
 ### Deploying
 
 For a non-Supabase deployment, see [`SETUP.md`](SETUP.md) — that is the intended
@@ -80,7 +142,7 @@ sections. Every change from 18 on is **one file under
 [`changes/`](changes/README.md)** — `NNN-<slug>.md`, a fixed shape, a 150-line
 cap — and the index after the table is generated from that directory by
 `scripts/fork-index.mjs`; check 15 holds the sizes, the numbering and the index,
-and fails a "FORK.md change N" citation with no file behind it (change 103).
+and fails a "FORK.md change N" citation with no file behind it (SMD-1917).
 
 | # | Commit | What | Upstream status |
 | --- | --- | --- | --- |
@@ -103,7 +165,7 @@ and fails a "FORK.md change N" citation with no file behind it (change 103).
 | 17 | `[fork] evals: choose the local models by measurement` | The local defaults were picked by size. `evals/` benchmarks retrieval and extraction against real Ollama; `nomic-embed-text` placed 5th of 7 and `llama3.2` reproduced its production faults. Defaults are now `embeddinggemma` + `qwen2.5:7b`. | **Unfiled** |
 
 <!-- changes-index:start — generated from changes/ by scripts/fork-index.mjs; do not edit by hand -->
-**103 numbered changes** on top of the pin: 1–17 are the table above; 18–103 are one file each under [`changes/`](changes/README.md), newest last. A change's record is its file; the review-pass prose behind it is in the commits (`(caught: …)` tags, read by `scripts/mechanism-yield.mjs`).
+**102 numbered changes** on top of the pin: 1–17 are the table above; 18–102 are one file each under [`changes/`](changes/README.md), newest last. A change's record is its file; the review-pass prose behind it is in the commits (`(caught: …)` tags, read by `scripts/mechanism-yield.mjs`).
 
 | # | Change | Ticket |
 | --- | --- | --- |
@@ -192,7 +254,8 @@ and fails a "FORK.md change N" citation with no file behind it (change 103).
 | 100 | [Two counted surfaces read one typed source instead of drifting by hand](changes/100-two-counted-surfaces-read-one-typed-source.md) | SMD-1805, SMD-1471 |
 | 101 | [The chat calls can have an endpoint of their own](changes/101-the-chat-calls-can-have-an-endpoint-of-their.md) | SMD-1902 |
 | 102 | [Every knob the server reads reaches the container](changes/102-every-knob-the-server-reads-reaches.md) | SMD-1843 |
-| 103 | [FORK.md is the front door, and every numbered change is one file](changes/103-fork-md-is-the-front-door.md) | SMD-1917 |
+
+Landed since the last release and numbered at the next one (SMD-1804): [SMD-1804](changes/smd-1804.md), [SMD-1917](changes/smd-1917.md).
 <!-- changes-index:end -->
 
 ### Files we own
@@ -315,8 +378,8 @@ scripts/gen-tools.mjs            # change 100 (new file — writes tools.json fr
 db/test-support.ts               # change 100 (createAssert gains total()/skipped()/docCheck — a doc check counted apart from the total it verifies)
 db/test-schema.ts, db/test-live.ts # change 100 (each holds db/README.md's quoted assertion total to the run's own; test-live only on a full run)
 scripts/check-fork-consistency.mjs # change 100 (grant privileges per group [SMD-1471]; every migration documented once and the count checked; tools.json round-tripped against tools.ts [SMD-1805])
-changes/                         # change 103 (new dir — one file per numbered change from 18 on, NNN-<slug>.md, a fixed shape and a 150-line cap; SMD-1804's smd-NNNN.md fragments sit beside them)
-scripts/fork-index.mjs           # change 103 (new file — renders FORK.md's index from changes/; check 15 round-trips it)
+changes/                         # SMD-1917 (new dir — one file per change from 18 on: NNN-<slug>.md once numbered, smd-NNNN.md until the release step numbers it; a fixed shape and a 150-line cap)
+scripts/fork-index.mjs           # SMD-1917 (new file — renders FORK.md's index from changes/; check 15 round-trips it; the release step calls it)
 db/config.mjs                    # change 100 (grantRows() — every ROLE_GRANTS row undeduped, for the per-group privilege check)
 db/README.md                     # change 100 (the applied-migration count stated as a digit so the check can read it)
 docs/01-getting-started.md       # fix 6
