@@ -10,6 +10,9 @@
 // (021) and the chunk rows (022) follow the text and vector, and the actor
 // reaches the audit (008). FORK.md change 69; extensions/test-writes.ts drives it
 // against Postgres, and scripts/check-fork-consistency.mjs check 10 holds it.
+// SMD-1541 (change 100): the key's name rides as the actor — p_actor on
+// update_thought, actor in upsert_thought's payload — so 008's row names it;
+// change 69 passed none, and the clause above was false until then.
 // ob1-fork (SMD-1455): access keys go through ../_shared/auth.ts — the core server's
 // server-portable/auth.ts, copied so Supabase bundles it with the function — named,
 // scoped, hashed entries in MCP_ACCESS_KEYS (the older single MCP_ACCESS_KEY still
@@ -409,7 +412,8 @@ async function textSearch(body: z.infer<typeof searchSchema>) {
   };
 }
 
-async function createThought(body: z.infer<typeof captureSchema>) {
+/** `actorName` is the authenticated key's name, for 008's audit row (SMD-1541). */
+async function createThought(body: z.infer<typeof captureSchema>, actorName: string) {
   const content = body.content.trim();
   const extracted = body.metadata ? body.metadata : await extractMetadata(content);
   const type = body.type || stringMeta(extracted, "type") || "observation";
@@ -429,7 +433,10 @@ async function createThought(body: z.infer<typeof captureSchema>) {
   const embedding = await getEmbedding(content);
   const upsert = await supabase.rpc("upsert_thought", {
     p_content: content,
-    p_payload: { metadata, embedding_model: EMBEDDING_MODEL },
+    // 008's actor, read from the payload into ob1.actor: the key's name, and
+    // the capture's declared source as the main server passes it (SMD-1541).
+    // Without it the audit row named nobody.
+    p_payload: { metadata, embedding_model: EMBEDDING_MODEL, actor: { name: actorName, source: sourceType } },
     p_embedding: embedding,
   });
   if (upsert.error) throw new Error(upsert.error.message);
@@ -554,6 +561,9 @@ app.put("/thought/:id", requireWrite, async (c) => {
       p_metadata_patch: metadata,
       p_embedding: embedding,
       p_embedding_model: embedding ? EMBEDDING_MODEL : null,
+      // 008's actor: the function sets ob1.actor only from what it is passed,
+      // so without this the audit row named nobody (SMD-1541).
+      p_actor: { name: c.get("principal").name, source: "open-brain-rest" },
     });
     if (edit.error) return c.json({ error: edit.error.message }, 500, corsHeaders);
     const result = (edit.data ?? {}) as Record<string, unknown>;
@@ -594,7 +604,7 @@ app.post("/capture", requireWrite, async (c) => {
   try {
     const parsed = captureSchema.safeParse(await c.req.json());
     if (!parsed.success) return c.json({ error: "Invalid capture payload", details: parsed.error.flatten() }, 400, corsHeaders);
-    return c.json(await createThought(parsed.data), 200, corsHeaders);
+    return c.json(await createThought(parsed.data, c.get("principal").name), 200, corsHeaders);
   } catch (error) {
     return c.json({ error: error instanceof Error ? error.message : "Capture failed" }, 500, corsHeaders);
   }
@@ -695,7 +705,7 @@ app.post("/ingest", requireWrite, async (c) => {
   const body = await c.req.json().catch(() => ({}));
   const text = String(body.text || "").trim();
   if (!text) return c.json({ error: "text is required" }, 400, corsHeaders);
-  const result = await createThought({ content: text, source_type: "dashboard_ingest" });
+  const result = await createThought({ content: text, source_type: "dashboard_ingest" }, c.get("principal").name);
   return c.json({ job_id: 0, status: "complete", extracted_count: 1, thought_id: result.thought_id }, 200, corsHeaders);
 });
 

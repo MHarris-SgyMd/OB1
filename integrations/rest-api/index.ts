@@ -10,6 +10,10 @@
 // (021) and the chunk rows (022) follow the text and vector, and the actor
 // reaches the audit (008). FORK.md change 69; extensions/test-writes.ts drives it
 // against Postgres, and scripts/check-fork-consistency.mjs check 10 holds it.
+// SMD-1541 (change 100): the key's name rides as the actor — p_actor on
+// update_thought, actor in upsert_thought's payload — so 008's row names it;
+// change 69 passed none, and the clause above was false until then. This server
+// holds one key, MCP_ACCESS_KEY, so the name is the variable's (ACTOR_NAME below).
 /**
  * rest-api — REST API gateway for Open Brain.
  *
@@ -77,6 +81,12 @@ const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "
 const MCP_ACCESS_KEY = Deno.env.get("MCP_ACCESS_KEY") ?? "";
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+
+// ob1-fork (SMD-1541): the name 008's audit row records for a write through
+// this server. It holds one key, MCP_ACCESS_KEY, compared in place (change 67
+// left it off _shared/auth.ts), so the name is the variable's — the name
+// auth.ts gives the same legacy key where a server does use the module.
+const ACTOR_NAME = "MCP_ACCESS_KEY";
 
 // ── CORS ────────────────────────────────────────────────────────────────────
 
@@ -491,6 +501,10 @@ async function handleCapture(req: Request): Promise<Response> {
     p_payload: {
       metadata: prepared.metadata,
       ...(embedding ? { embedding_model: embeddingModelUsed() } : {}),
+      // 008's actor, read from the payload into ob1.actor: the key's name,
+      // and the capture's declared source as the main server passes it
+      // (SMD-1541). Without it the audit row named nobody.
+      actor: { name: ACTOR_NAME, source },
     },
     p_embedding: embedding,
   });
@@ -599,6 +613,9 @@ async function handleUpdateThought(id: string, req: Request): Promise<Response> 
     p_metadata_patch: tierChanged ? { sensitivity_reasons: detected.reasons } : null,
     p_embedding: embedding,
     p_embedding_model: embedding ? embeddingModelUsed() : null,
+    // 008's actor: the function sets ob1.actor only from what it is passed,
+    // so without this the audit row named nobody (SMD-1541).
+    p_actor: { name: ACTOR_NAME, source: "rest-api" },
   });
   if (editErr) throw new Error(`update failed: ${editErr.message}`);
   const edit = (edited ?? {}) as Record<string, unknown>;
@@ -861,6 +878,8 @@ async function handleEnrichThought(thoughtId: string, url: URL): Promise<Respons
     p_metadata_patch: existingMetadata,
     p_embedding: enriched.embedding ?? null,
     p_embedding_model: enriched.embedding ? embeddingModelUsed() : null,
+    // 008's actor, as on PUT (SMD-1541).
+    p_actor: { name: ACTOR_NAME, source: "rest-api" },
   });
   if (editErr) throw new Error(`enrich update failed: ${editErr.message}`);
   const edit = (edited ?? {}) as Record<string, unknown>;

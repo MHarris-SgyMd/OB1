@@ -42,6 +42,18 @@
  * with the previous profile found through three path equalities and the
  * profile's own row kept out of its sources.
  *
+ * SMD-1541 (FORK.md change 100) reads 008's row after every driven capture and
+ * edit through change 69's five servers. Their headers said "the actor reaches
+ * the audit (008)" and none passed one — the functions set `ob1.actor` only
+ * from `p_actor` / `p_payload.actor` — so `thought_audit.actor_name` was NULL
+ * for every write through them, as for the raw writes they replaced. Each now
+ * names the key: `principal.name` where the server authenticates through
+ * `_shared/auth.ts` (three), the constant `MCP_ACCESS_KEY` where it holds
+ * that one key and compares it in place (`enhanced-mcp`, `rest-api`) — both
+ * `MCP_ACCESS_KEY` under this suite's legacy single key. The row's `source` is
+ * the capture's declared source, as the main server passes it, and the
+ * server's name on an edit; the write-back's runtime lands in `actor_context`.
+ *
  * The files are imported under the stand-in extensions/test-auth.ts uses for
  * Deno's two globals and its loader for Deno's specifiers, plus one more
  * rewrite: `@supabase/supabase-js` resolves to compat/supabase-sql, so the two
@@ -308,6 +320,18 @@ function judgeCapture(label: string, r: Row, text: string) {
   assert(r.embedding_model === MODEL, `${label}: embedding_model is the model that made it (021) — the raw update after the 2-argument form left NULL (got ${r.embedding_model})`);
   assert(r.chunks === 0, `${label}: no chunk rows (the writer made none; nothing here plants any under a capture)`);
 }
+type Audit = { actor_name: string | null; source: string | null; actor_context: Record<string, unknown> | null };
+/** 008's latest row of one action for a thought: who the function was told wrote it, and from where. */
+async function auditRow(id: string, action: "capture" | "update"): Promise<Audit | undefined> {
+  const [r] = await sql`SELECT actor_name, source, actor_context FROM thought_audit WHERE thought_id = ${id} AND action = ${action} ORDER BY created_at DESC LIMIT 1`;
+  return r as Audit | undefined;
+}
+/** The audit row a write through a server holding a key must leave (SMD-1541): the key's name, and the source named. */
+function judgeActor(label: string, a: Audit | undefined, source: string) {
+  assert(a !== undefined, `${label}: 008 has a row for the write`);
+  assert(a?.actor_name === "MCP_ACCESS_KEY", `${label}: 008's row names the key (SMD-1541) — change 69 passed no actor, so the row named nobody (got ${a?.actor_name})`);
+  assert(a?.source === source, `${label}: …and its source is ${source} (got ${a?.source})`);
+}
 
 // Everything below runs inside one try so the sidecars are dropped however it ends.
 try {
@@ -326,6 +350,7 @@ try {
   const after = await row(id, text);
   judgeEdit("update-thought-mcp", after, await oracle("update-thought-mcp", text), text);
   assert(after.metadata.via === "update-thought-mcp", "the patch is shallow-merged into metadata, in the function");
+  judgeActor("update-thought-mcp edit", await auditRow(id, "update"), "update-thought-mcp");
 
   // The concurrency check is the function's now, decided under the row's lock.
   const stale = await call(h, "update_thought", { id, content: "a lost update", if_unchanged_since: "2000-01-01T00:00:00Z" });
@@ -358,6 +383,7 @@ try {
   const after = await row(id, text);
   judgeEdit("enhanced-mcp", after, await oracle("enhanced-mcp", text), text);
   assert(after.metadata.type === "idea" && after.metadata.summary === "stubbed", "the re-classified metadata is merged in");
+  judgeActor("enhanced-mcp edit", await auditRow(id, "update"), "enhanced-mcp");
   const [side] = await sql`SELECT type, sensitivity_tier, importance FROM thoughts WHERE id = ${id}`;
   assert(side.type === "idea" && side.sensitivity_tier === "standard" && Number(side.importance) === 3, "the enhanced-thoughts columns are written beside the function, by the raw update that carries neither content nor vector");
 
@@ -368,6 +394,7 @@ try {
   const cid = String(c.structured?.thought_id);
   if (UUID.test(cid)) {
     judgeCapture("enhanced-mcp capture", await row(cid, captured), captured);
+    judgeActor("enhanced-mcp capture", await auditRow(cid, "capture"), "mcp"); // the tool's default `source`, as the metadata carries it
     assert(typeof c.structured?.content_fingerprint === "string" && c.structured.content_fingerprint.length === 64, "…and reports the fingerprint the function computed");
     const [cside] = await sql`SELECT type, source_type FROM thoughts WHERE id = ${cid}`;
     assert(cside.type === "idea" && cside.source_type === "mcp", "the enhanced-thoughts columns follow the capture");
@@ -397,6 +424,9 @@ try {
   assert(id !== null, "…and its thought");
   if (id) {
     judgeCapture("agent-memory-api writeback", await row(id, decision), decision);
+    const audit = await auditRow(id, "capture");
+    judgeActor("agent-memory-api writeback", audit, "agent_memory");
+    assert(audit?.actor_context?.runtime === "test", `…and the runtime that wrote back rides in actor_context (${JSON.stringify(audit?.actor_context)})`);
     const [m] = await sql`SELECT thought_id FROM agent_memories WHERE content = ${decision}`;
     assert(m?.thought_id === id, "the memory row points at the thought");
   }
@@ -414,6 +444,7 @@ try {
   const cid = String(c.json?.thought_id);
   if (UUID.test(cid)) {
     judgeCapture("open-brain-rest capture", await row(cid, captured), captured);
+    judgeActor("open-brain-rest capture", await auditRow(cid, "capture"), "dashboard"); // the route's default source_type, as the metadata carries it
     const [cside] = await sql`SELECT type, source_type, importance FROM thoughts WHERE id = ${cid}`;
     assert(cside.type === "idea" && cside.source_type === "dashboard" && Number(cside.importance) === 4, "the enhanced-thoughts columns follow the capture, without content or vector");
     // A re-capture of the same text: the function refreshes vector and metadata; the enhanced columns are the owner's.
@@ -431,6 +462,7 @@ try {
   const after = await row(id, text);
   judgeEdit("open-brain-rest", after, await oracle("open-brain-rest", text), text);
   assert(after.metadata.via === "open-brain-rest", "the metadata is merged in the function");
+  judgeActor("open-brain-rest edit", await auditRow(id, "update"), "open-brain-rest");
   const [side] = await sql`SELECT importance FROM thoughts WHERE id = ${id}`;
   assert(Number(side.importance) === 9, "the enhanced-thoughts column is written beside it");
   const meta = await send(h, "PUT", `/thought/${id}`, { status: "new" });
@@ -453,6 +485,7 @@ try {
   const cid = String(c.json?.thought_id);
   if (UUID.test(cid)) {
     judgeCapture("rest-api capture", await row(cid, captured), captured);
+    judgeActor("rest-api capture", await auditRow(cid, "capture"), "rest_api"); // the route's default `source`, as the metadata carries it
     assert(typeof c.json?.content_fingerprint === "string" && c.json.content_fingerprint.length === 64, "…and reports the fingerprint the function computed");
     await sql`UPDATE thoughts SET sensitivity_tier = 'personal' WHERE id = ${cid}`;
     const again = await send(h, "POST", "/capture", { content: captured });
@@ -466,6 +499,7 @@ try {
   const r = await send(h, "PUT", `/thought/${id}`, { content: text, importance: 5 });
   assert(r.status === 200 && r.json?.action === "updated", `PUT /thought/:id reaches a UUID row and answers updated (${r.status} ${JSON.stringify(r.json).slice(0, 80)})`);
   judgeEdit("rest-api", await row(id, text), await oracle("rest-api", text), text);
+  judgeActor("rest-api edit", await auditRow(id, "update"), "rest-api");
   const [side] = await sql`SELECT importance FROM thoughts WHERE id = ${id}`;
   assert(Number(side.importance) === 5, "the enhanced-thoughts column is written beside it");
 
@@ -492,6 +526,7 @@ try {
   assert(after.chunks === 0, "the previous vector's windows are gone (022)");
   assert(after.fp_ok && after.content === text, "the text and its fingerprint are untouched");
   assert(after.metadata.enrichment_fills?.toString() === "embedding", "the enrichment record is merged into metadata");
+  judgeActor("rest-api enrich", await auditRow(id, "update"), "rest-api");
 }
 
 // ── recipes/repo-learning-coach ──────────────────────────────────────────────
@@ -726,7 +761,8 @@ const DRIVEN_1524 = ["integrations/readwise-capture/index.ts", "recipes/editoria
 const TEXT_ONLY_1524 = ["recipes/adaptive-capture-classification/capture-with-gating.ts"];
 const BYPASS_1524 = ["integrations/kubernetes-deployment/index.ts", "recipes/vercel-neon-telegram/src/lib/db.ts", "recipes/schema-aware-routing/index.ts"];
 const DRIVEN_1544 = [BIO];
-for (const [ticket, files] of [["SMD-1228", [...DRIVEN, ...TEXT_ONLY]], ["SMD-1524", [...DRIVEN_1524, ...TEXT_ONLY_1524, ...BYPASS_1524]], ["SMD-1544", DRIVEN_1544]] as const) {
+const DRIVEN_1541 = DRIVEN.filter((f) => f.startsWith("integrations/") && f !== BIO); // change 69's five servers
+for (const [ticket, files] of [["SMD-1228", [...DRIVEN, ...TEXT_ONLY]], ["SMD-1524", [...DRIVEN_1524, ...TEXT_ONLY_1524, ...BYPASS_1524]], ["SMD-1544", DRIVEN_1544], ["SMD-1541", DRIVEN_1541]] as const) {
   const headed = [...new Bun.Glob("{recipes,integrations}/**/*.ts").scanSync({ cwd: ROOT })]
     .filter((f) => !f.includes("node_modules") && new RegExp(ticket).test(readFileSync(join(ROOT, f), "utf8"))).sort();
   assert(headed.join() === [...files].sort().join(), `every .ts file that names ${ticket} is driven here or read here, and vice versa (${headed.join(", ")})`);
