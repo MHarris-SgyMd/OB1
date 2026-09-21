@@ -1,0 +1,45 @@
+{
+  "note": "Generated from server-portable/tools.ts by scripts/gen-tools.mjs — do not edit by hand. tools.ts is the typed source of the MCP tool surface (SMD-1805); deploy/smoke.sh reads this JSON and check-fork-consistency.mjs round-trips it against the source.",
+  "tools": [
+    {
+      "name": "search",
+      "scope": "read"
+    },
+    {
+      "name": "fetch",
+      "scope": "read"
+    },
+    {
+      "name": "search_thoughts",
+      "scope": "read"
+    },
+    {
+      "name": "search_thoughts_keyword",
+      "scope": "read"
+    },
+    {
+      "name": "list_thoughts",
+      "scope": "read"
+    },
+    {
+      "name": "list_supersession_proposals",
+      "scope": "read"
+    },
+    {
+      "name": "thought_stats",
+      "scope": "read"
+    },
+    {
+      "name": "capture_thought",
+      "scope": "write"
+    },
+    {
+      "name": "update_thought",
+      "scope": "write"
+    },
+    {
+      "name": "delete_thought",
+      "scope": "write"
+    }
+  ]
+}

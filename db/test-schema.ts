@@ -96,7 +96,7 @@ function subst(sql: string, trgm = DEFAULT_TRGM_INDEX): string {
   );
 }
 
-const { assert, report } = createAssert();
+const { assert, total, docCheck, report } = createAssert();
 
 /** A unit vector of EMBEDDING_DIM width that is `1` at one position and 0 elsewhere. */
 function unit(at: number): string {
@@ -5023,6 +5023,21 @@ console.log("\n[42] Migration 043: query_log.tool's two shapes, and the table's 
     `INSERT INTO query_log (kind, tool, target_id) VALUES ('action', 'capture_thought/derived_from', $1) RETURNING id, tool`, [T])).rows[0];
   assert(citePointerOf(cite.tool) === "derived_from", "a cite row inserted under the documented shape reads back as a cite with its pointer");
   await db.query(`DELETE FROM query_log WHERE id = $1`, [cite.id]);
+}
+
+// db/README.md quotes this suite's assertion total in two places ("Expected
+// outcome" and the Testing block). It used to be edited by hand and drifted;
+// this holds every count the README gives for test-schema.ts to what the suite
+// actually ran (SMD-1805). A doc check, so it does not move the number it reads.
+console.log("\n[doc] db/README.md states this suite's own assertion total");
+{
+  const readme = readFileSync(new URL("./README.md", import.meta.url), "utf8");
+  const n = total();
+  const claims = [...readme.matchAll(/^.*\btest-schema\.ts\b.*$/gm)]
+    .flatMap((line) => [...line[0].matchAll(/(\d+)\s+(?:assertions|passed)/g)].map((x) => Number(x[1])));
+  docCheck(claims.length > 0, "db/README.md quotes test-schema.ts's assertion total at least once");
+  docCheck(claims.every((c) => c === n),
+    `every assertion count db/README.md gives for test-schema.ts is this run's ${n} (found ${[...new Set(claims)].join(", ") || "none"})`);
 }
 
 report();

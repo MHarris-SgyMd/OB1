@@ -50,7 +50,7 @@ if (!URL_) {
 }
 
 
-const { assert, skip, report } = createAssert();
+const { assert, skip, total, skipped, docCheck, report } = createAssert();
 
 /** Run migrate.ts as a subprocess so its real exit code and output are observed. */
 function migrate(...extra: string[]): Promise<{ code: number; out: string }> {
@@ -4005,5 +4005,22 @@ console.log("\n[18] Every schemas/*.sql applies over TCP with no Supabase role p
 }
 
 await sql.close();
+
+// db/README.md's Testing block quotes this suite's assertion total. The count
+// is lower when a group is skipped (PostgreSQL 18, or JIT off), so only a full
+// run — as CI's pg16-with-JIT job is — is compared to the headline (SMD-1805).
+console.log("\n[doc] db/README.md states this suite's assertion total (full runs only)");
+{
+  const readme = readFileSync(new URL("./README.md", import.meta.url), "utf8");
+  const n = total();
+  const claims = [...readme.matchAll(/^.*\btest-live\.ts\b.*$/gm)]
+    .flatMap((line) => [...line[0].matchAll(/(\d+)\s+assertions/g)].map((x) => Number(x[1])));
+  if (skipped() === 0) {
+    docCheck(claims.length > 0 && claims.every((c) => c === n),
+      `db/README.md quotes test-live.ts's ${n} assertions for a full run (found ${[...new Set(claims)].join(", ") || "none"})`);
+  } else {
+    console.log(`  ·  (doc) skipped — ${skipped()} group(s) did not run, so this ${n}-assertion run is not the full count the README states`);
+  }
+}
 
 report();
