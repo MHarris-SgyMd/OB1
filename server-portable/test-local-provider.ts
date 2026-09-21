@@ -5,6 +5,8 @@
  * Proves the provider is a configuration choice rather than a hard dependency:
  * the server sends both calls to OB1_LLM_BASE_URL, uses OB1_EMBEDDING_MODEL and
  * OB1_METADATA_MODEL, and sends NO Authorization header when no key is set.
+ * [8] is the other half: with OB1_CHAT_BASE_URL / OB1_CHAT_API_KEY the chat
+ * calls go to an endpoint of their own with its own credential (SMD-1902).
  *
  * The stub speaks the OpenAI-compatible shapes Ollama exposes at /v1. It asserts
  * on what the server SENDS as much as what it does with the reply, because that is
@@ -237,6 +239,90 @@ console.log("\n[7] A drifting `type` is normalised, not stored as a new category
 
   await sql.close();
   replyType = "idea";
+}
+
+console.log("\n[8] The chat calls have an endpoint of their own only when OB1_CHAT_BASE_URL or OB1_CHAT_API_KEY says so (SMD-1902)");
+{
+  // Function-level, not through the server: the server snapshots its
+  // environment once at boot (see [7]), so a second configuration needs a
+  // second process — and what is under test here is the resolver and the
+  // three diallers, which take the configuration as an argument. Cases [2]
+  // and [3] above are the server-level half: with neither chat knob set both
+  // calls went to one endpoint, keyless, exactly as before the split.
+  const { resolveEmbedConfig, providerCall, ProviderError } = await import("./embed.ts");
+  const { judgePair } = await import("./consolidate.ts");
+  const { extractEntities } = await import("./entities.ts");
+
+  // A second stand-in with its own log, so where each call landed is a fact
+  // about the request and not about the reply.
+  const seenB: { path: string; auth: string | null }[] = [];
+  let failB = false;
+  const providerB = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      const url = new URL(req.url);
+      await req.json();
+      seenB.push({ path: url.pathname, auth: req.headers.get("authorization") });
+      if (failB) return new Response("chat is down", { status: 503 });
+      return Response.json(url.pathname.endsWith("/embeddings")
+        ? { data: [{ embedding: [1, 0, 0] }] }
+        : { choices: [{ message: { content: JSON.stringify({ verdict: "unrelated", confidence: 0.9, reason: "", entities: [], relations: [] }) } }] });
+    },
+  });
+  const A = PROVIDER;
+  const B = `http://127.0.0.1:${providerB.port}/v1`;
+  const chatBody = { model: META_MODEL, messages: [{ role: "user", content: "x" }] };
+  const embBody = { model: EMB_MODEL, input: "x" };
+  const lastA = () => seen[seen.length - 1];
+  const lastB = () => seenB[seenB.length - 1];
+
+  // Neither chat knob: one endpoint, one key — the request of every deployment
+  // that predates the split. Remove the fallback in resolveProviderEndpoints
+  // and these fail.
+  const one = resolveEmbedConfig({ OB1_LLM_BASE_URL: A, OB1_LLM_API_KEY: "key-a" });
+  assert(one.chat.base === A && one.embeddings.base === A, "with no chat knob the chat endpoint IS the embeddings endpoint");
+  assert(one.chat.headers.Authorization === "Bearer key-a", "…with the same credential");
+  const beforeA = seen.length, beforeB = seenB.length;
+  await providerCall(one, "/chat/completions", chatBody);
+  assert(seen.length === beforeA + 1 && seenB.length === beforeB, "a chat call under one endpoint lands on it");
+  assert(lastA().path.endsWith("/chat/completions") && lastA().auth === "Bearer key-a", "…carrying the embeddings key");
+
+  // Both set: each path lands on its own endpoint with its own header.
+  const two = resolveEmbedConfig({ OB1_LLM_BASE_URL: A, OB1_LLM_API_KEY: "key-a", OB1_CHAT_BASE_URL: B, OB1_CHAT_API_KEY: "key-b" });
+  await providerCall(two, "/embeddings", embBody);
+  assert(lastA().path.endsWith("/embeddings") && lastA().auth === "Bearer key-a", "embeddings land on OB1_LLM_BASE_URL with OB1_LLM_API_KEY");
+  await providerCall(two, "/chat/completions", chatBody);
+  assert(lastB().path.endsWith("/chat/completions") && lastB().auth === "Bearer key-b", "chat lands on OB1_CHAT_BASE_URL with OB1_CHAT_API_KEY");
+  const nA = seen.length, nB = seenB.length;
+  await judgePair({ content: "older", createdAt: null }, { content: "newer", createdAt: null }, two);
+  await extractEntities("Ada met Grace in London", two);
+  assert(seen.length === nA && seenB.length === nB + 2, "the supersession judge and the entity extractor dial the chat endpoint too, never the embeddings one");
+  assert(seenB.slice(-2).every((s) => s.path.endsWith("/chat/completions") && s.auth === "Bearer key-b"), "…with its credential");
+
+  // A credential belongs to an endpoint: a different chat base is sent none
+  // unless it has its own; the same base spelled again shares the key; a chat
+  // key alone gives the shared endpoint a chat-only credential.
+  const own = resolveEmbedConfig({ OB1_LLM_BASE_URL: A, OB1_LLM_API_KEY: "key-a", OB1_CHAT_BASE_URL: B });
+  await providerCall(own, "/chat/completions", chatBody);
+  assert(lastB().auth === null, "a different chat endpoint with no OB1_CHAT_API_KEY is sent NO credential — OB1_LLM_API_KEY stays with the embeddings endpoint");
+  const same = resolveEmbedConfig({ OB1_LLM_BASE_URL: A, OB1_LLM_API_KEY: "key-a", OB1_CHAT_BASE_URL: `${A}/` });
+  assert(same.chat.base === A && same.chat.headers.Authorization === "Bearer key-a", "the same base spelled twice is one endpoint and shares the key");
+  const keyed = resolveEmbedConfig({ OB1_LLM_BASE_URL: A, OB1_CHAT_API_KEY: "key-c" });
+  assert(keyed.chat.base === A && keyed.chat.headers.Authorization === "Bearer key-c" && keyed.embeddings.headers.Authorization === undefined,
+         "OB1_CHAT_API_KEY alone gives the same endpoint a chat-only credential, and the embeddings call stays keyless");
+
+  // A failure names the endpoint that was dialled.
+  failB = true;
+  let msg = "";
+  try {
+    await providerCall(two, "/chat/completions", chatBody);
+  } catch (e) {
+    msg = (e as Error).message;
+    assert(e instanceof ProviderError && e.status === 503, "a chat failure is a ProviderError carrying its status");
+  }
+  assert(msg.includes(B) && !msg.includes(A), `a chat failure names the chat endpoint, not the embeddings one (${msg.slice(0, 80)})`);
+  failB = false;
+  providerB.stop();
 }
 
 server.stop();

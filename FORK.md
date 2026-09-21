@@ -68,14 +68,14 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Ninety-nine numbered changes on top of the pin. Seven fix defects found in an
+One hundred and two numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
 data layer (Phase 2). Ten (changes 31, 53, 55, 59, 79, 82, 86, 87, 88, and 89) ship no runtime change at
 all: each is a measurement that decided against building something.
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–99 are the numbered `###` sections** further down, which is
+sections. Changes **18–102 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -211,6 +211,15 @@ evals/eval-quant.ts              # change 81 (new file — vector, halfvec and b
 <4 vendored MCP servers, 1 sample> # change 78 (a McpServer built per request — per session in the cost recipe's after sample — in place of one shared and connect()ed to a fresh transport each time)
 <17 pin sites, 3 lockfiles>      # change 83 (@hono/mcp 0.1.1 → 0.1.5: the transport lets go of each POST it has answered; the after sample's sweep closes the transports it drops)
 <19 pin sites, 3 lockfiles, 15 servers, 20 SDK importers> # change 84 (SDK 1.30.0, @hono/mcp 0.3.2, hono 4.13.8, zod 4.6.5 together; the Accept patches removed; an @ts-types pragma on every SDK import so Deno types it)
+server-portable/tools.ts         # change 100 (new file — the typed source of the MCP tool surface: TOOLS as const, ToolName, visibleToolNames())
+server-portable/tools.json       # change 100 (new file — GENERATED from tools.ts by scripts/gen-tools.mjs; deploy/smoke.sh reads it)
+scripts/gen-tools.mjs            # change 100 (new file — writes tools.json from tools.ts; renderToolsJson() shared with the round-trip check)
+<4 suites + deploy/smoke.sh>     # change 100 (test-server/-auth/-e2e-sql/-agents and smoke.sh read the manifest; test-server's tools/list is the live drift guard; test-auth's mutating list is typed ToolName[])
+db/test-support.ts               # change 100 (createAssert gains total()/skipped()/docCheck — a doc check counted apart from the total it verifies)
+db/test-schema.ts, db/test-live.ts # change 100 (each holds db/README.md's quoted assertion total to the run's own; test-live only on a full run)
+scripts/check-fork-consistency.mjs # change 100 (grant privileges per group [SMD-1471]; every migration documented once and the count checked; tools.json round-tripped against tools.ts [SMD-1805])
+db/config.mjs                    # change 100 (grantRows() — every ROLE_GRANTS row undeduped, for the per-group privilege check)
+db/README.md                     # change 100 (the applied-migration count stated as a digit so the check can read it)
 docs/01-getting-started.md       # fix 6
 recipes/content-fingerprint-dedup/README.md  # fix 6
 recipes/email-history-import/README.md       # fix 6
@@ -16676,6 +16685,607 @@ words when the file is missing — where before the fourth pass's guard in check
 was followed by the older check's unguarded read, so a renamed example still
 aborted the whole script with an `ENOENT` trace after check 13 had reported
 properly. Suite unchanged: 38 probes, every pass-4 mutant as before.
+
+**Upstream status:** not sent — upstream has no `deploy/`; the stack is this
+fork's (change 16 and the migration plan's Phase 4).
+
+
+### 100. Two counted surfaces read one typed source instead of drifting by hand — the MCP tool list is a `ToolName`-typed manifest the suites and the smoke test read, `db/README.md`'s assertion totals and migration list are checked against what the suites and `db/migrations/` hold, and the grant check compares privileges, not just names (SMD-1805, SMD-1471)
+
+`server-portable/tools.ts` is the fork's ten tools as `const TOOLS = [{ name,
+scope }, …] as const satisfies readonly ToolEntry[]` — the single, typed place
+the surface is written. Because the names are `as const`, `ToolName` is a real
+union TypeScript checks a name against (a JSON import would widen every name to
+`string`), and `satisfies` fails a bad `scope` at the source. `scripts/gen-tools.mjs`
+writes `server-portable/tools.json` from it for `deploy/smoke.sh`, which is bash
+(and the deploy CI job has no bun); `check-fork-consistency.mjs` round-trips the
+two — regenerate in memory, compare to the committed copy — the way the codemod
+check round-trips the shim, so they cannot drift. `test-server.ts`,
+`test-auth.ts`, `test-e2e-sql.ts`, `test-agents.ts` and `smoke.sh` read the
+manifest in place of a hardcoded count or list, and the drift guards derive the
+expected surface per scope from `visibleToolNames({ write })` rather than a fixed
+number — so a gated or optional tool later changes what that returns, not a test.
+`test-server.ts`'s `tools/list` case is the live drift guard: it compares the
+running server to the manifest, so a `registerTool` added to or removed from
+`index.ts` without a manifest entry fails there. `test-auth.ts` still names the
+three mutating tools independently of the manifest — a manifest-and-server
+co-rename is caught — but as a `ToolName[]`, so a typo in that list is a compile
+error, not a runtime surprise. Before this the count was hardcoded in four suites
+and the smoke test, and the ticket's claim that it lived in five —
+`test-update-delete.ts` among them — was wrong; that suite asserts no count.
+`index.ts`'s `registerTool` name literals are left as they are: the live drift
+guard ties them to the manifest, and adopting the constants there (so the server
+registers from `ToolName`) is a deliberate follow-up.
+
+`db/README.md` quoted `test-schema.ts`'s and `test-live.ts`'s assertion totals
+by hand. `createAssert` gains `total()`, `skipped()` and a `docCheck` — counted
+apart from the headline total, so a check verifies that number without moving it
+— and each suite holds every count the README gives it to what the run
+produced (`test-live.ts` only on a full run, since a skipped group on
+PostgreSQL 18 or with JIT off legitimately lowers it). The migration list was
+edited by hand too and drifted an intro count once (SMD-1696);
+`check-fork-consistency.mjs` now holds every file under `db/migrations/` to
+being documented exactly once across "The migrations" table and the "024
+onward" map, the applied count stated as a digit and checked against the file
+count — distinct from check 5b, which only forbids two files sharing a number.
+
+The same script's grant check named every `ROLE_GRANTS` object in the README
+but never its privileges (SMD-1471). `db/config.mjs` gains `grantRows()` — every
+row undeduped, since an object carries a different set in two groups
+(`ob1_config`, `thought_audit`) — and the check now compares each group's
+documented privilege set to what the group grants, so a `SELECT` the docs claim
+but the config drops, or the reverse, fails with the object and the difference.
+
+**Upstream status:** not sent — upstream runs no tests and has none of these
+suites, the manifest, or the consistency script; this is the fork's own
+machinery. Steps 1–2 and 4–7 of SMD-1805 — the branch-protection ruleset, the
+merge queue, changelog fragments, the GHCR release job, frozen migrations, and
+the commit and workflow linters of SMD-1808 — are follow-ups; the release job
+and the frozen-migration check wait on SMD-1804's first tag.
+
+### 101. The chat calls can have an endpoint of their own — `OB1_CHAT_BASE_URL` and `OB1_CHAT_API_KEY` split `/chat/completions` from `/embeddings`, a credential belongs to an endpoint, and preflight reports and probes each by name (SMD-1902)
+
+`server-portable/embed.ts` held one `llmBase` and one header set, and
+`providerCall` appended `/embeddings` or `/chat/completions` to it. So the
+embedding of a capture and everything said about it by a chat model — the
+metadata extraction, the chunk blurbs of change 27, the entity extraction of
+change 30, the supersession judge of SMD-1294 — came from one provider. That
+ruled out the configuration people ask for first, local embeddings with a
+hosted tagger (the text stays home for the vector and leaves only for tags),
+and the one the routing ladder (SMD-1898) is built on: a second local runtime
+that serves chat only, beside Ollama — Edge0 (SMD-1880) has no embeddings
+endpoint at all.
+
+`EmbedConfig` now carries two `ProviderEndpoint`s, `embeddings` and `chat`,
+each `{ base, key, headers }`; `resolveProviderEndpoints` builds them and
+`resolveEmbedConfig` spreads them in, so the server, `db/reembed.ts`,
+`db/consolidate.ts`, `db/extract-entities.ts` and the evals resolve the pair by
+one rule. `providerCall` picks the endpoint by path and every message it
+builds names the base it dialled; the judge and the entity extractor, which
+keep their own `fetch` for their own deadline, read `cfg.chat`. The old fields
+are gone rather than aliased: a reader of `cfg.llmBase` meant "both" without
+saying so, and the compiler found each one.
+
+The rule for the credential is the part worth stating. `OB1_LLM_BASE_URL` (key
+`OB1_LLM_API_KEY`, else `OPENROUTER_API_KEY`) is the embeddings endpoint and,
+unless `OB1_CHAT_BASE_URL` names another, the chat endpoint too, key and all —
+a deployment that sets neither chat knob sends byte for byte what it sent
+before, which `test-local-provider.ts` [2]–[3] hold at the server and [8]
+holds at the resolver (drop the sharing and three assertions fail). A chat base
+that IS a different endpoint gets `OB1_CHAT_API_KEY` and nothing else. The
+ticket said "each knob falls back to its `OB1_LLM_*` value"; taken literally
+that hands a local chat model beside a hosted embedder the hosted provider's
+key, and since empty means unset throughout there would be no way to say "no
+key here" while `OB1_LLM_API_KEY` is set. A credential belongs to an endpoint,
+not to the environment. Two spellings of one base are one endpoint and share
+the key; `OB1_CHAT_API_KEY` alone gives the shared endpoint a chat-only
+credential. A hosted chat base with no key of its own is not papered over: it
+is the configuration preflight fails by name.
+
+`preflight.ts` resolved the base and key a second time by its own copy of the
+rule; it now reads `resolveProviderEndpoints`. Unsplit, the `model provider`
+row says the endpoint serves "embeddings and chat"; split, it says
+"embeddings" and a `chat provider` row names the other base. One
+`credentialRow` prints the embeddings credential and, when the chat knobs name
+an endpoint, a `chat credential` row — which also says when `OB1_LLM_API_KEY`
+is set and NOT sent there, where an operator expecting the inherited key would
+look. `--deep` runs two probes in two `try`s: a chat endpoint that is down
+fails the `metadata model` row, naming the chat base and its host, while the
+`embedding provider` row says what it found — one `try` around both had
+reported every chat failure as the embedding provider's, with "network
+reachability to openrouter.ai" as the remedy whatever the base was.
+`test-preflight.ts` [6] holds the rows, the exit code, that the key's value
+never prints, and the split `--deep` outcome against a stub embedder and a
+closed port.
+
+`deploy/.env.example` documents the pair as Option C (so check 14 requires
+`deploy/compose.yaml` to forward both, which it does), `server-portable/README.md`
+and `SETUP.md` carry the "half local" shape and its caveat: under it every
+capture's full text still leaves the host, for tagging, and nothing yet decides
+which content may — the choice of endpoint is the whole policy until SMD-1903.
+The defaults still share one base, so `checkEmbeddingDefaults`' "the three
+provider-facing defaults move together" stands. The timeout stays one knob.
+
+Two review passes: the failed-tagging note in `index.ts` named
+`env().OPENROUTER_API_KEY` (upstream's text) and now names the chat endpoint
+it dialled; the re-embed summary says where blurbs go; and the docs say that
+`OPENROUTER_API_KEY` belongs to the embeddings endpoint too, whatever its name
+suggests — local embeddings with OpenRouter for chat is `OB1_CHAT_API_KEY`,
+which preflight's fix line already said. Boyscout: the resolver builds the chat
+endpoint once and hands back the embeddings one when it has no key of its own
+and the same base, instead of stripping the slash twice and branching three
+ways.
+
+**Upstream status:** not sent — upstream has one provider constant and no
+preflight; this is the fork's own provider layer (change 16 and since).
+
+### 102. Every knob the server reads reaches the container — `deploy/compose.yaml` forwards the six `OB1_*` settings it did not, the server's `type Env` is the list check 14 holds the file to, and a name in a comment is no longer a forward (SMD-1843)
+
+Compose gives a container exactly the variables its `environment:` names.
+`deploy/compose.yaml`'s `server` block named sixteen and not
+`OB1_LLM_BASE_URL`, `OB1_METADATA_MODEL` or `OB1_QUERY_LOG` — nor
+`OB1_QUERY_LOG_RETENTION_DAYS`, `OB1_METADATA_TEMPERATURE` or
+`OB1_METADATA_REASONING`, which nobody had asked about. So the first stack
+this fork ran for real (podman machine, 2026-09-19; change 99 has the rest of
+that day) set `OB1_LLM_BASE_URL=http://host.containers.internal:11434/v1`,
+`OB1_METADATA_MODEL` and `OB1_QUERY_LOG=on` in `deploy/.env` and the container
+saw none of them, until a second `-f` file added the three lines — the
+override the dogfood stack has carried since. The `ollama` service's own
+comment said "the server needs no code change: OB1_LLM_BASE_URL points here";
+nothing pointed it. SETUP.md's query-log switch could not reach the container.
+
+**Why the rule that existed did not fire.** `check-fork-consistency.mjs` had a
+compose-forwards check: every `OB1_*` knob `.env.example` documents must be
+forwarded. It read "forwarded" as *any* `OB1_*` token in the
+compose file's text. The `ollama` comment carried `OB1_LLM_BASE_URL`;
+`ollama-pull`'s command line carried `${OB1_METADATA_MODEL:-qwen2.5:7b}`; both
+counted. `OB1_QUERY_LOG` was not documented in `.env.example` at all, so the
+rule never asked. A rule that reads text finds names where a parser finds
+nothing — the same class change 99's third pass replaced in check 13.
+
+**Measured before, on a throwaway project from `main`'s file** (podman 5,
+libkrun machine, macOS; `-p smd1843`, the three knobs in its env file, no
+`OPENROUTER_API_KEY`). The ticket's premise was that preflight fails the
+container for the missing credential. It does not. With nothing forwarded the
+server took `db/config.mjs`'s default, `http://127.0.0.1:11434/v1`, which
+`isLocalHostname` calls local — it *is*: the container's own loopback, with
+nothing on it — and preflight said
+
+```
+✓  model provider             http://127.0.0.1:11434/v1 (local — no credential needed)
+✓  provider credential        not required for a local endpoint
+✓  query log                  present; off by default — set OB1_QUERY_LOG=on to record. …
+·  embedding provider         not checked — pass --deep to call OpenRouter
+preflight OK
+```
+
+and the stack came up healthy. `capture_thought` then failed in **7 ms** with
+`Error: Unable to connect. Is the computer able to access the url?`, and the
+server log still ended at `Started server` (SMD-1849). Not a loud refusal at
+start; a healthy container that cannot capture. SMD-1875 is filed for the
+half of that this change does not close: preflight dials no local endpoint
+without `--deep`, so an operator whose URL is wrong still gets the same
+`OK`.
+
+**What changed.** `server.environment` forwards all six, five of them in the
+file's no-fallback form — `OB1_METADATA_MODEL: ${OB1_METADATA_MODEL:-}` and
+so on, so `db/config.mjs` keeps the default and `""` reaches the server, which
+its readers already treat as unset (`||` in `embed.ts` and `preflight.ts`, the
+`ENV` proxy in `config.mjs`, `queryLogEnabled`'s exact-`on` test,
+`queryLogRetentionDays`'s trim; `test-thoughts.ts` and `test-server.ts` now
+assert each of the six, as the chunk overlap's `""` case already was). The sixth is
+`OB1_LLM_BASE_URL: ${OB1_LLM_BASE_URL:-http://ollama:11434/v1}`: a fallback,
+deliberately, and not a copy of the code's default — that default is the right
+address from a shell on the host and the wrong one inside every container by
+construction, so the compose file names what "local" means inside its own
+network: the `ollama` service the `local-models` profile adds. The profile now
+needs nothing set, which is what its comment always said; an Ollama on the host
+is one line (`host.containers.internal`, or `host.docker.internal` on Docker
+Desktop); OpenRouter is the URL, the key and both hosted models.
+`ollama-pull`'s `${OB1_METADATA_MODEL:-qwen2.5:7b}` stays: a shell needs a
+value, and `checkEmbeddingDefaults` already holds that copy equal to the
+code's.
+
+Around it: `deploy/.env.example`'s provider section had "Option A: OpenRouter
+(default)", which the code has not been since the local flip — it is now the
+truth in three options (the stack's own Ollama, an Ollama on the host,
+OpenRouter), with a query-log block and the two extraction knobs; SMD-1876 is
+filed for the same sentence in SETUP.md (twice — the file also says the
+opposite) and `server-portable/README.md`'s table. `deploy/README.md`'s
+prerequisites no longer demand an OpenRouter key, and step 4 says what
+`SERVER_PORT` is for (the platform devcontainer publishing 8000 on the podman
+VM was the case met). SETUP.md's profile block shows its four lines as the
+defaults they now are. And `server-portable/index.ts`'s `type Env` declares
+`OB1_PG_POOL` and `OB1_TRGM_INDEX`, which are read without being declared —
+`store-sql.ts` through `process.env`, and `db/config.mjs`, which preflight
+imports, through its `ENV` proxy (the fourth pass corrected this sentence's
+first draft, which had placed that read in `preflight.ts`) — the rule's
+first run found them, as "forwarded but undeclared".
+
+**Held two ways.** Check 14 replaces the text rule. Its universe is what the
+*server* declares — the `OB1_*` and `OPEN_BRAIN_*` names in `index.ts`'s
+`type Env` block — and "forwarded" is read from the parsed document's
+`services.server.environment` (`Bun.YAML`, mapping or list form; an anchored
+block merged in is read, a name in a comment or on a command line is not).
+Each declared knob is forwarded under its own name as `${NAME}` or
+`${NAME:-…}` (a literal pins the operator out; another variable's name is a
+miswire) or excused by name in `NOT_FORWARDED` with its reason (`OB1_STORE`,
+change 97's), and documented in `.env.example`; a forwarded name the server
+does not declare is a typo or a dead knob; a documented knob no service
+forwards is a dead switch (the old rule, on the parsed mapping, once per
+name); `env_file` is refused on any service (it forwards a file the rule does
+not open); and `OB1_LLM_BASE_URL`'s fallback, if it has one, names a service
+in the file. Three probes hold the `type Env` reader and eight (seven at the
+first commit) the environment reader to their own text on every run; under a runtime with no `Bun.YAML` the
+check fails in words beside check 13's (no node on this Mac — measured by
+deleting `Bun.YAML` and importing the script; measured again after the
+seventh pass, which found pass 3 had broken it and put it back). Fourteen mutants on the real
+files bite: the ticket's three knobs each removed; the base-URL line commented
+out (its name still in the text — the old rule's hole, two reports, not zero);
+`${OB1_QUERY_LOGS:-}` under `OB1_QUERY_LOG`; a literal `"on"`; `env_file`; a
+fallback to `127.0.0.1` and one that is not a URL; the example's line removed;
+`# OB1_DEAD=1` added; `OB1_STORE` forwarded; `OB1_TYPO` forwarded; a new
+declared knob nobody forwards (two reports: unforwarded, undocumented); the
+block renamed away; and the server's block rewritten as a list, which passes.
+The "Full stack, no Supabase" job reads what the *container* saw: its
+`.env` sets `OB1_LLM_BASE_URL=http://host.docker.internal:11434/v1` and
+`OB1_QUERY_LOG=on` and no credential, and a step after bring-up greps
+preflight's report in the server log for that URL as the model provider,
+`ON (OB1_QUERY_LOG=on) here`, and `preflight OK` — the address is neither the
+code's default nor the compose fallback, so the line can only have come
+through `.env`. The stub `OPENROUTER_API_KEY` the job carried is gone: a local
+endpoint needs none, which is the ticket's Verify.
+
+**Measured after, same project, same env file.** Preflight:
+`model provider http://host.containers.internal:11434/v1 (local — no
+credential needed)`, `metadata model qwen2.5:7b`, `query log present; ON
+(OB1_QUERY_LOG=on) here`, `preflight OK`. One `capture_thought` through the
+host's Ollama: the row is there with `embedding_model = qwen3-embedding:4b`,
+`type = observation`, topics `container, model` — embedding and extraction
+both reached the host. `search_thoughts` found it at 67.6% in 113 ms and
+wrote one `query_log` row. The client's connection was reset at 9.9 s while
+the capture ran — SMD-1864, Bun's 10 s idle timeout on a capture the VM makes
+slow; the row landed after the client had gone, which is that ticket's
+partial-write shape and not this change's. `compose config` renders the six
+under `server` with the env file's values, and `OB1_LLM_BASE_URL=http://ollama:11434/v1`
+with an empty one. `check-fork-consistency` PASS, `tsc` clean, `test-thoughts`
+109, `test-server` 178, `test-preflight` 50 (2 skipped without a database).
+The dogfood stack's override file is now redundant; it comes out when the
+stack next restarts.
+
+**Review pass 1** (a cold read and a run-it reviewer with the mutation
+harness, both against the real files and the throwaway stack). The rule's
+pointers were wrong before its words were: `lineOf` searches the whole file,
+so a fault in the server's block was reported at *migrate's* line for every
+knob both forward — a literal `"on"` on the server's `OB1_TRGM_INDEX` at 151
+said `deploy/compose.yaml:102`, where the migrator's correct line sits (both
+reviewers; five knobs measured). A `lineIn(text, service, needle)` reads
+inside one service's block — from its key, at the indentation the first key
+under `services:` has, to the next key at that indentation — and takes a
+quoted or spaced key too (`"OB1_QUERY_LOG":` and `OB1_QUERY_LOG :` had lost
+the line altogether); six probes hold it, and breaking the reader to search
+from the top fails two of them. The fallback rule held its host to *a*
+service, so `http://ollama-pull:11434/v1`, `http://postgres:5432/v1` and the
+port-less `http://ollama/v1` all passed while preflight's own list of local
+service names was the literal `["ollama"]` in `preflight.ts` — a fallback the
+check accepted could be one the container refuses as remote (cold read,
+measured with `postgres`). `db/config.mjs` now exports
+`LOCAL_PROVIDER_SERVICES`, preflight reads it, and the rule wants exactly
+`http://<one of them>:11434/v1` for a service the file defines; renaming the
+list's entry fails the real file. Check 14 read the base file alone, so an
+overlay's `server: environment: { OB1_STORE: postgrest }` landed in the same
+container unread and a miswire under `migrate` passed (run-it): every
+`compose*.yaml` under `deploy/` is now held to the shape rule and the server's
+names, the base file alone to the universe. A bare list item `- OB1_QUERY_LOG`
+— compose's pass-through of the host's value, semantically `${OB1_QUERY_LOG}`
+— was refused as "a literal" (cold read); it is a forward now, and the shape
+message names what it found instead (a single dash keeps an empty value; `:?`
+aborts compose; bare `$X` and a nested `${…${…}}` are forms the rule does not
+read; a literal; a miswire). Beyond the rule: `store-sql.ts` read the pool
+size as `Number(process.env.OB1_PG_POOL ?? 10)`, so the `""` compose's
+no-fallback form sends is a pool of **0** (which Bun's SQL refuses at
+construction — the sixth pass measured it in the container — so the failure
+would have been preflight refusing at the data layer, loud, over a default
+that should have been 10) — the file kept `${OB1_PG_POOL:-10}`,
+a copy of the code's default its own comments call the recurring defect, and
+this change had declared the knob without asserting it (cold read);
+`poolSizeFrom` reads a positive integer or the default, the copy is gone, and
+the assertion sits with the six others. `metadataReasoning` lowercased but
+never trimmed, so `OB1_METADATA_REASONING=low ` from a `.env` file reached the
+provider as `"low "`; it trims like every sibling, and the example's line says
+what off/false/0 mean. And Option C of the example left its URL line
+commented beside the live key: with the new fallback a key alone dials the
+stack's Ollama and sends the key there — preflight warns and says OK, the
+first capture fails on a host that does not exist without the profile (cold
+read). The example says so in words; the failing capture is SMD-1875's case.
+Not taken: the example reader refuses `# OB1_X = on` with spaces, which
+compose's own dotenv accepts — the example has no such line, and check 13's
+reader is the same one; a duplicate or nested name in `type Env` — tsc owns
+the first, nothing writes the second. Eleven more mutants on the real files
+bite as their paragraphs say; the list form with a bare item passes; the
+throwaway client moved out of `server-portable/` into the scratchpad.
+
+**Review pass 2** (the same pair). The top findings were in pass 1's
+additions — the stop signal's shape, but each was a real hole, so one more
+pass. `lineIn` matched the needle as a *substring* of any non-comment line in
+the block (both reviewers): a longer name sharing the prefix, or a value
+naming the knob, earlier in the block took the pointer — `OB1_QUERY_LOG`
+resolved to `OB1_QUERY_LOG_RETENTION_DAYS`'s line when that came first, and a
+`command:` line carrying `$OB1_QUERY_LOG` before `environment:` was reported
+as the fault (the real file orders both the safe way, so right by accident).
+It matches keys alone now — a mapping key or a list item, bare or quoted with
+either quote, the name regex-escaped (a service named with a dot matched its
+hyphenated sibling) — and five more probes hold the prefix, the value mention,
+a single-quoted service key, list items and the dotted name; the run-it
+reviewer had also shown the quote handling was dead code for the needle and
+unprobed for the service key. The six `forwardForm` messages were unprobed
+(swapping two passed everything): six `FORM_PROBES` hold a phrase of each. The
+fallback rule refused a mixed-case service preflight lowercases into
+accepting; names compare case-insensitively, as DNS does. The base document
+was parsed twice; once now. Beyond the rule: SETUP.md's OpenRouter sentence —
+"set `OPENROUTER_API_KEY` and override both models" — omitted the URL this
+change made necessary, the very case the example's Option C warns of (cold
+read); it names all three. `type Env`'s line for `OB1_METADATA_REASONING`
+said "anything else disables it" while the code sends any other word as the
+effort (cold read); it says what the code does. Filed rather than taken:
+SMD-1881 — `poolSizeFrom` is the fifth reader deciding alone that `""` means
+unset (`numberOr`, `cacheTtlFromEnv`, `queryLogRetentionDays`,
+`resolveBackfillLimit`), one shared reader in `db/config.mjs`, across five
+files; the server README's provider table (SMD-1876); preflight dialling the
+fallback's service so a no-profile start fails in words (SMD-1875, the
+reviewer's own argument for it re-measured: `ollama` unresolvable, preflight
+OK, capture fails). Not taken: an overlay forwarding an undeclared knob to
+*migrate*, which reads `db/config.mjs`'s universe, not the server's. Two
+corrections to pass 1's text: breaking the reader to search from `services:`
+fails one probe, from the top of the file two (the run-it reviewer measured
+both); and `test-thoughts` is 114 assertions since pass 1, not 109.
+
+**Review pass 3** (the same pair). The run-it reviewer found tidy-ups alone,
+all in pass 1's code; the cold read found two holes in the mechanism's core,
+so not the stop signal yet. The decision itself had no probe: the three
+readers and the six messages were held, but a dropped `if (!server.has(k))`
+left the real file — which complies — passing, and the next knob added to
+`type Env` without a compose line would never have been reported (cold read;
+the drop-the-mechanism mutant, which this fork's own rule says to run). The
+decision is one pure function now, `serverEnvGapsIn(declared, documented,
+files, excused)`, returning kinds the caller turns into words, and nineteen
+`DECISION_PROBES` run it on in-memory documents: every kind once, the
+fallback three ways, an overlay's server held to the names, a knob forwarded
+only in an overlay not a dead switch. Dropping the unforwarded branch fails
+one probe, the undeclared branch two, inverting the dead switch seventeen,
+skipping overlays two. (Writing them found a flaw of their own: with the
+excuse map global, every probe reported `OB1_STORE`'s excuse as stale — the
+map is a parameter, the real run passes `NOT_FORWARDED`.) The universe was
+the hand-maintained `type Env`, so a module reading `process.env.OB1_X`
+directly slipped past — the class the rule's own message admits it met twice
+(cold read): every non-test server source is scanned for a direct read
+(`process.env.X`, `env.X`, `env?.X`, `env["X"]`, `ENV.X`, `bindings.X`) of a
+name the block does not declare, and fails at the file and line; two probes
+hold the reader, and a `process.env.OB1_POOL_SIZE` planted in `store-sql.ts`
+is reported at its line. The bare list item pass 1 had accepted is refused
+after all, on a measurement: under docker-compose v5.5 — the binary CI and
+this Mac's `podman compose` run — `- OB1_QUERY_LOG` does take deploy/.env's
+value, the process env winning over it, but with nothing set it is *absent*
+in the container where every other knob here is `""`, and the python
+podman-compose is said to read the process env alone (unmeasured: not
+installed here). One shape, `${NAME:-}`, and the message says what was
+measured. A mapping written as a list item (`- OB1_A: 1`, the slip compose
+rejects) stringified to `[object Object]` and the knob read as missing (cold
+read); it is refused as its own kind. `forwardForm` never saw the knob's
+name, so `${OB1_QUERY_LOG:-}x`, `${OB1_QUERY_LOG:+on}`, a `$$` in the
+default and a second expansion were all "another variable's name is a
+miswire" (both reviewers); it takes the name and says "the knob's own name
+with something the rule does not read around or inside it"; five more
+`FORM_PROBES`. A column-0 comment inside a service's block ended the block
+early and dropped the pointer to the bare filename (both reviewers); a
+comment does not end it, a top-level key does, one probe. The two extraction
+knobs sat under the example's "local models" heading though they apply to
+every endpoint (cold read); their own block. And the docblock of the rule
+check 14 replaced was still standing above it, describing a check that no
+longer existed; its history — six unforwarded knobs found when it was
+written — moved into check 14's own. Not taken: preflight resolving the
+fallback's service name at start (SMD-1875, argued again); a duplicate
+service key, which `Bun.YAML` reads last-wins and compose refuses outright,
+so it cannot reach a live stack; mixed case in `LOCAL_PROVIDER_SERVICES`
+itself, where the check and preflight agree exactly. Eleven mutants on the
+real files bite as above.
+
+**Review pass 4** (the same pair) — the stop signal. Both reviewers ranked
+pass 3's additions as the top findings, and each was a few lines: the
+decision probes covered `not-house-form` with a miswire and a literal but
+never the knob's own name with a refused tail, so the shape regex loosened to
+"starts with `${NAME`" passed everything (run-it); three probes now, and the
+loosened regex fails all three. `index.ts` was excluded from the read scan
+with no reason given (run-it); it is scanned — its typed reads through
+`env()` yield nothing, a `process.env.OB1_X` planted there is reported at its
+line — and the `env().X` accessor shape is read too. The scan stopped at
+`server-portable/`, while the container's process also loads `db/config.mjs`,
+which reads eight knobs through its `ENV` proxy — `OB1_TRGM_INDEX` among them,
+which the `type Env` comment had placed in `preflight.ts` (cold read);
+`db/config.mjs` is scanned, its one migrator-only knob excused by name in
+`READ_FOR_MIGRATOR` and the excuse held stale two ways, and a knob planted in
+the file is reported at its line. The undeclared-read pointer was the first
+mention of the name in the file, so a docblock above the read took it (both
+reviewers); the reader returns the read's own index, one probe holds that. A
+mapping key with no value (`OB1_A:`) was folded into the bare-item kind with
+the list item's remedy (cold read); one message names both shapes. A base
+file that failed to parse was reported "missing" beside check 13's parse
+error (cold read); check 14 says nothing then. No probe held the DNS-style
+name compare (run-it); one does. And the bring-up line in `deploy/README.md`,
+the compose header and SETUP.md ran the stack with no profile and no provider
+named, which now lands on the `ollama` fallback: they name the profile, and
+the README says in one sentence what happens without either — preflight OK,
+the first capture failing on the name (SMD-1875, argued a third time; not
+taken here). Left for the boyscout: the house-form shape is spelled three
+ways (the per-knob test, the fallback's, `forwardForm`'s partial regexes).
+Nine mutants on the real files bite. Counts at the stop: 8 `FORWARD_PROBES`,
+12 `LINE_PROBES`, 11 `FORM_PROBES`, 3 `ENV_SOURCE_PROBES`, 2 + 1
+`ENV_READ_PROBES`, 25 `DECISION_PROBES`; `test-thoughts` 114, `test-server`
+178, `test-preflight` 50 (2 skipped without a database); check 14 adds
+nothing measurable to the script's 0.8 s.
+
+**Review pass 5** (the same pair, over the whole branch, at the maintainer's
+call after the stop). One real defect, the author's, from pass 1:
+`LOCAL_PROVIDER_SERVICES` was inserted between `isLocalHostname`'s JSDoc and
+the function, so the `@param`/`@returns` block described a frozen array and
+the function had no doc (cold read); the constant sits above the block now.
+Two small holes in pass 3's scan: the walk of `server-portable/` was flat, so
+`shims/` and any later subdirectory were never read (cold read; a read
+planted in `shims/bun-unavailable.ts` is reported at its line now, the walk
+skips `node_modules`, and a self-check holds that the list reaches `shims/`
+— the run-it harness found the flat walk had no probe), and the fallback pin read the base file's server
+alone, so an overlay's `OB1_LLM_BASE_URL: ${OB1_LLM_BASE_URL:-https://…}`
+landed in the container unheld (cold read); every file's server is held,
+the service looked up in that file or the base, two probes, and the
+base-only rule fails one of them. Three record corrections from the run-it
+reviewer: main's server block named *sixteen* variables, not nineteen (that
+was `type Env`'s count after this change); the environment reader has eight
+probes since pass 3, not seven; and the "What changed" sentence placing
+`OB1_TRGM_INDEX`'s read in `preflight.ts` now says `db/config.mjs`. The
+run-it reviewer otherwise found nothing: `smoke.sh` unchanged and 9 of 9
+against the throwaway stack, the CI greps matching the live log under a C
+locale too, every documented knob read by a compose file, the script
+independent of the shell's environment, no `### 100.` on `main`. Not taken:
+comment- and string-awareness in the read scan (a mention spelling
+`process.env.OB1_X` in full above a real read takes the pointer, the verdict
+unchanged — a JavaScript comment stripper is its own hazard, and no scanned
+source has such a mention); the CI step reading `printenv` instead of the
+log (the log line proves preflight *read* the value, which is the claim);
+preflight resolving the fallback's name (SMD-1875, a fourth time); one
+shared numeric reader (SMD-1881); a universe derived from the reads rather
+than declared and held. For the boyscout: `index.ts` read from disk twice
+in check 14, the script's own path spelled per function, and the house-form
+shape spelled three ways.
+
+**Review pass 6** (the same pair, the whole branch; the run-it reviewer
+rebuilt the throwaway server from the branch tip, which nothing had done since
+pass 1 changed four server files). The rebuilt container: preflight names the
+host's Ollama, `qwen2.5:7b`, the query log `ON`; `smoke.sh` 9 of 9; a capture
+lands in 1.2 s with topics extracted, a search in 81 ms writes its
+`query_log` row — with both models warm the SMD-1864 reset does not fire. Two
+findings both reviewers made: `compat/supabase-sql/index.ts` — the shim
+sixteen extension and integration servers import — had the same
+`Number(process.env.OB1_PG_POOL ?? 10)` read `store-sql.ts` lost in pass 1;
+it has the same `poolSizeFrom` now, asserted in its own suite, and SMD-1881
+is one reader for both. And the sentence that read was fixed under was
+wrong: `Number("")` is 0, and Bun's SQL *refuses* a pool of 0 at construction
+(`options.max` must be at least 1 — measured in the container), so the server
+would have failed preflight at the data layer, loudly, over a default that
+should have been 10, rather than run with "a pool that opens nothing" as four
+sentences said; all four say what happens now. Beside the trimmed reasoning
+knob, the model and URL knobs were not trimmed, while the comment said "like
+every sibling" (cold read): one `stringOr` trims the three string knobs in
+`embed.ts`, and preflight reads them through it so the gate judges the values
+the server uses; and the trim's motivating sentence overstated its case —
+compose's own dotenv trims an unquoted value (measured, v5.5), so the case is
+a quoted `"low "` or another loader (run-it); the comment says so. Smaller:
+the fallback loop parsed each file's environment a second time (cold read;
+the first pass's maps are kept); the read-scan comment said `index.ts`'s typed
+reads "yield nothing" while `env().X` is matched (cold read; it says they are
+matched and declared by construction); SETUP.md said "all three" of four
+settings (cold read); the README's service table lacked the profile's two
+rows (run-it). Not taken: two preflight wordings outside the diff — a key
+beside a local endpoint prints two `provider credential` rows, and the skip
+line names OpenRouter for an Ollama provider; SMD-1875 (a fifth time);
+SMD-1876 for the server README's knob list.
+
+**Review pass 7** (the same pair). The run-it reviewer ran the CI job's shape
+locally with its exact `.env` — a second throwaway project, the three greps
+and the three `jq` lines verbatim (`host.docker.internal` this time), `smoke.sh`
+9 of 9, torn down — and the compat suite again, 179 of 179; pass 6's `stringOr`
+differs from the `||` it replaced only on whitespace-only strings and trims;
+preflight's new import of `embed.ts` costs nothing measurable and Workers
+never bundles preflight. The cold read found a regression of pass 3's:
+`DECISION_PROBES` parsed their YAML at module scope, so under a runtime with
+no `Bun.YAML` the script threw before any check reported — where the "Held two
+ways" paragraph promised, and had measured, a failure in words beside check
+13's. The probes hold text and parse inside the check, after its guard;
+measured again the same way, both checks fail in words and nothing throws.
+It also found the author's second orphaned docblock in one branch: `stringOr`
+sat between `resolveEmbedConfig`'s JSDoc and the function, exactly the
+misplacement pass 5 fixed for `LOCAL_PROVIDER_SERVICES`; the helpers sit above
+the block now. Pass 6 had the server trim its three string knobs while
+`db/config.mjs`'s `ENV` proxy — the migrator's reader, and preflight's through
+`TRGM_INDEX` — did not, so a quoted, padded `"qwen3-embedding:4b "` in
+`deploy/.env` would have been recorded by the migrator with the space and
+compared by preflight without it (cold read); the proxy trims (measured: it
+returns `qwen3-embedding:4b` for `" qwen3-embedding:4b "` and the default for
+spaces) — one rule for the string knobs, though not yet for the three flag
+knobs, as the eighth pass found. The dynamic `await import("./embed.ts")` in preflight is a static
+import like its siblings' (cold read). A base URL of slashes alone stripped to
+`""` — since before this change, the run-it reviewer measured on `main` — and
+`baseUrlOr` applies the unset rule after the strip; one assertion. And the
+universe's prefix limit is stated in the check's header and above: `type Env`'s
+other names — `DATABASE_URL`, the key material, `SUPABASE_*`, the legacy
+`MCP_ACCESS_KEY` — are the stack's wiring or another target's, and outside the
+rule (cold read: the legacy key is declared, read by `auth.ts`, and forwarded
+by nothing, which is the design). Not taken: the two pool readers (SMD-1881).
+
+**Review pass 8** (the same pair). The run-it reviewer found the defect in
+pass 7's own fix: the proxy trim reached `db/config.mjs`'s reads, but the
+server resolves the three flag knobs — `OB1_EMBEDDING_DIMENSIONS`,
+`OB1_CHUNK_CONTEXT`, `OB1_TRGM_INDEX` — by regex on the raw value it is
+handed, so `OB1_CHUNK_CONTEXT=" on "` was ON to the migrator (migration 013
+recording context on) and OFF to the server (bare windows embedded), with
+preflight agreeing with the migrator (measured: `migrator: true
+server: false` for the padded value). The cold read, independently, argued
+the trim belonged at the environment boundary rather than knob by knob, and
+showed the remaining readers: `OB1_LLM_API_KEY="sk-abc "` sent as the key
+plus a space while preflight reported the credential OK; `OB1_EMBEDDING_DIM=" "`
+truthy, `Number(" ")` = 0. Both taken as one rule in two places: `trimmedEnv`
+in `db/config.mjs` trims every string value of a record, `index.ts`'s
+`initEnv` applies it once to the server's environment and preflight once to
+`process.env`, so all nineteen declared knobs are trimmed at the boundary;
+and the three resolvers trim their own argument, so a padded flag decides the
+same wherever it is read — asserted on the server side for `" on "`, `" off "`
+and spaces alone, and `db/test-schema` 1082 of 1082 on the migrator's. The
+per-knob `stringOr` and `baseUrlOr` stay, as the rule for a caller that hands
+`resolveEmbedConfig` a raw record. Also from the run-it reviewer: a
+whitespace-only flag was "unrecognised, OFF" to the migrator before pass 7
+and is the default now — the intended reading, said here since no suite had
+probed it; `config.mjs`'s own `LLM_BASE_URL` export lacked the slash-only
+rule (a dead export today — nothing reads it — given the rule anyway). From
+the cold read: `forwardedEnvIn` registered an empty environment for a service
+before finding it unreadable, so `server: x` cascaded into one "never
+forwards" report per declared knob beside check 13's one — an unreadable
+service registers nothing, `no-server` stays quiet when check 13 has
+reported, two probes; and the `rel` inside the source walk shadowed the
+compose path's — renamed. Not taken: comment-awareness in the read scan (a
+third time); preflight resolving the fallback (SMD-1875, a sixth); the compat
+copy of `poolSizeFrom` — the shim's one import is `bun`, by design, and
+SMD-1881 owns the shared reader. Run-it otherwise: the proxy's blast radius
+measured across all eight reads (`Number(" 1024 ")` was 1024 already; a
+padded `OB1_BACKFILL_LIMIT=" 5 "` threw before and is 5 now); the server
+rebuilt from the tip, `smoke.sh` 9 of 9; `db/test-upgrade` 241, `test-live`
+579, `test-search-path` 23, `test-replay` 2, all green.
+
+**Tidied while the file was open** (no verdict changes): the house-form shape
+was spelled three ways in check 14 — the per-knob test, the fallback's own
+regex, and `forwardForm`'s partials; one `HOUSE_FORM(k)` with the default
+captured is the rule, and the fallback reads its capture, so a value the shape
+rule refused (a `$` in the default, say) draws its one report and no second
+from the fallback rule where before it drew two. `index.ts` was read from disk
+twice — once for the declaration, again in the read scan; once. And the
+script's own path, `const SELF`, was spelled inside eight functions (checks 6
+through 14, a pattern this file grew by accretion); one module constant. Run:
+every fallback, shape and scan mutant reports as before, a broken probe still
+names the script, and the runtime-without-`Bun.YAML` emulation still fails the
+two parser checks in words.
+
+**Numbered at the merge.** This section was 100 on its branch; `main` took 100
+(the tools manifest) and 101 (SMD-1902, the chat endpoint split) while the
+eight passes ran, so it is 102 — the hand renumber SMD-1917 is filed to end.
+SMD-1902's `OB1_CHAT_BASE_URL` and `OB1_CHAT_API_KEY` arrived declared,
+forwarded and documented, so check 14 passed the merged tree unchanged; its
+`resolveProviderEndpoints` now reads both bases through `baseUrlOr`. One thing
+the merge's local checks did not run was the CI job's own grep against a
+container rebuilt from the merged tree: SMD-1902 had put "— embeddings and
+chat" between the provider URL and preflight's "(local — no credential
+needed)" clause, and the step's exact pattern failed on the first CI run of
+PR #93 (caught: CI). The pattern reads the URL and the clause and nothing
+between them now, and the job's shape was rerun locally — a CI-shaped `.env`,
+a throwaway project rebuilt from the tree, the three greps, the three `jq`
+lines, `smoke.sh` 9 of 9 — before the second push.
 
 **Upstream status:** not sent — upstream has no `deploy/`; the stack is this
 fork's (change 16 and the migration plan's Phase 4).

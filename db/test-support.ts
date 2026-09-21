@@ -400,11 +400,24 @@ export function createAssert(): {
    * because it reports confidence it does not have. Only the report line shows it.
    */
   skip: (label: string, reason?: string) => void;
+  /** The headline count so far (passed + failed) — a suite reads it to verify
+   *  that db/README.md states its own total (SMD-1805). */
+  total: () => number;
+  /** Cases skipped so far — a suite checks a README total only on a full run. */
+  skipped: () => number;
+  /**
+   * A documentation self-check, counted APART from the headline total so it can
+   * verify that number without changing it (SMD-1805). A failure still fails the
+   * suite (report() exits non-zero), but it is not one of the `N assertions` the
+   * README states — otherwise the check would move the target it reads.
+   */
+  docCheck: (cond: unknown, label: string) => void;
   report: () => never;
 } {
   let passed = 0;
   let failed = 0;
   let skipped = 0;
+  let docFailed = 0;
   return {
     assert(cond: unknown, label: string): void {
       if (cond) {
@@ -419,14 +432,24 @@ export function createAssert(): {
       console.log(`  ·  ${label}${reason ? ` (${reason})` : ""}`);
       skipped++;
     },
+    total: () => passed + failed,
+    skipped: () => skipped,
+    docCheck(cond: unknown, label: string): void {
+      if (cond) console.log(`  ✓  (doc) ${label}`);
+      else {
+        console.error(`  ✗  (doc) ${label}`);
+        docFailed++;
+      }
+    },
     report(): never {
       console.log(`\n${"─".repeat(52)}`);
       console.log(
         `${passed + failed} assertions: ${passed} passed, ${failed} failed` +
-          (skipped ? `, ${skipped} skipped` : "")
+          (skipped ? `, ${skipped} skipped` : "") +
+          (docFailed ? `; ${docFailed} doc check(s) failed` : "")
       );
-      console.log(failed > 0 ? "FAIL\n" : "PASS\n");
-      process.exit(failed > 0 ? 1 : 0);
+      console.log(failed > 0 || docFailed > 0 ? "FAIL\n" : "PASS\n");
+      process.exit(failed > 0 || docFailed > 0 ? 1 : 0);
     },
   };
 }

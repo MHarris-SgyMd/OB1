@@ -15,8 +15,15 @@
 import { authenticate, hashKey, parseKeyRecords, canWrite, secretMatches } from "./auth.ts";
 import { actorPayload } from "./store.ts";
 import { createAssert } from "../db/test-support.ts";
+import { visibleToolNames, READ_TOOL_NAMES, type ToolName } from "./tools.ts";
 
 const { assert, report } = createAssert();
+
+// The mutating tools, named here independently of the manifest — a rename in
+// both the manifest (tools.ts) and the server is still caught — but typed as
+// ToolName, so a typo in this list is a compile error, not a runtime surprise
+// (SMD-1805).
+const MUTATING = ["capture_thought", "update_thought", "delete_thought"] as const satisfies readonly ToolName[];
 
 
 const WRITE_KEY = "w".repeat(64);
@@ -163,20 +170,17 @@ async function toolsFor(key: string, via: "header" | "query"): Promise<string[]>
 
 console.log("\n[7] A read-only key cannot see the tool that writes");
 {
+  // Counts derive from the manifest for each scope (SMD-1805); the mutating
+  // tools are checked by the independent, typed MUTATING list above — the count
+  // alone would pass if one write tool were swapped for another.
   const write = await toolsFor(WRITE_KEY, "header");
-  assert(write.length === 10, `write scope sees 10 tools (${write.length})`);
-  // The two mutating tools specifically — the count alone would pass if one
-  // write tool were swapped for another.
-  assert(write.includes("update_thought") && write.includes("delete_thought"),
-         "…including update_thought and delete_thought");
-  assert(write.includes("capture_thought"), "…including capture_thought");
+  assert(write.length === visibleToolNames({ write: true }).length, `write scope sees every tool (${write.length})`);
+  for (const t of MUTATING) assert(write.includes(t), `…including "${t}"`);
 
   const read = await toolsFor(READ_KEY, "header");
-  assert(read.length === 7, `read scope sees 7 tools (${read.length})`);
-  assert(!read.includes("update_thought") && !read.includes("delete_thought"),
-         "…and neither mutating tool is among them");
-  assert(!read.includes("capture_thought"), "capture_thought is absent, not merely refused");
-  for (const t of ["search", "fetch", "search_thoughts", "search_thoughts_keyword", "list_thoughts", "list_supersession_proposals", "thought_stats"]) {
+  assert(read.length === visibleToolNames({ write: false }).length, `read scope sees only the read tools (${read.length})`);
+  for (const t of MUTATING) assert(!read.includes(t), `"${t}" is absent from a read key, not merely refused`);
+  for (const t of READ_TOOL_NAMES) {
     assert(read.includes(t), `read scope keeps "${t}"`);
   }
 }
@@ -186,10 +190,10 @@ console.log("\n[8] Scope applies through the ?key= URL form too");
   // This is the form that ends up in logs and browser history, so it is the one
   // that most needs to be limitable.
   const read = await toolsFor(READ_KEY, "query");
-  assert(read.length === 7 && !read.includes("capture_thought"),
-    "a read-only key in the URL still cannot see capture_thought");
+  assert(read.length === visibleToolNames({ write: false }).length && MUTATING.every((t) => !read.includes(t)),
+    "a read-only key in the URL is scoped too — no mutating tool");
   const write = await toolsFor(WRITE_KEY, "query");
-  assert(write.includes("capture_thought"), "a write key in the URL still can");
+  assert(MUTATING.every((t) => write.includes(t)), "a write key in the URL still sees the mutating tools");
 }
 
 console.log("\n[9] Rejection still uses the JSON-RPC envelope");

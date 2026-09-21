@@ -1,5 +1,6 @@
 import { createAssert } from "../db/test-support.ts";
-import { queryLogEnabled, queryLogRetentionDays, QUERY_LOG } from "../db/config.mjs";
+import { queryLogEnabled, queryLogRetentionDays, QUERY_LOG, trimmedEnv } from "../db/config.mjs";
+import { visibleToolNames, READ_TOOL_NAMES } from "./tools.ts";
 /**
  * test-server.ts
  *
@@ -216,18 +217,12 @@ console.log("\n[9] tools/list exposes exactly the documented surface");
   });
   const b = await mcpBody(r);
   const tools = ((b?.result as { tools?: { name: string }[] })?.tools ?? []).map((t) => t.name).sort();
-  const expected = [
-    "capture_thought",
-    "delete_thought",
-    "fetch",
-    "list_supersession_proposals",
-    "list_thoughts",
-    "search",
-    "search_thoughts",
-    "search_thoughts_keyword",
-    "thought_stats",
-    "update_thought",
-  ];
+  // The live drift guard (SMD-1805): the surface a write key must see is
+  // derived from the typed manifest (tools.ts) for this scope — AUTH is a write
+  // key — so a tool added to or removed from index.ts without a matching
+  // manifest entry shows up here as a mismatch, and a gated tool later just
+  // changes what visibleToolNames() returns.
+  const expected = visibleToolNames({ write: true });
   assert(tools.length === expected.length, `${expected.length} tools registered (got ${tools.length})`);
   for (const t of expected) assert(tools.includes(t), `exposes "${t}"`);
 }
@@ -242,7 +237,9 @@ console.log("\n[10] Read tools are annotated read-only, capture is not");
   const b = await mcpBody(r);
   const tools = (b?.result as { tools?: { name: string; annotations?: { readOnlyHint?: boolean } }[] })?.tools ?? [];
   const byName = Object.fromEntries(tools.map((t) => [t.name, t]));
-  for (const t of ["search", "fetch", "search_thoughts", "list_thoughts", "list_supersession_proposals", "thought_stats"]) {
+  // Every read-scoped tool from the manifest (SMD-1805), so a read tool added
+  // without the read-only annotation fails here.
+  for (const t of READ_TOOL_NAMES) {
     assert(byName[t]?.annotations?.readOnlyHint === true, `"${t}" is readOnlyHint: true`);
   }
   assert(byName["capture_thought"]?.annotations?.readOnlyHint === false, `"capture_thought" is readOnlyHint: false`);
@@ -292,6 +289,14 @@ console.log("\n[12] Query log flag — off by default, so the guard writes nothi
   assert(queryLogEnabled({ OB1_QUERY_LOG: "on" }) === true, "\"on\" → on");
   assert(queryLogEnabled({ OB1_QUERY_LOG: "  ON  " }) === true, "\"  ON  \" → on (trimmed, case-insensitive)");
   assert(queryLogEnabled(undefined) === false && queryLogEnabled(null) === false, "undefined/null env → off");
+  // deploy/compose.yaml forwards both knobs as `${VAR:-}` since SMD-1843, so a
+  // composed server sees "" wherever deploy/.env set nothing.
+  assert(queryLogRetentionDays({ OB1_QUERY_LOG_RETENTION_DAYS: "" }) === QUERY_LOG.retentionDaysDefault,
+         "OB1_QUERY_LOG_RETENTION_DAYS='' — what compose forwards for an unset variable — is the default window, not 0 days");
+  // The boundary rule index.ts's initEnv and preflight apply to the whole environment (SMD-1843).
+  const trimmed = trimmedEnv({ OB1_LLM_API_KEY: " sk-abc ", OB1_EMBEDDING_DIM: " ", MCP_ACCESS_KEYS: "a:write:h1\nb:read:h2\n", PORT: "8000", n: 3, u: undefined });
+  assert(trimmed.OB1_LLM_API_KEY === "sk-abc" && trimmed.OB1_EMBEDDING_DIM === "" && trimmed.MCP_ACCESS_KEYS === "a:write:h1\nb:read:h2" && trimmed.PORT === "8000" && trimmed.n === 3 && trimmed.u === undefined,
+         "trimmedEnv trims every string value (a quoted key's trailing space, a dimension of spaces to ''), keeps inner newlines, and passes non-strings through");
 
   // The retention window prune_query_log uses, from the env or the default.
   assert(queryLogRetentionDays({}) === QUERY_LOG.retentionDaysDefault, `unset → the default ${QUERY_LOG.retentionDaysDefault} days`);

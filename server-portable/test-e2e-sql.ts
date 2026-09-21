@@ -18,6 +18,7 @@
 import { SQL } from "bun";
 import { createAssert, plantLegacyRow, resetSchema } from "../db/test-support.ts";
 import { join, dirname } from "node:path";
+import { TOOL_NAMES } from "./tools.ts";
 import { fileURLToPath } from "node:url";
 
 const URL_ = process.env.DATABASE_URL;
@@ -143,7 +144,7 @@ console.log("[1] The server runs with no Supabase configuration at all");
   });
   const t = await r.text();
   const b = JSON.parse(t.startsWith("{") ? t : (t.split("\n").find((l) => l.startsWith("data: ")) ?? "").slice(6));
-  assert(b.result?.tools?.length === 10, `all ten tools still registered (${b.result?.tools?.length})`);
+  assert(b.result?.tools?.length === TOOL_NAMES.length, `all ${TOOL_NAMES.length} tools still registered (${b.result?.tools?.length})`);
 }
 
 console.log("\n[2] capture_thought writes through SQL");

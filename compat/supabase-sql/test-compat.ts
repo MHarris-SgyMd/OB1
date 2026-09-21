@@ -14,11 +14,19 @@
  *   ../../db/with-postgres.sh bun test-compat.ts
  */
 
-import { createClient, PostgrestError } from "./index.ts";
+import { createClient, DEFAULT_PG_POOL, poolSizeFrom, PostgrestError } from "./index.ts";
 import { createAssert } from "../../db/test-support.ts";
 import { SQL } from "bun";
 
 const { assert, report } = createAssert();
+
+// [0] The pool size reads "" as unset — a compose file forwarding ${OB1_PG_POOL:-}
+// sends "" for an unset knob, and Number("") was 0 here until SMD-1843, a size
+// Bun's SQL refuses at construction.
+assert(poolSizeFrom(undefined) === DEFAULT_PG_POOL && poolSizeFrom("") === DEFAULT_PG_POOL && poolSizeFrom(" ") === DEFAULT_PG_POOL,
+       `OB1_PG_POOL unset or '' is the default pool (${DEFAULT_PG_POOL}), not Number('') = 0`);
+assert(poolSizeFrom("0") === DEFAULT_PG_POOL && poolSizeFrom("2.5") === DEFAULT_PG_POOL && poolSizeFrom("ten") === DEFAULT_PG_POOL && poolSizeFrom("4") === 4,
+       "a size Bun's SQL would refuse, or that is not a whole number, is the default; a positive integer is read");
 
 const URL_ = process.env.DATABASE_URL;
 if (!URL_) {

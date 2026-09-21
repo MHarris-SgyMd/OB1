@@ -29,6 +29,7 @@ import { mcpClient } from "./test-support.ts";
 import { hashKey, type Principal } from "./auth.ts";
 import { AgentResolver } from "./agents.ts";
 import type { AgentResolution, ThoughtStore } from "./store.ts";
+import { TOOL_NAMES } from "./tools.ts";
 
 const URL_ = requireDatabaseUrl("test-agents.ts");
 const { assert, report } = createAssert();
@@ -330,7 +331,7 @@ console.log("\n[11b] A server running against a database still at 009");
 
   const list = (await importer.rpc("tools/list")) as { error?: unknown; result?: { tools?: unknown[] } };
   assert(list.error === undefined, "tools/list still answers with no resolve_agent");
-  assert((list.result?.tools ?? []).length === 10, `…with the full write surface (${(list.result?.tools ?? []).length})`);
+  assert((list.result?.tools ?? []).length === TOOL_NAMES.length, `…with the full write surface (${(list.result?.tools ?? []).length})`);
 
   // The one that matters: a failed lookup must not poison the request behind it.
   const out = await importer.call("capture_thought", { content: "captured against an unmigrated database" });
