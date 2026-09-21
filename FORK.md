@@ -16878,6 +16878,13 @@ the metadata row passes. `db/test-live.ts` [16] holds the worker's pass key and
 model line under each setting, and that every request of a real pass named the
 metadata model with the knob unset.
 
+One review pass: the worker's `model:` line read the raw variable to say which
+knob named the judge, so a value the resolver treats as unset — empty, or the
+metadata model's own name again — was labelled the judge's own; it now reads
+the resolved pair. The pass also found main had moved under the branch
+(SMD-1843, PR #93) — this section's number and the `stringOr` rule for the new
+knob follow from the merge.
+
 **Upstream status:** not sent — upstream has no consolidation pass; the judge
 is the fork's (SMD-1294, change 54) and so is its knob.
 
