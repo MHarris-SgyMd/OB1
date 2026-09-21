@@ -80,6 +80,19 @@
  *      not a forward, which is how three knobs passed the text rule this
  *      replaces — and the decision is one pure function its probes run on
  *      in-memory documents (SMD-1843)
+ *  15. FORK.md is the front door and changes/ holds the record: every numbered
+ *      change from 18 on is one file changes/NNN-<slug>.md whose first line is
+ *      `# N. <title>` with the name's number, the numbers contiguous with no
+ *      duplicate (two branches taking one number fail on the tree that holds
+ *      both); a file is at most CHANGE_CAP_LINES lines, the files over it at
+ *      the split listed in OVERSIZE_AT_SPLIT with a ceiling they may only
+ *      shrink under (held stale two ways); FORK.md is under FORK_CEILING_BYTES,
+ *      carries no `### N.` section, and its index block equals what
+ *      scripts/fork-index.mjs renders from the directory; and every
+ *      "FORK.md change N" / "changes/NNN" citation in a tracked text file, and
+ *      every bare "change N" in the record itself, names a number that has a
+ *      file or a row of the 1–17 table. changes/smd-NNNN.md (SMD-1804's
+ *      fragments) are accepted by name and left to their own check (SMD-1917)
  *
  * Run: bun scripts/check-fork-consistency.mjs   (plain ESM; node runs it too,
  * except checks 13 and 14, which parse YAML with Bun.YAML and fail in words under node)
@@ -91,6 +104,7 @@ import { execFileSync } from "node:child_process";
 import { join, dirname, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { coreColumnCommentStatement, coreFunctionStatement, LOCAL_PROVIDER_SERVICES, ownedColumnCommentsIn, ownedFunctionsIn, supabaseIsmsIn } from "../db/config.mjs";
+import { CHANGES_DIR, FIRST_FILED, END as INDEX_END, START as INDEX_START, classifyChanges, readChanges, renderIndex } from "./fork-index.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const CATEGORIES = [
@@ -2767,6 +2781,176 @@ function checkFixtureRedaction() {
   }
 }
 checkFixtureRedaction();
+
+// ── 15: FORK.md is the front door; changes/ holds the record (SMD-1917) ──────
+//
+// FORK.md reached 1.23 MB and 17,700 lines — larger than any context window, so
+// every reader took a slice by grep — and its `### N.` sections were numbered by
+// hand in one file, so every merge of main renumbered a section and left the
+// code comments citing the old number silently wrong. Every change from 18 on is
+// one file under changes/ now, and this holds the layout: the names and the
+// numbers, the line cap, FORK.md's own size, the generated index, and every
+// citation of a change number in the tree.
+
+/** FORK.md's byte ceiling — the front door, not the record (~16k tokens; 58 KB at the split). */
+const FORK_CEILING_BYTES = 64 * 1024;
+/** A change file's line cap. The shape is in changes/README.md. */
+const CHANGE_CAP_LINES = 150;
+/**
+ * The files over the cap when the split landed, with the ceiling each may only
+ * shrink under (its line count then, rounded up to ten). Held stale two ways: an
+ * entry for a file that now fits under the cap, or for a number with no file,
+ * fails until it is dropped. 102 was cut to the shape at the split and is absent.
+ */
+const OVERSIZE_AT_SPLIT = {
+  24: 160, 28: 710, 30: 200, 32: 230, 33: 160, 34: 190, 35: 160, 36: 180, 37: 210, 38: 340, 39: 280,
+  40: 250, 41: 270, 51: 240, 52: 220, 56: 380, 57: 160, 58: 210, 60: 170, 61: 350, 63: 250, 64: 420, 66: 210,
+  67: 430, 69: 300, 70: 380, 71: 340, 72: 410, 73: 220, 74: 330, 75: 240, 76: 310, 77: 450, 78: 200, 79: 230, 80: 430,
+  81: 300, 84: 210, 90: 290, 91: 470, 93: 250, 94: 340, 95: 360, 97: 240, 98: 270, 99: 290,
+};
+
+/**
+ * Change numbers a text cites by the two explicit shapes every file may use:
+ * "FORK.md change N" (also "changes N and M", "FORK.md, change N", "FORK.md §N",
+ * "FORK.md section N"), a `changes/NNN` path, and db/README.md's migration map
+ * row "NNN change M". `record` adds the bare
+ * "change N" / "Change N" the record itself uses (FORK.md and the change files,
+ * where "change" means nothing else). Returns [{ n, index }].
+ */
+const EXPLICIT_CITATION = /\bFORK\.md,? (?:change|section|§) ?s? ?(\d+)((?:(?:,| and|–|—|-|\/) ?(?:change )?\d+)*)|\bchanges\/(\d{3})(?=-|\b)|\b\d{3} change (\d+)\b/g;
+const BARE_CITATION = /\b[Cc]hanges? (\d+)\b/g;
+function citedChangesIn(text, { record = false } = {}) {
+  const out = [];
+  for (const m of text.matchAll(EXPLICIT_CITATION)) {
+    if (m[3] !== undefined || m[4] !== undefined) { out.push({ n: Number(m[3] ?? m[4]), index: m.index }); continue; }
+    out.push({ n: Number(m[1]), index: m.index });
+    for (const t of m[2].matchAll(/\d+/g)) out.push({ n: Number(t[0]), index: m.index });
+  }
+  if (record) for (const m of text.matchAll(BARE_CITATION)) out.push({ n: Number(m[1]), index: m.index });
+  return out;
+}
+const CITATION_PROBES = [
+  ["see FORK.md change 58: the statements", false, [58]],
+  ["named in FORK.md changes 38 and 40 updated a", false, [38, 40]],
+  ["(FORK.md, change 64) and FORK.md §50 and FORK.md section 12", false, [64, 50, 12]],
+  ["[the file](changes/102-every-knob.md) and changes/018-long.md", false, [102, 18]],
+  ["changes/README.md and change 42 in prose", false, []],
+  ["change 42 in prose, Changes 3 and 4, changed 5 times", true, [42, 3]],
+  ["since FORK.md change 90, one per id a capture names", false, [90]],
+  ["024 change 45\n025 change 46\n044 SMD-1804", false, [45, 46]],
+];
+
+/**
+ * The layout decision, pure: what changes/ holds (as `{ name, text }` entries),
+ * FORK.md's text, the citations found in the tree, and the constants. Returns
+ * [{ where, kind, msg }]; the caller turns them into failures.
+ */
+function forkLayoutProblems({ entries, forkText, citations = [], ceilings = OVERSIZE_AT_SPLIT, cap = CHANGE_CAP_LINES, forkCeiling = FORK_CEILING_BYTES }) {
+  const problems = [];
+  const at = (where, kind, msg) => problems.push({ where, kind, msg });
+  const changes = classifyChanges(entries);
+  const { numbered, other } = changes;
+  for (const name of other) at(`${CHANGES_DIR}/${name}`, "bad-name", "is neither a numbered change (NNN-<slug>.md: three digits, a dash, lower-case ASCII words) nor a release fragment (smd-NNNN.md) — the index cannot list it");
+  if (numbered.length === 0) { at(CHANGES_DIR, "no-files", `holds no numbered change file — every change from ${FIRST_FILED} on is one`); }
+  const byN = new Map();
+  for (const c of numbered) {
+    if (byN.has(c.n)) at(`${CHANGES_DIR}/${c.name}`, "duplicate", `carries change number ${c.n}, which ${CHANGES_DIR}/${byN.get(c.n).name} already carries — two branches took one number; the later one takes the next free number and its citations move with it`);
+    else byN.set(c.n, c);
+  }
+  const hi = numbered.length ? numbered[numbered.length - 1].n : FIRST_FILED - 1;
+  for (let n = FIRST_FILED; n <= hi; n++) if (!byN.has(n)) at(CHANGES_DIR, "gap", `has no file for change ${n} — the numbers run contiguously from ${FIRST_FILED} to the highest (${hi})`);
+  for (const c of numbered) {
+    if (!c.heading) at(`${CHANGES_DIR}/${c.name}`, "heading", "does not open with `# N. <title>` on its first line — the index reads the title from it");
+    else if (c.heading.n !== c.n) at(`${CHANGES_DIR}/${c.name}`, "heading", `opens with \`# ${c.heading.n}.\` but its name says ${c.n} — the citations follow the name`);
+    const ceiling = ceilings[c.n];
+    if (c.lines > cap) {
+      if (ceiling === undefined) at(`${CHANGES_DIR}/${c.name}`, "oversize", `is ${c.lines} lines; a change file is at most ${cap} — a review pass is a table row, a finding worth more is a follow-up ticket (changes/README.md)`);
+      else if (c.lines > ceiling) at(`${CHANGES_DIR}/${c.name}`, "oversize", `is ${c.lines} lines; it was over the cap at the split and may only shrink — its ceiling in OVERSIZE_AT_SPLIT is ${ceiling}`);
+    } else if (ceiling !== undefined) at(SELF, "excuse-stale", `OVERSIZE_AT_SPLIT lists change ${c.n} (ceiling ${ceiling}) but ${CHANGES_DIR}/${c.name} is ${c.lines} lines, under the cap — drop the entry`);
+  }
+  for (const n of Object.keys(ceilings).map(Number)) if (!byN.has(n)) at(SELF, "excuse-stale", `OVERSIZE_AT_SPLIT lists change ${n}, which has no file — drop the entry`);
+  const bytes = Buffer.byteLength(forkText, "utf8");
+  if (bytes > forkCeiling) at("FORK.md", "fork-oversize", `is ${bytes} bytes; the front door stays under ${forkCeiling} — a change's record belongs in its file under ${CHANGES_DIR}/, not here`);
+  const sec = /^### (\d+)\. /m.exec(forkText);
+  if (sec) at("FORK.md", "section-in-fork", `carries a \`### ${sec[1]}.\` section — a numbered change is a file, ${CHANGES_DIR}/${String(sec[1]).padStart(3, "0")}-<slug>.md, and this file lists it`);
+  const s = forkText.indexOf(INDEX_START);
+  const e = forkText.indexOf(INDEX_END);
+  if (s < 0 || e < 0 || e < s) at("FORK.md", "index-missing", `has no \`${INDEX_START.slice(5, 24)}\` … \`${INDEX_END.slice(5, 22)}\` marker pair for the generated index`);
+  else if (forkText.slice(s + INDEX_START.length, e) !== "\n" + renderIndex(changes)) at("FORK.md", "index-stale", `the index between the markers is not what ${CHANGES_DIR}/ renders to — run \`bun scripts/fork-index.mjs\``);
+  for (const c of citations) {
+    if (c.n < 1 || (c.n >= FIRST_FILED && !byN.has(c.n))) at(c.where, "dangling", `cites change ${c.n}, which has no file under ${CHANGES_DIR}/ (1–${FIRST_FILED - 1} are FORK.md's table; the highest with a file is ${hi}) — a renumber left this behind, or the file is missing`);
+  }
+  return problems;
+}
+
+const LAYOUT_ENTRIES = (...files) => files.map(([name, text]) => ({ name, text }));
+const CH = (n, title = "A thing — a consequence (SMD-1)", body = "Body.\n") => [`${String(n).padStart(3, "0")}-a-thing.md`, `# ${n}. ${title}\n\n${body}`];
+const FORK_FOR = (entries, extra = "") => `# FORK\n\nintro\n\n${INDEX_START}\n${renderIndex(classifyChanges(entries))}${INDEX_END}\n\ntail\n${extra}`;
+const LONG = "line\n".repeat(200);
+const LAYOUT_PROBES = [
+  // [label, args, expected kinds]
+  ["a consistent layout", () => { const en = LAYOUT_ENTRIES(CH(18), CH(19), ["README.md", "x"], ["smd-1804.md", "---\n"]); return { entries: en, forkText: FORK_FOR(en), ceilings: {}, citations: [{ where: "a.ts:1", n: 19 }, { where: "b.md:2", n: 3 }] }; }, []],
+  ["a stray name", () => { const en = LAYOUT_ENTRIES(CH(18), ["notes.md", "x"]); return { entries: en, forkText: FORK_FOR(en), ceilings: {} }; }, ["bad-name"]],
+  ["two files with one number", () => { const en = LAYOUT_ENTRIES(CH(18), ["018-other.md", "# 18. Other\n"]); return { entries: en, forkText: FORK_FOR(en), ceilings: {} }; }, ["duplicate"]],
+  ["a gap", () => { const en = LAYOUT_ENTRIES(CH(18), CH(20)); return { entries: en, forkText: FORK_FOR(en), ceilings: {} }; }, ["gap"]],
+  ["a missing 18", () => { const en = LAYOUT_ENTRIES(CH(19)); return { entries: en, forkText: FORK_FOR(en), ceilings: {} }; }, ["gap"]],
+  ["no files at all", () => { const en = LAYOUT_ENTRIES(); return { entries: en, forkText: FORK_FOR(en), ceilings: {} }; }, ["no-files"]],
+  ["a heading with the wrong number", () => { const en = LAYOUT_ENTRIES(["018-a-thing.md", "# 19. A thing\n"]); return { entries: en, forkText: FORK_FOR(en), ceilings: {} }; }, ["heading"]],
+  ["no heading", () => { const en = LAYOUT_ENTRIES(["018-a-thing.md", "A thing\n"]); return { entries: en, forkText: FORK_FOR(en), ceilings: {} }; }, ["heading"]],
+  ["an unlisted file over the cap", () => { const en = LAYOUT_ENTRIES(CH(18, undefined, LONG)); return { entries: en, forkText: FORK_FOR(en), ceilings: {} }; }, ["oversize"]],
+  ["a listed file over its ceiling", () => { const en = LAYOUT_ENTRIES(CH(18, undefined, LONG)); return { entries: en, forkText: FORK_FOR(en), ceilings: { 18: 190 } }; }, ["oversize"]],
+  ["a listed file under its ceiling", () => { const en = LAYOUT_ENTRIES(CH(18, undefined, LONG)); return { entries: en, forkText: FORK_FOR(en), ceilings: { 18: 210 } }; }, []],
+  ["a listed file that now fits", () => { const en = LAYOUT_ENTRIES(CH(18)); return { entries: en, forkText: FORK_FOR(en), ceilings: { 18: 210 } }; }, ["excuse-stale"]],
+  ["a listing with no file", () => { const en = LAYOUT_ENTRIES(CH(18)); return { entries: en, forkText: FORK_FOR(en), ceilings: { 44: 210 } }; }, ["excuse-stale"]],
+  ["FORK.md over its ceiling", () => { const en = LAYOUT_ENTRIES(CH(18)); return { entries: en, forkText: FORK_FOR(en, "x".repeat(100)), ceilings: {}, forkCeiling: 150 }; }, ["fork-oversize"]],
+  ["a numbered section left in FORK.md", () => { const en = LAYOUT_ENTRIES(CH(18)); return { entries: en, forkText: FORK_FOR(en, "\n### 19. Left behind\n"), ceilings: {} }; }, ["section-in-fork"]],
+  ["no index markers", () => { const en = LAYOUT_ENTRIES(CH(18)); return { entries: en, forkText: "# FORK\nno markers\n", ceilings: {} }; }, ["index-missing"]],
+  ["a stale index", () => { const en = LAYOUT_ENTRIES(CH(18), CH(19)); return { entries: en, forkText: FORK_FOR(en.slice(0, 1)), ceilings: {} }; }, ["index-stale"]],
+  ["a citation above the highest", () => { const en = LAYOUT_ENTRIES(CH(18)); return { entries: en, forkText: FORK_FOR(en), ceilings: {}, citations: [{ where: "a.ts:1", n: 19 }] }; }, ["dangling"]],
+  ["a citation of change 0", () => { const en = LAYOUT_ENTRIES(CH(18)); return { entries: en, forkText: FORK_FOR(en), ceilings: {}, citations: [{ where: "a.ts:1", n: 0 }] }; }, ["dangling"]],
+  ["a citation of a gapped number", () => { const en = LAYOUT_ENTRIES(CH(18), CH(20)); return { entries: en, forkText: FORK_FOR(en), ceilings: {}, citations: [{ where: "a.ts:1", n: 19 }] }; }, ["gap", "dangling"]],
+];
+
+const SKIP_DIRS = new Set([".git", "node_modules", ".planning", ".cf-out", ".claude", "dist", "build", ".wrangler"]);
+/** Every non-binary, non-ignored file under the tree, as repo-relative paths. */
+function trackedTextFiles(dir = ROOT, out = []) {
+  for (const name of readdirSync(dir).sort()) {
+    const full = join(dir, name);
+    const st = statSync(full);
+    if (st.isDirectory()) { if (!SKIP_DIRS.has(name)) trackedTextFiles(full, out); continue; }
+    if (BINARY_FILES.test(name) || st.size > 4 * 1024 * 1024) continue;
+    out.push(relative(ROOT, full).split(sep).join("/"));
+  }
+  return out;
+}
+
+function checkForkLayout() {
+  for (const [text, record, want] of CITATION_PROBES) {
+    const got = citedChangesIn(text, { record }).map((c) => c.n);
+    if (JSON.stringify(got) !== JSON.stringify(want)) fail(SELF, `check 15's citation reader returns [${got}] for ${JSON.stringify(text)}, expected [${want}] (its own probe)`);
+  }
+  for (const [label, args, want] of LAYOUT_PROBES) {
+    const got = forkLayoutProblems(args()).map((p) => p.kind);
+    if (JSON.stringify(got) !== JSON.stringify(want)) fail(SELF, `check 15's layout decision reports [${got}] for ${label}, expected [${want}] (its own probe)`);
+  }
+
+  const forkText = readFileSync(join(ROOT, "FORK.md"), "utf8");
+  const dir = join(ROOT, CHANGES_DIR);
+  const entries = existsSync(dir)
+    ? readdirSync(dir).filter((n) => n.endsWith(".md")).sort().map((name) => ({ name, text: readFileSync(join(dir, name), "utf8") }))
+    : [];
+  const citations = [];
+  for (const rel of trackedTextFiles()) {
+    const text = readFileSync(join(ROOT, rel), "utf8");
+    const record = rel === "FORK.md" || rel.startsWith(`${CHANGES_DIR}/`);
+    for (const c of citedChangesIn(text, { record })) {
+      const line = text.slice(0, c.index).split("\n").length;
+      citations.push({ where: `${rel}:${line}`, n: c.n });
+    }
+  }
+  for (const p of forkLayoutProblems({ entries, forkText, citations })) fail(p.where, `${p.msg} (SMD-1917)`);
+}
+checkForkLayout();
 
 // No display-time filter. One excused `_template` violations, for a placeholder
 // link that contributionDirs() has skipped since the filter was written — so
