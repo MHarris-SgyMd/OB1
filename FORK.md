@@ -16858,6 +16858,41 @@ the first, nothing writes the second. Eleven more mutants on the real files
 bite as their paragraphs say; the list form with a bare item passes; the
 throwaway client moved out of `server-portable/` into the scratchpad.
 
+**Review pass 2** (the same pair). The top findings were in pass 1's
+additions — the stop signal's shape, but each was a real hole, so one more
+pass. `lineIn` matched the needle as a *substring* of any non-comment line in
+the block (both reviewers): a longer name sharing the prefix, or a value
+naming the knob, earlier in the block took the pointer — `OB1_QUERY_LOG`
+resolved to `OB1_QUERY_LOG_RETENTION_DAYS`'s line when that came first, and a
+`command:` line carrying `$OB1_QUERY_LOG` before `environment:` was reported
+as the fault (the real file orders both the safe way, so right by accident).
+It matches keys alone now — a mapping key or a list item, bare or quoted with
+either quote, the name regex-escaped (a service named with a dot matched its
+hyphenated sibling) — and five more probes hold the prefix, the value mention,
+a single-quoted service key, list items and the dotted name; the run-it
+reviewer had also shown the quote handling was dead code for the needle and
+unprobed for the service key. The six `forwardForm` messages were unprobed
+(swapping two passed everything): six `FORM_PROBES` hold a phrase of each. The
+fallback rule refused a mixed-case service preflight lowercases into
+accepting; names compare case-insensitively, as DNS does. The base document
+was parsed twice; once now. Beyond the rule: SETUP.md's OpenRouter sentence —
+"set `OPENROUTER_API_KEY` and override both models" — omitted the URL this
+change made necessary, the very case the example's Option C warns of (cold
+read); it names all three. `type Env`'s line for `OB1_METADATA_REASONING`
+said "anything else disables it" while the code sends any other word as the
+effort (cold read); it says what the code does. Filed rather than taken:
+SMD-1881 — `poolSizeFrom` is the fifth reader deciding alone that `""` means
+unset (`numberOr`, `cacheTtlFromEnv`, `queryLogRetentionDays`,
+`resolveBackfillLimit`), one shared reader in `db/config.mjs`, across five
+files; the server README's provider table (SMD-1876); preflight dialling the
+fallback's service so a no-profile start fails in words (SMD-1875, the
+reviewer's own argument for it re-measured: `ollama` unresolvable, preflight
+OK, capture fails). Not taken: an overlay forwarding an undeclared knob to
+*migrate*, which reads `db/config.mjs`'s universe, not the server's. Two
+corrections to pass 1's text: breaking the reader to search from `services:`
+fails one probe, from the top of the file two (the run-it reviewer measured
+both); and `test-thoughts` is 114 assertions since pass 1, not 109.
+
 **Upstream status:** not sent — upstream has no `deploy/`; the stack is this
 fork's (change 16 and the migration plan's Phase 4).
 

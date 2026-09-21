@@ -82,7 +82,12 @@ type Env = {
   OB1_METADATA_MODEL?: string;
   /** Sampling temperature for extraction. Defaults to 0 — see metadataTemperature. */
   OB1_METADATA_TEMPERATURE?: string;
-  /** "on" to let a thinking model reason; anything else disables it. Default off. */
+  /**
+   * Whether a thinking model reasons before extracting. Unset, off/false/0: no
+   * reasoning pass (`reasoning_effort: none`); on/true/1: the model's default
+   * effort; any other word (low, medium, high) is sent as the effort. See
+   * embed.ts metadataReasoning.
+   */
   OB1_METADATA_REASONING?: string;
   /** Any OpenAI-compatible base URL. Point it at Ollama for a fully local brain. */
   OB1_LLM_BASE_URL?: string;

@@ -2218,8 +2218,13 @@ function forwardedEnvIn(doc) {
 function lineIn(text, service, needle) {
   const lines = text.split("\n");
   const comment = (l) => /^\s*#/.test(l) || !l.trim();
-  const isKey = (l, name) => new RegExp(`^\\s*"?${name}"?\\s*:`).test(l);
-  const top = lines.findIndex((l) => /^"?services"?\s*:/.test(l));
+  // A KEY spelled `name`, `"name"` or `'name'` — as a mapping key (`name:`) or
+  // a list item (`- name=…`, `- name`). Keys only: the second review pass
+  // found a substring match handing the pointer to `OB1_QUERY_LOG_RETENTION_DAYS`
+  // for `OB1_QUERY_LOG`, and to a `command:` line that named the knob.
+  const esc = (n) => n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const isKey = (l, name) => new RegExp(`^\\s*(?:-\\s*)?["']?${esc(name)}["']?\\s*(?:[:=]|$)`).test(l);
+  const top = lines.findIndex((l) => /^["']?services["']?\s*:/.test(l));
   if (top < 0) return 0;
   const firstKey = lines.findIndex((l, i) => i > top && !comment(l));
   if (firstKey < 0) return 0;
@@ -2229,7 +2234,7 @@ function lineIn(text, service, needle) {
   if (start < 0) return 0;
   let stop = lines.findIndex((l, i) => i > start && (atIndent(l) || /^\S/.test(l)));
   if (stop < 0) stop = lines.length;
-  const i = lines.findIndex((l, i) => i > start && i < stop && !comment(l) && (isKey(l, needle) || l.replace(/\s+#.*$/, "").includes(needle)));
+  const i = lines.findIndex((l, i) => i > start && i < stop && !comment(l) && isKey(l, needle));
   return i < 0 ? 0 : i + 1;
 }
 const LINE_PROBES = [
@@ -2240,6 +2245,16 @@ const LINE_PROBES = [
   ["services:\n  server:\n    environment:\n      OB1_A : ${OB1_A:-}\n", "server", "OB1_A", 4],
   ["services:\n  server:\n    environment:\n      OB1_B: 1\n  ollama:\n    environment:\n      OB1_A: 1\n", "server", "OB1_A", 0],
   ["services:\n    server:\n        environment:\n            OB1_A: 1\n", "server", "OB1_A", 4],
+  // A longer name sharing the prefix, and a value that names the knob, come first — neither is the key.
+  ["services:\n  server:\n    environment:\n      OB1_A_B: 1\n      OB1_AB: 1\n      OB1_A: 1\n", "server", "OB1_A", 6],
+  ["services:\n  server:\n    command: [\"x\", \"$OB1_A\"]\n    environment:\n      OB1_B: ${OB1_A:-}\n      OB1_A: 1\n", "server", "OB1_A", 6],
+  ["services:\n  'server':\n    environment:\n      OB1_A: 1\n", "server", "OB1_A", 4],
+  ["services:\n  server:\n    environment:\n      - OB1_B=1\n      - OB1_A\n", "server", "OB1_A", 5],
+  ["services:\n  a-b:\n    environment:\n      OB1_A: 1\n  a.b:\n    environment:\n      OB1_A: 1\n", "a.b", "OB1_A", 7],
+];
+const FORM_PROBES = [
+  // [value, a phrase the message must carry]
+  ["${X-a}", "single dash"], ["${X:?a}", "aborts compose"], ["$X", "bare"], ["${X:-${Y}}", "nested"], ["on", "literal"], ["${Y:-}", "miswire"],
 ];
 
 /** What a value that is not `${NAME}` / `${NAME:-…}` is, for the message. */
@@ -2285,6 +2300,9 @@ function checkServerEnvForwarded() {
     const got = lineIn(yaml, service, needle);
     if (got !== line) fail(SELF, `service-line reader no longer reports line ${line} for \`${needle}\` under \`${service}\` (reported ${got}): ${JSON.stringify(yaml)}`);
   }
+  for (const [value, phrase] of FORM_PROBES) {
+    if (!forwardForm(value).includes(phrase)) fail(SELF, `forward-form message for ${JSON.stringify(value)} no longer says "${phrase}": ${JSON.stringify(forwardForm(value))}`);
+  }
   for (const [yaml, kinds, server] of FORWARD_PROBES) {
     const got = forwardedEnvIn(Bun.YAML.parse(yaml));
     const gotKinds = got.gaps.map((g) => g[0]);
@@ -2314,7 +2332,7 @@ function checkServerEnvForwarded() {
   // the universe (declared → forwarded → documented) and the fallback.
   const dir = join(ROOT, "deploy");
   const files = readdirSync(dir).filter((f) => COMPOSE_FILE.test(f) && statSync(join(dir, f)).isFile()).sort();
-  let server = null, baseText = null;
+  let server = null, baseText = null, baseDoc = null;
   const anywhere = new Set();
   for (const name of files) {
     const frel = `deploy/${name}`;
@@ -2346,6 +2364,7 @@ function checkServerEnvForwarded() {
     }
     if (name === "compose.yaml") {
       baseText = text;
+      baseDoc = doc;
       server = forwarded.get("server") ?? null;
       if (!server && !gaps.some(([kind]) => kind === "no-services")) fail(rel, `has no \`server\` service — check 14 reads what it forwards to the server (SMD-1843)`);
     }
@@ -2376,9 +2395,10 @@ function checkServerEnvForwarded() {
   const base = server.get("OB1_LLM_BASE_URL");
   const fb = /^\$\{OB1_LLM_BASE_URL:-(.+)\}$/.exec(base ?? "");
   if (fb) {
-    const m = /^http:\/\/([a-z0-9][a-z0-9_-]*):11434\/v1$/.exec(fb[1]);
-    const doc = Bun.YAML.parse(baseText);
-    const ok = m && LOCAL_PROVIDER_SERVICES.includes(m[1]) && doc?.services && m[1] in doc.services;
+    // Names compare as DNS and preflight's isLocalHostname do: case-insensitively.
+    const m = /^http:\/\/([A-Za-z0-9][A-Za-z0-9_.-]*):11434\/v1$/.exec(fb[1]);
+    const host = m ? m[1].toLowerCase() : null;
+    const ok = host && LOCAL_PROVIDER_SERVICES.includes(host) && Object.keys(baseDoc.services).some((s) => s.toLowerCase() === host);
     if (!ok) fail(at("OB1_LLM_BASE_URL"), `OB1_LLM_BASE_URL falls back to \`${fb[1]}\` — the fallback is \`http://<service>:11434/v1\` for a service this file defines and db/config.mjs's LOCAL_PROVIDER_SERVICES names (${LOCAL_PROVIDER_SERVICES.map((n) => `\`${n}\``).join(", ")}: what preflight calls local), the one address that means something inside the compose network; any other default belongs in db/config.mjs or the operator's deploy/.env (SMD-1843)`);
   }
 }
