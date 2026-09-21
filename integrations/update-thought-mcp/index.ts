@@ -183,9 +183,10 @@ function buildServer(principal: Principal): McpServer {
           p_embedding: embedding,
           p_if_unchanged_since: if_unchanged_since ?? null,
           p_embedding_model: embedding ? EMBEDDING_MODEL : null,
-          // 008's actor (SMD-1541): the key's name, and this server as `via` (kept in
-          // actor_context); the row's source stays its metadata's, by the trigger's
-          // own reading. Without the name the audit row named nobody.
+          // 008's actor (SMD-1541; the trigger's body is 025's now): the key's name,
+          // and this server as `via`, kept in actor_context; the row's source stays
+          // its metadata's, by the trigger's own reading. Without the name the audit
+          // row named nobody.
           p_actor: { name: principal.name, via: "update-thought-mcp" },
         });
 

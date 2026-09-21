@@ -89,6 +89,16 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 // left it off _shared/auth.ts), so the name is the variable's — the name
 // auth.ts gives the same legacy key where a server does use the module.
 const ACTOR_NAME = "MCP_ACCESS_KEY";
+// The actor every write here passes — p_actor on update_thought, `actor` in
+// upsert_thought's payload — for 008's audit row (the trigger's body is 025's
+// now; 010 and 025 redefined it whole): the key's name, and this server as
+// `via`, which the trigger keeps in actor_context. No source: the row's
+// `source` is its own metadata.source, read by the trigger, so the column says
+// where the thought came from and actor_context which door wrote it. Without
+// the name the row named nobody. When SMD-1798 moves this file onto
+// MCP_ACCESS_KEYS, `name` becomes the principal's — extensions/test-writes.ts
+// runs under the legacy key alone and would not notice a stale constant.
+const ACTOR = { name: ACTOR_NAME, via: "rest-api" };
 
 // ── CORS ────────────────────────────────────────────────────────────────────
 
@@ -503,12 +513,7 @@ async function handleCapture(req: Request): Promise<Response> {
     p_payload: {
       metadata: prepared.metadata,
       ...(embedding ? { embedding_model: embeddingModelUsed() } : {}),
-      // 008's actor, read from the payload into ob1.actor (SMD-1541): the key's
-      // name, and this server as `via`, which the trigger keeps in actor_context.
-      // No source: the row's `source` is its own metadata.source, read by the
-      // trigger — the column says where the thought came from, actor_context
-      // which door wrote it. Without the name the audit row named nobody.
-      actor: { name: ACTOR_NAME, via: "rest-api" },
+      actor: ACTOR, // 008's actor, read from the payload into ob1.actor (SMD-1541; ACTOR above)
     },
     p_embedding: embedding,
   });
@@ -617,10 +622,7 @@ async function handleUpdateThought(id: string, req: Request): Promise<Response> 
     p_metadata_patch: tierChanged ? { sensitivity_reasons: detected.reasons } : null,
     p_embedding: embedding,
     p_embedding_model: embedding ? embeddingModelUsed() : null,
-    // 008's actor (SMD-1541): the key's name, and this server as `via` (kept in
-    // actor_context); the row's source stays its metadata's, by the trigger's
-    // own reading. Without the name the audit row named nobody.
-    p_actor: { name: ACTOR_NAME, via: "rest-api" },
+    p_actor: ACTOR, // 008's actor (SMD-1541; ACTOR above)
   });
   if (editErr) throw new Error(`update failed: ${editErr.message}`);
   const edit = (edited ?? {}) as Record<string, unknown>;
@@ -883,8 +885,7 @@ async function handleEnrichThought(thoughtId: string, url: URL): Promise<Respons
     p_metadata_patch: existingMetadata,
     p_embedding: enriched.embedding ?? null,
     p_embedding_model: enriched.embedding ? embeddingModelUsed() : null,
-    // 008's actor, as on PUT (SMD-1541).
-    p_actor: { name: ACTOR_NAME, via: "rest-api" },
+    p_actor: ACTOR, // 008's actor (SMD-1541; ACTOR above)
   });
   if (editErr) throw new Error(`enrich update failed: ${editErr.message}`);
   const edit = (edited ?? {}) as Record<string, unknown>;

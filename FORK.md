@@ -16734,8 +16734,10 @@ reader's `WHERE source = 'mcp'` would have missed the two MCP doors here
 `agent-memory-api`'s constant `"agent_memory"` on a capture; whatever the row
 holds on an edit — so the column means one thing for every row these servers
 write: where the thought came from. The door is the actor's own: each passes
-`via: "<server>"`, which 008 keeps in `actor_context` (it strips `name`,
-`source` and `session` and stores the rest), so a row reads `actor_name` = the
+`via: "<server>"`, which the audit trigger keeps in `actor_context` — 008's
+trigger, whose body is 025's now (010 and 025 redefined it whole; 025's strip
+list, `name`, `source`, `session`, `agent_id`, is what lets `via` and
+`runtime` through) — so a row reads `actor_name` = the
 key, `source` = the origin, `actor_context` = `{"via": "rest-api"}`;
 `agent-memory-api`'s write-back adds the runtime that wrote back
 (`req.runtime.name`) beside it. The first draft copied the metadata's source
@@ -16758,16 +16760,17 @@ transaction-start time; two rows one transaction wrote — fails by name instead
 of making "latest" arbitrary; the raw update of the enhanced columns each
 server makes beside the call writes no row at all, since the trigger's diff
 covers `content`, `metadata` and the vector's presence and drops an empty
-diff, so the latest `update` row is the function's) and asserts three things:
+diff, so the latest `update` row is the function's) and asserts two things:
 `actor_name = MCP_ACCESS_KEY` (this suite's legacy single key, so the three
-principals and the two constants read the same); `source` is the row's own
-`metadata.source` by 008's reading — a capture's declared default (`mcp`,
-`dashboard`, `rest_api`, `agent_memory`), NULL for an edit of a planted row
-whose metadata names none, whatever `enhanced-mcp`'s re-classification put
-there for its edit; and `actor_context.via` is the server — the field no
-fallback supplies, so the arm that proves the actor object arrived on every
-site (the write-back's row is read for `runtime = "test"` beside it). A
-missing row is one failure, not three. The header-set guard gains SMD-1541:
+principals and the two constants read the same), and `actor_context.via` is
+the server — the field no fallback supplies, so the arm that proves the actor
+object arrived on every site (the write-back's row is read for `runtime =
+"test"` beside it). The row's `source` is not judged: no actor names one, so
+the column is the trigger's reading of the row's own `metadata.source`, and
+pass 2's arm on it — it read `mcp`, `dashboard`, `rest_api`, `agent_memory` on
+the captures and NULL on the planted rows' edits — could not fail for anything
+a server did (pass 3); `server-portable/test-audit.ts` holds the trigger's
+rule. A missing row is one failure, not two. The header-set guard gains SMD-1541:
 the five, listed; three text guards hold the legacy key's name at its sources
 — `integrations/_shared/auth.ts`'s `found = { name: "MCP_ACCESS_KEY", … }`,
 the copy the three principal servers import (`test-auth.ts` holds the six
@@ -16784,17 +16787,17 @@ capture's passed source was a claim the suite could not hold. The field is
 gone from every actor, and `via` — which no fallback supplies — is what every
 arm holds instead.
 
-**Verified:** `../db/with-postgres.sh bun test-writes.ts` 236/236 under podman
+**Verified:** `../db/with-postgres.sh bun test-writes.ts` 227/227 under podman
 (was 186 — `origin/main`'s suite run against the changed servers, 186/186:
-the fifty new assertions are nine `judgeActor` sites at four each, the tie
-check in each of the nine `auditRow` reads, the write-back's `runtime` read,
-the header-set entry and three spelling guards; the first draft of this
+the forty-one new assertions are nine `judgeActor` sites at three each, the
+tie check in each of the nine `auditRow` reads, the write-back's `runtime`
+read, the header-set entry and three spelling guards; the first draft of this
 paragraph said "was 200, twelve arms" from arithmetic, and the run said
 otherwise — caught: run-it); the four-site mutant, run on the first draft,
 211/215 with the four failures named above; after pass 2, `via` removed from
-`rest-api`'s `PUT` actor and from `open-brain-rest`'s capture actor, 234/236,
-the two `via` arms failing with `got null` and nothing else — a capture arm
-with teeth, which pass 1's had not;
+`rest-api`'s `PUT` actor and from `open-brain-rest`'s capture actor, 234/236
+of that pass's suite, the two `via` arms failing with `got null` and nothing
+else — a capture arm with teeth, which pass 1's had not;
 `bun test-auth.ts` 809/809 (the five import and
 authenticate as before); `bun scripts/check-fork-consistency.mjs` PASS on 118
 contributions (check 10 sees no new verb on `thoughts`; check 8 still passes
@@ -16867,7 +16870,32 @@ workers name their source in the actor); and merging `origin/main` for the
 100/101 order, which is the merge step's, not this pass's. Two of the ten were
 code defects in pass 1's additions and one was the first draft's rule; the
 rest were pass 1's own tidy-ups and three declines — not yet the stop signal.
-The suite's count after the pass is in Verified.
+
+**Review pass 3, triaged — the stop signal.** The same two reviewers. Fixed:
+pass 2's `source` arm was tautological — no actor names a source, so the
+column is the trigger's reading of the row's own metadata and the arm could
+not fail for anything a server did; the `enhanced-mcp` edit even read its
+expected value from the row it was judging (caught: cold-read; the shape
+[[test-assertion-teeth]] names) — dropped, nine assertions, and the paragraph
+above says why the column is not judged. Every comment, README and this
+section cited "008's trigger" for a body 010 and 025 redefined whole; 025 is
+the current definer and its strip list is what lets `via` through (caught:
+cold-read) — cited as such. `agent-memory-api`'s README said `runtime.name`
+rides in `actor_context`; the key is `runtime`, holding the name (caught:
+cold-read). The two in-place-compare servers spelled `{ name: ACTOR_NAME, via:
+… }` at five sites with a comment each, the enrich site's already shorter
+(caught: cold-read) — one module-level `ACTOR` beside `ACTOR_NAME`, whose
+comment also names the trap for SMD-1798: this suite runs under the legacy
+key alone, so a stale constant after that rewrite would pass here unnoticed
+(said on SMD-1798). Declined, third time each: the deletes through
+`delete_thought` (SMD-1793's design — the citation guard's refusal, the detach
+path, the merge's error order — not a one-line swap); one envelope builder
+across writer families (the vocabulary the column carries across the main
+server, the workers and these five is SMD-1730's event shape to decide — said
+there); merging `origin/main` for the heading order (the merge step's). What
+this pass fixed were a vacuous arm and three record items in the earlier
+passes' own additions, and its remaining findings were passes 1 and 2's
+declines re-raised: the stop signal.
 
 **Upstream status:** not applicable — the functions and the audit trigger are
 this fork's; upstream's servers write the row directly and have no actor to
