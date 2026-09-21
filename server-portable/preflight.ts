@@ -17,7 +17,7 @@
  * Run it as a deploy gate, an init container, or a readiness probe:
  *
  *   bun preflight.ts             # config + connectivity + schema
- *   bun preflight.ts --deep      # also calls the embedding provider (costs a token)
+ *   bun preflight.ts --deep      # also calls the embedding and chat providers (costs a token)
  *   bun preflight.ts --json      # machine-readable, for a pipeline step
  *
  * Exit codes: 0 all good, 1 something is wrong, 2 could not run the checks.
@@ -26,7 +26,7 @@
 import { createStore, databaseUrl, DEFAULT_STORE, DIRECT_CHECK_SKIP_OVER_POSTGREST, maskUrl, missingDatabaseUrl, postgrestOnBunNotice, postgrestOverPostgresUrl, storeKind, type StoreEnv } from "./store.ts";
 import { parseKeyRecords } from "./auth.ts";
 import { DEFAULT_MAX_TOKENS } from "./chunk.ts";
-import { baseUrlOr, stringOr } from "./embed.ts";
+import { resolveProviderEndpoints, stringOr, type ProviderEndpoint } from "./embed.ts";
 import { trimmedEnv } from "../db/config.mjs"; // static: `env` below is built before the dynamic import above resolves
 import type { PassCounts } from "../db/config.mjs";
 
@@ -55,7 +55,6 @@ const {
   DEFAULT_EMBEDDING_MODEL: DEF_EMB,
   DEFAULT_EMBEDDING_DIM: DEF_DIM,
   DEFAULT_METADATA_MODEL: DEF_META,
-  DEFAULT_LLM_BASE_URL: DEF_BASE,
   isLocalHostname,
   LOCAL_PROVIDER_SERVICES,
   REAPPLY_COMMAND,
@@ -66,8 +65,14 @@ const {
 const embModel = stringOr(env.OB1_EMBEDDING_MODEL, DEF_EMB);
 const embDim = env.OB1_EMBEDDING_DIM ? Number(env.OB1_EMBEDDING_DIM) : DEF_DIM;
 const metaModel = stringOr(env.OB1_METADATA_MODEL, DEF_META);
-const llmBase = baseUrlOr(env.OB1_LLM_BASE_URL, DEF_BASE);
-const llmKey = env.OB1_LLM_API_KEY || env.OPENROUTER_API_KEY;
+/**
+ * The two endpoints, by embed.ts's rule — the one the server dials by — so the
+ * rows below print what a capture will do, not a second opinion of it. Until
+ * SMD-1902 there was one base and one key, resolved here a second time.
+ */
+const { embeddings: embEndpoint, chat: chatEndpoint } = resolveProviderEndpoints(env);
+/** Whether the chat knobs name an endpoint of their own; the report then carries a provider and a credential row for it. */
+const chatIsOwn = Boolean(env.OB1_CHAT_BASE_URL || env.OB1_CHAT_API_KEY);
 
 /**
  * A loopback or private-network endpoint — Ollama, LM Studio, vLLM on the same
@@ -81,7 +86,16 @@ function isLocalEndpoint(url: string): boolean {
     return false;
   }
 }
-const localProvider = isLocalEndpoint(llmBase);
+const localEmbeddings = isLocalEndpoint(embEndpoint.base);
+const localChat = isLocalEndpoint(chatEndpoint.base);
+/** The host a base URL names, for a reachability remedy; the URL itself when it does not parse. */
+function hostOf(base: string): string {
+  try {
+    return new URL(base).host;
+  } catch {
+    return base;
+  }
+}
 
 /**
  * Migration 014's exposure and remedy, once, for both store paths. The
@@ -158,7 +172,14 @@ if (store !== "postgrest" && store !== "sql") {
 
 // ── Model provider ──────────────────────────────────────────────────────────
 
-add("model provider", "ok", `${llmBase}${localProvider ? " (local — no credential needed)" : ""}`);
+add("model provider", "ok",
+    `${embEndpoint.base} — embeddings${chatIsOwn ? "" : " and chat"}${localEmbeddings ? " (local — no credential needed)" : ""}`);
+if (chatIsOwn) {
+  // A second endpoint is a second row, so an operator reading the report sees
+  // where each of the two calls goes; unsplit, the one row says "and chat".
+  add("chat provider", "ok",
+      `${chatEndpoint.base} — chat${env.OB1_CHAT_BASE_URL ? " (OB1_CHAT_BASE_URL)" : ", the embeddings endpoint with its own credential (OB1_CHAT_API_KEY)"}${localChat ? " (local — no credential needed)" : ""}`);
+}
 {
   const { resolveEmbeddingDimensions } = await import("../db/config.mjs");
   const truncate = resolveEmbeddingDimensions(env.OB1_EMBEDDING_DIMENSIONS, embDim, embModel);
@@ -215,20 +236,39 @@ add("model provider", "ok", `${llmBase}${localProvider ? " (local — no credent
 }
 add("metadata model", "ok", metaModel);
 
-if (!llmKey) {
-  if (localProvider) {
-    add("provider credential", "ok", "not required for a local endpoint");
-  } else {
-    add("provider credential", "fail",
-        `no OB1_LLM_API_KEY or OPENROUTER_API_KEY, and ${llmBase} is not local`,
-        "Set OB1_LLM_API_KEY, or point OB1_LLM_BASE_URL at a local provider.");
+/**
+ * One credential row per endpoint. A hosted endpoint with no key is a hard
+ * failure naming the knob that sets one; a local endpoint needs none, and a
+ * key sent to one is worth a warning. `unshared` names a key that IS set for
+ * the other endpoint and is not sent to this one — embed.ts's rule that a
+ * different endpoint gets only its own credential, said where an operator
+ * expecting the inherited key would look for it (SMD-1902).
+ */
+function credentialRow(row: string, at: ProviderEndpoint, local: boolean, keyKnob: string, baseKnob: string, unshared?: string): void {
+  const aside = unshared ? ` — ${unshared} belongs to the other endpoint and is not sent here` : "";
+  if (!at.key) {
+    if (local) {
+      add(row, "ok", `not required for a local endpoint${aside}`);
+    } else {
+      add(row, "fail", `no ${keyKnob}, and ${at.base} is not local${aside}`,
+          `Set ${keyKnob}, or point ${baseKnob} at a local provider.`);
+    }
+    return;
   }
-} else {
-  add("provider credential", "ok", `set (${llmKey.length} chars)`);
-  if (localProvider) {
-    add("provider credential", "warn", "a key is set but the endpoint is local — it will be sent anyway",
+  add(row, "ok", `set (${at.key.length} chars)`);
+  if (local) {
+    add(row, "warn", "a key is set but the endpoint is local — it will be sent anyway",
         "Unset it to keep local traffic credential-free.");
   }
+}
+credentialRow("provider credential", embEndpoint, localEmbeddings, "OB1_LLM_API_KEY or OPENROUTER_API_KEY", "OB1_LLM_BASE_URL");
+if (chatIsOwn) {
+  // The same base spelled twice shares the embeddings key (embed.ts); only a
+  // different base leaves OB1_LLM_API_KEY behind, and only then is it named.
+  const unshared = embEndpoint.key && !chatEndpoint.key && chatEndpoint.base !== embEndpoint.base
+    ? (env.OB1_LLM_API_KEY ? "OB1_LLM_API_KEY" : "OPENROUTER_API_KEY")
+    : undefined;
+  credentialRow("chat credential", chatEndpoint, localChat, "OB1_CHAT_API_KEY", "OB1_CHAT_BASE_URL", unshared);
 }
 
 // ── Access keys ──────────────────────────────────────────────────────────────
@@ -2263,20 +2303,24 @@ if (configFailed) {
 
 // ── Optional: the model provider ─────────────────────────────────────────────
 
+// Two probes, one per endpoint, each in its own try: a chat base that is down
+// fails the metadata row by its own name and leaves the embeddings row to say
+// what it found, where one try around both reported every chat failure as the
+// embedding provider's (SMD-1902). Each sends exactly what the server sends —
+// the endpoint's own headers, and for embeddings the `dimensions` parameter
+// when the server would — so a pass here is a pass for the first capture.
+
 if (!deep) {
-  add("embedding provider", "skip", "not checked — pass --deep to call OpenRouter");
-} else if (!llmKey && !localProvider) {
+  add("embedding provider", "skip", "not checked — pass --deep to call the provider");
+} else if (!embEndpoint.key && !localEmbeddings) {
   add("embedding provider", "skip", "no credential to test with");
 } else {
   try {
-    const headers: Record<string, string> = { "Content-Type": "application/json" };
-    if (llmKey) headers.Authorization = `Bearer ${llmKey}`;
-
     const { resolveEmbeddingDimensions: resolveDims } = await import("../db/config.mjs");
     const wantsTruncation = resolveDims(env.OB1_EMBEDDING_DIMENSIONS, embDim, embModel);
-    const r = await fetch(`${llmBase}/embeddings`, {
+    const r = await fetch(`${embEndpoint.base}/embeddings`, {
       method: "POST",
-      headers,
+      headers: embEndpoint.headers,
       // Send exactly what the server will send. Omitting `dimensions` here would
       // let preflight pass against a provider that ignores or rejects it, and the
       // failure would surface on the first real capture instead.
@@ -2287,8 +2331,8 @@ if (!deep) {
       }),
     });
     if (!r.ok) {
-      add("embedding provider", "fail", `OpenRouter returned ${r.status}`,
-          r.status === 401 ? "The key is rejected. Check OPENROUTER_API_KEY." : "Check OpenRouter status and credit balance.");
+      add("embedding provider", "fail", `${embEndpoint.base} returned ${r.status}`,
+          r.status === 401 ? "The key is rejected. Check OB1_LLM_API_KEY (or OPENROUTER_API_KEY)." : "Check the provider's status and credit balance.");
     } else {
       const d = (await r.json()) as { data?: [{ embedding?: number[] }] };
       const dim = d.data?.[0]?.embedding?.length;
@@ -2301,13 +2345,23 @@ if (!deep) {
       else add("embedding provider", "fail", `${embModel} returned ${dim} dimensions, but the schema is vector(${embDim})`,
                `Set OB1_EMBEDDING_DIM=${dim} before any data exists, choose a model that returns ${embDim}, ` +
                (dim && dim > embDim ? "or set OB1_EMBEDDING_DIMENSIONS=on if the model supports truncation." : "."));
+    }
+  } catch (e) {
+    add("embedding provider", "fail", (e as Error).message, `Network reachability to ${hostOf(embEndpoint.base)}.`);
+  }
+}
 
+if (deep) {
+  if (!chatEndpoint.key && !localChat) {
+    add("metadata model", "skip", `no credential to test ${chatEndpoint.base} with`);
+  } else {
+    try {
       // Metadata extraction needs JSON mode. Providers differ here — Ollama's
       // OpenAI layer has been inconsistent about response_format — and a provider
       // that ignores it degrades every capture to "uncategorized" without failing.
-      const m = await fetch(`${llmBase}/chat/completions`, {
+      const m = await fetch(`${chatEndpoint.base}/chat/completions`, {
         method: "POST",
-        headers,
+        headers: chatEndpoint.headers,
         body: JSON.stringify({
           model: metaModel,
           response_format: { type: "json_object" },
@@ -2315,7 +2369,8 @@ if (!deep) {
         }),
       });
       if (!m.ok) {
-        add("metadata model", "fail", `${metaModel} returned ${m.status} from ${llmBase}`,
+        add("metadata model", "fail", `${metaModel} returned ${m.status} from ${chatEndpoint.base}`,
+            (m.status === 401 ? `The key is rejected. Check ${chatIsOwn ? "OB1_CHAT_API_KEY" : "OB1_LLM_API_KEY (or OPENROUTER_API_KEY)"}. ` : "") +
             "Capture would still succeed, but every thought would be tagged uncategorized.");
       } else {
         const md = (await m.json()) as { choices?: [{ message?: { content?: string } }] };
@@ -2324,16 +2379,17 @@ if (!deep) {
           const parsed = JSON.parse(content);
           add("metadata model", typeof parsed === "object" && parsed !== null ? "ok" : "warn",
               typeof parsed === "object" && parsed !== null
-                ? `${metaModel} honours JSON mode`
+                ? `${metaModel} honours JSON mode at ${chatEndpoint.base}`
                 : `${metaModel} returned JSON that is not an object`);
         } catch {
           add("metadata model", "warn", `${metaModel} did not return parseable JSON in JSON mode`,
               "Captures will still work but will fall back to uncategorized metadata.");
         }
       }
+    } catch (e) {
+      add("metadata model", "fail", `${metaModel} at ${chatEndpoint.base}: ${(e as Error).message}`,
+          `Network reachability to ${hostOf(chatEndpoint.base)}. Capture would still succeed, but every thought would be tagged uncategorized.`);
     }
-  } catch (e) {
-    add("embedding provider", "fail", (e as Error).message, "Network reachability to openrouter.ai.");
   }
 }
 

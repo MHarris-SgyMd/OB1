@@ -151,14 +151,14 @@ console.log("\n[7] Prompt templates and provider settings take their inputs lite
   // "" is unset — the default endpoint and model, temperature 0, no reasoning —
   // not a URL of "", a model named "", or a NaN temperature.
   const unset = resolveEmbedConfig({});
-  assert(resolveEmbedConfig({ OB1_LLM_BASE_URL: "" }).llmBase === DEFAULT_LLM_BASE_URL.replace(/\/+$/, ""),
+  assert(resolveEmbedConfig({ OB1_LLM_BASE_URL: "" }).embeddings.base === DEFAULT_LLM_BASE_URL.replace(/\/+$/, ""),
          "OB1_LLM_BASE_URL='' is the default endpoint, not an empty URL");
   // …and the three string knobs are trimmed: a trailing space from a .env file is not part of a model name or a URL.
-  assert(resolveEmbedConfig({ OB1_LLM_BASE_URL: " http://h:1/v1/ ", OB1_METADATA_MODEL: " m:1b ", OB1_EMBEDDING_MODEL: "\te:1b\n" }).llmBase === "http://h:1/v1" &&
+  assert(resolveEmbedConfig({ OB1_LLM_BASE_URL: " http://h:1/v1/ ", OB1_METADATA_MODEL: " m:1b ", OB1_EMBEDDING_MODEL: "\te:1b\n" }).embeddings.base === "http://h:1/v1" &&
          resolveEmbedConfig({ OB1_METADATA_MODEL: " m:1b " }).metadataModel === "m:1b" && resolveEmbedConfig({ OB1_EMBEDDING_MODEL: "\te:1b\n" }).embeddingModel === "e:1b",
          "OB1_LLM_BASE_URL, OB1_METADATA_MODEL and OB1_EMBEDDING_MODEL are trimmed; whitespace alone is unset");
   assert(resolveEmbedConfig({ OB1_METADATA_MODEL: "   " }).metadataModel === DEFAULT_METADATA_MODEL, "OB1_METADATA_MODEL of spaces alone is the default");
-  assert(resolveEmbedConfig({ OB1_LLM_BASE_URL: " / " }).llmBase === DEFAULT_LLM_BASE_URL.replace(/\/+$/, "") && resolveEmbedConfig({ OB1_LLM_BASE_URL: "http://a/v1//" }).llmBase === "http://a/v1",
+  assert(resolveEmbedConfig({ OB1_LLM_BASE_URL: " / " }).embeddings.base === DEFAULT_LLM_BASE_URL.replace(/\/+$/, "") && resolveEmbedConfig({ OB1_LLM_BASE_URL: "http://a/v1//" }).embeddings.base === "http://a/v1" && resolveEmbedConfig({ OB1_CHAT_BASE_URL: " http://c/v1/ " }).chat.base === "http://c/v1",
          "OB1_LLM_BASE_URL of slashes alone is the default, not an empty base (it was '' — the seventh review pass); trailing slashes come off");
   // The flag knobs decide once, wherever they are read: a padded " on " was ON to the
   // migrator (db/config.mjs's proxy trims) and OFF to the server (the resolver saw

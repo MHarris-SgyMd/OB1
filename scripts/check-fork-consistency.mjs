@@ -2115,8 +2115,118 @@ async function checkCapturingGrants() {
       });
     }
   }
+  // SMD-1471: the section names every object (above); it must also spell each
+  // object's PRIVILEGES to match ROLE_GRANTS, per group. The README lists a row
+  // per (group, object), and an object can carry a different set in two groups
+  // (`ob1_config`, `thought_audit`), so a name-only check would miss a
+  // privilege that drifted. Read the table rows in order, tracking the group
+  // from the bold cell that leads each group's first row (`**capture**`, …),
+  // and for every ROLE_GRANTS row compare its (group, object) privileges.
+  const rowLines = section.split("\n").filter((l) => l.trimStart().startsWith("|"));
+  const documentedPrivs = new Map(); // `${group}\t${name}` -> Set(privileges)
+  let group = null;
+  for (const line of rowLines) {
+    // A pipe-led, pipe-tailed row splits to ['', groupCell, objectCell, privCell, '']
+    // — the leading `**word**` names a group and carries to the rows below it.
+    const cells = line.split("|").map((c) => c.trim());
+    const gm = /\*\*(\w+)\*\*/.exec(cells[1] ?? "");
+    if (gm) group = gm[1];
+    if (!group || cells.length < 4) continue; // the header and its `---` separator
+    // The privileges are one backticked, comma-separated span at the head of
+    // the cell; prose may follow after an em-dash, so read only that span.
+    const pm = /`([^`]+)`/.exec(cells[3] ?? "");
+    const privs = new Set(pm ? pm[1].split(",").map((p) => p.trim()).filter(Boolean) : []);
+    // Every backticked object name in the object cell shares this row's
+    // privileges (a community row lists several tables at once). Stray
+    // backticked prose (`BIGSERIAL`) becomes a key nothing looks up.
+    for (const m of (cells[2] ?? "").matchAll(/`([^`]+)`/g)) {
+      documentedPrivs.set(`${group}\t${m[1]}`, privs);
+    }
+  }
+  for (const { group: g, kind, name, privileges } of cfg.grantRows()) {
+    const documented = documentedPrivs.get(`${g}\t${name}`);
+    if (!documented) {
+      // The name check above fires when the object is absent everywhere; this
+      // fires when it is present but not in this group's row.
+      violations.push({
+        where: "db/README.md",
+        msg: `"Grants for a capturing role" has no **${g}** row for the ${kind} \`${name}\` that db/config.mjs's ROLE_GRANTS grants in that group — the table and ROLE_GRANTS have drifted (SMD-1471)`,
+      });
+      continue;
+    }
+    const missing = privileges.filter((p) => !documented.has(p));
+    const extra = [...documented].filter((p) => !privileges.includes(p));
+    if (missing.length || extra.length) {
+      violations.push({
+        where: "db/README.md",
+        msg: `the **${g}** row for \`${name}\` lists [${[...documented].join(", ")}] but ROLE_GRANTS grants [${privileges.join(", ")}]${missing.length ? `; the README is missing ${missing.join(", ")}` : ""}${extra.length ? `; the README has extra ${extra.join(", ")}` : ""} — a role would be short or over a privilege the docs claim (SMD-1471)`,
+      });
+    }
+  }
 }
 await checkCapturingGrants();
+
+/**
+ * db/README.md documents every migration: 001–023 as rows in "## The
+ * migrations", 024 onward as a "NNN change M" map pointing at FORK.md. Both were
+ * kept by hand and drifted (SMD-1696 found the intro count off by one; a map
+ * lags a new migration). This holds the two together: every file under
+ * db/migrations/ is named exactly once across the table and the map, no
+ * documented number lacks a file, and the "N migrations applied" count is the
+ * file count. Distinct from check 5b (checkMigrationNumbers), which only forbids
+ * two files sharing a number (SMD-1805).
+ */
+function checkMigrationDoc() {
+  const files = readdirSync(join(ROOT, "db", "migrations")).filter((f) => /^\d{3}_.*\.sql$/.test(f));
+  const fileNums = files.map((f) => Number(f.slice(0, 3)));
+  const readme = readFileSync(join(ROOT, "db", "README.md"), "utf8");
+  const tableStart = readme.indexOf("## The migrations");
+  const mapStart = readme.indexOf("Migrations 024 onward");
+  if (tableStart < 0 || mapStart < 0 || mapStart < tableStart) {
+    return fail("db/README.md", 'the migration documentation ("## The migrations" table and the "Migrations 024 onward" map) is not where the coverage check expects it (SMD-1805)');
+  }
+  const tableText = readme.slice(tableStart, mapStart);
+  const mapEnd = readme.indexOf("\n\n", mapStart);
+  const mapText = readme.slice(mapStart, mapEnd < 0 ? readme.length : mapEnd);
+  const documented = new Set();
+  const dup = new Set();
+  const note = (n) => (documented.has(n) ? dup.add(n) : documented.add(n));
+  for (const m of tableText.matchAll(/`(\d{3})_[a-z0-9_]+\.sql`/g)) note(Number(m[1]));
+  for (const m of mapText.matchAll(/\b(\d{3}) change \d+/g)) note(Number(m[1]));
+  const pad = (n) => String(n).padStart(3, "0");
+  const missing = fileNums.filter((n) => !documented.has(n)).sort((a, b) => a - b);
+  const extra = [...documented].filter((n) => !fileNums.includes(n)).sort((a, b) => a - b);
+  if (missing.length) fail("db/README.md", `migration(s) ${missing.map(pad).join(", ")} have a file under db/migrations/ but appear in neither "## The migrations" nor the "024 onward" map — document each (a table row for 001–023, a "NNN change M" map entry otherwise) (SMD-1805)`);
+  if (extra.length) fail("db/README.md", `the migration table or map names ${extra.map(pad).join(", ")}, which has no file under db/migrations/ — a renamed or removed migration left a stale entry (SMD-1805)`);
+  if (dup.size) fail("db/README.md", `migration(s) ${[...dup].sort((a, b) => a - b).map(pad).join(", ")} are documented more than once across the table and the map (SMD-1805)`);
+  const cm = /(\d+)\)?\s+migrations applied/.exec(readme);
+  if (!cm) fail("db/README.md", `no "(N) migrations applied" count to check against the ${fileNums.length} files — state it as a digit so it cannot drift (SMD-1805)`);
+  else if (Number(cm[1]) !== fileNums.length) fail("db/README.md", `states ${cm[1]} migrations applied but db/migrations/ holds ${fileNums.length} (SMD-1805)`);
+}
+checkMigrationDoc();
+
+/**
+ * server-portable/tools.json is generated from the typed source tools.ts
+ * (SMD-1805) — the one place the MCP tool surface is written, so it can carry a
+ * `ToolName` union JSON cannot. deploy/smoke.sh (bash) reads the JSON; this
+ * holds it to exactly what tools.ts produces, the round-trip the codemod check
+ * does for the shim. Bun-only — it imports the TS source through the generator —
+ * so a node run skips it in words, as check 13 does.
+ */
+async function checkToolsManifest() {
+  let renderToolsJson;
+  try {
+    ({ renderToolsJson } = await import("./gen-tools.mjs"));
+  } catch (e) {
+    console.warn(`  (tools.json round-trip skipped — ${e.message.split("\n")[0]} — run under bun)`);
+    return;
+  }
+  const have = readFileSync(join(ROOT, "server-portable", "tools.json"), "utf8");
+  if (have !== renderToolsJson()) {
+    fail("server-portable/tools.json", "does not match its source — the MCP tool surface's typed source is server-portable/tools.ts; run `bun scripts/gen-tools.mjs` to regenerate (SMD-1805)");
+  }
+}
+await checkToolsManifest();
 
 /**
  * 14: every knob the server reads reaches the container (SMD-1843).

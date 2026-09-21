@@ -1,5 +1,6 @@
 import { createAssert } from "../db/test-support.ts";
 import { queryLogEnabled, queryLogRetentionDays, QUERY_LOG, trimmedEnv } from "../db/config.mjs";
+import { visibleToolNames, READ_TOOL_NAMES } from "./tools.ts";
 /**
  * test-server.ts
  *
@@ -216,18 +217,12 @@ console.log("\n[9] tools/list exposes exactly the documented surface");
   });
   const b = await mcpBody(r);
   const tools = ((b?.result as { tools?: { name: string }[] })?.tools ?? []).map((t) => t.name).sort();
-  const expected = [
-    "capture_thought",
-    "delete_thought",
-    "fetch",
-    "list_supersession_proposals",
-    "list_thoughts",
-    "search",
-    "search_thoughts",
-    "search_thoughts_keyword",
-    "thought_stats",
-    "update_thought",
-  ];
+  // The live drift guard (SMD-1805): the surface a write key must see is
+  // derived from the typed manifest (tools.ts) for this scope — AUTH is a write
+  // key — so a tool added to or removed from index.ts without a matching
+  // manifest entry shows up here as a mismatch, and a gated tool later just
+  // changes what visibleToolNames() returns.
+  const expected = visibleToolNames({ write: true });
   assert(tools.length === expected.length, `${expected.length} tools registered (got ${tools.length})`);
   for (const t of expected) assert(tools.includes(t), `exposes "${t}"`);
 }
@@ -242,7 +237,9 @@ console.log("\n[10] Read tools are annotated read-only, capture is not");
   const b = await mcpBody(r);
   const tools = (b?.result as { tools?: { name: string; annotations?: { readOnlyHint?: boolean } }[] })?.tools ?? [];
   const byName = Object.fromEntries(tools.map((t) => [t.name, t]));
-  for (const t of ["search", "fetch", "search_thoughts", "list_thoughts", "list_supersession_proposals", "thought_stats"]) {
+  // Every read-scoped tool from the manifest (SMD-1805), so a read tool added
+  // without the read-only annotation fails here.
+  for (const t of READ_TOOL_NAMES) {
     assert(byName[t]?.annotations?.readOnlyHint === true, `"${t}" is readOnlyHint: true`);
   }
   assert(byName["capture_thought"]?.annotations?.readOnlyHint === false, `"capture_thought" is readOnlyHint: false`);

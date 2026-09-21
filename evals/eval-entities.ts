@@ -254,7 +254,7 @@ const REPLAY = has("replay");
 const answersPath = entityAnswersPath(cfg.metadataModel);
 const chars = docs.reduce((n, d) => n + d.title.length + 2 + d.text.length, 0);
 console.log(`  corpus: ${docs.length} documents, ${chars.toLocaleString()} characters, from ${corpusPath}`);
-console.log(`  model:  ${cfg.metadataModel} via ${cfg.llmBase}, ${WORKERS} worker(s)${LIMIT ? `, first ${LIMIT} only` : ""}${REPLAY ? ` — REPLAY of ${answersPath}, no model calls` : ""}\n`);
+console.log(`  model:  ${cfg.metadataModel} via ${cfg.chat.base}, ${WORKERS} worker(s)${LIMIT ? `, first ${LIMIT} only` : ""}${REPLAY ? ` — REPLAY of ${answersPath}, no model calls` : ""}\n`);
 
 await sql`DELETE FROM thoughts`;
 // Fixed ids, so a replay's answers find their thoughts on a fresh database;

@@ -68,14 +68,14 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-One hundred numbered changes on top of the pin. Seven fix defects found in an
+One hundred and two numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
 data layer (Phase 2). Ten (changes 31, 53, 55, 59, 79, 82, 86, 87, 88, and 89) ship no runtime change at
 all: each is a measurement that decided against building something.
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–100 are the numbered `###` sections** further down, which is
+sections. Changes **18–102 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -211,6 +211,15 @@ evals/eval-quant.ts              # change 81 (new file — vector, halfvec and b
 <4 vendored MCP servers, 1 sample> # change 78 (a McpServer built per request — per session in the cost recipe's after sample — in place of one shared and connect()ed to a fresh transport each time)
 <17 pin sites, 3 lockfiles>      # change 83 (@hono/mcp 0.1.1 → 0.1.5: the transport lets go of each POST it has answered; the after sample's sweep closes the transports it drops)
 <19 pin sites, 3 lockfiles, 15 servers, 20 SDK importers> # change 84 (SDK 1.30.0, @hono/mcp 0.3.2, hono 4.13.8, zod 4.6.5 together; the Accept patches removed; an @ts-types pragma on every SDK import so Deno types it)
+server-portable/tools.ts         # change 100 (new file — the typed source of the MCP tool surface: TOOLS as const, ToolName, visibleToolNames())
+server-portable/tools.json       # change 100 (new file — GENERATED from tools.ts by scripts/gen-tools.mjs; deploy/smoke.sh reads it)
+scripts/gen-tools.mjs            # change 100 (new file — writes tools.json from tools.ts; renderToolsJson() shared with the round-trip check)
+<4 suites + deploy/smoke.sh>     # change 100 (test-server/-auth/-e2e-sql/-agents and smoke.sh read the manifest; test-server's tools/list is the live drift guard; test-auth's mutating list is typed ToolName[])
+db/test-support.ts               # change 100 (createAssert gains total()/skipped()/docCheck — a doc check counted apart from the total it verifies)
+db/test-schema.ts, db/test-live.ts # change 100 (each holds db/README.md's quoted assertion total to the run's own; test-live only on a full run)
+scripts/check-fork-consistency.mjs # change 100 (grant privileges per group [SMD-1471]; every migration documented once and the count checked; tools.json round-tripped against tools.ts [SMD-1805])
+db/config.mjs                    # change 100 (grantRows() — every ROLE_GRANTS row undeduped, for the per-group privilege check)
+db/README.md                     # change 100 (the applied-migration count stated as a digit so the check can read it)
 docs/01-getting-started.md       # fix 6
 recipes/content-fingerprint-dedup/README.md  # fix 6
 recipes/email-history-import/README.md       # fix 6
@@ -16678,7 +16687,136 @@ properly. Suite unchanged: 38 probes, every pass-4 mutant as before.
 fork's (change 16 and the migration plan's Phase 4).
 
 
-### 100. Every knob the server reads reaches the container — `deploy/compose.yaml` forwards the six `OB1_*` settings it did not, the server's `type Env` is the list check 14 holds the file to, and a name in a comment is no longer a forward (SMD-1843)
+### 100. Two counted surfaces read one typed source instead of drifting by hand — the MCP tool list is a `ToolName`-typed manifest the suites and the smoke test read, `db/README.md`'s assertion totals and migration list are checked against what the suites and `db/migrations/` hold, and the grant check compares privileges, not just names (SMD-1805, SMD-1471)
+
+`server-portable/tools.ts` is the fork's ten tools as `const TOOLS = [{ name,
+scope }, …] as const satisfies readonly ToolEntry[]` — the single, typed place
+the surface is written. Because the names are `as const`, `ToolName` is a real
+union TypeScript checks a name against (a JSON import would widen every name to
+`string`), and `satisfies` fails a bad `scope` at the source. `scripts/gen-tools.mjs`
+writes `server-portable/tools.json` from it for `deploy/smoke.sh`, which is bash
+(and the deploy CI job has no bun); `check-fork-consistency.mjs` round-trips the
+two — regenerate in memory, compare to the committed copy — the way the codemod
+check round-trips the shim, so they cannot drift. `test-server.ts`,
+`test-auth.ts`, `test-e2e-sql.ts`, `test-agents.ts` and `smoke.sh` read the
+manifest in place of a hardcoded count or list, and the drift guards derive the
+expected surface per scope from `visibleToolNames({ write })` rather than a fixed
+number — so a gated or optional tool later changes what that returns, not a test.
+`test-server.ts`'s `tools/list` case is the live drift guard: it compares the
+running server to the manifest, so a `registerTool` added to or removed from
+`index.ts` without a manifest entry fails there. `test-auth.ts` still names the
+three mutating tools independently of the manifest — a manifest-and-server
+co-rename is caught — but as a `ToolName[]`, so a typo in that list is a compile
+error, not a runtime surprise. Before this the count was hardcoded in four suites
+and the smoke test, and the ticket's claim that it lived in five —
+`test-update-delete.ts` among them — was wrong; that suite asserts no count.
+`index.ts`'s `registerTool` name literals are left as they are: the live drift
+guard ties them to the manifest, and adopting the constants there (so the server
+registers from `ToolName`) is a deliberate follow-up.
+
+`db/README.md` quoted `test-schema.ts`'s and `test-live.ts`'s assertion totals
+by hand. `createAssert` gains `total()`, `skipped()` and a `docCheck` — counted
+apart from the headline total, so a check verifies that number without moving it
+— and each suite holds every count the README gives it to what the run
+produced (`test-live.ts` only on a full run, since a skipped group on
+PostgreSQL 18 or with JIT off legitimately lowers it). The migration list was
+edited by hand too and drifted an intro count once (SMD-1696);
+`check-fork-consistency.mjs` now holds every file under `db/migrations/` to
+being documented exactly once across "The migrations" table and the "024
+onward" map, the applied count stated as a digit and checked against the file
+count — distinct from check 5b, which only forbids two files sharing a number.
+
+The same script's grant check named every `ROLE_GRANTS` object in the README
+but never its privileges (SMD-1471). `db/config.mjs` gains `grantRows()` — every
+row undeduped, since an object carries a different set in two groups
+(`ob1_config`, `thought_audit`) — and the check now compares each group's
+documented privilege set to what the group grants, so a `SELECT` the docs claim
+but the config drops, or the reverse, fails with the object and the difference.
+
+**Upstream status:** not sent — upstream runs no tests and has none of these
+suites, the manifest, or the consistency script; this is the fork's own
+machinery. Steps 1–2 and 4–7 of SMD-1805 — the branch-protection ruleset, the
+merge queue, changelog fragments, the GHCR release job, frozen migrations, and
+the commit and workflow linters of SMD-1808 — are follow-ups; the release job
+and the frozen-migration check wait on SMD-1804's first tag.
+
+### 101. The chat calls can have an endpoint of their own — `OB1_CHAT_BASE_URL` and `OB1_CHAT_API_KEY` split `/chat/completions` from `/embeddings`, a credential belongs to an endpoint, and preflight reports and probes each by name (SMD-1902)
+
+`server-portable/embed.ts` held one `llmBase` and one header set, and
+`providerCall` appended `/embeddings` or `/chat/completions` to it. So the
+embedding of a capture and everything said about it by a chat model — the
+metadata extraction, the chunk blurbs of change 27, the entity extraction of
+change 30, the supersession judge of SMD-1294 — came from one provider. That
+ruled out the configuration people ask for first, local embeddings with a
+hosted tagger (the text stays home for the vector and leaves only for tags),
+and the one the routing ladder (SMD-1898) is built on: a second local runtime
+that serves chat only, beside Ollama — Edge0 (SMD-1880) has no embeddings
+endpoint at all.
+
+`EmbedConfig` now carries two `ProviderEndpoint`s, `embeddings` and `chat`,
+each `{ base, key, headers }`; `resolveProviderEndpoints` builds them and
+`resolveEmbedConfig` spreads them in, so the server, `db/reembed.ts`,
+`db/consolidate.ts`, `db/extract-entities.ts` and the evals resolve the pair by
+one rule. `providerCall` picks the endpoint by path and every message it
+builds names the base it dialled; the judge and the entity extractor, which
+keep their own `fetch` for their own deadline, read `cfg.chat`. The old fields
+are gone rather than aliased: a reader of `cfg.llmBase` meant "both" without
+saying so, and the compiler found each one.
+
+The rule for the credential is the part worth stating. `OB1_LLM_BASE_URL` (key
+`OB1_LLM_API_KEY`, else `OPENROUTER_API_KEY`) is the embeddings endpoint and,
+unless `OB1_CHAT_BASE_URL` names another, the chat endpoint too, key and all —
+a deployment that sets neither chat knob sends byte for byte what it sent
+before, which `test-local-provider.ts` [2]–[3] hold at the server and [8]
+holds at the resolver (drop the sharing and three assertions fail). A chat base
+that IS a different endpoint gets `OB1_CHAT_API_KEY` and nothing else. The
+ticket said "each knob falls back to its `OB1_LLM_*` value"; taken literally
+that hands a local chat model beside a hosted embedder the hosted provider's
+key, and since empty means unset throughout there would be no way to say "no
+key here" while `OB1_LLM_API_KEY` is set. A credential belongs to an endpoint,
+not to the environment. Two spellings of one base are one endpoint and share
+the key; `OB1_CHAT_API_KEY` alone gives the shared endpoint a chat-only
+credential. A hosted chat base with no key of its own is not papered over: it
+is the configuration preflight fails by name.
+
+`preflight.ts` resolved the base and key a second time by its own copy of the
+rule; it now reads `resolveProviderEndpoints`. Unsplit, the `model provider`
+row says the endpoint serves "embeddings and chat"; split, it says
+"embeddings" and a `chat provider` row names the other base. One
+`credentialRow` prints the embeddings credential and, when the chat knobs name
+an endpoint, a `chat credential` row — which also says when `OB1_LLM_API_KEY`
+is set and NOT sent there, where an operator expecting the inherited key would
+look. `--deep` runs two probes in two `try`s: a chat endpoint that is down
+fails the `metadata model` row, naming the chat base and its host, while the
+`embedding provider` row says what it found — one `try` around both had
+reported every chat failure as the embedding provider's, with "network
+reachability to openrouter.ai" as the remedy whatever the base was.
+`test-preflight.ts` [6] holds the rows, the exit code, that the key's value
+never prints, and the split `--deep` outcome against a stub embedder and a
+closed port.
+
+`deploy/.env.example` documents the pair as Option C (so check 14 requires
+`deploy/compose.yaml` to forward both, which it does), `server-portable/README.md`
+and `SETUP.md` carry the "half local" shape and its caveat: under it every
+capture's full text still leaves the host, for tagging, and nothing yet decides
+which content may — the choice of endpoint is the whole policy until SMD-1903.
+The defaults still share one base, so `checkEmbeddingDefaults`' "the three
+provider-facing defaults move together" stands. The timeout stays one knob.
+
+Two review passes: the failed-tagging note in `index.ts` named
+`env().OPENROUTER_API_KEY` (upstream's text) and now names the chat endpoint
+it dialled; the re-embed summary says where blurbs go; and the docs say that
+`OPENROUTER_API_KEY` belongs to the embeddings endpoint too, whatever its name
+suggests — local embeddings with OpenRouter for chat is `OB1_CHAT_API_KEY`,
+which preflight's fix line already said. Boyscout: the resolver builds the chat
+endpoint once and hands back the embeddings one when it has no key of its own
+and the same base, instead of stripping the slash twice and branching three
+ways.
+
+**Upstream status:** not sent — upstream has one provider constant and no
+preflight; this is the fork's own provider layer (change 16 and since).
+
+### 102. Every knob the server reads reaches the container — `deploy/compose.yaml` forwards the six `OB1_*` settings it did not, the server's `type Env` is the list check 14 holds the file to, and a name in a comment is no longer a forward (SMD-1843)
 
 Compose gives a container exactly the variables its `environment:` names.
 `deploy/compose.yaml`'s `server` block named sixteen and not
@@ -17130,6 +17268,13 @@ through 14, a pattern this file grew by accretion); one module constant. Run:
 every fallback, shape and scan mutant reports as before, a broken probe still
 names the script, and the runtime-without-`Bun.YAML` emulation still fails the
 two parser checks in words.
+
+**Numbered at the merge.** This section was 100 on its branch; `main` took 100
+(the tools manifest) and 101 (SMD-1902, the chat endpoint split) while the
+eight passes ran, so it is 102 — the hand renumber SMD-1917 is filed to end.
+SMD-1902's `OB1_CHAT_BASE_URL` and `OB1_CHAT_API_KEY` arrived declared,
+forwarded and documented, so check 14 passed the merged tree unchanged; its
+`resolveProviderEndpoints` now reads both bases through `baseUrlOr`.
 
 **Upstream status:** not sent — upstream has no `deploy/`; the stack is this
 fork's (change 16 and the migration plan's Phase 4).

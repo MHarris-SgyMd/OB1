@@ -1465,4 +1465,55 @@ else {
   assert(Array.isArray(parsed.checks) && parsed.checks.length > 5, "--json lists every check for a pipeline to consume");
 }
 
+console.log("\n[6] Two provider endpoints are reported and gated by name (SMD-1902)");
+{
+  // No database needed: the provider rows print from configuration alone, and
+  // the --deep probes run whether or not the data layer came up.
+  const DB_DOWN = { ...NO_DB, OB1_STORE: "sql", DATABASE_URL: "postgres://u:p@127.0.0.1:1/x", MCP_ACCESS_KEY: "x".repeat(64) };
+  const NO_KEYS = { OPENROUTER_API_KEY: undefined, OB1_LLM_API_KEY: undefined, OB1_CHAT_BASE_URL: undefined, OB1_CHAT_API_KEY: undefined };
+  const LOCAL = "http://127.0.0.1:11434/v1";
+  const HOSTED = "https://openrouter.ai/api/v1";
+  /** The report row named `name` — glyph, name, detail — or "" when none printed. */
+  const row = (out: string, name: string) => out.split("\n").find((l) => new RegExp(`^\\s*[✓✗!·]\\s+${name}\\s`).test(l)) ?? "";
+
+  // Neither chat knob: one provider row that says it serves both, and no chat rows at all.
+  const one = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: LOCAL });
+  assert(/embeddings and chat/.test(row(one.out, "model provider")), "one endpoint: the provider row says it serves embeddings and chat");
+  assert(row(one.out, "chat provider") === "" && row(one.out, "chat credential") === "", "…and no chat rows print");
+
+  // A hosted chat endpoint with no key of its own fails by name, and is told
+  // the embeddings key is not borrowed.
+  const hosted = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: LOCAL, OB1_LLM_API_KEY: "k-emb", OB1_CHAT_BASE_URL: HOSTED });
+  assert(hosted.code === 1, "a hosted chat endpoint with no OB1_CHAT_API_KEY exits 1");
+  assert(/✗\s+chat credential\s+no OB1_CHAT_API_KEY, and https:\/\/openrouter\.ai\/api\/v1 is not local — OB1_LLM_API_KEY belongs to the other endpoint/.test(hosted.out),
+         "…the chat credential row names the knob and says the embeddings key is not sent there");
+  assert(/→ Set OB1_CHAT_API_KEY, or point OB1_CHAT_BASE_URL at a local provider\./.test(hosted.out), "…with the fix naming both chat knobs");
+  assert(/✓\s+chat provider\s+https:\/\/openrouter\.ai\/api\/v1 — chat \(OB1_CHAT_BASE_URL\)/.test(hosted.out), "…and the chat provider row names the base");
+  assert(/✓\s+model provider\s+http:\/\/127\.0\.0\.1:11434\/v1 — embeddings \(local/.test(hosted.out), "…while the provider row now says embeddings only");
+  assert(/!\s+provider credential\s+a key is set but the endpoint is local/.test(hosted.out), "…and the embeddings credential still warns about its own key on a local endpoint");
+
+  // With a key of its own it passes and the value never prints; a local chat
+  // endpoint beside a hosted embedder needs none and is told the hosted key stays put.
+  const keyed = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: LOCAL, OB1_CHAT_BASE_URL: HOSTED, OB1_CHAT_API_KEY: "k-chat-1234" });
+  assert(/✓\s+chat credential\s+set \(11 chars\)/.test(keyed.out), "OB1_CHAT_API_KEY set: the chat credential row reports its length");
+  assert(!/k-chat-1234/.test(keyed.out), "…and never the value");
+  const localChat = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: HOSTED, OPENROUTER_API_KEY: "k-emb", OB1_CHAT_BASE_URL: LOCAL });
+  assert(/✓\s+chat credential\s+not required for a local endpoint — OPENROUTER_API_KEY belongs to the other endpoint/.test(localChat.out),
+         "a local chat endpoint beside a hosted embedder: no key required, and the hosted key is named as not sent");
+  assert(!/chat credential\s+a key is set but the endpoint is local/.test(localChat.out), "…with no warning that a key will be sent to it");
+  const chatKeyOnly = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: HOSTED, OPENROUTER_API_KEY: "k-emb", OB1_CHAT_API_KEY: "k-chat" });
+  assert(/✓\s+chat provider\s+https:\/\/openrouter\.ai\/api\/v1 — chat, the embeddings endpoint with its own credential \(OB1_CHAT_API_KEY\)/.test(chatKeyOnly.out),
+         "OB1_CHAT_API_KEY alone: the chat row says the endpoint is shared and only the credential is its own");
+
+  // --deep dials each endpoint by name: a chat endpoint that is down fails its
+  // own row while the embeddings row passes against its endpoint.
+  const emb = Bun.serve({ port: 0, fetch: () => Response.json({ data: [{ embedding: new Array(EMBEDDING_DIM).fill(0) }] }) });
+  const deep = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: `http://127.0.0.1:${emb.port}/v1`, OB1_CHAT_BASE_URL: "http://127.0.0.1:1/v1" }, "--deep");
+  emb.stop();
+  assert(new RegExp(`✓\\s+embedding provider\\s+${rx(EMBEDDING_MODEL)} returns ${EMBEDDING_DIM} dimensions, matching the schema`).test(deep.out),
+         "--deep: the embeddings probe passes against its endpoint");
+  assert(/✗\s+metadata model\s+\S+ at http:\/\/127\.0\.0\.1:1\/v1: /.test(deep.out) && /→ Network reachability to 127\.0\.0\.1:1\./.test(deep.out),
+         "…while the chat probe fails by its own name, naming the chat endpoint and its host");
+}
+
 report();

@@ -158,7 +158,7 @@ const cfg = resolveEmbedConfig(process.env);
 const JOB = flag("job") ?? extractionKey(cfg.metadataModel);
 
 console.log(`  job:    ${JOB}`);
-console.log(`  model:  ${cfg.metadataModel} via ${cfg.llmBase}, temperature ${cfg.metadataTemperature}`);
+console.log(`  model:  ${cfg.metadataModel} via ${cfg.chat.base}, temperature ${cfg.metadataTemperature}`);
 
 // One connection per worker and one spare: the heartbeat (db/lease.ts) beats
 // through the pool, and a worker parked on a lock or a long statement holds
@@ -698,7 +698,7 @@ await sql.close();
 if (configError) {
   console.error(
     `\n  The provider refused the request itself: ${configError.slice(0, 300)}\n` +
-      `  Check OB1_LLM_BASE_URL, OB1_LLM_API_KEY and OB1_METADATA_MODEL against the provider; a 400 about a request field\n` +
+      `  Check the chat endpoint (OB1_CHAT_BASE_URL and OB1_CHAT_API_KEY, or OB1_LLM_BASE_URL and OB1_LLM_API_KEY when those are unset) and OB1_METADATA_MODEL against the provider; a 400 about a request field\n` +
       `  is usually reasoning_effort or response_format not being supported by this model. Nothing was marked failed.`
   );
   await Promise.resolve();

@@ -197,9 +197,9 @@ export function extractionKey(model: string): string {
  * `malformed: true` so the caller can count it rather than retry it blindly.
  */
 export async function extractEntities(content: string, cfg: EmbedConfig, signal?: AbortSignal): Promise<Extraction> {
-  const r = await fetch(`${cfg.llmBase}/chat/completions`, {
+  const r = await fetch(`${cfg.chat.base}/chat/completions`, {
     method: "POST",
-    headers: cfg.headers,
+    headers: cfg.chat.headers,
     signal,
     body: JSON.stringify({
       model: cfg.metadataModel,
@@ -211,7 +211,7 @@ export async function extractEntities(content: string, cfg: EmbedConfig, signal?
   });
   if (!r.ok) {
     const msg = await r.text().catch(() => "");
-    const err = new Error(`Extraction request to ${cfg.llmBase} failed: ${r.status} ${msg.slice(0, 300)}`);
+    const err = new Error(`Extraction request to ${cfg.chat.base} failed: ${r.status} ${msg.slice(0, 300)}`);
     (err as Error & { status?: number }).status = r.status;
     throw err;
   }

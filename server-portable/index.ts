@@ -90,10 +90,14 @@ type Env = {
    * embed.ts metadataReasoning.
    */
   OB1_METADATA_REASONING?: string;
-  /** Any OpenAI-compatible base URL. Point it at Ollama for a fully local brain. */
+  /** Any OpenAI-compatible base URL. Point it at Ollama for a fully local brain. Embeddings, and chat unless OB1_CHAT_BASE_URL says otherwise. */
   OB1_LLM_BASE_URL?: string;
   /** Preferred over OPENROUTER_API_KEY. Not needed for a loopback endpoint. */
   OB1_LLM_API_KEY?: string;
+  /** Where the chat calls (metadata, blurbs, the judge) go when it is not OB1_LLM_BASE_URL — see embed.ts resolveProviderEndpoints (SMD-1902). */
+  OB1_CHAT_BASE_URL?: string;
+  /** The chat endpoint's own credential; a different chat endpoint never inherits OB1_LLM_API_KEY. */
+  OB1_CHAT_API_KEY?: string;
   /** Seconds a single provider call — embedding, blurb or metadata extraction — may take. Default 120 — see embed.ts. */
   OB1_LLM_TIMEOUT?: string;
   OPEN_BRAIN_CITATION_BASE_URL?: string;
@@ -1185,7 +1189,7 @@ function buildServer(principal: Principal): McpServer {
             `\n\nNote: ${contextFailures} of ${chunks.length} search chunks were embedded without ` +
             `their situating context — the call failed, or returned a blurb too long to be one. ` +
             `They are stored and searchable; re-capture to regenerate, or check the model at ` +
-            `OB1_LLM_BASE_URL.`;
+            `${embedConfig().chat.base}.`;
         }
         confirmation += explainHeadWindow(embedded);
 
@@ -1219,12 +1223,14 @@ function buildServer(principal: Principal): McpServer {
         }
 
         // Tell the user when tags are placeholders rather than real extraction,
-        // so a broken env().OPENROUTER_API_KEY does not look like a successful capture.
+        // so a broken credential does not look like a successful capture. The
+        // remedy names the endpoint the tagging call dialled — the chat one,
+        // which since SMD-1902 need not be where the embedding went.
         if (typeof meta.metadata_extraction_failed === "string") {
           confirmation +=
             `\n\nNote: the thought was saved, but automatic tagging failed ` +
             `(${meta.metadata_extraction_failed}) — topics and people are placeholders. ` +
-            `Check env().OPENROUTER_API_KEY and the function logs.`;
+            `Check the chat endpoint (${embedConfig().chat.base}), its credential, and the server logs.`;
         }
 
         return {

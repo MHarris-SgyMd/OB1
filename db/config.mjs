@@ -1661,6 +1661,24 @@ export function grantedObjects(groups = ROLE_GRANT_GROUPS) {
   for (const g of groups) for (const row of ROLE_GRANTS[g] ?? []) { const o = grantObjectOf(row); if (!seen.has(o.name)) { seen.add(o.name); out.push(o); } }
   return out;
 }
+/**
+ * Every ROLE_GRANTS row, in group/list order, NOT de-duplicated:
+ * `{ group, kind, name, privileges }`. Where grantedObjects() merges by name to
+ * answer "is this object documented at all", this keeps an object's rows apart,
+ * because db/README.md documents privileges per group and an object can appear
+ * in more than one with a different set (`ob1_config`: SELECT in `server`,
+ * INSERT/UPDATE in `worker`; `thought_audit`: INSERT in `capture`, SELECT and
+ * INSERT in `community`). check-fork-consistency's privilege comparison reads it
+ * (SMD-1471).
+ */
+export function grantRows(groups = ROLE_GRANT_GROUPS) {
+  const out = [];
+  for (const g of groups) for (const row of ROLE_GRANTS[g] ?? []) {
+    const o = grantObjectOf(row);
+    out.push({ group: g, kind: o.kind, name: o.name, privileges: [...row.privileges] });
+  }
+  return out;
+}
 /** Every table named across the given groups (default: all), in group/list order, de-duplicated. */
 export function grantedTables(groups = ROLE_GRANT_GROUPS) {
   return grantedObjects(groups).filter((o) => o.kind === "table").map((o) => o.name);
