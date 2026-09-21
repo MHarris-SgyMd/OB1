@@ -109,11 +109,11 @@ Both are configurable, and both speak the OpenAI-compatible shapes that Ollama
 exposes at `/v1` — so a fully local brain is a URL change, not a code change:
 
 ```bash
-# deploy/.env
-OB1_LLM_BASE_URL=http://ollama:11434/v1
-OB1_EMBEDDING_MODEL=qwen3-embedding:4b
-OB1_EMBEDDING_DIM=1024
-OB1_METADATA_MODEL=qwen2.5:7b
+# deploy/.env — every line here is the default; the profile needs nothing set
+# OB1_LLM_BASE_URL=http://ollama:11434/v1   # compose's own fallback: the profile's service
+# OB1_EMBEDDING_MODEL=qwen3-embedding:4b
+# OB1_EMBEDDING_DIM=1024
+# OB1_METADATA_MODEL=qwen2.5:7b
 # leave OPENROUTER_API_KEY empty
 ```
 
@@ -351,18 +351,21 @@ takes effect within a minute and the agent's history stays queryable.
 
 The shipped defaults are **local**: `qwen3-embedding:4b` at 1024 dimensions for
 embeddings and `qwen2.5:7b` for metadata, both via Ollama, with no credential
-needed. To use OpenRouter instead, set `OPENROUTER_API_KEY` and override both
-models — they are changed as a pair, since a local model name sent to a hosted
-endpoint 404s on every capture and silently stores no topics, people or type.
-`scripts/check-fork-consistency.mjs` fails on that combination in the defaults.
-To mix them on purpose — local embeddings, hosted tagging — give the chat calls
-their own endpoint with `OB1_CHAT_BASE_URL` and `OB1_CHAT_API_KEY`; see
-"Running the models locally" below.
+needed. To use OpenRouter instead, set all four — `OB1_LLM_BASE_URL=https://openrouter.ai/api/v1`,
+`OPENROUTER_API_KEY`, and both models — not the key alone: with the URL unset
+the compose file points the server at the stack's own Ollama and the key is
+sent there (`deploy/.env.example`, Option C). The models are changed as a pair,
+since a local model name sent to a hosted endpoint 404s on every capture and
+silently stores no topics, people or type; `scripts/check-fork-consistency.mjs`
+fails on that combination in the defaults. To mix them on purpose — local
+embeddings, hosted tagging — give the chat calls their own endpoint with
+`OB1_CHAT_BASE_URL` and `OB1_CHAT_API_KEY`; see "Running the models locally"
+below.
 
 ### 2. Bring it up
 
 ```bash
-podman compose -f deploy/compose.yaml up --build
+podman compose -f deploy/compose.yaml up --build     # with a provider named in deploy/.env
 
 # …or, for the fully local path:
 podman compose -f deploy/compose.yaml --profile local-models up --build

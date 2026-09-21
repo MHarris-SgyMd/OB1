@@ -14,9 +14,10 @@
  */
 
 import { createAssert } from "../db/test-support.ts";
-import { applyChunkContextPrompt, applyEmbeddingPrompt, CHUNK_CONTEXT_PROMPTS, MAX_WHOLE_TOKENS } from "../db/config.mjs";
+import { applyChunkContextPrompt, applyEmbeddingPrompt, CHUNK_CONTEXT_PROMPTS, DEFAULT_LLM_BASE_URL, DEFAULT_METADATA_MODEL, MAX_WHOLE_TOKENS } from "../db/config.mjs";
 import { displayDate, normaliseType, thoughtTitle, thoughtUrl, THOUGHT_TYPES, TYPE_ALIASES } from "./thoughts.ts";
 import { DEFAULT_LLM_TIMEOUT_S, resolveEmbedConfig } from "./embed.ts";
+import { DEFAULT_PG_POOL, poolSizeFrom } from "./store-sql.ts";
 import { parseExtraction } from "./entities.ts";
 import { buildJudgeMessages, cleanForDisplay, parseJudgement, wrapSide } from "./consolidate.ts";
 import { chunkContent, DEFAULT_MAX_TOKENS, DEFAULT_OVERLAP_TOKENS, estimateTokens } from "./chunk.ts";
@@ -145,6 +146,44 @@ console.log("\n[7] Prompt templates and provider settings take their inputs lite
   assert(resolveEmbedConfig({ OB1_CHUNK_TOKENS: "" }).chunkTokens === resolveEmbedConfig({}).chunkTokens && resolveEmbedConfig({ OB1_CHUNK_TOKENS: "" }).chunkTokensFrom === "window",
          "and OB1_CHUNK_TOKENS='' is unset too: the window the model derives, not a zero-token one");
   assert(resolveEmbedConfig({ OB1_CHUNK_TOKENS: "900", OB1_CHUNK_OVERLAP: "50" }).chunkTokens === 900, "explicit values are read");
+
+  // The four provider knobs compose forwards since SMD-1843 take the same rule:
+  // "" is unset — the default endpoint and model, temperature 0, no reasoning —
+  // not a URL of "", a model named "", or a NaN temperature.
+  const unset = resolveEmbedConfig({});
+  assert(resolveEmbedConfig({ OB1_LLM_BASE_URL: "" }).embeddings.base === DEFAULT_LLM_BASE_URL.replace(/\/+$/, ""),
+         "OB1_LLM_BASE_URL='' is the default endpoint, not an empty URL");
+  // …and the three string knobs are trimmed: a trailing space from a .env file is not part of a model name or a URL.
+  assert(resolveEmbedConfig({ OB1_LLM_BASE_URL: " http://h:1/v1/ ", OB1_METADATA_MODEL: " m:1b ", OB1_EMBEDDING_MODEL: "\te:1b\n" }).embeddings.base === "http://h:1/v1" &&
+         resolveEmbedConfig({ OB1_METADATA_MODEL: " m:1b " }).metadataModel === "m:1b" && resolveEmbedConfig({ OB1_EMBEDDING_MODEL: "\te:1b\n" }).embeddingModel === "e:1b",
+         "OB1_LLM_BASE_URL, OB1_METADATA_MODEL and OB1_EMBEDDING_MODEL are trimmed; whitespace alone is unset");
+  assert(resolveEmbedConfig({ OB1_METADATA_MODEL: "   " }).metadataModel === DEFAULT_METADATA_MODEL, "OB1_METADATA_MODEL of spaces alone is the default");
+  assert(resolveEmbedConfig({ OB1_LLM_BASE_URL: " / " }).embeddings.base === DEFAULT_LLM_BASE_URL.replace(/\/+$/, "") && resolveEmbedConfig({ OB1_LLM_BASE_URL: "http://a/v1//" }).embeddings.base === "http://a/v1" && resolveEmbedConfig({ OB1_CHAT_BASE_URL: " http://c/v1/ " }).chat.base === "http://c/v1",
+         "OB1_LLM_BASE_URL of slashes alone is the default, not an empty base (it was '' — the seventh review pass); trailing slashes come off");
+  // The flag knobs decide once, wherever they are read: a padded " on " was ON to the
+  // migrator (db/config.mjs's proxy trims) and OFF to the server (the resolver saw
+  // the raw string) until the eighth review pass — the resolvers trim their own argument.
+  assert(resolveEmbedConfig({ OB1_CHUNK_CONTEXT: " on " }).chunkContext === true && resolveEmbedConfig({ OB1_CHUNK_CONTEXT: "  " }).chunkContext === resolveEmbedConfig({}).chunkContext,
+         "OB1_CHUNK_CONTEXT=' on ' is on; spaces alone are the default — the same decision the migrator makes");
+  assert(resolveEmbedConfig({ OB1_EMBEDDING_DIMENSIONS: " on " }).dimensionsRequested === true && resolveEmbedConfig({ OB1_EMBEDDING_DIMENSIONS: " off " }).dimensionsRequested === false,
+         "OB1_EMBEDDING_DIMENSIONS=' on ' / ' off ' decide as 'on' / 'off' do");
+  assert(resolveEmbedConfig({ OB1_METADATA_MODEL: "" }).metadataModel === DEFAULT_METADATA_MODEL, "OB1_METADATA_MODEL='' is the default model, not a model named ''");
+  assert(resolveEmbedConfig({ OB1_METADATA_TEMPERATURE: "" }).metadataTemperature === unset.metadataTemperature && unset.metadataTemperature === 0,
+         "OB1_METADATA_TEMPERATURE='' is the default temperature (0), not NaN");
+  assert(JSON.stringify(resolveEmbedConfig({ OB1_METADATA_REASONING: "" }).metadataReasoning) === JSON.stringify(unset.metadataReasoning),
+         "OB1_METADATA_REASONING='' is the default (no reasoning pass), not a reasoning_effort of ''");
+  assert(resolveEmbedConfig({ OB1_METADATA_TEMPERATURE: "0.3" }).metadataTemperature === 0.3 && resolveEmbedConfig({ OB1_METADATA_MODEL: "x:1b" }).metadataModel === "x:1b",
+         "…while explicit values are read");
+  assert(JSON.stringify(resolveEmbedConfig({ OB1_METADATA_REASONING: " low " }).metadataReasoning) === JSON.stringify({ reasoning_effort: "low" }),
+         "OB1_METADATA_REASONING is trimmed like its siblings — 'low ' from a .env file is an effort of low, not 'low '");
+  assert(JSON.stringify(resolveEmbedConfig({ OB1_METADATA_REASONING: "OFF" }).metadataReasoning) === JSON.stringify({ reasoning_effort: "none" }),
+         "…and off/false/0 mean none, as .env.example says");
+  // The pool size took the same "" (compose's unset) and made a pool of 0.
+  assert(poolSizeFrom(undefined) === DEFAULT_PG_POOL && poolSizeFrom("") === DEFAULT_PG_POOL && poolSizeFrom("  ") === DEFAULT_PG_POOL,
+         `OB1_PG_POOL unset or '' is the default pool (${DEFAULT_PG_POOL}), not Number('') = 0, which Bun's SQL refuses at construction`);
+  assert(poolSizeFrom("0") === DEFAULT_PG_POOL && poolSizeFrom("-2") === DEFAULT_PG_POOL && poolSizeFrom("2.5") === DEFAULT_PG_POOL && poolSizeFrom("ten") === DEFAULT_PG_POOL,
+         "a size Bun's SQL would refuse, or that is not a whole number, is the default");
+  assert(poolSizeFrom("5") === 5 && poolSizeFrom(" 12 ") === 12, "…while a positive integer is read");
 
   // The windowing rule follows the model's window (SMD-1305). 1200 was set
   // for Ollama's 2048-token batch and applied to every model: the default

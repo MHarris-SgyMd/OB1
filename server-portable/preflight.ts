@@ -26,7 +26,8 @@
 import { createStore, databaseUrl, DEFAULT_STORE, DIRECT_CHECK_SKIP_OVER_POSTGREST, maskUrl, missingDatabaseUrl, postgrestOnBunNotice, postgrestOverPostgresUrl, storeKind, type StoreEnv } from "./store.ts";
 import { parseKeyRecords } from "./auth.ts";
 import { DEFAULT_MAX_TOKENS } from "./chunk.ts";
-import { resolveEmbedConfig, resolveProviderEndpoints, type ProviderEndpoint } from "./embed.ts";
+import { resolveEmbedConfig, resolveProviderEndpoints, stringOr, type ProviderEndpoint } from "./embed.ts";
+import { trimmedEnv } from "../db/config.mjs"; // static: `env` below is built before the dynamic import above resolves
 import type { PassCounts } from "../db/config.mjs";
 
 type Status = "ok" | "fail" | "warn" | "skip";
@@ -40,7 +41,9 @@ const results: Check[] = [];
 const add = (name: string, status: Status, detail: string, fix?: string) =>
   results.push({ name, status, detail, fix });
 
-const env = process.env as Record<string, string | undefined>;
+// Trimmed once, as index.ts's initEnv trims the server's — the gate judges the
+// values the server will read (SMD-1843).
+const env = trimmedEnv(process.env as Record<string, string | undefined>);
 const store = storeKind(env);
 // Defaults come from db/config.mjs, not from copies. These four were hardcoded
 // here and went stale the moment the defaults changed, so preflight validated
@@ -52,10 +55,13 @@ const {
   DEFAULT_EMBEDDING_MODEL: DEF_EMB,
   DEFAULT_EMBEDDING_DIM: DEF_DIM,
   isLocalHostname,
+  LOCAL_PROVIDER_SERVICES,
   REAPPLY_COMMAND,
 } = await import("../db/config.mjs");
 
-const embModel = env.OB1_EMBEDDING_MODEL || DEF_EMB;
+// The embedding model read as embed.ts's resolveEmbedConfig reads it, trimmed
+// the same way, so the gate judges the value the server will use.
+const embModel = stringOr(env.OB1_EMBEDDING_MODEL, DEF_EMB);
 const embDim = env.OB1_EMBEDDING_DIM ? Number(env.OB1_EMBEDDING_DIM) : DEF_DIM;
 /**
  * The two chat models by embed.ts's rule, the one the extractor and the judge
@@ -80,7 +86,7 @@ const chatIsOwn = Boolean(env.OB1_CHAT_BASE_URL || env.OB1_CHAT_API_KEY);
  */
 function isLocalEndpoint(url: string): boolean {
   try {
-    return isLocalHostname(new URL(url).hostname, ["ollama"]); // "ollama" is the compose service name
+    return isLocalHostname(new URL(url).hostname, [...LOCAL_PROVIDER_SERVICES]); // the compose service name, from the contract
   } catch {
     return false;
   }
