@@ -16883,7 +16883,12 @@ knob named the judge, so a value the resolver treats as unset — empty, or the
 metadata model's own name again — was labelled the judge's own; it now reads
 the resolved pair. The pass also found main had moved under the branch
 (SMD-1843, PR #93) — this section's number and the `stringOr` rule for the new
-knob follow from the merge.
+knob follow from the merge. Boyscout: `test-preflight.ts` [6] and [7] declared
+the same two environment records and now share one; `test-local-provider.ts`
+carried two sections labelled [7], and the second is [7b], as [3b] is in the
+preflight suite, so [8] and [9] — which changes 101 and this one name — keep
+their numbers; and the JSON-mode probe's comment describes both callers it now
+serves. No behaviour change.
 
 **Upstream status:** not sent — upstream has no consolidation pass; the judge
 is the fork's (SMD-1294, change 54) and so is its knob.

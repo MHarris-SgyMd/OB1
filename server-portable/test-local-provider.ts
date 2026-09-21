@@ -208,7 +208,7 @@ console.log("\n[7] `dimensions` is not sent unless asked for");
          "off by default: the server does not send `dimensions` unasked");
 }
 
-console.log("\n[7] A drifting `type` is normalised, not stored as a new category");
+console.log("\n[7b] A drifting `type` is normalised, not stored as a new category");
 {
   // Observed for real: llama3.2 answered "action_item" for a reminder, which is
   // not in the enum the prompt asks for. Unenforced, that silently fragments the

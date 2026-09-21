@@ -1466,12 +1466,14 @@ else {
   assert(Array.isArray(parsed.checks) && parsed.checks.length > 5, "--json lists every check for a pipeline to consume");
 }
 
+// [6] and [7] need no database: the provider rows print from configuration
+// alone, and the --deep probes run whether or not the data layer came up. A
+// store that is configured and unreachable, and no credential anywhere.
+const DB_DOWN = { ...NO_DB, OB1_STORE: "sql", DATABASE_URL: "postgres://u:p@127.0.0.1:1/x", MCP_ACCESS_KEY: "x".repeat(64) };
+const NO_KEYS = { OPENROUTER_API_KEY: undefined, OB1_LLM_API_KEY: undefined, OB1_CHAT_BASE_URL: undefined, OB1_CHAT_API_KEY: undefined };
+
 console.log("\n[6] Two provider endpoints are reported and gated by name (SMD-1902)");
 {
-  // No database needed: the provider rows print from configuration alone, and
-  // the --deep probes run whether or not the data layer came up.
-  const DB_DOWN = { ...NO_DB, OB1_STORE: "sql", DATABASE_URL: "postgres://u:p@127.0.0.1:1/x", MCP_ACCESS_KEY: "x".repeat(64) };
-  const NO_KEYS = { OPENROUTER_API_KEY: undefined, OB1_LLM_API_KEY: undefined, OB1_CHAT_BASE_URL: undefined, OB1_CHAT_API_KEY: undefined };
   const LOCAL = "http://127.0.0.1:11434/v1";
   const HOSTED = "https://openrouter.ai/api/v1";
   /** The report row named `name` — glyph, name, detail — or "" when none printed. */
@@ -1519,11 +1521,8 @@ console.log("\n[6] Two provider endpoints are reported and gated by name (SMD-19
 
 console.log("\n[7] The supersession judge's model is reported, and probed under its own row when it is not the metadata model (SMD-1901)");
 {
-  // Configuration rows and --deep probes need no database; a stub serves both
-  // paths and logs the model each chat probe names, so "probed once" and
-  // "probed under its own row" are facts about the requests.
-  const DB_DOWN = { ...NO_DB, OB1_STORE: "sql", DATABASE_URL: "postgres://u:p@127.0.0.1:1/x", MCP_ACCESS_KEY: "x".repeat(64) };
-  const NO_KEYS = { OPENROUTER_API_KEY: undefined, OB1_LLM_API_KEY: undefined, OB1_CHAT_BASE_URL: undefined, OB1_CHAT_API_KEY: undefined };
+  // A stub serves both paths and logs the model each chat probe names, so
+  // "probed once" and "probed under its own row" are facts about the requests.
   const chatModels: string[] = [];
   let refuse = "";
   const stub = Bun.serve({

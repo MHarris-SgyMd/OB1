@@ -2375,9 +2375,10 @@ if (deep) {
       continue;
     }
     try {
-      // Metadata extraction needs JSON mode. Providers differ here — Ollama's
-      // OpenAI layer has been inconsistent about response_format — and a provider
-      // that ignores it degrades every capture to "uncategorized" without failing.
+      // Both callers parse the reply as JSON. Providers differ here — Ollama's
+      // OpenAI layer has been inconsistent about response_format — and one that
+      // ignores it degrades every capture to "uncategorized", or fails every
+      // pair the judge is shown, without ever failing a request.
       const m = await fetch(`${chatEndpoint.base}/chat/completions`, {
         method: "POST",
         headers: chatEndpoint.headers,
