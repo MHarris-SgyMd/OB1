@@ -238,7 +238,7 @@ function write(plan) {
   writeFileSync(join(ROOT, "releases.json"), JSON.stringify([...plan.releases, entry], null, 2) + "\n");
 
   console.log(`Wrote FORK.md, CHANGELOG.md and releases.json for ${plan.version}.`);
-  console.log(`Next, out of band: emit a NNN_set_schema_version.sql upserting '${plan.version}' as the range's last migration, then tag v${core}+upstream.${UPSTREAM_PIN} and create the release.`);
+  console.log(`Next, out of band, in this same commit: bump db/version.mjs's FORK_VERSION to '${plan.version}' and emit a NNN_set_schema_version.sql upserting it as the range's last migration (check-fork holds the two equal, so both move together). Then tag v${core}+upstream.${UPSTREAM_PIN} and create the release.`);
 }
 
 function gitHead() {
