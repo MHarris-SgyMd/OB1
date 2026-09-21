@@ -86,6 +86,7 @@ import { join, dirname, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { coreColumnCommentStatement, coreFunctionStatement, ownedColumnCommentsIn, ownedFunctionsIn, supabaseIsmsIn } from "../db/config.mjs";
 import { FORK_VERSION, migrationSha, readReleases, semverCompare } from "../db/version.mjs";
+import { parseFragment, fragmentSection } from "./fragments.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const CATEGORIES = [
@@ -2401,34 +2402,6 @@ function checkForkCounts() {
 }
 checkForkCounts();
 
-/** Split `---` front matter and the body of a fragment; null if no front matter. */
-function parseFragment(text) {
-  const m = /^---\n([\s\S]*?)\n---\n?([\s\S]*)$/.exec(text);
-  if (!m) return null;
-  const fm = {};
-  const lines = m[1].split("\n");
-  for (let i = 0; i < lines.length; i++) {
-    const kv = /^([a-z_]+):\s*(.*)$/.exec(lines[i]);
-    if (!kv) continue;
-    const key = kv[1];
-    let val = kv[2].trim();
-    if (val === "") {
-      const items = [];
-      while (i + 1 < lines.length && /^\s*-\s+/.test(lines[i + 1])) items.push(lines[++i].replace(/^\s*-\s+/, "").trim());
-      fm[key] = items;
-    } else if (val.startsWith("[")) {
-      fm[key] = val.replace(/^\[|\]$/g, "").split(",").map((s) => s.trim().replace(/^["']|["']$/g, "")).filter(Boolean);
-    } else {
-      fm[key] = val.replace(/^["']|["']$/g, "");
-    }
-  }
-  return { fm, body: m[2] };
-}
-/** A `## <name>` body from a fragment (up to the next `## ` or the end). */
-function fragmentSection(body, name) {
-  const m = new RegExp(`(?:^|\\n)## ${name}\\s*\\n([\\s\\S]*?)(?=\\n## |$)`).exec(body);
-  return m ? m[1].trim() : null;
-}
 /**
  * 15: a changes/<ticket>.md fragment is well-formed. A fragment replaces the
  * hand-numbered FORK section for new work: front matter naming a Keep a Changelog

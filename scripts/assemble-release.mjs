@@ -28,6 +28,7 @@ import { execFileSync } from "node:child_process";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { FORK_VERSION, UPSTREAM_PIN, migrationSha, readReleases, highestReleasedMigration } from "../db/version.mjs";
+import { parseFragment, fragmentSection } from "./fragments.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const CHANGES_DIR = join(ROOT, "changes");
@@ -38,35 +39,6 @@ const REPO = "https://github.com/MHarris-SgyMd/OB1";
 const pad3 = (n) => String(n).padStart(3, "0");
 
 // ── Pure functions (self-checked) ────────────────────────────────────────────
-
-/** Split a fragment into { fm, body }, or null when it has no front matter. */
-export function parseFragment(text) {
-  const m = /^---\n([\s\S]*?)\n---\n?([\s\S]*)$/.exec(text);
-  if (!m) return null;
-  const fm = {};
-  const lines = m[1].split("\n");
-  for (let i = 0; i < lines.length; i++) {
-    const kv = /^([a-z_]+):\s*(.*)$/.exec(lines[i]);
-    if (!kv) continue;
-    let val = kv[2].trim();
-    if (val === "") {
-      const items = [];
-      while (i + 1 < lines.length && /^\s*-\s+/.test(lines[i + 1])) items.push(lines[++i].replace(/^\s*-\s+/, "").trim());
-      fm[kv[1]] = items;
-    } else if (val.startsWith("[")) {
-      fm[kv[1]] = val.replace(/^\[|\]$/g, "").split(",").map((s) => s.trim().replace(/^["']|["']$/g, "")).filter(Boolean);
-    } else {
-      fm[kv[1]] = val.replace(/^["']|["']$/g, "");
-    }
-  }
-  return { fm, body: m[2] };
-}
-
-/** A `## <name>` body from a fragment. */
-export function fragmentSection(body, name) {
-  const m = new RegExp(`(?:^|\\n)## ${name}\\s*\\n([\\s\\S]*?)(?=\\n## |$)`).exec(body);
-  return m ? m[1].trim() : null;
-}
 
 /** Bump a version by kind, keeping the +upstream build metadata. */
 export function bumpVersion(version, kind) {
