@@ -16893,6 +16893,56 @@ corrections to pass 1's text: breaking the reader to search from `services:`
 fails one probe, from the top of the file two (the run-it reviewer measured
 both); and `test-thoughts` is 114 assertions since pass 1, not 109.
 
+**Review pass 3** (the same pair). The run-it reviewer found tidy-ups alone,
+all in pass 1's code; the cold read found two holes in the mechanism's core,
+so not the stop signal yet. The decision itself had no probe: the three
+readers and the six messages were held, but a dropped `if (!server.has(k))`
+left the real file — which complies — passing, and the next knob added to
+`type Env` without a compose line would never have been reported (cold read;
+the drop-the-mechanism mutant, which this fork's own rule says to run). The
+decision is one pure function now, `serverEnvGapsIn(declared, documented,
+files, excused)`, returning kinds the caller turns into words, and nineteen
+`DECISION_PROBES` run it on in-memory documents: every kind once, the
+fallback three ways, an overlay's server held to the names, a knob forwarded
+only in an overlay not a dead switch. Dropping the unforwarded branch fails
+one probe, the undeclared branch two, inverting the dead switch seventeen,
+skipping overlays two. (Writing them found a flaw of their own: with the
+excuse map global, every probe reported `OB1_STORE`'s excuse as stale — the
+map is a parameter, the real run passes `NOT_FORWARDED`.) The universe was
+the hand-maintained `type Env`, so a module reading `process.env.OB1_X`
+directly slipped past — the class the rule's own message admits it met twice
+(cold read): every non-test server source is scanned for a direct read
+(`process.env.X`, `env.X`, `env?.X`, `env["X"]`, `ENV.X`, `bindings.X`) of a
+name the block does not declare, and fails at the file and line; two probes
+hold the reader, and a `process.env.OB1_POOL_SIZE` planted in `store-sql.ts`
+is reported at its line. The bare list item pass 1 had accepted is refused
+after all, on a measurement: under docker-compose v5.5 — the binary CI and
+this Mac's `podman compose` run — `- OB1_QUERY_LOG` does take deploy/.env's
+value, the process env winning over it, but with nothing set it is *absent*
+in the container where every other knob here is `""`, and the python
+podman-compose is said to read the process env alone (unmeasured: not
+installed here). One shape, `${NAME:-}`, and the message says what was
+measured. A mapping written as a list item (`- OB1_A: 1`, the slip compose
+rejects) stringified to `[object Object]` and the knob read as missing (cold
+read); it is refused as its own kind. `forwardForm` never saw the knob's
+name, so `${OB1_QUERY_LOG:-}x`, `${OB1_QUERY_LOG:+on}`, a `$$` in the
+default and a second expansion were all "another variable's name is a
+miswire" (both reviewers); it takes the name and says "the knob's own name
+with something the rule does not read around or inside it"; five more
+`FORM_PROBES`. A column-0 comment inside a service's block ended the block
+early and dropped the pointer to the bare filename (both reviewers); a
+comment does not end it, a top-level key does, one probe. The two extraction
+knobs sat under the example's "local models" heading though they apply to
+every endpoint (cold read); their own block. And the docblock of the rule
+check 14 replaced was still standing above it, describing a check that no
+longer existed; its history — six unforwarded knobs found when it was
+written — moved into check 14's own. Not taken: preflight resolving the
+fallback's service name at start (SMD-1875, argued again); a duplicate
+service key, which `Bun.YAML` reads last-wins and compose refuses outright,
+so it cannot reach a live stack; mixed case in `LOCAL_PROVIDER_SERVICES`
+itself, where the check and preflight agree exactly. Eleven mutants on the
+real files bite as above.
+
 **Upstream status:** not sent — upstream has no `deploy/`; the stack is this
 fork's (change 16 and the migration plan's Phase 4).
 
