@@ -16943,6 +16943,40 @@ so it cannot reach a live stack; mixed case in `LOCAL_PROVIDER_SERVICES`
 itself, where the check and preflight agree exactly. Eleven mutants on the
 real files bite as above.
 
+**Review pass 4** (the same pair) — the stop signal. Both reviewers ranked
+pass 3's additions as the top findings, and each was a few lines: the
+decision probes covered `not-house-form` with a miswire and a literal but
+never the knob's own name with a refused tail, so the shape regex loosened to
+"starts with `${NAME`" passed everything (run-it); three probes now, and the
+loosened regex fails all three. `index.ts` was excluded from the read scan
+with no reason given (run-it); it is scanned — its typed reads through
+`env()` yield nothing, a `process.env.OB1_X` planted there is reported at its
+line — and the `env().X` accessor shape is read too. The scan stopped at
+`server-portable/`, while the container's process also loads `db/config.mjs`,
+which reads eight knobs through its `ENV` proxy — `OB1_TRGM_INDEX` among them,
+which the `type Env` comment had placed in `preflight.ts` (cold read);
+`db/config.mjs` is scanned, its one migrator-only knob excused by name in
+`READ_FOR_MIGRATOR` and the excuse held stale two ways, and a knob planted in
+the file is reported at its line. The undeclared-read pointer was the first
+mention of the name in the file, so a docblock above the read took it (both
+reviewers); the reader returns the read's own index, one probe holds that. A
+mapping key with no value (`OB1_A:`) was folded into the bare-item kind with
+the list item's remedy (cold read); one message names both shapes. A base
+file that failed to parse was reported "missing" beside check 13's parse
+error (cold read); check 14 says nothing then. No probe held the DNS-style
+name compare (run-it); one does. And the bring-up line in `deploy/README.md`,
+the compose header and SETUP.md ran the stack with no profile and no provider
+named, which now lands on the `ollama` fallback: they name the profile, and
+the README says in one sentence what happens without either — preflight OK,
+the first capture failing on the name (SMD-1875, argued a third time; not
+taken here). Left for the boyscout: the house-form shape is spelled three
+ways (the per-knob test, the fallback's, `forwardForm`'s partial regexes).
+Nine mutants on the real files bite. Counts at the stop: 8 `FORWARD_PROBES`,
+12 `LINE_PROBES`, 11 `FORM_PROBES`, 3 `ENV_SOURCE_PROBES`, 2 + 1
+`ENV_READ_PROBES`, 25 `DECISION_PROBES`; `test-thoughts` 114, `test-server`
+178, `test-preflight` 50 (2 skipped without a database); check 14 adds
+nothing measurable to the script's 0.8 s.
+
 **Upstream status:** not sent — upstream has no `deploy/`; the stack is this
 fork's (change 16 and the migration plan's Phase 4).
 

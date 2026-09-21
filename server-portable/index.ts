@@ -38,10 +38,11 @@ type Env = {
   /** The SQL store's connection pool size (store-sql.ts); default 10. */
   OB1_PG_POOL?: string;
   /**
-   * The opt-in trigram index (db/config.mjs). The migrator builds it; the server
-   * reads this only in preflight.ts, to tell the setting and the database apart.
-   * Declared here because this block is the one list of what the container's
-   * process reads — check 14 holds deploy/compose.yaml to it (SMD-1843).
+   * The opt-in trigram index. The migrator builds it; in the server's process
+   * db/config.mjs reads it (TRGM_INDEX), which preflight.ts imports to tell the
+   * setting and the database apart. Declared here because this block is the
+   * one list of what the container's process reads — check 14 holds
+   * deploy/compose.yaml to it (SMD-1843).
    */
   OB1_TRGM_INDEX?: string;
   /** Must match the width of thoughts.embedding — see db/config.mjs. */

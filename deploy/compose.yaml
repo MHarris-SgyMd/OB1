@@ -4,8 +4,11 @@
 # running system through an ordinary pipeline, with no Supabase CLI installed and
 # no supabase.com account involved. Postgres, the schema, and the MCP server.
 #
-#   podman compose -f deploy/compose.yaml up --build
-#   docker compose -f deploy/compose.yaml up --build
+#   podman compose -f deploy/compose.yaml --profile local-models up --build
+#   docker compose -f deploy/compose.yaml --profile local-models up --build
+#
+# The profile is the stack's own Ollama, where the server's model endpoint
+# defaults; drop it when deploy/.env names another provider.
 #
 # Then point an MCP client at http://127.0.0.1:8000/?key=$MCP_ACCESS_KEY
 #

@@ -33,10 +33,16 @@ now ordinary environment variables your platform's secret store supplies.
 ### 2. Bring it up
 
 ```bash
-podman compose -f deploy/compose.yaml up --build
+podman compose -f deploy/compose.yaml --profile local-models up --build
 ```
 
-Three services, in order:
+The profile is the stack's own Ollama, where the server's model endpoint
+defaults; drop it when `deploy/.env` names another provider (an Ollama on the
+host, OpenRouter — `.env.example`, "Model provider"). Without either, preflight
+still says OK — the name `ollama` counts as local and is not dialled — and the
+first capture fails on it (SMD-1875).
+
+Three services, in order (five with the profile):
 
 | Service | Replaces |
 | --- | --- |

@@ -2184,18 +2184,21 @@ function declaredEnvIn(source) {
 /**
  * The knob names a source reads straight from an environment object —
  * `process.env.OB1_X`, `env.OB1_X`, `env?.OB1_X`, `env["OB1_X"]`, `ENV.OB1_X`,
- * `bindings.OB1_X` — deduplicated, in order of first read. A name a module
- * reads this way without declaring it in `type Env` is the class the rule's
- * first run found twice (OB1_PG_POOL in store-sql.ts, OB1_TRGM_INDEX in
- * preflight.ts); a read through a variable (`env[QUERY_LOG.flag]`) is
- * invisible here, and declared by hand.
+ * `bindings.OB1_X`, index.ts's accessor `env().OB1_X` — as `[name, index]`
+ * pairs, deduplicated, in order of first read, the index that of the read
+ * itself (a docblock naming the knob above it is not the read). A name a
+ * module reads this way without declaring it in `type Env` is the class the
+ * rule's first run found twice (OB1_PG_POOL in store-sql.ts, and
+ * OB1_TRGM_INDEX, which db/config.mjs reads for preflight); a read through a
+ * variable (`env[QUERY_LOG.flag]`) or a destructuring is invisible here, and
+ * declared by hand.
  */
 function envReadsIn(source) {
-  const names = [];
-  for (const m of source.matchAll(/\b(?:process\.env|env|ENV|bindings)(?:\?\.|\.|\??\[["'])((?:OB1_|OPEN_BRAIN_)[A-Z0-9_]+)\b/g)) {
-    if (!names.includes(m[1])) names.push(m[1]);
+  const reads = [];
+  for (const m of source.matchAll(/\b(?:process\.env|env\(\)|env|ENV|bindings)(?:\?\.|\.|\??\[["'])((?:OB1_|OPEN_BRAIN_)[A-Z0-9_]+)\b/g)) {
+    if (!reads.some(([n]) => n === m[1])) reads.push([m[1], m.index]);
   }
-  return names;
+  return reads;
 }
 
 /**
@@ -2309,10 +2312,19 @@ const ENV_SOURCE_PROBES = [
 ];
 const ENV_READ_PROBES = [
   // [source, expected names]
-  ["const a = process.env.OB1_A; const b = env.OB1_B || 1; const c = env?.OB1_C; const d = env[\"OB1_D\"]; const e = ENV.OPEN_BRAIN_E; f(bindings.OB1_F);", ["OB1_A", "OB1_B", "OB1_C", "OB1_D", "OPEN_BRAIN_E", "OB1_F"]],
+  ["const a = process.env.OB1_A; const b = env.OB1_B || 1; const c = env?.OB1_C; const d = env[\"OB1_D\"]; const e = ENV.OPEN_BRAIN_E; f(bindings.OB1_F); const g = env().OB1_G;", ["OB1_A", "OB1_B", "OB1_C", "OB1_D", "OPEN_BRAIN_E", "OB1_F", "OB1_G"]],
   // Prose, a string naming the knob, a read through a variable, and a lowercase object are not reads.
   ["// set OB1_A in deploy/.env\nconst m = `OB1_B=${x}`; const v = env[QUERY_LOG.flag]; const w = cfg.OB1_C; const z = process.env.OB1_A;", ["OB1_A"]],
 ];
+// The index is the read's, not the first mention's: the comment comes first here.
+const ENV_READ_INDEX_PROBE = ["// OB1_A is read below\nconst a = process.env.OB1_A;", "OB1_A", 23 + 10]; // the read expression starts after the comment line (23) and `const a = ` (10)
+/**
+ * Knobs db/config.mjs reads that are the migrator's alone — the server's process
+ * loads the file but never reaches the read — with the reason.
+ */
+const READ_FOR_MIGRATOR = {
+  OB1_BACKFILL_LIMIT: "migration 023's batch size, read inside the substitutions db/migrate.ts asks for; the server never calls that",
+};
 const FORWARD_PROBES = [
   // [yaml, expected gap kinds, expected server names → values]
   ["services:\n  server:\n    environment:\n      OB1_A: ${OB1_A:-}\n      OB1_B: ${OB1_B:-x}\n", [], { OB1_A: "${OB1_A:-}", OB1_B: "${OB1_B:-x}" }],
@@ -2400,6 +2412,12 @@ const DECISION_PROBES = [
   [["OB1_A"], ["OB1_A"], [BASE(SRV("      OB1_A: ${OB1_B:-}\n"))], ["not-house-form:OB1_A"]],
   [["OB1_A"], ["OB1_A"], [BASE(SRV("      OB1_A: on\n"))], ["not-house-form:OB1_A"]],
   [["OB1_A"], ["OB1_A"], [BASE(SRV("      - OB1_A\n"))], ["bare-item:OB1_A"]],
+  [["OB1_A"], ["OB1_A"], [BASE(SRV("      OB1_A:\n"))], ["bare-item:OB1_A"]],
+  // The shape's tail: the knob's own name with a refused tail is not the house form.
+  [["OB1_A"], ["OB1_A"], [BASE(SRV("      OB1_A: ${OB1_A:-}x\n"))], ["not-house-form:OB1_A"]],
+  [["OB1_A"], ["OB1_A"], [BASE(SRV("      OB1_A: ${OB1_A-}\n"))], ["not-house-form:OB1_A"]],
+  [["OB1_A"], ["OB1_A"], [BASE(SRV("      OB1_A: ${OB1_A:?x}\n"))], ["not-house-form:OB1_A"]],
+  [["OB1_A"], ["OB1_A"], [BASE(SRV("      OB1_A: ${OB1_A}\n"))], []],
   [["OB1_A"], ["OB1_A"], [BASE(SRV("      - OB1_A=${OB1_A:-}\n"))], []],
   [["OB1_A"], ["OB1_A"], [BASE("services:\n  server:\n    env_file: .env\n    environment:\n      OB1_A: ${OB1_A:-}\n")], ["env-file:"]],
   [["OB1_A"], ["OB1_A"], [BASE("services:\n  migrate:\n    environment:\n      OB1_A: ${OB1_A:-}\n")], ["no-server:"]],
@@ -2410,6 +2428,8 @@ const DECISION_PROBES = [
   [["OB1_LLM_BASE_URL"], ["OB1_LLM_BASE_URL"], [BASE("services:\n  server:\n    environment:\n      OB1_LLM_BASE_URL: ${OB1_LLM_BASE_URL:-http://ollama:11434/v1}\n  ollama:\n    image: x\n")], []],
   [["OB1_LLM_BASE_URL"], ["OB1_LLM_BASE_URL"], [BASE("services:\n  server:\n    environment:\n      OB1_LLM_BASE_URL: ${OB1_LLM_BASE_URL:-http://postgres:11434/v1}\n  postgres:\n    image: x\n")], ["bad-fallback:OB1_LLM_BASE_URL"]],
   [["OB1_LLM_BASE_URL"], ["OB1_LLM_BASE_URL"], [BASE("services:\n  server:\n    environment:\n      OB1_LLM_BASE_URL: ${OB1_LLM_BASE_URL:-http://ollama:11434/v1}\n")], ["bad-fallback:OB1_LLM_BASE_URL"]],
+  // Names compare as DNS does: a service spelled Ollama, a fallback spelled OLLAMA.
+  [["OB1_LLM_BASE_URL"], ["OB1_LLM_BASE_URL"], [BASE("services:\n  server:\n    environment:\n      OB1_LLM_BASE_URL: ${OB1_LLM_BASE_URL:-http://OLLAMA:11434/v1}\n  Ollama:\n    image: x\n")], []],
   // Overlays: the server's names are held there too; a knob forwarded only in an overlay is not a dead switch.
   [["OB1_A"], ["OB1_A"], [BASE(SRV("      OB1_A: ${OB1_A:-}\n")), OVERLAY(SRV("      OB1_Z: ${OB1_Z:-}\n"))], ["undeclared:OB1_Z"]],
   [["OB1_A"], ["OB1_A", "OB1_C"], [BASE(SRV("      OB1_A: ${OB1_A:-}\n")), OVERLAY("services:\n  migrate:\n    environment:\n      OB1_C: ${OB1_C:-}\n")], []],
@@ -2427,8 +2447,13 @@ function checkServerEnvForwarded() {
     if (JSON.stringify(got) !== JSON.stringify(names)) fail(SELF, `env-declaration reader no longer reports ${JSON.stringify(names)} for its probe (reported ${JSON.stringify(got)}): ${JSON.stringify(source)}`);
   }
   for (const [source, names] of ENV_READ_PROBES) {
-    const got = envReadsIn(source);
+    const got = envReadsIn(source).map(([n]) => n);
     if (JSON.stringify(got) !== JSON.stringify(names)) fail(SELF, `env-read reader no longer reports ${JSON.stringify(names)} for its probe (reported ${JSON.stringify(got)}): ${JSON.stringify(source)}`);
+  }
+  {
+    const [source, name, index] = ENV_READ_INDEX_PROBE;
+    const got = envReadsIn(source).find(([n]) => n === name)?.[1];
+    if (got !== index) fail(SELF, `env-read reader no longer reports the read's own index ${index} for \`${name}\` (reported ${got}) — a mention in a comment above the read must not take the pointer: ${JSON.stringify(source)}`);
   }
   for (const [yaml, service, needle, line] of LINE_PROBES) {
     const got = lineIn(yaml, service, needle);
@@ -2461,14 +2486,27 @@ function checkServerEnvForwarded() {
   if (declared === null) { fail(SERVER_ENV_SOURCE, `has no \`type Env = { … };\` block — check 14 reads the knobs the server declares from it; if the declaration moved, move the reader (SMD-1843)`); return; }
   if (!declared.some((n) => KNOB.test(n))) { fail(SERVER_ENV_SOURCE, `\`type Env\` declares no OB1_* or OPEN_BRAIN_* name — check 14 has nothing to hold the compose file to, which cannot be right (SMD-1843)`); return; }
 
-  // The declaration is held honest: a server source that reads a knob straight
-  // from the environment declares it, or the universe is short of what runs.
+  // The declaration is held honest: a source the container's process loads —
+  // every non-test server-portable/*.ts, index.ts included (its typed reads
+  // yield nothing; a `process.env.OB1_X` there would), and db/config.mjs,
+  // which the server imports and which reads eight knobs through its ENV
+  // proxy — that reads a knob straight from the environment declares it, or
+  // the universe is short of what runs. The migrator's own knob is excused.
   const srcDir = join(ROOT, "server-portable");
-  for (const f of readdirSync(srcDir).filter((f) => /\.ts$/.test(f) && !/^test-/.test(f) && f !== "index.ts").sort()) {
-    const source = readFileSync(join(srcDir, f), "utf8");
-    for (const name of envReadsIn(source)) {
-      if (!declared.includes(name)) fail(`server-portable/${f}:${source.slice(0, source.indexOf(name)).split("\n").length}`, `reads \`${name}\` from the environment, and ${SERVER_ENV_SOURCE}'s \`type Env\` — the one list of what the container's process reads, which check 14 holds deploy/compose.yaml to — does not declare it, so nothing forwards it: declare it there with what it does (SMD-1843)`);
+  const sources = readdirSync(srcDir).filter((f) => /\.ts$/.test(f) && !/^test-/.test(f)).sort().map((f) => `server-portable/${f}`);
+  sources.push("db/config.mjs");
+  const readSomewhere = new Set();
+  for (const rel of sources) {
+    const source = readFileSync(join(ROOT, rel), "utf8");
+    for (const [name, index] of envReadsIn(source)) {
+      readSomewhere.add(name);
+      if (declared.includes(name) || (rel === "db/config.mjs" && name in READ_FOR_MIGRATOR)) continue;
+      fail(`${rel}:${source.slice(0, index).split("\n").length}`, `reads \`${name}\` from the environment, and ${SERVER_ENV_SOURCE}'s \`type Env\` — the one list of what the container's process reads, which check 14 holds deploy/compose.yaml to — does not declare it, so nothing forwards it: declare it there with what it does${rel === "db/config.mjs" ? `, or, when only db/migrate.ts reaches the read, excuse it in READ_FOR_MIGRATOR in ${SELF}` : ""} (SMD-1843)`);
     }
+  }
+  for (const name of Object.keys(READ_FOR_MIGRATOR)) {
+    if (!readSomewhere.has(name)) fail(SELF, `READ_FOR_MIGRATOR excuses \`${name}\`, which db/config.mjs no longer reads — drop the entry (SMD-1843)`);
+    if (declared.includes(name)) fail(SELF, `READ_FOR_MIGRATOR excuses \`${name}\` as the migrator's alone, and ${SERVER_ENV_SOURCE}'s \`type Env\` declares it — one of the two is wrong (SMD-1843)`);
   }
 
   const dir = join(ROOT, "deploy");
@@ -2476,7 +2514,7 @@ function checkServerEnvForwarded() {
   for (const name of readdirSync(dir).filter((f) => COMPOSE_FILE.test(f) && statSync(join(dir, f)).isFile()).sort()) {
     const text = readFileSync(join(dir, name), "utf8");
     let doc;
-    try { doc = Bun.YAML.parse(text); } catch { continue; } // check 13 reports the parse failure
+    try { doc = Bun.YAML.parse(text); } catch { if (name === "compose.yaml") return; continue; } // check 13 reports the parse failure; nothing to hold without the base
     files.push({ name, doc });
     texts.set(name, text);
   }
@@ -2491,7 +2529,7 @@ function checkServerEnvForwarded() {
       case "env-file": fail(at(file, service, "env_file"), `service \`${service}\` has \`env_file: ${detail}\` — a file this rule does not open, forwarding whatever it holds; name each knob in \`environment:\` instead (SMD-1843)`); break;
       case "environment-not-mapping": fail(at(file, service, "environment"), `service \`${service}\` has \`environment: ${detail}\`, neither a mapping nor a list (SMD-1843)`); break;
       case "environment-item-not-string": fail(at(file, service, "environment"), `service \`${service}\` has ${detail} as an \`environment:\` list item — an item is \`NAME=value\`; a mapping there is the slip compose rejects, and this rule would otherwise count its knob as missing (SMD-1843)`); break;
-      case "bare-item": fail(at(file, service, name), `\`- ${name}\` under \`${service}\` is a bare item, which compose fills from its own environment — absent in the container when nothing is set, where every other knob here is "", and the runners differ in what that environment is (docker-compose reads deploy/.env for it; measured) — write \`- ${name}=\${${name}:-}\`, or the mapping form (SMD-1843)`); break;
+      case "bare-item": fail(at(file, service, name), `\`${name}\` under \`${service}\` has no value — a bare \`- ${name}\` item, or \`${name}:\` with nothing after it — which compose fills from its own environment: absent in the container when nothing is set, where every other knob here is "", and the runners differ in what that environment is (docker-compose reads deploy/.env for it; measured) — write \`${name}: \${${name}:-}\` (in a list, \`- ${name}=\${${name}:-}\`) (SMD-1843)`); break;
       case "not-house-form": fail(at(file, service, name), `\`${name}: ${detail}\` under \`${service}\` — ${forwardForm(detail, name)}; a knob is forwarded as ${HOUSE(name)}, the operator's value under its own name (SMD-1843)`); break;
       case "undeclared": fail(at(file, "server", name), `\`server.environment\` forwards \`${name}\`, which ${SERVER_ENV_SOURCE} does not declare — \`type Env\` there is the one list of what the container's process reads, so this is a typo, a knob that died, or a knob a module reads without declaring (two were, when this rule first ran): declare it there with what it does, or drop it here (SMD-1843)`); break;
       case "excused-forwarded": fail(at(file, "server", name), `forwards \`${name}\`, which NOT_FORWARDED in ${SELF} says the stack must not: ${detail} (SMD-1843)`); break;

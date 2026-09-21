@@ -332,7 +332,7 @@ capture 404s and silently stores no topics, people or type.
 ### 2. Bring it up
 
 ```bash
-podman compose -f deploy/compose.yaml up --build
+podman compose -f deploy/compose.yaml up --build     # with a provider named in deploy/.env
 
 # …or, for the fully local path:
 podman compose -f deploy/compose.yaml --profile local-models up --build
