@@ -8,7 +8,7 @@ this directory, in one of two states:
 - **`NNN-<slug>.md` — a numbered change.** The change number is the one code
   comments cite as "FORK.md change N" and `db/README.md`'s migration map cites as
   "NNN change M". The numbers run contiguously from 18 with no gap and no
-  duplicate. Only the release step creates one of these.
+  duplicate. Only the release step creates one of these (18–103 predate it).
 - **`smd-NNNN.md` — a release fragment** (SMD-1804): what a pull request ships.
   It has no change number yet; the release step assigns one when it assembles a
   release, turning the fragment into `NNN-<slug>.md` in merge order. So a merge of
@@ -63,9 +63,11 @@ Bold-led paragraphs, in this order, each only if it applies:
 - **Follow-ups.** The tickets filed.
 - **Upstream status.**
 
-A file — fragment or numbered — is at most **150 lines**. The 46 numbered files
-that were over it at the split are listed in check 15's `OVERSIZE_AT_SPLIT` with
-the line count they had then, rounded up to ten, and may only shrink: a listed
+A file — fragment or numbered — is at most **150 lines**. The 47 numbered files
+that were over it when the split landed (46 from FORK.md, and 103, which reached
+`main` as a hand-numbered section while the split was in review) are listed in
+check 15's `OVERSIZE_AT_SPLIT` with the line count they had then, rounded up to
+ten, and may only shrink: a listed
 file that fits under the cap fails until its entry is dropped, and a listed file
 that grows past its ceiling fails.
 [`102-…`](102-every-knob-the-server-reads-reaches.md) is the first record cut to

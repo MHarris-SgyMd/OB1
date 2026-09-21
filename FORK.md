@@ -165,7 +165,7 @@ and fails a "FORK.md change N" citation with no file behind it (SMD-1917).
 | 17 | `[fork] evals: choose the local models by measurement` | The local defaults were picked by size. `evals/` benchmarks retrieval and extraction against real Ollama; `nomic-embed-text` placed 5th of 7 and `llama3.2` reproduced its production faults. Defaults are now `embeddinggemma` + `qwen2.5:7b`. | **Unfiled** |
 
 <!-- changes-index:start — generated from changes/ by scripts/fork-index.mjs; do not edit by hand -->
-**102 numbered changes** on top of the pin: 1–17 are the table above; 18–102 are one file each under [`changes/`](changes/README.md), newest last. A change's record is its file; the review-pass prose behind it is in the commits (`(caught: …)` tags, read by `scripts/mechanism-yield.mjs`).
+**103 numbered changes** on top of the pin: 1–17 are the table above; 18–103 are one file each under [`changes/`](changes/README.md), newest last. A change's record is its file; the review-pass prose behind it is in the commits (`(caught: …)` tags, read by `scripts/mechanism-yield.mjs`).
 
 | # | Change | Ticket |
 | --- | --- | --- |
@@ -254,6 +254,7 @@ and fails a "FORK.md change N" citation with no file behind it (SMD-1917).
 | 100 | [Two counted surfaces read one typed source instead of drifting by hand](changes/100-two-counted-surfaces-read-one-typed-source.md) | SMD-1805, SMD-1471 |
 | 101 | [The chat calls can have an endpoint of their own](changes/101-the-chat-calls-can-have-an-endpoint-of-their.md) | SMD-1902 |
 | 102 | [Every knob the server reads reaches the container](changes/102-every-knob-the-server-reads-reaches.md) | SMD-1843 |
+| 103 | [Change 69's five servers name the key on 008's audit row](changes/103-change-69-s-five-servers-name-the-key-on-008.md) | SMD-1541 |
 
 Landed since the last release and numbered at the next one (SMD-1804): [SMD-1804](changes/smd-1804.md), [SMD-1917](changes/smd-1917.md).
 <!-- changes-index:end -->

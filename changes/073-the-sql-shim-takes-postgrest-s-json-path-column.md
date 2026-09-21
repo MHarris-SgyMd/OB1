@@ -212,7 +212,7 @@ in a select list, and `.contains()` with a path (containment under a key is
 other shapes a PostgREST consumer might read differently — numerics as text,
 `int8` — are left as Bun gives them; nothing driven has needed more.
 `metadata-norm`'s `metadata->>confidence` term would parse now, and its
-nested `.or()` keeps it off the shim. SMD-1541 and SMD-1525 as before.
+nested `.or()` keeps it off the shim. SMD-1541 (done in change 103) and SMD-1525 as before.
 
 **Upstream status:** not applicable — the shim is this fork's (fix 13); the
 worker's `created_at.slice(0, 10)` is correct over PostgREST. **Unfiled.**

@@ -208,7 +208,8 @@ principal.name}`, and the test reads 008's row for the auditor's report
 (`actor_name = MCP_ACCESS_KEY`); the writers without a key (the receiver,
 the two scripts, the example, the two samples) say they name none, which is
 008's own distinction for a write without a key, and the test reads the
-receiver's audit row as NULL. Change 69's five are SMD-1541. Smaller: the
+receiver's audit row as NULL. Change 69's five are SMD-1541 — done in change
+103. Smaller: the
 UPDATE rule read a `-- comment` after a comma in a SET list as defeating the
 target match while pass 1's INSERT rule stripped it (asymmetry) — both rules
 blank line and block comments now, two probes and two non-probes (52/39); a
@@ -303,7 +304,7 @@ own structured-capture path), so it stays; the pass-1 note above says so.
 `consolidation-bio` cannot run on the fork; with that fixed, bio joins the
 driven set) — done in change 73. SMD-1541 (change 69's five servers hold a principal and
 pass no actor to `update_thought`/`upsert_thought`; their headers claim the
-actor reaches the audit). SMD-1525 (`enhanced-mcp`'s read tools address rows by
+actor reaches the audit) — done in change 103. SMD-1525 (`enhanced-mcp`'s read tools address rows by
 integer id). SMD-1480 (deployability of the shim-importing writers —
 `readwise-capture`, `consolidation-bio` and the auditor among them; their
 behaviour is exercised by `test-auth.ts` and `test-writes.ts` under Bun) —

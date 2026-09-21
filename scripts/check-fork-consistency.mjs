@@ -2819,13 +2819,17 @@ const CHANGE_CAP_LINES = 150;
  * The files over the cap when the split landed, with the ceiling each may only
  * shrink under (its line count then, rounded up to ten). Held stale two ways: an
  * entry for a file that now fits under the cap, or for a number with no file,
- * fails until it is dropped. 102 was cut to the shape at the split and is absent.
+ * fails until it is dropped. The sizes are the files' at the merge that landed the
+ * split (main's PR #95 had added two lines to 69). 102 was cut to the shape and is absent;
+ * 103 (SMD-1541) landed on main as a hand-numbered section while the split was in
+ * review — the last one the transition allowed — and joins the list.
  */
 const OVERSIZE_AT_SPLIT = {
   24: 160, 28: 710, 30: 200, 32: 230, 33: 160, 34: 190, 35: 160, 36: 180, 37: 210, 38: 340, 39: 280,
   40: 250, 41: 270, 51: 240, 52: 220, 56: 380, 57: 160, 58: 210, 60: 170, 61: 350, 63: 250, 64: 420, 66: 210,
-  67: 430, 69: 300, 70: 380, 71: 340, 72: 410, 73: 220, 74: 330, 75: 240, 76: 310, 77: 450, 78: 200, 79: 230, 80: 430,
+  67: 430, 69: 310, 70: 380, 71: 340, 72: 410, 73: 220, 74: 330, 75: 240, 76: 310, 77: 450, 78: 200, 79: 230, 80: 430,
   81: 300, 84: 210, 90: 290, 91: 470, 93: 250, 94: 340, 95: 360, 97: 240, 98: 270, 99: 290,
+  103: 320, // landed hand-numbered on main (PR #95) during SMD-1804's transition, after the split
 };
 
 /**

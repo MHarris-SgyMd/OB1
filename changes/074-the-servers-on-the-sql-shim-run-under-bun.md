@@ -315,7 +315,7 @@ prerequisites, the schema step and the user-id step. The `Deno.serve` return
 object carries `finished`, `shutdown()` and `addr` and nothing else of
 Deno's `HttpServer`; no file on the shim reads even those. `rest-api` and
 `smart-ingest` keep their own single-key compare (check 8 passes it; SMD-1455
-left them). SMD-1541 and SMD-1525 as before.
+left them). SMD-1541 (done in change 103) and SMD-1525 as before.
 
 **Upstream status:** not applicable — the shim, the codemod and the polyfill
 are this fork's (fix 13); upstream's copies of these files deploy to

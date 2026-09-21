@@ -27,7 +27,9 @@ NULL where the vector was written after a 2-argument `upsert_thought` — 021's
 header calls a raw vector write "the operator's", and these are shipped
 tools; 022's chunk rows of the previous vector left under the new one — 022's
 "the three writers leave no new stale set" held for the three alone; and no
-actor set for 008's audit row. The upstream survey added a third failure
+actor set for 008's audit row (the functions record the actor the caller
+names, and these five named none until change 103 — SMD-1541). The upstream
+survey added a third failure
 mode (upstream #379), and the audit confirmed it twice over: `enhanced-mcp`
 and `rest-api` read `thought_id`, or digits only, from `upsert_thought`'s
 return — this fork's returns `id`, a UUID — so every capture through them
