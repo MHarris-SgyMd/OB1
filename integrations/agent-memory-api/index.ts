@@ -519,12 +519,13 @@ app.post("/writeback", requireWrite, async (c) => {
       p_embedding: embedding,
       p_payload: {
         embedding_model: EMBEDDING_MODEL,
-        // 008's actor, read from the payload into ob1.actor: the key's name;
-        // the runtime that wrote back lands in actor_context, the row's column
-        // for what the actor carries beyond name, source and session
-        // (SMD-1541). Without it the row named nobody. No source: the trigger
-        // reads metadata.source below on its own.
-        actor: { name: principal.name, runtime: req.runtime.name },
+        // 008's actor, read from the payload into ob1.actor (SMD-1541): the key's
+        // name, this server as `via` and the runtime that wrote back — the
+        // trigger keeps both in actor_context, the row's column for what the
+        // actor carries beyond name, source and session. No source: the row's
+        // `source` is metadata.source below, read by the trigger. Without the
+        // name the row named nobody.
+        actor: { name: principal.name, via: "agent-memory-api", runtime: req.runtime.name },
         metadata: {
           source: "agent_memory",
           source_type: "agent_memory",

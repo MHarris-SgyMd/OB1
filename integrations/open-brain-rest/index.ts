@@ -12,7 +12,8 @@
 // against Postgres, and scripts/check-fork-consistency.mjs check 10 holds it.
 // SMD-1541 (change 101): the key's name rides as the actor — p_actor on
 // update_thought, actor in upsert_thought's payload — so 008's row names it;
-// change 69 passed none, and the clause above was false until then.
+// change 69 passed none, and the clause above was false until then. A capture's
+// and an edit's row; DELETE /thought/:id deletes raw and its row names nobody — SMD-1793.
 // ob1-fork (SMD-1455): access keys go through ../_shared/auth.ts — the core server's
 // server-portable/auth.ts, copied so Supabase bundles it with the function — named,
 // scoped, hashed entries in MCP_ACCESS_KEYS (the older single MCP_ACCESS_KEY still
@@ -433,12 +434,12 @@ async function createThought(body: z.infer<typeof captureSchema>, actorName: str
   const embedding = await getEmbedding(content);
   const upsert = await supabase.rpc("upsert_thought", {
     p_content: content,
-    // 008's actor, read from the payload into ob1.actor: the key's name
-    // (SMD-1541). Without it the audit row named nobody. No source: the
-    // trigger reads the row's metadata.source — `sourceType` above — on its
-    // own, and a copy of it here would be a second spelling the write suite
-    // cannot tell from the first.
-    p_payload: { metadata, embedding_model: EMBEDDING_MODEL, actor: { name: actorName } },
+    // 008's actor, read from the payload into ob1.actor (SMD-1541): the key's
+    // name, and this server as `via`, which the trigger keeps in actor_context.
+    // No source: the row's `source` is its own metadata.source, read by the
+    // trigger — the column says where the thought came from, actor_context
+    // which door wrote it. Without the name the audit row named nobody.
+    p_payload: { metadata, embedding_model: EMBEDDING_MODEL, actor: { name: actorName, via: "open-brain-rest" } },
     p_embedding: embedding,
   });
   if (upsert.error) throw new Error(upsert.error.message);
@@ -563,9 +564,10 @@ app.put("/thought/:id", requireWrite, async (c) => {
       p_metadata_patch: metadata,
       p_embedding: embedding,
       p_embedding_model: embedding ? EMBEDDING_MODEL : null,
-      // 008's actor: the function sets ob1.actor only from what it is passed,
-      // so without this the audit row named nobody (SMD-1541).
-      p_actor: { name: c.get("principal").name, source: "open-brain-rest" },
+      // 008's actor (SMD-1541): the key's name, and this server as `via` (kept in
+      // actor_context); the row's source stays its metadata's, by the trigger's
+      // own reading. Without the name the audit row named nobody.
+      p_actor: { name: c.get("principal").name, via: "open-brain-rest" },
     });
     if (edit.error) return c.json({ error: edit.error.message }, 500, corsHeaders);
     const result = (edit.data ?? {}) as Record<string, unknown>;

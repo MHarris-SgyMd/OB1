@@ -12,7 +12,7 @@
 // against Postgres, and scripts/check-fork-consistency.mjs check 10 holds it.
 // SMD-1541 (change 101): the key's name rides as the actor — p_actor on
 // update_thought — so 008's row names it; change 69 passed none, and the clause
-// above was false until then. The actor's source is this server's name.
+// above was false until then. This server rides as `via` in the row's actor_context.
 // ob1-fork (SMD-1455): access keys go through ../_shared/auth.ts — the core server's
 // server-portable/auth.ts, copied so Supabase bundles it with the function — named,
 // scoped, hashed entries in MCP_ACCESS_KEYS (the older single MCP_ACCESS_KEY still
@@ -183,9 +183,10 @@ function buildServer(principal: Principal): McpServer {
           p_embedding: embedding,
           p_if_unchanged_since: if_unchanged_since ?? null,
           p_embedding_model: embedding ? EMBEDDING_MODEL : null,
-          // 008's actor: the function sets ob1.actor only from what it is
-          // passed, so without this the audit row named nobody (SMD-1541).
-          p_actor: { name: principal.name, source: "update-thought-mcp" },
+          // 008's actor (SMD-1541): the key's name, and this server as `via` (kept in
+          // actor_context); the row's source stays its metadata's, by the trigger's
+          // own reading. Without the name the audit row named nobody.
+          p_actor: { name: principal.name, via: "update-thought-mcp" },
         });
 
         if (error) {

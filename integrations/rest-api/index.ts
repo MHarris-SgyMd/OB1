@@ -14,6 +14,8 @@
 // update_thought, actor in upsert_thought's payload — so 008's row names it;
 // change 69 passed none, and the clause above was false until then. This server
 // holds one key, MCP_ACCESS_KEY, so the name is the variable's (ACTOR_NAME below).
+// A capture's, an edit's and an enrich's row; the raw deletes (DELETE /thought/:id,
+// the duplicate-resolve merge's) still leave a row naming nobody — SMD-1793.
 /**
  * rest-api — REST API gateway for Open Brain.
  *
@@ -501,12 +503,12 @@ async function handleCapture(req: Request): Promise<Response> {
     p_payload: {
       metadata: prepared.metadata,
       ...(embedding ? { embedding_model: embeddingModelUsed() } : {}),
-      // 008's actor, read from the payload into ob1.actor: the key's name
-      // (SMD-1541). Without it the audit row named nobody. No source: the
-      // trigger reads the row's metadata.source — the same `source` — on its
-      // own, and a copy of it here would be a second spelling the write suite
-      // cannot tell from the first.
-      actor: { name: ACTOR_NAME },
+      // 008's actor, read from the payload into ob1.actor (SMD-1541): the key's
+      // name, and this server as `via`, which the trigger keeps in actor_context.
+      // No source: the row's `source` is its own metadata.source, read by the
+      // trigger — the column says where the thought came from, actor_context
+      // which door wrote it. Without the name the audit row named nobody.
+      actor: { name: ACTOR_NAME, via: "rest-api" },
     },
     p_embedding: embedding,
   });
@@ -615,9 +617,10 @@ async function handleUpdateThought(id: string, req: Request): Promise<Response> 
     p_metadata_patch: tierChanged ? { sensitivity_reasons: detected.reasons } : null,
     p_embedding: embedding,
     p_embedding_model: embedding ? embeddingModelUsed() : null,
-    // 008's actor: the function sets ob1.actor only from what it is passed,
-    // so without this the audit row named nobody (SMD-1541).
-    p_actor: { name: ACTOR_NAME, source: "rest-api" },
+    // 008's actor (SMD-1541): the key's name, and this server as `via` (kept in
+    // actor_context); the row's source stays its metadata's, by the trigger's
+    // own reading. Without the name the audit row named nobody.
+    p_actor: { name: ACTOR_NAME, via: "rest-api" },
   });
   if (editErr) throw new Error(`update failed: ${editErr.message}`);
   const edit = (edited ?? {}) as Record<string, unknown>;
@@ -881,7 +884,7 @@ async function handleEnrichThought(thoughtId: string, url: URL): Promise<Respons
     p_embedding: enriched.embedding ?? null,
     p_embedding_model: enriched.embedding ? embeddingModelUsed() : null,
     // 008's actor, as on PUT (SMD-1541).
-    p_actor: { name: ACTOR_NAME, source: "rest-api" },
+    p_actor: { name: ACTOR_NAME, via: "rest-api" },
   });
   if (editErr) throw new Error(`enrich update failed: ${editErr.message}`);
   const edit = (edited ?? {}) as Record<string, unknown>;
