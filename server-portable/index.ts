@@ -1206,12 +1206,14 @@ function buildServer(principal: Principal): McpServer {
         }
 
         // Tell the user when tags are placeholders rather than real extraction,
-        // so a broken env().OPENROUTER_API_KEY does not look like a successful capture.
+        // so a broken credential does not look like a successful capture. The
+        // remedy names the endpoint the tagging call dialled — the chat one,
+        // which since SMD-1902 need not be where the embedding went.
         if (typeof meta.metadata_extraction_failed === "string") {
           confirmation +=
             `\n\nNote: the thought was saved, but automatic tagging failed ` +
             `(${meta.metadata_extraction_failed}) — topics and people are placeholders. ` +
-            `Check env().OPENROUTER_API_KEY and the function logs.`;
+            `Check the chat endpoint (${embedConfig().chat.base}), its credential, and the server logs.`;
         }
 
         return {

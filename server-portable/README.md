@@ -44,7 +44,7 @@ chat only, beside Ollama:
 | `OB1_LLM_BASE_URL` | `https://openrouter.ai/api/v1` | Any OpenAI-compatible `/v1`. Ollama works. Embeddings — and chat, unless the next row says otherwise |
 | `OB1_LLM_API_KEY` | falls back to `OPENROUTER_API_KEY` | Omitted entirely for a loopback endpoint |
 | `OB1_CHAT_BASE_URL` | the embeddings endpoint | Where `/chat/completions` goes when that is a different provider; `OB1_METADATA_MODEL` then names a model this endpoint serves |
-| `OB1_CHAT_API_KEY` | none for a different endpoint; the embeddings key for the same one | A credential belongs to an endpoint: a different chat endpoint never inherits `OB1_LLM_API_KEY`, so a local chat model beside a hosted embedder is not handed the hosted key. Preflight fails a hosted chat endpoint with no key of its own |
+| `OB1_CHAT_API_KEY` | none for a different endpoint; the embeddings key for the same one | A credential belongs to an endpoint: a different chat endpoint never inherits `OB1_LLM_API_KEY` or `OPENROUTER_API_KEY` (both are the embeddings endpoint's), so a local chat model beside a hosted embedder is not handed the hosted key, and local embeddings with OpenRouter for chat means this knob, not `OPENROUTER_API_KEY`. Preflight fails a hosted chat endpoint with no key of its own and names the fix |
 | `OB1_LLM_TIMEOUT` | `120` seconds | Per provider call, both endpoints — embedding, blurb and metadata extraction alike; a call that never returns fails as such instead of hanging |
 | `OB1_EMBEDDING_MODEL` / `OB1_EMBEDDING_DIM` | `openai/text-embedding-3-small` / 1536 | Must match the column; permanent once there is data |
 | `OB1_METADATA_MODEL` | `openai/gpt-4o-mini` | No schema dependency — safe to change anytime |
