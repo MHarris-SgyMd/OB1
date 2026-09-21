@@ -3468,6 +3468,8 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
   let calls = 0;
   let hemlockIsProse = true;
   const seen: { a: string; b: string }[] = [];
+  /** The models the judge requests named; the knob under test in SMD-1901's cases below. */
+  const modelsSeen = new Set<string>();
   // While set, every verdict takes this long: the first run, so the heartbeat
   // (migration 031) has time to beat.
   let slowMs = 0;
@@ -3476,6 +3478,7 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     async fetch(req) {
       const body = (await req.json()) as { messages?: { role: string; content: string }[]; model?: string };
       calls++;
+      modelsSeen.add(String(body.model));
       const prompt = body.messages?.find((m) => m.role === "user")?.content ?? "";
       const a = /<thought_a>\n([\s\S]*?)\n<\/thought_a>/.exec(prompt)?.[1] ?? "";
       const b = /<thought_b>\n([\s\S]*?)\n<\/thought_b>/.exec(prompt)?.[1] ?? "";
@@ -3552,6 +3555,17 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
   const badList = await consolidate("--list", "maybe");
   assert(badList.code === 2 && /--list takes pending/.test(badList.out), "a status outside the four is refused");
 
+  // The judge's own model (SMD-1901): unset, the key and the model line name
+  // the metadata model and say the knob exists; set, OB1_JUDGE_MODEL moves the
+  // pass key and the model line — a fresh pass — while OB1_METADATA_MODEL, the
+  // extractor's, stays where it is. A dry run, so nothing is pooled under it.
+  assert(/job:\s+consolidate:stub-judge@p2/.test(dry.out) && /model:\s+stub-judge \(the metadata model; OB1_JUDGE_MODEL gives the judge its own\) via/.test(dry.out),
+         `OB1_JUDGE_MODEL unset: the pass key and the model line name the metadata model (${dry.out.split("\n").filter((l) => /job:|model:/.test(l)).join(" | ").trim().slice(0, 200)})`);
+  const ownJudge = await runScript(["bun", join(HERE, "consolidate.ts"), "--url", URL_!, "--dry-run"], { env: { ...env, OB1_JUDGE_MODEL: "judge-b" } as Record<string, string>, cwd: HERE });
+  assert(ownJudge.code === 0 && /job:\s+consolidate:judge-b@p2/.test(ownJudge.out) && /model:\s+judge-b \(OB1_JUDGE_MODEL\) via/.test(ownJudge.out),
+         `OB1_JUDGE_MODEL set: the pass key and the model line name the judge's model (exit ${ownJudge.code}: ${ownJudge.out.split("\n").filter((l) => /job:|model:/.test(l)).join(" | ").trim().slice(0, 200)})`);
+  assert(/each with judge-b and/.test(ownJudge.out) && calls === 0, "…the plan names it, and a dry run called no model");
+
   // The first run. Five pairs are judged, one of them (the hemlock pair) drawing prose.
   // A 6 s lease with a 1 s heartbeat, and 700 ms verdicts — five pairs across
   // two workers, some three and a half seconds of model time — so the beats
@@ -3569,6 +3583,7 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
   assert(/2 proposal\(s\) recorded \(1 without a direction\), 1 conflict\(s\) under confidence 0\.5 not recorded/.test(first.out),
          `…two proposals recorded, one undirected, one conflict too weak to record (${first.out.split("\n").find((l) => /proposal\(s\) recorded/.test(l))?.trim()})`);
   assert(/calls per thousand thoughts/.test(first.out) && /model time per pair/.test(first.out), "…and the cost line: calls per thousand thoughts and model time per pair");
+  assert(modelsSeen.size === 1 && modelsSeen.has("stub-judge"), `every judge request named the metadata model, OB1_JUDGE_MODEL being unset (${[...modelsSeen].join(", ")})`);
   const callsAfterFirst = calls;
   assert(seen.every((p) => !/nothing has extracted/.test(p.a + p.b) && !/embedding failed/.test(p.a + p.b)), "neither the thought without entities nor the one without a vector was shown to the judge");
   assert(seen.some((p) => /monthly/.test(p.a) && /annually/.test(p.b)) && !seen.some((p) => /annually/.test(p.a)),

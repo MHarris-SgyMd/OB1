@@ -873,8 +873,9 @@ run the pass after extraction has finished rather than beside it. k and the floo
 measurement (`evals/eval-consolidate.ts`; `evals/README.md` has the table) and
 are the worker's `--k` and `--min-sim`.
 
-**The judge.** One call to the metadata model per pair
-(`server-portable/consolidate.ts` holds the prompt): thought A (older) and B
+**The judge.** One call per pair to the judge model — `OB1_JUDGE_MODEL`, else
+the metadata model, so the harder task can run on a stronger model than every
+capture's tagging (SMD-1901). `server-portable/consolidate.ts` holds the prompt: thought A (older) and B
 (newer), dated, and one question — agree, unrelated, or conflict, and for a
 conflict which is current, decided from what the texts say and not from the
 dates. A conflict whose texts do not say is recorded `conflict_undirected` for
@@ -1313,7 +1314,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 1084 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 579 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
+./with-postgres.sh bun test-live.ts         # 583 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 ```
 

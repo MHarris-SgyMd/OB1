@@ -48,6 +48,7 @@ chat only, beside Ollama:
 | `OB1_LLM_TIMEOUT` | `120` seconds | Per provider call, both endpoints — embedding, blurb and metadata extraction alike; a call that never returns fails as such instead of hanging |
 | `OB1_EMBEDDING_MODEL` / `OB1_EMBEDDING_DIM` | `openai/text-embedding-3-small` / 1536 | Must match the column; permanent once there is data |
 | `OB1_METADATA_MODEL` | `openai/gpt-4o-mini` | No schema dependency — safe to change anytime |
+| `OB1_JUDGE_MODEL` | the metadata model | The supersession judge's model (`db/consolidate.ts`), for running the judge — the harder task — on a stronger model than every capture's tagging; a model the chat endpoint serves. The pass key carries it, so a change starts a fresh pass (SMD-1901) |
 
 The two calls fail differently and deliberately. An embedding failure fails the
 capture, because a thought with no vector is invisible to search. A metadata
@@ -57,7 +58,8 @@ durable part and the tags are re-derivable.
 `preflight.ts --deep` exercises both against the live endpoint, checks the
 embedding width matches the schema, and checks the metadata model actually honours
 JSON mode — a provider that ignores `response_format` degrades every capture to
-`uncategorized` without ever failing. `chunk window` prints the length a capture
+`uncategorized` without ever failing — and, when `OB1_JUDGE_MODEL` names a
+different model, checks that one too under its own `judge model` row. `chunk window` prints the length a capture
 is windowed above, the window size, and where the numbers came from — `OB1_CHUNK_TOKENS`, the model's
 measured window (`db/config.mjs`, `KNOWN_MODEL_WINDOW`), or the default for a
 model the table does not know — and warns when an explicit limit is over the
