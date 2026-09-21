@@ -53,7 +53,6 @@ import { SQL } from "bun";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createHash } from "node:crypto";
 import {
   ACCEPTED_CLAIM_SQL,
   LOCK_TIMEOUT_S,
@@ -77,6 +76,7 @@ import {
   validateEmbeddingConfig,
   versionAtLeast,
 } from "./config.mjs";
+import { migrationSha, versionForMigration, readReleases } from "./version.mjs";
 
 const MIGRATIONS_DIR = join(dirname(fileURLToPath(import.meta.url)), "migrations");
 
@@ -272,8 +272,9 @@ function loadMigrations(): Migration[] {
         sql: substitute(template, name),
         // Hash the TEMPLATE, not the substituted SQL. Otherwise choosing a
         // different embedding dimension would look like an edited migration and
-        // trip the drift check, when the file has not changed at all.
-        sha: createHash("sha256").update(template).digest("hex").slice(0, 12),
+        // trip the drift check, when the file has not changed at all. The rule is
+        // version.mjs's, shared with check-fork's frozen-range check (SMD-1804).
+        sha: migrationSha(template),
       };
     });
 }
@@ -803,6 +804,11 @@ if (reapply && !dryRun) {
   for (const m of migrations) if (m.seeds.length) await reportSeeds(m);
 }
 
+// --dry-run names the release each pending migration belongs to (SMD-1804);
+// read the manifest once here rather than per file, and only when it is used, so
+// a plain run never fails on a malformed releases.json.
+const releases = dryRun ? readReleases() : [];
+
 // Under a live --reapply every file ran above; this loop is the plain run's and --dry-run's.
 for (const m of reapply && !dryRun ? [] : migrations) {
   const prior = applied.get(m.name);
@@ -834,7 +840,8 @@ for (const m of reapply && !dryRun ? [] : migrations) {
       console.log(`  ·  ${m.name}  blocked behind ${floorBlocked.name}`);
       continue;
     }
-    console.log(`  →  ${m.name}  would ${prior ? "re-apply" : "apply"} (${m.sha})`);
+    const version = versionForMigration(Number(m.name.slice(0, 3)), releases) ?? "Unreleased";
+    console.log(`  →  ${m.name}  would ${prior ? "re-apply" : "apply"} (${m.sha}) · ${version}`);
     if (prior) reapplied++;
     else ran++;
     continue;

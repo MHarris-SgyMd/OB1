@@ -252,6 +252,31 @@ Example for a recipe that depends on a reusable skill:
 - What it requires (services, tools)
 - Confirmation that you tested it on your own Open Brain instance
 
+## Changelog & versioning (fork changes)
+
+The fork is versioned `MAJOR.MINOR.PATCH+upstream.<sha>` — the rules are in
+[`FORK.md`](FORK.md)'s "Versioning" section. A change to the fork's own code, as
+opposed to a vendored contribution, records itself as a **release fragment** rather
+than by editing a hand-numbered FORK.md section:
+
+- **Every PR that touches `db/migrations/`, `server-portable/` or `evals/` ships a
+  fragment**, `changes/<ticket>.md` (see [`changes/README.md`](changes/README.md)
+  for the shape). It carries the Keep a Changelog `type`, the `bump` the change
+  deserves (a `patch` may not add a migration — a migration is at least a MINOR),
+  the tickets and migrations it touches, a one-to-three-line changelog entry, and
+  the FORK.md section text — citing ticket and migration numbers, never a change
+  number, which the release step assigns.
+- The release step assembles the accumulated fragments into `FORK.md` and
+  `CHANGELOG.md` in one commit and cuts the tag; **do not hand-number a new
+  FORK.md section or edit `CHANGELOG.md` by hand.** (Sections 1–100 predate this
+  and stay as they are; during the transition a hand-numbered section is still
+  accepted, so an in-flight branch needs no rework.)
+- A migration inside a released range is **frozen** — append a new migration file
+  rather than editing an old one; `check-fork-consistency` enforces it.
+
+`check-fork-consistency` validates every fragment and the changelog shape, so a PR
+that gets this wrong fails CI at one place.
+
 ## The Review Process
 
 1. You submit a PR
