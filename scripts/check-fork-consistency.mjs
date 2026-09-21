@@ -60,9 +60,21 @@
  *      compose.yaml publishes the server alone; the database and Ollama
  *      publish through compose.host-ports.yaml, a second -f. The files are
  *      parsed with Bun.YAML (SMD-1844); no exceptions
+ *  14. every knob the server reads reaches the container: each `OB1_*` /
+ *      `OPEN_BRAIN_*` name server-portable/index.ts declares in its `type Env`
+ *      is forwarded by deploy/compose.yaml's `server.environment` as
+ *      `${NAME}` or `${NAME:-…}` under its own name (or excused by name in
+ *      NOT_FORWARDED, with the reason) and documented in deploy/.env.example;
+ *      a forwarded name the server does not declare is a typo; a documented
+ *      knob no service forwards is a dead switch; `env_file` is refused (a
+ *      file this rule does not open); and OB1_LLM_BASE_URL's fallback, if
+ *      any, names a service in the file. The environment is read from the
+ *      parsed document — a name in a comment or on a command line is not a
+ *      forward, which is how three knobs passed the text rule this replaces
+ *      (SMD-1843)
  *
  * Run: bun scripts/check-fork-consistency.mjs   (plain ESM; node runs it too,
- * except check 13, which parses YAML with Bun.YAML and fails in words under node)
+ * except checks 13 and 14, which parse YAML with Bun.YAML and fail in words under node)
  * Exits non-zero on any violation.
  */
 
@@ -1791,7 +1803,7 @@ function documentedEnvKnobs(pattern) {
   }
   const path = join(ROOT, "deploy", ".env.example");
   if (!existsSync(path)) {
-    if (!documentedEnvKnobs.reported) fail("deploy/.env.example", `missing — the documented knobs are read from it (check 13's _BIND knobs, the compose-forwards check's OB1_* settings), and SETUP.md tells every operator to copy it`);
+    if (!documentedEnvKnobs.reported) fail("deploy/.env.example", `missing — the documented knobs are read from it (check 13's _BIND knobs, check 14's OB1_* settings), and SETUP.md tells every operator to copy it`);
     documentedEnvKnobs.reported = true;
     return null;
   }
@@ -2121,24 +2133,180 @@ await checkCapturingGrants();
  * the example until change 97 made the SQL store the default and compose
  * stopped setting it.)
  */
-function checkComposeForwardsDocumentedEnv() {
-  const knobs = documentedEnvKnobs(/^OB1_/);
-  if (knobs === null) return;
-  const compose = readFileSync(join(ROOT, "deploy", "compose.yaml"), "utf8");
-  const documented = new Set(knobs.map((k) => k.name));
-  const forwarded = new Set([...compose.matchAll(/\b(OB1_[A-Z0-9_]+)\b/g)].map((m) => m[1]));
+/**
+ * 14: every knob the server reads reaches the container (SMD-1843).
+ *
+ * The first dogfood stack set OB1_LLM_BASE_URL, OB1_METADATA_MODEL and
+ * OB1_QUERY_LOG in deploy/.env and the container saw none of them: compose
+ * forwards exactly what `environment:` names, and the server's block named
+ * none of the three. The rule this replaces compared the knobs .env.example
+ * documents against every `OB1_*` token in the compose file's TEXT — and the
+ * file's comments named the first, ollama-pull's command line the second, so
+ * both counted as forwarded; the third was not documented, so it was never
+ * asked about. Measured: preflight took the code's default, 127.0.0.1:11434,
+ * for a local endpoint (it is — the container's own loopback), wanted no
+ * credential, dialled nothing without --deep and said OK; the first capture
+ * failed in 7 ms with "Unable to connect" and the server logged nothing.
+ *
+ * So the universe is what the SERVER declares — the `OB1_*` and `OPEN_BRAIN_*`
+ * names in server-portable/index.ts's `type Env` — and "forwarded" is read
+ * from the parsed document's `services.server.environment`, mapping or list
+ * form. Each declared knob is forwarded under its own name as `${NAME}` or
+ * `${NAME:-…}` (a literal pins the operator out; another name is a miswire) or
+ * excused by name in NOT_FORWARDED with the reason, and documented in
+ * .env.example so an operator can find it. A forwarded name the server does
+ * not declare is a typo or a knob that died. A documented knob no service
+ * forwards is a dead switch (the old rule, on the parsed mapping). `env_file`
+ * is refused on any service: it forwards a file this rule does not open. And
+ * OB1_LLM_BASE_URL's compose fallback, if it has one, names a service in the
+ * file — the one address that means something inside the compose network.
+ */
+const SERVER_ENV_SOURCE = "server-portable/index.ts";
+const KNOB = /^(OB1_|OPEN_BRAIN_)[A-Z0-9_]+$/;
+/** Knobs the server declares that compose.yaml must NOT forward, with the reason its own comment gives. */
+const NOT_FORWARDED = {
+  OB1_STORE: "the SQL store is the server's default (FORK.md change 97) and this stack is the deployment that proves it — forwarding it would let the default drift back to PostgREST with nothing in CI noticing",
+};
 
-  for (const name of [...documented].sort()) {
-    if (!forwarded.has(name)) {
-      violations.push({
-        where: "deploy/compose.yaml",
-        msg: `${name} is documented in deploy/.env.example but never forwarded to a service, ` +
-             `so setting it in deploy/.env does nothing and says nothing`,
-      });
+/** The names `type Env = { … }` declares in a server source, in order; null when the block is not there. */
+function declaredEnvIn(source) {
+  const m = /type Env = \{([\s\S]*?)\n\};/.exec(source);
+  if (!m) return null;
+  return [...m[1].matchAll(/^[ \t]*([A-Z][A-Z0-9_]*)\??:/gm)].map((x) => x[1]);
+}
+
+/**
+ * One parsed compose document's environment: `forwarded` maps each service to
+ * a Map of name → value (null for a list item with no `=`); `gaps` lists
+ * `[kind, service, detail]` for what the rule refuses or cannot read.
+ */
+function forwardedEnvIn(doc) {
+  const gaps = [], forwarded = new Map();
+  if (!doc || typeof doc !== "object" || Array.isArray(doc) || !doc.services || typeof doc.services !== "object" || Array.isArray(doc.services)) {
+    gaps.push(["no-services", null, ""]);
+    return { gaps, forwarded };
+  }
+  for (const [service, def] of Object.entries(doc.services)) {
+    const env = new Map();
+    forwarded.set(service, env);
+    if (!def || typeof def !== "object" || Array.isArray(def)) { gaps.push(["unreadable", service, JSON.stringify(def)]); continue; }
+    if ("env_file" in def) gaps.push(["env-file", service, JSON.stringify(def.env_file)]);
+    if (!("environment" in def)) continue;
+    const e = def.environment;
+    if (Array.isArray(e)) {
+      for (const item of e) { const s = String(item); const i = s.indexOf("="); env.set(i < 0 ? s : s.slice(0, i), i < 0 ? null : s.slice(i + 1)); }
+    } else if (e && typeof e === "object") {
+      for (const [k, v] of Object.entries(e)) env.set(k, v === null ? null : String(v));
+    } else {
+      gaps.push(["environment-not-mapping", service, JSON.stringify(e)]);
     }
   }
+  return { gaps, forwarded };
 }
-checkComposeForwardsDocumentedEnv();
+
+const ENV_SOURCE_PROBES = [
+  // [source, expected names]
+  ["type Env = {\n  A?: string;\n  /** doc with a colon: here */\n  OB1_B: string;\n  lower?: string;\n};\n", ["A", "OB1_B"]],
+  ["type Env = {\n  A?: string;\n  B?: string;\n};\nconst x: { C?: string } = {};\n", ["A", "B"]],
+  ["const Env = { A: 1 };\n", null],
+];
+const FORWARD_PROBES = [
+  // [yaml, expected gap kinds, expected server names → values]
+  ["services:\n  server:\n    environment:\n      OB1_A: ${OB1_A:-}\n      OB1_B: ${OB1_B:-x}\n", [], { OB1_A: "${OB1_A:-}", OB1_B: "${OB1_B:-x}" }],
+  ["services:\n  server:\n    environment:\n      - OB1_A=${OB1_A:-}\n      - OB1_B\n", [], { OB1_A: "${OB1_A:-}", OB1_B: null }],
+  ["x-e: &e\n  environment:\n    OB1_A: ${OB1_A:-}\nservices:\n  server:\n    <<: *e\n    image: x\n", [], { OB1_A: "${OB1_A:-}" }],
+  ["services:\n  server:\n    env_file: .env\n    environment:\n      OB1_A: ${OB1_A:-}\n", ["env-file"], { OB1_A: "${OB1_A:-}" }],
+  ["services:\n  server:\n    environment: OB1_A=1\n", ["environment-not-mapping"], {}],
+  // A comment and a command line are not forwards.
+  ["services:\n  server:\n    # OB1_A: ${OB1_A:-}\n    command: [\"sh\", \"-c\", \"echo ${OB1_B:-}\"]\n    environment:\n      OB1_C: \"1\"\n", [], { OB1_C: "1" }],
+  ["- a\n", ["no-services"], {}],
+];
+
+function checkServerEnvForwarded() {
+  const SELF = "scripts/check-fork-consistency.mjs";
+  const rel = "deploy/compose.yaml";
+  if (typeof Bun === "undefined" || typeof Bun.YAML?.parse !== "function") {
+    fail(SELF, `check 14 parses deploy/compose.yaml with Bun.YAML (Bun 1.2+) and this runtime has none — run \`bun ${SELF}\`, as CI does (SMD-1843)`);
+    return;
+  }
+  for (const [source, names] of ENV_SOURCE_PROBES) {
+    const got = declaredEnvIn(source);
+    if (JSON.stringify(got) !== JSON.stringify(names)) fail(SELF, `env-declaration reader no longer reports ${JSON.stringify(names)} for its probe (reported ${JSON.stringify(got)}): ${JSON.stringify(source)}`);
+  }
+  for (const [yaml, kinds, server] of FORWARD_PROBES) {
+    const got = forwardedEnvIn(Bun.YAML.parse(yaml));
+    const gotKinds = got.gaps.map((g) => g[0]);
+    const gotServer = Object.fromEntries(got.forwarded.get("server") ?? []);
+    if (JSON.stringify(gotKinds) !== JSON.stringify(kinds) || JSON.stringify(gotServer) !== JSON.stringify(server)) {
+      fail(SELF, `forwarded-env reader no longer reports ${JSON.stringify(kinds)} / ${JSON.stringify(server)} for its probe (reported ${JSON.stringify(gotKinds)} / ${JSON.stringify(gotServer)}): ${JSON.stringify(yaml)}`);
+    }
+  }
+
+  const knobs = documentedEnvKnobs(KNOB);
+  if (knobs === null) return;
+  const documented = new Set(knobs.map((k) => k.name));
+
+  const sourcePath = join(ROOT, SERVER_ENV_SOURCE);
+  if (!existsSync(sourcePath)) { fail(SERVER_ENV_SOURCE, `missing — check 14 reads the knobs the server declares from its \`type Env\` block (SMD-1843)`); return; }
+  const declared = declaredEnvIn(readFileSync(sourcePath, "utf8"));
+  if (declared === null) { fail(SERVER_ENV_SOURCE, `has no \`type Env = { … };\` block — check 14 reads the knobs the server declares from it; if the declaration moved, move the reader (SMD-1843)`); return; }
+  const declaredKnobs = declared.filter((n) => KNOB.test(n));
+  if (declaredKnobs.length === 0) { fail(SERVER_ENV_SOURCE, `\`type Env\` declares no OB1_* or OPEN_BRAIN_* name — check 14 has nothing to hold the compose file to, which cannot be right (SMD-1843)`); return; }
+
+  const text = readFileSync(join(ROOT, rel), "utf8");
+  let doc;
+  try { doc = Bun.YAML.parse(text); } catch { return; } // check 13 reports the parse failure
+  const { gaps, forwarded } = forwardedEnvIn(doc);
+  for (const [kind, service, detail] of gaps) {
+    switch (kind) {
+      case "no-services": case "unreadable": break; // check 13 reports these
+      case "env-file": fail(`${rel}:${lineOf(text, "env_file")}`, `service \`${service}\` has \`env_file: ${detail}\` — a file this rule does not open, forwarding whatever it holds; name each knob in \`environment:\` instead (SMD-1843)`); break;
+      case "environment-not-mapping": fail(`${rel}:${lineOf(text, "environment")}`, `service \`${service}\` has \`environment: ${detail}\`, neither a mapping nor a list (SMD-1843)`); break;
+      default: throw new Error(`check 14: no message for kind ${kind}`);
+    }
+  }
+  const server = forwarded.get("server");
+  if (!server) { fail(rel, `has no \`server\` service — check 14 reads what it forwards to the server (SMD-1843)`); return; }
+
+  const at = (name) => { const l = lineOf(text, `${name}:`); return l ? `${rel}:${l}` : rel; };
+  for (const name of declaredKnobs) {
+    if (name in NOT_FORWARDED) {
+      if (server.has(name)) fail(at(name), `forwards \`${name}\`, which NOT_FORWARDED in ${SELF} says the stack must not: ${NOT_FORWARDED[name]} (SMD-1843)`);
+      continue;
+    }
+    if (!server.has(name)) {
+      fail(`${rel}:${lineOf(text, "server:")}`, `the server reads \`${name}\` (${SERVER_ENV_SOURCE}, type Env) and \`server.environment\` never forwards it, so a value in deploy/.env does nothing and says nothing — add \`${name}: \${${name}:-}\` (or, when the stack must not forward it, the name and the reason to NOT_FORWARDED in ${SELF}) (SMD-1843)`);
+    } else {
+      const v = server.get(name);
+      if (v === null || !new RegExp(`^\\$\\{${name}(:-[^}]*)?\\}$`).test(v)) {
+        fail(at(name), `\`${name}: ${v}\` — the server's knob is forwarded as \`\${${name}}\` or \`\${${name}:-…}\`, the operator's value under its own name; a literal pins the operator out, and another variable's name is a miswire (SMD-1843)`);
+      }
+    }
+    if (!documented.has(name)) fail("deploy/.env.example", `does not document \`${name}\`, which the server reads and compose forwards — an operator cannot find the knob; add a \`# ${name}=\` line with what it does (SMD-1843)`);
+  }
+  for (const [name] of server) {
+    if (KNOB.test(name) && !declared.includes(name)) fail(at(name), `\`server.environment\` forwards \`${name}\`, which ${SERVER_ENV_SOURCE} does not declare — \`type Env\` there is the one list of what the container's process reads, so this is a typo, a knob that died, or a knob preflight.ts or a store reads through process.env without declaring (two were, when this rule first ran): declare it there with what it does, or drop it here (SMD-1843)`);
+  }
+  for (const name of Object.keys(NOT_FORWARDED)) {
+    if (!declared.includes(name)) fail(SELF, `NOT_FORWARDED excuses \`${name}\`, which ${SERVER_ENV_SOURCE} no longer declares — drop the entry (SMD-1843)`);
+  }
+  const anywhere = new Set();
+  for (const env of forwarded.values()) for (const k of env.keys()) anywhere.add(k);
+  const reported = new Set();
+  for (const k of knobs) {
+    if (anywhere.has(k.name) || reported.has(k.name)) continue;
+    reported.add(k.name);
+    fail(`deploy/.env.example:${k.line}`, `documents \`${k.name}\`, and no service's \`environment:\` in ${rel} forwards it, so setting it in deploy/.env does nothing and says nothing — a mention in a comment or on a command line is not a forward (SMD-1843)`);
+  }
+  const base = server.get("OB1_LLM_BASE_URL");
+  const fb = /^\$\{OB1_LLM_BASE_URL:-(.+)\}$/.exec(base ?? "");
+  if (fb) {
+    let host = null;
+    try { host = new URL(fb[1]).hostname; } catch { /* not a URL */ }
+    if (!host || !forwarded.has(host)) fail(at("OB1_LLM_BASE_URL"), `OB1_LLM_BASE_URL falls back to \`${fb[1]}\`, whose host ${host ? `\`${host}\` is not a service in this file` : "is not a URL's"} — the fallback is the stack's own Ollama (\`ollama\`, the local-models profile), the one address that means something inside the compose network; any other default belongs in db/config.mjs or the operator's deploy/.env (SMD-1843)`);
+  }
+}
+checkServerEnvForwarded();
 
 /**
  * 9: committed fixtures carry NO thought content (SMD-1295).

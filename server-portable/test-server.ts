@@ -292,6 +292,10 @@ console.log("\n[12] Query log flag — off by default, so the guard writes nothi
   assert(queryLogEnabled({ OB1_QUERY_LOG: "on" }) === true, "\"on\" → on");
   assert(queryLogEnabled({ OB1_QUERY_LOG: "  ON  " }) === true, "\"  ON  \" → on (trimmed, case-insensitive)");
   assert(queryLogEnabled(undefined) === false && queryLogEnabled(null) === false, "undefined/null env → off");
+  // deploy/compose.yaml forwards both knobs as `${VAR:-}` since SMD-1843, so a
+  // composed server sees "" wherever deploy/.env set nothing.
+  assert(queryLogRetentionDays({ OB1_QUERY_LOG_RETENTION_DAYS: "" }) === QUERY_LOG.retentionDaysDefault,
+         "OB1_QUERY_LOG_RETENTION_DAYS='' — what compose forwards for an unset variable — is the default window, not 0 days");
 
   // The retention window prune_query_log uses, from the env or the default.
   assert(queryLogRetentionDays({}) === QUERY_LOG.retentionDaysDefault, `unset → the default ${QUERY_LOG.retentionDaysDefault} days`);

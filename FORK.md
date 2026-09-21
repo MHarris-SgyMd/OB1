@@ -68,14 +68,14 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Ninety-nine numbered changes on top of the pin. Seven fix defects found in an
+One hundred numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
 data layer (Phase 2). Ten (changes 31, 53, 55, 59, 79, 82, 86, 87, 88, and 89) ship no runtime change at
 all: each is a measurement that decided against building something.
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–99 are the numbered `###` sections** further down, which is
+sections. Changes **18–100 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -16673,6 +16673,141 @@ words when the file is missing — where before the fourth pass's guard in check
 was followed by the older check's unguarded read, so a renamed example still
 aborted the whole script with an `ENOENT` trace after check 13 had reported
 properly. Suite unchanged: 38 probes, every pass-4 mutant as before.
+
+**Upstream status:** not sent — upstream has no `deploy/`; the stack is this
+fork's (change 16 and the migration plan's Phase 4).
+
+
+### 100. Every knob the server reads reaches the container — `deploy/compose.yaml` forwards the six `OB1_*` settings it did not, the server's `type Env` is the list check 14 holds the file to, and a name in a comment is no longer a forward (SMD-1843)
+
+Compose gives a container exactly the variables its `environment:` names.
+`deploy/compose.yaml`'s `server` block named nineteen and not
+`OB1_LLM_BASE_URL`, `OB1_METADATA_MODEL` or `OB1_QUERY_LOG` — nor
+`OB1_QUERY_LOG_RETENTION_DAYS`, `OB1_METADATA_TEMPERATURE` or
+`OB1_METADATA_REASONING`, which nobody had asked about. So the first stack
+this fork ran for real (podman machine, 2026-09-19; change 99 has the rest of
+that day) set `OB1_LLM_BASE_URL=http://host.containers.internal:11434/v1`,
+`OB1_METADATA_MODEL` and `OB1_QUERY_LOG=on` in `deploy/.env` and the container
+saw none of them, until a second `-f` file added the three lines — the
+override the dogfood stack has carried since. The `ollama` service's own
+comment said "the server needs no code change: OB1_LLM_BASE_URL points here";
+nothing pointed it. SETUP.md's query-log switch could not reach the container.
+
+**Why the rule that existed did not fire.** `check-fork-consistency.mjs` had a
+compose-forwards check: every `OB1_*` knob `.env.example` documents must be
+forwarded. It read "forwarded" as *any* `OB1_*` token in the
+compose file's text. The `ollama` comment carried `OB1_LLM_BASE_URL`;
+`ollama-pull`'s command line carried `${OB1_METADATA_MODEL:-qwen2.5:7b}`; both
+counted. `OB1_QUERY_LOG` was not documented in `.env.example` at all, so the
+rule never asked. A rule that reads text finds names where a parser finds
+nothing — the same class change 99's third pass replaced in check 13.
+
+**Measured before, on a throwaway project from `main`'s file** (podman 5,
+libkrun machine, macOS; `-p smd1843`, the three knobs in its env file, no
+`OPENROUTER_API_KEY`). The ticket's premise was that preflight fails the
+container for the missing credential. It does not. With nothing forwarded the
+server took `db/config.mjs`'s default, `http://127.0.0.1:11434/v1`, which
+`isLocalHostname` calls local — it *is*: the container's own loopback, with
+nothing on it — and preflight said
+
+```
+✓  model provider             http://127.0.0.1:11434/v1 (local — no credential needed)
+✓  provider credential        not required for a local endpoint
+✓  query log                  present; off by default — set OB1_QUERY_LOG=on to record. …
+·  embedding provider         not checked — pass --deep to call OpenRouter
+preflight OK
+```
+
+and the stack came up healthy. `capture_thought` then failed in **7 ms** with
+`Error: Unable to connect. Is the computer able to access the url?`, and the
+server log still ended at `Started server` (SMD-1849). Not a loud refusal at
+start; a healthy container that cannot capture. SMD-1875 is filed for the
+half of that this change does not close: preflight dials no local endpoint
+without `--deep`, so an operator whose URL is wrong still gets the same
+`OK`.
+
+**What changed.** `server.environment` forwards all six, five of them in the
+file's no-fallback form — `OB1_METADATA_MODEL: ${OB1_METADATA_MODEL:-}` and
+so on, so `db/config.mjs` keeps the default and `""` reaches the server, which
+its readers already treat as unset (`||` in `embed.ts` and `preflight.ts`, the
+`ENV` proxy in `config.mjs`, `queryLogEnabled`'s exact-`on` test,
+`queryLogRetentionDays`'s trim; `test-thoughts.ts` and `test-server.ts` now
+assert each of the six, as the chunk overlap's `""` case already was). The sixth is
+`OB1_LLM_BASE_URL: ${OB1_LLM_BASE_URL:-http://ollama:11434/v1}`: a fallback,
+deliberately, and not a copy of the code's default — that default is the right
+address from a shell on the host and the wrong one inside every container by
+construction, so the compose file names what "local" means inside its own
+network: the `ollama` service the `local-models` profile adds. The profile now
+needs nothing set, which is what its comment always said; an Ollama on the host
+is one line (`host.containers.internal`, or `host.docker.internal` on Docker
+Desktop); OpenRouter is the URL, the key and both hosted models.
+`ollama-pull`'s `${OB1_METADATA_MODEL:-qwen2.5:7b}` stays: a shell needs a
+value, and `checkEmbeddingDefaults` already holds that copy equal to the
+code's.
+
+Around it: `deploy/.env.example`'s provider section had "Option A: OpenRouter
+(default)", which the code has not been since the local flip — it is now the
+truth in three options (the stack's own Ollama, an Ollama on the host,
+OpenRouter), with a query-log block and the two extraction knobs; SMD-1876 is
+filed for the same sentence in SETUP.md (twice — the file also says the
+opposite) and `server-portable/README.md`'s table. `deploy/README.md`'s
+prerequisites no longer demand an OpenRouter key, and step 4 says what
+`SERVER_PORT` is for (the platform devcontainer publishing 8000 on the podman
+VM was the case met). SETUP.md's profile block shows its four lines as the
+defaults they now are. And `server-portable/index.ts`'s `type Env` declares
+`OB1_PG_POOL` and `OB1_TRGM_INDEX`, which `store-sql.ts` and `preflight.ts`
+read through `process.env` without declaring — the rule's first run found
+them, as "forwarded but undeclared".
+
+**Held two ways.** Check 14 replaces the text rule. Its universe is what the
+*server* declares — the `OB1_*` and `OPEN_BRAIN_*` names in `index.ts`'s
+`type Env` block — and "forwarded" is read from the parsed document's
+`services.server.environment` (`Bun.YAML`, mapping or list form; an anchored
+block merged in is read, a name in a comment or on a command line is not).
+Each declared knob is forwarded under its own name as `${NAME}` or
+`${NAME:-…}` (a literal pins the operator out; another variable's name is a
+miswire) or excused by name in `NOT_FORWARDED` with its reason (`OB1_STORE`,
+change 97's), and documented in `.env.example`; a forwarded name the server
+does not declare is a typo or a dead knob; a documented knob no service
+forwards is a dead switch (the old rule, on the parsed mapping, once per
+name); `env_file` is refused on any service (it forwards a file the rule does
+not open); and `OB1_LLM_BASE_URL`'s fallback, if it has one, names a service
+in the file. Three probes hold the `type Env` reader and seven the environment
+reader to their own text on every run; under a runtime with no `Bun.YAML` the
+check fails in words beside check 13's (no node on this Mac — measured by
+deleting `Bun.YAML` and importing the script). Fourteen mutants on the real
+files bite: the ticket's three knobs each removed; the base-URL line commented
+out (its name still in the text — the old rule's hole, two reports, not zero);
+`${OB1_QUERY_LOGS:-}` under `OB1_QUERY_LOG`; a literal `"on"`; `env_file`; a
+fallback to `127.0.0.1` and one that is not a URL; the example's line removed;
+`# OB1_DEAD=1` added; `OB1_STORE` forwarded; `OB1_TYPO` forwarded; a new
+declared knob nobody forwards (two reports: unforwarded, undocumented); the
+block renamed away; and the server's block rewritten as a list, which passes.
+The "Full stack, no Supabase" job reads what the *container* saw: its
+`.env` sets `OB1_LLM_BASE_URL=http://host.docker.internal:11434/v1` and
+`OB1_QUERY_LOG=on` and no credential, and a step after bring-up greps
+preflight's report in the server log for that URL as the model provider,
+`ON (OB1_QUERY_LOG=on) here`, and `preflight OK` — the address is neither the
+code's default nor the compose fallback, so the line can only have come
+through `.env`. The stub `OPENROUTER_API_KEY` the job carried is gone: a local
+endpoint needs none, which is the ticket's Verify.
+
+**Measured after, same project, same env file.** Preflight:
+`model provider http://host.containers.internal:11434/v1 (local — no
+credential needed)`, `metadata model qwen2.5:7b`, `query log present; ON
+(OB1_QUERY_LOG=on) here`, `preflight OK`. One `capture_thought` through the
+host's Ollama: the row is there with `embedding_model = qwen3-embedding:4b`,
+`type = observation`, topics `container, model` — embedding and extraction
+both reached the host. `search_thoughts` found it at 67.6% in 113 ms and
+wrote one `query_log` row. The client's connection was reset at 9.9 s while
+the capture ran — SMD-1864, Bun's 10 s idle timeout on a capture the VM makes
+slow; the row landed after the client had gone, which is that ticket's
+partial-write shape and not this change's. `compose config` renders the six
+under `server` with the env file's values, and `OB1_LLM_BASE_URL=http://ollama:11434/v1`
+with an empty one. `check-fork-consistency` PASS, `tsc` clean, `test-thoughts`
+109, `test-server` 178, `test-preflight` 50 (2 skipped without a database).
+The dogfood stack's override file is now redundant; it comes out when the
+stack next restarts.
 
 **Upstream status:** not sent — upstream has no `deploy/`; the stack is this
 fork's (change 16 and the migration plan's Phase 4).

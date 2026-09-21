@@ -159,6 +159,36 @@ services:
       OB1_EMBEDDING_DIMENSIONS: ${OB1_EMBEDDING_DIMENSIONS:-}
       OB1_LLM_API_KEY: ${OB1_LLM_API_KEY:-}
       OB1_LLM_TIMEOUT: ${OB1_LLM_TIMEOUT:-}
+      # Where both model calls go. Unset in deploy/.env this is the stack's own
+      # Ollama — the `ollama` service the local-models profile adds, by name on
+      # the compose network — so the profile needs nothing set. Not a copy of
+      # db/config.mjs's default: that is 127.0.0.1:11434, right from a shell on
+      # the host and, inside this container, the container's own loopback with
+      # nothing on it. Measured before SMD-1843, when nothing here forwarded the
+      # knob at all: preflight called that address local, wanted no credential,
+      # dialled nothing without --deep and said OK; the first capture failed in
+      # 7 ms with "Unable to connect", and the server logged nothing. An Ollama
+      # on the host is http://host.containers.internal:11434/v1 (podman; Docker
+      # Desktop: host.docker.internal); OpenRouter is https://openrouter.ai/api/v1
+      # with a key — deploy/.env.example, "Model provider". Check 14 holds this
+      # fallback to a service in this file.
+      OB1_LLM_BASE_URL: ${OB1_LLM_BASE_URL:-http://ollama:11434/v1}
+      # Metadata extraction: the model (db/config.mjs owns the default —
+      # ollama-pull's fallback below is a copy checkEmbeddingDefaults holds
+      # equal to it), its sampling temperature, and whether a thinking model
+      # reasons first. The no-fallback rule again.
+      OB1_METADATA_MODEL: ${OB1_METADATA_MODEL:-}
+      OB1_METADATA_TEMPERATURE: ${OB1_METADATA_TEMPERATURE:-}
+      OB1_METADATA_REASONING: ${OB1_METADATA_REASONING:-}
+      # The opt-in query log (migration 034): off unless deploy/.env says on,
+      # and preflight prints which. Until SMD-1843 nothing here forwarded it, so
+      # SETUP.md's switch never reached the container. Every knob the server
+      # declares (server-portable/index.ts, type Env) is forwarded now, and
+      # scripts/check-fork-consistency.mjs check 14 fails on the next one that
+      # is not — a name in a comment, or on ollama-pull's command line, is not
+      # a forward.
+      OB1_QUERY_LOG: ${OB1_QUERY_LOG:-}
+      OB1_QUERY_LOG_RETENTION_DAYS: ${OB1_QUERY_LOG_RETENTION_DAYS:-}
       OB1_AGENT_CACHE_TTL_MS: ${OB1_AGENT_CACHE_TTL_MS:-}
       OPEN_BRAIN_CITATION_BASE_URL: ${OPEN_BRAIN_CITATION_BASE_URL:-}
       OB1_PG_POOL: ${OB1_PG_POOL:-10}
@@ -181,8 +211,9 @@ services:
   # Replaces: OpenRouter. Optional — enable with `--profile local-models`.
   #
   # Ollama exposes an OpenAI-compatible surface at /v1, so the server needs no
-  # code change: OB1_LLM_BASE_URL points here and no credential is sent. With this
-  # running, nothing about a captured thought leaves the host.
+  # code change: its OB1_LLM_BASE_URL falls back to this service (above), and no
+  # credential is sent to it. With this running, nothing about a captured
+  # thought leaves the host.
   ollama:
     image: ollama/ollama:latest
     profiles: ["local-models"]

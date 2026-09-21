@@ -35,6 +35,15 @@ type Env = {
   SUPABASE_SERVICE_ROLE_KEY?: string;
   /** The SQL store's connection string — required unless SUPABASE_URL holds one. */
   DATABASE_URL?: string;
+  /** The SQL store's connection pool size (store-sql.ts); default 10. */
+  OB1_PG_POOL?: string;
+  /**
+   * The opt-in trigram index (db/config.mjs). The migrator builds it; the server
+   * reads this only in preflight.ts, to tell the setting and the database apart.
+   * Declared here because this block is the one list of what the container's
+   * process reads — check 14 holds deploy/compose.yaml to it (SMD-1843).
+   */
+  OB1_TRGM_INDEX?: string;
   /** Must match the width of thoughts.embedding — see db/config.mjs. */
   OB1_EMBEDDING_DIM?: string;
   OB1_EMBEDDING_MODEL?: string;

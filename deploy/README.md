@@ -13,7 +13,9 @@ backups, no resource limits.
 ## Prerequisites
 
 - podman or docker, with compose
-- An OpenRouter API key
+- A model provider: the stack's own Ollama (`--profile local-models`, nothing to
+  set), an Ollama on the host, or an OpenRouter key — the shipped defaults are
+  local; `deploy/.env.example`, "Model provider", is the one line to choose
 
 ## Steps
 
@@ -53,6 +55,10 @@ Three services, in order:
 ```
 http://127.0.0.1:8000/?key=<MCP_ACCESS_KEY>
 ```
+
+8000 is `SERVER_PORT`, set in `deploy/.env` when something on the host already
+publishes it (a devcontainer publishing 8000 on the podman VM was the case met);
+the URL, `smoke.sh` and the `lsof` line below follow it.
 
 That URL works from this machine and nowhere else, by default — a client on
 this machine, such as Claude Code at user scope

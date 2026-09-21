@@ -109,11 +109,11 @@ Both are configurable, and both speak the OpenAI-compatible shapes that Ollama
 exposes at `/v1` — so a fully local brain is a URL change, not a code change:
 
 ```bash
-# deploy/.env
-OB1_LLM_BASE_URL=http://ollama:11434/v1
-OB1_EMBEDDING_MODEL=qwen3-embedding:4b
-OB1_EMBEDDING_DIM=1024
-OB1_METADATA_MODEL=qwen2.5:7b
+# deploy/.env — every line here is the default; the profile needs nothing set
+# OB1_LLM_BASE_URL=http://ollama:11434/v1   # compose's own fallback: the profile's service
+# OB1_EMBEDDING_MODEL=qwen3-embedding:4b
+# OB1_EMBEDDING_DIM=1024
+# OB1_METADATA_MODEL=qwen2.5:7b
 # leave OPENROUTER_API_KEY empty
 ```
 

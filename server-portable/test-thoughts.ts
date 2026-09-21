@@ -14,7 +14,7 @@
  */
 
 import { createAssert } from "../db/test-support.ts";
-import { applyChunkContextPrompt, applyEmbeddingPrompt, CHUNK_CONTEXT_PROMPTS, MAX_WHOLE_TOKENS } from "../db/config.mjs";
+import { applyChunkContextPrompt, applyEmbeddingPrompt, CHUNK_CONTEXT_PROMPTS, DEFAULT_LLM_BASE_URL, DEFAULT_METADATA_MODEL, MAX_WHOLE_TOKENS } from "../db/config.mjs";
 import { displayDate, normaliseType, thoughtTitle, thoughtUrl, THOUGHT_TYPES, TYPE_ALIASES } from "./thoughts.ts";
 import { DEFAULT_LLM_TIMEOUT_S, resolveEmbedConfig } from "./embed.ts";
 import { parseExtraction } from "./entities.ts";
@@ -145,6 +145,20 @@ console.log("\n[7] Prompt templates and provider settings take their inputs lite
   assert(resolveEmbedConfig({ OB1_CHUNK_TOKENS: "" }).chunkTokens === resolveEmbedConfig({}).chunkTokens && resolveEmbedConfig({ OB1_CHUNK_TOKENS: "" }).chunkTokensFrom === "window",
          "and OB1_CHUNK_TOKENS='' is unset too: the window the model derives, not a zero-token one");
   assert(resolveEmbedConfig({ OB1_CHUNK_TOKENS: "900", OB1_CHUNK_OVERLAP: "50" }).chunkTokens === 900, "explicit values are read");
+
+  // The four provider knobs compose forwards since SMD-1843 take the same rule:
+  // "" is unset — the default endpoint and model, temperature 0, no reasoning —
+  // not a URL of "", a model named "", or a NaN temperature.
+  const unset = resolveEmbedConfig({});
+  assert(resolveEmbedConfig({ OB1_LLM_BASE_URL: "" }).llmBase === DEFAULT_LLM_BASE_URL.replace(/\/+$/, "") && unset.llmBase === resolveEmbedConfig({ OB1_LLM_BASE_URL: "" }).llmBase,
+         "OB1_LLM_BASE_URL='' is the default endpoint, not an empty URL");
+  assert(resolveEmbedConfig({ OB1_METADATA_MODEL: "" }).metadataModel === DEFAULT_METADATA_MODEL, "OB1_METADATA_MODEL='' is the default model, not a model named ''");
+  assert(resolveEmbedConfig({ OB1_METADATA_TEMPERATURE: "" }).metadataTemperature === unset.metadataTemperature && unset.metadataTemperature === 0,
+         "OB1_METADATA_TEMPERATURE='' is the default temperature (0), not NaN");
+  assert(JSON.stringify(resolveEmbedConfig({ OB1_METADATA_REASONING: "" }).metadataReasoning) === JSON.stringify(unset.metadataReasoning),
+         "OB1_METADATA_REASONING='' is the default (no reasoning pass), not a reasoning_effort of ''");
+  assert(resolveEmbedConfig({ OB1_METADATA_TEMPERATURE: "0.3" }).metadataTemperature === 0.3 && resolveEmbedConfig({ OB1_METADATA_MODEL: "x:1b" }).metadataModel === "x:1b",
+         "…while explicit values are read");
 
   // The windowing rule follows the model's window (SMD-1305). 1200 was set
   // for Ollama's 2048-token batch and applied to every model: the default
