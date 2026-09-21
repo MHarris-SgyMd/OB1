@@ -27,6 +27,7 @@ import { createStore, databaseUrl, DEFAULT_STORE, DIRECT_CHECK_SKIP_OVER_POSTGRE
 import { parseKeyRecords } from "./auth.ts";
 import { DEFAULT_MAX_TOKENS } from "./chunk.ts";
 import { baseUrlOr, stringOr } from "./embed.ts";
+import { trimmedEnv } from "../db/config.mjs"; // static: `env` below is built before the dynamic import above resolves
 import type { PassCounts } from "../db/config.mjs";
 
 type Status = "ok" | "fail" | "warn" | "skip";
@@ -40,7 +41,9 @@ const results: Check[] = [];
 const add = (name: string, status: Status, detail: string, fix?: string) =>
   results.push({ name, status, detail, fix });
 
-const env = process.env as Record<string, string | undefined>;
+// Trimmed once, as index.ts's initEnv trims the server's — the gate judges the
+// values the server will read (SMD-1843).
+const env = trimmedEnv(process.env as Record<string, string | undefined>);
 const store = storeKind(env);
 // Defaults come from db/config.mjs, not from copies. These four were hardcoded
 // here and went stale the moment the defaults changed, so preflight validated

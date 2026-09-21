@@ -160,6 +160,13 @@ console.log("\n[7] Prompt templates and provider settings take their inputs lite
   assert(resolveEmbedConfig({ OB1_METADATA_MODEL: "   " }).metadataModel === DEFAULT_METADATA_MODEL, "OB1_METADATA_MODEL of spaces alone is the default");
   assert(resolveEmbedConfig({ OB1_LLM_BASE_URL: " / " }).llmBase === DEFAULT_LLM_BASE_URL.replace(/\/+$/, "") && resolveEmbedConfig({ OB1_LLM_BASE_URL: "http://a/v1//" }).llmBase === "http://a/v1",
          "OB1_LLM_BASE_URL of slashes alone is the default, not an empty base (it was '' — the seventh review pass); trailing slashes come off");
+  // The flag knobs decide once, wherever they are read: a padded " on " was ON to the
+  // migrator (db/config.mjs's proxy trims) and OFF to the server (the resolver saw
+  // the raw string) until the eighth review pass — the resolvers trim their own argument.
+  assert(resolveEmbedConfig({ OB1_CHUNK_CONTEXT: " on " }).chunkContext === true && resolveEmbedConfig({ OB1_CHUNK_CONTEXT: "  " }).chunkContext === resolveEmbedConfig({}).chunkContext,
+         "OB1_CHUNK_CONTEXT=' on ' is on; spaces alone are the default — the same decision the migrator makes");
+  assert(resolveEmbedConfig({ OB1_EMBEDDING_DIMENSIONS: " on " }).dimensionsRequested === true && resolveEmbedConfig({ OB1_EMBEDDING_DIMENSIONS: " off " }).dimensionsRequested === false,
+         "OB1_EMBEDDING_DIMENSIONS=' on ' / ' off ' decide as 'on' / 'off' do");
   assert(resolveEmbedConfig({ OB1_METADATA_MODEL: "" }).metadataModel === DEFAULT_METADATA_MODEL, "OB1_METADATA_MODEL='' is the default model, not a model named ''");
   assert(resolveEmbedConfig({ OB1_METADATA_TEMPERATURE: "" }).metadataTemperature === unset.metadataTemperature && unset.metadataTemperature === 0,
          "OB1_METADATA_TEMPERATURE='' is the default temperature (0), not NaN");

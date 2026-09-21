@@ -1,5 +1,5 @@
 import { createAssert } from "../db/test-support.ts";
-import { queryLogEnabled, queryLogRetentionDays, QUERY_LOG } from "../db/config.mjs";
+import { queryLogEnabled, queryLogRetentionDays, QUERY_LOG, trimmedEnv } from "../db/config.mjs";
 /**
  * test-server.ts
  *
@@ -296,6 +296,10 @@ console.log("\n[12] Query log flag — off by default, so the guard writes nothi
   // composed server sees "" wherever deploy/.env set nothing.
   assert(queryLogRetentionDays({ OB1_QUERY_LOG_RETENTION_DAYS: "" }) === QUERY_LOG.retentionDaysDefault,
          "OB1_QUERY_LOG_RETENTION_DAYS='' — what compose forwards for an unset variable — is the default window, not 0 days");
+  // The boundary rule index.ts's initEnv and preflight apply to the whole environment (SMD-1843).
+  const trimmed = trimmedEnv({ OB1_LLM_API_KEY: " sk-abc ", OB1_EMBEDDING_DIM: " ", MCP_ACCESS_KEYS: "a:write:h1\nb:read:h2\n", PORT: "8000", n: 3, u: undefined });
+  assert(trimmed.OB1_LLM_API_KEY === "sk-abc" && trimmed.OB1_EMBEDDING_DIM === "" && trimmed.MCP_ACCESS_KEYS === "a:write:h1\nb:read:h2" && trimmed.PORT === "8000" && trimmed.n === 3 && trimmed.u === undefined,
+         "trimmedEnv trims every string value (a quoted key's trailing space, a dimension of spaces to ''), keeps inner newlines, and passes non-strings through");
 
   // The retention window prune_query_log uses, from the env or the default.
   assert(queryLogRetentionDays({}) === QUERY_LOG.retentionDaysDefault, `unset → the default ${QUERY_LOG.retentionDaysDefault} days`);

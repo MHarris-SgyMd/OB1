@@ -7,7 +7,7 @@ import { StreamableHTTPTransport } from "@hono/mcp";
 import { Hono } from "hono";
 import { z } from "zod";
 import { createStore, postgrestOnBunNotice, storeKind, UUID_RE, type Citation, type ThoughtStore } from "./store.ts";
-import { queryLogEnabled } from "../db/config.mjs";
+import { queryLogEnabled, trimmedEnv } from "../db/config.mjs";
 import { authenticateRequest, canWrite, type Principal } from "./auth.ts";
 import { AgentResolver, cacheTtlFromEnv } from "./agents.ts";
 
@@ -110,7 +110,9 @@ let ENV: Env | null = null;
 function initEnv(bindings?: Record<string, unknown>): void {
   if (ENV) return;
   const globals = (globalThis as { process?: { env?: Record<string, string> } }).process?.env ?? {};
-  ENV = { ...globals, ...(bindings ?? {}) } as Env;
+  // Trimmed once here, for every knob: a quoted `"sk-abc "` in deploy/.env
+  // reaches the provider as the key, not the key and a space (SMD-1843).
+  ENV = trimmedEnv({ ...globals, ...(bindings ?? {}) }) as Env;
 }
 
 function env(): Env {

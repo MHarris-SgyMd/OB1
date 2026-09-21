@@ -2219,9 +2219,12 @@ function forwardedEnvIn(doc) {
     return { gaps, forwarded };
   }
   for (const [service, def] of Object.entries(doc.services)) {
+    // An unreadable service registers no environment — registering an empty
+    // one first made `server: x` cascade into one "never forwards" report per
+    // declared knob beside check 13's (the eighth review pass).
+    if (!def || typeof def !== "object" || Array.isArray(def)) { gaps.push(["unreadable", service, JSON.stringify(def)]); continue; }
     const env = new Map();
     forwarded.set(service, env);
-    if (!def || typeof def !== "object" || Array.isArray(def)) { gaps.push(["unreadable", service, JSON.stringify(def)]); continue; }
     if ("env_file" in def) gaps.push(["env-file", service, JSON.stringify(def.env_file)]);
     if (!("environment" in def)) continue;
     const e = def.environment;
@@ -2342,6 +2345,7 @@ const FORWARD_PROBES = [
   // A comment and a command line are not forwards.
   ["services:\n  server:\n    # OB1_A: ${OB1_A:-}\n    command: [\"sh\", \"-c\", \"echo ${OB1_B:-}\"]\n    environment:\n      OB1_C: \"1\"\n", [], { OB1_C: "1" }],
   ["- a\n", ["no-services"], {}],
+  ["services:\n  server: x\n", ["unreadable"], {}],
 ];
 
 /**
@@ -2380,7 +2384,7 @@ function serverEnvGapsIn(declared, documented, files, excused = NOT_FORWARDED) {
       baseSeen = true;
       baseDoc = doc;
       server = forwarded.get("server") ?? null;
-      if (!server && !read.some(([kind]) => kind === "no-services")) gaps.push(["no-server", name, null, null, ""]);
+      if (!server && !read.some(([kind, service]) => kind === "no-services" || (kind === "unreadable" && service === "server"))) gaps.push(["no-server", name, null, null, ""]);
     }
   }
   if (!baseSeen) gaps.push(["no-base", "compose.yaml", null, null, ""]);
@@ -2439,6 +2443,8 @@ const DECISION_PROBES = [
   [["OB1_A"], ["OB1_A"], [BASE(SRV("      - OB1_A=${OB1_A:-}\n"))], []],
   [["OB1_A"], ["OB1_A"], [BASE("services:\n  server:\n    env_file: .env\n    environment:\n      OB1_A: ${OB1_A:-}\n")], ["env-file:"]],
   [["OB1_A"], ["OB1_A"], [BASE("services:\n  migrate:\n    environment:\n      OB1_A: ${OB1_A:-}\n")], ["no-server:"]],
+  // An unreadable server is check 13's one report, not a cascade of "never forwards" here.
+  [["OB1_A"], ["OB1_A"], [BASE("services:\n  server: x\n")], []],
   [["OB1_A"], ["OB1_A"], [OVERLAY(SRV("      OB1_A: ${OB1_A:-}\n"))], ["no-base:"]],
   // A knob not declared by the server is excused in NOT_FORWARDED: the entry is stale.
   [["OB1_A"], ["OB1_A"], [BASE(SRV("      OB1_A: ${OB1_A:-}\n"))], ["excuse-stale:OB1_STORE"], { OB1_STORE: "why" }],
@@ -2518,21 +2524,21 @@ function checkServerEnvForwarded() {
   const sources = [];
   const walk = (dir) => {
     for (const f of readdirSync(join(ROOT, dir)).sort()) {
-      const rel = `${dir}/${f}`;
-      if (statSync(join(ROOT, rel)).isDirectory()) { if (f !== "node_modules") walk(rel); }
-      else if (/\.ts$/.test(f) && !/^test-/.test(f)) sources.push(rel);
+      const srcRel = `${dir}/${f}`;
+      if (statSync(join(ROOT, srcRel)).isDirectory()) { if (f !== "node_modules") walk(srcRel); }
+      else if (/\.ts$/.test(f) && !/^test-/.test(f)) sources.push(srcRel);
     }
   };
   walk("server-portable"); // subdirectories too (shims/) — the fifth pass found the walk flat
   if (!sources.includes("server-portable/shims/bun-unavailable.ts")) fail(SELF, `check 14's read scan no longer reaches server-portable/shims/ (bun-unavailable.ts is not in its list) — a knob read in a subdirectory would go undeclared unseen (SMD-1843)`);
   sources.push("db/config.mjs");
   const readSomewhere = new Set();
-  for (const rel of sources) {
-    const source = readFileSync(join(ROOT, rel), "utf8");
+  for (const srcRel of sources) {
+    const source = readFileSync(join(ROOT, srcRel), "utf8");
     for (const [name, index] of envReadsIn(source)) {
       readSomewhere.add(name);
-      if (declared.includes(name) || (rel === "db/config.mjs" && name in READ_FOR_MIGRATOR)) continue;
-      fail(`${rel}:${source.slice(0, index).split("\n").length}`, `reads \`${name}\` from the environment, and ${SERVER_ENV_SOURCE}'s \`type Env\` — the one list of what the container's process reads, which check 14 holds deploy/compose.yaml to — does not declare it, so nothing forwards it: declare it there with what it does${rel === "db/config.mjs" ? `, or, when only db/migrate.ts reaches the read, excuse it in READ_FOR_MIGRATOR in ${SELF}` : ""} (SMD-1843)`);
+      if (declared.includes(name) || (srcRel === "db/config.mjs" && name in READ_FOR_MIGRATOR)) continue;
+      fail(`${srcRel}:${source.slice(0, index).split("\n").length}`, `reads \`${name}\` from the environment, and ${SERVER_ENV_SOURCE}'s \`type Env\` — the one list of what the container's process reads, which check 14 holds deploy/compose.yaml to — does not declare it, so nothing forwards it: declare it there with what it does${srcRel === "db/config.mjs" ? `, or, when only db/migrate.ts reaches the read, excuse it in READ_FOR_MIGRATOR in ${SELF}` : ""} (SMD-1843)`);
     }
   }
   for (const name of Object.keys(READ_FOR_MIGRATOR)) {

@@ -17067,10 +17067,10 @@ the block now. Pass 6 had the server trim its three string knobs while
 `db/config.mjs`'s `ENV` proxy — the migrator's reader, and preflight's through
 `TRGM_INDEX` — did not, so a quoted, padded `"qwen3-embedding:4b "` in
 `deploy/.env` would have been recorded by the migrator with the space and
-compared by preflight without it (cold read); the proxy trims, one rule, and
-`resolveEmbedConfig`'s "matching db/config.mjs" is true again (measured: the
-proxy returns `qwen3-embedding:4b` for `" qwen3-embedding:4b "` and the default
-for spaces). The dynamic `await import("./embed.ts")` in preflight is a static
+compared by preflight without it (cold read); the proxy trims (measured: it
+returns `qwen3-embedding:4b` for `" qwen3-embedding:4b "` and the default for
+spaces) — one rule for the string knobs, though not yet for the three flag
+knobs, as the eighth pass found. The dynamic `await import("./embed.ts")` in preflight is a static
 import like its siblings' (cold read). A base URL of slashes alone stripped to
 `""` — since before this change, the run-it reviewer measured on `main` — and
 `baseUrlOr` applies the unset rule after the strip; one assertion. And the
@@ -17079,6 +17079,44 @@ other names — `DATABASE_URL`, the key material, `SUPABASE_*`, the legacy
 `MCP_ACCESS_KEY` — are the stack's wiring or another target's, and outside the
 rule (cold read: the legacy key is declared, read by `auth.ts`, and forwarded
 by nothing, which is the design). Not taken: the two pool readers (SMD-1881).
+
+**Review pass 8** (the same pair). The run-it reviewer found the defect in
+pass 7's own fix: the proxy trim reached `db/config.mjs`'s reads, but the
+server resolves the three flag knobs — `OB1_EMBEDDING_DIMENSIONS`,
+`OB1_CHUNK_CONTEXT`, `OB1_TRGM_INDEX` — by regex on the raw value it is
+handed, so `OB1_CHUNK_CONTEXT=" on "` was ON to the migrator (migration 013
+recording context on) and OFF to the server (bare windows embedded), with
+preflight agreeing with the migrator (measured: `migrator: true
+server: false` for the padded value). The cold read, independently, argued
+the trim belonged at the environment boundary rather than knob by knob, and
+showed the remaining readers: `OB1_LLM_API_KEY="sk-abc "` sent as the key
+plus a space while preflight reported the credential OK; `OB1_EMBEDDING_DIM=" "`
+truthy, `Number(" ")` = 0. Both taken as one rule in two places: `trimmedEnv`
+in `db/config.mjs` trims every string value of a record, `index.ts`'s
+`initEnv` applies it once to the server's environment and preflight once to
+`process.env`, so all nineteen declared knobs are trimmed at the boundary;
+and the three resolvers trim their own argument, so a padded flag decides the
+same wherever it is read — asserted on the server side for `" on "`, `" off "`
+and spaces alone, and `db/test-schema` 1082 of 1082 on the migrator's. The
+per-knob `stringOr` and `baseUrlOr` stay, as the rule for a caller that hands
+`resolveEmbedConfig` a raw record. Also from the run-it reviewer: a
+whitespace-only flag was "unrecognised, OFF" to the migrator before pass 7
+and is the default now — the intended reading, said here since no suite had
+probed it; `config.mjs`'s own `LLM_BASE_URL` export lacked the slash-only
+rule (a dead export today — nothing reads it — given the rule anyway). From
+the cold read: `forwardedEnvIn` registered an empty environment for a service
+before finding it unreadable, so `server: x` cascaded into one "never
+forwards" report per declared knob beside check 13's one — an unreadable
+service registers nothing, `no-server` stays quiet when check 13 has
+reported, two probes; and the `rel` inside the source walk shadowed the
+compose path's — renamed. Not taken: comment-awareness in the read scan (a
+third time); preflight resolving the fallback (SMD-1875, a sixth); the compat
+copy of `poolSizeFrom` — the shim's one import is `bun`, by design, and
+SMD-1881 owns the shared reader. Run-it otherwise: the proxy's blast radius
+measured across all eight reads (`Number(" 1024 ")` was 1024 already; a
+padded `OB1_BACKFILL_LIMIT=" 5 "` threw before and is 5 now); the server
+rebuilt from the tip, `smoke.sh` 9 of 9; `db/test-upgrade` 241, `test-live`
+579, `test-search-path` 23, `test-replay` 2, all green.
 
 **Upstream status:** not sent — upstream has no `deploy/`; the stack is this
 fork's (change 16 and the migration plan's Phase 4).

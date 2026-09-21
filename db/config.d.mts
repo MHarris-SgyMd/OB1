@@ -212,6 +212,9 @@ export const REQUEUE_SET_SQL: string;
 /** Numeric per-component version floor; "0.10.0" is at least 0.8.0 here, unlike as strings. */
 export function versionAtLeast(version: string, major: number, minor?: number, patch?: number): boolean;
 
+/** Every string value of `record` trimmed, everything else as it was — the one boundary rule for a server environment. */
+export function trimmedEnv<T extends Record<string, unknown>>(record: T): T;
+
 /** The compose service names a model endpoint may live at (`ollama`); preflight and check 14 read it. */
 export const LOCAL_PROVIDER_SERVICES: readonly string[];
 

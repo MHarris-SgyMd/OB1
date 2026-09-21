@@ -36,6 +36,23 @@ const RAW_ENV = /** @type {Record<string, string|undefined>} */ (
  * truthiness, so the two disagreed about the same environment: the server would
  * run at the default width while the migration runner refused to start.
  */
+/**
+ * The same rule for a whole environment record: every string value trimmed,
+ * everything else as it was. server-portable/index.ts applies it once in
+ * initEnv and preflight.ts once to process.env, so a quoted `"sk-abc "` in
+ * deploy/.env is the key and not the key plus a space — for all nineteen
+ * declared knobs at once, not one reader at a time (SMD-1843, eighth pass).
+ * "" stays "": every reader already treats it as unset.
+ *
+ * @param {Record<string, unknown>} record
+ * @returns {Record<string, unknown>}
+ */
+export function trimmedEnv(record) {
+  const out = {};
+  for (const [k, v] of Object.entries(record)) out[k] = typeof v === "string" ? v.trim() : v;
+  return out;
+}
+
 const ENV = new Proxy(/** @type {Record<string, string|undefined>} */ ({}), {
   get: (_t, k) => {
     const v = RAW_ENV[/** @type {string} */ (k)];
@@ -126,7 +143,9 @@ export const EMBEDDING_MODEL = ENV.OB1_EMBEDDING_MODEL ?? DEFAULT_EMBEDDING_MODE
  */
 export const DEFAULT_METADATA_MODEL = "qwen2.5:7b";
 export const METADATA_MODEL = ENV.OB1_METADATA_MODEL ?? DEFAULT_METADATA_MODEL;
-export const LLM_BASE_URL = (ENV.OB1_LLM_BASE_URL ?? DEFAULT_LLM_BASE_URL).replace(/\/+$/, "");
+// Trailing slashes off, and a value that was slashes alone is unset — the rule
+// server-portable/embed.ts's baseUrlOr applies (SMD-1843).
+export const LLM_BASE_URL = (ENV.OB1_LLM_BASE_URL ?? DEFAULT_LLM_BASE_URL).replace(/\/+$/, "") || DEFAULT_LLM_BASE_URL.replace(/\/+$/, "");
 
 /** Widths pgvector supports for an HNSW index. Beyond this, indexing fails. */
 export const MAX_HNSW_DIM = 2000;
@@ -517,6 +536,7 @@ export function composeChunkForEmbedding(context, chunk) {
  * container crashlooped on a default configuration that was in fact valid.
  */
 export function resolveEmbeddingDimensions(raw, dim, model) {
+  raw = typeof raw === "string" ? raw.trim() : raw; // one decision for a padded value, wherever it is read (SMD-1843)
   if (raw !== undefined && raw !== "") return /^(1|on|true|yes)$/i.test(raw);
   const native = KNOWN_MODEL_DIMS[model];
   return MRL_MODELS.has(model) && native !== undefined && dim < native;
@@ -566,6 +586,7 @@ export const DEFAULT_TRGM_INDEX = true;
  * unrecognised value is a decision here, not a fallback to the default.
  */
 export function resolveTrgmIndex(raw) {
+  raw = typeof raw === "string" ? raw.trim() : raw; // one decision for a padded value, wherever it is read (SMD-1843)
   if (raw === undefined || raw === "") return DEFAULT_TRGM_INDEX;
   return /^(1|on|true|yes)$/i.test(raw);
 }
@@ -649,6 +670,7 @@ export const DEFAULT_CHUNK_CONTEXT = false;
  * `thought_chunks.context` is NULL for a bare chunk, and preflight counts both.
  */
 export function resolveChunkContext(raw) {
+  raw = typeof raw === "string" ? raw.trim() : raw; // one decision for a padded value, wherever it is read (SMD-1843)
   if (raw === undefined || raw === "") return DEFAULT_CHUNK_CONTEXT;
   return /^(1|on|true|yes)$/i.test(raw);
 }
