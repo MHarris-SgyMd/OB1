@@ -16681,7 +16681,7 @@ fork's (change 16 and the migration plan's Phase 4).
 ### 100. Every knob the server reads reaches the container — `deploy/compose.yaml` forwards the six `OB1_*` settings it did not, the server's `type Env` is the list check 14 holds the file to, and a name in a comment is no longer a forward (SMD-1843)
 
 Compose gives a container exactly the variables its `environment:` names.
-`deploy/compose.yaml`'s `server` block named nineteen and not
+`deploy/compose.yaml`'s `server` block named sixteen and not
 `OB1_LLM_BASE_URL`, `OB1_METADATA_MODEL` or `OB1_QUERY_LOG` — nor
 `OB1_QUERY_LOG_RETENTION_DAYS`, `OB1_METADATA_TEMPERATURE` or
 `OB1_METADATA_REASONING`, which nobody had asked about. So the first stack
@@ -16755,9 +16755,11 @@ prerequisites no longer demand an OpenRouter key, and step 4 says what
 `SERVER_PORT` is for (the platform devcontainer publishing 8000 on the podman
 VM was the case met). SETUP.md's profile block shows its four lines as the
 defaults they now are. And `server-portable/index.ts`'s `type Env` declares
-`OB1_PG_POOL` and `OB1_TRGM_INDEX`, which `store-sql.ts` and `preflight.ts`
-read through `process.env` without declaring — the rule's first run found
-them, as "forwarded but undeclared".
+`OB1_PG_POOL` and `OB1_TRGM_INDEX`, which are read without being declared —
+`store-sql.ts` through `process.env`, and `db/config.mjs`, which preflight
+imports, through its `ENV` proxy (the fourth pass corrected this sentence's
+first draft, which had placed that read in `preflight.ts`) — the rule's
+first run found them, as "forwarded but undeclared".
 
 **Held two ways.** Check 14 replaces the text rule. Its universe is what the
 *server* declares — the `OB1_*` and `OPEN_BRAIN_*` names in `index.ts`'s
@@ -16772,8 +16774,8 @@ does not declare is a typo or a dead knob; a documented knob no service
 forwards is a dead switch (the old rule, on the parsed mapping, once per
 name); `env_file` is refused on any service (it forwards a file the rule does
 not open); and `OB1_LLM_BASE_URL`'s fallback, if it has one, names a service
-in the file. Three probes hold the `type Env` reader and seven the environment
-reader to their own text on every run; under a runtime with no `Bun.YAML` the
+in the file. Three probes hold the `type Env` reader and eight (seven at the
+first commit) the environment reader to their own text on every run; under a runtime with no `Bun.YAML` the
 check fails in words beside check 13's (no node on this Mac — measured by
 deleting `Bun.YAML` and importing the script). Fourteen mutants on the real
 files bite: the ticket's three knobs each removed; the base-URL line commented
@@ -16976,6 +16978,39 @@ Nine mutants on the real files bite. Counts at the stop: 8 `FORWARD_PROBES`,
 `ENV_READ_PROBES`, 25 `DECISION_PROBES`; `test-thoughts` 114, `test-server`
 178, `test-preflight` 50 (2 skipped without a database); check 14 adds
 nothing measurable to the script's 0.8 s.
+
+**Review pass 5** (the same pair, over the whole branch, at the maintainer's
+call after the stop). One real defect, the author's, from pass 1:
+`LOCAL_PROVIDER_SERVICES` was inserted between `isLocalHostname`'s JSDoc and
+the function, so the `@param`/`@returns` block described a frozen array and
+the function had no doc (cold read); the constant sits above the block now.
+Two small holes in pass 3's scan: the walk of `server-portable/` was flat, so
+`shims/` and any later subdirectory were never read (cold read; a read
+planted in `shims/bun-unavailable.ts` is reported at its line now, the walk
+skips `node_modules`, and a self-check holds that the list reaches `shims/`
+— the run-it harness found the flat walk had no probe), and the fallback pin read the base file's server
+alone, so an overlay's `OB1_LLM_BASE_URL: ${OB1_LLM_BASE_URL:-https://…}`
+landed in the container unheld (cold read); every file's server is held,
+the service looked up in that file or the base, two probes, and the
+base-only rule fails one of them. Three record corrections from the run-it
+reviewer: main's server block named *sixteen* variables, not nineteen (that
+was `type Env`'s count after this change); the environment reader has eight
+probes since pass 3, not seven; and the "What changed" sentence placing
+`OB1_TRGM_INDEX`'s read in `preflight.ts` now says `db/config.mjs`. The
+run-it reviewer otherwise found nothing: `smoke.sh` unchanged and 9 of 9
+against the throwaway stack, the CI greps matching the live log under a C
+locale too, every documented knob read by a compose file, the script
+independent of the shell's environment, no `### 100.` on `main`. Not taken:
+comment- and string-awareness in the read scan (a mention spelling
+`process.env.OB1_X` in full above a real read takes the pointer, the verdict
+unchanged — a JavaScript comment stripper is its own hazard, and no scanned
+source has such a mention); the CI step reading `printenv` instead of the
+log (the log line proves preflight *read* the value, which is the claim);
+preflight resolving the fallback's name (SMD-1875, a fourth time); one
+shared numeric reader (SMD-1881); a universe derived from the reads rather
+than declared and held. For the boyscout: `index.ts` read from disk twice
+in check 14, the script's own path spelled per function, and the house-form
+shape spelled three ways.
 
 **Upstream status:** not sent — upstream has no `deploy/`; the stack is this
 fork's (change 16 and the migration plan's Phase 4).

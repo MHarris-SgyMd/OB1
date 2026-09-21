@@ -2159,8 +2159,9 @@ await checkCapturingGrants();
  * under deploy/ is held to the shape and to the server's names, since an
  * overlay's `server:` lands in the same container; the base file alone holds
  * the universe. And OB1_LLM_BASE_URL's compose fallback, if it has one, is
- * `http://<service>:11434/v1` for a service the base file defines and
- * db/config.mjs's LOCAL_PROVIDER_SERVICES names — what preflight calls local.
+ * `http://<service>:11434/v1` for a service the file or the base defines and
+ * db/config.mjs's LOCAL_PROVIDER_SERVICES names — what preflight calls local;
+ * held in every file's server, since an overlay's lands in the same container.
  *
  * The decision is one pure function over parsed inputs, serverEnvGapsIn, so
  * DECISION_PROBES run it on in-memory documents every run — the third review
@@ -2388,13 +2389,20 @@ function serverEnvGapsIn(declared, documented, files, excused = NOT_FORWARDED) {
   for (const k of documented) {
     if (!anywhere.has(k)) gaps.push(["dead-switch", ".env.example", null, k, ""]);
   }
-  const fb = /^\$\{OB1_LLM_BASE_URL:-(.+)\}$/.exec(server.get("OB1_LLM_BASE_URL") ?? "");
-  if (fb) {
+  // The fallback is held wherever a file's server sets it — an overlay's
+  // `OB1_LLM_BASE_URL: ${OB1_LLM_BASE_URL:-https://…}` lands in the same
+  // container (the fifth pass found only the base file's read) — and the
+  // service may be defined in that file or the base.
+  for (const { name, doc } of files) {
+    const env = forwardedEnvIn(doc).forwarded.get("server");
+    const fb = /^\$\{OB1_LLM_BASE_URL:-(.+)\}$/.exec(env?.get("OB1_LLM_BASE_URL") ?? "");
+    if (!fb) continue;
     // Names compare as DNS and preflight's isLocalHostname do: case-insensitively.
     const m = /^http:\/\/([A-Za-z0-9][A-Za-z0-9_.-]*):11434\/v1$/.exec(fb[1]);
     const host = m ? m[1].toLowerCase() : null;
-    const ok = host && LOCAL_PROVIDER_SERVICES.includes(host) && Object.keys(baseDoc.services).some((s) => s.toLowerCase() === host);
-    if (!ok) gaps.push(["bad-fallback", "compose.yaml", "server", "OB1_LLM_BASE_URL", fb[1]]);
+    const defined = (d) => Object.keys(d?.services ?? {}).some((s) => s.toLowerCase() === host);
+    const ok = host && LOCAL_PROVIDER_SERVICES.includes(host) && (defined(baseDoc) || defined(doc));
+    if (!ok) gaps.push(["bad-fallback", name, "server", "OB1_LLM_BASE_URL", fb[1]]);
   }
   return gaps;
 }
@@ -2428,6 +2436,9 @@ const DECISION_PROBES = [
   [["OB1_LLM_BASE_URL"], ["OB1_LLM_BASE_URL"], [BASE("services:\n  server:\n    environment:\n      OB1_LLM_BASE_URL: ${OB1_LLM_BASE_URL:-http://ollama:11434/v1}\n  ollama:\n    image: x\n")], []],
   [["OB1_LLM_BASE_URL"], ["OB1_LLM_BASE_URL"], [BASE("services:\n  server:\n    environment:\n      OB1_LLM_BASE_URL: ${OB1_LLM_BASE_URL:-http://postgres:11434/v1}\n  postgres:\n    image: x\n")], ["bad-fallback:OB1_LLM_BASE_URL"]],
   [["OB1_LLM_BASE_URL"], ["OB1_LLM_BASE_URL"], [BASE("services:\n  server:\n    environment:\n      OB1_LLM_BASE_URL: ${OB1_LLM_BASE_URL:-http://ollama:11434/v1}\n")], ["bad-fallback:OB1_LLM_BASE_URL"]],
+  // An overlay's fallback is held too: a hosted one is refused; the stack's own service, defined in the overlay, passes.
+  [["OB1_LLM_BASE_URL"], ["OB1_LLM_BASE_URL"], [BASE("services:\n  server:\n    environment:\n      OB1_LLM_BASE_URL: ${OB1_LLM_BASE_URL:-http://ollama:11434/v1}\n  ollama:\n    image: x\n"), OVERLAY(SRV("      OB1_LLM_BASE_URL: ${OB1_LLM_BASE_URL:-https://openrouter.ai/api/v1}\n"))], ["bad-fallback:OB1_LLM_BASE_URL"]],
+  [["OB1_LLM_BASE_URL"], ["OB1_LLM_BASE_URL"], [BASE(SRV("      OB1_LLM_BASE_URL: ${OB1_LLM_BASE_URL:-}\n")), OVERLAY("services:\n  server:\n    environment:\n      OB1_LLM_BASE_URL: ${OB1_LLM_BASE_URL:-http://ollama:11434/v1}\n  ollama:\n    image: x\n")], []],
   // Names compare as DNS does: a service spelled Ollama, a fallback spelled OLLAMA.
   [["OB1_LLM_BASE_URL"], ["OB1_LLM_BASE_URL"], [BASE("services:\n  server:\n    environment:\n      OB1_LLM_BASE_URL: ${OB1_LLM_BASE_URL:-http://OLLAMA:11434/v1}\n  Ollama:\n    image: x\n")], []],
   // Overlays: the server's names are held there too; a knob forwarded only in an overlay is not a dead switch.
@@ -2492,8 +2503,16 @@ function checkServerEnvForwarded() {
   // which the server imports and which reads eight knobs through its ENV
   // proxy — that reads a knob straight from the environment declares it, or
   // the universe is short of what runs. The migrator's own knob is excused.
-  const srcDir = join(ROOT, "server-portable");
-  const sources = readdirSync(srcDir).filter((f) => /\.ts$/.test(f) && !/^test-/.test(f)).sort().map((f) => `server-portable/${f}`);
+  const sources = [];
+  const walk = (dir) => {
+    for (const f of readdirSync(join(ROOT, dir)).sort()) {
+      const rel = `${dir}/${f}`;
+      if (statSync(join(ROOT, rel)).isDirectory()) { if (f !== "node_modules") walk(rel); }
+      else if (/\.ts$/.test(f) && !/^test-/.test(f)) sources.push(rel);
+    }
+  };
+  walk("server-portable"); // subdirectories too (shims/) — the fifth pass found the walk flat
+  if (!sources.includes("server-portable/shims/bun-unavailable.ts")) fail(SELF, `check 14's read scan no longer reaches server-portable/shims/ (bun-unavailable.ts is not in its list) — a knob read in a subdirectory would go undeclared unseen (SMD-1843)`);
   sources.push("db/config.mjs");
   const readSomewhere = new Set();
   for (const rel of sources) {
@@ -2539,7 +2558,7 @@ function checkServerEnvForwarded() {
       case "undocumented": fail("deploy/.env.example", `does not document \`${name}\`, which the server reads and compose forwards — an operator cannot find the knob; add a \`# ${name}=\` line with what it does (SMD-1843)`); break;
       case "excuse-stale": fail(SELF, `NOT_FORWARDED excuses \`${name}\`, which ${SERVER_ENV_SOURCE} no longer declares — drop the entry (SMD-1843)`); break;
       case "dead-switch": fail(`deploy/.env.example${exampleLine(name) ? `:${exampleLine(name)}` : ""}`, `documents \`${name}\`, and no service's \`environment:\` in any deploy/compose*.yaml forwards it, so setting it in deploy/.env does nothing and says nothing — a mention in a comment or on a command line is not a forward (SMD-1843)`); break;
-      case "bad-fallback": fail(at(file, "server", name), `OB1_LLM_BASE_URL falls back to \`${detail}\` — the fallback is \`http://<service>:11434/v1\` for a service this file defines and db/config.mjs's LOCAL_PROVIDER_SERVICES names (${LOCAL_PROVIDER_SERVICES.map((n) => `\`${n}\``).join(", ")}: what preflight calls local), the one address that means something inside the compose network; any other default belongs in db/config.mjs or the operator's deploy/.env (SMD-1843)`); break;
+      case "bad-fallback": fail(at(file, "server", name), `OB1_LLM_BASE_URL falls back to \`${detail}\` — the fallback is \`http://<service>:11434/v1\` for a service this file or compose.yaml defines and db/config.mjs's LOCAL_PROVIDER_SERVICES names (${LOCAL_PROVIDER_SERVICES.map((n) => `\`${n}\``).join(", ")}: what preflight calls local), the one address that means something inside the compose network; any other default belongs in db/config.mjs or the operator's deploy/.env (SMD-1843)`); break;
       default: throw new Error(`check 14: no message for kind ${kind}`);
     }
   }
