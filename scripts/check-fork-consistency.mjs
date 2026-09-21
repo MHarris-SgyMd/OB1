@@ -1758,6 +1758,46 @@ function checkSupabaseIsms() {
 // named as compose names them (`compose*.yaml`, `docker-compose*.yml`) are
 // read: SMD-1849's collector configuration under deploy/ is not a stack.
 
+/**
+ * The knobs deploy/.env.example documents whose names match `pattern`: one
+ * entry per knob line, live or commented out (most ship commented out
+ * precisely because they have a default), with an optional trailing `#`
+ * comment — so `# OB1_EMBEDDING_DIM=1536   # hosted` counts and the prose line
+ * `# SERVER_BIND=0.0.0.0 is the one an operator sets…` does not. Null, after a
+ * failure in words, when the file is missing; both readers stop there rather
+ * than throw. Check 13 and the compose-forwards check read the file through
+ * this, so what counts as a documented line is decided once.
+ */
+function envKnobsIn(text, pattern) {
+  const knobs = [];
+  // Same-line whitespace only: a `\s*` here once ate the newline and the next
+  // knob line as this one's trailing comment, and POSTGRES_BIND went undocumented.
+  for (const m of text.matchAll(/^(#?)[ \t]*([A-Z0-9_]+)=(\S*)[ \t]*(?:#.*)?$/gm)) {
+    if (pattern.test(m[2])) knobs.push({ name: m[2], value: m[3], live: m[1] === "", line: text.slice(0, m.index).split("\n").length });
+  }
+  return knobs;
+}
+const ENV_KNOB_PROBES = [
+  // [text, pattern, expected names]
+  ["# A_BIND=127.0.0.1\n# B_BIND=127.0.0.1\n# C_BIND=127.0.0.1\n", /_BIND$/, ["A_BIND", "B_BIND", "C_BIND"]],
+  ["# OB1_X=1536   # hosted; unmeasured\nOB1_Y=\n", /^OB1_/, ["OB1_X", "OB1_Y"]],
+  ["# SERVER_BIND=0.0.0.0 is the one an operator sets\n# SERVER_BIND=127.0.0.1\n", /_BIND$/, ["SERVER_BIND"]],
+];
+function documentedEnvKnobs(pattern) {
+  const SELF = "scripts/check-fork-consistency.mjs";
+  for (const [text, pat, names] of ENV_KNOB_PROBES) {
+    const got = envKnobsIn(text, pat).map((k) => k.name);
+    if (JSON.stringify(got) !== JSON.stringify(names)) fail(SELF, `env-knob reader no longer reports exactly ${JSON.stringify(names)} for its probe (reported ${JSON.stringify(got)}): ${JSON.stringify(text)}`);
+  }
+  const path = join(ROOT, "deploy", ".env.example");
+  if (!existsSync(path)) {
+    if (!documentedEnvKnobs.reported) fail("deploy/.env.example", `missing — the documented knobs are read from it (check 13's _BIND knobs, the compose-forwards check's OB1_* settings), and SETUP.md tells every operator to copy it`);
+    documentedEnvKnobs.reported = true;
+    return null;
+  }
+  return envKnobsIn(readFileSync(path, "utf8"), pattern);
+}
+
 /** compose file under deploy/ → the services that publish one mapping each from it. */
 const PUBLISHES = {
   "compose.yaml": ["server"],
@@ -1868,20 +1908,16 @@ const PORT_PROBES = [
 
 function checkPublishedPorts() {
   const SELF = "scripts/check-fork-consistency.mjs";
-  const examplePath = join(ROOT, "deploy", ".env.example");
-  if (!existsSync(examplePath)) { fail("deploy/.env.example", `missing — check 13 reads the documented _BIND knobs from it, and SETUP.md tells every operator to copy it (SMD-1844)`); return; }
-  const example = readFileSync(examplePath, "utf8");
-  // A knob line, live or commented out, with nothing after the value: the
-  // prose line "# SERVER_BIND=0.0.0.0 is the one an operator sets…" is not it.
-  const knobLines = [...example.matchAll(/^(#?)\s*([A-Z0-9_]+_BIND)=(\S*)\s*$/gm)];
-  const documented = new Set(knobLines.map((m) => m[2]));
+  const knobs = documentedEnvKnobs(/_BIND$/);
+  if (knobs === null) return;
+  const documented = new Set(knobs.map((k) => k.name));
   // The file every operator copies to deploy/.env: a LIVE knob line there is the
   // stack's default in practice, whatever compose.yaml's fallback says, and
   // neither the compose rule nor the CI step (which writes its own .env) reads
   // it — so a live line may only say the loopback address.
-  for (const m of knobLines) {
-    if (m[1] === "" && m[3] !== "127.0.0.1") {
-      fail(`deploy/.env.example:${example.slice(0, m.index).split("\n").length}`, `\`${m[2]}=${m[3]}\` is a live line in the file operators copy to deploy/.env, so every stack brought up from it publishes on ${m[3] || "an empty address"} — comment it out or set 127.0.0.1; the network is the operator's choice in deploy/.env, not the example's (SMD-1844)`);
+  for (const k of knobs) {
+    if (k.live && k.value !== "127.0.0.1") {
+      fail(`deploy/.env.example:${k.line}`, `\`${k.name}=${k.value}\` is a live line in the file operators copy to deploy/.env, so every stack brought up from it publishes on ${k.value || "an empty address"} — comment it out or set 127.0.0.1; the network is the operator's choice in deploy/.env, not the example's (SMD-1844)`);
     }
   }
   const probeDocs = new Set(["SERVER_BIND", "POSTGRES_BIND"]);
@@ -2086,14 +2122,10 @@ await checkCapturingGrants();
  * stopped setting it.)
  */
 function checkComposeForwardsDocumentedEnv() {
-  const example = readFileSync(join(ROOT, "deploy", ".env.example"), "utf8");
+  const knobs = documentedEnvKnobs(/^OB1_/);
+  if (knobs === null) return;
   const compose = readFileSync(join(ROOT, "deploy", "compose.yaml"), "utf8");
-
-  // Both a live `OB1_X=` line and a commented `# OB1_X=` one count as documented:
-  // most of these ship commented out precisely because they have a default.
-  const documented = new Set(
-    [...example.matchAll(/^#?\s*(OB1_[A-Z0-9_]+)=/gm)].map((m) => m[1])
-  );
+  const documented = new Set(knobs.map((k) => k.name));
   const forwarded = new Set([...compose.matchAll(/\b(OB1_[A-Z0-9_]+)\b/g)].map((m) => m[1]));
 
   for (const name of [...documented].sort()) {

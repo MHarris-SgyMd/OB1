@@ -16660,6 +16660,20 @@ a subdirectory is read by neither rule nor CI. Thirty-eight probes. The
 findings in the mechanism this pass were tidy-ups in the previous pass's
 additions and the rest were documents: the stop signal.
 
+**Tidied while the file was open** (no behaviour change): the two readers of
+`deploy/.env.example` — check 13's `_BIND` knobs and the older
+compose-forwards check's `OB1_*` settings — each parsed the file with a regex
+of its own, one of which the second pass had tightened while the other kept
+accepting the prose form; both call one `documentedEnvKnobs(pattern)` now,
+which decides once what a documented line is (a live or commented assignment,
+an optional trailing `#` comment, no prose after the value; three probes hold
+that, one of them the adjacent-lines case a `\s*` in the first draft got wrong
+by eating the newline and the next knob as this one's comment) and fails in
+words when the file is missing — where before the fourth pass's guard in check 13
+was followed by the older check's unguarded read, so a renamed example still
+aborted the whole script with an `ENOENT` trace after check 13 had reported
+properly. Suite unchanged: 38 probes, every pass-4 mutant as before.
+
 **Upstream status:** not sent — upstream has no `deploy/`; the stack is this
 fork's (change 16 and the migration plan's Phase 4).
 
