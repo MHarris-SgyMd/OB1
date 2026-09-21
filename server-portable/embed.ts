@@ -249,8 +249,9 @@ export function providerEndpoint(base: string, key: string | undefined): Provide
  * by name, not one this function papers over.
  */
 export function resolveProviderEndpoints(env: EmbedEnv): { embeddings: ProviderEndpoint; chat: ProviderEndpoint } {
-  const embeddings = providerEndpoint(env.OB1_LLM_BASE_URL || DEFAULT_LLM_BASE_URL, env.OB1_LLM_API_KEY || env.OPENROUTER_API_KEY);
-  const chat = providerEndpoint(env.OB1_CHAT_BASE_URL || embeddings.base, env.OB1_CHAT_API_KEY);
+  // baseUrlOr: trimmed, trailing slashes off, and slashes alone are unset (SMD-1843).
+  const embeddings = providerEndpoint(baseUrlOr(env.OB1_LLM_BASE_URL, DEFAULT_LLM_BASE_URL), env.OB1_LLM_API_KEY || env.OPENROUTER_API_KEY);
+  const chat = providerEndpoint(baseUrlOr(env.OB1_CHAT_BASE_URL, embeddings.base), env.OB1_CHAT_API_KEY);
   // No key of its own and the same base: it IS the embeddings endpoint, key
   // and all. Anything else — its own key, or a different base — stands alone.
   return { embeddings, chat: !chat.key && chat.base === embeddings.base ? embeddings : chat };
@@ -289,6 +290,18 @@ export type EmbedConfig = {
   timeoutMs: number;
 };
 
+/** A string knob: trimmed, and "" or whitespace is unset. `qwen2.5:7b ` from a .env file is not a model. */
+export function stringOr(raw: string | undefined, fallback: string): string {
+  const v = raw?.trim();
+  return v ? v : fallback;
+}
+
+/** A base-URL knob: stringOr, then trailing slashes off — and a value that was slashes alone is unset too. */
+export function baseUrlOr(raw: string | undefined, fallback: string): string {
+  const bare = fallback.replace(/\/+$/, "");
+  return stringOr(stringOr(raw, bare).replace(/\/+$/, ""), bare);
+}
+
 /**
  * Resolve the embedding configuration from an environment record.
  *
@@ -297,7 +310,7 @@ export type EmbedConfig = {
  * string is treated as unset throughout, matching db/config.mjs.
  */
 export function resolveEmbedConfig(env: EmbedEnv): EmbedConfig {
-  const model = env.OB1_EMBEDDING_MODEL || DEFAULT_EMBEDDING_MODEL;
+  const model = stringOr(env.OB1_EMBEDDING_MODEL, DEFAULT_EMBEDDING_MODEL);
   const dim = env.OB1_EMBEDDING_DIM ? Number(env.OB1_EMBEDDING_DIM) : DEFAULT_EMBEDDING_DIM;
   // The window a capture is split at. Until SMD-1305 this was chunk.ts's
   // constant for every model — 1200, chosen for Ollama's 2048-token batch —
@@ -341,7 +354,7 @@ export function resolveEmbedConfig(env: EmbedEnv): EmbedConfig {
       chunk.from === "window" && chunk.tokens < DEFAULT_MAX_TOKENS ? Math.floor((DEFAULT_OVERLAP_TOKENS * chunk.tokens) / DEFAULT_MAX_TOKENS) : DEFAULT_OVERLAP_TOKENS,
       "non-negative"),
     chunkContext: resolveChunkContext(env.OB1_CHUNK_CONTEXT),
-    metadataModel: env.OB1_METADATA_MODEL || DEFAULT_METADATA_MODEL,
+    metadataModel: stringOr(env.OB1_METADATA_MODEL, DEFAULT_METADATA_MODEL),
     // Deterministic by default; overridable for anyone who wants variety.
     metadataTemperature: numberOr(env.OB1_METADATA_TEMPERATURE, 0, "non-negative"),
     metadataReasoning: metadataReasoning(env.OB1_METADATA_REASONING),
@@ -379,7 +392,12 @@ function numberOr(raw: string | undefined, fallback: number, range: "positive" |
  * honours, and it is harmless to models with no reasoning mode.
  */
 function metadataReasoning(rawValue: string | undefined): Record<string, unknown> {
-  const raw = (rawValue ?? "").toLowerCase();
+  // Trimmed like the model, URL and numeric knobs. Compose's own dotenv trims
+  // an unquoted value (measured, v5.5), so the case is a quoted `"low "` in a
+  // .env file, or any other loader: that reached the provider as "low " and
+  // every extraction 400ed (SMD-1843; the model and URL were trimmed one pass
+  // later, on the same finding).
+  const raw = (rawValue ?? "").trim().toLowerCase();
   if (raw === "on" || raw === "true" || raw === "1") return {};
   if (raw && raw !== "off" && raw !== "false" && raw !== "0") return { reasoning_effort: raw };
   return { reasoning_effort: "none" };

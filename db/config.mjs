@@ -24,7 +24,10 @@ const RAW_ENV = /** @type {Record<string, string|undefined>} */ (
 );
 
 /**
- * An empty variable means unset, not "".
+ * An empty variable means unset, not "", and whitespace around a value is not
+ * part of it — the server trims its own reads the same way (embed.ts stringOr),
+ * so a quoted `"qwen3-embedding:4b "` in deploy/.env is one model name to the
+ * migrator that records it and the server that checks the record (SMD-1843).
  *
  * `??` only catches undefined, so `OB1_EMBEDDING_DIM=` — trivially produced by a
  * blank line in a .env file or a compose `${VAR}` that resolves to nothing — gave
@@ -33,10 +36,28 @@ const RAW_ENV = /** @type {Record<string, string|undefined>} */ (
  * truthiness, so the two disagreed about the same environment: the server would
  * run at the default width while the migration runner refused to start.
  */
+/**
+ * The same rule for a whole environment record: every string value trimmed,
+ * everything else as it was. server-portable/index.ts applies it once in
+ * initEnv and preflight.ts once to process.env, so a quoted `"sk-abc "` in
+ * deploy/.env is the key and not the key plus a space — for all nineteen
+ * declared knobs at once, not one reader at a time (SMD-1843, eighth pass).
+ * "" stays "": every reader already treats it as unset.
+ *
+ * @param {Record<string, unknown>} record
+ * @returns {Record<string, unknown>}
+ */
+export function trimmedEnv(record) {
+  const out = {};
+  for (const [k, v] of Object.entries(record)) out[k] = typeof v === "string" ? v.trim() : v;
+  return out;
+}
+
 const ENV = new Proxy(/** @type {Record<string, string|undefined>} */ ({}), {
   get: (_t, k) => {
     const v = RAW_ENV[/** @type {string} */ (k)];
-    return v === "" ? undefined : v;
+    const t = typeof v === "string" ? v.trim() : v;
+    return t === "" ? undefined : t;
   },
 });
 
@@ -122,7 +143,9 @@ export const EMBEDDING_MODEL = ENV.OB1_EMBEDDING_MODEL ?? DEFAULT_EMBEDDING_MODE
  */
 export const DEFAULT_METADATA_MODEL = "qwen2.5:7b";
 export const METADATA_MODEL = ENV.OB1_METADATA_MODEL ?? DEFAULT_METADATA_MODEL;
-export const LLM_BASE_URL = (ENV.OB1_LLM_BASE_URL ?? DEFAULT_LLM_BASE_URL).replace(/\/+$/, "");
+// Trailing slashes off, and a value that was slashes alone is unset — the rule
+// server-portable/embed.ts's baseUrlOr applies (SMD-1843).
+export const LLM_BASE_URL = (ENV.OB1_LLM_BASE_URL ?? DEFAULT_LLM_BASE_URL).replace(/\/+$/, "") || DEFAULT_LLM_BASE_URL.replace(/\/+$/, "");
 
 /** Widths pgvector supports for an HNSW index. Beyond this, indexing fails. */
 export const MAX_HNSW_DIM = 2000;
@@ -513,6 +536,7 @@ export function composeChunkForEmbedding(context, chunk) {
  * container crashlooped on a default configuration that was in fact valid.
  */
 export function resolveEmbeddingDimensions(raw, dim, model) {
+  raw = typeof raw === "string" ? raw.trim() : raw; // one decision for a padded value, wherever it is read (SMD-1843)
   if (raw !== undefined && raw !== "") return /^(1|on|true|yes)$/i.test(raw);
   const native = KNOWN_MODEL_DIMS[model];
   return MRL_MODELS.has(model) && native !== undefined && dim < native;
@@ -562,6 +586,7 @@ export const DEFAULT_TRGM_INDEX = true;
  * unrecognised value is a decision here, not a fallback to the default.
  */
 export function resolveTrgmIndex(raw) {
+  raw = typeof raw === "string" ? raw.trim() : raw; // one decision for a padded value, wherever it is read (SMD-1843)
   if (raw === undefined || raw === "") return DEFAULT_TRGM_INDEX;
   return /^(1|on|true|yes)$/i.test(raw);
 }
@@ -645,6 +670,7 @@ export const DEFAULT_CHUNK_CONTEXT = false;
  * `thought_chunks.context` is NULL for a bare chunk, and preflight counts both.
  */
 export function resolveChunkContext(raw) {
+  raw = typeof raw === "string" ? raw.trim() : raw; // one decision for a padded value, wherever it is read (SMD-1843)
   if (raw === undefined || raw === "") return DEFAULT_CHUNK_CONTEXT;
   return /^(1|on|true|yes)$/i.test(raw);
 }
@@ -1081,6 +1107,16 @@ export function versionAtLeast(version, major, minor = 0, patch = 0) {
   if (b !== minor) return b > minor;
   return c >= patch;
 }
+
+/**
+ * The compose service names a model endpoint may live at — the `ollama`
+ * service deploy/compose.yaml's `local-models` profile adds. preflight.ts
+ * passes these to isLocalHostname (a service name is local: the compose
+ * network), and check 14 of scripts/check-fork-consistency.mjs holds
+ * compose.yaml's OB1_LLM_BASE_URL fallback to one of them — so the address
+ * the file defaults to is one the container will call local (SMD-1843).
+ */
+export const LOCAL_PROVIDER_SERVICES = Object.freeze(["ollama"]);
 
 /**
  * Is this hostname the local machine or the private network it sits on?

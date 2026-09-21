@@ -1038,6 +1038,22 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
  */
 const POOLS = new Map<string, { sql: SQL; clients: number }>();
 
+/** The pool size when OB1_PG_POOL is unset. */
+export const DEFAULT_PG_POOL = 10;
+
+/**
+ * OB1_PG_POOL as a pool size: a positive integer, else the default. `""` is
+ * unset — a compose file forwarding `${OB1_PG_POOL:-}` sends "" for an unset
+ * knob, and Number("") is 0, which Bun's SQL refuses at construction, so a
+ * shim server composed that way would not start. The same rule as
+ * server-portable/store-sql.ts's poolSizeFrom, which SMD-1843's sixth review
+ * pass found this shim still lacked; SMD-1881 is one shared reader for both.
+ */
+export function poolSizeFrom(raw: string | undefined, fallback = DEFAULT_PG_POOL): number {
+  const n = raw && raw.trim() ? Number(raw.trim()) : NaN;
+  return Number.isInteger(n) && n > 0 ? n : fallback;
+}
+
 export class SupabaseSqlClient {
   readonly sql: SQL;
   private catalog: Catalog;
@@ -1046,7 +1062,7 @@ export class SupabaseSqlClient {
 
   constructor(private databaseUrl: string, opts: { max?: number } = {}) {
     let pool = POOLS.get(databaseUrl);
-    if (!pool) POOLS.set(databaseUrl, (pool = { sql: new SQL({ url: databaseUrl, max: opts.max ?? Number(process.env.OB1_PG_POOL ?? 10) }), clients: 0 }));
+    if (!pool) POOLS.set(databaseUrl, (pool = { sql: new SQL({ url: databaseUrl, max: opts.max ?? poolSizeFrom(process.env.OB1_PG_POOL) }), clients: 0 }));
     pool.clients++;
     this.pool = pool;
     this.sql = pool.sql;
