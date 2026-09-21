@@ -51,8 +51,72 @@ Three services, in order:
 ### 4. Connect a client
 
 ```
-http://localhost:8000/?key=<MCP_ACCESS_KEY>
+http://127.0.0.1:8000/?key=<MCP_ACCESS_KEY>
 ```
+
+That URL works from this machine and nowhere else, by default — a client on
+this machine, such as Claude Code at user scope
+(`claude mcp add --transport http --scope user open-brain http://127.0.0.1:8000/
+--header "x-brain-key: <key>"`). A claude.ai or Claude Desktop custom connector
+connects from Anthropic's side, not from your machine, so it needs a TLS proxy
+or a tunnel in front; one on this host (caddy, cloudflared, `tailscale serve`)
+dials `127.0.0.1:8000` itself and the loopback default serves it — `SERVER_BIND`
+changes only when the proxy is on another machine, as the next section says.
+`127.0.0.1`, not `localhost`: the mapping binds the IPv4 loopback only, and a
+client that resolves `localhost` to `::1` first without falling back is refused
+(`smoke.sh` dials `127.0.0.1` for the same reason).
+
+## What is reachable from where
+
+Compose binds an address-less `"8000:8000"` to `0.0.0.0`, every interface, so the
+first stack this fork ran on (podman on macOS) offered the database superuser and
+the MCP server to the whole LAN on a password and a key over plain HTTP. Since
+SMD-1844 every published port names its address, the default is loopback, and
+the database and Ollama are not published at all. `compose …` in this section
+stands for `podman compose -f deploy/compose.yaml …` (or `docker compose`) from
+the repo root, with whatever `-f` files the stack was started with:
+
+| Service | On the compose network | On the host | From another machine |
+| --- | --- | --- | --- |
+| `server` | `server:8000` | `127.0.0.1:${SERVER_PORT:-8000}` — the stack's only published port | Through a TLS proxy or tunnel. One on this host dials `127.0.0.1` and needs no knob; only a proxy on another machine needs `SERVER_BIND=0.0.0.0` in `deploy/.env`, and then the key rides every request in clear until the proxy |
+| `postgres` | `postgres:5432` — the server and the migrator | Nothing. `compose exec postgres psql -U postgres openbrain` for psql, `compose exec -T postgres pg_dump -U postgres openbrain > dump.sql` for a backup. A tool run from a checkout (`db/reembed.ts`, `db/extract-entities.ts`, `db/consolidate.ts`, the evals) adds `-f deploy/compose.host-ports.yaml`, which publishes it on `127.0.0.1:${POSTGRES_PORT:-5432}` — choose that when the stack comes up: adding or dropping the file later recreates `postgres` and, through `depends_on`, `server` | Never. `POSTGRES_BIND` exists for a firewalled host you have looked at; it is the superuser on the whole brain |
+| `ollama` (`--profile local-models`) | `ollama:11434` — the server and `ollama-pull` | Nothing. `compose exec ollama ollama pull <model>`; the host-ports file publishes it on `127.0.0.1:${OLLAMA_PORT:-11434}` for an eval run from a checkout | Not intended; an unauthenticated model API |
+
+`docker compose -f deploy/compose.yaml config` renders each mapping with
+`host_ip: 127.0.0.1`, and `scripts/check-fork-consistency.mjs` check 13 parses
+every `compose*.yaml` under `deploy/` and refuses a mapping that drops the
+address, a service that reaches outside the file (`extends`, `include`) or onto
+the host without a port (`network_mode`), and holds an inventory of which
+service publishes from which file — the server from `compose.yaml`, the
+database and Ollama from the host-ports file — so a new published port is
+named there deliberately, with its row in the table above; the "Full stack, no
+Supabase" CI job reads the rendered config the same way.
+
+On podman machine and Docker Desktop the listener you can see is the VM's
+proxy (`gvproxy`, `vpnkit`), not the container, so the check is on the Mac:
+
+```bash
+lsof -nP -iTCP -sTCP:LISTEN | grep -E ":(5432|8000|11434) "
+```
+
+(with your `SERVER_PORT` from `deploy/.env` in place of 8000 if you set one —
+the shell does not read that file; and the trailing space anchors the port,
+since without it a Supabase CLI stack on 54321 and 54322 matches `5432` and
+reads as the database leaking)
+
+shows `127.0.0.1:<port>` for the server, and for 5432 nothing without the
+host-ports file and `127.0.0.1:5432` with it; a line on 11434 is a
+host-installed Ollama (SETUP.md's macOS path), not the stack's — `127.0.0.1` is
+its own default and enough, since `host.containers.internal` reaches the host's
+loopback from the VM (measured); `*:11434` there means someone set
+`OLLAMA_HOST=0.0.0.0` and an unauthenticated model API is on the LAN. `ss`
+inside the VM does not answer the
+question. Measured on podman 5 (libkrun machine, macOS): gvproxy
+honours the address — with `SERVER_BIND=0.0.0.0` it listens on `*:8000` and a
+connection to the Mac's LAN address succeeds; with the default it listens on
+`127.0.0.1:8000` and the same connection gets nothing. "Nothing" is a timeout,
+not a refusal, when the macOS application firewall's stealth mode is on (it
+drops a probe of a closed port), so read `lsof`, not the error's wording.
 
 ## Expected outcome
 
@@ -144,7 +208,9 @@ there, for that check to pass.
   cron job, a Kubernetes CronJob, or a scheduled workflow. Not ported here.
 - **Data migration.** `pg_dump --data-only` from the old database, plus a full
   re-embed if the embedding model family changes — `db/reembed.ts`, run from a
-  checkout with the provider reachable, not from this stack.
+  checkout with the provider reachable, not from this stack. A checkout reaches
+  this stack's database only with `-f deploy/compose.host-ports.yaml` ("What is
+  reachable from where", above); the same goes for the two workers below.
 - **Entity extraction.** `db/extract-entities.ts --follow` is a long-running
   worker with a per-thought model cost; it is not a service here. Run it from a
   checkout, with `OB1_WORKER_KEY` set to a key whose hash is in

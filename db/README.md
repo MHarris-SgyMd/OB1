@@ -414,6 +414,12 @@ nags a correct deployment is worse than no check.
 Migration 015 adds `thought_work_claims`, ported from
 `schemas/thought-work-claims`, and `reembed.ts` is the first thing built on it.
 
+Every tool in this section takes a database URL and runs from a checkout. Against
+the compose stack in `deploy/`, that URL reaches nothing until the stack is up
+with `-f deploy/compose.host-ports.yaml`, which publishes the database on
+`127.0.0.1` (`deploy/README.md`, "What is reachable from where"); the base file
+publishes only the server.
+
 **Why a table.** Any pass over the whole corpus — re-embedding after a model
 change, entity extraction, a chunk-context backfill — was one process walking
 the table with no record of where it got to, or several processes each

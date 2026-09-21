@@ -50,8 +50,19 @@
  *      comments excepted by a literal-aware strip, string literals included
  *      (SMD-1796); the rules are db/config.mjs's SUPABASE_SQL_RULES, which
  *      test-schema [10] and [40] apply from inside the suite; no exceptions
+ *  13. every port a compose file under deploy/ publishes names its host address
+ *      as a knob that defaults to the literal 127.0.0.1 — the short form
+ *      `"${X_BIND:-127.0.0.1}:${X_PORT:-n}:n"`, each `X_BIND` documented in
+ *      deploy/.env.example — no service reaches outside the file (`extends`,
+ *      `include`) or onto the host without a port (`network_mode`), and
+ *      PUBLISHES names which service publishes from which file, one mapping
+ *      each, so a mapping that is gone or refused fails as missing:
+ *      compose.yaml publishes the server alone; the database and Ollama
+ *      publish through compose.host-ports.yaml, a second -f. The files are
+ *      parsed with Bun.YAML (SMD-1844); no exceptions
  *
- * Run: bun scripts/check-fork-consistency.mjs   (plain ESM; node runs it too)
+ * Run: bun scripts/check-fork-consistency.mjs   (plain ESM; node runs it too,
+ * except check 13, which parses YAML with Bun.YAML and fails in words under node)
  * Exits non-zero on any violation.
  */
 
@@ -1696,6 +1707,272 @@ function checkSupabaseIsms() {
   }
 }
 
+// ── 13: a compose file publishes a port on loopback, by a knob, or not at all ──
+//
+// SMD-1844. deploy/compose.yaml carried `"${POSTGRES_PORT:-5432}:5432"`,
+// `"${SERVER_PORT:-8000}:8000"` and `"${OLLAMA_PORT:-11434}:11434"`: an
+// address-less mapping, which compose binds to 0.0.0.0. On the first stack the
+// fork ran (podman machine, macOS) `lsof` showed gvproxy on `*:5432` and
+// `*:8010` — the postgres superuser on the whole brain behind its password, and
+// the MCP server with its key in clear on every request, offered to every host
+// on the LAN. The file's own comment said to drop the database port in
+// production; the default was the exposed one and no README said to. Since the
+// fix every published mapping is the short form `"${X_BIND:-127.0.0.1}:
+// ${X_PORT:-n}:n"` — the literal 127.0.0.1 unless the operator names an
+// address, in a knob deploy/.env.example documents — and the base file
+// publishes the server alone; the database and Ollama reach the host only
+// through compose.host-ports.yaml, a second -f an operator adds for a tool run
+// from a checkout.
+//
+// The file is PARSED, not scanned. Three review passes each found a spelling
+// the text walk before this did not read — an item at another indentation, a
+// `ports:` block carried in through an anchor and `<<:` merge key, a quoted
+// `"ports":` key — and each time compose rendered the mapping with no host_ip
+// while the check passed; a walk over YAML text is not a YAML reader, and the
+// fourth spelling would have been found by the next pass. Bun.YAML.parse
+// (Bun 1.2+; CI and the Dockerfile pin 1.4.0) resolves anchors, aliases and
+// merge keys (quoted or bare — a probe found no spelling it leaves unfolded),
+// normalises key spellings, reads flow and block sequences alike and refuses
+// tabs, so what this rule sees is what compose sees — with two exceptions it
+// refuses by name, because they reach outside the file: a service's
+// `extends:` and a top-level `include:`, each of which imports a service body
+// from a file the rule does not open; and `network_mode:`, which with the
+// value `host` puts a service on the host's interfaces with no `ports:` at
+// all (the third pass's one hole in the definition). Under node, which has no
+// Bun.YAML, the rule fails in words rather than passing. The fourth pass added
+// the file operators copy: a live `X_BIND=` line in deploy/.env.example may
+// say only 127.0.0.1, since that file, not compose.yaml's fallback, is the
+// default of every stack brought up from it.
+//
+// Two rules. The first, per service: `ports` is a list whose every item is the
+// short form — no host address (fewer than three fields), an address but not
+// the form (a literal address or port, a `/tcp` suffix, a knob not named
+// `_BIND`), a default other than the literal `127.0.0.1` (smoke.sh and the CI
+// step dial it), a knob `.env.example` does not document, and the long form
+// (an object) are each refused in their own words. The second is an
+// inventory: PUBLISHES names which service publishes from which compose file,
+// one mapping each, and a file's readable mappings must equal its entry — so
+// a mapping that is gone, or refused above, fails as MISSING too, a new file
+// or service that publishes fails as UNLISTED until named here deliberately
+// (with its row in deploy/README.md), and the overlay must exist. Only files
+// named as compose names them (`compose*.yaml`, `docker-compose*.yml`) are
+// read: SMD-1849's collector configuration under deploy/ is not a stack.
+
+/**
+ * The knobs deploy/.env.example documents whose names match `pattern`: one
+ * entry per knob line, live or commented out (most ship commented out
+ * precisely because they have a default), with an optional trailing `#`
+ * comment — so `# OB1_EMBEDDING_DIM=1536   # hosted` counts and the prose line
+ * `# SERVER_BIND=0.0.0.0 is the one an operator sets…` does not. Null, after a
+ * failure in words, when the file is missing; both readers stop there rather
+ * than throw. Check 13 and the compose-forwards check read the file through
+ * this, so what counts as a documented line is decided once.
+ */
+function envKnobsIn(text, pattern) {
+  const knobs = [];
+  // Same-line whitespace only: a `\s*` here once ate the newline and the next
+  // knob line as this one's trailing comment, and POSTGRES_BIND went undocumented.
+  for (const m of text.matchAll(/^(#?)[ \t]*([A-Z0-9_]+)=(\S*)[ \t]*(?:#.*)?$/gm)) {
+    if (pattern.test(m[2])) knobs.push({ name: m[2], value: m[3], live: m[1] === "", line: text.slice(0, m.index).split("\n").length });
+  }
+  return knobs;
+}
+const ENV_KNOB_PROBES = [
+  // [text, pattern, expected names]
+  ["# A_BIND=127.0.0.1\n# B_BIND=127.0.0.1\n# C_BIND=127.0.0.1\n", /_BIND$/, ["A_BIND", "B_BIND", "C_BIND"]],
+  ["# OB1_X=1536   # hosted; unmeasured\nOB1_Y=\n", /^OB1_/, ["OB1_X", "OB1_Y"]],
+  ["# SERVER_BIND=0.0.0.0 is the one an operator sets\n# SERVER_BIND=127.0.0.1\n", /_BIND$/, ["SERVER_BIND"]],
+];
+function documentedEnvKnobs(pattern) {
+  const SELF = "scripts/check-fork-consistency.mjs";
+  for (const [text, pat, names] of ENV_KNOB_PROBES) {
+    const got = envKnobsIn(text, pat).map((k) => k.name);
+    if (JSON.stringify(got) !== JSON.stringify(names)) fail(SELF, `env-knob reader no longer reports exactly ${JSON.stringify(names)} for its probe (reported ${JSON.stringify(got)}): ${JSON.stringify(text)}`);
+  }
+  const path = join(ROOT, "deploy", ".env.example");
+  if (!existsSync(path)) {
+    if (!documentedEnvKnobs.reported) fail("deploy/.env.example", `missing — the documented knobs are read from it (check 13's _BIND knobs, the compose-forwards check's OB1_* settings), and SETUP.md tells every operator to copy it`);
+    documentedEnvKnobs.reported = true;
+    return null;
+  }
+  return envKnobsIn(readFileSync(path, "utf8"), pattern);
+}
+
+/** compose file under deploy/ → the services that publish one mapping each from it. */
+const PUBLISHES = {
+  "compose.yaml": ["server"],
+  "compose.host-ports.yaml": ["postgres", "ollama"],
+};
+const COMPOSE_FILE = /^(docker-)?compose.*\.ya?ml$/;
+
+const PORT_ITEM = /^\$\{([A-Z0-9_]+)_BIND:-([^}]*)\}:\$\{[A-Z0-9_]+_PORT:-\d+\}:\d+$/;
+/** Colon-separated fields of a short-form mapping, `${…}` contents not counted. */
+function portFields(v) {
+  let depth = 0, n = 1;
+  for (const ch of v) { if (ch === "{") depth++; else if (ch === "}") depth--; else if (ch === ":" && depth === 0) n++; }
+  return n;
+}
+/** 1-based line of the first non-comment line containing `needle`, for the report; 0 if none. */
+function lineOf(text, needle) {
+  const i = text.split("\n").findIndex((l) => !/^\s*#/.test(l) && l.replace(/\s+#.*$/, "").includes(needle));
+  return i < 0 ? 0 : i + 1;
+}
+
+/**
+ * One compose file's published ports: `{ gaps: [[kind, service, line, detail]],
+ * published: [service, …] }` — `published` lists a service once per house-form
+ * mapping, for the inventory.
+ */
+function publishedPortGapsIn(text, { documented }) {
+  const gaps = [], published = [];
+  if (typeof Bun === "undefined" || typeof Bun.YAML?.parse !== "function") return { gaps: [["no-parser", null, 0, ""]], published };
+  let doc;
+  try { doc = Bun.YAML.parse(text); } catch (e) { return { gaps: [["unparseable", null, 0, String(e.message ?? e)]], published }; }
+  if (Array.isArray(doc)) return { gaps: [["not-a-mapping", null, 0, `a list of ${doc.length}`]], published };
+  if (!doc || typeof doc !== "object" || !doc.services || typeof doc.services !== "object" || Array.isArray(doc.services)) {
+    return { gaps: [["no-services", null, 0, ""]], published };
+  }
+  if ("include" in doc) gaps.push(["include", null, lineOf(text, "include"), ""]);
+  for (const [service, def] of Object.entries(doc.services)) {
+    const at = lineOf(text, `${service}:`) || lineOf(text, service);
+    if (!def || typeof def !== "object" || Array.isArray(def)) { gaps.push(["unreadable", service, at, JSON.stringify(def)]); continue; }
+    if ("extends" in def) gaps.push(["extends", service, lineOf(text, "extends"), JSON.stringify(def.extends)]);
+    if ("network_mode" in def) gaps.push(["network-mode", service, lineOf(text, "network_mode"), String(def.network_mode)]);
+    if (!("ports" in def)) continue;
+    const ports = def.ports;
+    if (!Array.isArray(ports)) { gaps.push(["ports-not-list", service, lineOf(text, "ports"), JSON.stringify(ports)]); continue; }
+    if (ports.length === 0) gaps.push(["empty-ports", service, lineOf(text, "ports"), ""]);
+    for (const item of ports) {
+      if (item === null || typeof item === "object") { gaps.push(["long-form", service, lineOf(text, "target"), JSON.stringify(item)]); continue; }
+      const v = String(item);
+      const line = lineOf(text, v) || lineOf(text, "ports");
+      if (portFields(v) < 3) { gaps.push(["no-address", service, line, v]); continue; }
+      const m = PORT_ITEM.exec(v);
+      if (!m) { gaps.push(["not-house-form", service, line, v]); continue; }
+      if (m[2] !== "127.0.0.1") gaps.push(["default-not-loopback", service, line, `${m[1]}_BIND defaults to "${m[2]}"`]);
+      else if (documented && !documented.has(`${m[1]}_BIND`)) gaps.push(["undocumented-knob", service, line, `${m[1]}_BIND`]);
+      else published.push(service);
+    }
+  }
+  return { gaps, published };
+}
+
+const GOOD = `"\${SERVER_BIND:-127.0.0.1}:\${SERVER_PORT:-8000}:8000"`;
+const PORT_PROBES = [
+  // [text, expected gap kinds, expected published services]
+  [`services:\n  server:\n    ports:\n      - ${GOOD}\n`, [], ["server"]],
+  // Spellings a parser makes one: quoting, indentation, a flow sequence, a quoted or spaced key, an alias, an anchored block merged in.
+  [`services:\n  server:\n    ports:\n      - ${GOOD.replace(/"/g, "'")}\n`, [], ["server"]],
+  [`services:\n  server:\n    ports:\n      - ${GOOD.replace(/"/g, "")}\n`, [], ["server"]],
+  [`services:\n  server:\n    ports:\n        - ${GOOD}\n`, [], ["server"]],
+  [`services:\n  server:\n    ports:\n    - ${GOOD}\n`, [], ["server"]],
+  [`services:\n    server:\n        ports:\n            - ${GOOD}\n`, [], ["server"]],
+  [`services:\n  server:\n    ports: [${GOOD}]\n`, [], ["server"]],
+  [`services:\n  server:\n    "ports":\n      - ${GOOD}\n`, [], ["server"]],
+  [`services:\n  server:\n    ports :\n      - ${GOOD}\n`, [], ["server"]],
+  [`x-p: &p\n  - ${GOOD}\nservices:\n  server:\n    ports: *p\n`, [], ["server"]],
+  [`x-open: &open\n  ports:\n    - ${GOOD}\nservices:\n  server:\n    <<: *open\n    image: x\n`, [], ["server"]],
+  // …and the same spellings carrying a bare mapping are read, and refused.
+  [`services:\n  server:\n    ports:\n        - "8000:8000"\n`, ["no-address"], []],
+  [`services:\n  server:\n    "ports":\n      - "5432:5432"\n`, ["no-address"], []],
+  [`x-open: &open\n  ports:\n    - "5432:5432"\nservices:\n  postgres:\n    <<: *open\n    image: x\n`, ["no-address"], []],
+  [`services:\n  server:\n    ports: ["8000:8000"]\n`, ["no-address"], []],
+  [`services:\n  server:\n    ports:\n      - "\${SERVER_PORT:-8000}:8000"\n`, ["no-address"], []],
+  [`services:\n  server:\n    ports:\n      - 8000:8000\n`, ["no-address"], []],
+  [`services:\n  server:\n    ports:\n      - "\${SERVER_BIND:-127.0.0.1}:8000:8000"\n`, ["not-house-form"], []],
+  [`services:\n  server:\n    ports:\n      - "127.0.0.1:\${SERVER_PORT:-8000}:8000"\n`, ["not-house-form"], []],
+  [`services:\n  server:\n    ports:\n      - ${GOOD.replace(/"$/, '/tcp"')}\n`, ["not-house-form"], []],
+  [`services:\n  server:\n    ports:\n      - "\${SERVER_BIND:-0.0.0.0}:\${SERVER_PORT:-8000}:8000"\n`, ["default-not-loopback"], []],
+  [`services:\n  server:\n    ports:\n      - "\${SERVER_BIND:-[::1]}:\${SERVER_PORT:-8000}:8000"\n`, ["default-not-loopback"], []],
+  [`services:\n  server:\n    ports:\n      - target: 8000\n        published: 8000\n        host_ip: 127.0.0.1\n`, ["long-form"], []],
+  [`services:\n  server:\n    ports: 8000\n`, ["ports-not-list"], []],
+  [`services:\n  server:\n    ports: []\n`, ["empty-ports"], []],
+  [`services:\n  server:\n    ports:\n      - "\${OTHER_BIND:-127.0.0.1}:\${SERVER_PORT:-8000}:8000"\n`, ["undocumented-knob"], []],
+  // What reaches outside the file, or the host, without a ports: item.
+  [`services:\n  postgres:\n    extends:\n      file: base/pg.yaml\n      service: pg\n`, ["extends"], []],
+  [`include:\n  - other.yaml\nservices:\n  server:\n    ports:\n      - ${GOOD}\n`, ["include"], ["server"]],
+  [`services:\n  postgres:\n    network_mode: host\n`, ["network-mode"], []],
+  [`services:\n  server:\n    network_mode: host\n    ports:\n      - ${GOOD}\n`, ["network-mode"], ["server"]],
+  // What is not a stack this rule can read.
+  [`services:\n  server:\n\tports:\n`, ["unparseable"], []],
+  [`services:\n  - server\n`, ["no-services"], []],
+  [`services:\n  server: x\n`, ["unreadable"], []],
+  [`version: "3"\n`, ["no-services"], []],
+  [`a: 1\n---\nb: 2\n`, ["not-a-mapping"], []],
+  [`- a\n- b\n`, ["not-a-mapping"], []],
+  // Two items are two mappings; a second service is read after the first; comments are not mappings.
+  [`services:\n  server:\n    ports:\n      - ${GOOD}\n      - "9000:9000"\n  postgres:\n    ports:\n      # - "5432:5432"\n      - "\${POSTGRES_BIND:-127.0.0.1}:\${POSTGRES_PORT:-5432}:5432"  # loopback\n`, ["no-address"], ["server", "postgres"]],
+  // A ports: key under a top-level block nothing merges into publishes nothing.
+  [`services:\n  server:\n    image: x\nvolumes:\n  ports:\n      - "8000:8000"\n`, [], []],
+];
+
+function checkPublishedPorts() {
+  const SELF = "scripts/check-fork-consistency.mjs";
+  const knobs = documentedEnvKnobs(/_BIND$/);
+  if (knobs === null) return;
+  const documented = new Set(knobs.map((k) => k.name));
+  // The file every operator copies to deploy/.env: a LIVE knob line there is the
+  // stack's default in practice, whatever compose.yaml's fallback says, and
+  // neither the compose rule nor the CI step (which writes its own .env) reads
+  // it — so a live line may only say the loopback address.
+  for (const k of knobs) {
+    if (k.live && k.value !== "127.0.0.1") {
+      fail(`deploy/.env.example:${k.line}`, `\`${k.name}=${k.value}\` is a live line in the file operators copy to deploy/.env, so every stack brought up from it publishes on ${k.value || "an empty address"} — comment it out or set 127.0.0.1; the network is the operator's choice in deploy/.env, not the example's (SMD-1844)`);
+    }
+  }
+  const probeDocs = new Set(["SERVER_BIND", "POSTGRES_BIND"]);
+  for (const [text, kinds, services] of PORT_PROBES) {
+    const got = publishedPortGapsIn(text, { documented: probeDocs });
+    const gotKinds = got.gaps.map((g) => g[0]);
+    if (gotKinds.length === 1 && gotKinds[0] === "no-parser") break; // reported once, below
+    if (JSON.stringify(gotKinds) !== JSON.stringify(kinds) || JSON.stringify(got.published) !== JSON.stringify(services)) {
+      fail(SELF, `published-port rule no longer reports exactly ${JSON.stringify(kinds)} / ${JSON.stringify(services)} for its probe (reported ${JSON.stringify(gotKinds)} / ${JSON.stringify(got.published)}): ${JSON.stringify(text)}`);
+    }
+  }
+
+  const dir = join(ROOT, "deploy");
+  const files = readdirSync(dir).filter((f) => COMPOSE_FILE.test(f) && statSync(join(dir, f)).isFile()).sort();
+  for (const name of Object.keys(PUBLISHES)) {
+    if (!files.includes(name)) fail(`deploy/${name}`, `missing — PUBLISHES in ${SELF} says ${PUBLISHES[name].map((s) => `\`${s}\``).join(" and ")} publish from it (SMD-1844)`);
+  }
+  const HOUSE = "`\"${X_BIND:-127.0.0.1}:${X_PORT:-n}:n\"`";
+  for (const name of files) {
+    const rel = `deploy/${name}`;
+    const { gaps, published } = publishedPortGapsIn(readFileSync(join(dir, name), "utf8"), { documented });
+    for (const [kind, service, line, detail] of gaps) {
+      const at = line ? `${rel}:${line}` : rel;
+      const svc = service ? `service \`${service}\`` : "the file";
+      const knob = `${(service || "X").toUpperCase().replace(/-/g, "_")}_BIND`;
+      switch (kind) {
+        case "no-parser": fail(SELF, `check 13 parses compose files with Bun.YAML (Bun 1.2+) and this runtime has none — run \`bun ${SELF}\`, as CI does (SMD-1844)`); return;
+        case "unparseable": fail(rel, `does not parse as YAML: ${detail} (SMD-1844)`); break;
+        case "not-a-mapping": fail(rel, `parses to ${detail}, not a mapping — several documents, or a root sequence; a compose file is one mapping (SMD-1844)`); break;
+        case "no-services": fail(rel, `has no top-level \`services:\` mapping — every compose*.yaml under deploy/ is a stack this rule reads (SMD-1844)`); break;
+        case "include": fail(at, `a top-level \`include:\` imports services from a file this rule does not open — put the services in this file (SMD-1844)`); break;
+        case "extends": fail(at, `${svc} \`extends\` ${detail} — a service body this rule does not follow (another file, or a sibling whose \`ports:\` the child would inherit uncounted); write the service out (SMD-1844)`); break;
+        case "network-mode": fail(at, `${svc} sets \`network_mode: ${detail}\` — refused whatever the value: \`host\` puts the service on the host's interfaces with no \`ports:\` at all, and the stack needs no mode but the default network; remove it (SMD-1844)`); break;
+        case "unreadable": fail(at, `${svc} is ${detail}, not a mapping (SMD-1844)`); break;
+        case "ports-not-list": fail(at, `${svc} has \`ports: ${detail}\`, not a list (SMD-1844)`); break;
+        case "empty-ports": fail(at, `${svc} has an empty \`ports:\` list (SMD-1844)`); break;
+        case "long-form": fail(at, `${svc} publishes ${detail} in the long form — use the short form ${HOUSE}, the one shape this rule and the README teach (SMD-1844)`); break;
+        case "no-address": fail(at, `${svc} publishes \`${detail}\` with no host address — compose binds that to 0.0.0.0, every interface; write ${HOUSE} with \`${knob}\` and document the knob in deploy/.env.example (SMD-1844)`); break;
+        case "not-house-form": fail(at, `${svc} publishes \`${detail}\`, which names an address but is not the house form ${HOUSE} — the knob must end in _BIND, the host port must be a \`_PORT\` knob (smoke.sh and the CI step read SERVER_PORT), and no suffix (SMD-1844)`); break;
+        case "default-not-loopback": fail(at, `${svc}: ${detail} — the default is the literal 127.0.0.1, which smoke.sh and the CI step dial; an operator who wants another address sets the knob (SMD-1844)`); break;
+        case "undocumented-knob": fail(at, `${svc} reads \`${detail}\`, which deploy/.env.example does not document — an operator cannot find the knob that opens the port (SMD-1844)`); break;
+        default: throw new Error(`check 13: no message for kind ${kind}`);
+      }
+    }
+    const expected = PUBLISHES[name] ?? [];
+    for (const service of expected) {
+      if (!published.includes(service)) fail(rel, `publishes no house-form mapping for service \`${service}\`, and PUBLISHES in ${SELF} says it does — the port is gone, or refused above (SMD-1844)`);
+    }
+    for (const service of new Set(published)) {
+      const n = published.filter((s) => s === service).length;
+      if (!expected.includes(service) || n > 1) fail(rel, `service \`${service}\` publishes ${n} mapping${n === 1 ? "" : "s"} from this file and PUBLISHES in ${SELF} lists ${expected.includes(service) ? "one" : "none"} — ${name === "compose.yaml" ? "the base file publishes the server alone; the database and Ollama publish through compose.host-ports.yaml, a second -f, and " : ""}a new published port is named in PUBLISHES deliberately, with its row in deploy/README.md's "What is reachable from where" (SMD-1844)`);
+    }
+  }
+}
+
 // ── Run ──────────────────────────────────────────────────────────────────────
 
 const dirs = contributionDirs();
@@ -1712,6 +1989,7 @@ checkCredentialCompares();
 checkThoughtWritesAround();
 checkShimRuntime();
 checkSupabaseIsms();
+checkPublishedPorts();
 
 /**
  * The embedding default is stated in three places that must agree, and two of them
@@ -1844,14 +2122,10 @@ await checkCapturingGrants();
  * stopped setting it.)
  */
 function checkComposeForwardsDocumentedEnv() {
-  const example = readFileSync(join(ROOT, "deploy", ".env.example"), "utf8");
+  const knobs = documentedEnvKnobs(/^OB1_/);
+  if (knobs === null) return;
   const compose = readFileSync(join(ROOT, "deploy", "compose.yaml"), "utf8");
-
-  // Both a live `OB1_X=` line and a commented `# OB1_X=` one count as documented:
-  // most of these ship commented out precisely because they have a default.
-  const documented = new Set(
-    [...example.matchAll(/^#?\s*(OB1_[A-Z0-9_]+)=/gm)].map((m) => m[1])
-  );
+  const documented = new Set(knobs.map((k) => k.name));
   const forwarded = new Set([...compose.matchAll(/\b(OB1_[A-Z0-9_]+)\b/g)].map((m) => m[1]));
 
   for (const name of [...documented].sort()) {
