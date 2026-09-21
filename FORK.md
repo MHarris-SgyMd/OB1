@@ -16772,9 +16772,15 @@ on an edit) fails the arm, and only a copy of the origin, the one case the
 rule allows, passes. Pass 2's arm on the column compared it with constants and,
 at one site, with itself, and could not fail for anything a server did; pass 3
 dropped it, and pass 4 put this one in its place, which compares the column
-with the rule (`mcp`, `dashboard`, `rest_api`, `agent_memory` on the captures,
-NULL on the planted rows' edits, either way the thought's own). A missing row
-is one failure, not three. The header-set guard gains SMD-1541:
+with the rule (`mcp`, `dashboard`, `rest_api`, `agent_memory` on the captures;
+`planted`, the origin every planted row carries since pass 5, on the edits —
+either way the thought's own). A missing row is one failure, not three. Every
+arm so far runs under the legacy key, whose name the two constants spell too,
+so one write through each principal server runs under a second, NAMED key in
+`MCP_ACCESS_KEYS` and its row is judged for that name — the arm that tells
+`principal.name` from a constant (pass 5) — and the two in-place-compare
+servers are shown refusing that key with 401, their limitation as an
+assertion. The header-set guard gains SMD-1541:
 the five, listed; three text guards hold the legacy key's name at its sources
 — `integrations/_shared/auth.ts`'s `found = { name: "MCP_ACCESS_KEY", … }`,
 the copy the three principal servers import (`test-auth.ts` holds the six
@@ -16791,26 +16797,34 @@ capture's passed source was a claim the suite could not hold. The field is
 gone from every actor, and `via` — which no fallback supplies — is what every
 arm holds instead.
 
-**Verified:** `../db/with-postgres.sh bun test-writes.ts` 236/236 under podman
+**Verified:** `../db/with-postgres.sh bun test-writes.ts` 257/257 under podman
 (was 186 — `origin/main`'s suite run against the changed servers, 186/186:
-the fifty new assertions are nine `judgeActor` sites at four each, the
-tie check in each of the nine `auditRow` reads, the write-back's `runtime`
-read, the header-set entry and three spelling guards; the first draft of this
+the new assertions are twelve `judgeActor` sites at four each plus their tie
+checks — nine under the legacy key, three under the named one, each with its
+own "the write succeeded" arm and the write-back's with an "its thought" arm —
+two 401 arms, the write-back's `runtime` read, the header-set entry and three
+spelling guards; the first draft of this
 paragraph said "was 200, twelve arms" from arithmetic, and the run said
 otherwise — caught: run-it); the four-site mutant, run on the first draft,
 211/215 with the four failures named above; after pass 2, `via` removed from
 `rest-api`'s `PUT` actor and from `open-brain-rest`'s capture actor, 234/236
 of that pass's suite, the two `via` arms failing with `got null` and nothing
 else — a capture arm with teeth, which pass 1's had not; after pass 4,
-`source: "rest-api"` added to `rest-api`'s `ACTOR` — 233/236, the three `rest-api` arms (capture, edit, enrich) failing with `got rest-api` and nothing else — the capture arm too, since the route's `rest_api` and the server's `rest-api` differ by a character;
-`bun test-auth.ts` 809/809 (the five import and
+`source: "rest-api"` added to `rest-api`'s `ACTOR` — 233/236, the three
+`rest-api` arms (capture, edit, enrich) failing with `got rest-api` and
+nothing else, the capture arm too, since the route's `rest_api` and the
+server's `rest-api` differ by a character; after pass 5, `principal.name`
+replaced by `"MCP_ACCESS_KEY"` in `open-brain-rest`'s edit actor — 256/257, the one arm that judges that row for the named key's name failing with `got MCP_ACCESS_KEY` and nothing else — the regression the legacy-key arms cannot see;
+`bun test-auth.ts` 809/809 (the
+five import and
 authenticate as before); `bun scripts/check-fork-consistency.mjs` PASS on 118
 contributions (check 10 sees no new verb on `thoughts`; check 8 still passes
 the two in-place compares). Not type-checked: the vendored servers are outside
 `tsc`'s project, as they were, and this machine's `deno` is bun's Node shim,
 not Deno — change 69's `deno check` of `enhanced-mcp` and `agent-memory-api`
-was not repeated; the two added lines are an object literal in an `rpc()`
-argument each, which those files' other calls already type.
+was not repeated; what each file gained is an object literal — or a module
+constant holding one — in an `rpc()` argument, which those files' other calls
+already type.
 
 **Not done here.** `enhanced-mcp` and `rest-api` onto `_shared/auth.ts` — with
 SMD-1798, which rewrites both files; a constant exported from `auth.ts` for
@@ -16922,6 +16936,30 @@ the trap in a comment), and one envelope builder across writer families
 (SMD-1730's shape). The pass's own fixes were a renumber main forced, two
 carve-out sentences and a guard for a rule the previous pass had left
 unheld; the signal stands.
+
+**Review pass 5, triaged (at the operator's call).** The same two reviewers.
+Fixed, both teeth: the planted rows carried `metadata = '{}'`, so on every
+edit site pass 4's origin arm compared NULL with NULL and proved only that no
+server adds a constant source (caught: cold-read) — a planted row carries
+`source: "planted"` now, and the edit arms compare a value; and the suite ran
+every write under the legacy key alone, whose name the two constants spell
+too, so a regression from `principal.name` to that literal in any of the
+three principal servers was invisible (caught: cold-read) — one write through
+each of the three runs under a second, named key in `MCP_ACCESS_KEYS` and its
+row is judged for that name, the two in-place-compare servers are shown
+refusing it with 401, and the mutant in Verified bites. Record: the pass-4
+mutant sentence had landed as one unwrapped line, and "the two added lines"
+predated `ACTOR` (caught: run-it, the read-back). Declined, fifth time: the
+deletes and the merge's metadata write through the functions (SMD-1793), the
+two servers onto `_shared/auth.ts` (SMD-1798), and the merge order (the merge
+step's). Left for the boyscout, as tidy-ups with no behaviour change: the
+header-set guard's one glob per ticket (four sweeps where one would do), and
+the four-line actor comment at the three principal servers' sites, which could
+point at this section. Not taken: `runtime` sits in `actor_context` and in
+`metadata.agent_memory.runtime` — the second is the thought's content, the
+first says who wrote the row, and the ticket asked for the envelope's fields
+on the actor; one copy per meaning. Two teeth in the previous passes' own
+additions, no defect in the mechanism: the signal stands.
 
 **Upstream status:** not applicable — the functions and the audit trigger are
 this fork's; upstream's servers write the row directly and have no actor to

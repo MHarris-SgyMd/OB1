@@ -50,7 +50,9 @@
  * names the key: `principal.name` where the server authenticates through
  * `_shared/auth.ts` (three), the constant `MCP_ACCESS_KEY` where it holds
  * that one key and compares it in place (`enhanced-mcp`, `rest-api`) — both
- * `MCP_ACCESS_KEY` under this suite's legacy single key. No actor carries a
+ * `MCP_ACCESS_KEY` under this suite's legacy single key — and one write through
+ * each of the three runs under a NAMED key too, the arm that tells the
+ * principal's name from a constant, while the two refuse that key. No actor carries a
  * source — the trigger (008; its body is 025's now) reads the row's own
  * `metadata.source`, so the column means the thought's origin on every row,
  * and a copy of it in the actor was indistinguishable from that fallback under
@@ -102,6 +104,7 @@
  *   ../db/with-postgres.sh bun test-writes.ts
  */
 
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -217,12 +220,19 @@ Bun.plugin({
 
 // One key, presented as `x-brain-key`: the older single MCP_ACCESS_KEY, which
 // the servers on _shared/auth.ts accept with write scope (compared by digest)
-// and the two still on a constant-time compare accept as their only key.
+// and the two still on a constant-time compare accept as their only key. And
+// a second, NAMED key in MCP_ACCESS_KEYS, which only the servers on the module
+// know: one write through each of them runs under it (SMD-1541), the arm that
+// tells `principal.name` on the audit row from a constant that happens to
+// spell the legacy key's name — every other arm runs under the legacy key,
+// whose name the two in-place-compare servers' constant spells too.
 const KEY = "one-write-key-for-every-writer";
+const NAMED_KEY = "a-second-key-with-a-name-of-its-own";
+const NAMED = "named-client";
 process.env.SUPABASE_URL = URL_;
 process.env.SUPABASE_SERVICE_ROLE_KEY = "stub";
 process.env.MCP_ACCESS_KEY = KEY;
-delete process.env.MCP_ACCESS_KEYS;
+process.env.MCP_ACCESS_KEYS = `${NAMED}:write:${createHash("sha256").update(NAMED_KEY, "utf8").digest("hex")}`;
 process.env.OPENROUTER_API_KEY = "stub-openrouter-key"; // the writers' first-choice provider; its model name is the label
 for (const name of ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OPENROUTER_EMBEDDING_MODEL", "OPENAI_EMBEDDING_MODEL"]) delete process.env[name];
 // The receiver's secret and token, and the auditor's key and Slack settings (read at import; Slack is never reached).
@@ -245,12 +255,12 @@ async function load(rel: string): Promise<Handler> {
 
 const HEADERS = { "Content-Type": "application/json", Accept: "application/json, text/event-stream", "x-brain-key": KEY };
 type Reply = { status: number; json: any; text: string };
-async function send(handler: Handler, method: string, path: string, body?: unknown): Promise<Reply> {
+async function send(handler: Handler, method: string, path: string, body?: unknown, key = KEY): Promise<Reply> {
   const console_ = { error: console.error, warn: console.warn };
   console.error = () => {}; console.warn = () => {}; // a writer logs what it refuses; the status is the assertion
   let r: Response;
   try {
-    r = await handler(new Request("http://writer.test" + path, { method, headers: HEADERS, body: body === undefined ? undefined : JSON.stringify(body) }));
+    r = await handler(new Request("http://writer.test" + path, { method, headers: { ...HEADERS, "x-brain-key": key }, body: body === undefined ? undefined : JSON.stringify(body) }));
   } finally {
     Object.assign(console, console_);
   }
@@ -261,8 +271,8 @@ async function send(handler: Handler, method: string, path: string, body?: unkno
   return { status: r.status, json, text };
 }
 /** An MCP tools/call, JSON-RPC over POST /mcp; the tool's first text block and structured content. */
-async function call(handler: Handler, name: string, args: Record<string, unknown>) {
-  const r = await send(handler, "POST", "/mcp", { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } });
+async function call(handler: Handler, name: string, args: Record<string, unknown>, key = KEY) {
+  const r = await send(handler, "POST", "/mcp", { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }, key);
   return { ...r, toolText: String(r.json?.result?.content?.[0]?.text ?? ""), structured: r.json?.result?.structuredContent ?? null, isError: r.json?.result?.isError === true };
 }
 
@@ -271,13 +281,15 @@ async function call(handler: Handler, name: string, args: Record<string, unknown
 const BEFORE = "the previous text";
 /**
  * A thought as an older write left it: text, its fingerprint, a vector under a
- * label of its own, and two chunk rows of that vector — the state an edit
- * must move whole. Distinct text per row: the fingerprint index is unique.
+ * label of its own, two chunk rows of that vector, and an origin in its
+ * metadata (`source: "planted"`, so an edit's audit arm compares a value and
+ * not NULL with NULL) — the state an edit must move whole. Distinct text per
+ * row: the fingerprint index is unique.
  */
 async function plant(tag: string): Promise<string> {
   const text = `${BEFORE} (${tag})`;
   const [{ id }] = await sql`INSERT INTO thoughts (content, content_fingerprint, embedding, embedding_model, metadata)
-    VALUES (${text}, content_fingerprint_of(${text}), ${vec(unit(BEFORE))}::vector, 'model-before', '{}'::jsonb) RETURNING id`;
+    VALUES (${text}, content_fingerprint_of(${text}), ${vec(unit(BEFORE))}::vector, 'model-before', '{"source": "planted"}'::jsonb) RETURNING id`;
   await plantWindows(id);
   return id as string;
 }
@@ -353,10 +365,10 @@ async function auditRow(id: string, action: "capture" | "update"): Promise<Audit
  * and only a copy of the origin, the one case the rule allows, passes. Pass 3 had dropped a source arm that compared
  * the column with constants and with itself; this one compares it with the rule.
  */
-function judgeActor(label: string, a: Audit | undefined, via: string) {
+function judgeActor(label: string, a: Audit | undefined, via: string, name = "MCP_ACCESS_KEY") {
   assert(a !== undefined, `${label}: 008 has a row for the write`);
   if (a === undefined) return; // one missing row is one failure, not three
-  assert(a.actor_name === "MCP_ACCESS_KEY", `${label}: 008's row names the key (SMD-1541) — change 69 passed no actor, so the row named nobody (got ${a.actor_name})`);
+  assert(a.actor_name === name, `${label}: 008's row names the key, ${name} (SMD-1541) — change 69 passed no actor, so the row named nobody (got ${a.actor_name})`);
   assert(a.actor_context?.via === via, `${label}: …actor_context names the door, via ${via} (got ${JSON.stringify(a.actor_context)})`);
   assert(a.source === a.origin, `${label}: …and its source is the thought's own origin, ${a.origin} — no actor names a source (got ${a.source})`);
 }
@@ -396,6 +408,11 @@ try {
   const other = await plant("update-thought-mcp twin");
   const dup = await call(h, "update_thought", { id: other, content: text });
   assert(dup.isError && /^DUPLICATE_CONTENT:/.test(dup.toolText), "an edit into text another thought holds is refused as DUPLICATE_CONTENT");
+
+  // Under the NAMED key: the row names it — `principal.name`, not a constant that spells the legacy key's name.
+  const named = await call(h, "update_thought", { id, metadata_patch: { named: true } }, NAMED_KEY);
+  assert(named.status === 200 && !named.isError, `a named write key (MCP_ACCESS_KEYS) edits (${named.toolText.slice(0, 60)})`);
+  judgeActor("update-thought-mcp edit under a named key", await auditRow(id, "update"), "update-thought-mcp", NAMED);
 }
 
 // ── integrations/enhanced-mcp ────────────────────────────────────────────────
@@ -434,6 +451,9 @@ try {
     assert(!again.isError && String(again.structured?.thought_id) === cid && again.structured?.action !== "inserted" && kept.sensitivity_tier === "personal",
       `a re-capture answers the same id, not as inserted, and leaves a hand-set tier (${again.structured?.action} ${kept.sensitivity_tier})`);
   }
+  // One key, compared in place: a named key is refused here, and the name this server records is its constant's (SMD-1798 moves it onto the module).
+  const named = await call(h, "brain_capture_thought", { content: "a capture under a named key, refused by enhanced-mcp" }, NAMED_KEY);
+  assert(named.status === 401, `a named key (MCP_ACCESS_KEYS) is 401 here — this server knows its one MCP_ACCESS_KEY (${named.status})`);
 }
 
 // ── integrations/agent-memory-api ────────────────────────────────────────────
@@ -458,6 +478,16 @@ try {
     const [m] = await sql`SELECT thought_id FROM agent_memories WHERE content = ${decision}`;
     assert(m?.thought_id === id, "the memory row points at the thought");
   }
+  // Under the NAMED key: the row names it — `principal.name`, not a constant that spells the legacy key's name.
+  const decision2 = "We decided the named key writes back too, and the audit row says so.";
+  const named = await send(h, "POST", "/writeback", {
+    schema_version: "openbrain.agent_memory.writeback.v1", workspace_id: "ws-test", runtime: { name: "test" },
+    memory_payload: { decisions: [decision2] }, provenance: { default_status: "user_confirmed", confidence: 0.9, requires_review: false },
+  }, NAMED_KEY);
+  assert(named.status === 200, `a named write key (MCP_ACCESS_KEYS) writes back (${named.status})`);
+  const nid = await idOf(decision2);
+  assert(nid !== null, "…and its thought");
+  if (nid) judgeActor("agent-memory-api writeback under a named key", await auditRow(nid, "capture"), "agent-memory-api", NAMED);
 }
 
 // ── integrations/open-brain-rest ─────────────────────────────────────────────
@@ -498,6 +528,11 @@ try {
   assert(meta.status === 200 && kept.at_axis === true && kept.embedding_model === MODEL && kept.fp_ok, "an edit without content leaves vector, label and fingerprint as they were");
   const gone = await send(h, "PUT", "/thought/00000000-0000-4000-8000-000000000000", { content: "nobody" });
   assert(gone.status === 404, "an unknown id is 404");
+
+  // Under the NAMED key: the row names it — `principal.name`, not a constant that spells the legacy key's name.
+  const named = await send(h, "PUT", `/thought/${id}`, { metadata: { named: true } }, NAMED_KEY);
+  assert(named.status === 200, `a named write key (MCP_ACCESS_KEYS) edits (${named.status})`);
+  judgeActor("open-brain-rest edit under a named key", await auditRow(id, "update"), "open-brain-rest", NAMED);
 }
 
 // ── integrations/rest-api ────────────────────────────────────────────────────
@@ -555,6 +590,10 @@ try {
   assert(after.fp_ok && after.content === text, "the text and its fingerprint are untouched");
   assert(after.metadata.enrichment_fills?.toString() === "embedding", "the enrichment record is merged into metadata");
   judgeActor("rest-api enrich", await auditRow(id, "update"), "rest-api");
+
+  // One key, compared in place: a named key is refused here, and the name this server records is its constant's (SMD-1798 moves it onto the module).
+  const named = await send(h, "POST", "/capture", { content: "a capture under a named key, refused by rest-api" }, NAMED_KEY);
+  assert(named.status === 401, `a named key (MCP_ACCESS_KEYS) is 401 here — this server knows its one MCP_ACCESS_KEY (${named.status})`);
 }
 
 // ── recipes/repo-learning-coach ──────────────────────────────────────────────
