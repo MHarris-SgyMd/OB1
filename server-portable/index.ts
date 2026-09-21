@@ -71,6 +71,8 @@ type Env = {
   OB1_QUERY_LOG_RETENTION_DAYS?: string;
   /** Model for metadata extraction. No schema dependency — safe to change anytime. */
   OB1_METADATA_MODEL?: string;
+  /** The supersession judge's model (db/consolidate.ts), when it is not OB1_METADATA_MODEL; the server never judges, but embed.ts reads one Env (SMD-1901). */
+  OB1_JUDGE_MODEL?: string;
   /** Sampling temperature for extraction. Defaults to 0 — see metadataTemperature. */
   OB1_METADATA_TEMPERATURE?: string;
   /** "on" to let a thinking model reason; anything else disables it. Default off. */

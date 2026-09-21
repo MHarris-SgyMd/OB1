@@ -55,6 +55,8 @@ export type EmbedEnv = {
   OB1_CHUNK_OVERLAP?: string;
   OB1_CHUNK_CONTEXT?: string;
   OB1_METADATA_MODEL?: string;
+  /** The supersession judge's model, when it is not the metadata model (SMD-1901). */
+  OB1_JUDGE_MODEL?: string;
   OB1_METADATA_TEMPERATURE?: string;
   OB1_METADATA_REASONING?: string;
   OB1_LLM_TIMEOUT?: string;
@@ -282,6 +284,15 @@ export type EmbedConfig = {
   chunkContext: boolean;
   /** The chat model the blurb is generated with — the metadata model. */
   metadataModel: string;
+  /**
+   * The model the supersession judge (consolidate.ts) runs on: OB1_JUDGE_MODEL,
+   * else the metadata model. The two tasks were one knob, so the only way to
+   * judge with a stronger model was to tag every capture with it too; SMD-1873
+   * measured them apart on one 7B — extraction fine, the judge at floor
+   * confidence on every pair. The pass key carries this name (consolidateKey),
+   * so a change starts a fresh pass rather than mixing judgements (SMD-1901).
+   */
+  judgeModel: string;
   metadataTemperature: number;
   /** Extra chat-completion fields controlling reasoning; see metadataReasoning. */
   metadataReasoning: Record<string, unknown>;
@@ -309,6 +320,7 @@ export function resolveEmbedConfig(env: EmbedEnv): EmbedConfig {
   // ratio (capped where the whole vector was measured to stop holding) and a
   // size at or under the constant, and an unknown model keeps the constant.
   const chunk = resolveChunkTokens(env.OB1_CHUNK_TOKENS, model, DEFAULT_MAX_TOKENS);
+  const metadataModel = env.OB1_METADATA_MODEL || DEFAULT_METADATA_MODEL;
   return {
     ...resolveProviderEndpoints(env),
     embeddingModel: model,
@@ -341,7 +353,8 @@ export function resolveEmbedConfig(env: EmbedEnv): EmbedConfig {
       chunk.from === "window" && chunk.tokens < DEFAULT_MAX_TOKENS ? Math.floor((DEFAULT_OVERLAP_TOKENS * chunk.tokens) / DEFAULT_MAX_TOKENS) : DEFAULT_OVERLAP_TOKENS,
       "non-negative"),
     chunkContext: resolveChunkContext(env.OB1_CHUNK_CONTEXT),
-    metadataModel: env.OB1_METADATA_MODEL || DEFAULT_METADATA_MODEL,
+    metadataModel,
+    judgeModel: env.OB1_JUDGE_MODEL || metadataModel,
     // Deterministic by default; overridable for anyone who wants variety.
     metadataTemperature: numberOr(env.OB1_METADATA_TEMPERATURE, 0, "non-negative"),
     metadataReasoning: metadataReasoning(env.OB1_METADATA_REASONING),

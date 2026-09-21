@@ -984,8 +984,9 @@ else {
   const consMid = await run(SQL_ENV);
   assert(consMid.code === 0 && new RegExp(`consolidate pass\\s+${rx(CONS)}: 3 thoughts with entities — 1 succeeded, 0 failed, 0 in flight, 1 pending, 1 not yet in the pool — a consolidation pass under this key stopped before it finished; 1 proposal\\(s\\) pending review — cd db && bun consolidate\\.ts --url \\$DATABASE_URL --list`).test(consMid.out),
          `a consolidation pass stopped mid-way warns with its counts over the thoughts with entities, and the queue (${consMid.out.split("\n").find((l) => /consolidate pass/.test(l))?.trim()})`);
-  assert(/Finish it: cd db && OB1_METADATA_MODEL=other-judge bun consolidate\.ts --url \$DATABASE_URL; OB1_METADATA_MODEL=other-judge bun consolidate\.ts --url \$DATABASE_URL --status shows where it stands\./.test(consMid.out),
-         "…and the remedy runs the worker under the key's own judge model, since another shell would pool under another key");
+  assert(/Finish it: cd db && OB1_JUDGE_MODEL=other-judge bun consolidate\.ts --url \$DATABASE_URL; OB1_JUDGE_MODEL=other-judge bun consolidate\.ts --url \$DATABASE_URL --status shows where it stands\./.test(consMid.out),
+         "…and the remedy runs the worker under the key's own judge model — the judge's knob, so the extractor stays put (SMD-1901) — since another shell would pool under another key");
+  assert(!/OB1_METADATA_MODEL=other-judge/.test(consMid.out), "…and not by moving the metadata model");
   const consJson = JSON.parse((await run(SQL_ENV, "--json")).out) as { ok: boolean; checks: { name: string; status: string }[] };
   assert(consJson.ok === true && consJson.checks.some((c) => c.name === "consolidate pass" && c.status === "warn"), "--json carries it as a warning, under ok:true");
   await claims`UPDATE thought_work_claims SET status = 'failed', finished_at = now(), last_error = 'stub: not JSON' WHERE work_type = ${CONS} AND thought_id = ${ids[1]}::uuid`;
@@ -1514,6 +1515,62 @@ console.log("\n[6] Two provider endpoints are reported and gated by name (SMD-19
          "--deep: the embeddings probe passes against its endpoint");
   assert(/✗\s+metadata model\s+\S+ at http:\/\/127\.0\.0\.1:1\/v1: /.test(deep.out) && /→ Network reachability to 127\.0\.0\.1:1\./.test(deep.out),
          "…while the chat probe fails by its own name, naming the chat endpoint and its host");
+}
+
+console.log("\n[7] The supersession judge's model is reported, and probed under its own row when it is not the metadata model (SMD-1901)");
+{
+  // Configuration rows and --deep probes need no database; a stub serves both
+  // paths and logs the model each chat probe names, so "probed once" and
+  // "probed under its own row" are facts about the requests.
+  const DB_DOWN = { ...NO_DB, OB1_STORE: "sql", DATABASE_URL: "postgres://u:p@127.0.0.1:1/x", MCP_ACCESS_KEY: "x".repeat(64) };
+  const NO_KEYS = { OPENROUTER_API_KEY: undefined, OB1_LLM_API_KEY: undefined, OB1_CHAT_BASE_URL: undefined, OB1_CHAT_API_KEY: undefined };
+  const chatModels: string[] = [];
+  let refuse = "";
+  const stub = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      const body = (await req.json()) as { model: string };
+      if (new URL(req.url).pathname.endsWith("/embeddings")) return Response.json({ data: [{ embedding: new Array(EMBEDDING_DIM).fill(0) }] });
+      chatModels.push(body.model);
+      if (body.model === refuse) return new Response(`model "${body.model}" not found`, { status: 404 });
+      return Response.json({ choices: [{ message: { content: '{"ok":true}' } }] });
+    },
+  });
+  const ENV = { ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: `http://127.0.0.1:${stub.port}/v1`, OB1_METADATA_MODEL: "meta-7b" };
+
+  // Unset: the row says the judge runs on the metadata model and how to give
+  // it another; --deep probes one model, once.
+  const shared = await run({ ...ENV, OB1_JUDGE_MODEL: undefined }, "--deep");
+  assert(/✓\s+judge model\s+meta-7b — the metadata model; OB1_JUDGE_MODEL gives the judge its own\s*$/m.test(shared.out),
+         "OB1_JUDGE_MODEL unset: the judge model row names the metadata model and the knob");
+  assert(/✓\s+metadata model\s+meta-7b honours JSON mode at/.test(shared.out), "--deep: the metadata model is probed for JSON mode");
+  assert(!/judge model\s+meta-7b honours/.test(shared.out) && chatModels.length === 1 && chatModels[0] === "meta-7b",
+         `…once — one model, one probe, and no judge-model probe row (${chatModels.join(", ")})`);
+
+  // Set: its own row and its own probe; the metadata model's are unchanged.
+  chatModels.length = 0;
+  const own = await run({ ...ENV, OB1_JUDGE_MODEL: "big-judge" }, "--deep");
+  assert(/✓\s+judge model\s+big-judge \(OB1_JUDGE_MODEL\)\s*$/m.test(own.out), "OB1_JUDGE_MODEL set: the judge model row names it and the knob");
+  assert(/✓\s+metadata model\s+meta-7b\s*$/m.test(own.out), "…and the metadata model row still names the extractor's model");
+  assert(/✓\s+judge model\s+big-judge honours JSON mode at/.test(own.out) && /✓\s+metadata model\s+meta-7b honours JSON mode at/.test(own.out),
+         "--deep probes each model under its own row");
+  assert(chatModels.length === 2 && chatModels.includes("meta-7b") && chatModels.includes("big-judge"), `…two probes, one per model (${chatModels.join(", ")})`);
+
+  // A judge model the endpoint does not serve fails the judge's row, with the
+  // pass as the consequence, and the metadata model's row passes on its own.
+  refuse = "big-judge";
+  const refused = await run({ ...ENV, OB1_JUDGE_MODEL: "big-judge" }, "--deep");
+  assert(/✗\s+judge model\s+big-judge returned 404 from http:\/\/127\.0\.0\.1:\d+\/v1/.test(refused.out) && /Capture is unaffected; db\/consolidate\.ts would fail every pair it judges\./.test(refused.out),
+         "a judge model the endpoint refuses fails the judge model row, naming the pass it would break and not capture");
+  assert(/✓\s+metadata model\s+meta-7b honours JSON mode at/.test(refused.out), "…while the metadata model row passes");
+  refuse = "";
+
+  // The metadata model named again in the judge's knob is one model: one probe.
+  chatModels.length = 0;
+  const same = await run({ ...ENV, OB1_JUDGE_MODEL: "meta-7b" }, "--deep");
+  assert(/✓\s+judge model\s+meta-7b \(OB1_JUDGE_MODEL\) — the same as the metadata model\s*$/m.test(same.out), "the same model in both knobs: the row says so");
+  assert(chatModels.length === 1, `…and it is probed once (${chatModels.length})`);
+  stub.stop();
 }
 
 report();

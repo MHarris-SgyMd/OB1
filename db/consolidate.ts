@@ -192,10 +192,13 @@ if (FORCE && !ACCEPT) {
 const REVIEW_ONLY = LIST !== undefined || ACCEPT !== undefined || REJECT !== undefined || STALE_DAYS > 0;
 
 const cfg = resolveEmbedConfig(process.env);
-const JOB = consolidateKey(cfg.metadataModel);
+// The judge's model, not the extractor's: OB1_JUDGE_MODEL, else the metadata
+// model (SMD-1901). The key carries it, so a pass under another judge is
+// another pass — --status and preflight report each by name.
+const JOB = consolidateKey(cfg.judgeModel);
 
 console.log(`  job:    ${JOB}`);
-if (!REVIEW_ONLY) console.log(`  model:  ${cfg.metadataModel} via ${cfg.chat.base}, temperature ${cfg.metadataTemperature}; up to ${K} older neighbour(s) per thought at cosine >= ${MIN_SIM}, conflicts recorded at confidence >= ${MIN_CONFIDENCE}`);
+if (!REVIEW_ONLY) console.log(`  model:  ${cfg.judgeModel}${process.env.OB1_JUDGE_MODEL ? " (OB1_JUDGE_MODEL)" : " (the metadata model; OB1_JUDGE_MODEL gives the judge its own)"} via ${cfg.chat.base}, temperature ${cfg.metadataTemperature}; up to ${K} older neighbour(s) per thought at cosine >= ${MIN_SIM}, conflicts recorded at confidence >= ${MIN_CONFIDENCE}`);
 
 // One connection per worker and one spare: the heartbeat (db/lease.ts) beats
 // through the pool, and a worker parked on a lock or a long statement holds
@@ -420,7 +423,7 @@ if (STATUS_ONLY || DRY_RUN) {
     const todo = c.pending + c.unpooled + (RETRY_FAILED ? c.failed : 0);
     console.log(
       `\n  would: ${RETRY_FAILED ? `return ${c.failed} failed rows to the pool; ` : ""}` +
-        `add ${c.unpooled} thoughts to the pool; judge ${LIMIT ? Math.min(LIMIT, todo) : todo} thought(s) against up to ${K} older neighbour(s) each with ${cfg.metadataModel} ` +
+        `add ${c.unpooled} thoughts to the pool; judge ${LIMIT ? Math.min(LIMIT, todo) : todo} thought(s) against up to ${K} older neighbour(s) each with ${cfg.judgeModel} ` +
         `and ${WORKERS} worker(s), ${TTL} s leases renewed every ${HEARTBEAT} s. Nothing was written.`
     );
   }
@@ -796,7 +799,7 @@ await sql.close();
 if (configError) {
   console.error(
     `\n  The provider refused the request itself: ${configError.slice(0, 300)}\n` +
-      `  Check the chat endpoint (OB1_CHAT_BASE_URL and OB1_CHAT_API_KEY, or OB1_LLM_BASE_URL and OB1_LLM_API_KEY when those are unset) and OB1_METADATA_MODEL against the provider; a 400 about a request field\n` +
+      `  Check the chat endpoint (OB1_CHAT_BASE_URL and OB1_CHAT_API_KEY, or OB1_LLM_BASE_URL and OB1_LLM_API_KEY when those are unset) and the judge model (OB1_JUDGE_MODEL, else OB1_METADATA_MODEL) against the provider; a 400 about a request field\n` +
       `  is usually reasoning_effort or response_format not being supported by this model. Nothing was marked failed.`
   );
   await Promise.resolve();

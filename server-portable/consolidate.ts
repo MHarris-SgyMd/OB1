@@ -215,9 +215,11 @@ export function proposalVerdict(j: Judgement): "newer_supersedes_older" | "older
 }
 
 /**
- * One judge call. The model, endpoint, temperature and reasoning settings are
- * the metadata-extraction ones (`OB1_METADATA_MODEL` and friends), read through
- * embed.ts's resolver so the worker and the eval see the same values. Throws on
+ * One judge call. The model is `cfg.judgeModel` — `OB1_JUDGE_MODEL`, else the
+ * metadata model (SMD-1901) — and the endpoint, temperature and reasoning
+ * settings are the metadata-extraction ones (`OB1_METADATA_TEMPERATURE` and
+ * friends), all read through embed.ts's resolver so the worker and the eval
+ * see the same values. Throws on
  * a transport or provider error (with `status` on an HTTP one, as entities.ts
  * does, so the worker's classifier reads both alike); a malformed answer is
  * returned with `malformed: true` so the caller can count it rather than retry
@@ -229,7 +231,7 @@ export async function judgePair(older: PairSide, newer: PairSide, cfg: EmbedConf
     headers: cfg.chat.headers,
     signal,
     body: JSON.stringify({
-      model: cfg.metadataModel,
+      model: cfg.judgeModel,
       response_format: { type: "json_object" },
       temperature: cfg.metadataTemperature,
       ...cfg.metadataReasoning,

@@ -68,14 +68,14 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-One hundred and one numbered changes on top of the pin. Seven fix defects found in an
+One hundred and two numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
 data layer (Phase 2). Ten (changes 31, 53, 55, 59, 79, 82, 86, 87, 88, and 89) ship no runtime change at
 all: each is a measurement that decided against building something.
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–101 are the numbered `###` sections** further down, which is
+sections. Changes **18–102 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -16815,6 +16815,71 @@ ways.
 
 **Upstream status:** not sent — upstream has one provider constant and no
 preflight; this is the fork's own provider layer (change 16 and since).
+
+
+### 102. The supersession judge has a model of its own — `OB1_JUDGE_MODEL` splits the judge's model from the extractor's, the pass key carries it, and preflight reports and probes it by name (SMD-1901)
+
+`server-portable/consolidate.ts` sent the judge call with `cfg.metadataModel`,
+the same knob every capture's tag and topic extraction uses, so the one way to
+run the judge on a stronger model was to run every capture's extraction on it
+too. SMD-1873 measured the two tasks apart on one 7B: extraction is fine, the
+judge is not — every proposal at floor confidence, no direction on most — and
+its own last line asks for a stronger judge while extraction stays where it
+is. Nothing let you. This is the first rung of the routing ladder (SMD-1898):
+route by task, before any per-item classifier exists. It is a config table,
+not a model.
+
+`EmbedConfig` gains `judgeModel`, resolved in `resolveEmbedConfig` beside
+`metadataModel` as `OB1_JUDGE_MODEL`, else the metadata model — so a
+deployment that sets nothing sends byte for byte what it sent before, and
+pools under the key it always did. `judgePair` reads it; the endpoint,
+temperature and reasoning settings stay the extraction ones, since nothing has
+measured the judge wanting others. The entity extractor, the metadata
+extraction and the chunk blurbs keep `metadataModel`: the split is the judge's,
+and only the judge's. `consolidateKey` already carried the model into the pass
+key, so `db/consolidate.ts` keying on `judgeModel` makes a judge-model change
+a fresh pass — an earlier model's judgements are not reused as this one's —
+which is the SMD-1068 rule applied where it already held: the model label
+follows the artifact it produced. The worker's `model:` line says which knob
+named the model, its dry-run plan names it, and its provider-refusal hint
+names the judge's knob and its fallback. `evals/eval-consolidate.ts` keys its
+pass, its verdict dump and its report on `judgeModel`, and its entity answers
+on the metadata model that made them.
+
+`preflight.ts` resolved the metadata model by its own copy of the rule; it now
+reads `resolveEmbedConfig` for both, so the row, the pass remedy and the probe
+cannot name a model the worker would not use. A `judge model` row prints
+beside `metadata model` — "the metadata model; `OB1_JUDGE_MODEL` gives the
+judge its own", or the knob's value and that it is set — so a reader can match
+the `consolidate pass` row's key to the model it names. That row's remedy ran
+the unfinished pass under `OB1_METADATA_MODEL=<the key's model>`, which moved
+the extractor with it; it now sets `OB1_JUDGE_MODEL`. `--deep` probed one chat
+model for JSON mode; it now probes each distinct one under its own row, so a
+judge model the endpoint does not serve fails the `judge model` row with the
+pass as the consequence, where before it failed the first pair of the next
+`db/consolidate.ts` run. One model named in both knobs is one probe.
+
+`deploy/.env.example` documents the knob, `deploy/compose.yaml` forwards it to
+the server (check 14) and to `ollama-pull`, which pulls it when set — through
+the container's shell, `$$OB1_JUDGE_MODEL`, since compose's own interpolation
+would pull a model named "" when unset. `server-portable/README.md`, `db/README.md`,
+`SETUP.md` and `evals/README.md` name it where they name the judge. The judge
+model is not chosen here: SMD-1873 owns that measurement, and Edge0
+(SMD-1880) and a hosted model behind SMD-1903's gate are the candidates.
+
+`test-local-provider.ts` [9] holds the resolver and both diallers on one
+configuration — unset, the judge request names the metadata model under the
+metadata model's key (remove the fallback and four assertions fail); set, the
+judge request names `OB1_JUDGE_MODEL` while the entity extractor's, on the same
+configuration, names `OB1_METADATA_MODEL`; empty means unset. `test-preflight.ts`
+[7] holds the rows, the remedy under the judge's knob, two probes for two
+models and one for one, and the refused judge model failing its own row while
+the metadata row passes. `db/test-live.ts` [16] holds the worker's pass key and
+model line under each setting, and that every request of a real pass named the
+metadata model with the knob unset.
+
+**Upstream status:** not sent — upstream has no consolidation pass; the judge
+is the fork's (SMD-1294, change 54) and so is its knob.
 
 
 ## Detached from the fork network

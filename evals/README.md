@@ -2831,7 +2831,8 @@ does not find much**: a 7B judge's recall on genuine reversals in long tracker
 documents is a third; the shared-entity rule inherits extraction's blind spot on
 exactly the long decision documents where the reversals live; and the day rule
 skips the pairs a planning session produces in one afternoon (31 of the 98
-labelled pairs are same-day). The two levers are a stronger judge and 016's
+labelled pairs are same-day). The two levers are a stronger judge (`OB1_JUDGE_MODEL`, the judge's own knob
+since SMD-1901, so the extractor need not move with it) and 016's
 timeout tail, and neither is this change's mechanism; this harness is the
 instrument for both, and `--replay` re-scores a dump in seconds.
 

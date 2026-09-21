@@ -263,7 +263,9 @@ The short version:
   no schema dependency and can be changed between two captures. Set
   `OB1_METADATA_MODEL=qwen3.8:27b` for the perfect score — nothing needs
   re-embedding when you change your mind, which is exactly why it is not the
-  default. Reasoning is off by
+  default. The supersession judge (`db/consolidate.ts`) is the harder task and
+  has its own knob, `OB1_JUDGE_MODEL`, so it alone can run on the larger model
+  while every capture's tagging stays on the default. Reasoning is off by
   default: `think: false` is silently ignored on the OpenAI-compatible endpoint, so
   the server sends `reasoning_effort: "none"` — without it a thinking model
   multiplies capture latency with no warning.
