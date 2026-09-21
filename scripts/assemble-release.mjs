@@ -119,6 +119,31 @@ export function renderChangelogSection(version, date, fragments) {
   return out;
 }
 
+/**
+ * Insert rendered FORK sections after the last `### N.` change section and before
+ * the trailing policy sections (the first `## ` heading that follows it), not at
+ * the end of the file — which is past "Detached from the fork network", "Rebasing
+ * onto upstream", "Known issues" and the rest.
+ */
+export function insertForkSections(forkText, sections) {
+  const lastChange = [...forkText.matchAll(/^### \d+\. /gm)].pop();
+  if (!lastChange) throw new Error("FORK.md has no `### N.` change sections to append after");
+  const afterLast = forkText.indexOf("\n## ", lastChange.index);
+  const insertAt = afterLast >= 0 ? afterLast + 1 : forkText.length;
+  return forkText.slice(0, insertAt) + sections + "\n" + forkText.slice(insertAt);
+}
+
+/**
+ * Insert a rendered version section under `## [Unreleased]` (newest first) and add
+ * its compare link beside the Unreleased one. Throws if there is no Unreleased
+ * section to insert under.
+ */
+export function insertChangelogSection(clText, sectionText, core, compareUrl) {
+  const withSection = clText.replace(/(## \[Unreleased\]\n)([\s\S]*?)(?=\n## \[|\n\[Unreleased\]:)/, `$1\n${sectionText}`);
+  if (withSection === clText) throw new Error("CHANGELOG.md has no ## [Unreleased] section to insert under");
+  return withSection.replace(/(\[Unreleased\]:.*\n)/, `$1[${core}]: ${compareUrl}\n`);
+}
+
 /** The frozen shas for a migration range, computed from the templates on disk. */
 export function frozenShasForRange(lo, hi, readMig) {
   const shas = {};
@@ -196,19 +221,16 @@ function write(plan) {
   const date = new Date().toISOString().slice(0, 10);
   const core = plan.version.split("+")[0];
 
-  // FORK.md: append the numbered sections before the trailing policy sections.
-  // (Kept simple: appended at the end of the change sections. The release author
-  //  reviews the diff — this is not run in CI.)
-  let fork = plan.forkText.trimEnd() + "\n\n" + plan.fragments.map((f) => renderForkSection(f.number, fragmentSection(f.body, "FORK"))).join("\n") + "\n";
-  writeFileSync(join(ROOT, "FORK.md"), fork);
+  // FORK.md: the numbered sections in place (the release author reviews the diff;
+  // this is not run in CI).
+  const sections = plan.fragments.map((f) => renderForkSection(f.number, fragmentSection(f.body, "FORK"))).join("\n");
+  writeFileSync(join(ROOT, "FORK.md"), insertForkSections(plan.forkText, sections));
 
-  // CHANGELOG.md: replace the Unreleased placeholder body and insert the section.
+  // CHANGELOG.md: the version section under Unreleased, with its compare link.
   const cl = readFileSync(join(ROOT, "CHANGELOG.md"), "utf8");
   const section = renderChangelogSection(plan.version, date, plan.fragments);
-  const withSection = cl.replace(/(## \[Unreleased\]\n)([\s\S]*?)(?=\n## \[|\n\[Unreleased\]:)/, `$1\n${section}`);
   const compare = plan.releases.length ? `${REPO}/compare/v${plan.releases[plan.releases.length - 1].version.split("+")[0]}...v${core}` : `${REPO}/compare/upstream-pin-${UPSTREAM_PIN}...v${core}`;
-  const withLink = withSection.replace(/(\[Unreleased\]:.*\n)/, `$1[${core}]: ${compare}\n`);
-  writeFileSync(join(ROOT, "CHANGELOG.md"), withLink);
+  writeFileSync(join(ROOT, "CHANGELOG.md"), insertChangelogSection(cl, section, core, compare));
 
   // releases.json: append this cut.
   const entry = { version: plan.version, range: plan.range, server: gitHead(), upstream: UPSTREAM_PIN, date, tickets: plan.tickets };
@@ -246,6 +268,18 @@ function selfCheck() {
   let threw = false;
   try { frozenShasForRange(1, 1, () => null); } catch { threw = true; }
   ok(threw, "a missing migration in the range throws");
+  // The mutation helpers: FORK sections land after the last change and before the
+  // trailing policy; the changelog section lands under Unreleased with its link.
+  const forkOut = insertForkSections("### 1. a (SMD-1)\n\nbody\n\n## Trailing\n\npolicy\n", "### 2. b (SMD-2)\n\nbody2\n");
+  ok(forkOut.indexOf("### 1. a") < forkOut.indexOf("### 2. b") && forkOut.indexOf("### 2. b") < forkOut.indexOf("## Trailing"), "a fork section lands after the last change and before the trailing policy");
+  let forkThrew = false;
+  try { insertForkSections("no change sections here\n", "### 2. b\n"); } catch { forkThrew = true; }
+  ok(forkThrew, "insertForkSections throws when there is no change section to follow");
+  const clOut = insertChangelogSection("# Changelog\n\n## [Unreleased]\n\n_placeholder_\n\n[Unreleased]: u\n", "## [1.0.0] - 2026-09-30\n### Added\n- x (SMD-1)\n", "1.0.0", "COMPARE");
+  ok(clOut.indexOf("## [Unreleased]") < clOut.indexOf("## [1.0.0] - 2026-09-30") && /\[1\.0\.0\]: COMPARE/.test(clOut) && !/_placeholder_/.test(clOut), "a changelog section lands under Unreleased, with its compare link, replacing the placeholder");
+  let clThrew = false;
+  try { insertChangelogSection("# Changelog\n\nno unreleased\n", "x", "1.0.0", "u"); } catch { clThrew = true; }
+  ok(clThrew, "insertChangelogSection throws when there is no Unreleased section");
   if (bad === 0) console.log("assemble-release.mjs self-check PASS");
   return bad === 0 ? 0 : 1;
 }

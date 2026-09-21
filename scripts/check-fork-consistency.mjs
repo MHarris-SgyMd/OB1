@@ -2611,6 +2611,7 @@ function checkFrozenMigrations() {
 function frozenProblems(releases, shaOf) {
   const problems = [];
   for (const r of releases) {
+    if (!r.range) continue; // a docs/server-only release froze no migration range
     const [lo, hi] = r.range;
     for (let n = lo; n <= hi; n++) {
       const frozen = (r.frozenShas ?? {})[pad3(n)];
@@ -2631,14 +2632,25 @@ checkFrozenMigrations();
  * string a brain reports (044 at the baseline, a later set-version migration
  * after a cut) and the string preflight and the assembler use cannot drift.
  */
+/** The schema_version literal a migration upserts, or null if it writes none. */
+function schemaVersionValue(text) {
+  const m = /'schema_version'\s*\)\s*VALUES?[\s\S]*?\(\s*'schema_version'\s*,\s*'([^']+)'/.exec(text)
+    || /\(\s*'schema_version'\s*,\s*'([^']+)'\s*\)/.exec(text);
+  return m ? m[1] : null;
+}
 function checkSchemaVersion() {
+  // Self-test: the two INSERT shapes are read, a migration that writes no
+  // schema_version is not mistaken for one that does.
+  if (schemaVersionValue("INSERT INTO ob1_config (key, value) VALUES\n  ('schema_version', '1.2.3+upstream.abc')\nON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;") !== "1.2.3+upstream.abc")
+    fail(SELF_1804, "check 16d no longer reads the schema_version an INSERT writes (its own probe)");
+  if (schemaVersionValue("INSERT INTO ob1_config (key, value) VALUES ('embedding_dim', '1024');") !== null)
+    fail(SELF_1804, "check 16d reads a schema_version from a migration that writes none (its own probe)");
+
   const migDir = join(ROOT, "db", "migrations");
   const writers = [];
   for (const name of readdirSync(migDir).filter((n) => /^\d{3}_.*\.sql$/.test(n))) {
-    const text = readFileSync(join(migDir, name), "utf8");
-    const m = /'schema_version'\s*\)\s*VALUES?[\s\S]*?\(\s*'schema_version'\s*,\s*'([^']+)'/.exec(text)
-      || /\(\s*'schema_version'\s*,\s*'([^']+)'\s*\)/.exec(text);
-    if (m) writers.push({ num: Number(name.slice(0, 3)), name, value: m[1] });
+    const value = schemaVersionValue(readFileSync(join(migDir, name), "utf8"));
+    if (value !== null) writers.push({ num: Number(name.slice(0, 3)), name, value });
   }
   if (writers.length === 0) return fail("db/migrations", "no migration writes ob1_config.schema_version — migration 044 should (SMD-1804)");
   writers.sort((a, b) => a.num - b.num);

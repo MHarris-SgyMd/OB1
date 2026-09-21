@@ -127,6 +127,7 @@ export function semverCompare(a, b) {
 export function versionForMigration(n, releases = readReleases()) {
   const num = Number(n);
   for (const r of releases) {
+    if (!r.range) continue; // a docs/server-only release closed no migration range
     const [lo, hi] = r.range;
     if (num >= lo && num <= hi) return r.version;
   }
@@ -136,7 +137,7 @@ export function versionForMigration(n, releases = readReleases()) {
 /** The last released range's upper bound, or 0 when nothing is released. */
 export function highestReleasedMigration(releases = readReleases()) {
   let hi = 0;
-  for (const r of releases) if (r.range[1] > hi) hi = r.range[1];
+  for (const r of releases) if (r.range && r.range[1] > hi) hi = r.range[1];
   return hi;
 }
 
@@ -164,6 +165,9 @@ function selfCheck() {
   bad += eq(versionForMigration(45, rel), null, "45 is unreleased");
   bad += eq(versionForMigration(20, []), null, "nothing released → null");
   bad += eq(highestReleasedMigration(rel), 44, "highest released is 44");
+  const withDocsOnly = [{ version: "1.0.0", range: [1, 44] }, { version: "1.0.1", range: null }];
+  bad += eq(versionForMigration(44, withDocsOnly), "1.0.0", "a docs-only release (range null) is skipped, not crashed");
+  bad += eq(highestReleasedMigration(withDocsOnly), 44, "a docs-only release does not lower the high-water mark");
   bad += eq(migrationSha("SELECT 1;\n"), migrationSha("SELECT 1;\n"), "sha is deterministic");
   if (migrationSha("a").length !== 12) {
     console.error("FAIL sha length is not 12");

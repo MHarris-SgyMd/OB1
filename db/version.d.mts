@@ -11,11 +11,13 @@
 /** One committed release: a version, the migration range it closed, and its shas. */
 export interface Release {
   version: string;
-  range: [number, number];
+  range: [number, number] | null;
   server: string;
   upstream: string;
   date: string;
-  frozenShas: Record<string, string>;
+  tickets?: string[];
+  /** Absent for a docs/server-only cut that closed no migration range. */
+  frozenShas?: Record<string, string>;
 }
 
 /** The upstream commit the fork sits on — FORK.md's pin. */

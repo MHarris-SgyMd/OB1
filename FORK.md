@@ -71,7 +71,7 @@ migration belongs to. The value 044 writes is `0.0.0+upstream.9543c29`, the
 pre-first-release baseline: the machinery is in place, no release has been cut yet.
 
 **A release is a tag naming three things**: the migration range it closes
-(`001..043`), the server commit, and the upstream pin. The committed
+(the first cut, `001..044`), the server commit, and the upstream pin. The committed
 `releases.json` is the machine-readable mirror CI reads with no network. Migrations
 inside a released range are **frozen** — the ledger's sha check already refuses
 drift at apply time; `check-fork-consistency` adds the rule that a renumber or
