@@ -9213,7 +9213,7 @@ header calls a raw vector write "the operator's", and these are shipped
 tools; 022's chunk rows of the previous vector left under the new one — 022's
 "the three writers leave no new stale set" held for the three alone; and no
 actor set for 008's audit row (the functions record the actor the caller
-names, and these five named none until change 101 — SMD-1541). The upstream
+names, and these five named none until change 102 — SMD-1541). The upstream
 survey added a third failure
 mode (upstream #379), and the audit confirmed it twice over: `enhanced-mcp`
 and `rest-api` read `thought_id`, or digits only, from `upsert_thought`'s
@@ -10078,7 +10078,7 @@ principal.name}`, and the test reads 008's row for the auditor's report
 the two scripts, the example, the two samples) say they name none, which is
 008's own distinction for a write without a key, and the test reads the
 receiver's audit row as NULL. Change 69's five are SMD-1541 — done in change
-101. Smaller: the
+102. Smaller: the
 UPDATE rule read a `-- comment` after a comma in a SET list as defeating the
 target match while pass 1's INSERT rule stripped it (asymmetry) — both rules
 blank line and block comments now, two probes and two non-probes (52/39); a
@@ -10173,7 +10173,7 @@ own structured-capture path), so it stays; the pass-1 note above says so.
 `consolidation-bio` cannot run on the fork; with that fixed, bio joins the
 driven set) — done in change 73. SMD-1541 (change 69's five servers hold a principal and
 pass no actor to `update_thought`/`upsert_thought`; their headers claim the
-actor reaches the audit) — done in change 101. SMD-1525 (`enhanced-mcp`'s read tools address rows by
+actor reaches the audit) — done in change 102. SMD-1525 (`enhanced-mcp`'s read tools address rows by
 integer id). SMD-1480 (deployability of the shim-importing writers —
 `readwise-capture`, `consolidation-bio` and the auditor among them; their
 behaviour is exercised by `test-auth.ts` and `test-writes.ts` under Bun) —
@@ -10824,7 +10824,7 @@ in a select list, and `.contains()` with a path (containment under a key is
 other shapes a PostgREST consumer might read differently — numerics as text,
 `int8` — are left as Bun gives them; nothing driven has needed more.
 `metadata-norm`'s `metadata->>confidence` term would parse now, and its
-nested `.or()` keeps it off the shim. SMD-1541 (done in change 101) and SMD-1525 as before.
+nested `.or()` keeps it off the shim. SMD-1541 (done in change 102) and SMD-1525 as before.
 
 **Upstream status:** not applicable — the shim is this fork's (fix 13); the
 worker's `created_at.slice(0, 10)` is correct over PostgREST. **Unfiled.**
@@ -11146,7 +11146,7 @@ prerequisites, the schema step and the user-id step. The `Deno.serve` return
 object carries `finished`, `shutdown()` and `addr` and nothing else of
 Deno's `HttpServer`; no file on the shim reads even those. `rest-api` and
 `smart-ingest` keep their own single-key compare (check 8 passes it; SMD-1455
-left them). SMD-1541 (done in change 101) and SMD-1525 as before.
+left them). SMD-1541 (done in change 102) and SMD-1525 as before.
 
 **Upstream status:** not applicable — the shim, the codemod and the polyfill
 are this fork's (fix 13); upstream's copies of these files deploy to
@@ -16681,7 +16681,7 @@ properly. Suite unchanged: 38 probes, every pass-4 mutant as before.
 fork's (change 16 and the migration plan's Phase 4).
 
 
-### 101. Change 69's five servers name the key on 008's audit row — `p_actor` on `update_thought`, `actor` in `upsert_thought`'s payload, three from the principal they authenticate and two from the one key they hold — and `test-writes.ts` reads the row after every driven capture and edit (SMD-1541)
+### 102. Change 69's five servers name the key on 008's audit row — `p_actor` on `update_thought`, `actor` in `upsert_thought`'s payload, three from the principal they authenticate and two from the one key they hold — and `test-writes.ts` reads the row after every driven capture and edit (SMD-1541)
 
 `integrations/update-thought-mcp/index.ts`, `integrations/enhanced-mcp/index.ts`,
 `integrations/agent-memory-api/index.ts`, `integrations/open-brain-rest/index.ts`,
@@ -16760,17 +16760,21 @@ transaction-start time; two rows one transaction wrote — fails by name instead
 of making "latest" arbitrary; the raw update of the enhanced columns each
 server makes beside the call writes no row at all, since the trigger's diff
 covers `content`, `metadata` and the vector's presence and drops an empty
-diff, so the latest `update` row is the function's) and asserts two things:
+diff, so the latest `update` row is the function's) and asserts three things:
 `actor_name = MCP_ACCESS_KEY` (this suite's legacy single key, so the three
-principals and the two constants read the same), and `actor_context.via` is
-the server — the field no fallback supplies, so the arm that proves the actor
+principals and the two constants read the same); `actor_context.via` is the
+server — the field no fallback supplies, so the arm that proves the actor
 object arrived on every site (the write-back's row is read for `runtime =
-"test"` beside it). The row's `source` is not judged: no actor names one, so
-the column is the trigger's reading of the row's own `metadata.source`, and
-pass 2's arm on it — it read `mcp`, `dashboard`, `rest_api`, `agent_memory` on
-the captures and NULL on the planted rows' edits — could not fail for anything
-a server did (pass 3); `server-portable/test-audit.ts` holds the trigger's
-rule. A missing row is one failure, not two. The header-set guard gains SMD-1541:
+"test"` beside it); and `source` equals the thought's own `metadata.source`,
+joined from `thoughts` — what the trigger writes when no actor names one, so
+a server that starts naming a source of its own (the first draft's server name
+on an edit) fails the arm, and only a copy of the origin, the one case the
+rule allows, passes. Pass 2's arm on the column compared it with constants and,
+at one site, with itself, and could not fail for anything a server did; pass 3
+dropped it, and pass 4 put this one in its place, which compares the column
+with the rule (`mcp`, `dashboard`, `rest_api`, `agent_memory` on the captures,
+NULL on the planted rows' edits, either way the thought's own). A missing row
+is one failure, not three. The header-set guard gains SMD-1541:
 the five, listed; three text guards hold the legacy key's name at its sources
 — `integrations/_shared/auth.ts`'s `found = { name: "MCP_ACCESS_KEY", … }`,
 the copy the three principal servers import (`test-auth.ts` holds the six
@@ -16787,9 +16791,9 @@ capture's passed source was a claim the suite could not hold. The field is
 gone from every actor, and `via` — which no fallback supplies — is what every
 arm holds instead.
 
-**Verified:** `../db/with-postgres.sh bun test-writes.ts` 227/227 under podman
+**Verified:** `../db/with-postgres.sh bun test-writes.ts` 236/236 under podman
 (was 186 — `origin/main`'s suite run against the changed servers, 186/186:
-the forty-one new assertions are nine `judgeActor` sites at three each, the
+the fifty new assertions are nine `judgeActor` sites at four each, the
 tie check in each of the nine `auditRow` reads, the write-back's `runtime`
 read, the header-set entry and three spelling guards; the first draft of this
 paragraph said "was 200, twelve arms" from arithmetic, and the run said
@@ -16797,7 +16801,8 @@ otherwise — caught: run-it); the four-site mutant, run on the first draft,
 211/215 with the four failures named above; after pass 2, `via` removed from
 `rest-api`'s `PUT` actor and from `open-brain-rest`'s capture actor, 234/236
 of that pass's suite, the two `via` arms failing with `got null` and nothing
-else — a capture arm with teeth, which pass 1's had not;
+else — a capture arm with teeth, which pass 1's had not; after pass 4,
+`source: "rest-api"` added to `rest-api`'s `ACTOR` — 233/236, the three `rest-api` arms (capture, edit, enrich) failing with `got rest-api` and nothing else — the capture arm too, since the route's `rest_api` and the server's `rest-api` differ by a character;
 `bun test-auth.ts` 809/809 (the five import and
 authenticate as before); `bun scripts/check-fork-consistency.mjs` PASS on 118
 contributions (check 10 sees no new verb on `thoughts`; check 8 still passes
@@ -16828,7 +16833,8 @@ still name nobody, by 008's rule.
 one. Fixed: the section was numbered 100, and `origin/main` took 100 for
 SMD-1805 (2956edd) while the pass ran — renumbered to 101 on the branch's own
 lines only, the base having held no "change 100" (caught: cold-read against
-`origin/main`; the trap change 71 recorded). The four capture actors carried a
+`origin/main`; the trap change 71 recorded), and to 102 in pass 4, when main
+took 101 for SMD-1902 (908de49) the same way. The four capture actors carried a
 `source` the suite could not distinguish from 008's fallback — the first draft
 reported the toothless arm and left it; the field is gone instead (caught: the
 mutant run, read again). The "was 200 — twelve arms" in Verified was
@@ -16896,6 +16902,26 @@ there); merging `origin/main` for the heading order (the merge step's). What
 this pass fixed were a vacuous arm and three record items in the earlier
 passes' own additions, and its remaining findings were passes 1 and 2's
 declines re-raised: the stop signal.
+
+**Review pass 4, triaged (run at the operator's call after the signal).** The
+same two reviewers. Fixed: `origin/main` took 101 for SMD-1902 (908de49)
+during the pass — 102 now, on the branch's own lines (caught: run-it, the
+fetch). `rest-api`'s header and README carved out the two raw deletes and not
+the duplicate-resolve merge's raw `metadata` write on the survivor, which
+leaves an `update` row naming nobody just the same (caught: cold-read) — named
+beside them; this section's Not-done-here already had it. `open-brain-rest`'s
+README named `POST /capture` and `PUT` and not `POST /ingest`, which captures
+through the same function with the same actor (caught: cold-read). Nothing
+held the rule "no actor names a source" — pass 3 had dropped the arm that
+could not fail, and with it the only place a server that started naming one
+would have been caught (caught: cold-read) — `judgeActor` compares the row's
+`source` with the thought's own `metadata.source`, joined; the mutant above
+shows it biting. Declined, fourth time: the two in-place-compare servers onto
+`_shared/auth.ts` or a constant exported from it (SMD-1798, which now carries
+the trap in a comment), and one envelope builder across writer families
+(SMD-1730's shape). The pass's own fixes were a renumber main forced, two
+carve-out sentences and a guard for a rule the previous pass had left
+unheld; the signal stands.
 
 **Upstream status:** not applicable — the functions and the audit trigger are
 this fork's; upstream's servers write the row directly and have no actor to

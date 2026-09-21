@@ -42,7 +42,7 @@
  * with the previous profile found through three path equalities and the
  * profile's own row kept out of its sources.
  *
- * SMD-1541 (FORK.md change 101) reads 008's row after every driven capture and
+ * SMD-1541 (FORK.md change 102) reads 008's row after every driven capture and
  * edit through change 69's five servers. Their headers said "the actor reaches
  * the audit (008)" and none passed one — the functions set `ob1.actor` only
  * from `p_actor` / `p_payload.actor` — so `thought_audit.actor_name` was NULL
@@ -57,9 +57,11 @@
  * the mutant run — and every actor names the server as `via`, which the
  * trigger keeps in `actor_context`: the arm that holds the actor object's
  * arrival on every site; the write-back's runtime lands beside it. The
- * `source` column is not judged here: it is the trigger's rule, not the
- * servers', so an arm on it could not fail for anything a server did;
- * server-portable/test-audit.ts holds the trigger.
+ * `source` column is judged against the thought's own `metadata.source`, which
+ * is what the trigger writes when no actor names one: the arm fails for a
+ * server that starts naming a source of its own (the first draft's server name
+ * on an edit) and tolerates only a copy of the origin, the one case the rule
+ * allows; server-portable/test-audit.ts holds the trigger itself.
  *
  * The files are imported under the stand-in extensions/test-auth.ts uses for
  * Deno's two globals and its loader for Deno's specifiers, plus one more
@@ -327,7 +329,7 @@ function judgeCapture(label: string, r: Row, text: string) {
   assert(r.embedding_model === MODEL, `${label}: embedding_model is the model that made it (021) — the raw update after the 2-argument form left NULL (got ${r.embedding_model})`);
   assert(r.chunks === 0, `${label}: no chunk rows (the writer made none; nothing here plants any under a capture)`);
 }
-type Audit = { actor_name: string | null; actor_context: Record<string, unknown> | null };
+type Audit = { actor_name: string | null; source: string | null; origin: string | null; actor_context: Record<string, unknown> | null };
 /**
  * 008's latest row of one action for a thought: who the function was told wrote it, and from where. `created_at` is
  * `now()`, transaction-start time, so two rows one transaction wrote would tie and "latest" would be arbitrary: a tie
@@ -336,24 +338,27 @@ type Audit = { actor_name: string | null; actor_context: Record<string, unknown>
  * one today (each call is its own transaction under the shim and over PostgREST alike).
  */
 async function auditRow(id: string, action: "capture" | "update"): Promise<Audit | undefined> {
-  const rows = await sql`SELECT actor_name, actor_context, created_at::text AS at FROM thought_audit WHERE thought_id = ${id} AND action = ${action} ORDER BY created_at DESC LIMIT 2`;
+  const rows = await sql`SELECT a.actor_name, a.source, a.actor_context, a.created_at::text AS at, t.metadata->>'source' AS origin
+    FROM thought_audit a JOIN thoughts t ON t.id = a.thought_id WHERE a.thought_id = ${id} AND a.action = ${action} ORDER BY a.created_at DESC LIMIT 2`;
   assert(rows.length < 2 || rows[0].at !== rows[1].at, `008's latest ${action} row for the thought is one row, not a tie in created_at`);
   if (!rows[0]) return undefined;
-  const { actor_name, actor_context } = rows[0];
-  return { actor_name, actor_context };
+  const { actor_name, source, origin, actor_context } = rows[0];
+  return { actor_name, source, origin, actor_context };
 }
 /**
- * The audit row a write through a server holding a key must leave (SMD-1541): the key's name, and the server as `via`
- * in actor_context — the field no fallback supplies, so the arm that proves the actor arrived. The row's `source` is
- * not judged: no actor here names one, so the column is the trigger's own reading of the row's metadata.source, and an
- * arm on it could not fail for anything a server did (it read the captures' declared defaults and NULL on the planted
- * rows' edits, and would have read anything else just the same).
+ * The audit row a write through a server holding a key must leave (SMD-1541): the key's name; the server as `via` in
+ * actor_context — the field no fallback supplies, so the arm that proves the actor arrived; and a `source` equal to the
+ * thought's own metadata.source, which is what the trigger writes when no actor names one — so a server that starts
+ * naming a source of its own (the first draft's server name on an edit: a third vocabulary in the column) fails here,
+ * and only a copy of the origin, the one case the rule allows, passes. Pass 3 had dropped a source arm that compared
+ * the column with constants and with itself; this one compares it with the rule.
  */
 function judgeActor(label: string, a: Audit | undefined, via: string) {
   assert(a !== undefined, `${label}: 008 has a row for the write`);
-  if (a === undefined) return; // one missing row is one failure, not two
+  if (a === undefined) return; // one missing row is one failure, not three
   assert(a.actor_name === "MCP_ACCESS_KEY", `${label}: 008's row names the key (SMD-1541) — change 69 passed no actor, so the row named nobody (got ${a.actor_name})`);
-  assert(a.actor_context?.via === via, `${label}: …and actor_context names the door, via ${via} (got ${JSON.stringify(a.actor_context)})`);
+  assert(a.actor_context?.via === via, `${label}: …actor_context names the door, via ${via} (got ${JSON.stringify(a.actor_context)})`);
+  assert(a.source === a.origin, `${label}: …and its source is the thought's own origin, ${a.origin} — no actor names a source (got ${a.source})`);
 }
 
 // Everything below runs inside one try so the sidecars are dropped however it ends.
