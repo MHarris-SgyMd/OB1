@@ -246,8 +246,8 @@ else {
   const after = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
   assert(after.code === 0, "a migrated database passes");
   assert(/thoughts table reachable/.test(after.out), "…and confirms the table is reachable");
-  assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, both 045's/.test(after.out), "…and that atomic capture is available, with the shipped bodies (a warn would also say \"present\")");
-  assert(/✓  audit events\s+045's event shape present — the columns, the trigger that derives the kind from the key, the one lawful amendment — and every key classified/.test(after.out), "…and that 045's event shape is present, with no key waiting on a kind (SMD-1730)");
+  assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, both 046's/.test(after.out), "…and that atomic capture is available, with the shipped bodies (a warn would also say \"present\")");
+  assert(/✓  audit events\s+046's event shape present — the columns, the trigger that derives the kind from the key, the one lawful amendment — and every key classified/.test(after.out), "…and that 046's event shape is present, with no key waiting on a kind (SMD-1730)");
   assert(/no schema_migrations table/.test(after.out), "…and warns the schema was applied outside the runner");
   assert(/resolve_agent present/.test(after.out), "…and that the agent registry is available");
 
@@ -1027,7 +1027,7 @@ else {
    */
   const noVec = await run(SQL_ENV);
   assert(/vector models\s+no vectors stored yet/.test(noVec.out) && /re-embed pass\s+none unfinished/.test(noVec.out), "with no vectors stored the rows have nothing to say, and say so");
-  assert(new RegExp(`edit signature\\s+update_thought\\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text,jsonb,jsonb\\): the form the servers and reembed\\.ts call since migration 045 \\(${rx(UPDATE_THOUGHT_SIGNATURE)}\\), alone`).test(noVec.out),
+  assert(new RegExp(`edit signature\\s+update_thought\\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text,jsonb,jsonb\\): the form the servers and reembed\\.ts call since migration 046 \\(${rx(UPDATE_THOUGHT_SIGNATURE)}\\), alone`).test(noVec.out),
          "the ten-argument update_thought is the only form");
   const VEC = `('[' || array_to_string(array_fill(0.5::real, ARRAY[${EMBEDDING_DIM}]), ',') || ']')::vector`;
   await claims.unsafe(`UPDATE thoughts SET embedding = ${VEC}, embedding_model = '${EMBEDDING_MODEL}' WHERE id IN ('${ids[0]}', '${ids[1]}')`);
@@ -1101,12 +1101,12 @@ else {
   assert(noColumn.code === 1 && /vector models\s+thoughts\.embedding_model does not exist/.test(noColumn.out) && /021_embedding_model_per_row\.sql/.test(noColumn.out),
          "the column missing under this server does not start, naming 021");
   // 021 puts the column back; the pre-022 and pre-025 capture-body warnings
-  // are asserted further down, after 018 and then 021 alone. 045 follows here,
-  // since 021 re-applied leaves its 8-argument update_thought beside 045's
-  // (asserted further down too) and 045 is the file whose DROP chain reaches
+  // are asserted further down, after 018 and then 021 alone. 046 follows here,
+  // since 021 re-applied leaves its 8-argument update_thought beside 046's
+  // (asserted further down too) and 046 is the file whose DROP chain reaches
   // it — 032's reaches only 8 and 7 and would leave its own 9-argument form
   // beside the shipped one (SMD-1730).
-  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("021") || f.startsWith("045") });
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("021") || f.startsWith("046") });
   const restored = await run(SQL_ENV);
   assert(restored.code === 0 && new RegExp(`vector models\\s+no vector is known to be at ${rx(EMBEDDING_MODEL)}: 4 unlabelled \\(model unknown\\)`).test(restored.out) && /the pass takes every row nothing vouches for/.test(restored.out),
          `021 re-applied: the column is back, its labels gone — and a corpus with no vector known to be at its model is a warning with the pass as the remedy, not an ok (exit ${restored.code}: ${restored.out.split("\n").filter((l) => /vector models|fail/.test(l)).join(" | ").trim()})`);
@@ -1121,8 +1121,8 @@ else {
   // 018 re-applied by hand puts the 7-argument form back BESIDE 032's.
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("018") });
   const twoEdits = await run(SQL_ENV);
-  assert(twoEdits.code === 1 && /edit signature\s+beside the form the servers call there is an earlier one: update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb\) — an earlier migration re-applied by hand over 045/.test(twoEdits.out),
-         "018 re-applied over 045 leaves two update_thought forms, and the start is refused naming the extra one");
+  assert(twoEdits.code === 1 && /edit signature\s+beside the form the servers call there is an earlier one: update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb\) — an earlier migration re-applied by hand over 046/.test(twoEdits.out),
+         "018 re-applied over 046 leaves two update_thought forms, and the start is refused naming the extra one");
   assert(/DROP FUNCTION update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb\);/.test(twoEdits.out), "…with the exact DROP as the remedy");
   // 021 re-applied drops the 7-argument form — and puts its own 8-argument
   // one beside 032's, the state SMD-1323's verify names: every caller sending
@@ -1130,21 +1130,21 @@ else {
   // "function is not unique".
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("021") });
   const eightBeside = await run(SQL_ENV);
-  assert(eightBeside.code === 1 && /edit signature\s+beside the form the servers call there is an earlier one: update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text\) — an earlier migration re-applied by hand over 045 — so every call that sends fewer than ten arguments/.test(eightBeside.out),
-         "021 re-applied over 045 leaves the 8-argument form beside the 10-argument one, and the start is refused naming it");
+  assert(eightBeside.code === 1 && /edit signature\s+beside the form the servers call there is an earlier one: update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text\) — an earlier migration re-applied by hand over 046 — so every call that sends fewer than ten arguments/.test(eightBeside.out),
+         "021 re-applied over 046 leaves the 8-argument form beside the 10-argument one, and the start is refused naming it");
   assert(/DROP FUNCTION update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text\);/.test(eightBeside.out) && !/timestamp with time zone,jsonb\);/.test(eightBeside.out),
          "…with the 8-argument DROP as the remedy, and only that one");
   // 032 re-applied drops 021's form — and puts its own 9-argument one beside
-  // 045's 10-argument form (032's DROP reaches 8 and 7): the state a hand
+  // 046's 10-argument form (032's DROP reaches 8 and 7): the state a hand
   // re-apply of 032 or 033 leaves since SMD-1730, refused with the one DROP.
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("032") });
   const nineBeside = await run(SQL_ENV);
-  assert(nineBeside.code === 1 && /edit signature\s+beside the form the servers call there is an earlier one: update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text,jsonb\) — an earlier migration re-applied by hand over 045 — so every call that sends fewer than ten arguments/.test(nineBeside.out) && /DROP FUNCTION update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text,jsonb\);/.test(nineBeside.out),
-         "032 re-applied over 045 leaves its 9-argument form beside the 10-argument one, and the start is refused naming it with its DROP");
+  assert(nineBeside.code === 1 && /edit signature\s+beside the form the servers call there is an earlier one: update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text,jsonb\) — an earlier migration re-applied by hand over 046 — so every call that sends fewer than ten arguments/.test(nineBeside.out) && /DROP FUNCTION update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text,jsonb\);/.test(nineBeside.out),
+         "032 re-applied over 046 leaves its 9-argument form beside the 10-argument one, and the start is refused naming it with its DROP");
   await claims.unsafe("DROP FUNCTION update_thought(uuid, text, jsonb, vector, jsonb, timestamptz, jsonb, text, jsonb)");
   const reapplied021 = await run(SQL_ENV);
-  assert(reapplied021.code === 0 && /edit signature\s+update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text,jsonb,jsonb\): the form the servers and reembed\.ts call since migration 045/.test(reapplied021.out),
-         "…which the DROP performs (045 re-applied would too, its chain reaching 9, 8 and 7)");
+  assert(reapplied021.code === 0 && /edit signature\s+update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text,jsonb,jsonb\): the form the servers and reembed\.ts call since migration 046/.test(reapplied021.out),
+         "…which the DROP performs (046 re-applied would too, its chain reaching 9, 8 and 7)");
   // 036 re-applied by hand over 042 puts the two-argument delete_thought back
   // BESIDE 042's three-argument one: every two-argument caller is "not unique".
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("036") });
@@ -1178,7 +1178,7 @@ else {
   // …and 021's CREATE OR REPLACE put its 3-argument upsert_thought back over
   // 035's: a chunkless re-capture would leave the previous vector's windows
   // again. A warning naming 035 — captures work, search is over-inclusive.
-  assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, but the 3-argument body is from before migration 022 \(004, 005, 008 or 021 re-applied by hand without 045 after them\)/.test(reapplied021.out) && /Apply db\/migrations\/045_thought_audit_event_shape\.sql — the last definer; 022's or 025's file alone would leave what the later ones added out\./.test(reapplied021.out) && !/either/.test(reapplied021.out),
+  assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, but the 3-argument body is from before migration 022 \(004, 005, 008 or 021 re-applied by hand without 046 after them\)/.test(reapplied021.out) && /Apply db\/migrations\/046_thought_audit_event_shape\.sql — the last definer; 022's or 025's file alone would leave what the later ones added out\./.test(reapplied021.out) && !/either/.test(reapplied021.out),
          "021 re-applied over 035 leaves 021's 3-argument upsert_thought, and the start warns naming 035 — the last definer, not 022, 025 or 033 — rather than refusing");
   // 022 re-applied by hand over 035: the sentinel is back, the provenance
   // envelope is not — derived_from and supersedes would be dropped silently
@@ -1186,7 +1186,7 @@ else {
   // sentinel.
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("022") });
   const reapplied022 = await run(SQL_ENV);
-  assert(reapplied022.code === 0 && /atomic capture\s+the 2- and 3-argument upsert_thought present, and the 3-argument body carries 022's rule, but it is from before migration 025 \(022 re-applied by hand puts it back\)/.test(reapplied022.out) && /Apply db\/migrations\/045_thought_audit_event_shape\.sql\./.test(reapplied022.out),
+  assert(reapplied022.code === 0 && /atomic capture\s+the 2- and 3-argument upsert_thought present, and the 3-argument body carries 022's rule, but it is from before migration 025 \(022 re-applied by hand puts it back\)/.test(reapplied022.out) && /Apply db\/migrations\/046_thought_audit_event_shape\.sql\./.test(reapplied022.out),
          "022 re-applied over 035 keeps 022's sentinel and loses 025's envelope, and the start warns naming 035");
   // 025 re-applied by hand over 035 (SMD-1043): 022's sentinel and 025's
   // envelope are back, 033's lock is not — a capture racing an edit of the
@@ -1195,134 +1195,134 @@ else {
   // it here and below, so no later "healthy" run carries the provenance warn.
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("025") || f.startsWith("026") });
   const reapplied025 = await run(SQL_ENV);
-  assert(reapplied025.code === 0 && /atomic capture\s+the 2- and 3-argument upsert_thought present, and the 3-argument body carries 022's rule and 025's envelope, but it is from before migration 033 \(migrations 033, 035 and 045 are not yet applied, or 025 was re-applied by hand\): it takes no fingerprint lock/.test(reapplied025.out) && /Apply db\/migrations\/045_thought_audit_event_shape\.sql\./.test(reapplied025.out) && !/either/.test(reapplied025.out),
-         "025 re-applied over 045 keeps 022's rule and 025's envelope and loses the lock, and the start warns naming 045 — the cause hedged, since this schema has no ledger to say whether 035 was ever applied — with the 2-argument body, still 045's, not mentioned");
-  assert(/!  audit events\s+the columns are there but the audit trigger's body is from before 045 \(025 or an earlier file re-applied by hand\): every write records an unknown kind, no door and no event/.test(reapplied025.out) && /Apply db\/migrations\/045_thought_audit_event_shape\.sql\./.test(reapplied025.out),
-         "…and 025 re-applied put 025's audit trigger back over 045's: the event check warns — writes go through, the kind and the event are not recorded — naming 045 (SMD-1730)");
-  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("045") });
+  assert(reapplied025.code === 0 && /atomic capture\s+the 2- and 3-argument upsert_thought present, and the 3-argument body carries 022's rule and 025's envelope, but it is from before migration 033 \(migrations 033, 035 and 046 are not yet applied, or 025 was re-applied by hand\): it takes no fingerprint lock/.test(reapplied025.out) && /Apply db\/migrations\/046_thought_audit_event_shape\.sql\./.test(reapplied025.out) && !/either/.test(reapplied025.out),
+         "025 re-applied over 046 keeps 022's rule and 025's envelope and loses the lock, and the start warns naming 046 — the cause hedged, since this schema has no ledger to say whether 035 was ever applied — with the 2-argument body, still 046's, not mentioned");
+  assert(/!  audit events\s+the columns are there but the audit trigger's body is from before 046 \(025 or an earlier file re-applied by hand\): every write records an unknown kind, no door and no event/.test(reapplied025.out) && /Apply db\/migrations\/046_thought_audit_event_shape\.sql\./.test(reapplied025.out),
+         "…and 025 re-applied put 025's audit trigger back over 046's: the event check warns — writes go through, the kind and the event are not recorded — naming 046 (SMD-1730)");
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("046") });
   const shippedPair = await run(SQL_ENV);
-  assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, both 045's — the 3-argument body carries 022's rule, so a re-capture's windows stay only while the label vouches for them, 025's provenance envelope, the fingerprint lock, so a capture and an edit of one text are serialised, and writes provenance on a first capture only, so no capture can close a supersession loop, and both set the write event beside the actor \(045\); the 2-argument body refuses a non-object payload \(005\) and takes the lock\s*$/m.test(shippedPair.out),
-         "…and 045 re-applied is the shipped pair again, said as such");
-  assert(/✓  audit events\s+045's event shape present/.test(shippedPair.out), "…and the event shape is whole again: 045 re-applied put the trigger's body back");
+  assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, both 046's — the 3-argument body carries 022's rule, so a re-capture's windows stay only while the label vouches for them, 025's provenance envelope, the fingerprint lock, so a capture and an edit of one text are serialised, and writes provenance on a first capture only, so no capture can close a supersession loop, and both set the write event beside the actor \(046\); the 2-argument body refuses a non-object payload \(005\) and takes the lock\s*$/m.test(shippedPair.out),
+         "…and 046 re-applied is the shipped pair again, said as such");
+  assert(/✓  audit events\s+046's event shape present/.test(shippedPair.out), "…and the event shape is whole again: 046 re-applied put the trigger's body back");
   // 033 re-applied by hand over 035 (SMD-1453): 033's lock and sentinel are
   // back, and with them 025's fill of a NULL pointer on a re-capture and the
   // supersession lock on every capture naming one — 035's sentinel is what
   // says so. A warning naming 035; the 2-argument body, byte-identical
-  // between 033 and 035 and so from before 045 — it sets no write event — is
-  // said beside it (sixth review pass; before 045 it was not mentioned).
+  // between 033 and 035 and so from before 046 — it sets no write event — is
+  // said beside it (sixth review pass; before 046 it was not mentioned).
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("033") });
   const reapplied033 = await run(SQL_ENV);
-  // 033 defines update_thought too, so its 9-argument form lands beside 045's
+  // 033 defines update_thought too, so its 9-argument form lands beside 046's
   // 10-argument one and the start is refused for that (exit 1, the edit
   // signature naming it); the capture-body verdict is read from the same run.
-  assert(reapplied033.code === 1 && /edit signature\s+beside the form the servers call there is an earlier one: update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text,jsonb\) — an earlier migration re-applied by hand over 045/.test(reapplied033.out),
-         "033 re-applied over 045 also puts its 9-argument update_thought beside the shipped one, and the start is refused naming it (SMD-1730)");
-  assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, and the 3-argument body carries 022's rule, 025's envelope and the fingerprint lock, but it is from before migration 035 \(migrations 035 and 045 are not yet applied, or 033 was re-applied by hand\): a re-capture naming supersedes fills a NULL pointer without walking the chain, so a dedup can write a two-row loop, and every capture naming supersedes holds the supersession lock through its insert.*; and the 2-argument body is not 045's either — it is from before migration 045 \(migration 045 is not yet applied, or 033 or 035 was re-applied by hand\): it sets no write event beside the actor/.test(reapplied033.out) && /Apply db\/migrations\/045_thought_audit_event_shape\.sql\./.test(reapplied033.out),
+  assert(reapplied033.code === 1 && /edit signature\s+beside the form the servers call there is an earlier one: update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text,jsonb\) — an earlier migration re-applied by hand over 046/.test(reapplied033.out),
+         "033 re-applied over 046 also puts its 9-argument update_thought beside the shipped one, and the start is refused naming it (SMD-1730)");
+  assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, and the 3-argument body carries 022's rule, 025's envelope and the fingerprint lock, but it is from before migration 035 \(migrations 035 and 046 are not yet applied, or 033 was re-applied by hand\): a re-capture naming supersedes fills a NULL pointer without walking the chain, so a dedup can write a two-row loop, and every capture naming supersedes holds the supersession lock through its insert.*; and the 2-argument body is not 046's either — it is from before migration 046 \(migration 046 is not yet applied, or 033 or 035 was re-applied by hand\): it sets no write event beside the actor/.test(reapplied033.out) && /Apply db\/migrations\/046_thought_audit_event_shape\.sql\./.test(reapplied033.out),
          "033 re-applied over 035 puts the fill and the supersession lock back, and the start warns naming 035 — the cause hedged with no ledger — with the 2-argument body, 035's and so without the write event, said beside it");
   // The query-log check reads the same verdict (SMD-1719): a body from before
   // 035 answers no `existed`, so no cite row is ever logged on this brain, and
   // the line says so rather than reporting the log as complete.
   assert(/query log\s+present; .*Cite rows \(a write naming a returned id as its source, SMD-1719\) need migration 035's upsert_thought and will NOT be logged on this brain/.test(reapplied033.out) && /!  query log/.test(reapplied033.out),
          "…and the query-log line warns that cite rows will not be logged under the pre-035 body");
-  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("045") });
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("046") });
   const shippedAgain = await run(SQL_ENV);
-  assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, both 045's/.test(shippedAgain.out), "…and 045 after it is the shipped pair again");
+  assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, both 046's/.test(shippedAgain.out), "…and 046 after it is the shipped pair again");
   assert(/✓  query log\s+present; /.test(shippedAgain.out) && !/will NOT be logged/.test(shippedAgain.out), "…and the query-log line is ok again, without the cite warning");
-  // 035 re-applied by hand over 045 (sixth review pass): both capture bodies
+  // 035 re-applied by hand over 046 (sixth review pass): both capture bodies
   // are 035's — locked, no fill, and no write event set beside the actor. The
   // 3-argument body's state is said, and the 2-argument body beside it, both
-  // naming 045; every event a capture declares would otherwise be dropped
+  // naming 046; every event a capture declares would otherwise be dropped
   // with the pair reported as shipped. update_thought is not 035's to define,
   // so the start is not refused for a 9-argument form.
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("035") });
   const reapplied035 = await run(SQL_ENV);
-  assert(reapplied035.code === 0 && /atomic capture\s+the 2- and 3-argument upsert_thought present, and the 3-argument body carries 022's rule, 025's envelope, the fingerprint lock and writes provenance on a first capture only, but it is from before migration 045 \(migration 045 is not yet applied, or 035 was re-applied by hand\): the write event a capture declares — stance, cites, the valid window, trust — is dropped silently, so no audit row carries it.*; and the 2-argument body is not 045's either — it is from before migration 045 \(migration 045 is not yet applied, or 033 or 035 was re-applied by hand\): it sets no write event beside the actor/.test(reapplied035.out) && /Apply db\/migrations\/045_thought_audit_event_shape\.sql\./.test(reapplied035.out),
-         "035 re-applied over 045 is a warning naming 045 for both bodies: neither sets the write event, and a capture's declaration would be dropped silently (SMD-1730, sixth review pass)");
+  assert(reapplied035.code === 0 && /atomic capture\s+the 2- and 3-argument upsert_thought present, and the 3-argument body carries 022's rule, 025's envelope, the fingerprint lock and writes provenance on a first capture only, but it is from before migration 046 \(migration 046 is not yet applied, or 035 was re-applied by hand\): the write event a capture declares — stance, cites, the valid window, trust — is dropped silently, so no audit row carries it.*; and the 2-argument body is not 046's either — it is from before migration 046 \(migration 046 is not yet applied, or 033 or 035 was re-applied by hand\): it sets no write event beside the actor/.test(reapplied035.out) && /Apply db\/migrations\/046_thought_audit_event_shape\.sql\./.test(reapplied035.out),
+         "035 re-applied over 046 is a warning naming 046 for both bodies: neither sets the write event, and a capture's declaration would be dropped silently (SMD-1730, sixth review pass)");
   assert(/✓  edit signature/.test(reapplied035.out), "…and the edit signature is untouched by it — 035 defines no update_thought");
-  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("045") });
-  assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, both 045's/.test((await run(SQL_ENV)).out), "…and 045 after it is the shipped pair again");
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("046") });
+  assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, both 046's/.test((await run(SQL_ENV)).out), "…and 046 after it is the shipped pair again");
   // The 2-argument form from before 005 — what the getting-started guide, the
   // fingerprint recipe's Step 2 and upstream's enhanced-thoughts schema all
   // carry — over 035's (SMD-1250): 003 re-applied is that statement. A warning
   // naming 035, the last definer of the 2-argument form as well.
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("003") });
   const reapplied003 = await run(SQL_ENV);
-  assert(reapplied003.code === 0 && /atomic capture\s+the 2- and 3-argument upsert_thought present and the 3-argument body is 045's, but the 2-argument body is not 005's — it does not refuse a non-object payload/.test(reapplied003.out) && /Apply db\/migrations\/045_thought_audit_event_shape\.sql — the last definer of the 2-argument form as well\./.test(reapplied003.out),
-         "an earlier 2-argument body over 045's is a warning naming 045, the last definer of that form too");
+  assert(reapplied003.code === 0 && /atomic capture\s+the 2- and 3-argument upsert_thought present and the 3-argument body is 046's, but the 2-argument body is not 005's — it does not refuse a non-object payload/.test(reapplied003.out) && /Apply db\/migrations\/046_thought_audit_event_shape\.sql — the last definer of the 2-argument form as well\./.test(reapplied003.out),
+         "an earlier 2-argument body over 046's is a warning naming 046, the last definer of that form too");
   // Both bodies stale at once — 003's 2-argument and 021's 3-argument: one
   // warning says both, and the remedy is 035, once. 032 follows 021 here so
   // `edit signature` stays ok and only `atomic capture` speaks.
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("021") || f.startsWith("032") });
   const bothStale = await run(SQL_ENV);
-  assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, but the 3-argument body is from before migration 022 .*; and it takes no fingerprint lock; and the 2-argument body is not 005's either — it does not refuse a non-object payload/.test(bothStale.out) && /Apply db\/migrations\/045_thought_audit_event_shape\.sql — the last definer; 022's or 025's file alone/.test(bothStale.out) && (bothStale.out.match(/045_thought_audit_event_shape/g) ?? []).length === 1,
-         "both bodies stale is one warning naming both, with 045 as the one remedy");
+  assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, but the 3-argument body is from before migration 022 .*; and it takes no fingerprint lock; and the 2-argument body is not 005's either — it does not refuse a non-object payload/.test(bothStale.out) && /Apply db\/migrations\/046_thought_audit_event_shape\.sql — the last definer; 022's or 025's file alone/.test(bothStale.out) && (bothStale.out.match(/046_thought_audit_event_shape/g) ?? []).length === 1,
+         "both bodies stale is one warning naming both, with 046 as the one remedy");
   // 005 re-applied alone: a pre-022 3-argument body, and the 2-argument body
   // 005's — the guard back, no lock. The warning says which of the two stale
   // states the 2-argument body is in.
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("005") });
   const fiveAlone = await run(SQL_ENV);
-  assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, but the 3-argument body is from before migration 022 .*; and the 2-argument body is not 045's either — it is from before migration 033 \(migrations 033, 035 and 045 are not yet applied, or 005 was re-applied by hand\): it takes no fingerprint lock/.test(fiveAlone.out) && /Apply db\/migrations\/045_thought_audit_event_shape\.sql — the last definer/.test(fiveAlone.out),
+  assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, but the 3-argument body is from before migration 022 .*; and the 2-argument body is not 046's either — it is from before migration 033 \(migrations 033, 035 and 046 are not yet applied, or 005 was re-applied by hand\): it takes no fingerprint lock/.test(fiveAlone.out) && /Apply db\/migrations\/046_thought_audit_event_shape\.sql — the last definer/.test(fiveAlone.out),
          "…and 005 re-applied alone leaves a pre-022 3-argument body and a 2-argument body with the guard and no lock, said as such");
-  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("045") });
-  assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, both 045's/.test((await run(SQL_ENV)).out), "…and 045 after it is the shipped pair again");
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("046") });
+  assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, both 046's/.test((await run(SQL_ENV)).out), "…and 046 after it is the shipped pair again");
   // The 3-argument form gone from a 035 database: the remedy is the last
   // definer, not 004, 022 or 025 — whose bodies would drop 005's guard, 008's
   // actor, 021's label, 022's rule, 025's envelope, 033's lock and 035's rule, or the
   // last of those.
   await claims.unsafe("DROP FUNCTION upsert_thought(text, jsonb, vector)");
   const noThree = await run(SQL_ENV);
-  assert(noThree.code === 1 && /atomic capture\s+2 upsert_thought overload\(s\) — the 3-argument form, the atomic capture, is missing/.test(noThree.out) && /Apply db\/migrations\/045_thought_audit_event_shape\.sql — the last definer of both forms/.test(noThree.out) && !/Apply db\/migrations\/00[24]_/.test(noThree.out) && !/Apply db\/migrations\/02[25]_/.test(noThree.out),
-         "the 3-argument form missing is a refusal whose remedy is 045, the last definer — not 004, 022 or 025");
-  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("045") });
-  assert((await run(SQL_ENV)).code === 0, "…which 045 re-applied performs");
+  assert(noThree.code === 1 && /atomic capture\s+2 upsert_thought overload\(s\) — the 3-argument form, the atomic capture, is missing/.test(noThree.out) && /Apply db\/migrations\/046_thought_audit_event_shape\.sql — the last definer of both forms/.test(noThree.out) && !/Apply db\/migrations\/00[24]_/.test(noThree.out) && !/Apply db\/migrations\/02[25]_/.test(noThree.out),
+         "the 3-argument form missing is a refusal whose remedy is 046, the last definer — not 004, 022 or 025");
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("046") });
+  assert((await run(SQL_ENV)).code === 0, "…which 046 re-applied performs");
   // A database whose update_thought predates 032: 018's form alone, then
   // 021's alone — each named by its signature, 032 the remedy.
   await claims.unsafe(`DROP FUNCTION ${UPDATE_THOUGHT_SIGNATURE}`);
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("018") });
   const pre021 = await run(SQL_ENV);
-  assert(pre021.code === 1 && /edit signature\s+update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb\) is the form from before migration 032; the server sends p_provenance/.test(pre021.out) && /Apply db\/migrations\/045_thought_audit_event_shape\.sql\. Its DROP chain reaches every older form/.test(pre021.out),
-         "a 018-era update_thought under this server does not start, and is named by its signature with 045 — whose DROP chain reaches every older form — as the remedy");
+  assert(pre021.code === 1 && /edit signature\s+update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb\) is the form from before migration 032; the server sends p_provenance/.test(pre021.out) && /Apply db\/migrations\/046_thought_audit_event_shape\.sql\. Its DROP chain reaches every older form/.test(pre021.out),
+         "a 018-era update_thought under this server does not start, and is named by its signature with 046 — whose DROP chain reaches every older form — as the remedy");
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("021") });
   const pre032 = await run(SQL_ENV);
-  assert(pre032.code === 1 && /edit signature\s+update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text\) is the form from before migration 032; the server sends p_provenance, which only 032's form and its successors take — so every edit would fail, and db\/reembed\.ts refuses to run/.test(pre032.out) && /Apply db\/migrations\/045_thought_audit_event_shape\.sql\. Its DROP chain reaches every older form/.test(pre032.out),
-         "…and a 021-era one — a brain at 031 — likewise, with 045 as the remedy");
+  assert(pre032.code === 1 && /edit signature\s+update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text\) is the form from before migration 032; the server sends p_provenance, which only 032's form and its successors take — so every edit would fail, and db\/reembed\.ts refuses to run/.test(pre032.out) && /Apply db\/migrations\/046_thought_audit_event_shape\.sql\. Its DROP chain reaches every older form/.test(pre032.out),
+         "…and a 021-era one — a brain at 031 — likewise, with 046 as the remedy");
   // 032 re-applied on that brain leaves its 9-argument form ALONE — a brain at
   // 044 under this server: every edit resolves, a warning naming what is lost
-  // and 045. Then 021 re-applied beside it: two older forms and none the
-  // servers call — the remedy is 045, whose DROP chain reaches both, not 032,
+  // and 046. Then 021 re-applied beside it: two older forms and none the
+  // servers call — the remedy is 046, whose DROP chain reaches both, not 032,
   // which would leave its own 9 to be named on the next start (second review
   // pass).
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("032") });
   const nineAlone = await run(SQL_ENV);
-  assert(nineAlone.code === 0 && /!  edit signature\s+update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text,jsonb\) is the form from before migration 045: every edit resolves, but no write event \(p_event — stance, cites, the valid window, trust\) reaches the audit row, and db\/reembed\.ts, which resolves the body by/.test(nineAlone.out) && /Apply db\/migrations\/045_thought_audit_event_shape\.sql\./.test(nineAlone.out),
-         `a 9-argument form alone — a brain at 044 — is a warning naming 045, not a refusal (exit ${nineAlone.code})`);
+  assert(nineAlone.code === 0 && /!  edit signature\s+update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text,jsonb\) is the form from before migration 046: every edit resolves, but no write event \(p_event — stance, cites, the valid window, trust\) reaches the audit row, and db\/reembed\.ts, which resolves the body by/.test(nineAlone.out) && /Apply db\/migrations\/046_thought_audit_event_shape\.sql\./.test(nineAlone.out),
+         `a 9-argument form alone — a brain at 044 — is a warning naming 046, not a refusal (exit ${nineAlone.code})`);
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("021") });
   const eightAndNine = await run(SQL_ENV);
   const editLine = eightAndNine.out.split("\n").find((l) => /edit signature/.test(l)) ?? "";
-  assert(eightAndNine.code === 1 && /^✗  edit signature/.test(editLine.trim()) && /update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text\)/.test(editLine) && /update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text,jsonb\)/.test(editLine) && / are forms from before migration 045 with none the servers call/.test(editLine) && /Apply db\/migrations\/045_thought_audit_event_shape\.sql\. Its DROP chain reaches the 9-, 8- and 7-argument forms/.test(eightAndNine.out) && !/032_update_thought_provenance/.test(eightAndNine.out),
-         `the 8- and 9-argument forms with no 10 are refused with 045 as the one remedy, not 032 (exit ${eightAndNine.code})`);
-  // 021 put the column back; 045 puts the shipped bodies back over 021's
+  assert(eightAndNine.code === 1 && /^✗  edit signature/.test(editLine.trim()) && /update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text\)/.test(editLine) && /update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text,jsonb\)/.test(editLine) && / are forms from before migration 046 with none the servers call/.test(editLine) && /Apply db\/migrations\/046_thought_audit_event_shape\.sql\. Its DROP chain reaches the 9-, 8- and 7-argument forms/.test(eightAndNine.out) && !/032_update_thought_provenance/.test(eightAndNine.out),
+         `the 8- and 9-argument forms with no 10 are refused with 046 as the one remedy, not 032 (exit ${eightAndNine.code})`);
+  // 021 put the column back; 046 puts the shipped bodies back over 021's
   // (022, 025, 033 or 035 alone would leave the later ones' out, warnings
-  // above) — 032 and 033 first, so the 9-argument update_thought 045 drops is
+  // above) — 032 and 033 first, so the 9-argument update_thought 046 drops is
   // there to drop, the ACL crossing as it did at the upgrade.
-  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("026") || f.startsWith("032") || f.startsWith("033") || f.startsWith("045") });
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("026") || f.startsWith("032") || f.startsWith("033") || f.startsWith("046") });
   const restoredAll = await run(SQL_ENV);
   assert(/provenance\s+trace_provenance and find_derivatives present; trace_provenance's body is 026's, the walk bounded/.test(restoredAll.out),
          "…and trace_provenance is 026's again: every 025 re-applied above was followed by 026, so no later healthy run carries the provenance warn");
   // The census (SMD-1730): a key the registry knows and nobody has classified
   // is a warning naming it, with set_agent_kind and the backfill as the
-  // remedy; classified, the check is ok again. A brain before 045 had no kind
+  // remedy; classified, the check is ok again. A brain before 046 had no kind
   // to be missing, which is why the arm is a WARN and not a FAIL.
   await claims.unsafe(`SELECT resolve_agent(repeat('d', 64), 'unclassified-key', 'write')`);
   const unclassified = await run(SQL_ENV);
   assert(unclassified.code === 0 && /!  audit events\s+1 key\(s\) with no kind \(unclassified-key\) and 0 audit row\(s\) naming a key with no kind — every write through an unclassified key is recorded with actor_kind and trust unknown/.test(unclassified.out) && /SELECT set_agent_kind\('<label>', '<operator \| agent \| ingested>'\); then, as the owner \(the pass amends thought_audit and locks ob1_agents\), SELECT backfill_thought_audit_events\(\);/.test(unclassified.out),
          "a resolved key nobody has classified is a warning naming it, with set_agent_kind and the backfill as the remedy (SMD-1730)");
   await claims.unsafe(`SELECT set_agent_kind('unclassified-key', 'agent')`);
-  assert(/✓  audit events\s+045's event shape present/.test((await run(SQL_ENV)).out), "…and classified, the check is ok again");
+  assert(/✓  audit events\s+046's event shape present/.test((await run(SQL_ENV)).out), "…and classified, the check is ok again");
   // A key retired through revoke_agent_key (010) can never write again: its
   // missing kind is not a warning to carry on every start (third review pass).
   await claims.unsafe(`SELECT resolve_agent(repeat('e', 64), 'retired-key', 'write'); SELECT revoke_agent_key(repeat('e', 64), 'left the team')`);
-  assert(/✓  audit events\s+045's event shape present/.test((await run(SQL_ENV)).out), "…and an unclassified key whose every digest is revoked is not counted: it cannot write");
+  assert(/✓  audit events\s+046's event shape present/.test((await run(SQL_ENV)).out), "…and an unclassified key whose every digest is revoked is not counted: it cannot write");
   // Rows waiting on the backfill alone — every key they name classified: the
   // remedy is the backfill call, with no key to classify (run-it, third pass).
   await claims.unsafe(`INSERT INTO thought_audit (thought_id, action, actor_name, diff) VALUES (gen_random_uuid(), 'capture', 'unclassified-key', '{}'::jsonb)`);
@@ -1330,22 +1330,22 @@ else {
   assert(/!  audit events\s+0 key\(s\) with no kind and 1 audit row\(s\) naming a key with no kind, 1 of them naming a key classified since — waiting only on the backfill/.test(fillOnly.out) && /SELECT backfill_thought_audit_events\(\); fills them — every key they name is classified/.test(fillOnly.out) && !/For each name/.test(fillOnly.out),
          "rows waiting on the backfill alone get the backfill as the remedy, with no key to classify");
   await claims.unsafe(`SELECT backfill_thought_audit_events()`);
-  assert(/✓  audit events\s+045's event shape present/.test((await run(SQL_ENV)).out), "…which fills them");
-  // A column dropped from under 045's trigger is fatal — the trigger INSERTs
+  assert(/✓  audit events\s+046's event shape present/.test((await run(SQL_ENV)).out), "…which fills them");
+  // A column dropped from under 046's trigger is fatal — the trigger INSERTs
   // into it, so every write would fail; the same missing column on a brain
-  // whose trigger is 025's is the ordinary state before 045 — writes go
-  // through — and a warning naming 045 (first review pass: the first draft
+  // whose trigger is 025's is the ordinary state before 046 — writes go
+  // through — and a warning naming 046 (first review pass: the first draft
   // called both a failure).
   await claims.unsafe("ALTER TABLE thought_audit DROP COLUMN backfilled_at");
   const droppedCol = await run(SQL_ENV);
-  assert(droppedCol.code === 1 && /✗  audit events\s+thought_audit lacks 1 of 045's eight columns \(backfilled_at\) while the audit trigger is 045's, which writes them — every capture, edit and delete would fail in the trigger/.test(droppedCol.out) && /Apply db\/migrations\/045_thought_audit_event_shape\.sql\./.test(droppedCol.out),
-         "a 045 column dropped from under 045's trigger does not start, naming the column and 045 (SMD-1730)");
+  assert(droppedCol.code === 1 && /✗  audit events\s+thought_audit lacks 1 of 046's eight columns \(backfilled_at\) while the audit trigger is 046's, which writes them — every capture, edit and delete would fail in the trigger/.test(droppedCol.out) && /Apply db\/migrations\/046_thought_audit_event_shape\.sql\./.test(droppedCol.out),
+         "a 046 column dropped from under 046's trigger does not start, naming the column and 046 (SMD-1730)");
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("025") || f.startsWith("026") });
-  const pre045 = await run(SQL_ENV);
-  assert(pre045.code === 0 && /!  audit events\s+thought_audit lacks 1 of 045's eight columns \(backfilled_at\) — the brain predates migration 045: writes go through, and every row records no kind, trust, door or event until it is applied/.test(pre045.out) && /Apply db\/migrations\/045_thought_audit_event_shape\.sql\./.test(pre045.out),
-         "…while the same column missing under 025's trigger — a brain before 045 — is a warning that writes go through, naming 045");
-  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("045") });
-  assert(/✓  audit events\s+045's event shape present/.test((await run(SQL_ENV)).out), "…and 045 re-applied puts the column and the trigger back");
+  const pre046 = await run(SQL_ENV);
+  assert(pre046.code === 0 && /!  audit events\s+thought_audit lacks 1 of 046's eight columns \(backfilled_at\) — the brain predates migration 046: writes go through, and every row records no kind, trust, door or event until it is applied/.test(pre046.out) && /Apply db\/migrations\/046_thought_audit_event_shape\.sql\./.test(pre046.out),
+         "…while the same column missing under 025's trigger — a brain before 046 — is a warning that writes go through, naming 046");
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("046") });
+  assert(/✓  audit events\s+046's event shape present/.test((await run(SQL_ENV)).out), "…and 046 re-applied puts the column and the trigger back");
   await claims.unsafe("UPDATE thoughts SET embedding = NULL");
 
   await claims.unsafe("DROP TABLE thought_work_claims");
@@ -1402,7 +1402,7 @@ else {
              `a role missing the chunk, audit and facet writes does not start, each named in order with its GRANT (exit ${missingBoth.code})`);
       assert(/a windowed capture, an edit with content, or 008's audit trigger, and every delete of a thought \(042's citation guard reads and writes thought_facets as the caller\) would fail/.test(writeLine(missingBoth.out)),
              "…and says what each missing privilege breaks: the capture path for the chunk and audit writes, every delete for the facet one");
-      assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, both 045's/.test(missingBoth.out), "…while atomic capture, a separate fact, is ok for it");
+      assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, both 046's/.test(missingBoth.out), "…while atomic capture, a separate fact, is ok for it");
 
       // Grant the chunk writes by hand; the audit INSERT and the facet UPDATE remain named.
       await claims.unsafe("GRANT INSERT, DELETE ON thought_chunks TO ob1_pf_capture");
@@ -1440,7 +1440,7 @@ else {
              `with 016's trigger present, a role lacking SELECT on ob1_config is refused, the trigger named (exit ${noConfig.code})`);
       await claims.unsafe("GRANT SELECT ON ob1_config TO ob1_pf_capture");
 
-      // 045's audit trigger reads the key's kind from ob1_agents as the caller
+      // 046's audit trigger reads the key's kind from ob1_agents as the caller
       // on every write that carries an actor, so SELECT there is a hard
       // capture-path requirement since SMD-1730 (first review pass: it sat only
       // in the soft `server` group, and a role granted exactly the capture set
@@ -1453,7 +1453,7 @@ else {
       try { await asCapturer`SELECT upsert_thought('preflight: a capture without SELECT on ob1_agents', ${{ metadata: {}, actor: { name: "laptop" } }}::jsonb)`; }
       catch (e) { deniedInTrigger = (e as Error).message; }
       finally { await asCapturer.close(); }
-      assert(/permission denied for table ob1_agents/.test(deniedInTrigger), `a capture as a role without SELECT on ob1_agents fails inside 045's audit trigger (${deniedInTrigger.slice(0, 80)})`);
+      assert(/permission denied for table ob1_agents/.test(deniedInTrigger), `a capture as a role without SELECT on ob1_agents fails inside 046's audit trigger (${deniedInTrigger.slice(0, 80)})`);
       // …while a raw write with NO actor set does not touch the registry at all
       // (third review pass): the trigger probes it only when an envelope names
       // an id or a name, so the sentence "on every write that carries an
@@ -1467,27 +1467,27 @@ else {
       const noAgents = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
       assert(noAgents.code === 1 &&
              /SELECT on ob1_agents/.test(writeLine(noAgents.out)) &&
-             /045's audit trigger reads ob1_agents as the caller on every capture, edit and delete that carries an actor/.test(writeLine(noAgents.out)) &&
+             /046's audit trigger reads ob1_agents as the caller on every capture, edit and delete that carries an actor/.test(writeLine(noAgents.out)) &&
              /GRANT SELECT ON ob1_agents TO ob1_pf_capture;/.test(noAgents.out),
              `a role lacking SELECT on ob1_agents is refused, the trigger named (exit ${noAgents.code})`);
       // The census skip names the table the denial was on — here ob1_agents,
-      // the capture group's row since 045, not thought_audit (run-it, third pass).
-      assert(/·  audit events\s+not checked — this role cannot read the census \(permission denied for table ob1_agents\)/.test(noAgents.out) && /GRANT SELECT ON ob1_agents TO <the connector's role>; — the capture group's row since 045/.test(noAgents.out),
+      // the capture group's row since 046, not thought_audit (run-it, third pass).
+      assert(/·  audit events\s+not checked — this role cannot read the census \(permission denied for table ob1_agents\)/.test(noAgents.out) && /GRANT SELECT ON ob1_agents TO <the connector's role>; — the capture group's row since 046/.test(noAgents.out),
              "…and the census skip names ob1_agents as the table to grant, not thought_audit");
       // The requirement follows the trigger body that reads the table (second
       // review pass): with 025's audit trigger in place — a brain still at 044
       // under this server — the role lacking SELECT on ob1_agents holds the
-      // capture set and is not refused for it; 045's body back, it is.
+      // capture set and is not refused for it; 046's body back, it is.
       await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("025") || f.startsWith("026") });
-      const pre045Agents = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
-      assert(/write privileges\s+ob1_pf_capture holds the capture path's privileges/.test(pre045Agents.out) && !/ob1_agents/.test(writeLine(pre045Agents.out)),
-             `under 025's audit trigger the same role holds the capture set — SELECT on ob1_agents is required only while the body that reads it is installed (exit ${pre045Agents.code})`);
-      await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("045") });
-      // 045 re-applied requires the SELECT again, and grants it to nobody: the
+      const pre046Agents = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
+      assert(/write privileges\s+ob1_pf_capture holds the capture path's privileges/.test(pre046Agents.out) && !/ob1_agents/.test(writeLine(pre046Agents.out)),
+             `under 025's audit trigger the same role holds the capture set — SELECT on ob1_agents is required only while the body that reads it is installed (exit ${pre046Agents.code})`);
+      await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("046") });
+      // 046 re-applied requires the SELECT again, and grants it to nobody: the
       // grant is the operator's, by the convention every privilege has landed
       // under — a ROLE_GRANTS row, this check naming what is missing, --grant
       // (ninth review pass cut an in-file grant after three passes of edges).
-      assert(/SELECT on ob1_agents/.test(writeLine((await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL })).out)), "…and 045's body back, it is required again — and named, not granted, by the apply");
+      assert(/SELECT on ob1_agents/.test(writeLine((await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL })).out)), "…and 046's body back, it is required again — and named, not granted, by the apply");
       await claims.unsafe("GRANT SELECT ON ob1_agents TO ob1_pf_capture");
       // The census SELECTs the log; the hard capture set grants INSERT only. A
       // role granted exactly that set is told the census was not checked, and

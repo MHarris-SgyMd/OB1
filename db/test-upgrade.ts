@@ -26,7 +26,7 @@ import { ACCEPTED_CAVEAT_PREFIX, ACCEPTED_CLAIM_SQL, LOCK_TIMEOUT_S, UPDATE_THOU
 
 /**
  * 032's update_thought, by its own signature — the form a brain holds from 032
- * through 044. UPDATE_THOUGHT_SIGNATURE names the shipped form, 045's
+ * through 044. UPDATE_THOUGHT_SIGNATURE names the shipped form, 046's
  * 10-argument one (SMD-1730), which the sections that stop at 032, 033 or 035
  * never have; they read this one, as [4] reads 021's.
  */
@@ -449,7 +449,7 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // paths pinned, SMD-1677 and SMD-1703), 042 (the citations facet and
   // delete_thought's third argument, SMD-1712) and 043 (the cite shape stated
   // at the table, SMD-1749) and 044 (the schema_version row, SMD-1804) and
-  // 045 (the audit row's event shape, SMD-1730) stay
+  // 046 (the audit row's event shape, SMD-1730) stay
   // recorded and are never tried. 030 is the
   // right one to make
   // pending
@@ -465,7 +465,7 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // 009's body and 036's lock key, all present; 043 comments 034's table and
   // column and needs only 034, refusing by name without it as 031 does without
   // 015 ([20]); 044 upserts ob1_config.schema_version and needs only 006's
-  // table; 045 adds columns to 008's thought_audit and 010's ob1_agents and
+  // table; 046 adds columns to 008's thought_audit and 010's ob1_agents and
   // redefines 025's trigger, 035's two capture forms and 033's update_thought
   // on their own bodies, all present ([20b]) — all recorded by the baseline
   // with their prerequisites present, so none
@@ -660,7 +660,7 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // back — the very state preflight's `atomic capture` check warns about.
   const forms = (await sql`SELECT pronargs AS n FROM pg_proc WHERE proname = 'update_thought' ORDER BY 1`) as { n: number }[];
   // …and 021's 8-argument update_thought would have stayed beside 032's.
-  assert(forms.length === 1 && Number(forms[0].n) === 10, `the ten-argument update_thought, alone — 032 ran after 021 and dropped 021's, 045 after 033 and dropped its (${forms.map((f) => f.n).join(",")})`);
+  assert(forms.length === 1 && Number(forms[0].n) === 10, `the ten-argument update_thought, alone — 032 ran after 021 and dropped 021's, 046 after 033 and dropped its (${forms.map((f) => f.n).join(",")})`);
   const body3 = (await sql`SELECT prosrc FROM pg_proc WHERE oid = 'upsert_thought(text, jsonb, vector)'::regprocedure`)[0].prosrc as string;
   assert(/ob1:vector-replaces-chunks/.test(body3) && /derived_from/.test(body3), "the 3-argument upsert_thought is the LAST definer's body (022's sentinel, 025's provenance), not 021's");
 
@@ -1562,10 +1562,10 @@ console.log("\n[20] Migration 043 on a schema without 034 — refused up front, 
   await applyMigrations(URL_, { ...OPTS, only: (f) => f >= "035" && f < the043 });
 }
 
-console.log("\n[20b] Migration 045 onto a populated 044 — the audit row gains the event shape, the door moves from the blob to a column on rows already written, the append-only rule holds after the ALTER, update_thought's tenth argument crosses with its ACL, and no thought or audit row moves (SMD-1730)");
+console.log("\n[20b] Migration 046 onto a populated 044 — the audit row gains the event shape, the door moves from the blob to a column on rows already written, the append-only rule holds after the ALTER, update_thought's tenth argument crosses with its ACL, and no thought or audit row moves (SMD-1730)");
 {
   await dropSchema(URL_);
-  await applyMigrations(URL_, { ...OPTS, only: (f) => f < "045" });
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < "046" });
   const sql = new SQL({ url: URL_, max: 1 });
   const vec = (axis: number) => `[${Array.from({ length: OPTS.dim }, (_, i) => (i === axis ? 1 : 0)).join(",")}]`;
   const aclOf = async (sig: string) => String((await sql`SELECT proacl::text AS a FROM pg_proc WHERE oid = ${sig}::regprocedure`)[0].a ?? "");
@@ -1580,8 +1580,8 @@ console.log("\n[20b] Migration 045 onto a populated 044 — the audit row gains 
   // was, its actor naming `source: "mcp"`; and a hardened 9-argument
   // update_thought.
   const laptop = (await sql`SELECT resolve_agent(${"a".repeat(64)}, 'laptop', 'write') AS r`)[0].r as { agent_id: string };
-  const viaRow = (await sql`SELECT upsert_thought('upgrade 045: through a vendored door', ${{ metadata: { source: "planted" }, actor: { name: "MCP_ACCESS_KEY", via: "rest-api" } }}::jsonb, ${vec(0)}::vector) AS r`)[0].r as { id: string };
-  const mcpRow = (await sql`SELECT upsert_thought('upgrade 045: through the main server as it was', ${{ metadata: { source: "mcp" }, actor: { name: "laptop", agent_id: laptop.agent_id, source: "mcp" } }}::jsonb, ${vec(1)}::vector) AS r`)[0].r as { id: string };
+  const viaRow = (await sql`SELECT upsert_thought('upgrade 046: through a vendored door', ${{ metadata: { source: "planted" }, actor: { name: "MCP_ACCESS_KEY", via: "rest-api" } }}::jsonb, ${vec(0)}::vector) AS r`)[0].r as { id: string };
+  const mcpRow = (await sql`SELECT upsert_thought('upgrade 046: through the main server as it was', ${{ metadata: { source: "mcp" }, actor: { name: "laptop", agent_id: laptop.agent_id, source: "mcp" } }}::jsonb, ${vec(1)}::vector) AS r`)[0].r as { id: string };
   let ev = await rowOf(viaRow.id);
   assert(ev.actor_context?.via === "rest-api" && ev.source === "planted" && !("origin" in ev), "at 044 the door rides in actor_context.via and there is no origin column");
   ev = await rowOf(mcpRow.id);
@@ -1608,14 +1608,14 @@ console.log("\n[20b] Migration 045 onto a populated 044 — the audit row gains 
   const before = await cols("thought_audit");
   assert(!before.includes("actor_kind") && !(await cols("ob1_agents")).includes("kind"), "…no actor_kind on thought_audit, no kind on ob1_agents");
 
-  await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("045") });
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("046") });
 
   const after = await cols("thought_audit");
   assert(after.length === before.length + 8 && ["actor_kind", "trust", "origin", "stance", "cites", "valid_from", "valid_until", "backfilled_at"].every((c) => after.includes(c)) && (await cols("ob1_agents")).includes("kind"),
-    "045 adds eight columns to thought_audit and kind to ob1_agents, each exactly once");
+    "046 adds eight columns to thought_audit and kind to ob1_agents, each exactly once");
   assert((await snapshot()) === rows, "no thought moved");
   assert((await auditSnapshot()) === auditRows && Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c) === Number(auditBefore), "…no audit row was added, and 008's and 010's columns on every existing row are byte for byte what they were");
-  assert((await readsAgents()) === false, "…and 045 grants it to nobody: the SELECT on ob1_agents its trigger needs is ROLE_GRANTS' row since 045, --grant's to issue and preflight's to name (ninth review pass)");
+  assert((await readsAgents()) === false, "…and 046 grants it to nobody: the SELECT on ob1_agents its trigger needs is ROLE_GRANTS' row since 046, --grant's to issue and preflight's to name (ninth review pass)");
   ev = await rowOf(viaRow.id);
   assert(ev.origin === "rest-api" && ev.backfilled_at != null && ev.actor_context?.via === "rest-api" && ev.actor_kind === null && ev.trust === null,
     `the file's own backfill call gives the SMD-1541 row its origin from the blob, stamped — the blob untouched, no kind: nobody has classified MCP_ACCESS_KEY (${ev.origin}, ${ev.backfilled_at})`);
@@ -1634,10 +1634,10 @@ console.log("\n[20b] Migration 045 onto a populated 044 — the audit row gains 
   // The mirror: the day after. A key classified, a write through it stamps
   // the kind; the backfill called again classifies the rows already written.
   await sql`SELECT set_agent_kind('laptop', 'operator')`;
-  const fresh = (await sql`SELECT upsert_thought('upgrade 045: a note captured after', ${{ metadata: { source: "mcp" }, actor: { name: "laptop", agent_id: laptop.agent_id, via: "open-brain" }, event: { stance: "stated" } }}::jsonb, ${vec(2)}::vector) AS r`)[0].r as { id: string };
+  const fresh = (await sql`SELECT upsert_thought('upgrade 046: a note captured after', ${{ metadata: { source: "mcp" }, actor: { name: "laptop", agent_id: laptop.agent_id, via: "open-brain" }, event: { stance: "stated" } }}::jsonb, ${vec(2)}::vector) AS r`)[0].r as { id: string };
   ev = await rowOf(fresh.id);
   assert(ev.actor_kind === "operator" && ev.trust === "operator" && ev.origin === "open-brain" && ev.actor_context === null && ev.backfilled_at == null && ev.stance === "stated",
-    "after 045 a write through a classified key stamps its kind, trust and door, and the event");
+    "after 046 a write through a classified key stamps its kind, trust and door, and the event");
   // Two passes at once — the capture and the edit are the two rows to fill: A
   // takes one and holds its transaction open; B, started meanwhile, waits on
   // that row's lock, and when A commits re-reads it as filled and skips it
@@ -1673,9 +1673,9 @@ console.log("\n[20b] Migration 045 onto a populated 044 — the audit row gains 
   assert(bf.awaiting_kind === 1, `…leaving the SMD-1541 row waiting on a kind for MCP_ACCESS_KEY (${bf.awaiting_kind})`);
 
   const shapeAfter = await shape(sql);
-  await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("045") });
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("046") });
   assert(JSON.stringify(await shape(sql)) === JSON.stringify(shapeAfter) && (await aclOf(UPDATE_THOUGHT_SIGNATURE)) === acl10 && ((await sql`SELECT backfill_thought_audit_events() AS r`)[0].r as { rows: number }).rows === 0,
-    "re-applying 045 is a no-op: the shape and the ACL as they were, the backfill finds nothing");
+    "re-applying 046 is a no-op: the shape and the ACL as they were, the backfill finds nothing");
   await sql.unsafe(`DROP OWNED BY ob1_upgrade_editor45`);
   await sql.unsafe(`DROP ROLE ob1_upgrade_editor45`);
   await sql.unsafe(`DROP OWNED BY ob1_upgrade_capturer45`);

@@ -416,7 +416,7 @@ async function upsertProfile(
   sourceCount: number,
   existingId: string | null,
   subject: string,
-  // The key's name and this worker as the door (`via`, 045's origin column —
+  // The key's name and this worker as the door (`via`, 046's origin column —
   // SMD-1730; it was `source` until then, a third vocabulary in that column).
   actor: { name: string; via: string },
 ): Promise<{ id: string; created: boolean }> {

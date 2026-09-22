@@ -140,7 +140,7 @@ const FUNCTIONS = [
   "thoughts_guard_citation_sources()",
   "thought_facet_active(thought_facets)",
   "record_citation(uuid, uuid, text, text)",
-  // 045 (SMD-1730); update_thought's 10-argument form is UPDATE_THOUGHT_SIGNATURE
+  // 046 (SMD-1730); update_thought's 10-argument form is UPDATE_THOUGHT_SIGNATURE
   // above and the 9-argument one it dropped is in SUPERSEDED_SIGNATURES.
   "set_agent_kind(text, text)",
   "validate_write_event(jsonb)",

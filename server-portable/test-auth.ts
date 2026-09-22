@@ -221,8 +221,8 @@ console.log("\n[10] The audit actor is serialised in the shape the trigger reads
   const full = actorPayload({ name: "laptop", via: "open-brain", agentId: "abc-123" });
   assert(full?.agent_id === "abc-123", "agentId is emitted as agent_id");
   assert(!("agentId" in (full ?? {})), "…and the camelCase form is not also present");
-  assert(full?.name === "laptop" && full?.via === "open-brain", "name and via — the door, 045's origin column — pass through");
-  assert(!("source" in (full ?? {})), "…and no source: the trigger reads the row's own metadata.source since 045, so the server names none (SMD-1730)");
+  assert(full?.name === "laptop" && full?.via === "open-brain", "name and via — the door, 046's origin column — pass through");
+  assert(!("source" in (full ?? {})), "…and no source: the trigger reads the row's own metadata.source since 046, so the server names none (SMD-1730)");
 
   // Absent, not null: the trigger's `actor - 'agent_id'` strips a missing key
   // cleanly, while an explicit null would land in actor_context as noise.

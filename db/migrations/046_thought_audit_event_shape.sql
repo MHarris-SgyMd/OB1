@@ -1,5 +1,5 @@
 -- =============================================================================
--- Migration 045: the event shape at the write boundary — thought_audit becomes
+-- Migration 046: the event shape at the write boundary — thought_audit becomes
 --                the log of record: who (from the key), the door, the ceiling on
 --                the content, stance, cites, the valid window; immutable by rule
 --                (SMD-1730)
@@ -213,30 +213,30 @@ END
 $$;
 
 COMMENT ON COLUMN thought_audit.actor_kind IS
-  'Who holds the key that made the write: operator | agent | ingested (an importer copying external text). From ob1_agents.kind by the envelope''s agent_id (010), else by the key''s name — never from the payload. NULL: a key nobody has classified (set_agent_kind), or a mutation made outside the server. Migration 045 / SMD-1730.';
+  'Who holds the key that made the write: operator | agent | ingested (an importer copying external text). From ob1_agents.kind by the envelope''s agent_id (010), else by the key''s name — never from the payload. NULL: a key nobody has classified (set_agent_kind), or a mutation made outside the server. Migration 046 / SMD-1730.';
 COMMENT ON COLUMN thought_audit.trust IS
-  'The ceiling on the content, never above actor_kind (operator > agent > ingested): the kind itself when undeclared, the declaration when it is lower, the kind when the declaration was higher — with the attempt in actor_context.claimed. NULL when the kind is unknown, unless the write declared ingested. Migration 045 / SMD-1730.';
+  'The ceiling on the content, never above actor_kind (operator > agent > ingested): the kind itself when undeclared, the declaration when it is lower, the kind when the declaration was higher — with the attempt in actor_context.claimed. NULL when the kind is unknown, unless the write declared ingested. Migration 046 / SMD-1730.';
 COMMENT ON COLUMN thought_audit.origin IS
-  'The door the write came through — the server, integration or worker that made the call (the envelope''s via), promoted from actor_context by 045. Distinct from source, which is the row''s own metadata.source. NULL for a caller that names no door. Migration 045 / SMD-1730.';
+  'The door the write came through — the server, integration or worker that made the call (the envelope''s via), promoted from actor_context by 046. Distinct from source, which is the row''s own metadata.source. NULL for a caller that names no door. Migration 046 / SMD-1730.';
 COMMENT ON COLUMN thought_audit.source IS
-  'The row''s own metadata.source at mutation time — what the client declared the content''s origin to be. Since 045 nothing else: the trigger no longer reads an actor''s source (which the main server set to "mcp" and the workers to their own names). The door is `origin`.';
+  'The row''s own metadata.source at mutation time — what the client declared the content''s origin to be. Since 046 nothing else: the trigger no longer reads an actor''s source (which the main server set to "mcp" and the workers to their own names). The door is `origin`.';
 COMMENT ON COLUMN thought_audit.stance IS
-  'What kind of statement the write made — stated | retrieved | inferred (042''s words) — as the call declared it in the event. NULL: undeclared, or a row from before 045. Migration 045 / SMD-1730.';
+  'What kind of statement the write made — stated | retrieved | inferred (042''s words) — as the call declared it in the event. NULL: undeclared, or a row from before 046. Migration 046 / SMD-1730.';
 COMMENT ON COLUMN thought_audit.cites IS
-  'The thoughts the write claimed to rest on, as the event declared them — each one existed when the write ran; lowercased, de-duplicated, sorted. The record; 042''s citation facets are the per-statement projection. Migration 045 / SMD-1730.';
+  'The thoughts the write claimed to rest on, as the event declared them — each one existed when the write ran; lowercased, de-duplicated, sorted. The record; 042''s citation facets are the per-statement projection. Migration 046 / SMD-1730.';
 COMMENT ON COLUMN thought_audit.valid_from IS
-  'When the fact the write states began to hold in the world, as the event declared it. NULL means unknown, and a read says unknown. Migration 045 / SMD-1730.';
+  'When the fact the write states began to hold in the world, as the event declared it. NULL means unknown, and a read says unknown. Migration 046 / SMD-1730.';
 COMMENT ON COLUMN thought_audit.valid_until IS
-  'When the fact the write states stopped holding, as the event declared it; never before valid_from. NULL means unknown, and a read says unknown. Migration 045 / SMD-1730.';
+  'When the fact the write states stopped holding, as the event declared it; never before valid_from. NULL means unknown, and a read says unknown. Migration 046 / SMD-1730.';
 COMMENT ON COLUMN thought_audit.actor_context IS
-  'The actor envelope''s remainder after the columns took theirs (name, session, agent_id, and since 045 via when it is a door). Two keys are the audit trigger''s own since 045: `claimed` — what the write declared for trust or actor_kind that its key did not support AT THE TIME (a clamp, or a declaration under a still-unclassified key); a row is a clamp exactly when claimed->>''trust'' IS DISTINCT FROM trust, since a backfill that later honours a declaration made under an unknown kind leaves the mark and makes them equal — and `caller_claimed`, whatever the envelope itself sent under `claimed`. Migration 008 / 045 (SMD-1730).';
+  'The actor envelope''s remainder after the columns took theirs (name, session, agent_id, and since 046 via when it is a door). Two keys are the audit trigger''s own since 046: `claimed` — what the write declared for trust or actor_kind that its key did not support AT THE TIME (a clamp, or a declaration under a still-unclassified key); a row is a clamp exactly when claimed->>''trust'' IS DISTINCT FROM trust, since a backfill that later honours a declaration made under an unknown kind leaves the mark and makes them equal — and `caller_claimed`, whatever the envelope itself sent under `claimed`. On a row written BEFORE 046, `claimed` is the envelope''s own (025 kept every key verbatim) and the backfill reads it as a declaration all the same — which the ceiling caps at the kind, so it can only lower, never raise; no in-tree writer ever sent one (ninth review pass). Migration 008 / 046 (SMD-1730).';
 COMMENT ON COLUMN thought_audit.backfilled_at IS
-  'NULL when actor_kind, trust and origin were set by the write itself. Otherwise when backfill_thought_audit_events derived them after the fact — origin from actor_context.via, kind and trust from ob1_agents — the one amendment thought_audit_immutable allows. Migration 045 / SMD-1730.';
+  'NULL when actor_kind, trust and origin were set by the write itself. Otherwise when backfill_thought_audit_events derived them after the fact — origin from actor_context.via, kind and trust from ob1_agents — the one amendment thought_audit_immutable allows. Migration 046 / SMD-1730.';
 COMMENT ON COLUMN ob1_agents.kind IS
-  'Who holds this key: operator | agent | ingested. Set by set_agent_kind(label, kind); the audit trigger reads it for actor_kind and as the ceiling on trust. NULL: unclassified — every write through the key is audited with an unknown kind until it is. Migration 045 / SMD-1730.';
+  'Who holds this key: operator | agent | ingested. Set by set_agent_kind(label, kind); the audit trigger reads it for actor_kind and as the ceiling on trust. NULL: unclassified — every write through the key is audited with an unknown kind until it is. Migration 046 / SMD-1730.';
 
 COMMENT ON TABLE thought_audit IS
-  'Append-only log of every capture/update/delete on thoughts, and since 045 the log of record SMD-1729''s views derive from: who (actor_name, canonical_agent_id, actor_kind from the key), the door (origin), the ceiling on the content (trust), what changed (diff), what the write claimed (stance, cites, valid_from/valid_until) and when (created_at). Written by a trigger inside the mutating transaction, so an event cannot be lost independently of the change it describes. thought_id is deliberately not a foreign key so audit rows outlive their subject. UPDATE and DELETE are refused by trigger, not by grant; the one lawful amendment fills a NULL actor_kind/trust/origin and stamps backfilled_at. Partition key chosen and not applied (SMD-1730): RANGE on created_at by month — append-only, so a closed month is cold; SMD-1697''s bench decides when.';
+  'Append-only log of every capture/update/delete on thoughts, and since 046 the log of record SMD-1729''s views derive from: who (actor_name, canonical_agent_id, actor_kind from the key), the door (origin), the ceiling on the content (trust), what changed (diff), what the write claimed (stance, cites, valid_from/valid_until) and when (created_at). Written by a trigger inside the mutating transaction, so an event cannot be lost independently of the change it describes. thought_id is deliberately not a foreign key so audit rows outlive their subject. UPDATE and DELETE are refused by trigger, not by grant; the one lawful amendment fills a NULL actor_kind/trust/origin and stamps backfilled_at. Partition key chosen and not applied (SMD-1730): RANGE on created_at by month — append-only, so a closed month is cold; SMD-1697''s bench decides when.';
 
 -- ---------------------------------------------------------------------------
 -- Two rules, one copy each (second review pass: the audit trigger, the
@@ -271,7 +271,7 @@ AS $$
 $$;
 
 COMMENT ON FUNCTION ob1_registry_kind(uuid, text) IS
-  'The kind ob1_agents holds for a writer: the id''s (canonical_agent_id) when it has one, else the name''s (label, the key''s name). NULL when neither is classified. The one lookup the audit trigger, the amendment gate and backfill_thought_audit_events share. Migration 045 / SMD-1730.';
+  'The kind ob1_agents holds for a writer: the id''s (canonical_agent_id) when it has one, else the name''s (label, the key''s name). NULL when neither is classified. The one lookup the audit trigger, the amendment gate and backfill_thought_audit_events share. Migration 046 / SMD-1730.';
 
 CREATE OR REPLACE FUNCTION ob1_trust_ceiling(p_kind text, p_declared text)
 RETURNS text
@@ -301,10 +301,10 @@ AS $$
 $$;
 
 COMMENT ON FUNCTION ob1_door_of(jsonb) IS
-  'The door an actor envelope names: its via, trimmed, when a non-blank string; NULL for anything else, which stays in actor_context. The one reading the audit trigger, the amendment gate and backfill_thought_audit_events share. Migration 045 / SMD-1730.';
+  'The door an actor envelope names: its via, trimmed, when a non-blank string; NULL for anything else, which stays in actor_context. The one reading the audit trigger, the amendment gate and backfill_thought_audit_events share. Migration 046 / SMD-1730.';
 
 COMMENT ON FUNCTION ob1_trust_ceiling(text, text) IS
-  'The trust a write gets from its key''s kind and the trust it declared: the kind when undeclared; the declaration when it stands under the kind (operator > agent > ingested); the kind when it does not; only a declared ingested when the kind is unknown. The one rule the audit trigger, the amendment gate and backfill_thought_audit_events share. Migration 045 / SMD-1730.';
+  'The trust a write gets from its key''s kind and the trust it declared: the kind when undeclared; the declaration when it stands under the kind (operator > agent > ingested); the kind when it does not; only a declared ingested when the kind is unknown. The one rule the audit trigger, the amendment gate and backfill_thought_audit_events share. Migration 046 / SMD-1730.';
 
 -- No index on actor_kind, trust or origin here: nothing in the tree reads
 -- them yet, and an index with no reader is maintenance on every audit row for
@@ -370,7 +370,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION ob1_clear_event() IS
-  'BEFORE DELETE, per statement, on thoughts: clears the ob1.event write event so the successor rows a tombstone''s ON DELETE SET NULL updates — audited before the delete''s own audit run — inherit no stance, cites or window. Migration 045 / SMD-1730.';
+  'BEFORE DELETE, per statement, on thoughts: clears the ob1.event write event so the successor rows a tombstone''s ON DELETE SET NULL updates — audited before the delete''s own audit run — inherit no stance, cites or window. Migration 046 / SMD-1730.';
 
 DROP TRIGGER IF EXISTS thoughts_delete_clears_event ON thoughts;
 CREATE TRIGGER thoughts_delete_clears_event
@@ -423,7 +423,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION set_agent_kind(text, text) IS
-  'Classify the key named label as operator, agent or ingested — the value the audit trigger stamps as actor_kind and uses as the ceiling on trust. Upserts the ob1_agents row by label, so a key can be classified before its first request. Returns {ok, agent_id, label, kind, created, previous_kind}, or {ok:false, error: BAD_LABEL | BAD_KIND}. Migration 045 / SMD-1730.';
+  'Classify the key named label as operator, agent or ingested — the value the audit trigger stamps as actor_kind and uses as the ceiling on trust. Upserts the ob1_agents row by label, so a key can be classified before its first request. Returns {ok, agent_id, label, kind, created, previous_kind}, or {ok:false, error: BAD_LABEL | BAD_KIND}. Migration 046 / SMD-1730.';
 
 -- ---------------------------------------------------------------------------
 -- validate_write_event — the one copy of the event's shape rule
@@ -568,7 +568,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION validate_write_event(jsonb) IS
-  'The write event''s shape rule (045): NULL and JSON null are NULL; otherwise an object with only stance (stated|retrieved|inferred), cites (UUID strings naming existing thoughts — lowercased, de-duplicated, sorted), valid_from / valid_until (timestamps, in order), trust and actor_kind (operator|agent|ingested — claims the audit trigger checks against the key), returned normalised, or an exception. Called by upsert_thought (both inserting forms) and update_thought. Migration 045 / SMD-1730.';
+  'The write event''s shape rule (046): NULL and JSON null are NULL; otherwise an object with only stance (stated|retrieved|inferred), cites (UUID strings naming existing thoughts — lowercased, de-duplicated, sorted), valid_from / valid_until (timestamps, in order), trust and actor_kind (operator|agent|ingested — claims the audit trigger checks against the key), returned normalised, or an exception. Called by upsert_thought (both inserting forms) and update_thought. Migration 046 / SMD-1730.';
 
 -- ---------------------------------------------------------------------------
 -- Immutable by rule: 008's refusal, with the one lawful amendment
@@ -666,7 +666,7 @@ LANGUAGE plpgsql
 AS $$
 DECLARE
   actor    jsonb := ob1_current_actor();
-  -- 045: the write event the function set beside the actor — stance, cites,
+  -- 046: the write event the function set beside the actor — stance, cites,
   -- the valid window, and the caller's DECLARED trust and actor_kind, which
   -- are checked against the key below and never copied. Read below, once.
   event    jsonb;
@@ -676,7 +676,7 @@ DECLARE
   v_id     uuid;
   v_source text;
   v_agent  uuid;
-  -- 045: who holds the key (the registry's word), the ceiling on the content,
+  -- 046: who holds the key (the registry's word), the ceiling on the content,
   -- what the caller claimed that the key could not support, and the context
   -- blob with that claim folded in.
   v_kind     text;
@@ -687,7 +687,7 @@ DECLARE
   v_context  jsonb;
 BEGIN
   /**
-   * 045: the event is read ONCE and the setting cleared — so a raw write later
+   * 046: the event is read ONCE and the setting cleared — so a raw write later
    * in the same transaction (an enhanced-columns UPDATE beside a capture)
    * cannot inherit a stance, cites or window declared for another row. A
    * tombstone declares nothing: on DELETE the event is not read at all —
@@ -788,7 +788,7 @@ BEGIN
       RETURN NULL;
     END IF;
     /**
-     * 045 (fourth review pass): an unchanged write that DECLARED an event is
+     * 046 (fourth review pass): an unchanged write that DECLARED an event is
      * an event. 008's rule stands for the bare re-import — no diff, no event,
      * no row, and no registry read — but a re-capture or edit that restates a
      * text with a stance, cites or a window is exactly the restatement
@@ -839,7 +839,7 @@ BEGIN
    * ob1:audit-event-from-the-key — a CONTRACT SENTINEL, not prose (the 014
    * convention); preflight's `audit events` check reads it.
    *
-   * 045: actor_kind is the REGISTRY's word for who holds the key —
+   * 046: actor_kind is the REGISTRY's word for who holds the key —
    * ob1_agents.kind, by the id the envelope carries (010) or, for a writer that
    * never resolved one, by the key's name (the label 010 keeps equal to it).
    * The payload's own `actor_kind` is never copied: the database never sees
@@ -937,7 +937,7 @@ BEGIN
   VALUES (
     v_id,
     v_action,
-    -- 045: the row's own metadata.source, and nothing else — see the header.
+    -- 046: the row's own metadata.source, and nothing else — see the header.
     v_source,
     actor->>'name',
     v_agent,
@@ -971,7 +971,7 @@ RETURNS jsonb AS $$
 DECLARE
   v_fingerprint text;
   v_id          uuid;
-  v_event       jsonb;  -- 045
+  v_event       jsonb;  -- 046
 BEGIN
   -- 005's guard, carried forward verbatim.
   IF p_payload IS NOT NULL AND jsonb_typeof(p_payload) <> 'object' THEN
@@ -987,7 +987,7 @@ BEGIN
     PERFORM set_config('ob1.actor', p_payload->>'actor', true);
   END IF;
 
-  -- 045: the write event's shape, refused here as a bad derived_from is; the
+  -- 046: the write event's shape, refused here as a bad derived_from is; the
   -- setting itself is written just before the INSERT below (second review
   -- pass: set beside the actor here, a call refused between the two left it
   -- on the transaction for a raw write to inherit).
@@ -1006,7 +1006,7 @@ BEGIN
   -- convention); preflight's `atomic capture` check reads it, so a 035 body
   -- put back by hand — every recogniser before this one satisfied, every
   -- declared event dropped — is named (sixth review pass).
-  -- 045: the event, set for the audit trigger UNCONDITIONALLY — an empty string
+  -- 046: the event, set for the audit trigger UNCONDITIONALLY — an empty string
   -- when the envelope names none — so a write in the same transaction cannot
   -- inherit the previous call's; the trigger reads it once and clears it. The
   -- actor above is set only when present, as 008 wrote it.
@@ -1023,7 +1023,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 COMMENT ON FUNCTION upsert_thought(text, jsonb) IS
-  'Capture without a vector: content + metadata, merged into the row holding the same normalised text. Reads p_payload.actor (008, here since 033) for the audit trigger. Takes the fingerprint advisory lock before the write (033), the one update_thought takes, so a capture and an edit of one text are serialised (READ COMMITTED). Refuses a non-object payload (005). Reads no provenance from the envelope. Called by PostgREST clients by name and the two-step capture fallback; the servers capture through the 3- and 4-argument forms. Reads p_payload.event (045) — {stance, cites, valid_from, valid_until, trust, actor_kind} — validated by validate_write_event and set on ob1.event for the trigger, an empty setting when absent. Body otherwise 033''s; 045 is the last definer.';
+  'Capture without a vector: content + metadata, merged into the row holding the same normalised text. Reads p_payload.actor (008, here since 033) for the audit trigger. Takes the fingerprint advisory lock before the write (033), the one update_thought takes, so a capture and an edit of one text are serialised (READ COMMITTED). Refuses a non-object payload (005). Reads no provenance from the envelope. Called by PostgREST clients by name and the two-step capture fallback; the servers capture through the 3- and 4-argument forms. Reads p_payload.event (046) — {stance, cites, valid_from, valid_until, trust, actor_kind} — validated by validate_write_event and set on ob1.event for the trigger, an empty setting when absent. Body otherwise 033''s; 046 is the last definer.';
 
 CREATE OR REPLACE FUNCTION upsert_thought(
   p_content   text,
@@ -1049,7 +1049,7 @@ DECLARE
   -- row only (035).
   v_derived     jsonb;
   v_supersedes  text  := p_payload->>'supersedes';
-  v_event       jsonb;  -- 045
+  v_event       jsonb;  -- 046
 BEGIN
   /**
    * Migration 005's guard, carried forward verbatim.
@@ -1091,7 +1091,7 @@ BEGIN
     PERFORM set_config('ob1.actor', p_payload->>'actor', true);
   END IF;
 
-  -- 045: the write event's shape, refused here as a bad derived_from is; the
+  -- 046: the write event's shape, refused here as a bad derived_from is; the
   -- setting itself is written just before the INSERT below (second review
   -- pass: set beside the actor here, a call refused between the two left it
   -- on the transaction for a raw write to inherit).
@@ -1132,7 +1132,7 @@ BEGIN
   -- convention); preflight's `atomic capture` check reads it, so a 035 body
   -- put back by hand — every recogniser before this one satisfied, every
   -- declared event dropped — is named (sixth review pass).
-  -- 045: the event, set for the audit trigger UNCONDITIONALLY — an empty string
+  -- 046: the event, set for the audit trigger UNCONDITIONALLY — an empty string
   -- when the envelope names none — so a write in the same transaction cannot
   -- inherit the previous call's; the trigger reads it once and clears it. The
   -- actor above is set only when present, as 008 wrote it.
@@ -1188,7 +1188,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION upsert_thought(text, jsonb, vector) IS
-  'Atomic capture: content + metadata + embedding in one statement. Reads p_payload.actor (008), p_payload.embedding_model (021), p_payload.derived_from / p_payload.supersedes (025) and p_payload.event (045: {stance, cites, valid_from, valid_until, trust, actor_kind}, validated by validate_write_event, set on ob1.event for the audit trigger — an empty setting when absent) from the envelope. derived_from is validated by validate_derived_from — an array of existing thought UUIDs, or the write is refused (SMD-1253); supersedes'' existence is the self-FK''s, checked where the column is written — a first capture (035). Takes the fingerprint advisory lock before the write (033), the one update_thought takes, so a capture and an edit of one text are serialised (READ COMMITTED); no supersession lock (035). On a re-capture the label follows the vector, the chunk rows stay only while the label vouches for them (022), and the envelope''s provenance is NOT written (035) — provenance lands on a first capture only; setting, changing or clearing it on an existing thought is update_thought''s p_provenance (032). Returns {id, fingerprint, existed, supersedes}: existed true means the text was already there and any provenance named was not written; supersedes is the row''s pointer after the write.';
+  'Atomic capture: content + metadata + embedding in one statement. Reads p_payload.actor (008), p_payload.embedding_model (021), p_payload.derived_from / p_payload.supersedes (025) and p_payload.event (046: {stance, cites, valid_from, valid_until, trust, actor_kind}, validated by validate_write_event, set on ob1.event for the audit trigger — an empty setting when absent) from the envelope. derived_from is validated by validate_derived_from — an array of existing thought UUIDs, or the write is refused (SMD-1253); supersedes'' existence is the self-FK''s, checked where the column is written — a first capture (035). Takes the fingerprint advisory lock before the write (033), the one update_thought takes, so a capture and an edit of one text are serialised (READ COMMITTED); no supersession lock (035). On a re-capture the label follows the vector, the chunk rows stay only while the label vouches for them (022), and the envelope''s provenance is NOT written (035) — provenance lands on a first capture only; setting, changing or clearing it on an existing thought is update_thought''s p_provenance (032). Returns {id, fingerprint, existed, supersedes}: existed true means the text was already there and any provenance named was not written; supersedes is the row''s pointer after the write.';
 
 -- ---------------------------------------------------------------------------
 -- update_thought: 033's body under a 10-argument signature — p_event, defaulted
@@ -1199,7 +1199,7 @@ COMMENT ON FUNCTION upsert_thought(text, jsonb, vector) IS
 -- is not unique"), replay the ACL onto the new form. So this file, as the
 -- last definer, leaves one function whatever state it meets, and
 -- test-schema's restore of the last definer means what it did (033's
--- header). On a brain already at 045 the setting is empty and the DROPs find
+-- header). On a brain already at 046 the setting is empty and the DROPs find
 -- nothing.
 -- ---------------------------------------------------------------------------
 SELECT set_config('ob1.acl_update_thought',
@@ -1231,7 +1231,7 @@ CREATE OR REPLACE FUNCTION update_thought(
   -- value sets it. Defaulted, so every 8-argument caller resolves here now
   -- that the 8-argument form is gone.
   p_provenance         jsonb       DEFAULT NULL,
-  -- 045: the write event — {"stance": stated|retrieved|inferred, "cites":
+  -- 046: the write event — {"stance": stated|retrieved|inferred, "cites":
   -- [uuid…], "valid_from", "valid_until", "trust", "actor_kind"} — validated by
   -- validate_write_event and set on ob1.event for the audit trigger; trust and
   -- actor_kind are claims the trigger checks against the key, never copies.
@@ -1261,7 +1261,7 @@ DECLARE
   v_derived        jsonb;
   v_walk           uuid;
   v_steps          int := 0;
-  v_event          jsonb;  -- 045
+  v_event          jsonb;  -- 046
 BEGIN
   -- 032: the envelope's shape, before any lock is taken — 005's guard, for
   -- this parameter: a client that binds a JS string to a jsonb parameter
@@ -1290,7 +1290,7 @@ BEGIN
   IF p_actor IS NOT NULL THEN
     PERFORM set_config('ob1.actor', p_actor::text, true);
   END IF;
-  -- 045: the event's shape, refused here before any lock; the setting itself
+  -- 046: the event's shape, refused here before any lock; the setting itself
   -- is written just before the UPDATE — after every refusal this function can
   -- return (NOT_FOUND, STALE_READ, DUPLICATE_CONTENT, SUPERSEDES_NOT_FOUND,
   -- WOULD_CYCLE), none of which fires the trigger that would consume it — so a
@@ -1419,7 +1419,7 @@ BEGIN
    * WHERE clause is the actual guard; the check above exists only to produce a
    * better error message.
    */
-  -- 045: the event, set for the audit trigger UNCONDITIONALLY — an empty
+  -- 046: the event, set for the audit trigger UNCONDITIONALLY — an empty
   -- string when none — so a write in the same transaction cannot inherit the
   -- previous call's; the trigger reads it once and clears it.
   PERFORM set_config('ob1.event', COALESCE(v_event::text, ''), true);
@@ -1457,7 +1457,7 @@ BEGIN
   RETURNING updated_at INTO v_updated;
 
   IF v_updated IS NULL THEN
-    -- Lost the race after the check above passed. 045: were the UPDATE to
+    -- Lost the race after the check above passed. 046: were the UPDATE to
     -- match no row, no trigger would have consumed the event set just above
     -- it — cleared here. Under READ COMMITTED with the row locked FOR NO KEY
     -- UPDATE above, this arm is not reachable (the predicate re-reads the same
@@ -1516,11 +1516,11 @@ END
 $acl$;
 
 COMMENT ON FUNCTION update_thought(uuid, text, jsonb, vector, jsonb, timestamptz, jsonb, text, jsonb, jsonb) IS
-  'Edit a thought by id. Recomputes content_fingerprint and replaces chunks — with their context — when content changes; an edit whose text normalises to what the row holds is never DUPLICATE_CONTENT, and reports duplicate_of when another row holds that text (a pair from before migration 003), or fingerprint_held_by when a row holds the key under other text, leaving this row''s fingerprint NULL. Every edit with content takes the fingerprint advisory lock (READ COMMITTED) — the one every capture through upsert_thought takes since 033 — and then locks the row FOR NO KEY UPDATE (032; FOR UPDATE until then, which the supersedes write''s FK check could deadlock with); both locks are held until the caller''s transaction ends, refusals included. Checks if_unchanged_since as a predicate in the UPDATE, so the guard is atomic. p_embedding_model (021) is written to thoughts.embedding_model beside the vector — the label follows the vector: untouched without content, NULL with content and no vector. p_provenance (032) is the envelope {"supersedes": uuid|null, "derived_from": [uuid…]|null}: an absent key leaves the column, a JSON null clears it, a value sets it — derived_from validated by validate_derived_from, supersedes an existing thought that closes no loop, the write serialised with review_supersession_proposal''s. p_event (045) is the write event {"stance", "cites", "valid_from", "valid_until", "trust", "actor_kind"}: validated by validate_write_event (a bad shape is refused), set on ob1.event for the audit trigger, which stamps stance, cites and the window on the row and checks trust and actor_kind against the key rather than copying them. Returns {ok:false, error} for NOT_FOUND | STALE_READ | DUPLICATE_CONTENT | SUPERSEDES_NOT_FOUND | WOULD_CYCLE.';
+  'Edit a thought by id. Recomputes content_fingerprint and replaces chunks — with their context — when content changes; an edit whose text normalises to what the row holds is never DUPLICATE_CONTENT, and reports duplicate_of when another row holds that text (a pair from before migration 003), or fingerprint_held_by when a row holds the key under other text, leaving this row''s fingerprint NULL. Every edit with content takes the fingerprint advisory lock (READ COMMITTED) — the one every capture through upsert_thought takes since 033 — and then locks the row FOR NO KEY UPDATE (032; FOR UPDATE until then, which the supersedes write''s FK check could deadlock with); both locks are held until the caller''s transaction ends, refusals included. Checks if_unchanged_since as a predicate in the UPDATE, so the guard is atomic. p_embedding_model (021) is written to thoughts.embedding_model beside the vector — the label follows the vector: untouched without content, NULL with content and no vector. p_provenance (032) is the envelope {"supersedes": uuid|null, "derived_from": [uuid…]|null}: an absent key leaves the column, a JSON null clears it, a value sets it — derived_from validated by validate_derived_from, supersedes an existing thought that closes no loop, the write serialised with review_supersession_proposal''s. p_event (046) is the write event {"stance", "cites", "valid_from", "valid_until", "trust", "actor_kind"}: validated by validate_write_event (a bad shape is refused), set on ob1.event for the audit trigger, which stamps stance, cites and the window on the row and checks trust and actor_kind against the key rather than copying them. Returns {ok:false, error} for NOT_FOUND | STALE_READ | DUPLICATE_CONTENT | SUPERSEDES_NOT_FOUND | WOULD_CYCLE.';
 
 
 -- ---------------------------------------------------------------------------
--- backfill_thought_audit_events — the derived columns on rows from before 045
+-- backfill_thought_audit_events — the derived columns on rows from before 046
 --
 -- origin from actor_context.via (SMD-1541's rows), actor_kind and trust from
 -- ob1_agents by the row's canonical_agent_id, else by its actor_name (the
@@ -1585,6 +1585,10 @@ BEGIN
            -- What the write declared while its key was unclassified: the
            -- trigger could not honour it then and filed it under claimed — a
            -- key the trigger owns (a caller's own goes under caller_claimed).
+           -- On a row from before this file the key is the envelope's own,
+           -- kept verbatim by 025's trigger, and is read the same way: the
+           -- ceiling caps it at the kind, so it can lower and never raise, and
+           -- no in-tree writer ever sent one (run-it, ninth review pass).
            a.actor_context->'claimed'->>'trust' AS declared,
            COALESCE(a.origin, ob1_door_of(a.actor_context)) AS origin
       FROM thought_audit a
@@ -1652,7 +1656,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION backfill_thought_audit_events(integer) IS
-  'Fill actor_kind, trust and origin on thought_audit rows written before 045, or before their key was classified: origin from actor_context.via, kind and trust from ob1_agents by canonical_agent_id else by actor_name, stamping backfilled_at — the one amendment thought_audit_immutable allows. Idempotent; p_limit bounds a pass. Returns {ok, rows, awaiting_kind}: awaiting_kind is the rows that still name a key with no kind. Migration 045 / SMD-1730.';
+  'Fill actor_kind, trust and origin on thought_audit rows written before 046, or before their key was classified: origin from actor_context.via, kind and trust from ob1_agents by canonical_agent_id else by actor_name, stamping backfilled_at — the one amendment thought_audit_immutable allows. Idempotent; p_limit bounds a pass. Returns {ok, rows, awaiting_kind}: awaiting_kind is the rows that still name a key with no kind. Migration 046 / SMD-1730.';
 
 -- Once, here: every SMD-1541 row gains its origin now; no row gains a kind at
 -- apply time, since no agent has one yet. Re-runs find nothing.
@@ -1661,7 +1665,7 @@ SELECT backfill_thought_audit_events();
 -- The one privilege this file adds to the capture path — SELECT on ob1_agents,
 -- which the trigger reads as the writer — is NOT granted here. It lands as
 -- every privilege since 010 has: a row in db/config.mjs's ROLE_GRANTS (since
--- 045), preflight's `write privileges` check naming what a role lacks, and
+-- 046), preflight's `write privileges` check naming what a role lacks, and
 -- `migrate.ts --grant`. A role granted the capture set before this file fails
 -- its writes from the apply until --grant is run, and the check says so at the
 -- next start; six through eight review passes tried granting in-file and each

@@ -659,7 +659,7 @@ if (modelChange && !SWITCH_MODEL && !STATUS_ONLY && !DRY_RUN && !RETIRE && !ACCE
 }
 
 // The schema the pass writes to. The body the pass will CALL — the exact
-// ten-argument signature (045; this pass's positional eight resolve through
+// ten-argument signature (046; this pass's positional eight resolve through
 // its defaults), as preflight resolves match_thoughts, not any function of that
 // name — is asked for 018's contract sentinel: a marker in pg_proc.prosrc,
 // which every CREATE OR REPLACE rewrites, rather than a field name a comment
@@ -678,7 +678,7 @@ const [fn] = await sql`
     EXISTS (SELECT 1 FROM information_schema.columns
             WHERE table_name = 'thoughts' AND column_name = 'embedding_model') AS labelled,
     -- 032's nine-argument form alone: a brain at 044 under this tree, whose
-    -- missing piece is 045, not 032 (SMD-1730, fourth review pass).
+    -- missing piece is 046, not 032 (SMD-1730, fourth review pass).
     EXISTS (SELECT 1 FROM pg_proc
             WHERE oid = to_regprocedure(${"public." + UPDATE_THOUGHT_SIGNATURE_9})) AS nine,
     to_regclass('schema_migrations') IS NOT NULL AS has_ledger`;
@@ -686,9 +686,9 @@ const [fn] = await sql`
 // statement is parsed, whatever the AND before it would have short-circuited,
 // so a schema applied by hand — no ledger — must not be asked about its ledger.
 // Which migration the missing piece belongs to: the column is 021's, the
-// ten-argument body 045's when 032's nine-argument one is there, 032's when
+// ten-argument body 046's when 032's nine-argument one is there, 032's when
 // neither is. The ledger is asked about that one.
-const missingMigration = !fn.labelled ? "021" : fn.nine ? "045" : "032";
+const missingMigration = !fn.labelled ? "021" : fn.nine ? "046" : "032";
 fn.ledgered = fn.has_ledger ? (await sql`SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name LIKE ${missingMigration + "%"}) AS l`)[0].l : false;
 /** Whether thoughts.embedding_model exists — the read-only modes answer without it. */
 const HAS_LABEL: boolean = Boolean(fn.labelled);
@@ -696,10 +696,10 @@ const refusalSchema: string | null = fn.present && fn.labelled
   ? null
   : ` ${fn.labelled ? "update_thought" : "the schema"} predates migration ${missingMigration}: this pass writes the model beside every vector it stores and builds\n` +
     "  its pool from the rows not at that model, which needs thoughts.embedding_model (021) and the ten-argument update_thought\n" +
-    "  (045, carrying 032's envelope and 018's rule, without which a pair from before the fingerprint fails on every run). " +
+    "  (046, carrying 032's envelope and 018's rule, without which a pair from before the fingerprint fails on every run). " +
     (fn.ledgered
       ? `schema_migrations records ${missingMigration} as\n  applied (--baseline?) but the schema installed is older. Re-apply the recorded migrations with the migrator: it re-runs\n  every migration, pending ones included, in one transaction, and runs 021's backfill with the operator's acceptances out of its sight, so it labels\n  from real passes alone (a paste of 021's body alone labels from the acceptances too).\n  Run it from a shell configured as this brain is, with the server and every worker stopped:\n    ${REAPPLY_COMMAND}`
-      : `Apply the pending migrations first (every file through ${fn.labelled ? "045" : "021"}, in order — a plain run does exactly that; ${missingMigration} alone would not):\n    cd db && bun migrate.ts --url …`);
+      : `Apply the pending migrations first (every file through ${fn.labelled ? "046" : "021"}, in order — a plain run does exactly that; ${missingMigration} alone would not):\n    cd db && bun migrate.ts --url …`);
 /**
  * What a run would refuse on, in the order a run judges them — the job, the
  * lease, the schema — spelled once for --status, --dry-run and the run.
@@ -1471,7 +1471,7 @@ if (total === 0) {
 }
 
 const toVector = (v: number[]) => `[${v.join(",")}]`;
-// `via`, the door (045's origin column) — `source` until SMD-1730, when the
+// `via`, the door (046's origin column) — `source` until SMD-1730, when the
 // trigger stopped reading an actor's source; the row's own stays the column.
 const actor = { name: "reembed", via: "db/reembed.ts", session: JOB };
 

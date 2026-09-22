@@ -343,7 +343,7 @@ function judgeCapture(label: string, r: Row, text: string) {
 }
 type Audit = { actor_name: string | null; source: string | null; own_source: string | null; origin: string | null; actor_context: Record<string, unknown> | null };
 /**
- * 008's latest row of one action for a thought: who the function was told wrote it, through which door (045's
+ * 008's latest row of one action for a thought: who the function was told wrote it, through which door (046's
  * `origin`), and the row's own metadata.source beside the column that copies it. `created_at` is `now()`,
  * transaction-start time, so two rows one transaction wrote would tie and "latest" would be arbitrary: a tie fails
  * here by name rather than passing by luck. Compared as Postgres's text — microseconds — not through a JS Date, whose
@@ -360,9 +360,9 @@ async function auditRow(id: string, action: "capture" | "update"): Promise<Audit
 }
 /**
  * The audit row a write through a server holding a key must leave (SMD-1541): the key's name; the server as the door
- * — `via` in the envelope, which migration 045 stamps as the `origin` column (SMD-1730; in actor_context until then)
+ * — `via` in the envelope, which migration 046 stamps as the `origin` column (SMD-1730; in actor_context until then)
  * and strips from the blob, so the blob is NULL unless something else rode along — the field no fallback supplies, so
- * the arm that proves the actor arrived; and a `source` equal to the thought's own metadata.source, which since 045 is
+ * the arm that proves the actor arrived; and a `source` equal to the thought's own metadata.source, which since 046 is
  * the only thing the trigger writes there (until then, what the trigger wrote when no actor named one) — so a server
  * that starts naming a source of its own (the first draft's server name on an edit: a third vocabulary in the column)
  * fails here, and only a copy of the origin, the one case the rule allows, passes. Pass 3 had dropped a source arm
@@ -745,7 +745,7 @@ try {
       "the profile's metadata names its generator, subject, kind and source count");
     const [audit] = await sql`SELECT actor_name, source, origin FROM thought_audit WHERE thought_id = ${id} AND action = 'capture'`;
     assert(audit?.actor_name === "MCP_ACCESS_KEY" && audit?.origin === "consolidation-bio" && audit?.source === null,
-      `008's capture row names the key and the worker as the door (045's origin — SMD-1730; the worker's name was in source until then), and no source: the profile's metadata declares none (${audit?.actor_name} ${audit?.origin} ${audit?.source})`);
+      `008's capture row names the key and the worker as the door (046's origin — SMD-1730; the worker's name was in source until then), and no source: the profile's metadata declares none (${audit?.actor_name} ${audit?.origin} ${audit?.source})`);
     const [log] = await sql`SELECT operation, survivor_id, details FROM consolidation_log ORDER BY id DESC LIMIT 1`;
     assert(log?.operation === "biographical_profile" && log?.survivor_id === id && log?.details?.action === "created", "the run is logged to consolidation_log as created");
 

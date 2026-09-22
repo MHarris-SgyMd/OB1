@@ -459,7 +459,7 @@ function explainPair(r: { duplicateOf?: string; fingerprintHeldBy?: string }): s
 
 /**
  * This server's name: what MCP clients see in `initialize`, and the door every
- * write names in its actor (`via`), which migration 045 stamps as
+ * write names in its actor (`via`), which migration 046 stamps as
  * thought_audit.origin (SMD-1730). One constant, so the two cannot drift.
  */
 const SERVER_NAME = "open-brain";
@@ -1209,7 +1209,7 @@ function buildServer(principal: Principal): McpServer {
           // and is absent when the registry could not answer — see agents.ts.
           // Both are recorded: the name is what the agent was CALLED at the time
           // of writing, which a later rename would otherwise erase. `via` is
-          // this server, the door (045's origin column); the row's source is
+          // this server, the door (046's origin column); the row's source is
           // its own metadata.source, "mcp" above, which the trigger reads
           // itself (SMD-1730).
           actor: {

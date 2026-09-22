@@ -368,7 +368,7 @@ if (REVIEW_ONLY) {
   if (ACCEPT || REJECT) {
     const decision = ACCEPT ? "accept" : "reject";
     const id = (ACCEPT ?? REJECT)!;
-    // `via`, the door (045's origin column) — `source` until SMD-1730, when
+    // `via`, the door (046's origin column) — `source` until SMD-1730, when
     // the trigger stopped reading an actor's source.
     const actor = { name: actorName, via: "consolidate", session: JOB, ...(agentId ? { agent_id: agentId } : {}) };
     const [{ r }] = await sql`

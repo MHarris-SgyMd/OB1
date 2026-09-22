@@ -603,7 +603,7 @@ export type Actor = {
   /** The access key's name, from auth.ts. Never the key. */
   name: string;
   /**
-   * The door the write came through — this server's name. Migration 045
+   * The door the write came through — this server's name. Migration 046
    * stamps it as thought_audit.origin (SMD-1730); until then the server sent
    * `source: "mcp"`, which the trigger wrote over the row's own
    * metadata.source and the column carried three vocabularies. The trigger

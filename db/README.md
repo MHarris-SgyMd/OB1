@@ -202,7 +202,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 (024 change 45, 025 change 46, 026 change 47, 027 change 48, 028 change 49,
 029 change 54, 030 change 56, 031 change 57, 032 change 60, 033 change 63,
 034 change 65, 035 change 66, 036 change 68, 037 change 70, 038 change 80, 039 change 81,
-040 change 91, 041 change 94, 042 change 95, 043 change 98, 044 SMD-1804, 045 SMD-1730).
+040 change 91, 041 change 94, 042 change 95, 043 change 98, 044 SMD-1804, 046 SMD-1730).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; `0.0.0+upstream.9543c29` until
@@ -212,7 +212,7 @@ its version's range. It is introduced by a fragment rather than a hand-numbered
 change, so it is named here by its ticket until the release step assigns its
 number (FORK.md's "Versioning", SMD-1804).
 
-Migration 045 makes `thought_audit` the log of record (SMD-1730): eight columns
+Migration 046 makes `thought_audit` the log of record (SMD-1730): eight columns
 beside 008's and 010's — `actor_kind` and `trust` (who holds the key, and the
 ceiling on the content: `operator | agent | ingested`), `origin` (the door — the
 server, integration or worker; SMD-1541's `via`, promoted from
@@ -279,8 +279,8 @@ issues every group at once.
 | | `thought_chunks` (007) | `SELECT, INSERT, DELETE` |
 | | `thought_audit` (008) | `INSERT` |
 | | `thought_facets` (042) | `SELECT, UPDATE` — the delete guard reads the citations that name a thought and, detaching, writes them, on every delete |
-| | `ob1_agents` (045) | `SELECT` — the audit trigger reads the key's kind on every write that carries an actor (SMD-1730) |
-| **server** — the server's soft extras, beyond capture; never fatal to a bare capture (the `SELECT` on `ob1_agents` 045 made hard is in capture, above), but `resolve_agent` *upserts* the agent tables, so attribution needs the writes, not just `SELECT` | `ob1_config` (006) | `SELECT` |
+| | `ob1_agents` (046) | `SELECT` — the audit trigger reads the key's kind on every write that carries an actor (SMD-1730) |
+| **server** — the server's soft extras, beyond capture; never fatal to a bare capture (the `SELECT` on `ob1_agents` 046 made hard is in capture, above), but `resolve_agent` *upserts* the agent tables, so attribution needs the writes, not just `SELECT` | `ob1_config` (006) | `SELECT` |
 | | `ob1_agents` (010) | `SELECT, INSERT, UPDATE` |
 | | `ob1_agent_keys` (010) | `SELECT, INSERT, UPDATE` |
 | **worker** — `reembed.ts`, `consolidate.ts`, `extract-entities.ts`: claim work, upsert a job key into `ob1_config`, and (consolidate) record/resolve proposals | `thought_work_claims` (015) | `SELECT, INSERT, UPDATE, DELETE` |

@@ -13,7 +13,7 @@
 // SMD-1541 (change 103): the key's name rides as the actor — p_actor on
 // update_thought — so 008's row names it; change 69 passed none, and the clause
 // above was false until then. This server rides as `via` in the actor, which
-// migration 045 stamps as the row's `origin` (SMD-1730; actor_context until then).
+// migration 046 stamps as the row's `origin` (SMD-1730; actor_context until then).
 // ob1-fork (SMD-1455): access keys go through ../_shared/auth.ts — the core server's
 // server-portable/auth.ts, copied so Supabase bundles it with the function — named,
 // scoped, hashed entries in MCP_ACCESS_KEYS (the older single MCP_ACCESS_KEY still
@@ -184,7 +184,7 @@ function buildServer(principal: Principal): McpServer {
           p_embedding: embedding,
           p_if_unchanged_since: if_unchanged_since ?? null,
           p_embedding_model: embedding ? EMBEDDING_MODEL : null,
-          // 008's actor: the key's name, this server as `via` — 045's origin column (SMD-1730) — no source (SMD-1541; FORK.md change 103 has the why).
+          // 008's actor: the key's name, this server as `via` — 046's origin column (SMD-1730) — no source (SMD-1541; FORK.md change 103 has the why).
           p_actor: { name: principal.name, via: "update-thought-mcp" },
         });
 

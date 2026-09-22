@@ -399,7 +399,7 @@ Classify each key once — `SELECT set_agent_kind('laptop', 'operator');` —
 as `operator` (a key you hold), `agent` (a key an agent holds) or `ingested`
 (an importer copying external text). Every write through it is then audited
 with that kind and with a trust ceiling the content cannot claim above
-(`thought_audit.actor_kind` and `trust`; migration 045, SMD-1730). Until a
+(`thought_audit.actor_kind` and `trust`; migration 046, SMD-1730). Until a
 key is classified its rows say unknown, and preflight's `audit events` counts
 them; `SELECT backfill_thought_audit_events();` fills the rows written before
 the classification. A key can be classified before its first request.
