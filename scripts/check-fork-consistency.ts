@@ -3806,9 +3806,9 @@ checkConnectorRegistry();
 // db/migrations/; an ignored file, the Supabase CLI's supabase/migrations or
 // a recipe's data/, is not the tree's. The fork's migrations DROP FUNCTION and DROP TRIGGER deliberately
 // (032/033/046's ACL replays, 046's own trigger), which the rail does not name
-// and which destroy no row; no migration drops a table — a scratch table is a
-// TEMP table ON COMMIT DROP (016's `_rte_in`) — and the one that once did
-// (change 61's dead `DROP TABLE IF EXISTS` of a temp name) is gone, so the
+// and which destroy no row; no migration has ever dropped a table — a scratch
+// table is a TEMP table ON COMMIT DROP (016's `_rte_in`), and the dead `DROP
+// TABLE IF EXISTS` change 61 records was db/migrate.ts's, TypeScript — so the
 // migrations are held to the same rule with no carve-out. Outside the rule, by
 // the rail's own words ("in SQL files"): SQL inside .ts (compat's suite drops
 // the tables it makes, test-schema empties the one it owns) and the heredocs
@@ -3844,6 +3844,9 @@ const DESTRUCTIVE_SQL_PROBES: [string, string][] = [
   ["truncate", "EXECUTE format('TRUNCATE %1$I', p_table);"],
   ["truncate", "EXECUTE $q$TRUNCATE $q$ || quote_ident(p_table);"],
   ["drop-database", "DROP OWNED BY community CASCADE;"],
+  // Second review pass: an apostrophe inside a dollar-quoted value must not open a literal that swallows the rest of the file; a tag may carry digits.
+  ["unqualified-delete", "COMMENT ON TABLE t IS $$don't$$;\nDELETE FROM t RETURNING 'WHERE';"],
+  ["truncate", "EXECUTE $q1$TRUNCATE $q1$ || quote_ident(p_table);"],
 ];
 /** SQL this repository writes that no rule may catch. */
 const DESTRUCTIVE_SQL_NON_PROBES = [
@@ -3876,7 +3879,10 @@ const DESTRUCTIVE_SQL_NON_PROBES = [
   "DELETE FROM thoughts WHERE false;",
   "COMMENT ON FUNCTION prune_query_log(int) IS 'Delete query_log rows older than p_keep_days. The DELETE is always bounded by logged_at.';",
   "DELETE FROM thoughts USING f(')') g WHERE thoughts.id = g.id;",
-  "DELETE FROM thoughts WHERE note = ';' AND id = $1;",
+  "DELETE FROM thoughts USING (SELECT ';' AS s) x WHERE thoughts.id = $1;", // the literal's `;` before the WHERE
+  // Second review pass: a keyword anywhere inside a quoted identifier; an apostrophe in a dollar-quoted value before a qualified delete.
+  'SELECT "my TRUNCATE", "a DROP TABLE b", "x DELETE FROM y" FROM information_schema.role_table_grants;',
+  "COMMENT ON TABLE t IS $$don't$$;\nDELETE FROM t USING f(')') g WHERE t.id = g.id;",
 ];
 /** file → rule → the reason and the exact hit count; a hit past the count fails, a count no hit reaches fails as stale. Empty: no file in the tree needs one. */
 const DESTRUCTIVE_SQL_EXCEPTIONS = new Map<string, Record<string, CountedException>>([]);
@@ -3916,7 +3922,7 @@ function checkDestructiveSql() {
       if (seen !== lines) {
         fail(rel, seen === 0
           ? `listed as a destructive-SQL exception for '${rule}' (${why}) but matches nothing — remove it from DESTRUCTIVE_SQL_EXCEPTIONS`
-          : `destructive-SQL exception for '${rule}' (${why}) covers ${lines} statement(s) but ${seen} match — a new statement beside the documented one, or the exception's count is stale`);
+          : `destructive-SQL exception for '${rule}' (${why}) covers ${lines} line(s) but ${seen} match — a new statement beside the documented one, or the exception's count is stale`);
       }
     }
   }

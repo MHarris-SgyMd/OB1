@@ -86,7 +86,6 @@ DESCRIBE THE EXACT WORK.
 
 - `CONTRIBUTING.md` — Source of truth for contribution rules, metadata format, and the review process
 - `.github/workflows/fork-checks.yml` — The fork's CI: every suite, the typechecks, the consistency checker, commitlint, actionlint
-- `.github/workflows/claude-review.yml` — Maintainer-triggered Claude PR review
 - `.github/metadata.schema.json` — JSON schema for metadata.json validation
 - `.github/PULL_REQUEST_TEMPLATE.md` — PR description template
 - `LICENSE.md` — FSL-1.1-MIT terms

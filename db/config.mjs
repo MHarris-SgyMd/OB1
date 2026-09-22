@@ -1960,18 +1960,24 @@ export const DESTRUCTIVE_SQL_RULES = Object.freeze([
  * then a bare or quoted name that is not the keyword ending a trigger event or a
  * privilege list (`ON`, `OR`, `TO`, …), a format() placeholder (`%I`, `%s`, the
  * positional `%1$I`), or the closing quote — `'` or a dollar tag — and `||` of a
- * statement built by concatenation. Not a keyword that a `"` precedes: `SELECT
- * "TRUNCATE" FROM t` names a column, and the quote that follows it closes that
- * name rather than opening a table's (first review pass).
+ * statement built by concatenation. A keyword inside a quoted identifier
+ * (`SELECT "TRUNCATE" FROM t`, `"my TRUNCATE"`) names a column, not a
+ * statement: destructiveSqlIn skips a match that blankSqlLiterals marks as
+ * one (first and second review passes).
  */
-const TRUNCATE_TARGET = String.raw`(?<!")\bTRUNCATE\b\s*(?:(?:TABLE|ONLY)\s+)*(?:"|%(?:\d+\$)?[Is]|(?:'|\$[A-Za-z_]*\$)\s*\|\||(?!(?:ON|OR|TO|FROM|AND|THEN|ELSE|END|IN|IS|WHEN)\b)[A-Za-z_][\w$.]*)`;
+const TRUNCATE_TARGET = String.raw`\bTRUNCATE\b\s*(?:(?:TABLE|ONLY)\s+)*(?:"|%(?:\d+\$)?[Is]|(?:'|\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$)\s*\|\||(?!(?:ON|OR|TO|FROM|AND|THEN|ELSE|END|IN|IS|WHEN)\b)[A-Za-z_][\w$.]*)`;
+/** What blankSqlLiterals writes over the inside of a quoted identifier, so a caller can tell one from a string literal (blanked to spaces). */
+const IDENT_FILL = "~";
 /**
- * `sql` (comments already stripped) with the inside of every string literal and
- * quoted identifier blanked to spaces, the quotes kept and every position where
- * it was, dollar-quote tags left alone (a body is scanned as statements, not
- * skipped) — so a `(`, `)`, `;` or WHERE inside a literal moves no statement
- * boundary and qualifies nothing (first review pass). The quote rules are
- * stripSqlComments's: `''` doubled, an E'…' string escaping with a backslash.
+ * `sql` (comments already stripped) with the inside of every string literal
+ * blanked to spaces and of every quoted identifier to IDENT_FILL, the quotes
+ * kept and every position where it was, a dollar-quoted body scanned within
+ * its own bounds (an apostrophe in a `$$…$$` value cannot open a literal that
+ * runs to the end of the file — second review pass) and its tags left alone —
+ * so a `(`, `)`, `;` or WHERE inside a literal moves no statement boundary and
+ * qualifies nothing (first review pass), and a keyword inside `"…"` is known
+ * for the column name it is. The quote rules are stripSqlComments's: `''`
+ * doubled, an E'…' string escaping with a backslash, `$tag$` grammar.
  */
 function blankSqlLiterals(sql) {
   let out = "";
@@ -1987,9 +1993,21 @@ function blankSqlLiterals(sql) {
         if (sql[j] === c) { if (sql[j + 1] === c) { j += 2; continue; } break; }
         j++;
       }
-      out += c + sql.slice(i + 1, j).replace(/[^\n]/g, " ") + (j < n ? c : "");
+      out += c + sql.slice(i + 1, j).replace(/[^\n]/g, c === "'" ? " " : IDENT_FILL) + (j < n ? c : "");
       i = j + 1;
       continue;
+    }
+    if (c === "$") {
+      const m = /^\$([A-Za-z_][A-Za-z0-9_]*)?\$/.exec(sql.slice(i, i + 64));
+      if (m) {
+        const tag = m[0];
+        const end = sql.indexOf(tag, i + tag.length);
+        if (end !== -1) {
+          out += tag + blankSqlLiterals(sql.slice(i + tag.length, end)) + tag;
+          i = end + tag.length;
+          continue;
+        }
+      }
     }
     out += c;
     i++;
@@ -2034,16 +2052,18 @@ export function destructiveSqlIn(text) {
     seen.add(key);
     hits.push({ rule: name, line, msg: byName.get(name).msg });
   };
-  // `(?<!")`: a quoted identifier that happens to spell a keyword names a column, not a statement.
-  for (const m of sql.matchAll(/(?<!")\bDROP\s+TABLE\b/gi)) hit("drop-table", m.index);
-  for (const m of sql.matchAll(/(?<!")\bDROP\s+(?:DATABASE|SCHEMA|OWNED)\b/gi)) hit("drop-database", m.index);
-  for (const m of sql.matchAll(new RegExp(TRUNCATE_TARGET, "gi"))) hit("truncate", m.index);
-  for (const m of sql.matchAll(/(?<!")\bDELETE\s+FROM\b/gi)) {
+  // A keyword inside a quoted identifier names a column (`"my TRUNCATE"`), not a statement.
+  const inIdentifier = (i) => flat[i] === IDENT_FILL;
+  for (const m of sql.matchAll(/\bDROP\s+TABLE\b/gi)) if (!inIdentifier(m.index)) hit("drop-table", m.index);
+  for (const m of sql.matchAll(/\bDROP\s+(?:DATABASE|SCHEMA|OWNED)\b/gi)) if (!inIdentifier(m.index)) hit("drop-database", m.index);
+  for (const m of sql.matchAll(new RegExp(TRUNCATE_TARGET, "gi"))) if (!inIdentifier(m.index)) hit("truncate", m.index);
+  for (const m of sql.matchAll(/\bDELETE\s+FROM\b/gi)) {
+    if (inIdentifier(m.index)) continue;
     // A DELETE inside a string literal is dynamic SQL: its statement is the
     // literal's text and whatever is concatenated onto it, so it is read in
     // `sql`; one the file runs is read in `flat`, where a literal cannot move
     // its boundary or qualify it.
-    const inLiteral = flat[m.index] !== sql[m.index];
+    const inLiteral = flat[m.index] === " ";
     if (!whereQualifies(inLiteral ? sql : flat, m.index + m[0].length)) hit("unqualified-delete", m.index);
   }
   return hits.sort((a, b) => a.line - b.line);

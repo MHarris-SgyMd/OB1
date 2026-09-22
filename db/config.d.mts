@@ -342,7 +342,7 @@ export function stripSqlComments(text: string): string;
 export const SUPABASE_SQL_RULES: readonly { name: string; re: RegExp; msg: string }[];
 /** Every SUPABASE_SQL_RULES hit in `text`, comments excepted, with the source line number. */
 export function supabaseIsmsIn(text: string): { rule: string; line: number; msg: string }[];
-/** The statements a .sql file may never run because each destroys rows a brain holds — DROP TABLE, DROP DATABASE/SCHEMA, TRUNCATE (as a statement, not a trigger event or privilege), DELETE FROM with no WHERE — each with its name and reason (SMD-1936). */
+/** The statements a .sql file may never run because each destroys rows a brain holds — DROP TABLE, DROP DATABASE/SCHEMA/OWNED, TRUNCATE (as a statement, not a trigger event or privilege), DELETE FROM with no WHERE — each with its name and reason (SMD-1936). */
 export const DESTRUCTIVE_SQL_RULES: readonly { name: string; msg: string }[];
 /** Every DESTRUCTIVE_SQL_RULES hit in `text`, comments excepted, statements read whole, with the source line number. */
 export function destructiveSqlIn(text: string): { rule: string; line: number; msg: string }[];
