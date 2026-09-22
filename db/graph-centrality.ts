@@ -1,0 +1,522 @@
+#!/usr/bin/env bun
+/**
+ * graph-centrality.ts — rank the entity graph by attention: what the brain
+ * mentions most, what it connects most, and around one subject, what it
+ * connects that subject to.
+ *
+ * Migration 016 stores entities, the thoughts that mention them and the edges
+ * between them, one row per evidencing thought; nothing ships that reads it for
+ * importance (SMD-1938). "What is relevant to X" is search_thoughts's question
+ * and stays there. This answers the other one — "what does the brain hold as
+ * central about X, or overall" — with three counts anyone can recompute:
+ *
+ *   mentions   distinct thoughts that mention the entity
+ *   degree     distinct entities an edge joins it to, either end, in scope
+ *   support    distinct thoughts evidencing any edge that touches it
+ *
+ * and around a subject, per neighbour:
+ *
+ *   co_mentions   distinct thoughts mentioning both the subject and the neighbour
+ *   support       distinct thoughts evidencing an edge between them, any relation,
+ *                 either direction — the per-relation counts are shown beside it
+ *
+ * A neighbour ranks by co_mentions + support; `--no-edges` drops the support
+ * term and the degree/support columns, so the same command run twice says what
+ * the edges add over co-occurrence alone (the drop-the-graph control the ticket
+ * asks for). Ties break on mentions, then normalised name, then type — never on
+ * a uuid or a timestamp, so the order is the same on every run over the same
+ * rows and carries no recency term.
+ *
+ *   bun db/graph-centrality.ts --url postgres://…                  # the whole graph: top entities and thoughts
+ *   bun db/graph-centrality.ts --url … "Open Brain"                # one subject's neighbourhood
+ *   bun db/graph-centrality.ts --url … "Open Brain" --no-edges     # …by co-occurrence alone
+ *   --limit N (20)   --types project,tool,…   --keep-numeric   --json
+ *
+ * The subject resolves by 016's own rule, one rung at a time: an exact
+ * `normalized_name` match (`normalize_entity_name`, so "Open-Brain" finds
+ * "open brain"); else a name a human merged in (`merged_from`) or an alias the
+ * model offered; else the five nearest by trigram similarity at pg_trgm's
+ * default threshold or above, named as guesses. A uuid is taken as an entity
+ * id. Every entity the rung returns is the subject — "postgres" as a tool and
+ * as a topic are both it. `--types` and the numeric rule together say which
+ * entities exist for the run — the scope IS the graph: an entity outside it is
+ * in no list and no count, so under `--types tool` a tool's degree is its
+ * degree among tools. The subject is the one exception, resolved whatever its
+ * type: `--types tool "Open Brain"` is the tools around a project.
+ *
+ * ── What this is not ────────────────────────────────────────────────────────
+ * Centrality here is ATTENTION, not value, and the output says so every run:
+ *   • Edges are unweighted. On real runs every edge carries confidence 1.00
+ *     (SMD-1925), so the only weight an edge has is how many thoughts assert it.
+ *   • Entity typing is noisy (SMD-1935): the extractor mints bare migration and
+ *     port numbers as `person`/`tool`/`project` rows. Names that are only digits,
+ *     dots, colons and spaces are out of scope by default (`--keep-numeric`
+ *     admits them); `--types` narrows further. Out of scope means out of every
+ *     count: a numeric neighbour adds no degree and appears in no list.
+ *   • Hubs and clusters inflate each other: the project's own name is mentioned
+ *     by most thoughts, and an epic's children all connect to it.
+ *   • A freshly captured thought about a subject ranks as high as any other; no
+ *     recency term is applied and none is subtracted.
+ *   • The graph knows nothing of ticket status: open/closed is the caller's
+ *     filter against the source.
+ *   • Only what has been extracted is in the graph: the coverage line says how
+ *     many thoughts db/extract-entities.ts has reached.
+ *
+ * Pure reads, one connection, no writes. The SQL is built by exported functions
+ * over a `Runner` so db/test-schema.ts [43] runs the same text under PGlite.
+ */
+import { SQL } from "bun";
+
+/** `(text, params) → rows` — Bun's `sql.unsafe` or PGlite's `query(...).rows`. */
+export type Runner = (text: string, params: unknown[]) => Promise<Record<string, unknown>[]>;
+
+export const ENTITY_TYPES_ALL = ["organization", "person", "place", "project", "tool", "topic"] as const;
+export type EntityType = (typeof ENTITY_TYPES_ALL)[number];
+
+/**
+ * SMD-1935's noise, as a pattern over normalized_name: digits, then any run of
+ * digits, dots, colons and spaces — "021", "11434", "127.0.0.1", "10 000".
+ * "pg16" and "smd 1938" have letters and stay.
+ */
+export const NUMERIC_NAME_RE = "^[0-9][0-9 .:]*$";
+/**
+ * Below this trigram similarity a fuzzy candidate is not offered: pg_trgm's
+ * own default (`pg_trgm.similarity_threshold`, what `%` tests). A one-letter
+ * transposition of a ten-letter name scores about 0.43, so 0.5 missed it.
+ */
+export const FUZZY_FLOOR = 0.3;
+export const FUZZY_LIMIT = 5;
+export const DEFAULT_LIMIT = 20;
+
+export type Scope = {
+  /** Entity types in scope; the default is all six. */
+  types: readonly EntityType[];
+  /** Whether SMD-1935's numeric names are excluded (the default). */
+  excludeNumeric: boolean;
+};
+export type Options = Scope & {
+  limit: number;
+  /** With edges off, no edge count is read or ranked on: the control. */
+  edges: boolean;
+};
+export const DEFAULT_OPTIONS: Options = { types: ENTITY_TYPES_ALL, excludeNumeric: true, limit: DEFAULT_LIMIT, edges: true };
+
+export type EntityRow = { id: string; entity_type: string; name: string; mentions: number; degree?: number; support?: number };
+export type ThoughtRow = { id: string; created_at: string | null; excerpt: string; entities: number; edges?: number };
+export type SubjectRow = { id: string; entity_type: string; name: string; normalized_name: string; mentions: number; score: number };
+export type Resolution = { how: "id" | "exact" | "alias" | "fuzzy" | "none"; subjects: SubjectRow[]; normalized: string | null };
+export type NeighbourRow = { id: string; entity_type: string; name: string; mentions: number; co_mentions: number; support?: number; relations?: string | null };
+export type Coverage = { thoughts: number; extracted: number; entities: number; numeric_names: number; edges: number; unit_edges: number; extraction_key: string | null };
+
+/** A Postgres array literal from strings that carry no quote, comma, brace, backslash or space — uuids, type names. */
+export function pgArray(items: readonly string[]): string {
+  for (const s of items) if (/[",{}\\\s]/.test(s)) throw new Error(`pgArray: ${JSON.stringify(s)} needs quoting; this helper is for uuids and type names`);
+  return `{${items.join(",")}}`;
+}
+
+/**
+ * The scope predicate over an ob1_entities alias, its parameters appended to
+ * `params` — one definition, so every list and every count agrees on which
+ * entities exist.
+ */
+function scopeSql(alias: string, scope: Scope, params: unknown[]): string {
+  params.push(pgArray(scope.types));
+  let s = `${alias}.entity_type = ANY($${params.length}::text[])`;
+  if (scope.excludeNumeric) {
+    params.push(NUMERIC_NAME_RE);
+    s += ` AND ${alias}.normalized_name !~ $${params.length}`;
+  }
+  return s;
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const MENTIONS_CTE = `mentions AS (SELECT te.entity_id, count(DISTINCT te.thought_id)::int AS mentions FROM thought_entities te GROUP BY 1)`;
+/** Every edge from both ends: (entity, the other entity, the evidencing thought, relation). */
+const ENDS_CTE = `ends AS (
+    SELECT from_entity_id AS entity_id, to_entity_id AS other_id, thought_id, relation FROM ob1_entity_edges
+    UNION ALL
+    SELECT to_entity_id, from_entity_id, thought_id, relation FROM ob1_entity_edges)`;
+const ENTITY_TIEBREAK = `s.normalized_name, s.entity_type`;
+
+/** How much of the brain the graph covers, and the two measured caveats' numbers. */
+export async function coverage(run: Runner, scope: Scope): Promise<Coverage> {
+  const params: unknown[] = [NUMERIC_NAME_RE];
+  const inScope = scopeSql("e", scope, params);
+  const [r] = await run(
+    `SELECT (SELECT count(*) FROM thoughts)::int AS thoughts,
+            (SELECT count(DISTINCT thought_id) FROM thought_entities)::int AS extracted,
+            (SELECT count(*) FROM ob1_entities e WHERE ${inScope})::int AS entities,
+            (SELECT count(*) FROM ob1_entities WHERE normalized_name ~ $1)::int AS numeric_names,
+            (SELECT count(*) FROM ob1_entity_edges)::int AS edges,
+            (SELECT count(*) FROM ob1_entity_edges WHERE confidence = 1)::int AS unit_edges,
+            (SELECT value FROM ob1_config WHERE key = 'entity_extraction_key') AS extraction_key`,
+    params);
+  return r as Coverage;
+}
+
+/**
+ * The subject, one rung at a time. `normalized` is what the rule made of the
+ * input; null when it is only punctuation, and nothing can match it. The type
+ * scope does not apply here — it says what to rank around the subject — and
+ * the numeric rule does, so "021" is not a subject unless numerics are kept.
+ */
+export async function resolveSubject(run: Runner, subject: string, scopeIn: Scope): Promise<Resolution> {
+  const scope: Scope = { types: ENTITY_TYPES_ALL, excludeNumeric: scopeIn.excludeNumeric };
+  const select = (how: string, score: string) =>
+    `SELECT s.id, s.entity_type, s.name, s.normalized_name, coalesce(m.mentions, 0) AS mentions, ${score} AS score
+       FROM ob1_entities s LEFT JOIN (SELECT te.entity_id, count(DISTINCT te.thought_id)::int AS mentions FROM thought_entities te GROUP BY 1) m ON m.entity_id = s.id
+      WHERE ${how}`;
+  const order = ` ORDER BY score DESC, mentions DESC, ${ENTITY_TIEBREAK}`;
+  const rows = (r: Record<string, unknown>[]) => r.map((x) => ({ ...x, score: Number(x.score) })) as SubjectRow[];
+
+  if (UUID_RE.test(subject.trim())) {
+    const params: unknown[] = [subject.trim()];
+    const r = await run(select(`s.id = $1::uuid AND ${scopeSql("s", scope, params)}`, "1.0::float8") + order, params);
+    return { how: r.length ? "id" : "none", subjects: rows(r), normalized: null };
+  }
+  const [{ n }] = await run(`SELECT normalize_entity_name($1) AS n`, [subject]);
+  const normalized = (n as string | null) ?? null;
+  if (normalized === null) return { how: "none", subjects: [], normalized };
+
+  const exactP: unknown[] = [normalized];
+  const exact = await run(select(`s.normalized_name = $1 AND ${scopeSql("s", scope, exactP)}`, "1.0::float8") + order, exactP);
+  if (exact.length) return { how: "exact", subjects: rows(exact), normalized };
+
+  const aliasP: unknown[] = [normalized];
+  const alias = await run(select(
+    `($1 = ANY(s.merged_from) OR EXISTS (SELECT 1 FROM unnest(s.aliases) a WHERE normalize_entity_name(a) = $1)) AND ${scopeSql("s", scope, aliasP)}`,
+    "1.0::float8") + order, aliasP);
+  if (alias.length) return { how: "alias", subjects: rows(alias), normalized };
+
+  const fuzzyP: unknown[] = [normalized, FUZZY_FLOOR];
+  const fuzzy = await run(select(
+    `similarity(s.normalized_name, $1) >= $2 AND ${scopeSql("s", scope, fuzzyP)}`,
+    "similarity(s.normalized_name, $1)::float8") + order + ` LIMIT ${FUZZY_LIMIT}`, fuzzyP);
+  return { how: fuzzy.length ? "fuzzy" : "none", subjects: rows(fuzzy), normalized };
+}
+
+/** Every in-scope entity with its counts; the caller orders. */
+function entityStatsSql(opts: Options, params: unknown[], orderBy: string): string {
+  const inScope = scopeSql("e", opts, params);
+  const edgeCols = opts.edges ? `, coalesce(d.degree, 0) AS degree, coalesce(d.support, 0) AS support` : "";
+  const edgeJoin = opts.edges
+    ? `LEFT JOIN (SELECT x.entity_id, count(DISTINCT x.other_id)::int AS degree, count(DISTINCT x.thought_id)::int AS support
+                   FROM ends x JOIN scope o ON o.id = x.other_id GROUP BY 1) d ON d.entity_id = s.id`
+    : "";
+  params.push(opts.limit);
+  return `WITH scope AS (SELECT e.id, e.entity_type, e.name, e.normalized_name FROM ob1_entities e WHERE ${inScope}),
+       ${MENTIONS_CTE}${opts.edges ? `,\n       ${ENDS_CTE}` : ""}
+  SELECT s.id, s.entity_type, s.name, coalesce(m.mentions, 0) AS mentions${edgeCols}
+    FROM scope s LEFT JOIN mentions m ON m.entity_id = s.id ${edgeJoin}
+   ORDER BY ${orderBy}, ${ENTITY_TIEBREAK}
+   LIMIT $${params.length}`;
+}
+
+/** The whole graph's top entities by mentions. */
+export async function topByMentions(run: Runner, opts: Options): Promise<EntityRow[]> {
+  const params: unknown[] = [];
+  return (await run(entityStatsSql(opts, params, `mentions DESC${opts.edges ? ", degree DESC, support DESC" : ""}`), params)) as EntityRow[];
+}
+
+/** The whole graph's top entities by degree — the hubs. Empty with edges off. */
+export async function topByDegree(run: Runner, opts: Options): Promise<EntityRow[]> {
+  if (!opts.edges) return [];
+  const params: unknown[] = [];
+  return (await run(entityStatsSql(opts, params, `degree DESC, support DESC, mentions DESC`), params)) as EntityRow[];
+}
+
+const EXCERPT = `regexp_replace(left(t.content, 160), '\\s+', ' ', 'g')`;
+
+/**
+ * The whole graph's top thoughts: the ones that mention the most in-scope
+ * entities and evidence the most in-scope edges — the thoughts that build the
+ * graph, which on a ticket corpus are the epics (the hub caveat, stated).
+ */
+export async function topThoughts(run: Runner, opts: Options): Promise<ThoughtRow[]> {
+  const params: unknown[] = [];
+  const inScope = scopeSql("e", opts, params);
+  params.push(opts.limit);
+  const edgeCol = opts.edges
+    ? `, (SELECT count(*) FROM ob1_entity_edges x JOIN scope a ON a.id = x.from_entity_id JOIN scope b ON b.id = x.to_entity_id WHERE x.thought_id = t.id)::int AS edges`
+    : "";
+  const rows = await run(
+    `WITH scope AS (SELECT e.id FROM ob1_entities e WHERE ${inScope}),
+          counted AS (
+            SELECT t.id, t.created_at::text AS created_at, ${EXCERPT} AS excerpt,
+                   (SELECT count(DISTINCT te.entity_id) FROM thought_entities te JOIN scope s ON s.id = te.entity_id WHERE te.thought_id = t.id)::int AS entities${edgeCol}
+              FROM thoughts t
+             WHERE EXISTS (SELECT 1 FROM thought_entities te JOIN scope s ON s.id = te.entity_id WHERE te.thought_id = t.id))
+     SELECT * FROM counted
+      ORDER BY ${opts.edges ? "entities + edges DESC, " : ""}entities DESC, id
+      LIMIT $${params.length}`,
+    params);
+  return rows as ThoughtRow[];
+}
+
+/**
+ * The subject's neighbourhood: every in-scope entity that shares a thought with
+ * it or an edge, ranked by co_mentions + support (co_mentions alone with edges
+ * off). `relations` lists the edges between them as `relation×n`, n the
+ * thoughts asserting it, both directions folded.
+ */
+export async function neighbourhood(run: Runner, subjectIds: readonly string[], opts: Options): Promise<NeighbourRow[]> {
+  if (subjectIds.length === 0) return [];
+  const params: unknown[] = [pgArray(subjectIds)];
+  const inScope = scopeSql("e", opts, params);
+  params.push(opts.limit);
+  const edgeCtes = opts.edges
+    ? `,
+       ${ENDS_CTE},
+       touching AS (SELECT x.other_id AS entity_id, x.thought_id, x.relation FROM ends x
+                     WHERE x.entity_id = ANY($1::uuid[]) AND NOT (x.other_id = ANY($1::uuid[]))),
+       ed AS (SELECT o.entity_id, count(DISTINCT o.thought_id)::int AS support,
+                     (SELECT string_agg(r.relation || '×' || r.n, ', ' ORDER BY r.n DESC, r.relation)
+                        FROM (SELECT i.relation, count(DISTINCT i.thought_id) AS n FROM touching i WHERE i.entity_id = o.entity_id GROUP BY 1) r) AS relations
+                FROM touching o GROUP BY o.entity_id)`
+    : "";
+  const rows = await run(
+    `WITH scope AS (SELECT e.id, e.entity_type, e.name, e.normalized_name FROM ob1_entities e WHERE ${inScope}),
+       ${MENTIONS_CTE},
+       subject_thoughts AS (SELECT DISTINCT te.thought_id FROM thought_entities te WHERE te.entity_id = ANY($1::uuid[])),
+       co AS (SELECT te.entity_id, count(DISTINCT te.thought_id)::int AS co_mentions
+                FROM thought_entities te JOIN subject_thoughts st ON st.thought_id = te.thought_id
+               WHERE NOT (te.entity_id = ANY($1::uuid[])) GROUP BY 1)${edgeCtes}
+     SELECT s.id, s.entity_type, s.name, coalesce(m.mentions, 0) AS mentions, coalesce(co.co_mentions, 0) AS co_mentions
+            ${opts.edges ? ", coalesce(ed.support, 0) AS support, ed.relations" : ""}
+       FROM scope s
+       LEFT JOIN mentions m ON m.entity_id = s.id
+       LEFT JOIN co ON co.entity_id = s.id
+       ${opts.edges ? "LEFT JOIN ed ON ed.entity_id = s.id" : ""}
+      WHERE coalesce(co.co_mentions, 0)${opts.edges ? " + coalesce(ed.support, 0)" : ""} > 0
+      ORDER BY coalesce(co.co_mentions, 0)${opts.edges ? " + coalesce(ed.support, 0)" : ""} DESC, mentions DESC, ${ENTITY_TIEBREAK}
+      LIMIT $${params.length}`,
+    params);
+  return rows as NeighbourRow[];
+}
+
+/**
+ * The thoughts that tie the subject to its neighbourhood: every thought
+ * mentioning the subject, ranked by how many of the ranked neighbours it also
+ * mentions plus (edges on) how many edge rows between the subject and anything
+ * else it evidences.
+ */
+export async function subjectThoughts(run: Runner, subjectIds: readonly string[], neighbourIds: readonly string[], opts: Options): Promise<ThoughtRow[]> {
+  if (subjectIds.length === 0) return [];
+  const params: unknown[] = [pgArray(subjectIds), pgArray(neighbourIds), opts.limit];
+  // An edge with the subject at exactly one end, the other end in scope — so a
+  // numeric or out-of-type neighbour adds nothing here either.
+  const edgeCol = opts.edges
+    ? `, (SELECT count(*) FROM ob1_entity_edges x
+           JOIN ob1_entities e ON e.id = CASE WHEN x.from_entity_id = ANY($1::uuid[]) THEN x.to_entity_id ELSE x.from_entity_id END
+          WHERE x.thought_id = t.id
+            AND (x.from_entity_id = ANY($1::uuid[])) <> (x.to_entity_id = ANY($1::uuid[]))
+            AND ${scopeSql("e", opts, params)})::int AS edges`
+    : "";
+  const rows = await run(
+    `WITH counted AS (
+       SELECT t.id, t.created_at::text AS created_at, ${EXCERPT} AS excerpt,
+              (SELECT count(DISTINCT te.entity_id) FROM thought_entities te WHERE te.thought_id = t.id AND te.entity_id = ANY($2::uuid[]))::int AS entities${edgeCol}
+         FROM thoughts t
+        WHERE EXISTS (SELECT 1 FROM thought_entities te WHERE te.thought_id = t.id AND te.entity_id = ANY($1::uuid[])))
+     SELECT * FROM counted
+      ORDER BY ${opts.edges ? "entities + edges DESC, " : ""}entities DESC, id
+      LIMIT $3`,
+    params);
+  return rows as ThoughtRow[];
+}
+
+/** The caveats, with the run's own numbers where a caveat has one — printed every run, in both formats. */
+export function caveats(c: Coverage, opts: Options): string[] {
+  const plural = (n: number) => (n === 1 ? "entity" : "entities");
+  const out = [
+    `Centrality here is attention, not value or quality: what the extracted thoughts mention and connect most.`,
+    `Edges are unweighted (SMD-1925): ${c.unit_edges} of ${c.edges} edge rows carry confidence 1.00, so an edge's only weight is the number of thoughts asserting it (support).`,
+    opts.excludeNumeric
+      ? `Entity typing is noisy (SMD-1935): ${c.numeric_names} ${plural(c.numeric_names)} named only by digits are out of scope and out of every count (--keep-numeric admits them; --types narrows further).`
+      : `Entity typing is noisy (SMD-1935): --keep-numeric is on, so ${c.numeric_names} ${plural(c.numeric_names)} named only by digits count like any other.`,
+    `Hubs and clusters inflate each other: a name most thoughts mention, or an epic its children all connect to, lifts everything around it.`,
+    `No recency term: a thought captured a minute ago about its own subject ranks as any other.`,
+    `The graph holds no ticket status; open/closed is the caller's filter against the source.`,
+    `Coverage: ${c.extracted} of ${c.thoughts} thoughts have extracted entities${c.extraction_key ? ` (extraction key ${c.extraction_key})` : " (no extraction key: db/extract-entities.ts has not run)"}; what the worker has not reached is not in the graph.`,
+  ];
+  if (!opts.edges) out.push(`--no-edges: ranked by co-occurrence alone; the difference from the default run is what the edges add.`);
+  return out;
+}
+
+export type Report = {
+  subject: string | null;
+  resolution: Resolution | null;
+  options: Options;
+  coverage: Coverage;
+  caveats: string[];
+  by_mentions?: EntityRow[];
+  by_degree?: EntityRow[];
+  thoughts: ThoughtRow[];
+  neighbours?: NeighbourRow[];
+};
+
+/** One run, as the CLI prints it and as `--json` emits it. */
+export async function report(run: Runner, subject: string | null, opts: Options): Promise<Report> {
+  const cov = await coverage(run, opts);
+  const base = { subject, options: opts, coverage: cov, caveats: caveats(cov, opts) };
+  if (subject === null) {
+    return { ...base, resolution: null, by_mentions: await topByMentions(run, opts), by_degree: await topByDegree(run, opts), thoughts: await topThoughts(run, opts) };
+  }
+  const resolution = await resolveSubject(run, subject, opts);
+  const ids = resolution.subjects.map((s) => s.id);
+  const neighbours = await neighbourhood(run, ids, opts);
+  const thoughts = await subjectThoughts(run, ids, neighbours.map((n) => n.id), opts);
+  return { ...base, resolution, neighbours, thoughts };
+}
+
+// ── Rendering ────────────────────────────────────────────────────────────────
+
+type Col = { key: string; head: string; right?: boolean; width?: number };
+
+function table(rows: Record<string, unknown>[], cols: Col[]): string {
+  const cell = (r: Record<string, unknown>, k: string) => (r[k] === null || r[k] === undefined ? "" : String(r[k]));
+  const widths = cols.map((c) => Math.min(c.width ?? 80, Math.max(c.head.length, ...rows.map((r) => cell(r, c.key).length))));
+  const line = (vals: string[]) => vals.map((v, i) => (cols[i].right ? v.padStart(widths[i]) : v.padEnd(widths[i]))).join("  ").trimEnd();
+  const out = [line(cols.map((c) => c.head)), line(widths.map((w) => "-".repeat(w)))];
+  for (const r of rows) out.push(line(cols.map((c, i) => cell(r, c.key).slice(0, widths[i]))));
+  return out.join("\n");
+}
+
+const E_COLS = (edges: boolean): Col[] => [
+  { key: "mentions", head: "mentions", right: true },
+  ...(edges ? [{ key: "degree", head: "degree", right: true }, { key: "support", head: "support", right: true }] : []),
+  { key: "entity_type", head: "type" },
+  { key: "name", head: "entity", width: 60 },
+];
+const T_COLS = (edges: boolean, entitiesHead: string): Col[] => [
+  { key: "entities", head: entitiesHead, right: true },
+  ...(edges ? [{ key: "edges", head: "edges", right: true }] : []),
+  { key: "id", head: "thought" },
+  { key: "created_at", head: "captured", width: 19 },
+  { key: "excerpt", head: "excerpt", width: 90 },
+];
+
+export function render(r: Report): string {
+  const out: string[] = [];
+  const o = r.options;
+  out.push(`graph-centrality — ${r.subject === null ? "the whole graph" : `around ${JSON.stringify(r.subject)}`}; scope ${o.types.length === ENTITY_TYPES_ALL.length ? "every type" : o.types.join(",")}${o.excludeNumeric ? ", numeric names excluded" : ", numeric names kept"}; edges ${o.edges ? "on" : "OFF (control)"}; top ${o.limit}`);
+  out.push(`${r.coverage.entities} entities in scope; ${r.coverage.edges} edge rows`);
+  out.push("");
+  if (r.resolution) {
+    const res = r.resolution;
+    if (res.how === "none") {
+      out.push(`No entity resolves from ${JSON.stringify(r.subject)}${res.normalized === null ? " — the name is only punctuation" : ` (normalised: ${JSON.stringify(res.normalized)}; nothing exact, no alias or merged name, nothing within trigram similarity ${FUZZY_FLOOR})`}.`);
+    } else {
+      const label = { id: "by id", exact: "exact match on the normalised name", alias: "by alias or merged-in name", fuzzy: `by trigram similarity — a GUESS; pass the name shown to be exact` }[res.how];
+      out.push(`Subject (${label}):`);
+      for (const s of res.subjects) out.push(`  ${s.entity_type} ${JSON.stringify(s.name)} — ${s.mentions} mention${s.mentions === 1 ? "" : "s"}${res.how === "fuzzy" ? ` (similarity ${s.score.toFixed(2)})` : ""}  ${s.id}`);
+    }
+    out.push("");
+    if (r.neighbours && r.neighbours.length) {
+      out.push(`Neighbourhood — ranked by co_mentions${o.edges ? " + support" : ""}:`);
+      out.push(table(r.neighbours as Record<string, unknown>[], [
+        { key: "co_mentions", head: "co_mentions", right: true },
+        ...(o.edges ? [{ key: "support", head: "support", right: true }] : []),
+        { key: "mentions", head: "mentions", right: true },
+        { key: "entity_type", head: "type" },
+        { key: "name", head: "entity", width: 50 },
+        ...(o.edges ? [{ key: "relations", head: "relations (thoughts asserting each)", width: 60 }] : []),
+      ]));
+      out.push("");
+    } else if (res.how !== "none") out.push("No neighbour: nothing in scope shares a thought or an edge with the subject.\n");
+    if (r.thoughts.length) {
+      out.push(`Thoughts mentioning the subject — ranked by neighbours mentioned${o.edges ? " + subject edges evidenced" : ""}:`);
+      out.push(table(r.thoughts as Record<string, unknown>[], T_COLS(o.edges, "neighbours")));
+      out.push("");
+    }
+  } else {
+    out.push(`Top entities by mentions:`);
+    out.push(table((r.by_mentions ?? []) as Record<string, unknown>[], E_COLS(o.edges)));
+    out.push("");
+    if (o.edges) {
+      out.push(`Top entities by degree — the hubs:`);
+      out.push(table((r.by_degree ?? []) as Record<string, unknown>[], E_COLS(true)));
+      out.push("");
+    }
+    out.push(`Top thoughts — by in-scope entities mentioned${o.edges ? " + in-scope edges evidenced" : ""}:`);
+    out.push(table(r.thoughts as Record<string, unknown>[], T_COLS(o.edges, "entities")));
+    out.push("");
+  }
+  out.push("Caveats:");
+  for (const c of r.caveats) out.push(`  • ${c}`);
+  return out.join("\n");
+}
+
+// ── CLI ──────────────────────────────────────────────────────────────────────
+
+export type Parsed = { url?: string; subject: string | null; opts: Options; json: boolean };
+
+/** argv → options and subject, or a usage error. Exported for the suite. */
+export function parseArgs(argv: readonly string[]): Parsed | { error: string } {
+  const opts: Options = { ...DEFAULT_OPTIONS };
+  let url: string | undefined;
+  let json = false;
+  const positional: string[] = [];
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    const value = (): string | { error: string } => {
+      const v = argv[i + 1];
+      if (v === undefined || v.startsWith("--")) return { error: `${a} needs a value` };
+      i++;
+      return v;
+    };
+    if (a === "--url") {
+      const v = value();
+      if (typeof v !== "string") return v;
+      url = v;
+    } else if (a === "--limit") {
+      const v = value();
+      if (typeof v !== "string") return v;
+      const n = Number(v);
+      if (!Number.isInteger(n) || n < 1 || n > 500) return { error: `--limit must be an integer from 1 to 500, got ${JSON.stringify(v)}` };
+      opts.limit = n;
+    } else if (a === "--types") {
+      const v = value();
+      if (typeof v !== "string") return v;
+      const types = v.split(",").map((t) => t.trim()).filter(Boolean);
+      const bad = types.filter((t) => !(ENTITY_TYPES_ALL as readonly string[]).includes(t));
+      if (bad.length || types.length === 0) return { error: `--types takes a comma list of ${ENTITY_TYPES_ALL.join(", ")}; ${bad.length ? `not ${bad.map((b) => JSON.stringify(b)).join(", ")}` : "none given"}` };
+      opts.types = types as EntityType[];
+    } else if (a === "--keep-numeric") opts.excludeNumeric = false;
+    else if (a === "--no-edges") opts.edges = false;
+    else if (a === "--json") json = true;
+    else if (a.startsWith("--")) return { error: `unknown flag ${a}` };
+    else positional.push(a);
+  }
+  if (positional.length > 1) return { error: `one subject at a time; got ${positional.map((p) => JSON.stringify(p)).join(", ")} — quote a name with spaces` };
+  return { url, subject: positional[0] ?? null, opts, json };
+}
+
+if (import.meta.main) {
+  const parsed = parseArgs(process.argv.slice(2));
+  if ("error" in parsed) {
+    console.error(parsed.error);
+    console.error(`usage: bun graph-centrality.ts --url postgres://… ["subject"] [--limit N] [--types a,b] [--keep-numeric] [--no-edges] [--json]`);
+    process.exit(2);
+  }
+  const url = parsed.url ?? process.env.DATABASE_URL;
+  if (!url) {
+    console.error("No database URL. Pass --url or set DATABASE_URL.");
+    process.exit(2);
+  }
+  const sql = new SQL({ url, max: 1 });
+  const run: Runner = async (text, params) => (await sql.unsafe(text, params as never[])) as unknown as Record<string, unknown>[];
+  try {
+    const [{ n }] = await run(`SELECT count(*)::int AS n FROM pg_class WHERE relname IN ('ob1_entities', 'thought_entities', 'ob1_entity_edges') AND relkind = 'r'`, []);
+    if (Number(n) !== 3) {
+      console.error("This brain has no entity graph: migration 016 is not applied. Run db/migrate.ts, then db/extract-entities.ts.");
+      process.exit(2);
+    }
+    const r = await report(run, parsed.subject, parsed.opts);
+    if (parsed.json) console.log(JSON.stringify(r, null, 2));
+    else console.log(render(r));
+    process.exit(r.resolution && r.resolution.how === "none" ? 1 : 0);
+  } finally {
+    await sql.close();
+  }
+}

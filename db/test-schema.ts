@@ -68,6 +68,10 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { buffersOf, COLUMN_COMMENT_SQL, communitySchemaFiles, createAssert, FUNCTION_COMMENT_SQL, SAMPLE_STATEMENT, sampleStatementOf, SCHEMA_FILES_FIRST, SCHEMAS_DIR, seededRandom, TABLE_COMMENT_SQL, TID_PROBE } from "./test-support.ts";
 import { markerAnswers } from "./bench-oracle.ts";
+import {
+  DEFAULT_OPTIONS, ENTITY_TYPES_ALL, FUZZY_FLOOR, NUMERIC_NAME_RE, coverage as graphCoverage, neighbourhood, parseArgs, pgArray, render, report as graphReport,
+  resolveSubject, subjectThoughts, topByDegree, topByMentions, topThoughts, type Options as GraphOptions, type Runner,
+} from "./graph-centrality.ts";
 import { agentLabel, armOf, attribute, citePointerOf, goldFromFixture, renderReport, summarise, toActionRow, toSearchRow, type ActionRow, type SearchRow } from "../evals/utilization.ts";
 import { ENTITY_TYPES, RELATIONS } from "../server-portable/entities.ts";
 
@@ -5024,6 +5028,190 @@ console.log("\n[42] Migration 043: query_log.tool's two shapes, and the table's 
     `INSERT INTO query_log (kind, tool, target_id) VALUES ('action', 'capture_thought/derived_from', $1) RETURNING id, tool`, [T])).rows[0];
   assert(citePointerOf(cite.tool) === "derived_from", "a cite row inserted under the documented shape reads back as a cite with its pointer");
   await db.query(`DELETE FROM query_log WHERE id = $1`, [cite.id]);
+}
+
+// ── 43. db/graph-centrality.ts — the counts, the ladder, the control ─────────
+//
+// The script's exported SQL builders run here under PGlite through a Runner, so
+// the text the CLI sends is the text asserted. A small graph whose every count
+// is known by construction: the subject, three neighbours that separate under
+// each ranking, one numeric-noise entity (SMD-1935) that must count nowhere,
+// and a merged entity for the merged_from rung.
+
+console.log("\n[43] db/graph-centrality.ts: mentions, degree and support as defined; the resolution ladder; numeric names out of every count; edges on vs off is the drop-the-graph control (SMD-1938)");
+{
+  await db.exec(`DELETE FROM thoughts`);
+  await db.exec(`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`);
+  await db.exec(`SELECT prune_orphan_entities()`);
+  const KEY = "extract:stub@p1";
+  const run: Runner = async (text, params) => (await db.query<Record<string, unknown>>(text, params)).rows;
+  const thought = async (content: string) =>
+    (await db.query<{ r: { id: string } }>(`SELECT upsert_thought($1, '{}'::jsonb) AS r`, [content])).rows[0].r.id;
+  const record = (id: string, entities: unknown[], relations: unknown[] = []) =>
+    db.query(`SELECT record_thought_entities($1::uuid, $2, $3::jsonb, $4::jsonb, NULL, NULL)`, [id, KEY, JSON.stringify(entities), JSON.stringify(relations)]);
+  const E = (name: string, type: string, aliases?: string[]) => ({ name, type, confidence: 0.9, ...(aliases ? { aliases } : {}) });
+  const R = (from: string, to: string, relation: string, confidence = 1.0) => ({ from, to, relation, confidence });
+
+  // The fixture. Open Brain (OB) is the subject, mentioned by t1–t5.
+  //   PostgreSQL: co-mentioned with OB in t1,t2,t3; OB→PG depends_on evidenced by t1,t2,t3   → co 3, support 3
+  //   Bun:        co-mentioned in t2,t3,t4; no edge to OB                                    → co 3, support 0
+  //   Anita:      co-mentioned in t1,t4; Anita→OB works_on evidenced by t1,t4                → co 2, support 2
+  //   021 (a numeric-named `person`, SMD-1935's shape): t5, with an edge to OB → out of scope by default
+  //   t6 mentions Bun alone (Bun's mentions 4 ≠ its co-mentions 3); t8 mentions "PG" alone, merged into PostgreSQL below.
+  const t1 = await thought("Open Brain depends on PostgreSQL; Anita works on it.");
+  const t2 = await thought("Open Brain depends on PostgreSQL and runs under Bun.");
+  const t3 = await thought("Open Brain on PostgreSQL, with Bun.");
+  const t4 = await thought("Anita works on Open Brain, in Bun.");
+  const t5 = await thought("Migration 021 in Open Brain.");
+  const t6 = await thought("Bun alone.");
+  const t8 = await thought("PG alone.");
+  await record(t1, [E("Open Brain", "project"), E("PostgreSQL", "tool", ["Postgres"]), E("Anita", "person")],
+    [R("Open Brain", "PostgreSQL", "depends_on", 0.8), R("Anita", "Open Brain", "works_on")]);
+  await record(t2, [E("Open Brain", "project"), E("PostgreSQL", "tool"), E("Bun", "tool")], [R("Open Brain", "PostgreSQL", "depends_on")]);
+  await record(t3, [E("Open Brain", "project"), E("PostgreSQL", "tool"), E("Bun", "tool")], [R("Open Brain", "PostgreSQL", "depends_on")]);
+  await record(t4, [E("Open Brain", "project"), E("Anita", "person"), E("Bun", "tool")], [R("Anita", "Open Brain", "works_on")]);
+  await record(t5, [E("Open Brain", "project"), E("021", "person")], [R("021", "Open Brain", "works_on")]);
+  await record(t6, [E("Bun", "tool")]);
+  await record(t8, [E("PG", "tool")]);
+  const idOf = async (nname: string, type = "tool") =>
+    (await db.query<{ id: string }>(`SELECT id FROM ob1_entities WHERE normalized_name = $1 AND entity_type = $2`, [nname, type])).rows[0].id;
+  const OB = await idOf("open brain", "project");
+  const PG = await idOf("postgresql");
+  const BUN = await idOf("bun");
+  const ANITA = await idOf("anita", "person");
+  const NUM = await idOf("021", "person");
+  await db.query(`SELECT merge_entities($1::uuid, $2::uuid)`, [PG, await idOf("pg")]);
+  const names = (rows: { name: string }[]) => rows.map((r) => r.name);
+  const on: GraphOptions = { ...DEFAULT_OPTIONS, limit: 10 };
+  const off: GraphOptions = { ...on, edges: false };
+  const keep: GraphOptions = { ...on, excludeNumeric: false };
+
+  // Coverage: the numbers the caveats print are the fixture's.
+  const cov = await graphCoverage(run, on);
+  assert(cov.thoughts === 7 && cov.extracted === 7, `coverage counts the thoughts and the extracted ones (${cov.thoughts}, ${cov.extracted})`);
+  assert(cov.entities === 4 && cov.numeric_names === 1, `four entities in scope — the merged PG is PostgreSQL's, 021 is numeric (${cov.entities} in scope, ${cov.numeric_names} numeric)`);
+  assert(cov.edges === 6 && cov.unit_edges === 5, `six edge rows, five at confidence 1.00 — the SMD-1925 caveat is a count, not a claim (${cov.edges}, ${cov.unit_edges})`);
+  assert(cov.extraction_key === null, "no extraction key: the coverage line says the worker has not set one");
+  assert((await graphCoverage(run, keep)).entities === 5, "…and with numerics kept the fifth entity is in scope");
+
+  // The three counts, as the header defines them.
+  const byM = await topByMentions(run, on);
+  const ob = byM.find((e) => e.id === OB)!;
+  assert(ob.mentions === 5 && ob.degree === 2 && ob.support === 4,
+    `Open Brain: 5 mentions; degree 2 (PostgreSQL, Anita — 021 is out of scope and adds none); support 4 (t1–t4 evidence its in-scope edges; t5's does not count) (${ob.mentions}/${ob.degree}/${ob.support})`);
+  const obKept = (await topByMentions(run, keep)).find((e) => e.id === OB)!;
+  assert(obKept.degree === 3 && obKept.support === 5, `…with numerics kept, 021 is a third neighbour and t5 a fifth supporting thought (${obKept.degree}/${obKept.support})`);
+  const pg = byM.find((e) => e.id === PG)!;
+  assert(pg.mentions === 4 && pg.name === "PostgreSQL", `PostgreSQL has 4 mentions after the merge re-pointed PG's (${pg.mentions})`);
+  assert(byM.every((e) => e.id !== NUM) && (await topByMentions(run, keep)).some((e) => e.id === NUM), "the numeric entity is in no list by default, and listed when kept");
+  assert(names(byM).join(",") === "Open Brain,PostgreSQL,Bun,Anita",
+    `by mentions with edges on: PostgreSQL before Bun at 4 mentions each, on degree (${names(byM).join(",")})`);
+  const byMOff = await topByMentions(run, off);
+  assert(names(byMOff).join(",") === "Open Brain,Bun,PostgreSQL,Anita" && byMOff.every((e) => e.degree === undefined && e.support === undefined),
+    `…edges off: the tie breaks on the name, and no edge column is read (${names(byMOff).join(",")})`);
+  const hubs = await topByDegree(run, on);
+  assert(names(hubs).join(",") === "Open Brain,PostgreSQL,Anita,Bun" && hubs[1].degree === 1 && hubs[3].degree === 0,
+    `by degree: the subject, then its two edge neighbours, then Bun with none (${names(hubs).join(",")})`);
+  assert((await topByDegree(run, off)).length === 0, "…and there is no hub list with edges off");
+  const tools = await topByMentions(run, { ...on, types: ["tool"] });
+  assert(names(tools).join(",") === "Bun,PostgreSQL" && tools[1].degree === 0 && tools[1].support === 0 && tools[1].mentions === 4,
+    `--types tool: the two tools, and the scope IS the graph — PostgreSQL's only edge neighbour is a project, so its degree and support are 0 here while its mentions are its own, and the tie with Bun breaks on the name (${names(tools).join(",")}, ${tools[1].degree}/${tools[1].support}/${tools[1].mentions})`);
+
+  // Top thoughts: entities mentioned plus edges evidenced, both in scope.
+  const tt = await topThoughts(run, on);
+  assert(tt[0].id === t1 && tt[0].entities === 3 && tt[0].edges === 2, `t1 leads the whole graph: three entities and two edges (${tt[0].entities}+${tt[0].edges})`);
+  const t5row = tt.find((t) => t.id === t5)!;
+  assert(t5row.entities === 1 && t5row.edges === 0, `t5 counts one entity and no edge — 021 is out of both counts (${t5row.entities}+${t5row.edges})`);
+  assert(tt.length === 7 && tt[0].excerpt.startsWith("Open Brain depends") && tt.every((t) => typeof t.created_at === "string"), "every extracted thought is listed with an excerpt and a timestamp");
+  const ttOff = await topThoughts(run, off);
+  assert(ttOff.slice(0, 4).map((t) => t.id).sort().join() === [t1, t2, t3, t4].sort().join() && ttOff.every((t) => t.edges === undefined),
+    "…edges off: t1–t4 tie at three entities, and the edge column is absent");
+
+  // The resolution ladder.
+  const exact = await resolveSubject(run, "Open Brain", on);
+  assert(exact.how === "exact" && exact.subjects.length === 1 && exact.subjects[0].id === OB && exact.subjects[0].mentions === 5, "exact: the normalised name, one subject, with its mentions");
+  assert((await resolveSubject(run, " open-brain ", on)).subjects[0]?.id === OB, "…through normalize_entity_name, so a hyphen and padding still find it");
+  const alias = await resolveSubject(run, "Postgres", on);
+  assert(alias.how === "alias" && alias.subjects.length === 1 && alias.subjects[0].id === PG, `alias: "Postgres" is an alias PostgreSQL carries (${alias.how})`);
+  const merged = await resolveSubject(run, "PG", on);
+  assert(merged.how === "alias" && merged.subjects[0]?.id === PG, `alias: "PG" is a name a human merged in, and merged_from resolves (${merged.how})`);
+  const fuzzy = await resolveSubject(run, "Open Brian", on);
+  assert(fuzzy.how === "fuzzy" && fuzzy.subjects[0]?.id === OB && fuzzy.subjects[0].score >= FUZZY_FLOOR && fuzzy.subjects[0].score < 1,
+    `fuzzy: a transposition is offered as a guess with its similarity (${fuzzy.how}, ${fuzzy.subjects[0]?.score})`);
+  assert(fuzzy.normalized === "open brian", "…and the resolution says what the rule made of the input");
+  const none = await resolveSubject(run, "qqqq", on);
+  assert(none.how === "none" && none.subjects.length === 0 && none.normalized === "qqqq", "none: nothing on any rung");
+  const punct = await resolveSubject(run, "...", on);
+  assert(punct.how === "none" && punct.normalized === null, "none: a name that is only punctuation normalises to NULL and no rung is tried");
+  assert((await resolveSubject(run, OB, on)).how === "id", "a uuid resolves by id");
+  assert((await resolveSubject(run, "021", on)).how === "none" && (await resolveSubject(run, "021", keep)).how === "exact",
+    "the numeric rule applies to the subject: 021 is no subject by default and is when kept");
+  const typed = await resolveSubject(run, "Open Brain", { ...on, types: ["tool"] });
+  assert(typed.how === "exact" && typed.subjects[0].id === OB, "--types does not apply to the subject: a project is found under a tool scope");
+
+  // The neighbourhood, and the control. Edges on: PostgreSQL 3+3, Anita 2+2,
+  // Bun 3+0. Edges off: PostgreSQL 3 and Bun 3 tie at 4 mentions each and the
+  // name decides, then Anita 2. Every position differs, so a build that ranks
+  // on co-mentions and calls it the graph fails here.
+  const nOn = await neighbourhood(run, [OB], on);
+  assert(names(nOn).join(",") === "PostgreSQL,Anita,Bun", `edges on: ranked by co_mentions + support (${names(nOn).join(",")})`);
+  assert(nOn[0].co_mentions === 3 && nOn[0].support === 3 && nOn[0].relations === "depends_on×3", `PostgreSQL: 3 co-mentions, 3 supporting thoughts, the relation named with its count (${JSON.stringify(nOn[0])})`);
+  assert(nOn[1].co_mentions === 2 && nOn[1].support === 2 && nOn[1].relations === "works_on×2" && nOn[1].mentions === 2, `Anita: 2 and 2, works_on both times (${JSON.stringify(nOn[1])})`);
+  assert(nOn[2].co_mentions === 3 && nOn[2].support === 0 && nOn[2].relations === null && nOn[2].mentions === 4, `Bun: 3 co-mentions, no edge, 4 mentions in all (${JSON.stringify(nOn[2])})`);
+  assert(nOn.every((n) => n.id !== NUM && n.id !== OB), "the subject is not its own neighbour, and the numeric entity is nobody's");
+  const nOff = await neighbourhood(run, [OB], off);
+  assert(names(nOff).join(",") === "Bun,PostgreSQL,Anita" && nOff.every((n) => n.support === undefined && n.relations === undefined),
+    `edges off: co-occurrence alone, no edge column read (${names(nOff).join(",")})`);
+  const nKept = await neighbourhood(run, [OB], keep);
+  assert(nKept.length === 4 && nKept[3].id === NUM && nKept[3].co_mentions === 1 && nKept[3].support === 1, `with numerics kept, 021 is the fourth neighbour at 1+1 (${names(nKept).join(",")})`);
+  const nTools = await neighbourhood(run, [OB], { ...on, types: ["tool"] });
+  assert(names(nTools).join(",") === "PostgreSQL,Bun", `--types tool around the project: the two tools (${names(nTools).join(",")})`);
+  assert((await neighbourhood(run, [OB], { ...on, limit: 1 })).length === 1, "the limit bounds the neighbourhood");
+  assert((await neighbourhood(run, [], on)).length === 0, "no subject, no neighbourhood — and no query");
+
+  // Thoughts around the subject: neighbours among the ranked ones, plus edges
+  // with the subject at one end and an in-scope entity at the other.
+  const st = await subjectThoughts(run, [OB], nOn.map((n) => n.id), on);
+  assert(st[0].id === t1 && st[0].entities === 2 && st[0].edges === 2, `t1 first: two neighbours (PostgreSQL, Anita) and two subject edges (${st[0].entities}+${st[0].edges})`);
+  const st5 = st.find((t) => t.id === t5)!;
+  assert(st5.entities === 0 && st5.edges === 0, `t5: no ranked neighbour, and its 021 edge is out of scope (${st5.entities}+${st5.edges})`);
+  assert(st.length === 5 && st.every((t) => t.id !== t6 && t.id !== t8), "only thoughts mentioning the subject are ranked");
+  const st5kept = (await subjectThoughts(run, [OB], nKept.map((n) => n.id), keep)).find((t) => t.id === t5)!;
+  assert(st5kept.entities === 1 && st5kept.edges === 1, `…kept, t5's 021 counts as a neighbour and as an edge (${st5kept.entities}+${st5kept.edges})`);
+  const stOff = await subjectThoughts(run, [OB], nOff.map((n) => n.id), off);
+  assert(stOff.every((t) => t.edges === undefined) && stOff.slice(0, 4).every((t) => t.entities === 2), "edges off: t1–t4 each mention two neighbours and no edge column is read");
+
+  // The report is deterministic, and what it prints names the caveats.
+  const r1 = await graphReport(run, "Open Brain", on);
+  const r2 = await graphReport(run, "Open Brain", on);
+  assert(JSON.stringify(r1) === JSON.stringify(r2), "two runs over the same rows are byte-identical");
+  const text = render(r1);
+  for (const needle of ["SMD-1925", "5 of 6 edge rows carry confidence 1.00", "SMD-1935", "1 entity named only by digits", "no ticket status", "No recency term", "Coverage: 7 of 7 thoughts", "db/extract-entities.ts has not run"])
+    assert(text.includes(needle), `the rendered report says: ${needle}`);
+  assert(text.includes("depends_on×3") && text.includes("exact match on the normalised name"), "…and shows the relation counts and how the subject resolved");
+  const rOff = render(await graphReport(run, "Open Brain", off));
+  assert(rOff.includes("--no-edges: ranked by co-occurrence alone") && /co_mentions  mentions/.test(rOff) && !/co_mentions  support/.test(rOff) && !/relations \(/.test(rOff),
+    "edges off, the report says it is the control and the neighbourhood table has no support or relations column");
+  assert(/co_mentions  support  mentions/.test(text) && /relations \(thoughts asserting each\)/.test(text), "…which edges on has");
+  const rNone = await graphReport(run, "qqqq", on);
+  assert(rNone.resolution?.how === "none" && rNone.neighbours?.length === 0 && rNone.thoughts.length === 0 && render(rNone).includes(`nothing within trigram similarity ${FUZZY_FLOOR}`), "an unresolved subject: empty lists and a line saying which rungs were tried");
+  const whole = await graphReport(run, null, off);
+  assert(whole.resolution === null && whole.by_mentions?.length === 4 && whole.by_degree?.length === 0 && render(whole).includes("the whole graph"), "no subject: the whole graph, and no hub list with edges off");
+
+  // The flags, and the helpers the SQL rests on.
+  const p = parseArgs(["--url", "postgres://x", "Open Brain", "--limit", "5", "--types", "tool,project", "--no-edges", "--keep-numeric", "--json"]);
+  assert(!("error" in p) && p.subject === "Open Brain" && p.opts.limit === 5 && p.opts.types.join() === "tool,project" && !p.opts.edges && !p.opts.excludeNumeric && p.json && p.url === "postgres://x", "every flag lands");
+  assert(!("error" in parseArgs([])) && (parseArgs([]) as { subject: null }).subject === null, "no argument is the whole graph");
+  for (const [argv, why] of [[["--limit", "0"], "limit"], [["--limit"], "needs a value"], [["--types", "vegetable"], "vegetable"], [["a", "b"], "one subject"], [["--bogus"], "unknown flag"], [["--types", ""], "none given"]] as [string[], string][])
+    assert("error" in parseArgs(argv) && (parseArgs(argv) as { error: string }).error.includes(why), `refused: ${argv.join(" ")} (${why})`);
+  assert(pgArray(["a", "b"]) === "{a,b}" && pgArray([]) === "{}", "pgArray builds the literal");
+  let threw = "";
+  try { pgArray(["a b"]); } catch (e) { threw = (e as Error).message; }
+  assert(/needs quoting/.test(threw), "…and refuses a value it cannot write unquoted");
+  const numeric = async (s: string) => (await db.query<{ m: boolean }>(`SELECT $1 ~ $2 AS m`, [s, NUMERIC_NAME_RE])).rows[0].m;
+  assert((await numeric("021")) && (await numeric("11434")) && (await numeric("127.0.0.1")) && (await numeric("10 000")), "the numeric rule takes bare numbers, ports, addresses");
+  assert(!(await numeric("pg16")) && !(await numeric("smd 1938")) && !(await numeric("migration 021")), "…and leaves anything with a letter");
+  assert(ENTITY_TYPES_ALL.length === ENTITY_TYPES.length && ENTITY_TYPES_ALL.every((t) => (ENTITY_TYPES as readonly string[]).includes(t)), "the script's type list is the module's");
 }
 
 // db/README.md quotes this suite's assertion total in two places ("Expected
