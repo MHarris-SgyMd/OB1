@@ -429,9 +429,10 @@ async function main(): Promise<void> {
   }
 
   const { docs, dropped } = dedupeByContent(collected);
+  const printCounts = () => { for (const s of SOURCES) if (perSource[s] !== undefined) console.log(`  ${s}: ${perSource[s]} record(s)`); };
 
   if (dryRun) {
-    for (const s of SOURCES) if (perSource[s] !== undefined) console.log(`  ${s}: ${perSource[s]} record(s)`);
+    printCounts();
     console.log(`  total: ${docs.length} to write${dropped ? `, ${dropped} duplicate-content dropped` : ""} (dry run — nothing written)`);
     return;
   }
@@ -448,7 +449,7 @@ async function main(): Promise<void> {
     await sql.close();
   }
 
-  for (const s of SOURCES) if (perSource[s] !== undefined) console.log(`  ${s}: ${perSource[s]} record(s)`);
+  printCounts();
   console.log(`  tier=${tier}  inserted ${tally.inserted}  updated ${tally.updated}  unchanged ${tally.unchanged}  skipped ${tally.skipped}${dropped ? `  (+${dropped} duplicate-content dropped)` : ""}`);
   console.log(`  next: bun db/reembed.ts --url … — embed the new rows (vectors + chunks) through the claim path.`);
 }

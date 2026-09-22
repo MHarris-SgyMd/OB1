@@ -1491,18 +1491,19 @@ else {
   // never a refusal — when the server's OB1_TIER names a different tier than the
   // database was stamped as (a working server pointed at the stable database).
   {
+    const tierRow = (out: string) => out.split("\n").find((l) => /\btier\b/.test(l))?.trim();
     const none = await run(SQL_ENV);
     assert(/·\s+tier\s+no tier recorded — db\/ingest-records\.ts has not run/.test(none.out),
-           `a brain the ingester never touched reports no tier (${none.out.split("\n").find((l) => /\btier\b/.test(l))?.trim()})`);
+           `a brain the ingester never touched reports no tier (${tierRow(none.out)})`);
 
     await claims.unsafe("INSERT INTO ob1_config (key, value) VALUES ('tier', 'stable'), ('last_ingest', '2026-09-22T00:00:00.000Z') ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value");
     const okTier = await run(SQL_ENV);
     assert(/✓\s+tier\s+stable, last ingest 2026-09-22T00:00:00\.000Z/.test(okTier.out),
-           `a stamped brain reports its tier and last ingest (${okTier.out.split("\n").find((l) => /\btier\b/.test(l))?.trim()})`);
+           `a stamped brain reports its tier and last ingest (${tierRow(okTier.out)})`);
 
     const mism = await run({ ...SQL_ENV, OB1_TIER: "working" });
     assert(/!\s+tier\s+the database is tier 'stable'.*but this server runs OB1_TIER=working — a server pointed at another tier's database/.test(mism.out),
-           `a server whose OB1_TIER names another tier than the database warns (${mism.out.split("\n").find((l) => /\btier\b/.test(l))?.trim()})`);
+           `a server whose OB1_TIER names another tier than the database warns (${tierRow(mism.out)})`);
     const mismJson = JSON.parse((await run({ ...SQL_ENV, OB1_TIER: "working" }, "--json")).out) as { ok: boolean; checks: { name: string; status: string }[] };
     assert(mismJson.ok === true && mismJson.checks.some((c) => c.name === "tier" && c.status === "warn"),
            "…carried as a warning in --json under ok:true — a tier mismatch never refuses the deploy");
