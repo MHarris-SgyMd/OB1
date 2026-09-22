@@ -104,6 +104,10 @@ const provider = Bun.serve({
 process.env.OB1_STORE = "sql";
 process.env.DATABASE_URL = URL_;
 process.env.OB1_LLM_BASE_URL = `http://localhost:${provider.port}/v1`;
+// Declared local to the egress gate (SMD-1903): the stub is on this box, and
+// the gate reads the flag, never the address — without it the default, deny,
+// refuses every call to it. test-egress.ts holds that case.
+process.env.OB1_LLM_LOCAL = "1";
 process.env.OB1_EMBEDDING_MODEL = EMB_MODEL;
 process.env.OB1_EMBEDDING_DIM = String(DIM);
 process.env.OB1_CHUNK_TOKENS = String(BATCH - 200);

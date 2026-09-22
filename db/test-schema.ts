@@ -4514,15 +4514,15 @@ console.log("\n[40] Every schemas/*.sql applies to a migrated brain with no Supa
   // queue) and columns to it (enhanced-thoughts, provenance-chains), and the
   // sections above must not meet them. Fresh migrations, then every SQL file
   // under schemas/ in the order test-support's communitySchemaFiles gives —
-  // the five with a prerequisite first, the rest alphabetical. Twelve of the
-  // seventeen ended with GRANTs TO service_role, RLS and policies for it, and
+  // the four with a prerequisite first, the rest alphabetical. Most of the
+  // upstream files ended with GRANTs TO service_role, RLS and policies for it, and
   // two with policies on auth.uid(): on any Postgres that is not Supabase the
   // first such statement stopped the file (`role "service_role" does not
   // exist`). [31] used to create the three roles for the one file it applied;
   // nothing does now.
   const SCHEMAS = SCHEMAS_DIR;
   const schemaFiles = communitySchemaFiles();
-  assert(schemaFiles.length >= 17 && SCHEMA_FILES_FIRST.every((f) => schemaFiles.includes(f)), `${schemaFiles.length} SQL files under schemas/ (17 when this was written; the set can only grow), the five with prerequisites among them`);
+  assert(schemaFiles.length >= 14 && SCHEMA_FILES_FIRST.every((f) => schemaFiles.includes(f)), `${schemaFiles.length} SQL files under schemas/ (17 when written, 14 after SMD-1924 removed three; the set otherwise grows), the four with prerequisites among them`);
 
   // The rule check-fork-consistency holds these files to, from inside the
   // suite: none runs a Supabase-ism, comments excepted. And the strip's teeth,

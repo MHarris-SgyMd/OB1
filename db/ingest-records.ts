@@ -22,7 +22,7 @@
  *   bun db/reembed.ts        --url postgres://…            # rows → vectors + chunks
  *
  * Sources, and what each needs:
- *   fork    — FORK.md's numbered `### N.` change sections. In the tree; no flag.
+ *   fork    — the fork's changes, one changes/*.md file each (SMD-1917). In the tree; no flag.
  *   commit  — git commit messages since the upstream pin. In the tree; no flag.
  *   linear  — a corpus dump built by evals/build-linear-corpus.ts. Needs --linear.
  *   memory  — the *.md memory files (not MEMORY.md, the index). Needs --memory-dir
@@ -51,6 +51,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 import { loadLinearCorpus, linearThoughtId, linearThoughtText, type LinearDoc } from "../evals/linear-corpus.ts";
+import { parseFragment, fragmentSection } from "../scripts/fragments.mjs";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -91,41 +92,36 @@ export function recordId(source: Source, key: string): string {
 // ---------------------------------------------------------------------------
 
 /**
- * FORK.md's numbered change sections. A change is a heading `### N. Title`; its
- * body runs to the next `## `/`### ` heading or the end. The section text
- * (heading included) is the content; the change number and the first ticket it
- * cites are the metadata. Prose sections without a leading number (`### Versioning`,
- * `### Deploying`) are design front-matter, not changes, and are skipped.
+ * One changes/*.md file as a fork Doc. SMD-1917 moved the fork's changes out of
+ * FORK.md into one file each, in two shapes this reader handles through the
+ * fragment parser they share with the release step (scripts/fragments.mjs):
  *
- * SMD-1917 (unpushed) replaces these sections with changes/*.md fragments; when
- * it lands, this adapter reads that directory instead. Until then FORK.md is the
- * source of record for the fork's changes.
+ *   - A rendered, numbered change (`NNN-slug.md`, e.g. 018-…): no front matter,
+ *     the file opens `# N. Title` and the whole file is the change. The number
+ *     comes from the filename, the ticket from the text.
+ *   - A pending fragment (`smd-NNNN.md`): front matter + `## Changelog` + `## FORK`.
+ *     The `## FORK` body is the change as written; the ticket(s) come from the
+ *     front matter, and the change number is not assigned until release (null).
+ *
+ * FORK.md itself is now an index and design record, not the changes, so it is no
+ * longer read here (SMD-1806 / SMD-1917).
  */
-export function forkDocs(forkMd: string): Doc[] {
-  const lines = forkMd.split("\n");
-  const docs: Doc[] = [];
-  let cur: { num: number; buf: string[] } | null = null;
-  const flush = () => {
-    if (!cur) return;
-    const content = cur.buf.join("\n").trim();
-    const ticket = content.match(/\bSMD-\d+\b/)?.[0] ?? null;
-    docs.push({ id: recordId("fork", String(cur.num)), content, source: "fork", meta: { change: cur.num, ticket } });
-    cur = null;
-  };
-  for (const line of lines) {
-    const head = line.match(/^### (\d+)\.\s/);
-    if (head) {
-      flush();
-      cur = { num: Number(head[1]), buf: [line] };
-    } else if (/^##\s|^### /.test(line)) {
-      // Any other heading at ## or ### depth ends the current change.
-      flush();
-    } else if (cur) {
-      cur.buf.push(line);
-    }
+export function forkDocFromFile(slug: string, text: string): Doc {
+  const parsed = parseFragment(text);
+  if (parsed) {
+    const fork = fragmentSection(parsed.body, "FORK") ?? parsed.body.trim();
+    const tickets = Array.isArray(parsed.fm.tickets) ? (parsed.fm.tickets as string[]) : [];
+    return { id: recordId("fork", slug), content: fork, source: "fork", meta: { change: null, ticket: tickets[0] ?? null, file: slug } };
   }
-  flush();
-  return docs;
+  const change = Number(slug.match(/^(\d+)-/)?.[1]) || null;
+  return { id: recordId("fork", slug), content: text.trim(), source: "fork", meta: { change, ticket: text.match(/\bSMD-\d+\b/)?.[0] ?? null, file: slug } };
+}
+
+/** Every fork change in the changes/ directory (its README aside). */
+export function forkDocs(changesDir: string): Doc[] {
+  return readdirSync(changesDir)
+    .filter((f) => f.endsWith(".md") && f !== "README.md")
+    .map((f) => forkDocFromFile(f.replace(/\.md$/, ""), readFileSync(join(changesDir, f), "utf8")));
 }
 
 /**
@@ -295,24 +291,12 @@ function selfCheck(): number {
   let bad = 0;
   const ok = (cond: boolean, label: string) => { if (!cond) { console.error(`FAIL ${label}`); bad++; } };
 
-  const fork = forkDocs([
-    "## The pin",
-    "not a change",
-    "### Versioning",
-    "prose, no number — skipped",
-    "### 18. Long captures stay searchable",
-    "the body of eighteen (SMD-1175)",
-    "more of eighteen",
-    "### 19. Default embedding model",
-    "the body of nineteen",
-    "## Drift guards",
-    "trailing prose",
-  ].join("\n"));
-  ok(fork.length === 2, `two numbered changes parsed, got ${fork.length}`);
-  ok(fork[0].meta.change === 18 && fork[0].meta.ticket === "SMD-1175", "change 18 number + first ticket");
-  ok(/\(SMD-1175\)\nmore of eighteen/.test(fork[0].content), "a change keeps its whole body");
-  ok(fork[1].meta.change === 19 && fork[1].meta.ticket === null, "a change with no ticket carries null");
-  ok(!fork.some((d) => /prose, no number/.test(d.content)), "un-numbered prose sections are not changes");
+  const numbered = forkDocFromFile("018-long-captures-stay-searchable", "# 18. Long captures stay searchable — `thought_chunks`\n\nthe body of eighteen (SMD-1175).\nmore of eighteen");
+  ok(numbered.source === "fork" && numbered.meta.change === 18 && numbered.meta.ticket === "SMD-1175", "a numbered rendered change: number from the filename, ticket from the text");
+  ok(/# 18\. Long captures/.test(numbered.content) && /more of eighteen/.test(numbered.content), "…and its whole file is the content");
+  const pending = forkDocFromFile("smd-1806", "---\ntype: added\nbump: minor\ntickets: [SMD-1806]\nmigrations: []\n---\n\n## Changelog\n\none line (SMD-1806)\n\n## FORK\n\nThe title line (SMD-1806)\n\nthe record body.");
+  ok(pending.meta.change === null && pending.meta.ticket === "SMD-1806", "a pending fragment: no change number yet, ticket from the front matter");
+  ok(pending.content.startsWith("The title line (SMD-1806)") && /the record body/.test(pending.content) && !/## Changelog/.test(pending.content), "…and the content is the `## FORK` body alone");
 
   const fm = memoryFrontmatter("---\nname: a-slug\ndescription: a one-line summary\nmetadata:\n  modified: 2026-09-22T03:00:00.000Z\n---\n\nthe body\nline two\n");
   ok(fm.name === "a-slug" && fm.description === "a one-line summary" && fm.modified === "2026-09-22T03:00:00.000Z", "frontmatter fields read");
@@ -408,7 +392,7 @@ async function main(): Promise<void> {
   const note = (s: Source, msg: string) => console.error(`  ${s}: ${msg}`);
 
   if (wanted.has("fork")) {
-    const docs = forkDocs(readFileSync(join(REPO_ROOT, "FORK.md"), "utf8"));
+    const docs = forkDocs(join(REPO_ROOT, "changes"));
     perSource.fork = docs.length;
     collected.push(...docs);
   }

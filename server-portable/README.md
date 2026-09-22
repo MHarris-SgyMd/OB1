@@ -49,11 +49,33 @@ chat only, beside Ollama:
 | `OB1_EMBEDDING_MODEL` / `OB1_EMBEDDING_DIM` | `openai/text-embedding-3-small` / 1536 | Must match the column; permanent once there is data |
 | `OB1_METADATA_MODEL` | `openai/gpt-4o-mini` | No schema dependency — safe to change anytime |
 | `OB1_JUDGE_MODEL` | the metadata model | The supersession judge's model (`db/consolidate.ts`), for running the judge — the harder task — on a stronger model than every capture's tagging; a model the chat endpoint serves. The pass key carries it, so a change starts a fresh pass (SMD-1901) |
+| `OB1_LLM_LOCAL` / `OB1_CHAT_LOCAL` | unset (remote) | `1` declares the embeddings / chat endpoint on this machine or its private network, so the egress gate does not apply to it. Declared, never guessed from the address: a loopback URL with the flag unset is remote to the gate. A chat endpoint at the same base is the same box: either knob declares it (SMD-1903) |
+| `OB1_EGRESS_POLICY` | `deny` | What may leave the box for an endpoint not declared local: `deny` (only what an `OB1_EGRESS_ALLOW` term names), `allow` (everything but what an `OB1_EGRESS_DENY` term names), `off`. A knob that does not parse fails preflight and closes the gate |
+| `OB1_EGRESS_ALLOW` / `OB1_EGRESS_DENY` | none | Comma-separated `unit:value` terms — `actor` (the access key's name), `source`, `type`, `topic` (a row's metadata), `marker` (a literal in the text) — read under `deny` and `allow` respectively |
 
 The two calls fail differently and deliberately. An embedding failure fails the
 capture, because a thought with no vector is invisible to search. A metadata
 failure lets the capture succeed and records why, because the content is the
 durable part and the tags are re-derivable.
+
+A call the **egress gate** refuses is neither (`egress.ts`, SMD-1903). The
+server asks the gate before either call and makes only the ones it allows: a
+refused embedding lands the capture with its text and fingerprint and no vector,
+the reply says so and names the rule, and the decision is recorded on the
+thought's audit row (`thought_audit.actor_context.egress`); a refused tagging
+call lands it untagged — no topics, no type — with `metadata_extraction_failed:
+egress_denied`, and a re-capture of a tagged thought keeps its tags and vector
+(only the marker merges in — and stays: the merge cannot remove a key, so a
+`metadata_extraction_failed` marker on a thought that carries real tags is
+informational and may be stale, as for the other failure reasons). An edit is
+judged on the row's own metadata; a capture is judged before the write, on
+the actor and the text alone. A refused search names `search_thoughts_keyword`, which makes no
+model call. Every dialler — `providerCall`, the judge, the entity extractor —
+asks the gate itself before the request, so no call the fork makes is ungated;
+a refusal there is a `ProviderError` of kind `egress`. Deny is the default and
+"local" is declared, never guessed: a stack from before the gate that points
+at Ollama by address needs `OB1_LLM_LOCAL=1`, and preflight's `embeddings
+egress` row says so with the line.
 
 `preflight.ts --deep` exercises both against the live endpoint, checks the
 embedding width matches the schema, and checks the metadata model actually honours
@@ -290,6 +312,15 @@ from, so the guards are unnecessary and absent.
 the default store is what it drives — and `SUPABASE_URL` deleted from the
 environment, and drives the tools over real JSON-RPC against real Postgres. Only the model provider is stubbed, so the suite
 stays hermetic and free.
+
+`test-egress.ts` holds the egress gate (SMD-1903): the policy's parsing, "local"
+as a declaration, every term unit, a second opinion that can only refuse, the
+three diallers refusing before any request reaches a counting stub — and the
+real server under the default, where a capture from a key no term names lands
+without a vector and says why at zero requests while the key a term names
+reaches the stub. Every other suite that boots the server against a stub
+declares it local (`OB1_LLM_LOCAL=1`), which is the upgrade every stack from
+before the gate makes.
 
 **Not yet ported:** `test-stats-pagination.mjs` and `test-capture-atomicity.mjs`
 still live in `../server/` and still test mirrors of the Deno build. They are now

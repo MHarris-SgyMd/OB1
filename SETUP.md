@@ -109,7 +109,8 @@ Both are configurable, and both speak the OpenAI-compatible shapes that Ollama
 exposes at `/v1` — so a fully local brain is a URL change, not a code change:
 
 ```bash
-# deploy/.env — every line here is the default; the profile needs nothing set
+# deploy/.env — every commented line is the default; the profile needs ONE line set
+OB1_LLM_LOCAL=1                             # the endpoint is on this box — declared, never guessed (below)
 # OB1_LLM_BASE_URL=http://ollama:11434/v1   # compose's own fallback: the profile's service
 # OB1_EMBEDDING_MODEL=qwen3-embedding:4b
 # OB1_EMBEDDING_DIM=1024
@@ -147,7 +148,47 @@ than the compose network, and skip the profile:
 ```bash
 # deploy/.env
 OB1_LLM_BASE_URL=http://host.containers.internal:11434/v1   # docker: host.docker.internal
+OB1_LLM_LOCAL=1                                              # …and it is on this box
 ```
+
+#### What may leave the box
+
+Every one of those calls carries a thought's full text. Before any of them is
+made, the **egress gate** (`server-portable/egress.ts`, SMD-1903) decides
+whether the text may reach the endpoint at all, and the policy is yours to
+state in words rather than implied by which URL you typed:
+
+- `OB1_EGRESS_POLICY=deny` — **the default.** Nothing reaches an endpoint that
+  is not declared local unless an `OB1_EGRESS_ALLOW` term names it.
+- `OB1_EGRESS_POLICY=allow` — everything leaves unless an `OB1_EGRESS_DENY`
+  term names it.
+- `OB1_EGRESS_POLICY=off` — no gate.
+
+"Local" is **declared, never guessed** from the address: `OB1_LLM_LOCAL=1` says
+the embeddings endpoint is on this machine or its private network, and
+`OB1_CHAT_LOCAL=1` says the same of a chat endpoint of its own (one at the same
+base is the same box: either knob declares it). A loopback URL, `host.containers.internal` and the
+stack's own `ollama` service are all remote to the gate until the flag says
+otherwise — which is why both blocks above carry the line. A refused capture is
+not lost: it lands with its text and fingerprint and no vector, the reply says
+so and names the rule, the decision sits on the row's audit entry, and a later
+`db/reembed.ts` pass against an endpoint the gate allows fills the vector in. A
+refused search says which tool works without a model call
+(`search_thoughts_keyword`). Terms are `unit:value`, comma-separated — `actor`
+(the access key's name), `source`, `type`, `topic` (a row's metadata, known to
+the passes and the re-embed, not at a first capture), `marker` (a literal in the
+text) — and a term that does not parse fails preflight and closes the gate.
+Preflight prints the mode and, per endpoint, what leaves; `deploy/.env.example`
+has the block.
+
+**With protected health information in the brain, keep every endpoint on the
+box** — Options A or B above, both declared local — and leave the policy at its
+default. The gate is deterministic on purpose: a classifier that tells PHI from
+not-PHI 98% of the time is a compliance failure two times in a hundred, so no
+detector may widen what leaves; one may only narrow it (the second-opinion hook
+in `egress.ts`). Until a local model strong enough for every task is in place
+(SMD-1880, SMD-1901), a hosted chat model behind an allowlist is the only
+half-way shape, and the allowlist names what may leave, not what may not.
 
 #### Half local: embeddings at home, tagging elsewhere
 
@@ -161,11 +202,13 @@ only sits beside Ollama:
 ```bash
 # deploy/.env — local embeddings, hosted chat
 OB1_LLM_BASE_URL=http://host.containers.internal:11434/v1
+OB1_LLM_LOCAL=1                              # the embeddings endpoint is on this box; the chat one is not
 OB1_EMBEDDING_MODEL=qwen3-embedding:4b
 OB1_EMBEDDING_DIM=1024
 OB1_CHAT_BASE_URL=https://openrouter.ai/api/v1
 OB1_CHAT_API_KEY=sk-or-…
 OB1_METADATA_MODEL=openai/gpt-4o-mini        # a model the CHAT endpoint serves
+OB1_EGRESS_ALLOW=marker:#public              # what may leave for tagging — under the default nothing else does
 ```
 
 A credential belongs to an endpoint: a different chat endpoint gets
@@ -174,8 +217,11 @@ beside a hosted embedder is not handed the hosted key. `preflight.ts` prints a
 row for each endpoint, fails a hosted one with no key of its own, and with
 `--deep` probes each by name — a chat endpoint that is down fails its own row
 while the embeddings row still passes. Note what leaves the host under this
-shape: every capture's full text, for tagging. Nothing here decides which
-content may (SMD-1903); the choice of endpoint is the whole policy.
+shape: a capture's full text, for tagging — and only the captures the gate
+lets through. Under the default policy the hosted chat endpoint is refused for
+every thought until an `OB1_EGRESS_ALLOW` term names what may go (above); the
+last line does that for thoughts carrying a `#public` marker, and the rest land
+untagged with the reason recorded.
 
 #### These two were chosen by measurement
 
@@ -360,6 +406,9 @@ silently stores no topics, people or type; `scripts/check-fork-consistency.mjs`
 fails on that combination in the defaults. To mix them on purpose — local
 embeddings, hosted tagging — give the chat calls their own endpoint with
 `OB1_CHAT_BASE_URL` and `OB1_CHAT_API_KEY`; see "Running the models locally"
+below. Whichever you choose, say which endpoints are on this box
+(`OB1_LLM_LOCAL=1`, `OB1_CHAT_LOCAL=1`): by default a thought's text never
+reaches an endpoint that is not declared local — see "What may leave the box"
 below.
 
 ### 2. Bring it up

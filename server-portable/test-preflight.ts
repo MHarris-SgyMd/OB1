@@ -1520,7 +1520,7 @@ else {
   assert(Array.isArray(parsed.checks) && parsed.checks.length > 5, "--json lists every check for a pipeline to consume");
 }
 
-// [6] and [7] need no database: the provider rows print from configuration
+// [6], [7] and [8] need no database: the provider rows print from configuration
 // alone, and the --deep probes run whether or not the data layer came up. A
 // store that is configured and unreachable, and no credential anywhere.
 const DB_DOWN = { ...NO_DB, OB1_STORE: "sql", DATABASE_URL: "postgres://u:p@127.0.0.1:1/x", MCP_ACCESS_KEY: "x".repeat(64) };
@@ -1624,6 +1624,81 @@ console.log("\n[7] The supersession judge's model is reported, and probed under 
   assert(/✓\s+judge model\s+meta-7b \(OB1_JUDGE_MODEL\) — the same as the metadata model\s*$/m.test(same.out), "the same model in both knobs: the row says so");
   assert(chatModels.length === 1, `…and it is probed once (${chatModels.length})`);
   stub.stop();
+}
+
+console.log("\n[8] The egress gate is reported: the mode, and per endpoint what leaves — declared local, the upgrade case, or refused (SMD-1903)");
+{
+  const LOCAL = "http://127.0.0.1:11434/v1";
+  const HOSTED = "https://openrouter.ai/api/v1";
+  const row = (out: string, name: string) => out.split("\n").find((l) => new RegExp(`^\\s*[✓✗!·]\\s+${name}\\s`).test(l)) ?? "";
+  /** Every gate knob unset, whatever the shell has. */
+  const GATE = { OB1_EGRESS_POLICY: undefined, OB1_EGRESS_ALLOW: undefined, OB1_EGRESS_DENY: undefined, OB1_LLM_LOCAL: undefined, OB1_CHAT_LOCAL: undefined };
+
+  // The upgrade case: a loopback endpoint nothing declared. The policy row
+  // says deny is the default; the endpoint row warns with the one-line fix.
+  const undeclared = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: LOCAL });
+  assert(/✓\s+egress policy\s+deny \(the default\) — a thought's text reaches an endpoint not declared local only under an OB1_EGRESS_ALLOW term; no terms/.test(undeclared.out),
+         "unset: the policy row says deny, the default, no terms");
+  assert(/!\s+embeddings egress\s+http:\/\/127\.0\.0\.1:11434\/v1 looks local but is not declared so — the gate treats it as remote, and under deny with no allow term every embeddings and chat call is refused: captures land without a vector/.test(undeclared.out),
+         "…a loopback endpoint nothing declared warns as the upgrade case, naming the consequence");
+  assert(/→ Set OB1_LLM_LOCAL=1 if this endpoint is on this machine/.test(undeclared.out), "…with the one-line fix");
+  assert(row(undeclared.out, "chat egress") === "", "…and one row when chat is the embeddings endpoint");
+  const declared = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: LOCAL, OB1_LLM_LOCAL: "1" });
+  assert(/✓\s+embeddings egress\s+http:\/\/127\.0\.0\.1:11434\/v1 is declared local \(OB1_LLM_LOCAL\) — the embeddings and chat text stays on the box; the gate does not apply/.test(declared.out),
+         "declared: ok, naming the knob");
+
+  // Hosted under deny with no terms: every call refused, said with the
+  // consequence and the ways out; with terms, what leaves and under what.
+  const hostedDeny = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: HOSTED, OPENROUTER_API_KEY: "k" });
+  assert(/!\s+embeddings egress\s+every embeddings and chat call to openrouter\.ai is refused — deny with no OB1_EGRESS_ALLOW term — so captures land without a vector/.test(hostedDeny.out),
+         "hosted, deny, no terms: warns that every call is refused");
+  assert(/→ Declare the endpoint local \(OB1_LLM_LOCAL=1\) if it is, name what may leave in OB1_EGRESS_ALLOW/.test(hostedDeny.out), "…with the ways out");
+  const hostedTerms = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: HOSTED, OPENROUTER_API_KEY: "k", OB1_EGRESS_ALLOW: "actor:chatgpt, marker:#public" });
+  assert(/✓\s+egress policy\s+deny \(the default\) — .*; 2 term\(s\): actor:chatgpt, marker:#public/.test(hostedTerms.out), "…with terms the policy row lists them");
+  assert(/✓\s+embeddings egress\s+the embeddings and chat text leaves to openrouter\.ai only under an OB1_EGRESS_ALLOW term; otherwise captures land/.test(hostedTerms.out),
+         "…and the endpoint row says what leaves and under what");
+  const allow = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: HOSTED, OPENROUTER_API_KEY: "k", OB1_EGRESS_POLICY: "allow" });
+  assert(/✓\s+egress policy\s+allow — .*; no terms/.test(allow.out) && /✓\s+embeddings egress\s+the full text of every embeddings and chat call leaves to openrouter\.ai — no OB1_EGRESS_DENY term holds any back/.test(allow.out),
+         "allow with no deny terms: says everything leaves, in words");
+  const off = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: HOSTED, OPENROUTER_API_KEY: "k", OB1_EGRESS_POLICY: "off" });
+  assert(/!\s+egress policy\s+off — nothing decides what leaves the box/.test(off.out) && /✓\s+embeddings egress\s+the full text of every embeddings and chat call leaves to openrouter\.ai — the gate is off/.test(off.out),
+         "off: the policy row warns, the endpoint row says the text leaves");
+  assert(!/✗\s+egress/.test(off.out), "…a warning, not a failure: the operator may choose it");
+
+  // A knob that does not parse fails by name, and the endpoint row says the
+  // gate is closed meanwhile.
+  const bad = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: HOSTED, OPENROUTER_API_KEY: "k", OB1_EGRESS_POLICY: "allow", OB1_EGRESS_DENY: "marker:#phi,nonsense" });
+  assert(bad.code === 1 && /✗\s+egress policy\s+OB1_EGRESS_DENY: `nonsense` is not unit:value \(units: actor, source, type, topic, marker\) — the gate fails closed \(deny\) until this is fixed/.test(bad.out),
+         "a term that does not parse fails by name");
+  assert(/!\s+embeddings egress\s+every embeddings and chat call to openrouter\.ai is refused while the policy does not parse/.test(bad.out), "…and the endpoint row says every call is refused meanwhile");
+  // Terms in the knob the mode does not read: a warning naming both knobs.
+  const unread = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: LOCAL, OB1_LLM_LOCAL: "1", OB1_EGRESS_DENY: "marker:#phi" });
+  assert(/!\s+egress policy\s+OB1_EGRESS_DENY has 1 term\(s\) but the mode is deny, which reads OB1_EGRESS_ALLOW — they decide nothing/.test(unread.out) && /→ Move them to OB1_EGRESS_ALLOW, or change OB1_EGRESS_POLICY\./.test(unread.out),
+         "deny terms under deny: warned as unread, with the knob the mode reads");
+  assert(!/egress policy\s+.*decide nothing/.test(declared.out), "…and no such warning when no term is unread");
+  // The upgrade-case warning carries the consequence for the mode in force.
+  const undeclaredTerms = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: LOCAL, OB1_EGRESS_ALLOW: "marker:#public" });
+  assert(/looks local but is not declared so — the gate treats it as remote, and under deny every embeddings and chat call no OB1_EGRESS_ALLOW term matches is refused/.test(undeclaredTerms.out),
+         "…undeclared under deny WITH terms says what is refused");
+  const undeclaredOff = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: LOCAL, OB1_EGRESS_POLICY: "off" });
+  assert(/looks local but is not declared so — the gate treats it as remote; the gate is off, so nothing is refused today/.test(undeclaredOff.out), "…and under off that nothing is refused today");
+  // Either knob declares a shared endpoint; the row names the one that did.
+  const chatKnob = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: LOCAL, OB1_CHAT_LOCAL: "1" });
+  assert(/✓\s+embeddings egress\s+http:\/\/127\.0\.0\.1:11434\/v1 is declared local \(OB1_CHAT_LOCAL\) — the embeddings and chat text stays on the box/.test(chatKnob.out),
+         "OB1_CHAT_LOCAL alone declares the one endpoint both calls use, and the row names that knob");
+  const badMode = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: LOCAL, OB1_LLM_LOCAL: "1", OB1_EGRESS_POLICY: "maybe" });
+  assert(badMode.code === 1 && /✗\s+egress policy\s+OB1_EGRESS_POLICY: `maybe` is not one of deny, allow, off/.test(badMode.out),
+         "a mode outside the three fails by name, even with every endpoint declared local");
+
+  // Two endpoints, two rows, each with its own knob; a same-base chat
+  // endpoint inherits and names the knob that declared it.
+  const split = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: LOCAL, OB1_LLM_LOCAL: "1", OB1_CHAT_BASE_URL: HOSTED, OB1_CHAT_API_KEY: "k" });
+  assert(/✓\s+embeddings egress\s+http:\/\/127\.0\.0\.1:11434\/v1 is declared local \(OB1_LLM_LOCAL\) — the embeddings text stays/.test(split.out), "split: the embeddings row is its own");
+  assert(/!\s+chat egress\s+every chat call to openrouter\.ai is refused — deny with no OB1_EGRESS_ALLOW term — so captures land untagged/.test(split.out) && /→ Declare the endpoint local \(OB1_CHAT_LOCAL=1\)/.test(split.out),
+         "…and the chat row names its own knob and consequence");
+  const inherit = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: LOCAL, OB1_LLM_LOCAL: "1", OB1_CHAT_API_KEY: "k" });
+  assert(/✓\s+chat egress\s+http:\/\/127\.0\.0\.1:11434\/v1 is declared local \(OB1_LLM_LOCAL\)/.test(inherit.out),
+         "a chat endpoint at the same base with its own key inherits the declaration and names the knob that made it");
 }
 
 report();
