@@ -1556,6 +1556,120 @@ measures both that awaited INSERT's cost and the prune plan flipping to an index
 scan. A cheaper insert path (a BRIN in place of the btree, the log being
 append-only with a monotonic `logged_at`) is a tracked follow-up (SMD-1950).
 
+## The board in the brain (SMD-1954)
+
+`ingest-records.ts` above loads the Linear board from a corpus dump, once, for a
+rebuild. The fork's running brain needs the board **continuously**: a ticket filed
+while a session works should be findable in the next, and one that moves to Done
+should read Done. `sync-linear.ts` is that sweep, and `deploy/compose.yaml`'s
+`board-sync` profile runs it on a schedule:
+
+```bash
+bun sync-linear.ts --url postgres://…                # one pass
+bun sync-linear.ts --url … --dry-run                 # what a pass would write
+bun sync-linear.ts --url … --audit                   # the lockstep census: missing / stale / extra; exit 1 when any of the three
+bun sync-linear.ts --url … --loop                    # a pass every OB1_BOARD_SYNC_INTERVAL seconds (300)
+bun sync-linear.ts --url … --full                    # re-render and compare every issue, not only the moved ones
+bun sync-linear.ts --url … --only SMD-1954,SMD-1865  # these identifiers, whatever the plan says of them
+bun sync-linear.ts --self-check                      # the pure rules and the write decisions, no network, no database
+```
+
+`LINEAR_API_KEY` (a personal API key; the tool only reads) comes from the
+environment or a `.env` on `db/env.ts`'s search path; `OB1_LINEAR_INITIATIVE`
+(default `Open Brain`, an exact name or a prefix naming exactly one) says whose
+projects are the board; the provider knobs are the server's, resolved as
+`reembed.ts` resolves them.
+
+**The brain is the state.** A pass lists every issue's identifier and `updatedAt`
+(two requests for three hundred), reads the brain's ticket rows, and the diff is
+the work: an identifier with no row is **missing** and is captured; one whose row's
+`linear_updated_at` is older than Linear's (or absent — a hand capture, adopted on
+first sight) is **stale** and is fetched in full and compared; the rest are left
+alone. A ticket row is one whose `metadata.issue` names an identifier (this tool's
+rows and `ingest-records.ts`'s — one key, so a rebuilt stable brain is adopted, not
+duplicated) or, before adoption, whose text opens with the hand-capture header
+(`SMD-N — title` / `Project: … · Status: …` / the Linear URL). A note that merely
+begins with an identifier is not one and is never touched. There is no done-file
+to lose; a pass killed halfway is finished by the next.
+
+**What a write is.** New: `captureThought` with the vector, the extracted tags and
+the facets Linear knows over them (`source: linear`, `issue`, `project`, `status`,
+`status_type`, `priority`, `labels`, `parent`, `url`, `linear_updated_at`).
+Changed text: `updateThought` with a fresh vector, fresh tags, and every facet over
+them, one statement. Same text, facets behind (the adoption case): a metadata patch and no
+model call — on the dogfood brain 224 of 268 hand captures rendered byte-identical
+and cost nothing but the patch. Every write goes through `server-portable/store-sql.ts`
+as the actor `board-sync` via `db/sync-linear.ts`, the egress gate asked first
+(refused, the row lands without a vector and the audit row says so), so a synced
+ticket differs from a captured one in `metadata.source` alone. Linear's autolink
+markup (`<issue …>SMD-x</issue>`) is stripped to the identifier before storing
+(SMD-1865's first item; the typed edges are its second and stay there). "Same
+text" is judged by `content_fingerprint_of` — the rule `update_thought` refuses
+duplicates by, asked of the database — so a paste with a trailing newline is the
+same text. When one identifier has several ticket rows — the hand re-captures —
+the **head** is the row that already holds Linear's text by that rule, else the
+row no other row of the group supersedes (the chain is the truth; age is the
+tiebreak), and the group is chained under it by `supersedes` (032): head → next →
+… → last, every differing pointer cleared first and then set, so no step closes a
+loop. A pointer the hand set to a thought outside the group is kept at the chain's
+tail, not erased. So a ticket moved back to a state an older paste recorded costs
+no model call: that paste becomes the head and its facets are patched. Nothing is
+deleted; the head's own write lands first, and a pointer the database refuses
+(a hand-set chain through an outside thought that loops back) is reported under
+*chain refusals*, never a reason the text did not land. When none of the ticket's
+rows holds Linear's text but another thought does, that thought is read: one
+that reads as this ticket, or as no ticket at all (a paste made after the row was
+adopted, with or without the header the grammar reads), is folded in as the head
+and chained; a text under ANOTHER ticket's claim is an outside holder, refused
+before any model call and never re-keyed — the facets are patched without
+`linear_updated_at` and `text_refused_by` names it, once, so the ticket stays
+*stale* in `--audit` and is retried each pass, at one lookup and no write, until
+the holder moves — reported under *refused*; the marker is cleared, on the head
+and on any twin, once the head holds the text. A new ticket whose text a stray
+row already holds (a paste the header grammar did not recognise) adopts that row
+with a patch of the facets that differ. One issue the API refuses in a batch fails
+that identifier alone, under *errors*; a batch Linear refuses whole (a rate limit)
+ends the fetch and the batches behind it are reported not attempted, for the next
+pass. The census carries each issue's project, state and label names beside its
+`updatedAt`, so a rename — which never bumps `updatedAt` — makes the ticket stale
+on the next pass. When the text moves, the tags are extracted
+again with the vector (a fallback tag set from a provider outage would otherwise
+stand on current text forever), every facet goes over them (a `status` or an
+`issue` the model read out of the description must not win), and a stale
+`metadata_extraction_failed` the fresh tags do not carry is set to null — the
+nearest a shallow merge comes to removing it (`tagsOverExisting`, the rule in
+`server-portable/metadata.ts` every writer that edits a tagged row shares). A row
+whose tags fell back at capture, with its text unchanged, is not this tool's to
+repair: that is SMD-1975's retag worker, for every thought and not ticket rows
+alone; a row that landed without a vector is `reembed.ts`'s, as any vectorless row
+is. Labels render and store
+sorted, whatever order Linear returns them. A ticket deleted in Linear (trashed)
+falls out of the census and its row reads *extra*; a completed one Linear
+archived stays a ticket. `--only` syncs the identifiers named whatever the plan
+says of them, and names one the census lacks; `--audit` takes no `--only`. The
+scheduled path reads ticket rows by their claim (`metadata ? 'issue'`, indexable)
+and adds the header scan over every thought's text — a sequential scan — only
+when that plan has a *missing* identifier, since a hand paste is the one thing
+that could hold it; `--full` and `--audit` always scan. Under `--loop`, SIGTERM
+ends the pass after the issue in hand (the compose service allows 60 s); the next
+pass finds what was left.
+
+**Two writers of one identity.** `ingest-records.ts --linear <dump>` and this tool
+both key a ticket on `metadata.issue`, but render different text (the corpus's
+`title / text` against the board header) and the ingester replaces `metadata`
+wholesale — so on one brain they would rewrite each other's rows on every run. A
+brain this tool keeps takes the board from it: rebuild that brain with
+`ingest-records.ts` and no `--linear` (the fork, commit and memory sources), then
+one sync pass fills the board; the corpus dump stays the eval harnesses'
+(SMD-1958 has the one-renderer resolution).
+
+**Not removed, not commented.** An issue deleted in Linear or moved out of the
+initiative keeps its row (`--audit` lists it under *extra*; `ingest-records.ts` has
+the same rule). Comments are the corpus builder's for the retrieval eval; the board
+mirror keeps the hand captures' shape, which had none. A Linear webhook would be
+exact and immediate; it needs an inbound URL (SMD-1846) and SMD-1862's handler,
+which would call this tool's `syncIssue` with the one identifier it was told.
+
 ## Testing
 
 Two suites cover most of it, because one of them cannot reach everything, and a
