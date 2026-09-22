@@ -31,6 +31,16 @@ export const ENTITY_PROMPT_VERSION = 1;
 export const ENTITY_TYPES = ["person", "organization", "project", "tool", "topic", "place"] as const;
 export type EntityType = (typeof ENTITY_TYPES)[number];
 
+/**
+ * SMD-1935's noise, as a POSIX pattern over `normalized_name`: the extractor
+ * mints bare migration and port numbers as `person`/`tool`/`project` rows.
+ * Digits, then any run of digits, dots, colons and spaces — "021", "11434",
+ * "127.0.0.1", "10 000"; "pg16" and "smd 1938" have letters and stay. A
+ * read-side rule every reader of the graph can share (db/graph-centrality.ts
+ * first) until that ticket refuses such names at record_thought_entities.
+ */
+export const NUMERIC_NAME_RE = "^[0-9][0-9 .:]*$";
+
 export const RELATIONS = ["works_on", "uses", "member_of", "located_in", "depends_on", "related_to", "co_occurs_with"] as const;
 export type Relation = (typeof RELATIONS)[number];
 
