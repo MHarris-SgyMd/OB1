@@ -166,12 +166,17 @@
  *      (integration_id 15368), strict up-to-date is on and enforced on
  *      create, the four rules — deletion, non-fast-forward, pull-request with
  *      no required review and none of the four review flags, required-status-
- *      checks with its parameters — are present once each and no other type
- *      is, the target is the default branch and nothing else, the bypass list
- *      is empty and enforcement is active; and the workflow names its jobs so
- *      the record can — no matrix, no expression in a name, no two jobs
- *      sharing one. The rules are rulesetProblems and workflowJobs, pure
- *      functions their probes run on in-memory records (twenty mutants, eight
+ *      checks with its parameters — are present once each, the one optional
+ *      rule — merge-queue, which GitHub refuses on a user-owned repository
+ *      and the record adds the day this one is organisation-owned — at most
+ *      once and, when present, with the fork's merge method, every entry
+ *      judged on its own merge commit and no PR waiting for another
+ *      (SMD-1857), no other type is, the target is the default branch and
+ *      nothing else, the bypass list is empty and enforcement is active; and
+ *      the workflow names its jobs so the record can — no matrix, no
+ *      expression in a name, no two jobs sharing one. The rules are
+ *      rulesetProblems and workflowJobs, pure functions their probes run on
+ *      in-memory records (twenty-five mutants, one accepted addition, nine
  *      non-probes, three workflow mutants); the workflow is parsed with
  *      Bun.YAML (SMD-1856); no exceptions
  *  21. a .sql file never destroys rows a brain already holds — CLAUDE.md's
@@ -3809,12 +3814,38 @@ checkConnectorRegistry();
  * check waits forever and every PR blocks. The record can still drift from the
  * live ruleset — CI's token cannot read it, and a GET adds defaults the record
  * omits — so FORK.md names the one command that re-applies it.
+ *
+ * SMD-1857 wanted the merge queue as a fifth rule: a PR is queued, GitHub
+ * builds the merge result and runs the twelve checks on it (the workflow's
+ * `merge_group` trigger), and merges only what passes — so the checks judge
+ * the tree that lands without the author merging `main` first, which is what
+ * strict up-to-date makes them do. GitHub offers the queue on
+ * organisation-owned repositories only; this one is owned by a user account,
+ * and the API refuses the rule (422, "Invalid rule 'merge_queue'") — a record
+ * the PUT refuses is no record. So the rule is OPTIONAL here: absent while
+ * the repository is user-owned, held to MERGE_QUEUE the day it is added,
+ * which is the day the repository moves to an organisation.
  */
 const RULESET = ".github/rulesets/main.json";
 /** GitHub's own app id for Actions: a required check pinned to it is satisfied by a workflow run and by nothing else — not a status another app or a token posts under the same name. */
 const GITHUB_ACTIONS_APP_ID = 15368;
 /** The rule types the record carries, each exactly once; another type (a linear-history rule, say) is a decision the ticket declined, and edits this list with it. */
 const RULE_TYPES = ["deletion", "non_fast_forward", "pull_request", "required_status_checks"];
+/** The rule types the record MAY carry, at most once each: the merge queue, which GitHub refuses on a user-owned repository and which the record adds the day this one is organisation-owned (SMD-1857). */
+const OPTIONAL_RULE_TYPES = ["merge_queue"];
+/**
+ * The merge queue's parameters when the rule is present, each held equal
+ * (SMD-1857). MERGE keeps the merge commit the fork lands with (the record of
+ * how a branch diverged); ALLGREEN judges each queued PR on its own merge
+ * commit, so a red run names the PR that broke the tree rather than the group;
+ * min 1 means a lone PR is merged as soon as its run is green — the wait
+ * applies only to reaching a minimum above one; 5 and 5 are GitHub's defaults
+ * for how many entries build and merge together, more than this fork queues
+ * at once; 60 minutes is four times the longest run seen (a push run of main,
+ * 16 minutes) before a check that never reports is read as failed and the PR
+ * is dropped from the queue.
+ */
+const MERGE_QUEUE = { check_response_timeout_minutes: 60, grouping_strategy: "ALLGREEN", max_entries_to_build: 5, max_entries_to_merge: 5, merge_method: "MERGE", min_entries_to_merge: 1, min_entries_to_merge_wait_minutes: 5 } as const;
 /** The one ref the ruleset targets: GitHub's alias for the default branch, so a rename of `main` carries it. */
 const RULESET_REFS = ["~DEFAULT_BRANCH"];
 /** The pull-request rule's flags, each held false: any of them true asks a review, or blocks on a thread, that the zero count says nothing asks. */
@@ -3859,11 +3890,17 @@ function rulesetProblems(ruleset: RulesetDoc, jobNames: string[]) {
   const rules = Array.isArray(ruleset.rules) ? ruleset.rules : [];
   const types = rules.map((r) => (typeof r?.type === "string" ? r.type : "(untyped)"));
   for (const t of RULE_TYPES) if (types.filter((x) => x === t).length !== 1) problems.push([RULESET, `carries the ${t} rule ${types.filter((x) => x === t).length} time(s), not once (SMD-1856)`]);
-  for (const t of new Set(types)) if (!RULE_TYPES.includes(t)) problems.push([RULESET, `carries a ${t} rule that RULE_TYPES in ${SELF} does not name — a new rule is a decision; record it there with the reason (SMD-1856)`]);
+  for (const t of OPTIONAL_RULE_TYPES) if (types.filter((x) => x === t).length > 1) problems.push([RULESET, `carries the ${t} rule ${types.filter((x) => x === t).length} time(s) — at most once (SMD-1857)`]);
+  for (const t of new Set(types)) if (!RULE_TYPES.includes(t) && !OPTIONAL_RULE_TYPES.includes(t)) problems.push([RULESET, `carries a ${t} rule that RULE_TYPES in ${SELF} does not name — a new rule is a decision; record it there with the reason (SMD-1856)`]);
   const pr = rules.find((r) => r?.type === "pull_request");
   if (pr) {
     if (pr.parameters?.required_approving_review_count !== 0) problems.push([RULESET, `the pull_request rule's required_approving_review_count is ${JSON.stringify(pr.parameters?.required_approving_review_count)}, not 0 — one maintainer; a required review blocks every PR (SMD-1856)`]);
     for (const flag of PR_RULE_FLAGS) if (pr.parameters?.[flag] !== false) problems.push([RULESET, `the pull_request rule's ${flag} is ${JSON.stringify(pr.parameters?.[flag])}, not false — a review, or a resolved thread, asked another way than the count (SMD-1856)`]);
+  }
+  const queue = rules.find((r) => r?.type === "merge_queue");
+  if (queue) {
+    if (!queue.parameters || typeof queue.parameters !== "object") problems.push([RULESET, "the merge_queue rule has no parameters — the merge method, the grouping and the group size live there, and GitHub refuses the rule without them (SMD-1857)"]);
+    else for (const [key, want] of Object.entries(MERGE_QUEUE)) if (queue.parameters[key] !== want) problems.push([RULESET, `the merge_queue rule's ${key} is ${JSON.stringify(queue.parameters[key])}, not ${JSON.stringify(want)} — a decision MERGE_QUEUE in ${SELF} records; change both, with the reason (SMD-1857)`]);
   }
   const checksRule = rules.find((r) => r?.type === "required_status_checks");
   if (!checksRule) return problems;
@@ -3899,6 +3936,12 @@ const RULESET_PROBE = (): RulesetProbe => ({
     { type: "required_status_checks", parameters: { strict_required_status_checks_policy: true, do_not_enforce_on_create: false, required_status_checks: RULESET_PROBE_JOBS.map((context) => ({ context, integration_id: GITHUB_ACTIONS_APP_ID })) } },
   ],
 });
+/** The optional merge-queue rule as the record would carry it, with a parameter overridden for a mutant. */
+const QUEUE_RULE = (over: Record<string, unknown> = {}): RulesetProbeRule => ({ type: "merge_queue", parameters: { ...MERGE_QUEUE, ...over } });
+/** [why, mutate]: records the rules must ACCEPT beyond the plain probe — the optional rule, present as recorded. */
+const RULESET_ACCEPTED: [why: string, mutate: (g: RulesetProbe) => RulesetProbe][] = [
+  ["a merge-queue rule as MERGE_QUEUE records it", (g) => { g.rules.push(QUEUE_RULE()); return g; }],
+];
 /** [why, mutate (returns the record to judge — the mutated probe, or null for no record), the job list, a phrase the ONE problem must carry]. */
 const RULESET_MUTANTS: [why: string, mutate: (g: RulesetProbe) => RulesetProbe | null, jobs: string[], says: string][] = [
   ["a job the record does not require", (g) => g, [...RULESET_PROBE_JOBS, "Retrieval replay gate"], 'does not require "Retrieval replay gate"'],
@@ -3921,6 +3964,11 @@ const RULESET_MUTANTS: [why: string, mutate: (g: RulesetProbe) => RulesetProbe |
   ["a ruleset aimed at another branch", (g) => { g.conditions!.ref_name.include = ["refs/heads/dev"]; return g; }, RULESET_PROBE_JOBS, "conditions.ref_name is not"],
   ["a ruleset with no conditions", (g) => { g.conditions = null; return g; }, RULESET_PROBE_JOBS, "conditions.ref_name is not"],
   ["no record at all", () => null, RULESET_PROBE_JOBS, "is missing or does not parse"],
+  ["a doubled merge-queue rule", (g) => { g.rules.push(QUEUE_RULE(), QUEUE_RULE()); return g; }, RULESET_PROBE_JOBS, "merge_queue rule 2 time(s) — at most once"],
+  ["a merge-queue rule with no parameters", (g) => { g.rules.push({ type: "merge_queue", parameters: null }); return g; }, RULESET_PROBE_JOBS, "merge_queue rule has no parameters"],
+  ["a queue that squashes", (g) => { g.rules.push(QUEUE_RULE({ merge_method: "SQUASH" })); return g; }, RULESET_PROBE_JOBS, 'merge_method is "SQUASH", not "MERGE"'],
+  ["a queue judged on the group's head only", (g) => { g.rules.push(QUEUE_RULE({ grouping_strategy: "HEADGREEN" })); return g; }, RULESET_PROBE_JOBS, 'grouping_strategy is "HEADGREEN"'],
+  ["a queue that waits for a second PR", (g) => { g.rules.push(QUEUE_RULE({ min_entries_to_merge: 2 })); return g; }, RULESET_PROBE_JOBS, "min_entries_to_merge is 2, not 1"],
 ];
 /** Non-probes: shapes the rules must not throw on and must report at least one problem for — a record that parsed but is not a ruleset. */
 const RULESET_NON_PROBES: [why: string, record: unknown][] = [
@@ -3932,6 +3980,7 @@ const RULESET_NON_PROBES: [why: string, record: unknown][] = [
   ["a null required check", (() => { const g = RULESET_PROBE(); (g.rules[3].parameters!.required_status_checks as (object | null)[]).push(null); return g; })()],
   ["a pull-request rule with no parameters", (() => { const g = RULESET_PROBE(); delete g.rules[2].parameters; return g; })()],
   ["conditions that are a string", { ...RULESET_PROBE(), conditions: "main" }],
+  ["a merge-queue rule whose parameters are a string", (() => { const g = RULESET_PROBE(); g.rules.push({ type: "merge_queue", parameters: "MERGE" } as unknown as RulesetProbeRule); return g; })()],
 ];
 /** The workflow reader's probes: [why, jobs, a phrase the one problem must carry]; the plain job by name and by key are read before them. */
 const WORKFLOW_MUTANTS: [why: string, jobs: Record<string, { name?: string; strategy?: { matrix?: unknown } | null }>, says: string][] = [
@@ -3945,6 +3994,10 @@ function checkRulesetRecord() {
   // reports something and throws nothing.
   const base = rulesetProblems(RULESET_PROBE(), RULESET_PROBE_JOBS);
   if (base.length) fail(SELF, `check 20 false-positives on a consistent record (${base.map((p) => p[1]).join("; ")})`);
+  for (const [why, mutate] of RULESET_ACCEPTED) {
+    const got = rulesetProblems(mutate(RULESET_PROBE()), RULESET_PROBE_JOBS);
+    if (got.length) fail(SELF, `check 20 refuses ${why} (its own probe): ${got.map((p) => p[1]).join("; ")}`);
+  }
   for (const [why, mutate, names, says] of RULESET_MUTANTS) {
     const got = rulesetProblems(mutate(RULESET_PROBE()), [...names]);
     if (got.length !== 1) fail(SELF, `check 20 reports ${got.length} problem(s) for ${why}, not one (its own probe): ${JSON.stringify(got)}`);
