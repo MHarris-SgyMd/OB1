@@ -400,7 +400,11 @@ async function score(offline: boolean): Promise<void> {
   const sql = new SQL(url);
   const notes: string[] = [];
   const live = new Set((await sql`SELECT id::text AS id FROM thoughts`).map((r: { id: string }) => r.id));
-  const here = (rows: LedgerRow[]) => rows.filter((r) => live.has(r.claim));
+  // A fixture id the brain no longer holds is dropped from every fixture-fed
+  // mechanism, and the count is printed, so a kind-band n that stops matching
+  // SMD-1951's table has a line saying why (review pass 1).
+  const gone = new Set<string>();
+  const here = (rows: LedgerRow[]) => rows.filter((r) => { if (live.has(r.claim)) return true; gone.add(r.claim); return false; });
 
   const declared = new Map<string, number | null>();
   let unreadable = 0;
@@ -428,6 +432,7 @@ async function score(offline: boolean): Promise<void> {
   await sql.end();
 
   const summaries = [...byMechanism].map(([m, rows]) => summarise(m, rows));
+  if (gone.size) notes.push(`${gone.size} fixture id(s) are no longer in this brain and are dropped from the kind band and the declared rows.`);
   notes.push(
     `Attribution is by the key each producer already writes (judge_key, extraction_key) and by the fixture's provenance; SMD-1731's per-run lineage would make it per prompt version, and is not needed to read this.`,
     `The shipped \`type\` facet and capture_thought carry no confidence at all: ${live.size} thought(s) in the brain, ${declared.size} with a declared one.`,
