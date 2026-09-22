@@ -89,8 +89,8 @@ import { decideCalls, type EgressSubject } from "../server-portable/egress.ts";
 import { extractMetadata, metadataRefused } from "../server-portable/metadata.ts";
 import type { Actor } from "../server-portable/store.ts";
 import { envFiles, parseEnv } from "../evals/env.ts";
+import { linearClient, strict, type Gql } from "../evals/linear-api.ts";
 
-const API = "https://api.linear.app/graphql";
 export const DEFAULT_INITIATIVE = "Open Brain";
 export const DEFAULT_INTERVAL_S = 300;
 export const ACTOR_NAME = "board-sync";
@@ -144,7 +144,7 @@ export function issueFacets(issue: LinearIssue): Record<string, unknown> {
     status: issue.state.name,
     status_type: issue.state.type,
     priority: issue.priorityLabel,
-    labels: issue.labels.nodes.map((l) => l.name),
+    labels: labelNames(issue),
     parent: issue.parent?.identifier ?? null,
     url: issue.url,
     linear_updated_at: issue.updatedAt,
@@ -159,8 +159,18 @@ export function issueFacets(issue: LinearIssue): Record<string, unknown> {
  * autolinks stripped. `Labels: none` and `Parent: none` are spelled, as the hand
  * did; the project too, for an issue that has none.
  */
+/**
+ * The label names in one order. Linear's `labels` connection promises none, and
+ * an order that differed between two requests would re-render the text and
+ * re-embed the row every pass (third review pass); the hand captures carried
+ * Linear's order, so a row with two or more labels re-embeds once on adoption.
+ */
+export function labelNames(issue: LinearIssue): string[] {
+  return issue.labels.nodes.map((l) => l.name).sort((a, b) => a.localeCompare(b, "en"));
+}
+
 export function renderIssue(issue: LinearIssue): string {
-  const labels = issue.labels.nodes.map((l) => l.name);
+  const labels = labelNames(issue);
   const header = `${issue.identifier} — ${issue.title.trim()}`;
   const facets = [
     `Project: ${issue.project?.name ?? "none"}`,
@@ -315,41 +325,23 @@ export function envValueFrom(name: string, env: Record<string, string | undefine
 // Linear
 // ---------------------------------------------------------------------------
 
-/** A GraphQL answer as Linear sends it: data and errors can both be present (HTTP 200 either way). */
-export type GqlResult<T> = { data: T | null; errors: { message: string; path?: (string | number)[] }[] };
-export type Gql = <T>(query: string, variables?: Record<string, unknown>) => Promise<GqlResult<T>>;
+// The client — the endpoint, the authorization rule, errors beside data — is
+// evals/linear-api.ts, one definition with the corpus builder (third review pass).
 
-export function linearClient(key: string, fetchImpl: typeof fetch = fetch): Gql {
-  // Personal API keys go in Authorization raw; OAuth tokens take Bearer.
-  const auth = key.startsWith("lin_api_") ? key : `Bearer ${key}`;
-  return async <T>(query: string, variables: Record<string, unknown> = {}): Promise<GqlResult<T>> => {
-    const res = await fetchImpl(API, {
-      method: "POST",
-      headers: { Authorization: auth, "Content-Type": "application/json" },
-      body: JSON.stringify({ query, variables }),
-    });
-    if (!res.ok) throw new Error(`Linear returned HTTP ${res.status} ${res.statusText}: ${(await res.text()).slice(0, 300)}`);
-    const json = (await res.json()) as { data?: T | null; errors?: { message: string; path?: (string | number)[] }[] };
-    return { data: json.data ?? null, errors: json.errors ?? [] };
-  };
-}
-
-/** The answer, or the error — for the queries where a partial answer is no answer (the census, the initiative). */
-async function strict<T>(gql: Gql, query: string, variables: Record<string, unknown> = {}): Promise<T> {
-  const r = await gql<T>(query, variables);
-  if (r.errors.length) throw new Error(`Linear GraphQL error: ${r.errors.map((e) => e.message).join("; ")}`);
-  if (r.data === null) throw new Error("Linear returned no data and no errors.");
-  return r.data;
-}
-
-/** The projects of the named initiative — the board. Matched on the exact name, else on the name's prefix when exactly one initiative starts with it. Paged: a workspace's initiatives can run past one page. */
+/**
+ * The projects of the named initiative — the board. Matched on the exact name,
+ * else on the name's prefix when exactly one initiative starts with it. The
+ * initiatives are paged; an initiative's projects are asked for in one page and
+ * the tool refuses to go on when there are more — a census silently short of a
+ * project would report its tickets extra and never capture its new ones.
+ */
 export async function initiativeProjects(gql: Gql, name: string): Promise<{ initiative: string; projects: { id: string; name: string }[] }> {
-  type Node = { name: string; projects: { nodes: { id: string; name: string }[] } };
+  type Node = { name: string; projects: { pageInfo: { hasNextPage: boolean }; nodes: { id: string; name: string }[] } };
   type R = { initiatives: { pageInfo: { hasNextPage: boolean; endCursor: string }; nodes: Node[] } };
   const all: Node[] = [];
   let after: string | null = null;
   do {
-    const d: R = await strict<R>(gql, `query($after: String) { initiatives(first: 50, after: $after) { pageInfo { hasNextPage endCursor } nodes { name projects(first: 50, includeArchived: true) { nodes { id name } } } } }`, { after });
+    const d: R = await strict<R>(gql, `query($after: String) { initiatives(first: 50, after: $after) { pageInfo { hasNextPage endCursor } nodes { name projects(first: 50, includeArchived: true) { pageInfo { hasNextPage } nodes { id name } } } } }`, { after });
     all.push(...d.initiatives.nodes);
     after = d.initiatives.pageInfo.hasNextPage ? d.initiatives.pageInfo.endCursor : null;
   } while (after);
@@ -358,21 +350,28 @@ export async function initiativeProjects(gql: Gql, name: string): Promise<{ init
   if (prefixed.length !== 1) {
     throw new Error(`OB1_LINEAR_INITIATIVE="${name}" matches ${prefixed.length} initiative(s) (${all.map((i) => JSON.stringify(i.name)).join(", ")}); name one.`);
   }
+  if (prefixed[0].projects.pageInfo.hasNextPage) throw new Error(`initiative "${prefixed[0].name}" has more than 50 projects and this tool reads one page of them; page the projects query before syncing this board.`);
   return { initiative: prefixed[0].name, projects: prefixed[0].projects.nodes };
 }
 
-/** Every issue's identifier and updatedAt across the projects: the census, archived issues included. */
+/**
+ * Every issue's identifier and updatedAt across the projects: the census.
+ * Archived issues are included — a completed ticket Linear auto-archived is
+ * still a ticket — but a TRASHED one (deleted in Linear; `includeArchived`
+ * returns those too) is not: it must fall out of the census so the brain's row
+ * shows up as `extra` and a fresh deletion is never captured (third review pass).
+ */
 export async function censusOf(gql: Gql, projectIds: string[]): Promise<Census> {
-  type R = { issues: { pageInfo: { hasNextPage: boolean; endCursor: string }; nodes: { identifier: string; updatedAt: string }[] } };
+  type R = { issues: { pageInfo: { hasNextPage: boolean; endCursor: string }; nodes: { identifier: string; updatedAt: string; trashed: boolean | null }[] } };
   const out: Census = [];
   let after: string | null = null;
   do {
     const d: R = await strict<R>(
       gql,
-      `query($ids: [ID!], $after: String) { issues(first: 250, after: $after, includeArchived: true, filter: { project: { id: { in: $ids } } }) { pageInfo { hasNextPage endCursor } nodes { identifier updatedAt } } }`,
+      `query($ids: [ID!], $after: String) { issues(first: 250, after: $after, includeArchived: true, filter: { project: { id: { in: $ids } } }) { pageInfo { hasNextPage endCursor } nodes { identifier updatedAt trashed } } }`,
       { ids: projectIds, after },
     );
-    out.push(...d.issues.nodes);
+    out.push(...d.issues.nodes.filter((n) => !n.trashed).map(({ identifier, updatedAt }) => ({ identifier, updatedAt })));
     after = d.issues.pageInfo.hasNextPage ? d.issues.pageInfo.endCursor : null;
   } while (after);
   return out;
@@ -444,14 +443,24 @@ export type Writer = {
   stopping?: () => boolean;
 };
 
-/** Read every ticket row the brain has — adopted rows by their claim, hand captures by their header. */
-export async function readTicketRows(sql: SQL): Promise<BrainRow[]> {
+/**
+ * Read every ticket row the brain has: adopted rows by their claim
+ * (`metadata ? 'issue'`), and — under `--full`, or on a brain with no adopted
+ * row yet — hand captures by their header. The header test is a regex over
+ * every thought's text, a sequential scan no index serves; after the first pass
+ * every ticket row carries the claim, so the scheduled path pays only the
+ * indexable predicate and a hand paste made after adoption is picked up by the
+ * next `--full` (third review pass).
+ */
+export async function readTicketRows(sql: SQL, opts: { scanHeaders: boolean } = { scanHeaders: false }): Promise<BrainRow[]> {
+  const cols = sql`id::text AS id, content, metadata, created_at::text AS created_at, supersedes::text AS supersedes, content_fingerprint AS fingerprint`;
+  const claimed = (await sql`SELECT ${cols} FROM thoughts WHERE metadata ? 'issue'`) as BrainRow[];
+  if (!opts.scanHeaders && claimed.length > 0) return claimed;
   // The header grammar in SQL is only a pre-filter; ticketIdentifier() decides.
-  const rows = await sql`
-    SELECT id::text AS id, content, metadata, created_at::text AS created_at, supersedes::text AS supersedes, content_fingerprint AS fingerprint
-    FROM thoughts
-    WHERE metadata ? 'issue' OR content ~ '^[A-Z][A-Z0-9]+-[0-9]+ — [^\n]*\nProject: '`;
-  return rows as BrainRow[];
+  const byHeader = (await sql`
+    SELECT ${cols} FROM thoughts
+    WHERE NOT (metadata ? 'issue') AND content ~ '^[A-Z][A-Z0-9]+-[0-9]+ — [^\n]*\nProject: '`) as BrainRow[];
+  return [...claimed, ...byHeader];
 }
 
 /** Set the pointers desiredPointers named, clears first, then sets — see its docblock for why that order. */
@@ -548,14 +557,21 @@ export async function syncIssue(w: Writer, issue: LinearIssue, rows: BrainRow[])
   }
 
   // The text moved: judged as an edit of THIS row — its own source and tags.
+  // The tags are extracted again with the vector: the people, topics and
+  // action items were the OLD text's, and a fallback tag set from a provider
+  // outage would otherwise stand on current text forever (third review pass).
+  // The facets go over the tags, as at capture.
   const subject: EgressSubject = { kind: "edit", actor: w.actor.name, metadata: { ...(head.metadata ?? {}), ...facets }, content };
   const g = decideCalls(subject, w.cfg, w.cfg.egress);
-  if (w.dryRun) { w.log(`  ~ ${issue.identifier}: would update the text (${g.embeddings.allowed ? "re-embedded" : "WITHOUT a vector"})${patch ? ` and patch ${said(patch)}` : ""}`); return { outcome: "updated", noVector: !g.embeddings.allowed, twinsMarked }; }
-  const embedded = g.embeddings.allowed ? await w.embed(content, subject) : undefined;
+  if (w.dryRun) { w.log(`  ~ ${issue.identifier}: would update the text (${g.embeddings.allowed ? "re-embedded" : "WITHOUT a vector"}, ${g.chat.allowed ? "re-tagged" : "tags NOT re-extracted"})${patch ? ` and patch ${said(patch)}` : ""}`); return { outcome: "updated", noVector: !g.embeddings.allowed, twinsMarked }; }
+  const [embedded, tags] = await Promise.all([
+    g.embeddings.allowed ? w.embed(content, subject) : Promise.resolve(undefined),
+    g.chat.allowed ? w.tags(content, subject) : Promise.resolve(undefined),
+  ]);
   const r = await w.store.updateThought({
     id: head.id,
     content,
-    metadataPatch: patch ?? undefined,
+    metadataPatch: tags || patch ? { ...(tags ?? {}), ...(patch ?? {}) } : undefined,
     embedding: embedded?.embedding,
     chunks: embedded?.chunks,
     actor: actorWith(g.record),
@@ -576,15 +592,27 @@ export async function syncIssue(w: Writer, issue: LinearIssue, rows: BrainRow[])
   return { outcome: "updated", noVector: !embedded, twinsMarked };
 }
 
-/** One pass: census, plan, fetch, write. */
-export async function runPass(opts: { gql: Gql; sql: SQL; writer: Writer; initiative: string; full: boolean; only?: string[] }): Promise<PassReport> {
+/**
+ * One pass: census, plan, fetch, write. `only` names identifiers to sync
+ * whatever the plan says of them — an operator asking for one ticket by name
+ * means it, so an `unchanged` one is fetched and compared all the same, and a
+ * name the census does not hold is reported rather than dropped (third review
+ * pass). `readRows` is how the brain's ticket rows are read — readTicketRows
+ * over a connection, or a fake in the self-check.
+ */
+export async function runPass(opts: { gql: Gql; readRows: () => Promise<BrainRow[]>; writer: Writer; initiative: string; full: boolean; only?: string[] }): Promise<PassReport> {
   const { initiative, projects } = await initiativeProjects(opts.gql, opts.initiative);
   const census = await censusOf(opts.gql, projects.map((p) => p.id));
-  const groups = groupTicketRows(await readTicketRows(opts.sql));
+  const groups = groupTicketRows(await opts.readRows());
   const plan = planPass(census, groups, opts.full);
-  const wanted = opts.only ? plan.fetch.filter((i) => opts.only!.includes(i)) : plan.fetch;
   const tally: Record<Outcome, number> = { captured: 0, updated: 0, patched: 0, unchanged: 0, refused: 0 };
   const report: PassReport = { initiative, projects: projects.length, census: census.length, plan, tally, twinsMarked: 0, noVector: 0, errors: [] };
+  let wanted = plan.fetch;
+  if (opts.only) {
+    const listed = new Set(census.map((c) => c.identifier));
+    for (const name of opts.only) if (!listed.has(name)) report.errors.push({ identifier: name, error: "not in the census — no such issue in the board's projects" });
+    wanted = opts.only.filter((name) => listed.has(name));
+  }
   if (wanted.length === 0) return report;
   const { issues, failed } = await fetchIssues(opts.gql, wanted);
   for (const f of failed) { report.errors.push(f); opts.writer.log(`  ! ${f.identifier}: ${f.error}`); }
@@ -679,7 +707,7 @@ function selfCheck(): Promise<number> {
   ok(text === "SMD-1936 — The SQL-safety guard rail\nProject: Open Brain — Release Engineering & Fork Maintenance · Status: Backlog (backlog) · Priority: Low · Parent: none · Labels: infrastructure\nhttps://linear.app/siggymd/issue/SMD-1936/the-sql-safety\n\n## Problem\n\nSee SMD-1730 and SMD-1250.", "renders the hand-capture shape: header, facets, url, blank, body with autolinks stripped");
   ok(HEADER_RE.test(text), "…and the rendered text matches the header grammar");
   const two = renderIssue({ ...issue, labels: { nodes: [{ name: "infrastructure" }, { name: "Improvement" }] }, parent: { identifier: "SMD-1850" }, project: null, description: null });
-  ok(two === "SMD-1936 — The SQL-safety guard rail\nProject: none · Status: Backlog (backlog) · Priority: Low · Parent: SMD-1850 · Labels: infrastructure, Improvement\nhttps://linear.app/siggymd/issue/SMD-1936/the-sql-safety", "labels comma-joined, a parent named, no project and no description spelled");
+  ok(two === "SMD-1936 — The SQL-safety guard rail\nProject: none · Status: Backlog (backlog) · Priority: Low · Parent: SMD-1850 · Labels: Improvement, infrastructure\nhttps://linear.app/siggymd/issue/SMD-1936/the-sql-safety", `labels sorted and comma-joined, a parent named, no project and no description spelled (${JSON.stringify(two.split("\n")[1])})`);
   ok(stripAutolinks("a <issue id=\"1\" href=\"h\">SMD-1</issue> b <issue>SMD-2</issue>") === "a SMD-1 b SMD-2", "every autolink element becomes its identifier");
   ok(stripAutolinks("<issues> keep </issues>") === "<issues> keep </issues>", "…and only that element (a longer tag name is not it)");
 
@@ -763,7 +791,8 @@ function selfCheck(): Promise<number> {
     r = await run(recorder, [row("cur", `${text}\n`, withFacets, null, null)]);
     ok(r.r.outcome === "unchanged" && r.calls.length === 0, "the same text up to whitespace is the same text — judged by fingerprint, as the database judges it (second review pass)");
     r = await run(recorder, [row("cur", text, { ...withFacets, status: "Done", status_type: "completed" }, null, null)], { ...issue, state: { name: "In Progress", type: "started" } });
-    ok(r.r.outcome === "updated" && r.calls.join("; ") === "embed; update cur content patch(status,status_type) vec", `moved text: one embed, one edit with the vector and the facets that moved (${r.calls.join("; ")})`);
+    ok(r.r.outcome === "updated" && r.calls.join("; ") === "embed; tags; update cur content patch(type,topics,status,status_type) vec", `moved text: one embed, the tags extracted again, one edit with the vector, the tags and the facets that moved over them (${r.calls.join("; ")})`);
+    ok(renderIssue({ ...issue, labels: { nodes: [{ name: "infrastructure" }, { name: "Improvement" }] } }) === renderIssue({ ...issue, labels: { nodes: [{ name: "Improvement" }, { name: "infrastructure" }] } }) && JSON.stringify(issueFacets({ ...issue, labels: { nodes: [{ name: "b" }, { name: "a" }] } }).labels) === '["a","b"]', "labels render and store in one order whatever order Linear returns them (third review pass)");
     r = await run(recorder, [row("c", text, withFacets, "2026-09-23T00:00:00Z", null), row("b", text, {}, "2026-09-22T00:00:00Z", "a"), row("a", text, {}, "2026-09-21T00:00:00Z", null)]);
     ok(r.r.twinsMarked === 1 && r.calls.join("; ") === "update c supersedes=b", `twins: only the missing pointer is set (c→b; b→a already stands), the head untouched (${r.calls.join("; ")})`);
     r = await run(recorder, [row("c", text, withFacets, "2026-09-23T00:00:00Z", "x"), row("b", text, {}, "2026-09-22T00:00:00Z", null)]);
@@ -775,8 +804,9 @@ function selfCheck(): Promise<number> {
     // Held by a thought outside the group: parked, with linear_updated_at, outcome refused.
     const dupStore: Writer["store"] = { captureThought: recorder.store.captureThought, updateThought: async (o) => { if (o.content !== undefined) { calls.push(`update ${o.id} content → DUPLICATE_CONTENT`); return { ok: false, error: "DUPLICATE_CONTENT" }; } return recorder.store.updateThought(o); } };
     r = await run({ ...recorder, store: dupStore }, [row("b", text, withFacets, null, null)], done);
-    ok(r.r.outcome === "refused" && r.calls.join("; ") === "embed; update b content → DUPLICATE_CONTENT; update b patch(status,status_type,linear_updated_at)",
-      `DUPLICATE_CONTENT held elsewhere: the facets (linear_updated_at among them) are patched so the plan converges, outcome refused (${r.calls.join("; ")})`);
+    // The fresh tags describe the new text, which the row does not hold, so the parked patch carries the facets alone.
+    ok(r.r.outcome === "refused" && r.calls.join("; ") === "embed; tags; update b content → DUPLICATE_CONTENT; update b patch(status,status_type,linear_updated_at)",
+      `DUPLICATE_CONTENT held elsewhere: the facets (linear_updated_at among them) are patched so the plan converges, the new text's tags are not, outcome refused (${r.calls.join("; ")})`);
     const refusing: Writer = { ...recorder, cfg: resolveEmbedConfig({ OB1_LLM_BASE_URL: "https://api.example.com/v1", OB1_LLM_API_KEY: "k", OB1_EGRESS_POLICY: "deny" }) };
     r = await run(refusing, []);
     ok(r.r.noVector && r.calls.join("; ") === 'capture "Backlog" vec=no type=-', `under deny to a hosted endpoint: no embed, no tags, the row lands bare (${r.calls.join("; ")})`);
@@ -820,6 +850,27 @@ function selfCheck(): Promise<number> {
     };
     const fetched = await fetchIssues(fakeGql, ["SMD-1", "SMD-404", "SMD-2"]);
     ok(fetched.issues.map((i) => i.identifier).join(",") === "SMD-1,SMD-2" && fetched.failed.length === 1 && fetched.failed[0].identifier === "SMD-404" && /Entity not found/.test(fetched.failed[0].error), `a refused alias is reported by identifier and the rest proceed (${JSON.stringify(fetched.failed)})`);
+
+    // A board: one initiative, one project, three issues (one trashed); the census, the plan, and --only.
+    const board: Gql = async <T,>(q: string, vars: Record<string, unknown> = {}) => {
+      if (/initiatives\(/.test(q)) return { data: { initiatives: { pageInfo: { hasNextPage: false, endCursor: "" }, nodes: [{ name: "Open Brain — self-hosted AI memory", projects: { pageInfo: { hasNextPage: vars.after === "more" }, nodes: [{ id: "p1", name: "P" }] } }] } } as T, errors: [] };
+      if (/issues\(first: 250/.test(q)) return { data: { issues: { pageInfo: { hasNextPage: false, endCursor: "" }, nodes: [
+        { identifier: "SMD-1936", updatedAt: issue.updatedAt, trashed: null },
+        { identifier: "SMD-2000", updatedAt: "2026-09-22T02:00:00.000Z", trashed: false },
+        { identifier: "SMD-666", updatedAt: "2026-09-22T02:00:00.000Z", trashed: true },
+      ] } } as T, errors: [] };
+      return fakeGql<T>(q, vars);
+    };
+    const census2 = await censusOf(board, ["p1"]);
+    ok(census2.map((c) => c.identifier).join(",") === "SMD-1936,SMD-2000", `a trashed issue falls out of the census, so its row would be extra and a fresh deletion is never captured (${census2.map((c) => c.identifier).join(",")})`);
+    const onlyBrain = fakeBrain({ K: { content: text, metadata: withFacets, supersedes: null, created_at: null } });
+    const onlyWriter: Writer = { ...live, store: onlyBrain.store, fingerprintOf: onlyBrain.fingerprintOf, holderOf: onlyBrain.holderOf, log: () => {} };
+    const rep = await runPass({ gql: board, readRows: async () => onlyBrain.brainRows(), writer: onlyWriter, initiative: "Open Brain", full: false, only: ["SMD-1936", "SMD-9999"] });
+    ok(rep.plan.unchanged === 1 && rep.tally.unchanged === 1 && rep.errors.length === 1 && /not in the census/.test(rep.errors[0].error) && rep.errors[0].identifier === "SMD-9999" && rep.tally.captured === 0,
+      `--only fetches the named identifier though the plan calls it unchanged, and names the one the census lacks; the missing SMD-2000 is not touched (${JSON.stringify({ tally: rep.tally, errors: rep.errors })})`);
+    let refusedProjects = false;
+    try { await initiativeProjects(async <T,>(q: string) => board<T>(q, { after: "more" }), "Open Brain"); } catch (e) { refusedProjects = /more than 50 projects/.test((e as Error).message); }
+    ok(refusedProjects, "an initiative with more projects than one page is refused, not silently shortened");
 
     // A value from a .env file, and that value alone.
     const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
@@ -907,10 +958,12 @@ async function main(): Promise<void> {
 
   const once = async (): Promise<number> => {
     const t0 = Date.now();
+    // The header scan under --full and --audit (the census should see a hand paste too), else the claim alone.
+    const readRows = () => readTicketRows(sql, { scanHeaders: flags.has("full") || flags.has("audit") });
     if (flags.has("audit")) {
       const { initiative: name, projects } = await initiativeProjects(gql, initiative);
       const census = await censusOf(gql, projects.map((p) => p.id));
-      const plan = planPass(census, groupTicketRows(await readTicketRows(sql)));
+      const plan = planPass(census, groupTicketRows(await readRows()));
       console.log(`  board: ${name} — ${projects.length} project(s), ${census.length} issue(s)`);
       console.log(`  missing ${plan.missing.length}${plan.missing.length ? ` (${plan.missing.join(", ")})` : ""}`);
       console.log(`  stale   ${plan.stale.length}${plan.stale.length ? ` (${plan.stale.slice(0, 20).join(", ")}${plan.stale.length > 20 ? ", …" : ""})` : ""}`);
@@ -918,7 +971,7 @@ async function main(): Promise<void> {
       console.log(`  in lockstep: ${plan.missing.length === 0 && plan.stale.length === 0 ? "yes" : "NO"}  (${Date.now() - t0} ms)`);
       return plan.missing.length || plan.stale.length ? 1 : 0;
     }
-    const report = await runPass({ gql, sql, writer, initiative, full: flags.has("full"), only });
+    const report = await runPass({ gql, readRows, writer, initiative, full: flags.has("full"), only });
     console.log(formatReport(report, dryRun));
     console.log(`  ${dryRun ? "dry run — nothing written" : "done"} (${Date.now() - t0} ms)`);
     return report.errors.length ? 1 : 0;

@@ -255,10 +255,12 @@ services:
   # brain's ticket rows, and writes the difference — a new issue captured, a
   # moved one updated in place — through the server's own store and embedder
   # (db/sync-linear.ts's header). No port, no key: it reaches Postgres as the
-  # migrator does and writes as the actor `board-sync`. The whole checkout is
-  # mounted read-only because the tool imports server-portable/ and evals/env.ts
-  # beside db/ (the migrator mounts db/ alone); like the migrator it needs no
-  # `bun install` — Bun built-ins and in-tree modules only.
+  # migrator does and writes as the actor `board-sync`. Mounted read-only: db/
+  # and server-portable/ (the tool's imports), and the two evals/ modules it
+  # reads by name — NOT the checkout whole, whose deploy/.env and evals/.env
+  # would otherwise sit on the tool's own `.env` search path inside the
+  # container (third review pass). Like the migrator it needs no `bun install`
+  # — Bun built-ins and in-tree modules only.
   #
   # The model knobs are the server's, inherited from its anchor above; the two
   # of its own are LINEAR_API_KEY (a personal API key, read-only use — it
@@ -270,7 +272,10 @@ services:
     profiles: ["board-sync"]
     working_dir: /app
     volumes:
-      - ..:/app:ro
+      - ../db:/app/db:ro
+      - ../server-portable:/app/server-portable:ro
+      - ../evals/env.ts:/app/evals/env.ts:ro
+      - ../evals/linear-api.ts:/app/evals/linear-api.ts:ro
     environment:
       <<: *server-env
       # The merge brings the server's whole block; the two things this worker

@@ -1568,8 +1568,19 @@ held by a thought outside the ticket's rows — patches the facets so the plan
 converges and is reported under *refused*; a new ticket whose text a stray row
 already holds (a paste the header grammar did not recognise) adopts that row with
 a facet patch. One issue the API refuses in a batch fails that identifier alone,
-under *errors*. Under `--loop`, SIGTERM ends the pass after the issue in hand (the
-compose service allows 60 s); the next pass finds what was left.
+under *errors*. When the text moves, the tags are extracted again with the vector
+(a fallback tag set from a provider outage would otherwise stand on current text
+forever); a row that landed without a vector is `reembed.ts`'s to repair, as any
+vectorless row is. Labels render and store sorted, whatever order Linear returns
+them. A ticket deleted in Linear (trashed) falls out of the census and its row
+reads *extra*; a completed one Linear archived stays a ticket. `--only` syncs the
+identifiers named whatever the plan says of them, and names one the census lacks.
+The scheduled path reads ticket rows by their claim alone (`metadata ? 'issue'`,
+indexable); the header scan over every thought's text runs under `--full` and
+`--audit`, and on a brain with no adopted row yet, so a hand paste made after
+adoption is picked up by the next `--full`. Under `--loop`, SIGTERM ends the pass
+after the issue in hand (the compose service allows 60 s); the next pass finds
+what was left.
 
 **Two writers of one identity.** `ingest-records.ts --linear <dump>` and this tool
 both key a ticket on `metadata.issue`, but render different text (the corpus's
