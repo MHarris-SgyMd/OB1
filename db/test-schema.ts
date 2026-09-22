@@ -5063,8 +5063,9 @@ console.log("\n[43] Migration 045: the event shape at the write boundary — who
     "…cites a uuid[], the window and backfilled_at timestamptz");
   assert((await one<{ e: boolean }>(`SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'ob1_agents' AND column_name = 'kind') AS e`)).e, "ob1_agents gains kind");
   assert(/ob1_agents_kind_check/.test(await refused(`INSERT INTO ob1_agents (label, kind) VALUES ('robot-key', 'robot')`)), "…which the CHECK holds to operator, agent or ingested");
-  const idx = await q<{ indexname: string }>(`SELECT indexname FROM pg_indexes WHERE tablename = 'thought_audit' AND indexname IN ('thought_audit_actor_kind_idx', 'thought_audit_trust_idx', 'thought_audit_awaiting_kind_idx', 'thought_audit_awaiting_door_idx')`);
-  assert(idx.length === 4, "four partial indexes: on actor_kind and on trust — the reads SMD-1724 and SMD-1726 build — and on the rows still waiting for a kind or a trust, by name, and for a door, which the census, the backfill and the gate read");
+  const idx = await q<{ indexname: string }>(`SELECT indexname FROM pg_indexes WHERE tablename = 'thought_audit' AND indexname LIKE 'thought_audit_%' AND indexname NOT IN ('thought_audit_thought_id_idx', 'thought_audit_created_at_idx', 'thought_audit_actor_idx', 'thought_audit_session_idx', 'thought_audit_agent_idx', 'thought_audit_pkey')`);
+  assert(idx.length === 2 && idx.map((i) => i.indexname).sort().join(",") === "thought_audit_awaiting_door_idx,thought_audit_awaiting_kind_idx",
+    `two partial indexes and no more: the rows still waiting for a kind or a trust, by name, and for a door — the census, the backfill and the gate read them; none on actor_kind, trust or origin until a read exists (${idx.map((i) => i.indexname).join(", ")})`);
   assert(lastDefinerOf("thoughts_write_audit").startsWith("045") && lastDefinerOf("thought_audit_refuse_mutation").startsWith("045") && lastDefinerOf("upsert_thought").startsWith("045") && lastDefinerOf("update_thought").startsWith("045") && lastDefinerOf("delete_thought").startsWith("042"),
     `045 is the last definer of the audit trigger, the refusal trigger and both writers; delete_thought stays 042's — a tombstone declares nothing (${lastDefinerOf("delete_thought")})`);
   const tbl = (await one<{ c: string | null }>(TABLE_COMMENT_SQL, ["thought_audit"])).c ?? "";
@@ -5193,6 +5194,8 @@ console.log("\n[43] Migration 045: the event shape at the write boundary — who
   const restated = await one<{ diff: Record<string, unknown>; stance: string | null; cites: string[] | null }>(`SELECT diff, stance, cites FROM thought_audit WHERE thought_id = $1::uuid AND action = 'update' ORDER BY created_at DESC LIMIT 1`, [paste.id]);
   assert(e.ok === true && (await rowsOf(paste.id, "update")).length === before + 1 && JSON.stringify(restated?.diff) === "{}" && restated?.stance === "retrieved" && restated?.cites?.[0] === cited.id,
     `…but an unchanged edit that DECLARES an event is an event: one row, the diff empty, the declaration on it — the restatement SMD-1722 counts (${JSON.stringify(restated?.diff)}, ${restated?.stance})`);
+  e = await edit(paste.id, "045: a page the operator pasted, corrected", { name: "op-key", agent_id: OP }, { trust: "ingested" });
+  assert(e.ok === true && (await rowsOf(paste.id, "update")).length === before + 1, "…while an unchanged edit declaring only a trust — a clamp, not a record — writes no row (run-it, fifth review pass)");
   const restatedCap = await cap("045: a page the operator pasted, corrected", { metadata: {}, actor: { name: "op-key", agent_id: OP }, event: { stance: "inferred" } }, 3);
   // Counted, not "the latest": PGlite's now() is millisecond-grained, so two
   // statements can tie on created_at and "latest" is arbitrary (a mutant run
@@ -5268,6 +5271,14 @@ console.log("\n[43] Migration 045: the event shape at the write boundary — who
   await db.exec(`SET TIME ZONE 'UTC'`);
   const win = await one<{ f: string; u: string }>(`SELECT (valid_from AT TIME ZONE 'UTC')::text AS f, (valid_until AT TIME ZONE 'UTC')::text AS u FROM thought_audit WHERE thought_id = $1::uuid AND action = 'capture'`, [zoned.id]);
   assert(win?.f === "2026-03-01 00:00:00" && win?.u === "2026-03-02 06:00:00", `a window with no offset is read as UTC whatever the session's TimeZone, one with an offset as written (${win?.f}, ${win?.u})`);
+  await db.exec(`SET TIME ZONE 'Asia/Tokyo'`);
+  const named = await cap("045: a window declared with a named zone", { metadata: {}, actor: { name: "op-key", agent_id: OP }, event: { valid_from: "2026-03-01 09:00:00 EST", valid_until: "2026-03-01 09:00:00 America/Chicago" } }, 21);
+  await db.exec(`SET TIME ZONE 'UTC'`);
+  const namedWin = await one<{ f: string; u: string }>(`SELECT (valid_from AT TIME ZONE 'UTC')::text AS f, (valid_until AT TIME ZONE 'UTC')::text AS u FROM thought_audit WHERE thought_id = $1::uuid AND action = 'capture'`, [named.id]);
+  assert(namedWin?.f === "2026-03-01 14:00:00" && namedWin?.u === "2026-03-01 15:00:00", `a zone spelled as a name or an abbreviation is honoured, not dropped — EST and America/Chicago read as themselves (${namedWin?.f}, ${namedWin?.u})`);
+  assert(/must be timestamps/.test(await bad({ valid_from: "2026-03-01 09:00:00 Mars/Olympus" })), "…and a zone Postgres does not know is refused, not read as UTC");
+  assert(/must be timestamps/.test(await bad({ valid_from: "2026-01-01 10:00:00 -5" })) && /must be timestamps/.test(await bad({ valid_from: "2026-01-01 10:00:00+123" })) && /must be timestamps/.test(await bad({ valid_from: "2026-01-01 10:00 PM PST" })),
+    "…and a one- or three-digit offset, or a zone after an AM/PM mark, is refused rather than silently dropped by the naive reader (run-it, fifth review pass)");
   assert(/event carries a key the shape does not have: stances/.test(await bad({ stances: "stated" })), "a misspelt key is refused, so it cannot vanish");
   assert(/event must be a JSON object, got string/.test(await bad("stated")), "a double-encoded event is refused with 005's message");
   assert(/event\.stance must be/.test(await bad({ stance: "guess" }, "edit")), "…and update_thought refuses through the same rule");

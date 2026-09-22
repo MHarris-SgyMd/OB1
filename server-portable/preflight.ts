@@ -1178,11 +1178,22 @@ if (configFailed) {
                  WHERE a.actor_kind IS NULL AND (a.actor_name IS NOT NULL OR a.canonical_agent_id IS NOT NULL)
                  GROUP BY 1, 2),
               resolved AS (
-                SELECT COALESCE(name, 'agent ' || agent::text) AS name, n, ob1_registry_kind(agent, name) IS NOT NULL AS fillable FROM waiting)
-              SELECT (SELECT count(*)::int FROM ob1_agents g WHERE g.kind IS NULL
-                        AND EXISTS (SELECT 1 FROM ob1_agent_keys k WHERE k.canonical_agent_id = g.canonical_agent_id AND k.revoked_at IS NULL)) AS unclassified,
-                     (SELECT string_agg(g.label, ', ' ORDER BY g.label) FROM ob1_agents g WHERE g.kind IS NULL
-                        AND EXISTS (SELECT 1 FROM ob1_agent_keys k WHERE k.canonical_agent_id = g.canonical_agent_id AND k.revoked_at IS NULL)) AS labels,
+                SELECT COALESCE(name, 'agent ' || agent::text) AS name, n, ob1_registry_kind(agent, name) IS NOT NULL AS fillable FROM waiting),
+              -- An unclassified key: a registry row with no kind, an unrevoked
+              -- digest, and no write of its own that resolves by name — a key
+              -- renamed in the env and pre-classified under its new name keeps
+              -- its old row unclassified when 010's rename meets label_conflict,
+              -- while every write it makes resolves through the name (fifth
+              -- review pass); 010's agent index makes the row read cheap.
+              unclassified AS (
+                SELECT g.label FROM ob1_agents g
+                 WHERE g.kind IS NULL
+                   AND EXISTS (SELECT 1 FROM ob1_agent_keys k WHERE k.canonical_agent_id = g.canonical_agent_id AND k.revoked_at IS NULL)
+                   AND NOT EXISTS (SELECT 1 FROM thought_audit a
+                                    WHERE a.canonical_agent_id = g.canonical_agent_id AND a.actor_name IS NOT NULL
+                                      AND ob1_registry_kind(NULL, a.actor_name) IS NOT NULL))
+              SELECT (SELECT count(*)::int FROM unclassified) AS unclassified,
+                     (SELECT string_agg(label, ', ' ORDER BY label) FROM unclassified) AS labels,
                      COALESCE(sum(n), 0)::int AS awaiting,
                      COALESCE(sum(n) FILTER (WHERE fillable), 0)::int AS fillable,
                      (SELECT string_agg(nm, ', ' ORDER BY nm) FROM (SELECT DISTINCT name AS nm FROM resolved WHERE NOT fillable LIMIT 8) s) AS unnamed
@@ -1211,8 +1222,15 @@ if (configFailed) {
             // the community group's, ob1_agents' the capture group's since 045
             // (run-it, third review pass: the remedy named the wrong one).
             const denied = /permission denied for table (\w+)/i.exec(msg)?.[1] ?? "thought_audit";
+            // The group each table the census reads belongs to, as db/config.mjs's
+            // ROLE_GRANTS has them (fifth review pass: ob1_agent_keys is the
+            // server group's, and was sent to the community group).
+            const group = denied === "ob1_agents" ? "the capture group's row since 045"
+              : denied === "ob1_agent_keys" ? "the server group's row"
+              : denied === "thought_audit" ? "the community group's row"
+              : "a row of";
             add("audit events", "skip", `not checked — this role cannot read the census (${msg}); the shape is checked, the waiting keys are not`,
-                `GRANT SELECT ON ${denied} TO <the connector's role>; — ${denied === "ob1_agents" ? "the capture group's row since 045" : "the community group's row"}, which migrate.ts --grant issues (db/README.md, Grants for a capturing role).`);
+                `GRANT SELECT ON ${denied} TO <the connector's role>; — ${group}, which migrate.ts --grant issues (db/README.md, Grants for a capturing role).`);
           } else {
             add("audit events", "warn", `could not verify: ${msg}`, "The check reads information_schema.columns, pg_proc, ob1_agents and thought_audit.");
           }
@@ -1521,20 +1539,25 @@ if (configFailed) {
          */
         try {
           const { UPDATE_THOUGHT_SIGNATURE } = await import("../db/config.mjs");
+          // The shipped arity, read from the signature the stores call rather
+          // than spelled here — the next defaulted parameter moves one constant
+          // (fifth review pass); the form one short of it is the one the
+          // migration before the current one left.
+          const ARITY = UPDATE_THOUGHT_SIGNATURE.split(",").length;
           const ut = (await sql`
             SELECT p.pronargs AS nargs, p.oid::regprocedure::text AS sig
             FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
             WHERE p.proname = 'update_thought' AND n.nspname = 'public'
-            ORDER BY (p.pronargs = 10) DESC, p.oid`) as { nargs: number; sig: string }[];
+            ORDER BY (p.pronargs = ${ARITY}) DESC, p.oid`) as { nargs: number; sig: string }[];
           // 045 (SMD-1730) gave update_thought a tenth argument, the write
           // event, by dropping the 9-argument form — 032's mechanism, one form
           // later. A 9-argument form ALONE is a brain that predates 045: every
           // edit still resolves (the servers send nine by name; a defaulted
           // tenth is the same call), so it is a WARN naming what is lost — the
           // event — where a 7- or 8-argument form alone is the FAIL it was.
-          const current = ut.filter((r) => Number(r.nargs) === 10);
-          const extra = ut.filter((r) => Number(r.nargs) !== 10).map((r) => r.sig);
-          const nineAlone = ut.length === 1 && Number(ut[0].nargs) === 9;
+          const current = ut.filter((r) => Number(r.nargs) === ARITY);
+          const extra = ut.filter((r) => Number(r.nargs) !== ARITY).map((r) => r.sig);
+          const nineAlone = ut.length === 1 && Number(ut[0].nargs) === ARITY - 1;
           if (!ut.length) {
             add("edit signature", "fail", "update_thought is missing — the update_thought tool and db/reembed.ts call it", ledgerRemedy("045", APPLY_045));
           } else if (current.length && extra.length === 0) {
@@ -1547,7 +1570,7 @@ if (configFailed) {
             add("edit signature", "warn",
                 `${ut[0].sig} is the form from before migration 045: every edit resolves, but no write event (p_event — stance, cites, the valid window, trust) reaches the audit row, and db/reembed.ts, which resolves the body by ${UPDATE_THOUGHT_SIGNATURE}, refuses to run`,
                 ledgerRemedy("045", APPLY_045));
-          } else if (ut.some((r) => Number(r.nargs) === 9)) {
+          } else if (ut.some((r) => Number(r.nargs) === ARITY - 1)) {
             // A 9-argument form among the leftovers and no 10: 032 re-applied
             // would drop the 8 and 7 and leave its own 9 to be named on the next
             // start; 045's chain reaches all three (second review pass).

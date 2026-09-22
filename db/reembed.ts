@@ -399,6 +399,7 @@ import {
   REEMBED_KEY_PREFIX,
   reembedKey,
   summariseCorpusByModel,
+  SUPERSEDED_SIGNATURES,
   UPDATE_THOUGHT_SIGNATURE,
   validateEmbeddingConfig,
 } from "./config.mjs";
@@ -655,7 +656,7 @@ const [fn] = await sql`
     -- 032's nine-argument form alone: a brain at 044 under this tree, whose
     -- missing piece is 045, not 032 (SMD-1730, fourth review pass).
     EXISTS (SELECT 1 FROM pg_proc
-            WHERE oid = to_regprocedure('public.update_thought(uuid, text, jsonb, vector, jsonb, timestamptz, jsonb, text, jsonb)')) AS nine,
+            WHERE oid = to_regprocedure(${"public." + SUPERSEDED_SIGNATURES[SUPERSEDED_SIGNATURES.length - 1]})) AS nine,
     to_regclass('schema_migrations') IS NOT NULL AS has_ledger`;
 // Asked separately: a relation named in a statement is resolved when the
 // statement is parsed, whatever the AND before it would have short-circuited,
@@ -674,7 +675,7 @@ const refusalSchema: string | null = fn.present && fn.labelled
     "  (045, carrying 032's envelope and 018's rule, without which a pair from before the fingerprint fails on every run). " +
     (fn.ledgered
       ? `schema_migrations records ${missingMigration} as\n  applied (--baseline?) but the schema installed is older. Re-apply the recorded migrations with the migrator: it re-runs\n  every migration, pending ones included, in one transaction, and runs 021's backfill with the operator's acceptances out of its sight, so it labels\n  from real passes alone (a paste of 021's body alone labels from the acceptances too).\n  Run it from a shell configured as this brain is, with the server and every worker stopped:\n    ${REAPPLY_COMMAND}`
-      : `Apply the pending migrations first (through ${missingMigration}):\n    cd db && bun migrate.ts --url …`);
+      : `Apply the pending migrations first (through ${fn.labelled ? "045" : "021"}, which a plain run does):\n    cd db && bun migrate.ts --url …`);
 /**
  * What a run would refuse on, in the order a run judges them — the job, the
  * lease, the schema — spelled once for --status, --dry-run and the run.

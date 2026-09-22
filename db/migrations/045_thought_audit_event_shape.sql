@@ -98,21 +98,27 @@
 --      the actor it has set since 009.
 --
 --   6. IMMUTABLE BY RULE. thought_audit_refuse_mutation (008) gains the one
---      lawful amendment this migration needs: under the transaction-local
---      setting ob1.audit_amend = 'backfill', an UPDATE may fill a NULL
---      actor_kind, trust or origin and stamp backfilled_at — every other
---      column byte-equal (to_jsonb(OLD) against to_jsonb(NEW) with the four
---      removed), a set value never changed, DELETE never. The trigger itself
---      knows which change is lawful, so a test can assert that an UPDATE of
---      `diff` is refused even under the setting. SMD-1723's redaction — the
---      audit rows' content replaced by a marker and a hash, with its own
+--      lawful amendment this migration needs: under the setting
+--      ob1.audit_amend = 'backfill', an UPDATE may fill a NULL actor_kind,
+--      trust or origin and stamp backfilled_at — each of the three either left
+--      as it was or set to WHAT THE ROW DERIVES TO (the registry's kind for its
+--      key, the blob's via, the rule's trust from the filed claim), something
+--      filled, the stamp this transaction's now(), every other column
+--      byte-equal (to_jsonb(OLD) against to_jsonb(NEW) with the four removed),
+--      a set value never changed, DELETE and TRUNCATE never. The trigger itself
+--      knows which change is lawful, so a hand UPDATE under the setting can
+--      write nothing the backfill would not, and a test can assert that an
+--      UPDATE of `diff` is refused even under the setting. SMD-1723's redaction
+--      — the audit rows' content replaced by a marker and a hash, with its own
 --      event row — is the second named amendment and arrives with that
 --      ticket; it goes in this function.
 --
 --   7. THE BACKFILL IS A FUNCTION. backfill_thought_audit_events(p_limit) fills
---      origin from actor_context->>'via' and actor_kind + trust from
---      ob1_agents by canonical_agent_id, else by label, stamping
---      backfilled_at — 023's shape, callable again as kinds are set. This file
+--      origin from the blob's via and actor_kind + trust from ob1_agents by
+--      canonical_agent_id, else by label (ob1_registry_kind, the trigger's own
+--      lookup), stamping backfilled_at — 023's shape, callable again as kinds
+--      are set, its candidates read through two partial indexes on the rows
+--      still waiting, the registry held FOR SHARE for the pass. This file
 --      calls it once: every row with a `via` gains its origin now; no row gains
 --      a kind at apply time, because no agent has one yet. Each backfilled row
 --      says so itself (backfilled_at) — that is the backfill's record; no
@@ -134,8 +140,10 @@
 --   thought_audit is append-only, so a month once closed is cold and can move
 --   to cheaper storage without a rewrite; the table's COMMENT says so.
 --   SMD-1697's hundred-million bench is the measurement that decides when.
---   Two partial indexes (actor_kind, trust) for the reads SMD-1724/1726 build;
---   the trigger's cost gains one primary-key lookup on ob1_agents per row.
+--   Two partial indexes on the rows still waiting for a kind or a door, for
+--   the backfill and the census; none on actor_kind, trust or origin until a
+--   read exists; the trigger's cost gains one primary-key lookup on ob1_agents
+--   per row that carries an actor.
 --
 -- ON THE WORD "TRUNCATE" BELOW
 --   CLAUDE.md's guard rail forbids TRUNCATE in SQL files: a file must never
@@ -228,19 +236,16 @@ COMMENT ON COLUMN ob1_agents.kind IS
 COMMENT ON TABLE thought_audit IS
   'Append-only log of every capture/update/delete on thoughts, and since 045 the log of record SMD-1729''s views derive from: who (actor_name, canonical_agent_id, actor_kind from the key), the door (origin), the ceiling on the content (trust), what changed (diff), what the write claimed (stance, cites, valid_from/valid_until) and when (created_at). Written by a trigger inside the mutating transaction, so an event cannot be lost independently of the change it describes. thought_id is deliberately not a foreign key so audit rows outlive their subject. UPDATE and DELETE are refused by trigger, not by grant; the one lawful amendment fills a NULL actor_kind/trust/origin and stamps backfilled_at. Partition key chosen and not applied (SMD-1730): RANGE on created_at by month — append-only, so a closed month is cold; SMD-1697''s bench decides when.';
 
-CREATE INDEX IF NOT EXISTS thought_audit_actor_kind_idx
-  ON thought_audit (actor_kind, created_at DESC)
-  WHERE actor_kind IS NOT NULL;
-
-CREATE INDEX IF NOT EXISTS thought_audit_trust_idx
-  ON thought_audit (trust, created_at DESC)
-  WHERE trust IS NOT NULL;
-
+-- No index on actor_kind, trust or origin here: nothing in the tree reads
+-- them yet, and an index with no reader is maintenance on every audit row for
+-- nothing — SMD-1724 and SMD-1726 add theirs with their first read, as this
+-- file's header says of origin (fifth review pass; the first draft carried
+-- two).
+--
 -- The rows still waiting on a kind or a trust, by the name they carry: what
 -- the backfill fills, the census counts and names, and the amendment gate
--- re-derives — the complement of the two indexes above, and the shape every
--- such read has (the census's `actor_kind IS NULL` is implied by the
--- predicate, so it reads this index too). And the rows still waiting on a
+-- re-derives — the shape every such read has (the census's `actor_kind IS
+-- NULL` is implied by the predicate, so it reads this index too). And the rows still waiting on a
 -- door: empty after this file's own backfill, since the trigger writes origin
 -- with the row, so a re-run scans no filled row (third review pass: the first
 -- backfill's WHERE was an OR over function results no index could serve).
@@ -462,18 +467,26 @@ BEGIN
     -- An input with no offset is read as UTC, not in the session's TimeZone:
     -- two servers over one brain, or one server behind a pooler set to UTC,
     -- must record the same instant for one declaration (fourth review pass).
-    -- An offset counts only after a time of day — a bare date's own "-01"
-    -- is a day, not a zone.
+    -- A zone counts only after a time of day — a bare date's own "-01" is a
+    -- day, not a zone — and may be an offset, Z, or a name Postgres knows
+    -- (EST, America/Chicago), which the fifth review pass found silently
+    -- dropped by the naive cast; a named zone goes through timestamptz's own
+    -- reader, so an unknown name is refused, not read as UTC. An input the
+    -- pattern does not recognise as zoned has ' UTC' APPENDED before the cast
+    -- rather than being cast as a naive timestamp — Postgres's naive reader
+    -- accepts and DISCARDS a trailing zone or a one- or three-digit offset, so
+    -- "10:00:00 -5" would have read as 10:00 UTC; appended, it fails the parse
+    -- and is refused (run-it, fifth review pass).
     BEGIN
       IF v ? 'valid_from' AND jsonb_typeof(v->'valid_from') <> 'null' THEN
-        v_from := CASE WHEN (v->>'valid_from') ~ '\d{2}:\d{2}(:\d{2}(\.\d+)?)?\s*([zZ]|[+-]\d{2}(:?\d{2})?)\s*$'
+        v_from := CASE WHEN (v->>'valid_from') ~ '\d{2}:\d{2}(:\d{2}(\.\d+)?)?\s*([zZ]|[+-]\d{2}(:?\d{2})?|[A-Za-z][A-Za-z_/+0-9-]*)\s*$'
                        THEN (v->>'valid_from')::timestamptz
-                       ELSE (v->>'valid_from')::timestamp AT TIME ZONE 'UTC' END;
+                       ELSE ((v->>'valid_from') || ' UTC')::timestamptz END;
       END IF;
       IF v ? 'valid_until' AND jsonb_typeof(v->'valid_until') <> 'null' THEN
-        v_until := CASE WHEN (v->>'valid_until') ~ '\d{2}:\d{2}(:\d{2}(\.\d+)?)?\s*([zZ]|[+-]\d{2}(:?\d{2})?)\s*$'
+        v_until := CASE WHEN (v->>'valid_until') ~ '\d{2}:\d{2}(:\d{2}(\.\d+)?)?\s*([zZ]|[+-]\d{2}(:?\d{2})?|[A-Za-z][A-Za-z_/+0-9-]*)\s*$'
                         THEN (v->>'valid_until')::timestamptz
-                        ELSE (v->>'valid_until')::timestamp AT TIME ZONE 'UTC' END;
+                        ELSE ((v->>'valid_until') || ' UTC')::timestamptz END;
       END IF;
     EXCEPTION WHEN others THEN
       RAISE EXCEPTION 'event.valid_from / valid_until must be timestamps, got % / %.', v->'valid_from', v->'valid_until';
@@ -508,20 +521,21 @@ AS $$
 DECLARE
   raw text := current_setting('ob1.event', true);
 BEGIN
-  IF raw IS NULL OR raw = '' THEN
+  -- No EXCEPTION arm: a plpgsql block with one establishes a savepoint every
+  -- time it is entered, and this runs once per audit row (the trigger's own
+  -- agent_id comment refuses that cost; fifth review pass). The functions
+  -- write a validated object or an empty string here, so only a hand-set
+  -- value can be anything else: one that does not begin as an object is read
+  -- as no event, one that does but is malformed fails the write loudly.
+  IF raw IS NULL OR raw = '' OR raw !~ '^\s*\{' THEN
     RETURN NULL;
   END IF;
   RETURN raw::jsonb;
-EXCEPTION WHEN others THEN
-  -- As ob1_current_actor: a malformed setting must not break a write. The
-  -- functions set a validated value or an empty string, so this arm is for a
-  -- hand-set value only.
-  RETURN NULL;
 END;
 $$;
 
 COMMENT ON FUNCTION ob1_current_event() IS
-  'Reads the ob1.event transaction-local setting as jsonb — the write event validate_write_event normalised: {stance, cites, valid_from, valid_until, trust, actor_kind}. NULL when unset, empty or malformed, so audit never blocks a mutation. Migration 045 / SMD-1730.';
+  'Reads the ob1.event transaction-local setting as jsonb — the write event validate_write_event normalised: {stance, cites, valid_from, valid_until, trust, actor_kind}. NULL when unset, empty, or not an object; no savepoint per row (a hand-set malformed object fails the write). Migration 045 / SMD-1730.';
 
 -- ---------------------------------------------------------------------------
 -- Immutable by rule: 008's refusal, with the one lawful amendment
@@ -634,6 +648,7 @@ DECLARE
   v_kind     text;
   v_declared text;
   v_trust    text;
+  v_origin   text;
   v_claimed  jsonb := '{}'::jsonb;
   v_context  jsonb;
 BEGIN
@@ -705,7 +720,7 @@ BEGIN
      *
      * `updated_at` moving on its own is bookkeeping, not history.
      */
-    IF v_diff = '{}'::jsonb AND event IS NULL THEN
+    IF v_diff = '{}'::jsonb AND NOT COALESCE(event ?| ARRAY['stance', 'cites', 'valid_from', 'valid_until'], false) THEN
       RETURN NULL;
     END IF;
     /**
@@ -714,7 +729,11 @@ BEGIN
      * no row — but a re-capture or edit that restates a text with a stance,
      * cites or a window is exactly the restatement SMD-1722 counts, and the
      * caller's declaration must exist somewhere: it is recorded here, the diff
-     * empty, rather than checked by validate_write_event and then lost.
+     * empty, rather than checked by validate_write_event and then lost. A
+     * trust or actor_kind claim alone is not a record of anything but a clamp,
+     * so it writes no row on an unchanged write (run-it, fifth review pass).
+     * (`?|` on a NULL event is NULL; NOT NULL is NULL; the IF takes the row —
+     * so the NULL case is spelled: no event, no row.)
      */
 
   ELSE  -- DELETE
@@ -810,10 +829,12 @@ BEGIN
   -- one sees it here rather than having it silently interpreted. The attempt
   -- the key could not support rides under `claimed`.
   v_context := COALESCE(actor - 'name' - 'session' - 'agent_id', '{}'::jsonb);
-  -- `via` is a door only as a non-empty string (ob1_door_of); anything else
-  -- stays in the blob, visible, rather than becoming an origin spelled as JSON
-  -- or an empty door (run-it, first and second review passes).
-  IF ob1_door_of(actor) IS NOT NULL THEN
+  -- `via` is a door only as a non-empty string (ob1_door_of, read once — the
+  -- column and the strip cannot disagree); anything else stays in the blob,
+  -- visible, rather than becoming an origin spelled as JSON or an empty door
+  -- (run-it, first and second review passes).
+  v_origin := ob1_door_of(actor);
+  IF v_origin IS NOT NULL THEN
     v_context := v_context - 'via';
   END IF;
   IF v_claimed <> '{}'::jsonb THEN
@@ -844,7 +865,7 @@ BEGIN
     NULLIF(v_context, '{}'::jsonb),
     v_kind,
     v_trust,
-    ob1_door_of(actor),
+    v_origin,
     -- NULL throughout on a tombstone: the event was not read (above).
     event->>'stance',
     CASE WHEN event ? 'cites' THEN ARRAY(SELECT jsonb_array_elements_text(event->'cites'))::uuid[] END,
