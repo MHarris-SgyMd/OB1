@@ -286,7 +286,11 @@ than by editing a hand-numbered FORK.md section:
   the tickets and migrations it touches, a one-to-three-line changelog entry, and
   the record itself in the shape `changes/README.md` gives — at most 150 lines,
   citing tickets, migrations and existing change numbers, never a number of its
-  own, which the release step assigns.
+  own, which the release step assigns. CI holds this: the `Repo consistency`
+  job's landing check (`scripts/check-landing.ts`) refuses a PR — and the merge
+  queue refuses its group — whose change in those directories, test files
+  (`test-*.ts`, `*.test.ts`) and Markdown aside, comes with no fragment; the
+  refusal names the files that asked (SMD-1857).
 - The release step assembles the accumulated fragments into numbered change
   files (`changes/NNN-<slug>.md`), FORK.md's index and `CHANGELOG.md` in one
   commit and cuts the tag; **do not hand-number a new change file or edit
