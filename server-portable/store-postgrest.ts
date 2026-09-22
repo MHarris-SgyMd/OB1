@@ -233,7 +233,7 @@ export class PostgrestStore implements ThoughtStore {
   async captureThought(opts: {
     content: string;
     payload: { metadata: Record<string, unknown> };
-    embedding: number[];
+    embedding: number[] | null;
     chunks?: { content: string; embedding: number[]; context?: string }[];
     actor?: Actor;
     embeddingModel?: string;
@@ -297,6 +297,9 @@ export class PostgrestStore implements ThoughtStore {
 
     const id = (upserted as { id?: string } | null)?.id;
     if (!id) throw new Error("upsert_thought returned no id, so the embedding could not be attached.");
+    // Nothing to attach when the egress gate refused the embedding (SMD-1903):
+    // the row stands as the 2-argument form left it, vectorless on purpose.
+    if (opts.embedding === null) return { id };
 
     // The label travels with the vector here too (021): a re-capture of a
     // labelled row through this path would otherwise leave the old label

@@ -13,7 +13,8 @@
  *   2. metadata `category` matches the directory it lives in
  *   3. relative links in contribution READMEs resolve
  *   4. requires_primitives / requires_skills point at directories that exist
- *   5. ALTER TABLE thoughts ADD COLUMN is guarded with IF NOT EXISTS
+ *   5. ALTER TABLE thoughts ADD COLUMN is guarded with IF NOT EXISTS, and a
+ *      vendored .sql never DROPs or ALTERs a core thoughts column (SMD-1924)
  *   6. shipped content never hands untrusted input a shell — no sandbox-bypass
  *      or skip-permissions flag, alias or mode; no allow rule granting all of
  *      Bash or a prefix of a network client or interpreter; no spawn through a
@@ -80,18 +81,44 @@
  *      not a forward, which is how three knobs passed the text rule this
  *      replaces — and the decision is one pure function its probes run on
  *      in-memory documents (SMD-1843)
- *  15. FORK.md's change counts — the "18–N" range and the total — match its
- *      `### N.` sections, which are contiguous with no gap or duplicate: the
- *      renumber trap, caught (SMD-1804)
- *  16. every changes/<ticket>.md fragment is well-formed — one of Keep a
+ *  15. FORK.md is the front door and changes/ holds the record: every numbered
+ *      change from 18 on is one file changes/NNN-<slug>.md whose first line is
+ *      `# N. <title>` with the name's number, the numbers contiguous with no
+ *      duplicate (two branches taking one number fail on the tree that holds
+ *      both); a file is at most CHANGE_CAP_LINES lines, the files over it at
+ *      the split listed in OVERSIZE_AT_SPLIT with a ceiling they may only
+ *      shrink under (held stale two ways); FORK.md is under FORK_CEILING_BYTES,
+ *      carries no `### N.` section, and its index block equals what
+ *      scripts/fork-index.mjs renders from the directory (a numbered section
+ *      at any heading level is refused in FORK.md); and every "FORK.md change
+ *      N" / "FORK change N" / "changes/NNN" / "NNN change M" citation in a file
+ *      git tracks or would track (untracked, not ignored), and every bare
+ *      "change N" in the record itself, names a number that has a file or a
+ *      row of the 1–17 table — lists and wrapped lines included, a thousands
+ *      group, a decimal, a date or a number before a unit word excluded, and a
+ *      slugged path (or a relative link inside the record) naming the file as
+ *      it is. A changes/smd-NNNN.md fragment (16) is held to the name and the
+ *      cap here, and listed in the index by ticket until the release step
+ *      numbers it (SMD-1917)
+ *  16. every changes/smd-NNNN.md fragment is well-formed — one of Keep a
  *      Changelog's six types, a bump the migrations it lists allow (a `patch`
- *      that ships a migration fails), an SMD-#### ticket list, and a Changelog
- *      body and a FORK body that cite tickets and migration numbers, never a
- *      change number the release step has yet to assign (SMD-1804)
+ *      that ships a migration fails), an SMD-#### ticket list; exactly one
+ *      `## Changelog` (one to three plain lines naming every listed ticket and
+ *      no other — 17b reads a version's tickets from CHANGELOG.md) followed
+ *      by exactly one `## FORK`, nothing between them, the FORK body running
+ *      to the end of the file with its first line the plain title (no heading
+ *      mark, nothing on the second line, ending in every listed ticket — 17b
+ *      reads a released ticket from that title) and no numbered heading of its
+ *      own — the release step assigns the number and writes the heading
+ *      (SMD-1804, SMD-1917); the rules are scripts/fragments.mjs's
+ *      fragmentProblems, which the release step runs too; the file's name and
+ *      line cap are check 15's
  *  17. CHANGELOG.md follows Keep a Changelog 1.1.0 (Unreleased first, versions
  *      dated and descending, only the six headings, compare links resolve); each
- *      released version pairs both ways with releases.json and FORK.md; a
- *      migration inside a released range keeps the sha the release froze; and
+ *      released version pairs both ways with releases.json and the numbered
+ *      change files' titles (prose, which names pending tickets, is not a
+ *      source); a migration inside a released range keeps the sha the release
+ *      froze; and
  *      migration 044's schema_version equals db/version.mjs's FORK_VERSION
  *      (SMD-1804)
  *
@@ -100,13 +127,14 @@
  * Exits non-zero on any violation.
  */
 
-import { readFileSync, existsSync, readdirSync, statSync } from "node:fs";
+import { readFileSync, existsSync, readdirSync, statSync, lstatSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join, dirname, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { coreColumnCommentStatement, coreFunctionStatement, LOCAL_PROVIDER_SERVICES, ownedColumnCommentsIn, ownedFunctionsIn, supabaseIsmsIn } from "../db/config.mjs";
+import { CHANGES_DIR, END as INDEX_END, START as INDEX_START, FIRST_FILED, classifyChanges, indexSpan, pad3, readChangeEntries, renderIndex, ticketsOf } from "./fork-index.mjs";
 import { FORK_VERSION, migrationSha, readReleases, semverCompare } from "../db/version.mjs";
-import { parseFragment, fragmentSection } from "./fragments.mjs";
+import { fragmentProblems } from "./fragments.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const CATEGORIES = [
@@ -288,13 +316,26 @@ function scanLines(files, rules) {
   return counts;
 }
 
-// ── 5: ADD COLUMN on thoughts must be re-runnable ────────────────────────────
+// ── 5: column ops on core thoughts — ADD is re-runnable, DROP/ALTER is refused ─
 
 function checkSqlGuards() {
   scanLines(walk(ROOT), [{
     name: "add-column-guard",
     re: /alter\s+table\s+(?:public\.)?thoughts\s+add\s+column\s+(?!if\s+not\s+exists)/i,
     msg: "ADD COLUMN on thoughts without IF NOT EXISTS",
+  }, {
+    // SMD-1924. Adding a column to thoughts is fine (guarded above); dropping
+    // or retyping one mutates a structure db/migrations owns, and a vendored
+    // file applied to a fork brain must not do it. The hazard was
+    // recipes/email-history-import/rollback-chunking-columns.sql (DROP COLUMN
+    // parent_id/chunk_index/full_text, the abandoned upstream chunking),
+    // removed in SMD-1924. Scoped to vendored .sql: a core migration may own
+    // the schema, and a README's rollback-of-its-own-added-columns or an
+    // annotated do-not-run example is prose, not an applied file.
+    name: "thoughts-column-mutation",
+    only: /(?:^|\/)(?:schemas|recipes|integrations)\/.+\.sql$/i,
+    fileRe: /alter\s+table\s+(?:public\.)?thoughts\s+(?:drop|alter)\s+column\b/gi,
+    msg: "DROP COLUMN / ALTER COLUMN on core thoughts in a vendored file — additive ADD COLUMN … IF NOT EXISTS only; a column drop or retype belongs in a db/ migration",
   }]);
 }
 
@@ -493,7 +534,7 @@ const SHELL_HAZARD_EXCEPTIONS = new Map([
 // Text is scanned by construction (checks 6 and 7): only known binary shapes
 // and lockfiles are skipped, so an extensionless Dockerfile, Procfile or CNAME
 // is read like everything else.
-const BINARY_FILES = /\.(png|jpe?g|gif|webp|svg|ico|woff2?|ttf|otf|pdf|zip|gz|tgz|lock|mp3|mp4|mov|m4a|wav|webm)$|(?:^|\/)(?:package-lock\.json|bun\.lockb?)$/i;
+const BINARY_FILES = /\.(png|jpe?g|gif|webp|svg|ico|woff2?|ttf|otf|pdf|zip|gz|tgz|lock|mp3|mp4|mov|m4a|wav|webm|xlsx|docx|pptx|db|sqlite|parquet|bin)$|(?:^|\/)(?:package-lock\.json|bun\.lockb?)$/i;
 
 /**
  * Files git ignores under ROOT — recipe run output (email packs, OAuth state),
@@ -648,7 +689,6 @@ const CORE_FUNCTION_PROBES = [
 ];
 /** Ordinary lines the rule must not catch. */
 const CORE_FUNCTION_NON_PROBES = [
-  "CREATE OR REPLACE FUNCTION match_thoughts_recency(",
   "CREATE OR REPLACE FUNCTION update_updated_at_column()",
   "CREATE OR REPLACE FUNCTION upsert_thoughts_batch(",
   "-- CREATE OR REPLACE FUNCTION upsert_thought(text, jsonb) is the statement 003 ran",
@@ -2787,113 +2827,376 @@ function checkFixtureRedaction() {
 }
 checkFixtureRedaction();
 
-// ── 14–16: versioning, the changelog and the freeze (SMD-1804) ───────────────
-const SELF_1804 = "scripts/check-fork-consistency.mjs";
-const FRAGMENT_TYPES = new Set(["added", "changed", "deprecated", "removed", "fixed", "security"]);
-const BUMPS = new Set(["major", "minor", "patch"]);
-const KAC_HEADINGS = new Set(["Added", "Changed", "Deprecated", "Removed", "Fixed", "Security"]);
-const pad3 = (n) => String(n).padStart(3, "0");
+// ── 15: FORK.md is the front door; changes/ holds the record (SMD-1917) ──────
+//
+// FORK.md reached 1.23 MB and 17,700 lines — larger than any context window, so
+// every reader took a slice by grep — and its `### N.` sections were numbered by
+// hand in one file, so every merge of main renumbered a section and left the
+// code comments citing the old number silently wrong. Every change from 18 on is
+// one file under changes/ now, and this holds the layout: the names and the
+// numbers, the line cap, FORK.md's own size, the generated index, and every
+// citation of a change number in the tree.
+
+/** FORK.md's byte ceiling, measured outside the generated index — the front door's prose, not the record (~16k tokens; 50 KB at the split). */
+const FORK_CEILING_BYTES = 64 * 1024;
+/** A change file's line cap. The shape is in changes/README.md. */
+const CHANGE_CAP_LINES = 150;
+/**
+ * The files over the cap when the split landed, with the ceiling each may only
+ * shrink under (its line count then, rounded up to ten). Held stale two ways: an
+ * entry for a file that now fits under the cap, or for a number with no file,
+ * fails until it is dropped. The sizes are the files' at the merge that landed the
+ * split (main's PR #95 had added two lines to 69). 102 was cut to the shape and is absent;
+ * 103 (SMD-1541) landed on main as a hand-numbered section while the split was in
+ * review — the last one the transition allowed — and joins the list.
+ */
+const OVERSIZE_AT_SPLIT = {
+  24: 160, 28: 710, 30: 200, 32: 230, 33: 160, 34: 190, 35: 160, 36: 180, 37: 210, 38: 340, 39: 280,
+  40: 250, 41: 270, 51: 240, 52: 220, 56: 380, 57: 160, 58: 210, 60: 170, 61: 350, 63: 250, 64: 420, 66: 210,
+  67: 430, 69: 310, 70: 380, 71: 340, 72: 410, 73: 220, 74: 330, 75: 240, 76: 310, 77: 450, 78: 200, 79: 230, 80: 430,
+  81: 300, 84: 210, 90: 290, 91: 470, 93: 250, 94: 340, 95: 360, 97: 240, 98: 270, 99: 290,
+  103: 320, // landed hand-numbered on main (PR #95) during SMD-1804's transition, after the split
+};
 
 /**
- * 15: FORK.md's counts match its sections. The change counter is assigned by
- * hand at PR time (SMD-1804 retires it for new work, but sections 1–100 stay),
- * so a botched renumber leaves a gap, a duplicate, or an intro count that no
- * longer matches. The `### N.` sections must run contiguously from their lowest
- * to their highest with no repeat, the "Changes 18–N" range must name that span,
- * and the "(N) numbered changes" total must equal the highest.
+ * Change numbers a text cites by the explicit shapes every file may use:
+ * "FORK.md change N" — also "FORK change N", "FORK.md's change N", "changes N
+ * and M", "changes N, M, and O", "FORK.md, change N", "FORK.md §N", "FORK.md
+ * section N" — a `changes/NNN` path, and db/README.md's migration map row
+ * "NNN change M". `record` adds the bare "change N" / "Change N" (and the same
+ * lists) the record itself uses (FORK.md and the change files, where "change"
+ * means nothing else). A number followed by `-NN-` is a date, not a change;
+ * "18-20" with a plain hyphen is still a range.
+ * Returns [{ n, index }].
  */
-function forkCountProblems(text) {
+// A number is not a thousands group ("changes 1,536 rows" is a count) nor a date
+// ("change 2026-09-21"). A list continues after "and", a dash or a slash, or
+// after a comma when another item or "and" follows — so "(FORK.md change 90,
+// 250 ms)" and "change 90, 2 of them" cite 90 alone while "changes 31, 53, and
+// 89" cites all three. A continuation number is three digits at most: change
+// 1000, should the fork get there, is read in the leading position only.
+// A number is a change number unless it is a thousands group ("1,536 rows"), a
+// date ("2026-09-21"), a decimal ("0.51 R@10") or is followed by a unit or count
+// word ("no behaviour change 250 ms", "a schema change 200 lines long") — the
+// record measures in the same sentences it cites in. The unit list is the
+// record's vocabulary, a heuristic held by its probes: a false report is fixed
+// by rewording, a miss by adding the word here.
+const UNIT_WORDS = String.raw`ms|[µμ]s|s|sec(?:ond)?s?|min(?:ute)?s?|h|hours?|rows?|lines?|files?|bytes?|[KMGT]i?B|%|dims?|dimensions?|tokens?|passes?|times|commits?|queries|thoughts?|vectors?|sections?|entries|items?|chars?|characters|words?|columns?|tables?|calls?|runs?`;
+const LINE_WRAP = String.raw`[ \t]*(?:\r?\n[ \t]*)?`; // the same line or a wrap onto the next, never across a blank line
+const UNIT = String.raw`(?!${LINE_WRAP}(?:${UNIT_WORDS})(?!\w))`;
+const NUM = String.raw`\b(?!-\d\d-)(?!,\d{3}\b)(?!\.\d)${UNIT}`;
+// "18–20, 22" and "3, 4, 5." read whole, across a wrapped line: a bare comma item
+// continues before another item, before "and", or at the end of the clause;
+// ", change N" always continues. The one cost is a unit-less number in
+// parentheses — "(change 90, 250)" cites 250 — a shape no site writes.
+const SEP = String.raw`,${LINE_WRAP}`; // a comma item may wrap onto an indented continuation line; a blank line still stops
+const CITED_LIST = String.raw`(\d+)${NUM}((?:(?:,?\s+and|–|—|-|\/)\s?(?:change )?\d{1,3}${NUM}|${SEP}change \d{1,3}${NUM}|${SEP}\d{1,3}${NUM}(?=${SEP}(?:change )?\d|,?\s+and\s|\s+(?:of|per)\b|\s*(?:[.;:)\]]|$)))*)`;
+// A slugged path names a file as it is — a mis-cased or underscored slug is read
+// so that check 15 can report the dead link, not skipped as "not a path".
+const CHANGE_PATH = String.raw`(?<![\w/.-])(?:\.\.?\/)*changes\/(\d{3})([-_][\w-]+\.md)?(?![\w-])(?!\.[\w-])`; // ./ and ../ allowed; not docs/changes/…, not …md.bak; a sentence may end after it
+// Inside the record a link may be relative: `(079-the-store.md)` beside the file.
+const RECORD_PATH = String.raw`\((?:\.\/)?(\d{3})([-_][\w-]+\.md)(?:#[\w-]*)?(?: "[^"\n]*")?\)`;
+// The file name may sit in a code span (\`FORK.md\` change N) or behind ../ .
+// Code comments cite as "SMD-1541 (change 103)" or "(SMD-1541; change 103)": a
+// bare "change N" within a few words of a ticket is a citation anywhere; and
+// "(FORK 79)" — the file's name and a number — is one too (the NUM guard keeps
+// "FORK.md 61,543 bytes" and "FORK.md 828 lines" out).
+const TICKETED = String.raw`\bSMD-\d+[^\n]{0,40}?\(?[Cc]hanges?\s${CITED_LIST}`;
+const EXPLICIT_CITATION = new RegExp(String.raw`\b(?:\.\.\/)?FORK(?:\.md)?\x60?(?:'s)?,?\s(?:(?:[Cc]hange|section|§) ?s?\s?)?${CITED_LIST}|${CHANGE_PATH}|\b\d{3} change (\d+)\b|${TICKETED}`, "gm");
+const BARE_CITATION = new RegExp(String.raw`\b[Cc]hanges?\s${CITED_LIST}|${RECORD_PATH}`, "gm");
+/** [{ n, index, name? }] — `name` when the citation is a `changes/NNN-<slug>.md` path, which must exist as such. */
+function citedChangesIn(text, { record = false } = {}) {
+  const out = [];
+  const list = (m, index = m.index) => {
+    out.push({ n: Number(m[1]), index });
+    for (const t of m[2].matchAll(/\d+/g)) out.push({ n: Number(t[0]), index });
+  };
+  let rest = text; // the record's bare reader runs over the text with the explicit spans blanked: one report per site
+  for (const m of text.matchAll(EXPLICIT_CITATION)) {
+    if (m[3] !== undefined) out.push({ n: Number(m[3]), index: m.index, ...(m[4] ? { name: `${m[3]}${m[4]}` } : {}) });
+    else if (m[5] !== undefined) out.push({ n: Number(m[5]), index: m.index });
+    else if (m[6] !== undefined) list([m[0], m[6], m[7]], m.index);
+    else list(m);
+    rest = rest.slice(0, m.index) + " ".repeat(m[0].length) + rest.slice(m.index + m[0].length);
+  }
+  if (record) for (const m of rest.matchAll(BARE_CITATION)) {
+    if (m[3] !== undefined) out.push({ n: Number(m[3]), index: m.index, name: `${m[3]}${m[4]}` });
+    else list(m);
+  }
+  return out;
+}
+const CITATION_PROBES = [
+  ["see FORK.md change 58: the statements", false, [58]],
+  ["named in FORK.md changes 38 and 40 updated a", false, [38, 40]],
+  ["(FORK.md, change 64) and FORK.md §50 and FORK.md section 12", false, [64, 50, 12]],
+  ["[the file](changes/102-every-knob-the-server-reads-reaches.md) and changes/018-long-captures-stay-searchable.md and changes/044", false, [102, 18, 44]],
+  ["changes/README.md and change 42 in prose", false, []],
+  ["change 42 in prose, Changes 3 and 4, changed 5 times", true, [42, 3, 4]],
+  ["FORK.md changes 18-20 and 22", false, [18, 20, 22]],
+  ["(FORK.md change 90, 1536 dims) and FORK.md change 90 and 1,536 vectors", false, [90, 90]],
+  ["FORK.md Change 42 and FORK.md change\n43", false, [42, 43]],
+  ["FORK.md change 42 once, once only", true, [42]],
+  ["which changes 1,536 rows and change 42; FORK.md change 1,000", true, [42]],
+  ["(FORK.md change 90, 250 ms) and FORK.md change 90, 2 of them", false, [90, 90, 2]], // "2 of them" reads as a list item: a miss on "changes 31, 53 of the record" would be silent, a false report here is bounded to a number above the highest change
+  ["Ten (changes 31, 53, 55, 59, and 89) ship; changes 31, 53", true, [31, 53, 55, 59, 89, 31, 53]],
+  ["FORK.md changes 3, 4, 5. Then FORK.md changes 18–20, 22; FORK.md change 90, change 91, change 92", false, [3, 4, 5, 18, 20, 22, 90, 91, 92]],
+  ["`FORK.md` change 43 and `FORK.md` §50 and `../FORK.md` §48", false, [43, 50, 48]],
+  ["(FORK.md change 31, 0.51 R@10) and FORK.md change 31, 12.3 ms.", false, [31, 31]],
+  ["no behaviour change 250 ms after; a schema change 200 lines long; changes 3, 4 and 500 rows; change 5 of 6", true, [3, 4, 5]],
+  ["Like FORK.md changes 31, 53\nand 999; FORK.md changes 5, 6,\n7 and 8; changes 31,\n53. And changes 31,\n53 then", true, [31, 53, 999, 5, 6, 7, 8, 31, 53, 31]],
+  ["- FORK.md changes 5, 6,\n  7 and 8; changes 31,\n\n53", true, [5, 6, 7, 8, 31]],
+  ["change 42% of them, change 5 seconds later, change 6 minutes, change 7 hours, change 8 μs", true, []],
+  ["FORK.md changes 31 and 53 of the record; changes 3, 4 and 500 rows; see FORK.md change 999\n\nlines later", true, [31, 53, 999, 3, 4]], // explicit citations first, then the record's bare ones
+  ["changes 31, 53 of the record; FORK.md change 42 of this fork; change 5 of 6", true, [42, 31, 53, 5]],
+  ["SMD-1541 (change 103): the key; (SMD-1541; change 103 has the why); SMD-1228 changes 38 and 40; SMD-1 is not change-free", false, [103, 103, 38, 40]],
+  ["SMD-1037 (FORK 79), (FORK 82) and FORK.md 61,543 bytes, FORK.md 828 lines", false, [79, 82]],
+  ["see changes/104-x.md. And ../changes/020-x.md and ./changes/021-y.md and changes/022-z.md.bak", false, [104, 20, 21]],
+  ["docs/changes/104-x.md and changes/105-y.md.bak and changes/106-z.md", false, [106]],
+  ["since FORK.md change 90, one per id a capture names", false, [90]],
+  ["024 change 45\n025 change 46\n044 SMD-1804", false, [45, 46]],
+  ["033's header and FORK change 62 state it; FORK §79; FORK.md's change 12", false, [62, 79, 12]],
+  ["Ten (changes 31, 53, 55, and 89) ship nothing", true, [31, 53, 55, 89]],
+  ["measured on change 2026-09-21 and change 42", true, [42]],
+  ["FORK.md change 2026-09-21 is a date", false, []],
+];
+
+/**
+ * The layout decision, pure: what changes/ holds (as `{ name, text }` entries),
+ * FORK.md's text, the citations found in the tree, and the constants. Returns
+ * [{ where, kind, msg }]; the caller turns them into failures.
+ */
+function forkLayoutProblems({ entries, forkText, citations = [], ceilings = OVERSIZE_AT_SPLIT, cap = CHANGE_CAP_LINES, forkCeiling = FORK_CEILING_BYTES }) {
   const problems = [];
-  const nums = [...text.matchAll(/^### (\d+)\. /gm)].map((m) => Number(m[1]));
-  if (nums.length === 0) { problems.push("no `### N.` numbered sections found"); return problems; }
-  const sorted = [...nums].sort((a, b) => a - b);
-  const lo = sorted[0];
-  const hi = sorted[sorted.length - 1];
-  const seen = new Set();
-  for (const n of sorted) {
-    if (seen.has(n)) problems.push(`change ${n} appears more than once`);
-    seen.add(n);
+  const at = (where, kind, msg) => problems.push({ where, kind, msg });
+  const changes = classifyChanges(entries);
+  const { numbered, other } = changes;
+  for (const o of other) at(`${CHANGES_DIR}/${o.name}`, "bad-name", o.text === null
+    ? "is not a regular file (a directory, a symlink, a pipe) — changes/ holds change files and fragments alone"
+    : "is neither a numbered change (NNN-<slug>.md: three digits, a dash, lower-case ASCII words) nor a release fragment (smd-NNNN.md) — the index cannot list it");
+  const byTicket = new Map();
+  for (const f of changes.fragments) {
+    if (byTicket.has(f.ticket)) at(`${CHANGES_DIR}/${f.name}`, "duplicate-fragment", `is a second fragment for ${f.ticket} beside ${CHANGES_DIR}/${byTicket.get(f.ticket)} — one PR, one fragment; the release step would number both`);
+    else byTicket.set(f.ticket, f.name);
   }
-  for (let n = lo; n <= hi; n++) if (!seen.has(n)) problems.push(`change ${n} is missing — the sections skip from ${n - 1} to the next`);
-  const range = /Changes \*\*(\d+)[–—-](\d+)/.exec(text);
-  if (!range) problems.push('no "Changes **18–N**" sentence to check the section span against');
-  else {
-    if (Number(range[1]) !== lo) problems.push(`the intro says changes start at ${range[1]} but the lowest `+"`### N.`"+` section is ${lo}`);
-    if (Number(range[2]) !== hi) problems.push(`the intro says changes end at ${range[2]} but the highest `+"`### N.`"+` section is ${hi}`);
+  if (numbered.length === 0) { at(CHANGES_DIR, "no-files", `holds no numbered change file — every change from ${FIRST_FILED} on is one`); }
+  const byN = new Map();
+  for (const c of numbered) {
+    if (c.n < FIRST_FILED) at(`${CHANGES_DIR}/${c.name}`, "below-first", `carries change number ${c.n}; changes 1–${FIRST_FILED - 1} are FORK.md's table and have no file`);
+    if (byN.has(c.n)) at(`${CHANGES_DIR}/${c.name}`, "duplicate", `carries change number ${c.n}, which ${CHANGES_DIR}/${byN.get(c.n).name} already carries — two branches took one number; the later one takes the next free number and its citations move with it`);
+    else byN.set(c.n, c);
   }
-  const total = /\((\d+)\) numbered changes/.exec(text);
-  if (!total) problems.push('no "(N) numbered changes" total stated as a digit — state it so it cannot drift');
-  else if (Number(total[1]) !== hi) problems.push(`the intro states (${total[1]}) numbered changes but the highest section is ${hi}`);
+  const hi = numbered.length ? numbered[numbered.length - 1].n : FIRST_FILED - 1;
+  for (let n = FIRST_FILED; n <= hi; n++) if (!byN.has(n)) at(CHANGES_DIR, "gap", `has no file for change ${n} — the numbers run contiguously from ${FIRST_FILED} to the highest (${hi})`);
+  for (const c of numbered) {
+    if (!c.heading) at(`${CHANGES_DIR}/${c.name}`, "heading", "does not open with `# N. <title>` on its first line — the index reads the title from it");
+    else if (c.heading.n !== c.n) at(`${CHANGES_DIR}/${c.name}`, "heading", `opens with \`# ${c.heading.n}.\` but its name says ${c.n} — the citations follow the name`);
+    const ceiling = ceilings[c.n];
+    if (c.lines > cap) {
+      if (ceiling === undefined) at(`${CHANGES_DIR}/${c.name}`, "oversize", `is ${c.lines} lines; a change file is at most ${cap} — a review pass is a table row, a finding worth more is a follow-up ticket (changes/README.md)`);
+      else if (c.lines > ceiling) at(`${CHANGES_DIR}/${c.name}`, "oversize", `is ${c.lines} lines; it was over the cap at the split and may only shrink — its ceiling in OVERSIZE_AT_SPLIT is ${ceiling}`);
+    } else if (ceiling !== undefined) at(SELF, "excuse-stale", `OVERSIZE_AT_SPLIT lists change ${c.n} (ceiling ${ceiling}) but ${CHANGES_DIR}/${c.name} is ${c.lines} lines, under the cap — drop the entry`);
+  }
+  for (const n of Object.keys(ceilings).map(Number)) if (!byN.has(n)) at(SELF, "excuse-stale", `OVERSIZE_AT_SPLIT lists change ${n}, which has no file — drop the entry`);
+  for (const f of changes.fragments) if (f.lines > cap) at(`${CHANGES_DIR}/${f.name}`, "oversize", `is ${f.lines} lines; a fragment becomes a change file and is held to the same ${cap} — a review pass is a table row (changes/README.md)`);
+  const sec = /^(#{1,6}) (\d+)\. /m.exec(forkText.replace(/^```[\s\S]*?^```/gm, "")); // a `# 1. fetch` comment in a fenced snippet is not a section
+  if (sec) at("FORK.md", "section-in-fork", `carries a \`${sec[1]} ${sec[2]}.\` section — a numbered change is a file, ${CHANGES_DIR}/${String(sec[2]).padStart(3, "0")}-<slug>.md, and this file lists it`);
+  let span = null;
+  try { span = indexSpan(forkText); } catch (e) { at("FORK.md", "index-missing", `${e.message} — the generated index lives between them`); }
+  // The ceiling is the front door's prose: the generated index between the
+  // markers grows a row per release and is not what the ceiling is for.
+  const prose = span ? forkText.slice(0, span.s) + forkText.slice(span.e) : forkText;
+  const bytes = Buffer.byteLength(prose, "utf8");
+  if (bytes > forkCeiling) at("FORK.md", "fork-oversize", `is ${bytes} bytes outside the generated index; the front door stays under ${forkCeiling} — a change's record belongs in its file under ${CHANGES_DIR}/, not here`);
+  if (span && forkText.slice(span.s, span.e) !== "\n" + renderIndex(changes)) at("FORK.md", "index-stale", `the index between the markers is not what ${CHANGES_DIR}/ renders to — run \`bun scripts/fork-index.mjs\``);
+  for (const c of citations) {
+    if (c.n < 1 || (c.n >= FIRST_FILED && !byN.has(c.n)) || (c.name && c.n < FIRST_FILED)) at(c.where, "dangling", `cites change ${c.n}${c.name ? ` as ${CHANGES_DIR}/${c.name}` : ""}, which has no file under ${CHANGES_DIR}/ (1–${FIRST_FILED - 1} are FORK.md's table; the highest with a file is ${hi}) — a renumber left this behind, or the file is missing`);
+    else if (c.name && byN.get(c.n).name !== c.name) at(c.where, "dangling", `cites ${CHANGES_DIR}/${c.name}, and change ${c.n}'s file is ${CHANGES_DIR}/${byN.get(c.n).name} — the file was renamed under the link`);
+  }
   return problems;
 }
-function checkForkCounts() {
-  // Self-test: a gap, a duplicate and a stale range/total must each be caught.
-  const good = "intro (5) numbered changes. Changes **1–5** are sections.\n### 1. a\n### 2. b\n### 3. c\n### 4. d\n### 5. e\n";
-  if (forkCountProblems(good).length) fail(SELF_1804, `check 15 false-positives on a consistent FORK.md (${forkCountProblems(good).join("; ")})`);
-  for (const [probe, why] of [
-    ["intro (5) numbered changes. Changes **1–5** are sections.\n### 1. a\n### 2. b\n### 4. d\n### 5. e\n", "a gap (missing 3)"],
-    ["intro (5) numbered changes. Changes **1–5** are sections.\n### 1. a\n### 2. b\n### 2. b\n### 5. e\n", "a duplicate"],
-    ["intro (9) numbered changes. Changes **1–5** are sections.\n### 1. a\n### 2. b\n### 3. c\n### 4. d\n### 5. e\n", "a stale total"],
-    ["intro (5) numbered changes. Changes **1–4** are sections.\n### 1. a\n### 2. b\n### 3. c\n### 4. d\n### 5. e\n", "a stale range"],
-  ]) if (forkCountProblems(probe).length === 0) fail(SELF_1804, `check 15 no longer catches ${why} (its own probe)`);
 
-  const fork = readFileSync(join(ROOT, "FORK.md"), "utf8");
-  for (const p of forkCountProblems(fork)) fail("FORK.md", `${p} (SMD-1804)`);
+const LAYOUT_ENTRIES = (...files) => files.map(([name, text]) => ({ name, text }));
+const CH = (n, title = "A thing — a consequence (SMD-1)", body = "Body.\n") => [`${String(n).padStart(3, "0")}-a-thing.md`, `# ${n}. ${title}\n\n${body}`];
+const FORK_FOR = (entries, extra = "") => `# FORK\n\nintro\n\n${INDEX_START}\n${renderIndex(classifyChanges(entries))}${INDEX_END}\n\ntail\n${extra}`;
+const LONG = "line\n".repeat(200);
+const LAYOUT_PROBES = [
+  // [label, args, expected kinds]
+  ["a consistent layout", () => { const en = LAYOUT_ENTRIES(CH(18), CH(19), ["README.md", "x"], ["smd-1804.md", "---\n"]); return { entries: en, forkText: FORK_FOR(en), ceilings: {}, citations: [{ where: "a.ts:1", n: 19 }, { where: "b.md:2", n: 3 }] }; }, []],
+  ["a stray name", () => { const en = LAYOUT_ENTRIES(CH(18), ["notes.md", "x"]); return { entries: en, forkText: FORK_FOR(en), ceilings: {} }; }, ["bad-name"]],
+  ["a fragment over the cap", () => { const en = LAYOUT_ENTRIES(CH(18), ["smd-9.md", "---\n" + LONG]); return { entries: en, forkText: FORK_FOR(en), ceilings: {} }; }, ["oversize"]],
+  ["two files with one number", () => { const en = LAYOUT_ENTRIES(CH(18), ["018-other.md", "# 18. Other\n"]); return { entries: en, forkText: FORK_FOR(en), ceilings: {} }; }, ["duplicate"]],
+  ["a gap", () => { const en = LAYOUT_ENTRIES(CH(18), CH(20)); return { entries: en, forkText: FORK_FOR(en), ceilings: {} }; }, ["gap"]],
+  ["a missing 18", () => { const en = LAYOUT_ENTRIES(CH(19)); return { entries: en, forkText: FORK_FOR(en), ceilings: {} }; }, ["gap"]],
+  ["no files at all", () => { const en = LAYOUT_ENTRIES(); return { entries: en, forkText: FORK_FOR(en), ceilings: {} }; }, ["no-files"]],
+  ["a heading with the wrong number", () => { const en = LAYOUT_ENTRIES(["018-a-thing.md", "# 19. A thing\n"]); return { entries: en, forkText: FORK_FOR(en), ceilings: {} }; }, ["heading"]],
+  ["no heading", () => { const en = LAYOUT_ENTRIES(["018-a-thing.md", "A thing\n"]); return { entries: en, forkText: FORK_FOR(en), ceilings: {} }; }, ["heading"]],
+  ["an unlisted file over the cap", () => { const en = LAYOUT_ENTRIES(CH(18, undefined, LONG)); return { entries: en, forkText: FORK_FOR(en), ceilings: {} }; }, ["oversize"]],
+  ["a listed file over its ceiling", () => { const en = LAYOUT_ENTRIES(CH(18, undefined, LONG)); return { entries: en, forkText: FORK_FOR(en), ceilings: { 18: 190 } }; }, ["oversize"]],
+  ["a listed file under its ceiling", () => { const en = LAYOUT_ENTRIES(CH(18, undefined, LONG)); return { entries: en, forkText: FORK_FOR(en), ceilings: { 18: 210 } }; }, []],
+  ["a listed file that now fits", () => { const en = LAYOUT_ENTRIES(CH(18)); return { entries: en, forkText: FORK_FOR(en), ceilings: { 18: 210 } }; }, ["excuse-stale"]],
+  ["a listing with no file", () => { const en = LAYOUT_ENTRIES(CH(18)); return { entries: en, forkText: FORK_FOR(en), ceilings: { 44: 210 } }; }, ["excuse-stale"]],
+  ["FORK.md over its ceiling", () => { const en = LAYOUT_ENTRIES(CH(18)); return { entries: en, forkText: FORK_FOR(en, "x".repeat(100)), ceilings: {}, forkCeiling: 150 }; }, ["fork-oversize"]],
+  ["a numbered section left in FORK.md", () => { const en = LAYOUT_ENTRIES(CH(18)); return { entries: en, forkText: FORK_FOR(en, "\n### 19. Left behind\n"), ceilings: {} }; }, ["section-in-fork"]],
+  ["no index markers", () => { const en = LAYOUT_ENTRIES(CH(18)); return { entries: en, forkText: "# FORK\nno markers\n", ceilings: {} }; }, ["index-missing"]],
+  ["a duplicated end marker", () => { const en = LAYOUT_ENTRIES(CH(18)); return { entries: en, forkText: FORK_FOR(en, INDEX_END + "\n"), ceilings: {} }; }, ["index-missing"]],
+  ["a `## N.` section left in FORK.md", () => { const en = LAYOUT_ENTRIES(CH(18)); return { entries: en, forkText: FORK_FOR(en, "\n## 19. Left behind\n"), ceilings: {} }; }, ["section-in-fork"]],
+  ["a change file's own `# N.` heading pasted into FORK.md", () => { const en = LAYOUT_ENTRIES(CH(18)); return { entries: en, forkText: FORK_FOR(en, "\n# 19. Pasted\n"), ceilings: {} }; }, ["section-in-fork"]],
+  ["a leading zero in the heading", () => { const en = LAYOUT_ENTRIES(["018-a-thing.md", "# 018. A thing\n"]); return { entries: en, forkText: FORK_FOR(en), ceilings: {} }; }, ["heading"]],
+  ["a stray file of another extension", () => { const en = LAYOUT_ENTRIES(CH(18), ["notes.txt", "x"]); return { entries: en, forkText: FORK_FOR(en), ceilings: {} }; }, ["bad-name"]],
+  ["a directory (or symlink, or pipe) under changes/", () => { const en = LAYOUT_ENTRIES(CH(18), ["drafts", null]); return { entries: en, forkText: FORK_FOR(en), ceilings: {} }; }, ["bad-name"]],
+  ["a numbered file below 18", () => { const en = LAYOUT_ENTRIES(CH(18), ["005-below.md", "# 5. Below (SMD-1)\n"]); return { entries: en, forkText: FORK_FOR(en), ceilings: {} }; }, ["below-first"]],
+  ["a dotfile the OS left", () => { const en = LAYOUT_ENTRIES(CH(18), [".DS_Store", "x"]); return { entries: en, forkText: FORK_FOR(en), ceilings: {} }; }, []],
+  ["two fragments for one ticket", () => { const en = LAYOUT_ENTRIES(CH(18), ["smd-9.md", "---\n"], ["smd-09.md", "---\n"]); return { entries: en, forkText: FORK_FOR(en), ceilings: {} }; }, ["duplicate-fragment"]],
+  ["a stale index", () => { const en = LAYOUT_ENTRIES(CH(18), CH(19)); return { entries: en, forkText: FORK_FOR(en.slice(0, 1)), ceilings: {} }; }, ["index-stale"]],
+  ["a citation above the highest", () => { const en = LAYOUT_ENTRIES(CH(18)); return { entries: en, forkText: FORK_FOR(en), ceilings: {}, citations: [{ where: "a.ts:1", n: 19 }] }; }, ["dangling"]],
+  ["a citation of change 0", () => { const en = LAYOUT_ENTRIES(CH(18)); return { entries: en, forkText: FORK_FOR(en), ceilings: {}, citations: [{ where: "a.ts:1", n: 0 }] }; }, ["dangling"]],
+  ["a citation of a gapped number", () => { const en = LAYOUT_ENTRIES(CH(18), CH(20)); return { entries: en, forkText: FORK_FOR(en), ceilings: {}, citations: [{ where: "a.ts:1", n: 19 }] }; }, ["gap", "dangling"]],
+  ["a path citation under an old slug", () => { const en = LAYOUT_ENTRIES(CH(18)); return { entries: en, forkText: FORK_FOR(en), ceilings: {}, citations: [{ where: "a.md:1", n: 18, name: "018-old-name.md" }, { where: "b.md:1", n: 18, name: "018-a-thing.md" }] }; }, ["dangling"]],
+  ["a path citation of a table change (no file can exist)", () => { const en = LAYOUT_ENTRIES(CH(18)); return { entries: en, forkText: FORK_FOR(en), ceilings: {}, citations: [{ where: "a.md:1", n: 5, name: "005-below.md" }] }; }, ["dangling"]],
+];
+
+const SKIP_DIRS = new Set([".git", "node_modules", ".planning", ".cf-out", ".claude", "dist", "build", ".wrangler"]);
+/**
+ * Every text file a citation can live in: what git tracks plus what it would
+ * track (untracked, not ignored) — so a change file not yet added is read, and a
+ * pulled email under an ignored data/ directory, an .env or a local corpus is
+ * not, as .gitignore promises of this check. Without git (a copied tree), a walk
+ * that skips the usual build and tool directories, symlinks left alone. Binary
+ * names and files over 4 MB are skipped either way. Repo-relative paths.
+ */
+function citationFiles() {
+  let names;
+  try {
+    // A nested repository (an agent worktree under .claude/) is listed as `dir/`,
+    // a deleted-but-indexed file has no stat, a symlink is followed by nothing
+    // here: regular files alone, as the walk below keeps. An untracked file a
+    // harness left behind IS read — that is the rule, not a slip.
+    names = execFileSync("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard"], { cwd: ROOT, encoding: "utf8", maxBuffer: Infinity })
+      .split("\0").filter(Boolean);
+  } catch (e) {
+    console.warn(`  (git ls-files failed — ${e.message.split("\n")[0]} — walking the tree for citations, ignored files too)`);
+    names = [];
+    const walkFor = (dir) => {
+      for (const name of readdirSync(dir).sort()) {
+        const full = join(dir, name);
+        const st = lstatSync(full);
+        if (st.isSymbolicLink()) continue;
+        if (st.isDirectory()) { if (!SKIP_DIRS.has(name)) walkFor(full); continue; }
+        names.push(relative(ROOT, full).split(sep).join("/"));
+      }
+    };
+    walkFor(ROOT);
+  }
+  const regular = (rel) => { try { const st = lstatSync(join(ROOT, rel)); return st.isFile() && st.size <= 4 * 1024 * 1024; } catch { return false; } };
+  // Not this script: its probe strings are citation shapes, not citations.
+  return names.filter((rel) => rel !== SELF && !BINARY_FILES.test(rel) && !rel.split("/").includes("node_modules") && regular(rel));
 }
-checkForkCounts();
+
+/** An offset → 1-based line number function for one text: the line starts are indexed once, then each lookup is a binary search. */
+function lineIndexer(text) {
+  const starts = [0];
+  for (let i = 0; i < text.length; i++) if (text.charCodeAt(i) === 10) starts.push(i + 1);
+  return (index) => { let lo = 0, hi = starts.length - 1; while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (starts[mid] <= index) lo = mid; else hi = mid - 1; } return lo + 1; };
+}
+
+/** changes/ read once per run: the classified entries with their text, for checks 15, 16 and 17b. */
+let changesCache = null;
+function changesOnDisk() {
+  if (!changesCache) {
+    const entries = readChangeEntries(ROOT);
+    changesCache = { entries, ...classifyChanges(entries) };
+  }
+  return changesCache;
+}
+
+function checkForkLayout() {
+  for (const [text, record, want] of CITATION_PROBES) {
+    const got = citedChangesIn(text, { record }).map((c) => c.n);
+    if (JSON.stringify(got) !== JSON.stringify(want)) fail(SELF, `check 15's citation reader returns [${got}] for ${JSON.stringify(text)}, expected [${want}] (its own probe)`);
+  }
+  // (this file is not among the files the reader scans, so its probes may cite dead links freely)
+  const named = citedChangesIn('see changes/079-the-store-measured-against-pgvector.md and changes/080 and changes/081-The_Store.md and changes/082_x.md and [79](079-the-store.md) and [a](./079-a.md#top "t")', { record: true }).map((c) => c.name ?? null);
+  if (JSON.stringify(named) !== JSON.stringify(["079-the-store-measured-against-pgvector.md", null, "081-The_Store.md", "082_x.md", "079-the-store.md", "079-a.md"])) fail(SELF, `check 15's citation reader keeps a slugged path's name (mis-cased, underscored, or a relative link inside the record too — a dead link on Linux), got ${JSON.stringify(named)} (its own probe)`);
+  for (const [label, args, want] of LAYOUT_PROBES) {
+    const got = forkLayoutProblems(args()).map((p) => p.kind);
+    if (JSON.stringify(got) !== JSON.stringify(want)) fail(SELF, `check 15's layout decision reports [${got}] for ${label}, expected [${want}] (its own probe)`);
+  }
+
+  const forkText = readFileSync(join(ROOT, "FORK.md"), "utf8");
+  const entries = changesOnDisk().entries; // every entry, any extension — a stray is a finding
+  const citations = [];
+  // A citation inside a fenced block or a code span counts: a quoted "change N" is
+  // still a claim about the record (check 16 strips fences for its heading rule
+  // alone, where a `# 1.` comment is not a heading).
+  for (const rel of citationFiles()) {
+    const text = readFileSync(join(ROOT, rel), "utf8");
+    const record = rel === "FORK.md" || rel.startsWith(`${CHANGES_DIR}/`);
+    const found = citedChangesIn(text, { record });
+    if (found.length === 0) continue;
+    const lineAt = lineIndexer(text);
+    for (const c of found) citations.push({ where: `${rel}:${lineAt(c.index)}`, n: c.n, ...(c.name ? { name: c.name } : {}) });
+  }
+  for (const p of forkLayoutProblems({ entries, forkText, citations })) fail(p.where, `${p.msg} (SMD-1917)`);
+}
+checkForkLayout();
+// ── 16–17: fragments, the changelog and the freeze (SMD-1804) ────────────────
+const KAC_HEADINGS = new Set(["Added", "Changed", "Deprecated", "Removed", "Fixed", "Security"]);
+
 
 /**
- * 16: a changes/<ticket>.md fragment is well-formed. A fragment replaces the
+ * 16: a changes/<ticket>.md fragment is well-formed — fragmentProblems lives in
+ * scripts/fragments.mjs, one definition for this check and the release step. A fragment replaces the
  * hand-numbered FORK section for new work: front matter naming a Keep a Changelog
  * type, a bump the migrations it lists allow, and the tickets and migrations it
  * touches; a Changelog body (1–3 lines) and a FORK body. A `bump: patch` that
- * ships a migration is the rule from the version scheme; a change-number citation
- * in the FORK body is the mistake the fragment format exists to prevent (the
- * number is assigned at release, so a fragment cannot know it).
+ * ships a migration is the rule from the version scheme; a numbered heading in
+ * the FORK body (`### N.` / `# N.`) is the mistake the fragment format exists to
+ * prevent — the number is assigned at release, so a fragment cannot know its own.
+ * A citation of an existing change number is fine; check 15 holds every citation
+ * to a file (SMD-1917).
  */
-function fragmentProblems(text) {
-  const problems = [];
-  const parsed = parseFragment(text);
-  if (!parsed) { problems.push("no `---` front matter"); return problems; }
-  const { fm, body } = parsed;
-  if (!FRAGMENT_TYPES.has(fm.type)) problems.push(`type must be one of ${[...FRAGMENT_TYPES].join("|")}, got ${JSON.stringify(fm.type ?? null)}`);
-  if (!BUMPS.has(fm.bump)) problems.push(`bump must be one of ${[...BUMPS].join("|")}, got ${JSON.stringify(fm.bump ?? null)}`);
-  const tickets = Array.isArray(fm.tickets) ? fm.tickets : [];
-  if (tickets.length === 0) problems.push("tickets: must list at least one SMD-#### id");
-  for (const t of tickets) if (!/^SMD-\d+$/.test(t)) problems.push(`tickets: ${JSON.stringify(t)} is not an SMD-#### id`);
-  const migrations = Array.isArray(fm.migrations) ? fm.migrations : [];
-  for (const mig of migrations) if (!/^\d{3}$/.test(String(mig))) problems.push(`migrations: ${JSON.stringify(mig)} is not a three-digit number`);
-  if (fm.bump === "patch" && migrations.length > 0) problems.push(`bump: patch cannot ship a migration (migrations: ${migrations.join(", ")}) — a migration is additive, at least a MINOR`);
-  const changelog = fragmentSection(body, "Changelog");
-  const fork = fragmentSection(body, "FORK");
-  if (!changelog) problems.push("missing a `## Changelog` body");
-  else {
-    const n = changelog.split("\n").map((s) => s.trim()).filter(Boolean).length;
-    if (n < 1 || n > 3) problems.push(`the \`## Changelog\` body is ${n} line(s); Keep a Changelog wants 1–3`);
-  }
-  if (!fork) problems.push("missing a `## FORK` body");
-  else if (/(?:^|\n)###\s*\d+\.|# change \d+|\bchange \d+\b/i.test(fork)) problems.push("the `## FORK` body cites a change number — cite the ticket and migration numbers (stable); the release step assigns the change number");
-  return problems;
-}
-function checkFragments() {
-  const goodFrag = "---\ntype: added\nbump: minor\ntickets: [SMD-1804]\nmigrations: [044]\n---\n\n## Changelog\nThe fork gets a version.\n\n## FORK\n### Title\n\nBody citing SMD-1804 and migration 044.\n";
-  if (fragmentProblems(goodFrag).length) fail(SELF_1804, `check 16 false-positives on a valid fragment (${fragmentProblems(goodFrag).join("; ")})`);
-  for (const [probe, why] of [
-    ["---\ntype: added\nbump: patch\ntickets: [SMD-1]\nmigrations: [044]\n---\n\n## Changelog\nx\n\n## FORK\ny\n", "a patch that ships a migration"],
-    ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\nmigrations: []\n---\n\n## Changelog\nx\n\n## FORK\nSee change 90 for context.\n", "a change-number citation in the FORK body"],
-    ["---\ntype: whatever\nbump: minor\ntickets: [SMD-1]\n---\n\n## Changelog\nx\n\n## FORK\ny\n", "a type off the six"],
-    ["---\ntype: added\nbump: minor\ntickets: []\n---\n\n## Changelog\nx\n\n## FORK\ny\n", "an empty ticket list"],
-    ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\n---\n\n## FORK\ny\n", "a missing Changelog body"],
-    ["no front matter here\n", "no front matter"],
-  ]) if (fragmentProblems(probe).length === 0) fail(SELF_1804, `check 16 no longer catches ${why} (its own probe)`);
 
-  const dir = join(ROOT, "changes");
-  if (!existsSync(dir)) return;
-  for (const name of readdirSync(dir).sort()) {
-    if (!name.endsWith(".md") || name === "README.md") continue;
-    if (!/^smd-\d+\.md$/i.test(name)) fail(`changes/${name}`, "a fragment is named changes/<ticket>.md, e.g. changes/smd-1804.md (SMD-1804)");
-    for (const p of fragmentProblems(readFileSync(join(dir, name), "utf8"))) fail(`changes/${name}`, `${p} (SMD-1804)`);
-  }
+function checkFragments() {
+  const goodFrag = "---\ntype: added\nbump: minor\ntickets: [SMD-1804, SMD-1805]\nmigrations: [044]\n---\n\n## Changelog\nThe fork gets a version (SMD-1804, SMD-1805).\n\n## FORK\nA title (SMD-1804 / 1805)\n\nBody citing SMD-1804, migration 044 and change 79.\n";
+  if (fragmentProblems(goodFrag).length) fail(SELF, `check 16 false-positives on a valid fragment (${fragmentProblems(goodFrag).join("; ")})`);
+  // Each probe isolates one rule: its other lines carry the ticket, so dropping
+  // the rule it names is the only way it passes. A third element names the file.
+  for (const [probe, why, name] of [
+    ["---\ntype: added\nbump: patch\ntickets: [SMD-1]\nmigrations: [044]\n---\n\n## Changelog\nx (SMD-1)\n\n## FORK\ny (SMD-1)\n", "a patch that ships a migration"],
+    ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\nmigrations: []\n---\n\n## Changelog\nx (SMD-1)\n\n## FORK\n# 103. A title\n\nbody\n", "a numbered heading in the FORK body"],
+    ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\nmigrations: []\n---\n\n## Changelog\nx (SMD-1)\n\n## FORK\nA title (SMD-1)\n\n### 103. sub\n", "a numbered `### N.` heading in the FORK body"],
+    ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\nmigrations: []\n---\n\n## Changelog\nx (SMD-1)\n\n## FORK\n### A title\n\nbody\n", "an unnumbered heading as the FORK body's title"],
+    ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\nmigrations: []\n---\n\n## Changelog\nx (SMD-1)\n\n## FORK\nA title that\nwraps (SMD-1)\n\nbody\n", "a title wrapped onto a second line"],
+    ["---\ntype: added\nbump: patch2\ntickets: [SMD-1]\n---\n\n## Changelog\nx (SMD-1)\n\n## FORK\ny (SMD-1)\n", "a bump off the three"],
+    ["---\ntype: added\nbump: minor\ntickets: [SMD-x]\n---\n\n## Changelog\nx\n\n## FORK\ny\n", "a ticket that is not SMD-#### (no ticket on the lines, so only that rule fires)"],
+    ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\nmigrations: [44]\n---\n\n## Changelog\nx (SMD-1)\n\n## FORK\ny (SMD-1)\n", "a migration number of two digits"],
+    ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\n---\n\n## Changelog\na (SMD-1)\nb\nc\nd\n\n## FORK\ny (SMD-1)\n", "a four-line Changelog body"],
+    ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\n---\n\n## Changelog\nx (SMD-1)\n", "a missing FORK body"],
+    ["---\ntype: added\nbump: minor\ntickets: [SMD-1, SMD-2]\n---\n\n## Changelog\nx (SMD-1)\n\n## FORK\nA title (SMD-1)\n\nbody\n", "a title that names one of the two tickets"],
+    ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\n---\n\n## Changelog\nx (SMD-1)\n\n## FORK\nA title\n\nbody\n", "a title that names no ticket"],
+    ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\n---\n\n## Changelog\n\n## FORK\nA title (SMD-1)\n\nbody\n", "an empty Changelog body (which used to read the FORK section as its text)"],
+    ["---\ntype: added\nbump: minor\ntickets: [SMD-1, SMD-2]\n---\n\n## Changelog\nx (SMD-1)\n\n## FORK\nA title (SMD-1 / 2)\n\nbody\n", "a Changelog line that names one of the two tickets"],
+    ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\n---\n\n## Changelog\nx (SMD-1), closing SMD-7's follow-up\n\n## FORK\nA title (SMD-1)\n\nbody\n", "a Changelog line naming a ticket the front matter does not"],
+    ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\n---\n\n## Changelog\n- x (SMD-1)\n\n## FORK\nA title (SMD-1)\n\nbody\n", "a Changelog line that is already a bullet"],
+    ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\n---\n\n## FORK\nA title (SMD-1)\n\nbody\n\n## Changelog\nx (SMD-1)\n", "a Changelog section after the FORK body (which runs to the end of the file)"],
+    ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\n---\n\n## Changelog\nx (SMD-1)\n\n## Notes\nkept nowhere\n\n## FORK\nA title (SMD-1)\n\nbody\n", "a section between Changelog and FORK, which the cut writes nowhere"],
+    ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\n---\n\n## Changelog\nx (SMD-1)\n\n## Changelog\ny (SMD-1)\n\n## FORK\nA title (SMD-1)\n\nbody\n", "two Changelog sections"],
+    ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\n---\n\n## Changelog\nx (SMD-1)\n### Added\n\n## FORK\nA title (SMD-1)\n\nbody\n", "a heading inside the Changelog body"],
+    ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\n---\n\n## Changelog\nx (SMD-1)\n\n## FORK\nA title (SMD-1)\n\n##### 5. deep\n", "a numbered heading five levels deep in the FORK body"],
+    ["---\ntype: added\nbump: minor\ntickets: [SMD-1804]\n---\n\n## Changelog\nx (SMD-1804)\n\n## FORK\nA title (SMD-1804)\n\nbody\n", "a fragment named for a ticket its front matter does not list", "smd-1805.md"],
+    ["---\ntype: whatever\nbump: minor\ntickets: [SMD-1]\n---\n\n## Changelog\nx (SMD-1)\n\n## FORK\ny (SMD-1)\n", "a type off the six"],
+    ["---\ntype: added\nbump: minor\ntickets: []\n---\n\n## Changelog\nx\n\n## FORK\ny\n", "an empty ticket list (no ticket on the lines, so only that rule fires)"],
+    ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\n---\n\n## Changelog\nx (SMD-1)\n\n## FORK\n", "an empty FORK section"],
+    ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\n---\n\n## FORK\ny (SMD-1)\n", "a missing Changelog body"],
+    ["no front matter here\n", "no front matter"],
+  ]) if (fragmentProblems(probe, name).length === 0) fail(SELF, `check 16 no longer catches ${why} (its own probe)`);
+  for (const [probe, why] of [
+    ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\n---\n\n## Changelog\nx (SMD-1)\n\n## FORK\nA title (SMD-1)\n\n```bash\n# 1. install\n```\n\n#1. not a heading\n\n1. a list item\n\n## Measured after\n\nA second-level heading inside the record is kept, as changes 19 and 79 keep theirs.\n", "a numbered comment in a fenced block, a `#1.`, a list item and a `## ` sub-heading inside the record"],
+    ["---\ntype: added        # one of the six\nbump: minor        # the rules\ntickets: [SMD-1804]        # one or more\nmigrations: [044]          # or [] for none\n---\n\n## Changelog\n\nx (SMD-1804, migration 044).\n\n## FORK\n\nA title (SMD-1804)\n\nbody\n", "the README's template copied with its inline comments"],
+  ]) if (fragmentProblems(probe).length) fail(SELF, `check 16 refuses ${why}: ${fragmentProblems(probe).join("; ")} (its own non-probe)`);
+
+  // Numbered files and stray names are check 15's; one definition of a fragment's name (fork-index.mjs).
+  for (const f of changesOnDisk().fragments) for (const p of fragmentProblems(f.text, f.name)) fail(`changes/${f.name}`, `${p} (SMD-1804)`);
 }
 checkFragments();
 
@@ -2927,14 +3230,15 @@ function changelogProblems(text) {
 }
 function checkChangelogShape() {
   const good = "# Changelog\n\n## [Unreleased]\n\n## [1.1.0] - 2026-10-01\n### Added\n- a thing (SMD-2)\n\n## [1.0.0] - 2026-09-30\n### Fixed\n- a thing (SMD-1)\n\n[Unreleased]: u\n[1.1.0]: u\n[1.0.0]: u\n";
-  if (changelogProblems(good).length) fail(SELF_1804, `check 17a false-positives on a valid changelog (${changelogProblems(good).join("; ")})`);
+  if (changelogProblems(good).length) fail(SELF, `check 17a false-positives on a valid changelog (${changelogProblems(good).join("; ")})`);
   for (const [probe, why] of [
-    ["# Changelog\n\n## [1.0.0] - 2026-09-30\n### Added\n- x (SMD-1)\n\n[1.0.0]: u\n", "no Unreleased first"],
-    ["# Changelog\n\n## [Unreleased]\n\n## [1.0.0]\n### Added\n- x\n\n[Unreleased]: u\n[1.0.0]: u\n", "an undated version"],
+    ["# Changelog\n\n## [1.0.0] - 2026-09-30\n### Added\n- x (SMD-1)\n\n[Unreleased]: u\n[1.0.0]: u\n", "no Unreleased first (its links present, so only that rule fires)"],
+    ["# Changelog\n\n## [Unreleased]\n\n## [1.0.0]\n### Added\n- x\n\n[Unreleased]: u\n", "an undated version (no footer link for it, so only that rule fires)"],
+    ["# Changelog\n\n## [Unreleased]\n\n## [1.0.0] - 2026-09-30\n### Added\n- x\n\n[Unreleased]: u\n[1.0.0]: u\n[0.9.0]: u\n", "a compare link for a version with no section"],
     ["# Changelog\n\n## [Unreleased]\n\n## [1.0.0] - 2026-09-30\n### Reworked\n- x\n\n[Unreleased]: u\n[1.0.0]: u\n", "a seventh heading"],
     ["# Changelog\n\n## [Unreleased]\n\n## [1.0.0] - 2026-09-30\n### Added\n- x\n\n## [1.1.0] - 2026-10-01\n### Added\n- y\n\n[Unreleased]: u\n[1.0.0]: u\n[1.1.0]: u\n", "versions not newest-first"],
     ["# Changelog\n\n## [Unreleased]\n\n## [1.0.0] - 2026-09-30\n### Added\n- x\n\n[1.0.0]: u\n", "a missing Unreleased compare link"],
-  ]) if (changelogProblems(probe).length === 0) fail(SELF_1804, `check 17a no longer catches ${why} (its own probe)`);
+  ]) if (changelogProblems(probe).length === 0) fail(SELF, `check 17a no longer catches ${why} (its own probe)`);
 
   const path = join(ROOT, "CHANGELOG.md");
   if (!existsSync(path)) return fail("CHANGELOG.md", "the fork's changelog is missing — Keep a Changelog 1.1.0, Unreleased first (SMD-1804)");
@@ -2957,40 +3261,55 @@ function releasedChangelogTickets(text) {
  * 17b: each release pairs both ways. releases.json is the machine record the
  * assembler writes; CHANGELOG.md is the page; FORK.md holds the sections. A
  * released version must appear in all three with the same tickets: a CHANGELOG
- * entry whose ticket has no FORK section, or a release whose version or tickets
+ * entry whose ticket has no numbered change file, or a release whose version or tickets
  * the changelog does not match, is drift the assembler would have to have caused.
  * A no-op until the first release (releases.json is []).
  */
 function pairingProblems(releases, changelogText, forkTickets) {
   const problems = [];
   const cl = releasedChangelogTickets(changelogText);
+  // releases.json carries the full version (`1.0.0+upstream.<sha>`); a CHANGELOG
+  // section title carries the core (`[1.0.0]`) — the assembler writes both, so
+  // the pairing compares cores (found by assembling a release on a copy of the
+  // tree: the first cut failed its own check both ways, SMD-1917).
+  const core = (v) => String(v).split("+")[0];
   for (const r of releases) {
-    if (!cl.has(r.version)) { problems.push(`release ${r.version} (releases.json) has no [${r.version}] section in CHANGELOG.md`); continue; }
-    const clTickets = cl.get(r.version);
+    if (!cl.has(core(r.version))) { problems.push(`release ${r.version} (releases.json) has no [${core(r.version)}] section in CHANGELOG.md`); continue; }
+    const clTickets = cl.get(core(r.version));
     const rTickets = new Set(r.tickets ?? []);
     for (const t of rTickets) if (!clTickets.has(t)) problems.push(`release ${r.version} lists ${t} but its CHANGELOG section does not`);
     for (const t of clTickets) if (!rTickets.has(t)) problems.push(`CHANGELOG [${r.version}] names ${t} but releases.json does not`);
-    for (const t of rTickets) if (!forkTickets.has(t)) problems.push(`release ${r.version} lists ${t} but no FORK.md section names it`);
+    for (const t of rTickets) if (!forkTickets.has(t)) problems.push(`release ${r.version} lists ${t} but no numbered change file's title names it — the release step did not number its fragment`);
   }
-  const known = new Set(releases.map((r) => r.version));
+  const known = new Set(releases.map((r) => core(r.version)));
   for (const v of cl.keys()) if (!known.has(v)) problems.push(`CHANGELOG has a released [${v}] with no releases.json entry`);
   return problems;
 }
 function checkChangelogForkPairing() {
   const fork = new Set(["SMD-1"]);
   const clGood = "## [1.0.0] - 2026-09-30\n### Added\n- x (SMD-1)\n";
-  if (pairingProblems([{ version: "1.0.0", tickets: ["SMD-1"] }], clGood, fork).length) fail(SELF_1804, "check 17b false-positives on a matched release");
+  if (pairingProblems([{ version: "1.0.0", tickets: ["SMD-1"] }], clGood, fork).length) fail(SELF, "check 17b false-positives on a matched release");
+  if (pairingProblems([{ version: "1.0.0+upstream.9543c29", tickets: ["SMD-1"] }], clGood, fork).length) fail(SELF, "check 17b false-positives on a matched release whose releases.json version carries the +upstream build metadata (its own probe)");
   for (const [rel, cl, forks, why] of [
     [[{ version: "1.0.0", tickets: ["SMD-1"] }], "## [1.0.0] - 2026-09-30\n- x (SMD-2)\n", fork, "a ticket in releases.json missing from the changelog"],
+    [[{ version: "1.0.0", tickets: ["SMD-1"] }], "## [Unreleased]\n", fork, "a release with no CHANGELOG section of its version (and no other section to blame)"],
+    [[{ version: "1.0.0", tickets: ["SMD-1", "SMD-2"] }], "## [1.0.0] - 2026-09-30\n- x (SMD-1)\n", new Set(["SMD-1", "SMD-2"]), "a release ticket the CHANGELOG section omits (its other ticket present, so only that branch fires)"],
+    [[{ version: "1.0.0", tickets: ["SMD-1"] }], "## [1.0.0] - 2026-09-30\n- x (SMD-1)\n- y (SMD-2)\n", new Set(["SMD-1", "SMD-2"]), "a changelog ticket missing from releases.json"],
     [[{ version: "1.0.0", tickets: ["SMD-9"] }], "## [1.0.0] - 2026-09-30\n- x (SMD-9)\n", fork, "a released ticket with no FORK section"],
     [[], "## [1.0.0] - 2026-09-30\n- x (SMD-1)\n", fork, "a changelog release with no releases.json entry"],
-  ]) if (pairingProblems(rel, cl, forks).length === 0) fail(SELF_1804, `check 17b no longer catches ${why} (its own probe)`);
+  ]) if (pairingProblems(rel, cl, forks).length === 0) fail(SELF, `check 17b no longer catches ${why} (its own probe)`);
 
   const clPath = join(ROOT, "CHANGELOG.md");
   if (!existsSync(clPath)) return;
-  const forkText = readFileSync(join(ROOT, "FORK.md"), "utf8");
-  const forkTickets = new Set([...forkText.matchAll(/\bSMD-(\d+)\b/g)].map((m) => `SMD-${m[1]}`));
-  for (const p of pairingProblems(readReleases(), readFileSync(clPath, "utf8"), forkTickets)) fail("CHANGELOG.md", `${p} (SMD-1804)`);
+  // A released ticket has a record: a numbered change file whose TITLE ends in it
+  // (ticketOf expands "(SMD-1301 / 1302)" to both; check 16 makes the release
+  // step's title name every front-matter ticket). Neither FORK.md's text nor a
+  // change file's body is a source: both name pending tickets in prose, which
+  // would let a release that left a fragment unnumbered pass — the drift this
+  // catches (SMD-1917).
+  const recordTickets = new Set();
+  for (const c of changesOnDisk().numbered) for (const t of ticketsOf(c.heading?.title ?? "")) recordTickets.add(t);
+  for (const p of pairingProblems(readReleases(), readFileSync(clPath, "utf8"), recordTickets)) fail("CHANGELOG.md", `${p} (SMD-1804)`);
 }
 checkChangelogForkPairing();
 
@@ -3013,11 +3332,11 @@ function checkFrozenMigrations() {
   const realNum = Number(real.slice(0, 3));
   const realSha = migrationSha(readFileSync(join(migDir, real), "utf8"));
   const okRel = [{ version: "9.9.9", range: [realNum, realNum], frozenShas: { [pad3(realNum)]: realSha } }];
-  if (frozenProblems(okRel, shaOf).length) fail(SELF_1804, "check 17c false-positives on an unchanged frozen migration");
+  if (frozenProblems(okRel, shaOf).length) fail(SELF, "check 17c false-positives on an unchanged frozen migration");
   const badRel = [{ version: "9.9.9", range: [realNum, realNum], frozenShas: { [pad3(realNum)]: "000000000000" } }];
-  if (frozenProblems(badRel, shaOf).length === 0) fail(SELF_1804, "check 17c no longer catches an edited frozen migration (its own probe)");
+  if (frozenProblems(badRel, shaOf).length === 0) fail(SELF, "check 17c no longer catches an edited frozen migration (its own probe)");
   const goneRel = [{ version: "9.9.9", range: [999, 999], frozenShas: { "999": "abc" } }];
-  if (frozenProblems(goneRel, shaOf).length === 0) fail(SELF_1804, "check 17c no longer catches a missing frozen migration (its own probe)");
+  if (frozenProblems(goneRel, shaOf).length === 0) fail(SELF, "check 17c no longer catches a missing frozen migration (its own probe)");
 
   for (const p of frozenProblems(readReleases(), shaOf)) fail("db/migrations", `${p} (SMD-1804)`);
 }
@@ -3055,9 +3374,9 @@ function checkSchemaVersion() {
   // Self-test: the two INSERT shapes are read, a migration that writes no
   // schema_version is not mistaken for one that does.
   if (schemaVersionValue("INSERT INTO ob1_config (key, value) VALUES\n  ('schema_version', '1.2.3+upstream.abc')\nON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;") !== "1.2.3+upstream.abc")
-    fail(SELF_1804, "check 17d no longer reads the schema_version an INSERT writes (its own probe)");
+    fail(SELF, "check 17d no longer reads the schema_version an INSERT writes (its own probe)");
   if (schemaVersionValue("INSERT INTO ob1_config (key, value) VALUES ('embedding_dim', '1024');") !== null)
-    fail(SELF_1804, "check 17d reads a schema_version from a migration that writes none (its own probe)");
+    fail(SELF, "check 17d reads a schema_version from a migration that writes none (its own probe)");
 
   const migDir = join(ROOT, "db", "migrations");
   const writers = [];

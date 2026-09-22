@@ -36,7 +36,6 @@ The 20 most recent merged PRs. This list is generated from GitHub and refreshes 
 | [Provenance-chains: fix eval.mjs default model (dated id 404s on OpenRouter)](recipes/provenance-chains/) | Provenance-chains: fix eval.mjs default model (dated id 404s on OpenRouter). | [@eazene](https://github.com/eazene) |
 | [Fix editorial-policy auditor JSON parse under claude-haiku-4-5](recipes/editorial-policy/) | Fixes editorial-policy auditor JSON parse under claude-haiku-4-5. | [@eazene](https://github.com/eazene) |
 | [Fix add_household_item storing details as an escaped JSON string](extensions/household-knowledge/) | Fixes add_household_item storing details as an escaped JSON string. | [@hannahgwilson](https://github.com/hannahgwilson) |
-| [Thought work claims for parallel workers](schemas/thought-work-claims/) | Thought work claims for parallel workers. | [@alanshurafa](https://github.com/alanshurafa) |
 | [Authorship edges — speaker attribution + self author edges](recipes/authorship-edges/) | Authorship edges — speaker attribution + self author edges. | [@alanshurafa](https://github.com/alanshurafa) |
 | [Add capture_derived_thought MCP tool to provenance-chains](recipes/provenance-chains/) | Adds capture_derived_thought MCP tool to provenance-chains. | [@eazene](https://github.com/eazene) |
 | [Add updating-thoughts and deleting-thoughts skill packs](skills/deleting-thoughts/) | Adds updating-thoughts and deleting-thoughts skill packs. | [@eazene](https://github.com/eazene) |

@@ -6,7 +6,9 @@
  * the server sends both calls to OB1_LLM_BASE_URL, uses OB1_EMBEDDING_MODEL and
  * OB1_METADATA_MODEL, and sends NO Authorization header when no key is set.
  * [8] is the other half: with OB1_CHAT_BASE_URL / OB1_CHAT_API_KEY the chat
- * calls go to an endpoint of their own with its own credential (SMD-1902).
+ * calls go to an endpoint of their own with its own credential (SMD-1902), and
+ * [9] gives the supersession judge a model of its own, OB1_JUDGE_MODEL, while
+ * the extractor keeps OB1_METADATA_MODEL (SMD-1901).
  *
  * The stub speaks the OpenAI-compatible shapes Ollama exposes at /v1. It asserts
  * on what the server SENDS as much as what it does with the reply, because that is
@@ -93,6 +95,10 @@ const PROVIDER = `http://127.0.0.1:${provider.port}/v1`;
 process.env.OB1_STORE = "sql";
 process.env.DATABASE_URL = URL_;
 process.env.OB1_LLM_BASE_URL = PROVIDER;
+// Declared local to the egress gate (SMD-1903): the stub is on this box, and
+// the gate reads the flag, never the address — without it the default, deny,
+// refuses every call to it. test-egress.ts holds that case.
+process.env.OB1_LLM_LOCAL = "1";
 process.env.OB1_EMBEDDING_MODEL = EMB_MODEL;
 process.env.OB1_EMBEDDING_DIM = String(DIM);
 process.env.OB1_METADATA_MODEL = META_MODEL;
@@ -206,7 +212,7 @@ console.log("\n[7] `dimensions` is not sent unless asked for");
          "off by default: the server does not send `dimensions` unasked");
 }
 
-console.log("\n[7] A drifting `type` is normalised, not stored as a new category");
+console.log("\n[7b] A drifting `type` is normalised, not stored as a new category");
 {
   // Observed for real: llama3.2 answered "action_item" for a reminder, which is
   // not in the enum the prompt asks for. Unenforced, that silently fragments the
@@ -273,37 +279,41 @@ console.log("\n[8] The chat calls have an endpoint of their own only when OB1_CH
   const B = `http://127.0.0.1:${providerB.port}/v1`;
   const chatBody = { model: META_MODEL, messages: [{ role: "user", content: "x" }] };
   const embBody = { model: EMB_MODEL, input: "x" };
+  // Both stubs declared local to the egress gate (SMD-1903), as the boot
+  // environment declares A; what is under test here is where a call lands.
+  const LOCAL = { OB1_LLM_LOCAL: "1", OB1_CHAT_LOCAL: "1" };
+  const SUBJ = { kind: "capture" as const };
   const lastA = () => seen[seen.length - 1];
   const lastB = () => seenB[seenB.length - 1];
 
   // Neither chat knob: one endpoint, one key — the request of every deployment
   // that predates the split. Remove the fallback in resolveProviderEndpoints
   // and these fail.
-  const one = resolveEmbedConfig({ OB1_LLM_BASE_URL: A, OB1_LLM_API_KEY: "key-a" });
+  const one = resolveEmbedConfig({ ...LOCAL, OB1_LLM_BASE_URL: A, OB1_LLM_API_KEY: "key-a" });
   assert(one.chat.base === A && one.embeddings.base === A, "with no chat knob the chat endpoint IS the embeddings endpoint");
   assert(one.chat.headers.Authorization === "Bearer key-a", "…with the same credential");
   const beforeA = seen.length, beforeB = seenB.length;
-  await providerCall(one, "/chat/completions", chatBody);
+  await providerCall(one, "/chat/completions", chatBody, SUBJ);
   assert(seen.length === beforeA + 1 && seenB.length === beforeB, "a chat call under one endpoint lands on it");
   assert(lastA().path.endsWith("/chat/completions") && lastA().auth === "Bearer key-a", "…carrying the embeddings key");
 
   // Both set: each path lands on its own endpoint with its own header.
-  const two = resolveEmbedConfig({ OB1_LLM_BASE_URL: A, OB1_LLM_API_KEY: "key-a", OB1_CHAT_BASE_URL: B, OB1_CHAT_API_KEY: "key-b" });
-  await providerCall(two, "/embeddings", embBody);
+  const two = resolveEmbedConfig({ ...LOCAL, OB1_LLM_BASE_URL: A, OB1_LLM_API_KEY: "key-a", OB1_CHAT_BASE_URL: B, OB1_CHAT_API_KEY: "key-b" });
+  await providerCall(two, "/embeddings", embBody, SUBJ);
   assert(lastA().path.endsWith("/embeddings") && lastA().auth === "Bearer key-a", "embeddings land on OB1_LLM_BASE_URL with OB1_LLM_API_KEY");
-  await providerCall(two, "/chat/completions", chatBody);
+  await providerCall(two, "/chat/completions", chatBody, SUBJ);
   assert(lastB().path.endsWith("/chat/completions") && lastB().auth === "Bearer key-b", "chat lands on OB1_CHAT_BASE_URL with OB1_CHAT_API_KEY");
   const nA = seen.length, nB = seenB.length;
   await judgePair({ content: "older", createdAt: null }, { content: "newer", createdAt: null }, two);
-  await extractEntities("Ada met Grace in London", two);
+  await extractEntities("Ada met Grace in London", two, undefined, SUBJ);
   assert(seen.length === nA && seenB.length === nB + 2, "the supersession judge and the entity extractor dial the chat endpoint too, never the embeddings one");
   assert(seenB.slice(-2).every((s) => s.path.endsWith("/chat/completions") && s.auth === "Bearer key-b"), "…with its credential");
 
   // A credential belongs to an endpoint: a different chat base is sent none
   // unless it has its own; the same base spelled again shares the key; a chat
   // key alone gives the shared endpoint a chat-only credential.
-  const own = resolveEmbedConfig({ OB1_LLM_BASE_URL: A, OB1_LLM_API_KEY: "key-a", OB1_CHAT_BASE_URL: B });
-  await providerCall(own, "/chat/completions", chatBody);
+  const own = resolveEmbedConfig({ ...LOCAL, OB1_LLM_BASE_URL: A, OB1_LLM_API_KEY: "key-a", OB1_CHAT_BASE_URL: B });
+  await providerCall(own, "/chat/completions", chatBody, SUBJ);
   assert(lastB().auth === null, "a different chat endpoint with no OB1_CHAT_API_KEY is sent NO credential — OB1_LLM_API_KEY stays with the embeddings endpoint");
   const same = resolveEmbedConfig({ OB1_LLM_BASE_URL: A, OB1_LLM_API_KEY: "key-a", OB1_CHAT_BASE_URL: `${A}/` });
   assert(same.chat.base === A && same.chat.headers.Authorization === "Bearer key-a", "the same base spelled twice is one endpoint and shares the key");
@@ -315,7 +325,7 @@ console.log("\n[8] The chat calls have an endpoint of their own only when OB1_CH
   failB = true;
   let msg = "";
   try {
-    await providerCall(two, "/chat/completions", chatBody);
+    await providerCall(two, "/chat/completions", chatBody, SUBJ);
   } catch (e) {
     msg = (e as Error).message;
     assert(e instanceof ProviderError && e.status === 503, "a chat failure is a ProviderError carrying its status");
@@ -323,6 +333,53 @@ console.log("\n[8] The chat calls have an endpoint of their own only when OB1_CH
   assert(msg.includes(B) && !msg.includes(A), `a chat failure names the chat endpoint, not the embeddings one (${msg.slice(0, 80)})`);
   failB = false;
   providerB.stop();
+}
+
+console.log("\n[9] The supersession judge has a model of its own — OB1_JUDGE_MODEL, else the metadata model (SMD-1901)");
+{
+  // Function-level for the reason [8] gives. One stand-in that logs the model
+  // each chat request names, so which knob a dialler read is a fact about the
+  // request; its one reply parses as a judgement and as an extraction alike.
+  const { resolveEmbedConfig } = await import("./embed.ts");
+  const { judgePair, consolidateKey } = await import("./consolidate.ts");
+  const { extractEntities } = await import("./entities.ts");
+  const models: { path: string; model: string }[] = [];
+  const providerC = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      const body = (await req.json()) as { model: string };
+      models.push({ path: new URL(req.url).pathname, model: body.model });
+      return Response.json({ choices: [{ message: { content: JSON.stringify({ verdict: "unrelated", supersedes: "unknown", confidence: 0.9, reason: "", entities: [], relations: [] }) } }] });
+    },
+  });
+  const C = `http://127.0.0.1:${providerC.port}/v1`;
+  const older = { content: "older", createdAt: null };
+  const newer = { content: "newer", createdAt: null };
+  const last = () => models[models.length - 1];
+
+  // Unset: the judge runs on the metadata model, under the pass key every pass
+  // before the knob pooled under — the request of every deployment that
+  // predates it. Remove the fallback in resolveEmbedConfig and these fail.
+  // Declared local, as every stub in this file is; the gate is test-egress.ts's.
+  const shared = resolveEmbedConfig({ OB1_LLM_LOCAL: "1", OB1_LLM_BASE_URL: C, OB1_METADATA_MODEL: META_MODEL });
+  assert(shared.judgeModel === META_MODEL, "OB1_JUDGE_MODEL unset: the judge model IS the metadata model");
+  await judgePair(older, newer, shared);
+  assert(last().path.endsWith("/chat/completions") && last().model === META_MODEL, `…and the judge request names it (${last().model})`);
+  assert(consolidateKey(shared.judgeModel) === consolidateKey(META_MODEL), "…under the metadata model's pass key");
+  assert(resolveEmbedConfig({ OB1_LLM_LOCAL: "1", OB1_LLM_BASE_URL: C, OB1_METADATA_MODEL: META_MODEL, OB1_JUDGE_MODEL: "" }).judgeModel === META_MODEL,
+         "an empty OB1_JUDGE_MODEL means unset, as for every knob embed.ts reads");
+
+  // Set: on ONE configuration the judge names its model and the extractor
+  // keeps the metadata model — the split the ticket exists for.
+  const split = resolveEmbedConfig({ OB1_LLM_LOCAL: "1", OB1_LLM_BASE_URL: C, OB1_METADATA_MODEL: META_MODEL, OB1_JUDGE_MODEL: "big-judge" });
+  assert(split.judgeModel === "big-judge" && split.metadataModel === META_MODEL, "OB1_JUDGE_MODEL set: the judge model is its own and the metadata model is untouched");
+  await judgePair(older, newer, split);
+  await extractEntities("Ada met Grace in London", split, undefined, { kind: "extraction" });
+  const [judge, extract] = models.slice(-2);
+  assert(judge.model === "big-judge", `the judge request names OB1_JUDGE_MODEL (${judge.model})`);
+  assert(extract.model === META_MODEL, `…while the entity extractor's, on the same configuration, names OB1_METADATA_MODEL (${extract.model})`);
+  assert(consolidateKey(split.judgeModel) !== consolidateKey(shared.judgeModel), "a judge-model change is a new pass key, so an earlier model's judgements are not reused as this one's");
+  providerC.stop();
 }
 
 server.stop();

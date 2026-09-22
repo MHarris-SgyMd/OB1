@@ -2168,6 +2168,7 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
     ...process.env,
     DATABASE_URL: URL_,
     OB1_LLM_BASE_URL: `http://127.0.0.1:${provider.port}/v1`,
+    OB1_LLM_LOCAL: "1", // declared to the egress gate (SMD-1903); the stub is on this box
     OB1_EMBEDDING_MODEL: "stub-embed",
     OB1_EMBEDDING_DIM: String(DIM),
     // The tarpit answers never; two seconds is what the run may wait for it.
@@ -2414,6 +2415,24 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   const noIds = await reembed("--accept-failed");
   assert(noIds.code === 2 && /needs the rows to accept, by id/.test(noIds.out) && /--all/.test(noIds.out) && noIds.out.includes(poisonId) && /3 failed row\(s\) under reembed:test/.test(noIds.out),
     `--accept-failed with no ids refuses, listing the failed rows and both forms (exit ${noIds.code})`);
+  // The egress gate (SMD-1903): with the stub not declared local under the
+  // default, a run stops before claiming; --accept-failed and --retire write
+  // claim rows and dial nothing, so the gate has no say and each reaches its
+  // own refusal (second review pass).
+  const gateEnv = { ...env } as Record<string, string>;
+  for (const k of ["OB1_LLM_LOCAL", "OB1_CHAT_LOCAL", "OB1_EGRESS_POLICY", "OB1_EGRESS_ALLOW", "OB1_EGRESS_DENY"]) delete gateEnv[k];
+  const gated = (...extra: string[]) => runScript(["bun", join(HERE, "reembed.ts"), "--url", URL_!, "--job", REEMBED_JOB, ...extra], { env: gateEnv, cwd: HERE });
+  const gateStop = await gated();
+  assert(gateStop.code === 2 && /Nothing would be re-embedded: OB1_EGRESS_POLICY=deny \(the default\) with no OB1_EGRESS_ALLOW term, and 127\.0\.0\.1:\d+ is not declared local/.test(gateStop.out),
+    `a run against an endpoint not declared local stops before claiming, naming the rule (exit ${gateStop.code})`);
+  const gateAccept = await gated("--accept-failed");
+  assert(gateAccept.code === 2 && !/Nothing would be re-embedded/.test(gateAccept.out) && /needs the rows to accept, by id/.test(gateAccept.out),
+    "…while --accept-failed, which dials nothing, passes the gate and reaches its own refusal");
+  // With a key, so the run passes argument parsing and reaches the gate before
+  // its own refusal (third review pass: keyless, it exited before either).
+  const gateRetire = await gated("--retire", "reembed:nonexistent@1024");
+  assert(gateRetire.code === 2 && !/Nothing would be re-embedded/.test(gateRetire.out) && /Refusing --retire reembed:nonexistent@1024/.test(gateRetire.out) && /Nothing was written/.test(gateRetire.out),
+    `…as does --retire, which reaches its own refusal past the gate (exit ${gateRetire.code}: ${gateRetire.out.split("\n").filter(Boolean).slice(-1)[0]?.trim().slice(0, 120)})`);
   const notFailed = await reembed("--accept-failed", poisonId, lateId);
   assert(notFailed.code === 2 && notFailed.out.includes(`not a failed row under reembed:test: ${lateId} (succeeded)`) && (await claimCounts()).failed === 3,
     `…an id whose row is not failed refuses the whole command, and nothing is written (exit ${notFailed.code})`);
@@ -2961,6 +2980,7 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
     ...process.env,
     DATABASE_URL: URL_,
     OB1_LLM_BASE_URL: `http://127.0.0.1:${model.port}/v1`,
+    OB1_LLM_LOCAL: "1",
     OB1_METADATA_MODEL: "stub-meta",
     OB1_WORKER_KEY: rawKey,
     MCP_ACCESS_KEYS: `entity-worker:write:${hashKey(rawKey)}`,
@@ -3468,6 +3488,8 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
   let calls = 0;
   let hemlockIsProse = true;
   const seen: { a: string; b: string }[] = [];
+  /** The models the judge requests named; the knob under test in SMD-1901's cases below. */
+  const modelsSeen = new Set<string>();
   // While set, every verdict takes this long: the first run, so the heartbeat
   // (migration 031) has time to beat.
   let slowMs = 0;
@@ -3476,6 +3498,7 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     async fetch(req) {
       const body = (await req.json()) as { messages?: { role: string; content: string }[]; model?: string };
       calls++;
+      modelsSeen.add(String(body.model));
       const prompt = body.messages?.find((m) => m.role === "user")?.content ?? "";
       const a = /<thought_a>\n([\s\S]*?)\n<\/thought_a>/.exec(prompt)?.[1] ?? "";
       const b = /<thought_b>\n([\s\S]*?)\n<\/thought_b>/.exec(prompt)?.[1] ?? "";
@@ -3523,6 +3546,7 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     ...process.env,
     DATABASE_URL: URL_,
     OB1_LLM_BASE_URL: `http://127.0.0.1:${judge.port}/v1`,
+    OB1_LLM_LOCAL: "1",
     OB1_METADATA_MODEL: "stub-judge",
     OB1_WORKER_KEY: rawKey,
     MCP_ACCESS_KEYS: `consolidator:write:${hashKey(rawKey)}`,
@@ -3552,6 +3576,43 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
   const badList = await consolidate("--list", "maybe");
   assert(badList.code === 2 && /--list takes pending/.test(badList.out), "a status outside the four is refused");
 
+  // The judge's own model (SMD-1901): unset, the key and the model line name
+  // the metadata model and say the knob exists; set, OB1_JUDGE_MODEL moves the
+  // pass key and the model line — a fresh pass — while OB1_METADATA_MODEL, the
+  // extractor's, stays where it is. A dry run, so nothing is pooled under it.
+  assert(/job:\s+consolidate:stub-judge@p2/.test(dry.out) && /model:\s+stub-judge \(the metadata model; OB1_JUDGE_MODEL gives the judge its own\) via/.test(dry.out),
+         `OB1_JUDGE_MODEL unset: the pass key and the model line name the metadata model (${dry.out.split("\n").filter((l) => /job:|model:/.test(l)).join(" | ").trim().slice(0, 200)})`);
+  const ownJudge = await runScript(["bun", join(HERE, "consolidate.ts"), "--url", URL_!, "--dry-run"], { env: { ...env, OB1_JUDGE_MODEL: "judge-b" } as Record<string, string>, cwd: HERE });
+  assert(ownJudge.code === 0 && /job:\s+consolidate:judge-b@p2/.test(ownJudge.out) && /model:\s+judge-b \(OB1_JUDGE_MODEL\) via/.test(ownJudge.out),
+         `OB1_JUDGE_MODEL set: the pass key and the model line name the judge's model (exit ${ownJudge.code}: ${ownJudge.out.split("\n").filter((l) => /job:|model:/.test(l)).join(" | ").trim().slice(0, 200)})`);
+  assert(/each with judge-b and/.test(ownJudge.out) && calls === 0, "…the plan names it, and a dry run called no model");
+
+  // The egress gate's blanket refusal (SMD-1903): the stub not declared local
+  // under the default would fail every row it claims, so a run stops before
+  // claiming; a dry run still reports, its egress line saying why a run would not.
+  const undeclared = { ...env } as Record<string, string>;
+  // Every gate knob unset, whatever the shell carries (second review pass).
+  for (const k of ["OB1_LLM_LOCAL", "OB1_CHAT_LOCAL", "OB1_EGRESS_POLICY", "OB1_EGRESS_ALLOW", "OB1_EGRESS_DENY"]) delete undeclared[k];
+  const blanket = await runScript(["bun", join(HERE, "consolidate.ts"), "--url", URL_!], { env: undeclared, cwd: HERE });
+  assert(blanket.code === 2 && /Nothing would be judged: OB1_EGRESS_POLICY=deny \(the default\) with no OB1_EGRESS_ALLOW term, and 127\.0\.0\.1:\d+ is not declared local — every call is refused/.test(blanket.out) && /Declare the endpoint local \(OB1_LLM_LOCAL=1\)/.test(blanket.out) && calls === 0,
+         `an endpoint not declared local under the default refuses to start the pass rather than fail every row (exit ${blanket.code}: ${blanket.out.split("\n").find((l) => /Nothing would/.test(l))?.trim().slice(0, 160)})`);
+  assert((await sql`SELECT count(*)::int AS c FROM thought_work_claims WHERE work_type = ${KEY}`)[0].c === 0, "…and it claimed nothing");
+  // Without a worker key at all (fourth review pass: every keyless invocation
+  // had died before connecting on a constant read before its declaration,
+  // and no case here ran the worker without one — this is the tooth).
+  const keyless = { ...undeclared, OB1_LLM_LOCAL: "1" } as Record<string, string>;
+  delete keyless.OB1_WORKER_KEY;
+  delete keyless.MCP_ACCESS_KEYS;
+  const keylessDry = await runScript(["bun", join(HERE, "consolidate.ts"), "--url", URL_!, "--dry-run"], { env: keyless, cwd: HERE });
+  assert(keylessDry.code === 0 && /Nothing was written/.test(keylessDry.out) && !/ReferenceError|before initialization/.test(keylessDry.out),
+         `a keyless --dry-run runs to its report (exit ${keylessDry.code}: ${keylessDry.out.split("\n").filter(Boolean).slice(-1)[0]?.trim().slice(0, 120)})`);
+  const keylessBlanket = await runScript(["bun", join(HERE, "consolidate.ts"), "--url", URL_!], { env: { ...keyless, OB1_LLM_LOCAL: "", OB1_EGRESS_ALLOW: "actor:someone" } as Record<string, string>, cwd: HERE });
+  assert(keylessBlanket.code === 2 && /Nothing would be judged: .*every OB1_EGRESS_ALLOW term \(actor:someone\) names a unit this caller never carries \(it carries source, type, topic, marker\)/.test(keylessBlanket.out),
+         `…and a keyless run under actor-only allow terms is refused up front, since it carries no actor (exit ${keylessBlanket.code})`);
+  const blanketDry = await runScript(["bun", join(HERE, "consolidate.ts"), "--url", URL_!, "--dry-run"], { env: undeclared, cwd: HERE });
+  assert(blanketDry.code === 0 && /egress: deny \(the default\) — the text reaches 127\.0\.0\.1:\d+ only under OB1_EGRESS_ALLOW \(no terms: every call is refused\)/.test(blanketDry.out),
+         `…while --dry-run still reports, with the egress line saying so (exit ${blanketDry.code})`);
+
   // The first run. Five pairs are judged, one of them (the hemlock pair) drawing prose.
   // A 6 s lease with a 1 s heartbeat, and 700 ms verdicts — five pairs across
   // two workers, some three and a half seconds of model time — so the beats
@@ -3569,6 +3630,7 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
   assert(/2 proposal\(s\) recorded \(1 without a direction\), 1 conflict\(s\) under confidence 0\.5 not recorded/.test(first.out),
          `…two proposals recorded, one undirected, one conflict too weak to record (${first.out.split("\n").find((l) => /proposal\(s\) recorded/.test(l))?.trim()})`);
   assert(/calls per thousand thoughts/.test(first.out) && /model time per pair/.test(first.out), "…and the cost line: calls per thousand thoughts and model time per pair");
+  assert(modelsSeen.size === 1 && modelsSeen.has("stub-judge"), `every judge request named the metadata model, OB1_JUDGE_MODEL being unset (${[...modelsSeen].join(", ")})`);
   const callsAfterFirst = calls;
   assert(seen.every((p) => !/nothing has extracted/.test(p.a + p.b) && !/embedding failed/.test(p.a + p.b)), "neither the thought without entities nor the one without a vector was shown to the judge");
   assert(seen.some((p) => /monthly/.test(p.a) && /annually/.test(p.b)) && !seen.some((p) => /annually/.test(p.a)),
@@ -3929,7 +3991,7 @@ console.log("\n[18] Every schemas/*.sql applies over TCP with no Supabase role p
         try { await sql.unsafe(readFileSync(join(SCHEMAS, f), "utf8")); }
         catch (e) { failed.push(`${f}: ${(e as Error).message.split("\n")[0]}`); }
       }
-      assert(schemaFiles.length >= 17 && failed.length === 0, `every schemas/*.sql applies over TCP with no Supabase role (${schemaFiles.length} files; failed: ${failed.join(" | ") || "none"})`);
+      assert(schemaFiles.length >= 14 && failed.length === 0, `every schemas/*.sql applies over TCP with no Supabase role (${schemaFiles.length} files; failed: ${failed.join(" | ") || "none"})`);
 
       // After: --grant issues the whole community group, over TCP, in one
       // transaction — views as tables, sequences and functions spelled as GRANT

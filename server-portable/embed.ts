@@ -38,6 +38,7 @@ import {
   resolveEmbeddingDimensions,
   type ChunkTokensFrom,
 } from "../db/config.mjs";
+import { flagOn, mayLeaveBox, resolveEgressPolicy, type EgressDecision, type EgressPolicy, type EgressSubject } from "./egress.ts";
 
 /** The environment keys this module reads. A subset of index.ts's Env. */
 export type EmbedEnv = {
@@ -48,6 +49,14 @@ export type EmbedEnv = {
   OB1_CHAT_BASE_URL?: string;
   /** The chat endpoint's own credential. */
   OB1_CHAT_API_KEY?: string;
+  /** 1/on: OB1_LLM_BASE_URL is on this machine or its private network — declared, never guessed from the address (SMD-1903). */
+  OB1_LLM_LOCAL?: string;
+  /** Likewise for OB1_CHAT_BASE_URL; a chat endpoint at the same base is the same box, declared by either knob. */
+  OB1_CHAT_LOCAL?: string;
+  /** The egress gate's mode — deny (the default), allow or off — and its terms; see egress.ts. */
+  OB1_EGRESS_POLICY?: string;
+  OB1_EGRESS_ALLOW?: string;
+  OB1_EGRESS_DENY?: string;
   OB1_EMBEDDING_MODEL?: string;
   OB1_EMBEDDING_DIM?: string;
   OB1_EMBEDDING_DIMENSIONS?: string;
@@ -55,6 +64,8 @@ export type EmbedEnv = {
   OB1_CHUNK_OVERLAP?: string;
   OB1_CHUNK_CONTEXT?: string;
   OB1_METADATA_MODEL?: string;
+  /** The supersession judge's model, when it is not the metadata model (SMD-1901). */
+  OB1_JUDGE_MODEL?: string;
   OB1_METADATA_TEMPERATURE?: string;
   OB1_METADATA_REASONING?: string;
   OB1_LLM_TIMEOUT?: string;
@@ -91,8 +102,10 @@ export const PROVIDER_ERROR_CHARS = 500;
  * What a provider call can fail with, told apart without parsing messages:
  * the deadline passed (`timeout`), the provider answered with an error status
  * (`http`, with the status), or it answered 2xx with a body that is not JSON
- * (`body`). Anything else — a refused connection, a reset — is the runtime's
- * own error and is rethrown as it came.
+ * (`body`) — or the call was never made, because the egress gate refused to
+ * send the text to an endpoint not declared local (`egress`, SMD-1903; no
+ * status, and nothing about the provider). Anything else — a refused
+ * connection, a reset — is the runtime's own error and is rethrown as it came.
  */
 export class ProviderError extends Error {
   /**
@@ -100,7 +113,7 @@ export class ProviderError extends Error {
    *   kept apart from the message so the base URL in the message cannot be
    *   mistaken for them.
    */
-  constructor(message: string, readonly kind: "timeout" | "http" | "body", readonly status?: number, readonly body = "") {
+  constructor(message: string, readonly kind: "timeout" | "http" | "body" | "egress", readonly status?: number, readonly body = "") {
     super(message);
     this.name = "ProviderError";
   }
@@ -120,13 +133,23 @@ export class ProviderError extends Error {
  * Not every call in the repository: db/extract-entities.ts's model call has
  * its own bound (--timeout, per model call) and preflight's probes are one
  * interactive shot; both keep their own fetch.
+ *
+ * Every call names its SUBJECT — whose text this is, and what is known about
+ * it — and the egress gate (egress.ts, SMD-1903) reads it against the
+ * endpoint before anything is sent: an endpoint not declared local gets the
+ * text only under the policy, and a refusal is a ProviderError of kind
+ * `egress` thrown before the request exists. The server's capture and search
+ * paths ask the gate first and skip the call, so a refusal here is the belt
+ * under those braces, never the way a refused capture is meant to be found.
  */
-export async function providerCall<T>(cfg: EmbedConfig, path: "/embeddings" | "/chat/completions", body: unknown): Promise<T> {
+export async function providerCall<T>(cfg: EmbedConfig, path: "/embeddings" | "/chat/completions", body: unknown, subject: EgressSubject): Promise<T> {
   const what = path === "/embeddings" ? "Embeddings" : "Chat completion";
   // The endpoint the PATH selects, and the one every message below names: a
   // chat call that fails names the chat base, which since SMD-1902 need not be
   // the embeddings base.
   const at = endpointFor(cfg, path);
+  const gate = mayLeaveBox(subject, at, cfg.egress);
+  if (!gate.allowed) throw refuseEgress(what, at.base, gate);
   const timedOut = () =>
     new ProviderError(`${what} request to ${at.base} timed out after ${cfg.timeoutMs / 1000} s (OB1_LLM_TIMEOUT)`, "timeout");
   let r: Response;
@@ -166,6 +189,16 @@ export async function providerCall<T>(cfg: EmbedConfig, path: "/embeddings" | "/
   } catch {
     throw new ProviderError(`${at.base} answered ${r.status} with a body that is not JSON`, "body", r.status, capped);
   }
+}
+
+/**
+ * The error a refused call throws, in one shape for the three diallers
+ * (providerCall here, judgePair, extractEntities): kind `egress`, no status,
+ * the gate's own sentence. A worker's claim row or a reply carries the
+ * message; a classifier reads the kind.
+ */
+export function refuseEgress(what: string, base: string, gate: EgressDecision): ProviderError {
+  return new ProviderError(`${what} request to ${base} refused by the egress gate: ${gate.reason}`, "egress");
 }
 
 /** The endpoint a path is served by: /embeddings by the embeddings one, /chat/completions by the chat one. */
@@ -216,13 +249,24 @@ export type ProviderEndpoint = {
   key: string | undefined;
   /** Request headers; carries Authorization only when there is a key. */
   headers: Record<string, string>;
+  /**
+   * Declared on this machine or its private network — OB1_LLM_LOCAL /
+   * OB1_CHAT_LOCAL — so the egress gate does not apply (SMD-1903). Declared,
+   * not guessed: a loopback address with the flag unset is remote here, even
+   * where preflight's credential rule calls it local.
+   */
+  local: boolean;
+  /** The knob that declared it, when `local`: what a row or a banner names (second review pass). */
+  declaredBy?: "OB1_LLM_LOCAL" | "OB1_CHAT_LOCAL";
 };
 
 /** An endpoint from its parts, with the one header rule every call shares. */
-export function providerEndpoint(base: string, key: string | undefined): ProviderEndpoint {
+export function providerEndpoint(base: string, key: string | undefined, local = false, declaredBy?: "OB1_LLM_LOCAL" | "OB1_CHAT_LOCAL"): ProviderEndpoint {
   return {
     base: base.replace(/\/+$/, ""),
     key,
+    local,
+    ...(local && declaredBy ? { declaredBy } : {}),
     // A local endpoint needs no credential, so the key is optional there.
     // Sending `Authorization: Bearer undefined` to Ollama is harmless but
     // confusing in logs, so the header is omitted entirely when there is no key.
@@ -247,14 +291,28 @@ export function providerEndpoint(base: string, key: string | undefined): Provide
  * Two spellings of the same base are the same endpoint and share the key. A
  * hosted chat base with no key of its own is a configuration preflight fails
  * by name, not one this function papers over.
+ *
+ * Whether an endpoint is LOCAL is declared the same way (SMD-1903):
+ * `OB1_LLM_LOCAL` for the embeddings endpoint, `OB1_CHAT_LOCAL` for a chat
+ * endpoint of its own — and a chat endpoint at the SAME base is the same box,
+ * so either knob declares it, for both calls (the first review pass found
+ * `OB1_CHAT_LOCAL` alone discarded on the shared endpoint, every call refused
+ * and no row saying why). Nothing is read off the address.
  */
 export function resolveProviderEndpoints(env: EmbedEnv): { embeddings: ProviderEndpoint; chat: ProviderEndpoint } {
   // baseUrlOr: trimmed, trailing slashes off, and slashes alone are unset (SMD-1843).
-  const embeddings = providerEndpoint(baseUrlOr(env.OB1_LLM_BASE_URL, DEFAULT_LLM_BASE_URL), env.OB1_LLM_API_KEY || env.OPENROUTER_API_KEY);
-  const chat = providerEndpoint(baseUrlOr(env.OB1_CHAT_BASE_URL, embeddings.base), env.OB1_CHAT_API_KEY);
+  const embeddings = providerEndpoint(baseUrlOr(env.OB1_LLM_BASE_URL, DEFAULT_LLM_BASE_URL), env.OB1_LLM_API_KEY || env.OPENROUTER_API_KEY, flagOn(env.OB1_LLM_LOCAL), "OB1_LLM_LOCAL");
+  const chatBase = baseUrlOr(env.OB1_CHAT_BASE_URL, embeddings.base);
+  const chatFlag = flagOn(env.OB1_CHAT_LOCAL);
+  const chat = providerEndpoint(chatBase, env.OB1_CHAT_API_KEY, chatFlag || (chatBase === embeddings.base && embeddings.local), chatFlag ? "OB1_CHAT_LOCAL" : "OB1_LLM_LOCAL");
   // No key of its own and the same base: it IS the embeddings endpoint, key
-  // and all. Anything else — its own key, or a different base — stands alone.
-  return { embeddings, chat: !chat.key && chat.base === embeddings.base ? embeddings : chat };
+  // and all — declared local by either knob, and the knob that did travels
+  // with it. Anything else — its own key, or a different base — stands alone.
+  if (!chat.key && chat.base === embeddings.base) {
+    const shared: ProviderEndpoint = chat.local && !embeddings.local ? { ...embeddings, local: true, declaredBy: "OB1_CHAT_LOCAL" } : embeddings;
+    return { embeddings: shared, chat: shared };
+  }
+  return { embeddings, chat };
 }
 
 export type EmbedConfig = {
@@ -283,11 +341,26 @@ export type EmbedConfig = {
   chunkContext: boolean;
   /** The chat model the blurb is generated with — the metadata model. */
   metadataModel: string;
+  /**
+   * The model the supersession judge (consolidate.ts) runs on: OB1_JUDGE_MODEL,
+   * else the metadata model. The two tasks were one knob, so the only way to
+   * judge with a stronger model was to tag every capture with it too; SMD-1873
+   * measured them apart on one 7B — extraction fine, the judge at floor
+   * confidence on every pair. The pass key carries this name (consolidateKey),
+   * so a change starts a fresh pass rather than mixing judgements (SMD-1901).
+   */
+  judgeModel: string;
   metadataTemperature: number;
   /** Extra chat-completion fields controlling reasoning; see metadataReasoning. */
   metadataReasoning: Record<string, unknown>;
   /** Per provider call, both endpoints. OB1_LLM_TIMEOUT in seconds; see DEFAULT_LLM_TIMEOUT_S. */
   timeoutMs: number;
+  /**
+   * What may leave the box for an endpoint not declared local (SMD-1903):
+   * OB1_EGRESS_POLICY and its terms, read by providerCall and the two diallers
+   * that keep their own fetch. Deny by default; see egress.ts.
+   */
+  egress: EgressPolicy;
 };
 
 /** A string knob: trimmed, and "" or whitespace is unset. `qwen2.5:7b ` from a .env file is not a model. */
@@ -322,6 +395,7 @@ export function resolveEmbedConfig(env: EmbedEnv): EmbedConfig {
   // ratio (capped where the whole vector was measured to stop holding) and a
   // size at or under the constant, and an unknown model keeps the constant.
   const chunk = resolveChunkTokens(env.OB1_CHUNK_TOKENS, model, DEFAULT_MAX_TOKENS);
+  const metadataModel = stringOr(env.OB1_METADATA_MODEL, DEFAULT_METADATA_MODEL);
   return {
     ...resolveProviderEndpoints(env),
     embeddingModel: model,
@@ -354,13 +428,17 @@ export function resolveEmbedConfig(env: EmbedEnv): EmbedConfig {
       chunk.from === "window" && chunk.tokens < DEFAULT_MAX_TOKENS ? Math.floor((DEFAULT_OVERLAP_TOKENS * chunk.tokens) / DEFAULT_MAX_TOKENS) : DEFAULT_OVERLAP_TOKENS,
       "non-negative"),
     chunkContext: resolveChunkContext(env.OB1_CHUNK_CONTEXT),
-    metadataModel: stringOr(env.OB1_METADATA_MODEL, DEFAULT_METADATA_MODEL),
+    metadataModel,
+    // Trimmed like its sibling (SMD-1843): the judge's own knob, else the
+    // metadata model as resolved above.
+    judgeModel: stringOr(env.OB1_JUDGE_MODEL, metadataModel),
     // Deterministic by default; overridable for anyone who wants variety.
     metadataTemperature: numberOr(env.OB1_METADATA_TEMPERATURE, 0, "non-negative"),
     metadataReasoning: metadataReasoning(env.OB1_METADATA_REASONING),
     // Seconds, as --ttl and --timeout are elsewhere in this fork; a timeout of
     // zero would fail every call, so zero means the default too.
     timeoutMs: numberOr(env.OB1_LLM_TIMEOUT, DEFAULT_LLM_TIMEOUT_S, "positive") * 1000,
+    egress: resolveEgressPolicy(env),
   };
 }
 
@@ -452,10 +530,12 @@ export type Embedder = {
   /**
    * Embed a capture: one vector for `thoughts.embedding`, plus per-window
    * vectors when the content is too long to embed in a single provider call.
+   * `subject` is whose text this is, for the egress gate (SMD-1903); a
+   * refusal throws a ProviderError of kind `egress` before any request.
    */
-  embedCapture(content: string): Promise<EmbeddedCapture>;
-  /** One embedding. `kind` selects the query template over the document one. */
-  getEmbedding(text: string, kind?: EmbedKind): Promise<number[]>;
+  embedCapture(content: string, subject: EgressSubject): Promise<EmbeddedCapture>;
+  /** One embedding. `kind` selects the query template over the document one; `subject` as above. */
+  getEmbedding(text: string, subject: EgressSubject, kind?: EmbedKind): Promise<number[]>;
 };
 
 /**
@@ -511,13 +591,13 @@ export function createEmbedder(config: () => EmbedConfig, opts: { rememberRefusa
     return applyEmbeddingPrompt(cfg.embeddingModel, text, kind === "query");
   }
 
-  async function getEmbedding(text: string, kind: EmbedKind = "document"): Promise<number[]> {
+  async function getEmbedding(text: string, subject: EgressSubject, kind: EmbedKind = "document"): Promise<number[]> {
     const cfg = config();
     const d = await providerCall<{ data?: [{ embedding?: unknown }] }>(cfg, "/embeddings", {
       model: cfg.embeddingModel,
       input: applyPrompt(cfg, text, kind),
       ...(cfg.dimensionsRequested ? { dimensions: cfg.embeddingDim } : {}),
-    });
+    }, subject);
     const embedding = d?.data?.[0]?.embedding;
     if (!Array.isArray(embedding)) {
       throw new Error(`${cfg.embeddings.base} returned no embedding for model ${cfg.embeddingModel}`);
@@ -562,7 +642,7 @@ export function createEmbedder(config: () => EmbedConfig, opts: { rememberRefusa
    * `thought_chunks.context` is NULL for a window embedded bare, preflight counts
    * both kinds, and the capture response says so at the time.
    */
-  async function contextualiseChunk(cfg: EmbedConfig, document: string, chunk: string): Promise<{ text: string; error?: string }> {
+  async function contextualiseChunk(cfg: EmbedConfig, document: string, chunk: string, subject: EgressSubject): Promise<{ text: string; error?: string }> {
     // Filled by db/config.mjs's function, shared with evals/eval-contextual.ts,
     // so the harness measures the prompt the server sends; it is one pass with
     // a function, because two string replaces read `$&` and its relatives in
@@ -585,7 +665,7 @@ export function createEmbedder(config: () => EmbedConfig, opts: { rememberRefusa
         temperature: cfg.metadataTemperature,
         ...cfg.metadataReasoning,
         messages: [{ role: "user", content: prompt }],
-      });
+      }, subject);
       const out = (d?.choices?.[0]?.message?.content ?? "").trim();
       // The rule lives in db/config.mjs so the benchmark applies the same one. A
       // blurb this file accepted and the harness rejected would mean every
@@ -599,7 +679,10 @@ export function createEmbedder(config: () => EmbedConfig, opts: { rememberRefusa
       return { text: out };
     } catch (e) {
       // The timeout lands here too, already named with the knob by providerCall;
-      // the window goes in bare, as for any other failure of this call.
+      // the window goes in bare, as for any other failure of this call — and
+      // so does an egress refusal of the CHAT endpoint (SMD-1903): the blurb
+      // is enrichment, the window is stored bare with the reason, and the
+      // embedding call is judged on its own endpoint.
       return bare((e as Error).message);
     }
   }
@@ -656,16 +739,16 @@ export function createEmbedder(config: () => EmbedConfig, opts: { rememberRefusa
    * generations on the interactive capture path, and neither is obviously right:
    * anyone turning this on has already been told to measure it first.
    */
-  async function embedCapture(content: string): Promise<EmbeddedCapture> {
+  async function embedCapture(content: string, subject: EgressSubject): Promise<EmbeddedCapture> {
     const cfg = config();
     const windows = chunkContent(content, { maxTokens: cfg.chunkTokens, threshold: cfg.chunkThreshold, overlapTokens: cfg.chunkOverlap });
     if (!windows.length) {
-      return { embedding: await getEmbedding(content), model: cfg.embeddingModel, chunks: [], contextFailures: 0, contextErrors: [], wholeContentFellBack: false, wholeContentRefused };
+      return { embedding: await getEmbedding(content, subject), model: cfg.embeddingModel, chunks: [], contextFailures: 0, contextErrors: [], wholeContentFellBack: false, wholeContentRefused };
     }
 
     const wantContext = cfg.chunkContext;
     const blurbs = wantContext
-      ? await Promise.all(windows.map((w) => contextualiseChunk(cfg, content, w.content)))
+      ? await Promise.all(windows.map((w) => contextualiseChunk(cfg, content, w.content, subject)))
       : windows.map((): { text: string; error?: string } => ({ text: "" }));
     const contexts = blurbs.map((b) => b.text);
 
@@ -676,7 +759,12 @@ export function createEmbedder(config: () => EmbedConfig, opts: { rememberRefusa
     const [whole, ...windowVectors] = await Promise.all([
       wholeContentRefused
         ? Promise.resolve(null)
-        : getEmbedding(content).catch((e: Error & { status?: number; body?: string }) => {
+        : getEmbedding(content, subject).catch((e: Error & { status?: number; body?: string }) => {
+            // An egress refusal is not a fallback (SMD-1903): the windows'
+            // calls are refused on the same rule, so the head window cannot
+            // stand in, and the caller — the server's edit path, the re-embed
+            // — is told the text was not sent rather than that it fell back.
+            if (e instanceof ProviderError && e.kind === "egress") throw e;
             // A 413, or a 400 that names the length, means the provider REFUSED
             // the input rather than truncating it, which is a fact about the
             // model and this input and will be just as true next time.
@@ -704,7 +792,7 @@ export function createEmbedder(config: () => EmbedConfig, opts: { rememberRefusa
             }
             return null;
           }),
-      ...windows.map((w, i) => getEmbedding(composeChunkForEmbedding(contexts[i], w.content))),
+      ...windows.map((w, i) => getEmbedding(composeChunkForEmbedding(contexts[i], w.content), subject)),
     ]);
 
     return {

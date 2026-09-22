@@ -252,6 +252,24 @@ Example for a recipe that depends on a reusable skill:
 - What it requires (services, tools)
 - Confirmation that you tested it on your own Open Brain instance
 
+## Commit messages (fork changes)
+
+Commits to the fork's own code follow a small grammar, checked by `commitlint`
+(SMD-1808) — not Conventional Commits (SMD-1804 declined it), just the house shape:
+
+- `[<category>] <subject>`, where `<category>` is one of the PR categories above
+  plus `fork`, `docs`, `resources`. `[fork]` is a change to the fork itself.
+- A `[fork]` subject ends in its ticket, `(SMD-NNNN)` — the `ticket-ref` rule (a
+  warning).
+- On a review-pass commit, every finding bullet in the body carries a
+  `(caught: <how it was found>)` tag — the `caught-tag` rule (a warning) — so
+  `scripts/mechanism-yield.mjs` can count what each pass caught. Subjects have no
+  length limit; they are sentences by design.
+
+It runs in CI on every PR (the `commit-lint` job) and, opt-in, before each commit
+locally: `bun scripts/install-hooks.mjs` (undo with `--uninstall`). Merge commits
+are ignored. The config is `scripts/commitlint.config.mjs`.
+
 ## Changelog & versioning (fork changes)
 
 The fork is versioned `MAJOR.MINOR.PATCH+upstream.<sha>` — the rules are in
@@ -260,17 +278,18 @@ opposed to a vendored contribution, records itself as a **release fragment** rat
 than by editing a hand-numbered FORK.md section:
 
 - **Every PR that touches `db/migrations/`, `server-portable/` or `evals/` ships a
-  fragment**, `changes/<ticket>.md` (see [`changes/README.md`](changes/README.md)
+  fragment**, `changes/smd-NNNN.md` (see [`changes/README.md`](changes/README.md)
   for the shape). It carries the Keep a Changelog `type`, the `bump` the change
   deserves (a `patch` may not add a migration — a migration is at least a MINOR),
   the tickets and migrations it touches, a one-to-three-line changelog entry, and
-  the FORK.md section text — citing ticket and migration numbers, never a change
-  number, which the release step assigns.
-- The release step assembles the accumulated fragments into `FORK.md` and
-  `CHANGELOG.md` in one commit and cuts the tag; **do not hand-number a new
-  FORK.md section or edit `CHANGELOG.md` by hand.** (Sections 1–100 predate this
-  and stay as they are; during the transition a hand-numbered section is still
-  accepted, so an in-flight branch needs no rework.)
+  the record itself in the shape `changes/README.md` gives — at most 150 lines,
+  citing tickets, migrations and existing change numbers, never a number of its
+  own, which the release step assigns.
+- The release step assembles the accumulated fragments into numbered change
+  files (`changes/NNN-<slug>.md`), FORK.md's index and `CHANGELOG.md` in one
+  commit and cuts the tag; **do not hand-number a new change file or edit
+  `CHANGELOG.md` by hand.** (Changes 1–103 predate this and keep their numbers;
+  a `### N.` section in FORK.md is refused by `check-fork-consistency`.)
 - A migration inside a released range is **frozen** — append a new migration file
   rather than editing an old one; `check-fork-consistency` enforces it.
 

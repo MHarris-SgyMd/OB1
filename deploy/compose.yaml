@@ -165,7 +165,24 @@ services:
       # provider (SMD-1902). Unset, chat goes where the embeddings go.
       OB1_CHAT_BASE_URL: ${OB1_CHAT_BASE_URL:-}
       OB1_CHAT_API_KEY: ${OB1_CHAT_API_KEY:-}
+      # The supersession judge's model when it is not the metadata model
+      # (SMD-1901). The server never judges; preflight, which runs in this
+      # container, reports it beside the metadata model and probes it with --deep.
+      OB1_JUDGE_MODEL: ${OB1_JUDGE_MODEL:-}
       OB1_LLM_TIMEOUT: ${OB1_LLM_TIMEOUT:-}
+      # What may leave the box (SMD-1903): whether a thought's text may reach
+      # an endpoint not declared local — deny (the default), allow or off —
+      # and its terms. "Local" is DECLARED, never read off the address, so
+      # the stack's own `ollama` service (the fallback below) and an Ollama on
+      # the host both need OB1_LLM_LOCAL=1 in deploy/.env; without it, under
+      # the default, every embedding is refused and preflight's `embeddings
+      # egress` row says so. No fallback here for the same reason: the compose
+      # file must not declare local on the operator's behalf.
+      OB1_EGRESS_POLICY: ${OB1_EGRESS_POLICY:-}
+      OB1_EGRESS_ALLOW: ${OB1_EGRESS_ALLOW:-}
+      OB1_EGRESS_DENY: ${OB1_EGRESS_DENY:-}
+      OB1_LLM_LOCAL: ${OB1_LLM_LOCAL:-}
+      OB1_CHAT_LOCAL: ${OB1_CHAT_LOCAL:-}
       # Where both model calls go. Unset in deploy/.env this is the stack's own
       # Ollama — the `ollama` service the local-models profile adds, by name on
       # the compose network — so the profile needs nothing set. Not a copy of
@@ -244,7 +261,8 @@ services:
       timeout: 5s
       retries: 20
 
-  # Pulls the two models, then exits. First run downloads a few hundred MB.
+  # Pulls the two models — three when OB1_JUDGE_MODEL names one — then exits.
+  # First run downloads a few hundred MB.
   ollama-pull:
     image: ollama/ollama:latest
     profiles: ["local-models"]
@@ -253,11 +271,15 @@ services:
         condition: service_healthy
     environment:
       OLLAMA_HOST: http://ollama:11434
+      # Read by the shell below, not by compose: `$$` reaches the container as
+      # `$`, so an unset knob pulls nothing rather than a model named "".
+      OB1_JUDGE_MODEL: ${OB1_JUDGE_MODEL:-}
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
         ollama pull ${OB1_EMBEDDING_MODEL:-qwen3-embedding:4b}
         ollama pull ${OB1_METADATA_MODEL:-qwen2.5:7b}
+        [ -z "$$OB1_JUDGE_MODEL" ] || ollama pull "$$OB1_JUDGE_MODEL"
     restart: "no"
 
 volumes:

@@ -985,8 +985,9 @@ else {
   const consMid = await run(SQL_ENV);
   assert(consMid.code === 0 && new RegExp(`consolidate pass\\s+${rx(CONS)}: 3 thoughts with entities — 1 succeeded, 0 failed, 0 in flight, 1 pending, 1 not yet in the pool — a consolidation pass under this key stopped before it finished; 1 proposal\\(s\\) pending review — cd db && bun consolidate\\.ts --url \\$DATABASE_URL --list`).test(consMid.out),
          `a consolidation pass stopped mid-way warns with its counts over the thoughts with entities, and the queue (${consMid.out.split("\n").find((l) => /consolidate pass/.test(l))?.trim()})`);
-  assert(/Finish it: cd db && OB1_METADATA_MODEL=other-judge bun consolidate\.ts --url \$DATABASE_URL; OB1_METADATA_MODEL=other-judge bun consolidate\.ts --url \$DATABASE_URL --status shows where it stands\./.test(consMid.out),
-         "…and the remedy runs the worker under the key's own judge model, since another shell would pool under another key");
+  assert(/Finish it: cd db && OB1_JUDGE_MODEL=other-judge bun consolidate\.ts --url \$DATABASE_URL; OB1_JUDGE_MODEL=other-judge bun consolidate\.ts --url \$DATABASE_URL --status shows where it stands\./.test(consMid.out),
+         "…and the remedy runs the worker under the key's own judge model — the judge's knob, so the extractor stays put (SMD-1901) — since another shell would pool under another key");
+  assert(!/OB1_METADATA_MODEL=other-judge/.test(consMid.out), "…and not by moving the metadata model");
   const consJson = JSON.parse((await run(SQL_ENV, "--json")).out) as { ok: boolean; checks: { name: string; status: string }[] };
   assert(consJson.ok === true && consJson.checks.some((c) => c.name === "consolidate pass" && c.status === "warn"), "--json carries it as a warning, under ok:true");
   await claims`UPDATE thought_work_claims SET status = 'failed', finished_at = now(), last_error = 'stub: not JSON' WHERE work_type = ${CONS} AND thought_id = ${ids[1]}::uuid`;
@@ -1641,12 +1642,14 @@ else {
   assert(Array.isArray(parsed.checks) && parsed.checks.length > 5, "--json lists every check for a pipeline to consume");
 }
 
+// [6], [7] and [8] need no database: the provider rows print from configuration
+// alone, and the --deep probes run whether or not the data layer came up. A
+// store that is configured and unreachable, and no credential anywhere.
+const DB_DOWN = { ...NO_DB, OB1_STORE: "sql", DATABASE_URL: "postgres://u:p@127.0.0.1:1/x", MCP_ACCESS_KEY: "x".repeat(64) };
+const NO_KEYS = { OPENROUTER_API_KEY: undefined, OB1_LLM_API_KEY: undefined, OB1_CHAT_BASE_URL: undefined, OB1_CHAT_API_KEY: undefined };
+
 console.log("\n[6] Two provider endpoints are reported and gated by name (SMD-1902)");
 {
-  // No database needed: the provider rows print from configuration alone, and
-  // the --deep probes run whether or not the data layer came up.
-  const DB_DOWN = { ...NO_DB, OB1_STORE: "sql", DATABASE_URL: "postgres://u:p@127.0.0.1:1/x", MCP_ACCESS_KEY: "x".repeat(64) };
-  const NO_KEYS = { OPENROUTER_API_KEY: undefined, OB1_LLM_API_KEY: undefined, OB1_CHAT_BASE_URL: undefined, OB1_CHAT_API_KEY: undefined };
   const LOCAL = "http://127.0.0.1:11434/v1";
   const HOSTED = "https://openrouter.ai/api/v1";
   /** The report row named `name` — glyph, name, detail — or "" when none printed. */
@@ -1690,6 +1693,134 @@ console.log("\n[6] Two provider endpoints are reported and gated by name (SMD-19
          "--deep: the embeddings probe passes against its endpoint");
   assert(/✗\s+metadata model\s+\S+ at http:\/\/127\.0\.0\.1:1\/v1: /.test(deep.out) && /→ Network reachability to 127\.0\.0\.1:1\./.test(deep.out),
          "…while the chat probe fails by its own name, naming the chat endpoint and its host");
+}
+
+console.log("\n[7] The supersession judge's model is reported, and probed under its own row when it is not the metadata model (SMD-1901)");
+{
+  // A stub serves both paths and logs the model each chat probe names, so
+  // "probed once" and "probed under its own row" are facts about the requests.
+  const chatModels: string[] = [];
+  let refuse = "";
+  const stub = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      const body = (await req.json()) as { model: string };
+      if (new URL(req.url).pathname.endsWith("/embeddings")) return Response.json({ data: [{ embedding: new Array(EMBEDDING_DIM).fill(0) }] });
+      chatModels.push(body.model);
+      if (body.model === refuse) return new Response(`model "${body.model}" not found`, { status: 404 });
+      return Response.json({ choices: [{ message: { content: '{"ok":true}' } }] });
+    },
+  });
+  const ENV = { ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: `http://127.0.0.1:${stub.port}/v1`, OB1_METADATA_MODEL: "meta-7b" };
+
+  // Unset: the row says the judge runs on the metadata model and how to give
+  // it another; --deep probes one model, once.
+  const shared = await run({ ...ENV, OB1_JUDGE_MODEL: undefined }, "--deep");
+  assert(/✓\s+judge model\s+meta-7b — the metadata model; OB1_JUDGE_MODEL gives the judge its own\s*$/m.test(shared.out),
+         "OB1_JUDGE_MODEL unset: the judge model row names the metadata model and the knob");
+  assert(/✓\s+metadata model\s+meta-7b honours JSON mode at/.test(shared.out), "--deep: the metadata model is probed for JSON mode");
+  assert(!/judge model\s+meta-7b honours/.test(shared.out) && chatModels.length === 1 && chatModels[0] === "meta-7b",
+         `…once — one model, one probe, and no judge-model probe row (${chatModels.join(", ")})`);
+
+  // Set: its own row and its own probe; the metadata model's are unchanged.
+  chatModels.length = 0;
+  const own = await run({ ...ENV, OB1_JUDGE_MODEL: "big-judge" }, "--deep");
+  assert(/✓\s+judge model\s+big-judge \(OB1_JUDGE_MODEL\)\s*$/m.test(own.out), "OB1_JUDGE_MODEL set: the judge model row names it and the knob");
+  assert(/✓\s+metadata model\s+meta-7b\s*$/m.test(own.out), "…and the metadata model row still names the extractor's model");
+  assert(/✓\s+judge model\s+big-judge honours JSON mode at/.test(own.out) && /✓\s+metadata model\s+meta-7b honours JSON mode at/.test(own.out),
+         "--deep probes each model under its own row");
+  assert(chatModels.length === 2 && chatModels.includes("meta-7b") && chatModels.includes("big-judge"), `…two probes, one per model (${chatModels.join(", ")})`);
+
+  // A judge model the endpoint does not serve fails the judge's row, with the
+  // pass as the consequence, and the metadata model's row passes on its own.
+  refuse = "big-judge";
+  const refused = await run({ ...ENV, OB1_JUDGE_MODEL: "big-judge" }, "--deep");
+  assert(/✗\s+judge model\s+big-judge returned 404 from http:\/\/127\.0\.0\.1:\d+\/v1/.test(refused.out) && /Capture is unaffected; db\/consolidate\.ts would fail every pair it judges\./.test(refused.out),
+         "a judge model the endpoint refuses fails the judge model row, naming the pass it would break and not capture");
+  assert(/✓\s+metadata model\s+meta-7b honours JSON mode at/.test(refused.out), "…while the metadata model row passes");
+  refuse = "";
+
+  // The metadata model named again in the judge's knob is one model: one probe.
+  chatModels.length = 0;
+  const same = await run({ ...ENV, OB1_JUDGE_MODEL: "meta-7b" }, "--deep");
+  assert(/✓\s+judge model\s+meta-7b \(OB1_JUDGE_MODEL\) — the same as the metadata model\s*$/m.test(same.out), "the same model in both knobs: the row says so");
+  assert(chatModels.length === 1, `…and it is probed once (${chatModels.length})`);
+  stub.stop();
+}
+
+console.log("\n[8] The egress gate is reported: the mode, and per endpoint what leaves — declared local, the upgrade case, or refused (SMD-1903)");
+{
+  const LOCAL = "http://127.0.0.1:11434/v1";
+  const HOSTED = "https://openrouter.ai/api/v1";
+  const row = (out: string, name: string) => out.split("\n").find((l) => new RegExp(`^\\s*[✓✗!·]\\s+${name}\\s`).test(l)) ?? "";
+  /** Every gate knob unset, whatever the shell has. */
+  const GATE = { OB1_EGRESS_POLICY: undefined, OB1_EGRESS_ALLOW: undefined, OB1_EGRESS_DENY: undefined, OB1_LLM_LOCAL: undefined, OB1_CHAT_LOCAL: undefined };
+
+  // The upgrade case: a loopback endpoint nothing declared. The policy row
+  // says deny is the default; the endpoint row warns with the one-line fix.
+  const undeclared = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: LOCAL });
+  assert(/✓\s+egress policy\s+deny \(the default\) — a thought's text reaches an endpoint not declared local only under an OB1_EGRESS_ALLOW term; no terms/.test(undeclared.out),
+         "unset: the policy row says deny, the default, no terms");
+  assert(/!\s+embeddings egress\s+http:\/\/127\.0\.0\.1:11434\/v1 looks local but is not declared so — the gate treats it as remote, and under deny with no allow term every embeddings and chat call is refused: captures land without a vector/.test(undeclared.out),
+         "…a loopback endpoint nothing declared warns as the upgrade case, naming the consequence");
+  assert(/→ Set OB1_LLM_LOCAL=1 if this endpoint is on this machine/.test(undeclared.out), "…with the one-line fix");
+  assert(row(undeclared.out, "chat egress") === "", "…and one row when chat is the embeddings endpoint");
+  const declared = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: LOCAL, OB1_LLM_LOCAL: "1" });
+  assert(/✓\s+embeddings egress\s+http:\/\/127\.0\.0\.1:11434\/v1 is declared local \(OB1_LLM_LOCAL\) — the embeddings and chat text stays on the box; the gate does not apply/.test(declared.out),
+         "declared: ok, naming the knob");
+
+  // Hosted under deny with no terms: every call refused, said with the
+  // consequence and the ways out; with terms, what leaves and under what.
+  const hostedDeny = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: HOSTED, OPENROUTER_API_KEY: "k" });
+  assert(/!\s+embeddings egress\s+every embeddings and chat call to openrouter\.ai is refused — deny with no OB1_EGRESS_ALLOW term — so captures land without a vector/.test(hostedDeny.out),
+         "hosted, deny, no terms: warns that every call is refused");
+  assert(/→ Declare the endpoint local \(OB1_LLM_LOCAL=1\) if it is, name what may leave in OB1_EGRESS_ALLOW/.test(hostedDeny.out), "…with the ways out");
+  const hostedTerms = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: HOSTED, OPENROUTER_API_KEY: "k", OB1_EGRESS_ALLOW: "actor:chatgpt, marker:#public" });
+  assert(/✓\s+egress policy\s+deny \(the default\) — .*; 2 term\(s\): actor:chatgpt, marker:#public/.test(hostedTerms.out), "…with terms the policy row lists them");
+  assert(/✓\s+embeddings egress\s+the embeddings and chat text leaves to openrouter\.ai only under an OB1_EGRESS_ALLOW term; otherwise captures land/.test(hostedTerms.out),
+         "…and the endpoint row says what leaves and under what");
+  const allow = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: HOSTED, OPENROUTER_API_KEY: "k", OB1_EGRESS_POLICY: "allow" });
+  assert(/✓\s+egress policy\s+allow — .*; no terms/.test(allow.out) && /✓\s+embeddings egress\s+the full text of every embeddings and chat call leaves to openrouter\.ai — no OB1_EGRESS_DENY term holds any back/.test(allow.out),
+         "allow with no deny terms: says everything leaves, in words");
+  const off = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: HOSTED, OPENROUTER_API_KEY: "k", OB1_EGRESS_POLICY: "off" });
+  assert(/!\s+egress policy\s+off — nothing decides what leaves the box/.test(off.out) && /✓\s+embeddings egress\s+the full text of every embeddings and chat call leaves to openrouter\.ai — the gate is off/.test(off.out),
+         "off: the policy row warns, the endpoint row says the text leaves");
+  assert(!/✗\s+egress/.test(off.out), "…a warning, not a failure: the operator may choose it");
+
+  // A knob that does not parse fails by name, and the endpoint row says the
+  // gate is closed meanwhile.
+  const bad = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: HOSTED, OPENROUTER_API_KEY: "k", OB1_EGRESS_POLICY: "allow", OB1_EGRESS_DENY: "marker:#phi,nonsense" });
+  assert(bad.code === 1 && /✗\s+egress policy\s+OB1_EGRESS_DENY: `nonsense` is not unit:value \(units: actor, source, type, topic, marker\) — the gate fails closed \(deny\) until this is fixed/.test(bad.out),
+         "a term that does not parse fails by name");
+  assert(/!\s+embeddings egress\s+every embeddings and chat call to openrouter\.ai is refused while the policy does not parse/.test(bad.out), "…and the endpoint row says every call is refused meanwhile");
+  // Terms in the knob the mode does not read: a warning naming both knobs.
+  const unread = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: LOCAL, OB1_LLM_LOCAL: "1", OB1_EGRESS_DENY: "marker:#phi" });
+  assert(/!\s+egress policy\s+OB1_EGRESS_DENY has 1 term\(s\) but the mode is deny, which reads OB1_EGRESS_ALLOW — they decide nothing/.test(unread.out) && /→ Move them to OB1_EGRESS_ALLOW, or change OB1_EGRESS_POLICY\./.test(unread.out),
+         "deny terms under deny: warned as unread, with the knob the mode reads");
+  assert(!/egress policy\s+.*decide nothing/.test(declared.out), "…and no such warning when no term is unread");
+  // The upgrade-case warning carries the consequence for the mode in force.
+  const undeclaredTerms = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: LOCAL, OB1_EGRESS_ALLOW: "marker:#public" });
+  assert(/looks local but is not declared so — the gate treats it as remote, and under deny every embeddings and chat call no OB1_EGRESS_ALLOW term matches is refused/.test(undeclaredTerms.out),
+         "…undeclared under deny WITH terms says what is refused");
+  const undeclaredOff = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: LOCAL, OB1_EGRESS_POLICY: "off" });
+  assert(/looks local but is not declared so — the gate treats it as remote; the gate is off, so nothing is refused today/.test(undeclaredOff.out), "…and under off that nothing is refused today");
+  // Either knob declares a shared endpoint; the row names the one that did.
+  const chatKnob = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: LOCAL, OB1_CHAT_LOCAL: "1" });
+  assert(/✓\s+embeddings egress\s+http:\/\/127\.0\.0\.1:11434\/v1 is declared local \(OB1_CHAT_LOCAL\) — the embeddings and chat text stays on the box/.test(chatKnob.out),
+         "OB1_CHAT_LOCAL alone declares the one endpoint both calls use, and the row names that knob");
+  const badMode = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: LOCAL, OB1_LLM_LOCAL: "1", OB1_EGRESS_POLICY: "maybe" });
+  assert(badMode.code === 1 && /✗\s+egress policy\s+OB1_EGRESS_POLICY: `maybe` is not one of deny, allow, off/.test(badMode.out),
+         "a mode outside the three fails by name, even with every endpoint declared local");
+
+  // Two endpoints, two rows, each with its own knob; a same-base chat
+  // endpoint inherits and names the knob that declared it.
+  const split = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: LOCAL, OB1_LLM_LOCAL: "1", OB1_CHAT_BASE_URL: HOSTED, OB1_CHAT_API_KEY: "k" });
+  assert(/✓\s+embeddings egress\s+http:\/\/127\.0\.0\.1:11434\/v1 is declared local \(OB1_LLM_LOCAL\) — the embeddings text stays/.test(split.out), "split: the embeddings row is its own");
+  assert(/!\s+chat egress\s+every chat call to openrouter\.ai is refused — deny with no OB1_EGRESS_ALLOW term — so captures land untagged/.test(split.out) && /→ Declare the endpoint local \(OB1_CHAT_LOCAL=1\)/.test(split.out),
+         "…and the chat row names its own knob and consequence");
+  const inherit = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: LOCAL, OB1_LLM_LOCAL: "1", OB1_CHAT_API_KEY: "k" });
+  assert(/✓\s+chat egress\s+http:\/\/127\.0\.0\.1:11434\/v1 is declared local \(OB1_LLM_LOCAL\)/.test(inherit.out),
+         "a chat endpoint at the same base with its own key inherits the declaration and names the knob that made it");
 }
 
 report();

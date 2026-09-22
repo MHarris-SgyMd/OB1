@@ -85,7 +85,8 @@ import { SQL } from "bun";
 import { hostname } from "node:os";
 import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
-import { PROVIDER_ERROR_CHARS, refusesLength, resolveEmbedConfig } from "../server-portable/embed.ts";
+import { PROVIDER_ERROR_CHARS, ProviderError, refusesLength, resolveEmbedConfig } from "../server-portable/embed.ts";
+import { describeEgress, localKnob, refusesEverything, ROW_UNITS } from "../server-portable/egress.ts";
 import {
   cleanForDisplay, consolidateKey, judgePair, proposalVerdict, DEFAULT_CANDIDATES, DEFAULT_MIN_CONFIDENCE, DEFAULT_MIN_SIMILARITY,
   type Judgement,
@@ -192,10 +193,32 @@ if (FORCE && !ACCEPT) {
 const REVIEW_ONLY = LIST !== undefined || ACCEPT !== undefined || REJECT !== undefined || STALE_DAYS > 0;
 
 const cfg = resolveEmbedConfig(process.env);
-const JOB = consolidateKey(cfg.metadataModel);
+// The judge's model, not the extractor's: OB1_JUDGE_MODEL, else the metadata
+// model (SMD-1901). The key carries it, so a pass under another judge is
+// another pass — --status and preflight report each by name.
+const JOB = consolidateKey(cfg.judgeModel);
 
 console.log(`  job:    ${JOB}`);
-if (!REVIEW_ONLY) console.log(`  model:  ${cfg.metadataModel} via ${cfg.chat.base}, temperature ${cfg.metadataTemperature}; up to ${K} older neighbour(s) per thought at cosine >= ${MIN_SIM}, conflicts recorded at confidence >= ${MIN_CONFIDENCE}`);
+// Which knob named it is read off the resolved pair, not the raw variable: a
+// value the resolver treats as unset (empty, or the metadata model's own name)
+// is the metadata model here too, however it was spelled.
+if (!REVIEW_ONLY) console.log(`  model:  ${cfg.judgeModel}${cfg.judgeModel !== cfg.metadataModel ? " (OB1_JUDGE_MODEL)" : " (the metadata model; OB1_JUDGE_MODEL gives the judge its own)"} via ${cfg.chat.base}, temperature ${cfg.metadataTemperature}; up to ${K} older neighbour(s) per thought at cosine >= ${MIN_SIM}, conflicts recorded at confidence >= ${MIN_CONFIDENCE}`);
+// What may leave the box (SMD-1903): a pair either row of which the gate
+// refuses is not judged, and the thought's claim fails naming the rule.
+if (!REVIEW_ONLY) console.log(`  egress: ${describeEgress(cfg.chat, cfg.egress, localKnob(cfg, "chat"))}`);
+{
+  // A policy that refuses whatever the row (SMD-1903): stop before claiming,
+  // rather than fail every row in the pool one at a time. A dry run and
+  // --status still report — the banner's egress line says why a run would not.
+  // The units a row of this pass carries: its metadata and text, and the
+  // worker key's name as the actor when one is set — re-checked below once
+  // the key has, or has not, resolved (third review pass).
+  const blanket = refusesEverything(cfg.chat, cfg.egress, process.env.OB1_WORKER_KEY ? undefined : ROW_UNITS);
+  if (blanket && !STATUS_ONLY && !DRY_RUN && !REVIEW_ONLY) {
+    console.error(`\n  Nothing would be judged: ${blanket}. Declare the endpoint local (${localKnob(cfg, "chat")}=1) if it is, name what may leave in OB1_EGRESS_ALLOW, or set OB1_EGRESS_POLICY — in words, before a pass that would fail every row it claims.`);
+    process.exit(2);
+  }
+}
 
 // One connection per worker and one spare: the heartbeat (db/lease.ts) beats
 // through the pool, and a worker parked on a lock or a long statement holds
@@ -224,6 +247,8 @@ if (Number(tables) < 3) {
  */
 let agentId: string | null = null;
 let actorName = "consolidate";
+/** The worker key's name when it RESOLVED — the egress gate's `actor:` unit; the audit label above is not an actor (third review pass). */
+let keyName: string | undefined;
 // A run, or a review: both write and are attributed. --status, --dry-run, --list and --stale only read.
 const WRITES = ACCEPT !== undefined || REJECT !== undefined || !(STATUS_ONLY || DRY_RUN || REVIEW_ONLY);
 if (WRITES) {
@@ -252,6 +277,7 @@ if (WRITES) {
       if (res.ok && res.agent_id) {
         agentId = res.agent_id;
         actorName = record.name;
+        keyName = record.name;
         console.log(`  agent:  ${record.name} (${record.scope}, ${agentId})`);
       } else {
         console.error(`  ⚠  resolve_agent answered ${res.error ?? "without an id"}; rows will carry no agent id`);
@@ -261,6 +287,16 @@ if (WRITES) {
     }
   } else {
     console.error(`  ⚠  OB1_WORKER_KEY is not set: ${ACCEPT || REJECT ? "the review is audited as 'consolidate' with no agent id" : "proposals will carry no agent id"}. Mint one with server-portable/keygen.ts and add its hash to MCP_ACCESS_KEYS.`);
+  }
+  // A key that was set but did not resolve to a name is no actor: the blanket
+  // check above credited one, so it is asked again without (third review pass).
+  if (process.env.OB1_WORKER_KEY && keyName === undefined && !REVIEW_ONLY) {
+    const again = refusesEverything(cfg.chat, cfg.egress, ROW_UNITS);
+    if (again) {
+      console.error(`\n  Nothing would be judged: ${again} — the worker key did not resolve, so the pass carries no actor for an actor: term to name.`);
+      await sql.close();
+      process.exit(2);
+    }
   }
 }
 
@@ -422,7 +458,7 @@ if (STATUS_ONLY || DRY_RUN) {
     const todo = c.pending + c.unpooled + (RETRY_FAILED ? c.failed : 0);
     console.log(
       `\n  would: ${RETRY_FAILED ? `return ${c.failed} failed rows to the pool; ` : ""}` +
-        `add ${c.unpooled} thoughts to the pool; judge ${LIMIT ? Math.min(LIMIT, todo) : todo} thought(s) against up to ${K} older neighbour(s) each with ${cfg.metadataModel} ` +
+        `add ${c.unpooled} thoughts to the pool; judge ${LIMIT ? Math.min(LIMIT, todo) : todo} thought(s) against up to ${K} older neighbour(s) each with ${cfg.judgeModel} ` +
         `and ${WORKERS} worker(s), ${TTL} s leases renewed every ${HEARTBEAT} s. Nothing was written.`
     );
   }
@@ -473,7 +509,7 @@ function progress(force = false): void {
 }
 
 /** A thought as read for judging: the text and 016's hash of it, taken together, so the proposal records what the judge saw. */
-type Row = { id: string; content: string; created_at: string | null; fingerprint: string };
+type Row = { id: string; content: string; created_at: string | null; fingerprint: string; metadata: Record<string, unknown> | null };
 type Candidate = { older_id: string; similarity: number; shared_entities: number };
 type Outcome = { outcome: "succeeded" } | { outcome: "failed"; error: string } | { outcome: "vanished" };
 
@@ -484,7 +520,7 @@ async function processRow(row: Row): Promise<Outcome> {
     return { outcome: "succeeded" };
   }
   const olders = (await sql`
-    SELECT id, content, created_at, content_fingerprint_of(content) AS fingerprint FROM thoughts
+    SELECT id, content, created_at, content_fingerprint_of(content) AS fingerprint, metadata FROM thoughts
     WHERE id = ANY(${sql.array(candidates.map((c) => c.older_id), "TEXT")}::uuid[])`) as Row[];
   const byId = new Map(olders.map((o) => [o.id, o]));
   const problems: string[] = [];
@@ -497,15 +533,22 @@ async function processRow(row: Row): Promise<Outcome> {
     const t0 = Date.now();
     let j: Judgement;
     try {
-      j = await judgePair({ content: older.content, createdAt: older.created_at },
-                          { content: row.content, createdAt: row.created_at },
-                          cfg, AbortSignal.timeout(TIMEOUT_S * 1000));
+      j = await judgePair({ content: older.content, createdAt: older.created_at, metadata: older.metadata ?? undefined },
+                          { content: row.content, createdAt: row.created_at, metadata: row.metadata ?? undefined },
+                          cfg, AbortSignal.timeout(TIMEOUT_S * 1000), keyName);
     } catch (e) {
       llmMs += Date.now() - t0;
       // A timeout is a fact about this pair (the longest thoughts); anything
       // else is the provider's and is classified by the caller.
       if ((e as Error).name === "TimeoutError" || /timed out/i.test((e as Error).message)) {
         problems.push(`pair with ${c.older_id}: timed out after ${TIMEOUT_S} s`);
+        continue;
+      }
+      // The egress gate refused a side of this pair (SMD-1903): a fact about
+      // these rows under this policy, recorded on the claim like a timeout,
+      // so the next pair is still judged and --retry-failed revisits the row.
+      if (e instanceof ProviderError && e.kind === "egress") {
+        problems.push(`pair with ${c.older_id}: ${e.message}`);
         continue;
       }
       throw e;
@@ -596,7 +639,7 @@ async function worker(n: number): Promise<void> {
         const ids = batch.map((b) => b.thought_id);
         hb.claimed(ids);
         const rows = (await sql`
-          SELECT id, content, created_at, content_fingerprint_of(content) AS fingerprint
+          SELECT id, content, created_at, content_fingerprint_of(content) AS fingerprint, metadata
             FROM thoughts WHERE id = ANY(${sql.array(ids, "TEXT")}::uuid[])`) as Row[];
         byId = new Map(rows.map((r) => [r.id, r]));
       } catch (e) {
@@ -798,7 +841,7 @@ await sql.close();
 if (configError) {
   console.error(
     `\n  The provider refused the request itself: ${configError.slice(0, 300)}\n` +
-      `  Check the chat endpoint (OB1_CHAT_BASE_URL and OB1_CHAT_API_KEY, or OB1_LLM_BASE_URL and OB1_LLM_API_KEY when those are unset) and OB1_METADATA_MODEL against the provider; a 400 about a request field\n` +
+      `  Check the chat endpoint (OB1_CHAT_BASE_URL and OB1_CHAT_API_KEY, or OB1_LLM_BASE_URL and OB1_LLM_API_KEY when those are unset) and the judge model (OB1_JUDGE_MODEL, else OB1_METADATA_MODEL) against the provider; a 400 about a request field\n` +
       `  is usually reasoning_effort or response_format not being supported by this model. Nothing was marked failed.`
   );
   await Promise.resolve();

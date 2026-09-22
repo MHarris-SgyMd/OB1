@@ -32,9 +32,11 @@
  *
  * Needs the entity answers dump (eval-entities.ts --corpus, about two hours
  * once) and an embedding provider for any document not in the vector cache.
- * The model, endpoint and temperature are the metadata-extraction ones
- * (OB1_METADATA_MODEL, OB1_LLM_BASE_URL or OB1_EVAL_BASE), through the same
- * resolver the worker uses.
+ * The judge model is OB1_JUDGE_MODEL, else OB1_METADATA_MODEL (SMD-1901); the
+ * endpoint and temperature are the metadata-extraction ones (OB1_LLM_BASE_URL
+ * or OB1_EVAL_BASE, OB1_METADATA_TEMPERATURE), through the same resolver the
+ * worker uses. The entity answers the candidate rule reads are still keyed on
+ * the metadata model, which made them.
  */
 
 import { SQL } from "bun";
@@ -77,11 +79,11 @@ const spec = parseSpec(EMBED_MODEL);
 const DIM = spec.dims ?? Number(process.env.OB1_EMBEDDING_DIM || 1024);
 const OUT = process.env.OB1_EVAL_OUT ?? "/tmp/consolidate-proposals.md";
 const cfg = resolveEmbedConfig(process.env);
-const JOB = consolidateKey(cfg.metadataModel);
+const JOB = consolidateKey(cfg.judgeModel);
 // The pass's verdicts, per judge model (OB1_EVAL_VERDICTS moves it); a --full
 // run starts it empty, since the worker appends and a second run the same day
 // would otherwise report the sum of both (review pass 2).
-const DUMP = REPLAY ?? (process.env.OB1_EVAL_VERDICTS ?? `/tmp/consolidate-verdicts-${cfg.metadataModel.replace(/[^A-Za-z0-9.-]+/g, "_")}.jsonl`);
+const DUMP = REPLAY ?? (process.env.OB1_EVAL_VERDICTS ?? `/tmp/consolidate-verdicts-${cfg.judgeModel.replace(/[^A-Za-z0-9.-]+/g, "_")}.jsonl`);
 const { path: corpusPath, docs } = loadLinearCorpus();
 const answersPath = entityAnswersPath(cfg.metadataModel);
 if (!existsSync(answersPath)) {
@@ -95,7 +97,7 @@ type Labels = { pairs: LabelPair[]; proposals?: GradedProposal[] };
 const labels = JSON.parse(readFileSync(join(HERE, "consolidate-labels.json"), "utf8")) as Labels;
 
 console.log(`  corpus: ${docs.length} documents from ${corpusPath}; ${labels.pairs.length} labelled pairs, ${labels.proposals?.length ?? 0} graded proposals`);
-console.log(`  embed:  ${EMBED_MODEL} @ ${DIM}; graph from ${answersPath}; judge ${cfg.metadataModel} at temperature ${cfg.metadataTemperature} via ${cfg.chat.base}; key ${JOB}`);
+console.log(`  embed:  ${EMBED_MODEL} @ ${DIM}; graph from ${answersPath}; judge ${cfg.judgeModel} at temperature ${cfg.metadataTemperature} via ${cfg.chat.base}; key ${JOB}`);
 console.log(`  k ${K}, cosine floor ${MIN_SIM}${REPLAY ? `; verdicts replayed from ${REPLAY}` : ""}\n`);
 
 // ── Load: thoughts with vectors AND their capture dates, then the graph ──────
@@ -261,13 +263,13 @@ if (FULL || REPLAY) {
   const byVerdict = lines.reduce((m, l) => { m[l.verdict] = (m[l.verdict] ?? 0) + 1; return m; }, {} as Record<string, number>);
   console.log(`  ${lines.length} verdicts: ${Object.entries(byVerdict).map(([v, n]) => `${n} ${v}`).join(", ")}; ${lines.filter((l) => l.recorded === "proposed").length} proposed, ${lines.filter((l) => l.recorded === "under-confidence").length} conflicts under the confidence floor`);
   console.log(`  cost: ${lines.length} judge calls for ${loaded.size} thoughts (${withEntities} with entities) = ${Math.round((1000 * lines.length) / loaded.size)} calls per thousand thoughts; ~${promptTokens.toLocaleString()} estimated prompt tokens, ~${Math.round(promptTokens / lines.length || 0)} per call, ~${Math.round((promptTokens / loaded.size) * 1000).toLocaleString()} per thousand thoughts` +
-    (wall ? `; ${(wall / 60).toFixed(1)} min wall on ${cfg.metadataModel}` : ""));
+    (wall ? `; ${(wall / 60).toFixed(1)} min wall on ${cfg.judgeModel}` : ""));
 
   const proposals = (await sql`SELECT * FROM list_supersession_proposals(NULL::text, 200)`) as Record<string, unknown>[];
   const issueOf = async (id: string) => (await sql`SELECT metadata->>'issue' AS i FROM thoughts WHERE id = ${id}::uuid`)[0]?.i as string | undefined;
   const graded = new Map((labels.proposals ?? []).map((g) => [`${g.older}|${g.newer}`, g]));
   let gTrue = 0, gFalse = 0, ungraded = 0;
-  const md: string[] = [`# Supersession proposals — ${cfg.metadataModel}, k=${K}, floor ${MIN_SIM}, ${new Date().toISOString().slice(0, 10)}`, "", "Grade each: true (a real supersession/contradiction) or false, and copy the verdict into evals/consolidate-labels.json → proposals.", ""];
+  const md: string[] = [`# Supersession proposals — ${cfg.judgeModel}, k=${K}, floor ${MIN_SIM}, ${new Date().toISOString().slice(0, 10)}`, "", "Grade each: true (a real supersession/contradiction) or false, and copy the verdict into evals/consolidate-labels.json → proposals.", ""];
   for (const p of proposals) {
     const oi = await issueOf(String(p.older_id)), ni = await issueOf(String(p.newer_id));
     const g = graded.get(`${oi}|${ni}`);

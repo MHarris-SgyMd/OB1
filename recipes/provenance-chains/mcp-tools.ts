@@ -22,6 +22,11 @@
 //                        defines it; an older copy hard-codes the model name in
 //                        getEmbedding, so lift it into a constant)
 //   - `extractMetadata` (Tool 3 only) canonical index.ts helper — text → metadata
+//                        (in this fork's server-portable/index.ts both helpers
+//                        take an EgressSubject second — whose text this is, for
+//                        the egress gate, SMD-1903 — so a paste-in against the
+//                        fork passes `{ kind: "capture", actor: <key name>,
+//                        content }`; the Edge Function copies take the text alone)
 //
 // Tool 3 (capture_derived_thought) is a WRITE tool and is deliberately a
 // SEPARATE tool from the canonical `capture_thought`, so the everyday

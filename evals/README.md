@@ -9,6 +9,12 @@ are here so the decision is auditable and re-runnable when better models appear.
 - [Ollama](https://ollama.com) running locally (`brew install ollama; ollama serve`)
 - [Bun](https://bun.sh) 1.4+
 - The models you want to compare, pulled
+- `OB1_LLM_LOCAL=1` in the environment for the harnesses that dial through the
+  server's own resolver (`eval-consolidate`, `eval-entities`, `eval-graphrag`;
+  the chunking end-to-end sets it for its child itself): the egress gate
+  (SMD-1903) refuses a thought's text to an endpoint not declared local, and a
+  loopback address is not a declaration. `lib.ts`'s own embedding dialler
+  (`OB1_EVAL_BASE`) is outside the gate: it embeds eval corpora, not the brain
 
 ## Steps
 
@@ -2831,7 +2837,8 @@ does not find much**: a 7B judge's recall on genuine reversals in long tracker
 documents is a third; the shared-entity rule inherits extraction's blind spot on
 exactly the long decision documents where the reversals live; and the day rule
 skips the pairs a planning session produces in one afternoon (31 of the 98
-labelled pairs are same-day). The two levers are a stronger judge and 016's
+labelled pairs are same-day). The two levers are a stronger judge (`OB1_JUDGE_MODEL`, the judge's own knob
+since SMD-1901, so the extractor need not move with it) and 016's
 timeout tail, and neither is this change's mechanism; this harness is the
 instrument for both, and `--replay` re-scores a dump in seconds.
 
@@ -2975,7 +2982,7 @@ Every retrieval number above was measured on Postgres with pgvector, because
 that is the store the fork kept when it left Supabase. The choice was argued —
 one transactional store lets a hybrid query run as one statement over one
 snapshot — never measured against the alternative it rules out. SMD-1038
-(FORK.md, "A second vector store beside Postgres") wrote the two-store shape and
+(changes/079-the-store-measured-against-pgvector.md, "A second vector store beside Postgres") wrote the two-store shape and
 the bar its numbers would have to clear *before* this measurement; this is the
 measurement, read against that bar. Nothing in the product changes as a result —
 the comparators are wired into an eval, never a backend
