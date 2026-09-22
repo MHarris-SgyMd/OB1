@@ -8,7 +8,7 @@
  * them (assemble-release.mjs), so the two cannot disagree and a cut refuses
  * what CI would (SMD-1917). Plain string work — node and bun both run it.
  */
-import { ticketOf } from "./fork-index.mjs";
+import { ticketsOf } from "./fork-index.mjs";
 
 /** Split `---` front matter and the body of a fragment; null if no front matter. */
 export function parseFragment(text) {
@@ -21,10 +21,10 @@ export function parseFragment(text) {
     const kv = /^([a-z_]+):\s*(.*)$/.exec(lines[i]);
     if (!kv) continue;
     const key = kv[1];
-    let val = kv[2].trim();
+    let val = kv[2].replace(/\s+#.*$/, "").trim(); // an inline `# comment` (the README's template carries them) is not the value
     if (val === "") {
       const items = [];
-      while (i + 1 < lines.length && /^\s*-\s+/.test(lines[i + 1])) items.push(lines[++i].replace(/^\s*-\s+/, "").trim());
+      while (i + 1 < lines.length && /^\s*-\s+/.test(lines[i + 1])) items.push(lines[++i].replace(/^\s*-\s+/, "").replace(/\s+#.*$/, "").trim());
       fm[key] = items;
     } else if (val.startsWith("[")) {
       fm[key] = val.replace(/^\[|\]$/g, "").split(",").map((s) => s.trim().replace(/^["']|["']$/g, "")).filter(Boolean);
@@ -55,10 +55,10 @@ export const BUMPS = new Set(["major", "minor", "patch"]);
 /**
  * What is wrong with a fragment's text, in words — nothing when it is well
  * formed: front matter naming a Keep a Changelog type, a bump the migrations it
- * lists allow, SMD-#### tickets and three-digit migrations; exactly one
- * `## Changelog` — one to three plain lines (no bullet, heading or list marker;
- * the release step writes the `- `) naming every listed ticket and no other —
- * then exactly one `## FORK`, nothing between them (a section there is written
+ * lists allow, SMD-#### tickets and three-digit migrations; before the FORK
+ * body exactly one `## Changelog` — one to three plain lines (no bullet, heading
+ * or list marker; the release step writes the `- `) naming every listed ticket
+ * and no other — then `## FORK`, nothing between them (a section there is written
  * nowhere); the FORK body runs to the end of the file, its first line the plain
  * title ending in every ticket the front matter lists (check 17b reads a
  * released ticket from that title once it is a numbered file), nothing on the
@@ -109,7 +109,7 @@ export function fragmentProblems(text) {
     if (/^#/.test(first)) problems.push("the `## FORK` body opens with a heading — its first line is the plain title (what follows `# N. ` once numbered); the release step writes the heading");
     else if (second.trim() !== "") problems.push("the `## FORK` body's title runs onto a second line — one line for the title, then a blank line, then the record (a wrapped title would become the file's first paragraph)");
     else {
-      const named = new Set(ticketOf(first).split(", ").filter(Boolean));
+      const named = new Set(ticketsOf(first));
       const missing = tickets.filter((t) => /^SMD-\d+$/.test(t) && !named.has(t));
       if (missing.length) problems.push(`the \`## FORK\` title does not end in ${missing.join(", ")} — the title names every ticket the front matter lists, as "(SMD-1 / 2)", so the release pairing can read them from the numbered file`);
     }

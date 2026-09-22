@@ -131,9 +131,9 @@ import { execFileSync } from "node:child_process";
 import { join, dirname, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { coreColumnCommentStatement, coreFunctionStatement, LOCAL_PROVIDER_SERVICES, ownedColumnCommentsIn, ownedFunctionsIn, supabaseIsmsIn } from "../db/config.mjs";
-import { CHANGES_DIR, END as INDEX_END, START as INDEX_START, FIRST_FILED, classifyChanges, indexSpan, readChangeEntries, renderIndex, ticketOf } from "./fork-index.mjs";
+import { CHANGES_DIR, END as INDEX_END, START as INDEX_START, FIRST_FILED, classifyChanges, indexSpan, pad3, readChangeEntries, renderIndex, ticketsOf } from "./fork-index.mjs";
 import { FORK_VERSION, migrationSha, readReleases, semverCompare } from "../db/version.mjs";
-import { parseFragment, fragmentSection, fragmentProblems } from "./fragments.mjs";
+import { fragmentProblems } from "./fragments.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const CATEGORIES = [
@@ -2868,17 +2868,23 @@ const OVERSIZE_AT_SPLIT = {
 // record measures in the same sentences it cites in. The unit list is the
 // record's vocabulary, a heuristic held by its probes: a false report is fixed
 // by rewording, a miss by adding the word here.
-const UNIT = String.raw`(?!\s*(?:ms|µs|s|sec(?:ond)?s?|min(?:ute)?s?|h|hours?|rows?|lines?|files?|bytes?|[KMGT]i?B|%|dims?|dimensions?|tokens?|passes?|times|of\b|per\b|commits?|queries|thoughts?|vectors?|sections?|entries|items?|chars?|characters|words?|columns?|tables?|calls?|runs?)(?!\w))`;
+const UNIT_WORDS = String.raw`ms|[µμ]s|s|sec(?:ond)?s?|min(?:ute)?s?|h|hours?|rows?|lines?|files?|bytes?|[KMGT]i?B|%|dims?|dimensions?|tokens?|passes?|times|commits?|queries|thoughts?|vectors?|sections?|entries|items?|chars?|characters|words?|columns?|tables?|calls?|runs?`;
+const LINE_WRAP = String.raw`[ \t]*(?:\r?\n[ \t]*)?`; // the same line or a wrap onto the next, never across a blank line
+const UNIT = String.raw`(?!${LINE_WRAP}(?:${UNIT_WORDS}|of\b|per\b)(?!\w))`;
+// A list's continuation item is a citation already ("changes 31 and 53 of the
+// record"): "of" and "per" end the list there without unmaking the item.
+const UNIT_TAIL = String.raw`(?!${LINE_WRAP}(?:${UNIT_WORDS})(?!\w))`;
 const NUM = String.raw`\b(?!-\d\d-)(?!,\d{3}\b)(?!\.\d)${UNIT}`;
+const NUM_TAIL = String.raw`\b(?!-\d\d-)(?!,\d{3}\b)(?!\.\d)${UNIT_TAIL}`;
 // "18–20, 22" and "3, 4, 5." read whole, across a wrapped line: a bare comma item
 // continues before another item, before "and", or at the end of the clause;
 // ", change N" always continues. The one cost is a unit-less number in
 // parentheses — "(change 90, 250)" cites 250 — a shape no site writes.
-const SEP = String.raw`,[ \t]*(?:\n[ \t]*)?`; // a comma item may wrap onto an indented continuation line; a blank line still stops
-const CITED_LIST = String.raw`(\d+)${NUM}((?:(?:,?\s+and|–|—|-|\/)\s?(?:change )?\d{1,3}${NUM}|${SEP}change \d{1,3}${NUM}|${SEP}\d{1,3}${NUM}(?=${SEP}(?:change )?\d|,?\s+and\s|\s*(?:[.;:)\]]|$)))*)`;
+const SEP = String.raw`,${LINE_WRAP}`; // a comma item may wrap onto an indented continuation line; a blank line still stops
+const CITED_LIST = String.raw`(\d+)${NUM}((?:(?:,?\s+and|–|—|-|\/)\s?(?:change )?\d{1,3}${NUM_TAIL}|${SEP}change \d{1,3}${NUM_TAIL}|${SEP}\d{1,3}${NUM_TAIL}(?=${SEP}(?:change )?\d|,?\s+and\s|\s*(?:[.;:)\]]|$)))*)`;
 // A slugged path names a file as it is — a mis-cased or underscored slug is read
 // so that check 15 can report the dead link, not skipped as "not a path".
-const CHANGE_PATH = String.raw`\bchanges\/(\d{3})([-_][\w-]+\.md)?(?![\w-])`;
+const CHANGE_PATH = String.raw`(?<![\w/.-])changes\/(\d{3})([-_][\w-]+\.md)?(?![\w.-])`; // not docs/changes/…, not …md.bak
 // Inside the record a link may be relative: `(079-the-store.md)` beside the file.
 const RECORD_PATH = String.raw`\((?:\.\/)?(\d{3})([-_][\w-]+\.md)(?:#[\w-]*)?(?: "[^"\n]*")?\)`;
 // The file name may sit in a code span (\`FORK.md\` change N) or behind ../ .
@@ -2924,7 +2930,9 @@ const CITATION_PROBES = [
   ["no behaviour change 250 ms after; a schema change 200 lines long; changes 3, 4 and 500 rows; change 5 of 6", true, [3, 4]],
   ["Like FORK.md changes 31, 53\nand 999; FORK.md changes 5, 6,\n7 and 8; changes 31,\n53. And changes 31,\n53 then", true, [31, 53, 999, 5, 6, 7, 8, 31, 53, 31]],
   ["- FORK.md changes 5, 6,\n  7 and 8; changes 31,\n\n53", true, [5, 6, 7, 8, 31]],
-  ["change 42% of them, change 5 seconds later, change 6 minutes, change 7 hours", true, []],
+  ["change 42% of them, change 5 seconds later, change 6 minutes, change 7 hours, change 8 μs", true, []],
+  ["FORK.md changes 31 and 53 of the record; changes 3, 4 and 500 rows; see FORK.md change 999\n\nlines later", true, [31, 53, 999, 3, 4]], // explicit citations first, then the record's bare ones
+  ["docs/changes/104-x.md and changes/105-y.md.bak and changes/106-z.md", false, [106]],
   ["since FORK.md change 90, one per id a capture names", false, [90]],
   ["024 change 45\n025 change 46\n044 SMD-1804", false, [45, 46]],
   ["033's header and FORK change 62 state it; FORK §79; FORK.md's change 12", false, [62, 79, 12]],
@@ -3109,7 +3117,6 @@ function checkForkLayout() {
 checkForkLayout();
 // ── 16–17: fragments, the changelog and the freeze (SMD-1804) ────────────────
 const KAC_HEADINGS = new Set(["Added", "Changed", "Deprecated", "Removed", "Fixed", "Security"]);
-const pad3 = (n) => String(n).padStart(3, "0");
 
 
 /**
@@ -3153,6 +3160,7 @@ function checkFragments() {
   ]) if (fragmentProblems(probe).length === 0) fail(SELF, `check 16 no longer catches ${why} (its own probe)`);
   for (const [probe, why] of [
     ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\n---\n\n## Changelog\nx (SMD-1)\n\n## FORK\nA title (SMD-1)\n\n```bash\n# 1. install\n```\n\n#1. not a heading\n\n1. a list item\n\n## Measured after\n\nA second-level heading inside the record is kept, as changes 19 and 79 keep theirs.\n", "a numbered comment in a fenced block, a `#1.`, a list item and a `## ` sub-heading inside the record"],
+    ["---\ntype: added        # one of the six\nbump: minor        # the rules\ntickets: [SMD-1804]        # one or more\nmigrations: [044]          # or [] for none\n---\n\n## Changelog\n\nx (SMD-1804, migration 044).\n\n## FORK\n\nA title (SMD-1804)\n\nbody\n", "the README's template copied with its inline comments"],
   ]) if (fragmentProblems(probe).length) fail(SELF, `check 16 refuses ${why}: ${fragmentProblems(probe).join("; ")} (its own non-probe)`);
   for (const [probe, why] of [
     ["---\ntype: whatever\nbump: minor\ntickets: [SMD-1]\n---\n\n## Changelog\nx (SMD-1)\n\n## FORK\ny (SMD-1)\n", "a type off the six"],
@@ -3274,7 +3282,7 @@ function checkChangelogForkPairing() {
   // would let a release that left a fragment unnumbered pass — the drift this
   // catches (SMD-1917).
   const recordTickets = new Set();
-  for (const c of changesOnDisk().numbered) for (const t of ticketOf(c.heading?.title ?? "").split(", ")) if (t) recordTickets.add(t);
+  for (const c of changesOnDisk().numbered) for (const t of ticketsOf(c.heading?.title ?? "")) recordTickets.add(t);
   for (const p of pairingProblems(readReleases(), readFileSync(clPath, "utf8"), recordTickets)) fail("CHANGELOG.md", `${p} (SMD-1804)`);
 }
 checkChangelogForkPairing();

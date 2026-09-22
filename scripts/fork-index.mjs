@@ -44,6 +44,14 @@ export function ticketOf(title) {
   return m ? m[1].replace(/\s*[/,]\s*/g, ", ").replace(/, (\d)/g, ", SMD-$1") : "";
 }
 
+/** The tickets a title ends with, as ids — ["SMD-1301", "SMD-1302"] for "(SMD-1301 / 1302)"; [] for none. */
+export function ticketsOf(title) {
+  return ticketOf(title).split(", ").filter(Boolean);
+}
+
+/** Three digits: 18 → "018". The one spelling the file names use. */
+export const pad3 = (n) => String(n).padStart(3, "0");
+
 /** The part of a title the index shows: before the first " — " outside a code span, the ticket tail off. */
 export function headOf(title) {
   const bare = title.replace(/\s*\((SMD-\d+(?:\s*[/,]\s*(?:SMD-)?\d+)*)\)\s*$/, "");
@@ -92,7 +100,7 @@ export function slugOf(title) {
 
 /** The file name a numbered change takes: `NNN-<slug>.md`. */
 export function changeFileName(n, title) {
-  return `${String(n).padStart(3, "0")}-${slugOf(title)}.md`;
+  return `${pad3(n)}-${slugOf(title)}.md`;
 }
 
 /**

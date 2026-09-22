@@ -18,8 +18,9 @@
  * CHANGELOG.md with no Unreleased section or a hand-written note under it, a
  * half-applied earlier cut (its numbered files, changelog section or release
  * entry already present), a shallow clone — is refused in the plan, before
- * --write touches a file. An I/O failure during --write is not planned for:
- * revert the working tree and run again.
+ * --write touches a file, and --write itself refuses a working tree that is
+ * not clean. An I/O failure during --write is not planned for: revert the
+ * working tree and run again.
  *
  *   bun scripts/assemble-release.mjs              # DRY RUN: print the plan, touch nothing
  *   bun scripts/assemble-release.mjs --write      # write changes/NNN-*.md, FORK.md's index, CHANGELOG.md, releases.json
@@ -40,7 +41,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { UPSTREAM_PIN, migrationSha, readReleases, highestReleasedMigration } from "../db/version.mjs";
 import { parseFragment, fragmentSection, fragmentProblems } from "./fragments.mjs";
-import { CHANGES_DIR as CHANGES_REL, FIRST_FILED, changeFileName, classifyChanges, readChangeEntries, renderIndex, spliceIndex, ticketOf } from "./fork-index.mjs";
+import { CHANGES_DIR as CHANGES_REL, FIRST_FILED, changeFileName, classifyChanges, pad3, readChangeEntries, renderIndex, spliceIndex } from "./fork-index.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const CHANGES_DIR = join(ROOT, "changes");
@@ -48,7 +49,6 @@ const MIGRATIONS_DIR = join(ROOT, "db", "migrations");
 const BUMP_RANK = { patch: 0, minor: 1, major: 2 };
 const TYPE_HEADING = { added: "Added", changed: "Changed", deprecated: "Deprecated", removed: "Removed", fixed: "Fixed", security: "Security" };
 const REPO = "https://github.com/MHarris-SgyMd/OB1";
-const pad3 = (n) => String(n).padStart(3, "0");
 
 // ── Pure functions (self-checked) ────────────────────────────────────────────
 
@@ -130,26 +130,33 @@ export function frozenShasForRange(lo, hi, readMig) {
 // ── I/O and the plan ─────────────────────────────────────────────────────────
 
 /**
- * The fragments, in merge order: git add-time, then ticket number as a tiebreak.
- * Read through fork-index's one reader, so a symlink or a pipe named like a
- * fragment is a stray the plan refuses, not a file this numbers (the check's rule).
+ * The fragments in merge order — when each ARRIVED on this branch's first-parent
+ * line (the merge commit that brought it, or the commit that added it here),
+ * not when its author committed it on a branch; a fragment created in a merge
+ * shows no diff without --first-parent, a renamed one is an R without
+ * --no-renames. Ticket number breaks a tie. A fragment git has never seen (an
+ * uncommitted one) has no arrival and sorts last; the plan says so. Read
+ * through fork-index's one reader, so a symlink or a pipe named like a fragment
+ * is a stray the plan refuses, not a file this numbers (the check's rule).
  */
+function landedAt(name) {
+  try {
+    const out = execFileSync("git", ["log", "--first-parent", "--diff-filter=A", "--no-renames", "--format=%ct", "--", `changes/${name}`], { cwd: ROOT, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim().split("\n").filter(Boolean).pop();
+    return out ? Number(out) : null;
+  } catch {
+    return null; // no repository (a copied tree)
+  }
+}
 function orderedFragments(fragments) {
-  const addedAt = (name) => {
-    try {
-      const out = execFileSync("git", ["log", "--diff-filter=A", "--format=%ct", "--", `changes/${name}`], { cwd: ROOT, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim().split("\n").pop();
-      return out ? Number(out) : Number.MAX_SAFE_INTEGER; // unstaged fragment sorts last
-    } catch {
-      return Number.MAX_SAFE_INTEGER;
-    }
-  };
-  const at = new Map(fragments.map((f) => [f.name, addedAt(f.name)])); // one child process per fragment, not per comparison
+  const at = new Map(fragments.map((f) => [f.name, landedAt(f.name)])); // one child process per fragment, not per comparison
+  const key = (f) => at.get(f.name) ?? Number.MAX_SAFE_INTEGER;
   const ticketNum = (f) => Number(/\d+/.exec(f.name)[0]);
-  return [...fragments].sort((a, b) => (at.get(a.name) - at.get(b.name)) || (ticketNum(a) - ticketNum(b)));
+  return [...fragments].sort((a, b) => (key(a) - key(b)) || (ticketNum(a) - ticketNum(b))).map((f) => ({ ...f, landed: at.get(f.name) }));
 }
 
+const MIGRATION_FILES = new Map(readdirSync(MIGRATIONS_DIR).filter((f) => /^\d{3}_.*\.sql$/.test(f)).map((f) => [Number(f.slice(0, 3)), f])); // one listing
 function readMig(n) {
-  const f = readdirSync(MIGRATIONS_DIR).find((name) => name.startsWith(pad3(n) + "_"));
+  const f = MIGRATION_FILES.get(n);
   return f ? readFileSync(join(MIGRATIONS_DIR, f), "utf8") : null;
 }
 
@@ -172,25 +179,22 @@ function buildPlan() {
     if (byTicket.has(f.ticket)) throw new Error(`${CHANGES_REL}/${f.name} is a second fragment for ${f.ticket} beside ${CHANGES_REL}/${byTicket.get(f.ticket)} — one PR, one fragment`);
     byTicket.set(f.ticket, f.name);
   }
-  const fragments = orderedFragments(pending).map(({ name, text }) => {
+  const fragments = orderedFragments(pending).map(({ name, text, landed }) => {
     // Check 16's rules, the same function: a cut refuses what CI would.
     const problems = fragmentProblems(text);
     if (problems.length) throw new Error(`${name}: ${problems.join("; ")} (check-fork-consistency, check 16)`);
     const parsed = parseFragment(text);
-    return { name, ...parsed, fork: fragmentSection(parsed.body, "FORK") };
+    return { name, landed, ...parsed, fork: fragmentSection(parsed.body, "FORK") };
   });
   // A previous --write that stopped after writing the numbered files (before the
   // overwrites) leaves their record beside the fragments it came from; a second
-  // run would number it again. The body after the heading, or the title's
-  // tickets, of an existing file matching a pending fragment is that signature.
+  // run would number it again. The signature is the whole rendered file minus its
+  // number — title and body — equal to an existing file's. (A shared ticket is
+  // not a signature: a ticket may have a second change, as SMD-1805's steps do.)
   for (const f of fragments) {
-    const planned = renderChangeFile(0, f.fork);
-    const body = planned.text.split("\n").slice(1).join("\n");
-    const fmTickets = new Set(f.fm.tickets ?? []);
+    const planned = renderChangeFile(0, f.fork).text.replace(/^# 0\. /, "");
     for (const e of existing) {
-      const eBody = e.text.split("\n").slice(1).join("\n");
-      const eTickets = ticketOf(e.heading?.title ?? "").split(", ").filter(Boolean);
-      if (eBody === body || eTickets.some((t) => fmTickets.has(t))) {
+      if (e.text.replace(/^# \d+\. /, "") === planned) {
         throw new Error(`${CHANGES_REL}/${e.name} already carries ${f.name}'s record — a previous --write stopped half-way; delete the numbered files it wrote, restore FORK.md, CHANGELOG.md and releases.json from version control, and run again`);
       }
     }
@@ -211,7 +215,7 @@ function buildPlan() {
   const forkPath = join(ROOT, "FORK.md");
   const forkAfter = spliceIndex(readFileSync(forkPath, "utf8"), renderIndex(after));
 
-  const migNums = readdirSync(MIGRATIONS_DIR).filter((f) => /^\d{3}_.*\.sql$/.test(f)).map((f) => Number(f.slice(0, 3)));
+  const migNums = [...MIGRATION_FILES.keys()];
   const lo = highestReleasedMigration(releases) + 1;
   const hi = Math.max(...migNums);
   const range = hi >= lo ? [lo, hi] : null; // a docs/server-only cut closes no migration
@@ -268,8 +272,8 @@ function printPlan(plan) {
   console.log(`Release: ${plan.version}`);
   console.log(`Migration range: ${plan.range ? `${pad3(plan.range[0])}..${pad3(plan.range[1])}` : "none (no schema change)"}`);
   console.log(`Tickets: ${plan.tickets.join(", ")}`);
-  console.log(`\nChange files to write (and the fragment each replaces):`);
-  for (const f of plan.fragments) console.log(`  ${CHANGES_REL}/${f.file.name}  <-  ${CHANGES_REL}/${f.name}`);
+  console.log(`\nChange files to write (and the fragment each replaces), in the order the fragments landed on this branch:`);
+  for (const f of plan.fragments) console.log(`  ${CHANGES_REL}/${f.file.name}  <-  ${CHANGES_REL}/${f.name}  (${f.landed ? `landed ${new Date(f.landed * 1000).toISOString().slice(0, 16)}Z` : "not committed — ordered last"})`);
   console.log(`\nCHANGELOG.md [${core}] section:\n`);
   console.log(renderChangelogSection(plan.version, plan.date, plan.fragments).split("\n").map((l) => "  " + l).join("\n"));
   if (plan.range) {
@@ -294,7 +298,12 @@ function write(plan) {
   for (const f of plan.fragments) unlinkSync(join(CHANGES_DIR, f.name));
 
   console.log(`Wrote ${plan.fragments.length} change file(s), FORK.md's index, CHANGELOG.md and releases.json for ${plan.version}.`);
-  console.log(`Next, out of band, in this same commit: bump db/version.mjs's FORK_VERSION to '${plan.version}' and emit a NNN_set_schema_version.sql upserting it as the range's last migration (check-fork holds the two equal, so both move together). Then tag v${plan.version.split("+")[0]}+upstream.${UPSTREAM_PIN} and create the release.`);
+  console.log(`Next, out of band, in this same commit: bump db/version.mjs's FORK_VERSION to '${plan.version}' and add a NNN_set_schema_version.sql upserting it (check-fork holds the two equal). That migration lands after the range this cut froze${plan.range ? ` (${pad3(plan.range[0])}..${pad3(plan.range[1])})` : ""}, so a brain that applies it sits one migration past the release until the next cut — the release job's shape (SMD-1805) is where that gap closes. Then tag v${plan.version.split("+")[0]}+upstream.${UPSTREAM_PIN} and create the release.`);
+}
+
+function gitStatus() {
+  try { return execFileSync("git", ["status", "--porcelain"], { cwd: ROOT, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim(); }
+  catch { return ""; } // no repository (a copied tree): nothing to compare against
 }
 
 function isShallow() {
@@ -352,8 +361,14 @@ if (import.meta.main) {
   if (args.includes("--self-check")) process.exit(selfCheck());
   try {
     const plan = buildPlan();
-    if (args.includes("--write")) write(plan);
-    else printPlan(plan);
+    if (args.includes("--write")) {
+      // A cut is committed whole. A tree with changes already in it — a
+      // half-applied earlier cut, an uncommitted fragment, anything — is refused,
+      // so the recovery from a failed --write is always "revert and run again".
+      const dirty = gitStatus();
+      if (dirty) throw new Error(`the working tree is not clean:\n${dirty}\n--write cuts a release from a committed tree — commit or revert first`);
+      write(plan);
+    } else printPlan(plan);
   } catch (e) {
     // Nothing to release, a fragment this step cannot number, a FORK.md it cannot
     // write into: a sentence, not a stack trace, and a non-zero exit so a release
