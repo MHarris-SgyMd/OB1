@@ -88,7 +88,7 @@ import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import { PROVIDER_ERROR_CHARS, refusesLength, resolveEmbedConfig } from "../server-portable/embed.ts";
 import { describeEgress, localKnob, refusesEverything, ROW_UNITS } from "../server-portable/egress.ts";
-import { describeExtractWindow, extractEntities, extractionKey, type Extraction } from "../server-portable/entities.ts";
+import { callsMadeBy, describeExtractWindow, extractEntities, extractionKey, type Extraction } from "../server-portable/entities.ts";
 import { hashKey, parseKeyRecords } from "../server-portable/auth.ts";
 import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, reportLost, startHeartbeat } from "./lease.ts";
 
@@ -568,6 +568,9 @@ async function worker(n: number): Promise<void> {
             try {
               outcome = await processRow(row);
             } catch (e) {
+              // The calls a thrown thought made — its fourth window timing out
+              // is four calls — count too (second review pass).
+              calls += callsMadeBy(e);
               const kind = classifyError(e);
               const msg = (e as Error).message.slice(0, PROVIDER_ERROR_CHARS);
               if (kind === "thought") {
@@ -753,7 +756,7 @@ if (configError) {
   console.error(
     `\n  The provider refused the request itself: ${configError.slice(0, 300)}\n` +
       `  Check the chat endpoint (OB1_CHAT_BASE_URL and OB1_CHAT_API_KEY, or OB1_LLM_BASE_URL and OB1_LLM_API_KEY when those are unset) and OB1_METADATA_MODEL against the provider; a 400 about a request field\n` +
-      `  is usually reasoning_effort or response_format not being supported by this model. Nothing was marked failed.`
+      `  is usually reasoning_effort, response_format, max_tokens (the answer budget) or frequency_penalty (the runaway retry) not being supported by this model or endpoint. Nothing was marked failed.`
   );
   await Promise.resolve();
   process.exit(2);

@@ -97,7 +97,9 @@ export function resolveExtractWindow(
   raw: string | undefined,
   model: string,
   fallback: number
-): { tokens: number; from: ExtractWindowFrom; window: number | undefined; capped: boolean };
+): { tokens: number; from: ExtractWindowFrom; window: number | undefined; capped: boolean; unfit: boolean };
+/** The smallest window a served context is derived into, 64; a context that holds less gets the default and `unfit`. */
+export const EXTRACT_MIN_WINDOW_TOKENS: number;
 
 /** Models whose cards claim Matryoshka training, so truncation is supported. */
 export const MRL_MODELS: Set<string>;

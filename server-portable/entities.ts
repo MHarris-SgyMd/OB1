@@ -194,9 +194,27 @@ export type ExtractWindowing = {
  */
 export const RUNAWAY_PENALTY = 0.5;
 
-/** The windowing the configuration decides — one rule for the worker, the evals and preflight. */
+/**
+ * Whether the metadata model is asked to reason before answering
+ * (OB1_METADATA_REASONING; embed.ts sends `reasoning_effort: "none"` when it
+ * is off, the default). On an OpenAI-compatible endpoint `max_tokens` caps the
+ * thinking AND the answer, so a budget sized for the answer alone (measured
+ * with reasoning off) would cut every reasoning call at its thinking and read
+ * it as a runaway — second review pass.
+ */
+export function reasoningOn(cfg: EmbedConfig): boolean {
+  return cfg.metadataReasoning.reasoning_effort !== "none";
+}
+
+/**
+ * The windowing the configuration decides — one rule for the worker, the
+ * evals and preflight. With reasoning on there is no answer budget and so no
+ * runaway to retry: the call is the p1 request, bounded by the context and
+ * the caller's deadline, and describeExtractWindow says so.
+ */
 export function windowingFor(cfg: EmbedConfig): ExtractWindowing {
-  return { windowTokens: cfg.extractChunkTokens, overlapTokens: cfg.extractChunkOverlap, header: cfg.extractHeader, outputBudget: true, retryRunaway: cfg.extractRetryRunaway };
+  const budgeted = !reasoningOn(cfg);
+  return { windowTokens: cfg.extractChunkTokens, overlapTokens: cfg.extractChunkOverlap, header: cfg.extractHeader, outputBudget: budgeted, retryRunaway: budgeted && cfg.extractRetryRunaway };
 }
 
 /**
@@ -211,10 +229,15 @@ export function describeExtractWindow(cfg: EmbedConfig): string {
   const ctx = cfg.extractModelWindow !== undefined
     ? `${cfg.metadataModel}'s ${cfg.extractModelWindow}-token served context`
     : `${cfg.metadataModel}'s served context, which db/config.mjs's KNOWN_CHAT_MODEL_WINDOW does not list`;
-  const retry = cfg.extractRetryRunaway ? `; a call that runs to its answer budget is made once more with a ${RUNAWAY_PENALTY} frequency penalty` : "";
+  const w = windowingFor(cfg);
+  const retry = !w.outputBudget
+    ? "; no answer budget and no runaway retry — reasoning is on (OB1_METADATA_REASONING), and a budget would cap the thinking, so a call that does not converge ends at the context or the caller's deadline"
+    : w.retryRunaway ? `; a call that runs to its answer budget is made once more with a ${RUNAWAY_PENALTY} frequency penalty` : "";
   if (cfg.extractChunkTokensFrom === "OB1_EXTRACT_CHUNK_TOKENS") return `${rule}, from OB1_EXTRACT_CHUNK_TOKENS (${ctx})${retry}`;
   if (cfg.extractChunkTokensFrom === "window") {
-    const held = n === DEFAULT_EXTRACT_WINDOW_TOKENS && cfg.extractModelWindow !== undefined
+    // `capped` is the resolver's own answer (second review pass: inferring it
+    // from the size said "held" of a context that yields exactly the default).
+    const held = cfg.extractChunkTokensCapped
       ? ` — held at ${DEFAULT_EXTRACT_WINDOW_TOKENS}, the size the default model was measured to finish reliably (evals/README.md, SMD-1879)` : "";
     return `${rule}, derived from ${ctx}${held}${retry}`;
   }
@@ -296,6 +319,7 @@ export function parseExtraction(raw: string): Extraction {
       out.entities.push({ name, type: type as EntityType, confidence, aliases });
     }
   }
+  const seenRelations = new Map<string, number>();
   if (Array.isArray(parsed.relationships)) {
     for (const r of parsed.relationships) {
       if (!isRecord(r)) { out.rejected.relations++; continue; }
@@ -304,6 +328,14 @@ export function parseExtraction(raw: string): Extraction {
       const relation = typeof r.relation === "string" ? r.relation.trim().toLowerCase() : "";
       const confidence = clampConfidence(r.confidence);
       if (!from || !to || !(RELATIONS as readonly string[]).includes(relation) || confidence < MIN_CONFIDENCE) { out.rejected.relations++; continue; }
+      // One key for a relation within an answer and across windows (second
+      // review pass: the merge de-duplicated relations and a single answer did
+      // not, so the payload's shape depended on the code path). The database
+      // would fold the duplicate anyway (DISTINCT ON in record_thought_entities).
+      const key = relationKey(relation as Relation, from, to);
+      const have = seenRelations.get(key);
+      if (have !== undefined) { if (confidence > out.relations[have].confidence) out.relations[have] = { from, to, relation: relation as Relation, confidence }; continue; }
+      seenRelations.set(key, out.relations.length);
       out.relations.push({ from, to, relation: relation as Relation, confidence });
     }
   }
@@ -313,6 +345,11 @@ export function parseExtraction(raw: string): Extraction {
 /** parseExtraction's own identity for an entity within one answer, applied across windows by mergeExtractions. */
 function entityKey(type: EntityType, name: string): string {
   return `${type} ${name.toLowerCase()}`;
+}
+
+/** …and for a relation: the verb and both endpoints, case-folded. */
+function relationKey(relation: Relation, from: string, to: string): string {
+  return `${relation} ${from.toLowerCase()} ${to.toLowerCase()}`;
 }
 
 /**
@@ -342,13 +379,16 @@ export function mergeExtractions(parts: ExtractionWindow[]): Extraction {
       const have = entities.get(k);
       if (!have) { entities.set(k, { ...e, aliases: [...e.aliases] }); continue; }
       const best = e.confidence > have.confidence ? e : have;
-      entities.set(k, {
-        name: best.name, type: have.type, confidence: Math.max(have.confidence, e.confidence),
-        aliases: [...new Set([...have.aliases, ...e.aliases, have.name, e.name].filter((a) => a.toLowerCase() !== best.name.toLowerCase()))],
-      });
+      // The two windows' spellings of the name share its key, so neither is an
+      // alias — the database's alias rule drops a name's own casing too. The
+      // aliases themselves fold by case, as the database's do (second review
+      // pass: `OB1` and `ob1` from two windows both survived).
+      const aliases = new Map<string, string>();
+      for (const a of [...have.aliases, ...e.aliases]) if (a.toLowerCase() !== best.name.toLowerCase() && !aliases.has(a.toLowerCase())) aliases.set(a.toLowerCase(), a);
+      entities.set(k, { name: best.name, type: have.type, confidence: Math.max(have.confidence, e.confidence), aliases: [...aliases.values()] });
     }
     for (const r of p.relations) {
-      const k = `${r.relation} ${r.from.toLowerCase()} ${r.to.toLowerCase()}`;
+      const k = relationKey(r.relation, r.from, r.to);
       const have = relations.get(k);
       if (!have || r.confidence > have.confidence) relations.set(k, { ...r });
     }
@@ -428,19 +468,41 @@ async function extractCall(text: string, cfg: EmbedConfig, timeoutMs: number | u
 export async function extractEntities(content: string, cfg: EmbedConfig, timeoutMs: number | undefined, subject: EgressSubject, windowing: ExtractWindowing = windowingFor(cfg)): Promise<Extraction> {
   const gate = mayLeaveBox({ ...subject, content }, cfg.chat, cfg.egress);
   if (!gate.allowed) throw refuseEgress("Extraction", cfg.chat.base, gate);
+  // A call always has a deadline: with Bun's idle cut disabled, an undefined
+  // one would wait for ever on a provider that never answers (second review
+  // pass). OB1_LLM_TIMEOUT is the deadline the callers that pass none get.
+  const deadline = timeoutMs ?? cfg.timeoutMs;
   const windows = chunkContent(content, { maxTokens: windowing.windowTokens, overlapTokens: windowing.overlapTokens });
-  if (windows.length === 0) {
-    const { runaway: _r, retried, ...one } = await extractCall(content, cfg, timeoutMs, undefined, windowing);
-    return { ...one, retried: retried || undefined };
+  // The calls made before a throw ride on the error (`callsMade`), so the
+  // worker's and the eval's call counts include a thought that timed out in
+  // its fourth window (second review pass).
+  let made = 0;
+  const count = (retried: boolean) => { made += retried ? 2 : 1; };
+  try {
+    if (windows.length === 0) {
+      const { runaway: _r, retried, ...one } = await extractCall(content, cfg, deadline, undefined, windowing);
+      count(retried);
+      return { ...one, retried: retried || undefined };
+    }
+    const header = windowing.header ? documentHeader(content) : undefined;
+    const parts: ExtractionWindow[] = [];
+    let retriedAny = false;
+    for (const w of windows) {
+      const t0 = Date.now();
+      const ex = await extractCall(w.content, cfg, deadline, { index: w.index, of: windows.length, header }, windowing);
+      count(ex.retried);
+      retriedAny ||= ex.retried;
+      parts.push({ index: w.index, tokens: estimateTokens(w.content), entities: ex.entities, relations: ex.relations, rejected: ex.rejected, malformed: ex.malformed, retried: ex.retried || undefined, ms: Date.now() - t0 });
+    }
+    return { ...mergeExtractions(parts), retried: retriedAny || undefined };
+  } catch (e) {
+    // The call that threw was made too.
+    (e as Error & { callsMade?: number }).callsMade = made + 1;
+    throw e;
   }
-  const header = windowing.header ? documentHeader(content) : undefined;
-  const parts: ExtractionWindow[] = [];
-  let retriedAny = false;
-  for (const w of windows) {
-    const t0 = Date.now();
-    const ex = await extractCall(w.content, cfg, timeoutMs, { index: w.index, of: windows.length, header }, windowing);
-    retriedAny ||= ex.retried;
-    parts.push({ index: w.index, tokens: estimateTokens(w.content), entities: ex.entities, relations: ex.relations, rejected: ex.rejected, malformed: ex.malformed, retried: ex.retried || undefined, ms: Date.now() - t0 });
-  }
-  return { ...mergeExtractions(parts), retried: retriedAny || undefined };
+}
+
+/** How many model calls an extractEntities that THREW had made, the throwing call included; 0 for an error that is not its. */
+export function callsMadeBy(e: unknown): number {
+  return (e as { callsMade?: number })?.callsMade ?? 0;
 }

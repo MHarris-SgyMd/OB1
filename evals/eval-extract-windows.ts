@@ -40,8 +40,8 @@ import { SQL } from "bun";
 import { readFileSync } from "node:fs";
 import { loadEnv } from "./env.ts";
 import { resolveEmbedConfig } from "../server-portable/embed.ts";
-import { extractEntities, extractionKey, type Extraction, type ExtractWindowing } from "../server-portable/entities.ts";
-import { estimateTokens } from "../server-portable/chunk.ts";
+import { callsMadeBy, extractEntities, extractionKey, type Extraction, type ExtractWindowing } from "../server-portable/entities.ts";
+import { estimateTokens, EXTRACT_OVERLAP_RATIO } from "../server-portable/chunk.ts";
 import { requireDatabaseUrl, resetSchema } from "../db/test-support.ts";
 
 loadEnv();
@@ -68,7 +68,8 @@ type Planted = Doc & {
 // ── Arms ─────────────────────────────────────────────────────────────────────
 
 type Arm = { name: string; windowing: ExtractWindowing | null };
-const overlap = (n: number) => Math.floor(n * 150 / 1200);
+// The worker's own overlap rule (embed.ts), not a copy of its numbers.
+const overlap = (n: number) => Math.floor(n * EXTRACT_OVERLAP_RATIO);
 const arm = (name: string, windowTokens: number, opts: Partial<ExtractWindowing> = {}): Arm => ({
   name,
   windowing: { windowTokens, overlapTokens: windowTokens === Number.MAX_SAFE_INTEGER ? 0 : overlap(windowTokens), header: false, outputBudget: true, retryRunaway: false, ...opts },
@@ -176,7 +177,9 @@ async function runOne(arm: Arm, doc: Doc): Promise<{ thoughtId: string | null; e
   } catch (e) {
     const seconds = (Date.now() - t0) / 1000;
     const timedOut = (e as Error).name === "TimeoutError" || /timed out/i.test((e as Error).message);
-    const out = { arm: arm.name, id: doc.id, tokens, windows: 0, ok: false, malformed: false, timedOut, error: (e as Error).message.slice(0, 120), seconds, entities: 0, edges: 0, retried: false };
+    // The calls a thrown thought made ride on the error, so the `calls`
+    // column counts them (second review pass).
+    const out = { arm: arm.name, id: doc.id, tokens, windows: callsMadeBy(e), ok: false, malformed: false, timedOut, error: (e as Error).message.slice(0, 120), seconds, entities: 0, edges: 0, retried: false };
     outcomes.push(out);
     return { thoughtId, ex: null, out };
   }

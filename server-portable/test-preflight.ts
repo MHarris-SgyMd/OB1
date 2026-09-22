@@ -226,6 +226,9 @@ console.log("\n[3c] The extraction window is derived from the METADATA model's s
   assert(/extraction window\s+thoughts over 10696 estimated tokens/.test(edge.out) && !/do not fit/.test(edge.out), "…and the value it names is accepted: a window at the limit requests exactly the context");
   const overByOne = await run({ ...base, OB1_METADATA_MODEL: "qwen2.5:7b", OB1_EXTRACT_CHUNK_TOKENS: "10697" });
   assert(/OB1_EXTRACT_CHUNK_TOKENS=10697 — a window that long/.test(overByOne.out), "…while one token more warns");
+  const thinking = await run({ ...base, OB1_METADATA_MODEL: "qwen2.5:7b", OB1_METADATA_REASONING: "medium" });
+  assert(/extraction window\s+thoughts over 1200 estimated tokens are extracted in 1200-token windows \(overlap 150\), derived from qwen2\.5:7b's 32768-token served context — held at 1200[^\n]*; no answer budget and no runaway retry — reasoning is on \(OB1_METADATA_REASONING\)/.test(thinking.out),
+         "with reasoning on the row says the budget and the retry are off, and why — a budget would cap the thinking");
   assert(/chunk window\s+captures over 4096 tokens are windowed at 1200, derived from qwen3-embedding:4b's 40960-token window/.test(qwen.out)
          && /chunk window\s+captures over 4096 tokens are windowed at 1200, derived from qwen3-embedding:4b's 40960-token window/.test(unknown.out),
          "…while the embedding model's chunk window row does not move with the metadata model: two models, two tables");

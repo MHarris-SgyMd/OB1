@@ -394,11 +394,19 @@ export function resolveExtractWindow(raw, model, fallback) {
   const n = raw ? Number(raw) : NaN;
   // Exact name, then the name without its Ollama tag — resolveChunkTokens's rule.
   const window = KNOWN_CHAT_MODEL_WINDOW[model] ?? KNOWN_CHAT_MODEL_WINDOW[model.replace(/:[^:]*$/, "")];
-  if (Number.isFinite(n) && n > 0) return { tokens: Math.floor(n), from: "OB1_EXTRACT_CHUNK_TOKENS", window, capped: false };
-  if (window === undefined) return { tokens: fallback, from: "default", window, capped: false };
+  if (Number.isFinite(n) && n > 0) return { tokens: Math.floor(n), from: "OB1_EXTRACT_CHUNK_TOKENS", window, capped: false, unfit: false };
+  if (window === undefined) return { tokens: fallback, from: "default", window, capped: false, unfit: false };
   const fits = extractWindowThatFits(window);
-  return { tokens: Math.max(1, Math.min(fits, fallback)), from: "window", window, capped: fits > fallback };
+  // A context that holds less than EXTRACT_MIN_WINDOW_TOKENS of text beside
+  // the rules and an answer cannot be windowed into — a 1-token window would
+  // be one call per word (second review pass: the floor was Math.max(1, …)).
+  // The default is returned with `unfit` set, and preflight warns.
+  if (fits < EXTRACT_MIN_WINDOW_TOKENS) return { tokens: fallback, from: "default", window, capped: false, unfit: true };
+  return { tokens: Math.min(fits, fallback), from: "window", window, capped: fits > fallback, unfit: false };
 }
+
+/** The smallest window a served context is derived into; below it the context cannot hold an extraction call at all. */
+export const EXTRACT_MIN_WINDOW_TOKENS = 64;
 
 /**
  * Models trained with Matryoshka Representation Learning, which concentrates

@@ -360,6 +360,8 @@ export type EmbedConfig = {
    */
   extractChunkTokens: number;
   extractChunkTokensFrom: ExtractWindowFrom;
+  /** The model's context would have held a larger window than the measured default it is held at. */
+  extractChunkTokensCapped: boolean;
   /** The metadata model's served context in KNOWN_CHAT_MODEL_WINDOW, when it has one. */
   extractModelWindow: number | undefined;
   /** Overlap between extraction windows: chunk.ts's ratio of the window (150 of 1200). */
@@ -464,6 +466,7 @@ export function resolveEmbedConfig(env: EmbedEnv): EmbedConfig {
     metadataModel,
     extractChunkTokens: extract.tokens,
     extractChunkTokensFrom: extract.from,
+    extractChunkTokensCapped: extract.capped,
     extractModelWindow: extract.window,
     extractChunkOverlap: Math.floor(extract.tokens * EXTRACT_OVERLAP_RATIO),
     extractHeader: EXTRACT_WINDOW_HEADER,

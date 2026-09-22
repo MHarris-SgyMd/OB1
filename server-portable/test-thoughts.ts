@@ -18,7 +18,7 @@ import { applyChunkContextPrompt, applyEmbeddingPrompt, CHUNK_CONTEXT_PROMPTS, D
 import { displayDate, normaliseType, thoughtTitle, thoughtUrl, THOUGHT_TYPES, TYPE_ALIASES } from "./thoughts.ts";
 import { DEFAULT_LLM_TIMEOUT_S, resolveEmbedConfig } from "./embed.ts";
 import { DEFAULT_PG_POOL, poolSizeFrom } from "./store-sql.ts";
-import { buildMessages, documentHeader, ENTITY_EXTRACTION_PROMPT, HEADER_CHARS, mergeExtractions, parseExtraction, wrapContent, type ExtractionWindow } from "./entities.ts";
+import { buildMessages, describeExtractWindow, documentHeader, ENTITY_EXTRACTION_PROMPT, HEADER_CHARS, mergeExtractions, parseExtraction, reasoningOn, windowingFor, wrapContent, type ExtractionWindow } from "./entities.ts";
 import { buildJudgeMessages, cleanForDisplay, parseJudgement, wrapSide } from "./consolidate.ts";
 import { chunkContent, DEFAULT_EXTRACT_WINDOW_TOKENS, DEFAULT_MAX_TOKENS, DEFAULT_OVERLAP_TOKENS, estimateTokens } from "./chunk.ts";
 
@@ -292,7 +292,7 @@ console.log("\n[8b] A long thought's windows merge to one answer, the window fol
   KNOWN_CHAT_MODEL_WINDOW["test-2048-context"] = 2048;
   try {
     const small2048 = resolveExtractWindow(undefined, "test-2048-context", DEFAULT_EXTRACT_WINDOW_TOKENS);
-    assert(JSON.stringify(small2048) === JSON.stringify({ tokens: 456, from: "window", window: 2048, capped: false }), `a 2,048-token context derives 456, uncapped (${JSON.stringify(small2048)})`);
+    assert(JSON.stringify(small2048) === JSON.stringify({ tokens: 456, from: "window", window: 2048, capped: false, unfit: false }), `a 2,048-token context derives 456, uncapped and fit (${JSON.stringify(small2048)})`);
     assert(extractWindowThatFits(2048) === 456 && extractContextNeeded(456) <= 2048 && extractContextNeeded(457) > 2048, "…the most that fits: one token more would not");
     assert(resolveExtractWindow(undefined, "test-2048-context:q4", DEFAULT_EXTRACT_WINDOW_TOKENS).tokens === 456, "…found under its Ollama tag too");
   } finally {
@@ -305,6 +305,43 @@ console.log("\n[8b] A long thought's windows merge to one answer, the window fol
          "the answer budget is the ratio times the text plus the floor, and a text of nothing still has the floor");
   assert(EXTRACT_PROMPT_TOKENS + EXTRACT_MARKER_TOKENS + 10696 + extractOutputBudget(10696) <= 32768, "…and a call at the window that fits requests no more than the context");
   assert(resolveEmbedConfig({ OB1_METADATA_MODEL: "qwen2.5:7b", OB1_EXTRACT_CHUNK_TOKENS: "1.5" }).extractChunkTokens === 1, "a fractional knob is floored, not passed through to a 1.5-token window");
+  // A context too small for any window (second review pass: the floor was a
+  // 1-token window, one call per word). The default is returned, marked
+  // unfit, and preflight warns; the shipped default carries `capped` from the
+  // resolver rather than inferring it from the size.
+  KNOWN_CHAT_MODEL_WINDOW["test-512-context"] = 512;
+  try {
+    const tiny = resolveExtractWindow(undefined, "test-512-context", DEFAULT_EXTRACT_WINDOW_TOKENS);
+    assert(tiny.tokens === DEFAULT_EXTRACT_WINDOW_TOKENS && tiny.from === "default" && tiny.unfit === true && tiny.window === 512, `a 512-token context is unfit: the default, flagged, not a 1-token window (${JSON.stringify(tiny)})`);
+    assert(resolveEmbedConfig({ OB1_METADATA_MODEL: "test-512-context" }).extractChunkTokens === DEFAULT_EXTRACT_WINDOW_TOKENS && !resolveEmbedConfig({ OB1_METADATA_MODEL: "test-512-context" }).extractChunkTokensCapped, "…and the resolver's capped flag is false for it");
+  } finally {
+    delete KNOWN_CHAT_MODEL_WINDOW["test-512-context"];
+  }
+  KNOWN_CHAT_MODEL_WINDOW["test-4278-context"] = 4278;
+  try {
+    const exact = resolveEmbedConfig({ OB1_METADATA_MODEL: "test-4278-context" });
+    assert(exact.extractChunkTokens === DEFAULT_EXTRACT_WINDOW_TOKENS && exact.extractChunkTokensFrom === "window" && exact.extractChunkTokensCapped === false, "a context that yields exactly the default is not 'held' — capped is the resolver's answer, not the size's");
+    assert(!describeExtractWindow(exact).includes("held at"), "…and the sentence does not say so");
+    assert(qwen.extractChunkTokensCapped === true && describeExtractWindow(qwen).includes("held at 1200"), "…where qwen2.5:7b's context would hold more, and the sentence says held");
+  } finally {
+    delete KNOWN_CHAT_MODEL_WINDOW["test-4278-context"];
+  }
+
+  // Reasoning on: max_tokens would cap the thinking and the answer together,
+  // so the budget and the retry are off and the sentence says why (second
+  // review pass).
+  const thinking = resolveEmbedConfig({ OB1_METADATA_MODEL: "qwen2.5:7b", OB1_METADATA_REASONING: "medium" });
+  assert(reasoningOn(thinking) && !windowingFor(thinking).outputBudget && !windowingFor(thinking).retryRunaway, "with OB1_METADATA_REASONING on there is no answer budget and no runaway retry");
+  assert(describeExtractWindow(thinking).includes("no answer budget and no runaway retry — reasoning is on"), "…and the banner/preflight sentence says so");
+  const plain = resolveEmbedConfig({ OB1_METADATA_MODEL: "qwen2.5:7b" });
+  assert(!reasoningOn(plain) && windowingFor(plain).outputBudget && windowingFor(plain).retryRunaway, "…while the default, reasoning off, budgets and retries");
+  assert(!reasoningOn(resolveEmbedConfig({ OB1_METADATA_REASONING: "off" })) && reasoningOn(resolveEmbedConfig({ OB1_METADATA_REASONING: "on" })), "off and on are read as embed.ts reads them");
+
+  // One key for a relation within an answer and across windows (second review
+  // pass: a single answer kept duplicate relations where the merge folded them).
+  const dup = parseExtraction(JSON.stringify({ entities: [{ name: "Anita", type: "person", confidence: 0.9 }, { name: "Open Brain", type: "project", confidence: 0.9 }], relationships: [
+    { from: "Anita", to: "Open Brain", relation: "works_on", confidence: 0.6 }, { from: "anita", to: "OPEN BRAIN", relation: "works_on", confidence: 0.9 }, { from: "Anita", to: "Open Brain", relation: "uses", confidence: 0.7 }] }));
+  assert(dup.relations.length === 2 && dup.relations.find((r) => r.relation === "works_on")?.confidence === 0.9, `a relation stated twice in one answer is one relation at the higher confidence, whatever the case; a different verb is another (${JSON.stringify(dup.relations)})`);
   const unknown = resolveEmbedConfig({ OB1_METADATA_MODEL: "some-chat-model" });
   assert(unknown.extractChunkTokens === DEFAULT_EXTRACT_WINDOW_TOKENS && unknown.extractChunkTokensFrom === "default" && unknown.extractModelWindow === undefined,
          "through the resolver too: an unknown model keeps the default");
@@ -331,8 +368,8 @@ console.log("\n[8b] A long thought's windows merge to one answer, the window fol
   const ob = merged.entities.filter((e) => e.type === "project");
   assert(ob.length === 1 && ob[0].name === "open brain" && ob[0].confidence === 0.95, `a project named in all three windows is ONE entity, spelt as the most confident window spelt it (${JSON.stringify(ob)})`);
   assert([...ob[0].aliases].sort().join("|") === "OB1|the brain", `…carrying every window's aliases, and not the name's own other casing, which the database's alias rule would drop too (${ob[0].aliases.join(", ")})`);
-  const spelt = mergeExtractions([part(0, [{ name: "Postgres", type: "tool", confidence: 0.7 }]), part(1, [{ name: "postgres", type: "tool", confidence: 0.9, aliases: ["PostgreSQL"] }])]);
-  assert(spelt.entities.length === 1 && spelt.entities[0].name === "postgres" && spelt.entities[0].aliases.join("|") === "PostgreSQL", "two casings of one name are one entity; a genuinely different spelling the model offered stays an alias");
+  const spelt = mergeExtractions([part(0, [{ name: "Postgres", type: "tool", confidence: 0.7, aliases: ["PG", "pg"] }]), part(1, [{ name: "postgres", type: "tool", confidence: 0.9, aliases: ["PostgreSQL", "Pg"] }])]);
+  assert(spelt.entities.length === 1 && spelt.entities[0].name === "postgres" && spelt.entities[0].aliases.join("|") === "PG|PostgreSQL", `two casings of one name are one entity; a genuinely different spelling the model offered stays an alias, and aliases fold by case as the database's do (${spelt.entities[0].aliases.join("|")})`);
   assert(merged.entities.some((e) => e.type === "topic" && e.name === "Open Brain"), "the same name under another type is another entity — the key is (type, name), as within one answer");
   assert(merged.entities.length === 4, `four entities in all: the project, the topic, Anita, PostgreSQL (${merged.entities.map((e) => `${e.name}/${e.type}`).join(", ")})`);
   const works = merged.relations.filter((r) => r.relation === "works_on");

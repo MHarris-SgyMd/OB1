@@ -498,6 +498,25 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
   penalties.length = 0;
   const clean = await extractEntities(short, cfgE, undefined, { kind: "extraction" });
   assert(!clean.malformed && clean.retried === undefined && penalties.length === 1, "…and an answer that converges is never retried");
+
+  // Reasoning on (second review pass): max_tokens would cap the thinking and
+  // the answer together, so no budget is sent and a cut answer is not retried.
+  const maxTokensSeen: (number | undefined)[] = [];
+  const providerF = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      const body = (await req.json()) as { max_tokens?: number; frequency_penalty?: number; reasoning_effort?: string };
+      maxTokensSeen.push(body.max_tokens);
+      penalties.push(body.frequency_penalty);
+      return Response.json({ choices: [{ message: { content: JSON.stringify({ entities: [{ name: "Anita", type: "person", confidence: 0.9 }], relationships: [] }) }, finish_reason: "length" }] });
+    },
+  });
+  penalties.length = 0;
+  const cfgF = resolveEmbedConfig({ OB1_LLM_LOCAL: "1", OB1_LLM_BASE_URL: `http://127.0.0.1:${providerF.port}/v1`, OB1_METADATA_MODEL: "stub-chat", OB1_METADATA_REASONING: "medium" });
+  const thought = await extractEntities(short, cfgF, undefined, { kind: "extraction" });
+  assert(maxTokensSeen.length === 1 && maxTokensSeen[0] === undefined && penalties[0] === undefined, "with OB1_METADATA_REASONING on the call carries no max_tokens and no penalty — the p1 request");
+  assert(!thought.malformed && thought.retried === undefined && maxTokensSeen.length === 1, "…and an answer that parses is the thought's, with `length` not read as a runaway since nothing was budgeted");
+  providerF.stop();
   providerE.stop();
 
   // The default window for a model the table lists is the measured 1200, and
