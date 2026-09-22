@@ -6,7 +6,7 @@
  * review pass each carried its own copy of the access rule — the endpoint, the
  * raw-vs-Bearer authorization, the "errors arrive with HTTP 200" reading — the
  * value defined twice this fork keeps finding. One definition here, under db/
- * (the fifth pass moved it from evals/) so the sync's container mounts db/ and
+ * (SMD-1985 moved it from evals/) so SMD-1954's container mounts db/ and
  * server-portable/ and nothing else.
  *
  * The client returns data AND errors: Linear answers a partial query with both
