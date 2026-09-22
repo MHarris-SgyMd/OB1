@@ -81,7 +81,7 @@ import { hostname } from "node:os";
 import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import { PROVIDER_ERROR_CHARS, refusesLength, resolveEmbedConfig } from "../server-portable/embed.ts";
-import { describeEgress, localKnob } from "../server-portable/egress.ts";
+import { describeEgress, localKnob, refusesEverything } from "../server-portable/egress.ts";
 import { extractEntities, extractionKey, type Extraction } from "../server-portable/entities.ts";
 import { hashKey, parseKeyRecords } from "../server-portable/auth.ts";
 import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, reportLost, startHeartbeat } from "./lease.ts";
@@ -163,6 +163,16 @@ console.log(`  model:  ${cfg.metadataModel} via ${cfg.chat.base}, temperature ${
 // What may leave the box (SMD-1903): a row the gate refuses is a failed claim
 // naming the rule; its text never went anywhere, and --retry-failed revisits it.
 console.log(`  egress: ${describeEgress(cfg.chat, cfg.egress, localKnob(cfg, "chat"))}`);
+{
+  // A policy that refuses whatever the row (SMD-1903): stop before claiming,
+  // rather than fail every row in the pool one at a time. A dry run and
+  // --status still report — the banner's egress line says why a run would not.
+  const blanket = refusesEverything(cfg.chat, cfg.egress);
+  if (blanket && !STATUS_ONLY && !DRY_RUN) {
+    console.error(`\n  Nothing would be extracted: ${blanket}. Declare the endpoint local (${localKnob(cfg, "chat")}=1) if it is, name what may leave in OB1_EGRESS_ALLOW, or set OB1_EGRESS_POLICY — in words, before a pass that would fail every row it claims.`);
+    process.exit(2);
+  }
+}
 
 // One connection per worker and one spare: the heartbeat (db/lease.ts) beats
 // through the pool, and a worker parked on a lock or a long statement holds

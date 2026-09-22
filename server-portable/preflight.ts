@@ -27,7 +27,7 @@ import { createStore, databaseUrl, DEFAULT_STORE, DIRECT_CHECK_SKIP_OVER_POSTGRE
 import { parseKeyRecords } from "./auth.ts";
 import { DEFAULT_MAX_TOKENS } from "./chunk.ts";
 import { resolveEmbedConfig, resolveProviderEndpoints, stringOr, type ProviderEndpoint } from "./embed.ts";
-import { EGRESS_UNITS, localKnob, type EgressTerm } from "./egress.ts";
+import { EGRESS_UNITS, flagOn, localKnob, type EgressTerm } from "./egress.ts";
 import { trimmedEnv } from "../db/config.mjs"; // static: `env` below is built before the dynamic import above resolves
 import type { PassCounts } from "../db/config.mjs";
 
@@ -306,10 +306,19 @@ if (!egress.problems.length) {
   } else {
     add("egress policy", "ok", `allow — a thought's text reaches an endpoint not declared local unless an OB1_EGRESS_DENY term matches; ${showTerms(egress.deny)}`);
   }
+  // Terms in the knob the mode does not read decide nothing — a natural
+  // misreading (deny + OB1_EGRESS_DENY) that fails closed and silently
+  // (first review pass). Said, with the knob the mode reads.
+  const unread: [string, EgressTerm[]][] = egress.mode === "deny" ? [["OB1_EGRESS_DENY", egress.deny]] : egress.mode === "allow" ? [["OB1_EGRESS_ALLOW", egress.allow]] : [["OB1_EGRESS_ALLOW", egress.allow], ["OB1_EGRESS_DENY", egress.deny]];
+  for (const [knob, terms] of unread) {
+    if (!terms.length) continue;
+    add("egress policy", "warn", `${knob} has ${terms.length} term(s) but the mode is ${egress.mode}, which reads ${egress.mode === "deny" ? "OB1_EGRESS_ALLOW" : egress.mode === "allow" ? "OB1_EGRESS_DENY" : "neither knob"} — they decide nothing`,
+        egress.mode === "off" ? "Set OB1_EGRESS_POLICY to deny or allow for the terms to be read, or drop them." : `Move them to ${egress.mode === "deny" ? "OB1_EGRESS_ALLOW" : "OB1_EGRESS_DENY"}, or change OB1_EGRESS_POLICY.`);
+  }
 }
 /** What a refused call costs, per endpoint, for the rows below. */
 const EMB_REFUSED = "captures land without a vector, findable by exact text only, until a re-embed pass against an endpoint the gate allows";
-const CHAT_REFUSED = "captures land untagged (uncategorized, no type) and the entity and consolidation passes fail every row they claim";
+const CHAT_REFUSED = "captures land untagged (no topics, no type) and the entity and consolidation passes fail every row they claim";
 /**
  * One row per endpoint: declared local (the gate does not apply), or what
  * leaves and under what rule. An endpoint the credential rule above CALLS
@@ -323,9 +332,20 @@ function egressRow(row: string, at: ProviderEndpoint, knob: string, calls: strin
     add(row, "ok", `${at.base} is declared local (${knob}) — the ${calls} text stays on the box; the gate does not apply`);
     return;
   }
-  const refusing = egress.mode === "deny" && !egress.allow.length;
   if (isLocalEndpoint(at.base)) {
-    add(row, "warn", `${at.base} looks local but is not declared so — the gate treats it as remote${refusing ? `, and under deny with no allow term every ${calls} call is refused: ${refusedMeans}` : ""}`,
+    // The consequence follows the mode (first review pass): under deny with
+    // terms every call a term does not match is refused; under allow, any a
+    // deny term matches; under off nothing is, today.
+    const consequence = egress.problems.length
+      ? `, and while the policy does not parse every ${calls} call is refused: ${refusedMeans}`
+      : egress.mode === "deny"
+        ? egress.allow.length
+          ? `, and under deny every ${calls} call no OB1_EGRESS_ALLOW term matches is refused: ${refusedMeans}`
+          : `, and under deny with no allow term every ${calls} call is refused: ${refusedMeans}`
+        : egress.mode === "allow"
+          ? `, and under allow any ${calls} call an OB1_EGRESS_DENY term matches is refused`
+          : "; the gate is off, so nothing is refused today — a later deny would refuse every call";
+    add(row, "warn", `${at.base} looks local but is not declared so — the gate treats it as remote${consequence}`,
         `Set ${knob}=1 if this endpoint is on this machine or its private network (declared, not guessed — SMD-1903).`);
     return;
   }
@@ -347,7 +367,10 @@ function egressRow(row: string, at: ProviderEndpoint, knob: string, calls: strin
   }
 }
 if (chatEndpoint === embEndpoint) {
-  egressRow("embeddings egress", embEndpoint, "OB1_LLM_LOCAL", "embeddings and chat", `${EMB_REFUSED}; ${CHAT_REFUSED}`);
+  // One endpoint, either knob declares it; the row names the one that did,
+  // or OB1_LLM_LOCAL as the one to set.
+  const knob = embEndpoint.local && !flagOn(env.OB1_LLM_LOCAL) ? "OB1_CHAT_LOCAL" : "OB1_LLM_LOCAL";
+  egressRow("embeddings egress", embEndpoint, knob, "embeddings and chat", `${EMB_REFUSED}; ${CHAT_REFUSED}`);
 } else {
   egressRow("embeddings egress", embEndpoint, "OB1_LLM_LOCAL", "embeddings", EMB_REFUSED);
   egressRow("chat egress", chatEndpoint, localKnob({ embeddings: embEndpoint, chat: chatEndpoint }, "chat"), "chat", CHAT_REFUSED);

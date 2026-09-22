@@ -3569,6 +3569,19 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
          `OB1_JUDGE_MODEL set: the pass key and the model line name the judge's model (exit ${ownJudge.code}: ${ownJudge.out.split("\n").filter((l) => /job:|model:/.test(l)).join(" | ").trim().slice(0, 200)})`);
   assert(/each with judge-b and/.test(ownJudge.out) && calls === 0, "…the plan names it, and a dry run called no model");
 
+  // The egress gate's blanket refusal (SMD-1903): the stub not declared local
+  // under the default would fail every row it claims, so a run stops before
+  // claiming; a dry run still reports, its egress line saying why a run would not.
+  const undeclared = { ...env } as Record<string, string>;
+  delete undeclared.OB1_LLM_LOCAL;
+  const blanket = await runScript(["bun", join(HERE, "consolidate.ts"), "--url", URL_!], { env: undeclared, cwd: HERE });
+  assert(blanket.code === 2 && /Nothing would be judged: OB1_EGRESS_POLICY=deny \(the default\) with no OB1_EGRESS_ALLOW term, and 127\.0\.0\.1:\d+ is not declared local — every call is refused/.test(blanket.out) && /Declare the endpoint local \(OB1_LLM_LOCAL=1\)/.test(blanket.out) && calls === 0,
+         `an endpoint not declared local under the default refuses to start the pass rather than fail every row (exit ${blanket.code}: ${blanket.out.split("\n").find((l) => /Nothing would/.test(l))?.trim().slice(0, 160)})`);
+  assert((await sql`SELECT count(*)::int AS c FROM thought_work_claims WHERE work_type = ${KEY}`)[0].c === 0, "…and it claimed nothing");
+  const blanketDry = await runScript(["bun", join(HERE, "consolidate.ts"), "--url", URL_!, "--dry-run"], { env: undeclared, cwd: HERE });
+  assert(blanketDry.code === 0 && /egress: deny \(the default\) — the text reaches 127\.0\.0\.1:\d+ only under OB1_EGRESS_ALLOW \(no terms: every call is refused\)/.test(blanketDry.out),
+         `…while --dry-run still reports, with the egress line saying so (exit ${blanketDry.code})`);
+
   // The first run. Five pairs are judged, one of them (the hemlock pair) drawing prose.
   // A 6 s lease with a 1 s heartbeat, and 700 ms verdicts — five pairs across
   // two workers, some three and a half seconds of model time — so the beats

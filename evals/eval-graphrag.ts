@@ -82,7 +82,8 @@ import { fileURLToPath } from "node:url";
 import { loadEnv } from "./env.ts";
 import { embed, cosine, parseSpec } from "./lib.ts";
 import { loadLinearCorpus, linearThoughtText, insertLinearThought, entityAnswersPath, readEntityAnswers, cachedDocumentVectors, linearVectorCachePath } from "./linear-corpus.ts";
-import { resolveEmbedConfig } from "../server-portable/embed.ts";
+import { refuseEgress, resolveEmbedConfig } from "../server-portable/embed.ts";
+import { mayLeaveBox } from "../server-portable/egress.ts";
 import { extractEntities, extractionKey } from "../server-portable/entities.ts";
 import { requireDatabaseUrl, resetSchema } from "../db/test-support.ts";
 
@@ -709,6 +710,11 @@ if (GLOBAL) {
     promptHashes.push(Bun.hash.xxHash64(prompt).toString(16).slice(0, 6));
     const ts = Date.now();
     try {
+      // The prompt carries thought titles, so it is gated like every other
+      // call (SMD-1903); a refusal is a failed summary, and the community
+      // falls back to its name list as for any other failure.
+      const gate = mayLeaveBox({ kind: "extraction", content: prompt }, cfg.chat, cfg.egress);
+      if (!gate.allowed) throw refuseEgress("Summary", cfg.chat.base, gate);
       const r = await fetch(`${cfg.chat.base}/chat/completions`, {
         method: "POST", headers: cfg.chat.headers, signal: AbortSignal.timeout(120_000),
         body: JSON.stringify({ model: cfg.metadataModel, temperature: cfg.metadataTemperature, ...cfg.metadataReasoning, messages: [{ role: "user", content: prompt }] }),

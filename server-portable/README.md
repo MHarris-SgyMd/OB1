@@ -63,8 +63,9 @@ server asks the gate before either call and makes only the ones it allows: a
 refused embedding lands the capture with its text and fingerprint and no vector,
 the reply says so and names the rule, and the decision is recorded on the
 thought's audit row (`thought_audit.actor_context.egress`); a refused tagging
-call lands it `uncategorized` with `metadata_extraction_failed: egress_denied`
-and no type. A refused search names `search_thoughts_keyword`, which makes no
+call lands it untagged — no topics, no type — with `metadata_extraction_failed:
+egress_denied`, and a re-capture of a tagged thought keeps its tags and vector
+(only the marker merges in). An edit is judged on the row's own metadata. A refused search names `search_thoughts_keyword`, which makes no
 model call. Every dialler — `providerCall`, the judge, the entity extractor —
 asks the gate itself before the request, so no call the fork makes is ungated;
 a refusal there is a `ProviderError` of kind `egress`. Deny is the default and

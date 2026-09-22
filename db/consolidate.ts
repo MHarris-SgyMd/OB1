@@ -86,7 +86,7 @@ import { hostname } from "node:os";
 import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import { PROVIDER_ERROR_CHARS, ProviderError, refusesLength, resolveEmbedConfig } from "../server-portable/embed.ts";
-import { describeEgress, localKnob } from "../server-portable/egress.ts";
+import { describeEgress, localKnob, refusesEverything } from "../server-portable/egress.ts";
 import {
   cleanForDisplay, consolidateKey, judgePair, proposalVerdict, DEFAULT_CANDIDATES, DEFAULT_MIN_CONFIDENCE, DEFAULT_MIN_SIMILARITY,
   type Judgement,
@@ -206,6 +206,16 @@ if (!REVIEW_ONLY) console.log(`  model:  ${cfg.judgeModel}${cfg.judgeModel !== c
 // What may leave the box (SMD-1903): a pair either row of which the gate
 // refuses is not judged, and the thought's claim fails naming the rule.
 if (!REVIEW_ONLY) console.log(`  egress: ${describeEgress(cfg.chat, cfg.egress, localKnob(cfg, "chat"))}`);
+{
+  // A policy that refuses whatever the row (SMD-1903): stop before claiming,
+  // rather than fail every row in the pool one at a time. A dry run and
+  // --status still report — the banner's egress line says why a run would not.
+  const blanket = refusesEverything(cfg.chat, cfg.egress);
+  if (blanket && !STATUS_ONLY && !DRY_RUN && !REVIEW_ONLY) {
+    console.error(`\n  Nothing would be judged: ${blanket}. Declare the endpoint local (${localKnob(cfg, "chat")}=1) if it is, name what may leave in OB1_EGRESS_ALLOW, or set OB1_EGRESS_POLICY — in words, before a pass that would fail every row it claims.`);
+    process.exit(2);
+  }
+}
 
 // One connection per worker and one spare: the heartbeat (db/lease.ts) beats
 // through the pool, and a worker parked on a lock or a long statement holds

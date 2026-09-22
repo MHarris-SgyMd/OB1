@@ -221,7 +221,7 @@ shape: a capture's full text, for tagging — and only the captures the gate
 lets through. Under the default policy the hosted chat endpoint is refused for
 every thought until an `OB1_EGRESS_ALLOW` term names what may go (above); the
 last line does that for thoughts carrying a `#public` marker, and the rest land
-tagged `uncategorized` with the reason recorded.
+untagged with the reason recorded.
 
 #### These two were chosen by measurement
 

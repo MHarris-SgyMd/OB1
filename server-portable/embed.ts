@@ -292,7 +292,9 @@ export function providerEndpoint(base: string, key: string | undefined, local = 
  * Whether an endpoint is LOCAL is declared the same way (SMD-1903):
  * `OB1_LLM_LOCAL` for the embeddings endpoint, `OB1_CHAT_LOCAL` for a chat
  * endpoint of its own — and a chat endpoint at the SAME base is the same box,
- * so it inherits the embeddings declaration. Nothing is read off the address.
+ * so either knob declares it, for both calls (the first review pass found
+ * `OB1_CHAT_LOCAL` alone discarded on the shared endpoint, every call refused
+ * and no row saying why). Nothing is read off the address.
  */
 export function resolveProviderEndpoints(env: EmbedEnv): { embeddings: ProviderEndpoint; chat: ProviderEndpoint } {
   // baseUrlOr: trimmed, trailing slashes off, and slashes alone are unset (SMD-1843).
@@ -300,8 +302,13 @@ export function resolveProviderEndpoints(env: EmbedEnv): { embeddings: ProviderE
   const chatBase = baseUrlOr(env.OB1_CHAT_BASE_URL, embeddings.base);
   const chat = providerEndpoint(chatBase, env.OB1_CHAT_API_KEY, flagOn(env.OB1_CHAT_LOCAL) || (chatBase === embeddings.base && embeddings.local));
   // No key of its own and the same base: it IS the embeddings endpoint, key
-  // and all. Anything else — its own key, or a different base — stands alone.
-  return { embeddings, chat: !chat.key && chat.base === embeddings.base ? embeddings : chat };
+  // and all — declared local by either knob. Anything else — its own key, or
+  // a different base — stands alone.
+  if (!chat.key && chat.base === embeddings.base) {
+    const shared = chat.local && !embeddings.local ? { ...embeddings, local: true } : embeddings;
+    return { embeddings: shared, chat: shared };
+  }
+  return { embeddings, chat };
 }
 
 export type EmbedConfig = {

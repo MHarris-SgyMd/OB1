@@ -295,12 +295,35 @@ export function decideCalls(
 }
 
 /**
+ * The refusal that does not depend on the row: an endpoint not declared local
+ * under deny with no allow term, or under a policy that did not parse. A
+ * worker asks this before claiming anything — every row would fail the same
+ * way, and a pass that marks the whole pool failed one row at a time says
+ * nothing this one line does not (first review pass). Null when some row
+ * might pass: a term might match, or the mode lets text through.
+ */
+export function refusesEverything(endpoint: Pick<ProviderEndpoint, "base" | "local">, policy: EgressPolicy): string | null {
+  if (endpoint.local) return null;
+  const host = hostOf(endpoint.base);
+  if (policy.problems.length) return `the egress policy did not parse (${policy.problems.join("; ")}), so the gate fails closed and every call to ${host} is refused`;
+  if (policy.mode === "deny" && !policy.allow.length) {
+    return `OB1_EGRESS_POLICY=deny${policy.configured === undefined ? " (the default)" : ""} with no OB1_EGRESS_ALLOW term, and ${host} is not declared local — every call is refused`;
+  }
+  return null;
+}
+
+/**
  * The knob that declares an endpoint local, for a banner or a remedy:
  * OB1_LLM_LOCAL for the embeddings endpoint and for a chat endpoint at the
  * same base (which inherits it), OB1_CHAT_LOCAL for a chat endpoint of its own.
  */
 export function localKnob(endpoints: { embeddings: ProviderEndpoint; chat: ProviderEndpoint }, which: "embeddings" | "chat"): string {
-  return which === "embeddings" || endpoints.chat.base === endpoints.embeddings.base ? "OB1_LLM_LOCAL" : "OB1_CHAT_LOCAL";
+  if (which === "embeddings") return "OB1_LLM_LOCAL";
+  // The same base: the embeddings knob declares both, and is the one to set
+  // when neither is declared. Only a chat endpoint declared by its own knob
+  // while the embeddings one is not (first review pass) names OB1_CHAT_LOCAL.
+  const sameBase = endpoints.chat.base === endpoints.embeddings.base;
+  return sameBase && (endpoints.embeddings.local || !endpoints.chat.local) ? "OB1_LLM_LOCAL" : "OB1_CHAT_LOCAL";
 }
 
 /**

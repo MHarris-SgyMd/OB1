@@ -1646,6 +1646,21 @@ console.log("\n[8] The egress gate is reported: the mode, and per endpoint what 
   assert(bad.code === 1 && /✗\s+egress policy\s+OB1_EGRESS_DENY: `nonsense` is not unit:value \(units: actor, source, type, topic, marker\) — the gate fails closed \(deny\) until this is fixed/.test(bad.out),
          "a term that does not parse fails by name");
   assert(/!\s+embeddings egress\s+every embeddings and chat call to openrouter\.ai is refused while the policy does not parse/.test(bad.out), "…and the endpoint row says every call is refused meanwhile");
+  // Terms in the knob the mode does not read: a warning naming both knobs.
+  const unread = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: LOCAL, OB1_LLM_LOCAL: "1", OB1_EGRESS_DENY: "marker:#phi" });
+  assert(/!\s+egress policy\s+OB1_EGRESS_DENY has 1 term\(s\) but the mode is deny, which reads OB1_EGRESS_ALLOW — they decide nothing/.test(unread.out) && /→ Move them to OB1_EGRESS_ALLOW, or change OB1_EGRESS_POLICY\./.test(unread.out),
+         "deny terms under deny: warned as unread, with the knob the mode reads");
+  assert(!/egress policy\s+.*decide nothing/.test(declared.out), "…and no such warning when no term is unread");
+  // The upgrade-case warning carries the consequence for the mode in force.
+  const undeclaredTerms = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: LOCAL, OB1_EGRESS_ALLOW: "marker:#public" });
+  assert(/looks local but is not declared so — the gate treats it as remote, and under deny every embeddings and chat call no OB1_EGRESS_ALLOW term matches is refused/.test(undeclaredTerms.out),
+         "…undeclared under deny WITH terms says what is refused");
+  const undeclaredOff = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: LOCAL, OB1_EGRESS_POLICY: "off" });
+  assert(/looks local but is not declared so — the gate treats it as remote; the gate is off, so nothing is refused today/.test(undeclaredOff.out), "…and under off that nothing is refused today");
+  // Either knob declares a shared endpoint; the row names the one that did.
+  const chatKnob = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: LOCAL, OB1_CHAT_LOCAL: "1" });
+  assert(/✓\s+embeddings egress\s+http:\/\/127\.0\.0\.1:11434\/v1 is declared local \(OB1_CHAT_LOCAL\) — the embeddings and chat text stays on the box/.test(chatKnob.out),
+         "OB1_CHAT_LOCAL alone declares the one endpoint both calls use, and the row names that knob");
   const badMode = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: LOCAL, OB1_LLM_LOCAL: "1", OB1_EGRESS_POLICY: "maybe" });
   assert(badMode.code === 1 && /✗\s+egress policy\s+OB1_EGRESS_POLICY: `maybe` is not one of deny, allow, off/.test(badMode.out),
          "a mode outside the three fails by name, even with every endpoint declared local");

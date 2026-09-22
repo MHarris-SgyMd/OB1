@@ -403,7 +403,7 @@ import {
   validateEmbeddingConfig,
 } from "./config.mjs";
 import { createEmbedder, PROVIDER_ERROR_CHARS, resolveEmbedConfig } from "../server-portable/embed.ts";
-import { describeEgress, localKnob } from "../server-portable/egress.ts";
+import { describeEgress, localKnob, mayLeaveBox, refusesEverything } from "../server-portable/egress.ts";
 import { UUID_RE } from "../server-portable/store.ts";
 import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, reportLost, startHeartbeat } from "./lease.ts";
 
@@ -560,6 +560,21 @@ console.log(`  embedding: ${embedConfig.embeddingModel} @ ${embedConfig.embeddin
 // naming the rule, retried by --retry-failed once the policy or the endpoint
 // changes; the text never went anywhere.
 console.log(`  egress:    ${describeEgress(embedConfig.embeddings, embedConfig.egress, localKnob(embedConfig, "embeddings"))}${embedConfig.chunkContext ? `; blurbs: ${describeEgress(embedConfig.chat, embedConfig.egress, localKnob(embedConfig, "chat"))}` : ""}`);
+{
+  // A policy that refuses whatever the row (SMD-1903): stop before claiming,
+  // rather than fail every row in the pool one at a time. A dry run and
+  // --status still report — the banner's egress line says why a run would not.
+  const blanket = refusesEverything(embedConfig.embeddings, embedConfig.egress);
+  if (blanket && !STATUS_ONLY && !DRY_RUN) {
+    console.error(`\n  Nothing would be re-embedded: ${blanket}. Declare the endpoint local (${localKnob(embedConfig, "embeddings")}=1) if it is, name what may leave in OB1_EGRESS_ALLOW, or set OB1_EGRESS_POLICY — in words, before a pass that would fail every row it claims.`);
+    process.exit(2);
+  }
+  // The blurbs are chat calls: refused, every long row's claim fails on them
+  // (a bare window is a failure here, since no caller is told) and
+  // --retry-failed would revisit each uselessly. Said before the pass.
+  const blurbs = embedConfig.chunkContext ? refusesEverything(embedConfig.chat, embedConfig.egress) : null;
+  if (blurbs) console.error(`  ⚠  OB1_CHUNK_CONTEXT is on and every blurb call would be refused (${blurbs}) — every long row's claim will fail on its blurbs; turn the context off for this pass, or declare the chat endpoint local (${localKnob(embedConfig, "chat")}=1)`);
+}
 console.log(`  chunks:    ${embedConfig.chunkTokens}-token windows above ${embedConfig.chunkThreshold} (${embedConfig.chunkTokensFrom === "window" ? `from ${embedConfig.embeddingModel}'s ${embedConfig.modelWindow}-token window` : embedConfig.chunkTokensFrom === "OB1_CHUNK_TOKENS" ? "OB1_CHUNK_TOKENS" : "the default, window unknown"}), overlap ${embedConfig.chunkOverlap}, context ${embedConfig.chunkContext ? `on (blurbs via ${embedConfig.chat.base})` : "off"}`);
 
 // One connection per worker and one spare: the heartbeat (db/lease.ts) beats
@@ -1313,12 +1328,24 @@ if (refusalForRun) {
 
 // The provider first, so a wrong URL or a wrong width fails before any row is
 // touched — the width check inside getEmbedding names the model and both widths.
-try {
-  await embedder.getEmbedding("reembed.ts provider probe");
-} catch (e) {
-  console.error(`\n  The embedding provider is not usable: ${(e as Error).message}`);
-  await sql.close();
-  process.exit(2);
+// The probe is the egress gate's subject too (SMD-1903): a constant with no
+// row behind it, so under terms that read the row (type:, source:) it is
+// refused where every pooled row would pass. Skipped then, and said — the
+// first row is the probe — rather than blamed on the provider (first review
+// pass: the probe was called without a subject and crashed under any policy
+// that read one).
+const probeSubject = { kind: "re-embed" as const };
+const probeGate = mayLeaveBox(probeSubject, embedConfig.embeddings, embedConfig.egress);
+if (!probeGate.allowed) {
+  console.log(`  probe:     skipped — ${probeGate.reason}; the first row is the probe`);
+} else {
+  try {
+    await embedder.getEmbedding("reembed.ts provider probe", probeSubject);
+  } catch (e) {
+    console.error(`\n  The embedding provider is not usable: ${(e as Error).message}`);
+    await sql.close();
+    process.exit(2);
+  }
 }
 
 // The record and the pool, in one transaction — see "Changing model" in the

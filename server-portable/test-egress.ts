@@ -28,7 +28,7 @@ import { SQL } from "bun";
 import { createAssert, resetSchema } from "../db/test-support.ts";
 import { hashKey } from "./auth.ts";
 import {
-  DEFAULT_EGRESS_MODE, decideCalls, describeEgress, flagOn, localKnob, mayLeaveBox, parseEgressTerms, resolveEgressPolicy, termMatches,
+  DEFAULT_EGRESS_MODE, decideCalls, describeEgress, flagOn, localKnob, mayLeaveBox, parseEgressTerms, refusesEverything, resolveEgressPolicy, termMatches,
   type EgressSubject,
 } from "./egress.ts";
 import { createEmbedder, providerCall, ProviderError, resolveEmbedConfig } from "./embed.ts";
@@ -112,6 +112,13 @@ console.log("\n[2] Local is declared, not guessed — a loopback base with the f
   assert(sameBase.chat !== sameBase.embeddings && sameBase.chat.local === true, "the same base with its own key is its own endpoint and inherits the declaration — one box");
   assert(localKnob(split, "chat") === "OB1_CHAT_LOCAL" && localKnob(sameBase, "chat") === "OB1_LLM_LOCAL" && localKnob(split, "embeddings") === "OB1_LLM_LOCAL",
          "the knob a row names is the one that would declare that endpoint");
+  // Either knob declares the shared endpoint (first review pass: OB1_CHAT_LOCAL
+  // alone was discarded on it, every call refused, no row saying why).
+  const chatOnly = resolveEmbedConfig({ OB1_LLM_BASE_URL: "http://a:1/v1", OB1_CHAT_LOCAL: "1" });
+  assert(chatOnly.chat === chatOnly.embeddings && chatOnly.embeddings.local === true, "OB1_CHAT_LOCAL alone declares the one shared endpoint, for both calls");
+  const chatOwnKey = resolveEmbedConfig({ OB1_LLM_BASE_URL: "http://a:1/v1", OB1_CHAT_BASE_URL: "http://a:1/v1", OB1_CHAT_API_KEY: "k", OB1_CHAT_LOCAL: "1" });
+  assert(chatOwnKey.chat.local && !chatOwnKey.embeddings.local && localKnob(chatOwnKey, "chat") === "OB1_CHAT_LOCAL" && localKnob(chatOwnKey, "embeddings") === "OB1_LLM_LOCAL",
+         "…while a same-base chat endpoint with its own key declared by OB1_CHAT_LOCAL is named by that knob, and the undeclared embeddings one by its own");
 }
 
 console.log("\n[3] The rules: every unit under deny and allow, with the reason naming the knob and the term");
@@ -151,6 +158,14 @@ console.log("\n[3] The rules: every unit under deny and allow, with the reason n
   assert(decideCalls(subject, local, local.egress).record === undefined, "both declared local: nothing was judged, nothing is recorded");
   assert(/declared local \(OB1_LLM_LOCAL\)/.test(describeEgress(local.embeddings, local.egress, "OB1_LLM_LOCAL")) && /no terms: every call is refused/.test(describeEgress(cfg.chat, resolveEgressPolicy({}), "OB1_CHAT_LOCAL")),
          "describeEgress says what a banner needs");
+
+  // The refusal no row can escape, which a worker reads before claiming.
+  const blanket = refusesEverything(remote, resolveEgressPolicy({}));
+  assert(blanket !== null && /OB1_EGRESS_POLICY=deny \(the default\) with no OB1_EGRESS_ALLOW term, and openrouter\.ai is not declared local — every call is refused/.test(blanket), `deny with no terms refuses everything, and says so (${blanket})`);
+  assert(/did not parse/.test(refusesEverything(remote, resolveEgressPolicy({ OB1_EGRESS_POLICY: "off", OB1_EGRESS_DENY: "junk" })) ?? ""), "…as does a policy that did not parse, whatever its mode");
+  assert(refusesEverything(remote, resolveEgressPolicy({ OB1_EGRESS_ALLOW: "actor:x" })) === null && refusesEverything(remote, resolveEgressPolicy({ OB1_EGRESS_POLICY: "allow" })) === null && refusesEverything(remote, resolveEgressPolicy({ OB1_EGRESS_POLICY: "off" })) === null,
+         "a term, allow or off might let a row through, so nothing is refused up front");
+  assert(refusesEverything({ ...remote, local: true }, resolveEgressPolicy({})) === null, "a declared endpoint is never refused up front");
 }
 
 console.log("\n[4] A second opinion can only refuse — it is never asked about a refused subject, and a hook that throws refuses");
@@ -231,8 +246,10 @@ process.env.OB1_EMBEDDING_MODEL = EMB_MODEL;
 process.env.OB1_EMBEDDING_DIM = String(DIM);
 process.env.OB1_METADATA_MODEL = META_MODEL;
 process.env.MCP_ACCESS_KEYS = `gated:write:${hashKey(GATED_KEY)},open:write:${hashKey(OPEN_KEY)}`;
-// One key allowed by name; the policy itself is the default.
-process.env.OB1_EGRESS_ALLOW = "actor:open";
+// One key allowed by name, and one type — which only a row already tagged can
+// carry, so it reaches an EDIT of such a row and never a first capture; the
+// policy itself is the default.
+process.env.OB1_EGRESS_ALLOW = "actor:open,type:idea";
 for (const k of ["OB1_LLM_LOCAL", "OB1_CHAT_LOCAL", "OB1_EGRESS_POLICY", "OB1_EGRESS_DENY", "OPENROUTER_API_KEY", "OB1_LLM_API_KEY", "OB1_CHAT_BASE_URL", "OB1_CHAT_API_KEY", "MCP_ACCESS_KEY", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "OB1_EMBEDDING_DIMENSIONS", "OB1_CHUNK_CONTEXT"]) delete process.env[k];
 
 const worker = (await import("./index.ts")).default as { fetch: (r: Request) => Response | Promise<Response> };
@@ -258,18 +275,18 @@ console.log("\n[6] The server under deny: a refused capture lands without a vect
   const before = seen.length;
   const cap = await call(GATED_KEY, "capture_thought", { content: "gated-thought-marker: a note that must not leave" });
   assert(!cap.isError && /Captured as thought — id [0-9a-f-]{36}/.test(cap.text), `the capture succeeds, typed as nothing (${cap.text.split("\n")[0]})`);
-  assert(/Note: saved WITHOUT a vector — OB1_EGRESS_POLICY=deny \(the default\) and no OB1_EGRESS_ALLOW term matches this capture \(actor:open\) — the text was not sent to 127\.0\.0\.1:\d+\./.test(cap.text),
+  assert(/Note: saved WITHOUT a vector — OB1_EGRESS_POLICY=deny \(the default\) and no OB1_EGRESS_ALLOW term matches this capture \(actor:open, type:idea\) — the text was not sent to 127\.0\.0\.1:\d+\./.test(cap.text),
          "…the reply says the vector is missing, names the rule, the terms and the host");
   assert(/findable by exact text \(search_thoughts_keyword\)/.test(cap.text) && /re-embed pass/.test(cap.text), "…and the two ways it is still reachable");
   assert(/Note: no topics, people or type were extracted — OB1_EGRESS_POLICY=deny/.test(cap.text), "…and that no tags were extracted, under the same rule");
-  assert(/^Captured as thought — id [0-9a-f-]{36} — uncategorized$/.test(cap.text.split("\n")[0]), "the first line carries the placeholder every reader of the tags knows, and no type");
+  assert(/^Captured as thought — id [0-9a-f-]{36}$/.test(cap.text.split("\n")[0]), "the first line carries no type and no topics — nothing was extracted, and nothing is dressed up as if it were");
   assert(seen.length === before, `zero requests reached the stub (${seen.length - before})`);
   const id = /id ([0-9a-f-]{36})/.exec(cap.text)![1];
 
   const [row] = await sql`SELECT content, metadata, embedding IS NULL AS no_vector, embedding_model FROM thoughts WHERE id = ${id}::uuid`;
   assert(row.no_vector === true && row.embedding_model === null, "the row has no vector and no model label");
-  assert(row.metadata.metadata_extraction_failed === "egress_denied" && row.metadata.type === undefined && Array.isArray(row.metadata.topics) && row.metadata.topics[0] === "uncategorized" && row.metadata.source === "mcp",
-         `the metadata records the refusal under the key the other failures use, with no fabricated type (${JSON.stringify(row.metadata)})`);
+  assert(row.metadata.metadata_extraction_failed === "egress_denied" && row.metadata.type === undefined && row.metadata.topics === undefined && row.metadata.source === "mcp",
+         `the metadata records the refusal under the key the other failures use, with no fabricated type or topics (${JSON.stringify(row.metadata)})`);
   const [audit] = await sql`SELECT actor_name, actor_context FROM thought_audit WHERE thought_id = ${id}::uuid AND action = 'capture'`;
   const rec = audit.actor_context?.egress;
   assert(audit.actor_name === "gated" && rec && rec.policy === "deny" && rec.embeddings.allowed === false && rec.embeddings.rule === "no-allow-term" && rec.embeddings.to === HOST && rec.chat.allowed === false && rec.chat.rule === "no-allow-term",
@@ -312,6 +329,30 @@ console.log("\n[6] The server under deny: a refused capture lands without a vect
   const openSearch = await call(OPEN_KEY, "search_thoughts", { query: "a note that may leave", threshold: 0 });
   assert(!openSearch.isError && !/^Refused/.test(openSearch.text) && seen.length === before + 3 && seen[seen.length - 1].path.endsWith("/embeddings"),
          `…and the allowed key searches: one embeddings request, no refusal (${seen.length - before})`);
+
+  // A RE-CAPTURE of that tagged, vectored text under the refused key: the row
+  // keeps its tags and its vector (upsert_thought merges and coalesces), the
+  // reply says so rather than "no vector", nothing is sent (first review
+  // pass: a placeholder topic in the refusal shape had replaced the real tags).
+  const n = seen.length;
+  const recap = await call(GATED_KEY, "capture_thought", { content: "open-thought-marker: a note that may leave" });
+  assert(!recap.isError && /id ([0-9a-f-]{36})/.exec(recap.text)![1] === openId && seen.length === n, `the re-capture lands on the same id at zero requests (${seen.length - n})`);
+  assert(/Note: the embedding call for this capture was not made — OB1_EGRESS_POLICY=deny/.test(recap.text) && /keeps the vector it had/.test(recap.text) && !/WITHOUT a vector/.test(recap.text),
+         "…the reply says the existing vector stands, not that there is none");
+  assert(/Note: the tagging call for this capture was not made/.test(recap.text) && /keeps its tags/.test(recap.text), "…and that the existing tags stand");
+  const [kept] = await sql`SELECT metadata, embedding IS NOT NULL AS has FROM thoughts WHERE id = ${openId}::uuid`;
+  assert(kept.has === true && kept.metadata.type === "idea" && Array.isArray(kept.metadata.topics) && kept.metadata.topics[0] === "stubbed" && kept.metadata.metadata_extraction_failed === "egress_denied",
+         `the row keeps its vector, type and topics; only the refusal marker was merged in (${JSON.stringify(kept.metadata)})`);
+
+  // An EDIT is judged on the row's own metadata, not the capture's bare
+  // source: the type:idea term lets the refused key edit the tagged row (one
+  // request), while its own untyped row stays refused (first review pass).
+  const m = seen.length;
+  const typedEdit = await call(GATED_KEY, "update_thought", { id: openId, content: "open-thought-marker: a note that may leave, edited by the gated key" });
+  assert(!typedEdit.isError && /content re-embedded/.test(typedEdit.text) && seen.length === m + 1 && seen[m].path.endsWith("/embeddings"),
+         `an edit of a row a type: term names is allowed on the row's metadata — one embeddings request (${seen.length - m})`);
+  const untypedEdit = await call(GATED_KEY, "update_thought", { id, content: "gated-thought-marker: edited again, still must not leave" });
+  assert(!untypedEdit.isError && /content saved without a vector/.test(untypedEdit.text) && seen.length === m + 1, "…while an edit of the untyped row is still refused at zero requests");
 }
 
 await sql.close();

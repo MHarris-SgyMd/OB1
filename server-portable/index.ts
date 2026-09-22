@@ -224,15 +224,18 @@ function explainHeadWindow(e: EmbeddedCapture | undefined): string {
 
 /**
  * What a capture records when the egress gate did not let its text reach the
- * chat endpoint (SMD-1903): the marker every reader of the tags already
- * knows, the reason under the key the other failures use, and NO type — the
- * call never happened, so it produced none, and "observation" would be a
- * guess dressed as an extraction. The capture path writes this without
- * calling extractMetadata; extractMetadata returns it too should a refusal
- * reach providerCall, so no path fabricates a tag set.
+ * chat endpoint (SMD-1903): the reason under the key the other failures use,
+ * and NO topics and NO type — the call never happened, so it produced none,
+ * and "observation" or the "uncategorized" placeholder would be a tag set
+ * dressed as an extraction. Nothing here but the marker, also because
+ * upsert_thought MERGES a re-capture's metadata over the row's (035): a
+ * placeholder topic would have replaced an existing thought's real tags on
+ * every re-capture under a refusing policy (first review pass). The capture
+ * path writes this without calling extractMetadata; extractMetadata returns
+ * it too should a refusal reach providerCall, so no path fabricates a tag set.
  */
 function metadataRefused(): Record<string, unknown> {
-  return { topics: ["uncategorized"], metadata_extraction_failed: "egress_denied" };
+  return { metadata_extraction_failed: "egress_denied" };
 }
 
 /**
@@ -241,10 +244,18 @@ function metadataRefused(): Record<string, unknown> {
  * the keyword tool, which makes no model call; the operator's are named.
  */
 function refuseQuery(gate: EgressDecision, actor: string): string {
+  // The remedy follows the rule that refused (first review pass): under
+  // `allow` a deny term matched, and adding an allow term would change
+  // nothing; a second opinion is the operator's hook to read.
+  const remedy = gate.rule === "deny-term"
+    ? "or removes the OB1_EGRESS_DENY term the reason names"
+    : gate.rule === "second-opinion"
+      ? "or reads what the second opinion refused"
+      : `or allows this key (OB1_EGRESS_ALLOW=actor:${actor})`;
   return (
     `Refused: the query text would be sent for its embedding, and ${gate.reason}. ` +
     `Use search_thoughts_keyword (exact text, no model call). To allow semantic search here, the operator declares the endpoint local ` +
-    `(OB1_LLM_LOCAL=1) when it is, or allows this key (OB1_EGRESS_ALLOW=actor:${actor}).`
+    `(OB1_LLM_LOCAL=1) when it is, ${remedy}.`
   );
 }
 
@@ -1252,12 +1263,18 @@ function buildServer(principal: Principal): McpServer {
 
         // The gate's refusal first among the notes (SMD-1903): a thought
         // without its vector is the one fact a caller must not miss. Not an
-        // error — the policy did what it says — but said in full.
+        // error — the policy did what it says — but said in full. On a
+        // RE-CAPTURE the row keeps the vector it had (upsert_thought
+        // coalesces), so the note says that instead of "no vector" (first
+        // review pass); a database from before 035 does not say, and is
+        // told the fresh-row story.
+        const existed = captured.existed === true;
         if (!gate.embeddings.allowed) {
-          confirmation +=
-            `\n\nNote: saved WITHOUT a vector — ${gate.embeddings.reason}. ` +
-            `It is findable by exact text (search_thoughts_keyword) and joins semantic search after a re-embed pass ` +
-            `(db/reembed.ts) against an endpoint the gate allows.`;
+          confirmation += existed
+            ? `\n\nNote: the embedding call for this capture was not made — ${gate.embeddings.reason}. This text was already a thought, and it keeps the vector it had.`
+            : `\n\nNote: saved WITHOUT a vector — ${gate.embeddings.reason}. ` +
+              `It is findable by exact text (search_thoughts_keyword) and joins semantic search after a re-embed pass ` +
+              `(db/reembed.ts) against an endpoint the gate allows.`;
         }
 
         // A chunk whose situating blurb could not be generated is embedded bare
@@ -1266,11 +1283,16 @@ function buildServer(principal: Principal): McpServer {
         // — preflight, which counts both kinds across the whole corpus, is the
         // other half.
         if (contextFailures > 0) {
-          confirmation +=
-            `\n\nNote: ${contextFailures} of ${chunks.length} search chunks were embedded without ` +
-            `their situating context — the call failed, or returned a blurb too long to be one. ` +
-            `They are stored and searchable; re-capture to regenerate, or check the model at ` +
-            `${embedConfig().chat.base}.`;
+          confirmation += gate.chat.allowed
+            ? `\n\nNote: ${contextFailures} of ${chunks.length} search chunks were embedded without ` +
+              `their situating context — the call failed, or returned a blurb too long to be one. ` +
+              `They are stored and searchable; re-capture to regenerate, or check the model at ` +
+              `${embedConfig().chat.base}.`
+            // The blurbs are chat calls, and the gate refused the chat endpoint
+            // (SMD-1903): not a model to check, and the reason is the one the
+            // tagging note below carries.
+            : `\n\nNote: the ${chunks.length} search chunks were embedded without their situating context — ` +
+              `the blurb calls were not made: ${gate.chat.reason}. They are stored and searchable.`;
         }
         confirmation += explainHeadWindow(embedded);
 
@@ -1309,7 +1331,14 @@ function buildServer(principal: Principal): McpServer {
         // which since SMD-1902 need not be where the embedding went.
         if (meta.metadata_extraction_failed === "egress_denied") {
           // Not a failure to check the endpoint for: the call was not made.
-          confirmation += `\n\nNote: no topics, people or type were extracted — ${gate.chat.reason}.`;
+          // The reason is the decision made here; providerCall's own refusal
+          // (the belt) reaching this branch would mean the two disagreed,
+          // which the shared function makes impossible — but say so rather
+          // than print an "allowed" sentence under a refusal.
+          const why = gate.chat.allowed ? "the egress gate refused the tagging call" : gate.chat.reason;
+          confirmation += existed
+            ? `\n\nNote: the tagging call for this capture was not made — ${why}. The existing thought keeps its tags; its metadata now carries the refusal marker.`
+            : `\n\nNote: no topics, people or type were extracted — ${why}.`;
         } else if (typeof meta.metadata_extraction_failed === "string") {
           confirmation +=
             `\n\nNote: the thought was saved, but automatic tagging failed ` +
@@ -1394,8 +1423,14 @@ function buildServer(principal: Principal): McpServer {
         // refused, the new text is stored and the stale vector cleared with it
         // (update_thought's rule: content and no vector is NULL), and the
         // reply says so.
+        // The subject is the ROW — its own source, type and topics, which a
+        // capture cannot know but an edit can: one read, only when the text
+        // moves (first review pass: an edit judged under the capture's bare
+        // {source: "mcp"} let a row a type: or source: term names slip past).
+        // A row that is not there is judged as bare and refused by the write.
         const cfg = embedConfig();
-        const subject: EgressSubject = { kind: "edit", actor: principal.name, metadata: { source: "mcp" }, content };
+        const existing = content !== undefined ? await (await db()).getThought(id) : null;
+        const subject: EgressSubject = { kind: "edit", actor: principal.name, metadata: existing?.metadata ?? { source: "mcp" }, content };
         const gate = content !== undefined ? decideCalls(subject, cfg, cfg.egress) : undefined;
         const embedded = content !== undefined && gate?.embeddings.allowed ? await embedCapture(content, subject) : undefined;
 
