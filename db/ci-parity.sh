@@ -20,6 +20,12 @@ set -u
 cd "$(dirname "$0")/.."
 ROOT="$PWD"
 
+# One row per suite or typecheck: ✓ or ✗, the name, the verdict.
+row() {
+  local ok="$1" name="$2" verdict="$3"
+  if [ "$ok" = ok ]; then printf "  \033[32m✓\033[0m %-26s %s\n" "$name" "$verdict"; else printf "  \033[31m✗\033[0m %-26s %s\n" "$name" "$verdict"; fi
+}
+
 run() {
   local dir="$1" script="$2" out res
   out=$(cd "$ROOT/$dir" && bun "$script" 2>&1)
@@ -28,11 +34,11 @@ run() {
   # contain the word "error" (a suite that tests error messages says so), and
   # grepping for it marked test-update-delete failed while it reported 27/27.
   if printf '%s' "$res" | grep -qvE ', 0 failed$' || [ -z "$res" ]; then
-    printf "  \033[31m✗\033[0m %-26s %s\n" "$script" "${res:-crashed}"
+    row bad "$script" "${res:-crashed}"
     printf '%s\n' "$out" | grep -E '✗|error:' | head -3 | sed 's/^/        /'
     FAILED=1
   else
-    printf "  \033[32m✓\033[0m %-26s %s\n" "$script" "${res:-ok}"
+    row ok "$script" "${res:-ok}"
   fi
 }
 
@@ -46,15 +52,15 @@ typecheck() {
   # The install and the compile fail for different reasons and are reported
   # apart: a lockfile out of step with package.json is not a type error.
   if ! out=$(cd "$ROOT/$dir" && bun install --frozen-lockfile 2>&1); then
-    printf "  \033[31m✗\033[0m %-26s %s\n" "$dir" "bun install --frozen-lockfile"
+    row bad "$dir" "bun install --frozen-lockfile"
     printf '%s\n' "$out" | grep -Ev '^\s*$' | tail -3 | sed 's/^/        /'
     FAILED=1
     return
   fi
   if out=$(cd "$ROOT/$dir" && bunx tsc --noEmit 2>&1); then
-    printf "  \033[32m✓\033[0m %-26s %s\n" "$dir" "tsc --noEmit"
+    row ok "$dir" "tsc --noEmit"
   else
-    printf "  \033[31m✗\033[0m %-26s %s\n" "$dir" "tsc --noEmit"
+    row bad "$dir" "tsc --noEmit"
     # The first type errors; or, when tsc itself did not run (a bunx
     # resolution failure has no `error TS` line), the tail of what did print.
     if printf '%s\n' "$out" | grep -qE 'error TS'; then

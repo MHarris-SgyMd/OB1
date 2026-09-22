@@ -3098,7 +3098,11 @@ function typecheckSurfaceProblems({ packages, tsconfigs, tscSteps }) {
   const problems = [];
   const ref = TYPECHECKED_DIRS[0];
   const refDev = packages[ref]?.devDependencies ?? {};
-  const canon = (o) => JSON.stringify(Object.fromEntries(Object.entries(o ?? {}).sort(([a], [b]) => a.localeCompare(b))));
+  // Keys sorted at every depth (a nested object such as `paths` compares by
+  // content, not insertion order); arrays keep their order, since `types`
+  // and `lib` are ordered.
+  const sortKeys = (v) => (Array.isArray(v) ? v.map(sortKeys) : v && typeof v === "object" ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => a.localeCompare(b)).map(([k, x]) => [k, sortKeys(x)])) : v);
+  const canon = (o) => JSON.stringify(sortKeys(o ?? {}));
   const refOpts = canon(tsconfigs[ref]?.compilerOptions);
   for (const dir of TYPECHECKED_DIRS) {
     const dev = packages[dir]?.devDependencies;
