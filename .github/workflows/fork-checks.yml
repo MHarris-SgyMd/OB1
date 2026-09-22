@@ -228,6 +228,13 @@ jobs:
         working-directory: evals
         run: bunx tsc --noEmit
 
+      # The thought-kind labels (SMD-1951): the fixture's shape rules, probed
+      # with mutants, and the committed fixture held to them. Ids and closed
+      # vocabulary only; no database, no model.
+      - name: Thought-kind fixture shape
+        working-directory: evals
+        run: bun eval-thought-kinds.ts --self-check
+
       # Proves the Cloudflare target still builds under the real Workers bundler.
       # Catches a dependency pulling in a node: builtin Workers cannot provide.
       - name: Cloudflare Workers build
