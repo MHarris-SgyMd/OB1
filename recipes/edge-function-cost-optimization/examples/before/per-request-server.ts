@@ -3,7 +3,7 @@
 // unchanged — set SUPABASE_URL to a postgres:// connection string, and
 // SUPABASE_SERVICE_ROLE_KEY is ignored (credentials live in the URL).
 // ob1-original-import: @supabase/supabase-js
-// Revert with: node scripts/migrate-to-sql-shim.mjs --revert <file>
+// Revert with: bun scripts/migrate-to-sql-shim.ts --revert <file>
 // ob1-fork (SMD-1455): the access key goes through ../_shared/auth.ts (examples/_shared/,
 // the core server's server-portable/auth.ts) — FORK.md change 67. The anti-pattern this file
 // teaches is the per-request construction below, not the key compare it used to carry.

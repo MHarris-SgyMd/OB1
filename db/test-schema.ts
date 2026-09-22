@@ -3381,7 +3381,7 @@ console.log("\n[30] Migration 031: renew_claims moves every lease the worker hol
 
 console.log("\n[31] A vendored schema applied to a migrated brain replaces no function a migration owns — and what upstream's did (SMD-1250)");
 {
-  // The owned set, read from the files as scripts/check-fork-consistency.mjs
+  // The owned set, read from the files as scripts/check-fork-consistency.ts
   // check 7 reads it. Three names preflight's remedies spell as the last
   // definer are pinned here: when one moves, so must the remedy.
   const owned = ownedFunctionsIn(files.map((f) => [f, readFileSync(join(MIGRATIONS, f), "utf8")] as const));

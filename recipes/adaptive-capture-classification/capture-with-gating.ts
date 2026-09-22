@@ -3,13 +3,13 @@
 // unchanged — set SUPABASE_URL to a postgres:// connection string, and
 // SUPABASE_SERVICE_ROLE_KEY is ignored (credentials live in the URL).
 // ob1-original-import: @supabase/supabase-js
-// Revert with: node scripts/migrate-to-sql-shim.mjs --revert <file>
+// Revert with: bun scripts/migrate-to-sql-shim.ts --revert <file>
 // ob1-fork (SMD-1524): the example capture goes through the database's upsert_thought,
 // which writes the content fingerprint (003) with the text; a raw insert left the
 // fingerprint NULL and the row invisible to dedup. It names no audit actor (008 records
 // one only when the caller passes `actor` in p_payload; a server with a key would). No vector is made
 // here, so the 2-argument form is resolved and the row waits for a re-embed pass. FORK.md
-// change 71; scripts/check-fork-consistency.mjs check 10 holds it.
+// change 71; scripts/check-fork-consistency.ts check 10 holds it.
 /**
  * Adaptive Capture Classification — TypeScript reference implementation
  *

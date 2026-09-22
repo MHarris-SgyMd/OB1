@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * assemble-release.mjs — cut a release from the changes/ fragments (SMD-1804).
+ * assemble-release.ts — cut a release from the changes/ fragments (SMD-1804).
  *
  * The fork's change counter used to be assigned by hand at PR time, so a merge of
  * `main` while a PR was in review renumbered a FORK.md section and its
@@ -11,9 +11,9 @@
  * between assembly and tag. Since SMD-1917 a numbered change is a file,
  * changes/NNN-<slug>.md, not a FORK.md section: the step writes each fragment as
  * the next numbered file, removes the fragment, and re-renders FORK.md's index
- * with scripts/fork-index.mjs. Everything a cut can refuse by reading — a
+ * with scripts/fork-index.ts. Everything a cut can refuse by reading — a
  * directory that is not contiguous or holds a stray or two fragments for one
- * ticket, a fragment check 16 would refuse (one function, fragments.mjs) or one
+ * ticket, a fragment check 16 would refuse (one function, fragments.ts) or one
  * naming a migration outside the range, a FORK.md with no marker pair or a
  * CHANGELOG.md with no Unreleased section or a hand-written note under it, a
  * half-applied earlier cut (its numbered files, changelog section or release
@@ -22,9 +22,9 @@
  * not clean. An I/O failure during --write is not planned for: revert the
  * working tree and run again.
  *
- *   bun scripts/assemble-release.mjs              # DRY RUN: print the plan, touch nothing
- *   bun scripts/assemble-release.mjs --write      # write changes/NNN-*.md, FORK.md's index, CHANGELOG.md, releases.json
- *   bun scripts/assemble-release.mjs --self-check  # exercise the pure functions
+ *   bun scripts/assemble-release.ts              # DRY RUN: print the plan, touch nothing
+ *   bun scripts/assemble-release.ts --write      # write changes/NNN-*.md, FORK.md's index, CHANGELOG.md, releases.json
+ *   bun scripts/assemble-release.ts --self-check  # exercise the pure functions
  *
  * The pieces this computes — the next version, the change numbering, the section
  * and changelog rendering, the frozen shas over the new migration range — are pure
@@ -40,8 +40,8 @@ import { execFileSync } from "node:child_process";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { UPSTREAM_PIN, migrationSha, readReleases, highestReleasedMigration } from "../db/version.mjs";
-import { parseFragment, fragmentSection, fragmentProblems } from "./fragments.mjs";
-import { CHANGES_DIR as CHANGES_REL, FIRST_FILED, changeFileName, classifyChanges, pad3, readChangeEntries, renderIndex, spliceIndex } from "./fork-index.mjs";
+import { parseFragment, fragmentSection, fragmentProblems } from "./fragments.ts";
+import { CHANGES_DIR as CHANGES_REL, FIRST_FILED, changeFileName, classifyChanges, pad3, readChangeEntries, renderIndex, spliceIndex } from "./fork-index.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const CHANGES_ABS = join(ROOT, "changes");
@@ -247,7 +247,7 @@ function buildPlan() {
   // can raise — a CHANGELOG.md with no Unreleased section, a migration missing from
   // the range — happens before write() has touched a file.
   // The release's day in the house zone (the one every review pass in the log
-  // was committed in and mechanism-yield.mjs defaults to, SMD-1728), not the
+  // was committed in and mechanism-yield.ts defaults to, SMD-1728), not the
   // machine's: a cut at 20:00 in Chicago is not dated tomorrow. Built from the
   // date's parts, so the YYYY-MM-DD shape check 17a wants is asserted, not a
   // locale's habit.
@@ -367,7 +367,7 @@ function selfCheck() {
   let clThrew = false;
   try { insertChangelogSection("# Changelog\n\nno unreleased\n", "x", "1.0.0", "u"); } catch { clThrew = true; }
   ok(clThrew, "insertChangelogSection throws when there is no Unreleased section");
-  if (bad === 0) console.log("assemble-release.mjs self-check PASS");
+  if (bad === 0) console.log("assemble-release.ts self-check PASS");
   return bad === 0 ? 0 : 1;
 }
 

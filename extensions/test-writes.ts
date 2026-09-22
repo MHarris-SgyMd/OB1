@@ -10,7 +10,7 @@
  * sample — and so
  * left 003/018's fingerprint describing the old text, 021's label describing
  * the old vector and 022's chunk rows of the old vector under the new one.
- * scripts/check-fork-consistency.mjs check 10 holds the text; this proves the
+ * scripts/check-fork-consistency.ts check 10 holds the text; this proves the
  * behaviour: each writer that can run is driven as deployed against a real
  * Postgres carrying the fork's schema, and the row it leaves is compared with
  * the row update_thought leaves for the same edit — the ticket's own verify.
@@ -207,7 +207,7 @@ Bun.plugin({
       src = src.replace(/(from\s+|import\s+)(["'])([^"']+)\2/g, (whole, lead, q, spec) => {
         let s = spec as string;
         if (s.startsWith("npm:")) s = s.slice(4).replace(/^(@?[^@/]+(?:\/[^@/]+)?)@[^/]*/, "$1");
-        // Matched by regex, not a quoted literal: scripts/migrate-to-sql-shim.mjs rewrites every
+        // Matched by regex, not a quoted literal: scripts/migrate-to-sql-shim.ts rewrites every
         // quoted @supabase/supabase-js it finds, and this loader is not a consumer of it.
         if (/^@supabase\/supabase-js$/.test(s)) return `${lead}${q}${SHIM}${q}`;
         if (PACKAGES.test(s)) return `${lead}${q}${Bun.resolveSync(s, HERE)}${q}`;
@@ -853,8 +853,8 @@ for (const [ticket, files] of [["SMD-1228", [...DRIVEN, ...TEXT_ONLY]], ["SMD-15
   assert(headed.join() === [...files].sort().join(), `every .ts file that names ${ticket} is driven here or read here, and vice versa (${headed.join(", ")})`);
 }
 {
-  assert(existsSync(join(ROOT, "scripts/check-fork-consistency.mjs")) && /function thoughtWritesAroundIn\(/.test(readFileSync(join(ROOT, "scripts/check-fork-consistency.mjs"), "utf8")),
-    "scripts/check-fork-consistency.mjs check 10 holds the text of every file: no raw write of content or vector on thoughts");
+  assert(existsSync(join(ROOT, "scripts/check-fork-consistency.ts")) && /function thoughtWritesAroundIn\(/.test(readFileSync(join(ROOT, "scripts/check-fork-consistency.ts"), "utf8")),
+    "scripts/check-fork-consistency.ts check 10 holds the text of every file: no raw write of content or vector on thoughts");
 }
 
 } catch (e) {

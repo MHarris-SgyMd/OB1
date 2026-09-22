@@ -2914,7 +2914,7 @@ on to open. This loop captures it and gates PRs on it.
    brain, so the fixture can be committed without the corpus — but the `query`
    strings are the searcher's own words (personal data), so committing an export
    fixture from a real brain commits real queries; that is a maintainer's call.
-   `scripts/check-fork-consistency.mjs` check 9 guards thought content (an
+   `scripts/check-fork-consistency.ts` check 9 guards thought content (an
    allowlist: every committed string must be an id or free text under a known
    key), not query text. Attribution collapses distinct callers who typed the
    same query, and every anonymous (NULL-agent) caller, into one bucket — a proxy.

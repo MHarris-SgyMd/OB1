@@ -21,7 +21,7 @@
 -- on plain Postgres PUBLIC already includes every role that can connect, so if
 -- the two SECURITY DEFINER RPCs should not read `thoughts` for all of them,
 -- REVOKE EXECUTE … FROM PUBLIC yourself and grant the roles you mean (README,
--- Security). scripts/check-fork-consistency.mjs check 7 fails the build if the
+-- Security). scripts/check-fork-consistency.ts check 7 fails the build if the
 -- upsert returns, and its Supabase-isms check if a grant does.
 
 -- ============================================================

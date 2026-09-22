@@ -100,7 +100,7 @@ export const DEFAULT_EMBEDDING_DIM = 1024;
  * at all: pointing local model names at OpenRouter produces a 404 per capture, and
  * the embedding one is fatal rather than degraded. Overriding the provider means
  * overriding the models too, which SETUP.md says and
- * scripts/check-fork-consistency.mjs enforces.
+ * scripts/check-fork-consistency.ts enforces.
  */
 export const DEFAULT_LLM_BASE_URL = "http://127.0.0.1:11434/v1";
 
@@ -1050,7 +1050,7 @@ export const LOCK_TIMEOUT_S = 10;
  * sharing a number (two branches each adding "the next number" is how it
  * happens; the fork has renumbered twice; SMD-1421). One rule, read by
  * migrate.ts at load — every operator's run and every compose start — and by
- * scripts/check-fork-consistency.mjs on every push, where the collision is
+ * scripts/check-fork-consistency.ts on every push, where the collision is
  * made. Only .sql files are judged.
  * @param {string[]} names
  * @returns {string | null}
@@ -1112,7 +1112,7 @@ export function versionAtLeast(version, major, minor = 0, patch = 0) {
  * The compose service names a model endpoint may live at — the `ollama`
  * service deploy/compose.yaml's `local-models` profile adds. preflight.ts
  * passes these to isLocalHostname (a service name is local: the compose
- * network), and check 14 of scripts/check-fork-consistency.mjs holds
+ * network), and check 14 of scripts/check-fork-consistency.ts holds
  * compose.yaml's OB1_LLM_BASE_URL fallback to one of them — so the address
  * the file defaults to is one the container will call local (SMD-1843).
  */
@@ -1269,7 +1269,7 @@ export const SUPERSEDED_SIGNATURES = Object.freeze([
  * Workers build and cannot touch the filesystem. A statement at the start of
  * a line, comments stripped first so a header quoting one is not it
  * (test-schema [10]'s rule). Read from the files, never typed: a list would
- * lag the next migration. scripts/check-fork-consistency.mjs check 7 fails a
+ * lag the next migration. scripts/check-fork-consistency.ts check 7 fails a
  * vendored file that redefines or drops one of these; test-schema [31] holds
  * the set to what preflight's remedies name.
  */

@@ -1398,16 +1398,17 @@ bunx tsc --noEmit                           # every .ts here, strict, against th
 The last line is the type check CI runs in the portable-server job (SMD-1932):
 `tsconfig.json` here mirrors `server-portable/tsconfig.json`, and `package.json`
 pins `@types/bun`, `typescript` and `@types/node` at the server's versions
-(`check-fork-consistency` 18 holds the four type-checked directories in step). The workers,
+(`check-fork-consistency` 18 holds the type-checked directories in step). The workers,
 benches and suites import `../server-portable/*.ts` and are the first callers
 to break when a shared signature moves; before this nothing compiled them, and
 SMD-1903's required `subject` argument reached `reembed.ts`'s provider probe as
 a runtime error that blamed the provider. Run it after any edit here; it needs
 `bun install` in this directory and in `../server-portable`, and nothing else.
 A plain-JavaScript module a `.ts` file here imports needs a `.d.mts` beside it
-(`config.d.mts` beside `config.mjs`; `../scripts/fragments.d.mts` and
-`fork-index.d.mts` beside theirs) — without one the import is an implicit `any`
-and the check refuses it, which is how SMD-1806's ingester met the step.
+(`config.d.mts` beside `config.mjs`, `version.d.mts` beside `version.mjs`) —
+without one the import is an implicit `any` and the check refuses it, which is
+how SMD-1806's ingester met the step when it imported two `scripts/*.mjs`
+(TypeScript since SMD-1870, so their declaration files went).
 
 `test-search-path.ts` relocates pgvector into a schema off the connection's
 `search_path` — how Supabase and several managed providers ship it, where
@@ -1892,7 +1893,7 @@ asserts 749 properties (at migration 032), including:
   the call and moves nothing
 - **a vendored schema applied to a migrated brain replaces no function a
   migration owns** (SMD-1250): the owned set is read from the migration files
-  as `scripts/check-fork-consistency.mjs` check 7 reads it, and the three last
+  as `scripts/check-fork-consistency.ts` check 7 reads it, and the three last
   definers preflight's remedies spell are pinned; `schemas/enhanced-thoughts/schema.sql`
   applied whole leaves every owned body and overload byte for byte while its
   own columns and functions arrive; then what upstream's file did — 003's

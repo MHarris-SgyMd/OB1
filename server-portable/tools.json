@@ -1,5 +1,5 @@
 {
-  "note": "Generated from server-portable/tools.ts by scripts/gen-tools.mjs — do not edit by hand. tools.ts is the typed source of the MCP tool surface (SMD-1805); deploy/smoke.sh reads this JSON and check-fork-consistency.mjs round-trips it against the source.",
+  "note": "Generated from server-portable/tools.ts by scripts/gen-tools.ts — do not edit by hand. tools.ts is the typed source of the MCP tool surface (SMD-1805); deploy/smoke.sh reads this JSON and check-fork-consistency.ts round-trips it against the source.",
   "tools": [
     {
       "name": "search",

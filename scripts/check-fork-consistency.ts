@@ -1,6 +1,6 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 /**
- * check-fork-consistency.mjs
+ * check-fork-consistency.ts
  *
  * Repo-wide versions of checks the upstream PR gate only applies to the
  * directories a given PR touches. Because the gate never looks at untouched
@@ -89,7 +89,7 @@
  *      the split listed in OVERSIZE_AT_SPLIT with a ceiling they may only
  *      shrink under (held stale two ways); FORK.md is under FORK_CEILING_BYTES,
  *      carries no `### N.` section, and its index block equals what
- *      scripts/fork-index.mjs renders from the directory (a numbered section
+ *      scripts/fork-index.ts renders from the directory (a numbered section
  *      at any heading level is refused in FORK.md); and every "FORK.md change
  *      N" / "FORK change N" / "changes/NNN" / "NNN change M" citation in a file
  *      git tracks or would track (untracked, not ignored), and every bare
@@ -110,7 +110,7 @@
  *      mark, nothing on the second line, ending in every listed ticket — 17b
  *      reads a released ticket from that title) and no numbered heading of its
  *      own — the release step assigns the number and writes the heading
- *      (SMD-1804, SMD-1917); the rules are scripts/fragments.mjs's
+ *      (SMD-1804, SMD-1917); the rules are scripts/fragments.ts's
  *      fragmentProblems, which the release step runs too; the file's name and
  *      line cap are check 15's
  *  17. CHANGELOG.md follows Keep a Changelog 1.1.0 (Unreleased first, versions
@@ -121,8 +121,8 @@
  *      froze; and
  *      migration 044's schema_version equals db/version.mjs's FORK_VERSION
  *      (SMD-1804)
- *  18. the four type-checked directories — server-portable/, compat/supabase-sql/,
- *      db/ and evals/ — share one type surface and CI checks each: every one
+ *  18. the type-checked directories — server-portable/, compat/supabase-sql/,
+ *      db/, evals/ and scripts/ — share one type surface and CI checks each: every one
  *      pins @types/bun, typescript and @types/node in devDependencies at the
  *      value server-portable pins (TypeScript dedupes a package by name and
  *      version, so one directory bumping alone loads two bun-types into the
@@ -132,8 +132,8 @@
  *      exactly once; a tsc step under a directory the list does not name is
  *      refused. The workflow is parsed with Bun.YAML (SMD-1932); no exceptions
  *
- * Run: bun scripts/check-fork-consistency.mjs   (plain ESM; node runs it too,
- * except checks 13, 14 and 18, which parse YAML with Bun.YAML and fail in words under node)
+ * Run: bun scripts/check-fork-consistency.ts   (a Bun script — TypeScript, type-checked in CI
+ * beside its run (SMD-1870); checks 13, 14 and 18 parse YAML with Bun.YAML)
  * Exits non-zero on any violation.
  */
 
@@ -142,9 +142,9 @@ import { execFileSync } from "node:child_process";
 import { join, dirname, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { coreColumnCommentStatement, coreFunctionStatement, LOCAL_PROVIDER_SERVICES, ownedColumnCommentsIn, ownedFunctionsIn, supabaseIsmsIn } from "../db/config.mjs";
-import { CHANGES_DIR, END as INDEX_END, START as INDEX_START, FIRST_FILED, classifyChanges, indexSpan, pad3, readChangeEntries, renderIndex, ticketsOf } from "./fork-index.mjs";
+import { CHANGES_DIR, END as INDEX_END, START as INDEX_START, FIRST_FILED, classifyChanges, indexSpan, pad3, readChangeEntries, renderIndex, ticketsOf } from "./fork-index.ts";
 import { FORK_VERSION, migrationSha, readReleases, semverCompare } from "../db/version.mjs";
-import { fragmentProblems } from "./fragments.mjs";
+import { fragmentProblems } from "./fragments.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const CATEGORIES = [
@@ -160,7 +160,7 @@ const CATEGORIES = [
 const violations = [];
 const fail = (where, msg) => violations.push({ where, msg });
 /** This script, as the `where` of a violation in its own probes and inventories. */
-const SELF = "scripts/check-fork-consistency.mjs";
+const SELF = "scripts/check-fork-consistency.ts";
 
 const schema = JSON.parse(readFileSync(join(ROOT, ".github/metadata.schema.json"), "utf8"));
 const props = schema.properties;
@@ -1745,7 +1745,7 @@ function checkShimRuntime() {
       const g = dep ? gap.slice(dep[0].length) : gap;
       const line = /@(\d+)$/.exec(g)?.[1];
       const at = line ? `${where}:${line}` : where;
-      if (g === "no-runtime-import") fail(rel, `${WHY} (itself or through ${deps.length ? "a file it imports" : "its own text"}) but does not import compat/deno-on-bun.ts — under Bun \`Deno\` is undefined at the first read, under Deno the shim's \`bun\` import fails, so the file runs nowhere; \`bun scripts/migrate-to-sql-shim.mjs --apply --all\` adds the line as the first import (SMD-1480, FORK.md change 74)`);
+      if (g === "no-runtime-import") fail(rel, `${WHY} (itself or through ${deps.length ? "a file it imports" : "its own text"}) but does not import compat/deno-on-bun.ts — under Bun \`Deno\` is undefined at the first read, under Deno the shim's \`bun\` import fails, so the file runs nowhere; \`bun scripts/migrate-to-sql-shim.ts --apply --all\` adds the line as the first import (SMD-1480, FORK.md change 74)`);
       else if (g.startsWith("runtime-not-first")) fail(at, `imports compat/deno-on-bun.ts after another import — a module evaluated before it may read \`Deno.env\` in its body and throw at startup; make it the first import statement (SMD-1480, FORK.md change 74)`);
       else if (g.startsWith("deno-member:")) {
         const member = g.slice("deno-member:".length).replace(/@\d+$/, "");
@@ -2285,14 +2285,14 @@ checkMigrationDoc();
 async function checkToolsManifest() {
   let renderToolsJson;
   try {
-    ({ renderToolsJson } = await import("./gen-tools.mjs"));
+    ({ renderToolsJson } = await import("./gen-tools.ts"));
   } catch (e) {
     console.warn(`  (tools.json round-trip skipped — ${e.message.split("\n")[0]} — run under bun)`);
     return;
   }
   const have = readFileSync(join(ROOT, "server-portable", "tools.json"), "utf8");
   if (have !== renderToolsJson()) {
-    fail("server-portable/tools.json", "does not match its source — the MCP tool surface's typed source is server-portable/tools.ts; run `bun scripts/gen-tools.mjs` to regenerate (SMD-1805)");
+    fail("server-portable/tools.json", "does not match its source — the MCP tool surface's typed source is server-portable/tools.ts; run `bun scripts/gen-tools.ts` to regenerate (SMD-1805)");
   }
 }
 await checkToolsManifest();
@@ -3017,7 +3017,7 @@ function forkLayoutProblems({ entries, forkText, citations = [], ceilings = OVER
   const prose = span ? forkText.slice(0, span.s) + forkText.slice(span.e) : forkText;
   const bytes = Buffer.byteLength(prose, "utf8");
   if (bytes > forkCeiling) at("FORK.md", "fork-oversize", `is ${bytes} bytes outside the generated index; the front door stays under ${forkCeiling} — a change's record belongs in its file under ${CHANGES_DIR}/, not here`);
-  if (span && forkText.slice(span.s, span.e) !== "\n" + renderIndex(changes)) at("FORK.md", "index-stale", `the index between the markers is not what ${CHANGES_DIR}/ renders to — run \`bun scripts/fork-index.mjs\``);
+  if (span && forkText.slice(span.s, span.e) !== "\n" + renderIndex(changes)) at("FORK.md", "index-stale", `the index between the markers is not what ${CHANGES_DIR}/ renders to — run \`bun scripts/fork-index.ts\``);
   for (const c of citations) {
     if (c.n < 1 || (c.n >= FIRST_FILED && !byN.has(c.n)) || (c.name && c.n < FIRST_FILED)) at(c.where, "dangling", `cites change ${c.n}${c.name ? ` as ${CHANGES_DIR}/${c.name}` : ""}, which has no file under ${CHANGES_DIR}/ (1–${FIRST_FILED - 1} are FORK.md's table; the highest with a file is ${hi}) — a renumber left this behind, or the file is missing`);
     else if (c.name && byN.get(c.n).name !== c.name) at(c.where, "dangling", `cites ${CHANGES_DIR}/${c.name}, and change ${c.n}'s file is ${CHANGES_DIR}/${byN.get(c.n).name} — the file was renamed under the link`);
@@ -3155,7 +3155,7 @@ const KAC_HEADINGS = new Set(["Added", "Changed", "Deprecated", "Removed", "Fixe
 
 /**
  * 16: a changes/<ticket>.md fragment is well-formed — fragmentProblems lives in
- * scripts/fragments.mjs, one definition for this check and the release step. A fragment replaces the
+ * scripts/fragments.ts, one definition for this check and the release step. A fragment replaces the
  * hand-numbered FORK section for new work: front matter naming a Keep a Changelog
  * type, a bump the migrations it lists allow, and the tickets and migrations it
  * touches; a Changelog body (1–3 lines) and a FORK body. A `bump: patch` that
@@ -3205,7 +3205,7 @@ function checkFragments() {
     ["---\ntype: added        # one of the six\nbump: minor        # the rules\ntickets: [SMD-1804]        # one or more\nmigrations: [044]          # or [] for none\n---\n\n## Changelog\n\nx (SMD-1804, migration 044).\n\n## FORK\n\nA title (SMD-1804)\n\nbody\n", "the README's template copied with its inline comments"],
   ]) if (fragmentProblems(probe).length) fail(SELF, `check 16 refuses ${why}: ${fragmentProblems(probe).join("; ")} (its own non-probe)`);
 
-  // Numbered files and stray names are check 15's; one definition of a fragment's name (fork-index.mjs).
+  // Numbered files and stray names are check 15's; one definition of a fragment's name (fork-index.ts).
   for (const f of changesOnDisk().fragments) for (const p of fragmentProblems(f.text, f.name)) fail(`changes/${f.name}`, `${p} (SMD-1804)`);
 }
 checkFragments();
@@ -3402,14 +3402,14 @@ function checkSchemaVersion() {
 checkSchemaVersion();
 
 /**
- * 18: one type surface across the four type-checked directories, and a CI step
+ * 18: one type surface across the type-checked directories, and a CI step
  * for each — see the header. The rule is one pure function over in-memory
  * records, probed below, so a package.json that stops pinning, a tsconfig that
  * drifts, or a workflow that loses (or grows) a tsc step fails here by name.
  * `server-portable` is the reference: the others import its files, so its
  * pins are the ones a second copy would collide with.
  */
-const TYPECHECKED_DIRS = ["server-portable", "compat/supabase-sql", "db", "evals"];
+const TYPECHECKED_DIRS = ["server-portable", "compat/supabase-sql", "db", "evals", "scripts"];
 const TYPE_PINS = ["@types/bun", "typescript", "@types/node"];
 const WORKFLOW = ".github/workflows/fork-checks.yml";
 const TSC_STEP = /^\s*bunx tsc --noEmit\s*$/;
@@ -3428,7 +3428,7 @@ function typecheckSurfaceProblems({ packages, tsconfigs, tscSteps }) {
     if (!dev) problems.push([`${dir}/package.json`, `${packages[dir] ? "has no devDependencies" : "is missing"} — every type-checked directory pins ${TYPE_PINS.join(", ")} in its devDependencies (SMD-1932)`]);
     else for (const name of TYPE_PINS) {
       if (!(name in dev)) problems.push([`${dir}/package.json`, dir === ref ? `does not pin ${name} — it is the reference the other type-checked directories are held to (SMD-1932)` : `does not pin ${name}; ${ref}/package.json pins it at ${refDev[name] ?? "(nothing)"} (SMD-1932)`]);
-      else if (dir !== ref && dev[name] !== refDev[name]) problems.push([`${dir}/package.json`, `pins ${name} at ${dev[name]} but ${ref}/package.json pins ${refDev[name]} — bump the four type-checked directories in one commit, or two copies of the types load into the programs that import ../server-portable (SMD-1932)`]);
+      else if (dir !== ref && dev[name] !== refDev[name]) problems.push([`${dir}/package.json`, `pins ${name} at ${dev[name]} but ${ref}/package.json pins ${refDev[name]} — bump every type-checked directory in one commit, or two copies of the types load into the programs that import ../server-portable (SMD-1932)`]);
     }
     const opts = tsconfigs[dir]?.compilerOptions;
     if (!opts) problems.push([`${dir}/tsconfig.json`, `missing, or has no compilerOptions (SMD-1932)`]);

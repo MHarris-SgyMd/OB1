@@ -263,12 +263,12 @@ Commits to the fork's own code follow a small grammar, checked by `commitlint`
   warning).
 - On a review-pass commit, every finding bullet in the body carries a
   `(caught: <how it was found>)` tag — the `caught-tag` rule (a warning) — so
-  `scripts/mechanism-yield.mjs` can count what each pass caught. Subjects have no
+  `scripts/mechanism-yield.ts` can count what each pass caught. Subjects have no
   length limit; they are sentences by design.
 
 It runs in CI on every PR (the `commit-lint` job) and, opt-in, before each commit
-locally: `bun scripts/install-hooks.mjs` (undo with `--uninstall`). Merge commits
-are ignored. The config is `scripts/commitlint.config.mjs`.
+locally: `bun scripts/install-hooks.ts` (undo with `--uninstall`). Merge commits
+are ignored. The config is `scripts/commitlint.config.ts`.
 
 ## Changelog & versioning (fork changes)
 

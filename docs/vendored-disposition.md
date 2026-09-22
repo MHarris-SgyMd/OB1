@@ -4,7 +4,7 @@ The fork vendors ~33k lines of upstream community code across `integrations/`,
 `recipes/`, `schemas/` and a few `docs/drafts/` SQL sketches. The standing posture is
 **"audit once, hold the delta"** (SMD-1228 / SMD-1250 / SMD-1256): the tree is *kept* —
 these are the repo's "open for contributions" categories — held to the core's standard
-where it matters, with `scripts/check-fork-consistency.mjs` as the standing guard.
+where it matters, with `scripts/check-fork-consistency.ts` as the standing guard.
 
 This document runs that standard to completion: **one inventory, one disposition per
 artifact.** For an arbitrary vendored file you can now say whether it is live,
@@ -71,7 +71,7 @@ exactly one disposition.
 
 **Guard follow-ups (SMD-1924 verify item — "a newly vendored file redefining a core object
 fails CI"):**
-1. `scripts/check-fork-consistency.mjs` check 7 already covers **function** redefinitions
+1. `scripts/check-fork-consistency.ts` check 7 already covers **function** redefinitions
    (`upsert_thought` / `match_thoughts` / `update_updated_at`) since SMD-1250 — confirmed.
 2. **Done** — check 5 now also fails a vendored `.sql` that does `DROP COLUMN` / `ALTER COLUMN`
    on core `thoughts` (rule `thoughts-column-mutation`, scoped to `schemas`/`recipes`/`integrations`
@@ -99,9 +99,9 @@ fails CI"):**
 
 An artifact is *referenced* — and therefore not removable — when something outside its
 own folder depends on it: a code import, a CI parity test (`extensions/test-auth.ts`,
-`extensions/test-writes.ts`), the fork guard (`scripts/check-fork-consistency.mjs`),
+`extensions/test-writes.ts`), the fork guard (`scripts/check-fork-consistency.ts`),
 `.github/workflows/fork-checks.yml`, `extensions/package.json` scripts, the SQL-shim
-codemod (`scripts/migrate-to-sql-shim.mjs`), a `README.md` capability index row, a docs
+codemod (`scripts/migrate-to-sql-shim.ts`), a `README.md` capability index row, a docs
 setup step, or another artifact wiring to it. Mentions in `FORK.md` / `CHANGELOG.md`
 are the *audit record*, not a live dependency, and do not block a removal.
 
@@ -139,7 +139,7 @@ excluding `_shared/` / `_template/` scaffolding and `README.md` indexes. 87 arti
 | `rest-api` | keep + audited | Documented general REST gateway (CORS, full CRUD, ingest, entity endpoints); `/ingest` proxies to `smart-ingest`. CI `test-auth.ts:622` + `test-writes.ts:443`, `brain-smoke-test` probes it; on the shim. (Coexists with `open-brain-rest`, the dashboard-specific gateway — a possible future consolidation, not a removal; both referenced.) |
 | `slack-capture` | keep + audited → fold-in **SMD-1867** | Slack quick-capture source. Live: README index, `docs/01-getting-started` step, CI. Capture adapter under SMD-1867. |
 | `smart-ingest` | keep + audited | LLM document-extraction/atomization pipeline; companion worker to `schemas/smart-ingest`. Live: CI `test-auth.ts:622`, `rest-api` `/ingest` proxies to it, `entity-extraction-worker` helper routes oversized content to it. (Schema's rebuild is tracked under SMD-1253.) |
-| `telegram-capture` | keep + audited → fold-in **SMD-1867** | Telegram quick-capture source; its README is a CI-driven write sample (`test-writes.ts:701-702`) and a guard fixture (`check-fork-consistency.mjs:1277`). Capture adapter under SMD-1867. |
+| `telegram-capture` | keep + audited → fold-in **SMD-1867** | Telegram quick-capture source; its README is a CI-driven write sample (`test-writes.ts:701-702`) and a guard fixture (`check-fork-consistency.ts:1277`). Capture adapter under SMD-1867. |
 | `update-thought-mcp` | keep + audited *(revises seed "remove")* | Twin of `delete-thought-mcp`: migration 009 ported the *RPC* from it into core, but the standalone MCP server stays a live community example — CI `test-auth.ts:187` + `test-writes.ts:315`, `schemas/thought-audit` README. Fails "verified no references." |
 
 ### `schemas/` (16)
@@ -154,7 +154,7 @@ excluding `_shared/` / `_template/` scaffolding and `README.md` indexes. 87 arti
 | `per-agent-identity` | keep + audited *(revises seed "remove")* | Community `openbrain_agents` / `agent_memory_keys` + `lookup_agent_memory_key` — granted by the fork's own `db/config.mjs` ROLE_GRANTS (SMD-1226). Migration 010 is "Ported from schemas/per-agent-identity" with departures (ob1_* names); the community file is the upstream-faithful origin, held to the delta. |
 | `provenance-chains` | keep + audited *(revises seed "remove")* | Additive derivation columns + own merge functions (granted by `db/config.mjs`); `recipes/provenance-chains` + `typed-edge-classifier` read it. Guard check 7 (line 554) already fences its function set. Distinct from core's 025/026/032 provenance. |
 | `readwise-books` | keep + audited | Own `readwise_books` cache + RPCs; granted by `db/config.mjs`; companion to `integrations/readwise-capture` + `recipes/readwise-import`; CI `test-writes.ts` SIDECARS. Not superseded, not a hazard. |
-| `recency-boosted-match-thoughts` | **remove** *(no-parity posture)* | Standalone `match_thoughts_recency` with **zero callers** in the fork; migration 020 folded recency into core `match_thoughts` + `recency_score()` instead (`db/README`: "upstream … for the formula"). Guard-allowlisted (not a clobber) but valueless to the fork. Removal PR: delete the folder **and** the now-dead allowlist entry at `scripts/check-fork-consistency.mjs:614`. |
+| `recency-boosted-match-thoughts` | **remove** *(no-parity posture)* | Standalone `match_thoughts_recency` with **zero callers** in the fork; migration 020 folded recency into core `match_thoughts` + `recency_score()` instead (`db/README`: "upstream … for the formula"). Guard-allowlisted (not a clobber) but valueless to the fork. Removal PR: delete the folder **and** the now-dead allowlist entry at `scripts/check-fork-consistency.ts:614`. |
 | `smart-ingest` | keep + audited | Own `ingestion_jobs` / `ingestion_items` + `append_thought_evidence` (granted by `db/config.mjs`); companion to `integrations/smart-ingest`; `enhanced-mcp` / `rest-api` / `brain-health-monitoring` reference it. *(Minor: some refs say `schemas/smart-ingest-tables` — a stale folder-name drift to fix, not a disposition issue.)* Rebuild tracked under SMD-1253. |
 | `text-search-trgm` | **remove** *(no-parity posture)* | Pure `idx_thoughts_content_trgm` GIN index promoted **verbatim** into core by migration 011 (SMD-925; on by default — `test-schema.ts:250`). Its purpose (accelerate `enhanced-thoughts`' `search_thoughts_text` ILIKE fallback) targets a function the fork replaced with `search_thoughts_keyword` (012). Only ref is an `enhanced-thoughts` doc comment. No fork-side value. Removal PR: delete the folder (no guard allowlist entry to clean). |
 | `thought-audit` | keep + audited *(revises seed "remove")* | Own `thought_audit` table (granted by `db/config.mjs`, with the `thought_provenance` view); referenced by `delete-thought-mcp` / `update-thought-mcp`. Migration 008 is "Ported from schemas/thought-audit" with departures; community origin held to the delta. |

@@ -1,6 +1,6 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 /**
- * mechanism-yield.mjs — which review mechanisms pay, read from the commit log.
+ * mechanism-yield.ts — which review mechanisms pay, read from the commit log.
  *
  * The fork's review loop records each pass as a commit whose body lists its
  * findings as bullets. This script treats every such bullet as one row and
@@ -59,12 +59,12 @@
  *
  * Not a CI gate. A maintainer report, run when ten tickets carry tags:
  *
- *   bun scripts/mechanism-yield.mjs                      # whole log
- *   bun scripts/mechanism-yield.mjs --since <sha>        # that commit and everything committed at or after it
- *   bun scripts/mechanism-yield.mjs --since YYYY-MM-DD   # from that calendar day on, committer time in --zone
- *   bun scripts/mechanism-yield.mjs --zone Europe/London # the zone days are read in (default America/Chicago)
- *   bun scripts/mechanism-yield.mjs --log dump.txt       # a saved dump (--since then takes a date only)
- *   bun scripts/mechanism-yield.mjs --self-check         # the parser fixtures
+ *   bun scripts/mechanism-yield.ts                      # whole log
+ *   bun scripts/mechanism-yield.ts --since <sha>        # that commit and everything committed at or after it
+ *   bun scripts/mechanism-yield.ts --since YYYY-MM-DD   # from that calendar day on, committer time in --zone
+ *   bun scripts/mechanism-yield.ts --zone Europe/London # the zone days are read in (default America/Chicago)
+ *   bun scripts/mechanism-yield.ts --log dump.txt       # a saved dump (--since then takes a date only)
+ *   bun scripts/mechanism-yield.ts --self-check         # the parser fixtures
  *
  * `--since <sha>` is a window in TIME as well as ancestry — the commit's own
  * commit time onward — so a branch that started before the anchor and merged
@@ -96,10 +96,10 @@
 
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
-// The commit-message grammar is defined once, in commit-grammar.mjs, and shared
-// with scripts/commitlint.config.mjs (SMD-1808) — importing it here rather than
+// The commit-message grammar is defined once, in commit-grammar.ts, and shared
+// with scripts/commitlint.config.ts (SMD-1808) — importing it here rather than
 // keeping a second copy. Pure string work, no side effects at import.
-import { passNumber, isRunResult, bulletsOf, MECHANISMS, readTag, isReviewPass, REVIEW_RE, BOYSCOUT_RE, MERGE_RE } from "./commit-grammar.mjs";
+import { passNumber, isRunResult, bulletsOf, MECHANISMS, readTag, isReviewPass, REVIEW_RE, BOYSCOUT_RE, MERGE_RE } from "./commit-grammar.ts";
 
 // ---------------------------------------------------------------------------
 // Arguments
@@ -382,7 +382,7 @@ function selfCheck() {
     "",
     "Green after:",
     "- bun db/test-schema.ts 907/907",
-    "- bun scripts/check-fork-consistency.mjs PASS, with a sentence long enough to look like a finding",
+    "- bun scripts/check-fork-consistency.ts PASS, with a sentence long enough to look like a finding",
     "",
     "Verified against the container, and two things came of it:",
     "- test-live 17/17 (caught: run-it)",
