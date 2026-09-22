@@ -72,6 +72,25 @@ if (!(DELETE_FRACTION > 0 && DELETE_FRACTION < 1)) {
 }
 const SPREAD_DAYS = KEEP_DAYS / (1 - DELETE_FRACTION);
 
+// The numeric knobs guard their own edges, as DELETE_FRACTION does: an unset value
+// takes the default, but a supplied 0, negative, fractional or non-numeric one would
+// otherwise slip through to a divide-by-zero (perRowUs, awaitedMs), an undefined
+// median (REPEATS=0 leaves the sample array empty), a generate_series(1, NaN) SQL
+// error, or an empty SCALES that prints a "flips at every scale" conclusion drawn
+// from zero rows. Fail fast instead.
+for (const [name, val] of [
+  ["OB1_BENCH_WRITE_BATCH", WRITE_BATCH],
+  ["OB1_BENCH_AWAITED", AWAITED_PROBES],
+  ["OB1_BENCH_REPEATS", REPEATS],
+] as const) {
+  if (!Number.isInteger(val) || val < 1) {
+    throw new Error(`${name} must be an integer >= 1, got ${process.env[name]}`);
+  }
+}
+if (SCALES.length === 0) {
+  throw new Error(`OB1_BENCH_SCALES must list at least one positive integer, got ${process.env.OB1_BENCH_SCALES}`);
+}
+
 const INDEX = "query_log_logged_at_idx";
 
 // ── Setup ──────────────────────────────────────────────────────────────────────
@@ -216,16 +235,18 @@ function fmtMs(ms: number): string {
 }
 
 /**
- * The index's per-row maintenance cost, signed. Below ±0.5 µs it is reported as
- * negligible rather than as a number: at 20k batched rows that band is warm-up and
- * ordering noise, and a signed "+0.1 µs" (or a negative one) invites a reader to
- * believe a difference a second run would reverse. That the cost lands here at all
- * is the finding — the btree is far below the ~0.5 ms round trip the await pays.
+ * The index's per-row maintenance cost. Reported as negligible unless it clears
+ * +0.5 µs: the two arms are timed on separately loaded tables (bloat can't cross
+ * between them, but ambient load can skew each), so a small "+0.1 µs" would invite a
+ * reader to believe a difference a second run would reverse — and a *negative* result
+ * is physically impossible (an index cannot speed up an insert), so it can only be
+ * that same noise. Both collapse to "negligible", which is itself the finding: the
+ * btree's cost sits far below the ~0.5 ms round trip the await already pays.
  */
 function perRowUs(withMs: number, withoutMs: number, n: number): string {
   const us = ((withMs - withoutMs) * 1000) / n;
-  if (Math.abs(us) < 0.5) return "negligible (<0.5 µs)";
-  return `${us > 0 ? "+" : ""}${us.toFixed(2)} µs`;
+  if (us < 0.5) return "negligible (< 0.5 µs, at/below measurement noise)";
+  return `+${us.toFixed(2)} µs`;
 }
 
 /** before/after as a ratio, with a ±5% dead band (noise at these durations). */
