@@ -43,11 +43,13 @@
  * and as a topic are both it; the other names an alias or fuzzy rung returns
  * are listed, unmarked, and not ranked around (`rankedSubjects`,
  * `Report.subject_ids`). A uuid is one entity, ranked around alone — its
- * same-name siblings under other types are then its neighbours. `--types` and the numeric rule together say which
- * entities exist for the run — the scope IS the graph: an entity outside it is
- * in no list and no count, so under `--types tool` a tool's degree is its
- * degree among tools. The subject is the one exception, resolved whatever its
- * type: `--types tool "Open Brain"` is the tools around a project.
+ * same-name siblings under other types are then its neighbours.
+ *
+ * `--types` and the numeric rule together say which entities exist for the
+ * run — the scope IS the graph: an entity outside it is in no list and no
+ * count, so under `--types tool` a tool's degree is its degree among tools.
+ * The subject is the one exception, resolved whatever its type: `--types tool
+ * "Open Brain"` is the tools around a project.
  *
  * ── What this is not ────────────────────────────────────────────────────────
  * Centrality here is ATTENTION, not value, and the output says so every run:
@@ -193,7 +195,9 @@ export async function resolveSubject(run: Runner, subject: string, scopeIn: Scop
   // subject. The mention count is MENTIONS_CTE's, correlated — an index probe
   // per CANDIDATE row, since the ORDER BY reads it: one for an exact or alias
   // match, one per entity above the similarity floor on the fuzzy rung.
-  const rung = async (how: string, score: string, params: unknown[], limit = ""): Promise<{ hit: SubjectRow[]; out: number }> => {
+  /** A rung's rows: those in the rule (the subject, if any) and how many the rule kept out. */
+  type RungResult = { hit: SubjectRow[]; out: number };
+  const rung = async (how: string, score: string, params: unknown[], limit = ""): Promise<RungResult> => {
     params.push(NUMERIC_NAME_RE);
     const rows = await run(
       `SELECT s.id, s.entity_type, s.name, s.normalized_name,
@@ -214,7 +218,7 @@ export async function resolveSubject(run: Runner, subject: string, scopeIn: Scop
    * rule hid (excluded, exit 3); on the fuzzy rung it is not — only guesses
    * were hidden, which the miss reports as a count (seventh review pass).
    */
-  const step = (how: Resolution["how"], r: { hit: SubjectRow[]; out: number }, normalized: string | null): Resolution | null =>
+  const step = (how: Resolution["how"], r: RungResult, normalized: string | null): Resolution | null =>
     r.hit.length ? { how, subjects: r.hit, normalized, excluded: false, hidden_guesses: 0 }
     : r.out === 0 ? null
     : how === "fuzzy" ? none(normalized, false, r.out) : none(normalized, true);

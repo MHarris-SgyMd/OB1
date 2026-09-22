@@ -5527,6 +5527,8 @@ console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defi
   await record(t5, [E("Open Brain", "project"), E("021", "person")], [R("021", "Open Brain", "works_on")]);
   await record(t6, [E("Bun", "tool")]);
   await record(t8, [E("PG", "tool")]);
+  /** A fixture thought out again, and the entities only it held with it. */
+  const drop = async (id: string) => { await db.query(`DELETE FROM thoughts WHERE id = $1`, [id]); await db.exec(`SELECT prune_orphan_entities()`); };
   const idOf = async (nname: string, type = "tool") =>
     (await db.query<{ id: string }>(`SELECT id FROM ob1_entities WHERE normalized_name = $1 AND entity_type = $2`, [nname, type])).rows[0].id;
   const OB = await idOf("open brain", "project");
@@ -5738,8 +5740,7 @@ console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defi
   assert(guessedText.includes("ranked around the first") && /\n {2}▸ project "Open Brain"/.test(guessedText) && /\n {4}project "Open Brains"/.test(guessedText),
     "the report says guesses are ranked around the first and marks which one");
   assert((await graphReport(run, "Open Brain", on)).subject_ids.join() === OB && (await graphReport(run, "Linear", on)).subject_ids.length === 0, "an exact subject is ranked around whole; a miss around nothing");
-  await db.query(`DELETE FROM thoughts WHERE id = $1`, [t9]);
-  await db.exec(`SELECT prune_orphan_entities()`);
+  await drop(t9);
   assert((await graphCoverage(run, on)).entities === 4, "the extra guess is gone again");
 
   // The alias rung can return several different names too — two entities the
@@ -5755,8 +5756,7 @@ console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defi
   assert(aliasedReport.subject_ids.join() === PG && render(aliasedReport).includes("several names match; ranked around the first") && /\n {4}tool "Supabase Postgres"/.test(render(aliasedReport)),
     "…the report says so and leaves the second unmarked");
   assert(rankedSubjects(exact).join() === OB && rankedSubjects(none).length === 0, "an exact subject is ranked whole; nothing, nothing");
-  await db.query(`DELETE FROM thoughts WHERE id = $1`, [t10]);
-  await db.exec(`SELECT prune_orphan_entities()`);
+  await drop(t10);
 
   // A numeric name that IS an entity stops the ladder before the guesses: with
   // a near name "021x" in the graph, "021" must not be guessed past to it
@@ -5772,18 +5772,15 @@ console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defi
   assert(noNeighbour.includes("No neighbour:") && !noNeighbour.includes("\n\n\n"), "a subject with nothing in scope beside it says so, with one blank line, not two (fourth review pass)");
   const guessedNumeric = await resolveSubject(run, "0219", on);
   assert(guessedNumeric.how === "fuzzy" && guessedNumeric.subjects[0].name === "021x", `a numeric name that is NOT an entity still reaches the guesses (${guessedNumeric.how})`);
-  // The fuzzy rung under the same rule as the others (sixth review pass): a
-  // near-miss whose only guess is the numeric 021 is excluded, not "nothing
-  // within trigram similarity"; kept, 021 is the guess. "02" is near "021"
-  // (0.4) and not near "021x" (two of six trigrams, 0.33 — also a guess, but
-  // in the rule and so first; hence the mixed case below asserts the order).
+  // The fuzzy rung under the same rule as the others: "02" is near "021" (0.4)
+  // and near "021x" (0.33); with 021 out of the rule the one guess is 021x,
+  // and no guess counts as hidden while a guess in the rule exists.
   const nearNumeric = await resolveSubject(run, "02", on);
   assert(nearNumeric.how === "fuzzy" && nearNumeric.subjects.map((s) => s.name).join() === "021x" && nearNumeric.hidden_guesses === 0,
     `under the rule the one guess for "02" is 021x — 021 is never offered (${nearNumeric.how}, ${nearNumeric.subjects.map((s) => s.name).join(",")})`);
   const nearKept = await resolveSubject(run, "02", keep);
   assert(nearKept.how === "fuzzy" && nearKept.subjects.some((s) => s.name === "021"), `…and kept, 021 is among the guesses (${nearKept.subjects.map((s) => s.name).join(",")})`);
-  await db.query(`DELETE FROM thoughts WHERE id = $1`, [t11]);
-  await db.exec(`SELECT prune_orphan_entities()`);
+  await drop(t11);
   assert((await graphCoverage(run, on)).entities === 4, "the fixture is back to four");
   // With no near name in the rule's scope, the only guess for "02" is 021: a
   // miss (no entity, exit 1's case — "02" is not 021), and the miss counts the
@@ -5809,8 +5806,7 @@ console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defi
     `the two lettered near names are the guesses, the five numeric ones sorted past the limit (${cut.how}: ${cut.subjects.map((s) => s.name).join(",")})`);
   const cutKept = await resolveSubject(run, "021z", keep);
   assert(cutKept.how === "fuzzy" && cutKept.subjects.length === 5, `kept, the limit's five come from all seven (${cutKept.subjects.length})`);
-  await db.query(`DELETE FROM thoughts WHERE id = $1`, [t15]);
-  await db.exec(`SELECT prune_orphan_entities()`);
+  await drop(t15);
 
   // Model output is rendered clean: a control sequence in a name never reaches
   // the terminal, and a newline in one never breaks a row (sixth review pass).
@@ -5818,13 +5814,12 @@ console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defi
   await record(t14, [E("Evil\u001b[31mName\nSplit", "tool")]);
   const hostile = render(await graphReport(run, null, on));
   assert(!hostile.includes("\u001b") && hostile.includes("Evil[31mName Split"), "the rendered table carries no control character — the escape is gone, its bare text stays — and one space for the newline");
-  await db.query(`DELETE FROM thoughts WHERE id = $1`, [t14]);
-  await db.exec(`SELECT prune_orphan_entities()`);
+  await drop(t14);
 
   // A non-numeric name that is an ALIAS of a numeric-named entity is the same
   // stop: the match exists, the rule hid it, exit 3 not 1 (fifth review pass).
   const t13 = await thought("021, the twenty-first migration.");
-  await record(t13, [{ ...E("021", "person", ["twentyfirst"]) }]);
+  await record(t13, [E("021", "person", ["twentyfirst"])]);
   const viaAlias = await resolveSubject(run, "twentyfirst", on);
   assert(viaAlias.how === "none" && viaAlias.excluded === true, `an alias of 021 resolves to none, excluded — not "no alias or merged name" (${viaAlias.how}, ${viaAlias.excluded})`);
   assert((await resolveSubject(run, "twentyfirst", keep)).how === "alias", "…and kept, the alias rung finds it");
