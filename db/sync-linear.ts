@@ -84,7 +84,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { SQL } from "bun";
 import { SqlStore } from "../server-portable/store-sql.ts";
-import { createEmbedder, resolveEmbedConfig, type EmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
+import { createEmbedder, resolveEmbedConfig, type EmbedConfig, type EmbedEnv, type EmbeddedCapture } from "../server-portable/embed.ts";
 import { decideCalls, type EgressSubject } from "../server-portable/egress.ts";
 import { extractMetadata, metadataRefused } from "../server-portable/metadata.ts";
 import type { Actor } from "../server-portable/store.ts";
@@ -115,9 +115,9 @@ export type LinearIssue = {
   labels: { nodes: { name: string }[] };
 };
 
-/** The identifier at the head of a ticket row, and the header grammar the hand captures used. */
-export const IDENTIFIER_RE = /^([A-Z][A-Z0-9]+-\d+)\b/;
-const HEADER_RE = /^([A-Z][A-Z0-9]+-\d+) — [^\n]*\nProject: [^\n]*\nhttps:\/\/linear\.app\/[^\n]*(?:\n|$)/;
+/** The identifier at the head of a ticket row (a team key of one letter or more), and the header grammar the hand captures used. */
+export const IDENTIFIER_RE = /^([A-Z][A-Z0-9]*-\d+)\b/;
+const HEADER_RE = /^([A-Z][A-Z0-9]*-\d+) — [^\n]*\nProject: [^\n]*\nhttps:\/\/linear\.app\/[^\n]*(?:\n|$)/;
 
 /**
  * Linear's autolink markup, `<issue id="…" href="…">SMD-1234</issue>`, to the
@@ -153,13 +153,6 @@ export function issueFacets(issue: LinearIssue): Record<string, unknown> {
 }
 
 /**
- * The thought's text: the shape the hand captures used, exactly, so the first
- * pass over a hand-built brain rewrites the tickets that changed and not every
- * one of them. Header line, facet line, URL, blank, the description with
- * autolinks stripped. `Labels: none` and `Parent: none` are spelled, as the hand
- * did; the project too, for an issue that has none.
- */
-/**
  * The label names in one order. Linear's `labels` connection promises none, and
  * an order that differed between two requests would re-render the text and
  * re-embed the row every pass (third review pass); the hand captures carried
@@ -169,6 +162,13 @@ export function labelNames(issue: LinearIssue): string[] {
   return issue.labels.nodes.map((l) => l.name).sort((a, b) => a.localeCompare(b, "en"));
 }
 
+/**
+ * The thought's text: the shape the hand captures used, exactly, so the first
+ * pass over a hand-built brain rewrites the tickets that changed and not every
+ * one of them. Header line, facet line, URL, blank, the description with
+ * autolinks stripped. `Labels: none` and `Parent: none` are spelled, as the hand
+ * did; the project too, for an issue that has none.
+ */
 export function renderIssue(issue: LinearIssue): string {
   const labels = labelNames(issue);
   const header = `${issue.identifier} — ${issue.title.trim()}`;
@@ -423,6 +423,8 @@ export type PassReport = {
   twinsMarked: number;
   noVector: number;
   errors: { identifier: string; error: string }[];
+  /** Pointers the database refused while chaining twins — the ticket itself landed; the chain is as it was. */
+  chainRefusals: { identifier: string; refusal: string }[];
   /** Issues left unwritten because the pass was asked to stop; the next pass finds them. */
   stopped?: number;
 };
@@ -430,12 +432,13 @@ export type PassReport = {
 export type Writer = {
   store: Pick<SqlStore, "captureThought" | "updateThought">;
   cfg: EmbedConfig;
-  embed: (content: string, subject: EgressSubject) => Promise<{ embedding: number[]; model: string; chunks: { content: string; embedding: number[]; context?: string }[] }>;
+  /** The embedder's own shape (embed.ts), the three fields a write records. */
+  embed: (content: string, subject: EgressSubject) => Promise<Pick<EmbeddedCapture, "embedding" | "model" | "chunks">>;
   tags: (content: string, subject: EgressSubject) => Promise<Record<string, unknown>>;
-  /** `content_fingerprint_of(text)` — the database's own rule, asked of the database. Null when it cannot be asked. */
+  /** `content_fingerprint_of(text)` — the database's own rule, asked of the database. Null when it cannot be asked (a brain before 016), and the exact compare stands in. */
   fingerprintOf: (text: string) => Promise<string | null>;
-  /** The id of a thought carrying this fingerprint, whatever its text says, or null. */
-  holderOf: (fingerprint: string) => Promise<string | null>;
+  /** The thought carrying this fingerprint, whatever its text says — its id and metadata — or null. */
+  holderOf: (fingerprint: string) => Promise<{ id: string; metadata: Record<string, unknown> } | null>;
   actor: Actor;
   dryRun: boolean;
   log: (line: string) => void;
@@ -445,40 +448,53 @@ export type Writer = {
 
 /**
  * Read every ticket row the brain has: adopted rows by their claim
- * (`metadata ? 'issue'`), and — under `--full`, or on a brain with no adopted
- * row yet — hand captures by their header. The header test is a regex over
- * every thought's text, a sequential scan no index serves; after the first pass
- * every ticket row carries the claim, so the scheduled path pays only the
- * indexable predicate and a hand paste made after adoption is picked up by the
- * next `--full` (third review pass).
+ * (`metadata ? 'issue'`, indexable), and — when asked — hand captures by their
+ * header, a regex over every thought's text that no index serves. runPass asks
+ * for the header scan when the plan over the claimed rows has a `missing`
+ * identifier (a hand paste is the one thing that could hold it), under `--full`
+ * and under `--audit`; a scheduled pass with nothing missing pays the claim
+ * alone. The third review pass skipped the scan whenever ANY claimed row
+ * existed, which on a brain with one ingested or model-tagged `issue` row hid
+ * every hand capture and would have captured the moved ones twice (fourth).
  */
 export async function readTicketRows(sql: SQL, opts: { scanHeaders: boolean } = { scanHeaders: false }): Promise<BrainRow[]> {
   const cols = sql`id::text AS id, content, metadata, created_at::text AS created_at, supersedes::text AS supersedes, content_fingerprint AS fingerprint`;
   const claimed = (await sql`SELECT ${cols} FROM thoughts WHERE metadata ? 'issue'`) as BrainRow[];
-  if (!opts.scanHeaders && claimed.length > 0) return claimed;
+  if (!opts.scanHeaders) return claimed;
   // The header grammar in SQL is only a pre-filter; ticketIdentifier() decides.
   const byHeader = (await sql`
     SELECT ${cols} FROM thoughts
-    WHERE NOT (metadata ? 'issue') AND content ~ '^[A-Z][A-Z0-9]+-[0-9]+ — [^\n]*\nProject: '`) as BrainRow[];
+    WHERE NOT (metadata ? 'issue') AND content ~ '^[A-Z][A-Z0-9]*-[0-9]+ — [^\n]*\nProject: '`) as BrainRow[];
   return [...claimed, ...byHeader];
 }
 
-/** Set the pointers desiredPointers named, clears first, then sets — see its docblock for why that order. */
-async function chainRows(w: Writer, identifier: string, order: BrainRow[]): Promise<number> {
+/**
+ * Set the pointers desiredPointers named, clears first, then sets — see its
+ * docblock for why that order. Runs AFTER the head's own write: a pointer the
+ * database refuses (a hand-set chain through a thought outside the group that
+ * loops back — WOULD_CYCLE — or a pointer at a thought since deleted) is
+ * bookkeeping, and must not hold the ticket's text and facets hostage every
+ * pass (fourth review pass); it is returned as `refusal` for the report.
+ */
+async function chainRows(w: Writer, identifier: string, order: BrainRow[]): Promise<{ changed: number; refusal?: string }> {
   const changes = desiredPointers(order);
-  if (changes.length === 0) return 0;
+  if (changes.length === 0) return { changed: 0 };
   const say = (c: { row: BrainRow; wanted: string | null }) => `${c.row.id} ${c.wanted ? `→ ${c.wanted}` : "cleared"}${c.row.supersedes && c.row.supersedes !== c.wanted ? ` (was ${c.row.supersedes})` : ""}`;
-  if (w.dryRun) { w.log(`  ~ ${identifier}: would re-chain ${changes.map(say).join(", ")}`); return changes.length; }
+  if (w.dryRun) { w.log(`  ~ ${identifier}: would re-chain ${changes.map(say).join(", ")}`); return { changed: changes.length }; }
+  // `changed` counts rows whose pointer moved, not statements: a row cleared then set is one.
+  let writes = 0;
   for (const c of changes.filter((c) => c.row.supersedes !== null)) {
     const r = await w.store.updateThought({ id: c.row.id, actor: w.actor, provenance: { supersedes: null } });
-    if (!r.ok) throw new Error(`clearing ${c.row.id}'s pointer: ${r.error}`);
+    if (!r.ok) return { changed: writes, refusal: `clearing ${c.row.id}'s pointer: ${r.error}` };
+    writes++;
   }
   for (const c of changes.filter((c) => c.wanted !== null)) {
     const r = await w.store.updateThought({ id: c.row.id, actor: w.actor, provenance: { supersedes: c.wanted } });
-    if (!r.ok) throw new Error(`pointing ${c.row.id} at ${c.wanted}: ${r.error}`);
+    if (!r.ok) return { changed: writes, refusal: `pointing ${c.row.id} at ${c.wanted}: ${r.error}` };
+    writes++;
   }
   w.log(`  ~ ${identifier}: re-chained ${changes.map(say).join(", ")}`);
-  return changes.length;
+  return { changed: changes.length };
 }
 
 /**
@@ -487,31 +503,43 @@ async function chainRows(w: Writer, identifier: string, order: BrainRow[]): Prom
  * No row: a capture with the vector, the tags and the facets — unless a thought
  * already carries the text's fingerprint (a paste the header grammar did not
  * recognise: a leading space, a lower-cased identifier), which is adopted with
- * a facet patch and no model call; upsert_thought's own `existed` is honoured
- * the same way should the fingerprint arrive between the two.
+ * a facet patch — the facets that differ, so a holder the grammar still cannot
+ * read is not re-patched every pass — and no model call; upsert_thought's own
+ * `existed` is honoured the same way should the fingerprint arrive between.
  *
  * Rows: the HEAD is the row that already holds Linear's text, by fingerprint,
- * else the current one; the group is chained under it (chainRows); then the
- * head's text is brought up (an edit with a fresh vector) or its facets patched
- * (no model call). An edit the database still refuses as DUPLICATE_CONTENT —
- * the text held by a thought outside this ticket's rows — patches the facets so
- * the plan converges and is reported `refused`, with the text left.
+ * else the current one. The head's text is brought up (an edit with a fresh
+ * vector and fresh tags, the facets over them as at capture) or its facets
+ * patched (no model call); THEN the group is chained under it (chainRows) —
+ * a pointer the database refuses is reported, never a reason the text did not
+ * land. A text held by a thought outside this ticket's rows is refused before
+ * any model call (holderOf), the facets patched WITHOUT advancing
+ * linear_updated_at and `text_refused_by` naming the holder, so the plan keeps
+ * the ticket stale — visible in --audit, retried each pass at the cost of one
+ * lookup — until the holder is edited or gone (fourth review pass).
  */
-export async function syncIssue(w: Writer, issue: LinearIssue, rows: BrainRow[]): Promise<{ outcome: Outcome; noVector: boolean; twinsMarked: number }> {
+export type SyncOutcome = { outcome: Outcome; noVector: boolean; twinsMarked: number; chainRefusal?: string };
+
+export async function syncIssue(w: Writer, issue: LinearIssue, rows: BrainRow[]): Promise<SyncOutcome> {
   const content = renderIssue(issue);
   const facets = issueFacets(issue);
   const fp = await w.fingerprintOf(content);
   const holds = (row: BrainRow) => row.content === content || (fp !== null && row.fingerprint === fp);
   const actorWith = (record: ReturnType<typeof decideCalls>["record"]): Actor => ({ ...w.actor, ...(record ? { egress: record } : {}) });
   const said = (patch: Record<string, unknown> | null) => (patch ? Object.keys(patch).join(", ") : "");
+  // The facets without the watermark: what a refused text carries, so the plan revisits it.
+  const { linear_updated_at: _watermark, ...facetsSansWatermark } = facets;
+  void _watermark;
 
   if (rows.length === 0) {
     const elsewhere = fp !== null ? await w.holderOf(fp) : null;
     if (elsewhere) {
-      if (w.dryRun) { w.log(`  · ${issue.identifier}: would adopt ${elsewhere}, which already holds the text (facets patched)`); return { outcome: "patched", noVector: false, twinsMarked: 0 }; }
-      const r = await w.store.updateThought({ id: elsewhere, metadataPatch: facets, actor: w.actor });
-      if (!r.ok) throw new Error(`adopting ${elsewhere}: ${r.error}`);
-      w.log(`  · ${issue.identifier}: adopted ${elsewhere}, which already held the text (facets patched)`);
+      const patch = facetPatch(elsewhere.metadata ?? {}, facets);
+      if (!patch) return { outcome: "unchanged", noVector: false, twinsMarked: 0 };
+      if (w.dryRun) { w.log(`  · ${issue.identifier}: would adopt ${elsewhere.id}, which already holds the text (${said(patch)})`); return { outcome: "patched", noVector: false, twinsMarked: 0 }; }
+      const r = await w.store.updateThought({ id: elsewhere.id, metadataPatch: patch, actor: w.actor });
+      if (!r.ok) throw new Error(`adopting ${elsewhere.id}: ${r.error}`);
+      w.log(`  · ${issue.identifier}: adopted ${elsewhere.id}, which already held the text (${said(patch)})`);
       return { outcome: "patched", noVector: false, twinsMarked: 0 };
     }
     // One subject for the gate, the embedder and the tags, so the call is
@@ -544,52 +572,67 @@ export async function syncIssue(w: Writer, issue: LinearIssue, rows: BrainRow[])
 
   const head = rows.find(holds) ?? rows[0];
   const order = [head, ...rows.filter((r) => r !== head)];
-  const twinsMarked = await chainRows(w, issue.identifier, order);
+  const chain = async (): Promise<Pick<SyncOutcome, "twinsMarked" | "chainRefusal">> => {
+    const c = await chainRows(w, issue.identifier, order);
+    if (c.refusal) w.log(`  ! ${issue.identifier}: chain left as it was — ${c.refusal}`);
+    return { twinsMarked: c.changed, ...(c.refusal ? { chainRefusal: c.refusal } : {}) };
+  };
   const patch = facetPatch(head.metadata ?? {}, facets);
 
   if (holds(head)) {
-    if (!patch) return { outcome: "unchanged", noVector: false, twinsMarked };
-    if (w.dryRun) { w.log(`  · ${issue.identifier}: would patch ${said(patch)}${head !== rows[0] ? ` on ${head.id}, which already holds the text` : ""}`); return { outcome: "patched", noVector: false, twinsMarked }; }
+    if (!patch) return { outcome: "unchanged", noVector: false, ...(await chain()) };
+    if (w.dryRun) { w.log(`  · ${issue.identifier}: would patch ${said(patch)}${head !== rows[0] ? ` on ${head.id}, which already holds the text` : ""}`); return { outcome: "patched", noVector: false, ...(await chain()) }; }
     const r = await w.store.updateThought({ id: head.id, metadataPatch: patch, actor: w.actor });
     if (!r.ok) throw new Error(`patching ${head.id}: ${r.error}`);
     w.log(`  · ${issue.identifier}: facets patched (${said(patch)})${head !== rows[0] ? ` on ${head.id}, which already holds the text` : ""}`);
-    return { outcome: "patched", noVector: false, twinsMarked };
+    return { outcome: "patched", noVector: false, ...(await chain()) };
   }
+
+  // A thought outside this ticket's rows holds the new text: the edit would be
+  // refused as DUPLICATE_CONTENT, so no model call is made. The facets land
+  // without the watermark, and the holder is named on the row.
+  const outside = fp !== null ? await w.holderOf(fp) : null;
+  const refuse = async (holder: string | null): Promise<SyncOutcome> => {
+    const parkedPatch = { ...(facetPatch(head.metadata ?? {}, facetsSansWatermark) ?? {}), text_refused_by: holder };
+    if (w.dryRun) { w.log(`  ! ${issue.identifier}: text held by ${holder ?? "another thought"} — would patch ${said(parkedPatch)}, text left`); return { outcome: "refused", noVector: false, ...(await chain()) }; }
+    const parked = await w.store.updateThought({ id: head.id, metadataPatch: parkedPatch, actor: w.actor });
+    if (!parked.ok) throw new Error(`recording the refusal on ${head.id}: ${parked.error}`);
+    w.log(`  ! ${issue.identifier}: text held by ${holder ?? "another thought"} (DUPLICATE_CONTENT) — facets patched, text left, stays stale until the holder moves`);
+    return { outcome: "refused", noVector: false, ...(await chain()) };
+  };
+  if (outside && !rows.some((r) => r.id === outside.id)) return refuse(outside.id);
 
   // The text moved: judged as an edit of THIS row — its own source and tags.
   // The tags are extracted again with the vector: the people, topics and
   // action items were the OLD text's, and a fallback tag set from a provider
   // outage would otherwise stand on current text forever (third review pass).
-  // The facets go over the tags, as at capture.
+  // The whole facet set goes over the tags, as at capture — a `status` or an
+  // `issue` the model read out of the description must not win (fourth) —
+  // and a stale failure marker the fresh tags do not carry is nulled, the
+  // nearest a shallow merge comes to removing it.
   const subject: EgressSubject = { kind: "edit", actor: w.actor.name, metadata: { ...(head.metadata ?? {}), ...facets }, content };
   const g = decideCalls(subject, w.cfg, w.cfg.egress);
-  if (w.dryRun) { w.log(`  ~ ${issue.identifier}: would update the text (${g.embeddings.allowed ? "re-embedded" : "WITHOUT a vector"}, ${g.chat.allowed ? "re-tagged" : "tags NOT re-extracted"})${patch ? ` and patch ${said(patch)}` : ""}`); return { outcome: "updated", noVector: !g.embeddings.allowed, twinsMarked }; }
+  if (w.dryRun) { w.log(`  ~ ${issue.identifier}: would update the text (${g.embeddings.allowed ? "re-embedded" : "WITHOUT a vector"}, ${g.chat.allowed ? "re-tagged" : "tags NOT re-extracted"})${patch ? ` and patch ${said(patch)}` : ""}`); return { outcome: "updated", noVector: !g.embeddings.allowed, ...(await chain()) }; }
   const [embedded, tags] = await Promise.all([
     g.embeddings.allowed ? w.embed(content, subject) : Promise.resolve(undefined),
     g.chat.allowed ? w.tags(content, subject) : Promise.resolve(undefined),
   ]);
+  const clearMarker = tags && !("metadata_extraction_failed" in tags) && head.metadata && "metadata_extraction_failed" in head.metadata ? { metadata_extraction_failed: null } : {};
+  const clearRefusal = head.metadata && "text_refused_by" in head.metadata ? { text_refused_by: null } : {};
   const r = await w.store.updateThought({
     id: head.id,
     content,
-    metadataPatch: tags || patch ? { ...(tags ?? {}), ...(patch ?? {}) } : undefined,
+    metadataPatch: { ...(tags ?? {}), ...clearMarker, ...clearRefusal, ...facets },
     embedding: embedded?.embedding,
     chunks: embedded?.chunks,
     actor: actorWith(g.record),
     embeddingModel: embedded?.model,
   });
-  if (!r.ok && r.error === "DUPLICATE_CONTENT") {
-    // A thought outside this ticket's rows holds the text (the in-group case
-    // was caught by fingerprint above). Patch the facets — linear_updated_at
-    // among them, or the plan re-fetches the same refusal every interval —
-    // and say so; the text is left (first review pass).
-    const parked = await w.store.updateThought({ id: head.id, metadataPatch: patch ?? { linear_updated_at: facets.linear_updated_at }, actor: w.actor });
-    if (!parked.ok) throw new Error(`recording the refusal on ${head.id}: ${parked.error}`);
-    w.log(`  ! ${issue.identifier}: text refused as DUPLICATE_CONTENT — another thought holds it; facets patched, text left`);
-    return { outcome: "refused", noVector: false, twinsMarked };
-  }
+  // The holder arrived between the lookup and the edit (or is unfingerprinted): the same refusal.
+  if (!r.ok && r.error === "DUPLICATE_CONTENT") return refuse(null);
   if (!r.ok) throw new Error(`updating ${head.id}: ${r.error}`);
   w.log(`  ~ ${issue.identifier}: updated${embedded ? "" : " WITHOUT a vector (egress refused)"}${patch ? ` (${said(patch)})` : ""}`);
-  return { outcome: "updated", noVector: !embedded, twinsMarked };
+  return { outcome: "updated", noVector: !embedded, ...(await chain()) };
 }
 
 /**
@@ -600,13 +643,21 @@ export async function syncIssue(w: Writer, issue: LinearIssue, rows: BrainRow[])
  * pass). `readRows` is how the brain's ticket rows are read — readTicketRows
  * over a connection, or a fake in the self-check.
  */
-export async function runPass(opts: { gql: Gql; readRows: () => Promise<BrainRow[]>; writer: Writer; initiative: string; full: boolean; only?: string[] }): Promise<PassReport> {
+export async function runPass(opts: { gql: Gql; readRows: (scanHeaders: boolean) => Promise<BrainRow[]>; writer: Writer; initiative: string; full: boolean; only?: string[] }): Promise<PassReport> {
   const { initiative, projects } = await initiativeProjects(opts.gql, opts.initiative);
   const census = await censusOf(opts.gql, projects.map((p) => p.id));
-  const groups = groupTicketRows(await opts.readRows());
-  const plan = planPass(census, groups, opts.full);
+  // The claimed rows first; when the plan over them misses an identifier, the
+  // hand captures too (the header scan) and the plan again — a paste is the
+  // one thing that could hold a missing ticket, and it must be adopted, not
+  // captured beside (fourth review pass). --full reads both from the start.
+  let groups = groupTicketRows(await opts.readRows(opts.full));
+  let plan = planPass(census, groups, opts.full);
+  if (!opts.full && plan.missing.length > 0) {
+    groups = groupTicketRows(await opts.readRows(true));
+    plan = planPass(census, groups, false);
+  }
   const tally: Record<Outcome, number> = { captured: 0, updated: 0, patched: 0, unchanged: 0, refused: 0 };
-  const report: PassReport = { initiative, projects: projects.length, census: census.length, plan, tally, twinsMarked: 0, noVector: 0, errors: [] };
+  const report: PassReport = { initiative, projects: projects.length, census: census.length, plan, tally, twinsMarked: 0, noVector: 0, errors: [], chainRefusals: [] };
   let wanted = plan.fetch;
   if (opts.only) {
     const listed = new Set(census.map((c) => c.identifier));
@@ -623,6 +674,7 @@ export async function runPass(opts: { gql: Gql; readRows: () => Promise<BrainRow
       tally[r.outcome]++;
       report.twinsMarked += r.twinsMarked;
       if (r.noVector) report.noVector++;
+      if (r.chainRefusal) report.chainRefusals.push({ identifier: issue.identifier, refusal: r.chainRefusal });
     } catch (e) {
       report.errors.push({ identifier: issue.identifier, error: (e as Error).message });
       opts.writer.log(`  ! ${issue.identifier}: ${(e as Error).message}`);
@@ -638,7 +690,8 @@ export function formatReport(r: PassReport, dryRun: boolean): string {
     `  plan: ${p.missing.length} missing, ${p.stale.length} stale, ${p.unchanged} unchanged${p.extra.length ? `, ${p.extra.length} extra in the brain (${p.extra.slice(0, 8).join(", ")}${p.extra.length > 8 ? ", …" : ""})` : ""}`,
     `  ${dryRun ? "would write" : "wrote"}: captured ${r.tally.captured}  updated ${r.tally.updated}  patched ${r.tally.patched}  unchanged ${r.tally.unchanged}${r.twinsMarked ? `  pointers re-chained ${r.twinsMarked}` : ""}${r.noVector ? `  without a vector ${r.noVector}` : ""}`,
   ];
-  if (r.tally.refused) lines.push(`  refused: ${r.tally.refused} ticket(s) whose text another thought holds (DUPLICATE_CONTENT) — facets patched, text left`);
+  if (r.tally.refused) lines.push(`  refused: ${r.tally.refused} ticket(s) whose text another thought holds (DUPLICATE_CONTENT) — facets patched, text left, stale until the holder moves`);
+  if (r.chainRefusals.length) lines.push(`  chain refusals: ${r.chainRefusals.length} — ${r.chainRefusals.slice(0, 5).map((c) => `${c.identifier}: ${c.refusal}`).join("; ")}`);
   if (r.stopped) lines.push(`  stopped: ${r.stopped} issue(s) left for the next pass`);
   if (r.errors.length) lines.push(`  errors: ${r.errors.length} — ${r.errors.slice(0, 5).map((e) => `${e.identifier}: ${e.error}`).join("; ")}`);
   return lines.join("\n");
@@ -691,7 +744,7 @@ function fakeBrain(seed: Record<string, FakeRow>) {
     },
   };
   const brainRows = (): BrainRow[] => [...rows.entries()].map(([id, r]) => ({ id, content: r.content, metadata: r.metadata, created_at: r.created_at, supersedes: r.supersedes, fingerprint: fakeFingerprint(r.content) }));
-  return { rows, store, writes, brainRows, fingerprintOf: async (t: string) => fakeFingerprint(t), holderOf: async (fp: string) => holder(fp) };
+  return { rows, store, writes, brainRows, fingerprintOf: async (t: string) => fakeFingerprint(t), holderOf: async (fp: string) => { const id = holder(fp); return id ? { id, metadata: rows.get(id)!.metadata } : null; } };
 }
 
 function selfCheck(): Promise<number> {
@@ -779,8 +832,11 @@ function selfCheck(): Promise<number> {
   return (async () => {
     let r = await run(recorder, []);
     ok(r.r.outcome === "captured" && r.calls.join("; ") === 'embed; tags; capture "Backlog" vec=yes type=task', `a new issue: embed, tags, capture with the facets over the tags (${r.calls.join("; ")})`);
-    r = await run({ ...recorder, holderOf: async () => "h1" }, []);
-    ok(r.r.outcome === "patched" && r.calls.join("; ") === "update h1 patch(source,issue,project,status,status_type,priority,labels,parent,url,linear_updated_at,archived_at)", `no ticket row but a thought holding the text: adopted with a facet patch, no model call (${r.calls.join("; ")})`);
+    r = await run({ ...recorder, holderOf: async () => ({ id: "h1", metadata: {} }) }, []);
+    ok(r.r.outcome === "patched" && r.calls.join("; ") === "update h1 patch(source,issue,project,status,status_type,priority,labels,url,linear_updated_at)", `no ticket row but a thought holding the text: adopted with a facet patch, no model call (${r.calls.join("; ")})`);
+    r = await run({ ...recorder, holderOf: async () => ({ id: "h1", metadata: { ...withFacets, issue: "X-12" } }) }, []);
+    ok(r.r.outcome === "patched" && r.calls.join("; ") === "update h1 patch(issue)", `…and a holder already carrying the facets is patched for what differs alone, so it is not re-patched every pass (${r.calls.join("; ")})`);
+    ok(ticketIdentifier({ content: "x", metadata: { issue: "X-12" } }) === "X-12", "a one-letter team key is an identifier");
     r = await run({ ...recorder, store: { ...recorder.store, captureThought: async (o) => { calls.push("capture"); return { id: "h2", existed: true, supersedes: null }; } } }, []);
     ok(r.r.outcome === "patched" && r.calls.join("; ") === "embed; tags; capture", `upsert_thought's own existed is honoured: reported as an adoption, not a capture (${r.calls.join("; ")})`);
     r = await run(recorder, [row("cur", text, { source: "mcp", type: "task" }, "2026-09-22T00:00:00Z", null)]);
@@ -791,7 +847,17 @@ function selfCheck(): Promise<number> {
     r = await run(recorder, [row("cur", `${text}\n`, withFacets, null, null)]);
     ok(r.r.outcome === "unchanged" && r.calls.length === 0, "the same text up to whitespace is the same text — judged by fingerprint, as the database judges it (second review pass)");
     r = await run(recorder, [row("cur", text, { ...withFacets, status: "Done", status_type: "completed" }, null, null)], { ...issue, state: { name: "In Progress", type: "started" } });
-    ok(r.r.outcome === "updated" && r.calls.join("; ") === "embed; tags; update cur content patch(type,topics,status,status_type) vec", `moved text: one embed, the tags extracted again, one edit with the vector, the tags and the facets that moved over them (${r.calls.join("; ")})`);
+    // The whole facet set over the tags: the recorder's tags carry `status: "a guess"`, which must not win (fourth review pass).
+    ok(r.r.outcome === "updated" && r.calls.join("; ") === "embed; tags; update cur content patch(type,topics,status,source,issue,project,status_type,priority,labels,parent,url,linear_updated_at,archived_at) vec", `moved text: one embed, the tags extracted again, one edit with the vector, the tags and every facet over them (${r.calls.join("; ")})`);
+    r = await run(recorder, [row("cur", text, { ...withFacets, status: "Done", status_type: "completed", metadata_extraction_failed: "provider_timeout", text_refused_by: "Z" }, null, null)], { ...issue, state: { name: "In Progress", type: "started" } });
+    ok(r.calls[2]?.includes("metadata_extraction_failed") === true && r.calls[2]?.includes("text_refused_by") === true, `a stale failure marker and a stale refusal are nulled when the fresh tags arrive (${r.calls[2]})`);
+    // A thought outside the group holds the new text: refused before any model call, the watermark not advanced, the holder named.
+    r = await run({ ...recorder, holderOf: async () => ({ id: "Z", metadata: {} }) }, [row("b", text, withFacets, null, null)], done);
+    ok(r.r.outcome === "refused" && r.calls.join("; ") === "update b patch(status,status_type,text_refused_by)", `held outside the group: no embed, no tags, facets without linear_updated_at, text_refused_by set (${r.calls.join("; ")})`);
+    // A pointer the database refuses does not hold the ticket's write hostage.
+    const cycling: Writer["store"] = { captureThought: recorder.store.captureThought, updateThought: async (o) => { if (o.provenance) { calls.push(`update ${o.id} supersedes=${o.provenance.supersedes} → WOULD_CYCLE`); return { ok: false, error: "WOULD_CYCLE" }; } return recorder.store.updateThought(o); } };
+    r = await run({ ...recorder, store: cycling }, [row("c", text, {}, "2026-09-23T00:00:00Z", null), row("b", text, {}, "2026-09-22T00:00:00Z", null)]);
+    ok(r.r.outcome === "patched" && r.r.chainRefusal !== undefined && r.calls[0].startsWith("update c patch(") && /WOULD_CYCLE/.test(r.calls[1]), `the head's write lands first; the refused pointer is reported, not thrown (${r.calls.join("; ")})`);
     ok(renderIssue({ ...issue, labels: { nodes: [{ name: "infrastructure" }, { name: "Improvement" }] } }) === renderIssue({ ...issue, labels: { nodes: [{ name: "Improvement" }, { name: "infrastructure" }] } }) && JSON.stringify(issueFacets({ ...issue, labels: { nodes: [{ name: "b" }, { name: "a" }] } }).labels) === '["a","b"]', "labels render and store in one order whatever order Linear returns them (third review pass)");
     r = await run(recorder, [row("c", text, withFacets, "2026-09-23T00:00:00Z", null), row("b", text, {}, "2026-09-22T00:00:00Z", "a"), row("a", text, {}, "2026-09-21T00:00:00Z", null)]);
     ok(r.r.twinsMarked === 1 && r.calls.join("; ") === "update c supersedes=b", `twins: only the missing pointer is set (c→b; b→a already stands), the head untouched (${r.calls.join("; ")})`);
@@ -799,14 +865,14 @@ function selfCheck(): Promise<number> {
     ok(r.r.twinsMarked === 2 && r.calls.join("; ") === "update c supersedes=null; update c supersedes=b; update b supersedes=x", `a hand-set pointer to another thought moves to the tail: clear first, then set (${r.calls.join("; ")})`);
     // The twin that already holds the new text is the head; no model call; the other row chained under it.
     r = await run(recorder, [row("b", text, withFacets, "2026-09-22T00:00:00Z", "a"), row("a", `${doneText} `, {}, "2026-09-21T00:00:00Z", null)], done);
-    ok(r.r.outcome === "patched" && r.calls.join("; ") === "update b supersedes=null; update a supersedes=b; update a patch(source,issue,project,status,status_type,priority,labels,url,linear_updated_at)",
-      `the twin holding Linear's text (up to whitespace) becomes the head: b's pointer cleared, a→b set, a's facets patched, nothing embedded (${r.calls.join("; ")})`);
+    ok(r.r.outcome === "patched" && r.calls.join("; ") === "update a patch(source,issue,project,status,status_type,priority,labels,url,linear_updated_at); update b supersedes=null; update a supersedes=b",
+      `the twin holding Linear's text (up to whitespace) becomes the head: its facets patched first, then b's pointer cleared and a→b set, nothing embedded (${r.calls.join("; ")})`);
     // Held by a thought outside the group: parked, with linear_updated_at, outcome refused.
     const dupStore: Writer["store"] = { captureThought: recorder.store.captureThought, updateThought: async (o) => { if (o.content !== undefined) { calls.push(`update ${o.id} content → DUPLICATE_CONTENT`); return { ok: false, error: "DUPLICATE_CONTENT" }; } return recorder.store.updateThought(o); } };
     r = await run({ ...recorder, store: dupStore }, [row("b", text, withFacets, null, null)], done);
     // The fresh tags describe the new text, which the row does not hold, so the parked patch carries the facets alone.
-    ok(r.r.outcome === "refused" && r.calls.join("; ") === "embed; tags; update b content → DUPLICATE_CONTENT; update b patch(status,status_type,linear_updated_at)",
-      `DUPLICATE_CONTENT held elsewhere: the facets (linear_updated_at among them) are patched so the plan converges, the new text's tags are not, outcome refused (${r.calls.join("; ")})`);
+    ok(r.r.outcome === "refused" && r.calls.join("; ") === "embed; tags; update b content → DUPLICATE_CONTENT; update b patch(status,status_type,text_refused_by)",
+      `DUPLICATE_CONTENT at the write (the holder arrived after the lookup): the facets are patched WITHOUT the watermark, so the ticket stays stale and is retried, outcome refused (${r.calls.join("; ")})`);
     const refusing: Writer = { ...recorder, cfg: resolveEmbedConfig({ OB1_LLM_BASE_URL: "https://api.example.com/v1", OB1_LLM_API_KEY: "k", OB1_EGRESS_POLICY: "deny" }) };
     r = await run(refusing, []);
     ok(r.r.noVector && r.calls.join("; ") === 'capture "Backlog" vec=no type=-', `under deny to a hosted endpoint: no embed, no tags, the row lands bare (${r.calls.join("; ")})`);
@@ -866,6 +932,16 @@ function selfCheck(): Promise<number> {
     const onlyBrain = fakeBrain({ K: { content: text, metadata: withFacets, supersedes: null, created_at: null } });
     const onlyWriter: Writer = { ...live, store: onlyBrain.store, fingerprintOf: onlyBrain.fingerprintOf, holderOf: onlyBrain.holderOf, log: () => {} };
     const rep = await runPass({ gql: board, readRows: async () => onlyBrain.brainRows(), writer: onlyWriter, initiative: "Open Brain", full: false, only: ["SMD-1936", "SMD-9999"] });
+    // A claimed row for another ticket beside an unadopted hand capture: the pass reads the headers because something is missing, and adopts (fourth review pass).
+    const mixed = fakeBrain({
+      K: { content: renderIssue({ ...issue, identifier: "SMD-2000", title: "other" }), metadata: { ...issueFacets({ ...issue, identifier: "SMD-2000" }), linear_updated_at: "2026-09-22T02:00:00.000Z" }, supersedes: null, created_at: null },
+      H: { content: text, metadata: { source: "mcp" }, supersedes: null, created_at: null },
+    });
+    const scans: boolean[] = [];
+    const mixedWriter: Writer = { ...live, store: mixed.store, fingerprintOf: mixed.fingerprintOf, holderOf: mixed.holderOf, log: () => {} };
+    const repMixed = await runPass({ gql: board, readRows: async (scan) => { scans.push(scan); return mixed.brainRows().filter((r) => scan || "issue" in r.metadata); }, writer: mixedWriter, initiative: "Open Brain", full: false });
+    ok(JSON.stringify(scans) === "[false,true]" && repMixed.tally.captured === 0 && repMixed.tally.patched === 1 && mixed.rows.get("H")!.metadata.issue === "SMD-1936" && mixed.rows.size === 2,
+      `the hand capture is read on the second look and adopted, not captured beside (scans ${JSON.stringify(scans)}, ${JSON.stringify(repMixed.tally)})`);
     ok(rep.plan.unchanged === 1 && rep.tally.unchanged === 1 && rep.errors.length === 1 && /not in the census/.test(rep.errors[0].error) && rep.errors[0].identifier === "SMD-9999" && rep.tally.captured === 0,
       `--only fetches the named identifier though the plan calls it unchanged, and names the one the census lacks; the missing SMD-2000 is not touched (${JSON.stringify({ tally: rep.tally, errors: rep.errors })})`);
     let refusedProjects = false;
@@ -916,6 +992,8 @@ async function main(): Promise<void> {
     else { console.error(`unknown argument: ${a}\n${USAGE}`); process.exit(2); }
   }
   if (flags.has("self-check")) process.exit(await selfCheck());
+  // --audit is the whole board's census; --only would be read by nothing on that branch (fourth review pass).
+  if (flags.has("audit") && values.has("only")) { console.error(`--audit takes no --only: the census is the whole board.\n${USAGE}`); process.exit(2); }
 
   const { value: key, from } = envValueFrom("LINEAR_API_KEY", process.env);
   if (!key) {
@@ -937,6 +1015,7 @@ async function main(): Promise<void> {
   const sql = new SQL({ url, max: 1 });
   const store = new SqlStore(url, { max: 1 });
   let stopping = false;
+  let noFingerprintSaid = false;
   // Resolved once, as db/reembed.ts does; the embedder does not remember a
   // refusal across rows (each row's length is its own).
   const cfg = resolveEmbedConfig(process.env as EmbedEnv);
@@ -948,8 +1027,13 @@ async function main(): Promise<void> {
     embed: (content, subject) => embedder.embedCapture(content, subject),
     tags: (content, subject) => extractMetadata(content, subject, cfg),
     // The database's own rule (016), asked of the database — never a copy here.
-    fingerprintOf: async (text) => { const [r] = await sql`SELECT content_fingerprint_of(${text}) AS f`; return (r?.f as string | null) ?? null; },
-    holderOf: async (fp) => { const [r] = await sql`SELECT id::text AS id FROM thoughts WHERE content_fingerprint = ${fp} LIMIT 1`; return (r?.id as string | undefined) ?? null; },
+    // A brain without the function (before 016) answers null, once said, and
+    // the exact compare stands in, as the Writer's contract promises.
+    fingerprintOf: async (text) => {
+      try { const [r] = await sql`SELECT content_fingerprint_of(${text}) AS f`; return (r?.f as string | null) ?? null; }
+      catch (e) { if (!noFingerprintSaid) { noFingerprintSaid = true; console.error(`  content_fingerprint_of is not available (${(e as Error).message.split("\n")[0]}); same text is judged by exact compare this run`); } return null; }
+    },
+    holderOf: async (fp) => { const [r] = await sql`SELECT id::text AS id, metadata FROM thoughts WHERE content_fingerprint = ${fp} LIMIT 1`; return r ? { id: r.id as string, metadata: (r.metadata as Record<string, unknown>) ?? {} } : null; },
     actor: { name: ACTOR_NAME, via: SELF, session },
     dryRun,
     log: quiet ? () => {} : (line) => console.log(line),
@@ -958,12 +1042,12 @@ async function main(): Promise<void> {
 
   const once = async (): Promise<number> => {
     const t0 = Date.now();
-    // The header scan under --full and --audit (the census should see a hand paste too), else the claim alone.
-    const readRows = () => readTicketRows(sql, { scanHeaders: flags.has("full") || flags.has("audit") });
+    // runPass asks for the header scan when it needs it; --audit always does (the census should see a hand paste too).
+    const readRows = (scanHeaders: boolean) => readTicketRows(sql, { scanHeaders });
     if (flags.has("audit")) {
       const { initiative: name, projects } = await initiativeProjects(gql, initiative);
       const census = await censusOf(gql, projects.map((p) => p.id));
-      const plan = planPass(census, groupTicketRows(await readRows()));
+      const plan = planPass(census, groupTicketRows(await readRows(true)));
       console.log(`  board: ${name} — ${projects.length} project(s), ${census.length} issue(s)`);
       console.log(`  missing ${plan.missing.length}${plan.missing.length ? ` (${plan.missing.join(", ")})` : ""}`);
       console.log(`  stale   ${plan.stale.length}${plan.stale.length ? ` (${plan.stale.slice(0, 20).join(", ")}${plan.stale.length > 20 ? ", …" : ""})` : ""}`);

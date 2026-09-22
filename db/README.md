@@ -1563,24 +1563,32 @@ tiebreak), and the group is chained under it by `supersedes` (032): head → nex
 loop. A pointer the hand set to a thought outside the group is kept at the chain's
 tail, not erased. So a ticket moved back to a state an older paste recorded costs
 no model call: that paste becomes the head and its facets are patched. Nothing is
-deleted. An edit the database still refuses as `DUPLICATE_CONTENT` — the text
-held by a thought outside the ticket's rows — patches the facets so the plan
-converges and is reported under *refused*; a new ticket whose text a stray row
-already holds (a paste the header grammar did not recognise) adopts that row with
-a facet patch. One issue the API refuses in a batch fails that identifier alone,
-under *errors*. When the text moves, the tags are extracted again with the vector
-(a fallback tag set from a provider outage would otherwise stand on current text
-forever); a row that landed without a vector is `reembed.ts`'s to repair, as any
-vectorless row is. Labels render and store sorted, whatever order Linear returns
-them. A ticket deleted in Linear (trashed) falls out of the census and its row
-reads *extra*; a completed one Linear archived stays a ticket. `--only` syncs the
-identifiers named whatever the plan says of them, and names one the census lacks.
-The scheduled path reads ticket rows by their claim alone (`metadata ? 'issue'`,
-indexable); the header scan over every thought's text runs under `--full` and
-`--audit`, and on a brain with no adopted row yet, so a hand paste made after
-adoption is picked up by the next `--full`. Under `--loop`, SIGTERM ends the pass
-after the issue in hand (the compose service allows 60 s); the next pass finds
-what was left.
+deleted; the head's own write lands first, and a pointer the database refuses
+(a hand-set chain through an outside thought that loops back) is reported under
+*chain refusals*, never a reason the text did not land. A text held by a thought
+OUTSIDE the ticket's rows is refused before any model call: the facets are
+patched without `linear_updated_at` and `text_refused_by` names the holder, so
+the ticket stays *stale* in `--audit` and is retried each pass, at one lookup,
+until the holder moves — reported under *refused*. A new ticket whose text a stray
+row already holds (a paste the header grammar did not recognise) adopts that row
+with a patch of the facets that differ. One issue the API refuses in a batch fails
+that identifier alone, under *errors*. When the text moves, the tags are extracted
+again with the vector (a fallback tag set from a provider outage would otherwise
+stand on current text forever), every facet goes over them (a `status` or an
+`issue` the model read out of the description must not win), and a stale
+`metadata_extraction_failed` the fresh tags do not carry is set to null — the
+nearest a shallow merge comes to removing it; a row that landed without a vector
+is `reembed.ts`'s to repair, as any vectorless row is. Labels render and store
+sorted, whatever order Linear returns them. A ticket deleted in Linear (trashed)
+falls out of the census and its row reads *extra*; a completed one Linear
+archived stays a ticket. `--only` syncs the identifiers named whatever the plan
+says of them, and names one the census lacks; `--audit` takes no `--only`. The
+scheduled path reads ticket rows by their claim (`metadata ? 'issue'`, indexable)
+and adds the header scan over every thought's text — a sequential scan — only
+when that plan has a *missing* identifier, since a hand paste is the one thing
+that could hold it; `--full` and `--audit` always scan. Under `--loop`, SIGTERM
+ends the pass after the issue in hand (the compose service allows 60 s); the next
+pass finds what was left.
 
 **Two writers of one identity.** `ingest-records.ts --linear <dump>` and this tool
 both key a ticket on `metadata.issue`, but render different text (the corpus's
