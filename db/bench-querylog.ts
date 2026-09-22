@@ -67,6 +67,9 @@ const KEEP_DAYS = 30;
  * SPREAD_DAYS so exactly this fraction lands older than KEEP_DAYS.
  */
 const DELETE_FRACTION = Number(process.env.OB1_BENCH_DELETE_FRACTION ?? 0.1);
+if (!(DELETE_FRACTION > 0 && DELETE_FRACTION < 1)) {
+  throw new Error(`OB1_BENCH_DELETE_FRACTION must be in (0, 1), got ${process.env.OB1_BENCH_DELETE_FRACTION}`);
+}
 const SPREAD_DAYS = KEEP_DAYS / (1 - DELETE_FRACTION);
 
 const INDEX = "query_log_logged_at_idx";
@@ -128,8 +131,16 @@ function scanNode(node: Record<string, unknown>): Record<string, unknown> | null
  * Time the prune DELETE under EXPLAIN (ANALYZE), rolled back so the rows survive
  * for the next arm and the next repeat. TIMING stays ON: with it off Postgres
  * reports the plan but zero durations, which reads as an infinitely fast query.
+ *
+ * The cutoff is a fixed timestamp passed in, not `now() - interval` re-evaluated
+ * per query: the two arms run seconds apart (twelve EXPLAINs plus a large ANALYZE
+ * between them), and with rows densely packed near the boundary at scale a moving
+ * `now()` would carry the cutoff past a few rows, so the arms would delete slightly
+ * different counts and the controlled comparison would abort. A bound timestamp
+ * plans identically to `now() - interval` (both a range predicate on logged_at) and
+ * makes both arms delete exactly the same rows.
  */
-async function timePrune(c: SQL): Promise<Timing> {
+async function timePrune(c: SQL, cutoff: Date): Promise<Timing> {
   const runs: number[] = [];
   let plan = "?";
   let rows = 0;
@@ -137,7 +148,7 @@ async function timePrune(c: SQL): Promise<Timing> {
     await c`BEGIN`;
     try {
       const res = await c`EXPLAIN (ANALYZE, FORMAT JSON)
-        DELETE FROM query_log WHERE logged_at < now() - make_interval(days => ${KEEP_DAYS})`;
+        DELETE FROM query_log WHERE logged_at < ${cutoff}`;
       const json = (res[0] as Record<string, unknown>)["QUERY PLAN"] as Array<Record<string, unknown>>;
       if (i > 0) {
         runs.push(Number(json[0]["Execution Time"] ?? 0));
@@ -154,18 +165,26 @@ async function timePrune(c: SQL): Promise<Timing> {
 }
 
 /**
- * One bulk INSERT of `n` rows in a single statement. The round trip is amortized
- * across the batch, so the with/without-index difference is the btree's per-row
- * maintenance cost rather than network latency — the number to compare between the
- * two arms. (A per-row awaited INSERT cannot isolate it: at ~1 ms a round trip and
- * ~µs of index work, the maintenance is lost in the connection noise.)
+ * The median wall time of a bulk INSERT of `n` rows in one statement, over REPEATS
+ * batches (the first discarded as warm-up), matching timePrune's rigor rather than
+ * trusting a single cold sample. The round trip is amortized across each batch, so
+ * the with/without-index difference is the btree's per-row maintenance cost rather
+ * than network latency — the number to compare between the two arms. (A per-row
+ * awaited INSERT cannot isolate it: at ~1 ms a round trip and ~µs of index work, the
+ * maintenance is lost in the connection noise.) Each batch grows the table, but both
+ * arms grow identically, so the comparison stays controlled.
  */
-async function timeBatchInsert(c: SQL, n: number): Promise<number> {
-  const t = performance.now();
-  await c`INSERT INTO query_log (kind, tool, query, agent_id, tier, arm)
-          SELECT 'search', 'search_thoughts', 'q' || g, gen_random_uuid(), 'canary', 'hybrid'
-            FROM generate_series(1, ${n}) AS g`;
-  return performance.now() - t;
+async function medianBatchMs(c: SQL, n: number): Promise<number> {
+  const runs: number[] = [];
+  for (let i = 0; i <= REPEATS; i++) {
+    const t = performance.now();
+    await c`INSERT INTO query_log (kind, tool, query, agent_id, tier, arm)
+            SELECT 'search', 'search_thoughts', 'q' || g, gen_random_uuid(), 'canary', 'hybrid'
+              FROM generate_series(1, ${n}) AS g`;
+    if (i > 0) runs.push(performance.now() - t);
+  }
+  runs.sort((a, b) => a - b);
+  return runs[Math.floor(runs.length / 2)];
 }
 
 /**
@@ -224,21 +243,46 @@ const pruneRows: PruneRow[] = [];
 for (const scale of SCALES) {
   console.log(`── ${scale.toLocaleString()} rows ${"─".repeat(Math.max(0, 50 - String(scale).length))}`);
   const c = await load();
-  await populate(c, scale);
+  try {
+    await populate(c, scale);
+    // One cutoff for both arms (see timePrune) — prune_query_log's own now()-interval.
+    const [{ cutoff }] = (await c`SELECT now() - make_interval(days => ${KEEP_DAYS}) AS cutoff`) as { cutoff: Date }[];
 
-  const withIdx = await timePrune(c);
-  console.log(`   prune, with ${INDEX}:  ${fmtMs(withIdx.ms).padStart(9)} (${withIdx.plan}, ${withIdx.rows} rows)`);
+    const withIdx = await timePrune(c, cutoff);
+    console.log(`   prune, with ${INDEX}:  ${fmtMs(withIdx.ms).padStart(9)} (${withIdx.plan}, ${withIdx.rows} rows)`);
 
-  await dropIndex(c);
-  await c`ANALYZE query_log`;
-  const without = await timePrune(c);
-  console.log(`   prune, no logged_at index: ${fmtMs(without.ms).padStart(9)} (${without.plan}, ${without.rows} rows)`);
+    await dropIndex(c);
+    await c`ANALYZE query_log`;
+    const without = await timePrune(c, cutoff);
+    console.log(`   prune, no logged_at index: ${fmtMs(without.ms).padStart(9)} (${without.plan}, ${without.rows} rows)`);
 
-  if (withIdx.rows !== without.rows) {
-    throw new Error(`the two prune arms deleted different counts (${withIdx.rows} vs ${without.rows}) — not a controlled comparison`);
+    // Same cutoff, same table, rolled back between — the arms must delete the same rows.
+    if (withIdx.rows !== without.rows) {
+      throw new Error(`the two prune arms deleted different counts (${withIdx.rows} vs ${without.rows}) — not a controlled comparison`);
+    }
+
+    // Tie the inlined predicate to the function it stands in for. EXPLAIN cannot see
+    // inside a plpgsql body, so the plan above is measured on a copy of the DELETE;
+    // run the real prune_query_log(KEEP_DAYS) rolled back and confirm it deletes the
+    // same rows (allowing a small drift for its own slightly-later now()), so a future
+    // change to the function's predicate is caught here, not silently measured stale.
+    await c`BEGIN`;
+    let funcDeleted = 0;
+    try {
+      const [r] = await c`SELECT prune_query_log(${KEEP_DAYS}) AS n`;
+      funcDeleted = Number(r.n);
+    } finally {
+      await c`ROLLBACK`;
+    }
+    const drift = Math.max(5, Math.ceil(scale * 0.005));
+    if (Math.abs(funcDeleted - withIdx.rows) > drift) {
+      throw new Error(`the inlined prune predicate deleted ${withIdx.rows} rows but prune_query_log deleted ${funcDeleted} (drift > ${drift}) — the bench has drifted from the function it measures`);
+    }
+
+    pruneRows.push({ scale, withIdx, without });
+  } finally {
+    await c.close();
   }
-  pruneRows.push({ scale, withIdx, without });
-  await c.close();
   console.log();
 }
 
@@ -249,14 +293,22 @@ for (const scale of SCALES) {
 // deployment has).
 console.log(`── write cost ${"─".repeat(40)}`);
 const withIdxC = await load();
-const withMs = await timeBatchInsert(withIdxC, WRITE_BATCH);
-const awaitedMs = await timeAwaitedInserts(withIdxC, AWAITED_PROBES);
-await withIdxC.close();
+let withMs: number, awaitedMs: number;
+try {
+  withMs = await medianBatchMs(withIdxC, WRITE_BATCH);
+  awaitedMs = await timeAwaitedInserts(withIdxC, AWAITED_PROBES);
+} finally {
+  await withIdxC.close();
+}
 
 const noIdxC = await load();
-await dropIndex(noIdxC);
-const withoutMs = await timeBatchInsert(noIdxC, WRITE_BATCH);
-await noIdxC.close();
+let withoutMs: number;
+try {
+  await dropIndex(noIdxC);
+  withoutMs = await medianBatchMs(noIdxC, WRITE_BATCH);
+} finally {
+  await noIdxC.close();
+}
 
 const write: WriteRow = { withoutMs, withMs, awaitedMs };
 console.log(
