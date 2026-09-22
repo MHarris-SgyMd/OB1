@@ -571,8 +571,7 @@ export async function syncIssue(w: Writer, issue: LinearIssue, rows: BrainRow[])
   const actorWith = (record: ReturnType<typeof decideCalls>["record"]): Actor => ({ ...w.actor, ...(record ? { egress: record } : {}) });
   const said = (patch: Record<string, unknown> | null) => (patch ? Object.keys(patch).join(", ") : "");
   // The facets without the watermark: what a refused text carries, so the plan revisits it.
-  const { linear_updated_at: _watermark, ...facetsSansWatermark } = facets;
-  void _watermark;
+  const facetsSansWatermark = Object.fromEntries(Object.entries(facets).filter(([k]) => k !== "linear_updated_at"));
 
   if (rows.length === 0) {
     const elsewhere = fp !== null ? await w.holderOf(fp) : null;
