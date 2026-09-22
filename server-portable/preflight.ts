@@ -232,6 +232,28 @@ if (chatIsOwn) {
   }
 }
 add("metadata model", "ok", metaModel);
+{
+  // The window db/extract-entities.ts extracts a long thought in, and where
+  // the number came from (SMD-1879): entities.ts's one sentence, the worker's
+  // banner verbatim. An explicit size whose text and answer would not fit the
+  // model's served context beside the rules is the one configuration that
+  // defeats the windows — the call is truncated or refused, which is what they
+  // exist to prevent — so it warns, naming the most that fits.
+  const { EXTRACT_PROMPT_TOKENS, EXTRACT_OUTPUT_RATIO } = await import("../db/config.mjs");
+  const { describeExtractWindow } = await import("./entities.ts");
+  const extractCfg = resolveEmbedConfig(env);
+  const fits = extractCfg.extractModelWindow !== undefined ? Math.floor((extractCfg.extractModelWindow - EXTRACT_PROMPT_TOKENS) / (1 + EXTRACT_OUTPUT_RATIO)) : undefined;
+  if (extractCfg.extractChunkTokensFrom === "OB1_EXTRACT_CHUNK_TOKENS" && fits !== undefined && extractCfg.extractChunkTokens > fits) {
+    add("extraction window", "warn",
+        `OB1_EXTRACT_CHUNK_TOKENS=${extractCfg.extractChunkTokens} — a window that long, its answer budget and the rules do not fit ${metaModel}'s ${extractCfg.extractModelWindow}-token served context; the call is truncated or refused`,
+        `Unset OB1_EXTRACT_CHUNK_TOKENS to derive the window from the context, or set it at or under ${fits}.`);
+  } else if (extractCfg.extractChunkTokensFrom === "default") {
+    add("extraction window", "ok",
+        `${describeExtractWindow(extractCfg)} — set OB1_EXTRACT_CHUNK_TOKENS if the model serves fewer than ${EXTRACT_PROMPT_TOKENS + extractCfg.extractChunkTokens * (1 + EXTRACT_OUTPUT_RATIO)} tokens`);
+  } else {
+    add("extraction window", "ok", describeExtractWindow(extractCfg));
+  }
+}
 // The judge's own row, so a report says which model db/consolidate.ts will
 // pool under: the pass key carries the name, and a reader of the consolidate
 // pass row below can match the two.

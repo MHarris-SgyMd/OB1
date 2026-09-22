@@ -71,6 +71,20 @@ export const DEFAULT_MAX_TOKENS = 1200;
 export const DEFAULT_OVERLAP_TOKENS = 150;
 
 /**
+ * The entity-extraction window (SMD-1879): estimated tokens of thought text
+ * per extraction call for a metadata model whose served context db/config.mjs's
+ * KNOWN_CHAT_MODEL_WINDOW does not list, and the most a listed model derives.
+ * Passed to `resolveExtractWindow` as the fallback because db/config.mjs cannot
+ * import a .ts file under Node; here rather than in entities.ts because embed.ts
+ * resolves the configuration and entities.ts reads it — a constant both import
+ * lives in the module neither depends on. The value is measured on the fork's
+ * brain: evals/README.md, "Entity extraction in windows".
+ */
+export const DEFAULT_EXTRACT_WINDOW_TOKENS = 1200;
+/** Overlap between consecutive extraction windows, at this file's ratio (150 of 1200) of the window. */
+export const EXTRACT_OVERLAP_RATIO = DEFAULT_OVERLAP_TOKENS / DEFAULT_MAX_TOKENS;
+
+/**
  * Split on the largest natural boundary that fits: paragraphs first, then
  * sentences, then whitespace. Splitting mid-sentence produces windows that embed
  * to something meaning neither half, so it is the last resort rather than the

@@ -33,6 +33,7 @@ import { readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, EMBEDDING_DIM, EMBEDDING_MODEL, HNSW_BOUNDS, MATCH_COUNT_CEILING, MATCH_THOUGHTS_SIGNATURE, ROUTE_ESTIMATE_MIN_PAGES, ROUTE_SAMPLE_PAGES, grantedFunctions, grantedSequences, grantedTables, grantedViews, parseSetConfig, versionAtLeast } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { tmpdir } from "node:os";
 import { SCHEMAS_DIR, TID_PROBE, applyFunctionSettings, applyMigrations, buffersOf, communitySchemaFiles, createAssert, sampleStatementOf, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
 import { heartbeatFor, leaseRefusal } from "./lease.ts";
 import { reachabilityReport, readHnswGraph, reachableFromEntry, type HnswElement, type HnswGraph } from "./hnsw-graph.ts";
@@ -2902,8 +2903,14 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
 {
   await sql`DELETE FROM thoughts`;
   await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
-  const KEY = "extract:stub-meta@p1";
+  const KEY = "extract:stub-meta@p2";
   const answers: Record<string, { entities: unknown[]; relationships: unknown[] }> = {
+    // Every window of the long thought below names this pair (SMD-1879): the
+    // merge and the database must make ONE entity and ONE mention of them.
+    ledger: {
+      entities: [{ name: "Anita", type: "person", confidence: 0.9 }, { name: "Ledger", type: "project", confidence: 0.8 }],
+      relationships: [{ from: "Anita", to: "Ledger", relation: "works_on", confidence: 0.8 }],
+    },
     migrated: {
       entities: [
         { name: "Anita", type: "person", confidence: 0.9 },
@@ -2944,6 +2951,7 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
     },
   };
   let calls = 0;
+  let ledgerCalls = 0;
   let hemlockIsProse = true;
   // While set, every answer takes this long: the first run, so the heartbeat
   // (migration 031) has time to beat.
@@ -2960,6 +2968,7 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
         return Response.json({ choices: [{ message: { content: "I'm sorry, I can't help with that." } }] });
       }
       const key = Object.keys(answers).find((k) => prompt.includes(k));
+      if (key === "ledger") ledgerCalls++;
       const answer = key ? answers[key] : { entities: [], relationships: [] };
       return Response.json({ choices: [{ message: { content: JSON.stringify(answer) } }], model: body.model });
     },
@@ -2972,6 +2981,12 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
   const t3 = await seed("Priya prefers Redis for the session cache.");
   const poison = await seed("The hemlock note.");
   for (let i = 0; i < 6; i++) await seed(`Filler ${i} about observability dashboards.`);
+  // A thought over the extraction window (SMD-1879): six paragraphs of ~130
+  // estimated tokens, each naming the ledger, against OB1_EXTRACT_CHUNK_TOKENS=300
+  // in the worker's environment below — three or more windows, every one of
+  // which the stub answers with the same Anita and Ledger.
+  const ledgerText = Array.from({ length: 6 }, (_, p) => `The ledger rewrite, part ${p}. ${Array.from({ length: 24 }, (__, i) => `Anita noted point ${p}.${i} about the ledger.`).join(" ")}`).join("\n\n");
+  const ledger = await seed(ledgerText);
   assert((await sql`SELECT count(*)::int AS c FROM thought_work_claims WHERE work_type = ${KEY}`)[0].c === 0,
          "before the worker has ever run, captures enqueue nothing — the trigger waits for the key");
 
@@ -2983,9 +2998,11 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
     OB1_LLM_BASE_URL: `http://127.0.0.1:${model.port}/v1`,
     OB1_LLM_LOCAL: "1",
     OB1_METADATA_MODEL: "stub-meta",
+    OB1_EXTRACT_CHUNK_TOKENS: "300",
     OB1_WORKER_KEY: rawKey,
     MCP_ACCESS_KEYS: `entity-worker:write:${hashKey(rawKey)}`,
   };
+  const dumpPath = join(tmpdir(), `ob1-test-live-extract-${process.pid}.jsonl`);
   const extract = (...extra: string[]): Promise<{ code: number; out: string }> =>
     runScript(["bun", join(HERE, "extract-entities.ts"), "--url", URL_!, ...extra], { env: env as Record<string, string>, cwd: HERE });
   const graph = async () => (await sql`
@@ -2998,8 +3015,10 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
       .map((r: { status: string; c: number }) => [r.status, Number(r.c)])) as Record<string, number>;
 
   const dry = await extract("--dry-run");
-  assert(dry.code === 0 && /Nothing was written/.test(dry.out) && /add 10 thoughts to the pool/.test(dry.out),
-         `--dry-run counts the ten thoughts and writes nothing (exit ${dry.code}: ${dry.out.split("\n").filter(Boolean).slice(-3).join(" | ").slice(0, 300)})`);
+  assert(dry.code === 0 && /Nothing was written/.test(dry.out) && /add 11 thoughts to the pool/.test(dry.out),
+         `--dry-run counts the eleven thoughts and writes nothing (exit ${dry.code}: ${dry.out.split("\n").filter(Boolean).slice(-3).join(" | ").slice(0, 300)})`);
+  assert(/window: thoughts over 300 estimated tokens are extracted in 300-token windows \(overlap 37\), from OB1_EXTRACT_CHUNK_TOKENS \(stub-meta's served context, which db\/config\.mjs's KNOWN_CHAT_MODEL_WINDOW does not list\)/.test(dry.out),
+         "the banner states the window rule and where it came from — the sentence preflight prints (SMD-1879)");
   assert((await sql`SELECT count(*)::int AS c FROM ob1_config WHERE key = 'entity_extraction_key'`)[0].c === 0, "…including the key");
   assert((await sql`SELECT count(*)::int AS c FROM ob1_agents WHERE label = 'entity-worker'`)[0].c === 0, "…and it did not register the worker's agent either");
   const bareLimit = await extract("--limit");
@@ -3014,13 +3033,23 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
   // two workers, some two seconds each — so the beats fire during the run, and
   // the summary counts them.
   slowMs = 400;
-  const first = await extract("--workers", "2", "--batch", "2", "--ttl", "6", "--heartbeat", "1");
+  const first = await extract("--workers", "2", "--batch", "2", "--ttl", "6", "--heartbeat", "1", "--dump", dumpPath);
   slowMs = 0;
   const firstBeats = Number(/, (\d+) heartbeat\(s\)/.exec(first.out)?.[1] ?? 0);
   assert(firstBeats >= 1 && !/heartbeat failed/.test(first.out) && !/attempt 2/.test(first.out),
     `the heartbeat beats through the first pass without error, and no row reaches a second worker (${firstBeats} beat(s))`);
-  assert(first.code === 1 && /9 extracted, 1 failed/.test(first.out), `the first run extracts nine and fails the prose answer (exit ${first.code}: ${first.out.split("\n").find((l) => /extracted,/.test(l))?.trim()})`);
+  assert(first.code === 1 && /10 extracted, 1 failed/.test(first.out), `the first run extracts ten and fails the prose answer (exit ${first.code}: ${first.out.split("\n").find((l) => /extracted,/.test(l))?.trim()})`);
   assert(/not JSON of the expected shape/.test(first.out), "…naming the failure");
+  // The long thought went in windows (SMD-1879): several calls, one thought,
+  // and the summary and the dump both say so.
+  assert(ledgerCalls >= 3, `the ledger thought took ${ledgerCalls} model calls — one per window`);
+  assert(new RegExp(`in ${calls} model call\\(s\\) across 2 worker\\(s\\), 1 thought\\(s\\) in windows`).test(first.out), `the summary counts every call (${calls}) and the one windowed thought`);
+  const dumped = (await Bun.file(dumpPath).text()).trim().split("\n").map((l) => JSON.parse(l) as { id: string; windows: number; parts?: { index: number; entities: unknown[] }[]; entities: unknown[]; relations: unknown[] });
+  const ledgerLine = dumped.find((l) => l.id === ledger);
+  assert(ledgerLine !== undefined && ledgerLine.windows === ledgerCalls && ledgerLine.parts?.length === ledgerCalls && ledgerLine.parts.every((p, i) => p.index === i && p.entities.length === 2),
+         "the dump line carries each window's own answer beside the merged one — the derivation record");
+  assert(ledgerLine !== undefined && ledgerLine.entities.length === 2 && ledgerLine.relations.length === 1, `…and the merged answer names Anita and Ledger once each, with one edge (${JSON.stringify(ledgerLine?.entities)})`);
+  assert(dumped.filter((l) => l.id !== ledger).every((l) => l.windows === 1 && l.parts === undefined), "a thought within the window dumps as one window with no per-window record");
   const [{ key }] = await sql`SELECT value AS key FROM ob1_config WHERE key = 'entity_extraction_key'`;
   assert(key === KEY, `the run recorded the extraction key (${key})`);
   const [agent] = await sql`SELECT canonical_agent_id AS id, label FROM ob1_agents WHERE label = 'entity-worker'`;
@@ -3031,18 +3060,23 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
     SELECT count(*) FILTER (WHERE canonical_agent_id = ${agent.id}::uuid)::int AS attributed, count(*)::int AS total FROM thought_entities`;
   assert(Number(total) > 0 && Number(attributed) === Number(total), `every mention carries that agent id (${attributed} of ${total})`);
   const g1 = await graph();
-  // Anita, Open Brain, PostgreSQL, Dev, Priya, Redis, observability = 7 entities;
-  // mentions 3 + 3 + 2 + 6 = 14; edges 2 + 2 + 1 = 5.
-  assert(g1.entities === 7 && g1.mentions === 14 && g1.edges === 5, `the graph is exactly what the stub said: 7 entities, 14 mentions, 5 edges (${JSON.stringify(g1)})`);
+  // Anita, Open Brain, PostgreSQL, Dev, Priya, Redis, observability, Ledger =
+  // 8 entities; mentions 3 + 3 + 2 + 6 + 2 = 16; edges 2 + 2 + 1 + 1 = 6.
+  assert(g1.entities === 8 && g1.mentions === 16 && g1.edges === 6, `the graph is exactly what the stub said: 8 entities, 16 mentions, 6 edges (${JSON.stringify(g1)})`);
   const anita = await entityByName("Anita");
-  assert((await sql`SELECT count(*)::int AS c FROM thought_entities WHERE entity_id = ${anita.id}::uuid`)[0].c === 2, "Anita, named by two thoughts, is one entity with two mentions");
+  assert((await sql`SELECT count(*)::int AS c FROM thought_entities WHERE entity_id = ${anita.id}::uuid`)[0].c === 3, "Anita, named by three thoughts, is one entity with three mentions");
+  const ledgerEntity = await entityByName("Ledger");
+  assert(ledgerEntity !== undefined && (await sql`SELECT count(*)::int AS c FROM thought_entities WHERE entity_id = ${ledgerEntity.id}::uuid AND thought_id = ${ledger}::uuid`)[0].c === 1
+         && (await sql`SELECT count(*)::int AS c FROM ob1_entities WHERE normalized_name = normalize_entity_name('Ledger')`)[0].c === 1,
+         `an entity named in every one of the ${ledgerCalls} windows is ONE entity row with ONE mention of the thought, not ${ledgerCalls} (SMD-1879)`);
+  assert((await sql`SELECT count(*)::int AS c FROM ob1_entity_edges WHERE thought_id = ${ledger}::uuid`)[0].c === 1, "…and the relation every window stated is one edge");
   const worksOn = await sql`
     SELECT count(*)::int AS support FROM ob1_entity_edges g
     WHERE g.relation = 'works_on' AND g.from_entity_id = ${anita.id}::uuid`;
-  assert(Number(worksOn[0].support) === 2, `"Anita works_on Open Brain" has two evidence rows, one per thought (${worksOn[0].support})`);
+  assert(Number(worksOn[0].support) === 3, `"Anita works_on …" has three evidence rows, one per thought (${worksOn[0].support})`);
   assert(((await entityByName("PostgreSQL")).aliases as string[]).includes("Postgres"), "the alias the model offered is recorded on the entity");
   const c1 = await claimCounts();
-  assert(c1.succeeded === 9 && c1.failed === 1, `claims: 9 succeeded, 1 failed (${JSON.stringify(c1)})`);
+  assert(c1.succeeded === 10 && c1.failed === 1, `claims: 10 succeeded, 1 failed (${JSON.stringify(c1)})`);
   const callsAfterFirst = calls;
 
   // Another model's key, without saying so: refused before anything is touched.
@@ -3076,14 +3110,14 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
   await sql`SELECT delete_thought(${t1}::uuid, NULL::jsonb)`;
   assert((await sql`SELECT count(*)::int AS c FROM ob1_entity_edges WHERE thought_id = ${t1}::uuid`)[0].c === 0, "deleting a thought leaves no edge citing it");
   const worksOnAfter = await sql`SELECT count(*)::int AS support FROM ob1_entity_edges WHERE relation = 'works_on' AND from_entity_id = ${anita.id}::uuid`;
-  assert(Number(worksOnAfter[0].support) === 1, `…and the relation the other thought still evidences keeps that one row (${worksOnAfter[0].support})`);
+  assert(Number(worksOnAfter[0].support) === 2, `…and the relations the other thoughts still evidence keep their rows (${worksOnAfter[0].support})`);
   assert((await entityByName("PostgreSQL")) !== undefined, "…while the entity it introduced remains until pruned");
   const [{ n: prunedN }] = await sql`SELECT prune_orphan_entities() AS n`;
   assert(Number(prunedN) === 1 && (await entityByName("PostgreSQL")) === undefined, `prune_orphan_entities removes it (${prunedN})`);
 
   // --status, then --retry-failed with a --limit.
   const status = await extract("--status");
-  assert(status.code === 0 && /8 extracted, 1 failed/.test(status.out) && /graph: \d+ entities/.test(status.out), "--status reports the pass and the graph");
+  assert(status.code === 0 && /9 extracted, 1 failed/.test(status.out) && /graph: \d+ entities/.test(status.out), "--status reports the pass and the graph");
   hemlockIsProse = false;
   answers.hemlock = { entities: [{ name: "Socrates", type: "person", confidence: 0.9 }], relationships: [] };
   const retried = await extract("--retry-failed", "--limit", "1");

@@ -69,6 +69,14 @@ type Env = {
    *  default, and measured off — see db/config.mjs and evals/eval-contextual.ts. */
   OB1_CHUNK_CONTEXT?: string;
   /**
+   * Estimated tokens of thought text per entity-extraction call
+   * (db/extract-entities.ts; SMD-1879). Unset, derived from the METADATA
+   * model's served context (db/config.mjs, KNOWN_CHAT_MODEL_WINDOW) and never
+   * above entities.ts's measured default. The server never extracts; preflight,
+   * which runs in this container, prints the rule and where it came from.
+   */
+  OB1_EXTRACT_CHUNK_TOKENS?: string;
+  /**
    * "on" to record the opt-in query log (migration 034, SMD-1295): one row per
    * search and one per follow-up fetch/edit/delete of a returned id — or, since
    * SMD-1719, per id a write cited as its source — so a

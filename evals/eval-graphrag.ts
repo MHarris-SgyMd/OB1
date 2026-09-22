@@ -306,7 +306,7 @@ const words = (t: string) => t.replace(/[^\p{L}\p{N}]+/gu, " ").trim();
 async function seedEntities(question: string): Promise<{ ids: string[]; names: string[] }> {
   let names: string[] = [];
   try {
-    const ex = await extractEntities(question, cfg, AbortSignal.timeout(120_000), { kind: "query" });
+    const ex = await extractEntities(question, cfg, 120_000, { kind: "query" });
     if (ex.malformed) { seedFailures++; console.error(`    seed extraction returned a malformed answer for: ${question.slice(0, 60)}…`); }
     else names = ex.entities.map((e) => e.name);
   } catch (e) {

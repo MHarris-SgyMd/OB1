@@ -62,6 +62,35 @@ export function resolveChunkTokens(
   fallback: number
 ): { tokens: number; threshold: number; from: ChunkTokensFrom; window: number | undefined; capped: boolean };
 
+/**
+ * Served context of the chat models the extraction pass runs on (SMD-1879).
+ * Measured local models only; a hosted model is absent until measured.
+ */
+export const KNOWN_CHAT_MODEL_WINDOW: Record<string, number>;
+/** The extraction prompt's rules and delimiter with an empty thought, 398 tokens. */
+export const EXTRACT_PROMPT_TOKENS: number;
+/** Answer tokens budgeted per estimated input token, 2 (the 95th percentile measured was 1.6). */
+export const EXTRACT_OUTPUT_RATIO: number;
+/** Added to every output budget, for a short thought dense with names. */
+export const EXTRACT_OUTPUT_FLOOR: number;
+/** `max_tokens` for an extraction call over this many estimated tokens of thought text. */
+export function extractOutputBudget(inputTokens: number): number;
+/** Whether an extraction window after the first carries the thought's opening line; decided by measurement. */
+export const EXTRACT_WINDOW_HEADER: boolean;
+/** Where an extraction window came from: the variable, the model's served context, or the fallback. */
+export type ExtractWindowFrom = "OB1_EXTRACT_CHUNK_TOKENS" | "window" | "default";
+/**
+ * Estimated tokens of thought text per extraction call: OB1_EXTRACT_CHUNK_TOKENS when a
+ * positive number; else what a KNOWN_CHAT_MODEL_WINDOW model's context holds beside the
+ * rules and an answer at the output ratio, never above `fallback`; else `fallback`.
+ * `capped` says the context would have allowed more than the fallback.
+ */
+export function resolveExtractWindow(
+  raw: string | undefined,
+  model: string,
+  fallback: number
+): { tokens: number; from: ExtractWindowFrom; window: number | undefined; capped: boolean };
+
 /** Models whose cards claim Matryoshka training, so truncation is supported. */
 export const MRL_MODELS: Set<string>;
 

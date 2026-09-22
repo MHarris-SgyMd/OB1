@@ -20,13 +20,41 @@
  * `normalize_entity_name()` in migration 016, applied by
  * `record_thought_entities`, so the database is the one definition and this
  * module passes names through as the model gave them.
+ *
+ * ── Long thoughts are extracted in windows (SMD-1879) ───────────────────────
+ * Until SMD-1879 a thought went to the model in ONE call, cut at 8,000
+ * characters, with no bound on the answer's length. On the fork's own brain 32
+ * thoughts — 1,656 to 13,113 characters — timed out at 900 s on `qwen2.5:7b`,
+ * every one of them a call the model would not finish: its served context is
+ * 32,768 tokens, so nothing was truncated on the way in; the answer was what
+ * did not end. Two rules bound both directions now. A thought over the window
+ * (`EmbedConfig.extractChunkTokens`, derived from the metadata model's served
+ * context by db/config.mjs's `resolveExtractWindow`) is split with chunk.ts
+ * into overlapping windows and each window is one call, so the model reads a
+ * bounded text; and every call carries `max_tokens` — an output budget sized
+ * to the text sent (`extractOutputBudget`) — so an answer that does not
+ * converge is cut and read as malformed in seconds instead of running to the
+ * context's end and the worker's timeout. A window's answers are merged across
+ * the thought by (type, lower-cased name) and (relation, from, to), the
+ * highest confidence kept and aliases unioned, before the database applies its
+ * own rule; a mention found in three windows is one entity and one mention.
+ * The one thing per-window extraction cannot see is a relation whose two
+ * endpoints are named in different windows — measured, and the loss stated,
+ * in evals/README.md.
  */
 
 import { refuseEgress, type EmbedConfig } from "./embed.ts";
 import { mayLeaveBox, type EgressSubject } from "./egress.ts";
+import { chunkContent, DEFAULT_EXTRACT_WINDOW_TOKENS, estimateTokens } from "./chunk.ts";
+import { extractOutputBudget } from "../db/config.mjs";
 
-/** Bumped when the prompt or the parsing rules change what gets stored. Part of the extraction key. */
-export const ENTITY_PROMPT_VERSION = 1;
+/**
+ * Bumped when the prompt or the parsing rules change what gets stored. Part of
+ * the extraction key. 2: windowed extraction (SMD-1879) — a long thought's
+ * whole text is extracted, where p1 cut it at 8,000 characters, so the graph a
+ * pass under this version writes is not the one p1 wrote for those thoughts.
+ */
+export const ENTITY_PROMPT_VERSION = 2;
 
 export const ENTITY_TYPES = ["person", "organization", "project", "tool", "topic", "place"] as const;
 export type EntityType = (typeof ENTITY_TYPES)[number];
@@ -37,20 +65,32 @@ export type Relation = (typeof RELATIONS)[number];
 /** Below this the model is guessing; migration 016 stores confidence as numeric(3,2) in [0, 1]. */
 export const MIN_CONFIDENCE = 0.5;
 
-/** Characters of content sent per call. Bounds cost and prompt size; the tail of a very long thought is not extracted. */
-export const CONTENT_LIMIT_CHARS = 8000;
-
 export const MAX_NAME_CHARS = 200;
 
 export type ExtractedEntity = { name: string; type: EntityType; confidence: number; aliases: string[] };
 export type ExtractedRelation = { from: string; to: string; relation: Relation; confidence: number };
+/** One window's own answer, kept beside the merged result: the derivation record (SMD-1731) the worker dumps. */
+export type ExtractionWindow = {
+  index: number;
+  /** chunk.ts's estimate of the text sent. */
+  tokens: number;
+  entities: ExtractedEntity[];
+  relations: ExtractedRelation[];
+  rejected: { entities: number; relations: number };
+  malformed: boolean;
+  ms: number;
+};
 export type Extraction = {
   entities: ExtractedEntity[];
   relations: ExtractedRelation[];
   /** Items the model returned that the rules rejected — for the eval's structural score. */
   rejected: { entities: number; relations: number };
-  /** True when the model's answer was not parseable JSON of the expected shape. */
+  /** True when the model's answer was not parseable JSON of the expected shape — in ANY window. */
   malformed: boolean;
+  /** How many calls the thought took: 1 for a thought within the window, the window count above it. */
+  windows: number;
+  /** Per window, when there was more than one: what each call returned before the merge. */
+  parts?: ExtractionWindow[];
 };
 
 /**
@@ -94,23 +134,85 @@ Rules:
 /**
  * The thought inside the delimiter the prompt names, with any literal
  * occurrence of the tags escaped so a thought cannot forge a close tag and
- * step out of the untrusted section. Cut to CONTENT_LIMIT_CHARS first.
+ * step out of the untrusted section. Whole: until SMD-1879 this cut the text
+ * at 8,000 characters and the tail of a long thought was never extracted;
+ * the windows bound the call's size now.
  */
 export function wrapContent(content: string): string {
   const escaped = content
-    .slice(0, CONTENT_LIMIT_CHARS)
     .replace(/<thought_content>/gi, "<thought_content_escaped>")
     .replace(/<\/thought_content>/gi, "</thought_content_escaped>");
   return `<thought_content>\n${escaped}\n</thought_content>`;
 }
 
+/** How many characters of a note's opening line the window header carries. */
+export const HEADER_CHARS = 200;
+
 /**
- * The messages for one thought, in the shape the chat endpoint takes. A
- * replacer function, for the reason db/config.mjs gives: `$&` in a thought is
- * text, not a substitution pattern.
+ * The note's opening, for a window that is not its first: a window of a long
+ * note reads "the project" or "it" where the note's first line named the
+ * subject, so a relation to that subject is lost unless each window is told
+ * what the note is about (SMD-951's pattern, applied to extraction). The
+ * header is the note's first non-empty line, cut to HEADER_CHARS, placed
+ * INSIDE the untrusted delimiter — it is the thought's own text, not an
+ * instruction — so an injection written into a title stays where the rule
+ * applies. Whether the header pays is measured, not assumed:
+ * evals/README.md, "Entity extraction in windows".
  */
-export function buildMessages(content: string): { role: "system" | "user"; content: string }[] {
-  return [{ role: "user", content: ENTITY_EXTRACTION_PROMPT.replace("{content}", () => wrapContent(content)) }];
+export function documentHeader(content: string): string {
+  const first = content.split("\n").map((l) => l.trim()).find((l) => l.length > 0) ?? "";
+  return first.length > HEADER_CHARS ? `${first.slice(0, HEADER_CHARS - 1)}…` : first;
+}
+
+export type ExtractWindowing = {
+  /** Estimated tokens of thought text per call; content at or under it is one call. */
+  windowTokens: number;
+  overlapTokens: number;
+  /** Prepend the note's opening line to every window after the first. */
+  header: boolean;
+  /** Send `max_tokens`, sized by extractOutputBudget to the text of each call. Off reproduces the p1 request. */
+  outputBudget: boolean;
+};
+
+/** The windowing the configuration decides — one rule for the worker, the evals and preflight. */
+export function windowingFor(cfg: EmbedConfig): ExtractWindowing {
+  return { windowTokens: cfg.extractChunkTokens, overlapTokens: cfg.extractChunkOverlap, header: cfg.extractHeader, outputBudget: true };
+}
+
+/**
+ * The window rule in words — the worker's banner and preflight's `extraction
+ * window` row print this one sentence, so the two cannot describe the same
+ * configuration differently: the size, where it came from, and, for a derived
+ * one, the served context it was derived from.
+ */
+export function describeExtractWindow(cfg: EmbedConfig): string {
+  const n = cfg.extractChunkTokens;
+  const rule = `thoughts over ${n} estimated tokens are extracted in ${n}-token windows (overlap ${cfg.extractChunkOverlap}${cfg.extractHeader ? ", each after the first led by the note's opening line" : ""})`;
+  const ctx = cfg.extractModelWindow !== undefined
+    ? `${cfg.metadataModel}'s ${cfg.extractModelWindow}-token served context`
+    : `${cfg.metadataModel}'s served context, which db/config.mjs's KNOWN_CHAT_MODEL_WINDOW does not list`;
+  if (cfg.extractChunkTokensFrom === "OB1_EXTRACT_CHUNK_TOKENS") return `${rule}, from OB1_EXTRACT_CHUNK_TOKENS (${ctx})`;
+  if (cfg.extractChunkTokensFrom === "window") {
+    const held = n === DEFAULT_EXTRACT_WINDOW_TOKENS && cfg.extractModelWindow !== undefined
+      ? ` — held at ${DEFAULT_EXTRACT_WINDOW_TOKENS}, the size the default model was measured to finish reliably (evals/README.md, SMD-1879)` : "";
+    return `${rule}, derived from ${ctx}${held}`;
+  }
+  return `${rule}, the default for ${ctx}`;
+}
+
+/**
+ * The messages for one call, in the shape the chat endpoint takes. A
+ * replacer function, for the reason db/config.mjs gives: `$&` in a thought is
+ * text, not a substitution pattern. `part` is set for a window of a longer
+ * note: which window this is, and the header when the windowing carries one.
+ */
+export function buildMessages(content: string, part?: { index: number; of: number; header?: string }): { role: "system" | "user"; content: string }[] {
+  const body = part && part.header && part.index > 0
+    ? `[Part ${part.index + 1} of ${part.of} of a note that begins: ${part.header}]\n\n${content}`
+    : part && part.of > 1
+      ? `[Part ${part.index + 1} of ${part.of} of a longer note]\n\n${content}`
+      : content;
+  return [{ role: "user", content: ENTITY_EXTRACTION_PROMPT.replace("{content}", () => wrapContent(body)) }];
 }
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -128,6 +230,8 @@ function clampConfidence(v: unknown): number {
   return Math.min(1, Math.max(0, Math.round(n * 100) / 100));
 }
 
+const EMPTY = (): Extraction => ({ entities: [], relations: [], rejected: { entities: 0, relations: 0 }, malformed: false, windows: 1 });
+
 /**
  * Parse the model's answer into what the tables accept. Lenient about shape
  * (code fences, a stray field), strict about the vocabulary: an entity of an
@@ -137,7 +241,7 @@ function clampConfidence(v: unknown): number {
  * entities resolved.
  */
 export function parseExtraction(raw: string): Extraction {
-  const empty: Extraction = { entities: [], relations: [], rejected: { entities: 0, relations: 0 }, malformed: false };
+  const empty = EMPTY();
   const text = raw.trim().replace(/^```(?:json)?\s*\n?/, "").replace(/\n?\s*```$/, "");
   if (!text) return { ...empty, malformed: true };
   let parsed: unknown;
@@ -153,7 +257,7 @@ export function parseExtraction(raw: string): Extraction {
   // extraction, and recording it as empty would make the thought terminal with
   // nothing in it.
   if (!Array.isArray(parsed.entities)) return { ...empty, malformed: true };
-  const out: Extraction = { entities: [], relations: [], rejected: { entities: 0, relations: 0 }, malformed: false };
+  const out = EMPTY();
   const seen = new Set<string>();
   {
     for (const e of parsed.entities) {
@@ -162,7 +266,7 @@ export function parseExtraction(raw: string): Extraction {
       const type = typeof e.type === "string" ? e.type.trim().toLowerCase() : "";
       const confidence = clampConfidence(e.confidence);
       if (!name || !(ENTITY_TYPES as readonly string[]).includes(type) || confidence < MIN_CONFIDENCE) { out.rejected.entities++; continue; }
-      const key = `${type} ${name.toLowerCase()}`;
+      const key = entityKey(type as EntityType, name);
       if (seen.has(key)) continue;
       seen.add(key);
       const aliases = Array.isArray(e.aliases)
@@ -185,34 +289,84 @@ export function parseExtraction(raw: string): Extraction {
   return out;
 }
 
+/** parseExtraction's own identity for an entity within one answer, applied across windows by mergeExtractions. */
+function entityKey(type: EntityType, name: string): string {
+  return `${type} ${name.toLowerCase()}`;
+}
+
+/**
+ * One thought's answer from its windows' answers. Entities merge on
+ * parseExtraction's own key — (type, lower-cased name) — keeping the highest
+ * confidence and the union of aliases, so a subject mentioned in every window
+ * is one entity in the payload; relations merge on (relation, from, to) the
+ * same way. The database's rule (`normalize_entity_name`) then merges what
+ * this cannot see — "clinician-portal" beside "clinician portal" — exactly as
+ * it does within one answer. Rejected counts add up; one malformed window
+ * makes the thought's answer malformed, so a thought is never recorded
+ * terminal on a partial reading (`db/extract-entities.ts` records it failed,
+ * retryable). `windows` is the window count; `parts` keeps each window's own
+ * answer for the derivation record.
+ */
+export function mergeExtractions(parts: ExtractionWindow[]): Extraction {
+  const entities = new Map<string, ExtractedEntity>();
+  const relations = new Map<string, ExtractedRelation>();
+  const rejected = { entities: 0, relations: 0 };
+  let malformed = false;
+  for (const p of parts) {
+    malformed ||= p.malformed;
+    rejected.entities += p.rejected.entities;
+    rejected.relations += p.rejected.relations;
+    for (const e of p.entities) {
+      const k = entityKey(e.type, e.name);
+      const have = entities.get(k);
+      if (!have) { entities.set(k, { ...e, aliases: [...e.aliases] }); continue; }
+      const best = e.confidence > have.confidence ? e : have;
+      entities.set(k, {
+        name: best.name, type: have.type, confidence: Math.max(have.confidence, e.confidence),
+        aliases: [...new Set([...have.aliases, ...e.aliases, have.name, e.name].filter((a) => a.toLowerCase() !== best.name.toLowerCase()))],
+      });
+    }
+    for (const r of p.relations) {
+      const k = `${r.relation} ${r.from.toLowerCase()} ${r.to.toLowerCase()}`;
+      const have = relations.get(k);
+      if (!have || r.confidence > have.confidence) relations.set(k, { ...r });
+    }
+  }
+  return { entities: [...entities.values()], relations: [...relations.values()], rejected, malformed, windows: parts.length, parts };
+}
+
 /** The pass's key: the model and the prompt version, so a change to either is a new pass. */
 export function extractionKey(model: string): string {
   return `extract:${model}@p${ENTITY_PROMPT_VERSION}`;
 }
 
 /**
- * One extraction call. The model, endpoint, temperature and reasoning settings
- * are the metadata-extraction ones (`OB1_METADATA_MODEL` and friends), read
- * through embed.ts's resolver so the worker and the eval see the same values.
- * Throws on a transport or provider error; a malformed answer is returned with
- * `malformed: true` so the caller can count it rather than retry it blindly.
- * `subject` is whose text this is — the row's metadata for the pass, the
- * actor for a query — and the egress gate (egress.ts, SMD-1903) refuses
- * before the request when it may not reach the chat endpoint.
+ * One extraction call — one window, or a whole thought within the window. The
+ * model, endpoint, temperature and reasoning settings are the
+ * metadata-extraction ones (`OB1_METADATA_MODEL` and friends). Throws on a
+ * transport or provider error; a malformed answer is returned with
+ * `malformed: true`. `max_tokens` is the output budget for the text sent
+ * (SMD-1879): an answer that does not converge ends at the budget as a
+ * malformed answer — visible, retryable — not at the context's end.
  */
-export async function extractEntities(content: string, cfg: EmbedConfig, signal: AbortSignal | undefined, subject: EgressSubject): Promise<Extraction> {
-  const gate = mayLeaveBox({ ...subject, content }, cfg.chat, cfg.egress);
-  if (!gate.allowed) throw refuseEgress("Extraction", cfg.chat.base, gate);
+async function extractOnce(text: string, cfg: EmbedConfig, timeoutMs: number | undefined, part: { index: number; of: number; header?: string } | undefined, budget: boolean): Promise<Extraction> {
   const r = await fetch(`${cfg.chat.base}/chat/completions`, {
     method: "POST",
     headers: cfg.chat.headers,
-    signal,
+    signal: timeoutMs === undefined ? undefined : AbortSignal.timeout(timeoutMs),
+    // Bun's fetch has its own 300 s idle timeout, and a chat completion that
+    // is not streamed is silent until it ends — so the worker's --timeout 900
+    // was 300 whatever it said (measured for SMD-1879: a 330 s signal against
+    // a server answering at 400 s fails at 300.1 s). The caller's deadline is
+    // the one deadline.
+    timeout: false,
     body: JSON.stringify({
       model: cfg.metadataModel,
       response_format: { type: "json_object" },
       temperature: cfg.metadataTemperature,
       ...cfg.metadataReasoning,
-      messages: buildMessages(content),
+      ...(budget ? { max_tokens: extractOutputBudget(estimateTokens(text)) } : {}),
+      messages: buildMessages(text, part),
     }),
   });
   if (!r.ok) {
@@ -222,9 +376,33 @@ export async function extractEntities(content: string, cfg: EmbedConfig, signal:
     throw err;
   }
   const d = (await r.json()) as { choices?: [{ message?: { content?: string } }] };
-  const text = d?.choices?.[0]?.message?.content;
-  if (typeof text !== "string") {
-    return { entities: [], relations: [], rejected: { entities: 0, relations: 0 }, malformed: true };
+  const answer = d?.choices?.[0]?.message?.content;
+  if (typeof answer !== "string") return { ...EMPTY(), malformed: true };
+  return parseExtraction(answer);
+}
+
+/**
+ * Extract one thought. The egress gate (egress.ts, SMD-1903) is asked once,
+ * about the whole text, before any call; `subject` is whose text this is — the
+ * row's metadata for the pass, the actor for a query. A thought at or under
+ * the window is one call, the request p1 made plus its output budget; a
+ * longer one is split with chunk.ts at the window, each window one call in
+ * order, and the answers merged (mergeExtractions). `timeoutMs` is PER CALL —
+ * the worker's --timeout — so a long thought's budget grows with its windows
+ * rather than sharing one deadline across them. `windowing` is the
+ * configuration's unless a harness measures another (evals/eval-extract-windows.ts).
+ */
+export async function extractEntities(content: string, cfg: EmbedConfig, timeoutMs: number | undefined, subject: EgressSubject, windowing: ExtractWindowing = windowingFor(cfg)): Promise<Extraction> {
+  const gate = mayLeaveBox({ ...subject, content }, cfg.chat, cfg.egress);
+  if (!gate.allowed) throw refuseEgress("Extraction", cfg.chat.base, gate);
+  const windows = chunkContent(content, { maxTokens: windowing.windowTokens, overlapTokens: windowing.overlapTokens });
+  if (windows.length === 0) return extractOnce(content, cfg, timeoutMs, undefined, windowing.outputBudget);
+  const header = windowing.header ? documentHeader(content) : undefined;
+  const parts: ExtractionWindow[] = [];
+  for (const w of windows) {
+    const t0 = Date.now();
+    const ex = await extractOnce(w.content, cfg, timeoutMs, { index: w.index, of: windows.length, header }, windowing.outputBudget);
+    parts.push({ index: w.index, tokens: estimateTokens(w.content), entities: ex.entities, relations: ex.relations, rejected: ex.rejected, malformed: ex.malformed, ms: Date.now() - t0 });
   }
-  return parseExtraction(text);
+  return mergeExtractions(parts);
 }

@@ -10,8 +10,8 @@ are here so the decision is auditable and re-runnable when better models appear.
 - [Bun](https://bun.sh) 1.4+
 - The models you want to compare, pulled
 - `OB1_LLM_LOCAL=1` in the environment for the harnesses that dial through the
-  server's own resolver (`eval-consolidate`, `eval-entities`, `eval-graphrag`;
-  the chunking end-to-end sets it for its child itself): the egress gate
+  server's own resolver (`eval-consolidate`, `eval-entities`, `eval-graphrag`,
+  `eval-extract-windows`; the chunking end-to-end sets it for its child itself): the egress gate
   (SMD-1903) refuses a thought's text to an endpoint not declared local, and a
   loopback address is not a declaration. `lib.ts`'s own embedding dialler
   (`OB1_EVAL_BASE`) is outside the gate: it embeds eval corpora, not the brain
@@ -1277,6 +1277,59 @@ get 1024. The harness takes `model@1024`. Interestingly 1024 beat 1536 here
 Note that the server does **not** currently send `dimensions`, so configuring a
 2560-native model against a 1024 column still fails the width check at capture
 time. Making that configurable is the obvious follow-up.
+
+## Entity extraction in windows — the stragglers, the answer budget, and what a window costs in relations
+
+`eval-extract-windows.ts` (SMD-1879). Until this change `db/extract-entities.ts`
+sent a thought to the metadata model in one call, cut at 8,000 characters,
+with no bound on the answer. On the fork's own brain 32 of 295 thoughts —
+1,656 to 13,113 characters — failed with "The operation timed out." on
+`qwen2.5:7b`, re-run serially with `--timeout 900`. The ticket read that as one
+oversized read-and-generate. Measured, it was half that.
+
+```bash
+# the thoughts that failed, off a brain (read-only), as the harness's input
+psql "$DATABASE_URL" -At -c "SELECT json_agg(json_build_object('id', t.id, 'content', t.content)) FROM thought_work_claims c JOIN thoughts t ON t.id = c.thought_id WHERE c.work_type LIKE 'extract:%' AND c.status = 'failed'" > stragglers.json
+OB1_LLM_LOCAL=1 OB1_EVAL_DOCS=stragglers.json ../db/with-postgres.sh bun eval-extract-windows.ts --arms whole+budget,w1200,w600
+OB1_LLM_LOCAL=1 ../db/with-postgres.sh bun eval-extract-windows.ts --planted     # three long documents with facts planted at known distances
+```
+
+### What the failures were, 2026-09-22
+
+Three probes before any design, all against an idle Ollama 0.33 serving
+`qwen2.5:7b` at its defaults:
+
+- **Nothing was truncated on the way in.** `/api/ps` reports the model served
+  at a 32,768-token context, and a 14,432-token prompt came back with
+  `usage.prompt_tokens` 14,432. The extraction rules and delimiter with an
+  empty thought cost 398 tokens. So the whole of every straggler — the longest
+  is about 3,300 estimated tokens — fit the context with room to spare.
+- **The shortest straggler ran to the deadline alone.** 1,656 characters, 414
+  estimated tokens, no other load: the worker's exact request ran 300 s and
+  was cut by the client.
+- **Every straggler is an answer that does not end.** With `max_tokens: 1500`
+  each of the 32 whole-thought calls returned `finish_reason: length` in
+  about 30 s; the tails are one relation repeated (`ToolName → ToolEntry
+  depends_on`, line after line), one entity repeated, or an enumeration of
+  every ticket id in the text as a `uses` edge. Nothing about the input's
+  length made the model stop; on these texts it did not.
+- **`--timeout 900` was 300.** Bun's `fetch` has its own 300 s idle timeout,
+  and an unstreamed chat completion is silent until it ends: a 330 s
+  `AbortSignal` against a server that answers at 400 s failed at 300.1 s; with
+  `timeout: false` on the request it failed at 330.0, the signal's. Every
+  dialler in the fork now passes `timeout: false` so the configured deadline is
+  the deadline.
+
+So the windows bound what the model reads, and the answer budget bounds what
+it writes — twice the text's estimated tokens plus 256 (`db/config.mjs`,
+`extractOutputBudget`), against a measured mean of 0.48 answer tokens per input
+token and a 95th percentile of 1.6 over the 262 thoughts that did extract. A
+runaway now ends at the budget as a malformed answer the worker records failed
+in seconds, where before it held a worker for the whole timeout.
+
+### Results
+
+RESULTS-PLACEHOLDER
 
 ## Entity extraction, measured through the real write path
 

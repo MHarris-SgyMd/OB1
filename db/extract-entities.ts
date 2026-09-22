@@ -4,12 +4,13 @@
  * in parallel, resumably, and keep doing it for new ones.
  *
  * The second consumer of migration 015's lease table, and the worker for
- * migration 016's tables. Each thought goes to the metadata model once
- * (server-portable/entities.ts holds the prompt and the parsing rules) and the
- * result is written through `record_thought_entities`, which replaces the
- * thought's mentions and edges wholesale — so running this twice over an
- * unchanged corpus writes nothing new, and running it after an edit leaves only
- * what the new text says.
+ * migration 016's tables. Each thought goes to the metadata model — once when
+ * it fits the extraction window, once per window when it does not
+ * (server-portable/entities.ts holds the prompt, the parsing rules, the
+ * windowing and the merge; SMD-1879) — and the result is written through
+ * `record_thought_entities`, which replaces the thought's mentions and edges
+ * wholesale — so running this twice over an unchanged corpus writes nothing
+ * new, and running it after an edit leaves only what the new text says.
  *
  *   bun db/extract-entities.ts --url postgres://…             # the backlog, then exit
  *   bun db/extract-entities.ts --url … --follow [SECONDS]     # …then keep polling for new captures
@@ -19,10 +20,12 @@
  *   bun db/extract-entities.ts --url … --retry-failed         # failed rows back into the pool first
  *   bun db/extract-entities.ts --url … --dump answers.jsonl   # also append every model answer, for evals/eval-entities.ts --replay
  *   bun db/extract-entities.ts --url … --switch-key           # required when the model or prompt version differs from ob1_config
- *   --workers N (2)   --batch N (1)   --ttl SECONDS (900)   --heartbeat SECONDS (60, or a third of the lease; at least 1, and the lease must cover two)   --timeout SECONDS (300, per model call)
+ *   --workers N (2)   --batch N (1)   --ttl SECONDS (900)   --heartbeat SECONDS (60, or a third of the lease; at least 1, and the lease must cover two)   --timeout SECONDS (300, per model call — per window of a long thought)
  *
  * ── The cost, and the switch ────────────────────────────────────────────────
- * One LLM call per thought, recurring: every new capture is extracted too. On
+ * One LLM call per thought — per window of a thought over the extraction
+ * window, so a 13,000-character thought is four or five smaller calls rather
+ * than one that never ends (SMD-1879) — recurring: every new capture is extracted too. On
  * the fork's default — Ollama, `qwen2.5:7b` — that is compute and latency on
  * your own machine and nothing leaves it. Pointed at a hosted provider it is
  * money, per thought, for ever, and the content of every thought goes to that
@@ -38,10 +41,13 @@
  * completed document the two-worker passes spent about twice the worker-seconds,
  * which is what a serialising local Ollama looks like. Two stays the default
  * because it costs nothing and recovers a little; do not expect more. The
- * timeouts (21, 11, 19 across the three passes) are long documents whose
- * extraction genuinely takes minutes on a 7B model. Raise --timeout for those,
- * or accept the failures and --retry-failed later; --workers beyond two is for
- * a hosted provider that really does serve calls in parallel.
+ * timeouts (21, 11, 19 across the three passes) were read as long documents
+ * whose extraction genuinely takes minutes on a 7B model; measured again for
+ * SMD-1879 they were answers that did not end — the model repeating one
+ * relation until the context ran out — and the windows plus the per-call
+ * answer budget (entities.ts) turn them into fast, visible failures or, for
+ * the long ones, into extractions. --workers beyond two is for a hosted
+ * provider that really does serve calls in parallel.
  *
  * Nothing spends it until this runs. The first run writes the extraction key
  * to `ob1_config.entity_extraction_key`; from then on migration 016's trigger
@@ -82,7 +88,7 @@ import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import { PROVIDER_ERROR_CHARS, refusesLength, resolveEmbedConfig } from "../server-portable/embed.ts";
 import { describeEgress, localKnob, refusesEverything, ROW_UNITS } from "../server-portable/egress.ts";
-import { extractEntities, extractionKey, type Extraction } from "../server-portable/entities.ts";
+import { describeExtractWindow, extractEntities, extractionKey, type Extraction } from "../server-portable/entities.ts";
 import { hashKey, parseKeyRecords } from "../server-portable/auth.ts";
 import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, reportLost, startHeartbeat } from "./lease.ts";
 
@@ -160,6 +166,10 @@ const JOB = flag("job") ?? extractionKey(cfg.metadataModel);
 
 console.log(`  job:    ${JOB}`);
 console.log(`  model:  ${cfg.metadataModel} via ${cfg.chat.base}, temperature ${cfg.metadataTemperature}`);
+// The window a thought is extracted in, and where the number came from
+// (SMD-1879) — the same rule preflight prints, so the banner says what the
+// pass will do rather than a second opinion of it.
+console.log(`  window: ${describeExtractWindow(cfg)}`);
 // What may leave the box (SMD-1903): a row the gate refuses is a failed claim
 // naming the rule; its text never went anywhere, and --retry-failed revisits it.
 console.log(`  egress: ${describeEgress(cfg.chat, cfg.egress, localKnob(cfg, "chat"))}`);
@@ -369,6 +379,9 @@ let lost = 0;
 let beats = 0;
 let malformed = 0;
 let llmMs = 0;
+/** Thoughts extracted in more than one window, and model calls made in all (SMD-1879). */
+let windowed = 0;
+let calls = 0;
 const totals = { entities: 0, newEntities: 0, mentions: 0, edges: 0, dropped: 0, ambiguous: 0 };
 const activeWorkers = new Set<string>();
 const started = Date.now();
@@ -404,19 +417,25 @@ async function processRow(row: Row): Promise<Outcome> {
   let extraction: Extraction;
   try {
     // The row's own metadata is what the gate reads (SMD-1903); a refusal
-    // throws out of here as a failed claim naming the rule.
-    extraction = await extractEntities(row.content, cfg, AbortSignal.timeout(TIMEOUT_S * 1000), { kind: "extraction", actor: actorName, metadata: row.metadata ?? undefined });
+    // throws out of here as a failed claim naming the rule. The timeout is per
+    // call — per window of a long thought (SMD-1879).
+    extraction = await extractEntities(row.content, cfg, TIMEOUT_S * 1000, { kind: "extraction", actor: actorName, metadata: row.metadata ?? undefined });
   } finally {
     llmMs += Date.now() - t0;
   }
+  calls += extraction.windows;
+  if (extraction.windows > 1) windowed++;
   if (extraction.malformed) {
     malformed++;
-    return { outcome: "failed", error: "the model's answer was not JSON of the expected shape" };
+    const where = extraction.parts ? ` (window ${extraction.parts.filter((p) => p.malformed).map((p) => p.index + 1).join(", ")} of ${extraction.windows})` : "";
+    return { outcome: "failed", error: `the model's answer was not JSON of the expected shape${where}` };
   }
   if (DUMP) {
     // The model's answer as parsed, before the database applies the rule —
-    // what a replay needs to re-score a rule change without the model.
-    appendFileSync(DUMP, JSON.stringify({ id: row.id, fingerprint: row.fingerprint, key: JOB, entities: extraction.entities, relations: extraction.relations }) + "\n");
+    // what a replay needs to re-score a rule change without the model — and,
+    // for a windowed thought, each window's own answer beside the merged one:
+    // the derivation record (SMD-1731) until a lineage table holds it.
+    appendFileSync(DUMP, JSON.stringify({ id: row.id, fingerprint: row.fingerprint, key: JOB, entities: extraction.entities, relations: extraction.relations, windows: extraction.windows, ...(extraction.parts ? { parts: extraction.parts } : {}) }) + "\n");
   }
   const [r] = await sql`
     SELECT record_thought_entities(
@@ -706,7 +725,7 @@ if (FOLLOW) {
 const elapsed = ((Date.now() - started) / 1000).toFixed(1);
 console.log(
   `\n  ${done} extracted, ${failed} failed, ${superseded} edited mid-extraction and re-queued, ${vanished} deleted mid-pass${lost ? `, ${lost} no longer this worker's when checked (each named above)` : ""}, in ${elapsed}s ` +
-    `(${(llmMs / 1000).toFixed(1)}s in model calls across ${WORKERS} worker(s), ${beats} heartbeat(s))`
+    `(${(llmMs / 1000).toFixed(1)}s in ${calls} model call(s) across ${WORKERS} worker(s), ${windowed} thought(s) in windows, ${beats} heartbeat(s))`
 );
 console.log(
   `  wrote ${totals.mentions} mentions of ${totals.newEntities} new entities, ${totals.edges} edges; ` +

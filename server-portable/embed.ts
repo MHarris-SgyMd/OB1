@@ -22,7 +22,7 @@
  * every target index.ts does.
  */
 
-import { chunkContent, DEFAULT_MAX_TOKENS, DEFAULT_OVERLAP_TOKENS } from "./chunk.ts";
+import { chunkContent, DEFAULT_EXTRACT_WINDOW_TOKENS, DEFAULT_MAX_TOKENS, DEFAULT_OVERLAP_TOKENS, EXTRACT_OVERLAP_RATIO } from "./chunk.ts";
 import {
   applyEmbeddingPrompt,
   DEFAULT_EMBEDDING_MODEL,
@@ -36,7 +36,10 @@ import {
   resolveChunkContext,
   resolveChunkTokens,
   resolveEmbeddingDimensions,
+  resolveExtractWindow,
+  EXTRACT_WINDOW_HEADER,
   type ChunkTokensFrom,
+  type ExtractWindowFrom,
 } from "../db/config.mjs";
 import { flagOn, mayLeaveBox, resolveEgressPolicy, type EgressDecision, type EgressPolicy, type EgressSubject } from "./egress.ts";
 
@@ -64,6 +67,8 @@ export type EmbedEnv = {
   OB1_CHUNK_OVERLAP?: string;
   OB1_CHUNK_CONTEXT?: string;
   OB1_METADATA_MODEL?: string;
+  /** Estimated tokens of thought text per entity-extraction call; unset derives it from the metadata model's served context (SMD-1879). */
+  OB1_EXTRACT_CHUNK_TOKENS?: string;
   /** The supersession judge's model, when it is not the metadata model (SMD-1901). */
   OB1_JUDGE_MODEL?: string;
   OB1_METADATA_TEMPERATURE?: string;
@@ -159,6 +164,10 @@ export async function providerCall<T>(cfg: EmbedConfig, path: "/embeddings" | "/
       headers: at.headers,
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(cfg.timeoutMs),
+      // OB1_LLM_TIMEOUT is the one deadline: Bun's fetch would otherwise cut
+      // an unstreamed call at its own 300 s idle timeout, so a longer value
+      // here never took effect (measured for SMD-1879; entities.ts).
+      timeout: false,
     });
   } catch (e) {
     // Named as what it is, with the knob, and WITHOUT a status: nothing about
@@ -342,6 +351,21 @@ export type EmbedConfig = {
   /** The chat model the blurb is generated with — the metadata model. */
   metadataModel: string;
   /**
+   * Estimated tokens of thought text per entity-extraction call (SMD-1879): a
+   * thought over it is extracted in windows of this size. OB1_EXTRACT_CHUNK_TOKENS,
+   * else derived from the metadata model's served context (db/config.mjs,
+   * KNOWN_CHAT_MODEL_WINDOW) and never above entities.ts's default, else that
+   * default. The server never extracts; preflight prints the rule and its source.
+   */
+  extractChunkTokens: number;
+  extractChunkTokensFrom: ExtractWindowFrom;
+  /** The metadata model's served context in KNOWN_CHAT_MODEL_WINDOW, when it has one. */
+  extractModelWindow: number | undefined;
+  /** Overlap between extraction windows: chunk.ts's ratio of the window (150 of 1200). */
+  extractChunkOverlap: number;
+  /** Whether a window after the first carries the note's opening line — entities.ts's documentHeader; measured in evals/README.md. */
+  extractHeader: boolean;
+  /**
    * The model the supersession judge (consolidate.ts) runs on: OB1_JUDGE_MODEL,
    * else the metadata model. The two tasks were one knob, so the only way to
    * judge with a stronger model was to tag every capture with it too; SMD-1873
@@ -396,6 +420,12 @@ export function resolveEmbedConfig(env: EmbedEnv): EmbedConfig {
   // size at or under the constant, and an unknown model keeps the constant.
   const chunk = resolveChunkTokens(env.OB1_CHUNK_TOKENS, model, DEFAULT_MAX_TOKENS);
   const metadataModel = stringOr(env.OB1_METADATA_MODEL, DEFAULT_METADATA_MODEL);
+  // The extraction window is the METADATA model's, not the embedding model's
+  // (SMD-1879): one call's text is bounded by what that model's served context
+  // holds beside the rules and its answer, and by what it was measured to
+  // finish. Same shape as the embedding rule above, a different model and a
+  // different table.
+  const extract = resolveExtractWindow(env.OB1_EXTRACT_CHUNK_TOKENS, metadataModel, DEFAULT_EXTRACT_WINDOW_TOKENS);
   return {
     ...resolveProviderEndpoints(env),
     embeddingModel: model,
@@ -429,6 +459,11 @@ export function resolveEmbedConfig(env: EmbedEnv): EmbedConfig {
       "non-negative"),
     chunkContext: resolveChunkContext(env.OB1_CHUNK_CONTEXT),
     metadataModel,
+    extractChunkTokens: extract.tokens,
+    extractChunkTokensFrom: extract.from,
+    extractModelWindow: extract.window,
+    extractChunkOverlap: Math.floor(extract.tokens * EXTRACT_OVERLAP_RATIO),
+    extractHeader: EXTRACT_WINDOW_HEADER,
     // Trimmed like its sibling (SMD-1843): the judge's own knob, else the
     // metadata model as resolved above.
     judgeModel: stringOr(env.OB1_JUDGE_MODEL, metadataModel),

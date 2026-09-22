@@ -239,6 +239,10 @@ export async function judgePair(older: PairSide, newer: PairSide, cfg: EmbedConf
     method: "POST",
     headers: cfg.chat.headers,
     signal,
+    // The caller's deadline is the one deadline: Bun's own 300 s idle timeout
+    // cut an unstreamed completion before a longer --timeout could (entities.ts
+    // has the measurement; SMD-1879).
+    timeout: false,
     body: JSON.stringify({
       model: cfg.judgeModel,
       response_format: { type: "json_object" },
