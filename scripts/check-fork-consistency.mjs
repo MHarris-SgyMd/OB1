@@ -3571,6 +3571,12 @@ const REGISTRY_PROBES = [
   ["an artifact marked only by a tag the brain's own vocabulary shares (capture) is not marked", (r) => {}, [], (t) => { t.metadataByPath.set("recipes/own-capture", { requires: { services: ["OpenRouter"] }, tags: ["capture", "export", "sync"] }); t.existingDirs.push("recipes/own-capture"); }],
   ["a family declared as null and used", (r) => { r.families["web-clip"] = null; r.artifacts[0].capabilities[0].family = "web-clip"; }, ["family-schema"]],
   ["a fold-in row naming a contribution that is gone", (r) => {}, ["disposition-stale"], (t) => { t.dispositionText += "| `gone-capture` | keep + audited → fold-in **SMD-1867** | removed since |\n"; }],
+  // The three below keep a provider service on the probe tree so the openrouter pattern stays live: the table is the only trigger under test.
+  ["an artifact the disposition table alone marks (a batch importer naming a provider only, declaring nothing)", (r) => { r.artifacts.shift(); r.connectors.acme.direction = "sink"; }, ["coverage-unregistered"], (t) => { t.metadataByPath.set("integrations/acme-capture", { requires: { services: ["OpenRouter"] }, tags: [] }); }],
+  ["a fold-in row for a directory whose metadata did not parse marks nothing", (r) => { r.artifacts.shift(); r.connectors.acme.direction = "sink"; }, [], (t) => { t.metadataByPath.set("integrations/acme-capture", null); t.metadataByPath.set("recipes/plain-tool", { requires: { services: ["Supabase", "OpenRouter"] }, tags: ["ops"] }); }],
+  ["a fold-in row after a fenced `# comment` under the same heading", (r) => { r.artifacts.shift(); r.connectors.acme.direction = "sink"; }, ["coverage-unregistered"], (t) => { t.metadataByPath.set("integrations/acme-capture", { requires: { services: ["OpenRouter"] }, tags: [] }); t.dispositionText = t.dispositionText.replace("| Artifact |", "```sh\n# a comment in an example\n```\n| Artifact |"); }],
+  ["a service pattern that matches the empty string (a trailing `|`)", (r) => { r.not_connectors.services[0].pattern = "openrouter|"; }, ["pattern-invalid"]],
+  ["a registry entry for a placeholder directory", (r) => { r.artifacts[1].path = "recipes/_template"; }, ["artifact-path", "coverage-unregistered"]],
   ["a disposition table that is missing", (r) => {}, ["disposition-missing"], (t) => { t.dispositionText = null; }],
   ["a disposition table whose headings moved to `##`, yielding no fold-in", (r) => {}, ["disposition-dark"], (t) => { t.dispositionText = t.dispositionText.replace("### ", "## "); }],
   ["a capability that is a bare string", (r) => { r.artifacts[1].capabilities[0] = "acme"; r.connectors.acme.direction = "source"; }, ["capability-keys", "connectors-field"]],
@@ -3593,9 +3599,6 @@ function checkConnectorRegistry() {
   // Two patterns covering one service are both live: the stale rule counts every match, not the first.
   const overlap = PROBE_REGISTRY(); overlap.not_connectors.services.push({ pattern: "open", reason: "overlaps openrouter on purpose" });
   if (registryProblems({ registry: overlap, ...PROBE_TREE() }).length) fail(SELF, "check 19 calls a service pattern stale when a broader pattern also matches its only service (its own non-probe)");
-  // The disposition table alone marks an artifact: a batch importer that names no service.
-  const disp = PROBE_TREE(); disp.metadataByPath.set("integrations/acme-capture", { requires: { services: [] }, tags: [] });
-  if (!kindsOf({ ...PROBE_REGISTRY(), artifacts: [PROBE_REGISTRY().artifacts[1]], connectors: { acme: { direction: "sink" } } }, disp).includes("coverage-unregistered")) fail(SELF, "check 19 no longer reads an SMD-1867 row of the disposition table as marking an artifact (its own probe)");
   // A provider qualified after itself is covered: the pattern matches within the first two words.
   const head = PROBE_TREE(); head.existingDirs.push("recipes/uses-a-gateway"); head.metadataByPath.set("recipes/uses-a-gateway", { requires: { services: ["Any OpenRouter-compatible LLM gateway (Ollama, etc.)", "Optional: OpenRouter (Sonar) for live search"] }, tags: ["synthesis"] });
   if (registryProblems({ registry: PROBE_REGISTRY(), ...head }).length) fail(SELF, "check 19 marks a service string that names a provider first and qualifies it after (its own non-probe)");

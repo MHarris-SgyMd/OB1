@@ -184,7 +184,7 @@ Every contribution needs a `metadata.json` file. Here's the template:
 **Additional structured dependency fields:**
 - `requires_skills` — array of skill slugs this contribution depends on (e.g., `["auto-capture"]`). Use this when the reusable behavior lives in `skills/<slug>/`
 - `requires_primitives` — array of primitive slugs this contribution depends on (e.g., `["rls", "shared-mcp"]`)
-- `connectors` — array of the external systems this contribution reads from or delivers to, as the vendor keys of [`docs/connector-registry.json`](docs/connector-registry.json) (e.g., `["gmail"]`, `["telegram", "google-calendar"]`). Omit it for a contribution that touches no external system; when present, the contribution is classified in the registry (see "Connectors" below)
+- `connectors` — array of the external systems this contribution reads from or delivers to, as the vendor keys of [`docs/connector-registry.json`](docs/connector-registry.json) (e.g., `["gmail"]`, `["telegram", "google-calendar"]`). Leave it empty (as the templates ship it) or omit it for a contribution that touches no external system; a non-empty list means the contribution is classified in the registry (see "Connectors" below)
 
 **Extension-specific fields:**
 - `learning_order` — integer position in the extension learning path (1-6)

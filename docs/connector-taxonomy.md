@@ -1,9 +1,9 @@
 # Connector taxonomy and the brain-side seam (SMD-1933)
 
 The fork carries many per-vendor implementations of a few external-system
-interfaces: five capture integrations and eleven import recipes on the way in,
-five digests and briefings on the way out, and the same vendor on both sides
-more than once (`docs/vendored-disposition.md`, SMD-1924). This document is the
+interfaces: the SMD-1924 triage counted capture integrations and import recipes
+on the way in, digests and briefings on the way out, and the same vendor on
+both sides more than once (`docs/vendored-disposition.md`). This document is the
 classification that collapses them, and the seam that lets **any** fetcher — a
 node of the orchestration tool SMD-1863 picks, a native OB1 driver, the AI
 client's own MCP connector, a browser extension — land in the brain through
@@ -85,9 +85,9 @@ the brain's.
 vendor driver**, and the registry models them that way:
 
 - An **artifact** (a folder under `integrations/` or `recipes/`) declares one or
-  more capabilities. Most declare one. `chrome-capture-extension` declares six
-  (three vendors, each with a manual `push` and a bulk `pull`); `life-engine`
-  declares three (two chat sinks and a calendar source).
+  more capabilities. Most declare one; a browser extension that captures from
+  several chat products, or a briefing recipe that reads a calendar and posts
+  to a chat, declares several (the generated Capabilities table has the rows).
 - A **connector** is a vendor. It is not declared in a folder of its own; it is
   the set of capabilities across the tree that name that vendor, and its
   direction is derived from them. The registry's `connectors` block declares the
@@ -302,7 +302,7 @@ must-pass probes on every run:
 | Verify item (SMD-1933) | Status |
 |---|---|
 | The classification covers every SMD-1924 external-touching artifact, each with the five facets | **Done, mechanical.** The counts are the generated block's first line; check 19's coverage rule sweeps every `metadata.json` and the disposition table, so the claim is re-proven on every run |
-| A bidirectional vendor is one connector serving capture and digest | **Done.** `telegram`, `gmail`, `discord`, `slack` derive `bidirectional` from their capabilities; the check refuses a declaration the capabilities do not derive |
+| A bidirectional vendor is one connector serving capture and digest | **Done.** The connectors that derive `bidirectional` are named on the generated block's first line (the ticket's telegram and gmail among them); the check refuses a declaration the capabilities do not derive |
 | A new vendor in an existing family is added with only a driver/mapping | **Specified** (the envelope, the family schemas, the "Adding" recipe). **Proven when SMD-1867 lands the pipeline** — until then a new recipe still hand-rolls the projection |
 | The same vendor via a low-code node and via a native driver produce identical canonical / text / edges | **Specified** (identity recomputed at the seam, fetcher as provenance). **Proven on one vendor once SMD-1863 picks the tool** |
 

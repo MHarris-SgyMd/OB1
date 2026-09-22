@@ -27,7 +27,7 @@
 import { readFileSync, writeFileSync, existsSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { CATEGORIES, contributionDirs } from "./contributions.mjs";
+import { CATEGORIES, NOT_CONTRIBUTIONS, contributionDirs } from "./contributions.mjs";
 
 export const REGISTRY_PATH = "docs/connector-registry.json";
 export const SPEC_PATH = "docs/connector-taxonomy.md";
@@ -93,7 +93,10 @@ export function readRegistry(root) {
 export function dispositionPaths(text) {
   const out = [];
   let cat = null;
+  let fenced = false;
   for (const line of text.split("\n")) {
+    if (/^\s*(```|~~~)/.test(line)) { fenced = !fenced; continue; } // a `# comment` inside a fenced example is not a heading
+    if (fenced) continue;
     if (/^#{1,6}\s/.test(line)) {
       const h = /^###\s+`([^`]+?)\/?`/.exec(line);
       cat = h && CATEGORIES.includes(h[1]) ? h[1] : null;
@@ -167,7 +170,12 @@ function servicePatterns(registry, problems) {
     const where = `${REGISTRY_PATH} not_connectors.services[${i}]`;
     if (!nonEmpty(p?.reason)) problems.push({ where, kind: "pattern-reason", msg: "a service pattern carries no reason" });
     if (!nonEmpty(p?.pattern)) { problems.push({ where, kind: "pattern-invalid", msg: "a service pattern is missing or empty — an empty pattern matches every service" }); continue; }
-    try { out.push({ re: new RegExp(p.pattern, "gi"), pattern: p.pattern, where }); } catch (e) { problems.push({ where, kind: "pattern-invalid", msg: `pattern ${JSON.stringify(p.pattern)} does not compile: ${e.message}` }); } // "g" for matchAll; read only through patternHits
+    let re;
+    try { re = new RegExp(p.pattern, "gi"); } catch (e) { problems.push({ where, kind: "pattern-invalid", msg: `pattern ${JSON.stringify(p.pattern)} does not compile: ${e.message}` }); continue; } // "g" for matchAll; read only through patternHits
+    // A pattern that matches the empty string — "openrouter|" (a one-character typo), ".*", "x?" — matches at index 0
+    // of every service and would excuse the whole tree as quietly as an empty pattern would.
+    if (new RegExp(p.pattern, "i").test("")) { problems.push({ where, kind: "pattern-invalid", msg: `pattern ${JSON.stringify(p.pattern)} matches the empty string, so it would cover every service — a trailing \`|\`, a \`.*\` or an optional-only body` }); continue; }
+    out.push({ re, pattern: p.pattern, where });
   }
   return out;
 }
@@ -211,7 +219,8 @@ export function triggersFor({ metadataByPath, foldIns, patterns, connectorKeys, 
     if (vendors.length) add(path, `tagged with the connector name${vendors.length > 1 ? "s" : ""} ${vendors.join(", ")}`);
   }
   const dirs = new Set(existingDirs);
-  for (const path of foldIns) if (dirs.has(path)) add(path, `a fold-in SMD-1867 row of ${DISPOSITION_PATH}`);
+  // A fold-in row marks a directory that exists — unless its metadata is there and did not parse (null): no verdict, as above.
+  for (const path of foldIns) if (dirs.has(path) && metadataByPath.get(path) !== null) add(path, `a fold-in SMD-1867 row of ${DISPOSITION_PATH}`);
   return { triggers: out, livePatterns };
 }
 
@@ -279,6 +288,7 @@ export function registryProblems({ registry, existingDirs, metadataByPath, dispo
   for (const a of artifacts) {
     const where = `${R} artifacts["${a?.path}"]`;
     if (!nonEmpty(a?.path) || !PATH.test(a.path)) { push(where, "artifact-path", `path must be <category>/<slug>, got ${JSON.stringify(a?.path)}`); continue; }
+    if (NOT_CONTRIBUTIONS.includes(a.path.split("/")[1])) { push(where, "artifact-path", `${a.path.split("/")[1]} is not a contribution — a placeholder, the shared auth module or an install — and cannot be classified`); continue; }
     if (seen.has(a.path)) push(where, "artifact-duplicate", "listed twice — one entry per artifact, with every capability under it");
     else seen.set(a.path, a); // the first entry is the one the declaration is judged against
 

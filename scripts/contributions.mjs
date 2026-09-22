@@ -20,11 +20,16 @@ export const CATEGORIES = [
 ];
 
 /**
+ * The directory names under a category that are not contributions: _template
+ * is the category's placeholder, _shared the auth module the category's servers
+ * import (a copy of server-portable/auth.ts), node_modules
+ * extensions/test-auth.ts's install (gitignored).
+ */
+export const NOT_CONTRIBUTIONS = ["_template", "_shared", "node_modules"];
+
+/**
  * Every contribution directory under `root`, as `{ cat, name, dir, rel }`,
- * categories and names sorted. _template is the category's placeholder,
- * _shared the auth module the category's servers import (a copy of
- * server-portable/auth.ts), and node_modules extensions/test-auth.ts's install
- * (gitignored) — none is a contribution. Any other directory is one, with or
+ * categories and names sorted — any directory but NOT_CONTRIBUTIONS, with or
  * without a metadata.json (check 1 is what fails a missing one).
  */
 export function contributionDirs(root) {
@@ -33,7 +38,7 @@ export function contributionDirs(root) {
     const base = join(root, cat);
     if (!existsSync(base)) continue;
     for (const name of readdirSync(base).sort()) {
-      if (name === "_template" || name === "_shared" || name === "node_modules") continue;
+      if (NOT_CONTRIBUTIONS.includes(name)) continue;
       const dir = join(base, name);
       if (statSync(dir).isDirectory()) out.push({ cat, name, dir, rel: `${cat}/${name}` });
     }
