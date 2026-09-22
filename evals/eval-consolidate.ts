@@ -45,7 +45,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadEnv } from "./env.ts";
 import { embed, parseSpec } from "./lib.ts";
-import { resolveEmbedConfig } from "../server-portable/embed.ts";
+import { resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { estimateTokens } from "../server-portable/chunk.ts";
 import { extractionKey } from "../server-portable/entities.ts";
 import {
@@ -78,7 +78,7 @@ const EMBED_MODEL = process.env.OB1_EVAL_EMBED ?? "qwen3-embedding:4b@1024";
 const spec = parseSpec(EMBED_MODEL);
 const DIM = spec.dims ?? Number(process.env.OB1_EMBEDDING_DIM || 1024);
 const OUT = process.env.OB1_EVAL_OUT ?? "/tmp/consolidate-proposals.md";
-const cfg = resolveEmbedConfig(process.env);
+const cfg = resolveEmbedConfig(process.env as EmbedEnv);
 const JOB = consolidateKey(cfg.judgeModel);
 // The pass's verdicts, per judge model (OB1_EVAL_VERDICTS moves it); a --full
 // run starts it empty, since the worker appends and a second run the same day

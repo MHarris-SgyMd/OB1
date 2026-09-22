@@ -242,6 +242,8 @@ export const MATCH_THOUGHTS_SIGNATURE: string;
 export const SEARCH_THOUGHTS_HYBRID_SIGNATURE: string;
 /** The signature the servers and reembed.ts call, as regprocedure text (032: nine arguments). */
 export const UPDATE_THOUGHT_SIGNATURE: string;
+/** 032's nine-argument form, the one 045 replaced (SMD-1730). */
+export const UPDATE_THOUGHT_SIGNATURE_9: string;
 /** The 4- and 5-argument search forms 020 dropped and the 7- and 8-argument update_thought 021 and 032 dropped; a schema reset drops them too. */
 export const SUPERSEDED_SIGNATURES: readonly string[];
 /** Function name → the migration file that last defines it, from the migrations as [name, text] pairs (SMD-1250). */
