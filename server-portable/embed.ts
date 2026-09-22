@@ -38,6 +38,7 @@ import {
   resolveEmbeddingDimensions,
   resolveExtractWindow,
   EXTRACT_WINDOW_HEADER,
+  EXTRACT_RETRY_RUNAWAY,
   type ChunkTokensFrom,
   type ExtractWindowFrom,
 } from "../db/config.mjs";
@@ -365,6 +366,8 @@ export type EmbedConfig = {
   extractChunkOverlap: number;
   /** Whether a window after the first carries the note's opening line — entities.ts's documentHeader; measured in evals/README.md. */
   extractHeader: boolean;
+  /** Whether a call that ran to its answer budget is retried once with a frequency penalty; measured in evals/README.md. */
+  extractRetryRunaway: boolean;
   /**
    * The model the supersession judge (consolidate.ts) runs on: OB1_JUDGE_MODEL,
    * else the metadata model. The two tasks were one knob, so the only way to
@@ -464,6 +467,7 @@ export function resolveEmbedConfig(env: EmbedEnv): EmbedConfig {
     extractModelWindow: extract.window,
     extractChunkOverlap: Math.floor(extract.tokens * EXTRACT_OVERLAP_RATIO),
     extractHeader: EXTRACT_WINDOW_HEADER,
+    extractRetryRunaway: EXTRACT_RETRY_RUNAWAY,
     // Trimmed like its sibling (SMD-1843): the judge's own knob, else the
     // metadata model as resolved above.
     judgeModel: stringOr(env.OB1_JUDGE_MODEL, metadataModel),

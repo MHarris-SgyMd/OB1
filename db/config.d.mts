@@ -77,6 +77,8 @@ export const EXTRACT_OUTPUT_FLOOR: number;
 export function extractOutputBudget(inputTokens: number): number;
 /** Whether an extraction window after the first carries the thought's opening line; decided by measurement. */
 export const EXTRACT_WINDOW_HEADER: boolean;
+/** Whether a budgeted extraction call that ran to its budget is retried once with a frequency penalty; decided by measurement. */
+export const EXTRACT_RETRY_RUNAWAY: boolean;
 /** Where an extraction window came from: the variable, the model's served context, or the fallback. */
 export type ExtractWindowFrom = "OB1_EXTRACT_CHUNK_TOKENS" | "window" | "default";
 /**

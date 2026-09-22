@@ -1307,12 +1307,15 @@ Three probes before any design, all against an idle Ollama 0.33 serving
 - **The shortest straggler ran to the deadline alone.** 1,656 characters, 414
   estimated tokens, no other load: the worker's exact request ran 300 s and
   was cut by the client.
-- **Every straggler is an answer that does not end.** With `max_tokens: 1500`
-  each of the 32 whole-thought calls returned `finish_reason: length` in
-  about 30 s; the tails are one relation repeated (`ToolName → ToolEntry
-  depends_on`, line after line), one entity repeated, or an enumeration of
-  every ticket id in the text as a `uses` edge. Nothing about the input's
-  length made the model stop; on these texts it did not.
+- **Thirty-one of the 32 are answers that do not end.** With `max_tokens:
+  1500` each whole-thought call returned in 30–37 s; 31 hit the cap
+  (`finish_reason: length`) and the tails are one relation repeated
+  (`ToolName → ToolEntry depends_on`, line after line), one entity repeated,
+  or an enumeration of every ticket id in the text as a `uses` edge. The one
+  that finished — 8,853 characters, 2,214 estimated tokens, 19 entities and
+  17 edges in 1,333 tokens — had simply been unlucky under load on the brain.
+  Nothing about the input's length made the model stop; on these texts it
+  did not, and the length of the input did not predict which.
 - **`--timeout 900` was 300.** Bun's `fetch` has its own 300 s idle timeout,
   and an unstreamed chat completion is silent until it ends: a 330 s
   `AbortSignal` against a server that answers at 400 s failed at 300.1 s; with
@@ -1327,9 +1330,108 @@ token and a 95th percentile of 1.6 over the 262 thoughts that did extract. A
 runaway now ends at the budget as a malformed answer the worker records failed
 in seconds, where before it held a worker for the whole timeout.
 
-### Results
+### The planted set: what a window costs in relations, 2026-09-22
 
-RESULTS-PLACEHOLDER
+Three documents of 2,928–3,525 estimated tokens — a title, an opening
+sentence naming a subject and a person, twenty-odd paragraphs of neutral
+meeting-note filler with no names in them, and a closing paragraph stating a
+relation to the subject as "the project" or "the migration" — so one planted
+relation per document has both endpoints in the opening (`near`) and one has
+its endpoints in different windows at every size measured (`FAR`). Scored
+through `record_thought_entities`; any relation between the two planted
+endpoints counts, since the question is whether the model connected them at
+all, not which verb it chose. `qwen2.5:7b`, temperature 0:
+
+| arm | extracted | planted entities | near relations | FAR relations | windows | median s |
+| --- | ---: | ---: | ---: | ---: | --- | ---: |
+| `whole` (the p1 request) | 3/3 | 11/13 | 0/3 | 1/3 | 1 | 9.0 |
+| `whole+budget` | 3/3 | 11/13 | 0/3 | 1/3 | 1 | 6.3 |
+| `w1200` | 3/3 | 12/13 | 0/3 | 0/3 | 4/3/3 | 41.3 |
+| `w1200h` (header) | 3/3 | 12/13 | 0/3 | 1/3 | 4/3/3 | 43.5 |
+| `w600` | 3/3 | 11/13 | 0/3 | 0/3 | 8/9/7 | 94.9 |
+| `w600h` (header) | 3/3 | 12/13 | 0/3 | 0/3 | 8/9/7 | 81.8 |
+
+Read with the sample size in view — three documents, three far relations:
+
+- **Entities are local and unaffected**, as the ticket predicted: 11–12 of 13
+  on every arm, the miss being `Kafka` typed as a topic or `Acme` dropped, the
+  same under one call as under nine.
+- **Relations are at the model's floor before any window is cut.** The
+  `near` relations — both endpoints in the same sentence — score 0/3 under
+  the whole-thought call too. This model does not reliably emit a relation
+  from a 3,000-token document at all, so the harness cannot separate "lost to
+  the window boundary" from "never produced"; the far loss it can see is one
+  relation in three (`whole` 1/3, `w1200` 0/3), and the header buys one back
+  (`w1200h` 1/3 — a different one), which at n=3 is a sign, not a measurement.
+- **Windows cost wall clock on documents that extract fine whole.** A
+  3,000-token document is one 9-second call or four 41-second-median ones;
+  at 600 tokens, eight to nine calls and 82–95 s. The windows are for the
+  thoughts one call cannot finish, and their price on every other long
+  thought is this.
+
+`EXTRACT_WINDOW_HEADER` ships **off**: one far relation recovered of three, no
+call added, no precision measured — not enough to change every window's
+prompt on. The arms stay in the harness for a labelled corpus that can decide
+it (see the follow-ups).
+
+### The stragglers, 2026-09-22
+
+The 32 thoughts that failed on the brain (414–3,279 estimated tokens, 173,469
+characters), each arm over all 32, `qwen2.5:7b` at temperature 0, 300 s per
+call, sequential on an otherwise idle Ollama. "Extracted" is the thought
+written through `record_thought_entities`; "malformed" is a thought at least
+one of whose calls ran to its budget:
+
+| arm | extracted | malformed | median s | total s | mean mentions | mean edges | calls |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `whole+budget` (one call, budgeted) | 2/32 | 30 | 64.2 | 2,047 | 12.0 | 8.5 | 32 |
+| `w1200` (the shipped window) | 10/32 | 22 | 44.5 | 1,799 | 20.1 | 18.6 | 58 |
+| `w600` | 13/32 | 19 | 62.6 | 2,392 | 20.6 | 21.3 | 132 |
+| `whole+p` (one call, a penalised retry on a runaway) | 27/32 | 4 (+1 timed out) | 79.5 | 2,963 | 12.0 | 9.1 | 31 + 29 retries |
+| **`w1200p` (shipped: the window and the retry)** | **27/32** | 5 | 75.8 | 2,728 | 17.1 | 15.1 | 58 + 22 retries |
+
+What the rows say, read together:
+
+- **A call that runs away runs away again at the same size.** Every one of
+  the 15 thoughts short enough to go in one call under `w1200` and `w600`
+  failed there (0/15), as it had on the brain and in the probe. Temperature 0
+  is deterministic: the same text, the same request, the same loop.
+- **Smaller inputs converge more often, and which ones is a coin toss.**
+  Of the 18 thoughts `w1200` split, 10 extracted; of the 31 `w600` split, 13.
+  Across the three arms 18 distinct thoughts extracted under at least one, but
+  only 6 under both window sizes — a thought that converged at 1200 failed at
+  600 and the reverse, so what a window changes is the text the model sees,
+  and any change is another draw. A thought fails when ANY window runs away,
+  which is why nine windows do not beat three by much.
+- **The budget is what makes a failure cheap.** No arm timed out. A thought
+  that fails now fails in 20–130 s — one call cut at its budget — where on the
+  brain each held a worker for the full timeout, and only Bun's 300 s cut
+  ended it.
+- **Windows cost calls, not wall clock, on the thoughts that converge.** 58
+  calls for 32 thoughts at 1200, 132 at 600; the median thought is faster
+  under `w1200` than whole because the cut answers are shorter.
+
+- **The retry is the lever.** A call that ends at its budget is made once
+  more with `frequency_penalty` 0.5 — the repetition the runaways are, taxed —
+  and that reaches the thoughts no window size did: one call plus the retry
+  extracts 27 of 32, and so does the shipped shape, 1200-token windows plus
+  the retry, with no timeouts (the whole-thought retry timed one out: a
+  penalised answer over a long text can be slow as well as long). Under the
+  shipped shape the 14 single-call thoughts go 0 → 10 of 14 and the 18 windowed
+  ones 10 → 17 of 18; 10 of the 27 needed no retry. Across every arm 28
+  distinct thoughts extracted at least once; the 5 the shipped shape still
+  fails ran away twice, and `--retry-failed` revisits them.
+- **The retried answer is thinner.** The penalty taxes the JSON's repeated
+  keys as it taxes the loop, so a retried call returns fewer items: the
+  whole-thought retry averages 12.0 mentions where the shipped shape's
+  windows, most of which converge first time, average 17.1 — the windows
+  keep the rich answer where they can and the retry rescues where they cannot.
+
+**The default is 1200** (`chunk.ts`, `DEFAULT_EXTRACT_WINDOW_TOKENS`) **with
+the retry on** (`EXTRACT_RETRY_RUNAWAY`): 27 of 32 for 1.8× the calls plus a
+retry on 22, where 600-token windows alone reached 13 for 4.1× the calls and,
+on the planted set above, cost a far relation the 1200 window kept. A brain
+whose model runs away more can set `OB1_EXTRACT_CHUNK_TOKENS=600`.
 
 ## Entity extraction, measured through the real write path
 

@@ -78,6 +78,8 @@ export type ExtractionWindow = {
   relations: ExtractedRelation[];
   rejected: { entities: number; relations: number };
   malformed: boolean;
+  /** Set when this window's first call ran to its budget and was made again with the penalty. */
+  retried?: true;
   ms: number;
 };
 export type Extraction = {
@@ -91,6 +93,8 @@ export type Extraction = {
   windows: number;
   /** Per window, when there was more than one: what each call returned before the merge. */
   parts?: ExtractionWindow[];
+  /** Set when any call ran to its budget and was made again with the penalty (ExtractWindowing.retryRunaway). */
+  retried?: true;
 };
 
 /**
@@ -172,11 +176,27 @@ export type ExtractWindowing = {
   header: boolean;
   /** Send `max_tokens`, sized by extractOutputBudget to the text of each call. Off reproduces the p1 request. */
   outputBudget: boolean;
+  /**
+   * When a call ends at its budget (`finish_reason: length` — an answer that
+   * did not converge), make it once more with RUNAWAY_PENALTY as
+   * `frequency_penalty`, which taxes the repetition the runaways were measured
+   * to be. Off, the cut answer is the answer (malformed).
+   */
+  retryRunaway: boolean;
 };
+
+/**
+ * `frequency_penalty` for the one retry of a call that ran to its budget. The
+ * runaways measured for SMD-1879 are one relation or one entity repeated to
+ * the context's end; a frequency penalty raises the cost of every token
+ * already emitted, which is exactly that. Applied only on the retry, so a
+ * call that converges is the p1 request plus its budget and nothing else.
+ */
+export const RUNAWAY_PENALTY = 0.5;
 
 /** The windowing the configuration decides — one rule for the worker, the evals and preflight. */
 export function windowingFor(cfg: EmbedConfig): ExtractWindowing {
-  return { windowTokens: cfg.extractChunkTokens, overlapTokens: cfg.extractChunkOverlap, header: cfg.extractHeader, outputBudget: true };
+  return { windowTokens: cfg.extractChunkTokens, overlapTokens: cfg.extractChunkOverlap, header: cfg.extractHeader, outputBudget: true, retryRunaway: cfg.extractRetryRunaway };
 }
 
 /**
@@ -191,13 +211,14 @@ export function describeExtractWindow(cfg: EmbedConfig): string {
   const ctx = cfg.extractModelWindow !== undefined
     ? `${cfg.metadataModel}'s ${cfg.extractModelWindow}-token served context`
     : `${cfg.metadataModel}'s served context, which db/config.mjs's KNOWN_CHAT_MODEL_WINDOW does not list`;
-  if (cfg.extractChunkTokensFrom === "OB1_EXTRACT_CHUNK_TOKENS") return `${rule}, from OB1_EXTRACT_CHUNK_TOKENS (${ctx})`;
+  const retry = cfg.extractRetryRunaway ? `; a call that runs to its answer budget is made once more with a ${RUNAWAY_PENALTY} frequency penalty` : "";
+  if (cfg.extractChunkTokensFrom === "OB1_EXTRACT_CHUNK_TOKENS") return `${rule}, from OB1_EXTRACT_CHUNK_TOKENS (${ctx})${retry}`;
   if (cfg.extractChunkTokensFrom === "window") {
     const held = n === DEFAULT_EXTRACT_WINDOW_TOKENS && cfg.extractModelWindow !== undefined
       ? ` — held at ${DEFAULT_EXTRACT_WINDOW_TOKENS}, the size the default model was measured to finish reliably (evals/README.md, SMD-1879)` : "";
-    return `${rule}, derived from ${ctx}${held}`;
+    return `${rule}, derived from ${ctx}${held}${retry}`;
   }
-  return `${rule}, the default for ${ctx}`;
+  return `${rule}, the default for ${ctx}${retry}`;
 }
 
 /**
@@ -349,7 +370,7 @@ export function extractionKey(model: string): string {
  * (SMD-1879): an answer that does not converge ends at the budget as a
  * malformed answer — visible, retryable — not at the context's end.
  */
-async function extractOnce(text: string, cfg: EmbedConfig, timeoutMs: number | undefined, part: { index: number; of: number; header?: string } | undefined, budget: boolean): Promise<Extraction> {
+async function extractOnce(text: string, cfg: EmbedConfig, timeoutMs: number | undefined, part: { index: number; of: number; header?: string } | undefined, budget: boolean, retry = false): Promise<Extraction & { runaway: boolean }> {
   const r = await fetch(`${cfg.chat.base}/chat/completions`, {
     method: "POST",
     headers: cfg.chat.headers,
@@ -366,6 +387,7 @@ async function extractOnce(text: string, cfg: EmbedConfig, timeoutMs: number | u
       temperature: cfg.metadataTemperature,
       ...cfg.metadataReasoning,
       ...(budget ? { max_tokens: extractOutputBudget(estimateTokens(text)) } : {}),
+      ...(retry ? { frequency_penalty: RUNAWAY_PENALTY } : {}),
       messages: buildMessages(text, part),
     }),
   });
@@ -375,10 +397,21 @@ async function extractOnce(text: string, cfg: EmbedConfig, timeoutMs: number | u
     (err as Error & { status?: number }).status = r.status;
     throw err;
   }
-  const d = (await r.json()) as { choices?: [{ message?: { content?: string } }] };
+  const d = (await r.json()) as { choices?: [{ message?: { content?: string }; finish_reason?: string }] };
   const answer = d?.choices?.[0]?.message?.content;
-  if (typeof answer !== "string") return { ...EMPTY(), malformed: true };
-  return parseExtraction(answer);
+  // A cut answer is a runaway only when the call was budgeted: without a
+  // budget the provider's own limit is what `length` names.
+  const runaway = budget && d?.choices?.[0]?.finish_reason === "length";
+  if (typeof answer !== "string") return { ...EMPTY(), malformed: true, runaway };
+  return { ...parseExtraction(answer), runaway };
+}
+
+/** extractOnce, and once more with the penalty when the windowing says so and the first answer ran to its budget. */
+async function extractCall(text: string, cfg: EmbedConfig, timeoutMs: number | undefined, part: { index: number; of: number; header?: string } | undefined, w: ExtractWindowing): Promise<Omit<Extraction, "retried"> & { runaway: boolean; retried: boolean }> {
+  const first = await extractOnce(text, cfg, timeoutMs, part, w.outputBudget);
+  if (!(w.retryRunaway && first.runaway && first.malformed)) return { ...first, retried: false };
+  const second = await extractOnce(text, cfg, timeoutMs, part, w.outputBudget, true);
+  return { ...second, retried: true };
 }
 
 /**
@@ -396,13 +429,18 @@ export async function extractEntities(content: string, cfg: EmbedConfig, timeout
   const gate = mayLeaveBox({ ...subject, content }, cfg.chat, cfg.egress);
   if (!gate.allowed) throw refuseEgress("Extraction", cfg.chat.base, gate);
   const windows = chunkContent(content, { maxTokens: windowing.windowTokens, overlapTokens: windowing.overlapTokens });
-  if (windows.length === 0) return extractOnce(content, cfg, timeoutMs, undefined, windowing.outputBudget);
+  if (windows.length === 0) {
+    const { runaway: _r, retried, ...one } = await extractCall(content, cfg, timeoutMs, undefined, windowing);
+    return { ...one, retried: retried || undefined };
+  }
   const header = windowing.header ? documentHeader(content) : undefined;
   const parts: ExtractionWindow[] = [];
+  let retriedAny = false;
   for (const w of windows) {
     const t0 = Date.now();
-    const ex = await extractOnce(w.content, cfg, timeoutMs, { index: w.index, of: windows.length, header }, windowing.outputBudget);
-    parts.push({ index: w.index, tokens: estimateTokens(w.content), entities: ex.entities, relations: ex.relations, rejected: ex.rejected, malformed: ex.malformed, ms: Date.now() - t0 });
+    const ex = await extractCall(w.content, cfg, timeoutMs, { index: w.index, of: windows.length, header }, windowing);
+    retriedAny ||= ex.retried;
+    parts.push({ index: w.index, tokens: estimateTokens(w.content), entities: ex.entities, relations: ex.relations, rejected: ex.rejected, malformed: ex.malformed, retried: ex.retried || undefined, ms: Date.now() - t0 });
   }
-  return mergeExtractions(parts);
+  return { ...mergeExtractions(parts), retried: retriedAny || undefined };
 }

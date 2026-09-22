@@ -331,6 +331,19 @@ export const EXTRACT_OUTPUT_FLOOR = 256;
  */
 export const EXTRACT_WINDOW_HEADER = false;
 
+/**
+ * Whether an extraction call that ran to its answer budget is made once more
+ * with a frequency penalty (server-portable/entities.ts, RUNAWAY_PENALTY).
+ * The runaways measured for SMD-1879 are repetition; the penalty taxes it, and
+ * it is the one lever that reached the thoughts a single call could not
+ * finish at any window: on the 32 stragglers, one call extracted 2, windows
+ * of 1200 tokens 10, of 600 tokens 13, and one call with this retry 27 —
+ * at the cost of a thinner answer on the retried call (the penalty taxes
+ * the JSON's repeated keys too; evals/README.md has the counts). On, and not
+ * a knob, for the reason the header is not: the eval scored this shape.
+ */
+export const EXTRACT_RETRY_RUNAWAY = true;
+
 /** `max_tokens` for an extraction call over `inputTokens` estimated tokens of thought text. */
 export function extractOutputBudget(inputTokens) {
   return Math.ceil(inputTokens * EXTRACT_OUTPUT_RATIO) + EXTRACT_OUTPUT_FLOOR;

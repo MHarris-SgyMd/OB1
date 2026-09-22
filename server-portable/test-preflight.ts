@@ -210,10 +210,10 @@ console.log("\n[3c] The extraction window is derived from the METADATA model's s
   // beside it must not move, since the two models are two tables.
   const base = { ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: "postgres://u:p@127.0.0.1:1/x", OB1_EXTRACT_CHUNK_TOKENS: undefined };
   const qwen = await run({ ...base, OB1_METADATA_MODEL: "qwen2.5:7b" });
-  assert(/extraction window\s+thoughts over 1200 estimated tokens are extracted in 1200-token windows \(overlap 150\), derived from qwen2\.5:7b's 32768-token served context — held at 1200, the size the default model was measured to finish reliably/.test(qwen.out),
-         "the default model derives the measured size from its 32,768-token context, and the row says the context would have allowed more");
+  assert(/extraction window\s+thoughts over 1200 estimated tokens are extracted in 1200-token windows \(overlap 150\), derived from qwen2\.5:7b's 32768-token served context — held at 1200, the size the default model was measured to finish reliably \(evals\/README\.md, SMD-1879\); a call that runs to its answer budget is made once more with a 0\.5 frequency penalty/.test(qwen.out),
+         "the default model derives the measured size from its 32,768-token context, the row says the context would have allowed more, and names the runaway retry");
   const unknown = await run({ ...base, OB1_METADATA_MODEL: "some-chat-model" });
-  assert(/extraction window\s+thoughts over 1200 estimated tokens are extracted in 1200-token windows \(overlap 150\), the default for some-chat-model's served context, which db\/config\.mjs's KNOWN_CHAT_MODEL_WINDOW does not list — set OB1_EXTRACT_CHUNK_TOKENS if the model serves fewer than 3998 tokens/.test(unknown.out),
+  assert(/extraction window\s+thoughts over 1200 estimated tokens are extracted in 1200-token windows \(overlap 150\), the default for some-chat-model's served context, which db\/config\.mjs's KNOWN_CHAT_MODEL_WINDOW does not list; a call that runs to its answer budget is made once more with a 0\.5 frequency penalty — set OB1_EXTRACT_CHUNK_TOKENS if the model serves fewer than 3998 tokens/.test(unknown.out),
          "an unknown model keeps the default, is told where the table is, and what context the default needs");
   const pinned = await run({ ...base, OB1_METADATA_MODEL: "qwen2.5:7b", OB1_EXTRACT_CHUNK_TOKENS: "600" });
   assert(/extraction window\s+thoughts over 600 estimated tokens are extracted in 600-token windows \(overlap 75\), from OB1_EXTRACT_CHUNK_TOKENS \(qwen2\.5:7b's 32768-token served context\)/.test(pinned.out),

@@ -457,6 +457,39 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
   prose = false;
   assert(bad.malformed && bad.windows === reqs.length, "a malformed window makes the thought's answer malformed — it is recorded failed, not terminal on a partial reading");
 
+  // A runaway — an answer cut at its budget — is the answer under the shipped
+  // windowing, and is made once more with the frequency penalty when the
+  // windowing says so; a penalty is never sent on a first call.
+  const { RUNAWAY_PENALTY } = await import("./entities.ts");
+  let runawayOnce = false;
+  const penalties: (number | undefined)[] = [];
+  const providerE = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      const body = (await req.json()) as { max_tokens?: number; frequency_penalty?: number };
+      penalties.push(body.frequency_penalty);
+      if (runawayOnce && body.frequency_penalty === undefined) {
+        runawayOnce = false;
+        return Response.json({ choices: [{ message: { content: '{"entities":[{"name":"Loop","type":"tool","confidence":1},{"name":"Loop","type":"tool",' }, finish_reason: "length" }] });
+      }
+      return Response.json({ choices: [{ message: { content: JSON.stringify({ entities: [{ name: "Anita", type: "person", confidence: 0.9 }], relationships: [] }) }, finish_reason: "stop" }] });
+    },
+  });
+  const cfgE = resolveEmbedConfig({ OB1_LLM_LOCAL: "1", OB1_LLM_BASE_URL: `http://127.0.0.1:${providerE.port}/v1`, OB1_METADATA_MODEL: "stub-chat" });
+  assert(windowingFor(cfgE).retryRunaway === true, "the shipped windowing retries a runaway — 27 of 32 stragglers against 2 without (evals/README.md)");
+  runawayOnce = true;
+  const cut = await extractEntities(short, cfgE, undefined, { kind: "extraction" }, { ...windowingFor(cfgE), retryRunaway: false });
+  assert(cut.malformed && cut.retried === undefined && penalties.length === 1 && penalties[0] === undefined, "with the retry off a cut answer is malformed after one call, with no penalty sent");
+  penalties.length = 0;
+  runawayOnce = true;
+  const again = await extractEntities(short, cfgE, undefined, { kind: "extraction" });
+  assert(!again.malformed && again.retried === true && again.entities[0]?.name === "Anita", "under the shipped windowing the cut answer is made again and the second answer is the thought's");
+  assert(penalties.length === 2 && penalties[0] === undefined && penalties[1] === RUNAWAY_PENALTY, `…the first call without a penalty, the retry with ${RUNAWAY_PENALTY} (${penalties.join(",")})`);
+  penalties.length = 0;
+  const clean = await extractEntities(short, cfgE, undefined, { kind: "extraction" });
+  assert(!clean.malformed && clean.retried === undefined && penalties.length === 1, "…and an answer that converges is never retried");
+  providerE.stop();
+
   // The default window for a model the table lists is the measured 1200, and
   // the same thought is one call under it (it is under 1200 estimated tokens)
   // — so the stub's ceiling refuses it, which is the point of the ceiling.

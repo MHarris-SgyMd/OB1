@@ -780,9 +780,13 @@ and (relation, from, to) — highest confidence kept, aliases unioned — before
 `record_thought_entities` applies its own rule, so a subject named in every
 window is one entity and one mention. Every call carries `max_tokens`, an
 answer budget sized to the text it sends (twice the estimated tokens plus 256,
-`db/config.mjs`), so an answer that will not end is cut and recorded as a
-malformed answer in seconds rather than running to the model's context and the
-worker's timeout. The window is the **metadata model's**, not the embedding
+`db/config.mjs`), so an answer that will not end is cut in seconds rather than
+running to the model's context and the worker's timeout — and a call cut that
+way is made once more with a frequency penalty (`RUNAWAY_PENALTY`, 0.5), which
+taxes the repetition the runaways were measured to be: on the fork's brain that
+retry extracted 27 of the 32 thoughts one call could not finish, where windows
+alone reached 10 to 13. A thought whose retry also runs away is recorded
+failed, retryable. The window is the **metadata model's**, not the embedding
 model's: `OB1_EXTRACT_CHUNK_TOKENS` when set, else derived from the model's
 served context (`KNOWN_CHAT_MODEL_WINDOW`, measured as `KNOWN_MODEL_WINDOW` is)
 and held at the size the default model was measured to finish reliably; a model
