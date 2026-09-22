@@ -5079,7 +5079,7 @@ console.log("\n[43] Migration 045: the event shape at the write boundary — who
   assert(/ob1_registry_kind\(OLD\.canonical_agent_id, OLD\.actor_name\)/.test(await src("thought_audit_refuse_mutation()")) && /ob1_registry_kind\(a\.canonical_agent_id, a\.actor_name\)/.test(await src("backfill_thought_audit_events(integer)")),
     "(the gate and the backfill do call them)");
   assert(!/actor->>'source'/.test(trig) && /- 'via'/.test(trig) && !/- 'source'/.test(trig), "…reads no actor source (the column is the row's own), strips via into origin and leaves an actor's source in the blob");
-  assert(/IF actor IS NOT NULL AND \(v_agent IS NOT NULL OR actor \? 'name'\) THEN\s+v_kind := ob1_registry_kind/.test(trig), "…and probes the registry only when an envelope names an id or a name — a raw write with no actor set needs no SELECT on ob1_agents");
+  assert(/IF v_agent IS NOT NULL OR actor->>'name' IS NOT NULL THEN\s+v_kind := ob1_registry_kind/.test(trig), "…and probes the registry only when an envelope names an id or a name (a JSON null is neither) — a raw write with no actor set needs no SELECT on ob1_agents");
   assert(/Lost the race[\s\S]*?PERFORM set_config\('ob1\.event', '', true\);[\s\S]*?'STALE_READ'/.test(await src(UPDATE_THOUGHT_SIGNATURE)), "update_thought clears the event on the one refusal that follows its write of the setting — the UPDATE that matched no row");
   for (const [re, what] of [[/jsonb_build_object\('metadata', NEW\.metadata\)/, "008's capture diff"], [/v_diff = '\{\}'::jsonb/, "008's no-op guard"], [/actor->>'agent_id'/, "010's agent id"], [/'previous_derived_from'/, "025's provenance in the delete row"]] as [RegExp, string][])
     assert(re.test(trig), `…carrying ${what}`);
@@ -5187,8 +5187,21 @@ console.log("\n[43] Migration 045: the event shape at the write boundary — who
   assert(e.ok === true && ev?.actor_kind === "operator" && ev?.trust === "ingested" && ev?.origin === "edit-door" && ev?.stance === "stated" && ev?.valid_from === null && ev?.valid_until?.startsWith("2026-09-01"),
     `update_thought's p_event reaches the update row — the window as declared on THIS write, not inherited from the capture (${ev?.valid_from} → ${ev?.valid_until})`);
   const before = (await rowsOf(paste.id, "update")).length;
-  e = await edit(paste.id, "045: a page the operator pasted, corrected", { name: "op-key", agent_id: OP }, { stance: "retrieved" });
-  assert(e.ok === true && (await rowsOf(paste.id, "update")).length === before, "an edit that changes nothing writes no row, event or not (008's guard)");
+  e = await edit(paste.id, "045: a page the operator pasted, corrected", { name: "op-key", agent_id: OP }, null);
+  assert(e.ok === true && (await rowsOf(paste.id, "update")).length === before, "an edit that changes nothing and declares nothing writes no row (008's guard)");
+  e = await edit(paste.id, "045: a page the operator pasted, corrected", { name: "op-key", agent_id: OP }, { stance: "retrieved", cites: [cited.id] });
+  const restated = await one<{ diff: Record<string, unknown>; stance: string | null; cites: string[] | null }>(`SELECT diff, stance, cites FROM thought_audit WHERE thought_id = $1::uuid AND action = 'update' ORDER BY created_at DESC LIMIT 1`, [paste.id]);
+  assert(e.ok === true && (await rowsOf(paste.id, "update")).length === before + 1 && JSON.stringify(restated?.diff) === "{}" && restated?.stance === "retrieved" && restated?.cites?.[0] === cited.id,
+    `…but an unchanged edit that DECLARES an event is an event: one row, the diff empty, the declaration on it — the restatement SMD-1722 counts (${JSON.stringify(restated?.diff)}, ${restated?.stance})`);
+  const restatedCap = await cap("045: a page the operator pasted, corrected", { metadata: {}, actor: { name: "op-key", agent_id: OP }, event: { stance: "inferred" } }, 3);
+  // Counted, not "the latest": PGlite's now() is millisecond-grained, so two
+  // statements can tie on created_at and "latest" is arbitrary (a mutant run
+  // found this arm flaky by that tie).
+  // (The earlier content-only edits left the row without a vector, so this
+  // re-capture's vector is a change of its own: the diff says embedding_present
+  // and the row would exist event or not — the event rides it.)
+  assert(restatedCap.existed === true && (await one<{ c: number }>(`SELECT count(*)::int AS c FROM thought_audit WHERE thought_id = $1::uuid AND action = 'update' AND stance = 'inferred'`, [paste.id]))?.c === 1,
+    "…and a re-capture of stored text with an event carries it on its update row, through the ON CONFLICT branch");
   const nine = (await one<{ r: { ok: boolean } }>(`SELECT update_thought($1::uuid, $2::text, NULL, NULL, NULL, NULL, $3::jsonb, NULL, NULL) AS r`, [paste.id, "045: a page the operator pasted, nine arguments", JSON.stringify({ name: "op-key", agent_id: OP })])).r;
   ev = await last(paste.id, "update");
   assert(nine.ok === true && ev?.actor_kind === "operator" && ev?.stance === null, "a 9-argument call — every caller before this change — resolves through the default and declares no event");
@@ -5221,7 +5234,7 @@ console.log("\n[43] Migration 045: the event shape at the write boundary — who
     `…and a raw UPDATE of thoughts after it inherits no event either — the trigger cleared the setting when it read it — while the ACTOR, 008's and transaction-scoped by design, is still the last call's (${ev?.stance}, ${ev?.actor_kind})`);
   // A call the function refuses before its write — NOT_FOUND here — fires no
   // trigger; the functions write the setting only just before their write
-  // (second review pass), so a refused call leaves nothing on the transaction:
+  // (second review pass), so a refused call leaves no event on the transaction:
   // a raw UPDATE right after it, and a capture after that, both declare none.
   const rawBefore = (await rowsOf(feed.id, "update")).length;
   await db.exec(`BEGIN;
@@ -5250,6 +5263,11 @@ console.log("\n[43] Migration 045: the event shape at the write boundary — who
   assert(/must be a timestamp string beginning YYYY-MM-DD, got "now"/.test(await bad({ valid_until: "now" })) && /beginning YYYY-MM-DD, got 0\./.test(await bad({ valid_from: 0 })) && /beginning YYYY-MM-DD, got "infinity"/.test(await bad({ valid_from: "infinity" })),
     "…and so are Postgres's own words for a time — now, a number, infinity — which its reader would otherwise take as a fact about the world");
   assert(/must be timestamps/.test(await bad({ valid_from: "2026-13-45T00:00:00Z" })), "a string shaped as a date that is not one is refused by the cast, with the event's message");
+  await db.exec(`SET TIME ZONE 'America/Chicago'`);
+  const zoned = await cap("045: a window declared without an offset", { metadata: {}, actor: { name: "op-key", agent_id: OP }, event: { valid_from: "2026-03-01", valid_until: "2026-03-02T00:00:00-06:00" } }, 20);
+  await db.exec(`SET TIME ZONE 'UTC'`);
+  const win = await one<{ f: string; u: string }>(`SELECT (valid_from AT TIME ZONE 'UTC')::text AS f, (valid_until AT TIME ZONE 'UTC')::text AS u FROM thought_audit WHERE thought_id = $1::uuid AND action = 'capture'`, [zoned.id]);
+  assert(win?.f === "2026-03-01 00:00:00" && win?.u === "2026-03-02 06:00:00", `a window with no offset is read as UTC whatever the session's TimeZone, one with an offset as written (${win?.f}, ${win?.u})`);
   assert(/event carries a key the shape does not have: stances/.test(await bad({ stances: "stated" })), "a misspelt key is refused, so it cannot vanish");
   assert(/event must be a JSON object, got string/.test(await bad("stated")), "a double-encoded event is refused with 005's message");
   assert(/event\.stance must be/.test(await bad({ stance: "guess" }, "edit")), "…and update_thought refuses through the same rule");
@@ -5274,9 +5292,10 @@ console.log("\n[43] Migration 045: the event shape at the write boundary — who
   assert(/derives to/.test(await amend(`UPDATE thought_audit SET actor_kind = 'agent', trust = 'operator', backfilled_at = now() WHERE id = '${nobodyRow}'`)), "…a fill that puts trust above the kind is refused — the amendment holds the write path's rule");
   assert(/derives to/.test(await amend(`UPDATE thought_audit SET actor_kind = 'agent', trust = 'agent', origin = 'made-up', backfilled_at = now() WHERE id = '${nobodyRow}'`)), "…a door the row's blob does not carry is refused");
   assert(/derives to/.test(await amend(`UPDATE thought_audit SET actor_kind = 'agent', trust = 'agent', backfilled_at = '1999-01-01' WHERE id = '${nobodyRow}'`)), "…and a back-dated stamp: the stamp is this transaction's time");
-  assert((await amend(`UPDATE thought_audit SET actor_kind = 'agent', trust = 'agent', backfilled_at = now() WHERE id = '${nobodyRow}'`)) === "", "a fill of NULL kind and trust with the registry's word and the stamp is the one lawful UPDATE");
+  assert((await amend(`UPDATE thought_audit SET actor_kind = 'agent', backfilled_at = now() WHERE id = '${nobodyRow}'`)) === "", "a fill of the kind alone, trust left as it was, is lawful — a value left unchanged is not invented (a pass and a key classified mid-pass must not collide; fourth review pass)");
+  assert((await amend(`UPDATE thought_audit SET trust = 'agent', backfilled_at = now() WHERE id = '${nobodyRow}'`)) === "", "…and the trust after it, from the kind the row now has");
   ev = (await rowsOf(nobody.id, "capture"))[0];
-  assert(ev?.actor_kind === "agent" && ev?.trust === "agent" && ev?.backfilled_at !== null, "…and it lands");
+  assert(ev?.actor_kind === "agent" && ev?.trust === "agent" && ev?.backfilled_at !== null, "…and both land");
   assert(/here nothing is filled/.test(await amend(`UPDATE thought_audit SET backfilled_at = now() WHERE id = '${nobodyRow}'`)), "…and the same row cannot be stamped again with nothing to fill");
   // A row a tool INSERTed with a kind and no trust (the trigger never writes
   // one) and a door in the blob: the backfill must fill trust and origin, not
@@ -5307,6 +5326,8 @@ console.log("\n[43] Migration 045: the event shape at the write boundary — who
   // mystery-key becomes an OPERATOR's key: the row that declared `agent` while
   // it was unclassified (claimed, not honoured) must come out `agent`, not
   // `operator` — the trigger's rule applied late, not a raise.
+  const ID_ONLY = "77777777-7777-4777-8777-777777777777";
+  await db.exec(`INSERT INTO thought_audit (thought_id, action, canonical_agent_id, diff) VALUES ('${ID_ONLY}', 'capture', '${MYSTERY}', '{}'::jsonb)`);
   await db.exec(`SELECT set_agent_kind('mystery-key', 'operator'); SELECT set_agent_kind('MCP_ACCESS_KEY', 'operator')`);
   const mysteryRows = (await q<{ id: string }>(`SELECT id FROM thought_audit WHERE actor_name = 'mystery-key' AND actor_kind IS NULL`)).length;
   bf = (await one<{ r: { ok: boolean; rows: number; awaiting_kind: number } }>(`SELECT backfill_thought_audit_events(1) AS r`)).r;
@@ -5321,7 +5342,9 @@ console.log("\n[43] Migration 045: the event shape at the write boundary — who
   assert(ev?.actor_kind === "operator" && ev?.trust === "operator", "…and a row that declared nothing takes the kind as its trust");
   ev = (await rowsOf(OLD, "capture"))[0];
   assert(ev?.actor_kind === "operator" && ev?.trust === "operator", "…and a row with no agent id is classified by its actor_name — the five servers' rows");
-  assert(bf.awaiting_kind === (await one<{ c: number }>(`SELECT count(*)::int AS c FROM thought_audit WHERE actor_kind IS NULL AND actor_name IS NOT NULL`)).c && mysteryRows + 1 >= 2,
+  ev = (await rowsOf(ID_ONLY, "capture"))[0];
+  assert(ev?.actor_kind === "operator" && ev?.trust === "operator" && ev?.backfilled_at !== null, "…and a row with an id and no name by its id — the backfill and the census count what the trigger derives from (fourth review pass)");
+  assert(bf.awaiting_kind === (await one<{ c: number }>(`SELECT count(*)::int AS c FROM thought_audit WHERE actor_kind IS NULL AND (actor_name IS NOT NULL OR canonical_agent_id IS NOT NULL)`)).c && mysteryRows + 1 >= 2,
     `awaiting_kind is the rows that still name an unclassified key (${bf.awaiting_kind})`);
   bf = (await one<{ r: { ok: boolean; rows: number } }>(`SELECT backfill_thought_audit_events() AS r`)).r;
   assert(bf.rows === 0, "a second pass finds nothing: idempotent, as the migration's own call is on re-apply");

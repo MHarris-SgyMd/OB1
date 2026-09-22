@@ -1127,7 +1127,12 @@ if (configFailed) {
             WHERE n.nspname = 'public' AND p.proname IN ('thoughts_write_audit', 'thought_audit_refuse_mutation')`) as { name: string; src: string }[];
           const trigSrc = String(bodies.find((b) => b.name === "thoughts_write_audit")?.src ?? "");
           const refuseSrc = String(bodies.find((b) => b.name === "thought_audit_refuse_mutation")?.src ?? "");
-          if (missingCols.length && /ob1:audit-event-from-the-key/.test(trigSrc)) {
+          const [{ tableThere }] = (await sql`SELECT to_regclass('public.thought_audit') IS NOT NULL AS "tableThere"`) as { tableThere: boolean }[];
+          if (!tableThere) {
+            // No table: nothing here predates 045 in particular, and the `audit
+            // trail` check above has already refused for 008 (fourth review pass).
+            add("audit events", "skip", "not checked — thought_audit is missing; the audit trail check names 008");
+          } else if (missingCols.length && /ob1:audit-event-from-the-key/.test(trigSrc)) {
             // 045's trigger INSERTs into the columns: dropped from under it, every
             // capture, edit and delete fails in the trigger.
             add("audit events", "fail",
@@ -1169,10 +1174,11 @@ if (configFailed) {
             const [census] = await sql`
               WITH waiting AS (
                 SELECT a.canonical_agent_id AS agent, a.actor_name AS name, count(*)::int AS n
-                  FROM thought_audit a WHERE a.actor_kind IS NULL AND a.actor_name IS NOT NULL
+                  FROM thought_audit a
+                 WHERE a.actor_kind IS NULL AND (a.actor_name IS NOT NULL OR a.canonical_agent_id IS NOT NULL)
                  GROUP BY 1, 2),
               resolved AS (
-                SELECT name, n, ob1_registry_kind(agent, name) IS NOT NULL AS fillable FROM waiting)
+                SELECT COALESCE(name, 'agent ' || agent::text) AS name, n, ob1_registry_kind(agent, name) IS NOT NULL AS fillable FROM waiting)
               SELECT (SELECT count(*)::int FROM ob1_agents g WHERE g.kind IS NULL
                         AND EXISTS (SELECT 1 FROM ob1_agent_keys k WHERE k.canonical_agent_id = g.canonical_agent_id AND k.revoked_at IS NULL)) AS unclassified,
                      (SELECT string_agg(g.label, ', ' ORDER BY g.label) FROM ob1_agents g WHERE g.kind IS NULL

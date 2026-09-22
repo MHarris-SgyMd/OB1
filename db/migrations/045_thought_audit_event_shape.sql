@@ -246,7 +246,7 @@ CREATE INDEX IF NOT EXISTS thought_audit_trust_idx
 -- backfill's WHERE was an OR over function results no index could serve).
 CREATE INDEX IF NOT EXISTS thought_audit_awaiting_kind_idx
   ON thought_audit (actor_name)
-  WHERE (actor_kind IS NULL OR trust IS NULL) AND actor_name IS NOT NULL;
+  WHERE (actor_kind IS NULL OR trust IS NULL) AND (actor_name IS NOT NULL OR canonical_agent_id IS NOT NULL);
 
 CREATE INDEX IF NOT EXISTS thought_audit_awaiting_door_idx
   ON thought_audit (created_at)
@@ -459,12 +459,21 @@ BEGIN
         RAISE EXCEPTION 'event.% must be a timestamp string beginning YYYY-MM-DD, got %.', v_key, left((v->v_key)::text, 80);
       END IF;
     END LOOP;
+    -- An input with no offset is read as UTC, not in the session's TimeZone:
+    -- two servers over one brain, or one server behind a pooler set to UTC,
+    -- must record the same instant for one declaration (fourth review pass).
+    -- An offset counts only after a time of day — a bare date's own "-01"
+    -- is a day, not a zone.
     BEGIN
       IF v ? 'valid_from' AND jsonb_typeof(v->'valid_from') <> 'null' THEN
-        v_from := (v->>'valid_from')::timestamptz;
+        v_from := CASE WHEN (v->>'valid_from') ~ '\d{2}:\d{2}(:\d{2}(\.\d+)?)?\s*([zZ]|[+-]\d{2}(:?\d{2})?)\s*$'
+                       THEN (v->>'valid_from')::timestamptz
+                       ELSE (v->>'valid_from')::timestamp AT TIME ZONE 'UTC' END;
       END IF;
       IF v ? 'valid_until' AND jsonb_typeof(v->'valid_until') <> 'null' THEN
-        v_until := (v->>'valid_until')::timestamptz;
+        v_until := CASE WHEN (v->>'valid_until') ~ '\d{2}:\d{2}(:\d{2}(\.\d+)?)?\s*([zZ]|[+-]\d{2}(:?\d{2})?)\s*$'
+                        THEN (v->>'valid_until')::timestamptz
+                        ELSE (v->>'valid_until')::timestamp AT TIME ZONE 'UTC' END;
       END IF;
     EXCEPTION WHEN others THEN
       RAISE EXCEPTION 'event.valid_from / valid_until must be timestamps, got % / %.', v->'valid_from', v->'valid_until';
@@ -554,14 +563,19 @@ BEGIN
     -- Each condition named when it fails (run-it, second review pass: thirteen
     -- different refusals read one sentence), so a hand amendment learns which
     -- of the five it broke — and that it must fill everything derivable at once.
+    -- Each of the three may be left as it was (a fill may be partial — the
+    -- backfill's candidates are derived under its statement's snapshot, the
+    -- gate's under a fresher one, and a key registered between the two must
+    -- not roll a pass back; fourth review pass) or set to what it derives to;
+    -- never anything else, and something must be filled.
     IF (to_jsonb(OLD) - 'actor_kind' - 'trust' - 'origin' - 'backfilled_at')
        <> (to_jsonb(NEW) - 'actor_kind' - 'trust' - 'origin' - 'backfilled_at') THEN
       v_why := 'a column other than actor_kind, trust, origin and backfilled_at changes';
-    ELSIF NEW.actor_kind IS DISTINCT FROM v_kind THEN
+    ELSIF NEW.actor_kind IS DISTINCT FROM OLD.actor_kind AND NEW.actor_kind IS DISTINCT FROM v_kind THEN
       v_why := format('actor_kind must be what the registry holds for the row''s key, %L', v_kind);
-    ELSIF NEW.trust IS DISTINCT FROM v_trust THEN
+    ELSIF NEW.trust IS DISTINCT FROM OLD.trust AND NEW.trust IS DISTINCT FROM v_trust THEN
       v_why := format('trust must be what the rule gives from that kind and the row''s filed claim, %L', v_trust);
-    ELSIF NEW.origin IS DISTINCT FROM v_origin THEN
+    ELSIF NEW.origin IS DISTINCT FROM OLD.origin AND NEW.origin IS DISTINCT FROM v_origin THEN
       v_why := format('origin must be the door the row''s own blob carries, %L', v_origin);
     ELSIF NEW.actor_kind IS NOT DISTINCT FROM OLD.actor_kind AND NEW.trust IS NOT DISTINCT FROM OLD.trust AND NEW.origin IS NOT DISTINCT FROM OLD.origin THEN
       v_why := 'nothing is filled';
@@ -571,7 +585,7 @@ BEGIN
       RETURN NEW;
     END IF;
     RAISE EXCEPTION
-      'thought_audit is append-only: the backfill amendment may only fill a NULL actor_kind, trust or origin with what the row derives to, all of them at once, and stamp backfilled_at with now() — here %.',
+      'thought_audit is append-only: the backfill amendment may only fill a NULL actor_kind, trust or origin with what the row derives to, and stamp backfilled_at with now() — here %.',
       v_why;
   END IF;
 
@@ -691,9 +705,17 @@ BEGIN
      *
      * `updated_at` moving on its own is bookkeeping, not history.
      */
-    IF v_diff = '{}'::jsonb THEN
+    IF v_diff = '{}'::jsonb AND event IS NULL THEN
       RETURN NULL;
     END IF;
+    /**
+     * 045 (fourth review pass): an unchanged write that DECLARED an event is
+     * an event. 008's rule stands for the bare re-import — no diff, no event,
+     * no row — but a re-capture or edit that restates a text with a stance,
+     * cites or a window is exactly the restatement SMD-1722 counts, and the
+     * caller's declaration must exist somewhere: it is recorded here, the diff
+     * empty, rather than checked by validate_write_event and then lost.
+     */
 
   ELSE  -- DELETE
     v_action := 'delete';
@@ -756,7 +778,7 @@ BEGIN
   -- Only when an envelope is there to look up: a raw write with no actor set
   -- must not probe the registry — the probe is a SELECT the writer's role may
   -- not hold, and its answer could only be NULL (third review pass).
-  IF actor IS NOT NULL AND (v_agent IS NOT NULL OR actor ? 'name') THEN
+  IF v_agent IS NOT NULL OR actor->>'name' IS NOT NULL THEN
     v_kind := ob1_registry_kind(v_agent, actor->>'name');
   END IF;
 
@@ -1160,8 +1182,9 @@ BEGIN
   -- is written just before the UPDATE — after every refusal this function can
   -- return (NOT_FOUND, STALE_READ, DUPLICATE_CONTENT, SUPERSEDES_NOT_FOUND,
   -- WOULD_CYCLE), none of which fires the trigger that would consume it — so a
-  -- refused call leaves nothing on the transaction for a raw write or a
-  -- cascade to inherit (second review pass).
+  -- refused call leaves no event on the transaction for a raw write or a
+  -- cascade to inherit (second review pass). The ACTOR it set above stays, as
+  -- 008 scoped it.
   v_event := validate_write_event(p_event);
 
   -- 032: a supersedes write is serialised with every other on 029's lock,
@@ -1322,10 +1345,12 @@ BEGIN
   RETURNING updated_at INTO v_updated;
 
   IF v_updated IS NULL THEN
-    -- Lost the race after the check above passed. 045: the UPDATE matched no
-    -- row, so no trigger consumed the event set just above it — cleared here,
-    -- the one refusal that comes after the setting is written (third review
-    -- pass).
+    -- Lost the race after the check above passed. 045: were the UPDATE to
+    -- match no row, no trigger would have consumed the event set just above
+    -- it — cleared here. Under READ COMMITTED with the row locked FOR NO KEY
+    -- UPDATE above, this arm is not reachable (the predicate re-reads the same
+    -- locked version); the clear is the belt to that brace (third and fourth
+    -- review passes).
     PERFORM set_config('ob1.event', '', true);
     RETURN jsonb_build_object('ok', false, 'error', 'STALE_READ');
   END IF;
@@ -1405,11 +1430,22 @@ BEGIN
 
   -- The registry, held for the pass: the candidates below derive each row's
   -- kind under this statement's snapshot, and the amendment gate re-derives it
-  -- under its own, fresher one — a set_agent_kind committed between the two
+  -- under its own, fresher one — a RECLASSIFICATION committed between the two
   -- would make them disagree and roll the whole pass back (third review
-  -- pass). FOR SHARE on the few registry rows makes a reclassification wait
-  -- for the pass instead; a new key registering meanwhile has no kind either
-  -- way. Released with the transaction.
+  -- pass). FOR SHARE on the few registry rows makes set_agent_kind's UPDATE
+  -- wait for the pass instead; a key classified for the first time meanwhile
+  -- (an INSERT, which no row lock stops) makes the gate derive a kind the
+  -- candidates left NULL, which the gate accepts as a value left unchanged
+  -- (fourth review pass) — the next pass fills it. FOR SHARE needs UPDATE on
+  -- ob1_agents, which the role that runs this has: UPDATE on thought_audit is
+  -- granted to no group, so the backfill is the owner's call. What else waits
+  -- behind it for the pass: 010's RENAME branch (resolve_agent's UPDATE of a
+  -- label), so a server whose key was renamed in the env stalls on every
+  -- request while a pass runs — rare, self-healing at commit, and the reason
+  -- a large log is walked in p_limit batches, each its own transaction, not
+  -- in one call. Ordinary requests, rotations, first-sight registrations,
+  -- revocations and every capture, edit and delete do not wait. Released with
+  -- the transaction.
   PERFORM 1 FROM ob1_agents FOR SHARE;
 
   WITH candidates AS (
@@ -1429,11 +1465,14 @@ BEGIN
      -- pass (run-it, second review pass) — and a NULL origin the blob carries.
      -- Each arm begins with the predicate of one of the two partial indexes
      -- above, so a pass on a log of filled rows reads the indexes, not the
-     -- heap, and the lookups run for candidates only (third review pass).
-     WHERE ((a.actor_kind IS NULL OR a.trust IS NULL) AND a.actor_name IS NOT NULL
+     -- heap, and the lookups run for candidates only (third review pass). No
+     -- ORDER BY: which rows a bounded pass takes first is not a contract, and
+     -- an order on created_at invited the planner, when many rows waited and
+     -- were newer than the filled mass, to walk the created_at index from the
+     -- oldest row instead (run-it, fourth review pass).
+     WHERE ((a.actor_kind IS NULL OR a.trust IS NULL) AND (a.actor_name IS NOT NULL OR a.canonical_agent_id IS NOT NULL)
             AND COALESCE(a.actor_kind, r.kind) IS NOT NULL)
         OR (a.origin IS NULL AND (a.actor_context ? 'via') AND ob1_door_of(a.actor_context) IS NOT NULL)
-     ORDER BY a.created_at
      LIMIT CASE WHEN p_limit IS NULL THEN NULL ELSE GREATEST(p_limit, 0) END
   )
   UPDATE thought_audit a
@@ -1459,12 +1498,13 @@ BEGIN
 
   PERFORM set_config('ob1.audit_amend', '', true);
 
-  -- Rows attributed to a key whose kind nobody has set: what set_agent_kind
-  -- and another call here would fill. Rows with no actor_name can never gain
-  -- one and are not counted. Read through the awaiting-kind index.
+  -- Rows attributed to a key — by name or by id — whose kind nobody has set:
+  -- what set_agent_kind and another call here would fill. Rows naming neither
+  -- can never gain one and are not counted. Read through the awaiting-kind
+  -- index.
   SELECT count(*)::int INTO v_awaiting
     FROM thought_audit
-   WHERE actor_kind IS NULL AND actor_name IS NOT NULL;
+   WHERE actor_kind IS NULL AND (actor_name IS NOT NULL OR canonical_agent_id IS NOT NULL);
 
   RETURN jsonb_build_object('ok', true, 'rows', v_rows, 'awaiting_kind', v_awaiting);
 END;
