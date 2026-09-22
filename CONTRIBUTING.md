@@ -260,7 +260,7 @@ opposed to a vendored contribution, records itself as a **release fragment** rat
 than by editing a hand-numbered FORK.md section:
 
 - **Every PR that touches `db/migrations/`, `server-portable/` or `evals/` ships a
-  fragment**, `changes/<ticket>.md` (see [`changes/README.md`](changes/README.md)
+  fragment**, `changes/smd-NNNN.md` (see [`changes/README.md`](changes/README.md)
   for the shape). It carries the Keep a Changelog `type`, the `bump` the change
   deserves (a `patch` may not add a migration — a migration is at least a MINOR),
   the tickets and migrations it touches, a one-to-three-line changelog entry, and

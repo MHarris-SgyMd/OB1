@@ -55,11 +55,14 @@ export const BUMPS = new Set(["major", "minor", "patch"]);
 /**
  * What is wrong with a fragment's text, in words — nothing when it is well
  * formed: front matter naming a Keep a Changelog type, a bump the migrations it
- * lists allow, SMD-#### tickets and three-digit migrations; a `## Changelog` body
- * of one to three lines; a `## FORK` body whose first line is the plain title,
- * ending in every ticket the front matter lists (check 17b reads a released
- * ticket from that title once it is a numbered file), nothing on the second
- * line, and no numbered heading of its own.
+ * lists allow, SMD-#### tickets and three-digit migrations; exactly one
+ * `## Changelog` — one to three plain lines (no bullet, heading or list marker;
+ * the release step writes the `- `) naming every listed ticket and no other —
+ * then exactly one `## FORK`, nothing between them (a section there is written
+ * nowhere); the FORK body runs to the end of the file, its first line the plain
+ * title ending in every ticket the front matter lists (check 17b reads a
+ * released ticket from that title once it is a numbered file), nothing on the
+ * second line, `## ` sub-headings of its own kept, and no numbered heading.
  */
 export function fragmentProblems(text) {
   const problems = [];
@@ -83,16 +86,21 @@ export function fragmentProblems(text) {
   else {
     const n = changelog.split("\n").map((s) => s.trim()).filter(Boolean).length;
     if (n < 1 || n > 3) problems.push(`the \`## Changelog\` body is ${n} line(s); Keep a Changelog wants 1–3`);
-    if (/^\s*[-*+] /.test(changelog)) problems.push("the `## Changelog` body is already a bullet — the release step writes the `- `; give it the sentence");
+    if (changelog.split("\n").some((l) => /^\s*(?:[-*+]\s|#|\d+\.\s)/.test(l))) problems.push("a `## Changelog` line is a bullet, a heading or a list item — the release step writes the `- `; give it plain sentences");
     // The changelog line is what the release pairing (check 17b) reads a version's
     // tickets from: it names every front-matter ticket and no other.
     const named = new Set([...changelog.matchAll(/\bSMD-(\d+)\b/g)].map((m) => `SMD-${m[1]}`));
-    const fm = tickets.filter((t) => /^SMD-\d+$/.test(t));
-    const missing = fm.filter((t) => !named.has(t));
-    const extra = [...named].filter((t) => !fm.includes(t));
+    const declared = tickets.filter((t) => /^SMD-\d+$/.test(t));
+    const missing = declared.filter((t) => !named.has(t));
+    const extra = [...named].filter((t) => !declared.includes(t));
     if (missing.length) problems.push(`the \`## Changelog\` body does not name ${missing.join(", ")} — it ends in every ticket the front matter lists; the release pairing reads a version's tickets from it`);
     if (extra.length) problems.push(`the \`## Changelog\` body names ${extra.join(", ")}, which the front matter does not list — CHANGELOG.md would pair a version with a ticket it does not carry; cite the other ticket in the FORK body instead`);
   }
+  // One of each section, in order, nothing between: a second `## Changelog` or a
+  // `## Notes` before `## FORK` is content the cut writes nowhere.
+  const headingsBeforeFork = [...body.slice(0, forkAt < 0 ? body.length : forkAt).matchAll(/(?:^|\n)## ([^\n]*)/g)].map((m) => m[1].trim());
+  if (headingsBeforeFork.filter((h) => h === "Changelog").length > 1) problems.push("two `## Changelog` sections — one, of one to three lines");
+  for (const h of headingsBeforeFork) if (h !== "Changelog") problems.push(`a \`## ${h}\` section before \`## FORK\` — the cut writes it nowhere; a fragment is \`## Changelog\` then \`## FORK\` (put the rest in the record)`);
   if (fork === null) problems.push("missing a `## FORK` section");
   else if (fork === "") problems.push("the `## FORK` section is empty — its first line is the title, then the record");
   else if (changelogAt > forkAt) problems.push("the `## Changelog` section sits after `## FORK` — the FORK body runs to the end of the file (its own `## ` sub-headings included), so the Changelog comes first");
@@ -106,7 +114,7 @@ export function fragmentProblems(text) {
       if (missing.length) problems.push(`the \`## FORK\` title does not end in ${missing.join(", ")} — the title names every ticket the front matter lists, as "(SMD-1 / 2)", so the release pairing can read them from the numbered file`);
     }
     const prose = fork.replace(/^```[\s\S]*?^```/gm, ""); // a `# 1. install` comment in a fenced snippet is not a heading
-    if (/\n#{1,4} \d+\. |# change \d+/i.test("\n" + prose)) problems.push("the `## FORK` body carries a numbered heading — the release step assigns the change number and writes the `# N.` heading");
+    if (/\n#{1,6} \d+\. |# change \d+/i.test("\n" + prose)) problems.push("the `## FORK` body carries a numbered heading — the release step assigns the change number and writes the `# N.` heading");
   }
   return problems;
 }

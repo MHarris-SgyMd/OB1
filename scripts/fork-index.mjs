@@ -152,7 +152,7 @@ export function renderIndex({ numbered, fragments }) {
   ];
   for (const c of numbered) {
     const title = c.heading?.title ?? c.name;
-    lines.push(`| ${c.n} | [${cell(headOf(title))}](${CHANGES_DIR}/${c.name}) | ${ticketOf(title)} |`);
+    lines.push(`| ${c.n} | [${cell(headOf(title))}](${CHANGES_DIR}/${c.name}) | ${ticketOf(title) || "—"} |`); // 18–41 predate the ticket tail
   }
   if (fragments.length) {
     lines.push("");

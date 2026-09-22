@@ -169,30 +169,30 @@ and fails a "FORK.md change N" citation with no file behind it (SMD-1917).
 
 | # | Change | Ticket |
 | --- | --- | --- |
-| 18 | [Long captures stay searchable](changes/018-long-captures-stay-searchable.md) |  |
-| 19 | [Default embedding model → `qwen3-embedding:4b` at 1024 dimensions](changes/019-default-embedding-model-to-qwen3-embedding-4b.md) |  |
-| 20 | [Shared scaffolding, and pure logic lifted out of `index.ts`](changes/020-shared-scaffolding-and-pure-logic-lifted-out.md) |  |
-| 21 | [Every mutation is recorded](changes/021-every-mutation-is-recorded.md) |  |
-| 22 | [`update_thought` and `delete_thought`](changes/022-update-thought-and-delete-thought.md) |  |
-| 23 | [A stable agent identity](changes/023-a-stable-agent-identity.md) |  |
-| 24 | [A trigram index on `thoughts.content`](changes/024-a-trigram-index-on-thoughts-content.md) |  |
-| 25 | [The benchmark corpus was truncated, and nobody knew](changes/025-the-benchmark-corpus-was-truncated-and-nobody.md) |  |
-| 26 | [Keyword search](changes/026-keyword-search.md) |  |
-| 27 | [Contextual retrieval, measured](changes/027-contextual-retrieval-measured.md) |  |
-| 28 | [A filtered search reaches the index](changes/028-a-filtered-search-reaches-the-index.md) |  |
-| 29 | [A lease per thought, and the re-embed that proves it](changes/029-a-lease-per-thought-and-the-re-embed.md) |  |
-| 30 | [Entities and relationships](changes/030-entities-and-relationships.md) |  |
-| 31 | [GraphRAG, measured](changes/031-graphrag-measured.md) |  |
-| 32 | [Hybrid ranking](changes/032-hybrid-ranking.md) |  |
-| 33 | [An unchanged edit is never a duplicate](changes/033-an-unchanged-edit-is-never-a-duplicate.md) |  |
-| 34 | [The head window is recorded on the row](changes/034-the-head-window-is-recorded-on-the-row.md) |  |
-| 35 | [Preflight sees an unfinished re-embed](changes/035-preflight-sees-an-unfinished-re-embed.md) |  |
-| 36 | [`match_thoughts` reaches the index at the shipped width](changes/036-match-thoughts-reaches-the-index-at-the-shipped.md) |  |
-| 37 | [`match_thoughts` blends recency into its ranking](changes/037-match-thoughts-blends-recency-into-its-ranking.md) |  |
-| 38 | [A vector carries its model](changes/038-a-vector-carries-its-model.md) |  |
-| 39 | [The operator's way to say "I know"](changes/039-the-operator-s-way-to-say-i-know.md) |  |
-| 40 | [A re-capture's windows stay while the label vouches for them](changes/040-a-re-capture-s-windows-stay-while-the-label.md) |  |
-| 41 | [003's missing half](changes/041-003-s-missing-half.md) |  |
+| 18 | [Long captures stay searchable](changes/018-long-captures-stay-searchable.md) | — |
+| 19 | [Default embedding model → `qwen3-embedding:4b` at 1024 dimensions](changes/019-default-embedding-model-to-qwen3-embedding-4b.md) | — |
+| 20 | [Shared scaffolding, and pure logic lifted out of `index.ts`](changes/020-shared-scaffolding-and-pure-logic-lifted-out.md) | — |
+| 21 | [Every mutation is recorded](changes/021-every-mutation-is-recorded.md) | — |
+| 22 | [`update_thought` and `delete_thought`](changes/022-update-thought-and-delete-thought.md) | — |
+| 23 | [A stable agent identity](changes/023-a-stable-agent-identity.md) | — |
+| 24 | [A trigram index on `thoughts.content`](changes/024-a-trigram-index-on-thoughts-content.md) | — |
+| 25 | [The benchmark corpus was truncated, and nobody knew](changes/025-the-benchmark-corpus-was-truncated-and-nobody.md) | — |
+| 26 | [Keyword search](changes/026-keyword-search.md) | — |
+| 27 | [Contextual retrieval, measured](changes/027-contextual-retrieval-measured.md) | — |
+| 28 | [A filtered search reaches the index](changes/028-a-filtered-search-reaches-the-index.md) | — |
+| 29 | [A lease per thought, and the re-embed that proves it](changes/029-a-lease-per-thought-and-the-re-embed.md) | — |
+| 30 | [Entities and relationships](changes/030-entities-and-relationships.md) | — |
+| 31 | [GraphRAG, measured](changes/031-graphrag-measured.md) | — |
+| 32 | [Hybrid ranking](changes/032-hybrid-ranking.md) | — |
+| 33 | [An unchanged edit is never a duplicate](changes/033-an-unchanged-edit-is-never-a-duplicate.md) | — |
+| 34 | [The head window is recorded on the row](changes/034-the-head-window-is-recorded-on-the-row.md) | — |
+| 35 | [Preflight sees an unfinished re-embed](changes/035-preflight-sees-an-unfinished-re-embed.md) | — |
+| 36 | [`match_thoughts` reaches the index at the shipped width](changes/036-match-thoughts-reaches-the-index-at-the-shipped.md) | — |
+| 37 | [`match_thoughts` blends recency into its ranking](changes/037-match-thoughts-blends-recency-into-its-ranking.md) | — |
+| 38 | [A vector carries its model](changes/038-a-vector-carries-its-model.md) | — |
+| 39 | [The operator's way to say "I know"](changes/039-the-operator-s-way-to-say-i-know.md) | — |
+| 40 | [A re-capture's windows stay while the label vouches for them](changes/040-a-re-capture-s-windows-stay-while-the-label.md) | — |
+| 41 | [003's missing half](changes/041-003-s-missing-half.md) | — |
 | 42 | [OAuth discovery is a 404](changes/042-oauth-discovery-is-a-404.md) | SMD-1246 |
 | 43 | [pgvector off the search path](changes/043-pgvector-off-the-search-path.md) | SMD-1247 |
 | 44 | [The read tools print the thought id, so `update_thought` and `delete_thought` can reach what a search found](changes/044-the-read-tools-print-the-thought-id-so-update.md) | SMD-1248 |

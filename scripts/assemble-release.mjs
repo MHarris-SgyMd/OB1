@@ -11,11 +11,15 @@
  * between assembly and tag. Since SMD-1917 a numbered change is a file,
  * changes/NNN-<slug>.md, not a FORK.md section: the step writes each fragment as
  * the next numbered file, removes the fragment, and re-renders FORK.md's index
- * with scripts/fork-index.mjs. Everything a cut can refuse — a directory that is
- * not contiguous or holds a stray or two fragments for one ticket, a fragment
- * check 16 would refuse (one function, fragments.mjs) or one naming a migration
- * outside the range, a FORK.md or CHANGELOG.md it cannot write into — is
- * refused in the plan, before --write touches a file.
+ * with scripts/fork-index.mjs. Everything a cut can refuse by reading — a
+ * directory that is not contiguous or holds a stray or two fragments for one
+ * ticket, a fragment check 16 would refuse (one function, fragments.mjs) or one
+ * naming a migration outside the range, a FORK.md with no marker pair or a
+ * CHANGELOG.md with no Unreleased section or a hand-written note under it, a
+ * half-applied earlier cut (its numbered files, changelog section or release
+ * entry already present), a shallow clone — is refused in the plan, before
+ * --write touches a file. An I/O failure during --write is not planned for:
+ * revert the working tree and run again.
  *
  *   bun scripts/assemble-release.mjs              # DRY RUN: print the plan, touch nothing
  *   bun scripts/assemble-release.mjs --write      # write changes/NNN-*.md, FORK.md's index, CHANGELOG.md, releases.json
@@ -36,7 +40,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { UPSTREAM_PIN, migrationSha, readReleases, highestReleasedMigration } from "../db/version.mjs";
 import { parseFragment, fragmentSection, fragmentProblems } from "./fragments.mjs";
-import { CHANGES_DIR as CHANGES_REL, FIRST_FILED, changeFileName, classifyChanges, readChangeEntries, renderIndex, spliceIndex } from "./fork-index.mjs";
+import { CHANGES_DIR as CHANGES_REL, FIRST_FILED, changeFileName, classifyChanges, readChangeEntries, renderIndex, spliceIndex, ticketOf } from "./fork-index.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const CHANGES_DIR = join(ROOT, "changes");
@@ -175,6 +179,25 @@ function buildPlan() {
     const parsed = parseFragment(text);
     return { name, ...parsed, fork: fragmentSection(parsed.body, "FORK") };
   });
+  // A previous --write that stopped after writing the numbered files (before the
+  // overwrites) leaves their record beside the fragments it came from; a second
+  // run would number it again. The body after the heading, or the title's
+  // tickets, of an existing file matching a pending fragment is that signature.
+  for (const f of fragments) {
+    const planned = renderChangeFile(0, f.fork);
+    const body = planned.text.split("\n").slice(1).join("\n");
+    const fmTickets = new Set(f.fm.tickets ?? []);
+    for (const e of existing) {
+      const eBody = e.text.split("\n").slice(1).join("\n");
+      const eTickets = ticketOf(e.heading?.title ?? "").split(", ").filter(Boolean);
+      if (eBody === body || eTickets.some((t) => fmTickets.has(t))) {
+        throw new Error(`${CHANGES_REL}/${e.name} already carries ${f.name}'s record — a previous --write stopped half-way; delete the numbered files it wrote, restore FORK.md, CHANGELOG.md and releases.json from version control, and run again`);
+      }
+    }
+  }
+  // Merge order comes from each fragment's add commit; a shallow clone has one
+  // commit and would order by ticket number, silently. Refuse it.
+  if (isShallow()) throw new Error("this checkout is shallow, so the fragments' merge order cannot be read — fetch the full history (actions/checkout: fetch-depth: 0) and run again");
   const version = nextVersion(releases, fragments.map((f) => f.fm.bump));
   let n = highestChangeNumber(existing);
   const numbered = fragments.map((f) => ({ number: ++n, ...f, file: renderChangeFile(n, f.fork) }));
@@ -225,8 +248,8 @@ function buildPlan() {
   // Whatever sits under ## [Unreleased] is replaced by the version section; a
   // hand-written note there would vanish. Only the placeholder paragraph may sit there.
   const unreleased = /## \[Unreleased\]\n([\s\S]*?)(?=\n## \[|\n\[Unreleased\]:)/.exec(changelogBefore);
-  const placeholder = (unreleased?.[1] ?? "").trim(); // empty, or one italic paragraph (_…_), possibly wrapped
-  if (placeholder && !(/^_[\s\S]*_$/.test(placeholder) && !/\n\s*\n/.test(placeholder))) {
+  const placeholder = (unreleased?.[1] ?? "").trim(); // empty, or one italic paragraph (_…_ with a closing mark), possibly wrapped
+  if (placeholder && !(/^_[\s\S]*_[.!]?$/.test(placeholder) && !/\n\s*\n/.test(placeholder))) {
     throw new Error("CHANGELOG.md carries hand-written lines under ## [Unreleased]; the release step replaces that body — move them into a fragment's ## Changelog first");
   }
   const changelogAfter = insertChangelogSection(
@@ -272,6 +295,11 @@ function write(plan) {
 
   console.log(`Wrote ${plan.fragments.length} change file(s), FORK.md's index, CHANGELOG.md and releases.json for ${plan.version}.`);
   console.log(`Next, out of band, in this same commit: bump db/version.mjs's FORK_VERSION to '${plan.version}' and emit a NNN_set_schema_version.sql upserting it as the range's last migration (check-fork holds the two equal, so both move together). Then tag v${plan.version.split("+")[0]}+upstream.${UPSTREAM_PIN} and create the release.`);
+}
+
+function isShallow() {
+  try { return execFileSync("git", ["rev-parse", "--is-shallow-repository"], { cwd: ROOT, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim() === "true"; }
+  catch { return false; } // no repository at all (a copied tree): the order falls back to ticket number, as addedAt says
 }
 
 function gitHead() {
