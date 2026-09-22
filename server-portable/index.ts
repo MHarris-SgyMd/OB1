@@ -542,7 +542,9 @@ export function withActorFilter(filter: Record<string, unknown>, saidBy: string 
     if (key in out && out[key] !== value) throw new Error(`${arg} is "${value}" but filter.${key} is ${JSON.stringify(out[key])} — pass one of the two`);
     out[key] = value;
   }
-  return out;
+  // The caps are the filter's, so they hold over the folded object too (first
+  // review pass: a 20-key filter plus the two was 22 keys the store ran).
+  return parseFilter(out);
 }
 
 /**

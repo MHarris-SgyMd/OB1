@@ -1741,11 +1741,58 @@ console.log("\n[20c] Migration 047 onto a populated 046 — every thought gains 
   bf = (await sql`SELECT backfill_thought_actors() AS r`)[0].r as { rows: number; differing: number; awaiting: number };
   assert(bf.rows === 1 && bf.awaiting === 0 && (await marks(claimRow.id)) === "ingested/MCP_ACCESS_KEY", `once the key is classified the next pass fills its row (${JSON.stringify(bf)}, ${await marks(claimRow.id)})`);
 
+  // An edit in flight: B holds update_thought's row lock (FOR NO KEY UPDATE)
+  // and has not written yet; the pass must wait for B's transaction, not
+  // deadlock against it (run-it, first review pass: the ALTER's SHARE ROW
+  // EXCLUSIVE did not conflict with B's ROW SHARE, B's UPDATE then waited on
+  // the table while the pass waited on the row, and the pass was the victim).
+  const passB = new SQL({ url: URL_, max: 1 });
+  await passB`BEGIN`;
+  await passB`SELECT id FROM thoughts WHERE id = ${fresh.id}::uuid FOR NO KEY UPDATE`;
+  const aPid = Number((await sql`SELECT pg_backend_pid() AS p`)[0].p);
+  await sql.unsafe(`ALTER TABLE thoughts DISABLE TRIGGER thoughts_stamp_actor`);
+  await sql.unsafe(`UPDATE thoughts SET metadata = metadata - 'actor_kind' - 'actor_name' WHERE id = '${opRow.id}'`);
+  await sql.unsafe(`ALTER TABLE thoughts ENABLE TRIGGER thoughts_stamp_actor`);
+  const pendingA = sql`SELECT backfill_thought_actors() AS r`.execute();
+  let waitedOnB = false;
+  for (let i = 0; i < 100 && !waitedOnB; i++) {
+    const [w] = await passB`SELECT wait_event_type AS t FROM pg_stat_activity WHERE pid = ${aPid}`;
+    waitedOnB = w?.t === "Lock";
+    if (!waitedOnB) await new Promise((r) => setTimeout(r, 50));
+  }
+  const bEdit = (await passB`SELECT update_thought(${fresh.id}::uuid, 'upgrade 047: edited while a pass waited', NULL, NULL, NULL, NULL, ${{ name: "laptop", agent_id: laptop.agent_id }}::jsonb, NULL, NULL, NULL) AS r`)[0].r as { ok: boolean };
+  await passB`COMMIT`;
+  await passB.close();
+  const passRes = (await pendingA)[0].r as { rows: number };
+  assert(waitedOnB && bEdit.ok === true && passRes.rows === 1 && (await marks(opRow.id)) === "operator/laptop" && (await marks(fresh.id)) === "operator/laptop",
+    `a pass meeting an edit in flight waits for it (seen waiting on a lock), the edit lands, the pass then writes its one row and neither deadlocks (${JSON.stringify(passRes)})`);
+  // Two passes at once: the second waits on the first's table lock and,
+  // re-checking the marks under it, writes and counts nothing the first did.
+  await sql.unsafe(`ALTER TABLE thoughts DISABLE TRIGGER thoughts_stamp_actor`);
+  await sql.unsafe(`UPDATE thoughts SET metadata = metadata - 'actor_kind' - 'actor_name' WHERE id IN ('${opRow.id}', '${fresh.id}')`);
+  await sql.unsafe(`ALTER TABLE thoughts ENABLE TRIGGER thoughts_stamp_actor`);
+  const passC = new SQL({ url: URL_, max: 1 });
+  await passC`BEGIN`;
+  const bfC = (await passC`SELECT backfill_thought_actors() AS r`)[0].r as { rows: number };
+  const pendingD = sql`SELECT backfill_thought_actors() AS r`.execute();
+  let waitedOnC = false;
+  for (let i = 0; i < 100 && !waitedOnC; i++) {
+    const [w] = await passC`SELECT wait_event_type AS t FROM pg_stat_activity WHERE pid = ${aPid}`;
+    waitedOnC = w?.t === "Lock";
+    if (!waitedOnC) await new Promise((r) => setTimeout(r, 50));
+  }
+  await passC`COMMIT`;
+  await passC.close();
+  const bfD = (await pendingD)[0].r as { rows: number; differing: number };
+  assert(waitedOnC && bfC.rows === 2 && bfD.rows === 0 && bfD.differing === 2,
+    `two passes at once: the second waits, finds the first's marks under the lock and writes nothing — rows ${bfC.rows} + ${bfD.rows} (run-it, first review pass: each had reported every row)`);
+  assert(Number((await sql`SELECT count(*)::int AS c FROM thought_audit WHERE origin = 'backfill_thought_actors'`)[0].c) === 2 + 1 + 1 + 2, "…and the audit rows count what was written, once");
+
   const shapeAfter = await shape(sql);
   const again = await stamps();
   await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("047") });
-  assert(JSON.stringify(await shape(sql)) === JSON.stringify(shapeAfter) && (await stamps()) === again && Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c) === Number(auditAfter) + 2,
-    "re-applying 047 is a no-op: the shape as it was, no row moved, no audit row added beyond the two the capture and the pass after left");
+  assert(JSON.stringify(await shape(sql)) === JSON.stringify(shapeAfter) && (await stamps()) === again && Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c) === Number(auditAfter) + 9,
+    "re-applying 047 is a no-op: the shape as it was, no row moved, no audit row added beyond the nine above — the capture, the classified key's pass, three raw strips of the marks (008 records a metadata change), the edit in flight, its pass, and the two-pass arm's two");
   await sql.close();
 }
 

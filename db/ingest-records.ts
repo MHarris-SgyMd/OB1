@@ -241,6 +241,21 @@ function isFingerprintCollision(e: unknown): boolean {
  * is its own statement (no surrounding transaction) so one such skip does not
  * poison the rest of the run, which is idempotent and re-runnable regardless.
  */
+/**
+ * The ingester's envelope, session-wide on the one connection it holds: 047's
+ * stamp reads it, so every record carries actor_name `ingest-records` (and the
+ * kind once the operator has said `SELECT set_agent_kind('ingest-records',
+ * 'ingested')` — the ingester does not classify itself; 046's rule is that
+ * the operator does), and 046's audit rows carry the door. Without it every
+ * record named nobody and a re-ingest stripped the mark an operator's edit
+ * had placed (run-it, SMD-1726's first review pass). Session-level on purpose:
+ * each upsert is its own statement, not a transaction.
+ */
+export const INGEST_ACTOR = { name: "ingest-records", via: "ingest-records" } as const;
+export async function nameIngestActor(sql: SQL): Promise<void> {
+  await sql`SELECT set_config('ob1.actor', ${JSON.stringify(INGEST_ACTOR)}, false)`;
+}
+
 export async function upsertRecord(sql: SQL, doc: Doc): Promise<UpsertResult> {
   const meta = { source: doc.source, ...doc.meta };
   const created = doc.createdAt ?? null;
@@ -436,6 +451,7 @@ async function main(): Promise<void> {
   const sql = new SQL({ url, max: 1 });
   const tally: Record<UpsertResult, number> = { inserted: 0, updated: 0, unchanged: 0, skipped: 0 };
   try {
+    await nameIngestActor(sql);
     for (const doc of docs) tally[await upsertRecord(sql, doc)]++;
     await stampTier(sql, tier);
   } finally {

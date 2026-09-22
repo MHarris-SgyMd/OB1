@@ -59,7 +59,10 @@ const WRITER_PHRASE: Record<string, string> = {
  */
 export function actorKindOf(metadata: Record<string, unknown> | null | undefined): string | null {
   const k = metadata?.actor_kind;
-  return typeof k === "string" && k in WRITER_PHRASE ? k : null;
+  // Object.hasOwn, not `in`: "constructor" or "__proto__" is `in` every object
+  // and would have rendered Object's source on the trusted header line from a
+  // row the backfill had not reached yet (first review pass).
+  return typeof k === "string" && Object.hasOwn(WRITER_PHRASE, k) ? k : null;
 }
 
 export const VERDICTS = ["agree", "unrelated", "conflict"] as const;
@@ -177,7 +180,7 @@ export function buildJudgeMessages(older: PairSide, newer: PairSide): { role: "s
   // SMD-1726: the writer's clause is the database's mark or nothing — a
   // value outside the three words renders no clause, so a caller's string
   // cannot reach the header through this slot either.
-  const writerOf = (side: PairSide): string => (side.writer && WRITER_PHRASE[side.writer]) || "";
+  const writerOf = (side: PairSide): string => (side.writer && Object.hasOwn(WRITER_PHRASE, side.writer) && WRITER_PHRASE[side.writer]) || "";
   const slots: Record<string, string> = {
     date_a: dateOf(older.createdAt), writer_a: writerOf(older), content_a: wrapSide("thought_a", older.content),
     date_b: dateOf(newer.createdAt), writer_b: writerOf(newer), content_b: wrapSide("thought_b", newer.content),

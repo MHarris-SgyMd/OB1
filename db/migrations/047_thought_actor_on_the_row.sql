@@ -49,18 +49,40 @@
 --
 --   3. THE BACKFILL, backfill_thought_actors(p_limit): for every thought, the
 --      latest audit row that WROTE ITS CONTENT — a capture, or an update whose
---      diff carries `content` — gives the writer: its actor_kind (046's
---      backfill may have filled it) else the registry's kind for its id or
---      name now, and its actor_name. The two keys are set to exactly that
---      wherever they differ, so a pre-047 row that happened to carry a
---      caller's `actor_kind` is corrected (the log knows the writer) or
---      stripped (it does not), a stamped row is left alone, and a re-apply
---      writes nothing. Called once by the file with {{BACKFILL_LIMIT}} (023's
---      knob, OB1_BACKFILL_LIMIT); run again after set_agent_kind and 046's
---      backfill have classified a key. Each row it writes is an UPDATE of
+--      diff carries `content` — gives the writer: the registry's kind for its
+--      id or name NOW, else the kind 046 stamped on the row, and its
+--      actor_name. The registry first: the mark is a view of the row's
+--      writer, not history, so a key reclassified by set_agent_kind
+--      propagates to its rows on the next pass (046's audit rows keep the
+--      kind they were stamped with — that IS history; first review pass).
+--      "Latest" is by `seq`, a monotonic column this file adds to
+--      thought_audit: created_at is now(), one value for a whole
+--      transaction, and id is a random uuid, so a capture and an edit in one
+--      transaction — an importer's, a PostgREST rpc chain's — ordered by
+--      those two was a coin flip that rewrote the trigger's correct stamp
+--      (first review pass, reproduced 6 of 12). Existing rows take their seq
+--      in heap order, which for an append-only table is insertion order.
+--      The two keys are set to exactly the derivation wherever they differ,
+--      so a pre-047 row that happened to carry a caller's `actor_kind` is
+--      corrected (the log knows the writer) or stripped (it does not), a
+--      stamped row is left alone, and a re-apply writes nothing. Called once
+--      by the file with {{BACKFILL_LIMIT}} (023's knob, OB1_BACKFILL_LIMIT);
+--      run again after set_agent_kind. Each row it writes is an UPDATE of
 --      metadata, which 008's trigger records — an audit row per thought
---      filled, its door `backfill_thought_actors`, its actor nobody. That IS
---      the record the ticket asks for; a brain with a million rows batches it.
+--      written, its door `backfill_thought_actors`, its actor nobody. That IS
+--      the record the ticket asks for. What p_limit buys, said plainly: it
+--      bounds the rows written and the write lock held per call, so a brain
+--      with a million rows takes the marks in batches between writers; it
+--      does not bound the scan — every call derives every thought's writer
+--      (one probe of 008's thought_id index per thought) — nor the audit
+--      rows, which are one per row marked whatever the batch size.
+--
+--      The pass scans before it locks and re-checks each row under the lock
+--      (023's shape): updated_at unchanged, and the marks still disagreeing.
+--      It takes thoughts IN EXCLUSIVE MODE for the write — writers wait for
+--      the call's transaction, readers do not — so an edit in flight is
+--      waited for rather than deadlocked against, and lock_timeout (10 s)
+--      aborts a pass a writer's idle transaction would hold up.
 --
 --   4. NOT HERE, SAID SO. No index beyond 001's GIN: the filter's route is the
 --      GIN's (a `said_by` matching most of the corpus is the walk with a
@@ -83,6 +105,18 @@
 -- =============================================================================
 
 -- ---------------------------------------------------------------------------
+-- The order of the log. created_at is one value per transaction and id is
+-- random; seq is the order rows were written in. ADD COLUMN on the append-only
+-- table is 010's and 046's precedent (the immutability trigger is a row
+-- trigger on UPDATE and DELETE; DDL is neither), and the amendment gate
+-- compares whole rows, so an added column that never changes passes it.
+-- ---------------------------------------------------------------------------
+ALTER TABLE thought_audit ADD COLUMN IF NOT EXISTS seq bigint GENERATED ALWAYS AS IDENTITY;
+
+COMMENT ON COLUMN thought_audit.seq IS
+  'The order rows were written in — an identity, assigned at INSERT. created_at is now(), one value for every row a transaction writes, and id is a random uuid, so neither orders two writes to one thought inside a transaction; seq does. Rows from before 047 took theirs in heap order at the ALTER (insertion order for an append-only table). backfill_thought_actors reads the latest content-writing row by it. Migration 047 / SMD-1726.';
+
+-- ---------------------------------------------------------------------------
 -- The stamp: who wrote this text, from the key.
 -- ---------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION ob1_stamp_actor()
@@ -91,10 +125,12 @@ LANGUAGE plpgsql
 AS $$
 DECLARE
   actor   jsonb;
+  v_raw   text;
   v_agent uuid;
   v_name  text;
   v_kind  text;
   v_meta  jsonb;
+  v_same  boolean := false;
 BEGIN
   /**
    * ob1:actor-on-the-row-from-the-key — a CONTRACT SENTINEL, not prose (the
@@ -109,32 +145,60 @@ BEGIN
   IF current_setting('ob1.actor_amend', true) = 'backfill' THEN
     RETURN NEW;
   END IF;
+  -- metadata is an object on every row the writers make (005 refuses any
+  -- other payload); a raw writer's array or scalar is not this trigger's to
+  -- fix, and `-` on a scalar would fail its write (first review pass).
+  IF NEW.metadata IS NOT NULL AND jsonb_typeof(NEW.metadata) <> 'object' THEN
+    RETURN NEW;
+  END IF;
 
-  IF TG_OP = 'UPDATE' AND NEW.content IS NOT DISTINCT FROM OLD.content THEN
+  -- The same text, by 003's rule (content_fingerprint_of: whitespace and case
+  -- folded — 018 calls that edit "unchanged" and never refuses it), or the
+  -- same bytes. Two IFs, not one OR: an SQL expression is not short-circuit,
+  -- and the hashes are wanted only when the bytes differ — a re-embed or a
+  -- metadata touch compares no hash at all.
+  IF TG_OP = 'UPDATE' THEN
+    v_same := NEW.content IS NOT DISTINCT FROM OLD.content;
+    IF NOT v_same THEN
+      v_same := content_fingerprint_of(NEW.content) IS NOT DISTINCT FROM content_fingerprint_of(OLD.content);
+    END IF;
+  END IF;
+  IF v_same THEN
     -- The actor follows the content: the mark stays as it was, whatever the
     -- patch said. The common case — a re-embed, a metadata touch — carries the
-    -- same two keys in and out and pays two comparisons, no rebuild.
+    -- same two keys in and out and pays two comparisons, no rebuild. A raw
+    -- `SET metadata = NULL` on a marked row keeps the mark too: the writer of
+    -- the text did not change because a caller wiped the rest.
     IF NEW.metadata->'actor_kind' IS NOT DISTINCT FROM OLD.metadata->'actor_kind'
        AND NEW.metadata->'actor_name' IS NOT DISTINCT FROM OLD.metadata->'actor_name' THEN
       RETURN NEW;
     END IF;
     v_meta := COALESCE(NEW.metadata, '{}'::jsonb) - 'actor_kind' - 'actor_name';
-    IF OLD.metadata ? 'actor_kind' THEN
-      v_meta := v_meta || jsonb_build_object('actor_kind', OLD.metadata->'actor_kind');
-    END IF;
-    IF OLD.metadata ? 'actor_name' THEN
-      v_meta := v_meta || jsonb_build_object('actor_name', OLD.metadata->'actor_name');
+    IF jsonb_typeof(OLD.metadata) = 'object' THEN
+      IF OLD.metadata ? 'actor_kind' THEN
+        v_meta := v_meta || jsonb_build_object('actor_kind', OLD.metadata->'actor_kind');
+      END IF;
+      IF OLD.metadata ? 'actor_name' THEN
+        v_meta := v_meta || jsonb_build_object('actor_name', OLD.metadata->'actor_name');
+      END IF;
     END IF;
     NEW.metadata := v_meta;
     RETURN NEW;
   END IF;
 
   -- An INSERT, or an UPDATE that changes the content: the writer is whoever
-  -- set the envelope. 008's reader (NULL when unset or malformed), 010's id
-  -- reading (the exact form the server emits; anything else is no id) and
-  -- 046's lookup — only when the envelope names an id or a name, so a raw
-  -- write with no actor set probes nothing (046, third review pass).
-  actor := ob1_current_actor();
+  -- set the envelope. The setting is read inline first — a raw load with no
+  -- actor pays one current_setting and nothing more (008's reader is plpgsql
+  -- with an EXCEPTION arm, a savepoint per call, which the audit trigger
+  -- already pays once per row; first review pass) — and through 008's reader
+  -- when set, so a malformed envelope is no actor rather than a failed
+  -- write, as 008 decided. Then 010's id reading (the exact form the server
+  -- emits; anything else is no id) and 046's lookup — only when the envelope
+  -- names an id or a name, so no actor means no probe (046, third pass).
+  v_raw := current_setting('ob1.actor', true);
+  IF v_raw IS NOT NULL AND v_raw <> '' THEN
+    actor := ob1_current_actor();
+  END IF;
   IF actor IS NOT NULL AND jsonb_typeof(actor) = 'object' THEN
     v_name  := NULLIF(btrim(actor->>'name'), '');
     v_agent := CASE
@@ -153,8 +217,8 @@ BEGIN
   IF v_name IS NOT NULL THEN
     v_meta := v_meta || jsonb_build_object('actor_name', v_name);
   END IF;
-  -- A NULL metadata with nothing to add stays NULL: the stamp adds keys, it
-  -- does not decide the column's emptiness for a raw writer.
+  -- A NULL metadata with nothing to add stays NULL: on this path the stamp
+  -- adds keys, it does not decide the column's emptiness for a raw writer.
   IF NEW.metadata IS NULL AND v_meta = '{}'::jsonb THEN
     RETURN NEW;
   END IF;
@@ -164,7 +228,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION ob1_stamp_actor() IS
-  'BEFORE INSERT OR UPDATE on thoughts (thoughts_stamp_actor, 047): writes metadata.actor_kind (ob1_agents.kind for the envelope''s agent_id, else its name — ob1_registry_kind, 046) and metadata.actor_name (the envelope''s name) from the ob1.actor setting 008''s writers set, never from the payload — a payload''s own values under either key are overwritten or removed. The actor follows the content: an INSERT and a content-changing UPDATE stamp from the envelope present (no envelope, no mark); an UPDATE that leaves the content keeps the mark as it was. Under ob1.actor_amend = ''backfill'' the keys are taken as given (backfill_thought_actors). Migration 047 / SMD-1726.';
+  'BEFORE INSERT OR UPDATE on thoughts (thoughts_stamp_actor, 047): writes metadata.actor_kind (ob1_agents.kind for the envelope''s agent_id, else its name — ob1_registry_kind, 046) and metadata.actor_name (the envelope''s name) from the ob1.actor setting 008''s writers set, never from the payload — a payload''s own values under either key are overwritten or removed. The actor follows the content: an INSERT and an UPDATE that changes the text (by 003''s normalised fingerprint, so 018''s unchanged edit is unchanged here too) stamp from the envelope present (no envelope, no mark); an UPDATE that leaves the text keeps the mark as it was. A non-object metadata (a raw writer''s) passes untouched. Under ob1.actor_amend = ''backfill'' the keys are taken as given (backfill_thought_actors). Migration 047 / SMD-1726.';
 
 DROP TRIGGER IF EXISTS thoughts_stamp_actor ON thoughts;
 CREATE TRIGGER thoughts_stamp_actor
@@ -186,6 +250,12 @@ AS $$
 DECLARE
   v_prev_actor text := current_setting('ob1.actor', true);
   v_prev_amend text := current_setting('ob1.actor_amend', true);
+  -- 023's shape: a temp table named per call and dropped at commit, so two
+  -- calls in one transaction never meet each other's, and nothing is dropped
+  -- by hand (CLAUDE.md's rail; the first draft dropped a fixed name, which
+  -- resolved to a permanent table of that name when no temp one existed —
+  -- first review pass, reproduced).
+  v_tbl      text := format('ob1_actor_backfill_%s', to_char(clock_timestamp(), 'YYYYMMDDHH24MISSUS'));
   v_rows     integer := 0;
   v_differ   integer;
   v_awaiting integer;
@@ -196,44 +266,63 @@ BEGIN
 
   /**
    * Every thought's writer, from the log: the latest row that wrote the
-   * content (a capture, or an update whose diff carries `content`), read by
-   * 008's thought_id index. Its kind is what 046 filled, else what the
-   * registry says NOW for its id or name — the trigger's rule applied late,
-   * as 046's backfill applies it. A thought with no such row (loaded with the
-   * audit trigger off, or its log pruned by a migration) derives to nothing,
-   * and a mark it carries is stripped: nobody vouches for it.
+   * content (a capture, or an update whose diff carries `content`), by seq,
+   * read through 008's thought_id index. Its kind is what the registry says
+   * NOW for its id or name — the trigger's rule applied late, and a
+   * reclassification carried to the rows — else the kind 046 stamped on the
+   * row (a key since removed from the registry). A thought with no such row
+   * (loaded with the audit trigger off, or its log pruned by a migration)
+   * derives to nothing, and a mark it carries is stripped: nobody vouches
+   * for it. A metadata that is not an object has no mark to read or write.
    *
    * `differs` is where the row and the log disagree — the rows this pass
    * writes; `awaiting` is where the log names a key nobody has classified —
    * the rows the next pass fills once set_agent_kind has. updated_at rides
    * along so the write below can tell a row edited meanwhile (018's guard).
    */
-  DROP TABLE IF EXISTS ob1_actor_backfill;
-  CREATE TEMP TABLE ob1_actor_backfill ON COMMIT DROP AS
+  EXECUTE format($scan$
+    CREATE TEMP TABLE %I ON COMMIT DROP AS
     SELECT d.id, d.updated_at, d.kind, d.name,
-           (d.kind IS DISTINCT FROM d.present_kind OR d.name IS DISTINCT FROM d.present_name) AS differs,
+           -- Differs when the value differs, or when the key is present with
+           -- a value that reads as NULL (a JSON null a caller planted — `->>`
+           -- says NULL for it as for an absent key; run-it, first review pass).
+           (d.kind IS DISTINCT FROM d.present_kind OR (d.kind IS NULL AND d.has_kind)
+            OR d.name IS DISTINCT FROM d.present_name OR (d.name IS NULL AND d.has_name)) AS differs,
            (d.kind IS NULL AND (d.w_name IS NOT NULL OR d.w_agent IS NOT NULL)) AS awaiting
     FROM (
       SELECT t.id, t.updated_at,
-             COALESCE(w.actor_kind, ob1_registry_kind(w.canonical_agent_id, w.actor_name)) AS kind,
-             w.actor_name AS name,
-             w.actor_name AS w_name, w.canonical_agent_id AS w_agent,
+             COALESCE(ob1_registry_kind(w.canonical_agent_id, w.name), w.actor_kind) AS kind,
+             w.name,
+             w.name AS w_name, w.canonical_agent_id AS w_agent,
              t.metadata->>'actor_kind' AS present_kind,
-             t.metadata->>'actor_name' AS present_name
+             t.metadata->>'actor_name' AS present_name,
+             COALESCE(t.metadata ? 'actor_kind', false) AS has_kind,
+             COALESCE(t.metadata ? 'actor_name', false) AS has_name
       FROM thoughts t
       LEFT JOIN LATERAL (
-        SELECT a.actor_kind, a.actor_name, a.canonical_agent_id
+        -- The name as the trigger reads it — trimmed, empty is none — so the
+        -- two derive one value and a pass after a pass writes nothing
+        -- (run-it, first review pass: a padded name flip-flopped every pass).
+        SELECT a.actor_kind, NULLIF(btrim(a.actor_name), '') AS name, a.canonical_agent_id
         FROM thought_audit a
         WHERE a.thought_id = t.id
-          AND (a.action = 'capture' OR (a.action = 'update' AND a.diff ? 'content'))
-        ORDER BY a.created_at DESC, a.id DESC
+          -- A content-writing row by the trigger's rule: a capture, or an
+          -- update whose text CHANGED by 003's normalised fingerprint — 018's
+          -- unchanged edit (case, whitespace) is in the diff and is not a
+          -- change of writer, on the row or here (first review pass: the two
+          -- disagreed, and a pass rewrote the trigger's stamp).
+          AND (a.action = 'capture'
+               OR (a.action = 'update' AND a.diff ? 'content'
+                   AND content_fingerprint_of(a.diff->'content'->>'before') IS DISTINCT FROM content_fingerprint_of(a.diff->'content'->>'after')))
+        ORDER BY a.seq DESC
         LIMIT 1
       ) w ON true
-    ) d;
+      WHERE t.metadata IS NULL OR jsonb_typeof(t.metadata) = 'object'
+    ) d
+  $scan$, v_tbl);
 
-  SELECT count(*) FILTER (WHERE differs), count(*) FILTER (WHERE awaiting)
-    INTO v_differ, v_awaiting
-    FROM ob1_actor_backfill;
+  EXECUTE format('SELECT count(*) FILTER (WHERE differs), count(*) FILTER (WHERE awaiting) FROM %I', v_tbl)
+    INTO v_differ, v_awaiting;
 
   IF v_differ > 0 THEN
     -- The stamp trigger takes the keys as given under this setting; the audit
@@ -241,22 +330,36 @@ BEGIN
     -- a hand call must not leave the transaction's actor changed.
     PERFORM set_config('ob1.actor_amend', 'backfill', true);
     PERFORM set_config('ob1.actor', '{"via": "backfill_thought_actors"}', true);
+    -- EXCLUSIVE, as 023 takes it, BEFORE the ALTER: the ALTER's own SHARE ROW
+    -- EXCLUSIVE does not conflict with the ROW SHARE update_thought holds on
+    -- its row between its lock and its UPDATE, so a pass that met an edit in
+    -- flight waited on the row while the edit waited on the table — a
+    -- deadlock, the pass the victim (run-it, first review pass, reproduced).
+    -- EXCLUSIVE conflicts with ROW SHARE, so the pass waits its turn instead;
+    -- readers (ACCESS SHARE) proceed. Held to commit, which is why each call
+    -- is its own transaction; lock_timeout 10 s aborts it cleanly.
+    LOCK TABLE thoughts IN EXCLUSIVE MODE;
     -- A stamp is not an edit: 001's trigger would bump updated_at on every
     -- row written, and 018's stale-read guard and 021's evidence rule both
-    -- read it. Held off for the one statement (SHARE ROW EXCLUSIVE: writers
-    -- wait, readers do not), as 023 holds it.
+    -- read it. Held off for the write, to commit, as 023 holds it.
     ALTER TABLE thoughts DISABLE TRIGGER thoughts_updated_at;
 
+    EXECUTE format($write$
     UPDATE thoughts t
        SET metadata = (COALESCE(t.metadata, '{}'::jsonb) - 'actor_kind' - 'actor_name')
                       || CASE WHEN d.kind IS NOT NULL THEN jsonb_build_object('actor_kind', d.kind) ELSE '{}'::jsonb END
                       || CASE WHEN d.name IS NOT NULL THEN jsonb_build_object('actor_name', d.name) ELSE '{}'::jsonb END
-      FROM (SELECT id, updated_at, kind, name FROM ob1_actor_backfill WHERE differs
-            LIMIT COALESCE(p_limit, 2147483647)) d
+      FROM (SELECT id, updated_at, kind, name FROM %I WHERE differs LIMIT %s) d
      WHERE t.id = d.id
        -- Re-checked on the locked row: a thought edited since the scan has a
        -- newer writer, stamped by the trigger; it is left for the next pass.
-       AND t.updated_at IS NOT DISTINCT FROM d.updated_at;
+       AND t.updated_at IS NOT DISTINCT FROM d.updated_at
+       -- …and one another pass marked meanwhile — updated_at held still, so
+       -- the marks themselves are compared — is not written or counted again
+       -- (run-it, first review pass: two passes each reported every row).
+       AND (t.metadata->>'actor_kind' IS DISTINCT FROM d.kind OR (d.kind IS NULL AND t.metadata ? 'actor_kind')
+            OR t.metadata->>'actor_name' IS DISTINCT FROM d.name OR (d.name IS NULL AND t.metadata ? 'actor_name'))
+    $write$, v_tbl, COALESCE(p_limit::text, 'ALL'));
     GET DIAGNOSTICS v_rows = ROW_COUNT;
 
     ALTER TABLE thoughts ENABLE TRIGGER thoughts_updated_at;
@@ -264,13 +367,12 @@ BEGIN
     PERFORM set_config('ob1.actor_amend', COALESCE(v_prev_amend, ''), true);
   END IF;
 
-  DROP TABLE ob1_actor_backfill;
   RETURN jsonb_build_object('ok', true, 'rows', v_rows, 'differing', v_differ, 'awaiting', v_awaiting);
 END;
 $$;
 
 COMMENT ON FUNCTION backfill_thought_actors(integer) IS
-  'Sets metadata.actor_kind and metadata.actor_name on every thought to what thought_audit derives for the writer of its current content — the latest capture or content-changing update row: its actor_kind (046''s backfill) else ob1_registry_kind for its id or name now, and its actor_name — wherever the row and the log disagree, stripping a mark no audit row vouches for. Returns {ok, rows (written this call), differing (found disagreeing), awaiting (writer named but unclassified — set_agent_kind, then backfill_thought_audit_events, then this)}. p_limit (at least 1) bounds the rows written per call; each call its own transaction. Holds the updated_at trigger for the write (a stamp is not an edit), which needs the table''s owner; each row written leaves an audit row whose origin is backfill_thought_actors. Idempotent: a second pass finds nothing. Migration 047 / SMD-1726.';
+  'Sets metadata.actor_kind and metadata.actor_name on every thought to what thought_audit derives for the writer of its current content — the latest (by seq) capture or content-changing update row: ob1_registry_kind for its id or name NOW (so a reclassified key reaches its rows) else the actor_kind 046 stamped, and its actor_name — wherever the row and the log disagree, stripping a mark no audit row vouches for. Returns {ok, rows (written this call), differing (found disagreeing), awaiting (writer named but unclassified — set_agent_kind, then this)}. p_limit (at least 1) bounds the rows written and the write lock per call, not the scan (every call derives every thought) nor the audit rows (one per row written); each call its own transaction. Holds the updated_at trigger for the write (a stamp is not an edit), which needs the table''s owner; each row written leaves an audit row whose origin is backfill_thought_actors. Idempotent: a second pass finds nothing. Migration 047 / SMD-1726.';
 
 -- Every thought already written takes its writer's mark now — or the batch
 -- OB1_BACKFILL_LIMIT names, the rest by hand.

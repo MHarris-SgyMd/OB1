@@ -296,6 +296,11 @@ console.log("\n[9] The supersession judge's prompt and parser (migration 029): a
   assert(/ingested from an outside source:/.test(buildJudgeMessages({ content: "a", createdAt: null, writer: "ingested" }, { content: "b", createdAt: null })[0].content), "an ingested writer has its own words");
   assert(actorKindOf({ actor_kind: "ingested" }) === "ingested" && actorKindOf({ actor_kind: "root" }) === null && actorKindOf(null) === null && actorKindOf(undefined) === null && actorKindOf({ actor_kind: 3 }) === null,
     "actorKindOf reads the mark and admits only the three words");
+  for (const proto of ["constructor", "__proto__", "toString", "hasOwnProperty"]) {
+    const p = buildJudgeMessages({ content: "a", createdAt: null, writer: proto }, { content: "b", createdAt: null })[0].content;
+    assert(actorKindOf({ actor_kind: proto }) === null && /THOUGHT A, captured an unknown date:\n/.test(p) && !/native code|\[object/.test(p),
+      `"${proto}" is not a writer: a prototype key is \`in\` every object and would have put Object's source on the trusted header line (first review pass)`);
+  }
   assert(CONSOLIDATE_PROMPT_VERSION === 3, "the prompt version moved to 3 with the header and the rule, so p2 and p3 verdicts are different pools under different keys");
   assert(wrapSide("thought_a", "x".repeat(7000)).length < 6100, "a thought is cut to the content limit before wrapping");
 

@@ -537,6 +537,9 @@ console.log("\n[16b] said_by and actor fold into the filter, and the By: line re
   assert(actorLine({ actor_kind: "root", actor_name: "x" }) === "By: x (kind not classified)", "a word outside the registry's three renders as no kind");
   assert(actorLine({ actor_name: "op\u001b[2Jkey" }) === "By: op[2Jkey (kind not classified)", "…and the name goes through the display cleaner: a control character cannot reach the terminal");
   assert(actorLine({ actor_name: "   " }) === null && actorLine({ actor_name: 7, actor_kind: 3 }) === null, "a blank or non-string value is no mark");
+  const twenty = Object.fromEntries(Array.from({ length: 20 }, (_, i) => [`k${i}`, i]));
+  assert(/too many keys/.test(refusal(twenty, "operator", undefined)) && /too large/.test(refusal({ blob: "x".repeat(4090) }, undefined, "op-key")),
+    "the filter's caps hold over the folded object: twenty keys plus said_by is over the key cap, a filter at the size cap plus actor over the size cap (first review pass)");
 }
 
 server.stop();
