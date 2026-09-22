@@ -232,8 +232,9 @@ podman compose -f deploy/compose.yaml --profile board-sync logs -f board-sync
 ```
 
 Every `OB1_BOARD_SYNC_INTERVAL` seconds (300) it runs `bun db/sync-linear.ts`
-once: two requests list every issue's identifier and last-updated time, one
-query reads the brain's ticket rows, and the difference is the work — a new
+once: a few requests list every issue's identifier, last-updated time and names
+(a hundred a page), one query reads the brain's ticket rows, and the difference
+is the work — a new
 issue is captured (vector, tags, and the facets Linear knows: project, status,
 priority, labels, parent), a moved or edited one is updated in place with a
 fresh vector, an unchanged one costs nothing. There is no state file: the brain

@@ -304,7 +304,7 @@ export function namesMoved(c: CensusRow, metadata: Record<string, unknown> | und
   if (c.labels !== undefined && JSON.stringify(m.labels ?? []) !== JSON.stringify([...c.labels].sort((a, b) => a.localeCompare(b, "en")))) return true;
   return false;
 }
-export type Plan = { fetch: string[]; missing: string[]; stale: string[]; extra: string[]; unchanged: number };
+export type Plan = { fetch: string[]; missing: string[]; stale: string[]; extra: string[]; unchanged: number; deferred: number };
 
 /**
  * The plan for one identifier from the census: which issues a pass must fetch
@@ -314,9 +314,9 @@ export type Plan = { fetch: string[]; missing: string[]; stale: string[]; extra:
  * row Linear's list does not name (deleted, or moved out of the initiative).
  * `full` puts every listed issue in the fetch.
  */
-export function planPass(census: Census, groups: Map<string, BrainRow[]>, full = false): Plan {
+export function planPass(census: Census, groups: Map<string, BrainRow[]>, full = false, retagCap = RETAGS_PER_PASS): Plan {
   const missing: string[] = [], stale: string[] = [], fetch: string[] = [];
-  let unchanged = 0;
+  let unchanged = 0, deferred = 0, retags = 0;
   const listed = new Set<string>();
   for (const c of census) {
     const { identifier, updatedAt } = c;
@@ -341,13 +341,19 @@ export function planPass(census: Census, groups: Map<string, BrainRow[]>, full =
     // database refuses), rows[0] keeps the old names for good and the ticket
     // would be stale forever while the writer called it unchanged (tenth pass).
     const written = rows.find((r) => r.metadata?.linear_updated_at === have) ?? rows[0];
-    const isStale = have === undefined || have < updatedAt || tagsFellBack(written.metadata) || namesMoved(c, written.metadata);
-    if (isStale) { stale.push(identifier); fetch.push(identifier); }
+    const moved = have === undefined || have < updatedAt || namesMoved(c, written.metadata);
+    const retag = !moved && tagsFellBack(written.metadata);
+    // A ticket stale for its fallback tags alone is fetched only while the
+    // pass's retag budget lasts; the rest wait for later passes unfetched,
+    // where every one was fetched in full to retag five (twelfth review pass).
+    if (retag && retags >= retagCap) { deferred++; continue; }
+    if (retag) retags++;
+    if (moved || retag) { stale.push(identifier); fetch.push(identifier); }
     else if (full) fetch.push(identifier);
     else unchanged++;
   }
   const extra = [...groups.keys()].filter((k) => !listed.has(k)).sort();
-  return { fetch, missing, stale, extra, unchanged };
+  return { fetch, missing, stale, extra, unchanged, deferred };
 }
 
 /**
@@ -369,6 +375,16 @@ export function refusalClear(metadata: Record<string, unknown> | undefined): { t
 // ---------------------------------------------------------------------------
 // Linear
 // ---------------------------------------------------------------------------
+
+/**
+ * The board named is not a board: no initiative by that name, or two, or one
+ * with no projects or more than one page of them. Configuration, which a
+ * restart does not fix — main exits 2 on it — where a Linear transport error
+ * at the same call is transient and is retried (twelfth review pass: a 502 at
+ * boot was exiting 2 and, under `restart: on-failure:3`, stopping the sidecar
+ * for good).
+ */
+export class BoardConfigError extends Error {}
 
 // The client — the endpoint, the authorization rule, errors beside data — is
 // db/linear-api.ts, one definition with the corpus builder (third review pass; moved from evals/ by the fifth).
@@ -393,11 +409,11 @@ export async function initiativeProjects(gql: Gql, name: string): Promise<{ init
   const exact = all.filter((i) => i.name === name);
   const prefixed = exact.length ? exact : all.filter((i) => i.name.startsWith(name));
   if (prefixed.length !== 1) {
-    throw new Error(`OB1_LINEAR_INITIATIVE="${name}" matches ${prefixed.length} initiative(s) (${all.map((i) => JSON.stringify(i.name)).join(", ")}); name one.`);
+    throw new BoardConfigError(`OB1_LINEAR_INITIATIVE="${name}" matches ${prefixed.length} initiative(s) (${all.map((i) => JSON.stringify(i.name)).join(", ")}); name one.`);
   }
-  if (prefixed[0].projects.pageInfo.hasNextPage) throw new Error(`initiative "${prefixed[0].name}" has more than 50 projects and this tool reads one page of them; page the projects query before syncing this board.`);
+  if (prefixed[0].projects.pageInfo.hasNextPage) throw new BoardConfigError(`initiative "${prefixed[0].name}" has more than 50 projects and this tool reads one page of them; page the projects query before syncing this board.`);
   // No projects is no board: the census would be empty and every ticket row in the brain `extra` (seventh review pass).
-  if (prefixed[0].projects.nodes.length === 0) throw new Error(`initiative "${prefixed[0].name}" has no projects; nothing to sync — name an initiative whose projects hold the board.`);
+  if (prefixed[0].projects.nodes.length === 0) throw new BoardConfigError(`initiative "${prefixed[0].name}" has no projects; nothing to sync — name an initiative whose projects hold the board.`);
   return { initiative: prefixed[0].name, projects: prefixed[0].projects.nodes };
 }
 
@@ -420,7 +436,7 @@ export async function censusOf(gql: Gql, projectIds: string[]): Promise<Census> 
       // request by its nodes, and 250 issues each with an unbounded connection
       // could reach its per-request cap on a board this size or larger — a
       // refused census is no census (eleventh review pass).
-      `query($ids: [ID!], $after: String) { issues(first: 100, after: $after, includeArchived: true, filter: { project: { id: { in: $ids } } }) { pageInfo { hasNextPage endCursor } nodes { identifier updatedAt trashed project { name } state { name } labels(first: 20) { nodes { name } } } } }`,
+      `query($ids: [ID!], $after: String) { issues(first: 100, after: $after, includeArchived: true, filter: { project: { id: { in: $ids } } }) { pageInfo { hasNextPage endCursor } nodes { identifier updatedAt trashed project { name } state { name } labels(first: ${LABELS_BOUND}) { nodes { name } } } } }`,
       { ids: projectIds, after },
     );
     out.push(...d.issues.nodes.filter((n) => !n.trashed).map((n) => ({ identifier: n.identifier, updatedAt: n.updatedAt, project: n.project?.name ?? null, status: n.state.name, labels: n.labels.nodes.map((l) => l.name) })));
@@ -429,7 +445,11 @@ export async function censusOf(gql: Gql, projectIds: string[]): Promise<Census> 
   return out;
 }
 
-const ISSUE_FIELDS = `identifier title description url createdAt updatedAt archivedAt priorityLabel state { name type } project { id name } parent { identifier } labels { nodes { name } }`;
+// Labels bounded as the census bounds them (twelfth review pass): the two must
+// see the same set, or an issue with more labels than the bound would read
+// `namesMoved` on every pass and never be unchanged.
+export const LABELS_BOUND = 20;
+const ISSUE_FIELDS = `identifier title description url createdAt updatedAt archivedAt priorityLabel state { name type } project { id name } parent { identifier } labels(first: ${LABELS_BOUND}) { nodes { name } }`;
 
 /**
  * The issues named, in full, fifty a request: one query with an alias per
@@ -749,8 +769,9 @@ export async function syncIssue(w: Writer, issue: LinearIssue, rows: BrainRow[])
       else if (w.retagBudget && w.retagBudget.left <= 0) w.log(`  · ${issue.identifier}: tags fell back and would be asked for again; this pass's retags are spent, the next pass takes it`);
       else if (!w.dryRun) {
         if (w.retagBudget) w.retagBudget.left--;
-        const tags = tagsOverExisting(await w.tags(content, subject));
-        retagged = { ...tags, ...("metadata_extraction_failed" in tags ? {} : { metadata_extraction_failed: null }) };
+        // tagsOverExisting nulls a stale marker under a full answer, and the
+        // tag keys a fallback did not set (one rule, metadata.ts; twelfth pass).
+        retagged = tagsOverExisting(await w.tags(content, subject));
       } else {
         // The dry run cannot know the tags; it counts the write it would make
         // and spends the budget as the pass would, so its count is the pass's.
@@ -816,12 +837,11 @@ export async function syncIssue(w: Writer, issue: LinearIssue, rows: BrainRow[])
   // on the new text under a marker that says no extraction happened (fifth
   // pass said the marker; the eleventh found the old tags still standing).
   const tags = tagsOverExisting(g.chat.allowed ? await w.tags(content, subject) : metadataRefused());
-  const clearMarker = !("metadata_extraction_failed" in tags) && head.metadata && "metadata_extraction_failed" in head.metadata ? { metadata_extraction_failed: null } : {};
   const clearRefusal = refusalClear(head.metadata);
   const r = await w.store.updateThought({
     id: head.id,
     content,
-    metadataPatch: { ...tags, ...clearMarker, ...clearRefusal, ...facets },
+    metadataPatch: { ...tags, ...clearRefusal, ...facets },
     embedding: embedded?.embedding,
     chunks: embedded?.chunks,
     actor: actorWith(g.record),
@@ -908,7 +928,7 @@ export function formatReport(r: PassReport, dryRun: boolean): string {
   const p = r.plan;
   const lines = [
     `  board: ${r.initiative} — ${r.projects} project(s), ${r.census} issue(s)`,
-    `  plan: ${p.missing.length} missing, ${p.stale.length} stale, ${p.unchanged} unchanged${p.extra.length ? `, ${p.extra.length} extra in the brain (${p.extra.slice(0, 8).join(", ")}${p.extra.length > 8 ? ", …" : ""})` : ""}`,
+    `  plan: ${p.missing.length} missing, ${p.stale.length} stale, ${p.unchanged} unchanged${p.deferred ? `, ${p.deferred} retag(s) deferred to later passes` : ""}${p.extra.length ? `, ${p.extra.length} extra in the brain (${p.extra.slice(0, 8).join(", ")}${p.extra.length > 8 ? ", …" : ""})` : ""}`,
     `  ${dryRun ? "would write" : "wrote"}: captured ${r.tally.captured}  updated ${r.tally.updated}  patched ${r.tally.patched}  unchanged ${r.tally.unchanged}${r.twinsMarked ? `  pointers re-chained ${r.twinsMarked}` : ""}${r.noVector ? `  without a vector ${r.noVector}` : ""}`,
   ];
   if (r.tally.refused) lines.push(`  refused: ${r.tally.refused} ticket(s) whose text another thought holds (DUPLICATE_CONTENT) — facets patched, text left, stale until the holder moves`);
@@ -1014,7 +1034,13 @@ function selfCheck(): Promise<number> {
     ["SMD-9", [row("z", "", { issue: "SMD-9" }, null, null)]],
   ]);
   const plan = planPass(census, g2);
-  ok(JSON.stringify(plan) === JSON.stringify({ fetch: ["SMD-1936", "SMD-2000"], missing: ["SMD-2000"], stale: ["SMD-1936"], extra: ["SMD-9"], unchanged: 0 }), `plan: an older linear_updated_at is stale, an absent row is missing, an unlisted row is extra (${JSON.stringify(plan)})`);
+  ok(JSON.stringify(plan) === JSON.stringify({ fetch: ["SMD-1936", "SMD-2000"], missing: ["SMD-2000"], stale: ["SMD-1936"], extra: ["SMD-9"], unchanged: 0, deferred: 0 }), `plan: an older linear_updated_at is stale, an absent row is missing, an unlisted row is extra (${JSON.stringify(plan)})`);
+  // Twelfth review pass: tickets stale for fallback tags alone are fetched only while the retag budget lasts.
+  const fellBack = (n: number) => new Map(Array.from({ length: n }, (_, i) => [`SMD-${i}`, [row(`f${i}`, text, { ...issueFacets({ ...issue, identifier: `SMD-${i}` }), metadata_extraction_failed: "provider_timeout" }, null, null)]]));
+  const manyCensus: Census = Array.from({ length: 8 }, (_, i) => ({ identifier: `SMD-${i}`, updatedAt: issue.updatedAt }));
+  const capped = planPass(manyCensus, fellBack(8), false, 5);
+  ok(capped.fetch.length === 5 && capped.deferred === 3 && capped.unchanged === 0, `eight fallback-tagged tickets, a budget of five: five fetched, three deferred unfetched (${JSON.stringify({ fetch: capped.fetch.length, deferred: capped.deferred })})`);
+  ok(planPass([{ identifier: "SMD-0", updatedAt: "2026-09-23T00:00:00.000Z" }], fellBack(1), false, 0).stale.length === 1, "…a ticket that also moved is fetched whatever the budget");
   const fresh = planPass(census, new Map([["SMD-1936", [row("b", text, { linear_updated_at: "2026-09-22T01:00:00.000Z" }, null, null)]], ["SMD-2000", [row("d", "", { linear_updated_at: "2026-09-22T02:00:00.000Z" }, null, null)]]]));
   ok(fresh.fetch.length === 0 && fresh.unchanged === 2, "an equal linear_updated_at is unchanged and fetches nothing");
   ok(planPass(census, new Map([["SMD-1936", [row("b", text, {}, null, null)]]])).stale[0] === "SMD-1936", "a hand capture with no linear_updated_at is stale — adopted on first sight");
@@ -1085,7 +1111,7 @@ function selfCheck(): Promise<number> {
     ok(r.r.outcome === "unchanged" && r.calls.length === 0, "the same text up to whitespace is the same text — judged by fingerprint, as the database judges it (second review pass)");
     r = await run(recorder, [row("cur", text, { ...withFacets, status: "Done", status_type: "completed" }, null, null)], { ...issue, state: { name: "In Progress", type: "started" } });
     // The whole facet set over the tags: the recorder's tags carry `status: "a guess"`, which must not win (fourth review pass).
-    ok(r.r.outcome === "updated" && r.calls.join("; ") === "embed; tags; update cur content patch(type,topics,status,source,issue,project,status_type,priority,labels,parent,url,linear_updated_at,archived_at) vec", `moved text: one embed, the tags extracted again, one edit with the vector, the tags and every facet over them (${r.calls.join("; ")})`);
+    ok(r.r.outcome === "updated" && r.calls.join("; ") === "embed; tags; update cur content patch(metadata_extraction_failed,type,topics,status,source,issue,project,status_type,priority,labels,parent,url,linear_updated_at,archived_at) vec", `moved text: one embed, the tags extracted again, one edit with the vector, the tags (a stale marker nulled) and every facet over them (${r.calls.join("; ")})`);
     r = await run(recorder, [row("cur", text, { ...withFacets, status: "Done", status_type: "completed", metadata_extraction_failed: "provider_timeout", text_refused_by: "Z" }, null, null)], { ...issue, state: { name: "In Progress", type: "started" } });
     ok(r.calls[2]?.includes("metadata_extraction_failed") === true && r.calls[2]?.includes("text_refused_by") === true, `a stale failure marker and a stale refusal are nulled when the fresh tags arrive (${r.calls[2]})`);
     // A thought outside the group holds the new text: refused before any model call, the watermark not advanced, the holder named.
@@ -1102,9 +1128,10 @@ function selfCheck(): Promise<number> {
     const chatDenied: Writer = { ...recorder, cfg: resolveEmbedConfig({ OB1_LLM_LOCAL: "1", OB1_CHAT_BASE_URL: "https://chat.example.com/v1", OB1_CHAT_API_KEY: "k", OB1_EGRESS_POLICY: "deny" }) };
     r = await run(chatDenied, [row("cur", text, withFacets, null, null)], done);
     // Eleventh review pass: every tag key the refusal does not set is nulled, so the old text's people and action items do not stand on the new text.
-    ok(r.r.outcome === "updated" && r.calls.join("; ") === "embed; update cur content patch(people,action_items,dates_mentioned,topics,type,metadata_extraction_failed,source,issue,project,status,status_type,priority,labels,parent,url,linear_updated_at,archived_at) vec", `chat refused on an edit: the vector lands, the tags are not called, the marker says why and the old tags are nulled (${r.calls.join("; ")})`);
-    ok(JSON.stringify(tagsOverExisting({ type: "task", topics: ["t"], people: [] })) === JSON.stringify({ type: "task", topics: ["t"], people: [] }), "a full answer passes through tagsOverExisting untouched");
-    ok(JSON.stringify(tagsOverExisting({ topics: ["uncategorized"], type: "observation", metadata_extraction_failed: "provider_timeout" })) === JSON.stringify({ people: null, action_items: null, dates_mentioned: null, topics: ["uncategorized"], type: "observation", metadata_extraction_failed: "provider_timeout" }), "a fallback answer nulls the keys it does not set and keeps its own");
+    ok(r.r.outcome === "updated" && r.calls.join("; ") === "embed; update cur content patch(people,action_items,dates_mentioned,topics,type,type_raw,metadata_extraction_failed,source,issue,project,status,status_type,priority,labels,parent,url,linear_updated_at,archived_at) vec", `chat refused on an edit: the vector lands, the tags are not called, the marker says why and the old tags are nulled (${r.calls.join("; ")})`);
+    ok(JSON.stringify(tagsOverExisting({ type: "task", topics: ["t"], people: [] })) === JSON.stringify({ metadata_extraction_failed: null, type: "task", topics: ["t"], people: [] }), "a full answer through tagsOverExisting nulls a stale marker and keeps every tag (twelfth review pass)");
+    ok(JSON.stringify(tagsOverExisting(metadataRefused())).includes('"type_raw":null'), "…and a refusal nulls the model's raw type too");
+    ok(JSON.stringify(tagsOverExisting({ topics: ["uncategorized"], type: "observation", metadata_extraction_failed: "provider_timeout" })) === JSON.stringify({ people: null, action_items: null, dates_mentioned: null, type_raw: null, topics: ["uncategorized"], type: "observation", metadata_extraction_failed: "provider_timeout" }), "a fallback answer nulls the keys it does not set (type_raw among them) and keeps its own");
     ok(planPass([{ identifier: "SMD-1936", updatedAt: issue.updatedAt }], new Map([["SMD-1936", [row("T", text, {}, "2026-09-25T00:00:00Z", null), row("H", text, withFacets, "2026-09-22T00:00:00Z", null)]]])).unchanged === 1, "the plan reads the newest watermark in the group, not the first row's — an unsuperseded hand twin does not keep the ticket stale");
     // A pointer the database refuses does not hold the ticket's write hostage.
     const cycling: Writer["store"] = { captureThought: recorder.store.captureThought, updateThought: async (o) => { if (o.provenance) { calls.push(`update ${o.id} supersedes=${o.provenance.supersedes} → WOULD_CYCLE`); return { ok: false, error: "WOULD_CYCLE" }; } return recorder.store.updateThought(o); } };
@@ -1236,7 +1263,7 @@ function selfCheck(): Promise<number> {
     ok(planPass([{ identifier: "SMD-1936", updatedAt: issue.updatedAt }], new Map([["SMD-1936", [row("E", text, { ...withFacets, metadata_extraction_failed: "egress_denied" }, null, null)]]])).stale.length === 0, "…an egress refusal is policy, not a failure to retry");
     r = await run(recorder, [row("F", text, { ...withFacets, metadata_extraction_failed: "provider_timeout", topics: ["uncategorized"] }, null, null)]);
     // Eighth review pass: the model's `status: "a guess"` does not reach the row — every facet goes over the fresh tags and only what differs is written.
-    ok(r.r.outcome === "patched" && r.calls.join("; ") === "tags; update F patch(type,topics,metadata_extraction_failed)", `the head holding the text with fallback tags: one chat call, the tags replaced and the marker nulled, Linear's status kept, no embed (${r.calls.join("; ")})`);
+    ok(r.r.outcome === "patched" && r.calls.join("; ") === "tags; update F patch(metadata_extraction_failed,type,topics)", `the head holding the text with fallback tags: one chat call, the tags replaced and the marker nulled, Linear's status kept, no embed (${r.calls.join("; ")})`);
     r = await run({ ...recorder, tags: async () => { calls.push("tags"); return { topics: ["uncategorized"], type: "observation", metadata_extraction_failed: "provider_timeout" }; } }, [row("F", text, { ...withFacets, topics: ["uncategorized"], type: "observation", metadata_extraction_failed: "provider_timeout" }, null, null)]);
     ok(r.r.outcome === "unchanged" && r.calls.join("; ") === "tags", `a retag that falls back to what the row already holds writes nothing (${r.calls.join("; ")})`);
     r = await run({ ...recorder, tags: async () => { calls.push("tags"); return { topics: ["uncategorized"], type: "observation", metadata_extraction_failed: "provider_timeout" }; } }, [row("F", text, { ...withFacets, people: ["someone"], topics: ["uncategorized"], type: "observation", metadata_extraction_failed: "provider_timeout" }, null, null)]);
@@ -1353,7 +1380,16 @@ async function main(): Promise<void> {
     // the exact compare stands in, as the Writer's contract promises.
     fingerprintOf: async (text) => {
       try { const [r] = await sql`SELECT content_fingerprint_of(${text}) AS f`; return (r?.f as string | null) ?? null; }
-      catch (e) { if (!noFingerprintSaid) { noFingerprintSaid = true; console.error(`  content_fingerprint_of is not available (${(e as Error).message.split("\n")[0]}); same text is judged by exact compare this run`); } return null; }
+      catch (e) {
+        // Only "no such function" (SQLSTATE 42883 — the repo's idiom, as
+        // db/ingest-records.ts reads 23505) is the brain-before-016 case the
+        // contract's null is for; a dropped connection is an error and is one
+        // (twelfth review pass: every error read as "not available").
+        const sqlstate = (e as { errno?: string; code?: string }).errno ?? (e as { code?: string }).code;
+        if (sqlstate !== "42883") throw e;
+        if (!noFingerprintSaid) { noFingerprintSaid = true; console.error(`  content_fingerprint_of is not available (migration 016 not applied); same text is judged by exact compare this run`); }
+        return null;
+      }
     },
     holderOf: async (fp) => { const [r] = await sql`SELECT ${rowColumns(sql)} FROM thoughts WHERE content_fingerprint = ${fp} LIMIT 1`; return (r as BrainRow | undefined) ?? null; },
     actor: { name: ACTOR_NAME, via: SELF, session },
@@ -1391,7 +1427,13 @@ async function main(): Promise<void> {
   // not a "pass failed" line every interval for as long as the loop runs
   // (sixth review pass). Under --loop the passes still ask Linear each time,
   // so a board that gains a project is seen.
-  try { resolved = await initiativeProjects(gql, initiative); } catch (e) { console.error(`  ${(e as Error).message}`); await store.close(); await sql.close(); process.exit(2); }
+  try { resolved = await initiativeProjects(gql, initiative); }
+  catch (e) {
+    // Configuration exits 2; a transport error is a pass that failed — under
+    // --loop the next pass retries, a one-shot run exits 1 (twelfth pass).
+    console.error(`  ${(e as Error).message}`);
+    if (e instanceof BoardConfigError || !flags.has("loop")) { await store.close(); await sql.close(); process.exit(e instanceof BoardConfigError ? 2 : 1); }
+  }
 
   // The signal handlers serve the one-shot pass too: a Ctrl-C mid-chain would
   // otherwise land between the clears and the sets with no undo (tenth review

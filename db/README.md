@@ -1544,8 +1544,8 @@ to lose; a pass killed halfway is finished by the next.
 **What a write is.** New: `captureThought` with the vector, the extracted tags and
 the facets Linear knows over them (`source: linear`, `issue`, `project`, `status`,
 `status_type`, `priority`, `labels`, `parent`, `url`, `linear_updated_at`).
-Changed text: `updateThought` with a fresh vector and the facets that moved, one
-statement. Same text, facets behind (the adoption case): a metadata patch and no
+Changed text: `updateThought` with a fresh vector, fresh tags, and every facet over
+them, one statement. Same text, facets behind (the adoption case): a metadata patch and no
 model call — on the dogfood brain 224 of 268 hand captures rendered byte-identical
 and cost nothing but the patch. Every write goes through `server-portable/store-sql.ts`
 as the actor `board-sync` via `db/sync-linear.ts`, the egress gate asked first
