@@ -141,7 +141,7 @@ console.log("[1] Missing configuration fails, with an actionable fix");
   const rowRe = (name: string, flags = "") => new RegExp(`^\\s*[✓✗!·]\\s+${name}\\s`, flags);
   const rowCounts = listedNames.map((name) => [name, (w.out.match(rowRe(name, "gm")) ?? []).length] as const);
   assert(rowCounts.every(([, n]) => n === 1), `over PostgREST every direct-connection check prints exactly one row (${rowCounts.filter(([, n]) => n !== 1).map(([name, n]) => `${name}×${n}`).join(", ") || "all once"})`);
-  assert(rowCounts.filter(([name]) => new RegExp(`·\\s+${name}\\s+${DIRECT_CHECK_SKIP_OVER_POSTGREST}`).test(w.out)).length === 17, "…seventeen of them as the catalog-only skip, the rest by their own hand-written rows");
+  assert(rowCounts.filter(([name]) => new RegExp(`·\\s+${name}\\s+${DIRECT_CHECK_SKIP_OVER_POSTGREST}`).test(w.out)).length === 18, "…eighteen of them as the catalog-only skip, the rest by their own hand-written rows");
   // And nothing else: every row between `data layer` and the provider section is
   // `schema` or one of the listed names. A hand-written PostgREST row under a
   // misspelt name would print beside the loop's correctly named skip with every
@@ -1484,6 +1484,31 @@ else {
 
     // Restore the baseline so the --json ok run below is clean.
     await claims.unsafe(`INSERT INTO ob1_config (key, value) VALUES ('schema_version', '${FORK_VERSION}') ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`);
+  }
+
+  // The pipeline tier (SMD-1806): unset on a plain brain the ingester never
+  // touched, reported once db/ingest-records.ts has stamped it, and a warning —
+  // never a refusal — when the server's OB1_TIER names a different tier than the
+  // database was stamped as (a working server pointed at the stable database).
+  {
+    const tierRow = (out: string) => out.split("\n").find((l) => /\btier\b/.test(l))?.trim();
+    const none = await run(SQL_ENV);
+    assert(/·\s+tier\s+no tier recorded — db\/ingest-records\.ts has not run/.test(none.out),
+           `a brain the ingester never touched reports no tier (${tierRow(none.out)})`);
+
+    await claims.unsafe("INSERT INTO ob1_config (key, value) VALUES ('tier', 'stable'), ('last_ingest', '2026-09-22T00:00:00.000Z') ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value");
+    const okTier = await run(SQL_ENV);
+    assert(/✓\s+tier\s+stable, last ingest 2026-09-22T00:00:00\.000Z/.test(okTier.out),
+           `a stamped brain reports its tier and last ingest (${tierRow(okTier.out)})`);
+
+    const mism = await run({ ...SQL_ENV, OB1_TIER: "working" });
+    assert(/!\s+tier\s+the database is tier 'stable'.*but this server runs OB1_TIER=working — a server pointed at another tier's database/.test(mism.out),
+           `a server whose OB1_TIER names another tier than the database warns (${tierRow(mism.out)})`);
+    const mismJson = JSON.parse((await run({ ...SQL_ENV, OB1_TIER: "working" }, "--json")).out) as { ok: boolean; checks: { name: string; status: string }[] };
+    assert(mismJson.ok === true && mismJson.checks.some((c) => c.name === "tier" && c.status === "warn"),
+           "…carried as a warning in --json under ok:true — a tier mismatch never refuses the deploy");
+
+    await claims.unsafe("DELETE FROM ob1_config WHERE key IN ('tier', 'last_ingest')");
   }
 
   await claims.unsafe("DELETE FROM thoughts");

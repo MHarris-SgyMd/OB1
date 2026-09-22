@@ -113,7 +113,7 @@ const DIRECT_CHECKS = [
   "atomic capture", "write privileges", "fingerprint backfill", "audit trail", "agent identity",
   "keyword search", "hybrid search", "stats summary", "provenance", "work claims", "search signatures", "edit signature", "delete signature", "transaction isolation", "filtered search",
   "candidate scan", "walk index", "chunk context", "trigram index", "embedding contract", "vector models",
-  "updated_at trigger", "re-embed pass", "consolidate pass", "migration ledger", "schema version", "query log",
+  "updated_at trigger", "re-embed pass", "consolidate pass", "migration ledger", "schema version", "query log", "tier",
 ];
 /**
  * 020 gave match_thoughts and search_thoughts_hybrid the forms the servers
@@ -2418,6 +2418,33 @@ if (configFailed) {
           }
         } catch (e) {
           add("query log", "warn", `could not verify: ${(e as Error).message}`, "The check reads to_regclass('public.query_log').");
+        }
+
+        // Which pipeline tier this brain is (SMD-1806): stable | canary | working.
+        // The records ingester (db/ingest-records.ts) stamps ob1_config.tier and
+        // .last_ingest on every rebuild; this reports them beside the schema
+        // version. Never fatal — a plain brain has no tier — but it warns when the
+        // running server's OB1_TIER disagrees with the stamped tier (a working
+        // server pointed at the stable database), the failure the one-writer rule
+        // exists to prevent.
+        try {
+          const rows = await sql`SELECT key, value FROM ob1_config WHERE key IN ('tier', 'last_ingest')`;
+          const cfg = Object.fromEntries((rows as { key: string; value: string }[]).map((r) => [r.key, r.value]));
+          const stamped = cfg.tier;
+          const wantTier = (env as unknown as Record<string, string | undefined>).OB1_TIER?.trim() || undefined;
+          if (!stamped) {
+            add("tier", "skip", `no tier recorded — db/ingest-records.ts has not run against this brain${wantTier ? ` (server OB1_TIER=${wantTier})` : ""}. A plain brain, not a pipeline tier.`);
+          } else {
+            const ingest = cfg.last_ingest ? `, last ingest ${cfg.last_ingest}` : ", never ingested";
+            if (wantTier && wantTier !== stamped) {
+              add("tier", "warn", `the database is tier '${stamped}'${ingest}, but this server runs OB1_TIER=${wantTier} — a server pointed at another tier's database.`,
+                "Point the server at its own tier's database, or set OB1_TIER to match. The tiers are one corpus read through three schemas with one writer (SMD-1806).");
+            } else {
+              add("tier", "ok", `${stamped}${ingest}`);
+            }
+          }
+        } catch (e) {
+          add("tier", "warn", `could not verify: ${(e as Error).message}`, "The check reads ob1_config.tier / last_ingest.");
         }
 
         await sql.close();

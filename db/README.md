@@ -1321,6 +1321,68 @@ Both easy to leave out, and both produced confidently wrong numbers first:
   runs three passes over three freshly loaded tables — one for reads, one per
   write arm — so there is nothing to compact and nothing to correct for.
 
+## The stable tier — a brain rebuilt from the records (SMD-1806)
+
+The fork runs a brain on its own memory, so a migration meets real vectors before
+an operator does. That brain — the **stable** tier — holds nothing that is not
+rebuildable from the fork's records: FORK.md, the Linear board, the memory files
+and git. It is a *derived view* over the records, never the record itself, so a
+wipe costs one re-ingest, and that re-ingest is two commands:
+
+```bash
+# 1. the records → rows (bare: no vectors, no chunks yet)
+bun ingest-records.ts --url postgres://… \
+  --linear /tmp/linear-corpus-full.json \
+  --memory-dir ~/.claude/projects/<project>/memory
+# 2. rows → vectors + chunks, through the owned embedding path (below)
+bun reembed.ts --url postgres://…
+```
+
+`ingest-records.ts` reads four sources, each a record becoming one thought row
+with a deterministic id and a `metadata.source` label (SMD-1806 rule 5 — an
+agent-written capture is one source among four):
+
+| source | what | needs |
+| --- | --- | --- |
+| `fork` | the fork's changes, one `changes/*.md` file each (SMD-1917) | in the tree |
+| `commit` | git commit messages since the upstream pin (the fork's whole delta) | in the tree; `--since <ref>` to move the range start |
+| `linear` | a corpus dump built by `evals/build-linear-corpus.ts` | `--linear <dump.json>` |
+| `memory` | the `*.md` memory files (`MEMORY.md`, the index, excluded) | `--memory-dir <path>` or `OB1_MEMORY_DIR` |
+
+`--source all` (the default) ingests every source it has an input for and says on
+stderr which it skipped; `--source <one>` restricts it; `--dry-run` counts per
+source and writes nothing. The write is idempotent on the deterministic id: an
+unchanged record is a no-op, an edited one updates in place, a new one inserts, a
+different record whose content is byte-identical to one already stored is skipped
+(the partial-unique fingerprint index) rather than crashing the run — so a rebuild
+writes exactly the rows that moved. It **adds and updates, but does not remove**: a
+record deleted from its source (a memory file removed, a ticket dropped from the
+dump) leaves its row behind, so a run that must reflect deletions starts from a
+wiped brain (the "a wipe costs one re-ingest" above), not an incremental pass. It
+writes **bare** rows on purpose: vectors and
+chunk rows are `reembed.ts`'s job, which walks the new rows through the claim table
+and embeds them exactly as a capture would (chunking long records), so the two
+tools together produce the same rows a live capture would.
+
+**The brain reports its tier.** `OB1_TIER` (`stable` | `canary` | `working`,
+default `stable`); the ingester stamps `ob1_config.tier` and `.last_ingest` on
+every run, and preflight's `tier` check reports them beside the schema version,
+warning when a server's `OB1_TIER` disagrees with the tier its database was
+stamped as — a working server pointed at the stable database, the failure the
+one-writer rule exists to prevent.
+
+**Reaching it from a client.** The server speaks Streamable HTTP, so a client
+adds it as one remote MCP entry:
+
+```bash
+claude mcp add --transport http open-brain-stable http://127.0.0.1:8010/mcp
+```
+
+The **canary** and **working** tiers (refresh-on-merge, replay the query log, diff
+the ids; a per-worktree disposable copy) are deferred: they need a `query_log.tier`
+column (SMD-1490), the log's hot-path fixes (SMD-1492) and SMD-1805's published
+images (SMD-1860). `db/tier.ts` and `deploy/compose.tiers.yaml` land with them.
+
 ## Testing
 
 Two suites cover most of it, because one of them cannot reach everything, and a
@@ -1328,7 +1390,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 1084 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 591 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
+./with-postgres.sh bun test-live.ts         # 601 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 ```
 
