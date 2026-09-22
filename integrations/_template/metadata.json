@@ -12,6 +12,7 @@
     "services": [],
     "tools": []
   },
+  "connectors": [],
   "tags": ["tag1", "tag2"],
   "difficulty": "intermediate",
   "estimated_time": "30 minutes",

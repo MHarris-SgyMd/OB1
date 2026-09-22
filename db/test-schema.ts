@@ -3827,7 +3827,9 @@ console.log("\n[34] Migration 034: query_log shape + CHECKs, the export join, an
 
   const cols = (await db.query<{ column_name: string }>(
     `SELECT column_name FROM information_schema.columns WHERE table_name = 'query_log' ORDER BY ordinal_position`)).rows.map((r) => r.column_name);
-  const expected = ["id", "logged_at", "kind", "agent_id", "tool", "query", "match_count", "threshold", "recency_weight", "filter", "result_ids", "result_scores", "target_id"];
+  // 045 (SMD-1490) appended `tier` (the pipeline tier the writer runs as) and
+  // `arm` (the retrieval arm a search ran) after 034's thirteen.
+  const expected = ["id", "logged_at", "kind", "agent_id", "tool", "query", "match_count", "threshold", "recency_weight", "filter", "result_ids", "result_scores", "target_id", "tier", "arm"];
   assert(JSON.stringify(cols) === JSON.stringify(expected), `query_log has exactly its columns in order (${cols.join(", ")})`);
 
   // The two indexes the export join relies on: a btree on (agent_id, logged_at)
@@ -3850,6 +3852,26 @@ console.log("\n[34] Migration 034: query_log shape + CHECKs, the export join, an
   try { await db.exec(`INSERT INTO query_log (kind, tool, query) VALUES ('other', 'x', 'q')`); }
   catch { refusedKind = true; }
   assert(refusedKind, "an unknown kind is refused by the CHECK");
+
+  // 045 (SMD-1490): tier and arm, each enumerated by a CHECK that also admits
+  // NULL. A valid pair inserts; an out-of-set value on either is refused. The
+  // rows are cleaned up so the export join below counts only its own.
+  await db.exec(`
+    INSERT INTO query_log (kind, tool, query, tier, arm) VALUES ('search', 'search_thoughts', 'q', 'canary', 'hybrid');
+    INSERT INTO query_log (kind, tool, query, tier, arm) VALUES ('search', 'search_thoughts_keyword', 'q', 'stable', 'keyword');`);
+  const enumd = (await db.query<{ tier: string; arm: string }>(
+    `SELECT tier, arm FROM query_log WHERE arm IS NOT NULL ORDER BY arm`)).rows;
+  assert(enumd.length === 2 && enumd[0].arm === "hybrid" && enumd[0].tier === "canary" && enumd[1].arm === "keyword" && enumd[1].tier === "stable",
+    `a search row carries its tier and arm (${JSON.stringify(enumd)})`);
+  let refusedTier = false;
+  try { await db.exec(`INSERT INTO query_log (kind, tool, query, tier) VALUES ('search', 'search_thoughts', 'q', 'prod')`); }
+  catch { refusedTier = true; }
+  assert(refusedTier, "a tier outside stable|canary|working is refused by the CHECK");
+  let refusedArm = false;
+  try { await db.exec(`INSERT INTO query_log (kind, tool, query, arm) VALUES ('search', 'search_thoughts', 'q', 'vector')`); }
+  catch { refusedArm = true; }
+  assert(refusedArm, "an arm outside hybrid|keyword is refused by the CHECK");
+  await db.exec(`DELETE FROM query_log WHERE arm IS NOT NULL OR query = 'q'`);
 
   // The export join over hand-made rows: an agent searches (id a and b returned,
   // a null score among them), then fetches b. The action links to the search by

@@ -131,6 +131,33 @@
  *      .github/workflows/fork-checks.yml runs `bunx tsc --noEmit` under it
  *      exactly once; a tsc step under a directory the list does not name is
  *      refused. The workflow is parsed with Bun.YAML (SMD-1932); no exceptions
+ *  19. docs/connector-registry.json — the connector taxonomy's one source — is
+ *      sound and complete: the four closed/near-closed facet sets and the
+ *      fetcher set equal the ones scripts/connector-registry.mjs pins (a
+ *      different set is a spec change and edits both); every family declares
+ *      its schema and a reserved family is used by no capability; every
+ *      artifact is a directory that exists, listed once, its capabilities
+ *      naming exactly the five facets and a fetcher from the sets and a
+ *      declared family; the connectors are exactly the vendors used, each
+ *      with the direction its capabilities derive; the declaration — a
+ *      registered artifact's metadata.json `connectors` equals the vendors its
+ *      capabilities name, a contribution declaring one is registered, an
+ *      excused one declares none; and coverage, the net under it — every
+ *      contribution whose metadata.json names a service no not-a-connector
+ *      pattern matches at the start of its first word, or of its second after
+ *      a qualifier such as "Any" or "Optional:" (a provider first and
+ *      qualified after is covered; a vendor first with a provider anywhere
+ *      after it is not; a pattern covering a classified vendor's own service
+ *      is too broad), carries a connector-shaped tag or
+ *      a declared connector's name as a tag (lower-cased), or sits in a
+ *      fold-in **SMD-1867** row of docs/vendored-disposition.md whose
+ *      directory exists (a row whose directory is gone is a finding) is
+ *      classified or excused by name with a reason, never both or neither,
+ *      a stale excuse or pattern is refused; and
+ *      docs/connector-taxonomy.md's generated tables equal what the registry
+ *      renders. The rules are registryProblems, one pure function the
+ *      renderer runs too (SMD-1933); no exceptions beyond the registry's own
+ *      named excuses
  *
  * Run: bun scripts/check-fork-consistency.mjs   (plain ESM; node runs it too,
  * except checks 13, 14 and 18, which parse YAML with Bun.YAML and fail in words under node)
@@ -145,17 +172,10 @@ import { coreColumnCommentStatement, coreFunctionStatement, LOCAL_PROVIDER_SERVI
 import { CHANGES_DIR, END as INDEX_END, START as INDEX_START, FIRST_FILED, classifyChanges, indexSpan, pad3, readChangeEntries, renderIndex, ticketsOf } from "./fork-index.mjs";
 import { FORK_VERSION, migrationSha, readReleases, semverCompare } from "../db/version.mjs";
 import { fragmentProblems } from "./fragments.mjs";
+import { DISPOSITION_PATH, FACET_SETS, FETCHERS, REGISTRY_PATH, SPEC_PATH, VENDOR_PATTERN, dispositionPaths, readMetadata, readRegistry, registryProblems, renderClassification, tablesSpan } from "./connector-registry.mjs";
+import { CATEGORIES, contributionDirs } from "./contributions.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const CATEGORIES = [
-  "recipes",
-  "schemas",
-  "dashboards",
-  "integrations",
-  "skills",
-  "primitives",
-  "extensions",
-];
 
 const violations = [];
 const fail = (where, msg) => violations.push({ where, msg });
@@ -165,23 +185,8 @@ const SELF = "scripts/check-fork-consistency.mjs";
 const schema = JSON.parse(readFileSync(join(ROOT, ".github/metadata.schema.json"), "utf8"));
 const props = schema.properties;
 
-function contributionDirs() {
-  const out = [];
-  for (const cat of CATEGORIES) {
-    const base = join(ROOT, cat);
-    if (!existsSync(base)) continue;
-    for (const name of readdirSync(base).sort()) {
-      // _template is the category's placeholder, _shared the auth module the
-      // category's servers import (a copy of server-portable/auth.ts), and
-      // node_modules extensions/test-auth.ts's install (gitignored) — none is
-      // a contribution.
-      if (name === "_template" || name === "_shared" || name === "node_modules") continue;
-      const dir = join(base, name);
-      if (statSync(dir).isDirectory()) out.push({ cat, name, dir, rel: `${cat}/${name}` });
-    }
-  }
-  return out;
-}
+// The walk of the contribution directories is scripts/contributions.mjs's
+// contributionDirs — one definition, shared with connector-registry.mjs (SMD-1933).
 
 // ── 1 + 2: metadata validity and category/directory agreement ────────────────
 
@@ -232,6 +237,16 @@ function checkMetadata({ cat, dir, rel }) {
   }
   if ("tags" in d && (!Array.isArray(d.tags) || d.tags.length < 1)) {
     fail(at, "tags must be a non-empty array");
+  }
+  // The schema's shape for `connectors` (SMD-1933), applied here since no ajv gate runs: a list of
+  // distinct kebab-case registry keys. A malformed declaration would read as "declares nothing".
+  if ("connectors" in d) {
+    if (!Array.isArray(d.connectors)) fail(at, `connectors must be an array of registry keys, got ${JSON.stringify(d.connectors)}`);
+    else if (props.connectors?.items?.pattern) { // a schema without the block is check 19's finding, once, not a throw here
+      const keyRe = new RegExp(props.connectors.items.pattern); // the schema's pattern, read, not restated
+      for (const c of d.connectors) if (typeof c !== "string" || !keyRe.test(c)) fail(at, `connectors entry ${JSON.stringify(c)} is not a key (${props.connectors.items.pattern})`);
+      if (props.connectors.uniqueItems && new Set(d.connectors).size !== d.connectors.length) fail(at, "connectors lists a key twice");
+    }
   }
   for (const k of ["created", "updated"]) {
     if (k in d && !/^\d{4}-\d{2}-\d{2}$/.test(String(d[k]))) fail(at, `${k} '${d[k]}' is not YYYY-MM-DD`);
@@ -2056,7 +2071,7 @@ function checkPublishedPorts() {
 
 // ── Run ──────────────────────────────────────────────────────────────────────
 
-const dirs = contributionDirs();
+const dirs = contributionDirs(ROOT);
 for (const d of dirs) {
   const meta = checkMetadata(d);
   checkLinks(d);
@@ -3480,6 +3495,153 @@ function checkTypecheckSurface() {
   for (const [where, msg] of typecheckSurfaceProblems({ packages, tsconfigs, tscSteps })) fail(where, msg);
 }
 checkTypecheckSurface();
+// ── 19: the connector registry (SMD-1933) ────────────────────────────────────
+/**
+ * A registry every rule accepts, in memory, against a tree of two contributions
+ * and a disposition table naming one of them: the baseline the mutants below
+ * are measured from. Each mutant changes one thing and must produce exactly
+ * the kinds listed — so a rule that stops firing is caught, and a rule that
+ * fires on the baseline is caught first.
+ */
+const PROBE_TREE = () => ({
+  existingDirs: ["integrations/acme-capture", "recipes/acme-digest", "recipes/plain-tool"],
+  metadataByPath: new Map([
+    ["integrations/acme-capture", { requires: { services: ["Acme Chat API", "OpenRouter"] }, tags: ["messaging"], connectors: ["acme"] }],
+    ["recipes/acme-digest", { requires: { services: ["Acme Chat API (optional)"] }, tags: ["digest"], connectors: ["acme"] }],
+    ["recipes/plain-tool", { requires: { services: ["Supabase"] }, tags: ["ops"] }],
+  ]),
+  dispositionText: "### `integrations/` (1)\n\n| Artifact | Disposition | Justification |\n|---|---|---|\n| `acme-capture` | keep + audited → fold-in **SMD-1867** | a capture source |\n",
+});
+const PROBE_REGISTRY = () => ({
+  facets: {
+    ...Object.fromEntries(Object.entries(FACET_SETS).map(([k, v]) => [k, { stability: v.stability, values: [...v.values] }])),
+    family: { stability: "open", values: "families" },
+  },
+  fetchers: Object.fromEntries(FETCHERS.map((f) => [f, "x"])),
+  families: {
+    "message-stream/chat": { item: "a message", grouping_key: "thread", default_cardinality: "1:1", canonical: "c", text: "t", edges: ["e"], metadata: ["m"], identity: "i", typical_transport: ["push"], dividing_line: "d" },
+    "notification-target": { reserved: true, direction: "sink", note: "held" },
+  },
+  connectors: { acme: { direction: "bidirectional" } },
+  artifacts: [
+    { path: "integrations/acme-capture", capabilities: [{ vendor: "acme", family: "message-stream/chat", transport: "push", direction: "source", cardinality: "1:1", round_trip: "read-only", fetcher: "native-driver" }] },
+    { path: "recipes/acme-digest", capabilities: [{ vendor: "acme", family: "message-stream/chat", transport: "push", direction: "sink", cardinality: "many:1", round_trip: "read-only", fetcher: "native-driver", note: "n" }] },
+  ],
+  not_connectors: {
+    services: [{ pattern: "openrouter", reason: "a model provider" }, { pattern: "supabase", reason: "hosting" }],
+    artifacts: {},
+  },
+});
+const REGISTRY_PROBES = [
+  ["a transport off the near-closed set (webhook-push)", (r) => { r.artifacts[0].capabilities[0].transport = "webhook-push"; }, ["capability-value"]],
+  ["a fourth transport added to the registry's own set", (r) => { r.facets.transport.values.push("stream"); }, ["facet-set"]],
+  ["a sixth facet", (r) => { r.facets.protocol = { stability: "open", values: ["http"] }; }, ["facet-set"]],
+  ["a fifth fetcher kind", (r) => { r.fetchers.cron = "x"; }, ["fetcher-set"]],
+  ["a capability naming an undeclared family", (r) => { r.artifacts[0].capabilities[0].family = "mailbox/email"; }, ["capability-family"]],
+  ["a capability using the reserved family", (r) => { r.artifacts[1].capabilities[0].family = "notification-target"; }, ["reserved-used"]],
+  ["a family missing a schema field", (r) => { delete r.families["message-stream/chat"].identity; }, ["family-schema"]],
+  ["a reserved family that is not sink-only", (r) => { r.families["notification-target"].direction = "source"; }, ["family-schema"]],
+  ["a capability with a sixth key and no fetcher", (r) => { const c = r.artifacts[0].capabilities[0]; delete c.fetcher; c.protocol = "https"; }, ["capability-keys"]],
+  ["an artifact whose directory does not exist", (r) => { r.artifacts[0].path = "integrations/acme-gone"; }, ["artifact-missing", "coverage-unregistered"]],
+  ["an artifact listed twice", (r) => { r.artifacts.push(structuredClone(r.artifacts[1])); }, ["artifact-duplicate"]],
+  ["a connector declaring source while its capabilities span both", (r) => { r.connectors.acme.direction = "source"; }, ["connector-direction"]],
+  ["a connector with no capability naming it", (r) => { r.connectors.ghost = { direction: "source" }; }, ["connector-set"]],
+  ["a vendor used with no connector entry", (r) => { delete r.connectors.acme; }, ["connector-set"]],
+  ["an external-touching artifact left unclassified", (r) => { r.artifacts.pop(); r.connectors.acme.direction = "source"; }, ["coverage-unregistered"]],
+  ["an artifact both classified and excused (its metadata still declares the connector)", (r) => { r.not_connectors.artifacts["recipes/acme-digest"] = "because"; }, ["coverage-both", "excuse-declares"]],
+  ["a classified artifact whose metadata declares no connector", (r) => { r.artifacts.push({ path: "recipes/plain-tool", capabilities: [{ vendor: "acme", family: "message-stream/chat", transport: "pull", direction: "source", cardinality: "1:1", round_trip: "read-only", fetcher: "native-driver" }] }); }, ["connectors-field"]],
+  ["a provider matched twice, once at the head after a qualifier, is covered (every match is read)", (r) => {}, [], (t) => { t.metadataByPath.set("recipes/two-hits", { requires: { services: ["Any OpenRouter-compatible OpenRouter gateway"] }, tags: ["notes"] }); t.existingDirs.push("recipes/two-hits"); }],
+  ["a registered artifact whose metadata declares other connectors than its capabilities", (r) => {}, ["connectors-field"], (t) => { t.metadataByPath.get("recipes/acme-digest").connectors = ["acme", "beta"]; }],
+  ["a contribution declaring a connector and classified nowhere", (r) => {}, ["coverage-unregistered"], (t) => { t.metadataByPath.set("recipes/plain-tool", { requires: { services: ["Supabase"] }, tags: ["ops"], connectors: ["acme"] }); }],
+  ["an excused artifact whose metadata declares a connector", (r) => { r.not_connectors.artifacts["recipes/plain-tool"] = "a tool"; }, ["excuse-declares"], (t) => { t.metadataByPath.set("recipes/plain-tool", { requires: { services: ["Supabase"] }, tags: ["ops"], connectors: ["acme"] }); }],
+  ["a vendor named after an Object.prototype member", (r) => { r.artifacts[1].capabilities[0].vendor = "constructor"; r.connectors.acme.direction = "source"; }, ["connector-set", "connectors-field"]],
+  ["an excuse for an artifact nothing marks", (r) => { r.not_connectors.artifacts["recipes/plain-tool"] = "because"; }, ["excuse-stale"]],
+  ["an excuse for a contribution that does not exist", (r) => { r.not_connectors.artifacts["recipes/gone"] = "because"; }, ["excuse-stale"]],
+  ["a service pattern matching nothing in the tree", (r) => { r.not_connectors.services.push({ pattern: "zapier", reason: "x" }); }, ["pattern-stale"]],
+  ["a service pattern that does not compile", (r) => { r.not_connectors.services.push({ pattern: "(", reason: "x" }); }, ["pattern-invalid"]],
+  ["a service pattern that is empty (which would match every service)", (r) => { r.not_connectors.services.push({ pattern: "", reason: "x" }); }, ["pattern-invalid"]],
+  ["a service pattern with no reason", (r) => { r.not_connectors.services.push({ pattern: "openrouter" }); }, ["pattern-reason"]],
+  ["an excuse with no reason", (r) => { r.artifacts.pop(); r.connectors.acme.direction = "source"; r.not_connectors.artifacts["recipes/acme-digest"] = ""; }, ["excuse-reason"], (t) => { delete t.metadataByPath.get("recipes/acme-digest").connectors; }],
+  ["an artifact path that is not <category>/<slug>", (r) => { r.artifacts[1].path = "Recipes/Acme Digest"; }, ["artifact-path", "coverage-unregistered"]],
+  ["a capability repeated within an artifact", (r) => { r.artifacts[0].capabilities.push({ ...r.artifacts[0].capabilities[0] }); }, ["capability-duplicate"]],
+  ["a registry that is not an object", () => {}, ["shape"], null],
+  ["an artifacts block that is an object, not a list", (r) => { r.artifacts = { a: r.artifacts[0] }; }, ["shape", "coverage-unregistered", "connector-set"]],
+  ["an artifact marked only by a tag naming its connector", (r) => {}, ["coverage-unregistered"], (t) => { t.metadataByPath.set("recipes/acme-notes", { requires: { services: ["OpenRouter"] }, tags: ["acme", "notes"] }); t.existingDirs.push("recipes/acme-notes"); }],
+  ["a vendor named first in a service string a provider pattern also matches", (r) => {}, ["coverage-unregistered"], (t) => { t.metadataByPath.set("recipes/notion-sync", { requires: { services: ["Notion API (summaries via OpenRouter)"] }, tags: ["notes"] }); t.existingDirs.push("recipes/notion-sync"); }],
+  ["a vendor first with the provider as the second token, bracketed or slashed", (r) => {}, ["coverage-unregistered"], (t) => { t.metadataByPath.set("recipes/notion-sync", { requires: { services: ["Notion (OpenRouter)"] }, tags: ["notes"] }); t.metadataByPath.set("recipes/mail-sync", { requires: { services: ["Gmail/OpenRouter"] }, tags: ["notes"] }); t.existingDirs.push("recipes/notion-sync", "recipes/mail-sync"); }],
+  ["a connector's name as a tag in another case", (r) => {}, ["coverage-unregistered"], (t) => { t.metadataByPath.set("recipes/acme-notes", { requires: { services: ["OpenRouter"] }, tags: ["Acme", "Notes"] }); t.existingDirs.push("recipes/acme-notes"); }],
+  ["an artifact marked only by a tag the brain's own vocabulary shares (capture) is not marked", (r) => {}, [], (t) => { t.metadataByPath.set("recipes/own-capture", { requires: { services: ["OpenRouter"] }, tags: ["capture", "export", "sync"] }); t.existingDirs.push("recipes/own-capture"); }],
+  ["a family declared as null and used", (r) => { r.families["web-clip"] = null; r.artifacts[0].capabilities[0].family = "web-clip"; }, ["family-schema"]],
+  ["a fold-in row naming a contribution that is gone", (r) => {}, ["disposition-stale"], (t) => { t.dispositionText += "| `gone-capture` | keep + audited → fold-in **SMD-1867** | removed since |\n"; }],
+  // The three below keep a provider service on the probe tree so the openrouter pattern stays live: the table is the only trigger under test.
+  ["an artifact the disposition table alone marks (a batch importer naming a provider only, declaring nothing)", (r) => { r.artifacts.shift(); r.connectors.acme.direction = "sink"; }, ["coverage-unregistered"], (t) => { t.metadataByPath.set("integrations/acme-capture", { requires: { services: ["OpenRouter"] }, tags: [] }); }],
+  ["a fold-in row for a directory whose metadata did not parse marks nothing", (r) => { r.artifacts.shift(); r.connectors.acme.direction = "sink"; }, [], (t) => { t.metadataByPath.set("integrations/acme-capture", null); t.metadataByPath.set("recipes/plain-tool", { requires: { services: ["Supabase", "OpenRouter"] }, tags: ["ops"] }); }],
+  ["a fold-in row after a fenced `# comment` under the same heading", (r) => { r.artifacts.shift(); r.connectors.acme.direction = "sink"; }, ["coverage-unregistered"], (t) => { t.metadataByPath.set("integrations/acme-capture", { requires: { services: ["OpenRouter"] }, tags: [] }); t.dispositionText = t.dispositionText.replace("| Artifact |", "```sh\n# a comment in an example\n```\n| Artifact |"); }],
+  ["a service pattern that matches the empty string (a trailing `|`)", (r) => { r.not_connectors.services[0].pattern = "openrouter|"; }, ["pattern-invalid"]],
+  ["a registry entry for a placeholder directory", (r) => { r.artifacts[1].path = "recipes/_template"; }, ["artifact-path", "coverage-unregistered"]],
+  ["a disposition table that is missing", (r) => {}, ["disposition-missing"], (t) => { t.dispositionText = null; }],
+  ["a disposition table with one category's heading moved (partly dark)", (r) => {}, ["disposition-dark"], (t) => { t.dispositionText = "### `recipes/` (1)\n\n| `acme-digest` | keep + audited → SMD-1867 candidate | x |\n\n## Integrations\n\n| `acme-capture` | keep + audited → fold-in **SMD-1867** | x |\n"; }],
+  ["a not-a-connector pattern broad enough to cover a classified vendor's own service", (r) => { r.not_connectors.services.push({ pattern: "acme", reason: "too broad" }); }, ["pattern-broad"]],
+  ["a provider as the bare second word after a vendor's name", (r) => {}, ["coverage-unregistered"], (t) => { t.metadataByPath.set("recipes/notion-sync", { requires: { services: ["Notion OpenRouter summaries"] }, tags: ["notes"] }); t.existingDirs.push("recipes/notion-sync"); }],
+  ["a capability with a direction typo beside source capabilities (no spurious connector-direction)", (r) => { r.artifacts[1].capabilities[0].direction = "both"; r.connectors.acme.direction = "source"; }, ["capability-value"]],
+  ["a fold-in row for a directory with no metadata.json marks nothing", (r) => { r.artifacts.shift(); r.connectors.acme.direction = "sink"; }, [], (t) => { t.metadataByPath.delete("integrations/acme-capture"); t.metadataByPath.set("recipes/plain-tool", { requires: { services: ["Supabase", "OpenRouter"] }, tags: ["ops"] }); }],
+  ["a registry path with a space, which the walk admits", (r) => { r.artifacts[1].path = "recipes/acme digest"; }, ["artifact-missing", "coverage-unregistered"]],
+  ["a disposition table whose headings moved to `##`, yielding no fold-in", (r) => {}, ["disposition-dark"], (t) => { t.dispositionText = t.dispositionText.replace("### ", "## "); }],
+  ["a capability that is a bare string", (r) => { r.artifacts[1].capabilities[0] = "acme"; r.connectors.acme.direction = "source"; }, ["capability-keys", "connectors-field"]],
+  ["an artifact listed twice, the duplicate under another vendor (the first entry is judged)", (r) => { r.artifacts.push({ path: "recipes/acme-digest", capabilities: [{ vendor: "beta", family: "message-stream/chat", transport: "push", direction: "sink", cardinality: "many:1", round_trip: "read-only", fetcher: "native-driver" }] }); r.connectors.beta = { direction: "sink" }; }, ["artifact-duplicate"]],
+];
+/** Non-probes: what the rules must accept (a `want` of []) and must not throw on. */
+const REGISTRY_NON_PROBES = [
+  ["a contribution naming only a model provider is not marked", (r) => {}, [], (t) => { t.metadataByPath.set("recipes/uses-a-model", { requires: { services: ["OpenRouter"] }, tags: ["synthesis"] }); t.existingDirs.push("recipes/uses-a-model"); }],
+  ["two patterns matching one service are both live (the narrower inside the word, covering nothing)", (r) => { r.not_connectors.services.push({ pattern: "router", reason: "overlaps openrouter on purpose" }); }, []],
+  ["a provider first and qualified after is covered", (r) => {}, [], (t) => { t.metadataByPath.set("recipes/uses-a-gateway", { requires: { services: ["Any OpenRouter-compatible LLM gateway (Ollama, etc.)", "Optional: OpenRouter (Sonar) for live search"] }, tags: ["synthesis"] }); t.existingDirs.push("recipes/uses-a-gateway"); }],
+  ["a pattern whose only match lies past the head is live, though it covers nothing", (r) => { r.not_connectors.services.push({ pattern: "sonar", reason: "a model" }); }, [], (t) => { t.metadataByPath.set("recipes/uses-a-gateway", { requires: { services: ["Optional: OpenRouter (Sonar) for live search"] }, tags: ["synthesis"] }); t.existingDirs.push("recipes/uses-a-gateway"); }],
+  ["an excuse for a directory that exists without a metadata.json waits on check 1", (r) => { r.not_connectors.artifacts["recipes/no-meta"] = "waiting on its metadata"; }, [], (t) => { t.existingDirs.push("recipes/no-meta"); }],
+  ["a registered artifact whose metadata did not parse gets no coverage verdict", (r) => {}, [], (t) => { t.metadataByPath.set("recipes/acme-digest", null); }],
+  ["a metadata whose tags and services are strings marks nothing and throws nothing", (r) => {}, [], (t) => { t.metadataByPath.set("recipes/odd-tool", { requires: { services: "Acme Chat API" }, tags: "digest" }); t.existingDirs.push("recipes/odd-tool"); }],
+];
+/** [text, want]: what dispositionPaths reads from a table — the fold-in marker in the Disposition cell under a contribution-category heading, and nothing from the Justification cell, past another heading, under `docs/drafts/`, or from a bare mention or a negation. */
+const DISPOSITION_PROBES = [
+  ["### `integrations/` (2)\n\n| Artifact | Disposition | Justification |\n|---|---|---|\n| `a-capture` | keep + audited → fold-in **SMD-1867** | x |\n| `b-tool` | keep + audited | mentioned beside SMD-1867 and SMD-1924; a tool, not a fold-in |\n| `e-graph` | keep + audited | a graph view; not an SMD-1867 adapter |\n\n### `recipes/` (1)\n\n| `c-import` | keep + audited → SMD-1867 candidate | x |\n| `f-import` | keep + audited *(drop one sub-file)* → SMD-1867 candidate | x |\n| `h-import` | remove | superseded by the seam; was the SMD-1867 candidate |\n| `i-import` | remove — was the SMD-1867 candidate | superseded by the seam |\n| `g-ext` | keep + audited | A capture adapter under the SMD-1867 contract, not an ad-hoc integration. |\n\n### `docs/drafts/` (1)\n\n| `sketch.md` | keep + audited → SMD-1867 candidate | not a contribution directory |\n\n## Notes\n\n| `d-tool` | remove → fold-in **SMD-1867** | was considered |\n", ["integrations/a-capture", "recipes/c-import", "recipes/f-import"]],
+  ["## Summary\n\n| `x-tool` | fold-in **SMD-1867** |\n", []],
+];
+function checkConnectorRegistry() {
+  // One pattern for a vendor key: the schema's for metadata `connectors`, the registry's for its vendors.
+  if (props.connectors?.items?.pattern !== VENDOR_PATTERN) fail(".github/metadata.schema.json", `connectors.items.pattern is ${JSON.stringify(props.connectors?.items?.pattern)} but scripts/connector-registry.mjs's VENDOR_PATTERN is ${JSON.stringify(VENDOR_PATTERN)} — one definition of a vendor key (SMD-1933)`);
+  const kindsOf = (registry, tree = PROBE_TREE()) => [...new Set(registryProblems({ registry, ...tree }).map((p) => p.kind))].sort();
+  const base = registryProblems({ registry: PROBE_REGISTRY(), ...PROBE_TREE() });
+  if (base.length) return fail(SELF, `check 19's baseline registry fails its own rules (${base.map((p) => `${p.kind}: ${p.msg}`).join("; ")}) — the mutants below measure nothing`);
+  for (const [text, want] of DISPOSITION_PROBES) {
+    const got = dispositionPaths(text);
+    if (JSON.stringify(got) !== JSON.stringify(want)) fail(SELF, `check 19's disposition reader returns [${got}], expected [${want}] (its own probe)`);
+  }
+  // A fourth element: null runs the mutant on a null registry; a function reshapes the tree. A `want` of []
+  // is a non-probe — a case the rules must accept and not throw on.
+  for (const [why, mutate, want, tree] of [...REGISTRY_PROBES, ...REGISTRY_NON_PROBES]) {
+    let r = PROBE_REGISTRY();
+    if (tree === null) r = null; else mutate(r);
+    const t = PROBE_TREE();
+    if (typeof tree === "function") tree(t);
+    let got;
+    try { got = kindsOf(r, t); } catch (e) { fail(SELF, `check 19 throws for ${why}: ${e.message} (its own probe)`); continue; }
+    if (JSON.stringify(got) !== JSON.stringify([...want].sort())) fail(SELF, `check 19 reports [${got}] for ${why}, expected [${want}] (its own probe)`);
+  }
+
+  if (!existsSync(join(ROOT, REGISTRY_PATH))) return fail(REGISTRY_PATH, "missing — the connector taxonomy's one source (SMD-1933)");
+  let registry;
+  try { registry = readRegistry(ROOT); } catch (e) { return fail(REGISTRY_PATH, `does not parse: ${e.message} (SMD-1933)`); }
+  const dispositionText = existsSync(join(ROOT, DISPOSITION_PATH)) ? readFileSync(join(ROOT, DISPOSITION_PATH), "utf8") : null;
+  let problems;
+  // readMetadata is the one statement of "absent is not in the map, unparseable is null (no verdict)" — the CLI reads the same; check 1 names the unparseable file.
+  try { problems = registryProblems({ registry, existingDirs: dirs.map((d) => d.rel), metadataByPath: readMetadata(dirs), dispositionText }); } catch (e) { return fail(REGISTRY_PATH, `check 19 threw instead of reporting: ${e.message} (SMD-1933)`); }
+  for (const p of problems) fail(p.where, `${p.msg} (SMD-1933)`);
+  if (!existsSync(join(ROOT, SPEC_PATH))) return fail(SPEC_PATH, "missing — the spec that carries the registry's rendered tables (SMD-1933)");
+  const span = tablesSpan(readFileSync(join(ROOT, SPEC_PATH), "utf8"));
+  if (!span) return fail(SPEC_PATH, "the generated-tables markers are missing or doubled (SMD-1933)");
+  // The renderer assumes a sound registry (the CLI refuses to render otherwise); an unsound one has its findings above.
+  if (problems.length === 0 && span.block !== renderClassification(registry)) fail(SPEC_PATH, `the generated tables differ from what ${REGISTRY_PATH} renders — run \`bun scripts/connector-registry.mjs\` (SMD-1933)`);
+}
+checkConnectorRegistry();
 
 // No display-time filter. One excused `_template` violations, for a placeholder
 // link that contributionDirs() has skipped since the filter was written — so
