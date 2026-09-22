@@ -1586,13 +1586,12 @@ again with the vector (a fallback tag set from a provider outage would otherwise
 stand on current text forever), every facet goes over them (a `status` or an
 `issue` the model read out of the description must not win), and a stale
 `metadata_extraction_failed` the fresh tags do not carry is set to null — the
-nearest a shallow merge comes to removing it. A current row whose tags fell back
-(a provider timeout, not an egress refusal) is stale on its own account and is
-asked for its tags again when it holds the text — at most five such heads per
-pass, so a provider still down costs five timeouts, not one per row it failed on;
-refused by the gate, the marker becomes `egress_denied` and the row is not stale.
-A row that landed without a vector is `reembed.ts`'s to repair, as any vectorless
-row is; a retag worker for every thought, not only tickets, is SMD-1975. Labels render and store
+nearest a shallow merge comes to removing it (`tagsOverExisting`, the rule in
+`server-portable/metadata.ts` every writer that edits a tagged row shares). A row
+whose tags fell back at capture, with its text unchanged, is not this tool's to
+repair: that is SMD-1975's retag worker, for every thought and not ticket rows
+alone; a row that landed without a vector is `reembed.ts`'s, as any vectorless row
+is. Labels render and store
 sorted, whatever order Linear returns them. A ticket deleted in Linear (trashed)
 falls out of the census and its row reads *extra*; a completed one Linear
 archived stays a ticket. `--only` syncs the identifiers named whatever the plan
