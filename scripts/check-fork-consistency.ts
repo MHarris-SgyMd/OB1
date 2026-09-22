@@ -3845,8 +3845,11 @@ const DESTRUCTIVE_SQL_PROBES: [string, string][] = [
   ["truncate", "EXECUTE $q$TRUNCATE $q$ || quote_ident(p_table);"],
   ["drop-database", "DROP OWNED BY community CASCADE;"],
   // Second review pass: an apostrophe inside a dollar-quoted value must not open a literal that swallows the rest of the file; a tag may carry digits.
-  ["unqualified-delete", "COMMENT ON TABLE t IS $$don't$$;\nDELETE FROM t RETURNING 'WHERE';"],
+  ["unqualified-delete", "COMMENT ON TABLE t IS $q1$don't$q1$;\nDELETE FROM t RETURNING 'WHERE';"], // the blanker's own tag grammar, digits included
   ["truncate", "EXECUTE $q1$TRUNCATE $q1$ || quote_ident(p_table);"],
+  // Third review pass: a dollar-quoted dynamic string's delete, and an unquoted non-ASCII name.
+  ["unqualified-delete", "EXECUTE $q$DELETE FROM $q$ || quote_ident(p_table);"],
+  ["truncate", "TRUNCATE Übersicht;"],
 ];
 /** SQL this repository writes that no rule may catch. */
 const DESTRUCTIVE_SQL_NON_PROBES = [
@@ -3883,6 +3886,7 @@ const DESTRUCTIVE_SQL_NON_PROBES = [
   // Second review pass: a keyword anywhere inside a quoted identifier; an apostrophe in a dollar-quoted value before a qualified delete.
   'SELECT "my TRUNCATE", "a DROP TABLE b", "x DELETE FROM y" FROM information_schema.role_table_grants;',
   "COMMENT ON TABLE t IS $$don't$$;\nDELETE FROM t USING f(')') g WHERE t.id = g.id;",
+  "EXECUTE $q$DELETE FROM $q$ || quote_ident(p_table) || ' WHERE id = $1';", // third pass: the WHERE arrives in a `'…'` piece the blanked walk cannot see
 ];
 /** file → rule → the reason and the exact hit count; a hit past the count fails, a count no hit reaches fails as stale. Empty: no file in the tree needs one. */
 const DESTRUCTIVE_SQL_EXCEPTIONS = new Map<string, Record<string, CountedException>>([]);

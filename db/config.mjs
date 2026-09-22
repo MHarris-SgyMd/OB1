@@ -1939,11 +1939,12 @@ export function supabaseIsmsIn(text) {
  * to the `)` that closes the CTE it sits in — carries no WHERE, so 034's
  * `DELETE FROM query_log` with the WHERE on the next line passes where
  * upstream's same-line grep failed it, and `DELETE FROM t;` and `DELETE FROM t
- * RETURNING id;` fail; DROP TABLE and DROP DATABASE/SCHEMA always. String
- * literals are read, as SUPABASE_SQL_RULES reads them: `EXECUTE 'TRUNCATE ' ||
- * quote_ident(t)` runs the truncate. A `--` comment quoting a statement is not
- * a hit, so a header may say why the file has none. check-fork-consistency
- * check 20 holds every .sql in the tree to these through destructiveSqlIn().
+ * RETURNING id;` fail; DROP TABLE and DROP DATABASE/SCHEMA/OWNED wherever they
+ * stand outside a quoted identifier. String literals are read, as
+ * SUPABASE_SQL_RULES reads them: `EXECUTE 'TRUNCATE ' || quote_ident(t)` runs
+ * the truncate. A `--` comment quoting a statement is not a hit, so a header
+ * may say why the file has none. check-fork-consistency check 20 holds every
+ * .sql git tracks to these through destructiveSqlIn().
  */
 export const DESTRUCTIVE_SQL_RULES = Object.freeze([
   Object.freeze({ name: "drop-table",
@@ -1965,7 +1966,7 @@ export const DESTRUCTIVE_SQL_RULES = Object.freeze([
  * statement: destructiveSqlIn skips a match that blankSqlLiterals marks as
  * one (first and second review passes).
  */
-const TRUNCATE_TARGET = String.raw`\bTRUNCATE\b\s*(?:(?:TABLE|ONLY)\s+)*(?:"|%(?:\d+\$)?[Is]|(?:'|\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$)\s*\|\||(?!(?:ON|OR|TO|FROM|AND|THEN|ELSE|END|IN|IS|WHEN)\b)[A-Za-z_][\w$.]*)`;
+const TRUNCATE_TARGET = String.raw`\bTRUNCATE\b\s*(?:(?:TABLE|ONLY)\s+)*(?:"|%(?:\d+\$)?[Is]|(?:'|\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$)\s*\|\||(?!(?:ON|OR|TO|FROM|AND|THEN|ELSE|END|IN|IS|WHEN)\b)[\p{L}_][\p{L}\p{N}_$.]*)`; // \p: an unquoted name may be non-ASCII (`TRUNCATE Übersicht`), matched with the u flag
 /** What blankSqlLiterals writes over the inside of a quoted identifier, so a caller can tell one from a string literal (blanked to spaces). */
 const IDENT_FILL = "~";
 /**
@@ -2021,8 +2022,16 @@ function blankSqlLiterals(sql) {
  * the end of the text, and a WHERE counts only at depth 0 — one inside a
  * subquery in USING or in a format() argument qualifies nothing (first review
  * pass). `text` is the literal-blanked copy for a statement the file runs, the
- * raw copy for one inside a string, whose WHERE may be concatenated on.
+ * raw copy for one inside a string — `'…'`, or a dollar-quoted one concatenated
+ * onward — whose WHERE may be concatenated on.
  */
+/** A closing dollar tag followed by `||`: the statement is a dollar-quoted string concatenated onward, read raw like a `'…'` one. */
+const DOLLAR_CONCAT = /\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$\s*\|\|/;
+/** Where the statement continuing at `from` ends in `text`: its `;`, or the text's end. */
+function statementEnd(text, from) {
+  const i = text.indexOf(";", from);
+  return i === -1 ? text.length : i;
+}
 function whereQualifies(text, from) {
   let depth = 0;
   for (let i = from; i < text.length; i++) {
@@ -2056,15 +2065,18 @@ export function destructiveSqlIn(text) {
   const inIdentifier = (i) => flat[i] === IDENT_FILL;
   for (const m of sql.matchAll(/\bDROP\s+TABLE\b/gi)) if (!inIdentifier(m.index)) hit("drop-table", m.index);
   for (const m of sql.matchAll(/\bDROP\s+(?:DATABASE|SCHEMA|OWNED)\b/gi)) if (!inIdentifier(m.index)) hit("drop-database", m.index);
-  for (const m of sql.matchAll(new RegExp(TRUNCATE_TARGET, "gi"))) if (!inIdentifier(m.index)) hit("truncate", m.index);
+  for (const m of sql.matchAll(new RegExp(TRUNCATE_TARGET, "giu"))) if (!inIdentifier(m.index)) hit("truncate", m.index);
   for (const m of sql.matchAll(/\bDELETE\s+FROM\b/gi)) {
     if (inIdentifier(m.index)) continue;
-    // A DELETE inside a string literal is dynamic SQL: its statement is the
-    // literal's text and whatever is concatenated onto it, so it is read in
-    // `sql`; one the file runs is read in `flat`, where a literal cannot move
-    // its boundary or qualify it.
-    const inLiteral = flat[m.index] === " ";
-    if (!whereQualifies(inLiteral ? sql : flat, m.index + m[0].length)) hit("unqualified-delete", m.index);
+    // A DELETE inside a string literal, or inside a dollar-quoted string that
+    // is concatenated onward (`$q$DELETE FROM $q$ || t || ' WHERE …'` — third
+    // review pass), is dynamic SQL: its statement is the string's text and
+    // whatever is concatenated onto it, so it is read in `sql`; one the file
+    // runs is read in `flat`, where a literal cannot move its boundary or
+    // qualify it.
+    const end = m.index + m[0].length;
+    const inLiteral = flat[m.index] === " " || DOLLAR_CONCAT.test(flat.slice(end, statementEnd(flat, end)));
+    if (!whereQualifies(inLiteral ? sql : flat, end)) hit("unqualified-delete", m.index);
   }
   return hits.sort((a, b) => a.line - b.line);
 }
