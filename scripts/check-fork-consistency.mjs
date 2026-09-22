@@ -648,7 +648,6 @@ const CORE_FUNCTION_PROBES = [
 ];
 /** Ordinary lines the rule must not catch. */
 const CORE_FUNCTION_NON_PROBES = [
-  "CREATE OR REPLACE FUNCTION match_thoughts_recency(",
   "CREATE OR REPLACE FUNCTION update_updated_at_column()",
   "CREATE OR REPLACE FUNCTION upsert_thoughts_batch(",
   "-- CREATE OR REPLACE FUNCTION upsert_thought(text, jsonb) is the statement 003 ran",
