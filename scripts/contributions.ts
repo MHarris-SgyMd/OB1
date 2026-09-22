@@ -27,13 +27,16 @@ export const CATEGORIES = [
  */
 export const NOT_CONTRIBUTIONS = ["_template", "_shared", "node_modules"];
 
+/** One contribution directory: its category, folder name, absolute path and repo-relative path. */
+export type ContribDir = { cat: string; name: string; dir: string; rel: string };
+
 /**
  * Every contribution directory under `root`, as `{ cat, name, dir, rel }`,
  * categories and names sorted — any directory but NOT_CONTRIBUTIONS, with or
  * without a metadata.json (check 1 is what fails a missing one).
  */
-export function contributionDirs(root) {
-  const out = [];
+export function contributionDirs(root: string): ContribDir[] {
+  const out: ContribDir[] = [];
   for (const cat of CATEGORIES) {
     const base = join(root, cat);
     if (!existsSync(base)) continue;
