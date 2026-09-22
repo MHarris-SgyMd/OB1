@@ -18,7 +18,8 @@
  *
  *   co_mentions   distinct thoughts mentioning both the subject and the neighbour
  *   support       distinct thoughts evidencing an edge between them, any relation,
- *                 either direction — the per-relation counts are shown beside it
+ *                 either direction — the per-relation counts are shown beside it,
+ *                 and can sum past support when one thought asserts two relations
  *
  * A neighbour ranks by co_mentions + support; `--no-edges` drops the support
  * term and the degree/support columns, so the same command run twice says what
@@ -38,8 +39,10 @@
  * "open brain"); else a name a human merged in (`merged_from`) or an alias the
  * model offered; else the five nearest by trigram similarity at pg_trgm's
  * default threshold or above, named as guesses. A uuid is taken as an entity
- * id. Every entity the rung returns is the subject — "postgres" as a tool and
- * as a topic are both it. `--types` and the numeric rule together say which
+ * id. What is ranked around is the entities sharing the FIRST subject's
+ * normalised name — "postgres" as a tool and as a topic are both it; the
+ * other names an alias or fuzzy rung returns are listed, unmarked, and not
+ * ranked around (`rankedSubjects`, `Report.subject_ids`). `--types` and the numeric rule together say which
  * entities exist for the run — the scope IS the graph: an entity outside it is
  * in no list and no count, so under `--types tool` a tool's degree is its
  * degree among tools. The subject is the one exception, resolved whatever its
@@ -313,21 +316,29 @@ export async function neighbourhood(run: Runner, subjectIds: readonly string[], 
                 JOIN (SELECT entity_id, string_agg(relation || '×' || n, ', ' ORDER BY n DESC, relation) AS relations FROM per_relation GROUP BY 1) rel
                   ON rel.entity_id = sup.entity_id)`
     : "";
+  // Candidates first — the entities with a co-mention or an edge — then
+  // `mentions`, a display and tiebreak column, counted for those alone
+  // (fourth review pass; the whole-table aggregate was the shape the first
+  // pass removed from the rungs).
   const rows = await run(
     `WITH scope AS (SELECT e.id, e.entity_type, e.name, e.normalized_name FROM ob1_entities e WHERE ${inScope}),
-       ${MENTIONS_CTE},
        subject_thoughts AS (SELECT DISTINCT te.thought_id FROM thought_entities te WHERE te.entity_id = ANY($1::uuid[])),
        co AS (SELECT te.entity_id, count(DISTINCT te.thought_id)::int AS co_mentions
                 FROM thought_entities te JOIN subject_thoughts st ON st.thought_id = te.thought_id
-               WHERE NOT (te.entity_id = ANY($1::uuid[])) GROUP BY 1)${edgeCtes}
-     SELECT s.id, s.entity_type, s.name, coalesce(m.mentions, 0) AS mentions, coalesce(co.co_mentions, 0) AS co_mentions
-            ${opts.edges ? ", coalesce(ed.support, 0) AS support, ed.relations" : ""}
-       FROM scope s
-       LEFT JOIN mentions m ON m.entity_id = s.id
-       LEFT JOIN co ON co.entity_id = s.id
-       ${opts.edges ? "LEFT JOIN ed ON ed.entity_id = s.id" : ""}
-      WHERE coalesce(co.co_mentions, 0)${opts.edges ? " + coalesce(ed.support, 0)" : ""} > 0
-      ORDER BY coalesce(co.co_mentions, 0)${opts.edges ? " + coalesce(ed.support, 0)" : ""} DESC, mentions DESC, ${ENTITY_TIEBREAK}
+               WHERE NOT (te.entity_id = ANY($1::uuid[])) GROUP BY 1)${edgeCtes},
+       cand AS (${opts.edges
+         ? `SELECT coalesce(co.entity_id, ed.entity_id) AS entity_id, coalesce(co.co_mentions, 0) AS co_mentions, coalesce(ed.support, 0) AS support, ed.relations
+              FROM co FULL JOIN ed ON ed.entity_id = co.entity_id`
+         : `SELECT entity_id, co_mentions FROM co`}),
+       ranked AS (
+         SELECT s.id, s.entity_type, s.name, s.normalized_name,
+                (SELECT count(DISTINCT te.thought_id) FROM thought_entities te WHERE te.entity_id = s.id)::int AS mentions,
+                c.co_mentions${opts.edges ? ", c.support, c.relations" : ""}
+           FROM cand c JOIN scope s ON s.id = c.entity_id
+          WHERE c.co_mentions${opts.edges ? " + c.support" : ""} > 0)
+     SELECT id, entity_type, name, mentions, co_mentions${opts.edges ? ", support, relations" : ""}
+       FROM ranked
+      ORDER BY co_mentions${opts.edges ? " + support" : ""} DESC, mentions DESC, normalized_name, entity_type
       LIMIT $${params.length}`,
     params);
   return rows as NeighbourRow[];
@@ -366,13 +377,14 @@ export async function subjectThoughts(run: Runner, subjectIds: readonly string[]
 
 /** The caveats, with the run's own numbers where a caveat has one — printed every run, in both formats. */
 export function caveats(c: Coverage, opts: Options): string[] {
-  const plural = (n: number) => (n === 1 ? "entity" : "entities");
+  const n = c.numeric_names;
+  const entities = `${n} ${n === 1 ? "entity" : "entities"} of the ranked types named only by digits, dots, colons and spaces`;
   const out = [
     `Centrality here is attention, not value or quality: what the extracted thoughts mention and connect most.`,
     `Edges are unweighted (SMD-1925): ${c.unit_edges} of ${c.edges} edge rows carry confidence 1.00, so an edge's only weight is the number of thoughts asserting it (support).`,
     opts.excludeNumeric
-      ? `Entity typing is noisy (SMD-1935): ${c.numeric_names} ${plural(c.numeric_names)} of the ranked types named only by digits are out of scope and out of every count (--keep-numeric admits them; --types narrows further).`
-      : `Entity typing is noisy (SMD-1935): --keep-numeric is on, so ${c.numeric_names} ${plural(c.numeric_names)} of the ranked types named only by digits count like any other.`,
+      ? `Entity typing is noisy (SMD-1935): ${entities} ${n === 1 ? "is" : "are"} out of scope and out of every count (--keep-numeric admits ${n === 1 ? "it" : "them"}; --types narrows further).`
+      : `Entity typing is noisy (SMD-1935): --keep-numeric is on, so ${entities} count${n === 1 ? "s" : ""} like any other.`,
     `Hubs and clusters inflate each other: a name most thoughts mention, or an epic its children all connect to, lifts everything around it.`,
     `No recency term: a thought captured a minute ago about its own subject ranks as any other.`,
     `The graph holds no ticket status; open/closed is the caller's filter against the source.`,
@@ -385,7 +397,7 @@ export function caveats(c: Coverage, opts: Options): string[] {
 export type Report = {
   subject: string | null;
   resolution: Resolution | null;
-  /** The entities ranked around: every subject the rung returned, or for a fuzzy guess the first alone. */
+  /** The entities ranked around: the subjects sharing the first subject's normalised name (`rankedSubjects`); `resolution.subjects` may list more. */
   subject_ids: string[];
   options: Options;
   coverage: Coverage;
@@ -470,10 +482,13 @@ export function render(r: Report): string {
         { key: "mentions", head: "mentions", right: true },
         { key: "entity_type", head: "type" },
         { key: "name", head: "entity", width: 50 },
-        ...(o.edges ? [{ key: "relations", head: "relations (thoughts asserting each)", width: 60 }] : []),
+        ...(o.edges ? [{ key: "relations", head: "relations (thoughts asserting each; can sum past support)", width: 60 }] : []),
       ]));
       out.push("");
-    } else if (res.how !== "none") out.push("No neighbour: nothing in scope shares a thought or an edge with the subject.\n");
+    } else if (res.how !== "none") {
+      out.push("No neighbour: nothing in scope shares a thought or an edge with the subject.");
+      out.push("");
+    }
     if (r.thoughts.length) {
       out.push(`Thoughts mentioning the subject — ranked by neighbours mentioned${o.edges ? " + subject edges evidenced" : ""}:`);
       out.push(table(r.thoughts as Record<string, unknown>[], T_COLS(o.edges, "neighbours")));
@@ -527,8 +542,9 @@ export function parseArgs(argv: readonly string[]): Parsed | { error: string } {
     } else if (a === "--limit") {
       const v = value();
       if (typeof v !== "string") return v;
-      const n = Number(v);
-      if (!Number.isInteger(n) || n < 1 || n > 500) return { error: `--limit must be an integer from 1 to 500, got ${JSON.stringify(v)}` };
+      // Decimal digits only: Number() would read "0x10", "1e2" and " 7" as integers.
+      const n = /^\d+$/.test(v) ? Number(v) : NaN;
+      if (!Number.isInteger(n) || n < 1 || n > 500) return { error: `--limit must be a decimal integer from 1 to 500, got ${JSON.stringify(v)}` };
       opts.limit = n;
     } else if (a === "--types") {
       const v = value();
@@ -552,7 +568,7 @@ if (import.meta.main) {
   const parsed = parseArgs(process.argv.slice(2));
   if ("error" in parsed) {
     console.error(parsed.error);
-    console.error(`usage: bun graph-centrality.ts --url postgres://… ["subject"] [--limit N] [--types a,b] [--keep-numeric] [--no-edges] [--json]`);
+    console.error(`usage: bun graph-centrality.ts --url postgres://… ["subject"] [--limit N] [--types a,b] [--keep-numeric] [--no-edges] [--json]   (exit 0 ranked, 1 no entity, 3 excluded by the numeric rule, 2 error)`);
     process.exit(2);
   }
   const url = parsed.url ?? process.env.DATABASE_URL;
@@ -565,9 +581,11 @@ if (import.meta.main) {
   // The exit code is decided inside and applied after the connection has
   // closed and the output has been written (process.exit inside the try would
   // skip the finally, and could cut a piped --json short).
-  // 0 ranked; 1 the subject resolved to nothing; 2 a usage error, a brain
-  // without 016, or a query that failed — never 1 for a failure, so a caller
-  // testing for "not in the graph" is not told that by a connection refused.
+  // 0 ranked; 1 the subject resolved to nothing; 3 the subject IS an entity
+  // and the numeric-name rule excluded it (--keep-numeric would rank it); 2 a
+  // usage error, a brain without 016, or a query that failed — never 1 for a
+  // failure or an exclusion, so a caller testing for "not in the graph" is not
+  // told that by a connection refused or by SMD-1935's rule.
   let code = 0;
   try {
     // The three tables as this connection resolves them — a same-named table in
@@ -580,7 +598,7 @@ if (import.meta.main) {
       const r = await report(run, parsed.subject, parsed.opts);
       if (parsed.json) console.log(JSON.stringify(r, null, 2));
       else console.log(render(r));
-      code = r.resolution && r.resolution.how === "none" ? 1 : 0;
+      code = r.resolution && r.resolution.how === "none" ? (r.resolution.excluded ? 3 : 1) : 0;
     }
   } catch (e) {
     console.error(`graph-centrality failed: ${(e as Error).message}`);

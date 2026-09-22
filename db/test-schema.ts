@@ -72,9 +72,8 @@ import {
   DEFAULT_OPTIONS, FUZZY_FLOOR, coverage as graphCoverage, neighbourhood, parseArgs, pgArray, rankedSubjects, render, report as graphReport,
   resolveSubject, subjectThoughts, topEntities, topThoughts, type Options as GraphOptions, type Runner,
 } from "./graph-centrality.ts";
-import { NUMERIC_NAME_RE } from "../server-portable/entities.ts";
 import { agentLabel, armOf, attribute, citePointerOf, goldFromFixture, renderReport, summarise, toActionRow, toSearchRow, type ActionRow, type SearchRow } from "../evals/utilization.ts";
-import { ENTITY_TYPES, RELATIONS } from "../server-portable/entities.ts";
+import { ENTITY_TYPES, NUMERIC_NAME_RE, RELATIONS } from "../server-portable/entities.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const MIGRATIONS = join(HERE, "migrations");
@@ -5173,6 +5172,15 @@ console.log("\n[43] db/graph-centrality.ts: mentions, degree and support as defi
   const nOn = await neighbourhood(run, [OB], on);
   assert(names(nOn).join(",") === "PostgreSQL,Anita,Bun", `edges on: ranked by co_mentions + support (${names(nOn).join(",")})`);
   assert(nOn[0].co_mentions === 3 && nOn[0].support === 3 && nOn[0].relations === "depends_on×3", `PostgreSQL: 3 co-mentions, 3 supporting thoughts, the relation named with its count (${JSON.stringify(nOn[0])})`);
+  // Support is distinct THOUGHTS; the per-relation counts are per relation, so
+  // one thought asserting two relations counts once in support and once under
+  // each relation (the definitional pass). Add such a thought, read, remove.
+  const t12 = await thought("Open Brain uses and depends on PostgreSQL, says one thought.");
+  await record(t12, [E("Open Brain", "project"), E("PostgreSQL", "tool")], [R("Open Brain", "PostgreSQL", "depends_on"), R("Open Brain", "PostgreSQL", "uses")]);
+  const twoRel = (await neighbourhood(run, [OB], on))[0];
+  assert(twoRel.name === "PostgreSQL" && twoRel.support === 4 && twoRel.co_mentions === 4 && twoRel.relations === "depends_on×4, uses×1",
+    `a thought asserting two relations adds one to support and one under each relation, so the relation counts sum to 5 past a support of 4 (${JSON.stringify(twoRel)})`);
+  await db.query(`DELETE FROM thoughts WHERE id = $1`, [t12]);
   assert(nOn[1].co_mentions === 2 && nOn[1].support === 2 && nOn[1].relations === "works_on×2" && nOn[1].mentions === 2, `Anita: 2 and 2, works_on both times (${JSON.stringify(nOn[1])})`);
   assert(nOn[2].co_mentions === 3 && nOn[2].support === 0 && nOn[2].relations === null && nOn[2].mentions === 4, `Bun: 3 co-mentions, no edge, 4 mentions in all (${JSON.stringify(nOn[2])})`);
   assert(nOn.every((n) => n.id !== NUM && n.id !== OB), "the subject is not its own neighbour, and the numeric entity is nobody's");
@@ -5203,7 +5211,7 @@ console.log("\n[43] db/graph-centrality.ts: mentions, degree and support as defi
   const r2 = await graphReport(run, "Open Brain", on);
   assert(JSON.stringify(r1) === JSON.stringify(r2), "two runs over the same rows are byte-identical");
   const text = render(r1);
-  for (const needle of ["SMD-1925", "5 of 6 edge rows carry confidence 1.00", "SMD-1935", "1 entity of the ranked types named only by digits", "no ticket status", "No recency term", "Coverage: 7 of 7 thoughts", "db/extract-entities.ts has not run", "--status tells the two apart"])
+  for (const needle of ["SMD-1925", "5 of 6 edge rows carry confidence 1.00", "SMD-1935", "1 entity of the ranked types named only by digits, dots, colons and spaces is out of scope", "admits it;", "no ticket status", "No recency term", "Coverage: 7 of 7 thoughts", "db/extract-entities.ts has not run", "--status tells the two apart", "can sum past support"])
     assert(text.includes(needle), `the rendered report says: ${needle}`);
   assert(text.includes("depends_on×3") && text.includes("exact match on the normalised name"), "…and shows the relation counts and how the subject resolved");
   assert(text.includes(r1.thoughts[0].created_at!) && text.split("\n").filter((l) => l.includes(r1.thoughts[0].id)).every((l) => !l.includes("…")),
@@ -5215,7 +5223,7 @@ console.log("\n[43] db/graph-centrality.ts: mentions, degree and support as defi
   const rOff = render(await graphReport(run, "Open Brain", off));
   assert(rOff.includes("--no-edges: ranked by co-occurrence alone") && /co_mentions  mentions/.test(rOff) && !/co_mentions  support/.test(rOff) && !/relations \(/.test(rOff),
     "edges off, the report says it is the control and the neighbourhood table has no support or relations column");
-  assert(/co_mentions  support  mentions/.test(text) && /relations \(thoughts asserting each\)/.test(text), "…which edges on has");
+  assert(/co_mentions  support  mentions/.test(text) && /relations \(thoughts asserting each; can sum past support\)/.test(text), "…which edges on has, the column head saying the counts can sum past support");
   const rNone = await graphReport(run, "qqqq", on);
   assert(rNone.resolution?.how === "none" && rNone.neighbours?.length === 0 && rNone.thoughts.length === 0 && render(rNone).includes(`nothing within trigram similarity ${FUZZY_FLOOR}`), "an unresolved subject: empty lists and a line saying which rungs were tried");
   const whole = await graphReport(run, null, off);
@@ -5226,7 +5234,8 @@ console.log("\n[43] db/graph-centrality.ts: mentions, degree and support as defi
   assert(!("error" in p) && p.subject === "Open Brain" && p.opts.limit === 5 && p.opts.types.join() === "tool,project" && !p.opts.edges && !p.opts.excludeNumeric && p.json && p.url === "postgres://x", "every flag lands");
   assert(!("error" in parseArgs([])) && (parseArgs([]) as { subject: null }).subject === null, "no argument is the whole graph");
   for (const [argv, why] of [[["--limit", "0"], "limit"], [["--limit"], "needs a value"], [["--types", "vegetable"], "vegetable"], [["a", "b"], "one subject"], [["--bogus"], "unknown flag"], [["--types", ""], "none given"],
-                             [["--limit", "5", "--limit", "50"], "given twice"], [["--json", "x", "--json"], "given twice"], [[""], "subject is empty"], [["  "], "subject is empty"]] as [string[], string][])
+                             [["--limit", "5", "--limit", "50"], "given twice"], [["--json", "x", "--json"], "given twice"], [[""], "subject is empty"], [["  "], "subject is empty"],
+                             [["--limit", "0x10"], "decimal"], [["--limit", "1e2"], "decimal"], [["--limit", " 7"], "decimal"], [["--limit", "7.0"], "decimal"]] as [string[], string][])
     assert("error" in parseArgs(argv) && (parseArgs(argv) as { error: string }).error.includes(why), `refused: ${argv.join(" ")} (${why})`);
   assert(pgArray(["a", "b"]) === "{a,b}" && pgArray([]) === "{}", "pgArray builds the literal");
   let threw = "";
@@ -5235,6 +5244,12 @@ console.log("\n[43] db/graph-centrality.ts: mentions, degree and support as defi
   const numeric = async (s: string) => (await db.query<{ m: boolean }>(`SELECT $1 ~ $2 AS m`, [s, NUMERIC_NAME_RE])).rows[0].m;
   assert((await numeric("021")) && (await numeric("11434")) && (await numeric("127.0.0.1")) && (await numeric("10 000")), "the numeric rule takes bare numbers, ports, addresses");
   assert(!(await numeric("pg16")) && !(await numeric("smd 1938")) && !(await numeric("migration 021")), "…and leaves anything with a letter");
+  // One pattern, two engines: Postgres reads it in scopeSql and coverage, JS in
+  // the ladder's probe. They must agree on every shape, or the probe stops
+  // firing while the SQL still filters (fourth review pass).
+  const js = new RegExp(NUMERIC_NAME_RE);
+  for (const name of ["021", "11434", "127.0.0.1", "10 000", "0:0", "1.", "pg16", "smd 1938", "migration 021", "x021", "", " 21", "2 1x"])
+    assert(js.test(name) === (await numeric(name)), `JS and Postgres agree on ${JSON.stringify(name)}: ${js.test(name)}`);
   const dup = parseArgs(["--types", "tool,tool,tool,tool,tool,tool"]);
   assert(!("error" in dup) && dup.opts.types.join() === "tool", "a repeated type is one type");
   assert(!render(await graphReport(run, null, { ...on, types: ["tool", "tool", "tool", "tool", "tool", "tool"] as GraphOptions["types"] })).includes("every type"),
@@ -5298,6 +5313,8 @@ console.log("\n[43] db/graph-centrality.ts: mentions, degree and support as defi
   const stopped = await resolveSubject(run, "021", on);
   assert(stopped.how === "none" && stopped.excluded === true, `021 is not guessed past to 021x: none, excluded (${stopped.how})`);
   assert(render(await graphReport(run, "021", on)).includes("pass --keep-numeric") && (await resolveSubject(run, "021", keep)).how === "exact", "…the flag is named, and kept it is exact");
+  const noNeighbour = render(await graphReport(run, "021x", { ...on, types: ["place"] }));
+  assert(noNeighbour.includes("No neighbour:") && !noNeighbour.includes("\n\n\n"), "a subject with nothing in scope beside it says so, with one blank line, not two (fourth review pass)");
   const guessedNumeric = await resolveSubject(run, "0219", on);
   assert(guessedNumeric.how === "fuzzy" && guessedNumeric.subjects[0].name === "021x", `a numeric name that is NOT an entity still reaches the guesses (${guessedNumeric.how})`);
   await db.query(`DELETE FROM thoughts WHERE id = $1`, [t11]);
