@@ -15,9 +15,11 @@
  * definition scripts/mechanism-yield.ts counts yield with, so the two cannot
  * disagree (the Verify: they report the same tagged count for a range).
  *
- * Run (no root package.json; the fork pins by exact version):
- *   bunx @commitlint/cli@19.6.1 --config scripts/commitlint.config.ts --from <base> --to <head>
- *   bunx @commitlint/cli@19.6.1 --config scripts/commitlint.config.ts --edit <file>   (the hook)
+ * Run (no root package.json; the fork pins by exact version; --bun because bunx
+ * otherwise honours the CLI's node shebang where node exists, and this config is
+ * a .ts the fork loads under bun — SMD-1870):
+ *   bunx --bun @commitlint/cli@19.6.1 --config scripts/commitlint.config.ts --from <base> --to <head>
+ *   bunx --bun @commitlint/cli@19.6.1 --config scripts/commitlint.config.ts --edit <file>   (the hook)
  * Merge commits are commitlint's default ignore, so "Merge origin/main …" and
  * "Merge pull request …" are skipped.
  */

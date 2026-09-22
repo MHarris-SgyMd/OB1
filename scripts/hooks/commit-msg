@@ -6,4 +6,4 @@
 # job accepts too. Run from the repo root (git invokes the hook there), so the
 # relative config path resolves.
 set -euo pipefail
-exec bunx @commitlint/cli@19.6.1 --config scripts/commitlint.config.ts --edit "$1"
+exec bunx --bun @commitlint/cli@19.6.1 --config scripts/commitlint.config.ts --edit "$1"

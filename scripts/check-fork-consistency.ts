@@ -208,7 +208,7 @@ type Metadata = {
   tags?: unknown;
   author?: { name?: unknown; [k: string]: unknown };
   requires?: { open_brain?: unknown; [k: string]: unknown };
-  requires_primitives?: string[];
+  requires_primitives?: string[]; // as the schema requires; a scalar here is check 1's finding, and checkDeps walks whatever is there as it always did
   requires_skills?: string[];
   [k: string]: unknown;
 };

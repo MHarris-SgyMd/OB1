@@ -721,7 +721,7 @@ jobs:
         run: |
           if [ "$EVENT" = merge_group ]; then from="$MG_FROM"; to="$MG_TO"; else from="$PR_FROM"; to="$PR_TO"; fi
           echo "Linting $from..$to"
-          bunx @commitlint/cli@19.6.1 --config scripts/commitlint.config.ts --from "$from" --to "$to"
+          bunx --bun @commitlint/cli@19.6.1 --config scripts/commitlint.config.ts --from "$from" --to "$to"
 
   workflow-lint:
     name: Workflow lint (actionlint + shellcheck)
