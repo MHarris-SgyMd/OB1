@@ -1366,7 +1366,9 @@ let haltedByProvider = false;
  * rate limit (third review pass).
  */
 function configShaped(e: unknown): boolean {
-  if (e instanceof ProviderError) return e.kind === "body" || (e.kind === "http" && [400, 401, 403, 404].includes(e.status ?? 0));
+  // 402 included (fifth review pass): a hosted provider out of credit answers
+  // it, and that is the account's state, not the row's.
+  if (e instanceof ProviderError) return e.kind === "body" || (e.kind === "http" && [400, 401, 402, 403, 404].includes(e.status ?? 0));
   const msg = (e as Error).message ?? "";
   return /Embedding width mismatch|returned no embedding/.test(msg);
 }
