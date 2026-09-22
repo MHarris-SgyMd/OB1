@@ -1482,16 +1482,67 @@ adds it as one remote MCP entry:
 claude mcp add --transport http open-brain-stable http://127.0.0.1:8010/mcp
 ```
 
-The **canary** and **working** tiers (refresh-on-merge, replay the query log, diff
-the ids; a per-worktree disposable copy) are deferred: the remaining blocker is
-SMD-1805's published images (SMD-1860). `db/tier.ts` and
-`deploy/compose.tiers.yaml` land with them. The `query_log.tier` column they read is
-already here — migration 045 (SMD-1490) added it, and the server stamps every
-query_log row with its `OB1_TIER` (stable | canary | working, NULL for a plain
-brain). 045 also added `query_log.arm` (the retrieval arm a search ran — `hybrid` or
-`keyword`) and populated the long-dead `filter` column: the search tools now take a
-metadata filter (`metadata @> filter`, a shallow object) and log it, so the offline
-replay gate can measure the filtered path against real use.
+## The canary and working tiers — refresh, replay, diff, promote (SMD-1806)
+
+The **canary** is main's shadow and the **working** tier is a per-worktree
+disposable copy; both are built from stable by one tool, `db/tier.ts`, whose four
+verbs are the promotion pipeline:
+
+```bash
+# snapshot stable into the canary (or a working copy) and migrate it forward
+bun tier.ts --refresh --from <stable-url> --to <canary-url> [--tier canary|working]
+# replay stable's logged searches against the canary and report the ranking
+bun tier.ts --replay  --from <stable-url> --to <canary-url> [--since <iso-ts>]
+# the same, printing ONLY what moved and exiting non-zero if anything did (the gate)
+bun tier.ts --diff    --from <stable-url> --to <canary-url> [--since <iso-ts>]
+# after a soak: stamp the canary's version onto stable
+bun tier.ts --promote --from <canary-url> --to <stable-url>
+```
+
+**`--refresh`** takes a faithful whole-database snapshot with `pg_dump | pg_restore`
+(thoughts, vectors, chunks, query_log, provenance, agents, audit — everything a
+migration might touch, so a migration meets *all* the real data), resets the target
+and restores into it, then runs `migrate.ts` forward with the merged tree. It is
+destructive to `--to` and refuses a non-loopback target unless
+`OB1_ALLOW_REMOTE_DB=1`. It needs a `pg_dump`/`pg_restore` whose major version is at
+least the source server's — the pgvector image the tiers run carries matching client
+tools; a host needs `postgresql-client >=` the server. A branch that changes the
+embedding model or width cannot inherit stable's vectors: `migrate.ts` refuses the
+mismatch on the refreshed copy, so that branch's working tier is rebuilt from the
+records instead (`ingest-records.ts` then `reembed.ts`, the claim path) — a real
+test of the re-embed path, not a cost.
+
+**`--replay` / `--diff`** are the *live* half of the replay gate (SMD-1295, whose
+`db/test-replay.ts` is the offline, model-free, fixture-vector half CI runs). For
+each search stable logged since the canary's last refresh, the query is re-run
+against the canary through the shipped retrieval and the returned ids are diffed
+against the ids stable recorded — the measured per-PR **"what moved"**, in place of
+the hand-written control run. The **keyword** arm replays with no model (the arm
+`test-live` [20] exercises end to end); the **hybrid** arm re-embeds the query text,
+so it replays only when a provider is configured (`OB1_EVAL_EMBED`, as
+`evals/eval-replay.ts` uses) and is skipped-with-a-note otherwise; a row logged
+before migration 045 carries a NULL arm and is skipped rather than guessed.
+
+The three tiers run as one stack, `deploy/compose.tiers.yaml` — three Postgres
+services, one shared Ollama, three servers on three loopback ports — built from the
+checkout (the published stable image is SMD-1860, not yet cut). A client reaches the
+working tier as a second remote MCP entry a transcript can tell from stable's:
+
+```bash
+claude mcp add --transport http open-brain-working http://127.0.0.1:8012/mcp
+```
+
+**Deferred to SMD-1805 + SMD-1860:** the *canary CI job on push to `main`* (which
+runs the refresh/replay/diff against the **published** images through the merge
+queue) and `--promote`'s image-repoint half. The engine, the compose stack and the
+end-to-end test ([20]) do not need them and are here now.
+
+The `query_log.tier` column the tiers read is from migration 045 (SMD-1490): the
+server stamps every query_log row with its `OB1_TIER` (stable | canary | working,
+NULL for a plain brain). 045 also added `query_log.arm` (the retrieval arm a search
+ran — `hybrid` or `keyword`) and populated the long-dead `filter` column: the search
+tools now take a metadata filter (`metadata @> filter`, a shallow object) and log
+it, so both replay halves can measure the filtered path against real use.
 
 **Prune seeks, and the write is measured (migration 047, SMD-1492).** The canary
 replays this log, so a lost row is a lost replay, and a scheduled prune (SMD-1794)
@@ -1626,7 +1677,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 1353 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 601 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
+./with-postgres.sh bun test-live.ts         # 611 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```

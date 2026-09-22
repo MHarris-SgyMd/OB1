@@ -45,7 +45,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-// This module is db/env.ts (moved from evals/ by SMD-1954's fifth review pass,
+// This module is db/env.ts (moved from evals/ by SMD-1985, ahead of SMD-1954,
 // so db/sync-linear.ts reaches it from a container that mounts db/ and
 // server-portable/ alone); evals/env.ts re-exports it. The search path below
 // is spelled from the repo root, so the move changed no file it looks at.
