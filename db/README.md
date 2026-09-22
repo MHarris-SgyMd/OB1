@@ -1341,7 +1341,11 @@ source and writes nothing. The write is idempotent on the deterministic id: an
 unchanged record is a no-op, an edited one updates in place, a new one inserts, a
 different record whose content is byte-identical to one already stored is skipped
 (the partial-unique fingerprint index) rather than crashing the run — so a rebuild
-writes exactly the rows that moved. It writes **bare** rows on purpose: vectors and
+writes exactly the rows that moved. It **adds and updates, but does not remove**: a
+record deleted from its source (a memory file removed, a ticket dropped from the
+dump) leaves its row behind, so a run that must reflect deletions starts from a
+wiped brain (the "a wipe costs one re-ingest" above), not an incremental pass. It
+writes **bare** rows on purpose: vectors and
 chunk rows are `reembed.ts`'s job, which walks the new rows through the claim table
 and embeds them exactly as a capture would (chunking long records), so the two
 tools together produce the same rows a live capture would.

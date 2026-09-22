@@ -262,16 +262,18 @@ export async function upsertRecord(sql: SQL, doc: Doc): Promise<UpsertResult> {
 /**
  * Drop records whose content is byte-identical to one already kept in this run,
  * keeping the first — the pre-filter that spares most cross-record fingerprint
- * collisions a round trip. Returns the kept docs and the count dropped.
+ * collisions a round trip. Keyed on the content itself, not a hash of it: a hash
+ * collision here would silently drop a distinct record before the database's
+ * (stronger) content_fingerprint ever saw it. Returns the kept docs and the
+ * count dropped.
  */
 export function dedupeByContent(docs: Doc[]): { docs: Doc[]; dropped: number } {
   const seen = new Set<string>();
   const kept: Doc[] = [];
   let dropped = 0;
   for (const d of docs) {
-    const h = Bun.hash.xxHash64(d.content).toString(16);
-    if (seen.has(h)) { dropped++; continue; }
-    seen.add(h);
+    if (seen.has(d.content)) { dropped++; continue; }
+    seen.add(d.content);
     kept.push(d);
   }
   return { docs: kept, dropped };
