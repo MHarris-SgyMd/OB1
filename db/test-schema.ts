@@ -5521,6 +5521,7 @@ console.log("\n[44] Migration 047: the actor on the row — who wrote the curren
   const bfSrc = await src("backfill_thought_actors(integer)");
   assert(/WHERE a\.action = 'capture' OR a\.fb IS DISTINCT FROM a\.fa/.test(bfSrc) && /content_fingerprint_of\(a\.diff->'content'->>'after'\)\s+AS fa\s+FROM thought_audit a[\s\S]*?OFFSET 0\s+\) a/.test(bfSrc) && /a\.fa IS NOT DISTINCT FROM f\.fp\) DESC,\s+a\.created_at DESC, a\.seq DESC/.test(bfSrc) && /t\.updated_at IS NOT DISTINCT FROM d\.updated_at/.test(bfSrc),
     "the backfill reads the audit row that changed the text by 003's rule — the trigger's rule — the one whose text stands first, then by created_at, then seq (never seq alone: a pre-047 seq is heap order — second review pass), and re-checks updated_at on the locked row, so a thought edited since the scan is left to the next pass");
+  assert(/\(a\.action = 'capture' AND NOT bool_or\(a\.action = 'update'\) OVER \(\)\)\) AS vouched/.test(bfSrc), "a capture is vouched from the set — no update ever changed the text — not from sorting first (fourth review pass)");
   assert(/CROSS JOIN LATERAL \(SELECT content_fingerprint_of\(t\.content\) AS fp OFFSET 0\) f/.test(bfSrc), "the thought's own text is hashed once per thought behind an OFFSET 0 fence, and each candidate row's two texts once behind another — without them the planner ran the hashes in every place the value is read (third review pass)");
   assert(/COALESCE\(ob1_registry_kind\(w\.canonical_agent_id, w\.name\), w\.actor_kind\)/.test(bfSrc) && /NULLIF\(btrim\(a\.actor_name\), ''\) AS name/.test(bfSrc), "…the registry's kind now first, the audit row's stamp as the fallback — a reclassified key reaches its rows — and the name trimmed as the stamp trims it (first review pass)");
   assert(!/DROP TABLE/.test(bfSrc) && /CREATE TEMP TABLE %I ON COMMIT DROP/.test(bfSrc), "…and names its temp table per call, dropped at commit, with nothing dropped by hand (023's shape; CLAUDE.md's rail)");
@@ -5615,6 +5616,18 @@ console.log("\n[44] Migration 047: the actor on the row — who wrote the curren
     ('${ANCH}', 'update', 'bot-key', '{"content": {"before": "047: typed by the operator", "after": "047: rewritten by the agent, seq inverted"}}'::jsonb, '2026-01-01 00:00:00+00', 900000)`);
   await db.exec(`SELECT backfill_thought_actors()`);
   assert((await marks(ANCH)) === "agent/bot-key", `with one created_at and the rewrite's seq BELOW the capture's, the row whose after-text is the thought's text still decides: the agent's (${await marks(ANCH)}; second review pass)`);
+  // The same inverted pair, but the text that stands matches neither: the
+  // capture sorts first and must NOT stand for it — an update changed the
+  // text once, so the capturer's text is gone (fourth review pass, planted).
+  const TIE = "47474747-4747-4747-8747-474747474758";
+  await db.exec(`ALTER TABLE thoughts DISABLE TRIGGER thoughts_audit; ALTER TABLE thoughts DISABLE TRIGGER thoughts_stamp_actor`);
+  await db.exec(`INSERT INTO thoughts (id, content, metadata, embedding) VALUES ('${TIE}', '047: Z, written unaudited', '{"actor_kind": "operator", "actor_name": "op-key"}'::jsonb, '${unit(65)}'::vector)`);
+  await db.exec(`ALTER TABLE thoughts ENABLE TRIGGER thoughts_audit; ALTER TABLE thoughts ENABLE TRIGGER thoughts_stamp_actor`);
+  await db.exec(`INSERT INTO thought_audit (thought_id, action, actor_name, diff, created_at, seq) OVERRIDING SYSTEM VALUE VALUES
+    ('${TIE}', 'capture', 'op-key', '{"metadata": {}}'::jsonb, '2026-01-02 00:00:00+00', 900003),
+    ('${TIE}', 'update', 'bot-key', '{"content": {"before": "047: X", "after": "047: Y"}}'::jsonb, '2026-01-02 00:00:00+00', 900002)`);
+  await db.exec(`SELECT backfill_thought_actors()`);
+  assert((await marks(TIE)) === "-/-", `a capture sorting above an unmatched update, on a created_at tie with the seq inverted, does not stand for a text nobody logged: nobody does (${await marks(TIE)}; fourth review pass)`);
   // Two rows can both have written the text that stands — X, then Y, then X
   // again, then Y, then X: the second and the fourth edits end on X. Then the
   // order decides, newest first, and the ordering mutant (oldest first) fails
@@ -5653,8 +5666,26 @@ console.log("\n[44] Migration 047: the actor on the row — who wrote the curren
     await tx.query(`INSERT INTO thoughts (id, content, content_fingerprint, metadata, embedding) VALUES ('${LEG}', '047: A Legacy Row', NULL, '{}'::jsonb, '${unit(63)}'::vector)`);
   });
   r = await edit(LEG, "047:   a legacy   ROW", null, { name: "bot-key" });
+  // The column stale after a raw content UPDATE, then an unchanged edit
+  // through update_thought moves it to the right value: bytes differ, the
+  // column moved between two values — and the text did not (fourth review
+  // pass: read as a change, it re-stamped, and the backfill stripped it).
+  const STALE = "47474747-4747-4747-8747-474747474757";
+  await db.transaction(async (tx) => {
+    await tx.query(`SELECT set_config('ob1.actor', '{"name": "op-key"}', true)`);
+    await tx.query(`INSERT INTO thoughts (id, content, content_fingerprint, metadata, embedding) VALUES ('${STALE}', '047: stale, typed by the operator', content_fingerprint_of('047: stale, typed by the operator'), '{}'::jsonb, '${unit(64)}'::vector)`);
+  });
+  await db.exec(`UPDATE thoughts SET content = '047: stale, rewritten by hand' WHERE id = '${STALE}'`);
+  assert((await marks(STALE)) === "-/-", "a raw content UPDATE strips the mark and leaves the fingerprint column stale");
+  const staleEdit = await edit(STALE, "047:   STALE, rewritten BY hand", null, { name: "bot-key" });
+  assert(staleEdit.ok === true && (await marks(STALE)) === "-/-" && (await one<{ f: string }>(`SELECT content_fingerprint AS f FROM thoughts WHERE id = $1::uuid`, [STALE]))?.f === (await one<{ f: string }>(`SELECT content_fingerprint_of('047: stale, rewritten by hand') AS f`))?.f,
+    `an unchanged edit that moves the stale column to the right value keeps the mark as it was — nobody's — while the column is corrected (${await marks(STALE)})`);
+  await db.exec(`SELECT backfill_thought_actors()`);
+  assert((await marks(STALE)) === "-/-", "…and the backfill agrees: the raw update's row wrote the text that stands, and it names nobody");
   assert(r.ok === true && (await marks(LEG)) === "operator/op-key" && (await one<{ f: string | null }>(`SELECT content_fingerprint AS f FROM thoughts WHERE id = $1::uuid`, [LEG]))?.f !== null,
     `a re-spelling of a row with no fingerprint yet keeps the operator's mark while the column takes its first value (${await marks(LEG)})`);
+  assert(/content_fingerprint_of\(OLD\.content\) IS NOT DISTINCT FROM\s+CASE WHEN NEW\.content_fingerprint IS NOT NULL AND NEW\.content_fingerprint IS DISTINCT FROM OLD\.content_fingerprint\s+THEN NEW\.content_fingerprint\s+ELSE content_fingerprint_of\(NEW\.content\) END/.test(stamp),
+    "the stamp hashes OLD's text always and trusts NEW's column only when it moved to a value (fourth review pass)");
 
   // The filter: 014's route reaches the keys through the GIN it already has,
   // on the walk and on the exact branch, and the keyword arm's filter too.

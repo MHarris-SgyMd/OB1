@@ -48,21 +48,23 @@
 --      diff, so "an agent rewrote the operator's note" is in the log.
 --
 --   3. THE BACKFILL, backfill_thought_actors(p_limit): for every thought, the
---      latest audit row that WROTE ITS CONTENT — a capture, or an update whose
---      diff carries `content` — gives the writer: the registry's kind for its
---      id or name NOW, else the kind 046 stamped on the row, and its
---      actor_name. The registry first: the mark is a view of the row's
+--      audit row that WROTE THE TEXT THAT STANDS — an update whose after-text
+--      hashes to the row's text, else the capture when no update ever changed
+--      the text — gives the writer: the registry's kind for its id or name
+--      NOW, else the kind 046 stamped on the row, and its actor_name. The registry first: the mark is a view of the row's
 --      writer, not history, so a key reclassified by set_agent_kind
 --      propagates to its rows on the next pass (046's audit rows keep the
 --      kind they were stamped with — that IS history; first review pass).
---      "Latest" is decided in three steps. First, the row whose text IS the
---      thought's current text: an update row whose after-fingerprint equals
---      the row's fingerprint wrote what stands (a capture row carries no
---      text in its diff — 008 records metadata on a capture — so it stands
---      for the text only when no update ever changed it; update rows present
---      and none matching means the text was written unaudited, and nobody
---      is stamped, as for a thought with no row at all — third review
---      pass). Then created_at, newest first. Then
+--      Which row, in three steps. First, the row whose text IS the thought's
+--      current text: an update row whose after-text hashes to the row's text
+--      (hashed from the row, not its content_fingerprint column, which a raw
+--      update leaves stale) wrote what stands. A capture row carries no text
+--      in its diff — 008 records metadata on a capture — so it stands for the
+--      text only when no update ever changed it; that a capture-only thought
+--      was rewritten unaudited cannot be seen, and the capturer stands.
+--      Update rows present and none matching means the text was written
+--      unaudited, and nobody is stamped, as for a thought with no row at all
+--      (third review pass). Then created_at, newest first. Then
 --      `seq`, a monotonic identity this file adds to thought_audit, for two
 --      rows one transaction wrote: created_at is now(), one value for the
 --      whole transaction, and id is a random uuid, so a capture and an edit
@@ -182,20 +184,26 @@ BEGIN
   -- metadata touch compares no hash at all.
   IF TG_OP = 'UPDATE' THEN
     v_same := NEW.content IS NOT DISTINCT FROM OLD.content;
-    -- A fingerprint column that MOVED from one value to another says the
-    -- text did (update_thought writes it with the content) and costs nothing
-    -- to read. One that did not move says nothing — a raw content UPDATE
-    -- leaves it stale — and a move from or to NULL says nothing either: a
-    -- row 023's batches have not reached takes its first fingerprint on any
-    -- edit, a re-spelling included, and 018 sets NULL when another row holds
-    -- the key (third review pass: NULL → set on a re-spelling had re-stamped
-    -- the row, and the backfill then disagreed). Then the two texts are
-    -- hashed (second review pass: two hashes on every content edit was +57%
-    -- on a bulk UPDATE; through update_thought on a fingerprinted row it is
-    -- now none).
-    IF NOT v_same AND (OLD.content_fingerprint IS NULL OR NEW.content_fingerprint IS NULL
-                       OR NEW.content_fingerprint = OLD.content_fingerprint) THEN
-      v_same := content_fingerprint_of(NEW.content) IS NOT DISTINCT FROM content_fingerprint_of(OLD.content);
+    -- The bytes differ: is it the same text by 003's rule? OLD's text is
+    -- hashed — always, because OLD's column cannot be trusted: a raw content
+    -- UPDATE leaves it stale, and the next edit through update_thought then
+    -- moves it from the stale value to the right one while the text stands
+    -- (fourth review pass: "moved between two values" had been read as a
+    -- change of text, and an unchanged edit re-stamped). NEW's column is
+    -- trusted when it moved to a value — update_thought writes fp(text)
+    -- there, and a raw writer's wrong value reads as a change, the answer it
+    -- would get anyway — else NEW's text is hashed too: the column that did
+    -- not move says nothing, and a move from or to NULL says nothing (a row
+    -- 023's batches have not reached takes its first fingerprint on any
+    -- edit; 018 sets NULL when another row holds the key — third review
+    -- pass). One hash on an edit through update_thought, two on a raw one
+    -- (second review pass: two on every content edit was +57% on a bulk
+    -- UPDATE; a re-embed or metadata touch hashes nothing).
+    IF NOT v_same THEN
+      v_same := content_fingerprint_of(OLD.content) IS NOT DISTINCT FROM
+                CASE WHEN NEW.content_fingerprint IS NOT NULL AND NEW.content_fingerprint IS DISTINCT FROM OLD.content_fingerprint
+                     THEN NEW.content_fingerprint
+                     ELSE content_fingerprint_of(NEW.content) END;
     END IF;
   END IF;
   IF v_same THEN
@@ -300,11 +308,12 @@ BEGIN
   END IF;
 
   /**
-   * Every thought's writer, from the log: the row that wrote the current
-   * text — an update whose after-fingerprint is the row's — else the latest
-   * content-writing row by created_at, then seq (a capture, or an update
-   * whose text changed), read through 008's thought_id index — and nobody
-   * when update rows exist but none wrote the text that stands. Its kind is what the registry says
+   * Every thought's writer, from the log: the update row whose after-text is
+   * the row's text, else the capture when no update ever changed the text —
+   * the newest by created_at then seq among candidates — read through 008's
+   * thought_id index; nobody when update rows exist but none wrote the text
+   * that stands (a capture-only thought rewritten unaudited cannot be told
+   * apart, and its capturer stands). Its kind is what the registry says
    * NOW for its id or name — the trigger's rule applied late, and a
    * reclassification carried to the rows — else the kind 046 stamped on the
    * row (a key since removed from the registry). A thought with no such row
@@ -355,7 +364,13 @@ BEGIN
         -- two derive one value and a pass after a pass writes nothing
         -- (run-it, first review pass: a padded name flip-flopped every pass).
         SELECT a.actor_kind, NULLIF(btrim(a.actor_name), '') AS name, a.canonical_agent_id,
-               (a.action = 'capture' OR a.fa IS NOT DISTINCT FROM f.fp) AS vouched
+               -- Decided from the SET, not from which row sorts first: a
+               -- capture stands only when no update ever changed the text
+               -- (fourth review pass, planted: a pre-047 seq inverted under a
+               -- created_at tie put the capture on top of an unmatched update,
+               -- and it was vouched by its place in the order).
+               ((a.action = 'update' AND a.fa IS NOT DISTINCT FROM f.fp)
+                OR (a.action = 'capture' AND NOT bool_or(a.action = 'update') OVER ())) AS vouched
         FROM (
           -- Each candidate row's two texts hashed ONCE, behind an OFFSET 0:
           -- read inline, the planner hashed them in every place the value is
