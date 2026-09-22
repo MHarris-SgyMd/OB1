@@ -5063,16 +5063,21 @@ console.log("\n[43] Migration 045: the event shape at the write boundary — who
     "…cites a uuid[], the window and backfilled_at timestamptz");
   assert((await one<{ e: boolean }>(`SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'ob1_agents' AND column_name = 'kind') AS e`)).e, "ob1_agents gains kind");
   assert(/ob1_agents_kind_check/.test(await refused(`INSERT INTO ob1_agents (label, kind) VALUES ('robot-key', 'robot')`)), "…which the CHECK holds to operator, agent or ingested");
-  const idx = await q<{ indexname: string }>(`SELECT indexname FROM pg_indexes WHERE tablename = 'thought_audit' AND indexname IN ('thought_audit_actor_kind_idx', 'thought_audit_trust_idx')`);
-  assert(idx.length === 2, "two partial indexes, on actor_kind and on trust — the reads SMD-1724 and SMD-1726 build");
+  const idx = await q<{ indexname: string }>(`SELECT indexname FROM pg_indexes WHERE tablename = 'thought_audit' AND indexname IN ('thought_audit_actor_kind_idx', 'thought_audit_trust_idx', 'thought_audit_awaiting_kind_idx')`);
+  assert(idx.length === 3, "three partial indexes: on actor_kind and on trust — the reads SMD-1724 and SMD-1726 build — and on the rows still waiting for a kind, by name, which the census, the backfill and the gate read");
   assert(lastDefinerOf("thoughts_write_audit").startsWith("045") && lastDefinerOf("thought_audit_refuse_mutation").startsWith("045") && lastDefinerOf("upsert_thought").startsWith("045") && lastDefinerOf("update_thought").startsWith("045") && lastDefinerOf("delete_thought").startsWith("042"),
     `045 is the last definer of the audit trigger, the refusal trigger and both writers; delete_thought stays 042's — a tombstone declares nothing (${lastDefinerOf("delete_thought")})`);
   const tbl = (await one<{ c: string | null }>(TABLE_COMMENT_SQL, ["thought_audit"])).c ?? "";
   assert(/RANGE on created_at by month/.test(tbl) && /not applied/.test(tbl) && /SMD-1697/.test(tbl), "the table's comment states the partition key chosen and not applied, and what decides when");
   const src = async (sig: string) => String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = $1::regprocedure`, [sig])).s);
   const trig = await src("thoughts_write_audit()");
-  assert(/ob1:audit-event-from-the-key/.test(trig) && /FROM ob1_agents WHERE canonical_agent_id = v_agent/.test(trig) && /FROM ob1_agents WHERE label = actor->>'name'/.test(trig),
-    "the trigger carries 045's sentinel and reads the kind from the registry, by id then by label");
+  assert(/ob1:audit-event-from-the-key/.test(trig) && /ob1_registry_kind\(v_agent, actor->>'name'\)/.test(trig) && /ob1_trust_ceiling\(v_kind, v_declared\)/.test(trig),
+    "the trigger carries 045's sentinel and reads the kind and the trust through the two shared rules — the registry by id then by label, the ceiling");
+  const registry = await src("ob1_registry_kind(uuid, text)"), ceiling = await src("ob1_trust_ceiling(text, text)");
+  assert(/canonical_agent_id = p_agent/.test(registry) && /label = p_label/.test(registry) && /array_position/.test(ceiling),
+    "…which the amendment gate and the backfill call too, so the three cannot drift");
+  assert(/ob1_registry_kind\(OLD\.canonical_agent_id, OLD\.actor_name\)/.test(await src("thought_audit_refuse_mutation()")) && /ob1_registry_kind\(a\.canonical_agent_id, a\.actor_name\)/.test(await src("backfill_thought_audit_events(integer)")),
+    "(the gate and the backfill do call them)");
   assert(!/actor->>'source'/.test(trig) && /- 'via'/.test(trig) && !/- 'source'/.test(trig), "…reads no actor source (the column is the row's own), strips via into origin and leaves an actor's source in the blob");
   for (const [re, what] of [[/jsonb_build_object\('metadata', NEW\.metadata\)/, "008's capture diff"], [/v_diff = '\{\}'::jsonb/, "008's no-op guard"], [/actor->>'agent_id'/, "010's agent id"], [/'previous_derived_from'/, "025's provenance in the delete row"]] as [RegExp, string][])
     assert(re.test(trig), `…carrying ${what}`);
@@ -5206,18 +5211,23 @@ console.log("\n[43] Migration 045: the event shape at the write boundary — who
     COMMIT;`);
   ev = await last(stale.id, "delete");
   assert(ev?.trust === "operator" && ev?.actor_kind === "operator" && ev?.actor_context === null, `a tombstone after an event-bearing capture in one transaction: trust is the key's, nothing claimed — the tombstone reads no event (${ev?.trust}, ${JSON.stringify(ev?.actor_context)})`);
-  // A call the function refuses before its write — NOT_FOUND here — fires no
-  // trigger, so nothing consumed its event; the next call in the transaction
-  // sets the setting itself, empty, and so declares none.
-  await db.exec(`BEGIN;
-    SELECT update_thought('11111111-1111-4111-8111-111111111111'::uuid, 'nobody', NULL, NULL, NULL, NULL, '{"name": "op-key", "agent_id": "${OP}"}'::jsonb, NULL, NULL, '{"stance": "inferred"}'::jsonb);
-    SELECT upsert_thought('045: a capture after a refused call', '{"metadata": {}, "actor": {"name": "op-key", "agent_id": "${OP}"}}'::jsonb, '${unit(18)}'::vector);
-    COMMIT;`);
-  ev = await last((await one<{ id: string }>(`SELECT id FROM thoughts WHERE content = '045: a capture after a refused call'`)).id, "capture");
-  assert(ev?.stance === null && ev?.actor_kind === "operator", `a call refused before its write leaves its event unconsumed; the next function call in the transaction overwrites the setting rather than inheriting it (${ev?.stance})`);
   ev = await last(feed.id, "update");
   assert(ev?.stance === null && ev?.cites === null && ev?.valid_from === null && ev?.actor_kind === "operator",
     `…and a raw UPDATE of thoughts after it inherits no event either — the trigger cleared the setting when it read it — while the ACTOR, 008's and transaction-scoped by design, is still the last call's (${ev?.stance}, ${ev?.actor_kind})`);
+  // A call the function refuses before its write — NOT_FOUND here — fires no
+  // trigger; the functions write the setting only just before their write
+  // (second review pass), so a refused call leaves nothing on the transaction:
+  // a raw UPDATE right after it, and a capture after that, both declare none.
+  const rawBefore = (await rowsOf(feed.id, "update")).length;
+  await db.exec(`BEGIN;
+    SELECT update_thought('11111111-1111-4111-8111-111111111111'::uuid, 'nobody', NULL, NULL, NULL, NULL, '{"name": "op-key", "agent_id": "${OP}"}'::jsonb, NULL, NULL, '{"stance": "inferred", "cites": ["${cited.id}"]}'::jsonb);
+    UPDATE thoughts SET metadata = metadata || '{"raw_after_refusal": true}'::jsonb WHERE id = '${feed.id}'::uuid;
+    SELECT upsert_thought('045: a capture after a refused call', '{"metadata": {}, "actor": {"name": "op-key", "agent_id": "${OP}"}}'::jsonb, '${unit(18)}'::vector);
+    COMMIT;`);
+  ev = await last(feed.id, "update");
+  assert((await rowsOf(feed.id, "update")).length === rawBefore + 1 && ev?.stance === null && ev?.cites === null, `a raw UPDATE right after a call refused before its write inherits no event: the refused call never wrote the setting (${ev?.stance}, ${JSON.stringify(ev?.cites)})`);
+  ev = await last((await one<{ id: string }>(`SELECT id FROM thoughts WHERE content = '045: a capture after a refused call'`)).id, "capture");
+  assert(ev?.stance === null && ev?.actor_kind === "operator", `…and neither does the next function call (${ev?.stance})`);
 
   // A bad SHAPE is refused, as 025 refuses a bad derived_from; the message
   // names the field.
@@ -5248,7 +5258,7 @@ console.log("\n[43] Migration 045: the event shape at the write boundary — who
   // One transaction per attempt (the setting is transaction-local); a refusal
   // rolls it back and its message is what the assertion reads.
   const amend = async (stmt: string) => { try { await db.transaction(async (tx) => { await tx.exec(`SELECT set_config('ob1.audit_amend', 'backfill', true)`); await tx.exec(stmt); }); return ""; } catch (err) { return (err as Error).message; } };
-  assert(/changes something else/.test(await amend(`UPDATE thought_audit SET diff = '{}'::jsonb WHERE id = '${paperRow}'`)), "under the setting, an UPDATE of diff is refused — the amendment fills the derived columns and nothing else");
+  assert(/here a column other than actor_kind, trust, origin and backfilled_at changes/.test(await amend(`UPDATE thought_audit SET diff = '{}'::jsonb WHERE id = '${paperRow}'`)), "under the setting, an UPDATE of diff is refused, the condition named — the amendment fills the derived columns and nothing else");
   assert(/derives to/.test(await amend(`UPDATE thought_audit SET actor_kind = 'agent', backfilled_at = now() WHERE id = '${paperRow}'`)), "…a set actor_kind is never changed");
   assert(/append-only: DELETE/.test(await amend(`DELETE FROM thought_audit WHERE id = '${paperRow}'`)), "…and DELETE is refused under the setting as without it");
   assert(/append-only: TRUNCATE/.test(await refused(`TRUNCATE thought_audit`)) && /append-only: TRUNCATE/.test(await amend(`TRUNCATE thought_audit`)), "…and TRUNCATE, which fires no row trigger, is refused by the statement trigger, setting or no setting");
@@ -5262,7 +5272,21 @@ console.log("\n[43] Migration 045: the event shape at the write boundary — who
   assert((await amend(`UPDATE thought_audit SET actor_kind = 'agent', trust = 'agent', backfilled_at = now() WHERE id = '${nobodyRow}'`)) === "", "a fill of NULL kind and trust with the registry's word and the stamp is the one lawful UPDATE");
   ev = (await rowsOf(nobody.id, "capture"))[0];
   assert(ev?.actor_kind === "agent" && ev?.trust === "agent" && ev?.backfilled_at !== null, "…and it lands");
-  assert(/fills nothing/.test(await amend(`UPDATE thought_audit SET backfilled_at = now() WHERE id = '${nobodyRow}'`)), "…and the same row cannot be stamped again with nothing to fill");
+  assert(/here nothing is filled/.test(await amend(`UPDATE thought_audit SET backfilled_at = now() WHERE id = '${nobodyRow}'`)), "…and the same row cannot be stamped again with nothing to fill");
+  // A row a tool INSERTed with a kind and no trust (the trigger never writes
+  // one) and a door in the blob: the backfill must fill trust and origin, not
+  // meet its own gate — one such row would otherwise fail every pass for the
+  // whole brain (run-it, second review pass).
+  const HALF_ROW = "55555555-5555-4555-8555-555555555555";
+  await db.exec(`INSERT INTO thought_audit (thought_id, action, actor_name, actor_kind, diff, actor_context) VALUES ('${HALF_ROW}', 'capture', 'bot-key', 'agent', '{}'::jsonb, '{"via": "tool-door"}'::jsonb)`);
+  const half = (await one<{ r: { rows: number } }>(`SELECT backfill_thought_audit_events() AS r`)).r;
+  ev = (await rowsOf(HALF_ROW, "capture"))[0];
+  assert(half.rows >= 1 && ev?.trust === "agent" && ev?.origin === "tool-door" && ev?.backfilled_at !== null, `a row with a kind and no trust is filled by the backfill — trust from the kind it has, origin from its blob — rather than refused by the gate (${ev?.trust}, ${ev?.origin})`);
+  const EMPTY_DOOR = "66666666-6666-4666-8666-666666666666";
+  await db.exec(`INSERT INTO thought_audit (thought_id, action, actor_name, diff, actor_context) VALUES ('${EMPTY_DOOR}', 'capture', 'bot-key', '{}'::jsonb, '{"via": ""}'::jsonb)`);
+  await db.exec(`SELECT backfill_thought_audit_events()`);
+  ev = (await rowsOf(EMPTY_DOOR, "capture"))[0];
+  assert(ev?.origin === null && ev?.actor_kind === "agent" && (ev?.actor_context as { via?: string })?.via === "", "…and an empty via is no door: origin stays NULL, the kind is filled, the blob keeps the empty string");
   assert(/append-only/.test(await refused(`UPDATE thought_audit SET actor_kind = NULL WHERE id = $1::uuid`, [nobodyRow])), "…after which the ordinary refusal stands again — the setting was transaction-local");
 
   // The backfill: a SMD-1541-shaped row (via in the blob, no origin) and rows

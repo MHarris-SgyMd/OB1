@@ -137,6 +137,12 @@
 --   Two partial indexes (actor_kind, trust) for the reads SMD-1724/1726 build;
 --   the trigger's cost gains one primary-key lookup on ob1_agents per row.
 --
+-- ON THE WORD "TRUNCATE" BELOW
+--   CLAUDE.md's guard rail forbids TRUNCATE in SQL files. The one occurrence
+--   here is a BEFORE TRUNCATE trigger that REFUSES it — the rail's intent,
+--   applied to the one statement 008's row triggers could not see. No file in
+--   this repository truncates thought_audit.
+--
 -- SAFETY
 --   Additive: thoughts is untouched; thought_audit and ob1_agents gain nullable
 --   columns behind IF NOT EXISTS; CHECKs are added once (pg_constraint guarded);
@@ -228,6 +234,74 @@ CREATE INDEX IF NOT EXISTS thought_audit_actor_kind_idx
 CREATE INDEX IF NOT EXISTS thought_audit_trust_idx
   ON thought_audit (trust, created_at DESC)
   WHERE trust IS NOT NULL;
+
+-- The rows still waiting on a kind, by the name they carry: what the backfill
+-- fills, the census counts and names, and the amendment gate re-derives — the
+-- complement of the two indexes above, and the shape every such read has.
+CREATE INDEX IF NOT EXISTS thought_audit_awaiting_kind_idx
+  ON thought_audit (actor_name)
+  WHERE actor_kind IS NULL AND actor_name IS NOT NULL;
+
+-- ---------------------------------------------------------------------------
+-- Two rules, one copy each (second review pass: the audit trigger, the
+-- amendment gate and the backfill had each spelled both, and the gate's
+-- correctness rests on the three agreeing byte for byte).
+--
+-- ob1_registry_kind: the kind the registry holds for a writer — by the id the
+-- envelope carries when the registry knows it (010), else by the key's name
+-- (the label 010 keeps equal to it). NULL: unknown, or no such key.
+-- ob1_trust_ceiling: the trust a write gets from its key's kind and the trust
+-- it declared — the kind when undeclared; the declaration when it stands
+-- under the kind (operator > agent > ingested); the kind when it does not; and
+-- for a key of unknown kind only a declared `ingested`, a lowering nobody can
+-- abuse. SQL-language, so the planner inlines both.
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION ob1_registry_kind(p_agent uuid, p_label text)
+RETURNS text
+LANGUAGE sql
+STABLE
+AS $$
+  SELECT CASE
+    WHEN p_agent IS NOT NULL AND EXISTS (SELECT 1 FROM ob1_agents g WHERE g.canonical_agent_id = p_agent)
+      THEN (SELECT g.kind FROM ob1_agents g WHERE g.canonical_agent_id = p_agent)
+    ELSE (SELECT g.kind FROM ob1_agents g WHERE g.label = p_label)
+  END
+$$;
+
+COMMENT ON FUNCTION ob1_registry_kind(uuid, text) IS
+  'The kind ob1_agents holds for a writer: by canonical_agent_id when the registry knows the id, else by label (the key''s name). NULL when unclassified or unknown. The one lookup the audit trigger, the amendment gate and backfill_thought_audit_events share. Migration 045 / SMD-1730.';
+
+CREATE OR REPLACE FUNCTION ob1_trust_ceiling(p_kind text, p_declared text)
+RETURNS text
+LANGUAGE sql
+IMMUTABLE
+AS $$
+  SELECT CASE
+    WHEN p_kind IS NULL THEN CASE WHEN p_declared = 'ingested' THEN 'ingested' END
+    WHEN p_declared IS NULL THEN p_kind
+    WHEN array_position(ARRAY['ingested', 'agent', 'operator'], p_declared)
+         <= array_position(ARRAY['ingested', 'agent', 'operator'], p_kind) THEN p_declared
+    ELSE p_kind
+  END
+$$;
+
+-- ob1_door_of: the door an actor blob carries — `via` as a non-empty string,
+-- nothing otherwise (a number, an object, an empty string is no door: run-it,
+-- first and second review passes). The trigger, the gate and the backfill read
+-- it through this one function.
+CREATE OR REPLACE FUNCTION ob1_door_of(p_actor jsonb)
+RETURNS text
+LANGUAGE sql
+IMMUTABLE
+AS $$
+  SELECT CASE WHEN jsonb_typeof(p_actor->'via') = 'string' THEN NULLIF(p_actor->>'via', '') END
+$$;
+
+COMMENT ON FUNCTION ob1_door_of(jsonb) IS
+  'The door an actor envelope names: its via, when a non-empty string; NULL for anything else, which stays in actor_context. The one reading the audit trigger, the amendment gate and backfill_thought_audit_events share. Migration 045 / SMD-1730.';
+
+COMMENT ON FUNCTION ob1_trust_ceiling(text, text) IS
+  'The trust a write gets from its key''s kind and the trust it declared: the kind when undeclared; the declaration when it stands under the kind (operator > agent > ingested); the kind when it does not; only a declared ingested when the kind is unknown. The one rule the audit trigger, the amendment gate and backfill_thought_audit_events share. Migration 045 / SMD-1730.';
 
 -- ---------------------------------------------------------------------------
 -- set_agent_kind — the operator classifies a key, by the name the env gives it
@@ -449,43 +523,40 @@ LANGUAGE plpgsql
 AS $$
 DECLARE
   v_kind     text;
-  v_known    boolean := false;
-  v_declared text;
   v_origin   text;
   v_trust    text;
+  v_why      text;
 BEGIN
   IF TG_OP = 'UPDATE' AND current_setting('ob1.audit_amend', true) = 'backfill' THEN
     -- ob1:audit-amend-fills-null-only — a CONTRACT SENTINEL, not prose (the
     -- 014 convention); preflight's `audit events` check reads it.
-    -- What the row derives to, as the audit trigger and the backfill read it.
-    IF OLD.canonical_agent_id IS NOT NULL THEN
-      SELECT kind INTO v_kind FROM ob1_agents WHERE canonical_agent_id = OLD.canonical_agent_id;
-      v_known := FOUND;
-    END IF;
-    IF NOT v_known AND OLD.actor_name IS NOT NULL THEN
-      SELECT kind INTO v_kind FROM ob1_agents WHERE label = OLD.actor_name;
-    END IF;
-    v_kind     := COALESCE(OLD.actor_kind, v_kind);
-    v_origin   := COALESCE(OLD.origin, CASE WHEN jsonb_typeof(OLD.actor_context->'via') = 'string' THEN OLD.actor_context->>'via' END);
-    v_declared := OLD.actor_context->'claimed'->>'trust';
-    v_trust    := COALESCE(OLD.trust, CASE WHEN v_kind IS NULL THEN NULL
-                    WHEN v_declared IS NOT NULL
-                         AND array_position(ARRAY['ingested', 'agent', 'operator'], v_declared)
-                             <= array_position(ARRAY['ingested', 'agent', 'operator'], v_kind) THEN v_declared
-                    ELSE v_kind END);
+    -- What the row derives to, through the two rules the audit trigger and the
+    -- backfill read.
+    v_kind   := COALESCE(OLD.actor_kind, ob1_registry_kind(OLD.canonical_agent_id, OLD.actor_name));
+    v_origin := COALESCE(OLD.origin, ob1_door_of(OLD.actor_context));
+    v_trust  := COALESCE(OLD.trust, CASE WHEN v_kind IS NOT NULL THEN ob1_trust_ceiling(v_kind, OLD.actor_context->'claimed'->>'trust') END);
+    -- Each condition named when it fails (run-it, second review pass: thirteen
+    -- different refusals read one sentence), so a hand amendment learns which
+    -- of the five it broke — and that it must fill everything derivable at once.
     IF (to_jsonb(OLD) - 'actor_kind' - 'trust' - 'origin' - 'backfilled_at')
-       = (to_jsonb(NEW) - 'actor_kind' - 'trust' - 'origin' - 'backfilled_at')
-       AND NEW.actor_kind IS NOT DISTINCT FROM v_kind
-       AND NEW.trust      IS NOT DISTINCT FROM v_trust
-       AND NEW.origin     IS NOT DISTINCT FROM v_origin
-       AND (NEW.actor_kind IS DISTINCT FROM OLD.actor_kind
-            OR NEW.trust IS DISTINCT FROM OLD.trust
-            OR NEW.origin IS DISTINCT FROM OLD.origin)
-       AND NEW.backfilled_at = now() THEN
+       <> (to_jsonb(NEW) - 'actor_kind' - 'trust' - 'origin' - 'backfilled_at') THEN
+      v_why := 'a column other than actor_kind, trust, origin and backfilled_at changes';
+    ELSIF NEW.actor_kind IS DISTINCT FROM v_kind THEN
+      v_why := format('actor_kind must be what the registry holds for the row''s key, %L', v_kind);
+    ELSIF NEW.trust IS DISTINCT FROM v_trust THEN
+      v_why := format('trust must be what the rule gives from that kind and the row''s filed claim, %L', v_trust);
+    ELSIF NEW.origin IS DISTINCT FROM v_origin THEN
+      v_why := format('origin must be the door the row''s own blob carries, %L', v_origin);
+    ELSIF NEW.actor_kind IS NOT DISTINCT FROM OLD.actor_kind AND NEW.trust IS NOT DISTINCT FROM OLD.trust AND NEW.origin IS NOT DISTINCT FROM OLD.origin THEN
+      v_why := 'nothing is filled';
+    ELSIF NEW.backfilled_at IS DISTINCT FROM now() THEN
+      v_why := 'backfilled_at must be now(), this transaction''s time';
+    ELSE
       RETURN NEW;
     END IF;
     RAISE EXCEPTION
-      'thought_audit is append-only: the backfill amendment may only fill a NULL actor_kind, trust or origin with what the row derives to (the registry''s kind for its key, the blob''s via, the rule''s trust) and stamp backfilled_at with now(); this UPDATE changes something else, or fills nothing.';
+      'thought_audit is append-only: the backfill amendment may only fill a NULL actor_kind, trust or origin with what the row derives to, all of them at once, and stamp backfilled_at with now() — here %.',
+      v_why;
   END IF;
 
   -- 008: the guidance is in the MESSAGE rather than in USING HINT deliberately.
@@ -493,8 +564,8 @@ BEGIN
   -- interleaved nulls, so anything put there is unreadable to the runtime this
   -- server actually uses.
   RAISE EXCEPTION
-    'thought_audit is append-only: % is not permitted. To prune history, DROP TRIGGER thought_audit_immutable in a migration — deliberately, and with a record of why.',
-    TG_OP;
+    'thought_audit is append-only: % is not permitted. To prune history, DROP TRIGGER % in a migration — deliberately, and with a record of why.',
+    TG_OP, CASE WHEN TG_OP = 'TRUNCATE' THEN 'thought_audit_immutable_truncate' ELSE 'thought_audit_immutable' END;
 END;
 $$;
 
@@ -527,11 +598,10 @@ DECLARE
   v_id     uuid;
   v_source text;
   v_agent  uuid;
-  -- 045: who holds the key (the registry's word), whether the registry knew
-  -- the id at all, the ceiling on the content, what the caller claimed that
-  -- the key could not support, and the context blob with that claim folded in.
+  -- 045: who holds the key (the registry's word), the ceiling on the content,
+  -- what the caller claimed that the key could not support, and the context
+  -- blob with that claim folded in.
   v_kind     text;
-  v_known    boolean := false;
   v_declared text;
   v_trust    text;
   v_claimed  jsonb := '{}'::jsonb;
@@ -652,18 +722,22 @@ BEGIN
    * The payload's own `actor_kind` is never copied: the database never sees
    * the key, so the one thing it can check a claim against is the row the
    * operator classified. NULL is honest: a key nobody has classified yet
-   * (set_agent_kind), or a mutation from outside the server. An id the
+   * (set_agent_kind), or a mutation made outside the server. An id the
    * registry does not know — a server holding a cached id across a registry
    * rebuilt by hand — falls back to the name as a writer with no id does
-   * (first review pass): the row is the same row either way.
+   * (first review pass): the row is the same row either way; the lookup is
+   * ob1_registry_kind's, one copy for the gate and the backfill too.
+   *
+   * The boundary, stated (second review pass): the envelope's name and id are
+   * the SERVER's word — 008 and 010 trusted them so, and a caller who can call
+   * this function directly can already write any content and metadata it
+   * likes. What the trigger enforces is that the EVENT's claims cannot exceed
+   * the envelope's identity: no MCP client composes the envelope, so a client
+   * cannot raise itself above its key. A direct SQL or PostgREST caller naming
+   * another key's label is a caller with the capture role, not a client, and
+   * is out of scope for a row-level check.
    */
-  IF v_agent IS NOT NULL THEN
-    SELECT kind INTO v_kind FROM ob1_agents WHERE canonical_agent_id = v_agent;
-    v_known := FOUND;
-  END IF;
-  IF NOT v_known AND actor ? 'name' THEN
-    SELECT kind INTO v_kind FROM ob1_agents WHERE label = actor->>'name';
-  END IF;
+  v_kind := ob1_registry_kind(v_agent, actor->>'name');
 
   /**
    * trust is the CEILING on the content, and the key's kind is the highest it
@@ -673,16 +747,12 @@ BEGIN
    * unknown kind can support no claim above the floor, so only `ingested` — a
    * lowering nobody can abuse — is kept from its declaration. A declared
    * value the key cannot support is clamped, not refused: the write is
-   * legitimate, the label is not, and the row records both.
+   * legitimate, the label is not, and the row records both. The rule is
+   * ob1_trust_ceiling's — one copy, which the amendment gate and the backfill
+   * call too (second review pass).
    */
   v_declared := event->>'trust';
-  v_trust := CASE
-    WHEN v_kind IS NULL THEN CASE WHEN v_declared = 'ingested' THEN 'ingested' END
-    WHEN v_declared IS NULL THEN v_kind
-    WHEN array_position(ARRAY['ingested', 'agent', 'operator'], v_declared)
-         <= array_position(ARRAY['ingested', 'agent', 'operator'], v_kind) THEN v_declared
-    ELSE v_kind
-  END;
+  v_trust := ob1_trust_ceiling(v_kind, v_declared);
   IF v_declared IS NOT NULL AND v_declared IS DISTINCT FROM v_trust THEN
     v_claimed := v_claimed || jsonb_build_object('trust', v_declared);
   END IF;
@@ -697,9 +767,10 @@ BEGIN
   -- one sees it here rather than having it silently interpreted. The attempt
   -- the key could not support rides under `claimed`.
   v_context := COALESCE(actor - 'name' - 'session' - 'agent_id', '{}'::jsonb);
-  -- `via` is a door only as a string; anything else stays in the blob, visible,
-  -- rather than becoming an origin spelled as JSON (run-it, first review pass).
-  IF jsonb_typeof(actor->'via') = 'string' THEN
+  -- `via` is a door only as a non-empty string (ob1_door_of); anything else
+  -- stays in the blob, visible, rather than becoming an origin spelled as JSON
+  -- or an empty door (run-it, first and second review passes).
+  IF ob1_door_of(actor) IS NOT NULL THEN
     v_context := v_context - 'via';
   END IF;
   IF v_claimed <> '{}'::jsonb THEN
@@ -730,7 +801,7 @@ BEGIN
     NULLIF(v_context, '{}'::jsonb),
     v_kind,
     v_trust,
-    CASE WHEN jsonb_typeof(actor->'via') = 'string' THEN actor->>'via' END,
+    ob1_door_of(actor),
     -- NULL throughout on a tombstone: the event was not read (above).
     event->>'stance',
     CASE WHEN event ? 'cites' THEN ARRAY(SELECT jsonb_array_elements_text(event->'cites'))::uuid[] END,
@@ -753,6 +824,7 @@ RETURNS jsonb AS $$
 DECLARE
   v_fingerprint text;
   v_id          uuid;
+  v_event       jsonb;  -- 045
 BEGIN
   -- 005's guard, carried forward verbatim.
   IF p_payload IS NOT NULL AND jsonb_typeof(p_payload) <> 'object' THEN
@@ -768,12 +840,11 @@ BEGIN
     PERFORM set_config('ob1.actor', p_payload->>'actor', true);
   END IF;
 
-  -- 045: the write event — validated (a bad shape is refused, as derived_from
-  -- is) and set beside the actor for the audit trigger. UNCONDITIONALLY, an
-  -- empty string when the envelope names none, so a write in the same
-  -- transaction cannot inherit the previous call's event; the actor above is
-  -- set only when present, as 008 wrote it.
-  PERFORM set_config('ob1.event', COALESCE(validate_write_event(p_payload->'event')::text, ''), true);
+  -- 045: the write event's shape, refused here as a bad derived_from is; the
+  -- setting itself is written just before the INSERT below (second review
+  -- pass: set beside the actor here, a call refused between the two left it
+  -- on the transaction for a raw write to inherit).
+  v_event := validate_write_event(p_payload->'event');
 
   v_fingerprint := content_fingerprint_of(p_content);
 
@@ -784,6 +855,11 @@ BEGIN
   -- and the second sees the first's committed row (READ COMMITTED).
   PERFORM pg_advisory_xact_lock(hashtextextended(v_fingerprint, 0));
 
+  -- 045: the event, set for the audit trigger UNCONDITIONALLY — an empty string
+  -- when the envelope names none — so a write in the same transaction cannot
+  -- inherit the previous call's; the trigger reads it once and clears it. The
+  -- actor above is set only when present, as 008 wrote it.
+  PERFORM set_config('ob1.event', COALESCE(v_event::text, ''), true);
   INSERT INTO thoughts (content, content_fingerprint, metadata)
   VALUES (p_content, v_fingerprint, COALESCE(p_payload->'metadata', '{}'::jsonb))
   ON CONFLICT (content_fingerprint) WHERE content_fingerprint IS NOT NULL DO UPDATE
@@ -822,6 +898,7 @@ DECLARE
   -- row only (035).
   v_derived     jsonb;
   v_supersedes  text  := p_payload->>'supersedes';
+  v_event       jsonb;  -- 045
 BEGIN
   /**
    * Migration 005's guard, carried forward verbatim.
@@ -863,12 +940,11 @@ BEGIN
     PERFORM set_config('ob1.actor', p_payload->>'actor', true);
   END IF;
 
-  -- 045: the write event — validated (a bad shape is refused, as derived_from
-  -- is) and set beside the actor for the audit trigger. UNCONDITIONALLY, an
-  -- empty string when the envelope names none, so a write in the same
-  -- transaction cannot inherit the previous call's event; the actor above is
-  -- set only when present, as 008 wrote it.
-  PERFORM set_config('ob1.event', COALESCE(validate_write_event(p_payload->'event')::text, ''), true);
+  -- 045: the write event's shape, refused here as a bad derived_from is; the
+  -- setting itself is written just before the INSERT below (second review
+  -- pass: set beside the actor here, a call refused between the two left it
+  -- on the transaction for a raw write to inherit).
+  v_event := validate_write_event(p_payload->'event');
 
   v_fingerprint := content_fingerprint_of(p_content);
 
@@ -901,6 +977,11 @@ BEGIN
   -- the caller named none (an older server), which is a vector of unknown model.
   -- 025: derived_from and supersedes are written beside them, validated above
   -- — on a fresh row (035).
+  -- 045: the event, set for the audit trigger UNCONDITIONALLY — an empty string
+  -- when the envelope names none — so a write in the same transaction cannot
+  -- inherit the previous call's; the trigger reads it once and clears it. The
+  -- actor above is set only when present, as 008 wrote it.
+  PERFORM set_config('ob1.event', COALESCE(v_event::text, ''), true);
   INSERT INTO thoughts (content, content_fingerprint, metadata, embedding, embedding_model, derived_from, supersedes)
   VALUES (
     p_content,
@@ -1025,6 +1106,7 @@ DECLARE
   v_derived        jsonb;
   v_walk           uuid;
   v_steps          int := 0;
+  v_event          jsonb;  -- 045
 BEGIN
   -- 032: the envelope's shape, before any lock is taken — 005's guard, for
   -- this parameter: a client that binds a JS string to a jsonb parameter
@@ -1053,10 +1135,13 @@ BEGIN
   IF p_actor IS NOT NULL THEN
     PERFORM set_config('ob1.actor', p_actor::text, true);
   END IF;
-  -- 045: the event, validated and set unconditionally (an empty string when
-  -- none), so a write in the same transaction cannot inherit the previous
-  -- call's — see upsert_thought.
-  PERFORM set_config('ob1.event', COALESCE(validate_write_event(p_event)::text, ''), true);
+  -- 045: the event's shape, refused here before any lock; the setting itself
+  -- is written just before the UPDATE — after every refusal this function can
+  -- return (NOT_FOUND, STALE_READ, DUPLICATE_CONTENT, SUPERSEDES_NOT_FOUND,
+  -- WOULD_CYCLE), none of which fires the trigger that would consume it — so a
+  -- refused call leaves nothing on the transaction for a raw write or a
+  -- cascade to inherit (second review pass).
+  v_event := validate_write_event(p_event);
 
   -- 032: a supersedes write is serialised with every other on 029's lock,
   -- taken BEFORE the row lock — see "Lock order" in 033's header — so the
@@ -1178,6 +1263,10 @@ BEGIN
    * WHERE clause is the actual guard; the check above exists only to produce a
    * better error message.
    */
+  -- 045: the event, set for the audit trigger UNCONDITIONALLY — an empty
+  -- string when none — so a write in the same transaction cannot inherit the
+  -- previous call's; the trigger reads it once and clears it.
+  PERFORM set_config('ob1.event', COALESCE(v_event::text, ''), true);
   UPDATE thoughts SET
     content             = COALESCE(p_content, content),
     -- v_other is set only when content arrived: another row holds this key,
@@ -1291,33 +1380,33 @@ BEGIN
 
   WITH candidates AS (
     SELECT a.id,
-           COALESCE(a.actor_kind, g_id.kind, g_label.kind) AS kind,
+           -- By the id, else by the name — the trigger's own lookup, including
+           -- an id the registry no longer knows (first review pass).
+           COALESCE(a.actor_kind, r.kind) AS kind,
            -- What the write declared while its key was unclassified: the
            -- trigger could not honour it then and filed it under claimed.
-           a.actor_context->'claimed'->>'trust'             AS declared,
-           COALESCE(a.origin, CASE WHEN jsonb_typeof(a.actor_context->'via') = 'string' THEN a.actor_context->>'via' END) AS origin
+           a.actor_context->'claimed'->>'trust' AS declared,
+           COALESCE(a.origin, ob1_door_of(a.actor_context)) AS origin
       FROM thought_audit a
-      -- By the id, else by the name — as the trigger reads it, including an id
-      -- the registry no longer knows (first review pass).
-      LEFT JOIN ob1_agents g_id    ON g_id.canonical_agent_id = a.canonical_agent_id
-      LEFT JOIN ob1_agents g_label ON g_id.canonical_agent_id IS NULL AND g_label.label = a.actor_name
-     WHERE (a.actor_kind IS NULL AND COALESCE(g_id.kind, g_label.kind) IS NOT NULL)
-        OR (a.origin IS NULL AND jsonb_typeof(a.actor_context->'via') = 'string')
+      CROSS JOIN LATERAL (SELECT ob1_registry_kind(a.canonical_agent_id, a.actor_name) AS kind) r
+     -- Every fill the gate would admit: a NULL kind the registry now has, a
+     -- NULL trust the kind (set or derived) gives — a row a tool INSERTed with
+     -- a kind and no trust must not be left for the gate to refuse on every
+     -- pass (run-it, second review pass) — and a NULL origin the blob carries.
+     WHERE (a.actor_kind IS NULL AND r.kind IS NOT NULL)
+        OR (a.trust IS NULL AND COALESCE(a.actor_kind, r.kind) IS NOT NULL)
+        OR (a.origin IS NULL AND ob1_door_of(a.actor_context) IS NOT NULL)
      ORDER BY a.created_at
      LIMIT CASE WHEN p_limit IS NULL THEN NULL ELSE GREATEST(p_limit, 0) END
   )
   UPDATE thought_audit a
      SET actor_kind    = COALESCE(a.actor_kind, c.kind),
-         -- The trigger's rule, applied late: the declaration stands when it
-         -- is not above the kind, else the kind; undeclared, the kind (first
-         -- review pass — the first draft wrote the kind over a lower
-         -- declaration). The claim stays in the blob: it was unverifiable
-         -- when the row was written, and the row says so.
-         trust         = COALESCE(a.trust, CASE WHEN a.actor_kind IS NULL THEN
-                           CASE WHEN c.declared IS NOT NULL
-                                 AND array_position(ARRAY['ingested', 'agent', 'operator'], c.declared)
-                                     <= array_position(ARRAY['ingested', 'agent', 'operator'], c.kind)
-                                THEN c.declared ELSE c.kind END END),
+         -- The trigger's rule, applied late (first review pass — the first
+         -- draft wrote the kind over a lower declaration): ob1_trust_ceiling,
+         -- the one copy, from the kind the row has or gains. The claim stays
+         -- in the blob: it was unverifiable when the row was written, and the
+         -- row says so.
+         trust         = COALESCE(a.trust, CASE WHEN c.kind IS NOT NULL THEN ob1_trust_ceiling(c.kind, c.declared) END),
          origin        = COALESCE(a.origin, c.origin),
          backfilled_at = now()
     FROM candidates c
@@ -1327,6 +1416,7 @@ BEGIN
      -- filled the row first leaves it nothing to fill, and it is skipped
      -- rather than re-stamped and counted again (run-it, first review pass).
      AND ((a.actor_kind IS NULL AND c.kind IS NOT NULL)
+          OR (a.trust IS NULL AND c.kind IS NOT NULL)
           OR (a.origin IS NULL AND c.origin IS NOT NULL));
   GET DIAGNOSTICS v_rows = ROW_COUNT;
 

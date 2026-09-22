@@ -1271,6 +1271,21 @@ else {
   const pre032 = await run(SQL_ENV);
   assert(pre032.code === 1 && /edit signature\s+update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text\) is the form from before migration 032; the server sends p_provenance, which only 032's form and its successors take — so every edit would fail, and db\/reembed\.ts refuses to run/.test(pre032.out) && /Apply db\/migrations\/032_update_thought_provenance\.sql\./.test(pre032.out),
          "…and a 021-era one — a brain at 031 — likewise, with 032 as the remedy");
+  // 032 re-applied on that brain leaves its 9-argument form ALONE — a brain at
+  // 044 under this server: every edit resolves, a warning naming what is lost
+  // and 045. Then 021 re-applied beside it: two older forms and none the
+  // servers call — the remedy is 045, whose DROP chain reaches both, not 032,
+  // which would leave its own 9 to be named on the next start (second review
+  // pass).
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("032") });
+  const nineAlone = await run(SQL_ENV);
+  assert(nineAlone.code === 0 && /!  edit signature\s+update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text,jsonb\) is the form from before migration 045: every edit resolves, but no write event \(p_event — stance, cites, the valid window, trust\) reaches the audit row, and db\/reembed\.ts, which resolves the body by/.test(nineAlone.out) && /Apply db\/migrations\/045_thought_audit_event_shape\.sql\./.test(nineAlone.out),
+         `a 9-argument form alone — a brain at 044 — is a warning naming 045, not a refusal (exit ${nineAlone.code})`);
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("021") });
+  const eightAndNine = await run(SQL_ENV);
+  const editLine = eightAndNine.out.split("\n").find((l) => /edit signature/.test(l)) ?? "";
+  assert(eightAndNine.code === 1 && /^✗  edit signature/.test(editLine.trim()) && /update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text\)/.test(editLine) && /update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text,jsonb\)/.test(editLine) && / are forms from before migration 045 with none the servers call/.test(editLine) && /Apply db\/migrations\/045_thought_audit_event_shape\.sql\. Its DROP chain reaches the 9-, 8- and 7-argument forms/.test(eightAndNine.out) && !/032_update_thought_provenance/.test(eightAndNine.out),
+         `the 8- and 9-argument forms with no 10 are refused with 045 as the one remedy, not 032 (exit ${eightAndNine.code})`);
   // 021 put the column back; 045 puts the shipped bodies back over 021's
   // (022, 025, 033 or 035 alone would leave the later ones' out, warnings
   // above) — 032 and 033 first, so the 9-argument update_thought 045 drops is
@@ -1418,7 +1433,26 @@ else {
              /045's audit trigger reads ob1_agents as the caller on every capture, edit and delete that carries an actor/.test(writeLine(noAgents.out)) &&
              /GRANT SELECT ON ob1_agents TO ob1_pf_capture;/.test(noAgents.out),
              `a role lacking SELECT on ob1_agents is refused, the trigger named (exit ${noAgents.code})`);
+      // The requirement follows the trigger body that reads the table (second
+      // review pass): with 025's audit trigger in place — a brain still at 044
+      // under this server — the role lacking SELECT on ob1_agents holds the
+      // capture set and is not refused for it; 045's body back, it is.
+      await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("025") || f.startsWith("026") });
+      const pre045Agents = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
+      assert(/write privileges\s+ob1_pf_capture holds the capture path's privileges/.test(pre045Agents.out) && !/ob1_agents/.test(writeLine(pre045Agents.out)),
+             `under 025's audit trigger the same role holds the capture set — SELECT on ob1_agents is required only while the body that reads it is installed (exit ${pre045Agents.code})`);
+      await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("045") });
+      assert(/SELECT on ob1_agents/.test(writeLine((await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL })).out)), "…and 045's body back, it is required again");
       await claims.unsafe("GRANT SELECT ON ob1_agents TO ob1_pf_capture");
+      // The census SELECTs the log; the hard capture set grants INSERT only. A
+      // role granted exactly that set is told the census was not checked, and
+      // where the SELECT is — not warned about its brain (run-it, second review
+      // pass); the role's SELECT-on-all otherwise held it.
+      await claims.unsafe("REVOKE SELECT ON thought_audit FROM ob1_pf_capture");
+      const noCensus = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
+      assert(noCensus.code === 0 && /·  audit events\s+not checked — this role cannot read the census \(permission denied for table thought_audit\); the shape is checked, the waiting keys are not/.test(noCensus.out) && /GRANT SELECT ON thought_audit TO <the connector's role>;/.test(noCensus.out),
+             `a role that cannot read thought_audit is told the census was skipped, with the community group's GRANT (exit ${noCensus.code})`);
+      await claims.unsafe("GRANT SELECT ON thought_audit TO ob1_pf_capture");
 
       // Enable entity extraction: 016's trigger now upserts a work claim as the
       // caller on every capture, so the capture path needs thought_work_claims

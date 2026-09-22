@@ -929,7 +929,17 @@ if (configFailed) {
         const conditional = triggerPresent
           ? [{ table: "ob1_config", privilege: "SELECT", since: "016" }, ...(extracting ? EXTRACTION_TRIGGER_WRITES : [])]
           : [];
-        const required = [...CAPTURE_WRITES, ...conditional];
+        // 045's audit trigger reads ob1_agents as the caller; 025's does not. The
+        // capture set lists the SELECT (db/README.md's table, --grant), and the
+        // check requires it only while the body that reads it is installed — a
+        // brain still at 044 under this server writes without it, and the
+        // `audit events` check says so (second review pass). Read from pg_proc
+        // by its sentinel, as the capture-body checks read theirs.
+        const [{ auditReadsAgents }] = (await sql`
+          SELECT EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+                          WHERE n.nspname = 'public' AND p.proname = 'thoughts_write_audit'
+                            AND p.prosrc LIKE '%ob1:audit-event-from-the-key%') AS "auditReadsAgents"`) as { auditReadsAgents: boolean }[];
+        const required = [...CAPTURE_WRITES.filter((w) => w.table !== "ob1_agents" || auditReadsAgents), ...conditional];
         const reqTables = required.map((w) => w.table);
         const reqPrivs = required.map((w) => w.privilege);
         const privRows = (await sql`
@@ -1146,18 +1156,21 @@ if (configFailed) {
             // classified since and want only the backfill (run-it, first review
             // pass: a brain with 9,008 waiting rows and no unclassified key was
             // told to classify "<label>").
+            // One pass over the waiting rows — 045's partial index on them, by
+            // name — resolving each as the backfill does (by id, else by name,
+            // through ob1_registry_kind), so "waiting only on the backfill" is
+            // what the backfill would fill (second review pass: three scans,
+            // and a by-name count that promised a fill the id refused).
             const [census] = await sql`
+              WITH waiting AS (
+                SELECT a.actor_name AS name, ob1_registry_kind(a.canonical_agent_id, a.actor_name) IS NOT NULL AS fillable
+                  FROM thought_audit a WHERE a.actor_kind IS NULL AND a.actor_name IS NOT NULL)
               SELECT (SELECT count(*)::int FROM ob1_agents WHERE kind IS NULL) AS unclassified,
                      (SELECT string_agg(label, ', ' ORDER BY label) FROM ob1_agents WHERE kind IS NULL) AS labels,
-                     (SELECT count(*)::int FROM thought_audit WHERE actor_kind IS NULL AND actor_name IS NOT NULL) AS awaiting,
-                     (SELECT string_agg(n, ', ' ORDER BY n) FROM (
-                        SELECT DISTINCT a.actor_name AS n FROM thought_audit a
-                        WHERE a.actor_kind IS NULL AND a.actor_name IS NOT NULL
-                          AND NOT EXISTS (SELECT 1 FROM ob1_agents g WHERE g.label = a.actor_name AND g.kind IS NOT NULL)
-                        LIMIT 8) s) AS unnamed,
-                     (SELECT count(*)::int FROM thought_audit a
-                       WHERE a.actor_kind IS NULL AND a.actor_name IS NOT NULL
-                         AND EXISTS (SELECT 1 FROM ob1_agents g WHERE g.label = a.actor_name AND g.kind IS NOT NULL)) AS fillable`;
+                     count(*)::int AS awaiting,
+                     count(*) FILTER (WHERE fillable)::int AS fillable,
+                     (SELECT string_agg(n, ', ' ORDER BY n) FROM (SELECT DISTINCT name AS n FROM waiting WHERE NOT fillable LIMIT 8) s) AS unnamed
+                FROM waiting`;
             const unclassified = Number(census.unclassified), awaiting = Number(census.awaiting), fillable = Number(census.fillable);
             if (unclassified > 0 || awaiting > 0) {
               add("audit events", "warn",
@@ -1168,7 +1181,18 @@ if (configFailed) {
             }
           }
         } catch (e) {
-          add("audit events", "warn", `could not verify: ${(e as Error).message}`, "The check reads information_schema.columns, pg_proc, ob1_agents and thought_audit.");
+          const msg = (e as Error).message;
+          // The census SELECTs thought_audit and ob1_agents; the hard capture set
+          // grants INSERT on the one and SELECT on the other, so a role granted
+          // exactly that set cannot run it — not a warning about the brain
+          // (second review pass, run-it): the community group's SELECT, which
+          // --grant issues, is what lets this role read the log it writes.
+          if (/permission denied/i.test(msg)) {
+            add("audit events", "skip", `not checked — this role cannot read the census (${msg}); the shape is checked, the waiting keys are not`,
+                "GRANT SELECT ON thought_audit TO <the connector's role>; — the community group's row, which migrate.ts --grant issues (db/README.md, Grants for a capturing role).");
+          } else {
+            add("audit events", "warn", `could not verify: ${msg}`, "The check reads information_schema.columns, pg_proc, ob1_agents and thought_audit.");
+          }
         }
 
         /**
@@ -1500,6 +1524,13 @@ if (configFailed) {
             add("edit signature", "warn",
                 `${ut[0].sig} is the form from before migration 045: every edit resolves, but no write event (p_event — stance, cites, the valid window, trust) reaches the audit row, and db/reembed.ts, which resolves the body by ${UPDATE_THOUGHT_SIGNATURE}, refuses to run`,
                 ledgerRemedy("045", APPLY_045));
+          } else if (ut.some((r) => Number(r.nargs) === 9)) {
+            // A 9-argument form among the leftovers and no 10: 032 re-applied
+            // would drop the 8 and 7 and leave its own 9 to be named on the next
+            // start; 045's chain reaches all three (second review pass).
+            add("edit signature", "fail",
+                `${extra.join(" and ")} are forms from before migration 045 with none the servers call — every call with fewer than ten arguments is "function is not unique"`,
+                `${ledgerRemedy("045", APPLY_045)} Its DROP chain reaches the 9-, 8- and 7-argument forms and leaves the one form.`);
           } else {
             add("edit signature", "fail",
                 `${extra.join(" and ")} ${extra.length === 1 ? "is the form" : "are the forms"} from before migration 032; the server sends p_provenance, which only 032's form and its successors take — so every edit would fail, and db/reembed.ts refuses to run`,
