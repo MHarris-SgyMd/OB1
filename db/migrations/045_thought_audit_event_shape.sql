@@ -249,6 +249,11 @@ COMMENT ON TABLE thought_audit IS
 -- door: empty after this file's own backfill, since the trigger writes origin
 -- with the row, so a re-run scans no filled row (third review pass: the first
 -- backfill's WHERE was an OR over function results no index could serve).
+-- The awaiting-kind index is as large as the log's unclassified writes: on a
+-- brain whose keys nobody classifies it holds every row's actor_name, and it
+-- empties once set_agent_kind and a backfill pass have run — classification is
+-- the remedy the census names, and this is the cost of not taking it (sixth
+-- review pass).
 CREATE INDEX IF NOT EXISTS thought_audit_awaiting_kind_idx
   ON thought_audit (actor_name)
   WHERE (actor_kind IS NULL OR trust IS NULL) AND (actor_name IS NOT NULL OR canonical_agent_id IS NOT NULL);
@@ -393,6 +398,7 @@ DECLARE
   v_key    text;
   v_from   timestamptz;
   v_until  timestamptz;
+  v_ts     timestamptz;
   v_cites  jsonb;
 BEGIN
   IF v IS NULL OR jsonb_typeof(v) = 'null' THEN
@@ -455,42 +461,43 @@ BEGIN
     -- Postgres is asked to read it: its input function also takes 'now',
     -- 'today', 'yesterday' and 'infinity', and a client's "now" would land as
     -- the call's time and read as a fact about the world (run-it, first
-    -- review pass). Then a subtransaction, entered only when a window is
-    -- named, so a text that is not a timestamp fails with a message about the
-    -- event, not a raw cast.
+    -- review pass). An input with no zone is read as UTC, not in the
+    -- session's TimeZone: two servers over one brain, or one behind a pooler
+    -- at UTC, must record the same instant for one declaration (fourth
+    -- review pass). An input with a zone is read as Postgres reads it. Which
+    -- an input is, Postgres decides, not a pattern of ours: ' UTC' is APPENDED
+    -- and the cast tried — it succeeds only when the input carried no zone,
+    -- since Postgres refuses two — and on failure the input is cast as it
+    -- came, and refused if that fails too. The fifth pass had a pattern for
+    -- "has a zone", and Postgres's timestamp reader accepts more trailing
+    -- words than any zone — AM, PM, BC, AD, a weekday — so "10:00 PM" went
+    -- through the zoned reader and landed in the session's zone (run-it,
+    -- sixth review pass); before that, the naive reader had DISCARDED a
+    -- trailing zone or a one- or three-digit offset, so "10:00:00 -5" read
+    -- as 10:00 (run-it, fifth review pass). Postgres's reading is the
+    -- contract, including its corners: "-5" is -05:00, "+123" is +01:23, and
+    -- a bare "UTC+5" or "GMT-3" is a POSIX zone, hours WEST of Greenwich, as
+    -- Etc/GMT+5 is — a client that means Karachi writes "+05:00" or
+    -- Asia/Karachi. One copy of the rule for both bounds, in the loop; the
+    -- echo bounded, as the other refusals' are. A subtransaction, entered
+    -- only when a window is named; a second only for a zoned input.
     FOREACH v_key IN ARRAY ARRAY['valid_from', 'valid_until'] LOOP
-      IF v ? v_key AND jsonb_typeof(v->v_key) <> 'null'
-         AND (jsonb_typeof(v->v_key) <> 'string' OR (v->>v_key) !~ '^\d{4}-\d{2}-\d{2}') THEN
-        RAISE EXCEPTION 'event.% must be a timestamp string beginning YYYY-MM-DD, got %.', v_key, left((v->v_key)::text, 80);
+      IF v ? v_key AND jsonb_typeof(v->v_key) <> 'null' THEN
+        IF jsonb_typeof(v->v_key) <> 'string' OR (v->>v_key) !~ '^\d{4}-\d{2}-\d{2}' THEN
+          RAISE EXCEPTION 'event.% must be a timestamp string beginning YYYY-MM-DD, got %.', v_key, left((v->v_key)::text, 80);
+        END IF;
+        BEGIN
+          v_ts := ((v->>v_key) || ' UTC')::timestamptz;
+        EXCEPTION WHEN others THEN
+          BEGIN
+            v_ts := (v->>v_key)::timestamptz;
+          EXCEPTION WHEN others THEN
+            RAISE EXCEPTION 'event.% must be a timestamp, got %.', v_key, left((v->v_key)::text, 80);
+          END;
+        END;
+        IF v_key = 'valid_from' THEN v_from := v_ts; ELSE v_until := v_ts; END IF;
       END IF;
     END LOOP;
-    -- An input with no offset is read as UTC, not in the session's TimeZone:
-    -- two servers over one brain, or one server behind a pooler set to UTC,
-    -- must record the same instant for one declaration (fourth review pass).
-    -- A zone counts only after a time of day — a bare date's own "-01" is a
-    -- day, not a zone — and may be an offset, Z, or a name Postgres knows
-    -- (EST, America/Chicago), which the fifth review pass found silently
-    -- dropped by the naive cast; a named zone goes through timestamptz's own
-    -- reader, so an unknown name is refused, not read as UTC. An input the
-    -- pattern does not recognise as zoned has ' UTC' APPENDED before the cast
-    -- rather than being cast as a naive timestamp — Postgres's naive reader
-    -- accepts and DISCARDS a trailing zone or a one- or three-digit offset, so
-    -- "10:00:00 -5" would have read as 10:00 UTC; appended, it fails the parse
-    -- and is refused (run-it, fifth review pass).
-    BEGIN
-      IF v ? 'valid_from' AND jsonb_typeof(v->'valid_from') <> 'null' THEN
-        v_from := CASE WHEN (v->>'valid_from') ~ '\d{2}:\d{2}(:\d{2}(\.\d+)?)?\s*([zZ]|[+-]\d{2}(:?\d{2})?|[A-Za-z][A-Za-z_/+0-9-]*)\s*$'
-                       THEN (v->>'valid_from')::timestamptz
-                       ELSE ((v->>'valid_from') || ' UTC')::timestamptz END;
-      END IF;
-      IF v ? 'valid_until' AND jsonb_typeof(v->'valid_until') <> 'null' THEN
-        v_until := CASE WHEN (v->>'valid_until') ~ '\d{2}:\d{2}(:\d{2}(\.\d+)?)?\s*([zZ]|[+-]\d{2}(:?\d{2})?|[A-Za-z][A-Za-z_/+0-9-]*)\s*$'
-                        THEN (v->>'valid_until')::timestamptz
-                        ELSE ((v->>'valid_until') || ' UTC')::timestamptz END;
-      END IF;
-    EXCEPTION WHEN others THEN
-      RAISE EXCEPTION 'event.valid_from / valid_until must be timestamps, got % / %.', v->'valid_from', v->'valid_until';
-    END;
     IF v_from IS NOT NULL AND v_until IS NOT NULL AND v_from > v_until THEN
       RAISE EXCEPTION 'event.valid_from (%) is after valid_until (%).', v_from, v_until;
     END IF;
@@ -521,12 +528,16 @@ AS $$
 DECLARE
   raw text := current_setting('ob1.event', true);
 BEGIN
-  -- No EXCEPTION arm: a plpgsql block with one establishes a savepoint every
-  -- time it is entered, and this runs once per audit row (the trigger's own
-  -- agent_id comment refuses that cost; fifth review pass). The functions
-  -- write a validated object or an empty string here, so only a hand-set
-  -- value can be anything else: one that does not begin as an object is read
-  -- as no event, one that does but is malformed fails the write loudly.
+  -- No EXCEPTION arm — and not for the cost alone (ob1_current_actor pays one
+  -- savepoint per row already, as the sixth review pass pointed out) but for
+  -- what the two settings ARE. 008 tolerates a malformed actor because a NULL
+  -- actor is a fact worth recording ("a mutation from outside the server").
+  -- The event is written by this file's own functions or by nobody: a
+  -- validated object or an empty string. A value that does not begin as an
+  -- object is a hand-set thing that is no event and reads as none; one that
+  -- begins as an object but is malformed is a bug in whoever set it, and a
+  -- write that would silently record no event for it is the failure this
+  -- file exists to remove — so it fails loudly.
   IF raw IS NULL OR raw = '' OR raw !~ '^\s*\{' THEN
     RETURN NULL;
   END IF;
@@ -535,7 +546,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION ob1_current_event() IS
-  'Reads the ob1.event transaction-local setting as jsonb — the write event validate_write_event normalised: {stance, cites, valid_from, valid_until, trust, actor_kind}. NULL when unset, empty, or not an object; no savepoint per row (a hand-set malformed object fails the write). Migration 045 / SMD-1730.';
+  'Reads the ob1.event transaction-local setting as jsonb — the write event validate_write_event normalised: {stance, cites, valid_from, valid_until, trust, actor_kind}. NULL when unset, empty, or not an object; no savepoint per row (a hand-set object that is malformed or not the normalised shape fails the write). Migration 045 / SMD-1730.';
 
 -- ---------------------------------------------------------------------------
 -- Immutable by rule: 008's refusal, with the one lawful amendment
@@ -731,7 +742,10 @@ BEGIN
      * caller's declaration must exist somewhere: it is recorded here, the diff
      * empty, rather than checked by validate_write_event and then lost. A
      * trust or actor_kind claim alone is not a record of anything but a clamp,
-     * so it writes no row on an unchanged write (run-it, fifth review pass).
+     * so it writes no row on an unchanged write (run-it, fifth review pass) —
+     * and the clamp is then recorded nowhere: a key's over-claims are counted
+     * (SMD-1724) only on its changed or stance-bearing writes, which is where
+     * a claim is about something (run-it, sixth review pass).
      * (`?|` on a NULL event is NULL; NOT NULL is NULL; the IF takes the row —
      * so the NULL case is spelled: no event, no row.)
      */
@@ -919,6 +933,10 @@ BEGIN
   -- and the second sees the first's committed row (READ COMMITTED).
   PERFORM pg_advisory_xact_lock(hashtextextended(v_fingerprint, 0));
 
+  -- ob1:capture-sets-write-event — a CONTRACT SENTINEL, not prose (the 014
+  -- convention); preflight's `atomic capture` check reads it, so a 035 body
+  -- put back by hand — every recogniser before this one satisfied, every
+  -- declared event dropped — is named (sixth review pass).
   -- 045: the event, set for the audit trigger UNCONDITIONALLY — an empty string
   -- when the envelope names none — so a write in the same transaction cannot
   -- inherit the previous call's; the trigger reads it once and clears it. The
@@ -1041,6 +1059,10 @@ BEGIN
   -- the caller named none (an older server), which is a vector of unknown model.
   -- 025: derived_from and supersedes are written beside them, validated above
   -- — on a fresh row (035).
+  -- ob1:capture-sets-write-event — a CONTRACT SENTINEL, not prose (the 014
+  -- convention); preflight's `atomic capture` check reads it, so a 035 body
+  -- put back by hand — every recogniser before this one satisfied, every
+  -- declared event dropped — is named (sixth review pass).
   -- 045: the event, set for the audit trigger UNCONDITIONALLY — an empty string
   -- when the envelope names none — so a write in the same transaction cannot
   -- inherit the previous call's; the trigger reads it once and clears it. The
@@ -1537,3 +1559,32 @@ COMMENT ON FUNCTION backfill_thought_audit_events(integer) IS
 -- Once, here: every SMD-1541 row gains its origin now; no row gains a kind at
 -- apply time, since no agent has one yet. Re-runs find nothing.
 SELECT backfill_thought_audit_events();
+
+-- ---------------------------------------------------------------------------
+-- The one privilege this file adds to the capture path, granted here
+--
+-- The audit trigger runs as the writer and reads ob1_agents; a role granted the
+-- capture set before this file (INSERT on thought_audit, no SELECT there)
+-- would fail every capture, edit and delete from the moment this applies
+-- until `migrate.ts --grant` was run again (sixth review pass). So, as 033
+-- replays an ACL onto the form it creates, every role that may INSERT into
+-- thought_audit — the capturing roles, by the catalog, the owner and PUBLIC
+-- aside — is granted SELECT on ob1_agents here. Idempotent: GRANT twice is
+-- GRANT once. db/config.mjs's ROLE_GRANTS documents the same row for --grant.
+-- ---------------------------------------------------------------------------
+DO $grant$
+DECLARE
+  v_role text;
+BEGIN
+  FOR v_role IN
+    SELECT DISTINCT g.grantee
+      FROM information_schema.role_table_grants g
+     WHERE g.table_schema = 'public' AND g.table_name = 'thought_audit'
+       AND g.privilege_type = 'INSERT'
+       AND g.grantee NOT IN ('PUBLIC', current_user)
+       AND EXISTS (SELECT 1 FROM pg_roles r WHERE r.rolname = g.grantee)
+  LOOP
+    EXECUTE format('GRANT SELECT ON ob1_agents TO %I', v_role);
+  END LOOP;
+END
+$grant$;

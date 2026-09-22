@@ -5087,6 +5087,8 @@ console.log("\n[43] Migration 045: the event shape at the write boundary — who
   assert(/ob1:audit-amend-fills-null-only/.test(await src("thought_audit_refuse_mutation()")), "the refusal trigger carries the amendment's sentinel");
   for (const sig of ["upsert_thought(text, jsonb)", "upsert_thought(text, jsonb, vector)", UPDATE_THOUGHT_SIGNATURE])
     assert(/validate_write_event\(/.test(await src(sig)) && /set_config\('ob1\.event'/.test(await src(sig)), `${sig} validates the event and sets it beside the actor`);
+  for (const sig of ["upsert_thought(text, jsonb)", "upsert_thought(text, jsonb, vector)"])
+    assert(/ob1:capture-sets-write-event/.test(await src(sig)), `${sig} carries the sentinel preflight's atomic-capture check reads, so a 035 body put back by hand is named (sixth review pass)`);
 
   // The registry: classify by label — before first use — and the resolver
   // meets the row.
@@ -5265,7 +5267,7 @@ console.log("\n[43] Migration 045: the event shape at the write boundary — who
   assert(/event\.valid_from must be a timestamp string beginning YYYY-MM-DD, got "last spring"/.test(await bad({ valid_from: "last spring" })), "a window that is not a timestamp is refused with a message about the event, not a raw cast");
   assert(/must be a timestamp string beginning YYYY-MM-DD, got "now"/.test(await bad({ valid_until: "now" })) && /beginning YYYY-MM-DD, got 0\./.test(await bad({ valid_from: 0 })) && /beginning YYYY-MM-DD, got "infinity"/.test(await bad({ valid_from: "infinity" })),
     "…and so are Postgres's own words for a time — now, a number, infinity — which its reader would otherwise take as a fact about the world");
-  assert(/must be timestamps/.test(await bad({ valid_from: "2026-13-45T00:00:00Z" })), "a string shaped as a date that is not one is refused by the cast, with the event's message");
+  assert(/event\.valid_from must be a timestamp, got "2026-13-45T00:00:00Z"/.test(await bad({ valid_from: "2026-13-45T00:00:00Z" })), "a string shaped as a date that is not one is refused by the cast, with the event's message");
   await db.exec(`SET TIME ZONE 'America/Chicago'`);
   const zoned = await cap("045: a window declared without an offset", { metadata: {}, actor: { name: "op-key", agent_id: OP }, event: { valid_from: "2026-03-01", valid_until: "2026-03-02T00:00:00-06:00" } }, 20);
   await db.exec(`SET TIME ZONE 'UTC'`);
@@ -5276,15 +5278,40 @@ console.log("\n[43] Migration 045: the event shape at the write boundary — who
   await db.exec(`SET TIME ZONE 'UTC'`);
   const namedWin = await one<{ f: string; u: string }>(`SELECT (valid_from AT TIME ZONE 'UTC')::text AS f, (valid_until AT TIME ZONE 'UTC')::text AS u FROM thought_audit WHERE thought_id = $1::uuid AND action = 'capture'`, [named.id]);
   assert(namedWin?.f === "2026-03-01 14:00:00" && namedWin?.u === "2026-03-01 15:00:00", `a zone spelled as a name or an abbreviation is honoured, not dropped — EST and America/Chicago read as themselves (${namedWin?.f}, ${namedWin?.u})`);
-  assert(/must be timestamps/.test(await bad({ valid_from: "2026-03-01 09:00:00 Mars/Olympus" })), "…and a zone Postgres does not know is refused, not read as UTC");
-  assert(/must be timestamps/.test(await bad({ valid_from: "2026-01-01 10:00:00 -5" })) && /must be timestamps/.test(await bad({ valid_from: "2026-01-01 10:00:00+123" })) && /must be timestamps/.test(await bad({ valid_from: "2026-01-01 10:00 PM PST" })),
-    "…and a one- or three-digit offset, or a zone after an AM/PM mark, is refused rather than silently dropped by the naive reader (run-it, fifth review pass)");
+  assert(/must be a timestamp, got/.test(await bad({ valid_from: "2026-03-01 09:00:00 Mars/Olympus" })), "…and a zone Postgres does not know is refused, not read as UTC");
+  // Which inputs carry a zone is Postgres's call, not a pattern's: ' UTC' is
+  // appended and the cast tried first — it fails only when a zone was already
+  // there — and then the input as it came (sixth review pass: the fifth's
+  // pattern took AM, PM, BC and a weekday for zones and read "10:00 PM" in the
+  // session's zone). So a one- or three-digit offset, or a zone after an AM/PM
+  // mark, is read as Postgres reads it, never dropped (run-it, fifth review
+  // pass); a bare UTC+5 is POSIX's, hours WEST, as the file says.
+  const winUtc = async (s: string) => (await one<{ f: string }>(`SELECT ((validate_write_event(jsonb_build_object('valid_from', $1::text))->>'valid_from')::timestamptz AT TIME ZONE 'UTC')::text AS f`, [s]))?.f;
+  await db.exec(`SET TIME ZONE 'Asia/Tokyo'`);
+  const odd = [await winUtc("2026-01-01 10:00:00 -5"), await winUtc("2026-01-01 10:00:00+123"), await winUtc("2026-01-01 10:00 PM PST"), await winUtc("2026-01-01 10:00:00 Thu"), await winUtc("2026-01-01 10:00:00 BC"), await winUtc("2026-01-01 10:00:00 UTC+5")];
+  await db.exec(`SET TIME ZONE 'UTC'`);
+  assert(JSON.stringify(odd) === JSON.stringify(["2026-01-01 15:00:00", "2026-01-01 08:37:00", "2026-01-02 06:00:00", "2026-01-01 10:00:00", "2026-01-01 10:00:00 BC", "2026-01-01 15:00:00"]),
+    `…and a zone in any form Postgres reads is read as Postgres reads it — -5 is -05:00, +123 is +01:23, PM PST is an evening in the Pacific, UTC+5 is POSIX's five hours west — while a weekday or an era is not a zone and reads as UTC, not the session's (${JSON.stringify(odd)})`);
+  await db.exec(`SET TIME ZONE 'Asia/Tokyo'`);
+  const meridian = await cap("045: a window declared with a meridian and no zone", { metadata: {}, actor: { name: "op-key", agent_id: OP }, event: { valid_from: "2026-03-01 10:00 PM" } }, 22);
+  await db.exec(`SET TIME ZONE 'UTC'`);
+  assert((await one<{ f: string }>(`SELECT (valid_from AT TIME ZONE 'UTC')::text AS f FROM thought_audit WHERE thought_id = $1::uuid AND action = 'capture'`, [meridian.id]))?.f === "2026-03-01 22:00:00",
+    "…and PM is not a zone: an evening with no zone is UTC, not the session's (sixth review pass)");
   assert(/event carries a key the shape does not have: stances/.test(await bad({ stances: "stated" })), "a misspelt key is refused, so it cannot vanish");
   assert(/event must be a JSON object, got string/.test(await bad("stated")), "a double-encoded event is refused with 005's message");
   assert(/event\.stance must be/.test(await bad({ stance: "guess" }, "edit")), "…and update_thought refuses through the same rule");
   assert((await one<{ c: number }>(`SELECT count(*)::int AS c FROM thoughts WHERE content = '045: refused'`)).c === 0, "a refused capture wrote no row");
   assert((await one<{ r: Record<string, unknown> | null }>(`SELECT validate_write_event('{"stance": null, "cites": []}'::jsonb) AS r`)).r === null && (await one<{ r: Record<string, unknown> | null }>(`SELECT validate_write_event('null'::jsonb) AS r`)).r === null,
     "JSON nulls and an empty cites are no event: validate_write_event returns NULL");
+  // The setting by hand: not an object is no event; an object that is not JSON
+  // is a bug in whoever set it and fails the write — unlike 008's actor,
+  // which a NULL records honestly (fifth and sixth review passes).
+  await db.exec(`BEGIN; SELECT set_config('ob1.event', 'garbage', true); UPDATE thoughts SET metadata = metadata || '{"hand": 1}'::jsonb WHERE id = '${feed.id}'::uuid; COMMIT;`);
+  ev = await last(feed.id, "update");
+  assert(ev?.stance === null, "a hand-set value that is not an object reads as no event, and the write goes through");
+  let handMalformed = "";
+  try { await db.transaction(async (tx) => { await tx.exec(`SELECT set_config('ob1.event', '{"stance": "stated"', true)`); await tx.exec(`UPDATE thoughts SET metadata = metadata || '{"hand": 2}'::jsonb WHERE id = '${feed.id}'::uuid`); }); } catch (err) { handMalformed = (err as Error).message; }
+  assert(/invalid input syntax for type json/.test(handMalformed), `a hand-set object that is not JSON fails the write loudly rather than recording no event for it (${handMalformed.slice(0, 60)})`);
 
   // Immutable by rule: the one amendment, and nothing beside it.
   const paperRow = (await one<{ id: string }>(`SELECT id FROM thought_audit WHERE thought_id = $1::uuid AND action = 'capture'`, [paste.id])).id;

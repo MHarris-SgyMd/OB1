@@ -823,6 +823,12 @@ if (configFailed) {
         // (005's guard, no lock).
         const twoStale = two !== undefined && !UPSERT_TWO_ARG_SHIPPED_RE.test(two.src);
         const twoUnlocked = two !== undefined && !twoStale && !LOCKED.test(two.src);
+        // 045's own sentinel: the body sets the write event beside the actor
+        // before its INSERT. Without a recogniser, 035 re-applied by hand
+        // read as the shipped pair and every event a capture declared was
+        // dropped silently (sixth review pass).
+        const EVENT_SET = /ob1:capture-sets-write-event/;
+        const twoNoEvent = two !== undefined && !twoStale && !twoUnlocked && !EVENT_SET.test(two.src);
         const TWO_STALE_WHY = "it does not refuse a non-object payload, the one thing 005 added — so a CREATE OR REPLACE from outside the migrations put another there (the getting-started guide or the fingerprint recipe's Step 2 pasted onto a migrated brain, or a community schema that mirrors columns on write): PostgREST callers by name and the two-step fallback capture through that body, and a double-encoded payload is emptied silently again";
         // Why a body predates the migration that added what it lacks (`stage`:
         // 033 for the lock, 035 for the fill): the ordinary state on a brain
@@ -833,16 +839,19 @@ if (configFailed) {
         // 035, the earlier file was re-applied by hand AND the remedy is still
         // pending, and the cause says both.
         const pre = (stage: string, earlier: string) => {
-          // The unapplied files, named: 035 alone when `stage` is 035 or the
-          // ledger has it, both otherwise (a brain at 032 lacks 033 as well).
-          const pending = stage === "035" ? "migration 035 is" : `migrations ${stage} and 035 are`;
-          return ledger.has("035") ? `${earlier} re-applied by hand puts it back`
-            : ledgerRead && ledger.has(stage) ? `${earlier} re-applied by hand puts it back, and migration 035 is not yet applied`
-            : ledgerRead ? `${pending} not yet applied`
-              : `${pending} not yet applied, or ${earlier} was re-applied by hand`;
+          // The unapplied files, named: the definers from `stage` through 045
+          // — 045 alone when `stage` is 045 or the ledger has it (a brain at
+          // 032 lacks 033, 035 and 045).
+          const list = (fs: string[]) => fs.length === 1 ? `migration ${fs[0]} is` : `migrations ${fs.slice(0, -1).join(", ")} and ${fs[fs.length - 1]} are`;
+          const files = ["033", "035", "045"].filter((f) => f >= stage);
+          return ledger.has("045") ? `${earlier} re-applied by hand puts it back`
+            : ledgerRead && ledger.has(stage) ? `${earlier} re-applied by hand puts it back, and ${list(files.slice(1))} not yet applied`
+            : ledgerRead ? `${list(files)} not yet applied`
+              : `${list(files)} not yet applied, or ${earlier} was re-applied by hand`;
         };
         const TWO_UNLOCKED_WHY = `it is from before migration 033 (${pre("033", "005")}): it takes no fingerprint lock, so a capture through it racing an edit of the same text raises the unique violation`;
-        const andTwo = twoStale ? `; and the 2-argument body is not 005's either — ${TWO_STALE_WHY}` : twoUnlocked ? `; and the 2-argument body is not 045's either — ${TWO_UNLOCKED_WHY}` : "";
+        const TWO_NO_EVENT_WHY = `it is from before migration 045 (${pre("045", "035")}): it sets no write event beside the actor, so a stance, cites or a window a PostgREST caller declares in the payload reaches no audit row`;
+        const andTwo = twoStale ? `; and the 2-argument body is not 005's either — ${TWO_STALE_WHY}` : twoUnlocked ? `; and the 2-argument body is not 045's either — ${TWO_UNLOCKED_WHY}` : twoNoEvent ? `; and the 2-argument body is not 045's either — ${TWO_NO_EVENT_WHY}` : "";
         if (!three) {
           add("atomic capture", "fail", `${forms.length} upsert_thought overload(s) — the 3-argument form, the atomic capture, is missing${twoStale ? `; and the 2-argument body present is not 005's — ${TWO_STALE_WHY}` : twoUnlocked ? `; and the 2-argument body present is not 045's — ${TWO_UNLOCKED_WHY}` : ""}${andOthers}`,
               applyLast(" — the last definer of both forms (004 created the 3-argument one; 005, 008, 021, 022, 025, 033, 035 and 045 redefined it, and an earlier file's body alone would drop what every later one added)."));
@@ -870,9 +879,15 @@ if (configFailed) {
           add("atomic capture", "warn",
               `the 2- and 3-argument upsert_thought present, and the 3-argument body carries 022's rule, 025's envelope and the fingerprint lock, but it is from before migration 035 (${pre("035", "033")}): a re-capture naming supersedes fills a NULL pointer without walking the chain, so a dedup can write a two-row loop, and every capture naming supersedes holds the supersession lock through its insert — about 145 a second at 1,024 dimensions whatever the worker count${andTwo}${andOthers}`,
               applyLast("."));
-        } else if (twoStale || twoUnlocked) {
+        } else if (!EVENT_SET.test(three.src)) {
+          // 035's body: locked, no fill — and no write event. The 2-argument
+          // body is 035's too, said beside it through andTwo.
           add("atomic capture", "warn",
-              `the 2- and 3-argument upsert_thought present and the 3-argument body is 045's, but the 2-argument body is ${twoStale ? `not 005's — ${TWO_STALE_WHY}` : `not 045's — ${TWO_UNLOCKED_WHY}`}${andOthers}`,
+              `the 2- and 3-argument upsert_thought present, and the 3-argument body carries 022's rule, 025's envelope, the fingerprint lock and writes provenance on a first capture only, but it is from before migration 045 (${pre("045", "035")}): the write event a capture declares — stance, cites, the valid window, trust — is dropped silently, so no audit row carries it and every read built on the event shape (SMD-1729) sees a capture that declared nothing${andTwo}${andOthers}`,
+              applyLast("."));
+        } else if (twoStale || twoUnlocked || twoNoEvent) {
+          add("atomic capture", "warn",
+              `the 2- and 3-argument upsert_thought present and the 3-argument body is 045's, but the 2-argument body is ${twoStale ? `not 005's — ${TWO_STALE_WHY}` : twoUnlocked ? `not 045's — ${TWO_UNLOCKED_WHY}` : `not 045's — ${TWO_NO_EVENT_WHY}`}${andOthers}`,
               applyLast(" — the last definer of the 2-argument form as well."));
         } else {
           add("atomic capture", "ok", `the 2- and 3-argument upsert_thought present, both 045's — the 3-argument body carries 022's rule, so a re-capture's windows stay only while the label vouches for them, 025's provenance envelope, the fingerprint lock, so a capture and an edit of one text are serialised, and writes provenance on a first capture only, so no capture can close a supersession loop, and both set the write event beside the actor (045); the 2-argument body refuses a non-object payload (005) and takes the lock${andOthers}`);
@@ -1189,9 +1204,13 @@ if (configFailed) {
                 SELECT g.label FROM ob1_agents g
                  WHERE g.kind IS NULL
                    AND EXISTS (SELECT 1 FROM ob1_agent_keys k WHERE k.canonical_agent_id = g.canonical_agent_id AND k.revoked_at IS NULL)
-                   AND NOT EXISTS (SELECT 1 FROM thought_audit a
-                                    WHERE a.canonical_agent_id = g.canonical_agent_id AND a.actor_name IS NOT NULL
-                                      AND ob1_registry_kind(NULL, a.actor_name) IS NOT NULL))
+                   -- The names first, then the lookup once per name, not once
+                   -- per row (sixth review pass: a key with a million writes
+                   -- probed the registry a million times).
+                   AND NOT EXISTS (SELECT 1 FROM (SELECT DISTINCT a.actor_name
+                                                    FROM thought_audit a
+                                                   WHERE a.canonical_agent_id = g.canonical_agent_id AND a.actor_name IS NOT NULL) d
+                                    WHERE ob1_registry_kind(NULL, d.actor_name) IS NOT NULL))
               SELECT (SELECT count(*)::int FROM unclassified) AS unclassified,
                      (SELECT string_agg(label, ', ' ORDER BY label) FROM unclassified) AS labels,
                      COALESCE(sum(n), 0)::int AS awaiting,

@@ -399,8 +399,8 @@ import {
   REEMBED_KEY_PREFIX,
   reembedKey,
   summariseCorpusByModel,
-  SUPERSEDED_SIGNATURES,
   UPDATE_THOUGHT_SIGNATURE,
+  UPDATE_THOUGHT_SIGNATURE_9,
   validateEmbeddingConfig,
 } from "./config.mjs";
 import { createEmbedder, PROVIDER_ERROR_CHARS, resolveEmbedConfig } from "../server-portable/embed.ts";
@@ -656,7 +656,7 @@ const [fn] = await sql`
     -- 032's nine-argument form alone: a brain at 044 under this tree, whose
     -- missing piece is 045, not 032 (SMD-1730, fourth review pass).
     EXISTS (SELECT 1 FROM pg_proc
-            WHERE oid = to_regprocedure(${"public." + SUPERSEDED_SIGNATURES[SUPERSEDED_SIGNATURES.length - 1]})) AS nine,
+            WHERE oid = to_regprocedure(${"public." + UPDATE_THOUGHT_SIGNATURE_9})) AS nine,
     to_regclass('schema_migrations') IS NOT NULL AS has_ledger`;
 // Asked separately: a relation named in a statement is resolved when the
 // statement is parsed, whatever the AND before it would have short-circuited,

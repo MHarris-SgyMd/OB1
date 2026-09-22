@@ -22,7 +22,7 @@ import { SQL } from "bun";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { COLUMN_COMMENT_SQL, TABLE_COMMENT_SQL, TID_PROBE, applyMigrations, createAssert, dropSchema, ledgerStrangers, loadChunkRows, migrationFiles, migratorEnv, plantLegacyRow, requireDatabaseUrl, resetSchema, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
-import { ACCEPTED_CAVEAT_PREFIX, ACCEPTED_CLAIM_SQL, LOCK_TIMEOUT_S, UPDATE_THOUGHT_SIGNATURE, reembedKey } from "./config.mjs";
+import { ACCEPTED_CAVEAT_PREFIX, ACCEPTED_CLAIM_SQL, LOCK_TIMEOUT_S, UPDATE_THOUGHT_SIGNATURE, UPDATE_THOUGHT_SIGNATURE_9, reembedKey } from "./config.mjs";
 
 /**
  * 032's update_thought, by its own signature — the form a brain holds from 032
@@ -30,7 +30,7 @@ import { ACCEPTED_CAVEAT_PREFIX, ACCEPTED_CLAIM_SQL, LOCK_TIMEOUT_S, UPDATE_THOU
  * 10-argument one (SMD-1730), which the sections that stop at 032, 033 or 035
  * never have; they read this one, as [4] reads 021's.
  */
-const UT_9 = "update_thought(uuid, text, jsonb, vector, jsonb, timestamptz, jsonb, text, jsonb)";
+const UT_9 = UPDATE_THOUGHT_SIGNATURE_9;
 
 const URL_ = requireDatabaseUrl("test-upgrade.ts");
 const { assert, report } = createAssert();
@@ -1568,7 +1568,6 @@ console.log("\n[20b] Migration 045 onto a populated 044 — the audit row gains 
   await applyMigrations(URL_, { ...OPTS, only: (f) => f < "045" });
   const sql = new SQL({ url: URL_, max: 1 });
   const vec = (axis: number) => `[${Array.from({ length: OPTS.dim }, (_, i) => (i === axis ? 1 : 0)).join(",")}]`;
-  const UT9 = "update_thought(uuid, text, jsonb, vector, jsonb, timestamptz, jsonb, text, jsonb)";
   const aclOf = async (sig: string) => String((await sql`SELECT proacl::text AS a FROM pg_proc WHERE oid = ${sig}::regprocedure`)[0].a ?? "");
   const cols = async (table: string) => (await sql`SELECT column_name AS c FROM information_schema.columns WHERE table_schema = 'public' AND table_name = ${table} ORDER BY 1`).map((r) => r.c as string);
   type Ev = { actor_name: string | null; source: string | null; actor_context: Record<string, unknown> | null; actor_kind?: string | null; trust?: string | null; origin?: string | null; stance?: string | null; backfilled_at?: string | null };
@@ -1588,9 +1587,15 @@ console.log("\n[20b] Migration 045 onto a populated 044 — the audit row gains 
   ev = await rowOf(mcpRow.id);
   assert(ev.source === "mcp" && ev.actor_context === null, "…and an actor's source is written into the column over the row's own");
   await sql.unsafe(`DO $r$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob1_upgrade_editor45') THEN CREATE ROLE ob1_upgrade_editor45 NOLOGIN; END IF; END $r$`);
-  await sql.unsafe(`REVOKE ALL ON FUNCTION ${UT9} FROM PUBLIC`);
-  await sql.unsafe(`GRANT EXECUTE ON FUNCTION ${UT9} TO ob1_upgrade_editor45`);
-  const acl9 = await aclOf(UT9);
+  await sql.unsafe(`REVOKE ALL ON FUNCTION ${UT_9} FROM PUBLIC`);
+  await sql.unsafe(`GRANT EXECUTE ON FUNCTION ${UT_9} TO ob1_upgrade_editor45`);
+  // A capturing role as 044 granted it — INSERT on thought_audit, nothing on
+  // ob1_agents — must not lose every write at the apply (sixth review pass).
+  await sql.unsafe(`DO $r$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob1_upgrade_capturer45') THEN CREATE ROLE ob1_upgrade_capturer45 NOLOGIN; END IF; END $r$`);
+  await sql.unsafe(`GRANT INSERT ON thought_audit TO ob1_upgrade_capturer45`);
+  const readsAgents = async () => (await sql`SELECT has_table_privilege('ob1_upgrade_capturer45', 'ob1_agents', 'SELECT') AS p`)[0].p as boolean;
+  assert((await readsAgents()) === false, "at 044 a capturing role holds no SELECT on ob1_agents — the audit trigger did not read it");
+  const acl9 = await aclOf(UT_9);
   const snapshot = async () => JSON.stringify(await sql`SELECT id, content_fingerprint, metadata, embedding_model, updated_at::text AS u FROM thoughts ORDER BY id`);
   const rows = await snapshot();
   // 008's and 010's columns on every audit row, byte for byte.
@@ -1607,6 +1612,7 @@ console.log("\n[20b] Migration 045 onto a populated 044 — the audit row gains 
     "045 adds eight columns to thought_audit and kind to ob1_agents, each exactly once");
   assert((await snapshot()) === rows, "no thought moved");
   assert((await auditSnapshot()) === auditRows && Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c) === Number(auditBefore), "…no audit row was added, and 008's and 010's columns on every existing row are byte for byte what they were");
+  assert((await readsAgents()) === true, "…and every role that may INSERT into thought_audit was granted the SELECT on ob1_agents 045's trigger needs — a capturing role keeps writing across the apply");
   ev = await rowOf(viaRow.id);
   assert(ev.origin === "rest-api" && ev.backfilled_at != null && ev.actor_context?.via === "rest-api" && ev.actor_kind === null && ev.trust === null,
     `the file's own backfill call gives the SMD-1541 row its origin from the blob, stamped — the blob untouched, no kind: nobody has classified MCP_ACCESS_KEY (${ev.origin}, ${ev.backfilled_at})`);
@@ -1669,6 +1675,8 @@ console.log("\n[20b] Migration 045 onto a populated 044 — the audit row gains 
     "re-applying 045 is a no-op: the shape and the ACL as they were, the backfill finds nothing");
   await sql.unsafe(`DROP OWNED BY ob1_upgrade_editor45`);
   await sql.unsafe(`DROP ROLE ob1_upgrade_editor45`);
+  await sql.unsafe(`DROP OWNED BY ob1_upgrade_capturer45`);
+  await sql.unsafe(`DROP ROLE ob1_upgrade_capturer45`);
   await sql.close();
 }
 

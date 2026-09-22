@@ -1253,6 +1253,15 @@ export const SEARCH_THOUGHTS_HYBRID_SIGNATURE = "search_thoughts_hybrid(vector, 
  */
 export const UPDATE_THOUGHT_SIGNATURE = "update_thought(uuid, text, jsonb, vector, jsonb, timestamptz, jsonb, text, jsonb, jsonb)";
 /**
+ * 032's form, the one 045 replaced: what a brain at 044 still carries, what
+ * reembed.ts probes for to name 045 as the missing file, and what a test that
+ * stops at 032 or 033 reads. One spelling (sixth review pass: three). Every
+ * type in both signatures is unparameterised — preflight's `edit signature`
+ * counts the commas for the arity, and a `vector(1024)` or `numeric(10,2)`
+ * here would count one too many.
+ */
+export const UPDATE_THOUGHT_SIGNATURE_9 = "update_thought(uuid, text, jsonb, vector, jsonb, timestamptz, jsonb, text, jsonb)";
+/**
  * The forms 020, 021, 032 and 045 dropped. Still owned: a bench's "before"
  * arm re-applies 014 or 017, and a test re-applies 018, 021, 032 or 033,
  * re-creating them, so a schema reset must drop them too.
@@ -1262,7 +1271,7 @@ export const SUPERSEDED_SIGNATURES = Object.freeze([
   "search_thoughts_hybrid(vector, text, float, int, jsonb)",
   "update_thought(uuid, text, jsonb, vector, jsonb, timestamptz, jsonb)",
   "update_thought(uuid, text, jsonb, vector, jsonb, timestamptz, jsonb, text)",
-  "update_thought(uuid, text, jsonb, vector, jsonb, timestamptz, jsonb, text, jsonb)",
+  UPDATE_THOUGHT_SIGNATURE_9,
 ]);
 
 /**
