@@ -39,7 +39,7 @@ The directory type-checks — `bunx tsc --noEmit` here, strict, every `.ts` file
 against `../server-portable`'s and `../db`'s exports — and CI runs it in the
 portable-server job (SMD-1932). `tsconfig.json` mirrors the server's;
 `package.json` pins `@types/bun`, `typescript` and `@types/node` at the server's
-versions, held in step across the four type-checked directories by
+versions, held in step across the type-checked directories by
 `check-fork-consistency` 18. The
 harnesses that call `judgePair`, `extractEntities` and `resolveEmbedConfig`
 directly are the call sites a signature change used to reach by grep rather
@@ -2914,7 +2914,7 @@ on to open. This loop captures it and gates PRs on it.
    brain, so the fixture can be committed without the corpus — but the `query`
    strings are the searcher's own words (personal data), so committing an export
    fixture from a real brain commits real queries; that is a maintainer's call.
-   `scripts/check-fork-consistency.mjs` check 9 guards thought content (an
+   `scripts/check-fork-consistency.ts` check 9 guards thought content (an
    allowlist: every committed string must be an id or free text under a known
    key), not query text. Attribution collapses distinct callers who typed the
    same query, and every anonymous (NULL-agent) caller, into one bucket — a proxy.

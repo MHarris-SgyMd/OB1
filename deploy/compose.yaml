@@ -23,7 +23,7 @@
 # password and one key over plain HTTP. Postgres and Ollama publish nothing;
 # the server reaches both over the compose network by service name, and a tool
 # run from a checkout gets them through compose.host-ports.yaml (a second -f),
-# loopback again unless told otherwise. scripts/check-fork-consistency.mjs
+# loopback again unless told otherwise. scripts/check-fork-consistency.ts
 # check 13 refuses a mapping that drops the address (SMD-1844).
 
 name: open-brain
@@ -210,7 +210,7 @@ services:
       # and preflight prints which. Until SMD-1843 nothing here forwarded it, so
       # SETUP.md's switch never reached the container. Every knob the server
       # declares (server-portable/index.ts, type Env) is forwarded now, and
-      # scripts/check-fork-consistency.mjs check 14 fails on the next one that
+      # scripts/check-fork-consistency.ts check 14 fails on the next one that
       # is not — a name in a comment, or on ollama-pull's command line, is not
       # a forward.
       OB1_QUERY_LOG: ${OB1_QUERY_LOG:-}

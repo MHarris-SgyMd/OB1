@@ -265,12 +265,12 @@ Commits to the fork's own code follow a small grammar, checked by `commitlint`
   warning).
 - On a review-pass commit, every finding bullet in the body carries a
   `(caught: <how it was found>)` tag — the `caught-tag` rule (a warning) — so
-  `scripts/mechanism-yield.mjs` can count what each pass caught. Subjects have no
+  `scripts/mechanism-yield.ts` can count what each pass caught. Subjects have no
   length limit; they are sentences by design.
 
 It runs in CI on every PR (the `commit-lint` job) and, opt-in, before each commit
-locally: `bun scripts/install-hooks.mjs` (undo with `--uninstall`). Merge commits
-are ignored. The config is `scripts/commitlint.config.mjs`.
+locally: `bun scripts/install-hooks.ts` (undo with `--uninstall`). Merge commits
+are ignored. The config is `scripts/commitlint.config.ts`.
 
 ## Changelog & versioning (fork changes)
 
@@ -311,7 +311,7 @@ registry's vendor keys — and name the vendor's service in `requires.services`,
 one external system per entry, its name first (a model provider it also uses is
 its own entry, not a parenthetical); add the artifact and its capabilities to
 the registry; add the vendor under `connectors` with the direction the
-capabilities derive; run `bun scripts/connector-registry.mjs` to refresh the
+capabilities derive; run `bun scripts/connector-registry.ts` to refresh the
 spec's tables. `check-fork-consistency` check 19 holds the declaration and the
 registry equal, so the PR fails at one place until it is classified. Under the
 declaration sits a net for a contribution that declared nothing — its services

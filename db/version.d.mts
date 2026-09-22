@@ -2,7 +2,7 @@
  * version.d.mts — types for version.mjs.
  *
  * version.mjs is plain JavaScript for the same reason config.mjs is: it is
- * imported by migrate.ts, preflight.ts and check-fork-consistency.mjs with no
+ * imported by migrate.ts, preflight.ts and check-fork-consistency.ts with no
  * build step between them. A TypeScript consumer would see `any`, which
  * `tsc --noEmit` rejects under `noImplicitAny`; this file is the missing half,
  * checked against the implementation by CI's typecheck so the two cannot drift.

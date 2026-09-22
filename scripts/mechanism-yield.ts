@@ -1,6 +1,6 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 /**
- * mechanism-yield.mjs — which review mechanisms pay, read from the commit log.
+ * mechanism-yield.ts — which review mechanisms pay, read from the commit log.
  *
  * The fork's review loop records each pass as a commit whose body lists its
  * findings as bullets. This script treats every such bullet as one row and
@@ -59,12 +59,12 @@
  *
  * Not a CI gate. A maintainer report, run when ten tickets carry tags:
  *
- *   bun scripts/mechanism-yield.mjs                      # whole log
- *   bun scripts/mechanism-yield.mjs --since <sha>        # that commit and everything committed at or after it
- *   bun scripts/mechanism-yield.mjs --since YYYY-MM-DD   # from that calendar day on, committer time in --zone
- *   bun scripts/mechanism-yield.mjs --zone Europe/London # the zone days are read in (default America/Chicago)
- *   bun scripts/mechanism-yield.mjs --log dump.txt       # a saved dump (--since then takes a date only)
- *   bun scripts/mechanism-yield.mjs --self-check         # the parser fixtures
+ *   bun scripts/mechanism-yield.ts                      # whole log
+ *   bun scripts/mechanism-yield.ts --since <sha>        # that commit and everything committed at or after it
+ *   bun scripts/mechanism-yield.ts --since YYYY-MM-DD   # from that calendar day on, committer time in --zone
+ *   bun scripts/mechanism-yield.ts --zone Europe/London # the zone days are read in (default America/Chicago)
+ *   bun scripts/mechanism-yield.ts --log dump.txt       # a saved dump (--since then takes a date only)
+ *   bun scripts/mechanism-yield.ts --self-check         # the parser fixtures
  *
  * `--since <sha>` is a window in TIME as well as ancestry — the commit's own
  * commit time onward — so a branch that started before the anchor and merged
@@ -96,19 +96,21 @@
 
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
-// The commit-message grammar is defined once, in commit-grammar.mjs, and shared
-// with scripts/commitlint.config.mjs (SMD-1808) — importing it here rather than
+// The commit-message grammar is defined once, in commit-grammar.ts, and shared
+// with scripts/commitlint.config.ts (SMD-1808) — importing it here rather than
 // keeping a second copy. Pure string work, no side effects at import.
-import { passNumber, isRunResult, bulletsOf, MECHANISMS, readTag, isReviewPass, REVIEW_RE, BOYSCOUT_RE, MERGE_RE } from "./commit-grammar.mjs";
+import { passNumber, isRunResult, bulletsOf, MECHANISMS, readTag, isReviewPass, REVIEW_RE, BOYSCOUT_RE, MERGE_RE } from "./commit-grammar.ts";
 
 // ---------------------------------------------------------------------------
 // Arguments
 // ---------------------------------------------------------------------------
-const KNOWN = { "--since": "value", "--log": "value", "--zone": "value", "--samples": "value", "--dump": "value", "--self-check": "flag" };
+const KNOWN: Record<string, "value" | "flag"> = { "--since": "value", "--log": "value", "--zone": "value", "--samples": "value", "--dump": "value", "--self-check": "flag" };
+/** The parsed options: each value option a string, the flag `true`, or one `error` — plus the index the parser writes them through. */
+type Opts = { error?: string; "--since"?: string; "--log"?: string; "--zone"?: string; "--samples"?: string; "--dump"?: string; "--self-check"?: true; [name: string]: string | true | undefined };
 
 /** `--name value` or `--name=value`; a flag takes none; anything unknown is refused. */
-function parseArgs(argv) {
-  const out = {};
+function parseArgs(argv: string[]): Opts {
+  const out: Opts = {};
   for (let i = 0; i < argv.length; i++) {
     const tok = argv[i];
     const eq = tok.indexOf("=");
@@ -128,7 +130,7 @@ function parseArgs(argv) {
 }
 
 /** A refusal with a reason: printed, and the run stops with exit 2. */
-function refuse(msg) {
+function refuse(msg: string): never {
   console.error(msg);
   process.exit(2);
 }
@@ -142,7 +144,7 @@ const DUMP = OPTS["--dump"];
 const LOG = OPTS["--log"];
 const SINCE = OPTS["--since"];
 const SELF_CHECK = OPTS["--self-check"] === true;
-const isDate = (s) => /^\d{4}-\d{2}-\d{2}$/.test(s);
+const isDate = (s: string) => /^\d{4}-\d{2}-\d{2}$/.test(s);
 
 // ---------------------------------------------------------------------------
 // The zone. A `--since YYYY-MM-DD` day is resolved ONCE to the instant it
@@ -155,14 +157,14 @@ const isDate = (s) => /^\d{4}-\d{2}-\d{2}$/.test(s);
 // ---------------------------------------------------------------------------
 const DEFAULT_ZONE = "America/Chicago";
 /** The zone from the options: a Region/City IANA name or UTC. Legacy abbreviations (EST) are refused — they are fixed offsets, not zones. */
-function zoneOf(opts) {
+function zoneOf(opts: Opts): { zone: string; error?: undefined } | { zone?: undefined; error: string } {
   const z = opts["--zone"];
   if (z === undefined) return { zone: DEFAULT_ZONE };
   if (!/^(?:[A-Za-z]+\/[A-Za-z0-9_+\-]+(?:\/[A-Za-z0-9_+\-]+)?|UTC)$/.test(z)) return { error: `--zone takes an IANA Region/City name such as ${DEFAULT_ZONE}, or UTC; got ${JSON.stringify(z)}` };
   return dayFormatter(z) ? { zone: z } : { error: `--zone: ${JSON.stringify(z)} is not a zone this runtime knows` };
 }
 /** A YYYY-MM-DD formatter for one IANA zone, or null when the runtime does not know the name. */
-function dayFormatter(zone) {
+function dayFormatter(zone: string): Intl.DateTimeFormat | null {
   try {
     return new Intl.DateTimeFormat("en-CA", { timeZone: zone, year: "numeric", month: "2-digit", day: "2-digit" });
   } catch {
@@ -170,9 +172,9 @@ function dayFormatter(zone) {
   }
 }
 /** The zone's offset from UTC at an instant, in ms (Chicago in September: -5 h). */
-function offsetMs(t, zone) {
+function offsetMs(t: Date, zone: string): number {
   const parts = new Intl.DateTimeFormat("en-US", { timeZone: zone, hourCycle: "h23", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" }).formatToParts(t);
-  const g = (type) => Number(parts.find((p) => p.type === type).value);
+  const g = (type: string) => Number(parts.find((p) => p.type === type)!.value); // every part g() asks for was requested of the formatter above
   return Date.UTC(g("year"), g("month") - 1, g("day"), g("hour"), g("minute"), g("second")) - t.getTime();
 }
 /**
@@ -180,7 +182,7 @@ function offsetMs(t, zone) {
  * midnight, shift by the zone's offset at that instant, and shift once more
  * so a DST change between the two candidate instants is applied.
  */
-function startOfDay(day, zone) {
+function startOfDay(day: string, zone: string): Date {
   const [y, m, d] = day.split("-").map(Number);
   const midnightUTC = Date.UTC(y, m - 1, d);
   let t = new Date(midnightUTC);
@@ -188,14 +190,14 @@ function startOfDay(day, zone) {
   return t;
 }
 /** The commits committed at or after an instant — the one window filter, for a day or a sha anchor alike. */
-const sinceInstant = (commits, start) => commits.filter((c) => c.stamp.getTime() >= start.getTime());
+const sinceInstant = <C extends { stamp: Date }>(commits: C[], start: Date): C[] => commits.filter((c) => c.stamp.getTime() >= start.getTime());
 /** The calendar day of an instant in a zone, for display. */
-const dayOf = (t, formatter) => formatter.format(t);
+const dayOf = (t: Date, formatter: Intl.DateTimeFormat): string => formatter.format(t);
 
 const zoneRead = zoneOf(OPTS);
 if (zoneRead.error) refuse(zoneRead.error);
-const ZONE = zoneRead.zone;
-const DAY_FORMAT = dayFormatter(ZONE);
+const ZONE = zoneRead.zone!; // zoneOf returned a zone, or refuse() ended the run the line above
+const DAY_FORMAT = dayFormatter(ZONE)!; // zoneOf built this same formatter to accept ZONE
 
 // ---------------------------------------------------------------------------
 // Parsing
@@ -206,18 +208,21 @@ const DAY_FORMAT = dayFormatter(ZONE);
 // differently on it. An instant rather than a rendered day, so a dump is
 // zone-free and the reader's --zone decides the day.
 const FORMAT = "%x1e%H%x1f%cI%x1f%s%x1f%b";
+/** One commit of the log: short sha, committer instant and its day in ZONE, subject, body. */
+type Commit = { sha: string; stamp: Date; date: string; subject: string; body: string };
 
-function git(args) {
+function git(args: string[]): string {
   try {
     return execFileSync("git", args, { encoding: "utf8", maxBuffer: 64 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"] });
   } catch (e) {
-    const msg = String(e.stderr ?? e.message).trim().split("\n")[0];
+    const err = e as { stderr?: string; message?: string }; // what execFileSync throws: an Error carrying the child's stderr
+    const msg = String(err.stderr ?? err.message).trim().split("\n")[0];
     refuse(`git ${args.slice(0, 2).join(" ")} failed: ${msg}`);
   }
 }
 
 /** Returns { commits, windowLabel }. */
-function readLog() {
+function readLog(): { commits: Commit[]; windowLabel: string } {
   const dayLabel = `window ${SINCE} (${ZONE} days) → `;
   if (LOG) {
     const commits = parseCommits(fs.readFileSync(LOG, "utf8"));
@@ -248,7 +253,7 @@ function readLog() {
  * truncated copy, a hand-edited dump, or one made before SMD-1728 with a
  * rendered day — is refused by position, not skipped and not compared.
  */
-function parseCommits(raw, fail = refuse) {
+function parseCommits(raw: string, fail: (msg: string) => never = refuse): Commit[] {
   return raw
     .split("\x1e")
     .filter((r) => r.trim())
@@ -273,7 +278,7 @@ function parseCommits(raw, fail = refuse) {
  * for SMD-1037 … (SMD-1607)"), so first-mention-anywhere attributed 13 of the
  * log's review passes wrongly.
  */
-const ticketOf = (subject, body) => subject.match(/\((SMD-\d+)[^()]*\)\s*$/)?.[1] ?? subject.match(/SMD-\d+/)?.[0] ?? body.match(/SMD-\d+/)?.[0] ?? "(none)";
+const ticketOf = (subject: string, body: string): string => subject.match(/\((SMD-\d+)[^()]*\)\s*$/)?.[1] ?? subject.match(/SMD-\d+/)?.[0] ?? body.match(/SMD-\d+/)?.[0] ?? "(none)";
 
 // ---------------------------------------------------------------------------
 // Classification
@@ -284,18 +289,24 @@ const ticketOf = (subject, body) => subject.match(/\((SMD-\d+)[^()]*\)\s*$/)?.[1
 // names a test; record before test-teeth before code, since a fix to prose
 // about a test is a record fix. Known skew: a code defect in a checker that
 // parses comments or names reads as record.
-const TARGET = [
+const TARGET: [string, RegExp][] = [
   ["filed", /\bfiled\b|\bticket(ed)?\b|\bfollow-?up\b/i],
   ["confirmed", /\b(confirmed|as it must|as designed|as intended|no defect|not vacuous|unaffected|keeps its teeth|holds\b|checks out|both correct|is correct|are correct|not a defect|not a live defect|does NOT occur|verified:)/i],
   ["record", /\bFORK\b|§|\bREADME\b|\bcomment\b|\bheader\b|\bprose\b|\bcaption\b|\bwording\b|\bsaid\b|\bstated\b|\bstates\b|\bwrite-?up\b|\bdoc(s|umented|umentation|block)?\b|\brenumber|\bcross-?ref|\bcredit\b|\bname[ds]? (as|the)\b|\bcount(ed)? (said|says)|Verified line|\bknown-issues\b|\bnote\b|\bsentence\b|\bparagraph\b|\btable\b.*\b(said|read)\b/i],
   ["test-teeth", /\btest-[a-z-]+\.ts|\[\d+[a-z]?\]|\bassert(ion)?s?\b|\bvacuous|\btoothless|\bfixture|\bflak|\bskip(s|ped)?\b|\bsuite\b|\bteeth\b|\bgate[sd]?\b|\bthreshold|\bmargin\b|eval-[a-z-]+\.ts|\bbench-[a-z-]+\.ts|\bprobe\b/i],
   ["code", /\b(refuse[sd]?|wrong|silent(ly)?|never|race|hang|leak|regress|fix(ed|es)?|bug|defect|broke|fails?|failed|crash|deadlock|double|twice|missing|absent|leaked|ignored|unbounded|off by|overflow|null|undefined|dangl|split|parsed?|returned|printed|counted|accepted|trusted|buried|gone|dropped|stripped|quoted|cache|key|flag|loop|error|refusal|banner)\b|\.(ts|sql|mjs|sh)\b|\bmigration \d{3}\b|\b0\d\d\b|→/i],
 ];
-const classify = (rules, text, fallback) => rules.find(([, re]) => re.test(text))?.[0] ?? fallback;
+const classify = (rules: [string, RegExp][], text: string, fallback: string): string => rules.find(([, re]) => re.test(text))?.[0] ?? fallback;
 const DEFECTS = new Set(["code", "test-teeth"]);
+/** One finding classified: its text with the tag stripped, how the catcher was named, the mechanism, what holds it, what was wrong. */
+type Classified = { text: string; source: string; mechanism: string; held: string | null; target: string };
+/** One row of the report: the commit it came from, its ticket and pass number (0 named, null unparsed), the row kind, and the classification. */
+type Row = { sha: string; stamp: Date; date: string; ticket: string; pass: number | null; kind: string } & Classified;
+/** Per ticket: the pass numbers run, the highest pass that found a defect, whether any did, and the bullet rows. */
+type TicketEntry = { passes: Set<number>; lastDefect: number; hadDefect: boolean; rows: number };
 
 /** One finding → one row with its two classifications. */
-function classifyRow(text) {
+function classifyRow(text: string): Classified {
   const tag = readTag(text);
   if (tag?.unparsed) {
     return { text, source: "tag-unparsed", mechanism: "unparsed", held: null, target: classify(TARGET, tag.head, "unclassified") };
@@ -319,10 +330,10 @@ function classifyRow(text) {
  * apart from `lastDefect` because a named pass (0) or an unparsed one (null)
  * can find a defect that no pass number can carry.
  */
-function ticketSummary(rows) {
-  const byTicket = new Map();
+function ticketSummary(rows: Pick<Row, "ticket" | "pass" | "kind" | "target">[]): Map<string, TicketEntry> {
+  const byTicket = new Map<string, TicketEntry>();
   for (const r of rows) {
-    const e = byTicket.get(r.ticket) ?? { passes: new Set(), lastDefect: 0, hadDefect: false, rows: 0 };
+    const e: TicketEntry = byTicket.get(r.ticket) ?? { passes: new Set(), lastDefect: 0, hadDefect: false, rows: 0 };
     if (r.pass) e.passes.add(r.pass);
     if (r.kind === "bullet") {
       e.rows++;
@@ -340,14 +351,14 @@ function ticketSummary(rows) {
  * "pass N" ranked N, then "an unnumbered pass" when only a named or unparsed
  * pass found one, then "none".
  */
-const lastDefect = (e) => (e.lastDefect ? { rank: e.lastDefect, label: `pass ${e.lastDefect}` } : e.hadDefect ? { rank: 1e3, label: "an unnumbered pass" } : { rank: 1e6, label: "none" });
+const lastDefect = (e: TicketEntry): { rank: number; label: string } => (e.lastDefect ? { rank: e.lastDefect, label: `pass ${e.lastDefect}` } : e.hadDefect ? { rank: 1e3, label: "an unnumbered pass" } : { rank: 1e6, label: "none" });
 
 // ---------------------------------------------------------------------------
 // Self-check: the parsers and the tag reader on fixtures
 // ---------------------------------------------------------------------------
 function selfCheck() {
   let failures = 0;
-  const check = (ok, label) => {
+  const check = (ok: boolean, label: string) => {
     console.log(`${ok ? "ok  " : "FAIL"} ${label}`);
     if (!ok) failures++;
   };
@@ -382,7 +393,7 @@ function selfCheck() {
     "",
     "Green after:",
     "- bun db/test-schema.ts 907/907",
-    "- bun scripts/check-fork-consistency.mjs PASS, with a sentence long enough to look like a finding",
+    "- bun scripts/check-fork-consistency.ts PASS, with a sentence long enough to look like a finding",
     "",
     "Verified against the container, and two things came of it:",
     "- test-live 17/17 (caught: run-it)",
@@ -395,10 +406,10 @@ function selfCheck() {
   check(skipped.length === 5 && skipped.includes("ok.") && skipped.includes("bun db/test-schema.ts 907/907"), `five bullets skipped and kept for the samples: a run result by shape, two under a Green line, an untagged one under a Verified line, one too short to be a finding on its own (${skipped.length})`);
   check(bullets[13] === "test-live 17/17 (caught: run-it)" && isRunResult("test-live 17/17 (caught: run-it)"), "a bullet the run-result rule would skip is a finding once it carries a tag");
   const rows = bullets.map(classifyRow);
-  const r = (i) => rows[i] ?? {};
+  const r = (i: number): Partial<Classified> => rows[i] ?? {};
   check(r(0).source === "tagged" && r(0).mechanism === "cold-read" && r(0).held === null, "tag without held read");
   check(r(0).target === "record", `tagged row still classified by target (${r(0).target})`);
-  check(!/\(caught:/.test(r(0).text), "tag stripped from the finding text");
+  check(!/\(caught:/.test(r(0).text!), "tag stripped from the finding text"); // row 0 is the fixture's first bullet; r() only falls back to {} on a short parse
   check(r(1).source === "tagged" && r(1).mechanism === "mutant" && r(1).held === "test-live [17]", "tag with held read, brackets inside held survive");
   check(r(2).source === "implicit", "untagged bullet is implicit");
   check(r(3).source === "tagged-unknown" && r(3).mechanism === "unknown:cold-reed", "unknown mechanism kept and flagged");
@@ -416,32 +427,32 @@ function selfCheck() {
   check(ticketOf("[fork] Review, second pass: that field is SMD-1730's, not this one's (SMD-1719)", "Body mentions SMD-1000 first.") === "SMD-1719" && ticketOf("[fork] Review pass 2: the probe beside SMD-1498's, re-run on the fixed table", "") === "SMD-1498" && ticketOf("[fork] Review pass 1: the header re-read (SMD-1463 review pass 1)", "SMD-1526 first in the body") === "SMD-1463" && ticketOf("[fork] Review, first pass", "Filed as SMD-1462.") === "SMD-1462" && ticketOf("[fork] Review, first pass", "no ticket") === "(none)" && ticketOf("[fork] Bump, and SMD-1616's probe re-run (SMD-1643, SMD-1616)", "") === "SMD-1643", "ticket: the first in the subject's trailing parenthetical, then its first mention, then the body");
   check(FORMAT.includes("%x1f%cI%x1f") && !FORMAT.includes("%ad") && !FORMAT.includes("%cd"), "rows carry the committer instant, the clock the anchor cuts on, not a rendered day");
   {
-    const iso = (t) => t.toISOString();
+    const iso = (t: Date) => t.toISOString();
     check(iso(startOfDay("2026-09-18", "America/Chicago")) === "2026-09-18T05:00:00.000Z" && iso(startOfDay("2026-09-18", "UTC")) === "2026-09-18T00:00:00.000Z" && iso(startOfDay("2026-09-18", "Asia/Tokyo")) === "2026-09-17T15:00:00.000Z", "a day begins at a different instant in each declared zone");
     check(iso(startOfDay("2026-03-08", "America/Chicago")) === "2026-03-08T06:00:00.000Z" && iso(startOfDay("2026-11-01", "America/Chicago")) === "2026-11-01T05:00:00.000Z" && iso(startOfDay("2026-07-01", "America/Chicago")) === "2026-07-01T05:00:00.000Z", "the day DST starts still begins on standard time, the day it ends on daylight time");
     // Lebanon moves its clocks at midnight, so 2026-03-29 has no 00:00 there: the day begins at 01:00 EEST = 22:00Z the evening before. One shift from UTC midnight lands an hour early; the second corrects it.
     check(iso(startOfDay("2026-03-29", "Asia/Beirut")) === "2026-03-28T22:00:00.000Z", "a zone whose DST change falls at midnight still gets the day's true first instant");
-    const parseErr = (raw) => {
+    const parseErr = (raw: string): string | null => {
       try {
         parseCommits(raw, (m) => { throw new Error(m); });
         return null;
       } catch (e) {
-        return e.message;
+        return (e as Error).message; // the fail passed above throws an Error
       }
     };
-    const rec = (...f) => "\x1e" + f.join("\x1f");
+    const rec = (...f: string[]) => "\x1e" + f.join("\x1f");
     const ok = rec("aaaaaaa1234", "2026-09-18T02:24:12-05:00", "s", "b");
-    check(parseErr(ok) === null && /^record 2 \(bbbbbbb\) has "2026-09-18" where a committer instant/.test(parseErr(ok + rec("bbbbbbb1234", "2026-09-18", "s", "b"))) && /^record 2 \(ccccccc\) has "garbage"/.test(parseErr(ok + rec("ccccccc1234", "garbage", "s", "b"))) && /^record 2 \(ddddddd\) has no date or subject column/.test(parseErr(ok + "\x1eddddddd1234\n")), "a rendered day, an unreadable stamp and a record without fields are each refused by record, never compared");
+    check(parseErr(ok) === null && /^record 2 \(bbbbbbb\) has "2026-09-18" where a committer instant/.test(String(parseErr(ok + rec("bbbbbbb1234", "2026-09-18", "s", "b")))) && /^record 2 \(ccccccc\) has "garbage"/.test(String(parseErr(ok + rec("ccccccc1234", "garbage", "s", "b")))) && /^record 2 \(ddddddd\) has no date or subject column/.test(String(parseErr(ok + "\x1eddddddd1234\n"))), "a rendered day, an unreadable stamp and a record without fields are each refused by record, never compared"); // String(): the coercion RegExp.test applies to a null (no throw) itself, spelled out
     const cs = sinceInstant(
       [{ stamp: new Date("2026-09-18T04:59:59Z") }, { stamp: new Date("2026-09-18T05:00:00Z") }, { stamp: new Date("2026-09-18T20:30:00-05:00") }],
       startOfDay("2026-09-18", "America/Chicago"),
     );
     check(cs.length === 2, `a --since day keeps the commits from its first instant in the zone on: 23:59:59 Chicago the night before is out, midnight is in (${cs.length})`);
     check(sinceInstant([{ stamp: new Date("2026-09-18T20:30:00-05:00") }], startOfDay("2026-09-19", "UTC")).length === 1 && sinceInstant([{ stamp: new Date("2026-09-18T20:30:00-05:00") }], startOfDay("2026-09-19", "America/Chicago")).length === 0, "one instant is inside the 19th under UTC and outside it in Chicago — the zone decides, once");
-    const chicago = dayFormatter("America/Chicago"), tokyo = dayFormatter("Asia/Tokyo");
+    const chicago = dayFormatter("America/Chicago")!, tokyo = dayFormatter("Asia/Tokyo")!; // both zones resolved in the startOfDay checks above
     check(dayOf(new Date("2026-09-18T20:30:00-05:00"), chicago) === "2026-09-18" && dayOf(new Date("2026-09-18T20:30:00-05:00"), tokyo) === "2026-09-19", "the day a row is shown with is rendered in the declared zone");
     check(zoneOf({}).zone === DEFAULT_ZONE && zoneOf({ "--zone": "UTC" }).zone === "UTC" && zoneOf({ "--zone": "Europe/London" }).zone === "Europe/London" && zoneOf({ "--zone": "America/Argentina/Buenos_Aires" }).zone === "America/Argentina/Buenos_Aires", "the zone comes from --zone, else the default");
-    check(!!zoneOf({ "--zone": "EST" }).error && !!zoneOf({ "--zone": "" }).error && !!zoneOf({ "--zone": "Not/AZone" }).error && /""/.test(zoneOf({ "--zone": "" }).error), "a legacy abbreviation, an empty value and an unknown name are refused, the empty one visibly");
+    check(!!zoneOf({ "--zone": "EST" }).error && !!zoneOf({ "--zone": "" }).error && !!zoneOf({ "--zone": "Not/AZone" }).error && /""/.test(zoneOf({ "--zone": "" }).error!), "a legacy abbreviation, an empty value and an unknown name are refused, the empty one visibly"); // the same call was asserted truthy one clause earlier
     check(ZONE === (OPTS["--zone"] ?? DEFAULT_ZONE) && DAY_FORMAT.resolvedOptions().timeZone === ZONE, `the running zone is the one the options named and the formatter is built on it (${ZONE})`);
     const parsed = parseCommits("\x1e" + ["abcdef0123", "2026-09-18T20:30:00-05:00", "s", "b"].join("\x1f"));
     check(parsed.length === 1 && parsed[0].stamp.getTime() === Date.parse("2026-09-18T20:30:00-05:00") && parsed[0].date === dayOf(parsed[0].stamp, DAY_FORMAT) && parsed[0].sha === "abcdef0", "a parsed commit keeps its instant, and its shown day is that instant in the running zone");
@@ -453,7 +464,7 @@ function selfCheck() {
       { ticket: "SMD-2", pass: 3, kind: "bullet", target: "record" },
       { ticket: "SMD-3", pass: 1, kind: "bullet", target: "confirmed" },
     ]);
-    const l = (t) => lastDefect(s.get(t));
+    const l = (t: string) => lastDefect(s.get(t)!); // the three tickets asked for are the fixture's
     check(l("SMD-1").label === "an unnumbered pass" && l("SMD-2").label === "pass 2" && l("SMD-3").label === "none" && l("SMD-2").rank < l("SMD-1").rank && l("SMD-1").rank < l("SMD-3").rank, "a defect found by a named pass is a defect the ticket had, not 'none'; ranks order numbered, unnumbered, none");
   }
   check(REVIEW_RE.test("[fork] Review, first pass: x") && REVIEW_RE.test("[fork] Review pass 6: x") && REVIEW_RE.test("[fork] Third review pass, triaged: x"), "the three review-pass subject shapes are recognised");
@@ -479,15 +490,15 @@ const { commits, windowLabel } = readLog();
 const review = commits.filter((c) => isReviewPass(c.subject));
 const boyscout = commits.filter((c) => BOYSCOUT_RE.test(c.subject) && !MERGE_RE.test(c.subject));
 
-const rows = [];
+const rows: Row[] = [];
 let subjectOnly = 0;
-const runResults = []; // the bullets the run-result rules dropped, printed in full at the end so a lost finding is visible
+const runResults: { sha: string; ticket: string; pass: number | null; text: string }[] = []; // the bullets the run-result rules dropped, printed in full at the end so a lost finding is visible
 for (const c of review) {
   const ticket = ticketOf(c.subject, c.body);
   const pass = passNumber(c.subject);
   const { findings, skipped } = bulletsOf(c.body);
   for (const s of skipped) runResults.push({ sha: c.sha, ticket, pass, text: s });
-  const row = (kind, text) => ({ sha: c.sha, stamp: c.stamp, date: c.date, ticket, pass, kind, ...classifyRow(text) });
+  const row = (kind: string, text: string): Row => ({ sha: c.sha, stamp: c.stamp, date: c.date, ticket, pass, kind, ...classifyRow(text) });
   if (findings.length === 0) {
     // Older passes carry their findings in the subject only: one coarse row, kept out of the tables.
     subjectOnly++;
@@ -501,15 +512,15 @@ const bulletRows = rows.filter((r) => r.kind === "bullet");
 // ---------------------------------------------------------------------------
 // Report
 // ---------------------------------------------------------------------------
-const pct = (n, d) => (d ? `${((100 * n) / d).toFixed(0)}%` : "-");
-const pad = (s, n) => String(s).padEnd(n);
-const rpad = (s, n) => String(s).padStart(n);
-const count = (arr, key) => {
-  const m = new Map();
+const pct = (n: number, d: number) => (d ? `${((100 * n) / d).toFixed(0)}%` : "-");
+const pad = (s: string | number, n: number) => String(s).padEnd(n);
+const rpad = (s: string | number, n: number) => String(s).padStart(n);
+const count = <K extends keyof Row>(arr: Row[], key: K) => {
+  const m = new Map<Row[K], number>();
   for (const r of arr) m.set(r[key], (m.get(r[key]) ?? 0) + 1);
   return [...m.entries()].sort((a, b) => b[1] - a[1]);
 };
-const distinctTickets = (tickets) => new Set(tickets.filter((t) => t !== "(none)")).size;
+const distinctTickets = (tickets: string[]) => new Set(tickets.filter((t) => t !== "(none)")).size;
 
 // Every review commit has at least one row (a subject-only one when it has no bullets), so the ticket count is read from the rows, once.
 console.log(`${windowLabel}commits ${commits.length}; review-pass commits ${review.length} across ${distinctTickets(rows.map((r) => r.ticket))} tickets (subject-only ${subjectOnly}); boyscout commits ${boyscout.length} (excluded: tidy-ups, not catches)`);
@@ -527,7 +538,7 @@ const targets = ["code", "test-teeth", "record", "confirmed", "filed", "unclassi
 const mechs = count(bulletRows, "mechanism").map(([m]) => m);
 console.log("== Mechanism × target ==");
 console.log(pad("mechanism", 22) + targets.map((t) => rpad(t, 13)).join("") + rpad("total", 8) + rpad("defect%", 9));
-const line = (label, rs) => {
+const line = (label: string, rs: Row[]) => {
   const defects = rs.filter((r) => DEFECTS.has(r.target)).length;
   console.log(pad(label, 22) + targets.map((t) => rpad(rs.filter((r) => r.target === t).length, 13)).join("") + rpad(rs.length, 8) + rpad(pct(defects, rs.length), 9));
 };
@@ -552,10 +563,10 @@ console.log("== By pass number ==");
 console.log(pad("pass", 6) + rpad("rows", 6) + rpad("code", 7) + rpad("teeth", 7) + rpad("record", 8) + rpad("confirm", 9) + rpad("filed", 7) + rpad("uncl", 6) + rpad("defect%", 9) + rpad("commits", 9));
 {
   // Every pass number the rows carry: numbered ones ascending, then the named (0) and the unparsed (null).
-  const passes = [...new Set(bulletRows.map((r) => r.pass))].sort((a, b) => (a === null) - (b === null) || (a === 0) - (b === 0) || a - b);
+  const passes = [...new Set(bulletRows.map((r) => r.pass))].sort((a, b) => Number(a === null) - Number(b === null) || Number(a === 0) - Number(b === 0) || Number(a) - Number(b));
   for (const p of passes) {
     const rs = bulletRows.filter((r) => r.pass === p);
-    const n = (t) => rs.filter((r) => r.target === t).length;
+    const n = (t: string) => rs.filter((r) => r.target === t).length;
     console.log(pad(p === 0 ? "named" : p ?? "?", 6) + rpad(rs.length, 6) + rpad(n("code"), 7) + rpad(n("test-teeth"), 7) + rpad(n("record"), 8) + rpad(n("confirmed"), 9) + rpad(n("filed"), 7) + rpad(n("unclassified"), 6) + rpad(pct(n("code") + n("test-teeth"), rs.length), 9) + rpad(new Set(rs.map((r) => r.sha)).size, 9));
   }
 }
@@ -583,7 +594,7 @@ if (bulletRows.some((r) => r.held)) {
   console.log();
 }
 
-const sample = (arr, n) => (arr.length <= n ? arr : Array.from({ length: n }, (_, i) => arr[Math.floor((i * arr.length) / n)]));
+const sample = <T>(arr: T[], n: number): T[] => (arr.length <= n ? arr : Array.from({ length: n }, (_, i) => arr[Math.floor((i * arr.length) / n)]));
 if (SAMPLES > 0) {
   console.log("== Samples per mechanism ==");
   for (const m of mechs) {

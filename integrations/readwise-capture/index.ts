@@ -3,7 +3,7 @@
 // unchanged — set SUPABASE_URL to a postgres:// connection string, and
 // SUPABASE_SERVICE_ROLE_KEY is ignored (credentials live in the URL).
 // ob1-original-import: https://esm.sh/@supabase/supabase-js@2
-// Revert with: node scripts/migrate-to-sql-shim.mjs --revert <file>
+// Revert with: bun scripts/migrate-to-sql-shim.ts --revert <file>
 // ob1-fork (SMD-1524): a captured thought — content and vector — is written through
 // the 3-argument upsert_thought, which writes the content fingerprint (003), the
 // vector's model label (021) in the same statement; a raw insert left both NULL, and
@@ -12,7 +12,7 @@
 // columns the function does not know follow by an update carrying neither content nor
 // vector, where they are NULL — a fresh row's, or a half-shaped row's on re-capture. FORK.md
 // change 71; extensions/test-writes.ts drives it
-// against Postgres, and scripts/check-fork-consistency.mjs check 10 holds it.
+// against Postgres, and scripts/check-fork-consistency.ts check 10 holds it.
 // ob1-fork (SMD-1455): the webhook secret Readwise echoes is compared timing-safe,
 // digest to digest, through ../_shared/auth.ts — the core server's
 // server-portable/auth.ts, copied so Supabase bundles it with the function.

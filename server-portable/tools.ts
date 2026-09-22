@@ -1,9 +1,9 @@
 // The canonical MCP tool surface — the single, typed source (SMD-1805). The
 // names live here as `as const`, so `ToolName` is a real union TypeScript checks
 // a tool name against; a JSON import would widen every name to `string`, which
-// is why the source is TS and not tools.json. scripts/gen-tools.mjs writes
+// is why the source is TS and not tools.json. scripts/gen-tools.ts writes
 // tools.json from this for deploy/smoke.sh (bash, no bun in the deploy job), and
-// check-fork-consistency.mjs round-trips the two so they cannot drift.
+// check-fork-consistency.ts round-trips the two so they cannot drift.
 
 export type ToolScope = "read" | "write";
 
