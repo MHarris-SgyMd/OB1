@@ -1,0 +1,329 @@
+{
+  "$comment": "The connector taxonomy's one machine-readable source (SMD-1933). docs/connector-taxonomy.md is the spec and carries the tables scripts/connector-registry.mjs renders from this file; check-fork-consistency check 18 validates it and holds the two equal. A new external-touching contribution adds an entry here (or an excuse under not_connectors.artifacts, with its reason) — the check finds it by its metadata.json services and tags and by the SMD-1924 disposition table.",
+  "spec": "docs/connector-taxonomy.md",
+  "facets": {
+    "direction": {
+      "stability": "closed",
+      "values": ["source", "sink"],
+      "note": "Per capability. A connector's direction is derived: `bidirectional` when its capabilities span both."
+    },
+    "round_trip": {
+      "stability": "closed",
+      "values": ["read-only", "writable"],
+      "note": "SMD-1867's canonical-is-truth rule: `writable` means the brain writes the item back to the vendor, so the stored canonical must round-trip."
+    },
+    "transport": {
+      "stability": "near-closed",
+      "values": ["push", "pull", "batch"],
+      "note": "How new data reaches the seam, never a wire protocol. push: the vendor calls in as things happen. pull: the fetcher asks on a schedule or on demand. batch: a one-shot archive or export file. For a sink, how the brain's output reaches the vendor (a send is push)."
+    },
+    "cardinality": {
+      "stability": "near-closed",
+      "values": ["1:1", "1:many", "many:1"],
+      "note": "Vendor item to thought at the seam. The family names the item and owns the grouping key. An enrichment stage past the seam (atomization, SMD-1930) does not change it."
+    },
+    "family": {
+      "stability": "open",
+      "values": "families",
+      "note": "The semantic class of the item. Grows as new sources appear; each new family is declared here with its schema before an artifact uses it."
+    }
+  },
+  "fetchers": {
+    "low-code-node": "a node of the orchestration tool SMD-1863 picks; the default for any vendor the tool exposes",
+    "native-driver": "a typed OB1 script or function that speaks the vendor's protocol itself; the fallback",
+    "mcp-server": "the AI client's own connector — an MCP server or a channel plugin — calling the vendor on demand",
+    "browser-extension": "a client in the user's browser that pushes what the user is looking at"
+  },
+  "families": {
+    "mailbox/email": {
+      "item": "one message",
+      "grouping_key": "thread — RFC 2822 Message-ID / In-Reply-To / References, or the vendor's thread id",
+      "default_cardinality": "1:1",
+      "canonical": "the RFC 2822 message: headers (Message-ID, Date, From, To, Cc, Subject, In-Reply-To, References, List-Id, Labels), the text/plain body, the text/html body, attachment names and types (never bodies)",
+      "text": "Subject, From, Date, then the plain body with quoted replies and signatures stripped; the html body flattened only when no plain part exists",
+      "edges": ["correspondent person edges from From/To/Cc (a person entity per address)", "reply-to edges along In-Reply-To / References to the thread's other messages", "list membership from List-Id"],
+      "metadata": ["message_id", "thread_id", "labels or folder", "date", "from", "to", "cc", "has_attachments", "sensitivity (the fetcher's local routing verdict, when it made one)"],
+      "identity": "`<vendor>:<account>:<Message-ID>`; the Message-ID survives a label change, a move and a re-download, so a re-pull is a no-op",
+      "typical_transport": ["pull", "push"],
+      "dividing_line": "a scheduled mailbox pull or a label-triggered push is a stateful workflow → tool node; \"draft this digest\" or \"read this one thread\" on demand → the client's MCP connector",
+      "sink_shape": "a draft or a send: subject, body, recipients; the brain never edits a message that exists"
+    },
+    "message-stream/chat": {
+      "item": "one message in a channel or a direct conversation",
+      "grouping_key": "conversation — channel id + thread ts (Slack), channel id + message reference chain (Discord), chat id + reply_to_message_id (Telegram), the DM conversation id (X, Instagram)",
+      "default_cardinality": "1:1",
+      "canonical": "the vendor's message object: ids (message, channel or chat, thread or reply-to), author, timestamp, the text with the vendor's markup intact, mentions, reactions, attachment references, an edited timestamp when the vendor keeps one",
+      "text": "the message text with the vendor's markup flattened (mention tokens to display names, formatting to plain text) and the author and channel named once",
+      "edges": ["author person edge", "mention edges to the people and channels named", "reply-to edge along the grouping key"],
+      "metadata": ["vendor", "workspace or server", "channel or chat", "thread", "author", "posted_at", "edited_at"],
+      "identity": "`<vendor>:<workspace>:<channel>:<message id>` — the vendor's message id is stable across an edit, which is what lets telegram-capture's UPDATE_ON_EDIT re-embed in place",
+      "typical_transport": ["push"],
+      "dividing_line": "a bot that must sit on the vendor's event stream (a webhook receiver, a gateway session) is a stateful workflow → tool node, or a native driver where the tool lacks the vendor; a confirmation reply to the captured message is part of the source capability (an ack), not a sink; a briefing or digest sent on a cadence is the sink capability → tool node when scheduled by the tool, the client's channel plugin when the AI client sends it",
+      "sink_shape": "one outbound message (text, optional media) to a chat id; many thoughts → one message is the digest case (many:1)"
+    },
+    "conversation-export": {
+      "item": "one conversation with an AI assistant, or one captured exchange of it",
+      "grouping_key": "conversation id; within it, the turn index and (ChatGPT) the branch the export resolves to",
+      "default_cardinality": "1:1",
+      "canonical": "the vendor's conversation object: conversation id, title, created and updated timestamps, the ordered turns each with role, timestamp, text (markdown intact) and tool or citation blocks, the branch map when the vendor exports one",
+      "text": "the turns in order as `role: text`, markdown flattened, tool and citation blocks reduced to their visible text",
+      "edges": ["model or assistant entity", "citation edges to the URLs a turn cites"],
+      "metadata": ["vendor", "conversation_id", "title", "created_at", "updated_at", "turn_count", "model"],
+      "identity": "`<vendor>:<conversation id>` for a whole conversation; `<vendor>:<conversation id>:<turn index>` for a captured exchange — the id survives a rename",
+      "typical_transport": ["batch", "push", "pull"],
+      "dividing_line": "a one-shot export file is a batch → native driver (a parse has no workflow state for a tool to hold); a browser capture is a push → browser extension; an auto-sync over the vendor's API is a pull the tool owns once SMD-1863 lands. Distilling a conversation into 0–5 thoughts is an enrichment past the seam; the recipes that do it today declare `1:many` because that is what reaches the brain"
+    },
+    "activity-export": {
+      "item": "one activity record — a search, a visit, a view, a post, a comment, a location event",
+      "grouping_key": "the vendor's activity category plus the day (a day of one category is the unit the importers summarise)",
+      "default_cardinality": "many:1",
+      "canonical": "the vendor's record: category, timestamp, title or text, the URL or target, the products and locations the vendor attached",
+      "text": "for a grouped item: the day and category once, then one line per record (`time — title — target`); for a single record: the title and target",
+      "edges": ["target edges to the URLs, places and accounts the records name"],
+      "metadata": ["vendor", "category", "day", "record_count", "date range"],
+      "identity": "`<vendor>:<category>:<day>` for a grouped item; `<vendor>:<category>:<record timestamp>:<hash of title+target>` for a single record — a re-import of the same archive is a no-op",
+      "typical_transport": ["batch"],
+      "dividing_line": "always a batch over an archive the user downloads (Takeout, an X or Instagram export) → native driver; a tool adds nothing to a file parse"
+    },
+    "annotation/highlight": {
+      "item": "one highlight or note on a source document",
+      "grouping_key": "the source document (book, article, podcast) — the vendor's book or document id",
+      "default_cardinality": "1:1",
+      "canonical": "the vendor's highlight object: id, text, note, location (page, position, timestamp), color or tags, highlighted_at, and the source document's id, title, author and category",
+      "text": "the highlight text; the user's note appended as `Note: …`; the source title and author named once",
+      "edges": ["source-document edge (a document entity per book or article, cached in schemas/readwise-books today)", "author person edge"],
+      "metadata": ["vendor", "highlight_id", "book_id", "title", "author", "category", "location", "highlighted_at", "tags"],
+      "identity": "`<vendor>:<highlight id>`; the id is stable across a note edit and a re-export, which is why readwise-capture answers `existed` on a re-delivery",
+      "typical_transport": ["push", "pull"],
+      "dividing_line": "the live webhook is a push → tool node (or the native receiver today); the history backfill is a pull the tool can page → tool node, or the native script; both map to one identity so running both makes no duplicate"
+    },
+    "document/page": {
+      "item": "one page or note",
+      "grouping_key": "the page — sections are the sync unit for the writable direction (SMD-949's section ownership), the page is the capture unit",
+      "default_cardinality": "1:1",
+      "canonical": "the source form byte-for-byte: the markdown file with its frontmatter (Obsidian, Markdown+git), the block JSON (Notion), the storage format (Confluence), the Atom entry (Blogger) — SMD-1867's round-trip rule: this is the stored truth for a writable page, the text and edges are projections",
+      "text": "the body with presentation markup flattened — callouts, embeds, block refs, macros reduced to their visible text — and the title first",
+      "edges": ["link edges from `[[wikilinks]]`, relation properties, issue links, `@page` mentions — the structured layer, imported deterministically and authoritative over an LLM-inferred edge naming the same pair (SMD-1867)", "tag edges from `#tags`, labels, frontmatter tags", "parent/child from the page tree"],
+      "metadata": ["vendor", "page_id", "path or url", "title", "tags", "frontmatter or typed properties", "created_at", "updated_at", "author"],
+      "identity": "`<vendor>:<page id>` where the vendor has one (Notion, Confluence, Blogger); for a file vault, the frontmatter id when present, else the path with a rename detected by content fingerprint (SMD-1813's identity rule: it must survive a rename on either side)",
+      "typical_transport": ["batch", "pull", "push"],
+      "dividing_line": "a vault or export import is a batch → native driver; a live two-way sync (SMD-1814–1818) is a stateful workflow → tool node with the section-ownership and conflict rules of SMD-1813 applied in the brain, not in the node. Splitting a long page by heading is an enrichment past the seam; obsidian-vault-import declares `1:many` because that is what reaches the brain",
+      "sink_shape": "the page's owned sections written back in the source form; a page the brain did not create is never overwritten whole"
+    },
+    "web-clip": {
+      "item": "one web page or selection the user chose to keep",
+      "grouping_key": "the URL (canonicalised: scheme and host lowercased, tracking parameters dropped, fragment kept only for a selection anchor)",
+      "default_cardinality": "1:1",
+      "canonical": "the URL, the page title, the captured HTML fragment or the readable-article extraction, the selection text when one was made, the capture timestamp",
+      "text": "the title, then the selection if any, else the readable article text",
+      "edges": ["site or publisher entity", "author from the page's metadata when present"],
+      "metadata": ["url", "title", "site", "captured_at", "selection (boolean)"],
+      "identity": "`web:<canonical url>[#<selection hash>]` — the same page clipped twice is one thought with the later canonical",
+      "typical_transport": ["push"],
+      "dividing_line": "a browser extension push → browser extension; no instance in the tree today (the Chrome extension captures conversations, a different family); the slot names where a clipper lands"
+    },
+    "calendar/event": {
+      "item": "one calendar event (an instance of a recurring series counts as one)",
+      "grouping_key": "the recurring series id; a day of events is the unit a briefing summarises",
+      "default_cardinality": "1:1",
+      "canonical": "the event resource: id and iCalUID, calendar id, summary, description, start and end with time zone, recurrence rule and the series id, attendees with response status, location, organizer, created and updated timestamps",
+      "text": "summary, start–end in the user's zone, location, attendee names, then the description flattened",
+      "edges": ["attendee person edges", "series edge to the recurring parent", "location place edge"],
+      "metadata": ["vendor", "calendar_id", "event_id", "ical_uid", "start", "end", "all_day", "status", "recurring"],
+      "identity": "`<vendor>:<calendar id>:<iCalUID>[:<instance start>]` — the iCalUID survives a title change and a move; the instance start distinguishes one occurrence of a series",
+      "typical_transport": ["pull", "push"],
+      "dividing_line": "a look-ahead pull on a cadence → tool node, or the client's calendar MCP when the AI client asks on demand (life-engine today); a change notification push → tool node. Not one of the ticket's seven — added for the calendar read the tree already does",
+      "note": "Added at classification time: recipes/life-engine reads Google Calendar through the client's MCP connector and none of the seven families named it. The events are read for a briefing, not stored one to one — the family exists so a calendar ingester has a declared slot."
+    },
+    "notification-target": {
+      "reserved": true,
+      "direction": "sink",
+      "item": "one outbound notification to a destination that is not a capturable source — SMS, a push service, an arbitrary outbound webhook",
+      "note": "Held in reserve with no instance: every digest in the tree today delivers to a family that is also a source (mail, chat) and is that family's sink capability. An artifact may use this family only once `reserved` is dropped here, which is a spec change, not a connector detail."
+    }
+  },
+  "connectors": {
+    "slack": { "direction": "bidirectional", "note": "slack-capture is the source; editorial-policy's optional critical-findings post is the sink. One bot token serves both today, in two artifacts." },
+    "discord": { "direction": "bidirectional", "note": "discord-capture is the source; life-engine's briefings are the sink." },
+    "telegram": { "direction": "bidirectional", "note": "telegram-capture and vercel-neon-telegram's bot route are the source; weekly-digest, life-engine and life-engine-video are the sink. Four artifacts, one vendor driver's worth of client." },
+    "gmail": { "direction": "bidirectional", "note": "email-history-import and gmail-smart-pull are the source (pull); daily-digest's draft is the sink, through the client's Gmail MCP connector." },
+    "readwise": { "direction": "source", "note": "readwise-capture (push) and readwise-import (pull) are two transports of one source capability; both resolve to `readwise:<highlight id>`." },
+    "obsidian": { "direction": "source", "note": "obsidian-vault-import is the read-only batch; the SMD-1814 connector adds the writable direction and makes this bidirectional." },
+    "claude-ai": { "direction": "source", "note": "captured by chrome-capture-extension: a manual push of the open exchange and a pull over the internal conversation API for bulk and auto sync." },
+    "chatgpt": { "direction": "source", "note": "two fetchers, one vendor: chrome-capture-extension (push and pull) and chatgpt-conversation-import (batch) — the same conversation id from either." },
+    "gemini": { "direction": "source", "note": "chrome-capture-extension: a best-effort manual push and a debugger-observed history pull." },
+    "perplexity": { "direction": "source", "note": "perplexity-conversation-import over the .xlsx export." },
+    "grok": { "direction": "source", "note": "grok-export-import over the xAI export, and x-twitter-import's grok-conversations.js — the same vendor from two archives." },
+    "x": { "direction": "source", "note": "x-twitter-import: tweets are activity, DMs are a message stream." },
+    "instagram": { "direction": "source", "note": "instagram-import: DMs are a message stream, comments and captions are activity." },
+    "blogger": { "direction": "source", "note": "journals-blogger-import over the Atom XML export." },
+    "google-takeout": { "direction": "source", "note": "google-activity-import over a Takeout archive: Search, Gmail activity, Maps, YouTube, Chrome and Gemini Apps as activity records grouped by day." },
+    "google-calendar": { "direction": "source", "note": "life-engine reads it through the client's Google Calendar MCP connector for the day's briefing." }
+  },
+  "artifacts": [
+    {
+      "path": "integrations/slack-capture",
+      "capabilities": [
+        { "vendor": "slack", "family": "message-stream/chat", "transport": "push", "direction": "source", "cardinality": "1:1", "round_trip": "read-only", "fetcher": "native-driver", "note": "Slack Events API → Edge Function; the threaded confirmation is the source's ack" }
+      ]
+    },
+    {
+      "path": "integrations/discord-capture",
+      "capabilities": [
+        { "vendor": "discord", "family": "message-stream/chat", "transport": "push", "direction": "source", "cardinality": "1:1", "round_trip": "read-only", "fetcher": "native-driver", "note": "a bot on the gateway with the message-content intent; designated channels only" }
+      ]
+    },
+    {
+      "path": "integrations/telegram-capture",
+      "capabilities": [
+        { "vendor": "telegram", "family": "message-stream/chat", "transport": "push", "direction": "source", "cardinality": "1:1", "round_trip": "read-only", "fetcher": "native-driver", "note": "bot webhook; UPDATE_ON_EDIT re-embeds a source-side edit in place through update_thought — the brain never writes to Telegram" }
+      ]
+    },
+    {
+      "path": "integrations/readwise-capture",
+      "capabilities": [
+        { "vendor": "readwise", "family": "annotation/highlight", "transport": "push", "direction": "source", "cardinality": "1:1", "round_trip": "read-only", "fetcher": "native-driver", "note": "highlight webhook; schemas/readwise-books caches the source-document side of the edge" }
+      ]
+    },
+    {
+      "path": "recipes/readwise-import",
+      "capabilities": [
+        { "vendor": "readwise", "family": "annotation/highlight", "transport": "pull", "direction": "source", "cardinality": "1:1", "round_trip": "read-only", "fetcher": "native-driver", "note": "one-shot history backfill over /api/v2/export/; the same identity as the webhook, so the two do not duplicate" }
+      ]
+    },
+    {
+      "path": "integrations/chrome-capture-extension",
+      "capabilities": [
+        { "vendor": "claude-ai", "family": "conversation-export", "transport": "push", "direction": "source", "cardinality": "1:1", "round_trip": "read-only", "fetcher": "browser-extension", "note": "manual capture of the open exchange from the DOM" },
+        { "vendor": "claude-ai", "family": "conversation-export", "transport": "pull", "direction": "source", "cardinality": "1:1", "round_trip": "read-only", "fetcher": "browser-extension", "note": "bulk and auto sync over the internal conversation API, one ingest per conversation" },
+        { "vendor": "chatgpt", "family": "conversation-export", "transport": "push", "direction": "source", "cardinality": "1:1", "round_trip": "read-only", "fetcher": "browser-extension", "note": "manual capture of the open exchange from the DOM" },
+        { "vendor": "chatgpt", "family": "conversation-export", "transport": "pull", "direction": "source", "cardinality": "1:1", "round_trip": "read-only", "fetcher": "browser-extension", "note": "bulk and auto sync over /backend-api/conversations" },
+        { "vendor": "gemini", "family": "conversation-export", "transport": "push", "direction": "source", "cardinality": "1:1", "round_trip": "read-only", "fetcher": "browser-extension", "note": "best-effort manual capture from the Web Components" },
+        { "vendor": "gemini", "family": "conversation-export", "transport": "pull", "direction": "source", "cardinality": "1:1", "round_trip": "read-only", "fetcher": "browser-extension", "note": "history sync observed through chrome.debugger — no public API" }
+      ]
+    },
+    {
+      "path": "recipes/chatgpt-conversation-import",
+      "capabilities": [
+        { "vendor": "chatgpt", "family": "conversation-export", "transport": "batch", "direction": "source", "cardinality": "1:many", "round_trip": "read-only", "fetcher": "native-driver", "note": "conversations.json with branches resolved; 0–5 typed thoughts per conversation by LLM extraction" }
+      ]
+    },
+    {
+      "path": "recipes/perplexity-conversation-import",
+      "capabilities": [
+        { "vendor": "perplexity", "family": "conversation-export", "transport": "batch", "direction": "source", "cardinality": "1:many", "round_trip": "read-only", "fetcher": "native-driver", "note": ".xlsx export; a Q&A exchange is distilled into standalone thoughts, a memory entry lands as it is" }
+      ]
+    },
+    {
+      "path": "recipes/grok-export-import",
+      "capabilities": [
+        { "vendor": "grok", "family": "conversation-export", "transport": "batch", "direction": "source", "cardinality": "1:1", "round_trip": "read-only", "fetcher": "native-driver", "note": "xAI JSON export with MongoDB-style dates; one thought per conversation" }
+      ]
+    },
+    {
+      "path": "recipes/x-twitter-import",
+      "capabilities": [
+        { "vendor": "x", "family": "activity-export", "transport": "batch", "direction": "source", "cardinality": "many:1", "round_trip": "read-only", "fetcher": "native-driver", "note": "tweets.js, batched twenty at a time by date range into one thought" },
+        { "vendor": "x", "family": "message-stream/chat", "transport": "batch", "direction": "source", "cardinality": "many:1", "round_trip": "read-only", "fetcher": "native-driver", "note": "direct-messages.js; a DM conversation of three or more messages is one thought" },
+        { "vendor": "grok", "family": "conversation-export", "transport": "batch", "direction": "source", "cardinality": "1:1", "round_trip": "read-only", "fetcher": "native-driver", "note": "grok-conversations.js from the X archive; one thought per chat" }
+      ]
+    },
+    {
+      "path": "recipes/email-history-import",
+      "capabilities": [
+        { "vendor": "gmail", "family": "mailbox/email", "transport": "pull", "direction": "source", "cardinality": "1:1", "round_trip": "read-only", "fetcher": "native-driver", "note": "Gmail API history pull; sender, subject and date as metadata" }
+      ]
+    },
+    {
+      "path": "recipes/gmail-smart-pull",
+      "capabilities": [
+        { "vendor": "gmail", "family": "mailbox/email", "transport": "pull", "direction": "source", "cardinality": "1:1", "round_trip": "read-only", "fetcher": "native-driver", "note": "emits an ingest pack — the closest thing in the tree to the family canonical (RFC 2822 threading headers, structured correspondents); local sensitivity routing before anything leaves the box; atomization of long messages is an enrichment past the seam" }
+      ]
+    },
+    {
+      "path": "recipes/google-activity-import",
+      "capabilities": [
+        { "vendor": "google-takeout", "family": "activity-export", "transport": "batch", "direction": "source", "cardinality": "many:1", "round_trip": "read-only", "fetcher": "native-driver", "note": "My Activity JSON grouped by day and category, each group summarised into one to three thoughts; Gmail and Gemini entries are activity records here, not the mailbox or conversation family" }
+      ]
+    },
+    {
+      "path": "recipes/instagram-import",
+      "capabilities": [
+        { "vendor": "instagram", "family": "message-stream/chat", "transport": "batch", "direction": "source", "cardinality": "many:1", "round_trip": "read-only", "fetcher": "native-driver", "note": "a DM conversation (capped at 200 messages) is one thought" },
+        { "vendor": "instagram", "family": "activity-export", "transport": "batch", "direction": "source", "cardinality": "many:1", "round_trip": "read-only", "fetcher": "native-driver", "note": "comments in batches of fifty and post captions in batches of thirty" }
+      ]
+    },
+    {
+      "path": "recipes/journals-blogger-import",
+      "capabilities": [
+        { "vendor": "blogger", "family": "document/page", "transport": "batch", "direction": "source", "cardinality": "1:1", "round_trip": "read-only", "fetcher": "native-driver", "note": "Atom XML export; one thought per post" }
+      ]
+    },
+    {
+      "path": "recipes/obsidian-vault-import",
+      "capabilities": [
+        { "vendor": "obsidian", "family": "document/page", "transport": "batch", "direction": "source", "cardinality": "1:many", "round_trip": "read-only", "fetcher": "native-driver", "note": "a note is split by heading and long sections distilled; the read-only projection of the two-way SMD-1814 connector, which will keep the file as the canonical" }
+      ]
+    },
+    {
+      "path": "recipes/daily-digest",
+      "capabilities": [
+        { "vendor": "gmail", "family": "mailbox/email", "transport": "push", "direction": "sink", "cardinality": "many:1", "round_trip": "read-only", "fetcher": "mcp-server", "note": "the day's thoughts → one Gmail draft, created by the AI client's Gmail MCP connector on a scheduled task; brain content leaves the box here — SMD-1903's egress decision applies" }
+      ]
+    },
+    {
+      "path": "recipes/weekly-digest",
+      "capabilities": [
+        { "vendor": "telegram", "family": "message-stream/chat", "transport": "push", "direction": "sink", "cardinality": "many:1", "round_trip": "read-only", "fetcher": "native-driver", "note": "importance-ranked synthesis → one sendMessage; optional when no chat id is set" }
+      ]
+    },
+    {
+      "path": "recipes/editorial-policy",
+      "capabilities": [
+        { "vendor": "slack", "family": "message-stream/chat", "transport": "push", "direction": "sink", "cardinality": "many:1", "round_trip": "read-only", "fetcher": "native-driver", "note": "the weekly auditor's critical findings → one chat.postMessage; optional" }
+      ]
+    },
+    {
+      "path": "recipes/life-engine",
+      "capabilities": [
+        { "vendor": "telegram", "family": "message-stream/chat", "transport": "push", "direction": "sink", "cardinality": "many:1", "round_trip": "read-only", "fetcher": "mcp-server", "note": "briefings through Claude Code's Telegram channel plugin; the channel's inbound side is the user talking to the agent, whose own captures go through the brain's MCP surface — not a capture source" },
+        { "vendor": "discord", "family": "message-stream/chat", "transport": "push", "direction": "sink", "cardinality": "many:1", "round_trip": "read-only", "fetcher": "mcp-server", "note": "the same briefing through the Discord channel plugin" },
+        { "vendor": "google-calendar", "family": "calendar/event", "transport": "pull", "direction": "source", "cardinality": "many:1", "round_trip": "read-only", "fetcher": "mcp-server", "note": "the day's events read through the Google Calendar MCP connector into one briefing; events are not stored one to one" }
+      ]
+    },
+    {
+      "path": "recipes/life-engine-video",
+      "capabilities": [
+        { "vendor": "telegram", "family": "message-stream/chat", "transport": "push", "direction": "sink", "cardinality": "many:1", "round_trip": "read-only", "fetcher": "mcp-server", "note": "the briefing rendered as a video (Remotion + ElevenLabs — a model provider, not a connector) and sent through the Telegram channel" }
+      ]
+    },
+    {
+      "path": "recipes/vercel-neon-telegram",
+      "capabilities": [
+        { "vendor": "telegram", "family": "message-stream/chat", "transport": "push", "direction": "source", "cardinality": "1:1", "round_trip": "read-only", "fetcher": "native-driver", "note": "grammY webhook route into its own Neon brain; /search replies are the brain's read surface over chat, not a sink of brain content to a third party" }
+      ]
+    }
+  ],
+  "not_connectors": {
+    "services": [
+      { "pattern": "openrouter|openai|anthropic|ollama|gemini api|elevenlabs|\\bllm\\b", "reason": "a model or embedding provider — governed by the egress policy (SMD-1903), not the taxonomy" },
+      { "pattern": "supabase|vercel|neon postgres|kubernetes|postgresql|pgvector", "reason": "hosting, the runtime or the database the brain runs on" },
+      { "pattern": "rest api gateway|ob1 agent memory api", "reason": "the brain's own surface (SMD-1931) — a client of it is not a connector" },
+      { "pattern": "openclaw|clawhub|hermes agent", "reason": "an agent runtime reading and writing memory through the brain's surface" }
+    ],
+    "artifacts": {
+      "recipes/adaptive-capture-classification": "a confidence gate on the capture path; no external system",
+      "recipes/auto-capture": "the AI client's own capture skill over the brain's MCP surface",
+      "recipes/brain-backup": "the brain's own tables to local JSON; a backup is not a connector",
+      "recipes/content-fingerprint-dedup": "the dedup convention the importers cite; no external system",
+      "recipes/wiki-synthesis": "synthesises email-thread wikis from thoughts already captured; the mail came in through gmail-smart-pull",
+      "dashboards/open-brain-dashboard-next": "a dashboard over the brain's REST surface",
+      "integrations/enhanced-mcp": "the brain's MCP surface (SMD-1931)",
+      "integrations/rest-api": "the brain's REST surface (SMD-1931); its /ingest is the brain-side capture node, not a vendor",
+      "skills/auto-capture": "the AI client's capture skill over the MCP surface",
+      "skills/auto-capture-claude-code": "the AI client's capture skill over the MCP surface",
+      "skills/ob1-local-http": "the AI client calling the brain's own HTTP surface",
+      "skills/autodream-brain-sync": "the AI client's memory files to the brain over its surface"
+    }
+  }
+}

@@ -296,6 +296,23 @@ than by editing a hand-numbered FORK.md section:
 `check-fork-consistency` validates every fragment and the changelog shape, so a PR
 that gets this wrong fails CI at one place.
 
+## Connectors: a contribution that touches an external system
+
+A recipe or integration that reads from or delivers to an external system — a
+mailbox, a chat, an export archive, a highlights service, a wiki, a calendar —
+is a **connector capability** and is classified in
+[`docs/connector-registry.json`](docs/connector-registry.json) by the five
+facets [`docs/connector-taxonomy.md`](docs/connector-taxonomy.md) defines
+(family × transport × direction × cardinality × round-trip, plus the fetcher).
+Name the vendor in your `metadata.json` `requires.services`; add the artifact
+and its capabilities to the registry; add the vendor under `connectors` with
+the direction the capabilities derive; run `bun scripts/connector-registry.mjs`
+to refresh the spec's tables. `check-fork-consistency` check 18 finds an
+unclassified connector by its services, its tags and the disposition table, so
+the PR fails at one place until it is classified — or excused there by name,
+with a reason, when the artifact only looks external (a dashboard over the
+brain's own REST surface, a skill over its MCP surface).
+
 ## The Review Process
 
 1. You submit a PR

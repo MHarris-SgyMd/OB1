@@ -121,6 +121,24 @@
  *      froze; and
  *      migration 044's schema_version equals db/version.mjs's FORK_VERSION
  *      (SMD-1804)
+ *  18. docs/connector-registry.json — the connector taxonomy's one source — is
+ *      sound and complete: the four closed/near-closed facet sets and the
+ *      fetcher set equal the ones scripts/connector-registry.mjs pins (a
+ *      different set is a spec change and edits both); every family declares
+ *      its schema and a reserved family is used by no capability; every
+ *      artifact is a directory that exists, listed once, its capabilities
+ *      naming exactly the five facets and a fetcher from the sets and a
+ *      declared family; the connectors are exactly the vendors used, each
+ *      with the direction its capabilities derive; and coverage — every
+ *      contribution whose metadata.json names a service outside the
+ *      not-a-connector patterns, carries a connector-shaped tag, or sits in an
+ *      SMD-1867 row of docs/vendored-disposition.md is classified or excused
+ *      by name with a reason, never both or neither, a classified artifact
+ *      nothing marks is refused, a stale excuse or pattern is refused; and
+ *      docs/connector-taxonomy.md's generated tables equal what the registry
+ *      renders. The rules are registryProblems, one pure function the
+ *      renderer runs too (SMD-1933); no exceptions beyond the registry's own
+ *      named excuses
  *
  * Run: bun scripts/check-fork-consistency.mjs   (plain ESM; node runs it too,
  * except checks 13 and 14, which parse YAML with Bun.YAML and fail in words under node)
@@ -135,6 +153,7 @@ import { coreColumnCommentStatement, coreFunctionStatement, LOCAL_PROVIDER_SERVI
 import { CHANGES_DIR, END as INDEX_END, START as INDEX_START, FIRST_FILED, classifyChanges, indexSpan, pad3, readChangeEntries, renderIndex, ticketsOf } from "./fork-index.mjs";
 import { FORK_VERSION, migrationSha, readReleases, semverCompare } from "../db/version.mjs";
 import { fragmentProblems } from "./fragments.mjs";
+import { DISPOSITION_PATH, FACET_SETS, FETCHERS, REGISTRY_PATH, SPEC_PATH, readRegistry, registryProblems, renderClassification, tablesSpan } from "./connector-registry.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const CATEGORIES = [
@@ -3390,6 +3409,101 @@ function checkSchemaVersion() {
   if (current.value !== FORK_VERSION) fail(`db/migrations/${current.name}`, `writes schema_version '${current.value}' but db/version.mjs's FORK_VERSION is '${FORK_VERSION}' — the brain would report a version the tooling does not (SMD-1804)`);
 }
 checkSchemaVersion();
+
+// ── 18: the connector registry (SMD-1933) ────────────────────────────────────
+/**
+ * A registry every rule accepts, in memory, against a tree of two contributions
+ * and a disposition table naming one of them: the baseline the mutants below
+ * are measured from. Each mutant changes one thing and must produce exactly
+ * the kinds listed — so a rule that stops firing is caught, and a rule that
+ * fires on the baseline is caught first.
+ */
+const PROBE_TREE = () => ({
+  existingDirs: ["integrations/acme-capture", "recipes/acme-digest", "recipes/plain-tool"],
+  metadataByPath: new Map([
+    ["integrations/acme-capture", { requires: { services: ["Acme Chat API", "OpenRouter"] }, tags: ["capture"] }],
+    ["recipes/acme-digest", { requires: { services: ["Acme Chat API (optional)"] }, tags: ["digest"] }],
+    ["recipes/plain-tool", { requires: { services: ["Supabase"] }, tags: ["ops"] }],
+  ]),
+  dispositionText: "### `integrations/` (1)\n\n| Artifact | Disposition | Justification |\n|---|---|---|\n| `acme-capture` | keep + audited → fold-in **SMD-1867** | a capture source |\n",
+});
+const PROBE_REGISTRY = () => ({
+  facets: {
+    ...Object.fromEntries(Object.entries(FACET_SETS).map(([k, v]) => [k, { stability: v.stability, values: [...v.values] }])),
+    family: { stability: "open", values: "families" },
+  },
+  fetchers: Object.fromEntries(FETCHERS.map((f) => [f, "x"])),
+  families: {
+    "message-stream/chat": { item: "a message", grouping_key: "thread", default_cardinality: "1:1", canonical: "c", text: "t", edges: ["e"], metadata: ["m"], identity: "i", typical_transport: ["push"], dividing_line: "d" },
+    "notification-target": { reserved: true, direction: "sink", note: "held" },
+  },
+  connectors: { acme: { direction: "bidirectional" } },
+  artifacts: [
+    { path: "integrations/acme-capture", capabilities: [{ vendor: "acme", family: "message-stream/chat", transport: "push", direction: "source", cardinality: "1:1", round_trip: "read-only", fetcher: "native-driver" }] },
+    { path: "recipes/acme-digest", capabilities: [{ vendor: "acme", family: "message-stream/chat", transport: "push", direction: "sink", cardinality: "many:1", round_trip: "read-only", fetcher: "native-driver", note: "n" }] },
+  ],
+  not_connectors: {
+    services: [{ pattern: "openrouter", reason: "a model provider" }, { pattern: "supabase", reason: "hosting" }],
+    artifacts: {},
+  },
+});
+const REGISTRY_PROBES = [
+  ["a transport off the near-closed set (webhook-push)", (r) => { r.artifacts[0].capabilities[0].transport = "webhook-push"; }, ["capability-value"]],
+  ["a fourth transport added to the registry's own set", (r) => { r.facets.transport.values.push("stream"); }, ["facet-set"]],
+  ["a sixth facet", (r) => { r.facets.protocol = { stability: "open", values: ["http"] }; }, ["facet-set"]],
+  ["a fifth fetcher kind", (r) => { r.fetchers.cron = "x"; }, ["fetcher-set"]],
+  ["a capability naming an undeclared family", (r) => { r.artifacts[0].capabilities[0].family = "mailbox/email"; }, ["capability-family"]],
+  ["a capability using the reserved family", (r) => { r.artifacts[1].capabilities[0].family = "notification-target"; }, ["reserved-used"]],
+  ["a family missing a schema field", (r) => { delete r.families["message-stream/chat"].identity; }, ["family-schema"]],
+  ["a reserved family that is not sink-only", (r) => { r.families["notification-target"].direction = "source"; }, ["family-schema"]],
+  ["a capability with a sixth key and no fetcher", (r) => { const c = r.artifacts[0].capabilities[0]; delete c.fetcher; c.protocol = "https"; }, ["capability-keys"]],
+  ["an artifact whose directory does not exist", (r) => { r.artifacts[0].path = "integrations/acme-gone"; }, ["artifact-missing", "coverage-unregistered", "coverage-unmarked"]],
+  ["an artifact listed twice", (r) => { r.artifacts.push(structuredClone(r.artifacts[1])); }, ["artifact-duplicate"]],
+  ["a connector declaring source while its capabilities span both", (r) => { r.connectors.acme.direction = "source"; }, ["connector-direction"]],
+  ["a connector with no capability naming it", (r) => { r.connectors.ghost = { direction: "source" }; }, ["connector-set"]],
+  ["a vendor used with no connector entry", (r) => { delete r.connectors.acme; }, ["connector-set"]],
+  ["an external-touching artifact left unclassified", (r) => { r.artifacts.pop(); r.connectors.acme.direction = "source"; }, ["coverage-unregistered"]],
+  ["an artifact both classified and excused", (r) => { r.not_connectors.artifacts["recipes/acme-digest"] = "because"; }, ["coverage-both"]],
+  ["a classified artifact nothing marks as external-touching", (r) => { r.artifacts.push({ path: "recipes/plain-tool", capabilities: [{ vendor: "acme", family: "message-stream/chat", transport: "pull", direction: "source", cardinality: "1:1", round_trip: "read-only", fetcher: "native-driver" }] }); }, ["coverage-unmarked"]],
+  ["an excuse for an artifact nothing marks", (r) => { r.not_connectors.artifacts["recipes/plain-tool"] = "because"; }, ["excuse-stale"]],
+  ["an excuse for a contribution that does not exist", (r) => { r.not_connectors.artifacts["recipes/gone"] = "because"; }, ["excuse-stale"]],
+  ["a service pattern matching nothing in the tree", (r) => { r.not_connectors.services.push({ pattern: "zapier", reason: "x" }); }, ["pattern-stale"]],
+  ["a service pattern that does not compile", (r) => { r.not_connectors.services.push({ pattern: "(", reason: "x" }); }, ["pattern-invalid"]],
+];
+function checkConnectorRegistry() {
+  const kindsOf = (registry, tree = PROBE_TREE()) => [...new Set(registryProblems({ registry, ...tree }).map((p) => p.kind))].sort();
+  const base = registryProblems({ registry: PROBE_REGISTRY(), ...PROBE_TREE() });
+  if (base.length) return fail(SELF, `check 18's baseline registry fails its own rules (${base.map((p) => `${p.kind}: ${p.msg}`).join("; ")}) — the mutants below measure nothing`);
+  // A model-provider service on an unclassified contribution triggers nothing: the pattern covers it.
+  const quiet = PROBE_TREE(); quiet.metadataByPath.set("recipes/uses-a-model", { requires: { services: ["OpenRouter"] }, tags: ["synthesis"] }); quiet.existingDirs.push("recipes/uses-a-model");
+  if (registryProblems({ registry: PROBE_REGISTRY(), ...quiet }).length) fail(SELF, "check 18 marks a contribution that names only a model provider as external-touching (its own non-probe)");
+  // The disposition table alone marks an artifact: a batch importer that names no service.
+  const disp = PROBE_TREE(); disp.metadataByPath.set("integrations/acme-capture", { requires: { services: [] }, tags: [] });
+  if (!kindsOf({ ...PROBE_REGISTRY(), artifacts: [PROBE_REGISTRY().artifacts[1]], connectors: { acme: { direction: "sink" } } }, disp).includes("coverage-unregistered")) fail(SELF, "check 18 no longer reads an SMD-1867 row of the disposition table as marking an artifact (its own probe)");
+  for (const [why, mutate, want] of REGISTRY_PROBES) {
+    const r = PROBE_REGISTRY();
+    mutate(r);
+    const got = kindsOf(r);
+    if (JSON.stringify(got) !== JSON.stringify([...want].sort())) fail(SELF, `check 18 reports [${got}] for ${why}, expected [${want}] (its own probe)`);
+  }
+
+  if (!existsSync(join(ROOT, REGISTRY_PATH))) return fail(REGISTRY_PATH, "missing — the connector taxonomy's one source (SMD-1933)");
+  let registry;
+  try { registry = readRegistry(ROOT); } catch (e) { return fail(REGISTRY_PATH, `does not parse: ${e.message} (SMD-1933)`); }
+  const metadataByPath = new Map();
+  for (const d of dirs) {
+    const file = join(d.dir, "metadata.json");
+    if (!existsSync(file)) continue;
+    try { metadataByPath.set(d.rel, JSON.parse(readFileSync(file, "utf8"))); } catch { metadataByPath.set(d.rel, {}); }
+  }
+  const dispositionText = existsSync(join(ROOT, DISPOSITION_PATH)) ? readFileSync(join(ROOT, DISPOSITION_PATH), "utf8") : "";
+  for (const p of registryProblems({ registry, existingDirs: dirs.map((d) => d.rel), metadataByPath, dispositionText })) fail(p.where, `${p.msg} (SMD-1933)`);
+  if (!existsSync(join(ROOT, SPEC_PATH))) return fail(SPEC_PATH, "missing — the spec that carries the registry's rendered tables (SMD-1933)");
+  const span = tablesSpan(readFileSync(join(ROOT, SPEC_PATH), "utf8"));
+  if (!span) fail(SPEC_PATH, "the generated-tables markers are missing or doubled (SMD-1933)");
+  else if (span.block !== renderClassification(registry)) fail(SPEC_PATH, `the generated tables differ from what ${REGISTRY_PATH} renders — run \`bun scripts/connector-registry.mjs\` (SMD-1933)`);
+}
+checkConnectorRegistry();
 
 // No display-time filter. One excused `_template` violations, for a placeholder
 // link that contributionDirs() has skipped since the filter was written — so

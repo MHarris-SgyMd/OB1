@@ -21,6 +21,11 @@ superseded, hazardous, or dead.
 - **remove** — superseded by a fork rebuild, or a hazard, **with nothing depending on
   it**. A removal only lands as a PR that can state *"verified no references."*
 
+Every artifact this table marks as external-touching — the SMD-1867 rows below
+and every sink — is classified by the five-facet connector taxonomy in
+[`docs/connector-taxonomy.md`](connector-taxonomy.md) (SMD-1933), and
+`check-fork-consistency` check 18 holds that coverage against this table.
+
 Some capture-source integrations are additionally **folded into SMD-1867** (the
 ingestion-adapter contract): they are kept, but re-scoped as adapters rather than
 ad-hoc integrations.
