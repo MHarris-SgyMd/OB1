@@ -256,7 +256,7 @@ and fails a "FORK.md change N" citation with no file behind it (SMD-1917).
 | 102 | [Every knob the server reads reaches the container](changes/102-every-knob-the-server-reads-reaches.md) | SMD-1843 |
 | 103 | [Change 69's five servers name the key on 008's audit row](changes/103-change-69-s-five-servers-name-the-key-on-008.md) | SMD-1541 |
 
-Landed since the last release and numbered at the next one (SMD-1804): [SMD-1490](changes/smd-1490.md), [SMD-1492](changes/smd-1492.md), [SMD-1730](changes/smd-1730.md), [SMD-1804](changes/smd-1804.md), [SMD-1806](changes/smd-1806.md), [SMD-1808](changes/smd-1808.md), [SMD-1870](changes/smd-1870.md), [SMD-1901](changes/smd-1901.md), [SMD-1903](changes/smd-1903.md), [SMD-1917](changes/smd-1917.md), [SMD-1932](changes/smd-1932.md), [SMD-1933](changes/smd-1933.md), [SMD-1938](changes/smd-1938.md).
+Landed since the last release and numbered at the next one (SMD-1804): [SMD-1490](changes/smd-1490.md), [SMD-1492](changes/smd-1492.md), [SMD-1730](changes/smd-1730.md), [SMD-1804](changes/smd-1804.md), [SMD-1806](changes/smd-1806.md), [SMD-1808](changes/smd-1808.md), [SMD-1856](changes/smd-1856.md), [SMD-1870](changes/smd-1870.md), [SMD-1901](changes/smd-1901.md), [SMD-1903](changes/smd-1903.md), [SMD-1917](changes/smd-1917.md), [SMD-1932](changes/smd-1932.md), [SMD-1933](changes/smd-1933.md), [SMD-1936](changes/smd-1936.md), [SMD-1938](changes/smd-1938.md), [SMD-1951](changes/smd-1951.md).
 <!-- changes-index:end -->
 
 ### Files we own
@@ -462,8 +462,8 @@ and the yield count cannot disagree. `workflow-lint` runs `actionlint` (pinned b
 checksum) with `shellcheck` over this workflow's `run:` steps; the workflow now
 sets `defaults.run.shell: bash`, so every step runs under `-eo pipefail` and a
 masked `cmd | grep` failure is surfaced rather than swallowed. Both are opt-in
-locally (`bun scripts/install-hooks.ts` for the commit hook); making them
-*required* is SMD-1805's ruleset work.
+locally (`bun scripts/install-hooks.ts` for the commit hook), and both are
+*required* on `main` with the other ten jobs since SMD-1856.
 
 ## Detached from the fork network
 
@@ -556,27 +556,30 @@ its measurements are in the change file named.
 
 ### Landing a rebase on `main`, which is protected
 
-`main` is the working default and carries a ruleset: nine required status checks,
+`main` is the working default and carries a ruleset: every one of
+`fork-checks.yml`'s twelve jobs required, on a head up to date with `main` and
+satisfied only by a run of the Actions app; changes only through a pull request;
 no deletion, **no force-push**, and no bypass actors — it applies to admins too.
-That is deliberate, and it interacts with a rebase in one specific way.
+The ruleset is a file, `.github/rulesets/main.json`, applied with
+`gh api -X PUT repos/MHarris-SgyMd/OB1/rulesets/22189960 --input .github/rulesets/main.json`,
+and `check-fork-consistency` check 20 holds the file to the workflow's job list,
+so a job added without being required fails CI by name (SMD-1856). That is
+deliberate, and it interacts with a rebase in one specific way.
 
 A rebase produces `siggymd/rebase-YYYYMMDD` with **rewritten history**, so it
 cannot fast-forward onto `main`. Two ways forward:
 
-**Open a pull request (normal case).** Required status checks mean **no push
-directly to `main` succeeds**, merge commit or not — a push carries commits CI has
-never seen, so the rule cannot be satisfied:
-
-```
-remote: - 9 of 9 required status checks are expected.
-```
-
-That is not a quirk of the merge; it is what requiring checks means. Everything
+**Open a pull request (normal case).** The pull-request rule means **no push
+directly to `main` succeeds**, green checks or not, and the required checks refuse
+it a second way — a push carries commits CI has never seen. GitHub answers with
+the rules it applied, one `remote: -` line each: that changes must be made through
+a pull request, and that the required status checks are expected. That is not a
+quirk of the merge; it is what the ruleset means. Everything
 reaching `main` goes through a PR, which is two commands:
 
 ```bash
 gh pr create --fill --base main --head siggymd/rebase-$(date +%Y%m%d)
-gh pr merge --merge --auto        # lands itself once the nine checks pass
+gh pr merge --merge --auto        # lands itself once the twelve checks pass
 ```
 
 History keeps both lines, which is what happened when the fork's work first landed
@@ -592,12 +595,13 @@ remote: - Cannot force-push to this branch
 ```
 
 To do it anyway — as with any push that must bypass the checks — set the ruleset
-to `disabled`, push, and put it back:
+to `disabled`, push, and put it back from the record, so the live copy converges
+on the file — every field the file names — at every use:
 
 ```bash
 gh api -X PUT repos/MHarris-SgyMd/OB1/rulesets/22189960 -f enforcement=disabled
 git push --force-with-lease origin main
-gh api -X PUT repos/MHarris-SgyMd/OB1/rulesets/22189960 -f enforcement=active
+gh api -X PUT repos/MHarris-SgyMd/OB1/rulesets/22189960 --input .github/rulesets/main.json
 ```
 
 Prefer `--force-with-lease` over `--force` so a push that raced with someone else's

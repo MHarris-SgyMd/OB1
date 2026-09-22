@@ -158,9 +158,41 @@
  *      renders. The rules are registryProblems, one pure function the
  *      renderer runs too (SMD-1933); no exceptions beyond the registry's own
  *      named excuses
+ *  20. main's ruleset is a record in the tree — .github/rulesets/main.json, the
+ *      body `gh api -X PUT repos/MHarris-SgyMd/OB1/rulesets/22189960 --input`
+ *      applies — and the record names every job: each job's display name in
+ *      .github/workflows/fork-checks.yml is a required check, nothing is
+ *      required that is not a job, every check is pinned to the Actions app
+ *      (integration_id 15368), strict up-to-date is on and enforced on
+ *      create, the four rules — deletion, non-fast-forward, pull-request with
+ *      no required review and none of the four review flags, required-status-
+ *      checks with its parameters — are present once each and no other type
+ *      is, the target is the default branch and nothing else, the bypass list
+ *      is empty and enforcement is active; and the workflow names its jobs so
+ *      the record can — no matrix, no expression in a name, no two jobs
+ *      sharing one. The rules are rulesetProblems and workflowJobs, pure
+ *      functions their probes run on in-memory records (twenty mutants, eight
+ *      non-probes, three workflow mutants); the workflow is parsed with
+ *      Bun.YAML (SMD-1856); no exceptions
+ *  21. a .sql file never destroys rows a brain already holds — CLAUDE.md's
+ *      SQL-safety guard rail read as statements, not words: no DROP TABLE, no
+ *      DROP DATABASE or DROP SCHEMA, no TRUNCATE with a table after it (a
+ *      trigger event `BEFORE TRUNCATE ON t`, a privilege `GRANT TRUNCATE ON` and
+ *      the bare value `TG_OP = 'TRUNCATE'` are not it), no DROP OWNED, no
+ *      DELETE FROM whose statement — to its `;` or the `)` closing its CTE,
+ *      a literal's parentheses not counted — has no WHERE of its own at the
+ *      top level (one in a USING subquery qualifies nothing); comments
+ *      excepted by the literal-aware strip, string literals and dollar-quoted
+ *      bodies read (an EXECUTE string runs; a statement quoted in prose is a
+ *      hit too, and belongs in a `--` comment) — in every .sql git tracks or
+ *      would track, db/migrations/ included (the fork's migrations DROP
+ *      FUNCTION and DROP TRIGGER, which destroy no row, and none drops a
+ *      table); the rules are db/config.mjs's
+ *      DESTRUCTIVE_SQL_RULES through destructiveSqlIn, with counted
+ *      per-(file, rule) exceptions as 7's (none today) (SMD-1936)
  *
  * Run: bun scripts/check-fork-consistency.ts   (a Bun script — TypeScript, type-checked in CI
- * beside its run (SMD-1870); checks 13, 14 and 18 parse YAML with Bun.YAML)
+ * beside its run (SMD-1870); checks 13, 14, 18 and 20 parse YAML with Bun.YAML)
  * Exits non-zero on any violation.
  */
 
@@ -168,7 +200,7 @@ import { readFileSync, existsSync, readdirSync, statSync, lstatSync } from "node
 import { execFileSync } from "node:child_process";
 import { join, dirname, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { coreColumnCommentStatement, coreFunctionStatement, LOCAL_PROVIDER_SERVICES, ownedColumnCommentsIn, ownedFunctionsIn, supabaseIsmsIn } from "../db/config.mjs";
+import { coreColumnCommentStatement, coreFunctionStatement, DESTRUCTIVE_SQL_RULES, destructiveSqlIn, LOCAL_PROVIDER_SERVICES, ownedColumnCommentsIn, ownedFunctionsIn, supabaseIsmsIn } from "../db/config.mjs";
 import { CHANGES_DIR, END as INDEX_END, START as INDEX_START, FIRST_FILED, classifyChanges, indexSpan, pad3, readChangeEntries, renderIndex, ticketsOf } from "./fork-index.ts";
 import { FORK_VERSION, migrationSha, readReleases, semverCompare } from "../db/version.mjs";
 import { fragmentProblems } from "./fragments.ts";
@@ -3756,6 +3788,358 @@ function checkConnectorRegistry() {
   if (problems.length === 0 && span.block !== renderClassification(registry)) fail(SPEC_PATH, `the generated tables differ from what ${REGISTRY_PATH} renders — run \`bun scripts/connector-registry.ts\` (SMD-1933)`);
 }
 checkConnectorRegistry();
+// ── 20: main's ruleset is a record in the tree, and the record names every job (SMD-1856) ──
+/**
+ * The ruleset GitHub enforces on `main` (id 22189960) lived outside the tree,
+ * where a job added to the workflow was not added to it — which is how the
+ * replay gate ran unrequired from SMD-1295 until this ticket. And with strict
+ * off, a run green against the `main` of its trigger time stayed green after
+ * `main` moved, so two branches could each pass and together break the tree.
+ * `.github/rulesets/main.json` is the body that
+ * `gh api -X PUT repos/MHarris-SgyMd/OB1/rulesets/22189960 --input` applies, so
+ * the setting is reviewed here first; this check holds the record to the
+ * workflow — every job's display name required, nothing required that is not a
+ * job — and to the ticket's decisions: the default branch as the target, strict
+ * up-to-date on, every check pinned to the Actions app so only a workflow run
+ * satisfies it, a pull-request rule with no required review (one maintainer)
+ * and none of the review flags that would ask one another way, deletion and
+ * force-push refused, no bypass actor, enforcement active. The workflow is held
+ * to names this check can predict: no matrix, no expression in a name, no two
+ * jobs sharing one — any of those and the required context never matches, the
+ * check waits forever and every PR blocks. The record can still drift from the
+ * live ruleset — CI's token cannot read it, and a GET adds defaults the record
+ * omits — so FORK.md names the one command that re-applies it.
+ */
+const RULESET = ".github/rulesets/main.json";
+/** GitHub's own app id for Actions: a required check pinned to it is satisfied by a workflow run and by nothing else — not a status another app or a token posts under the same name. */
+const GITHUB_ACTIONS_APP_ID = 15368;
+/** The rule types the record carries, each exactly once; another type (a linear-history rule, say) is a decision the ticket declined, and edits this list with it. */
+const RULE_TYPES = ["deletion", "non_fast_forward", "pull_request", "required_status_checks"];
+/** The one ref the ruleset targets: GitHub's alias for the default branch, so a rename of `main` carries it. */
+const RULESET_REFS = ["~DEFAULT_BRANCH"];
+/** The pull-request rule's flags, each held false: any of them true asks a review, or blocks on a thread, that the zero count says nothing asks. */
+const PR_RULE_FLAGS = ["dismiss_stale_reviews_on_push", "require_code_owner_review", "require_last_push_approval", "required_review_thread_resolution"];
+/** The record as rulesetProblems reads it: every level optional, as the `?.`s say. */
+type RulesetDoc = {
+  target?: unknown;
+  enforcement?: unknown;
+  bypass_actors?: unknown;
+  conditions?: { ref_name?: { include?: unknown; exclude?: unknown } } | null;
+  rules?: ({ type?: unknown; parameters?: ({ strict_required_status_checks_policy?: unknown; do_not_enforce_on_create?: unknown; required_status_checks?: unknown; required_approving_review_count?: unknown } & Record<string, unknown>) | null } | null)[];
+} | null | undefined;
+/** The workflow as workflowJobs reads it: a job's display name is its `name`, else its key — what GitHub reports the check as — and a matrix multiplies it. */
+type JobsDoc = { jobs?: Record<string, { name?: unknown; strategy?: { matrix?: unknown } | null } | null | undefined> | null } | null | undefined;
+/**
+ * The display names the workflow's jobs report as checks, and the jobs whose
+ * name this check cannot predict: a `strategy.matrix` job reports one check per
+ * cell, named `<name> (<values>)`; a name holding `${{ … }}` is rendered at run
+ * time; two jobs with one display name are one context GitHub cannot tell
+ * apart. Each is refused here, before the record is compared to the list.
+ */
+function workflowJobs(doc: JobsDoc) {
+  const names: string[] = [];
+  const problems: [string, string][] = [];
+  for (const [key, job] of Object.entries(doc?.jobs ?? {})) {
+    const name = typeof job?.name === "string" ? job.name : key;
+    if (job?.strategy && typeof job.strategy === "object" && "matrix" in job.strategy) problems.push([WORKFLOW, `job ${key} runs a matrix — GitHub reports one check per cell, named after its values, which ${RULESET} cannot name; give each cell its own job (SMD-1856)`]);
+    else if (name.includes("${{")) problems.push([WORKFLOW, `job ${key} is named by an expression (${name}) — the check's context is rendered at run time and ${RULESET} cannot name it (SMD-1856)`]);
+    else if (names.includes(name)) problems.push([WORKFLOW, `job ${key} shares the display name "${name}" with another job — one context for two jobs (SMD-1856)`]);
+    else names.push(name);
+  }
+  return { names, problems };
+}
+function rulesetProblems(ruleset: RulesetDoc, jobNames: string[]) {
+  const problems: [string, string][] = [];
+  if (!ruleset || typeof ruleset !== "object") return [[RULESET, "is missing or does not parse — the body main's ruleset is applied from (SMD-1856)"]] as [string, string][];
+  if (ruleset.target !== "branch") problems.push([RULESET, `target is ${JSON.stringify(ruleset.target)}, not "branch" (SMD-1856)`]);
+  if (ruleset.enforcement !== "active") problems.push([RULESET, `enforcement is ${JSON.stringify(ruleset.enforcement)}, not "active" (SMD-1856)`]);
+  if (!Array.isArray(ruleset.bypass_actors) || ruleset.bypass_actors.length) problems.push([RULESET, "bypass_actors is not the empty list — the ruleset applies to admins too (SMD-1856)"]);
+  const refs = ruleset.conditions?.ref_name;
+  if (JSON.stringify(refs?.include) !== JSON.stringify(RULESET_REFS) || !Array.isArray(refs?.exclude) || refs.exclude.length) problems.push([RULESET, `conditions.ref_name is not {include: ${JSON.stringify(RULESET_REFS)}, exclude: []} — the ruleset would apply to something other than the default branch, or to nothing (SMD-1856)`]);
+  const rules = Array.isArray(ruleset.rules) ? ruleset.rules : [];
+  const types = rules.map((r) => (typeof r?.type === "string" ? r.type : "(untyped)"));
+  for (const t of RULE_TYPES) if (types.filter((x) => x === t).length !== 1) problems.push([RULESET, `carries the ${t} rule ${types.filter((x) => x === t).length} time(s), not once (SMD-1856)`]);
+  for (const t of new Set(types)) if (!RULE_TYPES.includes(t)) problems.push([RULESET, `carries a ${t} rule that RULE_TYPES in ${SELF} does not name — a new rule is a decision; record it there with the reason (SMD-1856)`]);
+  const pr = rules.find((r) => r?.type === "pull_request");
+  if (pr) {
+    if (pr.parameters?.required_approving_review_count !== 0) problems.push([RULESET, `the pull_request rule's required_approving_review_count is ${JSON.stringify(pr.parameters?.required_approving_review_count)}, not 0 — one maintainer; a required review blocks every PR (SMD-1856)`]);
+    for (const flag of PR_RULE_FLAGS) if (pr.parameters?.[flag] !== false) problems.push([RULESET, `the pull_request rule's ${flag} is ${JSON.stringify(pr.parameters?.[flag])}, not false — a review, or a resolved thread, asked another way than the count (SMD-1856)`]);
+  }
+  const checksRule = rules.find((r) => r?.type === "required_status_checks");
+  if (!checksRule) return problems;
+  const checks = checksRule.parameters;
+  if (!checks || typeof checks !== "object") { problems.push([RULESET, "the required_status_checks rule has no parameters — strict, the contexts and the pins live there (SMD-1856)"]); return problems; }
+  if (checks.strict_required_status_checks_policy !== true) problems.push([RULESET, "strict_required_status_checks_policy is not true — a run green against an older main would stay green after main moves (SMD-1856)"]);
+  if (checks.do_not_enforce_on_create !== false) problems.push([RULESET, `do_not_enforce_on_create is ${JSON.stringify(checks.do_not_enforce_on_create)}, not false — a branch created at main's ref would skip the checks (SMD-1856)`]);
+  if (!Array.isArray(checks.required_status_checks)) { problems.push([RULESET, `required_status_checks is ${JSON.stringify(checks.required_status_checks)}, not a list (SMD-1856)`]); return problems; }
+  const required = checks.required_status_checks as ({ context?: unknown; integration_id?: unknown } | null)[];
+  const contexts = required.map((c) => (typeof c?.context === "string" ? c.context : ""));
+  for (const c of required) {
+    if (typeof c?.context !== "string" || !c.context) problems.push([RULESET, `a required check has no context: ${JSON.stringify(c)} (SMD-1856)`]);
+    else if (c.integration_id !== GITHUB_ACTIONS_APP_ID) problems.push([RULESET, `"${c.context}" is not pinned to the Actions app (integration_id ${GITHUB_ACTIONS_APP_ID}) — unpinned, a status any app posts under the name satisfies it (SMD-1856)`]);
+  }
+  for (const c of new Set(contexts)) if (c && contexts.filter((x) => x === c).length > 1) problems.push([RULESET, `requires "${c}" twice (SMD-1856)`]);
+  for (const name of jobNames) if (!contexts.includes(name)) problems.push([RULESET, `does not require "${name}", a job ${WORKFLOW} runs — every job is required, or a PR merges with it red; add it and re-apply the ruleset (SMD-1856)`]);
+  for (const c of new Set(contexts)) if (c && !jobNames.includes(c)) problems.push([RULESET, `requires "${c}", which no job in ${WORKFLOW} is named — a renamed or removed job leaves the check waiting forever and every PR blocked (SMD-1856)`]);
+  return problems;
+}
+/** A record every rule accepts, with every field a mutant can reach, and the job list it is judged against. */
+type RulesetProbeRule = { type: string; parameters?: { strict_required_status_checks_policy?: boolean; do_not_enforce_on_create?: boolean; required_status_checks?: ({ context?: string; integration_id?: number } | null)[] | string; required_approving_review_count?: number; [flag: string]: unknown } | null };
+type RulesetProbe = { target: string; enforcement: string; bypass_actors: unknown[]; conditions: { ref_name: { include: string[]; exclude: string[] } } | null; rules: RulesetProbeRule[] };
+const RULESET_PROBE_JOBS = ["Server tests", "Repo consistency"];
+const RULESET_PROBE = (): RulesetProbe => ({
+  target: "branch",
+  enforcement: "active",
+  bypass_actors: [],
+  conditions: { ref_name: { include: [...RULESET_REFS], exclude: [] } },
+  rules: [
+    { type: "deletion" },
+    { type: "non_fast_forward" },
+    { type: "pull_request", parameters: { required_approving_review_count: 0, ...Object.fromEntries(PR_RULE_FLAGS.map((f) => [f, false])) } },
+    { type: "required_status_checks", parameters: { strict_required_status_checks_policy: true, do_not_enforce_on_create: false, required_status_checks: RULESET_PROBE_JOBS.map((context) => ({ context, integration_id: GITHUB_ACTIONS_APP_ID })) } },
+  ],
+});
+/** [why, mutate (returns the record to judge — the mutated probe, or null for no record), the job list, a phrase the ONE problem must carry]. */
+const RULESET_MUTANTS: [why: string, mutate: (g: RulesetProbe) => RulesetProbe | null, jobs: string[], says: string][] = [
+  ["a job the record does not require", (g) => g, [...RULESET_PROBE_JOBS, "Retrieval replay gate"], 'does not require "Retrieval replay gate"'],
+  ["a required check no job is named", (g) => { (g.rules[3].parameters!.required_status_checks as object[]).push({ context: "Old job", integration_id: GITHUB_ACTIONS_APP_ID }); return g; }, RULESET_PROBE_JOBS, 'requires "Old job", which no job'],
+  ["a required check with no context", (g) => { (g.rules[3].parameters!.required_status_checks as object[]).push({ integration_id: GITHUB_ACTIONS_APP_ID }); return g; }, RULESET_PROBE_JOBS, "has no context"],
+  ["strict off", (g) => { g.rules[3].parameters!.strict_required_status_checks_policy = false; return g; }, RULESET_PROBE_JOBS, "strict_required_status_checks_policy is not true"],
+  ["enforce-on-create off", (g) => { g.rules[3].parameters!.do_not_enforce_on_create = true; return g; }, RULESET_PROBE_JOBS, "do_not_enforce_on_create is true"],
+  ["a check not pinned to the Actions app", (g) => { delete (g.rules[3].parameters!.required_status_checks as { integration_id?: number }[])[0].integration_id; return g; }, RULESET_PROBE_JOBS, "is not pinned to the Actions app"],
+  ["a check required twice", (g) => { (g.rules[3].parameters!.required_status_checks as object[]).push({ context: RULESET_PROBE_JOBS[0], integration_id: GITHUB_ACTIONS_APP_ID }); return g; }, RULESET_PROBE_JOBS, `requires "${RULESET_PROBE_JOBS[0]}" twice`],
+  ["a required_status_checks rule with no parameters", (g) => { g.rules[3].parameters = null; return g; }, RULESET_PROBE_JOBS, "has no parameters"],
+  ["a required_status_checks list that is a string", (g) => { g.rules[3].parameters!.required_status_checks = "Server tests"; return g; }, RULESET_PROBE_JOBS, "not a list"],
+  ["no pull-request rule", (g) => { g.rules.splice(2, 1); return g; }, RULESET_PROBE_JOBS, "pull_request rule 0 time(s)"],
+  ["a doubled deletion rule", (g) => { g.rules.push({ type: "deletion" }); return g; }, RULESET_PROBE_JOBS, "deletion rule 2 time(s)"],
+  ["a pull-request rule requiring a review", (g) => { g.rules[2].parameters!.required_approving_review_count = 1; return g; }, RULESET_PROBE_JOBS, "required_approving_review_count is 1"],
+  ["a pull-request rule requiring thread resolution", (g) => { g.rules[2].parameters!.required_review_thread_resolution = true; return g; }, RULESET_PROBE_JOBS, "required_review_thread_resolution is true"],
+  ["a linear-history rule", (g) => { g.rules.push({ type: "required_linear_history" }); return g; }, RULESET_PROBE_JOBS, "carries a required_linear_history rule"],
+  ["a bypass actor", (g) => { g.bypass_actors.push({ actor_id: 5, actor_type: "RepositoryRole", bypass_mode: "always" }); return g; }, RULESET_PROBE_JOBS, "bypass_actors is not the empty list"],
+  ["enforcement set to evaluate", (g) => { g.enforcement = "evaluate"; return g; }, RULESET_PROBE_JOBS, 'enforcement is "evaluate"'],
+  ["a push target", (g) => { g.target = "push"; return g; }, RULESET_PROBE_JOBS, 'target is "push"'],
+  ["a ruleset aimed at another branch", (g) => { g.conditions!.ref_name.include = ["refs/heads/dev"]; return g; }, RULESET_PROBE_JOBS, "conditions.ref_name is not"],
+  ["a ruleset with no conditions", (g) => { g.conditions = null; return g; }, RULESET_PROBE_JOBS, "conditions.ref_name is not"],
+  ["no record at all", () => null, RULESET_PROBE_JOBS, "is missing or does not parse"],
+];
+/** Non-probes: shapes the rules must not throw on and must report at least one problem for — a record that parsed but is not a ruleset. */
+const RULESET_NON_PROBES: [why: string, record: unknown][] = [
+  ["a list", []],
+  ["a string", "main"],
+  ["an object with no fields", {}],
+  ["rules that are not a list", { ...RULESET_PROBE(), rules: "deletion" }],
+  ["a null rule", { ...RULESET_PROBE(), rules: [null] }],
+  ["a null required check", (() => { const g = RULESET_PROBE(); (g.rules[3].parameters!.required_status_checks as (object | null)[]).push(null); return g; })()],
+  ["a pull-request rule with no parameters", (() => { const g = RULESET_PROBE(); delete g.rules[2].parameters; return g; })()],
+  ["conditions that are a string", { ...RULESET_PROBE(), conditions: "main" }],
+];
+/** The workflow reader's probes: [why, jobs, a phrase the one problem must carry]; the plain job by name and by key are read before them. */
+const WORKFLOW_MUTANTS: [why: string, jobs: Record<string, { name?: string; strategy?: { matrix?: unknown } | null }>, says: string][] = [
+  ["a matrix job", { a: { name: "Server tests", strategy: { matrix: { x: [1, 2] } } } }, "runs a matrix"],
+  ["a job named by an expression", { a: { name: "Tests (${{ matrix.x }})" } }, "named by an expression"],
+  ["two jobs with one display name", { a: { name: "Server tests" }, b: { name: "Server tests" } }, "shares the display name"],
+];
+function checkRulesetRecord() {
+  // Self-test: a record every rule accepts passes; each mutant reports exactly
+  // one problem, and that problem names what the mutant broke; a non-probe
+  // reports something and throws nothing.
+  const base = rulesetProblems(RULESET_PROBE(), RULESET_PROBE_JOBS);
+  if (base.length) fail(SELF, `check 20 false-positives on a consistent record (${base.map((p) => p[1]).join("; ")})`);
+  for (const [why, mutate, names, says] of RULESET_MUTANTS) {
+    const got = rulesetProblems(mutate(RULESET_PROBE()), [...names]);
+    if (got.length !== 1) fail(SELF, `check 20 reports ${got.length} problem(s) for ${why}, not one (its own probe): ${JSON.stringify(got)}`);
+    else if (!got[0][1].includes(says)) fail(SELF, `check 20's one problem for ${why} does not say "${says}" (its own probe): ${got[0][1]}`);
+  }
+  for (const [why, record] of RULESET_NON_PROBES) {
+    let got: [string, string][];
+    try { got = rulesetProblems(record as RulesetDoc, RULESET_PROBE_JOBS); } catch (e) { fail(SELF, `check 20 throws for ${why}: ${(e as Error).message} (its own probe)`); continue; }
+    if (!got.length) fail(SELF, `check 20 accepts ${why} (its own probe)`);
+  }
+  const plain = workflowJobs({ jobs: { a: { name: "Server tests" }, b: {}, c: null, d: { strategy: null } } });
+  if (plain.problems.length || JSON.stringify(plain.names) !== JSON.stringify(["Server tests", "b", "c", "d"])) fail(SELF, `check 20 reads a plain workflow as ${JSON.stringify(plain)} (its own probe)`);
+  for (const [why, jobs, says] of WORKFLOW_MUTANTS) {
+    const got = workflowJobs({ jobs }).problems;
+    if (got.length !== 1 || !got[0][1].includes(says)) fail(SELF, `check 20 reports ${JSON.stringify(got)} for ${why}, not one problem saying "${says}" (its own probe)`);
+  }
+  if (typeof Bun === "undefined" || typeof Bun.YAML?.parse !== "function") {
+    fail(SELF, `check 20 parses ${WORKFLOW} with Bun.YAML (Bun 1.2+) and this runtime has none — run \`bun ${SELF}\`, as CI does (SMD-1856)`);
+    return;
+  }
+  let ruleset: RulesetDoc = null;
+  if (existsSync(join(ROOT, RULESET))) {
+    try { ruleset = JSON.parse(readFileSync(join(ROOT, RULESET), "utf8")); } catch { ruleset = null; }
+  }
+  let doc: JobsDoc = null;
+  try { doc = Bun.YAML.parse(readFileSync(join(ROOT, WORKFLOW), "utf8")) as JobsDoc; } catch (e) { return fail(WORKFLOW, `does not parse: ${(e as Error).message} — check 20 has no job list to hold the record to (SMD-1856)`); }
+  const { names, problems } = workflowJobs(doc);
+  if (!names.length && !problems.length) return fail(WORKFLOW, "has no jobs check 20 can read — the record cannot be held to an empty list (SMD-1856)");
+  for (const [where, msg] of [...problems, ...rulesetProblems(ruleset, names)]) fail(where, msg);
+}
+checkRulesetRecord();
+
+// ── 21: a .sql file never destroys rows a brain already holds ────────────────
+//
+// SMD-1936. CLAUDE.md's guard rail and CONTRIBUTING.md's review checklist said
+// "no DROP TABLE, DROP DATABASE, TRUNCATE or unqualified DELETE FROM in SQL
+// files" and nothing on this fork checked it. Upstream's PR gate
+// (ob1-gate-v2.yml, rule 5) greps a PR's changed .sql files for the words on
+// any line, comments included, and calls a DELETE unqualified when its own
+// line has no WHERE; the fork does not run that gate (FORK.md's detach note:
+// it enforces contribution rules this fork does not follow), and
+// read that literally the rail fails the one file that applies it — 046's
+// `BEFORE TRUNCATE ON thought_audit` trigger, which REFUSES truncation, was
+// flagged twice in SMD-1730's review against the sentence — and 034's
+// `DELETE FROM query_log` with its WHERE on the next line. So the rule is
+// stated as what it means, a SQL file must never destroy rows a brain already
+// holds, and read as STATEMENTS: db/config.mjs's DESTRUCTIVE_SQL_RULES through
+// destructiveSqlIn — the comment-stripped text (stripSqlComments, literal-
+// aware, so a header quoting a statement to say why the file has none is not
+// a hit), a TRUNCATE counted only when a table follows it (a trigger event, a
+// privilege and the bare value `TG_OP = 'TRUNCATE'` are not it), a DELETE FROM
+// counted only when its statement — to the `;`, or the `)` that closes its
+// CTE, a literal's parentheses and semicolons not counted — has no WHERE of
+// its own at the top level (a WHERE inside a USING subquery or a format()
+// argument qualifies nothing; the first review pass found both holes), DROP
+// TABLE, DROP DATABASE/SCHEMA and DROP OWNED wherever they stand outside a
+// quoted identifier (`"a DROP TABLE b"` names a column), string literals read
+// because an EXECUTE string runs — which makes a statement quoted in prose
+// (`RAISE EXCEPTION 'TRUNCATE refused'`) a hit as well; the remedy is check
+// 12's, a `--` comment or a rewording, and the messages say so. test-schema
+// does not repeat the scan: the migrations are in this check's scope as
+// files, and a substituted value (`${EMBEDDING_DIM}`) is never one of these
+// statements.
+//
+// Scope: every .sql git tracks or would track (citationFiles, check 15's
+// listing) — the seven category directories, docs/, deploy/ AND
+// db/migrations/; an ignored file, the Supabase CLI's supabase/migrations or
+// a recipe's data/, is not the tree's. The fork's migrations DROP FUNCTION and DROP TRIGGER deliberately
+// (032/033/046's ACL replays, 046's own trigger), which the rail does not name
+// and which destroy no row; no migration has ever dropped a table — a scratch
+// table is a TEMP table ON COMMIT DROP (016's `_rte_in`), and the dead `DROP
+// TABLE IF EXISTS` change 61 records was db/migrate.ts's, TypeScript — so the
+// migrations are held to the same rule with no carve-out. Outside the rule, by
+// the rail's own words ("in SQL files"): SQL inside .ts (compat's suite drops
+// the tables it makes, test-schema empties the one it owns) and the heredocs
+// of a recipe's init .sh. Exceptions are per (file, rule) and COUNTED as check
+// 7's are; the list is empty, and a file that needs one says why beside it.
+
+/** Statements each rule must catch — the check's own negative tests, run through the rules every time. */
+const DESTRUCTIVE_SQL_PROBES: [string, string][] = [
+  ["truncate", "TRUNCATE thoughts;"],
+  ["truncate", "truncate table only public.thoughts restart identity cascade;"],
+  ["truncate", 'TRUNCATE "thoughts";'],
+  ["truncate", "BEGIN\n  TRUNCATE\n    thought_chunks;\nEND"],
+  ["truncate", "EXECUTE 'TRUNCATE ' || quote_ident(p_table);"],
+  ["truncate", "EXECUTE format('TRUNCATE %I', p_table);"],
+  ["drop-table", "DROP TABLE IF EXISTS thoughts CASCADE;"],
+  ["drop-table", "drop table pg_temp.scratch;"],
+  ["drop-database", "DROP DATABASE open_brain;"],
+  ["drop-database", "DROP SCHEMA public CASCADE;"],
+  ["unqualified-delete", "DELETE FROM thoughts;"],
+  ["unqualified-delete", "DELETE FROM thoughts RETURNING id;"],
+  ["unqualified-delete", "delete from only thoughts"],
+  ["unqualified-delete", "DELETE FROM thoughts -- WHERE id = $1\n;"],
+  ["unqualified-delete", "WITH gone AS (DELETE FROM thoughts RETURNING id) SELECT count(*) FROM gone WHERE id IS NOT NULL;"],
+  ["unqualified-delete", "EXECUTE format('DELETE FROM %I', p_table);"],
+  // First review pass: a WHERE that is not the statement's own, a literal that would move its boundary, the forms the regexes missed.
+  ["unqualified-delete", "DELETE FROM thoughts USING (SELECT id FROM x WHERE y) s;"],
+  ["unqualified-delete", "DELETE FROM thoughts RETURNING 'WHERE';"],
+  ["unqualified-delete", "WITH d AS (DELETE FROM thoughts RETURNING id, '(') SELECT 1 WHERE true;"],
+  ["unqualified-delete", "EXECUTE format('DELETE FROM %I', (SELECT n FROM x WHERE k = 1));"],
+  // The `)` that closes the CTE must END the statement, not just lower the depth: a later CTE's
+  // WHERE sits at depth 0 again once its `(` reopens (the depth-0 rule alone let this pass).
+  ["unqualified-delete", "WITH d AS (DELETE FROM thoughts RETURNING id), e AS (SELECT 1 WHERE true) SELECT * FROM e;"],
+  ["truncate", "EXECUTE format('TRUNCATE %1$I', p_table);"],
+  ["truncate", "EXECUTE $q$TRUNCATE $q$ || quote_ident(p_table);"],
+  ["drop-database", "DROP OWNED BY community CASCADE;"],
+  // Second review pass: an apostrophe inside a dollar-quoted value must not open a literal that swallows the rest of the file; a tag may carry digits.
+  ["unqualified-delete", "COMMENT ON TABLE t IS $q1$don't$q1$;\nDELETE FROM t RETURNING 'WHERE';"], // the blanker's own tag grammar, digits included
+  ["truncate", "EXECUTE $q1$TRUNCATE $q1$ || quote_ident(p_table);"],
+  // Third review pass: a dollar-quoted dynamic string's delete, and an unquoted non-ASCII name.
+  ["unqualified-delete", "EXECUTE $q$DELETE FROM $q$ || quote_ident(p_table);"],
+  ["truncate", "TRUNCATE Übersicht;"],
+];
+/** SQL this repository writes that no rule may catch. */
+const DESTRUCTIVE_SQL_NON_PROBES = [
+  "-- TRUNCATE thoughts; is what this file must never run",
+  "/* DROP TABLE thoughts; DELETE FROM thoughts; */",
+  "CREATE TRIGGER thought_audit_immutable_truncate\n  BEFORE TRUNCATE ON thought_audit\n  FOR EACH STATEMENT EXECUTE FUNCTION thought_audit_refuse_mutation();",
+  "CREATE TRIGGER t AFTER INSERT OR DELETE OR TRUNCATE ON thoughts FOR EACH STATEMENT EXECUTE FUNCTION f();",
+  "GRANT SELECT, INSERT, TRUNCATE ON thoughts TO community;",
+  "REVOKE TRUNCATE, DELETE ON thoughts FROM PUBLIC;",
+  "CASE WHEN TG_OP = 'TRUNCATE' THEN 'thought_audit_immutable_truncate' ELSE 'thought_audit_immutable' END",
+  "DELETE FROM thoughts WHERE id = $1;",
+  "DELETE FROM query_log\n   WHERE logged_at < now() - make_interval(days => p_keep_days);",
+  "DELETE FROM _rte_in WHERE true;",
+  "DELETE FROM _rte_in a USING _rte_in b\n   WHERE a.ntype = b.ntype AND a.nname = b.nname;",
+  "WITH d AS (DELETE FROM ob1_entity_edges WHERE thought_id = p_thought_id RETURNING from_entity_id) SELECT 1;",
+  "DELETE FROM thoughts WHERE id IN (SELECT id FROM thoughts ORDER BY created_at LIMIT 1);",
+  "EXECUTE 'DELETE FROM ' || quote_ident(p_table) || ' WHERE id = $1' USING p_id;",
+  "EXECUTE format('DELETE FROM %I WHERE id = $1', p_table) USING p_id;",
+  "CREATE TEMP TABLE IF NOT EXISTS _rte_in (name text) ON COMMIT DROP;",
+  "DROP TRIGGER IF EXISTS thought_audit_immutable_truncate ON thought_audit;",
+  "DROP FUNCTION IF EXISTS update_thought(uuid, text, jsonb);",
+  "DROP POLICY IF EXISTS p ON t;",
+  "ALTER TABLE thoughts DROP CONSTRAINT IF EXISTS thoughts_derivation_layer_check;",
+  "REFERENCES thoughts(id) ON DELETE CASCADE",
+  "CREATE POLICY p ON t FOR DELETE USING (true);",
+  "COMMENT ON COLUMN thoughts.truncated_at IS 'when the text was cut';",
+  'SELECT "TRUNCATE", "DELETE FROM" FROM information_schema.role_table_grants;',
+  "SELECT has_table_privilege('community', 'thoughts', 'TRUNCATE');",
+  "ALTER TABLE thoughts ENABLE ALWAYS TRIGGER thought_audit_immutable_truncate;",
+  "DELETE FROM thoughts WHERE false;",
+  "COMMENT ON FUNCTION prune_query_log(int) IS 'Delete query_log rows older than p_keep_days. The DELETE is always bounded by logged_at.';",
+  "DELETE FROM thoughts USING f(')') g WHERE thoughts.id = g.id;",
+  "DELETE FROM thoughts USING (SELECT ';' AS s) x WHERE thoughts.id = $1;", // the literal's `;` before the WHERE
+  // Second review pass: a keyword anywhere inside a quoted identifier; an apostrophe in a dollar-quoted value before a qualified delete.
+  'SELECT "my TRUNCATE", "a DROP TABLE b", "x DELETE FROM y" FROM information_schema.role_table_grants;',
+  "COMMENT ON TABLE t IS $$don't$$;\nDELETE FROM t USING f(')') g WHERE t.id = g.id;",
+  "EXECUTE $q$DELETE FROM $q$ || quote_ident(p_table) || ' WHERE id = $1';", // third pass: the WHERE arrives in a `'…'` piece the blanked walk cannot see
+];
+/** file → rule → the reason and the exact hit count; a hit past the count fails, a count no hit reaches fails as stale. Empty: no file in the tree needs one. */
+const DESTRUCTIVE_SQL_EXCEPTIONS = new Map<string, Record<string, CountedException>>([]);
+
+function checkDestructiveSql() {
+  const rules = new Set(DESTRUCTIVE_SQL_RULES.map((r) => r.name));
+  for (const [rule, probe] of DESTRUCTIVE_SQL_PROBES) {
+    if (!rules.has(rule)) { fail(SELF, `check 21's probe names rule '${rule}', which DESTRUCTIVE_SQL_RULES does not define (its own probe)`); continue; }
+    if (!destructiveSqlIn(probe).some((h) => h.rule === rule)) fail(SELF, `check 21's rule '${rule}' no longer catches its probe: ${JSON.stringify(probe)} (its own probe)`);
+  }
+  for (const text of DESTRUCTIVE_SQL_NON_PROBES) {
+    const [hit] = destructiveSqlIn(text);
+    if (hit) fail(SELF, `check 21's rule '${hit.rule}' catches SQL this repository writes: ${JSON.stringify(text)} (its own probe)`);
+  }
+  // The line is the statement's own, through comments and a plpgsql body alike.
+  const lined = destructiveSqlIn("-- a header\nCREATE FUNCTION f() RETURNS void LANGUAGE plpgsql AS $$\nBEGIN\n  -- TRUNCATE in prose\n  TRUNCATE thoughts;\nEND;\n$$;\n");
+  if (lined.map((h) => `${h.rule}@${h.line}`).join(",") !== "truncate@5") fail(SELF, `check 21 reports ${JSON.stringify(lined.map((h) => `${h.rule}@${h.line}`))} for a TRUNCATE on line 5 of a function body, expected ["truncate@5"] (its own probe)`);
+
+  const counts = new Map<string, number>();
+  // The files git tracks or would track, as check 15 reads them — so an ignored
+  // .sql (the Supabase CLI's supabase/migrations, a recipe's data/) is not the
+  // tree's, as .gitignore promises of this script (first review pass; the walk
+  // read the disk). citationFiles skips a file over 4 MB; no .sql is near it.
+  const files = citationFiles().filter((rel) => rel.endsWith(".sql"));
+  if (files.length === 0) fail(SELF, "check 21 found no .sql file in the tree — the listing or its filter is broken, and the rule would pass everything");
+  for (const rel of files) {
+    for (const h of destructiveSqlIn(readFileSync(join(ROOT, rel), "utf8"))) {
+      const key = `${rel} ${h.rule}`;
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+      if (DESTRUCTIVE_SQL_EXCEPTIONS.get(rel)?.[h.rule]) continue;
+      fail(`${rel}:${h.line}`, `${h.msg} (SMD-1936)`);
+    }
+  }
+  for (const [rel, byRule] of DESTRUCTIVE_SQL_EXCEPTIONS) {
+    for (const [rule, { why, lines }] of Object.entries(byRule)) {
+      const seen = counts.get(`${rel} ${rule}`) ?? 0;
+      if (seen !== lines) {
+        fail(rel, seen === 0
+          ? `listed as a destructive-SQL exception for '${rule}' (${why}) but matches nothing — remove it from DESTRUCTIVE_SQL_EXCEPTIONS`
+          : `destructive-SQL exception for '${rule}' (${why}) covers ${lines} line(s) but ${seen} match — a new statement beside the documented one, or the exception's count is stale`);
+      }
+    }
+  }
+}
+checkDestructiveSql();
 
 // No display-time filter. One excused `_template` violations, for a placeholder
 // link that contributionDirs() has skipped since the filter was written — so
