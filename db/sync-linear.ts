@@ -92,7 +92,7 @@ import { SQL } from "bun";
 import { SqlStore } from "../server-portable/store-sql.ts";
 import { createEmbedder, resolveEmbedConfig, type EmbedConfig, type EmbedEnv, type EmbeddedCapture } from "../server-portable/embed.ts";
 import { decideCalls, refusesEverything, type EgressSubject } from "../server-portable/egress.ts";
-import { extractMetadata, metadataRefused } from "../server-portable/metadata.ts";
+import { extractMetadata, metadataRefused, tagsOverExisting } from "../server-portable/metadata.ts";
 import type { Actor } from "../server-portable/store.ts";
 import { describeEnv, loadEnv } from "./env.ts";
 import { linearClient, strict, type Gql } from "./linear-api.ts";
@@ -286,13 +286,6 @@ export function facetPatch(current: Record<string, unknown>, wanted: Record<stri
 }
 
 /**
- * The plan for one identifier from the census: which issues a pass must fetch
- * in full. `missing` — no ticket row; `stale` — the row's linear_updated_at is
- * older than Linear's, or absent (a hand capture, adopted on first sight);
- * `extra` — a ticket row Linear's list does not name (deleted, or moved out of
- * the initiative). `full` puts every listed issue in the fetch.
- */
-/**
  * One census row: the identifier, when the issue last changed, and the three
  * names the text and facets carry that Linear can RENAME without touching the
  * issue's updatedAt — its project, its state, its labels. The plan compares
@@ -313,6 +306,14 @@ export function namesMoved(c: CensusRow, metadata: Record<string, unknown> | und
 }
 export type Plan = { fetch: string[]; missing: string[]; stale: string[]; extra: string[]; unchanged: number };
 
+/**
+ * The plan for one identifier from the census: which issues a pass must fetch
+ * in full. `missing` — no ticket row; `stale` — the row's linear_updated_at is
+ * older than Linear's, or absent (a hand capture, adopted on first sight), or
+ * its tags fell back, or a name the census carries moved; `extra` — a ticket
+ * row Linear's list does not name (deleted, or moved out of the initiative).
+ * `full` puts every listed issue in the fetch.
+ */
 export function planPass(census: Census, groups: Map<string, BrainRow[]>, full = false): Plan {
   const missing: string[] = [], stale: string[] = [], fetch: string[] = [];
   let unchanged = 0;
@@ -415,7 +416,11 @@ export async function censusOf(gql: Gql, projectIds: string[]): Promise<Census> 
   do {
     const d: R = await strict<R>(
       gql,
-      `query($ids: [ID!], $after: String) { issues(first: 250, after: $after, includeArchived: true, filter: { project: { id: { in: $ids } } }) { pageInfo { hasNextPage endCursor } nodes { identifier updatedAt trashed project { name } state { name } labels { nodes { name } } } } }`,
+      // 100 issues a page with the labels connection bounded: Linear costs a
+      // request by its nodes, and 250 issues each with an unbounded connection
+      // could reach its per-request cap on a board this size or larger — a
+      // refused census is no census (eleventh review pass).
+      `query($ids: [ID!], $after: String) { issues(first: 100, after: $after, includeArchived: true, filter: { project: { id: { in: $ids } } }) { pageInfo { hasNextPage endCursor } nodes { identifier updatedAt trashed project { name } state { name } labels(first: 20) { nodes { name } } } } }`,
       { ids: projectIds, after },
     );
     out.push(...d.issues.nodes.filter((n) => !n.trashed).map((n) => ({ identifier: n.identifier, updatedAt: n.updatedAt, project: n.project?.name ?? null, status: n.state.name, labels: n.labels.nodes.map((l) => l.name) })));
@@ -736,16 +741,20 @@ export async function syncIssue(w: Writer, issue: LinearIssue, rows: BrainRow[])
       const g = decideCalls(subject, w.cfg, w.cfg.egress);
       // Refused: the marker AND the placeholders gone — `uncategorized` /
       // `observation` under a marker that says no call was made is the tag
-      // set dressed as an extraction that metadataRefused() exists to
-      // prevent (tenth review pass).
-      if (!g.chat.allowed) retagged = { ...metadataRefused(), topics: null, type: null };
+      // set dressed as an extraction that the marker exists to prevent
+      // (tenth review pass; the rule is metadata.ts's tagsOverExisting since
+      // the eleventh, one spelling for this branch, the edit and the next
+      // writer).
+      if (!g.chat.allowed) retagged = tagsOverExisting(metadataRefused());
       else if (w.retagBudget && w.retagBudget.left <= 0) w.log(`  · ${issue.identifier}: tags fell back and would be asked for again; this pass's retags are spent, the next pass takes it`);
       else if (!w.dryRun) {
         if (w.retagBudget) w.retagBudget.left--;
-        const tags = await w.tags(content, subject);
+        const tags = tagsOverExisting(await w.tags(content, subject));
         retagged = { ...tags, ...("metadata_extraction_failed" in tags ? {} : { metadata_extraction_failed: null }) };
       } else {
-        // The dry run cannot know the tags; it counts the write it would make.
+        // The dry run cannot know the tags; it counts the write it would make
+        // and spends the budget as the pass would, so its count is the pass's.
+        if (w.retagBudget) w.retagBudget.left--;
         w.log(`  · ${issue.identifier}: would extract the tags again (they fell back: ${String(head.metadata?.metadata_extraction_failed)})`);
         retagged = { metadata_extraction_failed: null };
       }
@@ -802,9 +811,11 @@ export async function syncIssue(w: Writer, issue: LinearIssue, rows: BrainRow[])
   // away (tenth review pass). A capture runs the two together because it keeps
   // both; here the second is worth making only once the first is in hand.
   const embedded = g.embeddings.allowed ? await w.embed(content, subject) : undefined;
-  // Refused: the marker, as the capture path writes — the old text's tags
-  // must not pass as the new text's with nothing saying why (fifth pass).
-  const tags = g.chat.allowed ? await w.tags(content, subject) : metadataRefused();
+  // Refused or fallen back: the marker, and every tag key the answer did not
+  // set nulled — the OLD text's people, topics and action items must not stand
+  // on the new text under a marker that says no extraction happened (fifth
+  // pass said the marker; the eleventh found the old tags still standing).
+  const tags = tagsOverExisting(g.chat.allowed ? await w.tags(content, subject) : metadataRefused());
   const clearMarker = !("metadata_extraction_failed" in tags) && head.metadata && "metadata_extraction_failed" in head.metadata ? { metadata_extraction_failed: null } : {};
   const clearRefusal = refusalClear(head.metadata);
   const r = await w.store.updateThought({
@@ -1090,7 +1101,10 @@ function selfCheck(): Promise<number> {
     // An edit with the chat call refused carries the refusal marker, as a capture does, not the old text's tags in silence.
     const chatDenied: Writer = { ...recorder, cfg: resolveEmbedConfig({ OB1_LLM_LOCAL: "1", OB1_CHAT_BASE_URL: "https://chat.example.com/v1", OB1_CHAT_API_KEY: "k", OB1_EGRESS_POLICY: "deny" }) };
     r = await run(chatDenied, [row("cur", text, withFacets, null, null)], done);
-    ok(r.r.outcome === "updated" && r.calls.join("; ") === "embed; update cur content patch(metadata_extraction_failed,source,issue,project,status,status_type,priority,labels,parent,url,linear_updated_at,archived_at) vec", `chat refused on an edit: the vector lands, the tags are not called, the marker says why (${r.calls.join("; ")})`);
+    // Eleventh review pass: every tag key the refusal does not set is nulled, so the old text's people and action items do not stand on the new text.
+    ok(r.r.outcome === "updated" && r.calls.join("; ") === "embed; update cur content patch(people,action_items,dates_mentioned,topics,type,metadata_extraction_failed,source,issue,project,status,status_type,priority,labels,parent,url,linear_updated_at,archived_at) vec", `chat refused on an edit: the vector lands, the tags are not called, the marker says why and the old tags are nulled (${r.calls.join("; ")})`);
+    ok(JSON.stringify(tagsOverExisting({ type: "task", topics: ["t"], people: [] })) === JSON.stringify({ type: "task", topics: ["t"], people: [] }), "a full answer passes through tagsOverExisting untouched");
+    ok(JSON.stringify(tagsOverExisting({ topics: ["uncategorized"], type: "observation", metadata_extraction_failed: "provider_timeout" })) === JSON.stringify({ people: null, action_items: null, dates_mentioned: null, topics: ["uncategorized"], type: "observation", metadata_extraction_failed: "provider_timeout" }), "a fallback answer nulls the keys it does not set and keeps its own");
     ok(planPass([{ identifier: "SMD-1936", updatedAt: issue.updatedAt }], new Map([["SMD-1936", [row("T", text, {}, "2026-09-25T00:00:00Z", null), row("H", text, withFacets, "2026-09-22T00:00:00Z", null)]]])).unchanged === 1, "the plan reads the newest watermark in the group, not the first row's — an unsuperseded hand twin does not keep the ticket stale");
     // A pointer the database refuses does not hold the ticket's write hostage.
     const cycling: Writer["store"] = { captureThought: recorder.store.captureThought, updateThought: async (o) => { if (o.provenance) { calls.push(`update ${o.id} supersedes=${o.provenance.supersedes} → WOULD_CYCLE`); return { ok: false, error: "WOULD_CYCLE" }; } return recorder.store.updateThought(o); } };
@@ -1161,7 +1175,7 @@ function selfCheck(): Promise<number> {
     ok(r.r.outcome === "patched" && r.calls.join("; ") === "update F patch(metadata_extraction_failed)" && !tagsFellBack({ metadata_extraction_failed: "egress_denied" }), `a retag the gate refuses records egress_denied, which no later plan counts as fallback tags (${r.calls.join("; ")})`);
     // Tenth review pass: the placeholders go with the marker; staleness is judged on the row that carries the watermark; a thrown fetch is a batch refused whole; the grammar is one spelling; the vector is paid for before the tags.
     r = await run(chatDenied, [row("F", text, { ...withFacets, topics: ["uncategorized"], type: "observation", metadata_extraction_failed: "provider_timeout" }, null, null)]);
-    ok(r.calls.join("; ") === "update F patch(metadata_extraction_failed,topics,type)", `…and the placeholder topics and type are nulled with it, not left as a tag set dressed as an extraction (${r.calls.join("; ")})`);
+    ok(r.calls.join("; ") === "update F patch(topics,type,metadata_extraction_failed)", `…and the placeholder topics and type are nulled with it, not left as a tag set dressed as an extraction (${r.calls.join("; ")})`);
     ok(planPass([c0], new Map([["SMD-1936", [row("O", text, { ...withFacets, status: "Old", linear_updated_at: undefined as unknown as string }, "2026-09-23T00:00:00Z", null), row("W", text, withFacets, "2026-09-22T00:00:00Z", null)]]])).stale.length === 0,
       "the names and the tags are judged on the row carrying the newest watermark, not on rows[0] — a holder that could not be chained does not keep the ticket stale");
     const throwsHttp: Gql = async <T,>(_q: string, vars: Record<string, unknown> = {}) => { if (Object.values(vars)[0] === "SMD-1") throw new Error("Linear returned HTTP 429 Too Many Requests"); return fakeGql<T>(_q, vars); };
@@ -1189,7 +1203,7 @@ function selfCheck(): Promise<number> {
     // A board: one initiative, one project, three issues (one trashed); the census, the plan, and --only.
     const board: Gql = async <T,>(q: string, vars: Record<string, unknown> = {}) => {
       if (/initiatives\(/.test(q)) return { data: { initiatives: { pageInfo: { hasNextPage: false, endCursor: "" }, nodes: [{ name: "Open Brain — self-hosted AI memory", projects: { pageInfo: { hasNextPage: vars.after === "more" }, nodes: [{ id: "p1", name: "P" }] } }] } } as T, errors: [] };
-      if (/issues\(first: 250/.test(q)) return { data: { issues: { pageInfo: { hasNextPage: false, endCursor: "" }, nodes: [
+      if (/issues\(first: \d+/.test(q)) return { data: { issues: { pageInfo: { hasNextPage: false, endCursor: "" }, nodes: [
         { identifier: "SMD-1936", updatedAt: issue.updatedAt, trashed: null, project: { name: issue.project!.name }, state: { name: "Backlog" }, labels: { nodes: [{ name: "infrastructure" }] } },
         { identifier: "SMD-2000", updatedAt: "2026-09-22T02:00:00.000Z", trashed: false, project: { name: "P" }, state: { name: "Backlog" }, labels: { nodes: [] } },
         { identifier: "SMD-666", updatedAt: "2026-09-22T02:00:00.000Z", trashed: true, project: { name: "P" }, state: { name: "Backlog" }, labels: { nodes: [] } },
@@ -1225,8 +1239,14 @@ function selfCheck(): Promise<number> {
     ok(r.r.outcome === "patched" && r.calls.join("; ") === "tags; update F patch(type,topics,metadata_extraction_failed)", `the head holding the text with fallback tags: one chat call, the tags replaced and the marker nulled, Linear's status kept, no embed (${r.calls.join("; ")})`);
     r = await run({ ...recorder, tags: async () => { calls.push("tags"); return { topics: ["uncategorized"], type: "observation", metadata_extraction_failed: "provider_timeout" }; } }, [row("F", text, { ...withFacets, topics: ["uncategorized"], type: "observation", metadata_extraction_failed: "provider_timeout" }, null, null)]);
     ok(r.r.outcome === "unchanged" && r.calls.join("; ") === "tags", `a retag that falls back to what the row already holds writes nothing (${r.calls.join("; ")})`);
+    r = await run({ ...recorder, tags: async () => { calls.push("tags"); return { topics: ["uncategorized"], type: "observation", metadata_extraction_failed: "provider_timeout" }; } }, [row("F", text, { ...withFacets, people: ["someone"], topics: ["uncategorized"], type: "observation", metadata_extraction_failed: "provider_timeout" }, null, null)]);
+    ok(r.calls.join("; ") === "tags; update F patch(people)", `…but a fallback answer nulls the old text's people it did not set (${r.calls.join("; ")})`);
     r = await run({ ...recorder, dryRun: true }, [row("F", text, { ...withFacets, metadata_extraction_failed: "provider_timeout" }, null, null)]);
     ok(r.r.outcome === "patched" && r.calls.length === 0, `…and a dry run counts the retag it would make (${r.r.outcome})`);
+    const dryBudget: Writer = { ...recorder, dryRun: true, retagBudget: { left: 1 } };
+    const first = await syncIssue(dryBudget, issue, [row("F1", text, { ...withFacets, metadata_extraction_failed: "provider_timeout" }, null, null)]);
+    const second = await syncIssue(dryBudget, issue, [row("F2", text, { ...withFacets, metadata_extraction_failed: "provider_timeout" }, null, null)]);
+    ok(first.outcome === "patched" && second.outcome === "unchanged", `…spending the budget as the pass would, so its count is the pass's (${first.outcome}, ${second.outcome})`);
     ok(planPass([{ identifier: "SMD-1936", updatedAt: issue.updatedAt }], new Map([["SMD-1936", [row("H", text, withFacets, "2026-09-22T00:00:00Z", "T"), row("T", text, { metadata_extraction_failed: "provider_timeout" }, "2026-09-21T00:00:00Z", null)]]])).stale.length === 0, "a superseded twin's fallback tags do not keep the ticket stale — the current row's do");
     // The update branch clears a twin's stale refusal too.
     r = await run(recorder, [row("B", text, { ...withFacets, status: "Done", status_type: "completed" }, "2026-09-23T00:00:00Z", "A"), row("A", text, { text_refused_by: "Z" }, "2026-09-22T00:00:00Z", null)], { ...issue, state: { name: "In Progress", type: "started" } });
@@ -1274,6 +1294,8 @@ async function main(): Promise<void> {
   if (flags.has("self-check")) process.exit(await selfCheck());
   // --audit is the whole board's census; --only would be read by nothing on that branch (fourth review pass).
   if (flags.has("audit") && values.has("only")) { console.error(`--audit takes no --only: the census is the whole board.\n${USAGE}`); process.exit(2); }
+  // …nor --full or --dry-run: the audit writes nothing and compares the census, not the text (eleventh review pass).
+  for (const f of ["full", "dry-run"]) if (flags.has("audit") && flags.has(f)) { console.error(`--audit takes no --${f}: it writes nothing and compares the census alone.\n${USAGE}`); process.exit(2); }
 
   // Every knob from the environment, else the `.env` files on db/env.ts's search
   // path — the provider knobs too, so a checkout run resolves the endpoint and
@@ -1385,7 +1407,9 @@ async function main(): Promise<void> {
     console.log(`  ${SELF}: a pass every ${interval} s against ${initiative}${dryRun ? " (dry run)" : ""}; SIGTERM/SIGINT ends the loop after the issue in hand`);
     while (!stopping) {
       console.log(`▸ ${new Date().toISOString()}`);
-      try { await once(); } catch (e) { console.error(`  pass failed: ${(e as Error).message}`); }
+      // The last pass's result is the loop's exit code: a service whose every
+      // pass reported errors must not stop clean (eleventh review pass).
+      try { code = await once(); } catch (e) { code = 1; console.error(`  pass failed: ${(e as Error).message}`); }
       for (let waited = 0; waited < interval && !stopping; waited++) await Bun.sleep(1000);
     }
   } finally {
