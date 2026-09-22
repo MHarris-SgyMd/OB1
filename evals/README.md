@@ -3787,7 +3787,7 @@ random vectors; the vector index had been priced out of that plan entirely.
 
 `eval-thought-kinds.ts`. Every other harness here scores retrieval over a
 corpus; this one scores the `type` facet over the brain itself. On 2026-09-22
-the dogfood brain held 308 thoughts (336 by the cut) and `thought_stats` typed 259 of them
+the dogfood brain held 308 thoughts (342 by the cut) and `thought_stats` typed 259 of them
 `task` — the facet carried almost nothing, and SMD-1949 proposes widening the
 five-value enum. Widening it by intuition repeats the mistake, so the whole
 brain was labelled first against a candidate axis of thirteen epistemic kinds
@@ -3818,20 +3818,21 @@ to the host Ollama.
 
 Source is read from the text's shape — every row says `source: mcp`, because
 the board was loaded through `capture_thought`: 271 imported issues, 10 project
-records, 27 agent captures as found; by the cut 336 (281, 10 and 45), after
-the 16 rows this ticket wrote (the atoms below and three session notes) and 12
-a concurrent session added (10 Linear imports and 2 captures).
+records, 27 agent captures as found; by the cut 342 (286, 10 and 46), after
+the 16 rows this ticket wrote (the atoms below and three session notes) and 18
+a concurrent session added (14 Linear imports and 4 captures, one of them a
+DONE note written in the import's shape).
 
 | kind | issues | projects | captures | total | share |
 | --- | --- | --- | --- | --- | --- |
-| plan | 226 | 10 | 2 | 238 | 71% (open 155, done 77, canceled 6) |
+| plan | 230 | 10 | 2 | 242 | 71% (open 159, done 77, canceled 6) |
 | hypothesis | 37 | 0 | 0 | 37 | 11% (open 20, confirmed 4, refuted 13) |
 | decision | 2 | 0 | 10 | 12 | 4% (all standing; 9 are the atoms) |
-| event | 1 | 0 | 9 | 10 | 3% |
+| event | 2 | 0 | 9 | 11 | 3% |
 | lesson | 0 | 0 | 8 | 8 | 2% |
 | reference | 7 | 0 | 0 | 7 | 2% |
 | compound | 2 | 0 | 4 | 6 | 2% |
-| observation | 0 | 0 | 6 | 6 | 2% |
+| observation | 0 | 0 | 7 | 7 | 2% |
 | question | 5 | 0 | 0 | 5 | 1% (all open) |
 | rule | 0 | 0 | 4 | 4 | 1% (all atoms) |
 | fact, idea, procedure | | | | 1 each | |
@@ -3860,42 +3861,43 @@ SMD-1903, SMD-1730), a follow-up note (plan + lesson + decision), the posture
 digest (rule + fact + event) and SMD-1729 (its decision + its program).
 
 **The shipped five against the kind.** Where a kind has a slot in the five, the
-extractor's type is right for 220 of 263 (84%) — nearly all of it `plan` read
-as `task`. 73 thoughts (22%) are a kind the five cannot express: every
+extractor's type is right for 224 of 269 (83%) — nearly all of it `plan` read
+as `task`. 73 thoughts (21%) are a kind the five cannot express: every
 hypothesis (all 37 typed `task`; a hypothesis is not an `idea`, it is a
 prediction with an outcome), the lessons, decisions, questions, compounds and
-the procedure. `event` lands on `reference` 8 of 10 times.
+the procedure. `event` lands on `reference` 9 of 11 times.
 
 **The metadata model on the candidate axis** (`qwen2.5:7b`, temperature 0,
-first 12,000 characters): agrees with the hand label on **80 of 336 (24%)**.
+first 12,000 characters): agrees with the hand label on **82 of 342 (24%)**.
 
 | kind | hand | model recalled | model said | of which right |
 | --- | --- | --- | --- | --- |
-| plan | 238 | 52 (22%) | 83 | 52 (63%) |
+| plan | 242 | 53 (22%) | 84 | 53 (63%) |
 | hypothesis | 37 | 0 | 0 | — |
-| procedure | 1 | 1 | 156 | 1 (1%) |
-| fact | 1 | 1 | 25 | 1 |
+| procedure | 1 | 1 | 160 | 1 (1%) |
+| fact | 1 | 1 | 26 | 1 |
 | idea | 1 | 1 | 4 | 1 |
-| observation | 6 | 4 | 21 | 4 |
+| observation | 7 | 5 | 22 | 5 |
 | decision | 12 | 11 (92%) | 22 | 11 (50%) |
 | rule | 4 | 4 | 15 | 4 |
 | lesson | 8 | 4 (50%) | 6 | 4 (67%) |
-| event | 10 | 1 | 1 | 1 |
-| reference | 7 | 1 | 3 | 1 |
+| event | 11 | 1 | 1 | 1 |
+| reference | 7 | 1 | 2 | 1 |
 | question | 5 | 0 | 0 | — |
 | compound | 6 | 0 | 0 | — |
 
-It reads a Problem / Work / Verify ticket as a `procedure` 147 times out of
-281 and never says `hypothesis`, `question` or `compound`. On the captures it
+It reads a Problem / Work / Verify ticket as a `procedure` 151 times out of
+286 and never says `hypothesis`, `question` or `compound`. On the captures it
 is usable for `lesson` and `decision` and blind to `event` (a DONE note reads
-as a procedure or a plan). Its confidence band is `high` on 310 of 336 and
-right on 68 of those (22%), `medium` right on 11 of 24 — the band does not
+as a procedure or a plan). Its confidence band is `high` on 318 of 342 and
+right on 71 of those (22%), `medium` right on 11 of 24, `low` never given —
+the band does not
 separate right from wrong, the same finding as the entity extractor's flat
 1.00 (SMD-1925) and the judge's flat 0.80 (SMD-1873). Where it named a kind
-that carries a status, it read the status right for 32 of 52 plans (14 gave
+that carries a status, it read the status right for 33 of 53 plans (14 gave
 none) and 10 of 11 decisions; the first pass's status is frozen in the fixture
 and the harness prints this table. A band the model omits is recorded as none
-since review pass 3; the two `low` rows predate that and may be omissions.
+and counted, not coerced to `low`; every row in this fixture gave one.
 
 Also found while labelling: three tickets are in the brain as successive
 versions of one description (SMD-1933 three times, SMD-1867 and SMD-1903

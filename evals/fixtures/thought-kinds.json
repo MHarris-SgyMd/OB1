@@ -1,7 +1,7 @@
 {
-  "generated": "2026-09-22T18:52:38.040Z",
+  "generated": "2026-09-22T19:22:42.979Z",
   "origin": "the dogfood brain on the maintainer's machine, every thought it held, labelled whole (SMD-1951)",
-  "note": "Every thought the dogfood brain held on 2026-09-22, labelled by Claude Fable 5.1 working for the maintainer: 308 as found (the 27 agent captures and 10 project records read in full, the 271 imported issues by title, status line and description head, then every plan-labelled thought read again at 3,200 characters on the maintainer's request), plus 16 written under this ticket the same day (13 decision and rule atoms split out of the compounds and DONE notes, each derived_from its source, and 3 session notes) and 12 a concurrent session added before the cut (10 Linear imports and 2 captures), 336 in all. The maintainer has not yet re-read the labels; the review file the freeze consumed lists every disagreement with the first pass by id. First pass: qwen2.5:7b, the metadata model, through the server's resolver at temperature 0, on the first 12,000 characters; its kind, status and band are frozen. plan was added to the candidate axis during labelling (an imported issue is assigned work with its problem and acceptance test, not a procedure); a plan's status is the issue's own state type, which is stale for tickets closed after the import. A measure-first spike (measure X, adopt only if it clears a bar) and a verify-that ticket are hypotheses, and their status is the recorded outcome from the fork record, not the ticket's text, which is the prediction; a ticket whose only remaining work is the decision is a question. The first freeze had read all of these as plans; the maintainer caught the spikes, and the second reading found the rest. Compounds name their parts.",
+  "note": "Every thought the dogfood brain held at the cut on 2026-09-22, labelled by Claude Fable 5.1 working for the maintainer: 308 as found (the 27 agent captures and 10 project records read in full, the 271 imported issues by title, status line and description head, then every plan-labelled thought read again at 3,200 characters on the maintainer's request), plus 16 written under this ticket the same day (13 decision and rule atoms split out of the compounds and DONE notes, each derived_from its source, and 3 session notes) and 18 a concurrent session added before the cut (14 Linear imports, 4 captures), 342 in all. The maintainer has not yet re-read the labels; the review file the freeze consumed lists every disagreement with the first pass by id. First pass: qwen2.5:7b, the metadata model, through the server's resolver at temperature 0, on the first 12,000 characters; its kind, status and band are frozen, and an answer that gave no usable band is absent from the band map (two rows first frozen with a coerced low band were redone under that rule in review pass 4). plan was added to the candidate axis during labelling (an imported issue is assigned work with its problem and acceptance test, not a procedure); a plan's status is the issue's own state type, which is stale for tickets closed after the import. A measure-first spike (measure X, adopt only if it clears a bar) and a verify-that ticket are hypotheses, and their status is the recorded outcome from the fork record, not the ticket's text, which is the prediction; a ticket whose only remaining work is the decision is a question. The first freeze had read all of these as plans; the maintainer caught the spikes, and the second reading found the rest. Compounds name their parts.",
   "kinds": {
     "plan": [
       "00299246-c51f-47b8-99ef-14a529a4d244",
@@ -18,6 +18,7 @@
       "0fc673dc-8afc-40d1-8840-615a59257cb3",
       "108acc25-38c7-4430-bca5-05ed41db4363",
       "12ce6d5f-c7c1-429f-a8d6-630bf5f9a4e2",
+      "12ce6f1b-3a36-4589-8c19-d5798dfb0e51",
       "135f6dfe-30c8-4b05-bd4d-69ee8a9c951a",
       "1410e9c9-cb57-4d59-8a0f-fa12b13c4fb6",
       "145b35e6-4ef8-42da-9e2c-3773d057fda0",
@@ -52,6 +53,7 @@
       "30198efd-0474-4a5c-8dec-11cdd70bdc31",
       "30cf2d49-00d9-4604-9bda-4880068ccd92",
       "327da071-57c3-4cda-9d0e-b310ce098ff2",
+      "32f4f929-d897-4719-b246-d320cd72621b",
       "3428b435-748f-46d3-a350-c20cf12b2e0d",
       "34a41b16-c895-4bc0-b50e-a453419f4a62",
       "34b3b91f-4bea-4355-8671-e12a31369674",
@@ -119,6 +121,7 @@
       "7644cd24-e104-447d-b501-b43eb658eb94",
       "764eb870-2e1d-4080-aba0-df87d1f90cb4",
       "7779ead6-ca99-43f0-a42c-4e358c36c651",
+      "786dbee8-7341-477d-bab5-a15e1e98b01a",
       "78aa6052-5ffc-446f-aa32-6179d1ba1d78",
       "78c3815b-1dc2-48eb-a17a-6dc3d923509f",
       "7d8e6367-882c-4864-af76-68dc0bae1b0f",
@@ -240,6 +243,7 @@
       "f53fee38-fe35-49d9-82b3-71bf0106eb89",
       "ff5eddb1-2dd3-41f7-b8eb-663ab1c70550",
       "ff690613-0841-4089-a649-1c1967af2c5e",
+      "ffcb56f6-a199-40ce-b129-347a5310ac5c",
       "ffdce7e7-f6d2-486e-874e-b423132a46d1",
       "ffe88cf8-1420-4c84-b511-9fbd40e36482"
     ],
@@ -330,7 +334,8 @@
       "bbcdfca7-653b-4875-8026-02e212f8aeb6",
       "bd7772cf-95e7-4a10-a874-82416f67eee1",
       "c25e49a7-4052-414b-8bb2-d3b6a23b8f0f",
-      "c58106fa-65f5-442b-9761-8506990fb06f"
+      "c58106fa-65f5-442b-9761-8506990fb06f",
+      "fab47c58-4a13-472d-9865-8e561116eb0b"
     ],
     "lesson": [
       "062b98a8-00c9-4d03-abeb-563924044c68",
@@ -350,6 +355,7 @@
       "1b608fb9-a68a-4977-9adf-6ca720d6bac4",
       "1c183c0e-295a-4f06-b79d-6bc9bb2feb9d",
       "76908708-b504-4b5b-9536-ab9112ab06e7",
+      "991e6675-ef9c-4b80-a4d7-e3fff48dabca",
       "a62197cd-d11d-4478-9170-6694dfdb2214",
       "ca44ba5d-c219-497f-bd9b-338f66031fb4"
     ],
@@ -499,6 +505,7 @@
       "0f826f5a-c086-420e-98b8-951f74a9b985",
       "108acc25-38c7-4430-bca5-05ed41db4363",
       "12ce6d5f-c7c1-429f-a8d6-630bf5f9a4e2",
+      "12ce6f1b-3a36-4589-8c19-d5798dfb0e51",
       "135f6dfe-30c8-4b05-bd4d-69ee8a9c951a",
       "1410e9c9-cb57-4d59-8a0f-fa12b13c4fb6",
       "145b35e6-4ef8-42da-9e2c-3773d057fda0",
@@ -527,6 +534,7 @@
       "312bc2b1-861e-4a8d-8509-e1e188d2b9b9",
       "31c99cb8-8ab9-4a40-a8ea-fe8550aa85fd",
       "327da071-57c3-4cda-9d0e-b310ce098ff2",
+      "32f4f929-d897-4719-b246-d320cd72621b",
       "3428b435-748f-46d3-a350-c20cf12b2e0d",
       "34a41b16-c895-4bc0-b50e-a453419f4a62",
       "34b3b91f-4bea-4355-8671-e12a31369674",
@@ -582,6 +590,7 @@
       "7644cd24-e104-447d-b501-b43eb658eb94",
       "764eb870-2e1d-4080-aba0-df87d1f90cb4",
       "7779ead6-ca99-43f0-a42c-4e358c36c651",
+      "786dbee8-7341-477d-bab5-a15e1e98b01a",
       "78aa6052-5ffc-446f-aa32-6179d1ba1d78",
       "78c3815b-1dc2-48eb-a17a-6dc3d923509f",
       "7d8e6367-882c-4864-af76-68dc0bae1b0f",
@@ -669,6 +678,7 @@
       "fb2d4db5-27af-48fe-b14a-3cb9a9b80cc4",
       "ff5eddb1-2dd3-41f7-b8eb-663ab1c70550",
       "ff690613-0841-4089-a649-1c1967af2c5e",
+      "ffcb56f6-a199-40ce-b129-347a5310ac5c",
       "ffdce7e7-f6d2-486e-874e-b423132a46d1"
     ],
     "standing": [
@@ -720,6 +730,7 @@
       "0fc673dc-8afc-40d1-8840-615a59257cb3",
       "108acc25-38c7-4430-bca5-05ed41db4363",
       "12ce6d5f-c7c1-429f-a8d6-630bf5f9a4e2",
+      "12ce6f1b-3a36-4589-8c19-d5798dfb0e51",
       "135f6dfe-30c8-4b05-bd4d-69ee8a9c951a",
       "1410e9c9-cb57-4d59-8a0f-fa12b13c4fb6",
       "145b35e6-4ef8-42da-9e2c-3773d057fda0",
@@ -757,6 +768,7 @@
       "31c99cb8-8ab9-4a40-a8ea-fe8550aa85fd",
       "31eb3626-1506-405e-9241-ea5e9c918bc5",
       "327da071-57c3-4cda-9d0e-b310ce098ff2",
+      "32f4f929-d897-4719-b246-d320cd72621b",
       "34a41b16-c895-4bc0-b50e-a453419f4a62",
       "34b3b91f-4bea-4355-8671-e12a31369674",
       "35821174-9179-40dc-afd8-aff154234756",
@@ -836,6 +848,7 @@
       "764eb870-2e1d-4080-aba0-df87d1f90cb4",
       "776a5ebc-6604-4954-8e9e-26355989af53",
       "7779ead6-ca99-43f0-a42c-4e358c36c651",
+      "786dbee8-7341-477d-bab5-a15e1e98b01a",
       "78aa6052-5ffc-446f-aa32-6179d1ba1d78",
       "78c3815b-1dc2-48eb-a17a-6dc3d923509f",
       "7ba37993-91ff-4f5c-857f-d8a2270ad3bb",
@@ -979,8 +992,10 @@
       "f4afd5c4-6e15-4d62-84c9-729b66fbc0ac",
       "f4f54990-5218-4f09-86f5-fea5d1f90d04",
       "f53fee38-fe35-49d9-82b3-71bf0106eb89",
+      "fab47c58-4a13-472d-9865-8e561116eb0b",
       "fb2d4db5-27af-48fe-b14a-3cb9a9b80cc4",
       "ff690613-0841-4089-a649-1c1967af2c5e",
+      "ffcb56f6-a199-40ce-b129-347a5310ac5c",
       "ffdce7e7-f6d2-486e-874e-b423132a46d1",
       "ffe88cf8-1420-4c84-b511-9fbd40e36482"
     ],
@@ -1015,6 +1030,7 @@
       "827ccabc-c6c3-4f7e-817e-83984d5d559a",
       "8d8a93a6-511a-46f1-9316-470e00c80d56",
       "906a7d0b-e836-47e2-bbc8-fcb03e5cd555",
+      "991e6675-ef9c-4b80-a4d7-e3fff48dabca",
       "a4937254-6883-4425-bd62-6e65c4444f7a",
       "a62197cd-d11d-4478-9170-6694dfdb2214",
       "a8daa17d-14c7-497c-b347-2009e985b3f8",
@@ -1085,6 +1101,7 @@
       "31c99cb8-8ab9-4a40-a8ea-fe8550aa85fd",
       "31eb3626-1506-405e-9241-ea5e9c918bc5",
       "327da071-57c3-4cda-9d0e-b310ce098ff2",
+      "32f4f929-d897-4719-b246-d320cd72621b",
       "332b6cf7-bc8e-4009-a4b8-9ed0879984c0",
       "37a8bf3c-0759-46e7-a55e-079863bbfe8d",
       "384d2943-8be5-4fa2-8532-80fda91dd453",
@@ -1133,6 +1150,7 @@
       "761c79c7-18d0-4866-9fc8-d634cee3aeb4",
       "764eb870-2e1d-4080-aba0-df87d1f90cb4",
       "776a5ebc-6604-4954-8e9e-26355989af53",
+      "786dbee8-7341-477d-bab5-a15e1e98b01a",
       "7fe96ffe-80a3-44e0-847d-ca2c152606a8",
       "82fddbd3-513b-4a9f-8b12-97f5d2393e8e",
       "891e7131-3068-47a8-a503-c0d25478674e",
@@ -1201,12 +1219,15 @@
       "f3a7dac0-b583-4573-9588-a1bff84e66c3",
       "f4535101-84a9-4901-bf25-79986279b457",
       "f4f54990-5218-4f09-86f5-fea5d1f90d04",
-      "ff690613-0841-4089-a649-1c1967af2c5e"
+      "fab47c58-4a13-472d-9865-8e561116eb0b",
+      "ff690613-0841-4089-a649-1c1967af2c5e",
+      "ffcb56f6-a199-40ce-b129-347a5310ac5c"
     ],
     "plan": [
       "077b96f1-4b95-43c1-af98-3082ca48988b",
       "0b5193ad-4a90-4f05-9181-ab095de570ee",
       "0b855ce0-0885-44dc-835d-d766663c3a01",
+      "12ce6f1b-3a36-4589-8c19-d5798dfb0e51",
       "159630fa-793e-401c-8fc7-45d136db23b0",
       "1b756124-c4a2-4786-ae4c-307c76a3c638",
       "20c43c7d-1930-450e-ac55-73287cb21a7e",
@@ -1303,6 +1324,7 @@
       "87d5b566-b89e-4570-8659-9c5b378fc279",
       "8b389fb0-1049-41f2-a213-53baf5ebf131",
       "92a54004-8c83-495f-9a87-4ac9db6000dc",
+      "991e6675-ef9c-4b80-a4d7-e3fff48dabca",
       "9fc68ed1-eadf-42fc-a88a-58be946a2f95",
       "a62197cd-d11d-4478-9170-6694dfdb2214",
       "afe84aaa-ef7e-43ce-9c35-3456f9938b81",
@@ -1332,6 +1354,7 @@
       "b6c27763-ea72-4c0c-a4ab-eed30b11e1e8",
       "b6cb25e2-289d-46a1-84b2-b171f1c156b8",
       "debf03fe-7981-4185-8ecb-2a2381cc838e",
+      "ded87f73-6f7e-4ad7-9a3a-a6f854aa62b6",
       "e5ae1c72-8d62-4d61-9d8e-f81babda1b20",
       "e755d280-daec-4abc-b199-cf7de9af0041",
       "e82ff46e-dab2-48f5-bb12-e16ba9869576",
@@ -1362,11 +1385,6 @@
       "ecec04f1-e1c3-42f6-91fe-491247571e13",
       "fb2d4db5-27af-48fe-b14a-3cb9a9b80cc4"
     ],
-    "reference": [
-      "02311df0-ddf2-4b29-b173-73885aa34a31",
-      "a4233e8e-64cf-4346-9086-d24a0769e3c0",
-      "ded87f73-6f7e-4ad7-9a3a-a6f854aa62b6"
-    ],
     "rule": [
       "1b608fb9-a68a-4977-9adf-6ca720d6bac4",
       "1d9476d2-de20-470b-a040-190210c889ed",
@@ -1390,6 +1408,10 @@
       "8d897e7f-76d8-40db-b828-c40f7818bebc",
       "ffdce7e7-f6d2-486e-874e-b423132a46d1"
     ],
+    "reference": [
+      "02311df0-ddf2-4b29-b173-73885aa34a31",
+      "a4233e8e-64cf-4346-9086-d24a0769e3c0"
+    ],
     "lesson": [
       "24598e54-7cec-4038-ac71-ae6dfd800ac7",
       "791660e1-83b2-40a6-bf98-89cfa67cce66",
@@ -1406,6 +1428,7 @@
     "high": [
       "00299246-c51f-47b8-99ef-14a529a4d244",
       "008b4199-c07c-43f6-92de-17e85b2cfae0",
+      "02311df0-ddf2-4b29-b173-73885aa34a31",
       "024fa930-d102-44a5-9034-f56d2c7a2f16",
       "02af9525-0c98-4b16-8214-6e9771cc6edf",
       "03bbac6f-f38f-4b4f-9f84-f355a88441fe",
@@ -1427,6 +1450,7 @@
       "0fc673dc-8afc-40d1-8840-615a59257cb3",
       "108acc25-38c7-4430-bca5-05ed41db4363",
       "12ce6d5f-c7c1-429f-a8d6-630bf5f9a4e2",
+      "12ce6f1b-3a36-4589-8c19-d5798dfb0e51",
       "135f6dfe-30c8-4b05-bd4d-69ee8a9c951a",
       "1410e9c9-cb57-4d59-8a0f-fa12b13c4fb6",
       "145b35e6-4ef8-42da-9e2c-3773d057fda0",
@@ -1466,6 +1490,7 @@
       "31c99cb8-8ab9-4a40-a8ea-fe8550aa85fd",
       "31eb3626-1506-405e-9241-ea5e9c918bc5",
       "327da071-57c3-4cda-9d0e-b310ce098ff2",
+      "32f4f929-d897-4719-b246-d320cd72621b",
       "332b6cf7-bc8e-4009-a4b8-9ed0879984c0",
       "3428b435-748f-46d3-a350-c20cf12b2e0d",
       "34a41b16-c895-4bc0-b50e-a453419f4a62",
@@ -1555,6 +1580,7 @@
       "76908708-b504-4b5b-9536-ab9112ab06e7",
       "776a5ebc-6604-4954-8e9e-26355989af53",
       "7779ead6-ca99-43f0-a42c-4e358c36c651",
+      "786dbee8-7341-477d-bab5-a15e1e98b01a",
       "78aa6052-5ffc-446f-aa32-6179d1ba1d78",
       "78c3815b-1dc2-48eb-a17a-6dc3d923509f",
       "791660e1-83b2-40a6-bf98-89cfa67cce66",
@@ -1599,6 +1625,7 @@
       "92f4147a-4618-4358-9413-8c8994087923",
       "93ad2c48-a557-4381-a559-314c9f803ba6",
       "98f22a49-dad7-456f-bdd6-7ecc7ebf9993",
+      "991e6675-ef9c-4b80-a4d7-e3fff48dabca",
       "9a3d5f19-2cff-4ec1-a86b-fa6014014204",
       "9abc4fb4-05f1-4cc9-bd70-f7158bec5155",
       "9b7fe014-66b7-4a1a-83e3-3985ce2de0af",
@@ -1680,6 +1707,7 @@
       "dc95b5b4-a548-4151-b336-ab22162d01cf",
       "dd8d5d13-7e6d-4c10-941d-ff0e52dae16f",
       "debf03fe-7981-4185-8ecb-2a2381cc838e",
+      "ded87f73-6f7e-4ad7-9a3a-a6f854aa62b6",
       "df2eac7d-a838-427e-ba9f-36e2d629bc30",
       "e176f235-5d37-45eb-afee-e4ceca52c3ee",
       "e5ae1c72-8d62-4d61-9d8e-f81babda1b20",
@@ -1710,9 +1738,11 @@
       "f4afd5c4-6e15-4d62-84c9-729b66fbc0ac",
       "f4f54990-5218-4f09-86f5-fea5d1f90d04",
       "f53fee38-fe35-49d9-82b3-71bf0106eb89",
+      "fab47c58-4a13-472d-9865-8e561116eb0b",
       "fb2d4db5-27af-48fe-b14a-3cb9a9b80cc4",
       "fc02e695-e26a-4cf5-a077-111707aee9b1",
       "ff690613-0841-4089-a649-1c1967af2c5e",
+      "ffcb56f6-a199-40ce-b129-347a5310ac5c",
       "ffe88cf8-1420-4c84-b511-9fbd40e36482"
     ],
     "medium": [
@@ -1740,10 +1770,6 @@
       "ed5a3841-007d-42bc-b8c5-729531783a82",
       "ff5eddb1-2dd3-41f7-b8eb-663ab1c70550",
       "ffdce7e7-f6d2-486e-874e-b423132a46d1"
-    ],
-    "low": [
-      "02311df0-ddf2-4b29-b173-73885aa34a31",
-      "ded87f73-6f7e-4ad7-9a3a-a6f854aa62b6"
     ]
   },
   "first_pass_status": {
@@ -1762,6 +1788,7 @@
     ],
     "open": [
       "077b96f1-4b95-43c1-af98-3082ca48988b",
+      "12ce6f1b-3a36-4589-8c19-d5798dfb0e51",
       "159630fa-793e-401c-8fc7-45d136db23b0",
       "34b3b91f-4bea-4355-8671-e12a31369674",
       "35821174-9179-40dc-afd8-aff154234756",

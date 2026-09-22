@@ -24,7 +24,7 @@
  * `compound`, with the kinds it contains recorded under `parts` — the fork's
  * answer to a compound is to atomize it (SMD-1930), not to give it two types.
  *
- * Three modes, one shape:
+ * Four modes, one shape:
  *
  *   bun eval-thought-kinds.ts --self-check                       # the fixture's shape rules, probed; no database, no model
  *   DATABASE_URL=… bun eval-thought-kinds.ts --label out.jsonl   # the model's first pass over every thought, one line per id, resumable
@@ -36,7 +36,8 @@
  * the status axis where a kind carries one; (2) the confusion of the shipped
  * `type` against the kind, and how much of the brain has NO slot in the five;
  * (3) the frozen first pass's agreement with the hand label, per kind and per
- * confidence band; (4) unless `--frozen`, the same model run again now, so the
+ * confidence band, and where it named a kind that carries a status, whether it
+ * read the status too; (4) unless `--frozen`, the same model run again now, so the
  * agreement number is reproduced against the live brain rather than read from
  * the file. The model is the metadata model (OB1_METADATA_MODEL) through the
  * server's own resolver and egress gate, at the metadata temperature (0 by
@@ -113,8 +114,9 @@ export function sourceKindOf(content: string): SourceKind {
   return "agent_capture";
 }
 
-/** A `plan` status from an imported issue's own state type; undefined when the text is not an import. */
+/** A `plan` status from an imported issue's own state type; undefined when the text is not an import — a status line quoted inside a capture is not the capture's status (review pass 4 moved the gate here from label()). */
 export function ticketStatusOf(content: string): "open" | "done" | "canceled" | undefined {
+  if (!ISSUE_HEAD.test(content)) return undefined;
   const m = ISSUE_STATUS.exec(content);
   if (!m) return undefined;
   const t = m[1];
@@ -223,9 +225,14 @@ function invert(map: Record<string, string[]>, what: string, problems: string[])
   const out = new Map<string, string>();
   for (const [key, ids] of Object.entries(map)) {
     if (!Array.isArray(ids)) { problems.push(`${what}.${key} is not an array`); continue; }
+    if (ids.length === 0) { problems.push(`${what}.${key} is empty — a key with no ids says nothing; drop it`); continue; }
     for (const id of ids) {
       if (typeof id !== "string" || !UUID.test(id)) { problems.push(`${what}.${key} carries a non-id ${JSON.stringify(id).slice(0, 40)}`); continue; }
-      if (out.has(id)) problems.push(`${what}: ${id} is under both ${out.get(id)} and ${key}`);
+      // The database emits lowercase; an upper-cased id would validate and then
+      // miss its live row in the score's IN list (review pass 4).
+      if (id !== id.toLowerCase()) { problems.push(`${what}.${key} carries an upper-cased id ${id}`); continue; }
+      if (out.get(id) === key) problems.push(`${what}.${key} lists ${id} twice`);
+      else if (out.has(id)) problems.push(`${what}: ${id} is under both ${out.get(id)} and ${key}`);
       out.set(id, key);
     }
   }
@@ -325,7 +332,18 @@ type HandLabel = { id: string; kind: Kind; parts?: Kind[]; status?: string };
 
 function readJsonl<T>(path: string): T[] {
   if (!existsSync(path)) return [];
-  return readFileSync(path, "utf8").split("\n").filter((l) => l.trim() !== "").map((l) => JSON.parse(l) as T);
+  const lines = readFileSync(path, "utf8").split("\n").filter((l) => l.trim() !== "");
+  const out: T[] = [];
+  lines.forEach((l, i) => {
+    try { out.push(JSON.parse(l) as T); }
+    catch {
+      // A run killed mid-append leaves a partial last line; that one is dropped
+      // with a word, so the resume can go on. Anything earlier is a real defect.
+      if (i === lines.length - 1) console.error(`${path}: the last line is not JSON (a run killed mid-write?); dropped`);
+      else throw new Error(`${path}: line ${i + 1} is not JSON`);
+    }
+  });
+  return out;
 }
 
 function push(map: Record<string, string[]>, key: string, id: string) { (map[key] ??= []).push(id); }
@@ -338,7 +356,7 @@ function push(map: Record<string, string[]>, key: string, id: string) { (map[key
  * frozen that was not read from the brain.
  */
 export function buildFixture(labels: HandLabel[], review: ReviewLine[], note: string, generated = new Date().toISOString()): Fixture {
-  const byId = new Map(review.map((r) => [r.id, r]));
+  const byId = new Map(review.map((r) => [r.id, r])); // the last line per id wins: a redone error follows its error line
   const f: Fixture = {
     generated,
     origin: "the dogfood brain on the maintainer's machine, every thought it held, labelled whole (SMD-1951)",
@@ -435,6 +453,9 @@ function selfCheck(): void {
     ["a first-pass status a kind does not take", (f) => { f.first_pass_status = { done: [A], resolved: [B] }; }, "not one of"],
     ["a first-pass status on a kind that carries none", (f) => { f.first_pass_status.open.push(C); }, "carries no status"],
     ["a non-id value", (f) => { f.first_pass_confidence.high.push("a leaked thought body"); }, "non-id"],
+    ["an empty kind", (f) => { f.kinds.observation = []; }, "is empty"],
+    ["an upper-cased id", (f) => { f.status.done = ["1000000A-0000-4000-8000-00000000000A"]; }, "upper-cased"],
+    ["an id listed twice under one key", (f) => { f.first_pass.plan.push(A); }, "twice"],
     ["a non-id part", (f) => { f.parts.observation.push("a leaked thought body"); }, "non-id"],
     ["a bare note", (f) => { f.note = " "; }, "note is missing"],
   ];
@@ -451,6 +472,7 @@ function selfCheck(): void {
   ok(ticketStatusOf("SMD-1 — t\nProject: P · Status: In Review (started) · Priority: Low\n") === "open", "started → open");
   ok(ticketStatusOf("SMD-1 — t\nProject: P · Status: Canceled (canceled) · Priority: Low\n") === "canceled", "canceled → canceled");
   ok(ticketStatusOf("Lesson from a review") === undefined, "no status line → undefined");
+  ok(ticketStatusOf("Lesson from a review that quotes a ticket head:\nProject: P · Status: Done (completed) · Priority: Low\n") === undefined, "a status line quoted inside a capture is not the capture's status");
   const v = parseVerdict(JSON.stringify({ kind: "Plan", status: "Done", confidence: "high" }));
   ok("kind" in v && v.kind === "plan" && v.status === "done" && v.confidence === "high", "a verdict parses, case-folded");
   ok("error" in parseVerdict(JSON.stringify({ kind: "task", confidence: "high" })), "a kind off the list is an error, not a coercion");
@@ -467,7 +489,13 @@ function selfCheck(): void {
       { id: B, legacy_type: "observation", source_kind: "agent_capture", ticket_status: null, first_pass: { kind: "plan", status: "open", confidence: null }, error: null },
       { id: C, legacy_type: "task", source_kind: "agent_capture", ticket_status: null, first_pass: null, error: "timeout" },
     ], "probe", "2026-09-22T00:00:00Z");
-  ok(validateFixture(built).length === 0 && built.status.done?.[0] === A && !built.first_pass.lesson && built.first_pass_status.done?.[0] === A && built.first_pass_status.open?.[0] === B && !built.first_pass_confidence.low, "buildFixture: the ticket's status fills a plan, an unanswered id has no first pass, the first-pass status is kept, an absent band is not invented");
+  const flat = (m: Record<string, string[]>) => Object.values(m).flat();
+  ok(validateFixture(built).length === 0, `buildFixture builds a sound fixture: ${validateFixture(built).join("; ")}`);
+  ok(built.status.done?.[0] === A, "buildFixture: the ticket's own status fills a plan with no hand status");
+  ok(!flat(built.first_pass).includes(C), "buildFixture: an unanswered id has no first pass");
+  ok(built.first_pass_status.done?.[0] === A && built.first_pass_status.open?.[0] === B, "buildFixture: the first pass's status is kept");
+  ok(!flat(built.first_pass_confidence).includes(B), "buildFixture: an absent band is not invented");
+  ok(built.source_kind.linear_issue?.[0] === A && built.source_kind.agent_capture?.includes(B), "buildFixture: the source kind comes from the review line");
   let threw = false;
   try { buildFixture([{ id: A, kind: "plan" }], [], "probe"); } catch { threw = true; }
   ok(threw, "buildFixture refuses a label with no review line");
@@ -489,13 +517,12 @@ type Row = { id: string; content: string; metadata: Record<string, unknown> };
 
 async function label(out: string): Promise<void> {
   const sql = new SQL({ url: requireUrl(), max: 1 });
-  // Resume: a line with an answer is done; a line that recorded an error is
-  // dropped and its id redone, so a provider timeout is not permanent (review
-  // pass 3 — before this every existing line counted, errors included).
-  const existing = readJsonl<ReviewLine>(out);
-  const kept = existing.filter((l) => l.first_pass !== null);
-  if (kept.length !== existing.length) writeFileSync(out, kept.map((l) => JSON.stringify(l) + "\n").join(""));
-  const done = new Set(kept.map((l) => l.id));
+  // Resume: an id with an answered line is done; an id whose only lines
+  // recorded an error is redone and its new line appended (review pass 3 —
+  // before this every existing line counted, errors included; pass 4 dropped
+  // the rewrite of the file that did the dropping, a truncate-and-write of
+  // hours of model time). The freeze reads the LAST line per id.
+  const done = new Set(readJsonl<ReviewLine>(out).filter((l) => l.first_pass !== null).map((l) => l.id));
   const limit = Number(flag("limit") ?? 0);
   const rows = await sql`SELECT id::text, content, metadata FROM thoughts ORDER BY created_at, id` as Row[];
   const todo = rows.filter((r) => !done.has(r.id)).slice(0, limit || undefined);
@@ -509,8 +536,7 @@ async function label(out: string): Promise<void> {
       id: r.id,
       legacy_type: typeof r.metadata.type === "string" ? r.metadata.type : null,
       source_kind,
-      // A status line quoted inside a capture is not the capture's status.
-      ticket_status: source_kind === "linear_issue" ? ticketStatusOf(r.content) ?? null : null,
+      ticket_status: ticketStatusOf(r.content) ?? null,
       first_pass: "kind" in v ? v : null,
       error: "error" in v ? v.error : null,
     };
@@ -532,7 +558,7 @@ function freeze(labelsPath: string, reviewPath: string): void {
   if (problems.length) { console.error(`refusing to write an unsound fixture:\n  ${problems.join("\n  ")}`); process.exit(1); }
   const out = flag("out") ?? FIXTURE_PATH;
   writeFileSync(out, JSON.stringify(f, null, 2) + "\n");
-  const unread = review.filter((r) => !labels.some((l) => l.id === r.id)).length;
+  const unread = new Set(review.filter((r) => !labels.some((l) => l.id === r.id)).map((r) => r.id)).size;
   console.log(`wrote ${out}: ${labels.length} labelled ids, ${Object.keys(f.kinds).length} kinds${unread ? `; ${unread} review lines have NO hand label and were left out` : ""}`);
 }
 
@@ -598,7 +624,7 @@ async function score(): Promise<void> {
   // 3. The frozen first pass.
   const reportPass = (title: string, guessOf: Map<string, string>, bands?: Map<string, string>) => {
     const a = agreement(kindOf, guessOf);
-    out.push(`## ${title}`, "", `Agrees with the hand label on **${a.agree}/${a.n}** (${pct(a.agree, a.n)}); ${ids.length - a.n} unanswered.`, "");
+    out.push(`## ${title}`, "", `Agrees with the hand label on **${a.agree}/${a.n}** (${pct(a.agree, a.n)}); ${live.size - a.n} unanswered.`, "");
     out.push(table(
       ["kind", "hand", "model agreed (recall)", "model said", "of which right (precision)"],
       [...KINDS].filter((k) => a.perKind.get(k)).map((k) => { const e = a.perKind.get(k)!; return [k, e.n, `${e.agree} (${pct(e.agree, e.n)})`, e.guessed, `${e.right} (${pct(e.right, e.guessed)})`]; }),
