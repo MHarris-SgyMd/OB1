@@ -68,9 +68,10 @@
  * server started from deploy/.env does; in the container none of those files
  * is on the mount (db/ and server-portable/ alone), so the environment compose
  * forwarded is all there is. A run whose egress gate would refuse every
- * embedding — the default policy against an endpoint not declared local — is
- * refused up front rather than landing every ticket bare and calling it
- * synced; --allow-no-vector is the operator saying that is meant.
+ * embedding, or every chat call — the default policy against an endpoint not
+ * declared local — is refused up front rather than landing every ticket bare
+ * (or tagged `egress_denied`, which nothing revisits) and calling it synced;
+ * --allow-refused is the operator saying that is meant.
  *
  * ── What it does not do ──────────────────────────────────────────────────────
  * Remove: an issue deleted in Linear or moved out of the initiative keeps its
@@ -121,8 +122,14 @@ export type LinearIssue = {
 };
 
 /** The identifier at the head of a ticket row (a team key of one letter or more), and the header grammar the hand captures used. */
-export const IDENTIFIER_RE = /^([A-Z][A-Z0-9]*-\d+)\b/;
-const HEADER_RE = /^([A-Z][A-Z0-9]*-\d+) — [^\n]*\nProject: [^\n]*\nhttps:\/\/linear\.app\/[^\n]*(?:\n|$)/;
+// One spelling of the grammar, in a dialect both engines read the same
+// (character classes, `*`, `[^\n]`), so the JS test and the SQL pre-filter cannot
+// drift apart — a widening of one that the other did not get would drop hand
+// pastes before ticketIdentifier saw them (tenth review pass).
+export const IDENTIFIER_PATTERN = "[A-Z][A-Z0-9]*-[0-9]+";
+export const HEADER_PATTERN = `^${IDENTIFIER_PATTERN} — [^\n]*\nProject: `;
+export const IDENTIFIER_RE = new RegExp(`^(${IDENTIFIER_PATTERN})\\b`);
+const HEADER_RE = new RegExp(`^(${IDENTIFIER_PATTERN}) — [^\\n]*\\nProject: [^\\n]*\\nhttps:\\/\\/linear\\.app\\/[^\\n]*(?:\\n|$)`);
 
 /**
  * Linear's autolink markup, `<issue id="…" href="…">SMD-1234</issue>`, to the
@@ -327,7 +334,13 @@ export function planPass(census: Census, groups: Map<string, BrainRow[]>, full =
     // own text's and are never asked for again, so counting them kept a ticket
     // stale for good (eighth pass). When the pass promotes a holder over rows[0],
     // the chain makes that holder rows[0] by the next pass, so the two agree.
-    const isStale = have === undefined || have < updatedAt || tagsFellBack(rows[0].metadata) || namesMoved(c, rows[0].metadata);
+    // The tags and the names are judged on the row that carries the newest
+    // watermark — the row the pass last wrote — not on rows[0]: when a holder
+    // the pass promoted cannot be chained over it (a hand-set pointer the
+    // database refuses), rows[0] keeps the old names for good and the ticket
+    // would be stale forever while the writer called it unchanged (tenth pass).
+    const written = rows.find((r) => r.metadata?.linear_updated_at === have) ?? rows[0];
+    const isStale = have === undefined || have < updatedAt || tagsFellBack(written.metadata) || namesMoved(c, written.metadata);
     if (isStale) { stale.push(identifier); fetch.push(identifier); }
     else if (full) fetch.push(identifier);
     else unchanged++;
@@ -432,22 +445,24 @@ export async function fetchIssues(gql: Gql, identifiers: string[]): Promise<{ is
     const vars = Object.fromEntries(batch.map((ident, j) => [`i${j}`, ident]));
     const decl = batch.map((_, j) => `$i${j}: String!`).join(", ");
     const fields = batch.map((_, j) => `a${j}: issue(id: $i${j}) { ${ISSUE_FIELDS} }`).join("\n");
-    const r = await gql<Record<string, LinearIssue | null>>(`query(${decl}) { ${fields} }`, vars);
-    // The whole query refused (a rate or complexity limit answers with no data
-    // at all): the batches behind it would be refused the same way, so they are
-    // reported as not attempted and the pass moves on — the next pass retries
-    // (ninth review pass).
-    if (r.data === null && r.errors.length) {
-      const why = r.errors.map((e) => e.message).join("; ");
+    // The whole query refused — HTTP 200 with errors and no data (a complexity
+    // limit), or a non-2xx the client throws on (HTTP 429): the batches behind
+    // it would be refused the same way, so they are reported as not attempted
+    // and the pass moves on with its report intact — the next pass retries
+    // (ninth review pass; the thrown shape the tenth).
+    let r: { data: Record<string, LinearIssue | null> | null; errors: { message: string; path?: (string | number)[] }[] };
+    try { r = await gql<Record<string, LinearIssue | null>>(`query(${decl}) { ${fields} }`, vars); }
+    catch (e) { r = { data: null, errors: [{ message: (e as Error).message }] }; }
+    if (r.data === null) {
+      const why = r.errors.map((e) => e.message).join("; ") || "no data and no error";
       for (const ident of batch) failed.push({ identifier: ident, error: why });
       for (const ident of identifiers.slice(i + 50)) failed.push({ identifier: ident, error: `not attempted — the batch before it was refused whole (${why})` });
       break;
     }
     for (let j = 0; j < batch.length; j++) {
-      const n = r.data?.[`a${j}`];
+      const n = r.data[`a${j}`];
       if (n) { issues.push(n); continue; }
-      const err = r.errors.find((e) => e.path?.[0] === `a${j}`)?.message ?? (r.errors.length && r.data === null ? r.errors.map((e) => e.message).join("; ") : "not returned in full");
-      failed.push({ identifier: batch[j], error: err });
+      failed.push({ identifier: batch[j], error: r.errors.find((e) => e.path?.[0] === `a${j}`)?.message ?? "not returned in full" });
     }
   }
   return { issues, failed };
@@ -516,7 +531,7 @@ export async function readTicketRows(sql: SQL, opts: { scanHeaders: boolean; cla
   // review pass).
   const byHeader = (await sql`
     SELECT ${rowColumns(sql)} FROM thoughts
-    WHERE NOT (COALESCE(metadata, '{}'::jsonb) ? 'issue') AND content ~ '^[A-Z][A-Z0-9]*-[0-9]+ — [^\n]*\nProject: '`) as BrainRow[];
+    WHERE NOT (COALESCE(metadata, '{}'::jsonb) ? 'issue') AND content ~ ${HEADER_PATTERN}`) as BrainRow[];
   return [...claimed, ...byHeader];
 }
 
@@ -719,7 +734,11 @@ export async function syncIssue(w: Writer, issue: LinearIssue, rows: BrainRow[])
     if (tagsFellBack(head.metadata)) {
       const subject: EgressSubject = { kind: "edit", actor: w.actor.name, metadata: { ...(head.metadata ?? {}), ...facets }, content };
       const g = decideCalls(subject, w.cfg, w.cfg.egress);
-      if (!g.chat.allowed) retagged = metadataRefused();
+      // Refused: the marker AND the placeholders gone — `uncategorized` /
+      // `observation` under a marker that says no call was made is the tag
+      // set dressed as an extraction that metadataRefused() exists to
+      // prevent (tenth review pass).
+      if (!g.chat.allowed) retagged = { ...metadataRefused(), topics: null, type: null };
       else if (w.retagBudget && w.retagBudget.left <= 0) w.log(`  · ${issue.identifier}: tags fell back and would be asked for again; this pass's retags are spent, the next pass takes it`);
       else if (!w.dryRun) {
         if (w.retagBudget) w.retagBudget.left--;
@@ -777,12 +796,15 @@ export async function syncIssue(w: Writer, issue: LinearIssue, rows: BrainRow[])
   const subject: EgressSubject = { kind: "edit", actor: w.actor.name, metadata: { ...(head.metadata ?? {}), ...facets }, content };
   const g = decideCalls(subject, w.cfg, w.cfg.egress);
   if (w.dryRun) { w.log(`  ~ ${issue.identifier}: would update the text (${g.embeddings.allowed ? "re-embedded" : "WITHOUT a vector"}, ${g.chat.allowed ? "re-tagged" : "tags NOT re-extracted"})${patch ? ` and patch ${said(patch)}` : ""}`); return { outcome: "updated", noVector: !g.embeddings.allowed, ...(await chain()) }; }
-  const [embedded, tags] = await Promise.all([
-    g.embeddings.allowed ? w.embed(content, subject) : Promise.resolve(undefined),
-    // Refused: the marker, as the capture path writes — the old text's tags
-    // must not pass as the new text's with nothing saying why (fifth pass).
-    g.chat.allowed ? w.tags(content, subject) : Promise.resolve(metadataRefused()),
-  ]);
+  // The vector first, the tags after: an embedder that throws (a provider
+  // answering no vector) fails the edit — the fork's rule, only an egress
+  // refusal stores a row bare — and paid for no chat call it would have thrown
+  // away (tenth review pass). A capture runs the two together because it keeps
+  // both; here the second is worth making only once the first is in hand.
+  const embedded = g.embeddings.allowed ? await w.embed(content, subject) : undefined;
+  // Refused: the marker, as the capture path writes — the old text's tags
+  // must not pass as the new text's with nothing saying why (fifth pass).
+  const tags = g.chat.allowed ? await w.tags(content, subject) : metadataRefused();
   const clearMarker = !("metadata_extraction_failed" in tags) && head.metadata && "metadata_extraction_failed" in head.metadata ? { metadata_extraction_failed: null } : {};
   const clearRefusal = refusalClear(head.metadata);
   const r = await w.store.updateThought({
@@ -1137,6 +1159,20 @@ function selfCheck(): Promise<number> {
     ok(planPass([{ ...c0, status: "Todo" }], new Map([["SMD-1936", [row("R", text, withFacets, null, null)]]])).stale.length === 1 && planPass([{ ...c0, labels: ["Improvement", "infrastructure"] }], new Map([["SMD-1936", [row("R", text, { ...withFacets, labels: ["infrastructure", "Improvement"] }, null, null)]]])).stale.length === 1, "…a renamed state or a changed label set too, the labels compared in one order");
     r = await run(chatDenied, [row("F", text, { ...withFacets, metadata_extraction_failed: "provider_timeout" }, null, null)]);
     ok(r.r.outcome === "patched" && r.calls.join("; ") === "update F patch(metadata_extraction_failed)" && !tagsFellBack({ metadata_extraction_failed: "egress_denied" }), `a retag the gate refuses records egress_denied, which no later plan counts as fallback tags (${r.calls.join("; ")})`);
+    // Tenth review pass: the placeholders go with the marker; staleness is judged on the row that carries the watermark; a thrown fetch is a batch refused whole; the grammar is one spelling; the vector is paid for before the tags.
+    r = await run(chatDenied, [row("F", text, { ...withFacets, topics: ["uncategorized"], type: "observation", metadata_extraction_failed: "provider_timeout" }, null, null)]);
+    ok(r.calls.join("; ") === "update F patch(metadata_extraction_failed,topics,type)", `…and the placeholder topics and type are nulled with it, not left as a tag set dressed as an extraction (${r.calls.join("; ")})`);
+    ok(planPass([c0], new Map([["SMD-1936", [row("O", text, { ...withFacets, status: "Old", linear_updated_at: undefined as unknown as string }, "2026-09-23T00:00:00Z", null), row("W", text, withFacets, "2026-09-22T00:00:00Z", null)]]])).stale.length === 0,
+      "the names and the tags are judged on the row carrying the newest watermark, not on rows[0] — a holder that could not be chained does not keep the ticket stale");
+    const throwsHttp: Gql = async <T,>(_q: string, vars: Record<string, unknown> = {}) => { if (Object.values(vars)[0] === "SMD-1") throw new Error("Linear returned HTTP 429 Too Many Requests"); return fakeGql<T>(_q, vars); };
+    const thrown = await fetchIssues(throwsHttp, ["SMD-1", "SMD-2"]);
+    ok(thrown.issues.length === 0 && thrown.failed.length === 2 && /HTTP 429/.test(thrown.failed[0].error), `a non-2xx the client throws on is a batch refused whole, reported, never a pass aborted (${JSON.stringify(thrown.failed.map((f) => f.error.slice(0, 40)))})`);
+    ok(new RegExp(HEADER_PATTERN).test(text) && !new RegExp(HEADER_PATTERN).test("SMD-1903 — DONE 2026-09-22: the egress gate landed in Open Brain.") && HEADER_RE.test(text), "the SQL pre-filter's pattern and the JS grammar are one spelling and agree on a ticket row and a note");
+    const embedThrows: Writer = { ...recorder, embed: async () => { calls.push("embed"); throw new Error("returned no embedding"); } };
+    let threw = false;
+    calls.length = 0;
+    try { await syncIssue(embedThrows, done, [row("cur", text, withFacets, null, null)]); } catch { threw = true; }
+    ok(threw && calls.join("; ") === "embed", `an embedder that throws fails the edit before any chat call is paid for (${calls.join("; ")})`);
     r = await run({ ...recorder, retagBudget: { left: 0 } }, [row("F", text, { ...withFacets, metadata_extraction_failed: "provider_timeout" }, null, null)]);
     ok(r.r.outcome === "unchanged" && r.calls.length === 0, `a spent retag budget defers the retag to the next pass, no model call (${r.calls.join("; ")})`);
     // The set that builds the chain throws; the restore that follows it lands.
@@ -1220,8 +1256,8 @@ function selfCheck(): Promise<number> {
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const TAKES_ONE = new Set(["url", "initiative", "interval", "only"]);
-  const TAKES_NONE = new Set(["dry-run", "loop", "audit", "full", "self-check", "quiet", "allow-no-vector"]);
-  const USAGE = "  flags: --url <postgres://…>, --initiative <name>, --interval <seconds>, --only <SMD-1,SMD-2>, --dry-run, --loop, --audit, --full, --quiet, --allow-no-vector, --self-check";
+  const TAKES_NONE = new Set(["dry-run", "loop", "audit", "full", "self-check", "quiet", "allow-refused"]);
+  const USAGE = "  flags: --url <postgres://…>, --initiative <name>, --interval <seconds>, --only <SMD-1,SMD-2>, --dry-run, --loop, --audit, --full, --quiet, --allow-refused, --self-check";
   const values = new Map<string, string>();
   const flags = new Set<string>();
   for (let i = 0; i < args.length; i++) {
@@ -1274,9 +1310,13 @@ async function main(): Promise<void> {
   // before claiming anything): every embedding would be refused, so every
   // ticket would land bare and read as synced — refused here unless the
   // operator says that is meant (seventh review pass). --audit embeds nothing.
-  const wholesale = refusesEverything(cfg.embeddings, cfg.egress);
-  if (wholesale && !flags.has("allow-no-vector") && !flags.has("audit")) {
-    console.error(`  Refusing to run: ${wholesale}. Declare the endpoint local (OB1_LLM_LOCAL=1) when it is, allow this writer (OB1_EGRESS_ALLOW=actor:${ACTOR_NAME}), or pass --allow-no-vector to land every ticket without a vector on purpose.\n  Read: ${describeEnv(envSources)}`);
+  // Both endpoints (tenth review pass): a chat endpoint refused wholesale would
+  // land every ticket with a vector and `egress_denied` for its tags, which
+  // nothing revisits until the ticket next moves in Linear.
+  const wholesale = refusesEverything(cfg.embeddings, cfg.egress)
+    ?? (cfg.chat.base !== cfg.embeddings.base || cfg.chat.local !== cfg.embeddings.local ? refusesEverything(cfg.chat, cfg.egress) : null);
+  if (wholesale && !flags.has("allow-refused") && !flags.has("audit")) {
+    console.error(`  Refusing to run: ${wholesale}. Declare the endpoint local (OB1_LLM_LOCAL=1 / OB1_CHAT_LOCAL=1) when it is, allow this writer (OB1_EGRESS_ALLOW=actor:${ACTOR_NAME}), or pass --allow-refused to land every ticket without the refused call's result on purpose.\n  Read: ${describeEnv(envSources)}`);
     process.exit(2);
   }
   const embedder = createEmbedder(() => cfg, { rememberRefusal: false });
@@ -1331,13 +1371,18 @@ async function main(): Promise<void> {
   // so a board that gains a project is seen.
   try { resolved = await initiativeProjects(gql, initiative); } catch (e) { console.error(`  ${(e as Error).message}`); await store.close(); await sql.close(); process.exit(2); }
 
+  // The signal handlers serve the one-shot pass too: a Ctrl-C mid-chain would
+  // otherwise land between the clears and the sets with no undo (tenth review
+  // pass). The pass ends after the issue in hand; a second signal is the
+  // runtime's default and kills.
+  const stop = () => { if (stopping) process.exit(130); stopping = true; console.error(`  stopping after the issue in hand (a second signal kills)`); };
+  process.on("SIGTERM", stop);
+  process.on("SIGINT", stop);
+
   let code = 0;
   try {
     if (!flags.has("loop")) { code = await once(); return; }
     console.log(`  ${SELF}: a pass every ${interval} s against ${initiative}${dryRun ? " (dry run)" : ""}; SIGTERM/SIGINT ends the loop after the issue in hand`);
-    const stop = () => { stopping = true; };
-    process.on("SIGTERM", stop);
-    process.on("SIGINT", stop);
     while (!stopping) {
       console.log(`▸ ${new Date().toISOString()}`);
       try { await once(); } catch (e) { console.error(`  pass failed: ${(e as Error).message}`); }
