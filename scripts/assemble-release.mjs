@@ -44,7 +44,7 @@ import { parseFragment, fragmentSection, fragmentProblems } from "./fragments.mj
 import { CHANGES_DIR as CHANGES_REL, FIRST_FILED, changeFileName, classifyChanges, pad3, readChangeEntries, renderIndex, spliceIndex } from "./fork-index.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const CHANGES_DIR = join(ROOT, "changes");
+const CHANGES_ABS = join(ROOT, "changes");
 const MIGRATIONS_DIR = join(ROOT, "db", "migrations");
 const BUMP_RANK = { patch: 0, minor: 1, major: 2 };
 const TYPE_HEADING = { added: "Added", changed: "Changed", deprecated: "Deprecated", removed: "Removed", fixed: "Fixed", security: "Security" };
@@ -162,9 +162,13 @@ function orderedFragments(fragments) {
   return [...fragments].sort((a, b) => (key(a) - key(b)) || (ticketNum(a) - ticketNum(b))).map((f) => ({ ...f, landed: at.get(f.name) }));
 }
 
-const MIGRATION_FILES = new Map(readdirSync(MIGRATIONS_DIR).filter((f) => /^\d{3}_.*\.sql$/.test(f)).map((f) => [Number(f.slice(0, 3)), f])); // one listing
+/** number → file name under db/migrations, listed once when first asked (an import runs no I/O). */
+let migrationFilesCache = null;
+function migrationFiles() {
+  return (migrationFilesCache ??= new Map(readdirSync(MIGRATIONS_DIR).filter((f) => /^\d{3}_.*\.sql$/.test(f)).map((f) => [Number(f.slice(0, 3)), f])));
+}
 function readMig(n) {
-  const f = MIGRATION_FILES.get(n);
+  const f = migrationFiles().get(n);
   return f ? readFileSync(join(MIGRATIONS_DIR, f), "utf8") : null;
 }
 
@@ -224,7 +228,7 @@ function buildPlan() {
   const forkPath = join(ROOT, "FORK.md");
   const forkAfter = spliceIndex(readFileSync(forkPath, "utf8"), renderIndex(after));
 
-  const migNums = [...MIGRATION_FILES.keys()];
+  const migNums = [...migrationFiles().keys()];
   const lo = highestReleasedMigration(releases) + 1;
   const hi = Math.max(...migNums);
   const range = hi >= lo ? [lo, hi] : null; // a docs/server-only cut closes no migration
@@ -303,11 +307,11 @@ function write(plan) {
   // the fragments are removed last. A failure part-way is recovered by reverting
   // the working tree to the commit before the cut and running again; buildPlan
   // refuses to run on top of a half-applied cut rather than double it.
-  for (const f of plan.fragments) writeFileSync(join(CHANGES_DIR, f.file.name), f.file.text);
+  for (const f of plan.fragments) writeFileSync(join(CHANGES_ABS, f.file.name), f.file.text);
   writeFileSync(join(ROOT, "FORK.md"), plan.forkAfter);
   writeFileSync(join(ROOT, "CHANGELOG.md"), plan.changelogAfter);
   writeFileSync(join(ROOT, "releases.json"), JSON.stringify([...plan.releases, plan.entry], null, 2) + "\n");
-  for (const f of plan.fragments) unlinkSync(join(CHANGES_DIR, f.name));
+  for (const f of plan.fragments) unlinkSync(join(CHANGES_ABS, f.name));
 
   console.log(`Wrote ${plan.fragments.length} change file(s), FORK.md's index, CHANGELOG.md and releases.json for ${plan.version}.`);
   console.log(`Next, out of band, in this same commit: bump db/version.mjs's FORK_VERSION to '${plan.version}' and add a NNN_set_schema_version.sql upserting it (check-fork holds the two equal). That migration lands after the range this cut froze${plan.range ? ` (${pad3(plan.range[0])}..${pad3(plan.range[1])})` : ""}, so a brain that applies it sits one migration past the release until the next cut — the release job's shape (SMD-1805) is where that gap closes. Then tag v${plan.version.split("+")[0]} (the tag CHANGELOG.md's compare links name; the full version with its +upstream build metadata is in releases.json) and create the release.`);

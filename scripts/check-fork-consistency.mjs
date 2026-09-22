@@ -3146,7 +3146,9 @@ const KAC_HEADINGS = new Set(["Added", "Changed", "Deprecated", "Removed", "Fixe
 function checkFragments() {
   const goodFrag = "---\ntype: added\nbump: minor\ntickets: [SMD-1804, SMD-1805]\nmigrations: [044]\n---\n\n## Changelog\nThe fork gets a version (SMD-1804, SMD-1805).\n\n## FORK\nA title (SMD-1804 / 1805)\n\nBody citing SMD-1804, migration 044 and change 79.\n";
   if (fragmentProblems(goodFrag).length) fail(SELF, `check 16 false-positives on a valid fragment (${fragmentProblems(goodFrag).join("; ")})`);
-  for (const [probe, why] of [
+  // Each probe isolates one rule: its other lines carry the ticket, so dropping
+  // the rule it names is the only way it passes. A third element names the file.
+  for (const [probe, why, name] of [
     ["---\ntype: added\nbump: patch\ntickets: [SMD-1]\nmigrations: [044]\n---\n\n## Changelog\nx (SMD-1)\n\n## FORK\ny (SMD-1)\n", "a patch that ships a migration"],
     ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\nmigrations: []\n---\n\n## Changelog\nx (SMD-1)\n\n## FORK\n# 103. A title\n\nbody\n", "a numbered heading in the FORK body"],
     ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\nmigrations: []\n---\n\n## Changelog\nx (SMD-1)\n\n## FORK\nA title (SMD-1)\n\n### 103. sub\n", "a numbered `### N.` heading in the FORK body"],
@@ -3168,21 +3170,17 @@ function checkFragments() {
     ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\n---\n\n## Changelog\nx (SMD-1)\n\n## Changelog\ny (SMD-1)\n\n## FORK\nA title (SMD-1)\n\nbody\n", "two Changelog sections"],
     ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\n---\n\n## Changelog\nx (SMD-1)\n### Added\n\n## FORK\nA title (SMD-1)\n\nbody\n", "a heading inside the Changelog body"],
     ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\n---\n\n## Changelog\nx (SMD-1)\n\n## FORK\nA title (SMD-1)\n\n##### 5. deep\n", "a numbered heading five levels deep in the FORK body"],
-  ]) if (fragmentProblems(probe).length === 0) fail(SELF, `check 16 no longer catches ${why} (its own probe)`);
-  for (const [probe, name, why] of [
-    ["---\ntype: added\nbump: minor\ntickets: [SMD-1804]\n---\n\n## Changelog\nx (SMD-1804)\n\n## FORK\nA title (SMD-1804)\n\nbody\n", "smd-1805.md", "a fragment named for a ticket its front matter does not list"],
-  ]) if (fragmentProblems(probe, name).length === 0) fail(SELF, `check 16 no longer catches ${why} (its own probe)`);
-  for (const [probe, why] of [
-    ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\n---\n\n## Changelog\nx (SMD-1)\n\n## FORK\nA title (SMD-1)\n\n```bash\n# 1. install\n```\n\n#1. not a heading\n\n1. a list item\n\n## Measured after\n\nA second-level heading inside the record is kept, as changes 19 and 79 keep theirs.\n", "a numbered comment in a fenced block, a `#1.`, a list item and a `## ` sub-heading inside the record"],
-    ["---\ntype: added        # one of the six\nbump: minor        # the rules\ntickets: [SMD-1804]        # one or more\nmigrations: [044]          # or [] for none\n---\n\n## Changelog\n\nx (SMD-1804, migration 044).\n\n## FORK\n\nA title (SMD-1804)\n\nbody\n", "the README's template copied with its inline comments"],
-  ]) if (fragmentProblems(probe).length) fail(SELF, `check 16 refuses ${why}: ${fragmentProblems(probe).join("; ")} (its own non-probe)`);
-  for (const [probe, why] of [
+    ["---\ntype: added\nbump: minor\ntickets: [SMD-1804]\n---\n\n## Changelog\nx (SMD-1804)\n\n## FORK\nA title (SMD-1804)\n\nbody\n", "a fragment named for a ticket its front matter does not list", "smd-1805.md"],
     ["---\ntype: whatever\nbump: minor\ntickets: [SMD-1]\n---\n\n## Changelog\nx (SMD-1)\n\n## FORK\ny (SMD-1)\n", "a type off the six"],
     ["---\ntype: added\nbump: minor\ntickets: []\n---\n\n## Changelog\nx\n\n## FORK\ny\n", "an empty ticket list (no ticket on the lines, so only that rule fires)"],
     ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\n---\n\n## Changelog\nx (SMD-1)\n\n## FORK\n", "an empty FORK section"],
     ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\n---\n\n## FORK\ny (SMD-1)\n", "a missing Changelog body"],
     ["no front matter here\n", "no front matter"],
-  ]) if (fragmentProblems(probe).length === 0) fail(SELF, `check 16 no longer catches ${why} (its own probe)`);
+  ]) if (fragmentProblems(probe, name).length === 0) fail(SELF, `check 16 no longer catches ${why} (its own probe)`);
+  for (const [probe, why] of [
+    ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\n---\n\n## Changelog\nx (SMD-1)\n\n## FORK\nA title (SMD-1)\n\n```bash\n# 1. install\n```\n\n#1. not a heading\n\n1. a list item\n\n## Measured after\n\nA second-level heading inside the record is kept, as changes 19 and 79 keep theirs.\n", "a numbered comment in a fenced block, a `#1.`, a list item and a `## ` sub-heading inside the record"],
+    ["---\ntype: added        # one of the six\nbump: minor        # the rules\ntickets: [SMD-1804]        # one or more\nmigrations: [044]          # or [] for none\n---\n\n## Changelog\n\nx (SMD-1804, migration 044).\n\n## FORK\n\nA title (SMD-1804)\n\nbody\n", "the README's template copied with its inline comments"],
+  ]) if (fragmentProblems(probe).length) fail(SELF, `check 16 refuses ${why}: ${fragmentProblems(probe).join("; ")} (its own non-probe)`);
 
   // Numbered files and stray names are check 15's; one definition of a fragment's name (fork-index.mjs).
   for (const f of changesOnDisk().fragments) for (const p of fragmentProblems(f.text, f.name)) fail(`changes/${f.name}`, `${p} (SMD-1804)`);
