@@ -99,10 +99,10 @@ uuidgen | tr '[:upper:]' '[:lower:]'
 # Or use any UUID generator — the value just needs to be unique to you
 ```
 
-Set it as an environment variable for your Edge Function:
+Set it in the server's environment (Step 3):
 
 ```bash
-supabase secrets set DEFAULT_USER_ID=your-generated-uuid-here
+export DEFAULT_USER_ID=your-generated-uuid-here   # or on the command line in Step 3
 ```
 
 > If you already set `DEFAULT_USER_ID` for a previous extension, you can skip this step — all extensions share the same user ID.

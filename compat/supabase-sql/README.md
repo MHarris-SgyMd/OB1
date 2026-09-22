@@ -105,7 +105,7 @@ cd compat/supabase-sql && bun run test
 
 ## Expected outcome
 
-`205 assertions: 205 passed, 0 failed` and `PASS`. A migrated file behaves
+`250 assertions: 250 passed, 0 failed` and `PASS`. A migrated file behaves
 identically: same `{ data, error }` shape, same SQLSTATE codes, same row counts.
 `extensions/test-tools.ts` then drives every tool of the eight MCP servers with
 a schema of their own — seven extensions and the ob-graph recipe, fifty-five
@@ -178,6 +178,11 @@ Each of these throws with an explanation instead of guessing:
   `!fk_column` and `!left`, and an embed on the row a write returns
   (`.insert(row).select("*, companies (id, name)")`) are served since SMD-1798
   (the table above).
+- **An order, limit or range on an embedded resource** — `.order("due", {
+  foreignTable: "tasks" })`, `.limit(3, { referencedTable: "tasks" })`: the embed
+  returns every row; order or cut them in the file, or ask in a second query.
+  Applied to the base table instead it would be a silent wrong answer, so it is
+  refused at the call and the codemod blocks it.
 - **A filter on an embedded column** — `.neq("thoughts.sensitivity_tier", …)`
   beside `thoughts!inner(…)`: the dotted name is refused as an identifier. Read
   the embedded rows and filter them, or ask in two queries (enhanced-mcp's

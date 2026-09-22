@@ -590,7 +590,7 @@ try {
   assert(inner17.length === 2 && inner17.every((g) => (g.widgets as { name: string })?.name === "alpha"), `!inner keeps only the rows with an embedded row — the orphan gizmo is out (${inner17.length})`);
   const byKey17 = rowsOf(await db.from("gizmos").select("label, widgets!gizmos_widget_id_fkey(name)").eq("label", "g1"), "!fk_name");
   assert((byKey17[0]?.widgets as { name: string })?.name === "alpha", `!fk_name chooses the key by its constraint's name (${JSON.stringify(byKey17[0])})`);
-  assert(/not a single-column foreign key/.test(await refusedMsg(() => db.from("gizmos").select("*, label(name)"))), "a column that is not a foreign key is refused");
+  assert(/no foreign key joins it/.test(await refusedMsg(() => db.from("gizmos").select("*, label(name)"))), "a column that is not a foreign key falls through to the table lookup and is refused there ([21] has the table that shares a column's name)");
   // A one-to-one: the referencing column is unique, so PostgREST gives the one row or null, not a list.
   rowsOf(await db.from("manuals").insert({ widget_id: alpha, pages: 12 }).select("id"), "manual");
   const o2o = rowsOf(await db.from("widgets").select("name, manuals(pages)").in("name", ["alpha", "beta"]).order("id"), "one-to-one");
@@ -822,6 +822,8 @@ try {
   }
   const spaced = titles(await db.from("acts").select("title").or("title.ilike.%camp and (fun)%,dow.eq.monday"), "and ( in a value");
   assert(spaced === "weekly", `"and (" with a space is pattern text still, not a group — PostgREST's grammar has no space there (${spaced})`);
+  const afterComma = titles(await db.from("acts").select("title").or("dow.eq.monday, and(title.eq.camp,end_date.is.null), or(title.eq.ended,title.eq.future)").order("id"), "space before a group");
+  assert(afterComma === "weekly,ended,future", `a space after the comma before a group is trimmed, as a flat term's is (${afterComma})`);
   // Nested embeds: gizmos → widgets (many-to-one) → manuals (one-to-one), three levels; [17] planted the rows.
   const beta = rowsOf(await db.from("widgets").select("id").eq("name", "beta").limit(1), "beta id")[0]?.id as number;
   rowsOf(await db.from("gizmos").insert({ widget_id: beta, label: "g3" }).select("id"), "g3");
@@ -854,6 +856,85 @@ try {
   await admin.close();
 } catch (e) {
   assert(false, `[20] threw: ${e instanceof Error ? e.message : String(e)}`);
+}
+
+console.log("\n[21] What the first review pass found (SMD-1798)");
+try {
+  const admin = new SQL({ url: URL_, max: 1 });
+  await admin`DROP TABLE IF EXISTS progress CASCADE`;
+  await admin`CREATE TABLE progress (learner text, lesson text, status text, PRIMARY KEY (learner, lesson))`;
+  await admin`INSERT INTO progress VALUES ('ann', 'l1', 'done')`;
+  await admin`DROP TABLE IF EXISTS blobs CASCADE`;
+  await admin`CREATE TABLE blobs (id serial PRIMARY KEY, js jsonb[])`;
+  await admin`DROP TABLE IF EXISTS owners CASCADE`;
+  await admin`DROP TABLE IF EXISTS pets CASCADE`;
+  await admin`CREATE TABLE owners (id serial PRIMARY KEY, pets text)`;
+  await admin`CREATE TABLE pets (id serial PRIMARY KEY, owner_id int REFERENCES owners(id), name text)`;
+  await admin`INSERT INTO owners (pets) VALUES ('two of them')`;
+  await admin`INSERT INTO pets (owner_id, name) VALUES (1, 'rex'), (1, 'tom')`;
+  // ignoreDuplicates: the conflicting row is left as it is and not returned — repo-learning-coach's progress upsert
+  // reset a learner's row on every sync while the option went unread.
+  const ignored = await db.from("progress").upsert({ learner: "ann", lesson: "l1", status: "not_started" }, { onConflict: "learner,lesson", ignoreDuplicates: true }).select("status");
+  const [{ status }] = await admin`SELECT status FROM progress WHERE learner = 'ann' AND lesson = 'l1'`;
+  assert(ignored.error === null && (ignored.data as unknown[]).length === 0 && status === "done", `upsert with ignoreDuplicates leaves the existing row and returns none — DO NOTHING, as Prefer: resolution=ignore-duplicates is (${ignored.error?.message ?? `${(ignored.data as unknown[])?.length} rows, status ${status}`})`);
+  const fresh = await db.from("progress").upsert({ learner: "bob", lesson: "l1", status: "not_started" }, { onConflict: "learner,lesson", ignoreDuplicates: true }).select("status");
+  assert((fresh.data as { status: string }[])?.[0]?.status === "not_started", "…and inserts a row that conflicts with nothing");
+  const { text: ignoreText } = await db.from("progress").upsert({ learner: "x", lesson: "y" }, { onConflict: "learner,lesson", ignoreDuplicates: true }).toSQL();
+  assert(/ON CONFLICT \("learner", "lesson"\) DO NOTHING RETURNING/.test(ignoreText), `the SQL (${ignoreText.slice(ignoreText.indexOf("ON CONFLICT"))})`);
+  // jsonb[]: every element JSON text, whatever its JavaScript type.
+  const jsonArr = rowsOf(await db.from("blobs").insert({ js: [{ a: 1 }, [1, 2], "str", 1, true] }).select("js"), "jsonb[]");
+  assert(JSON.stringify(jsonArr[0]?.js) === '[{"a":1},[1,2],"str",1,true]', `a jsonb[] payload binds each element as JSON text — a nested array is a JSON array, not a second dimension; a string is a JSON string (${JSON.stringify(jsonArr[0]?.js)})`);
+  // A hinted self-reference is the one-to-many side, whichever way the key is named; the bare column is the parent.
+  const kids = rowsOf(await db.from("nodes").select("name, kids:nodes!parent_id(name)").eq("name", "root"), "self-ref children by column");
+  assert(JSON.stringify(kids[0]) === JSON.stringify({ name: "root", kids: [{ name: "leaf" }] }), `relation!fk_column on a table embedded in itself is the children — PostgREST's recursive form (${JSON.stringify(kids[0])})`);
+  const kidsByName = rowsOf(await db.from("nodes").select("name, kids:nodes!nodes_parent_id_fkey(name)").eq("name", "root"), "self-ref children by constraint");
+  assert(JSON.stringify(kidsByName[0]?.kids) === JSON.stringify([{ name: "leaf" }]), `…and by the constraint's name (${JSON.stringify(kidsByName[0])})`);
+  const parentStill = rowsOf(await db.from("nodes").select("name, parent:parent_id(name)").eq("name", "leaf"), "self-ref parent");
+  assert(JSON.stringify(parentStill[0]) === JSON.stringify({ name: "leaf", parent: { name: "root" } }), "…while the bare column form is still the parent");
+  // A hint naming the relation's own foreign-key column, from the referenced side: one-to-many.
+  const byReferencing = rowsOf(await db.from("widgets").select("name, gizmos!widget_id(label)").eq("name", "alpha"), "referenced side, hint = the relation's column");
+  assert(Array.isArray(byReferencing[0]?.gizmos) && (byReferencing[0]?.gizmos as { label: string }[]).map((g) => g.label).sort().join() === "g1,g2", `relation!fk_column from the referenced table names the relation's key column and is one-to-many (${JSON.stringify(byReferencing[0]?.gizmos)})`);
+  // A relation whose name is also a non-key column of the base: the table wins, as PostgREST tries it first.
+  const shared = rowsOf(await db.from("owners").select("id, pets(name)").eq("id", 1), "relation named like a column");
+  assert(Array.isArray(shared[0]?.pets) && (shared[0]?.pets as unknown[]).length === 2, `a relation named like a non-key column of the base is the relation, not the column (${JSON.stringify(shared[0])})`);
+  // The count rides under single() and maybeSingle().
+  const singleCount = await db.from("widgets").select("name", { count: "exact" }).eq("name", "alpha").single();
+  assert(singleCount.error === null && singleCount.count === 1, `count under single() is 1, as supabase-js reads Content-Range whatever the row mode (${singleCount.count})`);
+  const maybeNone = await db.from("widgets").select("name", { count: "exact" }).eq("name", "nobody").maybeSingle();
+  assert(maybeNone.error === null && maybeNone.count === 0, `…and 0 under maybeSingle() with no row (${maybeNone.count})`);
+  // A spelled-out star keeps the table's column order.
+  const ordered = rowsOf(await db.from("nodes").select("*").eq("name", "root"), "star order");
+  assert(Object.keys(ordered[0] ?? {}).join() === "id,parent_id,name,counts,days,blob", `a spelled-out * lists the columns in attnum order, as * does (${Object.keys(ordered[0] ?? {}).join()})`);
+  // A non-set function returning one composite row of ONE column is that row as an object, not its cell.
+  await admin`DROP TYPE IF EXISTS one_col CASCADE`;
+  await admin`CREATE TYPE one_col AS (v int)`;
+  await admin`CREATE OR REPLACE FUNCTION one_col_fn() RETURNS one_col LANGUAGE sql STABLE AS $$ SELECT ROW(7)::one_col $$`;
+  await admin`CREATE OR REPLACE FUNCTION one_out(OUT v int) LANGUAGE sql AS $$ SELECT 8 $$`;
+  await admin`CREATE OR REPLACE FUNCTION nothing_fn() RETURNS void LANGUAGE sql AS $$ SELECT 1 $$`;
+  const oneCol = await db.rpc("one_col_fn");
+  assert(JSON.stringify(oneCol.data) === '{"v":7}', `a function returning one composite row of one column is the object PostgREST gives, not the cell (${JSON.stringify(oneCol.data)})`);
+  const oneOut = await db.rpc("one_out");
+  assert(JSON.stringify(oneOut.data) === '{"v":8}', `…and so is one OUT parameter (${JSON.stringify(oneOut.data)})`);
+  const nothing = await db.rpc("nothing_fn");
+  assert(nothing.error === null && (nothing.data === null || nothing.data === ""), `a void function is still its (empty) value (${JSON.stringify(nothing.data)})`);
+  // order/limit/range on an embedded resource: refused, not applied to the base table.
+  const refusedMsg21 = async (run: () => PromiseLike<unknown>) => { try { await run(); return ""; } catch (e) { return (e as Error).message; } };
+  assert(/order\(\) on an embedded resource/.test(await refusedMsg21(() => db.from("widgets").select("name, gizmos(label)").order("label", { foreignTable: "gizmos" }))), "order() with foreignTable is refused, not applied to the base table");
+  assert(/limit\(\) on an embedded resource/.test(await refusedMsg21(() => db.from("widgets").select("name, gizmos(label)").limit(1, { referencedTable: "gizmos" }))), "…and limit() with referencedTable");
+  // is.NULL in any case, as PostgREST reads it.
+  const isNull = namesOf(await db.from("widgets").select("name").or("kind.is.NULL,name.eq.alpha").order("id"), "is.NULL");
+  assert(isNull === "alpha,epsilon", `is.NULL is read whatever its case (${isNull})`);
+  await admin`DROP FUNCTION one_col_fn()`;
+  await admin`DROP FUNCTION one_out()`;
+  await admin`DROP FUNCTION nothing_fn()`;
+  await admin`DROP TYPE one_col`;
+  await admin`DROP TABLE progress CASCADE`;
+  await admin`DROP TABLE blobs CASCADE`;
+  await admin`DROP TABLE pets CASCADE`;
+  await admin`DROP TABLE owners CASCADE`;
+  await admin.close();
+} catch (e) {
+  assert(false, `[21] threw: ${e instanceof Error ? e.message : String(e)}`);
 }
 
 await db.close();

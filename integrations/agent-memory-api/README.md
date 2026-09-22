@@ -20,7 +20,7 @@ sequenceDiagram
 
 ## What It Does
 
-This Edge Function exposes the v1 OB1 Agent Memory contract. OpenClaw is the first launch runtime, but these endpoints are runtime-neutral and can be used by Codex, Claude Code, local agents, n8n, or future SQLite adapters.
+This API exposes the v1 OB1 Agent Memory contract. OpenClaw is the first launch runtime, but these endpoints are runtime-neutral and can be used by Codex, Claude Code, local agents, n8n, or future SQLite adapters.
 
 ## Prerequisites
 
@@ -111,7 +111,7 @@ The trust model is documented in [Safe Agent Memory and Provenance](../../docs/s
 
 ## Smoke Harness
 
-Use the live smoke harness after deploying the Edge Function or rotating secrets, with a `write`-scoped key — the harness writes back first, then reports usage against the recall's `request_id`:
+Use the live smoke harness after starting the server or rotating a key, with a `write`-scoped key — the harness writes back first, then reports usage against the recall's `request_id`:
 
 ```bash
 OB1_AGENT_MEMORY_ENDPOINT="http://localhost:8787" \

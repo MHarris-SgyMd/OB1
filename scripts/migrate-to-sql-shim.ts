@@ -69,6 +69,9 @@ const BLOCKERS = [
     why: "type-only import (Session/User/SupabaseClient) — the shim exports different types",
   },
   { re: /\.textSearch\s*\(/, why: "PostgREST .textSearch() — write it as an .rpc() instead" },
+  // An order, limit or range on an embedded resource: the shim's embed returns every row, and the option applied
+  // to the base table would be a silent wrong answer (SMD-1798's first review pass); the shim refuses it at the call.
+  { re: /\.(?:order|limit|range)\s*\([^)]*\b(?:foreignTable|referencedTable)\b/, why: "an order, limit or range on an embedded resource (foreignTable/referencedTable) — the shim returns every embedded row; order or cut them in the file, or ask in a second query" },
 ];
 
 /**

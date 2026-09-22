@@ -4159,9 +4159,10 @@ checkDestructiveSql();
 // (SMD-1847), both outside this scan. This is what keeps the next rebase, or
 // the next vendored file, from bringing a PostgREST client back: a
 // specifier-shaped string naming the package — "@supabase/supabase-js",
-// "npm:@supabase/supabase-js@2", "jsr:@supabase/supabase-js@2",
-// "https://esm.sh/@supabase/supabase-js@2", with or without a subpath — in any
-// code file (.ts, .tsx, .js, .mjs, .cjs, .svelte, .vue) under the seven
+// "npm:@supabase/supabase-js@2", "jsr:@supabase/supabase-js@2", a CDN URL
+// ("https://esm.sh/@supabase/supabase-js@2", unpkg's), with or without a
+// subpath — in any code file (.ts, .tsx, .mts, .cts, .js, .jsx, .mjs, .cjs,
+// .svelte, .vue, and .html for an inline module script) under the seven
 // category directories and docs/, comments blanked (the codemod's
 // `// ob1-original-import:` record is a comment; a README's sample is prose,
 // SMD-1802's), is a hit, whatever statement holds it: an import, a type-only
@@ -4171,14 +4172,17 @@ checkDestructiveSql();
 // SMD-1800 decides the recipe) and the dashboard's type-only import
 // (SMD-1801's). Every other vendored client moved: 26 files in change 74, six
 // servers here.
-const SUPABASE_JS_SPECIFIER = /(["'])(?:npm:|jsr:|https:\/\/esm\.sh\/)?@supabase\/supabase-js(?:@[^"'/]*)?(?:\/[^"']*)?\1/g;
-const CODE_FILE = /\.(ts|tsx|js|mjs|cjs|svelte|vue)$/;
+const SUPABASE_JS_SPECIFIER = /(["'])(?:npm:|jsr:|https?:\/\/[^"'\s]*\/)?@supabase\/supabase-js(?:@[^"'/]*)?(?:\/[^"']*)?\1/g;
+/** Code, and HTML for the inline `<script type="module">` a dashboard's page may carry. */
+const CODE_FILE = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs|svelte|vue|html)$/;
 /** [text, whether it is a hit] — the forms the tree has had, and the neighbours the rule must not reach. */
 const SUPABASE_JS_PROBES: [string, boolean][] = [
   ['import { createClient } from "@supabase/supabase-js";', true],
   ["import { createClient } from 'npm:@supabase/supabase-js@2';", true],
   ['import { createClient } from "jsr:@supabase/supabase-js@2";', true],
   ['import { createClient } from "https://esm.sh/@supabase/supabase-js@2.47.10";', true],
+  ['import { createClient } from "https://esm.sh/v135/@supabase/supabase-js@2";', true],
+  ['<script type="module">import { createClient } from "https://unpkg.com/@supabase/supabase-js@2/dist/module/index.js";</script>', true],
   ['import type { Session, User } from "@supabase/supabase-js";', true],
   ['const { createClient } = require("@supabase/supabase-js");', true],
   ['const m = await import("@supabase/supabase-js/dist/module/index.js");', true],

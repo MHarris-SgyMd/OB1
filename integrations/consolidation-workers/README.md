@@ -8,7 +8,7 @@
 
 ## What It Does
 
-This integration provides two Supabase Edge Function workers that improve thought quality after initial import:
+This integration provides two workers, run under Bun against your Postgres, that improve thought quality after initial import:
 
 **Bio Worker** (`bio/index.ts`): Synthesizes a canonical biographical profile from person_note, decision, and journal thoughts. The profile is stored as a thought with `metadata.generated_by = "consolidation-bio"` and is rewritten through the database's `update_thought` on subsequent runs — embedded by the worker, so the row carries a vector and its model label and the content fingerprint follows the text; a re-embed pass's vector is replaced, not blanked (FORK.md change 69). The first run stores the profile through the 3-argument `upsert_thought`, embedded, with the enhanced columns following on the fresh row, and both paths name the key as 008's audit actor (FORK.md change 71, SMD-1524) — the raw insert it replaced computed its own fingerprint and stored no vector. On this fork the worker's source and profile queries — filters on `metadata->>generated_by`, `->>artifact_type` and `->>subject` — run through the SQL shim's JSON-path columns (FORK.md change 73, SMD-1544); before that change the shim refused the column and the worker answered 500 at its first query, so nothing above had run. `extensions/test-writes.ts` drives both write paths against Postgres. Useful for generating "Who is X" summaries from scattered notes.
 
