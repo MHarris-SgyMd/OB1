@@ -1371,7 +1371,7 @@ function configShaped(e: unknown): boolean {
   return /Embedding width mismatch|returned no embedding/.test(msg);
 }
 if (!probeGate.allowed) {
-  console.log(`  probe:     skipped — ${probeGate.reason}; the first row stands in, and a failure there that is not the gate's stops the run`);
+  console.log(`  probe:     skipped — ${probeGate.reason}; the first row stands in: a configuration-shaped failure there (a wrong width, no embedding, a non-JSON body, a 400–404) halts the run, anything else is the row's`);
 } else {
   try {
     await embedder.getEmbedding("reembed.ts provider probe", probeSubject);

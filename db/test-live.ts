@@ -3597,6 +3597,18 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
   assert(blanket.code === 2 && /Nothing would be judged: OB1_EGRESS_POLICY=deny \(the default\) with no OB1_EGRESS_ALLOW term, and 127\.0\.0\.1:\d+ is not declared local — every call is refused/.test(blanket.out) && /Declare the endpoint local \(OB1_LLM_LOCAL=1\)/.test(blanket.out) && calls === 0,
          `an endpoint not declared local under the default refuses to start the pass rather than fail every row (exit ${blanket.code}: ${blanket.out.split("\n").find((l) => /Nothing would/.test(l))?.trim().slice(0, 160)})`);
   assert((await sql`SELECT count(*)::int AS c FROM thought_work_claims WHERE work_type = ${KEY}`)[0].c === 0, "…and it claimed nothing");
+  // Without a worker key at all (fourth review pass: every keyless invocation
+  // had died before connecting on a constant read before its declaration,
+  // and no case here ran the worker without one — this is the tooth).
+  const keyless = { ...undeclared, OB1_LLM_LOCAL: "1" } as Record<string, string>;
+  delete keyless.OB1_WORKER_KEY;
+  delete keyless.MCP_ACCESS_KEYS;
+  const keylessDry = await runScript(["bun", join(HERE, "consolidate.ts"), "--url", URL_!, "--dry-run"], { env: keyless, cwd: HERE });
+  assert(keylessDry.code === 0 && /Nothing was written/.test(keylessDry.out) && !/ReferenceError|before initialization/.test(keylessDry.out),
+         `a keyless --dry-run runs to its report (exit ${keylessDry.code}: ${keylessDry.out.split("\n").filter(Boolean).slice(-1)[0]?.trim().slice(0, 120)})`);
+  const keylessBlanket = await runScript(["bun", join(HERE, "consolidate.ts"), "--url", URL_!], { env: { ...keyless, OB1_LLM_LOCAL: "", OB1_EGRESS_ALLOW: "actor:someone" } as Record<string, string>, cwd: HERE });
+  assert(keylessBlanket.code === 2 && /Nothing would be judged: .*every OB1_EGRESS_ALLOW term \(actor:someone\) names a unit this caller never carries \(it carries source, type, topic, marker\)/.test(keylessBlanket.out),
+         `…and a keyless run under actor-only allow terms is refused up front, since it carries no actor (exit ${keylessBlanket.code})`);
   const blanketDry = await runScript(["bun", join(HERE, "consolidate.ts"), "--url", URL_!, "--dry-run"], { env: undeclared, cwd: HERE });
   assert(blanketDry.code === 0 && /egress: deny \(the default\) — the text reaches 127\.0\.0\.1:\d+ only under OB1_EGRESS_ALLOW \(no terms: every call is refused\)/.test(blanketDry.out),
          `…while --dry-run still reports, with the egress line saying so (exit ${blanketDry.code})`);

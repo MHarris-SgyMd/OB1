@@ -191,6 +191,14 @@ if (FORCE && !ACCEPT) {
   process.exit(2);
 }
 const REVIEW_ONLY = LIST !== undefined || ACCEPT !== undefined || REJECT !== undefined || STALE_DAYS > 0;
+/**
+ * The egress units a row of this pass carries without a worker key: its
+ * metadata and its text. Declared here, above the blanket check that reads it
+ * — the fourth review pass found it below, in the identity section, so every
+ * keyless invocation died in the temporal dead zone before connecting; no
+ * test ran the worker without a key, and db/ is not type-checked (SMD-1932).
+ */
+const PASS_UNITS = ["source", "type", "topic", "marker"] as const;
 
 const cfg = resolveEmbedConfig(process.env);
 // The judge's model, not the extractor's: OB1_JUDGE_MODEL, else the metadata
@@ -249,8 +257,6 @@ let agentId: string | null = null;
 let actorName = "consolidate";
 /** The worker key's name when it RESOLVED — the egress gate's `actor:` unit; the audit label above is not an actor (third review pass). */
 let keyName: string | undefined;
-/** The egress units a row of this pass carries without a worker key: its metadata and its text. */
-const PASS_UNITS = ["source", "type", "topic", "marker"] as const;
 // A run, or a review: both write and are attributed. --status, --dry-run, --list and --stale only read.
 const WRITES = ACCEPT !== undefined || REJECT !== undefined || !(STATUS_ONLY || DRY_RUN || REVIEW_ONLY);
 if (WRITES) {
