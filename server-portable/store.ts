@@ -602,7 +602,14 @@ export function normaliseMutation(r: Record<string, unknown> | undefined): Mutat
 export type Actor = {
   /** The access key's name, from auth.ts. Never the key. */
   name: string;
-  source?: string;
+  /**
+   * The door the write came through — this server's name. Migration 046
+   * stamps it as thought_audit.origin (SMD-1730); until then the server sent
+   * `source: "mcp"`, which the trigger wrote over the row's own
+   * metadata.source and the column carried three vocabularies. The trigger
+   * reads no actor `source` any more, so there is no field for one here.
+   */
+  via?: string;
   session?: string;
   /**
    * Stable id from ob1_agents. Absent when the registry is unreachable or
@@ -632,7 +639,7 @@ export function actorPayload(actor: Actor | undefined): Record<string, unknown> 
   if (!actor) return null;
   return {
     name: actor.name,
-    ...(actor.source !== undefined ? { source: actor.source } : {}),
+    ...(actor.via !== undefined ? { via: actor.via } : {}),
     ...(actor.session !== undefined ? { session: actor.session } : {}),
     ...(actor.agentId !== undefined ? { agent_id: actor.agentId } : {}),
     ...(actor.egress !== undefined ? { egress: actor.egress } : {}),
