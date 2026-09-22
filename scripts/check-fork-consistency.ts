@@ -208,7 +208,7 @@ type Metadata = {
   tags?: unknown;
   author?: { name?: unknown; [k: string]: unknown };
   requires?: { open_brain?: unknown; [k: string]: unknown };
-  requires_primitives?: string[]; // as the schema requires; check 1 does not type fields, so a scalar reaches checkDeps, which walks its characters as it always did — the schema is the contract
+  requires_primitives?: string[]; // as the schema requires; check 1 never reads this field, so a scalar reaches checkDeps, which walks its characters as it always did — the schema is the contract
   requires_skills?: string[];
   [k: string]: unknown;
 };
