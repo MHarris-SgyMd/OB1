@@ -17,7 +17,7 @@ The original `server/` connector remains untouched and safe to leave connected: 
 - Working Open Brain setup ([guide](../../docs/01-getting-started.md))
 - **Enhanced Thoughts schema applied** — install `schemas/enhanced-thoughts` first (adds type, importance, sensitivity columns and utility RPCs)
 - OpenRouter API key (same one from the Getting Started guide)
-- Supabase CLI installed for deployment
+- [Bun](https://bun.sh) installed, and a checkout of this repository (the server runs under Bun, Step 1)
 - Optional: `schemas/smart-ingest` (unlocks `ops_capture_status` tool)
 - Optional: `schemas/knowledge-graph` (unlocks `graph_search`, `entity_detail`, `ops_source_monitor` tools)
 
@@ -38,8 +38,7 @@ ENHANCED MCP SERVER -- CREDENTIAL TRACKER
 ------------------------------------------
 
 FROM YOUR OPEN BRAIN SETUP
-  Project URL:           ____________
-  Service role key:      ____________
+  Postgres URL:          ____________
   MCP access key:        ____________
   OpenRouter API key:    ____________
 
@@ -52,30 +51,28 @@ OPTIONAL (for multi-provider fallback)
 
 ## Steps
 
-### 1. Deploy the Edge Function
+### 1. Run the MCP Server
 
-Copy the `integrations/enhanced-mcp/` folder into your Supabase project's `supabase/functions/` directory, then deploy:
+This server runs under [Bun](https://bun.sh) against your Postgres: it imports the repository's SQL shim (`compat/supabase-sql`, Bun's Postgres client in supabase-js's shape) and `compat/deno-on-bun.ts` (the two Deno globals it uses, on Bun), so it is not a Supabase Edge Function and `supabase functions deploy` does not apply (FORK.md change 74; SMD-1798 moved this server). From a checkout of this repository:
 
 ```bash
-supabase functions deploy enhanced-mcp --no-verify-jwt
+(cd extensions && bun install)   # once: the pinned hono, zod and MCP SDK the server imports
+NODE_PATH=extensions/node_modules \
+SUPABASE_URL='postgres://user:password@host:5432/openbrain' \
+MCP_ACCESS_KEY='your-access-key' \
+OPENROUTER_API_KEY='your-openrouter-key' \
+PORT=8787 bun integrations/enhanced-mcp/index.ts
 ```
+
+`SUPABASE_URL` carries the Postgres connection string — the shim keeps the variable names, so the code does not change — and `SUPABASE_SERVICE_ROLE_KEY` may be left unset; `NODE_PATH` points an integration at the pinned install, since it has no `node_modules` of its own ([Run a migrated server under Bun](../../compat/supabase-sql/README.md#3-run-a-migrated-server-under-bun)). The server prints `Listening on http://localhost:8787/` (`PORT` unset, it listens on 8000, Deno's default — which podman's `gvproxy` also holds on macOS, hence 8787 here). To reach it from a hosted client, put it behind the same TLS proxy as the core server ([`SETUP.md`](../../SETUP.md)). `extensions/test-auth.ts` starts the server this way in CI, and `extensions/test-writes.ts` drives its thirteen tools against a real Postgres carrying `schemas/enhanced-thoughts` (SMD-1798).
 
 ### 2. Set Environment Variables
 
-Add your secrets to the deployed function:
+The variables above are the server's secrets, passed as environment. Optional multi-provider fallback (for metadata classification resilience):
 
 ```bash
-supabase secrets set \
-  MCP_ACCESS_KEY="your-access-key" \
-  OPENROUTER_API_KEY="your-openrouter-key"
-```
-
-Optional multi-provider fallback (for metadata classification resilience):
-
-```bash
-supabase secrets set \
-  OPENAI_API_KEY="your-openai-key" \
-  ANTHROPIC_API_KEY="your-anthropic-key"
+OPENAI_API_KEY="your-openai-key" \
+ANTHROPIC_API_KEY="your-anthropic-key"
 ```
 
 ### 3. Add as a Remote MCP Connector
@@ -83,7 +80,7 @@ supabase secrets set \
 In Claude Desktop (or any MCP-compatible client), add a new remote connector:
 
 - **Name:** `Open Brain Enhanced`
-- **URL:** `https://<your-project-ref>.supabase.co/functions/v1/enhanced-mcp`
+- **URL:** `http://your-host:8787/mcp` (behind your TLS proxy, its `https://` address)
 - **Header:** `x-brain-key: <your-mcp-access-key>` _(or `Authorization: Bearer <your-mcp-access-key>`)_
 
 Header-only authentication — the access key is NOT accepted as a `?key=` URL query parameter. Query strings surface in Supabase, CDN, and proxy access logs, which leaks the credential into places that don't get rotated with the secret itself. Use the header (or `Authorization: Bearer …`) exclusively.
@@ -149,7 +146,7 @@ If you also have the original `server/` connector active, you will see both tool
 ## Troubleshooting
 
 **Issue: "Invalid or missing access key" error**
-Solution: Ensure your `MCP_ACCESS_KEY` secret is set in Supabase and matches the key in your connector configuration. The key must be passed via the `x-brain-key` header or `Authorization: Bearer …`. Query-string auth (`?key=…`) is intentionally not supported — it would leak the credential into access logs.
+Solution: Ensure `MCP_ACCESS_KEY` is set in the server's environment and matches the key in your connector configuration. The key must be passed via the `x-brain-key` header or `Authorization: Bearer …`. Query-string auth (`?key=…`) is intentionally not supported — it would leak the credential into access logs.
 
 **Issue: "No embedding API key configured" error**
 Solution: At least one of `OPENROUTER_API_KEY` or `OPENAI_API_KEY` must be set. OpenRouter is the default and recommended provider for OB1.

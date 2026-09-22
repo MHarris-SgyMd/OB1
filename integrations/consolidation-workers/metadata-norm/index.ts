@@ -1,3 +1,9 @@
+// MIGRATED OFF SUPABASE: imports compat/supabase-sql instead of @supabase/supabase-js.
+// Same API, but it speaks SQL directly. The environment variable NAMES are
+// unchanged — set SUPABASE_URL to a postgres:// connection string, and
+// SUPABASE_SERVICE_ROLE_KEY is ignored (credentials live in the URL).
+// ob1-original-import: @supabase/supabase-js
+// Revert with: bun scripts/migrate-to-sql-shim.ts --revert <file>
 /**
  * consolidation-metadata — Re-classify thoughts with weak metadata.
  *
@@ -29,7 +35,8 @@
 // change 67; extensions/test-auth.ts exercises it.
 // Deploy this worker with _shared/auth.ts beside the function (supabase/functions/_shared/),
 // as the README says — next to the helpers this directory's _shared/ already held.
-import { createClient } from "@supabase/supabase-js"; // pinned by ../deno.json
+import "../../../compat/deno-on-bun.ts";
+import { createClient } from "../../../compat/supabase-sql/index.ts"; // pinned by ../deno.json
 import { authenticateRequest, canWrite } from "../_shared/auth.ts";
 import {
   isRecord,

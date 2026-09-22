@@ -128,40 +128,14 @@ jobs:
         working-directory: server
         run: deno check --node-modules-dir=none index.ts
 
-      # The two extensions still on supabase-js resolve under Deno (the other
-      # five import the SQL shim, which imports `bun`, and run under Bun — the
-      # Portable-server job starts each; change 74), so they are checked as
-      # deployed — with ../_shared/auth.ts, the copy of server-portable/auth.ts.
-      - name: deno check extensions/family-calendar and job-hunt
-        working-directory: extensions/family-calendar
-        run: deno check --node-modules-dir=none index.ts ../job-hunt/index.ts
-
-      # The four recipes and integrations that still resolve under Deno after
-      # change 67 made them consumers of ../_shared/auth.ts (SMD-1455): each from
-      # its own directory, where its deno.json import map is.
-      - name: deno check recipes/ob-graph
-        working-directory: recipes/ob-graph
-        run: deno check --node-modules-dir=none index.ts
-
-      - name: deno check integrations/agent-memory-api
-        working-directory: integrations/agent-memory-api
-        run: deno check --node-modules-dir=none index.ts
-
-      - name: deno check integrations/consolidation-workers/metadata-norm
-        working-directory: integrations/consolidation-workers
-        run: deno check --node-modules-dir=none metadata-norm/index.ts
-
+      # Every vendored MCP server, API and worker imports the SQL shim (which
+      # imports `bun`) since SMD-1798 and runs under Bun — the Portable-server
+      # job starts each, the data-layer job drives their tools — so none
+      # resolves under Deno any more; the six steps that checked the last of
+      # them went with the move. kubernetes-deployment is the one vendored
+      # file still written for Deno alone (its own database, SMD-1524).
       - name: deno check integrations/kubernetes-deployment
         working-directory: integrations/kubernetes-deployment
-        run: deno check --node-modules-dir=none index.ts
-
-      # enhanced-mcp keeps its own key compare, so change 67's rationale never
-      # listed it; change 78 (SMD-1497) wrapped its thirteen tool registrations
-      # in a per-request buildServer() — a 1,517-line span — and this holds
-      # that wrap, and any later edit inside it, to Deno's typecheck. Its
-      # deno.json resolves supabase-js.
-      - name: deno check integrations/enhanced-mcp
-        working-directory: integrations/enhanced-mcp
         run: deno check --node-modules-dir=none index.ts
 
   portable-server:

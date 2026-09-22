@@ -1,3 +1,9 @@
+// MIGRATED OFF SUPABASE: imports compat/supabase-sql instead of @supabase/supabase-js.
+// Same API, but it speaks SQL directly. The environment variable NAMES are
+// unchanged — set SUPABASE_URL to a postgres:// connection string, and
+// SUPABASE_SERVICE_ROLE_KEY is ignored (credentials live in the URL).
+// ob1-original-import: @supabase/supabase-js
+// Revert with: bun scripts/migrate-to-sql-shim.ts --revert <file>
 // ob1-fork (SMD-1228): a thought's content and vector are written through the
 // functions that own them — update_thought for an edit, the 3-argument
 // upsert_thought for a capture — so the fingerprint (003/018), the model label
@@ -12,7 +18,7 @@
 // — one built at module scope and connect()ed to a fresh transport each request
 // answered the first of two overlapping requests on the second's transport.
 // FORK.md change 78; extensions/test-auth.ts fires three overlapping requests.
-import "jsr:@supabase/functions-js/edge-runtime.d.ts";
+import "../../compat/deno-on-bun.ts"; // ob1-original-types: jsr:@supabase/functions-js/edge-runtime.d.ts
 
 // Deno reads the SDK's types through the extensionless subpath: its exports map
 // names them `./dist/esm/*.d.ts`, unreachable from `.js` (FORK.md change 84).
@@ -21,7 +27,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPTransport } from "@hono/mcp";
 import { Hono } from "hono";
 import { z } from "zod";
-import { createClient } from "@supabase/supabase-js";
+import { createClient } from "../../compat/supabase-sql/index.ts";
 
 import {
   embedText,
@@ -64,9 +70,10 @@ const ACTOR_NAME = "MCP_ACCESS_KEY";
 // kept it in actor_context until then). No source: the row's `source` is its
 // own metadata.source, read by the trigger, so the column says where the
 // thought came from and origin which door wrote it. Without
-// the name the row named nobody. When SMD-1798 moves this file onto
-// MCP_ACCESS_KEYS, `name` becomes the principal's — extensions/test-writes.ts
-// runs under the legacy key alone and would not notice a stale constant.
+// the name the row named nobody. Were this file moved onto MCP_ACCESS_KEYS
+// (SMD-1798 moved it onto the SQL shim and left the key compare), `name` would
+// become the principal's — extensions/test-writes.ts runs under the legacy key
+// alone and would not notice a stale constant.
 const ACTOR = { name: ACTOR_NAME, via: "enhanced-mcp" };
 
 // ── Types ─────────────────────────────────────────────────────────────────

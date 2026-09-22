@@ -169,10 +169,11 @@ Each of these throws with an explanation instead of guessing:
 - **An embed the catalog cannot join** — a relation with no foreign key to the
   table it sits in, or with two and no hint (name the column, `alias:fk_column
   (…)`, or the key, `relation!fk_name (…)`), a hint that names no key, a table
-  embedded in itself by name, an embed in a `RETURNING` list. Nested embeds
-  (`applications!inner(*, job_postings!inner(*, companies!inner(*)))`) and the
-  hints `!inner`, `!fk_name`, `!fk_column` and `!left` are served since
-  SMD-1798 (the table below).
+  embedded in itself by name. Nested embeds (`applications!inner(*,
+  job_postings!inner(*, companies!inner(*)))`), the hints `!inner`, `!fk_name`,
+  `!fk_column` and `!left`, and an embed on the row a write returns
+  (`.insert(row).select("*, companies (id, name)")`) are served since SMD-1798
+  (the table above).
 - **A filter on an embedded column** — `.neq("thoughts.sensitivity_tier", …)`
   beside `thoughts!inner(…)`: the dotted name is refused as an identifier. Read
   the embedded rows and filter them, or ask in two queries (enhanced-mcp's

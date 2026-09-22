@@ -9,7 +9,6 @@
     "dry-run": "node import-x-twitter.mjs --dry-run"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.49.0",
     "dotenv": "^16.4.0"
   }
 }

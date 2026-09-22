@@ -52,22 +52,18 @@ cp integrations/consolidation-workers/deno.json supabase/functions/consolidation
 cp integrations/consolidation-workers/_shared/*.ts supabase/functions/_shared/
 ```
 
-Files are copied one by one, not folders, so running the block again — or into a `_shared/` folder you already have from the enhanced MCP server or any other server on this fork — replaces files rather than nesting a copy. The `deno.json` pins `@supabase/supabase-js`, which `consolidation-metadata` imports by its bare name (Supabase reads one per function directory); `consolidation-bio` imports the SQL shim instead and runs under Bun (the callout below), so the copy is for `consolidation-metadata`. Both workers import the access-key module from `../_shared/auth.ts`.
+Files are copied one by one, not folders, so running the block again — or into a `_shared/` folder you already have from the enhanced MCP server or any other server on this fork — replaces files rather than nesting a copy. Both workers import the access-key module from `../_shared/auth.ts`. The copy is for a Supabase deployment of the files after `bun scripts/migrate-to-sql-shim.ts --revert`, which puts them back on supabase-js; on this fork both run under Bun, below, and the copy is not needed.
 
-### 2. Deploy the Edge Functions
+### 2. Run the Workers
 
-> **Runs under Bun, not as an Edge Function.** This worker (`consolidation-bio`) imports the repository's SQL shim (`compat/supabase-sql`, which imports `bun`) and `compat/deno-on-bun.ts`, the two Deno globals it uses on Bun (FORK.md change 74), so `supabase functions deploy` cannot bundle it; from a checkout of this repository it serves on `PORT` (8000 unset — podman's `gvproxy` holds that port on macOS, so set one):
+> **Runs under Bun, not as an Edge Function.** Both workers import the repository's SQL shim (`compat/supabase-sql`, which imports `bun`) and `compat/deno-on-bun.ts`, the two Deno globals they use on Bun (FORK.md change 74 moved `consolidation-bio`; SMD-1798 moved `consolidation-metadata`, whose two-group `.or()` over the candidates the shim did not read until then), so `supabase functions deploy` cannot bundle them; from a checkout of this repository each serves on `PORT` (8000 unset — podman's `gvproxy` holds that port on macOS, so set one):
 >
 > ```bash
 > PORT=8787 SUPABASE_URL='postgres://user:password@host:5432/openbrain' MCP_ACCESS_KEYS='cron:write:<sha256-of-your-key>' OPENROUTER_API_KEY='…' bun integrations/consolidation-workers/bio/index.ts
+> PORT=8788 SUPABASE_URL='postgres://user:password@host:5432/openbrain' MCP_ACCESS_KEYS='cron:write:<sha256-of-your-key>' OPENROUTER_API_KEY='…' bun integrations/consolidation-workers/metadata-norm/index.ts
 > ```
 >
-> `SUPABASE_URL` carries the Postgres connection string (the shim's convention; `SUPABASE_SERVICE_ROLE_KEY` may be left unset), and the other variables are the secrets the steps below set, passed as environment — see [Run a migrated server under Bun](../../compat/supabase-sql/README.md#3-run-a-migrated-server-under-bun). `extensions/test-auth.ts` starts it this way in CI, and `extensions/test-writes.ts` drives both of its write paths against Postgres; `consolidation-metadata` deploys as below. The `supabase functions deploy consolidation-bio` below applies to the file after `bun scripts/migrate-to-sql-shim.ts --revert integrations/consolidation-workers/bio/index.ts`, which puts it back on supabase-js.
-
-```bash
-supabase functions deploy consolidation-bio --no-verify-jwt
-supabase functions deploy consolidation-metadata --no-verify-jwt
-```
+> `SUPABASE_URL` carries the Postgres connection string (the shim's convention; `SUPABASE_SERVICE_ROLE_KEY` may be left unset), and the other variables are the secrets the steps below set, passed as environment — see [Run a migrated server under Bun](../../compat/supabase-sql/README.md#3-run-a-migrated-server-under-bun). `extensions/test-auth.ts` starts both this way in CI, and `extensions/test-writes.ts` drives the bio worker's two write paths and the metadata worker's review against Postgres.
 
 ### 3. Set Environment Variables
 

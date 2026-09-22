@@ -57,8 +57,9 @@
  * `!left` is the default. Refused, with a message saying which: a relation
  * with no foreign key to its table or with more than one and no hint (name the
  * column or the key), a hint that names no key, a table embedded in itself by
- * name, an embed in a RETURNING list, a filter on an embedded column
- * (`.neq("thoughts.tier", …)`, refused as an identifier). Whether a relation
+ * name, a filter on an embedded column (`.neq("thoughts.tier", …)`, refused
+ * as an identifier). An embed in a write's RETURNING list is served as in a
+ * select — the table's name there is the row just written. Whether a relation
  * has one foreign key or two is the catalog's to say, at the first call.
  * Silently mishandling a join is the failure class this migration has been
  * removing, so nothing here guesses.
@@ -1070,23 +1071,30 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
     return info?.category === "A" ? `to_json(${ident(name, "column")}) AS ${ident(name, "column")}` : ident(name, "column");
   }
 
-  private async projection(cols: Columns, returning: boolean): Promise<string> {
+  /**
+   * The select list, or a write's RETURNING list — the same rendering: in a
+   * RETURNING list the table's name is the row just written, so an embed's
+   * correlated subquery joins to it as it joins to a selected row
+   * (`.insert(contact).select("*, companies (id, name)")`, job-hunt's;
+   * refused until SMD-1798).
+   */
+  private async projection(cols: Columns): Promise<string> {
     const parts: string[] = [];
     const hasArray = [...cols.values()].some((c) => c.category === "A");
     this.spelledOut = false;
+    const base = { table: this.table.trim(), alias: ident(this.table.trim(), "table") };
     for (const item of this.items) {
       if (item.kind === "star") {
         if (!hasArray) { parts.push("*"); continue; }
         for (const [name, info] of cols) parts.push(this.columnSql(name, info));
-        parts.push(`(SELECT c.relnatts FROM pg_class c WHERE c.oid = to_regclass('${ident(this.table.trim(), "table")}'))::int AS __natts`);
+        parts.push(`(SELECT c.relnatts FROM pg_class c WHERE c.oid = to_regclass('${base.alias}'))::int AS __natts`);
         this.spelledOut = true;
       }
       else if (item.kind === "column") parts.push(this.columnSql(item.name, cols.get(item.name)));
       // A table the catalog cannot see has no keys to embed through: the embed is left out so the query itself
       // reports the missing table (42P01, as `{ error }`) rather than a refusal naming a foreign key.
       else if (cols.size === 0) continue;
-      else if (returning) throw refusal(`select("…${item.key}(…)") embeds a relation in a RETURNING list, which is not supported — read the row back with a second select.`);
-      else parts.push(await this.embedSql(item, { table: this.table.trim(), alias: ident(this.table.trim(), "table") }, 1));
+      else parts.push(await this.embedSql(item, base, 1));
     }
     return parts.join(", ") || "*";
   }
@@ -1113,7 +1121,7 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
       // head: no rows, whether or not a count was asked for — supabase-js answers `data: null` to both; PostgREST runs
       // the query for its headers alone. One count query serves both forms; the count is answered only when asked.
       if (this.headOnly) return { text: `SELECT count(*)::int AS __count FROM ${t}${where.text}`, values: where.values, cols };
-      let projection = await this.projection(cols, false);
+      let projection = await this.projection(cols);
       if (this.wantCount) projection += ", count(*) OVER () AS __count";
       let text = `SELECT ${projection} FROM ${t}${where.text}`;
       if (this.orderBy.length) text += ` ORDER BY ${this.orderBy.join(", ")}`;
@@ -1122,7 +1130,7 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
       return { text, values: where.values, cols, countText: this.wantCount ? `SELECT count(*)::int AS __count FROM ${t}${where.text}` : undefined };
     }
 
-    const returning = await this.projection(cols, true);
+    const returning = await this.projection(cols);
     // A value bound by its column's type: an array column takes an array literal with a cast (change 77).
     const bind = (c: string, v: unknown, values: unknown[]): string => {
       const b = bound(cols.get(c), v);

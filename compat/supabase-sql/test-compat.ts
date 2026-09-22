@@ -616,7 +616,13 @@ try {
   // A table the catalog cannot see: the query reports it, not a refusal about foreign keys.
   const ghost = await db.from("no_such_table").select("*, widgets(name)");
   assert(ghost.error !== null && ghost.error.code === "42P01", `an embed on a missing table is the missing table's error, as without the embed (${ghost.error?.code})`);
-  assert(/RETURNING list/.test(await refusedMsg(() => db.from("gizmos").insert({ label: "x" }).select("*, widgets(name)"))), "an embed in a RETURNING list is refused");
+  // An embed on the row a write returns is served since SMD-1798 (job-hunt's add_job_contact): the table's name in
+  // RETURNING is the row just written, and the correlated subquery joins to it.
+  const returned = rowsOf(await db.from("gizmos").insert({ label: "returned", widget_id: alpha }).select("label, widgets(name)"), "embed in RETURNING");
+  assert(JSON.stringify(returned[0]) === JSON.stringify({ label: "returned", widgets: { name: "alpha" } }), `an embed in a write's RETURNING list is the embedded row of the row written (${JSON.stringify(returned[0])})`);
+  const updatedEmbed = rowsOf(await db.from("gizmos").update({ label: "returned again" }).eq("label", "returned").select("label, widgets(name)"), "embed in UPDATE RETURNING");
+  assert(updatedEmbed[0]?.label === "returned again" && (updatedEmbed[0]?.widgets as { name: string })?.name === "alpha", "…on an update too");
+  await db.from("gizmos").delete().eq("label", "returned again");
   assert(/Identifiers must match/.test(await refusedMsg(() => db.from("gizmos").select("widgets(name, meta->>k)"))), "a JSON path inside an embed is refused");
   assert(/with no columns/.test(await refusedMsg(() => db.from("gizmos").select("count()"))), "an aggregate — a name with empty parentheses — is refused");
   assert(/not a column or an embed/.test(await refusedMsg(() => db.from("gizmos").select("widgets(name)x"))), "text around an embed is refused");
