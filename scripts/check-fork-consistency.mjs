@@ -131,13 +131,15 @@
  *      declared family; the connectors are exactly the vendors used, each
  *      with the direction its capabilities derive; and coverage — every
  *      contribution whose metadata.json names a service no not-a-connector
- *      pattern matches within its first two words (a provider first and
- *      qualified after is covered; a vendor first with a provider in its
- *      parenthetical is not), carries a connector-shaped tag or a declared
- *      connector's name as a tag, or sits in a fold-in **SMD-1867** row of
- *      docs/vendored-disposition.md is classified or excused
- *      by name with a reason, never both or neither, a classified artifact
- *      nothing marks is refused, a stale excuse or pattern is refused; and
+ *      pattern matches at the start of its first or second word (a provider
+ *      first and qualified after is covered; a vendor first with a provider
+ *      after a bracket or a slash is not), carries a connector-shaped tag or
+ *      a declared connector's name as a tag (lower-cased), or sits in a
+ *      fold-in **SMD-1867** row of docs/vendored-disposition.md whose
+ *      directory exists (a row whose directory is gone is a finding) is
+ *      classified or excused by name with a reason, never both or neither,
+ *      a classified artifact nothing marks is refused, a stale excuse or
+ *      pattern is refused; and
  *      docs/connector-taxonomy.md's generated tables equal what the registry
  *      renders. The rules are registryProblems, one pure function the
  *      renderer runs too (SMD-1933); no exceptions beyond the registry's own
@@ -156,7 +158,7 @@ import { coreColumnCommentStatement, coreFunctionStatement, LOCAL_PROVIDER_SERVI
 import { CHANGES_DIR, END as INDEX_END, START as INDEX_START, FIRST_FILED, classifyChanges, indexSpan, pad3, readChangeEntries, renderIndex, ticketsOf } from "./fork-index.mjs";
 import { FORK_VERSION, migrationSha, readReleases, semverCompare } from "../db/version.mjs";
 import { fragmentProblems } from "./fragments.mjs";
-import { DISPOSITION_PATH, FACET_SETS, FETCHERS, REGISTRY_PATH, SPEC_PATH, dispositionPaths, readRegistry, registryProblems, renderClassification, tablesSpan } from "./connector-registry.mjs";
+import { DISPOSITION_PATH, FACET_SETS, FETCHERS, REGISTRY_PATH, SPEC_PATH, dispositionPaths, readMetadata, readRegistry, registryProblems, renderClassification, tablesSpan } from "./connector-registry.mjs";
 import { CATEGORIES, contributionDirs } from "./contributions.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -2046,12 +2048,8 @@ function checkPublishedPorts() {
 // ── Run ──────────────────────────────────────────────────────────────────────
 
 const dirs = contributionDirs(ROOT);
-/** The metadata check 1 parsed, by rel — check 18's coverage sweep reads it here rather than parsing again; an unparseable file is `{}`, its finding check 1's. */
-const metadataByRel = new Map();
 for (const d of dirs) {
   const meta = checkMetadata(d);
-  if (meta && typeof meta === "object") metadataByRel.set(d.rel, meta);
-  else if (existsSync(join(d.dir, "metadata.json"))) metadataByRel.set(d.rel, {});
   checkLinks(d);
   checkDeps(meta, d);
 }
@@ -3462,10 +3460,14 @@ const REGISTRY_PROBES = [
   ["an artifacts block that is an object, not a list", (r) => { r.artifacts = { a: r.artifacts[0] }; }, ["shape", "coverage-unregistered", "connector-set"]],
   ["an artifact marked only by a tag naming its connector", (r) => {}, ["coverage-unregistered"], (t) => { t.metadataByPath.set("recipes/acme-notes", { requires: { services: ["OpenRouter"] }, tags: ["acme", "notes"] }); t.existingDirs.push("recipes/acme-notes"); }],
   ["a vendor named first in a service string a provider pattern also matches", (r) => {}, ["coverage-unregistered"], (t) => { t.metadataByPath.set("recipes/notion-sync", { requires: { services: ["Notion API (summaries via OpenRouter)"] }, tags: ["notes"] }); t.existingDirs.push("recipes/notion-sync"); }],
+  ["a vendor first with the provider as the second token, bracketed or slashed", (r) => {}, ["coverage-unregistered"], (t) => { t.metadataByPath.set("recipes/notion-sync", { requires: { services: ["Notion (OpenRouter)"] }, tags: ["notes"] }); t.metadataByPath.set("recipes/mail-sync", { requires: { services: ["Gmail/OpenRouter"] }, tags: ["notes"] }); t.existingDirs.push("recipes/notion-sync", "recipes/mail-sync"); }],
+  ["a connector's name as a tag in another case", (r) => {}, ["coverage-unregistered"], (t) => { t.metadataByPath.set("recipes/acme-notes", { requires: { services: ["OpenRouter"] }, tags: ["Acme", "Notes"] }); t.existingDirs.push("recipes/acme-notes"); }],
+  ["a family declared as null and used", (r) => { r.families["web-clip"] = null; r.artifacts[0].capabilities[0].family = "web-clip"; }, ["family-schema"]],
+  ["a fold-in row naming a contribution that is gone", (r) => {}, ["disposition-stale"], (t) => { t.dispositionText += "| `gone-capture` | keep + audited → fold-in **SMD-1867** | removed since |\n"; }],
 ];
-/** [text, want]: what dispositionPaths reads from a table — the fold-in marker under a category heading, and nothing past another heading or from a bare mention. */
+/** [text, want]: what dispositionPaths reads from a table — the fold-in marker under a category heading, and nothing past another heading, from a bare mention or from a negation. */
 const DISPOSITION_PROBES = [
-  ["### `integrations/` (2)\n\n| Artifact | Disposition | Justification |\n|---|---|---|\n| `a-capture` | keep + audited → fold-in **SMD-1867** | x |\n| `b-tool` | keep + audited | mentioned beside SMD-1867 and SMD-1924; a tool, not a fold-in |\n\n### `recipes/` (1)\n\n| `c-import` | keep + audited | SMD-1867 candidate. |\n\n## Notes\n\n| `d-tool` | remove | fold-in **SMD-1867** was considered |\n", ["integrations/a-capture", "recipes/c-import"]],
+  ["### `integrations/` (2)\n\n| Artifact | Disposition | Justification |\n|---|---|---|\n| `a-capture` | keep + audited → fold-in **SMD-1867** | x |\n| `b-tool` | keep + audited | mentioned beside SMD-1867 and SMD-1924; a tool, not a fold-in |\n| `e-graph` | keep + audited | a graph view; not an SMD-1867 adapter |\n\n### `recipes/` (1)\n\n| `c-import` | keep + audited | SMD-1867 candidate. |\n| `f-import` | keep + audited | a candidate SMD-1867 adapter alongside the capture integrations. |\n| `g-ext` | keep + audited | A capture adapter under the SMD-1867 contract, not an ad-hoc integration. |\n\n## Notes\n\n| `d-tool` | remove | fold-in **SMD-1867** was considered |\n", ["integrations/a-capture", "recipes/c-import", "recipes/f-import", "recipes/g-ext"]],
   ["## Summary\n\n| `x-tool` | fold-in **SMD-1867** |\n", []],
 ];
 function checkConnectorRegistry() {
@@ -3484,6 +3486,10 @@ function checkConnectorRegistry() {
   // A provider qualified after itself is covered: the pattern matches within the first two words.
   const head = PROBE_TREE(); head.existingDirs.push("recipes/uses-a-gateway"); head.metadataByPath.set("recipes/uses-a-gateway", { requires: { services: ["Any OpenRouter-compatible LLM gateway (Ollama, etc.)", "Optional: OpenRouter (Sonar) for live search"] }, tags: ["synthesis"] });
   if (registryProblems({ registry: PROBE_REGISTRY(), ...head }).length) fail(SELF, "check 18 marks a service string that names a provider first and qualifies it after (its own non-probe)");
+  // A pattern that matches only past the head is live (the stale rule), though it covers nothing (the coverage rule).
+  const tail = PROBE_REGISTRY(); tail.not_connectors.services.push({ pattern: "sonar", reason: "a model" });
+  const tailTree = PROBE_TREE(); tailTree.existingDirs.push("recipes/uses-a-gateway"); tailTree.metadataByPath.set("recipes/uses-a-gateway", { requires: { services: ["Optional: OpenRouter (Sonar) for live search"] }, tags: ["synthesis"] });
+  if (registryProblems({ registry: tail, ...tailTree }).length) fail(SELF, "check 18 calls a pattern stale whose only match lies past a service's first two words (its own non-probe)");
   // An excuse for a directory that exists without a metadata.json is check 1's finding, not a stale excuse.
   const nometa = PROBE_TREE(); nometa.existingDirs.push("recipes/no-meta"); const nometaReg = PROBE_REGISTRY(); nometaReg.not_connectors.artifacts["recipes/no-meta"] = "waiting on its metadata";
   if (registryProblems({ registry: nometaReg, ...nometa }).length) fail(SELF, "check 18 calls an excuse stale for a directory that exists without a metadata.json (its own non-probe)");
@@ -3510,7 +3516,8 @@ function checkConnectorRegistry() {
   try { registry = readRegistry(ROOT); } catch (e) { return fail(REGISTRY_PATH, `does not parse: ${e.message} (SMD-1933)`); }
   const dispositionText = existsSync(join(ROOT, DISPOSITION_PATH)) ? readFileSync(join(ROOT, DISPOSITION_PATH), "utf8") : "";
   let problems;
-  try { problems = registryProblems({ registry, existingDirs: dirs.map((d) => d.rel), metadataByPath: metadataByRel, dispositionText }); } catch (e) { return fail(REGISTRY_PATH, `check 18 threw instead of reporting: ${e.message} (SMD-1933)`); }
+  // readMetadata is the one statement of "absent is not in the map, unparseable is {}" — the CLI reads the same; check 1 names the unparseable file.
+  try { problems = registryProblems({ registry, existingDirs: dirs.map((d) => d.rel), metadataByPath: readMetadata(dirs), dispositionText }); } catch (e) { return fail(REGISTRY_PATH, `check 18 threw instead of reporting: ${e.message} (SMD-1933)`); }
   for (const p of problems) fail(p.where, `${p.msg} (SMD-1933)`);
   if (!existsSync(join(ROOT, SPEC_PATH))) return fail(SPEC_PATH, "missing — the spec that carries the registry's rendered tables (SMD-1933)");
   const span = tablesSpan(readFileSync(join(ROOT, SPEC_PATH), "utf8"));

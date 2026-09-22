@@ -277,16 +277,17 @@ must-pass probes on every run:
   direction its capabilities derive;
 - **coverage**: every contribution whose `metadata.json` names a service that is
   not a model provider, the hosting or the brain's own surface (a pattern covers
-  a service string only when it matches within the first two words, so
+  a service string only when its match begins the first or the second word, so
   "OpenRouter or Anthropic" is a provider and "Notion API (summaries via
-  OpenRouter)" is a vendor — one external system per entry, its name first), or carries a
-  connector-shaped tag (`import`, `capture`, `digest`, `webhook`, `export`,
-  `sync`, `messaging`, `email`, `bot`) or a tag naming a declared connector
-  (`telegram`, `gmail`, …), or sits in an SMD-1867 row of
-  `docs/vendored-disposition.md`, is classified or excused by name — never both,
-  never neither; a classified artifact nothing marks is refused (declare the
-  vendor in its metadata); a stale excuse and a service pattern matching nothing
-  are refused;
+  OpenRouter)", "Notion (OpenRouter)" and "Gmail/OpenAI" are vendors — one
+  external system per entry, its name first), or carries a connector-shaped tag
+  (`import`, `capture`, `digest`, `webhook`, `export`, `sync`, `messaging`,
+  `email`, `bot`) or a tag naming a declared connector (`telegram`, `gmail`, …;
+  tags compare lower-cased), or sits in a fold-in SMD-1867 row of
+  `docs/vendored-disposition.md` (a fold-in row whose directory is gone is a
+  finding), is classified or excused by name — never both, never neither; a
+  classified artifact nothing marks is refused (tag it with the vendor); a
+  stale excuse and a service pattern matching nothing are refused;
 - the tables below equal what the registry renders.
 
 `bun scripts/connector-registry.mjs --check` runs the same rules by hand.

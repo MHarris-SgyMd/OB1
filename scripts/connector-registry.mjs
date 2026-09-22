@@ -56,8 +56,13 @@ export const FAMILY_TEXT_FIELDS = ["item", "grouping_key", "canonical", "text", 
 export const FAMILY_LIST_FIELDS = ["edges", "metadata", "typical_transport"];
 /** A metadata.json tag that says "this touches an external system" until the registry or an excuse says otherwise. */
 export const TRIGGER_TAGS = ["import", "capture", "digest", "webhook", "export", "sync", "messaging", "email", "bot"];
-/** A disposition row folds into SMD-1867 when it says so — a bare mention of the ticket ("not an SMD-1867 adapter") is not a fold-in. */
-export const FOLD_IN_RE = /fold-in \*\*SMD-1867\*\*|SMD-1867 (?:candidate|adapter)|candidate SMD-1867|under (?:the )?SMD-1867/;
+/**
+ * A disposition row folds into SMD-1867 when it says so in the table's own
+ * words — "fold-in **SMD-1867**", "SMD-1867 candidate", "candidate SMD-1867
+ * adapter", "adapter under (the) SMD-1867"; a bare mention of the ticket, and
+ * "not an SMD-1867 adapter", are not fold-ins.
+ */
+export const FOLD_IN_RE = /fold-in \*\*SMD-1867\*\*|SMD-1867 candidate|candidate SMD-1867 adapter|adapter under (?:the )?SMD-1867/;
 const VENDOR = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const PATH = new RegExp(`^(?:${CATEGORIES.join("|")})/[a-z0-9]+(?:-[a-z0-9]+)*$`);
 
@@ -107,18 +112,19 @@ export function contributionsOnDisk(root) {
 }
 
 /**
- * Does a not-a-connector pattern explain this service string? Only when it
- * matches within the string's first two words: "OpenRouter or Anthropic",
- * "Any OpenAI-compatible LLM gateway (…)", "Optional: OpenRouter (…)" are a
- * provider first and qualified after; "Notion API (summaries via OpenRouter)"
- * names a vendor first and a provider inside the parenthetical, and is not
- * covered — one external system per `requires.services` entry, the system's
- * name first. Returns the patterns that cover it (empty when none does).
+ * Does a not-a-connector pattern explain this service string? Only when its
+ * match BEGINS the first or the second word: "OpenRouter or Anthropic", "Any
+ * OpenAI-compatible LLM gateway (…)", "Optional: OpenRouter (…)" are a provider
+ * first and qualified after; "Notion API (summaries via OpenRouter)", "Notion
+ * (OpenRouter)" and "Gmail/OpenAI" name a vendor first and a provider after a
+ * bracket or a slash, and are not covered — one external system per
+ * `requires.services` entry, the system's name first. Returns the patterns
+ * that cover it (empty when none does).
  */
 export function coveringPatterns(service, patterns) {
-  const m = /^\s*\S+(?:\s+\S+)?/.exec(service);
-  const headEnd = m ? m[0].length : service.length;
-  return patterns.filter((p) => { const hit = p.re.exec(service); return hit !== null && hit.index < headEnd; });
+  const starts = [];
+  for (const w of service.matchAll(/\S+/g)) { starts.push(w.index); if (starts.length === 2) break; }
+  return patterns.filter((p) => { const hit = p.re.exec(service); return hit !== null && starts.includes(hit.index); });
 }
 
 const listOf = (v) => (Array.isArray(v) ? v : []);
@@ -145,30 +151,34 @@ function servicePatterns(registry, problems) {
  * metadata names that no not_connectors pattern covers, the trigger tags it
  * carries, a tag naming a declared connector (the vendor's own name — so a
  * recipe tagged `telegram` whose only service is a model provider is still
- * marked), and the SMD-1867 rows of the disposition table. Empty for a path
- * nothing marks. `patterns` is servicePatterns()'s output; every pattern a
- * service matches is counted on it, so a pattern a broader one shadows is still
- * live and a pattern nothing matches can be reported stale. A metadata whose
- * `services` or `tags` is not a list (check 1's finding) marks nothing here
- * rather than throwing.
+ * marked), and the fold-in SMD-1867 rows of the disposition table whose
+ * directory exists (`existingDirs`; a row whose directory is gone is
+ * registryProblems' finding, not a silent drop). Empty for a path nothing
+ * marks. `patterns` is servicePatterns()'s output; every pattern a service
+ * matches ANYWHERE is counted on it — liveness, which the stale rule reads, is
+ * not coverage, which coveringPatterns decides — so a pattern a broader one
+ * shadows is still live. Tags compare lower-cased, as the patterns match
+ * case-insensitively. A metadata whose `services` or `tags` is not a list
+ * (check 1's finding) marks nothing here rather than throwing.
  */
-export function triggersFor({ metadataByPath, dispositionPaths: disp, patterns, connectorKeys = new Set() }) {
+export function triggersFor({ metadataByPath, dispositionPaths: disp, patterns, connectorKeys = new Set(), existingDirs = [...metadataByPath.keys()] }) {
   const out = new Map();
   const add = (path, why) => out.set(path, [...(out.get(path) ?? []), why]);
   for (const [path, meta] of metadataByPath) {
     for (const s of listOf(meta?.requires?.services)) {
       if (typeof s !== "string") continue;
-      const hits = coveringPatterns(s, patterns);
-      if (hits.length) for (const p of hits) p.hits++;
-      else add(path, `requires.services names ${JSON.stringify(s)}${patterns.some((p) => p.re.test(s)) ? " (a not-a-connector pattern matches it only past its first two words — one system per entry, its name first)" : ""}`);
+      let anywhere = false;
+      for (const p of patterns) if (p.re.test(s)) { p.hits++; anywhere = true; }
+      if (coveringPatterns(s, patterns).length === 0) add(path, `requires.services names ${JSON.stringify(s)}${anywhere ? " (a not-a-connector pattern matches it, but not at its first or second word — one system per entry, its name first)" : ""}`);
     }
-    const tags = listOf(meta?.tags).filter((t) => typeof t === "string");
+    const tags = listOf(meta?.tags).filter((t) => typeof t === "string").map((t) => t.toLowerCase());
     const shaped = tags.filter((t) => TRIGGER_TAGS.includes(t));
     if (shaped.length) add(path, `tagged ${shaped.join(", ")}`);
     const vendors = tags.filter((t) => connectorKeys.has(t) && !shaped.includes(t));
     if (vendors.length) add(path, `tagged with the connector name${vendors.length > 1 ? "s" : ""} ${vendors.join(", ")}`);
   }
-  for (const path of disp) if (metadataByPath.has(path)) add(path, `an SMD-1867 row of ${DISPOSITION_PATH}`);
+  const dirs = new Set(existingDirs);
+  for (const path of disp) if (dirs.has(path)) add(path, `a fold-in SMD-1867 row of ${DISPOSITION_PATH}`);
   return out;
 }
 
@@ -252,7 +262,7 @@ export function registryProblems({ registry, existingDirs, metadataByPath, dispo
       if ("vendor" in (c ?? {}) && !VENDOR.test(String(c.vendor))) push(cw, "capability-value", `vendor ${JSON.stringify(c.vendor)} is not a kebab-case slug`);
       if ("family" in (c ?? {})) {
         if (!(c.family in families)) push(cw, "capability-family", `family ${JSON.stringify(c.family)} is not declared under families — a new family is declared with its schema first`);
-        else if (families[c.family].reserved) push(cw, "reserved-used", `family ${JSON.stringify(c.family)} is reserved — dropping \`reserved\` is a spec change`);
+        else if (families[c.family]?.reserved) push(cw, "reserved-used", `family ${JSON.stringify(c.family)} is reserved — dropping \`reserved\` is a spec change`);
       }
       const t = [c?.vendor, c?.family, c?.transport, c?.direction].join("|");
       if (tuples.has(t)) push(cw, "capability-duplicate", `repeats vendor/family/transport/direction ${t}`);
@@ -275,7 +285,9 @@ export function registryProblems({ registry, existingDirs, metadataByPath, dispo
   // ── coverage ──
   const patterns = servicePatterns(registry, problems);
   const connectorKeys = new Set([...Object.keys(declared), ...derived.keys()]);
-  const triggers = triggersFor({ metadataByPath, dispositionPaths: dispositionPaths(dispositionText), patterns, connectorKeys });
+  const foldIns = dispositionPaths(dispositionText);
+  for (const path of foldIns) if (!dirs.has(path)) push(`${DISPOSITION_PATH} (${path})`, "disposition-stale", "a fold-in SMD-1867 row names a contribution that no longer exists — the row marks nothing; note the removal in the table");
+  const triggers = triggersFor({ metadataByPath, dispositionPaths: foldIns, patterns, connectorKeys, existingDirs: [...dirs] });
   const excused = registry.not_connectors?.artifacts && typeof registry.not_connectors.artifacts === "object" ? registry.not_connectors.artifacts : {};
   for (const [path, why] of triggers) {
     const isReg = seen.has(path);
@@ -370,17 +382,18 @@ function main() {
   const root = join(dirname(fileURLToPath(import.meta.url)), "..");
   const check = process.argv.includes("--check");
   const report = (problems) => { for (const p of problems) console.error(`  ${p.where}\n    ${p.msg}`); };
-  let registry;
-  try { registry = readRegistry(root); } catch (e) { console.error(`  ${REGISTRY_PATH}\n    does not parse: ${e.message}`); process.exit(1); }
+  // Every step reports in words and exits 1 — a raw stack trace names no `where`.
+  const attempt = (where, fn) => { try { return fn(); } catch (e) { report([{ where, msg: e.message }]); process.exit(1); } };
+  const registry = attempt(REGISTRY_PATH, () => readRegistry(root));
   const { existingDirs, metadataByPath } = contributionsOnDisk(root);
-  const problems = registryProblems({
+  const problems = attempt(REGISTRY_PATH, () => registryProblems({
     registry,
     existingDirs,
     metadataByPath,
     dispositionText: existsSync(join(root, DISPOSITION_PATH)) ? readFileSync(join(root, DISPOSITION_PATH), "utf8") : "",
-  });
+  }));
   const specFile = join(root, SPEC_PATH);
-  const text = readFileSync(specFile, "utf8");
+  const text = attempt(SPEC_PATH, () => readFileSync(specFile, "utf8"));
   const span = tablesSpan(text);
   if (!span) problems.push({ where: SPEC_PATH, kind: "spec-markers", msg: "the generated-tables markers are missing or doubled" });
   // The renderer assumes a sound registry: with findings above, the tables are neither rendered nor compared.
@@ -389,7 +402,7 @@ function main() {
     console.error(check ? `FAIL — ${problems.length} problem(s)` : `refusing to render from a registry with ${problems.length} problem(s)`);
     process.exit(1);
   }
-  const rendered = renderClassification(registry);
+  const rendered = attempt(REGISTRY_PATH, () => renderClassification(registry));
   if (check) {
     if (span.block !== rendered) { report([{ where: SPEC_PATH, msg: "the tables differ from what the registry renders — run `bun scripts/connector-registry.mjs`" }]); console.error("FAIL — 1 problem(s)"); process.exit(1); }
     console.log("PASS — the connector registry is sound and the spec's tables are current.");
