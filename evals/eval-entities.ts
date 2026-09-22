@@ -166,6 +166,9 @@ async function scoreModel(model: string) {
     const t0 = Date.now();
     let ex: Extraction;
     try {
+      // Per call, as the worker's --timeout is (SMD-1879): a windowed capture
+      // has this per window, and again per retry. None of the fourteen is long
+      // enough to window.
       ex = await extractEntities(cs.text, c, 120_000, { kind: "extraction" });
     } catch (e) {
       // A thrown call is scored like a malformed answer — every labelled entity

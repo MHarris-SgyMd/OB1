@@ -315,7 +315,7 @@ export function parseExtraction(raw: string): Extraction {
   // nothing in it.
   if (!Array.isArray(parsed.entities)) return { ...empty, malformed: true };
   const out = EMPTY();
-  const seen = new Set<string>();
+  const seen = new Map<string, number>();
   {
     for (const e of parsed.entities) {
       if (!isRecord(e)) { out.rejected.entities++; continue; }
@@ -324,11 +324,18 @@ export function parseExtraction(raw: string): Extraction {
       const confidence = clampConfidence(e.confidence);
       if (!name || !(ENTITY_TYPES as readonly string[]).includes(type) || confidence < MIN_CONFIDENCE) { out.rejected.entities++; continue; }
       const key = entityKey(type as EntityType, name);
-      if (seen.has(key)) continue;
-      seen.add(key);
       const aliases = Array.isArray(e.aliases)
         ? [...new Set(e.aliases.map(cleanName).filter((a) => a && a.toLowerCase() !== name.toLowerCase()))]
         : [];
+      const at = seen.get(key);
+      if (at !== undefined) {
+        // The same rule the windows merge by (fourth review pass: one answer
+        // kept the first spelling and dropped the second's aliases, where two
+        // windows kept the best and united them).
+        out.entities[at] = mergeEntity(out.entities[at], { name, type: type as EntityType, confidence, aliases });
+        continue;
+      }
+      seen.set(key, out.entities.length);
       out.entities.push({ name, type: type as EntityType, confidence, aliases });
     }
   }
@@ -358,6 +365,21 @@ export function parseExtraction(raw: string): Extraction {
 /** parseExtraction's own identity for an entity within one answer, applied across windows by mergeExtractions. */
 function entityKey(type: EntityType, name: string): string {
   return `${type} ${name.toLowerCase()}`;
+}
+
+/**
+ * Two readings of one entity — within an answer or across windows — become
+ * one: the more confident spelling, the higher confidence, the aliases of both
+ * folded by case. The two spellings of the name share its key, so neither is
+ * an alias — the database's alias rule drops a name's own casing too (second
+ * review pass: `OB1` and `ob1` from two windows both survived; fourth: one
+ * answer kept its first reading and dropped the second's aliases).
+ */
+function mergeEntity(have: ExtractedEntity, e: ExtractedEntity): ExtractedEntity {
+  const best = e.confidence > have.confidence ? e : have;
+  const aliases = new Map<string, string>();
+  for (const a of [...have.aliases, ...e.aliases]) if (a.toLowerCase() !== best.name.toLowerCase() && !aliases.has(a.toLowerCase())) aliases.set(a.toLowerCase(), a);
+  return { name: best.name, type: have.type, confidence: Math.max(have.confidence, e.confidence), aliases: [...aliases.values()] };
 }
 
 /** …and for a relation: the verb and both endpoints, case-folded. */
@@ -391,14 +413,7 @@ export function mergeExtractions(parts: ExtractionWindow[]): Extraction {
       const k = entityKey(e.type, e.name);
       const have = entities.get(k);
       if (!have) { entities.set(k, { ...e, aliases: [...e.aliases] }); continue; }
-      const best = e.confidence > have.confidence ? e : have;
-      // The two windows' spellings of the name share its key, so neither is an
-      // alias — the database's alias rule drops a name's own casing too. The
-      // aliases themselves fold by case, as the database's do (second review
-      // pass: `OB1` and `ob1` from two windows both survived).
-      const aliases = new Map<string, string>();
-      for (const a of [...have.aliases, ...e.aliases]) if (a.toLowerCase() !== best.name.toLowerCase() && !aliases.has(a.toLowerCase())) aliases.set(a.toLowerCase(), a);
-      entities.set(k, { name: best.name, type: have.type, confidence: Math.max(have.confidence, e.confidence), aliases: [...aliases.values()] });
+      entities.set(k, mergeEntity(have, e));
     }
     for (const r of p.relations) {
       const k = relationKey(r.relation, r.from, r.to);

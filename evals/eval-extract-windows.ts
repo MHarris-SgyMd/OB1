@@ -27,8 +27,9 @@
  *   --arms whole,w1200,w1200h,w600,w600h,whole+p,w1200p,w600p    which arms (default: all)
  *   --limit N        first N documents        --timeout S    per call (default 300)
  *
- * Arms: `whole` is the request the worker made until SMD-1879 — one call, no
- * answer budget — under the given timeout; `whole+budget` the same call with
+ * Arms: `whole` is one call over the WHOLE text with no answer budget — p1's
+ * request without p1's 8,000-character cut, so a fair baseline for the windows
+ * and not a re-run of what p1 stored; `whole+budget` the same call with
  * `max_tokens`; `wNNN` windows of NNN estimated tokens with the budget;
  * `wNNNh` the same with the note's opening line led into every window after
  * the first; `…p` retries a call that ran to its budget once with a frequency
@@ -67,7 +68,7 @@ type Planted = Doc & {
 
 // ── Arms ─────────────────────────────────────────────────────────────────────
 
-type Arm = { name: string; windowing: ExtractWindowing | null };
+type Arm = { name: string; windowing: ExtractWindowing };
 // The worker's own overlap rule (embed.ts), not a copy of its numbers.
 const overlap = (n: number) => Math.floor(n * EXTRACT_OVERLAP_RATIO);
 const arm = (name: string, windowTokens: number, opts: Partial<ExtractWindowing> = {}): Arm => ({
@@ -152,7 +153,9 @@ await resetSchema(URL_, { dim: 8, model: "eval-stub" });
 const sql = new SQL({ url: URL_, max: 2 });
 const norm = async (s: string) => ((await sql`SELECT normalize_entity_name(${s}) AS n`)[0] as { n: string | null }).n ?? "";
 
-type Outcome = { arm: string; id: string; tokens: number; windows: number; ok: boolean; malformed: boolean; timedOut: boolean; error?: string; seconds: number; entities: number; edges: number; retried: boolean };
+/** `calls` is every model call the thought cost — windows plus retried windows, or what a thrown thought had made (fourth review pass: the column summed windows for one and calls for the other). */
+type Outcome = { arm: string; id: string; tokens: number; windows: number; calls: number; ok: boolean; malformed: boolean; timedOut: boolean; error?: string; seconds: number; entities: number; edges: number; retried: boolean };
+const callsOf = (ex: Extraction): number => ex.windows + (ex.parts ? ex.parts.filter((p) => p.retried).length : ex.retried ? 1 : 0);
 const outcomes: Outcome[] = [];
 
 async function runOne(arm: Arm, doc: Doc): Promise<{ thoughtId: string | null; ex: Extraction | null; out: Outcome }> {
@@ -161,17 +164,17 @@ async function runOne(arm: Arm, doc: Doc): Promise<{ thoughtId: string | null; e
   const [{ r }] = await sql`SELECT upsert_thought(${`${arm.name} :: ${doc.id}\n\n${doc.content}`}, ${{ metadata: { arm: arm.name, doc: doc.id } }}::jsonb) AS r`;
   const thoughtId = (r as { id: string }).id;
   try {
-    const ex = await extractEntities(doc.content, cfg, TIMEOUT_MS, { kind: "extraction" }, arm.windowing ?? undefined);
+    const ex = await extractEntities(doc.content, cfg, TIMEOUT_MS, { kind: "extraction" }, arm.windowing);
     const seconds = (Date.now() - t0) / 1000;
     const retried = ex.retried === true;
     if (ex.malformed) {
-      const out = { arm: arm.name, id: doc.id, tokens, windows: ex.windows, ok: false, malformed: true, timedOut: false, seconds, entities: 0, edges: 0, retried };
+      const out = { arm: arm.name, id: doc.id, tokens, windows: ex.windows, calls: callsOf(ex), ok: false, malformed: true, timedOut: false, seconds, entities: 0, edges: 0, retried };
       outcomes.push(out);
       return { thoughtId, ex, out };
     }
     const [{ w }] = await sql`SELECT record_thought_entities(${thoughtId}::uuid, ${key}, ${ex.entities}::jsonb, ${ex.relations}::jsonb) AS w`;
     const res = w as { mentions?: number; edges?: number };
-    const out = { arm: arm.name, id: doc.id, tokens, windows: ex.windows, ok: true, malformed: false, timedOut: false, seconds, entities: res.mentions ?? 0, edges: res.edges ?? 0, retried };
+    const out = { arm: arm.name, id: doc.id, tokens, windows: ex.windows, calls: callsOf(ex), ok: true, malformed: false, timedOut: false, seconds, entities: res.mentions ?? 0, edges: res.edges ?? 0, retried };
     outcomes.push(out);
     return { thoughtId, ex, out };
   } catch (e) {
@@ -179,7 +182,7 @@ async function runOne(arm: Arm, doc: Doc): Promise<{ thoughtId: string | null; e
     const timedOut = (e as Error).name === "TimeoutError" || /timed out/i.test((e as Error).message);
     // The calls a thrown thought made ride on the error, so the `calls`
     // column counts them (second review pass).
-    const out = { arm: arm.name, id: doc.id, tokens, windows: callsMadeBy(e), ok: false, malformed: false, timedOut, error: (e as Error).message.slice(0, 120), seconds, entities: 0, edges: 0, retried: false };
+    const out = { arm: arm.name, id: doc.id, tokens, windows: 0, calls: callsMadeBy(e), ok: false, malformed: false, timedOut, error: (e as Error).message.slice(0, 120), seconds, entities: 0, edges: 0, retried: false };
     outcomes.push(out);
     return { thoughtId, ex: null, out };
   }
@@ -252,15 +255,15 @@ for (const arm of ARMS) {
 }
 
 console.log(`\n  ${docs.length} documents per arm, ${cfg.metadataModel}, ${TIMEOUT_MS / 1000} s per call\n`);
-console.log("  arm            extracted  malformed  timed out  median s  total s  mean entities  mean edges  calls  retried");
-console.log("  " + "─".repeat(108));
+console.log("  arm            extracted  malformed  timed out  median s  total s  mean entities  mean edges  calls  retried thoughts");
+console.log("  " + "─".repeat(116));
 for (const arm of ARMS) {
   const os = outcomes.filter((o) => o.arm === arm.name);
   const ok = os.filter((o) => o.ok);
   const mean = (f: (o: Outcome) => number) => (ok.length ? ok.reduce((n, o) => n + f(o), 0) / ok.length : 0);
   console.log(
     `  ${arm.name.padEnd(14)} ${String(ok.length).padStart(9)}  ${String(os.filter((o) => o.malformed).length).padStart(9)}  ${String(os.filter((o) => o.timedOut).length).padStart(9)}  ` +
-      `${median(os.map((o) => o.seconds)).toFixed(1).padStart(8)}  ${os.reduce((n, o) => n + o.seconds, 0).toFixed(0).padStart(7)}  ${mean((o) => o.entities).toFixed(1).padStart(13)}  ${mean((o) => o.edges).toFixed(1).padStart(10)}  ${String(os.reduce((n, o) => n + o.windows, 0)).padStart(5)}  ${String(os.filter((o) => o.retried).length).padStart(7)}`
+      `${median(os.map((o) => o.seconds)).toFixed(1).padStart(8)}  ${os.reduce((n, o) => n + o.seconds, 0).toFixed(0).padStart(7)}  ${mean((o) => o.entities).toFixed(1).padStart(13)}  ${mean((o) => o.edges).toFixed(1).padStart(10)}  ${String(os.reduce((n, o) => n + o.calls, 0)).padStart(5)}  ${String(os.filter((o) => o.retried).length).padStart(16)}`
   );
 }
 await sql.close();

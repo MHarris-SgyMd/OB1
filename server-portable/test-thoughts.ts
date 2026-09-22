@@ -345,6 +345,11 @@ console.log("\n[8b] A long thought's windows merge to one answer, the window fol
   const dup = parseExtraction(JSON.stringify({ entities: [{ name: "Anita", type: "person", confidence: 0.9 }, { name: "Open Brain", type: "project", confidence: 0.9 }], relationships: [
     { from: "Anita", to: "Open Brain", relation: "works_on", confidence: 0.6 }, { from: "anita", to: "OPEN BRAIN", relation: "works_on", confidence: 0.9 }, { from: "Anita", to: "Open Brain", relation: "uses", confidence: 0.7 }] }));
   assert(dup.relations.length === 2 && dup.relations.find((r) => r.relation === "works_on")?.confidence === 0.9, `a relation stated twice in one answer is one relation at the higher confidence, whatever the case; a different verb is another (${JSON.stringify(dup.relations)})`);
+  // …and an entity read twice in one answer merges as two windows' readings do
+  // (fourth review pass: the first reading was kept and the second's aliases dropped).
+  const twice = parseExtraction(JSON.stringify({ entities: [{ name: "Open Brain", type: "project", confidence: 0.6, aliases: ["the brain"] }, { name: "open brain", type: "project", confidence: 0.95, aliases: ["OB1", "The Brain"] }], relationships: [] }));
+  assert(twice.entities.length === 1 && twice.entities[0].name === "open brain" && twice.entities[0].confidence === 0.95 && [...twice.entities[0].aliases].sort().join("|") === "OB1|the brain",
+         `an entity read twice in one answer is one, spelt as the more confident reading, at its confidence, with both readings' aliases folded by case (${JSON.stringify(twice.entities)})`);
   const unknown = resolveEmbedConfig({ OB1_METADATA_MODEL: "some-chat-model" });
   assert(unknown.extractChunkTokens === DEFAULT_EXTRACT_WINDOW_TOKENS && unknown.extractChunkTokensFrom === "default" && unknown.extractModelWindow === undefined,
          "through the resolver too: an unknown model keeps the default");

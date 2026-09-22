@@ -839,7 +839,9 @@ varying by pass, until SMD-1879 measured those timeouts as answers that did
 not end and bounded them (above). Two hours for a corpus that size, then per
 capture. Note that `--timeout` above 300 s only took effect from SMD-1879 on:
 Bun's `fetch` cut an unstreamed call at its own 300 s idle timeout whatever the
-flag said, and every dialler now disables that in favour of the one deadline.
+flag said; the three worker diallers (`providerCall`, `judgePair`,
+`extractOnce`) now disable that in favour of the one deadline, and SMD-1962
+covers preflight's probes and the evals' own diallers, which still run under it.
 
 **Identity.** The worker authenticates like any client: `OB1_WORKER_KEY` is a
 raw access key whose hash is in `MCP_ACCESS_KEYS`, resolved through

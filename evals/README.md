@@ -1357,12 +1357,18 @@ all, not which verb it chose. `qwen2.5:7b`, temperature 0:
 
 | arm | extracted | planted entities | near relations | FAR relations | windows | median s |
 | --- | ---: | ---: | ---: | ---: | --- | ---: |
-| `whole` (the p1 request) | 3/3 | 11/13 | 0/3 | 1/3 | 1 | 9.0 |
+| `whole` (one call over the whole text, no budget) | 3/3 | 11/13 | 0/3 | 1/3 | 1 | 9.0 |
 | `whole+budget` | 3/3 | 11/13 | 0/3 | 1/3 | 1 | 6.3 |
 | `w1200` | 3/3 | 12/13 | 0/3 | 0/3 | 4/3/3 | 41.3 |
 | `w1200h` (header) | 3/3 | 12/13 | 0/3 | 1/3 | 4/3/3 | 43.5 |
 | `w600` | 3/3 | 11/13 | 0/3 | 0/3 | 8/9/7 | 94.9 |
 | `w600h` (header) | 3/3 | 12/13 | 0/3 | 0/3 | 8/9/7 | 81.8 |
+
+`whole` is p1's request without p1's 8,000-character cut: these documents run
+to 13,000 characters, so the shipped p1 would have dropped the closing
+paragraph that carries every planted far relation and scored 0/3 on it by
+construction. The arm measures one unbounded call, which is the fair baseline
+for the windows; it is not a re-run of what p1 stored.
 
 Read with the sample size in view — three documents, three far relations:
 
@@ -1395,13 +1401,13 @@ call, sequential on an otherwise idle Ollama. "Extracted" is the thought
 written through `record_thought_entities`; "malformed" is a thought at least
 one of whose calls ran to its budget:
 
-| arm | extracted | malformed | median s | total s | mean mentions | mean edges | calls |
+| arm | extracted | malformed | median s | total s | mean mentions | mean edges | calls (that run's column counted windows, and retried thoughts, not retry calls; the harness now counts every call) |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | `whole+budget` (one call, budgeted) | 2/32 | 30 | 64.2 | 2,047 | 12.0 | 8.5 | 32 |
 | `w1200` (the shipped window) | 10/32 | 22 | 44.5 | 1,799 | 20.1 | 18.6 | 58 |
 | `w600` | 13/32 | 19 | 62.6 | 2,392 | 20.6 | 21.3 | 132 |
-| `whole+p` (one call, a penalised retry on a runaway) | 27/32 | 4 (+1 timed out) | 79.5 | 2,963 | 12.0 | 9.1 | 31 + 29 retries |
-| **`w1200p` (shipped: the window and the retry)** | **27/32** | 5 | 75.8 | 2,728 | 17.1 | 15.1 | 58 + 22 retries |
+| `whole+p` (one call, a penalised retry on a runaway) | 27/32 | 4 (+1 timed out) | 79.5 | 2,963 | 12.0 | 9.1 | 31 window calls; 29 thoughts retried |
+| **`w1200p` (shipped: the window and the retry)** | **27/32** | 5 | 75.8 | 2,728 | 17.1 | 15.1 | 58 window calls; 22 thoughts retried |
 
 What the rows say, read together:
 

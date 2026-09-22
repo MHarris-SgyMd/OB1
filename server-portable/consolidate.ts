@@ -238,10 +238,11 @@ export async function judgePair(older: PairSide, newer: PairSide, cfg: EmbedConf
   const r = await fetch(`${cfg.chat.base}/chat/completions`, {
     method: "POST",
     headers: cfg.chat.headers,
-    signal,
-    // The caller's deadline is the one deadline: Bun's own 300 s idle timeout
-    // cut an unstreamed completion before a longer --timeout could (entities.ts
-    // has the measurement; SMD-1879).
+    // The caller's deadline, else OB1_LLM_TIMEOUT — always one: Bun's own 300 s
+    // idle timeout cut an unstreamed completion before a longer --timeout
+    // could (entities.ts has the measurement; SMD-1879), and with it disabled
+    // a call with no signal would wait for ever (fourth review pass).
+    signal: signal ?? AbortSignal.timeout(cfg.timeoutMs),
     timeout: false,
     body: JSON.stringify({
       model: cfg.judgeModel,
