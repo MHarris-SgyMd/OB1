@@ -35,6 +35,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { SCHEMAS_DIR, TID_PROBE, applyFunctionSettings, applyMigrations, buffersOf, communitySchemaFiles, createAssert, sampleStatementOf, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
 import { heartbeatFor, leaseRefusal } from "./lease.ts";
+import { consolidateKey } from "../server-portable/consolidate.ts";
 import { reachabilityReport, readHnswGraph, reachableFromEntry, type HnswElement, type HnswGraph } from "./hnsw-graph.ts";
 import { recordId, stampTier, upsertRecord, type Doc } from "./ingest-records.ts";
 
@@ -3484,7 +3485,10 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
 {
   await sql`DELETE FROM thoughts`;
   await sql`DELETE FROM ob1_entities`;
-  const KEY = "consolidate:stub-judge@p2";
+  // The pass key from the one function that spells it (a hand-written "@p2"
+  // here broke the day SMD-1726 moved the prompt to 3).
+  const KEY = consolidateKey("stub-judge");
+  const keyRe = (model: string) => new RegExp(`job:\\s+${consolidateKey(model).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`);
   const EXTRACT = "extract:stub@p1";
   let calls = 0;
   let hemlockIsProse = true;
@@ -3581,10 +3585,10 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
   // the metadata model and say the knob exists; set, OB1_JUDGE_MODEL moves the
   // pass key and the model line — a fresh pass — while OB1_METADATA_MODEL, the
   // extractor's, stays where it is. A dry run, so nothing is pooled under it.
-  assert(/job:\s+consolidate:stub-judge@p2/.test(dry.out) && /model:\s+stub-judge \(the metadata model; OB1_JUDGE_MODEL gives the judge its own\) via/.test(dry.out),
+  assert(keyRe("stub-judge").test(dry.out) && /model:\s+stub-judge \(the metadata model; OB1_JUDGE_MODEL gives the judge its own\) via/.test(dry.out),
          `OB1_JUDGE_MODEL unset: the pass key and the model line name the metadata model (${dry.out.split("\n").filter((l) => /job:|model:/.test(l)).join(" | ").trim().slice(0, 200)})`);
   const ownJudge = await runScript(["bun", join(HERE, "consolidate.ts"), "--url", URL_!, "--dry-run"], { env: { ...env, OB1_JUDGE_MODEL: "judge-b" } as Record<string, string>, cwd: HERE });
-  assert(ownJudge.code === 0 && /job:\s+consolidate:judge-b@p2/.test(ownJudge.out) && /model:\s+judge-b \(OB1_JUDGE_MODEL\) via/.test(ownJudge.out),
+  assert(ownJudge.code === 0 && keyRe("judge-b").test(ownJudge.out) && /model:\s+judge-b \(OB1_JUDGE_MODEL\) via/.test(ownJudge.out),
          `OB1_JUDGE_MODEL set: the pass key and the model line name the judge's model (exit ${ownJudge.code}: ${ownJudge.out.split("\n").filter((l) => /job:|model:/.test(l)).join(" | ").trim().slice(0, 200)})`);
   assert(/each with judge-b and/.test(ownJudge.out) && calls === 0, "…the plan names it, and a dry run called no model");
 
@@ -4124,6 +4128,44 @@ console.log("\n[19] db/ingest-records.ts: the records upsert is source-labelled 
   assert(cfg.tier === "stable" && /^\d{4}-\d\d-\d\dT/.test(cfg.last_ingest ?? ""), "ob1_config records tier=stable and a last_ingest timestamp");
 
   for (const id of ids) await sql`DELETE FROM thoughts WHERE id = ${id}::uuid`; // per-id: Bun binds a JS array as a comma string, not a {…} literal
+}
+
+console.log("\n[20] said_by on real pgvector: the mark 047 stamps is filtered through 014's route — 001's GIN index, scanned inside the call — and the answer is the operator's rows alone (SMD-1726)");
+{
+  // The ticket's verification: EXPLAIN cannot see into plpgsql, so the route
+  // is read the way [5] reads it — the GIN index's scan count before and after
+  // one call. Rows through two classified keys, stamped by 047's trigger as
+  // they land (the envelope set once for the session, as a bulk writer would).
+  await sql`SELECT set_agent_kind('op-live', 'operator')`;
+  await sql`SELECT set_agent_kind('bot-live', 'agent')`;
+  const { unitVector } = seededRandom(1726);
+  const load = async (key: string, n: number) => {
+    const ids: string[] = [];
+    for (let i = 0; i < n; i++) {
+      const r = (await sql`SELECT upsert_thought(${`live 047 ${key} row ${i}`}, ${{ metadata: { source: "live" }, actor: { name: key, via: "test-live" } }}::jsonb, ${`[${unitVector(EMBEDDING_DIM).join(",")}]`}::vector) AS r`)[0].r as { id: string };
+      ids.push(r.id);
+    }
+    return ids;
+  };
+  const opIds = await load("op-live", 60), botIds = await load("bot-live", 60);
+  await sql.unsafe(`VACUUM ANALYZE thoughts`);
+  assert((await sql`SELECT count(*)::int AS c FROM thoughts WHERE id = ANY(${sql.array(opIds, "TEXT")}::uuid[]) AND metadata @> '{"actor_kind": "operator", "actor_name": "op-live"}'`)[0].c === 60, "every row through the operator's key carries its mark, stamped by the trigger as it landed");
+  const ginScans = async () => {
+    await sql`SELECT pg_stat_force_next_flush()`;
+    await sql`SELECT 1`;
+    return Number((await sql`SELECT idx_scan FROM pg_stat_user_indexes WHERE indexrelname = 'thoughts_metadata_idx'`)[0].idx_scan);
+  };
+  const q = `[${unitVector(EMBEDDING_DIM).join(",")}]`;
+  const before = await ginScans();
+  const hits = (await sql.unsafe(`SELECT id FROM match_thoughts('${q}'::vector, -1.0, 100, '{"actor_kind": "operator"}'::jsonb)`)) as { id: string }[];
+  const scans = (await ginScans()) - before;
+  assert(scans >= 1, `the said_by filter is answered through 001's GIN index inside match_thoughts — 014's route, ${scans} scan(s) in the call`);
+  const opSet = new Set(opIds);
+  assert(hits.length === 60 && hits.every((h) => opSet.has(h.id)), `…and the answer is exactly the operator's rows: ${hits.length} of 60, none of the agent's`);
+  const kw = (await sql.unsafe(`SELECT id FROM search_thoughts_keyword('live 047', 200, 0, '{"actor_name": "bot-live"}'::jsonb)`)) as { id: string }[];
+  const botSet = new Set(botIds);
+  assert(kw.length === 60 && kw.every((h) => botSet.has(h.id)), `the keyword arm under actor: bot-live returns exactly that key's rows (${kw.length})`);
+  for (const id of [...opIds, ...botIds]) await sql`DELETE FROM thoughts WHERE id = ${id}::uuid`;
 }
 
 await sql.close();

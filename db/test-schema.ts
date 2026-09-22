@@ -5480,6 +5480,158 @@ console.log("\n[43] Migration 046: the event shape at the write boundary — who
   await db.exec(`DELETE FROM ob1_agents`);
 }
 
+console.log("\n[44] Migration 047: the actor on the row — who wrote the current text, from the key, in metadata where 014's route filters on it; the actor follows the content; the backfill makes the row agree with the log (SMD-1726)");
+{
+  const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
+  const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
+  const refused = async (sql: string, params: unknown[] = []) => { try { await db.query(sql, params); return ""; } catch (e) { return (e as Error).message; } };
+  type Meta = Record<string, unknown>;
+  type Bf = { ok: boolean; rows: number; differing: number; awaiting: number };
+  type Audit = { action: string; actor_name: string | null; origin: string | null; diff: { content?: { after?: string }; metadata?: Meta & { before?: Meta; after?: Meta } } };
+  const metaOf = async (id: string) => one<{ m: Meta | null; u: string }>(`SELECT metadata AS m, updated_at::text AS u FROM thoughts WHERE id = $1::uuid`, [id]);
+  /** The two keys as "kind/name", "-" for absent — the shape every assertion below compares. */
+  const marks = async (id: string) => { const r = await metaOf(id); return `${r?.m?.actor_kind ?? "-"}/${r?.m?.actor_name ?? "-"}`; };
+  const audits = async (id: string) => q<Audit>(`SELECT action, actor_name, origin, diff FROM thought_audit WHERE thought_id = $1::uuid ORDER BY created_at, id`, [id]);
+  const auditCount = async () => (await one<{ c: number }>(`SELECT count(*)::int AS c FROM thought_audit`)).c;
+  const cap = async (content: string, envelope: Record<string, unknown>, at: number) =>
+    (await one<{ r: { id: string; existed: boolean } }>(`SELECT upsert_thought($1::text, $2::jsonb, $3::vector) AS r`, [content, JSON.stringify(envelope), unit(at)])).r;
+  const edit = async (id: string, content: string | null, patch: Meta | null, actor: Record<string, unknown> | null) =>
+    (await one<{ r: { ok: boolean; error?: string } }>(
+      `SELECT update_thought($1::uuid, $2::text, $3::jsonb, NULL, NULL, NULL, $4::jsonb, NULL, NULL, NULL) AS r`,
+      [id, content, patch === null ? null : JSON.stringify(patch), actor === null ? null : JSON.stringify(actor)])).r;
+  const src = async (sig: string) => String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = $1::regprocedure`, [sig])).s);
+  await db.exec(`DELETE FROM thoughts`);
+  await db.exec(`DELETE FROM ob1_agents`);
+  await db.exec(`SELECT set_agent_kind('op-key', 'operator'); SELECT set_agent_kind('bot-key', 'agent'); SELECT set_agent_kind('imp-key', 'ingested'); SELECT set_agent_kind('id-key', 'agent')`);
+  const idKey = (await one<{ r: { agent_id: string } }>(`SELECT resolve_agent($1, 'id-key', 'write') AS r`, ["c".repeat(64)])).r;
+
+  // The shape: a BEFORE row trigger on INSERT OR UPDATE beside 046's writers,
+  // reading the envelope through 008's reader and the kind through 046's one
+  // lookup; the column's comment names the keys the database owns.
+  const trg = await one<{ tgtype: number }>(`SELECT tgtype FROM pg_trigger WHERE tgrelid = 'thoughts'::regclass AND tgname = 'thoughts_stamp_actor'`);
+  assert(trg?.tgtype === 23, `thoughts_stamp_actor is a BEFORE INSERT OR UPDATE row trigger (tgtype ${trg?.tgtype}: row 1 + before 2 + insert 4 + update 16)`);
+  const stamp = await src("ob1_stamp_actor()");
+  assert(/ob1:actor-on-the-row-from-the-key/.test(stamp) && /ob1_current_actor\(\)/.test(stamp) && /ob1_registry_kind\(v_agent, v_name\)/.test(stamp),
+    "the stamp carries 047's sentinel, reads the envelope through 008's reader and the kind through 046's one lookup — the three cannot drift");
+  assert(/IF v_agent IS NOT NULL OR v_name IS NOT NULL THEN\s+v_kind := ob1_registry_kind/.test(stamp), "…and probes the registry only when the envelope names an id or a name (a raw write needs no SELECT on ob1_agents)");
+  assert(lastDefinerOf("upsert_thought").startsWith("046") && lastDefinerOf("update_thought").startsWith("046") && lastDefinerOf("thoughts_write_audit").startsWith("046") && lastDefinerOf("ob1_stamp_actor").startsWith("047"),
+    "047 redefines no writer and not the audit trigger: the stamp is a trigger of its own beside them");
+  const colc = (await one<{ c: string | null }>(COLUMN_COMMENT_SQL, ["thoughts", "metadata"])).c ?? "";
+  assert(/actor_kind/.test(colc) && /actor_name/.test(colc) && /047/.test(colc) && /cannot set them/.test(colc), "thoughts.metadata's comment names the two keys the database writes and a caller cannot");
+  const bfSrc = await src("backfill_thought_actors(integer)");
+  assert(/a\.action = 'capture' OR \(a\.action = 'update' AND a\.diff \? 'content'\)/.test(bfSrc) && /ORDER BY a\.created_at DESC, a\.id DESC/.test(bfSrc) && /t\.updated_at IS NOT DISTINCT FROM d\.updated_at/.test(bfSrc),
+    "the backfill reads the latest CONTENT-writing audit row and re-checks updated_at on the locked row, so a thought edited since the scan is left to the next pass");
+
+  // The stamp: from the key, never the payload.
+  const op = await cap("047: the operator typed this", { metadata: { source: "mcp" }, actor: { name: "op-key", via: "open-brain" } }, 40);
+  assert((await marks(op.id)) === "operator/op-key", `a capture through a classified key carries actor_kind and actor_name in metadata (${await marks(op.id)})`);
+  let a = await audits(op.id);
+  assert(a.length === 1 && a[0].diff.metadata?.actor_kind === "operator" && a[0].diff.metadata?.actor_name === "op-key" && a[0].actor_name === "op-key",
+    "…and the capture's audit row records the stamped metadata: the mark is in the log as it is on the row");
+  const claim = await cap("047: an agent claiming to be the operator", { metadata: { actor_kind: "operator", actor_name: "op-key", source: "mcp" }, actor: { name: "bot-key", via: "open-brain" } }, 41);
+  assert((await marks(claim.id)) === "agent/bot-key", `a payload's own actor_kind and actor_name are overwritten from the key — the mutant that trusts the payload fails here (${await marks(claim.id)})`);
+  assert((await metaOf(claim.id))?.m?.source === "mcp", "…and the rest of the payload's metadata is kept");
+  const ghost = await cap("047: an unclassified key claiming a kind", { metadata: { actor_kind: "operator" }, actor: { name: "ghost-key" } }, 42);
+  assert((await marks(ghost.id)) === "-/ghost-key", `an unclassified key stamps its name and no kind: the claim removed, nothing invented (${await marks(ghost.id)})`);
+  const byId = await cap("047: a writer known by id alone", { metadata: {}, actor: { agent_id: idKey.agent_id } }, 43);
+  assert((await marks(byId.id)) === "agent/-", `an envelope carrying only an agent id stamps the id's kind and no name (${await marks(byId.id)})`);
+  const badId = await cap("047: a malformed id falls to the name", { metadata: {}, actor: { name: "imp-key", agent_id: "not-a-uuid" } }, 44);
+  assert((await marks(badId.id)) === "ingested/imp-key", `a malformed agent_id is no id: the name decides (${await marks(badId.id)})`);
+  const RAW = "47474747-4747-4747-8747-474747474747", NUL = "47474747-4747-4747-8747-474747474748", ORPHAN = "47474747-4747-4747-8747-474747474749";
+  await db.exec(`INSERT INTO thoughts (id, content, metadata, embedding) VALUES ('${RAW}', '047: a raw insert claiming a kind', '{"actor_kind": "operator", "actor_name": "op-key", "keep": 1}'::jsonb, '${unit(45)}'::vector)`);
+  let m = await metaOf(RAW);
+  assert(m?.m?.actor_kind === undefined && m?.m?.actor_name === undefined && m?.m?.keep === 1, `a raw write with no envelope keeps neither key — a mutation from outside the server names nobody — and the rest of its metadata (${JSON.stringify(m?.m)})`);
+  await db.exec(`INSERT INTO thoughts (id, content, metadata, embedding) VALUES ('${NUL}', '047: a raw insert with null metadata', NULL, '${unit(46)}'::vector)`);
+  assert((await metaOf(NUL))?.m === null, "…and a NULL metadata stays NULL: the stamp adds keys, it does not decide the column");
+
+  // The actor follows the content.
+  let r = await edit(op.id, null, { topics: ["x"], actor_kind: "agent", actor_name: "bot-key" }, { name: "bot-key" });
+  assert(r.ok === true && (await marks(op.id)) === "operator/op-key" && ((await metaOf(op.id))?.m?.topics as string[])?.[0] === "x",
+    `a metadata-only edit by another key keeps the mark whatever the patch said, and lands the rest of the patch (${await marks(op.id)})`);
+  a = await audits(op.id);
+  assert(a.length === 2 && a[1].diff.metadata?.after?.actor_kind === "operator" && a[1].actor_name === "bot-key", "…the audit row shows the patch landing around the mark, under the editor's name");
+  r = await edit(op.id, null, { actor_kind: "agent" }, { name: "bot-key" });
+  assert(r.ok === true && (await audits(op.id)).length === 2, "…a patch that tries only the two keys changes nothing, so 008 writes no row");
+  r = await edit(op.id, "047: the agent rewrote the operator's note", null, { name: "bot-key", via: "open-brain" });
+  assert(r.ok === true && (await marks(op.id)) === "agent/bot-key", `an edit that changes the content re-stamps from the editor's key: the text is the agent's now (${await marks(op.id)})`);
+  a = await audits(op.id);
+  assert(a.length === 3 && a[2].diff.content?.after === "047: the agent rewrote the operator's note" && a[2].diff.metadata?.before?.actor_kind === "operator" && a[2].diff.metadata?.after?.actor_kind === "agent",
+    "…and the log holds the handover — content and mark in one diff");
+  r = await edit(op.id, "047: the agent rewrote the operator's note", { note: "same text" }, { name: "op-key" });
+  assert(r.ok === true && (await marks(op.id)) === "agent/bot-key", "018's unchanged edit — the same text, from the operator's key — keeps the agent's mark: the content did not move");
+  const reCap = await cap("047: an agent claiming to be the operator", { metadata: { actor_kind: "ingested", actor_name: "x", extra: true }, actor: { name: "op-key" } }, 41);
+  assert(reCap.existed === true && (await marks(claim.id)) === "agent/bot-key" && (await metaOf(claim.id))?.m?.extra === true,
+    `a re-capture merges the payload's metadata and keeps the mark: the text is unchanged, so its first writer's — through EXCLUDED, which the INSERT's stamp had already rewritten (${await marks(claim.id)})`);
+  await db.exec(`UPDATE thoughts SET content = '047: a raw content update' WHERE id = '${op.id}'`);
+  assert((await marks(op.id)) === "-/-", `a raw content update with no envelope removes the mark: nobody vouches for this text (${await marks(op.id)})`);
+  await db.exec(`UPDATE thoughts SET embedding = '${unit(47)}'::vector WHERE id = '${claim.id}'`);
+  assert((await marks(claim.id)) === "agent/bot-key", "a raw write that leaves the content — a re-embed — leaves the mark");
+
+  // The filter: 014's route reaches the keys through the GIN it already has,
+  // on the walk and on the exact branch, and the keyword arm's filter too.
+  const op2 = await cap("047: the operator's second note", { metadata: { source: "mcp" }, actor: { name: "op-key" } }, 48);
+  const bySaid = await q<{ id: string }>(`SELECT id FROM match_thoughts($1::vector, -1.0, 10, '{"actor_kind": "operator"}'::jsonb)`, [unit(41)]);
+  assert(bySaid.length === 1 && bySaid[0].id === op2.id, `match_thoughts under {"actor_kind": "operator"} returns the operator's rows and none of the agent's, the claim's or the unmarked (${bySaid.length})`);
+  const byActor = await q<{ id: string }>(`SELECT id FROM match_thoughts($1::vector, -1.0, 10, '{"actor_name": "bot-key"}'::jsonb)`, [unit(41)]);
+  assert(byActor.length === 1 && byActor[0].id === claim.id, "…and {\"actor_name\": \"bot-key\"} the one row that key wrote");
+  const kw = await q<{ id: string }>(`SELECT id FROM search_thoughts_keyword('047:', 50, 0, '{"actor_kind": "agent"}'::jsonb)`);
+  assert(kw.length === 2 && kw.map((x) => x.id).sort().join() === [claim.id, byId.id].sort().join(), `the keyword arm's filter reaches the same key — the agent's two rows, the one by name and the one by id (${kw.length})`);
+  assert((await q(`SELECT id FROM thoughts WHERE metadata @> jsonb_build_object('actor_kind', 'operator'::text)`)).length === 1, "…as does the list tool's containment clause");
+
+  // The backfill: a brain from before 047 — rows unmarked, one with a planted
+  // claim, one typed then rewritten, one an unclassified key's, one with no
+  // log at all — the stamp trigger off and the audit trigger on, as it was.
+  await db.exec(`ALTER TABLE thoughts DISABLE TRIGGER thoughts_stamp_actor`);
+  const pre1 = await cap("047: pre-047, the operator's", { metadata: { source: "mcp" }, actor: { name: "op-key" } }, 50);
+  const pre2 = await cap("047: pre-047, an agent's with a planted claim", { metadata: { actor_kind: "operator", actor_name: "op-key" }, actor: { name: "bot-key" } }, 51);
+  const pre3 = await cap("047: pre-047, an unclassified key's", { metadata: {}, actor: { name: "late-key" } }, 52);
+  const pre4 = await cap("047: pre-047, typed by the operator then rewritten", { metadata: {}, actor: { name: "op-key" } }, 53);
+  await edit(pre4.id, "047: pre-047, rewritten by an agent", null, { name: "bot-key" });
+  await db.exec(`ALTER TABLE thoughts DISABLE TRIGGER thoughts_audit`);
+  await db.exec(`INSERT INTO thoughts (id, content, metadata, embedding) VALUES ('${ORPHAN}', '047: no log, a planted claim', '{"actor_kind": "operator", "actor_name": "op-key", "keep": true}'::jsonb, '${unit(54)}'::vector)`);
+  await db.exec(`ALTER TABLE thoughts ENABLE TRIGGER thoughts_audit`);
+  await db.exec(`ALTER TABLE thoughts ENABLE TRIGGER thoughts_stamp_actor`);
+  assert((await marks(pre1.id)) === "-/-" && (await marks(pre2.id)) === "operator/op-key" && (await marks(pre4.id)) === "-/-" && (await marks(ORPHAN)) === "operator/op-key",
+    "the fixture: unmarked rows and planted claims, as a brain from before 047 holds them");
+  const u1 = (await metaOf(pre1.id))?.u;
+  const auditsBefore = await auditCount();
+  const first = await db.transaction(async (tx) => {
+    await tx.query(`SELECT set_config('ob1.actor', '{"name": "hand"}', true)`);
+    const bf = (await tx.query<{ r: Bf }>(`SELECT backfill_thought_actors(1) AS r`)).rows[0].r;
+    const s = (await tx.query<{ a: string | null; b: string | null }>(`SELECT current_setting('ob1.actor', true) AS a, current_setting('ob1.actor_amend', true) AS b`)).rows[0];
+    return { bf, s };
+  });
+  assert(first.bf.ok === true && first.bf.rows === 1 && first.bf.differing === 5 && first.bf.awaiting === 2,
+    `p_limit bounds the rows written; the return counts every row that disagrees with the log and every row whose writer waits on a classification (${JSON.stringify(first.bf)})`);
+  assert(first.s.a === '{"name": "hand"}' && (first.s.b === "" || first.s.b === null), `…and the pass hands the transaction's actor back as it found it, the amendment setting cleared (${first.s.a}, ${JSON.stringify(first.s.b)})`);
+  let bf = (await one<{ r: Bf }>(`SELECT backfill_thought_actors() AS r`)).r;
+  assert(bf.rows === 4 && bf.differing === 4 && bf.awaiting === 2, `the rest in one pass (${JSON.stringify(bf)})`);
+  assert((await marks(pre1.id)) === "operator/op-key", `an unmarked pre-047 row takes its capture's writer (${await marks(pre1.id)})`);
+  assert((await marks(pre2.id)) === "agent/bot-key", `a planted claim is corrected to the log's writer (${await marks(pre2.id)})`);
+  assert((await marks(pre3.id)) === "-/late-key", `an unclassified writer's row gains the name and waits for the kind (${await marks(pre3.id)})`);
+  assert((await marks(pre4.id)) === "agent/bot-key", `the latest CONTENT writer decides, not the capture — the mutant that reads the first row fails here (${await marks(pre4.id)})`);
+  m = await metaOf(ORPHAN);
+  assert((await marks(ORPHAN)) === "-/-" && m?.m?.keep === true, `a mark no audit row vouches for is stripped, the rest of the metadata kept (${JSON.stringify(m?.m)})`);
+  assert((await marks(claim.id)) === "agent/bot-key" && (await marks(byId.id)) === "agent/-" && (await marks(ghost.id)) === "-/ghost-key" && (await marks(op.id)) === "-/-",
+    "rows the trigger stamped — by name, by id, an unclassified name, a raw content update — already agree with the log and are not touched");
+  assert((await metaOf(pre1.id))?.u === u1, "updated_at is not bumped: a stamp is not an edit (018's guard and 021's rule read it)");
+  assert((await auditCount()) === auditsBefore + 5, `each row written left one audit row, the record the ticket asks for (${(await auditCount()) - auditsBefore})`);
+  const bfRow = (await audits(pre1.id)).at(-1);
+  assert(bfRow?.action === "update" && bfRow.origin === "backfill_thought_actors" && bfRow.actor_name === null && bfRow.diff.metadata?.after?.actor_kind === "operator" && bfRow.diff.metadata?.before?.actor_kind === undefined,
+    `…whose door is the backfill, whose actor is nobody, and whose diff is the mark arriving (${JSON.stringify(bfRow?.origin)}, ${JSON.stringify(bfRow?.actor_name)})`);
+  bf = (await one<{ r: Bf }>(`SELECT backfill_thought_actors() AS r`)).r;
+  assert(bf.rows === 0 && bf.differing === 0 && bf.awaiting === 2, `a second pass finds nothing: idempotent, as the migration's own call is on re-apply (${JSON.stringify(bf)})`);
+  await db.exec(`SELECT set_agent_kind('late-key', 'ingested')`);
+  bf = (await one<{ r: Bf }>(`SELECT backfill_thought_actors() AS r`)).r;
+  assert(bf.rows === 1 && bf.awaiting === 1 && (await marks(pre3.id)) === "ingested/late-key",
+    `once the key is classified the next pass fills its rows from the registry — before 046's backfill has touched the audit row (${JSON.stringify(bf)}, ${await marks(pre3.id)})`);
+  assert(/at least 1/.test(await refused(`SELECT backfill_thought_actors(0)`)), "p_limit 0 is refused as a value");
+  assert(/^\s*$|actor/.test(String((await one<{ s: string | null }>(`SELECT current_setting('ob1.actor_amend', true) AS s`)).s ?? "")), "the amendment setting is not left on the session");
+
+  await db.exec(`DELETE FROM thoughts`);
+  await db.exec(`DELETE FROM ob1_agents`);
+}
+
 // db/README.md quotes this suite's assertion total in two places ("Expected
 // outcome" and the Testing block). It used to be edited by hand and drifted;
 // this holds every count the README gives for test-schema.ts to what the suite

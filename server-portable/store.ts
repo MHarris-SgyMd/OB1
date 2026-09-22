@@ -361,6 +361,10 @@ export type ListFilters = {
   topic?: string;
   person?: string;
   days?: number;
+  /** SMD-1726: `metadata.actor_kind` — who holds the key that wrote the current text (operator | agent | ingested), stamped by migration 047. */
+  saidBy?: string;
+  /** SMD-1726: `metadata.actor_name` — that key's name. */
+  actor?: string;
 };
 
 /**

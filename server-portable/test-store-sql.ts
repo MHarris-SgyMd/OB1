@@ -267,6 +267,21 @@ console.log("\n[4] listThoughts reproduces the PostgREST filters");
 
   const combined = await store.listThoughts({ limit: 10, type: "note", topic: "beta", person: "Ada", days: 1 });
   assert(combined.length === 1, "filters combine with AND");
+
+  // SMD-1726: the two keys migration 047 stamps from the write's envelope, as
+  // containment beside the others. The store's own capture carries the actor;
+  // the registry classifies the key. Two rows in, two rows out, so [5]'s
+  // counts hold.
+  const raw = new SQL({ url: URL_, max: 1 });
+  await raw`SELECT set_agent_kind('op-key', 'operator')`;
+  const opRow = await store.captureThought({ content: "the operator's own line", payload: { metadata: { type: "note" } }, embedding: unit(3), actor: { name: "op-key", via: "test-store-sql" } });
+  const whoRow = await store.captureThought({ content: "an unclassified key's line", payload: { metadata: {} }, embedding: unit(4), actor: { name: "who-key", via: "test-store-sql" } });
+  assert((await store.listThoughts({ limit: 10, saidBy: "operator" })).map((r) => r.id).join() === opRow.id, "saidBy matches metadata.actor_kind — the operator's row and no other");
+  assert((await store.listThoughts({ limit: 10, actor: "op-key" })).length === 1 && (await store.listThoughts({ limit: 10, actor: "who-key" })).map((r) => r.id).join() === whoRow.id, "actor matches metadata.actor_name, classified key or not");
+  assert((await store.listThoughts({ limit: 10, saidBy: "agent" })).length === 0, "an unmatched kind returns nothing");
+  assert((await store.listThoughts({ limit: 10, saidBy: "operator", type: "note" })).length === 1 && (await store.listThoughts({ limit: 10, saidBy: "operator", type: "idea" })).length === 0, "…and they combine with the others by AND");
+  await raw`DELETE FROM thoughts WHERE id = ${opRow.id}::uuid OR id = ${whoRow.id}::uuid`;
+  await raw.close();
 }
 
 console.log("\n[5] Stats counting and paging");

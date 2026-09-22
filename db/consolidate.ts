@@ -88,7 +88,7 @@ import { appendFileSync } from "node:fs";
 import { PROVIDER_ERROR_CHARS, ProviderError, refusesLength, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { describeEgress, localKnob, refusesEverything, ROW_UNITS } from "../server-portable/egress.ts";
 import {
-  cleanForDisplay, consolidateKey, judgePair, proposalVerdict, DEFAULT_CANDIDATES, DEFAULT_MIN_CONFIDENCE, DEFAULT_MIN_SIMILARITY,
+  actorKindOf, cleanForDisplay, consolidateKey, judgePair, proposalVerdict, DEFAULT_CANDIDATES, DEFAULT_MIN_CONFIDENCE, DEFAULT_MIN_SIMILARITY,
   type Judgement,
 } from "../server-portable/consolidate.ts";
 import { hashKey, parseKeyRecords } from "../server-portable/auth.ts";
@@ -533,8 +533,11 @@ async function processRow(row: Row): Promise<Outcome> {
     const t0 = Date.now();
     let j: Judgement;
     try {
-      j = await judgePair({ content: older.content, createdAt: older.created_at, metadata: older.metadata ?? undefined },
-                          { content: row.content, createdAt: row.created_at, metadata: row.metadata ?? undefined },
+      // SMD-1726: the judge hears who wrote each side — the database's mark
+      // (047), never a payload field — so "an agent's summary supersedes what
+      // the operator typed" is a proposal it can decline on that ground.
+      j = await judgePair({ content: older.content, createdAt: older.created_at, metadata: older.metadata ?? undefined, writer: actorKindOf(older.metadata) },
+                          { content: row.content, createdAt: row.created_at, metadata: row.metadata ?? undefined, writer: actorKindOf(row.metadata) },
                           cfg, AbortSignal.timeout(TIMEOUT_S * 1000), keyName);
     } catch (e) {
       llmMs += Date.now() - t0;
