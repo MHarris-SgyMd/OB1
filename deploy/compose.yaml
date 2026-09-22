@@ -215,6 +215,10 @@ services:
       # a forward.
       OB1_QUERY_LOG: ${OB1_QUERY_LOG:-}
       OB1_QUERY_LOG_RETENTION_DAYS: ${OB1_QUERY_LOG_RETENTION_DAYS:-}
+      # Which pipeline tier this server runs as (SMD-1806); stamped on every
+      # query_log row. Unset is a plain brain. The three-tier compose
+      # (compose.tiers.yaml) sets it per service; here it is a plain forward.
+      OB1_TIER: ${OB1_TIER:-}
       OB1_AGENT_CACHE_TTL_MS: ${OB1_AGENT_CACHE_TTL_MS:-}
       OPEN_BRAIN_CITATION_BASE_URL: ${OPEN_BRAIN_CITATION_BASE_URL:-}
       # No `:-10` here any more: store-sql.ts owns the default and reads "" as
