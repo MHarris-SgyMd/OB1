@@ -168,6 +168,7 @@ Every contribution needs a `metadata.json` file. Here's the template:
     "tools": ["Node.js 18+"]
   },
   "requires_skills": [],
+  "connectors": ["gmail"],
   "tags": ["email", "gmail", "import", "history"],
   "difficulty": "intermediate",
   "estimated_time": "30 minutes",

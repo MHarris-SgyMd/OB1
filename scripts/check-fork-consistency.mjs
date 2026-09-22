@@ -151,8 +151,7 @@
  *      fold-in **SMD-1867** row of docs/vendored-disposition.md whose
  *      directory exists (a row whose directory is gone is a finding) is
  *      classified or excused by name with a reason, never both or neither,
- *      a classified artifact nothing marks is refused, a stale excuse or
- *      pattern is refused; and
+ *      a stale excuse or pattern is refused; and
  *      docs/connector-taxonomy.md's generated tables equal what the registry
  *      renders. The rules are registryProblems, one pure function the
  *      renderer runs too (SMD-1933); no exceptions beyond the registry's own
@@ -241,7 +240,7 @@ function checkMetadata({ cat, dir, rel }) {
   // distinct kebab-case registry keys. A malformed declaration would read as "declares nothing".
   if ("connectors" in d) {
     if (!Array.isArray(d.connectors)) fail(at, `connectors must be an array of registry keys, got ${JSON.stringify(d.connectors)}`);
-    else {
+    else if (props.connectors?.items?.pattern) { // a schema without the block is check 19's finding, once, not a throw here
       const keyRe = new RegExp(props.connectors.items.pattern); // the schema's pattern, read, not restated
       for (const c of d.connectors) if (typeof c !== "string" || !keyRe.test(c)) fail(at, `connectors entry ${JSON.stringify(c)} is not a key (${props.connectors.items.pattern})`);
       if (props.connectors.uniqueItems && new Set(d.connectors).size !== d.connectors.length) fail(at, "connectors lists a key twice");
@@ -3548,7 +3547,8 @@ const REGISTRY_PROBES = [
   ["a vendor used with no connector entry", (r) => { delete r.connectors.acme; }, ["connector-set"]],
   ["an external-touching artifact left unclassified", (r) => { r.artifacts.pop(); r.connectors.acme.direction = "source"; }, ["coverage-unregistered"]],
   ["an artifact both classified and excused (its metadata still declares the connector)", (r) => { r.not_connectors.artifacts["recipes/acme-digest"] = "because"; }, ["coverage-both", "excuse-declares"]],
-  ["a classified artifact nothing marks as external-touching", (r) => { r.artifacts.push({ path: "recipes/plain-tool", capabilities: [{ vendor: "acme", family: "message-stream/chat", transport: "pull", direction: "source", cardinality: "1:1", round_trip: "read-only", fetcher: "native-driver" }] }); }, ["coverage-unmarked", "connectors-field"]],
+  ["a classified artifact whose metadata declares no connector", (r) => { r.artifacts.push({ path: "recipes/plain-tool", capabilities: [{ vendor: "acme", family: "message-stream/chat", transport: "pull", direction: "source", cardinality: "1:1", round_trip: "read-only", fetcher: "native-driver" }] }); }, ["connectors-field"]],
+  ["a provider matched inside word one and again at the start of word two is covered", (r) => {}, [], (t) => { t.metadataByPath.set("recipes/two-hits", { requires: { services: ["Non-OpenRouter OpenRouter gateway"] }, tags: ["notes"] }); t.existingDirs.push("recipes/two-hits"); }],
   ["a registered artifact whose metadata declares other connectors than its capabilities", (r) => {}, ["connectors-field"], (t) => { t.metadataByPath.get("recipes/acme-digest").connectors = ["acme", "beta"]; }],
   ["a contribution declaring a connector and classified nowhere", (r) => {}, ["coverage-unregistered"], (t) => { t.metadataByPath.set("recipes/plain-tool", { requires: { services: ["Supabase"] }, tags: ["ops"], connectors: ["acme"] }); }],
   ["an excused artifact whose metadata declares a connector", (r) => { r.not_connectors.artifacts["recipes/plain-tool"] = "a tool"; }, ["excuse-declares"], (t) => { t.metadataByPath.set("recipes/plain-tool", { requires: { services: ["Supabase"] }, tags: ["ops"], connectors: ["acme"] }); }],

@@ -44,7 +44,7 @@ registry that redefines a set on its own.
 
 | Facet | Values | Stability | What it answers |
 |---|---|---|---|
-| **family** | `mailbox/email` · `message-stream/chat` · `conversation-export` · `activity-export` · `annotation/highlight` · `document/page` · `web-clip` · `calendar/event` · (`notification-target`, reserved) | **open** — grows as new sources appear; a new family is declared with its schema *before* an artifact uses it | what the item *is*; vendors within a family differ only in auth and wire format |
+| **family** | the families `docs/connector-registry.json` declares, each with its schema in the generated block below (the ticket named seven; one was added at classification time, one is held in reserve) | **open** — grows as new sources appear; a new family is declared with its schema *before* an artifact uses it | what the item *is*; vendors within a family differ only in auth and wire format |
 | **transport** | `push` · `pull` · `batch` | near-closed | how new data reaches the seam: the vendor calls in as things happen; the fetcher asks on a schedule or on demand; a one-shot archive. For a sink, how the brain's output reaches the vendor (a send is `push`). **Not a wire protocol.** |
 | **direction** | `source` · `sink` | closed | per capability. A **connector**'s direction is derived — `bidirectional` when its capabilities span both |
 | **cardinality** | `1:1` · `1:many` · `many:1` | near-closed | vendor item → thought *at the seam*. The family names the item and owns the grouping key |
@@ -94,18 +94,12 @@ vendor driver**, and the registry models them that way:
   direction once so the check can hold it, and refuses a declaration the
   capabilities do not derive.
 
-So the duplicated cases the ticket names are one connector each, with the
-previously separate artifacts as its capabilities:
-
-| Connector | Source capabilities today | Sink capabilities today |
-|---|---|---|
-| `telegram` | `telegram-capture` (push), `vercel-neon-telegram` (push) | `weekly-digest`, `life-engine`, `life-engine-video` |
-| `gmail` | `email-history-import` (pull), `gmail-smart-pull` (pull) | `daily-digest` (a draft, through the client's Gmail MCP) |
-| `discord` | `discord-capture` (push) | `life-engine` |
-| `slack` | `slack-capture` (push) | `editorial-policy` (optional critical-findings post) |
-
-Four vendors, eleven distinct artifacts, four drivers' worth of client. The generated
-tables below carry every connector, with the counts on their first line.
+So the duplicated cases the ticket names — `telegram` (capture and three
+digests), `gmail` (two pulls and a draft), `discord`, `slack` — are one connector
+each, with the previously separate artifacts as its source and sink
+capabilities. The generated Connectors table below carries every connector with
+its derived direction and the artifacts on each side; its first line names the
+ones that derive `bidirectional` today, so this prose need not.
 
 Two rules that settle the edge cases:
 
@@ -286,13 +280,12 @@ must-pass probes on every run:
   match begins the first or the second word, so "OpenRouter or Anthropic" is a
   provider and "Notion API (summaries via OpenRouter)", "Notion (OpenRouter)"
   and "Gmail/OpenAI" are vendors — one external system per entry, its name
-  first), or carries a connector-shaped tag (`import`, `digest`, `webhook`,
-  `messaging`, `email`, `bot`) or a tag naming a declared connector
-  (`telegram`, `gmail`, …; tags compare lower-cased), or sits in a fold-in
-  SMD-1867 row of `docs/vendored-disposition.md` — the marker in the
+  first), or carries a connector-shaped tag (the list is `TRIGGER_TAGS` in
+  `scripts/connector-registry.mjs`, printed at the top of the generated block)
+  or a tag naming a declared connector (tags compare lower-cased), or sits in
+  a fold-in SMD-1867 row of `docs/vendored-disposition.md` — the marker in the
   Disposition cell, and a row whose directory is gone is a finding — is
-  classified or excused by name — never both, never neither; a classified
-  artifact nothing marks is refused (declare its connectors); a stale excuse
+  classified or excused by name — never both, never neither; a stale excuse
   and a service pattern matching nothing are refused; a contribution whose
   metadata does not parse gets no verdict here (check 1 names the file); a
   missing table, or one whose headings or columns moved so it yields no
@@ -314,7 +307,9 @@ must-pass probes on every run:
 | The same vendor via a low-code node and via a native driver produce identical canonical / text / edges | **Specified** (identity recomputed at the seam, fetcher as provenance). **Proven on one vendor once SMD-1863 picks the tool** |
 
 <!-- connector-tables:start — generated from docs/connector-registry.json by scripts/connector-registry.mjs; do not edit by hand -->
-22 artifacts, 32 capability rows, 16 connectors (4 bidirectional), 7 of 8 declared families in use.
+22 artifacts, 32 capability rows, 16 connectors (4 bidirectional: `discord`, `gmail`, `slack`, `telegram`), 7 of 8 declared families in use.
+
+Coverage net — the connector-shaped tags that mark an undeclared contribution: `import`, `digest`, `webhook`, `messaging`, `email`, `bot`; a declared connector's name as a tag marks it too.
 
 ### Family schemas
 

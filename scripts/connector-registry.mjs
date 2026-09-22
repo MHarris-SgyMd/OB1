@@ -100,7 +100,7 @@ export function dispositionPaths(text) {
       continue;
     }
     if (!cat || !line.startsWith("|")) continue;
-    const cells = line.split("|");
+    const cells = line.split(/(?<!\\)\|/); // an escaped `\|` stays inside its cell
     const name = /^\s*`([^`]+)`\s*$/.exec(cells[1] ?? "");
     if (name && FOLD_IN_RE.test(cells[2] ?? "")) out.push(`${cat}/${name[1]}`);
   }
@@ -144,10 +144,11 @@ export function patternHits(service, patterns) {
   for (const w of service.matchAll(/\S+/g)) { starts.push(w.index); if (starts.length === 2) break; }
   const live = [], covering = [];
   for (const p of patterns) {
-    const hit = p.re.exec(service);
-    if (hit === null) continue;
+    // Every match, not the leftmost: "Non-OpenAI Anthropic" has a hit inside word one and one that begins word two.
+    const hits = [...service.matchAll(p.re)];
+    if (hits.length === 0) continue;
     live.push(p);
-    if (starts.includes(hit.index)) covering.push(p);
+    if (hits.some((h) => starts.includes(h.index))) covering.push(p);
   }
   return { live, covering };
 }
@@ -166,7 +167,7 @@ function servicePatterns(registry, problems) {
     const where = `${REGISTRY_PATH} not_connectors.services[${i}]`;
     if (!nonEmpty(p?.reason)) problems.push({ where, kind: "pattern-reason", msg: "a service pattern carries no reason" });
     if (!nonEmpty(p?.pattern)) { problems.push({ where, kind: "pattern-invalid", msg: "a service pattern is missing or empty — an empty pattern matches every service" }); continue; }
-    try { out.push({ re: new RegExp(p.pattern, "i"), pattern: p.pattern, hits: 0, where }); } catch (e) { problems.push({ where, kind: "pattern-invalid", msg: `pattern ${JSON.stringify(p.pattern)} does not compile: ${e.message}` }); }
+    try { out.push({ re: new RegExp(p.pattern, "gi"), pattern: p.pattern, where }); } catch (e) { problems.push({ where, kind: "pattern-invalid", msg: `pattern ${JSON.stringify(p.pattern)} does not compile: ${e.message}` }); } // "g" for matchAll; read only through patternHits
   }
   return out;
 }
@@ -191,6 +192,7 @@ function servicePatterns(registry, problems) {
  */
 export function triggersFor({ metadataByPath, foldIns, patterns, connectorKeys, existingDirs }) {
   const out = new Map();
+  const livePatterns = new Set(); // returned, not written onto the caller's objects: the stale rule reads it
   const add = (path, why) => out.set(path, [...(out.get(path) ?? []), why]);
   for (const [path, meta] of metadataByPath) {
     if (meta === null) continue;
@@ -199,7 +201,7 @@ export function triggersFor({ metadataByPath, foldIns, patterns, connectorKeys, 
     for (const s of listOf(meta?.requires?.services)) {
       if (typeof s !== "string") continue;
       const { live, covering } = patternHits(s, patterns);
-      for (const p of live) p.hits++;
+      for (const p of live) livePatterns.add(p);
       if (covering.length === 0) add(path, `requires.services names ${JSON.stringify(s)}${live.length ? " (a not-a-connector pattern matches it, but not at its first or second word — one system per entry, its name first)" : ""}`);
     }
     const tags = listOf(meta?.tags).filter((t) => typeof t === "string").map((t) => t.toLowerCase());
@@ -210,7 +212,7 @@ export function triggersFor({ metadataByPath, foldIns, patterns, connectorKeys, 
   }
   const dirs = new Set(existingDirs);
   for (const path of foldIns) if (dirs.has(path)) add(path, `a fold-in SMD-1867 row of ${DISPOSITION_PATH}`);
-  return out;
+  return { triggers: out, livePatterns };
 }
 
 /** The connectors the artifacts imply: vendor → { directions, capabilities: [{ path, ...cap }] }. */
@@ -330,7 +332,7 @@ export function registryProblems({ registry, existingDirs, metadataByPath, dispo
     if (foldIns.length === 0) push(DISPOSITION_PATH, "disposition-dark", "the table yields no fold-in SMD-1867 row — the category headings (`### \\`recipes/\\``) or the Disposition column moved, and the trigger went dark");
   }
   for (const path of foldIns) if (!dirs.has(path)) push(`${DISPOSITION_PATH} (${path})`, "disposition-stale", "a fold-in SMD-1867 row names a contribution that no longer exists — the row marks nothing; note the removal in the table");
-  const triggers = triggersFor({ metadataByPath, foldIns, patterns, connectorKeys, existingDirs: [...dirs] });
+  const { triggers, livePatterns } = triggersFor({ metadataByPath, foldIns, patterns, connectorKeys, existingDirs: [...dirs] });
   const excused = registry.not_connectors?.artifacts && typeof registry.not_connectors.artifacts === "object" ? registry.not_connectors.artifacts : {};
   const readable = (path) => metadataByPath.has(path) && metadataByPath.get(path) !== null; // absent or unparseable: check 1's finding, no verdict here
   const declaredConnectors = (path) => listOf(metadataByPath.get(path)?.connectors).filter((c) => typeof c === "string").sort();
@@ -348,7 +350,6 @@ export function registryProblems({ registry, existingDirs, metadataByPath, dispo
     const declared = declaredConnectors(path);
     if (JSON.stringify(declared) !== JSON.stringify(vendors)) push(`${path}/metadata.json`, "connectors-field", `\`connectors\` is [${declared.join(", ")}] but ${R} classifies this artifact under [${vendors.join(", ")}] — declare exactly its connectors`);
   }
-  for (const path of seen.keys()) if (!triggers.has(path) && readable(path)) push(`${R} artifacts["${path}"]`, "coverage-unmarked", "nothing marks this artifact as external-touching — declare its connectors in its metadata.json (`\"connectors\": [\"<vendor>\"]`), so the declaration and the registry agree");
   for (const [path, reason] of Object.entries(excused)) {
     const where = `${R} not_connectors.artifacts["${path}"]`;
     if (!nonEmpty(reason)) push(where, "excuse-reason", "an excuse carries its reason");
@@ -357,7 +358,7 @@ export function registryProblems({ registry, existingDirs, metadataByPath, dispo
     else if (readable(path) && !triggers.has(path)) push(where, "excuse-stale", "nothing marks this artifact as external-touching any more — drop the excuse");
     else if (readable(path) && declaredConnectors(path).length) push(where, "excuse-declares", `excused as no connector, yet its metadata.json declares connectors [${declaredConnectors(path).join(", ")}] — classify it or drop the declaration`);
   }
-  for (const p of patterns) if (p.hits === 0) push(p.where, "pattern-stale", `pattern ${JSON.stringify(p.pattern)} matches no service in the tree — drop it`);
+  for (const p of patterns) if (!livePatterns.has(p)) push(p.where, "pattern-stale", `pattern ${JSON.stringify(p.pattern)} matches no service in the tree — drop it`);
 
   return problems;
 }
@@ -377,7 +378,9 @@ export function renderClassification(registry) {
   const families = registry.families && typeof registry.families === "object" ? registry.families : {};
   const inUse = new Set(rows.map((r) => r.family));
   const lines = [];
-  lines.push(`${artifactsOf(registry).length} artifacts, ${rows.length} capability rows, ${vendors.length} connectors (${bidi} bidirectional), ${inUse.size} of ${Object.keys(families).filter((f) => !families[f]?.reserved).length} declared families in use.`);
+  lines.push(`${artifactsOf(registry).length} artifacts, ${rows.length} capability rows, ${vendors.length} connectors (${bidi} bidirectional: ${vendors.filter((v) => derived.get(v).directions.size === 2).map((v) => `\`${v}\``).join(", ") || "none"}), ${inUse.size} of ${Object.keys(families).filter((f) => !families[f]?.reserved).length} declared families in use.`);
+  lines.push("");
+  lines.push(`Coverage net — the connector-shaped tags that mark an undeclared contribution: ${TRIGGER_TAGS.map((t) => `\`${t}\``).join(", ")}; a declared connector's name as a tag marks it too.`);
   lines.push("");
   lines.push("### Family schemas");
   lines.push("");
