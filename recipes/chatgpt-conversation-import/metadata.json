@@ -13,6 +13,7 @@
     "tools": ["Python 3.10+"]
   },
   "tags": ["chatgpt", "import", "conversations", "migration", "knowledge-extraction"],
+  "connectors": ["chatgpt"],
   "difficulty": "beginner",
   "estimated_time": "20 minutes",
   "created": "2026-03-10",

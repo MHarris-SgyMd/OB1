@@ -13,6 +13,7 @@
     "tools": ["Supabase CLI"]
   },
   "tags": ["slack", "capture", "integration", "messaging"],
+  "connectors": ["slack"],
   "difficulty": "beginner",
   "estimated_time": "15 minutes",
   "created": "2026-03-12",

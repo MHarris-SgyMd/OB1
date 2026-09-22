@@ -13,6 +13,7 @@
     "tools": ["Node.js 18+"]
   },
   "tags": ["vercel", "neon", "telegram", "alternative-architecture", "mcp", "next-js", "pgvector"],
+  "connectors": ["telegram"],
   "difficulty": "intermediate",
   "estimated_time": "1 hour",
   "created": "2026-03-14",

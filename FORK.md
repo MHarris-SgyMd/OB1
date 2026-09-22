@@ -256,7 +256,7 @@ and fails a "FORK.md change N" citation with no file behind it (SMD-1917).
 | 102 | [Every knob the server reads reaches the container](changes/102-every-knob-the-server-reads-reaches.md) | SMD-1843 |
 | 103 | [Change 69's five servers name the key on 008's audit row](changes/103-change-69-s-five-servers-name-the-key-on-008.md) | SMD-1541 |
 
-Landed since the last release and numbered at the next one (SMD-1804): [SMD-1490](changes/smd-1490.md), [SMD-1804](changes/smd-1804.md), [SMD-1806](changes/smd-1806.md), [SMD-1808](changes/smd-1808.md), [SMD-1901](changes/smd-1901.md), [SMD-1903](changes/smd-1903.md), [SMD-1917](changes/smd-1917.md), [SMD-1932](changes/smd-1932.md).
+Landed since the last release and numbered at the next one (SMD-1804): [SMD-1490](changes/smd-1490.md), [SMD-1804](changes/smd-1804.md), [SMD-1806](changes/smd-1806.md), [SMD-1808](changes/smd-1808.md), [SMD-1901](changes/smd-1901.md), [SMD-1903](changes/smd-1903.md), [SMD-1917](changes/smd-1917.md), [SMD-1932](changes/smd-1932.md), [SMD-1933](changes/smd-1933.md).
 <!-- changes-index:end -->
 
 ### Files we own
@@ -271,10 +271,14 @@ server/test-stateless.mjs        # fix 1
 server/test-stats-pagination.mjs # fix 3   (new file)
 server/test-capture-atomicity.mjs# fix 5   (new file)
 db/migrations/                   # fix 9   (moved here from server/ in fix 9)
-.github/metadata.schema.json     # fix 7   (3 additive optional fields)
+.github/metadata.schema.json     # fix 7   (3 additive optional fields); SMD-1933 adds `connectors`
 .github/workflows/fork-checks.yml# fix 7   (new file)
 scripts/check-fork-consistency.mjs # fix 7 (new file)
 scripts/mechanism-yield.mjs      # SMD-1711 (new file — review-pass yield report, not a gate); window and attribution fixed SMD-1728
+scripts/connector-registry.mjs   # SMD-1933 (new file — the connector registry's rules and the spec's table renderer)
+scripts/contributions.mjs        # SMD-1933 (new file — the one walk of the contribution directories)
+docs/connector-registry.json     # SMD-1933 (new file — the connector taxonomy's one source)
+docs/connector-taxonomy.md       # SMD-1933 (new file — the spec; its tables are rendered from the JSON)
 server-portable/                 # fix 8   (new dir — parallel, does not touch server/)
 db/                              # fix 9   (new dir — schema, runner, tests)
 deploy/                          # fix 12  (new dir — compose stack, smoke test)
