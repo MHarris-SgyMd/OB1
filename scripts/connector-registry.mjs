@@ -7,22 +7,24 @@
  * five facets — family × transport × direction × cardinality × round-trip — per
  * capability, and collapses the artifacts into one connector per vendor whose
  * direction (source / sink / bidirectional) is DERIVED from its capabilities,
- * never declared twice. docs/connector-taxonomy.md is the spec; the two tables
- * it carries between marker comments are rendered from the registry by this
- * file, so the prose and the data cannot drift.
+ * never declared twice. docs/connector-taxonomy.md is the spec; the family
+ * schemas and the two tables it carries between marker comments are rendered
+ * from the registry by this file, so the prose and the data cannot drift.
  *
- *   bun scripts/connector-registry.mjs            # rewrite the tables in the spec
+ *   bun scripts/connector-registry.mjs            # rewrite the generated block in the spec
  *   bun scripts/connector-registry.mjs --check    # print the problems, exit 1 on any
  *   node scripts/connector-registry.mjs           # the same; plain fs, no Bun API
  *
  * check-fork-consistency.mjs (check 19) runs registryProblems() over the real
- * tree and holds the rendered block equal to the committed one. The coverage
- * rule is the one that bites: an artifact whose metadata.json names a service
- * that is not a model provider, the hosting or the brain's own surface, or
- * carries a connector-shaped tag, or sits in an SMD-1867 row of the SMD-1924
- * disposition table, must be classified here or excused here by name with its
- * reason — so a new vendored connector cannot land unclassified, and a
- * registry entry nothing marks as external-touching is refused too.
+ * tree and holds the rendered block equal to the committed one. Two rules
+ * bite. The declaration: a classified artifact's metadata.json `connectors`
+ * equals the vendors its capabilities name, and a contribution that declares
+ * one is classified. The net under it, for a contribution that declared
+ * nothing: a service no not-a-connector pattern covers, a connector-shaped
+ * tag or a connector's name as a tag, or a fold-in row of the SMD-1924
+ * disposition table marks it, and a marked contribution is classified here or
+ * excused here by name with its reason — so a new vendored connector cannot
+ * land unclassified.
  */
 import { readFileSync, writeFileSync, existsSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -83,6 +85,10 @@ export const QUALIFIERS = ["any", "an", "a", "the", "optional", "optionally", "l
 
 const sameSet = (a, b) => Array.isArray(a) && a.length === b.length && [...a].sort().join("\u0000") === [...b].sort().join("\u0000");
 const nonEmpty = (v) => typeof v === "string" && v.trim().length > 0;
+const listOf = (v) => (Array.isArray(v) ? v : []);
+const artifactsOf = (registry) => listOf(registry?.artifacts);
+/** The vendors an artifact's capabilities name, once each, sorted. */
+const registryVendors = (a) => [...new Set(listOf(a?.capabilities).map((c) => c?.vendor).filter(nonEmpty))].sort();
 
 export function readRegistry(root) {
   return JSON.parse(readFileSync(join(root, REGISTRY_PATH), "utf8"));
@@ -157,7 +163,7 @@ export function patternHits(service, patterns) {
   if (words[1] && QUALIFIERS.includes(words[0][0].toLowerCase().replace(/[^a-z-]/g, ""))) heads.add(words[1].index);
   const live = [], covering = [];
   for (const p of patterns) {
-    // Every match, not the leftmost: "Non-OpenAI Anthropic" has a hit inside word one and one that begins word two.
+    // Every match, not the leftmost: "Any OpenAI-compatible OpenAI gateway" hits at word two (a head) and again later.
     const hits = [...service.matchAll(p.re)];
     if (hits.length === 0) continue;
     live.push(p);
@@ -165,9 +171,6 @@ export function patternHits(service, patterns) {
   }
   return { live, covering };
 }
-
-const listOf = (v) => (Array.isArray(v) ? v : []);
-const artifactsOf = (registry) => listOf(registry?.artifacts);
 
 /**
  * Compile not_connectors.services; a pattern that does not compile is reported,
@@ -201,8 +204,8 @@ function servicePatterns(registry, problems) {
  * table whose directory exists (`existingDirs`; a row whose directory is gone
  * is registryProblems' finding, not a silent drop). Empty for a path nothing
  * marks. `patterns` is servicePatterns()'s output; every pattern a service
- * matches ANYWHERE is counted on it — liveness, which the stale rule reads, is
- * not coverage, which coveringPatterns decides — so a pattern a broader one
+ * matches ANYWHERE is returned as live — liveness, which the stale rule reads,
+ * is not coverage, which patternHits decides — so a pattern a broader one
  * shadows is still live. Tags compare lower-cased, as the patterns match
  * case-insensitively. A metadata that did not parse (`null`, check 1's
  * finding) marks nothing; one whose `services` or `tags` is not a list marks
@@ -247,8 +250,6 @@ export function derivedConnectors(registry) {
   return out;
 }
 export const connectorDirection = (directions) => (directions.size === 2 ? "bidirectional" : [...directions][0] ?? null);
-/** The vendors an artifact's capabilities name, once each. */
-const registryVendors = (a) => [...new Set(listOf(a?.capabilities).map((c) => c?.vendor).filter(nonEmpty))];
 
 /**
  * What is wrong with a registry, as `{ where, kind, msg }` — nothing when it is
@@ -257,9 +258,10 @@ const registryVendors = (a) => [...new Set(listOf(a?.capabilities).map((c) => c?
  * directory that exists, listed once, with capabilities that name exactly the
  * five facets and a fetcher from the sets and a declared family; the connectors
  * exactly the vendors used, each with the direction its capabilities derive;
- * and coverage — every external-touching contribution registered or excused,
- * never both, every registered one marked by something, every excuse and every
- * service pattern live.
+ * the declaration — every classified artifact's metadata `connectors` exactly
+ * its vendors; and coverage — every marked contribution classified or excused,
+ * never both, every excuse and every service pattern live, no pattern covering
+ * a classified vendor's own service, the disposition table present and whole.
  */
 export function registryProblems({ registry, existingDirs, metadataByPath, dispositionText }) {
   const problems = [];
@@ -300,7 +302,8 @@ export function registryProblems({ registry, existingDirs, metadataByPath, dispo
   for (const a of artifacts) {
     const where = `${R} artifacts["${a?.path}"]`;
     if (!nonEmpty(a?.path) || !PATH.test(a.path)) { push(where, "artifact-path", `path must be <category>/<slug>, got ${JSON.stringify(a?.path)}`); continue; }
-    if (NOT_CONTRIBUTIONS.includes(a.path.split("/")[1])) { push(where, "artifact-path", `${a.path.split("/")[1]} is not a contribution — a placeholder, the shared auth module or an install — and cannot be classified`); continue; }
+    const name = a.path.split("/")[1];
+    if (NOT_CONTRIBUTIONS.includes(name)) { push(where, "artifact-path", `${name} is not a contribution — a placeholder, the shared auth module or an install — and cannot be classified`); continue; }
     if (seen.has(a.path)) push(where, "artifact-duplicate", "listed twice — one entry per artifact, with every capability under it");
     else seen.set(a.path, a); // the first entry is the one the declaration is judged against
 
@@ -374,7 +377,7 @@ export function registryProblems({ registry, existingDirs, metadataByPath, dispo
   // artifact's metadata.json `connectors` is exactly the vendors its capabilities name.
   for (const [path, a] of seen) {
     if (!readable(path)) continue;
-    const vendors = [...new Set(listOf(a.capabilities).map((c) => c?.vendor).filter(nonEmpty))].sort();
+    const vendors = registryVendors(a);
     const declared = declaredConnectors(path);
     if (JSON.stringify(declared) !== JSON.stringify(vendors)) push(`${path}/metadata.json`, "connectors-field", `\`connectors\` is [${declared.join(", ")}] but ${R} classifies this artifact under [${vendors.join(", ")}] — declare exactly its connectors`);
   }

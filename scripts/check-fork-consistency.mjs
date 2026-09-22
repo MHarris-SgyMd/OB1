@@ -3590,6 +3590,16 @@ const REGISTRY_PROBES = [
   ["a capability that is a bare string", (r) => { r.artifacts[1].capabilities[0] = "acme"; r.connectors.acme.direction = "source"; }, ["capability-keys", "connectors-field"]],
   ["an artifact listed twice, the duplicate under another vendor (the first entry is judged)", (r) => { r.artifacts.push({ path: "recipes/acme-digest", capabilities: [{ vendor: "beta", family: "message-stream/chat", transport: "push", direction: "sink", cardinality: "many:1", round_trip: "read-only", fetcher: "native-driver" }] }); r.connectors.beta = { direction: "sink" }; }, ["artifact-duplicate"]],
 ];
+/** Non-probes: what the rules must accept (a `want` of []) and must not throw on. */
+const REGISTRY_NON_PROBES = [
+  ["a contribution naming only a model provider is not marked", (r) => {}, [], (t) => { t.metadataByPath.set("recipes/uses-a-model", { requires: { services: ["OpenRouter"] }, tags: ["synthesis"] }); t.existingDirs.push("recipes/uses-a-model"); }],
+  ["two patterns matching one service are both live (the narrower inside the word, covering nothing)", (r) => { r.not_connectors.services.push({ pattern: "router", reason: "overlaps openrouter on purpose" }); }, []],
+  ["a provider first and qualified after is covered", (r) => {}, [], (t) => { t.metadataByPath.set("recipes/uses-a-gateway", { requires: { services: ["Any OpenRouter-compatible LLM gateway (Ollama, etc.)", "Optional: OpenRouter (Sonar) for live search"] }, tags: ["synthesis"] }); t.existingDirs.push("recipes/uses-a-gateway"); }],
+  ["a pattern whose only match lies past the head is live, though it covers nothing", (r) => { r.not_connectors.services.push({ pattern: "sonar", reason: "a model" }); }, [], (t) => { t.metadataByPath.set("recipes/uses-a-gateway", { requires: { services: ["Optional: OpenRouter (Sonar) for live search"] }, tags: ["synthesis"] }); t.existingDirs.push("recipes/uses-a-gateway"); }],
+  ["an excuse for a directory that exists without a metadata.json waits on check 1", (r) => { r.not_connectors.artifacts["recipes/no-meta"] = "waiting on its metadata"; }, [], (t) => { t.existingDirs.push("recipes/no-meta"); }],
+  ["a registered artifact whose metadata did not parse gets no coverage verdict", (r) => {}, [], (t) => { t.metadataByPath.set("recipes/acme-digest", null); }],
+  ["a metadata whose tags and services are strings marks nothing and throws nothing", (r) => {}, [], (t) => { t.metadataByPath.set("recipes/odd-tool", { requires: { services: "Acme Chat API" }, tags: "digest" }); t.existingDirs.push("recipes/odd-tool"); }],
+];
 /** [text, want]: what dispositionPaths reads from a table — the fold-in marker in the Disposition cell under a contribution-category heading, and nothing from the Justification cell, past another heading, under `docs/drafts/`, or from a bare mention or a negation. */
 const DISPOSITION_PROBES = [
   ["### `integrations/` (2)\n\n| Artifact | Disposition | Justification |\n|---|---|---|\n| `a-capture` | keep + audited → fold-in **SMD-1867** | x |\n| `b-tool` | keep + audited | mentioned beside SMD-1867 and SMD-1924; a tool, not a fold-in |\n| `e-graph` | keep + audited | a graph view; not an SMD-1867 adapter |\n\n### `recipes/` (1)\n\n| `c-import` | keep + audited → SMD-1867 candidate | x |\n| `f-import` | keep + audited *(drop one sub-file)* → SMD-1867 candidate | x |\n| `h-import` | remove | superseded by the seam; was the SMD-1867 candidate |\n| `i-import` | remove — was the SMD-1867 candidate | superseded by the seam |\n| `g-ext` | keep + audited | A capture adapter under the SMD-1867 contract, not an ad-hoc integration. |\n\n### `docs/drafts/` (1)\n\n| `sketch.md` | keep + audited → SMD-1867 candidate | not a contribution directory |\n\n## Notes\n\n| `d-tool` | remove → fold-in **SMD-1867** | was considered |\n", ["integrations/a-capture", "recipes/c-import", "recipes/f-import"]],
@@ -3601,34 +3611,13 @@ function checkConnectorRegistry() {
   const kindsOf = (registry, tree = PROBE_TREE()) => [...new Set(registryProblems({ registry, ...tree }).map((p) => p.kind))].sort();
   const base = registryProblems({ registry: PROBE_REGISTRY(), ...PROBE_TREE() });
   if (base.length) return fail(SELF, `check 19's baseline registry fails its own rules (${base.map((p) => `${p.kind}: ${p.msg}`).join("; ")}) — the mutants below measure nothing`);
-  // A model-provider service on an unclassified contribution triggers nothing: the pattern covers it.
-  const quiet = PROBE_TREE(); quiet.metadataByPath.set("recipes/uses-a-model", { requires: { services: ["OpenRouter"] }, tags: ["synthesis"] }); quiet.existingDirs.push("recipes/uses-a-model");
-  if (registryProblems({ registry: PROBE_REGISTRY(), ...quiet }).length) fail(SELF, "check 19 marks a contribution that names only a model provider as external-touching (its own non-probe)");
-  // Two patterns covering one service are both live: the stale rule counts every match, not the first.
-  const overlap = PROBE_REGISTRY(); overlap.not_connectors.services.push({ pattern: "router", reason: "overlaps openrouter on purpose (live inside the word, covering nothing)" });
-  if (registryProblems({ registry: overlap, ...PROBE_TREE() }).length) fail(SELF, "check 19 calls a service pattern stale when a broader pattern also matches its only service (its own non-probe)");
-  // A provider qualified after itself is covered: the pattern matches within the first two words.
-  const head = PROBE_TREE(); head.existingDirs.push("recipes/uses-a-gateway"); head.metadataByPath.set("recipes/uses-a-gateway", { requires: { services: ["Any OpenRouter-compatible LLM gateway (Ollama, etc.)", "Optional: OpenRouter (Sonar) for live search"] }, tags: ["synthesis"] });
-  if (registryProblems({ registry: PROBE_REGISTRY(), ...head }).length) fail(SELF, "check 19 marks a service string that names a provider first and qualifies it after (its own non-probe)");
-  // A pattern that matches only past the head is live (the stale rule), though it covers nothing (the coverage rule).
-  const tail = PROBE_REGISTRY(); tail.not_connectors.services.push({ pattern: "sonar", reason: "a model" });
-  const tailTree = PROBE_TREE(); tailTree.existingDirs.push("recipes/uses-a-gateway"); tailTree.metadataByPath.set("recipes/uses-a-gateway", { requires: { services: ["Optional: OpenRouter (Sonar) for live search"] }, tags: ["synthesis"] });
-  if (registryProblems({ registry: tail, ...tailTree }).length) fail(SELF, "check 19 calls a pattern stale whose only match lies past a service's first two words (its own non-probe)");
-  // An excuse for a directory that exists without a metadata.json is check 1's finding, not a stale excuse.
-  const nometa = PROBE_TREE(); nometa.existingDirs.push("recipes/no-meta"); const nometaReg = PROBE_REGISTRY(); nometaReg.not_connectors.artifacts["recipes/no-meta"] = "waiting on its metadata";
-  if (registryProblems({ registry: nometaReg, ...nometa }).length) fail(SELF, "check 19 calls an excuse stale for a directory that exists without a metadata.json (its own non-probe)");
   for (const [text, want] of DISPOSITION_PROBES) {
     const got = dispositionPaths(text);
     if (JSON.stringify(got) !== JSON.stringify(want)) fail(SELF, `check 19's disposition reader returns [${got}], expected [${want}] (its own probe)`);
   }
-  // A registered artifact whose metadata did not parse (null) gets no coverage verdict — check 1 names the file.
-  const unread = PROBE_TREE(); unread.metadataByPath.set("recipes/acme-digest", null);
-  if (registryProblems({ registry: PROBE_REGISTRY(), ...unread }).length) fail(SELF, "check 19 passes a coverage verdict on a registered artifact whose metadata.json did not parse (its own non-probe)");
-  // A metadata whose tags or services is a string (check 1's finding) marks nothing and throws nothing.
-  const odd = PROBE_TREE(); odd.existingDirs.push("recipes/odd-tool"); odd.metadataByPath.set("recipes/odd-tool", { requires: { services: "Acme Chat API" }, tags: "digest" });
-  try { if (registryProblems({ registry: PROBE_REGISTRY(), ...odd }).length) fail(SELF, "check 19 marks a contribution whose tags and services are strings (its own non-probe)"); } catch (e) { fail(SELF, `check 19 throws on a metadata whose tags or services is a string: ${e.message} (its own non-probe)`); }
-  // A fourth element: null runs the mutant on a null registry; a function reshapes the tree.
-  for (const [why, mutate, want, tree] of REGISTRY_PROBES) {
+  // A fourth element: null runs the mutant on a null registry; a function reshapes the tree. A `want` of []
+  // is a non-probe — a case the rules must accept and not throw on.
+  for (const [why, mutate, want, tree] of [...REGISTRY_PROBES, ...REGISTRY_NON_PROBES]) {
     let r = PROBE_REGISTRY();
     if (tree === null) r = null; else mutate(r);
     const t = PROBE_TREE();
