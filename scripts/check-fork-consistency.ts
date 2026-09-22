@@ -158,6 +158,18 @@
  *      renders. The rules are registryProblems, one pure function the
  *      renderer runs too (SMD-1933); no exceptions beyond the registry's own
  *      named excuses
+ *  20. a .sql file never destroys rows a brain already holds — CLAUDE.md's
+ *      SQL-safety guard rail read as statements, not words: no DROP TABLE, no
+ *      DROP DATABASE or DROP SCHEMA, no TRUNCATE with a table after it (a
+ *      trigger event `BEFORE TRUNCATE ON t`, a privilege `GRANT TRUNCATE ON` and
+ *      the value `'TRUNCATE'` are not it), no DELETE FROM whose statement — to
+ *      its `;` or the `)` closing its CTE — has no WHERE; comments excepted by
+ *      the literal-aware strip, string literals and dollar-quoted bodies read
+ *      (an EXECUTE string runs) — in every .sql the tree holds, db/migrations/
+ *      included (the fork's migrations DROP FUNCTION and DROP TRIGGER, which
+ *      destroy no row, and none drops a table); the rules are db/config.mjs's
+ *      DESTRUCTIVE_SQL_RULES through destructiveSqlIn, with counted
+ *      per-(file, rule) exceptions as 7's (none today) (SMD-1936)
  *
  * Run: bun scripts/check-fork-consistency.ts   (a Bun script — TypeScript, type-checked in CI
  * beside its run (SMD-1870); checks 13, 14 and 18 parse YAML with Bun.YAML)
@@ -168,7 +180,7 @@ import { readFileSync, existsSync, readdirSync, statSync, lstatSync } from "node
 import { execFileSync } from "node:child_process";
 import { join, dirname, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { coreColumnCommentStatement, coreFunctionStatement, LOCAL_PROVIDER_SERVICES, ownedColumnCommentsIn, ownedFunctionsIn, supabaseIsmsIn } from "../db/config.mjs";
+import { coreColumnCommentStatement, coreFunctionStatement, DESTRUCTIVE_SQL_RULES, destructiveSqlIn, LOCAL_PROVIDER_SERVICES, ownedColumnCommentsIn, ownedFunctionsIn, supabaseIsmsIn } from "../db/config.mjs";
 import { CHANGES_DIR, END as INDEX_END, START as INDEX_START, FIRST_FILED, classifyChanges, indexSpan, pad3, readChangeEntries, renderIndex, ticketsOf } from "./fork-index.ts";
 import { FORK_VERSION, migrationSha, readReleases, semverCompare } from "../db/version.mjs";
 import { fragmentProblems } from "./fragments.ts";
@@ -3753,6 +3765,132 @@ function checkConnectorRegistry() {
   if (problems.length === 0 && span.block !== renderClassification(registry)) fail(SPEC_PATH, `the generated tables differ from what ${REGISTRY_PATH} renders — run \`bun scripts/connector-registry.ts\` (SMD-1933)`);
 }
 checkConnectorRegistry();
+
+// ── 20: a .sql file never destroys rows a brain already holds ────────────────
+//
+// SMD-1936. CLAUDE.md's guard rail and CONTRIBUTING.md's review checklist said
+// "no DROP TABLE, DROP DATABASE, TRUNCATE or unqualified DELETE FROM in SQL
+// files" and nothing on this fork checked it. Upstream's PR gate
+// (ob1-gate-v2.yml, rule 5) greps a PR's changed .sql files for the words on
+// any line, comments included, and calls a DELETE unqualified when its own
+// line has no WHERE; the fork does not run that gate (FORK.md's detach note:
+// it enforces contribution rules this fork does not follow), and
+// read that literally the rail fails the one file that applies it — 046's
+// `BEFORE TRUNCATE ON thought_audit` trigger, which REFUSES truncation, was
+// flagged twice in SMD-1730's review against the sentence — and 034's
+// `DELETE FROM query_log` with its WHERE on the next line. So the rule is
+// stated as what it means, a SQL file must never destroy rows a brain already
+// holds, and read as STATEMENTS: db/config.mjs's DESTRUCTIVE_SQL_RULES through
+// destructiveSqlIn — the comment-stripped text (stripSqlComments, literal-
+// aware, so a header quoting a statement to say why the file has none is not
+// a hit), a TRUNCATE counted only when a table follows it (a trigger event, a
+// privilege and the value `'TRUNCATE'` are not it), a DELETE FROM counted only
+// when its statement — to the `;`, or the `)` that closes its CTE — carries no
+// WHERE, DROP TABLE and DROP DATABASE/SCHEMA always, string literals read
+// because an EXECUTE string runs. test-schema does not repeat the scan: the
+// migrations are in this check's scope as files, and a substituted value
+// (`${EMBEDDING_DIM}`) is never one of these statements.
+//
+// Scope: every .sql the tree holds — the seven category directories, docs/,
+// deploy/ AND db/migrations/, the build and tool directories check 15 skips
+// left out. The fork's migrations DROP FUNCTION and DROP TRIGGER deliberately
+// (032/033/046's ACL replays, 046's own trigger), which the rail does not name
+// and which destroy no row; no migration drops a table — a scratch table is a
+// TEMP table ON COMMIT DROP (016's `_rte_in`) — and the one that once did
+// (change 61's dead `DROP TABLE IF EXISTS` of a temp name) is gone, so the
+// migrations are held to the same rule with no carve-out. Outside the rule, by
+// the rail's own words ("in SQL files"): SQL inside .ts (compat's suite drops
+// the tables it makes, test-schema empties the one it owns) and the heredocs
+// of a recipe's init .sh. Exceptions are per (file, rule) and COUNTED as check
+// 7's are; the list is empty, and a file that needs one says why beside it.
+
+/** Statements each rule must catch — the check's own negative tests, run through the rules every time. */
+const DESTRUCTIVE_SQL_PROBES: [string, string][] = [
+  ["truncate", "TRUNCATE thoughts;"],
+  ["truncate", "truncate table only public.thoughts restart identity cascade;"],
+  ["truncate", 'TRUNCATE "thoughts";'],
+  ["truncate", "BEGIN\n  TRUNCATE\n    thought_chunks;\nEND"],
+  ["truncate", "EXECUTE 'TRUNCATE ' || quote_ident(p_table);"],
+  ["truncate", "EXECUTE format('TRUNCATE %I', p_table);"],
+  ["drop-table", "DROP TABLE IF EXISTS thoughts CASCADE;"],
+  ["drop-table", "drop table pg_temp.scratch;"],
+  ["drop-database", "DROP DATABASE open_brain;"],
+  ["drop-database", "DROP SCHEMA public CASCADE;"],
+  ["unqualified-delete", "DELETE FROM thoughts;"],
+  ["unqualified-delete", "DELETE FROM thoughts RETURNING id;"],
+  ["unqualified-delete", "delete from only thoughts"],
+  ["unqualified-delete", "DELETE FROM thoughts -- WHERE id = $1\n;"],
+  ["unqualified-delete", "WITH gone AS (DELETE FROM thoughts RETURNING id) SELECT count(*) FROM gone WHERE id IS NOT NULL;"],
+  ["unqualified-delete", "EXECUTE format('DELETE FROM %I', p_table);"],
+];
+/** SQL this repository writes that no rule may catch. */
+const DESTRUCTIVE_SQL_NON_PROBES = [
+  "-- TRUNCATE thoughts; is what this file must never run",
+  "/* DROP TABLE thoughts; DELETE FROM thoughts; */",
+  "CREATE TRIGGER thought_audit_immutable_truncate\n  BEFORE TRUNCATE ON thought_audit\n  FOR EACH STATEMENT EXECUTE FUNCTION thought_audit_refuse_mutation();",
+  "CREATE TRIGGER t AFTER INSERT OR DELETE OR TRUNCATE ON thoughts FOR EACH STATEMENT EXECUTE FUNCTION f();",
+  "GRANT SELECT, INSERT, TRUNCATE ON thoughts TO community;",
+  "REVOKE TRUNCATE, DELETE ON thoughts FROM PUBLIC;",
+  "CASE WHEN TG_OP = 'TRUNCATE' THEN 'thought_audit_immutable_truncate' ELSE 'thought_audit_immutable' END",
+  "DELETE FROM thoughts WHERE id = $1;",
+  "DELETE FROM query_log\n   WHERE logged_at < now() - make_interval(days => p_keep_days);",
+  "DELETE FROM _rte_in WHERE true;",
+  "DELETE FROM _rte_in a USING _rte_in b\n   WHERE a.ntype = b.ntype AND a.nname = b.nname;",
+  "WITH d AS (DELETE FROM ob1_entity_edges WHERE thought_id = p_thought_id RETURNING from_entity_id) SELECT 1;",
+  "DELETE FROM thoughts WHERE id IN (SELECT id FROM thoughts ORDER BY created_at LIMIT 1);",
+  "EXECUTE 'DELETE FROM ' || quote_ident(p_table) || ' WHERE id = $1' USING p_id;",
+  "EXECUTE format('DELETE FROM %I WHERE id = $1', p_table) USING p_id;",
+  "CREATE TEMP TABLE IF NOT EXISTS _rte_in (name text) ON COMMIT DROP;",
+  "DROP TRIGGER IF EXISTS thought_audit_immutable_truncate ON thought_audit;",
+  "DROP FUNCTION IF EXISTS update_thought(uuid, text, jsonb);",
+  "DROP POLICY IF EXISTS p ON t;",
+  "ALTER TABLE thoughts DROP CONSTRAINT IF EXISTS thoughts_derivation_layer_check;",
+  "REFERENCES thoughts(id) ON DELETE CASCADE",
+  "CREATE POLICY p ON t FOR DELETE USING (true);",
+  "COMMENT ON COLUMN thoughts.truncated_at IS 'when the text was cut';",
+  "COMMENT ON FUNCTION prune_query_log(int) IS 'Delete query_log rows older than p_keep_days. The DELETE is always bounded by logged_at.';",
+];
+/** file → rule → the reason and the exact hit count; a hit past the count fails, a count no hit reaches fails as stale. Empty: no file in the tree needs one. */
+const DESTRUCTIVE_SQL_EXCEPTIONS = new Map<string, Record<string, CountedException>>([]);
+
+function checkDestructiveSql() {
+  const rules = new Set(DESTRUCTIVE_SQL_RULES.map((r) => r.name));
+  for (const [rule, probe] of DESTRUCTIVE_SQL_PROBES) {
+    if (!rules.has(rule)) { fail(SELF, `check 20's probe names rule '${rule}', which DESTRUCTIVE_SQL_RULES does not define (its own probe)`); continue; }
+    if (!destructiveSqlIn(probe).some((h) => h.rule === rule)) fail(SELF, `check 20's rule '${rule}' no longer catches its probe: ${JSON.stringify(probe)} (its own probe)`);
+  }
+  for (const text of DESTRUCTIVE_SQL_NON_PROBES) {
+    const [hit] = destructiveSqlIn(text);
+    if (hit) fail(SELF, `check 20's rule '${hit.rule}' catches SQL this repository writes: ${JSON.stringify(text)} (its own probe)`);
+  }
+  // The line is the statement's own, through comments and a plpgsql body alike.
+  const lined = destructiveSqlIn("-- a header\nCREATE FUNCTION f() RETURNS void LANGUAGE plpgsql AS $$\nBEGIN\n  -- TRUNCATE in prose\n  TRUNCATE thoughts;\nEND;\n$$;\n");
+  if (lined.length !== 1 || lined[0]!.line !== 5 || lined[0]!.rule !== "truncate") fail(SELF, `check 20 reports ${JSON.stringify(lined.map((h) => `${h.rule}@${h.line}`))} for a TRUNCATE on line 5 of a function body, expected ["truncate@5"] (its own probe)`); // one element when length === 1
+
+  const counts = new Map<string, number>();
+  const files = walk(ROOT, [], /\.sql$/).filter((f) => !relOf(f).split("/").some((seg) => SKIP_DIRS.has(seg)));
+  if (files.length === 0) fail(SELF, "check 20 found no .sql file in the tree — the walk or its filter is broken, and the rule would pass everything");
+  for (const file of files) {
+    const rel = relOf(file);
+    for (const h of destructiveSqlIn(readFileSync(file, "utf8"))) {
+      const key = `${rel} ${h.rule}`;
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+      if (DESTRUCTIVE_SQL_EXCEPTIONS.get(rel)?.[h.rule]) continue;
+      fail(`${rel}:${h.line}`, `${h.msg} (SMD-1936)`);
+    }
+  }
+  for (const [rel, byRule] of DESTRUCTIVE_SQL_EXCEPTIONS) {
+    for (const [rule, { why, lines }] of Object.entries(byRule)) {
+      const seen = counts.get(`${rel} ${rule}`) ?? 0;
+      if (seen !== lines) {
+        fail(rel, seen === 0
+          ? `listed as a destructive-SQL exception for '${rule}' (${why}) but matches nothing — remove it from DESTRUCTIVE_SQL_EXCEPTIONS`
+          : `destructive-SQL exception for '${rule}' (${why}) covers ${lines} statement(s) but ${seen} match — a new statement beside the documented one, or the exception's count is stale`);
+      }
+    }
+  }
+}
+checkDestructiveSql();
 
 // No display-time filter. One excused `_template` violations, for a placeholder
 // link that contributionDirs() has skipped since the filter was written — so

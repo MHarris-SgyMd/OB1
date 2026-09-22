@@ -1922,3 +1922,84 @@ export function supabaseIsmsIn(text) {
   }
   return hits.sort((a, b) => a.line - b.line);
 }
+
+/**
+ * The statements a `.sql` file may never run, because each destroys rows a
+ * brain already holds — CLAUDE.md's SQL-safety guard rail, read as what it
+ * means (SMD-1936). A community file is pasted by hand into a running brain and
+ * a migration is applied to every operator's, so a file that destroys rows
+ * destroys a stranger's memory with no undo. The rail's four shapes, with DROP
+ * SCHEMA beside DROP DATABASE (`DROP SCHEMA public CASCADE` is the reset that
+ * takes every table with it), read from the comment-stripped text as
+ * STATEMENTS rather than words: a `TRUNCATE` is a hit only when a table follows
+ * it — `TABLE`, `ONLY`, a name, a `%I` placeholder or the `' ||` of dynamic SQL
+ * — so a trigger event (`BEFORE TRUNCATE ON t`: 046's refusing trigger, the rule
+ * applied), a privilege (`GRANT TRUNCATE ON`) and the value `TG_OP = 'TRUNCATE'`
+ * are not it; a `DELETE FROM` is a hit only when its statement — to its `;`, or
+ * to the `)` that closes the CTE it sits in — carries no WHERE, so 034's
+ * `DELETE FROM query_log` with the WHERE on the next line passes where
+ * upstream's same-line grep failed it, and `DELETE FROM t;` and `DELETE FROM t
+ * RETURNING id;` fail; DROP TABLE and DROP DATABASE/SCHEMA always. String
+ * literals are read, as SUPABASE_SQL_RULES reads them: `EXECUTE 'TRUNCATE ' ||
+ * quote_ident(t)` runs the truncate. A `--` comment quoting a statement is not
+ * a hit, so a header may say why the file has none. check-fork-consistency
+ * check 20 holds every .sql in the tree to these through destructiveSqlIn().
+ */
+export const DESTRUCTIVE_SQL_RULES = Object.freeze([
+  Object.freeze({ name: "drop-table",
+    msg: "drops a table — a SQL file adds to a brain and never removes what it holds (CLAUDE.md's SQL-safety rail: a file must never destroy existing rows); a scratch table is `CREATE TEMP TABLE … ON COMMIT DROP`, as migration 016's `_rte_in` is, and a table an operator no longer wants is theirs to drop by hand, outside any file" }),
+  Object.freeze({ name: "drop-database",
+    msg: "drops a database or a schema — every table in it and every row with it (CLAUDE.md's SQL-safety rail: a file must never destroy existing rows); no file in this repository builds or resets a database, and an operator's reset is theirs to run by hand" }),
+  Object.freeze({ name: "truncate",
+    msg: "truncates a table (CLAUDE.md's SQL-safety rail: a file must never destroy existing rows); a trigger event (`BEFORE TRUNCATE ON t`, which REFUSES it) and a privilege (`GRANT TRUNCATE ON`) are not this statement and pass; a word in prose belongs in a `--` comment, not a string literal, and an `EXECUTE` string runs" }),
+  Object.freeze({ name: "unqualified-delete",
+    msg: "a DELETE FROM whose statement has no WHERE clause — every row of the table (CLAUDE.md's SQL-safety rail: a file must never destroy existing rows); name the rows (`WHERE id = $1`; a `WHERE true` on a TEMP table the file itself made, as 016's `_rte_in`, is the letter of the rule), on any line of the statement, and an `EXECUTE` string or a `format()` template is read to its `;` or closing `)` like any other" }),
+]);
+/**
+ * What may follow TRUNCATE for it to be the statement: the TABLE/ONLY keywords,
+ * then a bare or quoted name that is not the keyword ending a trigger event or a
+ * privilege list (`ON`, `OR`, `TO`, …), a format() placeholder, or the closing
+ * quote and `||` of a statement built by concatenation.
+ */
+const TRUNCATE_TARGET = String.raw`\bTRUNCATE\b\s*(?:(?:TABLE|ONLY)\s+)*(?:"|%[Is]|'\s*\|\||(?!(?:ON|OR|TO|FROM|AND|THEN|ELSE|END|IN|IS|WHEN)\b)[A-Za-z_][\w$.]*)`;
+/**
+ * The rest of the statement that begins at `from`: to its `;`, to the `)` that
+ * closes the parenthesis it sits in (a CTE's `WITH d AS (DELETE FROM …)`, a
+ * `format('DELETE FROM %I', t)`), or the end of the text — parentheses opened
+ * inside it balanced, so a `WHERE id IN (SELECT …)` is read whole.
+ */
+function statementAfter(sql, from) {
+  let depth = 0;
+  for (let i = from; i < sql.length; i++) {
+    const c = sql[i];
+    if (c === "(") depth++;
+    else if (c === ")") { if (depth === 0) return sql.slice(from, i); depth--; }
+    else if (c === ";") return sql.slice(from, i);
+  }
+  return sql.slice(from);
+}
+/**
+ * Every DESTRUCTIVE_SQL_RULES hit in `text`: [{ rule, line, msg }], line numbers
+ * in the source (stripSqlComments keeps newlines), one per (rule, line), sorted
+ * by line. Comments excepted; string literals and dollar-quoted bodies read.
+ */
+export function destructiveSqlIn(text) {
+  const sql = stripSqlComments(text);
+  const byName = new Map(DESTRUCTIVE_SQL_RULES.map((r) => [r.name, r]));
+  const seen = new Set();
+  const hits = [];
+  const hit = (name, index) => {
+    const line = sql.slice(0, index).split("\n").length;
+    const key = `${name}@${line}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    hits.push({ rule: name, line, msg: byName.get(name).msg });
+  };
+  for (const m of sql.matchAll(/\bDROP\s+TABLE\b/gi)) hit("drop-table", m.index);
+  for (const m of sql.matchAll(/\bDROP\s+(?:DATABASE|SCHEMA)\b/gi)) hit("drop-database", m.index);
+  for (const m of sql.matchAll(new RegExp(TRUNCATE_TARGET, "gi"))) hit("truncate", m.index);
+  for (const m of sql.matchAll(/\bDELETE\s+FROM\b/gi)) {
+    if (!/\bWHERE\b/i.test(statementAfter(sql, m.index + m[0].length))) hit("unqualified-delete", m.index);
+  }
+  return hits.sort((a, b) => a.line - b.line);
+}
