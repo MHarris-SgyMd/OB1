@@ -115,10 +115,10 @@ on the shim against their own schemas — the migrated files this shim is judged
 | | |
 | --- | --- |
 | Verbs | `from` `select` `insert` `update` `upsert` `delete` `rpc` |
-| Filters | `eq` `neq` `gt` `gte` `lt` `lte` `like` `ilike` `is` `in` `contains` `match` `or` `not` |
+| Filters | `eq` `neq` `gt` `gte` `lt` `lte` `like` `ilike` `is` `in` `contains` `match` `or` `not` — `.or()` with `and(…)`, `or(…)`, `not.and(…)` grouping to any depth and `col.in.(a,b)` lists (SMD-1798) |
 | Filter columns | a column, or PostgREST's JSON path — `metadata->>key`, `meta->a->>key` — in the comparison filters, `is`, `in`, `match`, `.or()` terms and `.order()`; not `.contains()`, which is containment with the column's own operator |
 | Modifiers | `order` `limit` `range` `single` `maybeSingle` `count` `head` |
-| Embedding | one hop: `relation (cols)`, `alias:fk_column (cols)`, `relation(*)` — through the foreign key the catalog finds; many-to-one an object or `null`, one-to-many an array or `[]` |
+| Embedding | `relation (cols)`, `alias:fk_column (cols)`, `relation(*)`, nested to any depth — through the foreign key the catalog finds; many-to-one an object or `null`, one-to-many an array or `[]`; `relation!inner (…)` keeps only the rows that have an embedded row (an `EXISTS`, nested with the embeds), `relation!fk_name (…)` and `relation!fk_column (…)` choose the key where two join the tables (SMD-1798) |
 | Arrays | a JavaScript array is bound by the column's or the function argument's declared type: an array literal for `text[]`, JSON for `jsonb`, JSON text for `vector` |
 
 Behaviours that are easy to get wrong and are pinned by tests: `range()` is
@@ -166,14 +166,17 @@ call; a table without one keeps `SELECT *`.
 
 Each of these throws with an explanation instead of guessing:
 
-- **A nested embed, or an embedding hint** — `applications!inner(*,
-  job_postings(*))`, `graph_nodes!graph_edges_target_node_id_fkey(…)`. One hop is
-  served through the catalog's foreign-key read (above); a second hop, `!inner`
-  and a named key are not, nor is a relation with no foreign key to the table or
-  with two (name the column: `alias:fk_column (…)`), nor an embed in a
-  `RETURNING` list.
-- **Nested `.or()`** — `or(and(a.eq.1,b.eq.2),c.eq.3)` needs a real parser. The flat
-  form, which is the only one this repo uses, works.
+- **An embed the catalog cannot join** — a relation with no foreign key to the
+  table it sits in, or with two and no hint (name the column, `alias:fk_column
+  (…)`, or the key, `relation!fk_name (…)`), a hint that names no key, a table
+  embedded in itself by name, an embed in a `RETURNING` list. Nested embeds
+  (`applications!inner(*, job_postings!inner(*, companies!inner(*)))`) and the
+  hints `!inner`, `!fk_name`, `!fk_column` and `!left` are served since
+  SMD-1798 (the table below).
+- **A filter on an embedded column** — `.neq("thoughts.sensitivity_tier", …)`
+  beside `thoughts!inner(…)`: the dotted name is refused as an identifier. Read
+  the embedded rows and filter them, or ask in two queries (enhanced-mcp's
+  `graph_search` does).
 - **A JSON path ending in `->`** — `meta->flag` yields jsonb, and what a bound value
   means against it depends on the value's JavaScript type. End the path in `->>`
   for the key's text, or use `.contains()`. An array index (`->0`), and a path in
