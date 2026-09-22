@@ -38,9 +38,11 @@
  * the thought by (type, lower-cased name) and (relation, from, to), the
  * highest confidence kept and aliases unioned, before the database applies its
  * own rule; a mention found in three windows is one entity and one mention.
- * The one thing per-window extraction cannot see is a relation whose two
- * endpoints are named in different windows — measured, and the loss stated,
- * in evals/README.md.
+ * A call that ends at its budget is made once more under a frequency penalty
+ * (`RUNAWAY_PENALTY`): the runaways are repetition, and the retry is what
+ * reached the thoughts no window size did — 27 of 32 against 2. The one thing
+ * per-window extraction cannot see is a relation whose two endpoints are named
+ * in different windows — measured, and the loss stated, in evals/README.md.
  */
 
 import { refuseEgress, type EmbedConfig } from "./embed.ts";
@@ -80,16 +82,10 @@ export const MAX_NAME_CHARS = 200;
 export type ExtractedEntity = { name: string; type: EntityType; confidence: number; aliases: string[] };
 export type ExtractedRelation = { from: string; to: string; relation: Relation; confidence: number };
 /** One window's own answer, kept beside the merged result: the derivation record (SMD-1731) the worker dumps. */
-export type ExtractionWindow = {
+export type ExtractionWindow = Pick<Extraction, "entities" | "relations" | "rejected" | "malformed" | "retried"> & {
   index: number;
   /** chunk.ts's estimate of the text sent. */
   tokens: number;
-  entities: ExtractedEntity[];
-  relations: ExtractedRelation[];
-  rejected: { entities: number; relations: number };
-  malformed: boolean;
-  /** Set when this window's first call ran to its budget and was made again with the penalty. */
-  retried?: true;
   ms: number;
 };
 export type Extraction = {
@@ -288,6 +284,8 @@ function clampConfidence(v: unknown): number {
 }
 
 const EMPTY = (): Extraction => ({ entities: [], relations: [], rejected: { entities: 0, relations: 0 }, malformed: false, windows: 1 });
+/** An answer that was not an extraction: nothing found, and `malformed` so the thought is not recorded terminal on it. */
+const MALFORMED = (): Extraction => ({ ...EMPTY(), malformed: true });
 
 /**
  * Parse the model's answer into what the tables accept. Lenient about shape
@@ -298,22 +296,21 @@ const EMPTY = (): Extraction => ({ entities: [], relations: [], rejected: { enti
  * entities resolved.
  */
 export function parseExtraction(raw: string): Extraction {
-  const empty = EMPTY();
   const text = raw.trim().replace(/^```(?:json)?\s*\n?/, "").replace(/\n?\s*```$/, "");
-  if (!text) return { ...empty, malformed: true };
+  if (!text) return MALFORMED();
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
   } catch {
-    return { ...empty, malformed: true };
+    return MALFORMED();
   }
-  if (!isRecord(parsed)) return { ...empty, malformed: true };
+  if (!isRecord(parsed)) return MALFORMED();
 
   // The shape requires an `entities` array. `{}`, a capitalised key, or
   // `{"error": …}` is not "nothing found" — it is an answer that was not an
   // extraction, and recording it as empty would make the thought terminal with
   // nothing in it.
-  if (!Array.isArray(parsed.entities)) return { ...empty, malformed: true };
+  if (!Array.isArray(parsed.entities)) return MALFORMED();
   const out = EMPTY();
   const seen = new Map<string, number>();
   {
@@ -472,7 +469,7 @@ async function extractOnce(text: string, cfg: EmbedConfig, timeoutMs: number, pa
   // A cut answer is a runaway only when the call was budgeted: without a
   // budget the provider's own limit is what `length` names.
   const runaway = budget && d?.choices?.[0]?.finish_reason === "length";
-  if (typeof answer !== "string") return { ...EMPTY(), malformed: true, runaway };
+  if (typeof answer !== "string") return { ...MALFORMED(), runaway };
   return { ...parseExtraction(answer), runaway };
 }
 

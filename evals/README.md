@@ -1401,13 +1401,17 @@ call, sequential on an otherwise idle Ollama. "Extracted" is the thought
 written through `record_thought_entities`; "malformed" is a thought at least
 one of whose calls ran to its budget:
 
-| arm | extracted | malformed | median s | total s | mean mentions | mean edges | calls (that run's column counted windows, and retried thoughts, not retry calls; the harness now counts every call) |
+| arm | extracted | malformed | median s | total s | mean mentions | mean edges | calls |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | `whole+budget` (one call, budgeted) | 2/32 | 30 | 64.2 | 2,047 | 12.0 | 8.5 | 32 |
 | `w1200` (the shipped window) | 10/32 | 22 | 44.5 | 1,799 | 20.1 | 18.6 | 58 |
 | `w600` | 13/32 | 19 | 62.6 | 2,392 | 20.6 | 21.3 | 132 |
 | `whole+p` (one call, a penalised retry on a runaway) | 27/32 | 4 (+1 timed out) | 79.5 | 2,963 | 12.0 | 9.1 | 31 window calls; 29 thoughts retried |
 | **`w1200p` (shipped: the window and the retry)** | **27/32** | 5 | 75.8 | 2,728 | 17.1 | 15.1 | 58 window calls; 22 thoughts retried |
+
+The `calls` column of that run counted windows, and its retry figures count
+thoughts retried, not retry calls; the harness has counted every call since
+the fourth review pass, so a re-run's column will read higher for the `p` arms.
 
 What the rows say, read together:
 
