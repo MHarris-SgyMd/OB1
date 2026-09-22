@@ -82,7 +82,7 @@ import { fileURLToPath } from "node:url";
 import { loadEnv } from "./env.ts";
 import { embed, cosine, parseSpec } from "./lib.ts";
 import { loadLinearCorpus, linearThoughtText, insertLinearThought, entityAnswersPath, readEntityAnswers, cachedDocumentVectors, linearVectorCachePath } from "./linear-corpus.ts";
-import { refuseEgress, resolveEmbedConfig } from "../server-portable/embed.ts";
+import { refuseEgress, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { mayLeaveBox } from "../server-portable/egress.ts";
 import { extractEntities, extractionKey } from "../server-portable/entities.ts";
 import { requireDatabaseUrl, resetSchema } from "../db/test-support.ts";
@@ -150,7 +150,7 @@ const SYN_REPEAT = Number(process.env.OB1_GRAPH_SCALE_REPEAT ?? 5); // timed run
 const EMBED_MODEL = process.env.OB1_EVAL_EMBED ?? "qwen3-embedding:4b@1024";
 const spec = parseSpec(EMBED_MODEL);
 const DIM = spec.dims ?? Number(process.env.OB1_EMBEDDING_DIM || 1024); // "" is unset, not zero; the first vector is checked against this below
-const cfg = resolveEmbedConfig(process.env);
+const cfg = resolveEmbedConfig(process.env as EmbedEnv);
 const { path: corpusPath, docs } = SCALE ? { path: "(synthetic)", docs: [] as ReturnType<typeof loadLinearCorpus>["docs"] } : loadLinearCorpus();
 const answersPath = entityAnswersPath(cfg.metadataModel);
 

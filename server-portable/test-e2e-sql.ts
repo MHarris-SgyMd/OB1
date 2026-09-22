@@ -101,6 +101,10 @@ process.env.MCP_ACCESS_KEY = "e2e-key";
 // [N] can exercise the real write+join path; the OFF guarantee — that the guard
 // writes nothing when unset — is a pure unit test in test-server.ts.
 process.env.OB1_QUERY_LOG = "on";
+// A named tier so [10b] can prove the server stamps query_log.tier from OB1_TIER
+// (SMD-1806). Frozen at boot with the rest; every row this suite writes is
+// 'canary'. No other section asserts tier, so the value is free to set here.
+process.env.OB1_TIER = "canary";
 delete process.env.SUPABASE_URL;
 delete process.env.SUPABASE_SERVICE_ROLE_KEY;
 
@@ -547,6 +551,54 @@ console.log("\n[10] query log: a search and its follow-up fetch, recorded and jo
     SELECT tool, target_id FROM query_log WHERE kind = 'action' AND tool LIKE 'update_thought%' ORDER BY tool`;
   assert(editRows.length === 2 && editRows[0].tool === "update_thought" && editRows[0].target_id === builtId && editRows[1].tool === "update_thought/supersedes" && editRows[1].target_id === hitId,
     `the edit that writes the pointer logs the edited id as opened and the superseded id as cited (${JSON.stringify(editRows)})`);
+
+  await qlog`DELETE FROM query_log`;
+  await qlog`DELETE FROM thoughts`;
+  await qlog.close();
+}
+
+console.log("\n[10b] query log: the filter a search ran, the arm that served it and the writer's tier are recorded, and keyword is logged too (SMD-1490)");
+{
+  // 034 gave query_log a `filter` column but every search tool passed
+  // `filter: {}`, so it was permanently empty; keyword search wrote no row at
+  // all. SMD-1490 exposes a real metadata filter on the search tools, routes all
+  // three through one operation, and adds `arm` (hybrid|keyword) and `tier`
+  // (from OB1_TIER, 'canary' here). This drives the real handlers and reads the
+  // rows back. The filter need not match a row — the log write precedes the
+  // result count — so this asserts what the boundary recorded, which is the
+  // whole bug: the object sent, not `{}`. Drop-the-mechanism: hardcode
+  // `filter: {}` in runSearch and the filtered-search assertion below fails.
+  const qlog = new SQL({ url: URL_, max: 1 });
+  await qlog`DELETE FROM query_log`;
+  await call("capture_thought", { content: "zeta note the filter path can search over" });
+
+  await call("search_thoughts", { query: "zeta", limit: 5, threshold: -1, filter: { type: "idea" } });
+  await call("search_thoughts", { query: "zeta", limit: 5, threshold: -1 });
+  await call("search_thoughts_keyword", { query: "zeta" });
+  await call("search_thoughts_keyword", { query: "zeta", filter: { type: "idea" } });
+
+  const rows = await qlog<{ tool: string; arm: string | null; tier: string | null; filter: Record<string, unknown> }[]>`
+    SELECT tool, arm, tier, filter FROM query_log WHERE kind = 'search' ORDER BY logged_at`;
+  assert(rows.length === 4, `four search rows were logged, keyword among them (${rows.length})`);
+  assert(rows.every((r) => r.tier === "canary"), `every search row carries the server's tier (${JSON.stringify(rows.map((r) => r.tier))})`);
+
+  const [stFiltered, stPlain, kwPlain, kwFiltered] = rows;
+  assert(stFiltered.tool === "search_thoughts" && stFiltered.arm === "hybrid" && JSON.stringify(stFiltered.filter) === JSON.stringify({ type: "idea" }),
+    `search_thoughts records the metadata filter it ran with and arm=hybrid — not the empty {} 034 always saw (${JSON.stringify(stFiltered)})`);
+  assert(stPlain.tool === "search_thoughts" && stPlain.arm === "hybrid" && JSON.stringify(stPlain.filter) === "{}",
+    `an unfiltered search_thoughts records {} (${JSON.stringify(stPlain)})`);
+  assert(kwPlain.tool === "search_thoughts_keyword" && kwPlain.arm === "keyword" && JSON.stringify(kwPlain.filter) === "{}",
+    `keyword search is logged now (034 logged none), arm=keyword, unfiltered {} (${JSON.stringify(kwPlain)})`);
+  assert(kwFiltered.arm === "keyword" && JSON.stringify(kwFiltered.filter) === JSON.stringify({ type: "idea" }),
+    `a filtered keyword search records its filter (${JSON.stringify(kwFiltered)})`);
+
+  // The boundary refuses a shape jsonb should not run: a nested object. call()
+  // throws on the tool error (or the schema rejection) — either way the bad
+  // filter never reaches the store.
+  let refused = false;
+  try { await call("search_thoughts", { query: "zeta", filter: { type: { nested: "no" } } }); }
+  catch { refused = true; }
+  assert(refused, "a nested-object filter is refused at the tool boundary, not passed to jsonb");
 
   await qlog`DELETE FROM query_log`;
   await qlog`DELETE FROM thoughts`;

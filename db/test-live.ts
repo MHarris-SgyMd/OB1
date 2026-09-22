@@ -1872,7 +1872,7 @@ console.log("\n[8] thought_work_claims: concurrent claimers are disjoint, leases
   await sql.unsafe(`INSERT INTO thoughts (content) SELECT 'pool ' || g FROM generate_series(1, 600) g`);
   const [{ n }] = await sql`SELECT enqueue_thoughts(${JOB}) AS n`;
   assert(Number(n) === 600, `enqueue_thoughts pools all 600 thoughts (got ${n})`);
-  const pool = new Set((await sql`SELECT id FROM thoughts`).map((r: { id: string }) => r.id));
+  const pool = new Set<string>((await sql`SELECT id FROM thoughts`).map((r: { id: string }) => r.id));
 
   // (a) A lease held open across another worker's claim.
   const holder = new SQL({ url: URL_, max: 1 });
@@ -1938,7 +1938,7 @@ console.log("\n[8] thought_work_claims: concurrent claimers are disjoint, leases
   // Two seconds, not one: the "before it expires" claim below is a separate
   // round trip, and a one-second lease is a cliff a stalled CI runner can fall
   // off with no defect in the migration.
-  const dead = (await sql`SELECT thought_id FROM claim_thoughts(${JOB2}, 'dead', 5, 2)`).map((r: { thought_id: string }) => r.thought_id);
+  const dead: string[] = (await sql`SELECT thought_id FROM claim_thoughts(${JOB2}, 'dead', 5, 2)`).map((r: { thought_id: string }) => r.thought_id);
   assert(dead.length === 5, `a worker takes five rows on a 2 s lease and dies (got ${dead.length})`);
   const tooSoon = await sql`SELECT thought_id FROM claim_thoughts(${JOB2}, 'second', 10)`;
   assert(tooSoon.length === 3, `before the lease expires a second worker gets only the three unclaimed rows (got ${tooSoon.length})`);
@@ -2003,7 +2003,7 @@ console.log("\n[8] thought_work_claims: concurrent claimers are disjoint, leases
   const six = [...pool].slice(8, 14);
   await sql`SELECT enqueue_thoughts(${JOB4}, ${sql.array(six, "TEXT")}::uuid[])`;
   const t0 = Date.now();
-  const alive = (await sql`SELECT thought_id FROM claim_thoughts(${JOB4}, 'alive', 4, 5)`).map((r: { thought_id: string }) => r.thought_id);
+  const alive: string[] = (await sql`SELECT thought_id FROM claim_thoughts(${JOB4}, 'alive', 4, 5)`).map((r: { thought_id: string }) => r.thought_id);
   assert(alive.length === 4, `a worker takes four rows on a 5 s lease (got ${alive.length})`);
   await Bun.sleep(4500);
   const b0 = performance.now();
@@ -2011,7 +2011,7 @@ console.log("\n[8] thought_work_claims: concurrent claimers are disjoint, leases
   const beatMs = performance.now() - b0;
   assert(beat1.length === 4 && alive.every((id) => beat1.includes(id)), `a beat at 4.5 s renews all four (${beat1.length})`);
   await Bun.sleep(1000); // 5.5 s: past the original deadline, 4 s before the renewed one
-  const afterOriginal = (await sql`SELECT thought_id FROM claim_thoughts(${JOB4}, 'second', 10)`).map((r: { thought_id: string }) => r.thought_id);
+  const afterOriginal: string[] = (await sql`SELECT thought_id FROM claim_thoughts(${JOB4}, 'second', 10)`).map((r: { thought_id: string }) => r.thought_id);
   assert(afterOriginal.length === 2 && afterOriginal.every((id) => !alive.includes(id)),
     `a claim after the original deadline gets only the two unclaimed rows — none of the heartbeating worker's (${afterOriginal.length}, at ${Date.now() - t0} ms)`);
   const [{ ok: released }] = await sql`SELECT release_thought(${alive[0]}::uuid, ${JOB4}, 'alive', 'succeeded') AS ok`;

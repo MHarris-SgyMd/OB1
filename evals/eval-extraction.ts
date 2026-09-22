@@ -30,6 +30,13 @@
  *   OB1_EVAL_BASE=https://openrouter.ai/api/v1 OB1_EVAL_KEY=sk-or-… bun eval-retrieval.ts \
  *     openai/text-embedding-3-small qwen/qwen3-embedding-8b
  */
+
+// A module, not a script: this file imports and exports nothing, and without
+// this line tsc reads it into one global scope with every other such file —
+// _chunk-e2e-child.ts and this one each declare CASES and BASE — and refuses
+// its top-level await. Bun treats every file as a module (SMD-1932).
+export {};
+
 const BASE = process.env.OB1_EVAL_BASE ?? process.env.OLLAMA_BASE ?? "http://127.0.0.1:11434/v1";
 const KEY = process.env.OB1_EVAL_KEY ?? process.env.OPENROUTER_API_KEY ?? "";
 const HEADERS: Record<string, string> = {

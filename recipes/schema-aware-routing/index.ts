@@ -3,12 +3,12 @@
 // unchanged — set SUPABASE_URL to a postgres:// connection string, and
 // SUPABASE_SERVICE_ROLE_KEY is ignored (credentials live in the URL).
 // ob1-original-import: @supabase/supabase-js
-// Revert with: node scripts/migrate-to-sql-shim.mjs --revert <file>
+// Revert with: bun scripts/migrate-to-sql-shim.ts --revert <file>
 // ob1-fork (SMD-1524): this pattern writes `thoughts` with a raw insert, by design — its
 // README's SQL creates its own five tables (a `thoughts` with domain/status/source columns)
 // in a project of its own, where this fork's upsert_thought is not. The row it writes
 // carries no content fingerprint, no model label and no audit actor; the README says so.
-// Listed in scripts/check-fork-consistency.mjs check 10's exceptions (FORK.md change 71).
+// Listed in scripts/check-fork-consistency.ts check 10's exceptions (FORK.md change 71).
 /**
  * Schema-Aware Routing Pattern for Open Brain (OB1)
  *

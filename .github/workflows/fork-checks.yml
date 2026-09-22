@@ -76,13 +76,26 @@ jobs:
 
       # Applies the upstream gate's rules to the WHOLE repo, not just the
       # directories a PR happens to touch. The upstream gate only validates
-      # changed dirs, so pre-existing violations never surface there. Under
-      # bun, the runtime every other job and every developer here uses (node
-      # is not installed on the maintainer's machine, so a node-only run was
-      # the one step nobody could reproduce locally); the script is plain ESM
-      # and runs under either.
-      - name: Check metadata, links, dependencies, SQL guards, shell hazards, core-function redefinitions, credential compares, fixture redaction, thought writes, the shim's runtime, Supabase-isms in schema SQL, the compose stack's ports and forwards, and FORK.md's change files
-        run: bun scripts/check-fork-consistency.mjs
+      # changed dirs, so pre-existing violations never surface there. A Bun
+      # script, TypeScript since SMD-1870 — bun is the runtime every other job
+      # and every developer here uses, and checks 13, 14 and 18 parse YAML with
+      # Bun.YAML.
+      - name: Check metadata, links, dependencies, SQL guards, shell hazards, core-function redefinitions, credential compares, fixture redaction, thought writes, the shim's runtime, Supabase-isms in schema SQL, the compose stack's ports and forwards, FORK.md's change files, and the type-checked directories' pins
+        run: bun scripts/check-fork-consistency.ts
+
+      # The scripts are type-checked where they run (SMD-1870): scripts/tsconfig.json
+      # mirrors server-portable's and scripts/package.json pins the types at the
+      # server's versions (check 18 holds the type-checked directories in step).
+      # They import ../db/config.mjs and ../db/version.mjs through their .d.mts
+      # files and ../server-portable/tools.ts; none of that needs a package
+      # installed, so this job installs only the types.
+      - name: Install the scripts' pinned packages
+        working-directory: scripts
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck the scripts
+        working-directory: scripts
+        run: bunx tsc --noEmit
 
   deno-check:
     name: Edge Function typecheck
@@ -185,6 +198,34 @@ jobs:
 
       - name: Typecheck
         working-directory: server-portable
+        run: bunx tsc --noEmit
+
+      # db/ and evals/ import this server's modules and are the first callers to
+      # break when a shared signature moves, and until SMD-1932 nothing compiled
+      # them: SMD-1903 gave getEmbedding a required argument, the compiler fixed
+      # every server call site, and db/reembed.ts's provider probe kept the old
+      # one — at runtime the gate read `subject.kind` on undefined and the probe
+      # blamed the provider. Each directory has a tsconfig.json mirroring this
+      # one and pins @types/bun, typescript and @types/node at the server's
+      # versions (check 18 holds the type-checked directories in step). Both run
+      # in THIS job because their imports of ../server-portable/*.ts resolve
+      # through server-portable/node_modules, installed above; each installs its
+      # own lockfile for its types (and evals' LanceDB, whose types
+      # store-backends.ts imports). No database, no provider.
+      - name: Install the workers' pinned packages
+        working-directory: db
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck the workers, benches and suites
+        working-directory: db
+        run: bunx tsc --noEmit
+
+      - name: Install the evals' pinned packages
+        working-directory: evals
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck the evals
+        working-directory: evals
         run: bunx tsc --noEmit
 
       # Proves the Cloudflare target still builds under the real Workers bundler.
@@ -529,7 +570,7 @@ jobs:
       # SMD-1843. The knobs the first dogfood stack needed a second -f file for
       # reach the container: preflight's own report in the server log names the
       # provider URL .env set and the query log ON, and the container passed
-      # preflight with no credential set. check-fork-consistency.mjs 14 holds
+      # preflight with no credential set. check-fork-consistency.ts 14 holds
       # the file to forwarding every knob the server declares; this holds the
       # running container to what .env said. The first line reads the URL and
       # preflight's "local" clause and nothing between them: SMD-1902 put
@@ -552,7 +593,7 @@ jobs:
       # by name, the other two still on loopback (a sorted multiset passed with
       # Ollama opened instead — the second review pass); and no service sets
       # network_mode, since `host` reaches the host's interfaces with no port
-      # published (the third pass). check-fork-consistency.mjs 13 holds the
+      # published (the third pass). check-fork-consistency.ts 13 holds the
       # files to the same rule; this holds what compose makes of them.
       - name: Every published port binds loopback
         working-directory: deploy
@@ -646,8 +687,8 @@ jobs:
 
       - name: Codemod round-trips losslessly
         run: |
-          bun scripts/migrate-to-sql-shim.mjs --revert >/dev/null
-          bun scripts/migrate-to-sql-shim.mjs --apply --all >/dev/null
+          bun scripts/migrate-to-sql-shim.ts --revert >/dev/null
+          bun scripts/migrate-to-sql-shim.ts --apply --all >/dev/null
           if ! git diff --quiet; then
             echo "apply→revert→apply is not idempotent:" >&2
             git diff --stat >&2
@@ -680,7 +721,7 @@ jobs:
         run: |
           if [ "$EVENT" = merge_group ]; then from="$MG_FROM"; to="$MG_TO"; else from="$PR_FROM"; to="$PR_TO"; fi
           echo "Linting $from..$to"
-          bunx @commitlint/cli@19.6.1 --config scripts/commitlint.config.mjs --from "$from" --to "$to"
+          bunx --bun @commitlint/cli@19.6.1 --config scripts/commitlint.config.ts --from "$from" --to "$to"
 
   workflow-lint:
     name: Workflow lint (actionlint + shellcheck)

@@ -85,7 +85,7 @@ import { SQL } from "bun";
 import { hostname } from "node:os";
 import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
-import { PROVIDER_ERROR_CHARS, ProviderError, refusesLength, resolveEmbedConfig } from "../server-portable/embed.ts";
+import { PROVIDER_ERROR_CHARS, ProviderError, refusesLength, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { describeEgress, localKnob, refusesEverything, ROW_UNITS } from "../server-portable/egress.ts";
 import {
   cleanForDisplay, consolidateKey, judgePair, proposalVerdict, DEFAULT_CANDIDATES, DEFAULT_MIN_CONFIDENCE, DEFAULT_MIN_SIMILARITY,
@@ -192,7 +192,7 @@ if (FORCE && !ACCEPT) {
 }
 const REVIEW_ONLY = LIST !== undefined || ACCEPT !== undefined || REJECT !== undefined || STALE_DAYS > 0;
 
-const cfg = resolveEmbedConfig(process.env);
+const cfg = resolveEmbedConfig(process.env as EmbedEnv);
 // The judge's model, not the extractor's: OB1_JUDGE_MODEL, else the metadata
 // model (SMD-1901). The key carries it, so a pass under another judge is
 // another pass — --status and preflight report each by name.
@@ -368,7 +368,9 @@ if (REVIEW_ONLY) {
   if (ACCEPT || REJECT) {
     const decision = ACCEPT ? "accept" : "reject";
     const id = (ACCEPT ?? REJECT)!;
-    const actor = { name: actorName, source: "consolidate", session: JOB, ...(agentId ? { agent_id: agentId } : {}) };
+    // `via`, the door (046's origin column) — `source` until SMD-1730, when
+    // the trigger stopped reading an actor's source.
+    const actor = { name: actorName, via: "consolidate", session: JOB, ...(agentId ? { agent_id: agentId } : {}) };
     const [{ r }] = await sql`
       SELECT review_supersession_proposal(${id}::uuid, ${decision}::text, ${NOTE ?? null}::text, ${DIRECTION ?? null}::text, ${actor}::jsonb, ${FORCE}::boolean) AS r`;
     const res = r as { ok: boolean; error?: string; status?: string; superseding_id?: string; superseded_id?: string; written?: boolean; cleared?: boolean; current?: string; verdict?: string; older_edited?: boolean; newer_edited?: boolean };
@@ -605,7 +607,11 @@ function classifyError(e: unknown): ErrorKind {
   return "thought";
 }
 const TRANSIENT_PAUSES_MS = [5_000, 15_000, 45_000];
-let configError: string | null = null;
+// Written inside the worker closures below, which control-flow analysis does
+// not follow: declared `: string | null = null`, the read at the end of the
+// run is narrowed to `never`. The cast keeps the declared type as the initial
+// one (SMD-1932).
+let configError = null as string | null;
 
 /** --limit counts thoughts CLAIMED, reserved at claim time, so two workers cannot each take one on a limit of one. */
 let reserved = 0;

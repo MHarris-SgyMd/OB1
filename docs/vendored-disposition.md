@@ -4,7 +4,7 @@ The fork vendors ~33k lines of upstream community code across `integrations/`,
 `recipes/`, `schemas/` and a few `docs/drafts/` SQL sketches. The standing posture is
 **"audit once, hold the delta"** (SMD-1228 / SMD-1250 / SMD-1256): the tree is *kept* —
 these are the repo's "open for contributions" categories — held to the core's standard
-where it matters, with `scripts/check-fork-consistency.mjs` as the standing guard.
+where it matters, with `scripts/check-fork-consistency.ts` as the standing guard.
 
 This document runs that standard to completion: **one inventory, one disposition per
 artifact.** For an arbitrary vendored file you can now say whether it is live,
@@ -20,6 +20,13 @@ superseded, hazardous, or dead.
   stays, held to the delta) and carry linked rebuild-tickets for its un-absorbed parts.
 - **remove** — superseded by a fork rebuild, or a hazard, **with nothing depending on
   it**. A removal only lands as a PR that can state *"verified no references."*
+
+Every external-touching artifact here — the SMD-1867 fold-in rows below, and the
+sinks (the digests and briefings), which the sweep finds by their `metadata.json`
+services and tags rather than by this table — is classified by the five-facet
+connector taxonomy in [`docs/connector-taxonomy.md`](connector-taxonomy.md)
+(SMD-1933); `check-fork-consistency` check 19 reads the fold-in rows from this
+table as one of its coverage triggers.
 
 Some capture-source integrations are additionally **folded into SMD-1867** (the
 ingestion-adapter contract): they are kept, but re-scoped as adapters rather than
@@ -71,7 +78,7 @@ exactly one disposition.
 
 **Guard follow-ups (SMD-1924 verify item — "a newly vendored file redefining a core object
 fails CI"):**
-1. `scripts/check-fork-consistency.mjs` check 7 already covers **function** redefinitions
+1. `scripts/check-fork-consistency.ts` check 7 already covers **function** redefinitions
    (`upsert_thought` / `match_thoughts` / `update_updated_at`) since SMD-1250 — confirmed.
 2. **Done** — check 5 now also fails a vendored `.sql` that does `DROP COLUMN` / `ALTER COLUMN`
    on core `thoughts` (rule `thoughts-column-mutation`, scoped to `schemas`/`recipes`/`integrations`
@@ -99,9 +106,9 @@ fails CI"):**
 
 An artifact is *referenced* — and therefore not removable — when something outside its
 own folder depends on it: a code import, a CI parity test (`extensions/test-auth.ts`,
-`extensions/test-writes.ts`), the fork guard (`scripts/check-fork-consistency.mjs`),
+`extensions/test-writes.ts`), the fork guard (`scripts/check-fork-consistency.ts`),
 `.github/workflows/fork-checks.yml`, `extensions/package.json` scripts, the SQL-shim
-codemod (`scripts/migrate-to-sql-shim.mjs`), a `README.md` capability index row, a docs
+codemod (`scripts/migrate-to-sql-shim.ts`), a `README.md` capability index row, a docs
 setup step, or another artifact wiring to it. Mentions in `FORK.md` / `CHANGELOG.md`
 are the *audit record*, not a live dependency, and do not block a removal.
 
@@ -139,7 +146,7 @@ excluding `_shared/` / `_template/` scaffolding and `README.md` indexes. 87 arti
 | `rest-api` | keep + audited | Documented general REST gateway (CORS, full CRUD, ingest, entity endpoints); `/ingest` proxies to `smart-ingest`. CI `test-auth.ts:622` + `test-writes.ts:443`, `brain-smoke-test` probes it; on the shim. (Coexists with `open-brain-rest`, the dashboard-specific gateway — a possible future consolidation, not a removal; both referenced.) |
 | `slack-capture` | keep + audited → fold-in **SMD-1867** | Slack quick-capture source. Live: README index, `docs/01-getting-started` step, CI. Capture adapter under SMD-1867. |
 | `smart-ingest` | keep + audited | LLM document-extraction/atomization pipeline; companion worker to `schemas/smart-ingest`. Live: CI `test-auth.ts:622`, `rest-api` `/ingest` proxies to it, `entity-extraction-worker` helper routes oversized content to it. (Schema's rebuild is tracked under SMD-1253.) |
-| `telegram-capture` | keep + audited → fold-in **SMD-1867** | Telegram quick-capture source; its README is a CI-driven write sample (`test-writes.ts:701-702`) and a guard fixture (`check-fork-consistency.mjs:1277`). Capture adapter under SMD-1867. |
+| `telegram-capture` | keep + audited → fold-in **SMD-1867** | Telegram quick-capture source; its README is a CI-driven write sample (`extensions/test-writes.ts`, its telegram-capture spellings) and a guard fixture (one of check 10's `THOUGHT_WRITE_PROBES` in `scripts/check-fork-consistency.ts`). Capture adapter under SMD-1867. |
 | `update-thought-mcp` | keep + audited *(revises seed "remove")* | Twin of `delete-thought-mcp`: migration 009 ported the *RPC* from it into core, but the standalone MCP server stays a live community example — CI `test-auth.ts:187` + `test-writes.ts:315`, `schemas/thought-audit` README. Fails "verified no references." |
 
 ### `schemas/` (16)
@@ -154,7 +161,7 @@ excluding `_shared/` / `_template/` scaffolding and `README.md` indexes. 87 arti
 | `per-agent-identity` | keep + audited *(revises seed "remove")* | Community `openbrain_agents` / `agent_memory_keys` + `lookup_agent_memory_key` — granted by the fork's own `db/config.mjs` ROLE_GRANTS (SMD-1226). Migration 010 is "Ported from schemas/per-agent-identity" with departures (ob1_* names); the community file is the upstream-faithful origin, held to the delta. |
 | `provenance-chains` | keep + audited *(revises seed "remove")* | Additive derivation columns + own merge functions (granted by `db/config.mjs`); `recipes/provenance-chains` + `typed-edge-classifier` read it. Guard check 7 (line 554) already fences its function set. Distinct from core's 025/026/032 provenance. |
 | `readwise-books` | keep + audited | Own `readwise_books` cache + RPCs; granted by `db/config.mjs`; companion to `integrations/readwise-capture` + `recipes/readwise-import`; CI `test-writes.ts` SIDECARS. Not superseded, not a hazard. |
-| `recency-boosted-match-thoughts` | **remove** *(no-parity posture)* | Standalone `match_thoughts_recency` with **zero callers** in the fork; migration 020 folded recency into core `match_thoughts` + `recency_score()` instead (`db/README`: "upstream … for the formula"). Guard-allowlisted (not a clobber) but valueless to the fork. Removal PR: delete the folder **and** the now-dead allowlist entry at `scripts/check-fork-consistency.mjs:614`. |
+| `recency-boosted-match-thoughts` | **remove** *(no-parity posture)* | Standalone `match_thoughts_recency` with **zero callers** in the fork; migration 020 folded recency into core `match_thoughts` + `recency_score()` instead (`db/README`: "upstream … for the formula"). Guard-allowlisted (not a clobber) but valueless to the fork. Removal PR: delete the folder **and** the now-dead allowlist entry `scripts/check-fork-consistency.ts` once carried for it. |
 | `smart-ingest` | keep + audited | Own `ingestion_jobs` / `ingestion_items` + `append_thought_evidence` (granted by `db/config.mjs`); companion to `integrations/smart-ingest`; `enhanced-mcp` / `rest-api` / `brain-health-monitoring` reference it. *(Minor: some refs say `schemas/smart-ingest-tables` — a stale folder-name drift to fix, not a disposition issue.)* Rebuild tracked under SMD-1253. |
 | `text-search-trgm` | **remove** *(no-parity posture)* | Pure `idx_thoughts_content_trgm` GIN index promoted **verbatim** into core by migration 011 (SMD-925; on by default — `test-schema.ts:250`). Its purpose (accelerate `enhanced-thoughts`' `search_thoughts_text` ILIKE fallback) targets a function the fork replaced with `search_thoughts_keyword` (012). Only ref is an `enhanced-thoughts` doc comment. No fork-side value. Removal PR: delete the folder (no guard allowlist entry to clean). |
 | `thought-audit` | keep + audited *(revises seed "remove")* | Own `thought_audit` table (granted by `db/config.mjs`, with the `thought_provenance` view); referenced by `delete-thought-mcp` / `update-thought-mcp`. Migration 008 is "Ported from schemas/thought-audit" with departures; community origin held to the delta. |
@@ -187,21 +194,21 @@ remaining drafts are unreferenced markdown working-notes.
 | `brain-health-monitoring` | keep + audited | Ops SQL views + runbook (`ops-views.sql`, no core clobber); optionally reads the kept `entity-extraction` / `smart-ingest` tables. |
 | `brain-smoke-test` | keep + audited | Fresh-install smoke harness (`smoke-all.js`); exercises REST/MCP/DB/auth across kept artifacts. |
 | `bring-your-own-context` | keep + audited | Portable context workflow (extraction prompts + Work Operating Model flow + remote MCP deploy). |
-| `chatgpt-conversation-import` | keep + audited | ChatGPT-export import recipe (`chatgpt_parser.py` + `schema.sql`, no core clobber); an ingestion source — candidate SMD-1867 adapter alongside the capture integrations. |
+| `chatgpt-conversation-import` | keep + audited → SMD-1867 candidate | ChatGPT-export import recipe (`chatgpt_parser.py` + `schema.sql`, no core clobber); an ingestion source — candidate SMD-1867 adapter alongside the capture integrations. |
 | `claudeception` | keep + audited | Skills-that-create-skills continuous-learning recipe; searches/captures via the core MCP path. |
 | `content-fingerprint-dedup` | keep + audited | The `upsert_thought` redefinition is a **README code example**, annotated "do not paste — migration 003/005 own it (SMD-1250)"; guard check 7 allowlists it (lines 646/1406). It is the fork's canonical dedup-convention doc, cited by `email-history-import` / `edge-function-cost-optimization` / `gmail-smart-pull` / `lint-sweep`. *(Minor: some cross-refs point at `primitives/content-fingerprint-dedup` / an upstream GitHub URL — stale paths to fix; overlaps SMD-1929.)* |
 | `daily-digest` | keep + audited | Gmail-draft daily summary via Claude Code scheduled tasks + core MCP; zero infra. |
 | `edge-function-cost-optimization` | keep + audited | MCP-consolidation/caching optimization recipe; its `examples/_shared/auth.ts` is on the `sync-auth` list. |
 | `editorial-policy` | keep + audited | 40-rule synthesis constitution + weekly drift auditor; `auditor/index.ts` is CI-driven (`test-writes.ts` DRIVEN_1524, SMD-1524). No core clobber. |
-| `email-history-import` | keep + audited *(drop one sub-file)* | Gmail-history import (an SMD-1867 candidate). **Sub-file removal:** `rollback-chunking-columns.sql` undoes the abandoned upstream PR #27 column-chunking (`parent_id`/`chunk_index`/`full_text` + `insert_thought` RPC) the fork never adopted (it uses `thought_chunks` / migration 007) — a no-op on the fork, dead upstream cruft. It is also an **unguarded `DROP COLUMN` on core `thoughts`** (guard check 5 only guards `ADD COLUMN`) → also a guard-rule candidate for the SMD-1924 verify step. |
+| `email-history-import` | keep + audited *(drop one sub-file)* → SMD-1867 candidate | Gmail-history import (an SMD-1867 candidate). **Sub-file removal:** `rollback-chunking-columns.sql` undoes the abandoned upstream PR #27 column-chunking (`parent_id`/`chunk_index`/`full_text` + `insert_thought` RPC) the fork never adopted (it uses `thought_chunks` / migration 007) — a no-op on the fork, dead upstream cruft. It is also an **unguarded `DROP COLUMN` on core `thoughts`** (guard check 5 only guards `ADD COLUMN`) → also a guard-rule candidate for the SMD-1924 verify step. |
 | `entity-wiki` | keep + audited | Per-entity markdown wiki generator; reads the kept `entity-extraction` tables + worker. |
 | `fingerprint-dedup-backfill` | keep + audited | Client-side fingerprint backfill **+ duplicate cleanup**. Migration 023 backfills server-side, but the recipe's `delete-duplicates.mjs` removes pre-existing dupes (a migration doesn't), and it's cited as the cleanup step by `lint-sweep` / `edge-function-cost-optimization` / `content-fingerprint-dedup`. Complements core, not superseded. |
-| `gmail-smart-pull` | keep + audited | Gmail → ingest-pack with sensitivity routing + atomization + contact tiers; own SQL (`merge_thought_metadata`, `entities_canonical_email`, no core clobber). SMD-1867 candidate. |
-| `google-activity-import` | keep + audited | Google Takeout (Search/Gmail/Maps/YouTube/Chrome/Gemini) import. SMD-1867 candidate. |
-| `grok-export-import` | keep + audited | xAI Grok conversation-export import. SMD-1867 candidate. |
+| `gmail-smart-pull` | keep + audited → SMD-1867 candidate | Gmail → ingest-pack with sensitivity routing + atomization + contact tiers; own SQL (`merge_thought_metadata`, `entities_canonical_email`, no core clobber). SMD-1867 candidate. |
+| `google-activity-import` | keep + audited → SMD-1867 candidate | Google Takeout (Search/Gmail/Maps/YouTube/Chrome/Gemini) import. SMD-1867 candidate. |
+| `grok-export-import` | keep + audited → SMD-1867 candidate | xAI Grok conversation-export import. SMD-1867 candidate. |
 | `infographic-generator` | keep + audited | Output generator (thoughts/research → infographic images via Gemini); not an import. |
-| `instagram-import` | keep + audited | Instagram export (DMs/comments/captions) import. SMD-1867 candidate. |
-| `journals-blogger-import` | keep + audited | Blogger Atom-XML import. SMD-1867 candidate. |
+| `instagram-import` | keep + audited → SMD-1867 candidate | Instagram export (DMs/comments/captions) import. SMD-1867 candidate. |
+| `journals-blogger-import` | keep + audited → SMD-1867 candidate | Blogger Atom-XML import. SMD-1867 candidate. |
 | `life-engine` | keep + audited | Background `/loop` personal-assistant recipe; own `schema.sql` (no core clobber). |
 | `life-engine-video` | keep + audited | Remotion + ElevenLabs video-briefing add-on for `life-engine`. |
 | `lint-sweep` | keep + audited | Read-only three-tier quality audit (`views.sql` + `lint-sweep.js`); never mutates thoughts. |
@@ -209,14 +216,14 @@ remaining drafts are unreferenced markdown working-notes.
 | `local-brain-no-mcp` | keep + audited *(own-database)* + SMD-1798 | Self-hosted LAN Supabase stack; its `match_thoughts`/`upsert_thought` live in its **own container init scripts** (guard check 7 excepts them; owned-set lines 657/1412) — OWN_DATABASE like `kubernetes-deployment`, not a clobber. Its Edge Functions use supabase-js → SMD-1798. |
 | `local-ollama-embeddings` | keep + audited | The `ALTER COLUMN embedding TYPE` is a README example explicitly annotated "not altered by hand on this fork — build at `db/config.mjs`'s width; `upsert_thought` refuses another width." CI-driven (`test-writes.ts:707`, SMD-1524). |
 | `ob-graph` | keep + audited + SMD-1798 | Knowledge-graph layer (own nodes/edges tables + recursive-CTE traversal + MCP server); no core clobber. `index.ts` uses supabase-js at runtime → SMD-1798 portability. |
-| `obsidian-vault-import` | keep + audited | Obsidian-vault import. SMD-1867 candidate. |
+| `obsidian-vault-import` | keep + audited → SMD-1867 candidate | Obsidian-vault import. SMD-1867 candidate. |
 | `openclaw-agent-memory` | keep + audited | Canonical OpenClaw × OB1 Agent Memory workflow recipe (depends on the kept `agent-memory-api`). Distinct from the `integrations/openclaw-agent-memory` plugin. |
 | `openclaw-code-review-memory` | keep + audited | OpenClaw code-review-agent memory workflow over Agent Memory. |
 | `openclaw-taskflow-work-log` | keep + audited | OpenClaw TaskFlow handoff-log workflow over Agent Memory. |
 | `panning-for-gold` | keep + audited | Flagship three-phase brain-dump mining workflow (paired with the skill pack). |
-| `perplexity-conversation-import` | keep + audited | Perplexity `.xlsx` export import. SMD-1867 candidate. |
+| `perplexity-conversation-import` | keep + audited → SMD-1867 candidate | Perplexity `.xlsx` export import. SMD-1867 candidate. |
 | `provenance-chains` | keep + audited | Backfill + nightly evaluator + MCP tool handlers over the kept `schemas/provenance-chains`; answers "why do I believe X / what uses this." SMD-1253 lineage. |
-| `readwise-import` | keep + audited | One-shot Readwise history backfill; pairs with `integrations/readwise-capture`. SMD-1867 candidate. |
+| `readwise-import` | keep + audited → SMD-1867 candidate | One-shot Readwise history backfill; pairs with `integrations/readwise-capture`. SMD-1867 candidate. |
 | `repo-learning-coach` | keep + audited + SMD-1798 | Local learning app with its own Supabase tables (`schema.sql`) + durable captures; `server/supabase.ts` uses supabase-js → SMD-1798; `server/brain.ts` is CI-driven. |
 | `research-to-decision-workflow` | keep + audited | Workflow composing canonical OB1 skills into decision pipelines. |
 | `schema-aware-routing` | keep + audited *(own-project)* + SMD-1798 | Metadata-routing pattern that creates **its own five tables in its own project** (README-annotated; guard check 10 counted exception; CI BYPASS_1524, SMD-1524). Its `alter column embedding` / raw inserts target its own `thoughts`, not core. README uses supabase-js → SMD-1798. |
@@ -229,4 +236,4 @@ remaining drafts are unreferenced markdown working-notes.
 | `wiki-synthesis` | keep + audited | Topic/email-thread wiki synthesis from atomic thoughts via any OpenAI-compatible LLM. |
 | `work-operating-model-activation` | keep + audited + SMD-1798 | Operating-model elicitation workflow; own `schema.sql`; `index.ts` uses supabase-js → SMD-1798. |
 | `world-model-diagnostic-activation` | keep + audited | World-Model Readiness Diagnostic activation; own tables (`world_model_assessments` / `world_model_boundary_flows`), no core clobber. |
-| `x-twitter-import` | keep + audited | X/Twitter export (tweets/DMs/Grok) import. SMD-1867 candidate; `import-x-twitter.mjs` uses supabase-js → SMD-1798. |
+| `x-twitter-import` | keep + audited → SMD-1867 candidate | X/Twitter export (tweets/DMs/Grok) import. SMD-1867 candidate; `import-x-twitter.mjs` uses supabase-js → SMD-1798. |

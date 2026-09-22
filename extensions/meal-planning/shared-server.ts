@@ -3,7 +3,7 @@
 // unchanged — set SUPABASE_URL to a postgres:// connection string, and
 // SUPABASE_SERVICE_ROLE_KEY is ignored (credentials live in the URL).
 // ob1-original-import: @supabase/supabase-js
-// Revert with: node scripts/migrate-to-sql-shim.mjs --revert <file>
+// Revert with: bun scripts/migrate-to-sql-shim.ts --revert <file>
 /**
  * Shared Meal Planning MCP Server
  *

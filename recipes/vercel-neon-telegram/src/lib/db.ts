@@ -5,7 +5,7 @@ import type { Thought, ThoughtMetadata } from "./types";
 // recipe's Neon database is its own, built by sql/001-create-thoughts.sql from the guide's
 // shape, and this fork's upsert_thought is not in it. The row carries no content
 // fingerprint, no model label and no audit actor; the README says so. Listed in
-// scripts/check-fork-consistency.mjs check 10's exceptions (FORK.md change 71).
+// scripts/check-fork-consistency.ts check 10's exceptions (FORK.md change 71).
 
 function getSQL() {
   const url = process.env.DATABASE_URL;

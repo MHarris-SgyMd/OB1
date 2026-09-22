@@ -147,7 +147,7 @@ const exclude: typeof label = [];
 for (const t of twinTopics) {
   const rows = await sql`
     SELECT id::text AS id FROM match_thoughts(${axisQuery(t.axis)}::vector, -1.0, 10, ${{}}::jsonb)`;
-  const ranked = rows.map((r: Record<string, unknown>) => String(r.id));
+  const ranked: string[] = rows.map((r: Record<string, unknown>) => String(r.id));
   const goldTopical = new Set([t.current, t.superseded!]);
   const goldCurrent = new Set([t.current]);
   label.push({ ranked, goldTopical, goldCurrent });
@@ -207,7 +207,7 @@ const plainSupersededIds = new Set(
 let controlOk = true;
 for (const t of plain) {
   const rows = await sql`SELECT id::text AS id FROM match_thoughts(${axisQuery(t.axis)}::vector, -1.0, 10, ${{}}::jsonb)`;
-  const ranked = rows.map((r: Record<string, unknown>) => String(r.id));
+  const ranked: string[] = rows.map((r: Record<string, unknown>) => String(r.id));
   if (JSON.stringify(ranked) !== JSON.stringify(ranked.filter((id) => !plainSupersededIds.has(id)))) controlOk = false;
 }
 assert(plainSupersededIds.size === 0 && controlOk, "CONTROL: with no superseded rows, exclude and label-only return the same rows");

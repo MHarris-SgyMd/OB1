@@ -416,11 +416,12 @@ export class SqlStore implements ThoughtStore {
     // object, never a string (the jsonb rule at the top of this file).
     await this.sql`
       INSERT INTO query_log
-        (kind, tool, agent_id, query, match_count, threshold, recency_weight, filter, result_ids, result_scores)
+        (kind, tool, agent_id, query, match_count, threshold, recency_weight, filter, result_ids, result_scores, arm, tier)
       VALUES
         ('search', ${row.tool}::text, ${row.agentId ?? null}::uuid, ${row.query}::text,
          ${row.matchCount}::int, ${row.threshold}::real, ${row.recencyWeight}::real,
-         ${row.filter}::jsonb, ${toUuidArray(row.resultIds)}::uuid[], ${toRealArray(row.resultScores)}::real[])`;
+         ${row.filter}::jsonb, ${toUuidArray(row.resultIds)}::uuid[], ${toRealArray(row.resultScores)}::real[],
+         ${row.arm ?? null}::text, ${row.tier ?? null}::text)`;
   }
 
   async logActions(rows: QueryActionLog[]): Promise<void> {
@@ -436,9 +437,12 @@ export class SqlStore implements ThoughtStore {
     // action rows — a single-row VALUES twin was removed so there is one
     // INSERT shape to keep right (SMD-1719, fourth pass).
     const clean = normaliseActionRows(rows);
+    // tier is the writing server's OB1_TIER — one server per batch, so it is a
+    // scalar across the rows, not a per-row column (SMD-1806).
+    const tier = rows[0]?.tier ?? null;
     await this.sql`
-      INSERT INTO query_log (kind, tool, agent_id, target_id)
-      SELECT 'action', t.tool, t.agent_id, t.target_id
+      INSERT INTO query_log (kind, tool, agent_id, target_id, tier)
+      SELECT 'action', t.tool, t.agent_id, t.target_id, ${tier}::text
         FROM unnest(${this.sql.array(clean.map((r) => r.tool), "TEXT")}::text[],
                     ${toUuidArray(clean.map((r) => r.agentId))}::uuid[],
                     ${toUuidArray(clean.map((r) => r.targetId))}::uuid[]) AS t(tool, agent_id, target_id)`;

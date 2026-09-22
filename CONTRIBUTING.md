@@ -168,6 +168,7 @@ Every contribution needs a `metadata.json` file. Here's the template:
     "tools": ["Node.js 18+"]
   },
   "requires_skills": [],
+  "connectors": ["gmail"],
   "tags": ["email", "gmail", "import", "history"],
   "difficulty": "intermediate",
   "estimated_time": "30 minutes",
@@ -178,11 +179,12 @@ Every contribution needs a `metadata.json` file. Here's the template:
 
 **Required fields:** `name`, `description`, `category`, `author` (with `name`), `version`, `requires.open_brain` (must be `true`), `tags` (at least 1), `difficulty` (one of: `beginner`, `intermediate`, `advanced`), `estimated_time`
 
-**Optional fields:** `author.github`, `requires.services`, `requires.tools`, `requires_skills`, `created`, `updated`
+**Optional fields:** `author.github`, `requires.services`, `requires.tools`, `requires_skills`, `connectors`, `created`, `updated`
 
 **Additional structured dependency fields:**
 - `requires_skills` — array of skill slugs this contribution depends on (e.g., `["auto-capture"]`). Use this when the reusable behavior lives in `skills/<slug>/`
 - `requires_primitives` — array of primitive slugs this contribution depends on (e.g., `["rls", "shared-mcp"]`)
+- `connectors` — array of the external systems this contribution reads from or delivers to, as the vendor keys of [`docs/connector-registry.json`](docs/connector-registry.json) (e.g., `["gmail"]`, `["telegram", "google-calendar"]`). Leave it empty (as the templates ship it) or omit it for a contribution that touches no external system; a non-empty list means the contribution is classified in the registry (see "Connectors" below)
 
 **Extension-specific fields:**
 - `learning_order` — integer position in the extension learning path (1-6)
@@ -263,12 +265,12 @@ Commits to the fork's own code follow a small grammar, checked by `commitlint`
   warning).
 - On a review-pass commit, every finding bullet in the body carries a
   `(caught: <how it was found>)` tag — the `caught-tag` rule (a warning) — so
-  `scripts/mechanism-yield.mjs` can count what each pass caught. Subjects have no
+  `scripts/mechanism-yield.ts` can count what each pass caught. Subjects have no
   length limit; they are sentences by design.
 
 It runs in CI on every PR (the `commit-lint` job) and, opt-in, before each commit
-locally: `bun scripts/install-hooks.mjs` (undo with `--uninstall`). Merge commits
-are ignored. The config is `scripts/commitlint.config.mjs`.
+locally: `bun scripts/install-hooks.ts` (undo with `--uninstall`). Merge commits
+are ignored. The config is `scripts/commitlint.config.ts`.
 
 ## Changelog & versioning (fork changes)
 
@@ -295,6 +297,29 @@ than by editing a hand-numbered FORK.md section:
 
 `check-fork-consistency` validates every fragment and the changelog shape, so a PR
 that gets this wrong fails CI at one place.
+
+## Connectors: a contribution that touches an external system
+
+A recipe or integration that reads from or delivers to an external system — a
+mailbox, a chat, an export archive, a highlights service, a wiki, a calendar —
+is a **connector capability** and is classified in
+[`docs/connector-registry.json`](docs/connector-registry.json) by the five
+facets [`docs/connector-taxonomy.md`](docs/connector-taxonomy.md) defines
+(family × transport × direction × cardinality × round-trip, plus the fetcher).
+Declare the connectors in your `metadata.json` — `"connectors": ["gmail"]`, the
+registry's vendor keys — and name the vendor's service in `requires.services`,
+one external system per entry, its name first (a model provider it also uses is
+its own entry, not a parenthetical); add the artifact and its capabilities to
+the registry; add the vendor under `connectors` with the direction the
+capabilities derive; run `bun scripts/connector-registry.ts` to refresh the
+spec's tables. `check-fork-consistency` check 19 holds the declaration and the
+registry equal, so the PR fails at one place until it is classified. Under the
+declaration sits a net for a contribution that declared nothing — its services
+(when the vendor is named first), its tags and the disposition table — which is
+a net, not a parser: "OpenAI or Notion" reads as a provider. Declare
+`connectors`; do not rely on the net. An artifact the net marks that only looks
+external (a recipe tagged `email` that reads mail the brain already holds) is
+excused in the registry by name, with a reason.
 
 ## The Review Process
 
@@ -332,7 +357,7 @@ Every PR is checked against these rules. All must pass before human review.
 2. **Required files** — Both `README.md` and `metadata.json` exist in the contribution folder
 3. **Metadata valid** — `metadata.json` parses as valid JSON and passes the repo JSON Schema
 4. **No credentials** — No API keys, tokens, passwords, or secrets in any file
-5. **SQL safety** — No `DROP TABLE`, `DROP DATABASE`, `TRUNCATE`, or unqualified `DELETE FROM`. No modifications to core `thoughts` table columns (adding columns is fine, altering/dropping existing ones is not)
+5. **SQL safety** — No `DROP TABLE`, `DROP DATABASE`, `TRUNCATE`, or unqualified `DELETE FROM`. The rule is that a file must never destroy existing rows; a trigger that refuses one of these statements is the rule applied, not a breach. No modifications to core `thoughts` table columns (adding columns is fine, altering/dropping existing ones is not)
 6. **Category-specific artifacts** — `recipes/` have code or detailed instructions, `schemas/` have SQL files, `dashboards/` have frontend code or `package.json`, `integrations/` have code files, `skills/` have at least one plain-text skill file, `primitives/` have substantial READMEs (200+ words), `extensions/` have both SQL and code files
 7. **PR format** — Title starts with `[recipes]`, `[schemas]`, `[dashboards]`, `[integrations]`, `[skills]`, `[primitives]`, or `[extensions]`
 8. **No binary blobs** — No files over 1MB, no `.exe`, `.dmg`, `.zip`, `.tar.gz`

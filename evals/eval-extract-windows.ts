@@ -39,7 +39,7 @@
 import { SQL } from "bun";
 import { readFileSync } from "node:fs";
 import { loadEnv } from "./env.ts";
-import { resolveEmbedConfig } from "../server-portable/embed.ts";
+import { resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { callsMadeBy, extractEntities, extractionKey, type Extraction, type ExtractWindowing } from "../server-portable/entities.ts";
 import { estimateTokens, EXTRACT_OVERLAP_RATIO } from "../server-portable/chunk.ts";
 import { requireDatabaseUrl, resetSchema } from "../db/test-support.ts";
@@ -53,7 +53,7 @@ const evalBase = process.env.OB1_EVAL_BASE ?? process.env.OLLAMA_BASE;
 if (!process.env.OB1_LLM_BASE_URL && evalBase) process.env.OB1_LLM_BASE_URL = evalBase;
 if (!process.env.OB1_LLM_API_KEY && process.env.OB1_EVAL_KEY) process.env.OB1_LLM_API_KEY = process.env.OB1_EVAL_KEY;
 
-const cfg = resolveEmbedConfig(process.env);
+const cfg = resolveEmbedConfig(process.env as EmbedEnv);
 const TIMEOUT_MS = Number(flag("timeout") ?? 300) * 1000;
 const LIMIT = flag("limit") ? Number(flag("limit")) : undefined;
 const key = extractionKey(cfg.metadataModel);

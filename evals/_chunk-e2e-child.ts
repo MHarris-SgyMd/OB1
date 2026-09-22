@@ -11,6 +11,12 @@
  * and prints `RESULT <found> <chunkRows>` for the parent to parse.
  */
 
+// A module, not a script: this file imports and exports nothing, and without
+// this line tsc reads it into one global scope with every other such file —
+// eval-extraction.ts and this one each declare CASES and BASE — and refuses
+// its top-level await. Bun treats every file as a module (SMD-1932).
+export {};
+
 const CASES = JSON.parse(process.env.OB1_EVAL_CASES ?? "[]") as {
   key: string; query: string; text: string;
 }[];

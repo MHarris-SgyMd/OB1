@@ -13,6 +13,7 @@
     "tools": ["Node.js 18+"]
   },
   "tags": ["import", "grok", "xai", "conversations", "ai-history"],
+  "connectors": ["grok"],
   "difficulty": "beginner",
   "estimated_time": "15 minutes",
   "created": "2026-03-15",
