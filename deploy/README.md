@@ -142,6 +142,7 @@ the repo root, with whatever `-f` files the stack was started with:
 | `server` | `server:8000` | `127.0.0.1:${SERVER_PORT:-8000}` — the stack's only published port | Through a TLS proxy or tunnel. One on this host dials `127.0.0.1` and needs no knob; only a proxy on another machine needs `SERVER_BIND=0.0.0.0` in `deploy/.env`, and then the key rides every request in clear until the proxy |
 | `postgres` | `postgres:5432` — the server and the migrator | Nothing. `compose exec postgres psql -U postgres openbrain` for psql, `compose exec -T postgres pg_dump -U postgres openbrain > dump.sql` for a backup. A tool run from a checkout (`db/reembed.ts`, `db/extract-entities.ts`, `db/consolidate.ts`, the evals) adds `-f deploy/compose.host-ports.yaml`, which publishes it on `127.0.0.1:${POSTGRES_PORT:-5432}` — choose that when the stack comes up: adding or dropping the file later recreates `postgres` and, through `depends_on`, `server` | Never. `POSTGRES_BIND` exists for a firewalled host you have looked at; it is the superuser on the whole brain |
 | `ollama` (`--profile local-models`) | `ollama:11434` — the server and `ollama-pull` | Nothing. `compose exec ollama ollama pull <model>`; the host-ports file publishes it on `127.0.0.1:${OLLAMA_PORT:-11434}` for an eval run from a checkout | Not intended; an unauthenticated model API |
+| `board-sync` (`--profile board-sync`) | Listens on nothing; dials `postgres:5432` and the model provider, and Linear's API outward | Nothing | Nothing |
 
 The three-brain pipeline (`-f deploy/compose.tiers.yaml`, SMD-1806) publishes one
 server per tier, each on loopback by default; its three Postgres services and
@@ -246,6 +247,35 @@ which is where claude.ai looks for OAuth discovery before it will open a custom
 connector (with the server's path as a suffix, when the URL carries one). A server
 behind a path prefix needs its proxy to route `/.well-known/` to it, or to 404 it
 there, for that check to pass.
+
+## Keeping the board in the brain
+
+The fork's own brain holds its Linear board — every issue in the Open Brain
+initiative's projects as one thought, in the shape the hand captures used. Until
+SMD-1954 that was a paste per ticket, and a ticket that moved to Done kept
+reading Backlog until someone pasted it again, which made a second row. The
+`board-sync` profile is that sweep as a service:
+
+```bash
+# deploy/.env: LINEAR_API_KEY=lin_api_…  (and OB1_LINEAR_INITIATIVE when the
+# initiative is not "Open Brain")
+podman compose -f deploy/compose.yaml --profile board-sync up -d
+podman compose -f deploy/compose.yaml --profile board-sync logs -f board-sync
+```
+
+Every `OB1_BOARD_SYNC_INTERVAL` seconds (300) it runs `bun db/sync-linear.ts`
+once: a few requests list every issue's identifier, last-updated time and names
+(a hundred a page), one query reads the brain's ticket rows, and the difference
+is the work — a new
+issue is captured (vector, tags, and the facets Linear knows: project, status,
+priority, labels, parent), a moved or edited one is updated in place with a
+fresh vector, an unchanged one costs nothing. There is no state file: the brain
+is the state, so a pass that dies is finished by the next one. The same command
+runs from a checkout against any brain (`bun db/sync-linear.ts --url … --audit`
+is the lockstep census alone; `db/README.md`, "The board in the brain"). The
+scheduled form is the one built here; a Linear webhook is exact and immediate
+but needs an inbound URL the stack has no origin for until SMD-1846, and the
+handler's shape (signature, replay window, loop guard) is SMD-1862's.
 
 ## What this does not cover
 
