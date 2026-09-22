@@ -22,7 +22,7 @@
 import { SQL } from "bun";
 import { estimateTokens } from "./chunk.ts";
 import { SqlStore } from "./store-sql.ts";
-import { createEmbedder, resolveEmbedConfig } from "./embed.ts";
+import { createEmbedder, resolveEmbedConfig, type EmbedEnv } from "./embed.ts";
 import { createAssert, neverAnswers, requireDatabaseUrl, resetSchema } from "../db/test-support.ts";
 import { mcpClient } from "./test-support.ts";
 
@@ -200,7 +200,7 @@ console.log("\n[1b] A pass-shaped embedder asks every long capture itself, and n
   // outcome is recorded on that row, so it has to be that row's own. Against the
   // same refusing stub, three long captures are three probes, not one — and each
   // result carries the provider's answer, which is what the pass writes down.
-  const cfg = resolveEmbedConfig({ ...(process.env as Record<string, string>), OB1_LLM_TIMEOUT: "1" });
+  const cfg = resolveEmbedConfig({ ...(process.env as EmbedEnv), OB1_LLM_TIMEOUT: "1" });
   const pass = createEmbedder(() => cfg, { rememberRefusal: false });
   // The subject every direct call here names, for the egress gate (SMD-1903);
   // the endpoint is declared local above, so the gate does not apply.
@@ -231,7 +231,7 @@ console.log("\n[1b] A pass-shaped embedder asks every long capture itself, and n
   // With context on, a blurb call that never returns is a reason the result
   // carries — so a pass can write "the metadata model timed out" on the row
   // instead of "fix the metadata model".
-  const withContext = createEmbedder(() => resolveEmbedConfig({ ...(process.env as Record<string, string>), OB1_LLM_TIMEOUT: "1", OB1_CHUNK_CONTEXT: "on" }), { rememberRefusal: false });
+  const withContext = createEmbedder(() => resolveEmbedConfig({ ...(process.env as EmbedEnv), OB1_LLM_TIMEOUT: "1", OB1_CHUNK_CONTEXT: "on" }), { rememberRefusal: false });
   const bare = await withContext.embedCapture(`blurbtarpit ${FILLER.repeat(60)}`, SUBJECT);
   assert(bare.contextFailures === bare.chunks.length && bare.chunks.every((c) => !c.context),
     `every blurb timed out, so every window went in bare (${bare.contextFailures} of ${bare.chunks.length})`);
@@ -322,7 +322,7 @@ console.log("\n[5b] The window grown, the same text makes no windows — the win
   const foundBy = async (query: string) => /Notes from the retrospective/.test(await call("search_thoughts", { query, limit: 10, threshold: 0.1 }));
   /** The same text embedded with the window at the batch — no windows — and written as index.ts writes a capture. */
   const recapture = async (model?: string) => {
-    const grown = createEmbedder(() => resolveEmbedConfig({ ...(process.env as Record<string, string>), OB1_CHUNK_TOKENS: String(BATCH), ...(model ? { OB1_EMBEDDING_MODEL: model } : {}) }));
+    const grown = createEmbedder(() => resolveEmbedConfig({ ...(process.env as EmbedEnv), OB1_CHUNK_TOKENS: String(BATCH), ...(model ? { OB1_EMBEDDING_MODEL: model } : {}) }));
     const embedded = await grown.embedCapture(text, { kind: "capture" });
     assert(embedded.chunks.length === 0, `with the window at the batch the same text makes no windows (${embedded.chunks.length}; model ${embedded.model})`);
     const store = new SqlStore(URL_, { max: 1 });
