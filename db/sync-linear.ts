@@ -255,13 +255,16 @@ export function groupTicketRows(rows: BrainRow[]): Map<string, BrainRow[]> {
  * text-holder was the oldest, left the middle twin as head and every later pass
  * on WOULD_CYCLE (second review pass).
  */
-export function desiredPointers(order: BrainRow[]): { row: BrainRow; wanted: string | null }[] {
+export function desiredPointers(order: BrainRow[]): { row: BrainRow; wanted: string | null; dropped?: string[] }[] {
   const ids = new Set(order.map((r) => r.id));
   const foreign = order.map((r) => r.supersedes).filter((s): s is string => s !== null && !ids.has(s));
-  const out: { row: BrainRow; wanted: string | null }[] = [];
+  // One tail, one pointer: a second outside pointer cannot be kept, and is
+  // named on the last row's change so the pass says so (eighth review pass).
+  const dropped = foreign.slice(1);
+  const out: { row: BrainRow; wanted: string | null; dropped?: string[] }[] = [];
   for (let i = 0; i < order.length; i++) {
     const wanted = i + 1 < order.length ? order[i + 1].id : foreign[0] ?? null;
-    if (order[i].supersedes !== wanted) out.push({ row: order[i], wanted });
+    if (order[i].supersedes !== wanted) out.push({ row: order[i], wanted, ...(i + 1 === order.length && dropped.length ? { dropped } : {}) });
   }
   return out;
 }
@@ -298,10 +301,14 @@ export function planPass(census: Census, groups: Map<string, BrainRow[]>, full =
     // and without a watermark, would otherwise keep the ticket stale forever
     // (fifth review pass).
     const have = rows.map((r) => r.metadata?.linear_updated_at).filter((v): v is string => typeof v === "string").sort().at(-1);
-    // A row whose tags fell back is stale too: the pass re-tags the head when
-    // it holds the text, where the watermark alone kept `uncategorized` until
-    // the ticket happened to move in Linear (seventh review pass).
-    const isStale = have === undefined || have < updatedAt || rows.some((r) => tagsFellBack(r.metadata));
+    // A current row whose tags fell back is stale too: the pass re-tags it,
+    // where the watermark alone kept `uncategorized` until the ticket happened
+    // to move in Linear (seventh review pass). The CURRENT row — rows[0], the
+    // one no member supersedes — not any row: a superseded twin's tags are its
+    // own text's and are never asked for again, so counting them kept a ticket
+    // stale for good (eighth pass). When the pass promotes a holder over rows[0],
+    // the chain makes that holder rows[0] by the next pass, so the two agree.
+    const isStale = have === undefined || have < updatedAt || tagsFellBack(rows[0].metadata);
     if (isStale) { stale.push(identifier); fetch.push(identifier); }
     else if (full) fetch.push(identifier);
     else unchanged++;
@@ -469,9 +476,12 @@ export async function readTicketRows(sql: SQL, opts: { scanHeaders: boolean; cla
   const claimed = opts.claimed ?? ((await sql`SELECT ${rowColumns(sql)} FROM thoughts WHERE metadata ? 'issue'`) as BrainRow[]);
   if (!opts.scanHeaders) return claimed;
   // The header grammar in SQL is only a pre-filter; ticketIdentifier() decides.
+  // `metadata` is nullable (001): `NOT (NULL ? 'issue')` is NULL, not true, and
+  // a raw-inserted paste with no metadata was invisible to both reads (eighth
+  // review pass).
   const byHeader = (await sql`
     SELECT ${rowColumns(sql)} FROM thoughts
-    WHERE NOT (metadata ? 'issue') AND content ~ '^[A-Z][A-Z0-9]*-[0-9]+ — [^\n]*\nProject: '`) as BrainRow[];
+    WHERE NOT (COALESCE(metadata, '{}'::jsonb) ? 'issue') AND content ~ '^[A-Z][A-Z0-9]*-[0-9]+ — [^\n]*\nProject: '`) as BrainRow[];
   return [...claimed, ...byHeader];
 }
 
@@ -498,7 +508,7 @@ function rowColumns(sql: SQL) {
 async function chainRows(w: Writer, identifier: string, order: BrainRow[]): Promise<{ changed: number; refusal?: string }> {
   const changes = desiredPointers(order);
   if (changes.length === 0) return { changed: 0 };
-  const say = (c: { row: BrainRow; wanted: string | null }) => `${c.row.id} ${c.wanted ? `→ ${c.wanted}` : "cleared"}${c.row.supersedes && c.row.supersedes !== c.wanted ? ` (was ${c.row.supersedes})` : ""}`;
+  const say = (c: { row: BrainRow; wanted: string | null; dropped?: string[] }) => `${c.row.id} ${c.wanted ? `→ ${c.wanted}` : "cleared"}${c.row.supersedes && c.row.supersedes !== c.wanted ? ` (was ${c.row.supersedes})` : ""}${c.dropped ? ` — a second outside pointer (${c.dropped.join(", ")}) has no place in one chain and is DROPPED` : ""}`;
   if (w.dryRun) { w.log(`  ~ ${identifier}: would re-chain ${changes.map(say).join(", ")}`); return { changed: changes.length }; }
   // A write the database refuses undoes EVERY write before it — the clears and
   // the sets that landed — in reverse: the pointers a person set were promised
@@ -663,9 +673,20 @@ export async function syncIssue(w: Writer, issue: LinearIssue, rows: BrainRow[])
       if (g.chat.allowed && !w.dryRun) {
         const tags = await w.tags(content, subject);
         retagged = { ...tags, ...("metadata_extraction_failed" in tags ? {} : { metadata_extraction_failed: null }) };
-      } else if (g.chat.allowed) w.log(`  · ${issue.identifier}: would extract the tags again (they fell back: ${String(head.metadata?.metadata_extraction_failed)})`);
+      } else if (g.chat.allowed) {
+        // The dry run cannot know the tags; it counts the write it would make.
+        w.log(`  · ${issue.identifier}: would extract the tags again (they fell back: ${String(head.metadata?.metadata_extraction_failed)})`);
+        retagged = { metadata_extraction_failed: null };
+      }
     }
-    const patch = facetDiff || Object.keys(staleRefusal).length || Object.keys(retagged).length ? { ...retagged, ...(facetDiff ?? {}), ...staleRefusal } : null;
+    // With fresh tags, EVERY facet goes over them (a `status` the model read out
+    // of the description must not win — the fourth pass's rule, which the
+    // seventh's retag broke) and the whole is compared with the row, so a retag
+    // that fell back again to what the row already holds writes nothing (eighth
+    // review pass).
+    const patch = Object.keys(retagged).length
+      ? facetPatch(head.metadata ?? {}, { ...retagged, ...facets, ...staleRefusal })
+      : (facetDiff || Object.keys(staleRefusal).length ? { ...(facetDiff ?? {}), ...staleRefusal } : null);
     if (!patch) { await clearRefusals(); return { outcome: "unchanged", noVector: false, ...(await chain()) }; }
     if (w.dryRun) { w.log(`  · ${issue.identifier}: would patch ${said(patch)}${where}`); await clearRefusals(); return { outcome: "patched", noVector: false, ...(await chain()) }; }
     const r = await w.store.updateThought({ id: head.id, metadataPatch: patch, actor: w.actor });
@@ -725,6 +746,8 @@ export async function syncIssue(w: Writer, issue: LinearIssue, rows: BrainRow[])
   if (!r.ok && r.error === "DUPLICATE_CONTENT") return refuse(null);
   if (!r.ok) throw new Error(`updating ${head.id}: ${r.error}`);
   w.log(`  ~ ${issue.identifier}: updated${embedded ? "" : " WITHOUT a vector (egress refused)"}${patch ? ` (${said(patch)})` : ""}`);
+  // The twins' refusal markers too, as the patch branch does (eighth review pass).
+  await clearRefusals();
   return { outcome: "updated", noVector: !embedded, ...(await chain()) };
 }
 
@@ -1092,7 +1115,17 @@ function selfCheck(): Promise<number> {
     ok(planPass([{ identifier: "SMD-1936", updatedAt: issue.updatedAt }], new Map([["SMD-1936", [row("F", text, { ...withFacets, metadata_extraction_failed: "provider_timeout" }, null, null)]]])).stale.length === 1, "a row whose tags fell back is stale though its watermark is current");
     ok(planPass([{ identifier: "SMD-1936", updatedAt: issue.updatedAt }], new Map([["SMD-1936", [row("E", text, { ...withFacets, metadata_extraction_failed: "egress_denied" }, null, null)]]])).stale.length === 0, "…an egress refusal is policy, not a failure to retry");
     r = await run(recorder, [row("F", text, { ...withFacets, metadata_extraction_failed: "provider_timeout", topics: ["uncategorized"] }, null, null)]);
-    ok(r.r.outcome === "patched" && r.calls.join("; ") === "tags; update F patch(type,topics,status,metadata_extraction_failed)", `the head holding the text with fallback tags: one chat call, the tags replaced and the marker nulled, no embed (${r.calls.join("; ")})`);
+    // Eighth review pass: the model's `status: "a guess"` does not reach the row — every facet goes over the fresh tags and only what differs is written.
+    ok(r.r.outcome === "patched" && r.calls.join("; ") === "tags; update F patch(type,topics,metadata_extraction_failed)", `the head holding the text with fallback tags: one chat call, the tags replaced and the marker nulled, Linear's status kept, no embed (${r.calls.join("; ")})`);
+    r = await run({ ...recorder, tags: async () => { calls.push("tags"); return { topics: ["uncategorized"], type: "observation", metadata_extraction_failed: "provider_timeout" }; } }, [row("F", text, { ...withFacets, topics: ["uncategorized"], type: "observation", metadata_extraction_failed: "provider_timeout" }, null, null)]);
+    ok(r.r.outcome === "unchanged" && r.calls.join("; ") === "tags", `a retag that falls back to what the row already holds writes nothing (${r.calls.join("; ")})`);
+    r = await run({ ...recorder, dryRun: true }, [row("F", text, { ...withFacets, metadata_extraction_failed: "provider_timeout" }, null, null)]);
+    ok(r.r.outcome === "patched" && r.calls.length === 0, `…and a dry run counts the retag it would make (${r.r.outcome})`);
+    ok(planPass([{ identifier: "SMD-1936", updatedAt: issue.updatedAt }], new Map([["SMD-1936", [row("H", text, withFacets, "2026-09-22T00:00:00Z", "T"), row("T", text, { metadata_extraction_failed: "provider_timeout" }, "2026-09-21T00:00:00Z", null)]]])).stale.length === 0, "a superseded twin's fallback tags do not keep the ticket stale — the current row's do");
+    // The update branch clears a twin's stale refusal too.
+    r = await run(recorder, [row("B", text, { ...withFacets, status: "Done", status_type: "completed" }, "2026-09-23T00:00:00Z", "A"), row("A", text, { text_refused_by: "Z" }, "2026-09-22T00:00:00Z", null)], { ...issue, state: { name: "In Progress", type: "started" } });
+    ok(r.calls.some((c) => c === "update A patch(text_refused_by)"), `after a text update the twin's refusal marker is cleared (${r.calls.join("; ")})`);
+    ok(/DROPPED/.test(desiredPointers([row("H", text, {}, null, "X"), row("T", text, {}, null, "Y")]).map((c) => c.dropped?.join() ?? "").join()) === false && desiredPointers([row("H", text, {}, null, "X"), row("T", text, {}, null, "Y")]).at(-1)?.dropped?.join() === "Y", "a second outside pointer is named as dropped on the tail's change, not lost in silence");
     // A refused set undoes the sets that landed too, not the clears alone.
     sets = 0;
     const thirdFails: Writer["store"] = { captureThought: recorder.store.captureThought, updateThought: async (o) => { if (o.provenance && o.provenance.supersedes != null && ++sets === 3) { calls.push(`update ${o.id} supersedes=${o.provenance.supersedes} → WOULD_CYCLE`); return { ok: false, error: "WOULD_CYCLE" }; } return recorder.store.updateThought(o); } };

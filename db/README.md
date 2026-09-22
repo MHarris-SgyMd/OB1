@@ -1519,7 +1519,7 @@ bun sync-linear.ts --url … --dry-run                 # what a pass would write
 bun sync-linear.ts --url … --audit                   # the lockstep census: missing / stale / extra; exit 1 when any of the three
 bun sync-linear.ts --url … --loop                    # a pass every OB1_BOARD_SYNC_INTERVAL seconds (300)
 bun sync-linear.ts --url … --full                    # re-render and compare every issue, not only the moved ones
-bun sync-linear.ts --url … --only SMD-1954,SMD-1865  # a few identifiers, from the plan
+bun sync-linear.ts --url … --only SMD-1954,SMD-1865  # these identifiers, whatever the plan says of them
 bun sync-linear.ts --self-check                      # the pure rules and the write decisions, no network, no database
 ```
 
