@@ -193,7 +193,8 @@ jobs:
       # every server call site, and db/reembed.ts's provider probe kept the old
       # one — at runtime the gate read `subject.kind` on undefined and the probe
       # blamed the provider. Each directory has a tsconfig.json mirroring this
-      # one and pins @types/bun and typescript at the versions above. Both run
+      # one and pins @types/bun, typescript and @types/node at the server's
+      # versions (check 18 holds the four directories in step). Both run
       # in THIS job because their imports of ../server-portable/*.ts resolve
       # through server-portable/node_modules, installed above; each installs its
       # own lockfile for its types (and evals' LanceDB, whose types

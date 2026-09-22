@@ -1335,7 +1335,8 @@ bunx tsc --noEmit                           # every .ts here, strict, against th
 
 The last line is the type check CI runs in the portable-server job (SMD-1932):
 `tsconfig.json` here mirrors `server-portable/tsconfig.json`, and `package.json`
-pins `@types/bun` and `typescript` at the server's versions. The workers,
+pins `@types/bun`, `typescript` and `@types/node` at the server's versions
+(`check-fork-consistency` 18 holds the four type-checked directories in step). The workers,
 benches and suites import `../server-portable/*.ts` and are the first callers
 to break when a shared signature moves; before this nothing compiled them, and
 SMD-1903's required `subject` argument reached `reembed.ts`'s provider probe as

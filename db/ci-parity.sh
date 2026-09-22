@@ -35,6 +35,22 @@ run() {
   fi
 }
 
+# CI's Typecheck steps, one per directory with a tsconfig.json: no tally to
+# parse, so the exit code is the verdict. Each directory's own install first,
+# as CI does (the pinned tsc and @types/bun live there); db/ and evals/ resolve
+# their ../server-portable imports through that directory's install, which the
+# suites above have already needed (SMD-1932).
+typecheck() {
+  local dir="$1" out
+  if out=$(cd "$ROOT/$dir" && bun install --frozen-lockfile >/dev/null 2>&1 && bunx tsc --noEmit 2>&1); then
+    printf "  \033[32m✓\033[0m %-26s %s\n" "$dir" "tsc --noEmit"
+  else
+    printf "  \033[31m✗\033[0m %-26s %s\n" "$dir" "tsc --noEmit"
+    printf '%s\n' "$out" | grep -E 'error TS' | head -3 | sed 's/^/        /'
+    FAILED=1
+  fi
+}
+
 main() {
   FAILED=0
   run db                 test-schema.ts
@@ -66,6 +82,10 @@ main() {
   run server-portable    test-server.ts
   run server-portable    test-auth.ts
   run server-portable    test-thoughts.ts
+  typecheck server-portable
+  typecheck compat/supabase-sql
+  typecheck db
+  typecheck evals
   echo
   [ "$FAILED" -eq 0 ] && echo "  all suites passed" || echo "  FAILURES above"
   return "$FAILED"

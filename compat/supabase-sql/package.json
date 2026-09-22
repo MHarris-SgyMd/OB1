@@ -6,5 +6,5 @@
     "test": "../../db/with-postgres.sh bun test-compat.ts",
     "typecheck": "tsc --noEmit"
   },
-  "devDependencies": { "@types/bun": "1.4.0", "typescript": "5.9.3" }
+  "devDependencies": { "@types/bun": "1.4.0", "@types/node": "26.6.2", "typescript": "5.9.3" }
 }

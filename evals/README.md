@@ -38,7 +38,9 @@ provider samples and a single run is not reproducible — see below.
 The directory type-checks — `bunx tsc --noEmit` here, strict, every `.ts` file,
 against `../server-portable`'s and `../db`'s exports — and CI runs it in the
 portable-server job (SMD-1932). `tsconfig.json` mirrors the server's;
-`package.json` pins `@types/bun` and `typescript` at the server's versions. The
+`package.json` pins `@types/bun`, `typescript` and `@types/node` at the server's
+versions, held in step across the four type-checked directories by
+`check-fork-consistency` 18. The
 harnesses that call `judgePair`, `extractEntities` and `resolveEmbedConfig`
 directly are the call sites a signature change used to reach by grep rather
 than by compiler. It needs `bun install` here (LanceDB's types included) and in
