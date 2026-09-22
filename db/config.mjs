@@ -1239,27 +1239,39 @@ export const ROUTE_ESTIMATE_MIN_PAGES = 8192;
 export const MATCH_THOUGHTS_SIGNATURE = "match_thoughts(vector, float, int, jsonb, float, float)";
 export const SEARCH_THOUGHTS_HYBRID_SIGNATURE = "search_thoughts_hybrid(vector, text, float, int, jsonb, float, float)";
 /**
- * update_thought's signature since migration 032 (SMD-1323): a ninth,
- * defaulted parameter, `p_provenance`, the envelope that sets or clears
- * `supersedes` and `derived_from` — after 021's eighth, `p_embedding_model`,
- * the model that produced the vector being written. Each dropped the form
- * before it first, for the reason above: CREATE OR REPLACE with a new
- * parameter leaves the old form beside it, and every call with fewer
- * arguments is then "function is not unique". reembed.ts resolves the body it
- * will call by this text (for 018's sentinel), and preflight's
- * `edit signature` check reads the forms beside it.
+ * update_thought's signature since migration 046 (SMD-1730): a tenth,
+ * defaulted parameter, `p_event`, the write event {stance, cites, valid_from,
+ * valid_until, trust, actor_kind} the audit trigger stamps on the row — after
+ * 032's ninth, `p_provenance`, the envelope that sets or clears `supersedes`
+ * and `derived_from`, and 021's eighth, `p_embedding_model`, the model that
+ * produced the vector being written. Each dropped the form before it first,
+ * for the reason above: CREATE OR REPLACE with a new parameter leaves the old
+ * form beside it, and every call with fewer arguments is then "function is
+ * not unique". reembed.ts resolves the body it will call by this text (for
+ * 018's sentinel), and preflight's `edit signature` check reads the forms
+ * beside it.
  */
-export const UPDATE_THOUGHT_SIGNATURE = "update_thought(uuid, text, jsonb, vector, jsonb, timestamptz, jsonb, text, jsonb)";
+export const UPDATE_THOUGHT_SIGNATURE = "update_thought(uuid, text, jsonb, vector, jsonb, timestamptz, jsonb, text, jsonb, jsonb)";
 /**
- * The forms 020, 021 and 032 dropped. Still owned: a bench's "before" arm
- * re-applies 014 or 017, and a test re-applies 018 or 021, re-creating them,
- * so a schema reset must drop them too.
+ * 032's form, the one 046 replaced: what a brain at 044 still carries, what
+ * reembed.ts probes for to name 046 as the missing file, and what a test that
+ * stops at 032 or 033 reads. One spelling (sixth review pass: three). Every
+ * type in both signatures is unparameterised — preflight's `edit signature`
+ * counts the commas for the arity, and a `vector(1024)` or `numeric(10,2)`
+ * here would count one too many.
+ */
+export const UPDATE_THOUGHT_SIGNATURE_9 = "update_thought(uuid, text, jsonb, vector, jsonb, timestamptz, jsonb, text, jsonb)";
+/**
+ * The forms 020, 021, 032 and 046 dropped. Still owned: a bench's "before"
+ * arm re-applies 014 or 017, and a test re-applies 018, 021, 032 or 033,
+ * re-creating them, so a schema reset must drop them too.
  */
 export const SUPERSEDED_SIGNATURES = Object.freeze([
   "match_thoughts(vector, float, int, jsonb)",
   "search_thoughts_hybrid(vector, text, float, int, jsonb)",
   "update_thought(uuid, text, jsonb, vector, jsonb, timestamptz, jsonb)",
   "update_thought(uuid, text, jsonb, vector, jsonb, timestamptz, jsonb, text)",
+  UPDATE_THOUGHT_SIGNATURE_9,
 ]);
 
 /**
@@ -1458,12 +1470,19 @@ export const ROLE_GRANTS = Object.freeze({
     // citations that name the row and, detaching, writes them. A role without
     // these cannot delete any thought, cited or not.
     Object.freeze({ table: "thought_facets", privileges: Object.freeze(["SELECT", "UPDATE"]),                     since: "042" }),
+    // 046's audit trigger runs as the caller on EVERY write that carries an
+    // actor: it reads the key's kind from ob1_agents (by id, else by name). A
+    // role without SELECT there fails every capture, edit and delete inside the
+    // trigger — so SELECT is hard here, while the writes resolve_agent makes
+    // stay soft, in `server` below (SMD-1730, first review pass).
+    Object.freeze({ table: "ob1_agents",     privileges: Object.freeze(["SELECT"]),                               since: "046" }),
   ]),
   // The server's soft extras, beyond the hard capture set: preflight reads its
   // own `ob1_config` as this role, and `resolve_agent` (010, SECURITY INVOKER)
   // attributes a write when a key is presented — and it UPSERTs both agent
   // tables (last_used_at, and registering an agent/key), so SELECT alone leaves
-  // it raising. A capture tolerates all of this: the resolve step is caught
+  // it raising. A capture tolerates all of this (SELECT on ob1_agents excepted,
+  // which 046's trigger made hard — above): the resolve step is caught
   // (agents.ts) and attribution degrades, and preflight only warns on the
   // config read. Documented and granted, not enforced — but granted with the
   // writes `resolve_agent` actually makes, so attribution works when it lands.

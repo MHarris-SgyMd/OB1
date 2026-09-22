@@ -97,7 +97,7 @@ console.log("\n[1b] The actor reaches the audit trail on THIS store too");
     content: "a thought captured with an actor",
     payload: { metadata: { source: "postgrest-test" } },
     embedding: vec(5),
-    actor: { name: "importer", source: "postgrest-test" },
+    actor: { name: "importer", via: "postgrest-test" },
   });
   const sql = new SQL({ url: URL_, max: 1 });
   const [ev] = await sql`
@@ -383,7 +383,7 @@ console.log("\n[7] resolveAgent's RPC argument shape, and the id it produces");
     content: "a thought captured by a resolved agent",
     payload: { metadata: { source: "postgrest-test" } },
     embedding: vec(6),
-    actor: { name: "connector", source: "postgrest-test", agentId },
+    actor: { name: "connector", via: "postgrest-test", agentId },
   });
   const sql = new SQL({ url: URL_, max: 1 });
   const [ev] = await sql`
@@ -575,14 +575,14 @@ console.log("\n[12] deleteThought's rpc shape over PostgREST: p_detach named and
   const [{ r: wrote }] = (await admin`SELECT record_citation(${citer}::uuid, ${source}::uuid, 'the limit is 600', 'retrieved') AS r`) as { r: { ok: boolean } }[];
   assert(wrote.ok === true, `record_citation writes the citing row (${JSON.stringify(wrote)})`);
   // Without detach: refused, the count and the citing row mapped to the store's shape.
-  const refused = await store.deleteThought({ id: source, actor: { name: "importer", source: "postgrest-test" } });
+  const refused = await store.deleteThought({ id: source, actor: { name: "importer", via: "postgrest-test" } });
   assert(refused.ok === false && refused.error === "CITED" && refused.citedBy === 1 && refused.citations?.length === 1 && refused.citations[0].thoughtId === citer && refused.citations[0].stance === "retrieved" && refused.citations[0].text === "the limit is 600" && ISO_RE.test(refused.citations[0].createdAt ?? ""),
          `the CITED envelope normalises to citedBy and citations, created_at an ISO string (${JSON.stringify(refused)})`);
   assert(Number((await admin`SELECT count(*)::int AS c FROM thoughts WHERE id = ${source}`)[0].c) === 1, "…and the source stands");
   const spelled = await store.deleteThought({ id: source, detach: false });
   assert(spelled.ok === false && spelled.error === "CITED", "detach: false spelled is the default's refusal");
   // With detach: deleted, the count read back, the actor on the audit row.
-  const detached = await store.deleteThought({ id: source, actor: { name: "importer", source: "postgrest-test" }, detach: true });
+  const detached = await store.deleteThought({ id: source, actor: { name: "importer", via: "postgrest-test" }, detach: true });
   assert(detached.ok === true && detached.id === source && detached.detached === 1 && detached.inactive === undefined, `p_detach binds and the count comes back (${JSON.stringify(detached)})`);
   const [ev] = await admin`SELECT actor_name FROM thought_audit WHERE thought_id = ${source} AND action = 'delete'`;
   assert(ev?.actor_name === "importer", `the delete is attributed over this path too (${ev?.actor_name})`);
