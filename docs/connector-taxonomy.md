@@ -200,11 +200,13 @@ not in the node).
 
 - **A new vendor in a known family.** Write the mapping where the fetcher lives.
   Add the artifact to `docs/connector-registry.json` with its capabilities; add
-  the vendor to `connectors` with the direction the capabilities derive. Tag the
-  artifact's `metadata.json` with the vendor's name and name its service in
-  `requires.services` (a service string a model-provider pattern also matches,
-  such as "OpenAI ChatGPT conversations API", is covered by the tag). Run
-  `bun scripts/connector-registry.mjs`. Nothing else.
+  the vendor to `connectors` with the direction the capabilities derive. Declare
+  the same vendors in the artifact's `metadata.json` — `"connectors": ["imap"]`
+  — and name its service in `requires.services`, one system per entry, its name
+  first. Run `bun scripts/connector-registry.mjs`. Nothing else. The check holds
+  the declaration and the registry equal, so a maker-first service string
+  ("OpenAI ChatGPT conversations API") cannot hide a vendor the declaration
+  names.
 - **A new family.** Declare it under `families` with every schema field before
   any capability uses it. The check refuses a capability naming an undeclared
   family, and refuses `notification-target` until its `reserved` flag is dropped
@@ -275,19 +277,24 @@ must-pass probes on every run:
   family, no capability repeated;
 - the connectors are exactly the vendors the capabilities name, each with the
   direction its capabilities derive;
-- **coverage**: every contribution whose `metadata.json` names a service that is
-  not a model provider, the hosting or the brain's own surface (a pattern covers
-  a service string only when its match begins the first or the second word, so
-  "OpenRouter or Anthropic" is a provider and "Notion API (summaries via
-  OpenRouter)", "Notion (OpenRouter)" and "Gmail/OpenAI" are vendors — one
-  external system per entry, its name first), or carries a connector-shaped tag
-  (`import`, `capture`, `digest`, `webhook`, `export`, `sync`, `messaging`,
-  `email`, `bot`) or a tag naming a declared connector (`telegram`, `gmail`, …;
-  tags compare lower-cased), or sits in a fold-in SMD-1867 row of
-  `docs/vendored-disposition.md` (a fold-in row whose directory is gone is a
-  finding), is classified or excused by name — never both, never neither; a
-  classified artifact nothing marks is refused (tag it with the vendor); a
-  stale excuse and a service pattern matching nothing are refused;
+- **the declaration**: a registered artifact's `metadata.json` `connectors`
+  equals exactly the vendors its capabilities name; a contribution that
+  declares a connector is classified; an excused one declares none;
+- **coverage**, the net under the declaration: every contribution whose
+  `metadata.json` names a service that is not a model provider, the hosting or
+  the brain's own surface (a pattern covers a service string only when its
+  match begins the first or the second word, so "OpenRouter or Anthropic" is a
+  provider and "Notion API (summaries via OpenRouter)", "Notion (OpenRouter)"
+  and "Gmail/OpenAI" are vendors — one external system per entry, its name
+  first), or carries a connector-shaped tag (`import`, `digest`, `webhook`,
+  `messaging`, `email`, `bot`) or a tag naming a declared connector
+  (`telegram`, `gmail`, …; tags compare lower-cased), or sits in a fold-in
+  SMD-1867 row of `docs/vendored-disposition.md` — the marker in the
+  Disposition cell, and a row whose directory is gone is a finding — is
+  classified or excused by name — never both, never neither; a classified
+  artifact nothing marks is refused (declare its connectors); a stale excuse
+  and a service pattern matching nothing are refused; a contribution whose
+  metadata does not parse gets no verdict here (check 1 names the file);
 - the tables below equal what the registry renders.
 
 `bun scripts/connector-registry.mjs --check` runs the same rules by hand.

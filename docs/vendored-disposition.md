@@ -194,21 +194,21 @@ remaining drafts are unreferenced markdown working-notes.
 | `brain-health-monitoring` | keep + audited | Ops SQL views + runbook (`ops-views.sql`, no core clobber); optionally reads the kept `entity-extraction` / `smart-ingest` tables. |
 | `brain-smoke-test` | keep + audited | Fresh-install smoke harness (`smoke-all.js`); exercises REST/MCP/DB/auth across kept artifacts. |
 | `bring-your-own-context` | keep + audited | Portable context workflow (extraction prompts + Work Operating Model flow + remote MCP deploy). |
-| `chatgpt-conversation-import` | keep + audited | ChatGPT-export import recipe (`chatgpt_parser.py` + `schema.sql`, no core clobber); an ingestion source — candidate SMD-1867 adapter alongside the capture integrations. |
+| `chatgpt-conversation-import` | keep + audited → SMD-1867 candidate | ChatGPT-export import recipe (`chatgpt_parser.py` + `schema.sql`, no core clobber); an ingestion source — candidate SMD-1867 adapter alongside the capture integrations. |
 | `claudeception` | keep + audited | Skills-that-create-skills continuous-learning recipe; searches/captures via the core MCP path. |
 | `content-fingerprint-dedup` | keep + audited | The `upsert_thought` redefinition is a **README code example**, annotated "do not paste — migration 003/005 own it (SMD-1250)"; guard check 7 allowlists it (lines 646/1406). It is the fork's canonical dedup-convention doc, cited by `email-history-import` / `edge-function-cost-optimization` / `gmail-smart-pull` / `lint-sweep`. *(Minor: some cross-refs point at `primitives/content-fingerprint-dedup` / an upstream GitHub URL — stale paths to fix; overlaps SMD-1929.)* |
 | `daily-digest` | keep + audited | Gmail-draft daily summary via Claude Code scheduled tasks + core MCP; zero infra. |
 | `edge-function-cost-optimization` | keep + audited | MCP-consolidation/caching optimization recipe; its `examples/_shared/auth.ts` is on the `sync-auth` list. |
 | `editorial-policy` | keep + audited | 40-rule synthesis constitution + weekly drift auditor; `auditor/index.ts` is CI-driven (`test-writes.ts` DRIVEN_1524, SMD-1524). No core clobber. |
-| `email-history-import` | keep + audited *(drop one sub-file)* | Gmail-history import (an SMD-1867 candidate). **Sub-file removal:** `rollback-chunking-columns.sql` undoes the abandoned upstream PR #27 column-chunking (`parent_id`/`chunk_index`/`full_text` + `insert_thought` RPC) the fork never adopted (it uses `thought_chunks` / migration 007) — a no-op on the fork, dead upstream cruft. It is also an **unguarded `DROP COLUMN` on core `thoughts`** (guard check 5 only guards `ADD COLUMN`) → also a guard-rule candidate for the SMD-1924 verify step. |
+| `email-history-import` | keep + audited *(drop one sub-file)* → SMD-1867 candidate | Gmail-history import (an SMD-1867 candidate). **Sub-file removal:** `rollback-chunking-columns.sql` undoes the abandoned upstream PR #27 column-chunking (`parent_id`/`chunk_index`/`full_text` + `insert_thought` RPC) the fork never adopted (it uses `thought_chunks` / migration 007) — a no-op on the fork, dead upstream cruft. It is also an **unguarded `DROP COLUMN` on core `thoughts`** (guard check 5 only guards `ADD COLUMN`) → also a guard-rule candidate for the SMD-1924 verify step. |
 | `entity-wiki` | keep + audited | Per-entity markdown wiki generator; reads the kept `entity-extraction` tables + worker. |
 | `fingerprint-dedup-backfill` | keep + audited | Client-side fingerprint backfill **+ duplicate cleanup**. Migration 023 backfills server-side, but the recipe's `delete-duplicates.mjs` removes pre-existing dupes (a migration doesn't), and it's cited as the cleanup step by `lint-sweep` / `edge-function-cost-optimization` / `content-fingerprint-dedup`. Complements core, not superseded. |
-| `gmail-smart-pull` | keep + audited | Gmail → ingest-pack with sensitivity routing + atomization + contact tiers; own SQL (`merge_thought_metadata`, `entities_canonical_email`, no core clobber). SMD-1867 candidate. |
-| `google-activity-import` | keep + audited | Google Takeout (Search/Gmail/Maps/YouTube/Chrome/Gemini) import. SMD-1867 candidate. |
-| `grok-export-import` | keep + audited | xAI Grok conversation-export import. SMD-1867 candidate. |
+| `gmail-smart-pull` | keep + audited → SMD-1867 candidate | Gmail → ingest-pack with sensitivity routing + atomization + contact tiers; own SQL (`merge_thought_metadata`, `entities_canonical_email`, no core clobber). SMD-1867 candidate. |
+| `google-activity-import` | keep + audited → SMD-1867 candidate | Google Takeout (Search/Gmail/Maps/YouTube/Chrome/Gemini) import. SMD-1867 candidate. |
+| `grok-export-import` | keep + audited → SMD-1867 candidate | xAI Grok conversation-export import. SMD-1867 candidate. |
 | `infographic-generator` | keep + audited | Output generator (thoughts/research → infographic images via Gemini); not an import. |
-| `instagram-import` | keep + audited | Instagram export (DMs/comments/captions) import. SMD-1867 candidate. |
-| `journals-blogger-import` | keep + audited | Blogger Atom-XML import. SMD-1867 candidate. |
+| `instagram-import` | keep + audited → SMD-1867 candidate | Instagram export (DMs/comments/captions) import. SMD-1867 candidate. |
+| `journals-blogger-import` | keep + audited → SMD-1867 candidate | Blogger Atom-XML import. SMD-1867 candidate. |
 | `life-engine` | keep + audited | Background `/loop` personal-assistant recipe; own `schema.sql` (no core clobber). |
 | `life-engine-video` | keep + audited | Remotion + ElevenLabs video-briefing add-on for `life-engine`. |
 | `lint-sweep` | keep + audited | Read-only three-tier quality audit (`views.sql` + `lint-sweep.js`); never mutates thoughts. |
@@ -216,14 +216,14 @@ remaining drafts are unreferenced markdown working-notes.
 | `local-brain-no-mcp` | keep + audited *(own-database)* + SMD-1798 | Self-hosted LAN Supabase stack; its `match_thoughts`/`upsert_thought` live in its **own container init scripts** (guard check 7 excepts them; owned-set lines 657/1412) — OWN_DATABASE like `kubernetes-deployment`, not a clobber. Its Edge Functions use supabase-js → SMD-1798. |
 | `local-ollama-embeddings` | keep + audited | The `ALTER COLUMN embedding TYPE` is a README example explicitly annotated "not altered by hand on this fork — build at `db/config.mjs`'s width; `upsert_thought` refuses another width." CI-driven (`test-writes.ts:707`, SMD-1524). |
 | `ob-graph` | keep + audited + SMD-1798 | Knowledge-graph layer (own nodes/edges tables + recursive-CTE traversal + MCP server); no core clobber. `index.ts` uses supabase-js at runtime → SMD-1798 portability. |
-| `obsidian-vault-import` | keep + audited | Obsidian-vault import. SMD-1867 candidate. |
+| `obsidian-vault-import` | keep + audited → SMD-1867 candidate | Obsidian-vault import. SMD-1867 candidate. |
 | `openclaw-agent-memory` | keep + audited | Canonical OpenClaw × OB1 Agent Memory workflow recipe (depends on the kept `agent-memory-api`). Distinct from the `integrations/openclaw-agent-memory` plugin. |
 | `openclaw-code-review-memory` | keep + audited | OpenClaw code-review-agent memory workflow over Agent Memory. |
 | `openclaw-taskflow-work-log` | keep + audited | OpenClaw TaskFlow handoff-log workflow over Agent Memory. |
 | `panning-for-gold` | keep + audited | Flagship three-phase brain-dump mining workflow (paired with the skill pack). |
-| `perplexity-conversation-import` | keep + audited | Perplexity `.xlsx` export import. SMD-1867 candidate. |
+| `perplexity-conversation-import` | keep + audited → SMD-1867 candidate | Perplexity `.xlsx` export import. SMD-1867 candidate. |
 | `provenance-chains` | keep + audited | Backfill + nightly evaluator + MCP tool handlers over the kept `schemas/provenance-chains`; answers "why do I believe X / what uses this." SMD-1253 lineage. |
-| `readwise-import` | keep + audited | One-shot Readwise history backfill; pairs with `integrations/readwise-capture`. SMD-1867 candidate. |
+| `readwise-import` | keep + audited → SMD-1867 candidate | One-shot Readwise history backfill; pairs with `integrations/readwise-capture`. SMD-1867 candidate. |
 | `repo-learning-coach` | keep + audited + SMD-1798 | Local learning app with its own Supabase tables (`schema.sql`) + durable captures; `server/supabase.ts` uses supabase-js → SMD-1798; `server/brain.ts` is CI-driven. |
 | `research-to-decision-workflow` | keep + audited | Workflow composing canonical OB1 skills into decision pipelines. |
 | `schema-aware-routing` | keep + audited *(own-project)* + SMD-1798 | Metadata-routing pattern that creates **its own five tables in its own project** (README-annotated; guard check 10 counted exception; CI BYPASS_1524, SMD-1524). Its `alter column embedding` / raw inserts target its own `thoughts`, not core. README uses supabase-js → SMD-1798. |
@@ -236,4 +236,4 @@ remaining drafts are unreferenced markdown working-notes.
 | `wiki-synthesis` | keep + audited | Topic/email-thread wiki synthesis from atomic thoughts via any OpenAI-compatible LLM. |
 | `work-operating-model-activation` | keep + audited + SMD-1798 | Operating-model elicitation workflow; own `schema.sql`; `index.ts` uses supabase-js → SMD-1798. |
 | `world-model-diagnostic-activation` | keep + audited | World-Model Readiness Diagnostic activation; own tables (`world_model_assessments` / `world_model_boundary_flows`), no core clobber. |
-| `x-twitter-import` | keep + audited | X/Twitter export (tweets/DMs/Grok) import. SMD-1867 candidate; `import-x-twitter.mjs` uses supabase-js → SMD-1798. |
+| `x-twitter-import` | keep + audited → SMD-1867 candidate | X/Twitter export (tweets/DMs/Grok) import. SMD-1867 candidate; `import-x-twitter.mjs` uses supabase-js → SMD-1798. |

@@ -304,16 +304,17 @@ is a **connector capability** and is classified in
 [`docs/connector-registry.json`](docs/connector-registry.json) by the five
 facets [`docs/connector-taxonomy.md`](docs/connector-taxonomy.md) defines
 (family × transport × direction × cardinality × round-trip, plus the fetcher).
-Name the vendor in your `metadata.json` `requires.services` — one external
-system per entry, its name first (a model provider it also uses is its own
-entry, not a parenthetical) — and tag the artifact with the vendor's name; add the artifact
-and its capabilities to the registry; add the vendor under `connectors` with
-the direction the capabilities derive; run `bun scripts/connector-registry.mjs`
-to refresh the spec's tables. `check-fork-consistency` check 18 finds an
-unclassified connector by its services, its tags and the disposition table, so
-the PR fails at one place until it is classified — or excused there by name,
-with a reason, when the artifact only looks external (a dashboard over the
-brain's own REST surface, a skill over its MCP surface).
+Declare the connectors in your `metadata.json` — `"connectors": ["gmail"]`, the
+registry's vendor keys — and name the vendor's service in `requires.services`,
+one external system per entry, its name first (a model provider it also uses is
+its own entry, not a parenthetical); add the artifact and its capabilities to
+the registry; add the vendor under `connectors` with the direction the
+capabilities derive; run `bun scripts/connector-registry.mjs` to refresh the
+spec's tables. `check-fork-consistency` check 18 holds the declaration and the
+registry equal, and finds an undeclared connector by its services, its tags and
+the disposition table, so the PR fails at one place until it is classified — or
+excused there by name, with a reason, when the artifact only looks external (a
+recipe tagged `email` that reads mail the brain already holds).
 
 ## The Review Process
 

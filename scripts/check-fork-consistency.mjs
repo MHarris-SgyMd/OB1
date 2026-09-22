@@ -129,7 +129,10 @@
  *      artifact is a directory that exists, listed once, its capabilities
  *      naming exactly the five facets and a fetcher from the sets and a
  *      declared family; the connectors are exactly the vendors used, each
- *      with the direction its capabilities derive; and coverage — every
+ *      with the direction its capabilities derive; the declaration — a
+ *      registered artifact's metadata.json `connectors` equals the vendors its
+ *      capabilities name, a contribution declaring one is registered, an
+ *      excused one declares none; and coverage, the net under it — every
  *      contribution whose metadata.json names a service no not-a-connector
  *      pattern matches at the start of its first or second word (a provider
  *      first and qualified after is covered; a vendor first with a provider
@@ -3403,8 +3406,8 @@ checkSchemaVersion();
 const PROBE_TREE = () => ({
   existingDirs: ["integrations/acme-capture", "recipes/acme-digest", "recipes/plain-tool"],
   metadataByPath: new Map([
-    ["integrations/acme-capture", { requires: { services: ["Acme Chat API", "OpenRouter"] }, tags: ["capture"] }],
-    ["recipes/acme-digest", { requires: { services: ["Acme Chat API (optional)"] }, tags: ["digest"] }],
+    ["integrations/acme-capture", { requires: { services: ["Acme Chat API", "OpenRouter"] }, tags: ["messaging"], connectors: ["acme"] }],
+    ["recipes/acme-digest", { requires: { services: ["Acme Chat API (optional)"] }, tags: ["digest"], connectors: ["acme"] }],
     ["recipes/plain-tool", { requires: { services: ["Supabase"] }, tags: ["ops"] }],
   ]),
   dispositionText: "### `integrations/` (1)\n\n| Artifact | Disposition | Justification |\n|---|---|---|\n| `acme-capture` | keep + audited → fold-in **SMD-1867** | a capture source |\n",
@@ -3439,21 +3442,25 @@ const REGISTRY_PROBES = [
   ["a family missing a schema field", (r) => { delete r.families["message-stream/chat"].identity; }, ["family-schema"]],
   ["a reserved family that is not sink-only", (r) => { r.families["notification-target"].direction = "source"; }, ["family-schema"]],
   ["a capability with a sixth key and no fetcher", (r) => { const c = r.artifacts[0].capabilities[0]; delete c.fetcher; c.protocol = "https"; }, ["capability-keys"]],
-  ["an artifact whose directory does not exist", (r) => { r.artifacts[0].path = "integrations/acme-gone"; }, ["artifact-missing", "coverage-unregistered", "coverage-unmarked"]],
+  ["an artifact whose directory does not exist", (r) => { r.artifacts[0].path = "integrations/acme-gone"; }, ["artifact-missing", "coverage-unregistered"]],
   ["an artifact listed twice", (r) => { r.artifacts.push(structuredClone(r.artifacts[1])); }, ["artifact-duplicate"]],
   ["a connector declaring source while its capabilities span both", (r) => { r.connectors.acme.direction = "source"; }, ["connector-direction"]],
   ["a connector with no capability naming it", (r) => { r.connectors.ghost = { direction: "source" }; }, ["connector-set"]],
   ["a vendor used with no connector entry", (r) => { delete r.connectors.acme; }, ["connector-set"]],
   ["an external-touching artifact left unclassified", (r) => { r.artifacts.pop(); r.connectors.acme.direction = "source"; }, ["coverage-unregistered"]],
-  ["an artifact both classified and excused", (r) => { r.not_connectors.artifacts["recipes/acme-digest"] = "because"; }, ["coverage-both"]],
-  ["a classified artifact nothing marks as external-touching", (r) => { r.artifacts.push({ path: "recipes/plain-tool", capabilities: [{ vendor: "acme", family: "message-stream/chat", transport: "pull", direction: "source", cardinality: "1:1", round_trip: "read-only", fetcher: "native-driver" }] }); }, ["coverage-unmarked"]],
+  ["an artifact both classified and excused (its metadata still declares the connector)", (r) => { r.not_connectors.artifacts["recipes/acme-digest"] = "because"; }, ["coverage-both", "excuse-declares"]],
+  ["a classified artifact nothing marks as external-touching", (r) => { r.artifacts.push({ path: "recipes/plain-tool", capabilities: [{ vendor: "acme", family: "message-stream/chat", transport: "pull", direction: "source", cardinality: "1:1", round_trip: "read-only", fetcher: "native-driver" }] }); }, ["coverage-unmarked", "connectors-field"]],
+  ["a registered artifact whose metadata declares other connectors than its capabilities", (r) => {}, ["connectors-field"], (t) => { t.metadataByPath.get("recipes/acme-digest").connectors = ["acme", "beta"]; }],
+  ["a contribution declaring a connector and classified nowhere", (r) => {}, ["coverage-unregistered"], (t) => { t.metadataByPath.set("recipes/plain-tool", { requires: { services: ["Supabase"] }, tags: ["ops"], connectors: ["acme"] }); }],
+  ["an excused artifact whose metadata declares a connector", (r) => { r.not_connectors.artifacts["recipes/plain-tool"] = "a tool"; }, ["excuse-declares"], (t) => { t.metadataByPath.set("recipes/plain-tool", { requires: { services: ["Supabase"] }, tags: ["ops"], connectors: ["acme"] }); }],
+  ["a vendor named after an Object.prototype member", (r) => { r.artifacts[1].capabilities[0].vendor = "constructor"; r.connectors.acme.direction = "source"; }, ["connector-set", "connectors-field"]],
   ["an excuse for an artifact nothing marks", (r) => { r.not_connectors.artifacts["recipes/plain-tool"] = "because"; }, ["excuse-stale"]],
   ["an excuse for a contribution that does not exist", (r) => { r.not_connectors.artifacts["recipes/gone"] = "because"; }, ["excuse-stale"]],
   ["a service pattern matching nothing in the tree", (r) => { r.not_connectors.services.push({ pattern: "zapier", reason: "x" }); }, ["pattern-stale"]],
   ["a service pattern that does not compile", (r) => { r.not_connectors.services.push({ pattern: "(", reason: "x" }); }, ["pattern-invalid"]],
   ["a service pattern that is empty (which would match every service)", (r) => { r.not_connectors.services.push({ pattern: "", reason: "x" }); }, ["pattern-invalid"]],
   ["a service pattern with no reason", (r) => { r.not_connectors.services.push({ pattern: "openrouter" }); }, ["pattern-reason"]],
-  ["an excuse with no reason", (r) => { r.artifacts.pop(); r.connectors.acme.direction = "source"; r.not_connectors.artifacts["recipes/acme-digest"] = ""; }, ["excuse-reason"]],
+  ["an excuse with no reason", (r) => { r.artifacts.pop(); r.connectors.acme.direction = "source"; r.not_connectors.artifacts["recipes/acme-digest"] = ""; }, ["excuse-reason"], (t) => { delete t.metadataByPath.get("recipes/acme-digest").connectors; }],
   ["an artifact path that is not <category>/<slug>", (r) => { r.artifacts[1].path = "Recipes/Acme Digest"; }, ["artifact-path", "coverage-unregistered"]],
   ["a capability repeated within an artifact", (r) => { r.artifacts[0].capabilities.push({ ...r.artifacts[0].capabilities[0] }); }, ["capability-duplicate"]],
   ["a registry that is not an object", () => {}, ["shape"], null],
@@ -3462,12 +3469,13 @@ const REGISTRY_PROBES = [
   ["a vendor named first in a service string a provider pattern also matches", (r) => {}, ["coverage-unregistered"], (t) => { t.metadataByPath.set("recipes/notion-sync", { requires: { services: ["Notion API (summaries via OpenRouter)"] }, tags: ["notes"] }); t.existingDirs.push("recipes/notion-sync"); }],
   ["a vendor first with the provider as the second token, bracketed or slashed", (r) => {}, ["coverage-unregistered"], (t) => { t.metadataByPath.set("recipes/notion-sync", { requires: { services: ["Notion (OpenRouter)"] }, tags: ["notes"] }); t.metadataByPath.set("recipes/mail-sync", { requires: { services: ["Gmail/OpenRouter"] }, tags: ["notes"] }); t.existingDirs.push("recipes/notion-sync", "recipes/mail-sync"); }],
   ["a connector's name as a tag in another case", (r) => {}, ["coverage-unregistered"], (t) => { t.metadataByPath.set("recipes/acme-notes", { requires: { services: ["OpenRouter"] }, tags: ["Acme", "Notes"] }); t.existingDirs.push("recipes/acme-notes"); }],
+  ["an artifact marked only by a tag the brain's own vocabulary shares (capture) is not marked", (r) => {}, [], (t) => { t.metadataByPath.set("recipes/own-capture", { requires: { services: ["OpenRouter"] }, tags: ["capture", "export", "sync"] }); t.existingDirs.push("recipes/own-capture"); }],
   ["a family declared as null and used", (r) => { r.families["web-clip"] = null; r.artifacts[0].capabilities[0].family = "web-clip"; }, ["family-schema"]],
   ["a fold-in row naming a contribution that is gone", (r) => {}, ["disposition-stale"], (t) => { t.dispositionText += "| `gone-capture` | keep + audited → fold-in **SMD-1867** | removed since |\n"; }],
 ];
-/** [text, want]: what dispositionPaths reads from a table — the fold-in marker under a category heading, and nothing past another heading, from a bare mention or from a negation. */
+/** [text, want]: what dispositionPaths reads from a table — the fold-in marker in the Disposition cell under a contribution-category heading, and nothing from the Justification cell, past another heading, under `docs/drafts/`, or from a bare mention or a negation. */
 const DISPOSITION_PROBES = [
-  ["### `integrations/` (2)\n\n| Artifact | Disposition | Justification |\n|---|---|---|\n| `a-capture` | keep + audited → fold-in **SMD-1867** | x |\n| `b-tool` | keep + audited | mentioned beside SMD-1867 and SMD-1924; a tool, not a fold-in |\n| `e-graph` | keep + audited | a graph view; not an SMD-1867 adapter |\n\n### `recipes/` (1)\n\n| `c-import` | keep + audited | SMD-1867 candidate. |\n| `f-import` | keep + audited | a candidate SMD-1867 adapter alongside the capture integrations. |\n| `g-ext` | keep + audited | A capture adapter under the SMD-1867 contract, not an ad-hoc integration. |\n\n## Notes\n\n| `d-tool` | remove | fold-in **SMD-1867** was considered |\n", ["integrations/a-capture", "recipes/c-import", "recipes/f-import", "recipes/g-ext"]],
+  ["### `integrations/` (2)\n\n| Artifact | Disposition | Justification |\n|---|---|---|\n| `a-capture` | keep + audited → fold-in **SMD-1867** | x |\n| `b-tool` | keep + audited | mentioned beside SMD-1867 and SMD-1924; a tool, not a fold-in |\n| `e-graph` | keep + audited | a graph view; not an SMD-1867 adapter |\n\n### `recipes/` (1)\n\n| `c-import` | keep + audited → SMD-1867 candidate | x |\n| `f-import` | keep + audited *(drop one sub-file)* → SMD-1867 candidate | x |\n| `h-import` | remove | superseded by the seam; was the SMD-1867 candidate |\n| `g-ext` | keep + audited | A capture adapter under the SMD-1867 contract, not an ad-hoc integration. |\n\n### `docs/drafts/` (1)\n\n| `sketch.md` | keep + audited → SMD-1867 candidate | not a contribution directory |\n\n## Notes\n\n| `d-tool` | remove → fold-in **SMD-1867** | was considered |\n", ["integrations/a-capture", "recipes/c-import", "recipes/f-import"]],
   ["## Summary\n\n| `x-tool` | fold-in **SMD-1867** |\n", []],
 ];
 function checkConnectorRegistry() {
@@ -3497,6 +3505,9 @@ function checkConnectorRegistry() {
     const got = dispositionPaths(text);
     if (JSON.stringify(got) !== JSON.stringify(want)) fail(SELF, `check 18's disposition reader returns [${got}], expected [${want}] (its own probe)`);
   }
+  // A registered artifact whose metadata did not parse (null) gets no coverage verdict — check 1 names the file.
+  const unread = PROBE_TREE(); unread.metadataByPath.set("recipes/acme-digest", null);
+  if (registryProblems({ registry: PROBE_REGISTRY(), ...unread }).length) fail(SELF, "check 18 passes a coverage verdict on a registered artifact whose metadata.json did not parse (its own non-probe)");
   // A metadata whose tags or services is a string (check 1's finding) marks nothing and throws nothing.
   const odd = PROBE_TREE(); odd.existingDirs.push("recipes/odd-tool"); odd.metadataByPath.set("recipes/odd-tool", { requires: { services: "Acme Chat API" }, tags: "digest" });
   try { if (registryProblems({ registry: PROBE_REGISTRY(), ...odd }).length) fail(SELF, "check 18 marks a contribution whose tags and services are strings (its own non-probe)"); } catch (e) { fail(SELF, `check 18 throws on a metadata whose tags or services is a string: ${e.message} (its own non-probe)`); }

@@ -55,14 +55,21 @@ export const CAPABILITY_KEYS = ["vendor", "family", "transport", "direction", "c
 export const FAMILY_TEXT_FIELDS = ["item", "grouping_key", "canonical", "text", "identity", "dividing_line"];
 export const FAMILY_LIST_FIELDS = ["edges", "metadata", "typical_transport"];
 /** A metadata.json tag that says "this touches an external system" until the registry or an excuse says otherwise. */
-export const TRIGGER_TAGS = ["import", "capture", "digest", "webhook", "export", "sync", "messaging", "email", "bot"];
 /**
- * A disposition row folds into SMD-1867 when it says so in the table's own
- * words — "fold-in **SMD-1867**", "SMD-1867 candidate", "candidate SMD-1867
- * adapter", "adapter under (the) SMD-1867"; a bare mention of the ticket, and
- * "not an SMD-1867 adapter", are not fold-ins.
+ * A metadata.json tag that says "this touches an external system" until the
+ * registry or an excuse says otherwise — the net under the `connectors` field
+ * for a contribution that never declared one. The brain's own vocabulary
+ * (`capture`, `export`, `sync`) is not here: it marked backups and skills over
+ * the MCP surface and grew the excuse list for nothing.
  */
-export const FOLD_IN_RE = /fold-in \*\*SMD-1867\*\*|SMD-1867 candidate|candidate SMD-1867 adapter|adapter under (?:the )?SMD-1867/;
+export const TRIGGER_TAGS = ["import", "digest", "webhook", "messaging", "email", "bot"];
+/**
+ * A disposition row folds into SMD-1867 when its Disposition CELL says so —
+ * "→ fold-in **SMD-1867**" or "→ SMD-1867 candidate"; the Justification cell
+ * is prose ("not an SMD-1867 adapter", "was the SMD-1867 candidate") and is
+ * not read.
+ */
+export const FOLD_IN_RE = /fold-in \*\*SMD-1867\*\*|SMD-1867 candidate/;
 const VENDOR = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const PATH = new RegExp(`^(?:${CATEGORIES.join("|")})/[a-z0-9]+(?:-[a-z0-9]+)*$`);
 
@@ -75,9 +82,11 @@ export function readRegistry(root) {
 
 /**
  * The contribution paths the SMD-1924 disposition table folds into SMD-1867: a
- * `| \`name\` |` row that carries the fold-in marker (FOLD_IN_RE), under a
- * `### \`category/\`` heading. Any other heading ends the table's context, so a
- * `## Notes` or `### Removals` appended below it names nothing.
+ * `| \`name\` | <disposition> |` row whose Disposition cell carries the fold-in
+ * marker (FOLD_IN_RE), under a `### \`category/\`` heading for one of the
+ * contribution categories (`### \`docs/drafts/\`` is not one). Any other
+ * heading ends the table's context, so a `## Notes` or `### Removals` appended
+ * below it names nothing.
  */
 export function dispositionPaths(text) {
   const out = [];
@@ -85,22 +94,28 @@ export function dispositionPaths(text) {
   for (const line of text.split("\n")) {
     if (/^#{1,6}\s/.test(line)) {
       const h = /^###\s+`([^`]+?)\/?`/.exec(line);
-      cat = h ? h[1] : null;
+      cat = h && CATEGORIES.includes(h[1]) ? h[1] : null;
       continue;
     }
-    const row = /^\|\s*`([^`]+)`\s*\|/.exec(line);
-    if (row && cat && FOLD_IN_RE.test(line)) out.push(`${cat}/${row[1]}`);
+    if (!cat || !line.startsWith("|")) continue;
+    const cells = line.split("|");
+    const name = /^\s*`([^`]+)`\s*$/.exec(cells[1] ?? "");
+    if (name && FOLD_IN_RE.test(cells[2] ?? "")) out.push(`${cat}/${name[1]}`);
   }
   return out;
 }
 
-/** The parsed metadata.json of every contribution that has one (an unparseable file is `{}` — check 1 names it). */
+/**
+ * The metadata.json of every contribution that has one: parsed, or `null` when
+ * the file does not parse — check 1 names that file, and the coverage rules
+ * pass no verdict on a contribution whose metadata they cannot read.
+ */
 export function readMetadata(dirs) {
   const out = new Map();
   for (const d of dirs) {
     const file = join(d.dir, "metadata.json");
     if (!existsSync(file)) continue;
-    try { out.set(d.rel, JSON.parse(readFileSync(file, "utf8"))); } catch { out.set(d.rel, {}); }
+    try { out.set(d.rel, JSON.parse(readFileSync(file, "utf8"))); } catch { out.set(d.rel, null); }
   }
   return out;
 }
@@ -147,24 +162,30 @@ function servicePatterns(registry, problems) {
 }
 
 /**
- * Why a contribution counts as external-touching, per path: the services its
- * metadata names that no not_connectors pattern covers, the trigger tags it
- * carries, a tag naming a declared connector (the vendor's own name — so a
- * recipe tagged `telegram` whose only service is a model provider is still
- * marked), and the fold-in SMD-1867 rows of the disposition table whose
- * directory exists (`existingDirs`; a row whose directory is gone is
- * registryProblems' finding, not a silent drop). Empty for a path nothing
+ * Why a contribution counts as external-touching, per path. The declaration
+ * first: a non-empty `connectors` list in its metadata (the field the schema
+ * carries for exactly this). Then the net under it, for a contribution that
+ * never declared one: the services its metadata names that no not_connectors
+ * pattern covers, the trigger tags it carries, a tag naming a declared
+ * connector (so a recipe tagged `telegram` whose only service is a model
+ * provider is still marked), and the fold-in SMD-1867 rows of the disposition
+ * table whose directory exists (`existingDirs`; a row whose directory is gone
+ * is registryProblems' finding, not a silent drop). Empty for a path nothing
  * marks. `patterns` is servicePatterns()'s output; every pattern a service
  * matches ANYWHERE is counted on it — liveness, which the stale rule reads, is
  * not coverage, which coveringPatterns decides — so a pattern a broader one
  * shadows is still live. Tags compare lower-cased, as the patterns match
- * case-insensitively. A metadata whose `services` or `tags` is not a list
- * (check 1's finding) marks nothing here rather than throwing.
+ * case-insensitively. A metadata that did not parse (`null`, check 1's
+ * finding) marks nothing; one whose `services` or `tags` is not a list marks
+ * nothing by them rather than throwing.
  */
 export function triggersFor({ metadataByPath, dispositionPaths: disp, patterns, connectorKeys = new Set(), existingDirs = [...metadataByPath.keys()] }) {
   const out = new Map();
   const add = (path, why) => out.set(path, [...(out.get(path) ?? []), why]);
   for (const [path, meta] of metadataByPath) {
+    if (meta === null) continue;
+    const declared = listOf(meta?.connectors).filter((c) => typeof c === "string");
+    if (declared.length) add(path, `declares connectors: [${declared.join(", ")}]`);
     for (const s of listOf(meta?.requires?.services)) {
       if (typeof s !== "string") continue;
       let anywhere = false;
@@ -261,7 +282,7 @@ export function registryProblems({ registry, existingDirs, metadataByPath, dispo
       if ("fetcher" in (c ?? {}) && !FETCHERS.includes(c.fetcher)) push(cw, "capability-value", `fetcher ${JSON.stringify(c.fetcher)} is not one of ${FETCHERS.join("|")}`);
       if ("vendor" in (c ?? {}) && !VENDOR.test(String(c.vendor))) push(cw, "capability-value", `vendor ${JSON.stringify(c.vendor)} is not a kebab-case slug`);
       if ("family" in (c ?? {})) {
-        if (!(c.family in families)) push(cw, "capability-family", `family ${JSON.stringify(c.family)} is not declared under families — a new family is declared with its schema first`);
+        if (!Object.hasOwn(families, c.family)) push(cw, "capability-family", `family ${JSON.stringify(c.family)} is not declared under families — a new family is declared with its schema first`);
         else if (families[c.family]?.reserved) push(cw, "reserved-used", `family ${JSON.stringify(c.family)} is reserved — dropping \`reserved\` is a spec change`);
       }
       const t = [c?.vendor, c?.family, c?.transport, c?.direction].join("|");
@@ -273,7 +294,7 @@ export function registryProblems({ registry, existingDirs, metadataByPath, dispo
   // ── the connectors ──
   const derived = derivedConnectors(registry);
   const declared = registry.connectors && typeof registry.connectors === "object" ? registry.connectors : {};
-  for (const v of derived.keys()) if (!(v in declared)) push(`${R} connectors`, "connector-set", `vendor "${v}" is used by a capability but has no connector entry`);
+  for (const v of derived.keys()) if (!Object.hasOwn(declared, v)) push(`${R} connectors`, "connector-set", `vendor "${v}" is used by a capability but has no connector entry`);
   for (const [v, c] of Object.entries(declared)) {
     const where = `${R} connectors["${v}"]`;
     if (!derived.has(v)) { push(where, "connector-set", "no capability names this vendor — a connector with no artifact is a stale entry"); continue; }
@@ -289,19 +310,30 @@ export function registryProblems({ registry, existingDirs, metadataByPath, dispo
   for (const path of foldIns) if (!dirs.has(path)) push(`${DISPOSITION_PATH} (${path})`, "disposition-stale", "a fold-in SMD-1867 row names a contribution that no longer exists — the row marks nothing; note the removal in the table");
   const triggers = triggersFor({ metadataByPath, dispositionPaths: foldIns, patterns, connectorKeys, existingDirs: [...dirs] });
   const excused = registry.not_connectors?.artifacts && typeof registry.not_connectors.artifacts === "object" ? registry.not_connectors.artifacts : {};
+  const readable = (path) => metadataByPath.has(path) && metadataByPath.get(path) !== null; // absent or unparseable: check 1's finding, no verdict here
+  const declaredConnectors = (path) => listOf(metadataByPath.get(path)?.connectors).filter((c) => typeof c === "string").sort();
   for (const [path, why] of triggers) {
     const isReg = seen.has(path);
-    const isEx = path in excused;
+    const isEx = Object.hasOwn(excused, path);
     if (isReg && isEx) push(`${R} not_connectors.artifacts["${path}"]`, "coverage-both", "both classified and excused — one or the other");
     if (!isReg && !isEx) push(path, "coverage-unregistered", `touches an external system (${why.join("; ")}) and is neither classified in ${R} nor excused there by name with a reason — see ${SPEC_PATH}`);
   }
-  for (const path of seen.keys()) if (!triggers.has(path)) push(`${R} artifacts["${path}"]`, "coverage-unmarked", "nothing marks this artifact as external-touching — tag it with its connector's name (the vendor key) or name the vendor's service in its metadata.json requires.services, so the sweep and the registry agree");
+  // The declaration and the classification are one fact stated twice, held equal: a registered
+  // artifact's metadata.json `connectors` is exactly the vendors its capabilities name.
+  for (const [path, a] of seen) {
+    if (!readable(path)) continue;
+    const vendors = [...new Set(listOf(a.capabilities).map((c) => c?.vendor).filter(nonEmpty))].sort();
+    const declared = declaredConnectors(path);
+    if (JSON.stringify(declared) !== JSON.stringify(vendors)) push(`${path}/metadata.json`, "connectors-field", `\`connectors\` is [${declared.join(", ")}] but ${R} classifies this artifact under [${vendors.join(", ")}] — declare exactly its connectors`);
+  }
+  for (const path of seen.keys()) if (!triggers.has(path) && readable(path)) push(`${R} artifacts["${path}"]`, "coverage-unmarked", "nothing marks this artifact as external-touching — declare its connectors in its metadata.json (`\"connectors\": [\"<vendor>\"]`), so the declaration and the registry agree");
   for (const [path, reason] of Object.entries(excused)) {
     const where = `${R} not_connectors.artifacts["${path}"]`;
     if (!nonEmpty(reason)) push(where, "excuse-reason", "an excuse carries its reason");
     // Existence is the directory's; a directory with no metadata.json is check 1's finding, and its excuse waits.
     if (!dirs.has(path)) push(where, "excuse-stale", "no such contribution — drop the excuse");
-    else if (metadataByPath.has(path) && !triggers.has(path)) push(where, "excuse-stale", "nothing marks this artifact as external-touching any more — drop the excuse");
+    else if (readable(path) && !triggers.has(path)) push(where, "excuse-stale", "nothing marks this artifact as external-touching any more — drop the excuse");
+    else if (readable(path) && declaredConnectors(path).length) push(where, "excuse-declares", `excused as no connector, yet its metadata.json declares connectors [${declaredConnectors(path).join(", ")}] — classify it or drop the declaration`);
   }
   for (const p of patterns) if (p.hits === 0) push(p.where, "pattern-stale", `pattern ${JSON.stringify(p.pattern)} matches no service in the tree — drop it`);
 
@@ -385,7 +417,7 @@ function main() {
   // Every step reports in words and exits 1 — a raw stack trace names no `where`.
   const attempt = (where, fn) => { try { return fn(); } catch (e) { report([{ where, msg: e.message }]); process.exit(1); } };
   const registry = attempt(REGISTRY_PATH, () => readRegistry(root));
-  const { existingDirs, metadataByPath } = contributionsOnDisk(root);
+  const { existingDirs, metadataByPath } = attempt("the contribution directories", () => contributionsOnDisk(root));
   const problems = attempt(REGISTRY_PATH, () => registryProblems({
     registry,
     existingDirs,
