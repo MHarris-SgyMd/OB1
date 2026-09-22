@@ -256,11 +256,12 @@ services:
   # moved one updated in place — through the server's own store and embedder
   # (db/sync-linear.ts's header). No port, no key: it reaches Postgres as the
   # migrator does and writes as the actor `board-sync`. Mounted read-only: db/
-  # and server-portable/ (the tool's imports), and the two evals/ modules it
-  # reads by name — NOT the checkout whole, whose deploy/.env and evals/.env
-  # would otherwise sit on the tool's own `.env` search path inside the
-  # container (third review pass). Like the migrator it needs no `bun install`
-  # — Bun built-ins and in-tree modules only.
+  # and server-portable/, the tool's whole import surface — NOT the checkout,
+  # whose deploy/.env and evals/.env would otherwise sit on the tool's own
+  # `.env` search path inside the container (third review pass; the fifth moved
+  # the two shared modules it read from evals/ into db/ so these two mounts are
+  # the boundary, not a list of files). Like the migrator it needs no
+  # `bun install` — Bun built-ins and in-tree modules only.
   #
   # The model knobs are the server's, inherited from its anchor above; the two
   # of its own are LINEAR_API_KEY (a personal API key, read-only use — it
@@ -274,8 +275,6 @@ services:
     volumes:
       - ../db:/app/db:ro
       - ../server-portable:/app/server-portable:ro
-      - ../evals/env.ts:/app/evals/env.ts:ro
-      - ../evals/linear-api.ts:/app/evals/linear-api.ts:ro
     environment:
       <<: *server-env
       # The merge brings the server's whole block; the two things this worker
@@ -300,7 +299,12 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
-    restart: unless-stopped
+    # Not `unless-stopped`: the tool exits 2 on a missing LINEAR_API_KEY or a
+    # bad interval — configuration, which a restart does not fix — and an
+    # unconditional restart made that refusal a crash loop with the same hint
+    # filling the log (fifth review pass). Three tries cover a database not yet
+    # answering; then the service stops and `ps` says so.
+    restart: on-failure:3
 
   # Replaces: OpenRouter. Optional — enable with `--profile local-models`.
   #

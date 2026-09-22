@@ -1516,7 +1516,7 @@ should read Done. `sync-linear.ts` is that sweep, and `deploy/compose.yaml`'s
 ```bash
 bun sync-linear.ts --url postgres://…                # one pass
 bun sync-linear.ts --url … --dry-run                 # what a pass would write
-bun sync-linear.ts --url … --audit                   # the lockstep census: missing / stale / extra; exit 1 when any
+bun sync-linear.ts --url … --audit                   # the lockstep census: missing / stale / extra; exit 1 when any of the three
 bun sync-linear.ts --url … --loop                    # a pass every OB1_BOARD_SYNC_INTERVAL seconds (300)
 bun sync-linear.ts --url … --full                    # re-render and compare every issue, not only the moved ones
 bun sync-linear.ts --url … --only SMD-1954,SMD-1865  # a few identifiers, from the plan
@@ -1565,11 +1565,15 @@ tail, not erased. So a ticket moved back to a state an older paste recorded cost
 no model call: that paste becomes the head and its facets are patched. Nothing is
 deleted; the head's own write lands first, and a pointer the database refuses
 (a hand-set chain through an outside thought that loops back) is reported under
-*chain refusals*, never a reason the text did not land. A text held by a thought
-OUTSIDE the ticket's rows is refused before any model call: the facets are
-patched without `linear_updated_at` and `text_refused_by` names the holder, so
-the ticket stays *stale* in `--audit` and is retried each pass, at one lookup,
-until the holder moves — reported under *refused*. A new ticket whose text a stray
+*chain refusals*, never a reason the text did not land. When none of the ticket's
+rows holds Linear's text but another thought does, that thought is read: a hand
+paste of THIS ticket (the header grammar, made after the row was adopted) is
+folded in as the head and chained; a text under ANOTHER ticket's claim is an
+outside holder, refused before any model call — the facets are patched without
+`linear_updated_at` and `text_refused_by` names it, once, so the ticket stays
+*stale* in `--audit` and is retried each pass, at one lookup and no write, until
+the holder moves — reported under *refused*; the marker is cleared, on the head
+and on any twin, once the head holds the text. A new ticket whose text a stray
 row already holds (a paste the header grammar did not recognise) adopts that row
 with a patch of the facets that differ. One issue the API refuses in a batch fails
 that identifier alone, under *errors*. When the text moves, the tags are extracted
