@@ -4043,14 +4043,20 @@ console.log("\n[19] db/ingest-records.ts: the records upsert is source-labelled 
   const [forkRow] = await sql`SELECT metadata, embedding IS NULL AS bare FROM thoughts WHERE id = ${docs[0].id}::uuid`;
   assert(forkRow.metadata.source === "fork" && forkRow.bare === true, "a row is source-labelled and written bare — no embedding, which is reembed.ts's job");
 
-  // An unchanged re-ingest is a no-op and does not touch updated_at: the fingerprint
-  // WHERE guard held. Drop that guard and the DO UPDATE fires, moving updated_at.
+  // An unchanged re-ingest is a no-op. The tooth is the classification: the
+  // fingerprint WHERE guard makes each row 'unchanged'; remove the guard and the
+  // DO UPDATE fires and each is 'updated'. Because no UPDATE runs, the updated_at
+  // trigger never fires either — and the 1.1s gap gives that second assertion its
+  // own teeth: an UPDATE here (guard removed) would move updated_at by over a
+  // second, where a within-millisecond re-ingest would not (now() truncates to the
+  // JS Date's millisecond).
   const before = (await sql`SELECT updated_at FROM thoughts WHERE id = ${docs[2].id}::uuid`)[0].updated_at;
+  await Bun.sleep(1100);
   const second: string[] = [];
   for (const d of docs) second.push(await upsertRecord(sql, d));
-  assert(second.every((r) => r === "unchanged"), `a re-ingest of the same records is a no-op (${second.join(",")})`);
+  assert(second.every((r) => r === "unchanged"), `a re-ingest of the same records is a no-op — every row 'unchanged', not 'updated' (${second.join(",")})`);
   const afterNoop = (await sql`SELECT updated_at FROM thoughts WHERE id = ${docs[2].id}::uuid`)[0].updated_at;
-  assert(String(before) === String(afterNoop), "an unchanged re-ingest leaves updated_at alone — the fingerprint guard bit (removing the WHERE moves it)");
+  assert(String(before) === String(afterNoop), "…and updated_at is untouched: no UPDATE ran (the 1.1s gap would surface one if it had)");
 
   // Editing one record updates exactly that row.
   const edited: Doc = { ...docs[2], content: "Test note A: EDITED body." };

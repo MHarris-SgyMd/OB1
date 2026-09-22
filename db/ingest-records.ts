@@ -139,21 +139,31 @@ export function memoryFrontmatter(md: string): { name?: string; description?: st
   const end = md.indexOf("\n---", 4);
   if (end < 0) return { body: md };
   const fm = md.slice(4, end);
-  const body = md.slice(md.indexOf("\n", end + 1) + 1);
+  // The newline after the closing `---` line; -1 when the fence is the last line
+  // with no trailing newline (a frontmatter-only file) — then the body is empty,
+  // not the whole file.
+  const afterFence = md.indexOf("\n", end + 1);
+  const body = afterFence < 0 ? "" : md.slice(afterFence + 1);
   const field = (name: string) => fm.match(new RegExp(`^\\s*${name}:\\s*(.+?)\\s*$`, "m"))?.[1]?.replace(/^["']|["']$/g, "");
   return { name: field("name"), description: field("description"), modified: field("modified"), body };
 }
+
+/** A frontmatter `modified` value the timestamptz cast will accept, or nothing. */
+const ISO_TS_RE = /^\d{4}-\d\d-\d\dT\d\d:\d\d/;
 
 /** One memory `.md` file as a Doc: a title line (its description, else name, else slug) then the body. */
 export function memoryDoc(slug: string, md: string, mtime?: string): Doc {
   const { name, description, modified, body } = memoryFrontmatter(md);
   const title = description ?? name ?? slug;
+  // `modified` is used only when it looks like an ISO timestamp; a malformed one
+  // would otherwise reach the row's timestamptz cast and abort the whole ingest.
+  // The file's mtime is always valid, so it is the fallback.
   return {
     id: recordId("memory", slug),
     content: `${title}\n\n${body.trim()}`,
     source: "memory",
     meta: { file: slug },
-    createdAt: modified ?? mtime,
+    createdAt: modified && ISO_TS_RE.test(modified) ? modified : mtime,
   };
 }
 
@@ -308,6 +318,9 @@ function selfCheck(): number {
   const md = memoryDoc("a-slug", "---\ndescription: the summary\n---\nbody\n");
   ok(md.content.startsWith("the summary\n\n") && md.meta.file === "a-slug", "memory doc = description title + body");
   ok(memoryFrontmatter("no frontmatter here").body === "no frontmatter here", "a file without a fence is all body");
+  ok(memoryFrontmatter("---\nname: x\n---").body === "", "a frontmatter-only file (fence at EOF) has an empty body, not the whole file");
+  ok(memoryDoc("s", "---\nmetadata:\n  modified: not-a-date\n---\nbody\n", "2026-01-01T00:00:00.000Z").createdAt === "2026-01-01T00:00:00.000Z", "a malformed `modified` falls back to the file mtime, never reaching the timestamptz cast");
+  ok(memoryDoc("s", "---\nmetadata:\n  modified: 2026-09-22T03:00:00.000Z\n---\nbody\n", "2026-01-01T00:00:00.000Z").createdAt === "2026-09-22T03:00:00.000Z", "a valid ISO `modified` is used over the mtime");
 
   ok(recordId("fork", "18") === recordId("fork", "18"), "recordId is stable");
   ok(recordId("fork", "18") !== recordId("commit", "18"), "the source qualifies the id");
@@ -374,7 +387,8 @@ async function main(): Promise<void> {
   }
   const wanted = sourceArg === "all" ? new Set<Source>(SOURCES) : new Set<Source>([sourceArg as Source]);
 
-  const tier = (flag("tier") ?? process.env.OB1_TIER ?? "stable") as Tier;
+  // Empty or whitespace is unset (the fork's string-knob rule), defaulting to stable.
+  const tier = ((flag("tier") ?? process.env.OB1_TIER)?.trim() || "stable") as Tier;
   if (!TIERS.includes(tier)) {
     console.error(`--tier / OB1_TIER must be one of ${TIERS.join(", ")}.`);
     process.exit(2);

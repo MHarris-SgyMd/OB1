@@ -2347,7 +2347,7 @@ if (configFailed) {
           const rows = await sql`SELECT key, value FROM ob1_config WHERE key IN ('tier', 'last_ingest')`;
           const cfg = Object.fromEntries((rows as { key: string; value: string }[]).map((r) => [r.key, r.value]));
           const stamped = cfg.tier;
-          const wantTier = (env as unknown as Record<string, string | undefined>).OB1_TIER;
+          const wantTier = (env as unknown as Record<string, string | undefined>).OB1_TIER?.trim() || undefined;
           if (!stamped) {
             add("tier", "skip", `no tier recorded — db/ingest-records.ts has not run against this brain${wantTier ? ` (server OB1_TIER=${wantTier})` : ""}. A plain brain, not a pipeline tier.`);
           } else {
