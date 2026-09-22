@@ -571,14 +571,10 @@ cannot fast-forward onto `main`. Two ways forward:
 
 **Open a pull request (normal case).** The pull-request rule means **no push
 directly to `main` succeeds**, green checks or not, and the required checks refuse
-it a second way — a push carries commits CI has never seen:
-
-```
-remote: - Changes must be made through a pull request.
-remote: - 12 of 12 required status checks are expected.
-```
-
-That is not a quirk of the merge; it is what the ruleset means. Everything
+it a second way — a push carries commits CI has never seen. GitHub answers with
+the rules it applied, one `remote: -` line each: that changes must be made through
+a pull request, and that the required status checks are expected. That is not a
+quirk of the merge; it is what the ruleset means. Everything
 reaching `main` goes through a PR, which is two commands:
 
 ```bash
@@ -600,7 +596,7 @@ remote: - Cannot force-push to this branch
 
 To do it anyway — as with any push that must bypass the checks — set the ruleset
 to `disabled`, push, and put it back from the record, so the live copy converges
-on the file at every use:
+on the file — every field the file names — at every use:
 
 ```bash
 gh api -X PUT repos/MHarris-SgyMd/OB1/rulesets/22189960 -f enforcement=disabled
