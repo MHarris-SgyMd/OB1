@@ -228,6 +228,8 @@ COMMENT ON COLUMN thought_audit.valid_from IS
   'When the fact the write states began to hold in the world, as the event declared it. NULL means unknown, and a read says unknown. Migration 045 / SMD-1730.';
 COMMENT ON COLUMN thought_audit.valid_until IS
   'When the fact the write states stopped holding, as the event declared it; never before valid_from. NULL means unknown, and a read says unknown. Migration 045 / SMD-1730.';
+COMMENT ON COLUMN thought_audit.actor_context IS
+  'The actor envelope''s remainder after the columns took theirs (name, session, agent_id, and since 045 via when it is a door). Two keys are the audit trigger''s own since 045: `claimed` — what the write declared for trust or actor_kind that its key did not support AT THE TIME (a clamp, or a declaration under a still-unclassified key); a row is a clamp exactly when claimed->>''trust'' IS DISTINCT FROM trust, since a backfill that later honours a declaration made under an unknown kind leaves the mark and makes them equal — and `caller_claimed`, whatever the envelope itself sent under `claimed`. Migration 008 / 045 (SMD-1730).';
 COMMENT ON COLUMN thought_audit.backfilled_at IS
   'NULL when actor_kind, trust and origin were set by the write itself. Otherwise when backfill_thought_audit_events derived them after the fact — origin from actor_context.via, kind and trust from ob1_agents — the one amendment thought_audit_immutable allows. Migration 045 / SMD-1730.';
 COMMENT ON COLUMN ob1_agents.kind IS
@@ -294,11 +296,12 @@ RETURNS text
 LANGUAGE sql
 IMMUTABLE
 AS $$
-  SELECT CASE WHEN jsonb_typeof(p_actor->'via') = 'string' THEN NULLIF(p_actor->>'via', '') END
+  -- Trimmed: a door is a name, and "  " is not one (run-it, eighth review pass).
+  SELECT CASE WHEN jsonb_typeof(p_actor->'via') = 'string' THEN NULLIF(btrim(p_actor->>'via'), '') END
 $$;
 
 COMMENT ON FUNCTION ob1_door_of(jsonb) IS
-  'The door an actor envelope names: its via, when a non-empty string; NULL for anything else, which stays in actor_context. The one reading the audit trigger, the amendment gate and backfill_thought_audit_events share. Migration 045 / SMD-1730.';
+  'The door an actor envelope names: its via, trimmed, when a non-blank string; NULL for anything else, which stays in actor_context. The one reading the audit trigger, the amendment gate and backfill_thought_audit_events share. Migration 045 / SMD-1730.';
 
 COMMENT ON FUNCTION ob1_trust_ceiling(text, text) IS
   'The trust a write gets from its key''s kind and the trust it declared: the kind when undeclared; the declaration when it stands under the kind (operator > agent > ingested); the kind when it does not; only a declared ingested when the kind is unknown. The one rule the audit trigger, the amendment gate and backfill_thought_audit_events share. Migration 045 / SMD-1730.';
@@ -312,10 +315,13 @@ COMMENT ON FUNCTION ob1_trust_ceiling(text, text) IS
 -- The rows still waiting on a kind or a trust, by the name they carry: what
 -- the backfill fills, the census counts and names, and the amendment gate
 -- re-derives — the shape every such read has (the census's `actor_kind IS
--- NULL` is implied by the predicate, so it reads this index too, and its
--- GROUP BY the agent id from the included column rather than the heap —
--- seventh review pass: a brain with one never-classified key and a million
--- rows fetched a million heap tuples at every server start). And the rows
+-- NULL` is implied by the predicate, so it reads this index too, and both
+-- its filter and its GROUP BY are answered from the included columns rather
+-- than the heap — seventh review pass: a brain with one never-classified key
+-- and a million rows fetched a million heap tuples at every server start;
+-- eighth: with the agent id alone included, the `actor_kind IS NULL` filter
+-- still sent every row to the heap, measured, so the kind is included too).
+-- And the rows
 -- still waiting on a door — a via that IS a door, by the one reading
 -- ob1_door_of gives, so a row whose via is empty or not a string (a raw
 -- caller's) is not in it (seventh review pass: on `actor_context ? 'via'`
@@ -329,12 +335,48 @@ COMMENT ON FUNCTION ob1_trust_ceiling(text, text) IS
 -- the remedy the census names, and this is the cost of not taking it (sixth
 -- review pass).
 CREATE INDEX IF NOT EXISTS thought_audit_awaiting_kind_idx
-  ON thought_audit (actor_name) INCLUDE (canonical_agent_id)
+  ON thought_audit (actor_name) INCLUDE (canonical_agent_id, actor_kind)
   WHERE (actor_kind IS NULL OR trust IS NULL) AND (actor_name IS NOT NULL OR canonical_agent_id IS NOT NULL);
 
 CREATE INDEX IF NOT EXISTS thought_audit_awaiting_door_idx
   ON thought_audit (created_at)
-  WHERE origin IS NULL AND ob1_door_of(actor_context) IS NOT NULL;
+  -- `? 'via'` beside the function: implied by it, and the operator the
+  -- planner has statistics for — on the function alone it estimated the OR
+  -- blind and read the table end to end (measured, eighth review pass).
+  WHERE origin IS NULL AND (actor_context ? 'via') AND ob1_door_of(actor_context) IS NOT NULL;
+
+-- ---------------------------------------------------------------------------
+-- thoughts_delete_clears_event — the tombstone's children inherit nothing
+--
+-- A DELETE's ON DELETE SET NULL action (025's supersedes self-FK) UPDATEs the
+-- successors, and each UPDATE fires thoughts_audit in the same statement. The
+-- tombstone's own thoughts_audit run clears the setting when it reads it, and
+-- measured on Postgres 16 it fires before the successors' rows are audited —
+-- but that is the after-trigger queue's order, not this file's rule, and an
+-- ob1.event left set on the transaction (by hand; by a future writer whose
+-- write failed inside a caller's savepoint) must not depend on it. A BEFORE
+-- DELETE trigger, once per statement, runs before any row work and clears the
+-- setting; delete_thought's own DELETE and a raw one alike (eighth review
+-- pass; [43] drives a hand-set event through a tombstone with a successor).
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION ob1_clear_event()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  PERFORM set_config('ob1.event', '', true);
+  RETURN NULL;
+END;
+$$;
+
+COMMENT ON FUNCTION ob1_clear_event() IS
+  'BEFORE DELETE, per statement, on thoughts: clears the ob1.event write event so the successor rows a tombstone''s ON DELETE SET NULL updates — audited before the delete''s own audit run — inherit no stance, cites or window. Migration 045 / SMD-1730.';
+
+DROP TRIGGER IF EXISTS thoughts_delete_clears_event ON thoughts;
+CREATE TRIGGER thoughts_delete_clears_event
+  BEFORE DELETE ON thoughts
+  FOR EACH STATEMENT
+  EXECUTE FUNCTION ob1_clear_event();
 
 -- ---------------------------------------------------------------------------
 -- set_agent_kind — the operator classifies a key, by the name the env gives it
@@ -646,12 +688,25 @@ DECLARE
 BEGIN
   /**
    * 045: the event is read ONCE and the setting cleared — so a raw write later
-   * in the same transaction (an enhanced-columns UPDATE beside a capture), or
-   * the child rows a tombstone's ON DELETE SET NULL touches, cannot inherit a
-   * stance, cites or window declared for another row. A tombstone declares
-   * nothing: on DELETE the event is not read at all — delete_thought sets
-   * none, and one a previous call left on this transaction is not its own
-   * (first review pass). The actor is 008's and stays as it was.
+   * in the same transaction (an enhanced-columns UPDATE beside a capture)
+   * cannot inherit a stance, cites or window declared for another row. A
+   * tombstone declares nothing: on DELETE the event is not read at all —
+   * delete_thought sets none, and one a previous call left on this
+   * transaction is not its own (first review pass). The successor rows a
+   * tombstone's ON DELETE SET NULL touches are audited in the same statement,
+   * and whether this trigger's DELETE run — which clears — fires before or
+   * after theirs is a property of Postgres's after-trigger queue, not of this
+   * file (measured: the tombstone's run first, then the successors'; the
+   * reading reviewer had the order the other way round). So the guarantee
+   * is not left to that order: thoughts_delete_clears_event, a BEFORE DELETE
+   * statement trigger below, clears the setting before any row work (eighth
+   * review pass). The actor is 008's and stays as it was.
+   *
+   * A hand-set value that begins as an object but fails the cast, the CHECK
+   * or a column type fails the write — and, since the set_config here rolls
+   * back with it, stays on the transaction, so every later write in it fails
+   * the same way until it ends (run-it, eighth review pass). Only a hand-set
+   * can do this: the functions validate before they set.
    *
    * Read inline, not through a function (seventh review pass: a plpgsql call
    * and an unconditional set_config on every audited row — DELETEs and bulk
@@ -838,7 +893,14 @@ BEGIN
   -- LEAVES it — the trigger no longer reads an actor's source (the column is
   -- the row's own metadata.source, one vocabulary), so a caller still sending
   -- one sees it here rather than having it silently interpreted. The attempt
-  -- the key could not support rides under `claimed`.
+  -- the key could not support rides under `claimed`, a key THIS TRIGGER owns:
+  -- the amendment gate and the backfill read claimed.trust as the declaration
+  -- filed while the key was unclassified, so a caller must not be able to
+  -- pre-seed it — a `claimed` the envelope carried, whatever its type, moves
+  -- under caller_claimed first (eighth review pass: the first draft merged a
+  -- caller's object into the same key, and a payload field could then decide
+  -- the trust the backfill wrote; the first review pass had only moved a
+  -- non-object).
   v_context := COALESCE(actor - 'name' - 'session' - 'agent_id', '{}'::jsonb);
   -- `via` is a door only as a non-empty string (ob1_door_of, read once — the
   -- column and the strip cannot disagree); anything else stays in the blob,
@@ -848,14 +910,11 @@ BEGIN
   IF v_origin IS NOT NULL THEN
     v_context := v_context - 'via';
   END IF;
+  IF v_context ? 'claimed' THEN
+    v_context := (v_context - 'claimed') || jsonb_build_object('caller_claimed', v_context->'claimed');
+  END IF;
   IF v_claimed <> '{}'::jsonb THEN
-    -- Merged under `claimed`, not written over a key the caller sent by that
-    -- name (run-it, first review pass); a non-object of theirs moves under
-    -- `caller`.
-    v_context := v_context || jsonb_build_object('claimed',
-      CASE WHEN jsonb_typeof(v_context->'claimed') = 'object' THEN (v_context->'claimed') || v_claimed
-           WHEN v_context ? 'claimed' THEN jsonb_build_object('caller', v_context->'claimed') || v_claimed
-           ELSE v_claimed END);
+    v_context := v_context || jsonb_build_object('claimed', v_claimed);
   END IF;
 
   -- An unchanged write whose event carried only a trust or an actor_kind the
@@ -1501,17 +1560,40 @@ BEGIN
   -- the transaction.
   PERFORM 1 FROM ob1_agents FOR SHARE;
 
-  WITH candidates AS (
+  WITH writers AS (
+    -- The distinct (id, name) pairs still waiting, read from the awaiting-kind
+    -- index and its included column; OFFSET 0 keeps the planner from pushing
+    -- the lookup below back onto the rows (the census's fence, seventh review
+    -- pass). One registry lookup per WRITER, not per row: a brain whose keys
+    -- nobody classified holds every row here, and the first draft probed the
+    -- registry twice per row on every pass — this file's own apply-time call
+    -- included — under the FOR SHARE above (eighth review pass).
+    SELECT DISTINCT a.canonical_agent_id AS agent, a.actor_name AS name
+      FROM thought_audit a
+     WHERE (a.actor_kind IS NULL OR a.trust IS NULL) AND (a.actor_name IS NOT NULL OR a.canonical_agent_id IS NOT NULL)
+    OFFSET 0
+  ),
+  kinds AS MATERIALIZED (
+    -- By the id, else by the name — the trigger's own lookup, including an id
+    -- the registry no longer knows (first review pass). MATERIALIZED so the
+    -- lookup runs once per writer and is never pulled up into the join.
+    SELECT w.agent, w.name, ob1_registry_kind(w.agent, w.name) AS kind FROM writers w
+  ),
+  candidates AS (
     SELECT a.id,
-           -- By the id, else by the name — the trigger's own lookup, including
-           -- an id the registry no longer knows (first review pass).
-           COALESCE(a.actor_kind, r.kind) AS kind,
+           COALESCE(a.actor_kind, k.kind) AS kind,
            -- What the write declared while its key was unclassified: the
-           -- trigger could not honour it then and filed it under claimed.
+           -- trigger could not honour it then and filed it under claimed — a
+           -- key the trigger owns (a caller's own goes under caller_claimed).
            a.actor_context->'claimed'->>'trust' AS declared,
            COALESCE(a.origin, ob1_door_of(a.actor_context)) AS origin
       FROM thought_audit a
-      CROSS JOIN LATERAL (SELECT ob1_registry_kind(a.canonical_agent_id, a.actor_name) AS kind) r
+      -- Joined on hashable keys: IS NOT DISTINCT FROM is not, and made the
+      -- join a nested loop over every row × every writer (measured, eighth
+      -- review pass). A uuid's text is never '', and a label is never blank
+      -- (010 and set_agent_kind refuse one), so '' stands for NULL on both.
+      LEFT JOIN kinds k ON COALESCE(k.agent::text, '') = COALESCE(a.canonical_agent_id::text, '')
+                       AND COALESCE(k.name, '') = COALESCE(a.actor_name, '')
      -- Every fill the gate would admit: a NULL kind the registry now has, a
      -- NULL trust the kind (set or derived) gives — a row a tool INSERTed with
      -- a kind and no trust must not be left for the gate to refuse on every
@@ -1523,9 +1605,15 @@ BEGIN
      -- an order on created_at invited the planner, when many rows waited and
      -- were newer than the filled mass, to walk the created_at index from the
      -- oldest row instead (run-it, fourth review pass).
-     WHERE ((a.actor_kind IS NULL OR a.trust IS NULL) AND (a.actor_name IS NOT NULL OR a.canonical_agent_id IS NOT NULL)
-            AND COALESCE(a.actor_kind, r.kind) IS NOT NULL)
-        OR (a.origin IS NULL AND ob1_door_of(a.actor_context) IS NOT NULL)
+     -- Spelled as (K OR D) AND (kind OR D) rather than (K AND kind) OR D — the
+     -- same clause, distributed — so the first conjunct is on this table alone
+     -- and is the two partial indexes' predicates, a BitmapOr; with the
+     -- writer's kind inside the OR the whole clause waited on the join and the
+     -- table was read end to end (measured, eighth review pass).
+     WHERE (((a.actor_kind IS NULL OR a.trust IS NULL) AND (a.actor_name IS NOT NULL OR a.canonical_agent_id IS NOT NULL))
+            OR (a.origin IS NULL AND (a.actor_context ? 'via') AND ob1_door_of(a.actor_context) IS NOT NULL))
+       AND (COALESCE(a.actor_kind, k.kind) IS NOT NULL
+            OR (a.origin IS NULL AND (a.actor_context ? 'via') AND ob1_door_of(a.actor_context) IS NOT NULL))
      LIMIT CASE WHEN p_limit IS NULL THEN NULL ELSE GREATEST(p_limit, 0) END
   )
   UPDATE thought_audit a
@@ -1584,19 +1672,24 @@ SELECT backfill_thought_audit_events();
 -- is granted SELECT on ob1_agents here. The registry holds labels, ids and
 -- kinds, no secret (the digests are ob1_agent_keys'). A group role's members
 -- inherit, as they inherit the INSERT. Idempotent: GRANT twice is GRANT once.
--- db/config.mjs's ROLE_GRANTS documents the same row for --grant.
+-- db/config.mjs's ROLE_GRANTS documents the same row for --grant. Read from
+-- the table's ACL itself, not information_schema.role_table_grants: that view
+-- shows a non-superuser only the rows where it is grantor or grantee, so an
+-- owner applying this file missed a role whose INSERT came through another
+-- role's grant option (run-it, eighth review pass) — the one role the block
+-- exists for, failing every write after the apply.
 -- ---------------------------------------------------------------------------
 DO $grant$
 DECLARE
   v_role text;
 BEGIN
   FOR v_role IN
-    SELECT DISTINCT g.grantee
-      FROM information_schema.role_table_grants g
-     WHERE g.table_schema = 'public' AND g.table_name = 'thought_audit'
-       AND g.privilege_type = 'INSERT'
-       AND g.grantee <> current_user
-       AND (g.grantee = 'PUBLIC' OR EXISTS (SELECT 1 FROM pg_roles r WHERE r.rolname = g.grantee))
+    SELECT DISTINCT CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END
+      FROM pg_class c
+      CROSS JOIN LATERAL aclexplode(c.relacl) a
+     WHERE c.oid = 'thought_audit'::regclass
+       AND a.privilege_type = 'INSERT'
+       AND (a.grantee = 0 OR pg_get_userbyid(a.grantee) <> current_user)
   LOOP
     EXECUTE CASE WHEN v_role = 'PUBLIC' THEN 'GRANT SELECT ON ob1_agents TO PUBLIC'
                  ELSE format('GRANT SELECT ON ob1_agents TO %I', v_role) END;

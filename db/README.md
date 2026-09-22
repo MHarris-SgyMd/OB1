@@ -164,7 +164,7 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `1203 assertions: 1203 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `1211 assertions: 1211 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports forty-five (45) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
@@ -1406,7 +1406,7 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 1203 assertions, PGlite, no container
+bun test-schema.ts                          # 1211 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts         # 601 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database

@@ -1315,7 +1315,7 @@ else {
   // to be missing, which is why the arm is a WARN and not a FAIL.
   await claims.unsafe(`SELECT resolve_agent(repeat('d', 64), 'unclassified-key', 'write')`);
   const unclassified = await run(SQL_ENV);
-  assert(unclassified.code === 0 && /!  audit events\s+1 key\(s\) with no kind \(unclassified-key\) and 0 audit row\(s\) naming a key with no kind — every write through an unclassified key is recorded with actor_kind and trust unknown/.test(unclassified.out) && /SELECT set_agent_kind\('<label>', '<operator \| agent \| ingested>'\); then, as the owner \(the pass locks ob1_agents\), SELECT backfill_thought_audit_events\(\);/.test(unclassified.out),
+  assert(unclassified.code === 0 && /!  audit events\s+1 key\(s\) with no kind \(unclassified-key\) and 0 audit row\(s\) naming a key with no kind — every write through an unclassified key is recorded with actor_kind and trust unknown/.test(unclassified.out) && /SELECT set_agent_kind\('<label>', '<operator \| agent \| ingested>'\); then, as the owner \(the pass amends thought_audit and locks ob1_agents\), SELECT backfill_thought_audit_events\(\);/.test(unclassified.out),
          "a resolved key nobody has classified is a warning naming it, with set_agent_kind and the backfill as the remedy (SMD-1730)");
   await claims.unsafe(`SELECT set_agent_kind('unclassified-key', 'agent')`);
   assert(/✓  audit events\s+045's event shape present/.test((await run(SQL_ENV)).out), "…and classified, the check is ok again");

@@ -1336,8 +1336,8 @@ if (configFailed) {
                   // met a permission error that looked like a grant bug). A name
                   // shaped `agent <uuid>` is an id the registry has no row for.
                   (needsKinds
-                    ? "For each name: SELECT set_agent_kind('<label>', '<operator | agent | ingested>'); then, as the owner (the pass locks ob1_agents), SELECT backfill_thought_audit_events(); fills the rows already written (db/README.md)."
-                    : "As the owner (the pass locks ob1_agents), SELECT backfill_thought_audit_events(); fills them — every key they name is classified (db/README.md).")
+                    ? "For each name: SELECT set_agent_kind('<label>', '<operator | agent | ingested>'); then, as the owner (the pass amends thought_audit and locks ob1_agents), SELECT backfill_thought_audit_events(); fills the rows already written (db/README.md)."
+                    : "As the owner (the pass amends thought_audit and locks ob1_agents), SELECT backfill_thought_audit_events(); fills them — every key they name is classified (db/README.md).")
                   + (/(^|, )agent [0-9a-f-]{36}/.test(String(census.unnamed ?? "")) ? " A name shaped `agent <uuid>` is an id the registry has no row for: set_agent_kind cannot reach those rows, and they stay unknown." : ""));
             } else {
               add("audit events", "ok", "045's event shape present — the columns, the trigger that derives the kind from the key, the one lawful amendment — and every key classified");

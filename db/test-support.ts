@@ -145,6 +145,7 @@ const FUNCTIONS = [
   "set_agent_kind(text, text)",
   "validate_write_event(jsonb)",
   "backfill_thought_audit_events(integer)",
+  "ob1_clear_event()",
   "ob1_registry_kind(uuid, text)",
   "ob1_trust_ceiling(text, text)",
   "ob1_door_of(jsonb)",
