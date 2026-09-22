@@ -285,14 +285,33 @@ export function facetPatch(current: Record<string, unknown>, wanted: Record<stri
  * `extra` — a ticket row Linear's list does not name (deleted, or moved out of
  * the initiative). `full` puts every listed issue in the fetch.
  */
-export type Census = { identifier: string; updatedAt: string }[];
+/**
+ * One census row: the identifier, when the issue last changed, and the three
+ * names the text and facets carry that Linear can RENAME without touching the
+ * issue's updatedAt — its project, its state, its labels. The plan compares
+ * them with the current row's facets, so a renamed project or workflow state
+ * reaches the brain on the next pass instead of waiting for `--full` (ninth
+ * review pass). Optional, so a plan can still be made from identifiers alone.
+ */
+export type CensusRow = { identifier: string; updatedAt: string; project?: string | null; status?: string; labels?: string[] };
+export type Census = CensusRow[];
+
+/** Whether a census row's names disagree with what the current row's facets say — a rename the watermark cannot see. */
+export function namesMoved(c: CensusRow, metadata: Record<string, unknown> | undefined): boolean {
+  const m = metadata ?? {};
+  if (c.project !== undefined && JSON.stringify(m.project ?? null) !== JSON.stringify(c.project ?? null)) return true;
+  if (c.status !== undefined && m.status !== c.status) return true;
+  if (c.labels !== undefined && JSON.stringify(m.labels ?? []) !== JSON.stringify([...c.labels].sort((a, b) => a.localeCompare(b, "en")))) return true;
+  return false;
+}
 export type Plan = { fetch: string[]; missing: string[]; stale: string[]; extra: string[]; unchanged: number };
 
 export function planPass(census: Census, groups: Map<string, BrainRow[]>, full = false): Plan {
   const missing: string[] = [], stale: string[] = [], fetch: string[] = [];
   let unchanged = 0;
   const listed = new Set<string>();
-  for (const { identifier, updatedAt } of census) {
+  for (const c of census) {
+    const { identifier, updatedAt } = c;
     listed.add(identifier);
     const rows = groups.get(identifier);
     if (!rows) { missing.push(identifier); fetch.push(identifier); continue; }
@@ -308,7 +327,7 @@ export function planPass(census: Census, groups: Map<string, BrainRow[]>, full =
     // own text's and are never asked for again, so counting them kept a ticket
     // stale for good (eighth pass). When the pass promotes a holder over rows[0],
     // the chain makes that holder rows[0] by the next pass, so the two agree.
-    const isStale = have === undefined || have < updatedAt || tagsFellBack(rows[0].metadata);
+    const isStale = have === undefined || have < updatedAt || tagsFellBack(rows[0].metadata) || namesMoved(c, rows[0].metadata);
     if (isStale) { stale.push(identifier); fetch.push(identifier); }
     else if (full) fetch.push(identifier);
     else unchanged++;
@@ -376,16 +395,17 @@ export async function initiativeProjects(gql: Gql, name: string): Promise<{ init
  * shows up as `extra` and a fresh deletion is never captured (third review pass).
  */
 export async function censusOf(gql: Gql, projectIds: string[]): Promise<Census> {
-  type R = { issues: { pageInfo: { hasNextPage: boolean; endCursor: string }; nodes: { identifier: string; updatedAt: string; trashed: boolean | null }[] } };
+  type Node = { identifier: string; updatedAt: string; trashed: boolean | null; project: { name: string } | null; state: { name: string }; labels: { nodes: { name: string }[] } };
+  type R = { issues: { pageInfo: { hasNextPage: boolean; endCursor: string }; nodes: Node[] } };
   const out: Census = [];
   let after: string | null = null;
   do {
     const d: R = await strict<R>(
       gql,
-      `query($ids: [ID!], $after: String) { issues(first: 250, after: $after, includeArchived: true, filter: { project: { id: { in: $ids } } }) { pageInfo { hasNextPage endCursor } nodes { identifier updatedAt trashed } } }`,
+      `query($ids: [ID!], $after: String) { issues(first: 250, after: $after, includeArchived: true, filter: { project: { id: { in: $ids } } }) { pageInfo { hasNextPage endCursor } nodes { identifier updatedAt trashed project { name } state { name } labels { nodes { name } } } } }`,
       { ids: projectIds, after },
     );
-    out.push(...d.issues.nodes.filter((n) => !n.trashed).map(({ identifier, updatedAt }) => ({ identifier, updatedAt })));
+    out.push(...d.issues.nodes.filter((n) => !n.trashed).map((n) => ({ identifier: n.identifier, updatedAt: n.updatedAt, project: n.project?.name ?? null, status: n.state.name, labels: n.labels.nodes.map((l) => l.name) })));
     after = d.issues.pageInfo.hasNextPage ? d.issues.pageInfo.endCursor : null;
   } while (after);
   return out;
@@ -413,6 +433,16 @@ export async function fetchIssues(gql: Gql, identifiers: string[]): Promise<{ is
     const decl = batch.map((_, j) => `$i${j}: String!`).join(", ");
     const fields = batch.map((_, j) => `a${j}: issue(id: $i${j}) { ${ISSUE_FIELDS} }`).join("\n");
     const r = await gql<Record<string, LinearIssue | null>>(`query(${decl}) { ${fields} }`, vars);
+    // The whole query refused (a rate or complexity limit answers with no data
+    // at all): the batches behind it would be refused the same way, so they are
+    // reported as not attempted and the pass moves on — the next pass retries
+    // (ninth review pass).
+    if (r.data === null && r.errors.length) {
+      const why = r.errors.map((e) => e.message).join("; ");
+      for (const ident of batch) failed.push({ identifier: ident, error: why });
+      for (const ident of identifiers.slice(i + 50)) failed.push({ identifier: ident, error: `not attempted — the batch before it was refused whole (${why})` });
+      break;
+    }
     for (let j = 0; j < batch.length; j++) {
       const n = r.data?.[`a${j}`];
       if (n) { issues.push(n); continue; }
@@ -458,7 +488,12 @@ export type Writer = {
   log: (line: string) => void;
   /** Asked between issues: true ends the pass after the issue in hand (SIGTERM under --loop). */
   stopping?: () => boolean;
+  /** How many heads with fallback tags this pass may still ask the model about; runPass sets it per pass. Absent: no cap. */
+  retagBudget?: { left: number };
 };
+
+/** Heads with fallback tags a pass asks the model about, at most — a provider still down costs this many timeouts, not one per failed row (ninth review pass). */
+export const RETAGS_PER_PASS = 5;
 
 /**
  * Read every ticket row the brain has: adopted rows by their claim
@@ -516,24 +551,36 @@ async function chainRows(w: Writer, identifier: string, order: BrainRow[]): Prom
   // true of every row, not only the cleared ones (sixth review pass, made
   // whole by the seventh). A row touched twice (cleared, then set) is restored
   // once, to what it held before either.
+  // The same undo runs when a statement THROWS (a dropped connection) as when
+  // one answers ok:false — the statements autocommit one by one, so a throw
+  // between the phases would otherwise leave the clears and lose the pointer
+  // (ninth review pass). A kill between them is the remaining gap; the loop
+  // stops between issues, not inside one, and the compose grace period is
+  // sized for that.
   const written: BrainRow[] = [];
   const undo = async (why: string): Promise<{ changed: number; refusal: string }> => {
     const failed: string[] = [];
     for (const row of [...new Set(written)].reverse()) {
-      const back = await w.store.updateThought({ id: row.id, actor: w.actor, provenance: { supersedes: row.supersedes } });
-      if (!back.ok) failed.push(`${row.id} → ${row.supersedes}: ${back.error}`);
+      try {
+        const back = await w.store.updateThought({ id: row.id, actor: w.actor, provenance: { supersedes: row.supersedes } });
+        if (!back.ok) failed.push(`${row.id} → ${row.supersedes}: ${back.error}`);
+      } catch (e) { failed.push(`${row.id} → ${row.supersedes}: ${(e as Error).message}`); }
     }
     return { changed: 0, refusal: `${why}; the chain is as it was${failed.length ? ` except ${failed.join(", ")}, which could not be restored` : ""}` };
   };
-  for (const c of changes.filter((c) => c.row.supersedes !== null)) {
-    const r = await w.store.updateThought({ id: c.row.id, actor: w.actor, provenance: { supersedes: null } });
-    if (!r.ok) return undo(`clearing ${c.row.id}'s pointer: ${r.error}`);
-    written.push(c.row);
-  }
-  for (const c of changes.filter((c) => c.wanted !== null)) {
-    const r = await w.store.updateThought({ id: c.row.id, actor: w.actor, provenance: { supersedes: c.wanted } });
-    if (!r.ok) return undo(`pointing ${c.row.id} at ${c.wanted}: ${r.error}`);
-    written.push(c.row);
+  try {
+    for (const c of changes.filter((c) => c.row.supersedes !== null)) {
+      const r = await w.store.updateThought({ id: c.row.id, actor: w.actor, provenance: { supersedes: null } });
+      if (!r.ok) return undo(`clearing ${c.row.id}'s pointer: ${r.error}`);
+      written.push(c.row);
+    }
+    for (const c of changes.filter((c) => c.wanted !== null)) {
+      const r = await w.store.updateThought({ id: c.row.id, actor: w.actor, provenance: { supersedes: c.wanted } });
+      if (!r.ok) return undo(`pointing ${c.row.id} at ${c.wanted}: ${r.error}`);
+      written.push(c.row);
+    }
+  } catch (e) {
+    return undo(`a pointer write failed: ${(e as Error).message}`);
   }
   w.log(`  ~ ${identifier}: re-chained ${changes.map(say).join(", ")}`);
   // `changed` counts rows whose pointer moved, not statements: a row cleared then set is one.
@@ -658,34 +705,40 @@ export async function syncIssue(w: Writer, issue: LinearIssue, rows: BrainRow[])
     }
   };
   const staleRefusal = refusalClear(head.metadata);
-  const facetDiff = facetPatch(head.metadata ?? {}, facets);
 
   if (holds(head)) {
     const where = head !== rows[0] ? ` on ${head.id}, which already holds the text` : "";
     // Tags that fell back to the failure vocabulary are asked for again, when
     // the gate lets the chat call through — the one model call this branch
-    // ever makes (seventh review pass). Refused, the marker stays as it is.
+    // ever makes (seventh review pass). Refused by the gate, the marker becomes
+    // `egress_denied`, as a refused capture's would, so the row stops reading as
+    // stale (ninth pass; it was stale forever under a refusing policy). A pass
+    // retags at most `retagBudget` heads, so a provider that is still down costs
+    // one timeout each for a few tickets, not one for every row it failed on.
     let retagged: Record<string, unknown> = {};
     if (tagsFellBack(head.metadata)) {
       const subject: EgressSubject = { kind: "edit", actor: w.actor.name, metadata: { ...(head.metadata ?? {}), ...facets }, content };
       const g = decideCalls(subject, w.cfg, w.cfg.egress);
-      if (g.chat.allowed && !w.dryRun) {
+      if (!g.chat.allowed) retagged = metadataRefused();
+      else if (w.retagBudget && w.retagBudget.left <= 0) w.log(`  · ${issue.identifier}: tags fell back and would be asked for again; this pass's retags are spent, the next pass takes it`);
+      else if (!w.dryRun) {
+        if (w.retagBudget) w.retagBudget.left--;
         const tags = await w.tags(content, subject);
         retagged = { ...tags, ...("metadata_extraction_failed" in tags ? {} : { metadata_extraction_failed: null }) };
-      } else if (g.chat.allowed) {
+      } else {
         // The dry run cannot know the tags; it counts the write it would make.
         w.log(`  · ${issue.identifier}: would extract the tags again (they fell back: ${String(head.metadata?.metadata_extraction_failed)})`);
         retagged = { metadata_extraction_failed: null };
       }
     }
-    // With fresh tags, EVERY facet goes over them (a `status` the model read out
-    // of the description must not win — the fourth pass's rule, which the
-    // seventh's retag broke) and the whole is compared with the row, so a retag
-    // that fell back again to what the row already holds writes nothing (eighth
-    // review pass).
-    const patch = Object.keys(retagged).length
-      ? facetPatch(head.metadata ?? {}, { ...retagged, ...facets, ...staleRefusal })
-      : (facetDiff || Object.keys(staleRefusal).length ? { ...(facetDiff ?? {}), ...staleRefusal } : null);
+    // One question of the row: what differs between what it holds and the whole
+    // wanted set — the fresh tags (when any) under EVERY facet (a `status` the
+    // model read out of the description must not win; fourth pass) and the
+    // refusal clear. facetPatch keeps the keys that differ and treats null and
+    // absent as one, so a retag that fell back again to what the row already
+    // holds writes nothing (eighth pass) — one spelling where there were three
+    // (ninth).
+    const patch = facetPatch(head.metadata ?? {}, { ...retagged, ...facets, ...staleRefusal });
     if (!patch) { await clearRefusals(); return { outcome: "unchanged", noVector: false, ...(await chain()) }; }
     if (w.dryRun) { w.log(`  · ${issue.identifier}: would patch ${said(patch)}${where}`); await clearRefusals(); return { outcome: "patched", noVector: false, ...(await chain()) }; }
     const r = await w.store.updateThought({ id: head.id, metadataPatch: patch, actor: w.actor });
@@ -694,7 +747,7 @@ export async function syncIssue(w: Writer, issue: LinearIssue, rows: BrainRow[])
     await clearRefusals();
     return { outcome: "patched", noVector: false, ...(await chain()) };
   }
-  const patch = facetDiff;
+  const patch = facetPatch(head.metadata ?? {}, facets);
 
   // A thought outside this ticket's rows holds the new text: the edit would be
   // refused as DUPLICATE_CONTENT, so no model call is made. The facets land
@@ -792,6 +845,7 @@ export async function runPass(opts: { gql: Gql; readRows: ReadRows; writer: Writ
   const { initiative, projects, census, groups, plan } = await planBoard(opts);
   const tally: Record<Outcome, number> = { captured: 0, updated: 0, patched: 0, unchanged: 0, refused: 0 };
   const report: PassReport = { initiative, projects: projects.length, census: census.length, plan, tally, twinsMarked: 0, noVector: 0, errors: [], chainRefusals: [] };
+  opts.writer.retagBudget = { left: RETAGS_PER_PASS };
   let wanted = plan.fetch;
   if (opts.only) {
     const listed = new Set(census.map((c) => c.identifier));
@@ -1076,6 +1130,23 @@ function selfCheck(): Promise<number> {
       }
       return { data: data as T, errors };
     };
+    // Ninth review pass: a rename the watermark cannot see, a retag the gate refuses, a spent retag budget, a chain write that throws, a batch refused whole.
+    const c0: CensusRow = { identifier: "SMD-1936", updatedAt: issue.updatedAt, project: issue.project!.name, status: "Backlog", labels: ["infrastructure"] };
+    ok(planPass([c0], new Map([["SMD-1936", [row("R", text, withFacets, null, null)]]])).stale.length === 0, "a census row whose names match the facets is unchanged");
+    ok(planPass([{ ...c0, project: "Release Eng" }], new Map([["SMD-1936", [row("R", text, withFacets, null, null)]]])).stale.length === 1, "…a renamed project makes the ticket stale though updatedAt did not move");
+    ok(planPass([{ ...c0, status: "Todo" }], new Map([["SMD-1936", [row("R", text, withFacets, null, null)]]])).stale.length === 1 && planPass([{ ...c0, labels: ["Improvement", "infrastructure"] }], new Map([["SMD-1936", [row("R", text, { ...withFacets, labels: ["infrastructure", "Improvement"] }, null, null)]]])).stale.length === 1, "…a renamed state or a changed label set too, the labels compared in one order");
+    r = await run(chatDenied, [row("F", text, { ...withFacets, metadata_extraction_failed: "provider_timeout" }, null, null)]);
+    ok(r.r.outcome === "patched" && r.calls.join("; ") === "update F patch(metadata_extraction_failed)" && !tagsFellBack({ metadata_extraction_failed: "egress_denied" }), `a retag the gate refuses records egress_denied, which no later plan counts as fallback tags (${r.calls.join("; ")})`);
+    r = await run({ ...recorder, retagBudget: { left: 0 } }, [row("F", text, { ...withFacets, metadata_extraction_failed: "provider_timeout" }, null, null)]);
+    ok(r.r.outcome === "unchanged" && r.calls.length === 0, `a spent retag budget defers the retag to the next pass, no model call (${r.calls.join("; ")})`);
+    // The set that builds the chain throws; the restore that follows it lands.
+    const throwing: Writer["store"] = { captureThought: recorder.store.captureThought, updateThought: async (o) => { if (o.provenance?.supersedes === "N") { calls.push(`update ${o.id} supersedes=N → THROW`); throw new Error("connection reset"); } return recorder.store.updateThought(o); } };
+    r = await run({ ...recorder, store: throwing }, [row("H", text, withFacets, "2026-09-23T00:00:00Z", "x"), row("N", text, {}, "2026-09-22T00:00:00Z", null)]);
+    ok(r.r.chainRefusal !== undefined && /connection reset/.test(r.r.chainRefusal) && r.calls.join("; ") === "update H supersedes=null; update H supersedes=N → THROW; update H supersedes=x", `a pointer write that throws is undone like a refusal — H→x restored (${r.calls.join("; ")})`);
+    const limited: Gql = async <T,>(_q: string, vars: Record<string, unknown> = {}) => (Object.values(vars)[0] === "SMD-1" ? { data: null, errors: [{ message: "RATELIMITED" }] } : fakeGql<T>(_q, vars));
+    const many = Array.from({ length: 60 }, (_, i) => `SMD-${i === 0 ? 1 : 100 + i}`);
+    const cut = await fetchIssues(limited, many);
+    ok(cut.issues.length === 0 && cut.failed.length === 60 && /RATELIMITED/.test(cut.failed[0].error) && /not attempted/.test(cut.failed[59].error), `a batch refused whole stops the fetch; the batches behind it are reported not attempted (${cut.failed.length} failed)`);
     const fetched = await fetchIssues(fakeGql, ["SMD-1", "SMD-404", "SMD-2"]);
     ok(fetched.issues.map((i) => i.identifier).join(",") === "SMD-1,SMD-2" && fetched.failed.length === 1 && fetched.failed[0].identifier === "SMD-404" && /Entity not found/.test(fetched.failed[0].error), `a refused alias is reported by identifier and the rest proceed (${JSON.stringify(fetched.failed)})`);
 
@@ -1083,9 +1154,9 @@ function selfCheck(): Promise<number> {
     const board: Gql = async <T,>(q: string, vars: Record<string, unknown> = {}) => {
       if (/initiatives\(/.test(q)) return { data: { initiatives: { pageInfo: { hasNextPage: false, endCursor: "" }, nodes: [{ name: "Open Brain — self-hosted AI memory", projects: { pageInfo: { hasNextPage: vars.after === "more" }, nodes: [{ id: "p1", name: "P" }] } }] } } as T, errors: [] };
       if (/issues\(first: 250/.test(q)) return { data: { issues: { pageInfo: { hasNextPage: false, endCursor: "" }, nodes: [
-        { identifier: "SMD-1936", updatedAt: issue.updatedAt, trashed: null },
-        { identifier: "SMD-2000", updatedAt: "2026-09-22T02:00:00.000Z", trashed: false },
-        { identifier: "SMD-666", updatedAt: "2026-09-22T02:00:00.000Z", trashed: true },
+        { identifier: "SMD-1936", updatedAt: issue.updatedAt, trashed: null, project: { name: issue.project!.name }, state: { name: "Backlog" }, labels: { nodes: [{ name: "infrastructure" }] } },
+        { identifier: "SMD-2000", updatedAt: "2026-09-22T02:00:00.000Z", trashed: false, project: { name: "P" }, state: { name: "Backlog" }, labels: { nodes: [] } },
+        { identifier: "SMD-666", updatedAt: "2026-09-22T02:00:00.000Z", trashed: true, project: { name: "P" }, state: { name: "Backlog" }, labels: { nodes: [] } },
       ] } } as T, errors: [] };
       return fakeGql<T>(q, vars);
     };

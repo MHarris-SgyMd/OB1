@@ -1577,13 +1577,22 @@ the holder moves — reported under *refused*; the marker is cleared, on the hea
 and on any twin, once the head holds the text. A new ticket whose text a stray
 row already holds (a paste the header grammar did not recognise) adopts that row
 with a patch of the facets that differ. One issue the API refuses in a batch fails
-that identifier alone, under *errors*. When the text moves, the tags are extracted
+that identifier alone, under *errors*; a batch Linear refuses whole (a rate limit)
+ends the fetch and the batches behind it are reported not attempted, for the next
+pass. The census carries each issue's project, state and label names beside its
+`updatedAt`, so a rename — which never bumps `updatedAt` — makes the ticket stale
+on the next pass. When the text moves, the tags are extracted
 again with the vector (a fallback tag set from a provider outage would otherwise
 stand on current text forever), every facet goes over them (a `status` or an
 `issue` the model read out of the description must not win), and a stale
 `metadata_extraction_failed` the fresh tags do not carry is set to null — the
-nearest a shallow merge comes to removing it; a row that landed without a vector
-is `reembed.ts`'s to repair, as any vectorless row is. Labels render and store
+nearest a shallow merge comes to removing it. A current row whose tags fell back
+(a provider timeout, not an egress refusal) is stale on its own account and is
+asked for its tags again when it holds the text — at most five such heads per
+pass, so a provider still down costs five timeouts, not one per row it failed on;
+refused by the gate, the marker becomes `egress_denied` and the row is not stale.
+A row that landed without a vector is `reembed.ts`'s to repair, as any vectorless
+row is; a retag worker for every thought, not only tickets, is SMD-1975. Labels render and store
 sorted, whatever order Linear returns them. A ticket deleted in Linear (trashed)
 falls out of the census and its row reads *extra*; a completed one Linear
 archived stays a ticket. `--only` syncs the identifiers named whatever the plan
