@@ -557,22 +557,22 @@ its measurements are in the change file named.
 ### Landing a rebase on `main`, which is protected
 
 `main` is the working default and carries a ruleset: every one of
-`fork-checks.yml`'s twelve jobs required, satisfied only by a run of the Actions
-app, and a **merge queue** — a PR is not merged but queued, GitHub builds the
-merge result, runs the twelve on it (the workflow's `merge_group` trigger) and
-merges only what passes, so the checks judge the tree that lands and not the
-`main` of the PR's last push (SMD-1857); changes only through a pull request; no
-deletion, **no force-push**, and no bypass actors — it applies to admins too.
+`fork-checks.yml`'s twelve jobs required, on a head up to date with `main` and
+satisfied only by a run of the Actions app; changes only through a pull request;
+no deletion, **no force-push**, and no bypass actors — it applies to admins too.
 The ruleset is a file, `.github/rulesets/main.json`, applied with
 `gh api -X PUT repos/MHarris-SgyMd/OB1/rulesets/22189960 --input .github/rulesets/main.json`,
-and `check-fork-consistency` check 20 holds the file to the workflow's job list
-and to the queue's parameters, so a job added without being required fails CI
-by name (SMD-1856). The queue's run also carries the landing check: a PR whose
-change touches `db/migrations/`, `server-portable/` or `evals/` beyond tests and
-docs ships a `changes/smd-NNNN.md` fragment, or the `Repo consistency` job
-refuses it with the files that asked (`scripts/check-landing.ts`) — a rebase
-that lands such a change records itself like any PR. That is deliberate, and
-it interacts with a rebase in one specific way.
+and `check-fork-consistency` check 20 holds the file to the workflow's job list,
+so a job added without being required fails CI by name (SMD-1856). The PR run
+also carries the landing check: a PR whose change touches `db/migrations/`,
+`server-portable/` or `evals/` beyond tests and docs ships a `changes/smd-NNNN.md`
+fragment, or the `Repo consistency` job refuses it with the files that asked
+(`scripts/check-landing.ts`, SMD-1857) — a rebase that lands such a change
+records itself like any PR. There is no merge queue: GitHub offers one on
+organisation-owned repositories only and refuses the rule on this user-owned
+one; the record adds it, and the landing check reads a merge group, the day
+the repository moves (SMD-1984). That is deliberate, and it interacts with a
+rebase in one specific way.
 
 A rebase produces `siggymd/rebase-YYYYMMDD` with **rewritten history**, so it
 cannot fast-forward onto `main`. Two ways forward:
@@ -587,7 +587,7 @@ reaching `main` goes through a PR, which is two commands:
 
 ```bash
 gh pr create --fill --base main --head siggymd/rebase-$(date +%Y%m%d)
-gh pr merge --merge --auto        # queues it; the queue lands it once the twelve pass on the merge result
+gh pr merge --merge --auto        # lands itself once the twelve checks pass
 ```
 
 History keeps both lines, which is what happened when the fork's work first landed

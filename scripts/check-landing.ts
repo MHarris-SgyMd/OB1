@@ -3,14 +3,15 @@
  * check-landing.ts — what a landing must carry (SMD-1857).
  *
  * A landing is one pull request's worth of change reaching `main`. CI sees it
- * twice: as the `pull_request` event, whose range is the PR's base and head,
- * and — since `main` merges through GitHub's merge queue — as the `merge_group`
- * event, whose range is `main`'s tip and the merge result the queue built, one
- * first-parent commit per queued PR (the record pins the queue's merge method
- * to MERGE, so each is that PR's merge commit, and `git diff c^1 c` is exactly
- * what the PR added; a first-parent commit with one parent means the live
- * queue is not merging as the record says, and the run stops on that rather
- * than reading each commit as a PR).
+ * as the `pull_request` event, whose range is the PR's base and head; and, the
+ * day `main` merges through GitHub's merge queue (refused on this user-owned
+ * repository — SMD-1984 moves it), as the `merge_group` event, whose range is
+ * `main`'s tip and the merge result the queue built, one first-parent commit
+ * per queued PR (the record pins the queue's merge method to MERGE, so each is
+ * that PR's merge commit, and `git diff c^1 c` is exactly what the PR added; a
+ * first-parent commit with one parent means the live queue is not merging as
+ * the record says, and the run stops on that rather than reading each commit
+ * as a PR).
  *
  * The rule, CONTRIBUTING.md's "Changelog & versioning": every PR that touches
  * db/migrations/, server-portable/ or evals/ ships a changes/smd-NNNN.md

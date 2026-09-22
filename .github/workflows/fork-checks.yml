@@ -78,15 +78,17 @@ jobs:
         with:
           bun-version: "1.4.0"
 
-      # What a landing must carry (SMD-1857): a PR — or, in the merge queue,
-      # each PR of the group, one first-parent merge commit each — whose change
+      # What a landing must carry (SMD-1857): a PR — or, in a merge queue, each
+      # PR of the group, one first-parent merge commit each — whose change
       # touches db/migrations/, server-portable/ or evals/ beyond tests and docs
       # ships a changes/smd-NNNN.md fragment. Read from the range the event
-      # gives, so it holds on the merged result the queue builds and not only on
-      # the PR's head. The migration-number rule (5b) and the rest of
-      # check-fork-consistency below already run on that result: on merge_group
-      # the checkout IS the group's head. A PR into another branch is not a
-      # landing yet; it is asked when it reaches main.
+      # gives, so it holds on a merge group's result as on a PR's head. GitHub
+      # refuses a merge queue on this user-owned repository (SMD-1984), so today
+      # the pull_request path is the one that runs; the merge_group path is
+      # ready. The migration-number rule (5b) and the rest of
+      # check-fork-consistency below run on whichever tree is checked out. A PR
+      # into another branch is not a landing yet; it is asked when it reaches
+      # main.
       - name: What the landing carries — a fragment for a change to db/migrations/, server-portable/ or evals/
         if: github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.base_ref == 'main')
         env:
