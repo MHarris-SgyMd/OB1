@@ -599,12 +599,13 @@ remote: - Cannot force-push to this branch
 ```
 
 To do it anyway — as with any push that must bypass the checks — set the ruleset
-to `disabled`, push, and put it back:
+to `disabled`, push, and put it back from the record, so the live copy converges
+on the file at every use:
 
 ```bash
 gh api -X PUT repos/MHarris-SgyMd/OB1/rulesets/22189960 -f enforcement=disabled
 git push --force-with-lease origin main
-gh api -X PUT repos/MHarris-SgyMd/OB1/rulesets/22189960 -f enforcement=active
+gh api -X PUT repos/MHarris-SgyMd/OB1/rulesets/22189960 --input .github/rulesets/main.json
 ```
 
 Prefer `--force-with-lease` over `--force` so a push that raced with someone else's
