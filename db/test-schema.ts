@@ -3838,12 +3838,18 @@ console.log("\n[34] Migration 034: query_log shape + CHECKs, the export join, an
   const expected = ["id", "logged_at", "kind", "agent_id", "tool", "query", "match_count", "threshold", "recency_weight", "filter", "result_ids", "result_scores", "target_id", "tier", "arm"];
   assert(JSON.stringify(cols) === JSON.stringify(expected), `query_log has exactly its columns in order (${cols.join(", ")})`);
 
-  // The two indexes the export join relies on: a btree on (agent_id, logged_at)
-  // and a partial GIN on result_ids for the @> containment lookup.
+  // The three indexes: 034's btree on (agent_id, logged_at) and partial GIN on
+  // result_ids for the export join, plus 047's (SMD-1492) plain btree on
+  // logged_at so prune's bare time-range DELETE range-scans instead of
+  // sequentially scanning (the composite's leading column is agent_id, so it
+  // cannot serve a logged_at-only range). The planner won't pick the logged_at
+  // index on this tiny table — that it exists is asserted here; that prune uses
+  // it at volume is bench-querylog.ts's job.
   const idx = (await db.query<{ indexname: string; indexdef: string }>(
     `SELECT indexname, indexdef FROM pg_indexes WHERE tablename = 'query_log'`)).rows;
   assert(idx.some((r) => /USING btree \(agent_id, logged_at\)/.test(r.indexdef)), "(agent_id, logged_at) btree exists for the join's agent-and-time narrowing");
   assert(idx.some((r) => /USING gin \(result_ids\)/.test(r.indexdef) && /WHERE \(kind = 'search'::text\)/.test(r.indexdef)), "a partial GIN on result_ids (search rows) answers the @> containment lookup");
+  assert(idx.some((r) => /USING btree \(logged_at\)/.test(r.indexdef)), "a plain btree on (logged_at) exists so prune's time-range DELETE range-scans (047, SMD-1492)");
 
   // The CHECKs: a search row must carry a query, an action row a target.
   let refusedSearch = false;

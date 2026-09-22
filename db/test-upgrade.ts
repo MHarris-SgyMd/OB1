@@ -449,8 +449,9 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // paths pinned, SMD-1677 and SMD-1703), 042 (the citations facet and
   // delete_thought's third argument, SMD-1712) and 043 (the cite shape stated
   // at the table, SMD-1749), 044 (the schema_version row, SMD-1804), 045
-  // (the query_log column set — filter, arm and tier, SMD-1490) and 046 (the
-  // audit row's event shape, SMD-1730) stay
+  // (the query_log column set — filter, arm and tier, SMD-1490), 046 (the
+  // audit row's event shape, SMD-1730) and 047 (the query_log.logged_at prune
+  // index, SMD-1492) stay
   // recorded and are never tried. 030 is the
   // right one to make
   // pending
@@ -470,10 +471,12 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // only 034 and refusing by name without it as 043 does; 046 adds columns to
   // 008's thought_audit and 010's ob1_agents and redefines 025's trigger, 035's
   // two capture forms and 033's update_thought on their own bodies, all present
-  // ([20b]) — all recorded by the baseline with their prerequisites present, so none
+  // ([20b]); 047 adds a btree on query_log.logged_at for prune, likewise needing
+  // only 034 and refusing by name without it — all recorded by the baseline with
+  // their prerequisites present, so none
   // becomes the plain-run failure point above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 17, `030 is among the last seventeen migrations (${last})`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 18, `030 is among the last eighteen migrations (${last})`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -1683,6 +1686,34 @@ console.log("\n[20b] Migration 046 onto a populated 044 — the audit row gains 
   await sql.unsafe(`DROP OWNED BY ob1_upgrade_capturer45`);
   await sql.unsafe(`DROP ROLE ob1_upgrade_capturer45`);
   await sql.close();
+}
+
+console.log("\n[20c] Migration 047 on a schema without 034 — refused up front, naming 034 and --reapply, and applied once the table exists (SMD-1492)");
+{
+  // 047's guard is 043's ([20]) verbatim: on a brain baselined at a ledger through
+  // 047 whose schema stops before 034, its CREATE INDEX would fail bare (relation
+  // "query_log" does not exist), and a plain run — the compose stack's, gating the
+  // server — would stop with no remedy named. [20] drives 043's guard and [20b]
+  // 046's; 045 and 047 carry the same guard but had no driver, so a typo in 047's
+  // refusal message or a guard that failed to fire went uncaught. This drives it.
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < "034" });
+  const baselined = await migrate("--baseline");
+  assert(baselined.code === 0, `--baseline records every migration over the pre-034 schema (exit ${baselined.code})`);
+  const sql = new SQL({ url: URL_, max: 1 });
+  const the047 = MIGRATIONS.find((f) => f.startsWith("047_"))!;
+  await sql`DELETE FROM schema_migrations WHERE name = ${the047}`;
+  const plain = await migrate();
+  const ok = plain.code === 1 &&
+    /047_query_log_logged_at_index\.sql\s+FAILED: migration 047 needs 034 \(query_log\); this schema lacks it/.test(plain.out) &&
+    /adopted with --baseline\?\)\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plain.out);
+  assert(ok, `a plain run fails at 047 naming 034 and --reapply, not with a bare "does not exist" (exit ${plain.code})${ok ? "" : `:\n${plain.out}`}`);
+  assert(Number((await sql`SELECT count(*)::int AS c FROM schema_migrations WHERE name = ${the047}`)[0].c) === 0, "…047 records nothing");
+  await sql.close();
+  // The guard is the only thing between the file and the table: with 034..046 in
+  // place the same pending file applies. Complete the schema (034 onward) so [21]
+  // resets a full brain, now through 047 rather than only through 046.
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f >= "034" });
 }
 
 console.log("\n[21] test-support's schema reset leaves nothing of the fork's in public — every table, function and type a migration creates is on its drop lists (SMD-1749)");
