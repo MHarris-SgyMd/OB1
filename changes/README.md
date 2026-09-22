@@ -82,10 +82,13 @@ the shape (470 lines to 119); [`smd-1917.md`](smd-1917.md) is the second.
 ## At a release
 
 `bun scripts/assemble-release.mjs` (dry run; `--write` applies) takes the
-fragments in merge order, writes each as the next `NNN-<slug>.md` with its
+fragments in merge order — when each arrived on the branch's first-parent line,
+the merge that brought it — writes each as the next `NNN-<slug>.md` with its
 `# N. <title>` heading, removes the fragment, regenerates FORK.md's index with
 `scripts/fork-index.mjs`, writes the `CHANGELOG.md` section and appends to
-`releases.json`, which freezes the shas of the migrations in the range. FORK.md's
+`releases.json`, which freezes the shas of the migrations in the range. It runs
+check 16's rules first and refuses what CI would; `--write` needs the repository
+(a full clone, not a shallow one), a clean tree and committed fragments. FORK.md's
 "Versioning" section has the scheme.
 
 ## History

@@ -113,7 +113,8 @@ export function renderChangelogSection(version, date, fragments) {
 export function insertChangelogSection(clText, sectionText, core, compareUrl) {
   const withSection = clText.replace(/(## \[Unreleased\]\n)([\s\S]*?)(?=\n## \[|\n\[Unreleased\]:)/, `$1\n${sectionText}`);
   if (withSection === clText) throw new Error("CHANGELOG.md has no ## [Unreleased] section to insert under");
-  return withSection.replace(/(\[Unreleased\]:.*\n)/, `$1[${core}]: ${compareUrl}\n`);
+  // The Unreleased compare link now runs from this version's tag; the version's own link follows it.
+  return withSection.replace(/\[Unreleased\]:\s*(\S+?)\/compare\/\S+\n/, `[Unreleased]: $1/compare/v${core}...HEAD\n[${core}]: ${compareUrl}\n`);
 }
 
 /** The frozen shas for a migration range, computed from the templates on disk. */
@@ -134,17 +135,24 @@ export function frozenShasForRange(lo, hi, readMig) {
  * line (the merge commit that brought it, or the commit that added it here),
  * not when its author committed it on a branch; a fragment created in a merge
  * shows no diff without --first-parent, a renamed one is an R without
- * --no-renames. Ticket number breaks a tie. A fragment git has never seen (an
- * uncommitted one) has no arrival and sorts last; the plan says so. Read
+ * --no-renames; the newest add is the one that counts (a name a cut deleted and
+ * a later PR re-created has two). Ticket number breaks a tie. A fragment git
+ * does not track has no arrival and sorts last; the plan says so and --write
+ * refuses it. Read
  * through fork-index's one reader, so a symlink or a pipe named like a fragment
  * is a stray the plan refuses, not a file this numbers (the check's rule).
  */
 function landedAt(name) {
   try {
-    const out = execFileSync("git", ["log", "--first-parent", "--diff-filter=A", "--no-renames", "--format=%ct", "--", `changes/${name}`], { cwd: ROOT, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim().split("\n").filter(Boolean).pop();
+    // Tracked at all? An uncommitted re-creation of a name a cut once deleted
+    // still has the old path's history; git ls-files answers for the file.
+    execFileSync("git", ["ls-files", "--error-unmatch", "--", `changes/${name}`], { cwd: ROOT, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+    // The NEWEST add on the first-parent line is this file's arrival (a name
+    // deleted by a cut and re-created later has two).
+    const out = execFileSync("git", ["log", "-1", "--first-parent", "--diff-filter=A", "--no-renames", "--format=%ct", "--", `changes/${name}`], { cwd: ROOT, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
     return out ? Number(out) : null;
   } catch {
-    return null; // no repository (a copied tree)
+    return null; // untracked, or no repository (a copied tree)
   }
 }
 function orderedFragments(fragments) {
@@ -181,21 +189,22 @@ function buildPlan() {
   }
   const fragments = orderedFragments(pending).map(({ name, text, landed }) => {
     // Check 16's rules, the same function: a cut refuses what CI would.
-    const problems = fragmentProblems(text);
+    const problems = fragmentProblems(text, name);
     if (problems.length) throw new Error(`${name}: ${problems.join("; ")} (check-fork-consistency, check 16)`);
     const parsed = parseFragment(text);
     return { name, landed, ...parsed, fork: fragmentSection(parsed.body, "FORK") };
   });
   // A previous --write that stopped after writing the numbered files (before the
   // overwrites) leaves their record beside the fragments it came from; a second
-  // run would number it again. The signature is the whole rendered file minus its
-  // number — title and body — equal to an existing file's. (A shared ticket is
-  // not a signature: a ticket may have a second change, as SMD-1805's steps do.)
+  // run would number it again. The signature is the TITLE: an existing file's
+  // heading, number off, equal to a pending fragment's title — which survives a
+  // typo fixed in the body afterwards, and which a legitimate second change for
+  // the same ticket (SMD-1805's steps) never shares.
   for (const f of fragments) {
-    const planned = renderChangeFile(0, f.fork).text.replace(/^# 0\. /, "");
+    const planned = renderChangeFile(0, f.fork).title;
     for (const e of existing) {
-      if (e.text.replace(/^# \d+\. /, "") === planned) {
-        throw new Error(`${CHANGES_REL}/${e.name} already carries ${f.name}'s record — a previous --write stopped half-way; delete the numbered files it wrote, restore FORK.md, CHANGELOG.md and releases.json from version control, and run again`);
+      if ((e.heading?.title ?? "") === planned) {
+        throw new Error(`${CHANGES_REL}/${e.name} already carries ${f.name}'s record (same title) — a previous --write stopped half-way; delete the numbered files it wrote, restore FORK.md, CHANGELOG.md and releases.json from version control, and run again`);
       }
     }
   }
@@ -244,9 +253,12 @@ function buildPlan() {
   const changelogBefore = readFileSync(join(ROOT, "CHANGELOG.md"), "utf8");
   // A previous --write that stopped half-way leaves CHANGELOG.md or releases.json
   // already carrying this cut while the fragments still sit in changes/; a second
-  // write would double the section. Refuse and say how to recover.
+  // write would double the section. The signatures: CHANGELOG.md already has this
+  // version's section, or the last release entry was written from this very HEAD
+  // (a committed cut moves HEAD past the commit it recorded). A ticket shared
+  // with the last release is NOT one: a ticket may ship a second fragment.
   const last = releases[releases.length - 1];
-  if (changelogBefore.includes(`## [${core}]`) || (last && (last.tickets ?? []).some((t) => tickets.includes(t)))) {
+  if (changelogBefore.includes(`## [${core}]`) || (last && last.server === gitHead())) {
     throw new Error(`CHANGELOG.md or releases.json already carries this cut while its fragments are still in ${CHANGES_REL}/ — a previous --write stopped half-way; restore FORK.md, CHANGELOG.md and releases.json from version control and run again`);
   }
   // Whatever sits under ## [Unreleased] is replaced by the version section; a
@@ -298,17 +310,17 @@ function write(plan) {
   for (const f of plan.fragments) unlinkSync(join(CHANGES_DIR, f.name));
 
   console.log(`Wrote ${plan.fragments.length} change file(s), FORK.md's index, CHANGELOG.md and releases.json for ${plan.version}.`);
-  console.log(`Next, out of band, in this same commit: bump db/version.mjs's FORK_VERSION to '${plan.version}' and add a NNN_set_schema_version.sql upserting it (check-fork holds the two equal). That migration lands after the range this cut froze${plan.range ? ` (${pad3(plan.range[0])}..${pad3(plan.range[1])})` : ""}, so a brain that applies it sits one migration past the release until the next cut — the release job's shape (SMD-1805) is where that gap closes. Then tag v${plan.version.split("+")[0]}+upstream.${UPSTREAM_PIN} and create the release.`);
+  console.log(`Next, out of band, in this same commit: bump db/version.mjs's FORK_VERSION to '${plan.version}' and add a NNN_set_schema_version.sql upserting it (check-fork holds the two equal). That migration lands after the range this cut froze${plan.range ? ` (${pad3(plan.range[0])}..${pad3(plan.range[1])})` : ""}, so a brain that applies it sits one migration past the release until the next cut — the release job's shape (SMD-1805) is where that gap closes. Then tag v${plan.version.split("+")[0]} (the tag CHANGELOG.md's compare links name; the full version with its +upstream build metadata is in releases.json) and create the release.`);
 }
 
 function gitStatus() {
   try { return execFileSync("git", ["status", "--porcelain"], { cwd: ROOT, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim(); }
-  catch { return ""; } // no repository (a copied tree): nothing to compare against
+  catch { return null; } // no repository (a copied tree)
 }
 
 function isShallow() {
   try { return execFileSync("git", ["rev-parse", "--is-shallow-repository"], { cwd: ROOT, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim() === "true"; }
-  catch { return false; } // no repository at all (a copied tree): the order falls back to ticket number, as addedAt says
+  catch { return false; } // no repository at all (a copied tree): a dry run orders by ticket number, as landedAt says; --write refuses
 }
 
 function gitHead() {
@@ -346,8 +358,8 @@ function selfCheck() {
   try { frozenShasForRange(1, 1, () => null); } catch { threw = true; }
   ok(threw, "a missing migration in the range throws");
   // The mutation helper: the changelog section lands under Unreleased with its link.
-  const clOut = insertChangelogSection("# Changelog\n\n## [Unreleased]\n\n_placeholder_\n\n[Unreleased]: u\n", "## [1.0.0] - 2026-09-30\n### Added\n- x (SMD-1)\n", "1.0.0", "COMPARE");
-  ok(clOut.indexOf("## [Unreleased]") < clOut.indexOf("## [1.0.0] - 2026-09-30") && /\[1\.0\.0\]: COMPARE/.test(clOut) && !/_placeholder_/.test(clOut), "a changelog section lands under Unreleased, with its compare link, replacing the placeholder");
+  const clOut = insertChangelogSection("# Changelog\n\n## [Unreleased]\n\n_placeholder_\n\n[Unreleased]: https://x/compare/upstream-pin-abc...HEAD\n", "## [1.0.0] - 2026-09-30\n### Added\n- x (SMD-1)\n", "1.0.0", "COMPARE");
+  ok(clOut.indexOf("## [Unreleased]") < clOut.indexOf("## [1.0.0] - 2026-09-30") && /\[1\.0\.0\]: COMPARE/.test(clOut) && /\[Unreleased\]: https:\/\/x\/compare\/v1\.0\.0\.\.\.HEAD/.test(clOut) && !/_placeholder_/.test(clOut), "a changelog section lands under Unreleased, with its compare link, replacing the placeholder; Unreleased now compares from this version's tag");
   let clThrew = false;
   try { insertChangelogSection("# Changelog\n\nno unreleased\n", "x", "1.0.0", "u"); } catch { clThrew = true; }
   ok(clThrew, "insertChangelogSection throws when there is no Unreleased section");
@@ -366,7 +378,10 @@ if (import.meta.main) {
       // half-applied earlier cut, an uncommitted fragment, anything — is refused,
       // so the recovery from a failed --write is always "revert and run again".
       const dirty = gitStatus();
+      if (dirty === null) throw new Error("--write needs the repository: the fragments' order and the tree's state are read from it, and a copied tree has neither");
       if (dirty) throw new Error(`the working tree is not clean:\n${dirty}\n--write cuts a release from a committed tree — commit or revert first`);
+      const uncommitted = plan.fragments.filter((f) => !f.landed).map((f) => f.name);
+      if (uncommitted.length) throw new Error(`${uncommitted.join(", ")}: not committed, so the order it landed in is unknown — commit it first`);
       write(plan);
     } else printPlan(plan);
   } catch (e) {

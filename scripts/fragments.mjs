@@ -64,11 +64,16 @@ export const BUMPS = new Set(["major", "minor", "patch"]);
  * released ticket from that title once it is a numbered file), nothing on the
  * second line, `## ` sub-headings of its own kept, and no numbered heading.
  */
-export function fragmentProblems(text) {
+export function fragmentProblems(text, name) {
   const problems = [];
   const parsed = parseFragment(text);
   if (!parsed) { problems.push("no `---` front matter"); return problems; }
   const { fm, body } = parsed;
+  // The name's ticket (changes/smd-NNNN.md) is one the front matter lists: the
+  // index and the duplicate rule read the name, the changelog and the pairing the
+  // front matter, and the two must not disagree.
+  const named = name && /^smd-(\d+)\.md$/.exec(name);
+  if (named && Array.isArray(fm.tickets) && !fm.tickets.includes(`SMD-${Number(named[1])}`)) problems.push(`is named for SMD-${Number(named[1])}, which its \`tickets:\` does not list`);
   if (!FRAGMENT_TYPES.has(fm.type)) problems.push(`type must be one of ${[...FRAGMENT_TYPES].join("|")}, got ${JSON.stringify(fm.type ?? null)}`);
   if (!BUMPS.has(fm.bump)) problems.push(`bump must be one of ${[...BUMPS].join("|")}, got ${JSON.stringify(fm.bump ?? null)}`);
   const tickets = Array.isArray(fm.tickets) ? fm.tickets : [];

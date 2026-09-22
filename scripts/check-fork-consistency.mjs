@@ -2870,37 +2870,39 @@ const OVERSIZE_AT_SPLIT = {
 // by rewording, a miss by adding the word here.
 const UNIT_WORDS = String.raw`ms|[µμ]s|s|sec(?:ond)?s?|min(?:ute)?s?|h|hours?|rows?|lines?|files?|bytes?|[KMGT]i?B|%|dims?|dimensions?|tokens?|passes?|times|commits?|queries|thoughts?|vectors?|sections?|entries|items?|chars?|characters|words?|columns?|tables?|calls?|runs?`;
 const LINE_WRAP = String.raw`[ \t]*(?:\r?\n[ \t]*)?`; // the same line or a wrap onto the next, never across a blank line
-const UNIT = String.raw`(?!${LINE_WRAP}(?:${UNIT_WORDS}|of\b|per\b)(?!\w))`;
-// A list's continuation item is a citation already ("changes 31 and 53 of the
-// record"): "of" and "per" end the list there without unmaking the item.
-const UNIT_TAIL = String.raw`(?!${LINE_WRAP}(?:${UNIT_WORDS})(?!\w))`;
+const UNIT = String.raw`(?!${LINE_WRAP}(?:${UNIT_WORDS})(?!\w))`;
 const NUM = String.raw`\b(?!-\d\d-)(?!,\d{3}\b)(?!\.\d)${UNIT}`;
-const NUM_TAIL = String.raw`\b(?!-\d\d-)(?!,\d{3}\b)(?!\.\d)${UNIT_TAIL}`;
 // "18–20, 22" and "3, 4, 5." read whole, across a wrapped line: a bare comma item
 // continues before another item, before "and", or at the end of the clause;
 // ", change N" always continues. The one cost is a unit-less number in
 // parentheses — "(change 90, 250)" cites 250 — a shape no site writes.
 const SEP = String.raw`,${LINE_WRAP}`; // a comma item may wrap onto an indented continuation line; a blank line still stops
-const CITED_LIST = String.raw`(\d+)${NUM}((?:(?:,?\s+and|–|—|-|\/)\s?(?:change )?\d{1,3}${NUM_TAIL}|${SEP}change \d{1,3}${NUM_TAIL}|${SEP}\d{1,3}${NUM_TAIL}(?=${SEP}(?:change )?\d|,?\s+and\s|\s*(?:[.;:)\]]|$)))*)`;
+const CITED_LIST = String.raw`(\d+)${NUM}((?:(?:,?\s+and|–|—|-|\/)\s?(?:change )?\d{1,3}${NUM}|${SEP}change \d{1,3}${NUM}|${SEP}\d{1,3}${NUM}(?=${SEP}(?:change )?\d|,?\s+and\s|\s+(?:of|per)\b|\s*(?:[.;:)\]]|$)))*)`;
 // A slugged path names a file as it is — a mis-cased or underscored slug is read
 // so that check 15 can report the dead link, not skipped as "not a path".
-const CHANGE_PATH = String.raw`(?<![\w/.-])changes\/(\d{3})([-_][\w-]+\.md)?(?![\w.-])`; // not docs/changes/…, not …md.bak
+const CHANGE_PATH = String.raw`(?<![\w/.-])(?:\.\.?\/)*changes\/(\d{3})([-_][\w-]+\.md)?(?![\w-])(?!\.[\w-])`; // ./ and ../ allowed; not docs/changes/…, not …md.bak; a sentence may end after it
 // Inside the record a link may be relative: `(079-the-store.md)` beside the file.
 const RECORD_PATH = String.raw`\((?:\.\/)?(\d{3})([-_][\w-]+\.md)(?:#[\w-]*)?(?: "[^"\n]*")?\)`;
 // The file name may sit in a code span (\`FORK.md\` change N) or behind ../ .
-const EXPLICIT_CITATION = new RegExp(String.raw`\b(?:\.\.\/)?FORK(?:\.md)?\x60?(?:'s)?,?\s(?:[Cc]hange|section|§) ?s?\s?${CITED_LIST}|${CHANGE_PATH}|\b\d{3} change (\d+)\b`, "gm");
+// Code comments cite as "SMD-1541 (change 103)" or "(SMD-1541; change 103)": a
+// bare "change N" within a few words of a ticket is a citation anywhere; and
+// "(FORK 79)" — the file's name and a number — is one too (the NUM guard keeps
+// "FORK.md 61,543 bytes" and "FORK.md 828 lines" out).
+const TICKETED = String.raw`\bSMD-\d+[^\n]{0,40}?\(?[Cc]hanges?\s${CITED_LIST}`;
+const EXPLICIT_CITATION = new RegExp(String.raw`\b(?:\.\.\/)?FORK(?:\.md)?\x60?(?:'s)?,?\s(?:(?:[Cc]hange|section|§) ?s?\s?)?${CITED_LIST}|${CHANGE_PATH}|\b\d{3} change (\d+)\b|${TICKETED}`, "gm");
 const BARE_CITATION = new RegExp(String.raw`\b[Cc]hanges?\s${CITED_LIST}|${RECORD_PATH}`, "gm");
 /** [{ n, index, name? }] — `name` when the citation is a `changes/NNN-<slug>.md` path, which must exist as such. */
 function citedChangesIn(text, { record = false } = {}) {
   const out = [];
-  const list = (m) => {
-    out.push({ n: Number(m[1]), index: m.index });
-    for (const t of m[2].matchAll(/\d+/g)) out.push({ n: Number(t[0]), index: m.index });
+  const list = (m, index = m.index) => {
+    out.push({ n: Number(m[1]), index });
+    for (const t of m[2].matchAll(/\d+/g)) out.push({ n: Number(t[0]), index });
   };
   let rest = text; // the record's bare reader runs over the text with the explicit spans blanked: one report per site
   for (const m of text.matchAll(EXPLICIT_CITATION)) {
     if (m[3] !== undefined) out.push({ n: Number(m[3]), index: m.index, ...(m[4] ? { name: `${m[3]}${m[4]}` } : {}) });
     else if (m[5] !== undefined) out.push({ n: Number(m[5]), index: m.index });
+    else if (m[6] !== undefined) list([m[0], m[6], m[7]], m.index);
     else list(m);
     rest = rest.slice(0, m.index) + " ".repeat(m[0].length) + rest.slice(m.index + m[0].length);
   }
@@ -2922,16 +2924,20 @@ const CITATION_PROBES = [
   ["FORK.md Change 42 and FORK.md change\n43", false, [42, 43]],
   ["FORK.md change 42 once, once only", true, [42]],
   ["which changes 1,536 rows and change 42; FORK.md change 1,000", true, [42]],
-  ["(FORK.md change 90, 250 ms) and FORK.md change 90, 2 of them", false, [90, 90]],
+  ["(FORK.md change 90, 250 ms) and FORK.md change 90, 2 of them", false, [90, 90, 2]], // "2 of them" reads as a list item: a miss on "changes 31, 53 of the record" would be silent, a false report here is bounded to a number above the highest change
   ["Ten (changes 31, 53, 55, 59, and 89) ship; changes 31, 53", true, [31, 53, 55, 59, 89, 31, 53]],
   ["FORK.md changes 3, 4, 5. Then FORK.md changes 18–20, 22; FORK.md change 90, change 91, change 92", false, [3, 4, 5, 18, 20, 22, 90, 91, 92]],
   ["`FORK.md` change 43 and `FORK.md` §50 and `../FORK.md` §48", false, [43, 50, 48]],
   ["(FORK.md change 31, 0.51 R@10) and FORK.md change 31, 12.3 ms.", false, [31, 31]],
-  ["no behaviour change 250 ms after; a schema change 200 lines long; changes 3, 4 and 500 rows; change 5 of 6", true, [3, 4]],
+  ["no behaviour change 250 ms after; a schema change 200 lines long; changes 3, 4 and 500 rows; change 5 of 6", true, [3, 4, 5]],
   ["Like FORK.md changes 31, 53\nand 999; FORK.md changes 5, 6,\n7 and 8; changes 31,\n53. And changes 31,\n53 then", true, [31, 53, 999, 5, 6, 7, 8, 31, 53, 31]],
   ["- FORK.md changes 5, 6,\n  7 and 8; changes 31,\n\n53", true, [5, 6, 7, 8, 31]],
   ["change 42% of them, change 5 seconds later, change 6 minutes, change 7 hours, change 8 μs", true, []],
   ["FORK.md changes 31 and 53 of the record; changes 3, 4 and 500 rows; see FORK.md change 999\n\nlines later", true, [31, 53, 999, 3, 4]], // explicit citations first, then the record's bare ones
+  ["changes 31, 53 of the record; FORK.md change 42 of this fork; change 5 of 6", true, [42, 31, 53, 5]],
+  ["SMD-1541 (change 103): the key; (SMD-1541; change 103 has the why); SMD-1228 changes 38 and 40; SMD-1 is not change-free", false, [103, 103, 38, 40]],
+  ["SMD-1037 (FORK 79), (FORK 82) and FORK.md 61,543 bytes, FORK.md 828 lines", false, [79, 82]],
+  ["see changes/104-x.md. And ../changes/020-x.md and ./changes/021-y.md and changes/022-z.md.bak", false, [104, 20, 21]],
   ["docs/changes/104-x.md and changes/105-y.md.bak and changes/106-z.md", false, [106]],
   ["since FORK.md change 90, one per id a capture names", false, [90]],
   ["024 change 45\n025 change 46\n044 SMD-1804", false, [45, 46]],
@@ -2979,7 +2985,7 @@ function forkLayoutProblems({ entries, forkText, citations = [], ceilings = OVER
   }
   for (const n of Object.keys(ceilings).map(Number)) if (!byN.has(n)) at(SELF, "excuse-stale", `OVERSIZE_AT_SPLIT lists change ${n}, which has no file — drop the entry`);
   for (const f of changes.fragments) if (f.lines > cap) at(`${CHANGES_DIR}/${f.name}`, "oversize", `is ${f.lines} lines; a fragment becomes a change file and is held to the same ${cap} — a review pass is a table row (changes/README.md)`);
-  const sec = /^(#{1,6}) (\d+)\. /m.exec(forkText);
+  const sec = /^(#{1,6}) (\d+)\. /m.exec(forkText.replace(/^```[\s\S]*?^```/gm, "")); // a `# 1. fetch` comment in a fenced snippet is not a section
   if (sec) at("FORK.md", "section-in-fork", `carries a \`${sec[1]} ${sec[2]}.\` section — a numbered change is a file, ${CHANGES_DIR}/${String(sec[2]).padStart(3, "0")}-<slug>.md, and this file lists it`);
   let span = null;
   try { span = indexSpan(forkText); } catch (e) { at("FORK.md", "index-missing", `${e.message} — the generated index lives between them`); }
@@ -3073,6 +3079,13 @@ function citationFiles() {
   return names.filter((rel) => rel !== SELF && !BINARY_FILES.test(rel) && !rel.split("/").includes("node_modules") && regular(rel));
 }
 
+/** An offset → 1-based line number function for one text: the line starts are indexed once, then each lookup is a binary search. */
+function lineIndexer(text) {
+  const starts = [0];
+  for (let i = 0; i < text.length; i++) if (text.charCodeAt(i) === 10) starts.push(i + 1);
+  return (index) => { let lo = 0, hi = starts.length - 1; while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (starts[mid] <= index) lo = mid; else hi = mid - 1; } return lo + 1; };
+}
+
 /** changes/ read once per run: the classified entries with their text, for checks 15, 16 and 17b. */
 let changesCache = null;
 function changesOnDisk() {
@@ -3107,10 +3120,8 @@ function checkForkLayout() {
     const record = rel === "FORK.md" || rel.startsWith(`${CHANGES_DIR}/`);
     const found = citedChangesIn(text, { record });
     if (found.length === 0) continue;
-    const starts = [0]; // line starts once per file, not a split per citation
-    for (let i = 0; i < text.length; i++) if (text.charCodeAt(i) === 10) starts.push(i + 1);
-    const lineOf = (index) => { let lo = 0, hi = starts.length - 1; while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (starts[mid] <= index) lo = mid; else hi = mid - 1; } return lo + 1; };
-    for (const c of found) citations.push({ where: `${rel}:${lineOf(c.index)}`, n: c.n, ...(c.name ? { name: c.name } : {}) });
+    const lineAt = lineIndexer(text);
+    for (const c of found) citations.push({ where: `${rel}:${lineAt(c.index)}`, n: c.n, ...(c.name ? { name: c.name } : {}) });
   }
   for (const p of forkLayoutProblems({ entries, forkText, citations })) fail(p.where, `${p.msg} (SMD-1917)`);
 }
@@ -3158,6 +3169,9 @@ function checkFragments() {
     ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\n---\n\n## Changelog\nx (SMD-1)\n### Added\n\n## FORK\nA title (SMD-1)\n\nbody\n", "a heading inside the Changelog body"],
     ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\n---\n\n## Changelog\nx (SMD-1)\n\n## FORK\nA title (SMD-1)\n\n##### 5. deep\n", "a numbered heading five levels deep in the FORK body"],
   ]) if (fragmentProblems(probe).length === 0) fail(SELF, `check 16 no longer catches ${why} (its own probe)`);
+  for (const [probe, name, why] of [
+    ["---\ntype: added\nbump: minor\ntickets: [SMD-1804]\n---\n\n## Changelog\nx (SMD-1804)\n\n## FORK\nA title (SMD-1804)\n\nbody\n", "smd-1805.md", "a fragment named for a ticket its front matter does not list"],
+  ]) if (fragmentProblems(probe, name).length === 0) fail(SELF, `check 16 no longer catches ${why} (its own probe)`);
   for (const [probe, why] of [
     ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\n---\n\n## Changelog\nx (SMD-1)\n\n## FORK\nA title (SMD-1)\n\n```bash\n# 1. install\n```\n\n#1. not a heading\n\n1. a list item\n\n## Measured after\n\nA second-level heading inside the record is kept, as changes 19 and 79 keep theirs.\n", "a numbered comment in a fenced block, a `#1.`, a list item and a `## ` sub-heading inside the record"],
     ["---\ntype: added        # one of the six\nbump: minor        # the rules\ntickets: [SMD-1804]        # one or more\nmigrations: [044]          # or [] for none\n---\n\n## Changelog\n\nx (SMD-1804, migration 044).\n\n## FORK\n\nA title (SMD-1804)\n\nbody\n", "the README's template copied with its inline comments"],
@@ -3171,7 +3185,7 @@ function checkFragments() {
   ]) if (fragmentProblems(probe).length === 0) fail(SELF, `check 16 no longer catches ${why} (its own probe)`);
 
   // Numbered files and stray names are check 15's; one definition of a fragment's name (fork-index.mjs).
-  for (const f of changesOnDisk().fragments) for (const p of fragmentProblems(f.text)) fail(`changes/${f.name}`, `${p} (SMD-1804)`);
+  for (const f of changesOnDisk().fragments) for (const p of fragmentProblems(f.text, f.name)) fail(`changes/${f.name}`, `${p} (SMD-1804)`);
 }
 checkFragments();
 
@@ -3207,8 +3221,9 @@ function checkChangelogShape() {
   const good = "# Changelog\n\n## [Unreleased]\n\n## [1.1.0] - 2026-10-01\n### Added\n- a thing (SMD-2)\n\n## [1.0.0] - 2026-09-30\n### Fixed\n- a thing (SMD-1)\n\n[Unreleased]: u\n[1.1.0]: u\n[1.0.0]: u\n";
   if (changelogProblems(good).length) fail(SELF, `check 17a false-positives on a valid changelog (${changelogProblems(good).join("; ")})`);
   for (const [probe, why] of [
-    ["# Changelog\n\n## [1.0.0] - 2026-09-30\n### Added\n- x (SMD-1)\n\n[1.0.0]: u\n", "no Unreleased first"],
-    ["# Changelog\n\n## [Unreleased]\n\n## [1.0.0]\n### Added\n- x\n\n[Unreleased]: u\n[1.0.0]: u\n", "an undated version"],
+    ["# Changelog\n\n## [1.0.0] - 2026-09-30\n### Added\n- x (SMD-1)\n\n[Unreleased]: u\n[1.0.0]: u\n", "no Unreleased first (its links present, so only that rule fires)"],
+    ["# Changelog\n\n## [Unreleased]\n\n## [1.0.0]\n### Added\n- x\n\n[Unreleased]: u\n", "an undated version (no footer link for it, so only that rule fires)"],
+    ["# Changelog\n\n## [Unreleased]\n\n## [1.0.0] - 2026-09-30\n### Added\n- x\n\n[Unreleased]: u\n[1.0.0]: u\n[0.9.0]: u\n", "a compare link for a version with no section"],
     ["# Changelog\n\n## [Unreleased]\n\n## [1.0.0] - 2026-09-30\n### Reworked\n- x\n\n[Unreleased]: u\n[1.0.0]: u\n", "a seventh heading"],
     ["# Changelog\n\n## [Unreleased]\n\n## [1.0.0] - 2026-09-30\n### Added\n- x\n\n## [1.1.0] - 2026-10-01\n### Added\n- y\n\n[Unreleased]: u\n[1.0.0]: u\n[1.1.0]: u\n", "versions not newest-first"],
     ["# Changelog\n\n## [Unreleased]\n\n## [1.0.0] - 2026-09-30\n### Added\n- x\n\n[1.0.0]: u\n", "a missing Unreleased compare link"],
