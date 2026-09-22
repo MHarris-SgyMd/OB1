@@ -36,6 +36,7 @@ import { fileURLToPath } from "node:url";
 import { SCHEMAS_DIR, TID_PROBE, applyFunctionSettings, applyMigrations, buffersOf, communitySchemaFiles, createAssert, sampleStatementOf, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
 import { heartbeatFor, leaseRefusal } from "./lease.ts";
 import { reachabilityReport, readHnswGraph, reachableFromEntry, type HnswElement, type HnswGraph } from "./hnsw-graph.ts";
+import { recordId, stampTier, upsertRecord, type Doc } from "./ingest-records.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const URL_ = process.env.DATABASE_URL;
@@ -4064,6 +4065,65 @@ console.log("\n[18] Every schemas/*.sql applies over TCP with no Supabase role p
   const left = await catalog();
   assert(left.tables.size === before18.tables.size && left.views.size === before18.views.size && left.fns.size === before18.fns.size,
     `the section leaves the database's tables, views and functions as it found them (${left.tables.size}/${left.views.size}/${left.fns.size})`);
+}
+
+console.log("\n[19] db/ingest-records.ts: the records upsert is source-labelled and idempotent, an edit moves one row, duplicate content is skipped (SMD-1806)");
+{
+  const count = (s: string) => sql`SELECT count(*)::int AS c FROM thoughts WHERE metadata->>'source' = ${s}`.then((r) => r[0].c);
+  const mk = (source: Doc["source"], key: string, content: string): Doc => ({ id: recordId(source, key), content, source, meta: {} });
+
+  // A tiny record set, one of each source, distinct content — no temp files: the
+  // adapters that read files are covered by ingest-records.ts's --self-check; this
+  // exercises the DB write path against real pgvector.
+  const docs: Doc[] = [
+    mk("fork", "999", "A synthetic fork change body for the ingester test."),
+    mk("commit", "deadbeef", "A synthetic commit message.\n\nWith a body."),
+    mk("memory", "test-note-a", "Test note A: the first synthetic memory file."),
+    mk("memory", "test-note-b", "Test note B: the second synthetic memory file."),
+  ];
+  const ids = docs.map((d) => d.id);
+
+  const first: string[] = [];
+  for (const d of docs) first.push(await upsertRecord(sql, d));
+  assert(first.every((r) => r === "inserted"), `first ingest inserts every record (${first.join(",")})`);
+  assert((await count("fork")) === 1 && (await count("commit")) === 1 && (await count("memory")) === 2, "each row carries its metadata.source label (SMD-1806 rule 5)");
+  const [forkRow] = await sql`SELECT metadata, embedding IS NULL AS bare FROM thoughts WHERE id = ${docs[0].id}::uuid`;
+  assert(forkRow.metadata.source === "fork" && forkRow.bare === true, "a row is source-labelled and written bare — no embedding, which is reembed.ts's job");
+
+  // An unchanged re-ingest is a no-op. The tooth is the classification: the
+  // fingerprint WHERE guard makes each row 'unchanged'; remove the guard and the
+  // DO UPDATE fires and each is 'updated'. Because no UPDATE runs, the updated_at
+  // trigger never fires either — and the 1.1s gap gives that second assertion its
+  // own teeth: an UPDATE here (guard removed) would move updated_at by over a
+  // second, where a within-millisecond re-ingest would not (now() truncates to the
+  // JS Date's millisecond).
+  const before = (await sql`SELECT updated_at FROM thoughts WHERE id = ${docs[2].id}::uuid`)[0].updated_at;
+  await Bun.sleep(1100);
+  const second: string[] = [];
+  for (const d of docs) second.push(await upsertRecord(sql, d));
+  assert(second.every((r) => r === "unchanged"), `a re-ingest of the same records is a no-op — every row 'unchanged', not 'updated' (${second.join(",")})`);
+  const afterNoop = (await sql`SELECT updated_at FROM thoughts WHERE id = ${docs[2].id}::uuid`)[0].updated_at;
+  assert(String(before) === String(afterNoop), "…and updated_at is untouched: no UPDATE ran (the 1.1s gap would surface one if it had)");
+
+  // Editing one record updates exactly that row.
+  const edited: Doc = { ...docs[2], content: "Test note A: EDITED body." };
+  const third: string[] = [];
+  for (const d of [edited, docs[3]]) third.push(await upsertRecord(sql, d));
+  assert(third[0] === "updated" && third[1] === "unchanged", `editing one record updates only it (${third.join(",")})`);
+  assert(/EDITED/.test((await sql`SELECT content FROM thoughts WHERE id = ${docs[2].id}::uuid`)[0].content), "the edited row carries the new content");
+
+  // A different record whose content is byte-identical to one already stored
+  // collides on the partial-unique content_fingerprint index → skipped, not a crash.
+  const twin = mk("fork", "1000", docs[1].content);
+  assert((await upsertRecord(sql, twin)) === "skipped", "a different record with identical content is skipped");
+  assert((await count("fork")) === 1, "…and no second row was written for it");
+
+  // Tier identity, for preflight's `tier` check.
+  await stampTier(sql, "stable");
+  const cfg = Object.fromEntries((await sql`SELECT key, value FROM ob1_config WHERE key IN ('tier','last_ingest')`).map((r: { key: string; value: string }) => [r.key, r.value]));
+  assert(cfg.tier === "stable" && /^\d{4}-\d\d-\d\dT/.test(cfg.last_ingest ?? ""), "ob1_config records tier=stable and a last_ingest timestamp");
+
+  for (const id of ids) await sql`DELETE FROM thoughts WHERE id = ${id}::uuid`; // per-id: Bun binds a JS array as a comma string, not a {…} literal
 }
 
 await sql.close();
