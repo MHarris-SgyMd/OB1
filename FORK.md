@@ -256,7 +256,7 @@ and fails a "FORK.md change N" citation with no file behind it (SMD-1917).
 | 102 | [Every knob the server reads reaches the container](changes/102-every-knob-the-server-reads-reaches.md) | SMD-1843 |
 | 103 | [Change 69's five servers name the key on 008's audit row](changes/103-change-69-s-five-servers-name-the-key-on-008.md) | SMD-1541 |
 
-Landed since the last release and numbered at the next one (SMD-1804): [SMD-1490](changes/smd-1490.md), [SMD-1492](changes/smd-1492.md), [SMD-1730](changes/smd-1730.md), [SMD-1804](changes/smd-1804.md), [SMD-1806](changes/smd-1806.md), [SMD-1808](changes/smd-1808.md), [SMD-1856](changes/smd-1856.md), [SMD-1857](changes/smd-1857.md), [SMD-1870](changes/smd-1870.md), [SMD-1901](changes/smd-1901.md), [SMD-1903](changes/smd-1903.md), [SMD-1917](changes/smd-1917.md), [SMD-1932](changes/smd-1932.md), [SMD-1933](changes/smd-1933.md), [SMD-1936](changes/smd-1936.md), [SMD-1938](changes/smd-1938.md), [SMD-1951](changes/smd-1951.md).
+Landed since the last release and numbered at the next one (SMD-1804): [SMD-1490](changes/smd-1490.md), [SMD-1492](changes/smd-1492.md), [SMD-1730](changes/smd-1730.md), [SMD-1804](changes/smd-1804.md), [SMD-1806](changes/smd-1806.md), [SMD-1808](changes/smd-1808.md), [SMD-1856](changes/smd-1856.md), [SMD-1857](changes/smd-1857.md), [SMD-1870](changes/smd-1870.md), [SMD-1901](changes/smd-1901.md), [SMD-1903](changes/smd-1903.md), [SMD-1917](changes/smd-1917.md), [SMD-1932](changes/smd-1932.md), [SMD-1933](changes/smd-1933.md), [SMD-1936](changes/smd-1936.md), [SMD-1938](changes/smd-1938.md), [SMD-1951](changes/smd-1951.md), [SMD-1985](changes/smd-1985.md).
 <!-- changes-index:end -->
 
 ### Files we own
@@ -563,16 +563,8 @@ no deletion, **no force-push**, and no bypass actors — it applies to admins to
 The ruleset is a file, `.github/rulesets/main.json`, applied with
 `gh api -X PUT repos/MHarris-SgyMd/OB1/rulesets/22189960 --input .github/rulesets/main.json`,
 and `check-fork-consistency` check 20 holds the file to the workflow's job list,
-so a job added without being required fails CI by name (SMD-1856). The PR run
-also carries the landing check: a PR whose change touches `db/migrations/`,
-`server-portable/` or `evals/` beyond tests and docs ships a `changes/smd-NNNN.md`
-fragment, or the `Repo consistency` job refuses it with the files that asked
-(`scripts/check-landing.ts`, SMD-1857) — a rebase that lands such a change
-records itself like any PR. There is no merge queue: GitHub offers one on
-organisation-owned repositories only and refuses the rule on this user-owned
-one; the record adds it, and the landing check reads a merge group, the day
-the repository moves (SMD-1984). That is deliberate, and it interacts with a
-rebase in one specific way.
+so a job added without being required fails CI by name (SMD-1856). That is
+deliberate, and it interacts with a rebase in one specific way.
 
 A rebase produces `siggymd/rebase-YYYYMMDD` with **rewritten history**, so it
 cannot fast-forward onto `main`. Two ways forward:
