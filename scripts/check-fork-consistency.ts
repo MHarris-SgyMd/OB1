@@ -208,7 +208,7 @@ type Metadata = {
   tags?: unknown;
   author?: { name?: unknown; [k: string]: unknown };
   requires?: { open_brain?: unknown; [k: string]: unknown };
-  requires_primitives?: string[]; // as the schema requires; a scalar here is check 1's finding, and checkDeps walks whatever is there as it always did
+  requires_primitives?: string[]; // as the schema requires; check 1 does not type fields, so a scalar reaches checkDeps, which walks its characters as it always did — the schema is the contract
   requires_skills?: string[];
   [k: string]: unknown;
 };
@@ -3378,7 +3378,9 @@ function checkChangelogForkPairing() {
     [[], "## [1.0.0] - 2026-09-30\n- x (SMD-1)\n", fork, "a changelog release with no releases.json entry"],
   ] as const) if (pairingProblems(rel, cl, forks).length === 0) fail(SELF, `check 17b no longer catches ${why} (its own probe)`);
   // A malformed heading is check 17a's finding; the ticket reader skips it rather than throwing on it (a TypeError here hid every violation, SMD-1870).
-  if (releasedChangelogTickets("## [Unreleased]\n\n## [1.0.0 - 2026-09-30\n- x (SMD-1)\n").size !== 0) fail(SELF, "check 17b's ticket reader reads a `## [` heading with no closing bracket as a version (its own probe)");
+  let skipped = false;
+  try { skipped = releasedChangelogTickets("## [Unreleased]\n\n## [1.0.0 - 2026-09-30\n- x (SMD-1)\n").size === 0; } catch { /* the TypeError the guard removes */ }
+  if (!skipped) fail(SELF, "check 17b's ticket reader no longer skips a `## [` heading with no closing bracket — it throws on it, or reads it as a version (its own probe)");
 
   const clPath = join(ROOT, "CHANGELOG.md");
   if (!existsSync(clPath)) return;
