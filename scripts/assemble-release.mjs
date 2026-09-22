@@ -11,7 +11,10 @@
  * between assembly and tag. Since SMD-1917 a numbered change is a file,
  * changes/NNN-<slug>.md, not a FORK.md section: the step writes each fragment as
  * the next numbered file, removes the fragment, and re-renders FORK.md's index
- * with scripts/fork-index.mjs.
+ * with scripts/fork-index.mjs. Everything a cut can refuse — a directory that is
+ * not contiguous or holds a stray, a fragment with no FORK body or a migration
+ * outside the range, a FORK.md or CHANGELOG.md it cannot write into — is refused
+ * in the plan, before --write touches a file.
  *
  *   bun scripts/assemble-release.mjs              # DRY RUN: print the plan, touch nothing
  *   bun scripts/assemble-release.mjs --write      # write changes/NNN-*.md, FORK.md's index, CHANGELOG.md, releases.json
@@ -32,7 +35,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { FORK_VERSION, UPSTREAM_PIN, migrationSha, readReleases, highestReleasedMigration } from "../db/version.mjs";
 import { parseFragment, fragmentSection } from "./fragments.mjs";
-import { CHANGES_DIR as CHANGES_REL, FIRST_FILED, FRAGMENT, changeFileName, classifyChanges, readChangeEntries, renderIndex, spliceIndex } from "./fork-index.mjs";
+import { CHANGES_DIR as CHANGES_REL, FIRST_FILED, changeFileName, classifyChanges, readChangeEntries, renderIndex, spliceIndex } from "./fork-index.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const CHANGES_DIR = join(ROOT, "changes");
@@ -65,7 +68,7 @@ export function nextVersion(releases, bumps) {
 
 /** The highest numbered change file today (0 when there is none). */
 export function highestChangeNumber(numbered) {
-  return numbered.length ? numbered[numbered.length - 1].n : 0;
+  return numbered[numbered.length - 1].n; // buildPlan refuses an empty directory before asking
 }
 
 /**
@@ -121,20 +124,22 @@ export function frozenShasForRange(lo, hi, readMig) {
 
 // ── I/O and the plan ─────────────────────────────────────────────────────────
 
-/** Fragment files, in merge order: git add-time, then ticket number as a tiebreak. */
-function fragmentFiles() {
-  if (!existsSync(CHANGES_DIR)) return [];
-  const names = readdirSync(CHANGES_DIR).filter((n) => FRAGMENT.test(n)); // one definition of a fragment's name (fork-index.mjs), case and all
+/**
+ * The fragments, in merge order: git add-time, then ticket number as a tiebreak.
+ * Read through fork-index's one reader, so a symlink or a pipe named like a
+ * fragment is a stray the plan refuses, not a file this numbers (the check's rule).
+ */
+function orderedFragments(fragments) {
   const addedAt = (name) => {
     try {
-      const out = execFileSync("git", ["log", "--diff-filter=A", "--format=%ct", "--", `changes/${name}`], { cwd: ROOT, encoding: "utf8" }).trim().split("\n").pop();
+      const out = execFileSync("git", ["log", "--diff-filter=A", "--format=%ct", "--", `changes/${name}`], { cwd: ROOT, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim().split("\n").pop();
       return out ? Number(out) : Number.MAX_SAFE_INTEGER; // unstaged fragment sorts last
     } catch {
       return Number.MAX_SAFE_INTEGER;
     }
   };
-  const ticketNum = (name) => Number(/\d+/.exec(name)[0]);
-  return names.sort((a, b) => (addedAt(a) - addedAt(b)) || (ticketNum(a) - ticketNum(b)));
+  const ticketNum = (f) => Number(/\d+/.exec(f.name)[0]);
+  return [...fragments].sort((a, b) => (addedAt(a.name) - addedAt(b.name)) || (ticketNum(a) - ticketNum(b)));
 }
 
 function readMig(n) {
@@ -144,25 +149,26 @@ function readMig(n) {
 
 function buildPlan() {
   const releases = readReleases();
-  const files = fragmentFiles();
-  if (files.length === 0) throw new Error(`nothing to release — no ${CHANGES_REL}/smd-NNNN.md fragment has landed since the last cut`);
-  const fragments = files.map((name) => {
-    const parsed = parseFragment(readFileSync(join(CHANGES_DIR, name), "utf8"));
+  const entries = readChangeEntries(ROOT);
+  const { numbered: existing, fragments: pending, other } = classifyChanges(entries);
+  // The directory this cut builds on must be sound — check 15's rules, applied
+  // here too because a local run before CI on a tree two branches both numbered,
+  // or with a stray beside the files, would otherwise stack a release on the flaw.
+  if (other.length) throw new Error(`${CHANGES_REL}/ holds ${other.map((o) => o.name).join(", ")} — not a change file or a fragment; run check-fork-consistency and clear the directory before cutting a release`);
+  if (existing.length === 0) throw new Error(`${CHANGES_REL}/ holds no numbered change file to number after — the first filed change is ${FIRST_FILED}`);
+  for (let i = 0; i < existing.length; i++) {
+    const want = FIRST_FILED + i;
+    if (existing[i].n !== want) throw new Error(`${CHANGES_REL}/ is not contiguous at ${existing[i].name} (expected change ${want}) — run check-fork-consistency and fix the directory before cutting a release`);
+  }
+  if (pending.length === 0) throw new Error(`nothing to release — no ${CHANGES_REL}/smd-NNNN.md fragment has landed since the last cut`);
+  const fragments = orderedFragments(pending).map(({ name, text }) => {
+    const parsed = parseFragment(text);
     if (!parsed) throw new Error(`${name}: no front matter (run check-fork-consistency)`);
     const fork = fragmentSection(parsed.body, "FORK");
     if (!fork || !fork.trim()) throw new Error(`${name}: no \`## FORK\` body to number (run check-fork-consistency)`);
     return { name, ...parsed, fork };
   });
   const version = nextVersion(releases, fragments.map((f) => f.fm.bump));
-  const entries = readChangeEntries(ROOT);
-  const { numbered: existing } = classifyChanges(entries);
-  // The numbers this cut builds on must be sound: contiguous from the first filed
-  // change, one file each. Check 15 holds that in CI; a local run before CI on a
-  // tree two branches both numbered would otherwise stack a release on the flaw.
-  for (let i = 0; i < existing.length; i++) {
-    const want = FIRST_FILED + i;
-    if (existing[i].n !== want) throw new Error(`${CHANGES_REL}/ is not contiguous at ${existing[i].name} (expected change ${want}) — run check-fork-consistency and fix the directory before cutting a release`);
-  }
   let n = highestChangeNumber(existing);
   const numbered = fragments.map((f) => ({ number: ++n, ...f, file: renderChangeFile(n, f.fork) }));
   // The index as it will read after the cut, from the plan — rendered (and the
@@ -179,12 +185,24 @@ function buildPlan() {
   const lo = highestReleasedMigration(releases) + 1;
   const hi = Math.max(...migNums);
   const range = hi >= lo ? [lo, hi] : null; // a docs/server-only cut closes no migration
+  // Every migration a fragment says it ships lies in the range this cut freezes:
+  // one already frozen by an earlier release, or one with no file, is a fragment
+  // that lies about its migration and a changelog that would say so.
+  for (const f of fragments) {
+    for (const mig of f.fm.migrations ?? []) {
+      const num = Number(mig);
+      if (!range || num < lo || num > hi) throw new Error(`${f.name} lists migration ${pad3(num)}, which is not in this cut's range (${range ? `${pad3(lo)}..${pad3(hi)}` : "none"}) — ${num < lo ? "an earlier release froze it" : "no such file under db/migrations/"}`);
+    }
+  }
   const tickets = [...new Set(fragments.flatMap((f) => f.fm.tickets))];
 
   // The changelog and the release entry, rendered here too: every throw the cut
   // can raise — a CHANGELOG.md with no Unreleased section, a migration missing from
   // the range — happens before write() has touched a file.
-  const date = new Date().toISOString().slice(0, 10);
+  // The release's day in the house zone (the one every review pass in the log
+  // was committed in and mechanism-yield.mjs defaults to, SMD-1728), not the
+  // machine's: a cut at 20:00 in Chicago is not dated tomorrow.
+  const date = new Date().toLocaleDateString("en-CA", { timeZone: "America/Chicago" });
   const core = version.split("+")[0];
   const changelogAfter = insertChangelogSection(
     readFileSync(join(ROOT, "CHANGELOG.md"), "utf8"),
@@ -231,7 +249,7 @@ function write(plan) {
 }
 
 function gitHead() {
-  try { return execFileSync("git", ["rev-parse", "--short", "HEAD"], { cwd: ROOT, encoding: "utf8" }).trim(); }
+  try { return execFileSync("git", ["rev-parse", "--short", "HEAD"], { cwd: ROOT, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim(); }
   catch { return "unknown"; }
 }
 
@@ -242,7 +260,7 @@ function selfCheck() {
   ok(nextVersion([{ version: "1.0.0" }], ["patch", "minor"]) === `1.1.0+upstream.${UPSTREAM_PIN}`, "strongest bump wins (minor over patch)");
   ok(nextVersion([{ version: "1.4.2" }], ["major", "minor"]) === `2.0.0+upstream.${UPSTREAM_PIN}`, "a major resets minor and patch");
   ok(bumpVersion("1.2.3+upstream.abc", "patch") === `1.2.4+upstream.${UPSTREAM_PIN}`, "patch increments the patch and re-pins upstream");
-  ok(highestChangeNumber([{ n: 18 }, { n: 100 }]) === 100 && highestChangeNumber([]) === 0, "highest change number from the directory");
+  ok(highestChangeNumber([{ n: 18 }, { n: 100 }]) === 100, "highest change number from the directory (an empty directory is refused before this is asked)");
   const cf = renderChangeFile(101, "A title — a consequence (SMD-1)\n\nBody line.");
   ok(cf.name === "101-a-title.md" && cf.text === "# 101. A title — a consequence (SMD-1)\n\nBody line.\n", "a change file from a fragment body: name from the title's first clause, `# N.` heading, the body");
   ok(renderChangeFile(102, "Only a title (SMD-2)").text === "# 102. Only a title (SMD-2)\n", "a body of one line is a heading alone");

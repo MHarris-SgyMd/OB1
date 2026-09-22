@@ -34,7 +34,7 @@ export const H1 = /^# ([1-9]\d*)\. (.+?)\s*$/;
 
 /** `{ n, title }` from a change file's first line, or null when it is not `# N. Title`. */
 export function headingOf(text) {
-  const m = H1.exec(text.split("\n", 1)[0]);
+  const m = H1.exec(text.replace(/^\uFEFF/, "").split("\n", 1)[0]); // an editor's byte-order mark is not part of the heading
   return m ? { n: Number(m[1]), title: m[2] } : null;
 }
 
@@ -44,9 +44,15 @@ export function ticketOf(title) {
   return m ? m[1].replace(/\s*[/,]\s*/g, ", ").replace(/, (\d)/g, ", SMD-$1") : "";
 }
 
-/** The part of a title the index shows: before the first " — ", the ticket tail off. */
+/** The part of a title the index shows: before the first " — " outside a code span, the ticket tail off. */
 export function headOf(title) {
-  return title.replace(/\s*\((SMD-\d+(?:\s*[/,]\s*(?:SMD-)?\d+)*)\)\s*$/, "").split(" — ")[0].trim();
+  const bare = title.replace(/\s*\((SMD-\d+(?:\s*[/,]\s*(?:SMD-)?\d+)*)\)\s*$/, "");
+  let inCode = false;
+  for (let i = 0; i < bare.length; i++) {
+    if (bare[i] === "`") inCode = !inCode;
+    else if (!inCode && bare.startsWith(" — ", i)) return bare.slice(0, i).trim();
+  }
+  return bare.trim();
 }
 
 /** Text safe inside a table cell and a link's text: a pipe or a bracket is escaped, not a delimiter. */
@@ -134,10 +140,12 @@ export function readChanges(root) {
 export function renderIndex({ numbered, fragments }) {
   const hi = numbered.length ? numbered[numbered.length - 1].n : FIRST_FILED - 1;
   const lines = [
-    `**${hi} numbered changes** on top of the pin: 1–${FIRST_FILED - 1} are the table above; ` +
-      `${FIRST_FILED}–${hi} are one file each under [\`changes/\`](changes/README.md), newest last. ` +
-      "A change's record is its file; the review-pass prose behind it is in the commits " +
-      "(`(caught: …)` tags, read by `scripts/mechanism-yield.mjs`).",
+    numbered.length
+      ? `**${hi} numbered changes** on top of the pin: 1–${FIRST_FILED - 1} are the table above; ` +
+        `${FIRST_FILED}–${hi} are one file each under [\`changes/\`](changes/README.md), newest last. ` +
+        "A change's record is its file; the review-pass prose behind it is in the commits " +
+        "(`(caught: …)` tags, read by `scripts/mechanism-yield.mjs`)."
+      : `**${FIRST_FILED - 1} numbered changes** on top of the pin, all in the table above; no change has a file under [\`changes/\`](changes/README.md) yet.`,
     "",
     "| # | Change | Ticket |",
     "| --- | --- | --- |",
