@@ -48,6 +48,7 @@ import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DEFAULT_MAX_TOKENS, estimateTokens } from "../server-portable/chunk.ts";
 import { describeEnv, envFiles, loadEnv } from "./env.ts";
+import { linearClient, strict } from "../db/linear-api.ts";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -55,7 +56,6 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // see env.ts — so this only fills in what the shell did not already provide.
 const ENV_SOURCES = loadEnv();
 
-const API = "https://api.linear.app/graphql";
 const KEY = process.env.LINEAR_API_KEY;
 const TEAM = process.env.OB1_CORPUS_TEAM ?? "SMD";
 /** Which workflow-state type to collect. "completed" reproduces the old corpus. */
@@ -157,34 +157,17 @@ query Corpus($after: String, $team: String!, $state: String!) {
   }
 }`;
 
+// The access rule — the endpoint, raw-vs-Bearer authorization, errors arriving
+// with HTTP 200 — is db/linear-api.ts, shared with db/sync-linear.ts
+// (SMD-1954). `strict` refuses a partial page: checking only res.ok would treat
+// an error as an empty page and silently build a short corpus.
+const gql = linearClient(KEY);
+
 async function page(after: string | null): Promise<{ nodes: Node[]; next: string | null }> {
-  const res = await fetch(API, {
-    method: "POST",
-    // Linear personal API keys go in Authorization raw, with no Bearer prefix.
-    // OAuth access tokens do take one, so both spellings are handled rather than
-    // failing with an opaque 401 for half of all callers.
-    headers: {
-      Authorization: KEY!.startsWith("lin_api_") ? KEY! : `Bearer ${KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ query: QUERY, variables: { after, team: TEAM, state: STATE } }),
-  });
-
-  if (!res.ok) {
-    throw new Error(`Linear returned HTTP ${res.status} ${res.statusText}: ${(await res.text()).slice(0, 300)}`);
-  }
-  const json = (await res.json()) as {
-    data?: { issues: { pageInfo: { hasNextPage: boolean; endCursor: string }; nodes: Node[] } };
-    errors?: { message: string }[];
-  };
-  // A GraphQL error arrives with HTTP 200 and an `errors` array. Checking only
-  // res.ok would treat it as an empty page and silently build a short corpus.
-  if (json.errors?.length) throw new Error(`Linear GraphQL error: ${json.errors.map((e) => e.message).join("; ")}`);
-  if (!json.data) throw new Error("Linear returned no data and no errors, which should not happen.");
-
+  const data = await strict<{ issues: { pageInfo: { hasNextPage: boolean; endCursor: string }; nodes: Node[] } }>(gql, QUERY, { after, team: TEAM, state: STATE });
   return {
-    nodes: json.data.issues.nodes,
-    next: json.data.issues.pageInfo.hasNextPage ? json.data.issues.pageInfo.endCursor : null,
+    nodes: data.issues.nodes,
+    next: data.issues.pageInfo.hasNextPage ? data.issues.pageInfo.endCursor : null,
   };
 }
 
