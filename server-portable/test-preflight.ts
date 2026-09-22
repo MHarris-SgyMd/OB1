@@ -1486,6 +1486,30 @@ else {
     await claims.unsafe(`INSERT INTO ob1_config (key, value) VALUES ('schema_version', '${FORK_VERSION}') ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`);
   }
 
+  // The pipeline tier (SMD-1806): unset on a plain brain the ingester never
+  // touched, reported once db/ingest-records.ts has stamped it, and a warning —
+  // never a refusal — when the server's OB1_TIER names a different tier than the
+  // database was stamped as (a working server pointed at the stable database).
+  {
+    const none = await run(SQL_ENV);
+    assert(/·\s+tier\s+no tier recorded — db\/ingest-records\.ts has not run/.test(none.out),
+           `a brain the ingester never touched reports no tier (${none.out.split("\n").find((l) => /\btier\b/.test(l))?.trim()})`);
+
+    await claims.unsafe("INSERT INTO ob1_config (key, value) VALUES ('tier', 'stable'), ('last_ingest', '2026-09-22T00:00:00.000Z') ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value");
+    const okTier = await run(SQL_ENV);
+    assert(/✓\s+tier\s+stable, last ingest 2026-09-22T00:00:00\.000Z/.test(okTier.out),
+           `a stamped brain reports its tier and last ingest (${okTier.out.split("\n").find((l) => /\btier\b/.test(l))?.trim()})`);
+
+    const mism = await run({ ...SQL_ENV, OB1_TIER: "working" });
+    assert(/!\s+tier\s+the database is tier 'stable'.*but this server runs OB1_TIER=working — a server pointed at another tier's database/.test(mism.out),
+           `a server whose OB1_TIER names another tier than the database warns (${mism.out.split("\n").find((l) => /\btier\b/.test(l))?.trim()})`);
+    const mismJson = JSON.parse((await run({ ...SQL_ENV, OB1_TIER: "working" }, "--json")).out) as { ok: boolean; checks: { name: string; status: string }[] };
+    assert(mismJson.ok === true && mismJson.checks.some((c) => c.name === "tier" && c.status === "warn"),
+           "…carried as a warning in --json under ok:true — a tier mismatch never refuses the deploy");
+
+    await claims.unsafe("DELETE FROM ob1_config WHERE key IN ('tier', 'last_ingest')");
+  }
+
   await claims.unsafe("DELETE FROM thoughts");
   await claims.close();
 
