@@ -184,7 +184,7 @@ export async function resolveSubject(run: Runner, subject: string, scopeIn: Scop
   const rung = async (how: string, score: string, params: unknown[], sc: Scope, limit = "") =>
     rows(await run(select(`${how} AND ${scopeSql("s", sc, params)}`, score) + order + limit, params));
   const unscoped: Scope = { ...scope, excludeNumeric: false };
-  /** Would the exact rung have found it without the numeric rule? */
+  /** Would this rung have found it without the numeric rule? */
   const excludedBy = async (exactHow: string, params: unknown[]) => scope.excludeNumeric && (await rung(exactHow, "1.0::float8", params, unscoped)).length > 0;
   const none = (normalized: string | null, excluded: boolean): Resolution => ({ how: "none", subjects: [], normalized, excluded });
 
@@ -205,8 +205,12 @@ export async function resolveSubject(run: Runner, subject: string, scopeIn: Scop
   // line naming --keep-numeric would never print (third review pass).
   if (NUMERIC_NAME_JS.test(normalized) && (await excludedBy(exactHow, [normalized]))) return none(normalized, true);
 
-  const alias = await rung(`($1 = ANY(s.merged_from) OR EXISTS (SELECT 1 FROM unnest(s.aliases) a WHERE normalize_entity_name(a) = $1))`, "1.0::float8", [normalized], scope);
+  const aliasHow = `($1 = ANY(s.merged_from) OR EXISTS (SELECT 1 FROM unnest(s.aliases) a WHERE normalize_entity_name(a) = $1))`;
+  const alias = await rung(aliasHow, "1.0::float8", [normalized], scope);
   if (alias.length) return { how: "alias", subjects: alias, normalized, excluded: false };
+  // The same stop for a non-numeric name that is an alias or merged-in name OF
+  // a numeric-named entity: the match exists, the rule hid it (fifth review pass).
+  if (await excludedBy(aliasHow, [normalized])) return none(normalized, true);
 
   const fuzzy = await rung(`similarity(s.normalized_name, $1) >= $2`, "similarity(s.normalized_name, $1)::float8", [normalized, FUZZY_FLOOR], scope, ` LIMIT ${FUZZY_LIMIT}`);
   return fuzzy.length ? { how: "fuzzy", subjects: fuzzy, normalized, excluded: false } : none(normalized, false);
@@ -316,10 +320,11 @@ export async function neighbourhood(run: Runner, subjectIds: readonly string[], 
                 JOIN (SELECT entity_id, string_agg(relation || '×' || n, ', ' ORDER BY n DESC, relation) AS relations FROM per_relation GROUP BY 1) rel
                   ON rel.entity_id = sup.entity_id)`
     : "";
-  // Candidates first — the entities with a co-mention or an edge — then
-  // `mentions`, a display and tiebreak column, counted for those alone
-  // (fourth review pass; the whole-table aggregate was the shape the first
-  // pass removed from the rungs).
+  // Candidates first — the entities with a co-mention or an edge, which is
+  // what `co` and `ed` hold, so no further filter is needed — then `mentions`,
+  // a display and tiebreak column, counted for those alone (fourth review
+  // pass; the whole-table aggregate was the shape the first pass removed from
+  // the rungs).
   const rows = await run(
     `WITH scope AS (SELECT e.id, e.entity_type, e.name, e.normalized_name FROM ob1_entities e WHERE ${inScope}),
        subject_thoughts AS (SELECT DISTINCT te.thought_id FROM thought_entities te WHERE te.entity_id = ANY($1::uuid[])),
@@ -334,8 +339,7 @@ export async function neighbourhood(run: Runner, subjectIds: readonly string[], 
          SELECT s.id, s.entity_type, s.name, s.normalized_name,
                 (SELECT count(DISTINCT te.thought_id) FROM thought_entities te WHERE te.entity_id = s.id)::int AS mentions,
                 c.co_mentions${opts.edges ? ", c.support, c.relations" : ""}
-           FROM cand c JOIN scope s ON s.id = c.entity_id
-          WHERE c.co_mentions${opts.edges ? " + c.support" : ""} > 0)
+           FROM cand c JOIN scope s ON s.id = c.entity_id)
      SELECT id, entity_type, name, mentions, co_mentions${opts.edges ? ", support, relations" : ""}
        FROM ranked
       ORDER BY co_mentions${opts.edges ? " + support" : ""} DESC, mentions DESC, ${ENTITY_TIEBREAK}
@@ -433,7 +437,7 @@ function table(rows: Record<string, unknown>[], cols: Col[]): string {
   const line = (vals: string[]) => vals.map((v, i) => (cols[i].right ? v.padStart(widths[i]) : v.padEnd(widths[i]))).join("  ").trimEnd();
   // A cell over its column's cap is cut and marked, never cut silently.
   const fit = (v: string, w: number) => (v.length > w ? `${v.slice(0, Math.max(0, w - 1))}…` : v);
-  const out = [line(cols.map((c) => c.head)), line(widths.map((w) => "-".repeat(w)))];
+  const out = [line(cols.map((c, i) => fit(c.head, widths[i]))), line(widths.map((w) => "-".repeat(w)))];
   for (const r of rows) out.push(line(cols.map((c, i) => fit(cell(r, c.key), widths[i]))));
   return out.join("\n");
 }
@@ -457,7 +461,7 @@ export function render(r: Report): string {
   const o = r.options;
   const everyType = ENTITY_TYPES.every((t) => o.types.includes(t));
   out.push(`graph-centrality — ${r.subject === null ? "the whole graph" : `around ${JSON.stringify(r.subject)}`}; scope ${everyType ? "every type" : o.types.join(",")}${o.excludeNumeric ? ", numeric names excluded" : ", numeric names kept"}; edges ${o.edges ? "on" : "OFF (control)"}; top ${o.limit}`);
-  out.push(`${r.coverage.entities} entities in scope; ${r.coverage.edges} edge rows`);
+  out.push(`${r.coverage.entities} entities in scope; ${r.coverage.edges} edge rows in the whole graph`);
   out.push("");
   if (r.resolution) {
     const res = r.resolution;

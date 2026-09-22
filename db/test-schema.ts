@@ -66,7 +66,7 @@ import {
 } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { buffersOf, COLUMN_COMMENT_SQL, communitySchemaFiles, createAssert, FUNCTION_COMMENT_SQL, SAMPLE_STATEMENT, sampleStatementOf, SCHEMA_FILES_FIRST, SCHEMAS_DIR, seededRandom, TABLE_COMMENT_SQL, TID_PROBE } from "./test-support.ts";
+import { buffersOf, COLUMN_COMMENT_SQL, communitySchemaFiles, createAssert, FUNCTION_COMMENT_SQL, ISO_RE, SAMPLE_STATEMENT, sampleStatementOf, SCHEMA_FILES_FIRST, SCHEMAS_DIR, seededRandom, TABLE_COMMENT_SQL, TID_PROBE } from "./test-support.ts";
 import { markerAnswers } from "./bench-oracle.ts";
 import {
   DEFAULT_OPTIONS, FUZZY_FLOOR, coverage as graphCoverage, neighbourhood, parseArgs, pgArray, rankedSubjects, render, report as graphReport,
@@ -5149,7 +5149,7 @@ console.log("\n[43] db/graph-centrality.ts: mentions, degree and support as defi
   assert(tt[0].id === t1 && tt[0].entities === 3 && tt[0].edges === 2, `t1 leads the whole graph: three entities and two edges (${tt[0].entities}+${tt[0].edges})`);
   const t5row = tt.find((t) => t.id === t5)!;
   assert(t5row.entities === 1 && t5row.edges === 0, `t5 counts one entity and no edge — 021 is out of both counts (${t5row.entities}+${t5row.edges})`);
-  assert(tt.length === 7 && tt[0].excerpt.startsWith("Open Brain depends") && tt.every((t) => /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(t.created_at ?? "")),
+  assert(tt.length === 7 && tt[0].excerpt.startsWith("Open Brain depends") && tt.every((t) => ISO_RE.test(t.created_at ?? "")),
     `every extracted thought is listed with an excerpt and its timestamp as the server renders one — ISO, UTC, not the session's TimeZone (${tt[0].created_at})`);
   assert(tt.find((t) => t.id === t6)!.excerpt === "Bun alone, really.", `the excerpt collapses tabs, newlines and runs of spaces to one space — so the '\\s+' reached Postgres as written (${JSON.stringify(tt.find((t) => t.id === t6)!.excerpt)})`);
   const ttOff = await topThoughts(run, off);
@@ -5346,6 +5346,16 @@ console.log("\n[43] db/graph-centrality.ts: mentions, degree and support as defi
   await db.query(`DELETE FROM thoughts WHERE id = $1`, [t11]);
   await db.exec(`SELECT prune_orphan_entities()`);
   assert((await graphCoverage(run, on)).entities === 4, "the fixture is back to four");
+
+  // A non-numeric name that is an ALIAS of a numeric-named entity is the same
+  // stop: the match exists, the rule hid it, exit 3 not 1 (fifth review pass).
+  const t13 = await thought("021, the twenty-first migration.");
+  await record(t13, [{ ...E("021", "person", ["twentyfirst"]) }]);
+  const viaAlias = await resolveSubject(run, "twentyfirst", on);
+  assert(viaAlias.how === "none" && viaAlias.excluded === true, `an alias of 021 resolves to none, excluded — not "no alias or merged name" (${viaAlias.how}, ${viaAlias.excluded})`);
+  assert((await resolveSubject(run, "twentyfirst", keep)).how === "alias", "…and kept, the alias rung finds it");
+  await db.query(`DELETE FROM thoughts WHERE id = $1`, [t13]);
+  await db.query(`UPDATE ob1_entities SET aliases = '{}' WHERE id = $1`, [NUM]);
 }
 
 // db/README.md quotes this suite's assertion total in two places ("Expected
