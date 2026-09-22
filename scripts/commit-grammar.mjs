@@ -13,8 +13,7 @@
  *   bun scripts/commit-grammar.mjs --self-check
  */
 
-const ORDINAL = "first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|eleventh|twelfth";
-export { ORDINAL };
+export const ORDINAL = "first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|eleventh|twelfth";
 export const ORDINALS = { first: 1, second: 2, third: 3, fourth: 4, fifth: 5, sixth: 6, seventh: 7, eighth: 8, ninth: 9, tenth: 10, eleventh: 11, twelfth: 12 };
 
 // One alternation, so the LEFTMOST mention wins whichever spelling it uses: a

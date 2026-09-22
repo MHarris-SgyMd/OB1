@@ -30,7 +30,8 @@ const CATEGORIES = ["fork", "extensions", "primitives", "recipes", "schemas", "d
 export default {
   parserPreset: {
     parserOpts: {
-      headerPattern: /^\[(fork|extensions|primitives|recipes|schemas|dashboards|integrations|skills|docs|resources)\] (.+)$/,
+      // Built from CATEGORIES so the header regex and type-enum share one list.
+      headerPattern: new RegExp(`^\\[(${CATEGORIES.join("|")})\\] (.+)$`),
       headerCorrespondence: ["type", "subject"],
     },
   },
