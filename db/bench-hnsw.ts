@@ -943,7 +943,7 @@ async function unfiltered(sql: SQL, queries: number[][], wants: OracleAnswer[]):
     let overlap = 0;
     for (const [i, q] of queries.entries()) {
       const t0 = performance.now();
-      const got = (await sql.unsafe(`SELECT id FROM match_thoughts('${lit(q)}'::vector, -1.0, ${count}, '{}'::jsonb)`)).map((r: { id: string }) => r.id);
+      const got: string[] = (await sql.unsafe(`SELECT id FROM match_thoughts('${lit(q)}'::vector, -1.0, ${count}, '{}'::jsonb)`)).map((r: { id: string }) => r.id);
       times.push(performance.now() - t0);
       overlap += got.filter((id) => wants[i].ids.includes(id)).length;
     }
@@ -1117,7 +1117,7 @@ async function filtered(
   for (const [i, q] of queries.entries()) {
     const want = wants[i];
     const t0 = performance.now();
-    const got = (await sql.unsafe(statement(q, filter))).map((r: { id: string }) => r.id);
+    const got: string[] = (await sql.unsafe(statement(q, filter))).map((r: { id: string }) => r.id);
     times.push(performance.now() - t0);
     returned += got.length;
     // Both lists are at most K long; a scan beside an index probe is noise.

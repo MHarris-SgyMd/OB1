@@ -106,7 +106,7 @@ const idOf = new Map<string, string>(); // thought uuid → issue id
 for (const d of docs) idOf.set(linearThoughtId(d.id), d.id);
 
 // The corpus's ages, so the half-lives below read against something.
-const ages = (await sql`SELECT metadata->>'issue' AS issue, extract(epoch FROM (now() - created_at)) / 86400.0 AS days FROM thoughts ORDER BY days`)
+const ages: { issue: string; days: number }[] = (await sql`SELECT metadata->>'issue' AS issue, extract(epoch FROM (now() - created_at)) / 86400.0 AS days FROM thoughts ORDER BY days`)
   .map((r: { issue: string; days: number }) => ({ issue: r.issue, days: Number(r.days) }));
 const pct = (p: number) => ages[Math.min(ages.length - 1, Math.floor(ages.length * p))].days;
 console.log(`  ages:   ${pct(0).toFixed(0)}–${pct(0.999).toFixed(0)} days (median ${pct(0.5).toFixed(0)}); ${ages.filter((a) => a.days <= 30).length} under 30 days, ${ages.filter((a) => a.days <= 90).length} under 90, ${ages.filter((a) => a.days <= 365).length} under 365`);
