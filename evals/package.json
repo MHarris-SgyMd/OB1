@@ -25,7 +25,9 @@
     "quant": "../db/with-postgres.sh bun eval-quant.ts",
     "export-queries": "bun export-queries.ts",
     "replay": "bun eval-replay.ts",
-    "build-replay-fixture": "bun build-replay-fixture.ts"
+    "build-replay-fixture": "bun build-replay-fixture.ts",
+    "thought-kinds": "bun eval-thought-kinds.ts",
+    "thought-kinds:self-check": "bun eval-thought-kinds.ts --self-check"
   },
   "devDependencies": {
     "@types/bun": "1.4.0",
