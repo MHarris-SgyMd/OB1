@@ -14,8 +14,8 @@
  *
  * with SUPABASE_URL a postgres:// connection string (the shim's convention),
  * the access keys in MCP_ACCESS_KEYS, and PORT the port to listen on (8000,
- * Deno's default, when unset). scripts/migrate-to-sql-shim.mjs adds and
- * removes the import; check 11 of scripts/check-fork-consistency.mjs holds it
+ * Deno's default, when unset). scripts/migrate-to-sql-shim.ts adds and
+ * removes the import; check 11 of scripts/check-fork-consistency.ts holds it
  * as a file's first import, so nothing the file imports reads `Deno.env`
  * before it is defined.
  *

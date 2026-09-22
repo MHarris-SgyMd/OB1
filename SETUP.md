@@ -395,6 +395,15 @@ name. To revoke a key without editing this file and restarting, take its digest
 and run `SELECT revoke_agent_key('<digest>', 'why');` against the database; it
 takes effect within a minute and the agent's history stays queryable.
 
+Classify each key once — `SELECT set_agent_kind('laptop', 'operator');` —
+as `operator` (a key you hold), `agent` (a key an agent holds) or `ingested`
+(an importer copying external text). Every write through it is then audited
+with that kind and with a trust ceiling the content cannot claim above
+(`thought_audit.actor_kind` and `trust`; migration 046, SMD-1730). Until a
+key is classified its rows say unknown, and preflight's `audit events` counts
+them; `SELECT backfill_thought_audit_events();` fills the rows written before
+the classification. A key can be classified before its first request.
+
 The shipped defaults are **local**: `qwen3-embedding:4b` at 1024 dimensions for
 embeddings and `qwen2.5:7b` for metadata, both via Ollama, with no credential
 needed. To use OpenRouter instead, set all four — `OB1_LLM_BASE_URL=https://openrouter.ai/api/v1`,
@@ -402,7 +411,7 @@ needed. To use OpenRouter instead, set all four — `OB1_LLM_BASE_URL=https://op
 the compose file points the server at the stack's own Ollama and the key is
 sent there (`deploy/.env.example`, Option C). The models are changed as a pair,
 since a local model name sent to a hosted endpoint 404s on every capture and
-silently stores no topics, people or type; `scripts/check-fork-consistency.mjs`
+silently stores no topics, people or type; `scripts/check-fork-consistency.ts`
 fails on that combination in the defaults. To mix them on purpose — local
 embeddings, hosted tagging — give the chat calls their own endpoint with
 `OB1_CHAT_BASE_URL` and `OB1_CHAT_API_KEY`; see "Running the models locally"

@@ -164,8 +164,8 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `1223 assertions: 1223 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports forty-five (45) migrations applied, and
+`bun test-schema.ts` prints `1350 assertions: 1350 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports forty-six (46) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -203,7 +203,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 029 change 54, 030 change 56, 031 change 57, 032 change 60, 033 change 63,
 034 change 65, 035 change 66, 036 change 68, 037 change 70, 038 change 80, 039 change 81,
 040 change 91, 041 change 94, 042 change 95, 043 change 98, 044 SMD-1804,
-045 SMD-1490).
+045 SMD-1490, 046 SMD-1730).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; `0.0.0+upstream.9543c29` until
@@ -212,6 +212,22 @@ migration and warns when a server is older than the brain, or a brain has run pa
 its version's range. It is introduced by a fragment rather than a hand-numbered
 change, so it is named here by its ticket until the release step assigns its
 number (FORK.md's "Versioning", SMD-1804).
+
+Migration 046 makes `thought_audit` the log of record (SMD-1730): eight columns
+beside 008's and 010's — `actor_kind` and `trust` (who holds the key, and the
+ceiling on the content: `operator | agent | ingested`), `origin` (the door — the
+server, integration or worker; SMD-1541's `via`, promoted from
+`actor_context`), `stance`, `cites`, `valid_from`, `valid_until` (what the write
+declared in its event) and `backfilled_at`. The kind is read from the registry,
+never from the payload: classify each key once with
+`SELECT set_agent_kind('<label>', '<operator | agent | ingested>');` (before its
+first request, if you like), then `SELECT backfill_thought_audit_events();`
+fills the rows written before — the one UPDATE the append-only trigger allows,
+and it stamps `backfilled_at`. Preflight's `audit events` counts the keys and
+rows still waiting. `source` keeps its name and now carries one vocabulary, the
+row's own `metadata.source`. The event rides `p_payload.event` on both
+inserting `upsert_thought` forms and a tenth, defaulted `p_event` on
+`update_thought`; nothing over MCP sends one yet (SMD-1724, 1725, 1733).
 
 ## What changed relative to the guide
 
@@ -264,7 +280,8 @@ issues every group at once.
 | | `thought_chunks` (007) | `SELECT, INSERT, DELETE` |
 | | `thought_audit` (008) | `INSERT` |
 | | `thought_facets` (042) | `SELECT, UPDATE` — the delete guard reads the citations that name a thought and, detaching, writes them, on every delete |
-| **server** — the server's soft extras, beyond capture; never fatal to a bare capture, but `resolve_agent` *upserts* the agent tables, so attribution needs the writes, not just `SELECT` | `ob1_config` (006) | `SELECT` |
+| | `ob1_agents` (046) | `SELECT` — the audit trigger reads the key's kind on every write that carries an actor (SMD-1730) |
+| **server** — the server's soft extras, beyond capture; never fatal to a bare capture (the `SELECT` on `ob1_agents` 046 made hard is in capture, above), but `resolve_agent` *upserts* the agent tables, so attribution needs the writes, not just `SELECT` | `ob1_config` (006) | `SELECT` |
 | | `ob1_agents` (010) | `SELECT, INSERT, UPDATE` |
 | | `ob1_agent_keys` (010) | `SELECT, INSERT, UPDATE` |
 | **worker** — `reembed.ts`, `consolidate.ts`, `extract-entities.ts`: claim work, upsert a job key into `ob1_config`, and (consolidate) record/resolve proposals | `thought_work_claims` (015) | `SELECT, INSERT, UPDATE, DELETE` |
@@ -890,7 +907,7 @@ entity resolves (a near-miss whose only guesses the numeric rule hid is still
 no entity: exit 1, and the line counts the hidden guesses), 3 when the subject
 IS an entity — by id, name, alias or merged-in name — that the numeric rule
 excluded (`--keep-numeric` would rank it), 2 for a usage error, a brain
-without 016 or a query that failed — never 1 for a failure or an exclusion. `test-schema.ts` [43] runs the
+without 016 or a query that failed — never 1 for a failure or an exclusion. `test-schema.ts` [44] runs the
 script's own SQL under PGlite over a graph whose every count is known by
 construction, and its edges-on and edges-off orders differ at every position.
 
@@ -1450,7 +1467,7 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 1223 assertions, PGlite, no container
+bun test-schema.ts                          # 1350 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts         # 601 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
@@ -1459,16 +1476,17 @@ bunx tsc --noEmit                           # every .ts here, strict, against th
 The last line is the type check CI runs in the portable-server job (SMD-1932):
 `tsconfig.json` here mirrors `server-portable/tsconfig.json`, and `package.json`
 pins `@types/bun`, `typescript` and `@types/node` at the server's versions
-(`check-fork-consistency` 18 holds the four type-checked directories in step). The workers,
+(`check-fork-consistency` 18 holds the type-checked directories in step). The workers,
 benches and suites import `../server-portable/*.ts` and are the first callers
 to break when a shared signature moves; before this nothing compiled them, and
 SMD-1903's required `subject` argument reached `reembed.ts`'s provider probe as
 a runtime error that blamed the provider. Run it after any edit here; it needs
 `bun install` in this directory and in `../server-portable`, and nothing else.
 A plain-JavaScript module a `.ts` file here imports needs a `.d.mts` beside it
-(`config.d.mts` beside `config.mjs`; `../scripts/fragments.d.mts` and
-`fork-index.d.mts` beside theirs) — without one the import is an implicit `any`
-and the check refuses it, which is how SMD-1806's ingester met the step.
+(`config.d.mts` beside `config.mjs`, `version.d.mts` beside `version.mjs`) —
+without one the import is an implicit `any` and the check refuses it, which is
+how SMD-1806's ingester met the step when it imported two `scripts/*.mjs`
+(TypeScript since SMD-1870, so their declaration files went).
 
 `test-search-path.ts` relocates pgvector into a schema off the connection's
 `search_path` — how Supabase and several managed providers ship it, where
@@ -1953,7 +1971,7 @@ asserts 749 properties (at migration 032), including:
   the call and moves nothing
 - **a vendored schema applied to a migrated brain replaces no function a
   migration owns** (SMD-1250): the owned set is read from the migration files
-  as `scripts/check-fork-consistency.mjs` check 7 reads it, and the three last
+  as `scripts/check-fork-consistency.ts` check 7 reads it, and the three last
   definers preflight's remedies spell are pinned; `schemas/enhanced-thoughts/schema.sql`
   applied whole leaves every owned body and overload byte for byte while its
   own columns and functions arrive; then what upstream's file did — 003's

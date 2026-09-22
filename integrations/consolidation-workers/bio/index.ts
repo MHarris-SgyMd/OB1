@@ -3,13 +3,13 @@
 // unchanged — set SUPABASE_URL to a postgres:// connection string, and
 // SUPABASE_SERVICE_ROLE_KEY is ignored (credentials live in the URL).
 // ob1-original-import: npm:@supabase/supabase-js@2
-// Revert with: node scripts/migrate-to-sql-shim.mjs --revert <file>
+// Revert with: bun scripts/migrate-to-sql-shim.ts --revert <file>
 // ob1-fork (SMD-1228): a thought's content and vector are written through the
 // functions that own them — update_thought for an edit, the 3-argument
 // upsert_thought for a capture — so the fingerprint (003/018), the model label
 // (021) and the chunk rows (022) follow the text and vector, and the actor
 // reaches the audit (008). FORK.md change 69; extensions/test-writes.ts drives it
-// against Postgres, and scripts/check-fork-consistency.mjs check 10 holds it.
+// against Postgres, and scripts/check-fork-consistency.ts check 10 holds it.
 // SMD-1524 (change 71): the first run's row too — the raw insert computed its own
 // fingerprint and stored no vector; the enhanced columns follow on a fresh row —
 // and the key's name reaches 008's audit row as the actor on both paths (the
@@ -416,7 +416,9 @@ async function upsertProfile(
   sourceCount: number,
   existingId: string | null,
   subject: string,
-  actor: { name: string; source: string },
+  // The key's name and this worker as the door (`via`, 046's origin column —
+  // SMD-1730; it was `source` until then, a third vocabulary in that column).
+  actor: { name: string; via: string },
 ): Promise<{ id: string; created: boolean }> {
   const now = new Date().toISOString();
 
@@ -609,7 +611,7 @@ Deno.serve(async (req) => {
     let result: { id: string | null; created: boolean } = { id: null, created: false };
     if (!dryRun) {
       result = await upsertProfile(profileContent, sources.length, existing?.id ?? null, subject,
-        { name: principal.name, source: "consolidation-bio" });
+        { name: principal.name, via: "consolidation-bio" });
       await logConsolidation(result.id!, sources.length, result.created);
     }
 

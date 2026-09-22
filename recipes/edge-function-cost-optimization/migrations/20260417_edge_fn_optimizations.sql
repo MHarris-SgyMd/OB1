@@ -18,5 +18,5 @@
 --    row missing all five, silently.
 --
 -- Nothing to apply on a migrated brain; the statements are removed and
--- scripts/check-fork-consistency.mjs check 7 fails the build if they return.
+-- scripts/check-fork-consistency.ts check 7 fails the build if they return.
 -- The recipe's Edge Function changes (README, step 2 onward) stand.

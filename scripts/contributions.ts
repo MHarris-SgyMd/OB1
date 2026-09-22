@@ -1,10 +1,10 @@
 /**
- * contributions.mjs — the one walk of the contribution directories.
+ * contributions.ts — the one walk of the contribution directories.
  *
- * check-fork-consistency.mjs walks the seven categories for every check, and
- * connector-registry.mjs walks them for the coverage sweep and its CLI; one
+ * check-fork-consistency.ts walks the seven categories for every check, and
+ * connector-registry.ts walks them for the coverage sweep and its CLI; one
  * definition of "what is a contribution" keeps the two from disagreeing about a
- * directory (SMD-1933, review pass 2). Plain fs — node and bun both run it.
+ * directory (SMD-1933, review pass 2). Plain fs, no Bun API.
  */
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -27,13 +27,16 @@ export const CATEGORIES = [
  */
 export const NOT_CONTRIBUTIONS = ["_template", "_shared", "node_modules"];
 
+/** One contribution directory: its category, folder name, absolute path and repo-relative path. */
+export type ContribDir = { cat: string; name: string; dir: string; rel: string };
+
 /**
  * Every contribution directory under `root`, as `{ cat, name, dir, rel }`,
  * categories and names sorted — any directory but NOT_CONTRIBUTIONS, with or
  * without a metadata.json (check 1 is what fails a missing one).
  */
-export function contributionDirs(root) {
-  const out = [];
+export function contributionDirs(root: string): ContribDir[] {
+  const out: ContribDir[] = [];
   for (const cat of CATEGORIES) {
     const base = join(root, cat);
     if (!existsSync(base)) continue;

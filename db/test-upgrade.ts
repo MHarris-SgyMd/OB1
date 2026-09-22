@@ -22,7 +22,15 @@ import { SQL } from "bun";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { COLUMN_COMMENT_SQL, TABLE_COMMENT_SQL, TID_PROBE, applyMigrations, createAssert, dropSchema, ledgerStrangers, loadChunkRows, migrationFiles, migratorEnv, plantLegacyRow, requireDatabaseUrl, resetSchema, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
-import { ACCEPTED_CAVEAT_PREFIX, ACCEPTED_CLAIM_SQL, LOCK_TIMEOUT_S, UPDATE_THOUGHT_SIGNATURE, reembedKey } from "./config.mjs";
+import { ACCEPTED_CAVEAT_PREFIX, ACCEPTED_CLAIM_SQL, LOCK_TIMEOUT_S, UPDATE_THOUGHT_SIGNATURE, UPDATE_THOUGHT_SIGNATURE_9, reembedKey } from "./config.mjs";
+
+/**
+ * 032's update_thought, by its own signature — the form a brain holds from 032
+ * through 044. UPDATE_THOUGHT_SIGNATURE names the shipped form, 046's
+ * 10-argument one (SMD-1730), which the sections that stop at 032, 033 or 035
+ * never have; they read this one, as [4] reads 021's.
+ */
+const UT_9 = UPDATE_THOUGHT_SIGNATURE_9;
 
 const URL_ = requireDatabaseUrl("test-upgrade.ts");
 const { assert, report } = createAssert();
@@ -440,8 +448,9 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // SMD-1501), 040 (jit off on the function, SMD-1624), 041 (its two planner
   // paths pinned, SMD-1677 and SMD-1703), 042 (the citations facet and
   // delete_thought's third argument, SMD-1712) and 043 (the cite shape stated
-  // at the table, SMD-1749) and 044 (the schema_version row, SMD-1804) and 045
-  // (the query_log column set — filter, arm and tier, SMD-1490) stay
+  // at the table, SMD-1749), 044 (the schema_version row, SMD-1804), 045
+  // (the query_log column set — filter, arm and tier, SMD-1490) and 046 (the
+  // audit row's event shape, SMD-1730) stay
   // recorded and are never tried. 030 is the
   // right one to make
   // pending
@@ -458,11 +467,13 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // column and needs only 034, refusing by name without it as 031 does without
   // 015 ([20]); 044 upserts ob1_config.schema_version and needs only 006's
   // table; 045 adds tier and arm to query_log and populates its filter, needing
-  // only 034 and refusing by name without it as 043 does — all recorded by the baseline with their prerequisites
-  // present, so none
+  // only 034 and refusing by name without it as 043 does; 046 adds columns to
+  // 008's thought_audit and 010's ob1_agents and redefines 025's trigger, 035's
+  // two capture forms and 033's update_thought on their own bodies, all present
+  // ([20b]) — all recorded by the baseline with their prerequisites present, so none
   // becomes the plain-run failure point above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 16, `030 is among the last sixteen migrations (${last})`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 17, `030 is among the last seventeen migrations (${last})`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -651,7 +662,7 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // back — the very state preflight's `atomic capture` check warns about.
   const forms = (await sql`SELECT pronargs AS n FROM pg_proc WHERE proname = 'update_thought' ORDER BY 1`) as { n: number }[];
   // …and 021's 8-argument update_thought would have stayed beside 032's.
-  assert(forms.length === 1 && Number(forms[0].n) === 9, `the nine-argument update_thought, alone — 032 ran after 021 and dropped 021's (${forms.map((f) => f.n).join(",")})`);
+  assert(forms.length === 1 && Number(forms[0].n) === 10, `the ten-argument update_thought, alone — 032 ran after 021 and dropped 021's, 046 after 033 and dropped its (${forms.map((f) => f.n).join(",")})`);
   const body3 = (await sql`SELECT prosrc FROM pg_proc WHERE oid = 'upsert_thought(text, jsonb, vector)'::regprocedure`)[0].prosrc as string;
   assert(/ob1:vector-replaces-chunks/.test(body3) && /derived_from/.test(body3), "the 3-argument upsert_thought is the LAST definer's body (022's sentinel, 025's provenance), not 021's");
 
@@ -834,12 +845,12 @@ console.log("\n[10] Migration 032 onto a populated 031 — the nine-argument upd
 
   await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("032") });
 
-  assert(JSON.stringify(await forms()) === "[9]" && (await sql`SELECT to_regprocedure(${UPDATE_THOUGHT_SIGNATURE}) IS NOT NULL AS p`)[0].p === true,
-         `after 032 one update_thought, of nine arguments, at the shipped signature (${(await forms()).join(",")})`);
+  assert(JSON.stringify(await forms()) === "[9]" && (await sql`SELECT to_regprocedure(${UT_9}) IS NOT NULL AS p`)[0].p === true,
+         `after 032 one update_thought, of nine arguments, at 032's signature (${(await forms()).join(",")})`);
   assert((await snapshot()) === before, "no row moved: supersedes, derived_from and updated_at as they were");
   const [{ c: auditAfter }] = await sql`SELECT count(*)::int AS c FROM thought_audit`;
   assert(Number(auditAfter) === Number(auditBefore), "…and no audit row was written");
-  const acl = String((await sql`SELECT proacl::text AS a FROM pg_proc WHERE oid = ${UPDATE_THOUGHT_SIGNATURE}::regprocedure`)[0].a ?? "");
+  const acl = String((await sql`SELECT proacl::text AS a FROM pg_proc WHERE oid = ${UT_9}::regprocedure`)[0].a ?? "");
   assert(!/(^\{|,)=X\//.test(acl) && /ob1_upgrade_editor32=X\//.test(acl), `the 8-argument form's ACL crossed the DROP: PUBLIC still revoked, the role still granted (${acl})`);
 
   // The mirror: an 8-argument positional call — reembed.ts's — still resolves,
@@ -854,7 +865,7 @@ console.log("\n[10] Migration 032 onto a populated 031 — the nine-argument upd
   assert(/update_thought\(/.test(review) && !/UPDATE\s+thoughts\b/i.test(review), "review_supersession_proposal is 032's: it writes through update_thought");
 
   await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("032") });
-  const again = String((await sql`SELECT proacl::text AS a FROM pg_proc WHERE oid = ${UPDATE_THOUGHT_SIGNATURE}::regprocedure`)[0].a ?? "");
+  const again = String((await sql`SELECT proacl::text AS a FROM pg_proc WHERE oid = ${UT_9}::regprocedure`)[0].a ?? "");
   assert(JSON.stringify(await forms()) === "[9]" && again === acl, "re-applying 032 is a no-op: one function, the ACL as it was");
   await sql.unsafe(`DROP OWNED BY ob1_upgrade_editor32`);
   await sql.unsafe(`DROP ROLE ob1_upgrade_editor32`);
@@ -970,7 +981,7 @@ console.log("\n[12] Migration 033 onto a populated 032 — both capture forms ta
   await sql`SELECT upsert_thought('a two-argument capture at 032', '{"metadata":{},"actor":{"name":"before","source":"test"}}'::jsonb)`;
   const windows = async () => Number((await sql`SELECT count(*)::int AS c FROM thought_chunks WHERE thought_id = ${id}::uuid`)[0].c);
   assert(!/ob1:capture-takes-fingerprint-lock/.test(await bodyOf(THREE)) && !/pg_advisory_xact_lock/.test(await bodyOf(TWO)), "at 032 neither capture body takes an advisory lock");
-  const edit032 = await bodyOf(UPDATE_THOUGHT_SIGNATURE);
+  const edit032 = await bodyOf(UT_9);
   assert(edit032.indexOf("FROM thoughts WHERE id = p_id FOR NO KEY UPDATE") < edit032.indexOf("pg_advisory_xact_lock(hashtextextended"), "…and update_thought takes its row before the fingerprint lock (018's order)");
   const [{ a: unattributed }] = await sql`SELECT actor_name AS a FROM thought_audit WHERE action = 'capture' AND thought_id = (SELECT id FROM thoughts WHERE content = 'a two-argument capture at 032')`;
   assert(unattributed === null, "…and a capture through the 2-argument form is unattributed — 005's body never read the actor");
@@ -992,8 +1003,8 @@ console.log("\n[12] Migration 033 onto a populated 032 — both capture forms ta
   assert(Number(auditAfter) === Number(auditBefore), "…and no audit row was written");
   assert((await aclOf(THREE)) === acl && !/(^\{|,)=X\//.test(acl), `CREATE OR REPLACE under the same signature keeps the 3-argument form's ACL: PUBLIC still revoked, the role still granted (${acl})`);
   const LOCK = "PERFORM pg_advisory_xact_lock(hashtextextended(v_fingerprint, 0));";
-  assert((await bodyOf(TWO)).includes(LOCK) && (await bodyOf(THREE)).includes(LOCK) && (await bodyOf(UPDATE_THOUGHT_SIGNATURE)).includes(LOCK), "both capture bodies spell the fingerprint lock as update_thought does");
-  const edit = await bodyOf(UPDATE_THOUGHT_SIGNATURE);
+  assert((await bodyOf(TWO)).includes(LOCK) && (await bodyOf(THREE)).includes(LOCK) && (await bodyOf(UT_9)).includes(LOCK), "both capture bodies spell the fingerprint lock as update_thought does");
+  const edit = await bodyOf(UT_9);
   assert(Number((await sql`SELECT count(*)::int AS c FROM pg_proc WHERE proname = 'update_thought'`)[0].c) === 1 && edit.indexOf(LOCK) < edit.indexOf("FROM thoughts WHERE id = p_id FOR NO KEY UPDATE") && /ob1:unchanged-edit-not-duplicate/.test(edit),
          "…and update_thought, one function still, takes the fingerprint lock before its row read, 018's sentinel kept");
   assert(/ob1:vector-replaces-chunks/.test(await bodyOf(THREE)) && /p_payload->'derived_from'/.test(await bodyOf(THREE)) && /validate_derived_from\(/.test(await bodyOf(THREE)), "…the 3-argument body carrying 022's sentinel and 025's envelope, through 032's validate_derived_from");
@@ -1048,7 +1059,7 @@ console.log("\n[13] Migration 035 onto a populated 033 — a re-capture no longe
   await sql.unsafe(`GRANT EXECUTE ON FUNCTION ${THREE} TO ob1_upgrade_capturer34`);
   const acl = await aclOf(THREE);
   const before = await shape(sql);
-  const editBefore = await bodyOf(UPDATE_THOUGHT_SIGNATURE);
+  const editBefore = await bodyOf(UT_9);
   const twoBefore = await bodyOf(TWO);
   const snapshot = async () => JSON.stringify(await sql`SELECT id, content_fingerprint, supersedes, derived_from, embedding_model, updated_at::text AS u FROM thoughts ORDER BY id`);
   const rows = await snapshot();
@@ -1066,7 +1077,7 @@ console.log("\n[13] Migration 035 onto a populated 033 — a re-capture no longe
   assert(/ob1:re-capture-writes-no-provenance/.test(three) && /ob1:capture-takes-fingerprint-lock/.test(three) && /ob1:vector-replaces-chunks/.test(three) && !/supersession-review/.test(three) && !/COALESCE\(thoughts\.(supersedes|derived_from)/.test(three),
          "…the 3-argument body carries 035's sentinel beside 022's and 033's, takes no supersession lock and fills nothing");
   assert((await bodyOf(TWO)) === twoBefore, "…the 2-argument body is byte-identical to 033's — carried, not changed");
-  assert((await bodyOf(UPDATE_THOUGHT_SIGNATURE)) === editBefore && Number((await sql`SELECT count(*)::int AS c FROM pg_proc WHERE proname = 'update_thought'`)[0].c) === 1, "…and update_thought is untouched: one function, 033's body byte for byte");
+  assert((await bodyOf(UT_9)) === editBefore && Number((await sql`SELECT count(*)::int AS c FROM pg_proc WHERE proname = 'update_thought'`)[0].c) === 1, "…and update_thought is untouched: one function, 033's body byte for byte");
 
   // The mirror: the day after. A re-capture naming supersedes over a row with
   // none fills nothing and says existed; a first capture naming one writes
@@ -1551,6 +1562,127 @@ console.log("\n[20] Migration 043 on a schema without 034 — refused up front, 
   // at the file under test, which the migrator has just applied and recorded:
   // an open-ended `>= "035"` re-applied it bare a second time (fifth pass).
   await applyMigrations(URL_, { ...OPTS, only: (f) => f >= "035" && f < the043 });
+}
+
+console.log("\n[20b] Migration 046 onto a populated 044 — the audit row gains the event shape, the door moves from the blob to a column on rows already written, the append-only rule holds after the ALTER, update_thought's tenth argument crosses with its ACL, and no thought or audit row moves (SMD-1730)");
+{
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < "046" });
+  const sql = new SQL({ url: URL_, max: 1 });
+  const vec = (axis: number) => `[${Array.from({ length: OPTS.dim }, (_, i) => (i === axis ? 1 : 0)).join(",")}]`;
+  const aclOf = async (sig: string) => String((await sql`SELECT proacl::text AS a FROM pg_proc WHERE oid = ${sig}::regprocedure`)[0].a ?? "");
+  const cols = async (table: string) => (await sql`SELECT column_name AS c FROM information_schema.columns WHERE table_schema = 'public' AND table_name = ${table} ORDER BY 1`).map((r: { c: string }) => r.c);
+  type Ev = { actor_name: string | null; source: string | null; actor_context: Record<string, unknown> | null; actor_kind?: string | null; trust?: string | null; origin?: string | null; stance?: string | null; backfilled_at?: string | null };
+  // The row as whichever schema holds it: every column, read by name at call
+  // time, so the same helper serves before and after the ALTER.
+  const rowOf = async (id: string) => (await sql.unsafe(`SELECT ${(await cols("thought_audit")).join(", ")} FROM thought_audit WHERE thought_id = '${id}' AND action = 'capture'`))[0] as Ev;
+
+  // A corpus at 044: a key resolved through 010; a write through a SMD-1541
+  // server — the door in the blob — and one through the main server as it
+  // was, its actor naming `source: "mcp"`; and a hardened 9-argument
+  // update_thought.
+  const laptop = (await sql`SELECT resolve_agent(${"a".repeat(64)}, 'laptop', 'write') AS r`)[0].r as { agent_id: string };
+  const viaRow = (await sql`SELECT upsert_thought('upgrade 046: through a vendored door', ${{ metadata: { source: "planted" }, actor: { name: "MCP_ACCESS_KEY", via: "rest-api" } }}::jsonb, ${vec(0)}::vector) AS r`)[0].r as { id: string };
+  const mcpRow = (await sql`SELECT upsert_thought('upgrade 046: through the main server as it was', ${{ metadata: { source: "mcp" }, actor: { name: "laptop", agent_id: laptop.agent_id, source: "mcp" } }}::jsonb, ${vec(1)}::vector) AS r`)[0].r as { id: string };
+  let ev = await rowOf(viaRow.id);
+  assert(ev.actor_context?.via === "rest-api" && ev.source === "planted" && !("origin" in ev), "at 044 the door rides in actor_context.via and there is no origin column");
+  ev = await rowOf(mcpRow.id);
+  assert(ev.source === "mcp" && ev.actor_context === null, "…and an actor's source is written into the column over the row's own");
+  await sql.unsafe(`DO $r$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob1_upgrade_editor45') THEN CREATE ROLE ob1_upgrade_editor45 NOLOGIN; END IF; END $r$`);
+  await sql.unsafe(`REVOKE ALL ON FUNCTION ${UT_9} FROM PUBLIC`);
+  await sql.unsafe(`GRANT EXECUTE ON FUNCTION ${UT_9} TO ob1_upgrade_editor45`);
+  // A capturing role as 044 granted it — INSERT on thought_audit, nothing on
+  // ob1_agents — is NOT granted the SELECT by the apply: that is --grant's, by
+  // the convention every privilege has landed under, and preflight names it.
+  // Asserted so a later hand does not put an in-file grant back (ninth
+  // review pass cut one after three passes of catalog edges).
+  await sql.unsafe(`DO $r$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob1_upgrade_capturer45') THEN CREATE ROLE ob1_upgrade_capturer45 NOLOGIN; END IF; END $r$`);
+  await sql.unsafe(`GRANT INSERT ON thought_audit TO ob1_upgrade_capturer45`);
+  const readsAgents = async () => (await sql`SELECT has_table_privilege('ob1_upgrade_capturer45', 'ob1_agents', 'SELECT') AS p`)[0].p as boolean;
+  assert((await readsAgents()) === false, "at 044 a capturing role holds no SELECT on ob1_agents — the audit trigger did not read it");
+  const acl9 = await aclOf(UT_9);
+  const snapshot = async () => JSON.stringify(await sql`SELECT id, content_fingerprint, metadata, embedding_model, updated_at::text AS u FROM thoughts ORDER BY id`);
+  const rows = await snapshot();
+  // 008's and 010's columns on every audit row, byte for byte.
+  const auditSnapshot = async () => JSON.stringify(await sql`SELECT thought_id, action, source, actor_name, canonical_agent_id, author_session_id, diff, actor_context, created_at::text AS t FROM thought_audit ORDER BY created_at, thought_id`);
+  const auditRows = await auditSnapshot();
+  const [{ c: auditBefore }] = await sql`SELECT count(*)::int AS c FROM thought_audit`;
+  const before = await cols("thought_audit");
+  assert(!before.includes("actor_kind") && !(await cols("ob1_agents")).includes("kind"), "…no actor_kind on thought_audit, no kind on ob1_agents");
+
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("046") });
+
+  const after = await cols("thought_audit");
+  assert(after.length === before.length + 8 && ["actor_kind", "trust", "origin", "stance", "cites", "valid_from", "valid_until", "backfilled_at"].every((c) => after.includes(c)) && (await cols("ob1_agents")).includes("kind"),
+    "046 adds eight columns to thought_audit and kind to ob1_agents, each exactly once");
+  assert((await snapshot()) === rows, "no thought moved");
+  assert((await auditSnapshot()) === auditRows && Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c) === Number(auditBefore), "…no audit row was added, and 008's and 010's columns on every existing row are byte for byte what they were");
+  assert((await readsAgents()) === false, "…and 046 grants it to nobody: the SELECT on ob1_agents its trigger needs is ROLE_GRANTS' row since 046, --grant's to issue and preflight's to name (ninth review pass)");
+  ev = await rowOf(viaRow.id);
+  assert(ev.origin === "rest-api" && ev.backfilled_at != null && ev.actor_context?.via === "rest-api" && ev.actor_kind === null && ev.trust === null,
+    `the file's own backfill call gives the SMD-1541 row its origin from the blob, stamped — the blob untouched, no kind: nobody has classified MCP_ACCESS_KEY (${ev.origin}, ${ev.backfilled_at})`);
+  ev = await rowOf(mcpRow.id);
+  assert(ev.origin === null && ev.backfilled_at == null && ev.source === "mcp" && ev.actor_kind === null, "…the main server's row names no door and is left as it was: source mcp, nothing derived, nothing stamped");
+  let refused = "";
+  try { await sql`UPDATE thought_audit SET action = 'update' WHERE thought_id = ${viaRow.id}::uuid`; } catch (e) { refused = (e as Error).message; }
+  assert(/append-only/i.test(refused), "the append-only trigger still refuses UPDATE after the ALTER (010's lesson, [2])");
+  const forms = await sql`SELECT p.pronargs AS n FROM pg_proc p JOIN pg_namespace ns ON ns.oid = p.pronamespace WHERE p.proname = 'update_thought' AND ns.nspname = 'public'`;
+  assert(forms.length === 1 && Number(forms[0].n) === 10, `one update_thought, of ten arguments — the 9-argument form dropped (${forms.map((f: { n: number }) => f.n).join(", ")})`);
+  const acl10 = await aclOf(UPDATE_THOUGHT_SIGNATURE);
+  assert(acl10 === acl9 && !/(^\{|,)=X\//.test(acl10) && /ob1_upgrade_editor45=X\//.test(acl10), `the 9-argument form's ACL crosses the DROP onto the 10-argument one: PUBLIC still revoked, the role still granted (${acl10})`);
+  const nine = (await sql`SELECT update_thought(${mcpRow.id}::uuid, NULL, ${{ k: 1 }}::jsonb, NULL, NULL, NULL, ${{ name: "laptop", agent_id: laptop.agent_id }}::jsonb, NULL, NULL) AS r`)[0].r as { ok: boolean };
+  assert(nine.ok === true, "a 9-argument call — every caller before this change — still resolves, through the default");
+
+  // The mirror: the day after. A key classified, a write through it stamps
+  // the kind; the backfill called again classifies the rows already written.
+  await sql`SELECT set_agent_kind('laptop', 'operator')`;
+  const fresh = (await sql`SELECT upsert_thought('upgrade 046: a note captured after', ${{ metadata: { source: "mcp" }, actor: { name: "laptop", agent_id: laptop.agent_id, via: "open-brain" }, event: { stance: "stated" } }}::jsonb, ${vec(2)}::vector) AS r`)[0].r as { id: string };
+  ev = await rowOf(fresh.id);
+  assert(ev.actor_kind === "operator" && ev.trust === "operator" && ev.origin === "open-brain" && ev.actor_context === null && ev.backfilled_at == null && ev.stance === "stated",
+    "after 046 a write through a classified key stamps its kind, trust and door, and the event");
+  // Two passes at once — the capture and the edit are the two rows to fill: A
+  // takes one and holds its transaction open; B, started meanwhile, waits on
+  // that row's lock, and when A commits re-reads it as filled and skips it
+  // (READ COMMITTED; the UPDATE's WHERE is re-evaluated on the locked row), so
+  // B fills the other row only and counts one — not two, and A's stamp is not
+  // written over (run-it, first review pass: the first UPDATE re-stamped and
+  // re-counted every row the other pass had filled).
+  const passA = new SQL({ url: URL_, max: 1 });
+  await passA`BEGIN`;
+  const bfA = (await passA`SELECT backfill_thought_audit_events(1) AS r`)[0].r as { rows: number };
+  const bPid = Number((await sql`SELECT pg_backend_pid() AS p`)[0].p);
+  // .execute(): Bun runs a query when it is awaited, not when it is written — the
+  // first form of this arm never had B in flight before A committed.
+  const pendingB = sql`SELECT backfill_thought_audit_events() AS r`.execute();
+  // B must actually be waiting on A's lock before A commits, or the arm proves
+  // nothing about the re-evaluated WHERE (third review pass: a sleep alone
+  // passed the same assertions when B simply ran after A). Watched from A's
+  // own connection, which can read pg_stat_activity inside its transaction.
+  let waited = false;
+  for (let i = 0; i < 100 && !waited; i++) {
+    const [w] = await passA`SELECT wait_event_type AS t FROM pg_stat_activity WHERE pid = ${bPid}`;
+    waited = w?.t === "Lock";
+    if (!waited) await new Promise((r) => setTimeout(r, 50));
+  }
+  await passA`COMMIT`;
+  await passA.close();
+  const bf = (await pendingB)[0].r as { rows: number; awaiting_kind: number };
+  ev = await rowOf(mcpRow.id);
+  const stamps = (await sql`SELECT count(DISTINCT backfilled_at)::int AS c FROM thought_audit WHERE thought_id = ${mcpRow.id}::uuid AND backfilled_at IS NOT NULL`)[0].c as number;
+  assert(waited, "the second pass was seen waiting on the first's row lock before the first committed — the state the re-evaluated WHERE exists for");
+  assert(bfA.rows === 1 && bf.rows === 1 && Number(stamps) === 2 && ev.actor_kind === "operator" && ev.trust === "operator" && ev.backfilled_at != null && ev.source === "mcp",
+    `…and the backfill classifies the rows written before — the capture and the edit — by their agent id, stamped; two passes at once fill one row each and neither re-stamps the other's (${bfA.rows} + ${bf.rows}, ${stamps} stamp(s)); the source stays what 044 wrote`);
+  assert(bf.awaiting_kind === 1, `…leaving the SMD-1541 row waiting on a kind for MCP_ACCESS_KEY (${bf.awaiting_kind})`);
+
+  const shapeAfter = await shape(sql);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("046") });
+  assert(JSON.stringify(await shape(sql)) === JSON.stringify(shapeAfter) && (await aclOf(UPDATE_THOUGHT_SIGNATURE)) === acl10 && ((await sql`SELECT backfill_thought_audit_events() AS r`)[0].r as { rows: number }).rows === 0,
+    "re-applying 046 is a no-op: the shape and the ACL as they were, the backfill finds nothing");
+  await sql.unsafe(`DROP OWNED BY ob1_upgrade_editor45`);
+  await sql.unsafe(`DROP ROLE ob1_upgrade_editor45`);
+  await sql.unsafe(`DROP OWNED BY ob1_upgrade_capturer45`);
+  await sql.unsafe(`DROP ROLE ob1_upgrade_capturer45`);
+  await sql.close();
 }
 
 console.log("\n[21] test-support's schema reset leaves nothing of the fork's in public — every table, function and type a migration creates is on its drop lists (SMD-1749)");

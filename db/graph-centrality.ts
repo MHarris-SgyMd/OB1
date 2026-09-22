@@ -68,7 +68,7 @@
  *     many thoughts db/extract-entities.ts has reached.
  *
  * Pure reads, one connection, no writes. The SQL is built by exported functions
- * over a `Runner` so db/test-schema.ts [43] runs the same text under PGlite.
+ * over a `Runner` so db/test-schema.ts [44] runs the same text under PGlite.
  */
 import { SQL } from "bun";
 import { ENTITY_TYPES, NUMERIC_NAME_RE, type EntityType } from "../server-portable/entities.ts";

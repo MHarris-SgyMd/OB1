@@ -1,21 +1,24 @@
 /**
- * fragments.mjs — read and validate a changes/smd-NNNN.md release fragment
+ * fragments.ts — read and validate a changes/smd-NNNN.md release fragment
  * (SMD-1804).
  *
  * One definition of what a fragment is — its parts AND its rules
  * (fragmentProblems) — shared by the check that validates them
- * (check-fork-consistency.mjs, check 16) and the release step that consumes
- * them (assemble-release.mjs), so the two cannot disagree and a cut refuses
- * what CI would (SMD-1917). Plain string work — node and bun both run it.
+ * (check-fork-consistency.ts, check 16) and the release step that consumes
+ * them (assemble-release.ts), so the two cannot disagree and a cut refuses
+ * what CI would (SMD-1917). Plain string work, no Bun API.
  */
-import { ticketsOf } from "./fork-index.mjs";
+import { ticketsOf } from "./fork-index.ts";
+
+/** Front matter as parsed: a scalar per key, or a list for `[a, b]` / `- item` forms. */
+export type FragmentFrontMatter = Record<string, string | string[]>;
 
 /** Split `---` front matter and the body of a fragment; null if no front matter. */
-export function parseFragment(text) {
+export function parseFragment(text: string): { fm: FragmentFrontMatter; body: string } | null {
   // An editor's byte-order mark or CRLF endings are not a missing front matter.
   const m = /^---\n([\s\S]*?)\n---\n?([\s\S]*)$/.exec(text.replace(/^\uFEFF/, "").replace(/\r\n/g, "\n"));
   if (!m) return null;
-  const fm = {};
+  const fm: FragmentFrontMatter = {};
   const lines = m[1].split("\n");
   for (let i = 0; i < lines.length; i++) {
     const kv = /^([a-z_]+):\s*(.*)$/.exec(lines[i]);
@@ -23,7 +26,7 @@ export function parseFragment(text) {
     const key = kv[1];
     let val = kv[2].replace(/\s+#.*$/, "").trim(); // an inline `# comment` (the README's template carries them) is not the value
     if (val === "") {
-      const items = [];
+      const items: string[] = [];
       while (i + 1 < lines.length && /^\s*-\s+/.test(lines[i + 1])) items.push(lines[++i].replace(/^\s*-\s+/, "").replace(/\s+#.*$/, "").trim());
       fm[key] = items;
     } else if (val.startsWith("[")) {
@@ -42,7 +45,7 @@ export function parseFragment(text) {
  * changes 19 and 79 do, so a second-level heading cannot end it (a Changelog
  * placed after it is refused by fragmentProblems).
  */
-export function fragmentSection(body, name) {
+export function fragmentSection(body: string, name: string): string | null {
   const m = new RegExp(`(?:^|\\n)## ${name}[ \\t]*(?:\\n|$)([\\s\\S]*?)${name === "FORK" ? "$" : "(?=\\n## |$)"}`).exec(body);
   if (!m) return null;
   const text = m[1].trim();
@@ -64,8 +67,8 @@ export const BUMPS = new Set(["major", "minor", "patch"]);
  * released ticket from that title once it is a numbered file), nothing on the
  * second line, `## ` sub-headings of its own kept, and no numbered heading.
  */
-export function fragmentProblems(text, name) {
-  const problems = [];
+export function fragmentProblems(text: string, name?: string): string[] {
+  const problems: string[] = [];
   const parsed = parseFragment(text);
   if (!parsed) { problems.push("no `---` front matter"); return problems; }
   const { fm, body } = parsed;
@@ -74,11 +77,16 @@ export function fragmentProblems(text, name) {
   // front matter, and the two must not disagree.
   const named = name && /^smd-(\d+)\.md$/.exec(name);
   if (named && Array.isArray(fm.tickets) && !fm.tickets.includes(`SMD-${Number(named[1])}`)) problems.push(`is named for SMD-${Number(named[1])}, which its \`tickets:\` does not list`);
-  if (!FRAGMENT_TYPES.has(fm.type)) problems.push(`type must be one of ${[...FRAGMENT_TYPES].join("|")}, got ${JSON.stringify(fm.type ?? null)}`);
-  if (!BUMPS.has(fm.bump)) problems.push(`bump must be one of ${[...BUMPS].join("|")}, got ${JSON.stringify(fm.bump ?? null)}`);
+  if (typeof fm.type !== "string" || !FRAGMENT_TYPES.has(fm.type)) problems.push(`type must be one of ${[...FRAGMENT_TYPES].join("|")}, got ${JSON.stringify(fm.type ?? null)}`);
+  if (typeof fm.bump !== "string" || !BUMPS.has(fm.bump)) problems.push(`bump must be one of ${[...BUMPS].join("|")}, got ${JSON.stringify(fm.bump ?? null)}`);
   const tickets = Array.isArray(fm.tickets) ? fm.tickets : [];
-  if (tickets.length === 0) problems.push("tickets: must list at least one SMD-#### id");
+  if (fm.tickets !== undefined && !Array.isArray(fm.tickets)) problems.push(`tickets: ${JSON.stringify(fm.tickets)} is a scalar — tickets: is a list, \`[SMD-1234]\``);
+  else if (tickets.length === 0) problems.push("tickets: must list at least one SMD-#### id");
   for (const t of tickets) if (!/^SMD-\d+$/.test(t)) problems.push(`tickets: ${JSON.stringify(t)} is not an SMD-#### id`);
+  // A scalar (`migrations: 045`) read as "no migrations" passed the check and
+  // skipped the patch-bump rule below, and the cut then iterated the digits and
+  // refused "migration 000" (SMD-1870, caught by typing the front matter).
+  if (fm.migrations !== undefined && !Array.isArray(fm.migrations)) problems.push(`migrations: ${JSON.stringify(fm.migrations)} is a scalar — migrations: is a list, \`[045]\`, or \`[]\` for none`);
   const migrations = Array.isArray(fm.migrations) ? fm.migrations : [];
   for (const mig of migrations) if (!/^\d{3}$/.test(String(mig))) problems.push(`migrations: ${JSON.stringify(mig)} is not a three-digit number`);
   if (fm.bump === "patch" && migrations.length > 0) problems.push(`bump: patch cannot ship a migration (migrations: ${migrations.join(", ")}) — a migration is additive, at least a MINOR`);

@@ -1,7 +1,11 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
+
+/** The fields this reads from GitHub's pull and pull-files payloads. */
+type Pull = { number: number; title: string; html_url: string; merged_at: string | null; user: { login: string } };
+type PullFile = { filename: string; additions?: number };
 
 const README_PATH = new URL("../README.md", import.meta.url);
 const START_MARKER = "<!-- recent-contributions:start -->";
@@ -16,7 +20,7 @@ if (!owner || !repo) {
 
 const token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN || getGhToken();
 
-async function github(path) {
+async function github<T>(path: string): Promise<T> {
   const response = await fetch(`https://api.github.com${path}`, {
     headers: {
       Accept: "application/vnd.github+json",
@@ -30,7 +34,7 @@ async function github(path) {
     throw new Error(`GitHub API ${response.status} for ${path}: ${body.slice(0, 300)}`);
   }
 
-  return response.json();
+  return (await response.json()) as T;
 }
 
 function getGhToken() {
@@ -44,7 +48,7 @@ function getGhToken() {
   }
 }
 
-function rootForPath(filePath) {
+function rootForPath(filePath: string): string {
   const parts = filePath.split("/");
   const first = parts[0];
 
@@ -60,7 +64,7 @@ function rootForPath(filePath) {
   return filePath;
 }
 
-function titleWords(title) {
+function titleWords(title: string): string[] {
   return title
     .toLowerCase()
     .replace(/#[0-9]+/g, "")
@@ -69,8 +73,8 @@ function titleWords(title) {
     .filter((word) => word.length >= 3);
 }
 
-function chooseRepoTarget(pr, files) {
-  const candidates = new Map();
+function chooseRepoTarget(pr: Pull, files: PullFile[]): string {
+  const candidates = new Map<string, { root: string; additions: number; count: number; titleHits: number }>();
   const words = titleWords(pr.title);
 
   for (const file of files) {
@@ -93,7 +97,7 @@ function chooseRepoTarget(pr, files) {
   return ranked[0]?.root || pr.html_url;
 }
 
-function cleanTitle(title) {
+function cleanTitle(title: string): string {
   const cleaned = title
     .replace(/^\s*((\[[^\]]+\])+\s*)+/g, "")
     .replace(/^docs:\s*/i, "")
@@ -103,7 +107,7 @@ function cleanTitle(title) {
   return cleaned.charAt(0).toUpperCase() + cleaned.slice(1);
 }
 
-function descriptionFromTitle(title) {
+function descriptionFromTitle(title: string): string {
   const cleaned = cleanTitle(title)
     .replace(/^add\s+/i, "Adds ")
     .replace(/^fix\s+/i, "Fixes ")
@@ -118,16 +122,16 @@ function descriptionFromTitle(title) {
   return sentence.charAt(0).toUpperCase() + sentence.slice(1);
 }
 
-function profileLink(user) {
+function profileLink(user: { login: string }): string {
   return `[@${user.login}](https://github.com/${user.login})`;
 }
 
-function repoLink(target) {
+function repoLink(target: string): string {
   if (/^https?:\/\//.test(target)) return target;
   return target;
 }
 
-function buildSection(items) {
+function buildSection(items: { title: string; target: string; user: { login: string } }[]): string {
   const generatedAt = new Date().toISOString().slice(0, 10);
   const lines = [
     "## Recent Contributions",
@@ -150,20 +154,20 @@ function buildSection(items) {
   return lines.join("\n");
 }
 
-function escapeTable(value) {
+function escapeTable(value: string): string {
   return value.replace(/\|/g, "\\|").replace(/\n/g, " ");
 }
 
 async function main() {
-  const pulls = await github(`/repos/${owner}/${repo}/pulls?state=closed&sort=updated&direction=desc&per_page=100`);
+  const pulls = await github<Pull[]>(`/repos/${owner}/${repo}/pulls?state=closed&sort=updated&direction=desc&per_page=100`);
   const merged = pulls
     .filter((pr) => pr.merged_at)
-    .sort((a, b) => new Date(b.merged_at) - new Date(a.merged_at))
+    .sort((a, b) => new Date(b.merged_at ?? 0).getTime() - new Date(a.merged_at ?? 0).getTime())
     .slice(0, 20);
 
-  const items = [];
+  const items: { title: string; target: string; user: { login: string } }[] = [];
   for (const pr of merged) {
-    const files = await github(`/repos/${owner}/${repo}/pulls/${pr.number}/files?per_page=100`);
+    const files = await github<PullFile[]>(`/repos/${owner}/${repo}/pulls/${pr.number}/files?per_page=100`);
     items.push({
       title: pr.title,
       target: chooseRepoTarget(pr, files),
@@ -175,7 +179,7 @@ async function main() {
   const section = buildSection(items);
   const sectionPattern = new RegExp(`## Recent Contributions\\n[\\s\\S]*?${END_MARKER}`);
 
-  let next;
+  let next: string;
   if (sectionPattern.test(readme)) {
     next = readme.replace(sectionPattern, section);
   } else {
