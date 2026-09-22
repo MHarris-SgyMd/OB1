@@ -5063,8 +5063,8 @@ console.log("\n[43] Migration 045: the event shape at the write boundary — who
     "…cites a uuid[], the window and backfilled_at timestamptz");
   assert((await one<{ e: boolean }>(`SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'ob1_agents' AND column_name = 'kind') AS e`)).e, "ob1_agents gains kind");
   assert(/ob1_agents_kind_check/.test(await refused(`INSERT INTO ob1_agents (label, kind) VALUES ('robot-key', 'robot')`)), "…which the CHECK holds to operator, agent or ingested");
-  const idx = await q<{ indexname: string }>(`SELECT indexname FROM pg_indexes WHERE tablename = 'thought_audit' AND indexname IN ('thought_audit_actor_kind_idx', 'thought_audit_trust_idx', 'thought_audit_awaiting_kind_idx')`);
-  assert(idx.length === 3, "three partial indexes: on actor_kind and on trust — the reads SMD-1724 and SMD-1726 build — and on the rows still waiting for a kind, by name, which the census, the backfill and the gate read");
+  const idx = await q<{ indexname: string }>(`SELECT indexname FROM pg_indexes WHERE tablename = 'thought_audit' AND indexname IN ('thought_audit_actor_kind_idx', 'thought_audit_trust_idx', 'thought_audit_awaiting_kind_idx', 'thought_audit_awaiting_door_idx')`);
+  assert(idx.length === 4, "four partial indexes: on actor_kind and on trust — the reads SMD-1724 and SMD-1726 build — and on the rows still waiting for a kind or a trust, by name, and for a door, which the census, the backfill and the gate read");
   assert(lastDefinerOf("thoughts_write_audit").startsWith("045") && lastDefinerOf("thought_audit_refuse_mutation").startsWith("045") && lastDefinerOf("upsert_thought").startsWith("045") && lastDefinerOf("update_thought").startsWith("045") && lastDefinerOf("delete_thought").startsWith("042"),
     `045 is the last definer of the audit trigger, the refusal trigger and both writers; delete_thought stays 042's — a tombstone declares nothing (${lastDefinerOf("delete_thought")})`);
   const tbl = (await one<{ c: string | null }>(TABLE_COMMENT_SQL, ["thought_audit"])).c ?? "";
@@ -5079,6 +5079,8 @@ console.log("\n[43] Migration 045: the event shape at the write boundary — who
   assert(/ob1_registry_kind\(OLD\.canonical_agent_id, OLD\.actor_name\)/.test(await src("thought_audit_refuse_mutation()")) && /ob1_registry_kind\(a\.canonical_agent_id, a\.actor_name\)/.test(await src("backfill_thought_audit_events(integer)")),
     "(the gate and the backfill do call them)");
   assert(!/actor->>'source'/.test(trig) && /- 'via'/.test(trig) && !/- 'source'/.test(trig), "…reads no actor source (the column is the row's own), strips via into origin and leaves an actor's source in the blob");
+  assert(/IF actor IS NOT NULL AND \(v_agent IS NOT NULL OR actor \? 'name'\) THEN\s+v_kind := ob1_registry_kind/.test(trig), "…and probes the registry only when an envelope names an id or a name — a raw write with no actor set needs no SELECT on ob1_agents");
+  assert(/Lost the race[\s\S]*?PERFORM set_config\('ob1\.event', '', true\);[\s\S]*?'STALE_READ'/.test(await src(UPDATE_THOUGHT_SIGNATURE)), "update_thought clears the event on the one refusal that follows its write of the setting — the UPDATE that matched no row");
   for (const [re, what] of [[/jsonb_build_object\('metadata', NEW\.metadata\)/, "008's capture diff"], [/v_diff = '\{\}'::jsonb/, "008's no-op guard"], [/actor->>'agent_id'/, "010's agent id"], [/'previous_derived_from'/, "025's provenance in the delete row"]] as [RegExp, string][])
     assert(re.test(trig), `…carrying ${what}`);
   assert(/ob1:audit-amend-fills-null-only/.test(await src("thought_audit_refuse_mutation()")), "the refusal trigger carries the amendment's sentinel");
@@ -5156,6 +5158,9 @@ console.log("\n[43] Migration 045: the event shape at the write boundary — who
   const ghost = await cap("045: a cached id the registry no longer knows", { metadata: {}, actor: { name: "feed-key", agent_id: "99999999-9999-4999-8999-999999999999" } }, 14);
   ev = await last(ghost.id, "capture");
   assert(ev?.actor_kind === "ingested" && ev?.canonical_agent_id === "99999999-9999-4999-8999-999999999999", `an agent_id the registry does not know — a rebuilt registry under a server's cached id — falls back to the name, the id kept as 010 keeps it (${ev?.actor_kind})`);
+  const shadowed = await cap("045: an id the registry knows but has not classified, under a classified name", { metadata: {}, actor: { name: "op-key", agent_id: MYSTERY } }, 19);
+  ev = await last(shadowed.id, "capture");
+  assert(ev?.actor_kind === "operator" && ev?.canonical_agent_id === MYSTERY, `an id the registry knows but has not classified takes the name's kind — the row a key renamed in the env and pre-classified under its new name leaves when 010's rename meets label_conflict (${ev?.actor_kind})`);
   const stale = await cap("045: a caller still sending an actor source", { metadata: { source: "own" }, actor: { name: "op-key", agent_id: OP, source: "mcp", via: "old-caller" } }, 11);
   ev = await last(stale.id, "capture");
   assert(ev?.source === "own" && (ev?.actor_context as { source?: string })?.source === "mcp", `an actor's source is no longer read into the column — it lands in actor_context, visible (${ev?.source}, ${JSON.stringify(ev?.actor_context)})`);

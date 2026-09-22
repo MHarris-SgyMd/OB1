@@ -1161,21 +1161,34 @@ if (configFailed) {
             // through ob1_registry_kind), so "waiting only on the backfill" is
             // what the backfill would fill (second review pass: three scans,
             // and a by-name count that promised a fill the id refused).
+            // Grouped by writer before the lookup, so the cost is one resolution
+            // per distinct (id, name) pair, not per waiting row; and an
+            // unclassified key counts only while it still holds an unrevoked
+            // key — a key retired through revoke_agent_key (010) can never write
+            // again and must not keep the warning lit (third review pass).
             const [census] = await sql`
               WITH waiting AS (
-                SELECT a.actor_name AS name, ob1_registry_kind(a.canonical_agent_id, a.actor_name) IS NOT NULL AS fillable
-                  FROM thought_audit a WHERE a.actor_kind IS NULL AND a.actor_name IS NOT NULL)
-              SELECT (SELECT count(*)::int FROM ob1_agents WHERE kind IS NULL) AS unclassified,
-                     (SELECT string_agg(label, ', ' ORDER BY label) FROM ob1_agents WHERE kind IS NULL) AS labels,
-                     count(*)::int AS awaiting,
-                     count(*) FILTER (WHERE fillable)::int AS fillable,
-                     (SELECT string_agg(n, ', ' ORDER BY n) FROM (SELECT DISTINCT name AS n FROM waiting WHERE NOT fillable LIMIT 8) s) AS unnamed
-                FROM waiting`;
+                SELECT a.canonical_agent_id AS agent, a.actor_name AS name, count(*)::int AS n
+                  FROM thought_audit a WHERE a.actor_kind IS NULL AND a.actor_name IS NOT NULL
+                 GROUP BY 1, 2),
+              resolved AS (
+                SELECT name, n, ob1_registry_kind(agent, name) IS NOT NULL AS fillable FROM waiting)
+              SELECT (SELECT count(*)::int FROM ob1_agents g WHERE g.kind IS NULL
+                        AND EXISTS (SELECT 1 FROM ob1_agent_keys k WHERE k.canonical_agent_id = g.canonical_agent_id AND k.revoked_at IS NULL)) AS unclassified,
+                     (SELECT string_agg(g.label, ', ' ORDER BY g.label) FROM ob1_agents g WHERE g.kind IS NULL
+                        AND EXISTS (SELECT 1 FROM ob1_agent_keys k WHERE k.canonical_agent_id = g.canonical_agent_id AND k.revoked_at IS NULL)) AS labels,
+                     COALESCE(sum(n), 0)::int AS awaiting,
+                     COALESCE(sum(n) FILTER (WHERE fillable), 0)::int AS fillable,
+                     (SELECT string_agg(nm, ', ' ORDER BY nm) FROM (SELECT DISTINCT name AS nm FROM resolved WHERE NOT fillable LIMIT 8) s) AS unnamed
+                FROM resolved`;
             const unclassified = Number(census.unclassified), awaiting = Number(census.awaiting), fillable = Number(census.fillable);
             if (unclassified > 0 || awaiting > 0) {
+              const needsKinds = unclassified > 0 || Boolean(census.unnamed);
               add("audit events", "warn",
                   `${unclassified} key(s) with no kind${unclassified ? ` (${census.labels})` : ""} and ${awaiting} audit row(s) naming a key with no kind${census.unnamed ? ` (names: ${census.unnamed})` : ""}${fillable ? `, ${fillable} of them naming a key classified since — waiting only on the backfill` : ""} — every write through an unclassified key is recorded with actor_kind and trust unknown, which every read built on them will say`,
-                  "For each name: SELECT set_agent_kind('<label>', '<operator | agent | ingested>'); then SELECT backfill_thought_audit_events(); fills the rows already written (db/README.md).");
+                  needsKinds
+                    ? "For each name: SELECT set_agent_kind('<label>', '<operator | agent | ingested>'); then SELECT backfill_thought_audit_events(); fills the rows already written (db/README.md)."
+                    : "SELECT backfill_thought_audit_events(); fills them — every key they name is classified (db/README.md).");
             } else {
               add("audit events", "ok", "045's event shape present — the columns, the trigger that derives the kind from the key, the one lawful amendment — and every key classified");
             }
@@ -1188,8 +1201,12 @@ if (configFailed) {
           // (second review pass, run-it): the community group's SELECT, which
           // --grant issues, is what lets this role read the log it writes.
           if (/permission denied/i.test(msg)) {
+            // The table the denial names, not a guess: thought_audit's SELECT is
+            // the community group's, ob1_agents' the capture group's since 045
+            // (run-it, third review pass: the remedy named the wrong one).
+            const denied = /permission denied for table (\w+)/i.exec(msg)?.[1] ?? "thought_audit";
             add("audit events", "skip", `not checked — this role cannot read the census (${msg}); the shape is checked, the waiting keys are not`,
-                "GRANT SELECT ON thought_audit TO <the connector's role>; — the community group's row, which migrate.ts --grant issues (db/README.md, Grants for a capturing role).");
+                `GRANT SELECT ON ${denied} TO <the connector's role>; — ${denied === "ob1_agents" ? "the capture group's row since 045" : "the community group's row"}, which migrate.ts --grant issues (db/README.md, Grants for a capturing role).`);
           } else {
             add("audit events", "warn", `could not verify: ${msg}`, "The check reads information_schema.columns, pg_proc, ob1_agents and thought_audit.");
           }
@@ -1532,9 +1549,13 @@ if (configFailed) {
                 `${extra.join(" and ")} are forms from before migration 045 with none the servers call — every call with fewer than ten arguments is "function is not unique"`,
                 `${ledgerRemedy("045", APPLY_045)} Its DROP chain reaches the 9-, 8- and 7-argument forms and leaves the one form.`);
           } else {
+            // 045 is the remedy here too: its DROP chain reaches the 8- and
+            // 7-argument forms and leaves the one form the servers call, where
+            // 032's would leave its own 9-argument form to be named on the next
+            // start (run-it, third review pass).
             add("edit signature", "fail",
                 `${extra.join(" and ")} ${extra.length === 1 ? "is the form" : "are the forms"} from before migration 032; the server sends p_provenance, which only 032's form and its successors take — so every edit would fail, and db/reembed.ts refuses to run`,
-                ledgerRemedy("032", APPLY_032));
+                `${ledgerRemedy("045", APPLY_045)} Its DROP chain reaches every older form and leaves the one the servers call.`);
           }
         } catch (e) {
           add("edit signature", "warn", `could not verify: ${(e as Error).message}`, "The catalog read behind this check needs SELECT on pg_proc.");

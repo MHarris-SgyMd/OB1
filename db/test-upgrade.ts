@@ -1639,13 +1639,26 @@ console.log("\n[20b] Migration 045 onto a populated 044 — the audit row gains 
   const passA = new SQL({ url: URL_, max: 1 });
   await passA`BEGIN`;
   const bfA = (await passA`SELECT backfill_thought_audit_events(1) AS r`)[0].r as { rows: number };
-  const pendingB = sql`SELECT backfill_thought_audit_events() AS r`;
-  await new Promise((r) => setTimeout(r, 400));
+  const bPid = Number((await sql`SELECT pg_backend_pid() AS p`)[0].p);
+  // .execute(): Bun runs a query when it is awaited, not when it is written — the
+  // first form of this arm never had B in flight before A committed.
+  const pendingB = sql`SELECT backfill_thought_audit_events() AS r`.execute();
+  // B must actually be waiting on A's lock before A commits, or the arm proves
+  // nothing about the re-evaluated WHERE (third review pass: a sleep alone
+  // passed the same assertions when B simply ran after A). Watched from A's
+  // own connection, which can read pg_stat_activity inside its transaction.
+  let waited = false;
+  for (let i = 0; i < 100 && !waited; i++) {
+    const [w] = await passA`SELECT wait_event_type AS t FROM pg_stat_activity WHERE pid = ${bPid}`;
+    waited = w?.t === "Lock";
+    if (!waited) await new Promise((r) => setTimeout(r, 50));
+  }
   await passA`COMMIT`;
   await passA.close();
   const bf = (await pendingB)[0].r as { rows: number; awaiting_kind: number };
   ev = await rowOf(mcpRow.id);
   const stamps = (await sql`SELECT count(DISTINCT backfilled_at)::int AS c FROM thought_audit WHERE thought_id = ${mcpRow.id}::uuid AND backfilled_at IS NOT NULL`)[0].c as number;
+  assert(waited, "the second pass was seen waiting on the first's row lock before the first committed — the state the re-evaluated WHERE exists for");
   assert(bfA.rows === 1 && bf.rows === 1 && Number(stamps) === 2 && ev.actor_kind === "operator" && ev.trust === "operator" && ev.backfilled_at != null && ev.source === "mcp",
     `…and the backfill classifies the rows written before — the capture and the edit — by their agent id, stamped; two passes at once fill one row each and neither re-stamps the other's (${bfA.rows} + ${bf.rows}, ${stamps} stamp(s)); the source stays what 044 wrote`);
   assert(bf.awaiting_kind === 1, `…leaving the SMD-1541 row waiting on a kind for MCP_ACCESS_KEY (${bf.awaiting_kind})`);

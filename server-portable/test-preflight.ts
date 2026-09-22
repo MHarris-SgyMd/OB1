@@ -1265,12 +1265,12 @@ else {
   await claims.unsafe(`DROP FUNCTION ${UPDATE_THOUGHT_SIGNATURE}`);
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("018") });
   const pre021 = await run(SQL_ENV);
-  assert(pre021.code === 1 && /edit signature\s+update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb\) is the form from before migration 032; the server sends p_provenance/.test(pre021.out) && /Apply db\/migrations\/032_update_thought_provenance\.sql\./.test(pre021.out),
-         "a 018-era update_thought under a 032 server does not start, and is named by its signature with 032 as the remedy");
+  assert(pre021.code === 1 && /edit signature\s+update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb\) is the form from before migration 032; the server sends p_provenance/.test(pre021.out) && /Apply db\/migrations\/045_thought_audit_event_shape\.sql\. Its DROP chain reaches every older form/.test(pre021.out),
+         "a 018-era update_thought under this server does not start, and is named by its signature with 045 — whose DROP chain reaches every older form — as the remedy");
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("021") });
   const pre032 = await run(SQL_ENV);
-  assert(pre032.code === 1 && /edit signature\s+update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text\) is the form from before migration 032; the server sends p_provenance, which only 032's form and its successors take — so every edit would fail, and db\/reembed\.ts refuses to run/.test(pre032.out) && /Apply db\/migrations\/032_update_thought_provenance\.sql\./.test(pre032.out),
-         "…and a 021-era one — a brain at 031 — likewise, with 032 as the remedy");
+  assert(pre032.code === 1 && /edit signature\s+update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text\) is the form from before migration 032; the server sends p_provenance, which only 032's form and its successors take — so every edit would fail, and db\/reembed\.ts refuses to run/.test(pre032.out) && /Apply db\/migrations\/045_thought_audit_event_shape\.sql\. Its DROP chain reaches every older form/.test(pre032.out),
+         "…and a 021-era one — a brain at 031 — likewise, with 045 as the remedy");
   // 032 re-applied on that brain leaves its 9-argument form ALONE — a brain at
   // 044 under this server: every edit resolves, a warning naming what is lost
   // and 045. Then 021 re-applied beside it: two older forms and none the
@@ -1304,6 +1304,18 @@ else {
          "a resolved key nobody has classified is a warning naming it, with set_agent_kind and the backfill as the remedy (SMD-1730)");
   await claims.unsafe(`SELECT set_agent_kind('unclassified-key', 'agent')`);
   assert(/✓  audit events\s+045's event shape present/.test((await run(SQL_ENV)).out), "…and classified, the check is ok again");
+  // A key retired through revoke_agent_key (010) can never write again: its
+  // missing kind is not a warning to carry on every start (third review pass).
+  await claims.unsafe(`SELECT resolve_agent(repeat('e', 64), 'retired-key', 'write'); SELECT revoke_agent_key(repeat('e', 64), 'left the team')`);
+  assert(/✓  audit events\s+045's event shape present/.test((await run(SQL_ENV)).out), "…and an unclassified key whose every digest is revoked is not counted: it cannot write");
+  // Rows waiting on the backfill alone — every key they name classified: the
+  // remedy is the backfill call, with no key to classify (run-it, third pass).
+  await claims.unsafe(`INSERT INTO thought_audit (thought_id, action, actor_name, diff) VALUES (gen_random_uuid(), 'capture', 'unclassified-key', '{}'::jsonb)`);
+  const fillOnly = await run(SQL_ENV);
+  assert(/!  audit events\s+0 key\(s\) with no kind and 1 audit row\(s\) naming a key with no kind, 1 of them naming a key classified since — waiting only on the backfill/.test(fillOnly.out) && /SELECT backfill_thought_audit_events\(\); fills them — every key they name is classified/.test(fillOnly.out) && !/For each name/.test(fillOnly.out),
+         "rows waiting on the backfill alone get the backfill as the remedy, with no key to classify");
+  await claims.unsafe(`SELECT backfill_thought_audit_events()`);
+  assert(/✓  audit events\s+045's event shape present/.test((await run(SQL_ENV)).out), "…which fills them");
   // A column dropped from under 045's trigger is fatal — the trigger INSERTs
   // into it, so every write would fail; the same missing column on a brain
   // whose trigger is 025's is the ordinary state before 045 — writes go
@@ -1427,12 +1439,26 @@ else {
       catch (e) { deniedInTrigger = (e as Error).message; }
       finally { await asCapturer.close(); }
       assert(/permission denied for table ob1_agents/.test(deniedInTrigger), `a capture as a role without SELECT on ob1_agents fails inside 045's audit trigger (${deniedInTrigger.slice(0, 80)})`);
+      // …while a raw write with NO actor set does not touch the registry at all
+      // (third review pass): the trigger probes it only when an envelope names
+      // an id or a name, so the sentence "on every write that carries an
+      // actor" is what the code does.
+      const asCapturerRaw = new SQL({ url: CAPTURE_URL, max: 1 });
+      let rawNoActor = "";
+      try { await asCapturerRaw`INSERT INTO thoughts (content, metadata) VALUES ('preflight: a raw write with no actor set', '{}'::jsonb)`; }
+      catch (e) { rawNoActor = (e as Error).message; }
+      finally { await asCapturerRaw.close(); }
+      assert(rawNoActor === "", `…and a raw INSERT with no actor set succeeds for the same role: the trigger reads the registry only for a write that carries an actor (${rawNoActor.slice(0, 80)})`);
       const noAgents = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
       assert(noAgents.code === 1 &&
              /SELECT on ob1_agents/.test(writeLine(noAgents.out)) &&
              /045's audit trigger reads ob1_agents as the caller on every capture, edit and delete that carries an actor/.test(writeLine(noAgents.out)) &&
              /GRANT SELECT ON ob1_agents TO ob1_pf_capture;/.test(noAgents.out),
              `a role lacking SELECT on ob1_agents is refused, the trigger named (exit ${noAgents.code})`);
+      // The census skip names the table the denial was on — here ob1_agents,
+      // the capture group's row since 045, not thought_audit (run-it, third pass).
+      assert(/·  audit events\s+not checked — this role cannot read the census \(permission denied for table ob1_agents\)/.test(noAgents.out) && /GRANT SELECT ON ob1_agents TO <the connector's role>; — the capture group's row since 045/.test(noAgents.out),
+             "…and the census skip names ob1_agents as the table to grant, not thought_audit");
       // The requirement follows the trigger body that reads the table (second
       // review pass): with 025's audit trigger in place — a brain still at 044
       // under this server — the role lacking SELECT on ob1_agents holds the
@@ -1450,7 +1476,7 @@ else {
       // pass); the role's SELECT-on-all otherwise held it.
       await claims.unsafe("REVOKE SELECT ON thought_audit FROM ob1_pf_capture");
       const noCensus = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
-      assert(noCensus.code === 0 && /·  audit events\s+not checked — this role cannot read the census \(permission denied for table thought_audit\); the shape is checked, the waiting keys are not/.test(noCensus.out) && /GRANT SELECT ON thought_audit TO <the connector's role>;/.test(noCensus.out),
+      assert(noCensus.code === 0 && /·  audit events\s+not checked — this role cannot read the census \(permission denied for table thought_audit\); the shape is checked, the waiting keys are not/.test(noCensus.out) && /GRANT SELECT ON thought_audit TO <the connector's role>; — the community group's row/.test(noCensus.out),
              `a role that cannot read thought_audit is told the census was skipped, with the community group's GRANT (exit ${noCensus.code})`);
       await claims.unsafe("GRANT SELECT ON thought_audit TO ob1_pf_capture");
 

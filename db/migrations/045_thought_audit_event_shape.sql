@@ -235,12 +235,21 @@ CREATE INDEX IF NOT EXISTS thought_audit_trust_idx
   ON thought_audit (trust, created_at DESC)
   WHERE trust IS NOT NULL;
 
--- The rows still waiting on a kind, by the name they carry: what the backfill
--- fills, the census counts and names, and the amendment gate re-derives — the
--- complement of the two indexes above, and the shape every such read has.
+-- The rows still waiting on a kind or a trust, by the name they carry: what
+-- the backfill fills, the census counts and names, and the amendment gate
+-- re-derives — the complement of the two indexes above, and the shape every
+-- such read has (the census's `actor_kind IS NULL` is implied by the
+-- predicate, so it reads this index too). And the rows still waiting on a
+-- door: empty after this file's own backfill, since the trigger writes origin
+-- with the row, so a re-run scans no filled row (third review pass: the first
+-- backfill's WHERE was an OR over function results no index could serve).
 CREATE INDEX IF NOT EXISTS thought_audit_awaiting_kind_idx
   ON thought_audit (actor_name)
-  WHERE actor_kind IS NULL AND actor_name IS NOT NULL;
+  WHERE (actor_kind IS NULL OR trust IS NULL) AND actor_name IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS thought_audit_awaiting_door_idx
+  ON thought_audit (created_at)
+  WHERE origin IS NULL AND (actor_context ? 'via');
 
 -- ---------------------------------------------------------------------------
 -- Two rules, one copy each (second review pass: the audit trigger, the
@@ -254,22 +263,28 @@ CREATE INDEX IF NOT EXISTS thought_audit_awaiting_kind_idx
 -- it declared — the kind when undeclared; the declaration when it stands
 -- under the kind (operator > agent > ingested); the kind when it does not; and
 -- for a key of unknown kind only a declared `ingested`, a lowering nobody can
--- abuse. SQL-language, so the planner inlines both.
+-- abuse. SQL-language: the two that read no table fold to constants; the
+-- registry lookup, with its sub-selects, is not inlined but plan-cached — one
+-- call per row, two index probes at most (run-it, third review pass).
 -- ---------------------------------------------------------------------------
+-- The id's kind, else the name's: one primary-key probe when the id is
+-- classified, a label probe only when it is not (third review pass — the
+-- first form probed the id twice, and an id the registry knew but had not
+-- classified never consulted the name, which is exactly the row a key
+-- renamed in the env and pre-classified under its new name leaves behind when
+-- 010's rename branch meets label_conflict).
 CREATE OR REPLACE FUNCTION ob1_registry_kind(p_agent uuid, p_label text)
 RETURNS text
 LANGUAGE sql
 STABLE
 AS $$
-  SELECT CASE
-    WHEN p_agent IS NOT NULL AND EXISTS (SELECT 1 FROM ob1_agents g WHERE g.canonical_agent_id = p_agent)
-      THEN (SELECT g.kind FROM ob1_agents g WHERE g.canonical_agent_id = p_agent)
-    ELSE (SELECT g.kind FROM ob1_agents g WHERE g.label = p_label)
-  END
+  SELECT COALESCE(
+    (SELECT g.kind FROM ob1_agents g WHERE p_agent IS NOT NULL AND g.canonical_agent_id = p_agent),
+    (SELECT g.kind FROM ob1_agents g WHERE p_label IS NOT NULL AND g.label = p_label))
 $$;
 
 COMMENT ON FUNCTION ob1_registry_kind(uuid, text) IS
-  'The kind ob1_agents holds for a writer: by canonical_agent_id when the registry knows the id, else by label (the key''s name). NULL when unclassified or unknown. The one lookup the audit trigger, the amendment gate and backfill_thought_audit_events share. Migration 045 / SMD-1730.';
+  'The kind ob1_agents holds for a writer: the id''s (canonical_agent_id) when it has one, else the name''s (label, the key''s name). NULL when neither is classified. The one lookup the audit trigger, the amendment gate and backfill_thought_audit_events share. Migration 045 / SMD-1730.';
 
 CREATE OR REPLACE FUNCTION ob1_trust_ceiling(p_kind text, p_declared text)
 RETURNS text
@@ -737,7 +752,12 @@ BEGIN
    * another key's label is a caller with the capture role, not a client, and
    * is out of scope for a row-level check.
    */
-  v_kind := ob1_registry_kind(v_agent, actor->>'name');
+  -- Only when an envelope is there to look up: a raw write with no actor set
+  -- must not probe the registry — the probe is a SELECT the writer's role may
+  -- not hold, and its answer could only be NULL (third review pass).
+  IF actor IS NOT NULL AND (v_agent IS NOT NULL OR actor ? 'name') THEN
+    v_kind := ob1_registry_kind(v_agent, actor->>'name');
+  END IF;
 
   /**
    * trust is the CEILING on the content, and the key's kind is the highest it
@@ -1301,7 +1321,11 @@ BEGIN
   RETURNING updated_at INTO v_updated;
 
   IF v_updated IS NULL THEN
-    -- Lost the race after the check above passed.
+    -- Lost the race after the check above passed. 045: the UPDATE matched no
+    -- row, so no trigger consumed the event set just above it — cleared here,
+    -- the one refusal that comes after the setting is written (third review
+    -- pass).
+    PERFORM set_config('ob1.event', '', true);
     RETURN jsonb_build_object('ok', false, 'error', 'STALE_READ');
   END IF;
 
@@ -1378,6 +1402,15 @@ DECLARE
 BEGIN
   PERFORM set_config('ob1.audit_amend', 'backfill', true);
 
+  -- The registry, held for the pass: the candidates below derive each row's
+  -- kind under this statement's snapshot, and the amendment gate re-derives it
+  -- under its own, fresher one — a set_agent_kind committed between the two
+  -- would make them disagree and roll the whole pass back (third review
+  -- pass). FOR SHARE on the few registry rows makes a reclassification wait
+  -- for the pass instead; a new key registering meanwhile has no kind either
+  -- way. Released with the transaction.
+  PERFORM 1 FROM ob1_agents FOR SHARE;
+
   WITH candidates AS (
     SELECT a.id,
            -- By the id, else by the name — the trigger's own lookup, including
@@ -1393,9 +1426,12 @@ BEGIN
      -- NULL trust the kind (set or derived) gives — a row a tool INSERTed with
      -- a kind and no trust must not be left for the gate to refuse on every
      -- pass (run-it, second review pass) — and a NULL origin the blob carries.
-     WHERE (a.actor_kind IS NULL AND r.kind IS NOT NULL)
-        OR (a.trust IS NULL AND COALESCE(a.actor_kind, r.kind) IS NOT NULL)
-        OR (a.origin IS NULL AND ob1_door_of(a.actor_context) IS NOT NULL)
+     -- Each arm begins with the predicate of one of the two partial indexes
+     -- above, so a pass on a log of filled rows reads the indexes, not the
+     -- heap, and the lookups run for candidates only (third review pass).
+     WHERE ((a.actor_kind IS NULL OR a.trust IS NULL) AND a.actor_name IS NOT NULL
+            AND COALESCE(a.actor_kind, r.kind) IS NOT NULL)
+        OR (a.origin IS NULL AND (a.actor_context ? 'via') AND ob1_door_of(a.actor_context) IS NOT NULL)
      ORDER BY a.created_at
      LIMIT CASE WHEN p_limit IS NULL THEN NULL ELSE GREATEST(p_limit, 0) END
   )
@@ -1424,7 +1460,7 @@ BEGIN
 
   -- Rows attributed to a key whose kind nobody has set: what set_agent_kind
   -- and another call here would fill. Rows with no actor_name can never gain
-  -- one and are not counted.
+  -- one and are not counted. Read through the awaiting-kind index.
   SELECT count(*)::int INTO v_awaiting
     FROM thought_audit
    WHERE actor_kind IS NULL AND actor_name IS NOT NULL;
