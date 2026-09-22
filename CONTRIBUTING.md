@@ -304,7 +304,9 @@ is a **connector capability** and is classified in
 [`docs/connector-registry.json`](docs/connector-registry.json) by the five
 facets [`docs/connector-taxonomy.md`](docs/connector-taxonomy.md) defines
 (family × transport × direction × cardinality × round-trip, plus the fetcher).
-Name the vendor in your `metadata.json` `requires.services`; add the artifact
+Name the vendor in your `metadata.json` `requires.services` — one external
+system per entry, its name first (a model provider it also uses is its own
+entry, not a parenthetical) — and tag the artifact with the vendor's name; add the artifact
 and its capabilities to the registry; add the vendor under `connectors` with
 the direction the capabilities derive; run `bun scripts/connector-registry.mjs`
 to refresh the spec's tables. `check-fork-consistency` check 18 finds an

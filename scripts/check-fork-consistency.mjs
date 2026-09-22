@@ -130,9 +130,12 @@
  *      naming exactly the five facets and a fetcher from the sets and a
  *      declared family; the connectors are exactly the vendors used, each
  *      with the direction its capabilities derive; and coverage — every
- *      contribution whose metadata.json names a service outside the
- *      not-a-connector patterns, carries a connector-shaped tag, or sits in an
- *      SMD-1867 row of docs/vendored-disposition.md is classified or excused
+ *      contribution whose metadata.json names a service no not-a-connector
+ *      pattern matches within its first two words (a provider first and
+ *      qualified after is covered; a vendor first with a provider in its
+ *      parenthetical is not), carries a connector-shaped tag or a declared
+ *      connector's name as a tag, or sits in a fold-in **SMD-1867** row of
+ *      docs/vendored-disposition.md is classified or excused
  *      by name with a reason, never both or neither, a classified artifact
  *      nothing marks is refused, a stale excuse or pattern is refused; and
  *      docs/connector-taxonomy.md's generated tables equal what the registry
@@ -153,18 +156,10 @@ import { coreColumnCommentStatement, coreFunctionStatement, LOCAL_PROVIDER_SERVI
 import { CHANGES_DIR, END as INDEX_END, START as INDEX_START, FIRST_FILED, classifyChanges, indexSpan, pad3, readChangeEntries, renderIndex, ticketsOf } from "./fork-index.mjs";
 import { FORK_VERSION, migrationSha, readReleases, semverCompare } from "../db/version.mjs";
 import { fragmentProblems } from "./fragments.mjs";
-import { DISPOSITION_PATH, FACET_SETS, FETCHERS, REGISTRY_PATH, SPEC_PATH, readRegistry, registryProblems, renderClassification, tablesSpan } from "./connector-registry.mjs";
+import { DISPOSITION_PATH, FACET_SETS, FETCHERS, REGISTRY_PATH, SPEC_PATH, dispositionPaths, readRegistry, registryProblems, renderClassification, tablesSpan } from "./connector-registry.mjs";
+import { CATEGORIES, contributionDirs } from "./contributions.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const CATEGORIES = [
-  "recipes",
-  "schemas",
-  "dashboards",
-  "integrations",
-  "skills",
-  "primitives",
-  "extensions",
-];
 
 const violations = [];
 const fail = (where, msg) => violations.push({ where, msg });
@@ -174,23 +169,8 @@ const SELF = "scripts/check-fork-consistency.mjs";
 const schema = JSON.parse(readFileSync(join(ROOT, ".github/metadata.schema.json"), "utf8"));
 const props = schema.properties;
 
-function contributionDirs() {
-  const out = [];
-  for (const cat of CATEGORIES) {
-    const base = join(ROOT, cat);
-    if (!existsSync(base)) continue;
-    for (const name of readdirSync(base).sort()) {
-      // _template is the category's placeholder, _shared the auth module the
-      // category's servers import (a copy of server-portable/auth.ts), and
-      // node_modules extensions/test-auth.ts's install (gitignored) — none is
-      // a contribution.
-      if (name === "_template" || name === "_shared" || name === "node_modules") continue;
-      const dir = join(base, name);
-      if (statSync(dir).isDirectory()) out.push({ cat, name, dir, rel: `${cat}/${name}` });
-    }
-  }
-  return out;
-}
+// The walk of the contribution directories is scripts/contributions.mjs's
+// contributionDirs — one definition, shared with connector-registry.mjs (SMD-1933).
 
 // ── 1 + 2: metadata validity and category/directory agreement ────────────────
 
@@ -2065,9 +2045,13 @@ function checkPublishedPorts() {
 
 // ── Run ──────────────────────────────────────────────────────────────────────
 
-const dirs = contributionDirs();
+const dirs = contributionDirs(ROOT);
+/** The metadata check 1 parsed, by rel — check 18's coverage sweep reads it here rather than parsing again; an unparseable file is `{}`, its finding check 1's. */
+const metadataByRel = new Map();
 for (const d of dirs) {
   const meta = checkMetadata(d);
+  if (meta && typeof meta === "object") metadataByRel.set(d.rel, meta);
+  else if (existsSync(join(d.dir, "metadata.json"))) metadataByRel.set(d.rel, {});
   checkLinks(d);
   checkDeps(meta, d);
 }
@@ -3477,6 +3461,12 @@ const REGISTRY_PROBES = [
   ["a registry that is not an object", () => {}, ["shape"], null],
   ["an artifacts block that is an object, not a list", (r) => { r.artifacts = { a: r.artifacts[0] }; }, ["shape", "coverage-unregistered", "connector-set"]],
   ["an artifact marked only by a tag naming its connector", (r) => {}, ["coverage-unregistered"], (t) => { t.metadataByPath.set("recipes/acme-notes", { requires: { services: ["OpenRouter"] }, tags: ["acme", "notes"] }); t.existingDirs.push("recipes/acme-notes"); }],
+  ["a vendor named first in a service string a provider pattern also matches", (r) => {}, ["coverage-unregistered"], (t) => { t.metadataByPath.set("recipes/notion-sync", { requires: { services: ["Notion API (summaries via OpenRouter)"] }, tags: ["notes"] }); t.existingDirs.push("recipes/notion-sync"); }],
+];
+/** [text, want]: what dispositionPaths reads from a table — the fold-in marker under a category heading, and nothing past another heading or from a bare mention. */
+const DISPOSITION_PROBES = [
+  ["### `integrations/` (2)\n\n| Artifact | Disposition | Justification |\n|---|---|---|\n| `a-capture` | keep + audited → fold-in **SMD-1867** | x |\n| `b-tool` | keep + audited | mentioned beside SMD-1867 and SMD-1924; a tool, not a fold-in |\n\n### `recipes/` (1)\n\n| `c-import` | keep + audited | SMD-1867 candidate. |\n\n## Notes\n\n| `d-tool` | remove | fold-in **SMD-1867** was considered |\n", ["integrations/a-capture", "recipes/c-import"]],
+  ["## Summary\n\n| `x-tool` | fold-in **SMD-1867** |\n", []],
 ];
 function checkConnectorRegistry() {
   const kindsOf = (registry, tree = PROBE_TREE()) => [...new Set(registryProblems({ registry, ...tree }).map((p) => p.kind))].sort();
@@ -3489,9 +3479,18 @@ function checkConnectorRegistry() {
   const overlap = PROBE_REGISTRY(); overlap.not_connectors.services.push({ pattern: "open", reason: "overlaps openrouter on purpose" });
   if (registryProblems({ registry: overlap, ...PROBE_TREE() }).length) fail(SELF, "check 18 calls a service pattern stale when a broader pattern also matches its only service (its own non-probe)");
   // The disposition table alone marks an artifact: a batch importer that names no service.
-  // The registry's own `shape` rule for a non-object is the early return; the render must not run after findings.
   const disp = PROBE_TREE(); disp.metadataByPath.set("integrations/acme-capture", { requires: { services: [] }, tags: [] });
   if (!kindsOf({ ...PROBE_REGISTRY(), artifacts: [PROBE_REGISTRY().artifacts[1]], connectors: { acme: { direction: "sink" } } }, disp).includes("coverage-unregistered")) fail(SELF, "check 18 no longer reads an SMD-1867 row of the disposition table as marking an artifact (its own probe)");
+  // A provider qualified after itself is covered: the pattern matches within the first two words.
+  const head = PROBE_TREE(); head.existingDirs.push("recipes/uses-a-gateway"); head.metadataByPath.set("recipes/uses-a-gateway", { requires: { services: ["Any OpenRouter-compatible LLM gateway (Ollama, etc.)", "Optional: OpenRouter (Sonar) for live search"] }, tags: ["synthesis"] });
+  if (registryProblems({ registry: PROBE_REGISTRY(), ...head }).length) fail(SELF, "check 18 marks a service string that names a provider first and qualifies it after (its own non-probe)");
+  // An excuse for a directory that exists without a metadata.json is check 1's finding, not a stale excuse.
+  const nometa = PROBE_TREE(); nometa.existingDirs.push("recipes/no-meta"); const nometaReg = PROBE_REGISTRY(); nometaReg.not_connectors.artifacts["recipes/no-meta"] = "waiting on its metadata";
+  if (registryProblems({ registry: nometaReg, ...nometa }).length) fail(SELF, "check 18 calls an excuse stale for a directory that exists without a metadata.json (its own non-probe)");
+  for (const [text, want] of DISPOSITION_PROBES) {
+    const got = dispositionPaths(text);
+    if (JSON.stringify(got) !== JSON.stringify(want)) fail(SELF, `check 18's disposition reader returns [${got}], expected [${want}] (its own probe)`);
+  }
   // A metadata whose tags or services is a string (check 1's finding) marks nothing and throws nothing.
   const odd = PROBE_TREE(); odd.existingDirs.push("recipes/odd-tool"); odd.metadataByPath.set("recipes/odd-tool", { requires: { services: "Acme Chat API" }, tags: "digest" });
   try { if (registryProblems({ registry: PROBE_REGISTRY(), ...odd }).length) fail(SELF, "check 18 marks a contribution whose tags and services are strings (its own non-probe)"); } catch (e) { fail(SELF, `check 18 throws on a metadata whose tags or services is a string: ${e.message} (its own non-probe)`); }
@@ -3509,15 +3508,9 @@ function checkConnectorRegistry() {
   if (!existsSync(join(ROOT, REGISTRY_PATH))) return fail(REGISTRY_PATH, "missing — the connector taxonomy's one source (SMD-1933)");
   let registry;
   try { registry = readRegistry(ROOT); } catch (e) { return fail(REGISTRY_PATH, `does not parse: ${e.message} (SMD-1933)`); }
-  const metadataByPath = new Map();
-  for (const d of dirs) {
-    const file = join(d.dir, "metadata.json");
-    if (!existsSync(file)) continue;
-    try { metadataByPath.set(d.rel, JSON.parse(readFileSync(file, "utf8"))); } catch { metadataByPath.set(d.rel, {}); }
-  }
   const dispositionText = existsSync(join(ROOT, DISPOSITION_PATH)) ? readFileSync(join(ROOT, DISPOSITION_PATH), "utf8") : "";
   let problems;
-  try { problems = registryProblems({ registry, existingDirs: dirs.map((d) => d.rel), metadataByPath, dispositionText }); } catch (e) { return fail(REGISTRY_PATH, `check 18 threw instead of reporting: ${e.message} (SMD-1933)`); }
+  try { problems = registryProblems({ registry, existingDirs: dirs.map((d) => d.rel), metadataByPath: metadataByRel, dispositionText }); } catch (e) { return fail(REGISTRY_PATH, `check 18 threw instead of reporting: ${e.message} (SMD-1933)`); }
   for (const p of problems) fail(p.where, `${p.msg} (SMD-1933)`);
   if (!existsSync(join(ROOT, SPEC_PATH))) return fail(SPEC_PATH, "missing — the spec that carries the registry's rendered tables (SMD-1933)");
   const span = tablesSpan(readFileSync(join(ROOT, SPEC_PATH), "utf8"));

@@ -24,9 +24,10 @@
  * reason — so a new vendored connector cannot land unclassified, and a
  * registry entry nothing marks as external-touching is refused too.
  */
-import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, realpathSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { CATEGORIES, contributionDirs } from "./contributions.mjs";
 
 export const REGISTRY_PATH = "docs/connector-registry.json";
 export const SPEC_PATH = "docs/connector-taxonomy.md";
@@ -55,7 +56,8 @@ export const FAMILY_TEXT_FIELDS = ["item", "grouping_key", "canonical", "text", 
 export const FAMILY_LIST_FIELDS = ["edges", "metadata", "typical_transport"];
 /** A metadata.json tag that says "this touches an external system" until the registry or an excuse says otherwise. */
 export const TRIGGER_TAGS = ["import", "capture", "digest", "webhook", "export", "sync", "messaging", "email", "bot"];
-export const CATEGORIES = ["recipes", "schemas", "dashboards", "integrations", "skills", "primitives", "extensions"];
+/** A disposition row folds into SMD-1867 when it says so — a bare mention of the ticket ("not an SMD-1867 adapter") is not a fold-in. */
+export const FOLD_IN_RE = /fold-in \*\*SMD-1867\*\*|SMD-1867 (?:candidate|adapter)|candidate SMD-1867|under (?:the )?SMD-1867/;
 const VENDOR = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const PATH = new RegExp(`^(?:${CATEGORIES.join("|")})/[a-z0-9]+(?:-[a-z0-9]+)*$`);
 
@@ -66,43 +68,57 @@ export function readRegistry(root) {
   return JSON.parse(readFileSync(join(root, REGISTRY_PATH), "utf8"));
 }
 
-/** The contribution paths the SMD-1924 disposition table folds into SMD-1867 — a `| \`name\` |` row under a `### \`category/\`` heading that names the ticket. */
+/**
+ * The contribution paths the SMD-1924 disposition table folds into SMD-1867: a
+ * `| \`name\` |` row that carries the fold-in marker (FOLD_IN_RE), under a
+ * `### \`category/\`` heading. Any other heading ends the table's context, so a
+ * `## Notes` or `### Removals` appended below it names nothing.
+ */
 export function dispositionPaths(text) {
   const out = [];
   let cat = null;
   for (const line of text.split("\n")) {
-    const h = /^###\s+`([^`]+?)\/?`/.exec(line);
-    if (h) { cat = h[1]; continue; }
+    if (/^#{1,6}\s/.test(line)) {
+      const h = /^###\s+`([^`]+?)\/?`/.exec(line);
+      cat = h ? h[1] : null;
+      continue;
+    }
     const row = /^\|\s*`([^`]+)`\s*\|/.exec(line);
-    if (row && cat && line.includes("SMD-1867")) out.push(`${cat}/${row[1]}`);
+    if (row && cat && FOLD_IN_RE.test(line)) out.push(`${cat}/${row[1]}`);
   }
   return out;
 }
 
-/**
- * The contributions on disk, with the skip rules check-fork's contributionDirs
- * applies (`_template`, `_shared`, `node_modules` are not contributions; any
- * other directory is one, metadata.json or not): `existingDirs` is every
- * contribution path, `metadataByPath` the parsed metadata of those that have one.
- */
-export function contributionsOnDisk(root) {
-  const existingDirs = [];
-  const metadataByPath = new Map();
-  for (const cat of CATEGORIES) {
-    const base = join(root, cat);
-    if (!existsSync(base)) continue;
-    for (const name of readdirSync(base).sort()) {
-      if (name === "_template" || name === "_shared" || name === "node_modules") continue;
-      const dir = join(base, name);
-      if (!statSync(dir).isDirectory()) continue;
-      const rel = `${cat}/${name}`;
-      existingDirs.push(rel);
-      const file = join(dir, "metadata.json");
-      if (!existsSync(file)) continue;
-      try { metadataByPath.set(rel, JSON.parse(readFileSync(file, "utf8"))); } catch { metadataByPath.set(rel, {}); }
-    }
+/** The parsed metadata.json of every contribution that has one (an unparseable file is `{}` — check 1 names it). */
+export function readMetadata(dirs) {
+  const out = new Map();
+  for (const d of dirs) {
+    const file = join(d.dir, "metadata.json");
+    if (!existsSync(file)) continue;
+    try { out.set(d.rel, JSON.parse(readFileSync(file, "utf8"))); } catch { out.set(d.rel, {}); }
   }
-  return { existingDirs, metadataByPath };
+  return out;
+}
+
+/** The contributions on disk — one walk (scripts/contributions.mjs) for the CLI and check 18. */
+export function contributionsOnDisk(root) {
+  const dirs = contributionDirs(root);
+  return { existingDirs: dirs.map((d) => d.rel), metadataByPath: readMetadata(dirs) };
+}
+
+/**
+ * Does a not-a-connector pattern explain this service string? Only when it
+ * matches within the string's first two words: "OpenRouter or Anthropic",
+ * "Any OpenAI-compatible LLM gateway (…)", "Optional: OpenRouter (…)" are a
+ * provider first and qualified after; "Notion API (summaries via OpenRouter)"
+ * names a vendor first and a provider inside the parenthetical, and is not
+ * covered — one external system per `requires.services` entry, the system's
+ * name first. Returns the patterns that cover it (empty when none does).
+ */
+export function coveringPatterns(service, patterns) {
+  const m = /^\s*\S+(?:\s+\S+)?/.exec(service);
+  const headEnd = m ? m[0].length : service.length;
+  return patterns.filter((p) => { const hit = p.re.exec(service); return hit !== null && hit.index < headEnd; });
 }
 
 const listOf = (v) => (Array.isArray(v) ? v : []);
@@ -142,8 +158,9 @@ export function triggersFor({ metadataByPath, dispositionPaths: disp, patterns, 
   for (const [path, meta] of metadataByPath) {
     for (const s of listOf(meta?.requires?.services)) {
       if (typeof s !== "string") continue;
-      const hits = patterns.filter((p) => p.re.test(s));
-      if (hits.length) for (const p of hits) p.hits++; else add(path, `requires.services names ${JSON.stringify(s)}`);
+      const hits = coveringPatterns(s, patterns);
+      if (hits.length) for (const p of hits) p.hits++;
+      else add(path, `requires.services names ${JSON.stringify(s)}${patterns.some((p) => p.re.test(s)) ? " (a not-a-connector pattern matches it only past its first two words — one system per entry, its name first)" : ""}`);
     }
     const tags = listOf(meta?.tags).filter((t) => typeof t === "string");
     const shaped = tags.filter((t) => TRIGGER_TAGS.includes(t));
@@ -270,8 +287,9 @@ export function registryProblems({ registry, existingDirs, metadataByPath, dispo
   for (const [path, reason] of Object.entries(excused)) {
     const where = `${R} not_connectors.artifacts["${path}"]`;
     if (!nonEmpty(reason)) push(where, "excuse-reason", "an excuse carries its reason");
-    if (!metadataByPath.has(path)) push(where, "excuse-stale", "no such contribution — drop the excuse");
-    else if (!triggers.has(path)) push(where, "excuse-stale", "nothing marks this artifact as external-touching any more — drop the excuse");
+    // Existence is the directory's; a directory with no metadata.json is check 1's finding, and its excuse waits.
+    if (!dirs.has(path)) push(where, "excuse-stale", "no such contribution — drop the excuse");
+    else if (metadataByPath.has(path) && !triggers.has(path)) push(where, "excuse-stale", "nothing marks this artifact as external-touching any more — drop the excuse");
   }
   for (const p of patterns) if (p.hits === 0) push(p.where, "pattern-stale", `pattern ${JSON.stringify(p.pattern)} matches no service in the tree — drop it`);
 
@@ -350,7 +368,10 @@ export function tablesSpan(text) {
 
 function main() {
   const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-  const registry = readRegistry(root);
+  const check = process.argv.includes("--check");
+  const report = (problems) => { for (const p of problems) console.error(`  ${p.where}\n    ${p.msg}`); };
+  let registry;
+  try { registry = readRegistry(root); } catch (e) { console.error(`  ${REGISTRY_PATH}\n    does not parse: ${e.message}`); process.exit(1); }
   const { existingDirs, metadataByPath } = contributionsOnDisk(root);
   const problems = registryProblems({
     registry,
@@ -361,20 +382,19 @@ function main() {
   const specFile = join(root, SPEC_PATH);
   const text = readFileSync(specFile, "utf8");
   const span = tablesSpan(text);
-  const rendered = renderClassification(registry);
-  if (process.argv.includes("--check")) {
-    if (!span) problems.push({ where: SPEC_PATH, kind: "spec-markers", msg: "the generated-tables markers are missing or doubled" });
-    else if (span.block !== rendered) problems.push({ where: SPEC_PATH, kind: "spec-stale", msg: "the tables differ from what the registry renders — run `bun scripts/connector-registry.mjs`" });
-    for (const p of problems) console.error(`  ${p.where}\n    ${p.msg}`);
-    console.log(problems.length ? `FAIL — ${problems.length} problem(s)` : "PASS — the connector registry is sound and the spec's tables are current.");
-    process.exit(problems.length ? 1 : 0);
-  }
+  if (!span) problems.push({ where: SPEC_PATH, kind: "spec-markers", msg: "the generated-tables markers are missing or doubled" });
+  // The renderer assumes a sound registry: with findings above, the tables are neither rendered nor compared.
   if (problems.length) {
-    for (const p of problems) console.error(`  ${p.where}\n    ${p.msg}`);
-    console.error(`refusing to render from a registry with ${problems.length} problem(s)`);
+    report(problems);
+    console.error(check ? `FAIL — ${problems.length} problem(s)` : `refusing to render from a registry with ${problems.length} problem(s)`);
     process.exit(1);
   }
-  if (!span) { console.error(`${SPEC_PATH}: the generated-tables markers are missing or doubled`); process.exit(1); }
+  const rendered = renderClassification(registry);
+  if (check) {
+    if (span.block !== rendered) { report([{ where: SPEC_PATH, msg: "the tables differ from what the registry renders — run `bun scripts/connector-registry.mjs`" }]); console.error("FAIL — 1 problem(s)"); process.exit(1); }
+    console.log("PASS — the connector registry is sound and the spec's tables are current.");
+    return;
+  }
   const next = `${span.before}\n${rendered}\n${span.after}`;
   if (next === text) { console.log(`${SPEC_PATH}: tables already current.`); return; }
   writeFileSync(specFile, next);

@@ -276,7 +276,10 @@ must-pass probes on every run:
 - the connectors are exactly the vendors the capabilities name, each with the
   direction its capabilities derive;
 - **coverage**: every contribution whose `metadata.json` names a service that is
-  not a model provider, the hosting or the brain's own surface, or carries a
+  not a model provider, the hosting or the brain's own surface (a pattern covers
+  a service string only when it matches within the first two words, so
+  "OpenRouter or Anthropic" is a provider and "Notion API (summaries via
+  OpenRouter)" is a vendor — one external system per entry, its name first), or carries a
   connector-shaped tag (`import`, `capture`, `digest`, `webhook`, `export`,
   `sync`, `messaging`, `email`, `bot`) or a tag naming a declared connector
   (`telegram`, `gmail`, …), or sits in an SMD-1867 row of
