@@ -164,7 +164,7 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `1219 assertions: 1219 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `1353 assertions: 1353 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports forty-seven (47) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
@@ -857,6 +857,60 @@ globally unique worker id (hostname, pid and a random suffix —
 `extract-entities.ts` is the shape to copy; `consolidate.ts` (next) is the
 third consumer, and the one whose work is per PAIR rather than per thought.
 
+### graph-centrality.ts
+
+Reads the graph for importance (SMD-1938). "What is relevant to X" is
+`search_thoughts`'s question; this answers the other one — what the brain holds
+as central about X, or overall — with counts anyone can recompute, and no
+hand-written SQL: **mentions** (distinct thoughts mentioning an entity),
+**degree** (distinct entities an edge joins it to, either end), **support**
+(distinct thoughts evidencing any edge touching it); around a subject, per
+neighbour, **co_mentions** (thoughts mentioning both) and **support** (thoughts
+evidencing an edge between them, any relation, either direction, the
+per-relation counts shown). Reads only; one connection; `--limit` is 20 by default and at most 500.
+
+```bash
+bun graph-centrality.ts --url postgres://…                     # the whole graph: top entities by mentions, the hubs by degree, top thoughts
+bun graph-centrality.ts --url … "Open Brain"                   # one subject's neighbourhood and the thoughts that tie it together
+bun graph-centrality.ts --url … "Open Brain" --no-edges        # the control: co-occurrence alone
+bun graph-centrality.ts --url … --types project,tool --json    # a typed subgraph, as data
+```
+
+The subject resolves by 016's own rule, one rung at a time — exact
+`normalized_name` (so "open-brain" finds "Open Brain"), then a name a human
+merged in (`merged_from`) or an alias the model offered, then the five nearest
+by trigram similarity at pg_trgm's default threshold, named as guesses. What
+is ranked around is the entities sharing the first subject's normalised name —
+"postgres" as a tool and as a topic are both it — and the other names an alias
+or fuzzy rung returns are listed, unmarked, and not ranked around
+(`subject_ids` in the JSON says which); a uuid is one entity, ranked around
+alone, its same-name siblings under other types then its neighbours. A neighbour ranks
+by co_mentions + support, and its per-relation counts can sum past support
+when one thought asserts two relations; `--no-edges` drops the support term and every edge
+column, so a run with and a run without say what the edges add over
+co-occurrence — the drop-the-graph control. Entity ties break on mentions,
+then the normalised name, then the type, never on a uuid or a timestamp;
+thought ties break on the thought id, stable on one database and carrying no
+recency: the same rows give the same order every run.
+
+**Centrality here is attention, not value**, and every run prints the caveats
+with its own numbers: edges are unweighted (SMD-1925 — on real runs every edge
+carries confidence 1.00, so support is an edge's only weight); entity typing is
+noisy (SMD-1935 — names that are only digits, dots, colons and spaces are out
+of scope by default, `--keep-numeric` admits them, `--types` narrows further,
+and the scope IS the graph: an entity outside it is in no list and no count,
+the subject the one exception, so `--types tool "Open Brain"` is the tools
+around a project); hubs and clusters inflate each other; no ticket status is
+stored, so open/closed is the caller's filter; and only extracted thoughts are
+in the graph, which the coverage line counts. Exit 0 when ranked, 1 when no
+entity resolves (a near-miss whose only guesses the numeric rule hid is still
+no entity: exit 1, and the line counts the hidden guesses), 3 when the subject
+IS an entity — by id, name, alias or merged-in name — that the numeric rule
+excluded (`--keep-numeric` would rank it), 2 for a usage error, a brain
+without 016 or a query that failed — never 1 for a failure or an exclusion. `test-schema.ts` [44] runs the
+script's own SQL under PGlite over a graph whose every count is known by
+construction, and its edges-on and edges-off orders differ at every position.
+
 ## Consolidation: proposing which thoughts supersede which
 
 Migration 029 and `consolidate.ts`, its worker (SMD-1294). 025 gave `thoughts`
@@ -1457,7 +1511,7 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 1219 assertions, PGlite, no container
+bun test-schema.ts                          # 1353 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts         # 601 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
@@ -1969,6 +2023,18 @@ asserts 749 properties (at migration 032), including:
   double-encoded payload is emptied silently again; 022 over 025 keeps 022's
   sentinel and drops 025's envelope, which preflight's recogniser sees; the
   last definers re-applied put every body back
+- **`graph-centrality.ts` counts what it says it counts** (SMD-1938): over a
+  graph built by `record_thought_entities` with every count known — a
+  subject, three neighbours, a numeric-named `person`, a merged entity — the
+  script's exported SQL runs through PGlite: mentions, degree and support as
+  the header defines them, the numeric entity in no list and no count and in
+  every one when kept, the merged name resolving through `merged_from`, the
+  ladder's five outcomes (id, exact, alias, fuzzy, none) and its stop for a
+  numeric name that is an entity, the grouping of several returned names
+  around the first, the neighbourhood's
+  order with edges on differing from the order without at every position,
+  two runs byte-identical, the caveats in the rendered text with the run's
+  numbers, and the flags refused as documented
 
 One thing this suite deliberately does NOT assert: that a context survives a
 capture, an edit and a payload that omits it. Writing chunk rows through the
