@@ -273,6 +273,11 @@ services:
       - ..:/app:ro
     environment:
       <<: *server-env
+      # The merge brings the server's whole block; the two things this worker
+      # does not read are unset again, so its environment is exactly what it
+      # reads (second review pass) — the key material stays with the server.
+      MCP_ACCESS_KEYS: ""
+      PORT: ""
       # No `:?` here: compose interpolates every service's block whether or not
       # its profile is active, so a required-variable error would fail every
       # `up` without the profile (the first review pass found the full-stack CI

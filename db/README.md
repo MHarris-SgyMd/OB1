@@ -1552,19 +1552,24 @@ as the actor `board-sync` via `db/sync-linear.ts`, the egress gate asked first
 (refused, the row lands without a vector and the audit row says so), so a synced
 ticket differs from a captured one in `metadata.source` alone. Linear's autolink
 markup (`<issue …>SMD-x</issue>`) is stripped to the identifier before storing
-(SMD-1865's first item; the typed edges are its second and stay there). When one
-identifier has several ticket rows — the hand re-captures — the row no other row
-of the group supersedes is current (the chain is the truth; age is the tiebreak)
-and each older twin is marked superseded by the next newer (032), once; nothing is
-deleted, and a pointer already there — to the twin or to anything else — is left.
-When the new text is one a twin already holds (a ticket moved back to a state a
-hand capture recorded; `update_thought` refuses it as `DUPLICATE_CONTENT`), the
-twin is promoted: the current row's pointer moves on to what the twin pointed at,
-then the twin points at it, in that order so no step closes a loop, and the
-twin's facets are patched. Held by any other thought, the facets are patched so
-the plan converges and the pass reports it under *refused*. Under `--loop`,
-SIGTERM ends the pass after the issue in hand (the compose service allows 60 s);
-the next pass finds what was left.
+(SMD-1865's first item; the typed edges are its second and stay there). "Same
+text" is judged by `content_fingerprint_of` — the rule `update_thought` refuses
+duplicates by, asked of the database — so a paste with a trailing newline is the
+same text. When one identifier has several ticket rows — the hand re-captures —
+the **head** is the row that already holds Linear's text by that rule, else the
+row no other row of the group supersedes (the chain is the truth; age is the
+tiebreak), and the group is chained under it by `supersedes` (032): head → next →
+… → last, every differing pointer cleared first and then set, so no step closes a
+loop. A pointer the hand set to a thought outside the group is kept at the chain's
+tail, not erased. So a ticket moved back to a state an older paste recorded costs
+no model call: that paste becomes the head and its facets are patched. Nothing is
+deleted. An edit the database still refuses as `DUPLICATE_CONTENT` — the text
+held by a thought outside the ticket's rows — patches the facets so the plan
+converges and is reported under *refused*; a new ticket whose text a stray row
+already holds (a paste the header grammar did not recognise) adopts that row with
+a facet patch. One issue the API refuses in a batch fails that identifier alone,
+under *errors*. Under `--loop`, SIGTERM ends the pass after the issue in hand (the
+compose service allows 60 s); the next pass finds what was left.
 
 **Two writers of one identity.** `ingest-records.ts --linear <dump>` and this tool
 both key a ticket on `metadata.issue`, but render different text (the corpus's
