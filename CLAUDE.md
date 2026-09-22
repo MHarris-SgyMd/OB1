@@ -70,7 +70,7 @@ DESCRIBE THE EXACT WORK.
 - **Never modify the core `thoughts` table structure.** Adding columns is fine; altering or dropping existing ones is not.
 - **No credentials, API keys, or secrets in any file.** Use environment variables.
 - **No binary blobs** over 1MB. No `.exe`, `.dmg`, `.zip`, `.tar.gz`.
-- **A SQL file must never destroy existing rows** — no `DROP TABLE`, `DROP DATABASE`/`DROP SCHEMA`, `TRUNCATE`, or `DELETE FROM` without a `WHERE`, in any `.sql` file, migrations included. `scripts/check-fork-consistency.ts` check 20 reads every `.sql` for these as statements (comments excepted, string literals read), so a trigger that *refuses* one of them (`BEFORE TRUNCATE ON …`, as `db/migrations/046` does for `thought_audit`) is the rule applied and passes; a scratch table is `CREATE TEMP TABLE … ON COMMIT DROP`.
+- **A SQL file must never destroy existing rows** — no `DROP TABLE`, `DROP DATABASE`/`DROP SCHEMA`/`DROP OWNED`, `TRUNCATE`, or `DELETE FROM` without a `WHERE` of its own, in any `.sql` file, migrations included. `scripts/check-fork-consistency.ts` check 20 reads every `.sql` for these as statements (comments excepted, string literals read), so a trigger that *refuses* one of them (`BEFORE TRUNCATE ON …`, as `db/migrations/046` does for `thought_audit`) is the rule applied and passes; a scratch table is `CREATE TEMP TABLE … ON COMMIT DROP`.
 - **Avoid profanity in all content.** Keep docs, examples, seed data, UI copy, prompts, walkthroughs, and generated assets clean and professional.
 - **MCP servers must be remote (Supabase Edge Functions), not local.** Never use `claude_desktop_config.json`, `StdioServerTransport`, or local Node.js servers. All extensions deploy as Edge Functions and connect via Claude Desktop's custom connectors UI (Settings → Connectors → Add custom connector → paste URL). See `docs/01-getting-started.md` Step 7 for the pattern.
 
@@ -79,13 +79,13 @@ DESCRIBE THE EXACT WORK.
 - **Title format:** `[category] Short description` (e.g., `[recipes] Email history import via Gmail API`, `[skills] Panning for Gold standalone skill pack`)
 - **Branch convention:** `contrib/<github-username>/<short-description>`
 - **Commit prefixes:** `[category]` matching the contribution type
-- Every PR must pass the automated review checks in `.github/workflows/ob1-gate-v2.yml` before human review
+- Every PR must pass `.github/workflows/fork-checks.yml` — the suites, the typechecks, `scripts/check-fork-consistency.ts`, commitlint and actionlint — before human review (upstream's `ob1-gate-v2.yml` is not run on this fork)
 - See `CONTRIBUTING.md` for the full review process, metadata.json template, and README requirements
 
 ## Key Files
 
 - `CONTRIBUTING.md` — Source of truth for contribution rules, metadata format, and the review process
-- `.github/workflows/ob1-gate-v2.yml` — Automated PR gate
+- `.github/workflows/fork-checks.yml` — The fork's CI: every suite, the typechecks, the consistency checker, commitlint, actionlint
 - `.github/workflows/claude-review.yml` — Maintainer-triggered Claude PR review
 - `.github/metadata.schema.json` — JSON schema for metadata.json validation
 - `.github/PULL_REQUEST_TEMPLATE.md` — PR description template

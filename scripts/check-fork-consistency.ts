@@ -162,12 +162,16 @@
  *      SQL-safety guard rail read as statements, not words: no DROP TABLE, no
  *      DROP DATABASE or DROP SCHEMA, no TRUNCATE with a table after it (a
  *      trigger event `BEFORE TRUNCATE ON t`, a privilege `GRANT TRUNCATE ON` and
- *      the value `'TRUNCATE'` are not it), no DELETE FROM whose statement — to
- *      its `;` or the `)` closing its CTE — has no WHERE; comments excepted by
- *      the literal-aware strip, string literals and dollar-quoted bodies read
- *      (an EXECUTE string runs) — in every .sql the tree holds, db/migrations/
- *      included (the fork's migrations DROP FUNCTION and DROP TRIGGER, which
- *      destroy no row, and none drops a table); the rules are db/config.mjs's
+ *      the bare value `TG_OP = 'TRUNCATE'` are not it), no DROP OWNED, no
+ *      DELETE FROM whose statement — to its `;` or the `)` closing its CTE,
+ *      a literal's parentheses not counted — has no WHERE of its own at the
+ *      top level (one in a USING subquery qualifies nothing); comments
+ *      excepted by the literal-aware strip, string literals and dollar-quoted
+ *      bodies read (an EXECUTE string runs; a statement quoted in prose is a
+ *      hit too, and belongs in a `--` comment) — in every .sql git tracks or
+ *      would track, db/migrations/ included (the fork's migrations DROP
+ *      FUNCTION and DROP TRIGGER, which destroy no row, and none drops a
+ *      table); the rules are db/config.mjs's
  *      DESTRUCTIVE_SQL_RULES through destructiveSqlIn, with counted
  *      per-(file, rule) exceptions as 7's (none today) (SMD-1936)
  *
@@ -3784,16 +3788,23 @@ checkConnectorRegistry();
 // destructiveSqlIn — the comment-stripped text (stripSqlComments, literal-
 // aware, so a header quoting a statement to say why the file has none is not
 // a hit), a TRUNCATE counted only when a table follows it (a trigger event, a
-// privilege and the value `'TRUNCATE'` are not it), a DELETE FROM counted only
-// when its statement — to the `;`, or the `)` that closes its CTE — carries no
-// WHERE, DROP TABLE and DROP DATABASE/SCHEMA always, string literals read
-// because an EXECUTE string runs. test-schema does not repeat the scan: the
-// migrations are in this check's scope as files, and a substituted value
-// (`${EMBEDDING_DIM}`) is never one of these statements.
+// privilege and the bare value `TG_OP = 'TRUNCATE'` are not it), a DELETE FROM
+// counted only when its statement — to the `;`, or the `)` that closes its
+// CTE, a literal's parentheses and semicolons not counted — has no WHERE of
+// its own at the top level (a WHERE inside a USING subquery or a format()
+// argument qualifies nothing; the first review pass found both holes), DROP
+// TABLE, DROP DATABASE/SCHEMA and DROP OWNED always, string literals read
+// because an EXECUTE string runs — which makes a statement quoted in prose
+// (`RAISE EXCEPTION 'TRUNCATE refused'`) a hit as well; the remedy is check
+// 12's, a `--` comment or a rewording, and the messages say so. test-schema
+// does not repeat the scan: the migrations are in this check's scope as
+// files, and a substituted value (`${EMBEDDING_DIM}`) is never one of these
+// statements.
 //
-// Scope: every .sql the tree holds — the seven category directories, docs/,
-// deploy/ AND db/migrations/, the build and tool directories check 15 skips
-// left out. The fork's migrations DROP FUNCTION and DROP TRIGGER deliberately
+// Scope: every .sql git tracks or would track (citationFiles, check 15's
+// listing) — the seven category directories, docs/, deploy/ AND
+// db/migrations/; an ignored file, the Supabase CLI's supabase/migrations or
+// a recipe's data/, is not the tree's. The fork's migrations DROP FUNCTION and DROP TRIGGER deliberately
 // (032/033/046's ACL replays, 046's own trigger), which the rail does not name
 // and which destroy no row; no migration drops a table — a scratch table is a
 // TEMP table ON COMMIT DROP (016's `_rte_in`) — and the one that once did
@@ -3822,6 +3833,14 @@ const DESTRUCTIVE_SQL_PROBES: [string, string][] = [
   ["unqualified-delete", "DELETE FROM thoughts -- WHERE id = $1\n;"],
   ["unqualified-delete", "WITH gone AS (DELETE FROM thoughts RETURNING id) SELECT count(*) FROM gone WHERE id IS NOT NULL;"],
   ["unqualified-delete", "EXECUTE format('DELETE FROM %I', p_table);"],
+  // First review pass: a WHERE that is not the statement's own, a literal that would move its boundary, the forms the regexes missed.
+  ["unqualified-delete", "DELETE FROM thoughts USING (SELECT id FROM x WHERE y) s;"],
+  ["unqualified-delete", "DELETE FROM thoughts RETURNING 'WHERE';"],
+  ["unqualified-delete", "WITH d AS (DELETE FROM thoughts RETURNING id, '(') SELECT 1 WHERE true;"],
+  ["unqualified-delete", "EXECUTE format('DELETE FROM %I', (SELECT n FROM x WHERE k = 1));"],
+  ["truncate", "EXECUTE format('TRUNCATE %1$I', p_table);"],
+  ["truncate", "EXECUTE $q$TRUNCATE $q$ || quote_ident(p_table);"],
+  ["drop-database", "DROP OWNED BY community CASCADE;"],
 ];
 /** SQL this repository writes that no rule may catch. */
 const DESTRUCTIVE_SQL_NON_PROBES = [
@@ -3848,7 +3867,13 @@ const DESTRUCTIVE_SQL_NON_PROBES = [
   "REFERENCES thoughts(id) ON DELETE CASCADE",
   "CREATE POLICY p ON t FOR DELETE USING (true);",
   "COMMENT ON COLUMN thoughts.truncated_at IS 'when the text was cut';",
+  'SELECT "TRUNCATE", "DELETE FROM" FROM information_schema.role_table_grants;',
+  "SELECT has_table_privilege('community', 'thoughts', 'TRUNCATE');",
+  "ALTER TABLE thoughts ENABLE ALWAYS TRIGGER thought_audit_immutable_truncate;",
+  "DELETE FROM thoughts WHERE false;",
   "COMMENT ON FUNCTION prune_query_log(int) IS 'Delete query_log rows older than p_keep_days. The DELETE is always bounded by logged_at.';",
+  "DELETE FROM thoughts USING f(')') g WHERE thoughts.id = g.id;",
+  "DELETE FROM thoughts WHERE note = ';' AND id = $1;",
 ];
 /** file → rule → the reason and the exact hit count; a hit past the count fails, a count no hit reaches fails as stale. Empty: no file in the tree needs one. */
 const DESTRUCTIVE_SQL_EXCEPTIONS = new Map<string, Record<string, CountedException>>([]);
@@ -3868,11 +3893,14 @@ function checkDestructiveSql() {
   if (lined.length !== 1 || lined[0]!.line !== 5 || lined[0]!.rule !== "truncate") fail(SELF, `check 20 reports ${JSON.stringify(lined.map((h) => `${h.rule}@${h.line}`))} for a TRUNCATE on line 5 of a function body, expected ["truncate@5"] (its own probe)`); // one element when length === 1
 
   const counts = new Map<string, number>();
-  const files = walk(ROOT, [], /\.sql$/).filter((f) => !relOf(f).split("/").some((seg) => SKIP_DIRS.has(seg)));
-  if (files.length === 0) fail(SELF, "check 20 found no .sql file in the tree — the walk or its filter is broken, and the rule would pass everything");
-  for (const file of files) {
-    const rel = relOf(file);
-    for (const h of destructiveSqlIn(readFileSync(file, "utf8"))) {
+  // The files git tracks or would track, as check 15 reads them — so an ignored
+  // .sql (the Supabase CLI's supabase/migrations, a recipe's data/) is not the
+  // tree's, as .gitignore promises of this script (first review pass; the walk
+  // read the disk). citationFiles skips a file over 4 MB; no .sql is near it.
+  const files = citationFiles().filter((rel) => rel.endsWith(".sql"));
+  if (files.length === 0) fail(SELF, "check 20 found no .sql file in the tree — the listing or its filter is broken, and the rule would pass everything");
+  for (const rel of files) {
+    for (const h of destructiveSqlIn(readFileSync(join(ROOT, rel), "utf8"))) {
       const key = `${rel} ${h.rule}`;
       counts.set(key, (counts.get(key) ?? 0) + 1);
       if (DESTRUCTIVE_SQL_EXCEPTIONS.get(rel)?.[h.rule]) continue;
