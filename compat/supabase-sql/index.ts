@@ -74,6 +74,19 @@
  * JSON path and the first whose code slices a timestamp; driven, it hit both —
  * a 500 at its first query, then at its prompt.
  *
+ * ── What PostgREST answers (SMD-1602) ────────────────────────────────────────
+ * Five places this shim answered what PostgREST does not, found by change 77's
+ * review and closed here — each a silent wrong answer, the failure class this
+ * module exists to avoid: a count without `head` is the total, not the page;
+ * `.single()` over several rows is PGRST116, not the first row; `head` without
+ * a count is no rows, not every row; an upsert's conflict target is the primary
+ * key when none is named, and every payload column is assigned so the row is
+ * always returned; `.rpc()`'s shape is what `pg_proc.proretset` declares, not
+ * how many cells came back. And an array column is read through `to_json` —
+ * PostgREST's rendering — because Bun's binary decoder hands a `uuid[]` back as
+ * literal text and refuses a `real[]` holding a NULL; a table with an array
+ * column therefore has its `*` spelled out from the map (see columnSql).
+ *
  * ── Error convention ─────────────────────────────────────────────────────────
  * supabase-js resolves with `{ data, error }` and does not throw. This matches
  * that exactly, including on SQL errors, so existing `if (error)` branches keep
@@ -225,8 +238,8 @@ function arrayLiteral(values: unknown[]): string {
 type ColumnInfo = { type: string; category: string };
 type Columns = Map<string, ColumnInfo>;
 type ForeignKey = { name: string; from: string; fromCols: string[]; to: string; toCols: string[]; unique: boolean };
-type Overload = { names: string[]; types: string[]; categories: string[]; outs: Columns; returns: { type: string; category: string; table: string | null } };
-type CatalogStore = { columns: Map<string, Promise<Columns>>; absent: Map<string, Set<string>>; fks: Map<string, Promise<ForeignKey[]>>; fns: Map<string, Promise<Overload[]>> };
+type Overload = { names: string[]; types: string[]; categories: string[]; outs: Columns; returns: { type: string; category: string; table: string | null; set: boolean } };
+type CatalogStore = { columns: Map<string, Promise<Columns>>; absent: Map<string, Set<string>>; natts: Map<string, number>; fks: Map<string, Promise<ForeignKey[]>>; fns: Map<string, Promise<Overload[]>>; pks: Map<string, Promise<string[]>> };
 
 /** One store per connection URL: the extension servers create a client per request, and the schema does not change between them. */
 const STORES = new Map<string, CatalogStore>();
@@ -246,7 +259,7 @@ class Catalog {
 
   constructor(private sql: SQL, url: string) {
     let store = STORES.get(url);
-    if (!store) STORES.set(url, (store = { columns: new Map(), absent: new Map(), fks: new Map(), fns: new Map() }));
+    if (!store) STORES.set(url, (store = { columns: new Map(), absent: new Map(), natts: new Map(), fks: new Map(), fns: new Map(), pks: new Map() }));
     this.store = store;
   }
 
@@ -316,18 +329,51 @@ class Catalog {
   forget(table: string): void {
     this.store.columns.delete(table);
     this.store.absent.delete(table);
+    this.store.natts.delete(table);
+  }
+
+  /**
+   * `pg_class.relnatts` as it stood when the table's columns were read: the
+   * count of attributes the table has ever had (a dropped one still counts),
+   * which a query on a spelled-out star carries back beside its rows, so a
+   * column added under a running client is seen on the next call as a
+   * changed count rather than as a key the map lacks (SMD-1602).
+   */
+  nattsOf(table: string): number | undefined {
+    return this.store.natts.get(table);
   }
 
   private readColumns(table: string): Promise<Columns> {
     return (async () => {
       const rows = (await this.sql.unsafe(
-        `SELECT a.attname AS name, format_type(a.atttypid, a.atttypmod) AS type, t.typcategory AS category
-           FROM pg_attribute a JOIN pg_type t ON t.oid = a.atttypid
+        `SELECT a.attname AS name, format_type(a.atttypid, a.atttypmod) AS type, t.typcategory AS category, c.relnatts::int AS natts
+           FROM pg_attribute a JOIN pg_type t ON t.oid = a.atttypid JOIN pg_class c ON c.oid = a.attrelid
           WHERE a.attrelid = to_regclass($1) AND a.attnum > 0 AND NOT a.attisdropped`,
         [ident(table, "table")] as never[]
-      )) as unknown as { name: string; type: string; category: string }[];
+      )) as unknown as { name: string; type: string; category: string; natts: number }[];
+      if (rows.length) this.store.natts.set(table, Number(rows[0].natts));
       return new Map(rows.map((r) => [r.name, { type: r.type, category: r.category }]));
     })();
+  }
+
+  /**
+   * The table's primary key columns, in key order — what PostgREST resolves
+   * an upsert's conflict target to when the caller names none (SMD-1602).
+   * Empty for a table with no primary key, and then not kept (memo's rule),
+   * which costs a read per such upsert; nothing in the tree upserts into one.
+   */
+  primaryKeyOf(table: string): Promise<string[]> {
+    return this.memo(this.store.pks, table, async () => {
+      const rows = (await this.sql.unsafe(
+        `SELECT a.attname AS name
+           FROM pg_index i JOIN unnest(i.indkey::int2[]) WITH ORDINALITY k(attnum, ord) ON true
+                JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum
+          WHERE i.indrelid = to_regclass($1) AND i.indisprimary
+          ORDER BY k.ord`,
+        [ident(table, "table")] as never[]
+      )) as unknown as { name: string }[];
+      return rows.map((r) => r.name);
+    });
   }
 
   /**
@@ -374,13 +420,13 @@ class Catalog {
                 (SELECT array_agg(y.typcategory::text ORDER BY u.ord) FROM unnest(p.proargtypes) WITH ORDINALITY u(t, ord) JOIN pg_type y ON y.oid = u.t) AS categories,
                 (SELECT array_agg(format_type(u.t, NULL) ORDER BY u.ord) FROM unnest(p.proallargtypes) WITH ORDINALITY u(t, ord)) AS all_types,
                 (SELECT array_agg(y.typcategory::text ORDER BY u.ord) FROM unnest(p.proallargtypes) WITH ORDINALITY u(t, ord) JOIN pg_type y ON y.oid = u.t) AS all_categories,
-                format_type(p.prorettype, NULL) AS ret_type, rt.typcategory::text AS ret_category,
+                format_type(p.prorettype, NULL) AS ret_type, rt.typcategory::text AS ret_category, p.proretset AS ret_set,
                 CASE WHEN rt.typtype = 'c' AND rc.relkind IN ('r', 'v', 'm', 'p', 'c') AND pg_table_is_visible(rc.oid) THEN rc.relname END AS ret_table
            FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
                 JOIN pg_type rt ON rt.oid = p.prorettype LEFT JOIN pg_class rc ON rc.oid = rt.typrelid
           WHERE p.proname = $1 AND n.nspname = ANY (current_schemas(true))`,
         [fn.trim()] as never[]
-      )) as unknown as { names: string[] | null; modes: string[] | null; types: string[] | null; categories: string[] | null; all_types: string[] | null; all_categories: string[] | null; ret_type: string; ret_category: string; ret_table: string | null }[];
+      )) as unknown as { names: string[] | null; modes: string[] | null; types: string[] | null; categories: string[] | null; all_types: string[] | null; all_categories: string[] | null; ret_type: string; ret_category: string; ret_set: boolean; ret_table: string | null }[];
       return rows.map((r) => {
         // proargnames covers OUT arguments too (a RETURNS TABLE function's columns); proargtypes only the IN ones;
         // proallargtypes every one, in proargnames' order, when any is OUT.
@@ -389,7 +435,7 @@ class Catalog {
         (r.names ?? []).forEach((name, i) => {
           if (r.modes && ["o", "t", "b"].includes(r.modes[i]) && r.all_types?.[i]) outs.set(name, { type: r.all_types[i], category: r.all_categories?.[i] ?? "" });
         });
-        return { names, types: r.types ?? [], categories: r.categories ?? [], outs, returns: { type: r.ret_type, category: r.ret_category, table: r.ret_table } };
+        return { names, types: r.types ?? [], categories: r.categories ?? [], outs, returns: { type: r.ret_type, category: r.ret_category, table: r.ret_table, set: r.ret_set === true } };
       });
     });
   }
@@ -456,7 +502,7 @@ const isRefusal = (e: unknown) => e instanceof Error && e.message.startsWith("co
 
 type SelectItem =
   | { kind: "star" }
-  | { kind: "column"; sql: string }
+  | { kind: "column"; sql: string; name: string }
   | { kind: "embed"; key: string; relation: string; cols: string[] | "*" };
 
 /**
@@ -496,7 +542,7 @@ function parseSelect(spec: string): SelectItem[] {
       return second ? { kind: "embed", key: first, relation: second, cols } : { kind: "embed", key: first, relation: first, cols };
     }
     if (/\(|\)/.test(item)) throw refusal(`select("${spec}"): "${item}" is not a column or a one-hop embed (relation (cols) or alias:relation (cols)).`);
-    return { kind: "column", sql: ident(item, "column") };
+    return { kind: "column", sql: ident(item, "column"), name: item };
   });
 }
 
@@ -520,6 +566,8 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
   private rowMode: "many" | "single" | "maybeSingle" = "many";
   /** The columns the filters, the order and the payload name — what the catalog's map must know (see columnsOf). */
   private named = new Set<string>();
+  /** Whether the last compile spelled a `*` out from the map (an array-bearing table): a 42703 then means the map named a column since dropped. */
+  private spelledOut = false;
 
   constructor(private sql: SQL, private catalog: Catalog, private table: string) {}
 
@@ -533,7 +581,7 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
   select(cols = "*", opts?: { count?: "exact" | "planned" | "estimated"; head?: boolean }): this {
     // `.select()` after insert/update/delete means RETURNING, not a new query: the verb stands, only the list moves.
     this.items = parseSelect(cols);
-    for (const item of this.items) if (item.kind === "column") this.names(item.sql.slice(1, -1));
+    for (const item of this.items) if (item.kind === "column") this.names(item.name);
     if (opts?.count) this.wantCount = "exact";
     if (opts?.head) this.headOnly = true;
     return this;
@@ -867,11 +915,35 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
     return `${value} AS ${ident(item.key, "embed alias")}`;
   }
 
+  /**
+   * An array column is read through `to_json`, which renders it as Postgres
+   * renders JSON (PostgREST's own rendering: a `uuid[]` a list of strings, a
+   * `date[]` bare dates), where Bun's binary decoder hands a `uuid[]` back as
+   * the literal text `{…}` and refuses a `real[]` holding a NULL outright
+   * (`ERR_POSTGRES_NULLS_IN_ARRAY_NOT_SUPPORTED_YET` — the query log's
+   * `result_scores`, SMD-1602). So on a table with an array column a `*` is
+   * spelled out from the map, arrays wrapped, with `relnatts` read beside the
+   * rows so a column added under a running client is still seen on the next
+   * call (execute compares it with the count the map was read at); on a table
+   * without one, `*` stays `*`, and a row carrying a key the map lacks is the
+   * signal, as before.
+   */
+  private columnSql(name: string, info: ColumnInfo | undefined): string {
+    return info?.category === "A" ? `to_json(${ident(name, "column")}) AS ${ident(name, "column")}` : ident(name, "column");
+  }
+
   private async projection(cols: Columns, returning: boolean): Promise<string> {
     const parts: string[] = [];
+    const hasArray = [...cols.values()].some((c) => c.category === "A");
+    this.spelledOut = false;
     for (const item of this.items) {
-      if (item.kind === "star") parts.push("*");
-      else if (item.kind === "column") parts.push(item.sql);
+      if (item.kind === "star") {
+        if (!hasArray) { parts.push("*"); continue; }
+        for (const [name, info] of cols) parts.push(this.columnSql(name, info));
+        parts.push(`(SELECT c.relnatts FROM pg_class c WHERE c.oid = to_regclass('${ident(this.table.trim(), "table")}'))::int AS __natts`);
+        this.spelledOut = true;
+      }
+      else if (item.kind === "column") parts.push(this.columnSql(item.name, cols.get(item.name)));
       // A table the catalog cannot see has no keys to embed through: the embed is left out so the query itself
       // reports the missing table (42P01, as `{ error }`) rather than a refusal naming a foreign key.
       else if (cols.size === 0) continue;
@@ -881,22 +953,31 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
     return parts.join(", ") || "*";
   }
 
-  private async compile(): Promise<{ text: string; values: unknown[]; cols: Columns }> {
+  /**
+   * The query, and — for a counted select that is not head-only — the count
+   * query PostgREST would run for `Content-Range`: the same WHERE, no page.
+   * The page itself carries `count(*) OVER ()`, the total before LIMIT and
+   * OFFSET; `countText` is run only when the page comes back empty (an offset
+   * past the end), where the window has no row to ride on (SMD-1602).
+   */
+  private async compile(): Promise<{ text: string; values: unknown[]; cols: Columns; countText?: string }> {
     const table = this.table.trim();
     const t = ident(table, "table");
     for (const row of this.payload) for (const c of Object.keys(row)) this.names(c);
     const cols = await this.catalog.columnsOf(table, this.named);
 
     if (this.op === "select") {
-      const projection = this.headOnly && this.wantCount ? "count(*)::int AS __count" : await this.projection(cols, false);
       const where = this.whereClause(cols, 0);
+      // head: no rows, whether or not a count was asked for — supabase-js answers `data: null` to both; PostgREST runs
+      // the query for its headers alone. One count query serves both forms; the count is answered only when asked.
+      if (this.headOnly) return { text: `SELECT count(*)::int AS __count FROM ${t}${where.text}`, values: where.values, cols };
+      let projection = await this.projection(cols, false);
+      if (this.wantCount) projection += ", count(*) OVER () AS __count";
       let text = `SELECT ${projection} FROM ${t}${where.text}`;
-      if (!this.headOnly) {
-        if (this.orderBy.length) text += ` ORDER BY ${this.orderBy.join(", ")}`;
-        if (this.limitN !== null) text += ` LIMIT ${Number(this.limitN)}`;
-        if (this.offsetN !== null) text += ` OFFSET ${Number(this.offsetN)}`;
-      }
-      return { text, values: where.values, cols };
+      if (this.orderBy.length) text += ` ORDER BY ${this.orderBy.join(", ")}`;
+      if (this.limitN !== null) text += ` LIMIT ${Number(this.limitN)}`;
+      if (this.offsetN !== null) text += ` OFFSET ${Number(this.offsetN)}`;
+      return { text, values: where.values, cols, countText: this.wantCount ? `SELECT count(*)::int AS __count FROM ${t}${where.text}` : undefined };
     }
 
     const returning = await this.projection(cols, true);
@@ -918,11 +999,16 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
       const tuples = this.payload.map((row) => `(${names.map((c) => bind(c, row[c] ?? null, values)).join(", ")})`);
       let text = `INSERT INTO ${t} (${quoted.join(", ")}) VALUES ${tuples.join(", ")}`;
       if (this.op === "upsert") {
-        const target = this.conflictTarget
-          ? this.conflictTarget.split(",").map((c) => ident(c, "conflict column")).join(", ")
-          : quoted[0];
-        const sets = quoted.filter((c) => c !== `"${this.conflictTarget}"`).map((c) => `${c} = EXCLUDED.${c}`);
-        text += ` ON CONFLICT (${target}) DO ${sets.length ? `UPDATE SET ${sets.join(", ")}` : "NOTHING"}`;
+        // PostgREST's upsert: the conflict target is `onConflict`'s columns, or the table's primary key when none is
+        // named — never the payload's first key, which was 42P10 whenever that key was not unique — and every payload
+        // column is assigned from EXCLUDED, the target's among them, so the statement is always DO UPDATE and always
+        // returns the row (`DO NOTHING` returned none, and a following `.single()` was PGRST116) (SMD-1602).
+        const targetNames = this.conflictTarget
+          ? this.conflictTarget.split(",").map((c) => c.trim()).filter(Boolean)
+          : await this.catalog.primaryKeyOf(table);
+        if (targetNames.length === 0) throw refusal(`upsert() into "${table}" names no onConflict column and the table has no primary key — PostgREST resolves the conflict target to the primary key; name the unique columns: upsert(row, { onConflict: "a,b" }).`);
+        const target = targetNames.map((c) => ident(c, "conflict column")).join(", ");
+        text += ` ON CONFLICT (${target}) DO UPDATE SET ${quoted.map((c) => `${c} = EXCLUDED.${c}`).join(", ")}`;
       }
       text += ` RETURNING ${returning}`;
       return { text, values, cols };
@@ -965,36 +1051,55 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
    */
   private async execute(): Promise<Result<T>> {
     let compiled = false;
+    const table = this.table.trim();
     try {
-      const { text, values, cols } = await this.compile();
+      const { text, values, cols, countText } = await this.compile();
       compiled = true;
-      const rows = ((await this.sql.unsafe(text, values as never[])) as unknown as Record<string, unknown>[]).map((r) => jsonShaped(r, cols));
+      const raw = (await this.sql.unsafe(text, values as never[])) as unknown as Record<string, unknown>[];
+      // The page's total (count(*) OVER (), the same on every row) and the map's attribute count ride on the rows and
+      // are lifted off them before the caller sees a row.
+      let total: number | null = raw.length && "__count" in raw[0] ? Number(raw[0].__count) : null;
+      const natts = raw.length && "__natts" in raw[0] ? Number(raw[0].__natts) : undefined;
+      const rows = raw.map((r) => {
+        if (!("__count" in r) && !("__natts" in r)) return jsonShaped(r, cols);
+        const { __count: _c, __natts: _n, ...rest } = r;
+        return jsonShaped(rest, cols);
+      });
       // The query named a column remembered as absent and RAN: the column exists, the map is stale (a `date` column
       // added after it was first named would shape as an instant for the process's life) — forget it for the next call.
       // So too when a row comes back with a column the map does not know (`select("*")` after an ADD COLUMN names
-      // nothing, but the row does): this row is shaped by the old map, the next call's by a fresh one.
-      const known = (k: string) => cols.size === 0 || cols.has(k) || k === "__count" || this.items.some((it) => it.kind === "embed" && it.key === k);
-      if (this.catalog.skippedRefresh(this.table.trim(), this.named) || (rows[0] && Object.keys(rows[0]).some((k) => !known(k)))) this.catalog.forget(this.table.trim());
+      // nothing, but the row does): this row is shaped by the old map, the next call's by a fresh one. On a table whose
+      // `*` is spelled out from the map, no such key can come back; the attribute count read beside the rows says it.
+      const known = (k: string) => cols.size === 0 || cols.has(k) || this.items.some((it) => it.kind === "embed" && it.key === k);
+      const grown = natts !== undefined && this.catalog.nattsOf(table) !== undefined && natts !== this.catalog.nattsOf(table);
+      if (this.catalog.skippedRefresh(table, this.named) || grown || (rows[0] && Object.keys(rows[0]).some((k) => !known(k)))) this.catalog.forget(table);
 
-      if (this.headOnly && this.wantCount) {
-        return { data: null, error: null, count: Number(rows[0]?.__count ?? 0) };
+      if (this.headOnly) {
+        // head: no rows, as supabase-js answers; the count only when asked (`{ head: true }` alone streamed the table).
+        return { data: null, error: null, count: this.wantCount ? Number(raw[0]?.__count ?? 0) : null };
       }
       if (this.rowMode !== "many") {
-        if (rows.length === 0) {
-          return this.rowMode === "single"
-            ? { data: null, error: new PostgrestError("JSON object requested, multiple (or no) rows returned", { code: "PGRST116" }), count: null }
-            : { data: null, error: null, count: null };
-        }
-        return { data: rows[0] as T, error: null, count: null };
+        // PostgREST's object response: exactly one row, or PGRST116 — several rows are the error too (an arbitrary first
+        // row was the answer before), and maybeSingle() differs only on none.
+        if (rows.length === 1) return { data: rows[0] as T, error: null, count: null };
+        if (rows.length === 0 && this.rowMode === "maybeSingle") return { data: null, error: null, count: null };
+        return { data: null, error: new PostgrestError("JSON object requested, multiple (or no) rows returned", { code: "PGRST116" }), count: null };
       }
-      return { data: rows as T, error: null, count: this.wantCount ? rows.length : null };
+      // A counted page that came back empty (an offset past the end) has no row for the window to ride on: the count
+      // query PostgREST would run for Content-Range, the same WHERE without the page.
+      if (this.wantCount && total === null) {
+        if (countText) total = Number(((await this.sql.unsafe(countText, values as never[])) as unknown as { __count: number }[])[0]?.__count ?? 0);
+        else total = rows.length;
+      }
+      return { data: rows as T, error: null, count: this.wantCount ? total : null };
     } catch (e) {
       if (isRefusal(e)) throw e;
       const error = toPostgrestError(e);
       // The query ran on a map that skipped a refresh for a column remembered as absent, and failed with something
       // other than "that column does not exist": the column is there now and the map is stale — forget it, so the
-      // next call reads the table again (a 42703 confirms the absence and keeps the memo).
-      if (compiled && error.code !== "42703" && this.catalog.skippedRefresh(this.table.trim(), this.named)) this.catalog.forget(this.table.trim());
+      // next call reads the table again (a 42703 confirms the absence and keeps the memo). A 42703 on a spelled-out
+      // `*` is the map's own naming of a column since dropped: forget it too, so the next call spells the fresh set.
+      if (compiled && ((error.code !== "42703" && this.catalog.skippedRefresh(table, this.named)) || (error.code === "42703" && this.spelledOut))) this.catalog.forget(table);
       return { data: null, error, count: null };
     }
   }
@@ -1138,10 +1243,31 @@ export class SupabaseSqlClient {
       }));
       const key = (m: Columns) => JSON.stringify([...m].sort(([a], [b]) => (a < b ? -1 : 1)).map(([k, v]) => [k, v.type]));
       const outs = shapes.length && shapes.every((m) => key(m) === key(shapes[0])) ? shapes[0] : undefined;
-      const rows = ((await this.sql.unsafe(`SELECT * FROM ${call}`, values as never[])) as unknown as Record<string, unknown>[]).map((r) => jsonShaped(r, outs));
+      // An array column of a declared shape is read through to_json, as a table's is (columnSql's reason: a `uuid[]`
+      // path column arrives as literal text otherwise); a shape the candidates disagree on is read as it comes.
+      // The call is aliased with the function's own name: a scalar function's one column takes the alias's name, and
+      // the shape map keys it by the function's.
+      const projection = outs && [...outs.values()].some((c) => c.category === "A")
+        ? [...outs].map(([name, info]) => (info.category === "A" ? `to_json(${f}.${ident(name, "column")}) AS ${ident(name, "column")}` : `${f}.${ident(name, "column")}`)).join(", ")
+        : "*";
+      const rows = ((await this.sql.unsafe(`SELECT ${projection} FROM ${call} AS ${f}`, values as never[])) as unknown as Record<string, unknown>[]).map((r) => jsonShaped(r, outs));
 
-      // A set-returning function yields rows; a scalar one yields a single column
-      // holding the value. PostgREST makes the same distinction.
+      // What the function declares decides the shape, as it does for PostgREST (SMD-1602): a set-returning function
+      // yields rows — one row of one column included, `[{ col: v }]`, where the old rule collapsed it to `v` and the
+      // caller's `data.length` was a string's — unless its rows are scalars (`RETURNS SETOF int`), which PostgREST
+      // lists bare; a scalar function yields its value, a function returning one composite row that row as an
+      // object. Where the candidates disagree on `proretset`, or the function is unknown to the catalog, the shape is
+      // the old rule's: one row of one column is the value.
+      const sets = new Set(overloads.map((o) => o.returns.set));
+      const set = sets.size === 1 ? [...sets][0] : undefined;
+      if (set === true) {
+        const scalarRows = overloads.every((o) => o.outs.size === 0 && !o.returns.table && !/^[CP]$/.test(o.returns.category));
+        return { data: (scalarRows ? rows.map((r) => Object.values(r)[0]) : rows) as T, error: null, count: null };
+      }
+      if (set === false) {
+        const row = rows[0] ?? null;
+        return { data: (row && Object.keys(row).length === 1 ? Object.values(row)[0] : row) as T, error: null, count: null };
+      }
       if (rows.length === 1 && Object.keys(rows[0]).length === 1) {
         const only = Object.values(rows[0])[0];
         return { data: only as T, error: null, count: null };

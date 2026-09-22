@@ -444,8 +444,8 @@ try {
   const viaScalar = await db.rpc("gizmo_made_on", { p_label: "dated" });
   assert(viaScalar.data === "2026-09-20", `…and a scalar date-returning function answers the bare date (${String(viaScalar.data)})`);
   const viaComposite = await db.rpc("a_pair");
-  // (Its one row arrives as a one-row list, the collapse rule SMD-1602 holds; the columns are the type's.)
-  assert((viaComposite.data as { b?: unknown }[])?.[0]?.b === "2026-09-20", `…and a function returning a standalone composite type is shaped by the type's columns (${JSON.stringify(viaComposite.data)})`);
+  // Its one row is the object PostgREST gives for a function returning one composite row (SMD-1602); the columns are the type's.
+  assert((viaComposite.data as { b?: unknown })?.b === "2026-09-20", `…and a function returning a standalone composite type is that one row, shaped by the type's columns (${JSON.stringify(viaComposite.data)})`);
   const noMap = rowsOf(await db.rpc("shape_x", { k: 1 }), "overloads that disagree");
   assert(JSON.stringify(noMap[0]?.n) === "[1,2]" && noMap[0]?.b instanceof Uint8Array, `overloads whose shapes disagree leave the rows unshaped, and an int[] is still a list while a bytea keeps its byte view (${JSON.stringify(noMap[0]?.n)}; ${Object.prototype.toString.call(noMap[0]?.b)})`);
   await db.from("gizmos").delete().eq("label", "dated");
@@ -643,9 +643,13 @@ try {
   const listed = rowsOf(await db.from("latecomers").select("id, made_on").limit(1), "select list names the column");
   assert(listed[0]?.made_on === "2026-09-20", `a date column added under the client and named only in the select list is the bare date — the list names it (${String(listed[0]?.made_on)})`);
   await admin`ALTER TABLE latecomers ADD COLUMN seen_on date DEFAULT '2026-09-21'`;
+  // latecomers has an array column, so its `*` is spelled out from the map (SMD-1602): the first call cannot carry the
+  // new column at all, but the attribute count read beside its rows says the map is short, and the second call has it.
   const starFirst = rowsOf(await db.from("latecomers").select("*").limit(1), "star, stale map");
   const starSecond = rowsOf(await db.from("latecomers").select("*").limit(1), "star, fresh map");
-  assert(typeof starFirst[0]?.seen_on === "string" && starSecond[0]?.seen_on === "2026-09-21", `a column added under the client and reached only through * shapes on the second call: the first row carried a key the map lacked, and the map was forgotten (${String(starFirst[0]?.seen_on)} → ${String(starSecond[0]?.seen_on)})`);
+  assert(!("seen_on" in (starFirst[0] ?? {})) && starSecond[0]?.seen_on === "2026-09-21", `a column added under the client and reached only through * arrives on the second call: the first, spelled out from the map, lacked it and read the table's attribute count beside its rows, and the map was forgotten (${String(starFirst[0]?.seen_on)} → ${String(starSecond[0]?.seen_on)})`);
+  const starNoArrays = rowsOf(await db.from("gizmos").select("*").limit(1), "star on a table without arrays");
+  assert(starNoArrays.length === 1 && "made_on" in starNoArrays[0], "…while a table without an array column keeps its `*` as written");
   // …and when a migration then adds that very column, the absent memo would bind its array raw for the process's life:
   // the failed call forgets the map (22P02 is not "undefined column"), and the next one reads the table again.
   // in.() on a column the table lacks selects nothing and names nothing: not an error, and not a refresh — counted:
@@ -684,6 +688,86 @@ try {
   await admin.close();
 } catch (e) {
   assert(false, `[18] threw: ${e instanceof Error ? e.message : String(e)}`);
+}
+
+console.log("\n[19] Five places the shim answered what PostgREST does not (SMD-1602)");
+try {
+  const admin = new SQL({ url: URL_, max: 1 });
+  await admin`DROP TABLE IF EXISTS pages CASCADE`;
+  await admin`CREATE TABLE pages (id serial PRIMARY KEY, name text UNIQUE NOT NULL, kind text, score int, scores real[], ids uuid[])`;
+  await admin`INSERT INTO pages (name, kind, score) SELECT 'p' || g, CASE WHEN g % 2 = 0 THEN 'even' ELSE 'odd' END, g FROM generate_series(1, 57) g`;
+  await admin`CREATE UNIQUE INDEX pages_kind_score ON pages (kind, score)`;
+  await admin`DROP TABLE IF EXISTS nopk CASCADE`;
+  await admin`CREATE TABLE nopk (name text UNIQUE, score int)`;
+  await admin`CREATE OR REPLACE FUNCTION pages_named(p_name text) RETURNS TABLE (name text) LANGUAGE sql STABLE AS $$ SELECT name FROM pages WHERE name = p_name $$`;
+  await admin`CREATE OR REPLACE FUNCTION pages_names(p_kind text) RETURNS SETOF text LANGUAGE sql STABLE AS $$ SELECT name FROM pages WHERE kind = p_kind ORDER BY id LIMIT 3 $$`;
+  await admin`CREATE OR REPLACE FUNCTION pages_ids(p_id int) RETURNS TABLE (id int, ids uuid[]) LANGUAGE sql STABLE AS $$ SELECT id, ids FROM pages WHERE id = p_id $$`;
+
+  // 1. count without head: the total, as Content-Range carries it — not the page.
+  const page = await db.from("pages").select("name", { count: "exact" }).order("id").range(0, 9);
+  assert(page.error === null && (page.data as unknown[]).length === 10 && page.count === 57, `count without head is the total over the whole WHERE, not the page's size (${page.count} for a page of ${(page.data as unknown[])?.length})`);
+  const filteredPage = await db.from("pages").select("name", { count: "exact" }).eq("kind", "odd").order("id").limit(5);
+  assert(filteredPage.count === 29 && (filteredPage.data as unknown[]).length === 5, `…honouring the filters (${filteredPage.count})`);
+  const pastEnd = await db.from("pages").select("name", { count: "exact" }).order("id").range(1000, 1009);
+  assert(pastEnd.error === null && (pastEnd.data as unknown[]).length === 0 && pastEnd.count === 57, `…and an empty page past the end still carries the total, as PostgREST's headers do (${pastEnd.count})`);
+  const uncounted = await db.from("pages").select("name").limit(3);
+  assert(uncounted.count === null, "no count asked for, none answered");
+  // 2. single() over several rows is PGRST116, as PostgREST's object response is; so is maybeSingle().
+  const several = await db.from("pages").select("name").eq("kind", "even").single();
+  assert(several.data === null && several.error?.code === "PGRST116", `single() over several rows is PGRST116, not an arbitrary first row (${several.error?.code ?? JSON.stringify(several.data)})`);
+  const maybeSeveral = await db.from("pages").select("name").eq("kind", "even").maybeSingle();
+  assert(maybeSeveral.data === null && maybeSeveral.error?.code === "PGRST116", `maybeSingle() over several rows is PGRST116 too — it differs from single() on none, not on many (${maybeSeveral.error?.code ?? JSON.stringify(maybeSeveral.data)})`);
+  const exactlyOne = await db.from("pages").select("name").eq("name", "p1").single();
+  assert(exactlyOne.error === null && (exactlyOne.data as unknown as { name: string })?.name === "p1", "…and exactly one row is the row");
+  // 3. head without count: no rows, no count — not the whole table as data.
+  const headOnly = await db.from("pages").select("*", { head: true }).order("id").limit(5);
+  assert(headOnly.error === null && headOnly.data === null && headOnly.count === null, `head without count answers no rows and no count, as supabase-js does — it streamed the table before (${JSON.stringify(headOnly.data)?.slice(0, 30)})`);
+  const headBad = await db.from("pages").select("*", { head: true }).eq("no_such_column", 1);
+  assert(headBad.error?.code === "42703", `…and still runs the query, so a bad filter is still the database's error (${headBad.error?.code})`);
+  // 4. upsert: the conflict target is the primary key when none is named; every payload column is assigned.
+  const byPk = await db.from("pages").upsert({ id: 1, name: "p1", kind: "odd", score: 100 }).select("name, score").single();
+  assert(byPk.error === null && (byPk.data as unknown as { score: number })?.score === 100, `an upsert naming no onConflict resolves the target to the primary key, as PostgREST does — the payload's first key was the target before (${byPk.error?.message ?? "ok"})`);
+  const { text: pkText } = await db.from("pages").upsert({ score: 5, id: 1 }).toSQL();
+  assert(/ON CONFLICT \("id"\) DO UPDATE SET "score" = EXCLUDED\."score", "id" = EXCLUDED\."id"/.test(pkText), `…whatever the payload's key order, and every column is assigned, the target's included (${pkText.slice(pkText.indexOf("ON CONFLICT"))})`);
+  let noPk = "";
+  try { await db.from("nopk").upsert({ name: "x", score: 1 }); } catch (e) { noPk = (e as Error).message; }
+  assert(/no primary key/.test(noPk) && /onConflict/.test(noPk), `a table with no primary key and no onConflict is refused, naming the option (${noPk.slice(0, 80)})`);
+  const multi = await db.from("pages").upsert({ name: "p2", kind: "even", score: 2 }, { onConflict: "kind, score" }).select("name").single();
+  assert(multi.error === null && (multi.data as unknown as { name: string })?.name === "p2", `a multi-column onConflict is split into its columns (${multi.error?.message ?? "ok"})`);
+  const oneCol = await db.from("pages").upsert({ name: "p3" }, { onConflict: "name" }).select("name").single();
+  assert(oneCol.error === null && (oneCol.data as unknown as { name: string })?.name === "p3", `a one-column payload on a one-column target still returns the row — DO UPDATE, never DO NOTHING, so .single() is not PGRST116 (${oneCol.error?.code ?? "ok"})`);
+  // 5. rpc: what the function declares decides the shape, not how many cells came back.
+  const oneByOne = await db.rpc("pages_named", { p_name: "p1" });
+  assert(Array.isArray(oneByOne.data) && (oneByOne.data as unknown[]).length === 1 && JSON.stringify(oneByOne.data) === '[{"name":"p1"}]', `a set-returning function answering one row of one column is [{ col: v }], as PostgREST's is — the caller's data.length is 1, not a string's (${JSON.stringify(oneByOne.data)})`);
+  const none = await db.rpc("pages_named", { p_name: "nobody" });
+  assert(Array.isArray(none.data) && (none.data as unknown[]).length === 0, "…and none is []");
+  const setOfScalar = await db.rpc("pages_names", { p_kind: "odd" });
+  assert(JSON.stringify(setOfScalar.data) === '["p1","p3","p5"]', `RETURNS SETOF <scalar> is a list of the values, bare, as PostgREST lists them (${JSON.stringify(setOfScalar.data)})`);
+  const scalar = await db.rpc("widget_score_total");
+  assert(typeof scalar.data === "number", `a scalar function is still its value (${typeof scalar.data})`);
+  // Arrays: read through to_json, so a NULL element and a uuid[] arrive as PostgREST's JSON has them.
+  const nulled = await db.from("pages").update({ scores: [0.9, null], ids: ["11111111-1111-4111-8111-111111111111"] }).eq("id", 1).select("scores, ids").single();
+  assert(nulled.error === null && JSON.stringify((nulled.data as unknown as { scores: unknown })?.scores) === "[0.9,null]", `a real[] holding a NULL comes back as [0.9, null] — Bun's binary decoder refused the column outright (ERR_POSTGRES_NULLS_IN_ARRAY_NOT_SUPPORTED_YET), so the query log's result_scores never landed through this shim (${nulled.error?.code ?? JSON.stringify((nulled.data as { scores: unknown })?.scores)})`);
+  assert(JSON.stringify((nulled.data as unknown as { ids: unknown })?.ids) === '["11111111-1111-4111-8111-111111111111"]', `a uuid[] is a list of strings, not the literal text {…} Bun leaves it as (${JSON.stringify((nulled.data as { ids: unknown })?.ids)})`);
+  const star = await db.from("pages").select("*").eq("id", 1).single();
+  assert(star.error === null && JSON.stringify((star.data as unknown as { scores: unknown })?.scores) === "[0.9,null]" && typeof (star.data as unknown as { name: unknown })?.name === "string" && !("__natts" in (star.data as object)),
+    `…through * as well, spelled out from the map on a table with an array column, the count column lifted off (${star.error?.code ?? Object.keys(star.data as object).join()})`);
+  const { text: starText } = await db.from("pages").select("*").toSQL();
+  assert(/to_json\("scores"\) AS "scores"/.test(starText) && /relnatts/.test(starText) && !/SELECT \*/.test(starText), `the spelled-out star wraps the array columns and reads relnatts beside the rows (${starText.slice(0, 120)})`);
+  const { text: plainText } = await db.from("gizmos").select("*").toSQL();
+  assert(/^SELECT \* FROM "gizmos"/.test(plainText), `a table without an array column keeps SELECT * (${plainText.slice(0, 40)})`);
+  const viaFn = await db.rpc("pages_ids", { p_id: 1 });
+  assert(JSON.stringify((viaFn.data as { ids: unknown }[])?.[0]?.ids) === '["11111111-1111-4111-8111-111111111111"]', `a function's uuid[] column is a list too (${JSON.stringify((viaFn.data as { ids: unknown }[])?.[0]?.ids)})`);
+  // A column dropped under the client: the spelled-out star names it once (42703), the map is forgotten, the next call is whole.
+  await admin`ALTER TABLE pages DROP COLUMN ids`;
+  const dropped = await db.from("pages").select("*").eq("id", 1).single();
+  const afterDrop = await db.from("pages").select("*").eq("id", 1).single();
+  assert(dropped.error?.code === "42703" && afterDrop.error === null && !("ids" in (afterDrop.data as object)), `a column dropped under a running client costs one 42703 on a spelled-out star, then the map is read again (${dropped.error?.code ?? "ok"} → ${afterDrop.error?.code ?? "ok"})`);
+  await admin`DROP TABLE pages CASCADE`;
+  await admin`DROP TABLE nopk CASCADE`;
+  await admin.close();
+} catch (e) {
+  assert(false, `[19] threw: ${e instanceof Error ? e.message : String(e)}`);
 }
 
 await db.close();

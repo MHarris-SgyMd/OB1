@@ -516,17 +516,16 @@ console.log("\n[11] The query log's action rows over PostgREST: one or many thro
 {
   // The hosted deployment's path for every fetch, edit and cite: logActions'
   // ARRAY insert through the client. Read back by SQL so the rows are checked
-  // as stored, not as the client echoed them. The search row is seeded by SQL:
-  // logSearch through THIS shim is a pre-existing divergence (uuid[] + real[]
-  // with a null element — see SMD-1602), not this ticket's writer.
+  // as stored, not as the client echoed them. The search row goes through
+  // logSearch, on the shim: a `real[]` with a null element was refused by Bun's
+  // array decoder on the row the insert returns until SMD-1602 read array
+  // columns through to_json, so this row was seeded by SQL before.
   const admin = new SQL({ url: URL_, max: 1 });
   await admin`DELETE FROM query_log`;
   const AG = "99999999-9999-4999-8999-999999999999";
   const X = "aaaaaaaa-0000-4000-8000-000000000001";
   const Y = "aaaaaaaa-0000-4000-8000-000000000002";
-  await admin`
-    INSERT INTO query_log (kind, tool, agent_id, query, match_count, threshold, recency_weight, filter, result_ids, result_scores)
-    VALUES ('search', 'search_thoughts', ${AG}::uuid, 'postgrest log', 5, 0, 0, '{}'::jsonb, ARRAY[${X},${Y}]::uuid[], ARRAY[0.9, NULL]::real[])`;
+  await store.logSearch({ tool: "search_thoughts", agentId: AG, query: "postgrest log", matchCount: 5, threshold: 0, recencyWeight: 0, filter: {}, resultIds: [X, Y], resultScores: [0.9, null] });
   await store.logActions([]);
   await store.logActions([{ tool: "fetch", agentId: AG, targetId: X }]);
   await store.logActions([

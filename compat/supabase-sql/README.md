@@ -105,7 +105,7 @@ cd compat/supabase-sql && bun run test
 
 ## Expected outcome
 
-`177 assertions: 177 passed, 0 failed` and `PASS`. A migrated file behaves
+`205 assertions: 205 passed, 0 failed` and `PASS`. A migrated file behaves
 identically: same `{ data, error }` shape, same SQLSTATE codes, same row counts.
 `extensions/test-tools.ts` then drives every tool of the five extension servers
 on the shim against their own schemas — the migrated files this shim is judged by.
@@ -139,6 +139,28 @@ a table's rows, a `RETURNS TABLE` function's and a `date[]` (change 77; five
 extension tools read one). A `timestamp without time zone` column is still a
 `Z` instant where PostgREST gives a zone-less datetime; `.slice(0, 10)` agrees,
 an equality does not — no migrated file reads one.
+
+Five places the shim answered what PostgREST does not, each a silent wrong
+answer until SMD-1602 pinned them: `{ count: "exact" }` without `head` is the
+total over the whole `WHERE` (the page carries `count(*) OVER ()`; an empty
+page past the end runs the count query PostgREST runs), not the page's size;
+`.single()` — and `.maybeSingle()` — over several rows is `PGRST116`, not an
+arbitrary first row; `{ head: true }` without a count is `data: null` and no
+count, not the table; an upsert's conflict target is `onConflict`'s columns
+or the table's primary key (a table with neither is refused, naming the
+option), never the payload's first key, and every payload column is assigned
+from `EXCLUDED`, so the statement always returns the row; and `.rpc()`'s shape
+is what the function declares (`pg_proc.proretset`): a set-returning function
+is rows even when one row of one column came back, `RETURNS SETOF <scalar>` a
+bare list, a scalar function its value, a function returning one composite row
+that row as an object. An array column is read through `to_json`, which is
+PostgREST's own rendering: a `uuid[]` a list of strings (Bun left it as the
+literal text `{…}`), a `real[]` holding a `NULL` a list with a `null` (Bun's
+binary decoder refused the column outright, so the query log's `result_scores`
+never landed through this shim). On a table with an array column a `*` is
+therefore spelled out from the catalog's map, `pg_class.relnatts` read beside
+the rows so a column added under a running client is still seen on the next
+call; a table without one keeps `SELECT *`.
 
 ## What is deliberately refused
 
