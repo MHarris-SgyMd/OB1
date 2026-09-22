@@ -273,10 +273,18 @@ services:
       - ..:/app:ro
     environment:
       <<: *server-env
-      LINEAR_API_KEY: ${LINEAR_API_KEY:?set LINEAR_API_KEY in deploy/.env — a Linear personal API key, for the board-sync profile}
+      # No `:?` here: compose interpolates every service's block whether or not
+      # its profile is active, so a required-variable error would fail every
+      # `up` without the profile (the first review pass found the full-stack CI
+      # job and every existing stack). The tool refuses to start without it.
+      LINEAR_API_KEY: ${LINEAR_API_KEY:-}
       OB1_LINEAR_INITIATIVE: ${OB1_LINEAR_INITIATIVE:-}
       OB1_BOARD_SYNC_INTERVAL: ${OB1_BOARD_SYNC_INTERVAL:-}
     command: ["bun", "db/sync-linear.ts", "--loop"]
+    # SIGTERM ends the loop after the issue in hand, not the pass — one embed
+    # and one write, seconds — and the brain is the state, so a pass cut short
+    # is finished by the next; this is the room for that one issue.
+    stop_grace_period: 60s
     depends_on:
       postgres:
         condition: service_healthy

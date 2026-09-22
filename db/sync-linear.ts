@@ -5,7 +5,7 @@
  * The dogfood brain held the Open Brain board only as hand captures: an agent
  * pasted each ticket through capture_thought, and a ticket that moved to Done
  * kept reading Backlog until someone pasted it again — which made a second
- * row, not an update (nine identifiers had two or more rows when this landed).
+ * row, not an update (three identifiers had two or more rows when this landed).
  * On 2026-09-22 one session hand-ingested eight tickets in two sweeps because
  * another session kept filing between asks. This tool is that sweep, committed
  * and repeatable: every issue in the Open Brain initiative's projects becomes
@@ -70,18 +70,21 @@
  * had none. A webhook: exact and immediate, but it needs an inbound URL the
  * stack has no origin for until SMD-1846, and SMD-1862 owns the Linear webhook
  * handler's shape (signature, replay window, loop guard); when both land the
- * handler calls syncIdentifiers() here with the one identifier it was told.
+ * handler calls runPass({ only: [identifier] }) here with the one identifier
+ * it was told — the census still runs, so the plan is the same one a
+ * scheduled pass would make.
  */
 
 import { hostname } from "node:os";
 import { randomUUID } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
 import { SQL } from "bun";
 import { SqlStore } from "../server-portable/store-sql.ts";
 import { createEmbedder, resolveEmbedConfig, type EmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { decideCalls, type EgressSubject } from "../server-portable/egress.ts";
 import { extractMetadata, metadataRefused } from "../server-portable/metadata.ts";
 import type { Actor } from "../server-portable/store.ts";
-import { describeEnv, loadEnv } from "../evals/env.ts";
+import { envFiles, parseEnv } from "../evals/env.ts";
 
 const API = "https://api.linear.app/graphql";
 export const DEFAULT_INITIATIVE = "Open Brain";
@@ -171,15 +174,23 @@ export type BrainRow = { id: string; content: string; metadata: Record<string, u
  */
 export function ticketIdentifier(row: Pick<BrainRow, "content" | "metadata">): string | null {
   const claimed = row.metadata?.issue;
-  if (typeof claimed === "string" && IDENTIFIER_RE.test(claimed)) return claimed;
+  // The identifier the claim OPENS with, as the header branch reads it: a
+  // claim with a suffix ("SMD-12 (old)") would otherwise become a group key
+  // no census row ever matches — extra every pass, and SMD-12 captured again.
+  const c = typeof claimed === "string" ? IDENTIFIER_RE.exec(claimed) : null;
+  if (c) return c[1];
   const m = HEADER_RE.exec(row.content);
   return m ? m[1] : null;
 }
 
 /**
- * The brain's ticket rows grouped by identifier, newest first — the newest is
- * the row kept current; the rest are twins. Ties on created_at (a same-second
- * double paste) fall to the id so the order is stable across passes.
+ * The brain's ticket rows grouped by identifier, the row kept current first.
+ * Current is the row no other row of the group supersedes — the chain is the
+ * truth — and among those the newest; the rest are twins, newest first. Ties
+ * on created_at (a same-second double paste) fall to the id so the order is
+ * stable across passes. Age alone was the rule until the first review pass
+ * showed the DUPLICATE_CONTENT resolution in syncIssue hands the current role
+ * to an older twin, which the next pass must then see as current.
  */
 export function groupTicketRows(rows: BrainRow[]): Map<string, BrainRow[]> {
   const byIssue = new Map<string, BrainRow[]>();
@@ -192,8 +203,33 @@ export function groupTicketRows(rows: BrainRow[]): Map<string, BrainRow[]> {
   }
   for (const list of byIssue.values()) {
     list.sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? "") || a.id.localeCompare(b.id));
+    const superseded = new Set(list.map((r) => r.supersedes).filter((s): s is string => s !== null));
+    // A stable sort: the unsuperseded rows first, each class still newest first.
+    list.sort((a, b) => Number(superseded.has(a.id)) - Number(superseded.has(b.id)));
   }
   return byIssue;
+}
+
+/**
+ * LINEAR_API_KEY: from the environment, else from the first `.env` on
+ * evals/env.ts's search path that has it — that ONE key, not the whole file.
+ * In the container the checkout is a mount, so the operator's host `.env`
+ * files are on the path too; evals' loadEnv() would fill every knob compose
+ * forwarded as "" from them (it skips only a set, non-empty value) and the
+ * sidecar would dial a chat endpoint or run an egress policy the server is
+ * not running (first review pass).
+ */
+export function linearKeyFrom(env: Record<string, string | undefined>, files: string[] = envFiles()): { key?: string; from: string } {
+  const own = env.LINEAR_API_KEY?.trim();
+  if (own) return { key: own, from: "the environment" };
+  for (const file of files) {
+    if (!existsSync(file)) continue;
+    let text: string;
+    try { text = readFileSync(file, "utf8"); } catch { continue; }
+    const value = parseEnv(text).LINEAR_API_KEY?.trim();
+    if (value) return { key: value, from: file };
+  }
+  return { from: `not in the environment; looked in ${files.join(", ")}` };
 }
 
 /** The facets that differ between what the row carries and what Linear says — the metadata patch, or nothing. */
@@ -320,6 +356,8 @@ export type PassReport = {
   twinsMarked: number;
   noVector: number;
   errors: { identifier: string; error: string }[];
+  /** Issues left unwritten because the pass was asked to stop; the next pass finds them. */
+  stopped?: number;
 };
 
 export type Writer = {
@@ -330,6 +368,8 @@ export type Writer = {
   actor: Actor;
   dryRun: boolean;
   log: (line: string) => void;
+  /** Asked between issues: true ends the pass after the issue in hand (SIGTERM under --loop). */
+  stopping?: () => boolean;
 };
 
 /** Read every ticket row the brain has — adopted rows by their claim, hand captures by their header. */
@@ -380,11 +420,17 @@ export async function syncIssue(w: Writer, issue: LinearIssue, rows: BrainRow[])
   }
 
   const [current, ...twins] = rows;
-  // Older twins: each superseded by the next newer, so the chain ends at the current row.
+  // Older twins: each superseded by the next newer, so the chain ends at the
+  // current row. A pointer already there — to this twin or to anything else
+  // (a design note the hand named on capture) — is left; provenance set by a
+  // person is not this tool's to rewrite (first review pass).
   for (let i = 0; i < twins.length; i++) {
     const newer = i === 0 ? current : twins[i - 1];
     const older = twins[i];
-    if (newer.supersedes === older.id) continue;
+    if (newer.supersedes !== null) {
+      if (newer.supersedes !== older.id) w.log(`  · ${issue.identifier}: ${newer.id} already supersedes ${newer.supersedes}, not its twin ${older.id}; left as it is`);
+      continue;
+    }
     if (w.dryRun) { w.log(`  ~ ${issue.identifier}: would mark ${older.id} superseded by ${newer.id}`); twinsMarked++; continue; }
     const r = await w.store.updateThought({ id: newer.id, actor: w.actor, provenance: { supersedes: older.id } });
     if (!r.ok) throw new Error(`marking ${older.id} superseded by ${newer.id}: ${r.error}`);
@@ -415,6 +461,32 @@ export async function syncIssue(w: Writer, issue: LinearIssue, rows: BrainRow[])
     actor: actorWith(g.record),
     embeddingModel: embedded?.model,
   });
+  if (!r.ok && r.error === "DUPLICATE_CONTENT") {
+    // Another row already holds this text's fingerprint (018). When it is one
+    // of this ticket's own twins — a ticket that moved back to a state a hand
+    // capture recorded — that twin already says what Linear says, so it becomes
+    // the current row: the current row's pointer moves on to what the twin
+    // pointed at (or clears), THEN the twin points at the current row, in that
+    // order so no step closes a loop; every older twin stays labelled, and the
+    // next pass's grouping (the chain is the truth) sees the twin as current.
+    // Held by any other row, the facets are patched so the pass stops
+    // re-planning the same refusal every interval, and the outcome says so.
+    // Before this branch the pass recorded an error and, linear_updated_at
+    // never advancing, repeated it forever (first review pass).
+    const holder = twins.find((t) => t.content === content);
+    if (holder) {
+      const moved = await w.store.updateThought({ id: current.id, actor: w.actor, provenance: { supersedes: holder.supersedes } });
+      if (!moved.ok) throw new Error(`moving ${current.id}'s pointer aside: ${moved.error}`);
+      const promoted = await w.store.updateThought({ id: holder.id, metadataPatch: facetPatch(holder.metadata ?? {}, facets) ?? undefined, actor: w.actor, provenance: { supersedes: current.id } });
+      if (!promoted.ok) throw new Error(`promoting the twin ${holder.id}: ${promoted.error}`);
+      w.log(`  ~ ${issue.identifier}: the twin ${holder.id} already held the new text and is current now; ${current.id} superseded by it`);
+      return { outcome: "updated", noVector: false, twinsMarked };
+    }
+    const parked = await w.store.updateThought({ id: current.id, metadataPatch: patch ?? { linear_updated_at: facets.linear_updated_at }, actor: w.actor });
+    if (!parked.ok) throw new Error(`recording the refusal on ${current.id}: ${parked.error}`);
+    w.log(`  ! ${issue.identifier}: text refused as DUPLICATE_CONTENT — another thought holds it; facets patched, text left`);
+    return { outcome: "refused", noVector: false, twinsMarked };
+  }
   if (!r.ok) throw new Error(`updating ${current.id}: ${r.error}`);
   w.log(`  ~ ${issue.identifier}: updated${embedded ? "" : " WITHOUT a vector (egress refused)"}${patch ? ` (${Object.keys(patch).join(", ")})` : ""}`);
   return { outcome: "updated", noVector: !embedded, twinsMarked };
@@ -433,7 +505,8 @@ export async function runPass(opts: { gql: Gql; sql: SQL; writer: Writer; initia
   const issues = await fetchIssues(opts.gql, wanted);
   const seen = new Set(issues.map((i) => i.identifier));
   for (const ident of wanted) if (!seen.has(ident)) report.errors.push({ identifier: ident, error: "listed in the census but not returned in full" });
-  for (const issue of issues) {
+  for (const [i, issue] of issues.entries()) {
+    if (opts.writer.stopping?.()) { report.stopped = issues.length - i; break; }
     try {
       const r = await syncIssue(opts.writer, issue, groups.get(issue.identifier) ?? []);
       tally[r.outcome]++;
@@ -454,6 +527,8 @@ export function formatReport(r: PassReport, dryRun: boolean): string {
     `  plan: ${p.missing.length} missing, ${p.stale.length} stale, ${p.unchanged} unchanged${p.extra.length ? `, ${p.extra.length} extra in the brain (${p.extra.slice(0, 8).join(", ")}${p.extra.length > 8 ? ", …" : ""})` : ""}`,
     `  ${dryRun ? "would write" : "wrote"}: captured ${r.tally.captured}  updated ${r.tally.updated}  patched ${r.tally.patched}  unchanged ${r.tally.unchanged}${r.twinsMarked ? `  twins marked superseded ${r.twinsMarked}` : ""}${r.noVector ? `  without a vector ${r.noVector}` : ""}`,
   ];
+  if (r.tally.refused) lines.push(`  refused: ${r.tally.refused} ticket(s) whose text another thought holds (DUPLICATE_CONTENT) — facets patched, text left`);
+  if (r.stopped) lines.push(`  stopped: ${r.stopped} issue(s) left for the next pass`);
   if (r.errors.length) lines.push(`  errors: ${r.errors.length} — ${r.errors.slice(0, 5).map((e) => `${e.identifier}: ${e.error}`).join("; ")}`);
   return lines.join("\n");
 }
@@ -488,6 +563,7 @@ function selfCheck(): Promise<number> {
   ok(ticketIdentifier({ content: "SMD-1903 — DONE 2026-09-22: the egress gate landed in Open Brain (PR #99).", metadata: {} }) === null, "a note that only opens with an identifier is not a ticket row");
   ok(ticketIdentifier({ content: "anything", metadata: { issue: "SMD-12" } }) === "SMD-12", "an adopted row is a ticket row by its claim, whatever its text");
   ok(ticketIdentifier({ content: "anything", metadata: { issue: "not an id" } }) === null, "…a claim that is not an identifier is ignored");
+  ok(ticketIdentifier({ content: "anything", metadata: { issue: "SMD-12 (old)" } }) === "SMD-12", "…a claim with a suffix yields the identifier it opens with, not the whole string");
 
   const rows: BrainRow[] = [
     { id: "b", content: text, metadata: {}, created_at: "2026-09-22T00:00:00Z", supersedes: null },
@@ -547,6 +623,55 @@ function selfCheck(): Promise<number> {
       { id: "a", content: text, metadata: {}, created_at: "2026-09-21T00:00:00Z", supersedes: null },
     ]);
     ok(r.r.twinsMarked === 1 && r.calls.join("; ") === "update c supersedes=b", `twins: only the missing pointer is set (c→b; b→a already stands), the current row untouched (${r.calls.join("; ")})`);
+    // First review pass: a pointer to anything but the twin is left alone.
+    r = await run([
+      { id: "c", content: text, metadata: withFacets, created_at: "2026-09-23T00:00:00Z", supersedes: "x" },
+      { id: "b", content: text, metadata: {}, created_at: "2026-09-22T00:00:00Z", supersedes: null },
+    ]);
+    ok(r.r.twinsMarked === 0 && r.calls.length === 0, `an existing pointer to another thought is left, not overwritten with the twin (${r.calls.join("; ")})`);
+    // First review pass: the new text is a twin's text — the twin is promoted, in the order that closes no loop.
+    const dupStore: Writer["store"] = {
+      captureThought: recorder.store.captureThought,
+      updateThought: async (o) => {
+        if (o.content !== undefined) { calls.push(`update ${o.id} content → DUPLICATE_CONTENT`); return { ok: false, error: "DUPLICATE_CONTENT" }; }
+        return recorder.store.updateThought(o);
+      },
+    };
+    const doneText = text.replace("Status: Backlog (backlog)", "Status: Done (completed)");
+    calls.length = 0;
+    const swap = await syncIssue({ ...recorder, store: dupStore }, { ...issue, state: { name: "Done", type: "completed" } }, [
+      { id: "b", content: text, metadata: withFacets, created_at: "2026-09-22T00:00:00Z", supersedes: "a" },
+      { id: "a", content: doneText, metadata: {}, created_at: "2026-09-21T00:00:00Z", supersedes: "z" },
+    ]);
+    ok(swap.outcome === "updated" && calls.join("; ") === "embed; update b content → DUPLICATE_CONTENT; update b supersedes=z; update a patch(source,issue,project,status,status_type,priority,labels,url,linear_updated_at) supersedes=b",
+      `DUPLICATE_CONTENT held by a twin: b's pointer moves on to z first, then a is promoted over b with the facets (${calls.join("; ")})`);
+    calls.length = 0;
+    // A later updatedAt, as a moved ticket has: the patch must carry it, or the next plan re-fetches the same refusal.
+    const parked = await syncIssue({ ...recorder, store: dupStore }, { ...issue, state: { name: "Done", type: "completed" }, updatedAt: "2026-09-22T02:00:00.000Z" }, [
+      { id: "b", content: text, metadata: withFacets, created_at: null, supersedes: null },
+    ]);
+    ok(parked.outcome === "refused" && calls.join("; ") === "embed; update b content → DUPLICATE_CONTENT; update b patch(status,status_type,linear_updated_at)",
+      `DUPLICATE_CONTENT held elsewhere: the facets (linear_updated_at among them) are patched so the plan converges, outcome refused (${calls.join("; ")})`);
+    // The chain is the truth for grouping: a row a member supersedes is never current, whatever its age.
+    const chained = groupTicketRows([
+      { id: "old", content: text, metadata: {}, created_at: "2026-09-21T00:00:00Z", supersedes: "new" },
+      { id: "new", content: text, metadata: {}, created_at: "2026-09-22T00:00:00Z", supersedes: null },
+    ]).get("SMD-1936")!;
+    ok(chained.map((x) => x.id).join(",") === "old,new", `the unsuperseded row is current though older (${chained.map((x) => x.id).join(",")})`);
+    // The key from a .env file, and that key alone.
+    const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const { tmpdir } = await import("node:os");
+    const dir = mkdtempSync(join(tmpdir(), "sync-linear-"));
+    writeFileSync(join(dir, "a.env"), "OB1_EGRESS_POLICY=allow\n# LINEAR_API_KEY=commented\n");
+    writeFileSync(join(dir, "b.env"), "LINEAR_API_KEY=lin_api_from_file\nOB1_CHAT_BASE_URL=http://127.0.0.1:1/v1\n");
+    const probe: Record<string, string | undefined> = { OB1_EGRESS_POLICY: "" };
+    const found = linearKeyFrom(probe, [join(dir, "missing.env"), join(dir, "a.env"), join(dir, "b.env")]);
+    ok(found.key === "lin_api_from_file" && found.from === join(dir, "b.env") && probe.OB1_EGRESS_POLICY === "" && !("OB1_CHAT_BASE_URL" in probe), "the first file holding the key supplies it; nothing else in any file reaches the environment");
+    ok(linearKeyFrom({ LINEAR_API_KEY: " lin_api_env " }, [join(dir, "b.env")]).key === "lin_api_env", "…and a set environment variable wins over every file");
+    ok(linearKeyFrom({}, [join(dir, "a.env")]).key === undefined, "…a commented-out key is not a key");
+    rmSync(dir, { recursive: true, force: true });
+
     const refusing: Writer = { ...recorder, cfg: resolveEmbedConfig({ OB1_LLM_BASE_URL: "https://api.example.com/v1", OB1_LLM_API_KEY: "k", OB1_EGRESS_POLICY: "deny" }) };
     calls.length = 0;
     const refused = await syncIssue(refusing, issue, []);
@@ -580,10 +705,9 @@ async function main(): Promise<void> {
   }
   if (flags.has("self-check")) process.exit(await selfCheck());
 
-  const envSources = loadEnv();
-  const key = process.env.LINEAR_API_KEY?.trim();
+  const { key, from } = linearKeyFrom(process.env);
   if (!key) {
-    console.error(`LINEAR_API_KEY is not set, and no .env file supplied it. Create a personal API key at https://linear.app/settings/api and put it in a .env (gitignored; see evals/.env.example).\n  Read: ${describeEnv(envSources)}`);
+    console.error(`LINEAR_API_KEY is not set, and no .env file supplied it. Create a personal API key at https://linear.app/settings/api and put it in a .env (gitignored; see evals/.env.example).\n  ${from}`);
     process.exit(2);
   }
   const url = values.get("url") ?? process.env.DATABASE_URL;
@@ -597,8 +721,10 @@ async function main(): Promise<void> {
   const only = values.get("only")?.split(",").map((s) => s.trim()).filter(Boolean);
 
   const gql = linearClient(key);
-  const sql = new SQL({ url, max: 2 });
-  const store = new SqlStore(url, { max: 2 });
+  // One connection each: the reader and the store, serial by construction.
+  const sql = new SQL({ url, max: 1 });
+  const store = new SqlStore(url, { max: 1 });
+  let stopping = false;
   // Resolved once, as db/reembed.ts does; the embedder does not remember a
   // refusal across rows (each row's length is its own).
   const cfg = resolveEmbedConfig(process.env as EmbedEnv);
@@ -612,6 +738,7 @@ async function main(): Promise<void> {
     actor: { name: ACTOR_NAME, via: SELF, session },
     dryRun,
     log: quiet ? () => {} : (line) => console.log(line),
+    stopping: () => stopping,
   };
 
   const once = async (): Promise<number> => {
@@ -636,8 +763,7 @@ async function main(): Promise<void> {
   let code = 0;
   try {
     if (!flags.has("loop")) { code = await once(); return; }
-    console.log(`  ${SELF}: a pass every ${interval} s against ${initiative}${dryRun ? " (dry run)" : ""}; SIGTERM/SIGINT ends the loop after the current pass`);
-    let stopping = false;
+    console.log(`  ${SELF}: a pass every ${interval} s against ${initiative}${dryRun ? " (dry run)" : ""}; SIGTERM/SIGINT ends the loop after the issue in hand`);
     const stop = () => { stopping = true; };
     process.on("SIGTERM", stop);
     process.on("SIGINT", stop);
@@ -647,6 +773,7 @@ async function main(): Promise<void> {
       for (let waited = 0; waited < interval && !stopping; waited++) await Bun.sleep(1000);
     }
   } finally {
+    await store.close();
     await sql.close();
     process.exitCode = code;
   }

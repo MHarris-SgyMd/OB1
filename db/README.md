@@ -1553,9 +1553,27 @@ as the actor `board-sync` via `db/sync-linear.ts`, the egress gate asked first
 ticket differs from a captured one in `metadata.source` alone. Linear's autolink
 markup (`<issue …>SMD-x</issue>`) is stripped to the identifier before storing
 (SMD-1865's first item; the typed edges are its second and stay there). When one
-identifier has several ticket rows — the hand re-captures — the newest is kept
-current and each older twin is marked superseded by the next newer (032), once;
-nothing is deleted, and a pointer already there is left.
+identifier has several ticket rows — the hand re-captures — the row no other row
+of the group supersedes is current (the chain is the truth; age is the tiebreak)
+and each older twin is marked superseded by the next newer (032), once; nothing is
+deleted, and a pointer already there — to the twin or to anything else — is left.
+When the new text is one a twin already holds (a ticket moved back to a state a
+hand capture recorded; `update_thought` refuses it as `DUPLICATE_CONTENT`), the
+twin is promoted: the current row's pointer moves on to what the twin pointed at,
+then the twin points at it, in that order so no step closes a loop, and the
+twin's facets are patched. Held by any other thought, the facets are patched so
+the plan converges and the pass reports it under *refused*. Under `--loop`,
+SIGTERM ends the pass after the issue in hand (the compose service allows 60 s);
+the next pass finds what was left.
+
+**Two writers of one identity.** `ingest-records.ts --linear <dump>` and this tool
+both key a ticket on `metadata.issue`, but render different text (the corpus's
+`title / text` against the board header) and the ingester replaces `metadata`
+wholesale — so on one brain they would rewrite each other's rows on every run. A
+brain this tool keeps takes the board from it: rebuild that brain with
+`ingest-records.ts` and no `--linear` (the fork, commit and memory sources), then
+one sync pass fills the board; the corpus dump stays the eval harnesses'
+(SMD-1958 has the one-renderer resolution).
 
 **Not removed, not commented.** An issue deleted in Linear or moved out of the
 initiative keeps its row (`--audit` lists it under *extra*; `ingest-records.ts` has
