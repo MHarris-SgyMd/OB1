@@ -196,7 +196,7 @@ export class SqlStore implements ThoughtStore {
         AND (${f.topic ?? null}::text IS NULL OR metadata @> jsonb_build_object('topics', jsonb_build_array(${f.topic ?? null}::text)))
         AND (${f.person ?? null}::text IS NULL OR metadata @> jsonb_build_object('people', jsonb_build_array(${f.person ?? null}::text)))
         AND (${f.saidBy ?? null}::text IS NULL OR metadata @> jsonb_build_object('actor_kind', ${f.saidBy ?? null}::text))
-        AND (${f.actor ?? null}::text IS NULL OR metadata @> jsonb_build_object('actor_name', ${f.actor ?? null}::text))
+        AND (${f.actor?.trim() || null}::text IS NULL OR metadata @> jsonb_build_object('actor_name', ${f.actor?.trim() || null}::text))
         AND (${since}::timestamptz IS NULL OR created_at >= ${since}::timestamptz)
       ORDER BY created_at DESC
       LIMIT ${f.limit}::int`;

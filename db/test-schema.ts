@@ -5519,15 +5519,15 @@ console.log("\n[44] Migration 047: the actor on the row — who wrote the curren
   const colc = (await one<{ c: string | null }>(COLUMN_COMMENT_SQL, ["thoughts", "metadata"])).c ?? "";
   assert(/actor_kind/.test(colc) && /actor_name/.test(colc) && /047/.test(colc) && /cannot set them/.test(colc), "thoughts.metadata's comment names the two keys the database writes and a caller cannot");
   const bfSrc = await src("backfill_thought_actors(integer)");
-  assert(/a\.action = 'capture'\s+OR \(a\.action = 'update' AND a\.diff \? 'content'\s+AND content_fingerprint_of\(a\.diff->'content'->>'before'\) IS DISTINCT FROM content_fingerprint_of\(a\.diff->'content'->>'after'\)\)/.test(bfSrc) && /ORDER BY a\.seq DESC/.test(bfSrc) && /t\.updated_at IS NOT DISTINCT FROM d\.updated_at/.test(bfSrc),
-    "the backfill reads the latest audit row that changed the text by 003's rule — the trigger's rule — by seq, and re-checks updated_at on the locked row, so a thought edited since the scan is left to the next pass");
+  assert(/a\.action = 'capture'\s+OR \(a\.action = 'update' AND a\.diff \? 'content'\s+AND content_fingerprint_of\(a\.diff->'content'->>'before'\) IS DISTINCT FROM content_fingerprint_of\(a\.diff->'content'->>'after'\)\)/.test(bfSrc) && /IS NOT DISTINCT FROM f\.fp\) DESC,\s+a\.created_at DESC, a\.seq DESC/.test(bfSrc) && /t\.updated_at IS NOT DISTINCT FROM d\.updated_at/.test(bfSrc),
+    "the backfill reads the audit row that changed the text by 003's rule — the trigger's rule — the one whose text stands first, then by created_at, then seq (never seq alone: a pre-047 seq is heap order — second review pass), and re-checks updated_at on the locked row, so a thought edited since the scan is left to the next pass");
   assert(/COALESCE\(ob1_registry_kind\(w\.canonical_agent_id, w\.name\), w\.actor_kind\)/.test(bfSrc) && /NULLIF\(btrim\(a\.actor_name\), ''\) AS name/.test(bfSrc), "…the registry's kind now first, the audit row's stamp as the fallback — a reclassified key reaches its rows — and the name trimmed as the stamp trims it (first review pass)");
   assert(!/DROP TABLE/.test(bfSrc) && /CREATE TEMP TABLE %I ON COMMIT DROP/.test(bfSrc), "…and names its temp table per call, dropped at commit, with nothing dropped by hand (023's shape; CLAUDE.md's rail)");
   assert(/LOCK TABLE thoughts IN EXCLUSIVE MODE;\s+-- A stamp is not an edit[\s\S]*?ALTER TABLE thoughts DISABLE TRIGGER thoughts_updated_at/.test(bfSrc), "…and takes thoughts IN EXCLUSIVE MODE before holding the trigger off, as 023 does — the ALTER's own lock deadlocked against an edit in flight (run-it, first review pass)");
   assert(/AND \(t\.metadata->>'actor_kind' IS DISTINCT FROM d\.kind/.test(bfSrc), "…and re-checks the marks themselves under the lock, so a row another pass marked meanwhile is neither written nor counted");
   const seqCol = await one<{ is_identity: string; data_type: string }>(`SELECT is_identity, data_type FROM information_schema.columns WHERE table_name = 'thought_audit' AND column_name = 'seq'`);
   assert(seqCol?.is_identity === "YES" && seqCol.data_type === "bigint", "thought_audit gains seq, a bigint identity: the order rows were written in, which created_at (one value per transaction) and id (random) are not");
-  assert(/GENERATED ALWAYS AS IDENTITY/.test(await refused(`INSERT INTO thought_audit (thought_id, action, diff, seq) VALUES (gen_random_uuid(), 'capture', '{}', 5)`)) || true, "…assigned by the table, not the writer");
+  assert(/non-DEFAULT value into column "seq"/.test(await refused(`INSERT INTO thought_audit (thought_id, action, diff, seq) VALUES (gen_random_uuid(), 'capture', '{}', 5)`)), "…assigned by the table, not the writer (second review pass: the first spelling of this line passed on `|| true`)");
 
   // The stamp: from the key, never the payload.
   const op = await cap("047: the operator typed this", { metadata: { source: "mcp" }, actor: { name: "op-key", via: "open-brain" } }, 40);
@@ -5599,6 +5599,36 @@ console.log("\n[44] Migration 047: the actor on the row — who wrote the curren
   await db.exec(`ALTER TABLE thoughts ENABLE TRIGGER thoughts_stamp_actor`);
   assert(((await one<{ r: Bf }>(`SELECT backfill_thought_actors() AS r`)).r.rows >= 1) && (await marks(same.id)) === "agent/bot-key",
     `the backfill reads the same pair by seq and derives the editor, every time — by created_at and id it was a coin flip that rewrote the trigger's stamp (${await marks(same.id)}; first review pass, reproduced 6 of 12)`);
+  // …and when seq lies — a pre-047 row's is heap order, and 046's amendments
+  // plus a VACUUM put an agent's later rewrite on an earlier page than the
+  // operator's capture (second review pass, reproduced) — the text anchors
+  // it: the update row whose after-text is the row's text wrote what stands.
+  // Planted by hand (OVERRIDING SYSTEM VALUE — the one door to a chosen seq):
+  // one created_at for both rows, the rewrite's seq below the capture's.
+  const ANCH = "47474747-4747-4747-8747-474747474755";
+  await db.exec(`ALTER TABLE thoughts DISABLE TRIGGER thoughts_audit; ALTER TABLE thoughts DISABLE TRIGGER thoughts_stamp_actor`);
+  await db.exec(`INSERT INTO thoughts (id, content, metadata, embedding) VALUES ('${ANCH}', '047: rewritten by the agent, seq inverted', '{}'::jsonb, '${unit(60)}'::vector)`);
+  await db.exec(`ALTER TABLE thoughts ENABLE TRIGGER thoughts_audit; ALTER TABLE thoughts ENABLE TRIGGER thoughts_stamp_actor`);
+  await db.exec(`INSERT INTO thought_audit (thought_id, action, actor_name, diff, created_at, seq) OVERRIDING SYSTEM VALUE VALUES
+    ('${ANCH}', 'capture', 'op-key', '{"metadata": {}}'::jsonb, '2026-01-01 00:00:00+00', 900001),
+    ('${ANCH}', 'update', 'bot-key', '{"content": {"before": "047: typed by the operator", "after": "047: rewritten by the agent, seq inverted"}}'::jsonb, '2026-01-01 00:00:00+00', 900000)`);
+  await db.exec(`SELECT backfill_thought_actors()`);
+  assert((await marks(ANCH)) === "agent/bot-key", `with one created_at and the rewrite's seq BELOW the capture's, the row whose after-text is the thought's text still decides: the agent's (${await marks(ANCH)}; second review pass)`);
+  // Two rows can both have written the text that stands — X, then Y, then X
+  // again, then Y, then X: the second and the fourth edits end on X. Then the
+  // order decides, newest first, and the ordering mutant (oldest first) fails
+  // here and nowhere else, since the anchor carried every other arm.
+  const flip = await cap("047: flip X", { metadata: {}, actor: { name: "op-key" } }, 61);
+  await edit(flip.id, "047: flip Y", null, { name: "bot-key" });
+  await edit(flip.id, "047: flip X", null, { name: "imp-key" });
+  await edit(flip.id, "047: flip Y", null, { name: "op-key" });
+  await edit(flip.id, "047: flip X", null, { name: "bot-key" });
+  assert((await marks(flip.id)) === "agent/bot-key", "X → Y → X → Y → X through four keys: the trigger's stamp is the last editor's");
+  await db.exec(`ALTER TABLE thoughts DISABLE TRIGGER thoughts_stamp_actor`);
+  await db.exec(`UPDATE thoughts SET metadata = metadata - 'actor_kind' - 'actor_name' WHERE id = '${flip.id}'`);
+  await db.exec(`ALTER TABLE thoughts ENABLE TRIGGER thoughts_stamp_actor`);
+  await db.exec(`SELECT backfill_thought_actors()`);
+  assert((await marks(flip.id)) === "agent/bot-key", `…and the backfill, with two update rows whose after-text is the row's text (imp-key's and bot-key's), takes the newer by created_at then seq (${await marks(flip.id)})`);
 
   // The filter: 014's route reaches the keys through the GIN it already has,
   // on the walk and on the exact branch, and the keyword arm's filter too.
@@ -5609,9 +5639,9 @@ console.log("\n[44] Migration 047: the actor on the row — who wrote the curren
   const bySaid = await q<{ id: string }>(`SELECT id FROM match_thoughts($1::vector, -1.0, 10, '{"actor_kind": "operator"}'::jsonb)`, [unit(41)]);
   assert(bySaid.length === 1 && bySaid[0].id === op2.id, `match_thoughts under {"actor_kind": "operator"} returns the operator's rows and none of the agent's, the claim's or the unmarked (${bySaid.length})`);
   const byActor = await q<{ id: string }>(`SELECT id FROM match_thoughts($1::vector, -1.0, 10, '{"actor_name": "bot-key"}'::jsonb)`, [unit(41)]);
-  assert(byActor.map((x) => x.id).sort().join() === [claim.id, same.id].sort().join(), `…and {"actor_name": "bot-key"} the two rows that key wrote — its capture and its edit of the operator's (${byActor.length})`);
+  assert(byActor.map((x) => x.id).sort().join() === [claim.id, same.id, ANCH].sort().join(), `…and {"actor_name": "bot-key"} the three rows that key wrote — its capture, its edit of the operator's, the planted rewrite (${byActor.length})`);
   const kw = await q<{ id: string }>(`SELECT id FROM search_thoughts_keyword('047:', 50, 0, '{"actor_kind": "agent"}'::jsonb)`);
-  assert(kw.map((x) => x.id).sort().join() === [claim.id, byId.id, same.id].sort().join(), `the keyword arm's filter reaches the same key — the agent's three rows, by name, by id, and the edit (${kw.length})`);
+  assert(kw.map((x) => x.id).sort().join() === [claim.id, byId.id, same.id, ANCH, flip.id].sort().join(), `the keyword arm's filter reaches the same key — the agent's five rows: by name, by id, the edit, the planted rewrite, the flip (${kw.length})`);
   assert((await q(`SELECT id FROM thoughts WHERE metadata @> jsonb_build_object('actor_kind', 'operator'::text)`)).length === 1, "…as does the list tool's containment clause");
 
   // The backfill: a brain from before 047 — rows unmarked, one with a planted
@@ -5664,7 +5694,7 @@ console.log("\n[44] Migration 047: the actor on the row — who wrote the curren
   m = await metaOf(ORPHAN);
   assert((await marks(ORPHAN)) === "-/-" && m?.m?.keep === true, `a mark no audit row vouches for is stripped, the rest of the metadata kept (${JSON.stringify(m?.m)})`);
   assert((await marks(claim.id)) === "agent/bot-key" && (await marks(byId.id)) === "agent/-" && (await marks(ghost.id)) === "-/ghost-key" && (await marks(op.id)) === "-/-",
-    "rows the trigger stamped — by name, by id, an unclassified name, a raw content update — already agree with the log and are not touched");
+    "rows the trigger stamped — by name, by id, an unclassified name, a raw content update — already agree with the log and are not touched (the raw update's row: its content_fingerprint column is stale, so the anchor hashes the text — second review pass)");
   assert((await metaOf(pre1.id))?.u === u1, "updated_at is not bumped: a stamp is not an edit (018's guard and 021's rule read it)");
   assert((await auditCount()) === auditsBefore + 6, `each row written left one audit row, the record the ticket asks for (${(await auditCount()) - auditsBefore})`);
   const bfRow = (await audits(pre1.id)).at(-1);

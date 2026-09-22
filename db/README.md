@@ -164,7 +164,7 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `1279 assertions: 1279 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `1282 assertions: 1282 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports forty-seven (47) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
@@ -239,16 +239,19 @@ mark. In metadata rather than columns because 014's `metadata @> filter` route
 over 001's GIN index already reaches it: `said_by` and `actor` on the search and
 list tools are that filter, and every hit prints `By: <key> (<kind>)`.
 `SELECT backfill_thought_actors();` — called once by the file — sets both keys
-on every thought to what the latest content-writing audit row derives (by
-`seq`, an identity 047 adds to `thought_audit`, since `created_at` is one value
-per transaction; the registry's kind for the writer now, else the kind 046
-stamped), correcting a planted claim and stripping one the log does not vouch
-for; each row written leaves an audit row under the door
+on every thought to what the audit row that wrote its current text derives
+(the update row whose after-text is the row's, else the newest content-writing
+row by `created_at` then `seq` — an identity 047 adds to `thought_audit` for
+two rows one transaction wrote; the registry's kind for the writer now, else
+the kind 046 stamped), correcting a planted claim and stripping one the log
+does not vouch for; each row written leaves an audit row under the door
 `backfill_thought_actors`. It locks `thoughts IN EXCLUSIVE MODE` for the write,
 as 023's does (writers wait for the call, readers do not), so each call is its
 own transaction and `OB1_BACKFILL_LIMIT` bounds the rows written per call — not
 the scan, which derives every thought each time. Run it again after
 classifying or reclassifying a key; it returns `{rows, differing, awaiting}`.
+The identity column rewrites `thought_audit` once at apply (about a minute per
+million rows, captures waiting): apply 047 in a quiet window.
 
 ## What changed relative to the guide
 
@@ -1434,8 +1437,8 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 1279 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 608 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
+bun test-schema.ts                          # 1282 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 609 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```

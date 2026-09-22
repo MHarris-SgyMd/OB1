@@ -524,7 +524,7 @@ export function parseFilter(raw: unknown): Record<string, unknown> {
 const SAID_BY = ["operator", "agent", "ingested"] as const;
 const saidByInput = z.enum(SAID_BY).optional()
   .describe("Only thoughts whose current text was written through a key of this kind: operator (typed by the operator), agent (an agent's own output — a summary, a conclusion), or ingested (an importer copying outside text). Decided by the key that made the write, never by the thought's text. Omit for every writer.");
-const actorInput = z.string().min(1).max(200).optional()
+const actorInput = z.string().trim().min(1).max(200).optional()
   .describe("Only thoughts whose current text was written through the access key with this name — the name on a hit's `By:` line. Omit for every key.");
 
 /**
@@ -537,7 +537,9 @@ const actorInput = z.string().min(1).max(200).optional()
  */
 export function withActorFilter(filter: Record<string, unknown>, saidBy: string | undefined, actor: string | undefined): Record<string, unknown> {
   const out = { ...filter };
-  for (const [key, value, arg] of [["actor_kind", saidBy, "said_by"], ["actor_name", actor, "actor"]] as const) {
+  // The stamp trims the key's name (047), so the argument is trimmed here too —
+  // a pasted "op-key " must find the rows op-key wrote (second review pass).
+  for (const [key, value, arg] of [["actor_kind", saidBy, "said_by"], ["actor_name", actor?.trim() || undefined, "actor"]] as const) {
     if (value === undefined) continue;
     if (key in out && out[key] !== value) throw new Error(`${arg} is "${value}" but filter.${key} is ${JSON.stringify(out[key])} — pass one of the two`);
     out[key] = value;

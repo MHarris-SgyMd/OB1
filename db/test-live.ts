@@ -37,7 +37,7 @@ import { SCHEMAS_DIR, TID_PROBE, applyFunctionSettings, applyMigrations, buffers
 import { heartbeatFor, leaseRefusal } from "./lease.ts";
 import { consolidateKey } from "../server-portable/consolidate.ts";
 import { reachabilityReport, readHnswGraph, reachableFromEntry, type HnswElement, type HnswGraph } from "./hnsw-graph.ts";
-import { INGEST_ACTOR, nameIngestActor, recordId, stampTier, upsertRecord, type Doc } from "./ingest-records.ts";
+import { INGEST_ACTOR, recordId, stampTier, upsertRecord, type Doc } from "./ingest-records.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const URL_ = process.env.DATABASE_URL;
@@ -4122,18 +4122,18 @@ console.log("\n[19] db/ingest-records.ts: the records upsert is source-labelled 
   assert((await upsertRecord(sql, twin)) === "skipped", "a different record with identical content is skipped");
   assert((await count("fork")) === 1, "…and no second row was written for it");
 
-  // SMD-1726: the ingester names itself on its connection, so 047's stamp
-  // marks every record with its name (the kind once the operator classifies
-  // it) and 046's audit rows carry its door; without it a re-ingest stripped
-  // the mark an operator's edit had placed (run-it, first review pass).
-  await nameIngestActor(sql);
+  // SMD-1726: the ingester names itself in each record's transaction, so
+  // 047's stamp marks every record with its name (the kind once the operator
+  // classifies it) and 046's audit rows carry its door; without it a re-ingest
+  // stripped the mark an operator's edit had placed (run-it, first review
+  // pass), and a session-level setting died with the connection (second).
   const named = mk("memory", "test-note-c", "Test note C: written under the ingester's own name.");
   assert((await upsertRecord(sql, named)) === "inserted", "a record under the ingester's envelope inserts");
   const [namedRow] = await sql`SELECT metadata->>'actor_name' AS n, metadata->>'actor_kind' AS k FROM thoughts WHERE id = ${named.id}::uuid`;
   assert(namedRow.n === INGEST_ACTOR.name && namedRow.k === null, `…stamped with the ingester's name and no kind until the operator classifies the label (${namedRow.n}/${namedRow.k})`);
   const [namedAudit] = await sql`SELECT origin, actor_name FROM thought_audit WHERE thought_id = ${named.id}::uuid AND action = 'capture'`;
   assert(namedAudit?.origin === INGEST_ACTOR.via && namedAudit.actor_name === INGEST_ACTOR.name, "…and its audit row names the ingester as writer and door");
-  await sql`SELECT set_config('ob1.actor', '', false)`;
+  assert((await sql`SELECT current_setting('ob1.actor', true) AS a`)[0].a === "" || (await sql`SELECT current_setting('ob1.actor', true) AS a`)[0].a === null, "…and the envelope does not outlive the record's transaction on the connection");
   ids.push(named.id);
   // Tier identity, for preflight's `tier` check.
   await stampTier(sql, "stable");

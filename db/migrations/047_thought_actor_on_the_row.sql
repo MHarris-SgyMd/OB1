@@ -55,13 +55,24 @@
 --      writer, not history, so a key reclassified by set_agent_kind
 --      propagates to its rows on the next pass (046's audit rows keep the
 --      kind they were stamped with — that IS history; first review pass).
---      "Latest" is by `seq`, a monotonic column this file adds to
---      thought_audit: created_at is now(), one value for a whole
---      transaction, and id is a random uuid, so a capture and an edit in one
---      transaction — an importer's, a PostgREST rpc chain's — ordered by
---      those two was a coin flip that rewrote the trigger's correct stamp
---      (first review pass, reproduced 6 of 12). Existing rows take their seq
---      in heap order, which for an append-only table is insertion order.
+--      "Latest" is decided in three steps. First, the row whose text IS the
+--      thought's current text: an update row whose after-fingerprint equals
+--      the row's fingerprint wrote what stands (a capture row carries no
+--      text in its diff — 008 records metadata on a capture — so it competes
+--      only when no update matches). Then created_at, newest first. Then
+--      `seq`, a monotonic identity this file adds to thought_audit, for two
+--      rows one transaction wrote: created_at is now(), one value for the
+--      whole transaction, and id is a random uuid, so a capture and an edit
+--      in one transaction — an importer's, a PostgREST rpc chain's —
+--      ordered by those two was a coin flip that rewrote the trigger's
+--      correct stamp (first review pass, reproduced 6 of 12). seq is exact
+--      for rows written after 047 (assigned at INSERT); rows from before
+--      take theirs at the ALTER in heap order, which is NOT insertion order
+--      once 046's backfill has amended rows and VACUUM has freed their old
+--      versions for later inserts to fill (second review pass, reproduced:
+--      an agent's rewrite took a smaller seq than the operator's capture,
+--      and ordering by seq alone stamped the operator on the agent's text).
+--      Hence created_at before seq, and the text anchor before both.
 --      The two keys are set to exactly the derivation wherever they differ,
 --      so a pre-047 row that happened to carry a caller's `actor_kind` is
 --      corrected (the log knows the writer) or stripped (it does not), a
@@ -102,6 +113,15 @@
 --
 -- Idempotent. CREATE OR REPLACE throughout; the trigger drop-then-create (001's
 -- form); the backfill writes only where the log and the row disagree.
+--
+-- APPLYING IT. The identity column REWRITES thought_audit once, under ACCESS
+-- EXCLUSIVE (a volatile default on a populated table): seconds on a small log,
+-- about a minute per million rows, with a copy of the table on disk meanwhile
+-- and every capture waiting on its audit INSERT. The file then takes locks on
+-- thoughts (the trigger, the backfill's EXCLUSIVE), the reverse of a capture's
+-- order (thoughts, then thought_audit), so a capture in flight can deadlock
+-- the apply — migrate.ts renders 40P01 and a re-run applies cleanly (046 has
+-- the same shape; second review pass). Apply in a quiet window.
 -- =============================================================================
 
 -- ---------------------------------------------------------------------------
@@ -114,7 +134,7 @@
 ALTER TABLE thought_audit ADD COLUMN IF NOT EXISTS seq bigint GENERATED ALWAYS AS IDENTITY;
 
 COMMENT ON COLUMN thought_audit.seq IS
-  'The order rows were written in — an identity, assigned at INSERT. created_at is now(), one value for every row a transaction writes, and id is a random uuid, so neither orders two writes to one thought inside a transaction; seq does. Rows from before 047 took theirs in heap order at the ALTER (insertion order for an append-only table). backfill_thought_actors reads the latest content-writing row by it. Migration 047 / SMD-1726.';
+  'The order rows were written in — an identity, assigned at INSERT, exact for rows written after 047. created_at is now(), one value for every row a transaction writes, and id is a random uuid, so neither orders two writes to one thought inside a transaction; seq does. Rows from before 047 took theirs at the ALTER in heap order, which is not insertion order where 046''s backfill amended rows and VACUUM let later inserts fill the freed space — so read created_at first and seq as the tiebreak, as backfill_thought_actors does. Migration 047 / SMD-1726.';
 
 -- ---------------------------------------------------------------------------
 -- The stamp: who wrote this text, from the key.
@@ -159,7 +179,13 @@ BEGIN
   -- metadata touch compares no hash at all.
   IF TG_OP = 'UPDATE' THEN
     v_same := NEW.content IS NOT DISTINCT FROM OLD.content;
-    IF NOT v_same THEN
+    -- A fingerprint column that MOVED says the text did (update_thought writes
+    -- it with the content, NULL when another row holds the key — 018), and
+    -- costs nothing to read; one that did not move says nothing — a raw
+    -- content UPDATE leaves it stale — so then the two texts are hashed
+    -- (second review pass: two hashes on every content edit was +57% on a
+    -- bulk UPDATE; through update_thought it is now none).
+    IF NOT v_same AND NEW.content_fingerprint IS NOT DISTINCT FROM OLD.content_fingerprint THEN
       v_same := content_fingerprint_of(NEW.content) IS NOT DISTINCT FROM content_fingerprint_of(OLD.content);
     END IF;
   END IF;
@@ -265,9 +291,10 @@ BEGIN
   END IF;
 
   /**
-   * Every thought's writer, from the log: the latest row that wrote the
-   * content (a capture, or an update whose diff carries `content`), by seq,
-   * read through 008's thought_id index. Its kind is what the registry says
+   * Every thought's writer, from the log: the row that wrote the current
+   * text — an update whose after-fingerprint is the row's — else the latest
+   * content-writing row by created_at, then seq (a capture, or an update
+   * whose text changed), read through 008's thought_id index. Its kind is what the registry says
    * NOW for its id or name — the trigger's rule applied late, and a
    * reclassification carried to the rows — else the kind 046 stamped on the
    * row (a key since removed from the registry). A thought with no such row
@@ -292,6 +319,10 @@ BEGIN
     FROM (
       SELECT t.id, t.updated_at,
              COALESCE(ob1_registry_kind(w.canonical_agent_id, w.name), w.actor_kind) AS kind,
+             -- (w is the LATERAL below; f.fp is the thought's own text hashed
+             -- here, NOT the content_fingerprint column: a raw content UPDATE
+             -- leaves that column stale, and the stale hash anchored the
+             -- previous writer's edit — second review pass, caught by [44].)
              w.name,
              w.name AS w_name, w.canonical_agent_id AS w_agent,
              t.metadata->>'actor_kind' AS present_kind,
@@ -299,6 +330,7 @@ BEGIN
              COALESCE(t.metadata ? 'actor_kind', false) AS has_kind,
              COALESCE(t.metadata ? 'actor_name', false) AS has_name
       FROM thoughts t
+      CROSS JOIN LATERAL (SELECT content_fingerprint_of(t.content) AS fp) f
       LEFT JOIN LATERAL (
         -- The name as the trigger reads it — trimmed, empty is none — so the
         -- two derive one value and a pass after a pass writes nothing
@@ -314,7 +346,12 @@ BEGIN
           AND (a.action = 'capture'
                OR (a.action = 'update' AND a.diff ? 'content'
                    AND content_fingerprint_of(a.diff->'content'->>'before') IS DISTINCT FROM content_fingerprint_of(a.diff->'content'->>'after')))
-        ORDER BY a.seq DESC
+        -- The row whose text stands first; then the newest transaction; then
+        -- the order inside it. Not seq alone (second review pass — see the
+        -- header): a pre-047 seq is heap order, and heap order lies after
+        -- 046's amendments and a VACUUM.
+        ORDER BY (a.action = 'update' AND content_fingerprint_of(a.diff->'content'->>'after') IS NOT DISTINCT FROM f.fp) DESC,
+                 a.created_at DESC, a.seq DESC
         LIMIT 1
       ) w ON true
       WHERE t.metadata IS NULL OR jsonb_typeof(t.metadata) = 'object'
@@ -372,7 +409,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION backfill_thought_actors(integer) IS
-  'Sets metadata.actor_kind and metadata.actor_name on every thought to what thought_audit derives for the writer of its current content — the latest (by seq) capture or content-changing update row: ob1_registry_kind for its id or name NOW (so a reclassified key reaches its rows) else the actor_kind 046 stamped, and its actor_name — wherever the row and the log disagree, stripping a mark no audit row vouches for. Returns {ok, rows (written this call), differing (found disagreeing), awaiting (writer named but unclassified — set_agent_kind, then this)}. p_limit (at least 1) bounds the rows written and the write lock per call, not the scan (every call derives every thought) nor the audit rows (one per row written); each call its own transaction. Holds the updated_at trigger for the write (a stamp is not an edit), which needs the table''s owner; each row written leaves an audit row whose origin is backfill_thought_actors. Idempotent: a second pass finds nothing. Migration 047 / SMD-1726.';
+  'Sets metadata.actor_kind and metadata.actor_name on every thought to what thought_audit derives for the writer of its current content — the update row whose after-text is the row''s text, else the latest capture or content-changing update row by created_at then seq: ob1_registry_kind for its id or name NOW (so a reclassified key reaches its rows) else the actor_kind 046 stamped, and its actor_name — wherever the row and the log disagree, stripping a mark no audit row vouches for. Returns {ok, rows (written this call), differing (found disagreeing), awaiting (writer named but unclassified — set_agent_kind, then this)}. p_limit (at least 1) bounds the rows written and the write lock per call, not the scan (every call derives every thought) nor the audit rows (one per row written); each call its own transaction. Holds the updated_at trigger for the write (a stamp is not an edit), which needs the table''s owner; each row written leaves an audit row whose origin is backfill_thought_actors. Idempotent: a second pass finds nothing. Migration 047 / SMD-1726.';
 
 -- Every thought already written takes its writer's mark now — or the batch
 -- OB1_BACKFILL_LIMIT names, the rest by hand.
