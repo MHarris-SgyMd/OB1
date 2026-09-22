@@ -2982,7 +2982,7 @@ Every retrieval number above was measured on Postgres with pgvector, because
 that is the store the fork kept when it left Supabase. The choice was argued —
 one transactional store lets a hybrid query run as one statement over one
 snapshot — never measured against the alternative it rules out. SMD-1038
-(FORK.md, "A second vector store beside Postgres") wrote the two-store shape and
+(changes/079-the-store-measured-against-pgvector.md, "A second vector store beside Postgres") wrote the two-store shape and
 the bar its numbers would have to clear *before* this measurement; this is the
 measurement, read against that bar. Nothing in the product changes as a result —
 the comparators are wired into an eval, never a backend
