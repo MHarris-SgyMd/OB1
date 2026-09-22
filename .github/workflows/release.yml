@@ -25,22 +25,30 @@
 # entry, a FORK_VERSION that was not bumped, a migration or a fragment that
 # landed after the cut, a tag off main, and an unpinned Ollama.
 #
-# Two things the owner does once, outside this file: the first publish creates
-# each GHCR package PRIVATE — flip both to public in the package settings so a
-# clean machine can `docker compose pull` without a login; and this workflow
-# needs the repository's Actions permission "Read and write" for the token,
-# which `permissions:` below requests for this job alone.
+# One thing to check after the first tag, outside this file: the visibility of
+# the two GHCR packages. A package a workflow first publishes may be created
+# private whatever the repository's visibility; a clean machine's `docker
+# compose pull` then wants a login, so flip both to public in the package
+# settings if they are not. The token's rights come from `permissions:` below
+# (this job alone gets contents and packages write), whatever the repository's
+# default workflow permission is.
 name: Release
 
 on:
   push:
     tags: ["v[0-9]*"]
   pull_request:
+    # What the job builds from, or reads: the two Dockerfiles and what they
+    # COPY, the compose files, the manifest, the script and this file.
     paths:
       - ".github/workflows/release.yml"
       - "scripts/release-artifacts.ts"
-      - "server-portable/Dockerfile"
+      - "server-portable/**"
       - "db/Dockerfile"
+      - "db/migrate.ts"
+      - "db/migrations/**"
+      - "db/config.mjs"
+      - "db/version.mjs"
       - ".dockerignore"
       - "deploy/**"
       - "releases.json"
@@ -68,6 +76,9 @@ jobs:
       packages: write   # GHCR
     env:
       PUBLISH: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
+      # No build-record artifacts from build-push-action: four `.dockerbuild`
+      # uploads per run beside the one artifact this job means to keep.
+      DOCKER_BUILD_RECORD_UPLOAD: "false"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -266,10 +277,13 @@ jobs:
         working-directory: deploy
         run: docker compose -f compose.yaml -f compose.release.yaml down -v
 
-      # What the review passes caught, over the window since the previous
-      # release (the whole log for the first), and the notes: the CHANGELOG
-      # section, how to run it, the digests, the change files, the table.
-      - name: Render the release notes
+      # The release's file assets, copied under their published names from the
+      # one list the notes' download lines read too (release-artifacts.ts
+      # ASSETS); the change files the cut numbered; the yield table over the
+      # window since the previous release (the whole log for the first); and
+      # the notes — the CHANGELOG section, how to run it, the digests, the
+      # change files, the table.
+      - name: Gather the assets and render the release notes
         env:
           MODE_ARGS: ${{ env.PUBLISH == 'true' && format('--tag {0}', github.ref_name) || '--rehearsal' }}
           PREVIOUS_TAG: ${{ steps.facts.outputs.previous_tag }}
@@ -277,25 +291,46 @@ jobs:
           MIGRATE_DIGEST: ${{ steps.migrate.outputs.digest }}
           OLLAMA_DIGEST: ${{ steps.overlay.outputs.ollama_digest }}
           CHANGE_FILES: ${{ steps.facts.outputs.change_files }}
+          ASSETS: ${{ steps.facts.outputs.assets }}
+          YIELD_ASSET: ${{ steps.facts.outputs.yield_asset }}
         run: |
           mkdir -p release-assets
+          for pair in $ASSETS; do cp "${pair%%=*}" "release-assets/${pair##*=}"; done
+          for f in $CHANGE_FILES; do cp "changes/$f" release-assets/; done
           since=()
           if [ -n "$PREVIOUS_TAG" ]; then since=(--since "$PREVIOUS_TAG"); fi
-          bun scripts/mechanism-yield.ts "${since[@]}" > release-assets/mechanism-yield.txt
+          bun scripts/mechanism-yield.ts "${since[@]}" > "release-assets/$YIELD_ASSET"
           digests=(--ollama-digest "$OLLAMA_DIGEST")
           if [ "$PUBLISH" = true ]; then digests+=(--server-digest "$SERVER_DIGEST" --migrate-digest "$MIGRATE_DIGEST"); fi
           # shellcheck disable=SC2086  # MODE_ARGS is two words on a tag, one on a rehearsal
-          bun scripts/release-artifacts.ts notes $MODE_ARGS --owner "$GITHUB_REPOSITORY_OWNER" --yield release-assets/mechanism-yield.txt "${digests[@]}" > release-assets/notes.md
-          cp deploy/compose.release.yaml deploy/compose.yaml release-assets/
-          cp deploy/.env.example release-assets/env.example
-          for f in $CHANGE_FILES; do cp "changes/$f" release-assets/; done
+          bun scripts/release-artifacts.ts notes $MODE_ARGS --owner "$GITHUB_REPOSITORY_OWNER" --yield "release-assets/$YIELD_ASSET" "${digests[@]}" > release-assets/notes.md
+          ls -la release-assets
           cat release-assets/notes.md >> "$GITHUB_STEP_SUMMARY"
+
+      # The release's files alone — what a machine with no checkout downloads
+      # (deploy/README.md, "Pinning a release") — bring the stack up: the
+      # copied compose.yaml's `build:` names a context that does not exist
+      # there, and `up` without --build must not care. The same .env, the
+      # same images, a directory of its own (its name is the project's), after
+      # the checkout's stack is down so the port is free. Held by the run, not
+      # by a reading of compose's source (caught: cold read).
+      - name: The release's files alone bring the stack up (no checkout)
+        env:
+          ASSETS: ${{ steps.facts.outputs.assets }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/ob1-release-files"
+          for pair in $ASSETS; do cp "release-assets/${pair##*=}" "$RUNNER_TEMP/ob1-release-files/"; done
+          cp deploy/.env "$RUNNER_TEMP/ob1-release-files/.env"
+          cd "$RUNNER_TEMP/ob1-release-files"
+          docker compose -f compose.yaml -f compose.release.yaml up -d --pull never --wait --wait-timeout 240
+          docker compose -f compose.yaml -f compose.release.yaml logs --no-color server | grep -F 'preflight OK'
+          docker compose -f compose.yaml -f compose.release.yaml down -v
 
       - name: Keep the rehearsal's overlay and notes
         if: env.PUBLISH != 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: release-rehearsal-${{ github.sha }}
+          name: release-rehearsal-run-${{ github.run_id }}
           path: release-assets/
           retention-days: 14
 
@@ -308,8 +343,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}
           VERSION: ${{ steps.facts.outputs.version }}
+          ASSETS: ${{ steps.facts.outputs.assets }}
+          YIELD_ASSET: ${{ steps.facts.outputs.yield_asset }}
+          CHANGE_FILES: ${{ steps.facts.outputs.change_files }}
         run: |
-          assets=(release-assets/compose.release.yaml release-assets/compose.yaml release-assets/env.example release-assets/mechanism-yield.txt)
-          for f in release-assets/[0-9][0-9][0-9]-*.md; do [ -e "$f" ] && assets+=("$f"); done
-          gh release create "$TAG" --verify-tag --title "$VERSION" --notes-file release-assets/notes.md "${assets[@]}"
+          files=("release-assets/$YIELD_ASSET")
+          for pair in $ASSETS; do files+=("release-assets/${pair##*=}"); done
+          for f in $CHANGE_FILES; do files+=("release-assets/$f"); done
+          gh release create "$TAG" --verify-tag --title "$VERSION" --notes-file release-assets/notes.md "${files[@]}"
           gh release view "$TAG" --json url,assets --jq '.url, (.assets[].name)'

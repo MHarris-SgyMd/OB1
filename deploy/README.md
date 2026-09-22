@@ -121,9 +121,11 @@ commit, upstream pin and change files each tag closed. `smoke.sh` against a pinn
 stack takes the URL and the key as arguments ("Using smoke.sh against a real
 deployment" below).
 
-One thing the owner does once: the first publish creates each GHCR package
-**private** — make `ob1-server` and `ob1-migrate` public in the package settings,
-or `pull` on a clean machine wants a login.
+One thing to check after the first tag: the two GHCR packages' visibility. A
+package a workflow first publishes may be created **private** whatever the
+repository's visibility is, and `pull` on a clean machine then wants a login —
+make `ob1-server` and `ob1-migrate` public in the package settings if they are
+not.
 
 ## What is reachable from where
 

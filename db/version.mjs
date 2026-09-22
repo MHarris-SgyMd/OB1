@@ -26,6 +26,9 @@ import { fileURLToPath } from "node:url";
 /** The upstream commit the fork sits on — FORK.md's pin, `upstream-pin-9543c29`. */
 export const UPSTREAM_PIN = "9543c29";
 
+/** The fork's repository, for compare links and release downloads — one definition for the assembler and the release job (SMD-1860). */
+export const REPO_URL = "https://github.com/MHarris-SgyMd/OB1";
+
 /**
  * The current fork version. `0.0.0` is the pre-first-release baseline: the
  * versioning machinery is present but no release has been cut, so a brain reports

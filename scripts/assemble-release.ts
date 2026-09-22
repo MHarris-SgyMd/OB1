@@ -50,7 +50,7 @@ import { readFileSync, writeFileSync, readdirSync, unlinkSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { FORK_VERSION, UPSTREAM_PIN, migrationSha, readReleases, highestReleasedMigration, schemaVersionValue, type Release } from "../db/version.mjs";
+import { FORK_VERSION, REPO_URL, UPSTREAM_PIN, migrationSha, readReleases, highestReleasedMigration, schemaVersionValue, type Release } from "../db/version.mjs";
 import { parseFragment, fragmentSection, fragmentProblems, type FragmentFrontMatter } from "./fragments.ts";
 import { CHANGES_DIR as CHANGES_REL, FIRST_FILED, changeFileName, classifyChanges, pad3, readChangeEntries, renderIndex, spliceIndex, type FragmentChange } from "./fork-index.ts";
 
@@ -59,7 +59,7 @@ const CHANGES_ABS = join(ROOT, "changes");
 const MIGRATIONS_DIR = join(ROOT, "db", "migrations");
 const BUMP_RANK: Record<string, number> = { patch: 0, minor: 1, major: 2 };
 const TYPE_HEADING: Record<string, string> = { added: "Added", changed: "Changed", deprecated: "Deprecated", removed: "Removed", fixed: "Fixed", security: "Security" };
-const REPO = "https://github.com/MHarris-SgyMd/OB1";
+
 /** A fragment's front matter once fragmentProblems has passed it: type and bump strings from their sets, tickets a list, migrations a list or absent (a scalar is refused). */
 type CheckedFrontMatter = FragmentFrontMatter & { type: string; bump: string; tickets: string[]; migrations?: string[] };
 
@@ -245,7 +245,7 @@ function buildPlan() {
   const migNums = [...migrationFiles().keys()];
   const lo = highestReleasedMigration(releases) + 1;
   const hi = Math.max(...migNums);
-  const range: [number, number] | null = hi >= lo ? [lo, hi] : null; // a docs/server-only cut closes no migration
+  const range: [number, number] | null = hi >= lo ? [lo, hi] : null; // never null since SMD-1860 — every cut adds the migration that writes its version (the precondition below) — and kept as the type says for the manifest entries the reader still accepts
   // Before --write: the tree says the version it is about to record. The brain
   // reports FORK_VERSION through the highest schema_version migration (044 at
   // the baseline), so a cut bumps the constant and adds that migration FIRST,
@@ -301,7 +301,7 @@ function buildPlan() {
     changelogBefore,
     renderChangelogSection(version, date, numbered),
     core,
-    releases.length ? `${REPO}/compare/v${releases[releases.length - 1].version.split("+")[0]}...v${core}` : `${REPO}/compare/upstream-pin-${UPSTREAM_PIN}...v${core}`,
+    releases.length ? `${REPO_URL}/compare/v${releases[releases.length - 1].version.split("+")[0]}...v${core}` : `${REPO_URL}/compare/upstream-pin-${UPSTREAM_PIN}...v${core}`,
   );
   const entry: Release = { version, range, server: gitHead(), upstream: UPSTREAM_PIN, date, tickets, changes: changeRange };
   if (range) entry.frozenShas = frozenShasForRange(range[0], range[1], readMig);

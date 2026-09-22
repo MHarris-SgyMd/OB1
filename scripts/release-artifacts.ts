@@ -42,16 +42,21 @@ import { existsSync, readFileSync, readdirSync, appendFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { FORK_VERSION, UPSTREAM_PIN, readReleases, type Release } from "../db/version.mjs";
+import { FORK_VERSION, REPO_URL, UPSTREAM_PIN, highestReleasedMigration, readReleases, type Release } from "../db/version.mjs";
 import { pad3, readChanges, type ClassifiedChanges } from "./fork-index.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-export const REPO_URL = "https://github.com/MHarris-SgyMd/OB1";
 /** The images the job publishes, by their short names; the registry path comes from imageNames. */
 export const IMAGES = ["server", "migrate"] as const;
 export type ImageKind = (typeof IMAGES)[number];
 /** Where each image builds from — the Dockerfile the job passes to buildx, context the repo root. */
 export const DOCKERFILES: Record<ImageKind, string> = { server: "server-portable/Dockerfile", migrate: "db/Dockerfile" };
+/** The release's file assets, published name → path in the tree (the overlay is written there by the job); the notes' download lines and the job's copy loop read this one list. */
+export const ASSETS: Record<string, string> = { "compose.yaml": "deploy/compose.yaml", "compose.release.yaml": "deploy/compose.release.yaml", "env.example": "deploy/.env.example" };
+/** The yield table's asset name; the job writes mechanism-yield.ts's output there. */
+export const YIELD_ASSET = "mechanism-yield.txt";
+/** The base compose file, whose Ollama pin the job resolves; every other deploy/compose*.yaml that names Ollama carries the same anchor. */
+export const BASE_COMPOSE = "compose.yaml";
 /** The tag the job runs on — `v` and the version's core, what CHANGELOG.md's compare links name. */
 const TAG_RE = /^v(\d+\.\d+\.\d+)$/;
 export const REHEARSAL_TAG = "rehearsal";
@@ -85,7 +90,8 @@ export type FactsInput = {
   /** Every db/migrations/NNN_*.sql number on disk. */
   migrationNumbers: number[];
   changes: Pick<ClassifiedChanges, "numbered" | "fragments">;
-  composeText: string;
+  /** deploy/compose*.yaml by file name; BASE_COMPOSE must be among them. */
+  composeFiles: Record<string, string>;
   owner: string;
   /** Whether HEAD is an ancestor of origin/main; null when that cannot be read. */
   headOnMain: boolean | null;
@@ -141,8 +147,28 @@ export function releaseFacts(input: FactsInput): { problems: string[]; facts: Fa
     if (input.headOnMain === false) problems.push("the tagged commit is not on origin/main — a release is cut on main and tagged there");
     if (input.headOnMain === null) problems.push("cannot tell whether the tagged commit is on origin/main (no origin/main ref — a full checkout has one)");
   }
-  const ollama = ollamaImageOf(input.composeText);
-  if (!ollama) problems.push("deploy/compose.yaml does not pin Ollama — its `x-ollama-image` anchor must name `ollama/ollama:<tag>`, not `latest`, for the job to resolve a digest from");
+  const ollama = ollamaImageOf(input.composeFiles[BASE_COMPOSE] ?? "");
+  if (!ollama) problems.push(`deploy/${BASE_COMPOSE} does not pin Ollama — its \`x-ollama-image\` anchor must be \`ollama/ollama:<tag>\` (a tag the job resolves to a digest; not \`latest\`, not a digest itself)`);
+  // Every other compose file under deploy/ that names Ollama pins it the same
+  // way — the tiers stack (SMD-1806) has its own anchor, and a second value
+  // beside the base file's would float or lag with nothing reading it.
+  for (const [file, text] of Object.entries(input.composeFiles)) {
+    if (file === BASE_COMPOSE || !/ollama\/ollama/.test(text)) continue;
+    const pin = ollamaImageOf(text);
+    if (pin !== ollama) problems.push(`deploy/${file} names Ollama as ${pin ? `\`${pin}\`` : "something other than an `x-ollama-image` anchor of the form `ollama/ollama:<tag>`"} — deploy/${BASE_COMPOSE} pins \`${ollama ?? "(unpinned)"}\`; the two files carry one value (SMD-1860)`);
+  }
+  // The row preflight prints for the brain this release's migrator wrote — the
+  // job greps the server's log for it. On a tag the ledger ends where the
+  // release's range does, the OK row; in a rehearsal on a tree where migrations
+  // have landed since the last cut, preflight's WARN row (the brain past its
+  // version's range) is the truthful one and is what is expected (caught: a
+  // cold read of the first cut, before any post-1.0.0 migration existed).
+  // Anchored on both sides so 1.0.0 does not match 1.0.0-rc.
+  const releasedHi = highestReleasedMigration(input.releases);
+  const escaped = version.replace(/[.+]/g, "\\$&");
+  const preflightRow = input.mode === "rehearsal" && releasedHi > 0 && hi > releasedHi
+    ? `schema version +the brain reports ${escaped} but its ledger reaches migration ${pad3(hi)}, past that release's range`
+    : `schema version +${escaped} · highest migration ${pad3(range[1])}\\b`;
 
   const core = coreOf(version);
   const facts: Facts = {
@@ -164,11 +190,12 @@ export function releaseFacts(input: FactsInput): { problems: string[]; facts: Fa
     change_files: changeFiles.join(" "),
     date,
     server,
+    head: input.head.slice(0, 8),
     upstream: UPSTREAM_PIN,
-    // The row preflight prints for the brain this release's migrator wrote —
-    // the job greps the server's log for it (the version 0NN wrote, the ledger's
-    // highest migration). Anchored on both sides so 1.0.0 does not match 1.0.0-rc.
-    preflight_row: `schema version +${version.replace(/[.+]/g, "\\$&")} · highest migration ${pad3(range[1])}\\b`,
+    preflight_row: preflightRow,
+    // The file assets, `<path in the tree>=<published name>`, and the yield's name.
+    assets: Object.entries(ASSETS).map(([name, path]) => `${path}=${name}`).join(" "),
+    yield_asset: YIELD_ASSET,
   };
   return { problems, facts };
 }
@@ -271,7 +298,7 @@ export function renderNotes(n: NotesInput): string {
   const lines: string[] = [];
   lines.push(`# Open Brain ${f.version}${rehearsal ? " — rehearsal" : ""}`, "");
   if (rehearsal) lines.push("_A rehearsal of the release job: the images below were built on the runner and never published, the overlay names them by tag alone, and nothing here is a release. The shape is what a tag's run does._", "");
-  lines.push(`Migrations \`${f.range_lo}..${f.range_hi}\` · server \`${f.server}\` · upstream pin \`${f.upstream}\`${f.date ? ` · cut ${f.date}` : ""}`, "");
+  lines.push(`Migrations \`${f.range_lo}..${f.range_hi}\` · commit \`${f.head}\`${rehearsal ? "" : ` (cut from \`${f.server}\`)`} · upstream pin \`${f.upstream}\`${f.date ? ` · cut ${f.date}` : ""}`, "");
   lines.push("## Changes", "");
   lines.push(n.changelogSection ?? (rehearsal ? "_Nothing released yet — the fragments under `changes/` are what the next cut assembles._" : "_CHANGELOG.md has no section for this version._"), "");
   if (f.change_files) {
@@ -284,10 +311,7 @@ export function renderNotes(n: NotesInput): string {
   lines.push("```bash");
   if (rehearsal) lines.push("# (a rehearsal publishes no assets — from a checkout at this commit, in deploy/)");
   else {
-    lines.push(`curl -fsSLO ${download("compose.yaml")}`);
-    lines.push(`curl -fsSLO ${download("compose.release.yaml")}`);
-    lines.push(`curl -fsSL -o .env.example ${download("env.example")}`);
-    lines.push("cp .env.example .env    # then set POSTGRES_PASSWORD, MCP_ACCESS_KEYS and a model provider");
+    for (const name of Object.keys(ASSETS)) lines.push(name === "env.example" ? `curl -fsSL -o .env ${download(name)}    # then set POSTGRES_PASSWORD, MCP_ACCESS_KEYS and a model provider` : `curl -fsSLO ${download(name)}`);
   }
   lines.push("docker compose -f compose.yaml -f compose.release.yaml pull");
   lines.push("docker compose -f compose.yaml -f compose.release.yaml up -d --wait");
@@ -325,13 +349,16 @@ function readInput(mode: "tag" | "rehearsal", tag: string | undefined, owner: st
   const migrationNumbers = readdirSync(join(ROOT, "db", "migrations")).filter((f) => /^\d{3}_.*\.sql$/.test(f)).map((f) => Number(f.slice(0, 3)));
   const head = git(["rev-parse", "HEAD"]) ?? "unknown";
   const onMain = git(["rev-parse", "--verify", "-q", "origin/main"]) === null ? null : git(["merge-base", "--is-ancestor", "HEAD", "origin/main"]) !== null;
+  // Every compose file under deploy/ but the job's own overlay, which a
+  // previous step of the same run may have written there.
+  const composeFiles = Object.fromEntries(readdirSync(join(ROOT, "deploy")).filter((f) => /^compose.*\.ya?ml$/.test(f) && f !== "compose.release.yaml").map((f) => [f, readFileSync(join(ROOT, "deploy", f), "utf8")]));
   return {
     mode, tag, owner, head,
     releases: readReleases(),
     forkVersion: FORK_VERSION,
     migrationNumbers,
     changes: readChanges(ROOT),
-    composeText: readFileSync(join(ROOT, "deploy", "compose.yaml"), "utf8"),
+    composeFiles,
     headOnMain: onMain,
   };
 }
@@ -355,7 +382,7 @@ function selfCheck(): number {
   const composeGood = "x-ollama-image: &o ollama/ollama:0.34.3\nservices:\n  ollama:\n    image: *o\n";
   const release: Release = { version: "1.0.0+upstream.9543c29", range: [1, 48], server: "abcdef12", upstream: "9543c29", date: "2026-09-30", tickets: ["SMD-1"], changes: [104, 105], frozenShas: {} };
   const numbered = (ns: number[]) => ns.map((n) => ({ name: `${pad3(n)}-x.md`, n, heading: { n, title: "x (SMD-1)" }, text: "", lines: 1 }));
-  const base: FactsInput = { mode: "tag", tag: "v1.0.0", releases: [release], forkVersion: release.version, migrationNumbers: Array.from({ length: 48 }, (_, i) => i + 1), changes: { numbered: numbered([103, 104, 105]), fragments: [] }, composeText: composeGood, owner: "MHarris-SgyMd", headOnMain: true, head: "abcdef1234567890" };
+  const base: FactsInput = { mode: "tag", tag: "v1.0.0", releases: [release], forkVersion: release.version, migrationNumbers: Array.from({ length: 48 }, (_, i) => i + 1), changes: { numbered: numbered([103, 104, 105]), fragments: [] }, composeFiles: { "compose.yaml": composeGood }, owner: "MHarris-SgyMd", headOnMain: true, head: "abcdef1234567890" };
 
   ok(coreOf("1.2.3+upstream.abc") === "1.2.3" && tagFor("1.2.3+upstream.abc") === "v1.2.3", "core and tag drop the build metadata");
   ok(imageNames("MHarris-SgyMd").server === "ghcr.io/mharris-sgymd/ob1-server" && imageNames("X").migrate === "ghcr.io/x/ob1-migrate", "image names lower-case the owner");
@@ -378,7 +405,9 @@ function selfCheck(): number {
     [{ releases: [{ ...release, range: null }] }, "closes no migration range", "an entry with no range"],
     [{ headOnMain: false }, "not on origin/main", "a tag off main"],
     [{ headOnMain: null }, "cannot tell", "no origin/main to compare with"],
-    [{ composeText: "services: {}\n" }, "does not pin Ollama", "no Ollama pin"],
+    [{ composeFiles: { "compose.yaml": "services: {}\n" } }, "does not pin Ollama", "no Ollama pin"],
+    [{ composeFiles: { "compose.yaml": composeGood, "compose.tiers.yaml": "services:\n  ollama:\n    image: ollama/ollama:latest\n" } }, "deploy/compose.tiers.yaml names Ollama as something other than", "a second compose file naming Ollama without the anchor"],
+    [{ composeFiles: { "compose.yaml": composeGood, "compose.tiers.yaml": "x-ollama-image: &o ollama/ollama:0.34.2\nservices:\n  ollama:\n    image: *o\n" } }, "names Ollama as `ollama/ollama:0.34.2`", "a second compose file pinning another tag"],
   ];
   for (const [over, phrase, why] of mutants) {
     const { problems } = releaseFacts({ ...base, ...over });
@@ -388,7 +417,11 @@ function selfCheck(): number {
   ok(two.problems.length === 0 && two.facts.previous_tag === "v0.9.0", "the previous release's tag is the yield window's start");
   const rehearsal = releaseFacts({ ...base, mode: "rehearsal", tag: undefined, releases: [], forkVersion: "0.0.0+upstream.9543c29", migrationNumbers: Array.from({ length: 47 }, (_, i) => i + 1), changes: { numbered: numbered([103]), fragments: [{ name: "smd-9.md", ticket: "SMD-9", text: "", lines: 1 }] }, headOnMain: false });
   ok(rehearsal.problems.length === 0 && rehearsal.facts.version === "0.0.0+upstream.9543c29" && rehearsal.facts.tag === REHEARSAL_TAG && rehearsal.facts.image_tag === REHEARSAL_TAG && rehearsal.facts.range_lo === "001" && rehearsal.facts.range_hi === "047" && rehearsal.facts.change_files === "" && rehearsal.facts.previous_tag === "", "a rehearsal on an unreleased tree: FORK_VERSION, the rehearsal tag, the whole migration range, no release checks");
-  ok(releaseFacts({ ...base, mode: "rehearsal", composeText: "services: {}\n" }).problems.length === 1, "a rehearsal still wants the Ollama pin");
+  ok(releaseFacts({ ...base, mode: "rehearsal", composeFiles: { "compose.yaml": "services: {}\n" } }).problems.length === 1, "a rehearsal still wants the Ollama pin");
+  ok(releaseFacts({ ...base, composeFiles: { "compose.yaml": composeGood, "compose.tiers.yaml": composeGood, "compose.host-ports.yaml": "services:\n  postgres:\n    ports: []\n" } }).problems.length === 0, "a second file with the same pin, and one naming no Ollama, are fine");
+  const past = releaseFacts({ ...base, mode: "rehearsal", tag: undefined, migrationNumbers: Array.from({ length: 50 }, (_, i) => i + 1) });
+  ok(past.problems.length === 0 && new RegExp(past.facts.preflight_row).test("  !  schema version            the brain reports 1.0.0+upstream.9543c29 but its ledger reaches migration 050, past that release's range (…048) — migrations applied beyond the version it names"), "a rehearsal on a tree two migrations past the last release expects preflight's WARN row, not the OK row (caught: cold read)");
+  ok(good.facts.assets === "deploy/compose.yaml=compose.yaml deploy/compose.release.yaml=compose.release.yaml deploy/.env.example=env.example" && good.facts.yield_asset === "mechanism-yield.txt" && good.facts.head === "abcdef12", "the asset list, the yield name and the tag commit are facts");
 
   const overlay = renderComposeOverlay({ version: release.version, tag: "v1.0.0", rendered: "2026-09-30", images: { server: { ref: "ghcr.io/x/ob1-server:1.0.0", digest: "sha256:aa" }, migrate: { ref: "ghcr.io/x/ob1-migrate:1.0.0", digest: "sha256:bb" } }, ollamaImage: "ollama/ollama:0.34.3", ollamaDigest: "sha256:cc" });
   const parsed = Bun.YAML.parse(overlay) as { services: Record<string, { image: string }> };

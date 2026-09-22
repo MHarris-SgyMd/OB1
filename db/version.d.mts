@@ -25,6 +25,9 @@ export interface Release {
 /** The upstream commit the fork sits on — FORK.md's pin. */
 export const UPSTREAM_PIN: string;
 
+/** The fork's repository URL, for compare links and release downloads. */
+export const REPO_URL: string;
+
 /** The current fork version, `MAJOR.MINOR.PATCH+upstream.<sha>`. */
 export const FORK_VERSION: string;
 
