@@ -51,7 +51,8 @@
  */
 
 import { SQL } from "bun";
-import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync, truncateSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadEnv } from "./env.ts";
@@ -105,7 +106,9 @@ export const FIXTURE_PATH = join(HERE, "fixtures", "thought-kinds.json");
 // ── The text's shape ─────────────────────────────────────────────────────────
 
 const ISSUE_HEAD = /^SMD-\d+ — [^\n]*\nProject: [^\n]*· Status: [^\n]*\n/;
-const ISSUE_STATUS = /^Project: [^\n]*· Status: [^·\n]+? \((\w+)\)/m;
+// Anchored on the head, not on any line: a head whose own status line lacks the
+// parenthetical must not take one from a ticket quoted further down (review pass 5).
+const ISSUE_STATUS = /^SMD-\d+ — [^\n]*\nProject: [^\n]*· Status: [^·\n]+? \((\w+)\)/;
 
 /** A Linear issue as the board loader wrote it, a project record, or anything else — an agent's or a person's capture. */
 export function sourceKindOf(content: string): SourceKind {
@@ -282,8 +285,10 @@ export function validateFixture(f: Fixture): string[] {
   const partsOf = new Map<string, string[]>();
   for (const [part, ids] of Object.entries(f.parts)) {
     if (!Array.isArray(ids)) { problems.push(`parts.${part} is not an array`); continue; }
+    if (ids.length === 0) { problems.push(`parts.${part} is empty — a key with no ids says nothing; drop it`); continue; }
     for (const id of ids) {
       if (typeof id !== "string" || !UUID.test(id)) { problems.push(`parts.${part} carries a non-id ${JSON.stringify(id).slice(0, 40)}`); continue; }
+      if (id !== id.toLowerCase()) { problems.push(`parts.${part} carries an upper-cased id ${id}`); continue; }
       const had = partsOf.get(id) ?? [];
       if (had.includes(part)) problems.push(`${id} names the part ${part} twice`);
       partsOf.set(id, [...had, part]);
@@ -329,6 +334,25 @@ type ReviewLine = {
 
 /** A hand label: the reader's kind, and the parts / status where the kind takes them. */
 type HandLabel = { id: string; kind: Kind; parts?: Kind[]; status?: string };
+
+/**
+ * A run killed mid-append leaves a torn, unterminated last line. readJsonl skips
+ * it on read, but the next append would glue a whole line onto it, and one
+ * resume later that glued line is the torn tail — the fresh answer lost — and
+ * two resumes later a torn line sits mid-file and every read throws (review
+ * pass 5 reproduced this against pass 4's read-side fix). So the resume trims
+ * the torn bytes off the end first: a truncate to the last newline, never a
+ * rewrite of the answered lines. Returns whether anything was trimmed.
+ */
+export function trimTornTail(path: string): boolean {
+  if (!existsSync(path)) return false;
+  const text = readFileSync(path, "utf8");
+  if (text === "" || text.endsWith("\n")) return false;
+  const keep = text.slice(0, text.lastIndexOf("\n") + 1);
+  truncateSync(path, Buffer.byteLength(keep, "utf8"));
+  console.error(`${path}: trimmed a torn last line (a run killed mid-write?) before appending`);
+  return true;
+}
 
 function readJsonl<T>(path: string): T[] {
   if (!existsSync(path)) return [];
@@ -457,6 +481,8 @@ function selfCheck(): void {
     ["an upper-cased id", (f) => { f.status.done = ["1000000A-0000-4000-8000-00000000000A"]; }, "upper-cased"],
     ["an id listed twice under one key", (f) => { f.first_pass.plan.push(A); }, "twice"],
     ["a non-id part", (f) => { f.parts.observation.push("a leaked thought body"); }, "non-id"],
+    ["an empty part list", (f) => { f.parts.decision = []; }, "parts.decision is empty"],
+    ["an upper-cased part id", (f) => { f.parts.observation.push("1000000A-0000-4000-8000-00000000000A"); }, "parts.observation carries an upper-cased id"],
     ["a bare note", (f) => { f.note = " "; }, "note is missing"],
   ];
   for (const [why, mutate, expect] of mutants) {
@@ -473,6 +499,7 @@ function selfCheck(): void {
   ok(ticketStatusOf("SMD-1 — t\nProject: P · Status: Canceled (canceled) · Priority: Low\n") === "canceled", "canceled → canceled");
   ok(ticketStatusOf("Lesson from a review") === undefined, "no status line → undefined");
   ok(ticketStatusOf("Lesson from a review that quotes a ticket head:\nProject: P · Status: Done (completed) · Priority: Low\n") === undefined, "a status line quoted inside a capture is not the capture's status");
+  ok(ticketStatusOf("SMD-1 — t\nProject: P · Status: Done · Priority: Low\n\nSupersedes:\nProject: Q · Status: Done (completed) · Priority: Low\n") === undefined, "a head without the state type does not take one from a ticket quoted below it");
   const v = parseVerdict(JSON.stringify({ kind: "Plan", status: "Done", confidence: "high" }));
   ok("kind" in v && v.kind === "plan" && v.status === "done" && v.confidence === "high", "a verdict parses, case-folded");
   ok("error" in parseVerdict(JSON.stringify({ kind: "task", confidence: "high" })), "a kind off the list is an error, not a coercion");
@@ -496,6 +523,19 @@ function selfCheck(): void {
   ok(built.first_pass_status.done?.[0] === A && built.first_pass_status.open?.[0] === B, "buildFixture: the first pass's status is kept");
   ok(!flat(built.first_pass_confidence).includes(B), "buildFixture: an absent band is not invented");
   ok(built.source_kind.linear_issue?.[0] === A && built.source_kind.agent_capture?.includes(B), "buildFixture: the source kind comes from the review line");
+  {
+    // The resume after a run killed mid-append: the torn tail is trimmed, the
+    // next line lands whole, and the file reads clean from then on.
+    const dir = mkdtempSync(join(tmpdir(), "thought-kinds-"));
+    const p = join(dir, "review.jsonl");
+    writeFileSync(p, JSON.stringify({ id: A }) + "\n" + '{"id":"' + B + '","legacy_ty');
+    ok(trimTornTail(p) === true, "a torn last line is trimmed before the resume appends");
+    appendFileSync(p, JSON.stringify({ id: B }) + "\n");
+    ok(readJsonl<{ id: string }>(p).map((l) => l.id).join(",") === `${A},${B}`, "the line appended after a torn tail reads back whole, on its own line");
+    ok(trimTornTail(p) === false, "a terminated file is left alone");
+    ok(!existsSync(join(dir, "none.jsonl")) && trimTornTail(join(dir, "none.jsonl")) === false, "no file, nothing to trim");
+    rmSync(dir, { recursive: true, force: true });
+  }
   let threw = false;
   try { buildFixture([{ id: A, kind: "plan" }], [], "probe"); } catch { threw = true; }
   ok(threw, "buildFixture refuses a label with no review line");
@@ -522,6 +562,7 @@ async function label(out: string): Promise<void> {
   // before this every existing line counted, errors included; pass 4 dropped
   // the rewrite of the file that did the dropping, a truncate-and-write of
   // hours of model time). The freeze reads the LAST line per id.
+  trimTornTail(out);
   const done = new Set(readJsonl<ReviewLine>(out).filter((l) => l.first_pass !== null).map((l) => l.id));
   const limit = Number(flag("limit") ?? 0);
   const rows = await sql`SELECT id::text, content, metadata FROM thoughts ORDER BY created_at, id` as Row[];
@@ -579,6 +620,11 @@ async function score(): Promise<void> {
   const rows = await sql`SELECT id::text, content, metadata FROM thoughts WHERE id::text IN ${sql(ids)}` as Row[];
   const live = new Map(rows.map((r) => [r.id, r]));
   const missing = ids.filter((id) => !live.has(id));
+  // Every section scores the rows still in the brain (review pass 5: only the
+  // shipped-type table filtered on `live`; the distribution, the first pass and
+  // the status table counted deleted rows, and "unanswered" could go negative).
+  const here = (list: string[]) => list.filter((id) => live.has(id));
+  const liveKindOf = new Map([...kindOf].filter(([id]) => live.has(id)));
   const out: string[] = [];
   out.push(`# thought kinds — ${f.origin}`, "", `Fixture generated ${f.generated}. ${f.note}`, "");
   out.push(`${ids.length} labelled thoughts; ${live.size} still in the brain${missing.length ? `, **${missing.length} gone since** (deleted or re-captured; scored on the ${live.size})` : ""}.`, "");
@@ -589,16 +635,16 @@ async function score(): Promise<void> {
   out.push("## Distribution", "", table(
     ["kind", ...sources, "total", "share", "status"],
     kinds.map((k) => {
-      const mine = f.kinds[k];
+      const mine = here(f.kinds[k]);
       const bySource = sources.map((s) => mine.filter((id) => sourceOf.get(id) === s).length);
       const st = STATUS_OF[k];
       const statusCells = st ? st.map((s) => `${s} ${mine.filter((id) => statusOf.get(id) === s).length}`).join(", ") : "—";
-      return [k, ...bySource, mine.length, pct(mine.length, ids.length), statusCells];
+      return [k, ...bySource, mine.length, pct(mine.length, live.size), statusCells];
     }),
   ), "");
-  const compounds = f.kinds.compound ?? [];
+  const compounds = here(f.kinds.compound ?? []);
   if (compounds.length) {
-    const partCounts = Object.entries(f.parts).map(([p, pid]) => `${p} ${pid.length}`).join(", ");
+    const partCounts = Object.entries(f.parts).map(([p, pid]) => `${p} ${here(pid).length}`).join(", ");
     out.push(`${compounds.length} compound(s) contain: ${partCounts}.`, "");
   }
 
@@ -610,7 +656,7 @@ async function score(): Promise<void> {
   out.push("## The shipped `type` against the kind", "", table(
     ["kind", ...legacyCols, "expected", "right"],
     kinds.map((k) => {
-      const mine = f.kinds[k].filter((id) => live.has(id));
+      const mine = here(f.kinds[k]);
       const counts = legacyCols.map((t) => mine.filter((id) => legacyOf.get(id) === t).length);
       const exp = LEGACY_OF[k];
       if (!exp) { noSlot += mine.length; return [k, ...counts, "*no slot*", "—"]; }
@@ -623,14 +669,14 @@ async function score(): Promise<void> {
 
   // 3. The frozen first pass.
   const reportPass = (title: string, guessOf: Map<string, string>, bands?: Map<string, string>) => {
-    const a = agreement(kindOf, guessOf);
+    const a = agreement(liveKindOf, guessOf);
     out.push(`## ${title}`, "", `Agrees with the hand label on **${a.agree}/${a.n}** (${pct(a.agree, a.n)}); ${live.size - a.n} unanswered.`, "");
     out.push(table(
       ["kind", "hand", "model agreed (recall)", "model said", "of which right (precision)"],
       [...KINDS].filter((k) => a.perKind.get(k)).map((k) => { const e = a.perKind.get(k)!; return [k, e.n, `${e.agree} (${pct(e.agree, e.n)})`, e.guessed, `${e.right} (${pct(e.right, e.guessed)})`]; }),
     ), "");
     if (bands) {
-      const answered = [...guessOf.keys()].filter((id) => kindOf.has(id));
+      const answered = [...guessOf.keys()].filter((id) => liveKindOf.has(id));
       const unbanded = answered.filter((id) => !bands.has(id)).length;
       out.push(table(["band", "n", "agreed"], CONFIDENCE.map((b) => {
         const inBand = answered.filter((id) => bands.get(id) === b);
@@ -645,7 +691,7 @@ async function score(): Promise<void> {
   {
     const rows: (string | number)[][] = [];
     for (const k of Object.keys(STATUS_OF) as Kind[]) {
-      const both = ids.filter((id) => kindOf.get(id) === k && firstOf.get(id) === k);
+      const both = here(ids).filter((id) => kindOf.get(id) === k && firstOf.get(id) === k);
       if (!both.length) continue;
       const right = both.filter((id) => statusOf.get(id) !== undefined && fpStatusOf.get(id) === statusOf.get(id)).length;
       const none = both.filter((id) => !fpStatusOf.has(id)).length;
