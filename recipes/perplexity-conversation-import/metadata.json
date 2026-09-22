@@ -13,6 +13,7 @@
     "tools": ["Python 3.10+"]
   },
   "tags": ["perplexity", "import", "conversations", "memory", "migration", "summarization"],
+  "connectors": ["perplexity"],
   "difficulty": "beginner",
   "estimated_time": "20 minutes",
   "created": "2026-03-22",

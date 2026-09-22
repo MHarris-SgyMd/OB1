@@ -22,6 +22,7 @@
     }
   },
   "tags": ["consumption-formats", "digest", "telegram", "synthesis", "scheduled"],
+  "connectors": ["telegram"],
   "difficulty": "intermediate",
   "estimated_time": "30 minutes",
   "created": "2026-04-17",

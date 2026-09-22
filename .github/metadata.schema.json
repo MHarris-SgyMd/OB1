@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/NateBJones-Projects/OB1/blob/main/.github/metadata.schema.json",
   "title": "Open Brain Source Contribution Metadata",
-  "description": "Schema for metadata.json files in OB1 contributions (recipes, schemas, dashboards, integrations, skills, primitives, extensions). FORK NOTE (siggymd): three optional fields added to the upstream schema \u2014 requires.env, contributors, status \u2014 so existing contributions that carry legitimate data upstream never modelled validate instead of being stripped. All are additive and optional; anything valid upstream stays valid here.",
+  "description": "Schema for metadata.json files in OB1 contributions (recipes, schemas, dashboards, integrations, skills, primitives, extensions). FORK NOTE (siggymd): four optional fields added to the upstream schema \u2014 requires.env, contributors, status, and connectors (SMD-1933) \u2014 the first three so existing contributions that carry legitimate data upstream never modelled validate instead of being stripped, the fourth so a contribution declares the external systems it touches. All are additive and optional; anything valid upstream stays valid here.",
   "type": "object",
   "required": [
     "name",
@@ -117,6 +117,15 @@
         "type": "string"
       },
       "description": "Slugs of canonical skills this contribution depends on (e.g., [\"auto-capture\"]). Use this when a contribution builds on reusable agent behavior from skills/."
+    },
+    "connectors": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"
+      },
+      "uniqueItems": true,
+      "description": "FORK (siggymd, SMD-1933): the external systems this contribution reads from or delivers to, as connector keys of docs/connector-registry.json (e.g. [\"gmail\"], [\"telegram\", \"google-calendar\"]). A contribution that names one is classified in the registry, and check-fork-consistency check 19 holds the two equal. Empty (the templates ship []) or omitted for a contribution that touches no external system."
     },
     "learning_order": {
       "type": "integer",

@@ -7,7 +7,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPTransport } from "@hono/mcp";
 import { Hono } from "hono";
 import { z } from "zod";
-import { createStore, postgrestOnBunNotice, storeKind, UUID_RE, type Citation, type ThoughtStore } from "./store.ts";
+import { createStore, postgrestOnBunNotice, storeKind, UUID_RE, type Citation, type ThoughtStore, type ThoughtHybridMatch, type ThoughtKeywordMatch } from "./store.ts";
 import { queryLogEnabled, trimmedEnv } from "../db/config.mjs";
 import { authenticateRequest, canWrite, type Principal } from "./auth.ts";
 import { AgentResolver, cacheTtlFromEnv } from "./agents.ts";
@@ -80,6 +80,15 @@ type Env = {
   OB1_QUERY_LOG?: string;
   /** Days query_log rows are kept by prune_query_log(); default 30. See db/config.mjs. */
   OB1_QUERY_LOG_RETENTION_DAYS?: string;
+  /**
+   * Which pipeline tier this server runs as (SMD-1806): stable | canary |
+   * working. Stamped onto every query_log row the server writes, so the canary
+   * — which replays stable's log — can tell a stable-written row from its own.
+   * Unset is a plain brain (the row's tier is NULL); the tiers are one corpus
+   * read through three schemas with one writer per tier. Read here as well as by
+   * db/ingest-records.ts (which stamps ob1_config.tier) and preflight's `tier`.
+   */
+  OB1_TIER?: string;
   /** Model for metadata extraction. No schema dependency — safe to change anytime. */
   OB1_METADATA_MODEL?: string;
   /** The supersession judge's model (db/consolidate.ts), when it is not OB1_METADATA_MODEL; the server never judges, but embed.ts reads one Env (SMD-1901). */
@@ -464,6 +473,48 @@ function explainPair(r: { duplicateOf?: string; fingerprintHeldBy?: string }): s
  */
 const SERVER_NAME = "open-brain";
 
+// SMD-1490: the metadata filter a search tool exposes. Shallow by design —
+// top-level keys to a scalar or an array of scalars — so `metadata @> filter`
+// stays GIN-indexable and the row-level-security cost of exposing it (SMD-1625)
+// is bounded, not open-ended. A nested object, or more than the caps below, is
+// refused at the tool boundary rather than handed to jsonb.
+const FILTER_MAX_KEYS = 20;
+const FILTER_MAX_BYTES = 4096;
+const filterScalar = z.union([z.string(), z.number(), z.boolean()]);
+/** The zod surface of the filter argument; the caps and normalisation are parseFilter's. */
+const filterInput = z
+  .record(z.string(), z.union([filterScalar, z.array(filterScalar)]))
+  .optional()
+  .describe(
+    'Optional metadata filter: an object whose top-level keys a thought\'s metadata must contain (jsonb containment). A value is a scalar or an array of scalars — {"type":"project"} keeps thoughts whose metadata.type is "project"; {"topics":["ob1"]} keeps those whose topics array contains "ob1". Nested objects are not accepted. Omit for an unfiltered search.',
+  );
+
+/**
+ * Normalise and bound a metadata filter from a search tool (SMD-1490). Absent,
+ * null or empty is `{}` (unfiltered). Throws on a shape the boundary should
+ * refuse — a non-object, a nested object, a non-scalar value, or a filter over
+ * the key/size caps — so the handler's catch turns it into a tool error rather
+ * than a jsonb the store would run. Exported for the unit test.
+ */
+export function parseFilter(raw: unknown): Record<string, unknown> {
+  if (raw === undefined || raw === null) return {};
+  if (typeof raw !== "object" || Array.isArray(raw)) throw new Error("filter must be an object of metadata keys");
+  const isScalar = (v: unknown) => typeof v === "string" || typeof v === "number" || typeof v === "boolean";
+  const entries = Object.entries(raw as Record<string, unknown>);
+  if (entries.length > FILTER_MAX_KEYS) throw new Error(`filter has too many keys (max ${FILTER_MAX_KEYS})`);
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of entries) {
+    if (Array.isArray(v)) {
+      if (!v.every(isScalar)) throw new Error(`filter.${k} must be an array of strings, numbers or booleans`);
+    } else if (!isScalar(v)) {
+      throw new Error(`filter.${k} must be a scalar or an array of scalars — nested objects are not accepted`);
+    }
+    out[k] = v;
+  }
+  if (JSON.stringify(out).length > FILTER_MAX_BYTES) throw new Error(`filter is too large (max ${FILTER_MAX_BYTES} bytes)`);
+  return out;
+}
+
 function buildServer(principal: Principal): McpServer {
   const server = new McpServer({
     name: SERVER_NAME,
@@ -476,9 +527,13 @@ function buildServer(principal: Principal): McpServer {
   // The flag is read from the boot-time env snapshot (initEnv freezes it on the
   // first request), so it is set at start-up, not toggled per request. Nothing
   // here reads the log back — the export tool does, offline.
+  // The pipeline tier this server runs as (SMD-1806), stamped on every query_log
+  // row so the canary — which replays stable's log — can tell a stable-written
+  // row from its own. Unset is a plain brain (the row's tier is NULL).
+  const serverTier = (): string | undefined => env().OB1_TIER?.trim() || undefined;
   const logSearchCall = async (
     tool: string,
-    args: { query: string; limit: number; threshold: number; recencyWeight: number; filter: Record<string, unknown> },
+    args: { query: string; limit: number; threshold: number; recencyWeight: number; filter: Record<string, unknown>; arm: string },
     data: { id: string; score?: number | null }[],
   ): Promise<void> => {
     if (!queryLogEnabled(env())) return;
@@ -493,6 +548,8 @@ function buildServer(principal: Principal): McpServer {
         filter: args.filter,
         resultIds: data.map((t) => t.id),
         resultScores: data.map((t) => t.score ?? null),
+        arm: args.arm,
+        tier: serverTier(),
       });
     } catch {
       // best-effort: a log failure must never reach the caller.
@@ -514,7 +571,7 @@ function buildServer(principal: Principal): McpServer {
       // on the pool, and there is one INSERT shape per store to keep right,
       // no single-row twin to drift from it. Best-effort as a whole: a
       // failure drops the batch, never the write it followed.
-      await (await db()).logActions(rows.map((r) => ({ tool: r.tool, agentId: principal.agentId, targetId: r.targetId })));
+      await (await db()).logActions(rows.map((r) => ({ tool: r.tool, agentId: principal.agentId, targetId: r.targetId, tier: serverTier() })));
     } catch {
       // best-effort.
     }
@@ -533,6 +590,49 @@ function buildServer(principal: Principal): McpServer {
     }
     return [...rows].map(([targetId, tool]) => ({ tool, targetId }));
   };
+
+  // The one search operation the three search tools share (SMD-1490). It owns
+  // the policy that was copy-pasted across the handlers — and dropped the filter
+  // in three places, and never logged keyword at all: the egress gate before a
+  // query leaves for its embedding (hybrid only — a keyword search embeds
+  // nothing, so nothing leaves the box), the arm dispatch, and the query-log
+  // write with the filter, the arm and the tier on it. Each tool is a thin
+  // adapter that maps its external interface in and renders its own output; the
+  // rows come back typed per arm, so search_thoughts still gets its needle facts
+  // and keyword its occurrence counts. A refusal (the egress gate) comes back as
+  // a ready tool result for the adapter to return.
+  type Refused = { refused: ReturnType<typeof toolError>; rows?: undefined; embedding?: undefined };
+  interface RunSearch {
+    // The hybrid arm hands back the query embedding it computed, so a caller
+    // (search_thoughts's zero-result probe) reuses it without a second gate or
+    // provider call.
+    (opts: { tool: string; arm: "hybrid"; query: string; limit: number; threshold: number; recencyWeight: number; filter: Record<string, unknown> }):
+      Promise<Refused | { refused?: undefined; rows: ThoughtHybridMatch[]; embedding: number[] }>;
+    (opts: { tool: string; arm: "keyword"; query: string; limit: number; offset: number; filter: Record<string, unknown> }):
+      Promise<{ refused?: undefined; rows: ThoughtKeywordMatch[] }>;
+  }
+  const runSearch: RunSearch = (async (opts: {
+    tool: string; arm: "hybrid" | "keyword"; query: string; limit: number;
+    threshold?: number; recencyWeight?: number; offset?: number; filter: Record<string, unknown>;
+  }): Promise<{ refused?: ReturnType<typeof toolError>; rows: (ThoughtHybridMatch | ThoughtKeywordMatch)[]; embedding?: number[] }> => {
+    if (opts.arm === "keyword") {
+      const rows = await (await db()).keywordThoughts({ query: opts.query, limit: opts.limit, offset: opts.offset ?? 0, filter: opts.filter });
+      // A keyword search takes no threshold or recency weight; log them as the
+      // compat `search` does its fixed zeros, so the column is a number not a NULL.
+      await logSearchCall(opts.tool, { query: opts.query, limit: opts.limit, threshold: 0, recencyWeight: 0, filter: opts.filter, arm: "keyword" }, rows);
+      return { rows };
+    }
+    // The query text leaves for its embedding as a thought's does (SMD-1903).
+    const q = gateQuery(opts.query, principal);
+    if (q.refused) return { refused: toolError(q.refused), rows: [] };
+    const embedding = await getEmbedding(opts.query, q.subject, "query");
+    const rows = await (await db()).hybridThoughts({
+      query: opts.query, embedding, threshold: opts.threshold ?? 0, limit: opts.limit,
+      filter: opts.filter, recencyWeight: opts.recencyWeight ?? 0,
+    });
+    await logSearchCall(opts.tool, { query: opts.query, limit: opts.limit, threshold: opts.threshold ?? 0, recencyWeight: opts.recencyWeight ?? 0, filter: opts.filter, arm: "hybrid" }, rows);
+    return { rows, embedding };
+  }) as RunSearch;
 
   // ChatGPT compatibility: restricted connector surfaces, company knowledge, and deep
   // research look for exact read-only `search` and `fetch` tool shapes.
@@ -568,24 +668,14 @@ function buildServer(principal: Principal): McpServer {
     },
     async ({ query }) => {
       try {
-        // The query text leaves for its embedding as a thought's does (SMD-1903).
-        const q = gateQuery(query, principal);
-        if (q.refused) return toolError(q.refused);
-        const qEmb = await getEmbedding(query, q.subject, "query");
-        const data = await (await db()).hybridThoughts({
-          query,
-          embedding: qEmb,
-          // 0, not 0.5 (SMD-1300): admission is relative to the top match now
-          // (migration 027), so sending a low absolute floor lets it govern.
-          // This tool takes no threshold from the caller, so it could not follow
-          // the fix any other way — the whole point of the ticket's step 3.
-          threshold: 0,
-          limit: 10,
-          filter: {},
-          recencyWeight: SEARCH_COMPAT_RECENCY_WEIGHT,
-        });
-
-        await logSearchCall("search", { query, limit: 10, threshold: 0, recencyWeight: SEARCH_COMPAT_RECENCY_WEIGHT, filter: {} }, data);
+        // The one search op, hybrid arm (SMD-1490); this surface is fixed, so it
+        // pins every knob and exposes none — no filter (filter: {}), no caller
+        // threshold (0, not 0.5, SMD-1300: admission is relative to the top match
+        // since 027, so a low absolute floor lets it govern), and the fixed
+        // recency weight above. runSearch gates the query (SMD-1903) and logs.
+        const r = await runSearch({ tool: "search", arm: "hybrid", query, limit: 10, threshold: 0, recencyWeight: SEARCH_COMPAT_RECENCY_WEIGHT, filter: {} });
+        if (r.refused) return r.refused;
+        const data = r.rows;
 
         const results = data.map((t) => ({
           id: t.id,
@@ -702,24 +792,20 @@ function buildServer(principal: Principal): McpServer {
         recency_weight: z.number().optional().default(0)
           .describe("How much a thought's age counts against its similarity, 0-1. 0 (default) ranks by meaning alone; 0.2 is a gentle preference for recent captures; 1 ranks the relevant thoughts newest first. A thought's recency halves every 90 days.")
           .transform((w) => Math.min(Math.max(w, 0), 1)),
+        // SMD-1490: the metadata filter, populated end to end (query_log.filter,
+        // eval-replay's filtered path). Absent is unfiltered. The store applies
+        // `metadata @> filter` inside the scan (014); parseFilter bounds it.
+        filter: filterInput,
       },
     },
-    async ({ query, limit, threshold, recency_weight }) => {
+    async ({ query, limit, threshold, recency_weight, filter }) => {
       try {
-        // The query text leaves for its embedding as a thought's does (SMD-1903).
-        const q = gateQuery(query, principal);
-        if (q.refused) return toolError(q.refused);
-        const qEmb = await getEmbedding(query, q.subject, "query");
-        const data = await (await db()).hybridThoughts({
-          query,
-          embedding: qEmb,
-          threshold,
-          limit,
-          filter: {},
-          recencyWeight: recency_weight,
-        });
-
-        await logSearchCall("search_thoughts", { query, limit, threshold, recencyWeight: recency_weight, filter: {} }, data);
+        // The one search op, hybrid arm (SMD-1490): it gates the query
+        // (SMD-1903), embeds it, runs the filter and logs. parseFilter refuses a
+        // shape jsonb should not run; a bad filter falls to the catch below.
+        const r = await runSearch({ tool: "search_thoughts", arm: "hybrid", query, limit, threshold, recencyWeight: recency_weight, filter: parseFilter(filter) });
+        if (r.refused) return r.refused;
+        const data = r.rows;
 
         if (data.length === 0) {
           // Nothing cleared the threshold and no literal matched — but WHY is
@@ -727,8 +813,10 @@ function buildServer(principal: Principal): McpServer {
           // call with no threshold and one row returns the query-level facts
           // whenever the brain has any embedded thought at all (review pass:
           // the first version said "no thoughts found" about a literal that
-          // 150 thoughts contained, because it was too common to match).
-          const probe = await (await db()).hybridThoughts({ query, embedding: qEmb, threshold: -1, limit: 1, filter: {} });
+          // 150 thoughts contained, because it was too common to match). Reuses
+          // the arm's embedding, and stays unfiltered so the facts are the
+          // query's, not the filtered scope's.
+          const probe = await (await db()).hybridThoughts({ query, embedding: r.embedding, threshold: -1, limit: 1, filter: {} });
           const facts = probe[0];
           const why: string[] = [];
           if (facts) {
@@ -857,16 +945,19 @@ function buildServer(principal: Principal): McpServer {
         // it, offset: -5 renders "Result -4".
         limit: z.number().int().min(1).max(100).optional().default(10).describe("Results per page, 1-100."),
         offset: z.number().int().min(0).optional().default(0).describe("Skip this many results, for paging."),
+        // SMD-1490: the same metadata filter as search_thoughts, applied inside
+        // the keyword scan (`metadata @> filter`). Absent is unfiltered.
+        filter: filterInput,
       },
     },
-    async ({ query, limit, offset }) => {
+    async ({ query, limit, offset, filter }) => {
       try {
-        const data = await (await db()).keywordThoughts({
-          query,
-          limit,
-          offset,
-          filter: {},
-        });
+        // The one search op, keyword arm (SMD-1490): no gate (a keyword search
+        // embeds nothing, so nothing leaves the box), the filter applied inside
+        // the scan, and — new since SMD-1490 — a query_log row written with
+        // arm='keyword' (034 logged only the semantic path).
+        const r = await runSearch({ tool: "search_thoughts_keyword", arm: "keyword", query, limit, offset, filter: parseFilter(filter) });
+        const data = r.rows;
 
         if (data.length === 0) {
           // Two different nothings, and the difference is actionable: an empty

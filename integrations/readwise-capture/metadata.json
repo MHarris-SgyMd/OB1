@@ -13,6 +13,7 @@
     "tools": ["Supabase CLI"]
   },
   "tags": ["readwise", "highlights", "capture", "reading", "webhook"],
+  "connectors": ["readwise"],
   "difficulty": "beginner",
   "estimated_time": "20 minutes",
   "created": "2026-04-24",

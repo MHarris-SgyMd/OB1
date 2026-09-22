@@ -35,6 +35,7 @@
     "habits",
     "personal-assistant"
   ],
+  "connectors": ["discord", "google-calendar", "telegram"],
   "difficulty": "intermediate",
   "estimated_time": "45-60 minutes",
   "created": "2026-03-18",

@@ -493,6 +493,27 @@ console.log("\n[15] The server says once, when it builds the store, that PostgRE
   assert(notices[0] === noticeOf("postgrest"), "…and it is store.ts's line itself, byte for byte — not a copy carrying the same phrases");
 }
 
+console.log("\n[16] parseFilter bounds and normalises a metadata filter at the tool boundary (SMD-1490)");
+{
+  // The validator the search tools run a caller's `filter` through before it
+  // reaches jsonb. Shallow by design (scalars or arrays of scalars) so
+  // `metadata @> filter` stays GIN-indexable; a nested object, a non-object, or
+  // a filter over the caps is refused here rather than handed to the store.
+  const { parseFilter } = await import("./index.ts") as { parseFilter: (raw: unknown) => Record<string, unknown> };
+  assert(JSON.stringify(parseFilter(undefined)) === "{}" && JSON.stringify(parseFilter(null)) === "{}" && JSON.stringify(parseFilter({})) === "{}",
+    "absent, null or empty normalises to the unfiltered {}");
+  const shallow = { type: "idea", count: 3, flagged: true };
+  assert(JSON.stringify(parseFilter(shallow)) === JSON.stringify(shallow), "a shallow scalar object passes through unchanged");
+  assert(JSON.stringify(parseFilter({ topics: ["ob1", "smd"] })) === JSON.stringify({ topics: ["ob1", "smd"] }), "an array of scalars passes");
+  const throws = (raw: unknown): boolean => { try { parseFilter(raw); return false; } catch { return true; } };
+  assert(throws({ type: { nested: "no" } }), "a nested object is refused");
+  assert(throws("not an object") && throws([1, 2, 3]), "a non-object (string or array) is refused");
+  assert(throws({ topics: [{ x: 1 }] }), "an array holding a non-scalar is refused");
+  const manyKeys = Object.fromEntries(Array.from({ length: 21 }, (_, i) => [`k${i}`, i]));
+  assert(throws(manyKeys), "a filter over the key cap is refused");
+  assert(throws({ blob: "x".repeat(5000) }), "a filter over the size cap is refused");
+}
+
 server.stop();
 
 report();

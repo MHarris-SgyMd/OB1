@@ -763,6 +763,10 @@ export type QuerySearchLog = {
   filter: Record<string, unknown>;
   resultIds: string[];
   resultScores: (number | null)[];
+  /** Which retrieval arm served the row: 'hybrid' or 'keyword' (SMD-1490). */
+  arm?: string;
+  /** The tier the writing server runs as: stable|canary|working, else absent (SMD-1806). */
+  tier?: string;
 };
 
 /**
@@ -775,6 +779,8 @@ export type QueryActionLog = {
   tool: string;
   agentId?: string;
   targetId: string;
+  /** The tier the writing server runs as: stable|canary|working, else absent (SMD-1806). */
+  tier?: string;
 };
 
 export interface ThoughtStore {
