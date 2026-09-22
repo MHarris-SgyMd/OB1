@@ -73,26 +73,27 @@ exactly one disposition.
 fails CI"):**
 1. `scripts/check-fork-consistency.mjs` check 7 already covers **function** redefinitions
    (`upsert_thought` / `match_thoughts` / `update_updated_at`) since SMD-1250 — confirmed.
-2. **Gap:** no check forbids a vendored file doing `DROP COLUMN` / `ALTER COLUMN` on core
-   `thoughts` (check 5 only guards `ADD COLUMN … IF NOT EXISTS`). `email-history-import`'s
-   rollback SQL slipped past exactly here. Extend the guard to fail on `DROP COLUMN` /
-   `ALTER COLUMN TYPE` against `public.thoughts` in any non-own-database vendored file.
-3. When `recency-boosted-match-thoughts` is removed, delete its now-dead allowlist entry
-   at `check-fork-consistency.mjs:614`.
+2. **Done** — check 5 now also fails a vendored `.sql` that does `DROP COLUMN` / `ALTER COLUMN`
+   on core `thoughts` (rule `thoughts-column-mutation`, scoped to `schemas`/`recipes`/`integrations`
+   `.sql`; a core migration may own the schema and a README example is prose, so both are out
+   of scope). This is the class `email-history-import`'s rollback SQL slipped past. Mutant-tested.
+3. **Done** — `recency-boosted-match-thoughts`'s now-dead `match_thoughts_recency` allowlist
+   entry was removed with the folder in the removals PR.
 
-**Consistency fixes surfaced by the audit (behaviour-neutral; apply in the landing PRs so
-`check-fork-consistency` + the suites verify them — not dispositions):**
+**Consistency fixes surfaced by the audit (behaviour-neutral):**
 1. **`schemas/smart-ingest` folder-name drift** — several refs say `schemas/smart-ingest-tables`
-   (`integrations/smart-ingest/index.ts`, `integrations/rest-api` comments,
-   `recipes/brain-smoke-test`); the folder is `schemas/smart-ingest`.
-2. **`recipes/content-fingerprint-dedup` stale paths** — some cross-refs point at
-   `primitives/content-fingerprint-dedup` and an upstream GitHub URL
-   (`recipes/email-history-import`, `recipes/gmail-smart-pull`,
-   `dashboards/ob1-canonical-landing`); the folder is under `recipes/`, and the upstream
-   URL overlaps SMD-1929.
-3. **`schemas/workflow-status` bare `ADD COLUMN`** — add `IF NOT EXISTS` to its two
-   `ALTER TABLE thoughts ADD COLUMN` statements (aligns with guard check 5; removes the
-   `enhanced-thoughts` install-order collision noted in its row).
+   (`integrations/smart-ingest`, `integrations/rest-api`, `recipes/brain-smoke-test`); the
+   folder is `schemas/smart-ingest`. **Deferred** — in `brain-smoke-test` the drift is tangled
+   with a stale "not yet on main" assertion (the schema *is* on main), so a correct fix is a
+   smoke-test-logic change, not a rename; left for its own pass.
+2. **`recipes/content-fingerprint-dedup` stale paths** — `recipes/email-history-import`'s
+   `pull-gmail.ts` pointed at `primitives/content-fingerprint-dedup`; **fixed** to `recipes/…`
+   here. The `dashboards/ob1-canonical-landing` upstream GitHub URL is an SMD-1929 item
+   (upstream branding/links), left for it.
+3. **`schemas/workflow-status`** — **no fix needed.** `migration.sql` already uses
+   `ALTER TABLE thoughts ADD COLUMN IF NOT EXISTS …` on both columns (idempotent, re-runnable);
+   the earlier "bare `ADD COLUMN` collision" note was a misread of the README example. The
+   `workflow-status` row below is corrected.
 
 ## How the "verified no references" gate is applied
 
@@ -160,7 +161,7 @@ excluding `_shared/` / `_template/` scaffolding and `README.md` indexes. 87 arti
 | `thought-work-claims` | **remove** *(no-parity posture)* | Already a **comment-only stub** — all upstream DDL was stripped under SMD-1250 (it would have clobbered 015's `release_thought` / `release_claims_for_worker`). Migration 015 owns the real `thought_work_claims` (evals + `db/config.mjs` grants use it). The stub's only content is upstream documentation. Removal PR: delete the folder; guard check 7 still fences the function names regardless. |
 | `typed-reasoning-edges` | keep + audited + rebuild-ticket **SMD-1253** | Own `thought_edges` table + upsert RPC (granted by `db/config.mjs`); required by `recipes/typed-edge-classifier` (matches its CHECK constraint). Requires `entity-extraction`. Not rebuilt in core; rebuild tracked under SMD-1253. |
 | `wiki-pages` | keep + audited + rebuild-ticket **SMD-949** | Own `wiki_pages` / `wiki_sections` / `wiki_section_revisions` + RPCs (granted by `db/config.mjs`); README index row; feeds the wiki recipes. Not rebuilt in core; rebuild tracked under SMD-949. |
-| `workflow-status` | keep + audited *(with caveat)* | Minimal "add `status` / `status_updated_at` + `idx_thoughts_status`" migration. Live consumers: `dashboards/open-brain-dashboard-next` (Workflow board requires the columns) and `open-brain-rest`. Distinct from the heavier `enhanced-thoughts`. **Caveat:** its bare `ADD COLUMN` (no `IF NOT EXISTS`) collides if `enhanced-thoughts` ran first — a one-line audit fix (add `IF NOT EXISTS`), not a removal. |
+| `workflow-status` | keep + audited | Minimal "add `status` / `status_updated_at` + `idx_thoughts_status`" migration; `migration.sql` uses `ADD COLUMN IF NOT EXISTS` on both columns (idempotent, re-runnable — no install-order collision with `enhanced-thoughts`). Live consumers: `dashboards/open-brain-dashboard-next` (Workflow board requires the columns) and `open-brain-rest`. Distinct from the heavier `enhanced-thoughts`. |
 
 ### `docs/drafts/` (3)
 

@@ -533,11 +533,10 @@ export const SCHEMAS_DIR = join(HERE, "..", "schemas");
 /**
  * The community SQL files with a prerequisite, in the order it requires:
  * enhanced-thoughts before readwise-books (whose function filters on its
- * source_type column) and text-search-trgm; entity-extraction before
- * typed-reasoning-edges (which alters its edges table). The rest of the files
- * follow alphabetically.
+ * source_type column); entity-extraction before typed-reasoning-edges (which
+ * alters its edges table). The rest of the files follow alphabetically.
  */
-export const SCHEMA_FILES_FIRST: readonly string[] = ["enhanced-thoughts/schema.sql", "text-search-trgm/schema.sql", "readwise-books/schema.sql", "entity-extraction/schema.sql", "typed-reasoning-edges/schema.sql"];
+export const SCHEMA_FILES_FIRST: readonly string[] = ["enhanced-thoughts/schema.sql", "readwise-books/schema.sql", "entity-extraction/schema.sql", "typed-reasoning-edges/schema.sql"];
 /**
  * Every SQL file under schemas/, as `<dir>/<file>`, SCHEMA_FILES_FIRST first
  * and the rest alphabetical — the order test-schema [40] and test-live [18]

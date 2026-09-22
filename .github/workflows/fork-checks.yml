@@ -81,7 +81,7 @@ jobs:
       # is not installed on the maintainer's machine, so a node-only run was
       # the one step nobody could reproduce locally); the script is plain ESM
       # and runs under either.
-      - name: Check metadata, links, dependencies, SQL guards, shell hazards, core-function redefinitions, credential compares, fixture redaction, thought writes, the shim's runtime and Supabase-isms in schema SQL
+      - name: Check metadata, links, dependencies, SQL guards, shell hazards, core-function redefinitions, credential compares, fixture redaction, thought writes, the shim's runtime, Supabase-isms in schema SQL, the compose stack's ports and forwards, FORK.md's change files, and the type-checked directories' pins
         run: bun scripts/check-fork-consistency.mjs
 
   deno-check:

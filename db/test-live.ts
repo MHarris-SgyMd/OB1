@@ -3991,7 +3991,7 @@ console.log("\n[18] Every schemas/*.sql applies over TCP with no Supabase role p
         try { await sql.unsafe(readFileSync(join(SCHEMAS, f), "utf8")); }
         catch (e) { failed.push(`${f}: ${(e as Error).message.split("\n")[0]}`); }
       }
-      assert(schemaFiles.length >= 17 && failed.length === 0, `every schemas/*.sql applies over TCP with no Supabase role (${schemaFiles.length} files; failed: ${failed.join(" | ") || "none"})`);
+      assert(schemaFiles.length >= 14 && failed.length === 0, `every schemas/*.sql applies over TCP with no Supabase role (${schemaFiles.length} files; failed: ${failed.join(" | ") || "none"})`);
 
       // After: --grant issues the whole community group, over TCP, in one
       // transaction — views as tables, sequences and functions spelled as GRANT

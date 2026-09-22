@@ -5,7 +5,7 @@
  * other numbers come from (the Linear issues, whole-content vector plus bare
  * windows, at the shipped 1024 width)?
  *
- * SMD-1038 (FORK.md, "A second vector store beside Postgres") pre-registered the
+ * SMD-1038 (changes/079-the-store-measured-against-pgvector.md, "A second vector store beside Postgres") pre-registered the
  * bar this run is read against: a recall gap at a used filter tier, a latency
  * gap at a reachable row count, or an index build time that makes a re-embed a
  * maintenance window. This arm measures the first and third on real data at
