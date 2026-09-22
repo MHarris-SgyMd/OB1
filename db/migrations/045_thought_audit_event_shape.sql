@@ -1658,41 +1658,12 @@ COMMENT ON FUNCTION backfill_thought_audit_events(integer) IS
 -- apply time, since no agent has one yet. Re-runs find nothing.
 SELECT backfill_thought_audit_events();
 
--- ---------------------------------------------------------------------------
--- The one privilege this file adds to the capture path, granted here
---
--- The audit trigger runs as the writer and reads ob1_agents; a role granted the
--- capture set before this file (INSERT on thought_audit, no SELECT there)
--- would fail every capture, edit and delete from the moment this applies
--- until `migrate.ts --grant` was run again (sixth review pass). So, as 033
--- replays an ACL onto the form it creates, every grantee that may INSERT into
--- thought_audit — the capturing roles, by the catalog, the owner aside, and
--- PUBLIC when an operator granted the table to PUBLIC (seventh review pass:
--- a getting-started paste does; every writer under it would have failed) —
--- is granted SELECT on ob1_agents here. The registry holds labels, ids and
--- kinds, no secret (the digests are ob1_agent_keys'). A group role's members
--- inherit, as they inherit the INSERT. Idempotent: GRANT twice is GRANT once.
--- db/config.mjs's ROLE_GRANTS documents the same row for --grant. Read from
--- the table's ACL itself, not information_schema.role_table_grants: that view
--- shows a non-superuser only the rows where it is grantor or grantee, so an
--- owner applying this file missed a role whose INSERT came through another
--- role's grant option (run-it, eighth review pass) — the one role the block
--- exists for, failing every write after the apply.
--- ---------------------------------------------------------------------------
-DO $grant$
-DECLARE
-  v_role text;
-BEGIN
-  FOR v_role IN
-    SELECT DISTINCT CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END
-      FROM pg_class c
-      CROSS JOIN LATERAL aclexplode(c.relacl) a
-     WHERE c.oid = 'thought_audit'::regclass
-       AND a.privilege_type = 'INSERT'
-       AND (a.grantee = 0 OR pg_get_userbyid(a.grantee) <> current_user)
-  LOOP
-    EXECUTE CASE WHEN v_role = 'PUBLIC' THEN 'GRANT SELECT ON ob1_agents TO PUBLIC'
-                 ELSE format('GRANT SELECT ON ob1_agents TO %I', v_role) END;
-  END LOOP;
-END
-$grant$;
+-- The one privilege this file adds to the capture path — SELECT on ob1_agents,
+-- which the trigger reads as the writer — is NOT granted here. It lands as
+-- every privilege since 010 has: a row in db/config.mjs's ROLE_GRANTS (since
+-- 045), preflight's `write privileges` check naming what a role lacks, and
+-- `migrate.ts --grant`. A role granted the capture set before this file fails
+-- its writes from the apply until --grant is run, and the check says so at the
+-- next start; six through eight review passes tried granting in-file and each
+-- found a catalog edge the convention does not have (PUBLIC, grant-option
+-- chains under a non-superuser owner) — cut, ninth review pass.

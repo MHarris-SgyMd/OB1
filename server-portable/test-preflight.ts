@@ -1483,13 +1483,12 @@ else {
       assert(/write privileges\s+ob1_pf_capture holds the capture path's privileges/.test(pre045Agents.out) && !/ob1_agents/.test(writeLine(pre045Agents.out)),
              `under 025's audit trigger the same role holds the capture set — SELECT on ob1_agents is required only while the body that reads it is installed (exit ${pre045Agents.code})`);
       await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("045") });
-      // 045 re-applied requires the SELECT again — and GRANTS it, to every role
-      // that may INSERT into thought_audit, so the role that lost it above holds
-      // it now and the check is ok (sixth review pass: a capturing role granted
-      // before 045 must not lose every write at the apply).
-      const granted045 = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
-      assert(/write privileges\s+ob1_pf_capture holds the capture path's privileges/.test(granted045.out) && /SELECT on ob1_agents/.test(writeLine(granted045.out)),
-             `…and 045's body back, the SELECT is required again — and 045 granted it to this role itself, which may INSERT into thought_audit (exit ${granted045.code})`);
+      // 045 re-applied requires the SELECT again, and grants it to nobody: the
+      // grant is the operator's, by the convention every privilege has landed
+      // under — a ROLE_GRANTS row, this check naming what is missing, --grant
+      // (ninth review pass cut an in-file grant after three passes of edges).
+      assert(/SELECT on ob1_agents/.test(writeLine((await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL })).out)), "…and 045's body back, it is required again — and named, not granted, by the apply");
+      await claims.unsafe("GRANT SELECT ON ob1_agents TO ob1_pf_capture");
       // The census SELECTs the log; the hard capture set grants INSERT only. A
       // role granted exactly that set is told the census was not checked, and
       // where the SELECT is — not warned about its brain (run-it, second review

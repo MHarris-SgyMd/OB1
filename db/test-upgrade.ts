@@ -1590,18 +1590,14 @@ console.log("\n[20b] Migration 045 onto a populated 044 — the audit row gains 
   await sql.unsafe(`REVOKE ALL ON FUNCTION ${UT_9} FROM PUBLIC`);
   await sql.unsafe(`GRANT EXECUTE ON FUNCTION ${UT_9} TO ob1_upgrade_editor45`);
   // A capturing role as 044 granted it — INSERT on thought_audit, nothing on
-  // ob1_agents — must not lose every write at the apply (sixth review pass).
+  // ob1_agents — is NOT granted the SELECT by the apply: that is --grant's, by
+  // the convention every privilege has landed under, and preflight names it.
+  // Asserted so a later hand does not put an in-file grant back (ninth
+  // review pass cut one after three passes of catalog edges).
   await sql.unsafe(`DO $r$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob1_upgrade_capturer45') THEN CREATE ROLE ob1_upgrade_capturer45 NOLOGIN; END IF; END $r$`);
   await sql.unsafe(`GRANT INSERT ON thought_audit TO ob1_upgrade_capturer45`);
   const readsAgents = async () => (await sql`SELECT has_table_privilege('ob1_upgrade_capturer45', 'ob1_agents', 'SELECT') AS p`)[0].p as boolean;
   assert((await readsAgents()) === false, "at 044 a capturing role holds no SELECT on ob1_agents — the audit trigger did not read it");
-  // …and PUBLIC, when an operator granted the table so (a getting-started
-  // paste does): every writer under that grant must keep writing too
-  // (seventh review pass). Read from the catalog, since has_table_privilege
-  // takes a role and PUBLIC is not one.
-  await sql.unsafe(`GRANT INSERT ON thought_audit TO PUBLIC`);
-  const publicReadsAgents = async () => (await sql`SELECT EXISTS (SELECT 1 FROM information_schema.role_table_grants WHERE grantee = 'PUBLIC' AND table_schema = 'public' AND table_name = 'ob1_agents' AND privilege_type = 'SELECT') AS p`)[0].p as boolean;
-  assert((await publicReadsAgents()) === false, "…nor does PUBLIC");
   const acl9 = await aclOf(UT_9);
   const snapshot = async () => JSON.stringify(await sql`SELECT id, content_fingerprint, metadata, embedding_model, updated_at::text AS u FROM thoughts ORDER BY id`);
   const rows = await snapshot();
@@ -1619,10 +1615,7 @@ console.log("\n[20b] Migration 045 onto a populated 044 — the audit row gains 
     "045 adds eight columns to thought_audit and kind to ob1_agents, each exactly once");
   assert((await snapshot()) === rows, "no thought moved");
   assert((await auditSnapshot()) === auditRows && Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c) === Number(auditBefore), "…no audit row was added, and 008's and 010's columns on every existing row are byte for byte what they were");
-  assert((await readsAgents()) === true, "…and every role that may INSERT into thought_audit was granted the SELECT on ob1_agents 045's trigger needs — a capturing role keeps writing across the apply");
-  assert((await publicReadsAgents()) === true, "…PUBLIC included, since PUBLIC may INSERT here (seventh review pass)");
-  await sql.unsafe(`REVOKE INSERT ON thought_audit FROM PUBLIC`);
-  await sql.unsafe(`REVOKE SELECT ON ob1_agents FROM PUBLIC`);
+  assert((await readsAgents()) === false, "…and 045 grants it to nobody: the SELECT on ob1_agents its trigger needs is ROLE_GRANTS' row since 045, --grant's to issue and preflight's to name (ninth review pass)");
   ev = await rowOf(viaRow.id);
   assert(ev.origin === "rest-api" && ev.backfilled_at != null && ev.actor_context?.via === "rest-api" && ev.actor_kind === null && ev.trust === null,
     `the file's own backfill call gives the SMD-1541 row its origin from the blob, stamped — the blob untouched, no kind: nobody has classified MCP_ACCESS_KEY (${ev.origin}, ${ev.backfilled_at})`);
