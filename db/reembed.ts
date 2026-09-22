@@ -402,7 +402,7 @@ import {
   UPDATE_THOUGHT_SIGNATURE,
   validateEmbeddingConfig,
 } from "./config.mjs";
-import { createEmbedder, PROVIDER_ERROR_CHARS, resolveEmbedConfig } from "../server-portable/embed.ts";
+import { createEmbedder, PROVIDER_ERROR_CHARS, ProviderError, resolveEmbedConfig } from "../server-portable/embed.ts";
 import { describeEgress, localKnob, mayLeaveBox, refusesEverything } from "../server-portable/egress.ts";
 import { UUID_RE } from "../server-portable/store.ts";
 import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, reportLost, startHeartbeat } from "./lease.ts";
@@ -538,6 +538,8 @@ if (problems.length > 0) {
 for (const w of embeddingConfigWarnings()) console.error(`  ⚠  ${w}`);
 
 const embedConfig = resolveEmbedConfig(process.env);
+/** The egress units a row of this pass can carry: its metadata and its text. */
+const PASS_UNITS = ["source", "type", "topic", "marker"] as const;
 // Not remembering a refusal: see "The head window, recorded" in the header.
 const embedder = createEmbedder(() => embedConfig, { rememberRefusal: false });
 
@@ -564,15 +566,19 @@ console.log(`  egress:    ${describeEgress(embedConfig.embeddings, embedConfig.e
   // A policy that refuses whatever the row (SMD-1903): stop before claiming,
   // rather than fail every row in the pool one at a time. A dry run and
   // --status still report — the banner's egress line says why a run would not.
-  const blanket = refusesEverything(embedConfig.embeddings, embedConfig.egress);
-  if (blanket && !STATUS_ONLY && !DRY_RUN) {
+  // Units a re-embed carries: the row's own metadata and text, never an
+  // actor — this pass has no worker key (second review pass).
+  const blanket = refusesEverything(embedConfig.embeddings, embedConfig.egress, PASS_UNITS);
+  // --retire and --accept-failed write claim rows, not vectors, and dial
+  // nothing: bookkeeping the gate has no say over (second review pass).
+  if (blanket && !STATUS_ONLY && !DRY_RUN && !RETIRE && !ACCEPT_FAILED) {
     console.error(`\n  Nothing would be re-embedded: ${blanket}. Declare the endpoint local (${localKnob(embedConfig, "embeddings")}=1) if it is, name what may leave in OB1_EGRESS_ALLOW, or set OB1_EGRESS_POLICY — in words, before a pass that would fail every row it claims.`);
     process.exit(2);
   }
   // The blurbs are chat calls: refused, every long row's claim fails on them
   // (a bare window is a failure here, since no caller is told) and
   // --retry-failed would revisit each uselessly. Said before the pass.
-  const blurbs = embedConfig.chunkContext ? refusesEverything(embedConfig.chat, embedConfig.egress) : null;
+  const blurbs = embedConfig.chunkContext ? refusesEverything(embedConfig.chat, embedConfig.egress, PASS_UNITS) : null;
   if (blurbs) console.error(`  ⚠  OB1_CHUNK_CONTEXT is on and every blurb call would be refused (${blurbs}) — every long row's claim will fail on its blurbs; turn the context off for this pass, or declare the chat endpoint local (${localKnob(embedConfig, "chat")}=1)`);
 }
 console.log(`  chunks:    ${embedConfig.chunkTokens}-token windows above ${embedConfig.chunkThreshold} (${embedConfig.chunkTokensFrom === "window" ? `from ${embedConfig.embeddingModel}'s ${embedConfig.modelWindow}-token window` : embedConfig.chunkTokensFrom === "OB1_CHUNK_TOKENS" ? "OB1_CHUNK_TOKENS" : "the default, window unknown"}), overlap ${embedConfig.chunkOverlap}, context ${embedConfig.chunkContext ? `on (blurbs via ${embedConfig.chat.base})` : "off"}`);
@@ -1336,11 +1342,20 @@ if (refusalForRun) {
 // that read one).
 const probeSubject = { kind: "re-embed" as const };
 const probeGate = mayLeaveBox(probeSubject, embedConfig.embeddings, embedConfig.egress);
+/**
+ * Whether the provider has answered once — the probe, or a first row
+ * processed to any outcome. While it has not, a row's failure that is not the
+ * gate's is read as the provider's answer (a wrong width, a wrong URL) and
+ * stops the run, so a skipped probe does not turn a configuration error into
+ * a pool marked failed one row at a time (second review pass).
+ */
+let probed = false;
 if (!probeGate.allowed) {
-  console.log(`  probe:     skipped — ${probeGate.reason}; the first row is the probe`);
+  console.log(`  probe:     skipped — ${probeGate.reason}; the first row stands in, and a failure there that is not the gate's stops the run`);
 } else {
   try {
     await embedder.getEmbedding("reembed.ts provider probe", probeSubject);
+    probed = true;
   } catch (e) {
     console.error(`\n  The embedding provider is not usable: ${(e as Error).message}`);
     await sql.close();
@@ -1622,8 +1637,18 @@ async function worker(n: number): Promise<void> {
         } else {
           try {
             outcome = await processRow(row);
+            probed = true;
           } catch (e) {
-            outcome = { outcome: "failed", error: (e as Error).message.slice(0, PROVIDER_ERROR_CHARS) };
+            const msg = (e as Error).message.slice(0, PROVIDER_ERROR_CHARS);
+            outcome = { outcome: "failed", error: msg };
+            // The skipped probe's stand-in (see `probed`): the provider's
+            // first answer was a failure that is not the gate's own, so it is
+            // the configuration's, not this row's. This row is recorded; the
+            // rest stay pending rather than fail the same way in turn.
+            if (!probed && !(e instanceof ProviderError && e.kind === "egress")) {
+              console.error(`  ${workerId}: the first row failed before any succeeded — ${msg} — read as the provider's answer, not the row's; stopping so the pool is not marked failed row by row (this row is recorded; the rest stay pending)`);
+              stopping = true;
+            }
           }
         }
         // Out of the heartbeat's set before the release goes out, so a beat in

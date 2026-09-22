@@ -167,7 +167,9 @@ console.log(`  egress: ${describeEgress(cfg.chat, cfg.egress, localKnob(cfg, "ch
   // A policy that refuses whatever the row (SMD-1903): stop before claiming,
   // rather than fail every row in the pool one at a time. A dry run and
   // --status still report — the banner's egress line says why a run would not.
-  const blanket = refusesEverything(cfg.chat, cfg.egress);
+  // The units a row of this pass carries: its metadata and text, and the
+  // worker key's name as the actor when one is set (second review pass).
+  const blanket = refusesEverything(cfg.chat, cfg.egress, process.env.OB1_WORKER_KEY ? ["actor", "source", "type", "topic", "marker"] : ["source", "type", "topic", "marker"]);
   if (blanket && !STATUS_ONLY && !DRY_RUN) {
     console.error(`\n  Nothing would be extracted: ${blanket}. Declare the endpoint local (${localKnob(cfg, "chat")}=1) if it is, name what may leave in OB1_EGRESS_ALLOW, or set OB1_EGRESS_POLICY — in words, before a pass that would fail every row it claims.`);
     process.exit(2);
@@ -203,6 +205,8 @@ if (Number(tables) < 4) {
  * call touches last_used_at), so --status and --dry-run do not resolve.
  */
 let agentId: string | null = null;
+/** The worker key's name, for the egress gate's `actor:` unit (SMD-1903); undefined without a key. */
+let actorName: string | undefined;
 if (!STATUS_ONLY && !DRY_RUN) {
   const rawKey = process.env.OB1_WORKER_KEY;
   if (rawKey) {
@@ -228,6 +232,7 @@ if (!STATUS_ONLY && !DRY_RUN) {
       }
       if (res.ok && res.agent_id) {
         agentId = res.agent_id;
+        actorName = record.name;
         console.log(`  agent:  ${record.name} (${record.scope}, ${agentId})`);
       } else {
         console.error(`  ⚠  resolve_agent answered ${res.error ?? "without an id"}; rows will carry no agent id`);
@@ -390,7 +395,7 @@ async function processRow(row: Row): Promise<Outcome> {
   try {
     // The row's own metadata is what the gate reads (SMD-1903); a refusal
     // throws out of here as a failed claim naming the rule.
-    extraction = await extractEntities(row.content, cfg, AbortSignal.timeout(TIMEOUT_S * 1000), { kind: "extraction", metadata: row.metadata ?? undefined });
+    extraction = await extractEntities(row.content, cfg, AbortSignal.timeout(TIMEOUT_S * 1000), { kind: "extraction", actor: actorName, metadata: row.metadata ?? undefined });
   } finally {
     llmMs += Date.now() - t0;
   }

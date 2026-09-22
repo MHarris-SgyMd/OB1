@@ -302,22 +302,33 @@ export function decideCalls(
  * nothing this one line does not (first review pass). Null when some row
  * might pass: a term might match, or the mode lets text through.
  */
-export function refusesEverything(endpoint: Pick<ProviderEndpoint, "base" | "local">, policy: EgressPolicy): string | null {
+export function refusesEverything(endpoint: Pick<ProviderEndpoint, "base" | "local">, policy: EgressPolicy, units: readonly EgressUnit[] = EGRESS_UNITS): string | null {
   if (endpoint.local) return null;
   const host = hostOf(endpoint.base);
   if (policy.problems.length) return `the egress policy did not parse (${policy.problems.join("; ")}), so the gate fails closed and every call to ${host} is refused`;
-  if (policy.mode === "deny" && !policy.allow.length) {
-    return `OB1_EGRESS_POLICY=deny${policy.configured === undefined ? " (the default)" : ""} with no OB1_EGRESS_ALLOW term, and ${host} is not declared local — every call is refused`;
+  if (policy.mode === "deny") {
+    const mode = `OB1_EGRESS_POLICY=deny${policy.configured === undefined ? " (the default)" : ""}`;
+    if (!policy.allow.length) return `${mode} with no OB1_EGRESS_ALLOW term, and ${host} is not declared local — every call is refused`;
+    // A term over a unit this caller never carries can match nothing it
+    // sends: a pass has no actor unless a worker key names one (second
+    // review pass — actor: terms alone read as "some row might pass").
+    if (!policy.allow.some((t) => units.includes(t.unit))) {
+      return `${mode}, and every OB1_EGRESS_ALLOW term (${policy.allow.map(showTerm).join(", ")}) names a unit this caller never carries (it carries ${units.join(", ")}), and ${host} is not declared local — every call is refused`;
+    }
   }
   return null;
 }
 
 /**
- * The knob that declares an endpoint local, for a banner or a remedy:
+ * The knob that declares an endpoint local, for a banner or a remedy: the one
+ * that DID when it is declared (`declaredBy`, so a shared endpoint declared by
+ * OB1_CHAT_LOCAL alone is named by it — second review pass); otherwise
  * OB1_LLM_LOCAL for the embeddings endpoint and for a chat endpoint at the
- * same base (which inherits it), OB1_CHAT_LOCAL for a chat endpoint of its own.
+ * same base, OB1_CHAT_LOCAL for a chat endpoint of its own.
  */
 export function localKnob(endpoints: { embeddings: ProviderEndpoint; chat: ProviderEndpoint }, which: "embeddings" | "chat"): string {
+  const at = endpoints[which];
+  if (at.local && at.declaredBy) return at.declaredBy;
   if (which === "embeddings") return "OB1_LLM_LOCAL";
   // The same base: the embeddings knob declares both, and is the one to set
   // when neither is declared. Only a chat endpoint declared by its own knob

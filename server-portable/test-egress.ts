@@ -116,6 +116,9 @@ console.log("\n[2] Local is declared, not guessed — a loopback base with the f
   // alone was discarded on it, every call refused, no row saying why).
   const chatOnly = resolveEmbedConfig({ OB1_LLM_BASE_URL: "http://a:1/v1", OB1_CHAT_LOCAL: "1" });
   assert(chatOnly.chat === chatOnly.embeddings && chatOnly.embeddings.local === true, "OB1_CHAT_LOCAL alone declares the one shared endpoint, for both calls");
+  assert(chatOnly.embeddings.declaredBy === "OB1_CHAT_LOCAL" && localKnob(chatOnly, "embeddings") === "OB1_CHAT_LOCAL" && localKnob(chatOnly, "chat") === "OB1_CHAT_LOCAL",
+         "…and the endpoint carries the knob that declared it, so every banner names OB1_CHAT_LOCAL and not the one the operator did not set");
+  assert(declared.embeddings.declaredBy === "OB1_LLM_LOCAL" && resolveEmbedConfig({ OB1_LLM_BASE_URL: "http://a:1/v1" }).embeddings.declaredBy === undefined, "declaredBy names OB1_LLM_LOCAL when it did, and is absent when nothing declared");
   const chatOwnKey = resolveEmbedConfig({ OB1_LLM_BASE_URL: "http://a:1/v1", OB1_CHAT_BASE_URL: "http://a:1/v1", OB1_CHAT_API_KEY: "k", OB1_CHAT_LOCAL: "1" });
   assert(chatOwnKey.chat.local && !chatOwnKey.embeddings.local && localKnob(chatOwnKey, "chat") === "OB1_CHAT_LOCAL" && localKnob(chatOwnKey, "embeddings") === "OB1_LLM_LOCAL",
          "…while a same-base chat endpoint with its own key declared by OB1_CHAT_LOCAL is named by that knob, and the undeclared embeddings one by its own");
@@ -166,6 +169,14 @@ console.log("\n[3] The rules: every unit under deny and allow, with the reason n
   assert(refusesEverything(remote, resolveEgressPolicy({ OB1_EGRESS_ALLOW: "actor:x" })) === null && refusesEverything(remote, resolveEgressPolicy({ OB1_EGRESS_POLICY: "allow" })) === null && refusesEverything(remote, resolveEgressPolicy({ OB1_EGRESS_POLICY: "off" })) === null,
          "a term, allow or off might let a row through, so nothing is refused up front");
   assert(refusesEverything({ ...remote, local: true }, resolveEgressPolicy({})) === null, "a declared endpoint is never refused up front");
+  // A pass with no worker key carries no actor: allow terms over actor alone
+  // can match nothing it sends, and the worker is told before claiming.
+  const passUnits = ["source", "type", "topic", "marker"] as const;
+  const actorOnly = refusesEverything(remote, resolveEgressPolicy({ OB1_EGRESS_ALLOW: "actor:chatgpt" }), passUnits);
+  assert(actorOnly !== null && /every OB1_EGRESS_ALLOW term \(actor:chatgpt\) names a unit this caller never carries \(it carries source, type, topic, marker\)/.test(actorOnly),
+         `allow terms over a unit the caller never carries refuse everything up front (${actorOnly})`);
+  assert(refusesEverything(remote, resolveEgressPolicy({ OB1_EGRESS_ALLOW: "actor:chatgpt,type:idea" }), passUnits) === null, "…one reachable term is enough");
+  assert(refusesEverything(remote, resolveEgressPolicy({ OB1_EGRESS_ALLOW: "actor:chatgpt" })) === null, "…and a caller that carries every unit (the server) is not refused up front");
 }
 
 console.log("\n[4] A second opinion can only refuse — it is never asked about a refused subject, and a hook that throws refuses");

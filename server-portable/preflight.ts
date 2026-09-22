@@ -27,7 +27,7 @@ import { createStore, databaseUrl, DEFAULT_STORE, DIRECT_CHECK_SKIP_OVER_POSTGRE
 import { parseKeyRecords } from "./auth.ts";
 import { DEFAULT_MAX_TOKENS } from "./chunk.ts";
 import { resolveEmbedConfig, resolveProviderEndpoints, stringOr, type ProviderEndpoint } from "./embed.ts";
-import { EGRESS_UNITS, flagOn, localKnob, type EgressTerm } from "./egress.ts";
+import { EGRESS_UNITS, localKnob, type EgressTerm } from "./egress.ts";
 import { trimmedEnv } from "../db/config.mjs"; // static: `env` below is built before the dynamic import above resolves
 import type { PassCounts } from "../db/config.mjs";
 
@@ -367,10 +367,9 @@ function egressRow(row: string, at: ProviderEndpoint, knob: string, calls: strin
   }
 }
 if (chatEndpoint === embEndpoint) {
-  // One endpoint, either knob declares it; the row names the one that did,
-  // or OB1_LLM_LOCAL as the one to set.
-  const knob = embEndpoint.local && !flagOn(env.OB1_LLM_LOCAL) ? "OB1_CHAT_LOCAL" : "OB1_LLM_LOCAL";
-  egressRow("embeddings egress", embEndpoint, knob, "embeddings and chat", `${EMB_REFUSED}; ${CHAT_REFUSED}`);
+  // One endpoint, either knob declares it; the row names the one that did
+  // (the endpoint carries it), or OB1_LLM_LOCAL as the one to set.
+  egressRow("embeddings egress", embEndpoint, localKnob({ embeddings: embEndpoint, chat: chatEndpoint }, "embeddings"), "embeddings and chat", `${EMB_REFUSED}; ${CHAT_REFUSED}`);
 } else {
   egressRow("embeddings egress", embEndpoint, "OB1_LLM_LOCAL", "embeddings", EMB_REFUSED);
   egressRow("chat egress", chatEndpoint, localKnob({ embeddings: embEndpoint, chat: chatEndpoint }, "chat"), "chat", CHAT_REFUSED);

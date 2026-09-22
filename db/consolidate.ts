@@ -517,7 +517,7 @@ async function processRow(row: Row): Promise<Outcome> {
     try {
       j = await judgePair({ content: older.content, createdAt: older.created_at, metadata: older.metadata ?? undefined },
                           { content: row.content, createdAt: row.created_at, metadata: row.metadata ?? undefined },
-                          cfg, AbortSignal.timeout(TIMEOUT_S * 1000));
+                          cfg, AbortSignal.timeout(TIMEOUT_S * 1000), actorName);
     } catch (e) {
       llmMs += Date.now() - t0;
       // A timeout is a fact about this pair (the longest thoughts); anything

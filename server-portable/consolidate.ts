@@ -227,11 +227,12 @@ export function proposalVerdict(j: Judgement): "newer_supersedes_older" | "older
  * returned with `malformed: true` so the caller can count it rather than retry
  * it blindly. Refuses BEFORE the request when the egress gate (egress.ts,
  * SMD-1903) says either row's text may not reach the chat endpoint: a pair is
- * two thoughts, and the more restricted one decides for both.
+ * two thoughts, and the more restricted one decides for both. `actor` is the
+ * worker's key name, when it has one, for an `actor:` term.
  */
-export async function judgePair(older: PairSide, newer: PairSide, cfg: EmbedConfig, signal?: AbortSignal): Promise<Judgement> {
+export async function judgePair(older: PairSide, newer: PairSide, cfg: EmbedConfig, signal?: AbortSignal, actor?: string): Promise<Judgement> {
   for (const side of [older, newer]) {
-    const gate = mayLeaveBox({ kind: "judge", metadata: side.metadata, content: side.content }, cfg.chat, cfg.egress);
+    const gate = mayLeaveBox({ kind: "judge", actor, metadata: side.metadata, content: side.content }, cfg.chat, cfg.egress);
     if (!gate.allowed) throw refuseEgress("Judge", cfg.chat.base, gate);
   }
   const r = await fetch(`${cfg.chat.base}/chat/completions`, {

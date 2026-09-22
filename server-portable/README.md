@@ -49,7 +49,7 @@ chat only, beside Ollama:
 | `OB1_EMBEDDING_MODEL` / `OB1_EMBEDDING_DIM` | `openai/text-embedding-3-small` / 1536 | Must match the column; permanent once there is data |
 | `OB1_METADATA_MODEL` | `openai/gpt-4o-mini` | No schema dependency — safe to change anytime |
 | `OB1_JUDGE_MODEL` | the metadata model | The supersession judge's model (`db/consolidate.ts`), for running the judge — the harder task — on a stronger model than every capture's tagging; a model the chat endpoint serves. The pass key carries it, so a change starts a fresh pass (SMD-1901) |
-| `OB1_LLM_LOCAL` / `OB1_CHAT_LOCAL` | unset (remote) | `1` declares the embeddings / chat endpoint on this machine or its private network, so the egress gate does not apply to it. Declared, never guessed from the address: a loopback URL with the flag unset is remote to the gate. A chat endpoint at the same base inherits `OB1_LLM_LOCAL` (SMD-1903) |
+| `OB1_LLM_LOCAL` / `OB1_CHAT_LOCAL` | unset (remote) | `1` declares the embeddings / chat endpoint on this machine or its private network, so the egress gate does not apply to it. Declared, never guessed from the address: a loopback URL with the flag unset is remote to the gate. A chat endpoint at the same base is the same box: either knob declares it (SMD-1903) |
 | `OB1_EGRESS_POLICY` | `deny` | What may leave the box for an endpoint not declared local: `deny` (only what an `OB1_EGRESS_ALLOW` term names), `allow` (everything but what an `OB1_EGRESS_DENY` term names), `off`. A knob that does not parse fails preflight and closes the gate |
 | `OB1_EGRESS_ALLOW` / `OB1_EGRESS_DENY` | none | Comma-separated `unit:value` terms — `actor` (the access key's name), `source`, `type`, `topic` (a row's metadata), `marker` (a literal in the text) — read under `deny` and `allow` respectively |
 
@@ -65,7 +65,11 @@ the reply says so and names the rule, and the decision is recorded on the
 thought's audit row (`thought_audit.actor_context.egress`); a refused tagging
 call lands it untagged — no topics, no type — with `metadata_extraction_failed:
 egress_denied`, and a re-capture of a tagged thought keeps its tags and vector
-(only the marker merges in). An edit is judged on the row's own metadata. A refused search names `search_thoughts_keyword`, which makes no
+(only the marker merges in — and stays: the merge cannot remove a key, so a
+`metadata_extraction_failed` marker on a thought that carries real tags is
+informational and may be stale, as for the other failure reasons). An edit is
+judged on the row's own metadata; a capture is judged before the write, on
+the actor and the text alone. A refused search names `search_thoughts_keyword`, which makes no
 model call. Every dialler — `providerCall`, the judge, the entity extractor —
 asks the gate itself before the request, so no call the fork makes is ungated;
 a refusal there is a `ProviderError` of kind `egress`. Deny is the default and

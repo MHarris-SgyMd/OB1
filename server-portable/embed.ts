@@ -51,7 +51,7 @@ export type EmbedEnv = {
   OB1_CHAT_API_KEY?: string;
   /** 1/on: OB1_LLM_BASE_URL is on this machine or its private network — declared, never guessed from the address (SMD-1903). */
   OB1_LLM_LOCAL?: string;
-  /** Likewise for OB1_CHAT_BASE_URL; a chat endpoint at the same base inherits OB1_LLM_LOCAL. */
+  /** Likewise for OB1_CHAT_BASE_URL; a chat endpoint at the same base is the same box, declared by either knob. */
   OB1_CHAT_LOCAL?: string;
   /** The egress gate's mode — deny (the default), allow or off — and its terms; see egress.ts. */
   OB1_EGRESS_POLICY?: string;
@@ -256,14 +256,17 @@ export type ProviderEndpoint = {
    * where preflight's credential rule calls it local.
    */
   local: boolean;
+  /** The knob that declared it, when `local`: what a row or a banner names (second review pass). */
+  declaredBy?: "OB1_LLM_LOCAL" | "OB1_CHAT_LOCAL";
 };
 
 /** An endpoint from its parts, with the one header rule every call shares. */
-export function providerEndpoint(base: string, key: string | undefined, local = false): ProviderEndpoint {
+export function providerEndpoint(base: string, key: string | undefined, local = false, declaredBy?: "OB1_LLM_LOCAL" | "OB1_CHAT_LOCAL"): ProviderEndpoint {
   return {
     base: base.replace(/\/+$/, ""),
     key,
     local,
+    ...(local && declaredBy ? { declaredBy } : {}),
     // A local endpoint needs no credential, so the key is optional there.
     // Sending `Authorization: Bearer undefined` to Ollama is harmless but
     // confusing in logs, so the header is omitted entirely when there is no key.
@@ -298,14 +301,15 @@ export function providerEndpoint(base: string, key: string | undefined, local = 
  */
 export function resolveProviderEndpoints(env: EmbedEnv): { embeddings: ProviderEndpoint; chat: ProviderEndpoint } {
   // baseUrlOr: trimmed, trailing slashes off, and slashes alone are unset (SMD-1843).
-  const embeddings = providerEndpoint(baseUrlOr(env.OB1_LLM_BASE_URL, DEFAULT_LLM_BASE_URL), env.OB1_LLM_API_KEY || env.OPENROUTER_API_KEY, flagOn(env.OB1_LLM_LOCAL));
+  const embeddings = providerEndpoint(baseUrlOr(env.OB1_LLM_BASE_URL, DEFAULT_LLM_BASE_URL), env.OB1_LLM_API_KEY || env.OPENROUTER_API_KEY, flagOn(env.OB1_LLM_LOCAL), "OB1_LLM_LOCAL");
   const chatBase = baseUrlOr(env.OB1_CHAT_BASE_URL, embeddings.base);
-  const chat = providerEndpoint(chatBase, env.OB1_CHAT_API_KEY, flagOn(env.OB1_CHAT_LOCAL) || (chatBase === embeddings.base && embeddings.local));
+  const chatFlag = flagOn(env.OB1_CHAT_LOCAL);
+  const chat = providerEndpoint(chatBase, env.OB1_CHAT_API_KEY, chatFlag || (chatBase === embeddings.base && embeddings.local), chatFlag ? "OB1_CHAT_LOCAL" : "OB1_LLM_LOCAL");
   // No key of its own and the same base: it IS the embeddings endpoint, key
-  // and all — declared local by either knob. Anything else — its own key, or
-  // a different base — stands alone.
+  // and all — declared local by either knob, and the knob that did travels
+  // with it. Anything else — its own key, or a different base — stands alone.
   if (!chat.key && chat.base === embeddings.base) {
-    const shared = chat.local && !embeddings.local ? { ...embeddings, local: true } : embeddings;
+    const shared: ProviderEndpoint = chat.local && !embeddings.local ? { ...embeddings, local: true, declaredBy: "OB1_CHAT_LOCAL" } : embeddings;
     return { embeddings: shared, chat: shared };
   }
   return { embeddings, chat };

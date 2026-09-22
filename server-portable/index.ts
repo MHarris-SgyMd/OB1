@@ -108,7 +108,7 @@ type Env = {
    * is remote to the gate.
    */
   OB1_LLM_LOCAL?: string;
-  /** Likewise for OB1_CHAT_BASE_URL; a chat endpoint at the same base inherits OB1_LLM_LOCAL. */
+  /** Likewise for OB1_CHAT_BASE_URL; a chat endpoint at the same base is the same box, declared by either knob. */
   OB1_CHAT_LOCAL?: string;
   /**
    * What may leave the box for an endpoint not declared local: deny (the
@@ -1266,15 +1266,21 @@ function buildServer(principal: Principal): McpServer {
         // error — the policy did what it says — but said in full. On a
         // RE-CAPTURE the row keeps the vector it had (upsert_thought
         // coalesces), so the note says that instead of "no vector" (first
-        // review pass); a database from before 035 does not say, and is
-        // told the fresh-row story.
-        const existed = captured.existed === true;
+        // review pass). A database from before 035, or the PostgREST
+        // two-step, does not say which this was — and the coalesce holds
+        // there too (033), so the note hedges rather than tell the fresh-row
+        // story of a row that may be keeping its vector (second review pass).
+        const existed = captured.existed;
         if (!gate.embeddings.allowed) {
-          confirmation += existed
+          confirmation += existed === true
             ? `\n\nNote: the embedding call for this capture was not made — ${gate.embeddings.reason}. This text was already a thought, and it keeps the vector it had.`
-            : `\n\nNote: saved WITHOUT a vector — ${gate.embeddings.reason}. ` +
-              `It is findable by exact text (search_thoughts_keyword) and joins semantic search after a re-embed pass ` +
-              `(db/reembed.ts) against an endpoint the gate allows.`;
+            : existed === false
+              ? `\n\nNote: saved WITHOUT a vector — ${gate.embeddings.reason}. ` +
+                `It is findable by exact text (search_thoughts_keyword) and joins semantic search after a re-embed pass ` +
+                `(db/reembed.ts) against an endpoint the gate allows.`
+              : `\n\nNote: the embedding call for this capture was not made — ${gate.embeddings.reason}. A new thought has no vector — findable by exact text ` +
+                `(search_thoughts_keyword), filled in by a re-embed pass (db/reembed.ts) against an endpoint the gate allows; text already captured keeps the vector it had. ` +
+                `This database does not say which this was.`;
         }
 
         // A chunk whose situating blurb could not be generated is embedded bare
@@ -1336,9 +1342,11 @@ function buildServer(principal: Principal): McpServer {
           // which the shared function makes impossible — but say so rather
           // than print an "allowed" sentence under a refusal.
           const why = gate.chat.allowed ? "the egress gate refused the tagging call" : gate.chat.reason;
-          confirmation += existed
+          confirmation += existed === true
             ? `\n\nNote: the tagging call for this capture was not made — ${why}. The existing thought keeps its tags; its metadata now carries the refusal marker.`
-            : `\n\nNote: no topics, people or type were extracted — ${why}.`;
+            : existed === false
+              ? `\n\nNote: no topics, people or type were extracted — ${why}.`
+              : `\n\nNote: the tagging call for this capture was not made — ${why}. A new thought has no topics or type; text already captured keeps its tags, with the refusal marker merged in.`;
         } else if (typeof meta.metadata_extraction_failed === "string") {
           confirmation +=
             `\n\nNote: the thought was saved, but automatic tagging failed ` +

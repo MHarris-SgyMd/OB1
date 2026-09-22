@@ -2415,6 +2415,21 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   const noIds = await reembed("--accept-failed");
   assert(noIds.code === 2 && /needs the rows to accept, by id/.test(noIds.out) && /--all/.test(noIds.out) && noIds.out.includes(poisonId) && /3 failed row\(s\) under reembed:test/.test(noIds.out),
     `--accept-failed with no ids refuses, listing the failed rows and both forms (exit ${noIds.code})`);
+  // The egress gate (SMD-1903): with the stub not declared local under the
+  // default, a run stops before claiming; --accept-failed and --retire write
+  // claim rows and dial nothing, so the gate has no say and each reaches its
+  // own refusal (second review pass).
+  const gateEnv = { ...env } as Record<string, string>;
+  for (const k of ["OB1_LLM_LOCAL", "OB1_CHAT_LOCAL", "OB1_EGRESS_POLICY", "OB1_EGRESS_ALLOW", "OB1_EGRESS_DENY"]) delete gateEnv[k];
+  const gated = (...extra: string[]) => runScript(["bun", join(HERE, "reembed.ts"), "--url", URL_!, "--job", REEMBED_JOB, ...extra], { env: gateEnv, cwd: HERE });
+  const gateStop = await gated();
+  assert(gateStop.code === 2 && /Nothing would be re-embedded: OB1_EGRESS_POLICY=deny \(the default\) with no OB1_EGRESS_ALLOW term, and 127\.0\.0\.1:\d+ is not declared local/.test(gateStop.out),
+    `a run against an endpoint not declared local stops before claiming, naming the rule (exit ${gateStop.code})`);
+  const gateAccept = await gated("--accept-failed");
+  assert(gateAccept.code === 2 && !/Nothing would be re-embedded/.test(gateAccept.out) && /needs the rows to accept, by id/.test(gateAccept.out),
+    "…while --accept-failed, which dials nothing, passes the gate and reaches its own refusal");
+  const gateRetire = await gated("--retire");
+  assert(!/Nothing would be re-embedded/.test(gateRetire.out), `…as does --retire (exit ${gateRetire.code}: ${gateRetire.out.split("\n").filter(Boolean).slice(-1)[0]?.trim().slice(0, 120)})`);
   const notFailed = await reembed("--accept-failed", poisonId, lateId);
   assert(notFailed.code === 2 && notFailed.out.includes(`not a failed row under reembed:test: ${lateId} (succeeded)`) && (await claimCounts()).failed === 3,
     `…an id whose row is not failed refuses the whole command, and nothing is written (exit ${notFailed.code})`);
@@ -3573,7 +3588,8 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
   // under the default would fail every row it claims, so a run stops before
   // claiming; a dry run still reports, its egress line saying why a run would not.
   const undeclared = { ...env } as Record<string, string>;
-  delete undeclared.OB1_LLM_LOCAL;
+  // Every gate knob unset, whatever the shell carries (second review pass).
+  for (const k of ["OB1_LLM_LOCAL", "OB1_CHAT_LOCAL", "OB1_EGRESS_POLICY", "OB1_EGRESS_ALLOW", "OB1_EGRESS_DENY"]) delete undeclared[k];
   const blanket = await runScript(["bun", join(HERE, "consolidate.ts"), "--url", URL_!], { env: undeclared, cwd: HERE });
   assert(blanket.code === 2 && /Nothing would be judged: OB1_EGRESS_POLICY=deny \(the default\) with no OB1_EGRESS_ALLOW term, and 127\.0\.0\.1:\d+ is not declared local — every call is refused/.test(blanket.out) && /Declare the endpoint local \(OB1_LLM_LOCAL=1\)/.test(blanket.out) && calls === 0,
          `an endpoint not declared local under the default refuses to start the pass rather than fail every row (exit ${blanket.code}: ${blanket.out.split("\n").find((l) => /Nothing would/.test(l))?.trim().slice(0, 160)})`);
