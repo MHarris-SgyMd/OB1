@@ -1908,19 +1908,33 @@ export const SUPABASE_SQL_RULES = Object.freeze([
  */
 export function supabaseIsmsIn(text) {
   const sql = stripSqlComments(text);
-  const seen = new Set();
-  const hits = [];
+  const list = sqlHitList(sql, SUPABASE_SQL_RULES);
   for (const rule of SUPABASE_SQL_RULES) {
     const re = new RegExp(rule.re.source, rule.re.flags.includes("g") ? rule.re.flags : rule.re.flags + "g");
-    for (const m of sql.matchAll(re)) {
-      const line = sql.slice(0, m.index).split("\n").length;
-      const key = `${rule.name}@${line}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      hits.push({ rule: rule.name, line, msg: rule.msg });
-    }
+    for (const m of sql.matchAll(re)) list.add(rule.name, m.index);
   }
-  return hits.sort((a, b) => a.line - b.line);
+  return list.sorted();
+}
+/**
+ * The hit list of one rule set over one comment-stripped text: `add(rule,
+ * index)` records the (rule, line) once, with the rule's message; `sorted()`
+ * returns the hits by line. Line numbers are the source's, since the strip
+ * keeps newlines. supabaseIsmsIn and destructiveSqlIn share it.
+ */
+function sqlHitList(sql, rules) {
+  const msgOf = new Map(rules.map((r) => [r.name, r.msg]));
+  const seen = new Set();
+  const hits = [];
+  return {
+    add(rule, index) {
+      const line = sql.slice(0, index).split("\n").length;
+      const key = `${rule}@${line}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      hits.push({ rule, line, msg: msgOf.get(rule) });
+    },
+    sorted: () => hits.sort((a, b) => a.line - b.line),
+  };
 }
 
 /**
@@ -2051,16 +2065,8 @@ function whereQualifies(text, from) {
 export function destructiveSqlIn(text) {
   const sql = stripSqlComments(text);
   const flat = blankSqlLiterals(sql);
-  const byName = new Map(DESTRUCTIVE_SQL_RULES.map((r) => [r.name, r]));
-  const seen = new Set();
-  const hits = [];
-  const hit = (name, index) => {
-    const line = sql.slice(0, index).split("\n").length;
-    const key = `${name}@${line}`;
-    if (seen.has(key)) return;
-    seen.add(key);
-    hits.push({ rule: name, line, msg: byName.get(name).msg });
-  };
+  const list = sqlHitList(sql, DESTRUCTIVE_SQL_RULES);
+  const hit = (rule, index) => list.add(rule, index);
   // A keyword inside a quoted identifier names a column (`"my TRUNCATE"`), not a statement.
   const inIdentifier = (i) => flat[i] === IDENT_FILL;
   for (const m of sql.matchAll(/\bDROP\s+TABLE\b/gi)) if (!inIdentifier(m.index)) hit("drop-table", m.index);
@@ -2078,5 +2084,5 @@ export function destructiveSqlIn(text) {
     const inLiteral = flat[m.index] === " " || DOLLAR_CONCAT.test(flat.slice(end, statementEnd(flat, end)));
     if (!whereQualifies(inLiteral ? sql : flat, end)) hit("unqualified-delete", m.index);
   }
-  return hits.sort((a, b) => a.line - b.line);
+  return list.sorted();
 }

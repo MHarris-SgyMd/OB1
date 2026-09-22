@@ -3903,7 +3903,7 @@ function checkDestructiveSql() {
   }
   // The line is the statement's own, through comments and a plpgsql body alike.
   const lined = destructiveSqlIn("-- a header\nCREATE FUNCTION f() RETURNS void LANGUAGE plpgsql AS $$\nBEGIN\n  -- TRUNCATE in prose\n  TRUNCATE thoughts;\nEND;\n$$;\n");
-  if (lined.length !== 1 || lined[0]!.line !== 5 || lined[0]!.rule !== "truncate") fail(SELF, `check 20 reports ${JSON.stringify(lined.map((h) => `${h.rule}@${h.line}`))} for a TRUNCATE on line 5 of a function body, expected ["truncate@5"] (its own probe)`); // one element when length === 1
+  if (lined.map((h) => `${h.rule}@${h.line}`).join(",") !== "truncate@5") fail(SELF, `check 20 reports ${JSON.stringify(lined.map((h) => `${h.rule}@${h.line}`))} for a TRUNCATE on line 5 of a function body, expected ["truncate@5"] (its own probe)`);
 
   const counts = new Map<string, number>();
   // The files git tracks or would track, as check 15 reads them — so an ignored
