@@ -214,13 +214,14 @@ type Metadata = {
 };
 function checkMetadata({ cat, dir, rel }: ContribDir) {
   const file = join(dir, "metadata.json");
-  if (!existsSync(file)) return fail(rel, "missing metadata.json");
+  if (!existsSync(file)) { fail(rel, "missing metadata.json"); return; }
 
   let d: Metadata;
   try {
     d = JSON.parse(readFileSync(file, "utf8"));
   } catch (e) {
-    return fail(`${rel}/metadata.json`, `invalid JSON: ${(e as Error).message}`);
+    fail(`${rel}/metadata.json`, `invalid JSON: ${(e as Error).message}`);
+    return;
   }
 
   const at = `${rel}/metadata.json`;
@@ -285,7 +286,7 @@ function checkLinks({ dir, rel }: ContribDir) {
 
 // ── 4: declared dependencies exist ───────────────────────────────────────────
 
-function checkDeps(meta: Metadata | void, { rel }: ContribDir) {
+function checkDeps(meta: Metadata | undefined, { rel }: ContribDir) {
   if (!meta) return;
   for (const [field, folder] of [
     ["requires_primitives", "primitives"],
@@ -1901,6 +1902,7 @@ const ENV_KNOB_PROBES: [string, RegExp, string[]][] = [
   ["# OB1_X=1536   # hosted; unmeasured\nOB1_Y=\n", /^OB1_/, ["OB1_X", "OB1_Y"]],
   ["# SERVER_BIND=0.0.0.0 is the one an operator sets\n# SERVER_BIND=127.0.0.1\n", /_BIND$/, ["SERVER_BIND"]],
 ];
+let envExampleMissingReported = false; // documentedEnvKnobs reports the missing file once, for its two callers
 function documentedEnvKnobs(pattern: RegExp) {
   for (const [text, pat, names] of ENV_KNOB_PROBES) {
     const got = envKnobsIn(text, pat).map((k) => k.name);
@@ -1908,15 +1910,12 @@ function documentedEnvKnobs(pattern: RegExp) {
   }
   const path = join(ROOT, "deploy", ".env.example");
   if (!existsSync(path)) {
-    if (!documentedEnvKnobs.reported) fail("deploy/.env.example", `missing — the documented knobs are read from it (check 13's _BIND knobs, check 14's OB1_* settings), and SETUP.md tells every operator to copy it`);
-    documentedEnvKnobs.reported = true;
+    if (!envExampleMissingReported) fail("deploy/.env.example", `missing — the documented knobs are read from it (check 13's _BIND knobs, check 14's OB1_* settings), and SETUP.md tells every operator to copy it`);
+    envExampleMissingReported = true;
     return null;
   }
   return envKnobsIn(readFileSync(path, "utf8"), pattern);
 }
-// The once-only flag the function keeps on itself (`documentedEnvKnobs.reported`, set inside its body): an
-// expando TypeScript reads only when assigned at top level, so the property is declared here (ambient, no emit).
-declare namespace documentedEnvKnobs { let reported: boolean | undefined; }
 
 /** compose file under deploy/ → the services that publish one mapping each from it. */
 const PUBLISHES: Record<string, string[]> = {

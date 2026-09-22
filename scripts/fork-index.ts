@@ -203,7 +203,7 @@ export function spliceIndex(forkText: string, block: string): string {
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
-// Run as a script (not imported): node resolves the entry through real paths
+// Run as a script (not imported): the runtime resolves the entry through real paths
 // while argv[1] keeps the spelling it was given, so compare real paths.
 const isMain = (() => { try { return Boolean(process.argv[1]) && realpathSync(fileURLToPath(import.meta.url)) === realpathSync(process.argv[1]); } catch { return false; } })();
 if (isMain) {

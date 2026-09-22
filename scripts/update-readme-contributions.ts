@@ -165,7 +165,7 @@ async function main() {
     .sort((a, b) => new Date(b.merged_at ?? 0).getTime() - new Date(a.merged_at ?? 0).getTime())
     .slice(0, 20);
 
-  const items = [];
+  const items: { title: string; target: string; user: { login: string } }[] = [];
   for (const pr of merged) {
     const files = await github<PullFile[]>(`/repos/${owner}/${repo}/pulls/${pr.number}/files?per_page=100`);
     items.push({
@@ -179,7 +179,7 @@ async function main() {
   const section = buildSection(items);
   const sectionPattern = new RegExp(`## Recent Contributions\\n[\\s\\S]*?${END_MARKER}`);
 
-  let next;
+  let next: string;
   if (sectionPattern.test(readme)) {
     next = readme.replace(sectionPattern, section);
   } else {
