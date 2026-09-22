@@ -5157,10 +5157,11 @@ console.log("\n[43] db/graph-centrality.ts: mentions, degree and support as defi
   const numSubject = await resolveSubject(run, "021", on);
   assert(numSubject.how === "none" && numSubject.excluded === true && (await resolveSubject(run, "021", keep)).how === "exact",
     "the numeric rule applies to the subject: 021 is no subject by default, the resolution says the rule excluded it, and it is a subject when kept");
-  assert(render(await graphReport(run, "021", on)).includes("pass --keep-numeric") && !render(await graphReport(run, "021", on)).includes("nothing exact"),
+  const numText = render(await graphReport(run, "021", on));
+  assert(numText.includes("pass --keep-numeric") && !numText.includes("nothing exact"),
     "…and the report names the flag instead of claiming nothing matched (first review pass)");
-  assert((await resolveSubject(run, NUM, on)).how === "none" && (await resolveSubject(run, NUM, on)).excluded === true && (await resolveSubject(run, NUM, keep)).how === "id",
-    "…by id as well");
+  const numById = await resolveSubject(run, NUM, on);
+  assert(numById.how === "none" && numById.excluded === true && (await resolveSubject(run, NUM, keep)).how === "id", "…by id as well");
   assert(none.excluded === false && punct.excluded === false, "a name nothing matches is not called excluded");
   const typed = await resolveSubject(run, "Open Brain", { ...on, types: ["tool"] });
   assert(typed.how === "exact" && typed.subjects[0].id === OB, "--types does not apply to the subject: a project is found under a tool scope");
@@ -5232,7 +5233,8 @@ console.log("\n[43] db/graph-centrality.ts: mentions, degree and support as defi
   // The flags, and the helpers the SQL rests on.
   const p = parseArgs(["--url", "postgres://x", "Open Brain", "--limit", "5", "--types", "tool,project", "--no-edges", "--keep-numeric", "--json"]);
   assert(!("error" in p) && p.subject === "Open Brain" && p.opts.limit === 5 && p.opts.types.join() === "tool,project" && !p.opts.edges && !p.opts.excludeNumeric && p.json && p.url === "postgres://x", "every flag lands");
-  assert(!("error" in parseArgs([])) && (parseArgs([]) as { subject: null }).subject === null, "no argument is the whole graph");
+  const bare = parseArgs([]);
+  assert(!("error" in bare) && bare.subject === null, "no argument is the whole graph");
   for (const [argv, why] of [[["--limit", "0"], "limit"], [["--limit"], "needs a value"], [["--types", "vegetable"], "vegetable"], [["a", "b"], "one subject"], [["--bogus"], "unknown flag"], [["--types", ""], "none given"],
                              [["--limit", "5", "--limit", "50"], "given twice"], [["--json", "x", "--json"], "given twice"], [[""], "subject is empty"], [["  "], "subject is empty"],
                              [["--limit", "0x10"], "decimal"], [["--limit", "1e2"], "decimal"], [["--limit", " 7"], "decimal"], [["--limit", "7.0"], "decimal"]] as [string[], string][])
@@ -5241,15 +5243,17 @@ console.log("\n[43] db/graph-centrality.ts: mentions, degree and support as defi
   let threw = "";
   try { pgArray(["a b"]); } catch (e) { threw = (e as Error).message; }
   assert(/needs quoting/.test(threw), "…and refuses a value it cannot write unquoted");
+  // The numeric rule, shape by shape — bare numbers, ports, addresses and
+  // spaced digits in; anything with a letter, or an empty or padded name,
+  // out — asked of BOTH engines that compile the one pattern: Postgres in
+  // scopeSql and coverage, JS in the ladder's probe. A shape the two read
+  // apart would leave the probe silent while the SQL still filters (fourth
+  // review pass).
   const numeric = async (s: string) => (await db.query<{ m: boolean }>(`SELECT $1 ~ $2 AS m`, [s, NUMERIC_NAME_RE])).rows[0].m;
-  assert((await numeric("021")) && (await numeric("11434")) && (await numeric("127.0.0.1")) && (await numeric("10 000")), "the numeric rule takes bare numbers, ports, addresses");
-  assert(!(await numeric("pg16")) && !(await numeric("smd 1938")) && !(await numeric("migration 021")), "…and leaves anything with a letter");
-  // One pattern, two engines: Postgres reads it in scopeSql and coverage, JS in
-  // the ladder's probe. They must agree on every shape, or the probe stops
-  // firing while the SQL still filters (fourth review pass).
   const js = new RegExp(NUMERIC_NAME_RE);
-  for (const name of ["021", "11434", "127.0.0.1", "10 000", "0:0", "1.", "pg16", "smd 1938", "migration 021", "x021", "", " 21", "2 1x"])
-    assert(js.test(name) === (await numeric(name)), `JS and Postgres agree on ${JSON.stringify(name)}: ${js.test(name)}`);
+  for (const [name, expected] of [["021", true], ["11434", true], ["127.0.0.1", true], ["10 000", true], ["0:0", true], ["1.", true],
+                                  ["pg16", false], ["smd 1938", false], ["migration 021", false], ["x021", false], ["", false], [" 21", false], ["2 1x", false]] as [string, boolean][])
+    assert((await numeric(name)) === expected && js.test(name) === expected, `${JSON.stringify(name)} is ${expected ? "" : "not "}a numeric name, in Postgres and in JS alike`);
   const dup = parseArgs(["--types", "tool,tool,tool,tool,tool,tool"]);
   assert(!("error" in dup) && dup.opts.types.join() === "tool", "a repeated type is one type");
   assert(!render(await graphReport(run, null, { ...on, types: ["tool", "tool", "tool", "tool", "tool", "tool"] as GraphOptions["types"] })).includes("every type"),

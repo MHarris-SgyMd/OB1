@@ -142,7 +142,8 @@ const ENDS_CTE = `ends AS (
     SELECT from_entity_id AS entity_id, to_entity_id AS other_id, thought_id, relation FROM ob1_entity_edges
     UNION ALL
     SELECT to_entity_id, from_entity_id, thought_id, relation FROM ob1_entity_edges)`;
-const ENTITY_TIEBREAK = `s.normalized_name, s.entity_type`;
+/** The entity tiebreak every ranking ends on, unqualified: each query has one relation carrying the two columns. */
+const ENTITY_TIEBREAK = `normalized_name, entity_type`;
 
 /** How much of the brain the graph covers, and the two measured caveats' numbers. */
 export async function coverage(run: Runner, scope: Scope): Promise<Coverage> {
@@ -237,7 +238,6 @@ export async function topEntities(run: Runner, opts: Options): Promise<{ byMenti
   const inScope = scopeSql("e", opts, params);
   params.push(opts.limit);
   const L = `$${params.length}`;
-  const tiebreak = `normalized_name, entity_type`;
   const edgeCols = opts.edges ? `, coalesce(d.degree, 0) AS degree, coalesce(d.support, 0) AS support` : "";
   const edgeJoin = opts.edges
     ? `LEFT JOIN (SELECT x.entity_id, count(DISTINCT x.other_id)::int AS degree, count(DISTINCT x.thought_id)::int AS support
@@ -250,8 +250,8 @@ export async function topEntities(run: Runner, opts: Options): Promise<{ byMenti
             SELECT s.id, s.entity_type, s.name, s.normalized_name, coalesce(m.mentions, 0) AS mentions${edgeCols}
               FROM scope s LEFT JOIN mentions m ON m.entity_id = s.id ${edgeJoin}),
           ranked AS (
-            SELECT *, row_number() OVER (ORDER BY mentions DESC${opts.edges ? ", degree DESC, support DESC" : ""}, ${tiebreak})::int AS rm
-                   ${opts.edges ? `, row_number() OVER (ORDER BY degree DESC, support DESC, mentions DESC, ${tiebreak})::int AS rd` : ", NULL::int AS rd"}
+            SELECT *, row_number() OVER (ORDER BY mentions DESC${opts.edges ? ", degree DESC, support DESC" : ""}, ${ENTITY_TIEBREAK})::int AS rm
+                   ${opts.edges ? `, row_number() OVER (ORDER BY degree DESC, support DESC, mentions DESC, ${ENTITY_TIEBREAK})::int AS rd` : ", NULL::int AS rd"}
               FROM stats)
      SELECT id, entity_type, name, mentions${opts.edges ? ", degree, support" : ""}, rm, rd
        FROM ranked WHERE rm <= ${L}${opts.edges ? ` OR rd <= ${L}` : ""}`,
@@ -338,7 +338,7 @@ export async function neighbourhood(run: Runner, subjectIds: readonly string[], 
           WHERE c.co_mentions${opts.edges ? " + c.support" : ""} > 0)
      SELECT id, entity_type, name, mentions, co_mentions${opts.edges ? ", support, relations" : ""}
        FROM ranked
-      ORDER BY co_mentions${opts.edges ? " + support" : ""} DESC, mentions DESC, normalized_name, entity_type
+      ORDER BY co_mentions${opts.edges ? " + support" : ""} DESC, mentions DESC, ${ENTITY_TIEBREAK}
       LIMIT $${params.length}`,
     params);
   return rows as NeighbourRow[];
