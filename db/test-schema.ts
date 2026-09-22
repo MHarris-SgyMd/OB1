@@ -5063,9 +5063,11 @@ console.log("\n[43] Migration 045: the event shape at the write boundary — who
     "…cites a uuid[], the window and backfilled_at timestamptz");
   assert((await one<{ e: boolean }>(`SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'ob1_agents' AND column_name = 'kind') AS e`)).e, "ob1_agents gains kind");
   assert(/ob1_agents_kind_check/.test(await refused(`INSERT INTO ob1_agents (label, kind) VALUES ('robot-key', 'robot')`)), "…which the CHECK holds to operator, agent or ingested");
-  const idx = await q<{ indexname: string }>(`SELECT indexname FROM pg_indexes WHERE tablename = 'thought_audit' AND indexname LIKE 'thought_audit_%' AND indexname NOT IN ('thought_audit_thought_id_idx', 'thought_audit_created_at_idx', 'thought_audit_actor_idx', 'thought_audit_session_idx', 'thought_audit_agent_idx', 'thought_audit_pkey')`);
+  const idx = await q<{ indexname: string; indexdef: string }>(`SELECT indexname, indexdef FROM pg_indexes WHERE tablename = 'thought_audit' AND indexname LIKE 'thought_audit_%' AND indexname NOT IN ('thought_audit_thought_id_idx', 'thought_audit_created_at_idx', 'thought_audit_actor_idx', 'thought_audit_session_idx', 'thought_audit_agent_idx', 'thought_audit_pkey')`);
   assert(idx.length === 2 && idx.map((i) => i.indexname).sort().join(",") === "thought_audit_awaiting_door_idx,thought_audit_awaiting_kind_idx",
     `two partial indexes and no more: the rows still waiting for a kind or a trust, by name, and for a door — the census, the backfill and the gate read them; none on actor_kind, trust or origin until a read exists (${idx.map((i) => i.indexname).join(", ")})`);
+  assert(/INCLUDE \(canonical_agent_id\)/.test(idx.find((i) => i.indexname === "thought_audit_awaiting_kind_idx")?.indexdef ?? "") && /WHERE \(\(origin IS NULL\) AND \(ob1_door_of\(actor_context\) IS NOT NULL\)\)/.test(idx.find((i) => i.indexname === "thought_audit_awaiting_door_idx")?.indexdef ?? ""),
+    `…the kind index carrying the agent id so the census groups without the heap, the door index holding only rows whose via IS a door, by the one reading (seventh review pass; ${idx.map((i) => i.indexdef.replace(/.*USING btree /, "")).join(" | ")})`);
   assert(lastDefinerOf("thoughts_write_audit").startsWith("045") && lastDefinerOf("thought_audit_refuse_mutation").startsWith("045") && lastDefinerOf("upsert_thought").startsWith("045") && lastDefinerOf("update_thought").startsWith("045") && lastDefinerOf("delete_thought").startsWith("042"),
     `045 is the last definer of the audit trigger, the refusal trigger and both writers; delete_thought stays 042's — a tombstone declares nothing (${lastDefinerOf("delete_thought")})`);
   const tbl = (await one<{ c: string | null }>(TABLE_COMMENT_SQL, ["thought_audit"])).c ?? "";
@@ -5197,7 +5199,15 @@ console.log("\n[43] Migration 045: the event shape at the write boundary — who
   assert(e.ok === true && (await rowsOf(paste.id, "update")).length === before + 1 && JSON.stringify(restated?.diff) === "{}" && restated?.stance === "retrieved" && restated?.cites?.[0] === cited.id,
     `…but an unchanged edit that DECLARES an event is an event: one row, the diff empty, the declaration on it — the restatement SMD-1722 counts (${JSON.stringify(restated?.diff)}, ${restated?.stance})`);
   e = await edit(paste.id, "045: a page the operator pasted, corrected", { name: "op-key", agent_id: OP }, { trust: "ingested" });
-  assert(e.ok === true && (await rowsOf(paste.id, "update")).length === before + 1, "…while an unchanged edit declaring only a trust — a clamp, not a record — writes no row (run-it, fifth review pass)");
+  assert(e.ok === true && (await rowsOf(paste.id, "update")).length === before + 1, "…while an unchanged edit declaring only a trust the key supports — a lowering, honoured, nothing to record — writes no row (run-it, fifth review pass)");
+  // …but a claim the key does NOT support is a fact about the caller: the
+  // clamp is the record, and this row is the only place SMD-1724 can count it
+  // (seventh review pass — the sixth had let identical over-claims leave no
+  // trace). Counted by its mark, not read as "the latest" (PGlite's now() ties).
+  e = await edit(paste.id, "045: a page the operator pasted, corrected", { name: "bot-key" }, { trust: "operator" });
+  const clampRows = await one<{ c: number }>(`SELECT count(*)::int AS c FROM thought_audit WHERE thought_id = $1::uuid AND action = 'update' AND diff = '{}'::jsonb AND trust = 'agent' AND actor_kind = 'agent' AND actor_context->'claimed'->>'trust' = 'operator'`, [paste.id]);
+  assert(e.ok === true && (await rowsOf(paste.id, "update")).length === before + 2 && clampRows.c === 1,
+    `…and an unchanged edit claiming a trust ABOVE its key writes a row: the diff empty, trust the key's, the claim under claimed — the over-claim is recorded (${clampRows.c} row)`);
   const restatedCap = await cap("045: a page the operator pasted, corrected", { metadata: {}, actor: { name: "op-key", agent_id: OP }, event: { stance: "inferred" } }, 3);
   // Counted, not "the latest": PGlite's now() is millisecond-grained, so two
   // statements can tie on created_at and "latest" is arbitrary (a mutant run
@@ -5349,6 +5359,8 @@ console.log("\n[43] Migration 045: the event shape at the write boundary — who
   await db.exec(`SELECT backfill_thought_audit_events()`);
   ev = (await rowsOf(EMPTY_DOOR, "capture"))[0];
   assert(ev?.origin === null && ev?.actor_kind === "agent" && (ev?.actor_context as { via?: string })?.via === "", "…and an empty via is no door: origin stays NULL, the kind is filled, the blob keeps the empty string");
+  assert((await one<{ c: number }>(`SELECT count(*)::int AS c FROM thought_audit WHERE origin IS NULL AND ob1_door_of(actor_context) IS NOT NULL`)).c === 0,
+    "…and the door index's predicate is empty after the pass — the row with the empty via is not in it, so no later pass re-reads a row it can never fill (seventh review pass)");
   assert(/append-only/.test(await refused(`UPDATE thought_audit SET actor_kind = NULL WHERE id = $1::uuid`, [nobodyRow])), "…after which the ordinary refusal stands again — the setting was transaction-local");
 
   // The backfill: a SMD-1541-shaped row (via in the blob, no origin) and rows

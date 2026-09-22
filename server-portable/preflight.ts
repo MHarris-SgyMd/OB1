@@ -945,10 +945,12 @@ if (configFailed) {
               : `${list(files)} not yet applied, or ${earlier} was re-applied by hand`;
         };
         const TWO_UNLOCKED_WHY = `it is from before migration 033 (${pre("033", "005")}): it takes no fingerprint lock, so a capture through it racing an edit of the same text raises the unique violation`;
-        const TWO_NO_EVENT_WHY = `it is from before migration 045 (${pre("045", "035")}): it sets no write event beside the actor, so a stance, cites or a window a PostgREST caller declares in the payload reaches no audit row`;
+        // 033's and 035's 2-argument bodies are byte-identical, so either
+        // re-apply is named (run-it, seventh review pass).
+        const TWO_NO_EVENT_WHY = `it is from before migration 045 (${pre("045", "033 or 035")}): it sets no write event beside the actor, so a stance, cites or a window a PostgREST caller declares in the payload reaches no audit row`;
         const andTwo = twoStale ? `; and the 2-argument body is not 005's either — ${TWO_STALE_WHY}` : twoUnlocked ? `; and the 2-argument body is not 045's either — ${TWO_UNLOCKED_WHY}` : twoNoEvent ? `; and the 2-argument body is not 045's either — ${TWO_NO_EVENT_WHY}` : "";
         if (!three) {
-          add("atomic capture", "fail", `${forms.length} upsert_thought overload(s) — the 3-argument form, the atomic capture, is missing${twoStale ? `; and the 2-argument body present is not 005's — ${TWO_STALE_WHY}` : twoUnlocked ? `; and the 2-argument body present is not 045's — ${TWO_UNLOCKED_WHY}` : ""}${andOthers}`,
+          add("atomic capture", "fail", `${forms.length} upsert_thought overload(s) — the 3-argument form, the atomic capture, is missing${twoStale ? `; and the 2-argument body present is not 005's — ${TWO_STALE_WHY}` : twoUnlocked ? `; and the 2-argument body present is not 045's — ${TWO_UNLOCKED_WHY}` : twoNoEvent ? `; and the 2-argument body present is not 045's — ${TWO_NO_EVENT_WHY}` : ""}${andOthers}`,
               applyLast(" — the last definer of both forms (004 created the 3-argument one; 005, 008, 021, 022, 025, 033, 035 and 045 redefined it, and an earlier file's body alone would drop what every later one added)."));
         } else if (!two) {
           // This server never calls the 2-argument form; PostgREST callers by
@@ -1287,8 +1289,14 @@ if (configFailed) {
                   FROM thought_audit a
                  WHERE a.actor_kind IS NULL AND (a.actor_name IS NOT NULL OR a.canonical_agent_id IS NOT NULL)
                  GROUP BY 1, 2),
+              -- A row with an id and no name is named by the registry's label
+              -- for that id, which set_agent_kind takes; only an id the
+              -- registry has no row for is named as the id (seventh review
+              -- pass: the remedy said set_agent_kind('<label>') and showed a uuid).
               resolved AS (
-                SELECT COALESCE(name, 'agent ' || agent::text) AS name, n, ob1_registry_kind(agent, name) IS NOT NULL AS fillable FROM waiting),
+                SELECT COALESCE(w.name, (SELECT g.label FROM ob1_agents g WHERE g.canonical_agent_id = w.agent), 'agent ' || w.agent::text) AS name,
+                       w.n, ob1_registry_kind(w.agent, w.name) IS NOT NULL AS fillable
+                  FROM waiting w),
               -- An unclassified key: a registry row with no kind, an unrevoked
               -- digest, and no write of its own that resolves by name — a key
               -- renamed in the env and pre-classified under its new name keeps
@@ -1301,10 +1309,15 @@ if (configFailed) {
                    AND EXISTS (SELECT 1 FROM ob1_agent_keys k WHERE k.canonical_agent_id = g.canonical_agent_id AND k.revoked_at IS NULL)
                    -- The names first, then the lookup once per name, not once
                    -- per row (sixth review pass: a key with a million writes
-                   -- probed the registry a million times).
+                   -- probed the registry a million times). OFFSET 0 is the
+                   -- fence: without it the planner pushes the STABLE lookup
+                   -- down through the DISTINCT onto every row — the sixth
+                   -- pass's rewrite changed nothing until measured (run-it,
+                   -- seventh review pass: 1.7 s → 0.17 s at a million rows).
                    AND NOT EXISTS (SELECT 1 FROM (SELECT DISTINCT a.actor_name
                                                     FROM thought_audit a
-                                                   WHERE a.canonical_agent_id = g.canonical_agent_id AND a.actor_name IS NOT NULL) d
+                                                   WHERE a.canonical_agent_id = g.canonical_agent_id AND a.actor_name IS NOT NULL
+                                                  OFFSET 0) d
                                     WHERE ob1_registry_kind(NULL, d.actor_name) IS NOT NULL))
               SELECT (SELECT count(*)::int FROM unclassified) AS unclassified,
                      (SELECT string_agg(label, ', ' ORDER BY label) FROM unclassified) AS labels,
@@ -1317,9 +1330,15 @@ if (configFailed) {
               const needsKinds = unclassified > 0 || Boolean(census.unnamed);
               add("audit events", "warn",
                   `${unclassified} key(s) with no kind${unclassified ? ` (${census.labels})` : ""} and ${awaiting} audit row(s) naming a key with no kind${census.unnamed ? ` (names: ${census.unnamed})` : ""}${fillable ? `, ${fillable} of them naming a key classified since — waiting only on the backfill` : ""} — every write through an unclassified key is recorded with actor_kind and trust unknown, which every read built on them will say`,
-                  needsKinds
-                    ? "For each name: SELECT set_agent_kind('<label>', '<operator | agent | ingested>'); then SELECT backfill_thought_audit_events(); fills the rows already written (db/README.md)."
-                    : "SELECT backfill_thought_audit_events(); fills them — every key they name is classified (db/README.md).");
+                  // The backfill is the owner's call: its pass holds a share lock on
+                  // ob1_agents, which needs UPDATE there (seventh review pass: the
+                  // remedy read as a plain SELECT and a connector role following it
+                  // met a permission error that looked like a grant bug). A name
+                  // shaped `agent <uuid>` is an id the registry has no row for.
+                  (needsKinds
+                    ? "For each name: SELECT set_agent_kind('<label>', '<operator | agent | ingested>'); then, as the owner (the pass locks ob1_agents), SELECT backfill_thought_audit_events(); fills the rows already written (db/README.md)."
+                    : "As the owner (the pass locks ob1_agents), SELECT backfill_thought_audit_events(); fills them — every key they name is classified (db/README.md).")
+                  + (/(^|, )agent [0-9a-f-]{36}/.test(String(census.unnamed ?? "")) ? " A name shaped `agent <uuid>` is an id the registry has no row for: set_agent_kind cannot reach those rows, and they stay unknown." : ""));
             } else {
               add("audit events", "ok", "045's event shape present — the columns, the trigger that derives the kind from the key, the one lawful amendment — and every key classified");
             }

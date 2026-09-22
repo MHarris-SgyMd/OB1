@@ -144,7 +144,6 @@ const FUNCTIONS = [
   // above and the 9-argument one it dropped is in SUPERSEDED_SIGNATURES.
   "set_agent_kind(text, text)",
   "validate_write_event(jsonb)",
-  "ob1_current_event()",
   "backfill_thought_audit_events(integer)",
   "ob1_registry_kind(uuid, text)",
   "ob1_trust_ceiling(text, text)",

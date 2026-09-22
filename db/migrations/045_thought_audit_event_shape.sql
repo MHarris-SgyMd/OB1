@@ -236,32 +236,6 @@ COMMENT ON COLUMN ob1_agents.kind IS
 COMMENT ON TABLE thought_audit IS
   'Append-only log of every capture/update/delete on thoughts, and since 045 the log of record SMD-1729''s views derive from: who (actor_name, canonical_agent_id, actor_kind from the key), the door (origin), the ceiling on the content (trust), what changed (diff), what the write claimed (stance, cites, valid_from/valid_until) and when (created_at). Written by a trigger inside the mutating transaction, so an event cannot be lost independently of the change it describes. thought_id is deliberately not a foreign key so audit rows outlive their subject. UPDATE and DELETE are refused by trigger, not by grant; the one lawful amendment fills a NULL actor_kind/trust/origin and stamps backfilled_at. Partition key chosen and not applied (SMD-1730): RANGE on created_at by month — append-only, so a closed month is cold; SMD-1697''s bench decides when.';
 
--- No index on actor_kind, trust or origin here: nothing in the tree reads
--- them yet, and an index with no reader is maintenance on every audit row for
--- nothing — SMD-1724 and SMD-1726 add theirs with their first read, as this
--- file's header says of origin (fifth review pass; the first draft carried
--- two).
---
--- The rows still waiting on a kind or a trust, by the name they carry: what
--- the backfill fills, the census counts and names, and the amendment gate
--- re-derives — the shape every such read has (the census's `actor_kind IS
--- NULL` is implied by the predicate, so it reads this index too). And the rows still waiting on a
--- door: empty after this file's own backfill, since the trigger writes origin
--- with the row, so a re-run scans no filled row (third review pass: the first
--- backfill's WHERE was an OR over function results no index could serve).
--- The awaiting-kind index is as large as the log's unclassified writes: on a
--- brain whose keys nobody classifies it holds every row's actor_name, and it
--- empties once set_agent_kind and a backfill pass have run — classification is
--- the remedy the census names, and this is the cost of not taking it (sixth
--- review pass).
-CREATE INDEX IF NOT EXISTS thought_audit_awaiting_kind_idx
-  ON thought_audit (actor_name)
-  WHERE (actor_kind IS NULL OR trust IS NULL) AND (actor_name IS NOT NULL OR canonical_agent_id IS NOT NULL);
-
-CREATE INDEX IF NOT EXISTS thought_audit_awaiting_door_idx
-  ON thought_audit (created_at)
-  WHERE origin IS NULL AND (actor_context ? 'via');
-
 -- ---------------------------------------------------------------------------
 -- Two rules, one copy each (second review pass: the audit trigger, the
 -- amendment gate and the backfill had each spelled both, and the gate's
@@ -328,6 +302,39 @@ COMMENT ON FUNCTION ob1_door_of(jsonb) IS
 
 COMMENT ON FUNCTION ob1_trust_ceiling(text, text) IS
   'The trust a write gets from its key''s kind and the trust it declared: the kind when undeclared; the declaration when it stands under the kind (operator > agent > ingested); the kind when it does not; only a declared ingested when the kind is unknown. The one rule the audit trigger, the amendment gate and backfill_thought_audit_events share. Migration 045 / SMD-1730.';
+
+-- No index on actor_kind, trust or origin here: nothing in the tree reads
+-- them yet, and an index with no reader is maintenance on every audit row for
+-- nothing — SMD-1724 and SMD-1726 add theirs with their first read, as this
+-- file's header says of origin (fifth review pass; the first draft carried
+-- two).
+--
+-- The rows still waiting on a kind or a trust, by the name they carry: what
+-- the backfill fills, the census counts and names, and the amendment gate
+-- re-derives — the shape every such read has (the census's `actor_kind IS
+-- NULL` is implied by the predicate, so it reads this index too, and its
+-- GROUP BY the agent id from the included column rather than the heap —
+-- seventh review pass: a brain with one never-classified key and a million
+-- rows fetched a million heap tuples at every server start). And the rows
+-- still waiting on a door — a via that IS a door, by the one reading
+-- ob1_door_of gives, so a row whose via is empty or not a string (a raw
+-- caller's) is not in it (seventh review pass: on `actor_context ? 'via'`
+-- such rows sat in the index for ever and every backfill pass re-read them):
+-- empty after this file's own backfill, since the trigger writes origin with
+-- the row, so a re-run scans no filled row (third review pass: the first
+-- backfill's WHERE was an OR over function results no index could serve).
+-- The awaiting-kind index is as large as the log's unclassified writes: on a
+-- brain whose keys nobody classifies it holds every row's actor_name, and it
+-- empties once set_agent_kind and a backfill pass have run — classification is
+-- the remedy the census names, and this is the cost of not taking it (sixth
+-- review pass).
+CREATE INDEX IF NOT EXISTS thought_audit_awaiting_kind_idx
+  ON thought_audit (actor_name) INCLUDE (canonical_agent_id)
+  WHERE (actor_kind IS NULL OR trust IS NULL) AND (actor_name IS NOT NULL OR canonical_agent_id IS NOT NULL);
+
+CREATE INDEX IF NOT EXISTS thought_audit_awaiting_door_idx
+  ON thought_audit (created_at)
+  WHERE origin IS NULL AND ob1_door_of(actor_context) IS NOT NULL;
 
 -- ---------------------------------------------------------------------------
 -- set_agent_kind — the operator classifies a key, by the name the env gives it
@@ -478,9 +485,14 @@ BEGIN
     -- contract, including its corners: "-5" is -05:00, "+123" is +01:23, and
     -- a bare "UTC+5" or "GMT-3" is a POSIX zone, hours WEST of Greenwich, as
     -- Etc/GMT+5 is — a client that means Karachi writes "+05:00" or
-    -- Asia/Karachi. One copy of the rule for both bounds, in the loop; the
-    -- echo bounded, as the other refusals' are. A subtransaction, entered
-    -- only when a window is named; a second only for a zoned input.
+    -- Asia/Karachi. Independent of the session's TimeZone, and measured so
+    -- across ninety inputs (run-it, seventh review pass); an ABBREVIATION —
+    -- EST, IST, CST — resolves through the session's timezone_abbreviations,
+    -- Postgres's own table, which the server never sets and no pooler does:
+    -- a client that must not depend on it writes an offset or a region name.
+    -- One copy of the rule for both bounds, in the loop; the echo bounded,
+    -- as the other refusals' are. A subtransaction, entered only when a
+    -- window is named; a second only for a zoned input.
     FOREACH v_key IN ARRAY ARRAY['valid_from', 'valid_until'] LOOP
       IF v ? v_key AND jsonb_typeof(v->v_key) <> 'null' THEN
         IF jsonb_typeof(v->v_key) <> 'string' OR (v->>v_key) !~ '^\d{4}-\d{2}-\d{2}' THEN
@@ -515,38 +527,6 @@ $$;
 
 COMMENT ON FUNCTION validate_write_event(jsonb) IS
   'The write event''s shape rule (045): NULL and JSON null are NULL; otherwise an object with only stance (stated|retrieved|inferred), cites (UUID strings naming existing thoughts — lowercased, de-duplicated, sorted), valid_from / valid_until (timestamps, in order), trust and actor_kind (operator|agent|ingested — claims the audit trigger checks against the key), returned normalised, or an exception. Called by upsert_thought (both inserting forms) and update_thought. Migration 045 / SMD-1730.';
-
--- ---------------------------------------------------------------------------
--- The event, carried on the transaction beside the actor — 008's mechanism,
--- a second setting, so the actor envelope and the event stay two things.
--- ---------------------------------------------------------------------------
-CREATE OR REPLACE FUNCTION ob1_current_event()
-RETURNS jsonb
-LANGUAGE plpgsql
-STABLE
-AS $$
-DECLARE
-  raw text := current_setting('ob1.event', true);
-BEGIN
-  -- No EXCEPTION arm — and not for the cost alone (ob1_current_actor pays one
-  -- savepoint per row already, as the sixth review pass pointed out) but for
-  -- what the two settings ARE. 008 tolerates a malformed actor because a NULL
-  -- actor is a fact worth recording ("a mutation from outside the server").
-  -- The event is written by this file's own functions or by nobody: a
-  -- validated object or an empty string. A value that does not begin as an
-  -- object is a hand-set thing that is no event and reads as none; one that
-  -- begins as an object but is malformed is a bug in whoever set it, and a
-  -- write that would silently record no event for it is the failure this
-  -- file exists to remove — so it fails loudly.
-  IF raw IS NULL OR raw = '' OR raw !~ '^\s*\{' THEN
-    RETURN NULL;
-  END IF;
-  RETURN raw::jsonb;
-END;
-$$;
-
-COMMENT ON FUNCTION ob1_current_event() IS
-  'Reads the ob1.event transaction-local setting as jsonb — the write event validate_write_event normalised: {stance, cites, valid_from, valid_until, trust, actor_kind}. NULL when unset, empty, or not an object; no savepoint per row (a hand-set object that is malformed or not the normalised shape fails the write). Migration 045 / SMD-1730.';
 
 -- ---------------------------------------------------------------------------
 -- Immutable by rule: 008's refusal, with the one lawful amendment
@@ -648,6 +628,7 @@ DECLARE
   -- the valid window, and the caller's DECLARED trust and actor_kind, which
   -- are checked against the key below and never copied. Read below, once.
   event    jsonb;
+  v_raw    text;
   v_action text;
   v_diff   jsonb;
   v_id     uuid;
@@ -671,9 +652,26 @@ BEGIN
    * nothing: on DELETE the event is not read at all — delete_thought sets
    * none, and one a previous call left on this transaction is not its own
    * (first review pass). The actor is 008's and stays as it was.
+   *
+   * Read inline, not through a function (seventh review pass: a plpgsql call
+   * and an unconditional set_config on every audited row — DELETEs and bulk
+   * raw INSERTs included — on a trigger the header measures at 6% of a bulk
+   * insert): one current_setting, and nothing more on the common path, where
+   * no event is set. A value that does not begin as an object is a hand-set
+   * thing that is no event and reads as none; one that begins as an object
+   * but is malformed is a bug in whoever set it, and fails the write loudly
+   * rather than recording no event for it. 008 tolerates a malformed actor
+   * because a NULL actor is a fact worth recording ("a mutation from outside
+   * the server"); the event is written by this file's own functions or by
+   * nobody, so there is nothing to tolerate.
    */
-  event := CASE WHEN TG_OP = 'DELETE' THEN NULL ELSE ob1_current_event() END;
-  PERFORM set_config('ob1.event', '', true);
+  v_raw := current_setting('ob1.event', true);
+  IF v_raw IS NOT NULL AND v_raw <> '' THEN
+    PERFORM set_config('ob1.event', '', true);
+    IF TG_OP <> 'DELETE' AND v_raw ~ '^\s*\{' THEN
+      event := v_raw::jsonb;
+    END IF;
+  END IF;
 
   IF TG_OP = 'INSERT' THEN
     v_action := 'capture';
@@ -731,21 +729,20 @@ BEGIN
      *
      * `updated_at` moving on its own is bookkeeping, not history.
      */
-    IF v_diff = '{}'::jsonb AND NOT COALESCE(event ?| ARRAY['stance', 'cites', 'valid_from', 'valid_until'], false) THEN
+    IF v_diff = '{}'::jsonb AND NOT COALESCE(event ?| ARRAY['stance', 'cites', 'valid_from', 'valid_until', 'trust', 'actor_kind'], false) THEN
       RETURN NULL;
     END IF;
     /**
      * 045 (fourth review pass): an unchanged write that DECLARED an event is
      * an event. 008's rule stands for the bare re-import — no diff, no event,
-     * no row — but a re-capture or edit that restates a text with a stance,
-     * cites or a window is exactly the restatement SMD-1722 counts, and the
-     * caller's declaration must exist somewhere: it is recorded here, the diff
-     * empty, rather than checked by validate_write_event and then lost. A
-     * trust or actor_kind claim alone is not a record of anything but a clamp,
-     * so it writes no row on an unchanged write (run-it, fifth review pass) —
-     * and the clamp is then recorded nowhere: a key's over-claims are counted
-     * (SMD-1724) only on its changed or stance-bearing writes, which is where
-     * a claim is about something (run-it, sixth review pass).
+     * no row, and no registry read — but a re-capture or edit that restates a
+     * text with a stance, cites or a window is exactly the restatement
+     * SMD-1722 counts, and the caller's declaration must exist somewhere: it
+     * is recorded, the diff empty, rather than checked by validate_write_event
+     * and then lost. An event carrying only a trust or an actor_kind goes on
+     * to the key's word below, where what it is — a lowering the key supports,
+     * or a clamp — is known; the decision to write no row for the former is
+     * taken there (seventh review pass).
      * (`?|` on a NULL event is NULL; NOT NULL is NULL; the IF takes the row —
      * so the NULL case is spelled: no event, no row.)
      */
@@ -859,6 +856,19 @@ BEGIN
       CASE WHEN jsonb_typeof(v_context->'claimed') = 'object' THEN (v_context->'claimed') || v_claimed
            WHEN v_context ? 'claimed' THEN jsonb_build_object('caller', v_context->'claimed') || v_claimed
            ELSE v_claimed END);
+  END IF;
+
+  -- An unchanged write whose event carried only a trust or an actor_kind the
+  -- key supports — a lowering, honoured — is nothing to record (run-it, fifth
+  -- review pass): no row. One the key does NOT support — a clamp — is a fact
+  -- about the caller, and this row is the only place SMD-1724 can count it:
+  -- the diff empty, trust the key's, the claim under claimed (seventh review
+  -- pass — the sixth had let a thousand identical over-claims on one text
+  -- leave no trace). Stance, cites and a window were let through above.
+  IF TG_OP = 'UPDATE' AND v_diff = '{}'::jsonb
+     AND NOT COALESCE(event ?| ARRAY['stance', 'cites', 'valid_from', 'valid_until'], false)
+     AND v_claimed = '{}'::jsonb THEN
+    RETURN NULL;
   END IF;
 
   INSERT INTO thought_audit (
@@ -1515,7 +1525,7 @@ BEGIN
      -- oldest row instead (run-it, fourth review pass).
      WHERE ((a.actor_kind IS NULL OR a.trust IS NULL) AND (a.actor_name IS NOT NULL OR a.canonical_agent_id IS NOT NULL)
             AND COALESCE(a.actor_kind, r.kind) IS NOT NULL)
-        OR (a.origin IS NULL AND (a.actor_context ? 'via') AND ob1_door_of(a.actor_context) IS NOT NULL)
+        OR (a.origin IS NULL AND ob1_door_of(a.actor_context) IS NOT NULL)
      LIMIT CASE WHEN p_limit IS NULL THEN NULL ELSE GREATEST(p_limit, 0) END
   )
   UPDATE thought_audit a
@@ -1567,10 +1577,14 @@ SELECT backfill_thought_audit_events();
 -- capture set before this file (INSERT on thought_audit, no SELECT there)
 -- would fail every capture, edit and delete from the moment this applies
 -- until `migrate.ts --grant` was run again (sixth review pass). So, as 033
--- replays an ACL onto the form it creates, every role that may INSERT into
--- thought_audit — the capturing roles, by the catalog, the owner and PUBLIC
--- aside — is granted SELECT on ob1_agents here. Idempotent: GRANT twice is
--- GRANT once. db/config.mjs's ROLE_GRANTS documents the same row for --grant.
+-- replays an ACL onto the form it creates, every grantee that may INSERT into
+-- thought_audit — the capturing roles, by the catalog, the owner aside, and
+-- PUBLIC when an operator granted the table to PUBLIC (seventh review pass:
+-- a getting-started paste does; every writer under it would have failed) —
+-- is granted SELECT on ob1_agents here. The registry holds labels, ids and
+-- kinds, no secret (the digests are ob1_agent_keys'). A group role's members
+-- inherit, as they inherit the INSERT. Idempotent: GRANT twice is GRANT once.
+-- db/config.mjs's ROLE_GRANTS documents the same row for --grant.
 -- ---------------------------------------------------------------------------
 DO $grant$
 DECLARE
@@ -1581,10 +1595,11 @@ BEGIN
       FROM information_schema.role_table_grants g
      WHERE g.table_schema = 'public' AND g.table_name = 'thought_audit'
        AND g.privilege_type = 'INSERT'
-       AND g.grantee NOT IN ('PUBLIC', current_user)
-       AND EXISTS (SELECT 1 FROM pg_roles r WHERE r.rolname = g.grantee)
+       AND g.grantee <> current_user
+       AND (g.grantee = 'PUBLIC' OR EXISTS (SELECT 1 FROM pg_roles r WHERE r.rolname = g.grantee))
   LOOP
-    EXECUTE format('GRANT SELECT ON ob1_agents TO %I', v_role);
+    EXECUTE CASE WHEN v_role = 'PUBLIC' THEN 'GRANT SELECT ON ob1_agents TO PUBLIC'
+                 ELSE format('GRANT SELECT ON ob1_agents TO %I', v_role) END;
   END LOOP;
 END
 $grant$;
