@@ -342,7 +342,7 @@ type HandLabel = { id: string; kind: Kind; parts?: Kind[]; status?: string };
  * two resumes later a torn line sits mid-file and every read throws (review
  * pass 5 reproduced this against pass 4's read-side fix). So the resume trims
  * the torn bytes off the end first: a truncate to the last newline, never a
- * rewrite of the answered lines. Returns whether anything was trimmed.
+ * rewrite of the answered lines. Returns whether anything was trimmed; the caller says so (the self-check probes it on a temp file and should stay quiet).
  */
 export function trimTornTail(path: string): boolean {
   if (!existsSync(path)) return false;
@@ -350,7 +350,6 @@ export function trimTornTail(path: string): boolean {
   if (text === "" || text.endsWith("\n")) return false;
   const keep = text.slice(0, text.lastIndexOf("\n") + 1);
   truncateSync(path, Buffer.byteLength(keep, "utf8"));
-  console.error(`${path}: trimmed a torn last line (a run killed mid-write?) before appending`);
   return true;
 }
 
@@ -562,7 +561,7 @@ async function label(out: string): Promise<void> {
   // before this every existing line counted, errors included; pass 4 dropped
   // the rewrite of the file that did the dropping, a truncate-and-write of
   // hours of model time). The freeze reads the LAST line per id.
-  trimTornTail(out);
+  if (trimTornTail(out)) console.error(`${out}: trimmed a torn last line (a run killed mid-write?) before appending`);
   const done = new Set(readJsonl<ReviewLine>(out).filter((l) => l.first_pass !== null).map((l) => l.id));
   const limit = Number(flag("limit") ?? 0);
   const rows = await sql`SELECT id::text, content, metadata FROM thoughts ORDER BY created_at, id` as Row[];
