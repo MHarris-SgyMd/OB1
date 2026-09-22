@@ -158,7 +158,7 @@
  *      renders. The rules are registryProblems, one pure function the
  *      renderer runs too (SMD-1933); no exceptions beyond the registry's own
  *      named excuses
- *  20. a .sql file never destroys rows a brain already holds — CLAUDE.md's
+ *  21. a .sql file never destroys rows a brain already holds — CLAUDE.md's
  *      SQL-safety guard rail read as statements, not words: no DROP TABLE, no
  *      DROP DATABASE or DROP SCHEMA, no TRUNCATE with a table after it (a
  *      trigger event `BEFORE TRUNCATE ON t`, a privilege `GRANT TRUNCATE ON` and
@@ -3770,7 +3770,7 @@ function checkConnectorRegistry() {
 }
 checkConnectorRegistry();
 
-// ── 20: a .sql file never destroys rows a brain already holds ────────────────
+// ── 21: a .sql file never destroys rows a brain already holds ────────────────
 //
 // SMD-1936. CLAUDE.md's guard rail and CONTRIBUTING.md's review checklist said
 // "no DROP TABLE, DROP DATABASE, TRUNCATE or unqualified DELETE FROM in SQL
@@ -3895,16 +3895,16 @@ const DESTRUCTIVE_SQL_EXCEPTIONS = new Map<string, Record<string, CountedExcepti
 function checkDestructiveSql() {
   const rules = new Set(DESTRUCTIVE_SQL_RULES.map((r) => r.name));
   for (const [rule, probe] of DESTRUCTIVE_SQL_PROBES) {
-    if (!rules.has(rule)) { fail(SELF, `check 20's probe names rule '${rule}', which DESTRUCTIVE_SQL_RULES does not define (its own probe)`); continue; }
-    if (!destructiveSqlIn(probe).some((h) => h.rule === rule)) fail(SELF, `check 20's rule '${rule}' no longer catches its probe: ${JSON.stringify(probe)} (its own probe)`);
+    if (!rules.has(rule)) { fail(SELF, `check 21's probe names rule '${rule}', which DESTRUCTIVE_SQL_RULES does not define (its own probe)`); continue; }
+    if (!destructiveSqlIn(probe).some((h) => h.rule === rule)) fail(SELF, `check 21's rule '${rule}' no longer catches its probe: ${JSON.stringify(probe)} (its own probe)`);
   }
   for (const text of DESTRUCTIVE_SQL_NON_PROBES) {
     const [hit] = destructiveSqlIn(text);
-    if (hit) fail(SELF, `check 20's rule '${hit.rule}' catches SQL this repository writes: ${JSON.stringify(text)} (its own probe)`);
+    if (hit) fail(SELF, `check 21's rule '${hit.rule}' catches SQL this repository writes: ${JSON.stringify(text)} (its own probe)`);
   }
   // The line is the statement's own, through comments and a plpgsql body alike.
   const lined = destructiveSqlIn("-- a header\nCREATE FUNCTION f() RETURNS void LANGUAGE plpgsql AS $$\nBEGIN\n  -- TRUNCATE in prose\n  TRUNCATE thoughts;\nEND;\n$$;\n");
-  if (lined.map((h) => `${h.rule}@${h.line}`).join(",") !== "truncate@5") fail(SELF, `check 20 reports ${JSON.stringify(lined.map((h) => `${h.rule}@${h.line}`))} for a TRUNCATE on line 5 of a function body, expected ["truncate@5"] (its own probe)`);
+  if (lined.map((h) => `${h.rule}@${h.line}`).join(",") !== "truncate@5") fail(SELF, `check 21 reports ${JSON.stringify(lined.map((h) => `${h.rule}@${h.line}`))} for a TRUNCATE on line 5 of a function body, expected ["truncate@5"] (its own probe)`);
 
   const counts = new Map<string, number>();
   // The files git tracks or would track, as check 15 reads them — so an ignored
@@ -3912,7 +3912,7 @@ function checkDestructiveSql() {
   // tree's, as .gitignore promises of this script (first review pass; the walk
   // read the disk). citationFiles skips a file over 4 MB; no .sql is near it.
   const files = citationFiles().filter((rel) => rel.endsWith(".sql"));
-  if (files.length === 0) fail(SELF, "check 20 found no .sql file in the tree — the listing or its filter is broken, and the rule would pass everything");
+  if (files.length === 0) fail(SELF, "check 21 found no .sql file in the tree — the listing or its filter is broken, and the rule would pass everything");
   for (const rel of files) {
     for (const h of destructiveSqlIn(readFileSync(join(ROOT, rel), "utf8"))) {
       const key = `${rel} ${h.rule}`;

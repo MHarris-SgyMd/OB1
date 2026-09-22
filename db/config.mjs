@@ -1957,7 +1957,7 @@ function sqlHitList(sql, rules) {
  * stand outside a quoted identifier. String literals are read, as
  * SUPABASE_SQL_RULES reads them: `EXECUTE 'TRUNCATE ' || quote_ident(t)` runs
  * the truncate. A `--` comment quoting a statement is not a hit, so a header
- * may say why the file has none. check-fork-consistency check 20 holds every
+ * may say why the file has none. check-fork-consistency check 21 holds every
  * .sql git tracks to these through destructiveSqlIn().
  */
 export const DESTRUCTIVE_SQL_RULES = Object.freeze([
