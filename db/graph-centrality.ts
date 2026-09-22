@@ -38,11 +38,12 @@
  * `normalized_name` match (`normalize_entity_name`, so "Open-Brain" finds
  * "open brain"); else a name a human merged in (`merged_from`) or an alias the
  * model offered; else the five nearest by trigram similarity at pg_trgm's
- * default threshold or above, named as guesses. A uuid is taken as an entity
- * id. What is ranked around is the entities sharing the FIRST subject's
- * normalised name — "postgres" as a tool and as a topic are both it; the
- * other names an alias or fuzzy rung returns are listed, unmarked, and not
- * ranked around (`rankedSubjects`, `Report.subject_ids`). `--types` and the numeric rule together say which
+ * default threshold or above, named as guesses. What is ranked around is the
+ * entities sharing the FIRST subject's normalised name — "postgres" as a tool
+ * and as a topic are both it; the other names an alias or fuzzy rung returns
+ * are listed, unmarked, and not ranked around (`rankedSubjects`,
+ * `Report.subject_ids`). A uuid is one entity, ranked around alone — its
+ * same-name siblings under other types are then its neighbours. `--types` and the numeric rule together say which
  * entities exist for the run — the scope IS the graph: an entity outside it is
  * in no list and no count, so under `--types tool` a tool's degree is its
  * degree among tools. The subject is the one exception, resolved whatever its
@@ -107,8 +108,10 @@ export type Resolution = {
   subjects: SubjectRow[];
   /** What normalize_entity_name made of the input; null for a uuid, or a name that is only punctuation. */
   normalized: string | null;
-  /** `none` because the entity exists and the numeric-name rule excludes it — the message names --keep-numeric. */
+  /** `none` because the subject IS an entity (by id, name, alias or merged-in name) and the numeric-name rule excludes it — exit 3, the message names --keep-numeric. */
   excluded: boolean;
+  /** `none` with numeric-named entities near the subject that the rule hid — still no entity (exit 1); --keep-numeric would offer them as guesses. */
+  hidden_guesses: number;
 };
 export type NeighbourRow = { id: string; entity_type: string; name: string; mentions: number; co_mentions: number; support?: number; relations?: string | null };
 export type Coverage = { thoughts: number; extracted: number; entities: number; numeric_names: number; edges: number; unit_edges: number; extraction_key: string | null };
@@ -124,14 +127,19 @@ export function pgArray(items: readonly string[]): string {
  * `params` — one definition, so every list and every count agrees on which
  * entities exist.
  */
-function scopeSql(alias: string, scope: Scope, params: unknown[]): string {
+function scopeSql(alias: string, scope: Scope, params: unknown[]): { where: string; typesSlot: number; patternSlot: number | null } {
   params.push(pgArray(scope.types));
-  let s = `${alias}.entity_type = ANY($${params.length}::text[])`;
+  const typesSlot = params.length;
+  let where = `${alias}.entity_type = ANY($${typesSlot}::text[])`;
+  let patternSlot: number | null = null;
   if (scope.excludeNumeric) {
     params.push(NUMERIC_NAME_RE);
-    s += ` AND ${alias}.normalized_name !~ $${params.length}`;
+    patternSlot = params.length;
+    where += ` AND ${alias}.normalized_name !~ $${patternSlot}`;
   }
-  return s;
+  // The slots are returned so a query that reads the same values again
+  // references them rather than counting pushes by hand (seventh review pass).
+  return { where, typesSlot, patternSlot };
 }
 
 /** Mentions per in-scope entity; every query using it has a `scope` CTE before it. */
@@ -150,17 +158,16 @@ export async function coverage(run: Runner, scope: Scope): Promise<Coverage> {
   // numeric_names is the rule's own effect: numeric names AMONG the ranked
   // types, since a numeric name of another type is out by type whatever the
   // rule says (third review pass).
-  // scopeSql binds the type list at $1 and, under the rule, the pattern at $2;
-  // the numeric count reads the same slots, binding the pattern itself only
-  // when the rule is off (sixth review pass: one binding per value).
+  // The numeric count reads the slots scopeSql bound, binding the pattern
+  // itself only when the rule is off and scopeSql did not (one binding per value).
   const params: unknown[] = [];
-  const inScope = scopeSql("e", scope, params);
-  if (!scope.excludeNumeric) params.push(NUMERIC_NAME_RE);
+  const sc = scopeSql("e", scope, params);
+  const patternSlot = sc.patternSlot ?? params.push(NUMERIC_NAME_RE);
   const [r] = await run(
     `SELECT (SELECT count(*) FROM thoughts)::int AS thoughts,
             (SELECT count(DISTINCT thought_id) FROM thought_entities)::int AS extracted,
-            (SELECT count(*) FROM ob1_entities e WHERE ${inScope})::int AS entities,
-            (SELECT count(*) FROM ob1_entities WHERE normalized_name ~ $2 AND entity_type = ANY($1::text[]))::int AS numeric_names,
+            (SELECT count(*) FROM ob1_entities e WHERE ${sc.where})::int AS entities,
+            (SELECT count(*) FROM ob1_entities WHERE normalized_name ~ $${patternSlot} AND entity_type = ANY($${sc.typesSlot}::text[]))::int AS numeric_names,
             (SELECT count(*) FROM ob1_entity_edges)::int AS edges,
             (SELECT count(*) FROM ob1_entity_edges WHERE confidence = 1)::int AS unit_edges,
             (SELECT value FROM ob1_config WHERE key = 'entity_extraction_key') AS extraction_key`,
@@ -183,9 +190,10 @@ export async function resolveSubject(run: Runner, subject: string, scopeIn: Scop
   // first, third and fifth passes had each patched one rung with a second,
   // unscoped probe, and the fuzzy rung still had none (sixth review pass).
   // The type scope does not apply here: it says what to rank around the
-  // subject. The mention count is MENTIONS_CTE's, correlated: at most five
-  // rows leave a rung, an index probe each.
-  const rung = async (how: string, score: string, params: unknown[], limit = ""): Promise<{ hit: SubjectRow[]; excluded: boolean }> => {
+  // subject. The mention count is MENTIONS_CTE's, correlated — an index probe
+  // per CANDIDATE row, since the ORDER BY reads it: one for an exact or alias
+  // match, one per entity above the similarity floor on the fuzzy rung.
+  const rung = async (how: string, score: string, params: unknown[], limit = ""): Promise<{ hit: SubjectRow[]; out: number }> => {
     params.push(NUMERIC_NAME_RE);
     const rows = await run(
       `SELECT s.id, s.entity_type, s.name, s.normalized_name,
@@ -197,12 +205,19 @@ export async function resolveSubject(run: Runner, subject: string, scopeIn: Scop
         ORDER BY excluded, score DESC, mentions DESC, ${ENTITY_TIEBREAK}${limit}`,
       params);
     const hit = rows.filter((r) => r.excluded !== true).map(({ excluded: _e, ...x }) => ({ ...x, score: Number(x.score) })) as SubjectRow[];
-    return { hit, excluded: hit.length === 0 && rows.length > 0 };
+    return { hit, out: rows.length - hit.length };
   };
-  const none = (normalized: string | null, excluded: boolean): Resolution => ({ how: "none", subjects: [], normalized, excluded });
-  /** The rung's verdict, or null to try the next. */
-  const step = (how: Resolution["how"], r: { hit: SubjectRow[]; excluded: boolean }, normalized: string | null): Resolution | null =>
-    r.hit.length ? { how, subjects: r.hit, normalized, excluded: false } : r.excluded ? none(normalized, true) : null;
+  const none = (normalized: string | null, excluded: boolean, hidden = 0): Resolution => ({ how: "none", subjects: [], normalized, excluded, hidden_guesses: hidden });
+  /**
+   * The rung's verdict, or null to try the next. Rows in → the subject. Only
+   * rows out → on the id, exact and alias rungs the subject IS an entity the
+   * rule hid (excluded, exit 3); on the fuzzy rung it is not — only guesses
+   * were hidden, which the miss reports as a count (seventh review pass).
+   */
+  const step = (how: Resolution["how"], r: { hit: SubjectRow[]; out: number }, normalized: string | null): Resolution | null =>
+    r.hit.length ? { how, subjects: r.hit, normalized, excluded: false, hidden_guesses: 0 }
+    : r.out === 0 ? null
+    : how === "fuzzy" ? none(normalized, false, r.out) : none(normalized, true);
 
   if (UUID_RE.test(subject.trim())) {
     return step("id", await rung(`s.id = $1::uuid`, "1.0::float8", [subject.trim()]), null) ?? none(null, false);
@@ -240,7 +255,7 @@ export function rankedSubjects(res: Resolution): string[] {
  */
 export async function topEntities(run: Runner, opts: Options): Promise<{ byMentions: EntityRow[]; byDegree: EntityRow[] }> {
   const params: unknown[] = [];
-  const inScope = scopeSql("e", opts, params);
+  const inScope = scopeSql("e", opts, params).where;
   params.push(opts.limit);
   const L = `$${params.length}`;
   const edgeCols = opts.edges ? `, coalesce(d.degree, 0) AS degree, coalesce(d.support, 0) AS support` : "";
@@ -280,7 +295,7 @@ const stampRows = (rows: Record<string, unknown>[]): ThoughtRow[] =>
  */
 export async function topThoughts(run: Runner, opts: Options): Promise<ThoughtRow[]> {
   const params: unknown[] = [];
-  const inScope = scopeSql("e", opts, params);
+  const inScope = scopeSql("e", opts, params).where;
   params.push(opts.limit);
   const edgeCol = opts.edges
     ? `, (SELECT count(*) FROM ob1_entity_edges x JOIN scope a ON a.id = x.from_entity_id JOIN scope b ON b.id = x.to_entity_id WHERE x.thought_id = t.id)::int AS edges`
@@ -308,7 +323,7 @@ export async function topThoughts(run: Runner, opts: Options): Promise<ThoughtRo
 export async function neighbourhood(run: Runner, subjectIds: readonly string[], opts: Options): Promise<NeighbourRow[]> {
   if (subjectIds.length === 0) return [];
   const params: unknown[] = [pgArray(subjectIds)];
-  const inScope = scopeSql("e", opts, params);
+  const inScope = scopeSql("e", opts, params).where;
   params.push(opts.limit);
   const edgeCtes = opts.edges
     ? `,
@@ -365,7 +380,7 @@ export async function subjectThoughts(run: Runner, subjectIds: readonly string[]
            JOIN ob1_entities e ON e.id = CASE WHEN x.from_entity_id = ANY($1::uuid[]) THEN x.to_entity_id ELSE x.from_entity_id END
           WHERE x.thought_id = t.id
             AND (x.from_entity_id = ANY($1::uuid[])) <> (x.to_entity_id = ANY($1::uuid[]))
-            AND ${scopeSql("e", opts, params)})::int AS edges`
+            AND ${scopeSql("e", opts, params).where})::int AS edges`
     : "";
   const rows = await run(
     `WITH counted AS (
@@ -431,6 +446,8 @@ export async function report(run: Runner, subject: string | null, opts: Options)
 // ── Rendering ────────────────────────────────────────────────────────────────
 
 type Col = { key: string; head: string; right?: boolean; width?: number };
+/** One cap for the entity-name column in every table, so the same name renders the same in the whole-graph and neighbourhood reports (the edges-on/off control diffs them). */
+const NAME_WIDTH = 60;
 
 function table(rows: Record<string, unknown>[], cols: Col[]): string {
   // Names and excerpts are model output: control characters out, whitespace
@@ -449,7 +466,7 @@ const E_COLS = (edges: boolean): Col[] => [
   { key: "mentions", head: "mentions", right: true },
   ...(edges ? [{ key: "degree", head: "degree", right: true }, { key: "support", head: "support", right: true }] : []),
   { key: "entity_type", head: "type" },
-  { key: "name", head: "entity", width: 60 },
+  { key: "name", head: "entity", width: NAME_WIDTH },
 ];
 const T_COLS = (edges: boolean, entitiesHead: string): Col[] => [
   { key: "entities", head: entitiesHead, right: true },
@@ -473,7 +490,7 @@ export function render(r: Report): string {
       if (res.excluded) out.push(`No entity resolves from ${shown}: what it matches is an entity named only by digits, dots, colons and spaces (SMD-1935's noise), out of scope by default — pass --keep-numeric to rank it.`);
       else if (UUID_RE.test((r.subject ?? "").trim())) out.push(`No entity has the id ${shown}.`);
       else if (res.normalized === null) out.push(`No entity resolves from ${shown} — the name is only punctuation.`);
-      else out.push(`No entity resolves from ${shown} (normalised: ${JSON.stringify(res.normalized)}; nothing exact, no alias or merged name, nothing within trigram similarity ${FUZZY_FLOOR}).`);
+      else out.push(`No entity resolves from ${shown} (normalised: ${JSON.stringify(res.normalized)}; nothing exact, no alias or merged name, nothing within trigram similarity ${FUZZY_FLOOR}${res.hidden_guesses ? ` except ${res.hidden_guesses} numeric-named entit${res.hidden_guesses === 1 ? "y" : "ies"} the rule hides — --keep-numeric offers ${res.hidden_guesses === 1 ? "it" : "them"} as guesses` : ""}).`);
     } else {
       const several = res.subjects.length > r.subject_ids.length ? " — several names match; ranked around the first, pass the name shown to be exact" : "";
       const label = { id: "by id", exact: "exact match on the normalised name", alias: `by alias or merged-in name${several}`, fuzzy: `by trigram similarity — GUESSES, ranked around the first; pass the name shown to be exact` }[res.how];
@@ -488,7 +505,7 @@ export function render(r: Report): string {
         ...(o.edges ? [{ key: "support", head: "support", right: true }] : []),
         { key: "mentions", head: "mentions", right: true },
         { key: "entity_type", head: "type" },
-        { key: "name", head: "entity", width: 50 },
+        { key: "name", head: "entity", width: NAME_WIDTH },
         ...(o.edges ? [{ key: "relations", head: "relations (thoughts asserting each; can sum past support)", width: 60 }] : []),
       ]));
       out.push("");

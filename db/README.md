@@ -164,7 +164,7 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `1219 assertions: 1219 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `1223 assertions: 1223 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports forty-five (45) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
@@ -862,11 +862,12 @@ bun graph-centrality.ts --url … --types project,tool --json    # a typed subgr
 The subject resolves by 016's own rule, one rung at a time — exact
 `normalized_name` (so "open-brain" finds "Open Brain"), then a name a human
 merged in (`merged_from`) or an alias the model offered, then the five nearest
-by trigram similarity at pg_trgm's default threshold, named as guesses; a uuid
-is an entity id. What is ranked around is the entities sharing the first
-subject's normalised name — "postgres" as a tool and as a topic are both it —
-and the other names an alias or fuzzy rung returns are listed, unmarked, and
-not ranked around (`subject_ids` in the JSON says which). A neighbour ranks
+by trigram similarity at pg_trgm's default threshold, named as guesses. What
+is ranked around is the entities sharing the first subject's normalised name —
+"postgres" as a tool and as a topic are both it — and the other names an alias
+or fuzzy rung returns are listed, unmarked, and not ranked around
+(`subject_ids` in the JSON says which); a uuid is one entity, ranked around
+alone, its same-name siblings under other types then its neighbours. A neighbour ranks
 by co_mentions + support, and its per-relation counts can sum past support
 when one thought asserts two relations; `--no-edges` drops the support term and every edge
 column, so a run with and a run without say what the edges add over
@@ -885,9 +886,11 @@ the subject the one exception, so `--types tool "Open Brain"` is the tools
 around a project); hubs and clusters inflate each other; no ticket status is
 stored, so open/closed is the caller's filter; and only extracted thoughts are
 in the graph, which the coverage line counts. Exit 0 when ranked, 1 when no
-entity resolves, 3 when the subject is an entity the numeric rule excluded
-(`--keep-numeric` would rank it), 2 for a usage error, a brain without 016 or
-a query that failed — never 1 for a failure or an exclusion. `test-schema.ts` [43] runs the
+entity resolves (a near-miss whose only guesses the numeric rule hid is still
+no entity: exit 1, and the line counts the hidden guesses), 3 when the subject
+IS an entity — by id, name, alias or merged-in name — that the numeric rule
+excluded (`--keep-numeric` would rank it), 2 for a usage error, a brain
+without 016 or a query that failed — never 1 for a failure or an exclusion. `test-schema.ts` [43] runs the
 script's own SQL under PGlite over a graph whose every count is known by
 construction, and its edges-on and edges-off orders differ at every position.
 
@@ -1447,7 +1450,7 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 1219 assertions, PGlite, no container
+bun test-schema.ts                          # 1223 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts         # 601 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database

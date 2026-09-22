@@ -5346,18 +5346,39 @@ console.log("\n[43] db/graph-centrality.ts: mentions, degree and support as defi
   // (0.4) and not near "021x" (two of six trigrams, 0.33 — also a guess, but
   // in the rule and so first; hence the mixed case below asserts the order).
   const nearNumeric = await resolveSubject(run, "02", on);
-  assert(nearNumeric.how === "fuzzy" ? nearNumeric.subjects.every((s) => s.name !== "021") : nearNumeric.how === "none" && nearNumeric.excluded === true,
-    `under the rule a fuzzy match never offers 021 (${nearNumeric.how}, ${nearNumeric.subjects.map((s) => s.name).join(",")})`);
+  assert(nearNumeric.how === "fuzzy" && nearNumeric.subjects.map((s) => s.name).join() === "021x" && nearNumeric.hidden_guesses === 0,
+    `under the rule the one guess for "02" is 021x — 021 is never offered (${nearNumeric.how}, ${nearNumeric.subjects.map((s) => s.name).join(",")})`);
   const nearKept = await resolveSubject(run, "02", keep);
   assert(nearKept.how === "fuzzy" && nearKept.subjects.some((s) => s.name === "021"), `…and kept, 021 is among the guesses (${nearKept.subjects.map((s) => s.name).join(",")})`);
   await db.query(`DELETE FROM thoughts WHERE id = $1`, [t11]);
   await db.exec(`SELECT prune_orphan_entities()`);
   assert((await graphCoverage(run, on)).entities === 4, "the fixture is back to four");
-  // With no near name in the rule's scope, the only guess for "02" is 021, and
-  // the ladder says the rule hid it (exit 3's case), not that nothing is near.
+  // With no near name in the rule's scope, the only guess for "02" is 021: a
+  // miss (no entity, exit 1's case — "02" is not 021), and the miss counts the
+  // guess the rule hid, so the reader knows --keep-numeric would offer one
+  // (seventh review pass: exit 3 is for a subject that IS an entity).
   const onlyNumeric = await resolveSubject(run, "02", on);
-  assert(onlyNumeric.how === "none" && onlyNumeric.excluded === true, `a fuzzy near-miss whose only guess is numeric is excluded, not a miss (${onlyNumeric.how}, ${onlyNumeric.excluded})`);
-  assert(render(await graphReport(run, "02", on)).includes("pass --keep-numeric") && (await resolveSubject(run, "02", keep)).how === "fuzzy", "…the flag is named, and kept it is a guess");
+  assert(onlyNumeric.how === "none" && onlyNumeric.excluded === false && onlyNumeric.hidden_guesses === 1,
+    `a fuzzy near-miss whose only guess is numeric is a miss with one hidden guess, not an exclusion (${onlyNumeric.how}, ${onlyNumeric.excluded}, ${onlyNumeric.hidden_guesses})`);
+  const onlyNumericText = render(await graphReport(run, "02", on));
+  assert(onlyNumericText.includes("except 1 numeric-named entity the rule hides — --keep-numeric offers it as guesses") && !onlyNumericText.includes("pass --keep-numeric to rank it"),
+    "…the miss line counts the hidden guess and does not claim the subject is an entity");
+  assert((await resolveSubject(run, "02", keep)).how === "fuzzy", "…and kept, it is a guess");
+  assert((await resolveSubject(run, "qqqq", on)).hidden_guesses === 0 && numSubject.hidden_guesses === 0, "a plain miss and an exclusion hide no guess");
+
+  // "Rows in the rule sort first, so a LIMIT keeps them": five numeric near
+  // names beside two lettered ones. Without that ordering the fuzzy rung's
+  // LIMIT 5 would fill with the numeric rows, every one excluded, and report
+  // five hidden guesses and no entity where two guesses exist.
+  const t15 = await thought("Five numeric near names and two lettered ones.");
+  await record(t15, [E("0211", "tool"), E("0212", "tool"), E("0213", "tool"), E("0214", "tool"), E("0215", "tool"), E("021x", "tool"), E("021y", "tool")]);
+  const cut = await resolveSubject(run, "021z", on);
+  assert(cut.how === "fuzzy" && cut.subjects.map((s) => s.name).sort().join() === "021x,021y",
+    `the two lettered near names are the guesses, the five numeric ones sorted past the limit (${cut.how}: ${cut.subjects.map((s) => s.name).join(",")})`);
+  const cutKept = await resolveSubject(run, "021z", keep);
+  assert(cutKept.how === "fuzzy" && cutKept.subjects.length === 5, `kept, the limit's five come from all seven (${cutKept.subjects.length})`);
+  await db.query(`DELETE FROM thoughts WHERE id = $1`, [t15]);
+  await db.exec(`SELECT prune_orphan_entities()`);
 
   // Model output is rendered clean: a control sequence in a name never reaches
   // the terminal, and a newline in one never breaks a row (sixth review pass).
