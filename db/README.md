@@ -1524,7 +1524,7 @@ bun sync-linear.ts --self-check                      # the pure rules and the wr
 ```
 
 `LINEAR_API_KEY` (a personal API key; the tool only reads) comes from the
-environment or a `.env` on `evals/env.ts`'s search path; `OB1_LINEAR_INITIATIVE`
+environment or a `.env` on `db/env.ts`'s search path; `OB1_LINEAR_INITIATIVE`
 (default `Open Brain`, an exact name or a prefix naming exactly one) says whose
 projects are the board; the provider knobs are the server's, resolved as
 `reembed.ts` resolves them.

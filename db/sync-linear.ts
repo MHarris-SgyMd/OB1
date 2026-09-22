@@ -62,9 +62,15 @@
  * resolveEmbedConfig as db/reembed.ts does. LINEAR_API_KEY is the one knob of
  * its own; OB1_LINEAR_INITIATIVE (default "Open Brain") names the initiative
  * whose projects are the board; OB1_BOARD_SYNC_INTERVAL the loop's period.
- * Each is read from the environment, else from the first `.env` on evals/env.ts's
- * search path ($OB1_ENV_FILE, evals/.env, <repo>/.env, deploy/.env) that has it
- * — that name alone, never the whole file (see envValueFrom).
+ * All of them — the provider knobs too — are read from the environment, else
+ * from the `.env` files on db/env.ts's search path ($OB1_ENV_FILE, evals/.env,
+ * <repo>/.env, deploy/.env), so a run from a checkout resolves the same knobs a
+ * server started from deploy/.env does; in the container none of those files
+ * is on the mount (db/ and server-portable/ alone), so the environment compose
+ * forwarded is all there is. A run whose egress gate would refuse every
+ * embedding — the default policy against an endpoint not declared local — is
+ * refused up front rather than landing every ticket bare and calling it
+ * synced; --allow-no-vector is the operator saying that is meant.
  *
  * ── What it does not do ──────────────────────────────────────────────────────
  * Remove: an issue deleted in Linear or moved out of the initiative keeps its
@@ -81,14 +87,13 @@
 
 import { hostname } from "node:os";
 import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
 import { SQL } from "bun";
 import { SqlStore } from "../server-portable/store-sql.ts";
 import { createEmbedder, resolveEmbedConfig, type EmbedConfig, type EmbedEnv, type EmbeddedCapture } from "../server-portable/embed.ts";
-import { decideCalls, type EgressSubject } from "../server-portable/egress.ts";
+import { decideCalls, refusesEverything, type EgressSubject } from "../server-portable/egress.ts";
 import { extractMetadata, metadataRefused } from "../server-portable/metadata.ts";
 import type { Actor } from "../server-portable/store.ts";
-import { envFiles, parseEnv } from "./env.ts";
+import { describeEnv, loadEnv } from "./env.ts";
 import { linearClient, strict, type Gql } from "./linear-api.ts";
 
 export const DEFAULT_INITIATIVE = "Open Brain";
@@ -293,7 +298,10 @@ export function planPass(census: Census, groups: Map<string, BrainRow[]>, full =
     // and without a watermark, would otherwise keep the ticket stale forever
     // (fifth review pass).
     const have = rows.map((r) => r.metadata?.linear_updated_at).filter((v): v is string => typeof v === "string").sort().at(-1);
-    const isStale = have === undefined || have < updatedAt;
+    // A row whose tags fell back is stale too: the pass re-tags the head when
+    // it holds the text, where the watermark alone kept `uncategorized` until
+    // the ticket happened to move in Linear (seventh review pass).
+    const isStale = have === undefined || have < updatedAt || rows.some((r) => tagsFellBack(r.metadata));
     if (isStale) { stale.push(identifier); fetch.push(identifier); }
     else if (full) fetch.push(identifier);
     else unchanged++;
@@ -303,26 +311,19 @@ export function planPass(census: Census, groups: Map<string, BrainRow[]>, full =
 }
 
 /**
- * One name from the environment, else from the first `.env` on evals/env.ts's
- * search path that has it — that ONE name, not the whole file. In the container
- * the checkout is a mount, so the operator's host `.env` files are on the path
- * too; evals' loadEnv() would fill every knob compose forwarded as "" from them
- * (it skips only a set, non-empty value) and the sidecar would dial a chat
- * endpoint or run an egress policy the server is not running (first review
- * pass). Reads the key, the initiative and the interval alike, so the header's
- * "from the environment or a .env file" holds for all three (second pass).
+ * Whether a row's tags are the fallback a failed extraction leaves (a provider
+ * timeout, a 500, unparseable output) — worth another call when the head
+ * holds the text. An egress refusal is policy, not a failure: retrying it
+ * would be refused again without a call, so it does not count (seventh pass).
  */
-export function envValueFrom(name: string, env: Record<string, string | undefined>, files: string[] = envFiles()): { value?: string; from: string } {
-  const own = env[name]?.trim();
-  if (own) return { value: own, from: "the environment" };
-  for (const file of files) {
-    if (!existsSync(file)) continue;
-    let text: string;
-    try { text = readFileSync(file, "utf8"); } catch { continue; }
-    const value = parseEnv(text)[name]?.trim();
-    if (value) return { value, from: file };
-  }
-  return { from: `not in the environment; looked in ${files.join(", ")}` };
+export function tagsFellBack(metadata: Record<string, unknown> | undefined): boolean {
+  const why = metadata?.metadata_extraction_failed;
+  return typeof why === "string" && why !== "egress_denied";
+}
+
+/** The patch that clears a refusal marker a row carries, or nothing — one spelling for the three places that ask (seventh review pass). */
+export function refusalClear(metadata: Record<string, unknown> | undefined): { text_refused_by: null } | Record<never, never> {
+  return metadata && metadata.text_refused_by != null ? { text_refused_by: null } : {};
 }
 
 // ---------------------------------------------------------------------------
@@ -355,6 +356,8 @@ export async function initiativeProjects(gql: Gql, name: string): Promise<{ init
     throw new Error(`OB1_LINEAR_INITIATIVE="${name}" matches ${prefixed.length} initiative(s) (${all.map((i) => JSON.stringify(i.name)).join(", ")}); name one.`);
   }
   if (prefixed[0].projects.pageInfo.hasNextPage) throw new Error(`initiative "${prefixed[0].name}" has more than 50 projects and this tool reads one page of them; page the projects query before syncing this board.`);
+  // No projects is no board: the census would be empty and every ticket row in the brain `extra` (seventh review pass).
+  if (prefixed[0].projects.nodes.length === 0) throw new Error(`initiative "${prefixed[0].name}" has no projects; nothing to sync — name an initiative whose projects hold the board.`);
   return { initiative: prefixed[0].name, projects: prefixed[0].projects.nodes };
 }
 
@@ -497,15 +500,16 @@ async function chainRows(w: Writer, identifier: string, order: BrainRow[]): Prom
   if (changes.length === 0) return { changed: 0 };
   const say = (c: { row: BrainRow; wanted: string | null }) => `${c.row.id} ${c.wanted ? `→ ${c.wanted}` : "cleared"}${c.row.supersedes && c.row.supersedes !== c.wanted ? ` (was ${c.row.supersedes})` : ""}`;
   if (w.dryRun) { w.log(`  ~ ${identifier}: would re-chain ${changes.map(say).join(", ")}`); return { changed: changes.length }; }
-  // `changed` counts rows whose pointer moved, not statements: a row cleared then set is one.
-  let writes = 0;
-  const cleared: BrainRow[] = [];
-  // A set the database refuses undoes the clears before it: the pointers a
-  // person set were promised a place at the tail, not erasure, and a chain
-  // left half-applied would forget them by the next pass (sixth review pass).
+  // A write the database refuses undoes EVERY write before it — the clears and
+  // the sets that landed — in reverse: the pointers a person set were promised
+  // a place at the tail, not erasure, and "the chain is as it was" must be
+  // true of every row, not only the cleared ones (sixth review pass, made
+  // whole by the seventh). A row touched twice (cleared, then set) is restored
+  // once, to what it held before either.
+  const written: BrainRow[] = [];
   const undo = async (why: string): Promise<{ changed: number; refusal: string }> => {
     const failed: string[] = [];
-    for (const row of cleared) {
+    for (const row of [...new Set(written)].reverse()) {
       const back = await w.store.updateThought({ id: row.id, actor: w.actor, provenance: { supersedes: row.supersedes } });
       if (!back.ok) failed.push(`${row.id} → ${row.supersedes}: ${back.error}`);
     }
@@ -514,15 +518,15 @@ async function chainRows(w: Writer, identifier: string, order: BrainRow[]): Prom
   for (const c of changes.filter((c) => c.row.supersedes !== null)) {
     const r = await w.store.updateThought({ id: c.row.id, actor: w.actor, provenance: { supersedes: null } });
     if (!r.ok) return undo(`clearing ${c.row.id}'s pointer: ${r.error}`);
-    cleared.push(c.row);
-    writes++;
+    written.push(c.row);
   }
   for (const c of changes.filter((c) => c.wanted !== null)) {
     const r = await w.store.updateThought({ id: c.row.id, actor: w.actor, provenance: { supersedes: c.wanted } });
     if (!r.ok) return undo(`pointing ${c.row.id} at ${c.wanted}: ${r.error}`);
-    writes++;
+    written.push(c.row);
   }
   w.log(`  ~ ${identifier}: re-chained ${changes.map(say).join(", ")}`);
+  // `changed` counts rows whose pointer moved, not statements: a row cleared then set is one.
   return { changed: changes.length };
 }
 
@@ -637,28 +641,40 @@ export async function syncIssue(w: Writer, issue: LinearIssue, rows: BrainRow[])
   // head holds the text: nothing is refused any more (fifth review pass).
   const clearRefusals = async (): Promise<void> => {
     for (const r of group) {
-      if (r === head || !r.metadata || r.metadata.text_refused_by == null) continue;
+      const clear = refusalClear(r.metadata);
+      if (r === head || !Object.keys(clear).length) continue;
       if (w.dryRun) { w.log(`  · ${issue.identifier}: would clear text_refused_by on ${r.id}`); continue; }
-      const u = await w.store.updateThought({ id: r.id, metadataPatch: { text_refused_by: null }, actor: w.actor });
+      const u = await w.store.updateThought({ id: r.id, metadataPatch: clear, actor: w.actor });
       if (!u.ok) throw new Error(`clearing text_refused_by on ${r.id}: ${u.error}`);
     }
   };
-  const staleRefusal = head.metadata && head.metadata.text_refused_by != null ? { text_refused_by: null } : {};
+  const staleRefusal = refusalClear(head.metadata);
   const facetDiff = facetPatch(head.metadata ?? {}, facets);
-  const patch = holds(head)
-    ? (facetDiff || Object.keys(staleRefusal).length ? { ...(facetDiff ?? {}), ...staleRefusal } : null)
-    : facetDiff;
 
   if (holds(head)) {
     const where = head !== rows[0] ? ` on ${head.id}, which already holds the text` : "";
+    // Tags that fell back to the failure vocabulary are asked for again, when
+    // the gate lets the chat call through — the one model call this branch
+    // ever makes (seventh review pass). Refused, the marker stays as it is.
+    let retagged: Record<string, unknown> = {};
+    if (tagsFellBack(head.metadata)) {
+      const subject: EgressSubject = { kind: "edit", actor: w.actor.name, metadata: { ...(head.metadata ?? {}), ...facets }, content };
+      const g = decideCalls(subject, w.cfg, w.cfg.egress);
+      if (g.chat.allowed && !w.dryRun) {
+        const tags = await w.tags(content, subject);
+        retagged = { ...tags, ...("metadata_extraction_failed" in tags ? {} : { metadata_extraction_failed: null }) };
+      } else if (g.chat.allowed) w.log(`  · ${issue.identifier}: would extract the tags again (they fell back: ${String(head.metadata?.metadata_extraction_failed)})`);
+    }
+    const patch = facetDiff || Object.keys(staleRefusal).length || Object.keys(retagged).length ? { ...retagged, ...(facetDiff ?? {}), ...staleRefusal } : null;
     if (!patch) { await clearRefusals(); return { outcome: "unchanged", noVector: false, ...(await chain()) }; }
     if (w.dryRun) { w.log(`  · ${issue.identifier}: would patch ${said(patch)}${where}`); await clearRefusals(); return { outcome: "patched", noVector: false, ...(await chain()) }; }
     const r = await w.store.updateThought({ id: head.id, metadataPatch: patch, actor: w.actor });
     if (!r.ok) throw new Error(`patching ${head.id}: ${r.error}`);
-    w.log(`  · ${issue.identifier}: facets patched (${said(patch)})${where}`);
+    w.log(`  · ${issue.identifier}: ${Object.keys(retagged).length ? "tags extracted again, " : ""}facets patched (${said(patch)})${where}`);
     await clearRefusals();
     return { outcome: "patched", noVector: false, ...(await chain()) };
   }
+  const patch = facetDiff;
 
   // A thought outside this ticket's rows holds the new text: the edit would be
   // refused as DUPLICATE_CONTENT, so no model call is made. The facets land
@@ -695,7 +711,7 @@ export async function syncIssue(w: Writer, issue: LinearIssue, rows: BrainRow[])
     g.chat.allowed ? w.tags(content, subject) : Promise.resolve(metadataRefused()),
   ]);
   const clearMarker = !("metadata_extraction_failed" in tags) && head.metadata && "metadata_extraction_failed" in head.metadata ? { metadata_extraction_failed: null } : {};
-  const clearRefusal = head.metadata && "text_refused_by" in head.metadata ? { text_refused_by: null } : {};
+  const clearRefusal = refusalClear(head.metadata);
   const r = await w.store.updateThought({
     id: head.id,
     content,
@@ -733,8 +749,11 @@ export type ReadRows = (scanHeaders: boolean, claimed?: BrainRow[]) => Promise<B
  * adopted, not captured beside (fourth review pass). `scan` reads both from the
  * start (--full, --audit).
  */
-export async function planBoard(opts: { gql: Gql; readRows: ReadRows; initiative: string; full: boolean; scan?: boolean }) {
-  const { initiative, projects } = await initiativeProjects(opts.gql, opts.initiative);
+export type Board = { initiative: string; projects: { id: string; name: string }[] };
+
+export async function planBoard(opts: { gql: Gql; readRows: ReadRows; initiative: string; full: boolean; scan?: boolean; board?: Board }) {
+  // A board the caller resolved already (main's preflight) is not asked for twice (seventh review pass).
+  const { initiative, projects } = opts.board ?? await initiativeProjects(opts.gql, opts.initiative);
   const census = await censusOf(opts.gql, projects.map((p) => p.id));
   const scanFirst = opts.scan || opts.full;
   const claimed = await opts.readRows(scanFirst);
@@ -747,7 +766,7 @@ export async function planBoard(opts: { gql: Gql; readRows: ReadRows; initiative
   return { initiative, projects, census, groups, plan };
 }
 
-export async function runPass(opts: { gql: Gql; readRows: ReadRows; writer: Writer; initiative: string; full: boolean; only?: string[] }): Promise<PassReport> {
+export async function runPass(opts: { gql: Gql; readRows: ReadRows; writer: Writer; initiative: string; full: boolean; only?: string[]; board?: Board }): Promise<PassReport> {
   const { initiative, projects, census, groups, plan } = await planBoard(opts);
   const tally: Record<Outcome, number> = { captured: 0, updated: 0, patched: 0, unchanged: 0, refused: 0 };
   const report: PassReport = { initiative, projects: projects.length, census: census.length, plan, tally, twinsMarked: 0, noVector: 0, errors: [], chainRefusals: [] };
@@ -1069,21 +1088,22 @@ function selfCheck(): Promise<number> {
     try { await initiativeProjects(async <T,>(q: string) => board<T>(q, { after: "more" }), "Open Brain"); } catch (e) { refusedProjects = /more than 50 projects/.test((e as Error).message); }
     ok(refusedProjects, "an initiative with more projects than one page is refused, not silently shortened");
 
-    // A value from a .env file, and that value alone.
-    const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
-    const { join } = await import("node:path");
-    const { tmpdir } = await import("node:os");
-    const dir = mkdtempSync(join(tmpdir(), "sync-linear-"));
-    writeFileSync(join(dir, "a.env"), "OB1_EGRESS_POLICY=allow\n# LINEAR_API_KEY=commented\n");
-    writeFileSync(join(dir, "b.env"), "LINEAR_API_KEY=lin_api_from_file\nOB1_LINEAR_INITIATIVE=Siggy\nOB1_CHAT_BASE_URL=http://127.0.0.1:1/v1\n");
-    const probe: Record<string, string | undefined> = { OB1_EGRESS_POLICY: "" };
-    const files = [join(dir, "missing.env"), join(dir, "a.env"), join(dir, "b.env")];
-    const found = envValueFrom("LINEAR_API_KEY", probe, files);
-    ok(found.value === "lin_api_from_file" && found.from === join(dir, "b.env") && probe.OB1_EGRESS_POLICY === "" && !("OB1_CHAT_BASE_URL" in probe), "the first file holding the key supplies it; nothing else in any file reaches the environment");
-    ok(envValueFrom("OB1_LINEAR_INITIATIVE", probe, files).value === "Siggy", "…the initiative is read the same way");
-    ok(envValueFrom("LINEAR_API_KEY", { LINEAR_API_KEY: " lin_api_env " }, [join(dir, "b.env")]).value === "lin_api_env", "…and a set environment variable wins over every file");
-    ok(envValueFrom("LINEAR_API_KEY", {}, [join(dir, "a.env")]).value === undefined, "…a commented-out key is not a key");
-    rmSync(dir, { recursive: true, force: true });
+    // Seventh review pass: fallback tags make a row stale and are asked for again when the head holds the text; a refusal marker is not.
+    ok(planPass([{ identifier: "SMD-1936", updatedAt: issue.updatedAt }], new Map([["SMD-1936", [row("F", text, { ...withFacets, metadata_extraction_failed: "provider_timeout" }, null, null)]]])).stale.length === 1, "a row whose tags fell back is stale though its watermark is current");
+    ok(planPass([{ identifier: "SMD-1936", updatedAt: issue.updatedAt }], new Map([["SMD-1936", [row("E", text, { ...withFacets, metadata_extraction_failed: "egress_denied" }, null, null)]]])).stale.length === 0, "…an egress refusal is policy, not a failure to retry");
+    r = await run(recorder, [row("F", text, { ...withFacets, metadata_extraction_failed: "provider_timeout", topics: ["uncategorized"] }, null, null)]);
+    ok(r.r.outcome === "patched" && r.calls.join("; ") === "tags; update F patch(type,topics,status,metadata_extraction_failed)", `the head holding the text with fallback tags: one chat call, the tags replaced and the marker nulled, no embed (${r.calls.join("; ")})`);
+    // A refused set undoes the sets that landed too, not the clears alone.
+    sets = 0;
+    const thirdFails: Writer["store"] = { captureThought: recorder.store.captureThought, updateThought: async (o) => { if (o.provenance && o.provenance.supersedes != null && ++sets === 3) { calls.push(`update ${o.id} supersedes=${o.provenance.supersedes} → WOULD_CYCLE`); return { ok: false, error: "WOULD_CYCLE" }; } return recorder.store.updateThought(o); } };
+    r = await run({ ...recorder, store: thirdFails }, [row("H", text, withFacets, "2026-09-23T00:00:00Z", null), row("A", text, {}, "2026-09-22T00:00:00Z", "F"), row("B", text, {}, "2026-09-21T00:00:00Z", null)]);
+    ok(r.r.chainRefusal !== undefined && r.calls.join("; ") === "update A supersedes=null; update H supersedes=A; update A supersedes=B; update B supersedes=F → WOULD_CYCLE; update H supersedes=null; update A supersedes=F",
+      `every write before the refusal is undone, each row once, to what it held — H back to null, A back to F (${r.calls.join("; ")})`);
+    // No projects is no board.
+    let refusedEmpty = false;
+    const empty: Gql = async <T,>() => ({ data: { initiatives: { pageInfo: { hasNextPage: false, endCursor: "" }, nodes: [{ name: "Open Brain", projects: { pageInfo: { hasNextPage: false }, nodes: [] } }] } } as T, errors: [] });
+    try { await initiativeProjects(empty, "Open Brain"); } catch (e) { refusedEmpty = /no projects/.test((e as Error).message); }
+    ok(refusedEmpty, "an initiative with no projects is refused by name, not an empty census");
 
     if (bad === 0) console.log("sync-linear.ts self-check PASS");
     return bad === 0 ? 0 : 1;
@@ -1097,8 +1117,8 @@ function selfCheck(): Promise<number> {
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const TAKES_ONE = new Set(["url", "initiative", "interval", "only"]);
-  const TAKES_NONE = new Set(["dry-run", "loop", "audit", "full", "self-check", "quiet"]);
-  const USAGE = "  flags: --url <postgres://…>, --initiative <name>, --interval <seconds>, --only <SMD-1,SMD-2>, --dry-run, --loop, --audit, --full, --quiet, --self-check";
+  const TAKES_NONE = new Set(["dry-run", "loop", "audit", "full", "self-check", "quiet", "allow-no-vector"]);
+  const USAGE = "  flags: --url <postgres://…>, --initiative <name>, --interval <seconds>, --only <SMD-1,SMD-2>, --dry-run, --loop, --audit, --full, --quiet, --allow-no-vector, --self-check";
   const values = new Map<string, string>();
   const flags = new Set<string>();
   for (let i = 0; i < args.length; i++) {
@@ -1116,15 +1136,22 @@ async function main(): Promise<void> {
   // --audit is the whole board's census; --only would be read by nothing on that branch (fourth review pass).
   if (flags.has("audit") && values.has("only")) { console.error(`--audit takes no --only: the census is the whole board.\n${USAGE}`); process.exit(2); }
 
-  const { value: key, from } = envValueFrom("LINEAR_API_KEY", process.env);
+  // Every knob from the environment, else the `.env` files on db/env.ts's search
+  // path — the provider knobs too, so a checkout run resolves the endpoint and
+  // the egress policy a server started from deploy/.env would (seventh review
+  // pass; before it only the key was read from the files and the rest fell to
+  // the defaults: deny, every ticket bare). A set variable is never overwritten.
+  // In the container none of the files is on the mount, so this reads nothing.
+  const envSources = loadEnv();
+  const key = process.env.LINEAR_API_KEY?.trim();
   if (!key) {
-    console.error(`LINEAR_API_KEY is not set, and no .env file supplied it. Create a personal API key at https://linear.app/settings/api and put it in a .env (gitignored; see evals/.env.example).\n  ${from}`);
+    console.error(`LINEAR_API_KEY is not set, and no .env file supplied it. Create a personal API key at https://linear.app/settings/api and put it in a .env (gitignored; see evals/.env.example).\n  Read: ${describeEnv(envSources)}`);
     process.exit(2);
   }
   const url = values.get("url") ?? process.env.DATABASE_URL;
   if (!url) { console.error("No database URL. Pass --url or set DATABASE_URL."); process.exit(2); }
-  const initiative = values.get("initiative")?.trim() || envValueFrom("OB1_LINEAR_INITIATIVE", process.env).value || DEFAULT_INITIATIVE;
-  const intervalRaw = values.get("interval")?.trim() || envValueFrom("OB1_BOARD_SYNC_INTERVAL", process.env).value;
+  const initiative = values.get("initiative")?.trim() || process.env.OB1_LINEAR_INITIATIVE?.trim() || DEFAULT_INITIATIVE;
+  const intervalRaw = values.get("interval")?.trim() || process.env.OB1_BOARD_SYNC_INTERVAL?.trim();
   const interval = intervalRaw ? Number(intervalRaw) : DEFAULT_INTERVAL_S;
   if (!Number.isInteger(interval) || interval < 10) { console.error(`--interval / OB1_BOARD_SYNC_INTERVAL must be a whole number of seconds, at least 10 (got "${intervalRaw}").`); process.exit(2); }
   const dryRun = flags.has("dry-run");
@@ -1140,6 +1167,15 @@ async function main(): Promise<void> {
   // Resolved once, as db/reembed.ts does; the embedder does not remember a
   // refusal across rows (each row's length is its own).
   const cfg = resolveEmbedConfig(process.env as EmbedEnv);
+  // The refusal that does not depend on the row (db/reembed.ts asks the same
+  // before claiming anything): every embedding would be refused, so every
+  // ticket would land bare and read as synced — refused here unless the
+  // operator says that is meant (seventh review pass). --audit embeds nothing.
+  const wholesale = refusesEverything(cfg.embeddings, cfg.egress);
+  if (wholesale && !flags.has("allow-no-vector") && !flags.has("audit")) {
+    console.error(`  Refusing to run: ${wholesale}. Declare the endpoint local (OB1_LLM_LOCAL=1) when it is, allow this writer (OB1_EGRESS_ALLOW=actor:${ACTOR_NAME}), or pass --allow-no-vector to land every ticket without a vector on purpose.\n  Read: ${describeEnv(envSources)}`);
+    process.exit(2);
+  }
   const embedder = createEmbedder(() => cfg, { rememberRefusal: false });
   const session = `${hostname()}:${process.pid}:${randomUUID().slice(0, 8)}`;
   const writer: Writer = {
@@ -1161,12 +1197,15 @@ async function main(): Promise<void> {
     stopping: () => stopping,
   };
 
+  let resolved: Board | undefined;
   const once = async (): Promise<number> => {
     const t0 = Date.now();
     // planBoard asks for the header scan when it needs it; --audit always does (the census should see a hand paste too).
     const readRows: ReadRows = (scanHeaders, claimed) => readTicketRows(sql, { scanHeaders, claimed });
+    // The board the preflight resolved serves the first pass; later passes ask again, so a project added to the initiative is seen.
+    const board = resolved; resolved = undefined;
     if (flags.has("audit")) {
-      const { initiative: name, projects, census, plan } = await planBoard({ gql, readRows, initiative, full: false, scan: true });
+      const { initiative: name, projects, census, plan } = await planBoard({ gql, readRows, initiative, full: false, scan: true, board });
       console.log(`  board: ${name} — ${projects.length} project(s), ${census.length} issue(s)`);
       console.log(`  missing ${plan.missing.length}${plan.missing.length ? ` (${plan.missing.join(", ")})` : ""}`);
       console.log(`  stale   ${plan.stale.length}${plan.stale.length ? ` (${plan.stale.slice(0, 20).join(", ")}${plan.stale.length > 20 ? ", …" : ""})` : ""}`);
@@ -1176,7 +1215,7 @@ async function main(): Promise<void> {
       console.log(`  in lockstep: ${drift === 0 ? "yes" : "NO"}  (${Date.now() - t0} ms)`);
       return drift ? 1 : 0;
     }
-    const report = await runPass({ gql, readRows, writer, initiative, full: flags.has("full"), only });
+    const report = await runPass({ gql, readRows, writer, initiative, full: flags.has("full"), only, board });
     console.log(formatReport(report, dryRun));
     console.log(`  ${dryRun ? "dry run — nothing written" : "done"} (${Date.now() - t0} ms)`);
     return report.errors.length ? 1 : 0;
@@ -1187,7 +1226,7 @@ async function main(): Promise<void> {
   // not a "pass failed" line every interval for as long as the loop runs
   // (sixth review pass). Under --loop the passes still ask Linear each time,
   // so a board that gains a project is seen.
-  try { await initiativeProjects(gql, initiative); } catch (e) { console.error(`  ${(e as Error).message}`); await store.close(); await sql.close(); process.exit(2); }
+  try { resolved = await initiativeProjects(gql, initiative); } catch (e) { console.error(`  ${(e as Error).message}`); await store.close(); await sql.close(); process.exit(2); }
 
   let code = 0;
   try {
