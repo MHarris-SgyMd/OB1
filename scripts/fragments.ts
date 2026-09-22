@@ -82,6 +82,10 @@ export function fragmentProblems(text: string, name?: string): string[] {
   const tickets = Array.isArray(fm.tickets) ? fm.tickets : [];
   if (tickets.length === 0) problems.push("tickets: must list at least one SMD-#### id");
   for (const t of tickets) if (!/^SMD-\d+$/.test(t)) problems.push(`tickets: ${JSON.stringify(t)} is not an SMD-#### id`);
+  // A scalar (`migrations: 045`) read as "no migrations" passed the check and
+  // skipped the patch-bump rule below, and the cut then iterated the digits and
+  // refused "migration 000" (SMD-1870, caught by typing the front matter).
+  if (fm.migrations !== undefined && !Array.isArray(fm.migrations)) problems.push(`migrations: ${JSON.stringify(fm.migrations)} is a scalar — list them, \`[${fm.migrations}]\`, or \`[]\` for none`);
   const migrations = Array.isArray(fm.migrations) ? fm.migrations : [];
   for (const mig of migrations) if (!/^\d{3}$/.test(String(mig))) problems.push(`migrations: ${JSON.stringify(mig)} is not a three-digit number`);
   if (fm.bump === "patch" && migrations.length > 0) problems.push(`bump: patch cannot ship a migration (migrations: ${migrations.join(", ")}) — a migration is additive, at least a MINOR`);

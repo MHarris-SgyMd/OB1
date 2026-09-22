@@ -49,8 +49,8 @@ const MIGRATIONS_DIR = join(ROOT, "db", "migrations");
 const BUMP_RANK: Record<string, number> = { patch: 0, minor: 1, major: 2 };
 const TYPE_HEADING: Record<string, string> = { added: "Added", changed: "Changed", deprecated: "Deprecated", removed: "Removed", fixed: "Fixed", security: "Security" };
 const REPO = "https://github.com/MHarris-SgyMd/OB1";
-/** A fragment's front matter once fragmentProblems has passed it: type and bump strings from their sets, tickets a list; migrations as parsed (a list, or a scalar the check does not read). */
-type CheckedFrontMatter = FragmentFrontMatter & { type: string; bump: string; tickets: string[]; migrations?: string | string[] };
+/** A fragment's front matter once fragmentProblems has passed it: type and bump strings from their sets, tickets a list, migrations a list or absent (a scalar is refused). */
+type CheckedFrontMatter = FragmentFrontMatter & { type: string; bump: string; tickets: string[]; migrations?: string[] };
 
 // ── Pure functions (self-checked) ────────────────────────────────────────────
 
