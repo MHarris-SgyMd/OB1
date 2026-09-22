@@ -158,9 +158,20 @@
  *      renders. The rules are registryProblems, one pure function the
  *      renderer runs too (SMD-1933); no exceptions beyond the registry's own
  *      named excuses
+ *  20. main's ruleset is a record in the tree — .github/rulesets/main.json, the
+ *      body `gh api -X PUT repos/MHarris-SgyMd/OB1/rulesets/22189960 --input`
+ *      applies — and the record names every job: each job's display name in
+ *      .github/workflows/fork-checks.yml is a required check, nothing is
+ *      required that is not a job, every check is pinned to the Actions app
+ *      (integration_id 15368), strict up-to-date is on, the pull-request,
+ *      deletion and non-fast-forward rules are present once each and no
+ *      other type is, the bypass list is empty and enforcement is active. The
+ *      rules are rulesetProblems, one pure function its probes run on
+ *      in-memory records; the workflow is parsed with Bun.YAML (SMD-1856); no
+ *      exceptions
  *
  * Run: bun scripts/check-fork-consistency.ts   (a Bun script — TypeScript, type-checked in CI
- * beside its run (SMD-1870); checks 13, 14 and 18 parse YAML with Bun.YAML)
+ * beside its run (SMD-1870); checks 13, 14, 18 and 20 parse YAML with Bun.YAML)
  * Exits non-zero on any violation.
  */
 
@@ -3576,6 +3587,106 @@ function checkTypecheckSurface() {
   for (const [where, msg] of typecheckSurfaceProblems({ packages, tsconfigs, tscSteps })) fail(where, msg);
 }
 checkTypecheckSurface();
+// ── 20: main's ruleset is a record in the tree, and the record names every job (SMD-1856) ──
+/**
+ * The ruleset GitHub enforces on `main` (id 22189960) lived outside the tree,
+ * where a job added to the workflow was not added to it — which is how the
+ * replay gate ran unrequired from SMD-1295 until this ticket, and how two
+ * branches each green on its own head could both carry a migration 047.
+ * `.github/rulesets/main.json` is the body that
+ * `gh api -X PUT repos/MHarris-SgyMd/OB1/rulesets/22189960 --input` applies, so
+ * the setting is reviewed here first; this check holds the record to the
+ * workflow — every job's display name required, nothing required that is not a
+ * job — and to the ticket's decisions: strict up-to-date on, every check pinned
+ * to the Actions app so only a workflow run satisfies it, a pull-request rule,
+ * deletion and force-push refused, no bypass actor, enforcement active. The
+ * record can still drift from the live ruleset — CI's token cannot read it —
+ * so FORK.md names the one command that re-applies it.
+ */
+const RULESET = ".github/rulesets/main.json";
+/** GitHub's own app id for Actions: a required check pinned to it is satisfied by a workflow run and by nothing else — not a status another app or a token posts under the same name. */
+const GITHUB_ACTIONS_APP_ID = 15368;
+/** The rule types the record carries, each exactly once; another type (a linear-history rule, say) is a decision the ticket declined, and edits this list with it. */
+const RULE_TYPES = ["deletion", "non_fast_forward", "pull_request", "required_status_checks"];
+/** The record as rulesetProblems reads it: every level optional, as the `?.`s say. */
+type RulesetDoc = {
+  enforcement?: unknown;
+  bypass_actors?: unknown;
+  rules?: { type?: unknown; parameters?: { strict_required_status_checks_policy?: unknown; required_status_checks?: { context?: unknown; integration_id?: unknown }[] } }[];
+} | null | undefined;
+/** The workflow as jobNamesIn reads it: a job's display name is its `name`, else its key — what GitHub reports the check as. */
+type JobsDoc = { jobs?: Record<string, { name?: unknown } | undefined> } | null | undefined;
+function jobNamesIn(doc: JobsDoc) {
+  return Object.entries(doc?.jobs ?? {}).map(([key, job]) => (typeof job?.name === "string" ? job.name : key));
+}
+function rulesetProblems(ruleset: RulesetDoc, jobNames: string[]) {
+  const problems: [string, string][] = [];
+  if (!ruleset || typeof ruleset !== "object") return [[RULESET, "is missing or does not parse — the body main's ruleset is applied from (SMD-1856)"]] as [string, string][];
+  if (ruleset.enforcement !== "active") problems.push([RULESET, `enforcement is ${JSON.stringify(ruleset.enforcement)}, not "active" (SMD-1856)`]);
+  if (!Array.isArray(ruleset.bypass_actors) || ruleset.bypass_actors.length) problems.push([RULESET, "bypass_actors is not the empty list — the ruleset applies to admins too (SMD-1856)"]);
+  const rules = Array.isArray(ruleset.rules) ? ruleset.rules : [];
+  const types = rules.map((r) => (typeof r?.type === "string" ? r.type : "(untyped)"));
+  for (const t of RULE_TYPES) if (types.filter((x) => x === t).length !== 1) problems.push([RULESET, `carries the ${t} rule ${types.filter((x) => x === t).length} time(s), not once (SMD-1856)`]);
+  for (const t of new Set(types)) if (!RULE_TYPES.includes(t)) problems.push([RULESET, `carries a ${t} rule that RULE_TYPES in ${SELF} does not name — a new rule is a decision; record it there with the reason (SMD-1856)`]);
+  const checks = rules.find((r) => r?.type === "required_status_checks")?.parameters;
+  if (!checks) return problems;
+  if (checks.strict_required_status_checks_policy !== true) problems.push([RULESET, "strict_required_status_checks_policy is not true — a PR green on a stale head would merge without re-running (SMD-1856)"]);
+  const required = Array.isArray(checks.required_status_checks) ? checks.required_status_checks : [];
+  const contexts = required.map((c) => (typeof c?.context === "string" ? c.context : ""));
+  for (const c of required) {
+    if (typeof c?.context !== "string" || !c.context) problems.push([RULESET, `a required check has no context: ${JSON.stringify(c)} (SMD-1856)`]);
+    else if (c.integration_id !== GITHUB_ACTIONS_APP_ID) problems.push([RULESET, `"${c.context}" is not pinned to the Actions app (integration_id ${GITHUB_ACTIONS_APP_ID}) — unpinned, a status any app posts under the name satisfies it (SMD-1856)`]);
+  }
+  for (const c of new Set(contexts)) if (c && contexts.filter((x) => x === c).length > 1) problems.push([RULESET, `requires "${c}" twice (SMD-1856)`]);
+  for (const name of jobNames) if (!contexts.includes(name)) problems.push([RULESET, `does not require "${name}", a job ${WORKFLOW} runs — every job is required, or a PR merges with it red; add it and re-apply the ruleset (SMD-1856)`]);
+  for (const c of new Set(contexts)) if (c && !jobNames.includes(c)) problems.push([RULESET, `requires "${c}", which no job in ${WORKFLOW} is named — a renamed or removed job leaves the check waiting forever and every PR blocked (SMD-1856)`]);
+  return problems;
+}
+function checkRulesetRecord() {
+  // Self-test: a record every rule accepts passes; each mutant reports exactly one problem.
+  const jobs = ["Server tests", "Repo consistency"];
+  type Probe = { enforcement: string; bypass_actors: unknown[]; rules: { type: string; parameters?: { strict_required_status_checks_policy?: boolean; required_status_checks?: { context: string; integration_id?: number }[] } }[] };
+  const good = (): Probe => ({
+    enforcement: "active",
+    bypass_actors: [],
+    rules: [
+      { type: "deletion" },
+      { type: "non_fast_forward" },
+      { type: "pull_request", parameters: {} },
+      { type: "required_status_checks", parameters: { strict_required_status_checks_policy: true, required_status_checks: jobs.map((context) => ({ context, integration_id: GITHUB_ACTIONS_APP_ID })) } },
+    ],
+  });
+  const base = rulesetProblems(good(), jobs);
+  if (base.length) fail(SELF, `check 20 false-positives on a consistent record (${base.map((p) => p[1]).join("; ")})`);
+  const mutants: [why: string, mutate: (g: Probe) => void, jobs: string[]][] = [
+    ["a job the record does not require", () => {}, [...jobs, "Retrieval replay gate"]],
+    ["a required check no job is named", (g) => { g.rules[3].parameters!.required_status_checks!.push({ context: "Old job", integration_id: GITHUB_ACTIONS_APP_ID }); }, jobs],
+    ["strict off", (g) => { g.rules[3].parameters!.strict_required_status_checks_policy = false; }, jobs],
+    ["a check not pinned to the Actions app", (g) => { delete g.rules[3].parameters!.required_status_checks![0].integration_id; }, jobs],
+    ["a check required twice", (g) => { g.rules[3].parameters!.required_status_checks!.push({ context: jobs[0], integration_id: GITHUB_ACTIONS_APP_ID }); }, jobs],
+    ["no pull-request rule", (g) => { g.rules.splice(2, 1); }, jobs],
+    ["a linear-history rule", (g) => { g.rules.push({ type: "required_linear_history" }); }, jobs],
+    ["a bypass actor", (g) => { g.bypass_actors.push({ actor_id: 5, actor_type: "RepositoryRole", bypass_mode: "always" }); }, jobs],
+    ["enforcement set to evaluate", (g) => { g.enforcement = "evaluate"; }, jobs],
+    ["no record at all", (g) => { g.rules = []; g.enforcement = ""; }, jobs],
+  ];
+  for (const [why, mutate, names] of mutants) {
+    const g = good(); mutate(g);
+    const got = why === "no record at all" ? rulesetProblems(null, names) : rulesetProblems(g, names);
+    if (got.length !== 1) fail(SELF, `check 20 reports ${got.length} problem(s) for ${why}, not one (its own probe): ${JSON.stringify(got)}`);
+  }
+  if (typeof Bun === "undefined" || typeof Bun.YAML?.parse !== "function") {
+    fail(SELF, `check 20 parses ${WORKFLOW} with Bun.YAML (Bun 1.2+) and this runtime has none — run \`bun ${SELF}\`, as CI does (SMD-1856)`);
+    return;
+  }
+  let ruleset: RulesetDoc = null;
+  if (existsSync(join(ROOT, RULESET))) {
+    try { ruleset = JSON.parse(readFileSync(join(ROOT, RULESET), "utf8")); } catch { ruleset = null; }
+  }
+  const jobNames = jobNamesIn(Bun.YAML.parse(readFileSync(join(ROOT, WORKFLOW), "utf8")) as JobsDoc);
+  for (const [where, msg] of rulesetProblems(ruleset, jobNames)) fail(where, msg);
+}
+checkRulesetRecord();
 // ── 19: the connector registry (SMD-1933) ────────────────────────────────────
 /**
  * A registry every rule accepts, in memory, against a tree of two contributions
