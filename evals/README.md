@@ -3965,10 +3965,10 @@ on the compose network with `--env-file deploy/.env`).
 | mechanism | claims | confidence | resolved | Brier | ECE | base rate | skill |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | kind band (`qwen2.5:7b` first pass) | 342 | `high` 318 / `medium` 24 | 342, hand label | 0.606 | 0.639 | 0.240 (reference Brier 0.182) | −2.324 |
-| `consolidate:qwen2.5:7b@p2` | 24 | 0.80 ×24 | 24, reviewer applied 0 | 0.640 | 0.800 | 0.000 | undefined |
-| `extract:qwen2.5:7b@p2` | 4,126 | 1.00 on 4,096, 0.80 on 19, 0.90 on 11 | 0 | — | — | — | — |
-| `extract:qwen2.5:7b@p1` | 3,157 | 1.00 on 3,156, 0.50 on 1 | 0 | — | — | — | — |
 | declared (`metadata.confidence`) | 48 | none | 28: 17 by the fork record, 11 superseded | — | — | — | — |
+| `consolidate:qwen2.5:7b@p2` | 24 | 0.80 ×24 | 24, reviewer applied 0 | 0.640 | 0.800 | 0.000 | undefined |
+| `extract:qwen2.5:7b@p1` | 3,157 | 1.00 on 3,156, 0.50 on 1 | 0 | — | — | — | — |
+| `extract:qwen2.5:7b@p2` | 4,126 | 1.00 on 4,096, 0.80 on 19, 0.90 on 11 | 0 | — | — | — | — |
 
 The band as stated:
 

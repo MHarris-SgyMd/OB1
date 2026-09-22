@@ -167,10 +167,25 @@ export function mentionRows(rows: MentionRow[]): LedgerRow[] {
   return rows.map((r) => ({ mechanism: r.extraction_key, claim: r.claim, kind: r.kind, stated: r.confidence, band: null, outcome: null, resolvedBy: null }));
 }
 
-/** A missing table or column — the migration that adds it is not applied. Any other error (a grant, a timeout, a renamed column) is not that, and is thrown, never read as "not applied" (review pass 3). */
+/**
+ * A missing table or column — the migration that adds it is not applied. Any
+ * other error (a grant, a timeout, a renamed column) is not that, and is thrown,
+ * never read as "not applied" (review pass 3). Bun's PostgresError carries the
+ * SQLSTATE in `errno` and a fixed string in `code` (`ERR_POSTGRES_SERVER_ERROR`);
+ * a driver that puts the SQLSTATE in `code` is read too. Review pass 4 found
+ * the first version reading `code` only, so it never fired on Bun and every
+ * brain below 029 died with a stack trace — and its probe had been handed the
+ * shape the author imagined, not the one the driver throws.
+ */
 export function absent(e: unknown): boolean {
-  const code = (e as { code?: unknown })?.code;
+  const o = e as { errno?: unknown; code?: unknown } | null;
+  const code = o?.errno ?? o?.code;
   return code === "42P01" || code === "42703";
+}
+
+/** A read whose table or column a migration has not added is a note and `none`; any other failure is thrown. */
+export async function orNote<T>(notes: string[], read: () => Promise<T>, note: string, none: T): Promise<T> {
+  try { return await read(); } catch (e) { if (!absent(e)) throw e; notes.push(note); return none; }
 }
 
 /** The rows a score may read: both sides present and in range. A row out of range is an error naming the claim, not a row dropped. */
@@ -237,9 +252,7 @@ export type Summary = {
   unresolvedWithConfidence: number; resolvedWithout: number;
   /** How many claims stated each distinct value (resolved or not). */
   perValue: Map<number, number>;
-  /** How many resolved claims each resolver accounts for. */
-  perResolver: Map<string, number>;
-  /** The same, over the resolved claims that carry NO confidence — the rows the "cannot be scored" line is about. */
+  /** How many of the resolved claims that carry NO confidence each resolver accounts for — the rows the "cannot be scored" line is about. */
   perResolverWithout: Map<string, number>;
   /** How many claims of each kind (thought, proposal, mention, edge). */
   perKind: Map<string, number>;
@@ -252,10 +265,9 @@ export function summarise(mechanism: string, rows: LedgerRow[]): Summary {
   const bands = new Map<string, { n: number; held: number }>();
   for (const r of rows) if (r.band && r.outcome !== null) { const b = bands.get(r.band) ?? { n: 0, held: 0 }; b.n++; b.held += r.outcome; bands.set(r.band, b); }
   const bs = sc.length ? brier(sc) : null, rate = sc.length ? baseRate(sc) : null;
-  const perValue = new Map<number, number>(), perResolver = new Map<string, number>(), perResolverWithout = new Map<string, number>(), perKind = new Map<string, number>();
+  const perValue = new Map<number, number>(), perResolverWithout = new Map<string, number>(), perKind = new Map<string, number>();
   for (const r of rows) {
     if (r.stated !== null) perValue.set(r.stated, (perValue.get(r.stated) ?? 0) + 1);
-    if (r.resolvedBy) perResolver.set(r.resolvedBy, (perResolver.get(r.resolvedBy) ?? 0) + 1);
     if (r.resolvedBy && r.stated === null) perResolverWithout.set(r.resolvedBy, (perResolverWithout.get(r.resolvedBy) ?? 0) + 1);
     perKind.set(r.kind, (perKind.get(r.kind) ?? 0) + 1);
   }
@@ -266,7 +278,7 @@ export function summarise(mechanism: string, rows: LedgerRow[]): Summary {
     brier: bs, ece: sc.length ? ece(bins) : null, baseRate: rate, skill: bs !== null && rate !== null ? skill(bs, rate) : null, bins, bands,
     unresolvedWithConfidence: rows.filter((r) => r.stated !== null && r.outcome === null).length,
     resolvedWithout: rows.filter((r) => r.stated === null && r.outcome !== null).length,
-    perValue, perResolver, perResolverWithout, perKind,
+    perValue, perResolverWithout, perKind,
   };
 }
 
@@ -291,8 +303,8 @@ function resolvers(s: Summary): string {
 }
 /** "4,126 (3,000 mentions, 1,126 edges)" when a mechanism claims more than one kind of thing. */
 function claims(s: Summary): string {
-  if (s.perKind.size <= 1) return String(s.claims);
-  return `${s.claims} (${[...s.perKind].sort((a, b) => b[1] - a[1]).map(([k, n]) => `${n.toLocaleString("en-US")} ${k}${n === 1 ? "" : "s"}`).join(", ")})`;
+  if (s.perKind.size <= 1) return s.claims.toLocaleString("en-US");
+  return `${s.claims.toLocaleString("en-US")} (${[...s.perKind].sort((a, b) => b[1] - a[1]).map(([k, n]) => `${n.toLocaleString("en-US")} ${k}${n === 1 ? "" : "s"}`).join(", ")})`;
 }
 
 /** The report over a set of summaries, in the order given. */
@@ -301,7 +313,7 @@ export function render(summaries: Summary[], heading: string, notes: string[]): 
   out.push("## The ledger", "", "One row per mechanism: what it claimed, what carried a confidence, how many distinct values that confidence took, what something resolved, and what has both sides.", "");
   out.push(table(
     ["mechanism", "claims", "with a confidence", "distinct values", "resolved", "scorable"],
-    summaries.map((s) => [s.mechanism, claims(s), `${s.withConfidence} (${pct(s.withConfidence, s.claims)})`, s.distinct.length <= 4 ? (s.distinct.length ? s.distinct.map((p) => p.toFixed(2)).join(", ") : "—") : String(s.distinct.length), `${s.resolved} (${pct(s.resolved, s.claims)})`, s.scorable]),
+    summaries.map((s) => [s.mechanism, claims(s), `${s.withConfidence.toLocaleString("en-US")} (${pct(s.withConfidence, s.claims)})`, s.distinct.length <= 4 ? (s.distinct.length ? s.distinct.map((p) => p.toFixed(2)).join(", ") : "—") : String(s.distinct.length), `${s.resolved.toLocaleString("en-US")} (${pct(s.resolved, s.claims)})`, s.scorable.toLocaleString("en-US")]),
   ), "");
   for (const s of summaries) {
     if (!s.scorable) continue;
@@ -333,7 +345,7 @@ export function render(summaries: Summary[], heading: string, notes: string[]): 
 const args = process.argv.slice(2);
 const has = (n: string) => args.includes(`--${n}`);
 
-function selfCheck(): void {
+async function selfCheck(): Promise<void> {
   let failed = 0;
   const ok = (cond: boolean, what: string) => { if (!cond) { failed++; console.error(`  FAIL ${what}`); } };
   const near = (a: number | null, b: number, what: string) => ok(a !== null && Math.abs(a - b) < 1e-9, `${what} (got ${a})`);
@@ -402,7 +414,27 @@ function selfCheck(): void {
   ok(mixed.includes("(1.00 on 2, 0.50 on 1)"), "a few-valued confidence prints its distribution, most common first");
   ok(mixed.includes("| e2 | 3 (2 edges, 1 mention) |"), "a mechanism that claims two kinds of thing prints the split");
   ok(render([summarise(KIND_BAND, [])], "probe", []).includes(`- ${KIND_BAND}: no claims.`), "a fixture-fed mechanism with no live thoughts prints a row and says so");
-  ok(absent({ code: "42P01" }) && absent({ code: "42703" }) && !absent({ code: "42501" }) && !absent(new Error("timeout")) && !absent(null), "a missing table or column is absent; a grant, a timeout or nothing at all is not");
+  // Bun's shape, as the driver throws it — not the shape one might imagine (review pass 4).
+  const pg = (errno: string) => ({ name: "PostgresError", code: "ERR_POSTGRES_SERVER_ERROR", errno });
+  ok(absent(pg("42P01")) && absent(pg("42703")), "a missing table or column, in Bun's shape (errno), is absent");
+  ok(!absent(pg("42501")) && !absent(pg("57014")) && !absent(new Error("timeout")) && !absent(null) && !absent(undefined), "a grant, a cancelled statement, a plain error or nothing at all is not");
+  ok(absent({ code: "42P01" }) && !absent({ code: "ERR_POSTGRES_SERVER_ERROR" }), "a driver that puts the SQLSTATE in code is read too; Bun's fixed code alone says nothing");
+  await (async () => {
+    const notes: string[] = [];
+    ok((await orNote(notes, async () => { throw pg("42P01"); }, "missing", [1])).length === 1 && notes[0] === "missing", "orNote on a missing table pushes the note and returns none");
+    let thrown: unknown = null;
+    try { await orNote(notes, async () => { throw pg("42501"); }, "missing", 0); } catch (e) { thrown = e; }
+    ok(thrown !== null && notes.length === 1, "orNote on a grant error throws and pushes nothing");
+    ok((await orNote(notes, async () => 7, "missing", 0)) === 7 && notes.length === 1, "orNote on a good read returns the value and pushes nothing");
+  })();
+  const none: Reads = { live: new Set(), declared: new Map(), superseded: [], proposals: [], mentions: [], deleted: 0 };
+  const empty = assemble(readFixture(), none);
+  ok(empty.summaries.length === 2 && empty.summaries[0].mechanism === KIND_BAND && empty.summaries[1].mechanism === DECLARED && empty.summaries.every((m) => m.claims === 0), "an empty brain still has the two fixture-fed rows, first, with no claims");
+  ok(empty.notes.length === 1 && /^342 of the fixture's 342 thought ids are not in this brain \(the fixture is /.test(empty.notes[0]), `an empty brain names every fixture id as absent, with the fixture's origin (${empty.notes[0]?.slice(0, 60)})`);
+  const allLive = assemble(readFixture(), { ...none, live: new Set([...kindBandRows(readFixture()).map((r) => r.claim), ...declaredRows(readFixture(), new Map(), []).map((r) => r.claim)]), deleted: 3, proposals: [{ id: "p", confidence: 0.8, status: "rejected", judge_key: "j" }] });
+  ok(allLive.summaries.length === 3 && allLive.summaries[0].claims === 342 && allLive.summaries[2].mechanism === "j", "with every fixture id live the kind band has 342 claims, and a producer follows the fixture-fed rows");
+  ok(allLive.notes.length === 1 && allLive.notes[0].startsWith("3 thought(s) have been deleted"), "deletes are counted in a note, and no id is reported gone");
+  ok(render([summarise("u", [{ mechanism: "u", claim: A, kind: "thought", stated: null, band: null, outcome: null, resolvedBy: null }])], "probe", []).includes("- u: 1 claim(s), none with a confidence, none resolved."), "a mechanism with claims that state nothing and resolve nothing says so, not \"no claims\"");
   const dec = summarise(DECLARED, declaredRows(fx, new Map(), [A]));
   ok(resolvers(dec) === "1 by the fork record, 1 superseded", `the resolvers are counted by name (${resolvers(dec)})`);
   const constant = render([summarise("c", proposalRows(Array.from({ length: 3 }, (_, i) => ({ id: `c${i}`, confidence: 0.8, status: "rejected", judge_key: "c" }))))], "probe", []);
@@ -420,6 +452,37 @@ function offlineSummaries(f: Fixture): Summary[] {
   return [summarise(KIND_BAND, kindBandRows(f)), summarise(DECLARED, declaredRows(f, new Map(), []))];
 }
 
+/** Everything the live report reads, so the assembly below can be probed without a database. */
+export type Reads = {
+  live: Set<string>;
+  declared: Map<string, number | null>;
+  superseded: string[];
+  proposals: ProposalRow[];
+  mentions: MentionRow[];
+  deleted: number;
+};
+
+/** The ledger from the fixture and the reads: the summaries in a fixed order (the two fixture-fed mechanisms first, always present, then each producer as read) and the notes the assembly itself adds. */
+export function assemble(f: Fixture, r: Reads): { summaries: Summary[]; notes: string[] } {
+  const notes: string[] = [];
+  // A fixture id the brain does not hold is dropped from every fixture-fed
+  // mechanism, and the count is printed, so a kind-band n that stops matching
+  // SMD-1951's table has a line saying why (review pass 2).
+  const gone = new Set<string>();
+  const here = (rows: LedgerRow[]) => rows.filter((row) => { if (r.live.has(row.claim)) return true; gone.add(row.claim); return false; });
+  // The two fixture-fed mechanisms always have a row, even when none of the fixture's thoughts is in this brain.
+  const byMechanism = new Map<string, LedgerRow[]>([[KIND_BAND, []], [DECLARED, []]]);
+  const add = (rows: LedgerRow[]) => { for (const row of rows) { const l = byMechanism.get(row.mechanism) ?? []; l.push(row); byMechanism.set(row.mechanism, l); } };
+  add(here(kindBandRows(f)));
+  add(here(declaredRows(f, r.declared, r.superseded)));
+  add(proposalRows(r.proposals));
+  add(mentionRows(r.mentions));
+  const fixtureIds = new Set([...kindBandRows(f), ...declaredRows(f, new Map(), [])].map((row) => row.claim)).size;
+  if (gone.size) notes.push(`${gone.size} of the fixture's ${fixtureIds} thought ids are not in this brain (the fixture is ${f.origin}) and are dropped from the kind band and the declared rows.`);
+  if (r.deleted) notes.push(`${r.deleted} thought(s) have been deleted from this brain (thought_audit): a delete takes the thought's proposals with it and clears any pointer at it, so their outcomes are not in the ledger and the scores above are of what survived.`);
+  return { summaries: [...byMechanism].map(([m, rows]) => summarise(m, rows)), notes };
+}
+
 async function score(offline: boolean): Promise<void> {
   const f = readFixture();
   if (offline) {
@@ -432,13 +495,7 @@ async function score(offline: boolean): Promise<void> {
   if (!url) { console.error("DATABASE_URL is not set; --offline scores the fixture-only mechanisms"); process.exit(2); }
   const sql = new SQL(url);
   const notes: string[] = [];
-  const live = new Set((await sql`SELECT id::text AS id FROM thoughts`).map((r: { id: string }) => r.id));
-  // A fixture id the brain no longer holds is dropped from every fixture-fed
-  // mechanism, and the count is printed, so a kind-band n that stops matching
-  // SMD-1951's table has a line saying why (review pass 1).
-  const gone = new Set<string>();
-  const here = (rows: LedgerRow[]) => rows.filter((r) => { if (live.has(r.claim)) return true; gone.add(r.claim); return false; });
-
+  const live = new Set<string>((await sql`SELECT id::text AS id FROM thoughts`).map((r: { id: string }) => r.id));
   const declared = new Map<string, number | null>();
   let unreadable = 0;
   for (const r of await sql`SELECT id::text AS id, metadata->'confidence' AS confidence FROM thoughts WHERE metadata ? 'confidence'` as { id: string; confidence: unknown }[]) {
@@ -447,31 +504,21 @@ async function score(offline: boolean): Promise<void> {
   }
   if (unreadable) notes.push(`${unreadable} thought(s) carry a metadata.confidence that is not a number in [0, 1]; read as none.`);
   // A table or column a migration has not added is a note; any other failure is thrown (review pass 3).
-  const orNote = async <T,>(read: () => Promise<T>, note: string, none: T): Promise<T> => {
-    try { return await read(); } catch (e) { if (!absent(e)) throw e; notes.push(note); return none; }
-  };
-  const superseded = (await orNote(() => sql`SELECT DISTINCT supersedes::text AS id FROM thoughts WHERE supersedes IS NOT NULL ORDER BY 1` as Promise<{ id: string }[]>,
+  const superseded = (await orNote(notes, () => sql`SELECT DISTINCT supersedes::text AS id FROM thoughts WHERE supersedes IS NOT NULL ORDER BY 1` as Promise<{ id: string }[]>,
     "thoughts.supersedes is absent (migration 025 not applied): nothing is resolved by supersession here.", [])).map((r) => r.id);
-  const deleted = await orNote(async () => Number((await sql`SELECT count(DISTINCT thought_id)::int AS n FROM thought_audit WHERE action = 'delete'`)[0]?.n ?? 0),
+  const deleted = await orNote(notes, async () => Number((await sql`SELECT count(DISTINCT thought_id)::int AS n FROM thought_audit WHERE action = 'delete'`)[0]?.n ?? 0),
     "No thought_audit table (migration 008 not applied): deletes are not counted.", 0);
 
-  // The two fixture-fed mechanisms always have a row, even when none of the fixture's thoughts is in this brain.
-  const byMechanism = new Map<string, LedgerRow[]>([[KIND_BAND, []], [DECLARED, []]]);
-  const add = (rows: LedgerRow[]) => { for (const r of rows) { const l = byMechanism.get(r.mechanism) ?? []; l.push(r); byMechanism.set(r.mechanism, l); } };
-  add(here(kindBandRows(f)));
-  add(proposalRows(await orNote(() => sql`SELECT id::text AS id, confidence::float AS confidence, status, judge_key FROM supersession_proposals ORDER BY judge_key, judged_at, id` as Promise<ProposalRow[]>,
-    "No supersession_proposals table (migration 029 not applied): the judge has no rows here.", [])));
-  add(mentionRows(await orNote(async () => [
+  const proposals = await orNote(notes, () => sql`SELECT id::text AS id, confidence::float AS confidence, status, judge_key FROM supersession_proposals ORDER BY judge_key, judged_at, id` as Promise<ProposalRow[]>,
+    "No supersession_proposals table (migration 029 not applied): the judge has no rows here.", []);
+  const mentions = await orNote(notes, async () => [
     ...(await sql`SELECT thought_id::text || ':' || entity_id::text AS claim, 'mention' AS kind, confidence::float AS confidence, extraction_key FROM thought_entities ORDER BY extraction_key, thought_id, entity_id` as MentionRow[]),
     ...(await sql`SELECT thought_id::text || ':' || from_entity_id::text || ':' || to_entity_id::text || ':' || relation AS claim, 'edge' AS kind, confidence::float AS confidence, extraction_key FROM ob1_entity_edges ORDER BY extraction_key, thought_id, from_entity_id, to_entity_id, relation` as MentionRow[]),
-  ], "No entity tables (migration 016 not applied): the extractor has no rows here.", [])));
-  add(here(declaredRows(f, declared, superseded)));
+  ], "No entity tables (migration 016 not applied): the extractor has no rows here.", []);
   await sql.end();
 
-  const summaries = [...byMechanism].map(([m, rows]) => summarise(m, rows));
-  const fixtureIds = new Set([...kindBandRows(f), ...declaredRows(f, new Map(), [])].map((r) => r.claim)).size;
-  if (gone.size) notes.push(`${gone.size} of the fixture's ${fixtureIds} thought ids are not in this brain (the fixture is ${f.origin}) and are dropped from the kind band and the declared rows.`);
-  if (deleted) notes.push(`${deleted} thought(s) have been deleted from this brain (thought_audit): a delete takes the thought's proposals with it and clears any pointer at it, so their outcomes are not in the ledger and the scores above are of what survived.`);
+  const { summaries, notes: assembled } = assemble(f, { live, declared, superseded, proposals, mentions, deleted });
+  notes.push(...assembled);
   notes.push(
     `Attribution is by the key each producer already writes (judge_key, extraction_key) and by the fixture's provenance; SMD-1731's per-run lineage would make it per prompt version, and is not needed to read this.`,
     `The shipped \`type\` facet and capture_thought carry no confidence at all: ${live.size} thought(s) in the brain, ${declared.size} with a declared one.`,
@@ -481,6 +528,6 @@ async function score(offline: boolean): Promise<void> {
 
 if (import.meta.main) {
   loadEnv();
-  if (has("self-check")) selfCheck();
+  if (has("self-check")) await selfCheck();
   else await score(has("offline"));
 }
