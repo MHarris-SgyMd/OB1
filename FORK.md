@@ -391,6 +391,17 @@ dimension mismatch. Every suite now drops `thought_chunks` first, and
 
 runs them all in CI's order against one shared database. Use it before pushing.
 
+**Two linters run on every PR (SMD-1808).** `commit-lint` holds each commit to the
+house grammar (`[fork] … (SMD-NNNN)`, and `(caught: …)` on a review pass's finding
+bullets) — `scripts/commitlint.config.mjs`, which shares its tag parser with
+`scripts/mechanism-yield.mjs` through `scripts/commit-grammar.mjs`, so the check
+and the yield count cannot disagree. `workflow-lint` runs `actionlint` (pinned by
+checksum) with `shellcheck` over this workflow's `run:` steps; the workflow now
+sets `defaults.run.shell: bash`, so every step runs under `-eo pipefail` and a
+masked `cmd | grep` failure is surfaced rather than swallowed. Both are opt-in
+locally (`bun scripts/install-hooks.mjs` for the commit hook); making them
+*required* is SMD-1805's ruleset work.
+
 ### 19. Default embedding model → `qwen3-embedding:4b` at 1024 dimensions
 
 Measured best on a real corpus: **0.903 MRR against `embeddinggemma`'s 0.873 over

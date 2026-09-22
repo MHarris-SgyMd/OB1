@@ -252,6 +252,24 @@ Example for a recipe that depends on a reusable skill:
 - What it requires (services, tools)
 - Confirmation that you tested it on your own Open Brain instance
 
+## Commit messages (fork changes)
+
+Commits to the fork's own code follow a small grammar, checked by `commitlint`
+(SMD-1808) — not Conventional Commits (SMD-1804 declined it), just the house shape:
+
+- `[<category>] <subject>`, where `<category>` is one of the PR categories above
+  plus `fork`, `docs`, `resources`. `[fork]` is a change to the fork itself.
+- A `[fork]` subject ends in its ticket, `(SMD-NNNN)` — the `ticket-ref` rule (a
+  warning).
+- On a review-pass commit, every finding bullet in the body carries a
+  `(caught: <how it was found>)` tag — the `caught-tag` rule (a warning) — so
+  `scripts/mechanism-yield.mjs` can count what each pass caught. Subjects have no
+  length limit; they are sentences by design.
+
+It runs in CI on every PR (the `commit-lint` job) and, opt-in, before each commit
+locally: `bun scripts/install-hooks.mjs` (undo with `--uninstall`). Merge commits
+are ignored. The config is `scripts/commitlint.config.mjs`.
+
 ## Changelog & versioning (fork changes)
 
 The fork is versioned `MAJOR.MINOR.PATCH+upstream.<sha>` — the rules are in
