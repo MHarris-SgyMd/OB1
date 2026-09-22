@@ -33,6 +33,7 @@
     "life-engine",
     "add-on"
   ],
+  "connectors": ["telegram"],
   "difficulty": "advanced",
   "estimated_time": "60-90 minutes",
   "created": "2026-03-18",

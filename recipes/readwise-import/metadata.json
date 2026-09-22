@@ -14,6 +14,7 @@
   },
   "requires_skills": [],
   "tags": ["readwise", "highlights", "import", "backfill", "reading"],
+  "connectors": ["readwise"],
   "difficulty": "beginner",
   "estimated_time": "15 minutes",
   "created": "2026-04-24",

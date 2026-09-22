@@ -13,6 +13,7 @@
     "tools": ["Chrome 120+ or Chromium-based browser"]
   },
   "tags": ["chrome-extension", "capture", "claude", "chatgpt", "gemini", "gemini-bulk-sync", "client-side"],
+  "connectors": ["chatgpt", "claude-ai", "gemini"],
   "difficulty": "intermediate",
   "estimated_time": "20 minutes",
   "created": "2026-04-17",
