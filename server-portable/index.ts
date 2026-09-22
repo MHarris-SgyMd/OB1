@@ -466,6 +466,13 @@ function explainPair(r: { duplicateOf?: string; fingerprintHeldBy?: string }): s
   return "";
 }
 
+/**
+ * This server's name: what MCP clients see in `initialize`, and the door every
+ * write names in its actor (`via`), which migration 046 stamps as
+ * thought_audit.origin (SMD-1730). One constant, so the two cannot drift.
+ */
+const SERVER_NAME = "open-brain";
+
 // SMD-1490: the metadata filter a search tool exposes. Shallow by design —
 // top-level keys to a scalar or an array of scalars — so `metadata @> filter`
 // stays GIN-indexable and the row-level-security cost of exposing it (SMD-1625)
@@ -510,7 +517,7 @@ export function parseFilter(raw: unknown): Record<string, unknown> {
 
 function buildServer(principal: Principal): McpServer {
   const server = new McpServer({
-    name: "open-brain",
+    name: SERVER_NAME,
     version: "1.0.0",
   });
 
@@ -520,6 +527,16 @@ function buildServer(principal: Principal): McpServer {
   // The flag is read from the boot-time env snapshot (initEnv freezes it on the
   // first request), so it is set at start-up, not toggled per request. Nothing
   // here reads the log back — the export tool does, offline.
+  //   The write is awaited on the request's hot path, deliberately (SMD-1492).
+  // Fire-and-forget or an in-process queue would shave a local INSERT off the
+  // latency, but either can drop a row when the isolate is torn down or the
+  // process dies — and SMD-1806 replays this log to build the canary, where a
+  // dropped row is a lost replay. The added cost is measured in db/bench-querylog.ts
+  // and kept; a cheaper insert path (a BRIN prune index in place of 047's btree)
+  // is the follow-up (SMD-1950), not a durability trade here. On Workers, executionCtx
+  // .waitUntil would keep the write durable and off the response path, but it is
+  // not plumbed to the handlers today and the dogfood runs Bun, which has no
+  // equivalent (deferred).
   // The pipeline tier this server runs as (SMD-1806), stamped on every query_log
   // row so the canary — which replays stable's log — can tell a stable-written
   // row from its own. Unset is a plain brain (the row's tier is NULL).
@@ -1292,11 +1309,14 @@ function buildServer(principal: Principal): McpServer {
           // auth.ts; `agentId` is the stable id migration 010 resolved it to,
           // and is absent when the registry could not answer — see agents.ts.
           // Both are recorded: the name is what the agent was CALLED at the time
-          // of writing, which a later rename would otherwise erase.
+          // of writing, which a later rename would otherwise erase. `via` is
+          // this server, the door (046's origin column); the row's source is
+          // its own metadata.source, "mcp" above, which the trigger reads
+          // itself (SMD-1730).
           actor: {
             name: principal.name,
             agentId: principal.agentId,
-            source: String(payload.metadata.source ?? "mcp"),
+            via: SERVER_NAME,
             // The gate's decisions for this write, on the audit row (SMD-1903);
             // absent when both endpoints are declared local and nothing was judged.
             ...(gate.record ? { egress: gate.record } : {}),
@@ -1549,7 +1569,7 @@ function buildServer(principal: Principal): McpServer {
           embedding: embedded?.embedding,
           chunks: embedded?.chunks,
           ifUnchangedSince: if_unchanged_since,
-          actor: { name: principal.name, agentId: principal.agentId, source: "mcp", ...(gate?.record ? { egress: gate.record } : {}) },
+          actor: { name: principal.name, agentId: principal.agentId, via: SERVER_NAME, ...(gate?.record ? { egress: gate.record } : {}) },
           // Read by update_thought only with content, when the vector moves (021).
           embeddingModel: embedded?.model,
           // 032: only the key the caller named reaches the envelope — absent
@@ -1618,7 +1638,7 @@ function buildServer(principal: Principal): McpServer {
       try {
         const result = await (await db()).deleteThought({
           id,
-          actor: { name: principal.name, agentId: principal.agentId, source: "mcp" },
+          actor: { name: principal.name, agentId: principal.agentId, via: SERVER_NAME },
           // 042: the refusal is the default; the way through is named here.
           detach: detach_citations === true,
         });

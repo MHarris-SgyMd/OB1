@@ -3,7 +3,7 @@
 // upsert_thought for a capture — so the fingerprint (003/018), the model label
 // (021) and the chunk rows (022) follow the text and vector, and the actor
 // reaches the audit (008). FORK.md change 69; extensions/test-writes.ts drives it
-// against Postgres, and scripts/check-fork-consistency.mjs check 10 holds it.
+// against Postgres, and scripts/check-fork-consistency.ts check 10 holds it.
 // SMD-1541 (change 103): the key's name rides as the actor — p_actor on
 // update_thought, actor in upsert_thought's payload — so 008's row names it;
 // change 69 passed none, and the clause above was false until then. This server
@@ -58,11 +58,12 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 // auth.ts gives the same legacy key where a server does use the module.
 const ACTOR_NAME = "MCP_ACCESS_KEY";
 // The actor every write here passes — p_actor on update_thought, `actor` in
-// upsert_thought's payload — for 008's audit row (the trigger's body is 025's
-// now; 010 and 025 redefined it whole): the key's name, and this server as
-// `via`, which the trigger keeps in actor_context. No source: the row's
-// `source` is its own metadata.source, read by the trigger, so the column says
-// where the thought came from and actor_context which door wrote it. Without
+// upsert_thought's payload — for 008's audit row (the trigger's body is 046's
+// now; 010, 025 and 046 redefined it whole): the key's name, and this server as
+// `via`, which the trigger stamps as the row's `origin` column (SMD-1730; it
+// kept it in actor_context until then). No source: the row's `source` is its
+// own metadata.source, read by the trigger, so the column says where the
+// thought came from and origin which door wrote it. Without
 // the name the row named nobody. When SMD-1798 moves this file onto
 // MCP_ACCESS_KEYS, `name` becomes the principal's — extensions/test-writes.ts
 // runs under the legacy key alone and would not notice a stale constant.

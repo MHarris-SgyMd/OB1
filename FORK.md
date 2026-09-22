@@ -141,7 +141,7 @@ The table below covers changes 1–17, which landed before this file grew prose
 sections. Every change from 18 on is **one file under
 [`changes/`](changes/README.md)** — `NNN-<slug>.md`, a fixed shape, a 150-line
 cap — and the index after the table is generated from that directory by
-`scripts/fork-index.mjs`; check 15 holds the sizes, the numbering and the index,
+`scripts/fork-index.ts`; check 15 holds the sizes, the numbering and the index,
 and fails a "FORK.md change N" citation with no file behind it (SMD-1917).
 
 | # | Commit | What | Upstream status |
@@ -164,8 +164,8 @@ and fails a "FORK.md change N" citation with no file behind it (SMD-1917).
 | 16 | `[fork] server: the model provider is configurable, including fully local` | Both per-capture calls (embedding, metadata extraction) now go to `OB1_LLM_BASE_URL` with `OB1_EMBEDDING_MODEL` and `OB1_METADATA_MODEL`; the credential is omitted for a loopback endpoint. A `local-models` compose profile runs Ollama so nothing about a captured thought leaves the host. | **Unfiled** |
 | 17 | `[fork] evals: choose the local models by measurement` | The local defaults were picked by size. `evals/` benchmarks retrieval and extraction against real Ollama; `nomic-embed-text` placed 5th of 7 and `llama3.2` reproduced its production faults. Defaults are now `embeddinggemma` + `qwen2.5:7b`. | **Unfiled** |
 
-<!-- changes-index:start — generated from changes/ by scripts/fork-index.mjs; do not edit by hand -->
-**103 numbered changes** on top of the pin: 1–17 are the table above; 18–103 are one file each under [`changes/`](changes/README.md), newest last. A change's record is its file; the review-pass prose behind it is in the commits (`(caught: …)` tags, read by `scripts/mechanism-yield.mjs`).
+<!-- changes-index:start — generated from changes/ by scripts/fork-index.ts; do not edit by hand -->
+**103 numbered changes** on top of the pin: 1–17 are the table above; 18–103 are one file each under [`changes/`](changes/README.md), newest last. A change's record is its file; the review-pass prose behind it is in the commits (`(caught: …)` tags, read by `scripts/mechanism-yield.ts`).
 
 | # | Change | Ticket |
 | --- | --- | --- |
@@ -256,7 +256,7 @@ and fails a "FORK.md change N" citation with no file behind it (SMD-1917).
 | 102 | [Every knob the server reads reaches the container](changes/102-every-knob-the-server-reads-reaches.md) | SMD-1843 |
 | 103 | [Change 69's five servers name the key on 008's audit row](changes/103-change-69-s-five-servers-name-the-key-on-008.md) | SMD-1541 |
 
-Landed since the last release and numbered at the next one (SMD-1804): [SMD-1490](changes/smd-1490.md), [SMD-1804](changes/smd-1804.md), [SMD-1806](changes/smd-1806.md), [SMD-1808](changes/smd-1808.md), [SMD-1901](changes/smd-1901.md), [SMD-1903](changes/smd-1903.md), [SMD-1917](changes/smd-1917.md), [SMD-1932](changes/smd-1932.md), [SMD-1933](changes/smd-1933.md), [SMD-1951](changes/smd-1951.md).
+Landed since the last release and numbered at the next one (SMD-1804): [SMD-1490](changes/smd-1490.md), [SMD-1492](changes/smd-1492.md), [SMD-1730](changes/smd-1730.md), [SMD-1804](changes/smd-1804.md), [SMD-1806](changes/smd-1806.md), [SMD-1808](changes/smd-1808.md), [SMD-1870](changes/smd-1870.md), [SMD-1901](changes/smd-1901.md), [SMD-1903](changes/smd-1903.md), [SMD-1917](changes/smd-1917.md), [SMD-1932](changes/smd-1932.md), [SMD-1933](changes/smd-1933.md), [SMD-1938](changes/smd-1938.md), [SMD-1951](changes/smd-1951.md).
 <!-- changes-index:end -->
 
 ### Files we own
@@ -273,10 +273,10 @@ server/test-capture-atomicity.mjs# fix 5   (new file)
 db/migrations/                   # fix 9   (moved here from server/ in fix 9)
 .github/metadata.schema.json     # fix 7   (3 additive optional fields); SMD-1933 adds `connectors`
 .github/workflows/fork-checks.yml# fix 7   (new file)
-scripts/check-fork-consistency.mjs # fix 7 (new file)
-scripts/mechanism-yield.mjs      # SMD-1711 (new file — review-pass yield report, not a gate); window and attribution fixed SMD-1728
-scripts/connector-registry.mjs   # SMD-1933 (new file — the connector registry's rules and the spec's table renderer)
-scripts/contributions.mjs        # SMD-1933 (new file — the one walk of the contribution directories)
+scripts/check-fork-consistency.ts # fix 7 (new file)
+scripts/mechanism-yield.ts       # SMD-1711 (new file — review-pass yield report, not a gate); window and attribution fixed SMD-1728
+scripts/connector-registry.ts    # SMD-1933 (new file — the connector registry's rules and the spec's table renderer)
+scripts/contributions.ts         # SMD-1933 (new file — the one walk of the contribution directories)
 docs/connector-registry.json     # SMD-1933 (new file — the connector taxonomy's one source)
 docs/connector-taxonomy.md       # SMD-1933 (new file — the spec; its tables are rendered from the JSON)
 server-portable/                 # fix 8   (new dir — parallel, does not touch server/)
@@ -345,7 +345,7 @@ evals/lib.ts                     # fix 20  (new file — shared embedding path)
 evals/bench.ts                   # fix 20  (new file — compare a model to the record)
 evals/baselines.json             # fix 20  (new file — recorded results)
 .dockerignore                    # fix 20  (new file — root build context)
-scripts/migrate-to-sql-shim.mjs  # fix 13  (new file — the codemod); change 74 (the runtime line, the KEEP list); change 77 (the embed blockers are the shim's refusals; agent-memory-api kept)
+scripts/migrate-to-sql-shim.ts   # fix 13  (new file — the codemod); change 74 (the runtime line, the KEEP list); change 77 (the embed blockers are the shim's refusals; agent-memory-api kept)
 <23 recipe/integration files>    # fix 13  (one import line each; revert with the codemod; 24 until change 74 put the local-brain client back)
 <7 extension servers>            # change 64 (keys through extensions/_shared/auth.ts; the tools that write gated)
 extensions/_shared/auth.ts       # change 64 (new file — server-portable/auth.ts byte for byte; the test holds them equal)
@@ -377,14 +377,14 @@ evals/eval-quant.ts              # change 81 (new file — vector, halfvec and b
 <17 pin sites, 3 lockfiles>      # change 83 (@hono/mcp 0.1.1 → 0.1.5: the transport lets go of each POST it has answered; the after sample's sweep closes the transports it drops)
 <19 pin sites, 3 lockfiles, 15 servers, 20 SDK importers> # change 84 (SDK 1.30.0, @hono/mcp 0.3.2, hono 4.13.8, zod 4.6.5 together; the Accept patches removed; an @ts-types pragma on every SDK import so Deno types it)
 server-portable/tools.ts         # change 100 (new file — the typed source of the MCP tool surface: TOOLS as const, ToolName, visibleToolNames())
-server-portable/tools.json       # change 100 (new file — GENERATED from tools.ts by scripts/gen-tools.mjs; deploy/smoke.sh reads it)
-scripts/gen-tools.mjs            # change 100 (new file — writes tools.json from tools.ts; renderToolsJson() shared with the round-trip check)
+server-portable/tools.json       # change 100 (new file — GENERATED from tools.ts by scripts/gen-tools.ts; deploy/smoke.sh reads it)
+scripts/gen-tools.ts             # change 100 (new file — writes tools.json from tools.ts; renderToolsJson() shared with the round-trip check)
 <4 suites + deploy/smoke.sh>     # change 100 (test-server/-auth/-e2e-sql/-agents and smoke.sh read the manifest; test-server's tools/list is the live drift guard; test-auth's mutating list is typed ToolName[])
 db/test-support.ts               # change 100 (createAssert gains total()/skipped()/docCheck — a doc check counted apart from the total it verifies)
 db/test-schema.ts, db/test-live.ts # change 100 (each holds db/README.md's quoted assertion total to the run's own; test-live only on a full run)
-scripts/check-fork-consistency.mjs # change 100 (grant privileges per group [SMD-1471]; every migration documented once and the count checked; tools.json round-tripped against tools.ts [SMD-1805])
+scripts/check-fork-consistency.ts # change 100 (grant privileges per group [SMD-1471]; every migration documented once and the count checked; tools.json round-tripped against tools.ts [SMD-1805])
 changes/                         # SMD-1917 (new dir — one file per change from 18 on: NNN-<slug>.md once numbered, smd-NNNN.md until the release step numbers it; a fixed shape and a 150-line cap)
-scripts/fork-index.mjs           # SMD-1917 (new file — renders FORK.md's index from changes/; check 15 round-trips it; the release step calls it)
+scripts/fork-index.ts            # SMD-1917 (new file — renders FORK.md's index from changes/; check 15 round-trips it; the release step calls it)
 db/config.mjs                    # change 100 (grantRows() — every ROLE_GRANTS row undeduped, for the per-group privilege check)
 db/README.md                     # change 100 (the applied-migration count stated as a digit so the check can read it)
 docs/01-getting-started.md       # fix 6
@@ -456,13 +456,13 @@ runs them all in CI's order against one shared database. Use it before pushing.
 
 **Two linters run on every PR (SMD-1808).** `commit-lint` holds each commit to the
 house grammar (`[fork] … (SMD-NNNN)`, and `(caught: …)` on a review pass's finding
-bullets) — `scripts/commitlint.config.mjs`, which shares its tag parser with
-`scripts/mechanism-yield.mjs` through `scripts/commit-grammar.mjs`, so the check
+bullets) — `scripts/commitlint.config.ts`, which shares its tag parser with
+`scripts/mechanism-yield.ts` through `scripts/commit-grammar.ts`, so the check
 and the yield count cannot disagree. `workflow-lint` runs `actionlint` (pinned by
 checksum) with `shellcheck` over this workflow's `run:` steps; the workflow now
 sets `defaults.run.shell: bash`, so every step runs under `-eo pipefail` and a
 masked `cmd | grep` failure is surfaced rather than swallowed. Both are opt-in
-locally (`bun scripts/install-hooks.mjs` for the commit hook); making them
+locally (`bun scripts/install-hooks.ts` for the commit hook); making them
 *required* is SMD-1805's ruleset work.
 
 ## Detached from the fork network
@@ -529,7 +529,7 @@ bun run test:sql && bun run test:e2e            # needs podman or docker
 bunx wrangler deploy --dry-run --outdir=.cf-out   # Workers target still builds
 cd ../db && bun install --frozen-lockfile && bun test-schema.ts
 ./with-postgres.sh bun test-live.ts               # needs podman or docker
-cd .. && bun scripts/check-fork-consistency.mjs   # CI runs it under bun too (change 58); node runs it as well
+cd .. && bun scripts/check-fork-consistency.ts   # CI runs it too (change 58)
 
 git tag -a upstream-pin-$(git rev-parse --short upstream/main) \
   -m "Upstream main @ $(git rev-parse upstream/main)"
@@ -545,7 +545,7 @@ vendored wholesale at the pin, so we ship its worst advice with its best under
 this repository's name. The rule (SMD-1251, change 51): **audit the tree once
 and hold the delta** — a standing check carries each audit so a rebase cannot
 quietly undo it. Four rules are held today, each in
-`scripts/check-fork-consistency.mjs` with counted, reasoned exceptions: shell
+`scripts/check-fork-consistency.ts` with counted, reasoned exceptions: shell
 safety (check 6, change 51), core ownership (check 7, change 58), credential
 compares (check 8, changes 64 and 67 — the exception list has been empty since
 67) and writes around the functions that own a thought's content and vector
@@ -629,7 +629,7 @@ reports the upstream PR gate currently fails on **every** fork-originated PR.
 
 ## Review passes: what caught a finding is written at the catch
 
-Measured 2026-09-18 with `bun scripts/mechanism-yield.mjs` over the commit log
+Measured 2026-09-18 with `bun scripts/mechanism-yield.ts` over the commit log
 as of `main` at 28e20d7 — before any tagged pass existed, so a re-run at HEAD
 adds this ticket's own passes to every figure: 221 review-pass commits across
 61 tickets, 511 bulleted findings in the 31 tickets whose passes carry bullet
@@ -676,7 +676,7 @@ or migration that now enforces the finding. An untagged bullet is counted as
 "(caught" but does not end in a readable tag is warned on, not counted as
 untagged. Bullets that only report a green run are not findings.
 
-**Re-measure when ten tickets carry tags**: `bun scripts/mechanism-yield.mjs
+**Re-measure when ten tickets carry tags**: `bun scripts/mechanism-yield.ts
 --since <first tagged commit>` — that commit and everything committed at or
 after it, so a branch begun earlier contributes only what it committed in the
 tagged era. That run was to decide SMD-1712, the citations facet that gives
@@ -728,12 +728,12 @@ The last row is the instructive one: it was introduced one commit after this
 section was written, by the person who wrote it, in a commit whose subject was
 removing duplication. Naming a pattern does not stop you repeating it — only a
 check does, which is why the row above it is now enforced by
-`scripts/check-fork-consistency.mjs` rather than by intent.
+`scripts/check-fork-consistency.ts` rather than by intent.
 
 The pattern is consistent enough to be a rule: **a default that appears in two
 files will be wrong in one of them, and the copy that goes stale is the one nobody
 runs directly.** Everything provider-facing now resolves through `db/config.mjs`,
-and `scripts/check-fork-consistency.mjs` fails the build when compose, the
+and `scripts/check-fork-consistency.ts` fails the build when compose, the
 embedding model, the metadata model and the base URL stop agreeing.
 
 The same rule applies to the suites. Three of them read a shipped default instead
@@ -805,7 +805,7 @@ Deliberate. Recorded so nobody assumes they were missed.
   before trusting them.
 - **Seven files still need a human.** Four use PostgREST resource embedding (a
   join), two use nested `.or()` grouping, and one is a type-only import. Run
-  `node scripts/migrate-to-sql-shim.mjs` for the current list and the reason.
+  `bun scripts/migrate-to-sql-shim.ts` for the current list and the reason.
 - **`CLAUDE.md` and `AGENTS.md` disagree** — a duplicated worktrees block, then
   divergent content, and `AGENTS.md` mandates updating a private tracker.
   [PR #274](https://github.com/NateBJones-Projects/OB1/pull/274) proposed the

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Opt-in commit-message check (SMD-1808). Nothing runs it unless you opt in with
-#   bun scripts/install-hooks.mjs        # sets core.hooksPath = scripts/hooks
-#   bun scripts/install-hooks.mjs --uninstall
+#   bun scripts/install-hooks.ts        # sets core.hooksPath = scripts/hooks
+#   bun scripts/install-hooks.ts --uninstall
 # It runs the same config CI runs, so a message the hook accepts the commit-lint
 # job accepts too. Run from the repo root (git invokes the hook there), so the
 # relative config path resolves.
 set -euo pipefail
-exec bunx @commitlint/cli@19.6.1 --config scripts/commitlint.config.mjs --edit "$1"
+exec bunx --bun @commitlint/cli@19.6.1 --config scripts/commitlint.config.ts --edit "$1"

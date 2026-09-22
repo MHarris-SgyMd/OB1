@@ -25,9 +25,9 @@ changing one import.
 ### 1. Migrate a file
 
 ```bash
-node scripts/migrate-to-sql-shim.mjs                    # triage, no writes
-node scripts/migrate-to-sql-shim.mjs --apply --all      # rewrite every eligible file
-node scripts/migrate-to-sql-shim.mjs --revert <file>    # undo, byte-for-byte
+bun scripts/migrate-to-sql-shim.ts                    # triage, no writes
+bun scripts/migrate-to-sql-shim.ts --apply --all      # rewrite every eligible file
+bun scripts/migrate-to-sql-shim.ts --revert <file>    # undo, byte-for-byte
 ```
 
 The rewrite is one line — two, for a file that reads `Deno.env` or calls `Deno.serve` (step 3):
@@ -89,7 +89,7 @@ callout gives its own line. `SUPABASE_SERVICE_ROLE_KEY` is read and ignored by
 every server but `work-operating-model-activation`, which refuses to start
 without it — set it to any value there. An extension's `schema.sql` carries
 Supabase RLS policies on `auth.uid()`; its README's Step 1 gives the two stub
-functions a plain Postgres needs before the file runs. Check 11 of `scripts/check-fork-consistency.mjs` holds
+functions a plain Postgres needs before the file runs. Check 11 of `scripts/check-fork-consistency.ts` holds
 every shim-importing file in this state — the polyfill first, no other `Deno.*`, no
 `jsr:`/`npm:`/URL specifier, through the files it imports — and
 `extensions/test-auth.ts` starts each one under `bun` and answers it over its port
@@ -233,7 +233,7 @@ development — the test caught it.
 
 ## Related
 
-- `../../scripts/migrate-to-sql-shim.mjs` — the codemod
+- `../../scripts/migrate-to-sql-shim.ts` — the codemod
 - `../../extensions/test-tools.ts` — every extension tool on the shim, driven against Postgres
 - `../deno-on-bun.ts` — Deno's two globals on Bun, for the servers on the shim
 - `../../server-portable/store-sql.ts` — the core server's own SQL layer

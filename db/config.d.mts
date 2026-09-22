@@ -242,6 +242,8 @@ export const MATCH_THOUGHTS_SIGNATURE: string;
 export const SEARCH_THOUGHTS_HYBRID_SIGNATURE: string;
 /** The signature the servers and reembed.ts call, as regprocedure text (032: nine arguments). */
 export const UPDATE_THOUGHT_SIGNATURE: string;
+/** 032's nine-argument form, the one 046 replaced (SMD-1730). */
+export const UPDATE_THOUGHT_SIGNATURE_9: string;
 /** The 4- and 5-argument search forms 020 dropped and the 7- and 8-argument update_thought 021 and 032 dropped; a schema reset drops them too. */
 export const SUPERSEDED_SIGNATURES: readonly string[];
 /** Function name → the migration file that last defines it, from the migrations as [name, text] pairs (SMD-1250). */
@@ -330,6 +332,8 @@ export function grantPresenceSql(objects: readonly GrantObject[]): string;
 export function grantStatements(role: string, opts?: { groups?: readonly string[]; present?: Set<string> | null }): string[];
 /** The groups' rows merged per object, privileges in a stable order — the one list grantStatements issues and grantVerifySql checks. */
 export function mergedGrants(groups?: readonly string[], present?: Set<string> | null): { kind: GrantObject["kind"]; name: string; privileges: string[] }[];
+/** Every ROLE_GRANTS row in group/list order, NOT merged by name — check-fork-consistency's per-group privilege comparison reads it (SMD-1471). */
+export function grantRows(groups?: readonly RoleGrantGroup[]): { group: RoleGrantGroup; kind: GrantObject["kind"]; name: string; privileges: string[] }[];
 /** One SELECT returning { kind, name, privilege, held } for USAGE on schema public and every privilege in `merged` — what a GRANT by a grantor without grant option silently fails to give (SMD-1796). */
 export function grantVerifySql(role: string, merged: readonly { kind: string; name: string; privileges: readonly string[] }[]): string;
 /** `text` with its comments blanked in place — literal-aware, dollar-quoted bodies scanned within, newlines kept so line numbers hold (SMD-1796, SMD-1316). */

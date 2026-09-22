@@ -12,7 +12,7 @@ client's own MCP connector, a browser extension — land in the brain through
 It is a spec with a data file behind it. `docs/connector-registry.json` is the
 one source: the facet sets, every family's schema, every external-touching
 artifact with its capabilities. The tables at the end of this page are rendered
-from it by `scripts/connector-registry.mjs`, and `check-fork-consistency`
+from it by `scripts/connector-registry.ts`, and `check-fork-consistency`
 check 19 holds the registry sound, the tables current, and the coverage
 complete (see "Held by"). Edit the JSON; run the script; the prose here is the
 part a human writes.
@@ -39,7 +39,7 @@ Sibling contracts, so the boundaries are named once:
 
 Every connector capability resolves to **exactly one value per facet**. A value
 off a closed or near-closed set is a spec change: it edits the registry and the
-pinned sets in `scripts/connector-registry.mjs` together, and the check refuses a
+pinned sets in `scripts/connector-registry.ts` together, and the check refuses a
 registry that redefines a set on its own.
 
 | Facet | Values | Stability | What it answers |
@@ -197,7 +197,7 @@ not in the node).
   the vendor to `connectors` with the direction the capabilities derive. Declare
   the same vendors in the artifact's `metadata.json` — `"connectors": ["imap"]`
   — and name its service in `requires.services`, one system per entry, its name
-  first. Run `bun scripts/connector-registry.mjs`. Nothing else. The check holds
+  first. Run `bun scripts/connector-registry.ts`. Nothing else. The check holds
   the declaration and the registry equal, so a maker-first service string
   ("OpenAI ChatGPT conversations API") cannot hide a vendor the declaration
   names.
@@ -259,8 +259,8 @@ their home under `primitives/` once SMD-1918 extracts them:
 
 ## Held by
 
-`scripts/check-fork-consistency.mjs` check 19, one pure function
-(`registryProblems` in `scripts/connector-registry.mjs`) with must-fail and
+`scripts/check-fork-consistency.ts` check 19, one pure function
+(`registryProblems` in `scripts/connector-registry.ts`) with must-fail and
 must-pass probes on every run:
 
 - the four closed and near-closed facet sets and the fetcher set equal the
@@ -283,7 +283,7 @@ must-pass probes on every run:
   OpenRouter" and "Gmail/OpenAI" are vendors — one external system per entry,
   its name first; a pattern that covers a classified vendor's own service,
   such as `open` over "OpenClaw", is refused as too broad), or carries a connector-shaped tag (the list is `TRIGGER_TAGS` in
-  `scripts/connector-registry.mjs`, printed at the top of the generated block)
+  `scripts/connector-registry.ts`, printed at the top of the generated block)
   or a tag naming a declared connector (tags compare lower-cased), or sits in
   a fold-in SMD-1867 row of `docs/vendored-disposition.md` — the marker in the
   Disposition cell, and a row whose directory is gone is a finding — is
@@ -300,7 +300,7 @@ must-pass probes on every run:
   (SMD-1943 owns the structured fix);
 - the tables below equal what the registry renders.
 
-`bun scripts/connector-registry.mjs --check` runs the same rules by hand.
+`bun scripts/connector-registry.ts --check` runs the same rules by hand.
 
 ## Verify status
 
@@ -311,7 +311,7 @@ must-pass probes on every run:
 | A new vendor in an existing family is added with only a driver/mapping | **Specified** (the envelope, the family schemas, the "Adding" recipe). **Proven when SMD-1867 lands the pipeline** — until then a new recipe still hand-rolls the projection |
 | The same vendor via a low-code node and via a native driver produce identical canonical / text / edges | **Specified** (identity recomputed at the seam, fetcher as provenance). **Proven on one vendor once SMD-1863 picks the tool** |
 
-<!-- connector-tables:start — generated from docs/connector-registry.json by scripts/connector-registry.mjs; do not edit by hand -->
+<!-- connector-tables:start — generated from docs/connector-registry.json by scripts/connector-registry.ts; do not edit by hand -->
 22 artifacts, 32 capability rows, 16 connectors (4 bidirectional: `discord`, `gmail`, `slack`, `telegram`), 7 of 8 declared families in use.
 
 Coverage net — the connector-shaped tags that mark an undeclared contribution: `import`, `digest`, `webhook`, `messaging`, `email`, `bot`; a declared connector's name as a tag marks it too.

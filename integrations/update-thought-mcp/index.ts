@@ -3,16 +3,17 @@
 // unchanged — set SUPABASE_URL to a postgres:// connection string, and
 // SUPABASE_SERVICE_ROLE_KEY is ignored (credentials live in the URL).
 // ob1-original-import: @supabase/supabase-js
-// Revert with: node scripts/migrate-to-sql-shim.mjs --revert <file>
+// Revert with: bun scripts/migrate-to-sql-shim.ts --revert <file>
 // ob1-fork (SMD-1228): a thought's content and vector are written through the
 // functions that own them — update_thought for an edit, the 3-argument
 // upsert_thought for a capture — so the fingerprint (003/018), the model label
 // (021) and the chunk rows (022) follow the text and vector, and the actor
 // reaches the audit (008). FORK.md change 69; extensions/test-writes.ts drives it
-// against Postgres, and scripts/check-fork-consistency.mjs check 10 holds it.
+// against Postgres, and scripts/check-fork-consistency.ts check 10 holds it.
 // SMD-1541 (change 103): the key's name rides as the actor — p_actor on
 // update_thought — so 008's row names it; change 69 passed none, and the clause
-// above was false until then. This server rides as `via` in the row's actor_context.
+// above was false until then. This server rides as `via` in the actor, which
+// migration 046 stamps as the row's `origin` (SMD-1730; actor_context until then).
 // ob1-fork (SMD-1455): access keys go through ../_shared/auth.ts — the core server's
 // server-portable/auth.ts, copied so Supabase bundles it with the function — named,
 // scoped, hashed entries in MCP_ACCESS_KEYS (the older single MCP_ACCESS_KEY still
@@ -183,7 +184,7 @@ function buildServer(principal: Principal): McpServer {
           p_embedding: embedding,
           p_if_unchanged_since: if_unchanged_since ?? null,
           p_embedding_model: embedding ? EMBEDDING_MODEL : null,
-          // 008's actor: the key's name, this server as `via`, no source (SMD-1541; FORK.md change 103 has the why).
+          // 008's actor: the key's name, this server as `via` — 046's origin column (SMD-1730) — no source (SMD-1541; FORK.md change 103 has the why).
           p_actor: { name: principal.name, via: "update-thought-mcp" },
         });
 

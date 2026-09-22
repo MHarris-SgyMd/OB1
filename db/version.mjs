@@ -12,7 +12,7 @@
  * "Versioning" section and are checked, not remembered (check-fork-consistency).
  *
  * This module is node-only on purpose. It reads the filesystem and hashes files,
- * and it is imported by migrate.ts, preflight.ts and check-fork-consistency.mjs —
+ * and it is imported by migrate.ts, preflight.ts and check-fork-consistency.ts —
  * none of which is bundled for Cloudflare Workers. config.mjs IS in that bundle
  * (server-portable/embed.ts imports it), so the sha rule lives here rather than
  * there: a top-level `node:crypto` import would break the Workers build.
