@@ -1946,8 +1946,8 @@ function sqlHitList(sql, rules) {
  * SCHEMA beside DROP DATABASE (`DROP SCHEMA public CASCADE` is the reset that
  * takes every table with it), read from the comment-stripped text as
  * STATEMENTS rather than words: a `TRUNCATE` is a hit only when a table follows
- * it — `TABLE`, `ONLY`, a name, a `%I` placeholder or the `' ||` of dynamic SQL
- * — so a trigger event (`BEFORE TRUNCATE ON t`: 046's refusing trigger, the rule
+ * it — `TABLE`, `ONLY`, a name, a format() placeholder (`%I`, `%1$I`) or the
+ * `' ||` / `$tag$ ||` of dynamic SQL — so a trigger event (`BEFORE TRUNCATE ON t`: 046's refusing trigger, the rule
  * applied), a privilege (`GRANT TRUNCATE ON`) and the value `TG_OP = 'TRUNCATE'`
  * are not it; a `DELETE FROM` is a hit only when its statement — to its `;`, or
  * to the `)` that closes the CTE it sits in — carries no WHERE, so 034's
@@ -1968,7 +1968,7 @@ export const DESTRUCTIVE_SQL_RULES = Object.freeze([
   Object.freeze({ name: "truncate",
     msg: "truncates a table (CLAUDE.md's SQL-safety rail: a file must never destroy existing rows); a trigger event (`BEFORE TRUNCATE ON t`, which REFUSES it) and a privilege (`GRANT TRUNCATE ON`) are not this statement and pass. String literals count (an EXECUTE string runs); a word in prose belongs in a `--` comment, or reworded (`'never truncated'`)" }),
   Object.freeze({ name: "unqualified-delete",
-    msg: "a DELETE FROM whose statement has no WHERE clause of its own — every row of the table (CLAUDE.md's SQL-safety rail: a file must never destroy existing rows); name the rows (`WHERE id = $1`, on any line of the statement; a `WHERE true` on a TEMP table the file itself made, as 016's `_rte_in`, is the letter of the rule) — a WHERE inside a subquery, a USING source or a string does not count. String literals count (an EXECUTE string or a format() template is read to its `;` or closing `)`); a statement quoted in prose belongs in a `--` comment" }),
+    msg: "a DELETE FROM whose statement has no WHERE clause of its own — every row of the table (CLAUDE.md's SQL-safety rail: a file must never destroy existing rows); name the rows (`WHERE id = $1`, on any line of the statement; a `WHERE true` on a TEMP table the file itself made, as 016's `_rte_in`, is the letter of the rule) — a WHERE inside a subquery or a USING source does not count, nor one inside a string when the file runs the DELETE itself. String literals count (an EXECUTE string or a format() template is read to its `;` or closing `)`); a statement quoted in prose belongs in a `--` comment" }),
 ]);
 /**
  * What may follow TRUNCATE for it to be the statement: the TABLE/ONLY keywords,
@@ -2029,6 +2029,13 @@ function blankSqlLiterals(sql) {
   }
   return out;
 }
+/** A closing dollar tag followed by `||`: the statement is a dollar-quoted string concatenated onward, read raw like a `'…'` one. */
+const DOLLAR_CONCAT = /\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$\s*\|\|/;
+/** Where the statement continuing at `from` ends in `text`: its `;`, or the text's end. */
+function statementEnd(text, from) {
+  const i = text.indexOf(";", from);
+  return i === -1 ? text.length : i;
+}
 /**
  * Whether the statement that continues at `from` in `text` carries a WHERE of
  * its own: read to its `;`, to the `)` that closes the parenthesis it sits in
@@ -2039,13 +2046,6 @@ function blankSqlLiterals(sql) {
  * raw copy for one inside a string — `'…'`, or a dollar-quoted one concatenated
  * onward — whose WHERE may be concatenated on.
  */
-/** A closing dollar tag followed by `||`: the statement is a dollar-quoted string concatenated onward, read raw like a `'…'` one. */
-const DOLLAR_CONCAT = /\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$\s*\|\|/;
-/** Where the statement continuing at `from` ends in `text`: its `;`, or the text's end. */
-function statementEnd(text, from) {
-  const i = text.indexOf(";", from);
-  return i === -1 ? text.length : i;
-}
 function whereQualifies(text, from) {
   let depth = 0;
   for (let i = from; i < text.length; i++) {
@@ -2066,12 +2066,11 @@ export function destructiveSqlIn(text) {
   const sql = stripSqlComments(text);
   const flat = blankSqlLiterals(sql);
   const list = sqlHitList(sql, DESTRUCTIVE_SQL_RULES);
-  const hit = (rule, index) => list.add(rule, index);
   // A keyword inside a quoted identifier names a column (`"my TRUNCATE"`), not a statement.
   const inIdentifier = (i) => flat[i] === IDENT_FILL;
-  for (const m of sql.matchAll(/\bDROP\s+TABLE\b/gi)) if (!inIdentifier(m.index)) hit("drop-table", m.index);
-  for (const m of sql.matchAll(/\bDROP\s+(?:DATABASE|SCHEMA|OWNED)\b/gi)) if (!inIdentifier(m.index)) hit("drop-database", m.index);
-  for (const m of sql.matchAll(new RegExp(TRUNCATE_TARGET, "giu"))) if (!inIdentifier(m.index)) hit("truncate", m.index);
+  for (const m of sql.matchAll(/\bDROP\s+TABLE\b/gi)) if (!inIdentifier(m.index)) list.add("drop-table", m.index);
+  for (const m of sql.matchAll(/\bDROP\s+(?:DATABASE|SCHEMA|OWNED)\b/gi)) if (!inIdentifier(m.index)) list.add("drop-database", m.index);
+  for (const m of sql.matchAll(new RegExp(TRUNCATE_TARGET, "giu"))) if (!inIdentifier(m.index)) list.add("truncate", m.index);
   for (const m of sql.matchAll(/\bDELETE\s+FROM\b/gi)) {
     if (inIdentifier(m.index)) continue;
     // A DELETE inside a string literal, or inside a dollar-quoted string that
@@ -2082,7 +2081,7 @@ export function destructiveSqlIn(text) {
     // qualify it.
     const end = m.index + m[0].length;
     const inLiteral = flat[m.index] === " " || DOLLAR_CONCAT.test(flat.slice(end, statementEnd(flat, end)));
-    if (!whereQualifies(inLiteral ? sql : flat, end)) hit("unqualified-delete", m.index);
+    if (!whereQualifies(inLiteral ? sql : flat, end)) list.add("unqualified-delete", m.index);
   }
   return list.sorted();
 }

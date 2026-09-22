@@ -3793,7 +3793,8 @@ checkConnectorRegistry();
 // CTE, a literal's parentheses and semicolons not counted — has no WHERE of
 // its own at the top level (a WHERE inside a USING subquery or a format()
 // argument qualifies nothing; the first review pass found both holes), DROP
-// TABLE, DROP DATABASE/SCHEMA and DROP OWNED always, string literals read
+// TABLE, DROP DATABASE/SCHEMA and DROP OWNED wherever they stand outside a
+// quoted identifier (`"a DROP TABLE b"` names a column), string literals read
 // because an EXECUTE string runs — which makes a statement quoted in prose
 // (`RAISE EXCEPTION 'TRUNCATE refused'`) a hit as well; the remedy is check
 // 12's, a `--` comment or a rewording, and the messages say so. test-schema
