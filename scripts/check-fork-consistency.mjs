@@ -144,9 +144,11 @@
  *      capabilities name, a contribution declaring one is registered, an
  *      excused one declares none; and coverage, the net under it — every
  *      contribution whose metadata.json names a service no not-a-connector
- *      pattern matches at the start of its first or second word (a provider
- *      first and qualified after is covered; a vendor first with a provider
- *      after a bracket or a slash is not), carries a connector-shaped tag or
+ *      pattern matches at the start of its first word, or of its second after
+ *      a qualifier such as "Any" or "Optional:" (a provider first and
+ *      qualified after is covered; a vendor first with a provider anywhere
+ *      after it is not; a pattern covering a classified vendor's own service
+ *      is too broad), carries a connector-shaped tag or
  *      a declared connector's name as a tag (lower-cased), or sits in a
  *      fold-in **SMD-1867** row of docs/vendored-disposition.md whose
  *      directory exists (a row whose directory is gone is a finding) is
@@ -3548,7 +3550,7 @@ const REGISTRY_PROBES = [
   ["an external-touching artifact left unclassified", (r) => { r.artifacts.pop(); r.connectors.acme.direction = "source"; }, ["coverage-unregistered"]],
   ["an artifact both classified and excused (its metadata still declares the connector)", (r) => { r.not_connectors.artifacts["recipes/acme-digest"] = "because"; }, ["coverage-both", "excuse-declares"]],
   ["a classified artifact whose metadata declares no connector", (r) => { r.artifacts.push({ path: "recipes/plain-tool", capabilities: [{ vendor: "acme", family: "message-stream/chat", transport: "pull", direction: "source", cardinality: "1:1", round_trip: "read-only", fetcher: "native-driver" }] }); }, ["connectors-field"]],
-  ["a provider matched inside word one and again at the start of word two is covered", (r) => {}, [], (t) => { t.metadataByPath.set("recipes/two-hits", { requires: { services: ["Non-OpenRouter OpenRouter gateway"] }, tags: ["notes"] }); t.existingDirs.push("recipes/two-hits"); }],
+  ["a provider matched twice, once at the head after a qualifier, is covered (every match is read)", (r) => {}, [], (t) => { t.metadataByPath.set("recipes/two-hits", { requires: { services: ["Any OpenRouter-compatible OpenRouter gateway"] }, tags: ["notes"] }); t.existingDirs.push("recipes/two-hits"); }],
   ["a registered artifact whose metadata declares other connectors than its capabilities", (r) => {}, ["connectors-field"], (t) => { t.metadataByPath.get("recipes/acme-digest").connectors = ["acme", "beta"]; }],
   ["a contribution declaring a connector and classified nowhere", (r) => {}, ["coverage-unregistered"], (t) => { t.metadataByPath.set("recipes/plain-tool", { requires: { services: ["Supabase"] }, tags: ["ops"], connectors: ["acme"] }); }],
   ["an excused artifact whose metadata declares a connector", (r) => { r.not_connectors.artifacts["recipes/plain-tool"] = "a tool"; }, ["excuse-declares"], (t) => { t.metadataByPath.set("recipes/plain-tool", { requires: { services: ["Supabase"] }, tags: ["ops"], connectors: ["acme"] }); }],
@@ -3578,6 +3580,12 @@ const REGISTRY_PROBES = [
   ["a service pattern that matches the empty string (a trailing `|`)", (r) => { r.not_connectors.services[0].pattern = "openrouter|"; }, ["pattern-invalid"]],
   ["a registry entry for a placeholder directory", (r) => { r.artifacts[1].path = "recipes/_template"; }, ["artifact-path", "coverage-unregistered"]],
   ["a disposition table that is missing", (r) => {}, ["disposition-missing"], (t) => { t.dispositionText = null; }],
+  ["a disposition table with one category's heading moved (partly dark)", (r) => {}, ["disposition-dark"], (t) => { t.dispositionText = "### `recipes/` (1)\n\n| `acme-digest` | keep + audited → SMD-1867 candidate | x |\n\n## Integrations\n\n| `acme-capture` | keep + audited → fold-in **SMD-1867** | x |\n"; }],
+  ["a not-a-connector pattern broad enough to cover a classified vendor's own service", (r) => { r.not_connectors.services.push({ pattern: "acme", reason: "too broad" }); }, ["pattern-broad"]],
+  ["a provider as the bare second word after a vendor's name", (r) => {}, ["coverage-unregistered"], (t) => { t.metadataByPath.set("recipes/notion-sync", { requires: { services: ["Notion OpenRouter summaries"] }, tags: ["notes"] }); t.existingDirs.push("recipes/notion-sync"); }],
+  ["a capability with a direction typo beside source capabilities (no spurious connector-direction)", (r) => { r.artifacts[1].capabilities[0].direction = "both"; r.connectors.acme.direction = "source"; }, ["capability-value"]],
+  ["a fold-in row for a directory with no metadata.json marks nothing", (r) => { r.artifacts.shift(); r.connectors.acme.direction = "sink"; }, [], (t) => { t.metadataByPath.delete("integrations/acme-capture"); t.metadataByPath.set("recipes/plain-tool", { requires: { services: ["Supabase", "OpenRouter"] }, tags: ["ops"] }); }],
+  ["a registry path with a space, which the walk admits", (r) => { r.artifacts[1].path = "recipes/acme digest"; }, ["artifact-missing", "coverage-unregistered"]],
   ["a disposition table whose headings moved to `##`, yielding no fold-in", (r) => {}, ["disposition-dark"], (t) => { t.dispositionText = t.dispositionText.replace("### ", "## "); }],
   ["a capability that is a bare string", (r) => { r.artifacts[1].capabilities[0] = "acme"; r.connectors.acme.direction = "source"; }, ["capability-keys", "connectors-field"]],
   ["an artifact listed twice, the duplicate under another vendor (the first entry is judged)", (r) => { r.artifacts.push({ path: "recipes/acme-digest", capabilities: [{ vendor: "beta", family: "message-stream/chat", transport: "push", direction: "sink", cardinality: "many:1", round_trip: "read-only", fetcher: "native-driver" }] }); r.connectors.beta = { direction: "sink" }; }, ["artifact-duplicate"]],
@@ -3597,7 +3605,7 @@ function checkConnectorRegistry() {
   const quiet = PROBE_TREE(); quiet.metadataByPath.set("recipes/uses-a-model", { requires: { services: ["OpenRouter"] }, tags: ["synthesis"] }); quiet.existingDirs.push("recipes/uses-a-model");
   if (registryProblems({ registry: PROBE_REGISTRY(), ...quiet }).length) fail(SELF, "check 19 marks a contribution that names only a model provider as external-touching (its own non-probe)");
   // Two patterns covering one service are both live: the stale rule counts every match, not the first.
-  const overlap = PROBE_REGISTRY(); overlap.not_connectors.services.push({ pattern: "open", reason: "overlaps openrouter on purpose" });
+  const overlap = PROBE_REGISTRY(); overlap.not_connectors.services.push({ pattern: "router", reason: "overlaps openrouter on purpose (live inside the word, covering nothing)" });
   if (registryProblems({ registry: overlap, ...PROBE_TREE() }).length) fail(SELF, "check 19 calls a service pattern stale when a broader pattern also matches its only service (its own non-probe)");
   // A provider qualified after itself is covered: the pattern matches within the first two words.
   const head = PROBE_TREE(); head.existingDirs.push("recipes/uses-a-gateway"); head.metadataByPath.set("recipes/uses-a-gateway", { requires: { services: ["Any OpenRouter-compatible LLM gateway (Ollama, etc.)", "Optional: OpenRouter (Sonar) for live search"] }, tags: ["synthesis"] });

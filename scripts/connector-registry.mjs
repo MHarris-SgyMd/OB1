@@ -73,7 +73,13 @@ export const FOLD_IN_RE = /→ (?:fold-in \*\*SMD-1867\*\*|SMD-1867 candidate)/;
 export const VENDOR_PATTERN = "^[a-z0-9]+(-[a-z0-9]+)*$";
 const VENDOR = new RegExp(VENDOR_PATTERN);
 /** A registry path is a contribution directory: any name the walk admits (contributions.mjs), under one of the categories. */
-const PATH = new RegExp(`^(?:${CATEGORIES.join("|")})/[^/\\s]+$`);
+const PATH = new RegExp(`^(?:${CATEGORIES.join("|")})/[^/]+$`);
+/**
+ * The words that may precede a provider and still leave the string a provider's:
+ * "Any OpenAI-compatible gateway", "Optional: OpenRouter (…)", "Local Ollama".
+ * A vendor's name is not one of them, so "Notion OpenRouter" names a vendor.
+ */
+export const QUALIFIERS = ["any", "an", "a", "the", "optional", "optionally", "local", "self-hosted", "hosted", "your", "own"];
 
 const sameSet = (a, b) => Array.isArray(a) && a.length === b.length && [...a].sort().join("\u0000") === [...b].sort().join("\u0000");
 const nonEmpty = (v) => typeof v === "string" && v.trim().length > 0;
@@ -143,15 +149,19 @@ export function contributionsOnDisk(root) {
  * system's name first.
  */
 export function patternHits(service, patterns) {
-  const starts = [];
-  for (const w of service.matchAll(/\S+/g)) { starts.push(w.index); if (starts.length === 2) break; }
+  const words = [];
+  for (const w of service.matchAll(/\S+/g)) { words.push(w); if (words.length === 2) break; }
+  // A match begins word one; or begins word two when word one is a qualifier, not a name.
+  const heads = new Set();
+  if (words[0]) heads.add(words[0].index);
+  if (words[1] && QUALIFIERS.includes(words[0][0].toLowerCase().replace(/[^a-z-]/g, ""))) heads.add(words[1].index);
   const live = [], covering = [];
   for (const p of patterns) {
     // Every match, not the leftmost: "Non-OpenAI Anthropic" has a hit inside word one and one that begins word two.
     const hits = [...service.matchAll(p.re)];
     if (hits.length === 0) continue;
     live.push(p);
-    if (hits.some((h) => starts.includes(h.index))) covering.push(p);
+    if (hits.some((h) => heads.has(h.index))) covering.push(p);
   }
   return { live, covering };
 }
@@ -220,7 +230,7 @@ export function triggersFor({ metadataByPath, foldIns, patterns, connectorKeys, 
   }
   const dirs = new Set(existingDirs);
   // A fold-in row marks a directory that exists — unless its metadata is there and did not parse (null): no verdict, as above.
-  for (const path of foldIns) if (dirs.has(path) && metadataByPath.get(path) !== null) add(path, `a fold-in SMD-1867 row of ${DISPOSITION_PATH}`);
+  for (const path of foldIns) if (dirs.has(path) && metadataByPath.has(path) && metadataByPath.get(path) !== null) add(path, `a fold-in SMD-1867 row of ${DISPOSITION_PATH}`);
   return { triggers: out, livePatterns };
 }
 
@@ -230,13 +240,15 @@ export function derivedConnectors(registry) {
   for (const a of artifactsOf(registry)) for (const c of listOf(a?.capabilities)) {
     if (!nonEmpty(c?.vendor)) continue;
     const v = out.get(c.vendor) ?? { directions: new Set(), capabilities: [] };
-    if (nonEmpty(c.direction)) v.directions.add(c.direction);
+    if (FACET_SETS.direction.values.includes(c.direction)) v.directions.add(c.direction); // a typo is capability-value's finding, not a third direction
     v.capabilities.push({ path: a.path, ...c });
     out.set(c.vendor, v);
   }
   return out;
 }
 export const connectorDirection = (directions) => (directions.size === 2 ? "bidirectional" : [...directions][0] ?? null);
+/** The vendors an artifact's capabilities name, once each. */
+const registryVendors = (a) => [...new Set(listOf(a?.capabilities).map((c) => c?.vendor).filter(nonEmpty))];
 
 /**
  * What is wrong with a registry, as `{ where, kind, msg }` — nothing when it is
@@ -340,6 +352,12 @@ export function registryProblems({ registry, existingDirs, metadataByPath, dispo
   else {
     foldIns = dispositionPaths(dispositionText);
     if (foldIns.length === 0) push(DISPOSITION_PATH, "disposition-dark", "the table yields no fold-in SMD-1867 row — the category headings (`### \\`recipes/\\``) or the Disposition column moved, and the trigger went dark");
+    else {
+      // A partial darkening — one category's heading or column moved — leaves the others lit; the raw
+      // marker count against the rows read says how many went dark.
+      const raw = (dispositionText.match(new RegExp(FOLD_IN_RE.source, "g")) ?? []).length;
+      if (raw !== foldIns.length) push(DISPOSITION_PATH, "disposition-dark", `${raw} fold-in markers in the text but ${foldIns.length} rows read — a heading, a column or a fence hides the rest`);
+    }
   }
   for (const path of foldIns) if (!dirs.has(path)) push(`${DISPOSITION_PATH} (${path})`, "disposition-stale", "a fold-in SMD-1867 row names a contribution that no longer exists — the row marks nothing; note the removal in the table");
   const { triggers, livePatterns } = triggersFor({ metadataByPath, foldIns, patterns, connectorKeys, existingDirs: [...dirs] });
@@ -369,6 +387,19 @@ export function registryProblems({ registry, existingDirs, metadataByPath, dispo
     else if (readable(path) && declaredConnectors(path).length) push(where, "excuse-declares", `excused as no connector, yet its metadata.json declares connectors [${declaredConnectors(path).join(", ")}] — classify it or drop the declaration`);
   }
   for (const p of patterns) if (!livePatterns.has(p)) push(p.where, "pattern-stale", `pattern ${JSON.stringify(p.pattern)} matches no service in the tree — drop it`);
+  // The positive control against an over-broad pattern ("open", "a"): the services that mark the registered
+  // artifacts are the vendors' own names, and no pattern may cover one of them.
+  for (const [path] of seen) {
+    if (!readable(path)) continue;
+    for (const s of listOf(metadataByPath.get(path)?.requires?.services)) {
+      if (typeof s !== "string") continue;
+      const { covering } = patternHits(s, patterns);
+      for (const p of covering) {
+        const first = (s.match(/\S+/) ?? [""])[0].toLowerCase();
+        if (registryVendors(seen.get(path)).some((v) => first.startsWith(v.split("-")[0]))) push(p.where, "pattern-broad", `pattern ${JSON.stringify(p.pattern)} covers ${JSON.stringify(s)}, a classified vendor's own service on ${path} — too broad to be a not-a-connector`);
+      }
+    }
+  }
 
   return problems;
 }

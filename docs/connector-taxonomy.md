@@ -277,10 +277,12 @@ must-pass probes on every run:
 - **coverage**, the net under the declaration: every contribution whose
   `metadata.json` names a service that is not a model provider, the hosting or
   the brain's own surface (a pattern covers a service string only when its
-  match begins the first or the second word, so "OpenRouter or Anthropic" is a
-  provider and "Notion API (summaries via OpenRouter)", "Notion (OpenRouter)"
-  and "Gmail/OpenAI" are vendors — one external system per entry, its name
-  first), or carries a connector-shaped tag (the list is `TRIGGER_TAGS` in
+  match begins the first word, or the second after a qualifier such as "Any"
+  or "Optional:", so "OpenRouter or Anthropic" and "Any OpenAI-compatible
+  gateway" are providers and "Notion API (summaries via OpenRouter)", "Notion
+  OpenRouter" and "Gmail/OpenAI" are vendors — one external system per entry,
+  its name first; a pattern that covers a classified vendor's own service,
+  such as `open` over "OpenClaw", is refused as too broad), or carries a connector-shaped tag (the list is `TRIGGER_TAGS` in
   `scripts/connector-registry.mjs`, printed at the top of the generated block)
   or a tag naming a declared connector (tags compare lower-cased), or sits in
   a fold-in SMD-1867 row of `docs/vendored-disposition.md` — the marker in the
@@ -289,10 +291,13 @@ must-pass probes on every run:
   and a service pattern matching nothing are refused; a contribution whose
   metadata does not parse gets no verdict here (check 1 names the file); a
   missing table, or one whose headings or columns moved so it yields no
-  fold-in, is a finding rather than a trigger gone dark. **The net's limit:**
+  fold-in, is a finding rather than a trigger gone dark, and so is a table
+  where the markers in the text outnumber the rows read. **The net's limit:**
   a service string that names a provider first and a vendor after it ("OpenAI
-  or Notion") reads as a provider; no positional rule parses prose, which is
-  why the declaration is primary and the net is a net;
+  or Notion") reads as a provider, and a vendor named only under
+  `requires.tools` or `requires.env` is not swept; no positional rule parses
+  prose, which is why the declaration is primary and the net is a net
+  (SMD-1943 owns the structured fix);
 - the tables below equal what the registry renders.
 
 `bun scripts/connector-registry.mjs --check` runs the same rules by hand.
