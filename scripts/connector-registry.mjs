@@ -69,7 +69,9 @@ export const TRIGGER_TAGS = ["import", "digest", "webhook", "messaging", "email"
  * Justification cell ("not an SMD-1867 adapter") are prose and are not read.
  */
 export const FOLD_IN_RE = /→ (?:fold-in \*\*SMD-1867\*\*|SMD-1867 candidate)/;
-const VENDOR = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+/** A vendor key. The same pattern the metadata schema gives `connectors` items — check 18 holds the two equal. */
+export const VENDOR_PATTERN = "^[a-z0-9]+(-[a-z0-9]+)*$";
+const VENDOR = new RegExp(VENDOR_PATTERN);
 /** A registry path is a contribution directory: any name the walk admits (contributions.mjs), under one of the categories. */
 const PATH = new RegExp(`^(?:${CATEGORIES.join("|")})/[^/\\s]+$`);
 
@@ -187,7 +189,7 @@ function servicePatterns(registry, problems) {
  * finding) marks nothing; one whose `services` or `tags` is not a list marks
  * nothing by them rather than throwing.
  */
-export function triggersFor({ metadataByPath, dispositionPaths: disp, patterns, connectorKeys = new Set(), existingDirs = [...metadataByPath.keys()] }) {
+export function triggersFor({ metadataByPath, foldIns, patterns, connectorKeys, existingDirs }) {
   const out = new Map();
   const add = (path, why) => out.set(path, [...(out.get(path) ?? []), why]);
   for (const [path, meta] of metadataByPath) {
@@ -207,7 +209,7 @@ export function triggersFor({ metadataByPath, dispositionPaths: disp, patterns, 
     if (vendors.length) add(path, `tagged with the connector name${vendors.length > 1 ? "s" : ""} ${vendors.join(", ")}`);
   }
   const dirs = new Set(existingDirs);
-  for (const path of disp) if (dirs.has(path)) add(path, `a fold-in SMD-1867 row of ${DISPOSITION_PATH}`);
+  for (const path of foldIns) if (dirs.has(path)) add(path, `a fold-in SMD-1867 row of ${DISPOSITION_PATH}`);
   return out;
 }
 
@@ -236,7 +238,7 @@ export const connectorDirection = (directions) => (directions.size === 2 ? "bidi
  * never both, every registered one marked by something, every excuse and every
  * service pattern live.
  */
-export function registryProblems({ registry, existingDirs, metadataByPath, dispositionText = "" }) {
+export function registryProblems({ registry, existingDirs, metadataByPath, dispositionText }) {
   const problems = [];
   const push = (where, kind, msg) => problems.push({ where, kind, msg });
   const R = REGISTRY_PATH;
@@ -276,24 +278,28 @@ export function registryProblems({ registry, existingDirs, metadataByPath, dispo
     const where = `${R} artifacts["${a?.path}"]`;
     if (!nonEmpty(a?.path) || !PATH.test(a.path)) { push(where, "artifact-path", `path must be <category>/<slug>, got ${JSON.stringify(a?.path)}`); continue; }
     if (seen.has(a.path)) push(where, "artifact-duplicate", "listed twice — one entry per artifact, with every capability under it");
-    seen.set(a.path, a);
+    else seen.set(a.path, a); // the first entry is the one the declaration is judged against
+
     if (!dirs.has(a.path)) push(where, "artifact-missing", "no such contribution directory");
     if (!Array.isArray(a.capabilities) || a.capabilities.length === 0) { push(where, "capability-keys", "an artifact declares at least one capability"); continue; }
     const tuples = new Set();
-    for (const [i, c] of a.capabilities.entries()) {
+    for (const [i, raw] of a.capabilities.entries()) {
       const cw = `${where}.capabilities[${i}]`;
-      const keys = Object.keys(c ?? {});
+      // A capability that is not an object (a bare "slack") is a keys finding, not a throw.
+      const c = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+      if (c !== raw) push(cw, "capability-keys", `a capability is an object, got ${JSON.stringify(raw)}`);
+      const keys = Object.keys(c);
       const missing = CAPABILITY_KEYS.filter((k) => !keys.includes(k));
       const extra = keys.filter((k) => !CAPABILITY_KEYS.includes(k) && k !== "note");
       if (missing.length || extra.length) push(cw, "capability-keys", `a capability names exactly ${CAPABILITY_KEYS.join(", ")} (and a note)${missing.length ? `; missing ${missing.join(", ")}` : ""}${extra.length ? `; extra ${extra.join(", ")}` : ""}`);
-      for (const [facet, pinned] of Object.entries(FACET_SETS)) if (facet in (c ?? {}) && !pinned.values.includes(c[facet])) push(cw, "capability-value", `${facet} ${JSON.stringify(c[facet])} is not one of ${pinned.values.join("|")}`);
-      if ("fetcher" in (c ?? {}) && !FETCHERS.includes(c.fetcher)) push(cw, "capability-value", `fetcher ${JSON.stringify(c.fetcher)} is not one of ${FETCHERS.join("|")}`);
-      if ("vendor" in (c ?? {}) && !VENDOR.test(String(c.vendor))) push(cw, "capability-value", `vendor ${JSON.stringify(c.vendor)} is not a kebab-case slug`);
-      if ("family" in (c ?? {})) {
+      for (const [facet, pinned] of Object.entries(FACET_SETS)) if (facet in c && !pinned.values.includes(c[facet])) push(cw, "capability-value", `${facet} ${JSON.stringify(c[facet])} is not one of ${pinned.values.join("|")}`);
+      if ("fetcher" in c && !FETCHERS.includes(c.fetcher)) push(cw, "capability-value", `fetcher ${JSON.stringify(c.fetcher)} is not one of ${FETCHERS.join("|")}`);
+      if ("vendor" in c && !VENDOR.test(String(c.vendor))) push(cw, "capability-value", `vendor ${JSON.stringify(c.vendor)} is not a kebab-case slug`);
+      if ("family" in c) {
         if (!Object.hasOwn(families, c.family)) push(cw, "capability-family", `family ${JSON.stringify(c.family)} is not declared under families — a new family is declared with its schema first`);
         else if (families[c.family]?.reserved) push(cw, "reserved-used", `family ${JSON.stringify(c.family)} is reserved — dropping \`reserved\` is a spec change`);
       }
-      const t = [c?.vendor, c?.family, c?.transport, c?.direction].join("|");
+      const t = [c.vendor, c.family, c.transport, c.direction].join("|");
       if (tuples.has(t)) push(cw, "capability-duplicate", `repeats vendor/family/transport/direction ${t}`);
       tuples.add(t);
     }
@@ -314,9 +320,17 @@ export function registryProblems({ registry, existingDirs, metadataByPath, dispo
   // ── coverage ──
   const patterns = servicePatterns(registry, problems);
   const connectorKeys = new Set([...Object.keys(declared), ...derived.keys()]);
-  const foldIns = dispositionPaths(dispositionText);
+  // The table is a trigger that can go dark in silence — a heading level or a column moved yields no
+  // rows and every current fold-in is also marked by its declaration — so a missing table and a table
+  // that yields no fold-in are findings, not an empty list.
+  let foldIns = [];
+  if (typeof dispositionText !== "string") push(DISPOSITION_PATH, "disposition-missing", "the disposition table is missing — it is one of the coverage triggers");
+  else {
+    foldIns = dispositionPaths(dispositionText);
+    if (foldIns.length === 0) push(DISPOSITION_PATH, "disposition-dark", "the table yields no fold-in SMD-1867 row — the category headings (`### \\`recipes/\\``) or the Disposition column moved, and the trigger went dark");
+  }
   for (const path of foldIns) if (!dirs.has(path)) push(`${DISPOSITION_PATH} (${path})`, "disposition-stale", "a fold-in SMD-1867 row names a contribution that no longer exists — the row marks nothing; note the removal in the table");
-  const triggers = triggersFor({ metadataByPath, dispositionPaths: foldIns, patterns, connectorKeys, existingDirs: [...dirs] });
+  const triggers = triggersFor({ metadataByPath, foldIns, patterns, connectorKeys, existingDirs: [...dirs] });
   const excused = registry.not_connectors?.artifacts && typeof registry.not_connectors.artifacts === "object" ? registry.not_connectors.artifacts : {};
   const readable = (path) => metadataByPath.has(path) && metadataByPath.get(path) !== null; // absent or unparseable: check 1's finding, no verdict here
   const declaredConnectors = (path) => listOf(metadataByPath.get(path)?.connectors).filter((c) => typeof c === "string").sort();
@@ -430,7 +444,7 @@ function main() {
     registry,
     existingDirs,
     metadataByPath,
-    dispositionText: existsSync(join(root, DISPOSITION_PATH)) ? readFileSync(join(root, DISPOSITION_PATH), "utf8") : "",
+    dispositionText: existsSync(join(root, DISPOSITION_PATH)) ? readFileSync(join(root, DISPOSITION_PATH), "utf8") : null,
   }));
   const specFile = join(root, SPEC_PATH);
   const text = attempt(SPEC_PATH, () => readFileSync(specFile, "utf8"));

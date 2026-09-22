@@ -294,7 +294,12 @@ must-pass probes on every run:
   classified or excused by name — never both, never neither; a classified
   artifact nothing marks is refused (declare its connectors); a stale excuse
   and a service pattern matching nothing are refused; a contribution whose
-  metadata does not parse gets no verdict here (check 1 names the file);
+  metadata does not parse gets no verdict here (check 1 names the file); a
+  missing table, or one whose headings or columns moved so it yields no
+  fold-in, is a finding rather than a trigger gone dark. **The net's limit:**
+  a service string that names a provider first and a vendor after it ("OpenAI
+  or Notion") reads as a provider; no positional rule parses prose, which is
+  why the declaration is primary and the net is a net;
 - the tables below equal what the registry renders.
 
 `bun scripts/connector-registry.mjs --check` runs the same rules by hand.

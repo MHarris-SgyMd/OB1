@@ -161,7 +161,7 @@ import { coreColumnCommentStatement, coreFunctionStatement, LOCAL_PROVIDER_SERVI
 import { CHANGES_DIR, END as INDEX_END, START as INDEX_START, FIRST_FILED, classifyChanges, indexSpan, pad3, readChangeEntries, renderIndex, ticketsOf } from "./fork-index.mjs";
 import { FORK_VERSION, migrationSha, readReleases, semverCompare } from "../db/version.mjs";
 import { fragmentProblems } from "./fragments.mjs";
-import { DISPOSITION_PATH, FACET_SETS, FETCHERS, REGISTRY_PATH, SPEC_PATH, dispositionPaths, readMetadata, readRegistry, registryProblems, renderClassification, tablesSpan } from "./connector-registry.mjs";
+import { DISPOSITION_PATH, FACET_SETS, FETCHERS, REGISTRY_PATH, SPEC_PATH, VENDOR_PATTERN, dispositionPaths, readMetadata, readRegistry, registryProblems, renderClassification, tablesSpan } from "./connector-registry.mjs";
 import { CATEGORIES, contributionDirs } from "./contributions.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -232,8 +232,9 @@ function checkMetadata({ cat, dir, rel }) {
   if ("connectors" in d) {
     if (!Array.isArray(d.connectors)) fail(at, `connectors must be an array of registry keys, got ${JSON.stringify(d.connectors)}`);
     else {
-      for (const c of d.connectors) if (typeof c !== "string" || !/^[a-z0-9]+(-[a-z0-9]+)*$/.test(c)) fail(at, `connectors entry ${JSON.stringify(c)} is not a kebab-case key`);
-      if (new Set(d.connectors).size !== d.connectors.length) fail(at, "connectors lists a key twice");
+      const keyRe = new RegExp(props.connectors.items.pattern); // the schema's pattern, read, not restated
+      for (const c of d.connectors) if (typeof c !== "string" || !keyRe.test(c)) fail(at, `connectors entry ${JSON.stringify(c)} is not a key (${props.connectors.items.pattern})`);
+      if (props.connectors.uniqueItems && new Set(d.connectors).size !== d.connectors.length) fail(at, "connectors lists a key twice");
     }
   }
   for (const k of ["created", "updated"]) {
@@ -3481,6 +3482,10 @@ const REGISTRY_PROBES = [
   ["an artifact marked only by a tag the brain's own vocabulary shares (capture) is not marked", (r) => {}, [], (t) => { t.metadataByPath.set("recipes/own-capture", { requires: { services: ["OpenRouter"] }, tags: ["capture", "export", "sync"] }); t.existingDirs.push("recipes/own-capture"); }],
   ["a family declared as null and used", (r) => { r.families["web-clip"] = null; r.artifacts[0].capabilities[0].family = "web-clip"; }, ["family-schema"]],
   ["a fold-in row naming a contribution that is gone", (r) => {}, ["disposition-stale"], (t) => { t.dispositionText += "| `gone-capture` | keep + audited → fold-in **SMD-1867** | removed since |\n"; }],
+  ["a disposition table that is missing", (r) => {}, ["disposition-missing"], (t) => { t.dispositionText = null; }],
+  ["a disposition table whose headings moved to `##`, yielding no fold-in", (r) => {}, ["disposition-dark"], (t) => { t.dispositionText = t.dispositionText.replace("### ", "## "); }],
+  ["a capability that is a bare string", (r) => { r.artifacts[1].capabilities[0] = "acme"; r.connectors.acme.direction = "source"; }, ["capability-keys", "connectors-field"]],
+  ["an artifact listed twice, the duplicate under another vendor (the first entry is judged)", (r) => { r.artifacts.push({ path: "recipes/acme-digest", capabilities: [{ vendor: "beta", family: "message-stream/chat", transport: "push", direction: "sink", cardinality: "many:1", round_trip: "read-only", fetcher: "native-driver" }] }); r.connectors.beta = { direction: "sink" }; }, ["artifact-duplicate"]],
 ];
 /** [text, want]: what dispositionPaths reads from a table — the fold-in marker in the Disposition cell under a contribution-category heading, and nothing from the Justification cell, past another heading, under `docs/drafts/`, or from a bare mention or a negation. */
 const DISPOSITION_PROBES = [
@@ -3488,6 +3493,8 @@ const DISPOSITION_PROBES = [
   ["## Summary\n\n| `x-tool` | fold-in **SMD-1867** |\n", []],
 ];
 function checkConnectorRegistry() {
+  // One pattern for a vendor key: the schema's for metadata `connectors`, the registry's for its vendors.
+  if (props.connectors?.items?.pattern !== VENDOR_PATTERN) fail(".github/metadata.schema.json", `connectors.items.pattern is ${JSON.stringify(props.connectors?.items?.pattern)} but scripts/connector-registry.mjs's VENDOR_PATTERN is ${JSON.stringify(VENDOR_PATTERN)} — one definition of a vendor key (SMD-1933)`);
   const kindsOf = (registry, tree = PROBE_TREE()) => [...new Set(registryProblems({ registry, ...tree }).map((p) => p.kind))].sort();
   const base = registryProblems({ registry: PROBE_REGISTRY(), ...PROBE_TREE() });
   if (base.length) return fail(SELF, `check 18's baseline registry fails its own rules (${base.map((p) => `${p.kind}: ${p.msg}`).join("; ")}) — the mutants below measure nothing`);
@@ -3534,7 +3541,7 @@ function checkConnectorRegistry() {
   if (!existsSync(join(ROOT, REGISTRY_PATH))) return fail(REGISTRY_PATH, "missing — the connector taxonomy's one source (SMD-1933)");
   let registry;
   try { registry = readRegistry(ROOT); } catch (e) { return fail(REGISTRY_PATH, `does not parse: ${e.message} (SMD-1933)`); }
-  const dispositionText = existsSync(join(ROOT, DISPOSITION_PATH)) ? readFileSync(join(ROOT, DISPOSITION_PATH), "utf8") : "";
+  const dispositionText = existsSync(join(ROOT, DISPOSITION_PATH)) ? readFileSync(join(ROOT, DISPOSITION_PATH), "utf8") : null;
   let problems;
   // readMetadata is the one statement of "absent is not in the map, unparseable is null (no verdict)" — the CLI reads the same; check 1 names the unparseable file.
   try { problems = registryProblems({ registry, existingDirs: dirs.map((d) => d.rel), metadataByPath: readMetadata(dirs), dispositionText }); } catch (e) { return fail(REGISTRY_PATH, `check 18 threw instead of reporting: ${e.message} (SMD-1933)`); }
