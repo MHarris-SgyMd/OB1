@@ -1,5 +1,5 @@
 {
-  "$comment": "The connector taxonomy's one machine-readable source (SMD-1933). docs/connector-taxonomy.md is the spec and carries the tables scripts/connector-registry.mjs renders from this file; check-fork-consistency check 18 validates it and holds the two equal. A new external-touching contribution adds an entry here (or an excuse under not_connectors.artifacts, with its reason) — the check finds it by its metadata.json services and tags and by the SMD-1924 disposition table.",
+  "$comment": "The connector taxonomy's one machine-readable source (SMD-1933). docs/connector-taxonomy.md is the spec and carries the tables scripts/connector-registry.mjs renders from this file; check-fork-consistency check 19 validates it and holds the two equal. A new external-touching contribution adds an entry here (or an excuse under not_connectors.artifacts, with its reason) — the check finds it by its metadata.json services and tags and by the SMD-1924 disposition table.",
   "spec": "docs/connector-taxonomy.md",
   "facets": {
     "direction": {

@@ -121,7 +121,7 @@
  *      froze; and
  *      migration 044's schema_version equals db/version.mjs's FORK_VERSION
  *      (SMD-1804)
- *  18. docs/connector-registry.json — the connector taxonomy's one source — is
+ *  19. docs/connector-registry.json — the connector taxonomy's one source — is
  *      sound and complete: the four closed/near-closed facet sets and the
  *      fetcher set equal the ones scripts/connector-registry.mjs pins (a
  *      different set is a spec change and edits both); every family declares
@@ -3405,7 +3405,7 @@ function checkSchemaVersion() {
 }
 checkSchemaVersion();
 
-// ── 18: the connector registry (SMD-1933) ────────────────────────────────────
+// ── 19: the connector registry (SMD-1933) ────────────────────────────────────
 /**
  * A registry every rule accepts, in memory, against a tree of two contributions
  * and a disposition table naming one of them: the baseline the mutants below
@@ -3497,36 +3497,36 @@ function checkConnectorRegistry() {
   if (props.connectors?.items?.pattern !== VENDOR_PATTERN) fail(".github/metadata.schema.json", `connectors.items.pattern is ${JSON.stringify(props.connectors?.items?.pattern)} but scripts/connector-registry.mjs's VENDOR_PATTERN is ${JSON.stringify(VENDOR_PATTERN)} — one definition of a vendor key (SMD-1933)`);
   const kindsOf = (registry, tree = PROBE_TREE()) => [...new Set(registryProblems({ registry, ...tree }).map((p) => p.kind))].sort();
   const base = registryProblems({ registry: PROBE_REGISTRY(), ...PROBE_TREE() });
-  if (base.length) return fail(SELF, `check 18's baseline registry fails its own rules (${base.map((p) => `${p.kind}: ${p.msg}`).join("; ")}) — the mutants below measure nothing`);
+  if (base.length) return fail(SELF, `check 19's baseline registry fails its own rules (${base.map((p) => `${p.kind}: ${p.msg}`).join("; ")}) — the mutants below measure nothing`);
   // A model-provider service on an unclassified contribution triggers nothing: the pattern covers it.
   const quiet = PROBE_TREE(); quiet.metadataByPath.set("recipes/uses-a-model", { requires: { services: ["OpenRouter"] }, tags: ["synthesis"] }); quiet.existingDirs.push("recipes/uses-a-model");
-  if (registryProblems({ registry: PROBE_REGISTRY(), ...quiet }).length) fail(SELF, "check 18 marks a contribution that names only a model provider as external-touching (its own non-probe)");
+  if (registryProblems({ registry: PROBE_REGISTRY(), ...quiet }).length) fail(SELF, "check 19 marks a contribution that names only a model provider as external-touching (its own non-probe)");
   // Two patterns covering one service are both live: the stale rule counts every match, not the first.
   const overlap = PROBE_REGISTRY(); overlap.not_connectors.services.push({ pattern: "open", reason: "overlaps openrouter on purpose" });
-  if (registryProblems({ registry: overlap, ...PROBE_TREE() }).length) fail(SELF, "check 18 calls a service pattern stale when a broader pattern also matches its only service (its own non-probe)");
+  if (registryProblems({ registry: overlap, ...PROBE_TREE() }).length) fail(SELF, "check 19 calls a service pattern stale when a broader pattern also matches its only service (its own non-probe)");
   // The disposition table alone marks an artifact: a batch importer that names no service.
   const disp = PROBE_TREE(); disp.metadataByPath.set("integrations/acme-capture", { requires: { services: [] }, tags: [] });
-  if (!kindsOf({ ...PROBE_REGISTRY(), artifacts: [PROBE_REGISTRY().artifacts[1]], connectors: { acme: { direction: "sink" } } }, disp).includes("coverage-unregistered")) fail(SELF, "check 18 no longer reads an SMD-1867 row of the disposition table as marking an artifact (its own probe)");
+  if (!kindsOf({ ...PROBE_REGISTRY(), artifacts: [PROBE_REGISTRY().artifacts[1]], connectors: { acme: { direction: "sink" } } }, disp).includes("coverage-unregistered")) fail(SELF, "check 19 no longer reads an SMD-1867 row of the disposition table as marking an artifact (its own probe)");
   // A provider qualified after itself is covered: the pattern matches within the first two words.
   const head = PROBE_TREE(); head.existingDirs.push("recipes/uses-a-gateway"); head.metadataByPath.set("recipes/uses-a-gateway", { requires: { services: ["Any OpenRouter-compatible LLM gateway (Ollama, etc.)", "Optional: OpenRouter (Sonar) for live search"] }, tags: ["synthesis"] });
-  if (registryProblems({ registry: PROBE_REGISTRY(), ...head }).length) fail(SELF, "check 18 marks a service string that names a provider first and qualifies it after (its own non-probe)");
+  if (registryProblems({ registry: PROBE_REGISTRY(), ...head }).length) fail(SELF, "check 19 marks a service string that names a provider first and qualifies it after (its own non-probe)");
   // A pattern that matches only past the head is live (the stale rule), though it covers nothing (the coverage rule).
   const tail = PROBE_REGISTRY(); tail.not_connectors.services.push({ pattern: "sonar", reason: "a model" });
   const tailTree = PROBE_TREE(); tailTree.existingDirs.push("recipes/uses-a-gateway"); tailTree.metadataByPath.set("recipes/uses-a-gateway", { requires: { services: ["Optional: OpenRouter (Sonar) for live search"] }, tags: ["synthesis"] });
-  if (registryProblems({ registry: tail, ...tailTree }).length) fail(SELF, "check 18 calls a pattern stale whose only match lies past a service's first two words (its own non-probe)");
+  if (registryProblems({ registry: tail, ...tailTree }).length) fail(SELF, "check 19 calls a pattern stale whose only match lies past a service's first two words (its own non-probe)");
   // An excuse for a directory that exists without a metadata.json is check 1's finding, not a stale excuse.
   const nometa = PROBE_TREE(); nometa.existingDirs.push("recipes/no-meta"); const nometaReg = PROBE_REGISTRY(); nometaReg.not_connectors.artifacts["recipes/no-meta"] = "waiting on its metadata";
-  if (registryProblems({ registry: nometaReg, ...nometa }).length) fail(SELF, "check 18 calls an excuse stale for a directory that exists without a metadata.json (its own non-probe)");
+  if (registryProblems({ registry: nometaReg, ...nometa }).length) fail(SELF, "check 19 calls an excuse stale for a directory that exists without a metadata.json (its own non-probe)");
   for (const [text, want] of DISPOSITION_PROBES) {
     const got = dispositionPaths(text);
-    if (JSON.stringify(got) !== JSON.stringify(want)) fail(SELF, `check 18's disposition reader returns [${got}], expected [${want}] (its own probe)`);
+    if (JSON.stringify(got) !== JSON.stringify(want)) fail(SELF, `check 19's disposition reader returns [${got}], expected [${want}] (its own probe)`);
   }
   // A registered artifact whose metadata did not parse (null) gets no coverage verdict — check 1 names the file.
   const unread = PROBE_TREE(); unread.metadataByPath.set("recipes/acme-digest", null);
-  if (registryProblems({ registry: PROBE_REGISTRY(), ...unread }).length) fail(SELF, "check 18 passes a coverage verdict on a registered artifact whose metadata.json did not parse (its own non-probe)");
+  if (registryProblems({ registry: PROBE_REGISTRY(), ...unread }).length) fail(SELF, "check 19 passes a coverage verdict on a registered artifact whose metadata.json did not parse (its own non-probe)");
   // A metadata whose tags or services is a string (check 1's finding) marks nothing and throws nothing.
   const odd = PROBE_TREE(); odd.existingDirs.push("recipes/odd-tool"); odd.metadataByPath.set("recipes/odd-tool", { requires: { services: "Acme Chat API" }, tags: "digest" });
-  try { if (registryProblems({ registry: PROBE_REGISTRY(), ...odd }).length) fail(SELF, "check 18 marks a contribution whose tags and services are strings (its own non-probe)"); } catch (e) { fail(SELF, `check 18 throws on a metadata whose tags or services is a string: ${e.message} (its own non-probe)`); }
+  try { if (registryProblems({ registry: PROBE_REGISTRY(), ...odd }).length) fail(SELF, "check 19 marks a contribution whose tags and services are strings (its own non-probe)"); } catch (e) { fail(SELF, `check 19 throws on a metadata whose tags or services is a string: ${e.message} (its own non-probe)`); }
   // A fourth element: null runs the mutant on a null registry; a function reshapes the tree.
   for (const [why, mutate, want, tree] of REGISTRY_PROBES) {
     let r = PROBE_REGISTRY();
@@ -3534,8 +3534,8 @@ function checkConnectorRegistry() {
     const t = PROBE_TREE();
     if (typeof tree === "function") tree(t);
     let got;
-    try { got = kindsOf(r, t); } catch (e) { fail(SELF, `check 18 throws for ${why}: ${e.message} (its own probe)`); continue; }
-    if (JSON.stringify(got) !== JSON.stringify([...want].sort())) fail(SELF, `check 18 reports [${got}] for ${why}, expected [${want}] (its own probe)`);
+    try { got = kindsOf(r, t); } catch (e) { fail(SELF, `check 19 throws for ${why}: ${e.message} (its own probe)`); continue; }
+    if (JSON.stringify(got) !== JSON.stringify([...want].sort())) fail(SELF, `check 19 reports [${got}] for ${why}, expected [${want}] (its own probe)`);
   }
 
   if (!existsSync(join(ROOT, REGISTRY_PATH))) return fail(REGISTRY_PATH, "missing — the connector taxonomy's one source (SMD-1933)");
@@ -3544,7 +3544,7 @@ function checkConnectorRegistry() {
   const dispositionText = existsSync(join(ROOT, DISPOSITION_PATH)) ? readFileSync(join(ROOT, DISPOSITION_PATH), "utf8") : null;
   let problems;
   // readMetadata is the one statement of "absent is not in the map, unparseable is null (no verdict)" — the CLI reads the same; check 1 names the unparseable file.
-  try { problems = registryProblems({ registry, existingDirs: dirs.map((d) => d.rel), metadataByPath: readMetadata(dirs), dispositionText }); } catch (e) { return fail(REGISTRY_PATH, `check 18 threw instead of reporting: ${e.message} (SMD-1933)`); }
+  try { problems = registryProblems({ registry, existingDirs: dirs.map((d) => d.rel), metadataByPath: readMetadata(dirs), dispositionText }); } catch (e) { return fail(REGISTRY_PATH, `check 19 threw instead of reporting: ${e.message} (SMD-1933)`); }
   for (const p of problems) fail(p.where, `${p.msg} (SMD-1933)`);
   if (!existsSync(join(ROOT, SPEC_PATH))) return fail(SPEC_PATH, "missing — the spec that carries the registry's rendered tables (SMD-1933)");
   const span = tablesSpan(readFileSync(join(ROOT, SPEC_PATH), "utf8"));

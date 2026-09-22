@@ -13,7 +13,7 @@ It is a spec with a data file behind it. `docs/connector-registry.json` is the
 one source: the facet sets, every family's schema, every external-touching
 artifact with its capabilities. The tables at the end of this page are rendered
 from it by `scripts/connector-registry.mjs`, and `check-fork-consistency`
-check 18 holds the registry sound, the tables current, and the coverage
+check 19 holds the registry sound, the tables current, and the coverage
 complete (see "Held by"). Edit the JSON; run the script; the prose here is the
 part a human writes.
 
@@ -265,7 +265,7 @@ their home under `primitives/` once SMD-1918 extracts them:
 
 ## Held by
 
-`scripts/check-fork-consistency.mjs` check 18, one pure function
+`scripts/check-fork-consistency.mjs` check 19, one pure function
 (`registryProblems` in `scripts/connector-registry.mjs`) with must-fail and
 must-pass probes on every run:
 
@@ -308,7 +308,7 @@ must-pass probes on every run:
 
 | Verify item (SMD-1933) | Status |
 |---|---|
-| The classification covers every SMD-1924 external-touching artifact, each with the five facets | **Done, mechanical.** The counts are the generated block's first line; check 18's coverage rule sweeps every `metadata.json` and the disposition table, so the claim is re-proven on every run |
+| The classification covers every SMD-1924 external-touching artifact, each with the five facets | **Done, mechanical.** The counts are the generated block's first line; check 19's coverage rule sweeps every `metadata.json` and the disposition table, so the claim is re-proven on every run |
 | A bidirectional vendor is one connector serving capture and digest | **Done.** `telegram`, `gmail`, `discord`, `slack` derive `bidirectional` from their capabilities; the check refuses a declaration the capabilities do not derive |
 | A new vendor in an existing family is added with only a driver/mapping | **Specified** (the envelope, the family schemas, the "Adding" recipe). **Proven when SMD-1867 lands the pipeline** — until then a new recipe still hand-rolls the projection |
 | The same vendor via a low-code node and via a native driver produce identical canonical / text / edges | **Specified** (identity recomputed at the seam, fetcher as provenance). **Proven on one vendor once SMD-1863 picks the tool** |

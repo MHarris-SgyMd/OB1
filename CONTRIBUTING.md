@@ -311,7 +311,7 @@ one external system per entry, its name first (a model provider it also uses is
 its own entry, not a parenthetical); add the artifact and its capabilities to
 the registry; add the vendor under `connectors` with the direction the
 capabilities derive; run `bun scripts/connector-registry.mjs` to refresh the
-spec's tables. `check-fork-consistency` check 18 holds the declaration and the
+spec's tables. `check-fork-consistency` check 19 holds the declaration and the
 registry equal, so the PR fails at one place until it is classified. Under the
 declaration sits a net for a contribution that declared nothing — its services
 (when the vendor is named first), its tags and the disposition table — which is

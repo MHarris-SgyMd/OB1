@@ -25,7 +25,7 @@ Every external-touching artifact here — the SMD-1867 fold-in rows below, and t
 sinks (the digests and briefings), which the sweep finds by their `metadata.json`
 services and tags rather than by this table — is classified by the five-facet
 connector taxonomy in [`docs/connector-taxonomy.md`](connector-taxonomy.md)
-(SMD-1933); `check-fork-consistency` check 18 reads the fold-in rows from this
+(SMD-1933); `check-fork-consistency` check 19 reads the fold-in rows from this
 table as one of its coverage triggers.
 
 Some capture-source integrations are additionally **folded into SMD-1867** (the

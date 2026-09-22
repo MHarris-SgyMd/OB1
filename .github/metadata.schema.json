@@ -125,7 +125,7 @@
         "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"
       },
       "uniqueItems": true,
-      "description": "FORK (siggymd, SMD-1933): the external systems this contribution reads from or delivers to, as connector keys of docs/connector-registry.json (e.g. [\"gmail\"], [\"telegram\", \"google-calendar\"]). A contribution that names one is classified in the registry, and check-fork-consistency check 18 holds the two equal. Omit for a contribution that touches no external system."
+      "description": "FORK (siggymd, SMD-1933): the external systems this contribution reads from or delivers to, as connector keys of docs/connector-registry.json (e.g. [\"gmail\"], [\"telegram\", \"google-calendar\"]). A contribution that names one is classified in the registry, and check-fork-consistency check 19 holds the two equal. Omit for a contribution that touches no external system."
     },
     "learning_order": {
       "type": "integer",

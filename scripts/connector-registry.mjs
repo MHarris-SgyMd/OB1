@@ -15,7 +15,7 @@
  *   bun scripts/connector-registry.mjs --check    # print the problems, exit 1 on any
  *   node scripts/connector-registry.mjs           # the same; plain fs, no Bun API
  *
- * check-fork-consistency.mjs (check 18) runs registryProblems() over the real
+ * check-fork-consistency.mjs (check 19) runs registryProblems() over the real
  * tree and holds the rendered block equal to the committed one. The coverage
  * rule is the one that bites: an artifact whose metadata.json names a service
  * that is not a model provider, the hosting or the brain's own surface, or
@@ -38,7 +38,7 @@ export const END = "<!-- connector-tables:end -->";
 /**
  * The closed and near-closed sets, pinned here as well as in the registry: a
  * value off one of these is a spec change (the ticket's facet-stability rule),
- * so it edits this file and the registry together, and check 18 refuses a
+ * so it edits this file and the registry together, and check 19 refuses a
  * registry that redefines a set on its own.
  */
 export const FACET_SETS = {
@@ -69,7 +69,7 @@ export const TRIGGER_TAGS = ["import", "digest", "webhook", "messaging", "email"
  * Justification cell ("not an SMD-1867 adapter") are prose and are not read.
  */
 export const FOLD_IN_RE = /→ (?:fold-in \*\*SMD-1867\*\*|SMD-1867 candidate)/;
-/** A vendor key. The same pattern the metadata schema gives `connectors` items — check 18 holds the two equal. */
+/** A vendor key. The same pattern the metadata schema gives `connectors` items — check 19 holds the two equal. */
 export const VENDOR_PATTERN = "^[a-z0-9]+(-[a-z0-9]+)*$";
 const VENDOR = new RegExp(VENDOR_PATTERN);
 /** A registry path is a contribution directory: any name the walk admits (contributions.mjs), under one of the categories. */
@@ -122,7 +122,7 @@ export function readMetadata(dirs) {
   return out;
 }
 
-/** The contributions on disk — one walk (scripts/contributions.mjs) for the CLI and check 18. */
+/** The contributions on disk — one walk (scripts/contributions.mjs) for the CLI and check 19. */
 export function contributionsOnDisk(root) {
   const dirs = contributionDirs(root);
   return { existingDirs: dirs.map((d) => d.rel), metadataByPath: readMetadata(dirs) };
