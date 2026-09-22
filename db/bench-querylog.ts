@@ -11,14 +11,14 @@
  *      effort, swallowed, but on the latency path). Fire-and-forget would shave it
  *      off, but SMD-1806 replays this log to build the canary, where a dropped row
  *      is a lost replay — so the await stays and the question is only how much it
- *      costs. This measures that INSERT's latency, and how much migration 046's
+ *      costs. This measures that INSERT's latency, and how much migration 047's
  *      new btree adds to it (the "fourth index write cost" the ticket weighs, and
  *      the number a future BRIN follow-up would try to erase).
  *
  *   2. prune could not seek. prune_query_log deletes WHERE logged_at < cutoff with
  *      no agent_id predicate; 034's only logged_at index is the composite
  *      (agent_id, logged_at), whose leading column is agent_id, so the delete fell
- *      to a sequential scan. Migration 046 adds a plain btree on logged_at. This
+ *      to a sequential scan. Migration 047 adds a plain btree on logged_at. This
  *      runs the prune DELETE under EXPLAIN (ANALYZE) with and without that index
  *      and shows the plan flip from Seq Scan to an index range scan.
  *
@@ -26,7 +26,7 @@
  *   OB1_BENCH_SCALES=1000000 ./with-postgres.sh bun bench-querylog.ts
  *
  * Every arm starts from a fresh schema (resetSchema applies every migration,
- * including 046, so the index is built by the schema, not bolted on), and the
+ * including 047, so the index is built by the schema, not bolted on), and the
  * "without" arm drops just query_log_logged_at_idx — so the two arms differ by
  * that one index and nothing else. The prune measurements roll their DELETE back,
  * so both arms see the same rows.
@@ -91,7 +91,7 @@ async function load(): Promise<SQL> {
   return c;
 }
 
-/** Drop 046's index and prove it is gone — "with" silently staying "with" would read as a clean result. */
+/** Drop 047's index and prove it is gone — "with" silently staying "with" would read as a clean result. */
 async function dropIndex(c: SQL): Promise<void> {
   await c`DROP INDEX IF EXISTS query_log_logged_at_idx`;
   const [n] = await c`SELECT count(*)::int AS c FROM pg_indexes WHERE indexname = ${INDEX}`;
@@ -329,7 +329,7 @@ console.log();
 
 // ── Report ───────────────────────────────────────────────────────────────────
 console.log("\n### Prune: does the DELETE seek logged_at? (median of " + REPEATS + ", EXPLAIN ANALYZE, rolled back)\n");
-console.log("| rows | deleted | without index | plan | with 046 | plan | change |");
+console.log("| rows | deleted | without index | plan | with 047 | plan | change |");
 console.log("| ---: | ---: | ---: | --- | ---: | --- | ---: |");
 for (const r of pruneRows) {
   console.log(
@@ -342,7 +342,7 @@ for (const r of pruneRows) {
 // for the trigram index), and a hard-coded "it flips" would contradict the table above.
 const flipped = pruneRows.filter((r) => r.without.plan === "Seq Scan" && r.withIdx.plan !== "Seq Scan");
 if (flipped.length === pruneRows.length) {
-  console.log("\nAt every scale the delete flips from a Seq Scan of the whole log (no index) to an index range scan (046).");
+  console.log("\nAt every scale the delete flips from a Seq Scan of the whole log (no index) to an index range scan (047).");
 } else if (flipped.length > 0) {
   console.log(`\nThe delete flips from a Seq Scan to an index range scan at ${flipped.map((r) => r.scale.toLocaleString()).join(", ")} rows; below that the table is small enough that Postgres scans regardless (the crossover).`);
 } else {
@@ -351,11 +351,11 @@ if (flipped.length === pruneRows.length) {
 
 console.log("\n### Write cost of the index, and the awaited hot-path latency\n");
 console.log(`A batch of ${WRITE_BATCH.toLocaleString()} rows in one INSERT into two freshly loaded tables that differ only`);
-console.log(`by 046's index — the round trip is amortized, so the delta is the btree's per-row`);
+console.log(`by 047's index — the round trip is amortized, so the delta is the btree's per-row`);
 console.log(`maintenance (what a BRIN follow-up would try to erase). The awaited number is a single`);
 console.log(`INSERT per round trip, index present: what OB1_QUERY_LOG=on makes a search or fetch wait`);
 console.log(`for before it returns, and the cost the "keep the await" decision accepts.\n`);
-console.log("| batch without index | batch with 046 | index adds per row | awaited single INSERT |");
+console.log("| batch without index | batch with 047 | index adds per row | awaited single INSERT |");
 console.log("| ---: | ---: | ---: | ---: |");
 console.log(
   `| ${fmtMs(write.withoutMs)} | ${fmtMs(write.withMs)} | ` +

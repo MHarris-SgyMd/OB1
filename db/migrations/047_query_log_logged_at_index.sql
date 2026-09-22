@@ -1,5 +1,5 @@
 -- =============================================================================
--- Migration 046: a seekable prune index on query_log.logged_at (SMD-1492)
+-- Migration 047: a seekable prune index on query_log.logged_at (SMD-1492)
 -- =============================================================================
 --
 -- WHY
@@ -37,7 +37,7 @@
 --     deploy-time stall of the awaited hot-path log writes. It is bounded in
 --     practice: a fresh brain builds it on an empty table, and SMD-1806's canary —
 --     the tier that carries the log at volume — is rebuilt from stable's dump on
---     every merge, so 046 runs against the refreshed copy as it is loaded, not
+--     every merge, so 047 runs against the refreshed copy as it is loaded, not
 --     against the live stable writer. Migrating an existing large log in place is
 --     the case to run in a quiet window (SMD-1794's maintenance window, or by hand).
 --   * COMMENT ON INDEX records what it is for.
@@ -58,7 +58,7 @@ DO $qc$
 BEGIN
   IF to_regclass('query_log') IS NULL THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'migration 046 needs 034 (query_log); this schema lacks it',
+      MESSAGE = 'migration 047 needs 034 (query_log); this schema lacks it',
       -- ASCII only: Bun's client hands a HINT holding a non-ASCII character back mis-decoded (030's fourth review pass).
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
       ERRCODE = 'invalid_schema_definition';

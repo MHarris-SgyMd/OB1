@@ -63,6 +63,7 @@ import {
   grantedViews,
   stripSqlComments,
   supabaseIsmsIn,
+  UPDATE_THOUGHT_SIGNATURE_9,
 } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -2492,7 +2493,7 @@ console.log("\n[22] Migration 021: the vector's model rides with the vector");
   // One function, eight parameters, 018's body by name; 010's trigger untouched.
   assert((await functionsNamed("update_thought")) === 1, "exactly one update_thought: 021 replaced the signature rather than adding an overload, and 032 again");
   const proc = (await db.query<{ n: number; src: string }>(`SELECT pronargs AS n, prosrc AS src FROM pg_proc WHERE oid = $1::regprocedure`, [UT])).rows[0];
-  assert(Number(proc?.n) === 9, `…of nine parameters since 032 (${proc?.n})`);
+  assert(Number(proc?.n) === 10, `…of ten parameters since 046 (nine since 032) (${proc?.n})`);
   for (const [re, what] of [
     [/ob1:unchanged-edit-not-duplicate/, "018's sentinel"], [/ob1\.actor/, "008's actor"], [/FROM thoughts WHERE id = p_id FOR NO KEY UPDATE/, "018's row lock, FOR NO KEY UPDATE since 032"],
     [/pg_advisory_xact_lock/, "018's advisory lock"], [/content_fingerprint_of\(/, "016's fingerprint function"], [/elem->>'context'/, "013's context"],
@@ -2503,8 +2504,8 @@ console.log("\n[22] Migration 021: the vector's model rides with the vector");
   const up = (await db.query<{ src: string }>(`SELECT prosrc AS src FROM pg_proc WHERE oid = 'upsert_thought(text, jsonb, vector)'::regprocedure`)).rows[0].src;
   assert(/jsonb_typeof\(p_payload\) <> 'object'/.test(up) && /set_config\('ob1\.actor'/.test(up) && /p_payload->>'embedding_model'/.test(up), "the 3-argument upsert_thought carries 005's guard and 008's actor beside the label");
   assert((await functionsNamed("upsert_thought")) === 3, "still exactly three upsert_thought overloads");
-  assert(lastDefinerOf("update_thought").startsWith("033") && lastDefinerOf("upsert_thought").startsWith("035") && lastDefinerOf("thoughts_write_audit").startsWith("025"),
-         `033 is the last definer of update_thought (it carries 032's body — 021's and the provenance envelope — with the fingerprint lock before the row), 035 of upsert_thought (its 3-argument body carries 022's chunk rule, 021's label and 025's envelope, takes the fingerprint lock and writes provenance on a first capture only), 025 of the audit trigger (it carries 010's body and diffs provenance) (${lastDefinerOf("update_thought")}, ${lastDefinerOf("upsert_thought")}, ${lastDefinerOf("thoughts_write_audit")})`);
+  assert(lastDefinerOf("update_thought").startsWith("046") && lastDefinerOf("upsert_thought").startsWith("046") && lastDefinerOf("thoughts_write_audit").startsWith("046"),
+         `046 is the last definer of update_thought (033's body — 032's, 021's, the provenance envelope, the fingerprint lock before the row — under a 10-argument signature with the write event), of upsert_thought (035's bodies — 022's chunk rule, 021's label, 025's envelope, the fingerprint lock, provenance on a first capture only — with the event set beside the actor) and of the audit trigger (025's body — 010's id, the provenance diff — stamping the event and the key-derived columns) (${lastDefinerOf("update_thought")}, ${lastDefinerOf("upsert_thought")}, ${lastDefinerOf("thoughts_write_audit")})`);
 
   // The trap: 018 re-applied by hand puts the 7-argument form back BESIDE the
   // current one, and a 7-argument call is ambiguous. The last definer (032)
@@ -2632,7 +2633,7 @@ console.log("\n[23] Migration 022: a re-capture's windows stay while the label v
   assert(!/ob1:vector-replaces-chunks/.test(up4) && /elem->>'context'/.test(up4) && /DELETE FROM thought_chunks WHERE thought_id = v_id/.test(up4),
          "the 4-argument form is 013's, untouched: it delegates here and replaces the windows with the caller's");
   assert((await functionsNamed("upsert_thought")) === 3, "still exactly three upsert_thought overloads");
-  assert(lastDefinerOf("upsert_thought").startsWith("035"), `035 is the last definer of upsert_thought (it carries 033's body — 022's rule, 025's envelope, the fingerprint lock — and writes provenance on a first capture only) (${lastDefinerOf("upsert_thought")})`);
+  assert(lastDefinerOf("upsert_thought").startsWith("046"), `046 is the last definer of upsert_thought (it carries 035's bodies — 033's, 022's rule, 025's envelope, the fingerprint lock, provenance on a first capture only — with the write event set beside the actor) (${lastDefinerOf("upsert_thought")})`);
 
   // The trap: 021 re-applied by hand puts 021's 3-argument body back, and the
   // defect with it — which is what preflight's `atomic capture` reads the
@@ -3390,8 +3391,8 @@ console.log("\n[31] A vendored schema applied to a migrated brain replaces no fu
   // a migration went away.
   assert(owned.size >= 37 && [...owned.keys()].every((n) => /^[a-z][a-z0-9_]*$/.test(n)) && !owned.has("and") && !owned.has("keeps"),
     `the owned set is read from the migrations: ${owned.size} functions (37 at 032, never fewer), names only — no word from a header comment quoting a statement`);
-  assert(owned.get("upsert_thought") === "035_recapture_writes_no_provenance.sql" && owned.get("trace_provenance") === "026_trace_provenance_bounded.sql" && owned.get("release_thought") === "015_thought_work_claims.sql",
-    "…and the last definers preflight's remedies name: upsert_thought 035, trace_provenance 026, release_thought 015");
+  assert(owned.get("upsert_thought") === "046_thought_audit_event_shape.sql" && owned.get("trace_provenance") === "026_trace_provenance_bounded.sql" && owned.get("release_thought") === "015_thought_work_claims.sql",
+    "…and the last definers preflight's remedies name: upsert_thought 046, trace_provenance 026, release_thought 015");
   const ownedCols = ownedColumnCommentsIn(files.map((f) => [f, readFileSync(join(MIGRATIONS, f), "utf8")] as const));
   assert(ownedCols.get("embedding_model") === "021_embedding_model_per_row.sql" && ownedCols.get("derived_from") === "025_thought_provenance.sql" && ownedCols.get("supersedes") === "025_thought_provenance.sql" && ownedCols.size >= 3,
     `the thoughts columns whose comments a migration writes are read the same way (${ownedCols.size}): embedding_model 021, derived_from and supersedes 025`);
@@ -3506,13 +3507,14 @@ console.log("\n[32] Migration 032: update_thought takes provenance — set, clea
   const srcOf = async (sig: string) => String((await db.query<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = $1::regprocedure`, [sig])).rows[0].s);
   const exists = async (sig: string) => (await db.query<{ e: boolean }>(`SELECT to_regprocedure($1) IS NOT NULL AS e`, [sig])).rows[0].e;
 
-  // The shape: one function of nine parameters, neither older form beside it,
-  // 032 the last definer of the three names it touches.
-  assert((await functionsNamed("update_thought")) === 1 && Number((await db.query<{ n: number }>(`SELECT pronargs AS n FROM pg_proc WHERE oid = $1::regprocedure`, [UT])).rows[0].n) === 9,
-    "one update_thought, of nine parameters");
+  // The shape: one function of ten parameters (nine until 046), no older form
+  // beside it, 046 the last definer of update_thought and 032/036 of the two
+  // names this section otherwise touches.
+  assert((await functionsNamed("update_thought")) === 1 && Number((await db.query<{ n: number }>(`SELECT pronargs AS n FROM pg_proc WHERE oid = $1::regprocedure`, [UT])).rows[0].n) === 10,
+    "one update_thought, of ten parameters");
   assert(!(await exists(UT_8)) && !(await exists(UT_7)), "…neither the 8- nor the 7-argument form beside it");
-  assert(lastDefinerOf("update_thought").startsWith("033") && lastDefinerOf("review_supersession_proposal").startsWith("036") && lastDefinerOf("validate_derived_from").startsWith("032"),
-    `033 is the last definer of update_thought, 036 of review_supersession_proposal (its lock moved before the proposal row, SMD-1462 [36]), 032 of validate_derived_from (${lastDefinerOf("update_thought")}, ${lastDefinerOf("review_supersession_proposal")})`);
+  assert(lastDefinerOf("update_thought").startsWith("046") && lastDefinerOf("review_supersession_proposal").startsWith("036") && lastDefinerOf("validate_derived_from").startsWith("032"),
+    `046 is the last definer of update_thought (033's body, carried), 036 of review_supersession_proposal (its lock moved before the proposal row, SMD-1462 [36]), 032 of validate_derived_from (${lastDefinerOf("update_thought")}, ${lastDefinerOf("review_supersession_proposal")})`);
   const src = await srcOf(UT);
   for (const [re, what] of [
     [/ob1:unchanged-edit-not-duplicate/, "018's sentinel"], [/ob1\.actor/, "008's actor"], [/FROM thoughts WHERE id = p_id FOR NO KEY UPDATE/, "018's row lock, FOR NO KEY UPDATE since 032"],
@@ -3712,8 +3714,8 @@ console.log("\n[33] Migration 033: both capture forms take the fingerprint lock,
   // of update_thought and 035 of upsert_thought (035 carries 033's bodies
   // with the fill and the supersession lock gone — [35]), the lock spelled
   // once.
-  assert((await functionsNamed("upsert_thought")) === 3 && (await functionsNamed("update_thought")) === 1 && lastDefinerOf("upsert_thought").startsWith("035") && lastDefinerOf("update_thought").startsWith("033"),
-    `three upsert_thought overloads and one update_thought, 033 the last definer of update_thought and 035 of upsert_thought (${lastDefinerOf("upsert_thought")}, ${lastDefinerOf("update_thought")})`);
+  assert((await functionsNamed("upsert_thought")) === 3 && (await functionsNamed("update_thought")) === 1 && lastDefinerOf("upsert_thought").startsWith("046") && lastDefinerOf("update_thought").startsWith("046"),
+    `three upsert_thought overloads and one update_thought, 046 the last definer of both (it carries 033's update_thought and 035's upsert_thought bodies — [35] — with the write event) (${lastDefinerOf("upsert_thought")}, ${lastDefinerOf("update_thought")})`);
   assert(two.includes(LOCK) && three.includes(LOCK) && edit.includes(LOCK), "the 2- and 3-argument bodies and update_thought spell the fingerprint lock identically — the same key is the same lock");
   // update_thought's order since 033: the fingerprint lock BEFORE the row
   // read, whenever content arrives — one order for every writer, so the
@@ -3789,20 +3791,24 @@ console.log("\n[33] Migration 033: both capture forms take the fingerprint lock,
   await restoreShipped("upsert_thought", "trace_provenance");
   assert(/ob1:capture-takes-fingerprint-lock/.test(await srcOf(TWO)) && /ob1:capture-takes-fingerprint-lock/.test(await srcOf(THREE)) && (await functionsNamed("upsert_thought")) === 3, "035 re-applied: both bodies locked again, three overloads");
   assert(/ob1:provenance-walk-bounded/.test(await srcOf("trace_provenance(uuid, int, int)")), "…and 026 re-applied: the bounded walk's sentinel is back");
-  // 032 re-applied by hand over 033 puts 032's update_thought back — the
-  // row → fingerprint order, no sentinel to say so (the header states it);
-  // 033 re-applied restores the order.
+  // 032 re-applied by hand puts 032's update_thought back — the row →
+  // fingerprint order, no sentinel to say so (the header states it). On a
+  // brain before 046: its 10-argument form dropped first, or 032's 9-argument
+  // one lands BESIDE it and every 9-argument call is "function is not unique"
+  // ([22]'s trap, one form later; 046's DROP chain is what clears it). The
+  // last definer re-applied restores the order — 046, carrying 033's body.
+  await db.exec(`DROP FUNCTION ${UPDATE_THOUGHT_SIGNATURE}`);
   await reapply("032");
-  const edit032 = await srcOf(UPDATE_THOUGHT_SIGNATURE);
-  assert(edit032.indexOf("FROM thoughts WHERE id = p_id FOR NO KEY UPDATE") < edit032.indexOf(LOCK) && (await functionsNamed("update_thought")) === 1, "032 re-applied over 033 puts the row-then-fingerprint order back, one function still");
+  const edit032 = await srcOf(UPDATE_THOUGHT_SIGNATURE_9);
+  assert(edit032.indexOf("FROM thoughts WHERE id = p_id FOR NO KEY UPDATE") < edit032.indexOf(LOCK) && (await functionsNamed("update_thought")) === 1, "032 re-applied on a brain before 046 puts the row-then-fingerprint order back, one function (its 9-argument form)");
   // reapply("032") reverts update_thought AND review_supersession_proposal to
-  // 032's bodies; restoring update_thought re-applies 033, which also rewrites
-  // both capture forms as 033's. So restore all three shipped bodies:
-  // update_thought (033), upsert_thought (035, recapture), and
+  // 032's bodies; restoring update_thought re-applies 046, which also rewrites
+  // both capture forms (035's bodies with the event). So restore all three
+  // shipped bodies: update_thought and upsert_thought (046) and
   // review_supersession_proposal (036, its lock moved before the proposal row).
   await restoreShipped("update_thought", "upsert_thought", "review_supersession_proposal");
   const edit033 = await srcOf(UPDATE_THOUGHT_SIGNATURE);
-  assert(edit033.indexOf(LOCK) < edit033.indexOf("FROM thoughts WHERE id = p_id FOR NO KEY UPDATE") && (await functionsNamed("update_thought")) === 1, "…and 033 re-applied puts the fingerprint lock before the row again");
+  assert(edit033.indexOf(LOCK) < edit033.indexOf("FROM thoughts WHERE id = p_id FOR NO KEY UPDATE") && (await functionsNamed("update_thought")) === 1, "…and the last definer re-applied (046, 033's body) puts the fingerprint lock before the row again and drops 032's form");
   await db.exec(`DELETE FROM thoughts`);
 }
 
@@ -3829,7 +3835,7 @@ console.log("\n[34] Migration 034: query_log shape + CHECKs, the export join, an
   assert(JSON.stringify(cols) === JSON.stringify(expected), `query_log has exactly its columns in order (${cols.join(", ")})`);
 
   // The three indexes: 034's btree on (agent_id, logged_at) and partial GIN on
-  // result_ids for the export join, plus 046's (SMD-1492) plain btree on
+  // result_ids for the export join, plus 047's (SMD-1492) plain btree on
   // logged_at so prune's bare time-range DELETE range-scans instead of
   // sequentially scanning (the composite's leading column is agent_id, so it
   // cannot serve a logged_at-only range). The planner won't pick the logged_at
@@ -3839,7 +3845,7 @@ console.log("\n[34] Migration 034: query_log shape + CHECKs, the export join, an
     `SELECT indexname, indexdef FROM pg_indexes WHERE tablename = 'query_log'`)).rows;
   assert(idx.some((r) => /USING btree \(agent_id, logged_at\)/.test(r.indexdef)), "(agent_id, logged_at) btree exists for the join's agent-and-time narrowing");
   assert(idx.some((r) => /USING gin \(result_ids\)/.test(r.indexdef) && /WHERE \(kind = 'search'::text\)/.test(r.indexdef)), "a partial GIN on result_ids (search rows) answers the @> containment lookup");
-  assert(idx.some((r) => /USING btree \(logged_at\)/.test(r.indexdef)), "a plain btree on (logged_at) exists so prune's time-range DELETE range-scans (046, SMD-1492)");
+  assert(idx.some((r) => /USING btree \(logged_at\)/.test(r.indexdef)), "a plain btree on (logged_at) exists so prune's time-range DELETE range-scans (047, SMD-1492)");
 
   // The CHECKs: a search row must carry a query, an action row a target.
   let refusedSearch = false;
@@ -4027,10 +4033,10 @@ console.log("\n[35] Migration 035: a re-capture writes no provenance — the env
     (await db.query<{ r: { ok: boolean; error?: string } }>(`SELECT update_thought($1::uuid, NULL, NULL, NULL, NULL, NULL, NULL, NULL, $2::jsonb) AS r`, [id, JSON.stringify(envelope)])).rows[0].r;
   const twoRowLoops = async () => Number((await db.query<{ c: number }>(`SELECT count(*)::int AS c FROM thoughts a JOIN thoughts b ON b.id = a.supersedes AND b.supersedes = a.id AND a.id < b.id`)).rows[0].c);
 
-  // The shape: 035 the last definer of upsert_thought, 033 still of
-  // update_thought, which this file does not touch.
-  assert(lastDefinerOf("upsert_thought").startsWith("035") && lastDefinerOf("update_thought").startsWith("033") && (await functionsNamed("upsert_thought")) === 3,
-    `035 is the last definer of upsert_thought and 033 of update_thought, three overloads (${lastDefinerOf("upsert_thought")}, ${lastDefinerOf("update_thought")})`);
+  // The shape: 046 the last definer of upsert_thought (035's bodies, with the
+  // write event) and of update_thought (033's body, a tenth parameter).
+  assert(lastDefinerOf("upsert_thought").startsWith("046") && lastDefinerOf("update_thought").startsWith("046") && (await functionsNamed("upsert_thought")) === 3,
+    `046 is the last definer of upsert_thought and of update_thought, three overloads (${lastDefinerOf("upsert_thought")}, ${lastDefinerOf("update_thought")})`);
   // The 3-argument body, read from pg_proc: 035's sentinel beside 022's and
   // 033's; no supersession lock; an ON CONFLICT clause that sets neither
   // column while the INSERT still lists both; the row read for every
@@ -4126,7 +4132,11 @@ console.log("\n[35] Migration 035: a re-capture writes no provenance — the env
 
   // The trap: 033 re-applied by hand puts the fill and the supersession lock
   // back (its file defines both forms and update_thought) — 035's sentinel is
-  // what says so; 035 re-applied restores.
+  // what says so; the last definer (046) re-applied restores. On a brain
+  // before 046 — its 10-argument update_thought dropped first, or 033's
+  // 9-argument form lands beside it and the 9-argument edit below is
+  // "function is not unique" ([33]'s note).
+  await db.exec(`DROP FUNCTION ${UPDATE_THOUGHT_SIGNATURE}`);
   await reapply("033");
   const three033 = await srcOf(THREE);
   assert(!/ob1:re-capture-writes-no-provenance/.test(three033) && /supersession-review/.test(three033) && /COALESCE\(thoughts\.supersedes/.test(three033) && /ob1:capture-takes-fingerprint-lock/.test(three033), "033 re-applied over 035 puts the fill and the supersession lock back, the lock sentinel kept");
@@ -4136,8 +4146,8 @@ console.log("\n[35] Migration 035: a re-capture writes no provenance — the env
   assert(!/add-if-empty/.test(await commentOf(REVIEW)), "(033 re-applied leaves review_supersession_proposal's COMMENT as 035 issued it — only 032's own file puts the aside back, as [33]'s trap did before 035 followed)");
   await restoreShipped("upsert_thought");
   const restored = await srcOf(THREE);
-  assert(/ob1:re-capture-writes-no-provenance/.test(restored) && !/supersession-review/.test(restored) && !/COALESCE\(thoughts\.supersedes/.test(restored) && (await functionsNamed("upsert_thought")) === 3 && lastDefinerOf("update_thought").startsWith("033"),
-    "035 re-applied: the fill and the lock gone again, three overloads, update_thought still 033's");
+  assert(/ob1:re-capture-writes-no-provenance/.test(restored) && !/supersession-review/.test(restored) && !/COALESCE\(thoughts\.supersedes/.test(restored) && (await functionsNamed("upsert_thought")) === 3 && (await functionsNamed("update_thought")) === 1 && /ob1\.event/.test(await srcOf(UPDATE_THOUGHT_SIGNATURE)),
+    "046 re-applied: the fill and the lock gone again, three overloads, one update_thought — 046's 10-argument form, 033's dropped");
   assert(!/add-if-empty/.test(await commentOf(REVIEW)), "…and review_supersession_proposal's COMMENT re-issued without the aside");
   await db.exec(`DELETE FROM thoughts`);
 }
@@ -5052,6 +5062,428 @@ console.log("\n[42] Migration 043: query_log.tool's two shapes, and the table's 
     `INSERT INTO query_log (kind, tool, target_id) VALUES ('action', 'capture_thought/derived_from', $1) RETURNING id, tool`, [T])).rows[0];
   assert(citePointerOf(cite.tool) === "derived_from", "a cite row inserted under the documented shape reads back as a cite with its pointer");
   await db.query(`DELETE FROM query_log WHERE id = $1`, [cite.id]);
+}
+
+console.log("\n[43] Migration 046: the event shape at the write boundary — who from the key, the door, the ceiling on the content, stance, cites, the window; immutable by rule (SMD-1730)");
+{
+  const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
+  const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
+  const refused = async (sql: string, params: unknown[] = []) => { try { await db.query(sql, params); return ""; } catch (e) { return (e as Error).message; } };
+  type Ev = { actor_name: string | null; canonical_agent_id: string | null; actor_kind: string | null; trust: string | null; origin: string | null; source: string | null;
+              stance: string | null; cites: string[] | null; valid_from: string | null; valid_until: string | null; backfilled_at: string | null; actor_context: Record<string, unknown> | null };
+  const EV = "actor_name, canonical_agent_id, actor_kind, trust, origin, source, stance, cites, valid_from::text AS valid_from, valid_until::text AS valid_until, backfilled_at::text AS backfilled_at, actor_context";
+  const rowsOf = async (id: string, action: string) => q<Ev>(`SELECT ${EV} FROM thought_audit WHERE thought_id = $1::uuid AND action = $2 ORDER BY created_at`, [id, action]);
+  const last = async (id: string, action: string) => { const r = await rowsOf(id, action); return r[r.length - 1]; };
+  const cap = async (content: string, envelope: Record<string, unknown>, at = 1) =>
+    (await one<{ r: { id: string; existed: boolean } }>(`SELECT upsert_thought($1::text, $2::jsonb, $3::vector) AS r`, [content, JSON.stringify(envelope), unit(at)])).r;
+  const edit = async (id: string, content: string | null, actor: Record<string, unknown> | null, event: Record<string, unknown> | null) =>
+    (await one<{ r: { ok: boolean; error?: string } }>(
+      `SELECT update_thought($1::uuid, $2::text, NULL, NULL, NULL, NULL, $3::jsonb, NULL, NULL, $4::jsonb) AS r`,
+      [id, content, actor === null ? null : JSON.stringify(actor), event === null ? null : JSON.stringify(event)])).r;
+  await db.exec(`DELETE FROM thoughts`);
+  await db.exec(`DELETE FROM ob1_agents`);
+
+  // The shape: eight nullable columns, the CHECKs, the two indexes, the kind on
+  // the registry, and the last definers this file takes over.
+  const cols = await q<{ column_name: string; data_type: string; is_nullable: string }>(
+    `SELECT column_name, data_type, is_nullable FROM information_schema.columns WHERE table_name = 'thought_audit'
+      AND column_name IN ('actor_kind', 'trust', 'origin', 'stance', 'cites', 'valid_from', 'valid_until', 'backfilled_at') ORDER BY column_name`);
+  assert(cols.length === 8 && cols.every((c) => c.is_nullable === "YES"), `thought_audit gains eight nullable columns (${cols.map((c) => c.column_name).join(", ")})`);
+  assert(cols.find((c) => c.column_name === "cites")?.data_type === "ARRAY" && cols.filter((c) => /^valid_|backfilled_at/.test(c.column_name)).every((c) => c.data_type === "timestamp with time zone"),
+    "…cites a uuid[], the window and backfilled_at timestamptz");
+  assert((await one<{ e: boolean }>(`SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'ob1_agents' AND column_name = 'kind') AS e`)).e, "ob1_agents gains kind");
+  assert(/ob1_agents_kind_check/.test(await refused(`INSERT INTO ob1_agents (label, kind) VALUES ('robot-key', 'robot')`)), "…which the CHECK holds to operator, agent or ingested");
+  const idx = await q<{ indexname: string; indexdef: string }>(`SELECT indexname, indexdef FROM pg_indexes WHERE tablename = 'thought_audit' AND indexname LIKE 'thought_audit_%' AND indexname NOT IN ('thought_audit_thought_id_idx', 'thought_audit_created_at_idx', 'thought_audit_actor_idx', 'thought_audit_session_idx', 'thought_audit_agent_idx', 'thought_audit_pkey')`);
+  assert(idx.length === 2 && idx.map((i) => i.indexname).sort().join(",") === "thought_audit_awaiting_door_idx,thought_audit_awaiting_kind_idx",
+    `two partial indexes and no more: the rows still waiting for a kind or a trust, by name, and for a door — the census, the backfill and the gate read them; none on actor_kind, trust or origin until a read exists (${idx.map((i) => i.indexname).join(", ")})`);
+  assert(/INCLUDE \(canonical_agent_id, actor_kind\)/.test(idx.find((i) => i.indexname === "thought_audit_awaiting_kind_idx")?.indexdef ?? "") && /WHERE \(\(origin IS NULL\) AND \(actor_context \? 'via'::text\) AND \(ob1_door_of\(actor_context\) IS NOT NULL\)\)/.test(idx.find((i) => i.indexname === "thought_audit_awaiting_door_idx")?.indexdef ?? ""),
+    `…the kind index carrying the agent id and the kind so the census filters and groups without the heap, the door index holding only rows whose via IS a door, by the one reading (seventh review pass; ${idx.map((i) => i.indexdef.replace(/.*USING btree /, "")).join(" | ")})`);
+  assert(lastDefinerOf("thoughts_write_audit").startsWith("046") && lastDefinerOf("thought_audit_refuse_mutation").startsWith("046") && lastDefinerOf("upsert_thought").startsWith("046") && lastDefinerOf("update_thought").startsWith("046") && lastDefinerOf("delete_thought").startsWith("042"),
+    `046 is the last definer of the audit trigger, the refusal trigger and both writers; delete_thought stays 042's — a tombstone declares nothing (${lastDefinerOf("delete_thought")})`);
+  const tbl = (await one<{ c: string | null }>(TABLE_COMMENT_SQL, ["thought_audit"])).c ?? "";
+  assert(/RANGE on created_at by month/.test(tbl) && /not applied/.test(tbl) && /SMD-1697/.test(tbl), "the table's comment states the partition key chosen and not applied, and what decides when");
+  const src = async (sig: string) => String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = $1::regprocedure`, [sig])).s);
+  const trig = await src("thoughts_write_audit()");
+  assert(/ob1:audit-event-from-the-key/.test(trig) && /ob1_registry_kind\(v_agent, actor->>'name'\)/.test(trig) && /ob1_trust_ceiling\(v_kind, v_declared\)/.test(trig),
+    "the trigger carries 046's sentinel and reads the kind and the trust through the two shared rules — the registry by id then by label, the ceiling");
+  const registry = await src("ob1_registry_kind(uuid, text)"), ceiling = await src("ob1_trust_ceiling(text, text)");
+  assert(/canonical_agent_id = p_agent/.test(registry) && /label = p_label/.test(registry) && /array_position/.test(ceiling),
+    "…which the amendment gate and the backfill call too, so the three cannot drift");
+  assert(/ob1_registry_kind\(OLD\.canonical_agent_id, OLD\.actor_name\)/.test(await src("thought_audit_refuse_mutation()")) && /ob1_registry_kind\(w\.agent, w\.name\)/.test(await src("backfill_thought_audit_events(integer)")) && /kinds AS MATERIALIZED/.test(await src("backfill_thought_audit_events(integer)")),
+    "(the gate and the backfill do call them — the backfill once per distinct writer, materialised, not once per row: eighth review pass)");
+  assert(!/actor->>'source'/.test(trig) && /- 'via'/.test(trig) && !/- 'source'/.test(trig), "…reads no actor source (the column is the row's own), strips via into origin and leaves an actor's source in the blob");
+  assert(/IF v_agent IS NOT NULL OR actor->>'name' IS NOT NULL THEN\s+v_kind := ob1_registry_kind/.test(trig), "…and probes the registry only when an envelope names an id or a name (a JSON null is neither) — a raw write with no actor set needs no SELECT on ob1_agents");
+  assert(/Lost the race[\s\S]*?PERFORM set_config\('ob1\.event', '', true\);[\s\S]*?'STALE_READ'/.test(await src(UPDATE_THOUGHT_SIGNATURE)), "update_thought clears the event on the one refusal that follows its write of the setting — the UPDATE that matched no row");
+  for (const [re, what] of [[/jsonb_build_object\('metadata', NEW\.metadata\)/, "008's capture diff"], [/v_diff = '\{\}'::jsonb/, "008's no-op guard"], [/actor->>'agent_id'/, "010's agent id"], [/'previous_derived_from'/, "025's provenance in the delete row"]] as [RegExp, string][])
+    assert(re.test(trig), `…carrying ${what}`);
+  assert(/ob1:audit-amend-fills-null-only/.test(await src("thought_audit_refuse_mutation()")), "the refusal trigger carries the amendment's sentinel");
+  for (const sig of ["upsert_thought(text, jsonb)", "upsert_thought(text, jsonb, vector)", UPDATE_THOUGHT_SIGNATURE])
+    assert(/validate_write_event\(/.test(await src(sig)) && /set_config\('ob1\.event'/.test(await src(sig)), `${sig} validates the event and sets it beside the actor`);
+  for (const sig of ["upsert_thought(text, jsonb)", "upsert_thought(text, jsonb, vector)"])
+    assert(/ob1:capture-sets-write-event/.test(await src(sig)), `${sig} carries the sentinel preflight's atomic-capture check reads, so a 035 body put back by hand is named (sixth review pass)`);
+
+  // The registry: classify by label — before first use — and the resolver
+  // meets the row.
+  const HASH_OP = "a".repeat(64), HASH_BOT = "b".repeat(64);
+  let r = await one<{ r: Record<string, unknown> }>(`SELECT set_agent_kind('op-key', 'operator') AS r`);
+  assert(r.r.ok === true && r.r.created === true && r.r.previous_kind === null && r.r.kind === "operator", `set_agent_kind classifies a key nobody has used yet — created, no previous kind (${JSON.stringify(r.r)})`);
+  r = await one<{ r: Record<string, unknown> }>(`SELECT set_agent_kind('op-key', 'agent') AS r`);
+  assert(r.r.ok === true && r.r.created === false && r.r.previous_kind === "operator", "…a reclassification reports the kind it replaced");
+  await db.exec(`SELECT set_agent_kind('op-key', 'operator')`);
+  assert((await one<{ r: { ok: boolean; error: string } }>(`SELECT set_agent_kind('op-key', 'root') AS r`)).r.error === "BAD_KIND" && (await one<{ r: { ok: boolean; error: string } }>(`SELECT set_agent_kind('  ', 'agent') AS r`)).r.error === "BAD_LABEL",
+    "…and refuses a fourth word and an empty label as values");
+  const res = (await one<{ r: { ok: boolean; agent_id: string; rotated: boolean; created: boolean } }>(`SELECT resolve_agent($1, 'op-key', 'write') AS r`, [HASH_OP])).r;
+  assert(res.ok && res.rotated === true && res.created === false, "resolve_agent (010) meets the pre-classified label as a known agent with a new digest — its rotation branch — and attaches the hash");
+  const OP = res.agent_id;
+  assert((await one<{ k: string }>(`SELECT kind AS k FROM ob1_agents WHERE canonical_agent_id = $1::uuid`, [OP])).k === "operator", "…leaving the kind in place");
+  await db.exec(`SELECT set_agent_kind('bot-key', 'agent'); SELECT set_agent_kind('feed-key', 'ingested')`);
+  const BOT = (await one<{ r: { agent_id: string } }>(`SELECT resolve_agent($1, 'bot-key', 'write') AS r`, [HASH_BOT])).r.agent_id;
+  const MYSTERY = (await one<{ r: { agent_id: string } }>(`SELECT resolve_agent($1, 'mystery-key', 'write') AS r`, ["c".repeat(64)])).r.agent_id;
+  assert((await one<{ k: string | null }>(`SELECT kind AS k FROM ob1_agents WHERE canonical_agent_id = $1::uuid`, [MYSTERY])).k === null, "a key resolved and never classified has no kind — unknown, not guessed");
+
+  // The settling case (SMD-1724): the operator's key hands in an ingested page.
+  const cited = await cap("046: a source the next write cites", { metadata: { source: "planted" }, actor: { name: "op-key", agent_id: OP, via: "test-door" } }, 2);
+  const paste = await cap("046: a page the operator pasted", {
+    metadata: { source: "web" }, actor: { name: "op-key", agent_id: OP, via: "test-door" },
+    event: { stance: "retrieved", cites: [cited.id.toUpperCase(), cited.id], valid_from: "2026-01-01T00:00:00Z", valid_until: "2026-06-30T00:00:00Z", trust: "ingested" },
+  }, 3);
+  let ev = await last(paste.id, "capture");
+  assert(ev?.actor_kind === "operator" && ev?.trust === "ingested", `the settling case: actor operator, trust ingested — two columns, because one read two ways cannot say it (${ev?.actor_kind}, ${ev?.trust})`);
+  assert(ev?.origin === "test-door" && ev?.actor_context === null, `the door is the origin column, promoted from actor_context, which is NULL when nothing else rode along (${ev?.origin}, ${JSON.stringify(ev?.actor_context)})`);
+  assert(ev?.source === "web", `source is the row's own metadata.source (${ev?.source})`);
+  assert(ev?.stance === "retrieved" && ev?.cites?.length === 1 && ev?.cites[0] === cited.id, `stance and cites as declared — cites lowercased and de-duplicated (${ev?.stance}, ${JSON.stringify(ev?.cites)})`);
+  assert(ev?.valid_from?.startsWith("2026-01-01") && ev?.valid_until?.startsWith("2026-06-30"), `the valid window as declared (${ev?.valid_from} → ${ev?.valid_until})`);
+  assert(ev?.canonical_agent_id === OP && ev?.actor_name === "op-key" && ev?.backfilled_at === null, "…010's id and 008's name beside them, and backfilled_at NULL: the write set them itself");
+  ev = await last(cited.id, "capture");
+  assert(ev?.actor_kind === "operator" && ev?.trust === "operator" && ev?.stance === null && ev?.cites === null && ev?.valid_from === null && ev?.valid_until === null,
+    `no event declared: trust IS the kind, stance, cites and the window NULL — unknown, and the read says unknown (${ev?.trust})`);
+
+  // The Verify fixture: a payload claiming what the key cannot support is
+  // stored as the key says, with the attempt on the same row.
+  const claim = await cap("046: an agent's conclusion dressed as the operator's word", {
+    metadata: {}, actor: { name: "bot-key", agent_id: BOT, via: "test-door" }, event: { actor_kind: "operator", trust: "operator", stance: "inferred" },
+  }, 4);
+  ev = await last(claim.id, "capture");
+  assert(ev?.actor_kind === "agent" && ev?.trust === "agent", `an agent key claiming actor_kind operator and trust operator is stored as agent, agent — the key decides (${ev?.actor_kind}, ${ev?.trust})`);
+  assert((ev?.actor_context as { claimed?: Record<string, string> })?.claimed?.actor_kind === "operator" && (ev?.actor_context as { claimed?: Record<string, string> })?.claimed?.trust === "operator" && ev?.stance === "inferred",
+    `…and the attempt is recorded on the same row under actor_context.claimed, the stance kept (${JSON.stringify(ev?.actor_context)})`);
+  const lowered = await cap("046: an agent hands in a page it fetched", { metadata: {}, actor: { name: "bot-key", agent_id: BOT }, event: { trust: "ingested" } }, 5);
+  ev = await last(lowered.id, "capture");
+  assert(ev?.trust === "ingested" && ev?.actor_kind === "agent" && ev?.actor_context === null && ev?.origin === null, "a lowering stands, nothing is claimed, and a caller naming no door has a NULL origin");
+
+  // The label fallback: a writer that never resolved an id (SMD-1541's five,
+  // the workers) is classified by the key's name.
+  const feed = await cap("046: an importer's row", { metadata: { source: "rss" }, actor: { name: "feed-key", via: "readwise-capture" } }, 6);
+  ev = await last(feed.id, "capture");
+  assert(ev?.canonical_agent_id === null && ev?.actor_kind === "ingested" && ev?.trust === "ingested" && ev?.origin === "readwise-capture", `no agent_id in the envelope: the kind is read by the key's name — ingested, from the registry (${ev?.actor_kind})`);
+  const feedRaise = await cap("046: an importer claiming the operator typed it", { metadata: {}, actor: { name: "feed-key" }, event: { trust: "operator" } }, 7);
+  ev = await last(feedRaise.id, "capture");
+  assert(ev?.trust === "ingested" && (ev?.actor_context as { claimed?: Record<string, string> })?.claimed?.trust === "operator", "…and the clamp works by name as by id");
+
+  // Unknown kind: nothing is invented.
+  const unk = await cap("046: a write through a key nobody classified", { metadata: {}, actor: { name: "mystery-key", agent_id: MYSTERY }, event: { trust: "agent" } }, 8);
+  ev = await last(unk.id, "capture");
+  assert(ev?.actor_kind === null && ev?.trust === null && (ev?.actor_context as { claimed?: Record<string, string> })?.claimed?.trust === "agent", `an unclassified key: actor_kind NULL, trust NULL — a claim above the floor is not honoured, and is recorded (${ev?.trust})`);
+  const unkLow = await cap("046: an unclassified key lowering itself", { metadata: {}, actor: { name: "mystery-key", agent_id: MYSTERY }, event: { trust: "ingested" } }, 9);
+  ev = await last(unkLow.id, "capture");
+  assert(ev?.actor_kind === null && ev?.trust === "ingested" && ev?.actor_context === null, "…but a declared ingested is kept: a lowering nobody can abuse");
+  const nobody = await cap("046: a name the registry has never seen", { metadata: {}, actor: { name: "nobody-key" } }, 10);
+  ev = await last(nobody.id, "capture");
+  assert(ev?.actor_kind === null && ev?.trust === null && ev?.actor_name === "nobody-key", "a name with no registry row: NULL kind and trust, the name kept (008)");
+  const ghost = await cap("046: a cached id the registry no longer knows", { metadata: {}, actor: { name: "feed-key", agent_id: "99999999-9999-4999-8999-999999999999" } }, 14);
+  ev = await last(ghost.id, "capture");
+  assert(ev?.actor_kind === "ingested" && ev?.canonical_agent_id === "99999999-9999-4999-8999-999999999999", `an agent_id the registry does not know — a rebuilt registry under a server's cached id — falls back to the name, the id kept as 010 keeps it (${ev?.actor_kind})`);
+  const shadowed = await cap("046: an id the registry knows but has not classified, under a classified name", { metadata: {}, actor: { name: "op-key", agent_id: MYSTERY } }, 19);
+  ev = await last(shadowed.id, "capture");
+  assert(ev?.actor_kind === "operator" && ev?.canonical_agent_id === MYSTERY, `an id the registry knows but has not classified takes the name's kind — the row a key renamed in the env and pre-classified under its new name leaves when 010's rename meets label_conflict (${ev?.actor_kind})`);
+  const stale = await cap("046: a caller still sending an actor source", { metadata: { source: "own" }, actor: { name: "op-key", agent_id: OP, source: "mcp", via: "old-caller" } }, 11);
+  ev = await last(stale.id, "capture");
+  assert(ev?.source === "own" && (ev?.actor_context as { source?: string })?.source === "mcp", `an actor's source is no longer read into the column — it lands in actor_context, visible (${ev?.source}, ${JSON.stringify(ev?.actor_context)})`);
+  const oddDoor = await cap("046: a door that is not a string", { metadata: {}, actor: { name: "op-key", agent_id: OP, via: { server: "x" } } }, 16);
+  ev = await last(oddDoor.id, "capture");
+  assert(ev?.origin === null && JSON.stringify((ev?.actor_context as { via?: unknown })?.via) === '{"server":"x"}', `a via that is not a string is no door: origin NULL, the value left in the blob (${JSON.stringify(ev?.actor_context)})`);
+  const ownClaim = await cap("046: a caller with a claimed key of its own", { metadata: {}, actor: { name: "bot-key", agent_id: BOT, claimed: { foo: 1 } }, event: { trust: "operator" } }, 17);
+  ev = await last(ownClaim.id, "capture");
+  assert(JSON.stringify((ev?.actor_context as { claimed?: unknown })?.claimed) === '{"trust":"operator"}' && JSON.stringify((ev?.actor_context as { caller_claimed?: unknown })?.caller_claimed) === '{"foo":1}',
+    `the trigger owns claimed: a caller's own moves under caller_claimed, whatever its shape, so the gate and the backfill read only what the trigger filed (eighth review pass; ${JSON.stringify(ev?.actor_context)})`);
+
+  // The other doors: the 2-argument form, the 4-argument form, and the edit.
+  const two = (await one<{ r: { id: string } }>(`SELECT upsert_thought($1::text, $2::jsonb) AS r`, ["046: through the 2-argument form", JSON.stringify({ metadata: {}, actor: { name: "op-key", agent_id: OP, via: "postgrest-fallback" }, event: { stance: "stated" } })])).r;
+  ev = await last(two.id, "capture");
+  assert(ev?.actor_kind === "operator" && ev?.origin === "postgrest-fallback" && ev?.stance === "stated", "the 2-argument form (PostgREST's fallback) stamps the event too");
+  // 013's 4-argument form is not redefined: it delegates to the 3-argument
+  // body, so it inherits the event — read from its source rather than driven
+  // with windows, which PGlite's build has crashed on here (a WASM
+  // out-of-bounds in the chunk INSERT, not a Postgres error); test-live
+  // drives the windowed capture against a real server.
+  assert(/upsert_thought\(p_content, p_payload, p_embedding\)/.test(await src("upsert_thought(text, jsonb, vector, jsonb)")) && lastDefinerOf("upsert_thought").startsWith("046"),
+    "…and the 4-argument form, 013's and untouched, delegates to the 3-argument body and so inherits the event");
+  let e = await edit(paste.id, "046: a page the operator pasted, corrected", { name: "op-key", agent_id: OP, via: "edit-door" }, { stance: "stated", valid_until: "2026-09-01T00:00:00Z", trust: "ingested" });
+  ev = await last(paste.id, "update");
+  assert(e.ok === true && ev?.actor_kind === "operator" && ev?.trust === "ingested" && ev?.origin === "edit-door" && ev?.stance === "stated" && ev?.valid_from === null && ev?.valid_until?.startsWith("2026-09-01"),
+    `update_thought's p_event reaches the update row — the window as declared on THIS write, not inherited from the capture (${ev?.valid_from} → ${ev?.valid_until})`);
+  const before = (await rowsOf(paste.id, "update")).length;
+  e = await edit(paste.id, "046: a page the operator pasted, corrected", { name: "op-key", agent_id: OP }, null);
+  assert(e.ok === true && (await rowsOf(paste.id, "update")).length === before, "an edit that changes nothing and declares nothing writes no row (008's guard)");
+  e = await edit(paste.id, "046: a page the operator pasted, corrected", { name: "op-key", agent_id: OP }, { stance: "retrieved", cites: [cited.id] });
+  const restated = await one<{ diff: Record<string, unknown>; stance: string | null; cites: string[] | null }>(`SELECT diff, stance, cites FROM thought_audit WHERE thought_id = $1::uuid AND action = 'update' ORDER BY created_at DESC LIMIT 1`, [paste.id]);
+  assert(e.ok === true && (await rowsOf(paste.id, "update")).length === before + 1 && JSON.stringify(restated?.diff) === "{}" && restated?.stance === "retrieved" && restated?.cites?.[0] === cited.id,
+    `…but an unchanged edit that DECLARES an event is an event: one row, the diff empty, the declaration on it — the restatement SMD-1722 counts (${JSON.stringify(restated?.diff)}, ${restated?.stance})`);
+  e = await edit(paste.id, "046: a page the operator pasted, corrected", { name: "op-key", agent_id: OP }, { trust: "ingested" });
+  assert(e.ok === true && (await rowsOf(paste.id, "update")).length === before + 1, "…while an unchanged edit declaring only a trust the key supports — a lowering, honoured, nothing to record — writes no row (run-it, fifth review pass)");
+  // …but a claim the key does NOT support is a fact about the caller: the
+  // clamp is the record, and this row is the only place SMD-1724 can count it
+  // (seventh review pass — the sixth had let identical over-claims leave no
+  // trace). Counted by its mark, not read as "the latest" (PGlite's now() ties).
+  e = await edit(paste.id, "046: a page the operator pasted, corrected", { name: "bot-key" }, { trust: "operator" });
+  const clampRows = await one<{ c: number }>(`SELECT count(*)::int AS c FROM thought_audit WHERE thought_id = $1::uuid AND action = 'update' AND diff = '{}'::jsonb AND trust = 'agent' AND actor_kind = 'agent' AND actor_context->'claimed'->>'trust' = 'operator'`, [paste.id]);
+  assert(e.ok === true && (await rowsOf(paste.id, "update")).length === before + 2 && clampRows.c === 1,
+    `…and an unchanged edit claiming a trust ABOVE its key writes a row: the diff empty, trust the key's, the claim under claimed — the over-claim is recorded (${clampRows.c} row)`);
+  // A tombstone's ON DELETE SET NULL updates the successors, and their audit
+  // rows are written BEFORE the delete's own trigger run (RI triggers sort
+  // first) — so an event left on the transaction would land on them, were it
+  // not for the BEFORE DELETE statement trigger that clears it (eighth review
+  // pass: the header had claimed the read-once rule covered this; it did not).
+  const par = await cap("046: a parent about to be deleted", { metadata: {}, actor: { name: "op-key", agent_id: OP } }, 34);
+  const kid = await cap("046: a successor pointing at the parent", { metadata: {}, actor: { name: "op-key", agent_id: OP }, supersedes: par.id }, 35);
+  await db.transaction(async (tx) => {
+    await tx.exec(`SELECT set_config('ob1.event', '{"stance": "inferred"}', true)`);
+    await tx.exec(`SELECT delete_thought('${par.id}'::uuid)`);
+    const left = await tx.query<{ v: string }>(`SELECT current_setting('ob1.event', true) AS v`);
+    assert(left.rows[0]?.v === "", "…and the setting is cleared by the delete statement itself, before its row work");
+  });
+  const kidRows = await q<{ action: string; stance: string | null; diff: Record<string, unknown> }>(`SELECT action, stance, diff FROM thought_audit WHERE thought_id = $1::uuid ORDER BY created_at`, [kid.id]);
+  assert(kidRows.some((r) => r.action === "update" && JSON.stringify(r.diff).includes("supersedes")) && kidRows.every((r) => r.stance === null),
+    `the successor's pointer-cleared row carries no event left on the transaction: the BEFORE DELETE trigger cleared it before the RI action ran (${kidRows.map((r) => `${r.action}:${r.stance}`).join(", ")})`);
+  assert((await one<{ c: number }>(`SELECT count(*)::int AS c FROM pg_trigger WHERE tgrelid = 'thoughts'::regclass AND tgname = 'thoughts_delete_clears_event' AND NOT tgisinternal AND tgtype & 1 = 0 AND tgtype & 2 = 2 AND tgtype & 8 = 8`)).c === 1,
+    "…by a statement-level BEFORE DELETE trigger on thoughts, once per statement, not per row");
+  const restatedCap = await cap("046: a page the operator pasted, corrected", { metadata: {}, actor: { name: "op-key", agent_id: OP }, event: { stance: "inferred" } }, 3);
+  // Counted, not "the latest": PGlite's now() is millisecond-grained, so two
+  // statements can tie on created_at and "latest" is arbitrary (a mutant run
+  // found this arm flaky by that tie).
+  // (The earlier content-only edits left the row without a vector, so this
+  // re-capture's vector is a change of its own: the diff says embedding_present
+  // and the row would exist event or not — the event rides it.)
+  assert(restatedCap.existed === true && (await one<{ c: number }>(`SELECT count(*)::int AS c FROM thought_audit WHERE thought_id = $1::uuid AND action = 'update' AND stance = 'inferred'`, [paste.id]))?.c === 1,
+    "…and a re-capture of stored text with an event carries it on its update row, through the ON CONFLICT branch");
+  const nine = (await one<{ r: { ok: boolean } }>(`SELECT update_thought($1::uuid, $2::text, NULL, NULL, NULL, NULL, $3::jsonb, NULL, NULL) AS r`, [paste.id, "046: a page the operator pasted, nine arguments", JSON.stringify({ name: "op-key", agent_id: OP })])).r;
+  ev = await last(paste.id, "update");
+  assert(nine.ok === true && ev?.actor_kind === "operator" && ev?.stance === null, "a 9-argument call — every caller before this change — resolves through the default and declares no event");
+
+  // No inheritance inside one transaction: the second write's event is its
+  // own (none), and a tombstone declares nothing even after an event.
+  await db.exec(`BEGIN;
+    SELECT update_thought('${lowered.id}'::uuid, '046: an agent hands in a page it fetched, edited', NULL, NULL, NULL, NULL, '{"name": "bot-key", "agent_id": "${BOT}"}'::jsonb, NULL, NULL, '{"stance": "inferred", "valid_from": "2020-01-01T00:00:00Z"}'::jsonb);
+    SELECT update_thought('${feed.id}'::uuid, '046: an importer''s row, edited', NULL, NULL, NULL, NULL, '{"name": "feed-key"}'::jsonb, NULL, NULL, NULL::jsonb);
+    SELECT delete_thought('${unk.id}'::uuid, '{"name": "mystery-key", "agent_id": "${MYSTERY}", "via": "tombstone-door"}'::jsonb);
+    COMMIT;`);
+  ev = await last(lowered.id, "update");
+  assert(ev?.stance === "inferred" && ev?.valid_from?.startsWith("2020-01-01"), "in one transaction, the first edit's event is stamped on its row…");
+  ev = await last(feed.id, "update");
+  assert(ev?.stance === null && ev?.valid_from === null && ev?.actor_kind === "ingested", "…the second edit, declaring none, inherits nothing — the setting is written empty, not left");
+  ev = await last(unk.id, "delete");
+  assert(ev !== undefined && ev.stance === null && ev.cites === null && ev.origin === "tombstone-door" && ev.actor_kind === null, "…and the tombstone carries the door and the kind, and declares no stance: delete_thought is 042's, unchanged");
+  // The event is read once — and this arm is the read-once rule's own tooth:
+  // a capture declaring an event, then a RAW update of another row in the
+  // same transaction, with NO delete between (eighth review pass: the arm
+  // below has a tombstone in the middle, and thoughts_delete_clears_event now
+  // clears the setting there, so it no longer tells a trigger that forgot to
+  // clear from one that did — the `inherit` mutant went quiet on it).
+  await db.exec(`BEGIN;
+    SELECT upsert_thought('046: a page pasted before a raw update', '{"metadata": {}, "actor": {"name": "op-key", "agent_id": "${OP}"}, "event": {"stance": "retrieved", "valid_from": "2026-02-01"}}'::jsonb, '${unit(36)}'::vector);
+    UPDATE thoughts SET metadata = metadata || '{"raw_after_capture": true}'::jsonb WHERE id = '${feed.id}'::uuid;
+    COMMIT;`);
+  const rawAfter = await one<{ stance: string | null; valid_from: string | null }>(`SELECT stance, valid_from FROM thought_audit WHERE thought_id = $1::uuid AND action = 'update' AND diff::text LIKE '%raw_after_capture%'`, [feed.id]);
+  assert(rawAfter !== undefined && rawAfter.stance === null && rawAfter.valid_from === null,
+    `a raw UPDATE right after an event-bearing capture, no tombstone between, inherits no event: the trigger cleared the setting when it read it (${rawAfter?.stance}, ${rawAfter?.valid_from})`);
+  // …and with a tombstone between: a capture declaring a lowered trust, then a
+  // tombstone and a RAW update in the same transaction — the tombstone's trust
+  // is the key's, unclaimed, and the raw update's row carries no event.
+  await db.exec(`BEGIN;
+    SELECT upsert_thought('046: a page pasted before a delete', '{"metadata": {}, "actor": {"name": "op-key", "agent_id": "${OP}"}, "event": {"trust": "ingested", "stance": "retrieved"}}'::jsonb, '${unit(15)}'::vector);
+    SELECT delete_thought('${stale.id}'::uuid, '{"name": "op-key", "agent_id": "${OP}", "via": "tombstone-door"}'::jsonb);
+    UPDATE thoughts SET metadata = metadata || '{"raw": true}'::jsonb WHERE id = '${feed.id}'::uuid;
+    COMMIT;`);
+  ev = await last(stale.id, "delete");
+  assert(ev?.trust === "operator" && ev?.actor_kind === "operator" && ev?.actor_context === null, `a tombstone after an event-bearing capture in one transaction: trust is the key's, nothing claimed — the tombstone reads no event (${ev?.trust}, ${JSON.stringify(ev?.actor_context)})`);
+  ev = await last(feed.id, "update");
+  assert(ev?.stance === null && ev?.cites === null && ev?.valid_from === null && ev?.actor_kind === "operator",
+    `…and a raw UPDATE of thoughts after it inherits no event either — the trigger cleared the setting when it read it — while the ACTOR, 008's and transaction-scoped by design, is still the last call's (${ev?.stance}, ${ev?.actor_kind})`);
+  // A call the function refuses before its write — NOT_FOUND here — fires no
+  // trigger; the functions write the setting only just before their write
+  // (second review pass), so a refused call leaves no event on the transaction:
+  // a raw UPDATE right after it, and a capture after that, both declare none.
+  const rawBefore = (await rowsOf(feed.id, "update")).length;
+  await db.exec(`BEGIN;
+    SELECT update_thought('11111111-1111-4111-8111-111111111111'::uuid, 'nobody', NULL, NULL, NULL, NULL, '{"name": "op-key", "agent_id": "${OP}"}'::jsonb, NULL, NULL, '{"stance": "inferred", "cites": ["${cited.id}"]}'::jsonb);
+    UPDATE thoughts SET metadata = metadata || '{"raw_after_refusal": true}'::jsonb WHERE id = '${feed.id}'::uuid;
+    SELECT upsert_thought('046: a capture after a refused call', '{"metadata": {}, "actor": {"name": "op-key", "agent_id": "${OP}"}}'::jsonb, '${unit(18)}'::vector);
+    COMMIT;`);
+  ev = await last(feed.id, "update");
+  assert((await rowsOf(feed.id, "update")).length === rawBefore + 1 && ev?.stance === null && ev?.cites === null, `a raw UPDATE right after a call refused before its write inherits no event: the refused call never wrote the setting (${ev?.stance}, ${JSON.stringify(ev?.cites)})`);
+  ev = await last((await one<{ id: string }>(`SELECT id FROM thoughts WHERE content = '046: a capture after a refused call'`)).id, "capture");
+  assert(ev?.stance === null && ev?.actor_kind === "operator", `…and neither does the next function call (${ev?.stance})`);
+
+  // A bad SHAPE is refused, as 025 refuses a bad derived_from; the message
+  // names the field.
+  const bad = async (event: Record<string, unknown> | string, form: "cap" | "edit" = "cap") =>
+    form === "cap"
+      ? refused(`SELECT upsert_thought($1::text, $2::jsonb, $3::vector)`, ["046: refused", JSON.stringify({ metadata: {}, actor: { name: "op-key" }, event }), unit(13)])
+      : refused(`SELECT update_thought($1::uuid, 'x', NULL, NULL, NULL, NULL, NULL, NULL, NULL, $2::jsonb)`, [paste.id, JSON.stringify(event)]);
+  assert(/event\.stance must be stated, retrieved or inferred/.test(await bad({ stance: "guess" })), "a fourth stance is refused, naming the three");
+  assert(/event\.trust must be operator, agent or ingested/.test(await bad({ trust: "root" })), "a fourth trust word is refused");
+  assert(/event\.cites must contain only thought UUID strings/.test(await bad({ cites: ["not-a-uuid"] })), "a cite that is not a UUID is refused");
+  assert(/event\.cites references a thought that does not exist/.test(await bad({ cites: ["11111111-1111-4111-8111-111111111111"] })), "a cite naming no thought is refused — the write is the choke point (025)");
+  assert(/event\.cites must be a JSON array/.test(await bad({ cites: cited.id })), "a cite that is not an array is refused");
+  assert(/event\.valid_from \(.*\) is after valid_until/.test(await bad({ valid_from: "2026-06-01T00:00:00Z", valid_until: "2026-01-01T00:00:00Z" })), "a window that ends before it starts is refused");
+  assert(/event\.valid_from must be a timestamp string beginning YYYY-MM-DD, got "last spring"/.test(await bad({ valid_from: "last spring" })), "a window that is not a timestamp is refused with a message about the event, not a raw cast");
+  assert(/must be a timestamp string beginning YYYY-MM-DD, got "now"/.test(await bad({ valid_until: "now" })) && /beginning YYYY-MM-DD, got 0\./.test(await bad({ valid_from: 0 })) && /beginning YYYY-MM-DD, got "infinity"/.test(await bad({ valid_from: "infinity" })),
+    "…and so are Postgres's own words for a time — now, a number, infinity — which its reader would otherwise take as a fact about the world");
+  assert(/event\.valid_from must be a timestamp, got "2026-13-45T00:00:00Z"/.test(await bad({ valid_from: "2026-13-45T00:00:00Z" })), "a string shaped as a date that is not one is refused by the cast, with the event's message");
+  await db.exec(`SET TIME ZONE 'America/Chicago'`);
+  const zoned = await cap("046: a window declared without an offset", { metadata: {}, actor: { name: "op-key", agent_id: OP }, event: { valid_from: "2026-03-01", valid_until: "2026-03-02T00:00:00-06:00" } }, 20);
+  await db.exec(`SET TIME ZONE 'UTC'`);
+  const win = await one<{ f: string; u: string }>(`SELECT (valid_from AT TIME ZONE 'UTC')::text AS f, (valid_until AT TIME ZONE 'UTC')::text AS u FROM thought_audit WHERE thought_id = $1::uuid AND action = 'capture'`, [zoned.id]);
+  assert(win?.f === "2026-03-01 00:00:00" && win?.u === "2026-03-02 06:00:00", `a window with no offset is read as UTC whatever the session's TimeZone, one with an offset as written (${win?.f}, ${win?.u})`);
+  await db.exec(`SET TIME ZONE 'Asia/Tokyo'`);
+  const named = await cap("046: a window declared with a named zone", { metadata: {}, actor: { name: "op-key", agent_id: OP }, event: { valid_from: "2026-03-01 09:00:00 EST", valid_until: "2026-03-01 09:00:00 America/Chicago" } }, 21);
+  await db.exec(`SET TIME ZONE 'UTC'`);
+  const namedWin = await one<{ f: string; u: string }>(`SELECT (valid_from AT TIME ZONE 'UTC')::text AS f, (valid_until AT TIME ZONE 'UTC')::text AS u FROM thought_audit WHERE thought_id = $1::uuid AND action = 'capture'`, [named.id]);
+  assert(namedWin?.f === "2026-03-01 14:00:00" && namedWin?.u === "2026-03-01 15:00:00", `a zone spelled as a name or an abbreviation is honoured, not dropped — EST and America/Chicago read as themselves (${namedWin?.f}, ${namedWin?.u})`);
+  assert(/must be a timestamp, got/.test(await bad({ valid_from: "2026-03-01 09:00:00 Mars/Olympus" })), "…and a zone Postgres does not know is refused, not read as UTC");
+  // Which inputs carry a zone is Postgres's call, not a pattern's: ' UTC' is
+  // appended and the cast tried first — it fails only when a zone was already
+  // there — and then the input as it came (sixth review pass: the fifth's
+  // pattern took AM, PM, BC and a weekday for zones and read "10:00 PM" in the
+  // session's zone). So a one- or three-digit offset, or a zone after an AM/PM
+  // mark, is read as Postgres reads it, never dropped (run-it, fifth review
+  // pass); a bare UTC+5 is POSIX's, hours WEST, as the file says.
+  const winUtc = async (s: string) => (await one<{ f: string }>(`SELECT ((validate_write_event(jsonb_build_object('valid_from', $1::text))->>'valid_from')::timestamptz AT TIME ZONE 'UTC')::text AS f`, [s]))?.f;
+  await db.exec(`SET TIME ZONE 'Asia/Tokyo'`);
+  const odd = [await winUtc("2026-01-01 10:00:00 -5"), await winUtc("2026-01-01 10:00:00+123"), await winUtc("2026-01-01 10:00 PM PST"), await winUtc("2026-01-01 10:00:00 Thu"), await winUtc("2026-01-01 10:00:00 BC"), await winUtc("2026-01-01 10:00:00 UTC+5")];
+  await db.exec(`SET TIME ZONE 'UTC'`);
+  assert(JSON.stringify(odd) === JSON.stringify(["2026-01-01 15:00:00", "2026-01-01 08:37:00", "2026-01-02 06:00:00", "2026-01-01 10:00:00", "2026-01-01 10:00:00 BC", "2026-01-01 15:00:00"]),
+    `…and a zone in any form Postgres reads is read as Postgres reads it — -5 is -05:00, +123 is +01:23, PM PST is an evening in the Pacific, UTC+5 is POSIX's five hours west — while a weekday or an era is not a zone and reads as UTC, not the session's (${JSON.stringify(odd)})`);
+  await db.exec(`SET TIME ZONE 'Asia/Tokyo'`);
+  const meridian = await cap("046: a window declared with a meridian and no zone", { metadata: {}, actor: { name: "op-key", agent_id: OP }, event: { valid_from: "2026-03-01 10:00 PM" } }, 22);
+  await db.exec(`SET TIME ZONE 'UTC'`);
+  assert((await one<{ f: string }>(`SELECT (valid_from AT TIME ZONE 'UTC')::text AS f FROM thought_audit WHERE thought_id = $1::uuid AND action = 'capture'`, [meridian.id]))?.f === "2026-03-01 22:00:00",
+    "…and PM is not a zone: an evening with no zone is UTC, not the session's (sixth review pass)");
+  assert(/event carries a key the shape does not have: stances/.test(await bad({ stances: "stated" })), "a misspelt key is refused, so it cannot vanish");
+  assert(/event must be a JSON object, got string/.test(await bad("stated")), "a double-encoded event is refused with 005's message");
+  assert(/event\.stance must be/.test(await bad({ stance: "guess" }, "edit")), "…and update_thought refuses through the same rule");
+  assert((await one<{ c: number }>(`SELECT count(*)::int AS c FROM thoughts WHERE content = '046: refused'`)).c === 0, "a refused capture wrote no row");
+  assert((await one<{ r: Record<string, unknown> | null }>(`SELECT validate_write_event('{"stance": null, "cites": []}'::jsonb) AS r`)).r === null && (await one<{ r: Record<string, unknown> | null }>(`SELECT validate_write_event('null'::jsonb) AS r`)).r === null,
+    "JSON nulls and an empty cites are no event: validate_write_event returns NULL");
+  // The setting by hand: not an object is no event; an object that is not JSON
+  // is a bug in whoever set it and fails the write — unlike 008's actor,
+  // which a NULL records honestly (fifth and sixth review passes).
+  await db.exec(`BEGIN; SELECT set_config('ob1.event', 'garbage', true); UPDATE thoughts SET metadata = metadata || '{"hand": 1}'::jsonb WHERE id = '${feed.id}'::uuid; COMMIT;`);
+  ev = await last(feed.id, "update");
+  assert(ev?.stance === null, "a hand-set value that is not an object reads as no event, and the write goes through");
+  let handMalformed = "";
+  try { await db.transaction(async (tx) => { await tx.exec(`SELECT set_config('ob1.event', '{"stance": "stated"', true)`); await tx.exec(`UPDATE thoughts SET metadata = metadata || '{"hand": 2}'::jsonb WHERE id = '${feed.id}'::uuid`); }); } catch (err) { handMalformed = (err as Error).message; }
+  assert(/invalid input syntax for type json/.test(handMalformed), `a hand-set object that is not JSON fails the write loudly rather than recording no event for it (${handMalformed.slice(0, 60)})`);
+
+  // Immutable by rule: the one amendment, and nothing beside it.
+  const paperRow = (await one<{ id: string }>(`SELECT id FROM thought_audit WHERE thought_id = $1::uuid AND action = 'capture'`, [paste.id])).id;
+  assert(/append-only/.test(await refused(`UPDATE thought_audit SET action = 'capture' WHERE id = $1::uuid`, [paperRow])), "UPDATE without the setting is refused, as 008 refused it");
+  // One transaction per attempt (the setting is transaction-local); a refusal
+  // rolls it back and its message is what the assertion reads.
+  const amend = async (stmt: string) => { try { await db.transaction(async (tx) => { await tx.exec(`SELECT set_config('ob1.audit_amend', 'backfill', true)`); await tx.exec(stmt); }); return ""; } catch (err) { return (err as Error).message; } };
+  assert(/here a column other than actor_kind, trust, origin and backfilled_at changes/.test(await amend(`UPDATE thought_audit SET diff = '{}'::jsonb WHERE id = '${paperRow}'`)), "under the setting, an UPDATE of diff is refused, the condition named — the amendment fills the derived columns and nothing else");
+  assert(/derives to/.test(await amend(`UPDATE thought_audit SET actor_kind = 'agent', backfilled_at = now() WHERE id = '${paperRow}'`)), "…a set actor_kind is never changed");
+  assert(/append-only: DELETE/.test(await amend(`DELETE FROM thought_audit WHERE id = '${paperRow}'`)), "…and DELETE is refused under the setting as without it");
+  assert(/append-only: TRUNCATE/.test(await refused(`TRUNCATE thought_audit`)) && /append-only: TRUNCATE/.test(await amend(`TRUNCATE thought_audit`)), "…and TRUNCATE, which fires no row trigger, is refused by the statement trigger, setting or no setting");
+  const nobodyRow = (await one<{ id: string }>(`SELECT id FROM thought_audit WHERE thought_id = $1::uuid AND action = 'capture'`, [nobody.id])).id;
+  assert(/derives to/.test(await amend(`UPDATE thought_audit SET actor_kind = 'agent' WHERE id = '${nobodyRow}'`)), "…a fill without backfilled_at is refused: the row must say it was derived after the fact");
+  assert(/derives to/.test(await amend(`UPDATE thought_audit SET actor_kind = 'agent', trust = 'agent', backfilled_at = now() WHERE id = '${nobodyRow}'`)), "…a kind the registry does not hold for the row's key is refused — the amendment invents nothing");
+  await db.exec(`SELECT set_agent_kind('nobody-key', 'agent')`);
+  assert(/derives to/.test(await amend(`UPDATE thought_audit SET actor_kind = 'agent', trust = 'operator', backfilled_at = now() WHERE id = '${nobodyRow}'`)), "…a fill that puts trust above the kind is refused — the amendment holds the write path's rule");
+  assert(/derives to/.test(await amend(`UPDATE thought_audit SET actor_kind = 'agent', trust = 'agent', origin = 'made-up', backfilled_at = now() WHERE id = '${nobodyRow}'`)), "…a door the row's blob does not carry is refused");
+  assert(/derives to/.test(await amend(`UPDATE thought_audit SET actor_kind = 'agent', trust = 'agent', backfilled_at = '1999-01-01' WHERE id = '${nobodyRow}'`)), "…and a back-dated stamp: the stamp is this transaction's time");
+  assert((await amend(`UPDATE thought_audit SET actor_kind = 'agent', backfilled_at = now() WHERE id = '${nobodyRow}'`)) === "", "a fill of the kind alone, trust left as it was, is lawful — a value left unchanged is not invented (a pass and a key classified mid-pass must not collide; fourth review pass)");
+  assert((await amend(`UPDATE thought_audit SET trust = 'agent', backfilled_at = now() WHERE id = '${nobodyRow}'`)) === "", "…and the trust after it, from the kind the row now has");
+  ev = (await rowsOf(nobody.id, "capture"))[0];
+  assert(ev?.actor_kind === "agent" && ev?.trust === "agent" && ev?.backfilled_at !== null, "…and both land");
+  assert(/here nothing is filled/.test(await amend(`UPDATE thought_audit SET backfilled_at = now() WHERE id = '${nobodyRow}'`)), "…and the same row cannot be stamped again with nothing to fill");
+  // A row a tool INSERTed with a kind and no trust (the trigger never writes
+  // one) and a door in the blob: the backfill must fill trust and origin, not
+  // meet its own gate — one such row would otherwise fail every pass for the
+  // whole brain (run-it, second review pass).
+  const HALF_ROW = "55555555-5555-4555-8555-555555555555";
+  await db.exec(`INSERT INTO thought_audit (thought_id, action, actor_name, actor_kind, diff, actor_context) VALUES ('${HALF_ROW}', 'capture', 'bot-key', 'agent', '{}'::jsonb, '{"via": "tool-door"}'::jsonb)`);
+  const half = (await one<{ r: { rows: number } }>(`SELECT backfill_thought_audit_events() AS r`)).r;
+  ev = (await rowsOf(HALF_ROW, "capture"))[0];
+  assert(half.rows >= 1 && ev?.trust === "agent" && ev?.origin === "tool-door" && ev?.backfilled_at !== null, `a row with a kind and no trust is filled by the backfill — trust from the kind it has, origin from its blob — rather than refused by the gate (${ev?.trust}, ${ev?.origin})`);
+  const EMPTY_DOOR = "66666666-6666-4666-8666-666666666666";
+  await db.exec(`INSERT INTO thought_audit (thought_id, action, actor_name, diff, actor_context) VALUES ('${EMPTY_DOOR}', 'capture', 'bot-key', '{}'::jsonb, '{"via": ""}'::jsonb)`);
+  await db.exec(`SELECT backfill_thought_audit_events()`);
+  ev = (await rowsOf(EMPTY_DOOR, "capture"))[0];
+  assert(ev?.origin === null && ev?.actor_kind === "agent" && (ev?.actor_context as { via?: string })?.via === "", "…and an empty via is no door: origin stays NULL, the kind is filled, the blob keeps the empty string");
+  assert((await one<{ c: number }>(`SELECT count(*)::int AS c FROM thought_audit WHERE origin IS NULL AND ob1_door_of(actor_context) IS NOT NULL`)).c === 0,
+    "…and the door index's predicate is empty after the pass — the row with the empty via is not in it, so no later pass re-reads a row it can never fill (seventh review pass)");
+  const doors = await one<{ a: string | null; b: string | null }>(`SELECT ob1_door_of('{"via": "  "}'::jsonb) AS a, ob1_door_of('{"via": " rest-api "}'::jsonb) AS b`);
+  assert(doors.a === null && doors.b === "rest-api",
+    "…a via of blanks is no door and a door is trimmed — a name, not bytes (run-it, eighth review pass)");
+  assert(/append-only/.test(await refused(`UPDATE thought_audit SET actor_kind = NULL WHERE id = $1::uuid`, [nobodyRow])), "…after which the ordinary refusal stands again — the setting was transaction-local");
+
+  // The backfill: a SMD-1541-shaped row (via in the blob, no origin) and rows
+  // whose key is classified after the fact.
+  const OLD = "44444444-4444-4444-8444-444444444444";
+  await db.exec(`INSERT INTO thought_audit (thought_id, action, source, actor_name, diff, actor_context) VALUES ('${OLD}', 'capture', 'planted', 'MCP_ACCESS_KEY', '{}'::jsonb, '{"via": "rest-api", "runtime": "test"}'::jsonb)`);
+  const awaitingBefore = (await one<{ c: number }>(`SELECT count(*)::int AS c FROM thought_audit WHERE actor_kind IS NULL AND actor_name IS NOT NULL`)).c;
+  let bf = (await one<{ r: { ok: boolean; rows: number; awaiting_kind: number } }>(`SELECT backfill_thought_audit_events() AS r`)).r;
+  ev = (await rowsOf(OLD, "capture"))[0];
+  assert(bf.ok && bf.rows >= 1 && ev?.origin === "rest-api" && ev?.backfilled_at !== null && (ev?.actor_context as { via?: string; runtime?: string })?.via === "rest-api" && (ev?.actor_context as { runtime?: string })?.runtime === "test",
+    `a row from before 046 gains its origin from actor_context.via, stamped, the blob untouched (${bf.rows} row(s))`);
+  assert(ev?.actor_kind === null && bf.awaiting_kind === awaitingBefore, `…and no kind: MCP_ACCESS_KEY is a name the registry has not classified — ${bf.awaiting_kind} row(s) still wait on one`);
+  // A caller's own `claimed` cannot steer the backfill: an envelope that
+  // pre-seeds {claimed: {trust: "ingested"}} through an unclassified key has
+  // it moved under caller_claimed, so once the key is an operator's the row
+  // comes out `operator`, not `ingested` (eighth review pass — the first draft
+  // merged the caller's object into the trigger's key and the backfill read it).
+  await db.exec(`SELECT resolve_agent(repeat('e', 64), 'seeded-key', 'write')`);
+  const seeded = await cap("046: a write whose envelope pre-seeds a claim", { metadata: {}, actor: { name: "seeded-key", claimed: { trust: "ingested" } } }, 33);
+  ev = (await rowsOf(seeded.id, "capture"))[0];
+  assert(ev?.trust === null && (ev?.actor_context as { claimed?: unknown; caller_claimed?: { trust?: string } })?.claimed === undefined && (ev?.actor_context as { caller_claimed?: { trust?: string } })?.caller_claimed?.trust === "ingested",
+    `a caller's claimed moves under caller_claimed and the trigger's key stays empty when nothing was clamped (${JSON.stringify(ev?.actor_context)})`);
+  await db.exec(`SELECT set_agent_kind('seeded-key', 'operator')`);
+  // mystery-key becomes an OPERATOR's key: the row that declared `agent` while
+  // it was unclassified (claimed, not honoured) must come out `agent`, not
+  // `operator` — the trigger's rule applied late, not a raise.
+  const ID_ONLY = "77777777-7777-4777-8777-777777777777";
+  await db.exec(`INSERT INTO thought_audit (thought_id, action, canonical_agent_id, diff) VALUES ('${ID_ONLY}', 'capture', '${MYSTERY}', '{}'::jsonb)`);
+  await db.exec(`SELECT set_agent_kind('mystery-key', 'operator'); SELECT set_agent_kind('MCP_ACCESS_KEY', 'operator')`);
+  const mysteryRows = (await q<{ id: string }>(`SELECT id FROM thought_audit WHERE actor_name = 'mystery-key' AND actor_kind IS NULL`)).length;
+  bf = (await one<{ r: { ok: boolean; rows: number; awaiting_kind: number } }>(`SELECT backfill_thought_audit_events(1) AS r`)).r;
+  assert(bf.rows === 1, `p_limit bounds a pass (${bf.rows})`);
+  bf = (await one<{ r: { ok: boolean; rows: number; awaiting_kind: number } }>(`SELECT backfill_thought_audit_events() AS r`)).r;
+  ev = (await rowsOf(unk.id, "capture"))[0];
+  assert(ev?.actor_kind === "operator" && ev?.trust === "agent" && ev?.backfilled_at !== null && (ev?.actor_context as { claimed?: Record<string, string> })?.claimed?.trust === "agent",
+    `once the key is classified, its rows gain the kind by id, stamped — and the trust the write DECLARED while unclassified, now that the kind supports it, the claim left in the blob (${ev?.actor_kind}, ${ev?.trust})`);
+  assert((await one<{ c: number }>(`SELECT count(*)::int AS c FROM thought_audit WHERE thought_id = $1::uuid AND action = 'capture' AND actor_context->'claimed'->>'trust' IS DISTINCT FROM trust`, [unk.id])).c === 0,
+    "…and by the column's rule — a clamp is claimed.trust IS DISTINCT FROM trust — that row is no longer a clamp: the mark means 'declared while unknown', and the backfill made them equal (eighth review pass)");
+  ev = (await rowsOf(unkLow.id, "capture"))[0];
+  assert(ev?.actor_kind === "operator" && ev?.trust === "ingested", "…a row that had declared ingested keeps it: a set value is never changed");
+  ev = (await rowsOf(seeded.id, "capture"))[0];
+  assert(ev?.actor_kind === "operator" && ev?.trust === "operator" && (ev?.actor_context as { caller_claimed?: { trust?: string } })?.caller_claimed?.trust === "ingested",
+    `…and the pre-seeded claim decided nothing: the backfill reads the trigger's key only, so the row is the operator's (${ev?.trust})`);
+  ev = (await rowsOf(unk.id, "delete"))[0];
+  assert(ev?.actor_kind === "operator" && ev?.trust === "operator", "…and a row that declared nothing takes the kind as its trust");
+  ev = (await rowsOf(OLD, "capture"))[0];
+  assert(ev?.actor_kind === "operator" && ev?.trust === "operator", "…and a row with no agent id is classified by its actor_name — the five servers' rows");
+  ev = (await rowsOf(ID_ONLY, "capture"))[0];
+  assert(ev?.actor_kind === "operator" && ev?.trust === "operator" && ev?.backfilled_at !== null, "…and a row with an id and no name by its id — the backfill and the census count what the trigger derives from (fourth review pass)");
+  assert(bf.awaiting_kind === (await one<{ c: number }>(`SELECT count(*)::int AS c FROM thought_audit WHERE actor_kind IS NULL AND (actor_name IS NOT NULL OR canonical_agent_id IS NOT NULL)`)).c && mysteryRows + 1 >= 2,
+    `awaiting_kind is the rows that still name an unclassified key (${bf.awaiting_kind})`);
+  bf = (await one<{ r: { ok: boolean; rows: number; awaiting_kind: number } }>(`SELECT backfill_thought_audit_events() AS r`)).r;
+  assert(bf.rows === 0, "a second pass finds nothing: idempotent, as the migration's own call is on re-apply");
+  assert((await one<{ s: string }>(`SELECT current_setting('ob1.audit_amend', true) AS s`)).s === "" || (await one<{ s: string | null }>(`SELECT current_setting('ob1.audit_amend', true) AS s`)).s === null, "…and leaves the amendment setting cleared");
+  assert(/append-only/.test(await refused(`DELETE FROM thought_audit WHERE thought_id = $1::uuid`, [OLD])), "the planted row cannot be removed either — it stays, as every row does");
+
+  await db.exec(`DELETE FROM thoughts`);
+  await db.exec(`DELETE FROM ob1_agents`);
 }
 
 // db/README.md quotes this suite's assertion total in two places ("Expected
