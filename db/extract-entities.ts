@@ -81,6 +81,7 @@ import { hostname } from "node:os";
 import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import { PROVIDER_ERROR_CHARS, refusesLength, resolveEmbedConfig } from "../server-portable/embed.ts";
+import { describeEgress, localKnob, refusesEverything, ROW_UNITS } from "../server-portable/egress.ts";
 import { extractEntities, extractionKey, type Extraction } from "../server-portable/entities.ts";
 import { hashKey, parseKeyRecords } from "../server-portable/auth.ts";
 import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, reportLost, startHeartbeat } from "./lease.ts";
@@ -159,6 +160,21 @@ const JOB = flag("job") ?? extractionKey(cfg.metadataModel);
 
 console.log(`  job:    ${JOB}`);
 console.log(`  model:  ${cfg.metadataModel} via ${cfg.chat.base}, temperature ${cfg.metadataTemperature}`);
+// What may leave the box (SMD-1903): a row the gate refuses is a failed claim
+// naming the rule; its text never went anywhere, and --retry-failed revisits it.
+console.log(`  egress: ${describeEgress(cfg.chat, cfg.egress, localKnob(cfg, "chat"))}`);
+{
+  // A policy that refuses whatever the row (SMD-1903): stop before claiming,
+  // rather than fail every row in the pool one at a time. A dry run and
+  // --status still report — the banner's egress line says why a run would not.
+  // The units a row of this pass carries: its metadata and text, and the
+  // worker key's name as the actor when one is set (second review pass).
+  const blanket = refusesEverything(cfg.chat, cfg.egress, process.env.OB1_WORKER_KEY ? undefined : ROW_UNITS);
+  if (blanket && !STATUS_ONLY && !DRY_RUN) {
+    console.error(`\n  Nothing would be extracted: ${blanket}. Declare the endpoint local (${localKnob(cfg, "chat")}=1) if it is, name what may leave in OB1_EGRESS_ALLOW, or set OB1_EGRESS_POLICY — in words, before a pass that would fail every row it claims.`);
+    process.exit(2);
+  }
+}
 
 // One connection per worker and one spare: the heartbeat (db/lease.ts) beats
 // through the pool, and a worker parked on a lock or a long statement holds
@@ -189,6 +205,8 @@ if (Number(tables) < 4) {
  * call touches last_used_at), so --status and --dry-run do not resolve.
  */
 let agentId: string | null = null;
+/** The worker key's name, for the egress gate's `actor:` unit (SMD-1903); undefined without a key. */
+let actorName: string | undefined;
 if (!STATUS_ONLY && !DRY_RUN) {
   const rawKey = process.env.OB1_WORKER_KEY;
   if (rawKey) {
@@ -214,6 +232,7 @@ if (!STATUS_ONLY && !DRY_RUN) {
       }
       if (res.ok && res.agent_id) {
         agentId = res.agent_id;
+        actorName = record.name;
         console.log(`  agent:  ${record.name} (${record.scope}, ${agentId})`);
       } else {
         console.error(`  ⚠  resolve_agent answered ${res.error ?? "without an id"}; rows will carry no agent id`);
@@ -223,6 +242,16 @@ if (!STATUS_ONLY && !DRY_RUN) {
     }
   } else {
     console.error("  ⚠  OB1_WORKER_KEY is not set: mentions and edges will carry no agent id. Mint one with server-portable/keygen.ts and add its hash to MCP_ACCESS_KEYS.");
+  }
+  // A key that was set but did not resolve to a name is no actor: the blanket
+  // check above credited one, so it is asked again without (third review pass).
+  if (process.env.OB1_WORKER_KEY && actorName === undefined) {
+    const again = refusesEverything(cfg.chat, cfg.egress, ROW_UNITS);
+    if (again) {
+      console.error(`\n  Nothing would be extracted: ${again} — the worker key did not resolve, so the pass carries no actor for an actor: term to name.`);
+      await sql.close();
+      process.exit(2);
+    }
   }
 }
 
@@ -362,7 +391,7 @@ function progress(force = false): void {
   );
 }
 
-type Row = { id: string; content: string; fingerprint: string | null };
+type Row = { id: string; content: string; fingerprint: string | null; metadata: Record<string, unknown> | null };
 type Outcome =
   | { outcome: "succeeded" }
   | { outcome: "failed"; error: string }
@@ -374,7 +403,9 @@ async function processRow(row: Row): Promise<Outcome> {
   const t0 = Date.now();
   let extraction: Extraction;
   try {
-    extraction = await extractEntities(row.content, cfg, AbortSignal.timeout(TIMEOUT_S * 1000));
+    // The row's own metadata is what the gate reads (SMD-1903); a refusal
+    // throws out of here as a failed claim naming the rule.
+    extraction = await extractEntities(row.content, cfg, AbortSignal.timeout(TIMEOUT_S * 1000), { kind: "extraction", actor: actorName, metadata: row.metadata ?? undefined });
   } finally {
     llmMs += Date.now() - t0;
   }
@@ -486,7 +517,7 @@ async function worker(n: number): Promise<void> {
         const ids = batch.map((b) => b.thought_id);
         hb.claimed(ids);
         const rows = (await sql`
-          SELECT id, content, COALESCE(content_fingerprint, content_fingerprint_of(content)) AS fingerprint
+          SELECT id, content, COALESCE(content_fingerprint, content_fingerprint_of(content)) AS fingerprint, metadata
             FROM thoughts WHERE id = ANY(${sql.array(ids, "TEXT")}::uuid[])`) as Row[];
         byId = new Map(rows.map((r) => [r.id, r]));
       } catch (e) {

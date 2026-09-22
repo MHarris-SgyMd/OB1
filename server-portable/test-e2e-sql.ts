@@ -83,6 +83,10 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 // URL moved to Ollama, and the test hit the real provider.
 const STUB_BASE = "https://stub.invalid/v1";
 process.env.OB1_LLM_BASE_URL = STUB_BASE;
+// Declared local to the egress gate (SMD-1903): the stub is on this box, and
+// the gate reads the flag, never the address — without it the default, deny,
+// refuses every call to it. test-egress.ts holds that case.
+process.env.OB1_LLM_LOCAL = "1";
 
 // OB1_STORE is UNSET on purpose (change 97, SMD-1797): the SQL store is the
 // default, and this suite — the whole server over MCP against real Postgres —

@@ -102,6 +102,10 @@ const provider = Bun.serve({
 process.env.OB1_STORE = "sql";
 process.env.DATABASE_URL = URL_;
 process.env.OB1_LLM_BASE_URL = `http://localhost:${provider.port}/v1`;
+// Declared local to the egress gate (SMD-1903): the stub is on this box, and
+// the gate reads the flag, never the address — without it the default, deny,
+// refuses every call to it. test-egress.ts holds that case.
+process.env.OB1_LLM_LOCAL = "1";
 process.env.OB1_EMBEDDING_MODEL = EMB_MODEL;
 process.env.OB1_EMBEDDING_DIM = String(DIM);
 process.env.OB1_CHUNK_TOKENS = String(BATCH - 200);   // headroom, as in production
@@ -198,9 +202,12 @@ console.log("\n[1b] A pass-shaped embedder asks every long capture itself, and n
   // result carries the provider's answer, which is what the pass writes down.
   const cfg = resolveEmbedConfig({ ...(process.env as Record<string, string>), OB1_LLM_TIMEOUT: "1" });
   const pass = createEmbedder(() => cfg, { rememberRefusal: false });
+  // The subject every direct call here names, for the egress gate (SMD-1903);
+  // the endpoint is declared local above, so the gate does not apply.
+  const SUBJECT = { kind: "re-embed" as const };
   const probesBefore = overBatch;
   const results = [];
-  for (const text of [LONG, LONG_HEAD, LONG_MID]) results.push(await pass.embedCapture(text));
+  for (const text of [LONG, LONG_HEAD, LONG_MID]) results.push(await pass.embedCapture(text, SUBJECT));
   assert(overBatch - probesBefore === 3, `three long captures, three over-batch probes — nothing remembered between them (${overBatch - probesBefore})`);
   assert(results.every((r) => r.wholeContentFellBack && r.wholeContentRefused && /400/.test(r.wholeContentError ?? "")),
     "…and each reports its own refusal, with the provider's 400 in the error");
@@ -209,14 +216,14 @@ console.log("\n[1b] A pass-shaped embedder asks every long capture itself, and n
   // The timeout. A short call that never returns fails with the knob named and
   // no status, in about the configured second rather than never.
   const t0 = Date.now();
-  const hung = await pass.getEmbedding("tarpit").then(() => "", (e: Error) => e.message);
+  const hung = await pass.getEmbedding("tarpit", SUBJECT).then(() => "", (e: Error) => e.message);
   assert(/timed out after 1 s \(OB1_LLM_TIMEOUT\)/.test(hung), `a call that never returns times out, naming the setting (${hung})`);
   assert(Date.now() - t0 < 5_000, `…within the timeout, not the test's patience (${Date.now() - t0} ms)`);
-  const stalled = await pass.getEmbedding("slowbody").then(() => "", (e: Error) => e.message);
+  const stalled = await pass.getEmbedding("slowbody", SUBJECT).then(() => "", (e: Error) => e.message);
   assert(/timed out after 1 s \(OB1_LLM_TIMEOUT\)/.test(stalled), `…and so does one whose body never ends after the headers arrived (${stalled})`);
   // The same hang on a whole-content call is a transient fallback: head window,
   // not refused, the timeout in the error — what the pass records as retryable.
-  const hungLong = await pass.embedCapture(`tarpit ${FILLER.repeat(60)}`);
+  const hungLong = await pass.embedCapture(`tarpit ${FILLER.repeat(60)}`, SUBJECT);
   assert(hungLong.wholeContentFellBack && !hungLong.wholeContentRefused && /timed out after 1 s/.test(hungLong.wholeContentError ?? ""),
     "a whole-content call that never returns falls back as transient, with the timeout in the error");
   assert(hungLong.chunks.length >= 3 && hungLong.embedding.every((x, i) => x === hungLong.chunks[0].embedding[i]),
@@ -225,7 +232,7 @@ console.log("\n[1b] A pass-shaped embedder asks every long capture itself, and n
   // carries — so a pass can write "the metadata model timed out" on the row
   // instead of "fix the metadata model".
   const withContext = createEmbedder(() => resolveEmbedConfig({ ...(process.env as Record<string, string>), OB1_LLM_TIMEOUT: "1", OB1_CHUNK_CONTEXT: "on" }), { rememberRefusal: false });
-  const bare = await withContext.embedCapture(`blurbtarpit ${FILLER.repeat(60)}`);
+  const bare = await withContext.embedCapture(`blurbtarpit ${FILLER.repeat(60)}`, SUBJECT);
   assert(bare.contextFailures === bare.chunks.length && bare.chunks.every((c) => !c.context),
     `every blurb timed out, so every window went in bare (${bare.contextFailures} of ${bare.chunks.length})`);
   assert(bare.contextErrors.length === 1 && /Chat completion request .* timed out after 1 s \(OB1_LLM_TIMEOUT\)/.test(bare.contextErrors[0]),
@@ -316,7 +323,7 @@ console.log("\n[5b] The window grown, the same text makes no windows — the win
   /** The same text embedded with the window at the batch — no windows — and written as index.ts writes a capture. */
   const recapture = async (model?: string) => {
     const grown = createEmbedder(() => resolveEmbedConfig({ ...(process.env as Record<string, string>), OB1_CHUNK_TOKENS: String(BATCH), ...(model ? { OB1_EMBEDDING_MODEL: model } : {}) }));
-    const embedded = await grown.embedCapture(text);
+    const embedded = await grown.embedCapture(text, { kind: "capture" });
     assert(embedded.chunks.length === 0, `with the window at the batch the same text makes no windows (${embedded.chunks.length}; model ${embedded.model})`);
     const store = new SqlStore(URL_, { max: 1 });
     await store.captureThought({ content: text, payload: { metadata: {} }, embedding: embedded.embedding, chunks: embedded.chunks, embeddingModel: embedded.model });

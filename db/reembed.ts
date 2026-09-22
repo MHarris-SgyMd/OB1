@@ -402,7 +402,8 @@ import {
   UPDATE_THOUGHT_SIGNATURE,
   validateEmbeddingConfig,
 } from "./config.mjs";
-import { createEmbedder, PROVIDER_ERROR_CHARS, resolveEmbedConfig } from "../server-portable/embed.ts";
+import { createEmbedder, PROVIDER_ERROR_CHARS, ProviderError, resolveEmbedConfig } from "../server-portable/embed.ts";
+import { describeEgress, localKnob, mayLeaveBox, refusesEverything, ROW_UNITS } from "../server-portable/egress.ts";
 import { UUID_RE } from "../server-portable/store.ts";
 import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, reportLost, startHeartbeat } from "./lease.ts";
 
@@ -555,6 +556,29 @@ const refusalTtl: string | null = (() => {
 
 console.log(`  job:       ${JOB}`);
 console.log(`  embedding: ${embedConfig.embeddingModel} @ ${embedConfig.embeddingDim} dimensions, via ${embedConfig.embeddings.base}, ${embedConfig.timeoutMs / 1000} s per call`);
+// What may leave the box (SMD-1903): a row the gate refuses is a failed claim
+// naming the rule, retried by --retry-failed once the policy or the endpoint
+// changes; the text never went anywhere.
+console.log(`  egress:    ${describeEgress(embedConfig.embeddings, embedConfig.egress, localKnob(embedConfig, "embeddings"))}${embedConfig.chunkContext ? `; blurbs: ${describeEgress(embedConfig.chat, embedConfig.egress, localKnob(embedConfig, "chat"))}` : ""}`);
+{
+  // A policy that refuses whatever the row (SMD-1903): stop before claiming,
+  // rather than fail every row in the pool one at a time. A dry run and
+  // --status still report — the banner's egress line says why a run would not.
+  // Units a re-embed carries: the row's own metadata and text, never an
+  // actor — this pass has no worker key (second review pass).
+  const blanket = refusesEverything(embedConfig.embeddings, embedConfig.egress, ROW_UNITS);
+  // --retire and --accept-failed write claim rows, not vectors, and dial
+  // nothing: bookkeeping the gate has no say over (second review pass).
+  if (blanket && !STATUS_ONLY && !DRY_RUN && !RETIRE && !ACCEPT_FAILED) {
+    console.error(`\n  Nothing would be re-embedded: ${blanket}. Declare the endpoint local (${localKnob(embedConfig, "embeddings")}=1) if it is, name what may leave in OB1_EGRESS_ALLOW, or set OB1_EGRESS_POLICY — in words, before a pass that would fail every row it claims.`);
+    process.exit(2);
+  }
+  // The blurbs are chat calls: refused, every long row's claim fails on them
+  // (a bare window is a failure here, since no caller is told) and
+  // --retry-failed would revisit each uselessly. Said before the pass.
+  const blurbs = embedConfig.chunkContext ? refusesEverything(embedConfig.chat, embedConfig.egress, ROW_UNITS) : null;
+  if (blurbs) console.error(`  ⚠  OB1_CHUNK_CONTEXT is on and every blurb call would be refused (${blurbs}) — every long row's claim will fail on its blurbs; turn the context off for this pass, or declare the chat endpoint local (${localKnob(embedConfig, "chat")}=1)`);
+}
 console.log(`  chunks:    ${embedConfig.chunkTokens}-token windows above ${embedConfig.chunkThreshold} (${embedConfig.chunkTokensFrom === "window" ? `from ${embedConfig.embeddingModel}'s ${embedConfig.modelWindow}-token window` : embedConfig.chunkTokensFrom === "OB1_CHUNK_TOKENS" ? "OB1_CHUNK_TOKENS" : "the default, window unknown"}), overlap ${embedConfig.chunkOverlap}, context ${embedConfig.chunkContext ? `on (blurbs via ${embedConfig.chat.base})` : "off"}`);
 
 // One connection per worker and one spare: the heartbeat (db/lease.ts) beats
@@ -1308,12 +1332,55 @@ if (refusalForRun) {
 
 // The provider first, so a wrong URL or a wrong width fails before any row is
 // touched — the width check inside getEmbedding names the model and both widths.
-try {
-  await embedder.getEmbedding("reembed.ts provider probe");
-} catch (e) {
-  console.error(`\n  The embedding provider is not usable: ${(e as Error).message}`);
-  await sql.close();
-  process.exit(2);
+// The probe is the egress gate's subject too (SMD-1903): a constant with no
+// row behind it, so under terms that read the row (type:, source:) it is
+// refused where every pooled row would pass. Skipped then, and said — the
+// first row stands in — rather than blamed on the provider (first review
+// pass: the probe was called without a subject and crashed under any policy
+// that read one).
+const probeSubject = { kind: "re-embed" as const };
+const probeGate = mayLeaveBox(probeSubject, embedConfig.embeddings, embedConfig.egress);
+/**
+ * Whether the provider has answered once — the probe, or a first row
+ * processed to any outcome. While it has not, a row's failure that is not the
+ * gate's is read as the provider's answer (a wrong width, a wrong URL) and
+ * stops the run, so a skipped probe does not turn a configuration error into
+ * a pool marked failed one row at a time (second review pass).
+ */
+let probed = false;
+/**
+ * Set by the stand-in when the provider's first answer was a failure shaped
+ * like the configuration's: the workers return, the row in hand is recorded,
+ * the rest stay pending, and the run exits 1 with the pending hint — not
+ * `stopping`, which is the operator's Ctrl-C and exits 130 (third review pass).
+ */
+let haltedByProvider = false;
+/**
+ * Whether a failure reads as the configuration's — a wrong width, no
+ * embedding in the reply, a body that is not JSON, a model or a route the
+ * endpoint refuses (400–404) — rather than this row's or the moment's: a
+ * timeout, a 408/429, a 5xx, a dropped connection and a database error are
+ * all left to the row, since the probe's stand-in must not halt a run on a
+ * rate limit (third review pass).
+ */
+function configShaped(e: unknown): boolean {
+  // 402 included (fifth review pass): a hosted provider out of credit answers
+  // it, and that is the account's state, not the row's.
+  if (e instanceof ProviderError) return e.kind === "body" || (e.kind === "http" && [400, 401, 402, 403, 404].includes(e.status ?? 0));
+  const msg = (e as Error).message ?? "";
+  return /Embedding width mismatch|returned no embedding/.test(msg);
+}
+if (!probeGate.allowed) {
+  console.log(`  probe:     skipped — ${probeGate.reason}; the first row stands in: a configuration-shaped failure there (a wrong width, no embedding, a non-JSON body, a 400–404) halts the run, anything else is the row's`);
+} else {
+  try {
+    await embedder.getEmbedding("reembed.ts provider probe", probeSubject);
+    probed = true;
+  } catch (e) {
+    console.error(`\n  The embedding provider is not usable: ${(e as Error).message}`);
+    await sql.close();
+    process.exit(2);
+  }
 }
 
 // The record and the pool, in one transaction — see "Changing model" in the
@@ -1433,7 +1500,7 @@ function progress(force = false): void {
  * that NULL as `p_if_unchanged_since` would disable the guard and let this pass
  * write a concurrent edit back to its old text.
  */
-type Row = { id: string; content: string; updated_at: Date };
+type Row = { id: string; content: string; updated_at: Date; metadata: Record<string, unknown> | null };
 
 /**
  * Embed and write one thought. Returns "succeeded" — with a caveat when the
@@ -1444,7 +1511,9 @@ type Outcome = { outcome: "succeeded"; caveat?: string } | { outcome: "failed"; 
 async function processRow(row: Row): Promise<Outcome> {
   let current = row;
   for (let attempt = 0; attempt < 3; attempt++) {
-    const embedded = await embedder.embedCapture(current.content);
+    // The row's own metadata is what the gate reads — source, type, topics —
+    // and an egress refusal throws out of here as a failed claim (SMD-1903).
+    const embedded = await embedder.embedCapture(current.content, { kind: "re-embed", metadata: current.metadata ?? undefined, content: current.content });
     const chunks = embedded.chunks.map((c) => ({ content: c.content, embedding: toVector(c.embedding), context: c.context ?? null }));
     const [r] = await sql`
       SELECT update_thought(
@@ -1524,7 +1593,7 @@ async function processRow(row: Row): Promise<Outcome> {
       // if_unchanged_since — and the text this worker holds is then no longer
       // the row's, so 018 judges it as a change into another row's text. The
       // re-read carries the current text and the next call is unchanged.
-      const [fresh] = (await sql`SELECT id, content, COALESCE(updated_at, created_at) AS updated_at FROM thoughts WHERE id = ${current.id}::uuid`) as Row[];
+      const [fresh] = (await sql`SELECT id, content, COALESCE(updated_at, created_at) AS updated_at, metadata FROM thoughts WHERE id = ${current.id}::uuid`) as Row[];
       if (!fresh) return { outcome: "vanished" };
       current = fresh;
       continue;
@@ -1552,7 +1621,7 @@ async function worker(n: number): Promise<void> {
     onError: (e, consecutive) => { if (consecutive === 1) console.error(`  ${workerId}: heartbeat failed (${e.message}); the leases hold ${TTL} s from the last beat that reached the database`); },
   });
   try {
-    while (!stopping) {
+    while (!stopping && !haltedByProvider) {
       let batch: { thought_id: string; attempt: number }[];
       let byId: Map<string, Row>;
       try {
@@ -1562,7 +1631,7 @@ async function worker(n: number): Promise<void> {
         const ids = batch.map((b) => b.thought_id);
         hb.claimed(ids);
         const rows = (await sql`
-          SELECT id, content, COALESCE(updated_at, created_at) AS updated_at FROM thoughts WHERE id = ANY(${sql.array(ids, "TEXT")}::uuid[])`) as Row[];
+          SELECT id, content, COALESCE(updated_at, created_at) AS updated_at, metadata FROM thoughts WHERE id = ANY(${sql.array(ids, "TEXT")}::uuid[])`) as Row[];
         byId = new Map(rows.map((r) => [r.id, r]));
       } catch (e) {
         // A database error here is not about one thought. This worker stops;
@@ -1571,7 +1640,7 @@ async function worker(n: number): Promise<void> {
         return;
       }
       for (const b of batch) {
-        if (stopping) return;
+        if (stopping || haltedByProvider) return;
         if (hb.lost.has(b.thought_id)) {
           // A beat found this row no longer ours. Nothing to release, and
           // repeating the provider's work would only race the holder; the row
@@ -1588,8 +1657,18 @@ async function worker(n: number): Promise<void> {
         } else {
           try {
             outcome = await processRow(row);
+            probed = true;
           } catch (e) {
-            outcome = { outcome: "failed", error: (e as Error).message.slice(0, PROVIDER_ERROR_CHARS) };
+            const msg = (e as Error).message.slice(0, PROVIDER_ERROR_CHARS);
+            outcome = { outcome: "failed", error: msg };
+            // The skipped probe's stand-in (see `probed`): the provider's
+            // first answer was a failure shaped like the configuration's, so
+            // it is not this row's. This row is recorded; the rest stay
+            // pending rather than fail the same way in turn.
+            if (!probed && configShaped(e)) {
+              console.error(`  ${workerId}: the first row failed before any succeeded — ${msg} — read as the provider's answer, not the row's; halting so the pool is not marked failed row by row (this row is recorded failed, --retry-failed revisits it; the rest stay pending for the re-run)`);
+              haltedByProvider = true;
+            }
           }
         }
         // Out of the heartbeat's set before the release goes out, so a beat in
@@ -1726,8 +1805,9 @@ if (after.claimed > 0) {
 }
 if (after.pending > 0 && !stopping) {
   // Every worker stopped before the pool was empty — a database error each
-  // (their messages are above) — and handed its leases back. Not done.
-  console.error(`\n  ${after.pending} row(s) are still pending: every worker stopped before the pool was empty. Re-run.`);
+  // (their messages are above), or the provider's first answer was a
+  // configuration-shaped failure — and handed its leases back. Not done.
+  console.error(`\n  ${after.pending} row(s) are still pending: every worker stopped before the pool was empty${haltedByProvider ? " — the provider's first answer was a failure (above); fix it, then --retry-failed and re-run" : ". Re-run"}.`);
 }
 await sql.close();
 process.exit(stopping ? 130 : after.failed > 0 || after.claimed > 0 || after.pending > 0 ? 1 : 0);

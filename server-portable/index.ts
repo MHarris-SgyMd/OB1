@@ -2,6 +2,7 @@
 import { displayDate, normaliseType, thoughtTitle, thoughtUrl, THOUGHT_TYPES } from "./thoughts.ts";
 import { cleanForDisplay } from "./consolidate.ts";
 import { createEmbedder, providerCall, ProviderError, resolveEmbedConfig, type EmbedConfig, type EmbedKind, type EmbeddedCapture } from "./embed.ts";
+import { decideCalls, mayLeaveBox, type EgressDecision, type EgressSubject } from "./egress.ts";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPTransport } from "@hono/mcp";
 import { Hono } from "hono";
@@ -100,6 +101,25 @@ type Env = {
   OB1_CHAT_BASE_URL?: string;
   /** The chat endpoint's own credential; a different chat endpoint never inherits OB1_LLM_API_KEY. */
   OB1_CHAT_API_KEY?: string;
+  /**
+   * 1/on: the endpoint OB1_LLM_BASE_URL names is on this machine or its
+   * private network, so the egress gate does not apply to it (SMD-1903).
+   * Declared, never guessed from the address — a loopback URL with this unset
+   * is remote to the gate.
+   */
+  OB1_LLM_LOCAL?: string;
+  /** Likewise for OB1_CHAT_BASE_URL; a chat endpoint at the same base is the same box, declared by either knob. */
+  OB1_CHAT_LOCAL?: string;
+  /**
+   * What may leave the box for an endpoint not declared local: deny (the
+   * default — only what an OB1_EGRESS_ALLOW term names), allow (everything
+   * but what an OB1_EGRESS_DENY term names) or off. See egress.ts.
+   */
+  OB1_EGRESS_POLICY?: string;
+  /** Comma-separated unit:value terms (actor, source, type, topic, marker) read under deny. */
+  OB1_EGRESS_ALLOW?: string;
+  /** The same, read under allow. */
+  OB1_EGRESS_DENY?: string;
   /** Seconds a single provider call — embedding, blurb or metadata extraction — may take. Default 120 — see embed.ts. */
   OB1_LLM_TIMEOUT?: string;
   OPEN_BRAIN_CITATION_BASE_URL?: string;
@@ -182,8 +202,8 @@ function citationBase(): string {
 // capture would. The embedder remembers one thing across calls: whether the
 // provider refused a whole-content embedding, which is a property of the model.
 const embedder = createEmbedder(embedConfig);
-const embedCapture = (content: string) => embedder.embedCapture(content);
-const getEmbedding = (text: string, kind: EmbedKind = "document") => embedder.getEmbedding(text, kind);
+const embedCapture = (content: string, subject: EgressSubject) => embedder.embedCapture(content, subject);
+const getEmbedding = (text: string, subject: EgressSubject, kind: EmbedKind = "document") => embedder.getEmbedding(text, subject, kind);
 
 /**
  * What a capture or an edit reply says when the whole-content vector could
@@ -202,8 +222,57 @@ function explainHeadWindow(e: EmbeddedCapture | undefined): string {
   );
 }
 
+/**
+ * What a capture records when the egress gate did not let its text reach the
+ * chat endpoint (SMD-1903): the reason under the key the other failures use,
+ * and NO topics and NO type — the call never happened, so it produced none,
+ * and "observation" or the "uncategorized" placeholder would be a tag set
+ * dressed as an extraction. Nothing here but the marker, also because
+ * upsert_thought MERGES a re-capture's metadata over the row's (035): a
+ * placeholder topic would have replaced an existing thought's real tags on
+ * every re-capture under a refusing policy (first review pass). The capture
+ * path writes this without calling extractMetadata; extractMetadata returns
+ * it too should a refusal reach providerCall, so no path fabricates a tag set.
+ */
+function metadataRefused(): Record<string, unknown> {
+  return { metadata_extraction_failed: "egress_denied" };
+}
 
-async function extractMetadata(text: string): Promise<Record<string, unknown>> {
+/**
+ * A search the egress gate refused (SMD-1903): the query text would leave for
+ * its embedding, and the policy says it may not. The caller's way through is
+ * the keyword tool, which makes no model call; the operator's are named.
+ */
+function refuseQuery(gate: EgressDecision, actor: string): string {
+  // The remedy follows the rule that refused (first review pass): under
+  // `allow` a deny term matched, and adding an allow term would change
+  // nothing; a second opinion is the operator's hook to read.
+  const remedy = gate.rule === "deny-term"
+    ? "or removes the OB1_EGRESS_DENY term the reason names"
+    : gate.rule === "second-opinion"
+      ? "or reads what the second opinion refused"
+      : `or allows this key (OB1_EGRESS_ALLOW=actor:${actor})`;
+  return (
+    `Refused: the query text would be sent for its embedding, and ${gate.reason}. ` +
+    `Use search_thoughts_keyword (exact text, no model call). To allow semantic search here, the operator declares the endpoint local ` +
+    `(OB1_LLM_LOCAL=1) when it is, ${remedy}.`
+  );
+}
+
+/**
+ * The question both search tools ask before embedding a query (SMD-1903): the
+ * subject the embedding will be judged and sent under, and the refusal text
+ * when it may not leave. One helper, since the two tools had the four lines
+ * each (boyscout).
+ */
+function gateQuery(query: string, principal: Principal): { subject: EgressSubject; refused?: string } {
+  const cfg = embedConfig();
+  const subject: EgressSubject = { kind: "query", actor: principal.name, content: query };
+  const gate = mayLeaveBox(subject, cfg.embeddings, cfg.egress);
+  return gate.allowed ? { subject } : { subject, refused: refuseQuery(gate, principal.name) };
+}
+
+async function extractMetadata(text: string, subject: EgressSubject): Promise<Record<string, unknown>> {
   // The original swallowed every failure into the fallback below: an auth error,
   // a rate limit, or a 500 from OpenRouter all produced a thought tagged
   // "uncategorized" and a success message to the user, with no way to tell a
@@ -249,10 +318,11 @@ Only extract what's explicitly there.`,
         },
         { role: "user", content: text },
       ],
-    });
+    }, subject);
   } catch (e) {
     if (e instanceof ProviderError) {
       console.error(`extractMetadata: ${e.message}`);
+      if (e.kind === "egress") return metadataRefused();
       return fallback(e.kind === "timeout" ? "provider_timeout" : e.kind === "http" ? `provider_${e.status}` : "invalid_response_body");
     }
     throw e;
@@ -491,7 +561,10 @@ function buildServer(principal: Principal): McpServer {
     },
     async ({ query }) => {
       try {
-        const qEmb = await getEmbedding(query, "query");
+        // The query text leaves for its embedding as a thought's does (SMD-1903).
+        const q = gateQuery(query, principal);
+        if (q.refused) return toolError(q.refused);
+        const qEmb = await getEmbedding(query, q.subject, "query");
         const data = await (await db()).hybridThoughts({
           query,
           embedding: qEmb,
@@ -626,7 +699,10 @@ function buildServer(principal: Principal): McpServer {
     },
     async ({ query, limit, threshold, recency_weight }) => {
       try {
-        const qEmb = await getEmbedding(query, "query");
+        // The query text leaves for its embedding as a thought's does (SMD-1903).
+        const q = gateQuery(query, principal);
+        if (q.refused) return toolError(q.refused);
+        const qEmb = await getEmbedding(query, q.subject, "query");
         const data = await (await db()).hybridThoughts({
           query,
           embedding: qEmb,
@@ -1096,12 +1172,20 @@ function buildServer(principal: Principal): McpServer {
         // Existence stays the write's.
         const badDerived = derived_from?.find((d) => !UUID_RE.test(d));
         if (badDerived !== undefined) return toolError(`Refused: every \`derived_from\` entry must be a thought id (the ID: line of a search result), not "${badDerived.slice(0, 40)}".`);
+        // What may leave the box (SMD-1903): asked once, for both calls, and
+        // only the allowed ones are made — a refused capture costs no request
+        // and lands all the same, without the vector or the tags the refused
+        // call would have produced, with the decision on its audit row.
+        const cfg = embedConfig();
+        const subject: EgressSubject = { kind: "capture", actor: principal.name, metadata: { source: "mcp" }, content };
+        const gate = decideCalls(subject, cfg, cfg.egress);
         // Independent of each other, so they overlap.
         const [embedded, metadata] = await Promise.all([
-          embedCapture(content),
-          extractMetadata(content),
+          gate.embeddings.allowed ? embedCapture(content, subject) : Promise.resolve(undefined),
+          gate.chat.allowed ? extractMetadata(content, subject) : Promise.resolve(metadataRefused()),
         ]);
-        const { embedding, chunks, contextFailures } = embedded;
+        const chunks = embedded?.chunks ?? [];
+        const contextFailures = embedded?.contextFailures ?? 0;
 
         const payload = { metadata: { ...metadata, source: "mcp" } };
 
@@ -1122,12 +1206,17 @@ function buildServer(principal: Principal): McpServer {
             name: principal.name,
             agentId: principal.agentId,
             source: String(payload.metadata.source ?? "mcp"),
+            // The gate's decisions for this write, on the audit row (SMD-1903);
+            // absent when both endpoints are declared local and nothing was judged.
+            ...(gate.record ? { egress: gate.record } : {}),
           },
-          embedding,
+          // NULL when the gate refused the embedding call: the row lands with
+          // its text and fingerprint and no vector, as the reply says.
+          embedding: embedded?.embedding ?? null,
           // The model this vector came from, recorded on the row (021) — the
           // one the embedder used, not the one ob1_config records: they differ
           // exactly while a re-embed to another model is under way.
-          embeddingModel: embedded.model,
+          embeddingModel: embedded?.model,
           // 025: provenance, if the caller named any. upsert_thought validates
           // derived_from and refuses a bad reference, so a malformed value
           // fails the capture with a clear message rather than storing a lie.
@@ -1181,17 +1270,44 @@ function buildServer(principal: Principal): McpServer {
         if (Array.isArray(meta.action_items) && meta.action_items.length)
           confirmation += ` | Actions: ${(meta.action_items as string[]).join("; ")}`;
 
+        // The gate's refusal first among the notes (SMD-1903): a thought
+        // without its vector is the one fact a caller must not miss. Not an
+        // error — the policy did what it says — but said in full. On a
+        // RE-CAPTURE the row keeps the vector it had (upsert_thought
+        // coalesces), so the note says that instead of "no vector" (first
+        // review pass). A database from before 035, or the PostgREST
+        // two-step, does not say which this was — and the coalesce holds
+        // there too (033), so the note hedges rather than tell the fresh-row
+        // story of a row that may be keeping its vector (second review pass).
+        const existed = captured.existed;
+        if (!gate.embeddings.allowed) {
+          confirmation += existed === true
+            ? `\n\nNote: the embedding call for this capture was not made — ${gate.embeddings.reason}. This text was already a thought, and it keeps the vector it had.`
+            : existed === false
+              ? `\n\nNote: saved WITHOUT a vector — ${gate.embeddings.reason}. ` +
+                `It is findable by exact text (search_thoughts_keyword) and joins semantic search after a re-embed pass ` +
+                `(db/reembed.ts) against an endpoint the gate allows.`
+              : `\n\nNote: the embedding call for this capture was not made — ${gate.embeddings.reason}. A new thought has no vector — findable by exact text ` +
+                `(search_thoughts_keyword), filled in by a re-embed pass (db/reembed.ts) against an endpoint the gate allows; text already captured keeps the vector it had. ` +
+                `This database does not say which this was.`;
+        }
+
         // A chunk whose situating blurb could not be generated is embedded bare
         // and stored with a NULL context, which is a legitimate state and a
         // silent one. Saying so here is half of what keeps it from being silent
         // — preflight, which counts both kinds across the whole corpus, is the
         // other half.
         if (contextFailures > 0) {
-          confirmation +=
-            `\n\nNote: ${contextFailures} of ${chunks.length} search chunks were embedded without ` +
-            `their situating context — the call failed, or returned a blurb too long to be one. ` +
-            `They are stored and searchable; re-capture to regenerate, or check the model at ` +
-            `${embedConfig().chat.base}.`;
+          confirmation += gate.chat.allowed
+            ? `\n\nNote: ${contextFailures} of ${chunks.length} search chunks were embedded without ` +
+              `their situating context — the call failed, or returned a blurb too long to be one. ` +
+              `They are stored and searchable; re-capture to regenerate, or check the model at ` +
+              `${embedConfig().chat.base}.`
+            // The blurbs are chat calls, and the gate refused the chat endpoint
+            // (SMD-1903): not a model to check, and the reason is the one the
+            // tagging note below carries.
+            : `\n\nNote: the ${chunks.length} search chunks were embedded without their situating context — ` +
+              `the blurb calls were not made: ${gate.chat.reason}. They are stored and searchable.`;
         }
         confirmation += explainHeadWindow(embedded);
 
@@ -1228,7 +1344,19 @@ function buildServer(principal: Principal): McpServer {
         // so a broken credential does not look like a successful capture. The
         // remedy names the endpoint the tagging call dialled — the chat one,
         // which since SMD-1902 need not be where the embedding went.
-        if (typeof meta.metadata_extraction_failed === "string") {
+        if (meta.metadata_extraction_failed === "egress_denied") {
+          // Not a failure to check the endpoint for: the call was not made.
+          // The reason is the decision made here; providerCall's own refusal
+          // (the belt) reaching this branch would mean the two disagreed,
+          // which the shared function makes impossible — but say so rather
+          // than print an "allowed" sentence under a refusal.
+          const why = gate.chat.allowed ? "the egress gate refused the tagging call" : gate.chat.reason;
+          confirmation += existed === true
+            ? `\n\nNote: the tagging call for this capture was not made — ${why}. The existing thought keeps its tags; its metadata now carries the refusal marker.`
+            : existed === false
+              ? `\n\nNote: no topics, people or type were extracted — ${why}.`
+              : `\n\nNote: the tagging call for this capture was not made — ${why}. A new thought has no topics or type; text already captured keeps its tags, with the refusal marker merged in.`;
+        } else if (typeof meta.metadata_extraction_failed === "string") {
           confirmation +=
             `\n\nNote: the thought was saved, but automatic tagging failed ` +
             `(${meta.metadata_extraction_failed}) — topics and people are placeholders. ` +
@@ -1308,7 +1436,20 @@ function buildServer(principal: Principal): McpServer {
 
         // Only re-embed when the text actually changed. A metadata-only edit
         // must not spend two model calls, nor risk replacing a good vector.
-        const embedded = content !== undefined ? await embedCapture(content) : undefined;
+        // The gate as at capture (SMD-1903), asked only when the text moves:
+        // refused, the new text is stored and the stale vector cleared with it
+        // (update_thought's rule: content and no vector is NULL), and the
+        // reply says so.
+        // The subject is the ROW — its own source, type and topics, which a
+        // capture cannot know but an edit can: one read, only when the text
+        // moves (first review pass: an edit judged under the capture's bare
+        // {source: "mcp"} let a row a type: or source: term names slip past).
+        // A row that is not there is judged as bare and refused by the write.
+        const cfg = embedConfig();
+        const existing = content !== undefined ? await (await db()).getThought(id) : null;
+        const subject: EgressSubject = { kind: "edit", actor: principal.name, metadata: existing?.metadata ?? { source: "mcp" }, content };
+        const gate = content !== undefined ? decideCalls(subject, cfg, cfg.egress) : undefined;
+        const embedded = content !== undefined && gate?.embeddings.allowed ? await embedCapture(content, subject) : undefined;
 
         const result = await (await db()).updateThought({
           id,
@@ -1317,7 +1458,7 @@ function buildServer(principal: Principal): McpServer {
           embedding: embedded?.embedding,
           chunks: embedded?.chunks,
           ifUnchangedSince: if_unchanged_since,
-          actor: { name: principal.name, agentId: principal.agentId, source: "mcp" },
+          actor: { name: principal.name, agentId: principal.agentId, source: "mcp", ...(gate?.record ? { egress: gate.record } : {}) },
           // Read by update_thought only with content, when the vector moves (021).
           embeddingModel: embedded?.model,
           // 032: only the key the caller named reaches the envelope — absent
@@ -1340,7 +1481,7 @@ function buildServer(principal: Principal): McpServer {
         ]);
 
         const what = [
-          content !== undefined ? "content re-embedded" : null,
+          content !== undefined ? (gate?.embeddings.allowed ? "content re-embedded" : "content saved without a vector") : null,
           metadata_patch !== undefined ? "metadata merged" : null,
           supersedes === null ? "supersedes cleared" : supersedes !== undefined ? `now supersedes ${supersedes}` : null,
           // An edit replaces every chunk, so a failure here leaves the SAME
@@ -1351,7 +1492,10 @@ function buildServer(principal: Principal): McpServer {
         return {
           content: [{
             type: "text" as const,
-            text: `Updated ${id} (${what}).\nupdated_at: ${result.updatedAt}\nPass that value as if_unchanged_since on your next edit.${explainPair(result)}${explainHeadWindow(embedded)}`,
+            text: `Updated ${id} (${what}).\nupdated_at: ${result.updatedAt}\nPass that value as if_unchanged_since on your next edit.${explainPair(result)}${explainHeadWindow(embedded)}${
+              gate && !gate.embeddings.allowed
+                ? `\n\nNote: saved WITHOUT a vector — ${gate.embeddings.reason}. It is findable by exact text and joins semantic search after a re-embed pass (db/reembed.ts) against an endpoint the gate allows.`
+                : ""}`,
           }],
         };
       } catch (e) {

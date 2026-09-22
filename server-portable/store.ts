@@ -27,6 +27,8 @@
  * shapes to the tools (SMD-1040, SMD-1328).
  */
 
+import type { EgressRecord } from "./egress.ts";
+
 export type ThoughtMatch = {
   id: string;
   content: string;
@@ -608,6 +610,13 @@ export type Actor = {
    * which is exactly the pre-010 behaviour rather than a new failure.
    */
   agentId?: string;
+  /**
+   * The egress gate's decisions for this write (SMD-1903): which endpoint
+   * was, or was not, sent the text, and by which rule. Lands in
+   * thought_audit.actor_context, where the trigger keeps every key it does
+   * not read by name. Absent when both endpoints are declared local.
+   */
+  egress?: EgressRecord;
 };
 
 /**
@@ -626,6 +635,7 @@ export function actorPayload(actor: Actor | undefined): Record<string, unknown> 
     ...(actor.source !== undefined ? { source: actor.source } : {}),
     ...(actor.session !== undefined ? { session: actor.session } : {}),
     ...(actor.agentId !== undefined ? { agent_id: actor.agentId } : {}),
+    ...(actor.egress !== undefined ? { egress: actor.egress } : {}),
   };
 }
 
@@ -842,7 +852,14 @@ export interface ThoughtStore {
      */
     actor?: Actor;
     payload: { metadata: Record<string, unknown> };
-    embedding: number[];
+    /**
+     * NULL when the egress gate refused the embedding call (SMD-1903): the row
+     * lands with its text and fingerprint and no vector — findable by exact
+     * text, absent from semantic search until a re-embed pass against an
+     * endpoint the gate allows. The only path that stores a row without a
+     * vector on purpose; a failed call still fails the capture.
+     */
+    embedding: number[] | null;
     /**
      * Per-window embeddings for a capture too long to embed in one provider call.
      * Empty or absent for ordinary short thoughts, which stay exactly as they

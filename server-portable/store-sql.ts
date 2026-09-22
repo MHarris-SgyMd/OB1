@@ -253,7 +253,7 @@ export class SqlStore implements ThoughtStore {
   async captureThought(opts: {
     content: string;
     payload: { metadata: Record<string, unknown> };
-    embedding: number[];
+    embedding: number[] | null;
     chunks?: { content: string; embedding: number[]; context?: string }[];
     actor?: Actor;
     embeddingModel?: string;
@@ -295,14 +295,14 @@ export class SqlStore implements ThoughtStore {
           SELECT upsert_thought(
             ${opts.content}::text,
             ${envelope}::jsonb,
-            ${toVector(opts.embedding)}::vector,
+            ${opts.embedding ? toVector(opts.embedding) : null}::vector,
             ${chunks.map((c) => ({ content: c.content, embedding: toVector(c.embedding), context: c.context ?? null }))}::jsonb
           ) AS r`
       : await this.sql`
           SELECT upsert_thought(
             ${opts.content}::text,
             ${envelope}::jsonb,
-            ${toVector(opts.embedding)}::vector
+            ${opts.embedding ? toVector(opts.embedding) : null}::vector
           ) AS r`;
 
     const r = rows[0]?.r as { id?: string; existed?: unknown; supersedes?: unknown } | undefined;

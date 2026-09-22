@@ -170,6 +170,19 @@ services:
       # container, reports it beside the metadata model and probes it with --deep.
       OB1_JUDGE_MODEL: ${OB1_JUDGE_MODEL:-}
       OB1_LLM_TIMEOUT: ${OB1_LLM_TIMEOUT:-}
+      # What may leave the box (SMD-1903): whether a thought's text may reach
+      # an endpoint not declared local — deny (the default), allow or off —
+      # and its terms. "Local" is DECLARED, never read off the address, so
+      # the stack's own `ollama` service (the fallback below) and an Ollama on
+      # the host both need OB1_LLM_LOCAL=1 in deploy/.env; without it, under
+      # the default, every embedding is refused and preflight's `embeddings
+      # egress` row says so. No fallback here for the same reason: the compose
+      # file must not declare local on the operator's behalf.
+      OB1_EGRESS_POLICY: ${OB1_EGRESS_POLICY:-}
+      OB1_EGRESS_ALLOW: ${OB1_EGRESS_ALLOW:-}
+      OB1_EGRESS_DENY: ${OB1_EGRESS_DENY:-}
+      OB1_LLM_LOCAL: ${OB1_LLM_LOCAL:-}
+      OB1_CHAT_LOCAL: ${OB1_CHAT_LOCAL:-}
       # Where both model calls go. Unset in deploy/.env this is the stack's own
       # Ollama — the `ollama` service the local-models profile adds, by name on
       # the compose network — so the profile needs nothing set. Not a copy of

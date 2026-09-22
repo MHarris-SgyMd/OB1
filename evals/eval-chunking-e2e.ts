@@ -91,6 +91,10 @@ async function runOne(chunkTokens: number, repeats: number): Promise<{ found: nu
       DATABASE_URL: URL_,
       OB1_STORE: "sql",
       OB1_LLM_BASE_URL: OLLAMA,
+      // Declared local to the egress gate (SMD-1903): the eval's own Ollama,
+      // on this box; without it the default, deny, refuses every capture the
+      // child makes and the eval measures nothing.
+      OB1_LLM_LOCAL: "1",
       OB1_EMBEDDING_MODEL: EMBED,
       OB1_EMBEDDING_DIM: String(DIM),
       OB1_METADATA_MODEL: META,
