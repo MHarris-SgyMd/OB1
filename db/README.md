@@ -1505,6 +1505,65 @@ measures both that awaited INSERT's cost and the prune plan flipping to an index
 scan. A cheaper insert path (a BRIN in place of the btree, the log being
 append-only with a monotonic `logged_at`) is a tracked follow-up (SMD-1950).
 
+## The board in the brain (SMD-1954)
+
+`ingest-records.ts` above loads the Linear board from a corpus dump, once, for a
+rebuild. The fork's running brain needs the board **continuously**: a ticket filed
+while a session works should be findable in the next, and one that moves to Done
+should read Done. `sync-linear.ts` is that sweep, and `deploy/compose.yaml`'s
+`board-sync` profile runs it on a schedule:
+
+```bash
+bun sync-linear.ts --url postgres://…                # one pass
+bun sync-linear.ts --url … --dry-run                 # what a pass would write
+bun sync-linear.ts --url … --audit                   # the lockstep census: missing / stale / extra; exit 1 when any
+bun sync-linear.ts --url … --loop                    # a pass every OB1_BOARD_SYNC_INTERVAL seconds (300)
+bun sync-linear.ts --url … --full                    # re-render and compare every issue, not only the moved ones
+bun sync-linear.ts --url … --only SMD-1954,SMD-1865  # a few identifiers, from the plan
+bun sync-linear.ts --self-check                      # the pure rules and the write decisions, no network, no database
+```
+
+`LINEAR_API_KEY` (a personal API key; the tool only reads) comes from the
+environment or a `.env` on `evals/env.ts`'s search path; `OB1_LINEAR_INITIATIVE`
+(default `Open Brain`, an exact name or a prefix naming exactly one) says whose
+projects are the board; the provider knobs are the server's, resolved as
+`reembed.ts` resolves them.
+
+**The brain is the state.** A pass lists every issue's identifier and `updatedAt`
+(two requests for three hundred), reads the brain's ticket rows, and the diff is
+the work: an identifier with no row is **missing** and is captured; one whose row's
+`linear_updated_at` is older than Linear's (or absent — a hand capture, adopted on
+first sight) is **stale** and is fetched in full and compared; the rest are left
+alone. A ticket row is one whose `metadata.issue` names an identifier (this tool's
+rows and `ingest-records.ts`'s — one key, so a rebuilt stable brain is adopted, not
+duplicated) or, before adoption, whose text opens with the hand-capture header
+(`SMD-N — title` / `Project: … · Status: …` / the Linear URL). A note that merely
+begins with an identifier is not one and is never touched. There is no done-file
+to lose; a pass killed halfway is finished by the next.
+
+**What a write is.** New: `captureThought` with the vector, the extracted tags and
+the facets Linear knows over them (`source: linear`, `issue`, `project`, `status`,
+`status_type`, `priority`, `labels`, `parent`, `url`, `linear_updated_at`).
+Changed text: `updateThought` with a fresh vector and the facets that moved, one
+statement. Same text, facets behind (the adoption case): a metadata patch and no
+model call — on the dogfood brain 224 of 268 hand captures rendered byte-identical
+and cost nothing but the patch. Every write goes through `server-portable/store-sql.ts`
+as the actor `board-sync` via `db/sync-linear.ts`, the egress gate asked first
+(refused, the row lands without a vector and the audit row says so), so a synced
+ticket differs from a captured one in `metadata.source` alone. Linear's autolink
+markup (`<issue …>SMD-x</issue>`) is stripped to the identifier before storing
+(SMD-1865's first item; the typed edges are its second and stay there). When one
+identifier has several ticket rows — the hand re-captures — the newest is kept
+current and each older twin is marked superseded by the next newer (032), once;
+nothing is deleted, and a pointer already there is left.
+
+**Not removed, not commented.** An issue deleted in Linear or moved out of the
+initiative keeps its row (`--audit` lists it under *extra*; `ingest-records.ts` has
+the same rule). Comments are the corpus builder's for the retrieval eval; the board
+mirror keeps the hand captures' shape, which had none. A Linear webhook would be
+exact and immediate; it needs an inbound URL (SMD-1846) and SMD-1862's handler,
+which would call this tool's `syncIssue` with the one identifier it was told.
+
 ## Testing
 
 Two suites cover most of it, because one of them cannot reach everything, and a

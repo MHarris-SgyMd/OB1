@@ -133,7 +133,11 @@ services:
       # on the missing module.
       context: ..
       dockerfile: server-portable/Dockerfile
-    environment:
+    # Anchored: `board-sync` below inherits this block whole (`<<: *server-env`),
+    # so the provider, embedding and egress knobs are forwarded once, here, and a
+    # worker that embeds and tags exactly as a capture does reads exactly what
+    # the server reads. Check 14 parses anchors and merge keys (SMD-1954).
+    environment: &server-env
       # No OB1_STORE on purpose: the SQL store is the server's default (FORK.md
       # change 97), and this stack — the "Full stack, no Supabase" CI job — is
       # the deployment that proves it. Setting it here would let the default
@@ -236,6 +240,43 @@ services:
       # machine, and puts the key on the wire in clear on every request: the
       # header is as visible as `?key=` over plain HTTP (SMD-1844).
       - "${SERVER_BIND:-127.0.0.1}:${SERVER_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  # Keeps the brain in lockstep with the Linear board (SMD-1954). Optional —
+  # `--profile board-sync`; a brain that is not the fork's own never runs it.
+  #
+  # `bun db/sync-linear.ts --loop`: every OB1_BOARD_SYNC_INTERVAL seconds (300)
+  # it lists the issues of the OB1_LINEAR_INITIATIVE's projects, reads the
+  # brain's ticket rows, and writes the difference — a new issue captured, a
+  # moved one updated in place — through the server's own store and embedder
+  # (db/sync-linear.ts's header). No port, no key: it reaches Postgres as the
+  # migrator does and writes as the actor `board-sync`. The whole checkout is
+  # mounted read-only because the tool imports server-portable/ and evals/env.ts
+  # beside db/ (the migrator mounts db/ alone); like the migrator it needs no
+  # `bun install` — Bun built-ins and in-tree modules only.
+  #
+  # The model knobs are the server's, inherited from its anchor above; the two
+  # of its own are LINEAR_API_KEY (a personal API key, read-only use — it
+  # fetches issues) and OB1_LINEAR_INITIATIVE. The egress gate applies to its
+  # embed and tag calls as to a capture's: with the provider on the host,
+  # deploy/.env carries OB1_LLM_LOCAL=1 or every ticket lands without a vector.
+  board-sync:
+    image: oven/bun:1.4.0-alpine
+    profiles: ["board-sync"]
+    working_dir: /app
+    volumes:
+      - ..:/app:ro
+    environment:
+      <<: *server-env
+      LINEAR_API_KEY: ${LINEAR_API_KEY:?set LINEAR_API_KEY in deploy/.env — a Linear personal API key, for the board-sync profile}
+      OB1_LINEAR_INITIATIVE: ${OB1_LINEAR_INITIATIVE:-}
+      OB1_BOARD_SYNC_INTERVAL: ${OB1_BOARD_SYNC_INTERVAL:-}
+    command: ["bun", "db/sync-linear.ts", "--loop"]
     depends_on:
       postgres:
         condition: service_healthy
