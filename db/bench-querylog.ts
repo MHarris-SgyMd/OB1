@@ -76,10 +76,19 @@ const INDEX = "query_log_logged_at_idx";
 
 // ── Setup ──────────────────────────────────────────────────────────────────────
 
-/** A fresh schema (every migration, index present) on its own single connection. */
+/**
+ * A fresh schema (every migration, index present) on its own single connection.
+ * Assert the index is actually there, symmetric with dropIndex's post-check: if the
+ * migration ever stops building it (renamed, guarded out, lost in a merge), the
+ * "with index" arm would silently measure an index-less table and both arms would
+ * read alike — a false "no change" that looks like a clean result, not a broken bench.
+ */
 async function load(): Promise<SQL> {
   await resetSchema(URL_, OPTS);
-  return new SQL({ url: URL_, max: 1 });
+  const c = new SQL({ url: URL_, max: 1 });
+  const [n] = await c`SELECT count(*)::int AS c FROM pg_indexes WHERE indexname = ${INDEX}`;
+  if (n.c !== 1) throw new Error(`${INDEX} was not built by the schema — the with-index arm would measure an index-less table`);
+  return c;
 }
 
 /** Drop 046's index and prove it is gone — "with" silently staying "with" would read as a clean result. */
