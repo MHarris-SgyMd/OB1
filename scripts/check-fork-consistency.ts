@@ -3330,6 +3330,7 @@ function releasedChangelogTickets(text: string) {
     const title = part.split("\n", 1)[0].trim();
     if (!title.startsWith("[") || title === "[Unreleased]") continue;
     const vm = /^\[([^\]]+)\]/.exec(title);
+    if (!vm) continue; // a `## [` heading with no `]`: checkChangelogShape has reported it; reading vm[1] threw and hid every violation (SMD-1870)
     out.set(vm[1], new Set([...part.matchAll(/\bSMD-(\d+)\b/g)].map((m) => `SMD-${m[1]}`)));
   }
   return out;
@@ -3375,6 +3376,8 @@ function checkChangelogForkPairing() {
     [[{ version: "1.0.0", tickets: ["SMD-9"] }], "## [1.0.0] - 2026-09-30\n- x (SMD-9)\n", fork, "a released ticket with no FORK section"],
     [[], "## [1.0.0] - 2026-09-30\n- x (SMD-1)\n", fork, "a changelog release with no releases.json entry"],
   ] as const) if (pairingProblems(rel, cl, forks).length === 0) fail(SELF, `check 17b no longer catches ${why} (its own probe)`);
+  // A malformed heading is check 17a's finding; the ticket reader skips it rather than throwing on it (a TypeError here hid every violation, SMD-1870).
+  if (releasedChangelogTickets("## [Unreleased]\n\n## [1.0.0 - 2026-09-30\n- x (SMD-1)\n").size !== 0) fail(SELF, "check 17b's ticket reader reads a `## [` heading with no closing bracket as a version (its own probe)");
 
   const clPath = join(ROOT, "CHANGELOG.md");
   if (!existsSync(clPath)) return;
