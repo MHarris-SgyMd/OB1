@@ -69,9 +69,10 @@ import { fileURLToPath } from "node:url";
 import { buffersOf, COLUMN_COMMENT_SQL, communitySchemaFiles, createAssert, FUNCTION_COMMENT_SQL, SAMPLE_STATEMENT, sampleStatementOf, SCHEMA_FILES_FIRST, SCHEMAS_DIR, seededRandom, TABLE_COMMENT_SQL, TID_PROBE } from "./test-support.ts";
 import { markerAnswers } from "./bench-oracle.ts";
 import {
-  DEFAULT_OPTIONS, FUZZY_FLOOR, NUMERIC_NAME_RE, coverage as graphCoverage, neighbourhood, parseArgs, pgArray, render, report as graphReport,
+  DEFAULT_OPTIONS, FUZZY_FLOOR, coverage as graphCoverage, neighbourhood, parseArgs, pgArray, rankedSubjects, render, report as graphReport,
   resolveSubject, subjectThoughts, topEntities, topThoughts, type Options as GraphOptions, type Runner,
 } from "./graph-centrality.ts";
+import { NUMERIC_NAME_RE } from "../server-portable/entities.ts";
 import { agentLabel, armOf, attribute, citePointerOf, goldFromFixture, renderReport, summarise, toActionRow, toSearchRow, type ActionRow, type SearchRow } from "../evals/utilization.ts";
 import { ENTITY_TYPES, RELATIONS } from "../server-portable/entities.ts";
 
@@ -5093,6 +5094,8 @@ console.log("\n[43] db/graph-centrality.ts: mentions, degree and support as defi
   assert(cov.edges === 6 && cov.unit_edges === 5, `six edge rows, five at confidence 1.00 — the SMD-1925 caveat is a count, not a claim (${cov.edges}, ${cov.unit_edges})`);
   assert(cov.extraction_key === null, "no extraction key: the coverage line says the worker has not set one");
   assert((await graphCoverage(run, keep)).entities === 5, "…and with numerics kept the fifth entity is in scope");
+  assert((await graphCoverage(run, { ...on, types: ["tool"] })).numeric_names === 0 && (await graphCoverage(run, { ...on, types: ["person"] })).numeric_names === 1,
+    "numeric_names counts the rule's own effect — numeric names among the ranked types, so under --types tool the person 021 is not counted (third review pass)");
 
   // The three counts, as the header defines them.
   const top = await topEntities(run, on);
@@ -5200,9 +5203,15 @@ console.log("\n[43] db/graph-centrality.ts: mentions, degree and support as defi
   const r2 = await graphReport(run, "Open Brain", on);
   assert(JSON.stringify(r1) === JSON.stringify(r2), "two runs over the same rows are byte-identical");
   const text = render(r1);
-  for (const needle of ["SMD-1925", "5 of 6 edge rows carry confidence 1.00", "SMD-1935", "1 entity named only by digits", "no ticket status", "No recency term", "Coverage: 7 of 7 thoughts", "db/extract-entities.ts has not run"])
+  for (const needle of ["SMD-1925", "5 of 6 edge rows carry confidence 1.00", "SMD-1935", "1 entity of the ranked types named only by digits", "no ticket status", "No recency term", "Coverage: 7 of 7 thoughts", "db/extract-entities.ts has not run", "--status tells the two apart"])
     assert(text.includes(needle), `the rendered report says: ${needle}`);
   assert(text.includes("depends_on×3") && text.includes("exact match on the normalised name"), "…and shows the relation counts and how the subject resolved");
+  assert(text.includes(r1.thoughts[0].created_at!) && text.split("\n").filter((l) => l.includes(r1.thoughts[0].id)).every((l) => !l.includes("…")),
+    `the captured column carries the whole ISO stamp, Z included, uncut (${r1.thoughts[0].created_at})`);
+  const long = render({ ...r1, neighbours: [{ ...r1.neighbours![0], relations: "depends_on×3, works_on×2, uses×1, related_to×1, co_occurs_with×1, member_of×1" }] });
+  const cutLine = long.split("\n").find((l) => l.includes("depends_on×3, works_on×2"))!;
+  assert(cutLine !== undefined && /related_to×1, co_occurs_w…/.test(cutLine) && !cutLine.includes("member_of"),
+    `a cell over its column's cap (60) is cut at 59 and marked, never silently — 77 characters of relations end "co_occurs_w…" (third review pass) (${cutLine?.trim().slice(-30)})`);
   const rOff = render(await graphReport(run, "Open Brain", off));
   assert(rOff.includes("--no-edges: ranked by co-occurrence alone") && /co_mentions  mentions/.test(rOff) && !/co_mentions  support/.test(rOff) && !/relations \(/.test(rOff),
     "edges off, the report says it is the control and the neighbourhood table has no support or relations column");
@@ -5262,6 +5271,38 @@ console.log("\n[43] db/graph-centrality.ts: mentions, degree and support as defi
   await db.query(`DELETE FROM thoughts WHERE id = $1`, [t9]);
   await db.exec(`SELECT prune_orphan_entities()`);
   assert((await graphCoverage(run, on)).entities === 4, "the extra guess is gone again");
+
+  // The alias rung can return several different names too — two entities the
+  // model gave the same alias — and the same rule applies: ranked around the
+  // first name's entities, the rest listed (third review pass).
+  const t10 = await thought("Supabase Postgres, hosted.");
+  await record(t10, [E("Supabase Postgres", "tool", ["Postgres"])]);
+  const aliased = await resolveSubject(run, "Postgres", on);
+  assert(aliased.how === "alias" && aliased.subjects.length === 2 && aliased.subjects[0].id === PG && aliased.subjects[1].name === "Supabase Postgres",
+    `alias: two entities carry the alias, the more-mentioned first (${aliased.subjects.map((s) => s.name).join(", ")})`);
+  assert(rankedSubjects(aliased).join() === PG, "…and only the first name's entity is ranked around");
+  const aliasedReport = await graphReport(run, "Postgres", on);
+  assert(aliasedReport.subject_ids.join() === PG && render(aliasedReport).includes("several names match; ranked around the first") && /\n {4}tool "Supabase Postgres"/.test(render(aliasedReport)),
+    "…the report says so and leaves the second unmarked");
+  assert(rankedSubjects(exact).join() === OB && rankedSubjects(none).length === 0, "an exact subject is ranked whole; nothing, nothing");
+  await db.query(`DELETE FROM thoughts WHERE id = $1`, [t10]);
+  await db.exec(`SELECT prune_orphan_entities()`);
+
+  // A numeric name that IS an entity stops the ladder before the guesses: with
+  // a near name "021x" in the graph, "021" must not be guessed past to it
+  // (third review pass).
+  const t11 = await thought("021x is a tool.");
+  await record(t11, [E("021x", "tool")]);
+  const near = await resolveSubject(run, "021x", on);
+  assert(near.how === "exact" && near.subjects[0].name === "021x", "021x has a letter, so it is a subject under the default scope");
+  const stopped = await resolveSubject(run, "021", on);
+  assert(stopped.how === "none" && stopped.excluded === true, `021 is not guessed past to 021x: none, excluded (${stopped.how})`);
+  assert(render(await graphReport(run, "021", on)).includes("pass --keep-numeric") && (await resolveSubject(run, "021", keep)).how === "exact", "…the flag is named, and kept it is exact");
+  const guessedNumeric = await resolveSubject(run, "0219", on);
+  assert(guessedNumeric.how === "fuzzy" && guessedNumeric.subjects[0].name === "021x", `a numeric name that is NOT an entity still reaches the guesses (${guessedNumeric.how})`);
+  await db.query(`DELETE FROM thoughts WHERE id = $1`, [t11]);
+  await db.exec(`SELECT prune_orphan_entities()`);
+  assert((await graphCoverage(run, on)).entities === 4, "the fixture is back to four");
 }
 
 // db/README.md quotes this suite's assertion total in two places ("Expected

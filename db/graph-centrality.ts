@@ -67,18 +67,12 @@
  * over a `Runner` so db/test-schema.ts [43] runs the same text under PGlite.
  */
 import { SQL } from "bun";
-import { ENTITY_TYPES, type EntityType } from "../server-portable/entities.ts";
+import { ENTITY_TYPES, NUMERIC_NAME_RE, type EntityType } from "../server-portable/entities.ts";
 import { isoTimestampOrNull, UUID_RE } from "../server-portable/store.ts";
 
 /** `(text, params) → rows` — Bun's `sql.unsafe` or PGlite's `query(...).rows`. */
 export type Runner = (text: string, params: unknown[]) => Promise<Record<string, unknown>[]>;
 
-/**
- * SMD-1935's noise, as a pattern over normalized_name: digits, then any run of
- * digits, dots, colons and spaces — "021", "11434", "127.0.0.1", "10 000".
- * "pg16" and "smd 1938" have letters and stay.
- */
-export const NUMERIC_NAME_RE = "^[0-9][0-9 .:]*$";
 /**
  * Below this trigram similarity a fuzzy candidate is not offered: pg_trgm's
  * own default (`pg_trgm.similarity_threshold`, what `%` tests). A one-letter
@@ -149,13 +143,16 @@ const ENTITY_TIEBREAK = `s.normalized_name, s.entity_type`;
 
 /** How much of the brain the graph covers, and the two measured caveats' numbers. */
 export async function coverage(run: Runner, scope: Scope): Promise<Coverage> {
-  const params: unknown[] = [NUMERIC_NAME_RE];
+  // numeric_names is the rule's own effect: numeric names AMONG the ranked
+  // types, since a numeric name of another type is out by type whatever the
+  // rule says (third review pass).
+  const params: unknown[] = [NUMERIC_NAME_RE, pgArray(scope.types)];
   const inScope = scopeSql("e", scope, params);
   const [r] = await run(
     `SELECT (SELECT count(*) FROM thoughts)::int AS thoughts,
             (SELECT count(DISTINCT thought_id) FROM thought_entities)::int AS extracted,
             (SELECT count(*) FROM ob1_entities e WHERE ${inScope})::int AS entities,
-            (SELECT count(*) FROM ob1_entities WHERE normalized_name ~ $1)::int AS numeric_names,
+            (SELECT count(*) FROM ob1_entities WHERE normalized_name ~ $1 AND entity_type = ANY($2::text[]))::int AS numeric_names,
             (SELECT count(*) FROM ob1_entity_edges)::int AS edges,
             (SELECT count(*) FROM ob1_entity_edges WHERE confidence = 1)::int AS unit_edges,
             (SELECT value FROM ob1_config WHERE key = 'entity_extraction_key') AS extraction_key`,
@@ -183,34 +180,47 @@ export async function resolveSubject(run: Runner, subject: string, scopeIn: Scop
   const rung = async (how: string, score: string, params: unknown[], sc: Scope, limit = "") =>
     rows(await run(select(`${how} AND ${scopeSql("s", sc, params)}`, score) + order + limit, params));
   const unscoped: Scope = { ...scope, excludeNumeric: false };
-  /**
-   * `none`, saying whether the exact rung would have found it without the
-   * numeric rule — asked only when the rule could be the reason: a numeric
-   * name, or a uuid (whose name is unknown until looked up).
-   */
-  const none = async (normalized: string | null, exactHow: string, params: () => unknown[]): Promise<Resolution> => ({
-    how: "none", subjects: [], normalized,
-    excluded: scope.excludeNumeric && (normalized === null || NUMERIC_NAME_JS.test(normalized)) && (await rung(exactHow, "1.0::float8", params(), unscoped)).length > 0,
-  });
+  /** Would the exact rung have found it without the numeric rule? */
+  const excludedBy = async (exactHow: string, params: unknown[]) => scope.excludeNumeric && (await rung(exactHow, "1.0::float8", params, unscoped)).length > 0;
+  const none = (normalized: string | null, excluded: boolean): Resolution => ({ how: "none", subjects: [], normalized, excluded });
 
   if (UUID_RE.test(subject.trim())) {
     const byId = `s.id = $1::uuid`;
     const r = await rung(byId, "1.0::float8", [subject.trim()], scope);
-    return r.length ? { how: "id", subjects: r, normalized: null, excluded: false } : none(null, byId, () => [subject.trim()]);
+    return r.length ? { how: "id", subjects: r, normalized: null, excluded: false } : none(null, await excludedBy(byId, [subject.trim()]));
   }
   const [{ n }] = await run(`SELECT normalize_entity_name($1) AS n`, [subject]);
   const normalized = (n as string | null) ?? null;
-  if (normalized === null) return { how: "none", subjects: [], normalized, excluded: false };
+  if (normalized === null) return none(normalized, false);
 
   const exactHow = `s.normalized_name = $1`;
   const exact = await rung(exactHow, "1.0::float8", [normalized], scope);
   if (exact.length) return { how: "exact", subjects: exact, normalized, excluded: false };
+  // A numeric name that IS an entity, excluded by the rule, stops here: the
+  // alias and fuzzy rungs would otherwise guess past the real match and the
+  // line naming --keep-numeric would never print (third review pass).
+  if (NUMERIC_NAME_JS.test(normalized) && (await excludedBy(exactHow, [normalized]))) return none(normalized, true);
 
   const alias = await rung(`($1 = ANY(s.merged_from) OR EXISTS (SELECT 1 FROM unnest(s.aliases) a WHERE normalize_entity_name(a) = $1))`, "1.0::float8", [normalized], scope);
   if (alias.length) return { how: "alias", subjects: alias, normalized, excluded: false };
 
   const fuzzy = await rung(`similarity(s.normalized_name, $1) >= $2`, "similarity(s.normalized_name, $1)::float8", [normalized, FUZZY_FLOOR], scope, ` LIMIT ${FUZZY_LIMIT}`);
-  return fuzzy.length ? { how: "fuzzy", subjects: fuzzy, normalized, excluded: false } : none(normalized, exactHow, () => [normalized]);
+  return fuzzy.length ? { how: "fuzzy", subjects: fuzzy, normalized, excluded: false } : none(normalized, false);
+}
+
+/**
+ * The entities a report ranks around: the subjects that share the FIRST
+ * subject's normalised name. The exact rung returns one name under several
+ * types — all of them. The alias and fuzzy rungs can return several different
+ * names (two entities the model gave the same alias; five near spellings);
+ * ranking around their union would count a thought about the second as a
+ * co-mention of the first and hide each as a neighbour of the others, so the
+ * first name's entities alone are ranked and the rest are listed (second and
+ * third review passes).
+ */
+export function rankedSubjects(res: Resolution): string[] {
+  const lead = res.subjects[0];
+  return lead ? res.subjects.filter((s) => s.normalized_name === lead.normalized_name).map((s) => s.id) : [];
 }
 
 /**
@@ -228,7 +238,7 @@ export async function topEntities(run: Runner, opts: Options): Promise<{ byMenti
   const edgeCols = opts.edges ? `, coalesce(d.degree, 0) AS degree, coalesce(d.support, 0) AS support` : "";
   const edgeJoin = opts.edges
     ? `LEFT JOIN (SELECT x.entity_id, count(DISTINCT x.other_id)::int AS degree, count(DISTINCT x.thought_id)::int AS support
-                   FROM ends x JOIN scope o ON o.id = x.other_id GROUP BY 1) d ON d.entity_id = s.id`
+                   FROM ends x JOIN scope o ON o.id = x.other_id JOIN scope me ON me.id = x.entity_id GROUP BY 1) d ON d.entity_id = s.id`
     : "";
   const rows = await run(
     `WITH scope AS (SELECT e.id, e.entity_type, e.name, e.normalized_name FROM ob1_entities e WHERE ${inScope}),
@@ -361,8 +371,8 @@ export function caveats(c: Coverage, opts: Options): string[] {
     `Centrality here is attention, not value or quality: what the extracted thoughts mention and connect most.`,
     `Edges are unweighted (SMD-1925): ${c.unit_edges} of ${c.edges} edge rows carry confidence 1.00, so an edge's only weight is the number of thoughts asserting it (support).`,
     opts.excludeNumeric
-      ? `Entity typing is noisy (SMD-1935): ${c.numeric_names} ${plural(c.numeric_names)} named only by digits are out of scope and out of every count (--keep-numeric admits them; --types narrows further).`
-      : `Entity typing is noisy (SMD-1935): --keep-numeric is on, so ${c.numeric_names} ${plural(c.numeric_names)} named only by digits count like any other.`,
+      ? `Entity typing is noisy (SMD-1935): ${c.numeric_names} ${plural(c.numeric_names)} of the ranked types named only by digits are out of scope and out of every count (--keep-numeric admits them; --types narrows further).`
+      : `Entity typing is noisy (SMD-1935): --keep-numeric is on, so ${c.numeric_names} ${plural(c.numeric_names)} of the ranked types named only by digits count like any other.`,
     `Hubs and clusters inflate each other: a name most thoughts mention, or an epic its children all connect to, lifts everything around it.`,
     `No recency term: a thought captured a minute ago about its own subject ranks as any other.`,
     `The graph holds no ticket status; open/closed is the caller's filter against the source.`,
@@ -395,12 +405,7 @@ export async function report(run: Runner, subject: string | null, opts: Options)
     return { ...base, resolution: null, subject_ids: [], by_mentions: byMentions, by_degree: byDegree, thoughts: await topThoughts(run, opts) };
   }
   const resolution = await resolveSubject(run, subject, opts);
-  // Exact and alias rungs return one name under several types — one subject.
-  // The fuzzy rung returns up to five DIFFERENT names; ranking around their
-  // union would count a thought about the fourth guess as a co-mention of the
-  // first and hide each guess as a neighbour of the others, so it ranks around
-  // the best guess alone and lists the rest (second review pass).
-  const ids = resolution.how === "fuzzy" ? resolution.subjects.slice(0, 1).map((s) => s.id) : resolution.subjects.map((s) => s.id);
+  const ids = rankedSubjects(resolution);
   const neighbours = await neighbourhood(run, ids, opts);
   const thoughts = await subjectThoughts(run, ids, neighbours.map((n) => n.id), opts);
   return { ...base, resolution, subject_ids: ids, neighbours, thoughts };
@@ -414,8 +419,10 @@ function table(rows: Record<string, unknown>[], cols: Col[]): string {
   const cell = (r: Record<string, unknown>, k: string) => (r[k] === null || r[k] === undefined ? "" : String(r[k]));
   const widths = cols.map((c) => Math.min(c.width ?? 80, Math.max(c.head.length, ...rows.map((r) => cell(r, c.key).length))));
   const line = (vals: string[]) => vals.map((v, i) => (cols[i].right ? v.padStart(widths[i]) : v.padEnd(widths[i]))).join("  ").trimEnd();
+  // A cell over its column's cap is cut and marked, never cut silently.
+  const fit = (v: string, w: number) => (v.length > w ? `${v.slice(0, Math.max(0, w - 1))}…` : v);
   const out = [line(cols.map((c) => c.head)), line(widths.map((w) => "-".repeat(w)))];
-  for (const r of rows) out.push(line(cols.map((c, i) => cell(r, c.key).slice(0, widths[i]))));
+  for (const r of rows) out.push(line(cols.map((c, i) => fit(cell(r, c.key), widths[i]))));
   return out.join("\n");
 }
 
@@ -429,7 +436,7 @@ const T_COLS = (edges: boolean, entitiesHead: string): Col[] => [
   { key: "entities", head: entitiesHead, right: true },
   ...(edges ? [{ key: "edges", head: "edges", right: true }] : []),
   { key: "id", head: "thought" },
-  { key: "created_at", head: "captured", width: 19 },
+  { key: "created_at", head: "captured", width: 24 },
   { key: "excerpt", head: "excerpt", width: 90 },
 ];
 
@@ -449,7 +456,8 @@ export function render(r: Report): string {
       else if (res.normalized === null) out.push(`No entity resolves from ${shown} — the name is only punctuation.`);
       else out.push(`No entity resolves from ${shown} (normalised: ${JSON.stringify(res.normalized)}; nothing exact, no alias or merged name, nothing within trigram similarity ${FUZZY_FLOOR}).`);
     } else {
-      const label = { id: "by id", exact: "exact match on the normalised name", alias: "by alias or merged-in name", fuzzy: `by trigram similarity — GUESSES, ranked around the first; pass the name shown to be exact` }[res.how];
+      const several = res.subjects.length > r.subject_ids.length ? " — several names match; ranked around the first, pass the name shown to be exact" : "";
+      const label = { id: "by id", exact: "exact match on the normalised name", alias: `by alias or merged-in name${several}`, fuzzy: `by trigram similarity — GUESSES, ranked around the first; pass the name shown to be exact` }[res.how];
       out.push(`Subject (${label}):`);
       for (const s of res.subjects) out.push(`  ${r.subject_ids.includes(s.id) ? "▸" : " "} ${s.entity_type} ${JSON.stringify(s.name)} — ${s.mentions} mention${s.mentions === 1 ? "" : "s"}${res.how === "fuzzy" ? ` (similarity ${s.score.toFixed(2)})` : ""}  ${s.id}`);
     }
@@ -557,6 +565,9 @@ if (import.meta.main) {
   // The exit code is decided inside and applied after the connection has
   // closed and the output has been written (process.exit inside the try would
   // skip the finally, and could cut a piped --json short).
+  // 0 ranked; 1 the subject resolved to nothing; 2 a usage error, a brain
+  // without 016, or a query that failed — never 1 for a failure, so a caller
+  // testing for "not in the graph" is not told that by a connection refused.
   let code = 0;
   try {
     // The three tables as this connection resolves them — a same-named table in
@@ -571,6 +582,9 @@ if (import.meta.main) {
       else console.log(render(r));
       code = r.resolution && r.resolution.how === "none" ? 1 : 0;
     }
+  } catch (e) {
+    console.error(`graph-centrality failed: ${(e as Error).message}`);
+    code = 2;
   } finally {
     await sql.close();
   }

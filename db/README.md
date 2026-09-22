@@ -164,7 +164,7 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `1175 assertions: 1175 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `1188 assertions: 1188 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports forty-four (44) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
@@ -879,8 +879,11 @@ and the scope IS the graph: an entity outside it is in no list and no count,
 the subject the one exception, so `--types tool "Open Brain"` is the tools
 around a project); hubs and clusters inflate each other; no ticket status is
 stored, so open/closed is the caller's filter; and only extracted thoughts are
-in the graph, which the coverage line counts. Exit 1 when no entity resolves,
-2 for a usage error or a brain without 016. `test-schema.ts` [43] runs the
+in the graph, which the coverage line counts. Where a rung returns several
+names — two entities the model gave one alias, five near spellings — the
+first name's entities are ranked around and the rest listed, marked apart.
+Exit 1 when no entity resolves, 2 for a usage error, a brain without 016 or a
+query that failed, never 1 for a failure. `test-schema.ts` [43] runs the
 script's own SQL under PGlite over a graph whose every count is known by
 construction, and its edges-on and edges-off orders differ at every position.
 
@@ -1434,7 +1437,7 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 1175 assertions, PGlite, no container
+bun test-schema.ts                          # 1188 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts         # 601 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
