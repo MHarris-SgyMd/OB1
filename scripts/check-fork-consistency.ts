@@ -3838,6 +3838,9 @@ const DESTRUCTIVE_SQL_PROBES: [string, string][] = [
   ["unqualified-delete", "DELETE FROM thoughts RETURNING 'WHERE';"],
   ["unqualified-delete", "WITH d AS (DELETE FROM thoughts RETURNING id, '(') SELECT 1 WHERE true;"],
   ["unqualified-delete", "EXECUTE format('DELETE FROM %I', (SELECT n FROM x WHERE k = 1));"],
+  // The `)` that closes the CTE must END the statement, not just lower the depth: a later CTE's
+  // WHERE sits at depth 0 again once its `(` reopens (the depth-0 rule alone let this pass).
+  ["unqualified-delete", "WITH d AS (DELETE FROM thoughts RETURNING id), e AS (SELECT 1 WHERE true) SELECT * FROM e;"],
   ["truncate", "EXECUTE format('TRUNCATE %1$I', p_table);"],
   ["truncate", "EXECUTE $q$TRUNCATE $q$ || quote_ident(p_table);"],
   ["drop-database", "DROP OWNED BY community CASCADE;"],
