@@ -79,31 +79,47 @@ export function dispositionPaths(text) {
   return out;
 }
 
-/** metadata.json per contribution path that has one, read from the tree. */
-export function metadataOnDisk(root) {
-  const out = new Map();
+/**
+ * The contributions on disk, with the skip rules check-fork's contributionDirs
+ * applies (`_template`, `_shared`, `node_modules` are not contributions; any
+ * other directory is one, metadata.json or not): `existingDirs` is every
+ * contribution path, `metadataByPath` the parsed metadata of those that have one.
+ */
+export function contributionsOnDisk(root) {
+  const existingDirs = [];
+  const metadataByPath = new Map();
   for (const cat of CATEGORIES) {
     const base = join(root, cat);
     if (!existsSync(base)) continue;
     for (const name of readdirSync(base).sort()) {
-      if (name.startsWith("_") || name === "node_modules") continue;
+      if (name === "_template" || name === "_shared" || name === "node_modules") continue;
       const dir = join(base, name);
       if (!statSync(dir).isDirectory()) continue;
+      const rel = `${cat}/${name}`;
+      existingDirs.push(rel);
       const file = join(dir, "metadata.json");
       if (!existsSync(file)) continue;
-      try { out.set(`${cat}/${name}`, JSON.parse(readFileSync(file, "utf8"))); } catch { out.set(`${cat}/${name}`, {}); }
+      try { metadataByPath.set(rel, JSON.parse(readFileSync(file, "utf8"))); } catch { metadataByPath.set(rel, {}); }
     }
   }
-  return out;
+  return { existingDirs, metadataByPath };
 }
 
-/** Compile not_connectors.services; a pattern that does not compile is reported, not thrown. */
+const listOf = (v) => (Array.isArray(v) ? v : []);
+const artifactsOf = (registry) => listOf(registry?.artifacts);
+
+/**
+ * Compile not_connectors.services; a pattern that does not compile is reported,
+ * not thrown, and a missing or empty pattern is refused — `new RegExp("")`
+ * matches every service and would excuse the whole tree in silence.
+ */
 function servicePatterns(registry, problems) {
   const out = [];
-  for (const [i, p] of (registry.not_connectors?.services ?? []).entries()) {
+  for (const [i, p] of listOf(registry.not_connectors?.services).entries()) {
     const where = `${REGISTRY_PATH} not_connectors.services[${i}]`;
     if (!nonEmpty(p?.reason)) problems.push({ where, kind: "pattern-reason", msg: "a service pattern carries no reason" });
-    try { out.push({ re: new RegExp(p.pattern, "i"), pattern: p.pattern, hits: 0, where }); } catch (e) { problems.push({ where, kind: "pattern-invalid", msg: `pattern ${JSON.stringify(p?.pattern)} does not compile: ${e.message}` }); }
+    if (!nonEmpty(p?.pattern)) { problems.push({ where, kind: "pattern-invalid", msg: "a service pattern is missing or empty — an empty pattern matches every service" }); continue; }
+    try { out.push({ re: new RegExp(p.pattern, "i"), pattern: p.pattern, hits: 0, where }); } catch (e) { problems.push({ where, kind: "pattern-invalid", msg: `pattern ${JSON.stringify(p.pattern)} does not compile: ${e.message}` }); }
   }
   return out;
 }
@@ -111,21 +127,29 @@ function servicePatterns(registry, problems) {
 /**
  * Why a contribution counts as external-touching, per path: the services its
  * metadata names that no not_connectors pattern covers, the trigger tags it
- * carries, and the SMD-1867 rows of the disposition table. Empty for a path
- * nothing marks. `patterns` is servicePatterns()'s output; each match is counted
- * on it so a pattern nothing matches can be reported stale.
+ * carries, a tag naming a declared connector (the vendor's own name — so a
+ * recipe tagged `telegram` whose only service is a model provider is still
+ * marked), and the SMD-1867 rows of the disposition table. Empty for a path
+ * nothing marks. `patterns` is servicePatterns()'s output; every pattern a
+ * service matches is counted on it, so a pattern a broader one shadows is still
+ * live and a pattern nothing matches can be reported stale. A metadata whose
+ * `services` or `tags` is not a list (check 1's finding) marks nothing here
+ * rather than throwing.
  */
-export function triggersFor({ metadataByPath, dispositionPaths: disp, patterns }) {
+export function triggersFor({ metadataByPath, dispositionPaths: disp, patterns, connectorKeys = new Set() }) {
   const out = new Map();
   const add = (path, why) => out.set(path, [...(out.get(path) ?? []), why]);
   for (const [path, meta] of metadataByPath) {
-    for (const s of meta?.requires?.services ?? []) {
+    for (const s of listOf(meta?.requires?.services)) {
       if (typeof s !== "string") continue;
-      const hit = patterns.find((p) => p.re.test(s));
-      if (hit) hit.hits++; else add(path, `requires.services names ${JSON.stringify(s)}`);
+      const hits = patterns.filter((p) => p.re.test(s));
+      if (hits.length) for (const p of hits) p.hits++; else add(path, `requires.services names ${JSON.stringify(s)}`);
     }
-    const tags = (meta?.tags ?? []).filter((t) => TRIGGER_TAGS.includes(t));
-    if (tags.length) add(path, `tagged ${tags.join(", ")}`);
+    const tags = listOf(meta?.tags).filter((t) => typeof t === "string");
+    const shaped = tags.filter((t) => TRIGGER_TAGS.includes(t));
+    if (shaped.length) add(path, `tagged ${shaped.join(", ")}`);
+    const vendors = tags.filter((t) => connectorKeys.has(t) && !shaped.includes(t));
+    if (vendors.length) add(path, `tagged with the connector name${vendors.length > 1 ? "s" : ""} ${vendors.join(", ")}`);
   }
   for (const path of disp) if (metadataByPath.has(path)) add(path, `an SMD-1867 row of ${DISPOSITION_PATH}`);
   return out;
@@ -134,7 +158,7 @@ export function triggersFor({ metadataByPath, dispositionPaths: disp, patterns }
 /** The connectors the artifacts imply: vendor → { directions, capabilities: [{ path, ...cap }] }. */
 export function derivedConnectors(registry) {
   const out = new Map();
-  for (const a of registry.artifacts ?? []) for (const c of a.capabilities ?? []) {
+  for (const a of artifactsOf(registry)) for (const c of listOf(a?.capabilities)) {
     if (!nonEmpty(c?.vendor)) continue;
     const v = out.get(c.vendor) ?? { directions: new Set(), capabilities: [] };
     if (nonEmpty(c.direction)) v.directions.add(c.direction);
@@ -190,7 +214,8 @@ export function registryProblems({ registry, existingDirs, metadataByPath, dispo
   // ── the artifacts ──
   const seen = new Map();
   const dirs = new Set(existingDirs);
-  const artifacts = Array.isArray(registry.artifacts) ? registry.artifacts : [];
+  if (registry.artifacts !== undefined && !Array.isArray(registry.artifacts)) push(`${R} artifacts`, "shape", "artifacts must be a list of { path, capabilities }, one entry per artifact");
+  const artifacts = artifactsOf(registry);
   for (const a of artifacts) {
     const where = `${R} artifacts["${a?.path}"]`;
     if (!nonEmpty(a?.path) || !PATH.test(a.path)) { push(where, "artifact-path", `path must be <category>/<slug>, got ${JSON.stringify(a?.path)}`); continue; }
@@ -232,7 +257,8 @@ export function registryProblems({ registry, existingDirs, metadataByPath, dispo
 
   // ── coverage ──
   const patterns = servicePatterns(registry, problems);
-  const triggers = triggersFor({ metadataByPath, dispositionPaths: dispositionPaths(dispositionText), patterns });
+  const connectorKeys = new Set([...Object.keys(declared), ...derived.keys()]);
+  const triggers = triggersFor({ metadataByPath, dispositionPaths: dispositionPaths(dispositionText), patterns, connectorKeys });
   const excused = registry.not_connectors?.artifacts && typeof registry.not_connectors.artifacts === "object" ? registry.not_connectors.artifacts : {};
   for (const [path, why] of triggers) {
     const isReg = seen.has(path);
@@ -240,7 +266,7 @@ export function registryProblems({ registry, existingDirs, metadataByPath, dispo
     if (isReg && isEx) push(`${R} not_connectors.artifacts["${path}"]`, "coverage-both", "both classified and excused — one or the other");
     if (!isReg && !isEx) push(path, "coverage-unregistered", `touches an external system (${why.join("; ")}) and is neither classified in ${R} nor excused there by name with a reason — see ${SPEC_PATH}`);
   }
-  for (const path of seen.keys()) if (!triggers.has(path)) push(`${R} artifacts["${path}"]`, "coverage-unmarked", "nothing marks this artifact as external-touching — name the vendor in its metadata.json requires.services (or a trigger tag), so the sweep and the registry agree");
+  for (const path of seen.keys()) if (!triggers.has(path)) push(`${R} artifacts["${path}"]`, "coverage-unmarked", "nothing marks this artifact as external-touching — tag it with its connector's name (the vendor key) or name the vendor's service in its metadata.json requires.services, so the sweep and the registry agree");
   for (const [path, reason] of Object.entries(excused)) {
     const where = `${R} not_connectors.artifacts["${path}"]`;
     if (!nonEmpty(reason)) push(where, "excuse-reason", "an excuse carries its reason");
@@ -262,12 +288,12 @@ const cell = (s) => String(s ?? "").replace(/\|/g, "\\|").replace(/\n/g, " ");
 export function renderClassification(registry) {
   const derived = derivedConnectors(registry);
   const vendors = [...derived.keys()].sort();
-  const rows = (registry.artifacts ?? []).flatMap((a) => (a.capabilities ?? []).map((c) => ({ path: a.path, ...c })));
+  const rows = artifactsOf(registry).flatMap((a) => listOf(a?.capabilities).map((c) => ({ path: a.path, ...c })));
   const bidi = vendors.filter((v) => derived.get(v).directions.size === 2).length;
-  const families = registry.families ?? {};
+  const families = registry.families && typeof registry.families === "object" ? registry.families : {};
   const inUse = new Set(rows.map((r) => r.family));
   const lines = [];
-  lines.push(`${(registry.artifacts ?? []).length} artifacts, ${rows.length} capability rows, ${vendors.length} connectors (${bidi} bidirectional), ${inUse.size} of ${Object.keys(families).filter((f) => !families[f].reserved).length} declared families in use.`);
+  lines.push(`${artifactsOf(registry).length} artifacts, ${rows.length} capability rows, ${vendors.length} connectors (${bidi} bidirectional), ${inUse.size} of ${Object.keys(families).filter((f) => !families[f]?.reserved).length} declared families in use.`);
   lines.push("");
   lines.push("### Family schemas");
   lines.push("");
@@ -325,10 +351,10 @@ export function tablesSpan(text) {
 function main() {
   const root = join(dirname(fileURLToPath(import.meta.url)), "..");
   const registry = readRegistry(root);
-  const metadataByPath = metadataOnDisk(root);
+  const { existingDirs, metadataByPath } = contributionsOnDisk(root);
   const problems = registryProblems({
     registry,
-    existingDirs: [...metadataByPath.keys()],
+    existingDirs,
     metadataByPath,
     dispositionText: existsSync(join(root, DISPOSITION_PATH)) ? readFileSync(join(root, DISPOSITION_PATH), "utf8") : "",
   });
@@ -355,4 +381,7 @@ function main() {
   console.log(`${SPEC_PATH}: tables rewritten from ${REGISTRY_PATH}.`);
 }
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === realpathSync(process.argv[1])) main();
+// Run as a CLI only when this file is the entry: both sides realpath'd (a symlinked checkout), and an
+// argv[1] that does not resolve (a REPL, an import) is "not the entry", not a crash — fork-index.mjs's idiom.
+const isMain = (() => { try { return Boolean(process.argv[1]) && realpathSync(fileURLToPath(import.meta.url)) === realpathSync(process.argv[1]); } catch { return false; } })();
+if (isMain) main();

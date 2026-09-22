@@ -170,7 +170,7 @@
     {
       "path": "integrations/discord-capture",
       "capabilities": [
-        { "vendor": "discord", "family": "message-stream/chat", "transport": "push", "direction": "source", "cardinality": "1:1", "round_trip": "read-only", "fetcher": "native-driver", "note": "a bot on the gateway with the message-content intent; designated channels only" }
+        { "vendor": "discord", "family": "message-stream/chat", "transport": "push", "direction": "source", "cardinality": "1:1", "round_trip": "read-only", "fetcher": "native-driver", "note": "an Edge Function fed by a Discord bot that needs the message-content intent; designated channels only. The folder ships a README and no code, so how the bot hands messages to the function is not in the tree — a push either way" }
       ]
     },
     {
@@ -323,7 +323,12 @@
       "skills/auto-capture": "the AI client's capture skill over the MCP surface",
       "skills/auto-capture-claude-code": "the AI client's capture skill over the MCP surface",
       "skills/ob1-local-http": "the AI client calling the brain's own HTTP surface",
-      "skills/autodream-brain-sync": "the AI client's memory files to the brain over its surface"
+      "skills/autodream-brain-sync": "the AI client's memory files to the brain over its surface",
+      "recipes/atomizer": "tagged gmail: it re-atomizes Gmail thoughts gmail-smart-pull already captured and backfills their correspondents; no Gmail client",
+      "recipes/infographic-generator": "tagged gemini: the Gemini image-generation API is a model provider here, not the Gemini chat product the Chrome extension captures",
+      "recipes/schema-aware-routing": "tagged slack: a metadata-routing pattern in its own project that keeps a slack_ts column for thoughts a Slack capture wrote; the recipe has no Slack client of its own",
+      "schemas/readwise-books": "tagged readwise: the source-document cache table readwise-capture and readwise-import write; a table is not a fetcher",
+      "primitives/remote-mcp": "tagged chatgpt: a guide to connecting AI clients (ChatGPT among them) to the brain's own MCP surface"
     }
   }
 }

@@ -3469,6 +3469,14 @@ const REGISTRY_PROBES = [
   ["an excuse for a contribution that does not exist", (r) => { r.not_connectors.artifacts["recipes/gone"] = "because"; }, ["excuse-stale"]],
   ["a service pattern matching nothing in the tree", (r) => { r.not_connectors.services.push({ pattern: "zapier", reason: "x" }); }, ["pattern-stale"]],
   ["a service pattern that does not compile", (r) => { r.not_connectors.services.push({ pattern: "(", reason: "x" }); }, ["pattern-invalid"]],
+  ["a service pattern that is empty (which would match every service)", (r) => { r.not_connectors.services.push({ pattern: "", reason: "x" }); }, ["pattern-invalid"]],
+  ["a service pattern with no reason", (r) => { r.not_connectors.services.push({ pattern: "openrouter" }); }, ["pattern-reason"]],
+  ["an excuse with no reason", (r) => { r.artifacts.pop(); r.connectors.acme.direction = "source"; r.not_connectors.artifacts["recipes/acme-digest"] = ""; }, ["excuse-reason"]],
+  ["an artifact path that is not <category>/<slug>", (r) => { r.artifacts[1].path = "Recipes/Acme Digest"; }, ["artifact-path", "coverage-unregistered"]],
+  ["a capability repeated within an artifact", (r) => { r.artifacts[0].capabilities.push({ ...r.artifacts[0].capabilities[0] }); }, ["capability-duplicate"]],
+  ["a registry that is not an object", () => {}, ["shape"], null],
+  ["an artifacts block that is an object, not a list", (r) => { r.artifacts = { a: r.artifacts[0] }; }, ["shape", "coverage-unregistered", "connector-set"]],
+  ["an artifact marked only by a tag naming its connector", (r) => {}, ["coverage-unregistered"], (t) => { t.metadataByPath.set("recipes/acme-notes", { requires: { services: ["OpenRouter"] }, tags: ["acme", "notes"] }); t.existingDirs.push("recipes/acme-notes"); }],
 ];
 function checkConnectorRegistry() {
   const kindsOf = (registry, tree = PROBE_TREE()) => [...new Set(registryProblems({ registry, ...tree }).map((p) => p.kind))].sort();
@@ -3477,13 +3485,24 @@ function checkConnectorRegistry() {
   // A model-provider service on an unclassified contribution triggers nothing: the pattern covers it.
   const quiet = PROBE_TREE(); quiet.metadataByPath.set("recipes/uses-a-model", { requires: { services: ["OpenRouter"] }, tags: ["synthesis"] }); quiet.existingDirs.push("recipes/uses-a-model");
   if (registryProblems({ registry: PROBE_REGISTRY(), ...quiet }).length) fail(SELF, "check 18 marks a contribution that names only a model provider as external-touching (its own non-probe)");
+  // Two patterns covering one service are both live: the stale rule counts every match, not the first.
+  const overlap = PROBE_REGISTRY(); overlap.not_connectors.services.push({ pattern: "open", reason: "overlaps openrouter on purpose" });
+  if (registryProblems({ registry: overlap, ...PROBE_TREE() }).length) fail(SELF, "check 18 calls a service pattern stale when a broader pattern also matches its only service (its own non-probe)");
   // The disposition table alone marks an artifact: a batch importer that names no service.
+  // The registry's own `shape` rule for a non-object is the early return; the render must not run after findings.
   const disp = PROBE_TREE(); disp.metadataByPath.set("integrations/acme-capture", { requires: { services: [] }, tags: [] });
   if (!kindsOf({ ...PROBE_REGISTRY(), artifacts: [PROBE_REGISTRY().artifacts[1]], connectors: { acme: { direction: "sink" } } }, disp).includes("coverage-unregistered")) fail(SELF, "check 18 no longer reads an SMD-1867 row of the disposition table as marking an artifact (its own probe)");
-  for (const [why, mutate, want] of REGISTRY_PROBES) {
-    const r = PROBE_REGISTRY();
-    mutate(r);
-    const got = kindsOf(r);
+  // A metadata whose tags or services is a string (check 1's finding) marks nothing and throws nothing.
+  const odd = PROBE_TREE(); odd.existingDirs.push("recipes/odd-tool"); odd.metadataByPath.set("recipes/odd-tool", { requires: { services: "Acme Chat API" }, tags: "digest" });
+  try { if (registryProblems({ registry: PROBE_REGISTRY(), ...odd }).length) fail(SELF, "check 18 marks a contribution whose tags and services are strings (its own non-probe)"); } catch (e) { fail(SELF, `check 18 throws on a metadata whose tags or services is a string: ${e.message} (its own non-probe)`); }
+  // A fourth element: null runs the mutant on a null registry; a function reshapes the tree.
+  for (const [why, mutate, want, tree] of REGISTRY_PROBES) {
+    let r = PROBE_REGISTRY();
+    if (tree === null) r = null; else mutate(r);
+    const t = PROBE_TREE();
+    if (typeof tree === "function") tree(t);
+    let got;
+    try { got = kindsOf(r, t); } catch (e) { fail(SELF, `check 18 throws for ${why}: ${e.message} (its own probe)`); continue; }
     if (JSON.stringify(got) !== JSON.stringify([...want].sort())) fail(SELF, `check 18 reports [${got}] for ${why}, expected [${want}] (its own probe)`);
   }
 
@@ -3497,11 +3516,14 @@ function checkConnectorRegistry() {
     try { metadataByPath.set(d.rel, JSON.parse(readFileSync(file, "utf8"))); } catch { metadataByPath.set(d.rel, {}); }
   }
   const dispositionText = existsSync(join(ROOT, DISPOSITION_PATH)) ? readFileSync(join(ROOT, DISPOSITION_PATH), "utf8") : "";
-  for (const p of registryProblems({ registry, existingDirs: dirs.map((d) => d.rel), metadataByPath, dispositionText })) fail(p.where, `${p.msg} (SMD-1933)`);
+  let problems;
+  try { problems = registryProblems({ registry, existingDirs: dirs.map((d) => d.rel), metadataByPath, dispositionText }); } catch (e) { return fail(REGISTRY_PATH, `check 18 threw instead of reporting: ${e.message} (SMD-1933)`); }
+  for (const p of problems) fail(p.where, `${p.msg} (SMD-1933)`);
   if (!existsSync(join(ROOT, SPEC_PATH))) return fail(SPEC_PATH, "missing — the spec that carries the registry's rendered tables (SMD-1933)");
   const span = tablesSpan(readFileSync(join(ROOT, SPEC_PATH), "utf8"));
-  if (!span) fail(SPEC_PATH, "the generated-tables markers are missing or doubled (SMD-1933)");
-  else if (span.block !== renderClassification(registry)) fail(SPEC_PATH, `the generated tables differ from what ${REGISTRY_PATH} renders — run \`bun scripts/connector-registry.mjs\` (SMD-1933)`);
+  if (!span) return fail(SPEC_PATH, "the generated-tables markers are missing or doubled (SMD-1933)");
+  // The renderer assumes a sound registry (the CLI refuses to render otherwise); an unsound one has its findings above.
+  if (problems.length === 0 && span.block !== renderClassification(registry)) fail(SPEC_PATH, `the generated tables differ from what ${REGISTRY_PATH} renders — run \`bun scripts/connector-registry.mjs\` (SMD-1933)`);
 }
 checkConnectorRegistry();
 

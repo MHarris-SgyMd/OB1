@@ -75,8 +75,9 @@ persistent-connection weight (reconnects, subscriptions, backpressure) is what
 the SMD-1863 sidecar absorbs. Today the tree speaks HTTP only — webhooks and
 polling on the way in, MCP over Streamable HTTP, SSE only as MCP's streaming
 response shape (SMD-1259) — and no WebSocket, AMQP, MQTT, SNS, Kafka or gRPC
-client exists in it. `discord-capture` sits on Discord's gateway; that is the
-bot's business, not the brain's.
+client exists in it. `discord-capture` needs Discord's message-content gateway
+intent on its bot; whatever session that bot holds is the bot's business, not
+the brain's.
 
 ## The unit is a capability; a connector is a vendor
 
@@ -104,7 +105,7 @@ previously separate artifacts as its capabilities:
 | `slack` | `slack-capture` (push) | `editorial-policy` (optional critical-findings post) |
 
 Four vendors, eleven distinct artifacts, four drivers' worth of client. The generated
-tables below carry all sixteen connectors.
+tables below carry every connector, with the counts on their first line.
 
 Two rules that settle the edge cases:
 
@@ -199,8 +200,10 @@ not in the node).
 
 - **A new vendor in a known family.** Write the mapping where the fetcher lives.
   Add the artifact to `docs/connector-registry.json` with its capabilities; add
-  the vendor to `connectors` with the direction the capabilities derive. Name the
-  vendor in the artifact's `metadata.json` `requires.services`. Run
+  the vendor to `connectors` with the direction the capabilities derive. Tag the
+  artifact's `metadata.json` with the vendor's name and name its service in
+  `requires.services` (a service string a model-provider pattern also matches,
+  such as "OpenAI ChatGPT conversations API", is covered by the tag). Run
   `bun scripts/connector-registry.mjs`. Nothing else.
 - **A new family.** Declare it under `families` with every schema field before
   any capability uses it. The check refuses a capability naming an undeclared
@@ -275,7 +278,8 @@ must-pass probes on every run:
 - **coverage**: every contribution whose `metadata.json` names a service that is
   not a model provider, the hosting or the brain's own surface, or carries a
   connector-shaped tag (`import`, `capture`, `digest`, `webhook`, `export`,
-  `sync`, `messaging`, `email`, `bot`), or sits in an SMD-1867 row of
+  `sync`, `messaging`, `email`, `bot`) or a tag naming a declared connector
+  (`telegram`, `gmail`, …), or sits in an SMD-1867 row of
   `docs/vendored-disposition.md`, is classified or excused by name — never both,
   never neither; a classified artifact nothing marks is refused (declare the
   vendor in its metadata); a stale excuse and a service pattern matching nothing
@@ -288,7 +292,7 @@ must-pass probes on every run:
 
 | Verify item (SMD-1933) | Status |
 |---|---|
-| The classification covers every SMD-1924 external-touching artifact, each with the five facets | **Done, mechanical.** 22 artifacts, 32 capability rows; check 18's coverage rule sweeps every `metadata.json` and the disposition table, so the claim is re-proven on every run |
+| The classification covers every SMD-1924 external-touching artifact, each with the five facets | **Done, mechanical.** The counts are the generated block's first line; check 18's coverage rule sweeps every `metadata.json` and the disposition table, so the claim is re-proven on every run |
 | A bidirectional vendor is one connector serving capture and digest | **Done.** `telegram`, `gmail`, `discord`, `slack` derive `bidirectional` from their capabilities; the check refuses a declaration the capabilities do not derive |
 | A new vendor in an existing family is added with only a driver/mapping | **Specified** (the envelope, the family schemas, the "Adding" recipe). **Proven when SMD-1867 lands the pipeline** — until then a new recipe still hand-rolls the projection |
 | The same vendor via a low-code node and via a native driver produce identical canonical / text / edges | **Specified** (identity recomputed at the seam, fetcher as provenance). **Proven on one vendor once SMD-1863 picks the tool** |
