@@ -5519,8 +5519,9 @@ console.log("\n[44] Migration 047: the actor on the row — who wrote the curren
   const colc = (await one<{ c: string | null }>(COLUMN_COMMENT_SQL, ["thoughts", "metadata"])).c ?? "";
   assert(/actor_kind/.test(colc) && /actor_name/.test(colc) && /047/.test(colc) && /cannot set them/.test(colc), "thoughts.metadata's comment names the two keys the database writes and a caller cannot");
   const bfSrc = await src("backfill_thought_actors(integer)");
-  assert(/a\.action = 'capture'\s+OR \(a\.action = 'update' AND a\.diff \? 'content'\s+AND content_fingerprint_of\(a\.diff->'content'->>'before'\) IS DISTINCT FROM content_fingerprint_of\(a\.diff->'content'->>'after'\)\)/.test(bfSrc) && /IS NOT DISTINCT FROM f\.fp\) DESC,\s+a\.created_at DESC, a\.seq DESC/.test(bfSrc) && /t\.updated_at IS NOT DISTINCT FROM d\.updated_at/.test(bfSrc),
+  assert(/WHERE a\.action = 'capture' OR a\.fb IS DISTINCT FROM a\.fa/.test(bfSrc) && /content_fingerprint_of\(a\.diff->'content'->>'after'\)\s+AS fa\s+FROM thought_audit a[\s\S]*?OFFSET 0\s+\) a/.test(bfSrc) && /a\.fa IS NOT DISTINCT FROM f\.fp\) DESC,\s+a\.created_at DESC, a\.seq DESC/.test(bfSrc) && /t\.updated_at IS NOT DISTINCT FROM d\.updated_at/.test(bfSrc),
     "the backfill reads the audit row that changed the text by 003's rule — the trigger's rule — the one whose text stands first, then by created_at, then seq (never seq alone: a pre-047 seq is heap order — second review pass), and re-checks updated_at on the locked row, so a thought edited since the scan is left to the next pass");
+  assert(/CROSS JOIN LATERAL \(SELECT content_fingerprint_of\(t\.content\) AS fp OFFSET 0\) f/.test(bfSrc), "the thought's own text is hashed once per thought behind an OFFSET 0 fence, and each candidate row's two texts once behind another — without them the planner ran the hashes in every place the value is read (third review pass)");
   assert(/COALESCE\(ob1_registry_kind\(w\.canonical_agent_id, w\.name\), w\.actor_kind\)/.test(bfSrc) && /NULLIF\(btrim\(a\.actor_name\), ''\) AS name/.test(bfSrc), "…the registry's kind now first, the audit row's stamp as the fallback — a reclassified key reaches its rows — and the name trimmed as the stamp trims it (first review pass)");
   assert(!/DROP TABLE/.test(bfSrc) && /CREATE TEMP TABLE %I ON COMMIT DROP/.test(bfSrc), "…and names its temp table per call, dropped at commit, with nothing dropped by hand (023's shape; CLAUDE.md's rail)");
   assert(/LOCK TABLE thoughts IN EXCLUSIVE MODE;\s+-- A stamp is not an edit[\s\S]*?ALTER TABLE thoughts DISABLE TRIGGER thoughts_updated_at/.test(bfSrc), "…and takes thoughts IN EXCLUSIVE MODE before holding the trigger off, as 023 does — the ALTER's own lock deadlocked against an edit in flight (run-it, first review pass)");
@@ -5629,6 +5630,31 @@ console.log("\n[44] Migration 047: the actor on the row — who wrote the curren
   await db.exec(`ALTER TABLE thoughts ENABLE TRIGGER thoughts_stamp_actor`);
   await db.exec(`SELECT backfill_thought_actors()`);
   assert((await marks(flip.id)) === "agent/bot-key", `…and the backfill, with two update rows whose after-text is the row's text (imp-key's and bot-key's), takes the newer by created_at then seq (${await marks(flip.id)})`);
+  // A text nobody logged: the operator's X, the agent's audited rewrite to Y,
+  // then Z written with the audit trigger off. Update rows exist and none has
+  // the text that stands, so the writer is nobody — as for a thought with no
+  // row at all — not the agent, whose text is gone (third review pass).
+  const awBefore = (await one<{ r: Bf }>(`SELECT backfill_thought_actors() AS r`)).r.awaiting;
+  const unv = await cap("047: unvouched X", { metadata: {}, actor: { name: "op-key" } }, 62);
+  await edit(unv.id, "047: unvouched Y", null, { name: "bot-key" });
+  await db.exec(`ALTER TABLE thoughts DISABLE TRIGGER thoughts_audit; ALTER TABLE thoughts DISABLE TRIGGER thoughts_stamp_actor`);
+  await db.exec(`UPDATE thoughts SET content = '047: unvouched Z' WHERE id = '${unv.id}'`);
+  await db.exec(`ALTER TABLE thoughts ENABLE TRIGGER thoughts_audit; ALTER TABLE thoughts ENABLE TRIGGER thoughts_stamp_actor`);
+  const unvBf = (await one<{ r: Bf }>(`SELECT backfill_thought_actors() AS r`)).r;
+  assert((await marks(unv.id)) === "-/-" && unvBf.awaiting === awBefore,
+    `a text no audit row vouches for is nobody's, and does not count as awaiting a classification (${await marks(unv.id)})`);
+  // A row 023's batches have not reached — content_fingerprint NULL — re-spelled
+  // through update_thought: the column moves from NULL to a value while the
+  // text does not change; the mark stays (third review pass: the moved-column
+  // shortcut had taken NULL → set for a change of text).
+  const LEG = "47474747-4747-4747-8747-474747474756";
+  await db.transaction(async (tx) => {
+    await tx.query(`SELECT set_config('ob1.actor', '{"name": "op-key"}', true)`);
+    await tx.query(`INSERT INTO thoughts (id, content, content_fingerprint, metadata, embedding) VALUES ('${LEG}', '047: A Legacy Row', NULL, '{}'::jsonb, '${unit(63)}'::vector)`);
+  });
+  r = await edit(LEG, "047:   a legacy   ROW", null, { name: "bot-key" });
+  assert(r.ok === true && (await marks(LEG)) === "operator/op-key" && (await one<{ f: string | null }>(`SELECT content_fingerprint AS f FROM thoughts WHERE id = $1::uuid`, [LEG]))?.f !== null,
+    `a re-spelling of a row with no fingerprint yet keeps the operator's mark while the column takes its first value (${await marks(LEG)})`);
 
   // The filter: 014's route reaches the keys through the GIN it already has,
   // on the walk and on the exact branch, and the keyword arm's filter too.
@@ -5642,7 +5668,7 @@ console.log("\n[44] Migration 047: the actor on the row — who wrote the curren
   assert(byActor.map((x) => x.id).sort().join() === [claim.id, same.id, ANCH].sort().join(), `…and {"actor_name": "bot-key"} the three rows that key wrote — its capture, its edit of the operator's, the planted rewrite (${byActor.length})`);
   const kw = await q<{ id: string }>(`SELECT id FROM search_thoughts_keyword('047:', 50, 0, '{"actor_kind": "agent"}'::jsonb)`);
   assert(kw.map((x) => x.id).sort().join() === [claim.id, byId.id, same.id, ANCH, flip.id].sort().join(), `the keyword arm's filter reaches the same key — the agent's five rows: by name, by id, the edit, the planted rewrite, the flip (${kw.length})`);
-  assert((await q(`SELECT id FROM thoughts WHERE metadata @> jsonb_build_object('actor_kind', 'operator'::text)`)).length === 1, "…as does the list tool's containment clause");
+  assert((await q(`SELECT id FROM thoughts WHERE metadata @> jsonb_build_object('actor_kind', 'operator'::text)`)).length === 2, "…as does the list tool's containment clause — the operator's second note and the re-spelled legacy row");
 
   // The backfill: a brain from before 047 — rows unmarked, one with a planted
   // claim, one typed then rewritten, one an unclassified key's, one with no

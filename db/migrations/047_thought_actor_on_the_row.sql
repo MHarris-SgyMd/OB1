@@ -58,8 +58,11 @@
 --      "Latest" is decided in three steps. First, the row whose text IS the
 --      thought's current text: an update row whose after-fingerprint equals
 --      the row's fingerprint wrote what stands (a capture row carries no
---      text in its diff — 008 records metadata on a capture — so it competes
---      only when no update matches). Then created_at, newest first. Then
+--      text in its diff — 008 records metadata on a capture — so it stands
+--      for the text only when no update ever changed it; update rows present
+--      and none matching means the text was written unaudited, and nobody
+--      is stamped, as for a thought with no row at all — third review
+--      pass). Then created_at, newest first. Then
 --      `seq`, a monotonic identity this file adds to thought_audit, for two
 --      rows one transaction wrote: created_at is now(), one value for the
 --      whole transaction, and id is a random uuid, so a capture and an edit
@@ -179,13 +182,19 @@ BEGIN
   -- metadata touch compares no hash at all.
   IF TG_OP = 'UPDATE' THEN
     v_same := NEW.content IS NOT DISTINCT FROM OLD.content;
-    -- A fingerprint column that MOVED says the text did (update_thought writes
-    -- it with the content, NULL when another row holds the key — 018), and
-    -- costs nothing to read; one that did not move says nothing — a raw
-    -- content UPDATE leaves it stale — so then the two texts are hashed
-    -- (second review pass: two hashes on every content edit was +57% on a
-    -- bulk UPDATE; through update_thought it is now none).
-    IF NOT v_same AND NEW.content_fingerprint IS NOT DISTINCT FROM OLD.content_fingerprint THEN
+    -- A fingerprint column that MOVED from one value to another says the
+    -- text did (update_thought writes it with the content) and costs nothing
+    -- to read. One that did not move says nothing — a raw content UPDATE
+    -- leaves it stale — and a move from or to NULL says nothing either: a
+    -- row 023's batches have not reached takes its first fingerprint on any
+    -- edit, a re-spelling included, and 018 sets NULL when another row holds
+    -- the key (third review pass: NULL → set on a re-spelling had re-stamped
+    -- the row, and the backfill then disagreed). Then the two texts are
+    -- hashed (second review pass: two hashes on every content edit was +57%
+    -- on a bulk UPDATE; through update_thought on a fingerprinted row it is
+    -- now none).
+    IF NOT v_same AND (OLD.content_fingerprint IS NULL OR NEW.content_fingerprint IS NULL
+                       OR NEW.content_fingerprint = OLD.content_fingerprint) THEN
       v_same := content_fingerprint_of(NEW.content) IS NOT DISTINCT FROM content_fingerprint_of(OLD.content);
     END IF;
   END IF;
@@ -294,7 +303,8 @@ BEGIN
    * Every thought's writer, from the log: the row that wrote the current
    * text — an update whose after-fingerprint is the row's — else the latest
    * content-writing row by created_at, then seq (a capture, or an update
-   * whose text changed), read through 008's thought_id index. Its kind is what the registry says
+   * whose text changed), read through 008's thought_id index — and nobody
+   * when update rows exist but none wrote the text that stands. Its kind is what the registry says
    * NOW for its id or name — the trigger's rule applied late, and a
    * reclassification carried to the rows — else the kind 046 stamped on the
    * row (a key since removed from the registry). A thought with no such row
@@ -318,39 +328,60 @@ BEGIN
            (d.kind IS NULL AND (d.w_name IS NOT NULL OR d.w_agent IS NOT NULL)) AS awaiting
     FROM (
       SELECT t.id, t.updated_at,
-             COALESCE(ob1_registry_kind(w.canonical_agent_id, w.name), w.actor_kind) AS kind,
              -- (w is the LATERAL below; f.fp is the thought's own text hashed
-             -- here, NOT the content_fingerprint column: a raw content UPDATE
-             -- leaves that column stale, and the stale hash anchored the
-             -- previous writer's edit — second review pass, caught by [44].)
-             w.name,
-             w.name AS w_name, w.canonical_agent_id AS w_agent,
+             -- once per thought — the OFFSET 0 fences the subquery, or the
+             -- planner pulls the hash up into w's sort key and runs it once
+             -- per update row (third review pass, counted: 5 edits, 5 hashes
+             -- of the same text) — NOT the content_fingerprint column: a raw
+             -- content UPDATE leaves that column stale, and the stale hash
+             -- anchored the previous writer's edit — second review pass.)
+             -- A writer stands only for text the log vouches for: an update
+             -- row whose after-text is the row's, or the capture when no
+             -- update ever changed the text (a capture row carries no text to
+             -- check). Update rows present and none matching means the text
+             -- that stands was written unaudited — nobody's, as a no-row
+             -- thought is (third review pass).
+             CASE WHEN w.vouched THEN COALESCE(ob1_registry_kind(w.canonical_agent_id, w.name), w.actor_kind) END AS kind,
+             CASE WHEN w.vouched THEN w.name END AS name,
+             CASE WHEN w.vouched THEN w.name END AS w_name, CASE WHEN w.vouched THEN w.canonical_agent_id END AS w_agent,
              t.metadata->>'actor_kind' AS present_kind,
              t.metadata->>'actor_name' AS present_name,
              COALESCE(t.metadata ? 'actor_kind', false) AS has_kind,
              COALESCE(t.metadata ? 'actor_name', false) AS has_name
       FROM thoughts t
-      CROSS JOIN LATERAL (SELECT content_fingerprint_of(t.content) AS fp) f
+      CROSS JOIN LATERAL (SELECT content_fingerprint_of(t.content) AS fp OFFSET 0) f
       LEFT JOIN LATERAL (
         -- The name as the trigger reads it — trimmed, empty is none — so the
         -- two derive one value and a pass after a pass writes nothing
         -- (run-it, first review pass: a padded name flip-flopped every pass).
-        SELECT a.actor_kind, NULLIF(btrim(a.actor_name), '') AS name, a.canonical_agent_id
-        FROM thought_audit a
-        WHERE a.thought_id = t.id
-          -- A content-writing row by the trigger's rule: a capture, or an
-          -- update whose text CHANGED by 003's normalised fingerprint — 018's
-          -- unchanged edit (case, whitespace) is in the diff and is not a
-          -- change of writer, on the row or here (first review pass: the two
-          -- disagreed, and a pass rewrote the trigger's stamp).
-          AND (a.action = 'capture'
-               OR (a.action = 'update' AND a.diff ? 'content'
-                   AND content_fingerprint_of(a.diff->'content'->>'before') IS DISTINCT FROM content_fingerprint_of(a.diff->'content'->>'after')))
+        SELECT a.actor_kind, NULLIF(btrim(a.actor_name), '') AS name, a.canonical_agent_id,
+               (a.action = 'capture' OR a.fa IS NOT DISTINCT FROM f.fp) AS vouched
+        FROM (
+          -- Each candidate row's two texts hashed ONCE, behind an OFFSET 0:
+          -- read inline, the planner hashed them in every place the value is
+          -- used — four sha256 of a 100 KB text per update row, the whole cost
+          -- of a pass on a brain of long thoughts (third review pass, measured:
+          -- 17.6 s at 100,000 thoughts with a tenth at 100 KB, of which the
+          -- hashing of the update rows' texts was 15.9).
+          SELECT a.actor_kind, a.actor_name, a.canonical_agent_id, a.action, a.created_at, a.seq,
+                 content_fingerprint_of(a.diff->'content'->>'before') AS fb,
+                 content_fingerprint_of(a.diff->'content'->>'after')  AS fa
+          FROM thought_audit a
+          WHERE a.thought_id = t.id
+            AND (a.action = 'capture' OR (a.action = 'update' AND a.diff ? 'content'))
+          OFFSET 0
+        ) a
+        -- A content-writing row by the trigger's rule: a capture, or an update
+        -- whose text CHANGED by 003's normalised fingerprint — 018's unchanged
+        -- edit (case, whitespace) is in the diff and is not a change of writer,
+        -- on the row or here (first review pass: the two disagreed, and a pass
+        -- rewrote the trigger's stamp).
+        WHERE a.action = 'capture' OR a.fb IS DISTINCT FROM a.fa
         -- The row whose text stands first; then the newest transaction; then
         -- the order inside it. Not seq alone (second review pass — see the
         -- header): a pre-047 seq is heap order, and heap order lies after
         -- 046's amendments and a VACUUM.
-        ORDER BY (a.action = 'update' AND content_fingerprint_of(a.diff->'content'->>'after') IS NOT DISTINCT FROM f.fp) DESC,
+        ORDER BY (a.action = 'update' AND a.fa IS NOT DISTINCT FROM f.fp) DESC,
                  a.created_at DESC, a.seq DESC
         LIMIT 1
       ) w ON true
@@ -409,7 +440,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION backfill_thought_actors(integer) IS
-  'Sets metadata.actor_kind and metadata.actor_name on every thought to what thought_audit derives for the writer of its current content — the update row whose after-text is the row''s text, else the latest capture or content-changing update row by created_at then seq: ob1_registry_kind for its id or name NOW (so a reclassified key reaches its rows) else the actor_kind 046 stamped, and its actor_name — wherever the row and the log disagree, stripping a mark no audit row vouches for. Returns {ok, rows (written this call), differing (found disagreeing), awaiting (writer named but unclassified — set_agent_kind, then this)}. p_limit (at least 1) bounds the rows written and the write lock per call, not the scan (every call derives every thought) nor the audit rows (one per row written); each call its own transaction. Holds the updated_at trigger for the write (a stamp is not an edit), which needs the table''s owner; each row written leaves an audit row whose origin is backfill_thought_actors. Idempotent: a second pass finds nothing. Migration 047 / SMD-1726.';
+  'Sets metadata.actor_kind and metadata.actor_name on every thought to what thought_audit derives for the writer of its current content — the update row whose after-text is the row''s text, else the capture when no update ever changed the text (update rows present and none matching: nobody), the newest by created_at then seq among matches: ob1_registry_kind for its id or name NOW (so a reclassified key reaches its rows) else the actor_kind 046 stamped, and its actor_name — wherever the row and the log disagree, stripping a mark no audit row vouches for. Returns {ok, rows (written this call), differing (found disagreeing), awaiting (writer named but unclassified — set_agent_kind, then this)}. p_limit (at least 1) bounds the rows written and the write lock per call, not the scan (every call derives every thought) nor the audit rows (one per row written); each call its own transaction. Holds the updated_at trigger for the write (a stamp is not an edit), which needs the table''s owner; each row written leaves an audit row whose origin is backfill_thought_actors. Idempotent: a second pass finds nothing. Migration 047 / SMD-1726.';
 
 -- Every thought already written takes its writer's mark now — or the batch
 -- OB1_BACKFILL_LIMIT names, the rest by hand.
