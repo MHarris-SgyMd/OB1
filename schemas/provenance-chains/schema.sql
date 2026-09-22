@@ -43,7 +43,7 @@
 --   supersedes are removed too — 025 writes those columns' comments, and a
 --   COMMENT ON here would overwrite them as silently. The metadata-merge
 --   helpers in sections 7 and 8 have no counterpart in the migrations and stay.
---   scripts/check-fork-consistency.mjs check 7 fails the build if the two
+--   scripts/check-fork-consistency.ts check 7 fails the build if the two
 --   return.
 --
 -- Safe to run multiple times (ADD COLUMN IF NOT EXISTS / CREATE OR REPLACE).

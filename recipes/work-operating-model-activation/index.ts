@@ -3,7 +3,7 @@
 // unchanged — set SUPABASE_URL to a postgres:// connection string, and
 // SUPABASE_SERVICE_ROLE_KEY is ignored (credentials live in the URL).
 // ob1-original-import: @supabase/supabase-js
-// Revert with: node scripts/migrate-to-sql-shim.mjs --revert <file>
+// Revert with: bun scripts/migrate-to-sql-shim.ts --revert <file>
 // ob1-fork (SMD-1455): access keys go through ../_shared/auth.ts — the core server's
 // server-portable/auth.ts, copied so Supabase bundles it with the function — named,
 // scoped, hashed entries in MCP_ACCESS_KEYS (the older single MCP_ACCESS_KEY still

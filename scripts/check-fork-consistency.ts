@@ -1,6 +1,6 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 /**
- * check-fork-consistency.mjs
+ * check-fork-consistency.ts
  *
  * Repo-wide versions of checks the upstream PR gate only applies to the
  * directories a given PR touches. Because the gate never looks at untouched
@@ -89,7 +89,7 @@
  *      the split listed in OVERSIZE_AT_SPLIT with a ceiling they may only
  *      shrink under (held stale two ways); FORK.md is under FORK_CEILING_BYTES,
  *      carries no `### N.` section, and its index block equals what
- *      scripts/fork-index.mjs renders from the directory (a numbered section
+ *      scripts/fork-index.ts renders from the directory (a numbered section
  *      at any heading level is refused in FORK.md); and every "FORK.md change
  *      N" / "FORK change N" / "changes/NNN" / "NNN change M" citation in a file
  *      git tracks or would track (untracked, not ignored), and every bare
@@ -110,7 +110,7 @@
  *      mark, nothing on the second line, ending in every listed ticket — 17b
  *      reads a released ticket from that title) and no numbered heading of its
  *      own — the release step assigns the number and writes the heading
- *      (SMD-1804, SMD-1917); the rules are scripts/fragments.mjs's
+ *      (SMD-1804, SMD-1917); the rules are scripts/fragments.ts's
  *      fragmentProblems, which the release step runs too; the file's name and
  *      line cap are check 15's
  *  17. CHANGELOG.md follows Keep a Changelog 1.1.0 (Unreleased first, versions
@@ -121,8 +121,8 @@
  *      froze; and
  *      migration 044's schema_version equals db/version.mjs's FORK_VERSION
  *      (SMD-1804)
- *  18. the four type-checked directories — server-portable/, compat/supabase-sql/,
- *      db/ and evals/ — share one type surface and CI checks each: every one
+ *  18. the type-checked directories — server-portable/, compat/supabase-sql/,
+ *      db/, evals/ and scripts/ — share one type surface and CI checks each: every one
  *      pins @types/bun, typescript and @types/node in devDependencies at the
  *      value server-portable pins (TypeScript dedupes a package by name and
  *      version, so one directory bumping alone loads two bun-types into the
@@ -133,7 +133,7 @@
  *      refused. The workflow is parsed with Bun.YAML (SMD-1932); no exceptions
  *  19. docs/connector-registry.json — the connector taxonomy's one source — is
  *      sound and complete: the four closed/near-closed facet sets and the
- *      fetcher set equal the ones scripts/connector-registry.mjs pins (a
+ *      fetcher set equal the ones scripts/connector-registry.ts pins (a
  *      different set is a spec change and edits both); every family declares
  *      its schema and a reserved family is used by no capability; every
  *      artifact is a directory that exists, listed once, its capabilities
@@ -159,8 +159,8 @@
  *      renderer runs too (SMD-1933); no exceptions beyond the registry's own
  *      named excuses
  *
- * Run: bun scripts/check-fork-consistency.mjs   (plain ESM; node runs it too,
- * except checks 13, 14 and 18, which parse YAML with Bun.YAML and fail in words under node)
+ * Run: bun scripts/check-fork-consistency.ts   (a Bun script — TypeScript, type-checked in CI
+ * beside its run (SMD-1870); checks 13, 14 and 18 parse YAML with Bun.YAML)
  * Exits non-zero on any violation.
  */
 
@@ -169,36 +169,65 @@ import { execFileSync } from "node:child_process";
 import { join, dirname, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { coreColumnCommentStatement, coreFunctionStatement, LOCAL_PROVIDER_SERVICES, ownedColumnCommentsIn, ownedFunctionsIn, supabaseIsmsIn } from "../db/config.mjs";
-import { CHANGES_DIR, END as INDEX_END, START as INDEX_START, FIRST_FILED, classifyChanges, indexSpan, pad3, readChangeEntries, renderIndex, ticketsOf } from "./fork-index.mjs";
+import { CHANGES_DIR, END as INDEX_END, START as INDEX_START, FIRST_FILED, classifyChanges, indexSpan, pad3, readChangeEntries, renderIndex, ticketsOf } from "./fork-index.ts";
 import { FORK_VERSION, migrationSha, readReleases, semverCompare } from "../db/version.mjs";
-import { fragmentProblems } from "./fragments.mjs";
-import { DISPOSITION_PATH, FACET_SETS, FETCHERS, REGISTRY_PATH, SPEC_PATH, VENDOR_PATTERN, dispositionPaths, readMetadata, readRegistry, registryProblems, renderClassification, tablesSpan } from "./connector-registry.mjs";
-import { CATEGORIES, contributionDirs } from "./contributions.mjs";
+import { fragmentProblems } from "./fragments.ts";
+import type { ChangeEntry, ClassifiedChanges, NumberedChange } from "./fork-index.ts";
+import { DISPOSITION_PATH, FACET_SETS, FETCHERS, REGISTRY_PATH, SPEC_PATH, VENDOR_PATTERN, dispositionPaths, readMetadata, readRegistry, registryProblems, renderClassification, tablesSpan } from "./connector-registry.ts";
+import type { Family, Problem, Registry, Tree } from "./connector-registry.ts";
+import { CATEGORIES, contributionDirs } from "./contributions.ts";
+import type { ContribDir } from "./contributions.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
-const violations = [];
-const fail = (where, msg) => violations.push({ where, msg });
+/** One finding: where in the tree, and what. */
+type Violation = { where: string; msg: string };
+const violations: Violation[] = [];
+const fail: (where: string, msg: string) => void = (where, msg) => violations.push({ where, msg });
 /** This script, as the `where` of a violation in its own probes and inventories. */
-const SELF = "scripts/check-fork-consistency.mjs";
+const SELF = "scripts/check-fork-consistency.ts";
 
-const schema = JSON.parse(readFileSync(join(ROOT, ".github/metadata.schema.json"), "utf8"));
+/** The slice of .github/metadata.schema.json this check reads: the required names, four fields' enums and sub-properties, and the `connectors` block (SMD-1933) when the schema carries it. */
+type MetadataSchema = {
+  required: string[];
+  properties: Record<string, unknown> & {
+    difficulty: { enum: unknown[] };
+    category: { enum: unknown[] };
+    author: { properties: Record<string, unknown> };
+    requires: { properties: Record<string, unknown> };
+    connectors?: { items?: { pattern?: string; [k: string]: unknown }; uniqueItems?: boolean; [k: string]: unknown };
+  };
+};
+const schema: MetadataSchema = JSON.parse(readFileSync(join(ROOT, ".github/metadata.schema.json"), "utf8"));
 const props = schema.properties;
 
-// The walk of the contribution directories is scripts/contributions.mjs's
-// contributionDirs — one definition, shared with connector-registry.mjs (SMD-1933).
+// The walk of the contribution directories is scripts/contributions.ts's
+// contributionDirs — one definition, shared with connector-registry.ts (SMD-1933).
 
 // ── 1 + 2: metadata validity and category/directory agreement ────────────────
 
-function checkMetadata({ cat, dir, rel }) {
+/** metadata.json as this check reads it: the fields it inspects by name, everything else by key (the schema decides what is allowed). */
+type Metadata = {
+  version?: unknown;
+  difficulty?: unknown;
+  category?: unknown;
+  tags?: unknown;
+  author?: { name?: unknown; [k: string]: unknown };
+  requires?: { open_brain?: unknown; [k: string]: unknown };
+  requires_primitives?: string[]; // as the schema requires; check 1 never reads this field, so a scalar reaches checkDeps, which walks its characters as it always did — the schema is the contract
+  requires_skills?: string[];
+  [k: string]: unknown;
+};
+function checkMetadata({ cat, dir, rel }: ContribDir) {
   const file = join(dir, "metadata.json");
-  if (!existsSync(file)) return fail(rel, "missing metadata.json");
+  if (!existsSync(file)) { fail(rel, "missing metadata.json"); return; }
 
-  let d;
+  let d: Metadata;
   try {
     d = JSON.parse(readFileSync(file, "utf8"));
   } catch (e) {
-    return fail(`${rel}/metadata.json`, `invalid JSON: ${e.message}`);
+    fail(`${rel}/metadata.json`, `invalid JSON: ${(e as Error).message}`);
+    return;
   }
 
   const at = `${rel}/metadata.json`;
@@ -257,7 +286,7 @@ function checkMetadata({ cat, dir, rel }) {
 
 // ── 3: relative links resolve ────────────────────────────────────────────────
 
-function checkLinks({ dir, rel }) {
+function checkLinks({ dir, rel }: ContribDir) {
   const readme = join(dir, "README.md");
   if (!existsSync(readme)) return fail(rel, "missing README.md");
 
@@ -273,12 +302,12 @@ function checkLinks({ dir, rel }) {
 
 // ── 4: declared dependencies exist ───────────────────────────────────────────
 
-function checkDeps(meta, { rel }) {
+function checkDeps(meta: Metadata | undefined, { rel }: ContribDir) {
   if (!meta) return;
   for (const [field, folder] of [
     ["requires_primitives", "primitives"],
     ["requires_skills", "skills"],
-  ]) {
+  ] as const) {
     for (const slug of meta[field] ?? []) {
       if (!existsSync(join(ROOT, folder, slug))) {
         fail(`${rel}/metadata.json`, `${field} references '${slug}' but ${folder}/${slug}/ does not exist`);
@@ -290,9 +319,9 @@ function checkDeps(meta, { rel }) {
 // ── Line scanning, shared by checks 5 and 6 ──────────────────────────────────
 
 /** Repo-relative path with `/` separators on every OS, so it can be a key. */
-const relOf = (file) => relative(ROOT, file).split(sep).join("/");
+const relOf = (file: string) => relative(ROOT, file).split(sep).join("/");
 
-function walk(dir, out = [], match = /\.(sql|md)$/) {
+function walk(dir: string, out: string[] = [], match = /\.(sql|md)$/) {
   for (const name of readdirSync(dir)) {
     // .claude holds this repo's agent worktrees — whole copies of the tree.
     if (name === ".git" || name === "node_modules" || name === ".claude") continue;
@@ -304,6 +333,8 @@ function walk(dir, out = [], match = /\.(sql|md)$/) {
   return out;
 }
 
+/** One rule scanLines applies: `re` per line or `fileRe` whole-text (one of the two is set), `only` a path filter, `suppress` the counted-exception hook — see the docblock below. */
+type ScanRule = { name?: string; msg: string; re?: RegExp; fileRe?: RegExp; only?: RegExp; suppress?: (rel: string) => boolean };
 /**
  * Run every rule over every file. A rule is { name, msg } plus either `re`
  * (tested per line, without the g flag so test() is stateless) or `fileRe`
@@ -315,9 +346,9 @@ function walk(dir, out = [], match = /\.(sql|md)$/) {
  * count — one read, one definition of "matches", for the scan and the
  * exception audit alike.
  */
-function scanLines(files, rules) {
-  const counts = new Map();
-  const hit = (rel, rule, line, quiet) => {
+function scanLines(files: string[], rules: ScanRule[]) {
+  const counts = new Map<string, number>();
+  const hit = (rel: string, rule: ScanRule, line: number, quiet: boolean) => {
     const key = `${rel} ${rule.name ?? rule.msg}`;
     counts.set(key, (counts.get(key) ?? 0) + 1);
     if (!quiet) fail(`${rel}:${line}`, rule.msg);
@@ -334,7 +365,7 @@ function scanLines(files, rules) {
           hit(rel, rule, text.slice(0, m.index).split("\n").length, quiet);
         }
       } else {
-        lines.forEach((line, i) => { if (rule.re.test(line)) hit(rel, rule, i + 1, quiet); });
+        lines.forEach((line, i) => { if (rule.re!.test(line)) hit(rel, rule, i + 1, quiet); }); // a rule without fileRe carries re (ScanRule)
       }
     }
   }
@@ -411,7 +442,9 @@ async function checkMigrationNumbers() {
 // warning — fails; one fewer — the prose rewritten — fails too, so the list is
 // kept honest in both directions.
 const CODE_FILES = /\.(m?js|cjs|tsx?)$/;
-const SHELL_HAZARDS = [
+/** A check-6 hazard: its name, the shape it catches (`re` per line or `fileRe` whole-text), an `only` path filter, and the phrase its message opens with. */
+type ShellHazard = { name: string; what: string; re?: RegExp; fileRe?: RegExp; only?: RegExp };
+const SHELL_HAZARDS: ShellHazard[] = [
   { name: "codex-bypass",
     // The flag, its aliases, and the config key behind them (config.toml, or a
     // `-c approval_policy=never` override on the command line).
@@ -461,7 +494,7 @@ const SHELL_HAZARDS = [
     what: "a spawn through a shell (spawn an argv array with no shell)" },
 ];
 /** Strings each hazard must catch — the check's own negative tests. */
-const SHELL_HAZARD_PROBES = [
+const SHELL_HAZARD_PROBES: [string, string][] = [
   ["codex-bypass", "codex exec --dangerously-bypass-approvals-and-sandbox -"],
   ["codex-bypass", "codex exec --yolo -"],
   ["codex-bypass", "--sandbox danger-full-access"],
@@ -550,7 +583,9 @@ const SHELL_HAZARD_NON_PROBES = [
   'The "Bash" tool is powerful',
   "      shell: isWin,",
 ];
-const SHELL_HAZARD_EXCEPTIONS = new Map([
+/** A counted exception: why the file may match, and for exactly how many lines. */
+type CountedException = { why: string; lines: number };
+const SHELL_HAZARD_EXCEPTIONS = new Map<string, Record<string, CountedException>>([
   // Prose that names the deleted flag in order to say it was deleted: exactly
   // this many lines, for exactly this hazard.
   ["recipes/atomizer/README.md", { "codex-bypass": { why: "the warning that documents the codex provider's removal", lines: 1 } }],
@@ -568,7 +603,7 @@ const BINARY_FILES = /\.(png|jpe?g|gif|webp|svg|ico|woff2?|ttf|otf|pdf|zip|gz|tg
  * and CI on a clean checkout has none of it. Empty when git is unavailable, in
  * which case everything is scanned.
  */
-function gitIgnoredFiles(dirs) {
+function gitIgnoredFiles(dirs: { rel: string }[]): Set<string> {
   try {
     // Scoped to the directories scanned and unbounded, so a node_modules or a
     // build output elsewhere in the tree cannot overflow the default 1 MiB
@@ -577,24 +612,24 @@ function gitIgnoredFiles(dirs) {
       { cwd: ROOT, encoding: "utf8", maxBuffer: Infinity });
     return new Set(out.split("\0").filter(Boolean));
   } catch (e) {
-    console.warn(`  (git ls-files failed — ${e.message.split("\n")[0]} — scanning ignored files too)`);
+    console.warn(`  (git ls-files failed — ${(e as Error).message.split("\n")[0]} — scanning ignored files too)`);
     return new Set();
   }
 }
 
 /** Which hazards a text trips, by the same rules scanLines applies (line rules per line, file rules whole). */
-function hazardsIn(text, rel = "probe.md") {
-  const names = new Set();
+function hazardsIn(text: string, rel = "probe.md") {
+  const names = new Set<string>();
   for (const h of SHELL_HAZARDS) {
     if (h.only && !h.only.test(rel)) continue;
     const found = h.fileRe ? new RegExp(h.fileRe.source, h.fileRe.flags.replace("g", "")).test(text)
-      : text.split("\n").some((line) => h.re.test(line));
+      : text.split("\n").some((line) => h.re!.test(line)); // a hazard without fileRe carries re (ShellHazard)
     if (found) names.add(h.name);
   }
   return names;
 }
 
-function checkShellHazards(dirs) {
+function checkShellHazards(dirs: ContribDir[]) {
   for (const [name, probe] of SHELL_HAZARD_PROBES) {
     if (!hazardsIn(probe).has(name)) fail(SELF, `shell-hazard pattern '${name}' no longer catches its probe: ${probe}`);
   }
@@ -614,7 +649,7 @@ function checkShellHazards(dirs) {
     fileRe,
     only,
     msg: `${what} — shipped content must not hand untrusted input a shell (SMD-1251)`,
-    suppress: (rel) => Boolean(SHELL_HAZARD_EXCEPTIONS.get(rel)?.[name]),
+    suppress: (rel: string) => Boolean(SHELL_HAZARD_EXCEPTIONS.get(rel)?.[name]),
   })));
   for (const [rel, byHazard] of SHELL_HAZARD_EXCEPTIONS) {
     for (const [name, { why, lines }] of Object.entries(byHazard)) {
@@ -634,11 +669,11 @@ function checkShellHazards(dirs) {
  * directories and docs/, which cover every directory either check walks.
  */
 const SCANNED_ROOTS = [...CATEGORIES, "docs"].map((c) => ({ dir: join(ROOT, c), rel: c }));
-let ignoredFiles;
-function textFilesUnder(dirs) {
+let ignoredFiles: Set<string> | undefined;
+function textFilesUnder(dirs: { dir: string; rel: string }[]) {
   ignoredFiles ??= gitIgnoredFiles(SCANNED_ROOTS);
   return dirs.flatMap((d) => walk(d.dir, [], /./))
-    .filter((f) => !BINARY_FILES.test(f) && !ignoredFiles.has(relOf(f)));
+    .filter((f) => !BINARY_FILES.test(f) && !ignoredFiles!.has(relOf(f))); // assigned by the ??= above; the closure does not see that narrowing
 }
 
 // ── 7: vendored SQL never redefines or drops a function a migration owns ─────
@@ -688,13 +723,13 @@ function textFilesUnder(dirs) {
 // exception: its statement was cut and a header says which migration owns the
 // function.
 const MIGRATION_TEXTS = readdirSync(join(ROOT, "db", "migrations")).filter((f) => f.endsWith(".sql")).sort()
-  .map((f) => [f, readFileSync(join(ROOT, "db", "migrations", f), "utf8")]);
+  .map((f): [string, string] => [f, readFileSync(join(ROOT, "db", "migrations", f), "utf8")]);
 const OWNED_FUNCTIONS = ownedFunctionsIn(MIGRATION_TEXTS);
 const OWNED_COLUMN_COMMENTS = ownedColumnCommentsIn(MIGRATION_TEXTS);
 /** The whole-text rule as scanLines's `fileRe` (the g flag added; the line reported is the match's first). */
-const asFileRe = (re) => new RegExp(re.source, re.flags + "g");
+const asFileRe = (re: RegExp) => new RegExp(re.source, re.flags + "g");
 /** Strings the rule must catch — the check's own negative tests, run through the scan's machinery every time. */
-const CORE_FUNCTION_PROBES = [
+const CORE_FUNCTION_PROBES: [string, string][] = [
   ["upsert_thought", "CREATE OR REPLACE FUNCTION public.upsert_thought(p_content TEXT, p_payload JSONB DEFAULT '{}')"],
   ["upsert_thought", "create or replace function upsert_thought("],
   ["upsert_thought", "  CREATE FUNCTION upsert_thought (p_content text)"],
@@ -728,7 +763,7 @@ const CORE_FUNCTION_NON_PROBES = [
   "CREATE OR REPLACE FUNCTION public.upsert_thought_v2(",
 ];
 /** Column comments the rule must catch, and ordinary ones it must not. */
-const COLUMN_COMMENT_PROBES = [
+const COLUMN_COMMENT_PROBES: [string, string][] = [
   ["derived_from", "COMMENT ON COLUMN public.thoughts.derived_from IS"],
   ["supersedes", 'comment on column "thoughts"."supersedes" is \'x\';'],
 ];
@@ -742,8 +777,8 @@ const COLUMN_COMMENT_NON_PROBES = [
 const GUIDE = "the guide migrations 001-003 were extracted from, creating the brain; SETUP.md sends this fork's readers past it";
 const NEON = "creates the recipe's own Neon database from the guide's shape; never run against a migrated brain";
 const LOCAL_INIT = "the init script of the recipe's own Postgres container, run once on an empty database";
-const one = (why) => ({ why, lines: 1 });
-const CORE_FUNCTION_EXCEPTIONS = new Map([
+const one = (why: string): CountedException => ({ why, lines: 1 });
+const CORE_FUNCTION_EXCEPTIONS = new Map<string, Record<string, CountedException>>([
   ["docs/01-getting-started.md", { update_updated_at: one(GUIDE), match_thoughts: one(GUIDE), upsert_thought: one(GUIDE) }],
   ["recipes/content-fingerprint-dedup/README.md", {
     upsert_thought: one("the recipe migration 003 was extracted from, kept as its record; the note above its Step 2 says a migrated brain must not paste it"),
@@ -764,9 +799,9 @@ const CORE_FUNCTION_EXCEPTIONS = new Map([
 ]);
 
 /** Which of `owned`'s names a text names in a statement, by the rule the scan applies to the whole text. */
-const namedIn = (owned, ruleFor, text) => new Set([...owned.keys()].filter((name) => ruleFor(name).test(text)));
-const coreStatementsIn = (text) => namedIn(OWNED_FUNCTIONS, coreFunctionStatement, text);
-const columnCommentsIn = (text) => namedIn(OWNED_COLUMN_COMMENTS, coreColumnCommentStatement, text);
+const namedIn = (owned: Map<string, string>, ruleFor: (name: string) => RegExp, text: string) => new Set([...owned.keys()].filter((name) => ruleFor(name).test(text)));
+const coreStatementsIn = (text: string) => namedIn(OWNED_FUNCTIONS, coreFunctionStatement, text);
+const columnCommentsIn = (text: string) => namedIn(OWNED_COLUMN_COMMENTS, coreColumnCommentStatement, text);
 
 function checkCoreFunctions() {
   if (OWNED_FUNCTIONS.size === 0) return fail(SELF, "no migration under db/migrations defines a function — the owned set is empty and check 7 would pass everything");
@@ -797,7 +832,7 @@ function checkCoreFunctions() {
       name: fn,
       fileRe: asFileRe(coreFunctionStatement(fn)),
       msg: `redefines, drops or re-comments ${fn}, which the core migrations own (last defined by db/migrations/${file}); vendored SQL must not touch a function a migration owns (SMD-1250)`,
-      suppress: (rel) => Boolean(CORE_FUNCTION_EXCEPTIONS.get(rel)?.[fn]),
+      suppress: (rel: string) => Boolean(CORE_FUNCTION_EXCEPTIONS.get(rel)?.[fn]),
     })),
     ...[...OWNED_COLUMN_COMMENTS].map(([col, file]) => ({
       name: `thoughts.${col}`,
@@ -898,16 +933,16 @@ const NOT_A_VALUE = String.raw`(?:undefined\b|null\b|None\b|"[^"\n]*"|'[^'\n]*'|
 /** What may wrap an inline read on the left of a compare: `!`, `)`, `?? ""`, `|| ""`, `.trim()`. */
 const WRAP = String.raw`(?:[!)]|\s*(?:\?\?|\|\|)\s*(?:""|'')|\.trim\(\))*`;
 /** A bound name as an operand, in the wrappings a compare puts around one: `String(x)`, `(x ?? "")`, `x.trim()`, `x?.trim()`, bare — not `x.y`, `x(`, `x[` or `x?.y`; a ternary's `?` after it is fine. */
-const bound = (N) => String.raw`(?:String\(\s*${N}\s*\)|\(\s*${N}\s*(?:\?\?|\|\|)\s*(?:""|'')\s*\)|${N}(?:\?\.|\.)trim\(\)|${N}\b(?!\s*(?:[.(\[]|\?\.)))`;
-const envNameOf = (groups) => groups.find((g) => g !== undefined) ?? "";
+const bound = (N: string) => String.raw`(?:String\(\s*${N}\s*\)|\(\s*${N}\s*(?:\?\?|\|\|)\s*(?:""|'')\s*\)|${N}(?:\?\.|\.)trim\(\)|${N}\b(?!\s*(?:[.(\[]|\?\.)))`;
+const envNameOf = (groups: (string | undefined)[]) => groups.find((g) => g !== undefined) ?? "";
 
 /**
  * The 1-based lines of `text` that compare an environment credential with an
  * equality operator, by the rule above. Bindings are collected over the whole
  * text first, so a compare may sit above or below the read it compares.
  */
-function credentialComparesIn(text) {
-  const names = new Set();
+function credentialComparesIn(text: string) {
+  const names = new Set<string>();
   // `x = <anything on the statement containing a credential read>` — `=`, `??=`
   // and `||=`, a type annotation before it, a line break after it, a wrapper
   // (`String(…)`, `(… ?? "")`, `.trim()`) around the read.
@@ -921,7 +956,7 @@ function credentialComparesIn(text) {
   // destructure from it are the credential below. Anchored to these objects
   // only: a clause over any object's upper-case properties fired on
   // `opts.MAX_TOKENS` and `table.PRIMARY_KEY`.
-  const objects = new Set();
+  const objects = new Set<string>();
   for (const m of text.matchAll(new RegExp(String.raw`(?<![\w$.])(${IDENT})\s*(?::[^=\n]*?)?\s*=\s*\{`, "g"))) {
     let depth = 0, i = m.index + m[0].length - 1;
     for (; i < text.length; i++) { if (text[i] === "{") depth++; else if (text[i] === "}" && --depth === 0) break; }
@@ -937,12 +972,12 @@ function credentialComparesIn(text) {
       if (envName && CREDENTIAL_ENV_NAME.test(envName)) names.add(local || envName);
     }
   }
-  const lines = new Set();
-  const lineOf = (i) => text.slice(0, i).split("\n").length;
-  const flag = (re, keep = () => true) => {
+  const lines = new Set<number>();
+  const lineOf = (i: number) => text.slice(0, i).split("\n").length;
+  const flag = (re: RegExp, keep: (m: RegExpMatchArray) => boolean = () => true) => {
     for (const m of text.matchAll(re)) if (keep(m)) lines.add(lineOf(m.index));
   };
-  const credential = (m) => CREDENTIAL_ENV_NAME.test(envNameOf(m.slice(1)));
+  const credential = (m: RegExpMatchArray) => CREDENTIAL_ENV_NAME.test(envNameOf(m.slice(1)));
   flag(new RegExp(String.raw`${EQ}\s*\(*\s*${ENV_READ}`, "g"), credential);
   flag(new RegExp(String.raw`${ENV_READ}${WRAP}\s*${EQ}`, "g"), credential);
   for (const name of names) {
@@ -959,7 +994,7 @@ function credentialComparesIn(text) {
   // nullish, empty or string literal, not `.x`, `(`, `[` after it.
   for (const O of OBJECTS) {
     const P = String.raw`(?<![\w$.])${O}(?:(?:\?\.|\.)(${IDENT})|(?:\?\.)?\[\s*["'](${IDENT})["']\s*\])(?:(?:\?\.|\.)trim\(\))?`;
-    const cred = (m) => CREDENTIAL_ENV_NAME.test(m[1] ?? m[2] ?? "");
+    const cred = (m: RegExpMatchArray) => CREDENTIAL_ENV_NAME.test(m[1] ?? m[2] ?? "");
     flag(new RegExp(String.raw`(?<!${NOT_A_VALUE}\s*)${EQ}\s*${P}(?!\s*(?:[.(\[]|\?\.))`, "g"), cred);
     flag(new RegExp(String.raw`(?<!typeof\s+)${P}\s*${EQ}(?!\s*${NOT_A_VALUE})`, "g"), cred);
   }
@@ -1079,7 +1114,7 @@ const CREDENTIAL_COMPARE_NON_PROBES = [
 // vendored file that must keep a compare is listed with its line count and the
 // ticket that holds its fix, and the count is checked both ways — one fixed
 // makes its entry stale (remove it), one added beside it fails.
-const CREDENTIAL_COMPARE_EXCEPTIONS = new Map([]);
+const CREDENTIAL_COMPARE_EXCEPTIONS = new Map<string, CountedException>([]);
 
 function checkCredentialCompares() {
   for (const probe of CREDENTIAL_COMPARE_PROBES) {
@@ -1093,7 +1128,7 @@ function checkCredentialCompares() {
     if (credentialComparesIn(text).length > 0) fail(SELF, `credential-compare rule catches ordinary text it must not: ${JSON.stringify(text)}`);
   }
   const MSG = "compares a credential from the environment with an equality operator — one shared plaintext secret, a timing leak, no scope and no revocation; authenticate through the _shared/auth.ts beside the file (a copy of server-portable/auth.ts) as the extensions, recipes and integrations do (SMD-1252 and SMD-1455, FORK.md changes 64 and 67) — or, for a secret the caller echoes, compare digests with its secretMatches() — or list the file in CREDENTIAL_COMPARE_EXCEPTIONS with its line count and the ticket that holds its fix";
-  const counts = new Map();
+  const counts = new Map<string, number>();
   for (const file of textFilesUnder(SCANNED_ROOTS)) {
     const rel = relOf(file);
     const hits = credentialComparesIn(readFileSync(file, "utf8"));
@@ -1198,7 +1233,7 @@ const PAYLOAD_KEY = /(?:^|[{,])\s*(?:["'\x60]?(?:content|embedding)["'\x60]?|\[\
  * a `"`, `'` or backtick run is a string (escapes honoured), so a brace inside
  * one is not structure — `{ note: "}", content }` closes where the code says.
  */
-function walkChars(text, open, visit) {
+function walkChars(text: string, open: number, visit: (ch: string, i: number, inString: boolean) => boolean | void) {
   let quote = null;
   for (let i = open; i < text.length; i++) {
     const ch = text[i];
@@ -1213,7 +1248,7 @@ function walkChars(text, open, visit) {
   }
 }
 /** The brace- or bracket-balanced block that opens at `text[open]`, or null when it never closes. */
-function blockAt(text, open) {
+function blockAt(text: string, open: number) {
   let depth = 0, end = -1;
   walkChars(text, open, (ch, i, inString) => {
     if (inString) return;
@@ -1227,9 +1262,9 @@ function blockAt(text, open) {
  * keys at 1, an array's elements' keys at 2. A `[` that follows `{` or `,` is a
  * computed key (`{ ["content"]: x }`), not a nested value, and stays at its depth.
  */
-function topLevel(block, depth = 1) {
+function topLevel(block: string, depth = 1) {
   let d = 0, out = "", last = "";
-  const nests = [];
+  const nests: boolean[] = [];
   walkChars(block, 0, (ch, _i, inString) => {
     if (!inString && (ch === "{" || ch === "[")) {
       const nest = ch === "{" || !(last === "{" || last === ",");
@@ -1254,7 +1289,7 @@ function topLevel(block, depth = 1) {
  * Started at the head, where the text is SQL, so a quote in the prose before
  * it does not open a string.
  */
-function sqlUncommented(sqlText) {
+function sqlUncommented(sqlText: string) {
   let out = "", i = 0, quote = false, escapes = false, ident = false;
   while (i < sqlText.length) {
     const ch = sqlText[i];
@@ -1279,9 +1314,9 @@ function sqlUncommented(sqlText) {
   return out;
 }
 /** The text from `from` on, comments blanked, as far as a statement can reasonably run: 4000 characters (the longest in the tree is under 400). */
-const sqlFrom = (text, from) => sqlUncommented(text.slice(from, from + 4000));
+const sqlFrom = (text: string, from: number) => sqlUncommented(text.slice(from, from + 4000));
 /** Whether a literal opening at `text[open]` — `{…}` or `[{…}, …]` — carries either key at the level a table verb reads. */
-const literalCarries = (text, open) => {
+const literalCarries = (text: string, open: number) => {
   const block = blockAt(text, open);
   return block !== null && PAYLOAD_KEY.test(topLevel(block, text[open] === "[" ? 2 : 1));
 };
@@ -1294,13 +1329,13 @@ const literalCarries = (text, open) => {
  * credential is: scope in regex over unparsed text is not a thing, and a hit on
  * a second, cleaner send of the same name is answered with a rename.
  */
-function thoughtWritesAroundIn(text) {
-  const lineOf = (i) => text.slice(0, i).split("\n").length;
-  const lines = new Set();
+function thoughtWritesAroundIn(text: string) {
+  const lineOf = (i: number) => text.slice(0, i).split("\n").length;
+  const lines = new Set<number>();
   // Identifiers bound to a payload with either key: `x = { … content … }` or
   // `x = [{ … }]` (the block walked), `Object.assign(x, { … })`, `x.push({ … })`,
   // `x.content = …`, `x.embedding ??= …`, `x.content += …`, `x["embedding"] = …`.
-  const payloads = new Set();
+  const payloads = new Set<string>();
   for (const m of text.matchAll(new RegExp(String.raw`(?<![\w$.])(${IDENT})\s*(?::[^=\n]*?)?\s*=\s*([{[])`, "g"))) {
     if (literalCarries(text, m.index + m[0].length - 1)) payloads.add(m[1]);
   }
@@ -1341,7 +1376,7 @@ function thoughtWritesAroundIn(text) {
   // The head is found in the text; the list is read from the text with its comments blanked, so a
   // comment's `;` or `WHERE` does not end it (the third review pass).
   for (const m of text.matchAll(/\bUPDATE\s+(?:ONLY\s+)?(?:"?public"?\.)?"?thoughts"?(?![\w"])(?:\s+(?:AS\s+)?(?!SET\b)\w+)?\s+SET\b/gi)) {
-    const list = /^([\s\S]*?)(?=\bWHERE\b|\bRETURNING\b|;|$)/.exec(sqlFrom(text, m.index + m[0].length))[1];
+    const list = /^([\s\S]*?)(?=\bWHERE\b|\bRETURNING\b|;|$)/.exec(sqlFrom(text, m.index + m[0].length))![1]; // the lookahead's `$` alternative makes this match every string
     const tuple = /^\s*\(([^)]*)\)\s*=/.exec(list);
     // An assignment TARGET: first in the list or after a comma — `SET summary = CASE WHEN content = 'x'` compares, it does not assign.
     if (tuple ? /(?:^|[\s,(])"?(?:content|embedding)"?\s*(?:,|$)/i.test(tuple[1]) : /(?:^|,)\s*"?(?:content|embedding)"?\s*=(?!=)/i.test(list)) lines.add(lineOf(m.index));
@@ -1499,7 +1534,7 @@ const THOUGHT_WRITE_NON_PROBES = [
   "UPDATE thoughts SET summary = 'x -- content = 1' WHERE id = $1;",
   "UPDATE thoughts SET summary = 'see, content = old' WHERE id = $1;",
 ];
-const OWN_DATABASE = (what) => ({ why: `${what} — the fork's functions are not in it, so the capture is a raw row with no fingerprint, no label and no audit actor; the README says so`, lines: 1 });
+const OWN_DATABASE = (what: string): CountedException => ({ why: `${what} — the fork's functions are not in it, so the capture is a raw row with no fingerprint, no label and no audit actor; the README says so`, lines: 1 });
 const THOUGHT_WRITE_EXCEPTIONS = new Map([
   // The guides that show upstream's upsert_thought body: the INSERT is the function's own (check 7 excepts the same lines).
   ["docs/01-getting-started.md", { why: "the INSERT inside upstream's upsert_thought definition, the function itself, shown as the guide's; SETUP.md sends this fork's readers past it", lines: 1 }],
@@ -1526,7 +1561,7 @@ function checkThoughtWritesAround() {
     if (thoughtWritesAroundIn(text).length > 0) fail(SELF, `thought-write rule catches ordinary text it must not: ${JSON.stringify(text)}`);
   }
   const MSG = "writes a thought's content or vector around the functions that own them — the fingerprint (003/018), the model label (021) and the chunk rows (022) are left describing the text and vector before the write, and no actor reaches the audit (008); route an edit through update_thought(p_id, p_content, p_metadata_patch, p_embedding, …, p_embedding_model) and a capture — an insert too — through the 3-argument upsert_thought with embedding_model in the payload, the columns it does not know by an update carrying neither content nor vector (FORK.md changes 69 and 70, SMD-1228 and SMD-1524) — or list the file in THOUGHT_WRITE_EXCEPTIONS with its line count and the reason, and say in its README what its rows lack";
-  const counts = new Map();
+  const counts = new Map<string, number>();
   for (const file of textFilesUnder(SCANNED_ROOTS)) {
     const rel = relOf(file);
     const hits = thoughtWritesAroundIn(readFileSync(file, "utf8"));
@@ -1597,7 +1632,7 @@ const NOT_ON_BUN = /^(?:jsr:|npm:|https?:\/\/)/;
  * template literal is blanked whole, `${…}` included, so a `Deno` member
  * inside one is not seen either way (no file on the shim has one).
  */
-function blanked(text, stringsToo) {
+function blanked(text: string, stringsToo: boolean) {
   let out = "";
   for (let i = 0; i < text.length;) {
     const c = text[i], d = text[i + 1];
@@ -1627,9 +1662,9 @@ function blanked(text, stringsToo) {
  * a semicolon-less import would run on to the next `;` and its specifier be
  * missed (a silent miss, never a false catch), so the rule says so here.
  */
-function importSpecifiers(text) {
+function importSpecifiers(text: string) {
   const code = blanked(text, false);
-  const out = [];
+  const out: { spec: string; line: number }[] = [];
   for (const m of code.matchAll(/^[ \t]*(?:import|export)\b[^;]*;/gm)) {
     const spec = /\bfrom\s*(["'])([^"'\n]+)\1\s*;$/.exec(m[0]) ?? /^[ \t]*import\s*(["'])([^"'\n]+)\1\s*;$/.exec(m[0]);
     if (spec) out.push({ spec: spec[2], line: code.slice(0, m.index).split("\n").length });
@@ -1638,7 +1673,7 @@ function importSpecifiers(text) {
 }
 
 /** Whether `text` imports the SQL shim by a relative specifier. */
-const importsShim = (text) => importSpecifiers(text).some((s) => SHIM_SPECIFIER.test(s.spec));
+const importsShim = (text: string) => importSpecifiers(text).some((s) => SHIM_SPECIFIER.test(s.spec));
 
 /**
  * The gaps between a shim-importing entry file and running under Bun, as
@@ -1649,8 +1684,8 @@ const importsShim = (text) => importSpecifiers(text).some((s) => SHIM_SPECIFIER.
  * transitively; their own gaps come back prefixed with their index (`dep0:`).
  * Pure over texts so the probes below need no files.
  */
-function shimRuntimeGapsIn(entry, deps = []) {
-  const gaps = [];
+function shimRuntimeGapsIn(entry: string, deps: string[] = []) {
+  const gaps: string[] = [];
   let usesDeno = false;
   [entry, ...deps].forEach((text, i) => {
     const at = i === 0 ? "" : `dep${i - 1}:`;
@@ -1678,7 +1713,7 @@ function shimRuntimeGapsIn(entry, deps = []) {
   return gaps;
 }
 
-const SHIM_RUNTIME_PROBES = [
+const SHIM_RUNTIME_PROBES: [string, string][] = [
   // The state fix 13 left the files in: the shim, a Deno global, no runtime line.
   ['import { createClient } from "../../compat/supabase-sql/index.ts";\nconst u = Deno.env.get("SUPABASE_URL");\nDeno.serve(() => new Response("ok"));\n', "no-runtime-import"],
   // The runtime line present, but after another import whose module body may read Deno.env.
@@ -1699,7 +1734,7 @@ const SHIM_RUNTIME_PROBES = [
   ['import "../../compat/deno-on-bun.ts";\nimport { createClient } from "../../compat/supabase-sql/index.ts";\nexport {\n  Pool,\n} from "https://deno.land/x/postgres@v0.17.0/mod.ts";\nDeno.serve(() => new Response("ok"));\n', "specifier:https://deno.land/x/postgres@v0.17.0/mod.ts@3"],
 ];
 /** [entry, dep, gap]: the transitive cases — the entry itself reads no Deno member. */
-const SHIM_RUNTIME_DEP_PROBES = [
+const SHIM_RUNTIME_DEP_PROBES: [string, string, string][] = [
   ['import { createClient } from "../../compat/supabase-sql/index.ts";\nimport { key } from "./_shared/helpers.ts";\nexport const c = createClient(key(), "");\n', 'export const key = () => Deno.env.get("SUPABASE_URL") ?? "";\n', "no-runtime-import"],
   ['import "../../compat/deno-on-bun.ts";\nimport { createClient } from "../../compat/supabase-sql/index.ts";\nimport { key } from "./_shared/helpers.ts";\n', 'export const key = () => Deno.args[0];\n', "dep0:deno-member:args@1"],
   ['import "../../compat/deno-on-bun.ts";\nimport { createClient } from "../../compat/supabase-sql/index.ts";\nimport { db } from "./_shared/db.ts";\n', 'import { Pool } from "npm:pg@8";\nexport const db = new Pool();\n', "dep0:specifier:npm:pg@8@1"],
@@ -1740,11 +1775,11 @@ function checkShimRuntime() {
     if (!importsShim(text)) continue;
     const rel = relOf(file);
     // The files it evaluates: relative imports, transitively, that exist in the tree — not the shim or the polyfill themselves.
-    const deps = [];
+    const deps: string[] = [];
     const seen = new Set([file]);
     const queue = [file];
     while (queue.length) {
-      const from = queue.shift();
+      const from = queue.shift()!; // the loop runs while queue.length
       const src = from === file ? text : readFileSync(from, "utf8");
       for (const { spec } of importSpecifiers(src)) {
         if (!spec.startsWith("./") && !spec.startsWith("../")) continue;
@@ -1760,7 +1795,7 @@ function checkShimRuntime() {
       const g = dep ? gap.slice(dep[0].length) : gap;
       const line = /@(\d+)$/.exec(g)?.[1];
       const at = line ? `${where}:${line}` : where;
-      if (g === "no-runtime-import") fail(rel, `${WHY} (itself or through ${deps.length ? "a file it imports" : "its own text"}) but does not import compat/deno-on-bun.ts — under Bun \`Deno\` is undefined at the first read, under Deno the shim's \`bun\` import fails, so the file runs nowhere; \`bun scripts/migrate-to-sql-shim.mjs --apply --all\` adds the line as the first import (SMD-1480, FORK.md change 74)`);
+      if (g === "no-runtime-import") fail(rel, `${WHY} (itself or through ${deps.length ? "a file it imports" : "its own text"}) but does not import compat/deno-on-bun.ts — under Bun \`Deno\` is undefined at the first read, under Deno the shim's \`bun\` import fails, so the file runs nowhere; \`bun scripts/migrate-to-sql-shim.ts --apply --all\` adds the line as the first import (SMD-1480, FORK.md change 74)`);
       else if (g.startsWith("runtime-not-first")) fail(at, `imports compat/deno-on-bun.ts after another import — a module evaluated before it may read \`Deno.env\` in its body and throw at startup; make it the first import statement (SMD-1480, FORK.md change 74)`);
       else if (g.startsWith("deno-member:")) {
         const member = g.slice("deno-member:".length).replace(/@\d+$/, "");
@@ -1856,6 +1891,8 @@ function checkSupabaseIsms() {
 // named as compose names them (`compose*.yaml`, `docker-compose*.yml`) are
 // read: SMD-1849's collector configuration under deploy/ is not a stack.
 
+/** One knob line of deploy/.env.example: the name, the value after `=`, whether the line is live (not commented out), and its line. */
+type EnvKnob = { name: string; value: string; live: boolean; line: number };
 /**
  * The knobs deploy/.env.example documents whose names match `pattern`: one
  * entry per knob line, live or commented out (most ship commented out
@@ -1866,8 +1903,8 @@ function checkSupabaseIsms() {
  * than throw. Check 13 and the compose-forwards check read the file through
  * this, so what counts as a documented line is decided once.
  */
-function envKnobsIn(text, pattern) {
-  const knobs = [];
+function envKnobsIn(text: string, pattern: RegExp) {
+  const knobs: EnvKnob[] = [];
   // Same-line whitespace only: a `\s*` here once ate the newline and the next
   // knob line as this one's trailing comment, and POSTGRES_BIND went undocumented.
   for (const m of text.matchAll(/^(#?)[ \t]*([A-Z0-9_]+)=(\S*)[ \t]*(?:#.*)?$/gm)) {
@@ -1875,28 +1912,29 @@ function envKnobsIn(text, pattern) {
   }
   return knobs;
 }
-const ENV_KNOB_PROBES = [
+const ENV_KNOB_PROBES: [string, RegExp, string[]][] = [
   // [text, pattern, expected names]
   ["# A_BIND=127.0.0.1\n# B_BIND=127.0.0.1\n# C_BIND=127.0.0.1\n", /_BIND$/, ["A_BIND", "B_BIND", "C_BIND"]],
   ["# OB1_X=1536   # hosted; unmeasured\nOB1_Y=\n", /^OB1_/, ["OB1_X", "OB1_Y"]],
   ["# SERVER_BIND=0.0.0.0 is the one an operator sets\n# SERVER_BIND=127.0.0.1\n", /_BIND$/, ["SERVER_BIND"]],
 ];
-function documentedEnvKnobs(pattern) {
+let envExampleMissingReported = false; // documentedEnvKnobs reports the missing file once, for its two callers
+function documentedEnvKnobs(pattern: RegExp) {
   for (const [text, pat, names] of ENV_KNOB_PROBES) {
     const got = envKnobsIn(text, pat).map((k) => k.name);
     if (JSON.stringify(got) !== JSON.stringify(names)) fail(SELF, `env-knob reader no longer reports exactly ${JSON.stringify(names)} for its probe (reported ${JSON.stringify(got)}): ${JSON.stringify(text)}`);
   }
   const path = join(ROOT, "deploy", ".env.example");
   if (!existsSync(path)) {
-    if (!documentedEnvKnobs.reported) fail("deploy/.env.example", `missing — the documented knobs are read from it (check 13's _BIND knobs, check 14's OB1_* settings), and SETUP.md tells every operator to copy it`);
-    documentedEnvKnobs.reported = true;
+    if (!envExampleMissingReported) fail("deploy/.env.example", `missing — the documented knobs are read from it (check 13's _BIND knobs, check 14's OB1_* settings), and SETUP.md tells every operator to copy it`);
+    envExampleMissingReported = true;
     return null;
   }
   return envKnobsIn(readFileSync(path, "utf8"), pattern);
 }
 
 /** compose file under deploy/ → the services that publish one mapping each from it. */
-const PUBLISHES = {
+const PUBLISHES: Record<string, string[]> = {
   "compose.yaml": ["server"],
   "compose.host-ports.yaml": ["postgres", "ollama"],
 };
@@ -1904,27 +1942,31 @@ const COMPOSE_FILE = /^(docker-)?compose.*\.ya?ml$/;
 
 const PORT_ITEM = /^\$\{([A-Z0-9_]+)_BIND:-([^}]*)\}:\$\{[A-Z0-9_]+_PORT:-\d+\}:\d+$/;
 /** Colon-separated fields of a short-form mapping, `${…}` contents not counted. */
-function portFields(v) {
+function portFields(v: string) {
   let depth = 0, n = 1;
   for (const ch of v) { if (ch === "{") depth++; else if (ch === "}") depth--; else if (ch === ":" && depth === 0) n++; }
   return n;
 }
 /** 1-based line of the first non-comment line containing `needle`, for the report; 0 if none. */
-function lineOf(text, needle) {
+function lineOf(text: string, needle: string) {
   const i = text.split("\n").findIndex((l) => !/^\s*#/.test(l) && l.replace(/\s+#.*$/, "").includes(needle));
   return i < 0 ? 0 : i + 1;
 }
 
+/** What Bun.YAML.parse yields, spelled out: a mapping is a record of unknowns, a sequence an array, anything else a scalar or null — the readers narrow it by typeof / Array.isArray, as they always did. */
+type YamlValue = Record<string, unknown> | unknown[] | string | number | boolean | null;
+/** One check-13 gap: `[kind, service, line, detail]` — service null when the file as a whole is at fault, line 0 when none applies. */
+type PortGap = [kind: string, service: string | null, line: number, detail: string];
 /**
  * One compose file's published ports: `{ gaps: [[kind, service, line, detail]],
  * published: [service, …] }` — `published` lists a service once per house-form
  * mapping, for the inventory.
  */
-function publishedPortGapsIn(text, { documented }) {
-  const gaps = [], published = [];
+function publishedPortGapsIn(text: string, { documented }: { documented: Set<string> | null }): { gaps: PortGap[]; published: string[] } {
+  const gaps: PortGap[] = [], published: string[] = [];
   if (typeof Bun === "undefined" || typeof Bun.YAML?.parse !== "function") return { gaps: [["no-parser", null, 0, ""]], published };
-  let doc;
-  try { doc = Bun.YAML.parse(text); } catch (e) { return { gaps: [["unparseable", null, 0, String(e.message ?? e)]], published }; }
+  let doc: YamlValue;
+  try { doc = Bun.YAML.parse(text) as YamlValue; } catch (e) { return { gaps: [["unparseable", null, 0, String((e as Error).message ?? e)]], published }; }
   if (Array.isArray(doc)) return { gaps: [["not-a-mapping", null, 0, `a list of ${doc.length}`]], published };
   if (!doc || typeof doc !== "object" || !doc.services || typeof doc.services !== "object" || Array.isArray(doc.services)) {
     return { gaps: [["no-services", null, 0, ""]], published };
@@ -1955,7 +1997,7 @@ function publishedPortGapsIn(text, { documented }) {
 }
 
 const GOOD = `"\${SERVER_BIND:-127.0.0.1}:\${SERVER_PORT:-8000}:8000"`;
-const PORT_PROBES = [
+const PORT_PROBES: [string, string[], string[]][] = [
   // [text, expected gap kinds, expected published services]
   [`services:\n  server:\n    ports:\n      - ${GOOD}\n`, [], ["server"]],
   // Spellings a parser makes one: quoting, indentation, a flow sequence, a quoted or spaced key, an alias, an anchored block merged in.
@@ -2133,7 +2175,7 @@ async function checkEmbeddingDefaults() {
   // name sent to a hosted endpoint is a 404 per capture — fatal for the embedding
   // call, silent for the metadata one. Both halves of that have already shipped
   // here once.
-  const hostedModel = (n) => n.includes("/");
+  const hostedModel = (n: string) => n.includes("/");
   const localBase = /(^|\/\/)(127\.0\.0\.1|localhost|ollama|host\.(docker|containers)\.internal)/.test(
     cfg.DEFAULT_LLM_BASE_URL
   );
@@ -2204,8 +2246,8 @@ async function checkCapturingGrants() {
   // from the bold cell that leads each group's first row (`**capture**`, …),
   // and for every ROLE_GRANTS row compare its (group, object) privileges.
   const rowLines = section.split("\n").filter((l) => l.trimStart().startsWith("|"));
-  const documentedPrivs = new Map(); // `${group}\t${name}` -> Set(privileges)
-  let group = null;
+  const documentedPrivs = new Map<string, Set<string>>(); // `${group}\t${name}` -> Set(privileges)
+  let group: string | null = null;
   for (const line of rowLines) {
     // A pipe-led, pipe-tailed row splits to ['', groupCell, objectCell, privCell, '']
     // — the leading `**word**` names a group and carries to the rows below it.
@@ -2269,15 +2311,15 @@ function checkMigrationDoc() {
   const tableText = readme.slice(tableStart, mapStart);
   const mapEnd = readme.indexOf("\n\n", mapStart);
   const mapText = readme.slice(mapStart, mapEnd < 0 ? readme.length : mapEnd);
-  const documented = new Set();
-  const dup = new Set();
-  const note = (n) => (documented.has(n) ? dup.add(n) : documented.add(n));
+  const documented = new Set<number>();
+  const dup = new Set<number>();
+  const note = (n: number) => (documented.has(n) ? dup.add(n) : documented.add(n));
   for (const m of tableText.matchAll(/`(\d{3})_[a-z0-9_]+\.sql`/g)) note(Number(m[1]));
   // "NNN change M" for a hand-numbered change, or "NNN SMD-####" for a migration
   // a fragment introduced — its change number is assigned at release, so it is
   // documented by its stable ticket until then (SMD-1804).
   for (const m of mapText.matchAll(/\b(\d{3}) (?:change \d+|SMD-\d+)/g)) note(Number(m[1]));
-  const pad = (n) => String(n).padStart(3, "0");
+  const pad = (n: number) => String(n).padStart(3, "0");
   const missing = fileNums.filter((n) => !documented.has(n)).sort((a, b) => a - b);
   const extra = [...documented].filter((n) => !fileNums.includes(n)).sort((a, b) => a - b);
   if (missing.length) fail("db/README.md", `migration(s) ${missing.map(pad).join(", ")} have a file under db/migrations/ but appear in neither "## The migrations" nor the "024 onward" map — document each (a table row for 001–023, a "NNN change M" map entry otherwise) (SMD-1805)`);
@@ -2298,16 +2340,16 @@ checkMigrationDoc();
  * so a node run skips it in words, as check 13 does.
  */
 async function checkToolsManifest() {
-  let renderToolsJson;
+  let renderToolsJson: () => string;
   try {
-    ({ renderToolsJson } = await import("./gen-tools.mjs"));
+    ({ renderToolsJson } = await import("./gen-tools.ts"));
   } catch (e) {
-    console.warn(`  (tools.json round-trip skipped — ${e.message.split("\n")[0]} — run under bun)`);
+    console.warn(`  (tools.json round-trip skipped — ${(e as Error).message.split("\n")[0]} — run under bun)`);
     return;
   }
   const have = readFileSync(join(ROOT, "server-portable", "tools.json"), "utf8");
   if (have !== renderToolsJson()) {
-    fail("server-portable/tools.json", "does not match its source — the MCP tool surface's typed source is server-portable/tools.ts; run `bun scripts/gen-tools.mjs` to regenerate (SMD-1805)");
+    fail("server-portable/tools.json", "does not match its source — the MCP tool surface's typed source is server-portable/tools.ts; run `bun scripts/gen-tools.ts` to regenerate (SMD-1805)");
   }
 }
 await checkToolsManifest();
@@ -2365,14 +2407,14 @@ await checkToolsManifest();
 const SERVER_ENV_SOURCE = "server-portable/index.ts";
 const KNOB = /^(OB1_|OPEN_BRAIN_)[A-Z0-9_]+$/;
 /** The one shape a knob is forwarded in — `${NAME}` or `${NAME:-default}` — with the default captured; the fallback rule reads the capture. */
-const HOUSE_FORM = (k) => new RegExp(`^\\$\\{${k}(?::-([^$}]*))?\\}$`);
+const HOUSE_FORM = (k: string) => new RegExp(`^\\$\\{${k}(?::-([^$}]*))?\\}$`);
 /** Knobs the server declares that compose.yaml must NOT forward, with the reason its own comment gives. */
-const NOT_FORWARDED = {
+const NOT_FORWARDED: Record<string, string> = {
   OB1_STORE: "the SQL store is the server's default (FORK.md change 97) and this stack is the deployment that proves it — forwarding it would let the default drift back to PostgREST with nothing in CI noticing",
 };
 
 /** The names `type Env = { … }` declares in a server source, in order; null when the block is not there. */
-function declaredEnvIn(source) {
+function declaredEnvIn(source: string): string[] | null {
   const m = /type Env = \{([\s\S]*?)\n\};/.exec(source);
   if (!m) return null;
   return [...m[1].matchAll(/^[ \t]*([A-Z][A-Z0-9_]*)\??:/gm)].map((x) => x[1]);
@@ -2390,21 +2432,27 @@ function declaredEnvIn(source) {
  * variable (`env[QUERY_LOG.flag]`) or a destructuring is invisible here, and
  * declared by hand.
  */
-function envReadsIn(source) {
-  const reads = [];
+function envReadsIn(source: string) {
+  const reads: [string, number][] = [];
   for (const m of source.matchAll(/\b(?:process\.env|env\(\)|env|ENV|bindings)(?:\?\.|\.|\??\[["'])((?:OB1_|OPEN_BRAIN_)[A-Z0-9_]+)\b/g)) {
     if (!reads.some(([n]) => n === m[1])) reads.push([m[1], m.index]);
   }
   return reads;
 }
 
+/** A check-14 reader gap: `[kind, service, detail]` — `no-services` alone names no service. */
+type EnvGap =
+  | [kind: "no-services", service: null, detail: string]
+  | [kind: "unreadable" | "env-file" | "environment-item-not-string" | "environment-not-mapping", service: string, detail: string];
+/** One service's forwarded environment: name → value, null for a list item with no `=`. */
+type ServiceEnv = Map<string, string | null>;
 /**
  * One parsed compose document's environment: `forwarded` maps each service to
  * a Map of name → value (null for a list item with no `=`); `gaps` lists
  * `[kind, service, detail]` for what the rule refuses or cannot read.
  */
-function forwardedEnvIn(doc) {
-  const gaps = [], forwarded = new Map();
+function forwardedEnvIn(doc: YamlValue) {
+  const gaps: EnvGap[] = [], forwarded = new Map<string, ServiceEnv>();
   if (!doc || typeof doc !== "object" || Array.isArray(doc) || !doc.services || typeof doc.services !== "object" || Array.isArray(doc.services)) {
     gaps.push(["no-services", null, ""]);
     return { gaps, forwarded };
@@ -2414,7 +2462,7 @@ function forwardedEnvIn(doc) {
     // one first made `server: x` cascade into one "never forwards" report per
     // declared knob beside check 13's (the eighth review pass).
     if (!def || typeof def !== "object" || Array.isArray(def)) { gaps.push(["unreadable", service, JSON.stringify(def)]); continue; }
-    const env = new Map();
+    const env: ServiceEnv = new Map();
     forwarded.set(service, env);
     if ("env_file" in def) gaps.push(["env-file", service, JSON.stringify(def.env_file)]);
     if (!("environment" in def)) continue;
@@ -2449,17 +2497,17 @@ function forwardedEnvIn(doc) {
  * `OB1_QUERY_LOG_RETENTION_DAYS` for `OB1_QUERY_LOG`, and to a `command:`
  * line that named the knob — so keys only, regex-escaped.
  */
-function lineIn(text, service, needle) {
+function lineIn(text: string, service: string, needle: string) {
   const lines = text.split("\n");
-  const comment = (l) => /^\s*#/.test(l) || !l.trim();
-  const esc = (n) => n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const isKey = (l, name) => new RegExp(`^\\s*(?:-\\s*)?["']?${esc(name)}["']?\\s*(?:[:=]|$)`).test(l);
+  const comment = (l: string) => /^\s*#/.test(l) || !l.trim();
+  const esc = (n: string) => n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const isKey = (l: string, name: string) => new RegExp(`^\\s*(?:-\\s*)?["']?${esc(name)}["']?\\s*(?:[:=]|$)`).test(l);
   const top = lines.findIndex((l) => /^["']?services["']?\s*:/.test(l));
   if (top < 0) return 0;
   const firstKey = lines.findIndex((l, i) => i > top && !comment(l));
   if (firstKey < 0) return 0;
-  const indent = /^\s*/.exec(lines[firstKey])[0].length;
-  const atIndent = (l) => !comment(l) && /^\s*/.exec(l)[0].length === indent;
+  const indent = /^\s*/.exec(lines[firstKey])![0].length; // `^\s*` matches every string
+  const atIndent = (l: string) => !comment(l) && /^\s*/.exec(l)![0].length === indent; // as above
   const start = lines.findIndex((l, i) => i > top && atIndent(l) && isKey(l, service));
   if (start < 0) return 0;
   // The block ends at the next service, or the next top-level key — not at a
@@ -2469,7 +2517,7 @@ function lineIn(text, service, needle) {
   const i = lines.findIndex((l, i) => i > start && i < stop && !comment(l) && isKey(l, needle));
   return i < 0 ? 0 : i + 1;
 }
-const LINE_PROBES = [
+const LINE_PROBES: [string, string, string, number][] = [
   // [yaml, service, needle, expected line]
   ["services:\n  migrate:\n    environment:\n      OB1_A: ${OB1_A:-}\n  server:\n    environment:\n      OB1_A: ${OB1_A:-}\n", "server", "OB1_A", 7],
   ["services:\n  migrate:\n    environment:\n      OB1_A: ${OB1_A:-}\n  server:\n    environment:\n      OB1_A: ${OB1_A:-}\n", "migrate", "OB1_A", 4],
@@ -2488,7 +2536,7 @@ const LINE_PROBES = [
 ];
 
 /** What a value that is not `${NAME}` / `${NAME:-…}` is, for the message. */
-function forwardForm(v, name) {
+function forwardForm(v: string, name: string) {
   if (new RegExp(`^\\$\\{${name}-`).test(v)) return "`${X-…}`, a single dash, keeps an EMPTY value from deploy/.env instead of the default";
   if (new RegExp(`^\\$\\{${name}:\\?`).test(v)) return "`${X:?…}` aborts compose on an unset knob that has a default in the code";
   if (new RegExp(`^\\$${name}$`).test(v)) return "a bare `$X` is the form this rule does not read";
@@ -2497,35 +2545,35 @@ function forwardForm(v, name) {
   if (/^\$\{/.test(v)) return "another variable's name is a miswire";
   return "a literal pins the operator out";
 }
-const FORM_PROBES = [
+const FORM_PROBES: [string, string, string][] = [
   // [value, name, a phrase the message must carry]
   ["${X-a}", "X", "single dash"], ["${X:?a}", "X", "aborts compose"], ["$X", "X", "bare"], ["${X:-${Y}}", "X", "nested"],
   ["on", "X", "literal"], ["${Y:-}", "X", "miswire"],
   ["${X:-}x", "X", "own name"], ["x${X:-}", "X", "own name"], ["${X:+on}", "X", "own name"], ["${X:-$$id}", "X", "own name"], ["${X:-a}${X:-b}", "X", "own name"],
 ];
 
-const ENV_SOURCE_PROBES = [
+const ENV_SOURCE_PROBES: [string, string[] | null][] = [
   // [source, expected names]
   ["type Env = {\n  A?: string;\n  /** doc with a colon: here */\n  OB1_B: string;\n  lower?: string;\n};\n", ["A", "OB1_B"]],
   ["type Env = {\n  A?: string;\n  B?: string;\n};\nconst x: { C?: string } = {};\n", ["A", "B"]],
   ["const Env = { A: 1 };\n", null],
 ];
-const ENV_READ_PROBES = [
+const ENV_READ_PROBES: [string, string[]][] = [
   // [source, expected names]
   ["const a = process.env.OB1_A; const b = env.OB1_B || 1; const c = env?.OB1_C; const d = env[\"OB1_D\"]; const e = ENV.OPEN_BRAIN_E; f(bindings.OB1_F); const g = env().OB1_G;", ["OB1_A", "OB1_B", "OB1_C", "OB1_D", "OPEN_BRAIN_E", "OB1_F", "OB1_G"]],
   // Prose, a string naming the knob, a read through a variable, and a lowercase object are not reads.
   ["// set OB1_A in deploy/.env\nconst m = `OB1_B=${x}`; const v = env[QUERY_LOG.flag]; const w = cfg.OB1_C; const z = process.env.OB1_A;", ["OB1_A"]],
 ];
 // The index is the read's, not the first mention's: the comment comes first here.
-const ENV_READ_INDEX_PROBE = ["// OB1_A is read below\nconst a = process.env.OB1_A;", "OB1_A", 23 + 10]; // the read expression starts after the comment line (23) and `const a = ` (10)
+const ENV_READ_INDEX_PROBE: [string, string, number] = ["// OB1_A is read below\nconst a = process.env.OB1_A;", "OB1_A", 23 + 10]; // the read expression starts after the comment line (23) and `const a = ` (10)
 /**
  * Knobs db/config.mjs reads that are the migrator's alone — the server's process
  * loads the file but never reaches the read — with the reason.
  */
-const READ_FOR_MIGRATOR = {
+const READ_FOR_MIGRATOR: Record<string, string> = {
   OB1_BACKFILL_LIMIT: "migration 023's batch size, read inside the substitutions db/migrate.ts asks for; the server never calls that",
 };
-const FORWARD_PROBES = [
+const FORWARD_PROBES: [string, string[], Record<string, string | null>][] = [
   // [yaml, expected gap kinds, expected server names → values]
   ["services:\n  server:\n    environment:\n      OB1_A: ${OB1_A:-}\n      OB1_B: ${OB1_B:-x}\n", [], { OB1_A: "${OB1_A:-}", OB1_B: "${OB1_B:-x}" }],
   ["services:\n  server:\n    environment:\n      - OB1_A=${OB1_A:-}\n      - OB1_B\n", [], { OB1_A: "${OB1_A:-}", OB1_B: null }],
@@ -2539,6 +2587,19 @@ const FORWARD_PROBES = [
   ["services:\n  server: x\n", ["unreadable"], {}],
 ];
 
+/** One compose file, parsed: its name under deploy/ and its document. */
+type ComposeFile = { name: string; doc: YamlValue };
+/**
+ * One check-14 gap: `[kind, file, service, name, detail]` — the slots a kind fills are the ones
+ * its message reads, so the `switch` in checkServerEnvForwarded narrows them by kind.
+ */
+type ServerEnvGap =
+  | [kind: "env-file" | "environment-not-mapping" | "environment-item-not-string", file: string, service: string, name: null, detail: string]
+  | [kind: "bare-item" | "not-house-form" | "excused-forwarded" | "unforwarded" | "bad-fallback", file: string, service: string, name: string, detail: string]
+  | [kind: "undeclared", file: string, service: string, name: string, detail: string | null]
+  | [kind: "no-server" | "no-base", file: string, service: null, name: null, detail: string]
+  | [kind: "undocumented" | "dead-switch", file: string, service: null, name: string, detail: string]
+  | [kind: "excuse-stale", file: null, service: null, name: string, detail: string];
 /**
  * The decision, pure: `declared` (type Env's names), `documented` (a Set of the
  * example's knob names), `files` = [{ name, doc }] with "compose.yaml" among
@@ -2548,11 +2609,11 @@ const FORWARD_PROBES = [
  * the server, its declaration and excuse; then the base file's universe;
  * stale excuses; dead switches; the fallback.
  */
-function serverEnvGapsIn(declared, documented, files, excused = NOT_FORWARDED) {
-  const gaps = [];
-  const anywhere = new Set();
-  const forwardedBy = new Map(); // file name → its services' environments, read once
-  let server = null, baseDoc = null, baseSeen = false;
+function serverEnvGapsIn(declared: string[], documented: Set<string>, files: ComposeFile[], excused: Record<string, string> = NOT_FORWARDED) {
+  const gaps: ServerEnvGap[] = [];
+  const anywhere = new Set<string>();
+  const forwardedBy = new Map<string, Map<string, ServiceEnv>>(); // file name → its services' environments, read once
+  let server: ServiceEnv | null = null, baseDoc: YamlValue | null = null, baseSeen = false;
   for (const { name, doc } of files) {
     const { gaps: read, forwarded } = forwardedEnvIn(doc);
     forwardedBy.set(name, forwarded);
@@ -2596,14 +2657,14 @@ function serverEnvGapsIn(declared, documented, files, excused = NOT_FORWARDED) {
   // container (the fifth pass found only the base file's read) — and the
   // service may be defined in that file or the base.
   for (const { name, doc } of files) {
-    const env = forwardedBy.get(name).get("server");
+    const env = forwardedBy.get(name)!.get("server"); // set for every file by the first loop
     // The captured default of a house-form value; a value the shape rule refused was reported above and draws no second report here.
     const fb = HOUSE_FORM("OB1_LLM_BASE_URL").exec(env?.get("OB1_LLM_BASE_URL") ?? "");
     if (!fb?.[1]) continue;
     // Names compare as DNS and preflight's isLocalHostname do: case-insensitively.
     const m = /^http:\/\/([A-Za-z0-9][A-Za-z0-9_.-]*):11434\/v1$/.exec(fb[1]);
     const host = m ? m[1].toLowerCase() : null;
-    const defined = (d) => Object.keys(d?.services ?? {}).some((s) => s.toLowerCase() === host);
+    const defined = (d: YamlValue | null) => Object.keys((d as Record<string, unknown> | null)?.services ?? {}).some((s) => s.toLowerCase() === host); // `?.services` on a non-mapping is undefined, which the `?? {}` answers; the cast says only that
     const ok = host && LOCAL_PROVIDER_SERVICES.includes(host) && (defined(baseDoc) || defined(doc));
     if (!ok) gaps.push(["bad-fallback", name, "server", "OB1_LLM_BASE_URL", fb[1]]);
   }
@@ -2612,10 +2673,10 @@ function serverEnvGapsIn(declared, documented, files, excused = NOT_FORWARDED) {
 // Text, not documents: the probes are parsed inside the check, after its
 // Bun.YAML guard — parsing here at module scope made the whole script throw
 // under node before any check reported (the seventh review pass).
-const BASE = (yaml) => ({ name: "compose.yaml", yaml });
-const OVERLAY = (yaml) => ({ name: "compose.x.yaml", yaml });
-const SRV = (env) => `services:\n  server:\n    environment:\n${env}`;
-const DECISION_PROBES = [
+const BASE = (yaml: string) => ({ name: "compose.yaml", yaml });
+const OVERLAY = (yaml: string) => ({ name: "compose.x.yaml", yaml });
+const SRV = (env: string) => `services:\n  server:\n    environment:\n${env}`;
+const DECISION_PROBES: [string[], string[], { name: string; yaml: string }[], string[], Record<string, string>?][] = [
   // [declared, documented, files, expected "kind:name" list, excused (none unless given)]
   [["OB1_A", "OB1_B", "OB1_STORE"], ["OB1_A", "OB1_B"], [BASE(SRV("      OB1_A: ${OB1_A:-}\n      OB1_B: ${OB1_B:-x}\n"))], [], { OB1_STORE: "why" }],
   [["OB1_A", "OB1_B"], ["OB1_A", "OB1_B"], [BASE(SRV("      OB1_A: ${OB1_A:-}\n"))], ["unforwarded:OB1_B", "dead-switch:OB1_B"]],
@@ -2681,7 +2742,7 @@ function checkServerEnvForwarded() {
     if (!forwardForm(value, name).includes(phrase)) fail(SELF, `forward-form message for ${JSON.stringify(value)} no longer says "${phrase}": ${JSON.stringify(forwardForm(value, name))}`);
   }
   for (const [yaml, kinds, server] of FORWARD_PROBES) {
-    const got = forwardedEnvIn(Bun.YAML.parse(yaml));
+    const got = forwardedEnvIn(Bun.YAML.parse(yaml) as YamlValue);
     const gotKinds = got.gaps.map((g) => g[0]);
     const gotServer = Object.fromEntries(got.forwarded.get("server") ?? []);
     if (JSON.stringify(gotKinds) !== JSON.stringify(kinds) || JSON.stringify(gotServer) !== JSON.stringify(server)) {
@@ -2689,7 +2750,7 @@ function checkServerEnvForwarded() {
     }
   }
   for (const [declared, documented, probeFiles, expected, excused] of DECISION_PROBES) {
-    const files = probeFiles.map(({ name, yaml }) => ({ name, doc: Bun.YAML.parse(yaml) }));
+    const files = probeFiles.map(({ name, yaml }) => ({ name, doc: Bun.YAML.parse(yaml) as YamlValue }));
     const got = serverEnvGapsIn(declared, new Set(documented), files, excused ?? {}).map(([kind, , , name]) => `${kind}:${name ?? ""}`);
     if (JSON.stringify(got) !== JSON.stringify(expected)) fail(SELF, `check 14's decision no longer reports ${JSON.stringify(expected)} for its probe (reported ${JSON.stringify(got)}): declared ${JSON.stringify(declared)}, documented ${JSON.stringify(documented)}, ${probeFiles.map((f) => f.name).join(" + ")}`);
   }
@@ -2697,7 +2758,7 @@ function checkServerEnvForwarded() {
   const knobs = documentedEnvKnobs(KNOB);
   if (knobs === null) return;
   const documented = new Set(knobs.map((k) => k.name));
-  const exampleLine = (name) => knobs.find((k) => k.name === name)?.line;
+  const exampleLine = (name: string) => knobs.find((k) => k.name === name)?.line;
 
   const sourcePath = join(ROOT, SERVER_ENV_SOURCE);
   if (!existsSync(sourcePath)) { fail(SERVER_ENV_SOURCE, `missing — check 14 reads the knobs the server declares from its \`type Env\` block (SMD-1843)`); return; }
@@ -2713,8 +2774,8 @@ function checkServerEnvForwarded() {
   // which the server imports and which reads eight knobs through its ENV
   // proxy — that reads a knob straight from the environment declares it, or
   // the universe is short of what runs. The migrator's own knob is excused.
-  const sources = [];
-  const walk = (dir) => {
+  const sources: string[] = [];
+  const walk = (dir: string) => {
     for (const f of readdirSync(join(ROOT, dir)).sort()) {
       const srcRel = `${dir}/${f}`;
       if (statSync(join(ROOT, srcRel)).isDirectory()) { if (f !== "node_modules") walk(srcRel); }
@@ -2739,20 +2800,20 @@ function checkServerEnvForwarded() {
   }
 
   const dir = join(ROOT, "deploy");
-  const files = [], texts = new Map();
+  const files: ComposeFile[] = [], texts = new Map<string, string>();
   for (const name of readdirSync(dir).filter((f) => COMPOSE_FILE.test(f) && statSync(join(dir, f)).isFile()).sort()) {
     const text = readFileSync(join(dir, name), "utf8");
-    let doc;
-    try { doc = Bun.YAML.parse(text); } catch { if (name === "compose.yaml") return; continue; } // check 13 reports the parse failure; nothing to hold without the base
+    let doc: YamlValue;
+    try { doc = Bun.YAML.parse(text) as YamlValue; } catch { if (name === "compose.yaml") return; continue; } // check 13 reports the parse failure; nothing to hold without the base
     files.push({ name, doc });
     texts.set(name, text);
   }
-  const at = (file, service, needle) => {
+  const at = (file: string, service: string | null, needle: string | null) => {
     const frel = `deploy/${file}`;
-    const l = texts.has(file) && service && needle ? lineIn(texts.get(file), service, needle) : 0;
+    const l = texts.has(file) && service && needle ? lineIn(texts.get(file)!, service, needle) : 0; // has() just tested
     return l ? `${frel}:${l}` : frel;
   };
-  const HOUSE = (k) => `\`\${${k}}\` or \`\${${k}:-…}\``;
+  const HOUSE = (k: string) => `\`\${${k}}\` or \`\${${k}:-…}\``;
   for (const [kind, file, service, name, detail] of serverEnvGapsIn(declared, documented, files)) {
     switch (kind) {
       case "env-file": fail(at(file, service, "env_file"), `service \`${service}\` has \`env_file: ${detail}\` — a file this rule does not open, forwarding whatever it holds; name each knob in \`environment:\` instead (SMD-1843)`); break;
@@ -2810,7 +2871,7 @@ function checkFixtureRedaction() {
   // Recurse carrying the nearest object key that governs a value; an array's
   // elements are governed by the array's own key, so `relevant: [uuid]` passes
   // and `chunks: ["body"]` does not.
-  const scan = (node, key, path, hits) => {
+  const scan = (node: unknown, key: string, path: string, hits: string[]): void => {
     if (typeof node === "string") {
       if (node.trim() !== "" && !FREE_TEXT_KEYS.has(key) && !UUID.test(node.trim())) hits.push(`${path} (value under "${key}")`);
       return;
@@ -2830,10 +2891,10 @@ function checkFixtureRedaction() {
     [{ title: "a leaked title derived from content" }, "content under an off-list key (`title`)"],
     [{ thoughts: { "a leaked thought body used as a key": 1 } }, "content used as an object key"],
   ]) {
-    const bad = []; scan(probe, "$", "$", bad);
+    const bad: string[] = []; scan(probe, "$", "$", bad);
     if (bad.length === 0) fail(SELF, `fixture redaction check no longer catches ${why} (its own probe)`);
   }
-  const good = []; scan(
+  const good: string[] = []; scan(
     { generated: "2026-01-01T00:00:00Z", origin: "query_log", note: "a description",
       queries: [{ query: "how many projects have I led", relevant: ["10000000-0000-4000-8000-000000000001"], baseline: ["10000000-0000-4000-8000-000000000002"] }],
       thoughts: [{ id: "10000000-0000-4000-8000-000000000003", embedding: [0.1, -0.2] }] }, "$", "$", good);
@@ -2842,10 +2903,10 @@ function checkFixtureRedaction() {
   const dir = join(ROOT, "evals", "fixtures");
   if (!existsSync(dir)) return;
   for (const file of walk(dir, [], /\.json$/)) {
-    let data;
+    let data: unknown;
     try { data = JSON.parse(readFileSync(file, "utf8")); }
     catch { fail(relOf(file), "committed fixture is not valid JSON"); continue; }
-    const hits = [];
+    const hits: string[] = [];
     scan(data, "$", "$", hits);
     for (const h of hits) fail(relOf(file), `committed fixture carries a non-id, non-query string at ${h} — thought content must not be committed (SMD-1295)`);
   }
@@ -2875,7 +2936,7 @@ const CHANGE_CAP_LINES = 150;
  * 103 (SMD-1541) landed on main as a hand-numbered section while the split was in
  * review — the last one the transition allowed — and joins the list.
  */
-const OVERSIZE_AT_SPLIT = {
+const OVERSIZE_AT_SPLIT: Record<number, number> = {
   24: 160, 28: 710, 30: 200, 32: 230, 33: 160, 34: 190, 35: 160, 36: 180, 37: 210, 38: 340, 39: 280,
   40: 250, 41: 270, 51: 240, 52: 220, 56: 380, 57: 160, 58: 210, 60: 170, 61: 350, 63: 250, 64: 420, 66: 210,
   67: 430, 69: 310, 70: 380, 71: 340, 72: 410, 73: 220, 74: 330, 75: 240, 76: 310, 77: 450, 78: 200, 79: 230, 80: 430,
@@ -2929,10 +2990,12 @@ const RECORD_PATH = String.raw`\((?:\.\/)?(\d{3})([-_][\w-]+\.md)(?:#[\w-]*)?(?:
 const TICKETED = String.raw`\bSMD-\d+[^\n]{0,40}?\(?[Cc]hanges?\s${CITED_LIST}`;
 const EXPLICIT_CITATION = new RegExp(String.raw`\b(?:\.\.\/)?FORK(?:\.md)?\x60?(?:'s)?,?\s(?:(?:[Cc]hange|section|§) ?s?\s?)?${CITED_LIST}|${CHANGE_PATH}|\b\d{3} change (\d+)\b|${TICKETED}`, "gm");
 const BARE_CITATION = new RegExp(String.raw`\b[Cc]hanges?\s${CITED_LIST}|${RECORD_PATH}`, "gm");
+/** A change number a text cites, at the offset of its citation; `name` when it was cited as a `changes/NNN-<slug>.md` path. */
+type Citation = { n: number; index: number; name?: string };
 /** [{ n, index, name? }] — `name` when the citation is a `changes/NNN-<slug>.md` path, which must exist as such. */
-function citedChangesIn(text, { record = false } = {}) {
-  const out = [];
-  const list = (m, index = m.index) => {
+function citedChangesIn(text: string, { record = false }: { record?: boolean } = {}) {
+  const out: Citation[] = [];
+  const list = (m: RegExpMatchArray, index: number = m.index!) => { // the default is taken for a real match alone, whose index is set
     out.push({ n: Number(m[1]), index });
     for (const t of m[2].matchAll(/\d+/g)) out.push({ n: Number(t[0]), index });
   };
@@ -2950,7 +3013,7 @@ function citedChangesIn(text, { record = false } = {}) {
   }
   return out;
 }
-const CITATION_PROBES = [
+const CITATION_PROBES: [string, boolean, number[]][] = [
   ["see FORK.md change 58: the statements", false, [58]],
   ["named in FORK.md changes 38 and 40 updated a", false, [38, 40]],
   ["(FORK.md, change 64) and FORK.md §50 and FORK.md section 12", false, [64, 50, 12]],
@@ -2985,29 +3048,33 @@ const CITATION_PROBES = [
   ["FORK.md change 2026-09-21 is a date", false, []],
 ];
 
+/** A citation as the layout decision sees it: where in the tree, the number, and the file name when it was cited as a path. */
+type LayoutCitation = { where: string; n: number; name?: string };
+/** forkLayoutProblems' inputs; the constants default to the shipped values, a probe passes its own. */
+type LayoutArgs = { entries: ChangeEntry[]; forkText: string; citations?: LayoutCitation[]; ceilings?: Record<number, number>; cap?: number; forkCeiling?: number };
 /**
  * The layout decision, pure: what changes/ holds (as `{ name, text }` entries),
  * FORK.md's text, the citations found in the tree, and the constants. Returns
  * [{ where, kind, msg }]; the caller turns them into failures.
  */
-function forkLayoutProblems({ entries, forkText, citations = [], ceilings = OVERSIZE_AT_SPLIT, cap = CHANGE_CAP_LINES, forkCeiling = FORK_CEILING_BYTES }) {
-  const problems = [];
-  const at = (where, kind, msg) => problems.push({ where, kind, msg });
+function forkLayoutProblems({ entries, forkText, citations = [], ceilings = OVERSIZE_AT_SPLIT, cap = CHANGE_CAP_LINES, forkCeiling = FORK_CEILING_BYTES }: LayoutArgs) {
+  const problems: { where: string; kind: string; msg: string }[] = [];
+  const at = (where: string, kind: string, msg: string) => problems.push({ where, kind, msg });
   const changes = classifyChanges(entries);
   const { numbered, other } = changes;
   for (const o of other) at(`${CHANGES_DIR}/${o.name}`, "bad-name", o.text === null
     ? "is not a regular file (a directory, a symlink, a pipe) — changes/ holds change files and fragments alone"
     : "is neither a numbered change (NNN-<slug>.md: three digits, a dash, lower-case ASCII words) nor a release fragment (smd-NNNN.md) — the index cannot list it");
-  const byTicket = new Map();
+  const byTicket = new Map<string, string>();
   for (const f of changes.fragments) {
     if (byTicket.has(f.ticket)) at(`${CHANGES_DIR}/${f.name}`, "duplicate-fragment", `is a second fragment for ${f.ticket} beside ${CHANGES_DIR}/${byTicket.get(f.ticket)} — one PR, one fragment; the release step would number both`);
     else byTicket.set(f.ticket, f.name);
   }
   if (numbered.length === 0) { at(CHANGES_DIR, "no-files", `holds no numbered change file — every change from ${FIRST_FILED} on is one`); }
-  const byN = new Map();
+  const byN = new Map<number, NumberedChange>();
   for (const c of numbered) {
     if (c.n < FIRST_FILED) at(`${CHANGES_DIR}/${c.name}`, "below-first", `carries change number ${c.n}; changes 1–${FIRST_FILED - 1} are FORK.md's table and have no file`);
-    if (byN.has(c.n)) at(`${CHANGES_DIR}/${c.name}`, "duplicate", `carries change number ${c.n}, which ${CHANGES_DIR}/${byN.get(c.n).name} already carries — two branches took one number; the later one takes the next free number and its citations move with it`);
+    if (byN.has(c.n)) at(`${CHANGES_DIR}/${c.name}`, "duplicate", `carries change number ${c.n}, which ${CHANGES_DIR}/${byN.get(c.n)!.name} already carries — two branches took one number; the later one takes the next free number and its citations move with it`);
     else byN.set(c.n, c);
   }
   const hi = numbered.length ? numbered[numbered.length - 1].n : FIRST_FILED - 1;
@@ -3025,26 +3092,26 @@ function forkLayoutProblems({ entries, forkText, citations = [], ceilings = OVER
   for (const f of changes.fragments) if (f.lines > cap) at(`${CHANGES_DIR}/${f.name}`, "oversize", `is ${f.lines} lines; a fragment becomes a change file and is held to the same ${cap} — a review pass is a table row (changes/README.md)`);
   const sec = /^(#{1,6}) (\d+)\. /m.exec(forkText.replace(/^```[\s\S]*?^```/gm, "")); // a `# 1. fetch` comment in a fenced snippet is not a section
   if (sec) at("FORK.md", "section-in-fork", `carries a \`${sec[1]} ${sec[2]}.\` section — a numbered change is a file, ${CHANGES_DIR}/${String(sec[2]).padStart(3, "0")}-<slug>.md, and this file lists it`);
-  let span = null;
-  try { span = indexSpan(forkText); } catch (e) { at("FORK.md", "index-missing", `${e.message} — the generated index lives between them`); }
+  let span: { s: number; e: number } | null = null;
+  try { span = indexSpan(forkText); } catch (e) { at("FORK.md", "index-missing", `${(e as Error).message} — the generated index lives between them`); }
   // The ceiling is the front door's prose: the generated index between the
   // markers grows a row per release and is not what the ceiling is for.
   const prose = span ? forkText.slice(0, span.s) + forkText.slice(span.e) : forkText;
   const bytes = Buffer.byteLength(prose, "utf8");
   if (bytes > forkCeiling) at("FORK.md", "fork-oversize", `is ${bytes} bytes outside the generated index; the front door stays under ${forkCeiling} — a change's record belongs in its file under ${CHANGES_DIR}/, not here`);
-  if (span && forkText.slice(span.s, span.e) !== "\n" + renderIndex(changes)) at("FORK.md", "index-stale", `the index between the markers is not what ${CHANGES_DIR}/ renders to — run \`bun scripts/fork-index.mjs\``);
+  if (span && forkText.slice(span.s, span.e) !== "\n" + renderIndex(changes)) at("FORK.md", "index-stale", `the index between the markers is not what ${CHANGES_DIR}/ renders to — run \`bun scripts/fork-index.ts\``);
   for (const c of citations) {
     if (c.n < 1 || (c.n >= FIRST_FILED && !byN.has(c.n)) || (c.name && c.n < FIRST_FILED)) at(c.where, "dangling", `cites change ${c.n}${c.name ? ` as ${CHANGES_DIR}/${c.name}` : ""}, which has no file under ${CHANGES_DIR}/ (1–${FIRST_FILED - 1} are FORK.md's table; the highest with a file is ${hi}) — a renumber left this behind, or the file is missing`);
-    else if (c.name && byN.get(c.n).name !== c.name) at(c.where, "dangling", `cites ${CHANGES_DIR}/${c.name}, and change ${c.n}'s file is ${CHANGES_DIR}/${byN.get(c.n).name} — the file was renamed under the link`);
+    else if (c.name && byN.get(c.n)!.name !== c.name) at(c.where, "dangling", `cites ${CHANGES_DIR}/${c.name}, and change ${c.n}'s file is ${CHANGES_DIR}/${byN.get(c.n)!.name} — the file was renamed under the link`); // has(c.n) held by the branch above
   }
   return problems;
 }
 
-const LAYOUT_ENTRIES = (...files) => files.map(([name, text]) => ({ name, text }));
-const CH = (n, title = "A thing — a consequence (SMD-1)", body = "Body.\n") => [`${String(n).padStart(3, "0")}-a-thing.md`, `# ${n}. ${title}\n\n${body}`];
-const FORK_FOR = (entries, extra = "") => `# FORK\n\nintro\n\n${INDEX_START}\n${renderIndex(classifyChanges(entries))}${INDEX_END}\n\ntail\n${extra}`;
+const LAYOUT_ENTRIES = (...files: [string, string | null][]): ChangeEntry[] => files.map(([name, text]) => ({ name, text }));
+const CH = (n: number, title = "A thing — a consequence (SMD-1)", body = "Body.\n"): [string, string] => [`${String(n).padStart(3, "0")}-a-thing.md`, `# ${n}. ${title}\n\n${body}`];
+const FORK_FOR = (entries: ChangeEntry[], extra = "") => `# FORK\n\nintro\n\n${INDEX_START}\n${renderIndex(classifyChanges(entries))}${INDEX_END}\n\ntail\n${extra}`;
 const LONG = "line\n".repeat(200);
-const LAYOUT_PROBES = [
+const LAYOUT_PROBES: [string, () => LayoutArgs, string[]][] = [
   // [label, args, expected kinds]
   ["a consistent layout", () => { const en = LAYOUT_ENTRIES(CH(18), CH(19), ["README.md", "x"], ["smd-1804.md", "---\n"]); return { entries: en, forkText: FORK_FOR(en), ceilings: {}, citations: [{ where: "a.ts:1", n: 19 }, { where: "b.md:2", n: 3 }] }; }, []],
   ["a stray name", () => { const en = LAYOUT_ENTRIES(CH(18), ["notes.md", "x"]); return { entries: en, forkText: FORK_FOR(en), ceilings: {} }; }, ["bad-name"]],
@@ -3090,7 +3157,7 @@ const SKIP_DIRS = new Set([".git", "node_modules", ".planning", ".cf-out", ".cla
  * names and files over 4 MB are skipped either way. Repo-relative paths.
  */
 function citationFiles() {
-  let names;
+  let names: string[];
   try {
     // A nested repository (an agent worktree under .claude/) is listed as `dir/`,
     // a deleted-but-indexed file has no stat, a symlink is followed by nothing
@@ -3099,9 +3166,9 @@ function citationFiles() {
     names = execFileSync("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard"], { cwd: ROOT, encoding: "utf8", maxBuffer: Infinity })
       .split("\0").filter(Boolean);
   } catch (e) {
-    console.warn(`  (git ls-files failed — ${e.message.split("\n")[0]} — walking the tree for citations, ignored files too)`);
+    console.warn(`  (git ls-files failed — ${(e as Error).message.split("\n")[0]} — walking the tree for citations, ignored files too)`);
     names = [];
-    const walkFor = (dir) => {
+    const walkFor = (dir: string) => {
       for (const name of readdirSync(dir).sort()) {
         const full = join(dir, name);
         const st = lstatSync(full);
@@ -3112,20 +3179,20 @@ function citationFiles() {
     };
     walkFor(ROOT);
   }
-  const regular = (rel) => { try { const st = lstatSync(join(ROOT, rel)); return st.isFile() && st.size <= 4 * 1024 * 1024; } catch { return false; } };
+  const regular = (rel: string) => { try { const st = lstatSync(join(ROOT, rel)); return st.isFile() && st.size <= 4 * 1024 * 1024; } catch { return false; } };
   // Not this script: its probe strings are citation shapes, not citations.
   return names.filter((rel) => rel !== SELF && !BINARY_FILES.test(rel) && !rel.split("/").includes("node_modules") && regular(rel));
 }
 
 /** An offset → 1-based line number function for one text: the line starts are indexed once, then each lookup is a binary search. */
-function lineIndexer(text) {
+function lineIndexer(text: string) {
   const starts = [0];
   for (let i = 0; i < text.length; i++) if (text.charCodeAt(i) === 10) starts.push(i + 1);
-  return (index) => { let lo = 0, hi = starts.length - 1; while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (starts[mid] <= index) lo = mid; else hi = mid - 1; } return lo + 1; };
+  return (index: number) => { let lo = 0, hi = starts.length - 1; while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (starts[mid] <= index) lo = mid; else hi = mid - 1; } return lo + 1; };
 }
 
 /** changes/ read once per run: the classified entries with their text, for checks 15, 16 and 17b. */
-let changesCache = null;
+let changesCache: (ClassifiedChanges & { entries: ChangeEntry[] }) | null = null;
 function changesOnDisk() {
   if (!changesCache) {
     const entries = readChangeEntries(ROOT);
@@ -3149,7 +3216,7 @@ function checkForkLayout() {
 
   const forkText = readFileSync(join(ROOT, "FORK.md"), "utf8");
   const entries = changesOnDisk().entries; // every entry, any extension — a stray is a finding
-  const citations = [];
+  const citations: LayoutCitation[] = [];
   // A citation inside a fenced block or a code span counts: a quoted "change N" is
   // still a claim about the record (check 16 strips fences for its heading rule
   // alone, where a `# 1.` comment is not a heading).
@@ -3170,7 +3237,7 @@ const KAC_HEADINGS = new Set(["Added", "Changed", "Deprecated", "Removed", "Fixe
 
 /**
  * 16: a changes/<ticket>.md fragment is well-formed — fragmentProblems lives in
- * scripts/fragments.mjs, one definition for this check and the release step. A fragment replaces the
+ * scripts/fragments.ts, one definition for this check and the release step. A fragment replaces the
  * hand-numbered FORK section for new work: front matter naming a Keep a Changelog
  * type, a bump the migrations it lists allow, and the tickets and migrations it
  * touches; a Changelog body (1–3 lines) and a FORK body. A `bump: patch` that
@@ -3214,13 +3281,14 @@ function checkFragments() {
     ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\n---\n\n## Changelog\nx (SMD-1)\n\n## FORK\n", "an empty FORK section"],
     ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\n---\n\n## FORK\ny (SMD-1)\n", "a missing Changelog body"],
     ["no front matter here\n", "no front matter"],
+    ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\nmigrations: 045\n---\n\n## Changelog\nx (SMD-1)\n\n## FORK\ny (SMD-1)\n", "a scalar `migrations:` (read as none, it passed while the cut refused \"migration 000\" — SMD-1870)"],
   ]) if (fragmentProblems(probe, name).length === 0) fail(SELF, `check 16 no longer catches ${why} (its own probe)`);
   for (const [probe, why] of [
     ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\n---\n\n## Changelog\nx (SMD-1)\n\n## FORK\nA title (SMD-1)\n\n```bash\n# 1. install\n```\n\n#1. not a heading\n\n1. a list item\n\n## Measured after\n\nA second-level heading inside the record is kept, as changes 19 and 79 keep theirs.\n", "a numbered comment in a fenced block, a `#1.`, a list item and a `## ` sub-heading inside the record"],
     ["---\ntype: added        # one of the six\nbump: minor        # the rules\ntickets: [SMD-1804]        # one or more\nmigrations: [044]          # or [] for none\n---\n\n## Changelog\n\nx (SMD-1804, migration 044).\n\n## FORK\n\nA title (SMD-1804)\n\nbody\n", "the README's template copied with its inline comments"],
   ]) if (fragmentProblems(probe).length) fail(SELF, `check 16 refuses ${why}: ${fragmentProblems(probe).join("; ")} (its own non-probe)`);
 
-  // Numbered files and stray names are check 15's; one definition of a fragment's name (fork-index.mjs).
+  // Numbered files and stray names are check 15's; one definition of a fragment's name (fork-index.ts).
   for (const f of changesOnDisk().fragments) for (const p of fragmentProblems(f.text, f.name)) fail(`changes/${f.name}`, `${p} (SMD-1804)`);
 }
 checkFragments();
@@ -3232,13 +3300,13 @@ checkFragments();
  * fork predate the first cut and live in FORK.md, so a fresh CHANGELOG has only
  * Unreleased until the first release is assembled.
  */
-function changelogProblems(text) {
-  const problems = [];
+function changelogProblems(text: string) {
+  const problems: string[] = [];
   const parts = text.split(/^## /m).slice(1);
   const titles = parts.map((p) => p.split("\n", 1)[0].trim());
   const sections = titles.filter((t) => t.startsWith("["));
   if (sections.length === 0 || sections[0] !== "[Unreleased]") problems.push("the first `## [..]` section must be `## [Unreleased]`");
-  const versions = [];
+  const versions: string[] = [];
   for (const part of parts) {
     const title = part.split("\n", 1)[0].trim();
     if (!title.startsWith("[") || title === "[Unreleased]") continue;
@@ -3272,12 +3340,13 @@ function checkChangelogShape() {
 checkChangelogShape();
 
 /** Tickets appearing in each released `## [X.Y.Z]` section of a changelog. */
-function releasedChangelogTickets(text) {
-  const out = new Map();
+function releasedChangelogTickets(text: string) {
+  const out = new Map<string, Set<string>>();
   for (const part of text.split(/^## /m).slice(1)) {
     const title = part.split("\n", 1)[0].trim();
     if (!title.startsWith("[") || title === "[Unreleased]") continue;
     const vm = /^\[([^\]]+)\]/.exec(title);
+    if (!vm) continue; // a `## [` heading with no `]`: checkChangelogShape has reported it; reading vm[1] threw and hid every violation (SMD-1870)
     out.set(vm[1], new Set([...part.matchAll(/\bSMD-(\d+)\b/g)].map((m) => `SMD-${m[1]}`)));
   }
   return out;
@@ -3290,17 +3359,17 @@ function releasedChangelogTickets(text) {
  * the changelog does not match, is drift the assembler would have to have caused.
  * A no-op until the first release (releases.json is []).
  */
-function pairingProblems(releases, changelogText, forkTickets) {
-  const problems = [];
+function pairingProblems(releases: readonly { version: string; tickets?: readonly string[] }[], changelogText: string, forkTickets: Set<string>) {
+  const problems: string[] = [];
   const cl = releasedChangelogTickets(changelogText);
   // releases.json carries the full version (`1.0.0+upstream.<sha>`); a CHANGELOG
   // section title carries the core (`[1.0.0]`) — the assembler writes both, so
   // the pairing compares cores (found by assembling a release on a copy of the
   // tree: the first cut failed its own check both ways, SMD-1917).
-  const core = (v) => String(v).split("+")[0];
+  const core = (v: string) => String(v).split("+")[0];
   for (const r of releases) {
     if (!cl.has(core(r.version))) { problems.push(`release ${r.version} (releases.json) has no [${core(r.version)}] section in CHANGELOG.md`); continue; }
-    const clTickets = cl.get(core(r.version));
+    const clTickets = cl.get(core(r.version))!; // has() just tested
     const rTickets = new Set(r.tickets ?? []);
     for (const t of rTickets) if (!clTickets.has(t)) problems.push(`release ${r.version} lists ${t} but its CHANGELOG section does not`);
     for (const t of clTickets) if (!rTickets.has(t)) problems.push(`CHANGELOG [${r.version}] names ${t} but releases.json does not`);
@@ -3322,7 +3391,11 @@ function checkChangelogForkPairing() {
     [[{ version: "1.0.0", tickets: ["SMD-1"] }], "## [1.0.0] - 2026-09-30\n- x (SMD-1)\n- y (SMD-2)\n", new Set(["SMD-1", "SMD-2"]), "a changelog ticket missing from releases.json"],
     [[{ version: "1.0.0", tickets: ["SMD-9"] }], "## [1.0.0] - 2026-09-30\n- x (SMD-9)\n", fork, "a released ticket with no FORK section"],
     [[], "## [1.0.0] - 2026-09-30\n- x (SMD-1)\n", fork, "a changelog release with no releases.json entry"],
-  ]) if (pairingProblems(rel, cl, forks).length === 0) fail(SELF, `check 17b no longer catches ${why} (its own probe)`);
+  ] as const) if (pairingProblems(rel, cl, forks).length === 0) fail(SELF, `check 17b no longer catches ${why} (its own probe)`);
+  // A malformed heading is check 17a's finding; the ticket reader skips it rather than throwing on it (a TypeError here hid every violation, SMD-1870).
+  let skipped = false;
+  try { skipped = releasedChangelogTickets("## [Unreleased]\n\n## [1.0.0 - 2026-09-30\n- x (SMD-1)\n").size === 0; } catch { /* the TypeError the guard removes */ }
+  if (!skipped) fail(SELF, "check 17b's ticket reader no longer skips a `## [` heading with no closing bracket — it throws on it, or reads it as a version (its own probe)");
 
   const clPath = join(ROOT, "CHANGELOG.md");
   if (!existsSync(clPath)) return;
@@ -3332,7 +3405,7 @@ function checkChangelogForkPairing() {
   // change file's body is a source: both name pending tickets in prose, which
   // would let a release that left a fragment unnumbered pass — the drift this
   // catches (SMD-1917).
-  const recordTickets = new Set();
+  const recordTickets = new Set<string>();
   for (const c of changesOnDisk().numbered) for (const t of ticketsOf(c.heading?.title ?? "")) recordTickets.add(t);
   for (const p of pairingProblems(readReleases(), readFileSync(clPath, "utf8"), recordTickets)) fail("CHANGELOG.md", `${p} (SMD-1804)`);
 }
@@ -3348,7 +3421,7 @@ checkChangelogForkPairing();
  */
 function checkFrozenMigrations() {
   const migDir = join(ROOT, "db", "migrations");
-  const shaOf = (num) => {
+  const shaOf = (num: number) => {
     const f = readdirSync(migDir).find((n) => n.startsWith(pad3(num) + "_"));
     return f ? migrationSha(readFileSync(join(migDir, f), "utf8")) : null;
   };
@@ -3365,8 +3438,8 @@ function checkFrozenMigrations() {
 
   for (const p of frozenProblems(readReleases(), shaOf)) fail("db/migrations", `${p} (SMD-1804)`);
 }
-function frozenProblems(releases, shaOf) {
-  const problems = [];
+function frozenProblems(releases: readonly { version: string; range: readonly number[] | null; frozenShas?: Record<string, string> }[], shaOf: (num: number) => string | null) {
+  const problems: string[] = [];
   for (const r of releases) {
     if (!r.range) continue; // a docs/server-only release froze no migration range
     const [lo, hi] = r.range;
@@ -3390,7 +3463,7 @@ checkFrozenMigrations();
  * after a cut) and the string preflight and the assembler use cannot drift.
  */
 /** The schema_version literal a migration upserts, or null if it writes none. */
-function schemaVersionValue(text) {
+function schemaVersionValue(text: string) {
   const m = /'schema_version'\s*\)\s*VALUES?[\s\S]*?\(\s*'schema_version'\s*,\s*'([^']+)'/.exec(text)
     || /\(\s*'schema_version'\s*,\s*'([^']+)'\s*\)/.exec(text);
   return m ? m[1] : null;
@@ -3404,7 +3477,7 @@ function checkSchemaVersion() {
     fail(SELF, "check 17d reads a schema_version from a migration that writes none (its own probe)");
 
   const migDir = join(ROOT, "db", "migrations");
-  const writers = [];
+  const writers: { num: number; name: string; value: string }[] = [];
   for (const name of readdirSync(migDir).filter((n) => /^\d{3}_.*\.sql$/.test(n))) {
     const value = schemaVersionValue(readFileSync(join(migDir, name), "utf8"));
     if (value !== null) writers.push({ num: Number(name.slice(0, 3)), name, value });
@@ -3417,33 +3490,41 @@ function checkSchemaVersion() {
 checkSchemaVersion();
 
 /**
- * 18: one type surface across the four type-checked directories, and a CI step
+ * 18: one type surface across the type-checked directories, and a CI step
  * for each — see the header. The rule is one pure function over in-memory
  * records, probed below, so a package.json that stops pinning, a tsconfig that
  * drifts, or a workflow that loses (or grows) a tsc step fails here by name.
  * `server-portable` is the reference: the others import its files, so its
  * pins are the ones a second copy would collide with.
  */
-const TYPECHECKED_DIRS = ["server-portable", "compat/supabase-sql", "db", "evals"];
+const TYPECHECKED_DIRS = ["server-portable", "compat/supabase-sql", "db", "evals", "scripts"];
 const TYPE_PINS = ["@types/bun", "typescript", "@types/node"];
 const WORKFLOW = ".github/workflows/fork-checks.yml";
 const TSC_STEP = /^\s*bunx tsc --noEmit\s*$/;
-function typecheckSurfaceProblems({ packages, tsconfigs, tscSteps }) {
-  const problems = [];
+/** What check 18 compares: each directory's package.json and tsconfig.json as read (absent when the file is), and the workflow's tsc steps by directory. */
+type PackageJson = { devDependencies?: Record<string, string> };
+type TsConfig = { compilerOptions?: Record<string, unknown> };
+type TypecheckSurface = { packages: Record<string, PackageJson | undefined>; tsconfigs: Record<string, TsConfig | undefined>; tscSteps: string[] };
+/** The probe's surface: every directory present with every field, so a mutation can reach in. */
+type TypecheckProbe = { packages: Record<string, { devDependencies: Record<string, string> }>; tsconfigs: Record<string, { compilerOptions: Record<string, unknown> }>; tscSteps: string[] };
+/** .github/workflows/fork-checks.yml as tscStepsIn reads it: jobs, their steps, a step's `run` and `working-directory` — every level optional, as the `?.`s say. */
+type WorkflowDoc = { jobs?: Record<string, { steps?: { run?: unknown; "working-directory"?: string }[] } | undefined> } | null | undefined;
+function typecheckSurfaceProblems({ packages, tsconfigs, tscSteps }: TypecheckSurface) {
+  const problems: [string, string][] = [];
   const ref = TYPECHECKED_DIRS[0];
   const refDev = packages[ref]?.devDependencies ?? {};
   // Keys sorted at every depth (a nested object such as `paths` compares by
   // content, not insertion order); arrays keep their order, since `types`
   // and `lib` are ordered.
-  const sortKeys = (v) => (Array.isArray(v) ? v.map(sortKeys) : v && typeof v === "object" ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => a.localeCompare(b)).map(([k, x]) => [k, sortKeys(x)])) : v);
-  const canon = (o) => JSON.stringify(sortKeys(o ?? {}));
+  const sortKeys = (v: unknown): unknown => (Array.isArray(v) ? v.map(sortKeys) : v && typeof v === "object" ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => a.localeCompare(b)).map(([k, x]) => [k, sortKeys(x)])) : v);
+  const canon = (o: unknown) => JSON.stringify(sortKeys(o ?? {}));
   const refOpts = canon(tsconfigs[ref]?.compilerOptions);
   for (const dir of TYPECHECKED_DIRS) {
     const dev = packages[dir]?.devDependencies;
     if (!dev) problems.push([`${dir}/package.json`, `${packages[dir] ? "has no devDependencies" : "is missing"} — every type-checked directory pins ${TYPE_PINS.join(", ")} in its devDependencies (SMD-1932)`]);
     else for (const name of TYPE_PINS) {
       if (!(name in dev)) problems.push([`${dir}/package.json`, dir === ref ? `does not pin ${name} — it is the reference the other type-checked directories are held to (SMD-1932)` : `does not pin ${name}; ${ref}/package.json pins it at ${refDev[name] ?? "(nothing)"} (SMD-1932)`]);
-      else if (dir !== ref && dev[name] !== refDev[name]) problems.push([`${dir}/package.json`, `pins ${name} at ${dev[name]} but ${ref}/package.json pins ${refDev[name]} — bump the four type-checked directories in one commit, or two copies of the types load into the programs that import ../server-portable (SMD-1932)`]);
+      else if (dir !== ref && dev[name] !== refDev[name]) problems.push([`${dir}/package.json`, `pins ${name} at ${dev[name]} but ${ref}/package.json pins ${refDev[name]} — bump every type-checked directory in one commit, or two copies of the types load into the programs that import ../server-portable (SMD-1932)`]);
     }
     const opts = tsconfigs[dir]?.compilerOptions;
     if (!opts) problems.push([`${dir}/tsconfig.json`, `missing, or has no compilerOptions (SMD-1932)`]);
@@ -3455,8 +3536,8 @@ function typecheckSurfaceProblems({ packages, tsconfigs, tscSteps }) {
   return problems;
 }
 /** The working-directory of every `bunx tsc --noEmit` step in a parsed workflow, in order. */
-function tscStepsIn(doc) {
-  const out = [];
+function tscStepsIn(doc: WorkflowDoc) {
+  const out: string[] = [];
   for (const job of Object.values(doc?.jobs ?? {})) {
     for (const step of job?.steps ?? []) if (typeof step?.run === "string" && TSC_STEP.test(step.run)) out.push(step["working-directory"] ?? ".");
   }
@@ -3466,19 +3547,19 @@ function checkTypecheckSurface() {
   // Self-test: a consistent set passes; one drifted pin, one missing pin, one
   // differing option, one missing step and one unlisted step each report
   // exactly one problem.
-  const good = () => ({
+  const good = (): TypecheckProbe => ({
     packages: Object.fromEntries(TYPECHECKED_DIRS.map((d) => [d, { devDependencies: { "@types/bun": "1.4.0", typescript: "5.9.3", "@types/node": "26.6.2" } }])),
     tsconfigs: Object.fromEntries(TYPECHECKED_DIRS.map((d) => [d, { compilerOptions: { strict: true, types: ["bun"] } }])),
     tscSteps: [...TYPECHECKED_DIRS],
   });
   if (typecheckSurfaceProblems(good()).length) fail(SELF, `check 18 false-positives on a consistent surface (${typecheckSurfaceProblems(good()).map((p) => p[1]).join("; ")})`);
   for (const [why, mutate] of [
-    ["a drifted pin", (g) => { g.packages.db.devDependencies.typescript = "5.9.4"; }],
-    ["a missing pin", (g) => { delete g.packages.evals.devDependencies["@types/node"]; }],
-    ["a differing compilerOption", (g) => { g.tsconfigs.evals.compilerOptions.strict = false; }],
-    ["a missing tsc step", (g) => { g.tscSteps = g.tscSteps.filter((d) => d !== "db"); }],
-    ["a tsc step under an unlisted directory", (g) => { g.tscSteps.push("recipes/x"); }],
-  ]) {
+    ["a drifted pin", (g: TypecheckProbe) => { g.packages.db.devDependencies.typescript = "5.9.4"; }],
+    ["a missing pin", (g: TypecheckProbe) => { delete g.packages.evals.devDependencies["@types/node"]; }],
+    ["a differing compilerOption", (g: TypecheckProbe) => { g.tsconfigs.evals.compilerOptions.strict = false; }],
+    ["a missing tsc step", (g: TypecheckProbe) => { g.tscSteps = g.tscSteps.filter((d) => d !== "db"); }],
+    ["a tsc step under an unlisted directory", (g: TypecheckProbe) => { g.tscSteps.push("recipes/x"); }],
+  ] as const) {
     const g = good(); mutate(g);
     const got = typecheckSurfaceProblems(g);
     if (got.length !== 1) fail(SELF, `check 18 reports ${got.length} problem(s) for ${why}, not one (its own probe): ${JSON.stringify(got)}`);
@@ -3488,10 +3569,10 @@ function checkTypecheckSurface() {
     fail(SELF, `check 18 parses ${WORKFLOW} with Bun.YAML (Bun 1.2+) and this runtime has none — run \`bun ${SELF}\`, as CI does (SMD-1932)`);
     return;
   }
-  const readJson = (rel) => (existsSync(join(ROOT, rel)) ? JSON.parse(readFileSync(join(ROOT, rel), "utf8")) : undefined);
+  const readJson = (rel: string) => (existsSync(join(ROOT, rel)) ? JSON.parse(readFileSync(join(ROOT, rel), "utf8")) : undefined);
   const packages = Object.fromEntries(TYPECHECKED_DIRS.map((d) => [d, readJson(`${d}/package.json`)]));
   const tsconfigs = Object.fromEntries(TYPECHECKED_DIRS.map((d) => [d, readJson(`${d}/tsconfig.json`)]));
-  const tscSteps = tscStepsIn(Bun.YAML.parse(readFileSync(join(ROOT, WORKFLOW), "utf8")));
+  const tscSteps = tscStepsIn(Bun.YAML.parse(readFileSync(join(ROOT, WORKFLOW), "utf8")) as WorkflowDoc);
   for (const [where, msg] of typecheckSurfaceProblems({ packages, tsconfigs, tscSteps })) fail(where, msg);
 }
 checkTypecheckSurface();
@@ -3503,7 +3584,37 @@ checkTypecheckSurface();
  * the kinds listed — so a rule that stops firing is caught, and a rule that
  * fires on the baseline is caught first.
  */
-const PROBE_TREE = () => ({
+/** The probe tree: registryProblems' Tree with the disposition table present, so a tree mutant can append to it. */
+type ProbeTree = Tree & { dispositionText: string };
+/** A pinned facet as the probe declares it; `family`'s `values` is the string "families", the other four are lists. */
+type ProbeFacet = { stability: string; values: unknown[] | string };
+/** A probe capability: the seven keys as strings, `fetcher` optional (one mutant deletes it), any other key settable (one adds a sixth). */
+type ProbeCapability = { vendor: string; family: string; transport: string; direction: string; cardinality: string; round_trip: string; fetcher?: string; note?: string; [k: string]: unknown };
+type ProbeArtifact = { path: string; capabilities: ProbeCapability[] };
+/**
+ * The baseline registry, every block present and every key a string, so a
+ * mutant can reach in — the strict counterpart of connector-registry.ts's
+ * loose Registry (the probe is assignable to it). The families reuse the loose
+ * Family: a probe family is a reserved one or a full one, the rules read both.
+ */
+type ProbeRegistry = {
+  facets: Record<string, ProbeFacet>;
+  fetchers: Record<string, string>;
+  families: Record<string, Family>;
+  connectors: Record<string, { direction: string; note?: string }>;
+  artifacts: ProbeArtifact[];
+  not_connectors: { services: { pattern: string; reason?: string }[]; artifacts: Record<string, string> };
+};
+/**
+ * A probe registry with one block reshaped: the parameter type of a mutant
+ * that breaks a block's shape (an object for the artifacts list, a string for
+ * a capability, null for a family) — wider than ProbeRegistry, so the closure
+ * still fits the table's `(r: ProbeRegistry) => void`.
+ */
+type ProbeWith<K extends keyof ProbeRegistry, T> = Omit<ProbeRegistry, K> & Record<K, T>;
+/** [why, mutate, want, tree?]: a mutant of the baseline registry, the kinds it must produce, and (a fourth element) null for a null registry or a function that reshapes the tree. */
+type RegistryProbe = [why: string, mutate: (r: ProbeRegistry) => void, want: string[], tree?: ((t: ProbeTree) => void) | null];
+const PROBE_TREE = (): ProbeTree => ({
   existingDirs: ["integrations/acme-capture", "recipes/acme-digest", "recipes/plain-tool"],
   metadataByPath: new Map([
     ["integrations/acme-capture", { requires: { services: ["Acme Chat API", "OpenRouter"] }, tags: ["messaging"], connectors: ["acme"] }],
@@ -3512,7 +3623,7 @@ const PROBE_TREE = () => ({
   ]),
   dispositionText: "### `integrations/` (1)\n\n| Artifact | Disposition | Justification |\n|---|---|---|\n| `acme-capture` | keep + audited → fold-in **SMD-1867** | a capture source |\n",
 });
-const PROBE_REGISTRY = () => ({
+const PROBE_REGISTRY = (): ProbeRegistry => ({
   facets: {
     ...Object.fromEntries(Object.entries(FACET_SETS).map(([k, v]) => [k, { stability: v.stability, values: [...v.values] }])),
     family: { stability: "open", values: "families" },
@@ -3532,9 +3643,9 @@ const PROBE_REGISTRY = () => ({
     artifacts: {},
   },
 });
-const REGISTRY_PROBES = [
+const REGISTRY_PROBES: RegistryProbe[] = [
   ["a transport off the near-closed set (webhook-push)", (r) => { r.artifacts[0].capabilities[0].transport = "webhook-push"; }, ["capability-value"]],
-  ["a fourth transport added to the registry's own set", (r) => { r.facets.transport.values.push("stream"); }, ["facet-set"]],
+  ["a fourth transport added to the registry's own set", (r) => { (r.facets.transport.values as unknown[]).push("stream"); }, ["facet-set"]], // the four pinned facets' values are lists; only `family`'s is the string (ProbeFacet)
   ["a sixth facet", (r) => { r.facets.protocol = { stability: "open", values: ["http"] }; }, ["facet-set"]],
   ["a fifth fetcher kind", (r) => { r.fetchers.cron = "x"; }, ["fetcher-set"]],
   ["a capability naming an undeclared family", (r) => { r.artifacts[0].capabilities[0].family = "mailbox/email"; }, ["capability-family"]],
@@ -3551,7 +3662,7 @@ const REGISTRY_PROBES = [
   ["an artifact both classified and excused (its metadata still declares the connector)", (r) => { r.not_connectors.artifacts["recipes/acme-digest"] = "because"; }, ["coverage-both", "excuse-declares"]],
   ["a classified artifact whose metadata declares no connector", (r) => { r.artifacts.push({ path: "recipes/plain-tool", capabilities: [{ vendor: "acme", family: "message-stream/chat", transport: "pull", direction: "source", cardinality: "1:1", round_trip: "read-only", fetcher: "native-driver" }] }); }, ["connectors-field"]],
   ["a provider matched twice, once at the head after a qualifier, is covered (every match is read)", (r) => {}, [], (t) => { t.metadataByPath.set("recipes/two-hits", { requires: { services: ["Any OpenRouter-compatible OpenRouter gateway"] }, tags: ["notes"] }); t.existingDirs.push("recipes/two-hits"); }],
-  ["a registered artifact whose metadata declares other connectors than its capabilities", (r) => {}, ["connectors-field"], (t) => { t.metadataByPath.get("recipes/acme-digest").connectors = ["acme", "beta"]; }],
+  ["a registered artifact whose metadata declares other connectors than its capabilities", (r) => {}, ["connectors-field"], (t) => { t.metadataByPath.get("recipes/acme-digest")!.connectors = ["acme", "beta"]; }], // PROBE_TREE sets the key
   ["a contribution declaring a connector and classified nowhere", (r) => {}, ["coverage-unregistered"], (t) => { t.metadataByPath.set("recipes/plain-tool", { requires: { services: ["Supabase"] }, tags: ["ops"], connectors: ["acme"] }); }],
   ["an excused artifact whose metadata declares a connector", (r) => { r.not_connectors.artifacts["recipes/plain-tool"] = "a tool"; }, ["excuse-declares"], (t) => { t.metadataByPath.set("recipes/plain-tool", { requires: { services: ["Supabase"] }, tags: ["ops"], connectors: ["acme"] }); }],
   ["a vendor named after an Object.prototype member", (r) => { r.artifacts[1].capabilities[0].vendor = "constructor"; r.connectors.acme.direction = "source"; }, ["connector-set", "connectors-field"]],
@@ -3561,17 +3672,17 @@ const REGISTRY_PROBES = [
   ["a service pattern that does not compile", (r) => { r.not_connectors.services.push({ pattern: "(", reason: "x" }); }, ["pattern-invalid"]],
   ["a service pattern that is empty (which would match every service)", (r) => { r.not_connectors.services.push({ pattern: "", reason: "x" }); }, ["pattern-invalid"]],
   ["a service pattern with no reason", (r) => { r.not_connectors.services.push({ pattern: "openrouter" }); }, ["pattern-reason"]],
-  ["an excuse with no reason", (r) => { r.artifacts.pop(); r.connectors.acme.direction = "source"; r.not_connectors.artifacts["recipes/acme-digest"] = ""; }, ["excuse-reason"], (t) => { delete t.metadataByPath.get("recipes/acme-digest").connectors; }],
+  ["an excuse with no reason", (r) => { r.artifacts.pop(); r.connectors.acme.direction = "source"; r.not_connectors.artifacts["recipes/acme-digest"] = ""; }, ["excuse-reason"], (t) => { delete t.metadataByPath.get("recipes/acme-digest")!.connectors; }], // PROBE_TREE sets the key
   ["an artifact path that is not <category>/<slug>", (r) => { r.artifacts[1].path = "Recipes/Acme Digest"; }, ["artifact-path", "coverage-unregistered"]],
   ["a capability repeated within an artifact", (r) => { r.artifacts[0].capabilities.push({ ...r.artifacts[0].capabilities[0] }); }, ["capability-duplicate"]],
   ["a registry that is not an object", () => {}, ["shape"], null],
-  ["an artifacts block that is an object, not a list", (r) => { r.artifacts = { a: r.artifacts[0] }; }, ["shape", "coverage-unregistered", "connector-set"]],
+  ["an artifacts block that is an object, not a list", (r: ProbeWith<"artifacts", { [i: number]: ProbeArtifact; a?: ProbeArtifact }>) => { r.artifacts = { a: r.artifacts[0] }; }, ["shape", "coverage-unregistered", "connector-set"]],
   ["an artifact marked only by a tag naming its connector", (r) => {}, ["coverage-unregistered"], (t) => { t.metadataByPath.set("recipes/acme-notes", { requires: { services: ["OpenRouter"] }, tags: ["acme", "notes"] }); t.existingDirs.push("recipes/acme-notes"); }],
   ["a vendor named first in a service string a provider pattern also matches", (r) => {}, ["coverage-unregistered"], (t) => { t.metadataByPath.set("recipes/notion-sync", { requires: { services: ["Notion API (summaries via OpenRouter)"] }, tags: ["notes"] }); t.existingDirs.push("recipes/notion-sync"); }],
   ["a vendor first with the provider as the second token, bracketed or slashed", (r) => {}, ["coverage-unregistered"], (t) => { t.metadataByPath.set("recipes/notion-sync", { requires: { services: ["Notion (OpenRouter)"] }, tags: ["notes"] }); t.metadataByPath.set("recipes/mail-sync", { requires: { services: ["Gmail/OpenRouter"] }, tags: ["notes"] }); t.existingDirs.push("recipes/notion-sync", "recipes/mail-sync"); }],
   ["a connector's name as a tag in another case", (r) => {}, ["coverage-unregistered"], (t) => { t.metadataByPath.set("recipes/acme-notes", { requires: { services: ["OpenRouter"] }, tags: ["Acme", "Notes"] }); t.existingDirs.push("recipes/acme-notes"); }],
   ["an artifact marked only by a tag the brain's own vocabulary shares (capture) is not marked", (r) => {}, [], (t) => { t.metadataByPath.set("recipes/own-capture", { requires: { services: ["OpenRouter"] }, tags: ["capture", "export", "sync"] }); t.existingDirs.push("recipes/own-capture"); }],
-  ["a family declared as null and used", (r) => { r.families["web-clip"] = null; r.artifacts[0].capabilities[0].family = "web-clip"; }, ["family-schema"]],
+  ["a family declared as null and used", (r: ProbeWith<"families", Record<string, Family | null>>) => { r.families["web-clip"] = null; r.artifacts[0].capabilities[0].family = "web-clip"; }, ["family-schema"]],
   ["a fold-in row naming a contribution that is gone", (r) => {}, ["disposition-stale"], (t) => { t.dispositionText += "| `gone-capture` | keep + audited → fold-in **SMD-1867** | removed since |\n"; }],
   // The three below keep a provider service on the probe tree so the openrouter pattern stays live: the table is the only trigger under test.
   ["an artifact the disposition table alone marks (a batch importer naming a provider only, declaring nothing)", (r) => { r.artifacts.shift(); r.connectors.acme.direction = "sink"; }, ["coverage-unregistered"], (t) => { t.metadataByPath.set("integrations/acme-capture", { requires: { services: ["OpenRouter"] }, tags: [] }); }],
@@ -3579,7 +3690,7 @@ const REGISTRY_PROBES = [
   ["a fold-in row after a fenced `# comment` under the same heading", (r) => { r.artifacts.shift(); r.connectors.acme.direction = "sink"; }, ["coverage-unregistered"], (t) => { t.metadataByPath.set("integrations/acme-capture", { requires: { services: ["OpenRouter"] }, tags: [] }); t.dispositionText = t.dispositionText.replace("| Artifact |", "```sh\n# a comment in an example\n```\n| Artifact |"); }],
   ["a service pattern that matches the empty string (a trailing `|`)", (r) => { r.not_connectors.services[0].pattern = "openrouter|"; }, ["pattern-invalid"]],
   ["a registry entry for a placeholder directory", (r) => { r.artifacts[1].path = "recipes/_template"; }, ["artifact-path", "coverage-unregistered"]],
-  ["a disposition table that is missing", (r) => {}, ["disposition-missing"], (t) => { t.dispositionText = null; }],
+  ["a disposition table that is missing", (r) => {}, ["disposition-missing"], (t: Tree) => { t.dispositionText = null; }],
   ["a disposition table with one category's heading moved (partly dark)", (r) => {}, ["disposition-dark"], (t) => { t.dispositionText = "### `recipes/` (1)\n\n| `acme-digest` | keep + audited → SMD-1867 candidate | x |\n\n## Integrations\n\n| `acme-capture` | keep + audited → fold-in **SMD-1867** | x |\n"; }],
   ["a not-a-connector pattern broad enough to cover a classified vendor's own service", (r) => { r.not_connectors.services.push({ pattern: "acme", reason: "too broad" }); }, ["pattern-broad"]],
   ["a provider as the bare second word after a vendor's name", (r) => {}, ["coverage-unregistered"], (t) => { t.metadataByPath.set("recipes/notion-sync", { requires: { services: ["Notion OpenRouter summaries"] }, tags: ["notes"] }); t.existingDirs.push("recipes/notion-sync"); }],
@@ -3587,11 +3698,11 @@ const REGISTRY_PROBES = [
   ["a fold-in row for a directory with no metadata.json marks nothing", (r) => { r.artifacts.shift(); r.connectors.acme.direction = "sink"; }, [], (t) => { t.metadataByPath.delete("integrations/acme-capture"); t.metadataByPath.set("recipes/plain-tool", { requires: { services: ["Supabase", "OpenRouter"] }, tags: ["ops"] }); }],
   ["a registry path with a space, which the walk admits", (r) => { r.artifacts[1].path = "recipes/acme digest"; }, ["artifact-missing", "coverage-unregistered"]],
   ["a disposition table whose headings moved to `##`, yielding no fold-in", (r) => {}, ["disposition-dark"], (t) => { t.dispositionText = t.dispositionText.replace("### ", "## "); }],
-  ["a capability that is a bare string", (r) => { r.artifacts[1].capabilities[0] = "acme"; r.connectors.acme.direction = "source"; }, ["capability-keys", "connectors-field"]],
+  ["a capability that is a bare string", (r: ProbeWith<"artifacts", { path: string; capabilities: (ProbeCapability | string)[] }[]>) => { r.artifacts[1].capabilities[0] = "acme"; r.connectors.acme.direction = "source"; }, ["capability-keys", "connectors-field"]],
   ["an artifact listed twice, the duplicate under another vendor (the first entry is judged)", (r) => { r.artifacts.push({ path: "recipes/acme-digest", capabilities: [{ vendor: "beta", family: "message-stream/chat", transport: "push", direction: "sink", cardinality: "many:1", round_trip: "read-only", fetcher: "native-driver" }] }); r.connectors.beta = { direction: "sink" }; }, ["artifact-duplicate"]],
 ];
 /** Non-probes: what the rules must accept (a `want` of []) and must not throw on. */
-const REGISTRY_NON_PROBES = [
+const REGISTRY_NON_PROBES: RegistryProbe[] = [
   ["a contribution naming only a model provider is not marked", (r) => {}, [], (t) => { t.metadataByPath.set("recipes/uses-a-model", { requires: { services: ["OpenRouter"] }, tags: ["synthesis"] }); t.existingDirs.push("recipes/uses-a-model"); }],
   ["two patterns matching one service are both live (the narrower inside the word, covering nothing)", (r) => { r.not_connectors.services.push({ pattern: "router", reason: "overlaps openrouter on purpose" }); }, []],
   ["a provider first and qualified after is covered", (r) => {}, [], (t) => { t.metadataByPath.set("recipes/uses-a-gateway", { requires: { services: ["Any OpenRouter-compatible LLM gateway (Ollama, etc.)", "Optional: OpenRouter (Sonar) for live search"] }, tags: ["synthesis"] }); t.existingDirs.push("recipes/uses-a-gateway"); }],
@@ -3601,14 +3712,14 @@ const REGISTRY_NON_PROBES = [
   ["a metadata whose tags and services are strings marks nothing and throws nothing", (r) => {}, [], (t) => { t.metadataByPath.set("recipes/odd-tool", { requires: { services: "Acme Chat API" }, tags: "digest" }); t.existingDirs.push("recipes/odd-tool"); }],
 ];
 /** [text, want]: what dispositionPaths reads from a table — the fold-in marker in the Disposition cell under a contribution-category heading, and nothing from the Justification cell, past another heading, under `docs/drafts/`, or from a bare mention or a negation. */
-const DISPOSITION_PROBES = [
+const DISPOSITION_PROBES: [text: string, want: string[]][] = [
   ["### `integrations/` (2)\n\n| Artifact | Disposition | Justification |\n|---|---|---|\n| `a-capture` | keep + audited → fold-in **SMD-1867** | x |\n| `b-tool` | keep + audited | mentioned beside SMD-1867 and SMD-1924; a tool, not a fold-in |\n| `e-graph` | keep + audited | a graph view; not an SMD-1867 adapter |\n\n### `recipes/` (1)\n\n| `c-import` | keep + audited → SMD-1867 candidate | x |\n| `f-import` | keep + audited *(drop one sub-file)* → SMD-1867 candidate | x |\n| `h-import` | remove | superseded by the seam; was the SMD-1867 candidate |\n| `i-import` | remove — was the SMD-1867 candidate | superseded by the seam |\n| `g-ext` | keep + audited | A capture adapter under the SMD-1867 contract, not an ad-hoc integration. |\n\n### `docs/drafts/` (1)\n\n| `sketch.md` | keep + audited → SMD-1867 candidate | not a contribution directory |\n\n## Notes\n\n| `d-tool` | remove → fold-in **SMD-1867** | was considered |\n", ["integrations/a-capture", "recipes/c-import", "recipes/f-import"]],
   ["## Summary\n\n| `x-tool` | fold-in **SMD-1867** |\n", []],
 ];
 function checkConnectorRegistry() {
   // One pattern for a vendor key: the schema's for metadata `connectors`, the registry's for its vendors.
-  if (props.connectors?.items?.pattern !== VENDOR_PATTERN) fail(".github/metadata.schema.json", `connectors.items.pattern is ${JSON.stringify(props.connectors?.items?.pattern)} but scripts/connector-registry.mjs's VENDOR_PATTERN is ${JSON.stringify(VENDOR_PATTERN)} — one definition of a vendor key (SMD-1933)`);
-  const kindsOf = (registry, tree = PROBE_TREE()) => [...new Set(registryProblems({ registry, ...tree }).map((p) => p.kind))].sort();
+  if (props.connectors?.items?.pattern !== VENDOR_PATTERN) fail(".github/metadata.schema.json", `connectors.items.pattern is ${JSON.stringify(props.connectors?.items?.pattern)} but scripts/connector-registry.ts's VENDOR_PATTERN is ${JSON.stringify(VENDOR_PATTERN)} — one definition of a vendor key (SMD-1933)`);
+  const kindsOf = (registry: Registry | null, tree: Tree = PROBE_TREE()) => [...new Set(registryProblems({ registry, ...tree }).map((p) => p.kind))].sort();
   const base = registryProblems({ registry: PROBE_REGISTRY(), ...PROBE_TREE() });
   if (base.length) return fail(SELF, `check 19's baseline registry fails its own rules (${base.map((p) => `${p.kind}: ${p.msg}`).join("; ")}) — the mutants below measure nothing`);
   for (const [text, want] of DISPOSITION_PROBES) {
@@ -3618,28 +3729,28 @@ function checkConnectorRegistry() {
   // A fourth element: null runs the mutant on a null registry; a function reshapes the tree. A `want` of []
   // is a non-probe — a case the rules must accept and not throw on.
   for (const [why, mutate, want, tree] of [...REGISTRY_PROBES, ...REGISTRY_NON_PROBES]) {
-    let r = PROBE_REGISTRY();
+    let r: ProbeRegistry | null = PROBE_REGISTRY();
     if (tree === null) r = null; else mutate(r);
     const t = PROBE_TREE();
     if (typeof tree === "function") tree(t);
-    let got;
-    try { got = kindsOf(r, t); } catch (e) { fail(SELF, `check 19 throws for ${why}: ${e.message} (its own probe)`); continue; }
+    let got: string[];
+    try { got = kindsOf(r, t); } catch (e) { fail(SELF, `check 19 throws for ${why}: ${(e as Error).message} (its own probe)`); continue; }
     if (JSON.stringify(got) !== JSON.stringify([...want].sort())) fail(SELF, `check 19 reports [${got}] for ${why}, expected [${want}] (its own probe)`);
   }
 
   if (!existsSync(join(ROOT, REGISTRY_PATH))) return fail(REGISTRY_PATH, "missing — the connector taxonomy's one source (SMD-1933)");
-  let registry;
-  try { registry = readRegistry(ROOT); } catch (e) { return fail(REGISTRY_PATH, `does not parse: ${e.message} (SMD-1933)`); }
+  let registry: Registry;
+  try { registry = readRegistry(ROOT); } catch (e) { return fail(REGISTRY_PATH, `does not parse: ${(e as Error).message} (SMD-1933)`); }
   const dispositionText = existsSync(join(ROOT, DISPOSITION_PATH)) ? readFileSync(join(ROOT, DISPOSITION_PATH), "utf8") : null;
-  let problems;
+  let problems: Problem[];
   // readMetadata is the one statement of "absent is not in the map, unparseable is null (no verdict)" — the CLI reads the same; check 1 names the unparseable file.
-  try { problems = registryProblems({ registry, existingDirs: dirs.map((d) => d.rel), metadataByPath: readMetadata(dirs), dispositionText }); } catch (e) { return fail(REGISTRY_PATH, `check 19 threw instead of reporting: ${e.message} (SMD-1933)`); }
+  try { problems = registryProblems({ registry, existingDirs: dirs.map((d) => d.rel), metadataByPath: readMetadata(dirs), dispositionText }); } catch (e) { return fail(REGISTRY_PATH, `check 19 threw instead of reporting: ${(e as Error).message} (SMD-1933)`); }
   for (const p of problems) fail(p.where, `${p.msg} (SMD-1933)`);
   if (!existsSync(join(ROOT, SPEC_PATH))) return fail(SPEC_PATH, "missing — the spec that carries the registry's rendered tables (SMD-1933)");
   const span = tablesSpan(readFileSync(join(ROOT, SPEC_PATH), "utf8"));
   if (!span) return fail(SPEC_PATH, "the generated-tables markers are missing or doubled (SMD-1933)");
   // The renderer assumes a sound registry (the CLI refuses to render otherwise); an unsound one has its findings above.
-  if (problems.length === 0 && span.block !== renderClassification(registry)) fail(SPEC_PATH, `the generated tables differ from what ${REGISTRY_PATH} renders — run \`bun scripts/connector-registry.mjs\` (SMD-1933)`);
+  if (problems.length === 0 && span.block !== renderClassification(registry)) fail(SPEC_PATH, `the generated tables differ from what ${REGISTRY_PATH} renders — run \`bun scripts/connector-registry.ts\` (SMD-1933)`);
 }
 checkConnectorRegistry();
 

@@ -123,7 +123,7 @@ the repo root, with whatever `-f` files the stack was started with:
 | `ollama` (`--profile local-models`) | `ollama:11434` — the server and `ollama-pull` | Nothing. `compose exec ollama ollama pull <model>`; the host-ports file publishes it on `127.0.0.1:${OLLAMA_PORT:-11434}` for an eval run from a checkout | Not intended; an unauthenticated model API |
 
 `docker compose -f deploy/compose.yaml config` renders each mapping with
-`host_ip: 127.0.0.1`, and `scripts/check-fork-consistency.mjs` check 13 parses
+`host_ip: 127.0.0.1`, and `scripts/check-fork-consistency.ts` check 13 parses
 every `compose*.yaml` under `deploy/` and refuses a mapping that drops the
 address, a service that reaches outside the file (`extends`, `include`) or onto
 the host without a port (`network_mode`), and holds an inventory of which

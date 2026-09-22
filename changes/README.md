@@ -63,7 +63,7 @@ Bold-led paragraphs, in this order, each only if it applies:
 - **Review passes.** A table, one row per finding that changed the mechanism:
   pass, finding, who caught it (`cold read` / `run-it` / `mutant` / `CI`), the
   fix commit. Not a paragraph per pass: the prose is in the pass's commit body,
-  where `(caught: …)` tags live and `scripts/mechanism-yield.mjs` reads them.
+  where `(caught: …)` tags live and `scripts/mechanism-yield.ts` reads them.
   A finding worth more than a row is worth a follow-up ticket.
 - **Not taken.** What was argued and declined, and why.
 - **Follow-ups.** The tickets filed.
@@ -81,11 +81,11 @@ the shape (470 lines to 119); [`smd-1917.md`](smd-1917.md) is the second.
 
 ## At a release
 
-`bun scripts/assemble-release.mjs` (dry run; `--write` applies) takes the
+`bun scripts/assemble-release.ts` (dry run; `--write` applies) takes the
 fragments in merge order — when each arrived on the branch's first-parent line,
 the merge that brought it — writes each as the next `NNN-<slug>.md` with its
 `# N. <title>` heading, removes the fragment, regenerates FORK.md's index with
-`scripts/fork-index.mjs`, writes the `CHANGELOG.md` section and appends to
+`scripts/fork-index.ts`, writes the `CHANGELOG.md` section and appends to
 `releases.json`, which freezes the shas of the migrations in the range. It runs
 check 16's rules first and refuses what CI would; `--write` needs the repository
 (a full clone, not a shallow one), a clean tree and committed fragments. FORK.md's
@@ -105,11 +105,11 @@ FORK.md`. Git does not follow a split of one file into eighty-five, so
 
 ## Held by
 
-`scripts/check-fork-consistency.mjs` check 15: file names (numbered or fragment),
+`scripts/check-fork-consistency.ts` check 15: file names (numbered or fragment),
 contiguous numbers, the `# N.` heading matching the name, the line cap and its
 ratchet, FORK.md under its byte ceiling and carrying no numbered section at any
 heading level, the index between FORK.md's markers equal to what
-`scripts/fork-index.mjs` renders from this directory, and every "FORK.md change
+`scripts/fork-index.ts` renders from this directory, and every "FORK.md change
 N" / "FORK change N" / `changes/NNN` / "NNN change M" citation in a file git
 tracks or would track — and every "change N" in the record itself — naming a
 number with a file (or a row of the 1–17 table). Check 16 holds the fragment

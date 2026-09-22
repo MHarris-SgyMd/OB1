@@ -20,7 +20,7 @@ After setup, on one office Linux host:
 - Postgres 15 with `pgvector` (HNSW index on a configurable embedding dim, default 768)
 - The full Supabase stack (Kong gateway, PostgREST, GoTrue, Realtime, Storage, Studio, Edge Functions runtime, Logflare) -- canonical, unmodified, just self-hosted
 - An `ollama` sidecar that the Edge Functions call for embedding generation -- dev hosts never need Ollama
-- A `thoughts` table that mirrors the canonical OB1 schema exactly, plus `match_thoughts(...)` and `upsert_thought(...)` RPCs with the same signatures as cloud — the guide's `upsert_thought`, not this fork's: its rows carry a content fingerprint but no model label and no audit actor, and it is a counted exception in `scripts/check-fork-consistency.mjs` check 10 (FORK.md change 71, SMD-1524)
+- A `thoughts` table that mirrors the canonical OB1 schema exactly, plus `match_thoughts(...)` and `upsert_thought(...)` RPCs with the same signatures as cloud — the guide's `upsert_thought`, not this fork's: its rows carry a content fingerprint but no model label and no audit actor, and it is a counted exception in `scripts/check-fork-consistency.ts` check 10 (FORK.md change 71, SMD-1524)
 - Three Edge Functions reachable through Kong:
   - `POST /functions/v1/capture` -- embed and store
   - `POST /functions/v1/search` -- embed query and run match_thoughts

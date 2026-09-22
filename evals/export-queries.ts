@@ -24,7 +24,7 @@
  * The fixture is query text and ids — the query, the ids the caller touched as
  * `relevant`, the shipped ranking as `baseline`. No *thought content* leaves the
  * brain, so it can be committed without the corpus (checked by
- * scripts/check-fork-consistency.mjs check 9). But the query strings are the
+ * scripts/check-fork-consistency.ts check 9). But the query strings are the
  * searcher's own words — personal data — so committing an export fixture from a
  * real brain commits real queries; that is a maintainer's call, not something
  * the redaction guards. The `relevant` label is click-through relevance — a

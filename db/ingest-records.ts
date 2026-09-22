@@ -51,8 +51,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 import { loadLinearCorpus, linearThoughtId, linearThoughtText, type LinearDoc } from "../evals/linear-corpus.ts";
-import { parseFragment, fragmentSection } from "../scripts/fragments.mjs";
-import { headingOf, ticketsOf } from "../scripts/fork-index.mjs";
+import { parseFragment, fragmentSection } from "../scripts/fragments.ts";
+import { headingOf, ticketsOf } from "../scripts/fork-index.ts";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -95,7 +95,7 @@ export function recordId(source: Source, key: string): string {
 /**
  * One changes/*.md file as a fork Doc. SMD-1917 moved the fork's changes out of
  * FORK.md into one file each, in two shapes this reader handles through the
- * fragment parser they share with the release step (scripts/fragments.mjs):
+ * fragment parser they share with the release step (scripts/fragments.ts):
  *
  *   - A rendered, numbered change (`NNN-slug.md`, e.g. 018-…): no front matter,
  *     the file opens `# N. Title` and the whole file is the change. The number
