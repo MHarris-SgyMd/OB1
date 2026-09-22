@@ -23,9 +23,10 @@
  * A neighbour ranks by co_mentions + support; `--no-edges` drops the support
  * term and the degree/support columns, so the same command run twice says what
  * the edges add over co-occurrence alone (the drop-the-graph control the ticket
- * asks for). Ties break on mentions, then normalised name, then type — never on
- * a uuid or a timestamp, so the order is the same on every run over the same
- * rows and carries no recency term.
+ * asks for). Entity ties break on mentions, then normalised name, then type —
+ * never on a uuid or a timestamp; thought ties break on the thought id, which
+ * is stable on one database and carries no recency. The same rows give the
+ * same order on every run.
  *
  *   bun db/graph-centrality.ts --url postgres://…                  # the whole graph: top entities and thoughts
  *   bun db/graph-centrality.ts --url … "Open Brain"                # one subject's neighbourhood
@@ -66,12 +67,10 @@
  * over a `Runner` so db/test-schema.ts [43] runs the same text under PGlite.
  */
 import { SQL } from "bun";
+import { ENTITY_TYPES, type EntityType } from "../server-portable/entities.ts";
 
 /** `(text, params) → rows` — Bun's `sql.unsafe` or PGlite's `query(...).rows`. */
 export type Runner = (text: string, params: unknown[]) => Promise<Record<string, unknown>[]>;
-
-export const ENTITY_TYPES_ALL = ["organization", "person", "place", "project", "tool", "topic"] as const;
-export type EntityType = (typeof ENTITY_TYPES_ALL)[number];
 
 /**
  * SMD-1935's noise, as a pattern over normalized_name: digits, then any run of
@@ -99,12 +98,19 @@ export type Options = Scope & {
   /** With edges off, no edge count is read or ranked on: the control. */
   edges: boolean;
 };
-export const DEFAULT_OPTIONS: Options = { types: ENTITY_TYPES_ALL, excludeNumeric: true, limit: DEFAULT_LIMIT, edges: true };
+export const DEFAULT_OPTIONS: Options = { types: ENTITY_TYPES, excludeNumeric: true, limit: DEFAULT_LIMIT, edges: true };
 
 export type EntityRow = { id: string; entity_type: string; name: string; mentions: number; degree?: number; support?: number };
 export type ThoughtRow = { id: string; created_at: string | null; excerpt: string; entities: number; edges?: number };
 export type SubjectRow = { id: string; entity_type: string; name: string; normalized_name: string; mentions: number; score: number };
-export type Resolution = { how: "id" | "exact" | "alias" | "fuzzy" | "none"; subjects: SubjectRow[]; normalized: string | null };
+export type Resolution = {
+  how: "id" | "exact" | "alias" | "fuzzy" | "none";
+  subjects: SubjectRow[];
+  /** What normalize_entity_name made of the input; null for a uuid, or a name that is only punctuation. */
+  normalized: string | null;
+  /** `none` because the entity exists and the numeric-name rule excludes it — the message names --keep-numeric. */
+  excluded: boolean;
+};
 export type NeighbourRow = { id: string; entity_type: string; name: string; mentions: number; co_mentions: number; support?: number; relations?: string | null };
 export type Coverage = { thoughts: number; extracted: number; entities: number; numeric_names: number; edges: number; unit_edges: number; extraction_key: string | null };
 
@@ -161,68 +167,90 @@ export async function coverage(run: Runner, scope: Scope): Promise<Coverage> {
  * the numeric rule does, so "021" is not a subject unless numerics are kept.
  */
 export async function resolveSubject(run: Runner, subject: string, scopeIn: Scope): Promise<Resolution> {
-  const scope: Scope = { types: ENTITY_TYPES_ALL, excludeNumeric: scopeIn.excludeNumeric };
+  const scope: Scope = { types: ENTITY_TYPES, excludeNumeric: scopeIn.excludeNumeric };
+  // The mention count as MENTIONS_CTE defines it, correlated: at most five rows
+  // come out of a rung, so an index probe each, not an aggregate of the table.
   const select = (how: string, score: string) =>
-    `SELECT s.id, s.entity_type, s.name, s.normalized_name, coalesce(m.mentions, 0) AS mentions, ${score} AS score
-       FROM ob1_entities s LEFT JOIN (SELECT te.entity_id, count(DISTINCT te.thought_id)::int AS mentions FROM thought_entities te GROUP BY 1) m ON m.entity_id = s.id
+    `SELECT s.id, s.entity_type, s.name, s.normalized_name,
+            (SELECT count(DISTINCT te.thought_id) FROM thought_entities te WHERE te.entity_id = s.id)::int AS mentions, ${score} AS score
+       FROM ob1_entities s
       WHERE ${how}`;
   const order = ` ORDER BY score DESC, mentions DESC, ${ENTITY_TIEBREAK}`;
   const rows = (r: Record<string, unknown>[]) => r.map((x) => ({ ...x, score: Number(x.score) })) as SubjectRow[];
+  const rung = async (how: string, score: string, params: unknown[], sc: Scope, limit = "") =>
+    rows(await run(select(`${how} AND ${scopeSql("s", sc, params)}`, score) + order + limit, params));
+  const unscoped: Scope = { ...scope, excludeNumeric: false };
+  /** `none`, saying whether the exact rung would have found it without the numeric rule. */
+  const none = async (normalized: string | null, exactHow: string, params: () => unknown[]): Promise<Resolution> => ({
+    how: "none", subjects: [], normalized,
+    excluded: scope.excludeNumeric && (await rung(exactHow, "1.0::float8", params(), unscoped)).length > 0,
+  });
 
   if (UUID_RE.test(subject.trim())) {
-    const params: unknown[] = [subject.trim()];
-    const r = await run(select(`s.id = $1::uuid AND ${scopeSql("s", scope, params)}`, "1.0::float8") + order, params);
-    return { how: r.length ? "id" : "none", subjects: rows(r), normalized: null };
+    const byId = `s.id = $1::uuid`;
+    const r = await rung(byId, "1.0::float8", [subject.trim()], scope);
+    return r.length ? { how: "id", subjects: r, normalized: null, excluded: false } : none(null, byId, () => [subject.trim()]);
   }
   const [{ n }] = await run(`SELECT normalize_entity_name($1) AS n`, [subject]);
   const normalized = (n as string | null) ?? null;
-  if (normalized === null) return { how: "none", subjects: [], normalized };
+  if (normalized === null) return { how: "none", subjects: [], normalized, excluded: false };
 
-  const exactP: unknown[] = [normalized];
-  const exact = await run(select(`s.normalized_name = $1 AND ${scopeSql("s", scope, exactP)}`, "1.0::float8") + order, exactP);
-  if (exact.length) return { how: "exact", subjects: rows(exact), normalized };
+  const exactHow = `s.normalized_name = $1`;
+  const exact = await rung(exactHow, "1.0::float8", [normalized], scope);
+  if (exact.length) return { how: "exact", subjects: exact, normalized, excluded: false };
 
-  const aliasP: unknown[] = [normalized];
-  const alias = await run(select(
-    `($1 = ANY(s.merged_from) OR EXISTS (SELECT 1 FROM unnest(s.aliases) a WHERE normalize_entity_name(a) = $1)) AND ${scopeSql("s", scope, aliasP)}`,
-    "1.0::float8") + order, aliasP);
-  if (alias.length) return { how: "alias", subjects: rows(alias), normalized };
+  const alias = await rung(`($1 = ANY(s.merged_from) OR EXISTS (SELECT 1 FROM unnest(s.aliases) a WHERE normalize_entity_name(a) = $1))`, "1.0::float8", [normalized], scope);
+  if (alias.length) return { how: "alias", subjects: alias, normalized, excluded: false };
 
-  const fuzzyP: unknown[] = [normalized, FUZZY_FLOOR];
-  const fuzzy = await run(select(
-    `similarity(s.normalized_name, $1) >= $2 AND ${scopeSql("s", scope, fuzzyP)}`,
-    "similarity(s.normalized_name, $1)::float8") + order + ` LIMIT ${FUZZY_LIMIT}`, fuzzyP);
-  return { how: fuzzy.length ? "fuzzy" : "none", subjects: rows(fuzzy), normalized };
+  const fuzzy = await rung(`similarity(s.normalized_name, $1) >= $2`, "similarity(s.normalized_name, $1)::float8", [normalized, FUZZY_FLOOR], scope, ` LIMIT ${FUZZY_LIMIT}`);
+  return fuzzy.length ? { how: "fuzzy", subjects: fuzzy, normalized, excluded: false } : none(normalized, exactHow, () => [normalized]);
 }
 
-/** Every in-scope entity with its counts; the caller orders. */
-function entityStatsSql(opts: Options, params: unknown[], orderBy: string): string {
+/**
+ * The whole graph's top entities, both orderings from one pass over the
+ * tables: by mentions (then degree and support with edges on), and with edges
+ * on by degree (then support and mentions) — the hubs. Each entity's counts are
+ * computed once and ranked twice; a row comes back if it is in either top list.
+ */
+export async function topEntities(run: Runner, opts: Options): Promise<{ byMentions: EntityRow[]; byDegree: EntityRow[] }> {
+  const params: unknown[] = [];
   const inScope = scopeSql("e", opts, params);
+  params.push(opts.limit);
+  const L = `$${params.length}`;
+  const tiebreak = `normalized_name, entity_type`;
   const edgeCols = opts.edges ? `, coalesce(d.degree, 0) AS degree, coalesce(d.support, 0) AS support` : "";
   const edgeJoin = opts.edges
     ? `LEFT JOIN (SELECT x.entity_id, count(DISTINCT x.other_id)::int AS degree, count(DISTINCT x.thought_id)::int AS support
                    FROM ends x JOIN scope o ON o.id = x.other_id GROUP BY 1) d ON d.entity_id = s.id`
     : "";
-  params.push(opts.limit);
-  return `WITH scope AS (SELECT e.id, e.entity_type, e.name, e.normalized_name FROM ob1_entities e WHERE ${inScope}),
-       ${MENTIONS_CTE}${opts.edges ? `,\n       ${ENDS_CTE}` : ""}
-  SELECT s.id, s.entity_type, s.name, coalesce(m.mentions, 0) AS mentions${edgeCols}
-    FROM scope s LEFT JOIN mentions m ON m.entity_id = s.id ${edgeJoin}
-   ORDER BY ${orderBy}, ${ENTITY_TIEBREAK}
-   LIMIT $${params.length}`;
+  const rows = await run(
+    `WITH scope AS (SELECT e.id, e.entity_type, e.name, e.normalized_name FROM ob1_entities e WHERE ${inScope}),
+          ${MENTIONS_CTE}${opts.edges ? `,\n          ${ENDS_CTE}` : ""},
+          stats AS (
+            SELECT s.id, s.entity_type, s.name, s.normalized_name, coalesce(m.mentions, 0) AS mentions${edgeCols}
+              FROM scope s LEFT JOIN mentions m ON m.entity_id = s.id ${edgeJoin}),
+          ranked AS (
+            SELECT *, row_number() OVER (ORDER BY mentions DESC${opts.edges ? ", degree DESC, support DESC" : ""}, ${tiebreak})::int AS rm
+                   ${opts.edges ? `, row_number() OVER (ORDER BY degree DESC, support DESC, mentions DESC, ${tiebreak})::int AS rd` : ", NULL::int AS rd"}
+              FROM stats)
+     SELECT id, entity_type, name, mentions${opts.edges ? ", degree, support" : ""}, rm, rd
+       FROM ranked WHERE rm <= ${L}${opts.edges ? ` OR rd <= ${L}` : ""}`,
+    params) as (EntityRow & { rm: number; rd: number | null })[];
+  const strip = ({ rm: _rm, rd: _rd, ...e }: EntityRow & { rm: number; rd: number | null }): EntityRow => e;
+  return {
+    byMentions: rows.filter((r) => r.rm <= opts.limit).sort((a, b) => a.rm - b.rm).map(strip),
+    byDegree: opts.edges ? rows.filter((r) => r.rd !== null && r.rd <= opts.limit).sort((a, b) => a.rd! - b.rd!).map(strip) : [],
+  };
 }
 
 /** The whole graph's top entities by mentions. */
 export async function topByMentions(run: Runner, opts: Options): Promise<EntityRow[]> {
-  const params: unknown[] = [];
-  return (await run(entityStatsSql(opts, params, `mentions DESC${opts.edges ? ", degree DESC, support DESC" : ""}`), params)) as EntityRow[];
+  return (await topEntities(run, opts)).byMentions;
 }
 
 /** The whole graph's top entities by degree — the hubs. Empty with edges off. */
 export async function topByDegree(run: Runner, opts: Options): Promise<EntityRow[]> {
-  if (!opts.edges) return [];
-  const params: unknown[] = [];
-  return (await run(entityStatsSql(opts, params, `degree DESC, support DESC, mentions DESC`), params)) as EntityRow[];
+  return (await topEntities(run, opts)).byDegree;
 }
 
 const EXCERPT = `regexp_replace(left(t.content, 160), '\\s+', ' ', 'g')`;
@@ -269,10 +297,11 @@ export async function neighbourhood(run: Runner, subjectIds: readonly string[], 
        ${ENDS_CTE},
        touching AS (SELECT x.other_id AS entity_id, x.thought_id, x.relation FROM ends x
                      WHERE x.entity_id = ANY($1::uuid[]) AND NOT (x.other_id = ANY($1::uuid[]))),
-       ed AS (SELECT o.entity_id, count(DISTINCT o.thought_id)::int AS support,
-                     (SELECT string_agg(r.relation || '×' || r.n, ', ' ORDER BY r.n DESC, r.relation)
-                        FROM (SELECT i.relation, count(DISTINCT i.thought_id) AS n FROM touching i WHERE i.entity_id = o.entity_id GROUP BY 1) r) AS relations
-                FROM touching o GROUP BY o.entity_id)`
+       per_relation AS (SELECT entity_id, relation, count(DISTINCT thought_id) AS n FROM touching GROUP BY 1, 2),
+       ed AS (SELECT sup.entity_id, sup.support, rel.relations
+                FROM (SELECT entity_id, count(DISTINCT thought_id)::int AS support FROM touching GROUP BY 1) sup
+                JOIN (SELECT entity_id, string_agg(relation || '×' || n, ', ' ORDER BY n DESC, relation) AS relations FROM per_relation GROUP BY 1) rel
+                  ON rel.entity_id = sup.entity_id)`
     : "";
   const rows = await run(
     `WITH scope AS (SELECT e.id, e.entity_type, e.name, e.normalized_name FROM ob1_entities e WHERE ${inScope}),
@@ -360,7 +389,8 @@ export async function report(run: Runner, subject: string | null, opts: Options)
   const cov = await coverage(run, opts);
   const base = { subject, options: opts, coverage: cov, caveats: caveats(cov, opts) };
   if (subject === null) {
-    return { ...base, resolution: null, by_mentions: await topByMentions(run, opts), by_degree: await topByDegree(run, opts), thoughts: await topThoughts(run, opts) };
+    const { byMentions, byDegree } = await topEntities(run, opts);
+    return { ...base, resolution: null, by_mentions: byMentions, by_degree: byDegree, thoughts: await topThoughts(run, opts) };
   }
   const resolution = await resolveSubject(run, subject, opts);
   const ids = resolution.subjects.map((s) => s.id);
@@ -399,13 +429,18 @@ const T_COLS = (edges: boolean, entitiesHead: string): Col[] => [
 export function render(r: Report): string {
   const out: string[] = [];
   const o = r.options;
-  out.push(`graph-centrality — ${r.subject === null ? "the whole graph" : `around ${JSON.stringify(r.subject)}`}; scope ${o.types.length === ENTITY_TYPES_ALL.length ? "every type" : o.types.join(",")}${o.excludeNumeric ? ", numeric names excluded" : ", numeric names kept"}; edges ${o.edges ? "on" : "OFF (control)"}; top ${o.limit}`);
+  const everyType = ENTITY_TYPES.every((t) => o.types.includes(t));
+  out.push(`graph-centrality — ${r.subject === null ? "the whole graph" : `around ${JSON.stringify(r.subject)}`}; scope ${everyType ? "every type" : o.types.join(",")}${o.excludeNumeric ? ", numeric names excluded" : ", numeric names kept"}; edges ${o.edges ? "on" : "OFF (control)"}; top ${o.limit}`);
   out.push(`${r.coverage.entities} entities in scope; ${r.coverage.edges} edge rows`);
   out.push("");
   if (r.resolution) {
     const res = r.resolution;
     if (res.how === "none") {
-      out.push(`No entity resolves from ${JSON.stringify(r.subject)}${res.normalized === null ? " — the name is only punctuation" : ` (normalised: ${JSON.stringify(res.normalized)}; nothing exact, no alias or merged name, nothing within trigram similarity ${FUZZY_FLOOR})`}.`);
+      const shown = JSON.stringify(r.subject);
+      if (res.excluded) out.push(`No entity resolves from ${shown} within scope: it names an entity whose name is only digits (SMD-1935's noise), out of scope by default — pass --keep-numeric to rank it.`);
+      else if (UUID_RE.test((r.subject ?? "").trim())) out.push(`No entity has the id ${shown}.`);
+      else if (res.normalized === null) out.push(`No entity resolves from ${shown} — the name is only punctuation.`);
+      else out.push(`No entity resolves from ${shown} (normalised: ${JSON.stringify(res.normalized)}; nothing exact, no alias or merged name, nothing within trigram similarity ${FUZZY_FLOOR}).`);
     } else {
       const label = { id: "by id", exact: "exact match on the normalised name", alias: "by alias or merged-in name", fuzzy: `by trigram similarity — a GUESS; pass the name shown to be exact` }[res.how];
       out.push(`Subject (${label}):`);
@@ -478,9 +513,9 @@ export function parseArgs(argv: readonly string[]): Parsed | { error: string } {
     } else if (a === "--types") {
       const v = value();
       if (typeof v !== "string") return v;
-      const types = v.split(",").map((t) => t.trim()).filter(Boolean);
-      const bad = types.filter((t) => !(ENTITY_TYPES_ALL as readonly string[]).includes(t));
-      if (bad.length || types.length === 0) return { error: `--types takes a comma list of ${ENTITY_TYPES_ALL.join(", ")}; ${bad.length ? `not ${bad.map((b) => JSON.stringify(b)).join(", ")}` : "none given"}` };
+      const types = [...new Set(v.split(",").map((t) => t.trim()).filter(Boolean))];
+      const bad = types.filter((t) => !(ENTITY_TYPES as readonly string[]).includes(t));
+      if (bad.length || types.length === 0) return { error: `--types takes a comma list of ${ENTITY_TYPES.join(", ")}; ${bad.length ? `not ${bad.map((b) => JSON.stringify(b)).join(", ")}` : "none given"}` };
       opts.types = types as EntityType[];
     } else if (a === "--keep-numeric") opts.excludeNumeric = false;
     else if (a === "--no-edges") opts.edges = false;

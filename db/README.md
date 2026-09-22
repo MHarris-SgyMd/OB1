@@ -164,7 +164,7 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `1155 assertions: 1155 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `1165 assertions: 1165 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports forty-four (44) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
@@ -865,9 +865,10 @@ by trigram similarity at pg_trgm's default threshold, named as guesses; a uuid
 is an entity id. Every entity a rung returns is the subject. A neighbour ranks
 by co_mentions + support; `--no-edges` drops the support term and every edge
 column, so a run with and a run without say what the edges add over
-co-occurrence — the drop-the-graph control. Ties break on mentions, then the
-normalised name, then the type, never on a uuid or a timestamp: the same rows
-give the same order every run, with no recency term.
+co-occurrence — the drop-the-graph control. Entity ties break on mentions,
+then the normalised name, then the type, never on a uuid or a timestamp;
+thought ties break on the thought id, stable on one database and carrying no
+recency: the same rows give the same order every run.
 
 **Centrality here is attention, not value**, and every run prints the caveats
 with its own numbers: edges are unweighted (SMD-1925 — on real runs every edge
@@ -1433,7 +1434,7 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 1155 assertions, PGlite, no container
+bun test-schema.ts                          # 1165 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts         # 601 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database

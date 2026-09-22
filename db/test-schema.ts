@@ -69,8 +69,8 @@ import { fileURLToPath } from "node:url";
 import { buffersOf, COLUMN_COMMENT_SQL, communitySchemaFiles, createAssert, FUNCTION_COMMENT_SQL, SAMPLE_STATEMENT, sampleStatementOf, SCHEMA_FILES_FIRST, SCHEMAS_DIR, seededRandom, TABLE_COMMENT_SQL, TID_PROBE } from "./test-support.ts";
 import { markerAnswers } from "./bench-oracle.ts";
 import {
-  DEFAULT_OPTIONS, ENTITY_TYPES_ALL, FUZZY_FLOOR, NUMERIC_NAME_RE, coverage as graphCoverage, neighbourhood, parseArgs, pgArray, render, report as graphReport,
-  resolveSubject, subjectThoughts, topByDegree, topByMentions, topThoughts, type Options as GraphOptions, type Runner,
+  DEFAULT_OPTIONS, FUZZY_FLOOR, NUMERIC_NAME_RE, coverage as graphCoverage, neighbourhood, parseArgs, pgArray, render, report as graphReport,
+  resolveSubject, subjectThoughts, topByDegree, topByMentions, topEntities, topThoughts, type Options as GraphOptions, type Runner,
 } from "./graph-centrality.ts";
 import { agentLabel, armOf, attribute, citePointerOf, goldFromFixture, renderReport, summarise, toActionRow, toSearchRow, type ActionRow, type SearchRow } from "../evals/utilization.ts";
 import { ENTITY_TYPES, RELATIONS } from "../server-portable/entities.ts";
@@ -5063,7 +5063,7 @@ console.log("\n[43] db/graph-centrality.ts: mentions, degree and support as defi
   const t3 = await thought("Open Brain on PostgreSQL, with Bun.");
   const t4 = await thought("Anita works on Open Brain, in Bun.");
   const t5 = await thought("Migration 021 in Open Brain.");
-  const t6 = await thought("Bun alone.");
+  const t6 = await thought("Bun\talone,\n\n  really.");
   const t8 = await thought("PG alone.");
   await record(t1, [E("Open Brain", "project"), E("PostgreSQL", "tool", ["Postgres"]), E("Anita", "person")],
     [R("Open Brain", "PostgreSQL", "depends_on", 0.8), R("Anita", "Open Brain", "works_on")]);
@@ -5123,6 +5123,7 @@ console.log("\n[43] db/graph-centrality.ts: mentions, degree and support as defi
   const t5row = tt.find((t) => t.id === t5)!;
   assert(t5row.entities === 1 && t5row.edges === 0, `t5 counts one entity and no edge — 021 is out of both counts (${t5row.entities}+${t5row.edges})`);
   assert(tt.length === 7 && tt[0].excerpt.startsWith("Open Brain depends") && tt.every((t) => typeof t.created_at === "string"), "every extracted thought is listed with an excerpt and a timestamp");
+  assert(tt.find((t) => t.id === t6)!.excerpt === "Bun alone, really.", `the excerpt collapses tabs, newlines and runs of spaces to one space — so the '\\s+' reached Postgres as written (${JSON.stringify(tt.find((t) => t.id === t6)!.excerpt)})`);
   const ttOff = await topThoughts(run, off);
   assert(ttOff.slice(0, 4).map((t) => t.id).sort().join() === [t1, t2, t3, t4].sort().join() && ttOff.every((t) => t.edges === undefined),
     "…edges off: t1–t4 tie at three entities, and the edge column is absent");
@@ -5144,8 +5145,17 @@ console.log("\n[43] db/graph-centrality.ts: mentions, degree and support as defi
   const punct = await resolveSubject(run, "...", on);
   assert(punct.how === "none" && punct.normalized === null, "none: a name that is only punctuation normalises to NULL and no rung is tried");
   assert((await resolveSubject(run, OB, on)).how === "id", "a uuid resolves by id");
-  assert((await resolveSubject(run, "021", on)).how === "none" && (await resolveSubject(run, "021", keep)).how === "exact",
-    "the numeric rule applies to the subject: 021 is no subject by default and is when kept");
+  const noId = await resolveSubject(run, "0f1e2d3c-4b5a-6789-abcd-0123456789ab", on);
+  assert(noId.how === "none" && !noId.excluded && render(await graphReport(run, "0f1e2d3c-4b5a-6789-abcd-0123456789ab", on)).includes("No entity has the id"),
+    "a uuid no entity has: none, and the report says so rather than calling it punctuation (first review pass)");
+  const numSubject = await resolveSubject(run, "021", on);
+  assert(numSubject.how === "none" && numSubject.excluded === true && (await resolveSubject(run, "021", keep)).how === "exact",
+    "the numeric rule applies to the subject: 021 is no subject by default, the resolution says the rule excluded it, and it is a subject when kept");
+  assert(render(await graphReport(run, "021", on)).includes("pass --keep-numeric") && !render(await graphReport(run, "021", on)).includes("nothing exact"),
+    "…and the report names the flag instead of claiming nothing matched (first review pass)");
+  assert((await resolveSubject(run, NUM, on)).how === "none" && (await resolveSubject(run, NUM, on)).excluded === true && (await resolveSubject(run, NUM, keep)).how === "id",
+    "…by id as well");
+  assert(none.excluded === false && punct.excluded === false, "a name nothing matches is not called excluded");
   const typed = await resolveSubject(run, "Open Brain", { ...on, types: ["tool"] });
   assert(typed.how === "exact" && typed.subjects[0].id === OB, "--types does not apply to the subject: a project is found under a tool scope");
 
@@ -5211,7 +5221,21 @@ console.log("\n[43] db/graph-centrality.ts: mentions, degree and support as defi
   const numeric = async (s: string) => (await db.query<{ m: boolean }>(`SELECT $1 ~ $2 AS m`, [s, NUMERIC_NAME_RE])).rows[0].m;
   assert((await numeric("021")) && (await numeric("11434")) && (await numeric("127.0.0.1")) && (await numeric("10 000")), "the numeric rule takes bare numbers, ports, addresses");
   assert(!(await numeric("pg16")) && !(await numeric("smd 1938")) && !(await numeric("migration 021")), "…and leaves anything with a letter");
-  assert(ENTITY_TYPES_ALL.length === ENTITY_TYPES.length && ENTITY_TYPES_ALL.every((t) => (ENTITY_TYPES as readonly string[]).includes(t)), "the script's type list is the module's");
+  const dup = parseArgs(["--types", "tool,tool,tool,tool,tool,tool"]);
+  assert(!("error" in dup) && dup.opts.types.join() === "tool", "a repeated type is one type");
+  assert(!render(await graphReport(run, null, { ...on, types: ["tool", "tool", "tool", "tool", "tool", "tool"] as GraphOptions["types"] })).includes("every type"),
+    "…and six copies of one type are not \"every type\" in the header line — membership, not length (first review pass)");
+  assert(render(await graphReport(run, null, on)).includes("scope every type"), "…while the full list is");
+
+  // The whole-graph lists come from one pass: the two orderings agree with the
+  // two single-list calls row for row.
+  const both = await topEntities(run, on);
+  assert(JSON.stringify(both.byMentions) === JSON.stringify(byM) && JSON.stringify(both.byDegree) === JSON.stringify(hubs), "topEntities gives the two lists the single calls give");
+  const two = await topEntities(run, { ...on, limit: 2 });
+  assert(names(two.byMentions).join(",") === "Open Brain,PostgreSQL" && names(two.byDegree).join(",") === "Open Brain,PostgreSQL" && two.byMentions.every((e) => !("rm" in e)),
+    `…each cut at the limit, the rank columns stripped (${names(two.byMentions).join(",")} / ${names(two.byDegree).join(",")})`);
+  const one = await topEntities(run, { ...on, limit: 1, types: ["tool"] });
+  assert(names(one.byMentions).join() === "Bun" && names(one.byDegree).join() === "Bun", "…and a row in one list only is in that list only");
 }
 
 // db/README.md quotes this suite's assertion total in two places ("Expected
