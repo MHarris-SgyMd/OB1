@@ -29,6 +29,24 @@ export function passNumber(subject) {
   return null;
 }
 
+// "Review, second pass" / "Review pass 4" / "Review, reproducibility pass" /
+// "Second review pass". The whole word "review" is required: "reviewed pass" and
+// "the third pass was in flight" are NOT review passes — so a subject that merely
+// mentions a "pass" (passNumber !== null) is not enough on its own.
+export const REVIEW_RE = new RegExp(`\\breview\\b,? ?(?:\\w+ )?pass\\b|\\b(?:${ORDINAL}) review pass\\b`, "i");
+export const BOYSCOUT_RE = /\bboyscout\b/i;
+export const MERGE_RE = /^Merge\b/;
+
+/**
+ * Is this subject a review pass — the commits the caught-tag rule holds to their
+ * tags, and mechanism-yield counts yield over? A review pass (REVIEW_RE), and not
+ * a merge or a boyscout commit. NOT bare passNumber: "the ten-million-row second
+ * pass, measured" names a pass but is not a review pass.
+ */
+export function isReviewPass(subject) {
+  return REVIEW_RE.test(subject) && !MERGE_RE.test(subject) && !BOYSCOUT_RE.test(subject);
+}
+
 export const BULLET_RE = /^\s*[-*] (.*)$/;
 export const GREEN_HEAD_RE = /^\s*(green|all green|verified)\b/i;
 /** Only suite names and N/N counts: "Committed suite 500/500; test-schema 890/890 untouched." */
@@ -120,6 +138,12 @@ function selfCheck() {
   ok(passNumber("[fork] Third review pass, triaged (SMD-1)") === 3, "ordinal review pass");
   ok(passNumber("[fork] Review, reproducibility pass (SMD-1)") === 0, "a named (not numbered) pass is 0");
   ok(passNumber("[fork] A plain change (SMD-1)") === null, "a non-review subject is null");
+
+  ok(isReviewPass("[fork] Review pass 2: a thing (SMD-1)") === true, "a review pass is one");
+  ok(isReviewPass("[fork] Third review pass, triaged (SMD-1)") === true, "an ordinal review pass is one");
+  ok(isReviewPass("[fork] The ten-million-row second pass, measured (SMD-1)") === false, "a subject that only NAMES a pass is not a review pass (caught-tag must not fire on it)");
+  ok(isReviewPass("[fork] Boyscout: tidy the review passes left (SMD-1)") === false, "a boyscout commit is not a review pass");
+  ok(isReviewPass("Merge origin/main into x: the second review pass") === false, "a merge is not a review pass");
 
   const t = readTag("a masked failure (caught: self-review; held: --write is never run in CI)");
   ok(t && t.mechanism === "self-review" && t.known === false && /never run in CI/.test(t.held), "a tag with an unknown (single-token) mechanism and a held clause reads, known:false");

@@ -99,7 +99,7 @@ import fs from "node:fs";
 // The commit-message grammar is defined once, in commit-grammar.mjs, and shared
 // with scripts/commitlint.config.mjs (SMD-1808) — importing it here rather than
 // keeping a second copy. Pure string work, no side effects at import.
-import { ORDINAL, passNumber, isRunResult, bulletsOf, MECHANISMS, readTag } from "./commit-grammar.mjs";
+import { passNumber, isRunResult, bulletsOf, MECHANISMS, readTag, isReviewPass, REVIEW_RE, BOYSCOUT_RE, MERGE_RE } from "./commit-grammar.mjs";
 
 // ---------------------------------------------------------------------------
 // Arguments
@@ -263,12 +263,6 @@ function parseCommits(raw, fail = refuse) {
       return { sha: sha.trim().slice(0, 7), stamp: t, date: dayOf(t, DAY_FORMAT), subject: subject.trim(), body };
     });
 }
-
-// "Review, second pass" / "Review pass 4" / "Review, reproducibility pass" / "Second review pass".
-// The whole word "review" is required: "reviewed pass" and "the third pass was in flight" are not review passes.
-const REVIEW_RE = new RegExp(`\\breview\\b,? ?(?:\\w+ )?pass\\b|\\b(?:${ORDINAL}) review pass\\b`, "i");
-const BOYSCOUT_RE = /\bboyscout\b/i;
-const MERGE_RE = /^Merge\b/;
 
 /**
  * The ticket a commit belongs to: the first ticket in the parenthetical the
@@ -482,7 +476,7 @@ if (SELF_CHECK) process.exit(selfCheck());
 // Build rows
 // ---------------------------------------------------------------------------
 const { commits, windowLabel } = readLog();
-const review = commits.filter((c) => REVIEW_RE.test(c.subject) && !MERGE_RE.test(c.subject) && !BOYSCOUT_RE.test(c.subject));
+const review = commits.filter((c) => isReviewPass(c.subject));
 const boyscout = commits.filter((c) => BOYSCOUT_RE.test(c.subject) && !MERGE_RE.test(c.subject));
 
 const rows = [];

@@ -22,7 +22,7 @@
  * "Merge pull request …" are skipped.
  */
 
-import { passNumber, bulletsOf, readTag } from "./commit-grammar.mjs";
+import { isReviewPass, bulletsOf, readTag } from "./commit-grammar.mjs";
 
 /** CLAUDE.md's eight PR categories, plus the fork's own `fork`, `docs`, `resources`. */
 const CATEGORIES = ["fork", "extensions", "primitives", "recipes", "schemas", "dashboards", "integrations", "skills", "docs", "resources"];
@@ -50,7 +50,9 @@ export default {
         // that is present but malformed still counts as carrying one — a warn
         // rule catches the missing tag, not a mechanism typo (readTag !== null).
         "caught-tag": ({ header, body }) => {
-          if (passNumber(header ?? "") === null) return [true];
+          // A review pass (REVIEW_RE), not merely a subject that names a "pass N"
+          // — mechanism-yield gates its yield count the same way (SMD-1808).
+          if (!isReviewPass(header ?? "")) return [true];
           const { findings } = bulletsOf(body ?? "");
           const untagged = findings.filter((f) => readTag(f) === null);
           const detail = untagged.map((f) => JSON.stringify(f.length > 50 ? f.slice(0, 50) + "…" : f)).join(", ");
