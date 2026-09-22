@@ -498,7 +498,7 @@ console.log("\n[8b] match_thoughts applies the metadata filter inside the candid
   assert(got[0] === "b via chunk", "…including the one reachable only through its chunk");
   assert(got[1] === "the one b", "…and the one reachable through its own vector");
 
-  const none = await db.query(`SELECT count(*)::int AS c FROM match_thoughts($1::vector, -1.0, 10, '{"kind":"z"}'::jsonb)`, [unit(0)]);
+  const none = await db.query<{ c: number }>(`SELECT count(*)::int AS c FROM match_thoughts($1::vector, -1.0, 10, '{"kind":"z"}'::jsonb)`, [unit(0)]);
   assert(none.rows[0].c === 0, "a filter nothing matches still returns nothing");
 
   // The unfiltered path must not depend on metadata being an object, or on it
@@ -514,22 +514,22 @@ console.log("\n[8b] match_thoughts applies the metadata filter inside the candid
   const oddNames = odd.rows.map((r) => r.content);
   assert(oddNames.includes("crowd 0"), "a row with NULL metadata is returned by an unfiltered search");
   assert(oddNames.includes("crowd 1"), "a row with array metadata is returned by an unfiltered search");
-  const oddFiltered = await db.query(`SELECT count(*)::int AS c FROM match_thoughts($1::vector, -1.0, 10, '{"kind":"a"}'::jsonb)`, [unit(0)]);
+  const oddFiltered = await db.query<{ c: number }>(`SELECT count(*)::int AS c FROM match_thoughts($1::vector, -1.0, 10, '{"kind":"a"}'::jsonb)`, [unit(0)]);
   assert(oddFiltered.rows[0].c === 10, `…and a filter simply does not match them, without error (got ${oddFiltered.rows[0].c} of the 58 remaining kind "a")`);
 
   // 007 evaluated `NULL = '{}' OR metadata @> NULL` → NULL → every row excluded.
-  const nul = await db.query(`SELECT count(*)::int AS c FROM match_thoughts($1::vector, -1.0, 10, NULL::jsonb)`, [unit(0)]);
+  const nul = await db.query<{ c: number }>(`SELECT count(*)::int AS c FROM match_thoughts($1::vector, -1.0, 10, NULL::jsonb)`, [unit(0)]);
   assert(nul.rows[0].c === 10, `a NULL filter is unfiltered (got ${nul.rows[0].c} rows, 007 gave 0)`);
 
   // The overfetch is honoured above the default: 62 rows stored, 50 asked, 50 back.
   // Under 007 each CTE stopped at hnsw.ef_search (40) candidates.
-  const big = await db.query(`SELECT count(*)::int AS c FROM match_thoughts($1::vector, -1.0, 50, '{}'::jsonb)`, [unit(0)]);
+  const big = await db.query<{ c: number }>(`SELECT count(*)::int AS c FROM match_thoughts($1::vector, -1.0, 50, '{}'::jsonb)`, [unit(0)]);
   assert(big.rows[0].c === 50, `match_count 50 returns 50 of 62 rows (got ${big.rows[0].c})`);
 
   // The clamp's edges, named in the header: 0 and negative give 1 row, NULL
   // gives the default 10. 007 gave 0, an error, and the whole candidate set.
   for (const [arg, want, label] of [["0", 1, "match_count 0 returns 1 row"], ["-5", 1, "a negative match_count returns 1 row, not an error"], ["NULL", 10, "a NULL match_count returns the default 10"]] as const) {
-    const r = await db.query(`SELECT count(*)::int AS c FROM match_thoughts($1::vector, -1.0, ${arg}, '{}'::jsonb)`, [unit(0)]);
+    const r = await db.query<{ c: number }>(`SELECT count(*)::int AS c FROM match_thoughts($1::vector, -1.0, ${arg}, '{}'::jsonb)`, [unit(0)]);
     assert(r.rows[0].c === want, `${label} (got ${r.rows[0].c})`);
   }
   // The body, read once: the ceiling and the sentinel are both in it.
@@ -2206,7 +2206,7 @@ console.log("\n[21] Migration 020: the recency blend — identical at weight 0, 
   assert(scoreIsSim, "…and score equals similarity on every row, exactly");
   const plain = (await db.query<Row>(`SELECT id, similarity, score FROM match_thoughts($1::vector, -1.0, 10, '{}'::jsonb)`, [Q])).rows;
   assert(plain[0].id === chunkOnly && Math.abs(plain[0].similarity - 0.99) < 1e-6, `the chunk-only thought is first at weight 0, scored by its chunk (${plain[0].similarity})`);
-  const fourArg = await db.query(`SELECT count(*)::int AS c FROM match_thoughts($1::vector, -1.0, 10, '{}'::jsonb)`, [Q]);
+  const fourArg = await db.query<{ c: number }>(`SELECT count(*)::int AS c FROM match_thoughts($1::vector, -1.0, 10, '{}'::jsonb)`, [Q]);
   assert(fourArg.rows[0].c === 10, "a 4-argument call still resolves — the defaults, not a second overload");
   await db.exec(`DROP FUNCTION match_thoughts_019(vector, float, int, jsonb)`);
   assert((await functionsNamed("match_thoughts")) === 1, "the comparison function is gone again");
@@ -3089,7 +3089,8 @@ console.log("\n[28] Migration 029: supersession proposals — candidates, the on
     (await db.query<{ id: string | null }>(
       `SELECT record_supersession_proposal($1::uuid, $2::uuid, $3, $4, $5, 0.99, $6, NULL) AS id`,
       [older, newer, verdict, conf, reason, KEY])).rows[0].id;
-  const pid = await propose(decision, reversal, "newer_supersedes_older");
+  // `!`: the assert on the next line holds it, and assert counts rather than narrows.
+  const pid = (await propose(decision, reversal, "newer_supersedes_older"))!;
   assert(typeof pid === "string", "a conflict is recorded as a pending proposal");
   assert((await propose(decision, reversal, "older_supersedes_newer", 0.2)) === null, "…and the pair recorded again returns NULL, the first verdict standing");
   let badVerdict = "";

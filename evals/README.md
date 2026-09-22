@@ -35,6 +35,15 @@ OB1_EVAL_TEMP=0 bun eval-extraction.ts qwen2.5:7b llama3.2
 **Always pass `OB1_EVAL_TEMP=0` when comparing extraction models.** Without it the
 provider samples and a single run is not reproducible — see below.
 
+The directory type-checks — `bunx tsc --noEmit` here, strict, every `.ts` file,
+against `../server-portable`'s and `../db`'s exports — and CI runs it in the
+portable-server job (SMD-1932). `tsconfig.json` mirrors the server's;
+`package.json` pins `@types/bun` and `typescript` at the server's versions. The
+harnesses that call `judgePair`, `extractEntities` and `resolveEmbedConfig`
+directly are the call sites a signature change used to reach by grep rather
+than by compiler. It needs `bun install` here (LanceDB's types included) and in
+`../server-portable`; no model, no database.
+
 ## Expected outcome
 
 `retrieval` prints Recall@1 per difficulty slice plus overall MRR; `extraction`

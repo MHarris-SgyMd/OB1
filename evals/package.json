@@ -26,5 +26,9 @@
     "export-queries": "bun export-queries.ts",
     "replay": "bun eval-replay.ts",
     "build-replay-fixture": "bun build-replay-fixture.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "1.4.0",
+    "typescript": "5.9.3"
   }
 }

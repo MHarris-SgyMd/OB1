@@ -42,7 +42,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadEnv } from "./env.ts";
-import { resolveEmbedConfig } from "../server-portable/embed.ts";
+import { resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { extractEntities, extractionKey, type Extraction } from "../server-portable/entities.ts";
 import { requireDatabaseUrl, resetSchema } from "../db/test-support.ts";
 import { loadLinearCorpus, insertLinearThought, entityAnswersPath, readEntityAnswers } from "./linear-corpus.ts";
@@ -149,7 +149,7 @@ const CASES: Case[] = [
   },
 ];
 
-const cfg = resolveEmbedConfig(process.env);
+const cfg = resolveEmbedConfig(process.env as EmbedEnv);
 const norm = async (s: string) => ((await sql`SELECT normalize_entity_name(${s}) AS n`)[0] as { n: string | null }).n ?? "";
 
 async function scoreModel(model: string) {

@@ -187,6 +187,33 @@ jobs:
         working-directory: server-portable
         run: bunx tsc --noEmit
 
+      # db/ and evals/ import this server's modules and are the first callers to
+      # break when a shared signature moves, and until SMD-1932 nothing compiled
+      # them: SMD-1903 gave getEmbedding a required argument, the compiler fixed
+      # every server call site, and db/reembed.ts's provider probe kept the old
+      # one — at runtime the gate read `subject.kind` on undefined and the probe
+      # blamed the provider. Each directory has a tsconfig.json mirroring this
+      # one and pins @types/bun and typescript at the versions above. Both run
+      # in THIS job because their imports of ../server-portable/*.ts resolve
+      # through server-portable/node_modules, installed above; each installs its
+      # own lockfile for its types (and evals' LanceDB, whose types
+      # store-backends.ts imports). No database, no provider.
+      - name: Install the workers' pinned packages
+        working-directory: db
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck the workers, benches and suites
+        working-directory: db
+        run: bunx tsc --noEmit
+
+      - name: Install the evals' pinned packages
+        working-directory: evals
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck the evals
+        working-directory: evals
+        run: bunx tsc --noEmit
+
       # Proves the Cloudflare target still builds under the real Workers bundler.
       # Catches a dependency pulling in a node: builtin Workers cannot provide.
       - name: Cloudflare Workers build

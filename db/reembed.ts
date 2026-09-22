@@ -402,7 +402,7 @@ import {
   UPDATE_THOUGHT_SIGNATURE,
   validateEmbeddingConfig,
 } from "./config.mjs";
-import { createEmbedder, PROVIDER_ERROR_CHARS, ProviderError, resolveEmbedConfig } from "../server-portable/embed.ts";
+import { createEmbedder, PROVIDER_ERROR_CHARS, ProviderError, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { describeEgress, localKnob, mayLeaveBox, refusesEverything, ROW_UNITS } from "../server-portable/egress.ts";
 import { UUID_RE } from "../server-portable/store.ts";
 import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, reportLost, startHeartbeat } from "./lease.ts";
@@ -537,7 +537,7 @@ if (problems.length > 0) {
 }
 for (const w of embeddingConfigWarnings()) console.error(`  ⚠  ${w}`);
 
-const embedConfig = resolveEmbedConfig(process.env);
+const embedConfig = resolveEmbedConfig(process.env as EmbedEnv);
 // Not remembering a refusal: see "The head window, recorded" in the header.
 const embedder = createEmbedder(() => embedConfig, { rememberRefusal: false });
 

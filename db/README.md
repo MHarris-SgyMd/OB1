@@ -1330,7 +1330,17 @@ third covers the one thing the test image cannot reproduce.
 bun test-schema.ts                          # 1084 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts         # 591 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
+bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```
+
+The last line is the type check CI runs in the portable-server job (SMD-1932):
+`tsconfig.json` here mirrors `server-portable/tsconfig.json`, and `package.json`
+pins `@types/bun` and `typescript` at the server's versions. The workers,
+benches and suites import `../server-portable/*.ts` and are the first callers
+to break when a shared signature moves; before this nothing compiled them, and
+SMD-1903's required `subject` argument reached `reembed.ts`'s provider probe as
+a runtime error that blamed the provider. Run it after any edit here; it needs
+`bun install` in this directory and in `../server-portable`, and nothing else.
 
 `test-search-path.ts` relocates pgvector into a schema off the connection's
 `search_path` — how Supabase and several managed providers ship it, where
