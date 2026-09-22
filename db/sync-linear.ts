@@ -242,8 +242,21 @@ export function groupTicketRows(rows: BrainRow[]): Map<string, BrainRow[]> {
   for (const list of byIssue.values()) {
     list.sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? "") || a.id.localeCompare(b.id));
     const superseded = new Set(list.map((r) => r.supersedes).filter((s): s is string => s !== null));
-    // A stable sort: the unsuperseded rows first, each class still newest first.
-    list.sort((a, b) => Number(superseded.has(a.id)) - Number(superseded.has(b.id)));
+    const byId = new Map(list.map((r) => [r.id, r]));
+    // The order IS the chain: from each unsuperseded row (newest first) follow
+    // its pointers, so a group whose chain already stands comes back in the
+    // order desiredPointers would set and a pass writes nothing — where a sort
+    // by age below the head re-chained an unchanged board on every second pass
+    // and inverted a hand-set supersession between two twins (thirteenth review
+    // pass). A row no pointer reaches (a cycle's remainder) follows by age.
+    const ordered: BrainRow[] = [];
+    const seen = new Set<string>();
+    for (const start of list.filter((r) => !superseded.has(r.id))) {
+      let cur: BrainRow | undefined = start;
+      while (cur && !seen.has(cur.id)) { seen.add(cur.id); ordered.push(cur); cur = cur.supersedes ? byId.get(cur.supersedes) : undefined; }
+    }
+    for (const r of list) if (!seen.has(r.id)) ordered.push(r);
+    list.splice(0, list.length, ...ordered);
   }
   return byIssue;
 }
@@ -367,7 +380,7 @@ export function refusalClear(metadata: Record<string, unknown> | undefined): { t
 export class BoardConfigError extends Error {}
 
 // The client — the endpoint, the authorization rule, errors beside data — is
-// db/linear-api.ts, one definition with the corpus builder (third review pass; moved from evals/ by the fifth).
+// db/linear-api.ts, one definition with the corpus builder (SMD-1985's move; it began under this ticket's third review pass).
 
 /**
  * The projects of the named initiative — the board. Matched on the exact name,
@@ -489,6 +502,8 @@ export type PassReport = {
   errors: { identifier: string; error: string }[];
   /** Pointers the database refused while chaining twins — the ticket itself landed; the chain is as it was. */
   chainRefusals: { identifier: string; refusal: string }[];
+  /** Rows whose vector is the head window's, the provider having refused the whole text — reembed.ts --retry-fallbacks repairs them. */
+  headWindow: number;
   /** Issues left unwritten because the pass was asked to stop; the next pass finds them. */
   stopped?: number;
 };
@@ -496,8 +511,8 @@ export type PassReport = {
 export type Writer = {
   store: Pick<SqlStore, "captureThought" | "updateThought">;
   cfg: EmbedConfig;
-  /** The embedder's own shape (embed.ts), the three fields a write records. */
-  embed: (content: string, subject: EgressSubject) => Promise<Pick<EmbeddedCapture, "embedding" | "model" | "chunks">>;
+  /** The embedder's own shape (embed.ts): the three fields a write records, and the caveats it should say — a head-window vector standing in for the whole text, windows that went in without their blurb. */
+  embed: (content: string, subject: EgressSubject) => Promise<Pick<EmbeddedCapture, "embedding" | "model" | "chunks"> & Partial<Pick<EmbeddedCapture, "wholeContentFellBack" | "wholeContentError" | "contextFailures">>>;
   tags: (content: string, subject: EgressSubject) => Promise<Record<string, unknown>>;
   /** `content_fingerprint_of(text)` — the database's own rule, asked of the database. Null when it cannot be asked (a brain before 016), and the exact compare stands in. */
   fingerprintOf: (text: string) => Promise<string | null>;
@@ -623,7 +638,23 @@ async function chainRows(w: Writer, identifier: string, order: BrainRow[]): Prom
  * the ticket stale — visible in --audit, retried each pass at the cost of one
  * lookup — until the holder is edited or gone (fourth review pass).
  */
-export type SyncOutcome = { outcome: Outcome; noVector: boolean; twinsMarked: number; chainRefusal?: string };
+export type SyncOutcome = { outcome: Outcome; noVector: boolean; twinsMarked: number; chainRefusal?: string; headWindow?: boolean };
+
+/**
+ * What the embedder had to settle for, said on the line and counted in the
+ * report, as the server's capture reply and reembed.ts's claim row say it: a
+ * head-window vector standing in for a text the provider refused whole, and
+ * windows that went in without their blurb. Silent before (thirteenth review
+ * pass); reembed.ts --retry-fallbacks is the repair, and only a reader told can
+ * reach for it.
+ */
+function caveat(e: { wholeContentFellBack?: boolean; wholeContentError?: string; contextFailures?: number } | undefined): string {
+  if (!e) return "";
+  const parts: string[] = [];
+  if (e.wholeContentFellBack) parts.push(`the head window's vector stands in for the whole text (${e.wholeContentError ?? "no detail"}; reembed.ts --retry-fallbacks repairs it)`);
+  if (e.contextFailures) parts.push(`${e.contextFailures} chunk(s) without context`);
+  return parts.length ? ` — caveat: ${parts.join("; ")}` : "";
+}
 
 export async function syncIssue(w: Writer, issue: LinearIssue, rows: BrainRow[]): Promise<SyncOutcome> {
   const content = renderIssue(issue);
@@ -662,6 +693,21 @@ export async function syncIssue(w: Writer, issue: LinearIssue, rows: BrainRow[])
       g.embeddings.allowed ? w.embed(content, subject) : Promise.resolve(undefined),
       g.chat.allowed ? w.tags(content, subject) : Promise.resolve(metadataRefused()),
     ]);
+    // Asked once more, after the model calls: a row holding this text written
+    // meanwhile would take a wholesale merge of a fallback or a refusal marker
+    // over its real tags through upsert_thought's `existed` path; found here it
+    // takes the facets alone (thirteenth review pass). The window between this
+    // look and the write remains, and `existed` below says when it was hit.
+    const late = fp !== null ? await w.holderOf(fp) : null;
+    if (late) {
+      const patch = facetPatch(late.metadata ?? {}, facets);
+      if (patch) {
+        const r = await w.store.updateThought({ id: late.id, metadataPatch: patch, actor: w.actor });
+        if (!r.ok) throw new Error(`adopting ${late.id}: ${r.error}`);
+      }
+      w.log(`  · ${issue.identifier}: adopted ${late.id}, which took the text while the tags were extracted (${said(patch)})`);
+      return { outcome: "patched", noVector: false, twinsMarked: 0 };
+    }
     // The facets last: Linear's word on status and project beats a tag the model guessed.
     const captured = await w.store.captureThought({
       content,
@@ -672,13 +718,16 @@ export async function syncIssue(w: Writer, issue: LinearIssue, rows: BrainRow[])
       embeddingModel: embedded?.model,
     });
     if (captured.existed === true) {
-      // 035: the text was there after all (written between the holder lookup
-      // and this call, or unfingerprinted); the facets merged onto that row.
-      w.log(`  · ${issue.identifier}: adopted ${captured.id}, which already held the text (facets merged)`);
+      // 035: the text was there after all — written in the window after the
+      // second look — and the tag set went over that row's tags wholesale,
+      // which for a fallback or a refusal is the clobber tagsOverExisting
+      // prevents on the edit path. Said plainly, with the row, so the operator
+      // can look; the window is a race this tool cannot close from outside.
+      w.log(`  ! ${issue.identifier}: ${captured.id} took the text in the last instant; the fresh tags${"metadata_extraction_failed" in tags ? " (a FALLBACK set — check that row's tags)" : ""} and the facets merged onto it`);
       return { outcome: "patched", noVector: false, twinsMarked: 0 };
     }
-    w.log(`  + ${issue.identifier}: captured${embedded ? "" : " WITHOUT a vector (egress refused)"}`);
-    return { outcome: "captured", noVector: !embedded, twinsMarked: 0 };
+    w.log(`  + ${issue.identifier}: captured${embedded ? "" : " WITHOUT a vector (egress refused)"}${caveat(embedded)}`);
+    return { outcome: "captured", noVector: !embedded, twinsMarked: 0, headWindow: embedded?.wholeContentFellBack === true };
   }
 
   // The thought holding the new text, when none of this ticket's rows does. A
@@ -779,10 +828,15 @@ export async function syncIssue(w: Writer, issue: LinearIssue, rows: BrainRow[])
   // pass said the marker; the eleventh found the old tags still standing).
   const tags = tagsOverExisting(g.chat.allowed ? await w.tags(content, subject) : metadataRefused());
   const clearRefusal = refusalClear(head.metadata);
+  // Only what differs is sent, as the patch branch sends it: a merge would
+  // persist a `metadata_extraction_failed: null` key on every edited row that
+  // never carried a marker, and every facet whether it moved or not
+  // (thirteenth review pass).
+  const editPatch = facetPatch(head.metadata ?? {}, { ...tags, ...clearRefusal, ...facets });
   const r = await w.store.updateThought({
     id: head.id,
     content,
-    metadataPatch: { ...tags, ...clearRefusal, ...facets },
+    metadataPatch: editPatch ?? undefined,
     embedding: embedded?.embedding,
     chunks: embedded?.chunks,
     actor: actorWith(g.record),
@@ -791,10 +845,10 @@ export async function syncIssue(w: Writer, issue: LinearIssue, rows: BrainRow[])
   // The holder arrived between the lookup and the edit (or is unfingerprinted): the same refusal.
   if (!r.ok && r.error === "DUPLICATE_CONTENT") return refuse(null);
   if (!r.ok) throw new Error(`updating ${head.id}: ${r.error}`);
-  w.log(`  ~ ${issue.identifier}: updated${embedded ? "" : " WITHOUT a vector (egress refused)"}${patch ? ` (${said(patch)})` : ""}`);
+  w.log(`  ~ ${issue.identifier}: updated${embedded ? "" : " WITHOUT a vector (egress refused)"}${editPatch ? ` (${said(editPatch)})` : ""}${caveat(embedded)}`);
   // The twins' refusal markers too, as the patch branch does (eighth review pass).
   await clearRefusals();
-  return { outcome: "updated", noVector: !embedded, ...(await chain()) };
+  return { outcome: "updated", noVector: !embedded, headWindow: embedded?.wholeContentFellBack === true, ...(await chain()) };
 }
 
 /**
@@ -828,7 +882,12 @@ export async function planBoard(opts: { gql: Gql; readRows: ReadRows; initiative
   const claimed = await opts.readRows(scanFirst);
   let groups = groupTicketRows(claimed);
   let plan = planPass(census, groups, opts.full);
-  if (!scanFirst && plan.missing.length > 0) {
+  // …and when anything is to be fetched at all, not only when something is
+  // missing: a hand paste of an ADOPTED ticket whose text is not Linear's
+  // current text is found by no fingerprint, so a stale ticket's pass must see
+  // it to chain it (thirteenth review pass). A pass with nothing to fetch still
+  // pays the claimed read alone.
+  if (!scanFirst && plan.fetch.length > 0) {
     groups = groupTicketRows(await opts.readRows(true, claimed));
     plan = planPass(census, groups, opts.full);
   }
@@ -838,7 +897,7 @@ export async function planBoard(opts: { gql: Gql; readRows: ReadRows; initiative
 export async function runPass(opts: { gql: Gql; readRows: ReadRows; writer: Writer; initiative: string; full: boolean; only?: string[]; board?: Board }): Promise<PassReport> {
   const { initiative, projects, census, groups, plan } = await planBoard(opts);
   const tally: Record<Outcome, number> = { captured: 0, updated: 0, patched: 0, unchanged: 0, refused: 0 };
-  const report: PassReport = { initiative, projects: projects.length, census: census.length, plan, tally, twinsMarked: 0, noVector: 0, errors: [], chainRefusals: [] };
+  const report: PassReport = { initiative, projects: projects.length, census: census.length, plan, tally, twinsMarked: 0, noVector: 0, errors: [], chainRefusals: [], headWindow: 0 };
   let wanted = plan.fetch;
   if (opts.only) {
     const listed = new Set(census.map((c) => c.identifier));
@@ -856,6 +915,7 @@ export async function runPass(opts: { gql: Gql; readRows: ReadRows; writer: Writ
       report.twinsMarked += r.twinsMarked;
       if (r.noVector) report.noVector++;
       if (r.chainRefusal) report.chainRefusals.push({ identifier: issue.identifier, refusal: r.chainRefusal });
+      if (r.headWindow) report.headWindow++;
     } catch (e) {
       report.errors.push({ identifier: issue.identifier, error: (e as Error).message });
       opts.writer.log(`  ! ${issue.identifier}: ${(e as Error).message}`);
@@ -873,6 +933,7 @@ export function formatReport(r: PassReport, dryRun: boolean): string {
   ];
   if (r.tally.refused) lines.push(`  refused: ${r.tally.refused} ticket(s) whose text another thought holds (DUPLICATE_CONTENT) — facets patched, text left, stale until the holder moves`);
   if (r.chainRefusals.length) lines.push(`  chain refusals: ${r.chainRefusals.length} — ${r.chainRefusals.slice(0, 5).map((c) => `${c.identifier}: ${c.refusal}`).join("; ")}`);
+  if (r.headWindow) lines.push(`  head-window vectors: ${r.headWindow} row(s) the provider refused whole — reembed.ts --retry-fallbacks repairs them`);
   if (r.stopped) lines.push(`  stopped: ${r.stopped} issue(s) left for the next pass`);
   if (r.errors.length) lines.push(`  errors: ${r.errors.length} — ${r.errors.slice(0, 5).map((e) => `${e.identifier}: ${e.error}`).join("; ")}`);
   return lines.join("\n");
@@ -1047,7 +1108,8 @@ function selfCheck(): Promise<number> {
     ok(r.r.outcome === "unchanged" && r.calls.length === 0, "the same text up to whitespace is the same text — judged by fingerprint, as the database judges it (second review pass)");
     r = await run(recorder, [row("cur", text, { ...withFacets, status: "Done", status_type: "completed" }, null, null)], { ...issue, state: { name: "In Progress", type: "started" } });
     // The whole facet set over the tags: the recorder's tags carry `status: "a guess"`, which must not win (fourth review pass).
-    ok(r.r.outcome === "updated" && r.calls.join("; ") === "embed; tags; update cur content patch(metadata_extraction_failed,type,topics,status,source,issue,project,status_type,priority,labels,parent,url,linear_updated_at,archived_at) vec", `moved text: one embed, the tags extracted again, one edit with the vector, the tags (a stale marker nulled) and every facet over them (${r.calls.join("; ")})`);
+    // Thirteenth review pass: only what differs is sent — no `metadata_extraction_failed: null` persisted on a row that never carried a marker, no facet re-sent unchanged.
+    ok(r.r.outcome === "updated" && r.calls.join("; ") === "embed; tags; update cur content patch(type,topics,status,status_type) vec", `moved text: one embed, the tags extracted again, one edit with the vector, the tags and the facets that differ — every facet considered, only the moved ones sent (${r.calls.join("; ")})`);
     r = await run(recorder, [row("cur", text, { ...withFacets, status: "Done", status_type: "completed", metadata_extraction_failed: "provider_timeout", text_refused_by: "Z" }, null, null)], { ...issue, state: { name: "In Progress", type: "started" } });
     ok(r.calls[2]?.includes("metadata_extraction_failed") === true && r.calls[2]?.includes("text_refused_by") === true, `a stale failure marker and a stale refusal are nulled when the fresh tags arrive (${r.calls[2]})`);
     // A thought outside the group holds the new text: refused before any model call, the watermark not advanced, the holder named.
@@ -1064,7 +1126,9 @@ function selfCheck(): Promise<number> {
     const chatDenied: Writer = { ...recorder, cfg: resolveEmbedConfig({ OB1_LLM_LOCAL: "1", OB1_CHAT_BASE_URL: "https://chat.example.com/v1", OB1_CHAT_API_KEY: "k", OB1_EGRESS_POLICY: "deny" }) };
     r = await run(chatDenied, [row("cur", text, withFacets, null, null)], done);
     // Eleventh review pass: every tag key the refusal does not set is nulled, so the old text's people and action items do not stand on the new text.
-    ok(r.r.outcome === "updated" && r.calls.join("; ") === "embed; update cur content patch(people,action_items,dates_mentioned,topics,type,type_raw,metadata_extraction_failed,source,issue,project,status,status_type,priority,labels,parent,url,linear_updated_at,archived_at) vec", `chat refused on an edit: the vector lands, the tags are not called, the marker says why and the old tags are nulled (${r.calls.join("; ")})`);
+    ok(r.r.outcome === "updated" && r.calls.join("; ") === "embed; update cur content patch(metadata_extraction_failed,status,status_type,linear_updated_at) vec", `chat refused on an edit: the vector lands, the tags are not called, the marker says why; a row with no old tags gets no null keys (${r.calls.join("; ")})`);
+    r = await run(chatDenied, [row("cur", text, { ...withFacets, people: ["someone"], topics: ["old"], type: "task" }, null, null)], done);
+    ok(r.calls[1]?.includes("people") === true && r.calls[1]?.includes("topics") === true && r.calls[1]?.includes("type") === true, `…and a row with old tags has them nulled under the marker (${r.calls[1]})`);
     ok(JSON.stringify(tagsOverExisting({ type: "task", topics: ["t"], people: [] })) === JSON.stringify({ metadata_extraction_failed: null, type: "task", topics: ["t"], people: [] }), "a full answer through tagsOverExisting nulls a stale marker and keeps every tag (twelfth review pass)");
     ok(JSON.stringify(tagsOverExisting(metadataRefused())).includes('"type_raw":null'), "…and a refusal nulls the model's raw type too");
     ok(JSON.stringify(tagsOverExisting({ topics: ["uncategorized"], type: "observation", metadata_extraction_failed: "provider_timeout" })) === JSON.stringify({ people: null, action_items: null, dates_mentioned: null, type_raw: null, topics: ["uncategorized"], type: "observation", metadata_extraction_failed: "provider_timeout" }), "a fallback answer nulls the keys it does not set (type_raw among them) and keeps its own");
@@ -1149,6 +1213,27 @@ function selfCheck(): Promise<number> {
     calls.length = 0;
     try { await syncIssue(embedThrows, done, [row("cur", text, withFacets, null, null)]); } catch { threw = true; }
     ok(threw && calls.join("; ") === "embed", `an embedder that throws fails the edit before any chat call is paid for (${calls.join("; ")})`);
+    // Thirteenth review pass: the order below the head is the chain, so an unchanged board writes nothing on the pass after a re-chain and a hand-set twin order stands.
+    const chainBrain = fakeBrain({
+      H: { content: text, metadata: withFacets, supersedes: null, created_at: "2026-09-23T00:00:00Z" },
+      r1: { content: `${text} (older paste)`, metadata: {}, supersedes: "r2", created_at: "2026-09-21T00:00:00Z" },
+      r2: { content: `${text} (oldest paste)`, metadata: {}, supersedes: null, created_at: "2026-09-22T00:00:00Z" },
+    });
+    const chainWriter: Writer = { ...live, store: chainBrain.store, fingerprintOf: chainBrain.fingerprintOf, holderOf: chainBrain.holderOf };
+    const p1 = await syncIssue(chainWriter, issue, groupTicketRows(chainBrain.brainRows()).get("SMD-1936")!);
+    const w1 = chainBrain.writes.slice(); chainBrain.writes.length = 0;
+    const p2 = await syncIssue(chainWriter, issue, groupTicketRows(chainBrain.brainRows()).get("SMD-1936")!);
+    ok(p1.twinsMarked === 1 && w1.join("; ") === "update H supersedes=r1" && p2.twinsMarked === 0 && chainBrain.writes.length === 0 && chainBrain.rows.get("r1")!.supersedes === "r2",
+      `pass one chains the head onto the hand-set twins (H→r1→r2); the pass after writes nothing and the hand's r1→r2 stands (${w1.join("; ")} | ${chainBrain.writes.join("; ")})`);
+    ok(groupTicketRows([row("H", text, {}, "2026-09-23T00:00:00Z", "r1"), row("r2", text, {}, "2026-09-22T00:00:00Z", null), row("r1", text, {}, "2026-09-21T00:00:00Z", "r2")]).get("SMD-1936")!.map((x) => x.id).join(",") === "H,r1,r2", "grouping follows the pointers from the head, not the ages below it");
+    // A row that takes the text between the model calls and the write is adopted with the facets, not clobbered with a fallback tag set.
+    let looks = 0;
+    const lateWriter: Writer = { ...recorder, holderOf: async () => (++looks === 2 ? row("L", ` ${text}`, { type: "task", topics: ["real"] }, null, null) : null) };
+    r = await run(lateWriter, []);
+    ok(r.r.outcome === "patched" && r.calls.join("; ") === "embed; tags; update L patch(source,issue,project,status,status_type,priority,labels,url,linear_updated_at)", `a holder found on the second look takes the facets alone; its tags stand (${r.calls.join("; ")})`);
+    // A head-window vector is said and counted.
+    r = await run({ ...recorder, embed: async () => { calls.push("embed"); return { embedding: [1], model: "m", chunks: [], wholeContentFellBack: true, wholeContentError: "413" }; } }, []);
+    ok(r.r.headWindow === true, "a vector the provider refused whole is reported, not passed as a whole-text vector");
     // The set that builds the chain throws; the restore that follows it lands.
     const throwing: Writer["store"] = { captureThought: recorder.store.captureThought, updateThought: async (o) => { if (o.provenance?.supersedes === "N") { calls.push(`update ${o.id} supersedes=N → THROW`); throw new Error("connection reset"); } return recorder.store.updateThought(o); } };
     r = await run({ ...recorder, store: throwing }, [row("H", text, withFacets, "2026-09-23T00:00:00Z", "x"), row("N", text, {}, "2026-09-22T00:00:00Z", null)]);
@@ -1185,6 +1270,16 @@ function selfCheck(): Promise<number> {
     const repMixed = await runPass({ gql: board, readRows: async (scan) => { scans.push(scan); return mixed.brainRows().filter((r) => scan || "issue" in r.metadata); }, writer: mixedWriter, initiative: "Open Brain", full: false });
     ok(JSON.stringify(scans) === "[false,true]" && repMixed.tally.captured === 0 && repMixed.tally.patched === 1 && mixed.rows.get("H")!.metadata.issue === "SMD-1936" && mixed.rows.size === 2,
       `the hand capture is read on the second look and adopted, not captured beside (scans ${JSON.stringify(scans)}, ${JSON.stringify(repMixed.tally)})`);
+    // Thirteenth review pass: a STALE ticket's pass scans the headers too, so a later paste of an adopted ticket with a text that is not Linear's is chained, not left as a second answer.
+    const staleMixed = fakeBrain({
+      A: { content: text, metadata: { ...withFacets, linear_updated_at: "2026-09-22T00:30:00.000Z" }, supersedes: null, created_at: "2026-09-22T00:00:00Z" },
+      P: { content: renderIssue({ ...issue, state: { name: "Todo", type: "unstarted" } }), metadata: { source: "mcp" }, supersedes: null, created_at: "2026-09-23T00:00:00Z" },
+    });
+    const staleScans: boolean[] = [];
+    const staleWriter: Writer = { ...live, store: staleMixed.store, fingerprintOf: staleMixed.fingerprintOf, holderOf: staleMixed.holderOf, log: () => {} };
+    const repStale = await runPass({ gql: board, readRows: async (scan) => { staleScans.push(scan); return staleMixed.brainRows().filter((r) => scan || "issue" in r.metadata); }, writer: staleWriter, initiative: "Open Brain", full: false, only: ["SMD-1936"] });
+    ok(JSON.stringify(staleScans) === "[false,true]" && repStale.tally.patched === 1 && repStale.tally.updated === 0 && staleMixed.rows.get("A")!.supersedes === "P" && staleMixed.rows.get("P")!.supersedes === null,
+      `a stale ticket's pass reads the headers, patches the adopted holder of the current text and chains the later paste under it (scans ${JSON.stringify(staleScans)}, ${JSON.stringify(repStale.tally)}, P→${staleMixed.rows.get("P")!.supersedes}, A→${staleMixed.rows.get("A")!.supersedes})`);
     ok(rep.plan.unchanged === 1 && rep.tally.unchanged === 1 && rep.errors.length === 1 && /not in the census/.test(rep.errors[0].error) && rep.errors[0].identifier === "SMD-9999" && rep.tally.captured === 0,
       `--only fetches the named identifier though the plan calls it unchanged, and names the one the census lacks; the missing SMD-2000 is not touched (${JSON.stringify({ tally: rep.tally, errors: rep.errors })})`);
     let refusedProjects = false;
@@ -1310,7 +1405,16 @@ async function main(): Promise<void> {
         return null;
       }
     },
-    holderOf: async (fp) => { const [r] = await sql`SELECT ${rowColumns(sql)} FROM thoughts WHERE content_fingerprint = ${fp} LIMIT 1`; return (r as BrainRow | undefined) ?? null; },
+    // By the stored fingerprint, else by the rule computed over the rows 018
+    // left unfingerprinted (a NULL fingerprint, so a small set) — such a holder
+    // otherwise answered DUPLICATE_CONTENT only after the embed and the tags
+    // were paid for, every pass (thirteenth review pass).
+    holderOf: async (fp) => {
+      const [r] = await sql`SELECT ${rowColumns(sql)} FROM thoughts WHERE content_fingerprint = ${fp}
+        UNION ALL SELECT ${rowColumns(sql)} FROM thoughts WHERE content_fingerprint IS NULL AND content_fingerprint_of(content) = ${fp}
+        LIMIT 1`;
+      return (r as BrainRow | undefined) ?? null;
+    },
     actor: { name: ACTOR_NAME, via: SELF, session },
     dryRun,
     log: quiet ? () => {} : (line) => console.log(line),
