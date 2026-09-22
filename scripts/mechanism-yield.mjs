@@ -96,6 +96,10 @@
 
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
+// The commit-message grammar is defined once, in commit-grammar.mjs, and shared
+// with scripts/commitlint.config.mjs (SMD-1808) — importing it here rather than
+// keeping a second copy. Pure string work, no side effects at import.
+import { passNumber, isRunResult, bulletsOf, MECHANISMS, readTag, isReviewPass, REVIEW_RE, BOYSCOUT_RE, MERGE_RE } from "./commit-grammar.mjs";
 
 // ---------------------------------------------------------------------------
 // Arguments
@@ -260,25 +264,6 @@ function parseCommits(raw, fail = refuse) {
     });
 }
 
-const ORDINAL = "first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|eleventh|twelfth";
-// "Review, second pass" / "Review pass 4" / "Review, reproducibility pass" / "Second review pass".
-// The whole word "review" is required: "reviewed pass" and "the third pass was in flight" are not review passes.
-const REVIEW_RE = new RegExp(`\\breview\\b,? ?(?:\\w+ )?pass\\b|\\b(?:${ORDINAL}) review pass\\b`, "i");
-const BOYSCOUT_RE = /\bboyscout\b/i;
-const MERGE_RE = /^Merge\b/;
-const ORDINALS = { first: 1, second: 2, third: 3, fourth: 4, fifth: 5, sixth: 6, seventh: 7, eighth: 8, ninth: 9, tenth: 10, eleventh: 11, twelfth: 12 };
-
-// One alternation, so the LEFTMOST mention wins whichever spelling it uses: a
-// subject names its own pass first and an earlier one after ("Review pass 4:
-// the third pass's fix held"); trying the ordinal spelling first would read
-// that as pass 3.
-const PASS_RE = new RegExp(`\\b(?:pass (\\d+)|(${ORDINAL})(?: review)? pass)\\b`, "i");
-function passNumber(subject) {
-  const m = subject.match(PASS_RE);
-  if (m) return m[1] ? Number(m[1]) : ORDINALS[m[2].toLowerCase()];
-  if (/reproducibility|convergence/i.test(subject)) return 0; // named, not numbered
-  return null;
-}
 /**
  * The ticket a commit belongs to: the first ticket in the parenthetical the
  * subject ends with — "(SMD-1607)", and as twelve subjects in the log spell it
@@ -290,88 +275,9 @@ function passNumber(subject) {
  */
 const ticketOf = (subject, body) => subject.match(/\((SMD-\d+)[^()]*\)\s*$/)?.[1] ?? subject.match(/SMD-\d+/)?.[0] ?? body.match(/SMD-\d+/)?.[0] ?? "(none)";
 
-const BULLET_RE = /^\s*[-*] (.*)$/;
-const GREEN_HEAD_RE = /^\s*(green|all green|verified)\b/i;
-/** Only suite names and N/N counts: "Committed suite 500/500; test-schema 890/890 untouched." */
-function isRunResult(text) {
-  if (!/\b\d+\/\d+\b/.test(text)) return false;
-  const words = text.replace(/\S+\s+\d+\/\d+/g, " ").replace(/\b\d+\/\d+\b/g, " ").match(/[A-Za-z]{3,}/g) ?? [];
-  return words.length <= 3;
-}
-
-/**
- * Finding bullets of a commit body → { findings, skipped }, both lists, so a
- * bullet the run-result rules drop can be shown and judged. A bullet starts
- * with "- " or "* " at any indent and continues on following non-blank lines
- * until a blank line or the next bullet. Fenced code is skipped. Bullets under
- * a "Green …" or "Verified …" line, bullets that are only suite names and N/N
- * counts, and bullets of twelve characters or fewer are run results, counted
- * in `skipped` — unless the bullet carries a `(caught` tag, which makes it a
- * finding wherever it sits: a "Verified:" line may introduce tagged findings,
- * and a tagged bullet may quote the count that proved it.
- */
-function bulletsOf(body) {
-  const findings = [];
-  const skipped = [];
-  let cur = null;
-  let fenced = false;
-  let green = false;
-  const flush = () => {
-    if (cur === null) return;
-    const tagged = /\(caught/i.test(cur);
-    (!tagged && (green || isRunResult(cur) || cur.length <= 12) ? skipped : findings).push(cur);
-    cur = null;
-  };
-  for (const line of body.split("\n")) {
-    if (/^\s*```/.test(line)) {
-      flush();
-      fenced = !fenced;
-      continue;
-    }
-    if (fenced) continue;
-    if (/^Co-Authored-By:/i.test(line)) break;
-    if (line.trim() === "") {
-      flush();
-      green = false;
-      continue;
-    }
-    const start = line.match(BULLET_RE);
-    if (start) {
-      flush();
-      cur = start[1].trim();
-    } else if (cur !== null) {
-      cur += " " + line.trim();
-    } else if (GREEN_HEAD_RE.test(line)) {
-      green = true;
-    }
-  }
-  flush();
-  return { findings, skipped };
-}
-
 // ---------------------------------------------------------------------------
 // Classification
 // ---------------------------------------------------------------------------
-const MECHANISMS = ["cold-read", "run-it", "mutant", "walkthrough", "automated"];
-// Applied to the bullet's tail from its LAST "(caught": mechanism, an optional
-// held clause that may itself hold parentheses, the closing paren, an optional
-// period, end of bullet.
-const TAG_TAIL_RE = /^\((?:caught|caught-by):\s*([a-z_-]+)\s*(?:;\s*held(?:-by)?:\s*(.+?))?\s*\)\s*\.?\s*$/i;
-
-/**
- * Reads the `(caught: …; held: …)` tag off a bullet. Returns null when there is
- * no "(caught" at all; `{unparsed: true, head}` when there is one that does not
- * read — `head` is the finding before it, so the target is classified over the
- * finding and not over whatever the broken tag names.
- */
-function readTag(text) {
-  const idx = text.toLowerCase().lastIndexOf("(caught");
-  if (idx < 0) return null;
-  const m = text.slice(idx).match(TAG_TAIL_RE);
-  if (!m) return { unparsed: true, text, head: text.slice(0, idx).trim() };
-  const mechanism = m[1].toLowerCase();
-  return { mechanism, known: MECHANISMS.includes(mechanism), held: m[2]?.trim() ?? null, text: text.slice(0, idx).trim() };
-}
 
 // What was wrong. Precedence: a row that says it filed a ticket is `filed`
 // even if it also names a comment; a confirmation is not a defect even if it
@@ -570,7 +476,7 @@ if (SELF_CHECK) process.exit(selfCheck());
 // Build rows
 // ---------------------------------------------------------------------------
 const { commits, windowLabel } = readLog();
-const review = commits.filter((c) => REVIEW_RE.test(c.subject) && !MERGE_RE.test(c.subject) && !BOYSCOUT_RE.test(c.subject));
+const review = commits.filter((c) => isReviewPass(c.subject));
 const boyscout = commits.filter((c) => BOYSCOUT_RE.test(c.subject) && !MERGE_RE.test(c.subject));
 
 const rows = [];
