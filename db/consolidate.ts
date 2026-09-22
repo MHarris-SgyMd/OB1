@@ -85,7 +85,8 @@ import { SQL } from "bun";
 import { hostname } from "node:os";
 import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
-import { PROVIDER_ERROR_CHARS, refusesLength, resolveEmbedConfig } from "../server-portable/embed.ts";
+import { PROVIDER_ERROR_CHARS, ProviderError, refusesLength, resolveEmbedConfig } from "../server-portable/embed.ts";
+import { describeEgress, localKnob } from "../server-portable/egress.ts";
 import {
   cleanForDisplay, consolidateKey, judgePair, proposalVerdict, DEFAULT_CANDIDATES, DEFAULT_MIN_CONFIDENCE, DEFAULT_MIN_SIMILARITY,
   type Judgement,
@@ -202,6 +203,9 @@ console.log(`  job:    ${JOB}`);
 // value the resolver treats as unset (empty, or the metadata model's own name)
 // is the metadata model here too, however it was spelled.
 if (!REVIEW_ONLY) console.log(`  model:  ${cfg.judgeModel}${cfg.judgeModel !== cfg.metadataModel ? " (OB1_JUDGE_MODEL)" : " (the metadata model; OB1_JUDGE_MODEL gives the judge its own)"} via ${cfg.chat.base}, temperature ${cfg.metadataTemperature}; up to ${K} older neighbour(s) per thought at cosine >= ${MIN_SIM}, conflicts recorded at confidence >= ${MIN_CONFIDENCE}`);
+// What may leave the box (SMD-1903): a pair either row of which the gate
+// refuses is not judged, and the thought's claim fails naming the rule.
+if (!REVIEW_ONLY) console.log(`  egress: ${describeEgress(cfg.chat, cfg.egress, localKnob(cfg, "chat"))}`);
 
 // One connection per worker and one spare: the heartbeat (db/lease.ts) beats
 // through the pool, and a worker parked on a lock or a long statement holds
@@ -477,7 +481,7 @@ function progress(force = false): void {
 }
 
 /** A thought as read for judging: the text and 016's hash of it, taken together, so the proposal records what the judge saw. */
-type Row = { id: string; content: string; created_at: string | null; fingerprint: string };
+type Row = { id: string; content: string; created_at: string | null; fingerprint: string; metadata: Record<string, unknown> | null };
 type Candidate = { older_id: string; similarity: number; shared_entities: number };
 type Outcome = { outcome: "succeeded" } | { outcome: "failed"; error: string } | { outcome: "vanished" };
 
@@ -488,7 +492,7 @@ async function processRow(row: Row): Promise<Outcome> {
     return { outcome: "succeeded" };
   }
   const olders = (await sql`
-    SELECT id, content, created_at, content_fingerprint_of(content) AS fingerprint FROM thoughts
+    SELECT id, content, created_at, content_fingerprint_of(content) AS fingerprint, metadata FROM thoughts
     WHERE id = ANY(${sql.array(candidates.map((c) => c.older_id), "TEXT")}::uuid[])`) as Row[];
   const byId = new Map(olders.map((o) => [o.id, o]));
   const problems: string[] = [];
@@ -501,8 +505,8 @@ async function processRow(row: Row): Promise<Outcome> {
     const t0 = Date.now();
     let j: Judgement;
     try {
-      j = await judgePair({ content: older.content, createdAt: older.created_at },
-                          { content: row.content, createdAt: row.created_at },
+      j = await judgePair({ content: older.content, createdAt: older.created_at, metadata: older.metadata ?? undefined },
+                          { content: row.content, createdAt: row.created_at, metadata: row.metadata ?? undefined },
                           cfg, AbortSignal.timeout(TIMEOUT_S * 1000));
     } catch (e) {
       llmMs += Date.now() - t0;
@@ -510,6 +514,13 @@ async function processRow(row: Row): Promise<Outcome> {
       // else is the provider's and is classified by the caller.
       if ((e as Error).name === "TimeoutError" || /timed out/i.test((e as Error).message)) {
         problems.push(`pair with ${c.older_id}: timed out after ${TIMEOUT_S} s`);
+        continue;
+      }
+      // The egress gate refused a side of this pair (SMD-1903): a fact about
+      // these rows under this policy, recorded on the claim like a timeout,
+      // so the next pair is still judged and --retry-failed revisits the row.
+      if (e instanceof ProviderError && e.kind === "egress") {
+        problems.push(`pair with ${c.older_id}: ${e.message}`);
         continue;
       }
       throw e;
@@ -600,7 +611,7 @@ async function worker(n: number): Promise<void> {
         const ids = batch.map((b) => b.thought_id);
         hb.claimed(ids);
         const rows = (await sql`
-          SELECT id, content, created_at, content_fingerprint_of(content) AS fingerprint
+          SELECT id, content, created_at, content_fingerprint_of(content) AS fingerprint, metadata
             FROM thoughts WHERE id = ANY(${sql.array(ids, "TEXT")}::uuid[])`) as Row[];
         byId = new Map(rows.map((r) => [r.id, r]));
       } catch (e) {

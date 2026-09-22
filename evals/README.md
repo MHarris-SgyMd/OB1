@@ -9,6 +9,10 @@ are here so the decision is auditable and re-runnable when better models appear.
 - [Ollama](https://ollama.com) running locally (`brew install ollama; ollama serve`)
 - [Bun](https://bun.sh) 1.4+
 - The models you want to compare, pulled
+- `OB1_LLM_LOCAL=1` in the environment for the harnesses that dial through the
+  server's own resolver (`eval-consolidate`, `eval-entities`, `eval-graphrag`,
+  the chunking end-to-end): the egress gate (SMD-1903) refuses a thought's text
+  to an endpoint not declared local, and a loopback address is not a declaration
 
 ## Steps
 

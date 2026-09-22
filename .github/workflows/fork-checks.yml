@@ -361,6 +361,16 @@ jobs:
         env:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
 
+      # The egress gate (SMD-1903): under the default, deny, a thought's text
+      # never reaches an endpoint not declared local — zero requests at the
+      # stub, the capture lands without a vector and says why, a search is
+      # refused by name — and the second opinion can only refuse.
+      - name: Egress gate, deny by default
+        working-directory: server-portable
+        run: bun test-egress.ts
+        env:
+          DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
+
       # OB1_EMBEDDING_DIMENSIONS: the opt-in that makes a model wider than
       # pgvector's HNSW ceiling usable at all. Separate process because the server
       # snapshots the environment at boot, so the flag cannot be flipped mid-run.
@@ -494,11 +504,14 @@ jobs:
           # dials it — smoke.sh captures nothing and preflight runs without
           # --deep. The address is neither the code's default nor the compose
           # fallback, so the log line below can only come from this file
-          # (SMD-1843); the query log likewise.
+          # (SMD-1843); the query log likewise. OB1_LLM_LOCAL declares the
+          # endpoint to the egress gate (SMD-1903), which reads the flag and
+          # never the address; the log line below holds the forward.
           cat > .env <<EOF
           POSTGRES_PASSWORD=$(openssl rand -hex 24)
           MCP_ACCESS_KEYS=ci:write:$HASH
           OB1_LLM_BASE_URL=http://host.docker.internal:11434/v1
+          OB1_LLM_LOCAL=1
           OB1_QUERY_LOG=on
           SERVER_PORT=8010
           EOF
@@ -518,6 +531,7 @@ jobs:
         run: |
           LOG="$(docker compose -f compose.yaml logs --no-color server)"
           grep -E 'model provider +http://host\.docker\.internal:11434/v1\b.*\(local — no credential needed\)' <<<"$LOG"
+          grep -E 'embeddings egress +http://host\.docker\.internal:11434/v1 is declared local \(OB1_LLM_LOCAL\)' <<<"$LOG"
           grep -F 'ON (OB1_QUERY_LOG=on) here' <<<"$LOG"
           grep -F 'preflight OK' <<<"$LOG"
 

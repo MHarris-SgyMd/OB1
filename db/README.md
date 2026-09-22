@@ -474,7 +474,11 @@ bun reembed.ts --url … --retry-fallbacks     # …and the rows stored with a h
 ```
 
 It reads the same variables the server does — model, width, provider URL and
-key, chunk sizing, chunk context — through the same function
+key, chunk sizing, chunk context, and the egress gate's (`OB1_LLM_LOCAL`,
+`OB1_EGRESS_POLICY` and its terms, SMD-1903: a row the gate refuses to send to
+an endpoint not declared local is a failed claim naming the rule, its text never
+sent, and `--retry-failed` revisits it once the policy or the endpoint changes;
+the banner's `egress:` line says what the run will do) — through the same function
 (`server-portable/embed.ts`, lifted out of the server for exactly this reason),
 so what it stores is byte-for-byte what a capture would store. Each thought is
 re-embedded and written through `update_thought`, which replaces the chunk rows
@@ -769,6 +773,13 @@ bun extract-entities.ts --url … --retry-failed          # failed rows back int
 bun extract-entities.ts --url … --switch-key           # required when the model or prompt version differs from the recorded key
 ```
 
+**What may leave.** The egress gate (SMD-1903) reads each row's own
+`metadata` — `source`, `type`, `topics` — and its text against `OB1_EGRESS_POLICY`
+before the call; a row it refuses to send to a chat endpoint not declared local
+(`OB1_CHAT_LOCAL`, or `OB1_LLM_LOCAL` when chat is the embeddings endpoint) is a
+failed claim naming the rule, and the banner's `egress:` line says what the run
+will do before it claims anything.
+
 **The cost, stated up front.** One call to the metadata model per thought,
 recurring: every new capture is extracted too. On the default — Ollama,
 `qwen2.5:7b` — that is compute and latency on your own machine and nothing
@@ -875,7 +886,10 @@ are the worker's `--k` and `--min-sim`.
 
 **The judge.** One call per pair to the judge model — `OB1_JUDGE_MODEL`, else
 the metadata model, so the harder task can run on a stronger model than every
-capture's tagging (SMD-1901). `server-portable/consolidate.ts` holds the prompt: thought A (older) and B
+capture's tagging (SMD-1901) — and only for a pair BOTH rows of which the
+egress gate lets reach the chat endpoint (SMD-1903; the more restricted row
+decides for the pair, a refused pair is recorded on the claim like a timeout,
+and the banner's `egress:` line says what the run will do). `server-portable/consolidate.ts` holds the prompt: thought A (older) and B
 (newer), dated, and one question — agree, unrelated, or conflict, and for a
 conflict which is current, decided from what the texts say and not from the
 dates. A conflict whose texts do not say is recorded `conflict_undirected` for

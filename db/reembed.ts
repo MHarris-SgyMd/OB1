@@ -403,6 +403,7 @@ import {
   validateEmbeddingConfig,
 } from "./config.mjs";
 import { createEmbedder, PROVIDER_ERROR_CHARS, resolveEmbedConfig } from "../server-portable/embed.ts";
+import { describeEgress, localKnob } from "../server-portable/egress.ts";
 import { UUID_RE } from "../server-portable/store.ts";
 import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, reportLost, startHeartbeat } from "./lease.ts";
 
@@ -555,6 +556,10 @@ const refusalTtl: string | null = (() => {
 
 console.log(`  job:       ${JOB}`);
 console.log(`  embedding: ${embedConfig.embeddingModel} @ ${embedConfig.embeddingDim} dimensions, via ${embedConfig.embeddings.base}, ${embedConfig.timeoutMs / 1000} s per call`);
+// What may leave the box (SMD-1903): a row the gate refuses is a failed claim
+// naming the rule, retried by --retry-failed once the policy or the endpoint
+// changes; the text never went anywhere.
+console.log(`  egress:    ${describeEgress(embedConfig.embeddings, embedConfig.egress, localKnob(embedConfig, "embeddings"))}${embedConfig.chunkContext ? `; blurbs: ${describeEgress(embedConfig.chat, embedConfig.egress, localKnob(embedConfig, "chat"))}` : ""}`);
 console.log(`  chunks:    ${embedConfig.chunkTokens}-token windows above ${embedConfig.chunkThreshold} (${embedConfig.chunkTokensFrom === "window" ? `from ${embedConfig.embeddingModel}'s ${embedConfig.modelWindow}-token window` : embedConfig.chunkTokensFrom === "OB1_CHUNK_TOKENS" ? "OB1_CHUNK_TOKENS" : "the default, window unknown"}), overlap ${embedConfig.chunkOverlap}, context ${embedConfig.chunkContext ? `on (blurbs via ${embedConfig.chat.base})` : "off"}`);
 
 // One connection per worker and one spare: the heartbeat (db/lease.ts) beats
@@ -1433,7 +1438,7 @@ function progress(force = false): void {
  * that NULL as `p_if_unchanged_since` would disable the guard and let this pass
  * write a concurrent edit back to its old text.
  */
-type Row = { id: string; content: string; updated_at: Date };
+type Row = { id: string; content: string; updated_at: Date; metadata: Record<string, unknown> | null };
 
 /**
  * Embed and write one thought. Returns "succeeded" — with a caveat when the
@@ -1444,7 +1449,9 @@ type Outcome = { outcome: "succeeded"; caveat?: string } | { outcome: "failed"; 
 async function processRow(row: Row): Promise<Outcome> {
   let current = row;
   for (let attempt = 0; attempt < 3; attempt++) {
-    const embedded = await embedder.embedCapture(current.content);
+    // The row's own metadata is what the gate reads — source, type, topics —
+    // and an egress refusal throws out of here as a failed claim (SMD-1903).
+    const embedded = await embedder.embedCapture(current.content, { kind: "re-embed", metadata: current.metadata ?? undefined, content: current.content });
     const chunks = embedded.chunks.map((c) => ({ content: c.content, embedding: toVector(c.embedding), context: c.context ?? null }));
     const [r] = await sql`
       SELECT update_thought(
@@ -1524,7 +1531,7 @@ async function processRow(row: Row): Promise<Outcome> {
       // if_unchanged_since — and the text this worker holds is then no longer
       // the row's, so 018 judges it as a change into another row's text. The
       // re-read carries the current text and the next call is unchanged.
-      const [fresh] = (await sql`SELECT id, content, COALESCE(updated_at, created_at) AS updated_at FROM thoughts WHERE id = ${current.id}::uuid`) as Row[];
+      const [fresh] = (await sql`SELECT id, content, COALESCE(updated_at, created_at) AS updated_at, metadata FROM thoughts WHERE id = ${current.id}::uuid`) as Row[];
       if (!fresh) return { outcome: "vanished" };
       current = fresh;
       continue;
@@ -1562,7 +1569,7 @@ async function worker(n: number): Promise<void> {
         const ids = batch.map((b) => b.thought_id);
         hb.claimed(ids);
         const rows = (await sql`
-          SELECT id, content, COALESCE(updated_at, created_at) AS updated_at FROM thoughts WHERE id = ANY(${sql.array(ids, "TEXT")}::uuid[])`) as Row[];
+          SELECT id, content, COALESCE(updated_at, created_at) AS updated_at, metadata FROM thoughts WHERE id = ANY(${sql.array(ids, "TEXT")}::uuid[])`) as Row[];
         byId = new Map(rows.map((r) => [r.id, r]));
       } catch (e) {
         // A database error here is not about one thought. This worker stops;

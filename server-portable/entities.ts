@@ -22,7 +22,8 @@
  * module passes names through as the model gave them.
  */
 
-import type { EmbedConfig } from "./embed.ts";
+import { refuseEgress, type EmbedConfig } from "./embed.ts";
+import { mayLeaveBox, type EgressSubject } from "./egress.ts";
 
 /** Bumped when the prompt or the parsing rules change what gets stored. Part of the extraction key. */
 export const ENTITY_PROMPT_VERSION = 1;
@@ -195,8 +196,13 @@ export function extractionKey(model: string): string {
  * through embed.ts's resolver so the worker and the eval see the same values.
  * Throws on a transport or provider error; a malformed answer is returned with
  * `malformed: true` so the caller can count it rather than retry it blindly.
+ * `subject` is whose text this is — the row's metadata for the pass, the
+ * actor for a query — and the egress gate (egress.ts, SMD-1903) refuses
+ * before the request when it may not reach the chat endpoint.
  */
-export async function extractEntities(content: string, cfg: EmbedConfig, signal?: AbortSignal): Promise<Extraction> {
+export async function extractEntities(content: string, cfg: EmbedConfig, signal: AbortSignal | undefined, subject: EgressSubject): Promise<Extraction> {
+  const gate = mayLeaveBox({ ...subject, content }, cfg.chat, cfg.egress);
+  if (!gate.allowed) throw refuseEgress("Extraction", cfg.chat.base, gate);
   const r = await fetch(`${cfg.chat.base}/chat/completions`, {
     method: "POST",
     headers: cfg.chat.headers,

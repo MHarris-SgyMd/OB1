@@ -2168,6 +2168,7 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
     ...process.env,
     DATABASE_URL: URL_,
     OB1_LLM_BASE_URL: `http://127.0.0.1:${provider.port}/v1`,
+    OB1_LLM_LOCAL: "1", // declared to the egress gate (SMD-1903); the stub is on this box
     OB1_EMBEDDING_MODEL: "stub-embed",
     OB1_EMBEDDING_DIM: String(DIM),
     // The tarpit answers never; two seconds is what the run may wait for it.
@@ -2961,6 +2962,7 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
     ...process.env,
     DATABASE_URL: URL_,
     OB1_LLM_BASE_URL: `http://127.0.0.1:${model.port}/v1`,
+    OB1_LLM_LOCAL: "1",
     OB1_METADATA_MODEL: "stub-meta",
     OB1_WORKER_KEY: rawKey,
     MCP_ACCESS_KEYS: `entity-worker:write:${hashKey(rawKey)}`,
@@ -3526,6 +3528,7 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     ...process.env,
     DATABASE_URL: URL_,
     OB1_LLM_BASE_URL: `http://127.0.0.1:${judge.port}/v1`,
+    OB1_LLM_LOCAL: "1",
     OB1_METADATA_MODEL: "stub-judge",
     OB1_WORKER_KEY: rawKey,
     MCP_ACCESS_KEYS: `consolidator:write:${hashKey(rawKey)}`,

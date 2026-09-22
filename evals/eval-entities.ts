@@ -166,7 +166,7 @@ async function scoreModel(model: string) {
     const t0 = Date.now();
     let ex: Extraction;
     try {
-      ex = await extractEntities(cs.text, c, AbortSignal.timeout(120_000));
+      ex = await extractEntities(cs.text, c, AbortSignal.timeout(120_000), { kind: "extraction" });
     } catch (e) {
       // A thrown call is scored like a malformed answer — every labelled entity
       // missed — not skipped: a skipped case inflated recall while the header

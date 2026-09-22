@@ -81,6 +81,7 @@ import { hostname } from "node:os";
 import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import { PROVIDER_ERROR_CHARS, refusesLength, resolveEmbedConfig } from "../server-portable/embed.ts";
+import { describeEgress, localKnob } from "../server-portable/egress.ts";
 import { extractEntities, extractionKey, type Extraction } from "../server-portable/entities.ts";
 import { hashKey, parseKeyRecords } from "../server-portable/auth.ts";
 import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, reportLost, startHeartbeat } from "./lease.ts";
@@ -159,6 +160,9 @@ const JOB = flag("job") ?? extractionKey(cfg.metadataModel);
 
 console.log(`  job:    ${JOB}`);
 console.log(`  model:  ${cfg.metadataModel} via ${cfg.chat.base}, temperature ${cfg.metadataTemperature}`);
+// What may leave the box (SMD-1903): a row the gate refuses is a failed claim
+// naming the rule; its text never went anywhere, and --retry-failed revisits it.
+console.log(`  egress: ${describeEgress(cfg.chat, cfg.egress, localKnob(cfg, "chat"))}`);
 
 // One connection per worker and one spare: the heartbeat (db/lease.ts) beats
 // through the pool, and a worker parked on a lock or a long statement holds
@@ -362,7 +366,7 @@ function progress(force = false): void {
   );
 }
 
-type Row = { id: string; content: string; fingerprint: string | null };
+type Row = { id: string; content: string; fingerprint: string | null; metadata: Record<string, unknown> | null };
 type Outcome =
   | { outcome: "succeeded" }
   | { outcome: "failed"; error: string }
@@ -374,7 +378,9 @@ async function processRow(row: Row): Promise<Outcome> {
   const t0 = Date.now();
   let extraction: Extraction;
   try {
-    extraction = await extractEntities(row.content, cfg, AbortSignal.timeout(TIMEOUT_S * 1000));
+    // The row's own metadata is what the gate reads (SMD-1903); a refusal
+    // throws out of here as a failed claim naming the rule.
+    extraction = await extractEntities(row.content, cfg, AbortSignal.timeout(TIMEOUT_S * 1000), { kind: "extraction", metadata: row.metadata ?? undefined });
   } finally {
     llmMs += Date.now() - t0;
   }
@@ -486,7 +492,7 @@ async function worker(n: number): Promise<void> {
         const ids = batch.map((b) => b.thought_id);
         hb.claimed(ids);
         const rows = (await sql`
-          SELECT id, content, COALESCE(content_fingerprint, content_fingerprint_of(content)) AS fingerprint
+          SELECT id, content, COALESCE(content_fingerprint, content_fingerprint_of(content)) AS fingerprint, metadata
             FROM thoughts WHERE id = ANY(${sql.array(ids, "TEXT")}::uuid[])`) as Row[];
         byId = new Map(rows.map((r) => [r.id, r]));
       } catch (e) {
