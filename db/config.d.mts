@@ -73,7 +73,7 @@ export const EXTRACT_PROMPT_TOKENS: number;
 export const EXTRACT_OUTPUT_RATIO: number;
 /** Added to every output budget, for a short thought dense with names. */
 export const EXTRACT_OUTPUT_FLOOR: number;
-/** Tokens reserved for the `[Part i of n …]` marker a window carries. */
+/** Tokens reserved for what a window carries beside its text: the part marker and, when on, the header. */
 export const EXTRACT_MARKER_TOKENS: number;
 /** `max_tokens` for an extraction call over this many estimated tokens of thought text. */
 export function extractOutputBudget(inputTokens: number): number;

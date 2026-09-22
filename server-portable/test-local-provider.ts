@@ -460,6 +460,14 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
   assert(many.relations.length === 4 && many.relations.every((r) => r.to === "Open Brain" && r.relation === "works_on"), "the four works_on edges, one per window, all to the one subject");
   assert(many.parts?.length === reqs.length && many.parts.every((p, i) => p.index === i && p.entities.length === 2 && p.tokens <= 600 && p.ms >= 0), "the per-window record keeps what each call returned, in order, with its size and time");
 
+  // An over-estimate that chunk.ts packs into one window is the whole-thought
+  // path — no marker, no per-window record (third review pass).
+  reqs.length = 0;
+  const padded = `${" ".repeat(2500)}${short}`; // ~632 estimated tokens: over the 600 window, under the stub's 700 ceiling
+  assert(estimateTokens(padded) > 600, "the padded thought over-estimates past the window");
+  const one2 = await extractEntities(padded, cfgD, undefined, { kind: "extraction" });
+  assert(reqs.length === 1 && one2.windows === 1 && one2.parts === undefined && reqs[0].part === undefined, "…and is one unmarked call with no per-window record");
+
   // One window answering prose fails the thought, not the window.
   reqs.length = 0;
   prose = true;

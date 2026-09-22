@@ -203,6 +203,9 @@ export const RUNAWAY_PENALTY = 0.5;
  * it as a runaway — second review pass.
  */
 export function reasoningOn(cfg: EmbedConfig): boolean {
+  // A missing key IS reasoning on: embed.ts sends `{}` for
+  // OB1_METADATA_REASONING=on — the provider's default, which for a thinking
+  // model is to think — and `reasoning_effort: "none"` for off, the default.
   return cfg.metadataReasoning.reasoning_effort !== "none";
 }
 
@@ -227,7 +230,7 @@ export function describeExtractWindow(cfg: EmbedConfig): string {
   const n = cfg.extractChunkTokens;
   const rule = `thoughts over ${n} estimated tokens are extracted in ${n}-token windows (overlap ${cfg.extractChunkOverlap}${cfg.extractHeader ? ", each after the first led by the note's opening line" : ""})`;
   const ctx = cfg.extractModelWindow !== undefined
-    ? `${cfg.metadataModel}'s ${cfg.extractModelWindow}-token served context`
+    ? `${cfg.metadataModel}'s ${cfg.extractModelWindow}-token served context${cfg.extractChunkTokensUnfit ? ", which holds no window beside the rules and an answer" : ""}`
     : `${cfg.metadataModel}'s served context, which db/config.mjs's KNOWN_CHAT_MODEL_WINDOW does not list`;
   const w = windowingFor(cfg);
   const retry = !w.outputBudget
@@ -410,11 +413,13 @@ export function extractionKey(model: string): string {
  * (SMD-1879): an answer that does not converge ends at the budget as a
  * malformed answer — visible, retryable — not at the context's end.
  */
-async function extractOnce(text: string, cfg: EmbedConfig, timeoutMs: number | undefined, part: { index: number; of: number; header?: string } | undefined, budget: boolean, retry = false): Promise<Extraction & { runaway: boolean }> {
+async function extractOnce(text: string, cfg: EmbedConfig, timeoutMs: number, part: { index: number; of: number; header?: string } | undefined, budget: boolean, retry = false): Promise<Extraction & { runaway: boolean }> {
   const r = await fetch(`${cfg.chat.base}/chat/completions`, {
     method: "POST",
     headers: cfg.chat.headers,
-    signal: timeoutMs === undefined ? undefined : AbortSignal.timeout(timeoutMs),
+    // Always a deadline (third review pass narrowed the type): with Bun's idle
+    // cut below disabled, a call without one would wait for ever.
+    signal: AbortSignal.timeout(timeoutMs),
     // Bun's fetch has its own 300 s idle timeout, and a chat completion that
     // is not streamed is silent until it ends — so the worker's --timeout 900
     // was 300 whatever it said (measured for SMD-1879: a 330 s signal against
@@ -446,10 +451,16 @@ async function extractOnce(text: string, cfg: EmbedConfig, timeoutMs: number | u
   return { ...parseExtraction(answer), runaway };
 }
 
-/** extractOnce, and once more with the penalty when the windowing says so and the first answer ran to its budget. */
-async function extractCall(text: string, cfg: EmbedConfig, timeoutMs: number | undefined, part: { index: number; of: number; header?: string } | undefined, w: ExtractWindowing): Promise<Omit<Extraction, "retried"> & { runaway: boolean; retried: boolean }> {
+/**
+ * extractOnce, and once more with the penalty when the windowing says so and
+ * the first answer ran to its budget. `onCall` is told of every call BEFORE
+ * it is made, so a retry that throws is still counted (third review pass).
+ */
+async function extractCall(text: string, cfg: EmbedConfig, timeoutMs: number, part: { index: number; of: number; header?: string } | undefined, w: ExtractWindowing, onCall: () => void): Promise<Omit<Extraction, "retried"> & { runaway: boolean; retried: boolean }> {
+  onCall();
   const first = await extractOnce(text, cfg, timeoutMs, part, w.outputBudget);
   if (!(w.retryRunaway && first.runaway && first.malformed)) return { ...first, retried: false };
+  onCall();
   const second = await extractOnce(text, cfg, timeoutMs, part, w.outputBudget, true);
   return { ...second, retried: true };
 }
@@ -472,16 +483,19 @@ export async function extractEntities(content: string, cfg: EmbedConfig, timeout
   // one would wait for ever on a provider that never answers (second review
   // pass). OB1_LLM_TIMEOUT is the deadline the callers that pass none get.
   const deadline = timeoutMs ?? cfg.timeoutMs;
+  // One window is the whole thought: chunk.ts can pack an over-estimate
+  // (leading whitespace, say) into a single window, and that is not a
+  // windowed thought — no marker, no `parts` (third review pass).
   const windows = chunkContent(content, { maxTokens: windowing.windowTokens, overlapTokens: windowing.overlapTokens });
-  // The calls made before a throw ride on the error (`callsMade`), so the
-  // worker's and the eval's call counts include a thought that timed out in
-  // its fourth window (second review pass).
+  // The calls made before a throw ride on the error (`callsMade`), counted as
+  // each is made, so the worker's and the eval's call counts include a thought
+  // that timed out in its fourth window or on a retry (second and third review
+  // passes).
   let made = 0;
-  const count = (retried: boolean) => { made += retried ? 2 : 1; };
+  const onCall = () => { made++; };
   try {
-    if (windows.length === 0) {
-      const { runaway: _r, retried, ...one } = await extractCall(content, cfg, deadline, undefined, windowing);
-      count(retried);
+    if (windows.length <= 1) {
+      const { runaway: _r, retried, ...one } = await extractCall(content, cfg, deadline, undefined, windowing, onCall);
       return { ...one, retried: retried || undefined };
     }
     const header = windowing.header ? documentHeader(content) : undefined;
@@ -489,15 +503,13 @@ export async function extractEntities(content: string, cfg: EmbedConfig, timeout
     let retriedAny = false;
     for (const w of windows) {
       const t0 = Date.now();
-      const ex = await extractCall(w.content, cfg, deadline, { index: w.index, of: windows.length, header }, windowing);
-      count(ex.retried);
+      const ex = await extractCall(w.content, cfg, deadline, { index: w.index, of: windows.length, header }, windowing, onCall);
       retriedAny ||= ex.retried;
       parts.push({ index: w.index, tokens: estimateTokens(w.content), entities: ex.entities, relations: ex.relations, rejected: ex.rejected, malformed: ex.malformed, retried: ex.retried || undefined, ms: Date.now() - t0 });
     }
     return { ...mergeExtractions(parts), retried: retriedAny || undefined };
   } catch (e) {
-    // The call that threw was made too.
-    (e as Error & { callsMade?: number }).callsMade = made + 1;
+    (e as Error & { callsMade?: number }).callsMade = made;
     throw e;
   }
 }

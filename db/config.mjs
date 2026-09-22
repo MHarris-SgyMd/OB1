@@ -319,8 +319,8 @@ export const KNOWN_CHAT_MODEL_WINDOW = {
 export const EXTRACT_PROMPT_TOKENS = 398;
 export const EXTRACT_OUTPUT_RATIO = 2;
 export const EXTRACT_OUTPUT_FLOOR = 256;
-/** The `[Part i of n of a longer note]` marker a window carries (entities.ts buildMessages), with room over its ~12 tokens. */
-export const EXTRACT_MARKER_TOKENS = 24;
+/** What a window carries inside the delimiter besides the text: the `[Part i of n …]` marker (~12 tokens) and, with EXTRACT_WINDOW_HEADER on, the note's first 200 characters (~50) — reserved whether or not the header is on, so the arithmetic holds for both (third review pass). */
+export const EXTRACT_MARKER_TOKENS = 80;
 
 /**
  * The most thought text one extraction call can carry in a served context of
@@ -379,8 +379,8 @@ export function extractOutputBudget(inputTokens) {
  * measured to extract reliably (chunk.ts's DEFAULT_EXTRACT_WINDOW_TOKENS,
  * passed in because this file cannot import it under Node); a model the table
  * does not know gets `fallback`. So a 32,768-token model derives the fallback
- * (its context would hold 10,696 and the cap holds it to what the model was
- * measured to finish), a 4,096-token one 1,139, a 2,048-token one 456, where
+ * (its context would hold 10,678 and the cap holds it to what the model was
+ * measured to finish), a 4,096-token one 1,120, a 2,048-token one 438, where
  * the fallback's text plus its answer would not fit its context at all. One
  * rule for the worker, the evals and preflight, which names the source it
  * reports; `capped` says the context would have allowed more. Not the

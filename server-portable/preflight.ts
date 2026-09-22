@@ -248,10 +248,20 @@ add("metadata model", "ok", metaModel);
   // answer floor and the part marker, and recommended a value that requested
   // 280 tokens more than the context.
   const fits = extractCfg.extractModelWindow !== undefined ? extractWindowThatFits(extractCfg.extractModelWindow) : undefined;
-  if (fits !== undefined && fits < EXTRACT_MIN_WINDOW_TOKENS && extractCfg.extractChunkTokensFrom === "default") {
+  // A context that holds no window is a fact about the model whatever the
+  // knob says (third review pass: with the knob set, the branch below
+  // recommended a negative size). `unfit` is the resolver's answer for the
+  // derived path; the same arithmetic decides the explicit one.
+  if (fits !== undefined && fits < EXTRACT_MIN_WINDOW_TOKENS) {
     add("extraction window", "warn",
-        `${metaModel}'s ${extractCfg.extractModelWindow}-token served context holds under ${EXTRACT_MIN_WINDOW_TOKENS} tokens of thought text beside the rules and an answer — no window fits it; the default ${extractCfg.extractChunkTokens} is in force and every windowed call will be truncated or refused`,
+        `${metaModel}'s ${extractCfg.extractModelWindow}-token served context holds under ${EXTRACT_MIN_WINDOW_TOKENS} tokens of thought text beside the rules and an answer — no window fits it; ${extractCfg.extractChunkTokensUnfit ? `the default ${extractCfg.extractChunkTokens} is in force` : `OB1_EXTRACT_CHUNK_TOKENS=${extractCfg.extractChunkTokens} cannot fit either`} and every extraction call will be truncated or refused`,
         `Serve the model with a larger context (a Modelfile's num_ctx, or the provider's setting), or set OB1_METADATA_MODEL to one that has it.`);
+  } else if (extractCfg.extractChunkTokensFrom === "OB1_EXTRACT_CHUNK_TOKENS" && extractCfg.extractChunkTokens < EXTRACT_MIN_WINDOW_TOKENS) {
+    // The explicit path had no floor (third review pass): a 1-token window is
+    // one model call per word.
+    add("extraction window", "warn",
+        `OB1_EXTRACT_CHUNK_TOKENS=${extractCfg.extractChunkTokens} is under ${EXTRACT_MIN_WINDOW_TOKENS} tokens — a window that small is one model call per few words of every thought`,
+        `Set OB1_EXTRACT_CHUNK_TOKENS at or above ${EXTRACT_MIN_WINDOW_TOKENS}, or unset it to derive the window from the model's context.`);
   } else if (extractCfg.extractChunkTokensFrom === "OB1_EXTRACT_CHUNK_TOKENS" && fits !== undefined && extractCfg.extractChunkTokens > fits) {
     add("extraction window", "warn",
         `OB1_EXTRACT_CHUNK_TOKENS=${extractCfg.extractChunkTokens} — a window that long, its answer budget and the rules do not fit ${metaModel}'s ${extractCfg.extractModelWindow}-token served context; the call is truncated or refused`,

@@ -286,24 +286,24 @@ console.log("\n[8b] A long thought's windows merge to one answer, the window fol
   // (first review pass: a bare arithmetic assertion here tested the constants,
   // and the uncapped branch — Math.min, capped — was exercised by no test). The
   // table is a plain object, so a 2,048-token model is planted and removed:
-  // it derives 456 — the context less the rules, the part marker and the
+  // it derives 438 — the context less the rules, the marker reserve and the
   // answer floor, divided among the text and its answer at the output ratio —
   // where the default's text plus its answer would not fit at all.
   KNOWN_CHAT_MODEL_WINDOW["test-2048-context"] = 2048;
   try {
     const small2048 = resolveExtractWindow(undefined, "test-2048-context", DEFAULT_EXTRACT_WINDOW_TOKENS);
-    assert(JSON.stringify(small2048) === JSON.stringify({ tokens: 456, from: "window", window: 2048, capped: false, unfit: false }), `a 2,048-token context derives 456, uncapped and fit (${JSON.stringify(small2048)})`);
-    assert(extractWindowThatFits(2048) === 456 && extractContextNeeded(456) <= 2048 && extractContextNeeded(457) > 2048, "…the most that fits: one token more would not");
-    assert(resolveExtractWindow(undefined, "test-2048-context:q4", DEFAULT_EXTRACT_WINDOW_TOKENS).tokens === 456, "…found under its Ollama tag too");
+    assert(JSON.stringify(small2048) === JSON.stringify({ tokens: 438, from: "window", window: 2048, capped: false, unfit: false }), `a 2,048-token context derives 438, uncapped and fit (${JSON.stringify(small2048)})`);
+    assert(extractWindowThatFits(2048) === 438 && extractContextNeeded(438) <= 2048 && extractContextNeeded(439) > 2048, "…the most that fits: one token more would not");
+    assert(resolveExtractWindow(undefined, "test-2048-context:q4", DEFAULT_EXTRACT_WINDOW_TOKENS).tokens === 438, "…found under its Ollama tag too");
   } finally {
     delete KNOWN_CHAT_MODEL_WINDOW["test-2048-context"];
   }
-  assert(resolveExtractWindow(undefined, "qwen2.5:7b", DEFAULT_EXTRACT_WINDOW_TOKENS).capped === true && extractWindowThatFits(32768) === 10696,
-         "qwen2.5:7b is capped: its context would hold 10,696");
-  assert(extractContextNeeded(DEFAULT_EXTRACT_WINDOW_TOKENS) === 4278, "the default window needs a 4,278-token context: 398 + 24 + 256 + 3 × 1200");
+  assert(resolveExtractWindow(undefined, "qwen2.5:7b", DEFAULT_EXTRACT_WINDOW_TOKENS).capped === true && extractWindowThatFits(32768) === 10678,
+         "qwen2.5:7b is capped: its context would hold 10,678");
+  assert(extractContextNeeded(DEFAULT_EXTRACT_WINDOW_TOKENS) === 4334, "the default window needs a 4,334-token context: 398 + 80 + 256 + 3 × 1200");
   assert(extractOutputBudget(414) === 414 * EXTRACT_OUTPUT_RATIO + EXTRACT_OUTPUT_FLOOR && extractOutputBudget(0) === EXTRACT_OUTPUT_FLOOR,
          "the answer budget is the ratio times the text plus the floor, and a text of nothing still has the floor");
-  assert(EXTRACT_PROMPT_TOKENS + EXTRACT_MARKER_TOKENS + 10696 + extractOutputBudget(10696) <= 32768, "…and a call at the window that fits requests no more than the context");
+  assert(EXTRACT_PROMPT_TOKENS + EXTRACT_MARKER_TOKENS + 10678 + extractOutputBudget(10678) <= 32768, "…and a call at the window that fits requests no more than the context");
   assert(resolveEmbedConfig({ OB1_METADATA_MODEL: "qwen2.5:7b", OB1_EXTRACT_CHUNK_TOKENS: "1.5" }).extractChunkTokens === 1, "a fractional knob is floored, not passed through to a 1.5-token window");
   // A context too small for any window (second review pass: the floor was a
   // 1-token window, one call per word). The default is returned, marked
@@ -313,18 +313,21 @@ console.log("\n[8b] A long thought's windows merge to one answer, the window fol
   try {
     const tiny = resolveExtractWindow(undefined, "test-512-context", DEFAULT_EXTRACT_WINDOW_TOKENS);
     assert(tiny.tokens === DEFAULT_EXTRACT_WINDOW_TOKENS && tiny.from === "default" && tiny.unfit === true && tiny.window === 512, `a 512-token context is unfit: the default, flagged, not a 1-token window (${JSON.stringify(tiny)})`);
-    assert(resolveEmbedConfig({ OB1_METADATA_MODEL: "test-512-context" }).extractChunkTokens === DEFAULT_EXTRACT_WINDOW_TOKENS && !resolveEmbedConfig({ OB1_METADATA_MODEL: "test-512-context" }).extractChunkTokensCapped, "…and the resolver's capped flag is false for it");
+    const tinyCfg = resolveEmbedConfig({ OB1_METADATA_MODEL: "test-512-context" });
+    assert(tinyCfg.extractChunkTokens === DEFAULT_EXTRACT_WINDOW_TOKENS && !tinyCfg.extractChunkTokensCapped && tinyCfg.extractChunkTokensUnfit, "…and the resolver's flags ride on the configuration: not capped, unfit");
+    assert(describeExtractWindow(tinyCfg).includes("which holds no window beside the rules and an answer"), "…and the sentence says the context holds no window");
+    assert(!resolveEmbedConfig({ OB1_METADATA_MODEL: "test-512-context", OB1_EXTRACT_CHUNK_TOKENS: "300" }).extractChunkTokensUnfit, "an explicit knob is never 'unfit' — preflight judges it against the same arithmetic");
   } finally {
     delete KNOWN_CHAT_MODEL_WINDOW["test-512-context"];
   }
-  KNOWN_CHAT_MODEL_WINDOW["test-4278-context"] = 4278;
+  KNOWN_CHAT_MODEL_WINDOW["test-4334-context"] = 4334;
   try {
-    const exact = resolveEmbedConfig({ OB1_METADATA_MODEL: "test-4278-context" });
+    const exact = resolveEmbedConfig({ OB1_METADATA_MODEL: "test-4334-context" });
     assert(exact.extractChunkTokens === DEFAULT_EXTRACT_WINDOW_TOKENS && exact.extractChunkTokensFrom === "window" && exact.extractChunkTokensCapped === false, "a context that yields exactly the default is not 'held' — capped is the resolver's answer, not the size's");
     assert(!describeExtractWindow(exact).includes("held at"), "…and the sentence does not say so");
     assert(qwen.extractChunkTokensCapped === true && describeExtractWindow(qwen).includes("held at 1200"), "…where qwen2.5:7b's context would hold more, and the sentence says held");
   } finally {
-    delete KNOWN_CHAT_MODEL_WINDOW["test-4278-context"];
+    delete KNOWN_CHAT_MODEL_WINDOW["test-4334-context"];
   }
 
   // Reasoning on: max_tokens would cap the thinking and the answer together,
