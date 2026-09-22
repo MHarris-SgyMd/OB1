@@ -28,6 +28,14 @@
 
 name: open-brain
 
+# The one place the Ollama image is named: the model server and the pull job
+# below run the same image, so a bump is one edit (the fork's recurring defect
+# is a value defined twice). Pinned to a release, not `:latest`, for the reason
+# postgres is: a floating tag moves under a working deployment. The release job
+# resolves this tag to a digest and writes `ollama/ollama@sha256:…` into the
+# release's compose overlay (SMD-1860; deploy/README.md, "Pinning a release").
+x-ollama-image: &ollama-image ollama/ollama:0.34.3
+
 services:
   # Replaces: the Supabase-hosted Postgres.
   #
@@ -85,11 +93,18 @@ services:
 
   # Replaces: pasting SQL into the Supabase dashboard's SQL editor.
   # Runs to completion, then exits. The server waits for it.
+  #
+  # Built from db/Dockerfile — the ob1-migrate image the release job publishes
+  # per tag beside ob1-server (SMD-1860) — rather than run off a read-only mount
+  # of the checkout's db/ on a stock Bun image, so a release's compose overlay
+  # pulls the migrator that wrote the schema_version its server checks, on a
+  # machine with no checkout, and this stack and a pinned one run the same
+  # bytes. Root context, as server's: migrate.ts imports db/config.mjs, and the
+  # root .dockerignore keeps the context to what the two images need.
   migrate:
-    image: oven/bun:1.4.0-alpine
-    working_dir: /app
-    volumes:
-      - ../db:/app:ro
+    build:
+      context: ..
+      dockerfile: db/Dockerfile
     environment:
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@postgres:5432/openbrain
       # The vector width is baked into the schema here and cannot change later
@@ -113,11 +128,6 @@ services:
       # is one batch, for a brain with millions of legacy rows that finishes by
       # hand (023's header). Same no-fallback rule as above.
       OB1_BACKFILL_LIMIT: ${OB1_BACKFILL_LIMIT:-}
-    # No `bun install`: migrate.ts imports only Bun built-ins and node: modules.
-    # The one dependency in db/package.json is pglite, used solely by the tests.
-    # This also keeps the mount read-only — `bun install` would need to write
-    # node_modules into it, which fails on a clean checkout.
-    command: ["bun", "migrate.ts"]
     depends_on:
       postgres:
         condition: service_healthy
@@ -250,7 +260,7 @@ services:
   # credential is sent to it. With this running, nothing about a captured
   # thought leaves the host.
   ollama:
-    image: ollama/ollama:latest
+    image: *ollama-image
     profiles: ["local-models"]
     volumes:
       - ollama:/root/.ollama
@@ -268,7 +278,7 @@ services:
   # Pulls the two models — three when OB1_JUDGE_MODEL names one — then exits.
   # First run downloads a few hundred MB.
   ollama-pull:
-    image: ollama/ollama:latest
+    image: *ollama-image
     profiles: ["local-models"]
     depends_on:
       ollama:

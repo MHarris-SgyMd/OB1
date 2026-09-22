@@ -86,10 +86,15 @@ fragments in merge order — when each arrived on the branch's first-parent line
 the merge that brought it — writes each as the next `NNN-<slug>.md` with its
 `# N. <title>` heading, removes the fragment, regenerates FORK.md's index with
 `scripts/fork-index.ts`, writes the `CHANGELOG.md` section and appends to
-`releases.json`, which freezes the shas of the migrations in the range. It runs
-check 16's rules first and refuses what CI would; `--write` needs the repository
-(a full clone, not a shallow one), a clean tree and committed fragments. FORK.md's
-"Versioning" section has the scheme.
+`releases.json`, which freezes the shas of the migrations in the range and records
+the change numbers. It runs check 16's rules first and refuses what CI would;
+`--write` needs the repository (a full clone, not a shallow one), a clean tree,
+committed fragments, and a tree that already says the version — `FORK_VERSION`
+bumped and a `NNN_schema_version.sql` writing it as the highest migration, the
+cut's first commit (SMD-1860). The PR lands both commits; the tag on the merge
+commit runs `.github/workflows/release.yml`, which publishes the images and the
+release, the numbered change files attached. FORK.md's "Versioning" section has
+the scheme and the cut.
 
 ## History
 

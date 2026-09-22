@@ -16,6 +16,8 @@ export interface Release {
   upstream: string;
   date: string;
   tickets?: string[];
+  /** The change numbers this cut assigned, first and last (SMD-1860); the release job attaches those files. */
+  changes?: [number, number];
   /** Absent for a docs/server-only cut that closed no migration range. */
   frozenShas?: Record<string, string>;
 }
@@ -40,3 +42,6 @@ export function versionForMigration(n: number | string, releases?: Release[]): s
 
 /** The last released range's upper bound, or 0 when nothing is released. */
 export function highestReleasedMigration(releases?: Release[]): number;
+
+/** The schema_version literal a migration template upserts into ob1_config, or null when it writes none. */
+export function schemaVersionValue(template: string): string | null;

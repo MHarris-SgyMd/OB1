@@ -28,18 +28,29 @@
  *
  * The pieces this computes — the next version, the change numbering, the section
  * and changelog rendering, the frozen shas over the new migration range — are pure
- * functions, self-checked below. --write is the glue that applies them; it is what
- * SMD-1805's release job invokes, and is never run in CI's checks.
+ * functions, self-checked below. --write is the glue that applies them; a
+ * maintainer runs it on a branch, and it is never run in CI's checks.
+ *
+ * A cut is two commits on one branch, in this order (SMD-1860): first the version
+ * — the dry run names it — bumped in db/version.mjs's FORK_VERSION and written by
+ * a new `NNN_schema_version.sql` upserting it, the highest migration on disk, so
+ * the range this cut freezes ends on the migration that names the release and a
+ * brain that applies the range reports the version (check 17d holds the two
+ * equal; db/README.md's map and the suites' migration counts move with it); then
+ * --write, which refuses a tree whose FORK_VERSION or highest migration does not
+ * say the version it is about to record. The PR lands the two; the maintainer
+ * tags the merge commit `v<core>` and pushes the tag, and
+ * .github/workflows/release.yml publishes the images and the release from it.
  *
  * Not this script's job: creating the git tag or the GitHub release, or publishing
- * images. Those are the release job's (SMD-1805) and are gated on approval.
+ * images. Those are the release job's (scripts/release-artifacts.ts, SMD-1860).
  */
 
 import { readFileSync, writeFileSync, readdirSync, unlinkSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { UPSTREAM_PIN, migrationSha, readReleases, highestReleasedMigration, type Release } from "../db/version.mjs";
+import { FORK_VERSION, UPSTREAM_PIN, migrationSha, readReleases, highestReleasedMigration, schemaVersionValue, type Release } from "../db/version.mjs";
 import { parseFragment, fragmentSection, fragmentProblems, type FragmentFrontMatter } from "./fragments.ts";
 import { CHANGES_DIR as CHANGES_REL, FIRST_FILED, changeFileName, classifyChanges, pad3, readChangeEntries, renderIndex, spliceIndex, type FragmentChange } from "./fork-index.ts";
 
@@ -220,6 +231,7 @@ function buildPlan() {
   const version = nextVersion(releases, fragments.map((f) => f.fm.bump));
   let n = highestChangeNumber(existing);
   const numbered = fragments.map((f) => ({ number: ++n, ...f, file: renderChangeFile(n, f.fork) }));
+  const changeRange: [number, number] = [numbered[0].number, numbered[numbered.length - 1].number]; // pending is non-empty (refused above)
   // The index as it will read after the cut, from the plan — rendered (and the
   // marker pair checked) before a single file is written, so a FORK.md this step
   // cannot write into is refused with nothing half-applied.
@@ -234,6 +246,17 @@ function buildPlan() {
   const lo = highestReleasedMigration(releases) + 1;
   const hi = Math.max(...migNums);
   const range: [number, number] | null = hi >= lo ? [lo, hi] : null; // a docs/server-only cut closes no migration
+  // Before --write: the tree says the version it is about to record. The brain
+  // reports FORK_VERSION through the highest schema_version migration (044 at
+  // the baseline), so a cut bumps the constant and adds that migration FIRST,
+  // as the highest on disk — inside the range this cut freezes, so a brain that
+  // applies the range reports the version, and no later cut has to close a
+  // one-migration gap. The dry run prints these as the next step; --write
+  // refuses on them (SMD-1860).
+  const before: string[] = [];
+  if (FORK_VERSION !== version) before.push(`db/version.mjs's FORK_VERSION is '${FORK_VERSION}'; this cut is ${version} — bump it`);
+  const writes = readMig(hi) === null ? null : schemaVersionValue(readMig(hi)!); // hi is a key of migrationFiles()
+  if (writes !== version) before.push(`the highest migration, ${pad3(hi)}, ${writes === null ? "writes no schema_version" : `writes schema_version '${writes}'`} — add db/migrations/${pad3(hi + (writes === null ? 1 : 0))}_schema_version.sql upserting '${version}' (044's shape), with db/README.md's map and the suites' migration counts moved (check-fork holds them); the range below then ends on it`);
   // Every migration a fragment says it ships lies in the range this cut freezes:
   // one already frozen by an earlier release, or one with no file, is a fragment
   // that lies about its migration and a changelog that would say so.
@@ -280,9 +303,9 @@ function buildPlan() {
     core,
     releases.length ? `${REPO}/compare/v${releases[releases.length - 1].version.split("+")[0]}...v${core}` : `${REPO}/compare/upstream-pin-${UPSTREAM_PIN}...v${core}`,
   );
-  const entry: Release = { version, range, server: gitHead(), upstream: UPSTREAM_PIN, date, tickets };
+  const entry: Release = { version, range, server: gitHead(), upstream: UPSTREAM_PIN, date, tickets, changes: changeRange };
   if (range) entry.frozenShas = frozenShasForRange(range[0], range[1], readMig);
-  return { releases, fragments: numbered, version, range, tickets, date, forkAfter, changelogAfter, entry };
+  return { releases, fragments: numbered, version, range, tickets, date, forkAfter, changelogAfter, entry, before };
 }
 
 /** What buildPlan renders: everything --write applies, and everything the dry run prints. */
@@ -301,7 +324,11 @@ function printPlan(plan: Plan) {
     const shas = plan.entry.frozenShas!; // buildPlan sets it whenever range is
     console.log(`releases.json entry would freeze ${Object.keys(shas).length} migration(s): ${Object.entries(shas).map(([k, v]) => `${k}:${v}`).join(", ")}`);
   }
-  console.log(`\n(dry run — nothing written; pass --write to apply, then tag and release out of band)`);
+  if (plan.before.length) {
+    console.log(`\nBefore --write, in one commit (the tree must say the version it records):`);
+    for (const b of plan.before) console.log(`  - ${b}`);
+    console.log(`(dry run — nothing written; --write refuses until the above is done)`);
+  } else console.log(`\n(dry run — nothing written; pass --write to apply, commit, and open the PR; the tag comes after the merge)`);
 }
 
 function write(plan: Plan) {
@@ -318,8 +345,8 @@ function write(plan: Plan) {
   writeFileSync(join(ROOT, "releases.json"), JSON.stringify([...plan.releases, plan.entry], null, 2) + "\n");
   for (const f of plan.fragments) unlinkSync(join(CHANGES_ABS, f.name));
 
-  console.log(`Wrote ${plan.fragments.length} change file(s), FORK.md's index, CHANGELOG.md and releases.json for ${plan.version}.`);
-  console.log(`Next, out of band, in this same commit: bump db/version.mjs's FORK_VERSION to '${plan.version}' and add a NNN_set_schema_version.sql upserting it (check-fork holds the two equal). That migration lands after the range this cut froze${plan.range ? ` (${pad3(plan.range[0])}..${pad3(plan.range[1])})` : ""}, so a brain that applies it sits one migration past the release until the next cut — the release job's shape (SMD-1805) is where that gap closes. Then tag v${plan.version.split("+")[0]} (the tag CHANGELOG.md's compare links name; the full version with its +upstream build metadata is in releases.json) and create the release.`);
+  console.log(`Wrote ${plan.fragments.length} change file(s), FORK.md's index, CHANGELOG.md and releases.json for ${plan.version}${plan.range ? ` (migrations ${pad3(plan.range[0])}..${pad3(plan.range[1])} frozen)` : ""}.`);
+  console.log(`Next: commit this as the cut's second commit, run check-fork-consistency, and open the PR. Once it has merged, tag the merge commit — git tag -a v${plan.version.split("+")[0]} <merge sha> -m '${plan.version}' && git push origin v${plan.version.split("+")[0]} — and .github/workflows/release.yml publishes the images and the release from it (scripts/release-artifacts.ts refuses a tag that does not name this cut).`);
 }
 
 function gitStatus() {
@@ -366,6 +393,7 @@ function selfCheck() {
   let threw = false;
   try { frozenShasForRange(1, 1, () => null); } catch { threw = true; }
   ok(threw, "a missing migration in the range throws");
+  ok(schemaVersionValue("INSERT INTO ob1_config (key, value) VALUES\n  ('schema_version', '1.0.0+upstream.abc')\nON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;") === "1.0.0+upstream.abc" && schemaVersionValue("CREATE INDEX x ON y (z);") === null, "the version migration's value is read through db/version.mjs's one reader (a cut's precondition)");
   // The mutation helper: the changelog section lands under Unreleased with its link.
   const clOut = insertChangelogSection("# Changelog\n\n## [Unreleased]\n\n_placeholder_\n\n[Unreleased]: https://x/compare/upstream-pin-abc...HEAD\n", "## [1.0.0] - 2026-09-30\n### Added\n- x (SMD-1)\n", "1.0.0", "COMPARE");
   ok(clOut.indexOf("## [Unreleased]") < clOut.indexOf("## [1.0.0] - 2026-09-30") && /\[1\.0\.0\]: COMPARE/.test(clOut) && /\[Unreleased\]: https:\/\/x\/compare\/v1\.0\.0\.\.\.HEAD/.test(clOut) && !/_placeholder_/.test(clOut), "a changelog section lands under Unreleased, with its compare link, replacing the placeholder; Unreleased now compares from this version's tag");
@@ -391,6 +419,7 @@ if (import.meta.main) {
       if (dirty) throw new Error(`the working tree is not clean:\n${dirty}\n--write cuts a release from a committed tree — commit or revert first`);
       const uncommitted = plan.fragments.filter((f) => !f.landed).map((f) => f.name);
       if (uncommitted.length) throw new Error(`${uncommitted.join(", ")}: not committed, so the order it landed in is unknown — commit it first`);
+      if (plan.before.length) throw new Error(`the tree does not yet say the version this cut records:\n  - ${plan.before.join("\n  - ")}\n(one commit, before --write; the dry run prints the same)`);
       write(plan);
     } else printPlan(plan);
   } catch (e) {

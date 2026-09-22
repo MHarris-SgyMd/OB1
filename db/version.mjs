@@ -141,6 +141,19 @@ export function highestReleasedMigration(releases = readReleases()) {
   return hi;
 }
 
+/**
+ * The schema_version literal a migration template upserts into ob1_config, or
+ * null when it writes none — the two INSERT shapes 044 and a cut's set-version
+ * migration use. One definition (SMD-1860): check-fork-consistency's 17d holds
+ * the highest writer equal to FORK_VERSION, and assemble-release.ts refuses a
+ * cut whose highest migration does not write the version it is cutting.
+ */
+export function schemaVersionValue(template) {
+  const m = /'schema_version'\s*\)\s*VALUES?[\s\S]*?\(\s*'schema_version'\s*,\s*'([^']+)'/.exec(template)
+    || /\(\s*'schema_version'\s*,\s*'([^']+)'\s*\)/.exec(template);
+  return m ? m[1] : null;
+}
+
 function selfCheck() {
   const eq = (got, want, label) => {
     const g = JSON.stringify(got);
@@ -169,6 +182,8 @@ function selfCheck() {
   bad += eq(versionForMigration(44, withDocsOnly), "1.0.0", "a docs-only release (range null) is skipped, not crashed");
   bad += eq(highestReleasedMigration(withDocsOnly), 44, "a docs-only release does not lower the high-water mark");
   bad += eq(migrationSha("SELECT 1;\n"), migrationSha("SELECT 1;\n"), "sha is deterministic");
+  bad += eq(schemaVersionValue("INSERT INTO ob1_config (key, value) VALUES\n  ('schema_version', '1.2.3+upstream.abc')\nON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;"), "1.2.3+upstream.abc", "the schema_version an INSERT writes is read");
+  bad += eq(schemaVersionValue("INSERT INTO ob1_config (key, value) VALUES ('embedding_dim', '1024');"), null, "a migration writing no schema_version reads as none");
   if (migrationSha("a").length !== 12) {
     console.error("FAIL sha length is not 12");
     bad++;

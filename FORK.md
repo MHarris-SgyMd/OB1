@@ -97,6 +97,28 @@ adopted — the fragment's fields give tooling what it needs, and the `[fork]` p
 and `(caught: …)` tags stay. (The orphaned `.github/release-drafter.yml`, an
 upstream leftover no workflow ran, is removed so there is one release mechanism.)
 
+**Cutting a release** (SMD-1860). On a branch off `main`, `bun
+scripts/assemble-release.ts` prints the plan and the version the fragments' bumps
+deserve. First commit: bump `db/version.mjs`'s `FORK_VERSION` to it and add
+`db/migrations/NNN_schema_version.sql` upserting it (044's shape), the highest
+migration on disk, with `db/README.md`'s map and the suites' migration counts
+moved — `check-fork-consistency` 17d holds the constant and the migration equal,
+and `--write` refuses a tree that does not yet say the version. Second commit:
+`--write` — the fragments numbered in merge order, this file's index,
+`CHANGELOG.md`'s section, `releases.json`'s entry freezing the range through
+`NNN` and recording the change numbers. The PR lands both (the landing check
+reads the manifest written as the cut's record). Then tag the merge commit —
+`git tag -a vX.Y.Z <sha> -m 'X.Y.Z+upstream.<sha>' && git push origin vX.Y.Z` —
+and `.github/workflows/release.yml` publishes `ob1-server` and `ob1-migrate` to
+GHCR, brings the stack up from the *pulled* images under the full-stack job's
+checks plus preflight's schema-version row, and creates the GitHub release: the
+CHANGELOG section, a compose overlay pinning the two images and Ollama by digest,
+the change files, the review yield (`deploy/README.md`, "Pinning a release").
+`scripts/release-artifacts.ts` refuses a tag that does not name the manifest's
+last entry, a `FORK_VERSION` not bumped, a migration or fragment that landed after
+the cut, a tag off `main`. The same job runs as a rehearsal, publishing nothing,
+on a pull request that touches what it builds from.
+
 ### Deploying
 
 For a non-Supabase deployment, see [`SETUP.md`](SETUP.md) — that is the intended
@@ -256,7 +278,7 @@ and fails a "FORK.md change N" citation with no file behind it (SMD-1917).
 | 102 | [Every knob the server reads reaches the container](changes/102-every-knob-the-server-reads-reaches.md) | SMD-1843 |
 | 103 | [Change 69's five servers name the key on 008's audit row](changes/103-change-69-s-five-servers-name-the-key-on-008.md) | SMD-1541 |
 
-Landed since the last release and numbered at the next one (SMD-1804): [SMD-1490](changes/smd-1490.md), [SMD-1492](changes/smd-1492.md), [SMD-1730](changes/smd-1730.md), [SMD-1804](changes/smd-1804.md), [SMD-1806](changes/smd-1806.md), [SMD-1808](changes/smd-1808.md), [SMD-1856](changes/smd-1856.md), [SMD-1857](changes/smd-1857.md), [SMD-1870](changes/smd-1870.md), [SMD-1901](changes/smd-1901.md), [SMD-1903](changes/smd-1903.md), [SMD-1917](changes/smd-1917.md), [SMD-1932](changes/smd-1932.md), [SMD-1933](changes/smd-1933.md), [SMD-1936](changes/smd-1936.md), [SMD-1938](changes/smd-1938.md), [SMD-1951](changes/smd-1951.md).
+Landed since the last release and numbered at the next one (SMD-1804): [SMD-1490](changes/smd-1490.md), [SMD-1492](changes/smd-1492.md), [SMD-1730](changes/smd-1730.md), [SMD-1804](changes/smd-1804.md), [SMD-1806](changes/smd-1806.md), [SMD-1808](changes/smd-1808.md), [SMD-1856](changes/smd-1856.md), [SMD-1857](changes/smd-1857.md), [SMD-1860](changes/smd-1860.md), [SMD-1870](changes/smd-1870.md), [SMD-1901](changes/smd-1901.md), [SMD-1903](changes/smd-1903.md), [SMD-1917](changes/smd-1917.md), [SMD-1932](changes/smd-1932.md), [SMD-1933](changes/smd-1933.md), [SMD-1936](changes/smd-1936.md), [SMD-1938](changes/smd-1938.md), [SMD-1951](changes/smd-1951.md).
 <!-- changes-index:end -->
 
 ### Files we own
@@ -385,6 +407,9 @@ db/test-schema.ts, db/test-live.ts # change 100 (each holds db/README.md's quote
 scripts/check-fork-consistency.ts # change 100 (grant privileges per group [SMD-1471]; every migration documented once and the count checked; tools.json round-tripped against tools.ts [SMD-1805])
 changes/                         # SMD-1917 (new dir — one file per change from 18 on: NNN-<slug>.md once numbered, smd-NNNN.md until the release step numbers it; a fixed shape and a 150-line cap)
 scripts/fork-index.ts            # SMD-1917 (new file — renders FORK.md's index from changes/; check 15 round-trips it; the release step calls it)
+.github/workflows/release.yml    # SMD-1860 (new file — on a v* tag: ob1-server + ob1-migrate to GHCR, the stack from the pulled images, the GitHub release with the pinned overlay, change files and yield; a rehearsal on a PR)
+scripts/release-artifacts.ts     # SMD-1860 (new file — the release job's reader and renderer: facts, the compose overlay, the notes; refuses a tag that does not name the cut)
+db/Dockerfile                    # SMD-1860 (new file — the ob1-migrate image: migrate.ts, config.mjs, version.mjs, the migrations, releases.json)
 db/config.mjs                    # change 100 (grantRows() — every ROLE_GRANTS row undeduped, for the per-group privilege check)
 db/README.md                     # change 100 (the applied-migration count stated as a digit so the check can read it)
 docs/01-getting-started.md       # fix 6
@@ -436,9 +461,11 @@ gh repo set-default MHarris-SgyMd/OB1
 gh run list --branch siggymd/db-migrations          # now the fork
 ```
 
-Eight commits went out on a red CI because of this. Only `Fork Checks` ever runs
-here; the other eleven inherited workflows are PR- and issue-triggered against
-upstream and never fire on a branch push.
+Eight commits went out on a red CI because of this. Two workflows run here:
+`Fork Checks` on every push and PR, and `Release` on a `v*` tag — as a rehearsal
+that publishes nothing on a PR touching what it builds from (SMD-1860); the
+inherited upstream workflows are PR- and issue-triggered against upstream and
+never fire on a branch push.
 
 **Running the suites individually cannot catch state leaking between them.**
 `db/with-postgres.sh` starts a fresh container per invocation, so anything one

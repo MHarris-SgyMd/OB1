@@ -47,7 +47,7 @@ Three services, in order (five with the profile):
 | Service | Replaces |
 | --- | --- |
 | `postgres` | The Supabase-hosted database (`pgvector/pgvector:0.8.6-pg16`) |
-| `migrate` | Pasting SQL into the Supabase dashboard — runs `db/migrate.ts`, then exits |
+| `migrate` | Pasting SQL into the Supabase dashboard — the `ob1-migrate` image (`db/Dockerfile`) runs `db/migrate.ts`, then exits |
 | `server` | The Edge Function and `supabase functions deploy` |
 | `ollama` (profile) | OpenRouter — the model endpoint the server defaults to |
 | `ollama-pull` (profile) | Pulling both models by hand; runs once, then exits |
@@ -82,29 +82,48 @@ client that resolves `localhost` to `::1` first without falling back is refused
 
 ## Pinning a release
 
-The stack builds `server` from the checkout and pins `postgres` and `migrate` by
-tag; `ollama` still floats on `:latest`. Once the fork cuts releases (SMD-1804 —
-`MAJOR.MINOR.PATCH+upstream.<sha>`, see [`FORK.md`](../FORK.md) "Versioning"), a
-production deployment pins to one so the server, the migrations and the models it
-was verified against move together:
+The stack above builds `server` and `migrate` from the checkout, and pins
+`postgres` and `ollama` by tag (`ollama`'s is the one `x-ollama-image` anchor in
+`compose.yaml`, shared by `ollama-pull`). A release pins everything: the job
+`.github/workflows/release.yml` (SMD-1860) runs on the tag a cut is named by —
+`v<X.Y.Z>`; [`FORK.md`](../FORK.md) "Versioning" has the scheme and the cut —
+publishes the two images to GHCR, `ghcr.io/mharris-sgymd/ob1-server:<X.Y.Z>` and
+`ghcr.io/mharris-sgymd/ob1-migrate:<X.Y.Z>` for linux/amd64 and linux/arm64, and
+creates the GitHub release with a compose overlay that names the two by tag and
+digest and `ollama` by the digest its tag resolved to when the job ran, beside
+`compose.yaml` and `.env.example` from the same tag, the change files the release
+numbered and `scripts/mechanism-yield.ts`'s table. Before the release existed, the
+job brought a stack up from the *pulled* images and held it to this file's checks
+(the `Full stack, no Supabase` lines, `smoke.sh`, no Supabase binary) and to
+preflight's schema-version row for the version the release's migrator wrote.
 
-```yaml
-# deploy/compose.yaml, per release
-services:
-  server:
-    image: ghcr.io/mharris-sgymd/ob1-server:<tag>   # instead of `build:`
-  migrate:
-    image: ghcr.io/mharris-sgymd/ob1-migrate:<tag>
-  ollama:
-    image: ollama/ollama@sha256:<digest>            # a digest, not :latest
+On a machine with Docker (or Podman) and no checkout:
+
+```bash
+mkdir ob1 && cd ob1
+curl -fsSLO https://github.com/MHarris-SgyMd/OB1/releases/download/v<X.Y.Z>/compose.yaml
+curl -fsSLO https://github.com/MHarris-SgyMd/OB1/releases/download/v<X.Y.Z>/compose.release.yaml
+curl -fsSL -o .env https://github.com/MHarris-SgyMd/OB1/releases/download/v<X.Y.Z>/env.example
+# fill in .env as step 1 says, then:
+docker compose -f compose.yaml -f compose.release.yaml pull
+docker compose -f compose.yaml -f compose.release.yaml up -d --wait   # --profile local-models on both for the stack's own Ollama
 ```
 
-The published `ob1-server`/`ob1-migrate` images and the per-release ollama digest
-are produced by the release job (SMD-1805) and are not built yet; until then the
-checkout build is the supported path. `releases.json` at the repo root records
-which migration range, server commit and upstream pin each `<tag>` closed, and
-`preflight` prints the running brain's `schema_version` so a mismatch between a
-pinned server and the brain it opens is caught before traffic.
+`up` without `--build`: `compose.yaml`'s `build:` stays under the overlay and is
+used only when asked, so a pinned stack never rebuilds behind the overlay's back.
+The server's log carries preflight's row for the brain the release's migrator
+wrote — `schema version   <X.Y.Z>+upstream.<sha> · highest migration NNN` — and
+warns, by name, when a brain is at another release than its server: a server
+older than its brain, or a brain migrated past the range its version names (both
+images carry `releases.json` as of the tag, so the second reads the release's
+range). `releases.json` at the repo root records which migration range, server
+commit, upstream pin and change files each tag closed. `smoke.sh` against a pinned
+stack takes the URL and the key as arguments ("Using smoke.sh against a real
+deployment" below).
+
+One thing the owner does once: the first publish creates each GHCR package
+**private** — make `ob1-server` and `ob1-migrate` public in the package settings,
+or `pull` on a clean machine wants a login.
 
 ## What is reachable from where
 
@@ -160,7 +179,8 @@ drops a probe of a closed port), so read `lsof`, not the error's wording.
 
 ## Expected outcome
 
-`migrate` exits 0 having applied every migration under `db/migrations/` (it needs no `bun install` —
+`migrate` exits 0 having applied every migration under `db/migrations/` (its image,
+`db/Dockerfile`, carries the runner and the migrations and installs nothing —
 `migrate.ts` imports only Bun and `node:` built-ins). `server` logs `preflight OK`
 followed by `Started server`. `smoke.sh` ends with `0 failed` and exits 0 (its
 checks are the numbered comments in the script; the summary line counts them).
