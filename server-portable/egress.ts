@@ -66,6 +66,14 @@ export const DEFAULT_EGRESS_MODE: EgressMode = "deny";
 export const EGRESS_UNITS = ["actor", "source", "type", "topic", "marker"] as const;
 export type EgressUnit = (typeof EGRESS_UNITS)[number];
 
+/**
+ * The units a row carries on its own — its metadata and its text — which is
+ * what a pass sends when no worker key names an actor. The three workers pass
+ * this to refusesEverything; one definition, so a fourth unit lands in all of
+ * them (boyscout: each had its own copy).
+ */
+export const ROW_UNITS = ["source", "type", "topic", "marker"] as const satisfies readonly EgressUnit[];
+
 export type EgressTerm = { unit: EgressUnit; value: string };
 
 /** The environment keys this module reads. A subset of embed.ts's EmbedEnv. */

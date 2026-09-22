@@ -259,6 +259,19 @@ function refuseQuery(gate: EgressDecision, actor: string): string {
   );
 }
 
+/**
+ * The question both search tools ask before embedding a query (SMD-1903): the
+ * subject the embedding will be judged and sent under, and the refusal text
+ * when it may not leave. One helper, since the two tools had the four lines
+ * each (boyscout).
+ */
+function gateQuery(query: string, principal: Principal): { subject: EgressSubject; refused?: string } {
+  const cfg = embedConfig();
+  const subject: EgressSubject = { kind: "query", actor: principal.name, content: query };
+  const gate = mayLeaveBox(subject, cfg.embeddings, cfg.egress);
+  return gate.allowed ? { subject } : { subject, refused: refuseQuery(gate, principal.name) };
+}
+
 async function extractMetadata(text: string, subject: EgressSubject): Promise<Record<string, unknown>> {
   // The original swallowed every failure into the fallback below: an auth error,
   // a rate limit, or a 500 from OpenRouter all produced a thought tagged
@@ -549,11 +562,9 @@ function buildServer(principal: Principal): McpServer {
     async ({ query }) => {
       try {
         // The query text leaves for its embedding as a thought's does (SMD-1903).
-        const cfg = embedConfig();
-        const subject: EgressSubject = { kind: "query", actor: principal.name, content: query };
-        const gate = mayLeaveBox(subject, cfg.embeddings, cfg.egress);
-        if (!gate.allowed) return toolError(refuseQuery(gate, principal.name));
-        const qEmb = await getEmbedding(query, subject, "query");
+        const q = gateQuery(query, principal);
+        if (q.refused) return toolError(q.refused);
+        const qEmb = await getEmbedding(query, q.subject, "query");
         const data = await (await db()).hybridThoughts({
           query,
           embedding: qEmb,
@@ -689,11 +700,9 @@ function buildServer(principal: Principal): McpServer {
     async ({ query, limit, threshold, recency_weight }) => {
       try {
         // The query text leaves for its embedding as a thought's does (SMD-1903).
-        const cfg = embedConfig();
-        const subject: EgressSubject = { kind: "query", actor: principal.name, content: query };
-        const gate = mayLeaveBox(subject, cfg.embeddings, cfg.egress);
-        if (!gate.allowed) return toolError(refuseQuery(gate, principal.name));
-        const qEmb = await getEmbedding(query, subject, "query");
+        const q = gateQuery(query, principal);
+        if (q.refused) return toolError(q.refused);
+        const qEmb = await getEmbedding(query, q.subject, "query");
         const data = await (await db()).hybridThoughts({
           query,
           embedding: qEmb,

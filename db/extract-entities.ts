@@ -81,7 +81,7 @@ import { hostname } from "node:os";
 import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import { PROVIDER_ERROR_CHARS, refusesLength, resolveEmbedConfig } from "../server-portable/embed.ts";
-import { describeEgress, localKnob, refusesEverything } from "../server-portable/egress.ts";
+import { describeEgress, localKnob, refusesEverything, ROW_UNITS } from "../server-portable/egress.ts";
 import { extractEntities, extractionKey, type Extraction } from "../server-portable/entities.ts";
 import { hashKey, parseKeyRecords } from "../server-portable/auth.ts";
 import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, reportLost, startHeartbeat } from "./lease.ts";
@@ -169,7 +169,7 @@ console.log(`  egress: ${describeEgress(cfg.chat, cfg.egress, localKnob(cfg, "ch
   // --status still report — the banner's egress line says why a run would not.
   // The units a row of this pass carries: its metadata and text, and the
   // worker key's name as the actor when one is set (second review pass).
-  const blanket = refusesEverything(cfg.chat, cfg.egress, process.env.OB1_WORKER_KEY ? ["actor", "source", "type", "topic", "marker"] : ["source", "type", "topic", "marker"]);
+  const blanket = refusesEverything(cfg.chat, cfg.egress, process.env.OB1_WORKER_KEY ? undefined : ROW_UNITS);
   if (blanket && !STATUS_ONLY && !DRY_RUN) {
     console.error(`\n  Nothing would be extracted: ${blanket}. Declare the endpoint local (${localKnob(cfg, "chat")}=1) if it is, name what may leave in OB1_EGRESS_ALLOW, or set OB1_EGRESS_POLICY — in words, before a pass that would fail every row it claims.`);
     process.exit(2);
@@ -246,7 +246,7 @@ if (!STATUS_ONLY && !DRY_RUN) {
   // A key that was set but did not resolve to a name is no actor: the blanket
   // check above credited one, so it is asked again without (third review pass).
   if (process.env.OB1_WORKER_KEY && actorName === undefined) {
-    const again = refusesEverything(cfg.chat, cfg.egress, ["source", "type", "topic", "marker"]);
+    const again = refusesEverything(cfg.chat, cfg.egress, ROW_UNITS);
     if (again) {
       console.error(`\n  Nothing would be extracted: ${again} — the worker key did not resolve, so the pass carries no actor for an actor: term to name.`);
       await sql.close();

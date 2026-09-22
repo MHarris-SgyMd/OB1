@@ -27,7 +27,7 @@ import { createStore, databaseUrl, DEFAULT_STORE, DIRECT_CHECK_SKIP_OVER_POSTGRE
 import { parseKeyRecords } from "./auth.ts";
 import { DEFAULT_MAX_TOKENS } from "./chunk.ts";
 import { resolveEmbedConfig, resolveProviderEndpoints, stringOr, type ProviderEndpoint } from "./embed.ts";
-import { EGRESS_UNITS, localKnob, type EgressTerm } from "./egress.ts";
+import { EGRESS_UNITS, hostOf, localKnob, type EgressTerm } from "./egress.ts";
 import { trimmedEnv } from "../db/config.mjs"; // static: `env` below is built before the dynamic import above resolves
 import type { PassCounts } from "../db/config.mjs";
 
@@ -94,15 +94,6 @@ function isLocalEndpoint(url: string): boolean {
 }
 const localEmbeddings = isLocalEndpoint(embEndpoint.base);
 const localChat = isLocalEndpoint(chatEndpoint.base);
-/** The host a base URL names, for a reachability remedy; the URL itself when it does not parse. */
-function hostOf(base: string): string {
-  try {
-    return new URL(base).host;
-  } catch {
-    return base;
-  }
-}
-
 /**
  * Migration 014's exposure and remedy, once, for both store paths. The
  * PostgREST and SQL checks below used to each carry their own copy; the next

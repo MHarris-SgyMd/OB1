@@ -403,7 +403,7 @@ import {
   validateEmbeddingConfig,
 } from "./config.mjs";
 import { createEmbedder, PROVIDER_ERROR_CHARS, ProviderError, resolveEmbedConfig } from "../server-portable/embed.ts";
-import { describeEgress, localKnob, mayLeaveBox, refusesEverything } from "../server-portable/egress.ts";
+import { describeEgress, localKnob, mayLeaveBox, refusesEverything, ROW_UNITS } from "../server-portable/egress.ts";
 import { UUID_RE } from "../server-portable/store.ts";
 import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, reportLost, startHeartbeat } from "./lease.ts";
 
@@ -538,8 +538,6 @@ if (problems.length > 0) {
 for (const w of embeddingConfigWarnings()) console.error(`  ⚠  ${w}`);
 
 const embedConfig = resolveEmbedConfig(process.env);
-/** The egress units a row of this pass can carry: its metadata and its text. */
-const PASS_UNITS = ["source", "type", "topic", "marker"] as const;
 // Not remembering a refusal: see "The head window, recorded" in the header.
 const embedder = createEmbedder(() => embedConfig, { rememberRefusal: false });
 
@@ -568,7 +566,7 @@ console.log(`  egress:    ${describeEgress(embedConfig.embeddings, embedConfig.e
   // --status still report — the banner's egress line says why a run would not.
   // Units a re-embed carries: the row's own metadata and text, never an
   // actor — this pass has no worker key (second review pass).
-  const blanket = refusesEverything(embedConfig.embeddings, embedConfig.egress, PASS_UNITS);
+  const blanket = refusesEverything(embedConfig.embeddings, embedConfig.egress, ROW_UNITS);
   // --retire and --accept-failed write claim rows, not vectors, and dial
   // nothing: bookkeeping the gate has no say over (second review pass).
   if (blanket && !STATUS_ONLY && !DRY_RUN && !RETIRE && !ACCEPT_FAILED) {
@@ -578,7 +576,7 @@ console.log(`  egress:    ${describeEgress(embedConfig.embeddings, embedConfig.e
   // The blurbs are chat calls: refused, every long row's claim fails on them
   // (a bare window is a failure here, since no caller is told) and
   // --retry-failed would revisit each uselessly. Said before the pass.
-  const blurbs = embedConfig.chunkContext ? refusesEverything(embedConfig.chat, embedConfig.egress, PASS_UNITS) : null;
+  const blurbs = embedConfig.chunkContext ? refusesEverything(embedConfig.chat, embedConfig.egress, ROW_UNITS) : null;
   if (blurbs) console.error(`  ⚠  OB1_CHUNK_CONTEXT is on and every blurb call would be refused (${blurbs}) — every long row's claim will fail on its blurbs; turn the context off for this pass, or declare the chat endpoint local (${localKnob(embedConfig, "chat")}=1)`);
 }
 console.log(`  chunks:    ${embedConfig.chunkTokens}-token windows above ${embedConfig.chunkThreshold} (${embedConfig.chunkTokensFrom === "window" ? `from ${embedConfig.embeddingModel}'s ${embedConfig.modelWindow}-token window` : embedConfig.chunkTokensFrom === "OB1_CHUNK_TOKENS" ? "OB1_CHUNK_TOKENS" : "the default, window unknown"}), overlap ${embedConfig.chunkOverlap}, context ${embedConfig.chunkContext ? `on (blurbs via ${embedConfig.chat.base})` : "off"}`);

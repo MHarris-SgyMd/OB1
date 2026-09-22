@@ -86,7 +86,7 @@ import { hostname } from "node:os";
 import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import { PROVIDER_ERROR_CHARS, ProviderError, refusesLength, resolveEmbedConfig } from "../server-portable/embed.ts";
-import { describeEgress, localKnob, refusesEverything } from "../server-portable/egress.ts";
+import { describeEgress, localKnob, refusesEverything, ROW_UNITS } from "../server-portable/egress.ts";
 import {
   cleanForDisplay, consolidateKey, judgePair, proposalVerdict, DEFAULT_CANDIDATES, DEFAULT_MIN_CONFIDENCE, DEFAULT_MIN_SIMILARITY,
   type Judgement,
@@ -191,14 +191,6 @@ if (FORCE && !ACCEPT) {
   process.exit(2);
 }
 const REVIEW_ONLY = LIST !== undefined || ACCEPT !== undefined || REJECT !== undefined || STALE_DAYS > 0;
-/**
- * The egress units a row of this pass carries without a worker key: its
- * metadata and its text. Declared here, above the blanket check that reads it
- * — the fourth review pass found it below, in the identity section, so every
- * keyless invocation died in the temporal dead zone before connecting; no
- * test ran the worker without a key, and db/ is not type-checked (SMD-1932).
- */
-const PASS_UNITS = ["source", "type", "topic", "marker"] as const;
 
 const cfg = resolveEmbedConfig(process.env);
 // The judge's model, not the extractor's: OB1_JUDGE_MODEL, else the metadata
@@ -221,7 +213,7 @@ if (!REVIEW_ONLY) console.log(`  egress: ${describeEgress(cfg.chat, cfg.egress, 
   // The units a row of this pass carries: its metadata and text, and the
   // worker key's name as the actor when one is set — re-checked below once
   // the key has, or has not, resolved (third review pass).
-  const blanket = refusesEverything(cfg.chat, cfg.egress, process.env.OB1_WORKER_KEY ? undefined : PASS_UNITS);
+  const blanket = refusesEverything(cfg.chat, cfg.egress, process.env.OB1_WORKER_KEY ? undefined : ROW_UNITS);
   if (blanket && !STATUS_ONLY && !DRY_RUN && !REVIEW_ONLY) {
     console.error(`\n  Nothing would be judged: ${blanket}. Declare the endpoint local (${localKnob(cfg, "chat")}=1) if it is, name what may leave in OB1_EGRESS_ALLOW, or set OB1_EGRESS_POLICY — in words, before a pass that would fail every row it claims.`);
     process.exit(2);
@@ -299,7 +291,7 @@ if (WRITES) {
   // A key that was set but did not resolve to a name is no actor: the blanket
   // check above credited one, so it is asked again without (third review pass).
   if (process.env.OB1_WORKER_KEY && keyName === undefined && !REVIEW_ONLY) {
-    const again = refusesEverything(cfg.chat, cfg.egress, PASS_UNITS);
+    const again = refusesEverything(cfg.chat, cfg.egress, ROW_UNITS);
     if (again) {
       console.error(`\n  Nothing would be judged: ${again} — the worker key did not resolve, so the pass carries no actor for an actor: term to name.`);
       await sql.close();
