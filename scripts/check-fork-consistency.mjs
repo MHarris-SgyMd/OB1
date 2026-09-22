@@ -13,7 +13,8 @@
  *   2. metadata `category` matches the directory it lives in
  *   3. relative links in contribution READMEs resolve
  *   4. requires_primitives / requires_skills point at directories that exist
- *   5. ALTER TABLE thoughts ADD COLUMN is guarded with IF NOT EXISTS
+ *   5. ALTER TABLE thoughts ADD COLUMN is guarded with IF NOT EXISTS, and a
+ *      vendored .sql never DROPs or ALTERs a core thoughts column (SMD-1924)
  *   6. shipped content never hands untrusted input a shell — no sandbox-bypass
  *      or skip-permissions flag, alias or mode; no allow rule granting all of
  *      Bash or a prefix of a network client or interpreter; no spawn through a
@@ -315,13 +316,26 @@ function scanLines(files, rules) {
   return counts;
 }
 
-// ── 5: ADD COLUMN on thoughts must be re-runnable ────────────────────────────
+// ── 5: column ops on core thoughts — ADD is re-runnable, DROP/ALTER is refused ─
 
 function checkSqlGuards() {
   scanLines(walk(ROOT), [{
     name: "add-column-guard",
     re: /alter\s+table\s+(?:public\.)?thoughts\s+add\s+column\s+(?!if\s+not\s+exists)/i,
     msg: "ADD COLUMN on thoughts without IF NOT EXISTS",
+  }, {
+    // SMD-1924. Adding a column to thoughts is fine (guarded above); dropping
+    // or retyping one mutates a structure db/migrations owns, and a vendored
+    // file applied to a fork brain must not do it. The hazard was
+    // recipes/email-history-import/rollback-chunking-columns.sql (DROP COLUMN
+    // parent_id/chunk_index/full_text, the abandoned upstream chunking),
+    // removed in SMD-1924. Scoped to vendored .sql: a core migration may own
+    // the schema, and a README's rollback-of-its-own-added-columns or an
+    // annotated do-not-run example is prose, not an applied file.
+    name: "thoughts-column-mutation",
+    only: /(?:^|\/)(?:schemas|recipes|integrations)\/.+\.sql$/i,
+    fileRe: /alter\s+table\s+(?:public\.)?thoughts\s+(?:drop|alter)\s+column\b/gi,
+    msg: "DROP COLUMN / ALTER COLUMN on core thoughts in a vendored file — additive ADD COLUMN … IF NOT EXISTS only; a column drop or retype belongs in a db/ migration",
   }]);
 }
 

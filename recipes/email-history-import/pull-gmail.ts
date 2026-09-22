@@ -706,7 +706,7 @@ async function ingestThoughtDirect(
     if (body.includes("content_fingerprint")) {
       fingerprintSupported = false;
       console.log("   (content_fingerprint column not found — inserting without dedup)");
-      console.log("   Run the SQL from primitives/content-fingerprint-dedup to enable dedup.\n");
+      console.log("   Run the SQL from recipes/content-fingerprint-dedup to enable dedup.\n");
       delete row.content_fingerprint;
       const retry = await fetch(`${SUPABASE_URL}/rest/v1/thoughts`, {
         method: "POST",
