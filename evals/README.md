@@ -3920,6 +3920,88 @@ make; on this table `plan` (today's `task`, with `status` its own axis),
 input), `lesson`, `decision` and `event` have counts and consumers, and the
 writer's declaration — not the 7B — is what makes any of them reliable.
 
+## Was the confidence earned? An outcome ledger and a calibration score per mechanism (SMD-1809)
+
+`eval-calibration.ts`. The fork writes a confidence in three places — the
+consolidation judge on every proposal (029), the entity extractor on every
+mention and edge (016), and the metadata model's kind band that the section
+above froze — and it resolves claims in three: a reviewer accepts or rejects a
+proposal, the hand label agrees or not with the model's kind, and the fork
+record confirms or refutes a hypothesis. Nothing compared the two. This harness
+does, as a read model over what the log already holds — no table, no
+migration, no new confidence source — so the ticket's first question, whether
+calibration is measurable from the existing log and whether any mechanism is
+systematically over- or under-confident, is answered before anything that
+would act on it is built.
+
+The ledger is one row per (mechanism, claim, the confidence it carried, the
+outcome it resolved to, what resolved it). A row with no confidence is
+unscored, never scored as 0; a row nothing has resolved is unresolved; the
+report counts both. Per mechanism, over the rows with both sides: the
+reliability table, the Brier score, the expected calibration error, and the
+Brier skill against a constant at the base rate (0 = no better than a
+forecaster who knows only how often claims hold; negative = worse). A band maps
+to a nominal probability (`high` .9, `medium` .6, `low` .3) for the Brier and
+ECE only; the band table does not depend on the mapping. A mechanism whose
+confidence takes one value is flagged: no monotone re-weighting of a constant
+reorders anything. `metadata.confidence` on a thought — a number in [0, 1] — is
+the key a writer can set today to enter the ledger; it is resolved by the
+kinds fixture's hypothesis status or by being superseded.
+
+```bash
+bun eval-calibration.ts --self-check      # the arithmetic and the ledger rules; no database (in CI)
+bun eval-calibration.ts --offline         # the fixture-only mechanisms: the kind band, the hypotheses
+DATABASE_URL=… bun eval-calibration.ts    # the report over the live brain
+```
+
+The dogfood brain is reached the way the section above describes (a container
+on the compose network with `--env-file deploy/.env`).
+
+### Results, 2026-09-22 (dogfood brain, 348 thoughts)
+
+| mechanism | claims | confidence | resolved | Brier | ECE | base rate | skill |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| kind band (`qwen2.5:7b` first pass) | 342 | `high` 318 / `medium` 24 | 342, hand label | 0.606 | 0.639 | 0.240 (reference Brier 0.182) | −2.324 |
+| `consolidate:qwen2.5:7b@p2` | 24 | 0.80 ×24 | 24, reviewer: 0 held | 0.640 | 0.800 | 0.000 | undefined |
+| `extract:qwen2.5:7b@p1` | 5,456 | 1.00 on 5,455, 0.50 on 1 | 0 | — | — | — | — |
+| `extract:qwen2.5:7b@p2` | 425 | 1.00 ×425 | 0 | — | — | — | — |
+| declared (`metadata.confidence`) | 45 | none | 25: 17 by the fork record, 8 superseded | — | — | — | — |
+
+The band as stated:
+
+| band | nominal p | n | held | rate |
+| --- | --- | --- | --- | --- |
+| high | 0.90 | 318 | 71 | 22% |
+| medium | 0.60 | 24 | 11 | 46% |
+
+What it says:
+
+* **Calibration is measurable from the log today** for two mechanisms, and
+  both are over-confident. The judge is the cleanest over-confidence event the
+  log holds: 0.80 stated twenty-four times, 0 of 24 held. The band runs
+  backwards — `high` holds less often than `medium` — so no mapping of bands to
+  probabilities rescues it.
+* **The extractor's confidence is a constant.** 1.00 on every mention and edge
+  but one (the parser's 0.50 default), so the column 016 sorts and
+  de-duplicates by carries nothing. Its outcome set is this directory's
+  `eval-entities.ts` labelled captures, outside any brain, where the same model's
+  precision is 0.68.
+* **The 17 resolved hypotheses are an outcome with nothing to score.** No
+  thought in the brain carries a confidence; the first Brier over the writer's
+  own judgement is over whatever `metadata.confidence` declares from here.
+* **The ticket's other two Verify items, answered by construction.** On the
+  LongMemEval knowledge-update slice nothing captured carries a confidence
+  (the metadata extractor emits none), so "does captured confidence predict
+  supersession" has no predictor to test. A calibration-adjusted read over a
+  constant is the identity on order — the review queue's `ORDER BY confidence
+  DESC, judged_at` is an order by time — so no downstream number can move
+  until a mechanism states a confidence that varies.
+
+Not built here: a ledger table (SMD-1730/1731's substrate), any control loop
+(SMD-1736 decay, SMD-1724 trust), a `confidence` argument on `capture_thought`
+(SMD-1949). The record is `changes/smd-1809.md`.
+
+
 ## Related
 
 - `../SETUP.md` — the two decisions these evals inform
