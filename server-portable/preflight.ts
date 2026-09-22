@@ -17,7 +17,7 @@
  * Run it as a deploy gate, an init container, or a readiness probe:
  *
  *   bun preflight.ts             # config + connectivity + schema
- *   bun preflight.ts --deep      # also calls the embedding and chat providers (costs a token)
+ *   bun preflight.ts --deep      # also calls the embedding and chat providers (costs a token per model)
  *   bun preflight.ts --json      # machine-readable, for a pipeline step
  *
  * Exit codes: 0 all good, 1 something is wrong, 2 could not run the checks.
@@ -26,7 +26,7 @@
 import { createStore, databaseUrl, DEFAULT_STORE, DIRECT_CHECK_SKIP_OVER_POSTGREST, maskUrl, missingDatabaseUrl, postgrestOnBunNotice, postgrestOverPostgresUrl, storeKind, type StoreEnv } from "./store.ts";
 import { parseKeyRecords } from "./auth.ts";
 import { DEFAULT_MAX_TOKENS } from "./chunk.ts";
-import { resolveProviderEndpoints, stringOr, type ProviderEndpoint } from "./embed.ts";
+import { resolveEmbedConfig, resolveProviderEndpoints, stringOr, type ProviderEndpoint } from "./embed.ts";
 import { trimmedEnv } from "../db/config.mjs"; // static: `env` below is built before the dynamic import above resolves
 import type { PassCounts } from "../db/config.mjs";
 
@@ -54,17 +54,22 @@ const store = storeKind(env);
 const {
   DEFAULT_EMBEDDING_MODEL: DEF_EMB,
   DEFAULT_EMBEDDING_DIM: DEF_DIM,
-  DEFAULT_METADATA_MODEL: DEF_META,
   isLocalHostname,
   LOCAL_PROVIDER_SERVICES,
   REAPPLY_COMMAND,
 } = await import("../db/config.mjs");
 
-// The same three string reads as embed.ts's resolveEmbedConfig, trimmed the
-// same way, so the gate judges the values the server will use.
+// The embedding model read as embed.ts's resolveEmbedConfig reads it, trimmed
+// the same way, so the gate judges the value the server will use.
 const embModel = stringOr(env.OB1_EMBEDDING_MODEL, DEF_EMB);
 const embDim = env.OB1_EMBEDDING_DIM ? Number(env.OB1_EMBEDDING_DIM) : DEF_DIM;
-const metaModel = stringOr(env.OB1_METADATA_MODEL, DEF_META);
+/**
+ * The two chat models by embed.ts's rule, the one the extractor and the judge
+ * run by: the judge's is OB1_JUDGE_MODEL, else the metadata model (SMD-1901).
+ * Resolved here rather than copied, so the row, the pass remedy and the --deep
+ * probe cannot name a model the worker would not use.
+ */
+const { metadataModel: metaModel, judgeModel } = resolveEmbedConfig(env);
 /**
  * The two endpoints, by embed.ts's rule — the one the server dials by — so the
  * rows below print what a capture will do, not a second opinion of it. Until
@@ -235,6 +240,12 @@ if (chatIsOwn) {
   }
 }
 add("metadata model", "ok", metaModel);
+// The judge's own row, so a report says which model db/consolidate.ts will
+// pool under: the pass key carries the name, and a reader of the consolidate
+// pass row below can match the two.
+add("judge model", "ok", env.OB1_JUDGE_MODEL
+    ? `${judgeModel} (OB1_JUDGE_MODEL)${judgeModel === metaModel ? " — the same as the metadata model" : ""}`
+    : `${judgeModel} — the metadata model; OB1_JUDGE_MODEL gives the judge its own`);
 
 /**
  * One credential row per endpoint. A hosted endpoint with no key is a hard
@@ -2236,9 +2247,10 @@ if (configFailed) {
               c.unpooled = Number(unpooled);
               // The key names the judge model between the prefix and the
               // prompt version; the command has to run under that model, or
-              // consolidate.ts pools under another key.
+              // consolidate.ts pools under another key. The judge's own knob
+              // since SMD-1901, so the remedy leaves the extractor where it is.
               const model = /^(.+)@p\d+$/.exec(key.slice(CONSOLIDATE_KEY_PREFIX.length))?.[1];
-              const envPrefix = model && model !== metaModel ? `OB1_METADATA_MODEL=${model} ` : "";
+              const envPrefix = model && model !== judgeModel ? `OB1_JUDGE_MODEL=${model} ` : "";
               add("consolidate pass", "warn",
                   `${key}: ${formatPassCounts(c).replace(/ thoughts — /, " thoughts with entities — ")} — a consolidation pass under this key stopped before it finished${queue ? `; ${queue}` : ""}`,
                   `Finish it: cd db && ${envPrefix}bun consolidate.ts --url $DATABASE_URL${c.failed ? ` (--retry-failed for the ${c.failed} failed row(s) once their cause is fixed)` : ""}; ${envPrefix}bun consolidate.ts --url $DATABASE_URL --status shows where it stands.`);
@@ -2392,43 +2404,55 @@ if (!deep) {
 }
 
 if (deep) {
-  if (!chatEndpoint.key && !localChat) {
-    add("metadata model", "skip", `no credential to test ${chatEndpoint.base} with`);
-  } else {
+  // Both chat models need JSON mode — extraction and the judge each parse the
+  // reply as an object — so each is probed under its own row when they differ,
+  // and a judge model the endpoint does not serve fails the `judge model` row
+  // rather than the first pass of db/consolidate.ts (SMD-1901). One model,
+  // one probe: the two rows would otherwise report one call twice.
+  const probes: [row: string, model: string, consequence: string][] = [
+    ["metadata model", metaModel, "Capture would still succeed, but every thought would be tagged uncategorized."],
+    ...(judgeModel !== metaModel
+      ? [["judge model", judgeModel, "Capture is unaffected; db/consolidate.ts would fail every pair it judges."] as [string, string, string]]
+      : []),
+  ];
+  for (const [row, model, consequence] of probes) {
+    if (!chatEndpoint.key && !localChat) {
+      add(row, "skip", `no credential to test ${chatEndpoint.base} with`);
+      continue;
+    }
     try {
-      // Metadata extraction needs JSON mode. Providers differ here — Ollama's
-      // OpenAI layer has been inconsistent about response_format — and a provider
-      // that ignores it degrades every capture to "uncategorized" without failing.
+      // Both callers parse the reply as JSON. Providers differ here — Ollama's
+      // OpenAI layer has been inconsistent about response_format — and one that
+      // ignores it degrades every capture to "uncategorized", or fails every
+      // pair the judge is shown, without ever failing a request.
       const m = await fetch(`${chatEndpoint.base}/chat/completions`, {
         method: "POST",
         headers: chatEndpoint.headers,
         body: JSON.stringify({
-          model: metaModel,
+          model,
           response_format: { type: "json_object" },
           messages: [{ role: "user", content: 'Reply with only this JSON: {"ok":true}' }],
         }),
       });
       if (!m.ok) {
-        add("metadata model", "fail", `${metaModel} returned ${m.status} from ${chatEndpoint.base}`,
-            (m.status === 401 ? `The key is rejected. Check ${chatIsOwn ? "OB1_CHAT_API_KEY" : "OB1_LLM_API_KEY (or OPENROUTER_API_KEY)"}. ` : "") +
-            "Capture would still succeed, but every thought would be tagged uncategorized.");
+        add(row, "fail", `${model} returned ${m.status} from ${chatEndpoint.base}`,
+            (m.status === 401 ? `The key is rejected. Check ${chatIsOwn ? "OB1_CHAT_API_KEY" : "OB1_LLM_API_KEY (or OPENROUTER_API_KEY)"}. ` : "") + consequence);
       } else {
         const md = (await m.json()) as { choices?: [{ message?: { content?: string } }] };
         const content = md.choices?.[0]?.message?.content ?? "";
         try {
           const parsed = JSON.parse(content);
-          add("metadata model", typeof parsed === "object" && parsed !== null ? "ok" : "warn",
+          add(row, typeof parsed === "object" && parsed !== null ? "ok" : "warn",
               typeof parsed === "object" && parsed !== null
-                ? `${metaModel} honours JSON mode at ${chatEndpoint.base}`
-                : `${metaModel} returned JSON that is not an object`);
+                ? `${model} honours JSON mode at ${chatEndpoint.base}`
+                : `${model} returned JSON that is not an object`);
         } catch {
-          add("metadata model", "warn", `${metaModel} did not return parseable JSON in JSON mode`,
-              "Captures will still work but will fall back to uncategorized metadata.");
+          add(row, "warn", `${model} did not return parseable JSON in JSON mode`, consequence);
         }
       }
     } catch (e) {
-      add("metadata model", "fail", `${metaModel} at ${chatEndpoint.base}: ${(e as Error).message}`,
-          `Network reachability to ${hostOf(chatEndpoint.base)}. Capture would still succeed, but every thought would be tagged uncategorized.`);
+      add(row, "fail", `${model} at ${chatEndpoint.base}: ${(e as Error).message}`,
+          `Network reachability to ${hostOf(chatEndpoint.base)}. ${consequence}`);
     }
   }
 }

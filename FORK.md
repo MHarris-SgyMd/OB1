@@ -256,7 +256,7 @@ and fails a "FORK.md change N" citation with no file behind it (SMD-1917).
 | 102 | [Every knob the server reads reaches the container](changes/102-every-knob-the-server-reads-reaches.md) | SMD-1843 |
 | 103 | [Change 69's five servers name the key on 008's audit row](changes/103-change-69-s-five-servers-name-the-key-on-008.md) | SMD-1541 |
 
-Landed since the last release and numbered at the next one (SMD-1804): [SMD-1804](changes/smd-1804.md), [SMD-1917](changes/smd-1917.md).
+Landed since the last release and numbered at the next one (SMD-1804): [SMD-1804](changes/smd-1804.md), [SMD-1808](changes/smd-1808.md), [SMD-1901](changes/smd-1901.md), [SMD-1917](changes/smd-1917.md).
 <!-- changes-index:end -->
 
 ### Files we own
@@ -449,6 +449,17 @@ dimension mismatch. Every suite now drops `thought_chunks` first, and
 ```
 
 runs them all in CI's order against one shared database. Use it before pushing.
+
+**Two linters run on every PR (SMD-1808).** `commit-lint` holds each commit to the
+house grammar (`[fork] … (SMD-NNNN)`, and `(caught: …)` on a review pass's finding
+bullets) — `scripts/commitlint.config.mjs`, which shares its tag parser with
+`scripts/mechanism-yield.mjs` through `scripts/commit-grammar.mjs`, so the check
+and the yield count cannot disagree. `workflow-lint` runs `actionlint` (pinned by
+checksum) with `shellcheck` over this workflow's `run:` steps; the workflow now
+sets `defaults.run.shell: bash`, so every step runs under `-eo pipefail` and a
+masked `cmd | grep` failure is surfaced rather than swallowed. Both are opt-in
+locally (`bun scripts/install-hooks.mjs` for the commit hook); making them
+*required* is SMD-1805's ruleset work.
 
 ## Detached from the fork network
 

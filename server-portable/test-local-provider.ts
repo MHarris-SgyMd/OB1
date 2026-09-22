@@ -6,7 +6,9 @@
  * the server sends both calls to OB1_LLM_BASE_URL, uses OB1_EMBEDDING_MODEL and
  * OB1_METADATA_MODEL, and sends NO Authorization header when no key is set.
  * [8] is the other half: with OB1_CHAT_BASE_URL / OB1_CHAT_API_KEY the chat
- * calls go to an endpoint of their own with its own credential (SMD-1902).
+ * calls go to an endpoint of their own with its own credential (SMD-1902), and
+ * [9] gives the supersession judge a model of its own, OB1_JUDGE_MODEL, while
+ * the extractor keeps OB1_METADATA_MODEL (SMD-1901).
  *
  * The stub speaks the OpenAI-compatible shapes Ollama exposes at /v1. It asserts
  * on what the server SENDS as much as what it does with the reply, because that is
@@ -206,7 +208,7 @@ console.log("\n[7] `dimensions` is not sent unless asked for");
          "off by default: the server does not send `dimensions` unasked");
 }
 
-console.log("\n[7] A drifting `type` is normalised, not stored as a new category");
+console.log("\n[7b] A drifting `type` is normalised, not stored as a new category");
 {
   // Observed for real: llama3.2 answered "action_item" for a reminder, which is
   // not in the enum the prompt asks for. Unenforced, that silently fragments the
@@ -323,6 +325,52 @@ console.log("\n[8] The chat calls have an endpoint of their own only when OB1_CH
   assert(msg.includes(B) && !msg.includes(A), `a chat failure names the chat endpoint, not the embeddings one (${msg.slice(0, 80)})`);
   failB = false;
   providerB.stop();
+}
+
+console.log("\n[9] The supersession judge has a model of its own — OB1_JUDGE_MODEL, else the metadata model (SMD-1901)");
+{
+  // Function-level for the reason [8] gives. One stand-in that logs the model
+  // each chat request names, so which knob a dialler read is a fact about the
+  // request; its one reply parses as a judgement and as an extraction alike.
+  const { resolveEmbedConfig } = await import("./embed.ts");
+  const { judgePair, consolidateKey } = await import("./consolidate.ts");
+  const { extractEntities } = await import("./entities.ts");
+  const models: { path: string; model: string }[] = [];
+  const providerC = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      const body = (await req.json()) as { model: string };
+      models.push({ path: new URL(req.url).pathname, model: body.model });
+      return Response.json({ choices: [{ message: { content: JSON.stringify({ verdict: "unrelated", supersedes: "unknown", confidence: 0.9, reason: "", entities: [], relations: [] }) } }] });
+    },
+  });
+  const C = `http://127.0.0.1:${providerC.port}/v1`;
+  const older = { content: "older", createdAt: null };
+  const newer = { content: "newer", createdAt: null };
+  const last = () => models[models.length - 1];
+
+  // Unset: the judge runs on the metadata model, under the pass key every pass
+  // before the knob pooled under — the request of every deployment that
+  // predates it. Remove the fallback in resolveEmbedConfig and these fail.
+  const shared = resolveEmbedConfig({ OB1_LLM_BASE_URL: C, OB1_METADATA_MODEL: META_MODEL });
+  assert(shared.judgeModel === META_MODEL, "OB1_JUDGE_MODEL unset: the judge model IS the metadata model");
+  await judgePair(older, newer, shared);
+  assert(last().path.endsWith("/chat/completions") && last().model === META_MODEL, `…and the judge request names it (${last().model})`);
+  assert(consolidateKey(shared.judgeModel) === consolidateKey(META_MODEL), "…under the metadata model's pass key");
+  assert(resolveEmbedConfig({ OB1_LLM_BASE_URL: C, OB1_METADATA_MODEL: META_MODEL, OB1_JUDGE_MODEL: "" }).judgeModel === META_MODEL,
+         "an empty OB1_JUDGE_MODEL means unset, as for every knob embed.ts reads");
+
+  // Set: on ONE configuration the judge names its model and the extractor
+  // keeps the metadata model — the split the ticket exists for.
+  const split = resolveEmbedConfig({ OB1_LLM_BASE_URL: C, OB1_METADATA_MODEL: META_MODEL, OB1_JUDGE_MODEL: "big-judge" });
+  assert(split.judgeModel === "big-judge" && split.metadataModel === META_MODEL, "OB1_JUDGE_MODEL set: the judge model is its own and the metadata model is untouched");
+  await judgePair(older, newer, split);
+  await extractEntities("Ada met Grace in London", split);
+  const [judge, extract] = models.slice(-2);
+  assert(judge.model === "big-judge", `the judge request names OB1_JUDGE_MODEL (${judge.model})`);
+  assert(extract.model === META_MODEL, `…while the entity extractor's, on the same configuration, names OB1_METADATA_MODEL (${extract.model})`);
+  assert(consolidateKey(split.judgeModel) !== consolidateKey(shared.judgeModel), "a judge-model change is a new pass key, so an earlier model's judgements are not reused as this one's");
+  providerC.stop();
 }
 
 server.stop();
