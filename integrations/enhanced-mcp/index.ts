@@ -71,8 +71,13 @@ const ACTOR = { name: ACTOR_NAME, via: "enhanced-mcp" };
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
+// ob1-fork (SMD-1525): thoughts.id is a UUID on this fork (db/migrations/001), so
+// every tool that addresses a thought takes and returns a string id; upstream's
+// enhanced schema had a BIGINT here. Entity ids are whatever the installed
+// Knowledge Graph schema declares — a UUID or an integer — and are carried as
+// they arrive, compared as strings.
 type ThoughtRow = {
-  id: number;
+  id: string;
   content: string;
   content_fingerprint?: string | null;
   type: string;
@@ -438,17 +443,12 @@ function buildServer(): McpServer {
       description:
         "Fetch a thought by ID with its full metadata and provenance.",
       inputSchema: z.object({
-        id: z.number().int().min(1).describe("Thought ID"),
+        id: z.string().uuid().describe("Thought UUID"),
       }),
     },
     async (params) => {
       try {
-        const id = asInteger(
-          (params as Record<string, unknown>).id,
-          0,
-          1,
-          Number.MAX_SAFE_INTEGER,
-        );
+        const id = asString((params as Record<string, unknown>).id, "").trim();
 
         if (!id) {
           return toolFailure("id is required");
@@ -506,8 +506,8 @@ function buildServer(): McpServer {
       description:
         "Update the content of an existing thought. Re-generates embedding and metadata.",
       inputSchema: z.object({
-        // thoughts.id is a UUID on this fork (the other tools here still take
-        // upstream's integer ids; SMD-1228's "Not done here" holds them).
+        // thoughts.id is a UUID on this fork (every tool here that addresses a
+        // thought takes one since SMD-1525; SMD-1228 moved this one first).
         id: z.string().uuid().describe("Thought UUID to update"),
         content: z
           .string()
@@ -1011,22 +1011,16 @@ function buildServer(): McpServer {
         "Find thoughts related to a given thought via the knowledge graph connections.",
       inputSchema: z.object({
         thought_id: z
-          .number()
-          .int()
-          .min(1)
-          .describe("Thought ID to find connections for"),
+          .string()
+          .uuid()
+          .describe("Thought UUID to find connections for"),
         limit: z.number().int().min(1).max(20).default(10).optional(),
       }),
     },
     async (params) => {
       try {
         const raw = params as Record<string, unknown>;
-        const thoughtId = asInteger(
-          raw.thought_id,
-          0,
-          1,
-          Number.MAX_SAFE_INTEGER,
-        );
+        const thoughtId = asString(raw.thought_id, "").trim();
         const limit = asInteger(raw.limit, 10, 1, 20);
 
         if (!thoughtId) {
@@ -1253,31 +1247,47 @@ function buildServer(): McpServer {
           });
         }
 
-        // Get thought counts for each entity, excluding restricted thoughts
-        const entityIds = entities.map(
-          (e: Record<string, unknown>) => e.id as number,
-        );
-        const { data: countRows, error: countError } = await supabase
+        // Get thought counts for each entity, excluding restricted thoughts.
+        // ob1-fork (SMD-1798): two queries — the links, then the tiers of the
+        // thoughts they name — where one embedded, filtered join was
+        // (`thoughts!inner(sensitivity_tier)` with `.neq("thoughts.…")`): the
+        // SQL shim serves an embed, not a filter on an embedded column. Ids
+        // travel as they arrive (SMD-1525) and are compared as strings.
+        const entityIds = entities.map((e: Record<string, unknown>) => e.id);
+        const { data: linkRows, error: countError } = await supabase
           .from("thought_entities")
-          .select("entity_id, thoughts!inner(sensitivity_tier)")
-          .in("entity_id", entityIds)
-          .neq("thoughts.sensitivity_tier", "restricted");
+          .select("entity_id, thought_id")
+          .in("entity_id", entityIds);
 
         if (countError) {
           console.error("thought count query failed", countError);
         }
 
-        const countMap = new Map<number, number>();
-        if (countRows) {
-          for (const row of countRows) {
-            const eid = (row as Record<string, unknown>).entity_id as number;
+        const countMap = new Map<string, number>();
+        if (linkRows && linkRows.length > 0) {
+          const links = linkRows as Record<string, unknown>[];
+          const thoughtIds = [...new Set(links.map((row) => row.thought_id))];
+          const { data: unrestricted, error: tierError } = await supabase
+            .from("thoughts")
+            .select("id")
+            .in("id", thoughtIds)
+            .neq("sensitivity_tier", "restricted");
+          if (tierError) {
+            console.error("thought tier query failed", tierError);
+          }
+          const allowed = new Set(
+            ((unrestricted ?? []) as Record<string, unknown>[]).map((t) => String(t.id)),
+          );
+          for (const row of links) {
+            if (!allowed.has(String(row.thought_id))) continue;
+            const eid = String(row.entity_id);
             countMap.set(eid, (countMap.get(eid) ?? 0) + 1);
           }
         }
 
         const results = entities.map((e: Record<string, unknown>) => ({
           ...e,
-          thought_count: countMap.get(e.id as number) ?? 0,
+          thought_count: countMap.get(String(e.id)) ?? 0,
         }));
 
         const lines = results.map(
@@ -1305,18 +1315,18 @@ function buildServer(): McpServer {
       description:
         "Get full entity info with connected thoughts and edges from the knowledge graph.",
       inputSchema: z.object({
-        entity_id: z.number().int().min(1).describe("Entity ID"),
+        entity_id: z
+          .union([z.string().min(1), z.number().int().min(1)])
+          .describe("Entity ID — as the installed Knowledge Graph schema declares it: a UUID, or an integer"),
       }),
     },
     async (params) => {
       try {
         const raw = params as Record<string, unknown>;
-        const entityId = asInteger(
-          raw.entity_id,
-          0,
-          1,
-          Number.MAX_SAFE_INTEGER,
-        );
+        const entityId: string | number =
+          typeof raw.entity_id === "number"
+            ? raw.entity_id
+            : asString(raw.entity_id, "").trim();
 
         if (!entityId) {
           return toolFailure("entity_id is required");
@@ -1363,7 +1373,7 @@ function buildServer(): McpServer {
         if (thoughtLinks && thoughtLinks.length > 0) {
           const thoughtIds = (
             thoughtLinks as Record<string, unknown>[]
-          ).map((tl) => tl.thought_id as number);
+          ).map((tl) => tl.thought_id);
           const { data: thoughtRows, error: tError } = await supabase
             .from("thoughts")
             .select("id, content, type, created_at, sensitivity_tier")
@@ -1375,10 +1385,10 @@ function buildServer(): McpServer {
           if (tError) {
             console.error("thoughts fetch failed", tError);
           } else if (thoughtRows) {
-            const roleMap = new Map<number, string>();
+            const roleMap = new Map<string, string>();
             for (const tl of thoughtLinks as Record<string, unknown>[]) {
               roleMap.set(
-                tl.thought_id as number,
+                String(tl.thought_id),
                 tl.mention_role as string,
               );
             }
@@ -1389,7 +1399,7 @@ function buildServer(): McpServer {
                 type: t.type,
                 created_at: t.created_at,
                 mention_role:
-                  roleMap.get(t.id as number) ?? "mentioned",
+                  roleMap.get(String(t.id)) ?? "mentioned",
               }),
             );
           }
@@ -1412,23 +1422,23 @@ function buildServer(): McpServer {
         if (etError) console.error("edges to fetch failed", etError);
 
         // Collect all connected entity IDs to resolve names
-        const connectedIds = new Set<number>();
+        const connectedIds = new Map<string, unknown>();
         for (const e of (edgesFrom ?? []) as Record<string, unknown>[]) {
-          connectedIds.add(e.to_entity_id as number);
+          connectedIds.set(String(e.to_entity_id), e.to_entity_id);
         }
         for (const e of (edgesTo ?? []) as Record<string, unknown>[]) {
-          connectedIds.add(e.from_entity_id as number);
+          connectedIds.set(String(e.from_entity_id), e.from_entity_id);
         }
 
-        const nameMap = new Map<number, { name: string; type: string }>();
+        const nameMap = new Map<string, { name: string; type: string }>();
         if (connectedIds.size > 0) {
           const { data: connEntities } = await supabase
             .from("entities")
             .select("id, canonical_name, entity_type")
-            .in("id", Array.from(connectedIds));
+            .in("id", Array.from(connectedIds.values()));
           if (connEntities) {
             for (const ce of connEntities as Record<string, unknown>[]) {
-              nameMap.set(ce.id as number, {
+              nameMap.set(String(ce.id), {
                 name: ce.canonical_name as string,
                 type: ce.entity_type as string,
               });
@@ -1443,9 +1453,9 @@ function buildServer(): McpServer {
             relation: e.relation,
             other_entity_id: e.to_entity_id,
             other_entity_name:
-              nameMap.get(e.to_entity_id as number)?.name ?? "unknown",
+              nameMap.get(String(e.to_entity_id))?.name ?? "unknown",
             other_entity_type:
-              nameMap.get(e.to_entity_id as number)?.type ?? "unknown",
+              nameMap.get(String(e.to_entity_id))?.type ?? "unknown",
             support_count: e.support_count,
             confidence: e.confidence,
           })),
@@ -1455,9 +1465,9 @@ function buildServer(): McpServer {
             relation: e.relation,
             other_entity_id: e.from_entity_id,
             other_entity_name:
-              nameMap.get(e.from_entity_id as number)?.name ?? "unknown",
+              nameMap.get(String(e.from_entity_id))?.name ?? "unknown",
             other_entity_type:
-              nameMap.get(e.from_entity_id as number)?.type ?? "unknown",
+              nameMap.get(String(e.from_entity_id))?.type ?? "unknown",
             support_count: e.support_count,
             confidence: e.confidence,
           })),

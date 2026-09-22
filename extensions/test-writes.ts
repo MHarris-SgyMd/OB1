@@ -436,6 +436,16 @@ try {
   const [side] = await sql`SELECT type, sensitivity_tier, importance FROM thoughts WHERE id = ${id}`;
   assert(side.type === "idea" && side.sensitivity_tier === "standard" && Number(side.importance) === 3, "the enhanced-thoughts columns are written beside the function, by the raw update that carries neither content nor vector");
 
+  // SMD-1525: the read tools take the row's UUID too — they took upstream's integer id and could reach no row here.
+  const got = await call(h, "get_thought", { id });
+  assert(!got.isError && got.structured?.thought?.id === id && got.structured?.thought?.content === text, `get_thought takes the thought's UUID and answers the row (${got.toolText.slice(0, 60)})`);
+  const gotInt = await call(h, "get_thought", { id: 7 });
+  assert(gotInt.isError || gotInt.json?.error, `…and an integer id is refused by the schema, not looked up (${gotInt.isError ? gotInt.toolText.slice(0, 40) : JSON.stringify(gotInt.json?.error).slice(0, 60)})`);
+  const gotNone = await call(h, "get_thought", { id: "00000000-0000-4000-8000-000000000000" });
+  assert(gotNone.isError && /not found/.test(gotNone.toolText), "…and an unknown UUID is not found");
+  const related = await call(h, "related_thoughts", { thought_id: id });
+  assert(!related.isError && related.structured?.thought_id === id && Array.isArray(related.structured?.results), `related_thoughts takes the UUID and reaches get_thought_connections (enhanced-thoughts's, p_thought_id UUID) rather than binding an integer (${related.toolText.slice(0, 60)})`);
+
   const captured = "a fresh thought captured through enhanced-mcp";
   const c = await call(h, "brain_capture_thought", { content: captured });
   assert(!c.isError && /^Captured new thought #/.test(c.toolText) && UUID.test(String(c.structured?.thought_id)) && c.structured?.action === "inserted",
