@@ -52,6 +52,7 @@ import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 import { loadLinearCorpus, linearThoughtId, linearThoughtText, type LinearDoc } from "../evals/linear-corpus.ts";
 import { parseFragment, fragmentSection } from "../scripts/fragments.mjs";
+import { headingOf, ticketsOf } from "../scripts/fork-index.mjs";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -113,8 +114,14 @@ export function forkDocFromFile(slug: string, text: string): Doc {
     const tickets = Array.isArray(parsed.fm.tickets) ? (parsed.fm.tickets as string[]) : [];
     return { id: recordId("fork", slug), content: fork, source: "fork", meta: { change: null, ticket: tickets[0] ?? null, file: slug } };
   }
-  const change = Number(slug.match(/^(\d+)-/)?.[1]) || null;
-  return { id: recordId("fork", slug), content: text.trim(), source: "fork", meta: { change, ticket: text.match(/\bSMD-\d+\b/)?.[0] ?? null, file: slug } };
+  // A numbered rendered change: the fork's own parsers read the number and the
+  // owning ticket from the `# N. Title (SMD-…)` heading — the canonical pair the
+  // changes index shows — rather than the first SMD id anywhere in the body,
+  // which could be an incidental cross-reference ("superseded by", "unlike").
+  const heading = headingOf(text);
+  const change = heading?.n ?? (Number(slug.match(/^(\d+)-/)?.[1]) || null);
+  const ticket = heading ? ticketsOf(heading.title)[0] ?? null : null;
+  return { id: recordId("fork", slug), content: text.trim(), source: "fork", meta: { change, ticket, file: slug } };
 }
 
 /** Every fork change in the changes/ directory (its README aside). */
@@ -291,9 +298,11 @@ function selfCheck(): number {
   let bad = 0;
   const ok = (cond: boolean, label: string) => { if (!cond) { console.error(`FAIL ${label}`); bad++; } };
 
-  const numbered = forkDocFromFile("018-long-captures-stay-searchable", "# 18. Long captures stay searchable — `thought_chunks`\n\nthe body of eighteen (SMD-1175).\nmore of eighteen");
-  ok(numbered.source === "fork" && numbered.meta.change === 18 && numbered.meta.ticket === "SMD-1175", "a numbered rendered change: number from the filename, ticket from the text");
-  ok(/# 18\. Long captures/.test(numbered.content) && /more of eighteen/.test(numbered.content), "…and its whole file is the content");
+  const numbered = forkDocFromFile("042-a-change", "# 42. A change — the thing (SMD-1300)\n\nthe body\nmore body");
+  ok(numbered.source === "fork" && numbered.meta.change === 42 && numbered.meta.ticket === "SMD-1300", "a numbered change: number and owning ticket from the `# N. Title (SMD-…)` heading");
+  ok(/# 42\. A change/.test(numbered.content) && /more body/.test(numbered.content), "…and its whole file is the content");
+  const noTitleTicket = forkDocFromFile("018-long-captures", "# 18. Long captures — `thought_chunks`\n\nbody unlike SMD-968's approach");
+  ok(noTitleTicket.meta.change === 18 && noTitleTicket.meta.ticket === null, "…and a title with no ticket carries null, not an incidental body reference (SMD-968)");
   const pending = forkDocFromFile("smd-1806", "---\ntype: added\nbump: minor\ntickets: [SMD-1806]\nmigrations: []\n---\n\n## Changelog\n\none line (SMD-1806)\n\n## FORK\n\nThe title line (SMD-1806)\n\nthe record body.");
   ok(pending.meta.change === null && pending.meta.ticket === "SMD-1806", "a pending fragment: no change number yet, ticket from the front matter");
   ok(pending.content.startsWith("The title line (SMD-1806)") && /the record body/.test(pending.content) && !/## Changelog/.test(pending.content), "…and the content is the `## FORK` body alone");
