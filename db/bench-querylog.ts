@@ -216,18 +216,23 @@ async function medianBatchMs(c: SQL, n: number): Promise<number> {
 }
 
 /**
- * `n` single-row awaited INSERTs, one round trip each — the exact shape and cost
- * the request hot path pays when OB1_QUERY_LOG=on (round-trip dominated). This is
- * the number the "keep the await" decision is grounded in: it is what a search or
- * a fetch waits for before returning.
+ * The median wall time of one single-row awaited INSERT — one round trip each, the
+ * exact shape and cost the request hot path pays when OB1_QUERY_LOG=on (round-trip
+ * dominated). This is the number the "keep the await" decision is grounded in, so it
+ * takes the median of `n` calls with the first discarded as warm-up, not a single
+ * mean: a GC pause or scheduler stall in one call then moves one sample, not the
+ * headline figure (matching timePrune / medianBatchMs).
  */
-async function timeAwaitedInserts(c: SQL, n: number): Promise<number> {
-  const t = performance.now();
-  for (let i = 0; i < n; i++) {
+async function medianAwaitedMs(c: SQL, n: number): Promise<number> {
+  const runs: number[] = [];
+  for (let i = 0; i <= n; i++) {
+    const t = performance.now();
     await c`INSERT INTO query_log (kind, tool, query, agent_id, tier, arm)
             VALUES ('search', 'search_thoughts', ${"q" + i}, gen_random_uuid(), 'canary', 'hybrid')`;
+    if (i > 0) runs.push(performance.now() - t);
   }
-  return performance.now() - t;
+  runs.sort((a, b) => a - b);
+  return runs[Math.floor(runs.length / 2)];
 }
 
 function fmtMs(ms: number): string {
@@ -326,7 +331,7 @@ const withIdxC = await load();
 let withMs: number, awaitedMs: number;
 try {
   withMs = await medianBatchMs(withIdxC, WRITE_BATCH);
-  awaitedMs = await timeAwaitedInserts(withIdxC, AWAITED_PROBES);
+  awaitedMs = await medianAwaitedMs(withIdxC, AWAITED_PROBES);
 } finally {
   await withIdxC.close();
 }
@@ -345,7 +350,7 @@ console.log(
   `   batch ${WRITE_BATCH.toLocaleString()}: ${fmtMs(withoutMs)} without → ${fmtMs(withMs)} with  ` +
     `(${perRowUs(withMs, withoutMs, WRITE_BATCH)}/row for the index)`
 );
-console.log(`   awaited single INSERT: ${(awaitedMs / AWAITED_PROBES).toFixed(2)} ms/call (what the hot path waits for)`);
+console.log(`   awaited single INSERT: ${awaitedMs.toFixed(2)} ms/call median (what the hot path waits for)`);
 console.log();
 
 // ── Report ───────────────────────────────────────────────────────────────────
@@ -380,6 +385,6 @@ console.log("| batch without index | batch with 047 | index adds per row | await
 console.log("| ---: | ---: | ---: | ---: |");
 console.log(
   `| ${fmtMs(write.withoutMs)} | ${fmtMs(write.withMs)} | ` +
-    `${perRowUs(write.withMs, write.withoutMs, WRITE_BATCH)} | ${(write.awaitedMs / AWAITED_PROBES).toFixed(2)} ms/call |`
+    `${perRowUs(write.withMs, write.withoutMs, WRITE_BATCH)} | ${write.awaitedMs.toFixed(2)} ms/call |`
 );
 console.log();
