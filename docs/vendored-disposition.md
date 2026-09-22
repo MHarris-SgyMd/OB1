@@ -80,6 +80,20 @@ fails CI"):**
 3. When `recency-boosted-match-thoughts` is removed, delete its now-dead allowlist entry
    at `check-fork-consistency.mjs:614`.
 
+**Consistency fixes surfaced by the audit (behaviour-neutral; apply in the landing PRs so
+`check-fork-consistency` + the suites verify them — not dispositions):**
+1. **`schemas/smart-ingest` folder-name drift** — several refs say `schemas/smart-ingest-tables`
+   (`integrations/smart-ingest/index.ts`, `integrations/rest-api` comments,
+   `recipes/brain-smoke-test`); the folder is `schemas/smart-ingest`.
+2. **`recipes/content-fingerprint-dedup` stale paths** — some cross-refs point at
+   `primitives/content-fingerprint-dedup` and an upstream GitHub URL
+   (`recipes/email-history-import`, `recipes/gmail-smart-pull`,
+   `dashboards/ob1-canonical-landing`); the folder is under `recipes/`, and the upstream
+   URL overlaps SMD-1929.
+3. **`schemas/workflow-status` bare `ADD COLUMN`** — add `IF NOT EXISTS` to its two
+   `ALTER TABLE thoughts ADD COLUMN` statements (aligns with guard check 5; removes the
+   `enhanced-thoughts` install-order collision noted in its row).
+
 ## How the "verified no references" gate is applied
 
 An artifact is *referenced* — and therefore not removable — when something outside its
