@@ -164,7 +164,7 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `1214 assertions: 1214 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `1219 assertions: 1219 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports forty-five (45) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
@@ -850,7 +850,7 @@ hand-written SQL: **mentions** (distinct thoughts mentioning an entity),
 (distinct thoughts evidencing any edge touching it); around a subject, per
 neighbour, **co_mentions** (thoughts mentioning both) and **support** (thoughts
 evidencing an edge between them, any relation, either direction, the
-per-relation counts shown). Reads only; one connection.
+per-relation counts shown). Reads only; one connection; `--limit` is 20 by default and at most 500.
 
 ```bash
 bun graph-centrality.ts --url postgres://…                     # the whole graph: top entities by mentions, the hubs by degree, top thoughts
@@ -1447,7 +1447,7 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 1214 assertions, PGlite, no container
+bun test-schema.ts                          # 1219 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts         # 601 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database

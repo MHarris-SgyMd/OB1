@@ -5267,15 +5267,12 @@ console.log("\n[43] db/graph-centrality.ts: mentions, degree and support as defi
   assert(/needs quoting/.test(threw), "…and refuses a value it cannot write unquoted");
   // The numeric rule, shape by shape — bare numbers, ports, addresses and
   // spaced digits in; anything with a letter, or an empty or padded name,
-  // out — asked of BOTH engines that compile the one pattern: Postgres in
-  // scopeSql and coverage, JS in the ladder's probe. A shape the two read
-  // apart would leave the probe silent while the SQL still filters (fourth
-  // review pass).
+  // out. Postgres is the one engine that reads the pattern since the sixth
+  // pass (every rung marks its own rows), so it is asked of Postgres.
   const numeric = async (s: string) => (await db.query<{ m: boolean }>(`SELECT $1 ~ $2 AS m`, [s, NUMERIC_NAME_RE])).rows[0].m;
-  const js = new RegExp(NUMERIC_NAME_RE);
   for (const [name, expected] of [["021", true], ["11434", true], ["127.0.0.1", true], ["10 000", true], ["0:0", true], ["1.", true],
                                   ["pg16", false], ["smd 1938", false], ["migration 021", false], ["x021", false], ["", false], [" 21", false], ["2 1x", false]] as [string, boolean][])
-    assert((await numeric(name)) === expected && js.test(name) === expected, `${JSON.stringify(name)} is ${expected ? "" : "not "}a numeric name, in Postgres and in JS alike`);
+    assert((await numeric(name)) === expected, `${JSON.stringify(name)} is ${expected ? "" : "not "}a numeric name`);
   const dup = parseArgs(["--types", "tool,tool,tool,tool,tool,tool"]);
   assert(!("error" in dup) && dup.opts.types.join() === "tool", "a repeated type is one type");
   assert(!render(await graphReport(run, null, { ...on, types: ["tool", "tool", "tool", "tool", "tool", "tool"] as GraphOptions["types"] })).includes("every type"),
@@ -5343,9 +5340,33 @@ console.log("\n[43] db/graph-centrality.ts: mentions, degree and support as defi
   assert(noNeighbour.includes("No neighbour:") && !noNeighbour.includes("\n\n\n"), "a subject with nothing in scope beside it says so, with one blank line, not two (fourth review pass)");
   const guessedNumeric = await resolveSubject(run, "0219", on);
   assert(guessedNumeric.how === "fuzzy" && guessedNumeric.subjects[0].name === "021x", `a numeric name that is NOT an entity still reaches the guesses (${guessedNumeric.how})`);
+  // The fuzzy rung under the same rule as the others (sixth review pass): a
+  // near-miss whose only guess is the numeric 021 is excluded, not "nothing
+  // within trigram similarity"; kept, 021 is the guess. "02" is near "021"
+  // (0.4) and not near "021x" (two of six trigrams, 0.33 — also a guess, but
+  // in the rule and so first; hence the mixed case below asserts the order).
+  const nearNumeric = await resolveSubject(run, "02", on);
+  assert(nearNumeric.how === "fuzzy" ? nearNumeric.subjects.every((s) => s.name !== "021") : nearNumeric.how === "none" && nearNumeric.excluded === true,
+    `under the rule a fuzzy match never offers 021 (${nearNumeric.how}, ${nearNumeric.subjects.map((s) => s.name).join(",")})`);
+  const nearKept = await resolveSubject(run, "02", keep);
+  assert(nearKept.how === "fuzzy" && nearKept.subjects.some((s) => s.name === "021"), `…and kept, 021 is among the guesses (${nearKept.subjects.map((s) => s.name).join(",")})`);
   await db.query(`DELETE FROM thoughts WHERE id = $1`, [t11]);
   await db.exec(`SELECT prune_orphan_entities()`);
   assert((await graphCoverage(run, on)).entities === 4, "the fixture is back to four");
+  // With no near name in the rule's scope, the only guess for "02" is 021, and
+  // the ladder says the rule hid it (exit 3's case), not that nothing is near.
+  const onlyNumeric = await resolveSubject(run, "02", on);
+  assert(onlyNumeric.how === "none" && onlyNumeric.excluded === true, `a fuzzy near-miss whose only guess is numeric is excluded, not a miss (${onlyNumeric.how}, ${onlyNumeric.excluded})`);
+  assert(render(await graphReport(run, "02", on)).includes("pass --keep-numeric") && (await resolveSubject(run, "02", keep)).how === "fuzzy", "…the flag is named, and kept it is a guess");
+
+  // Model output is rendered clean: a control sequence in a name never reaches
+  // the terminal, and a newline in one never breaks a row (sixth review pass).
+  const t14 = await thought("An entity with a hostile name.");
+  await record(t14, [E("Evil\u001b[31mName\nSplit", "tool")]);
+  const hostile = render(await graphReport(run, null, on));
+  assert(!hostile.includes("\u001b") && hostile.includes("Evil[31mName Split"), "the rendered table carries no control character — the escape is gone, its bare text stays — and one space for the newline");
+  await db.query(`DELETE FROM thoughts WHERE id = $1`, [t14]);
+  await db.exec(`SELECT prune_orphan_entities()`);
 
   // A non-numeric name that is an ALIAS of a numeric-named entity is the same
   // stop: the match exists, the rule hid it, exit 3 not 1 (fifth review pass).
