@@ -271,10 +271,14 @@ server/test-stateless.mjs        # fix 1
 server/test-stats-pagination.mjs # fix 3   (new file)
 server/test-capture-atomicity.mjs# fix 5   (new file)
 db/migrations/                   # fix 9   (moved here from server/ in fix 9)
-.github/metadata.schema.json     # fix 7   (3 additive optional fields)
+.github/metadata.schema.json     # fix 7   (3 additive optional fields); SMD-1933 adds `connectors`
 .github/workflows/fork-checks.yml# fix 7   (new file)
 scripts/check-fork-consistency.mjs # fix 7 (new file)
 scripts/mechanism-yield.mjs      # SMD-1711 (new file — review-pass yield report, not a gate); window and attribution fixed SMD-1728
+scripts/connector-registry.mjs   # SMD-1933 (new file — the connector registry's rules and the spec's table renderer)
+scripts/contributions.mjs        # SMD-1933 (new file — the one walk of the contribution directories)
+docs/connector-registry.json     # SMD-1933 (new file — the connector taxonomy's one source)
+docs/connector-taxonomy.md       # SMD-1933 (new file — the spec; its tables are rendered from the JSON)
 server-portable/                 # fix 8   (new dir — parallel, does not touch server/)
 db/                              # fix 9   (new dir — schema, runner, tests)
 deploy/                          # fix 12  (new dir — compose stack, smoke test)

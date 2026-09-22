@@ -54,7 +54,6 @@ export const CAPABILITY_KEYS = ["vendor", "family", "transport", "direction", "c
 /** A family's schema: what the seam needs from a fetcher, and how the brain projects it (SMD-1867's five outputs). */
 export const FAMILY_TEXT_FIELDS = ["item", "grouping_key", "canonical", "text", "identity", "dividing_line"];
 export const FAMILY_LIST_FIELDS = ["edges", "metadata", "typical_transport"];
-/** A metadata.json tag that says "this touches an external system" until the registry or an excuse says otherwise. */
 /**
  * A metadata.json tag that says "this touches an external system" until the
  * registry or an excuse says otherwise — the net under the `connectors` field
@@ -64,14 +63,15 @@ export const FAMILY_LIST_FIELDS = ["edges", "metadata", "typical_transport"];
  */
 export const TRIGGER_TAGS = ["import", "digest", "webhook", "messaging", "email", "bot"];
 /**
- * A disposition row folds into SMD-1867 when its Disposition CELL says so —
- * "→ fold-in **SMD-1867**" or "→ SMD-1867 candidate"; the Justification cell
- * is prose ("not an SMD-1867 adapter", "was the SMD-1867 candidate") and is
- * not read.
+ * A disposition row folds into SMD-1867 when its Disposition CELL says so with
+ * the table's arrow — "→ fold-in **SMD-1867**" or "→ SMD-1867 candidate"; a
+ * cell that recounts ("remove — was the SMD-1867 candidate") and the
+ * Justification cell ("not an SMD-1867 adapter") are prose and are not read.
  */
-export const FOLD_IN_RE = /fold-in \*\*SMD-1867\*\*|SMD-1867 candidate/;
+export const FOLD_IN_RE = /→ (?:fold-in \*\*SMD-1867\*\*|SMD-1867 candidate)/;
 const VENDOR = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
-const PATH = new RegExp(`^(?:${CATEGORIES.join("|")})/[a-z0-9]+(?:-[a-z0-9]+)*$`);
+/** A registry path is a contribution directory: any name the walk admits (contributions.mjs), under one of the categories. */
+const PATH = new RegExp(`^(?:${CATEGORIES.join("|")})/[^/\\s]+$`);
 
 const sameSet = (a, b) => Array.isArray(a) && a.length === b.length && [...a].sort().join("\u0000") === [...b].sort().join("\u0000");
 const nonEmpty = (v) => typeof v === "string" && v.trim().length > 0;
@@ -127,19 +127,27 @@ export function contributionsOnDisk(root) {
 }
 
 /**
- * Does a not-a-connector pattern explain this service string? Only when its
- * match BEGINS the first or the second word: "OpenRouter or Anthropic", "Any
- * OpenAI-compatible LLM gateway (…)", "Optional: OpenRouter (…)" are a provider
- * first and qualified after; "Notion API (summaries via OpenRouter)", "Notion
- * (OpenRouter)" and "Gmail/OpenAI" name a vendor first and a provider after a
- * bracket or a slash, and are not covered — one external system per
- * `requires.services` entry, the system's name first. Returns the patterns
- * that cover it (empty when none does).
+ * One exec per pattern, two answers. `live`: the patterns that match the
+ * service string anywhere (liveness, which the stale rule reads). `covering`:
+ * the patterns whose match BEGINS the first or the second word — the ones that
+ * explain the string: "OpenRouter or Anthropic", "Any OpenAI-compatible LLM
+ * gateway (…)", "Optional: OpenRouter (…)" are a provider first and qualified
+ * after; "Notion API (summaries via OpenRouter)", "Notion (OpenRouter)" and
+ * "Gmail/OpenAI" name a vendor first and a provider after a bracket or a slash,
+ * and are not covered — one external system per `requires.services` entry, the
+ * system's name first.
  */
-export function coveringPatterns(service, patterns) {
+export function patternHits(service, patterns) {
   const starts = [];
   for (const w of service.matchAll(/\S+/g)) { starts.push(w.index); if (starts.length === 2) break; }
-  return patterns.filter((p) => { const hit = p.re.exec(service); return hit !== null && starts.includes(hit.index); });
+  const live = [], covering = [];
+  for (const p of patterns) {
+    const hit = p.re.exec(service);
+    if (hit === null) continue;
+    live.push(p);
+    if (starts.includes(hit.index)) covering.push(p);
+  }
+  return { live, covering };
 }
 
 const listOf = (v) => (Array.isArray(v) ? v : []);
@@ -188,9 +196,9 @@ export function triggersFor({ metadataByPath, dispositionPaths: disp, patterns, 
     if (declared.length) add(path, `declares connectors: [${declared.join(", ")}]`);
     for (const s of listOf(meta?.requires?.services)) {
       if (typeof s !== "string") continue;
-      let anywhere = false;
-      for (const p of patterns) if (p.re.test(s)) { p.hits++; anywhere = true; }
-      if (coveringPatterns(s, patterns).length === 0) add(path, `requires.services names ${JSON.stringify(s)}${anywhere ? " (a not-a-connector pattern matches it, but not at its first or second word — one system per entry, its name first)" : ""}`);
+      const { live, covering } = patternHits(s, patterns);
+      for (const p of live) p.hits++;
+      if (covering.length === 0) add(path, `requires.services names ${JSON.stringify(s)}${live.length ? " (a not-a-connector pattern matches it, but not at its first or second word — one system per entry, its name first)" : ""}`);
     }
     const tags = listOf(meta?.tags).filter((t) => typeof t === "string").map((t) => t.toLowerCase());
     const shaped = tags.filter((t) => TRIGGER_TAGS.includes(t));
@@ -431,7 +439,7 @@ function main() {
   // The renderer assumes a sound registry: with findings above, the tables are neither rendered nor compared.
   if (problems.length) {
     report(problems);
-    console.error(check ? `FAIL — ${problems.length} problem(s)` : `refusing to render from a registry with ${problems.length} problem(s)`);
+    console.error(check ? `FAIL — ${problems.length} problem(s)` : `refusing to render: ${problems.length} problem(s) above, each at the file it names`);
     process.exit(1);
   }
   const rendered = attempt(REGISTRY_PATH, () => renderClassification(registry));

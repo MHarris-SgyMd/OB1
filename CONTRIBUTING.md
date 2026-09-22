@@ -178,11 +178,12 @@ Every contribution needs a `metadata.json` file. Here's the template:
 
 **Required fields:** `name`, `description`, `category`, `author` (with `name`), `version`, `requires.open_brain` (must be `true`), `tags` (at least 1), `difficulty` (one of: `beginner`, `intermediate`, `advanced`), `estimated_time`
 
-**Optional fields:** `author.github`, `requires.services`, `requires.tools`, `requires_skills`, `created`, `updated`
+**Optional fields:** `author.github`, `requires.services`, `requires.tools`, `requires_skills`, `connectors`, `created`, `updated`
 
 **Additional structured dependency fields:**
 - `requires_skills` — array of skill slugs this contribution depends on (e.g., `["auto-capture"]`). Use this when the reusable behavior lives in `skills/<slug>/`
 - `requires_primitives` — array of primitive slugs this contribution depends on (e.g., `["rls", "shared-mcp"]`)
+- `connectors` — array of the external systems this contribution reads from or delivers to, as the vendor keys of [`docs/connector-registry.json`](docs/connector-registry.json) (e.g., `["gmail"]`, `["telegram", "google-calendar"]`). Omit it for a contribution that touches no external system; when present, the contribution is classified in the registry (see "Connectors" below)
 
 **Extension-specific fields:**
 - `learning_order` — integer position in the extension learning path (1-6)

@@ -227,6 +227,15 @@ function checkMetadata({ cat, dir, rel }) {
   if ("tags" in d && (!Array.isArray(d.tags) || d.tags.length < 1)) {
     fail(at, "tags must be a non-empty array");
   }
+  // The schema's shape for `connectors` (SMD-1933), applied here since no ajv gate runs: a list of
+  // distinct kebab-case registry keys. A malformed declaration would read as "declares nothing".
+  if ("connectors" in d) {
+    if (!Array.isArray(d.connectors)) fail(at, `connectors must be an array of registry keys, got ${JSON.stringify(d.connectors)}`);
+    else {
+      for (const c of d.connectors) if (typeof c !== "string" || !/^[a-z0-9]+(-[a-z0-9]+)*$/.test(c)) fail(at, `connectors entry ${JSON.stringify(c)} is not a kebab-case key`);
+      if (new Set(d.connectors).size !== d.connectors.length) fail(at, "connectors lists a key twice");
+    }
+  }
   for (const k of ["created", "updated"]) {
     if (k in d && !/^\d{4}-\d{2}-\d{2}$/.test(String(d[k]))) fail(at, `${k} '${d[k]}' is not YYYY-MM-DD`);
   }
@@ -3475,7 +3484,7 @@ const REGISTRY_PROBES = [
 ];
 /** [text, want]: what dispositionPaths reads from a table — the fold-in marker in the Disposition cell under a contribution-category heading, and nothing from the Justification cell, past another heading, under `docs/drafts/`, or from a bare mention or a negation. */
 const DISPOSITION_PROBES = [
-  ["### `integrations/` (2)\n\n| Artifact | Disposition | Justification |\n|---|---|---|\n| `a-capture` | keep + audited → fold-in **SMD-1867** | x |\n| `b-tool` | keep + audited | mentioned beside SMD-1867 and SMD-1924; a tool, not a fold-in |\n| `e-graph` | keep + audited | a graph view; not an SMD-1867 adapter |\n\n### `recipes/` (1)\n\n| `c-import` | keep + audited → SMD-1867 candidate | x |\n| `f-import` | keep + audited *(drop one sub-file)* → SMD-1867 candidate | x |\n| `h-import` | remove | superseded by the seam; was the SMD-1867 candidate |\n| `g-ext` | keep + audited | A capture adapter under the SMD-1867 contract, not an ad-hoc integration. |\n\n### `docs/drafts/` (1)\n\n| `sketch.md` | keep + audited → SMD-1867 candidate | not a contribution directory |\n\n## Notes\n\n| `d-tool` | remove → fold-in **SMD-1867** | was considered |\n", ["integrations/a-capture", "recipes/c-import", "recipes/f-import"]],
+  ["### `integrations/` (2)\n\n| Artifact | Disposition | Justification |\n|---|---|---|\n| `a-capture` | keep + audited → fold-in **SMD-1867** | x |\n| `b-tool` | keep + audited | mentioned beside SMD-1867 and SMD-1924; a tool, not a fold-in |\n| `e-graph` | keep + audited | a graph view; not an SMD-1867 adapter |\n\n### `recipes/` (1)\n\n| `c-import` | keep + audited → SMD-1867 candidate | x |\n| `f-import` | keep + audited *(drop one sub-file)* → SMD-1867 candidate | x |\n| `h-import` | remove | superseded by the seam; was the SMD-1867 candidate |\n| `i-import` | remove — was the SMD-1867 candidate | superseded by the seam |\n| `g-ext` | keep + audited | A capture adapter under the SMD-1867 contract, not an ad-hoc integration. |\n\n### `docs/drafts/` (1)\n\n| `sketch.md` | keep + audited → SMD-1867 candidate | not a contribution directory |\n\n## Notes\n\n| `d-tool` | remove → fold-in **SMD-1867** | was considered |\n", ["integrations/a-capture", "recipes/c-import", "recipes/f-import"]],
   ["## Summary\n\n| `x-tool` | fold-in **SMD-1867** |\n", []],
 ];
 function checkConnectorRegistry() {
@@ -3527,7 +3536,7 @@ function checkConnectorRegistry() {
   try { registry = readRegistry(ROOT); } catch (e) { return fail(REGISTRY_PATH, `does not parse: ${e.message} (SMD-1933)`); }
   const dispositionText = existsSync(join(ROOT, DISPOSITION_PATH)) ? readFileSync(join(ROOT, DISPOSITION_PATH), "utf8") : "";
   let problems;
-  // readMetadata is the one statement of "absent is not in the map, unparseable is {}" — the CLI reads the same; check 1 names the unparseable file.
+  // readMetadata is the one statement of "absent is not in the map, unparseable is null (no verdict)" — the CLI reads the same; check 1 names the unparseable file.
   try { problems = registryProblems({ registry, existingDirs: dirs.map((d) => d.rel), metadataByPath: readMetadata(dirs), dispositionText }); } catch (e) { return fail(REGISTRY_PATH, `check 18 threw instead of reporting: ${e.message} (SMD-1933)`); }
   for (const p of problems) fail(p.where, `${p.msg} (SMD-1933)`);
   if (!existsSync(join(ROOT, SPEC_PATH))) return fail(SPEC_PATH, "missing — the spec that carries the registry's rendered tables (SMD-1933)");
