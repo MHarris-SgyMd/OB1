@@ -1629,10 +1629,25 @@ console.log("\n[20b] Migration 045 onto a populated 044 — the audit row gains 
   ev = await rowOf(fresh.id);
   assert(ev.actor_kind === "operator" && ev.trust === "operator" && ev.origin === "open-brain" && ev.actor_context === null && ev.backfilled_at == null && ev.stance === "stated",
     "after 045 a write through a classified key stamps its kind, trust and door, and the event");
-  const bf = (await sql`SELECT backfill_thought_audit_events() AS r`)[0].r as { rows: number; awaiting_kind: number };
+  // Two passes at once — the capture and the edit are the two rows to fill: A
+  // takes one and holds its transaction open; B, started meanwhile, waits on
+  // that row's lock, and when A commits re-reads it as filled and skips it
+  // (READ COMMITTED; the UPDATE's WHERE is re-evaluated on the locked row), so
+  // B fills the other row only and counts one — not two, and A's stamp is not
+  // written over (run-it, first review pass: the first UPDATE re-stamped and
+  // re-counted every row the other pass had filled).
+  const passA = new SQL({ url: URL_, max: 1 });
+  await passA`BEGIN`;
+  const bfA = (await passA`SELECT backfill_thought_audit_events(1) AS r`)[0].r as { rows: number };
+  const pendingB = sql`SELECT backfill_thought_audit_events() AS r`;
+  await new Promise((r) => setTimeout(r, 400));
+  await passA`COMMIT`;
+  await passA.close();
+  const bf = (await pendingB)[0].r as { rows: number; awaiting_kind: number };
   ev = await rowOf(mcpRow.id);
-  assert(bf.rows === 2 && ev.actor_kind === "operator" && ev.trust === "operator" && ev.backfilled_at != null && ev.source === "mcp",
-    `…and the backfill called again classifies the rows written before — the capture and the edit — by their agent id, stamped; the source stays what 044 wrote (${bf.rows})`);
+  const stamps = (await sql`SELECT count(DISTINCT backfilled_at)::int AS c FROM thought_audit WHERE thought_id = ${mcpRow.id}::uuid AND backfilled_at IS NOT NULL`)[0].c as number;
+  assert(bfA.rows === 1 && bf.rows === 1 && Number(stamps) === 2 && ev.actor_kind === "operator" && ev.trust === "operator" && ev.backfilled_at != null && ev.source === "mcp",
+    `…and the backfill classifies the rows written before — the capture and the edit — by their agent id, stamped; two passes at once fill one row each and neither re-stamps the other's (${bfA.rows} + ${bf.rows}, ${stamps} stamp(s)); the source stays what 044 wrote`);
   assert(bf.awaiting_kind === 1, `…leaving the SMD-1541 row waiting on a kind for MCP_ACCESS_KEY (${bf.awaiting_kind})`);
 
   const shapeAfter = await shape(sql);

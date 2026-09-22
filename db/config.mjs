@@ -1461,12 +1461,19 @@ export const ROLE_GRANTS = Object.freeze({
     // citations that name the row and, detaching, writes them. A role without
     // these cannot delete any thought, cited or not.
     Object.freeze({ table: "thought_facets", privileges: Object.freeze(["SELECT", "UPDATE"]),                     since: "042" }),
+    // 045's audit trigger runs as the caller on EVERY write that carries an
+    // actor: it reads the key's kind from ob1_agents (by id, else by name). A
+    // role without SELECT there fails every capture, edit and delete inside the
+    // trigger — so SELECT is hard here, while the writes resolve_agent makes
+    // stay soft, in `server` below (SMD-1730, first review pass).
+    Object.freeze({ table: "ob1_agents",     privileges: Object.freeze(["SELECT"]),                               since: "045" }),
   ]),
   // The server's soft extras, beyond the hard capture set: preflight reads its
   // own `ob1_config` as this role, and `resolve_agent` (010, SECURITY INVOKER)
   // attributes a write when a key is presented — and it UPSERTs both agent
   // tables (last_used_at, and registering an agent/key), so SELECT alone leaves
-  // it raising. A capture tolerates all of this: the resolve step is caught
+  // it raising. A capture tolerates all of this (SELECT on ob1_agents excepted,
+  // which 045's trigger made hard — above): the resolve step is caught
   // (agents.ts) and attribution degrades, and preflight only warns on the
   // config read. Documented and granted, not enforced — but granted with the
   // writes `resolve_agent` actually makes, so attribution works when it lands.

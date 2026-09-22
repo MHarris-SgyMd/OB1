@@ -1289,6 +1289,21 @@ else {
          "a resolved key nobody has classified is a warning naming it, with set_agent_kind and the backfill as the remedy (SMD-1730)");
   await claims.unsafe(`SELECT set_agent_kind('unclassified-key', 'agent')`);
   assert(/✓  audit events\s+045's event shape present/.test((await run(SQL_ENV)).out), "…and classified, the check is ok again");
+  // A column dropped from under 045's trigger is fatal — the trigger INSERTs
+  // into it, so every write would fail; the same missing column on a brain
+  // whose trigger is 025's is the ordinary state before 045 — writes go
+  // through — and a warning naming 045 (first review pass: the first draft
+  // called both a failure).
+  await claims.unsafe("ALTER TABLE thought_audit DROP COLUMN backfilled_at");
+  const droppedCol = await run(SQL_ENV);
+  assert(droppedCol.code === 1 && /✗  audit events\s+thought_audit lacks 1 of 045's eight columns \(backfilled_at\) while the audit trigger is 045's, which writes them — every capture, edit and delete would fail in the trigger/.test(droppedCol.out) && /Apply db\/migrations\/045_thought_audit_event_shape\.sql\./.test(droppedCol.out),
+         "a 045 column dropped from under 045's trigger does not start, naming the column and 045 (SMD-1730)");
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("025") || f.startsWith("026") });
+  const pre045 = await run(SQL_ENV);
+  assert(pre045.code === 0 && /!  audit events\s+thought_audit lacks 1 of 045's eight columns \(backfilled_at\) — the brain predates migration 045: writes go through, and every row records no kind, trust, door or event until it is applied/.test(pre045.out) && /Apply db\/migrations\/045_thought_audit_event_shape\.sql\./.test(pre045.out),
+         "…while the same column missing under 025's trigger — a brain before 045 — is a warning that writes go through, naming 045");
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("045") });
+  assert(/✓  audit events\s+045's event shape present/.test((await run(SQL_ENV)).out), "…and 045 re-applied puts the column and the trigger back");
   await claims.unsafe("UPDATE thoughts SET embedding = NULL");
 
   await claims.unsafe("DROP TABLE thought_work_claims");
@@ -1382,6 +1397,28 @@ else {
              /GRANT SELECT ON ob1_config TO ob1_pf_capture;/.test(noConfig.out),
              `with 016's trigger present, a role lacking SELECT on ob1_config is refused, the trigger named (exit ${noConfig.code})`);
       await claims.unsafe("GRANT SELECT ON ob1_config TO ob1_pf_capture");
+
+      // 045's audit trigger reads the key's kind from ob1_agents as the caller
+      // on every write that carries an actor, so SELECT there is a hard
+      // capture-path requirement since SMD-1730 (first review pass: it sat only
+      // in the soft `server` group, and a role granted exactly the capture set
+      // passed preflight and failed every write in the trigger). Revoke it: a
+      // real capture as the role fails in the trigger, and preflight refuses
+      // naming the table and the trigger; then restore it.
+      await claims.unsafe("REVOKE SELECT ON ob1_agents FROM ob1_pf_capture");
+      const asCapturer = new SQL({ url: CAPTURE_URL, max: 1 });
+      let deniedInTrigger = "";
+      try { await asCapturer`SELECT upsert_thought('preflight: a capture without SELECT on ob1_agents', ${{ metadata: {}, actor: { name: "laptop" } }}::jsonb)`; }
+      catch (e) { deniedInTrigger = (e as Error).message; }
+      finally { await asCapturer.close(); }
+      assert(/permission denied for table ob1_agents/.test(deniedInTrigger), `a capture as a role without SELECT on ob1_agents fails inside 045's audit trigger (${deniedInTrigger.slice(0, 80)})`);
+      const noAgents = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
+      assert(noAgents.code === 1 &&
+             /SELECT on ob1_agents/.test(writeLine(noAgents.out)) &&
+             /045's audit trigger reads ob1_agents as the caller on every capture, edit and delete that carries an actor/.test(writeLine(noAgents.out)) &&
+             /GRANT SELECT ON ob1_agents TO ob1_pf_capture;/.test(noAgents.out),
+             `a role lacking SELECT on ob1_agents is refused, the trigger named (exit ${noAgents.code})`);
+      await claims.unsafe("GRANT SELECT ON ob1_agents TO ob1_pf_capture");
 
       // Enable entity extraction: 016's trigger now upserts a work claim as the
       // caller on every capture, so the capture path needs thought_work_claims

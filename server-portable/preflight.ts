@@ -968,10 +968,15 @@ if (configFailed) {
           // thought for that one, said separately so an operator whose
           // capture succeeds is not told the check was wrong (seventh pass).
           const captureMiss = [...missingByTable.keys()].some((t) => t !== "thought_facets");
+          // 045's audit trigger reads the key's kind from ob1_agents as the caller
+          // on every write that carries an actor — captures, edits AND deletes
+          // — so that one is named with the trigger (SMD-1730).
+          const agentsMiss = missingByTable.has("ob1_agents");
           const fails: string[] = [];
-          if (captureMiss) fails.push(triggerMiss
+          if (captureMiss) fails.push((triggerMiss
             ? "a windowed capture, an edit with content, 008's audit trigger, or 016's enqueue trigger — which as the caller reads ob1_config on every capture, and upserts a work claim while entity extraction is enabled —"
-            : "a windowed capture, an edit with content, or 008's audit trigger");
+            : "a windowed capture, an edit with content, or 008's audit trigger")
+            + (agentsMiss ? " (045's audit trigger reads ob1_agents as the caller on every capture, edit and delete that carries an actor)" : ""));
           if (missingByTable.has("thought_facets")) fails.push("every delete of a thought (042's citation guard reads and writes thought_facets as the caller)");
           const why = ` — so ${fails.join(", and ")} would fail`;
           if (missingByTable.size) {
@@ -1112,9 +1117,19 @@ if (configFailed) {
             WHERE n.nspname = 'public' AND p.proname IN ('thoughts_write_audit', 'thought_audit_refuse_mutation')`) as { name: string; src: string }[];
           const trigSrc = String(bodies.find((b) => b.name === "thoughts_write_audit")?.src ?? "");
           const refuseSrc = String(bodies.find((b) => b.name === "thought_audit_refuse_mutation")?.src ?? "");
-          if (missingCols.length) {
+          if (missingCols.length && /ob1:audit-event-from-the-key/.test(trigSrc)) {
+            // 045's trigger INSERTs into the columns: dropped from under it, every
+            // capture, edit and delete fails in the trigger.
             add("audit events", "fail",
-                `thought_audit lacks ${missingCols.length} of 045's eight columns (${missingCols.join(", ")}) — the brain predates migration 045, and every write through 045's upsert_thought or update_thought would fail in the audit trigger, which writes them`,
+                `thought_audit lacks ${missingCols.length} of 045's eight columns (${missingCols.join(", ")}) while the audit trigger is 045's, which writes them — every capture, edit and delete would fail in the trigger`,
+                ledgerRemedy("045", APPLY_045));
+          } else if (missingCols.length) {
+            // A brain from before 045 under this server: 025's trigger writes 008's
+            // and 010's columns, the servers send no event, so every write goes
+            // through — recording no kind, trust, door or event (first review pass:
+            // the first draft called this a failure it is not).
+            add("audit events", "warn",
+                `thought_audit lacks ${missingCols.length} of 045's eight columns (${missingCols.join(", ")}) — the brain predates migration 045: writes go through, and every row records no kind, trust, door or event until it is applied`,
                 ledgerRemedy("045", APPLY_045));
           } else if (!/ob1:audit-event-from-the-key/.test(trigSrc)) {
             add("audit events", "warn",
@@ -1125,15 +1140,29 @@ if (configFailed) {
                 "the refusal trigger's body is from before 045 (008 re-applied by hand): every UPDATE of thought_audit is refused, the backfill's included, so rows written before a key was classified can never gain their kind",
                 ledgerRemedy("045", APPLY_045));
           } else {
+            // The census names what waits, not only how many: the names the
+            // waiting rows carry that no classified key answers to (the
+            // set_agent_kind the remedy asks for), and the rows whose key IS
+            // classified since and want only the backfill (run-it, first review
+            // pass: a brain with 9,008 waiting rows and no unclassified key was
+            // told to classify "<label>").
             const [census] = await sql`
               SELECT (SELECT count(*)::int FROM ob1_agents WHERE kind IS NULL) AS unclassified,
                      (SELECT string_agg(label, ', ' ORDER BY label) FROM ob1_agents WHERE kind IS NULL) AS labels,
-                     (SELECT count(*)::int FROM thought_audit WHERE actor_kind IS NULL AND actor_name IS NOT NULL) AS awaiting`;
-            const unclassified = Number(census.unclassified), awaiting = Number(census.awaiting);
+                     (SELECT count(*)::int FROM thought_audit WHERE actor_kind IS NULL AND actor_name IS NOT NULL) AS awaiting,
+                     (SELECT string_agg(n, ', ' ORDER BY n) FROM (
+                        SELECT DISTINCT a.actor_name AS n FROM thought_audit a
+                        WHERE a.actor_kind IS NULL AND a.actor_name IS NOT NULL
+                          AND NOT EXISTS (SELECT 1 FROM ob1_agents g WHERE g.label = a.actor_name AND g.kind IS NOT NULL)
+                        LIMIT 8) s) AS unnamed,
+                     (SELECT count(*)::int FROM thought_audit a
+                       WHERE a.actor_kind IS NULL AND a.actor_name IS NOT NULL
+                         AND EXISTS (SELECT 1 FROM ob1_agents g WHERE g.label = a.actor_name AND g.kind IS NOT NULL)) AS fillable`;
+            const unclassified = Number(census.unclassified), awaiting = Number(census.awaiting), fillable = Number(census.fillable);
             if (unclassified > 0 || awaiting > 0) {
               add("audit events", "warn",
-                  `${unclassified} key(s) with no kind${unclassified ? ` (${census.labels})` : ""} and ${awaiting} audit row(s) naming a key with no kind — every write through an unclassified key is recorded with actor_kind and trust unknown, which every read built on them will say`,
-                  "For each key: SELECT set_agent_kind('<label>', '<operator | agent | ingested>'); then SELECT backfill_thought_audit_events(); fills the rows already written (db/README.md).");
+                  `${unclassified} key(s) with no kind${unclassified ? ` (${census.labels})` : ""} and ${awaiting} audit row(s) naming a key with no kind${census.unnamed ? ` (names: ${census.unnamed})` : ""}${fillable ? `, ${fillable} of them naming a key classified since — waiting only on the backfill` : ""} — every write through an unclassified key is recorded with actor_kind and trust unknown, which every read built on them will say`,
+                  "For each name: SELECT set_agent_kind('<label>', '<operator | agent | ingested>'); then SELECT backfill_thought_audit_events(); fills the rows already written (db/README.md).");
             } else {
               add("audit events", "ok", "045's event shape present — the columns, the trigger that derives the kind from the key, the one lawful amendment — and every key classified");
             }
@@ -1465,7 +1494,7 @@ if (configFailed) {
             add("edit signature", "ok", `${current[0].sig}: the form the servers and reembed.ts call since migration 045 (${UPDATE_THOUGHT_SIGNATURE}), alone`);
           } else if (current.length) {
             add("edit signature", "fail",
-                `beside the form the servers call there ${extra.length === 1 ? "is an earlier one" : `are ${extra.length} earlier ones`}: ${extra.join(", ")} — an earlier migration re-applied by hand over 045 — so every call that sends fewer than ten arguments to update_thought, which is every PostgREST caller by name, every hand-written SELECT and db/reembed.ts's positional nine, fails with "function is not unique"`,
+                `beside the form the servers call there ${extra.length === 1 ? "is an earlier one" : `are ${extra.length} earlier ones`}: ${extra.join(", ")} — an earlier migration re-applied by hand over 045 — so every call that sends fewer than ten arguments to update_thought, which is every PostgREST caller by name, every hand-written SELECT and db/reembed.ts's positional eight, fails with "function is not unique"`,
                 `Drop the earlier form, as 045 does: ${extra.map((sig) => `DROP FUNCTION ${sig};`).join(" ")}`);
           } else if (nineAlone) {
             add("edit signature", "warn",

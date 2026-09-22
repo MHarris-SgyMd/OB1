@@ -335,34 +335,40 @@ BEGIN
   END LOOP;
 
   IF v ? 'cites' AND jsonb_typeof(v->'cites') <> 'null' THEN
-    IF jsonb_typeof(v->'cites') <> 'array' THEN
-      RAISE EXCEPTION 'event.cites must be a JSON array of thought UUID strings, got %.', jsonb_typeof(v->'cites');
-    END IF;
-    IF EXISTS (
-      SELECT 1 FROM jsonb_array_elements(v->'cites') AS e
-      WHERE jsonb_typeof(e) <> 'string'
-         OR (e #>> '{}') !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
-    ) THEN
-      RAISE EXCEPTION 'event.cites must contain only thought UUID strings; got a non-UUID element in %.', v->'cites';
-    END IF;
-    IF EXISTS (
-      SELECT 1 FROM jsonb_array_elements_text(v->'cites') AS ref(id)
-      WHERE NOT EXISTS (SELECT 1 FROM thoughts t WHERE t.id = ref.id::uuid)
-    ) THEN
-      RAISE EXCEPTION 'event.cites references a thought that does not exist (in %).', v->'cites';
-    END IF;
-    IF jsonb_array_length(v->'cites') > 0 THEN
-      SELECT to_jsonb(array_agg(DISTINCT lower(e) ORDER BY lower(e)))
-        INTO v_cites
-        FROM jsonb_array_elements_text(v->'cites') AS e;
+    -- One rule, one copy: derived_from's (032's validate_derived_from) — a JSON
+    -- array of UUID strings naming thoughts that exist, lowercased,
+    -- de-duplicated, sorted; [] and JSON null are NULL. Its refusals name
+    -- derived_from, so they are re-raised naming the event's field. A
+    -- subtransaction, entered only when cites are named (first review pass:
+    -- the first draft carried a second copy of the rule).
+    BEGIN
+      v_cites := validate_derived_from(v->'cites');
+    EXCEPTION WHEN others THEN
+      -- The rule's message echoes the input; bounded here, since a client
+      -- can send a long one (run-it: a 100,000-character cite came back whole).
+      RAISE EXCEPTION '%', left(replace(SQLERRM, 'derived_from', 'event.cites'), 500)
+        || CASE WHEN length(SQLERRM) > 500 THEN '…' ELSE '' END;
+    END;
+    IF v_cites IS NOT NULL THEN
       v_out := v_out || jsonb_build_object('cites', v_cites);
     END IF;
   END IF;
 
   IF (v ? 'valid_from' AND jsonb_typeof(v->'valid_from') <> 'null')
      OR (v ? 'valid_until' AND jsonb_typeof(v->'valid_until') <> 'null') THEN
-    -- A subtransaction, entered only when a window is named: a text that is
-    -- not a timestamp fails with a message about the event, not a raw cast.
+    -- A timestamp is a string that begins as a date does — YYYY-MM-DD — before
+    -- Postgres is asked to read it: its input function also takes 'now',
+    -- 'today', 'yesterday' and 'infinity', and a client's "now" would land as
+    -- the call's time and read as a fact about the world (run-it, first
+    -- review pass). Then a subtransaction, entered only when a window is
+    -- named, so a text that is not a timestamp fails with a message about the
+    -- event, not a raw cast.
+    FOREACH v_key IN ARRAY ARRAY['valid_from', 'valid_until'] LOOP
+      IF v ? v_key AND jsonb_typeof(v->v_key) <> 'null'
+         AND (jsonb_typeof(v->v_key) <> 'string' OR (v->>v_key) !~ '^\d{4}-\d{2}-\d{2}') THEN
+        RAISE EXCEPTION 'event.% must be a timestamp string beginning YYYY-MM-DD, got %.', v_key, left((v->v_key)::text, 80);
+      END IF;
+    END LOOP;
     BEGIN
       IF v ? 'valid_from' AND jsonb_typeof(v->'valid_from') <> 'null' THEN
         v_from := (v->>'valid_from')::timestamptz;
@@ -424,28 +430,62 @@ COMMENT ON FUNCTION ob1_current_event() IS
 -- The trigger knows which change is lawful, so nothing outside it — no grant,
 -- no DISABLE TRIGGER in a script — has to. Under ob1.audit_amend = 'backfill'
 -- an UPDATE may fill a NULL actor_kind, trust or origin and stamp
--- backfilled_at; the row otherwise byte-equal, a value once set never
--- changed, DELETE never. SMD-1723's redaction is the second amendment and
--- goes here with its ticket.
+-- backfilled_at — and ONLY with what the row itself derives to: the kind the
+-- registry holds for the row's id (else its name), the door the row's own blob
+-- carries as `via`, the trust the write path's rule gives (the declaration the
+-- trigger filed under `claimed` when it stands under the kind, else the kind),
+-- the stamp this transaction's time; something must be filled; every other
+-- column byte-equal; a value once set never changed; DELETE and TRUNCATE
+-- never. So a hand UPDATE under the setting can write nothing the backfill
+-- would not (first review pass, run-it: the first gate let a door be invented,
+-- a stamp back-dated, and a row re-stamped with nothing filled). The setting
+-- is a key any role that can write the table may turn — the rule is WHAT may
+-- change, not who. SMD-1723's redaction is the second amendment and goes here
+-- with its ticket.
 -- ---------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION thought_audit_refuse_mutation()
 RETURNS trigger
 LANGUAGE plpgsql
 AS $$
+DECLARE
+  v_kind     text;
+  v_known    boolean := false;
+  v_declared text;
+  v_origin   text;
+  v_trust    text;
 BEGIN
   IF TG_OP = 'UPDATE' AND current_setting('ob1.audit_amend', true) = 'backfill' THEN
     -- ob1:audit-amend-fills-null-only — a CONTRACT SENTINEL, not prose (the
     -- 014 convention); preflight's `audit events` check reads it.
+    -- What the row derives to, as the audit trigger and the backfill read it.
+    IF OLD.canonical_agent_id IS NOT NULL THEN
+      SELECT kind INTO v_kind FROM ob1_agents WHERE canonical_agent_id = OLD.canonical_agent_id;
+      v_known := FOUND;
+    END IF;
+    IF NOT v_known AND OLD.actor_name IS NOT NULL THEN
+      SELECT kind INTO v_kind FROM ob1_agents WHERE label = OLD.actor_name;
+    END IF;
+    v_kind     := COALESCE(OLD.actor_kind, v_kind);
+    v_origin   := COALESCE(OLD.origin, CASE WHEN jsonb_typeof(OLD.actor_context->'via') = 'string' THEN OLD.actor_context->>'via' END);
+    v_declared := OLD.actor_context->'claimed'->>'trust';
+    v_trust    := COALESCE(OLD.trust, CASE WHEN v_kind IS NULL THEN NULL
+                    WHEN v_declared IS NOT NULL
+                         AND array_position(ARRAY['ingested', 'agent', 'operator'], v_declared)
+                             <= array_position(ARRAY['ingested', 'agent', 'operator'], v_kind) THEN v_declared
+                    ELSE v_kind END);
     IF (to_jsonb(OLD) - 'actor_kind' - 'trust' - 'origin' - 'backfilled_at')
        = (to_jsonb(NEW) - 'actor_kind' - 'trust' - 'origin' - 'backfilled_at')
-       AND (OLD.actor_kind IS NULL OR NEW.actor_kind IS NOT DISTINCT FROM OLD.actor_kind)
-       AND (OLD.trust      IS NULL OR NEW.trust      IS NOT DISTINCT FROM OLD.trust)
-       AND (OLD.origin     IS NULL OR NEW.origin     IS NOT DISTINCT FROM OLD.origin)
-       AND NEW.backfilled_at IS NOT NULL THEN
+       AND NEW.actor_kind IS NOT DISTINCT FROM v_kind
+       AND NEW.trust      IS NOT DISTINCT FROM v_trust
+       AND NEW.origin     IS NOT DISTINCT FROM v_origin
+       AND (NEW.actor_kind IS DISTINCT FROM OLD.actor_kind
+            OR NEW.trust IS DISTINCT FROM OLD.trust
+            OR NEW.origin IS DISTINCT FROM OLD.origin)
+       AND NEW.backfilled_at = now() THEN
       RETURN NEW;
     END IF;
     RAISE EXCEPTION
-      'thought_audit is append-only: the backfill amendment may only fill a NULL actor_kind, trust or origin and stamp backfilled_at; this UPDATE changes something else.';
+      'thought_audit is append-only: the backfill amendment may only fill a NULL actor_kind, trust or origin with what the row derives to (the registry''s kind for its key, the blob''s via, the rule''s trust) and stamp backfilled_at with now(); this UPDATE changes something else, or fills nothing.';
   END IF;
 
   -- 008: the guidance is in the MESSAGE rather than in USING HINT deliberately.
@@ -457,6 +497,13 @@ BEGIN
     TG_OP;
 END;
 $$;
+
+-- TRUNCATE fires no row trigger, so 008's rule had a door it did not mean to
+-- leave (first review pass, run-it): the same function, as a statement trigger.
+DROP TRIGGER IF EXISTS thought_audit_immutable_truncate ON thought_audit;
+CREATE TRIGGER thought_audit_immutable_truncate
+  BEFORE TRUNCATE ON thought_audit
+  FOR EACH STATEMENT EXECUTE FUNCTION thought_audit_refuse_mutation();
 
 -- ---------------------------------------------------------------------------
 -- The audit trigger: 025's body with the event and the key-derived columns.
@@ -473,22 +520,35 @@ DECLARE
   actor    jsonb := ob1_current_actor();
   -- 045: the write event the function set beside the actor — stance, cites,
   -- the valid window, and the caller's DECLARED trust and actor_kind, which
-  -- are checked against the key below and never copied.
-  event    jsonb := ob1_current_event();
+  -- are checked against the key below and never copied. Read below, once.
+  event    jsonb;
   v_action text;
   v_diff   jsonb;
   v_id     uuid;
   v_source text;
   v_agent  uuid;
-  -- 045: who holds the key (the registry's word), the ceiling on the content,
-  -- what the caller claimed that the key could not support, and the context
-  -- blob with that claim folded in.
+  -- 045: who holds the key (the registry's word), whether the registry knew
+  -- the id at all, the ceiling on the content, what the caller claimed that
+  -- the key could not support, and the context blob with that claim folded in.
   v_kind     text;
+  v_known    boolean := false;
   v_declared text;
   v_trust    text;
   v_claimed  jsonb := '{}'::jsonb;
   v_context  jsonb;
 BEGIN
+  /**
+   * 045: the event is read ONCE and the setting cleared — so a raw write later
+   * in the same transaction (an enhanced-columns UPDATE beside a capture), or
+   * the child rows a tombstone's ON DELETE SET NULL touches, cannot inherit a
+   * stance, cites or window declared for another row. A tombstone declares
+   * nothing: on DELETE the event is not read at all — delete_thought sets
+   * none, and one a previous call left on this transaction is not its own
+   * (first review pass). The actor is 008's and stays as it was.
+   */
+  event := CASE WHEN TG_OP = 'DELETE' THEN NULL ELSE ob1_current_event() END;
+  PERFORM set_config('ob1.event', '', true);
+
   IF TG_OP = 'INSERT' THEN
     v_action := 'capture';
     v_id     := NEW.id;
@@ -592,11 +652,16 @@ BEGIN
    * The payload's own `actor_kind` is never copied: the database never sees
    * the key, so the one thing it can check a claim against is the row the
    * operator classified. NULL is honest: a key nobody has classified yet
-   * (set_agent_kind), or a mutation from outside the server.
+   * (set_agent_kind), or a mutation from outside the server. An id the
+   * registry does not know — a server holding a cached id across a registry
+   * rebuilt by hand — falls back to the name as a writer with no id does
+   * (first review pass): the row is the same row either way.
    */
   IF v_agent IS NOT NULL THEN
     SELECT kind INTO v_kind FROM ob1_agents WHERE canonical_agent_id = v_agent;
-  ELSIF actor ? 'name' THEN
+    v_known := FOUND;
+  END IF;
+  IF NOT v_known AND actor ? 'name' THEN
     SELECT kind INTO v_kind FROM ob1_agents WHERE label = actor->>'name';
   END IF;
 
@@ -631,9 +696,20 @@ BEGIN
   -- the row's own metadata.source, one vocabulary), so a caller still sending
   -- one sees it here rather than having it silently interpreted. The attempt
   -- the key could not support rides under `claimed`.
-  v_context := COALESCE(actor - 'name' - 'session' - 'agent_id' - 'via', '{}'::jsonb);
+  v_context := COALESCE(actor - 'name' - 'session' - 'agent_id', '{}'::jsonb);
+  -- `via` is a door only as a string; anything else stays in the blob, visible,
+  -- rather than becoming an origin spelled as JSON (run-it, first review pass).
+  IF jsonb_typeof(actor->'via') = 'string' THEN
+    v_context := v_context - 'via';
+  END IF;
   IF v_claimed <> '{}'::jsonb THEN
-    v_context := v_context || jsonb_build_object('claimed', v_claimed);
+    -- Merged under `claimed`, not written over a key the caller sent by that
+    -- name (run-it, first review pass); a non-object of theirs moves under
+    -- `caller`.
+    v_context := v_context || jsonb_build_object('claimed',
+      CASE WHEN jsonb_typeof(v_context->'claimed') = 'object' THEN (v_context->'claimed') || v_claimed
+           WHEN v_context ? 'claimed' THEN jsonb_build_object('caller', v_context->'claimed') || v_claimed
+           ELSE v_claimed END);
   END IF;
 
   INSERT INTO thought_audit (
@@ -654,14 +730,12 @@ BEGIN
     NULLIF(v_context, '{}'::jsonb),
     v_kind,
     v_trust,
-    actor->>'via',
-    -- A tombstone declares nothing: delete_thought sets no event, and one a
-    -- previous call left on this transaction must not be read as its own.
-    CASE WHEN TG_OP <> 'DELETE' THEN event->>'stance' END,
-    CASE WHEN TG_OP <> 'DELETE' AND event ? 'cites'
-         THEN ARRAY(SELECT jsonb_array_elements_text(event->'cites'))::uuid[] END,
-    CASE WHEN TG_OP <> 'DELETE' THEN (event->>'valid_from')::timestamptz END,
-    CASE WHEN TG_OP <> 'DELETE' THEN (event->>'valid_until')::timestamptz END
+    CASE WHEN jsonb_typeof(actor->'via') = 'string' THEN actor->>'via' END,
+    -- NULL throughout on a tombstone: the event was not read (above).
+    event->>'stance',
+    CASE WHEN event ? 'cites' THEN ARRAY(SELECT jsonb_array_elements_text(event->'cites'))::uuid[] END,
+    (event->>'valid_from')::timestamptz,
+    (event->>'valid_until')::timestamptz
   );
 
   RETURN NULL;  -- AFTER trigger; the return value is ignored.
@@ -1218,24 +1292,42 @@ BEGIN
   WITH candidates AS (
     SELECT a.id,
            COALESCE(a.actor_kind, g_id.kind, g_label.kind) AS kind,
-           COALESCE(a.origin, a.actor_context->>'via')      AS origin
+           -- What the write declared while its key was unclassified: the
+           -- trigger could not honour it then and filed it under claimed.
+           a.actor_context->'claimed'->>'trust'             AS declared,
+           COALESCE(a.origin, CASE WHEN jsonb_typeof(a.actor_context->'via') = 'string' THEN a.actor_context->>'via' END) AS origin
       FROM thought_audit a
+      -- By the id, else by the name — as the trigger reads it, including an id
+      -- the registry no longer knows (first review pass).
       LEFT JOIN ob1_agents g_id    ON g_id.canonical_agent_id = a.canonical_agent_id
-      LEFT JOIN ob1_agents g_label ON a.canonical_agent_id IS NULL AND g_label.label = a.actor_name
+      LEFT JOIN ob1_agents g_label ON g_id.canonical_agent_id IS NULL AND g_label.label = a.actor_name
      WHERE (a.actor_kind IS NULL AND COALESCE(g_id.kind, g_label.kind) IS NOT NULL)
-        OR (a.origin IS NULL AND a.actor_context->>'via' IS NOT NULL)
+        OR (a.origin IS NULL AND jsonb_typeof(a.actor_context->'via') = 'string')
      ORDER BY a.created_at
-     LIMIT p_limit
+     LIMIT CASE WHEN p_limit IS NULL THEN NULL ELSE GREATEST(p_limit, 0) END
   )
   UPDATE thought_audit a
      SET actor_kind    = COALESCE(a.actor_kind, c.kind),
-         -- Undeclared trust is the kind (the trigger's rule); a row from
-         -- before 045 declared nothing.
-         trust         = COALESCE(a.trust, CASE WHEN a.actor_kind IS NULL THEN c.kind END),
+         -- The trigger's rule, applied late: the declaration stands when it
+         -- is not above the kind, else the kind; undeclared, the kind (first
+         -- review pass — the first draft wrote the kind over a lower
+         -- declaration). The claim stays in the blob: it was unverifiable
+         -- when the row was written, and the row says so.
+         trust         = COALESCE(a.trust, CASE WHEN a.actor_kind IS NULL THEN
+                           CASE WHEN c.declared IS NOT NULL
+                                 AND array_position(ARRAY['ingested', 'agent', 'operator'], c.declared)
+                                     <= array_position(ARRAY['ingested', 'agent', 'operator'], c.kind)
+                                THEN c.declared ELSE c.kind END END),
          origin        = COALESCE(a.origin, c.origin),
          backfilled_at = now()
     FROM candidates c
-   WHERE a.id = c.id;
+   WHERE a.id = c.id
+     -- Re-read on the row as it is when the lock is taken (READ COMMITTED),
+     -- not as the candidates saw it: a pass that ran beside this one and
+     -- filled the row first leaves it nothing to fill, and it is skipped
+     -- rather than re-stamped and counted again (run-it, first review pass).
+     AND ((a.actor_kind IS NULL AND c.kind IS NOT NULL)
+          OR (a.origin IS NULL AND c.origin IS NOT NULL));
   GET DIAGNOSTICS v_rows = ROW_COUNT;
 
   PERFORM set_config('ob1.audit_amend', '', true);
