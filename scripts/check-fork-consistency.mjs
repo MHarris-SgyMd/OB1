@@ -3102,9 +3102,9 @@ function typecheckSurfaceProblems({ packages, tsconfigs, tscSteps }) {
   const refOpts = canon(tsconfigs[ref]?.compilerOptions);
   for (const dir of TYPECHECKED_DIRS) {
     const dev = packages[dir]?.devDependencies;
-    if (!dev) problems.push([`${dir}/package.json`, `has no devDependencies — every type-checked directory pins ${TYPE_PINS.join(", ")} there (SMD-1932)`]);
+    if (!dev) problems.push([`${dir}/package.json`, `${packages[dir] ? "has no devDependencies" : "is missing"} — every type-checked directory pins ${TYPE_PINS.join(", ")} in its devDependencies (SMD-1932)`]);
     else for (const name of TYPE_PINS) {
-      if (!(name in dev)) problems.push([`${dir}/package.json`, `does not pin ${name}; ${ref}/package.json pins it at ${refDev[name] ?? "(nothing)"} (SMD-1932)`]);
+      if (!(name in dev)) problems.push([`${dir}/package.json`, dir === ref ? `does not pin ${name} — it is the reference the other type-checked directories are held to (SMD-1932)` : `does not pin ${name}; ${ref}/package.json pins it at ${refDev[name] ?? "(nothing)"} (SMD-1932)`]);
       else if (dir !== ref && dev[name] !== refDev[name]) problems.push([`${dir}/package.json`, `pins ${name} at ${dev[name]} but ${ref}/package.json pins ${refDev[name]} — bump the four type-checked directories in one commit, or two copies of the types load into the programs that import ../server-portable (SMD-1932)`]);
     }
     const opts = tsconfigs[dir]?.compilerOptions;
@@ -3125,8 +3125,9 @@ function tscStepsIn(doc) {
   return out;
 }
 function checkTypecheckSurface() {
-  // Self-test: a consistent set passes; one drifted pin, one differing option,
-  // one missing step and one unlisted step each report exactly one problem.
+  // Self-test: a consistent set passes; one drifted pin, one missing pin, one
+  // differing option, one missing step and one unlisted step each report
+  // exactly one problem.
   const good = () => ({
     packages: Object.fromEntries(TYPECHECKED_DIRS.map((d) => [d, { devDependencies: { "@types/bun": "1.4.0", typescript: "5.9.3", "@types/node": "26.6.2" } }])),
     tsconfigs: Object.fromEntries(TYPECHECKED_DIRS.map((d) => [d, { compilerOptions: { strict: true, types: ["bun"] } }])),
