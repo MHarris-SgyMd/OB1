@@ -173,7 +173,7 @@
  *      empty and enforcement is active; and the workflow names its jobs so
  *      the record can — no matrix, no expression in a name, no two jobs
  *      sharing one. The rules are rulesetProblems and workflowJobs, pure
- *      functions their probes run on in-memory records (twenty-four mutants,
+ *      functions their probes run on in-memory records (twenty-five mutants,
  *      nine non-probes, three workflow mutants); the workflow is parsed with
  *      Bun.YAML (SMD-1856); no exceptions
  *

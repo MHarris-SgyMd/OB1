@@ -85,9 +85,10 @@ jobs:
       # gives, so it holds on the merged result the queue builds and not only on
       # the PR's head. The migration-number rule (5b) and the rest of
       # check-fork-consistency below already run on that result: on merge_group
-      # the checkout IS the group's head.
+      # the checkout IS the group's head. A PR into another branch is not a
+      # landing yet; it is asked when it reaches main.
       - name: What the landing carries — a fragment for a change to db/migrations/, server-portable/ or evals/
-        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+        if: github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.base_ref == 'main')
         env:
           EVENT: ${{ github.event_name }}
           PR_FROM: ${{ github.event.pull_request.base.sha }}
