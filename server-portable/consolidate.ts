@@ -24,7 +24,8 @@
  * share one definition of the candidate set.
  */
 
-import type { EmbedConfig } from "./embed.ts";
+import { refuseEgress, type EmbedConfig } from "./embed.ts";
+import { mayLeaveBox } from "./egress.ts";
 import { CONSOLIDATE_KEY_PREFIX } from "../db/config.mjs";
 
 /**
@@ -70,9 +71,10 @@ export type Judgement = {
  * capture date. Not `metadata.source`, though the ticket asked that the judge
  * see it: it is caller-controlled text, and on the trusted header line it
  * would sit outside the only region the prompt tells the judge to distrust
- * (review pass 3).
+ * (review pass 3). `metadata` is NOT sent either: it is what the egress gate
+ * reads (SMD-1903) — a pair leaves the box only if both rows may.
  */
-export type PairSide = { content: string; createdAt: string | Date | null };
+export type PairSide = { content: string; createdAt: string | Date | null; metadata?: Record<string, unknown> };
 
 /**
  * One user message holding the rules and both thoughts, the shape entities.ts
@@ -223,9 +225,16 @@ export function proposalVerdict(j: Judgement): "newer_supersedes_older" | "older
  * a transport or provider error (with `status` on an HTTP one, as entities.ts
  * does, so the worker's classifier reads both alike); a malformed answer is
  * returned with `malformed: true` so the caller can count it rather than retry
- * it blindly.
+ * it blindly. Refuses BEFORE the request when the egress gate (egress.ts,
+ * SMD-1903) says either row's text may not reach the chat endpoint: a pair is
+ * two thoughts, and the more restricted one decides for both. `actor` is the
+ * worker's key name, when it has one, for an `actor:` term.
  */
-export async function judgePair(older: PairSide, newer: PairSide, cfg: EmbedConfig, signal?: AbortSignal): Promise<Judgement> {
+export async function judgePair(older: PairSide, newer: PairSide, cfg: EmbedConfig, signal?: AbortSignal, actor?: string): Promise<Judgement> {
+  for (const side of [older, newer]) {
+    const gate = mayLeaveBox({ kind: "judge", actor, metadata: side.metadata, content: side.content }, cfg.chat, cfg.egress);
+    if (!gate.allowed) throw refuseEgress("Judge", cfg.chat.base, gate);
+  }
   const r = await fetch(`${cfg.chat.base}/chat/completions`, {
     method: "POST",
     headers: cfg.chat.headers,
