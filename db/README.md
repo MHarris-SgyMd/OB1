@@ -1404,6 +1404,10 @@ to break when a shared signature moves; before this nothing compiled them, and
 SMD-1903's required `subject` argument reached `reembed.ts`'s provider probe as
 a runtime error that blamed the provider. Run it after any edit here; it needs
 `bun install` in this directory and in `../server-portable`, and nothing else.
+A plain-JavaScript module a `.ts` file here imports needs a `.d.mts` beside it
+(`config.d.mts` beside `config.mjs`; `../scripts/fragments.d.mts` and
+`fork-index.d.mts` beside theirs) — without one the import is an implicit `any`
+and the check refuses it, which is how SMD-1806's ingester met the step.
 
 `test-search-path.ts` relocates pgvector into a schema off the connection's
 `search_path` — how Supabase and several managed providers ship it, where
