@@ -70,7 +70,7 @@ import { buffersOf, COLUMN_COMMENT_SQL, communitySchemaFiles, createAssert, FUNC
 import { markerAnswers } from "./bench-oracle.ts";
 import {
   DEFAULT_OPTIONS, FUZZY_FLOOR, NUMERIC_NAME_RE, coverage as graphCoverage, neighbourhood, parseArgs, pgArray, render, report as graphReport,
-  resolveSubject, subjectThoughts, topByDegree, topByMentions, topEntities, topThoughts, type Options as GraphOptions, type Runner,
+  resolveSubject, subjectThoughts, topEntities, topThoughts, type Options as GraphOptions, type Runner,
 } from "./graph-centrality.ts";
 import { agentLabel, armOf, attribute, citePointerOf, goldFromFixture, renderReport, summarise, toActionRow, toSearchRow, type ActionRow, type SearchRow } from "../evals/utilization.ts";
 import { ENTITY_TYPES, RELATIONS } from "../server-portable/entities.ts";
@@ -5095,25 +5095,28 @@ console.log("\n[43] db/graph-centrality.ts: mentions, degree and support as defi
   assert((await graphCoverage(run, keep)).entities === 5, "…and with numerics kept the fifth entity is in scope");
 
   // The three counts, as the header defines them.
-  const byM = await topByMentions(run, on);
+  const top = await topEntities(run, on);
+  const byM = top.byMentions;
   const ob = byM.find((e) => e.id === OB)!;
   assert(ob.mentions === 5 && ob.degree === 2 && ob.support === 4,
     `Open Brain: 5 mentions; degree 2 (PostgreSQL, Anita — 021 is out of scope and adds none); support 4 (t1–t4 evidence its in-scope edges; t5's does not count) (${ob.mentions}/${ob.degree}/${ob.support})`);
-  const obKept = (await topByMentions(run, keep)).find((e) => e.id === OB)!;
+  const keptTop = await topEntities(run, keep);
+  const obKept = keptTop.byMentions.find((e) => e.id === OB)!;
   assert(obKept.degree === 3 && obKept.support === 5, `…with numerics kept, 021 is a third neighbour and t5 a fifth supporting thought (${obKept.degree}/${obKept.support})`);
   const pg = byM.find((e) => e.id === PG)!;
   assert(pg.mentions === 4 && pg.name === "PostgreSQL", `PostgreSQL has 4 mentions after the merge re-pointed PG's (${pg.mentions})`);
-  assert(byM.every((e) => e.id !== NUM) && (await topByMentions(run, keep)).some((e) => e.id === NUM), "the numeric entity is in no list by default, and listed when kept");
+  assert(byM.every((e) => e.id !== NUM) && keptTop.byMentions.some((e) => e.id === NUM), "the numeric entity is in no list by default, and listed when kept");
   assert(names(byM).join(",") === "Open Brain,PostgreSQL,Bun,Anita",
     `by mentions with edges on: PostgreSQL before Bun at 4 mentions each, on degree (${names(byM).join(",")})`);
-  const byMOff = await topByMentions(run, off);
+  const offTop = await topEntities(run, off);
+  const byMOff = offTop.byMentions;
   assert(names(byMOff).join(",") === "Open Brain,Bun,PostgreSQL,Anita" && byMOff.every((e) => e.degree === undefined && e.support === undefined),
     `…edges off: the tie breaks on the name, and no edge column is read (${names(byMOff).join(",")})`);
-  const hubs = await topByDegree(run, on);
+  const hubs = top.byDegree;
   assert(names(hubs).join(",") === "Open Brain,PostgreSQL,Anita,Bun" && hubs[1].degree === 1 && hubs[3].degree === 0,
     `by degree: the subject, then its two edge neighbours, then Bun with none (${names(hubs).join(",")})`);
-  assert((await topByDegree(run, off)).length === 0, "…and there is no hub list with edges off");
-  const tools = await topByMentions(run, { ...on, types: ["tool"] });
+  assert(offTop.byDegree.length === 0, "…and there is no hub list with edges off");
+  const tools = (await topEntities(run, { ...on, types: ["tool"] })).byMentions;
   assert(names(tools).join(",") === "Bun,PostgreSQL" && tools[1].degree === 0 && tools[1].support === 0 && tools[1].mentions === 4,
     `--types tool: the two tools, and the scope IS the graph — PostgreSQL's only edge neighbour is a project, so its degree and support are 0 here while its mentions are its own, and the tie with Bun breaks on the name (${names(tools).join(",")}, ${tools[1].degree}/${tools[1].support}/${tools[1].mentions})`);
 
@@ -5122,7 +5125,8 @@ console.log("\n[43] db/graph-centrality.ts: mentions, degree and support as defi
   assert(tt[0].id === t1 && tt[0].entities === 3 && tt[0].edges === 2, `t1 leads the whole graph: three entities and two edges (${tt[0].entities}+${tt[0].edges})`);
   const t5row = tt.find((t) => t.id === t5)!;
   assert(t5row.entities === 1 && t5row.edges === 0, `t5 counts one entity and no edge — 021 is out of both counts (${t5row.entities}+${t5row.edges})`);
-  assert(tt.length === 7 && tt[0].excerpt.startsWith("Open Brain depends") && tt.every((t) => typeof t.created_at === "string"), "every extracted thought is listed with an excerpt and a timestamp");
+  assert(tt.length === 7 && tt[0].excerpt.startsWith("Open Brain depends") && tt.every((t) => /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(t.created_at ?? "")),
+    `every extracted thought is listed with an excerpt and its timestamp as the server renders one — ISO, UTC, not the session's TimeZone (${tt[0].created_at})`);
   assert(tt.find((t) => t.id === t6)!.excerpt === "Bun alone, really.", `the excerpt collapses tabs, newlines and runs of spaces to one space — so the '\\s+' reached Postgres as written (${JSON.stringify(tt.find((t) => t.id === t6)!.excerpt)})`);
   const ttOff = await topThoughts(run, off);
   assert(ttOff.slice(0, 4).map((t) => t.id).sort().join() === [t1, t2, t3, t4].sort().join() && ttOff.every((t) => t.edges === undefined),
@@ -5212,7 +5216,8 @@ console.log("\n[43] db/graph-centrality.ts: mentions, degree and support as defi
   const p = parseArgs(["--url", "postgres://x", "Open Brain", "--limit", "5", "--types", "tool,project", "--no-edges", "--keep-numeric", "--json"]);
   assert(!("error" in p) && p.subject === "Open Brain" && p.opts.limit === 5 && p.opts.types.join() === "tool,project" && !p.opts.edges && !p.opts.excludeNumeric && p.json && p.url === "postgres://x", "every flag lands");
   assert(!("error" in parseArgs([])) && (parseArgs([]) as { subject: null }).subject === null, "no argument is the whole graph");
-  for (const [argv, why] of [[["--limit", "0"], "limit"], [["--limit"], "needs a value"], [["--types", "vegetable"], "vegetable"], [["a", "b"], "one subject"], [["--bogus"], "unknown flag"], [["--types", ""], "none given"]] as [string[], string][])
+  for (const [argv, why] of [[["--limit", "0"], "limit"], [["--limit"], "needs a value"], [["--types", "vegetable"], "vegetable"], [["a", "b"], "one subject"], [["--bogus"], "unknown flag"], [["--types", ""], "none given"],
+                             [["--limit", "5", "--limit", "50"], "given twice"], [["--json", "x", "--json"], "given twice"], [[""], "subject is empty"], [["  "], "subject is empty"]] as [string[], string][])
     assert("error" in parseArgs(argv) && (parseArgs(argv) as { error: string }).error.includes(why), `refused: ${argv.join(" ")} (${why})`);
   assert(pgArray(["a", "b"]) === "{a,b}" && pgArray([]) === "{}", "pgArray builds the literal");
   let threw = "";
@@ -5227,15 +5232,36 @@ console.log("\n[43] db/graph-centrality.ts: mentions, degree and support as defi
     "…and six copies of one type are not \"every type\" in the header line — membership, not length (first review pass)");
   assert(render(await graphReport(run, null, on)).includes("scope every type"), "…while the full list is");
 
-  // The whole-graph lists come from one pass: the two orderings agree with the
-  // two single-list calls row for row.
-  const both = await topEntities(run, on);
-  assert(JSON.stringify(both.byMentions) === JSON.stringify(byM) && JSON.stringify(both.byDegree) === JSON.stringify(hubs), "topEntities gives the two lists the single calls give");
+  // The whole-graph lists come from one pass, each cut at the limit.
   const two = await topEntities(run, { ...on, limit: 2 });
   assert(names(two.byMentions).join(",") === "Open Brain,PostgreSQL" && names(two.byDegree).join(",") === "Open Brain,PostgreSQL" && two.byMentions.every((e) => !("rm" in e)),
     `…each cut at the limit, the rank columns stripped (${names(two.byMentions).join(",")} / ${names(two.byDegree).join(",")})`);
   const one = await topEntities(run, { ...on, limit: 1, types: ["tool"] });
   assert(names(one.byMentions).join() === "Bun" && names(one.byDegree).join() === "Bun", "…and a row in one list only is in that list only");
+
+  // A fuzzy resolution with several guesses ranks around the FIRST alone
+  // (second review pass): "Open Brian" is near "open brain" (0.47) and near a
+  // second project "open brains" (0.40) that shares a thought with Bun. Under
+  // a union of the guesses Bun would count that thought as a co-mention of the
+  // subject; ranked around the first, the neighbourhood is exactly the exact
+  // run's.
+  const t9 = await thought("Open Brains uses Bun.");
+  await record(t9, [E("Open Brains", "project"), E("Bun", "tool")], [R("Open Brains", "Bun", "uses")]);
+  const guessed = await graphReport(run, "Open Brian", on);
+  assert(guessed.resolution?.how === "fuzzy" && guessed.resolution.subjects.length === 2 && guessed.resolution.subjects[0].id === OB && guessed.resolution.subjects[1].name === "Open Brains",
+    `two guesses, the nearer first (${guessed.resolution?.subjects.map((s) => `${s.name} ${s.score.toFixed(2)}`).join(", ")})`);
+  assert(guessed.subject_ids.join() === OB, "…and only the first is ranked around");
+  const shape = (ns: { name: string; co_mentions: number; support?: number }[] | undefined) => JSON.stringify((ns ?? []).map((n) => [n.name, n.co_mentions, n.support]));
+  assert(shape(guessed.neighbours) === shape(r1.neighbours) && guessed.neighbours![2].name === "Bun" && guessed.neighbours![2].co_mentions === 3,
+    `…so every neighbour's co_mentions and support are the exact run's — Bun at 3, not 4 (${shape(guessed.neighbours)})`);
+  assert(JSON.stringify(guessed.thoughts.map((t) => t.id)) === JSON.stringify(r1.thoughts.map((t) => t.id)), "…and the thoughts are the exact run's");
+  const guessedText = render(guessed);
+  assert(guessedText.includes("ranked around the first") && /\n {2}▸ project "Open Brain"/.test(guessedText) && /\n {4}project "Open Brains"/.test(guessedText),
+    "the report says guesses are ranked around the first and marks which one");
+  assert((await graphReport(run, "Open Brain", on)).subject_ids.join() === OB && (await graphReport(run, "Linear", on)).subject_ids.length === 0, "an exact subject is ranked around whole; a miss around nothing");
+  await db.query(`DELETE FROM thoughts WHERE id = $1`, [t9]);
+  await db.exec(`SELECT prune_orphan_entities()`);
+  assert((await graphCoverage(run, on)).entities === 4, "the extra guess is gone again");
 }
 
 // db/README.md quotes this suite's assertion total in two places ("Expected

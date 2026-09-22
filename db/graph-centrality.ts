@@ -68,6 +68,7 @@
  */
 import { SQL } from "bun";
 import { ENTITY_TYPES, type EntityType } from "../server-portable/entities.ts";
+import { isoTimestampOrNull, UUID_RE } from "../server-portable/store.ts";
 
 /** `(text, params) → rows` — Bun's `sql.unsafe` or PGlite's `query(...).rows`. */
 export type Runner = (text: string, params: unknown[]) => Promise<Record<string, unknown>[]>;
@@ -135,8 +136,10 @@ function scopeSql(alias: string, scope: Scope, params: unknown[]): string {
   return s;
 }
 
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const MENTIONS_CTE = `mentions AS (SELECT te.entity_id, count(DISTINCT te.thought_id)::int AS mentions FROM thought_entities te GROUP BY 1)`;
+const NUMERIC_NAME_JS = new RegExp(NUMERIC_NAME_RE);
+/** Mentions per in-scope entity; every query using it has a `scope` CTE before it. */
+const MENTIONS_CTE = `mentions AS (SELECT te.entity_id, count(DISTINCT te.thought_id)::int AS mentions FROM thought_entities te
+                        WHERE te.entity_id IN (SELECT id FROM scope) GROUP BY 1)`;
 /** Every edge from both ends: (entity, the other entity, the evidencing thought, relation). */
 const ENDS_CTE = `ends AS (
     SELECT from_entity_id AS entity_id, to_entity_id AS other_id, thought_id, relation FROM ob1_entity_edges
@@ -180,10 +183,14 @@ export async function resolveSubject(run: Runner, subject: string, scopeIn: Scop
   const rung = async (how: string, score: string, params: unknown[], sc: Scope, limit = "") =>
     rows(await run(select(`${how} AND ${scopeSql("s", sc, params)}`, score) + order + limit, params));
   const unscoped: Scope = { ...scope, excludeNumeric: false };
-  /** `none`, saying whether the exact rung would have found it without the numeric rule. */
+  /**
+   * `none`, saying whether the exact rung would have found it without the
+   * numeric rule — asked only when the rule could be the reason: a numeric
+   * name, or a uuid (whose name is unknown until looked up).
+   */
   const none = async (normalized: string | null, exactHow: string, params: () => unknown[]): Promise<Resolution> => ({
     how: "none", subjects: [], normalized,
-    excluded: scope.excludeNumeric && (await rung(exactHow, "1.0::float8", params(), unscoped)).length > 0,
+    excluded: scope.excludeNumeric && (normalized === null || NUMERIC_NAME_JS.test(normalized)) && (await rung(exactHow, "1.0::float8", params(), unscoped)).length > 0,
   });
 
   if (UUID_RE.test(subject.trim())) {
@@ -243,17 +250,10 @@ export async function topEntities(run: Runner, opts: Options): Promise<{ byMenti
   };
 }
 
-/** The whole graph's top entities by mentions. */
-export async function topByMentions(run: Runner, opts: Options): Promise<EntityRow[]> {
-  return (await topEntities(run, opts)).byMentions;
-}
-
-/** The whole graph's top entities by degree — the hubs. Empty with edges off. */
-export async function topByDegree(run: Runner, opts: Options): Promise<EntityRow[]> {
-  return (await topEntities(run, opts)).byDegree;
-}
-
 const EXCERPT = `regexp_replace(left(t.content, 160), '\\s+', ' ', 'g')`;
+/** `created_at` as the server renders every timestamp (SMD-1328): ISO UTC whatever the session's TimeZone, null for none, `infinity` as its own text. */
+const stampRows = (rows: Record<string, unknown>[]): ThoughtRow[] =>
+  rows.map((r) => ({ ...r, created_at: isoTimestampOrNull(r.created_at) })) as ThoughtRow[];
 
 /**
  * The whole graph's top thoughts: the ones that mention the most in-scope
@@ -270,7 +270,7 @@ export async function topThoughts(run: Runner, opts: Options): Promise<ThoughtRo
   const rows = await run(
     `WITH scope AS (SELECT e.id FROM ob1_entities e WHERE ${inScope}),
           counted AS (
-            SELECT t.id, t.created_at::text AS created_at, ${EXCERPT} AS excerpt,
+            SELECT t.id, t.created_at, ${EXCERPT} AS excerpt,
                    (SELECT count(DISTINCT te.entity_id) FROM thought_entities te JOIN scope s ON s.id = te.entity_id WHERE te.thought_id = t.id)::int AS entities${edgeCol}
               FROM thoughts t
              WHERE EXISTS (SELECT 1 FROM thought_entities te JOIN scope s ON s.id = te.entity_id WHERE te.thought_id = t.id))
@@ -278,7 +278,7 @@ export async function topThoughts(run: Runner, opts: Options): Promise<ThoughtRo
       ORDER BY ${opts.edges ? "entities + edges DESC, " : ""}entities DESC, id
       LIMIT $${params.length}`,
     params);
-  return rows as ThoughtRow[];
+  return stampRows(rows);
 }
 
 /**
@@ -343,7 +343,7 @@ export async function subjectThoughts(run: Runner, subjectIds: readonly string[]
     : "";
   const rows = await run(
     `WITH counted AS (
-       SELECT t.id, t.created_at::text AS created_at, ${EXCERPT} AS excerpt,
+       SELECT t.id, t.created_at, ${EXCERPT} AS excerpt,
               (SELECT count(DISTINCT te.entity_id) FROM thought_entities te WHERE te.thought_id = t.id AND te.entity_id = ANY($2::uuid[]))::int AS entities${edgeCol}
          FROM thoughts t
         WHERE EXISTS (SELECT 1 FROM thought_entities te WHERE te.thought_id = t.id AND te.entity_id = ANY($1::uuid[])))
@@ -351,7 +351,7 @@ export async function subjectThoughts(run: Runner, subjectIds: readonly string[]
       ORDER BY ${opts.edges ? "entities + edges DESC, " : ""}entities DESC, id
       LIMIT $3`,
     params);
-  return rows as ThoughtRow[];
+  return stampRows(rows);
 }
 
 /** The caveats, with the run's own numbers where a caveat has one — printed every run, in both formats. */
@@ -366,7 +366,7 @@ export function caveats(c: Coverage, opts: Options): string[] {
     `Hubs and clusters inflate each other: a name most thoughts mention, or an epic its children all connect to, lifts everything around it.`,
     `No recency term: a thought captured a minute ago about its own subject ranks as any other.`,
     `The graph holds no ticket status; open/closed is the caller's filter against the source.`,
-    `Coverage: ${c.extracted} of ${c.thoughts} thoughts have extracted entities${c.extraction_key ? ` (extraction key ${c.extraction_key})` : " (no extraction key: db/extract-entities.ts has not run)"}; what the worker has not reached is not in the graph.`,
+    `Coverage: ${c.extracted} of ${c.thoughts} thoughts have extracted entities${c.extraction_key ? ` (extraction key ${c.extraction_key})` : " (no extraction key: db/extract-entities.ts has not run)"}; a thought the worker has not reached, or found no entity in, is not in the graph (extract-entities.ts --status tells the two apart).`,
   ];
   if (!opts.edges) out.push(`--no-edges: ranked by co-occurrence alone; the difference from the default run is what the edges add.`);
   return out;
@@ -375,6 +375,8 @@ export function caveats(c: Coverage, opts: Options): string[] {
 export type Report = {
   subject: string | null;
   resolution: Resolution | null;
+  /** The entities ranked around: every subject the rung returned, or for a fuzzy guess the first alone. */
+  subject_ids: string[];
   options: Options;
   coverage: Coverage;
   caveats: string[];
@@ -390,13 +392,18 @@ export async function report(run: Runner, subject: string | null, opts: Options)
   const base = { subject, options: opts, coverage: cov, caveats: caveats(cov, opts) };
   if (subject === null) {
     const { byMentions, byDegree } = await topEntities(run, opts);
-    return { ...base, resolution: null, by_mentions: byMentions, by_degree: byDegree, thoughts: await topThoughts(run, opts) };
+    return { ...base, resolution: null, subject_ids: [], by_mentions: byMentions, by_degree: byDegree, thoughts: await topThoughts(run, opts) };
   }
   const resolution = await resolveSubject(run, subject, opts);
-  const ids = resolution.subjects.map((s) => s.id);
+  // Exact and alias rungs return one name under several types — one subject.
+  // The fuzzy rung returns up to five DIFFERENT names; ranking around their
+  // union would count a thought about the fourth guess as a co-mention of the
+  // first and hide each guess as a neighbour of the others, so it ranks around
+  // the best guess alone and lists the rest (second review pass).
+  const ids = resolution.how === "fuzzy" ? resolution.subjects.slice(0, 1).map((s) => s.id) : resolution.subjects.map((s) => s.id);
   const neighbours = await neighbourhood(run, ids, opts);
   const thoughts = await subjectThoughts(run, ids, neighbours.map((n) => n.id), opts);
-  return { ...base, resolution, neighbours, thoughts };
+  return { ...base, resolution, subject_ids: ids, neighbours, thoughts };
 }
 
 // ── Rendering ────────────────────────────────────────────────────────────────
@@ -442,9 +449,9 @@ export function render(r: Report): string {
       else if (res.normalized === null) out.push(`No entity resolves from ${shown} — the name is only punctuation.`);
       else out.push(`No entity resolves from ${shown} (normalised: ${JSON.stringify(res.normalized)}; nothing exact, no alias or merged name, nothing within trigram similarity ${FUZZY_FLOOR}).`);
     } else {
-      const label = { id: "by id", exact: "exact match on the normalised name", alias: "by alias or merged-in name", fuzzy: `by trigram similarity — a GUESS; pass the name shown to be exact` }[res.how];
+      const label = { id: "by id", exact: "exact match on the normalised name", alias: "by alias or merged-in name", fuzzy: `by trigram similarity — GUESSES, ranked around the first; pass the name shown to be exact` }[res.how];
       out.push(`Subject (${label}):`);
-      for (const s of res.subjects) out.push(`  ${s.entity_type} ${JSON.stringify(s.name)} — ${s.mentions} mention${s.mentions === 1 ? "" : "s"}${res.how === "fuzzy" ? ` (similarity ${s.score.toFixed(2)})` : ""}  ${s.id}`);
+      for (const s of res.subjects) out.push(`  ${r.subject_ids.includes(s.id) ? "▸" : " "} ${s.entity_type} ${JSON.stringify(s.name)} — ${s.mentions} mention${s.mentions === 1 ? "" : "s"}${res.how === "fuzzy" ? ` (similarity ${s.score.toFixed(2)})` : ""}  ${s.id}`);
     }
     out.push("");
     if (r.neighbours && r.neighbours.length) {
@@ -492,8 +499,13 @@ export function parseArgs(argv: readonly string[]): Parsed | { error: string } {
   let url: string | undefined;
   let json = false;
   const positional: string[] = [];
+  const seen = new Set<string>();
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
+    if (a.startsWith("--")) {
+      if (seen.has(a)) return { error: `${a} given twice` };
+      seen.add(a);
+    }
     const value = (): string | { error: string } => {
       const v = argv[i + 1];
       if (v === undefined || v.startsWith("--")) return { error: `${a} needs a value` };
@@ -521,6 +533,7 @@ export function parseArgs(argv: readonly string[]): Parsed | { error: string } {
     else if (a === "--no-edges") opts.edges = false;
     else if (a === "--json") json = true;
     else if (a.startsWith("--")) return { error: `unknown flag ${a}` };
+    else if (a.trim() === "") return { error: "the subject is empty; leave it out for the whole graph" };
     else positional.push(a);
   }
   if (positional.length > 1) return { error: `one subject at a time; got ${positional.map((p) => JSON.stringify(p)).join(", ")} — quote a name with spaces` };
@@ -541,17 +554,25 @@ if (import.meta.main) {
   }
   const sql = new SQL({ url, max: 1 });
   const run: Runner = async (text, params) => (await sql.unsafe(text, params as never[])) as unknown as Record<string, unknown>[];
+  // The exit code is decided inside and applied after the connection has
+  // closed and the output has been written (process.exit inside the try would
+  // skip the finally, and could cut a piped --json short).
+  let code = 0;
   try {
-    const [{ n }] = await run(`SELECT count(*)::int AS n FROM pg_class WHERE relname IN ('ob1_entities', 'thought_entities', 'ob1_entity_edges') AND relkind = 'r'`, []);
+    // The three tables as this connection resolves them — a same-named table in
+    // a schema off the search_path is not the graph.
+    const [{ n }] = await run(`SELECT (to_regclass('ob1_entities') IS NOT NULL)::int + (to_regclass('thought_entities') IS NOT NULL)::int + (to_regclass('ob1_entity_edges') IS NOT NULL)::int AS n`, []);
     if (Number(n) !== 3) {
       console.error("This brain has no entity graph: migration 016 is not applied. Run db/migrate.ts, then db/extract-entities.ts.");
-      process.exit(2);
+      code = 2;
+    } else {
+      const r = await report(run, parsed.subject, parsed.opts);
+      if (parsed.json) console.log(JSON.stringify(r, null, 2));
+      else console.log(render(r));
+      code = r.resolution && r.resolution.how === "none" ? 1 : 0;
     }
-    const r = await report(run, parsed.subject, parsed.opts);
-    if (parsed.json) console.log(JSON.stringify(r, null, 2));
-    else console.log(render(r));
-    process.exit(r.resolution && r.resolution.how === "none" ? 1 : 0);
   } finally {
     await sql.close();
   }
+  process.exit(code);
 }
