@@ -138,10 +138,11 @@
 --   the trigger's cost gains one primary-key lookup on ob1_agents per row.
 --
 -- ON THE WORD "TRUNCATE" BELOW
---   CLAUDE.md's guard rail forbids TRUNCATE in SQL files. The one occurrence
---   here is a BEFORE TRUNCATE trigger that REFUSES it — the rail's intent,
---   applied to the one statement 008's row triggers could not see. No file in
---   this repository truncates thought_audit.
+--   CLAUDE.md's guard rail forbids TRUNCATE in SQL files: a file must never
+--   destroy existing rows. The one occurrence here is a BEFORE TRUNCATE trigger
+--   that REFUSES it — the rule applied to the one statement 008's row triggers
+--   could not see, and the rail says so since SMD-1730's third review pass. No
+--   file in this repository truncates thought_audit.
 --
 -- SAFETY
 --   Additive: thoughts is untouched; thought_audit and ob1_agents gain nullable
