@@ -461,6 +461,8 @@ export class PostgrestStore implements ThoughtStore {
       filter: row.filter,
       result_ids: row.resultIds,
       result_scores: row.resultScores,
+      arm: row.arm ?? null,
+      tier: row.tier ?? null,
     });
     if (error) throw new Error(error.message);
   }
@@ -471,8 +473,10 @@ export class PostgrestStore implements ThoughtStore {
     // The batch's contract (absent agent → NULL, every id a uuid, refused by
     // column before the request) is normaliseActionRows, shared with the SQL
     // writer: `""` sent as an agent id was a 22P02 that dropped the batch.
+    // tier is the writing server's OB1_TIER — one server per batch (SMD-1806).
+    const tier = rows[0]?.tier ?? null;
     const { error } = await this.client.from("query_log").insert(
-      normaliseActionRows(rows).map((row) => ({ kind: "action", tool: row.tool, agent_id: row.agentId, target_id: row.targetId })),
+      normaliseActionRows(rows).map((row) => ({ kind: "action", tool: row.tool, agent_id: row.agentId, target_id: row.targetId, tier })),
     );
     if (error) throw new Error(error.message);
   }
