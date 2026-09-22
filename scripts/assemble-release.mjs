@@ -32,7 +32,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { FORK_VERSION, UPSTREAM_PIN, migrationSha, readReleases, highestReleasedMigration } from "../db/version.mjs";
 import { parseFragment, fragmentSection } from "./fragments.mjs";
-import { CHANGES_DIR as CHANGES_REL, FRAGMENT, changeFileName, classifyChanges, readChangeEntries, readChanges, renderIndex, spliceIndex } from "./fork-index.mjs";
+import { CHANGES_DIR as CHANGES_REL, FIRST_FILED, FRAGMENT, changeFileName, classifyChanges, readChangeEntries, renderIndex, spliceIndex } from "./fork-index.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const CHANGES_DIR = join(ROOT, "changes");
@@ -155,7 +155,15 @@ function buildPlan() {
   });
   const version = nextVersion(releases, fragments.map((f) => f.fm.bump));
   const entries = readChangeEntries(ROOT);
-  let n = highestChangeNumber(classifyChanges(entries).numbered);
+  const { numbered: existing } = classifyChanges(entries);
+  // The numbers this cut builds on must be sound: contiguous from the first filed
+  // change, one file each. Check 15 holds that in CI; a local run before CI on a
+  // tree two branches both numbered would otherwise stack a release on the flaw.
+  for (let i = 0; i < existing.length; i++) {
+    const want = FIRST_FILED + i;
+    if (existing[i].n !== want) throw new Error(`${CHANGES_REL}/ is not contiguous at ${existing[i].name} (expected change ${want}) — run check-fork-consistency and fix the directory before cutting a release`);
+  }
+  let n = highestChangeNumber(existing);
   const numbered = fragments.map((f) => ({ number: ++n, ...f, file: renderChangeFile(n, f.fork) }));
   // The index as it will read after the cut, from the plan — rendered (and the
   // marker pair checked) before a single file is written, so a FORK.md this step
@@ -173,7 +181,20 @@ function buildPlan() {
   const range = hi >= lo ? [lo, hi] : null; // a docs/server-only cut closes no migration
   const tickets = [...new Set(fragments.flatMap((f) => f.fm.tickets))];
 
-  return { releases, fragments: numbered, version, range, tickets, forkAfter };
+  // The changelog and the release entry, rendered here too: every throw the cut
+  // can raise — a CHANGELOG.md with no Unreleased section, a migration missing from
+  // the range — happens before write() has touched a file.
+  const date = new Date().toISOString().slice(0, 10);
+  const core = version.split("+")[0];
+  const changelogAfter = insertChangelogSection(
+    readFileSync(join(ROOT, "CHANGELOG.md"), "utf8"),
+    renderChangelogSection(version, date, numbered),
+    core,
+    releases.length ? `${REPO}/compare/v${releases[releases.length - 1].version.split("+")[0]}...v${core}` : `${REPO}/compare/upstream-pin-${UPSTREAM_PIN}...v${core}`,
+  );
+  const entry = { version, range, server: gitHead(), upstream: UPSTREAM_PIN, date, tickets };
+  if (range) entry.frozenShas = frozenShasForRange(range[0], range[1], readMig);
+  return { releases, fragments: numbered, version, range, tickets, date, forkAfter, changelogAfter, entry };
 }
 
 function printPlan(plan) {
@@ -184,40 +205,29 @@ function printPlan(plan) {
   console.log(`\nChange files to write (and the fragment each replaces):`);
   for (const f of plan.fragments) console.log(`  ${CHANGES_REL}/${f.file.name}  <-  ${CHANGES_REL}/${f.name}`);
   console.log(`\nCHANGELOG.md [${core}] section:\n`);
-  console.log(renderChangelogSection(plan.version, new Date().toISOString().slice(0, 10), plan.fragments).split("\n").map((l) => "  " + l).join("\n"));
+  console.log(renderChangelogSection(plan.version, plan.date, plan.fragments).split("\n").map((l) => "  " + l).join("\n"));
   if (plan.range) {
-    const shas = frozenShasForRange(plan.range[0], plan.range[1], readMig);
+    const shas = plan.entry.frozenShas;
     console.log(`releases.json entry would freeze ${Object.keys(shas).length} migration(s): ${Object.entries(shas).map(([k, v]) => `${k}:${v}`).join(", ")}`);
   }
   console.log(`\n(dry run — nothing written; pass --write to apply, then tag and release out of band)`);
 }
 
 function write(plan) {
-  const date = new Date().toISOString().slice(0, 10);
-  const core = plan.version.split("+")[0];
-
-  // changes/: each fragment becomes the next numbered file and is removed; then
-  // FORK.md's index is re-rendered from the directory (the release author reviews
-  // the diff; this is not run in CI).
+  // Everything was rendered in buildPlan; this only writes (the release author
+  // reviews the diff; this is not run in CI): each fragment becomes the next
+  // numbered file and is removed, then FORK.md's index, CHANGELOG.md's section
+  // under Unreleased with its compare link, and releases.json's entry.
   for (const f of plan.fragments) {
     writeFileSync(join(CHANGES_DIR, f.file.name), f.file.text);
     unlinkSync(join(CHANGES_DIR, f.name));
   }
   writeFileSync(join(ROOT, "FORK.md"), plan.forkAfter);
-
-  // CHANGELOG.md: the version section under Unreleased, with its compare link.
-  const cl = readFileSync(join(ROOT, "CHANGELOG.md"), "utf8");
-  const section = renderChangelogSection(plan.version, date, plan.fragments);
-  const compare = plan.releases.length ? `${REPO}/compare/v${plan.releases[plan.releases.length - 1].version.split("+")[0]}...v${core}` : `${REPO}/compare/upstream-pin-${UPSTREAM_PIN}...v${core}`;
-  writeFileSync(join(ROOT, "CHANGELOG.md"), insertChangelogSection(cl, section, core, compare));
-
-  // releases.json: append this cut.
-  const entry = { version: plan.version, range: plan.range, server: gitHead(), upstream: UPSTREAM_PIN, date, tickets: plan.tickets };
-  if (plan.range) entry.frozenShas = frozenShasForRange(plan.range[0], plan.range[1], readMig);
-  writeFileSync(join(ROOT, "releases.json"), JSON.stringify([...plan.releases, entry], null, 2) + "\n");
+  writeFileSync(join(ROOT, "CHANGELOG.md"), plan.changelogAfter);
+  writeFileSync(join(ROOT, "releases.json"), JSON.stringify([...plan.releases, plan.entry], null, 2) + "\n");
 
   console.log(`Wrote ${plan.fragments.length} change file(s), FORK.md's index, CHANGELOG.md and releases.json for ${plan.version}.`);
-  console.log(`Next, out of band, in this same commit: bump db/version.mjs's FORK_VERSION to '${plan.version}' and emit a NNN_set_schema_version.sql upserting it as the range's last migration (check-fork holds the two equal, so both move together). Then tag v${core}+upstream.${UPSTREAM_PIN} and create the release.`);
+  console.log(`Next, out of band, in this same commit: bump db/version.mjs's FORK_VERSION to '${plan.version}' and emit a NNN_set_schema_version.sql upserting it as the range's last migration (check-fork holds the two equal, so both move together). Then tag v${plan.version.split("+")[0]}+upstream.${UPSTREAM_PIN} and create the release.`);
 }
 
 function gitHead() {
@@ -238,6 +248,8 @@ function selfCheck() {
   ok(renderChangeFile(102, "Only a title (SMD-2)").text === "# 102. Only a title (SMD-2)\n", "a body of one line is a heading alone");
   ok(renderChangeFile(103, "### A title (SMD-3)\n\nBody.").text.startsWith("# 103. A title (SMD-3)\n"), "a heading mark on the title line is stripped, not doubled");
   ok(changeFileName(104, "A".repeat(200) + " (SMD-4)").length <= 60, "one long word is cut to the slug budget");
+  ok(changeFileName(105, ["B".repeat(60), "C".repeat(60), "D".repeat(60)].join(" ") + " (SMD-5)").length <= 60, "three long words: the budget applies from the first");
+  ok(changeFileName(106, "Only the (SMD-6)") === "106-only.md" && changeFileName(107, "The (SMD-7)") === "107-the.md", "a trailing stop word goes while a word remains");
   const frags = [
     { fm: { type: "fixed" }, body: "## Changelog\nfixed a thing (SMD-2)\n" },
     { fm: { type: "added" }, body: "## Changelog\nadded a thing (SMD-1)\n" },

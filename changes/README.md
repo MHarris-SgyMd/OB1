@@ -98,9 +98,10 @@ FORK.md`. Git does not follow a split of one file into eighty-five, so
 
 `scripts/check-fork-consistency.mjs` check 15: file names (numbered or fragment),
 contiguous numbers, the `# N.` heading matching the name, the line cap and its
-ratchet, FORK.md under its byte ceiling and carrying no `### N.` section, the
-index between FORK.md's markers equal to what `scripts/fork-index.mjs` renders
-from this directory, and every "FORK.md change N" / `changes/NNN` / "NNN change
-M" citation in the tree — and every "change N" in the record itself — naming a
+ratchet, FORK.md under its byte ceiling and carrying no numbered section at any
+heading level, the index between FORK.md's markers equal to what
+`scripts/fork-index.mjs` renders from this directory, and every "FORK.md change
+N" / "FORK change N" / `changes/NNN` / "NNN change M" citation in a file git
+tracks or would track — and every "change N" in the record itself — naming a
 number with a file (or a row of the 1–17 table). Check 16 holds the fragment
 shape; check 17 the changelog, the release pairing and the frozen migrations.

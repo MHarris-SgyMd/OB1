@@ -49,11 +49,18 @@ export function headOf(title) {
   return title.replace(/\s*\((SMD-\d+(?:\s*[/,]\s*(?:SMD-)?\d+)*)\)\s*$/, "").split(" — ")[0].trim();
 }
 
+/** Text safe inside a table cell and a link's text: a pipe or a bracket is escaped, not a delimiter. */
+export function cell(text) {
+  return text.replace(/[|[\]]/g, "\\$&");
+}
+
 const STOP_WORDS = new Set(["of", "so", "the", "and", "a", "an", "its", "not", "to", "is", "was", "as", "be", "for", "with", "on", "in", "at", "that", "which", "into", "s", "it", "by", "or", "no", "only"]);
 /**
  * The slug a change file's name carries, from its title: the first clause, ASCII
- * lower-case words joined by dashes, cut around 48 characters and never ending on
- * a stop word. The release step names a numbered file with it; the split did too.
+ * lower-case words joined by dashes, at most 48 characters (a first word longer
+ * than that is cut to it) and, when more than one word remains, never ending on
+ * a stop word. The release step names a numbered file with it; the split did
+ * too, with an earlier cut — the names 18–103 stand as they are.
  */
 export function slugOf(title) {
   const words = headOf(title)
@@ -69,11 +76,11 @@ export function slugOf(title) {
   const out = [];
   let len = 0;
   for (const w of words) {
-    if (len + w.length + 1 > 48 && out.length >= 3) break;
-    out.push(w.slice(0, 48)); // one word longer than the whole budget is cut too
-    len += w.length + 1;
+    if (out.length && len + 1 + w.length > 48) break;
+    out.push(out.length ? w : w.slice(0, 48));
+    len += (out.length > 1 ? 1 : 0) + out[out.length - 1].length;
   }
-  while (out.length > 3 && STOP_WORDS.has(out[out.length - 1])) out.pop();
+  while (out.length > 1 && STOP_WORDS.has(out[out.length - 1])) out.pop();
   return out.join("-") || "change";
 }
 
@@ -83,32 +90,40 @@ export function changeFileName(n, title) {
 }
 
 /**
- * What changes/ holds: numbered files (with their heading, line count and the
- * number their name carries), SMD-1804 fragments, and anything else. Pure over
- * a listing of `{ name, text }`, so the check can hand it an in-memory directory.
+ * What changes/ holds: numbered files (with their heading, text, line count and
+ * the number their name carries), SMD-1804 fragments, and anything else — an
+ * entry whose `text` is null is not a regular file (a directory, a socket) and is
+ * "other" whatever its name. Pure over a listing of `{ name, text }`, so the
+ * check can hand it an in-memory directory.
  */
 export function classifyChanges(entries) {
   const numbered = [];
   const fragments = [];
   const other = [];
   for (const { name, text } of entries) {
-    const num = NUMBERED.exec(name);
-    const frag = FRAGMENT.exec(name);
-    const lines = text.endsWith("\n") ? text.split("\n").length - 1 : text.split("\n").length;
-    if (num) numbered.push({ name, n: Number(num[1]), heading: headingOf(text), lines });
-    else if (frag) fragments.push({ name, ticket: `SMD-${Number(frag[1])}`, lines });
-    else if (name !== "README.md" && !name.startsWith(".")) other.push(name); // a dotfile is the OS's, not a record
+    const num = text === null ? null : NUMBERED.exec(name);
+    const frag = text === null ? null : FRAGMENT.exec(name);
+    const lines = text === null ? 0 : text.endsWith("\n") ? text.split("\n").length - 1 : text.split("\n").length;
+    if (num) numbered.push({ name, n: Number(num[1]), heading: headingOf(text), text, lines });
+    else if (frag) fragments.push({ name, ticket: `SMD-${Number(frag[1])}`, text, lines });
+    else if (text === null || (name !== "README.md" && !name.startsWith("."))) other.push({ name, text }); // a dotfile is the OS's, not a record
   }
   numbered.sort((a, b) => a.n - b.n || a.name.localeCompare(b.name));
   fragments.sort((a, b) => a.name.localeCompare(b.name));
   return { numbered, fragments, other };
 }
 
-/** Every entry of changes/ (any extension — a stray is a finding), as `{ name, text }`. */
+/**
+ * Every entry of changes/ (any extension — a stray is a finding), as
+ * `{ name, text }`; a directory or anything else that is not a regular file has
+ * `text: null` rather than an EISDIR from the reader.
+ */
 export function readChangeEntries(root) {
   const dir = join(root, CHANGES_DIR);
   if (!existsSync(dir)) return [];
-  return readdirSync(dir).sort().map((name) => ({ name, text: readFileSync(join(dir, name), "utf8") }));
+  return readdirSync(dir, { withFileTypes: true })
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .map((d) => ({ name: d.name, text: d.isFile() ? readFileSync(join(dir, d.name), "utf8") : null }));
 }
 
 export function readChanges(root) {
@@ -129,7 +144,7 @@ export function renderIndex({ numbered, fragments }) {
   ];
   for (const c of numbered) {
     const title = c.heading?.title ?? c.name;
-    lines.push(`| ${c.n} | [${headOf(title)}](${CHANGES_DIR}/${c.name}) | ${ticketOf(title)} |`);
+    lines.push(`| ${c.n} | [${cell(headOf(title))}](${CHANGES_DIR}/${c.name}) | ${ticketOf(title)} |`);
   }
   if (fragments.length) {
     lines.push("");

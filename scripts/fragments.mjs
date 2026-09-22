@@ -9,7 +9,8 @@
 
 /** Split `---` front matter and the body of a fragment; null if no front matter. */
 export function parseFragment(text) {
-  const m = /^---\n([\s\S]*?)\n---\n?([\s\S]*)$/.exec(text);
+  // An editor's byte-order mark or CRLF endings are not a missing front matter.
+  const m = /^---\n([\s\S]*?)\n---\n?([\s\S]*)$/.exec(text.replace(/^\uFEFF/, "").replace(/\r\n/g, "\n"));
   if (!m) return null;
   const fm = {};
   const lines = m[1].split("\n");
