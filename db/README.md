@@ -164,8 +164,8 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `1350 assertions: 1350 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports forty-six (46) migrations applied, and
+`bun test-schema.ts` prints `1353 assertions: 1353 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports forty-seven (47) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -203,7 +203,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 029 change 54, 030 change 56, 031 change 57, 032 change 60, 033 change 63,
 034 change 65, 035 change 66, 036 change 68, 037 change 70, 038 change 80, 039 change 81,
 040 change 91, 041 change 94, 042 change 95, 043 change 98, 044 SMD-1804,
-045 SMD-1490, 046 SMD-1730).
+045 SMD-1490, 046 SMD-1730, 047 SMD-1492).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; `0.0.0+upstream.9543c29` until
@@ -1103,6 +1103,38 @@ gets only 8-9x at either size, and a common word and any sub-trigram pattern are
 unaffected at every scale. The full table, with the write cost beside it, is in
 the header of `migrations/011_text_search_trgm.sql`.
 
+### bench-querylog.ts
+
+The two `query_log` costs SMD-1492 settles with numbers rather than prose. It ages
+search rows so `prune_query_log` deletes only the oldest tenth — the small old tail a
+real retention prune trims, the selective range the index is for, not the half-table
+delete a Seq Scan would win anyway — on a fresh schema (every migration, so migration
+047's `logged_at` index is built by the schema), then runs the retention `DELETE`
+under `EXPLAIN (ANALYZE)` — rolled back so both arms see the same rows — with the
+index and again with it dropped, reporting the plan for each and flagging the
+Seq-Scan→index-scan flip only where it was actually observed (at small scales the
+table is cheap enough that Postgres scans regardless — the crossover).
+
+The write cost is two separate arms. One times a single **bulk** INSERT of
+`WRITE_BATCH` rows into two tables differing only by the index: the round trip is
+amortized across the batch, so the difference is the btree's per-row maintenance —
+the "fourth index write cost" the ticket weighs, and the number a future BRIN
+follow-up would try to erase (below the noise floor at these scales). The other
+times `AWAITED_PROBES` **single** awaited INSERTs, one round trip each, on the
+index-present table: that per-call millisecond is what `OB1_QUERY_LOG=on` actually
+makes a search or fetch wait for before it returns, the cost the "keep the await"
+decision accepts (a single awaited INSERT cannot isolate the µs-scale index cost —
+the round trip swamps it — which is why the two are measured apart).
+
+```bash
+./with-postgres.sh bun bench-querylog.ts
+OB1_BENCH_SCALES=1000000 ./with-postgres.sh bun bench-querylog.ts
+```
+
+Without a container it does nothing (`requireDatabaseUrl`); PGlite's tiny tables
+would seq-scan whatever the index, which is why the prune teeth live here and not in
+`test-schema.ts` (which asserts only that the index exists).
+
 ### bench-hnsw.ts
 
 What a filtered `match_thoughts` returns against an exact scan of the same rows,
@@ -1451,8 +1483,8 @@ claude mcp add --transport http open-brain-stable http://127.0.0.1:8010/mcp
 ```
 
 The **canary** and **working** tiers (refresh-on-merge, replay the query log, diff
-the ids; a per-worktree disposable copy) are deferred: they need the log's hot-path
-fixes (SMD-1492) and SMD-1805's published images (SMD-1860). `db/tier.ts` and
+the ids; a per-worktree disposable copy) are deferred: the remaining blocker is
+SMD-1805's published images (SMD-1860). `db/tier.ts` and
 `deploy/compose.tiers.yaml` land with them. The `query_log.tier` column they read is
 already here — migration 045 (SMD-1490) added it, and the server stamps every
 query_log row with its `OB1_TIER` (stable | canary | working, NULL for a plain
@@ -1461,13 +1493,25 @@ brain). 045 also added `query_log.arm` (the retrieval arm a search ran — `hybr
 metadata filter (`metadata @> filter`, a shallow object) and log it, so the offline
 replay gate can measure the filtered path against real use.
 
+**Prune seeks, and the write is measured (migration 047, SMD-1492).** The canary
+replays this log, so a lost row is a lost replay, and a scheduled prune (SMD-1794)
+runs the retention delete at volume. `prune_query_log` deletes `WHERE logged_at <
+cutoff` with no `agent_id` predicate, which 034's composite `(agent_id, logged_at)`
+index cannot serve (its leading column is `agent_id`); migration 047 adds a plain
+btree on `logged_at` so the delete range-scans instead of sequentially scanning the
+whole log. The log write stays awaited on the request hot path deliberately —
+fire-and-forget could drop a row the canary needs — and `bench-querylog.ts` (below)
+measures both that awaited INSERT's cost and the prune plan flipping to an index
+scan. A cheaper insert path (a BRIN in place of the btree, the log being
+append-only with a monotonic `logged_at`) is a tracked follow-up (SMD-1950).
+
 ## Testing
 
 Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 1350 assertions, PGlite, no container
+bun test-schema.ts                          # 1353 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts         # 601 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
