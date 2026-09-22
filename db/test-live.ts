@@ -3050,6 +3050,7 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
          "the dump line carries each window's own answer beside the merged one — the derivation record");
   assert(ledgerLine !== undefined && ledgerLine.entities.length === 2 && ledgerLine.relations.length === 1, `…and the merged answer names Anita and Ledger once each, with one edge (${JSON.stringify(ledgerLine?.entities)})`);
   assert(dumped.filter((l) => l.id !== ledger).every((l) => l.windows === 1 && l.parts === undefined), "a thought within the window dumps as one window with no per-window record");
+  try { unlinkSync(dumpPath); } catch { /* already gone */ }
   const [{ key }] = await sql`SELECT value AS key FROM ob1_config WHERE key = 'entity_extraction_key'`;
   assert(key === KEY, `the run recorded the extraction key (${key})`);
   const [agent] = await sql`SELECT canonical_agent_id AS id, label FROM ob1_agents WHERE label = 'entity-worker'`;

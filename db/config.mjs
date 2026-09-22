@@ -319,6 +319,27 @@ export const KNOWN_CHAT_MODEL_WINDOW = {
 export const EXTRACT_PROMPT_TOKENS = 398;
 export const EXTRACT_OUTPUT_RATIO = 2;
 export const EXTRACT_OUTPUT_FLOOR = 256;
+/** The `[Part i of n of a longer note]` marker a window carries (entities.ts buildMessages), with room over its ~12 tokens. */
+export const EXTRACT_MARKER_TOKENS = 24;
+
+/**
+ * The most thought text one extraction call can carry in a served context of
+ * `window` tokens with everything the call requests beside it: the rules, the
+ * part marker, and the answer budget for that much text —
+ * `(window − rules − marker − floor) / (1 + ratio)`. One function for the
+ * resolver, preflight's warning and its "fewer than N tokens" hint (first
+ * review pass: the three had the arithmetic each, and all three omitted the
+ * floor and the marker, so the value preflight recommended requested
+ * window + 280 tokens of a `window`-token context).
+ */
+export function extractWindowThatFits(window) {
+  return Math.floor((window - EXTRACT_PROMPT_TOKENS - EXTRACT_MARKER_TOKENS - EXTRACT_OUTPUT_FLOOR) / (1 + EXTRACT_OUTPUT_RATIO));
+}
+
+/** The served context a window of `tokens` needs: the inverse of extractWindowThatFits. */
+export function extractContextNeeded(tokens) {
+  return EXTRACT_PROMPT_TOKENS + EXTRACT_MARKER_TOKENS + EXTRACT_OUTPUT_FLOOR + tokens * (1 + EXTRACT_OUTPUT_RATIO);
+}
 
 /**
  * Whether a window after a thought's first carries the thought's opening line
@@ -353,14 +374,13 @@ export function extractOutputBudget(inputTokens) {
  * How many estimated tokens of thought text one extraction call carries, for
  * the metadata model (SMD-1879): OB1_EXTRACT_CHUNK_TOKENS when it is set to a
  * positive number; otherwise, for a model in KNOWN_CHAT_MODEL_WINDOW, what its
- * served context holds beside the rules and an answer at the output ratio —
- * `(window − EXTRACT_PROMPT_TOKENS) / (1 + EXTRACT_OUTPUT_RATIO)` — never above
- * `fallback`, the window measured to extract reliably (entities.ts's
- * DEFAULT_EXTRACT_WINDOW_TOKENS, passed in because this file cannot import it
- * under Node); a model the table does not know gets `fallback`. So a
- * 32,768-token model derives the fallback (its context would hold 10,790 and
- * the cap holds it to what the model was measured to finish), a 4,096-token
- * one 1,232 → the fallback again if that is 1,200, a 2,048-token one 550, where
+ * served context holds beside the rules, the part marker and an answer at the
+ * output ratio (extractWindowThatFits) — never above `fallback`, the window
+ * measured to extract reliably (chunk.ts's DEFAULT_EXTRACT_WINDOW_TOKENS,
+ * passed in because this file cannot import it under Node); a model the table
+ * does not know gets `fallback`. So a 32,768-token model derives the fallback
+ * (its context would hold 10,696 and the cap holds it to what the model was
+ * measured to finish), a 4,096-token one 1,139, a 2,048-token one 456, where
  * the fallback's text plus its answer would not fit its context at all. One
  * rule for the worker, the evals and preflight, which names the source it
  * reports; `capped` says the context would have allowed more. Not the
@@ -374,9 +394,9 @@ export function resolveExtractWindow(raw, model, fallback) {
   const n = raw ? Number(raw) : NaN;
   // Exact name, then the name without its Ollama tag — resolveChunkTokens's rule.
   const window = KNOWN_CHAT_MODEL_WINDOW[model] ?? KNOWN_CHAT_MODEL_WINDOW[model.replace(/:[^:]*$/, "")];
-  if (Number.isFinite(n) && n > 0) return { tokens: n, from: "OB1_EXTRACT_CHUNK_TOKENS", window, capped: false };
+  if (Number.isFinite(n) && n > 0) return { tokens: Math.floor(n), from: "OB1_EXTRACT_CHUNK_TOKENS", window, capped: false };
   if (window === undefined) return { tokens: fallback, from: "default", window, capped: false };
-  const fits = Math.floor((window - EXTRACT_PROMPT_TOKENS) / (1 + EXTRACT_OUTPUT_RATIO));
+  const fits = extractWindowThatFits(window);
   return { tokens: Math.max(1, Math.min(fits, fallback)), from: "window", window, capped: fits > fallback };
 }
 

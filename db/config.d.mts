@@ -73,8 +73,14 @@ export const EXTRACT_PROMPT_TOKENS: number;
 export const EXTRACT_OUTPUT_RATIO: number;
 /** Added to every output budget, for a short thought dense with names. */
 export const EXTRACT_OUTPUT_FLOOR: number;
+/** Tokens reserved for the `[Part i of n …]` marker a window carries. */
+export const EXTRACT_MARKER_TOKENS: number;
 /** `max_tokens` for an extraction call over this many estimated tokens of thought text. */
 export function extractOutputBudget(inputTokens: number): number;
+/** The most thought text one call carries in a served context of `window` tokens, with the rules, the marker and its answer budget beside it. */
+export function extractWindowThatFits(window: number): number;
+/** The served context a window of `tokens` needs — the inverse of extractWindowThatFits. */
+export function extractContextNeeded(tokens: number): number;
 /** Whether an extraction window after the first carries the thought's opening line; decided by measurement. */
 export const EXTRACT_WINDOW_HEADER: boolean;
 /** Whether a budgeted extraction call that ran to its budget is retried once with a frequency penalty; decided by measurement. */

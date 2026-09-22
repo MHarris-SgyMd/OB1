@@ -437,7 +437,17 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
   assert(reqs[0].maxTokens === extractOutputBudget(estimateTokens(short)), `…carrying the answer budget for its own length (${reqs[0].maxTokens})`);
 
   reqs.length = 0;
-  const many = await extractEntities(long, cfgD, undefined, { kind: "extraction" });
+  // Caught, not thrown: with the windowing removed the stub refuses the one
+  // oversized call, and that must be a counted failure here, not a crash of
+  // the suite (a mutant run found the crash and no red line).
+  let many: Awaited<ReturnType<typeof extractEntities>>;
+  try {
+    many = await extractEntities(long, cfgD, undefined, { kind: "extraction" });
+  } catch (e) {
+    assert(false, `the long thought went to the stub in one call and was refused — the windowing is gone (${(e as Error).message.slice(0, 80)})`);
+    providerD.stop();
+    throw e;
+  }
   assert(reqs.length >= 3 && many.windows === reqs.length, `the long thought is ${reqs.length} calls, one per window, and the answer says so (windows ${many.windows})`);
   assert(reqs.every((r) => estimateTokens(r.text) <= 600), "every call carries at most a window of text — the stub would have refused more");
   assert(reqs.every((r, i) => r.part === `[Part ${i + 1} of ${reqs.length} of a longer note]`), `each window says which part it is (${reqs.map((r) => r.part).join(" | ")})`);

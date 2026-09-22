@@ -213,15 +213,19 @@ console.log("\n[3c] The extraction window is derived from the METADATA model's s
   assert(/extraction window\s+thoughts over 1200 estimated tokens are extracted in 1200-token windows \(overlap 150\), derived from qwen2\.5:7b's 32768-token served context — held at 1200, the size the default model was measured to finish reliably \(evals\/README\.md, SMD-1879\); a call that runs to its answer budget is made once more with a 0\.5 frequency penalty/.test(qwen.out),
          "the default model derives the measured size from its 32,768-token context, the row says the context would have allowed more, and names the runaway retry");
   const unknown = await run({ ...base, OB1_METADATA_MODEL: "some-chat-model" });
-  assert(/extraction window\s+thoughts over 1200 estimated tokens are extracted in 1200-token windows \(overlap 150\), the default for some-chat-model's served context, which db\/config\.mjs's KNOWN_CHAT_MODEL_WINDOW does not list; a call that runs to its answer budget is made once more with a 0\.5 frequency penalty — set OB1_EXTRACT_CHUNK_TOKENS if the model serves fewer than 3998 tokens/.test(unknown.out),
+  assert(/extraction window\s+thoughts over 1200 estimated tokens are extracted in 1200-token windows \(overlap 150\), the default for some-chat-model's served context, which db\/config\.mjs's KNOWN_CHAT_MODEL_WINDOW does not list; a call that runs to its answer budget is made once more with a 0\.5 frequency penalty — set OB1_EXTRACT_CHUNK_TOKENS if the model serves fewer than 4278 tokens/.test(unknown.out),
          "an unknown model keeps the default, is told where the table is, and what context the default needs");
   const pinned = await run({ ...base, OB1_METADATA_MODEL: "qwen2.5:7b", OB1_EXTRACT_CHUNK_TOKENS: "600" });
   assert(/extraction window\s+thoughts over 600 estimated tokens are extracted in 600-token windows \(overlap 75\), from OB1_EXTRACT_CHUNK_TOKENS \(qwen2\.5:7b's 32768-token served context\)/.test(pinned.out),
          "OB1_EXTRACT_CHUNK_TOKENS sets the window, the overlap follows it, and the context is shown beside it");
   const over = await run({ ...base, OB1_METADATA_MODEL: "qwen2.5:7b", OB1_EXTRACT_CHUNK_TOKENS: "20000" });
   assert(/extraction window\s+OB1_EXTRACT_CHUNK_TOKENS=20000 — a window that long, its answer budget and the rules do not fit qwen2\.5:7b's 32768-token served context/.test(over.out)
-         && /set it at or under 10790/.test(over.out),
-         "a window whose text plus answer would not fit the context warns, naming the most that fits");
+         && /set it at or under 10696/.test(over.out),
+         "a window whose text plus answer would not fit the context warns, naming the most that fits — 10,696: (32768 − 398 rules − 24 marker − 256 floor) / 3, with the floor and the marker the first review pass found missing");
+  const edge = await run({ ...base, OB1_METADATA_MODEL: "qwen2.5:7b", OB1_EXTRACT_CHUNK_TOKENS: "10696" });
+  assert(/extraction window\s+thoughts over 10696 estimated tokens/.test(edge.out) && !/do not fit/.test(edge.out), "…and the value it names is accepted: a window at the limit requests exactly the context");
+  const overByOne = await run({ ...base, OB1_METADATA_MODEL: "qwen2.5:7b", OB1_EXTRACT_CHUNK_TOKENS: "10697" });
+  assert(/OB1_EXTRACT_CHUNK_TOKENS=10697 — a window that long/.test(overByOne.out), "…while one token more warns");
   assert(/chunk window\s+captures over 4096 tokens are windowed at 1200, derived from qwen3-embedding:4b's 40960-token window/.test(qwen.out)
          && /chunk window\s+captures over 4096 tokens are windowed at 1200, derived from qwen3-embedding:4b's 40960-token window/.test(unknown.out),
          "…while the embedding model's chunk window row does not move with the metadata model: two models, two tables");

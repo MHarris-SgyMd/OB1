@@ -424,7 +424,9 @@ async function processRow(row: Row): Promise<Outcome> {
   } finally {
     llmMs += Date.now() - t0;
   }
-  calls += extraction.windows;
+  // Every call the thought cost: one per window, and one more per window
+  // that was retried (first review pass: the retries went uncounted).
+  calls += extraction.windows + (extraction.parts ? extraction.parts.filter((p) => p.retried).length : extraction.retried ? 1 : 0);
   if (extraction.windows > 1) windowed++;
   if (extraction.retried) retried++;
   if (extraction.malformed) {

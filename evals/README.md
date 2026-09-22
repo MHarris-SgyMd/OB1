@@ -1319,9 +1319,11 @@ Three probes before any design, all against an idle Ollama 0.33 serving
 - **`--timeout 900` was 300.** Bun's `fetch` has its own 300 s idle timeout,
   and an unstreamed chat completion is silent until it ends: a 330 s
   `AbortSignal` against a server that answers at 400 s failed at 300.1 s; with
-  `timeout: false` on the request it failed at 330.0, the signal's. Every
-  dialler in the fork now passes `timeout: false` so the configured deadline is
-  the deadline.
+  `timeout: false` on the request it failed at 330.0, the signal's. The three
+  diallers the server and the workers use — `providerCall`, `judgePair`,
+  `extractOnce` — now pass `timeout: false` so the configured deadline is the
+  deadline; preflight's probes and the evals' own diallers keep Bun's default,
+  being short.
 
 So the windows bound what the model reads, and the answer budget bounds what
 it writes — twice the text's estimated tokens plus 256 (`db/config.mjs`,

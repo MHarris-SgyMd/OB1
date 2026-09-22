@@ -239,17 +239,20 @@ add("metadata model", "ok", metaModel);
   // model's served context beside the rules is the one configuration that
   // defeats the windows — the call is truncated or refused, which is what they
   // exist to prevent — so it warns, naming the most that fits.
-  const { EXTRACT_PROMPT_TOKENS, EXTRACT_OUTPUT_RATIO } = await import("../db/config.mjs");
+  const { extractWindowThatFits, extractContextNeeded } = await import("../db/config.mjs");
   const { describeExtractWindow } = await import("./entities.ts");
   const extractCfg = resolveEmbedConfig(env);
-  const fits = extractCfg.extractModelWindow !== undefined ? Math.floor((extractCfg.extractModelWindow - EXTRACT_PROMPT_TOKENS) / (1 + EXTRACT_OUTPUT_RATIO)) : undefined;
+  // The resolver's own arithmetic (first review pass): a copy here omitted the
+  // answer floor and the part marker, and recommended a value that requested
+  // 280 tokens more than the context.
+  const fits = extractCfg.extractModelWindow !== undefined ? extractWindowThatFits(extractCfg.extractModelWindow) : undefined;
   if (extractCfg.extractChunkTokensFrom === "OB1_EXTRACT_CHUNK_TOKENS" && fits !== undefined && extractCfg.extractChunkTokens > fits) {
     add("extraction window", "warn",
         `OB1_EXTRACT_CHUNK_TOKENS=${extractCfg.extractChunkTokens} — a window that long, its answer budget and the rules do not fit ${metaModel}'s ${extractCfg.extractModelWindow}-token served context; the call is truncated or refused`,
         `Unset OB1_EXTRACT_CHUNK_TOKENS to derive the window from the context, or set it at or under ${fits}.`);
   } else if (extractCfg.extractChunkTokensFrom === "default") {
     add("extraction window", "ok",
-        `${describeExtractWindow(extractCfg)} — set OB1_EXTRACT_CHUNK_TOKENS if the model serves fewer than ${EXTRACT_PROMPT_TOKENS + extractCfg.extractChunkTokens * (1 + EXTRACT_OUTPUT_RATIO)} tokens`);
+        `${describeExtractWindow(extractCfg)} — set OB1_EXTRACT_CHUNK_TOKENS if the model serves fewer than ${extractContextNeeded(extractCfg.extractChunkTokens)} tokens`);
   } else {
     add("extraction window", "ok", describeExtractWindow(extractCfg));
   }

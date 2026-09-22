@@ -14,7 +14,7 @@
  */
 
 import { createAssert } from "../db/test-support.ts";
-import { applyChunkContextPrompt, applyEmbeddingPrompt, CHUNK_CONTEXT_PROMPTS, DEFAULT_LLM_BASE_URL, DEFAULT_METADATA_MODEL, EXTRACT_OUTPUT_FLOOR, EXTRACT_OUTPUT_RATIO, EXTRACT_PROMPT_TOKENS, extractOutputBudget, MAX_WHOLE_TOKENS, resolveExtractWindow } from "../db/config.mjs";
+import { applyChunkContextPrompt, applyEmbeddingPrompt, CHUNK_CONTEXT_PROMPTS, DEFAULT_LLM_BASE_URL, DEFAULT_METADATA_MODEL, EXTRACT_MARKER_TOKENS, EXTRACT_OUTPUT_FLOOR, EXTRACT_OUTPUT_RATIO, EXTRACT_PROMPT_TOKENS, extractContextNeeded, extractOutputBudget, extractWindowThatFits, KNOWN_CHAT_MODEL_WINDOW, MAX_WHOLE_TOKENS, resolveExtractWindow } from "../db/config.mjs";
 import { displayDate, normaliseType, thoughtTitle, thoughtUrl, THOUGHT_TYPES, TYPE_ALIASES } from "./thoughts.ts";
 import { DEFAULT_LLM_TIMEOUT_S, resolveEmbedConfig } from "./embed.ts";
 import { DEFAULT_PG_POOL, poolSizeFrom } from "./store-sql.ts";
@@ -282,12 +282,29 @@ console.log("\n[8b] A long thought's windows merge to one answer, the window fol
   assert(resolveEmbedConfig({}).extractChunkTokens === qwen.extractChunkTokens && resolveEmbedConfig({}).extractChunkTokensFrom === "window", "the default metadata model is qwen2.5:7b, so an empty environment derives its rule");
   const small = resolveExtractWindow(undefined, "a-2048-context-model", DEFAULT_EXTRACT_WINDOW_TOKENS);
   assert(small.from === "default" && small.tokens === DEFAULT_EXTRACT_WINDOW_TOKENS, "a model the table does not list keeps the default and says so");
-  // The derivation itself, on the table's shape: the context less the rules,
-  // divided among the text and its answer at the output ratio. A 2,048-token
-  // context derives 550 — the default's text plus its answer would not fit.
-  assert(Math.floor((2048 - EXTRACT_PROMPT_TOKENS) / (1 + EXTRACT_OUTPUT_RATIO)) === 550, "the rule's arithmetic: (2048 − 398) / 3 = 550");
+  // The derivation itself, THROUGH the resolver on a small-context entry
+  // (first review pass: a bare arithmetic assertion here tested the constants,
+  // and the uncapped branch — Math.min, capped — was exercised by no test). The
+  // table is a plain object, so a 2,048-token model is planted and removed:
+  // it derives 456 — the context less the rules, the part marker and the
+  // answer floor, divided among the text and its answer at the output ratio —
+  // where the default's text plus its answer would not fit at all.
+  KNOWN_CHAT_MODEL_WINDOW["test-2048-context"] = 2048;
+  try {
+    const small2048 = resolveExtractWindow(undefined, "test-2048-context", DEFAULT_EXTRACT_WINDOW_TOKENS);
+    assert(JSON.stringify(small2048) === JSON.stringify({ tokens: 456, from: "window", window: 2048, capped: false }), `a 2,048-token context derives 456, uncapped (${JSON.stringify(small2048)})`);
+    assert(extractWindowThatFits(2048) === 456 && extractContextNeeded(456) <= 2048 && extractContextNeeded(457) > 2048, "…the most that fits: one token more would not");
+    assert(resolveExtractWindow(undefined, "test-2048-context:q4", DEFAULT_EXTRACT_WINDOW_TOKENS).tokens === 456, "…found under its Ollama tag too");
+  } finally {
+    delete KNOWN_CHAT_MODEL_WINDOW["test-2048-context"];
+  }
+  assert(resolveExtractWindow(undefined, "qwen2.5:7b", DEFAULT_EXTRACT_WINDOW_TOKENS).capped === true && extractWindowThatFits(32768) === 10696,
+         "qwen2.5:7b is capped: its context would hold 10,696");
+  assert(extractContextNeeded(DEFAULT_EXTRACT_WINDOW_TOKENS) === 4278, "the default window needs a 4,278-token context: 398 + 24 + 256 + 3 × 1200");
   assert(extractOutputBudget(414) === 414 * EXTRACT_OUTPUT_RATIO + EXTRACT_OUTPUT_FLOOR && extractOutputBudget(0) === EXTRACT_OUTPUT_FLOOR,
          "the answer budget is the ratio times the text plus the floor, and a text of nothing still has the floor");
+  assert(EXTRACT_PROMPT_TOKENS + EXTRACT_MARKER_TOKENS + 10696 + extractOutputBudget(10696) <= 32768, "…and a call at the window that fits requests no more than the context");
+  assert(resolveEmbedConfig({ OB1_METADATA_MODEL: "qwen2.5:7b", OB1_EXTRACT_CHUNK_TOKENS: "1.5" }).extractChunkTokens === 1, "a fractional knob is floored, not passed through to a 1.5-token window");
   const unknown = resolveEmbedConfig({ OB1_METADATA_MODEL: "some-chat-model" });
   assert(unknown.extractChunkTokens === DEFAULT_EXTRACT_WINDOW_TOKENS && unknown.extractChunkTokensFrom === "default" && unknown.extractModelWindow === undefined,
          "through the resolver too: an unknown model keeps the default");
