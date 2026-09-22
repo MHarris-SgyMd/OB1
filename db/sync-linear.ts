@@ -330,7 +330,7 @@ export function envValueFrom(name: string, env: Record<string, string | undefine
 // ---------------------------------------------------------------------------
 
 // The client — the endpoint, the authorization rule, errors beside data — is
-// evals/linear-api.ts, one definition with the corpus builder (third review pass).
+// db/linear-api.ts, one definition with the corpus builder (third review pass; moved from evals/ by the fifth).
 
 /**
  * The projects of the named initiative — the board. Matched on the exact name,
@@ -461,15 +461,27 @@ export type Writer = {
  * existed, which on a brain with one ingested or model-tagged `issue` row hid
  * every hand capture and would have captured the moved ones twice (fourth).
  */
-export async function readTicketRows(sql: SQL, opts: { scanHeaders: boolean } = { scanHeaders: false }): Promise<BrainRow[]> {
-  const cols = sql`id::text AS id, content, metadata, created_at::text AS created_at, supersedes::text AS supersedes, content_fingerprint AS fingerprint`;
-  const claimed = (await sql`SELECT ${cols} FROM thoughts WHERE metadata ? 'issue'`) as BrainRow[];
+export async function readTicketRows(sql: SQL, opts: { scanHeaders: boolean; claimed?: BrainRow[] } = { scanHeaders: false }): Promise<BrainRow[]> {
+  // The claimed rows a caller already read are not read again (sixth review pass).
+  const claimed = opts.claimed ?? ((await sql`SELECT ${rowColumns(sql)} FROM thoughts WHERE metadata ? 'issue'`) as BrainRow[]);
   if (!opts.scanHeaders) return claimed;
   // The header grammar in SQL is only a pre-filter; ticketIdentifier() decides.
   const byHeader = (await sql`
-    SELECT ${cols} FROM thoughts
+    SELECT ${rowColumns(sql)} FROM thoughts
     WHERE NOT (metadata ? 'issue') AND content ~ '^[A-Z][A-Z0-9]*-[0-9]+ — [^\n]*\nProject: '`) as BrainRow[];
   return [...claimed, ...byHeader];
+}
+
+/**
+ * The one projection of a thought as a BrainRow — readTicketRows' two queries
+ * and main's holderOf all select it, so a field added to BrainRow reaches every
+ * row that enters syncIssue (sixth review pass). `created_at` is spelled in
+ * UTC: the `::text` of a timestamptz carries the session's offset, and across a
+ * DST change that text does not sort as the instants do, which would have made
+ * the older of two pastes the head.
+ */
+function rowColumns(sql: SQL) {
+  return sql`id::text AS id, content, metadata, to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS created_at, supersedes::text AS supersedes, content_fingerprint AS fingerprint`;
 }
 
 /**
@@ -487,14 +499,27 @@ async function chainRows(w: Writer, identifier: string, order: BrainRow[]): Prom
   if (w.dryRun) { w.log(`  ~ ${identifier}: would re-chain ${changes.map(say).join(", ")}`); return { changed: changes.length }; }
   // `changed` counts rows whose pointer moved, not statements: a row cleared then set is one.
   let writes = 0;
+  const cleared: BrainRow[] = [];
+  // A set the database refuses undoes the clears before it: the pointers a
+  // person set were promised a place at the tail, not erasure, and a chain
+  // left half-applied would forget them by the next pass (sixth review pass).
+  const undo = async (why: string): Promise<{ changed: number; refusal: string }> => {
+    const failed: string[] = [];
+    for (const row of cleared) {
+      const back = await w.store.updateThought({ id: row.id, actor: w.actor, provenance: { supersedes: row.supersedes } });
+      if (!back.ok) failed.push(`${row.id} → ${row.supersedes}: ${back.error}`);
+    }
+    return { changed: 0, refusal: `${why}; the chain is as it was${failed.length ? ` except ${failed.join(", ")}, which could not be restored` : ""}` };
+  };
   for (const c of changes.filter((c) => c.row.supersedes !== null)) {
     const r = await w.store.updateThought({ id: c.row.id, actor: w.actor, provenance: { supersedes: null } });
-    if (!r.ok) return { changed: writes, refusal: `clearing ${c.row.id}'s pointer: ${r.error}` };
+    if (!r.ok) return undo(`clearing ${c.row.id}'s pointer: ${r.error}`);
+    cleared.push(c.row);
     writes++;
   }
   for (const c of changes.filter((c) => c.wanted !== null)) {
     const r = await w.store.updateThought({ id: c.row.id, actor: w.actor, provenance: { supersedes: c.wanted } });
-    if (!r.ok) return { changed: writes, refusal: `pointing ${c.row.id} at ${c.wanted}: ${r.error}` };
+    if (!r.ok) return undo(`pointing ${c.row.id} at ${c.wanted}: ${r.error}`);
     writes++;
   }
   w.log(`  ~ ${identifier}: re-chained ${changes.map(say).join(", ")}`);
@@ -537,6 +562,13 @@ export async function syncIssue(w: Writer, issue: LinearIssue, rows: BrainRow[])
 
   if (rows.length === 0) {
     const elsewhere = fp !== null ? await w.holderOf(fp) : null;
+    // A holder claimed by ANOTHER ticket is not adopted — as the rows branch
+    // refuses it — rather than re-keyed under this one (sixth review pass).
+    const claimedBy = elsewhere ? ticketIdentifier(elsewhere) : null;
+    if (elsewhere && claimedBy !== null && claimedBy !== issue.identifier) {
+      w.log(`  ! ${issue.identifier}: the text is held by ${elsewhere.id}, claimed as ${claimedBy}; not adopted`);
+      return { outcome: "refused", noVector: false, twinsMarked: 0 };
+    }
     if (elsewhere) {
       const patch = facetPatch(elsewhere.metadata ?? {}, facets);
       if (!patch) return { outcome: "unchanged", noVector: false, twinsMarked: 0 };
@@ -585,7 +617,12 @@ export async function syncIssue(w: Writer, issue: LinearIssue, rows: BrainRow[])
   if (!rows.some(holds) && fp !== null) {
     const holder = await w.holderOf(fp);
     if (holder && !rows.some((r) => r.id === holder.id)) {
-      if (ticketIdentifier(holder) === issue.identifier) group = [holder, ...rows];
+      // Ours when it reads as this ticket OR as nothing (a paste the grammar
+      // cannot read — a leading space — is still this ticket's text, exactly;
+      // the no-row branch adopts the same row, and the two must agree — sixth
+      // pass); another ticket's claim on the same text is the outside case.
+      const claimedBy = ticketIdentifier(holder);
+      if (claimedBy === null || claimedBy === issue.identifier) group = [holder, ...rows];
       else outside = holder;
     }
   }
@@ -607,9 +644,10 @@ export async function syncIssue(w: Writer, issue: LinearIssue, rows: BrainRow[])
     }
   };
   const staleRefusal = head.metadata && head.metadata.text_refused_by != null ? { text_refused_by: null } : {};
+  const facetDiff = facetPatch(head.metadata ?? {}, facets);
   const patch = holds(head)
-    ? (Object.keys(staleRefusal).length || facetPatch(head.metadata ?? {}, facets) ? { ...(facetPatch(head.metadata ?? {}, facets) ?? {}), ...staleRefusal } : null)
-    : facetPatch(head.metadata ?? {}, facets);
+    ? (facetDiff || Object.keys(staleRefusal).length ? { ...(facetDiff ?? {}), ...staleRefusal } : null)
+    : facetDiff;
 
   if (holds(head)) {
     const where = head !== rows[0] ? ` on ${head.id}, which already holds the text` : "";
@@ -682,19 +720,35 @@ export async function syncIssue(w: Writer, issue: LinearIssue, rows: BrainRow[])
  * pass). `readRows` is how the brain's ticket rows are read — readTicketRows
  * over a connection, or a fake in the self-check.
  */
-export async function runPass(opts: { gql: Gql; readRows: (scanHeaders: boolean) => Promise<BrainRow[]>; writer: Writer; initiative: string; full: boolean; only?: string[] }): Promise<PassReport> {
+/** How the brain's ticket rows are read: with or without the header scan, and with the claimed rows already read when a caller has them. */
+export type ReadRows = (scanHeaders: boolean, claimed?: BrainRow[]) => Promise<BrainRow[]>;
+
+/**
+ * The board and the brain, side by side: the census, the ticket rows and the
+ * plan — the front half of a pass, and the whole of --audit, one definition
+ * (sixth review pass; the audit branch had a second copy that already differed
+ * in one rule). The claimed rows first; when the plan over them misses an
+ * identifier, the hand captures too (the header scan) and the plan again — a
+ * paste is the one thing that could hold a missing ticket, and it must be
+ * adopted, not captured beside (fourth review pass). `scan` reads both from the
+ * start (--full, --audit).
+ */
+export async function planBoard(opts: { gql: Gql; readRows: ReadRows; initiative: string; full: boolean; scan?: boolean }) {
   const { initiative, projects } = await initiativeProjects(opts.gql, opts.initiative);
   const census = await censusOf(opts.gql, projects.map((p) => p.id));
-  // The claimed rows first; when the plan over them misses an identifier, the
-  // hand captures too (the header scan) and the plan again — a paste is the
-  // one thing that could hold a missing ticket, and it must be adopted, not
-  // captured beside (fourth review pass). --full reads both from the start.
-  let groups = groupTicketRows(await opts.readRows(opts.full));
+  const scanFirst = opts.scan || opts.full;
+  const claimed = await opts.readRows(scanFirst);
+  let groups = groupTicketRows(claimed);
   let plan = planPass(census, groups, opts.full);
-  if (!opts.full && plan.missing.length > 0) {
-    groups = groupTicketRows(await opts.readRows(true));
-    plan = planPass(census, groups, false);
+  if (!scanFirst && plan.missing.length > 0) {
+    groups = groupTicketRows(await opts.readRows(true, claimed));
+    plan = planPass(census, groups, opts.full);
   }
+  return { initiative, projects, census, groups, plan };
+}
+
+export async function runPass(opts: { gql: Gql; readRows: ReadRows; writer: Writer; initiative: string; full: boolean; only?: string[] }): Promise<PassReport> {
+  const { initiative, projects, census, groups, plan } = await planBoard(opts);
   const tally: Record<Outcome, number> = { captured: 0, updated: 0, patched: 0, unchanged: 0, refused: 0 };
   const report: PassReport = { initiative, projects: projects.length, census: census.length, plan, tally, twinsMarked: 0, noVector: 0, errors: [], chainRefusals: [] };
   let wanted = plan.fetch;
@@ -873,8 +927,20 @@ function selfCheck(): Promise<number> {
     ok(r.r.outcome === "captured" && r.calls.join("; ") === 'embed; tags; capture "Backlog" vec=yes type=task', `a new issue: embed, tags, capture with the facets over the tags (${r.calls.join("; ")})`);
     r = await run({ ...recorder, holderOf: async () => row("h1", ` ${text}`, {}, null, null) }, []);
     ok(r.r.outcome === "patched" && r.calls.join("; ") === "update h1 patch(source,issue,project,status,status_type,priority,labels,url,linear_updated_at)", `no ticket row but a thought holding the text: adopted with a facet patch, no model call (${r.calls.join("; ")})`);
+    r = await run({ ...recorder, holderOf: async () => row("h1", ` ${text}`, { ...withFacets, priority: "High" }, null, null) }, []);
+    ok(r.r.outcome === "patched" && r.calls.join("; ") === "update h1 patch(priority)", `…and a holder already carrying the facets is patched for what differs alone, so it is not re-patched every pass (${r.calls.join("; ")})`);
+    // Sixth review pass: a holder claimed by ANOTHER ticket is not re-keyed under this one, in either branch.
     r = await run({ ...recorder, holderOf: async () => row("h1", ` ${text}`, { ...withFacets, issue: "X-12" }, null, null) }, []);
-    ok(r.r.outcome === "patched" && r.calls.join("; ") === "update h1 patch(issue)", `…and a holder already carrying the facets is patched for what differs alone, so it is not re-patched every pass (${r.calls.join("; ")})`);
+    ok(r.r.outcome === "refused" && r.calls.length === 0, `no ticket row, the text held under another ticket's claim: refused without a write (${r.calls.join("; ")})`);
+    r = await run({ ...recorder, holderOf: async () => row("P", ` ${doneText}`, { source: "mcp" }, "2026-09-25T00:00:00Z", null) }, [row("A", text, withFacets, "2026-09-22T00:00:00Z", null)], done);
+    ok(r.r.outcome === "patched" && r.calls.join("; ") === "update P patch(source,issue,project,status,status_type,priority,labels,url,linear_updated_at); update P supersedes=A",
+      `a paste the grammar cannot read (a leading space) holding this ticket's text is folded in as the head too, as the no-row branch would adopt it (${r.calls.join("; ")})`);
+    // A refused set undoes the clears before it, so a hand-set pointer survives.
+    let sets = 0;
+    const halfway: Writer["store"] = { captureThought: recorder.store.captureThought, updateThought: async (o) => { if (o.provenance && o.provenance.supersedes !== null && o.provenance.supersedes !== undefined && ++sets === 2) { calls.push(`update ${o.id} supersedes=${o.provenance.supersedes} → WOULD_CYCLE`); return { ok: false, error: "WOULD_CYCLE" }; } return recorder.store.updateThought(o); } };
+    r = await run({ ...recorder, store: halfway }, [row("H", text, withFacets, "2026-09-23T00:00:00Z", "x"), row("N", text, {}, "2026-09-22T00:00:00Z", null)]);
+    ok(r.r.chainRefusal !== undefined && r.calls.join("; ") === "update H supersedes=null; update H supersedes=N; update N supersedes=x → WOULD_CYCLE; update H supersedes=x" && r.r.twinsMarked === 0,
+      `a refused set restores the pointer the clear removed — H→x is back, the chain reported as it was (${r.calls.join("; ")})`);
     // Fifth review pass: a hand paste of THIS ticket made after adoption is folded in as the head, not refused as an outside holder.
     r = await run({ ...recorder, holderOf: async () => row("P", doneText, { source: "mcp" }, "2026-09-25T00:00:00Z", null) }, [row("A", text, withFacets, "2026-09-22T00:00:00Z", null)], done);
     ok(r.r.outcome === "patched" && r.calls.join("; ") === "update P patch(source,issue,project,status,status_type,priority,labels,url,linear_updated_at); update P supersedes=A",
@@ -1088,7 +1154,7 @@ async function main(): Promise<void> {
       try { const [r] = await sql`SELECT content_fingerprint_of(${text}) AS f`; return (r?.f as string | null) ?? null; }
       catch (e) { if (!noFingerprintSaid) { noFingerprintSaid = true; console.error(`  content_fingerprint_of is not available (${(e as Error).message.split("\n")[0]}); same text is judged by exact compare this run`); } return null; }
     },
-    holderOf: async (fp) => { const [r] = await sql`SELECT id::text AS id, content, metadata, created_at::text AS created_at, supersedes::text AS supersedes, content_fingerprint AS fingerprint FROM thoughts WHERE content_fingerprint = ${fp} LIMIT 1`; return (r as BrainRow | undefined) ?? null; },
+    holderOf: async (fp) => { const [r] = await sql`SELECT ${rowColumns(sql)} FROM thoughts WHERE content_fingerprint = ${fp} LIMIT 1`; return (r as BrainRow | undefined) ?? null; },
     actor: { name: ACTOR_NAME, via: SELF, session },
     dryRun,
     log: quiet ? () => {} : (line) => console.log(line),
@@ -1097,12 +1163,10 @@ async function main(): Promise<void> {
 
   const once = async (): Promise<number> => {
     const t0 = Date.now();
-    // runPass asks for the header scan when it needs it; --audit always does (the census should see a hand paste too).
-    const readRows = (scanHeaders: boolean) => readTicketRows(sql, { scanHeaders });
+    // planBoard asks for the header scan when it needs it; --audit always does (the census should see a hand paste too).
+    const readRows: ReadRows = (scanHeaders, claimed) => readTicketRows(sql, { scanHeaders, claimed });
     if (flags.has("audit")) {
-      const { initiative: name, projects } = await initiativeProjects(gql, initiative);
-      const census = await censusOf(gql, projects.map((p) => p.id));
-      const plan = planPass(census, groupTicketRows(await readRows(true)));
+      const { initiative: name, projects, census, plan } = await planBoard({ gql, readRows, initiative, full: false, scan: true });
       console.log(`  board: ${name} — ${projects.length} project(s), ${census.length} issue(s)`);
       console.log(`  missing ${plan.missing.length}${plan.missing.length ? ` (${plan.missing.join(", ")})` : ""}`);
       console.log(`  stale   ${plan.stale.length}${plan.stale.length ? ` (${plan.stale.slice(0, 20).join(", ")}${plan.stale.length > 20 ? ", …" : ""})` : ""}`);
@@ -1117,6 +1181,13 @@ async function main(): Promise<void> {
     console.log(`  ${dryRun ? "dry run — nothing written" : "done"} (${Date.now() - t0} ms)`);
     return report.errors.length ? 1 : 0;
   };
+
+  // The initiative is configuration, resolved once before any pass: a name
+  // that matches no initiative (or two) is exit 2 here, as a missing key is —
+  // not a "pass failed" line every interval for as long as the loop runs
+  // (sixth review pass). Under --loop the passes still ask Linear each time,
+  // so a board that gains a project is seen.
+  try { await initiativeProjects(gql, initiative); } catch (e) { console.error(`  ${(e as Error).message}`); await store.close(); await sql.close(); process.exit(2); }
 
   let code = 0;
   try {

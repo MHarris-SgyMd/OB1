@@ -1566,10 +1566,11 @@ no model call: that paste becomes the head and its facets are patched. Nothing i
 deleted; the head's own write lands first, and a pointer the database refuses
 (a hand-set chain through an outside thought that loops back) is reported under
 *chain refusals*, never a reason the text did not land. When none of the ticket's
-rows holds Linear's text but another thought does, that thought is read: a hand
-paste of THIS ticket (the header grammar, made after the row was adopted) is
-folded in as the head and chained; a text under ANOTHER ticket's claim is an
-outside holder, refused before any model call — the facets are patched without
+rows holds Linear's text but another thought does, that thought is read: one
+that reads as this ticket, or as no ticket at all (a paste made after the row was
+adopted, with or without the header the grammar reads), is folded in as the head
+and chained; a text under ANOTHER ticket's claim is an outside holder, refused
+before any model call and never re-keyed — the facets are patched without
 `linear_updated_at` and `text_refused_by` names it, once, so the ticket stays
 *stale* in `--audit` and is retried each pass, at one lookup and no write, until
 the holder moves — reported under *refused*; the marker is cleared, on the head
