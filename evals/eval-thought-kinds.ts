@@ -84,11 +84,13 @@ export const LEGACY_TYPES = ["observation", "task", "idea", "reference", "person
  * Which shipped type a kind would land on if the extractor were right — the
  * expectation column of the confusion table. A kind with no entry has NO slot
  * in the five: whatever the extractor says about it is wrong by construction,
- * and that share of the brain is the measurement SMD-1949 wants.
+ * and that share of the brain is the measurement SMD-1949 wants. A hypothesis
+ * is not an `idea` (a possibility floated) — it is a prediction with a
+ * resolvable outcome, and the five cannot say that — so it has no slot.
  */
 export const LEGACY_OF: Partial<Record<Kind, (typeof LEGACY_TYPES)[number]>> = {
   observation: "observation", fact: "observation", event: "observation",
-  idea: "idea", hypothesis: "idea",
+  idea: "idea",
   plan: "task",
   reference: "reference",
 };

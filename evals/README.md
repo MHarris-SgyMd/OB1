@@ -3822,39 +3822,49 @@ records, 27 agent captures.
 
 | kind | issues | projects | captures | total | share |
 | --- | --- | --- | --- | --- | --- |
-| plan | 256 | 10 | 2 | 268 | 87% (open 174, done 94) |
+| plan | 223 | 10 | 2 | 235 | 76% (open 156, done 79) |
+| hypothesis | 32 | 0 | 0 | 32 | 10% (open 17, confirmed 4, refuted 11) |
 | event | 1 | 0 | 8 | 9 | 3% |
 | lesson | 0 | 0 | 8 | 8 | 3% |
 | reference | 7 | 0 | 0 | 7 | 2% |
 | compound | 2 | 0 | 3 | 5 | 2% |
 | decision | 2 | 0 | 1 | 3 | 1% (all standing) |
 | observation | 0 | 0 | 3 | 3 | 1% |
-| question | 2 | 0 | 0 | 2 | 1% (both open) |
+| question | 3 | 0 | 0 | 3 | 1% (all open) |
 | fact, idea, procedure | | | | 1 each | |
-| hypothesis, rule | | | | 0 | |
+| rule | | | | 0 | |
 
 `plan` was added to the axis during labelling: an imported issue is assigned
 work carrying its problem and its acceptance test, which none of the ticket's
 candidates named, and `procedure` (how to do a repeatable thing here) is not
-it. Twenty plans are question-shaped spikes; two tickets are questions
-outright. **No hypothesis exists in the brain** — nothing states a prediction
-with a checkable outcome — so SMD-1809's calibration has no seed population in
-this corpus. Compounds are five: two DONE notes whose body is a decisions list,
-a follow-up note (plan + lesson + decision), the posture digest (rule + fact +
-event) and SMD-1729 (its decision + its program).
+it. A measure-first spike — "measure X, adopt only if it clears the bar" — is a
+`hypothesis`: GraphRAG as the retriever (refuted, SMD-948) and as an expansion
+stage (refuted at full budget, SMD-1738), the vector-store ladder (SMD-1037,
+1662, 1696 refuted; the composed match SMD-1707 confirmed), recency (refuted),
+contextual retrieval (refuted), the local rerankers (refuted) and
+decompose-then-rerank (confirmed), quantisation (confirmed), and the open
+Jev-class, Edge0, Matryoshka, DiskANN, partitioning and BRIN spikes. Its status
+is the recorded outcome, not the ticket's text, which is the prediction. The
+first freeze had labelled all of these `plan`; the maintainer caught it. Those
+fifteen resolved hypotheses are SMD-1809's seed population. Compounds are five:
+two DONE notes whose body is a decisions list, a follow-up note (plan + lesson
++ decision), the posture digest (rule + fact + event) and SMD-1729 (its
+decision + its program).
 
 **The shipped five against the kind.** Where a kind has a slot in the five, the
-extractor's type is right for 249 of 289 (86%) — nearly all of it `plan` read
-as `task`. 19 thoughts (6%) are a kind the five cannot express: the lessons,
-decisions, questions, compounds and the procedure. `event` lands on
-`reference` 7 of 9 times.
+extractor's type is right for 216 of 256 (84%) — nearly all of it `plan` read
+as `task`. 52 thoughts (17%) are a kind the five cannot express: every
+hypothesis (all 32 typed `task`; a hypothesis is not an `idea`, it is a
+prediction with an outcome), the lessons, decisions, questions, compounds and
+the procedure. `event` lands on `reference` 7 of 9 times.
 
 **The metadata model on the candidate axis** (`qwen2.5:7b`, temperature 0,
-first 12,000 characters): agrees with the hand label on **86 of 308 (28%)**.
+first 12,000 characters): agrees with the hand label on **65 of 308 (21%)**.
 
 | kind | hand | model recalled | model said | of which right |
 | --- | --- | --- | --- | --- |
-| plan | 268 | 72 (27%) | 81 | 72 (89%) |
+| plan | 235 | 51 (22%) | 81 | 51 (63%) |
+| hypothesis | 32 | 0 | 0 | — |
 | procedure | 1 | 1 | 149 | 1 (1%) |
 | fact | 1 | 1 | 23 | 1 |
 | observation | 3 | 3 | 20 | 3 |
@@ -3863,16 +3873,17 @@ first 12,000 characters): agrees with the hand label on **86 of 308 (28%)**.
 | lesson | 8 | 4 (50%) | 5 | 4 (80%) |
 | event | 9 | 1 | 1 | 1 |
 | reference | 7 | 1 | 3 | 1 |
-| question | 2 | 0 | 0 | — |
+| question | 3 | 0 | 0 | — |
 | compound | 5 | 0 | 0 | — |
 
 It reads a Problem / Work / Verify ticket as a `procedure` 138 times out of
-271. On the captures it is usable for `lesson` and `decision` and blind to
-`event` (a DONE note reads as a procedure or a plan). Its confidence band is
-`high` on 284 of 308 and right on 75 of those (26%), `medium` right on 10 of
-22 — the band does not separate right from wrong, the same finding as the
-entity extractor's flat 1.00 (SMD-1925) and the judge's flat 0.80 (SMD-1873).
-Where it said `plan`, it read the issue's own status right 45 of 72 times.
+271 and never says `hypothesis`, `question` or `compound`. On the captures it
+is usable for `lesson` and `decision` and blind to `event` (a DONE note reads
+as a procedure or a plan). Its confidence band is `high` on 284 of 308 and
+right on 54 of those (19%), `medium` right on 10 of 22 — the band does not
+separate right from wrong, the same finding as the entity extractor's flat
+1.00 (SMD-1925) and the judge's flat 0.80 (SMD-1873). Where it said `plan`, it
+read the issue's own status right 45 of 72 times.
 
 Also found while labelling: three tickets are in the brain as successive
 versions of one description (SMD-1933 three times, SMD-1867 and SMD-1903
@@ -3882,8 +3893,9 @@ twice) — SMD-1720's stale-value case, live in the dogfood brain — and the
 What this decides is on SMD-1949: a kind earns a slot with a count, a
 consumer and an assignment the extractor (or the writer's declaration) can
 make; on this table `plan` (today's `task`, with `status` its own axis),
-`lesson`, `decision` and `event` have counts and consumers, and the writer's
-declaration — not the 7B — is what makes any of them reliable.
+`hypothesis` (with its open / confirmed / refuted status, the calibration
+input), `lesson`, `decision` and `event` have counts and consumers, and the
+writer's declaration — not the 7B — is what makes any of them reliable.
 
 ## Related
 
