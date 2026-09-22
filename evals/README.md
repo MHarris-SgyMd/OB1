@@ -3818,9 +3818,9 @@ to the host Ollama.
 
 Source is read from the text's shape — every row says `source: mcp`, because
 the board was loaded through `capture_thought`: 271 imported issues, 10 project
-records, 27 agent captures as found; by the cut 336, after the 16 rows this
-ticket wrote (the atoms below and three session notes) and 12 a concurrent
-ingest added.
+records, 27 agent captures as found; by the cut 336 (281, 10 and 45), after
+the 16 rows this ticket wrote (the atoms below and three session notes) and 12
+a concurrent session added (10 Linear imports and 2 captures).
 
 | kind | issues | projects | captures | total | share |
 | --- | --- | --- | --- | --- | --- |
@@ -3854,17 +3854,17 @@ prediction. The first freeze had labelled all of these `plan`; the maintainer
 caught the spikes and a second reading of every plan found the rest. Those
 seventeen resolved hypotheses are SMD-1809's seed population. A ticket whose
 only remaining work is the decision is a `question` (SMD-1464, 1465 beside
-the three already there). Compounds are five:
-two DONE notes whose body is a decisions list, a follow-up note (plan + lesson
-+ decision), the posture digest (rule + fact + event) and SMD-1729 (its
-decision + its program).
+the three already there). Compounds are six:
+three DONE notes whose body is a decisions or lessons list (SMD-1933,
+SMD-1903, SMD-1730), a follow-up note (plan + lesson + decision), the posture
+digest (rule + fact + event) and SMD-1729 (its decision + its program).
 
 **The shipped five against the kind.** Where a kind has a slot in the five, the
 extractor's type is right for 220 of 263 (84%) — nearly all of it `plan` read
 as `task`. 73 thoughts (22%) are a kind the five cannot express: every
 hypothesis (all 37 typed `task`; a hypothesis is not an `idea`, it is a
 prediction with an outcome), the lessons, decisions, questions, compounds and
-the procedure. `event` lands on `reference` 7 of 9 times.
+the procedure. `event` lands on `reference` 8 of 10 times.
 
 **The metadata model on the candidate axis** (`qwen2.5:7b`, temperature 0,
 first 12,000 characters): agrees with the hand label on **80 of 336 (24%)**.
@@ -3875,6 +3875,7 @@ first 12,000 characters): agrees with the hand label on **80 of 336 (24%)**.
 | hypothesis | 37 | 0 | 0 | — |
 | procedure | 1 | 1 | 156 | 1 (1%) |
 | fact | 1 | 1 | 25 | 1 |
+| idea | 1 | 1 | 4 | 1 |
 | observation | 6 | 4 | 21 | 4 |
 | decision | 12 | 11 (92%) | 22 | 11 (50%) |
 | rule | 4 | 4 | 15 | 4 |
@@ -3884,14 +3885,17 @@ first 12,000 characters): agrees with the hand label on **80 of 336 (24%)**.
 | question | 5 | 0 | 0 | — |
 | compound | 6 | 0 | 0 | — |
 
-It reads a Problem / Work / Verify ticket as a `procedure` 138 times out of
-271 and never says `hypothesis`, `question` or `compound`. On the captures it
+It reads a Problem / Work / Verify ticket as a `procedure` 147 times out of
+281 and never says `hypothesis`, `question` or `compound`. On the captures it
 is usable for `lesson` and `decision` and blind to `event` (a DONE note reads
 as a procedure or a plan). Its confidence band is `high` on 310 of 336 and
 right on 68 of those (22%), `medium` right on 11 of 24 — the band does not
 separate right from wrong, the same finding as the entity extractor's flat
-1.00 (SMD-1925) and the judge's flat 0.80 (SMD-1873). Where it said `plan`, it
-read the issue's own status right 30 of 50 times.
+1.00 (SMD-1925) and the judge's flat 0.80 (SMD-1873). Where it named a kind
+that carries a status, it read the status right for 32 of 52 plans (14 gave
+none) and 10 of 11 decisions; the first pass's status is frozen in the fixture
+and the harness prints this table. A band the model omits is recorded as none
+since review pass 3; the two `low` rows predate that and may be omissions.
 
 Also found while labelling: three tickets are in the brain as successive
 versions of one description (SMD-1933 three times, SMD-1867 and SMD-1903

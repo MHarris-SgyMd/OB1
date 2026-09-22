@@ -1,7 +1,7 @@
 {
-  "generated": "2026-09-22T17:28:48.528Z",
+  "generated": "2026-09-22T18:52:38.040Z",
   "origin": "the dogfood brain on the maintainer's machine, every thought it held, labelled whole (SMD-1951)",
-  "note": "Every thought the dogfood brain held on 2026-09-22, labelled by Claude Fable 5.1 working for the maintainer: 308 as found (the 27 agent captures and 10 project records read in full, the 271 imported issues by title, status line and description head, then every plan-labelled thought read again at 3,200 characters on the maintainer's request), plus 16 written under this ticket the same day (13 decision and rule atoms split out of the compounds and DONE notes, each derived_from its source, and 3 session notes) and 12 a concurrent session's Linear ingest added before the cut, 336 in all. The maintainer has not yet re-read the labels; the review file the freeze consumed lists every disagreement with the first pass by id. First pass: qwen2.5:7b, the metadata model, through the server's resolver at temperature 0, on the first 12,000 characters. plan was added to the candidate axis during labelling (an imported issue is assigned work with its problem and acceptance test, not a procedure); a plan's status is the issue's own state type, which is stale for tickets closed after the import. A measure-first spike (measure X, adopt only if it clears a bar) and a verify-that ticket are hypotheses, and their status is the recorded outcome from the fork record, not the ticket's text, which is the prediction; a ticket whose only remaining work is the decision is a question. The first freeze had read all of these as plans; the maintainer caught the spikes, and the second reading found the rest. Compounds name their parts.",
+  "note": "Every thought the dogfood brain held on 2026-09-22, labelled by Claude Fable 5.1 working for the maintainer: 308 as found (the 27 agent captures and 10 project records read in full, the 271 imported issues by title, status line and description head, then every plan-labelled thought read again at 3,200 characters on the maintainer's request), plus 16 written under this ticket the same day (13 decision and rule atoms split out of the compounds and DONE notes, each derived_from its source, and 3 session notes) and 12 a concurrent session added before the cut (10 Linear imports and 2 captures), 336 in all. The maintainer has not yet re-read the labels; the review file the freeze consumed lists every disagreement with the first pass by id. First pass: qwen2.5:7b, the metadata model, through the server's resolver at temperature 0, on the first 12,000 characters; its kind, status and band are frozen. plan was added to the candidate axis during labelling (an imported issue is assigned work with its problem and acceptance test, not a procedure); a plan's status is the issue's own state type, which is stale for tickets closed after the import. A measure-first spike (measure X, adopt only if it clears a bar) and a verify-that ticket are hypotheses, and their status is the recorded outcome from the fork record, not the ticket's text, which is the prediction; a ticket whose only remaining work is the decision is a question. The first freeze had read all of these as plans; the maintainer caught the spikes, and the second reading found the rest. Compounds name their parts.",
   "kinds": {
     "plan": [
       "00299246-c51f-47b8-99ef-14a529a4d244",
@@ -1744,6 +1744,103 @@
     "low": [
       "02311df0-ddf2-4b29-b173-73885aa34a31",
       "ded87f73-6f7e-4ad7-9a3a-a6f854aa62b6"
+    ]
+  },
+  "first_pass_status": {
+    "done": [
+      "20c43c7d-1930-450e-ac55-73287cb21a7e",
+      "3f92be0e-8e5c-43fe-a5eb-8a1efba63c40",
+      "44fbd565-841d-4129-82e5-a5aeef2c03fd",
+      "56bee416-6a8c-4913-9a40-cdd3857adf37",
+      "8de7833a-19ee-4162-bef0-65deee1cb58d",
+      "93ad2c48-a557-4381-a559-314c9f803ba6",
+      "b6dbeae1-9984-4edc-b0c0-b9001fbbf98f",
+      "bd7772cf-95e7-4a10-a874-82416f67eee1",
+      "c98f0736-1377-4df1-8ec6-d9bd677a6a21",
+      "e5d8b5c6-1596-467d-8e80-342fcdbf5805",
+      "e9e0b165-7c7f-4798-ab31-485e0526f696"
+    ],
+    "open": [
+      "077b96f1-4b95-43c1-af98-3082ca48988b",
+      "159630fa-793e-401c-8fc7-45d136db23b0",
+      "34b3b91f-4bea-4355-8671-e12a31369674",
+      "35821174-9179-40dc-afd8-aff154234756",
+      "39b715f4-2be4-4d0f-a559-bbf4f5e9a48f",
+      "3ab7f54b-f0b2-4c40-8872-334f410abbbc",
+      "3d7d1c8e-140d-4dae-90fe-27a123856a24",
+      "449c0d8c-774f-4fc6-803c-15f9b28a8028",
+      "465081bd-9087-4e8c-960a-a1a051ec59ef",
+      "47da6419-c437-41e2-b670-02d404cd0810",
+      "4bc56004-8f42-430c-aea4-d57779ae6a0c",
+      "4bda1038-811e-413e-8ef7-7c0bd3be41b6",
+      "4dd3b38c-75b8-4562-aaa3-a43ab8051756",
+      "58a53ce4-21d5-4f72-896b-97718828df41",
+      "59c917e2-a108-4411-9e43-a89ea4f9633c",
+      "60d19cfc-f148-4e3f-a30f-696fc8c699e2",
+      "6941c030-e3cd-4218-ac7b-12f76662bd79",
+      "6e2529f8-a051-4804-bf82-86d45578f06e",
+      "738f31e4-df71-43e4-813b-da007a601e07",
+      "752151d9-9441-49c4-934c-decb0bcb1c4d",
+      "7644cd24-e104-447d-b501-b43eb658eb94",
+      "7779ead6-ca99-43f0-a42c-4e358c36c651",
+      "78c3815b-1dc2-48eb-a17a-6dc3d923509f",
+      "7ba37993-91ff-4f5c-857f-d8a2270ad3bb",
+      "7d8e6367-882c-4864-af76-68dc0bae1b0f",
+      "7ebab11d-99cf-4fcc-9db2-97e9aa594c0f",
+      "7f5d4590-a4fb-4fd5-a740-91351c0cac9d",
+      "7fc7d975-0f79-4152-880c-514bdaca0a51",
+      "7fcbb50b-10e2-4da5-a5e8-0419925a222a",
+      "87ad3bf1-2942-4ab7-8b5e-89b8aef3a0bf",
+      "8963bd39-bc72-4224-a57e-6b116683b422",
+      "89979474-90a4-4514-b037-03ab61432ecb",
+      "8c88a3cf-612b-4dfa-b911-ac9e27b4cc23",
+      "92aa62ad-8f20-43f9-a2c1-1a53840a80af",
+      "9d87a8a5-9059-4e95-9d3b-a8feeb60a19d",
+      "a7691108-0ae2-4b99-904f-df7550f8ef4c",
+      "ac30e612-cdb5-43cd-a930-4b21012690ad",
+      "afd317bc-7434-417f-8b36-fc2bc03bf922",
+      "b8ee8d61-aed0-46d5-9022-640f3d598e9d",
+      "b91a7530-0928-439b-8396-c25777ede5d0",
+      "ba45e129-e0dd-4b85-b7aa-42e771def748",
+      "bca12e19-ae4c-40d5-9ced-1c4bd7bf3c16",
+      "bfa6d729-5065-4a12-8f0c-c437cb111df9",
+      "d67f2069-ff22-42ac-ab62-e9181f7fca70",
+      "dd8d5d13-7e6d-4c10-941d-ff0e52dae16f",
+      "e176f235-5d37-45eb-afee-e4ceca52c3ee",
+      "e657af91-628e-4846-9496-68152c5458eb",
+      "e95a4ade-8fd9-4ec6-a3b5-690cd5335826",
+      "f04728a0-d1b9-4dec-90d1-11de5d4eae8a",
+      "f4afd5c4-6e15-4d62-84c9-729b66fbc0ac"
+    ],
+    "standing": [
+      "07b2f9bb-f60a-4389-a0bd-5ed7e4f7de8d",
+      "39f940d2-2941-4a59-a9b4-430a3d9105ae",
+      "3c7a8a52-bc16-4249-ad0e-363eea61d11b",
+      "48b42cda-4a6d-4ee4-9ff1-79fc135cb734",
+      "7410620e-faa8-44e0-a6f3-0911920e166e",
+      "78aa6052-5ffc-446f-aa32-6179d1ba1d78",
+      "819cca62-3684-45bc-b47d-2659ddc02105",
+      "88c5e875-3088-4498-9f3f-48c0ee98b95d",
+      "8d8a93a6-511a-46f1-9316-470e00c80d56",
+      "906a7d0b-e836-47e2-bbc8-fcb03e5cd555",
+      "a75f3476-e4e8-4d15-9a6c-8b665447960e",
+      "ca206040-3f26-47a7-89b8-3650d019dc6d",
+      "cce65268-bb39-4d43-a1ae-bb2b984e8294",
+      "d18ea201-3a80-48ef-9a30-a19f76cf8108",
+      "d792d5db-9111-4e2f-a909-0bc1319d098a",
+      "dbafc615-0c0e-40b3-896b-d19687c62c56",
+      "dc95b5b4-a548-4151-b336-ab22162d01cf",
+      "e8934859-5e26-40a2-86eb-a61076573f9a",
+      "ea48d084-d58a-47c5-b180-3a9a58be4245",
+      "ecec04f1-e1c3-42f6-91fe-491247571e13",
+      "fb2d4db5-27af-48fe-b14a-3cb9a9b80cc4"
+    ],
+    "canceled": [
+      "64f67a12-2235-4799-b839-406182ab3a91",
+      "8c60ce8e-d9ec-489d-84f7-ce00bc472152"
+    ],
+    "superseded": [
+      "07f11f34-8670-45f1-bc63-657cdf4fb5fc"
     ]
   }
 }

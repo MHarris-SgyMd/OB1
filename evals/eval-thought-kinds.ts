@@ -144,7 +144,7 @@ export const SYSTEM = `Classify the user's captured thought by its epistemic kin
 - "confidence": "high"|"medium"|"low" — how sure you are of the kind
 Judge by what the text mainly asserts, not by its length or its topic.`;
 
-export type Verdict = { kind: Kind; status: string | null; confidence: (typeof CONFIDENCE)[number] };
+export type Verdict = { kind: Kind; status: string | null; confidence: (typeof CONFIDENCE)[number] | null };
 
 /** The model's JSON, held to the vocabulary; a kind off the list is a parse failure, not a coercion — the point is to measure the model, not to help it. */
 export function parseVerdict(raw: unknown): Verdict | { error: string } {
@@ -162,8 +162,11 @@ export function parseVerdict(raw: unknown): Verdict | { error: string } {
   const allowed = STATUS_OF[k];
   const s = typeof o.status === "string" ? o.status.trim().toLowerCase() : "";
   const status = allowed && allowed.includes(s) ? s : null;
+  // A band off the list, or none, is recorded as none — not as "low", which
+  // would make the band table conflate "the model said low" with "the model
+  // said nothing usable" (review pass 3).
   const c = typeof o.confidence === "string" ? o.confidence.trim().toLowerCase() : "";
-  const confidence = (CONFIDENCE as readonly string[]).includes(c) ? (c as Verdict["confidence"]) : "low";
+  const confidence = (CONFIDENCE as readonly string[]).includes(c) ? (c as (typeof CONFIDENCE)[number]) : null;
   return { kind: k, status, confidence };
 }
 
@@ -207,8 +210,10 @@ export type Fixture = {
   source_kind: Record<string, string[]>;
   /** The model's first-pass kind → ids (a partition of the ids it answered for). */
   first_pass: Record<string, string[]>;
-  /** The model's first-pass confidence band → ids. */
+  /** The model's first-pass confidence band → ids; an id whose answer carried no usable band is absent. */
   first_pass_confidence: Record<string, string[]>;
+  /** The model's first-pass status → ids, for the ids whose first-pass kind carries one and whose answer gave one. */
+  first_pass_status: Record<string, string[]>;
 };
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -235,7 +240,7 @@ function invert(map: Record<string, string[]>, what: string, problems: string[])
 export function validateFixture(f: Fixture): string[] {
   const problems: string[] = [];
   for (const k of ["generated", "origin", "note"] as const) if (typeof f[k] !== "string" || f[k].trim() === "") problems.push(`${k} is missing`);
-  for (const k of ["kinds", "parts", "status", "source_kind", "first_pass", "first_pass_confidence"] as const) {
+  for (const k of ["kinds", "parts", "status", "source_kind", "first_pass", "first_pass_confidence", "first_pass_status"] as const) {
     if (!f[k] || typeof f[k] !== "object" || Array.isArray(f[k])) { problems.push(`${k} is not an object`); return problems; }
   }
   for (const k of Object.keys(f.kinds)) if (!(KINDS as readonly string[]).includes(k)) problems.push(`kinds.${k} is not a candidate kind`);
@@ -245,6 +250,7 @@ export function validateFixture(f: Fixture): string[] {
   for (const k of Object.keys(f.first_pass_confidence)) if (!(CONFIDENCE as readonly string[]).includes(k)) problems.push(`first_pass_confidence.${k} is not a band`);
   const allStatus = new Set(Object.values(STATUS_OF).flat());
   for (const k of Object.keys(f.status)) if (!allStatus.has(k)) problems.push(`status.${k} is not a status any kind carries`);
+  for (const k of Object.keys(f.first_pass_status)) if (!allStatus.has(k)) problems.push(`first_pass_status.${k} is not a status any kind carries`);
 
   const kindOf = invert(f.kinds, "kinds", problems);
   if (kindOf.size === 0) problems.push("kinds is empty");
@@ -252,6 +258,7 @@ export function validateFixture(f: Fixture): string[] {
   const statusOf = invert(f.status, "status", problems);
   const firstOf = invert(f.first_pass, "first_pass", problems);
   const bandOf = invert(f.first_pass_confidence, "first_pass_confidence", problems);
+  const fpStatusOf = invert(f.first_pass_status, "first_pass_status", problems);
   for (const id of kindOf.keys()) if (!sourceOf.has(id)) problems.push(`${id} has a kind and no source_kind`);
   for (const id of sourceOf.keys()) if (!kindOf.has(id)) problems.push(`${id} has a source_kind and no kind`);
   for (const [id, s] of statusOf) {
@@ -262,9 +269,19 @@ export function validateFixture(f: Fixture): string[] {
     else if (!allowed.includes(s)) problems.push(`${id} is a ${k} with status ${s}, not one of ${allowed.join("|")}`);
   }
   for (const [id, k] of kindOf) if (STATUS_OF[k as Kind] && !statusOf.has(id)) problems.push(`${id} is a ${k} and needs a status`);
-  // Parts: every compound names at least two, and nothing else names any.
+  // Parts: every compound names at least two DISTINCT parts, nothing else
+  // names any, and a part is not named twice for one id (review pass 3: the
+  // other maps get that through invert; this one is many-to-many).
   const partsOf = new Map<string, string[]>();
-  for (const [part, ids] of Object.entries(f.parts)) for (const id of ids) partsOf.set(id, [...(partsOf.get(id) ?? []), part]);
+  for (const [part, ids] of Object.entries(f.parts)) {
+    if (!Array.isArray(ids)) { problems.push(`parts.${part} is not an array`); continue; }
+    for (const id of ids) {
+      if (typeof id !== "string" || !UUID.test(id)) { problems.push(`parts.${part} carries a non-id ${JSON.stringify(id).slice(0, 40)}`); continue; }
+      const had = partsOf.get(id) ?? [];
+      if (had.includes(part)) problems.push(`${id} names the part ${part} twice`);
+      partsOf.set(id, [...had, part]);
+    }
+  }
   for (const [id, k] of kindOf) {
     const parts = partsOf.get(id) ?? [];
     if (k === "compound" && parts.length < 2) problems.push(`${id} is a compound with ${parts.length} part(s); a compound names at least two`);
@@ -273,7 +290,13 @@ export function validateFixture(f: Fixture): string[] {
   for (const id of partsOf.keys()) if (!kindOf.has(id)) problems.push(`${id} has parts and no kind`);
   for (const id of firstOf.keys()) if (!kindOf.has(id)) problems.push(`${id} has a first-pass kind and no hand label`);
   for (const id of bandOf.keys()) if (!firstOf.has(id)) problems.push(`${id} has a first-pass band and no first-pass kind`);
-  for (const id of firstOf.keys()) if (!bandOf.has(id)) problems.push(`${id} has a first-pass kind and no band`);
+  for (const [id, st] of fpStatusOf) {
+    const k = firstOf.get(id);
+    if (!k) { problems.push(`${id} has a first-pass status and no first-pass kind`); continue; }
+    const allowed = STATUS_OF[k as Kind];
+    if (!allowed) problems.push(`${id}'s first pass is a ${k}, which carries no status, but has first-pass status ${st}`);
+    else if (!allowed.includes(st)) problems.push(`${id}'s first pass is a ${k} with status ${st}, not one of ${allowed.join("|")}`);
+  }
   return problems;
 }
 
@@ -320,7 +343,7 @@ export function buildFixture(labels: HandLabel[], review: ReviewLine[], note: st
     generated,
     origin: "the dogfood brain on the maintainer's machine, every thought it held, labelled whole (SMD-1951)",
     note,
-    kinds: {}, parts: {}, status: {}, source_kind: {}, first_pass: {}, first_pass_confidence: {},
+    kinds: {}, parts: {}, status: {}, source_kind: {}, first_pass: {}, first_pass_confidence: {}, first_pass_status: {},
   };
   const seen = new Set<string>();
   for (const l of labels) {
@@ -336,10 +359,11 @@ export function buildFixture(labels: HandLabel[], review: ReviewLine[], note: st
     if (status) push(f.status, status, l.id);
     if (r.first_pass) {
       push(f.first_pass, r.first_pass.kind, l.id);
-      push(f.first_pass_confidence, r.first_pass.confidence, l.id);
+      if (r.first_pass.confidence) push(f.first_pass_confidence, r.first_pass.confidence, l.id);
+      if (r.first_pass.status) push(f.first_pass_status, r.first_pass.status, l.id);
     }
   }
-  for (const m of [f.kinds, f.parts, f.status, f.source_kind, f.first_pass, f.first_pass_confidence]) for (const ids of Object.values(m)) ids.sort();
+  for (const m of [f.kinds, f.parts, f.status, f.source_kind, f.first_pass, f.first_pass_confidence, f.first_pass_status]) for (const ids of Object.values(m)) ids.sort();
   return f;
 }
 
@@ -386,34 +410,46 @@ function selfCheck(): void {
     status: { done: [A] },
     source_kind: { linear_issue: [A], agent_capture: [B, C] },
     first_pass: { plan: [A, B], lesson: [C] },
-    first_pass_confidence: { high: [A], low: [B, C] },
+    first_pass_confidence: { high: [A], low: [B] },
+    first_pass_status: { done: [A], open: [B] },
   };
   ok(validateFixture(sound).length === 0, `a sound fixture validates: ${validateFixture(sound).join("; ")}`);
-  const mutants: [string, (f: Fixture) => void][] = [
-    ["an id under two kinds", (f) => { f.kinds.lesson.push(A); }],
-    ["a kind off the list", (f) => { f.kinds.task = [A]; f.kinds.plan = []; }],
-    ["a plan with no status", (f) => { f.status = {}; }],
-    ["a status on a kind that carries none", (f) => { f.status.open = [B]; }],
-    ["a status a kind does not take", (f) => { f.status = { resolved: [A] }; }],
-    ["a compound with one part", (f) => { f.parts = { observation: [C] }; }],
-    ["parts on a non-compound", (f) => { f.parts.observation.push(B); }],
-    ["a kind with no source", (f) => { f.source_kind = { linear_issue: [A], agent_capture: [B] }; }],
-    ["a source with no kind", (f) => { f.source_kind.agent_capture.push("10000000-0000-4000-8000-000000000009"); }],
-    ["a first pass for an unlabelled id", (f) => { f.first_pass.plan.push("10000000-0000-4000-8000-000000000009"); }],
-    ["a first-pass kind with no band", (f) => { f.first_pass_confidence = { high: [A] }; }],
-    ["a non-id value", (f) => { f.kinds.plan.push("a leaked thought body"); }],
-    ["a bare note", (f) => { f.note = " "; }],
+  // Each mutant names the problem text the rule it targets emits, on an id no
+  // neighbouring rule would also catch — review pass 3 found three probes whose
+  // rule could be deleted with the check still green, because another rule
+  // fired on the same id (a plan's status, a source with no kind).
+  const mutants: [string, (f: Fixture) => void, string][] = [
+    ["an id under two kinds", (f) => { f.kinds.observation = [B]; }, "is under both"],
+    ["a kind off the list", (f) => { f.kinds.task = [B]; f.kinds.lesson = []; }, "not a candidate kind"],
+    ["a plan with no status", (f) => { f.status = {}; }, "needs a status"],
+    ["a status on a kind that carries none", (f) => { f.status.open = [B]; }, "carries no status"],
+    ["a status a kind does not take", (f) => { f.status = { resolved: [A] }; }, "not one of"],
+    ["a compound with one part", (f) => { f.parts = { observation: [C] }; }, "at least two"],
+    ["a part named twice", (f) => { f.parts = { observation: [C, C] }; }, "twice"],
+    ["parts that are not an array", (f) => { (f.parts as Record<string, unknown>).observation = 1; }, "not an array"],
+    ["parts on a non-compound", (f) => { f.parts.observation.push(B); }, "only a compound has parts"],
+    ["a kind with no source", (f) => { f.source_kind = { linear_issue: [A], agent_capture: [B] }; }, "no source_kind"],
+    ["a source with no kind", (f) => { f.source_kind.agent_capture.push("10000000-0000-4000-8000-000000000009"); }, "source_kind and no kind"],
+    ["a first pass for an unlabelled id", (f) => { f.first_pass.plan.push("10000000-0000-4000-8000-000000000009"); }, "no hand label"],
+    ["a band with no first pass", (f) => { f.first_pass_confidence.low.push("10000000-0000-4000-8000-000000000004"); }, "band and no first-pass kind"],
+    ["a first-pass status a kind does not take", (f) => { f.first_pass_status = { done: [A], resolved: [B] }; }, "not one of"],
+    ["a first-pass status on a kind that carries none", (f) => { f.first_pass_status.open.push(C); }, "carries no status"],
+    ["a non-id value", (f) => { f.first_pass_confidence.high.push("a leaked thought body"); }, "non-id"],
+    ["a non-id part", (f) => { f.parts.observation.push("a leaked thought body"); }, "non-id"],
+    ["a bare note", (f) => { f.note = " "; }, "note is missing"],
   ];
-  for (const [why, mutate] of mutants) {
+  for (const [why, mutate, expect] of mutants) {
     const f = JSON.parse(JSON.stringify(sound)) as Fixture;
     mutate(f);
-    ok(validateFixture(f).length > 0, `the shape rules catch ${why}`);
+    const problems = validateFixture(f);
+    ok(problems.some((p) => p.includes(expect)), `the shape rules catch ${why} with "${expect}" (got: ${problems.join("; ") || "nothing"})`);
   }
   ok(sourceKindOf("SMD-1494 — bench-hnsw.ts: size the workers\nProject: Open Brain — Benchmarking & Scale · Status: Backlog (backlog) · Priority: Low\nhttps://…\n\n## Problem\n") === "linear_issue", "an imported issue is recognised by its two-line head");
   ok(sourceKindOf("Project: Open Brain — Wiki Pages & External Sync\nInitiative: …") === "linear_project", "a project record is recognised");
   ok(sourceKindOf("SMD-1806 slice 1 (the stable tier) is DONE — PR #103") === "agent_capture", "a capture that starts with a ticket id is not an import");
   ok(ticketStatusOf("SMD-1 — t\nProject: P · Status: Done (completed) · Priority: Low\n") === "done", "completed → done");
   ok(ticketStatusOf("SMD-1 — t\nProject: P · Status: In Review (started) · Priority: Low\n") === "open", "started → open");
+  ok(ticketStatusOf("SMD-1 — t\nProject: P · Status: Canceled (canceled) · Priority: Low\n") === "canceled", "canceled → canceled");
   ok(ticketStatusOf("Lesson from a review") === undefined, "no status line → undefined");
   const v = parseVerdict(JSON.stringify({ kind: "Plan", status: "Done", confidence: "high" }));
   ok("kind" in v && v.kind === "plan" && v.status === "done" && v.confidence === "high", "a verdict parses, case-folded");
@@ -422,15 +458,16 @@ function selfCheck(): void {
   ok("kind" in off && off.kind === "plan" && off.status === null, "a status the kind does not take is dropped and the kind stands");
   const l = parseVerdict(JSON.stringify({ kind: "lesson", status: "done", confidence: "high" }));
   ok("kind" in l && l.status === null, "a status on a kind that carries none is dropped");
-  ok("kind" in parseVerdict(JSON.stringify({ kind: "lesson" })) && (parseVerdict(JSON.stringify({ kind: "lesson" })) as Verdict).confidence === "low", "a missing band is low");
+  ok("kind" in parseVerdict(JSON.stringify({ kind: "lesson" })) && (parseVerdict(JSON.stringify({ kind: "lesson" })) as Verdict).confidence === null, "a missing band is none, not low");
+  ok((parseVerdict(JSON.stringify({ kind: "lesson", confidence: "very" })) as Verdict).confidence === null, "a band off the list is none");
   const built = buildFixture(
     [{ id: A, kind: "plan" }, { id: B, kind: "lesson" }, { id: C, kind: "compound", parts: ["observation", "decision"] }],
     [
       { id: A, legacy_type: "task", source_kind: "linear_issue", ticket_status: "done", first_pass: { kind: "plan", status: "done", confidence: "high" }, error: null },
-      { id: B, legacy_type: "observation", source_kind: "agent_capture", ticket_status: null, first_pass: { kind: "plan", status: "open", confidence: "low" }, error: null },
+      { id: B, legacy_type: "observation", source_kind: "agent_capture", ticket_status: null, first_pass: { kind: "plan", status: "open", confidence: null }, error: null },
       { id: C, legacy_type: "task", source_kind: "agent_capture", ticket_status: null, first_pass: null, error: "timeout" },
     ], "probe", "2026-09-22T00:00:00Z");
-  ok(validateFixture(built).length === 0 && built.status.done?.[0] === A && !built.first_pass.lesson && built.first_pass_confidence.low?.[0] === B, "buildFixture: the ticket's status fills a plan, an unanswered id has no first pass");
+  ok(validateFixture(built).length === 0 && built.status.done?.[0] === A && !built.first_pass.lesson && built.first_pass_status.done?.[0] === A && built.first_pass_status.open?.[0] === B && !built.first_pass_confidence.low, "buildFixture: the ticket's status fills a plan, an unanswered id has no first pass, the first-pass status is kept, an absent band is not invented");
   let threw = false;
   try { buildFixture([{ id: A, kind: "plan" }], [], "probe"); } catch { threw = true; }
   ok(threw, "buildFixture refuses a label with no review line");
@@ -452,7 +489,13 @@ type Row = { id: string; content: string; metadata: Record<string, unknown> };
 
 async function label(out: string): Promise<void> {
   const sql = new SQL({ url: requireUrl(), max: 1 });
-  const done = new Set(readJsonl<ReviewLine>(out).map((l) => l.id));
+  // Resume: a line with an answer is done; a line that recorded an error is
+  // dropped and its id redone, so a provider timeout is not permanent (review
+  // pass 3 — before this every existing line counted, errors included).
+  const existing = readJsonl<ReviewLine>(out);
+  const kept = existing.filter((l) => l.first_pass !== null);
+  if (kept.length !== existing.length) writeFileSync(out, kept.map((l) => JSON.stringify(l) + "\n").join(""));
+  const done = new Set(kept.map((l) => l.id));
   const limit = Number(flag("limit") ?? 0);
   const rows = await sql`SELECT id::text, content, metadata FROM thoughts ORDER BY created_at, id` as Row[];
   const todo = rows.filter((r) => !done.has(r.id)).slice(0, limit || undefined);
@@ -461,11 +504,13 @@ async function label(out: string): Promise<void> {
   const t0 = Date.now();
   for (const r of todo) {
     const v = await classify(r.content, r.metadata);
+    const source_kind = sourceKindOf(r.content);
     const line: ReviewLine = {
       id: r.id,
       legacy_type: typeof r.metadata.type === "string" ? r.metadata.type : null,
-      source_kind: sourceKindOf(r.content),
-      ticket_status: ticketStatusOf(r.content) ?? null,
+      source_kind,
+      // A status line quoted inside a capture is not the capture's status.
+      ticket_status: source_kind === "linear_issue" ? ticketStatusOf(r.content) ?? null : null,
       first_pass: "kind" in v ? v : null,
       error: "error" in v ? v.error : null,
     };
@@ -499,6 +544,7 @@ async function score(): Promise<void> {
   const statusOf = invert(f.status, "status", problems);
   const firstOf = invert(f.first_pass, "first_pass", problems);
   const bandOf = invert(f.first_pass_confidence, "first_pass_confidence", problems);
+  const fpStatusOf = invert(f.first_pass_status, "first_pass_status", problems);
   const ids = [...kindOf.keys()];
 
   const sql = new SQL({ url: requireUrl(), max: 1 });
@@ -558,14 +604,29 @@ async function score(): Promise<void> {
       [...KINDS].filter((k) => a.perKind.get(k)).map((k) => { const e = a.perKind.get(k)!; return [k, e.n, `${e.agree} (${pct(e.agree, e.n)})`, e.guessed, `${e.right} (${pct(e.right, e.guessed)})`]; }),
     ), "");
     if (bands) {
+      const answered = [...guessOf.keys()].filter((id) => kindOf.has(id));
+      const unbanded = answered.filter((id) => !bands.has(id)).length;
       out.push(table(["band", "n", "agreed"], CONFIDENCE.map((b) => {
-        const inBand = [...guessOf.keys()].filter((id) => bands.get(id) === b && kindOf.has(id));
+        const inBand = answered.filter((id) => bands.get(id) === b);
         const right = inBand.filter((id) => guessOf.get(id) === kindOf.get(id)).length;
         return [b, inBand.length, `${right} (${pct(right, inBand.length)})`];
-      })), "");
+      })), unbanded ? `${unbanded} answer(s) gave no usable band.` : "", "");
     }
   };
   reportPass("First pass, frozen in the fixture", firstOf, bandOf);
+  // Where the model named the kind and that kind carries a status, did it read
+  // the status too? Per kind, from the frozen first_pass_status map.
+  {
+    const rows: (string | number)[][] = [];
+    for (const k of Object.keys(STATUS_OF) as Kind[]) {
+      const both = ids.filter((id) => kindOf.get(id) === k && firstOf.get(id) === k);
+      if (!both.length) continue;
+      const right = both.filter((id) => statusOf.get(id) !== undefined && fpStatusOf.get(id) === statusOf.get(id)).length;
+      const none = both.filter((id) => !fpStatusOf.has(id)).length;
+      rows.push([k, both.length, `${right} (${pct(right, both.length)})`, none]);
+    }
+    if (rows.length) out.push("Where the model named the kind and the kind carries a status:", "", table(["kind", "both said", "status agreed", "model gave none"], rows), "");
+  }
 
   // 4. The same model, now.
   if (!has("frozen")) {
@@ -575,7 +636,7 @@ async function score(): Promise<void> {
     const t0 = Date.now();
     for (const [id, r] of live) {
       const v = await classify(r.content, r.metadata);
-      if ("kind" in v) { guessOf.set(id, v.kind); bands.set(id, v.confidence); } else errors++;
+      if ("kind" in v) { guessOf.set(id, v.kind); if (v.confidence) bands.set(id, v.confidence); } else errors++;
       if (++i % 25 === 0) console.error(`  ${i}/${live.size} (${errors} errors, ${((Date.now() - t0) / 1000 / i).toFixed(1)} s each)`);
     }
     reportPass(`Re-run now: ${cfg.metadataModel} at temperature ${cfg.metadataTemperature}`, guessOf, bands);
