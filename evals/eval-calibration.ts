@@ -109,24 +109,31 @@ export function kindBandRows(f: Fixture): LedgerRow[] {
   return rows;
 }
 
-/** The hypotheses: resolved by the fork record where the fixture says confirmed or refuted; the confidence is whatever the writer declared, usually nothing. */
-export function hypothesisRows(f: Fixture, declared: Map<string, number | null>): LedgerRow[] {
-  const statusOf = invert(f.status);
-  return (f.kinds.hypothesis ?? []).map((id) => {
+/**
+ * The writer's own confidence: one row per claim, each claim once. A hypothesis
+ * is resolved by the fork record where the fixture says confirmed or refuted;
+ * a thought another thought supersedes is resolved against — the ticket's
+ * reading ("superseded by a corrected value"), which counts a supersession
+ * that merely extends the same way and so overstates refutation; the fork
+ * record wins where both apply, since a verdict is a resolution and a pointer
+ * is a hint at one. A thought that declared a value and that nothing resolved
+ * is unresolved. The confidence is whatever the writer declared under
+ * metadata.confidence, usually nothing.
+ */
+export function declaredRows(f: Fixture, declared: Map<string, number | null>, superseded: Iterable<string>): LedgerRow[] {
+  const statusOf = invert(f.status), sup = new Set(superseded);
+  const rows: LedgerRow[] = [];
+  const seen = new Set<string>();
+  for (const id of f.kinds.hypothesis ?? []) {
     const s = statusOf.get(id);
-    const outcome = s === "confirmed" ? 1 : s === "refuted" ? 0 : null;
-    return { mechanism: DECLARED, claim: id, stated: declared.get(id) ?? null, band: null, outcome, resolvedBy: outcome === null ? null : "fork record" };
-  });
-}
-
-/** A thought another thought supersedes: resolved against. */
-export function supersededRows(ids: string[], declared: Map<string, number | null>, already: Set<string>): LedgerRow[] {
-  return ids.filter((id) => !already.has(id)).map((id) => ({ mechanism: DECLARED, claim: id, stated: declared.get(id) ?? null, band: null, outcome: 0 as const, resolvedBy: "superseded" }));
-}
-
-/** A thought that declared a confidence and that nothing has resolved. */
-export function declaredOnlyRows(declared: Map<string, number | null>, already: Set<string>): LedgerRow[] {
-  return [...declared].filter(([id]) => !already.has(id)).map(([id, p]) => ({ mechanism: DECLARED, claim: id, stated: p, band: null, outcome: null, resolvedBy: null }));
+    let outcome: 0 | 1 | null = s === "confirmed" ? 1 : s === "refuted" ? 0 : null, resolvedBy: string | null = outcome === null ? null : "fork record";
+    if (outcome === null && sup.has(id)) { outcome = 0; resolvedBy = "superseded"; }
+    rows.push({ mechanism: DECLARED, claim: id, stated: declared.get(id) ?? null, band: null, outcome, resolvedBy });
+    seen.add(id);
+  }
+  for (const id of sup) if (!seen.has(id)) { rows.push({ mechanism: DECLARED, claim: id, stated: declared.get(id) ?? null, band: null, outcome: 0, resolvedBy: "superseded" }); seen.add(id); }
+  for (const [id, p] of declared) if (!seen.has(id)) { rows.push({ mechanism: DECLARED, claim: id, stated: p, band: null, outcome: null, resolvedBy: null }); seen.add(id); }
+  return rows;
 }
 
 export type ProposalRow = { id: string; confidence: number; status: string; judge_key: string };
@@ -334,13 +341,14 @@ function selfCheck(): void {
   ok(b?.stated === null && b.outcome === 0 && b.band === null, "an answer with no band is a resolved claim with no confidence, not a 0");
   ok(c?.stated === 0.6 && c.outcome === 0, "a medium band that was wrong: stated 0.60, did not hold");
   ok(scorable(kb).length === 2, "only the rows with both sides are scorable");
-  const hyp = hypothesisRows(fx, new Map([[C, 0.75]]));
-  ok(hyp.length === 2 && hyp.find((r) => r.claim === C)?.outcome === 1 && hyp.find((r) => r.claim === C)?.stated === 0.75 && hyp.find((r) => r.claim === D)?.outcome === null, "a confirmed hypothesis held; an open one is unresolved; the declared value is read");
-  ok(hypothesisRows(fx, new Map()).every((r) => r.stated === null), "with nothing declared, a hypothesis carries no confidence");
-  const sup = supersededRows([A, C], new Map([[A, 0.5]]), new Set([C]));
-  ok(sup.length === 1 && sup[0].claim === A && sup[0].outcome === 0 && sup[0].stated === 0.5, "a superseded thought resolved against, once, with its declared value");
-  const only = declaredOnlyRows(new Map([[A, 0.5], [B, 0.4]]), new Set([A]));
-  ok(only.length === 1 && only[0].claim === B && only[0].outcome === null, "a declared value on an unresolved thought is unresolved, listed once");
+  const dr = declaredRows(fx, new Map([[C, 0.75], [A, 0.5], [B, 0.4]]), [A, C, D]);
+  const at = (id: string) => dr.filter((r) => r.claim === id);
+  ok(dr.length === 4 && new Set(dr.map((r) => r.claim)).size === 4, `each claim lands under the declared mechanism once (${dr.length} rows)`);
+  ok(at(C)[0]?.outcome === 1 && at(C)[0]?.resolvedBy === "fork record" && at(C)[0]?.stated === 0.75, "a confirmed hypothesis held by the fork record, even where a pointer supersedes it; the declared value is read");
+  ok(at(D)[0]?.outcome === 0 && at(D)[0]?.resolvedBy === "superseded" && at(D)[0]?.stated === null, "an open hypothesis another thought supersedes is resolved against");
+  ok(at(A)[0]?.outcome === 0 && at(A)[0]?.resolvedBy === "superseded" && at(A)[0]?.stated === 0.5, "a superseded thought that is no hypothesis is a row of its own, with its declared value");
+  ok(at(B)[0]?.outcome === null && at(B)[0]?.stated === 0.4, "a declared value on a thought nothing resolved is unresolved");
+  ok(declaredRows(fx, new Map(), []).every((r) => r.stated === null) && declaredRows(fx, new Map(), []).find((r) => r.claim === D)?.outcome === null, "with nothing declared and nothing superseded, an open hypothesis is unresolved with no confidence");
   const props = proposalRows([{ id: "p1", confidence: 0.8, status: "rejected", judge_key: "j" }, { id: "p2", confidence: 0.8, status: "accepted", judge_key: "j" }, { id: "p3", confidence: 0.9, status: "pending", judge_key: "j" }]);
   ok(props[0].outcome === 0 && props[1].outcome === 1 && props[2].outcome === null && props[2].resolvedBy === null, "rejected 0, accepted 1, pending unresolved");
   ok(parseDeclared(0.7) === 0.7 && parseDeclared("0.7") === 0.7 && parseDeclared(1) === 1 && parseDeclared(0) === 0, "a declared confidence reads as a number or a numeric string");
@@ -362,7 +370,7 @@ function selfCheck(): void {
   ok(text.includes("- j: 1 resolved claim(s) carry no confidence — an outcome with nothing to score it against (3 by the reviewer)."), "a resolved claim with no confidence is named, with who resolved");
   const mixed = render([summarise("e2", mentionRows([{ claim: "m1", confidence: 1, extraction_key: "e2" }, { claim: "m2", confidence: 1, extraction_key: "e2" }, { claim: "m3", confidence: 0.5, extraction_key: "e2" }]))], "probe", []);
   ok(mixed.includes("(1.00 on 2, 0.50 on 1)"), "a few-valued confidence prints its distribution, most common first");
-  const dec = summarise(DECLARED, [...hypothesisRows(fx, new Map()), ...supersededRows([A], new Map(), new Set())]);
+  const dec = summarise(DECLARED, declaredRows(fx, new Map(), [A]));
   ok(resolvers(dec) === "1 by the fork record, 1 superseded", `the resolvers are counted by name (${resolvers(dec)})`);
   const constant = render([summarise("c", proposalRows(Array.from({ length: 3 }, (_, i) => ({ id: `c${i}`, confidence: 0.8, status: "rejected", judge_key: "c" }))))], "probe", []);
   ok(constant.includes("the confidence is a constant (0.80)") && constant.includes("Brier 0.640") && constant.includes("skill against it — (every claim resolved the same way)"), "a constant confidence is flagged, with its Brier and an undefined skill");
@@ -376,7 +384,7 @@ function selfCheck(): void {
 }
 
 function offlineSummaries(f: Fixture): Summary[] {
-  return [summarise(KIND_BAND, kindBandRows(f)), summarise(DECLARED, hypothesisRows(f, new Map()))];
+  return [summarise(KIND_BAND, kindBandRows(f)), summarise(DECLARED, declaredRows(f, new Map(), []))];
 }
 
 async function score(offline: boolean): Promise<void> {
@@ -403,11 +411,6 @@ async function score(offline: boolean): Promise<void> {
   if (unreadable) notes.push(`${unreadable} thought(s) carry a metadata.confidence that is not a number in [0, 1]; read as none.`);
   const superseded = (await sql`SELECT DISTINCT supersedes::text AS id FROM thoughts WHERE supersedes IS NOT NULL` as { id: string }[]).map((r) => r.id);
 
-  const hyp = here(hypothesisRows(f, declared));
-  const seen = new Set(hyp.map((r) => r.claim));
-  const sup = supersededRows(superseded, declared, seen);
-  for (const r of sup) seen.add(r.claim);
-  const declaredRows = [...hyp, ...sup, ...declaredOnlyRows(declared, seen)];
 
   const byMechanism = new Map<string, LedgerRow[]>();
   const add = (rows: LedgerRow[]) => { for (const r of rows) { const l = byMechanism.get(r.mechanism) ?? []; l.push(r); byMechanism.set(r.mechanism, l); } };
@@ -421,7 +424,7 @@ async function score(offline: boolean): Promise<void> {
       ...(await sql`SELECT thought_id::text || ':' || from_entity_id::text || ':' || to_entity_id::text || ':' || relation AS claim, confidence::float AS confidence, extraction_key FROM ob1_entity_edges` as MentionRow[]),
     ]));
   } catch { notes.push("No entity tables (migration 016 not applied): the extractor has no rows here."); }
-  add(declaredRows);
+  add(here(declaredRows(f, declared, superseded)));
   await sql.end();
 
   const summaries = [...byMechanism].map(([m, rows]) => summarise(m, rows));
