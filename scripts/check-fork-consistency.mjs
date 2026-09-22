@@ -121,9 +121,19 @@
  *      froze; and
  *      migration 044's schema_version equals db/version.mjs's FORK_VERSION
  *      (SMD-1804)
+ *  18. the four type-checked directories — server-portable/, compat/supabase-sql/,
+ *      db/ and evals/ — share one type surface and CI checks each: every one
+ *      pins @types/bun, typescript and @types/node in devDependencies at the
+ *      value server-portable pins (TypeScript dedupes a package by name and
+ *      version, so one directory bumping alone loads two bun-types into the
+ *      db and evals programs, whose ../server-portable imports pull the
+ *      server's copy), its tsconfig compilerOptions equal the server's, and
+ *      .github/workflows/fork-checks.yml runs `bunx tsc --noEmit` under it
+ *      exactly once; a tsc step under a directory the list does not name is
+ *      refused. The workflow is parsed with Bun.YAML (SMD-1932); no exceptions
  *
  * Run: bun scripts/check-fork-consistency.mjs   (plain ESM; node runs it too,
- * except checks 13 and 14, which parse YAML with Bun.YAML and fail in words under node)
+ * except checks 13, 14 and 18, which parse YAML with Bun.YAML and fail in words under node)
  * Exits non-zero on any violation.
  */
 
@@ -3390,6 +3400,86 @@ function checkSchemaVersion() {
   if (current.value !== FORK_VERSION) fail(`db/migrations/${current.name}`, `writes schema_version '${current.value}' but db/version.mjs's FORK_VERSION is '${FORK_VERSION}' — the brain would report a version the tooling does not (SMD-1804)`);
 }
 checkSchemaVersion();
+
+/**
+ * 18: one type surface across the four type-checked directories, and a CI step
+ * for each — see the header. The rule is one pure function over in-memory
+ * records, probed below, so a package.json that stops pinning, a tsconfig that
+ * drifts, or a workflow that loses (or grows) a tsc step fails here by name.
+ * `server-portable` is the reference: the others import its files, so its
+ * pins are the ones a second copy would collide with.
+ */
+const TYPECHECKED_DIRS = ["server-portable", "compat/supabase-sql", "db", "evals"];
+const TYPE_PINS = ["@types/bun", "typescript", "@types/node"];
+const WORKFLOW = ".github/workflows/fork-checks.yml";
+const TSC_STEP = /^\s*bunx tsc --noEmit\s*$/;
+function typecheckSurfaceProblems({ packages, tsconfigs, tscSteps }) {
+  const problems = [];
+  const ref = TYPECHECKED_DIRS[0];
+  const refDev = packages[ref]?.devDependencies ?? {};
+  // Keys sorted at every depth (a nested object such as `paths` compares by
+  // content, not insertion order); arrays keep their order, since `types`
+  // and `lib` are ordered.
+  const sortKeys = (v) => (Array.isArray(v) ? v.map(sortKeys) : v && typeof v === "object" ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => a.localeCompare(b)).map(([k, x]) => [k, sortKeys(x)])) : v);
+  const canon = (o) => JSON.stringify(sortKeys(o ?? {}));
+  const refOpts = canon(tsconfigs[ref]?.compilerOptions);
+  for (const dir of TYPECHECKED_DIRS) {
+    const dev = packages[dir]?.devDependencies;
+    if (!dev) problems.push([`${dir}/package.json`, `${packages[dir] ? "has no devDependencies" : "is missing"} — every type-checked directory pins ${TYPE_PINS.join(", ")} in its devDependencies (SMD-1932)`]);
+    else for (const name of TYPE_PINS) {
+      if (!(name in dev)) problems.push([`${dir}/package.json`, dir === ref ? `does not pin ${name} — it is the reference the other type-checked directories are held to (SMD-1932)` : `does not pin ${name}; ${ref}/package.json pins it at ${refDev[name] ?? "(nothing)"} (SMD-1932)`]);
+      else if (dir !== ref && dev[name] !== refDev[name]) problems.push([`${dir}/package.json`, `pins ${name} at ${dev[name]} but ${ref}/package.json pins ${refDev[name]} — bump the four type-checked directories in one commit, or two copies of the types load into the programs that import ../server-portable (SMD-1932)`]);
+    }
+    const opts = tsconfigs[dir]?.compilerOptions;
+    if (!opts) problems.push([`${dir}/tsconfig.json`, `missing, or has no compilerOptions (SMD-1932)`]);
+    else if (dir !== ref && canon(opts) !== refOpts) problems.push([`${dir}/tsconfig.json`, `compilerOptions differ from ${ref}/tsconfig.json's: ${canon(opts)} vs ${refOpts} (SMD-1932)`]);
+    const n = tscSteps.filter((d) => d === dir).length;
+    if (n !== 1) problems.push([WORKFLOW, `runs \`bunx tsc --noEmit\` under ${dir} ${n} time(s); exactly one step per type-checked directory (SMD-1932)`]);
+  }
+  for (const d of tscSteps) if (!TYPECHECKED_DIRS.includes(d)) problems.push([WORKFLOW, `runs \`bunx tsc --noEmit\` under ${d}, which TYPECHECKED_DIRS in ${SELF} does not name — add it there, with its pins and tsconfig (SMD-1932)`]);
+  return problems;
+}
+/** The working-directory of every `bunx tsc --noEmit` step in a parsed workflow, in order. */
+function tscStepsIn(doc) {
+  const out = [];
+  for (const job of Object.values(doc?.jobs ?? {})) {
+    for (const step of job?.steps ?? []) if (typeof step?.run === "string" && TSC_STEP.test(step.run)) out.push(step["working-directory"] ?? ".");
+  }
+  return out;
+}
+function checkTypecheckSurface() {
+  // Self-test: a consistent set passes; one drifted pin, one missing pin, one
+  // differing option, one missing step and one unlisted step each report
+  // exactly one problem.
+  const good = () => ({
+    packages: Object.fromEntries(TYPECHECKED_DIRS.map((d) => [d, { devDependencies: { "@types/bun": "1.4.0", typescript: "5.9.3", "@types/node": "26.6.2" } }])),
+    tsconfigs: Object.fromEntries(TYPECHECKED_DIRS.map((d) => [d, { compilerOptions: { strict: true, types: ["bun"] } }])),
+    tscSteps: [...TYPECHECKED_DIRS],
+  });
+  if (typecheckSurfaceProblems(good()).length) fail(SELF, `check 18 false-positives on a consistent surface (${typecheckSurfaceProblems(good()).map((p) => p[1]).join("; ")})`);
+  for (const [why, mutate] of [
+    ["a drifted pin", (g) => { g.packages.db.devDependencies.typescript = "5.9.4"; }],
+    ["a missing pin", (g) => { delete g.packages.evals.devDependencies["@types/node"]; }],
+    ["a differing compilerOption", (g) => { g.tsconfigs.evals.compilerOptions.strict = false; }],
+    ["a missing tsc step", (g) => { g.tscSteps = g.tscSteps.filter((d) => d !== "db"); }],
+    ["a tsc step under an unlisted directory", (g) => { g.tscSteps.push("recipes/x"); }],
+  ]) {
+    const g = good(); mutate(g);
+    const got = typecheckSurfaceProblems(g);
+    if (got.length !== 1) fail(SELF, `check 18 reports ${got.length} problem(s) for ${why}, not one (its own probe): ${JSON.stringify(got)}`);
+  }
+
+  if (typeof Bun === "undefined" || typeof Bun.YAML?.parse !== "function") {
+    fail(SELF, `check 18 parses ${WORKFLOW} with Bun.YAML (Bun 1.2+) and this runtime has none — run \`bun ${SELF}\`, as CI does (SMD-1932)`);
+    return;
+  }
+  const readJson = (rel) => (existsSync(join(ROOT, rel)) ? JSON.parse(readFileSync(join(ROOT, rel), "utf8")) : undefined);
+  const packages = Object.fromEntries(TYPECHECKED_DIRS.map((d) => [d, readJson(`${d}/package.json`)]));
+  const tsconfigs = Object.fromEntries(TYPECHECKED_DIRS.map((d) => [d, readJson(`${d}/tsconfig.json`)]));
+  const tscSteps = tscStepsIn(Bun.YAML.parse(readFileSync(join(ROOT, WORKFLOW), "utf8")));
+  for (const [where, msg] of typecheckSurfaceProblems({ packages, tsconfigs, tscSteps })) fail(where, msg);
+}
+checkTypecheckSurface();
 
 // No display-time filter. One excused `_template` violations, for a placeholder
 // link that contributionDirs() has skipped since the filter was written — so

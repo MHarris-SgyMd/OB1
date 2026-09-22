@@ -80,7 +80,7 @@ import { SQL } from "bun";
 import { hostname } from "node:os";
 import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
-import { PROVIDER_ERROR_CHARS, refusesLength, resolveEmbedConfig } from "../server-portable/embed.ts";
+import { PROVIDER_ERROR_CHARS, refusesLength, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { describeEgress, localKnob, refusesEverything, ROW_UNITS } from "../server-portable/egress.ts";
 import { extractEntities, extractionKey, type Extraction } from "../server-portable/entities.ts";
 import { hashKey, parseKeyRecords } from "../server-portable/auth.ts";
@@ -155,7 +155,7 @@ const DRY_RUN = has("dry-run");
 const SWITCH_KEY = has("switch-key");
 const RETRY_FAILED = has("retry-failed");
 
-const cfg = resolveEmbedConfig(process.env);
+const cfg = resolveEmbedConfig(process.env as EmbedEnv);
 const JOB = flag("job") ?? extractionKey(cfg.metadataModel);
 
 console.log(`  job:    ${JOB}`);
@@ -482,7 +482,11 @@ function classifyError(e: unknown): ErrorKind {
   return "thought";
 }
 const TRANSIENT_PAUSES_MS = [5_000, 15_000, 45_000];
-let configError: string | null = null;
+// Written inside the worker closures below, which control-flow analysis does
+// not follow: declared `: string | null = null`, the read at the end of the
+// run is narrowed to `never`. The cast keeps the declared type as the initial
+// one (SMD-1932).
+let configError = null as string | null;
 
 /**
  * --limit counts thoughts CLAIMED, reserved at claim time, so two workers
