@@ -1337,7 +1337,7 @@ if (refusalForRun) {
 // The probe is the egress gate's subject too (SMD-1903): a constant with no
 // row behind it, so under terms that read the row (type:, source:) it is
 // refused where every pooled row would pass. Skipped then, and said — the
-// first row is the probe — rather than blamed on the provider (first review
+// first row stands in — rather than blamed on the provider (first review
 // pass: the probe was called without a subject and crashed under any policy
 // that read one).
 const probeSubject = { kind: "re-embed" as const };
@@ -1350,6 +1350,26 @@ const probeGate = mayLeaveBox(probeSubject, embedConfig.embeddings, embedConfig.
  * a pool marked failed one row at a time (second review pass).
  */
 let probed = false;
+/**
+ * Set by the stand-in when the provider's first answer was a failure shaped
+ * like the configuration's: the workers return, the row in hand is recorded,
+ * the rest stay pending, and the run exits 1 with the pending hint — not
+ * `stopping`, which is the operator's Ctrl-C and exits 130 (third review pass).
+ */
+let haltedByProvider = false;
+/**
+ * Whether a failure reads as the configuration's — a wrong width, no
+ * embedding in the reply, a body that is not JSON, a model or a route the
+ * endpoint refuses (400–404) — rather than this row's or the moment's: a
+ * timeout, a 408/429, a 5xx, a dropped connection and a database error are
+ * all left to the row, since the probe's stand-in must not halt a run on a
+ * rate limit (third review pass).
+ */
+function configShaped(e: unknown): boolean {
+  if (e instanceof ProviderError) return e.kind === "body" || (e.kind === "http" && [400, 401, 403, 404].includes(e.status ?? 0));
+  const msg = (e as Error).message ?? "";
+  return /Embedding width mismatch|returned no embedding/.test(msg);
+}
 if (!probeGate.allowed) {
   console.log(`  probe:     skipped — ${probeGate.reason}; the first row stands in, and a failure there that is not the gate's stops the run`);
 } else {
@@ -1601,7 +1621,7 @@ async function worker(n: number): Promise<void> {
     onError: (e, consecutive) => { if (consecutive === 1) console.error(`  ${workerId}: heartbeat failed (${e.message}); the leases hold ${TTL} s from the last beat that reached the database`); },
   });
   try {
-    while (!stopping) {
+    while (!stopping && !haltedByProvider) {
       let batch: { thought_id: string; attempt: number }[];
       let byId: Map<string, Row>;
       try {
@@ -1620,7 +1640,7 @@ async function worker(n: number): Promise<void> {
         return;
       }
       for (const b of batch) {
-        if (stopping) return;
+        if (stopping || haltedByProvider) return;
         if (hb.lost.has(b.thought_id)) {
           // A beat found this row no longer ours. Nothing to release, and
           // repeating the provider's work would only race the holder; the row
@@ -1642,12 +1662,12 @@ async function worker(n: number): Promise<void> {
             const msg = (e as Error).message.slice(0, PROVIDER_ERROR_CHARS);
             outcome = { outcome: "failed", error: msg };
             // The skipped probe's stand-in (see `probed`): the provider's
-            // first answer was a failure that is not the gate's own, so it is
-            // the configuration's, not this row's. This row is recorded; the
-            // rest stay pending rather than fail the same way in turn.
-            if (!probed && !(e instanceof ProviderError && e.kind === "egress")) {
-              console.error(`  ${workerId}: the first row failed before any succeeded — ${msg} — read as the provider's answer, not the row's; stopping so the pool is not marked failed row by row (this row is recorded; the rest stay pending)`);
-              stopping = true;
+            // first answer was a failure shaped like the configuration's, so
+            // it is not this row's. This row is recorded; the rest stay
+            // pending rather than fail the same way in turn.
+            if (!probed && configShaped(e)) {
+              console.error(`  ${workerId}: the first row failed before any succeeded — ${msg} — read as the provider's answer, not the row's; halting so the pool is not marked failed row by row (this row is recorded failed, --retry-failed revisits it; the rest stay pending for the re-run)`);
+              haltedByProvider = true;
             }
           }
         }
@@ -1785,8 +1805,9 @@ if (after.claimed > 0) {
 }
 if (after.pending > 0 && !stopping) {
   // Every worker stopped before the pool was empty — a database error each
-  // (their messages are above) — and handed its leases back. Not done.
-  console.error(`\n  ${after.pending} row(s) are still pending: every worker stopped before the pool was empty. Re-run.`);
+  // (their messages are above), or the provider's first answer was a
+  // configuration-shaped failure — and handed its leases back. Not done.
+  console.error(`\n  ${after.pending} row(s) are still pending: every worker stopped before the pool was empty${haltedByProvider ? " — the provider's first answer was a failure (above); fix it, then --retry-failed and re-run" : ". Re-run"}.`);
 }
 await sql.close();
 process.exit(stopping ? 130 : after.failed > 0 || after.claimed > 0 || after.pending > 0 ? 1 : 0);

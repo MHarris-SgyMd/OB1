@@ -2428,8 +2428,11 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   const gateAccept = await gated("--accept-failed");
   assert(gateAccept.code === 2 && !/Nothing would be re-embedded/.test(gateAccept.out) && /needs the rows to accept, by id/.test(gateAccept.out),
     "…while --accept-failed, which dials nothing, passes the gate and reaches its own refusal");
-  const gateRetire = await gated("--retire");
-  assert(!/Nothing would be re-embedded/.test(gateRetire.out), `…as does --retire (exit ${gateRetire.code}: ${gateRetire.out.split("\n").filter(Boolean).slice(-1)[0]?.trim().slice(0, 120)})`);
+  // With a key, so the run passes argument parsing and reaches the gate before
+  // its own refusal (third review pass: keyless, it exited before either).
+  const gateRetire = await gated("--retire", "reembed:nonexistent@1024");
+  assert(gateRetire.code === 2 && !/Nothing would be re-embedded/.test(gateRetire.out) && /Refusing --retire reembed:nonexistent@1024/.test(gateRetire.out) && /Nothing was written/.test(gateRetire.out),
+    `…as does --retire, which reaches its own refusal past the gate (exit ${gateRetire.code}: ${gateRetire.out.split("\n").filter(Boolean).slice(-1)[0]?.trim().slice(0, 120)})`);
   const notFailed = await reembed("--accept-failed", poisonId, lateId);
   assert(notFailed.code === 2 && notFailed.out.includes(`not a failed row under reembed:test: ${lateId} (succeeded)`) && (await claimCounts()).failed === 3,
     `…an id whose row is not failed refuses the whole command, and nothing is written (exit ${notFailed.code})`);

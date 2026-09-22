@@ -210,7 +210,10 @@ if (!REVIEW_ONLY) console.log(`  egress: ${describeEgress(cfg.chat, cfg.egress, 
   // A policy that refuses whatever the row (SMD-1903): stop before claiming,
   // rather than fail every row in the pool one at a time. A dry run and
   // --status still report — the banner's egress line says why a run would not.
-  const blanket = refusesEverything(cfg.chat, cfg.egress);
+  // The units a row of this pass carries: its metadata and text, and the
+  // worker key's name as the actor when one is set — re-checked below once
+  // the key has, or has not, resolved (third review pass).
+  const blanket = refusesEverything(cfg.chat, cfg.egress, process.env.OB1_WORKER_KEY ? undefined : PASS_UNITS);
   if (blanket && !STATUS_ONLY && !DRY_RUN && !REVIEW_ONLY) {
     console.error(`\n  Nothing would be judged: ${blanket}. Declare the endpoint local (${localKnob(cfg, "chat")}=1) if it is, name what may leave in OB1_EGRESS_ALLOW, or set OB1_EGRESS_POLICY — in words, before a pass that would fail every row it claims.`);
     process.exit(2);
@@ -244,6 +247,10 @@ if (Number(tables) < 3) {
  */
 let agentId: string | null = null;
 let actorName = "consolidate";
+/** The worker key's name when it RESOLVED — the egress gate's `actor:` unit; the audit label above is not an actor (third review pass). */
+let keyName: string | undefined;
+/** The egress units a row of this pass carries without a worker key: its metadata and its text. */
+const PASS_UNITS = ["source", "type", "topic", "marker"] as const;
 // A run, or a review: both write and are attributed. --status, --dry-run, --list and --stale only read.
 const WRITES = ACCEPT !== undefined || REJECT !== undefined || !(STATUS_ONLY || DRY_RUN || REVIEW_ONLY);
 if (WRITES) {
@@ -272,6 +279,7 @@ if (WRITES) {
       if (res.ok && res.agent_id) {
         agentId = res.agent_id;
         actorName = record.name;
+        keyName = record.name;
         console.log(`  agent:  ${record.name} (${record.scope}, ${agentId})`);
       } else {
         console.error(`  ⚠  resolve_agent answered ${res.error ?? "without an id"}; rows will carry no agent id`);
@@ -281,6 +289,16 @@ if (WRITES) {
     }
   } else {
     console.error(`  ⚠  OB1_WORKER_KEY is not set: ${ACCEPT || REJECT ? "the review is audited as 'consolidate' with no agent id" : "proposals will carry no agent id"}. Mint one with server-portable/keygen.ts and add its hash to MCP_ACCESS_KEYS.`);
+  }
+  // A key that was set but did not resolve to a name is no actor: the blanket
+  // check above credited one, so it is asked again without (third review pass).
+  if (process.env.OB1_WORKER_KEY && keyName === undefined && !REVIEW_ONLY) {
+    const again = refusesEverything(cfg.chat, cfg.egress, PASS_UNITS);
+    if (again) {
+      console.error(`\n  Nothing would be judged: ${again} — the worker key did not resolve, so the pass carries no actor for an actor: term to name.`);
+      await sql.close();
+      process.exit(2);
+    }
   }
 }
 
@@ -517,7 +535,7 @@ async function processRow(row: Row): Promise<Outcome> {
     try {
       j = await judgePair({ content: older.content, createdAt: older.created_at, metadata: older.metadata ?? undefined },
                           { content: row.content, createdAt: row.created_at, metadata: row.metadata ?? undefined },
-                          cfg, AbortSignal.timeout(TIMEOUT_S * 1000), actorName);
+                          cfg, AbortSignal.timeout(TIMEOUT_S * 1000), keyName);
     } catch (e) {
       llmMs += Date.now() - t0;
       // A timeout is a fact about this pair (the longest thoughts); anything

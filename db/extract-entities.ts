@@ -243,6 +243,16 @@ if (!STATUS_ONLY && !DRY_RUN) {
   } else {
     console.error("  ⚠  OB1_WORKER_KEY is not set: mentions and edges will carry no agent id. Mint one with server-portable/keygen.ts and add its hash to MCP_ACCESS_KEYS.");
   }
+  // A key that was set but did not resolve to a name is no actor: the blanket
+  // check above credited one, so it is asked again without (third review pass).
+  if (process.env.OB1_WORKER_KEY && actorName === undefined) {
+    const again = refusesEverything(cfg.chat, cfg.egress, ["source", "type", "topic", "marker"]);
+    if (again) {
+      console.error(`\n  Nothing would be extracted: ${again} — the worker key did not resolve, so the pass carries no actor for an actor: term to name.`);
+      await sql.close();
+      process.exit(2);
+    }
+  }
 }
 
 // ── Where the pass stands ───────────────────────────────────────────────────
