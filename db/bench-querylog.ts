@@ -55,8 +55,19 @@ const AWAITED_PROBES = Number(process.env.OB1_BENCH_AWAITED ?? 300);
 /** Repeats per prune probe. The median is reported; the first run is discarded as warm-up. */
 const REPEATS = Number(process.env.OB1_BENCH_REPEATS ?? 5);
 
-/** The retention window prune deletes past; the rows below are spread over twice it. */
+/** The retention window prune deletes past. */
 const KEEP_DAYS = 30;
+
+/**
+ * The fraction of rows prune deletes — a realistic retention prune trims a small
+ * old tail off a mostly-recent log, NOT half the table. This is the case the
+ * logged_at index is for: a ~50% range delete is often served best by a Seq Scan
+ * (and the planner keeps one in both arms), so spreading rows to delete only a
+ * small fraction is what exercises the index. Rows are aged uniformly over
+ * SPREAD_DAYS so exactly this fraction lands older than KEEP_DAYS.
+ */
+const DELETE_FRACTION = Number(process.env.OB1_BENCH_DELETE_FRACTION ?? 0.1);
+const SPREAD_DAYS = KEEP_DAYS / (1 - DELETE_FRACTION);
 
 const INDEX = "query_log_logged_at_idx";
 
@@ -76,15 +87,17 @@ async function dropIndex(c: SQL): Promise<void> {
 }
 
 /**
- * Populate `n` search rows with logged_at spread evenly over 2 * KEEP_DAYS, oldest
- * first, so prune(KEEP_DAYS) deletes about the older half — a real range, not all
- * or nothing. agent_id is random so the composite index is as populated as it
- * would be in life (and cannot accidentally serve the bare-logged_at range).
+ * Populate `n` search rows with logged_at aged uniformly over SPREAD_DAYS, so
+ * prune(KEEP_DAYS) deletes the oldest DELETE_FRACTION of them — the small old tail
+ * a real retention prune trims off a mostly-recent log, which is the selective
+ * range the logged_at index is for (half the table would favour a Seq Scan in both
+ * arms). agent_id is random so the composite index is as populated as it would be
+ * in life (and cannot accidentally serve the bare-logged_at range).
  */
 async function populate(c: SQL, n: number): Promise<void> {
   await c`
     INSERT INTO query_log (logged_at, kind, tool, query, agent_id)
-    SELECT now() - make_interval(days => ${2 * KEEP_DAYS}) * (g::float8 / ${n}),
+    SELECT now() - make_interval(days => 1) * (${SPREAD_DAYS} * g::float8 / ${n}),
            'search', 'search_thoughts', 'q' || g, gen_random_uuid()
       FROM generate_series(1, ${n}) AS g`;
   await c`ANALYZE query_log`;
@@ -198,7 +211,7 @@ function change(before: number, after: number): string {
 
 // ── Run ────────────────────────────────────────────────────────────────────────
 
-console.log(`scales:  ${SCALES.join(", ")} rows (spread over ${2 * KEEP_DAYS} days; prune keeps ${KEEP_DAYS})`);
+console.log(`scales:  ${SCALES.join(", ")} rows (aged over ${SPREAD_DAYS.toFixed(1)} days; prune keeps ${KEEP_DAYS}, deletes the oldest ~${Math.round(DELETE_FRACTION * 100)}%)`);
 console.log(`writes:  ${WRITE_BATCH.toLocaleString()} batched (index cost), ${AWAITED_PROBES} single awaited (hot-path latency)`);
 console.log(`repeats: ${REPEATS} per prune probe, median reported\n`);
 
@@ -263,7 +276,17 @@ for (const r of pruneRows) {
       `${fmtMs(r.withIdx.ms)} | ${r.withIdx.plan} | ${change(r.without.ms, r.withIdx.ms)} |`
   );
 }
-console.log("\nWithout the index the plan is a Seq Scan of the whole log; with 046 it is an index range scan.");
+// Report the flip only where it was actually observed — at small scales the table
+// is cheap enough that Postgres scans regardless (the crossover, as bench-trgm found
+// for the trigram index), and a hard-coded "it flips" would contradict the table above.
+const flipped = pruneRows.filter((r) => r.without.plan === "Seq Scan" && r.withIdx.plan !== "Seq Scan");
+if (flipped.length === pruneRows.length) {
+  console.log("\nAt every scale the delete flips from a Seq Scan of the whole log (no index) to an index range scan (046).");
+} else if (flipped.length > 0) {
+  console.log(`\nThe delete flips from a Seq Scan to an index range scan at ${flipped.map((r) => r.scale.toLocaleString()).join(", ")} rows; below that the table is small enough that Postgres scans regardless (the crossover).`);
+} else {
+  console.log("\nNo scale showed a Seq-Scan→index-scan flip: the table is small enough that Postgres scans regardless. Raise OB1_BENCH_SCALES (e.g. 1000000) to cross over.");
+}
 
 console.log("\n### Write cost of the index, and the awaited hot-path latency\n");
 console.log(`A batch of ${WRITE_BATCH.toLocaleString()} rows in one INSERT into two freshly loaded tables that differ only`);

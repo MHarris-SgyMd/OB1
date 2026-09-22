@@ -32,7 +32,14 @@
 --   * CREATE INDEX IF NOT EXISTS query_log_logged_at_idx ON query_log (logged_at) —
 --     a btree the prune DELETE range-scans. Not CONCURRENTLY: migrations run in one
 --     transaction (034's own indexes are plain CREATE INDEX), and CONCURRENTLY
---     cannot run inside a transaction block.
+--     cannot run inside a transaction block. A plain build takes a lock that blocks
+--     writes to query_log for its duration; on a large opt-in log this is a
+--     deploy-time stall of the awaited hot-path log writes. It is bounded in
+--     practice: a fresh brain builds it on an empty table, and SMD-1806's canary —
+--     the tier that carries the log at volume — is rebuilt from stable's dump on
+--     every merge, so 046 runs against the refreshed copy as it is loaded, not
+--     against the live stable writer. Migrating an existing large log in place is
+--     the case to run in a quiet window (SMD-1794's maintenance window, or by hand).
 --   * COMMENT ON INDEX records what it is for.
 --
 -- SAFETY

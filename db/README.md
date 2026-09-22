@@ -1034,16 +1034,26 @@ the header of `migrations/011_text_search_trgm.sql`.
 
 ### bench-querylog.ts
 
-The two `query_log` costs SMD-1492 settles with numbers rather than prose. It
-loads search rows spread over sixty days on a fresh schema (every migration, so
-migration 046's `logged_at` index is built by the schema), then runs
-`prune_query_log`'s retention `DELETE` under `EXPLAIN (ANALYZE)` — rolled back so
-both arms see the same rows — with the index and again with it dropped, showing the
-plan flip from a full Seq Scan to an index range scan. A separate arm times
-`WRITE_BATCH` single-row INSERTs (the hot-path shape) into two tables differing only
-by that index, reporting the per-row latency `OB1_QUERY_LOG=on` already awaits and
-the delta the btree adds — the "fourth index write cost" the ticket weighs, and the
-number a future BRIN follow-up would try to erase.
+The two `query_log` costs SMD-1492 settles with numbers rather than prose. It ages
+search rows so `prune_query_log` deletes only the oldest tenth — the small old tail a
+real retention prune trims, the selective range the index is for, not the half-table
+delete a Seq Scan would win anyway — on a fresh schema (every migration, so migration
+046's `logged_at` index is built by the schema), then runs the retention `DELETE`
+under `EXPLAIN (ANALYZE)` — rolled back so both arms see the same rows — with the
+index and again with it dropped, reporting the plan for each and flagging the
+Seq-Scan→index-scan flip only where it was actually observed (at small scales the
+table is cheap enough that Postgres scans regardless — the crossover).
+
+The write cost is two separate arms. One times a single **bulk** INSERT of
+`WRITE_BATCH` rows into two tables differing only by the index: the round trip is
+amortized across the batch, so the difference is the btree's per-row maintenance —
+the "fourth index write cost" the ticket weighs, and the number a future BRIN
+follow-up would try to erase (below the noise floor at these scales). The other
+times `AWAITED_PROBES` **single** awaited INSERTs, one round trip each, on the
+index-present table: that per-call millisecond is what `OB1_QUERY_LOG=on` actually
+makes a search or fetch wait for before it returns, the cost the "keep the await"
+decision accepts (a single awaited INSERT cannot isolate the µs-scale index cost —
+the round trip swamps it — which is why the two are measured apart).
 
 ```bash
 ./with-postgres.sh bun bench-querylog.ts
