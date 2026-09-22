@@ -115,7 +115,7 @@ export function classifyChanges(entries) {
     else if (text === null || (name !== "README.md" && !name.startsWith("."))) other.push({ name, text }); // a dotfile is the OS's, not a record
   }
   numbered.sort((a, b) => a.n - b.n || a.name.localeCompare(b.name));
-  fragments.sort((a, b) => a.name.localeCompare(b.name));
+  fragments.sort((a, b) => Number(a.ticket.slice(4)) - Number(b.ticket.slice(4)) || a.name.localeCompare(b.name));
   return { numbered, fragments, other };
 }
 

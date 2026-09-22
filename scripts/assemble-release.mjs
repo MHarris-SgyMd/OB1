@@ -12,9 +12,10 @@
  * changes/NNN-<slug>.md, not a FORK.md section: the step writes each fragment as
  * the next numbered file, removes the fragment, and re-renders FORK.md's index
  * with scripts/fork-index.mjs. Everything a cut can refuse — a directory that is
- * not contiguous or holds a stray, a fragment with no FORK body or a migration
- * outside the range, a FORK.md or CHANGELOG.md it cannot write into — is refused
- * in the plan, before --write touches a file.
+ * not contiguous or holds a stray or two fragments for one ticket, a fragment
+ * check 16 would refuse (one function, fragments.mjs) or one naming a migration
+ * outside the range, a FORK.md or CHANGELOG.md it cannot write into — is
+ * refused in the plan, before --write touches a file.
  *
  *   bun scripts/assemble-release.mjs              # DRY RUN: print the plan, touch nothing
  *   bun scripts/assemble-release.mjs --write      # write changes/NNN-*.md, FORK.md's index, CHANGELOG.md, releases.json
@@ -29,12 +30,12 @@
  * images. Those are the release job's (SMD-1805) and are gated on approval.
  */
 
-import { readFileSync, writeFileSync, readdirSync, existsSync, unlinkSync } from "node:fs";
+import { readFileSync, writeFileSync, readdirSync, unlinkSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { FORK_VERSION, UPSTREAM_PIN, migrationSha, readReleases, highestReleasedMigration } from "../db/version.mjs";
-import { parseFragment, fragmentSection } from "./fragments.mjs";
+import { UPSTREAM_PIN, migrationSha, readReleases, highestReleasedMigration } from "../db/version.mjs";
+import { parseFragment, fragmentSection, fragmentProblems } from "./fragments.mjs";
 import { CHANGES_DIR as CHANGES_REL, FIRST_FILED, changeFileName, classifyChanges, readChangeEntries, renderIndex, spliceIndex } from "./fork-index.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -66,7 +67,7 @@ export function nextVersion(releases, bumps) {
   return bumpVersion(releases[releases.length - 1].version, strongest);
 }
 
-/** The highest numbered change file today (0 when there is none). */
+/** The highest numbered change file today (buildPlan refuses an empty directory before asking). */
 export function highestChangeNumber(numbered) {
   return numbered[numbered.length - 1].n; // buildPlan refuses an empty directory before asking
 }
@@ -138,8 +139,9 @@ function orderedFragments(fragments) {
       return Number.MAX_SAFE_INTEGER;
     }
   };
+  const at = new Map(fragments.map((f) => [f.name, addedAt(f.name)])); // one child process per fragment, not per comparison
   const ticketNum = (f) => Number(/\d+/.exec(f.name)[0]);
-  return [...fragments].sort((a, b) => (addedAt(a.name) - addedAt(b.name)) || (ticketNum(a) - ticketNum(b)));
+  return [...fragments].sort((a, b) => (at.get(a.name) - at.get(b.name)) || (ticketNum(a) - ticketNum(b)));
 }
 
 function readMig(n) {
@@ -161,12 +163,17 @@ function buildPlan() {
     if (existing[i].n !== want) throw new Error(`${CHANGES_REL}/ is not contiguous at ${existing[i].name} (expected change ${want}) — run check-fork-consistency and fix the directory before cutting a release`);
   }
   if (pending.length === 0) throw new Error(`nothing to release — no ${CHANGES_REL}/smd-NNNN.md fragment has landed since the last cut`);
+  const byTicket = new Map();
+  for (const f of pending) {
+    if (byTicket.has(f.ticket)) throw new Error(`${CHANGES_REL}/${f.name} is a second fragment for ${f.ticket} beside ${CHANGES_REL}/${byTicket.get(f.ticket)} — one PR, one fragment`);
+    byTicket.set(f.ticket, f.name);
+  }
   const fragments = orderedFragments(pending).map(({ name, text }) => {
+    // Check 16's rules, the same function: a cut refuses what CI would.
+    const problems = fragmentProblems(text);
+    if (problems.length) throw new Error(`${name}: ${problems.join("; ")} (check-fork-consistency, check 16)`);
     const parsed = parseFragment(text);
-    if (!parsed) throw new Error(`${name}: no front matter (run check-fork-consistency)`);
-    const fork = fragmentSection(parsed.body, "FORK");
-    if (!fork || !fork.trim()) throw new Error(`${name}: no \`## FORK\` body to number (run check-fork-consistency)`);
-    return { name, ...parsed, fork };
+    return { name, ...parsed, fork: fragmentSection(parsed.body, "FORK") };
   });
   const version = nextVersion(releases, fragments.map((f) => f.fm.bump));
   let n = highestChangeNumber(existing);
@@ -201,8 +208,11 @@ function buildPlan() {
   // the range — happens before write() has touched a file.
   // The release's day in the house zone (the one every review pass in the log
   // was committed in and mechanism-yield.mjs defaults to, SMD-1728), not the
-  // machine's: a cut at 20:00 in Chicago is not dated tomorrow.
-  const date = new Date().toLocaleDateString("en-CA", { timeZone: "America/Chicago" });
+  // machine's: a cut at 20:00 in Chicago is not dated tomorrow. Built from the
+  // date's parts, so the YYYY-MM-DD shape check 17a wants is asserted, not a
+  // locale's habit.
+  const parts = Object.fromEntries(new Intl.DateTimeFormat("en", { timeZone: "America/Chicago", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(new Date()).map((x) => [x.type, x.value]));
+  const date = `${parts.year}-${parts.month}-${parts.day}`;
   const core = version.split("+")[0];
   const changelogAfter = insertChangelogSection(
     readFileSync(join(ROOT, "CHANGELOG.md"), "utf8"),
@@ -233,16 +243,16 @@ function printPlan(plan) {
 
 function write(plan) {
   // Everything was rendered in buildPlan; this only writes (the release author
-  // reviews the diff; this is not run in CI): each fragment becomes the next
-  // numbered file and is removed, then FORK.md's index, CHANGELOG.md's section
-  // under Unreleased with its compare link, and releases.json's entry.
-  for (const f of plan.fragments) {
-    writeFileSync(join(CHANGES_DIR, f.file.name), f.file.text);
-    unlinkSync(join(CHANGES_DIR, f.name));
-  }
+  // reviews the diff; this is not run in CI). The overwrites first — FORK.md's
+  // index, CHANGELOG.md's section under Unreleased with its compare link,
+  // releases.json's entry — then the new numbered files, and the fragments are
+  // removed last: the one step that cannot be redone by re-running sits after
+  // every one that can fail on I/O.
   writeFileSync(join(ROOT, "FORK.md"), plan.forkAfter);
   writeFileSync(join(ROOT, "CHANGELOG.md"), plan.changelogAfter);
   writeFileSync(join(ROOT, "releases.json"), JSON.stringify([...plan.releases, plan.entry], null, 2) + "\n");
+  for (const f of plan.fragments) writeFileSync(join(CHANGES_DIR, f.file.name), f.file.text);
+  for (const f of plan.fragments) unlinkSync(join(CHANGES_DIR, f.name));
 
   console.log(`Wrote ${plan.fragments.length} change file(s), FORK.md's index, CHANGELOG.md and releases.json for ${plan.version}.`);
   console.log(`Next, out of band, in this same commit: bump db/version.mjs's FORK_VERSION to '${plan.version}' and emit a NNN_set_schema_version.sql upserting it as the range's last migration (check-fork holds the two equal, so both move together). Then tag v${plan.version.split("+")[0]}+upstream.${UPSTREAM_PIN} and create the release.`);
