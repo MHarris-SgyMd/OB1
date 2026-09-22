@@ -3926,8 +3926,9 @@ writer's declaration — not the 7B — is what makes any of them reliable.
 consolidation judge on every proposal (029), the entity extractor on every
 mention and edge (016), and the metadata model's kind band that the section
 above froze — and it resolves claims in three: a reviewer accepts or rejects a
-proposal, the hand label agrees or not with the model's kind, and the fork
-record confirms or refutes a hypothesis. Nothing compared the two. This harness
+proposal — applies it or declines it — the hand label agrees or not with the
+model's kind, and the fork record confirms or refutes a hypothesis. Nothing
+compared the two. This harness
 does, as a read model over what the log already holds — no table, no
 migration, no new confidence source — so the ticket's first question, whether
 calibration is measurable from the existing log and whether any mechanism is
@@ -3937,7 +3938,9 @@ would act on it is built.
 The ledger is one row per (mechanism, claim, the confidence it carried, the
 outcome it resolved to, what resolved it). A row with no confidence is
 unscored, never scored as 0; a row nothing has resolved is unresolved; the
-report counts both. Per mechanism, over the rows with both sides: the
+report counts both, and it counts the deletes `thought_audit` remembers, since
+a deleted thought takes its proposals and pointers out of the log and the
+scores are of what survived. Per mechanism, over the rows with both sides: the
 reliability table, the Brier score, the expected calibration error, and the
 Brier skill against a constant at the base rate (0 = no better than a
 forecaster who knows only how often claims hold; negative = worse). A band maps
@@ -3962,7 +3965,7 @@ on the compose network with `--env-file deploy/.env`).
 | mechanism | claims | confidence | resolved | Brier | ECE | base rate | skill |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | kind band (`qwen2.5:7b` first pass) | 342 | `high` 318 / `medium` 24 | 342, hand label | 0.606 | 0.639 | 0.240 (reference Brier 0.182) | −2.324 |
-| `consolidate:qwen2.5:7b@p2` | 24 | 0.80 ×24 | 24, reviewer: 0 held | 0.640 | 0.800 | 0.000 | undefined |
+| `consolidate:qwen2.5:7b@p2` | 24 | 0.80 ×24 | 24, reviewer applied 0 | 0.640 | 0.800 | 0.000 | undefined |
 | `extract:qwen2.5:7b@p2` | 4,126 | 1.00 on 4,096, 0.80 on 19, 0.90 on 11 | 0 | — | — | — | — |
 | `extract:qwen2.5:7b@p1` | 3,157 | 1.00 on 3,156, 0.50 on 1 | 0 | — | — | — | — |
 | declared (`metadata.confidence`) | 48 | none | 28: 17 by the fork record, 11 superseded | — | — | — | — |
@@ -3978,9 +3981,11 @@ What it says:
 
 * **Calibration is measurable from the log today** for two mechanisms, and
   both are over-confident. The judge is the cleanest over-confidence event the
-  log holds: 0.80 stated twenty-four times, 0 of 24 held — over its conflict
-  calls only, since 029 records no other verdict, and the 24 rejections are one
-  reviewer's sitting. The band runs backwards — `high` holds less often than
+  log holds: 0.80 stated twenty-four times, 0 of 24 applied — over its conflict
+  calls only, since 029 records no other verdict; "declined" is the reviewer's
+  decision about the proposal, not a verdict on the proposition, and 029 keeps
+  no reason, so it bounds the conflict call's failures from above; and the 24
+  declines are one reviewer's sitting. The band runs backwards — `high` holds less often than
   `medium` — and no mapping rescues it: one fitted to the held rates has skill
   0.02 against the base-rate constant, the literal swap −0.78.
 * **The extractor's confidence is nearly a constant.** 1.00 on every mention

@@ -36,9 +36,14 @@
  * Where the sides come from:
  *   kind band     fixtures/thought-kinds.json — the model's first-pass band on
  *                 each thought, resolved by the hand kind (right / wrong)
- *   judge         supersession_proposals — the judge's confidence, resolved by
- *                 the reviewer (accepted = the claim held, rejected = it did
- *                 not; pending = unresolved); one mechanism per judge_key
+ *   judge         supersession_proposals — the judge's confidence on each
+ *                 pair it called a conflict (029 records no other verdict, so
+ *                 this scores its positive calls only), resolved by the
+ *                 reviewer: accepted = applied, rejected = declined; pending =
+ *                 unresolved. 029 keeps no reason, so a rejection cannot say
+ *                 whether the conflict call itself failed or only its direction
+ *                 or its timing did — "did not hold" is an upper bound on the
+ *                 judge's failures. One mechanism per judge_key
  *   extractor     thought_entities + ob1_entity_edges — the confidence on each
  *                 mention and edge; nothing in a brain resolves them (the
  *                 labelled captures in eval-entities.ts are that outcome set,
@@ -49,6 +54,12 @@
  *                 by being superseded (another thought's `supersedes` points at
  *                 it). A hypothesis or a superseded thought with no declared
  *                 value is the unscored row the report counts.
+ *
+ * What the log forgets: a deleted thought takes its proposals with it (029
+ * cascades) and clears any pointer at it (025 sets null), while thought_audit
+ * keeps the delete. So a brain whose operator prunes refuted or superseded
+ * thoughts reads as better calibrated than it was; the report counts the
+ * deletes the log remembers so the reader can see how much is missing.
  *
  * Modes:
  *   bun eval-calibration.ts --self-check      the arithmetic and the ledger rules; no database
@@ -68,6 +79,8 @@ export type LedgerRow = {
   mechanism: string;
   /** The claim: a thought id, a proposal id, or a mention/edge key. */
   claim: string;
+  /** What kind of claim: a thought's kind or its own statement, a proposal, an entity mention, an entity edge. */
+  kind: "thought" | "proposal" | "mention" | "edge";
   /** The confidence as a probability, or null when the claim carried none. */
   stated: number | null;
   /** The band it was stated as, when it was a band rather than a number. */
@@ -104,7 +117,7 @@ export function kindBandRows(f: Fixture): LedgerRow[] {
     const kind = kindOf.get(id);
     if (!kind) continue;
     const band = bandOf.get(id) ?? null;
-    rows.push({ mechanism: KIND_BAND, claim: id, stated: band ? BAND_P[band] ?? null : null, band, outcome: guess === kind ? 1 : 0, resolvedBy: "hand label" });
+    rows.push({ mechanism: KIND_BAND, claim: id, kind: "thought", stated: band ? BAND_P[band] ?? null : null, band, outcome: guess === kind ? 1 : 0, resolvedBy: "hand label" });
   }
   return rows;
 }
@@ -128,30 +141,36 @@ export function declaredRows(f: Fixture, declared: Map<string, number | null>, s
     const s = statusOf.get(id);
     let outcome: 0 | 1 | null = s === "confirmed" ? 1 : s === "refuted" ? 0 : null, resolvedBy: string | null = outcome === null ? null : "fork record";
     if (outcome === null && sup.has(id)) { outcome = 0; resolvedBy = "superseded"; }
-    rows.push({ mechanism: DECLARED, claim: id, stated: declared.get(id) ?? null, band: null, outcome, resolvedBy });
+    rows.push({ mechanism: DECLARED, claim: id, kind: "thought", stated: declared.get(id) ?? null, band: null, outcome, resolvedBy });
     seen.add(id);
   }
-  for (const id of sup) if (!seen.has(id)) { rows.push({ mechanism: DECLARED, claim: id, stated: declared.get(id) ?? null, band: null, outcome: 0, resolvedBy: "superseded" }); seen.add(id); }
-  for (const [id, p] of declared) if (!seen.has(id)) { rows.push({ mechanism: DECLARED, claim: id, stated: p, band: null, outcome: null, resolvedBy: null }); seen.add(id); }
+  for (const id of sup) if (!seen.has(id)) { rows.push({ mechanism: DECLARED, claim: id, kind: "thought", stated: declared.get(id) ?? null, band: null, outcome: 0, resolvedBy: "superseded" }); seen.add(id); }
+  for (const [id, p] of declared) if (!seen.has(id)) { rows.push({ mechanism: DECLARED, claim: id, kind: "thought", stated: p, band: null, outcome: null, resolvedBy: null }); seen.add(id); }
   return rows;
 }
 
 export type ProposalRow = { id: string; confidence: number; status: string; judge_key: string };
 
-/** The judge: its confidence on each proposal, resolved by the reviewer. */
+/** The judge: its confidence on each proposal, resolved by the reviewer — applied or declined; see the header for what a decline can and cannot mean. */
 export function proposalRows(rows: ProposalRow[]): LedgerRow[] {
   return rows.map((r) => ({
-    mechanism: r.judge_key, claim: r.id, stated: r.confidence, band: null,
+    mechanism: r.judge_key, claim: r.id, kind: "proposal" as const, stated: r.confidence, band: null,
     outcome: r.status === "accepted" ? 1 : r.status === "rejected" ? 0 : null,
     resolvedBy: r.status === "pending" ? null : "reviewer",
   }));
 }
 
-export type MentionRow = { claim: string; confidence: number; extraction_key: string };
+export type MentionRow = { claim: string; kind: "mention" | "edge"; confidence: number; extraction_key: string };
 
 /** The extractor: a confidence per mention or edge, nothing to resolve it in a brain. */
 export function mentionRows(rows: MentionRow[]): LedgerRow[] {
-  return rows.map((r) => ({ mechanism: r.extraction_key, claim: r.claim, stated: r.confidence, band: null, outcome: null, resolvedBy: null }));
+  return rows.map((r) => ({ mechanism: r.extraction_key, claim: r.claim, kind: r.kind, stated: r.confidence, band: null, outcome: null, resolvedBy: null }));
+}
+
+/** A missing table or column — the migration that adds it is not applied. Any other error (a grant, a timeout, a renamed column) is not that, and is thrown, never read as "not applied" (review pass 3). */
+export function absent(e: unknown): boolean {
+  const code = (e as { code?: unknown })?.code;
+  return code === "42P01" || code === "42703";
 }
 
 /** The rows a score may read: both sides present and in range. A row out of range is an error naming the claim, not a row dropped. */
@@ -220,6 +239,10 @@ export type Summary = {
   perValue: Map<number, number>;
   /** How many resolved claims each resolver accounts for. */
   perResolver: Map<string, number>;
+  /** The same, over the resolved claims that carry NO confidence — the rows the "cannot be scored" line is about. */
+  perResolverWithout: Map<string, number>;
+  /** How many claims of each kind (thought, proposal, mention, edge). */
+  perKind: Map<string, number>;
 };
 
 export function summarise(mechanism: string, rows: LedgerRow[]): Summary {
@@ -229,10 +252,12 @@ export function summarise(mechanism: string, rows: LedgerRow[]): Summary {
   const bands = new Map<string, { n: number; held: number }>();
   for (const r of rows) if (r.band && r.outcome !== null) { const b = bands.get(r.band) ?? { n: 0, held: 0 }; b.n++; b.held += r.outcome; bands.set(r.band, b); }
   const bs = sc.length ? brier(sc) : null, rate = sc.length ? baseRate(sc) : null;
-  const perValue = new Map<number, number>(), perResolver = new Map<string, number>();
+  const perValue = new Map<number, number>(), perResolver = new Map<string, number>(), perResolverWithout = new Map<string, number>(), perKind = new Map<string, number>();
   for (const r of rows) {
     if (r.stated !== null) perValue.set(r.stated, (perValue.get(r.stated) ?? 0) + 1);
     if (r.resolvedBy) perResolver.set(r.resolvedBy, (perResolver.get(r.resolvedBy) ?? 0) + 1);
+    if (r.resolvedBy && r.stated === null) perResolverWithout.set(r.resolvedBy, (perResolverWithout.get(r.resolvedBy) ?? 0) + 1);
+    perKind.set(r.kind, (perKind.get(r.kind) ?? 0) + 1);
   }
   return {
     mechanism, claims: rows.length,
@@ -241,7 +266,7 @@ export function summarise(mechanism: string, rows: LedgerRow[]): Summary {
     brier: bs, ece: sc.length ? ece(bins) : null, baseRate: rate, skill: bs !== null && rate !== null ? skill(bs, rate) : null, bins, bands,
     unresolvedWithConfidence: rows.filter((r) => r.stated !== null && r.outcome === null).length,
     resolvedWithout: rows.filter((r) => r.stated === null && r.outcome !== null).length,
-    perValue, perResolver,
+    perValue, perResolver, perResolverWithout, perKind,
   };
 }
 
@@ -260,9 +285,14 @@ function distribution(s: Summary): string {
   if (s.distinct.length <= 4) return [...s.perValue].sort((a, b) => b[1] - a[1]).map(([p, n]) => `${p.toFixed(2)} on ${n.toLocaleString("en-US")}`).join(", ");
   return `${s.distinct.length} distinct values`;
 }
-/** "17 by the fork record, 8 superseded" — who resolved the claims. */
+/** "17 by the fork record, 8 superseded" — who resolved the claims that carry no confidence. */
 function resolvers(s: Summary): string {
-  return [...s.perResolver].sort((a, b) => b[1] - a[1]).map(([by, n]) => `${n} ${by === "superseded" ? "superseded" : `by the ${by}`}`).join(", ");
+  return [...s.perResolverWithout].sort((a, b) => b[1] - a[1]).map(([by, n]) => `${n} ${by === "superseded" ? "superseded" : `by the ${by}`}`).join(", ");
+}
+/** "4,126 (3,000 mentions, 1,126 edges)" when a mechanism claims more than one kind of thing. */
+function claims(s: Summary): string {
+  if (s.perKind.size <= 1) return String(s.claims);
+  return `${s.claims} (${[...s.perKind].sort((a, b) => b[1] - a[1]).map(([k, n]) => `${n.toLocaleString("en-US")} ${k}${n === 1 ? "" : "s"}`).join(", ")})`;
 }
 
 /** The report over a set of summaries, in the order given. */
@@ -271,7 +301,7 @@ export function render(summaries: Summary[], heading: string, notes: string[]): 
   out.push("## The ledger", "", "One row per mechanism: what it claimed, what carried a confidence, how many distinct values that confidence took, what something resolved, and what has both sides.", "");
   out.push(table(
     ["mechanism", "claims", "with a confidence", "distinct values", "resolved", "scorable"],
-    summaries.map((s) => [s.mechanism, s.claims, `${s.withConfidence} (${pct(s.withConfidence, s.claims)})`, s.distinct.length <= 4 ? (s.distinct.length ? s.distinct.map((p) => p.toFixed(2)).join(", ") : "—") : String(s.distinct.length), `${s.resolved} (${pct(s.resolved, s.claims)})`, s.scorable]),
+    summaries.map((s) => [s.mechanism, claims(s), `${s.withConfidence} (${pct(s.withConfidence, s.claims)})`, s.distinct.length <= 4 ? (s.distinct.length ? s.distinct.map((p) => p.toFixed(2)).join(", ") : "—") : String(s.distinct.length), `${s.resolved} (${pct(s.resolved, s.claims)})`, s.scorable]),
   ), "");
   for (const s of summaries) {
     if (!s.scorable) continue;
@@ -290,7 +320,7 @@ export function render(summaries: Summary[], heading: string, notes: string[]): 
     for (const s of unscored) {
       if (s.resolvedWithout) out.push(`- ${s.mechanism}: ${s.resolvedWithout} resolved claim(s) carry no confidence — an outcome with nothing to score it against (${resolvers(s)}).`);
       if (!s.scorable && s.withConfidence) out.push(`- ${s.mechanism}: ${s.withConfidence} claim(s) carry a confidence (${distribution(s)}) and nothing has resolved any of them.`);
-      if (!s.scorable && !s.withConfidence && !s.resolvedWithout) out.push(`- ${s.mechanism}: no claims.`);
+      if (!s.scorable && !s.withConfidence && !s.resolvedWithout) out.push(`- ${s.mechanism}: ${s.claims ? `${s.claims} claim(s), none with a confidence, none resolved.` : "no claims."}`);
     }
     out.push("");
   }
@@ -354,22 +384,25 @@ function selfCheck(): void {
   ok(parseDeclared(0.7) === 0.7 && parseDeclared("0.7") === 0.7 && parseDeclared(1) === 1 && parseDeclared(0) === 0, "a declared confidence reads as a number or a numeric string");
   ok(parseDeclared(1.5) === null && parseDeclared(-0.1) === null && parseDeclared("high") === null && parseDeclared("") === null && parseDeclared(null) === null && parseDeclared(true) === null, "out of range, a word, empty, null and a boolean are not a confidence");
   let threw = "";
-  try { scorable([{ mechanism: "m", claim: "x", stated: 1.2, band: null, outcome: 1, resolvedBy: "r" }]); } catch (e) { threw = (e as Error).message; }
+  try { scorable([{ mechanism: "m", claim: "x", kind: "thought", stated: 1.2, band: null, outcome: 1, resolvedBy: "r" }]); } catch (e) { threw = (e as Error).message; }
   ok(threw.includes("x") && threw.includes("1.2"), "a stated value outside [0, 1] is refused, naming the claim");
 
   // The summary and the report.
-  const s = summarise("j", [...props, { mechanism: "j", claim: "p4", stated: null, band: null, outcome: 0, resolvedBy: "reviewer" }]);
+  const s = summarise("j", [...props, { mechanism: "j", claim: "p4", kind: "proposal", stated: null, band: null, outcome: 0, resolvedBy: "reviewer" }]);
   ok(s.claims === 4 && s.withConfidence === 3 && s.resolved === 3 && s.scorable === 2 && s.unresolvedWithConfidence === 1 && s.resolvedWithout === 1, `the summary partitions the rows (${JSON.stringify([s.claims, s.withConfidence, s.resolved, s.scorable, s.unresolvedWithConfidence, s.resolvedWithout])})`);
   near(s.brier, ((0.8 - 0) ** 2 + (0.8 - 1) ** 2) / 2, "the summary's Brier reads only the scorable rows");
   ok(s.distinct.length === 2, "distinct values count the stated ones across every row, resolved or not");
   const k = summarise(KIND_BAND, kb);
   ok(k.bands.get("high")?.n === 1 && k.bands.get("high")?.held === 1 && k.bands.get("medium")?.held === 0, "the band table counts the band as stated");
-  const text = render([s, k, summarise("e", mentionRows([{ claim: "m1", confidence: 1, extraction_key: "e" }]))], "probe", []);
+  const text = render([s, k, summarise("e", mentionRows([{ claim: "m1", kind: "mention", confidence: 1, extraction_key: "e" }]))], "probe", []);
   ok(text.includes("| j | 4 | 3 (75%) | 0.80, 0.90 | 3 (75%) | 2 |"), "the ledger row prints the partition");
   ok(text.includes("- e: 1 claim(s) carry a confidence (every one 1.00) and nothing has resolved any of them."), "an unresolvable mechanism is named with its constant");
-  ok(text.includes("- j: 1 resolved claim(s) carry no confidence — an outcome with nothing to score it against (3 by the reviewer)."), "a resolved claim with no confidence is named, with who resolved");
-  const mixed = render([summarise("e2", mentionRows([{ claim: "m1", confidence: 1, extraction_key: "e2" }, { claim: "m2", confidence: 1, extraction_key: "e2" }, { claim: "m3", confidence: 0.5, extraction_key: "e2" }]))], "probe", []);
+  ok(text.includes("- j: 1 resolved claim(s) carry no confidence — an outcome with nothing to score it against (1 by the reviewer)."), "a resolved claim with no confidence is named, with who resolved THAT claim — not every resolved one");
+  const mixed = render([summarise("e2", mentionRows([{ claim: "m1", kind: "mention", confidence: 1, extraction_key: "e2" }, { claim: "m2", kind: "edge", confidence: 1, extraction_key: "e2" }, { claim: "m3", kind: "edge", confidence: 0.5, extraction_key: "e2" }]))], "probe", []);
   ok(mixed.includes("(1.00 on 2, 0.50 on 1)"), "a few-valued confidence prints its distribution, most common first");
+  ok(mixed.includes("| e2 | 3 (2 edges, 1 mention) |"), "a mechanism that claims two kinds of thing prints the split");
+  ok(render([summarise(KIND_BAND, [])], "probe", []).includes(`- ${KIND_BAND}: no claims.`), "a fixture-fed mechanism with no live thoughts prints a row and says so");
+  ok(absent({ code: "42P01" }) && absent({ code: "42703" }) && !absent({ code: "42501" }) && !absent(new Error("timeout")) && !absent(null), "a missing table or column is absent; a grant, a timeout or nothing at all is not");
   const dec = summarise(DECLARED, declaredRows(fx, new Map(), [A]));
   ok(resolvers(dec) === "1 by the fork record, 1 superseded", `the resolvers are counted by name (${resolvers(dec)})`);
   const constant = render([summarise("c", proposalRows(Array.from({ length: 3 }, (_, i) => ({ id: `c${i}`, confidence: 0.8, status: "rejected", judge_key: "c" }))))], "probe", []);
@@ -390,8 +423,8 @@ function offlineSummaries(f: Fixture): Summary[] {
 async function score(offline: boolean): Promise<void> {
   const f = readFixture();
   if (offline) {
-    console.log(render(offlineSummaries(f), `Calibration, from the fixture alone (${f.generated.slice(0, 10)})`, [
-      "Offline: the judge, the extractor, a declared confidence and the superseded thoughts need the live brain.",
+    console.log(render(offlineSummaries(f), `Calibration, from the fixture alone — ${f.origin} (${f.generated.slice(0, 10)})`, [
+      `Offline: the two rows are the fixture's thoughts (${f.origin}), not any live brain's; the judge, the extractor, a declared confidence and the superseded thoughts need the live brain.`,
     ]));
     return;
   }
@@ -413,26 +446,32 @@ async function score(offline: boolean): Promise<void> {
     if (p === null) unreadable++; else declared.set(r.id, p);
   }
   if (unreadable) notes.push(`${unreadable} thought(s) carry a metadata.confidence that is not a number in [0, 1]; read as none.`);
-  const superseded = (await sql`SELECT DISTINCT supersedes::text AS id FROM thoughts WHERE supersedes IS NOT NULL` as { id: string }[]).map((r) => r.id);
+  // A table or column a migration has not added is a note; any other failure is thrown (review pass 3).
+  const orNote = async <T,>(read: () => Promise<T>, note: string, none: T): Promise<T> => {
+    try { return await read(); } catch (e) { if (!absent(e)) throw e; notes.push(note); return none; }
+  };
+  const superseded = (await orNote(() => sql`SELECT DISTINCT supersedes::text AS id FROM thoughts WHERE supersedes IS NOT NULL ORDER BY 1` as Promise<{ id: string }[]>,
+    "thoughts.supersedes is absent (migration 025 not applied): nothing is resolved by supersession here.", [])).map((r) => r.id);
+  const deleted = await orNote(async () => Number((await sql`SELECT count(DISTINCT thought_id)::int AS n FROM thought_audit WHERE action = 'delete'`)[0]?.n ?? 0),
+    "No thought_audit table (migration 008 not applied): deletes are not counted.", 0);
 
-
-  const byMechanism = new Map<string, LedgerRow[]>();
+  // The two fixture-fed mechanisms always have a row, even when none of the fixture's thoughts is in this brain.
+  const byMechanism = new Map<string, LedgerRow[]>([[KIND_BAND, []], [DECLARED, []]]);
   const add = (rows: LedgerRow[]) => { for (const r of rows) { const l = byMechanism.get(r.mechanism) ?? []; l.push(r); byMechanism.set(r.mechanism, l); } };
   add(here(kindBandRows(f)));
-  try {
-    add(proposalRows(await sql`SELECT id::text AS id, confidence::float AS confidence, status, judge_key FROM supersession_proposals` as ProposalRow[]));
-  } catch { notes.push("No supersession_proposals table (migration 029 not applied): the judge has no rows here."); }
-  try {
-    add(mentionRows([
-      ...(await sql`SELECT thought_id::text || ':' || entity_id::text AS claim, confidence::float AS confidence, extraction_key FROM thought_entities` as MentionRow[]),
-      ...(await sql`SELECT thought_id::text || ':' || from_entity_id::text || ':' || to_entity_id::text || ':' || relation AS claim, confidence::float AS confidence, extraction_key FROM ob1_entity_edges` as MentionRow[]),
-    ]));
-  } catch { notes.push("No entity tables (migration 016 not applied): the extractor has no rows here."); }
+  add(proposalRows(await orNote(() => sql`SELECT id::text AS id, confidence::float AS confidence, status, judge_key FROM supersession_proposals ORDER BY judge_key, judged_at, id` as Promise<ProposalRow[]>,
+    "No supersession_proposals table (migration 029 not applied): the judge has no rows here.", [])));
+  add(mentionRows(await orNote(async () => [
+    ...(await sql`SELECT thought_id::text || ':' || entity_id::text AS claim, 'mention' AS kind, confidence::float AS confidence, extraction_key FROM thought_entities ORDER BY extraction_key, thought_id, entity_id` as MentionRow[]),
+    ...(await sql`SELECT thought_id::text || ':' || from_entity_id::text || ':' || to_entity_id::text || ':' || relation AS claim, 'edge' AS kind, confidence::float AS confidence, extraction_key FROM ob1_entity_edges ORDER BY extraction_key, thought_id, from_entity_id, to_entity_id, relation` as MentionRow[]),
+  ], "No entity tables (migration 016 not applied): the extractor has no rows here.", [])));
   add(here(declaredRows(f, declared, superseded)));
   await sql.end();
 
   const summaries = [...byMechanism].map(([m, rows]) => summarise(m, rows));
-  if (gone.size) notes.push(`${gone.size} fixture id(s) are no longer in this brain and are dropped from the kind band and the declared rows.`);
+  const fixtureIds = new Set([...kindBandRows(f), ...declaredRows(f, new Map(), [])].map((r) => r.claim)).size;
+  if (gone.size) notes.push(`${gone.size} of the fixture's ${fixtureIds} thought ids are not in this brain (the fixture is ${f.origin}) and are dropped from the kind band and the declared rows.`);
+  if (deleted) notes.push(`${deleted} thought(s) have been deleted from this brain (thought_audit): a delete takes the thought's proposals with it and clears any pointer at it, so their outcomes are not in the ledger and the scores above are of what survived.`);
   notes.push(
     `Attribution is by the key each producer already writes (judge_key, extraction_key) and by the fixture's provenance; SMD-1731's per-run lineage would make it per prompt version, and is not needed to read this.`,
     `The shipped \`type\` facet and capture_thought carry no confidence at all: ${live.size} thought(s) in the brain, ${declared.size} with a declared one.`,
