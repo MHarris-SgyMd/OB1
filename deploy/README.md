@@ -141,6 +141,16 @@ the repo root, with whatever `-f` files the stack was started with:
 | `postgres` | `postgres:5432` — the server and the migrator | Nothing. `compose exec postgres psql -U postgres openbrain` for psql, `compose exec -T postgres pg_dump -U postgres openbrain > dump.sql` for a backup. A tool run from a checkout (`db/reembed.ts`, `db/extract-entities.ts`, `db/consolidate.ts`, the evals) adds `-f deploy/compose.host-ports.yaml`, which publishes it on `127.0.0.1:${POSTGRES_PORT:-5432}` — choose that when the stack comes up: adding or dropping the file later recreates `postgres` and, through `depends_on`, `server` | Never. `POSTGRES_BIND` exists for a firewalled host you have looked at; it is the superuser on the whole brain |
 | `ollama` (`--profile local-models`) | `ollama:11434` — the server and `ollama-pull` | Nothing. `compose exec ollama ollama pull <model>`; the host-ports file publishes it on `127.0.0.1:${OLLAMA_PORT:-11434}` for an eval run from a checkout | Not intended; an unauthenticated model API |
 
+The three-brain pipeline (`-f deploy/compose.tiers.yaml`, SMD-1806) publishes one
+server per tier, each on loopback by default; its three Postgres services and
+shared Ollama publish nothing, exactly as above.
+
+| Service | On the compose network | On the host | From another machine |
+| --- | --- | --- | --- |
+| `stable-server` | `stable-server:8000` | `127.0.0.1:${STABLE_SERVER_PORT:-8010}` | Through a proxy; `STABLE_SERVER_BIND=0.0.0.0` only for a proxy elsewhere |
+| `canary-server` | `canary-server:8000` | `127.0.0.1:${CANARY_SERVER_PORT:-8011}` | Through a proxy; `CANARY_SERVER_BIND=0.0.0.0` only for a proxy elsewhere |
+| `working-server` | `working-server:8000` | `127.0.0.1:${WORKING_SERVER_PORT:-8012}` | Through a proxy; `WORKING_SERVER_BIND=0.0.0.0` only for a proxy elsewhere |
+
 `docker compose -f deploy/compose.yaml config` renders each mapping with
 `host_ip: 127.0.0.1`, and `scripts/check-fork-consistency.ts` check 13 parses
 every `compose*.yaml` under `deploy/` and refuses a mapping that drops the

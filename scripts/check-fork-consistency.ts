@@ -1974,6 +1974,9 @@ function documentedEnvKnobs(pattern: RegExp) {
 const PUBLISHES: Record<string, string[]> = {
   "compose.yaml": ["server"],
   "compose.host-ports.yaml": ["postgres", "ollama"],
+  // The three-brain pipeline (SMD-1806): each tier's server on its own loopback
+  // port; the three Postgres services and the shared Ollama publish nothing.
+  "compose.tiers.yaml": ["stable-server", "canary-server", "working-server"],
 };
 const COMPOSE_FILE = /^(docker-)?compose.*\.ya?ml$/;
 
