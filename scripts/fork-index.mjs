@@ -19,7 +19,7 @@
  * fragment — a change that has landed and takes its number at the next release —
  * and is listed after the numbered ones, by ticket.
  */
-import { readFileSync, writeFileSync, readdirSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, readdirSync, existsSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
@@ -186,7 +186,10 @@ export function spliceIndex(forkText, block) {
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+// Run as a script (not imported): node resolves the entry through real paths
+// while argv[1] keeps the spelling it was given, so compare real paths.
+const isMain = (() => { try { return Boolean(process.argv[1]) && realpathSync(fileURLToPath(import.meta.url)) === realpathSync(process.argv[1]); } catch { return false; } })();
+if (isMain) {
   const fork = join(ROOT, "FORK.md");
   const changes = readChanges(ROOT);
   writeFileSync(fork, spliceIndex(readFileSync(fork, "utf8"), renderIndex(changes)));

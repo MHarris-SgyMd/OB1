@@ -32,21 +32,25 @@ migrations: [044]          # the migration numbers this change adds, or [] for n
 
 ## Changelog
 
-One to three lines for CHANGELOG.md, ending in the ticket and migration numbers.
+One to three lines for CHANGELOG.md, no leading bullet, naming every ticket the
+front matter lists and no other (the release pairing reads a version's tickets
+from this line), and the migration numbers.
 
 ## FORK
 
-The change's record. Its FIRST line is the title — "Thing — consequence
-(SMD-NNNN)", ending in every ticket the front matter lists, as "(SMD-1 / 2)" —
-what will follow `# N. ` once numbered; then a blank line, then the body in the
-shape below. Cite tickets, migration numbers and existing change numbers; do not
-give the record its own number or heading — the release step does.
+The change's record, to the end of the file. Its FIRST line is the title —
+"Thing — consequence (SMD-NNNN)", ending in every ticket the front matter lists,
+as "(SMD-1 / 2)" — what will follow `# N. ` once numbered; then a blank line,
+then the body in the shape below; `## ` sub-headings of its own are kept. Cite
+tickets, migration numbers and existing change numbers; do not give the record
+its own number or heading — the release step does.
 ```
 
 `CONTRIBUTING.md` says when a fragment is required. `check-fork-consistency`
 validates every fragment (the six types, a bump the migrations allow, both bodies
-present, the title naming the tickets, no numbered heading in the FORK body, the
-line cap below) — the same function the release step runs before it writes.
+present and in that order, the changelog line and the title naming the tickets,
+no numbered heading in the FORK body, the line cap below) — the same function
+the release step runs before it writes.
 
 ## The shape of the record
 

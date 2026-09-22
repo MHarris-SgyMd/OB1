@@ -214,8 +214,23 @@ function buildPlan() {
   const parts = Object.fromEntries(new Intl.DateTimeFormat("en", { timeZone: "America/Chicago", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(new Date()).map((x) => [x.type, x.value]));
   const date = `${parts.year}-${parts.month}-${parts.day}`;
   const core = version.split("+")[0];
+  const changelogBefore = readFileSync(join(ROOT, "CHANGELOG.md"), "utf8");
+  // A previous --write that stopped half-way leaves CHANGELOG.md or releases.json
+  // already carrying this cut while the fragments still sit in changes/; a second
+  // write would double the section. Refuse and say how to recover.
+  const last = releases[releases.length - 1];
+  if (changelogBefore.includes(`## [${core}]`) || (last && (last.tickets ?? []).some((t) => tickets.includes(t)))) {
+    throw new Error(`CHANGELOG.md or releases.json already carries this cut while its fragments are still in ${CHANGES_REL}/ — a previous --write stopped half-way; restore FORK.md, CHANGELOG.md and releases.json from version control and run again`);
+  }
+  // Whatever sits under ## [Unreleased] is replaced by the version section; a
+  // hand-written note there would vanish. Only the placeholder paragraph may sit there.
+  const unreleased = /## \[Unreleased\]\n([\s\S]*?)(?=\n## \[|\n\[Unreleased\]:)/.exec(changelogBefore);
+  const placeholder = (unreleased?.[1] ?? "").trim(); // empty, or one italic paragraph (_…_), possibly wrapped
+  if (placeholder && !(/^_[\s\S]*_$/.test(placeholder) && !/\n\s*\n/.test(placeholder))) {
+    throw new Error("CHANGELOG.md carries hand-written lines under ## [Unreleased]; the release step replaces that body — move them into a fragment's ## Changelog first");
+  }
   const changelogAfter = insertChangelogSection(
-    readFileSync(join(ROOT, "CHANGELOG.md"), "utf8"),
+    changelogBefore,
     renderChangelogSection(version, date, numbered),
     core,
     releases.length ? `${REPO}/compare/v${releases[releases.length - 1].version.split("+")[0]}...v${core}` : `${REPO}/compare/upstream-pin-${UPSTREAM_PIN}...v${core}`,
@@ -243,15 +258,16 @@ function printPlan(plan) {
 
 function write(plan) {
   // Everything was rendered in buildPlan; this only writes (the release author
-  // reviews the diff; this is not run in CI). The overwrites first — FORK.md's
-  // index, CHANGELOG.md's section under Unreleased with its compare link,
-  // releases.json's entry — then the new numbered files, and the fragments are
-  // removed last: the one step that cannot be redone by re-running sits after
-  // every one that can fail on I/O.
+  // reviews the diff; this is not run in CI). The new numbered files first —
+  // pure additions — then the three overwrites (FORK.md's index, CHANGELOG.md's
+  // section under Unreleased with its compare link, releases.json's entry), and
+  // the fragments are removed last. A failure part-way is recovered by reverting
+  // the working tree to the commit before the cut and running again; buildPlan
+  // refuses to run on top of a half-applied cut rather than double it.
+  for (const f of plan.fragments) writeFileSync(join(CHANGES_DIR, f.file.name), f.file.text);
   writeFileSync(join(ROOT, "FORK.md"), plan.forkAfter);
   writeFileSync(join(ROOT, "CHANGELOG.md"), plan.changelogAfter);
   writeFileSync(join(ROOT, "releases.json"), JSON.stringify([...plan.releases, plan.entry], null, 2) + "\n");
-  for (const f of plan.fragments) writeFileSync(join(CHANGES_DIR, f.file.name), f.file.text);
   for (const f of plan.fragments) unlinkSync(join(CHANGES_DIR, f.name));
 
   console.log(`Wrote ${plan.fragments.length} change file(s), FORK.md's index, CHANGELOG.md and releases.json for ${plan.version}.`);
@@ -275,6 +291,7 @@ function selfCheck() {
   ok(cf.name === "101-a-title.md" && cf.text === "# 101. A title — a consequence (SMD-1)\n\nBody line.\n", "a change file from a fragment body: name from the title's first clause, `# N.` heading, the body");
   ok(renderChangeFile(102, "Only a title (SMD-2)").text === "# 102. Only a title (SMD-2)\n", "a body of one line is a heading alone");
   ok(renderChangeFile(103, "### A title (SMD-3)\n\nBody.").text.startsWith("# 103. A title (SMD-3)\n"), "a heading mark on the title line is stripped, not doubled");
+  ok(fragmentSection("## Changelog\nx\n\n## FORK\nT (SMD-1)\n\nBody.\n\n## Measured after\n\nKept.\n", "FORK").endsWith("## Measured after\n\nKept."), "a FORK body keeps its own ## sub-headings to the end of the file");
   ok(changeFileName(104, "A".repeat(200) + " (SMD-4)").length <= 60, "one long word is cut to the slug budget");
   ok(changeFileName(105, ["B".repeat(60), "C".repeat(60), "D".repeat(60)].join(" ") + " (SMD-5)").length <= 60, "three long words: the budget applies from the first");
   ok(changeFileName(106, "Only the (SMD-6)") === "106-only.md" && changeFileName(107, "The (SMD-7)") === "107-the.md", "a trailing stop word goes while a word remains");
