@@ -50,9 +50,10 @@
  *                 labelled captures in eval-entities.ts are that outcome set,
  *                 outside the brain), so they report a distribution — except
  *                 the rows fixtures/entity-grades.json holds a hand grade for
- *                 (SMD-1982: every row the windowed prompt hedged below 1.00
- *                 on the dogfood brain and a control of 1.00 rows, read
- *                 against the thought's text), which resolve by that grade.
+ *                 (SMD-1982: every row the windowed prompt wrote below 1.00
+ *                 on the dogfood brain — the parser's 0.50 default included —
+ *                 and a control of 1.00 rows, read against the thought's
+ *                 text), which resolve by that grade.
  *                 The grade is of the claim, so a later prompt version that
  *                 writes the same mention or edge is resolved by the same row
  *   declared      metadata.confidence on a thought — a number in [0, 1], or a
@@ -185,9 +186,7 @@ export const HAND_GRADE = "hand grade";
 
 /**
  * fixtures/entity-grades.json — SMD-1982's outcome set for the extractor: a
- * hand grade (1 the text holds the named thing, and for an edge states the
- * relation; 0 it does not) per mention or edge, keyed the way the live report
- * keys a claim. Ids and numbers only, as check 9 admits: the kind is which list
+ * hand grade per mention or edge (1 = a specific named thing the text holds, of a defensible type, and for an edge a relation the text states or clearly implies; 0 otherwise), keyed the way the live report keys a claim. Ids and numbers only, as check 9 admits: the kind is which list
  * a row is in, `relation` is its index into server-portable's RELATIONS, and
  * `stated` is the confidence at the grade (the report reads the live one).
  */
