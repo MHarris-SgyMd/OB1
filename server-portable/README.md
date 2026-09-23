@@ -279,6 +279,47 @@ current checkout re-applies. The compose stack is in lockstep by construction; a
 or a Supabase brain served from another machine is not (FORK.md change 60;
 SMD-1451 is the migrator refusing it).
 
+## What this brain is: `brain_info` and a keyed `/health`
+
+An agent or an operator can ask a running brain what it is (SMD-2041). The
+**`brain_info`** tool (read scope — a read or a write key sees it, a capture-only
+key does not) answers a short table:
+
+```
+Version:         1.1.0+upstream.9543c29 (release range 049–051)
+Commit:          8ba58db5…
+Store:           sql · tier stable
+Embedding:       qwen3-embedding:4b @ 1024
+Postgres:        16.15 (Debian 16.15-1.pgdg12+2) · pgvector 0.8.6 (schema public)
+Schema version:  1.1.0+upstream.9543c29
+Migrations:      052 applied — this server's tree ends at 052 (current)
+Brain embedding: qwen3-embedding:4b @ 1024
+Rows:            373 thoughts · 1,204 audit · 90 chunks · 512 entities
+Database size:   45.2 MB
+HNSW:            thought_chunks_embedding_idx on thought_chunks (m 16, ef_construction 64); …
+```
+
+**`GET /health` with a read or write key** (the `x-brain-key` header, a bearer
+token or `?key=`) answers the same record as JSON — `version`, `releaseRange`,
+`latestMigration`, `commit`, `store`, `tier`, `embedding`, `ledger`
+(`current` | `behind` | `ahead` | `null`) and `database`, which carries the
+database's facts or `{ "error": … }` when it cannot answer (still a 200: the
+process is serving). Without a key, with a wrong or capture-only key, or with a
+revoked one, the body stays the literal `ok`, so nothing about the deployment
+reaches an unauthenticated probe. `deploy/smoke.sh`'s check 10 reads it.
+
+Where each fact comes from: the version, its release range and the tree's last
+migration are generated into `version.ts` by `scripts/gen-version.ts` (the Workers
+build cannot import the node-only `db/version.mjs`; check-fork's 17e round-trips
+the file, so rerun the script after adding a migration). The commit is the image's
+`OB1_GIT_SHA` build arg (`deploy/README.md`), `unknown` when unset. The database's
+half is `brain-info.ts`'s `readDatabaseFacts`, the same read preflight's
+`vector extension`, `migration ledger` and `schema version` rows make, so the gate
+and the tool cannot disagree. Each read is its own statement: a role without
+`SELECT` on, say, `ob1_entities` or `schema_migrations` gets that field as unread,
+named on a `Not read:` line, and the rest still answers. Over the PostgREST store
+(Workers) the database's half is an error — PostgREST exposes no catalog reads.
+
 ## Expected outcome
 
 ```bash

@@ -74,6 +74,7 @@ The core MCP server in `server/index.ts` exposes:
 - `list_thoughts`: browse recent thoughts with optional filters.
 - `thought_stats`: summarize total thoughts, types, top topics, and people.
 - `thought_changes`: what changed since a time or a cursor — every capture, edit and deletion, who made it, and what moved (this fork's `server-portable` server only, migration 052).
+- `brain_info`: what this brain is — the server's version and commit, the store and tier, the Postgres and pgvector versions, the highest migration applied against the server's own, row counts, size and vector-index parameters (this fork's `server-portable` server only).
 - `search`: ChatGPT-compatible read-only search alias.
 - `fetch`: ChatGPT-compatible read-only fetch-by-id alias.
 

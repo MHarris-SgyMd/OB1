@@ -207,6 +207,30 @@ POSTs to the endpoint instead, which also proves the MCP path serves; either is
 fine. Opening the connector URL in a browser shows `Method Not Allowed`, which is
 expected.
 
+With a read or write key, the same `GET <base>/health` answers what the brain is,
+as JSON — version, commit, store, tier, the Postgres and pgvector versions, the
+ledger's highest migration against the server's own, counts, size and HNSW
+parameters (the `brain_info` tool's record; `server-portable/README.md` has the
+fields). A probe with no key still gets `ok`. `smoke.sh` prints the version, the
+commit and the highest migration from it, and asserts the version is the
+checkout's:
+
+```bash
+curl -s -H "x-brain-key: $KEY" http://127.0.0.1:8010/health | jq '{version, commit, ledger, highest: .database.highestMigration}'
+```
+
+**The commit is a build argument.** `server-portable/Dockerfile` bakes
+`OB1_GIT_SHA` into the image, and compose passes the variable of the same name
+from your shell or `deploy/.env` to every server build (the three tier servers
+too). It is never forwarded at runtime, so a running container cannot claim a
+commit it was not built from; unset, the image reports `unknown`. Rebuild with it:
+
+```bash
+OB1_GIT_SHA=$(git rev-parse --short HEAD) docker compose up -d --build server
+```
+
+The release images carry the tag's commit (`.github/workflows/release.yml`).
+
 ## Why the server runs preflight before serving
 
 The data layer is built lazily on first use. Without a gate, a server with a wrong

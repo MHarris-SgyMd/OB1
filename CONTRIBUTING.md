@@ -302,6 +302,10 @@ than by editing a hand-numbered FORK.md section:
   `check-fork-consistency`.)
 - A migration inside a released range is **frozen** — append a new migration file
   rather than editing an old one; `check-fork-consistency` enforces it.
+- A new migration, like a cut, moves what the server reports about itself: rerun
+  `bun scripts/gen-version.ts`, which regenerates `server-portable/version.ts`
+  (the tree's last migration, the version and its release range);
+  `check-fork-consistency`'s 17e names the command when the file is stale.
 
 `check-fork-consistency` validates every fragment and the changelog shape, so a PR
 that gets this wrong fails CI at one place.
