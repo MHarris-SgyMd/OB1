@@ -284,14 +284,16 @@ export function markdownDocs(root: string): { docs: Doc[]; refused: { path: stri
   // would silently overwrite the first's text (first review pass: the limits
   // list promised IDENTITY_HELD, which the id construction never reaches).
   // The first file, in walk order, keeps the identity; the rest are refused by
-  // name, and the fix is a frontmatter id.
+  // name, and the fix is a rename — the name IS the identity (sixth review
+  // pass: the message said "give one a frontmatter id", which since the third
+  // pass changes nothing).
   const holders = new Map<string, string>();
   for (const f of markdownFiles(scope)) {
     try {
       const doc = docOf(markdownAdapter.map({ ...f, root: scope }));
       const key = doc.structure!.identity.key;
       const holder = holders.get(key);
-      if (holder !== undefined) { refused.push({ path: f.path, reason: `identity "${key}" is already ${holder}'s — two notes of one name; give one a frontmatter id` }); continue; }
+      if (holder !== undefined) { refused.push({ path: f.path, reason: `identity "${key}" is already ${holder}'s — two notes of one name; rename one (the name is the identity, as a wikilink names it)` }); continue; }
       holders.set(key, f.path);
       docs.push(doc);
     } catch (e) {

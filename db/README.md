@@ -164,7 +164,7 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `1517 assertions: 1517 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `1521 assertions: 1521 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports fifty-one (51) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
@@ -1801,8 +1801,9 @@ and the structure lands beside each head row (no model call, ~1 s of Linear per
 fifty issues). On a brain without 051 the tool says so at boot and writes rows
 alone. A ticket whose structure write fails — a validator refusal, a race —
 has its watermark cleared so the next pass fetches it and tries again, every
-pass until it lands: one fetch and one facet patch per failing ticket per
-interval, and the error under *errors* in every report, which is the signal
+pass until it lands: one fetch, the facet patch, the hook's rolled-back
+transaction and the clearing patch per failing ticket per interval — two audit
+rows — and the error under *errors* in every report, which is the signal
 to look. The retry is not capped; a ticket that fails forever costs that
 forever, and says so each time.
 
@@ -1819,7 +1820,7 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 1517 assertions, PGlite, no container
+bun test-schema.ts                          # 1521 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts         # 631 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database

@@ -6394,7 +6394,22 @@ console.log("\n[47] Migration 051: the source beside the thought — the canonic
   await db.query(`SELECT record_thought_source($1::uuid, 'markdown', 'b', 'A', 'text/markdown', 'r')`, [tA]);
   const closing = await recordLinks(tA, "markdown", []);
   assert(closing.ok === true && closing.closed === 1 && (await links(tA)).length === 0, `a link to what is now the thought's own identity can still be closed (${JSON.stringify(closing)})`);
-  assert(/does not link to itself/.test(await recordLinks(tA, "markdown", [{ relation: "references", target: "b" }]).then((r) => (r.dropped === 1 ? "does not link to itself (dropped)" : JSON.stringify(r)))), "…while stating it anew is dropped as a self-reference");
+  const anew = await recordLinks(tA, "markdown", [{ relation: "references", target: "b" }]);
+  assert(anew.ok === true && anew.dropped === 1 && anew.added === 0, `…while stating it anew is dropped as a self-reference (${JSON.stringify(anew)})`);
+  // The shortcut is exactly a close (sixth review pass — the mutant that
+  // admitted any payload-unchanged UPDATE passed the suite): a re-open of the
+  // closed self-link, a move of the row to another thought whose identity is
+  // its target, and a kind change beside a close are all judged.
+  const closedLink = (await one<{ id: string }>(`SELECT id FROM thought_facets WHERE thought_id = $1::uuid AND kind = 'link' AND valid_until IS NOT NULL`, [tA])).id;
+  assert(/does not link to itself/.test(await refused(`UPDATE thought_facets SET valid_until = NULL WHERE id = $1::uuid`, [closedLink])), "re-opening the closed link, now a self-link, is judged and refused");
+  const tB = await put("B note", {});
+  await db.query(`SELECT record_thought_source($1::uuid, 'markdown', 'c', 'B', 'text/markdown', 'r')`, [tB]);
+  const tC = await put("C note", {});
+  const onC = (await one<{ r: J }>(`SELECT record_source_links($1::uuid, 'markdown', '[{"relation":"references","target":"c"}]'::jsonb) AS r`, [tC])).r;
+  const cLink = (await one<{ id: string }>(`SELECT id FROM thought_facets WHERE thought_id = $1::uuid AND kind = 'link'`, [tC])).id;
+  assert(onC.added === 1 && /does not link to itself/.test(await refused(`UPDATE thought_facets SET thought_id = $1::uuid WHERE id = $2::uuid`, [tB, cLink])), "moving a link row onto the thought whose identity it names is judged and refused");
+  assert(/needs a non-empty text|not a registered facet kind|stance/.test(await refused(`UPDATE thought_facets SET kind = 'citation', valid_until = now() WHERE id = $1::uuid`, [cLink])), "a kind change beside a close is judged as the new kind, and a link payload is no citation");
+  assert(((await one<{ r: J }>(`SELECT record_source_links($1::uuid, 'markdown', '[]'::jsonb) AS r`, [tC])).r).closed === 1, "…and the legitimate close still takes the shortcut");
   await db.exec(`DELETE FROM thoughts`);
   await db.exec(`DELETE FROM ob1_entities`);
 }

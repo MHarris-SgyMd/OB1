@@ -48,7 +48,7 @@ export type MarkdownFile = { path: string; bytes: Uint8Array; root: string };
 export type Frontmatter = Record<string, string | string[]>;
 
 /** A frontmatter property line: `key:` then whitespace and a value, or the line's end. The value group is empty for a bare `key:`. */
-const PROPERTY_RE = /^([^\s:#\-][^:]*?):(?:[ \t]+(.*))?$/;
+const PROPERTY_RE = /^(?!-\s)([^\s:#][^:]*?):(?:[ \t]+(.*))?$/;
 /** A line that belongs to a property block without being a property of its own: an indented continuation (a multi-line scalar, a nested mapping's lines), a list item, a YAML comment, or blank. */
 const PROPERTY_CONTINUATION_RE = /^\s+\S|^\s*-\s+|^\s*#|^\s*$/;
 
@@ -79,15 +79,30 @@ export function parseFrontmatter(md: string): { fm: Frontmatter; body: string; f
   // "every line a property" refused valid frontmatter Obsidian reads).
   if (!m[1].split(/\r?\n/).every((l) => PROPERTY_RE.test(l) || PROPERTY_CONTINUATION_RE.test(l))) return { fm: {}, body: md, fence: "" };
   const fm: Frontmatter = {};
-  let listKey: string | null = null;
+  // The property an indented or `- ` line continues: a list under a bare
+  // `key:`, a block scalar under `key: >-` / `key: |` (its lines joined by a
+  // space or a newline), or a nested mapping under a bare `key:` — whose lines
+  // are dropped and whose key is dropped with them, rather than left as an
+  // empty list that says something the file did not (sixth review pass).
+  let open: { key: string; kind: "list" | "fold" | "keep" | "map" } | null = null;
   for (const raw of m[1].split(/\r?\n/)) {
+    if (open && (open.kind === "fold" || open.kind === "keep") && /^\s+\S/.test(raw)) {
+      const cur = fm[open.key] as string;
+      fm[open.key] = cur ? `${cur}${open.kind === "fold" ? " " : "\n"}${raw.trim()}` : raw.trim();
+      continue;
+    }
     const item = /^\s*-\s+(.*)$/.exec(raw);
-    if (item && listKey) { (fm[listKey] as string[]).push(unquote(item[1])); continue; }
+    if (item && open && open.kind === "list") { (fm[open.key] as string[]).push(unquote(item[1])); continue; }
+    if (open && open.kind === "list" && /^\s+\S/.test(raw)) { delete fm[open.key]; open = { key: open.key, kind: "map" }; continue; }
+    if (open && open.kind === "map" && /^\s+\S/.test(raw)) continue;
     const kv = PROPERTY_RE.exec(raw);
-    if (!kv) { listKey = null; continue; }
-    const [, key, value = ""] = kv;
-    if (value.trim() === "") { fm[key] = []; listKey = key; continue; }
-    listKey = null;
+    if (!kv) { open = null; continue; }
+    const [, key, rawValue = ""] = kv;
+    // A trailing YAML comment is not part of an unquoted value (sixth review pass: `[a, b] # c` yielded a tag `[a`).
+    const value = /^["']/.test(rawValue.trim()) ? rawValue.trim() : rawValue.replace(/\s+#.*$/, "").trim();
+    if (value === "") { fm[key] = []; open = { key, kind: "list" }; continue; }
+    if (/^[>|][+-]?$/.test(value)) { fm[key] = ""; open = { key, kind: value.startsWith(">") ? "fold" : "keep" }; continue; }
+    open = null;
     const list = /^\[(.*)\]$/.exec(value);
     fm[key] = list ? list[1].split(",").map((s) => unquote(s)).filter(Boolean) : unquote(value);
   }
@@ -279,10 +294,10 @@ export const MARKDOWN_LOSSY: { name: string; input: string; text: RegExp }[] = [
 
 /** A limit of the identity or the link rule, stated rather than discovered. */
 export const MARKDOWN_LIMITS: readonly string[] = [
-  "A note's identity is its NAME folded to lower case — the file name without `.md`, which is what a wikilink names and how Obsidian resolves one, case-insensitively — so a link's target and its note's identity meet with no resolver, and a note can never link to itself under another spelling. The `note` facet keeps the name as written. The cost: renaming a note is a new identity (the old row stays), and two notes of one name in different folders collide — the first in walk order keeps the identity and the ingester refuses the rest by name. A frontmatter `id` is kept as a facet for a connector (SMD-1814) to reconcile a rename by; it is not the identity, because no wikilink names it.",
+  "A note's identity is its NAME, Unicode-normalised (NFC) and folded to lower case — the file name without `.md`, which is what a wikilink names and how Obsidian resolves one, case-insensitively and whatever form the filesystem hands back — so a link's target and its note's identity meet with no resolver, and a note can never link to itself under another spelling. The `note` facet keeps the name as written. The cost: renaming a note is a new identity (the old row stays), and two notes of one name in different folders collide — the first in walk order keeps the identity and the ingester refuses the rest by name. A frontmatter `id` is kept as a facet for a connector (SMD-1814) to reconcile a rename by; it is not the identity, because no wikilink names it.",
   "A file that is not UTF-8, or holds a NUL byte, is refused, not stored: a text column cannot hold it byte for byte. So is a name over 512 characters, the column's bound.",
   "A wikilink to an image, audio, video, PDF or canvas file (NON_NOTE_EXTENSIONS) is a file reference, not an edge to a note; a note named `v1.2` is still a note. A `[[link]]` inside a code fence or span is text about a link, not one.",
-  "Frontmatter is read minimally (scalars, `[a, b]`, `- item` lists); a multi-line scalar's continuation lines and a nested mapping's lines belong to the block but are dropped from the frontmatter facet — the canonical keeps them. A leading `---` fence is frontmatter when every column-0 line in it is a property (`key:` then a space or the line's end; the key may hold dots and spaces), a list item or a `#` comment, indented lines being continuation; a fence holding a prose line or a bare URL at column 0 is a horizontal rule and body. A prose line that happens to read `Word: rest` inside such a fence is a property to Obsidian's YAML too, and here.",
+  "Frontmatter is read minimally (scalars, `[a, b]`, `- item` lists, `>` / `|` block scalars joined by a space or a newline, a trailing `# comment` dropped from an unquoted value); a nested mapping's lines belong to the block but are dropped from the frontmatter facet along with their key — the canonical keeps them. A leading `---` fence is frontmatter when every column-0 line in it is a property (`key:` then a space or the line's end; the key may hold dots and spaces), a list item or a `#` comment, indented lines being continuation; a fence holding a prose line or a bare URL at column 0 is a horizontal rule and body. A prose line that happens to read `Word: rest` inside such a fence is a property to Obsidian's YAML too, and here.",
 ];
 
 export function selfCheck(): number {
@@ -293,7 +308,7 @@ export function selfCheck(): number {
 
   const md = "---\nid: note-1\ntitle: Ingestion contract\ntags: [design, ingest]\ncreated: 2026-09-21\naliases:\n  - contract\n---\n# Heading\n\nSee [[Adapter|the adapter]] and [[Pipeline#Writes]], then ![[Diagram]] and ![[img.png]]. #linear #wiki/sync %%todo%%\n\n> [!note] Why\n> because ^blk1\n";
   const out = markdownAdapter.map(file("design/Ingestion contract.md", md));
-  ok(out.identity.key === "ingestion contract" && out.identity.system === "markdown" && out.facets.note === "Ingestion contract", "identity is the note's name folded to lower case — what a wikilink names, as Obsidian resolves it — even with a frontmatter id; the note facet keeps the case (third and fourth review passes)");
+  ok(out.identity.key === "ingestion contract" && out.identity.system === "markdown" && out.facets.note === "Ingestion contract", "identity is the note's name, NFC then lower case — what a wikilink names, as Obsidian resolves it — even with a frontmatter id; the note facet keeps the case (third, fourth and fifth review passes)");
   ok(out.canonical.form === md && out.canonical.mediaType === "text/markdown", "the canonical is the file, byte for byte");
   ok(out.text === "Ingestion contract\n\n# Heading\n\nSee the adapter and Pipeline › Writes, then Diagram and img.png. #linear #wiki/sync \n\n> Why\n> because", `the text: title, body with links flattened, comment and block id and callout marker gone (${JSON.stringify(out.text)})`);
   ok(JSON.stringify(out.links) === JSON.stringify([{ relation: "references", target: "adapter" }, { relation: "references", target: "diagram" }, { relation: "references", target: "pipeline" }]), `links: the notes named, embeds included, the image not; targets folded as identities are (${JSON.stringify(out.links)})`);
@@ -312,6 +327,10 @@ export function selfCheck(): number {
   ok(propsOnly.facets.title === "T" && JSON.stringify(propsOnly.facets.tags) === '["a"]', "a fence of properties and list items alone is frontmatter");
   const yaml = markdownAdapter.map(file("Y.md", "---\ntitle: T\ncreated: 2026-09-21\n# generated by templater\ndescription: >-\n  a long\n  value\nmeta:\n  sub: v\nmy key: with spaces\ndc.title: dotted\ntags: [a]\n---\nbody"));
   ok(yaml.facets.title === "T" && yaml.createdAt === "2026-09-21" && JSON.stringify(yaml.facets.tags) === '["a"]' && (yaml.facets.frontmatter as Frontmatter)["my key"] === "with spaces" && (yaml.facets.frontmatter as Frontmatter)["dc.title"] === "dotted" && yaml.text === "T\n\nbody", `frontmatter with a multi-line scalar, a nested mapping, a comment and keys with a space and a dot is frontmatter (fifth review pass) (${JSON.stringify(yaml.facets.frontmatter)} ${JSON.stringify(yaml.text)})`);
+  const yfm = yaml.facets.frontmatter as Frontmatter;
+  ok(yfm.description === "a long value" && !("meta" in yfm), `a folded block scalar is joined by spaces; a nested mapping's key is dropped with its lines, not left as an empty list (sixth review pass) (${JSON.stringify(yfm)})`);
+  const blockTitle = markdownAdapter.map(file("B.md", "---\ntitle: >-\n  A long\n  title\nnotes: |\n  line one\n  line two\ntags: [a, b] # trailing comment\n-x: v\n---\nbody"));
+  ok(blockTitle.facets.title === "A long title" && blockTitle.text === "A long title\n\nbody" && (blockTitle.facets.frontmatter as Frontmatter).notes === "line one\nline two" && JSON.stringify(blockTitle.facets.tags) === '["a","b"]' && (blockTitle.facets.frontmatter as Frontmatter)["-x"] === "v", `a block-scalar title is the title, not '>-'; a literal block keeps its newlines; a trailing comment is not part of a list; a hyphen-led key is a key (sixth review pass) (${JSON.stringify(blockTitle.facets)} ${JSON.stringify(blockTitle.text)})`);
   ok(noteKey("Café") === noteKey("Café") && noteKey("Café") === "café", "a note name meets its link whatever the Unicode form the filesystem handed back (NFC, then lower case)");
   const fenceComment = markdownAdapter.map(file("F.md", "```\nx %% y\n```\nprose %% z"));
   ok(fenceComment.text === "F\n\n```\nx %% y\n```\nprose %% z", `a %% inside a fence does not pair with one in prose (${JSON.stringify(fenceComment.text)})`);
