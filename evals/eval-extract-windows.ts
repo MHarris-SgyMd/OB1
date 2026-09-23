@@ -41,7 +41,7 @@ import { SQL } from "bun";
 import { readFileSync } from "node:fs";
 import { loadEnv } from "./env.ts";
 import { resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
-import { callsMadeBy, extractEntities, extractionKey, type Extraction, type ExtractWindowing } from "../server-portable/entities.ts";
+import { callsMadeBy, callsOf, extractEntities, extractionKey, type Extraction, type ExtractWindowing } from "../server-portable/entities.ts";
 import { estimateTokens, EXTRACT_OVERLAP_RATIO } from "../server-portable/chunk.ts";
 import { requireDatabaseUrl, resetSchema } from "../db/test-support.ts";
 
@@ -153,9 +153,8 @@ await resetSchema(URL_, { dim: 8, model: "eval-stub" });
 const sql = new SQL({ url: URL_, max: 2 });
 const norm = async (s: string) => ((await sql`SELECT normalize_entity_name(${s}) AS n`)[0] as { n: string | null }).n ?? "";
 
-/** `calls` is every model call the thought cost — windows plus retried windows, or what a thrown thought had made (fourth review pass: the column summed windows for one and calls for the other). */
+/** `calls` is every model call the thought cost — entities.ts's callsOf, the worker's own count, or what a thrown thought had made (fourth and fifth review passes). */
 type Outcome = { arm: string; id: string; tokens: number; windows: number; calls: number; ok: boolean; malformed: boolean; timedOut: boolean; error?: string; seconds: number; entities: number; edges: number; retried: boolean };
-const callsOf = (ex: Extraction): number => ex.windows + (ex.parts ? ex.parts.filter((p) => p.retried).length : ex.retried ? 1 : 0);
 const outcomes: Outcome[] = [];
 
 async function runOne(arm: Arm, doc: Doc): Promise<{ thoughtId: string | null; ex: Extraction | null; out: Outcome }> {

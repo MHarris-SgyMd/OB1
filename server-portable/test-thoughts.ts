@@ -312,6 +312,7 @@ console.log("\n[8b] A long thought's windows merge to one answer, the window fol
   assert(extractOutputBudget(70) >= 659 && extractOutputBudget(291) >= 1020 && extractOutputBudget(402) >= 1494 && extractOutputBudget(525) >= 2301,
          "the budget clears the four 27B answers the 2×+256 budget cut");
   assert(resolveEmbedConfig({ OB1_METADATA_MODEL: "qwen2.5:7b", OB1_EXTRACT_CHUNK_TOKENS: "1.5" }).extractChunkTokens === 1, "a fractional knob is floored, not passed through to a 1.5-token window");
+  assert(resolveEmbedConfig({ OB1_METADATA_MODEL: "qwen2.5:7b", OB1_EXTRACT_CHUNK_TOKENS: "0.5" }).extractChunkTokensFrom === "window", "…and one under 1 floors to 0 and means unset — not a 0-token window, one call per word (fifth review pass)");
   // A context too small for any window (second review pass: the floor was a
   // 1-token window, one call per word). The default is returned, marked
   // unfit, and preflight warns; the shipped default carries `capped` from the
@@ -383,6 +384,8 @@ console.log("\n[8b] A long thought's windows merge to one answer, the window fol
   const ob = merged.entities.filter((e) => e.type === "project");
   assert(ob.length === 1 && ob[0].name === "open brain" && ob[0].confidence === 0.95, `a project named in all three windows is ONE entity, spelt as the most confident window spelt it (${JSON.stringify(ob)})`);
   assert([...ob[0].aliases].sort().join("|") === "OB1|the brain", `…carrying every window's aliases, and not the name's own other casing, which the database's alias rule would drop too (${ob[0].aliases.join(", ")})`);
+  const once = parseExtraction(JSON.stringify({ entities: [{ name: "Postgres", type: "tool", confidence: 0.7, aliases: ["PG", "pg", "postgres"] }], relationships: [] }));
+  assert(once.entities[0].aliases.join("|") === "PG", `one reading folds its aliases by case and drops the name's own casing, as two readings do (${once.entities[0].aliases.join("|")})`);
   const spelt = mergeExtractions([part(0, [{ name: "Postgres", type: "tool", confidence: 0.7, aliases: ["PG", "pg"] }]), part(1, [{ name: "postgres", type: "tool", confidence: 0.9, aliases: ["PostgreSQL", "Pg"] }])]);
   assert(spelt.entities.length === 1 && spelt.entities[0].name === "postgres" && spelt.entities[0].aliases.join("|") === "PG|PostgreSQL", `two casings of one name are one entity; a genuinely different spelling the model offered stays an alias, and aliases fold by case as the database's do (${spelt.entities[0].aliases.join("|")})`);
   assert(merged.entities.some((e) => e.type === "topic" && e.name === "Open Brain"), "the same name under another type is another entity — the key is (type, name), as within one answer");

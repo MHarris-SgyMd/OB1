@@ -49,7 +49,7 @@
 import { refuseEgress, type EmbedConfig } from "./embed.ts";
 import { mayLeaveBox, type EgressSubject } from "./egress.ts";
 import { chunkContent, DEFAULT_EXTRACT_WINDOW_TOKENS, estimateTokens } from "./chunk.ts";
-import { extractOutputBudget } from "../db/config.mjs";
+import { EXTRACT_MAX_WINDOWS, extractOutputBudget } from "../db/config.mjs";
 
 /**
  * Bumped when the prompt or the parsing rules change what gets stored. Part of
@@ -322,9 +322,9 @@ export function parseExtraction(raw: string): Extraction {
       const confidence = clampConfidence(e.confidence);
       if (!name || !(ENTITY_TYPES as readonly string[]).includes(type) || confidence < MIN_CONFIDENCE) { out.rejected.entities++; continue; }
       const key = entityKey(type as EntityType, name);
-      const aliases = Array.isArray(e.aliases)
-        ? [...new Set(e.aliases.map(cleanName).filter((a) => a && a.toLowerCase() !== name.toLowerCase()))]
-        : [];
+      // Folded by case, as mergeEntity folds them (fifth review pass: one
+      // reading kept `PG` and `pg`, two readings kept one).
+      const aliases = Array.isArray(e.aliases) ? foldAliases(e.aliases.map(cleanName), name) : [];
       const at = seen.get(key);
       if (at !== undefined) {
         // The same rule the windows merge by (fourth review pass: one answer
@@ -375,9 +375,19 @@ function entityKey(type: EntityType, name: string): string {
  */
 function mergeEntity(have: ExtractedEntity, e: ExtractedEntity): ExtractedEntity {
   const best = e.confidence > have.confidence ? e : have;
-  const aliases = new Map<string, string>();
-  for (const a of [...have.aliases, ...e.aliases]) if (a.toLowerCase() !== best.name.toLowerCase() && !aliases.has(a.toLowerCase())) aliases.set(a.toLowerCase(), a);
-  return { name: best.name, type: have.type, confidence: Math.max(have.confidence, e.confidence), aliases: [...aliases.values()] };
+  return { name: best.name, type: have.type, confidence: Math.max(have.confidence, e.confidence), aliases: foldAliases([...have.aliases, ...e.aliases], best.name) };
+}
+
+/** Aliases de-duplicated by case, the first spelling kept, the name's own casing dropped — the database's alias rule, applied once in both readers. */
+function foldAliases(aliases: string[], name: string): string[] {
+  const seen = new Map<string, string>();
+  for (const a of aliases) if (a && a.toLowerCase() !== name.toLowerCase() && !seen.has(a.toLowerCase())) seen.set(a.toLowerCase(), a);
+  return [...seen.values()];
+}
+
+/** Every model call an answer cost: one per window, one more per window that was retried. The worker's summary and the eval's column read this one. */
+export function callsOf(ex: Extraction): number {
+  return ex.windows + (ex.parts ? ex.parts.filter((p) => p.retried).length : ex.retried ? 1 : 0);
 }
 
 /** …and for a relation: the verb and both endpoints, case-folded. */
@@ -510,6 +520,12 @@ export async function extractEntities(content: string, cfg: EmbedConfig, timeout
   // (leading whitespace, say) into a single window, and that is not a
   // windowed thought — no marker, no `parts` (third review pass).
   const windows = chunkContent(content, { maxTokens: windowing.windowTokens, overlapTokens: windowing.overlapTokens });
+  // The per-thought cost bound (fifth review pass): a thought over
+  // EXTRACT_MAX_WINDOWS is recorded failed with the count rather than
+  // extracted for hours — the 8,000-character cut used to bound this.
+  if (windows.length > EXTRACT_MAX_WINDOWS) {
+    throw new Error(`the thought is ${windows.length} windows of ${windowing.windowTokens} estimated tokens, over EXTRACT_MAX_WINDOWS (${EXTRACT_MAX_WINDOWS}); not extracted`);
+  }
   // The calls made before a throw ride on the error (`callsMade`), counted as
   // each is made, so the worker's and the eval's call counts include a thought
   // that timed out in its fourth window or on a retry (second and third review

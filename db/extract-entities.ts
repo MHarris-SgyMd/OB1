@@ -88,7 +88,7 @@ import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import { PROVIDER_ERROR_CHARS, refusesLength, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { describeEgress, localKnob, refusesEverything, ROW_UNITS } from "../server-portable/egress.ts";
-import { callsMadeBy, describeExtractWindow, extractEntities, extractionKey, type Extraction } from "../server-portable/entities.ts";
+import { callsMadeBy, callsOf, describeExtractWindow, extractEntities, extractionKey, type Extraction } from "../server-portable/entities.ts";
 import { hashKey, parseKeyRecords } from "../server-portable/auth.ts";
 import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, reportLost, startHeartbeat } from "./lease.ts";
 
@@ -426,7 +426,7 @@ async function processRow(row: Row): Promise<Outcome> {
   }
   // Every call the thought cost: one per window, and one more per window
   // that was retried (first review pass: the retries went uncounted).
-  calls += extraction.windows + (extraction.parts ? extraction.parts.filter((p) => p.retried).length : extraction.retried ? 1 : 0);
+  calls += callsOf(extraction);
   if (extraction.windows > 1) windowed++;
   if (extraction.retried) retried++;
   if (extraction.malformed) {
@@ -499,6 +499,11 @@ function classifyError(e: unknown): ErrorKind {
   // embed.ts so the two tools cannot drift. A 413 stays fatal below, as it
   // was: the extraction request is the same shape for every thought, so a
   // provider refusing its size would refuse the next one too.
+  // A 400 about the answer budget names the REQUEST — the same max_tokens
+  // shape goes to every thought — and would otherwise read as this thought's
+  // length (refusesLength matches "tokens") and fail the pool one row at a
+  // time (fifth review pass). Fatal: stop every worker, mark nothing.
+  if (status === 400 && /max_tokens|max_completion_tokens|completion tokens/i.test(msg)) return "fatal";
   if (status === 400 && refusesLength(status, msg)) return "thought";
   if (status !== undefined && status >= 400 && status < 500) return "fatal";
   if (/ECONNREFUSED|ECONNRESET|EAI_AGAIN|ENOTFOUND|fetch failed|Unable to connect|socket/i.test(msg)) return "transient";

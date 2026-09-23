@@ -468,6 +468,15 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
   const one2 = await extractEntities(padded, cfgD, undefined, { kind: "extraction" });
   assert(reqs.length === 1 && one2.windows === 1 && one2.parts === undefined && reqs[0].part === undefined, "…and is one unmarked call with no per-window record");
 
+  // A thought over EXTRACT_MAX_WINDOWS is refused before any call — the
+  // per-thought cost bound (fifth review pass).
+  const { EXTRACT_MAX_WINDOWS } = await import("../db/config.mjs");
+  reqs.length = 0;
+  const enormous = Array.from({ length: EXTRACT_MAX_WINDOWS + 6 }, (_, i) => para(`Anita${i}`, 40)).join("\n\n");
+  let refusedWindows = "";
+  try { await extractEntities(enormous, cfgD, undefined, { kind: "extraction" }); } catch (e) { refusedWindows = (e as Error).message; }
+  assert(/over EXTRACT_MAX_WINDOWS \(24\); not extracted/.test(refusedWindows) && reqs.length === 0, `a thought of more than ${EXTRACT_MAX_WINDOWS} windows is refused with the count and costs no call (${refusedWindows.slice(0, 90)})`);
+
   // One window answering prose fails the thought, not the window.
   reqs.length = 0;
   prose = true;

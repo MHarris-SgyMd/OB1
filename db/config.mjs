@@ -423,11 +423,25 @@ export function extractOutputBudget(inputTokens) {
  * Empty, non-numeric and non-positive mean unset, as every numeric variable
  * server-portable/embed.ts reads (deploy/compose.yaml forwards `${VAR:-}`).
  */
+/** The smallest window a served context is derived into; below it the context cannot hold an extraction call at all. */
+export const EXTRACT_MIN_WINDOW_TOKENS = 64;
+
+/**
+ * The most windows one thought may be extracted in — the per-thought cost
+ * bound the 8,000-character cut used to be (fifth review pass). At the default
+ * window that is ~29,000 estimated tokens, ~115,000 characters, four times the
+ * longest thought on the fork's brain; a thought over it is recorded failed
+ * with the count, not extracted for hours or billed for hundreds of calls.
+ */
+export const EXTRACT_MAX_WINDOWS = 24;
+
 export function resolveExtractWindow(raw, model, fallback) {
-  const n = raw ? Number(raw) : NaN;
+  // Floored BEFORE the positivity test (fifth review pass): 0.5 passed `n > 0`
+  // and floored to a 0-token window, one call per word.
+  const n = raw ? Math.floor(Number(raw)) : NaN;
   // Exact name, then the name without its Ollama tag — resolveChunkTokens's rule.
   const window = KNOWN_CHAT_MODEL_WINDOW[model] ?? KNOWN_CHAT_MODEL_WINDOW[model.replace(/:[^:]*$/, "")];
-  if (Number.isFinite(n) && n > 0) return { tokens: Math.floor(n), from: "OB1_EXTRACT_CHUNK_TOKENS", window, capped: false, unfit: false };
+  if (Number.isFinite(n) && n > 0) return { tokens: n, from: "OB1_EXTRACT_CHUNK_TOKENS", window, capped: false, unfit: false };
   if (window === undefined) return { tokens: fallback, from: "default", window, capped: false, unfit: false };
   const fits = extractWindowThatFits(window);
   // A context that holds less than EXTRACT_MIN_WINDOW_TOKENS of text beside
@@ -437,9 +451,6 @@ export function resolveExtractWindow(raw, model, fallback) {
   if (fits < EXTRACT_MIN_WINDOW_TOKENS) return { tokens: fallback, from: "default", window, capped: false, unfit: true };
   return { tokens: Math.min(fits, fallback), from: "window", window, capped: fits > fallback, unfit: false };
 }
-
-/** The smallest window a served context is derived into; below it the context cannot hold an extraction call at all. */
-export const EXTRACT_MIN_WINDOW_TOKENS = 64;
 
 /**
  * Models trained with Matryoshka Representation Learning, which concentrates

@@ -100,6 +100,8 @@ export function resolveExtractWindow(
 ): { tokens: number; from: ExtractWindowFrom; window: number | undefined; capped: boolean; unfit: boolean };
 /** The smallest window a served context is derived into, 64; a context that holds less gets the default and `unfit`. */
 export const EXTRACT_MIN_WINDOW_TOKENS: number;
+/** The most windows one thought may be extracted in, 24; over it the thought is recorded failed with the count. */
+export const EXTRACT_MAX_WINDOWS: number;
 
 /** Models whose cards claim Matryoshka training, so truncation is supported. */
 export const MRL_MODELS: Set<string>;
