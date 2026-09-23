@@ -33,6 +33,8 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { Pool } from "postgres";
 import { authenticateRequest, canWrite, type Principal } from "../_shared/auth.ts";
+// Named, not the global: `deno check` types the import; Bun and Deno both resolve it (SMD-1799).
+import process from "node:process";
 
 // ob1-fork (SMD-1524): capture_thought writes `thoughts` with a raw INSERT, by design —
 // this deployment's Postgres is its own, built by k8s/init.sql from the guide's shape,
@@ -42,19 +44,19 @@ import { authenticateRequest, canWrite, type Principal } from "../_shared/auth.t
 
 // --- Configuration ---
 
-const DB_HOST = Deno.env.get("DB_HOST") || "127.0.0.1";
-const DB_PORT = parseInt(Deno.env.get("DB_PORT") || "5432", 10);
-const DB_NAME = Deno.env.get("DB_NAME") || "openbrain";
-const DB_USER = Deno.env.get("DB_USER") || "postgres";
-const DB_PASSWORD = Deno.env.get("DB_PASSWORD")!;
+const DB_HOST = process.env.DB_HOST || "127.0.0.1";
+const DB_PORT = parseInt(process.env.DB_PORT || "5432", 10);
+const DB_NAME = process.env.DB_NAME || "openbrain";
+const DB_USER = process.env.DB_USER || "postgres";
+const DB_PASSWORD = process.env.DB_PASSWORD!;
 
-const EMBEDDING_API_BASE = Deno.env.get("EMBEDDING_API_BASE") || "https://openrouter.ai/api/v1";
-const EMBEDDING_API_KEY = Deno.env.get("EMBEDDING_API_KEY") || Deno.env.get("OPENROUTER_API_KEY") || "";
-const EMBEDDING_MODEL = Deno.env.get("EMBEDDING_MODEL") || "openai/text-embedding-3-small";
+const EMBEDDING_API_BASE = process.env.EMBEDDING_API_BASE || "https://openrouter.ai/api/v1";
+const EMBEDDING_API_KEY = process.env.EMBEDDING_API_KEY || process.env.OPENROUTER_API_KEY || "";
+const EMBEDDING_MODEL = process.env.EMBEDDING_MODEL || "openai/text-embedding-3-small";
 
-const CHAT_API_BASE = Deno.env.get("CHAT_API_BASE") || EMBEDDING_API_BASE;
-const CHAT_API_KEY = Deno.env.get("CHAT_API_KEY") || EMBEDDING_API_KEY;
-const CHAT_MODEL = Deno.env.get("CHAT_MODEL") || "openai/gpt-4o-mini";
+const CHAT_API_BASE = process.env.CHAT_API_BASE || EMBEDDING_API_BASE;
+const CHAT_API_KEY = process.env.CHAT_API_KEY || EMBEDDING_API_KEY;
+const CHAT_MODEL = process.env.CHAT_MODEL || "openai/gpt-4o-mini";
 
 // --- PostgreSQL Connection Pool ---
 
@@ -83,7 +85,7 @@ type ThoughtRecord = {
 };
 
 const CITATION_BASE_URL =
-  Deno.env.get("OPEN_BRAIN_CITATION_BASE_URL") || "https://openbrain.local/thoughts";
+  process.env.OPEN_BRAIN_CITATION_BASE_URL || "https://openbrain.local/thoughts";
 
 function thoughtTitle(content: string, createdAt?: string): string {
   const firstLine = content.replace(/\s+/g, " ").trim().slice(0, 80);
@@ -612,8 +614,8 @@ app.all("*", async (c) => {
   // MCP_ACCESS_KEY still works, compared by digest. A read-scoped key is never
   // given the tool that writes, so it cannot see it, let alone call it.
   const principal = authenticateRequest(c.req.raw, {
-    MCP_ACCESS_KEYS: Deno.env.get("MCP_ACCESS_KEYS"),
-    MCP_ACCESS_KEY: Deno.env.get("MCP_ACCESS_KEY"),
+    MCP_ACCESS_KEYS: process.env.MCP_ACCESS_KEYS,
+    MCP_ACCESS_KEY: process.env.MCP_ACCESS_KEY,
   });
   if (!principal) {
     return c.json({ error: "Invalid or missing access key" }, 401, corsHeaders);
@@ -629,4 +631,10 @@ app.all("*", async (c) => {
   return response;
 });
 
-Deno.serve({ port: parseInt(Deno.env.get("PORT") || "8000", 10) }, app.fetch);
+// Bun's entry shape, the core server's (SMD-1799): `bun index.ts` serves it on PORT. The image runs
+// `deno serve --port 8000 index.ts`, which serves the same export on the flag's port (a `port` here is
+// Bun's to read; Deno's is the flag), so k8s/openbrain.yml names no PORT.
+export default {
+  port: Number(process.env.PORT ?? 8000),
+  fetch: app.fetch,
+};

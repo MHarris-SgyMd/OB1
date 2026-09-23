@@ -19,4 +19,7 @@ USER deno
 
 EXPOSE 8000
 
-CMD ["deno", "run", "--allow-net", "--allow-env", "--allow-read", "index.ts"]
+# `deno serve` starts the module's default export — `{ fetch }`, the shape Bun
+# serves as `bun index.ts` (SMD-1799) — on the flag's port; `deno run` would
+# load the module and exit.
+CMD ["deno", "serve", "--allow-net", "--allow-env", "--allow-read", "--port", "8000", "index.ts"]

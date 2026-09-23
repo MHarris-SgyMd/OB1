@@ -65,15 +65,14 @@
  * on an edit) and tolerates only a copy of the origin, the one case the rule
  * allows; server-portable/test-audit.ts holds the trigger itself.
  *
- * The files are imported under the stand-in extensions/test-auth.ts uses for
- * Deno's two globals and its loader for Deno's specifiers; every server
+ * The files are imported as modules — each exports Bun's entry shape, and its
+ * default export's `fetch` is the handler driven here (SMD-1799) — under the
+ * loader extensions/test-auth.ts uses for Deno's specifiers; every server
  * imports compat/supabase-sql itself since SMD-1798 (the loader resolved a
  * supabase-js import to it for the two that did not, until then). The model provider is
  * stubbed — a unit vector keyed off the text, so the vector a writer stored is
- * recognisable — and everything below the tool or route boundary is real. The
- * shim-migrated files import compat/deno-on-bun.ts first (change 74), which
- * installs nothing where `Deno` is already defined, so the stand-in still
- * captures each handler; test-auth.ts is where they start under bun for real.
+ * recognisable — and everything below the tool or route boundary is real;
+ * test-auth.ts is where the servers start under bun for real.
  *
  * The database is the fork's migrations plus three vendored sidecars the
  * writers assume: schemas/enhanced-thoughts (the columns the APIs write
@@ -187,17 +186,9 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   return Response.json({ choices: [{ message: { content: JSON.stringify(STUB_METADATA) } }] });
 }) as typeof fetch;
 
-// ── Deno's globals and specifiers, on Bun ────────────────────────────────────
+// ── The servers' handlers; Deno's specifiers, on Bun ─────────────────────────
 
 type Handler = (req: Request) => Response | Promise<Response>;
-const served: Handler[] = [];
-(globalThis as unknown as { Deno: unknown }).Deno = {
-  env: { get: (name: string) => process.env[name] },
-  serve: (a: Handler | object, b?: Handler) => {
-    served.push(typeof a === "function" ? a : b!);
-    return { finished: Promise.resolve() };
-  },
-};
 const PACKAGES = /^(hono|zod|@hono\/mcp|@modelcontextprotocol\/sdk)(\/|$)/;
 const VENDORED = new RegExp("^" + ROOT.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "/(recipes|integrations)/.*\\.ts$");
 // Until SMD-1798 this loader also resolved a quoted supabase-js specifier to the shim, for the two servers still on
@@ -247,10 +238,10 @@ process.env.SLACK_BOT_TOKEN = "stub";
 process.env.SLACK_CAPTURE_CHANNEL = "C0STUB";
 
 async function load(rel: string): Promise<Handler> {
-  const before = served.length;
-  await import(join(ROOT, rel));
-  assert(served.length === before + 1, `${rel} imports as deployed and hands Deno.serve one handler`);
-  return served[before];
+  // The handler Bun would serve: the module's default export's `fetch` (SMD-1799); nothing stands in for `Deno`.
+  const mod = (await import(join(ROOT, rel))) as { default?: { fetch?: unknown } };
+  assert(typeof mod.default?.fetch === "function", `${rel} imports as a module and exports default { fetch }`);
+  return mod.default!.fetch as Handler;
 }
 
 // ── One request ──────────────────────────────────────────────────────────────
