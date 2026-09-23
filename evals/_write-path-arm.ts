@@ -48,17 +48,16 @@ import { hashKey } from "../server-portable/auth.ts";
 import { mcpClient } from "../server-portable/test-support.ts";
 import { DELIVERABLES, READER_K, SESSIONS, SUBJECTS, type SubjectKey } from "./write-path-corpus.ts";
 import {
-  ARMS, STUB_DIM, STUB_EMBED_MODEL, decide, parseCapturedId, parseHits, parseProposalIds, renderDeliverable, stubChat, vectorFor,
+  ARMS, FORWARDED_ENV, STUB_DIM, STUB_EMBED_MODEL, decide, parseCapturedId, parseHits, parseProposalIds, renderDeliverable, stubChat, vectorFor,
   type Arm, type DeliverableObservation, type Line, type Observation, type ReaderPolicy,
 } from "./write-path.ts";
 
 const t0 = Date.now();
 // Before anything reads the environment: every OB1_* knob but this arm's own
-// goes. Kept: the two flags db/test-support's throwaway guard reads — they are
-// an operator's answer to a safety question, not a server knob, and the
-// guard's own refusal names them.
-const KEEP = new Set(["OB1_ALLOW_REMOTE_DB", "OB1_EVAL_ALLOW_REMOTE_DB", "OB1_DROP_KEPT_CORPUS"]);
-for (const k of Object.keys(process.env)) if (k.startsWith("OB1_") && !k.startsWith("OB1_WP_") && !KEEP.has(k)) delete process.env[k];
+// goes, and the few FORWARDED_ENV names (write-path.ts) — the throwaway
+// guard's overrides, whose own refusal names them. The import below is hoisted
+// and the list is a literal, so it is in hand here.
+for (const k of Object.keys(process.env)) if (k.startsWith("OB1_") && !k.startsWith("OB1_WP_") && !(FORWARDED_ENV as readonly string[]).includes(k)) delete process.env[k];
 const URL_ = process.env.DATABASE_URL;
 if (!URL_) { console.error("DATABASE_URL is not set."); process.exit(2); }
 const ARM = (process.env.OB1_WP_ARM ?? "default") as Arm;

@@ -49,6 +49,14 @@ export const STUB_DIM = SUBJECT_KEYS.length + NOISE_AXES;
  * branch the live vector; the self-check holds that against the real rule.
  */
 export const STUB_EMBED_MODEL = "write-path-stub";
+/**
+ * The OB1_* variables that reach the arm's process by name when every other
+ * is removed: the throwaway guard's overrides (db/test-support's
+ * assertThrowawayDatabase and dropSchema read them — an operator's answer to a
+ * safety question, not a knob of the server under test) and this eval's own
+ * verbose switch. The parent forwards these; the child keeps these.
+ */
+export const FORWARDED_ENV = ["OB1_ALLOW_REMOTE_DB", "OB1_EVAL_ALLOW_REMOTE_DB", "OB1_DROP_KEPT_CORPUS", "OB1_WP_VERBOSE"] as const;
 
 /** The subjects a text names, by phrase, case-insensitive, in SUBJECTS' order. */
 export function subjectsIn(text: string): SubjectKey[] {
@@ -677,6 +685,7 @@ export function corpusProblems(items: readonly Item[] = ITEMS, specs: readonly D
   // that, or the pair is never judged and the expectation and the run part.
   for (const b of items) {
     const sb = sessionOf(b.id);
+    if (sb < 0) { out.push(`${b.id} is in no session; every item is captured in one`); continue; }
     const earlier = items.filter((a) => a.subject === b.subject && sessionOf(a.id) < sb);
     if (earlier.length > DEFAULT_CANDIDATES && earlier.some((a) => judgeRule(a.text, b.text).verdict === "conflict")) {
       out.push(`${b.id} conflicts with an earlier item and has ${earlier.length} earlier neighbours on ${b.subject}, more than the shipped ${DEFAULT_CANDIDATES} candidates; the pair may not be judged`);

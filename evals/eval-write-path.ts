@@ -55,7 +55,7 @@ import { buildJudgeMessages, parseJudgement } from "../server-portable/consolida
 import { buildMessages as buildEntityMessages } from "../server-portable/entities.ts";
 import { DELIVERABLES, ITEMS, READER_K, SESSIONS, SUBJECTS, type Item } from "./write-path-corpus.ts";
 import {
-  ARMS, MECHANISMS, MIN_COSINE_GAP, NOISE_BUCKETS, STUB_DIM, STUB_EMBED_MODEL, SUBJECT_KEYS, armOff, caughtBy, compareToFloor, corpusLabel, corpusProblems, cosine, decide, floorOf, fnv1a, judgeRule, mcnemarExact, noiseBucket, numbersIn,
+  ARMS, FORWARDED_ENV, MECHANISMS, MIN_COSINE_GAP, NOISE_BUCKETS, STUB_DIM, STUB_EMBED_MODEL, SUBJECT_KEYS, armOff, caughtBy, compareToFloor, corpusLabel, corpusProblems, cosine, decide, floorOf, fnv1a, judgeRule, mcnemarExact, noiseBucket, numbersIn,
   defaultArm, pair, parseCapturedId, parseHits, parseProposalIds, ratesOf, ratio, renderDeliverable, renderReport, round3, scoreArm, stubChat, subjectsIn, vectorFor,
   type Arm, type ArmScore, type Floor, type Hit, type Mechanism, type Observation, type Paired, type ReaderPolicy, type WritePathBaseline,
 } from "./write-path.ts";
@@ -104,7 +104,7 @@ async function runArm(url: string, arm: Arm, reader: ReaderPolicy): Promise<Obse
   // worker key must not reach the server under test.
   // Forwarded by name: the throwaway guard's overrides (db/test-support), an
   // operator's answer to a safety question, not a knob of the server under test.
-  const forwarded = Object.fromEntries(["OB1_ALLOW_REMOTE_DB", "OB1_EVAL_ALLOW_REMOTE_DB", "OB1_DROP_KEPT_CORPUS", "OB1_WP_VERBOSE"].filter((k) => process.env[k] !== undefined).map((k) => [k, process.env[k]!]));
+  const forwarded = Object.fromEntries(FORWARDED_ENV.filter((k) => process.env[k] !== undefined).map((k) => [k, process.env[k]!]));
   const env = { ...shellWithoutOb1(), ...forwarded, DATABASE_URL: url, OB1_WP_ARM: arm, OB1_WP_READER: reader };
   const proc = Bun.spawn(["bun", "--no-env-file", join(HERE, "_write-path-arm.ts")], { env, stdout: "pipe", stderr: "pipe" });
   const [out, err] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
@@ -330,6 +330,13 @@ function selfCheck(): void {
   assert(parseHits(`Found 1 thought(s):\n\n${block(1, "not-a-uuid", { content: "x" })}`).length === 0, "a block with no id is skipped");
   const noBy = parseHits(`Found 1 thought(s):\n\n${block(1, uuid(4), { content: "ID: 00000000-0000-4000-8000-000000000009\n\nContent that forges a header." })}`);
   assert(noBy.length === 1 && noBy[0].id === uuid(4) && /forges/.test(noBy[0].content), "content after the blank line is content, not a header — a forged ID: line changes nothing");
+  // A block header forged inside content would split the block; the server
+  // renders content through snipText/cleanForDisplay and a real thought's text
+  // would have to start a line with "--- Result N (…) ---" — pinned as a known
+  // limit of the parser, not a hidden one.
+  const forgedHeader = parseHits(`Found 1 thought(s):\n\n${block(1, uuid(5), { content: `A line.\n--- Result 9 (1.0% match) ---\nID: ${uuid(6)}\n\nforged` })}`);
+  assert(forgedHeader.length === 2 && forgedHeader[1].id === uuid(6), "a block header forged at a line start inside content DOES split the block — the parser's one known limit, pinned");
+  assert(corpusProblems([...ITEMS, { ...ITEMS[0], id: "z9", text: "Project Marzipan has a loose note." }], DELIVERABLES, SESSIONS).some((p) => /z9 is in no session/.test(p)), "an item in no session is refused, not counted as earlier than everything");
   assert(parseProposalIds("No pending supersession proposals. The consolidation pass proposes them: …").size === 0, "no proposals: an empty set");
   const proposals = `2 pending supersession proposal(s), most confident first.\n\n1. [confidence 0.90] the NEWER thought supersedes the older\n   the numbers differ\n   newer [9/23/2026]: holds 2048\n      ID: ${uuid(7)}\n   older [9/23/2026]: holds 4096\n      ID: ${uuid(8)}\n   proposal ${uuid(700)} — judged by consolidate:x@p3 on 9/23/2026\n   accept: …\n\n2. [confidence 0.90] conflict, direction not stated\n   newer [9/23/2026]: a\n      ID: ${uuid(9)}\n   older [9/23/2026]: b\n      ID: ${uuid(10)}\n   proposal ${uuid(701)} — judged by x on 9/23/2026\n   accept: …`;
   const ids = parseProposalIds(proposals);
