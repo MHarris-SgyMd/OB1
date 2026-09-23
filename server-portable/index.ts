@@ -342,8 +342,15 @@ function parseSince(raw: string | undefined): { since: string | null; after: str
   // laptop, 08:00Z in the container); a date that does not round-trip
   // (2026-02-30) would silently become another day; a year Postgres has no
   // room for (0000) would come back as its raw error (caught: cold-read, pass 1).
-  const shape = /^(\d{4}-\d{2}-\d{2})(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(Z|[+-]\d{2}:?\d{2}))?$/i.exec(v);
-  const d = shape ? new Date(v.replace(" ", "T")) : new Date(NaN);
+  // Any ISO-8601 fraction (Python's isoformat gives six digits) and an
+  // hour-only offset (psql prints `+00`), normalised to what Date parses: a T,
+  // three fraction digits, a colon in the offset (third review pass).
+  const shape = /^(\d{4}-\d{2}-\d{2})(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(Z|[+-]\d{2}(?::?\d{2})?))?$/i.exec(v);
+  // The offset is completed only when the shape has one: a bare date's own
+  // `-01` is a day, not a zone.
+  let iso = v.replace(" ", "T").replace(/(\.\d{3})\d+/, "$1");
+  if (shape?.[2] && !/^z$/i.test(shape[2])) iso = iso.replace(/([+-]\d{2})(\d{2})$/, "$1:$2").replace(/([+-]\d{2})$/, "$1:00");
+  const d = shape ? new Date(iso) : new Date(NaN);
   // The date part round-trips on its own, whatever the clock or zone beside it
   // (the first pass checked it only on a bare date, so 2026-02-30T08:00:00Z
   // still slid to March); and the year stays where timestamptz has room — a
@@ -351,7 +358,7 @@ function parseSince(raw: string | undefined): { since: string | null; after: str
   const day = shape ? new Date(`${shape[1]}T00:00:00Z`) : d;
   const badDay = !shape || Number.isNaN(day.getTime()) || day.toISOString().slice(0, 10) !== shape[1];
   if (Number.isNaN(d.getTime()) || badDay || d.getUTCFullYear() < 1 || d.getUTCFullYear() > 9999) {
-    return { refused: `Refused: \`since\` must be an ISO-8601 time with its zone (2026-09-22T08:00:00Z), a date (2026-09-22), or the cursor a previous call ended with, not "${v.slice(0, 40)}".` };
+    return { refused: `Refused: \`since\` must be an ISO-8601 time with its zone (2026-09-22T08:00:00Z), a date (2026-09-22), or the cursor a previous call ended with, not "${snipText(v, 40)}".` };
   }
   return { since: d.toISOString(), after: null };
 }
@@ -365,7 +372,10 @@ function parseSince(raw: string | undefined): { since: string | null; after: str
  * through snipText, the one cleaner every reply quotes a thought through.
  */
 function renderChange(c: AuditChange, n: number): string {
-  const when = c.createdAt.replace(/\.\d{3}Z$/, "Z");
+  // The full ISO form, the one spelling the header's `since` echoes — a client
+  // that checkpoints on a line's time rather than the cursor re-reads nothing
+  // it need not (third review pass).
+  const when = c.createdAt;
   // The name through snipText, not cleanForDisplay alone: a writer that can
   // set its own actor could carry a newline and forge an entry or the Cursor
   // line in a feed agents act on (second review pass).
@@ -388,7 +398,7 @@ function renderChange(c: AuditChange, n: number): string {
     if (parts.length) lines.push(`   ${parts.join("; ")}`);
     // 046: an unchanged edit that declared a stance, cites or a window is an
     // event with an empty diff — say so rather than print a bare header.
-    else if (!c.changed.length) lines.push("   restated — no field changed");
+    else if (!c.changed.some((k) => k === "supersedes" || k === "derived_from")) lines.push("   restated — no field changed");
   }
   if (c.action === "capture" && c.supersedesAfter) lines.push(`   supersedes ${c.supersedesAfter}`);
   if (c.action === "update") {
@@ -1248,7 +1258,8 @@ function buildServer(principal: Principal): McpServer {
       // (caught: cold-read, pass 1).
       const named = agent?.trim() ? ` by ${snipText(agent.trim(), 80)}` : "";
       const who = named && others_only ? `${named} but not ${principal.name}` : others_only ? ` by everyone but ${principal.name}` : named;
-      const what = actions?.length ? `${actions.join("/")} change(s)` : "change(s)";
+      const kinds = actions?.length ? [...new Set(actions)] : null;
+      const what = kinds ? `${kinds.join("/")} change(s)` : "change(s)";
       const where = start.after ? "after the cursor" : start.since ? `since ${start.since}` : "";
       try {
         // One more than shown, so the reply can say whether more follow
@@ -1258,7 +1269,7 @@ function buildServer(principal: Principal): McpServer {
           after: start.after,
           agent: agent?.trim() || null,
           notAgent: others_only ? principal.name : null,
-          actions: actions?.length ? actions : null,
+          actions: kinds,
           limit: limit + 1,
         });
         const more = rows.length > limit;
@@ -1272,7 +1283,7 @@ function buildServer(principal: Principal): McpServer {
         }
         const head = where ? `${shown.length} ${what}${who} ${where}, oldest first:` : `The ${shown.length} most recent ${what}${who}, oldest first:`;
         const cursor = shown[shown.length - 1].id;
-        const onward = !more ? "" : where ? " More changes follow." : " Older changes exist — pass a time as `since` to read them.";
+        const onward = !more ? "" : where ? " More changes follow." : " Older changes exist — pass a time before the first entry above as `since` to read them.";
         const tail = `Cursor: ${cursor} — pass it as \`since\` to continue from here.${onward}`;
         return {
           content: [{ type: "text" as const, text: `${head}\n\n${shown.map((c, i) => renderChange(c, i + 1)).join("\n\n")}\n\n${tail}` }],

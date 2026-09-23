@@ -172,12 +172,15 @@ BEGIN
 
   -- The page: ids only, by the bound and the three filters — one statement per
   -- kind of bound (none, a cursor, a time), so the bound is a plain index
-  -- condition on 008's created_at btree. One statement with `(p_since IS NULL
-  -- OR …) AND (v_ts IS NULL OR …)` would have served the first five calls on
-  -- a connection from custom plans and then, under plpgsql's generic plan,
-  -- walked the index from the oldest row and filtered (second review pass).
-  -- The three filters are spelled three times; the projection below is the
-  -- one copy that matters.
+  -- condition on 008's created_at btree under ANY plan. One statement with
+  -- `(p_since IS NULL OR …) AND (v_ts IS NULL OR …)` keeps the condition only
+  -- while the plan cache picks custom plans (it did, over seven calls at 2k
+  -- and 100k audit rows — the generic estimate priced far above); under a
+  -- generic plan (plan_cache_mode = force_generic_plan, or a data shape that
+  -- prices one below the custom plans) it walks the index from the oldest row
+  -- and filters: measured 98 ms against 0.03 ms for these shapes at 100k
+  -- rows (second review pass; measured in the third). The three filters are
+  -- spelled three times; the projection below is the one copy that matters.
   IF p_since IS NULL AND p_after IS NULL THEN
     SELECT array_agg(p.aid) INTO v_ids FROM (
       SELECT a.id AS aid FROM thought_audit a

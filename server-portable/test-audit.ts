@@ -288,7 +288,7 @@ console.log("\n[10] thought_changes: pages by cursor join with no gap or repeat,
   // the extra row the function returns is the oldest here, not the newest, and
   // slicing the same end dropped the latest change on every first call).
   const recent = await laptop.call("thought_changes", { limit: 2 });
-  assert(/^The 2 most recent change\(s\), oldest first:/.test(recent) && JSON.stringify(heads(recent)) === JSON.stringify(whole.slice(4)) && /Older changes exist — pass a time as `since` to read them\./.test(recent) && !/More changes follow/.test(recent),
+  assert(/^The 2 most recent change\(s\), oldest first:/.test(recent) && JSON.stringify(heads(recent)) === JSON.stringify(whole.slice(4)) && /Older changes exist — pass a time before the first entry above as `since` to read them\./.test(recent) && !/More changes follow/.test(recent),
     "with no since, the two newest entries end with the latest change, and the reply says older ones exist rather than that more follow");
   // Both writer filters name themselves, so agent = the caller's own key beside
   // others_only is an explained empty set, not a silent one.
@@ -304,6 +304,13 @@ console.log("\n[10] thought_changes: pages by cursor join with no gap or repeat,
   }
   assert(/change\(s\) since 2026-09-22T08:00:00\.000Z/.test(await laptop.call("thought_changes", { since: "2026-09-22 08:00+00:00" })) && /change\(s\) since 2026-09-22T00:00:00\.000Z/.test(await laptop.call("thought_changes", { since: "2026-09-22" })),
     "…while an offset form and a bare date are read as UTC");
+  // Standard spellings other tools emit (third review pass): Python's six-digit
+  // fraction, psql's hour-only offset, a four-digit offset with no colon.
+  assert(/change\(s\) since 2026-09-22T08:00:00\.123Z/.test(await laptop.call("thought_changes", { since: "2026-09-22T08:00:00.123456+00:00" })) && /change\(s\) since 2026-09-22T13:00:00\.000Z/.test(await laptop.call("thought_changes", { since: "2026-09-22 08:00:00-05" })) && /change\(s\) since 2026-09-22T07:00:00\.000Z/.test(await laptop.call("thought_changes", { since: "2026-09-22T08:00:00+0100" })),
+    "…and a six-digit fraction, an hour-only offset and a colon-less offset are read as the instants they name");
+  // Each entry's time is the header's spelling, so a client that checkpoints on
+  // a line's time re-reads nothing it need not.
+  assert(/^\d+\. \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z — /m.test(recent), "an entry's time carries its milliseconds, as the header's since does");
   // A writer's name is untrusted text on the feed's first line: one carrying
   // newlines (a raw INSERT by a role with the capture set — INSERT on
   // thought_audit and its own actor) must not forge an entry or the Cursor

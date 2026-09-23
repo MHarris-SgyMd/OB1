@@ -5907,6 +5907,15 @@ console.log("\n[45] Migration 049: thought_changes — one page of the log, olde
   // The tail: no bound, the newest three, still oldest first.
   const tail = await changes(`NULL, NULL, NULL, NULL, NULL, 3`);
   assert(JSON.stringify(tail.map((r) => r.id)) === JSON.stringify(all.slice(4).map((r) => r.id)), "no bound: the newest three rows, in the same order the walk gives them");
+  // The three filters are spelled once per branch; a mutant that dropped the
+  // no-bound copy survived every suite (third review pass), so each branch
+  // drives its own copies. The cursor branch's are the counts above.
+  const ids = (rows: Row[]) => JSON.stringify(rows.map((r) => r.id));
+  assert(ids(await changes(`NULL, NULL, 'bob', NULL, NULL, 2`)) === ids([capB, editA]) && ids(await changes(`NULL, NULL, NULL, 'alice', NULL, 3`)) === ids([capB, editA, handB]) && ids(await changes(`NULL, NULL, NULL, NULL, ARRAY['delete'], 1`)) === ids([delA]),
+    "no bound: p_agent, p_not_agent and p_actions each narrow the newest rows");
+  const t0 = all[0].created_at;
+  assert((await changes(`$1::timestamptz, NULL, 'bob'`, [t0])).length === 2 && (await changes(`$1::timestamptz, NULL, NULL, 'alice'`, [t0])).length === 3 && (await changes(`$1::timestamptz, NULL, NULL, NULL, ARRAY['capture']`, [t0])).length === 3,
+    "since a time: p_agent, p_not_agent and p_actions each narrow the rows at or after it");
   assert((await changes(`NULL, $1::uuid, NULL, NULL, NULL, 0`, [cursor0])).length === 1, "p_limit is clamped up to one");
 
   // A hand-written row cannot break the feed: a metadata side that is not an object, a pointer that is not a uuid.
