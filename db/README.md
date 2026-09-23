@@ -164,8 +164,8 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `1444 assertions: 1444 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports fifty (50) migrations applied, and
+`bun test-schema.ts` prints `1446 assertions: 1446 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports fifty-one (51) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -203,13 +203,15 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 029 change 54, 030 change 56, 031 change 57, 032 change 60, 033 change 63,
 034 change 65, 035 change 66, 036 change 68, 037 change 70, 038 change 80, 039 change 81,
 040 change 91, 041 change 94, 042 change 95, 043 change 98, 044 SMD-1804,
-045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726).
+045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
+051 SMD-1804).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
 baseline `0.0.0+upstream.9543c29`), and every release cut appends the migration
 that writes its version as the last file of the range it freezes: 048 writes
-`1.0.0+upstream.9543c29`, the first release (`001..048`). `preflight` prints the
+`1.0.0+upstream.9543c29`, the first release (`001..048`), and 051 writes
+`1.1.0+upstream.9543c29`, the second (`049..051`). `preflight` prints the
 value beside the ledger's highest migration and warns when a server is older than
 the brain, or a brain has run past its version's range. Both are introduced by a
 fragment or a cut rather than a hand-numbered change, so they are named here by
@@ -825,9 +827,35 @@ bun extract-entities.ts --url … --limit 25              # a trial: this many, 
 bun extract-entities.ts --url … --status                # the pass, and the graph so far
 bun extract-entities.ts --url … --dry-run               # what a run would do; writes nothing
 bun extract-entities.ts --url … --retry-failed          # failed rows back into the pool first
-#   --workers N (2)  --batch N (1)  --ttl SECONDS (900)  --heartbeat SECONDS (60, or a third of the lease; at least 1, and the lease must cover two)  --timeout SECONDS (300, per model call)
+#   --workers N (2)  --batch N (1)  --ttl SECONDS (900)  --heartbeat SECONDS (60, or a third of the lease; at least 1, and the lease must cover two)  --timeout SECONDS (300, per model call — per window of a long thought)
 bun extract-entities.ts --url … --switch-key           # required when the model or prompt version differs from the recorded key
 ```
+
+**Long thoughts go in windows (SMD-1879).** A thought over the extraction
+window is split with `server-portable/chunk.ts` into overlapping windows, each
+window is one model call, and the windows' answers are merged by (type, name)
+and (relation, from, to) — highest confidence kept, aliases unioned — before
+`record_thought_entities` applies its own rule, so a subject named in every
+window is one entity and one mention. Every call carries `max_tokens`, an
+answer budget sized to the text it sends (three times the estimated tokens plus
+1,536, `db/config.mjs` — over every legitimate answer measured on `qwen2.5:7b`
+and `qwen3.8:27b`), so an answer that will not end is cut in about a minute rather than
+running to the model's context and the worker's timeout — and a call cut that
+way is made once more with a frequency penalty (`RUNAWAY_PENALTY`, 0.5), which
+taxes the repetition the runaways were measured to be: on the fork's brain that
+retry, with the budget sized to both measured models, extracted all 32 thoughts
+one call could not finish, where windows alone reached 10 to 13. A thought whose retry also runs away is recorded
+failed, retryable. The window is the **metadata model's**, not the embedding
+model's: `OB1_EXTRACT_CHUNK_TOKENS` when set, else derived from the model's
+served context (`KNOWN_CHAT_MODEL_WINDOW`, measured as `KNOWN_MODEL_WINDOW` is)
+and held at the size the default model was measured to finish reliably; a model
+the table does not list gets that default. The banner's `window:` line and
+preflight's `extraction window` row print the same sentence. The prompt version
+is 2 — a pass under it re-extracts a brain whose thoughts were cut at 8,000
+characters under p1 — so the first run after upgrading needs `--switch-key`.
+`--dump`'s line carries `windows` and, for a windowed thought, each window's own
+answer in `parts` beside the merged one. Why, measured: `evals/README.md`,
+"Entity extraction in windows".
 
 **What may leave.** The egress gate (SMD-1903) reads each row's own
 `metadata` — `source`, `type`, `topics` — and its text against `OB1_EGRESS_POLICY`
@@ -847,8 +875,14 @@ before it sends any; `--limit` lets you look at twenty before committing to
 thousands. Measured on the fork's 441-issue corpus with `qwen2.5:7b` on local
 Ollama: 82 to 108 minutes at two workers, 113 at one — two workers are worth
 about 5% like for like, since a local Ollama mostly serialises — and eleven to
-twenty-one of the longest issues exceed the per-call timeout on a 7B model,
-varying by pass. Two hours for a corpus that size, then per capture.
+twenty-one of the longest issues exceeded the per-call timeout on a 7B model,
+varying by pass, until SMD-1879 measured those timeouts as answers that did
+not end and bounded them (above). Two hours for a corpus that size, then per
+capture. Note that `--timeout` above 300 s only took effect from SMD-1879 on:
+Bun's `fetch` cut an unstreamed call at its own 300 s idle timeout whatever the
+flag said; the three worker diallers (`providerCall`, `judgePair`,
+`extractOnce`) now disable that in favour of the one deadline, and SMD-1962
+covers preflight's probes and the evals' own diallers, which still run under it.
 
 **Identity.** The worker authenticates like any client: `OB1_WORKER_KEY` is a
 raw access key whose hash is in `MCP_ACCESS_KEYS`, resolved through
@@ -1714,8 +1748,8 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 1444 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 619 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
+bun test-schema.ts                          # 1446 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 627 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```

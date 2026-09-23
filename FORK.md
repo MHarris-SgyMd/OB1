@@ -69,10 +69,11 @@ the brain it serves. `db/version.mjs` is the one definition of the current versi
 (`FORK_VERSION`), and `migrate.ts --dry-run` names the release each pending
 migration belongs to. 044 wrote `0.0.0+upstream.9543c29`, the pre-first-release
 baseline; each cut appends the migration that writes its version as the last file
-of the range it freezes — 048 writes `1.0.0+upstream.9543c29`, the first release.
+of the range it freezes — 048 writes `1.0.0+upstream.9543c29`, the first release;
+051 writes `1.1.0+upstream.9543c29`, the second.
 
 **A release is a tag naming three things**: the migration range it closes
-(the first cut, `001..048`), the server commit, and the upstream pin. The committed
+(the first cut, `001..048`; the second, `049..051`), the server commit, and the upstream pin. The committed
 `releases.json` is the machine-readable mirror CI reads with no network. Migrations
 inside a released range are **frozen** — the ledger's sha check already refuses
 drift at apply time; `check-fork-consistency` adds the rule that a renumber or
@@ -166,7 +167,7 @@ and fails a "FORK.md change N" citation with no file behind it (SMD-1917).
 | 17 | `[fork] evals: choose the local models by measurement` | The local defaults were picked by size. `evals/` benchmarks retrieval and extraction against real Ollama; `nomic-embed-text` placed 5th of 7 and `llama3.2` reproduced its production faults. Defaults are now `embeddinggemma` + `qwen2.5:7b`. | **Unfiled** |
 
 <!-- changes-index:start — generated from changes/ by scripts/fork-index.ts; do not edit by hand -->
-**123 numbered changes** on top of the pin: 1–17 are the table above; 18–123 are one file each under [`changes/`](changes/README.md), newest last. A change's record is its file; the review-pass prose behind it is in the commits (`(caught: …)` tags, read by `scripts/mechanism-yield.ts`).
+**134 numbered changes** on top of the pin: 1–17 are the table above; 18–134 are one file each under [`changes/`](changes/README.md), newest last. A change's record is its file; the review-pass prose behind it is in the commits (`(caught: …)` tags, read by `scripts/mechanism-yield.ts`).
 
 | # | Change | Ticket |
 | --- | --- | --- |
@@ -276,8 +277,19 @@ and fails a "FORK.md change N" citation with no file behind it (SMD-1917).
 | 121 | [Three shared modules for the tools beside the server](changes/121-three-shared-modules-for-the-tools-beside.md) | SMD-1985 |
 | 122 | [The board reaches the brain by a sweep that runs itself](changes/122-the-board-reaches-the-brain-by-a-sweep-that-runs.md) | SMD-1954 |
 | 123 | [A release publishes what it names](changes/123-a-release-publishes-what-it-names.md) | SMD-1860 |
+| 124 | [Was the confidence earned](changes/124-was-the-confidence-earned.md) | SMD-1809 |
+| 125 | [A key that may only add](changes/125-a-key-that-may-only-add.md) | SMD-1298 |
+| 126 | [A session leaves one thought behind](changes/126-a-session-leaves-one-thought-behind.md) | SMD-1989, SMD-1298 |
+| 127 | [check-fork compares the grants table both ways, and the commit grammar reads a thirteenth pass](changes/127-check-fork-compares-the-grants-table-both-ways.md) | SMD-1990 |
+| 128 | [A wrong `OB1_TIER` is caught at boot instead of silently emptying the query log](changes/128-a-wrong-ob1-tier-is-caught-at-boot-instead.md) | SMD-1953 |
+| 129 | [The tool-call stream is kept alive for as long as the tool runs, and a client that leaves is logged](changes/129-the-tool-call-stream-is-kept-alive-for-as-long.md) | SMD-1864 |
+| 130 | [Retrieval tells what the operator said from what an agent concluded](changes/130-retrieval-tells-what-the-operator-said-from-what.md) | SMD-1726 |
+| 131 | [enhanced-mcp's read tools address a thought by its UUID](changes/131-enhanced-mcp-s-read-tools-address-a-thought.md) | SMD-1525 |
+| 132 | [The SQL shim answers what PostgREST answers](changes/132-the-sql-shim-answers-what-postgrest-answers.md) | SMD-1602 |
+| 133 | [Shim everywhere](changes/133-shim-everywhere.md) | SMD-1798 |
+| 134 | [Entity extraction sent the whole thought in one unbounded call](changes/134-entity-extraction-sent-the-whole-thought-in-one.md) | SMD-1879 |
 
-Landed since the last release and numbered at the next one (SMD-1804): [SMD-1298](changes/smd-1298.md), [SMD-1525](changes/smd-1525.md), [SMD-1602](changes/smd-1602.md), [SMD-1726](changes/smd-1726.md), [SMD-1798](changes/smd-1798.md), [SMD-1809](changes/smd-1809.md), [SMD-1864](changes/smd-1864.md), [SMD-1953](changes/smd-1953.md), [SMD-1982](changes/smd-1982.md), [SMD-1989](changes/smd-1989.md), [SMD-1990](changes/smd-1990.md).
+Landed since the last release and numbered at the next one (SMD-1804): [SMD-1982](changes/smd-1982.md).
 <!-- changes-index:end -->
 
 ### Files we own

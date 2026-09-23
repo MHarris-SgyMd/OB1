@@ -382,6 +382,171 @@ console.log("\n[9] The supersession judge has a model of its own — OB1_JUDGE_M
   providerC.stop();
 }
 
+console.log("\n[10] A long thought is extracted in windows of the metadata model's size, each call budgeted, and the windows' answers merged (SMD-1879)");
+{
+  // Function-level, as [8] and [9]. A stand-in that answers from what each
+  // request carries — the entity named in the text it was sent, plus the
+  // subject every window names — and REFUSES a request over a ceiling, the way
+  // test-chunking.ts's embedder does: if the windowing ever stops, [10] fails
+  // on the refusal rather than passing on a call that happened to fit.
+  const { resolveEmbedConfig } = await import("./embed.ts");
+  const { extractEntities, windowingFor } = await import("./entities.ts");
+  const { estimateTokens } = await import("./chunk.ts");
+  const { extractOutputBudget } = await import("../db/config.mjs");
+  type Req = { text: string; maxTokens: number | undefined; part: string | undefined };
+  const reqs: Req[] = [];
+  const CEILING = 700; // estimated tokens of thought text the stub accepts per call
+  let prose = false;
+  const providerD = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      const body = (await req.json()) as { messages: { content: string }[]; max_tokens?: number };
+      const user = body.messages[0].content;
+      const inner = /<thought_content>\n([\s\S]*)\n<\/thought_content>/.exec(user)?.[1] ?? "";
+      const part = /^\[Part [^\]]*\]/.exec(inner)?.[0];
+      const text = part ? inner.slice(part.length).trimStart() : inner;
+      reqs.push({ text, maxTokens: body.max_tokens, part });
+      if (estimateTokens(text) > CEILING) return new Response(JSON.stringify({ error: { message: `input too long: ${estimateTokens(text)} tokens` } }), { status: 400 });
+      if (prose) return Response.json({ choices: [{ message: { content: "I cannot help with that." } }] });
+      // The subject "Open Brain" is in every window; each window also names one
+      // person of its own — Anita in the first, Dev in the second, and so on.
+      const person = /(Anita|Dev|Priya|Sam)/.exec(text)?.[1];
+      const entities: unknown[] = [{ name: "Open Brain", type: "project", confidence: 0.8 + (person === "Dev" ? 0.1 : 0), aliases: person === "Dev" ? ["OB1"] : [] }];
+      const relationships: unknown[] = [];
+      if (person) { entities.push({ name: person, type: "person", confidence: 0.9 }); relationships.push({ from: person, to: "Open Brain", relation: "works_on", confidence: 0.7 }); }
+      return Response.json({ choices: [{ message: { content: JSON.stringify({ entities, relationships }) } }] });
+    },
+  });
+  const D = `http://127.0.0.1:${providerD.port}/v1`;
+  const para = (who: string, n: number) => `${who} wrote about Open Brain. ${Array.from({ length: n }, (_, i) => `Sentence ${i} of this paragraph says nothing new about it.`).join(" ")}`;
+  // Four paragraphs of ~330 estimated tokens each: 1,320 in all, over a 600-token
+  // window and over the stub's 700-token ceiling as one call.
+  const long = [para("Anita", 40), para("Dev", 40), para("Priya", 40), para("Sam", 40)].join("\n\n");
+  const short = "Anita wrote about Open Brain.";
+  assert(estimateTokens(long) > CEILING && estimateTokens(short) < 100, `the long thought (${estimateTokens(long)} tokens) is over the stub's ceiling and the short one is not`);
+
+  // The configuration's window: an explicit 600 for the stub's model, which
+  // the table does not list, so the rule the worker reads is the one exercised.
+  const cfgD = resolveEmbedConfig({ OB1_LLM_LOCAL: "1", OB1_LLM_BASE_URL: D, OB1_METADATA_MODEL: "stub-chat", OB1_EXTRACT_CHUNK_TOKENS: "600" });
+  const w = windowingFor(cfgD);
+  assert(w.windowTokens === 600 && w.overlapTokens === 75 && w.outputBudget, "the windowing the worker runs under is the configuration's: 600-token windows, 75 overlap, an answer budget");
+
+  const one = await extractEntities(short, cfgD, undefined, { kind: "extraction" });
+  assert(reqs.length === 1 && one.windows === 1 && one.parts === undefined, "a thought within the window is one call, with no per-window record");
+  assert(reqs[0].part === undefined && reqs[0].text === short, "…the p1 request: the text alone, no part marker");
+  assert(reqs[0].maxTokens === extractOutputBudget(estimateTokens(short)), `…carrying the answer budget for its own length (${reqs[0].maxTokens})`);
+
+  reqs.length = 0;
+  // Caught, not thrown: with the windowing removed the stub refuses the one
+  // oversized call, and that must be a counted failure here, not a crash of
+  // the suite (a mutant run found the crash and no red line).
+  let many: Awaited<ReturnType<typeof extractEntities>>;
+  try {
+    many = await extractEntities(long, cfgD, undefined, { kind: "extraction" });
+  } catch (e) {
+    assert(false, `the long thought went to the stub in one call and was refused — the windowing is gone (${(e as Error).message.slice(0, 80)})`);
+    providerD.stop();
+    throw e;
+  }
+  assert(reqs.length >= 3 && many.windows === reqs.length, `the long thought is ${reqs.length} calls, one per window, and the answer says so (windows ${many.windows})`);
+  assert(reqs.every((r) => estimateTokens(r.text) <= 600), "every call carries at most a window of text — the stub would have refused more");
+  assert(reqs.every((r, i) => r.part === `[Part ${i + 1} of ${reqs.length} of a longer note]`), `each window says which part it is (${reqs.map((r) => r.part).join(" | ")})`);
+  assert(reqs.every((r) => r.maxTokens === extractOutputBudget(estimateTokens(r.text))), "each call's answer budget follows the text it carries, not the whole thought's");
+  const subject = many.entities.filter((e) => e.type === "project");
+  assert(subject.length === 1 && subject[0].name === "Open Brain" && subject[0].confidence === 0.9 && subject[0].aliases.includes("OB1"),
+         `a subject every window names is ONE entity in the merged answer, at the best confidence with the aliases any window offered (${JSON.stringify(subject)})`);
+  const people = many.entities.filter((e) => e.type === "person").map((e) => e.name).sort();
+  assert(people.join(",") === "Anita,Dev,Priya,Sam", `…and each window's own person is there once (${people.join(",")})`);
+  assert(many.relations.length === 4 && many.relations.every((r) => r.to === "Open Brain" && r.relation === "works_on"), "the four works_on edges, one per window, all to the one subject");
+  assert(many.parts?.length === reqs.length && many.parts.every((p, i) => p.index === i && p.entities.length === 2 && p.tokens <= 600 && p.ms >= 0), "the per-window record keeps what each call returned, in order, with its size and time");
+
+  // An over-estimate that chunk.ts packs into one window is the whole-thought
+  // path — no marker, no per-window record (third review pass).
+  reqs.length = 0;
+  const padded = `${" ".repeat(2500)}${short}`; // ~632 estimated tokens: over the 600 window, under the stub's 700 ceiling
+  assert(estimateTokens(padded) > 600, "the padded thought over-estimates past the window");
+  const one2 = await extractEntities(padded, cfgD, undefined, { kind: "extraction" });
+  assert(reqs.length === 1 && one2.windows === 1 && one2.parts === undefined && reqs[0].part === undefined, "…and is one unmarked call with no per-window record");
+
+  // A thought over EXTRACT_MAX_WINDOWS is refused before any call — the
+  // per-thought cost bound (fifth review pass).
+  const { EXTRACT_MAX_WINDOWS } = await import("../db/config.mjs");
+  reqs.length = 0;
+  const enormous = Array.from({ length: EXTRACT_MAX_WINDOWS + 6 }, (_, i) => para(`Anita${i}`, 40)).join("\n\n");
+  let refusedWindows = "";
+  try { await extractEntities(enormous, cfgD, undefined, { kind: "extraction" }); } catch (e) { refusedWindows = (e as Error).message; }
+  assert(/over EXTRACT_MAX_WINDOWS \(24\); not extracted/.test(refusedWindows) && reqs.length === 0, `a thought of more than ${EXTRACT_MAX_WINDOWS} windows is refused with the count and costs no call (${refusedWindows.slice(0, 90)})`);
+
+  // One window answering prose fails the thought, not the window.
+  reqs.length = 0;
+  prose = true;
+  const bad = await extractEntities(long, cfgD, undefined, { kind: "extraction" });
+  prose = false;
+  assert(bad.malformed && bad.windows === reqs.length, "a malformed window makes the thought's answer malformed — it is recorded failed, not terminal on a partial reading");
+
+  // A runaway — an answer cut at its budget — is the answer under the shipped
+  // windowing, and is made once more with the frequency penalty when the
+  // windowing says so; a penalty is never sent on a first call.
+  const { RUNAWAY_PENALTY } = await import("./entities.ts");
+  let runawayOnce = false;
+  const penalties: (number | undefined)[] = [];
+  const providerE = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      const body = (await req.json()) as { max_tokens?: number; frequency_penalty?: number };
+      penalties.push(body.frequency_penalty);
+      if (runawayOnce && body.frequency_penalty === undefined) {
+        runawayOnce = false;
+        return Response.json({ choices: [{ message: { content: '{"entities":[{"name":"Loop","type":"tool","confidence":1},{"name":"Loop","type":"tool",' }, finish_reason: "length" }] });
+      }
+      return Response.json({ choices: [{ message: { content: JSON.stringify({ entities: [{ name: "Anita", type: "person", confidence: 0.9 }], relationships: [] }) }, finish_reason: "stop" }] });
+    },
+  });
+  const cfgE = resolveEmbedConfig({ OB1_LLM_LOCAL: "1", OB1_LLM_BASE_URL: `http://127.0.0.1:${providerE.port}/v1`, OB1_METADATA_MODEL: "stub-chat" });
+  assert(windowingFor(cfgE).retryRunaway === true, "the shipped windowing retries a runaway — 32 of 32 stragglers against 2 without (evals/README.md)");
+  runawayOnce = true;
+  const cut = await extractEntities(short, cfgE, undefined, { kind: "extraction" }, { ...windowingFor(cfgE), retryRunaway: false });
+  assert(cut.malformed && cut.retried === undefined && penalties.length === 1 && penalties[0] === undefined, "with the retry off a cut answer is malformed after one call, with no penalty sent");
+  penalties.length = 0;
+  runawayOnce = true;
+  const again = await extractEntities(short, cfgE, undefined, { kind: "extraction" });
+  assert(!again.malformed && again.retried === true && again.entities[0]?.name === "Anita", "under the shipped windowing the cut answer is made again and the second answer is the thought's");
+  assert(penalties.length === 2 && penalties[0] === undefined && penalties[1] === RUNAWAY_PENALTY, `…the first call without a penalty, the retry with ${RUNAWAY_PENALTY} (${penalties.join(",")})`);
+  penalties.length = 0;
+  const clean = await extractEntities(short, cfgE, undefined, { kind: "extraction" });
+  assert(!clean.malformed && clean.retried === undefined && penalties.length === 1, "…and an answer that converges is never retried");
+
+  // Reasoning on (second review pass): max_tokens would cap the thinking and
+  // the answer together, so no budget is sent and a cut answer is not retried.
+  const maxTokensSeen: (number | undefined)[] = [];
+  const providerF = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      const body = (await req.json()) as { max_tokens?: number; frequency_penalty?: number; reasoning_effort?: string };
+      maxTokensSeen.push(body.max_tokens);
+      penalties.push(body.frequency_penalty);
+      return Response.json({ choices: [{ message: { content: JSON.stringify({ entities: [{ name: "Anita", type: "person", confidence: 0.9 }], relationships: [] }) }, finish_reason: "length" }] });
+    },
+  });
+  penalties.length = 0;
+  const cfgF = resolveEmbedConfig({ OB1_LLM_LOCAL: "1", OB1_LLM_BASE_URL: `http://127.0.0.1:${providerF.port}/v1`, OB1_METADATA_MODEL: "stub-chat", OB1_METADATA_REASONING: "medium" });
+  const thought = await extractEntities(short, cfgF, undefined, { kind: "extraction" });
+  assert(maxTokensSeen.length === 1 && maxTokensSeen[0] === undefined && penalties[0] === undefined, "with OB1_METADATA_REASONING on the call carries no max_tokens and no penalty — the p1 request");
+  assert(!thought.malformed && thought.retried === undefined && maxTokensSeen.length === 1, "…and an answer that parses is the thought's, with `length` not read as a runaway since nothing was budgeted");
+  providerF.stop();
+  providerE.stop();
+
+  // The default window for a model the table lists is the measured 1200, and
+  // the same thought is one call under it (it is under 1200 estimated tokens)
+  // — so the stub's ceiling refuses it, which is the point of the ceiling.
+  const cfgWide = resolveEmbedConfig({ OB1_LLM_LOCAL: "1", OB1_LLM_BASE_URL: D, OB1_METADATA_MODEL: "qwen2.5:7b" });
+  assert(cfgWide.extractChunkTokens === 1200, "qwen2.5:7b derives the measured 1200");
+  let refused = "";
+  try { await extractEntities(long, cfgWide, undefined, { kind: "extraction" }); } catch (e) { refused = (e as Error).message; }
+  assert(/input too long/.test(refused), "under a 1200-token window the 1,320-token thought is two calls or refused — the stub refused one over 700, so the windowing is what [10] measures, not the stub's leniency");
+  providerD.stop();
+}
+
 server.stop();
 provider.stop();
 
