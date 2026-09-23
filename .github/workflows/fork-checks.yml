@@ -269,6 +269,14 @@ jobs:
         working-directory: evals
         run: bun eval-thought-kinds.ts --self-check
 
+      # The calibration ledger's arithmetic (Brier, ECE, skill, the bins) and
+      # its rules (an unstated or unresolved claim is never scored as 0) held
+      # by probes with hand-known answers, and the committed kinds fixture
+      # still yields the kind band a scorable set. No database, no model.
+      - name: Calibration ledger arithmetic
+        working-directory: evals
+        run: bun eval-calibration.ts --self-check
+
       # Proves the Cloudflare target still builds under the real Workers bundler.
       # Catches a dependency pulling in a node: builtin Workers cannot provide.
       - name: Cloudflare Workers build
