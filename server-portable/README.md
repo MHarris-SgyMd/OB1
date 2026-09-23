@@ -282,7 +282,7 @@ SMD-1451 is the migrator refusing it).
 ## Expected outcome
 
 ```bash
-bun test-server.ts        # 205 — transport, auth, tool surface, OAuth discovery, the method guard, /health, the store default and the tool-call keepalive
+bun test-server.ts        # 213 — transport, auth, tool surface, OAuth discovery, the method guard, /health, the store default and the tool-call keepalive
 bun test-auth.ts          # 97 — scoped, hashed, named keys
 bun run test:local        # 52 — fully local provider, no credential
 bun run test:sql          # 123 — store conformance, real Postgres in a container
