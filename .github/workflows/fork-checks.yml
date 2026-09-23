@@ -262,6 +262,14 @@ jobs:
         working-directory: evals
         run: bun eval-thought-kinds.ts --self-check
 
+      # The calibration ledger's arithmetic (Brier, ECE, skill, the bins) and
+      # its rules (an unstated or unresolved claim is never scored as 0) held
+      # by probes with hand-known answers, and the committed kinds fixture
+      # still yields the kind band a scorable set. No database, no model.
+      - name: Calibration ledger arithmetic
+        working-directory: evals
+        run: bun eval-calibration.ts --self-check
+
       # Proves the Cloudflare target still builds under the real Workers bundler.
       # Catches a dependency pulling in a node: builtin Workers cannot provide.
       - name: Cloudflare Workers build
@@ -311,6 +319,14 @@ jobs:
       - name: Apply migrations and assert the schema
         working-directory: db
         run: bun test-schema.ts
+
+      # The board sync's pure rules and write decisions — the rendering the
+      # hand captures are recognised by, the plan from a census, which call
+      # each state of the brain gets — against a recording store. No network,
+      # no database, no provider (SMD-1954).
+      - name: Board sync rules
+        working-directory: db
+        run: bun sync-linear.ts --self-check
 
       # The embedding width is configurable and must hold at more than one value.
       - name: Schema builds at a non-default embedding width

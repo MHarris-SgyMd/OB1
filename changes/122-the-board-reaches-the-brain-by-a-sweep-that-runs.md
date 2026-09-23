@@ -1,0 +1,121 @@
+# 122. The board reaches the brain by a sweep that runs itself — `db/sync-linear.ts` and the `board-sync` profile, with the brain as the only state (SMD-1954)
+
+**What changed.** `db/sync-linear.ts` lists every issue of the `OB1_LINEAR_INITIATIVE`'s
+projects (identifier and `updatedAt`, two requests for three hundred), reads the
+brain's ticket rows in one query, and writes the difference: an identifier with no
+row is captured — vector, extracted tags, and the facets Linear knows over them
+(`source: linear`, `issue`, `project`, `status`, `status_type`, `priority`,
+`labels`, `parent`, `url`, `linear_updated_at`); one whose row's `linear_updated_at`
+is older, or absent, is fetched in full and compared — the text moved is one
+`update_thought` with a fresh vector and the facets that moved, the text unchanged
+is a metadata patch and no model call. A ticket row is one whose `metadata.issue`
+names an identifier (the key `ingest-records.ts` writes, so a rebuilt stable brain
+is adopted, not duplicated) or whose text opens with the hand-capture header this
+tool renders byte for byte; a note that merely begins `SMD-N` is not one. Twins of
+one identifier — the hand re-captures — are chained by `supersedes` (032), newest
+current, once. Writes go through `server-portable/store-sql.ts` with the egress gate
+asked first (SMD-1903) and an actor on every row; Linear's autolink markup is
+stripped to the identifier before storing (SMD-1865's first item). The tag
+extraction, the `.env` reader and the Linear client it shares with the server and
+the evals are SMD-1985's `server-portable/metadata.ts`, `db/env.ts` and
+`db/linear-api.ts`, landed ahead of this as their own change.
+`deploy/compose.yaml` gains `board-sync` under a profile: the server's environment
+block is anchored (`&server-env`) and the sidecar merges it, so the provider and
+egress knobs are forwarded once; its own are `LINEAR_API_KEY`,
+`OB1_LINEAR_INITIATIVE` and `OB1_BOARD_SYNC_INTERVAL`, documented in
+`deploy/.env.example`. `--audit` is the lockstep census (missing / stale / extra,
+exit 1 when any); `--dry-run`, `--full`, `--only`, `--loop`, `--self-check`.
+
+**Why.** The dogfood brain held the board only as hand captures: on 2026-09-22 one
+session pasted eight tickets in two sweeps because another kept filing, and a
+ticket moved to Done kept reading Backlog until re-pasted — which made a second
+row (three identifiers had two or more). The ingester the dogfood notes described
+was a scratchpad script nobody committed. The first pass over that brain: 276
+issues, 8 missing, 268 stale of which 224 rendered byte-identical to the hand
+capture (facets patched, no model call) and 44 had moved (status, parent, text);
+the twins were already chained by the hand re-captures, so none were touched.
+
+**Held.** `bun db/sync-linear.ts --self-check` in the schema job: the rendering
+against the hand grammar, autolink stripping, the ticket-row rule (a note is not
+one), grouping newest-first, the plan from a census (missing / stale / extra /
+unchanged, `--full`), the facet patch, and the write decisions against a recording
+store — new → embed, tags, capture with the facets over the tags; same text →
+one patch, no model call; moved text → one embed, one edit; twins → only the
+missing pointer; deny to a hosted endpoint → no calls, the row bare. Check 14
+parses the anchor and the merge key (its probe list already carried one); check
+13 sees no port on the sidecar.
+
+**Review passes.**
+
+| pass | finding | caught | fix |
+| --- | --- | --- | --- |
+| 1 | `${LINEAR_API_KEY:?}` on the profiled service is interpolated whether or not the profile is active — every `compose up` without it, the full-stack CI job among them, would have failed | run-it (`compose config --services`) | `${LINEAR_API_KEY:-}`; the tool's own exit 2 is the guard |
+| 1 | `update_thought` refuses `DUPLICATE_CONTENT` when a twin already holds the new text (a ticket moved back to a recorded state); the pass errored and, `linear_updated_at` never advancing, repeated it every interval | cold read; the SQL fact proven on a throwaway Postgres | the twin is promoted — pointer moved aside, then the twin points at the current row, facets patched; held elsewhere, facets patched and the outcome is `refused`; grouping makes the chain the truth so the next pass agrees |
+| 1 | a pointer on the current row to anything but the twin was overwritten | cold read | any existing pointer is left, said in the log |
+| 1 | `loadEnv()` in the container read the operator's host `.env` files off the mount and filled every knob compose forwarded as `""` | cold read | `linearKeyFrom`: that one key, from the environment else the first file that has it |
+| 1 | `ticketIdentifier` returned the whole `metadata.issue` after a prefix test | cold read | the identifier the claim opens with |
+| 1 | SIGTERM ended the loop after the pass; compose SIGKILLs at 10 s | cold read | `stopping` asked between issues, `stop_grace_period: 60s` |
+| 1 | two pools, the store's never closed; a dead `refused` outcome; a header naming a function that does not exist | cold read | one connection each, both closed; `refused` is the parked case; `runPass({ only })` |
+| 1 | `ingest-records.ts --linear` and this tool key one identity but render different text and the ingester replaces metadata wholesale — a rebuild and a pass rewrite each other | cold read | documented (a synced brain rebuilds without `--linear`); the one-renderer fix is SMD-1958 |
+| 2 | the two-step promotion re-linked two rows; with three where the text-holder was the oldest, the middle twin became head and every later pass threw WOULD_CYCLE | run-it (an in-memory brain) | the chain is computed (`desiredPointers`: head → … → last, a hand-set outside pointer kept at the tail), clears before sets; the self-check runs the scenario to a fixpoint |
+| 2 | "same text" was an exact string compare, DUPLICATE_CONTENT is judged by `content_fingerprint_of` — a trailing newline hid the holder | cold read | the fingerprint, asked of the database, decides the head and "unchanged" |
+| 2 | `captureThought`'s `existed` ignored, and a stray row holding the text (a paste the grammar missed) was never looked for | cold read | `holderOf(fingerprint)` adopts it; `existed` is reported as an adoption |
+| 2 | one alias Linear refused failed the whole 50-issue batch and, outside the per-issue try, the pass | cold read | the client returns data and errors; a refused alias is one identifier under *errors* |
+| 2 | `archived_at` only emitted when set, so a restored issue kept it | cold read | every facet always present, null when absent |
+| 2 | the merged block handed the sidecar `MCP_ACCESS_KEYS` and `PORT`; initiatives unpaged; the initiative not read from `.env` as the header said; the subject built twice per branch | cold read | unset in the merge; paged; `envValueFrom` for all three names; one subject |
+| 3 | `includeArchived: true` returns trashed (deleted) issues too, so a deletion was captured and never *extra* | cold read | `trashed` requested and dropped from the census |
+| 3 | an edit re-embedded but kept the old text's tags (and a provider-outage fallback) forever | cold read | the tags are extracted again with the vector; vectorless rows are `reembed.ts`'s |
+| 3 | labels rendered in Linear's order, which the connection does not promise — a flip would re-embed every pass | cold read | sorted in the text and the facet; a one-time re-render of the hand captures with two labels |
+| 3 | the whole checkout mounted into the sidecar put `deploy/.env` and `evals/.env` on its own `.env` search path | cold read | four mounts: `db/`, `server-portable/`, `evals/env.ts`, `evals/linear-api.ts` |
+| 3 | `--only` only narrowed the plan (an `unchanged` name wrote nothing, a typo said nothing); projects unpaged within an initiative; the header regex scanned every thought every pass; a second Linear client beside the corpus builder's | cold read | `--only` forces and reports; more than one page of projects is refused; the header scan leaves the scheduled path; one client in `evals/linear-api.ts` |
+| 4 | pass 3's header-scan rule skipped the scan whenever ANY claimed row existed — one ingested or model-tagged `issue` row hid every hand capture, and the moved ones would have been captured twice | cold read | the scan runs when the plan over the claimed rows misses an identifier, then the plan again |
+| 4 | the moved-text merge put the fresh tags over only the facets that differed, so a `status` or `issue` the model read out of the description won | cold read | every facet over the tags, as at capture; a stale failure marker nulled |
+| 4 | a refused pointer (WOULD_CYCLE through a hand-set chain) threw before the head's write, every pass | cold read | the head lands first; the refusal is reported under *chain refusals* |
+| 4 | the parked refusal advanced `linear_updated_at`, so a text the outside holder no longer held was never retried; the outside holder cost an embed each pass | cold read | refused before any model call by `holderOf`; the watermark not advanced, `text_refused_by` set; retried at one lookup |
+| 4 | a stray holder was re-patched with every facet each pass; `fingerprintOf` threw on a brain without 016 though its contract said null; `--audit --only` silently ignored the names; a one-letter team key was not an identifier; renderIssue's docblock orphaned by the label helper; `Writer.embed` restated the embedder's type | cold read | the facets that differ; null once said; the combination refused; `[A-Z][A-Z0-9]*`; docblock restored; `Pick<EmbeddedCapture, …>` |
+| 5 | a hand paste of the ticket made AFTER adoption was an outside holder — refused every pass, Backlog in one row and Done in the other for good | cold read | `holderOf` returns a row; one this tool reads as the same ticket is folded in as the head and chained |
+| 5 | an edit with the chat call refused kept the old text's tags with no marker; the refusal was re-recorded (a write and an audit row) every pass; a resolved refusal stayed on a twin; the plan read the first row's watermark, so an unsuperseded hand twin kept a ticket stale forever; `--audit` ignored *extra* in its exit code though three documents said otherwise | cold read | `metadataRefused()` as at capture; recorded once, compared before writing; cleared on head and twins; the group's newest watermark; *extra* counts |
+| 5 | `restart: unless-stopped` turned the tool's exit 2 on a missing key into a crash loop; the two shared modules lived under `evals/`, so the sidecar mounted two files by name | cold read | `on-failure:3`; `db/env.ts` and `db/linear-api.ts` (evals/env.ts re-exports), the mounts are `db/` and `server-portable/` |
+| 6 | a paste of this ticket the grammar cannot read (a leading space) was an outside holder when a row existed but adopted when none did; a holder claimed by another ticket was re-keyed in the no-row branch and refused in the other | cold read | ours when it reads as this ticket or as nothing, outside when another ticket claims it — both branches |
+| 6 | a refused set left the clears before it — a hand-set pointer erased with one log line; `created_at::text` carries the session's offset, so across a DST change the older paste could be the head; an initiative typo under `--loop` failed every pass forever where a missing key exits 2 | cold read | the clears are undone; `created_at` spelled in UTC; the initiative resolved once before any pass |
+| 6 | `--audit` re-implemented the front half of a pass; the claimed rows were read twice when something was missing; the BrainRow projection spelled twice; a stale `evals/linear-api.ts` in two comments; `facetPatch` computed twice | cold read | `planBoard` for both; the claimed rows handed on; `rowColumns`; the paths; once |
+| 7 | a checkout run read the Linear key from `deploy/.env` but every provider knob from the shell alone, so the documented command ran under the default deny and landed every ticket bare, then called them unchanged | cold read | `loadEnv()` for every name (the `.env` files are off the sidecar's mount since pass 5, so the pass-1 hazard is gone); a run whose gate refuses every embedding is refused unless `--allow-refused` (named `--allow-no-vector` until pass 10 widened it to the chat endpoint) |
+| 7 | a capture whose tags fell back (a provider timeout) kept `uncategorized` until the ticket happened to move; the chain undo restored only the clears, not the sets that had landed; an initiative with no projects made every row `extra`; the initiative resolved twice at start; three spellings of the marker clear; a stale `evals/env.ts` in three places | cold read | a fallback marker makes the row stale and the head is re-tagged when it holds the text; every write undone; refused by name; the resolved board handed to the first pass; one helper; the paths |
+| 8 | pass 7's retag put the fresh tags under only the differing facets (a `status` the model guessed won and stuck), counted any row's fallback marker (a superseded twin kept the ticket stale for good), wrote the same fallback again every pass, and the dry run called the retag `unchanged` — the stop signal: the top findings were the prior pass's fix | cold read | every facet over the tags, compared whole before writing; the current row's marker alone; the dry run counts the write; also: the update branch clears the twins' markers, a second outside pointer is named as dropped, `NULL` metadata rows are read, the `--only` comment |
+| 9 (asked for) | a pointer write that THREW between the chain's phases left the clears (the undo fired on `ok:false` alone); a retag the gate refused left the row stale forever; a renamed project, state or label never bumps `updatedAt`, so the loop never saw it; retags had no cap (a provider still down cost one timeout per failed row per pass); a batch Linear refused whole fired the batches behind it at the same limit; the retag write spelled three ways; a stale `see metadataTemperature` in index.ts | cold read | the undo runs on a throw too; refused → `egress_denied`; the census carries the three names and the plan compares them; `RETAGS_PER_PASS` = 5; the rest reported not attempted; one `facetPatch` over the whole wanted set; the comment. The generic retag worker the reviewer asked for is SMD-1975 |
+| 10 (asked for) | staleness was judged on `rows[0]` while facets landed on the holder, so a holder that could not be chained left a ticket stale forever; the wholesale-refusal preflight asked about embeddings alone (a refused chat endpoint tagged every ticket `egress_denied`, which nothing revisits); a refused retag left `uncategorized` under the marker; a non-2xx from Linear aborted the whole pass; the header grammar spelled twice (JS and SQL); a dead branch; no signal handler on the one-shot pass; a throwing embedder threw away a paid chat call | cold read | the row carrying the newest watermark is judged; both endpoints asked, `--allow-refused`; the placeholders nulled with the marker; a throw is a batch refused whole; one `IDENTIFIER_PATTERN`; collapsed; the handlers serve both modes; the vector first, the tags after |
+| 11 (asked for) | the update branch merged a refused or fallen-back answer over the row, leaving the OLD text's people, topics and action items under the marker (the tenth pass's rule reached the retag alone); the census asked 250 issues with an unbounded labels connection — Linear's per-request cap in reach on a larger board; the dry run never spent the retag budget and over-counted; the loop discarded each pass's result and exited 0 after erroring passes; `--audit --full` was accepted and `--full` ignored; planPass's docblock orphaned by the census row type | cold read | `tagsOverExisting` in metadata.ts — one rule for both branches and the next writer; 100 a page, `labels(first: 20)`; the dry run spends the budget; the last pass's result is the exit code; refused as `--only` is; the docblock restored |
+| 12 (asked for) | the start-up preflight exited 2 on ANY error, so a 502 at boot stopped the sidecar for good under `on-failure:3`; `fingerprintOf` read every error as "016 not applied"; the census bounded labels and the full fetch did not, so a ticket with more labels than the bound was stale forever; every fallback-tagged ticket was fetched each pass to retag five; `TAG_KEYS` lacked `type_raw`; the marker-clear rule spelled beside `tagsOverExisting`; two README sentences stale | cold read | `BoardConfigError` alone exits 2, a transport error retries; SQLSTATE 42883 alone is null; one `LABELS_BOUND`; the plan defers fallback-only tickets past the budget unfetched; `type_raw`; the shared rule clears the marker too; the sentences |
+| 13 (asked for, after the split and the merge of main) | `groupTicketRows` sorted the twins below the head by age while `desiredPointers` chained them in that order, so the pass after a re-chain re-chained again (four pointer writes on an unchanged board) and inverted a hand-set supersession between twins; the scheduled path scanned the headers only when an identifier was MISSING, so a later paste of an adopted ticket was never chained and `--audit` still said lockstep; the capture branch's `existed` path merged a fallback tag set over a row that took the text between the holder look and the write; `loadEnv` refilled a variable set to `""` from the .env files (`OB1_LLM_LOCAL= bun …` got deploy/.env's `1` back); `Writer.embed` dropped the head-window caveat; a holder 018 left unfingerprinted paid the embed and the tags every pass before DUPLICATE_CONTENT; the edit persisted `metadata_extraction_failed: null`; two comments credited the move to this ticket | run-it (the re-chain), cold read | the order IS the chain (walk the pointers from each unsuperseded row); the scan runs whenever anything is fetched; a second `holderOf` after the model calls adopts with the facets alone; set is set, `""` included; `caveat(e)` on the line and a `headWindow` count in the report; `holderOf` falls back to the rule over NULL-fingerprint rows; `facetPatch` decides the edit's patch; the comments name SMD-1985 |
+
+**Cut before the merge.** The retag branch — a row whose tags fell back at
+capture made the ticket stale and was asked for its tags again when it held the
+text, with a per-pass budget (rows 7–12 above) — left this branch with SMD-1975,
+where it belongs: a retag worker beside `reembed.ts` repairs every thought, not
+ticket rows alone, and the sync's plan is exactly the census diff again. The
+shared rule those passes produced, `tagsOverExisting`, stays (SMD-1985) and the
+edit path uses it. The three pure moves the passes made are SMD-1985's own PR.
+
+**Not taken.** A note a person appended below a pasted ticket is rewritten with
+the ticket (the previous text is on the audit row, 008, so it is recoverable);
+the tool cannot tell a note from a stale description. A ticket whose only text
+is held under ANOTHER ticket's claim stays `missing`, and `--audit` says so each
+pass, until the claim is fixed by hand — no row of this ticket's exists to carry
+a marker. A Linear webhook: exact and immediate, but it needs an inbound URL
+the stack has no origin for until SMD-1846, and SMD-1862 owns the handler's shape
+(signature, replay window, loop guard) — when both land the handler calls
+`syncIssue` with the identifier it was told, and the schedule stays as the
+backstop. Writing over MCP to the running server: the read side has no structured
+listing, and `deploy/.env` holds key hashes by design, so a raw key for a sidecar
+would have broken that; the store is the same code the server runs. Deterministic
+ids (`linearThoughtId`): the dogfood rows are already on random ids from
+`capture_thought`, so identity is `metadata.issue`, which both writers share.
+Removing rows for issues deleted in Linear (reported as *extra*; `ingest-records.ts`
+has the same rule) and appending comments (the corpus builder's, for the eval).
+
+**Follow-ups.** SMD-1975 (the retag worker, with the branch cut from here);
+SMD-1958 (one renderer and one merge rule for the ingester's linear source and
+this tool); SMD-1865's typed edges from the relations Linear already knows;
+SMD-1862 + SMD-1846 for the webhook form. SMD-1985 landed the shared modules.
+
+**Upstream status:** not sent — the board and the dogfood brain are the fork's.

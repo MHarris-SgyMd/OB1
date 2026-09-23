@@ -27,7 +27,9 @@
     "replay": "bun eval-replay.ts",
     "build-replay-fixture": "bun build-replay-fixture.ts",
     "thought-kinds": "bun eval-thought-kinds.ts",
-    "thought-kinds:self-check": "bun eval-thought-kinds.ts --self-check"
+    "thought-kinds:self-check": "bun eval-thought-kinds.ts --self-check",
+    "calibration": "bun eval-calibration.ts",
+    "calibration:self-check": "bun eval-calibration.ts --self-check"
   },
   "devDependencies": {
     "@types/bun": "1.4.0",

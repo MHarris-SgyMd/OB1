@@ -133,7 +133,12 @@ export function loadEnv(): { file: string; keys: string[] }[] {
     for (const [k, v] of Object.entries(parsed)) {
       // Already set — by the real environment, or by an earlier file in the
       // order above. Either way it wins.
-      if (process.env[k] !== undefined && process.env[k] !== "") continue;
+      // Set is set, the empty string included: `OB1_LLM_LOCAL= bun …` means
+      // "not local", and refilling it from a file would send text to an
+      // endpoint the operator had just un-declared. The docblock has always
+      // said a present variable wins; the code read "" as absent until
+      // SMD-1954's thirteenth review pass made the provider knobs ride here.
+      if (process.env[k] !== undefined) continue;
       process.env[k] = v;
       applied.push(k);
     }
