@@ -4045,8 +4045,9 @@ Two bins, held over graded:
 
 By value, as the report prints it over the graded rows: 0.50 held 0 of 2, 0.80
 5 of 19 (mentions 1 of 13, edges 4 of 6), 0.90 8 of 11 (all edges), 1.00 17 of
-32 — Brier 0.425, ECE 0.439, base rate 0.469, skill −0.705 against the constant,
-over a stratified sample, so the base rate is the sample's and not the brain's.
+32 — Brier 0.425, ECE 0.439, base rate 0.469, skill −0.705 against the
+constant, over a stratified sample, so the base rate is the sample's and not
+the brain's.
 
 What it says:
 
@@ -4098,15 +4099,15 @@ at 3 of 15 against 10 of 15 (p = 0.025); `actor_name` read as held would
 strengthen it; two more control calls a strict reader might question
 (`check-fork-consistency check 20`, `canary`) take it to 3 of 15 against 8 of
 15 (p = 0.13), past which it rests on the within-thought contrast and the two
-0.80 `PostgreSQL` rows in other thoughts. The control's held rate is the estimate of the 1.00
-stratum's precision, with the interval fifteen or seventeen rows give:
-mentions 80% (Wilson 95% 55–93%), edges 29% (13–53%).
+0.80 `PostgreSQL` rows in other thoughts. The control's held rate is the
+estimate of the 1.00 stratum's precision, with the interval fifteen or
+seventeen rows give: mentions 80% (Wilson 95% 55–93%), edges 29% (13–53%).
 
 What it changes in SMD-1982: the elicitation arms in its Work item 1 are worth
 running for mentions — the prompt that asks for a reason below 1 first, on the
 windowed prompt SMD-1879 merged the same day (PR #113) — and item 2 (stop
-recording a confidence) is not the answer for mentions. For edges the confidence carries no signal
-either way. The record is `changes/smd-1982.md`.
+recording a confidence) is not the answer for mentions. For edges the
+confidence carries no signal either way. The record is `changes/smd-1982.md`.
 
 
 ## Related

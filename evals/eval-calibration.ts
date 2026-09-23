@@ -55,7 +55,7 @@
  *                 and a control of 1.00 rows, read against the thought's
  *                 text), which resolve by that grade.
  *                 The grade is of the claim, so a later prompt version that
- *                 writes the same mention or edge is resolved by the same row
+ *                 writes the same mention or edge is resolved by the same row.
  *   declared      metadata.confidence on a thought — a number in [0, 1], or a
  *                 string holding one — the key a writer can set today; resolved
  *                 by the fixture's hypothesis status (confirmed / refuted) or
@@ -186,9 +186,12 @@ export const HAND_GRADE = "hand grade";
 
 /**
  * fixtures/entity-grades.json — SMD-1982's outcome set for the extractor: a
- * hand grade per mention or edge (1 = a specific named thing the text holds, of a defensible type, and for an edge a relation the text states or clearly implies; 0 otherwise), keyed the way the live report keys a claim. Ids and numbers only, as check 9 admits: the kind is which list
- * a row is in, `relation` is its index into server-portable's RELATIONS, and
- * `stated` is the confidence at the grade (the report reads the live one).
+ * hand grade per mention or edge (1 = a specific named thing the text holds,
+ * of a defensible type, and for an edge a relation the text states or clearly
+ * implies; 0 otherwise), keyed the way the live report keys a claim. Ids and
+ * numbers only, as check 9 admits: the kind is which list a row is in,
+ * `relation` is its index into server-portable's RELATIONS, and `stated` is
+ * the confidence at the grade (the report reads the live one).
  */
 export type GradedMention = { thought: string; entity: string; stated: number; outcome: 0 | 1 };
 export type GradedEdge = { thought: string; from: string; to: string; relation: number; stated: number; outcome: 0 | 1 };
@@ -223,9 +226,9 @@ export function validateGrades(g: unknown): string[] {
   f.edges.forEach((v, i) => {
     const e = obj(`edges[${i}]`, v);
     if (!e) return;
-    const rel = e.relation;
-    if (!Number.isInteger(rel) || (rel as number) < 0 || (rel as number) >= RELATIONS.length) problems.push(`edges[${i}]: relation ${JSON.stringify(rel)} is not an index into RELATIONS (0–${RELATIONS.length - 1})`);
-    row(`edges[${i}]`, [e.thought, e.from, e.to], e, `${e.thought}:${e.from}:${e.to}:${RELATIONS[rel as number] ?? rel}`);
+    const rel = e.relation as number;
+    if (!Number.isInteger(rel) || rel < 0 || rel >= RELATIONS.length) problems.push(`edges[${i}]: relation ${JSON.stringify(rel)} is not an index into RELATIONS (0–${RELATIONS.length - 1})`);
+    row(`edges[${i}]`, [e.thought, e.from, e.to], e, `${e.thought}:${e.from}:${e.to}:${RELATIONS[rel] ?? rel}`);
   });
   return problems;
 }
@@ -554,9 +557,12 @@ async function selfCheck(): Promise<void> {
   ok(validateGrades(gfx).length === 0, "a sound grades fixture has no problems");
   const gm = gradeMap(gfx);
   ok(gm.get(`${A}:${B}`) === 0 && gm.get(`${A}:${B}:${C}:uses`) === 1 && gm.size === 2, "the grades key a claim the way the live report does: thought:entity, thought:from:to:relation by name");
-  const graded = mentionRows([{ claim: `${A}:${B}`, kind: "mention", confidence: 0.8, extraction_key: "x" }, { claim: `${A}:${B}:${C}:uses`, kind: "edge", confidence: 1, extraction_key: "x" }, { claim: `${A}:${E}`, kind: "mention", confidence: 1, extraction_key: "x" }], gm);
+  const gMention: MentionRow = { claim: `${A}:${B}`, kind: "mention", confidence: 0.8, extraction_key: "x" };
+  const gEdge: MentionRow = { claim: `${A}:${B}:${C}:uses`, kind: "edge", confidence: 1, extraction_key: "x" };
+  const ungraded: MentionRow = { claim: `${A}:${E}`, kind: "mention", confidence: 1, extraction_key: "x" };
+  const graded = mentionRows([gMention, gEdge, ungraded], gm);
   ok(graded[0].outcome === 0 && graded[0].resolvedBy === HAND_GRADE && graded[1].outcome === 1 && graded[2].outcome === null && graded[2].resolvedBy === null, "a graded mention and edge resolve by the hand grade; an ungraded one stays unresolved");
-  ok(mentionRows(graded.map((r) => ({ claim: r.claim, kind: r.kind as "mention" | "edge", confidence: r.stated!, extraction_key: "x" }))).every((r) => r.outcome === null), "with no grades the extractor resolves nothing, as before");
+  ok(mentionRows([gMention, gEdge, ungraded]).every((r) => r.outcome === null), "with no grades the extractor resolves nothing, as before");
   // F has hex letters, so its upper-case form differs (a digits-only id upper-cases to itself and would probe nothing).
   const F = "1000000a-0000-4000-8000-00000000000f", G = "10000000-0000-4000-8000-000000000007";
   const bad = validateGrades({
@@ -575,11 +581,11 @@ async function selfCheck(): Promise<void> {
   ok(unexpected.length === 0 && unmet.length === 0 && bad.length === expect.length, `a missing label, a bad id, an upper-case id, a row that is not an object, a stated value out of range or not a number, an outcome that is not 0/1, a mention or an edge graded twice, a bad edge end and a relation off the vocabulary or not an integer are each refused by name, once (${bad.length}; unmet: ${unmet.join("; ") || "none"}; unexpected: ${unexpected.join("; ") || "none"})`);
   ok(validateGrades(null)[0] === "the fixture is not an object" && validateGrades([])[0] === "the fixture is not an object" && validateGrades("x")[0] === "the fixture is not an object" && validateGrades({}).length === 4, "a fixture that is not an object, or has none of the shape, is a problem and not a throw");
   // The brain holds one graded mention and one ungraded, and lacks the graded edge: the note counts a set difference, not a subtraction (review pass 1).
-  const gradedBrain = assemble(committed, { ...none, mentions: [{ claim: `${A}:${B}`, kind: "mention", confidence: 0.8, extraction_key: "x" }, { claim: `${A}:${E}`, kind: "mention", confidence: 1, extraction_key: "x" }] }, gm);
+  const gradedBrain = assemble(committed, { ...none, mentions: [gMention, ungraded] }, gm);
   const gx = gradedBrain.summaries.find((m) => m.mechanism === "x")!;
   ok(gx.claims === 2 && gx.resolved === 1 && gx.scorable === 1 && Math.abs((gx.brier ?? 0) - 0.64) < 1e-9, `a graded mention in the brain is resolved and scored on the extractor's row, an ungraded one beside it is not (${gx.claims}/${gx.resolved}/${gx.scorable}/${gx.brier})`);
   ok(gradedBrain.notes.some((n) => n.startsWith("1 of the 2 hand-graded extractor claims")), "a graded claim the brain lacks is counted in a note, and an ungraded claim the brain holds does not offset it");
-  ok(!assemble(committed, { ...none, mentions: [{ claim: `${A}:${B}`, kind: "mention", confidence: 0.8, extraction_key: "x" }, { claim: `${A}:${B}:${C}:uses`, kind: "edge", confidence: 1, extraction_key: "x" }] }, gm).notes.some((n) => n.includes("hand-graded")), "with every graded claim present there is no such note");
+  ok(!assemble(committed, { ...none, mentions: [gMention, gEdge] }, gm).notes.some((n) => n.includes("hand-graded")), "with every graded claim present there is no such note");
   ok(assemble(committed, none).notes.every((n) => !n.includes("hand-graded")), "with no grades there is no such note");
   const committedGrades = readGrades();
   ok(committedGrades.mentions.length === 30 && committedGrades.edges.length === 34 && gradeMap(committedGrades).size === 64, `the committed grades fixture holds SMD-1982's 64 rows, 30 mentions and 34 edges (${committedGrades.mentions.length}/${committedGrades.edges.length})`);
