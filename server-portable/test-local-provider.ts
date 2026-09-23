@@ -494,7 +494,7 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
     },
   });
   const cfgE = resolveEmbedConfig({ OB1_LLM_LOCAL: "1", OB1_LLM_BASE_URL: `http://127.0.0.1:${providerE.port}/v1`, OB1_METADATA_MODEL: "stub-chat" });
-  assert(windowingFor(cfgE).retryRunaway === true, "the shipped windowing retries a runaway — 27 of 32 stragglers against 2 without (evals/README.md)");
+  assert(windowingFor(cfgE).retryRunaway === true, "the shipped windowing retries a runaway — 32 of 32 stragglers against 2 without (evals/README.md)");
   runawayOnce = true;
   const cut = await extractEntities(short, cfgE, undefined, { kind: "extraction" }, { ...windowingFor(cfgE), retryRunaway: false });
   assert(cut.malformed && cut.retried === undefined && penalties.length === 1 && penalties[0] === undefined, "with the retry off a cut answer is malformed after one call, with no penalty sent");

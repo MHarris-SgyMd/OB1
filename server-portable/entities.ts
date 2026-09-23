@@ -40,7 +40,8 @@
  * own rule; a mention found in three windows is one entity and one mention.
  * A call that ends at its budget is made once more under a frequency penalty
  * (`RUNAWAY_PENALTY`): the runaways are repetition, and the retry is what
- * reached the thoughts no window size did — 27 of 32 against 2. The one thing
+ * reached the thoughts no window size did — with a budget sized to both
+ * measured models, 32 of 32 against 2. The one thing
  * per-window extraction cannot see is a relation whose two endpoints are named
  * in different windows — measured, and the loss stated, in evals/README.md.
  */

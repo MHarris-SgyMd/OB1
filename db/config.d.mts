@@ -69,9 +69,9 @@ export function resolveChunkTokens(
 export const KNOWN_CHAT_MODEL_WINDOW: Record<string, number>;
 /** The extraction prompt's rules and delimiter with an empty thought, 398 tokens. */
 export const EXTRACT_PROMPT_TOKENS: number;
-/** Answer tokens budgeted per estimated input token, 2 (the 95th percentile measured was 1.6). */
+/** Answer tokens budgeted per estimated input token, 3 (the 7B's 95th percentile was 1.6; the 27B answers short dense notes at 3.5–9.4×). */
 export const EXTRACT_OUTPUT_RATIO: number;
-/** Added to every output budget, for a short thought dense with names. */
+/** Added to every output budget, 1,536: a short thought dense with names draws a long answer whatever its length. */
 export const EXTRACT_OUTPUT_FLOOR: number;
 /** Tokens reserved for what a window carries beside its text: the part marker and, when on, the header. */
 export const EXTRACT_MARKER_TOKENS: number;

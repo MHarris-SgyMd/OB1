@@ -1337,11 +1337,14 @@ Three probes before any design, all against an idle Ollama 0.33 serving
   being short.
 
 So the windows bound what the model reads, and the answer budget bounds what
-it writes — twice the text's estimated tokens plus 256 (`db/config.mjs`,
-`extractOutputBudget`), against a measured mean of 0.48 answer tokens per input
-token and a 95th percentile of 1.6 over the 262 thoughts that did extract. A
-runaway now ends at the budget as a malformed answer the worker records failed
-in seconds, where before it held a worker for the whole timeout.
+it writes (`db/config.mjs`, `extractOutputBudget`). The first cut was twice
+the text's estimated tokens plus 256, against a measured mean of 0.48 answer
+tokens per input token and a 95th percentile of 1.6 over the 262 thoughts the
+7B did extract; the second model below showed that ratio was the 7B's compact
+answer style, not a property of the task, and the budget shipped is three
+times the text plus 1,536. A runaway ends at the budget as a malformed answer
+the worker records failed in about a minute, where before it held a worker for
+the whole timeout.
 
 ### The planted set: what a window costs in relations, 2026-09-22
 
@@ -1441,9 +1444,10 @@ What the rows say, read together:
   the retry, with no timeouts (the whole-thought retry timed one out: a
   penalised answer over a long text can be slow as well as long). Under the
   shipped shape the 14 single-call thoughts go 0 → 10 of 14 and the 18 windowed
-  ones 10 → 17 of 18; 10 of the 27 needed no retry. Across every arm 28
-  distinct thoughts extracted at least once; the 5 the shipped shape still
-  fails ran away twice, and `--retry-failed` revisits them.
+  ones 10 → 17 of 18; 10 of the 27 needed no retry. The 5 the shipped shape
+  still failed under this budget ran away twice — and, the second model below
+  showed, were penalised answers the budget then cut: under the recalibrated
+  budget the same arm takes 32 of 32.
 - **The retried answer is thinner.** The penalty taxes the JSON's repeated
   keys as it taxes the loop, so a retried call returns fewer items: the
   whole-thought retry averages 12.0 mentions where the shipped shape's
@@ -1451,10 +1455,59 @@ What the rows say, read together:
   keep the rich answer where they can and the retry rescues where they cannot.
 
 **The default is 1200** (`chunk.ts`, `DEFAULT_EXTRACT_WINDOW_TOKENS`) **with
-the retry on** (`EXTRACT_RETRY_RUNAWAY`): 27 of 32 for 1.8× the calls plus a
-retry on 22, where 600-token windows alone reached 13 for 4.1× the calls and,
-on the planted set above, cost a far relation the 1200 window kept. A brain
-whose model runs away more can set `OB1_EXTRACT_CHUNK_TOKENS=600`.
+the retry on** (`EXTRACT_RETRY_RUNAWAY`): 27 of 32 under this budget, 32 of 32
+under the recalibrated one below, for 1.8× the calls plus a retry on 20–22,
+where 600-token windows alone reached 13 for 4.1× the calls and, on the planted
+set above, cost a far relation the 1200 window kept. A brain whose model runs
+away more can set `OB1_EXTRACT_CHUNK_TOKENS=600`.
+
+### A second model: the p2 residue on `qwen3.8:27b`, 2026-09-22
+
+After the dogfood brain was re-extracted under p2 (343 of 367; 24 failed twice
+on the 7B and a `--retry-failed` pass recovered none), twelve of the 24 —
+every other one by length, 277 to 9,804 characters — went through the shipped
+windowing on `qwen3.8:27b` (served at 262,144 tokens), with and without the
+retry, under the budget of twice the text plus 256:
+
+| arm | extracted | malformed | median s | calls | retried thoughts |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `w1200` | 8/12 | 4 | 52.5 | 18 | 0 |
+| `w1200p` | 8/12 | 4 | 72.1 | 22 | 4 |
+
+The 27B took every thought over 699 estimated tokens, the four-window
+2,451-token one included, and the retry added nothing. The four it "failed"
+are the four shortest — 70, 291, 402 and 525 estimated tokens — and probing
+them showed they are not runaways: with a budget too large to bind, all four
+extract cleanly, at 659, 1,020, 1,494 and 2,301 answer tokens. That is 3.5 to
+9.4 answer tokens per input token, in pretty-printed JSON 1.6× the compact
+size, on notes dense with ticket ids. **The budget of twice the text plus 256
+was the 7B's compact answer style measured, not a property of the task**, and
+it cut every one of those legitimate answers — and a cut answer under the
+retry is retried under a penalty it did not need. The budget shipped is three
+times the text plus 1,536: over every legitimate answer measured on both
+models (1,746 for the 70-token note, 3,111 for the 525-token one), and still a
+bound for the 7B's runaways, which now end in about a minute rather than 30 s.
+The window derivation moves with it: qwen2.5:7b's context would hold 7,688
+(was 10,678), a 4,096-token context derives 520, a 2,048-token one holds no
+window at all.
+
+**Under the recalibrated budget**, the shipped shape (`w1200p`) re-run on both
+sets, same machine, sequential:
+
+| model | set | extracted | malformed | median s | calls | retried thoughts |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| `qwen3.8:27b` | the 12 of the p2 residue | **12/12** | 0 | 63.2 | 18 | 0 |
+| `qwen2.5:7b` | the 32 original stragglers | **32/32** | 0 | 106.4 | 78 | 20 |
+
+On the 27B the retry never fires: every "runaway" was the budget. On the 7B
+the loops are real — 20 of 32 first calls still run to the budget and are
+retried — but the five that failed twice under 2× + 256 converge now, which
+says their penalised retries were legitimate answers the old budget cut in
+turn. The price is time: a runaway on the 7B costs about a minute before the
+retry instead of 30 s (median 106 s per straggler against 76). The dogfood
+brain, re-run with `--retry-failed` under the new budget: **366 of 373
+extracted, 7 failed**, from 339 of 363 under the old one and 262 of 295 under
+p1; the graph holds 2,149 entities, 5,272 mentions and 4,563 edges.
 
 ## Entity extraction, measured through the real write path
 

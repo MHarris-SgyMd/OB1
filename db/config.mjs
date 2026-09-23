@@ -299,6 +299,7 @@ export function resolveChunkTokens(raw, model, fallback) {
 export const KNOWN_CHAT_MODEL_WINDOW = {
   // ── Local via Ollama 0.33, at each model's default parameters. ─────────────
   "qwen2.5:7b": 32768,                     // /api/ps context_length; a 14,432-token prompt evaluated whole
+  "qwen3.8:27b": 262144,                   // /api/ps context_length while extracting the p2 residue (SMD-1879)
 };
 
 /**
@@ -307,18 +308,23 @@ export const KNOWN_CHAT_MODEL_WINDOW = {
  *
  * EXTRACT_PROMPT_TOKENS is the rules and the delimiter with an empty thought,
  * as the qwen2.5 tokeniser counts them (`usage.prompt_tokens` 398). The answer
- * grows with the text: on the fork's own brain, 262 extracted thoughts averaged
- * 0.48 answer tokens per estimated input token (25 tokens per entity or edge
- * row) and the 95th percentile was 1.6, so the budget is twice the text plus a
- * floor for a short thought dense with names. Beyond the budget an answer is
- * not an extraction that ran long — the model's longest legitimate answer
- * measured (136 items, 3,400 tokens, on a 13,000-character thought) sits under
- * it at every window — it is one that will not end, and the budget is what
- * turns a 900-second timeout into a malformed answer in seconds.
+ * grows with the text, but not only with the text: on the fork's own brain,
+ * 262 thoughts `qwen2.5:7b` extracted averaged 0.48 answer tokens per
+ * estimated input token (25 tokens per entity or edge row, compact JSON) with
+ * a 95th percentile of 1.6 — and `qwen3.8:27b`, asked the same of four short,
+ * dense notes it then extracted correctly, answered at 3.5 to 9.4 times the
+ * input (659 tokens for a 70-token note, 2,301 for a 525-token one), in
+ * pretty-printed JSON 1.6× the compact size. A budget of twice the text plus
+ * 256 — the first cut, sized to the 7B — cut every one of those answers and
+ * read them as runaways. So the budget is three times the text plus a floor
+ * of 1,536: over every legitimate answer measured on both models, and still a
+ * bound — a runaway on the 7B ends at it in a minute or so rather than at the
+ * context's end and the worker's timeout (evals/README.md, "Entity extraction
+ * in windows", the second model).
  */
 export const EXTRACT_PROMPT_TOKENS = 398;
-export const EXTRACT_OUTPUT_RATIO = 2;
-export const EXTRACT_OUTPUT_FLOOR = 256;
+export const EXTRACT_OUTPUT_RATIO = 3;
+export const EXTRACT_OUTPUT_FLOOR = 1536;
 /** What a window carries inside the delimiter besides the text: the `[Part i of n …]` marker (~12 tokens) and, with EXTRACT_WINDOW_HEADER on, the note's first 200 characters (~50) — reserved whether or not the header is on, so the arithmetic holds for both (third review pass). */
 export const EXTRACT_MARKER_TOKENS = 80;
 
@@ -379,9 +385,10 @@ export function extractOutputBudget(inputTokens) {
  * measured to extract reliably (chunk.ts's DEFAULT_EXTRACT_WINDOW_TOKENS,
  * passed in because this file cannot import it under Node); a model the table
  * does not know gets `fallback`. So a 32,768-token model derives the fallback
- * (its context would hold 10,678 and the cap holds it to what the model was
- * measured to finish), a 4,096-token one 1,120, a 2,048-token one 438, where
- * the fallback's text plus its answer would not fit its context at all. One
+ * (its context would hold 7,688 and the cap holds it to what the model was
+ * measured to finish), a 4,096-token one 520, where the fallback's text plus
+ * its answer would not fit, and a 2,048-token one holds no window at all
+ * (`unfit`: the rules, the reserve and the answer floor leave 34 tokens). One
  * rule for the worker, the evals and preflight, which names the source it
  * reports; `capped` says the context would have allowed more. Not the
  * embedding rule (resolveChunkTokens): the two models differ, and so do the two
