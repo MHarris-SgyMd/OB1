@@ -30,14 +30,15 @@ export const UPSTREAM_PIN = "9543c29";
 export const REPO_URL = "https://github.com/MHarris-SgyMd/OB1";
 
 /**
- * The current fork version. `0.0.0` is the pre-first-release baseline: the
- * versioning machinery is present but no release has been cut, so a brain reports
- * this rather than a perpetual "no version" warning. The first release replaces
- * it with the number that cut deserves (`1.0.0`), assembled and tagged by the
- * release step, not by hand. Migration 044 writes this exact string into
- * ob1_config.schema_version; check-fork's checkSchemaVersion holds the two equal.
+ * The current fork version — the last release cut (releases.json's last entry),
+ * bumped by a cut's first commit together with the migration that writes it
+ * (FORK.md, "Cutting a release"). `1.0.0` is the first release (migrations
+ * 001..048); before it, 044 wrote the pre-first-release baseline `0.0.0`.
+ * The highest migration that upserts ob1_config.schema_version writes this
+ * exact string (048 today); check-fork's 17d holds the two equal, and
+ * scripts/assemble-release.ts refuses --write until both say the version.
  */
-export const FORK_VERSION = `0.0.0+upstream.${UPSTREAM_PIN}`;
+export const FORK_VERSION = `1.0.0+upstream.${UPSTREAM_PIN}`;
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const RELEASES_PATH = join(ROOT, "releases.json");
@@ -175,7 +176,7 @@ function selfCheck() {
   bad += eq(sign(semverCompare("1.0.0+upstream.9543c29", "1.0.0+upstream.deadbee")), 0, "build metadata ignored");
   bad += eq(sign(semverCompare("1.0.0-rc.1", "1.0.0")), -1, "pre-release precedes release");
   bad += eq(sign(semverCompare("1.0.0-rc.2", "1.0.0-rc.10")), -1, "numeric pre-release fields");
-  bad += eq(sign(semverCompare("0.0.0", FORK_VERSION)), 0, "FORK_VERSION core is 0.0.0");
+  bad += eq(sign(semverCompare("1.0.0", FORK_VERSION)), 0, "FORK_VERSION core is 1.0.0 (the first release)");
   const rel = [{ version: "1.0.0", range: [1, 44] }];
   bad += eq(versionForMigration(44, rel), "1.0.0", "44 is in 1.0.0's range");
   bad += eq(versionForMigration(45, rel), null, "45 is unreleased");

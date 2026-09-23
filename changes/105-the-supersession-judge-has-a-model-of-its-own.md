@@ -1,17 +1,4 @@
----
-type: added
-bump: patch
-tickets: [SMD-1901]
-migrations: []
----
-
-## Changelog
-
-`OB1_JUDGE_MODEL` gives the supersession judge (`db/consolidate.ts`) a model of its own, else the metadata model; the pass key carries it, and preflight reports it beside the metadata model and probes it with `--deep` (SMD-1901).
-
-## FORK
-
-The supersession judge has a model of its own — `OB1_JUDGE_MODEL` splits the judge's model from the extractor's, the pass key carries it, and preflight reports and probes it by name (SMD-1901)
+# 105. The supersession judge has a model of its own — `OB1_JUDGE_MODEL` splits the judge's model from the extractor's, the pass key carries it, and preflight reports and probes it by name (SMD-1901)
 
 `server-portable/consolidate.ts` sent the judge call with `cfg.metadataModel`,
 the same knob every capture's tag and topic extraction uses, so the one way to

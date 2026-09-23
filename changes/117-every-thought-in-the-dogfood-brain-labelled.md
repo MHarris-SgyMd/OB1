@@ -1,17 +1,4 @@
----
-type: added
-bump: patch
-tickets: [SMD-1951]
-migrations: []
----
-
-## Changelog
-
-The whole dogfood brain (342 thoughts) is labelled by epistemic kind against a thirteen-value candidate axis and frozen as `evals/fixtures/thought-kinds.json` — ids and closed-vocabulary keys only — with `evals/eval-thought-kinds.ts` to label, freeze and score it against the live brain; 71% of the brain is a `plan` and 11% a `hypothesis` (all imported issues), the metadata model agrees with the hand label on 24% and calls half the brain `procedure`, and its confidence band carries no signal, so the enum change that follows is decided from this table (SMD-1951).
-
-## FORK
-
-Every thought in the dogfood brain labelled by kind — the distribution, the shipped type's confusion against it, and the metadata model's first pass, frozen as a content-free fixture the enum decision reads (SMD-1951)
+# 117. Every thought in the dogfood brain labelled by kind — the distribution, the shipped type's confusion against it, and the metadata model's first pass, frozen as a content-free fixture the enum decision reads (SMD-1951)
 
 **What changed.** `evals/eval-thought-kinds.ts` holds the candidate axis —
 `observation`, `fact`, `idea`, `hypothesis`, `question`, `decision`, `lesson`,

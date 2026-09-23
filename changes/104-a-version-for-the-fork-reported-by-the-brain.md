@@ -1,17 +1,4 @@
----
-type: added
-bump: minor
-tickets: [SMD-1804]
-migrations: [044]
----
-
-## Changelog
-
-The fork has a version — `MAJOR.MINOR.PATCH+upstream.<sha>` — that the brain reports (`schema_version`, migration 044) and preflight checks, plus `CHANGELOG.md` and `changes/` fragments numbered into change files at release (SMD-1804, migration 044).
-
-## FORK
-
-A version for the fork, reported by the brain, with a changelog beside the design record (SMD-1804)
+# 104. A version for the fork, reported by the brain, with a changelog beside the design record (SMD-1804)
 
 The fork shipped continuously from `main` and nothing named what shipped: one tag
 (the upstream pin), no releases, and a brain identified only by the highest
