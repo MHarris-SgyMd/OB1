@@ -1,17 +1,4 @@
----
-type: fixed
-bump: patch
-tickets: [SMD-1525]
-migrations: []
----
-
-## Changelog
-
-`integrations/enhanced-mcp`'s `get_thought` and `related_thoughts` take the thought's UUID, which is what `thoughts.id` is on this fork — they took upstream's integer id and could address no row here — and `graph_search` and `entity_detail` carry an entity's id as the installed Knowledge Graph schema declares it instead of casting it to a number (SMD-1525).
-
-## FORK
-
-enhanced-mcp's read tools address a thought by its UUID — `get_thought` and `related_thoughts` can reach a row on this fork, and the entity tools carry an id as the schema declares it (SMD-1525)
+# 131. enhanced-mcp's read tools address a thought by its UUID — `get_thought` and `related_thoughts` can reach a row on this fork, and the entity tools carry an id as the schema declares it (SMD-1525)
 
 **What changed.** `integrations/enhanced-mcp/index.ts`: `ThoughtRow.id` is a
 string; `get_thought` takes `id: z.string().uuid()` and `related_thoughts`

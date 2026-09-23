@@ -308,6 +308,151 @@ export function resolveChunkTokens(raw, model, fallback) {
 }
 
 /**
+ * Served context of the CHAT models the extraction pass runs on, in tokens —
+ * the window `resolveExtractWindow` sizes an extraction call to (SMD-1879).
+ * Not KNOWN_MODEL_WINDOW: that table is what an EMBEDDING model embeds in one
+ * request, and the extraction and embedding models differ, so the limit is a
+ * property of the metadata model, not of the pipeline. Measured, as that table
+ * is: each local entry is the context Ollama reports serving the model at
+ * (`/api/ps` context_length) at its default parameters, confirmed by a prompt
+ * longer than the previous default going through whole (`usage.prompt_tokens`
+ * 14,432 for `qwen2.5:7b`, Ollama 0.33) — a card's trained length says what
+ * the weights can do, not what the server admits, and an older Ollama served
+ * every model at 2,048 by default. A model rebuilt with a Modelfile has
+ * another name and is not here: set OB1_EXTRACT_CHUNK_TOKENS for it. Hosted
+ * models are absent until measured, for the reason KNOWN_MODEL_WINDOW gives.
+ */
+export const KNOWN_CHAT_MODEL_WINDOW = {
+  // ── Local via Ollama 0.33, at each model's default parameters. ─────────────
+  "qwen2.5:7b": 32768,                     // /api/ps context_length; a 14,432-token prompt evaluated whole
+  "qwen3.8:27b": 262144,                   // /api/ps context_length while extracting the p2 residue (SMD-1879)
+};
+
+/**
+ * What an extraction call costs beyond the thought's text, and what its answer
+ * may cost, so a window fits a served context with room for both (SMD-1879).
+ *
+ * EXTRACT_PROMPT_TOKENS is the rules and the delimiter with an empty thought,
+ * as the qwen2.5 tokeniser counts them (`usage.prompt_tokens` 398). The answer
+ * grows with the text, but not only with the text: on the fork's own brain,
+ * 262 thoughts `qwen2.5:7b` extracted averaged 0.48 answer tokens per
+ * estimated input token (25 tokens per entity or edge row, compact JSON) with
+ * a 95th percentile of 1.6 — and `qwen3.8:27b`, asked the same of four short,
+ * dense notes it then extracted correctly, answered at 3.5 to 9.4 times the
+ * input (659 tokens for a 70-token note, 2,301 for a 525-token one), in
+ * pretty-printed JSON 1.6× the compact size. A budget of twice the text plus
+ * 256 — the first cut, sized to the 7B — cut every one of those answers and
+ * read them as runaways. So the budget is three times the text plus a floor
+ * of 1,536: over every legitimate answer measured on both models, and still a
+ * bound — a runaway on the 7B ends at it in a minute or so rather than at the
+ * context's end and the worker's timeout (evals/README.md, "Entity extraction
+ * in windows", the second model).
+ */
+export const EXTRACT_PROMPT_TOKENS = 398;
+export const EXTRACT_OUTPUT_RATIO = 3;
+export const EXTRACT_OUTPUT_FLOOR = 1536;
+/** What a window carries inside the delimiter besides the text: the `[Part i of n …]` marker (~12 tokens) and, with EXTRACT_WINDOW_HEADER on, the note's first 200 characters (~50) — reserved whether or not the header is on, so the arithmetic holds for both (third review pass). */
+export const EXTRACT_MARKER_TOKENS = 80;
+
+/**
+ * The most thought text one extraction call can carry in a served context of
+ * `window` tokens with everything the call requests beside it: the rules, the
+ * part marker, and the answer budget for that much text —
+ * `(window − rules − marker − floor) / (1 + ratio)`. One function for the
+ * resolver, preflight's warning and its "fewer than N tokens" hint (first
+ * review pass: the three had the arithmetic each, and all three omitted the
+ * floor and the marker, so the value preflight recommended requested
+ * window + 280 tokens of a `window`-token context).
+ */
+export function extractWindowThatFits(window) {
+  return Math.floor((window - EXTRACT_PROMPT_TOKENS - EXTRACT_MARKER_TOKENS - EXTRACT_OUTPUT_FLOOR) / (1 + EXTRACT_OUTPUT_RATIO));
+}
+
+/** The served context a window of `tokens` needs: the inverse of extractWindowThatFits. */
+export function extractContextNeeded(tokens) {
+  return EXTRACT_PROMPT_TOKENS + EXTRACT_MARKER_TOKENS + EXTRACT_OUTPUT_FLOOR + tokens * (1 + EXTRACT_OUTPUT_RATIO);
+}
+
+/**
+ * Whether a window after a thought's first carries the thought's opening line
+ * (server-portable/entities.ts, documentHeader): the contextual-retrieval
+ * pattern SMD-951 measured mixed for embeddings, applied to extraction where
+ * the loss it addresses is a relation whose subject a later window names only
+ * as "the project". Decided by measurement — evals/README.md, "Entity
+ * extraction in windows" — not by intuition, and not a knob: one rule for the
+ * worker and the eval, so the graph a pass writes is the one the eval scored.
+ */
+export const EXTRACT_WINDOW_HEADER = false;
+
+/**
+ * Whether an extraction call that ran to its answer budget is made once more
+ * with a frequency penalty (server-portable/entities.ts, RUNAWAY_PENALTY).
+ * The runaways measured for SMD-1879 are repetition; the penalty taxes it, and
+ * it is the one lever that reached the thoughts a single call could not
+ * finish at any window: on the 32 stragglers, one call extracted 2, windows
+ * of 1200 tokens 10, of 600 tokens 13, and one call with this retry 27 —
+ * at the cost of a thinner answer on the retried call (the penalty taxes
+ * the JSON's repeated keys too; evals/README.md has the counts). On, and not
+ * a knob, for the reason the header is not: the eval scored this shape.
+ */
+export const EXTRACT_RETRY_RUNAWAY = true;
+
+/** `max_tokens` for an extraction call over `inputTokens` estimated tokens of thought text. */
+export function extractOutputBudget(inputTokens) {
+  return Math.ceil(inputTokens * EXTRACT_OUTPUT_RATIO) + EXTRACT_OUTPUT_FLOOR;
+}
+
+/**
+ * How many estimated tokens of thought text one extraction call carries, for
+ * the metadata model (SMD-1879): OB1_EXTRACT_CHUNK_TOKENS when it is set to a
+ * positive number; otherwise, for a model in KNOWN_CHAT_MODEL_WINDOW, what its
+ * served context holds beside the rules, the part marker and an answer at the
+ * output ratio (extractWindowThatFits) — never above `fallback`, the window
+ * measured to extract reliably (chunk.ts's DEFAULT_EXTRACT_WINDOW_TOKENS,
+ * passed in because this file cannot import it under Node); a model the table
+ * does not know gets `fallback`. So a 32,768-token model derives the fallback
+ * (its context would hold 7,688 and the cap holds it to what the model was
+ * measured to finish), a 4,096-token one 520, where the fallback's text plus
+ * its answer would not fit, and a 2,048-token one holds no window at all
+ * (`unfit`: the rules, the reserve and the answer floor leave 34 tokens). One
+ * rule for the worker, the evals and preflight, which names the source it
+ * reports; `capped` says the context would have allowed more. Not the
+ * embedding rule (resolveChunkTokens): the two models differ, and so do the two
+ * costs — an embedding has no answer to budget for.
+ *
+ * Empty, non-numeric and non-positive mean unset, as every numeric variable
+ * server-portable/embed.ts reads (deploy/compose.yaml forwards `${VAR:-}`).
+ */
+/** The smallest window a served context is derived into; below it the context cannot hold an extraction call at all. */
+export const EXTRACT_MIN_WINDOW_TOKENS = 64;
+
+/**
+ * The most windows one thought may be extracted in — the per-thought cost
+ * bound the 8,000-character cut used to be (fifth review pass). At the default
+ * window that is ~29,000 estimated tokens, ~115,000 characters, four times the
+ * longest thought on the fork's brain; a thought over it is recorded failed
+ * with the count, not extracted for hours or billed for hundreds of calls.
+ */
+export const EXTRACT_MAX_WINDOWS = 24;
+
+export function resolveExtractWindow(raw, model, fallback) {
+  // Floored BEFORE the positivity test (fifth review pass): 0.5 passed `n > 0`
+  // and floored to a 0-token window, one call per word.
+  const n = raw ? Math.floor(Number(raw)) : NaN;
+  // Exact name, then the name without its Ollama tag — resolveChunkTokens's rule.
+  const window = KNOWN_CHAT_MODEL_WINDOW[model] ?? KNOWN_CHAT_MODEL_WINDOW[model.replace(/:[^:]*$/, "")];
+  if (Number.isFinite(n) && n > 0) return { tokens: n, from: "OB1_EXTRACT_CHUNK_TOKENS", window, capped: false, unfit: false };
+  if (window === undefined) return { tokens: fallback, from: "default", window, capped: false, unfit: false };
+  const fits = extractWindowThatFits(window);
+  // A context that holds less than EXTRACT_MIN_WINDOW_TOKENS of text beside
+  // the rules and an answer cannot be windowed into — a 1-token window would
+  // be one call per word (second review pass: the floor was Math.max(1, …)).
+  // The default is returned with `unfit` set, and preflight warns.
+  if (fits < EXTRACT_MIN_WINDOW_TOKENS) return { tokens: fallback, from: "default", window, capped: false, unfit: true };
+  return { tokens: Math.min(fits, fallback), from: "window", window, capped: fits > fallback, unfit: false };
+}
+
+/**
  * Models trained with Matryoshka Representation Learning, which concentrates
  * meaning in the leading dimensions so a prefix of the vector is still a good
  * vector. Truncating one of these is a supported operation; truncating anything
