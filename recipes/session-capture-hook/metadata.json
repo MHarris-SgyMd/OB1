@@ -1,0 +1,24 @@
+{
+  "name": "Session Capture Hook",
+  "description": "A session-end hook for Claude Code and Codex that captures one summary thought into Open Brain — what was asked, what came out, what changed — with the thoughts the session retrieved as its provenance, through a capture-only key, after a secret scan. Off until you paste the hook it prints.",
+  "category": "recipes",
+  "author": {
+    "name": "Michael Harris",
+    "github": "MHarris-SgyMd"
+  },
+  "version": "1.0.0",
+  "requires": {
+    "open_brain": true,
+    "services": [],
+    "tools": ["Claude Code or Codex CLI", "Bun 1.4+ or Node.js 18+"],
+    "env": {
+      "optional": ["OB1_SESSION_CAPTURE_CONFIG", "OB1_SESSION_CAPTURE_STATE", "OB1_BRAIN_URL", "OB1_CAPTURE_KEY", "OB1_SESSION_CAPTURE_SYNC"]
+    }
+  },
+  "requires_skills": ["session-summary"],
+  "tags": ["capture", "hooks", "session-end", "claude-code", "codex", "provenance", "derived_from", "capture-scope"],
+  "difficulty": "beginner",
+  "estimated_time": "10 minutes",
+  "created": "2026-09-22",
+  "updated": "2026-09-22"
+}
