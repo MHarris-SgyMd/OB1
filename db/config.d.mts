@@ -62,6 +62,47 @@ export function resolveChunkTokens(
   fallback: number
 ): { tokens: number; threshold: number; from: ChunkTokensFrom; window: number | undefined; capped: boolean };
 
+/**
+ * Served context of the chat models the extraction pass runs on (SMD-1879).
+ * Measured local models only; a hosted model is absent until measured.
+ */
+export const KNOWN_CHAT_MODEL_WINDOW: Record<string, number>;
+/** The extraction prompt's rules and delimiter with an empty thought, 398 tokens. */
+export const EXTRACT_PROMPT_TOKENS: number;
+/** Answer tokens budgeted per estimated input token, 3 (the 7B's 95th percentile was 1.6; the 27B answers short dense notes at 3.5–9.4×). */
+export const EXTRACT_OUTPUT_RATIO: number;
+/** Added to every output budget, 1,536: a short thought dense with names draws a long answer whatever its length. */
+export const EXTRACT_OUTPUT_FLOOR: number;
+/** Tokens reserved for what a window carries beside its text: the part marker and, when on, the header. */
+export const EXTRACT_MARKER_TOKENS: number;
+/** `max_tokens` for an extraction call over this many estimated tokens of thought text. */
+export function extractOutputBudget(inputTokens: number): number;
+/** The most thought text one call carries in a served context of `window` tokens, with the rules, the marker and its answer budget beside it. */
+export function extractWindowThatFits(window: number): number;
+/** The served context a window of `tokens` needs — the inverse of extractWindowThatFits. */
+export function extractContextNeeded(tokens: number): number;
+/** Whether an extraction window after the first carries the thought's opening line; decided by measurement. */
+export const EXTRACT_WINDOW_HEADER: boolean;
+/** Whether a budgeted extraction call that ran to its budget is retried once with a frequency penalty; decided by measurement. */
+export const EXTRACT_RETRY_RUNAWAY: boolean;
+/** Where an extraction window came from: the variable, the model's served context, or the fallback. */
+export type ExtractWindowFrom = "OB1_EXTRACT_CHUNK_TOKENS" | "window" | "default";
+/**
+ * Estimated tokens of thought text per extraction call: OB1_EXTRACT_CHUNK_TOKENS when a
+ * positive number; else what a KNOWN_CHAT_MODEL_WINDOW model's context holds beside the
+ * rules and an answer at the output ratio, never above `fallback`; else `fallback`.
+ * `capped` says the context would have allowed more than the fallback.
+ */
+export function resolveExtractWindow(
+  raw: string | undefined,
+  model: string,
+  fallback: number
+): { tokens: number; from: ExtractWindowFrom; window: number | undefined; capped: boolean; unfit: boolean };
+/** The smallest window a served context is derived into, 64; a context that holds less gets the default and `unfit`. */
+export const EXTRACT_MIN_WINDOW_TOKENS: number;
+/** The most windows one thought may be extracted in, 24; over it the thought is recorded failed with the count. */
+export const EXTRACT_MAX_WINDOWS: number;
+
 /** Models whose cards claim Matryoshka training, so truncation is supported. */
 export const MRL_MODELS: Set<string>;
 
