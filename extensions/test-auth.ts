@@ -75,7 +75,7 @@ const ROOT = resolve(HERE, "..");
 
 type Handler = (req: Request) => Response | Promise<Response>;
 /** Each server's handler in SERVERS order, the webhook receiver's after them. */
-const served: Handler[] = [];
+const handlers: Handler[] = [];
 /**
  * A server imported as a module: the handler Bun would serve is its default
  * export's `fetch` (SMD-1799). Nothing stands in for `Deno` — a file that still
@@ -243,12 +243,12 @@ process.env[WEBHOOK.secretEnv] = WEBHOOK.secret;
 try {
   for (const s of SERVERS) {
     process.env.SUPABASE_URL = s.url;
-    served.push(await importServer(s.file));
-    assert(served.length === SERVERS.indexOf(s) + 1, `${s.file} imports as a module and exports default { fetch }`);
+    handlers.push(await importServer(s.file));
+    assert(handlers.length === SERVERS.indexOf(s) + 1, `${s.file} imports as a module and exports default { fetch }`);
   }
   process.env.SUPABASE_URL = PG;
-  served.push(await importServer(WEBHOOK.file));
-  assert(served.length === SERVERS.length + 1, `${WEBHOOK.file} imports as a module and exports default { fetch }`);
+  handlers.push(await importServer(WEBHOOK.file));
+  assert(handlers.length === SERVERS.length + 1, `${WEBHOOK.file} imports as a module and exports default { fetch }`);
 } catch (e) {
   // A server that listens or connects at import, or reaches a `Deno` nothing installs, is a
   // counted failure with a tally, not a stack trace in place of one; nothing below could run.
@@ -278,7 +278,7 @@ function unhush() { if (--hushed === 0) Object.assign(console, CONSOLE); }
 /** One request to server `s`; `also` carries further presented forms beside the one under test. */
 async function request(s: Server, key: string | null, via: Via, also: Partial<Record<Via, string>>,
   init: { method: string; path: string; body?: unknown; rawBody?: string | ReadableStream<Uint8Array>; accept?: boolean }): Promise<Reply> {
-  const handler = served[SERVERS.indexOf(s)];
+  const handler = handlers[SERVERS.indexOf(s)];
   // Where createClient runs per request, the URL shape must be the one THIS server's client accepts.
   process.env.SUPABASE_URL = s.url;
   const headers: Record<string, string> = init.accept === false ? { "Content-Type": RPC["Content-Type"] } : { ...RPC };
@@ -464,14 +464,14 @@ for (const s of SERVERS.filter((s) => s.kind === "mcp")) {
   console.log(`\n[${file}]`);
   process.env.SUPABASE_URL = PG;
   process.env.MCP_ACCESS_KEY = LEGACY_KEY;
-  const before = served.length;
+  const before = handlers.length;
   try {
-    served.push(await importServer(file));
+    handlers.push(await importServer(file));
   } catch (e) {
     assert(false, `${file} threw at import: ${e instanceof Error ? e.message : String(e)}`);
   }
-  assert(served.length === before + 1, `${file} imports as a module and exports default { fetch }`);
-  const handler = served[before];
+  assert(handlers.length === before + 1, `${file} imports as a module and exports default { fetch }`);
+  const handler = handlers[before];
   const ids = [11, 12, 13];
   // No handler (the import failed above) is already a counted failure; the probe is skipped rather than thrown from.
   const answers = handler ? await overlapping(ids, (id, late) => answer(handler, new Request("http://extension.test/mcp",
@@ -551,7 +551,7 @@ for (const s of SERVERS.filter((s) => s.kind === "worker")) {
 
 console.log(`\n[${WEBHOOK.file}]`);
 {
-  const handler = served[SERVERS.length];
+  const handler = handlers[SERVERS.length];
   const post = async (body: unknown) => {
     const r = await handler(new Request("http://extension.test/", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }));
     return { status: r.status, text: await r.text() };
@@ -732,7 +732,7 @@ for (const s of SERVERS.filter((s) => s.kind === "mcp" && s.writes.length > 0)) 
     "…and is still refused with a wrong key");
 }
 for (const s of SERVERS.filter((s) => s.health)) {
-  const health = await served[SERVERS.indexOf(s)](new Request(`http://extension.test${s.health}`, { method: "GET" }));
+  const health = await handlers[SERVERS.indexOf(s)](new Request(`http://extension.test${s.health}`, { method: "GET" }));
   assert(health.status === 200 && (await health.json()).status === "ok", `${s.file}: the unauthenticated GET ${s.health} health check still answers`);
 }
 

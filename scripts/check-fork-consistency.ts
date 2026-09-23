@@ -1789,7 +1789,7 @@ function expressionEnd(text: string, start: number): number { return scan(text, 
 function importSpecifiers(text: string) {
   const code = blanked(text, false);
   const out: { spec: string; line: number }[] = [];
-  const lineOf = (index: number) => code.slice(0, index).split("\n").length;
+  const lineOf = lineIndexer(code);
   // A statement runs to its `;` but never across a newline into a line that opens another statement or leads
   // with `;` (standard style's `;[…]` and `;(…)` idioms): the third review pass found a semicolon-less import
   // counted twice through the next line's leading `;`, and a mixed file's `;`-terminated import credited to the
@@ -1811,10 +1811,11 @@ const importsShim = (text: string) => importSpecifiers(text).some((s) => SHIM_SP
 /** Every `Deno` reached in `text`'s code, as `{ member, line }` — `<bare>` when not through a member; `globalThis.Deno.x` reads as `Deno.x`. */
 function denoLinesIn(text: string): { member: string; line: number }[] {
   const code = blanked(text, true);
+  const lineOf = lineIndexer(text);
   const out: { member: string; line: number }[] = [];
   for (const m of code.matchAll(DENO_MEMBER)) {
     const member = m[1] === undefined ? "<bare>" : m[2] ? `${m[1]}.${m[2]}` : m[1];
-    out.push({ member, line: text.slice(0, m.index).split("\n").length });
+    out.push({ member, line: lineOf(m.index!) });
   }
   return out;
 }
@@ -1830,10 +1831,11 @@ function specifierGapsIn(entry: string, deps: string[] = []): string[] {
     const at = i === 0 ? "" : `dep${i - 1}:`;
     for (const s of importSpecifiers(text)) if (NOT_ON_BUN.test(s.spec)) gaps.push(`${at}specifier:${s.spec}@${s.line}`);
     const code = blanked(text, true);
+    const lineOf = lineIndexer(text);
     for (const m of code.matchAll(DYNAMIC_IMPORT)) {
       // The specifier's text is blanked in `code`; read it from the original at the same offset.
       const spec = text.slice(m.index + m[0].length - m[2].length - 1, m.index + m[0].length - 1);
-      if (NOT_ON_BUN.test(spec)) gaps.push(`${at}specifier:${spec}@${text.slice(0, m.index).split("\n").length}`);
+      if (NOT_ON_BUN.test(spec)) gaps.push(`${at}specifier:${spec}@${lineOf(m.index!)}`);
     }
   });
   return gaps;

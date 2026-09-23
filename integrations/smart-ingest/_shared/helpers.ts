@@ -523,7 +523,7 @@ export function detectSensitivity(text: string): SensitivityResult {
 /**
  * Compute SHA-256 fingerprint of normalized content.
  * Algorithm: lowercase -> collapse whitespace -> trim -> SHA-256 hex.
- * Uses Web Crypto API (available in Deno and modern browsers).
+ * Uses Web Crypto API (available in Bun, Deno and modern browsers).
  */
 export async function computeContentFingerprint(content: string): Promise<string> {
   const normalized = content.trim().replace(/\s+/g, " ").toLowerCase();
