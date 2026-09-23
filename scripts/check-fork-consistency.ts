@@ -207,7 +207,7 @@ import { join, dirname, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { coreColumnCommentStatement, coreFunctionStatement, DESTRUCTIVE_SQL_RULES, destructiveSqlIn, LOCAL_PROVIDER_SERVICES, ownedColumnCommentsIn, ownedFunctionsIn, supabaseIsmsIn } from "../db/config.mjs";
 import { CHANGES_DIR, END as INDEX_END, START as INDEX_START, FIRST_FILED, classifyChanges, indexSpan, pad3, readChangeEntries, renderIndex, ticketsOf } from "./fork-index.ts";
-import { FORK_VERSION, migrationSha, readReleases, semverCompare } from "../db/version.mjs";
+import { FORK_VERSION, migrationSha, readReleases, schemaVersionValue, semverCompare } from "../db/version.mjs";
 import { fragmentProblems } from "./fragments.ts";
 import type { ChangeEntry, ClassifiedChanges, NumberedChange } from "./fork-index.ts";
 import { DISPOSITION_PATH, FACET_SETS, FETCHERS, REGISTRY_PATH, SPEC_PATH, VENDOR_PATTERN, dispositionPaths, readMetadata, readRegistry, registryProblems, renderClassification, tablesSpan } from "./connector-registry.ts";
@@ -1974,6 +1974,9 @@ function documentedEnvKnobs(pattern: RegExp) {
 const PUBLISHES: Record<string, string[]> = {
   "compose.yaml": ["server"],
   "compose.host-ports.yaml": ["postgres", "ollama"],
+  // The three-brain pipeline (SMD-1806): each tier's server on its own loopback
+  // port; the three Postgres services and the shared Ollama publish nothing.
+  "compose.tiers.yaml": ["stable-server", "canary-server", "working-server"],
 };
 const COMPOSE_FILE = /^(docker-)?compose.*\.ya?ml$/;
 
@@ -3499,15 +3502,11 @@ checkFrozenMigrations();
  * string a brain reports (044 at the baseline, a later set-version migration
  * after a cut) and the string preflight and the assembler use cannot drift.
  */
-/** The schema_version literal a migration upserts, or null if it writes none. */
-function schemaVersionValue(text: string) {
-  const m = /'schema_version'\s*\)\s*VALUES?[\s\S]*?\(\s*'schema_version'\s*,\s*'([^']+)'/.exec(text)
-    || /\(\s*'schema_version'\s*,\s*'([^']+)'\s*\)/.exec(text);
-  return m ? m[1] : null;
-}
 function checkSchemaVersion() {
   // Self-test: the two INSERT shapes are read, a migration that writes no
-  // schema_version is not mistaken for one that does.
+  // schema_version is not mistaken for one that does. The reader is
+  // db/version.mjs's schemaVersionValue, shared with assemble-release.ts, which
+  // refuses a cut whose highest migration does not write the version (SMD-1860).
   if (schemaVersionValue("INSERT INTO ob1_config (key, value) VALUES\n  ('schema_version', '1.2.3+upstream.abc')\nON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;") !== "1.2.3+upstream.abc")
     fail(SELF, "check 17d no longer reads the schema_version an INSERT writes (its own probe)");
   if (schemaVersionValue("INSERT INTO ob1_config (key, value) VALUES ('embedding_dim', '1024');") !== null)

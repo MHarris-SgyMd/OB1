@@ -320,6 +320,14 @@ jobs:
         working-directory: db
         run: bun test-schema.ts
 
+      # The board sync's pure rules and write decisions — the rendering the
+      # hand captures are recognised by, the plan from a census, which call
+      # each state of the brain gets — against a recording store. No network,
+      # no database, no provider (SMD-1954).
+      - name: Board sync rules
+        working-directory: db
+        run: bun sync-linear.ts --self-check
+
       # The embedding width is configurable and must hold at more than one value.
       - name: Schema builds at a non-default embedding width
         working-directory: db
