@@ -3996,7 +3996,8 @@ What it says:
   the re-extraction running since says 0.80 or 0.90 on under 1% of its rows.
   The column 016 sorts and de-duplicates by carries almost nothing. Its
   outcome set is this directory's `eval-entities.ts` labelled captures, outside
-  any brain, where the same model's precision is 0.68.
+  any brain, where the same model's precision is 0.68 — and, since SMD-1982's
+  grade below, the 64 rows `fixtures/entity-grades.json` resolves by hand.
 * **The 17 resolved hypotheses are an outcome with nothing to score.** No
   thought in the brain carries a confidence; the first Brier over the writer's
   own judgement is over whatever `metadata.confidence` declares from here.
@@ -4012,6 +4013,74 @@ What it says:
 Not built here: a ledger table (SMD-1730/1731's substrate), any control loop
 (SMD-1736 decay, SMD-1724 trust), a `confidence` argument on `capture_thought`
 (SMD-1949). The record is `changes/smd-1809.md`.
+
+### The extractor's hedge, graded blind (SMD-1982, 2026-09-23)
+
+The report above could not score the extractor: nothing in a brain resolves a
+mention or an edge. SMD-1982 asked the natural question first — when the
+windowed prompt does say something other than 1.00, is it right to? — and the
+answer needs no prompt change, only a grade. `fixtures/entity-grades.json`
+holds one: every row `extract:qwen2.5:7b@p2` had written below 1.00 on the
+dogfood brain that day (15 mentions — 13 at 0.80, 2 at the parser's 0.50
+default — and 17 edges — 6 at 0.80, 11 at 0.90) plus a control of the same
+count per kind drawn from the 1.00 rows by md5 of the claim: 64 rows over 37
+thoughts, graded blind to the confidence by reading each name (and for an edge
+its relation) against the thought's text. 1 = a specific named thing the text
+holds, of a defensible type, and for an edge a relation the text states or
+clearly implies; 0 otherwise. The fixture is ids and numbers only (check 9): the
+kind is which list a row is in, the relation an index into `RELATIONS`, the
+confidence at the grade beside the outcome. `eval-calibration.ts` joins it on
+the claim key the live report already uses, so the extractor's row now has a
+resolved count and a reliability table, and a graded claim the brain no longer
+holds is counted in a note. The grade is of the claim, not of the run: a later
+prompt version that writes the same mention or edge is resolved by the same row.
+
+Two bins, held over graded:
+
+| bin | mentions | edges | all |
+| --- | --- | --- | --- |
+| 1.00 (the control) | 12/15 (80%) | 5/17 (29%) | 17/32 (53%) |
+| below 1.00 (every row) | 1/15 (7%) | 12/17 (71%) | 13/32 (41%) |
+
+By value, as the report prints it over the graded rows: 0.50 held 0 of 2, 0.80
+5 of 19 (mentions 1 of 13, edges 4 of 6), 0.90 8 of 11 (all edges), 1.00 17 of
+32 — Brier 0.425, ECE 0.439, base rate 0.469, skill −0.705 against the constant,
+over a stratified sample, so the base rate is the sample's and not the brain's.
+
+What it says:
+
+* **On a mention the hedge is a signal the prompt suppresses.** When the model
+  said 0.80 of a mention it was wrong 12 times in 13 (Fisher exact against the
+  control, p = 0.0001): six type-vocabulary words (`person`, `topic`, `place`,
+  `tool`, `organization`, `project`) minted from a ticket that quotes the
+  prompt's own type list, four `PostgreSQL` mentions in thoughts whose text
+  never says Postgres — each in a different thought, each hedged — and four
+  fragments and example tokens. The two 0.50 defaults were both wrong. The
+  control's three failures at 1.00 (an identifier typed as a topic, a URL
+  fragment, a glob typed as a place) were not hedged. So the model does know
+  something about its own false positives, and today the column throws it
+  away: 016 keeps every row at or above 0.50 and only sorts by it.
+* **On an edge the hedge marks nothing useful.** The hedged edges held *more*
+  often than the control (12/17 against 5/17, p = 0.038, the other way), but
+  15 of the 17 come from one thought — SMD-1731's ticket body, whose "SMD-1731
+  `uses` <component>" edges the model marked 0.90 and which mostly hold — and
+  the other two held 0 of 2. The finding on edges is the control itself: 1.00
+  edges hold 29% of the time, and a confidence that says 1.00 on 99.6% of them
+  is not where that defect will be fixed (SMD-1925, SMD-1937).
+* **The pooled two-bin table is flat (53% against 41%, p = 0.45) because the
+  two kinds run opposite ways.** Read per kind or not at all.
+
+Limits: 64 rows, one grader (the maintainer's assistant, blind to the value but
+not to the fork), the hedged strata clustered on six thoughts for mentions and
+three for edges, and a strict rule on type. The control's held rate is the
+estimate of the 1.00 stratum's precision (mentions 80%, edges 29%) with the
+wide interval fifteen or seventeen rows give.
+
+What it changes in SMD-1982: the elicitation arms in its Work item 1 are worth
+running for mentions — the prompt that asks for a reason below 1 first, on the
+windowed prompt once SMD-1879 lands — and item 2 (stop recording a confidence)
+is not the answer for mentions. For edges the confidence carries no signal
+either way. The record is `changes/smd-1982.md`.
 
 
 ## Related
