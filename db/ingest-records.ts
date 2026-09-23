@@ -5,7 +5,7 @@
  * SMD-1806's first premise: the brain is a *derived view* over the fork's
  * records — FORK.md, the Linear board, the memory files, the git history — never
  * the record itself. So the "stable" tier holds nothing that a wipe would lose:
- * its cost is one re-ingest. This is that ingest. It reads the four sources,
+ * its cost is one re-ingest. This is that ingest. It reads the sources below,
  * turns each record into one thought row with a deterministic id and a
  * `metadata.source` label (SMD-1806 rule 5 — an agent-written capture is one
  * source among four, so SMD-1724's trust question has an answer here from day
@@ -66,7 +66,7 @@
 
 import { SQL } from "bun";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 import { PIPELINE_TIERS } from "./config.mjs";
@@ -88,8 +88,6 @@ const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 export const SOURCES = ["fork", "commit", "linear", "memory", "markdown"] as const;
 export type Source = (typeof SOURCES)[number];
-/** The sources that are external content, gated by the allowlist; the rest are the fork's own records. */
-export const GATED_SOURCES: readonly Source[] = ["linear", "markdown"];
 /** The pipeline tiers, from the one source db/config.mjs owns (SMD-1953) — migration 045's CHECK and preflight/initEnv validate against the same list. */
 export const TIERS = PIPELINE_TIERS;
 export type Tier = (typeof TIERS)[number];
@@ -679,7 +677,7 @@ async function main(): Promise<void> {
     for (const s of SOURCES) {
       if (perSource[s] === undefined) continue;
       const refused = refusedPerSource[s] ?? 0;
-      console.log(`  ${s}: ${perSource[s]} record(s)${refused ? ` — ${refused} REFUSED by the allowlist (${basename(s === "markdown" ? resolve(markdownDir!) : LINEAR_CORPUS_SCOPE)} not cleared)` : ""}`);
+      console.log(`  ${s}: ${perSource[s]} record(s)${refused ? ` — ${refused} REFUSED by the allowlist (the scope and the knob that clears it are said above)` : ""}`);
     }
   };
 

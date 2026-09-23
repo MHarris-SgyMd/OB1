@@ -28,7 +28,7 @@
 
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative, sep } from "node:path";
-import { AdapterRefusal, decodeUtf8Strict, IDENTITY_MAX, normaliseLinks, normaliseMentions, type Adapter, type Ingested, type Link, type Mention } from "./ingest-contract.ts";
+import { AdapterRefusal, decodeUtf8Strict, IDENTITY_MAX, normaliseLinks, normaliseMentions, roundTrips, type Adapter, type Ingested, type Link, type Mention } from "./ingest-contract.ts";
 
 /**
  * What Obsidian embeds that is not a note: images, audio, video, PDFs and
@@ -350,7 +350,7 @@ export function selfCheck(): number {
 
   for (const c of MARKDOWN_LOSSY) {
     const r = markdownAdapter.map(file("N.md", c.input));
-    ok(r.canonical.form === c.input, `lossy case "${c.name}": the canonical is the input byte for byte`);
+    ok(roundTrips(r, c.input), `lossy case "${c.name}": the canonical is the input byte for byte`);
     ok(c.text.test(r.text) && r.text !== c.input, `lossy case "${c.name}": the text flattens it (${JSON.stringify(r.text)})`);
   }
   ok(MARKDOWN_LIMITS.length >= 4, "the limits are enumerated");
