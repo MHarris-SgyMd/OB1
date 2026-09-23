@@ -164,7 +164,7 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `1508 assertions: 1508 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `1512 assertions: 1512 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports fifty-one (51) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
@@ -1544,8 +1544,8 @@ re-embedded).
 **The ingestion contract (SMD-1867).** The `linear` and `markdown` sources go
 through an **adapter** — `ingest-linear.ts`, `ingest-markdown.ts`, each a pure
 map from one source item to the five things `ingest-contract.ts` names: a stable
-**identity** within the system (a Linear identifier; a note's frontmatter `id`,
-else its name), the **canonical** form byte for byte (the issue as fetched, as
+**identity** within the system (a Linear identifier; a note's name, which is
+what a wikilink names — its frontmatter `id` is a facet), the **canonical** form byte for byte (the issue as fetched, as
 JSON with keys in one order; the file's bytes), the clean **text** that is
 stored and embedded (Linear's autolink markup stripped to the identifier; a
 note's frontmatter dropped and its `[[wikilinks]]` flattened to their alias or
@@ -1559,7 +1559,11 @@ also writes, through migration 051, its canonical (`thought_sources`), its links
 (`link` facets, as a set — a link the source drops is closed, never deleted) and
 its mentions (`record_thought_entities` under `source:<system>`, confidence 1,
 no model call — rows 016's extractor never displaces and never doubles: where
-both name one pair the structured row stands). Re-ingesting an unchanged item
+both name one pair the structured row stands); the three writes are
+`ingest-structure.ts`'s `recordStructure`, a module of bun and the contract
+alone so `sync-linear.ts` can load it inside its container (which mounts `db/`
+and `server-portable/` and nothing else — the sync's `--self-check` holds its
+whole import closure to those two). Re-ingesting an unchanged item
 writes nothing at any of the four. Every adapter passes one test: its canonical
 IS the input; the Markdown adapter enumerates what its text cannot reproduce
 (`MARKDOWN_LOSSY`) and the two inputs it refuses rather than store mangled — a
@@ -1809,7 +1813,7 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 1508 assertions, PGlite, no container
+bun test-schema.ts                          # 1512 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts         # 631 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database

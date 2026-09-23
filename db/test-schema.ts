@@ -6298,6 +6298,23 @@ console.log("\n[47] Migration 051: the source beside the thought — the canonic
   assert(s1.ok === true && s1.mentions === 2 && s1.new_entities === 2, `the structured pass writes the project and the label as mentions (${JSON.stringify(s1)})`);
   let m = await mentions(t1);
   assert(m.length === 2 && m.every((x) => x.key === "source:linear" && x.c === "1.00"), `…under source:linear at confidence 1 (${JSON.stringify(m)})`);
+  // The same structured set again writes no row: the mentions' extracted_at
+  // and the entities' last_seen_at stand where the first pass put them (third
+  // review pass, independent read — the pass deleted and re-inserted its own
+  // rows every call, and a sync pass over an unchanged ticket stamped the
+  // project entity every five minutes).
+  const stamps = async () => q<{ x: string; s: string }>(`SELECT m.extracted_at::text AS x, en.last_seen_at::text AS s FROM thought_entities m JOIN ob1_entities en ON en.id = m.entity_id WHERE m.thought_id = $1::uuid ORDER BY en.name`, [t1]);
+  const stampsBefore = await stamps();
+  await db.query(`SELECT pg_sleep(0.02)`);
+  const s1b = await rte(t1, "source:linear", structured);
+  assert(s1b.ok === true && s1b.mentions === 0 && s1b.new_entities === 0 && JSON.stringify(await stamps()) === JSON.stringify(stampsBefore), `the same structured set again writes nothing: 0 mentions written, extracted_at and last_seen_at unmoved (${JSON.stringify(s1b)})`);
+  const s1c = await rte(t1, "source:linear", [...structured, { name: "Extra Topic", type: "topic", confidence: 1 }]);
+  assert(s1c.mentions === 1 && (await mentions(t1)).length === 3, `a wider structured set writes only what is new (${JSON.stringify(s1c)})`);
+  const extraSeen = (await one<{ s: string }>(`SELECT last_seen_at::text AS s FROM ob1_entities WHERE name = 'Extra Topic'`)).s;
+  const projectSeen = (await one<{ s: string }>(`SELECT last_seen_at::text AS s FROM ob1_entities WHERE name = $1`, [SAMPLE_ISSUE.project!.name])).s;
+  assert(extraSeen > projectSeen, "…and a mention written is a sighting (the new topic's last_seen_at is later than the untouched project's)");
+  await rte(t1, "source:linear", structured);
+  assert((await mentions(t1)).length === 2, "…a narrower set removes the row it no longer names");
   const e1 = await rte(t1, "extract:m@p1", [{ name: "infrastructure", type: "topic", confidence: 0.6 }, { name: "Bob", type: "person", confidence: 0.9 }], [{ from: "Bob", to: "infrastructure", relation: "works_on", confidence: 0.8 }]);
   m = await mentions(t1);
   assert(e1.ok === true && e1.mentions === 1 && e1.edges === 1 && m.length === 3, `the extraction lands its own rows — Bob and one edge — and reports one mention, not two (${JSON.stringify(e1)})`);

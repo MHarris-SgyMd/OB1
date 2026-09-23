@@ -96,6 +96,9 @@
 
 import { hostname } from "node:os";
 import { randomUUID } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, relative, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { SQL } from "bun";
 import { SqlStore } from "../server-portable/store-sql.ts";
 import { createEmbedder, resolveEmbedConfig, type EmbedConfig, type EmbedEnv, type EmbeddedCapture } from "../server-portable/embed.ts";
@@ -105,7 +108,11 @@ import type { Actor } from "../server-portable/store.ts";
 import { describeEnv, loadEnv } from "./env.ts";
 import { linearClient, strict, type Gql } from "./linear-api.ts";
 import { IDENTIFIER_PATTERN, issueFacets, labelNames, linearAdapter, renderIssue, SAMPLE_ISSUE, stripAutolinks, type LinearIssue } from "./ingest-linear.ts";
-import { recordStructure, runName, type Structure } from "./ingest-records.ts";
+// From ingest-structure.ts, NOT ingest-records.ts: the ingester imports evals/
+// and scripts/, which the board-sync container does not mount (third review
+// pass; the self-check holds this file's import closure to db/ and
+// server-portable/).
+import { recordStructure, runName, type Structure } from "./ingest-structure.ts";
 
 // The Linear adapter's pure rules, re-exported: the renderer, the facets and
 // the markup strip moved to db/ingest-linear.ts (SMD-1867) so the sync and
@@ -949,9 +956,56 @@ function fakeBrain(seed: Record<string, FakeRow>) {
   return { rows, store, writes, brainRows, fingerprintOf: async (t: string) => fakeFingerprint(t), holderOf: async (fp: string) => { const id = holder(fp); return id ? brainRows().find((r) => r.id === id)! : null; } };
 }
 
+/**
+ * The files a module reaches through its relative imports, transitively —
+ * `import … from "./x.ts"`, `import "./x.ts"`, `export … from "./x.ts"`, and a
+ * dynamic `import("./x.ts")` with a literal specifier — as paths relative to
+ * the repository root. A regex over the source, not a
+ * bundler: the fork's imports are static relative specifiers with their
+ * extensions written, which is all this needs to hold the container's mount
+ * to what the sync loads (third review pass).
+ */
+export function importClosure(entry: string, root: string): string[] {
+  const seen = new Set<string>();
+  const walk = (file: string) => {
+    const abs = resolve(file);
+    if (seen.has(abs)) return;
+    seen.add(abs);
+    // A file the mount does not carry is in the closure (that is the finding)
+    // and cannot be read further — inside the container the ingester's
+    // evals/ imports are exactly such files.
+    if (!existsSync(abs)) return;
+    const src = readFileSync(abs, "utf8");
+    for (const m of src.matchAll(/(?:^|\n)\s*(?:import|export)\b[^;]*?\bfrom\s+"(\.{1,2}\/[^"]+)"|(?:^|\n)\s*import\s+"(\.{1,2}\/[^"]+)"|\bimport\(\s*"(\.{1,2}\/[^"]+)"\s*\)/g)) {
+      walk(resolve(dirname(abs), m[1] ?? m[2] ?? m[3]));
+    }
+  };
+  walk(entry);
+  return [...seen].map((f) => relative(root, f)).sort();
+}
+
+/** The directories deploy/compose.yaml mounts into the board-sync container — everything this file loads must be under one of them. */
+export const CONTAINER_MOUNTS = ["db/", "server-portable/"] as const;
+
 function selfCheck(): Promise<number> {
   let bad = 0;
   const ok = (cond: boolean, label: string) => { if (!cond) { console.error(`FAIL ${label}`); bad++; } };
+
+  // The container's mount is the boundary: every file this tool loads,
+  // transitively, sits under db/ or server-portable/ (third review pass — an
+  // import of ingest-records.ts reached evals/ and scripts/, which the
+  // container does not mount, and the sync would have failed at load).
+  {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const root = resolve(here, "..");
+    const closure = importClosure(resolve(here, "sync-linear.ts"), root);
+    const outside = closure.filter((f) => !CONTAINER_MOUNTS.some((m) => f.startsWith(m)));
+    ok(closure.length > 10 && outside.length === 0, `every file the sync loads is under ${CONTAINER_MOUNTS.join(" or ")} — the board-sync container's mounts (${closure.length} files; outside: ${outside.join(", ") || "none"})`);
+    // The walker sees through: the ingester's closure DOES reach evals/ and
+    // scripts/, so a sync that imported it would fail the line above.
+    const ingester = importClosure(resolve(here, "ingest-records.ts"), root);
+    ok(ingester.some((f) => f.startsWith("evals/")) && ingester.some((f) => f.startsWith("scripts/")) && ingester.includes("db/ingest-structure.ts"), `…and the walker finds the ingester's evals/ and scripts/ imports, so the rule has teeth (${ingester.length} files)`);
+  }
 
   // The adapter's sample issue, with the description the hand-capture shape was asserted on.
   const issue: LinearIssue = { ...SAMPLE_ISSUE, description: "## Problem\n\nSee <issue id=\"x\" href=\"https://linear.app/…\">SMD-1730</issue> and SMD-1250.\n", createdAt: "2026-09-22T00:00:00.000Z" };
@@ -1412,7 +1466,12 @@ async function main(): Promise<void> {
     // chain's head, and the identity follows the head — without it the hook
     // would refuse IDENTITY_HELD by the old head on every pass (first review
     // pass).
-    structure: async (id, s) => { await recordStructure(sql, id, s, run, { take: true }); },
+    // One transaction: the takeover (the old head's links closed, its mentions
+    // removed, its source row gone), the canonical, the links and the mentions
+    // land together or not at all — three autocommit statements left a ticket
+    // edge-less until it next moved when the second failed (third review pass,
+    // independent read).
+    structure: async (id, s) => { await sql.begin(async (tx) => { await recordStructure(tx, id, s, run, { take: true }); }); },
   };
 
   let resolved: Board | undefined;

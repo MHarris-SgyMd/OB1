@@ -73,9 +73,16 @@ import { PIPELINE_TIERS } from "./config.mjs";
 import { loadLinearCorpus, linearThoughtId, linearThoughtText, type LinearDoc } from "../evals/linear-corpus.ts";
 import { parseFragment, fragmentSection } from "../scripts/fragments.ts";
 import { headingOf, ticketsOf } from "../scripts/fork-index.ts";
-import { AdapterRefusal, allowlistFrom, normaliseLinks, normaliseMentions, scopeRefusal, stableJson, type Allowlist, type Identity, type Ingested } from "./ingest-contract.ts";
+import { AdapterRefusal, allowlistFrom, normaliseLinks, normaliseMentions, scopeRefusal, stableJson, type Allowlist, type Ingested } from "./ingest-contract.ts";
 import { autolinkTargets, LINEAR_SYSTEM, stripAutolinks } from "./ingest-linear.ts";
 import { markdownAdapter, markdownFiles, MARKDOWN_SYSTEM } from "./ingest-markdown.ts";
+import { IdentityHeld, recordStructure, runName as structureRunName, type Structure, type StructureResult } from "./ingest-structure.ts";
+
+// The structure writer lives in ingest-structure.ts so db/sync-linear.ts can
+// import it without this file's evals/ and scripts/ imports (its container
+// mounts db/ and server-portable/ alone); re-exported here for the callers
+// that read it as the pipeline's.
+export { IdentityHeld, recordStructure, type Structure, type StructureResult };
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -87,8 +94,6 @@ export const GATED_SOURCES: readonly Source[] = ["linear", "markdown"];
 export const TIERS = PIPELINE_TIERS;
 export type Tier = (typeof TIERS)[number];
 
-/** What a record that came through an adapter carries beside its row: the canonical, the links and the structured mentions (SMD-1867). */
-export type Structure = Pick<Ingested, "identity" | "canonical" | "links" | "mentions">;
 
 /** One record as a thought row: its id, its content, its source label and the metadata that goes under it. */
 export type Doc = {
@@ -385,15 +390,15 @@ export const INGEST_ACTOR = { name: "ingest-records", via: "ingest-records" } as
 /** The two keys 050's trigger owns: never compared, never merged — the trigger stamps them from the envelope. */
 const ACTOR_KEYS = ["actor_kind", "actor_name"] as const;
 
-/** A run's name for thought_sources.ingest_run — the tool and the moment it started. */
+/** A run's name for thought_sources.ingest_run — this tool and the moment it started (ingest-structure.ts's rule, the ingester's name). */
 export function runName(tool: string = INGEST_ACTOR.via, at: Date = new Date()): string {
-  return `${tool}@${at.toISOString()}`;
+  return structureRunName(tool, at);
 }
 
 /** What one record's write said: the row's outcome, and the structure's counts when the record carried one. */
 export type RecordResult = {
   outcome: UpsertResult;
-  structure?: { canonical: string; links: { added: number; closed: number; kept: number; dropped: number }; mentions: number };
+  structure?: StructureResult;
   /** For `held`: the thought that holds the identity. */
   heldBy?: string;
 };
@@ -465,44 +470,6 @@ export async function upsertRecord(sql: SQL, doc: Doc, run: string = runName()):
     if (e instanceof IdentityHeld) return { outcome: "held", heldBy: e.heldBy };
     throw e;
   }
-}
-
-/** record_thought_source refused: another thought holds the (system, identity). */
-export class IdentityHeld extends Error {
-  constructor(public readonly identity: Identity, public readonly thoughtId: string, public readonly heldBy: string) {
-    super(`${identity.system} ${identity.key} is held by thought ${heldBy}; not written on ${thoughtId}`);
-    this.name = "IdentityHeld";
-  }
-}
-
-/**
- * The structure beside a row, as 051 records it: the canonical
- * (record_thought_source — unchanged when it stands), the links as a set
- * (record_source_links — the same set twice writes nothing, a link the source
- * no longer states is closed) and the structured mentions
- * (record_thought_entities under `source:<system>`, confidence 1, replacing
- * only that key's rows — the resolution rule). Runs on the caller's
- * connection or transaction; db/sync-linear.ts calls it on the head row it
- * has just written, with `take`: a ticket's head row moves when an older
- * paste becomes the chain's head, and the identity follows it. Without
- * `take`, an identity another thought holds is thrown as IdentityHeld: two
- * thoughts claiming one source item is the caller's to resolve.
- */
-export async function recordStructure(sql: SQL, thoughtId: string, s: Structure, run: string = runName(), opts: { take?: boolean } = {}): Promise<NonNullable<RecordResult["structure"]>> {
-  const [src] = (await sql`SELECT record_thought_source(${thoughtId}::uuid, ${s.identity.system}, ${s.identity.key}, ${s.canonical.form}, ${s.canonical.mediaType}, ${run}, ${opts.take === true}) AS r`) as { r: { ok: boolean; outcome?: string; error?: string; held_by?: string } }[];
-  if (!src.r.ok && src.r.error === "IDENTITY_HELD" && src.r.held_by) throw new IdentityHeld(s.identity, thoughtId, src.r.held_by);
-  if (!src.r.ok) throw new Error(`record_thought_source(${s.identity.system} ${s.identity.key}) on ${thoughtId}: ${src.r.error}`);
-  // The JSON goes over as TEXT and is cast in SQL: a JS string bound straight
-  // to a `::jsonb` parameter is serialised as a JSON string — the function saw
-  // `"[…]"`, a string, not an array (test-live, first review pass; db/README.md
-  // "The double-encoding trap"). A JS array bound directly would be a Postgres
-  // array literal, not JSON.
-  const [lnk] = (await sql`SELECT record_source_links(${thoughtId}::uuid, ${s.identity.system}, ${JSON.stringify(s.links)}::text::jsonb) AS r`) as { r: { ok: boolean; added: number; closed: number; kept: number; dropped: number; error?: string } }[];
-  if (!lnk.r.ok) throw new Error(`record_source_links on ${thoughtId}: ${lnk.r.error}`);
-  const entities = s.mentions.map((m) => ({ name: m.name, type: m.type, confidence: 1 }));
-  const [ent] = (await sql`SELECT record_thought_entities(${thoughtId}::uuid, ${`source:${s.identity.system}`}, ${JSON.stringify(entities)}::text::jsonb, '[]'::jsonb, NULL, NULL) AS r`) as { r: { ok: boolean; mentions?: number; error?: string } }[];
-  if (!ent.r.ok) throw new Error(`record_thought_entities(source:${s.identity.system}) on ${thoughtId}: ${ent.r.error}`);
-  return { canonical: src.r.outcome ?? "unchanged", links: { added: lnk.r.added, closed: lnk.r.closed, kept: lnk.r.kept, dropped: lnk.r.dropped }, mentions: ent.r.mentions ?? 0 };
 }
 
 /**

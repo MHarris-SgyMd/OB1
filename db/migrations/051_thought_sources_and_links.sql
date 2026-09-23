@@ -77,8 +77,9 @@
 --   CREATE TABLE / INDEX IF NOT EXISTS, CREATE OR REPLACE everywhere, no
 --   trigger re-created (042's trigger calls the function by name). No data
 --   change, no ACL; DDL on fork-owned tables — MINOR under the version rules.
---   The only DELETEs are record_thought_entities's own, each with its WHERE,
---   and the temp tables' (check 21 reads them as 016's).
+--   Every DELETE carries its WHERE: record_thought_entities's own rows and its
+--   temp tables (check 21 reads them as 016's), and record_thought_source's
+--   one row of the holder an identity is taken from.
 --
 -- Dependencies: 001 (thoughts), 016 (the entity tables, record_thought_entities,
 --   normalize_entity_name), 025 (supersedes, for the chain head), 042
@@ -170,18 +171,28 @@ BEGIN
     PERFORM record_thought_entities(v_holder, 'source:' || p_system, '[]'::jsonb, '[]'::jsonb, NULL, NULL);
     DELETE FROM thought_sources WHERE thought_id = v_holder;
   END IF;
-  INSERT INTO thought_sources (thought_id, system, identity, canonical, media_type, canonical_hash, ingest_run)
-  VALUES (p_thought_id, p_system, p_identity, p_canonical, p_media_type, encode(sha256(convert_to(p_canonical, 'UTF8')), 'hex'), p_run)
-  ON CONFLICT (thought_id) DO UPDATE
-    SET system = EXCLUDED.system, identity = EXCLUDED.identity,
-        canonical = EXCLUDED.canonical, media_type = EXCLUDED.media_type,
-        canonical_hash = EXCLUDED.canonical_hash,
-        ingest_run = EXCLUDED.ingest_run, ingested_at = now()
-    WHERE thought_sources.canonical IS DISTINCT FROM EXCLUDED.canonical
-       OR thought_sources.system IS DISTINCT FROM EXCLUDED.system
-       OR thought_sources.identity IS DISTINCT FROM EXCLUDED.identity
-       OR thought_sources.media_type IS DISTINCT FROM EXCLUDED.media_type
-  RETURNING CASE WHEN xmax = 0 THEN 'inserted' ELSE 'updated' END INTO v_outcome;
+  -- The lookup above and this write are two statements: two writers landing
+  -- one identity on two thoughts in the same instant race to the unique key,
+  -- and the loser's violation is answered as IDENTITY_HELD with the holder
+  -- re-read, not thrown up a run (third review pass, independent read).
+  BEGIN
+    INSERT INTO thought_sources (thought_id, system, identity, canonical, media_type, canonical_hash, ingest_run)
+    VALUES (p_thought_id, p_system, p_identity, p_canonical, p_media_type, encode(sha256(convert_to(p_canonical, 'UTF8')), 'hex'), p_run)
+    ON CONFLICT (thought_id) DO UPDATE
+      SET system = EXCLUDED.system, identity = EXCLUDED.identity,
+          canonical = EXCLUDED.canonical, media_type = EXCLUDED.media_type,
+          canonical_hash = EXCLUDED.canonical_hash,
+          ingest_run = EXCLUDED.ingest_run, ingested_at = now()
+      WHERE thought_sources.canonical IS DISTINCT FROM EXCLUDED.canonical
+         OR thought_sources.system IS DISTINCT FROM EXCLUDED.system
+         OR thought_sources.identity IS DISTINCT FROM EXCLUDED.identity
+         OR thought_sources.media_type IS DISTINCT FROM EXCLUDED.media_type
+    RETURNING CASE WHEN xmax = 0 THEN 'inserted' ELSE 'updated' END INTO v_outcome;
+  EXCEPTION WHEN unique_violation THEN
+    SELECT thought_id INTO v_holder FROM thought_sources
+     WHERE system = p_system AND identity = p_identity AND thought_id <> p_thought_id;
+    RETURN jsonb_build_object('ok', false, 'error', 'IDENTITY_HELD', 'held_by', v_holder);
+  END;
   RETURN jsonb_build_object('ok', true, 'outcome', COALESCE(v_outcome, 'unchanged'), 'taken_from', v_holder);
 END;
 $$;
@@ -526,11 +537,17 @@ BEGIN
    WHERE a.ntype = b.ntype AND a.nname = b.nname
      AND (a.confidence < b.confidence OR (a.confidence = b.confidence AND a.ctid > b.ctid));
 
+  -- A structured pass re-stating what it stated before is not a new sighting:
+  -- last_seen_at moves for an extraction (016's rule) and, for a structured
+  -- pass, only where a mention is actually written below — so a sync pass
+  -- over an unchanged ticket leaves the project entity's last_seen_at where
+  -- it was and 029's stale_entities can still see it (third review pass,
+  -- independent read).
   WITH up AS (
     INSERT INTO ob1_entities (entity_type, name, normalized_name, aliases)
     SELECT i.ntype, i.name, i.nname, i.aliases FROM _rte_in i
     ON CONFLICT (entity_type, normalized_name) DO UPDATE
-      SET last_seen_at = now(),
+      SET last_seen_at = CASE WHEN v_structured THEN ob1_entities.last_seen_at ELSE now() END,
           aliases = (SELECT ARRAY(SELECT DISTINCT a FROM unnest(
                        ob1_entities.aliases
                        || EXCLUDED.aliases
@@ -540,9 +557,20 @@ BEGIN
   )
   SELECT count(*) FILTER (WHERE created), count(*) INTO v_new, v_entities FROM up;
 
-  -- Replace the calling pass's class of rows — its own key for a structured
-  -- pass, every extracted key for an extraction — remembering which entities
-  -- they pointed at: those are the only candidates for pruning.
+  -- The entities this call names, resolved.
+  CREATE TEMP TABLE IF NOT EXISTS _rte_ids (id uuid) ON COMMIT DROP;
+  DELETE FROM _rte_ids WHERE true;
+  INSERT INTO _rte_ids
+  SELECT en.id FROM _rte_in i JOIN ob1_entities en ON en.entity_type = i.ntype AND en.normalized_name = i.nname;
+
+  -- Replace the calling pass's class of rows, remembering which entities
+  -- they pointed at (the only candidates for pruning). An extraction replaces
+  -- every extracted row, as 016 did. A structured pass is a SET: its own rows
+  -- for entities it no longer names go, its own rows for entities it still
+  -- names STAND (no delete-and-reinsert — the same set twice writes no row,
+  -- as record_source_links's does), and what it newly names is inserted.
+  -- Its edges are still replaced whole: no adapter states an entity relation
+  -- yet, so the set rule for edges waits for the first that does.
   CREATE TEMP TABLE IF NOT EXISTS _rte_touched (id uuid) ON COMMIT DROP;
   DELETE FROM _rte_touched WHERE true;
   WITH d AS (
@@ -554,22 +582,34 @@ BEGIN
   WITH d AS (
     DELETE FROM thought_entities
      WHERE thought_id = p_thought_id
-       AND CASE WHEN v_structured THEN extraction_key = p_extraction_key ELSE extraction_key NOT LIKE 'source:%' END
+       AND CASE WHEN v_structured
+                THEN extraction_key = p_extraction_key AND entity_id NOT IN (SELECT id FROM _rte_ids)
+                ELSE extraction_key NOT LIKE 'source:%' END
     RETURNING entity_id)
   INSERT INTO _rte_touched SELECT entity_id FROM d;
 
   -- On the same (thought, entity) the structured row stands: an extracted
   -- insert onto it does nothing, a structured insert onto an extracted row
-  -- takes it over.
-  INSERT INTO thought_entities (thought_id, entity_id, confidence, extraction_key, canonical_agent_id)
-  SELECT p_thought_id, en.id, i.confidence, p_extraction_key, p_agent_id
-    FROM _rte_in i
-    JOIN ob1_entities en ON en.entity_type = i.ntype AND en.normalized_name = i.nname
-  ON CONFLICT (thought_id, entity_id) DO UPDATE
-    SET confidence = EXCLUDED.confidence, extraction_key = EXCLUDED.extraction_key,
-        canonical_agent_id = EXCLUDED.canonical_agent_id, extracted_at = now()
-    WHERE thought_entities.extraction_key NOT LIKE 'source:%';
-  GET DIAGNOSTICS v_mentions = ROW_COUNT;
+  -- takes it over, and a structured insert onto its own standing row is no
+  -- write at all.
+  CREATE TEMP TABLE IF NOT EXISTS _rte_new (id uuid) ON COMMIT DROP;
+  DELETE FROM _rte_new WHERE true;
+  WITH w AS (
+    INSERT INTO thought_entities (thought_id, entity_id, confidence, extraction_key, canonical_agent_id)
+    SELECT p_thought_id, en.id, i.confidence, p_extraction_key, p_agent_id
+      FROM _rte_in i
+      JOIN ob1_entities en ON en.entity_type = i.ntype AND en.normalized_name = i.nname
+    ON CONFLICT (thought_id, entity_id) DO UPDATE
+      SET confidence = EXCLUDED.confidence, extraction_key = EXCLUDED.extraction_key,
+          canonical_agent_id = EXCLUDED.canonical_agent_id, extracted_at = now()
+      WHERE thought_entities.extraction_key NOT LIKE 'source:%'
+    RETURNING entity_id)
+  INSERT INTO _rte_new SELECT entity_id FROM w;
+  SELECT count(*) INTO v_mentions FROM _rte_new;
+  -- A mention a structured pass did write is a sighting.
+  IF v_structured THEN
+    UPDATE ob1_entities SET last_seen_at = now() WHERE id IN (SELECT id FROM _rte_new);
+  END IF;
 
   WITH rel AS (
     SELECT r.relation, r.confidence, f.id AS from_id, t.id AS to_id,
@@ -634,4 +674,4 @@ END;
 $$;
 
 COMMENT ON FUNCTION record_thought_entities(uuid, text, jsonb, jsonb, text, uuid) IS
-  'Writes one thought''s entities and relations atomically (016), with 051''s resolution rule: an extraction_key `source:<system>` is a structured pass (the source''s own project, labels, members — no model call) that replaces only its own rows; an `extract:*` pass replaces only extracted rows; and where both name one (thought, entity) or (thought, from, to, relation) the structured row stands — an extracted insert onto it does nothing, a structured insert onto an extracted row takes it over. Entities upserted by (type, normalised name); a relation naming an unlisted entity is dropped and counted; entities left unreferenced are pruned. p_content_fingerprint NULL skips the stale check. Returns {ok, stale, entities, new_entities, mentions, edges, dropped_relations, ambiguous_relations, pruned_entities}. Migrations 016, 051 / SMD-947, SMD-1867.';
+  'Writes one thought''s entities and relations atomically (016), with 051''s resolution rule: an extraction_key `source:<system>` is a structured pass (the source''s own project, labels, members — no model call) that keeps its own rows as a set — the same set twice writes nothing, and moves no last_seen_at; an `extract:*` pass replaces only extracted rows; and where both name one (thought, entity) or (thought, from, to, relation) the structured row stands — an extracted insert onto it does nothing, a structured insert onto an extracted row takes it over. Entities upserted by (type, normalised name); a relation naming an unlisted entity is dropped and counted; entities left unreferenced are pruned. p_content_fingerprint NULL skips the stale check. Returns {ok, stale, entities, new_entities, mentions, edges, dropped_relations, ambiguous_relations, pruned_entities}. Migrations 016, 051 / SMD-947, SMD-1867.';

@@ -16,10 +16,12 @@
  *   #tag (inline) and frontmatter `tags:`         →  mentions (topic)
  *   frontmatter                                   →  facets.frontmatter, title, tags
  *
- * Identity (SMD-1813's rule): the frontmatter `id` when the note has one,
- * else the note's NAME — the file name without `.md`, which is how Obsidian
- * itself resolves a wikilink, so a link's target and its note's identity meet
- * without a resolver. The cases this cannot cover are ENUMERATED below
+ * Identity: the note's NAME — the file name without `.md`, which is what a
+ * wikilink names and how Obsidian itself resolves one, so a link's target and
+ * its note's identity meet without a resolver and a note cannot link to itself
+ * under another key. A frontmatter `id` is a facet, for a connector to
+ * reconcile a rename by (SMD-1813's rule is met there, not here — no wikilink
+ * names an id). The cases this cannot cover are ENUMERATED below
  * (MARKDOWN_LOSSY / MARKDOWN_LIMITS), each with a self-check that shows the
  * canonical unharmed where the text is not.
  */
@@ -56,6 +58,11 @@ export function parseFrontmatter(md: string): { fm: Frontmatter; body: string; f
   if (!md.startsWith("---\n") && !md.startsWith("---\r\n")) return { fm: {}, body: md, fence: "" };
   const m = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(md);
   if (!m) return { fm: {}, body: md, fence: "" };
+  // A fence that parses no `key:` line is not frontmatter: a note that opens
+  // with a horizontal rule, some text and another rule is body from its first
+  // byte (third review pass, independent read — the text lost its first
+  // section).
+  if (!/^[A-Za-z0-9_-]+:/m.test(m[1])) return { fm: {}, body: md, fence: "" };
   const fm: Frontmatter = {};
   let listKey: string | null = null;
   for (const raw of m[1].split(/\r?\n/)) {
@@ -84,7 +91,9 @@ const WIKILINK_RE = /(!?)\[\[([^\[\]|#]*)(?:#([^\[\]|]*))?(?:\|([^\[\]]*))?\]\]/
 /** Every wikilink in the text, in order, embeds included. */
 export function wikilinks(md: string): Wikilink[] {
   const out: Wikilink[] = [];
-  for (const m of stripComments(md).matchAll(WIKILINK_RE)) {
+  // Not inside a code fence or span: `[[x]]` there is text about a link, as
+  // inlineTags already reads a `#` there (third review pass, independent read).
+  for (const m of stripCode(stripComments(md)).matchAll(WIKILINK_RE)) {
     const target = m[2].trim();
     const note = target.split("/").filter(Boolean).at(-1)?.replace(/\.md$/i, "") ?? "";
     out.push({ note, anchor: m[3]?.trim() || null, alias: m[4]?.trim() || null, embed: m[1] === "!", raw: m[0] });
@@ -92,10 +101,15 @@ export function wikilinks(md: string): Wikilink[] {
   return out;
 }
 
+/** Code fences and spans blanked: what is written there is text about Markdown, not Markdown. */
+function stripCode(md: string): string {
+  return md.replace(/```[\s\S]*?```/g, " ").replace(/`[^`\n]*`/g, " ");
+}
+
 /** `#tag` and `#nested/tag` in prose — not a heading (`# Title`), not inside a code span or fence, not a bare `#`. */
 export function inlineTags(md: string): string[] {
   const out: string[] = [];
-  const text = stripComments(md).replace(/```[\s\S]*?```/g, " ").replace(/`[^`\n]*`/g, " ");
+  const text = stripCode(stripComments(md));
   for (const m of text.matchAll(/(?:^|[\s(])#([A-Za-z_][\w\/-]*)/g)) if (!out.includes(m[1])) out.push(m[1]);
   return out;
 }
@@ -117,19 +131,14 @@ export function markdownText(md: string, noteName: string): string {
   text = text.replace(WIKILINK_RE, (_raw, embed: string, target: string, anchor?: string, alias?: string) => {
     const note = target.trim().split("/").filter(Boolean).at(-1)?.replace(/\.md$/i, "") ?? "";
     if (alias?.trim()) return alias.trim();
-    if (embed === "!" || !anchor?.trim()) return note || anchor?.trim() || "";
+    // A block reference (`#^id`) names a position, not a section: the note alone.
+    if (embed === "!" || !anchor?.trim() || anchor.trim().startsWith("^")) return note || anchor?.trim() || "";
     return note ? `${note} › ${anchor.trim()}` : anchor.trim();
   });
   text = text.replace(/^(>\s*)\[!([A-Za-z-]+)\][+-]?\s?/gm, "$1");
   text = text.replace(/[ \t]+\^[A-Za-z0-9-]+$/gm, "");
   text = text.replace(/==([^=\n]+)==/g, "$1");
   return `${title}\n\n${text.trim()}`.trim();
-}
-
-/** The identity: frontmatter `id` (or `uuid`), else the note name. */
-export function markdownIdentity(fm: Frontmatter, noteName: string): string {
-  const id = typeof fm.id === "string" ? fm.id : typeof fm.uuid === "string" ? fm.uuid : "";
-  return id.trim() || noteName;
 }
 
 /** The note name a path resolves to: the file name without `.md`. */
@@ -141,7 +150,16 @@ export function noteNameOf(path: string): string {
 export function noteTags(fm: Frontmatter, body: string): string[] {
   const fmTags = Array.isArray(fm.tags) ? fm.tags : typeof fm.tags === "string" ? fm.tags.split(/[,\s]+/) : [];
   const out: string[] = [];
-  for (const t of [...fmTags, ...inlineTags(body)]) { const tag = t.replace(/^#/, "").trim(); if (tag && !out.includes(tag)) out.push(tag); }
+  // One tag per spelling case-insensitively — Obsidian treats `#Linear` and
+  // `#linear` as one tag, and the mentions dedupe so already; the first
+  // spelling seen is kept (third review pass, independent read).
+  const seen = new Set<string>();
+  for (const t of [...fmTags, ...inlineTags(body)]) {
+    const tag = t.replace(/^#/, "").trim();
+    if (!tag || seen.has(tag.toLowerCase())) continue;
+    seen.add(tag.toLowerCase());
+    out.push(tag);
+  }
   return out;
 }
 
@@ -164,12 +182,11 @@ export const markdownAdapter: Adapter<MarkdownFile> = {
     if (!decoded.ok) throw new AdapterRefusal({ system: MARKDOWN_SYSTEM, key: noteName }, `${file.path} ${decoded.reason}`);
     const md = decoded.text;
     const { fm, body } = parseFrontmatter(md);
-    const key = markdownIdentity(fm, noteName);
+    const key = noteName;
     if (key.length > IDENTITY_MAX) throw new AdapterRefusal({ system: MARKDOWN_SYSTEM, key: key.slice(0, 40) + "…" }, `${file.path} has an identity of ${key.length} characters; thought_sources.identity holds ${IDENTITY_MAX}`);
     const tags = noteTags(fm, body);
     const links: Link[] = wikilinks(body).filter((w) => w.note && !NON_NOTE_EXTENSIONS.test(w.note)).map((w) => ({ relation: "references", target: w.note }));
     const mentions: Mention[] = tags.map((t) => ({ name: t, type: "topic" as const }));
-    const { id: _id, uuid: _uuid, ...rest } = fm;
     return {
       identity: { system: MARKDOWN_SYSTEM, key },
       scope: file.root,
@@ -177,7 +194,7 @@ export const markdownAdapter: Adapter<MarkdownFile> = {
       text: markdownText(md, noteName),
       links: normaliseLinks(links, key).links,
       mentions: normaliseMentions(mentions),
-      facets: { path: file.path, note: noteName, title: typeof fm.title === "string" ? fm.title : noteName, tags, ...(Object.keys(rest).length ? { frontmatter: rest } : {}) },
+      facets: { path: file.path, note: noteName, title: typeof fm.title === "string" ? fm.title : noteName, tags, ...(Object.keys(fm).length ? { frontmatter: fm } : {}) },
       createdAt: noteCreatedAt(fm),
     };
   },
@@ -220,10 +237,10 @@ export const MARKDOWN_LOSSY: { name: string; input: string; text: RegExp }[] = [
 
 /** A limit of the identity or the link rule, stated rather than discovered. */
 export const MARKDOWN_LIMITS: readonly string[] = [
-  "A note without a frontmatter `id` is identified by its name: renaming it is a new identity (the old row stays; a connector reconciles), and two notes of one name in different folders collide — the first in walk order keeps the identity, the ingester refuses the rest by name, and the fix is a frontmatter id.",
-  "A file that is not UTF-8, or holds a NUL byte, is refused, not stored: a text column cannot hold it byte for byte. So is an identity over 512 characters, the column's bound.",
-  "A wikilink to an image, audio, video, PDF or canvas file (NON_NOTE_EXTENSIONS) is a file reference, not an edge to a note; a note named `v1.2` is still a note.",
-  "Frontmatter is read minimally (scalars, `[a, b]`, `- item` lists); a nested mapping is kept as raw text under its key.",
+  "A note's identity is its NAME — the file name without `.md`, which is what a wikilink names and how Obsidian resolves one — so a link's target and its note's identity meet with no resolver, and a note can never link to itself under another key. The cost: renaming a note is a new identity (the old row stays), and two notes of one name in different folders collide — the first in walk order keeps the identity and the ingester refuses the rest by name. A frontmatter `id` is kept as a facet for a connector (SMD-1814) to reconcile a rename by; it is not the identity, because no wikilink names it.",
+  "A file that is not UTF-8, or holds a NUL byte, is refused, not stored: a text column cannot hold it byte for byte. So is a name over 512 characters, the column's bound.",
+  "A wikilink to an image, audio, video, PDF or canvas file (NON_NOTE_EXTENSIONS) is a file reference, not an edge to a note; a note named `v1.2` is still a note. A `[[link]]` inside a code fence or span is text about a link, not one.",
+  "Frontmatter is read minimally (scalars, `[a, b]`, `- item` lists); the lines of a nested mapping are dropped from the frontmatter facet — the canonical keeps them. A leading `---` fence with no `key:` line in it is body (a horizontal rule), not frontmatter.",
 ];
 
 export function selfCheck(): number {
@@ -234,21 +251,27 @@ export function selfCheck(): number {
 
   const md = "---\nid: note-1\ntitle: Ingestion contract\ntags: [design, ingest]\ncreated: 2026-09-21\naliases:\n  - contract\n---\n# Heading\n\nSee [[Adapter|the adapter]] and [[Pipeline#Writes]], then ![[Diagram]] and ![[img.png]]. #linear #wiki/sync %%todo%%\n\n> [!note] Why\n> because ^blk1\n";
   const out = markdownAdapter.map(file("design/Ingestion contract.md", md));
-  ok(out.identity.key === "note-1" && out.identity.system === "markdown", "identity is the frontmatter id");
+  ok(out.identity.key === "Ingestion contract" && out.identity.system === "markdown", "identity is the note's name — what a wikilink names — even with a frontmatter id (third review pass)");
   ok(out.canonical.form === md && out.canonical.mediaType === "text/markdown", "the canonical is the file, byte for byte");
   ok(out.text === "Ingestion contract\n\n# Heading\n\nSee the adapter and Pipeline › Writes, then Diagram and img.png. #linear #wiki/sync \n\n> Why\n> because", `the text: title, body with links flattened, comment and block id and callout marker gone (${JSON.stringify(out.text)})`);
   ok(JSON.stringify(out.links) === JSON.stringify([{ relation: "references", target: "Adapter" }, { relation: "references", target: "Diagram" }, { relation: "references", target: "Pipeline" }]), `links: the notes named, embeds included, the image not (${JSON.stringify(out.links)})`);
   ok(JSON.stringify(out.mentions.map((m) => m.name)) === JSON.stringify(["design", "ingest", "linear", "wiki/sync"]), `mentions: frontmatter and inline tags as topics (${JSON.stringify(out.mentions)})`);
   ok(out.scope === "/vault" && out.createdAt === "2026-09-21" && out.facets.title === "Ingestion contract" && out.facets.note === "Ingestion contract" && JSON.stringify((out.facets.frontmatter as Frontmatter).aliases) === '["contract"]', "scope is the root; created, title and the rest of the frontmatter are facets");
-  ok(!("id" in (out.facets.frontmatter as Frontmatter)), "the id is the identity, not a facet");
+  ok((out.facets.frontmatter as Frontmatter).id === "note-1", "the frontmatter id is a facet, for a connector to reconcile a rename by");
+  const withId = markdownAdapter.map(file("Self.md", "---\nid: n1\n---\n[[Self]] and [[Other]] and [[Self#^blk]]"));
+  ok(withId.identity.key === "Self" && withId.links.map((l) => l.target).join(",") === "Other" && /\n\nSelf and Other and Self$/.test(withId.text), `a note with an id: links to itself by name are dropped, a block reference flattens to the note alone (${JSON.stringify(withId.links)} ${JSON.stringify(withId.text)})`);
+  const rule = markdownAdapter.map(file("Rule.md", "---\n\nSome text the reader must keep\n\n---\n\nmore"));
+  ok(rule.text === "Rule\n\n---\n\nSome text the reader must keep\n\n---\n\nmore" && !("frontmatter" in rule.facets), `a leading horizontal rule is body, not frontmatter (${JSON.stringify(rule.text)})`);
+  const coded = markdownAdapter.map(file("Code.md", "```\n[[NotALink]]\n```\n`[[Inline]]` [[Real]] #Linear #linear"));
+  ok(coded.links.map((l) => l.target).join(",") === "Real" && JSON.stringify(coded.facets.tags) === '["Linear"]', `a wikilink inside code is not a link; tags dedupe case-insensitively (${JSON.stringify(coded.links)} ${JSON.stringify(coded.facets.tags)})`);
 
   const plain = markdownAdapter.map(file("a/Plain note.md", "Just text with a #tag."));
   ok(plain.identity.key === "Plain note" && plain.text === "Plain note\n\nJust text with a #tag." && plain.mentions[0]?.name === "tag" && plain.links.length === 0 && plain.createdAt === undefined, "a note with no frontmatter: the name is the identity and the title");
   ok(markdownAdapter.map(file("Self.md", "[[Self]] and [[Other]]")).links.map((l) => l.target).join(",") === "Other", "a link to the note itself is dropped");
   ok(markdownAdapter.map(file("N.md", "[[v1.2]] [[Plan Q3.2026]] ![[photo.JPG]] [[deck.pdf]] [[board.canvas]]")).links.map((l) => l.target).join(",") === "Plan Q3.2026,v1.2", "a dotted note name is a note; an image, a PDF and a canvas are files (first review pass)");
   let tooLong = "";
-  try { markdownAdapter.map(file("long.md", `---\nid: ${"x".repeat(513)}\n---\nbody`)); } catch (e) { tooLong = (e as Error).message; }
-  ok(/513 characters/.test(tooLong), `an identity over the column's bound is refused by the adapter, not by the write (${tooLong.slice(0, 60)})`);
+  try { markdownAdapter.map(file(`${"x".repeat(513)}.md`, "body")); } catch (e) { tooLong = (e as Error).message; }
+  ok(/513 characters/.test(tooLong), `a name over the column's bound is refused by the adapter, not by the write (${tooLong.slice(0, 60)})`);
 
   for (const c of MARKDOWN_LOSSY) {
     const r = markdownAdapter.map(file("N.md", c.input));
