@@ -83,7 +83,7 @@ export const MAX_NAME_CHARS = 200;
 export type ExtractedEntity = { name: string; type: EntityType; confidence: number; aliases: string[] };
 export type ExtractedRelation = { from: string; to: string; relation: Relation; confidence: number };
 /** One window's own answer, kept beside the merged result: the derivation record (SMD-1731) the worker dumps. */
-export type ExtractionWindow = Pick<Extraction, "entities" | "relations" | "rejected" | "malformed" | "retried"> & {
+export type ExtractionWindow = Pick<Extraction, "entities" | "relations" | "rejected" | "malformed" | "retried" | "abortedMs"> & {
   index: number;
   /** chunk.ts's estimate of the text sent. */
   tokens: number;
@@ -102,6 +102,14 @@ export type Extraction = {
   parts?: ExtractionWindow[];
   /** Set when any call ran to its budget and was made again with the penalty (ExtractWindowing.retryRunaway). */
   retried?: true;
+  /**
+   * Set when a call's streamed answer was aborted as a runaway
+   * (ExtractWindowing.streamAbort): how many milliseconds into the call, its
+   * prompt evaluation included — the longest, when more than one call of the
+   * thought was. The measurement the eval and the worker's dump read, against
+   * the budget the call would have run to; absent when no call was aborted.
+   */
+  abortedMs?: number;
 };
 
 /**
@@ -190,6 +198,18 @@ export type ExtractWindowing = {
    * to be. Off, the cut answer is the answer (malformed).
    */
   retryRunaway: boolean;
+  /**
+   * Request the answer as a stream and abort the call the moment it holds
+   * RUNAWAY_REPEATS copies of one item (RunawayDetector) — the runaways
+   * measured for SMD-1879 are one entity or relation repeated to the budget,
+   * visible on the stream long before it (SMD-1960). A call aborted so is a
+   * runaway: retried under the penalty when retryRunaway says so, else the
+   * thought's malformed answer. The budget stays the bound. Off, the answer is
+   * read whole, as before. Presumes outputBudget: windowingFor turns the two
+   * off together (reasoning on), and a harness that streams without a budget
+   * gets an aborted call retried without one — its own arm to describe.
+   */
+  streamAbort: boolean;
 };
 
 /**
@@ -200,6 +220,90 @@ export type ExtractWindowing = {
  * call that converges is the p1 request plus its budget and nothing else.
  */
 export const RUNAWAY_PENALTY = 0.5;
+
+/**
+ * How many copies of one item — an entity by (type, name), a relation by
+ * (relation, from, to), parseExtraction's own keys — make a streamed answer a
+ * runaway (SMD-1960). Chosen against the 31 runaway tails the SMD-1879 probe
+ * captured (evals/README.md): 16 repeat one item and 3 alternate two, and a
+ * third copy is never a converging answer's — parseExtraction folds the
+ * second already; the 12 that enumerate distinct ids (every ticket a `uses`
+ * edge, tickets counted down) are not loops by this rule and run to the
+ * budget, as the ticket requires. Two copies is one duplicate, which a
+ * converging answer does hold.
+ */
+export const RUNAWAY_REPEATS = 3;
+
+/**
+ * Reads a streamed extraction answer as it arrives and says when it has become
+ * a runaway: the RUNAWAY_REPEATS-th copy of one item. An item is a complete
+ * `{…}` one level inside the answer's top-level object — the objects of its
+ * two arrays — found by brace depth outside strings, so braces and quotes
+ * inside a name are text. Items are keyed as parseExtraction keys them, the
+ * type and relation UNVALIDATED: a repeated item the rules would reject
+ * (`"type": "table"`, tails 7, 20 and 21) is a loop all the same, and a copy
+ * differing only in confidence, aliases, case or whitespace is a copy. Text
+ * that is not an item is skipped; the budget bounds an answer this cannot read.
+ */
+export class RunawayDetector {
+  private depth = 0;
+  private inString = false;
+  private escaped = false;
+  private item = "";
+  private readonly counts = new Map<string, number>();
+  /** Items read so far, the one that fired included. */
+  items = 0;
+
+  /** Feed the next piece of the answer. The repeated item's key when the answer became a runaway on this piece; null while it has not. */
+  feed(piece: string): string | null {
+    let fired: string | null = null;
+    for (let i = 0; i < piece.length; i++) {
+      const c = piece[i];
+      if (this.depth >= 2) this.item += c;
+      if (this.inString) {
+        if (this.escaped) this.escaped = false;
+        else if (c === "\\") this.escaped = true;
+        else if (c === '"') this.inString = false;
+        continue;
+      }
+      if (c === '"') { this.inString = true; continue; }
+      if (c === "{") {
+        this.depth++;
+        if (this.depth === 2) this.item = "{";
+        continue;
+      }
+      if (c === "}" && this.depth > 0) {
+        this.depth--;
+        if (this.depth !== 1) continue;
+        const key = itemKey(this.item);
+        this.item = "";
+        if (key === null) continue;
+        this.items++;
+        const n = (this.counts.get(key) ?? 0) + 1;
+        this.counts.set(key, n);
+        if (n >= RUNAWAY_REPEATS && fired === null) fired = key;
+      }
+    }
+    return fired;
+  }
+}
+
+/** parseExtraction's key for one item of a streamed answer, the type or relation unvalidated; null for text that is not an item. */
+function itemKey(text: string): string | null {
+  let o: unknown;
+  try { o = JSON.parse(text); } catch { return null; }
+  if (!isRecord(o)) return null;
+  // An item carrying `from` or `to` is a relation or nothing — never read as an
+  // entity by its `name`, which parseExtraction would not do (third review pass).
+  if (o.from !== undefined || o.to !== undefined) return typeof o.from === "string" && typeof o.to === "string" ? relationKey(lowered(o.relation) as Relation, cleanName(o.from), cleanName(o.to)) : null;
+  if (typeof o.name === "string") return entityKey(lowered(o.type) as EntityType, cleanName(o.name));
+  return null;
+}
+
+/** A type or relation field as parseExtraction reads it before validating it — trimmed and lower-cased, "" for a non-string; the detector keys by the same reading (first review pass: it was spelt out twice in each). */
+function lowered(v: unknown): string {
+  return typeof v === "string" ? v.trim().toLowerCase() : "";
+}
 
 /**
  * Whether the metadata model is asked to reason before answering
@@ -224,7 +328,9 @@ export function reasoningOn(cfg: EmbedConfig): boolean {
  */
 export function windowingFor(cfg: EmbedConfig): ExtractWindowing {
   const budgeted = !reasoningOn(cfg);
-  return { windowTokens: cfg.extractChunkTokens, overlapTokens: cfg.extractChunkOverlap, header: cfg.extractHeader, outputBudget: budgeted, retryRunaway: budgeted && cfg.extractRetryRunaway };
+  // The stream abort follows the budget too: it makes a runaway of a call,
+  // and only a budgeted call has a retry to send one to (SMD-1960).
+  return { windowTokens: cfg.extractChunkTokens, overlapTokens: cfg.extractChunkOverlap, header: cfg.extractHeader, outputBudget: budgeted, retryRunaway: budgeted && cfg.extractRetryRunaway, streamAbort: budgeted && cfg.extractStreamAbort };
 }
 
 /**
@@ -240,9 +346,12 @@ export function describeExtractWindow(cfg: EmbedConfig): string {
     ? `${cfg.metadataModel}'s ${cfg.extractModelWindow}-token served context${cfg.extractChunkTokensUnfit ? ", which holds no window beside the rules and an answer" : ""}`
     : `${cfg.metadataModel}'s served context, which db/config.mjs's KNOWN_CHAT_MODEL_WINDOW does not list`;
   const w = windowingFor(cfg);
+  const abort = w.streamAbort ? `; the answer is streamed and a call is aborted once it holds ${RUNAWAY_REPEATS} copies of one item` : "";
   const retry = !w.outputBudget
     ? "; no answer budget and no runaway retry — reasoning is on (OB1_METADATA_REASONING), and a budget would cap the thinking, so a call that does not converge ends at the context or the caller's deadline"
-    : w.retryRunaway ? `; a call that runs to its answer budget is made once more with a ${RUNAWAY_PENALTY} frequency penalty` : "";
+    : w.retryRunaway
+      ? `${abort}${w.streamAbort ? ", and a call aborted so or run to its answer budget" : "; a call that runs to its answer budget"} is made once more with a ${RUNAWAY_PENALTY} frequency penalty`
+      : abort;
   if (cfg.extractChunkTokensFrom === "OB1_EXTRACT_CHUNK_TOKENS") return `${rule}, from OB1_EXTRACT_CHUNK_TOKENS (${ctx})${retry}`;
   if (cfg.extractChunkTokensFrom === "window") {
     // `capped` is the resolver's own answer (second review pass: inferring it
@@ -318,7 +427,7 @@ export function parseExtraction(raw: string): Extraction {
     for (const e of parsed.entities) {
       if (!isRecord(e)) { out.rejected.entities++; continue; }
       const name = cleanName(e.name);
-      const type = typeof e.type === "string" ? e.type.trim().toLowerCase() : "";
+      const type = lowered(e.type);
       const confidence = clampConfidence(e.confidence);
       if (!name || !(ENTITY_TYPES as readonly string[]).includes(type) || confidence < MIN_CONFIDENCE) { out.rejected.entities++; continue; }
       const key = entityKey(type as EntityType, name);
@@ -343,7 +452,7 @@ export function parseExtraction(raw: string): Extraction {
       if (!isRecord(r)) { out.rejected.relations++; continue; }
       const from = cleanName(r.from);
       const to = cleanName(r.to);
-      const relation = typeof r.relation === "string" ? r.relation.trim().toLowerCase() : "";
+      const relation = lowered(r.relation);
       const confidence = clampConfidence(r.confidence);
       if (!from || !to || !(RELATIONS as readonly string[]).includes(relation) || confidence < MIN_CONFIDENCE) { out.rejected.relations++; continue; }
       // One key for a relation within an answer and across windows (second
@@ -413,8 +522,10 @@ export function mergeExtractions(parts: ExtractionWindow[]): Extraction {
   const relations = new Map<string, ExtractedRelation>();
   const rejected = { entities: 0, relations: 0 };
   let malformed = false;
+  let abortedMs: number | undefined;
   for (const p of parts) {
     malformed ||= p.malformed;
+    if (p.abortedMs !== undefined) abortedMs = Math.max(abortedMs ?? 0, p.abortedMs);
     rejected.entities += p.rejected.entities;
     rejected.relations += p.rejected.relations;
     for (const e of p.entities) {
@@ -429,7 +540,7 @@ export function mergeExtractions(parts: ExtractionWindow[]): Extraction {
       if (!have || r.confidence > have.confidence) relations.set(k, { ...r });
     }
   }
-  return { entities: [...entities.values()], relations: [...relations.values()], rejected, malformed, windows: parts.length, parts };
+  return { entities: [...entities.values()], relations: [...relations.values()], rejected, malformed, windows: parts.length, parts, ...(abortedMs !== undefined ? { abortedMs } : {}) };
 }
 
 /** The pass's key: the model and the prompt version, so a change to either is a new pass. */
@@ -446,7 +557,11 @@ export function extractionKey(model: string): string {
  * (SMD-1879): an answer that does not converge ends at the budget as a
  * malformed answer — visible, retryable — not at the context's end.
  */
-async function extractOnce(text: string, cfg: EmbedConfig, timeoutMs: number, part: { index: number; of: number; header?: string } | undefined, budget: boolean, retry = false): Promise<Extraction & { runaway: boolean }> {
+async function extractOnce(text: string, cfg: EmbedConfig, timeoutMs: number, part: { index: number; of: number; header?: string } | undefined, w: Pick<ExtractWindowing, "outputBudget" | "streamAbort">, retry = false): Promise<Extraction & { runaway: boolean }> {
+  // Named by the windowing, not positional booleans (second review pass).
+  const budget = w.outputBudget;
+  const stream = w.streamAbort;
+  const t0 = Date.now();
   const r = await fetch(`${cfg.chat.base}/chat/completions`, {
     method: "POST",
     headers: cfg.chat.headers,
@@ -466,6 +581,7 @@ async function extractOnce(text: string, cfg: EmbedConfig, timeoutMs: number, pa
       ...cfg.metadataReasoning,
       ...(budget ? { max_tokens: extractOutputBudget(estimateTokens(text)) } : {}),
       ...(retry ? { frequency_penalty: RUNAWAY_PENALTY } : {}),
+      ...(stream ? { stream: true } : {}),
       messages: buildMessages(text, part),
     }),
   });
@@ -474,6 +590,16 @@ async function extractOnce(text: string, cfg: EmbedConfig, timeoutMs: number, pa
     const err = new Error(`Extraction request to ${cfg.chat.base} failed: ${r.status} ${msg.slice(0, 300)}`);
     (err as Error & { status?: number }).status = r.status;
     throw err;
+  }
+  // Streamed when asked AND answered so (SMD-1960): a provider that ignores
+  // `stream` — the suites' stubs answer JSON — is read whole, as one not asked.
+  if (stream && r.body && /^text\/event-stream/i.test(r.headers.get("content-type") ?? "")) {
+    const got = await readStreamedAnswer(r.body, new RunawayDetector(), cfg.chat.base);
+    // Aborted: a runaway by the detector's rule, whatever the budget — the
+    // partial answer is not read (it could not parse), and the caller's
+    // deadline, on the fetch's signal, bounds the read as it does the whole.
+    if (got.repeated !== null) return { ...MALFORMED(), runaway: true, abortedMs: Date.now() - t0 };
+    return { ...parseExtraction(got.content), runaway: budget && got.finish === "length" };
   }
   const d = (await r.json()) as { choices?: [{ message?: { content?: string }; finish_reason?: string }] };
   const answer = d?.choices?.[0]?.message?.content;
@@ -485,17 +611,112 @@ async function extractOnce(text: string, cfg: EmbedConfig, timeoutMs: number, pa
 }
 
 /**
+ * A chat completion's `text/event-stream` body reassembled: the `data:` frames'
+ * `choices[0].delta.content` concatenated, the last `finish_reason` kept, and
+ * comments and frames that are not JSON passed over, and `[DONE]` the end:
+ * the reader is cancelled there and the answer returned, so a gateway that
+ * keeps the connection open after it (keepalive comments) does not hold the
+ * call to its deadline (fourth review pass). Every piece of content goes
+ * through the detector as it lands; when it fires the reader is cancelled —
+ * the connection closes and Ollama stops generating — and what arrived is
+ * returned with the repeated item's key. Frames split across reads
+ * are buffered to their newline. A stream that ends with neither a
+ * `finish_reason` nor `[DONE]` is a socket that closed mid-answer — the
+ * provider died, the connection dropped — and THROWS, as the whole read's
+ * r.json() on a truncated body did, so the worker classifies it (transient)
+ * rather than recording the thought's answer as malformed (first review pass).
+ * A frame that is the provider's error (`data: {"error": …}` — a runner that
+ * died or a refusal after the 200) throws with the provider's message, not the
+ * socket sentence, so the failed row names the cause (second review pass).
+ */
+async function readStreamedAnswer(body: ReadableStream<Uint8Array>, detector: RunawayDetector, base: string): Promise<{ content: string; finish: string | undefined; repeated: string | null }> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let content = "";
+  let finish: string | undefined;
+  let ended = false;
+  /** The frame's verdict: a repeated item's key, `"[DONE]"` for the end marker, null to go on. */
+  const take = (line: string): string | null => {
+    if (!line.startsWith("data:")) return null;
+    const data = line.slice(5).trim();
+    if (data === "[DONE]") { ended = true; return "[DONE]"; }
+    if (!data) return null;
+    let frame: { choices?: [{ delta?: { content?: unknown }; finish_reason?: unknown }]; error?: unknown };
+    try { frame = JSON.parse(data); } catch { return null; }
+    // `"error": null` beside the choices is no error (fourth review pass).
+    if (frame && typeof frame === "object" && frame.error !== undefined && frame.error !== null) {
+      const err = frame.error as { message?: unknown; code?: unknown } | string;
+      const msg = typeof err === "string" ? err : typeof err?.message === "string" ? err.message : JSON.stringify(err);
+      const thrown = new Error(`Extraction stream from ${base} answered an error mid-stream: ${msg.slice(0, 300)}`);
+      // The frame's HTTP-shaped code — a number, or a string of one — is the
+      // status the whole read carried on r.status, and the worker's
+      // transient/fatal rule reads (third review pass: a runner's 500
+      // mid-stream was a per-row failure, not a pause). A frame with no such
+      // code (Ollama's compat layer sends `code: null`) carries no status: the
+      // worker records THIS row failed with the provider's message, visible,
+      // rather than a status this reader would have had to invent.
+      const raw = typeof err === "object" && err !== null ? err.code : undefined;
+      const code = typeof raw === "number" ? raw : typeof raw === "string" && /^\d{3}$/.test(raw) ? Number(raw) : NaN;
+      if (Number.isInteger(code) && code >= 400 && code < 600) (thrown as Error & { status?: number }).status = code;
+      throw thrown;
+    }
+    const choice = frame?.choices?.[0];
+    if (typeof choice?.finish_reason === "string") { finish = choice.finish_reason; ended = true; }
+    if (typeof choice?.delta?.content !== "string" || !choice.delta.content) return null;
+    content += choice.delta.content;
+    return detector.feed(choice.delta.content);
+  };
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      buffer += done ? decoder.decode() : decoder.decode(value, { stream: true });
+      // One slice per read, however many frames it carried (first review pass).
+      let from = 0;
+      let nl: number;
+      while ((nl = buffer.indexOf("\n", from)) >= 0) {
+        const line = buffer.slice(from, nl).replace(/\r$/, "");
+        from = nl + 1;
+        const verdict = take(line);
+        if (verdict !== null) {
+          await reader.cancel().catch(() => {});
+          return { content, finish, repeated: verdict === "[DONE]" ? null : verdict };
+        }
+      }
+      buffer = buffer.slice(from);
+      if (done) break;
+    }
+  } catch (e) {
+    // A throw from a frame (the provider's error) leaves by here: the reader
+    // is cancelled so the connection closes now, not at the deadline (third
+    // review pass). A throw from read() itself — the deadline — has no
+    // connection left to close, and cancel() on it is a no-op.
+    await reader.cancel().catch(() => {});
+    throw e;
+  }
+  // A last frame without its newline.
+  const verdict = buffer ? take(buffer) : null;
+  const repeated = verdict === "[DONE]" ? null : verdict;
+  if (repeated === null && !ended) {
+    throw new Error(`Extraction stream from ${base} closed mid-answer: the socket closed after ${content.length} characters with no finish_reason — not an answer`);
+  }
+  return { content, finish, repeated };
+}
+
+/**
  * extractOnce, and once more with the penalty when the windowing says so and
- * the first answer ran to its budget. `onCall` is told of every call BEFORE
+ * the first answer ran to its budget or was aborted on the stream. `onCall` is told of every call BEFORE
  * it is made, so a retry that throws is still counted (third review pass).
  */
 async function extractCall(text: string, cfg: EmbedConfig, timeoutMs: number, part: { index: number; of: number; header?: string } | undefined, w: ExtractWindowing, onCall: () => void): Promise<Omit<Extraction, "retried"> & { runaway: boolean; retried: boolean }> {
   onCall();
-  const first = await extractOnce(text, cfg, timeoutMs, part, w.outputBudget);
+  const first = await extractOnce(text, cfg, timeoutMs, part, w);
   if (!(w.retryRunaway && first.runaway && first.malformed)) return { ...first, retried: false };
   onCall();
-  const second = await extractOnce(text, cfg, timeoutMs, part, w.outputBudget, true);
-  return { ...second, retried: true };
+  const second = await extractOnce(text, cfg, timeoutMs, part, w, true);
+  // The longest a runaway ran before it was aborted, over both calls.
+  const abortedMs = [first.abortedMs, second.abortedMs].filter((n): n is number => n !== undefined);
+  return { ...second, ...(abortedMs.length ? { abortedMs: Math.max(...abortedMs) } : {}), retried: true };
 }
 
 /**
@@ -544,7 +765,7 @@ export async function extractEntities(content: string, cfg: EmbedConfig, timeout
       const t0 = Date.now();
       const ex = await extractCall(w.content, cfg, deadline, { index: w.index, of: windows.length, header }, windowing, onCall);
       retriedAny ||= ex.retried;
-      parts.push({ index: w.index, tokens: estimateTokens(w.content), entities: ex.entities, relations: ex.relations, rejected: ex.rejected, malformed: ex.malformed, retried: ex.retried || undefined, ms: Date.now() - t0 });
+      parts.push({ index: w.index, tokens: estimateTokens(w.content), entities: ex.entities, relations: ex.relations, rejected: ex.rejected, malformed: ex.malformed, retried: ex.retried || undefined, ...(ex.abortedMs !== undefined ? { abortedMs: ex.abortedMs } : {}), ms: Date.now() - t0 });
     }
     return { ...mergeExtractions(parts), retried: retriedAny || undefined };
   } catch (e) {

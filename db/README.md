@@ -842,7 +842,13 @@ running to the model's context and the worker's timeout — and a call cut that
 way is made once more with a frequency penalty (`RUNAWAY_PENALTY`, 0.5), which
 taxes the repetition the runaways were measured to be: on the fork's brain that
 retry, with the budget sized to both measured models, extracted all 32 thoughts
-one call could not finish, where windows alone reached 10 to 13. A thought whose retry also runs away is recorded
+one call could not finish, where windows alone reached 10 to 13. The answer is
+streamed, and a call is aborted the moment its answer holds three copies of one
+item (`RunawayDetector`, `RUNAWAY_REPEATS`; SMD-1960) — the loop is visible on
+the stream long before the budget, so a runaway costs seconds rather than the
+minute the budget allows — and a call aborted so is retried as a cut one is; an
+answer that enumerates distinct ids is not a loop by that rule and runs to the
+budget, which stays the bound. A thought whose retry also runs away is recorded
 failed, retryable. The window is the **metadata model's**, not the embedding
 model's: `OB1_EXTRACT_CHUNK_TOKENS` when set, else derived from the model's
 served context (`KNOWN_CHAT_MODEL_WINDOW`, measured as `KNOWN_MODEL_WINDOW` is)
@@ -851,9 +857,10 @@ the table does not list gets that default. The banner's `window:` line and
 preflight's `extraction window` row print the same sentence. The prompt version
 is 2 — a pass under it re-extracts a brain whose thoughts were cut at 8,000
 characters under p1 — so the first run after upgrading needs `--switch-key`.
-`--dump`'s line carries `windows` and, for a windowed thought, each window's own
-answer in `parts` beside the merged one. Why, measured: `evals/README.md`,
-"Entity extraction in windows".
+`--dump`'s line carries `windows`, `retried` and `abortedMs` — how far into
+the call a runaway was aborted on the stream — and, for a windowed thought,
+each window's own answer in `parts` beside the merged one. Why, measured:
+`evals/README.md`, "Entity extraction in windows".
 
 **What may leave.** The egress gate (SMD-1903) reads each row's own
 `metadata` — `source`, `type`, `topics` — and its text against `OB1_EGRESS_POLICY`

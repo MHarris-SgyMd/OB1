@@ -487,7 +487,7 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
   // A runaway — an answer cut at its budget — is the answer under the shipped
   // windowing, and is made once more with the frequency penalty when the
   // windowing says so; a penalty is never sent on a first call.
-  const { RUNAWAY_PENALTY } = await import("./entities.ts");
+  const { RUNAWAY_PENALTY, RUNAWAY_REPEATS, callsMadeBy } = await import("./entities.ts");
   let runawayOnce = false;
   const penalties: (number | undefined)[] = [];
   const providerE = Bun.serve({
@@ -516,6 +516,121 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
   const clean = await extractEntities(short, cfgE, undefined, { kind: "extraction" });
   assert(!clean.malformed && clean.retried === undefined && penalties.length === 1, "…and an answer that converges is never retried");
 
+  // SMD-1960: the answer is streamed and a runaway is aborted at the third copy
+  // of one item, before its budget, then retried under the penalty as a cut
+  // one is. The stub streams a loop one item per frame and records, per
+  // request, how many frames it got out before the client hung up.
+  type Run = { sent: number; total: number; cancelled: boolean; body: { stream?: boolean; frequency_penalty?: number; max_tokens?: number } };
+  const runs: Run[] = [];
+  let gMode: "loop" | "good" | "json" | "slow" | "cut" | "error" = "loop";
+  const GOOD = JSON.stringify({ entities: [{ name: "Anita", type: "person", confidence: 0.9, aliases: ["A. {Nita}"] }, { name: "Open Brain", type: "project", confidence: 0.8 }], relationships: [{ from: "Anita", to: "Open Brain", relation: "works_on", confidence: 0.7 }] });
+  const frame = (content: string, finish: string | null = null) => `data: ${JSON.stringify({ choices: [{ delta: { content }, finish_reason: finish }] })}\n\n`;
+  const providerG = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      const body = (await req.json()) as Run["body"];
+      const run: Run = { sent: 0, total: 0, cancelled: false, body };
+      runs.push(run);
+      if (gMode === "json" || !body.stream) return Response.json({ choices: [{ message: { content: GOOD }, finish_reason: "stop" }] });
+      let frames: string[];
+      let gapMs = 1;
+      if (gMode === "loop" && body.frequency_penalty === undefined) {
+        const loop = '{"name": "Loop", "type": "tool", "confidence": 1.0}';
+        frames = ['{"entities": [{"name": "Anita", "type": "person", "confidence": 0.9}', ...Array.from({ length: 40 }, () => `,\n    ${loop}`), ""].map((p, i, a) => frame(p, i === a.length - 1 ? "length" : null));
+        // A second between the third copy and the loop running out (third
+        // review pass): the stub's loop stops only when Bun sees the hang-up.
+        gapMs = 25;
+      } else if (gMode === "slow") {
+        frames = Array.from({ length: 20 }, (_, i) => frame(GOOD.slice(i * 8, i * 8 + 8)));
+        gapMs = 100;
+      } else if (gMode === "cut") {
+        // Half the answer, then the stream ends: no finish_reason, no [DONE].
+        frames = Array.from({ length: 10 }, (_, i) => frame(GOOD.slice(i * 8, i * 8 + 8)));
+      } else if (gMode === "error") {
+        // Half the answer, then the provider's error frame — and the stream
+        // kept OPEN after it, as a gateway that goes on talking would.
+        frames = [...Array.from({ length: 10 }, (_, i) => frame(GOOD.slice(i * 8, i * 8 + 8))), `data: ${JSON.stringify({ error: { message: "the runner exited: context length exceeded", code: 500 } })}\n\n`, ...Array.from({ length: 40 }, () => ": still here\n\n")];
+        gapMs = 25;
+      } else {
+        // Seven characters a frame: tokens split mid-name, mid-number, mid-brace;
+        // `"error": null` beside every choice, as some compat layers send; and
+        // after [DONE] the connection kept open with keepalive comments for
+        // seconds, as a gateway might (fourth review pass).
+        frames = [...(GOOD.match(/[\s\S]{1,7}/g) ?? []).map((p) => frame(p).replace('"finish_reason":null}]', '"finish_reason":null}],"error":null')), frame("", "stop"), "data: [DONE]\n\n", ...Array.from({ length: 400 }, () => ": keepalive\n\n")];
+        gapMs = 2;
+      }
+      run.total = frames.length;
+      const encoder = new TextEncoder();
+      const stream = new ReadableStream<Uint8Array>({
+        async start(c) {
+          try {
+            for (const f of frames) { c.enqueue(encoder.encode(f)); run.sent++; await Bun.sleep(gapMs); }
+            c.close();
+          } catch { /* cancelled mid-loop */ }
+        },
+        cancel() { run.cancelled = true; },
+      });
+      return new Response(stream, { headers: { "content-type": "text/event-stream" } });
+    },
+  });
+  const cfgG = resolveEmbedConfig({ OB1_LLM_LOCAL: "1", OB1_LLM_BASE_URL: `http://127.0.0.1:${providerG.port}/v1`, OB1_METADATA_MODEL: "stub-chat" });
+  assert(windowingFor(cfgG).streamAbort === true, "the shipped windowing streams the answer and aborts a runaway on it (EXTRACT_STREAM_ABORT)");
+  gMode = "loop";
+  const rescued = await extractEntities(short, cfgG, undefined, { kind: "extraction" });
+  // The stub's cancel() lands after the client's reader.cancel(): wait for
+  // it, bounded, rather than a fixed sleep (second review pass).
+  for (let waited = 0; !(runs[0]?.cancelled && runs[1]?.cancelled) && waited < 2000; waited += 10) await Bun.sleep(10);
+  assert(!rescued.malformed && rescued.retried === true && rescued.entities[0]?.name === "Anita" && rescued.entities.length === 2, "a streamed runaway is aborted and the penalised retry's answer is the thought's");
+  assert(rescued.abortedMs !== undefined && rescued.abortedMs >= 0 && rescued.abortedMs < 5000, `…and the answer says how far into the call the runaway was aborted (${rescued.abortedMs} ms)`);
+  assert(runs.length === 2 && runs[0].body.stream === true && runs[0].body.frequency_penalty === undefined && runs[1].body.frequency_penalty === RUNAWAY_PENALTY && runs[1].body.stream === true, `both calls ask for a stream; the first carries no penalty, the retry ${RUNAWAY_PENALTY} (${runs.map((r) => `${r.body.stream}/${r.body.frequency_penalty}`).join(" ")})`);
+  assert(runs[0].cancelled && runs[0].sent >= RUNAWAY_REPEATS + 1 && runs[0].sent < runs[0].total, `the client hung up on the loop after the third copy and before it ran out (${runs[0].sent} of ${runs[0].total} frames sent) — the mutant that reads the stream to its end sends all ${runs[0].total}`);
+  assert(runs[1].cancelled === true && runs[1].sent < runs[1].total && runs[1].sent > RUNAWAY_REPEATS + 1, `…and read the retry's converging answer to its [DONE], closing the connection on the keepalives after it (${runs[1].sent} of ${runs[1].total} frames)`);
+
+  // The streamed answer, reassembled from frames that split tokens, is the
+  // whole answer; and a provider that answers a stream request with plain JSON
+  // is read as one not asked (every other stub in this suite does).
+  runs.length = 0;
+  gMode = "good";
+  const streamed = await extractEntities(short, cfgG, undefined, { kind: "extraction" });
+  for (let waited = 0; !runs[0]?.cancelled && waited < 2000; waited += 10) await Bun.sleep(10);
+  assert(runs[0]?.cancelled === true && runs[0].sent < runs[0].total, `[DONE] ends the read: the call returned with the gateway still sending keepalives (${runs[0]?.sent} of ${runs[0]?.total} frames) and the connection closed — the mutant that waits for the socket sends all ${runs[0]?.total}`);
+  gMode = "json";
+  const whole = await extractEntities(short, cfgG, undefined, { kind: "extraction" });
+  assert(JSON.stringify(streamed) === JSON.stringify(whole) && streamed.entities.length === 2 && streamed.relations.length === 1 && streamed.entities[0].aliases[0] === "A. {Nita}" && streamed.retried === undefined && streamed.abortedMs === undefined, `a streamed answer parses to the same Extraction as the whole one — braces inside an alias included — with nothing aborted or retried (${JSON.stringify(streamed).slice(0, 120)})`);
+  assert(runs.length === 2 && runs[1].body.stream === true && runs[1].total === 0, "…and the JSON answer to a stream request read whole");
+
+  // The per-call deadline bounds a stream that keeps coming too slowly, and
+  // the error is the timeout the worker classifies (TimeoutError / timed out),
+  // with the call counted.
+  gMode = "slow";
+  let late = "";
+  let lateCalls = -1;
+  try { await extractEntities(short, cfgG, 300, { kind: "extraction" }); } catch (e) { late = `${(e as Error).name}: ${(e as Error).message}`; lateCalls = callsMadeBy(e); }
+  assert(/TimeoutError|timed out/i.test(late) && lateCalls === 1, `a stream still coming at the deadline is the timeout, counted as one call (${late.slice(0, 80)}; calls ${lateCalls})`);
+
+  // A stream that ends with neither a finish_reason nor [DONE] is a socket
+  // that closed mid-answer — thrown, as the whole read's r.json() on a
+  // truncated body was, and worded for the worker's transient rule (`socket`),
+  // NOT returned as the model's malformed answer (first review pass).
+  gMode = "cut";
+  let closed = "";
+  let closedCalls = -1;
+  try { await extractEntities(short, cfgG, undefined, { kind: "extraction" }); } catch (e) { closed = (e as Error).message; closedCalls = callsMadeBy(e); }
+  assert(/closed mid-answer/.test(closed) && /socket/i.test(closed) && /80 characters/.test(closed) && closedCalls === 1, `a stream cut mid-answer throws a socket error naming what arrived, counted as one call, rather than a malformed answer (${closed.slice(0, 100)}; calls ${closedCalls})`);
+
+  // The provider's own error frame mid-stream is the provider's error, with its
+  // message — not the socket sentence, not a malformed answer (second review pass).
+  gMode = "error";
+  runs.length = 0;
+  let errored = "";
+  let erroredStatus: number | undefined;
+  try { await extractEntities(short, cfgG, undefined, { kind: "extraction" }); } catch (e) { errored = (e as Error).message; erroredStatus = (e as { status?: number }).status; }
+  assert(/answered an error mid-stream: the runner exited: context length exceeded/.test(errored) && !/socket/.test(errored), `an error frame mid-stream throws the provider's message (${errored.slice(0, 120)})`);
+  assert(erroredStatus === 500, `…carrying the frame's code as the status the worker's transient rule reads (${erroredStatus})`);
+  for (let waited = 0; !runs[0]?.cancelled && waited < 2000; waited += 10) await Bun.sleep(10);
+  assert(runs[0]?.cancelled === true && runs[0].sent < runs[0].total, `…and the connection is closed on the way out, not left open to the deadline (${runs[0]?.sent} of ${runs[0]?.total} frames sent)`);
+  gMode = "loop";
+
   // Reasoning on (second review pass): max_tokens would cap the thinking and
   // the answer together, so no budget is sent and a cut answer is not retried.
   const maxTokensSeen: (number | undefined)[] = [];
@@ -534,6 +649,7 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
   assert(maxTokensSeen.length === 1 && maxTokensSeen[0] === undefined && penalties[0] === undefined, "with OB1_METADATA_REASONING on the call carries no max_tokens and no penalty — the p1 request");
   assert(!thought.malformed && thought.retried === undefined && maxTokensSeen.length === 1, "…and an answer that parses is the thought's, with `length` not read as a runaway since nothing was budgeted");
   providerF.stop();
+  providerG.stop();
   providerE.stop();
 
   // The default window for a model the table lists is the measured 1200, and
