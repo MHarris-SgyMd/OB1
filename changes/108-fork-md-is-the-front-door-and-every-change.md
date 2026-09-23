@@ -1,17 +1,4 @@
----
-type: changed
-bump: patch
-tickets: [SMD-1917]
-migrations: []
----
-
-## Changelog
-
-FORK.md is a 60 KB front door with a generated index; every numbered change (18–103) is one file under `changes/`, release fragments sit beside them until they are numbered, and check 15 holds the sizes, the numbering and every citation of a change number (SMD-1917).
-
-## FORK
-
-FORK.md is the front door, and every change is one file — `changes/NNN-<slug>.md` with a fixed shape and a 150-line cap, an index generated from the directory, fragments numbered into it at release, and check 15 holding the sizes, the numbering and every citation of a change number (SMD-1917)
+# 108. FORK.md is the front door, and every change is one file — `changes/NNN-<slug>.md` with a fixed shape and a 150-line cap, an index generated from the directory, fragments numbered into it at release, and check 15 holding the sizes, the numbering and every citation of a change number (SMD-1917)
 
 **What changed.** The 85 `### N.` sections FORK.md carried for changes 18–102
 (and 103, which reached `main` while this was in review) are one file each under

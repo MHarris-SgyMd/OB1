@@ -1,17 +1,4 @@
----
-type: fixed
-bump: patch
-tickets: [SMD-1932]
-migrations: []
----
-
-## Changelog
-
-`db/` and `evals/` are type-checked in CI: each gains a `tsconfig.json` mirroring the server's, the four type-checked directories pin `@types/bun`, `typescript` and `@types/node` at one version (check 18 holds them in step), two `Typecheck` steps run in the portable-server job, `db/ci-parity.sh` runs the four typechecks, and the findings a first strict pass over the two directories turned up are fixed — none a runtime defect (SMD-1932).
-
-## FORK
-
-The workers, benches, suites and evals are type-checked — `db/` and `evals/` each get a tsconfig, the type pins and a CI step, check 18 holds the four directories' pins in step, so a call-site mismatch fails at review rather than at the first run (SMD-1932)
+# 110. The workers, benches, suites and evals are type-checked — `db/` and `evals/` each get a tsconfig, the type pins and a CI step, check 18 holds the four directories' pins in step, so a call-site mismatch fails at review rather than at the first run (SMD-1932)
 
 **What changed.** `db/tsconfig.json` and `evals/tsconfig.json` are
 `server-portable/tsconfig.json` byte for byte — `strict`, `bundler`

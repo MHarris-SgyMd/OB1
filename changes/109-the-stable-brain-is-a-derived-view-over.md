@@ -1,19 +1,4 @@
----
-type: added
-bump: minor
-tickets: [SMD-1806]
-migrations: []
----
-
-## Changelog
-
-`db/ingest-records.ts` rebuilds a brain from the records it derives from — FORK.md changes, git commits since the pin, a Linear corpus dump, the memory files — each row source-labelled and written bare for `db/reembed.ts` to embed; a `tier` preflight check and `OB1_TIER` report which pipeline tier a brain is (SMD-1806).
-
-`db/tier.ts` and `deploy/compose.tiers.yaml` add the canary and working tiers: `--refresh` snapshots stable into a tier with `pg_dump`/`pg_restore` and migrates it forward, `--replay`/`--diff` re-run stable's logged searches against the canary and report what moved, `--promote` stamps the soaked version onto stable — three brains on three loopback ports over one shared Ollama (SMD-1806).
-
-## FORK
-
-The stable brain is a derived view over the records, rebuilt by one tool — `db/ingest-records.ts`, with a `tier` the brain reports (SMD-1806)
+# 109. The stable brain is a derived view over the records, rebuilt by one tool — `db/ingest-records.ts`, with a `tier` the brain reports (SMD-1806)
 
 SMD-1806 wants three brains as a promotion pipeline over one corpus: **stable**
 (the record, the only writer) → **main canary** (refreshed and replayed on every
