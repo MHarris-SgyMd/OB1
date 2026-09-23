@@ -81,7 +81,9 @@ export function noiseBucket(text: string): number {
  * exact rerank stage (039 / SMD-1707) orders at full precision. So this is
  * a MARGIN, sixteen times float32's spacing near 1 and about a bucket's
  * worth at the smallest weight, not a measured tie; `corpusProblems` holds
- * it over the real vectors.
+ * it over the stub's full vectors (not the bucket indices). It says nothing
+ * about a real embedding model — the arm has no path to one; the stub IS the
+ * provider the child serves.
  */
 export const MIN_COSINE_GAP = 1e-6;
 
@@ -332,13 +334,14 @@ export type ArmScore = {
 };
 
 export const isError = (item: Item): boolean => item.planted.kind !== "salient";
+/** The default arm under the labelled reader, by name — never by position in the arms list. */
+export function defaultArm(scores: readonly ArmScore[]): ArmScore {
+  const d = scores.find((s) => s.arm === "default" && s.reader === "labels");
+  if (!d) throw new Error("no default arm among the scores");
+  return d;
+}
 export const errorClassOf = (item: Item): ErrorClass | null => (isError(item) ? (item.planted.kind as ErrorClass) : null);
 export const ratio = (r: Rate): number | null => (r.of > 0 ? r.n / r.of : null);
-
-/** The scored items: every planted item is scored; nothing in the corpus is filler today. */
-export function scoredItems(items: readonly Item[] = ITEMS): Item[] {
-  return [...items];
-}
 
 /**
  * One arm's numbers from what it observed. A salient item is right when a
@@ -360,7 +363,8 @@ export function scoreArm(obs: Observation, items: readonly Item[] = ITEMS, specs
   const survival = { n: 0, of: 0, contested: 0, dropped: 0, unseen: 0 };
   const byClass = Object.fromEntries(ERROR_CLASSES.map((c) => [c, { n: 0, of: 0 }])) as Record<ErrorClass, Rate>;
   const catchAll = { n: 0, of: 0, unseen: 0 };
-  for (const item of scoredItems(items)) {
+  // Every planted item is scored; the corpus has no filler.
+  for (const item of items) {
     if (!covered.has(item.subject)) continue;
     const tid = obs.idOf[item.id]?.toLowerCase();
     if (!tid) throw new Error(`scoreArm: item ${item.id} has no thought id in the ${obs.arm} arm's observation`);
@@ -554,7 +558,7 @@ export function compareToFloor(s: ArmScore, floor: Floor): { failures: string[];
   const rightThen = new Set(floor.right);
   const lost = [...rightThen].filter((id) => !rightNow.has(id)).sort();
   const gained = [...rightNow].filter((id) => !rightThen.has(id)).sort();
-  if (lost.length) failures.push(`items the record had right and this run has wrong: ${lost.join(", ")}`);
+  if (lost.length) failures.push(`items the record had right and this run has wrong: ${lost.join(", ")}; re-record with \`../db/with-postgres.sh bun eval-write-path.ts --record\` if the change is meant`);
   if (gained.length) notes.push(`items this run has right and the record had wrong: ${gained.join(", ")}; re-record to hold them`);
   return { failures, notes };
 }
@@ -574,7 +578,7 @@ export function renderReport(scores: ArmScore[], paired: Paired[], caught: Recor
       `${String(s.survival.contested).padStart(9)}  ${String(s.catch.unseen).padStart(10)}  ${String(s.returned).padStart(8)}  ${String(s.chars).padStart(5)}`,
     );
   }
-  const def = scores.find((s) => s.arm === "default" && s.reader === "labels");
+  const def = scores.some((s) => s.arm === "default" && s.reader === "labels") ? defaultArm(scores) : undefined;
   if (def) {
     lines.push(``, `catch by error class (default arm): ` + ERROR_CLASSES.map((c) => `${c} ${pct(def.catch.byClass[c]).trim()}`).join(" · "));
   }
@@ -613,6 +617,11 @@ export function corpusProblems(items: readonly Item[] = ITEMS, specs: readonly D
   const texts = new Map<string, string>();
   items.forEach((it, i) => {
     if (ids.has(it.id)) out.push(`item id ${it.id} appears twice`);
+    // A kind the scorer has no row for: `errorClassOf` narrows by cast, so
+    // TypeScript would accept a new member of Planted and the scorer would
+    // meet it as `byClass[cls]` undefined. Refused here with the list to join.
+    const kind = (it.planted as { kind: string }).kind;
+    if (kind !== "salient" && !(ERROR_CLASSES as readonly string[]).includes(kind)) out.push(`${it.id} is planted as "${kind}", which is neither salient nor one of ERROR_CLASSES (${ERROR_CLASSES.join(", ")}); add the class to ERROR_CLASSES and the scorer's per-class table first`);
     ids.set(it.id, i);
     // The same text is one row after upsert_thought's fingerprint (003/035):
     // two items would be scored from one presentation, and the second's

@@ -53,8 +53,12 @@ import {
 } from "./write-path.ts";
 
 const t0 = Date.now();
-// Before anything reads the environment: every OB1_* knob but this arm's own goes.
-for (const k of Object.keys(process.env)) if (k.startsWith("OB1_") && !k.startsWith("OB1_WP_")) delete process.env[k];
+// Before anything reads the environment: every OB1_* knob but this arm's own
+// goes. Kept: the two flags db/test-support's throwaway guard reads — they are
+// an operator's answer to a safety question, not a server knob, and the
+// guard's own refusal names them.
+const KEEP = new Set(["OB1_ALLOW_REMOTE_DB", "OB1_EVAL_ALLOW_REMOTE_DB", "OB1_DROP_KEPT_CORPUS"]);
+for (const k of Object.keys(process.env)) if (k.startsWith("OB1_") && !k.startsWith("OB1_WP_") && !KEEP.has(k)) delete process.env[k];
 const URL_ = process.env.DATABASE_URL;
 if (!URL_) { console.error("DATABASE_URL is not set."); process.exit(2); }
 const ARM = (process.env.OB1_WP_ARM ?? "default") as Arm;
@@ -206,6 +210,10 @@ for (const spec of DELIVERABLES) {
   const lines = spec.subjects.flatMap((k) => (decided[k] ?? []).map((l) => ({ ...l, subject: k })));
   const content = renderDeliverable(spec, decided);
   const derived = [...new Set(lines.map((l) => l.id))];
+  // The deliverable, in the reduced form: a capture whose derived_from names
+  // its sources. SMD-1715's capture_deliverable replaces this call; SMD-1733's
+  // cites argument, or 042's facets, replace the read-back below — the scorer
+  // keeps taking a list of source ids.
   const reply = await asOp.call("capture_thought", { content, derived_from: derived, source: "write-path-eval" });
   const thoughtId = parseCapturedId(reply);
   const [row] = (await sql`SELECT derived_from, length(content)::int AS chars FROM thoughts WHERE id = ${thoughtId}::uuid`) as { derived_from: string[] | null; chars: number }[];
