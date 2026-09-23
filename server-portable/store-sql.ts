@@ -23,7 +23,7 @@
  */
 
 import { SQL } from "bun";
-import { actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, normaliseThoughtMeta, normaliseThoughtRecord, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE } from "./store.ts";
+import { actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, normaliseThoughtMeta, normaliseThoughtRecord, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
@@ -367,6 +367,24 @@ export class SqlStore implements ThoughtStore {
     return normaliseAgentResolution(rows[0]?.r);
   }
 
+  async captureActorOf(id: string): Promise<{ actorName: string | null; agentId: string | null } | null> {
+    if (!UUID_RE.test(id)) return null;
+    // The FIRST capture row: a re-capture of the same text by another key
+    // writes no new row (035), and an update is not a capture.
+    const rows = await this.sql`
+      SELECT actor_name, canonical_agent_id::text AS agent_id FROM thought_audit
+      WHERE thought_id = ${id}::uuid AND action = 'capture' ORDER BY created_at ASC, id ASC LIMIT 1`; // id is a uuid (008): the tiebreak is stable, not chronological — a thought has one capture row by construction (035), so the tie is theory
+    const r = rows[0] as { actor_name?: string | null; agent_id?: string | null } | undefined;
+    return r ? { actorName: r.actor_name ?? null, agentId: r.agent_id ?? null } : null;
+  }
+
+  async existingIds(ids: string[]): Promise<Set<string>> {
+    const valid = idList(ids);
+    if (valid.length === 0) return new Set();
+    const rows = await this.sql`SELECT id::text AS id FROM thoughts WHERE id = ANY(${this.sql.array(valid, "TEXT")}::uuid[])`;
+    return new Set((rows as { id: string }[]).map((r) => String(r.id).toLowerCase()));
+  }
+
   async traceProvenance(opts: { id: string; maxDepth?: number; nodeCap?: number }): Promise<ProvenanceNode[]> {
     if (!UUID_RE.test(opts.id)) return [];
     // Migration 025. NULLs pass the function's own defaults (and its clamps).
@@ -392,7 +410,7 @@ export class SqlStore implements ThoughtStore {
   }
 
   async supersededAmong(ids: string[]): Promise<Record<string, string>> {
-    const valid = ids.filter((id) => UUID_RE.test(id));
+    const valid = idList(ids);
     if (valid.length === 0) return {};
     // For each hit that a newer thought supersedes, the newest such thought.
     // Best-effort: a database without migration 025 has no `supersedes` column,

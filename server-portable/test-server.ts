@@ -222,7 +222,7 @@ console.log("\n[9] tools/list exposes exactly the documented surface");
   // key — so a tool added to or removed from index.ts without a matching
   // manifest entry shows up here as a mismatch, and a gated tool later just
   // changes what visibleToolNames() returns.
-  const expected = visibleToolNames({ write: true });
+  const expected = visibleToolNames({ scope: "write" });
   assert(tools.length === expected.length, `${expected.length} tools registered (got ${tools.length})`);
   for (const t of expected) assert(tools.includes(t), `exposes "${t}"`);
 }

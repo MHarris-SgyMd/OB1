@@ -5,17 +5,24 @@
 // tools.json from this for deploy/smoke.sh (bash, no bun in the deploy job), and
 // check-fork-consistency.ts round-trips the two so they cannot drift.
 
-export type ToolScope = "read" | "write";
+import type { Scope } from "./auth.ts";
+
+/** A tool's scope is a key's scope: one literal union, so a fourth scope is added once (tenth review pass). */
+export type ToolScope = Scope;
 
 export interface ToolEntry {
   readonly name: string;
   /**
-   * When the tool is on the surface. `read` — always. `write` — only for a
-   * write-scoped key, registered behind canWrite() in index.ts and absent for a
-   * read key. This is the only "condition" today; a future flag-gated or
-   * optional tool adds its condition here and extends visibleToolNames() below,
-   * and the drift guards read that rather than a fixed count — so the surface
-   * can grow conditions without a test hard-coding the answer.
+   * The gate index.ts registers the tool behind, named for the key scope that
+   * unlocks it alone: `read` (canRead — a read or a write key), `capture`
+   * (canCapture — a write key or the capture-only key, SMD-1298), `write`
+   * (canWrite — a write key alone). A key's surface is the union of the groups
+   * its scope unlocks, UNLOCKS below; visibleToolNames() derives it, so the
+   * drift guards read the manifest rather than a fixed count, and a tool
+   * gated with canCapture in index.ts but tagged `write` here fails them
+   * (first review pass: a hand-written list beside the manifest would not). A
+   * future flag-gated or optional tool adds its condition here and extends
+   * that function.
    */
   readonly scope: ToolScope;
 }
@@ -31,7 +38,7 @@ export const TOOLS = [
   { name: "list_thoughts", scope: "read" },
   { name: "list_supersession_proposals", scope: "read" },
   { name: "thought_stats", scope: "read" },
-  { name: "capture_thought", scope: "write" },
+  { name: "capture_thought", scope: "capture" },
   { name: "update_thought", scope: "write" },
   { name: "delete_thought", scope: "write" },
 ] as const satisfies readonly ToolEntry[];
@@ -39,19 +46,30 @@ export const TOOLS = [
 /** Every tool name as a literal union — the type a tool name is checked against. */
 export type ToolName = (typeof TOOLS)[number]["name"];
 
-/** Every tool name, sorted — the surface a write-scoped key sees. */
-export const TOOL_NAMES: ToolName[] = TOOLS.map((t) => t.name).sort();
-/** The read-scoped subset, sorted — the surface a read-only key sees. */
-export const READ_TOOL_NAMES: ToolName[] = TOOLS.filter((t) => t.scope === "read").map((t) => t.name).sort();
-/** The write-gated tools, sorted — absent from a read key's surface. */
-export const WRITE_TOOL_NAMES: ToolName[] = TOOLS.filter((t) => t.scope === "write").map((t) => t.name).sort();
+const namesIn = (groups: readonly ToolScope[]): ToolName[] => TOOLS.filter((t) => groups.includes(t.scope)).map((t) => t.name).sort();
+
+/** The tool groups each key scope unlocks — the one statement of the scope hierarchy. */
+export const UNLOCKS: Readonly<Record<Scope, readonly ToolScope[]>> = {
+  read: ["read"],
+  capture: ["capture"],
+  write: ["read", "capture", "write"],
+};
+
+/** Every tool name a write-scoped key sees, sorted — derived from UNLOCKS, not restated (eleventh review pass: it was every manifest entry, a second statement of the hierarchy). */
+export const TOOL_NAMES: ToolName[] = namesIn(UNLOCKS.write);
+/** The read group, sorted — the surface a read-only key sees. */
+export const READ_TOOL_NAMES: ToolName[] = namesIn(["read"]);
+/** The write group, sorted — what a write key alone unlocks: update and delete. */
+export const WRITE_TOOL_NAMES: ToolName[] = namesIn(["write"]);
+/** The capture group, sorted — the surface a capture-only key sees (SMD-1298). */
+export const CAPTURE_TOOL_NAMES: ToolName[] = namesIn(["capture"]);
 
 /**
  * The tool names a caller sees, derived from the manifest for the caller's
- * condition — the one place "which tools are expected" is computed, so the drift
+ * scope — the one place "which tools are expected" is computed, so the drift
  * guards stay correct as tools gain conditions. Today the only condition is
- * write scope; a flag-gated tool would take its flag as another field here.
+ * the key's scope; a flag-gated tool would take its flag as another field here.
  */
-export function visibleToolNames({ write }: { write: boolean }): ToolName[] {
-  return write ? TOOL_NAMES : READ_TOOL_NAMES;
+export function visibleToolNames({ scope }: { scope: Scope }): ToolName[] {
+  return namesIn(UNLOCKS[scope]);
 }

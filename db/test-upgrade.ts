@@ -460,12 +460,11 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // (the query_log column set — filter, arm and tier, SMD-1490), 046 (the
   // audit row's event shape, SMD-1730), 047 (the query_log.logged_at prune
   // index, SMD-1492), 048 (the first release's schema_version, 1.0.0 — the
-  // cut's last migration, SMD-1804/SMD-1860), 049 (the capture-only key scope,
-  // SMD-1298) and 050 (the writer's mark on the row, SMD-1726) stay
-  // recorded and are never tried. 030 is the
-  // right one to make
-  // pending
-  // because its prerequisites — 015 and 021's embedding_model column — are
+  // cut's last migration, SMD-1804/SMD-1860) 049 (the three-value CHECK on
+  // ob1_agent_keys.scope, SMD-1298) and 050 (the writer's mark on the row,
+  // SMD-1726) stay recorded and are never tried. 030 is
+  // the right one to make pending because its prerequisites — 015 and 021's
+  // embedding_model column — are
   // exactly what a through-020 schema lacks, so it fails by name rather than
   // with a bare error. The window guard trips whenever a migration lands past
   // 030, to force this note to be re-read (034 needs only 001/010; 035 needs
@@ -1732,6 +1731,29 @@ console.log("\n[20c] Migration 047 on a schema without 034 — refused up front,
   assert((await sql`SELECT 1 FROM pg_indexes WHERE tablename = 'query_log' AND indexname = 'query_log_logged_at_idx'`).length === 1,
     "…and applied once the table exists: 047's index is on query_log");
   await sql.close();
+}
+
+console.log("\n[20d] Migration 049 on a schema without 010 — refused up front, naming 010 and --reapply (SMD-1298)");
+{
+  // 049's guard is 047's ([20c]) on 010's table: its `'ob1_agent_keys'::regclass`
+  // would otherwise fail bare (tenth review pass: every sibling carried the
+  // guard, this file did not). Same drive: a ledger baselined over a schema that
+  // stops before 010, 049 alone made pending.
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < "010" });
+  const baselined = await migrate("--baseline");
+  assert(baselined.code === 0, `--baseline records every migration over the pre-010 schema (exit ${baselined.code})`);
+  const sql = new SQL({ url: URL_, max: 1 });
+  const the049 = MIGRATIONS.find((f) => f.startsWith("049_"))!;
+  await sql`DELETE FROM schema_migrations WHERE name = ${the049}`;
+  const plain = await migrate();
+  const ok = plain.code === 1 &&
+    /049_agent_key_scope_capture\.sql\s+FAILED: migration 049 needs 010 \(ob1_agent_keys\.scope\); this schema lacks it/.test(plain.out) &&
+    /adopted with --baseline\?\)\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plain.out);
+  assert(ok, `a plain run fails at 049 naming 010 and --reapply, not with a bare "does not exist" (exit ${plain.code})${ok ? "" : `:\n${plain.out}`}`);
+  assert(Number((await sql`SELECT count(*)::int AS c FROM schema_migrations WHERE name = ${the049}`)[0].c) === 0, "…049 records nothing");
+  await sql.close();
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f >= "010" });
 }
 
 console.log("\n[20e] Migration 050 onto a populated 046 — every thought gains its writer's mark from the log, a planted claim is corrected, updated_at does not move, one audit row per row written, the trigger stamps every write after, and a re-apply writes nothing (SMD-1726)");

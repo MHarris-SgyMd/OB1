@@ -164,7 +164,7 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `1430 assertions: 1430 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `1444 assertions: 1444 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports fifty (50) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
@@ -230,6 +230,16 @@ rows still waiting. `source` keeps its name and now carries one vocabulary, the
 row's own `metadata.source`. The event rides `p_payload.event` on both
 inserting `upsert_thought` forms and a tenth, defaulted `p_event` on
 `update_thought`; nothing over MCP sends one yet (SMD-1724, 1725, 1733).
+
+Migration 049 widens `ob1_agent_keys.scope`'s CHECK from `read, write` to
+`read, write, capture` (dropping every CHECK on the column first, whatever name a
+restore left it under) — the third key scope `server-portable/auth.ts` mints for
+a session-end hook (`bun keygen.ts --scope capture`: `capture_thought` alone, no
+read tool, no update, no delete; `recipes/session-capture-hook`). The column is
+010's record of the scope a key last presented, not a gate; without the widening
+`resolve_agent()` would have refused the row and every capture through such a
+key would have landed without its agent id. Named by ticket for the same reason
+as 044 (SMD-1298).
 
 Migration 050 puts the writer on the row (SMD-1726): two reserved keys in
 `thoughts.metadata`, `actor_kind` and `actor_name`, stamped by a BEFORE trigger
@@ -311,6 +321,7 @@ issues every group at once.
 | **server** — the server's soft extras, beyond capture; never fatal to a bare capture (the `SELECT` on `ob1_agents` 046 made hard is in capture, above), but `resolve_agent` *upserts* the agent tables, so attribution needs the writes, not just `SELECT` | `ob1_config` (006) | `SELECT` |
 | | `ob1_agents` (010) | `SELECT, INSERT, UPDATE` |
 | | `ob1_agent_keys` (010) | `SELECT, INSERT, UPDATE` |
+| | `thought_audit` (008) | `SELECT` — a capture-only key may supersede only a thought whose capture row is its own (SMD-1298); without this the server refuses that pointer and names the grant |
 | **worker** — `reembed.ts`, `consolidate.ts`, `extract-entities.ts`: claim work, upsert a job key into `ob1_config`, and (consolidate) record/resolve proposals | `thought_work_claims` (015) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `ob1_config` (006) | `INSERT, UPDATE` |
 | | `supersession_proposals` (029) | `SELECT, INSERT, UPDATE` |
@@ -1703,7 +1714,7 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 1430 assertions, PGlite, no container
+bun test-schema.ts                          # 1444 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts         # 619 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
