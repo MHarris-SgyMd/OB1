@@ -1755,7 +1755,7 @@ function scan(text: string, from: number, stringsToo: boolean, inExpression: boo
       // A regex literal, if one closes on this line; else the `/` is a division.
       let j = i + 1, inClass = false, closed = false;
       for (; j < text.length && text[j] !== "\n"; j++) {
-        if (text[j] === "\\") { j++; continue; }
+        if (text[j] === "\\" && text[j + 1] !== "\n") { j++; continue; } // an escape, never past the line's end
         if (text[j] === "[") inClass = true;
         else if (text[j] === "]") inClass = false;
         else if (text[j] === "/" && !inClass) { closed = true; break; }
@@ -1790,8 +1790,12 @@ function importSpecifiers(text: string) {
   const code = blanked(text, false);
   const out: { spec: string; line: number }[] = [];
   const lineOf = (index: number) => code.slice(0, index).split("\n").length;
-  for (const m of code.matchAll(/^[ \t]*(?:import|export)\b[^;]*;/gm)) {
-    const spec = /\bfrom\s*(["'])([^"'\n]+)\1\s*;$/.exec(m[0]) ?? /^[ \t]*import\s*(["'])([^"'\n]+)\1\s*;$/.exec(m[0]);
+  // A statement runs to its `;` but never across a newline into a line that opens another statement or leads
+  // with `;` (standard style's `;[…]` and `;(…)` idioms): the third review pass found a semicolon-less import
+  // counted twice through the next line's leading `;`, and a mixed file's `;`-terminated import credited to the
+  // semicolon-less line above it. The `;` must sit on the specifier's own line.
+  for (const m of code.matchAll(/^[ \t]*(?:import|export)\b(?:[^;\n]|\n(?![ \t]*(?:import\b|export\b|;)))*;/gm)) {
+    const spec = /\bfrom\s*(["'])([^"'\n]+)\1[ \t]*;$/.exec(m[0]) ?? /^[ \t]*import\s*(["'])([^"'\n]+)\1[ \t]*;$/.exec(m[0]);
     if (spec) out.push({ spec: spec[2], line: lineOf(m.index) });
   }
   for (const m of code.matchAll(/^[ \t]*(?:import|export)\b[^;\n]*$/gm)) {
@@ -1892,6 +1896,11 @@ const SPECIFIER_PROBES: [string, string[], string[]][] = [
   ['import { createHash } from "node:crypto";\nimport { createClient } from "../../compat/supabase-sql/index.ts";\nconst m = await import("./tools.ts");\n// see "jsr:@supabase/functions-js"\nconst s = "npm:hono";\n', [], []],
   // Semicolon-less, single-line (the second review pass: repo-learning-coach's shape, unread until then).
   ["import { Hono } from 'npm:hono@4'\nimport { createClient } from '../../compat/supabase-sql/index.ts'\n", [], ["specifier:npm:hono@4@1"]],
+  // The third pass: a `;`-led next line counts the import once; a mixed file credits each import to its own line.
+  ["import { a } from 'npm:a'\n;[1].forEach(f)\n", [], ["specifier:npm:a@1"]],
+  ["import { a } from 'npm:a'\nimport { b } from 'npm:b';\nimport { c } from 'npm:c'\n", [], ["specifier:npm:a@1", "specifier:npm:b@2", "specifier:npm:c@3"]],
+  // A multi-line, `;`-terminated import is still read whole.
+  ['import {\n  createClient,\n} from "npm:@supabase/supabase-js@2";\nimport { x } from "../../compat/supabase-sql/index.ts";\n', [], ["specifier:npm:@supabase/supabase-js@2@1"]],
 ];
 
 function checkBunNative() {
@@ -1931,9 +1940,12 @@ function checkBunNative() {
       const src = from === file ? text : readFileSync(from, "utf8");
       for (const { spec } of importSpecifiers(src)) {
         if (!spec.startsWith("./") && !spec.startsWith("../")) continue;
-        // As Bun resolves it: the path as written, a `.js`/`.mjs` specifier for a `.ts`/`.mts` file, or a directory's index.
+        // As Bun resolves it: the path as written; a `.js`/`.mjs` specifier for a `.ts`/`.tsx`/`.mts` file; an
+        // extensionless one; a directory's index — in Bun's order, the first that is a file.
         const target = join(dirname(from), spec);
-        const p = [target, target.replace(/\.js$/, ".ts"), target.replace(/\.mjs$/, ".mts"), join(target, "index.ts")]
+        const p = [target, target.replace(/\.js$/, ".ts"), target.replace(/\.js$/, ".tsx"), target.replace(/\.mjs$/, ".mts"),
+          ...(/\.\w+$/.test(spec) ? [] : [`${target}.ts`, `${target}.tsx`, `${target}.js`]),
+          join(target, "index.ts"), join(target, "index.tsx"), join(target, "index.js")]
           .find((c) => existsSync(c) && statSync(c).isFile());
         if (!p || seen.has(p) || relOf(p).startsWith("compat/")) continue;
         seen.add(p); queue.push(p); deps.push(p);

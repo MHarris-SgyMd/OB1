@@ -239,55 +239,26 @@ export default {
 };
 ```
 
-### Step 4: Configure Separate Secrets
+### Step 4: Mint Separate Keys
 
-Set the shared server's secrets in Supabase (separate from your main server's secrets):
+The shared server's keys are its own environment, separate from the extension server's — there is no Supabase project holding secrets; the variables go on the `bun` command in Step 5:
 
 ```bash
 # Mint a separate, named key for the shared server — read-scoped unless this
 # member should add or check off items (Step 3 of the Deploy an Edge Function
-# primitive shows the by-hand form). The HASH is stored; the key goes in the URL.
-# Run from a checkout of this repository, in a subshell so the cwd stays here:
+# primitive shows the by-hand form). The HASH goes in MCP_HOUSEHOLD_ACCESS_KEYS;
+# the key goes in the other person's connector URL. From a checkout, in a
+# subshell so the cwd stays here:
 (cd /path/to/your/OB1/checkout/server-portable && bun keygen.ts --name spouse --scope read)
-
-# Set secrets
-supabase secrets set MCP_HOUSEHOLD_ACCESS_KEYS=spouse:read:paste-the-hash-here
-supabase secrets set SUPABASE_HOUSEHOLD_KEY=your-limited-supabase-key  # LIMITED KEY
-
-# Optional: Household ID for RLS
-SHARED_HOUSEHOLD_ID=uuid-here
 ```
 
-Add to `package.json`:
-
-```json
-{
-  "name": "household-shared-server",
-  "version": "1.0.0",
-  "type": "module",
-  "scripts": {
-    "build": "tsc",
-    "start": "node --env-file=.env.shared dist/shared-server.js"
-  },
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "^0.5.0",
-    "@supabase/supabase-js": "^2.39.0"
-  },
-  "devDependencies": {
-    "@types/node": "^20.0.0",
-    "typescript": "^5.3.0"
-  }
-}
-```
+The shared server reads `MCP_HOUSEHOLD_ACCESS_KEYS` (the older single `MCP_HOUSEHOLD_ACCESS_KEY` still works, compared by digest) and `SUPABASE_HOUSEHOLD_KEY`, which the SQL shim accepts and ignores — the credentials are in `SUPABASE_URL`, so the household's scope is the key's `read`/`write`, not a second database credential. No `package.json` of its own: `extensions/package.json` and the extension's `deno.json` pin the packages the file imports.
 
 ### Step 5: Run It as a Separate Server
 
 The shared server is its own process on its own port, with its own keys — the extension's server never sees them:
 
 ```bash
-# Mint a separate access key for the shared server (the primitive's Step 3 shows the name:scope:hash line)
-openssl rand -hex 32
-
 SUPABASE_URL='postgres://user:password@host:5432/openbrain' \
 SUPABASE_HOUSEHOLD_KEY='unused-by-the-shim' \
 MCP_HOUSEHOLD_ACCESS_KEYS='partner:read:<sha256-of-the-shared-key>' \
@@ -305,7 +276,7 @@ PORT=8788 bun extensions/<name>/shared-server.ts
 **Key points:**
 - They connect via URL — no Node.js, no config files, no terminal needed on their end
 - They do NOT need access to your main MCP server or credentials
-- You can revoke access by changing the shared access key in Supabase secrets
+- You can revoke access by removing their line from `MCP_HOUSEHOLD_ACCESS_KEYS` in the shared server's environment and restarting it
 
 ### Step 6: Test the Access Boundaries
 
