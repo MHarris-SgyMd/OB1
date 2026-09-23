@@ -1,0 +1,534 @@
+/**
+ * write-path.ts — the write-path eval's rules, pure (Linear SMD-1713).
+ *
+ * Everything here is a function of its arguments and nothing else, so
+ * `eval-write-path.ts --self-check` can probe every rule with a hand-known
+ * answer and no database, no server and no model: the scripted provider's
+ * three answers (a vector for a text, an entity list, a judge's verdict), the
+ * reader that turns search hits into a deliverable's lines, the parsers that
+ * read the server's replies, the scorer, the pairing and the comparison
+ * against `baselines.json`. `_write-path-arm.ts` runs the corpus through the
+ * real server and hands back an Observation; the scorer never sees the server.
+ *
+ * The number. Of the facts planted across the sessions, how many reached a
+ * later deliverable as a plain statement (SURVIVAL); of the errors planted,
+ * how many the deliverable did not state as fact (CATCH), and which memory
+ * mechanism the catch rests on — the one whose removal lets the error through;
+ * and of the deliverable's lines, how many carry their source in the row's
+ * `derived_from` as the database accepted it (COVERAGE). Paired per
+ * mechanism: the items an arm gets right that the default arm does not, and
+ * the reverse — helped and hurt, with McNemar's exact p — never a mean of
+ * means (SMD-1420's rule, eval-longmemeval's test).
+ *
+ * Partitions, decided up front (SMD-1719's lesson: define the number before
+ * the review finds its denominator). An item is RETRIEVED when a search for
+ * its subject returned it within READER_K. A retrieved item is PRESENTED as
+ * `plain` (a line stating it as fact), `contested` (a line marking it under a
+ * pending conflict proposal) or `dropped` (the reader left it out — labelled
+ * superseded, or an agent's word on a subject the operator spoke on); an item
+ * never retrieved is `unseen`. Survival counts `plain` over every salient
+ * item; catch counts not-`plain` over every RETRIEVED error, and the errors
+ * never retrieved are counted beside it, not inside it — an error the
+ * deliverable never saw is luck, not a mechanism.
+ */
+
+import { DELIVERABLES, ITEMS, READER_K, SUBJECTS, type DeliverableSpec, type Item, type SubjectKey } from "./write-path-corpus.ts";
+
+// ── The scripted provider's rules ──────────────────────────────────────────
+
+export const SUBJECT_KEYS = Object.keys(SUBJECTS) as SubjectKey[];
+/** Axes past the subjects', one per text by hash, so two texts of one subject never tie. */
+export const NOISE_AXES = 16;
+/** The vector width the stub embeds at: one axis per subject, then the noise axes. */
+export const STUB_DIM = SUBJECT_KEYS.length + NOISE_AXES;
+
+/** The subjects a text names, by phrase, case-insensitive, in SUBJECTS' order. */
+export function subjectsIn(text: string): SubjectKey[] {
+  const lower = text.toLowerCase();
+  return SUBJECT_KEYS.filter((k) => lower.includes(SUBJECTS[k].toLowerCase()));
+}
+
+/** FNV-1a over UTF-16 code units; a stable 32-bit hash for the noise axis and its weight. */
+export function fnv1a(text: string): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h >>> 0;
+}
+
+/**
+ * The stub embedding: 1 on each named subject's axis, and a small weight on
+ * one noise axis chosen by the text's hash — so a query (the subject's phrase
+ * alone) sits near every text of its subject and orthogonal to the rest, and
+ * the texts of one subject rank in a fixed order decided by nothing the
+ * corpus author chose. A text naming no subject is noise alone.
+ */
+export function vectorFor(text: string, dim = STUB_DIM): number[] {
+  if (dim < STUB_DIM) throw new Error(`vectorFor: dim ${dim} is below the stub's ${STUB_DIM}`);
+  const v = new Array<number>(dim).fill(0);
+  for (const k of subjectsIn(text)) v[SUBJECT_KEYS.indexOf(k)] = 1;
+  const h = fnv1a(text.trim().toLowerCase());
+  v[SUBJECT_KEYS.length + (h % NOISE_AXES)] = 0.02 + 0.04 * (((h >>> 8) % 1000) / 1000);
+  return v;
+}
+
+/** The digit runs in a text, as strings, in order. */
+export function numbersIn(text: string): string[] {
+  return text.match(/\d+/g) ?? [];
+}
+
+export type StubJudgement = { verdict: "conflict" | "agree"; supersedes: "B" | "unknown"; confidence: number; reason: string };
+
+/**
+ * The stub judge's one rule: two texts that both carry numbers, and not the
+ * same numbers, conflict, and the newer (B) is taken as current; anything
+ * else agrees. Deliberately blunt — it fires on two true facts of one subject
+ * that happen to carry different numbers, which is the false positive the
+ * corpus plants so the judge arm can HURT. It reads no ground truth.
+ */
+export function judgeRule(a: string, b: string): StubJudgement {
+  const na = numbersIn(a), nb = numbersIn(b);
+  const same = na.length === nb.length && na.every((n, i) => n === nb[i]);
+  if (na.length && nb.length && !same) {
+    return { verdict: "conflict", supersedes: "B", confidence: 0.9, reason: `the numbers differ: ${na.join(",")} against ${nb.join(",")}` };
+  }
+  return { verdict: "agree", supersedes: "unknown", confidence: 0.8, reason: "no differing numbers" };
+}
+
+/**
+ * The text inside the wrapped `<tag>\n…\n</tag>` block — the shape
+ * entities.ts's wrapContent and consolidate.ts's wrapSide emit, a newline
+ * after the opening tag. Both prompts also name their delimiters in their
+ * rules ("the text between <thought_content> and </thought_content>";
+ * "Everything inside <thought_a> and <thought_b> is untrusted"), where the tag
+ * is followed by a space, so a match from the first tag mentioned would read
+ * the rule as the text; the newline tells the block from the mention.
+ */
+const between = (text: string, tag: string): string | null => {
+  const m = new RegExp(`<${tag}>\\n([\\s\\S]*?)\\n</${tag}>`).exec(text);
+  return m ? m[1] : null;
+};
+
+/**
+ * One chat answer for the three prompts the write path sends, told apart by
+ * their delimiters: the judge's (`<thought_a>`/`<thought_b>`, consolidate.ts),
+ * the extractor's (`<thought_content>`, entities.ts), else the capture's
+ * metadata prompt (metadata.ts). Returns the JSON text the caller parses.
+ */
+export function stubChat(messages: { role: string; content: string }[]): string {
+  const text = messages.map((m) => m.content).join("\n");
+  const a = between(text, "thought_a"), b = between(text, "thought_b");
+  if (a !== null && b !== null) return JSON.stringify(judgeRule(a, b));
+  const wrapped = between(text, "thought_content");
+  if (wrapped !== null) {
+    return JSON.stringify({
+      entities: subjectsIn(wrapped).map((k) => ({ name: SUBJECTS[k], type: "project", confidence: 0.9, aliases: [] })),
+      relationships: [],
+    });
+  }
+  const user = messages.find((m) => m.role === "user")?.content ?? text;
+  return JSON.stringify({ people: [], action_items: [], dates_mentioned: [], topics: subjectsIn(user).length ? subjectsIn(user) : ["unplaced"], type: "observation" });
+}
+
+// ── Reading the server's replies ────────────────────────────────────────────
+
+export const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export type WriterKind = "operator" | "agent" | "ingested";
+
+export type Hit = {
+  id: string;
+  /** The `⚠ Superseded by a newer thought` line was present. */
+  superseded: boolean;
+  /** The kind in the `By:` line, when it is one of the three; null for none or "kind not classified". */
+  writer: WriterKind | null;
+  content: string;
+};
+
+/**
+ * The hits in a `search_thoughts` reply, in rank order. A block runs from its
+ * `--- Result N (…) ---` header to the next; the header lines are read by
+ * name (`ID:`, the superseded mark, `By:`), and the content is what follows
+ * the first blank line — the shape index.ts renders, which nothing parses by
+ * position past the id (SMD-1726's rule, held here as a reader too).
+ */
+export function parseHits(reply: string): Hit[] {
+  const blocks = reply.split(/^--- Result \d+ \([^)]*\) ---\n/m).slice(1);
+  const hits: Hit[] = [];
+  for (const block of blocks) {
+    const cut = block.indexOf("\n\n");
+    const header = (cut >= 0 ? block.slice(0, cut) : block).split("\n");
+    const content = cut >= 0 ? block.slice(cut + 2).replace(/\n+$/, "") : "";
+    const idLine = header.find((l) => l.startsWith("ID: "));
+    const id = idLine?.slice(4).trim() ?? "";
+    if (!UUID_RE.test(id)) continue;
+    const by = header.find((l) => l.startsWith("By: "));
+    const kind = by ? /\((operator|agent|ingested)\)\s*$/.exec(by)?.[1] ?? null : null;
+    hits.push({ id: id.toLowerCase(), superseded: header.some((l) => l.startsWith("⚠ Superseded by a newer thought")), writer: kind as WriterKind | null, content });
+  }
+  return hits;
+}
+
+/**
+ * The thought ids named by the pending proposals in a
+ * `list_supersession_proposals` reply — both sides of every pair. The reply
+ * lists proposals of the status asked for, so a caller asking for `pending`
+ * (the default) reads only those; each proposal prints its two `ID:` lines.
+ */
+export function parseProposalIds(reply: string): Set<string> {
+  const ids = new Set<string>();
+  if (/^No .*supersession proposals\./.test(reply)) return ids;
+  for (const m of reply.matchAll(/^\s+ID: ([0-9a-f-]{36})\s*$/gim)) ids.add(m[1].toLowerCase());
+  return ids;
+}
+
+/** The id in `capture_thought`'s confirmation, `Captured as <type> — id <uuid>`. */
+export function parseCapturedId(reply: string): string {
+  const m = /— id ([0-9a-f-]{36})/i.exec(reply);
+  if (!m) throw new Error(`capture_thought's reply names no id: ${reply.slice(0, 200)}`);
+  return m[1].toLowerCase();
+}
+
+// ── The reader ──────────────────────────────────────────────────────────────
+
+export type LineKind = "plain" | "contested";
+export type Line = { id: string; kind: LineKind; content: string };
+export type ReaderPolicy = "labels" | "blind";
+
+/**
+ * The reader's policy over one subject's hits — fixed, not a model, because
+ * what is measured is what memory's presentation lets a reader do (SMD-1735's
+ * thesis). Under `labels`: a hit the read marks superseded is left out; where
+ * the operator's word stands on the subject, an agent's is left out; a hit in
+ * a pending conflict proposal is written as contested (a proposal is a
+ * question for a reviewer, never applied unreviewed — migration 029's rule);
+ * every other hit is a plain line. Under `blind` every hit is a plain line —
+ * the reader that ignores every label, which the gate uses to prove its floor
+ * has teeth. The reader never sees the ground truth.
+ */
+export function decide(hits: Hit[], contested: ReadonlySet<string>, policy: ReaderPolicy): Line[] {
+  if (policy === "blind") return hits.map((h) => ({ id: h.id, kind: "plain", content: h.content }));
+  const standing = hits.filter((h) => !h.superseded);
+  const operatorSpoke = standing.some((h) => h.writer === "operator");
+  const kept = operatorSpoke ? standing.filter((h) => h.writer !== "agent") : standing;
+  return kept.map((h) => ({ id: h.id, kind: contested.has(h.id) ? "contested" : "plain", content: h.content }));
+}
+
+/** The deliverable's text: a heading per subject, a line per hit kept, contested ones marked. */
+export function renderDeliverable(spec: DeliverableSpec, lines: Partial<Record<SubjectKey, Line[]>>): string {
+  const parts = [`Deliverable: ${spec.title}`];
+  for (const k of spec.subjects) {
+    parts.push(``, `## ${SUBJECTS[k]}`);
+    const ls = lines[k] ?? [];
+    if (!ls.length) parts.push(`- nothing on record`);
+    for (const l of ls) parts.push(l.kind === "contested" ? `- (contested, pending review) ${l.content}` : `- ${l.content}`);
+  }
+  return parts.join("\n");
+}
+
+// ── What an arm hands back ──────────────────────────────────────────────────
+
+export const ARMS = ["default", "-supersedes", "-judge", "-actor"] as const;
+export type Arm = (typeof ARMS)[number];
+export type Mechanism = "supersedes" | "judge" | "actor";
+export const MECHANISMS: Mechanism[] = ["supersedes", "judge", "actor"];
+export const armOff = (m: Mechanism): Arm => `-${m}` as Arm;
+
+export type DeliverableObservation = {
+  title: string;
+  subjects: SubjectKey[];
+  lines: (Line & { subject: SubjectKey })[];
+  /** The deliverable's own thought id, and derived_from read back from its row. */
+  thoughtId: string;
+  derivedFrom: string[];
+  /** Cost: characters the deliverable carries. */
+  chars: number;
+};
+
+export type Observation = {
+  arm: Arm;
+  reader: ReaderPolicy;
+  /** Item id → the thought id the server returned for it. */
+  idOf: Record<string, string>;
+  /** Per subject searched: the hit ids returned, in rank order. */
+  hits: Partial<Record<SubjectKey, string[]>>;
+  deliverables: DeliverableObservation[];
+  /** How many pending proposals the reader saw, and how many thoughts the extractor reached. */
+  pendingProposals: number;
+  extracted: number;
+  ms: number;
+};
+
+// ── Scoring ─────────────────────────────────────────────────────────────────
+
+export type Presented = "plain" | "contested" | "dropped" | "unseen";
+export type Outcome = { retrieved: boolean; presented: Presented; right: boolean };
+export type ErrorClass = "stale" | "wrong_number" | "inference";
+export const ERROR_CLASSES: ErrorClass[] = ["stale", "wrong_number", "inference"];
+
+export type Rate = { n: number; of: number };
+export type ArmScore = {
+  arm: Arm;
+  reader: ReaderPolicy;
+  /** Salient items presented plain, over every salient item; the other presentations counted beside. */
+  survival: Rate & { contested: number; dropped: number; unseen: number };
+  /** Retrieved errors not presented plain, over every retrieved error; the errors never retrieved beside. */
+  catch: Rate & { unseen: number; byClass: Record<ErrorClass, Rate> };
+  /** Lines whose id sits in the deliverable's derived_from, over every line. */
+  coverage: Rate;
+  /** Cost: ids returned across every search, characters across every deliverable. */
+  returned: number;
+  chars: number;
+  outcome: Record<string, Outcome>;
+};
+
+export const isError = (item: Item): boolean => item.planted.kind !== "salient";
+export const errorClassOf = (item: Item): ErrorClass | null => (isError(item) ? (item.planted.kind as ErrorClass) : null);
+export const ratio = (r: Rate): number | null => (r.of > 0 ? r.n / r.of : null);
+
+/** The scored items: every planted item is scored; nothing in the corpus is filler today. */
+export function scoredItems(items: readonly Item[] = ITEMS): Item[] {
+  return [...items];
+}
+
+/**
+ * One arm's numbers from what it observed. A salient item is right when a
+ * deliverable states it plain; an error is right when no deliverable states it
+ * plain (contested, dropped or never seen). The map from item to thought id
+ * is the runner's; an item the runner never mapped is a run fault, not a
+ * score, and throws.
+ */
+export function scoreArm(obs: Observation, items: readonly Item[] = ITEMS, specs: readonly DeliverableSpec[] = DELIVERABLES): ArmScore {
+  const outcome: Record<string, Outcome> = {};
+  const presentedBy = new Map<string, LineKind>();
+  for (const d of obs.deliverables) for (const l of d.lines) {
+    const prev = presentedBy.get(l.id);
+    // A thought stated plain anywhere is stated plain: the worse presentation stands.
+    if (prev !== "plain") presentedBy.set(l.id, l.kind);
+  }
+  const retrievedIds = new Set(Object.values(obs.hits).flat().map((id) => id.toLowerCase()));
+  const covered = new Set(specs.flatMap((s) => s.subjects));
+  const survival = { n: 0, of: 0, contested: 0, dropped: 0, unseen: 0 };
+  const byClass = Object.fromEntries(ERROR_CLASSES.map((c) => [c, { n: 0, of: 0 }])) as Record<ErrorClass, Rate>;
+  const catchAll = { n: 0, of: 0, unseen: 0 };
+  for (const item of scoredItems(items)) {
+    if (!covered.has(item.subject)) continue;
+    const tid = obs.idOf[item.id]?.toLowerCase();
+    if (!tid) throw new Error(`scoreArm: item ${item.id} has no thought id in the ${obs.arm} arm's observation`);
+    const retrieved = retrievedIds.has(tid);
+    const presented: Presented = !retrieved ? "unseen" : (presentedBy.get(tid) ?? "dropped");
+    const cls = errorClassOf(item);
+    if (cls === null) {
+      survival.of++;
+      if (presented === "plain") survival.n++;
+      else if (presented === "contested") survival.contested++;
+      else if (presented === "dropped") survival.dropped++;
+      else survival.unseen++;
+      outcome[item.id] = { retrieved, presented, right: presented === "plain" };
+    } else {
+      if (!retrieved) catchAll.unseen++;
+      else {
+        catchAll.of++; byClass[cls].of++;
+        if (presented !== "plain") { catchAll.n++; byClass[cls].n++; }
+      }
+      outcome[item.id] = { retrieved, presented, right: presented !== "plain" };
+    }
+  }
+  let lines = 0, cited = 0, chars = 0;
+  for (const d of obs.deliverables) {
+    const derived = new Set(d.derivedFrom.map((x) => x.toLowerCase()));
+    for (const l of d.lines) { lines++; if (derived.has(l.id.toLowerCase())) cited++; }
+    chars += d.chars;
+  }
+  const returned = Object.values(obs.hits).reduce((s, ids) => s + (ids?.length ?? 0), 0);
+  return { arm: obs.arm, reader: obs.reader, survival, catch: { ...catchAll, byClass }, coverage: { n: cited, of: lines }, returned, chars, outcome };
+}
+
+// ── Pairing ─────────────────────────────────────────────────────────────────
+
+/**
+ * McNemar's exact test, two-sided, over the discordant pairs under a fair
+ * coin — eval-longmemeval's, with its bound: the binomial sum is exact in
+ * doubles while 2^n is finite, and refused past 1,000 rather than printing 0.
+ */
+export function mcnemarExact(helped: number, hurt: number): number {
+  const n = helped + hurt;
+  if (n === 0) return 1;
+  if (n > 1000) throw new Error(`mcnemarExact: ${n} discordant pairs is past the exact sum's range; use a normal approximation.`);
+  const lo = Math.min(helped, hurt);
+  let c = 1, tail = 0;
+  for (let i = 0; i <= lo; i++) { tail += c; c = (c * (n - i)) / (i + 1); }
+  return Math.min(1, (2 * tail) / 2 ** n);
+}
+
+export type Paired = {
+  mechanism: Mechanism;
+  /** Items right with the mechanism (the default arm) and wrong without it. */
+  helped: string[];
+  /** Items wrong with the mechanism and right without it. */
+  hurt: string[];
+  p: number;
+};
+
+/** The default arm against the arm with one mechanism off: what that mechanism helped and hurt, by item. */
+export function pair(withAll: ArmScore, without: ArmScore, mechanism: Mechanism): Paired {
+  const helped: string[] = [], hurt: string[] = [];
+  for (const [id, o] of Object.entries(withAll.outcome)) {
+    const w = without.outcome[id];
+    if (!w) throw new Error(`pair: ${id} scored in the default arm and not in ${without.arm}`);
+    if (o.right && !w.right) helped.push(id);
+    if (!o.right && w.right) hurt.push(id);
+  }
+  return { mechanism, helped, hurt, p: mcnemarExact(helped.length, hurt.length) };
+}
+
+/**
+ * For each error the default arm caught: the mechanisms it rests on — those
+ * whose removal lets the error through. An error caught with none named is
+ * caught twice over (two mechanisms each suffice), or never retrieved.
+ */
+export function caughtBy(withAll: ArmScore, withouts: Partial<Record<Mechanism, ArmScore>>, items: readonly Item[] = ITEMS): Record<string, Mechanism[]> {
+  const out: Record<string, Mechanism[]> = {};
+  for (const item of items) {
+    if (!isError(item)) continue;
+    const o = withAll.outcome[item.id];
+    if (!o || !o.right) continue;
+    out[item.id] = MECHANISMS.filter((m) => withouts[m] && withouts[m]!.outcome[item.id]?.right === false);
+  }
+  return out;
+}
+
+// ── The record and the comparison ───────────────────────────────────────────
+
+export type Floor = { survival: number; catch: number; coverage: number };
+export type WritePathBaseline = {
+  via: string;
+  corpus: string;
+  reader_k: number;
+  /** The default arm's three rates, which the gate holds as a floor. */
+  floor: Floor;
+  arms: Record<string, { survival: number | null; catch: number | null; coverage: number | null; contested: number; unseen_errors: number; returned: number; chars: number }>;
+  paired: Record<string, { helped: number; hurt: number; p: number }>;
+};
+
+export const round3 = (x: number | null): number | null => (x === null ? null : Math.round(x * 1000) / 1000);
+
+/** The three rates of an arm, rounded as the record keeps them. */
+export function ratesOf(s: ArmScore): { survival: number | null; catch: number | null; coverage: number | null } {
+  return { survival: round3(ratio(s.survival)), catch: round3(ratio(s.catch)), coverage: round3(ratio(s.coverage)) };
+}
+
+/**
+ * The gate's comparison: each of the default arm's three rates at or above the
+ * recorded floor. The run is deterministic — a stub provider, a fixed corpus,
+ * hashed tie-breaks — so the floor is the value recorded, not a tolerance
+ * below it; a legitimate change that moves a rate re-records the section, as
+ * `bench.ts --rebaseline` asks for the retrieval ones. Returns the failures
+ * in words, empty when it holds. A rate with an empty denominator never
+ * passes silently.
+ */
+export function compareToFloor(s: ArmScore, floor: Floor): string[] {
+  const out: string[] = [];
+  const check = (name: keyof Floor, r: Rate) => {
+    const v = ratio(r);
+    if (v === null) { out.push(`${name}: nothing to measure (${r.n}/${r.of})`); return; }
+    if (v + 1e-9 < floor[name]) out.push(`${name}: ${v.toFixed(3)} (${r.n}/${r.of}) is below the recorded ${floor[name]}`);
+  };
+  check("survival", s.survival);
+  check("catch", s.catch);
+  check("coverage", s.coverage);
+  return out;
+}
+
+// ── Rendering ───────────────────────────────────────────────────────────────
+
+const pct = (r: Rate): string => (r.of ? `${((100 * r.n) / r.of).toFixed(1).padStart(5)}% (${r.n}/${r.of})` : "   n/a");
+
+/** The report: one row per arm, then the paired table per mechanism, then each caught error's mechanism. */
+export function renderReport(scores: ArmScore[], paired: Paired[], caught: Record<string, Mechanism[]>, items: readonly Item[] = ITEMS): string {
+  const lines: string[] = [];
+  lines.push(`arm            reader   survival            catch               coverage            contested  unseen-err  returned  chars`);
+  lines.push(`─`.repeat(118));
+  for (const s of scores) {
+    lines.push(
+      `${s.arm.padEnd(14)} ${s.reader.padEnd(8)} ${pct(s.survival).padEnd(19)} ${pct(s.catch).padEnd(19)} ${pct(s.coverage).padEnd(19)} ` +
+      `${String(s.survival.contested).padStart(9)}  ${String(s.catch.unseen).padStart(10)}  ${String(s.returned).padStart(8)}  ${String(s.chars).padStart(5)}`,
+    );
+  }
+  const def = scores.find((s) => s.arm === "default" && s.reader === "labels");
+  if (def) {
+    lines.push(``, `catch by error class (default arm): ` + ERROR_CLASSES.map((c) => `${c} ${pct(def.catch.byClass[c]).trim()}`).join(" · "));
+  }
+  lines.push(``, `paired against the default arm — items the mechanism got right that its absence did not (helped) and the reverse (hurt); McNemar exact, two-sided`);
+  lines.push(`mechanism    helped  hurt   p       helped items                          hurt items`);
+  lines.push(`─`.repeat(118));
+  for (const p of paired) {
+    lines.push(`${p.mechanism.padEnd(12)} ${String(p.helped.length).padStart(6)}  ${String(p.hurt.length).padStart(4)}   ${p.p.toFixed(3)}   ${p.helped.join(",").padEnd(37)} ${p.hurt.join(",")}`);
+  }
+  const byItem = new Map(items.map((i) => [i.id, i]));
+  lines.push(``, `errors the default arm caught, and the mechanism each rests on (none named = caught by more than one, or never retrieved)`);
+  for (const [id, ms] of Object.entries(caught)) {
+    const it = byItem.get(id);
+    lines.push(`  ${id.padEnd(5)} ${(it?.planted.kind ?? "?").padEnd(13)} ${ms.length ? ms.join(" + ") : (def?.outcome[id]?.retrieved ? "more than one" : "never retrieved")}`);
+  }
+  return lines.join("\n");
+}
+
+// ── The corpus's own shape ──────────────────────────────────────────────────
+
+/**
+ * What the corpus must hold for the numbers to mean what the header says.
+ * Returned as problems in words; the self-check asserts the list is empty and
+ * probes the rules with a broken copy.
+ */
+export function corpusProblems(items: readonly Item[] = ITEMS, specs: readonly DeliverableSpec[] = DELIVERABLES): string[] {
+  const out: string[] = [];
+  const ids = new Map<string, number>();
+  items.forEach((it, i) => {
+    if (ids.has(it.id)) out.push(`item id ${it.id} appears twice`);
+    ids.set(it.id, i);
+  });
+  const phrases = SUBJECT_KEYS.map((k) => SUBJECTS[k].toLowerCase());
+  for (const a of phrases) for (const b of phrases) if (a !== b && b.includes(a)) out.push(`subject phrase "${a}" is inside "${b}"`);
+  for (const p of phrases) if (/\d/.test(p)) out.push(`subject phrase "${p}" carries a digit; the judge stub would read it`);
+  items.forEach((it, i) => {
+    const named = subjectsIn(it.text);
+    if (named.length !== 1 || named[0] !== it.subject) out.push(`${it.id} names ${named.join(",") || "no subject"}; its subject is ${it.subject}`);
+    const ref = it.planted.kind === "stale" ? it.planted.replacedBy : it.planted.kind === "wrong_number" ? it.planted.correct : it.planted.kind === "inference" ? it.planted.against : null;
+    if (ref !== null) {
+      const j = ids.get(ref);
+      if (j === undefined) out.push(`${it.id} refers to ${ref}, which is not an item`);
+      else if (items[j].subject !== it.subject) out.push(`${it.id} refers to ${ref} on another subject`);
+      else if (it.planted.kind === "stale" && j <= i) out.push(`${it.id} is replaced by ${ref}, which is not captured later`);
+      else if (it.planted.kind !== "stale" && j >= i) out.push(`${it.id} is planted against ${ref}, which is not captured earlier`);
+    }
+    if (it.planted.kind === "stale") {
+      const newer = items[ids.get(it.planted.replacedBy) ?? -1];
+      if (newer && newer.supersedes !== it.id) out.push(`${newer.id} replaces ${it.id} but does not carry supersedes: ${it.id}`);
+      if (numbersIn(it.text).length) out.push(`${it.id} is a decision and carries a digit; the judge stub would catch what supersedes should`);
+    }
+    if (it.supersedes !== undefined) {
+      const older = items[ids.get(it.supersedes) ?? -1];
+      if (!older) out.push(`${it.id} supersedes ${it.supersedes}, which is not an item`);
+      else if (older.planted.kind !== "stale" || older.planted.replacedBy !== it.id) out.push(`${it.id} supersedes ${it.supersedes}, which is not the stale decision it replaces`);
+    }
+    if (it.planted.kind === "wrong_number") {
+      const correct = items[ids.get(it.planted.correct) ?? -1];
+      if (correct && judgeRule(correct.text, it.text).verdict !== "conflict") out.push(`${it.id} and ${correct.id} do not differ in their numbers; the judge stub would not read a conflict`);
+      if (it.writer !== "op") out.push(`${it.id} is a wrong number by ${it.writer}; the plant is the operator's own slip`);
+    }
+    if (it.planted.kind === "inference" && it.writer !== "bot") out.push(`${it.id} is an inference by ${it.writer}; the plant is an agent's`);
+  });
+  const covered = new Set(specs.flatMap((s) => s.subjects));
+  for (const k of SUBJECT_KEYS) if (!covered.has(k)) out.push(`subject ${k} is in no deliverable`);
+  const seen = new Set<string>();
+  for (const s of specs) for (const k of s.subjects) { if (seen.has(k)) out.push(`subject ${k} is in two deliverables`); seen.add(k); }
+  const perSubject = new Map<SubjectKey, number>();
+  for (const it of items) perSubject.set(it.subject, (perSubject.get(it.subject) ?? 0) + 1);
+  if (![...perSubject.values()].some((n) => n > READER_K)) out.push(`no subject has more than READER_K (${READER_K}) items, so retrieval never cuts and survival is trivially 1`);
+  if (!items.some((it) => it.writer === "bot" && it.planted.kind === "salient" && items.some((o) => o.subject === it.subject && o.writer === "op"))) out.push(`no agent's true fact on a subject the operator spoke on (the actor arm's hurt case)`);
+  if (!items.some((it) => it.writer === "bot" && it.planted.kind === "salient" && !items.some((o) => o.subject === it.subject && o.writer === "op"))) out.push(`no agent-only subject (the actor arm must not drop an agent nobody contradicts)`);
+  return out;
+}

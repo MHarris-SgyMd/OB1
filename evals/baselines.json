@@ -5,7 +5,7 @@
     "at OB1_EVAL_TEMP=0, against local Ollama.",
     "",
     "The retrieval corpus is 97 closed issues from a real Linear tracker and is NOT",
-    "committed \u2014 see eval-real.ts. Anyone re-running gets different absolute numbers",
+    "committed — see eval-real.ts. Anyone re-running gets different absolute numbers",
     "on their own corpus, which is the point; what transfers is the ORDERING and the",
     "size of the gaps. Re-baseline with `bun bench.ts --rebaseline` after changing",
     "the corpus, or these become a comparison against someone else's data.",
@@ -45,7 +45,7 @@
       "qwen3-embedding:8b@1024": {
         "mrr": 0.919,
         "r1": 0.88,
-        "sec": 20.0,
+        "sec": 20,
         "gb": 4.7
       },
       "snowflake-arctic-embed2": {
@@ -69,7 +69,7 @@
       "bge-large": {
         "mrr": 0.894,
         "r1": 0.82,
-        "sec": 3.0,
+        "sec": 3,
         "gb": 0.67
       },
       "nomic-embed-text": {
@@ -136,7 +136,7 @@
       "qwen2.5:14b": {
         "total": 81,
         "perCapture": 1.9,
-        "gb": 9.0,
+        "gb": 9,
         "failures": 1
       },
       "qwen3.5:4b": {
@@ -160,7 +160,7 @@
       "qwen3.5:0.8b": {
         "total": 77,
         "perCapture": 0.56,
-        "gb": 1.0,
+        "gb": 1,
         "failures": 0
       },
       "qwen3.5:35b-a3b": {
@@ -178,7 +178,7 @@
       "llama3.2": {
         "total": 76,
         "perCapture": 0.56,
-        "gb": 2.0,
+        "gb": 2,
         "failures": 3
       },
       "deepseek-r1:8b": {
@@ -192,6 +192,80 @@
         "perCapture": 0.63,
         "gb": 0.3,
         "failures": 12
+      }
+    }
+  },
+  "write_path": {
+    "via": "eval-write-path.ts --record",
+    "corpus": "20 sessions, 36 items over 12 subjects, 4 deliverables, reader k=5 (write-path-corpus.ts)",
+    "reader_k": 5,
+    "floor": {
+      "survival": 0.6296296296296297,
+      "catch": 1,
+      "coverage": 1
+    },
+    "arms": {
+      "default": {
+        "survival": 0.63,
+        "catch": 1,
+        "coverage": 1,
+        "contested": 6,
+        "unseen_errors": 0,
+        "returned": 34,
+        "chars": 2266
+      },
+      "-supersedes": {
+        "survival": 0.63,
+        "catch": 0.667,
+        "coverage": 1,
+        "contested": 6,
+        "unseen_errors": 0,
+        "returned": 34,
+        "chars": 2436
+      },
+      "-judge": {
+        "survival": 0.852,
+        "catch": 0.667,
+        "coverage": 1,
+        "contested": 0,
+        "unseen_errors": 0,
+        "returned": 34,
+        "chars": 2014
+      },
+      "-actor": {
+        "survival": 0.704,
+        "catch": 0.778,
+        "coverage": 1,
+        "contested": 6,
+        "unseen_errors": 0,
+        "returned": 34,
+        "chars": 2664
+      },
+      "default (blind reader)": {
+        "survival": 0.926,
+        "catch": 0,
+        "coverage": 1,
+        "contested": 0,
+        "unseen_errors": 0,
+        "returned": 34,
+        "chars": 2554
+      }
+    },
+    "paired": {
+      "supersedes": {
+        "helped": 3,
+        "hurt": 0,
+        "p": 0.25
+      },
+      "judge": {
+        "helped": 3,
+        "hurt": 6,
+        "p": 0.508
+      },
+      "actor": {
+        "helped": 2,
+        "hurt": 2,
+        "p": 1
       }
     }
   }
