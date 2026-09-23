@@ -1,17 +1,4 @@
----
-type: changed
-bump: minor
-tickets: [SMD-1879]
-migrations: []
----
-
-## Changelog
-
-Entity extraction sends a long thought to the metadata model in overlapping windows sized to that model's served context, budgets every call's answer with `max_tokens`, retries a call that runs to its budget once with a frequency penalty, and merges the windows' answers to one entity per (type, name) — all 32 thoughts that timed out on the fork's brain extract, against 2 before, and a budget sized to both measured models; `OB1_EXTRACT_CHUNK_TOKENS` overrides the derived window and preflight prints it; the prompt version is 2, so the first pass after upgrading needs `--switch-key`; the three worker diallers disable Bun's 300 s fetch idle timeout so `--timeout` and `OB1_LLM_TIMEOUT` above it take effect (SMD-1879).
-
-## FORK
-
-Entity extraction sent the whole thought in one unbounded call — long thoughts go in windows sized to the metadata model, every call carries an answer budget and a runaway is retried under a penalty, and the windows merge to one entity (SMD-1879)
+# 134. Entity extraction sent the whole thought in one unbounded call — long thoughts go in windows sized to the metadata model, every call carries an answer budget and a runaway is retried under a penalty, and the windows merge to one entity (SMD-1879)
 
 **What changed.** `server-portable/entities.ts`: `extractEntities` splits a
 thought over `EmbedConfig.extractChunkTokens` with `chunk.ts` into overlapping

@@ -658,5 +658,27 @@ console.log("\n[13] The provenance and proposal rpc shapes are null-safe too: a 
   }
 }
 
+console.log("\n[14] listChanges over PostgREST: the rpc shape — every argument named, the actions as text[] through the shim's catalog read, the row normalised (migration 052, SMD-1296)");
+{
+  const admin = new SQL({ url: URL_, max: 1 });
+  const cursor0 = String((await admin`SELECT id FROM thought_audit ORDER BY created_at DESC, id DESC LIMIT 1`)[0].id);
+  const actor = { name: "store-pg-14" };
+  const { id } = await store.captureThought({ content: "postgrest 1296 a thought the feed will list", payload: { metadata: { type: "idea" } }, embedding: vec(14), actor });
+  await store.updateThought({ id, content: "postgrest 1296 the thought, edited", embedding: vec(14), embeddingModel: "unit-test-model", actor });
+  await store.deleteThought({ id, actor });
+  const rows = await store.listChanges({ after: cursor0, limit: 10 });
+  assert(rows.map((r) => r.action).join(",") === "capture,update,delete" && rows.every((r) => r.thoughtId === id && r.actorName === "store-pg-14" && ISO_RE.test(r.createdAt)),
+    `three rows after the cursor over rpc, oldest first (${rows.map((r) => r.action).join(",")})`);
+  assert(rows[1].changed.includes("content") && rows[1].head === "postgrest 1296 the thought, edited" && rows[0].present === false,
+    "the text[] columns and the booleans come back as values, not literals");
+  assert((await store.listChanges({ after: cursor0, actions: ["capture", "delete"], limit: 10 })).length === 2, "p_actions binds as text[] over the rpc");
+  assert((await store.listChanges({ after: rows[1].id, limit: 10 })).length === 1, "a cursor at the second row yields the one after it");
+  let ghost = "";
+  // Not the all-zero id: SMD-1298's section above plants an audit row under it.
+  try { await store.listChanges({ after: "00000000-0000-4000-8000-0000000000ff", limit: 1 }); } catch (e) { ghost = (e as Error).message; }
+  assert(/no audit row/.test(ghost), "the function's refusal crosses the rpc as the thrown message");
+  await admin.close();
+}
+
 await store.close();
 report();

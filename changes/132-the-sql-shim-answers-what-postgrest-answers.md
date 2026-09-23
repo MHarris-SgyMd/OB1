@@ -1,17 +1,4 @@
----
-type: fixed
-bump: patch
-tickets: [SMD-1602]
-migrations: []
----
-
-## Changelog
-
-`compat/supabase-sql` answers what PostgREST answers in the five places change 77's review found it did not — a count without `head` is the total, `.single()` over several rows is `PGRST116`, `head` without a count is no rows, an upsert's conflict target is the primary key when none is named and every payload column is assigned, an `.rpc()`'s shape is what `pg_proc.proretset` declares — and an array column is read through `to_json`, so a `real[]` holding a `NULL` and a `uuid[]` arrive as PostgREST's JSON has them (SMD-1602).
-
-## FORK
-
-The SQL shim answers what PostgREST answers — five silent divergences closed, and an array column read as JSON so a `real[]` with a `NULL` lands and a `uuid[]` is a list (SMD-1602)
+# 132. The SQL shim answers what PostgREST answers — five silent divergences closed, and an array column read as JSON so a `real[]` with a `NULL` lands and a `uuid[]` is a list (SMD-1602)
 
 **What changed.** `compat/supabase-sql/index.ts`, in `QueryBuilder.compile()`,
 `execute()` and `SupabaseSqlClient.rpc()`, with the catalog reading two more

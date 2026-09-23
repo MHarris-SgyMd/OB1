@@ -1,17 +1,4 @@
----
-type: fixed
-bump: patch
-tickets: [SMD-1990]
-migrations: []
----
-
-## Changelog
-
-check-fork's grants comparison reads db/README.md's table both ways through a pure function with nine probes, and the commit grammar reads ordinals to "twentieth" (SMD-1990).
-
-## FORK
-
-check-fork compares the grants table both ways, and the commit grammar reads a thirteenth pass (SMD-1990)
+# 127. check-fork compares the grants table both ways, and the commit grammar reads a thirteenth pass (SMD-1990)
 
 **What changed.** `scripts/check-fork-consistency.ts`'s SMD-1471 comparison
 of db/README.md's "Grants for a capturing role" against `ROLE_GRANTS` is
