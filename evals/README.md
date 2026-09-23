@@ -3940,7 +3940,10 @@ outcome it resolved to, what resolved it). A row with no confidence is
 unscored, never scored as 0; a row nothing has resolved is unresolved; the
 report counts both, and it counts the deletes `thought_audit` remembers, since
 a deleted thought takes its proposals and pointers out of the log and the
-scores are of what survived. Per mechanism, over the rows with both sides: the
+scores are of what survived. A `supersedes` pointer counts whoever wrote it, so
+a brain running SMD-1954's board sync, which chains a re-imported ticket's rows
+under it, sees its unscored superseded count grow with every edited ticket.
+Per mechanism, over the rows with both sides: the
 reliability table, the Brier score, the expected calibration error, and the
 Brier skill against a constant at the base rate (0 = no better than a
 forecaster who knows only how often claims hold; negative = worse). A band maps
