@@ -33,7 +33,7 @@ delete process.env.OB1_CAPTURE_KEY;
 
 const {
   stripInjected, sniffHarness, parseClaudeCode, parseCodex, summariseTranscript, renderSummary, provenanceOf,
-  scanForSecrets, scanSummary, SECRET_PATTERNS, parseRpcBody, postCapture, prepare, postPending, hookJson, shellWord, readState, LIMITS, REFUSAL_RE, checkpointOf, EVENTS, HOOK_EVENTS,
+  scanForSecrets, scanSummary, SECRET_PATTERNS, parseRpcBody, postCapture, prepare, postPending, hookJson, shellWord, readState, LIMITS, REFUSAL_RE, checkpointOf, EVENTS, HOOK_EVENTS, DEFAULT_EVENTS, eventSpec,
 } = await import(SCRIPT);
 
 let passed = 0, failed = 0;
@@ -394,6 +394,14 @@ console.log("\n[5] The foreground half decides, writes a payload, and never a ke
     "checkpointOf reads the event, and a trigger only when it is manual or auto");
   assert(HOOK_EVENTS.join() === "SessionEnd,PreCompact,Stop" && Object.values(EVENTS).every((e) => "checkpoint" in e && typeof e.timeout === "boolean" && typeof e.interval === "boolean") && EVENTS.Stop.interval && !EVENTS.Stop.timeout && EVENTS.PreCompact.checkpoint === "compacted",
     "the three events are one table — what a summary there says, whether the printed hook pins a timeout, whether the command carries the interval (second review pass: four structures)");
+  assert(EVENTS.PreCompact.harnesses.join() === "claude-code" && DEFAULT_EVENTS["claude-code"].join() === "SessionEnd,PreCompact" && DEFAULT_EVENTS.codex.join() === "SessionEnd" && Object.keys(DEFAULT_EVENTS).join() === "claude-code,codex",
+    "…and which harness fires which, the defaults derived from it (third review pass: a second table beside the first)");
+  // Object's own names are not events (third review pass: `EVENTS["constructor"]` was a function, and "toString" passed every check).
+  for (const name of ["constructor", "toString", "valueOf", "hasOwnProperty", "__proto__"]) {
+    assert(eventSpec(name) === undefined && !HOOK_EVENTS.includes(name) && checkpointOf({ hook_event_name: name }) === undefined && /is not an event this hook captures on/.test(prepare({ ...base, session_id: `s-proto-${name.replace(/_/g, "")}`, hook_event_name: name }).message),
+      `"${name}" is no event: not a checkpoint, and a hook under it is a skip`);
+  }
+  assert(eventSpec(7) === undefined && eventSpec(["PreCompact"]) === undefined && eventSpec("PreCompact") === EVENTS.PreCompact, "eventSpec reads a string by own property, nothing else");
   const foreign = prepare({ ...base, session_id: "s-foreign", hook_event_name: "SubagentStop" });
   assert(foreign.code === 0 && !foreign.payloadPath && /^skip: SubagentStop is not an event this hook captures on \(SessionEnd, PreCompact, Stop\)/.test(foreign.message),
     `a command pasted under an event the hook is not for is a skip, exit 0 — it fires mid-session and would post a final-looking summary over the checkpoint (second review pass; ${foreign.message})`);
@@ -871,6 +879,8 @@ console.log("\n[7] As a hook: JSON on stdin, exit codes, and what reaches the en
   assert(/captured session=s-compact-chain harness=claude-code event=PreCompact trigger=auto id=/.test(readFileSync(join(STATE, "log"), "utf8")), "the log names the event and its trigger when it is not the session's end");
   const foreignRun = await runHook({ session_id: "s-compact-chain", transcript_path: join(TMP, "two.jsonl"), cwd: "/repo/proj", hook_event_name: "UserPromptSubmit" }, { OB1_SESSION_CAPTURE_SYNC: "1" });
   assert(foreignRun.code === 0 && received.length === before + 2 && /skip: UserPromptSubmit is not an event this hook captures on/.test(foreignRun.err), `as a hook under an event it is not for: exit 0, nothing sent, the skip named (${foreignRun.err.trim().slice(0, 70)})`);
+  const protoRun = await runHook({ session_id: "s-compact-chain", transcript_path: join(TMP, "two.jsonl"), cwd: "/repo/proj", hook_event_name: "toString" }, { OB1_SESSION_CAPTURE_SYNC: "1" });
+  assert(protoRun.code === 0 && received.length === before + 2 && /skip: toString is not an event this hook captures on/.test(protoRun.err), "…and under one of Object's own names — which passed as an event and captured an end over the checkpoint (third review pass)");
 }
 
 // ── [8] Detached ─────────────────────────────────────────────────────────────
@@ -914,6 +924,11 @@ console.log("\n[9] The printed hook carries no secret; --check tells a capture k
     "Codex's default is SessionEnd alone — it has no compaction hook; an event named prints that event alone");
   assert((() => { try { hookJson("claude", {}); return false; } catch (e) { return /no default events for harness "claude"/.test(e.message); } })(), "a harness with no defaults is a named error from hookJson, not a TypeError off undefined (first review pass)");
   assert((() => { try { hookJson("claude-code", { event: "precompact" }); return false; } catch (e) { return /"precompact" is not an event this hook runs on/.test(e.message); } })(), "…and so is an event outside the table: the export refuses what the CLI refuses (second review pass: it printed a hook under any name)");
+  const thrown = (fn) => { try { fn(); return ""; } catch (e) { return e.message; } };
+  assert(/"constructor" is not an event/.test(thrown(() => hookJson("claude-code", { event: "constructor" }))) && /"__proto__" is not an event/.test(thrown(() => hookJson("claude-code", { event: "__proto__" }))) && /no default events for harness "constructor"/.test(thrown(() => hookJson("constructor", {}))),
+    "Object's own names are refused by name as events and as a harness — not printed, not a TypeError (third review pass)");
+  assert(/codex has no PreCompact hook/.test(thrown(() => hookJson("codex", { event: "PreCompact" }))) && Object.keys(hookJson("codex", { event: "Stop", runtime: "bun" }).hooks).join() === "Stop",
+    "which harness fires which event is the table's rule: the export refuses Codex a PreCompact hook as the CLI does, and prints it a Stop (third review pass)");
   assert(!JSON.stringify([cc, cx, st]).includes("cap-key"), "no key in any of them");
   assert(shellWord("/Users/me/My Projects/OB1/x.mjs") === "'/Users/me/My Projects/OB1/x.mjs'" && shellWord(SCRIPT) === SCRIPT && shellWord("/a'b/c.mjs") === "'/a'\\''b/c.mjs'",
     "a path with a space or a quote is quoted for the shell the harness runs the command through; a plain one is not");
@@ -943,6 +958,16 @@ console.log("\n[9] The printed hook carries no secret; --check tells a capture k
   assert((await run(["--dry-run", CLAUDE_T, "--trigger", "auto"])).code === 2 && /--trigger goes with --event PreCompact, which was not given/.test((await run(["--dry-run", CLAUDE_T, "--trigger", "auto"])).err), "…as is --trigger with no event");
   assert((await run(["--dry-run", CLAUDE_T, "--event", "Stop", "--trigger", "auto"])).code === 2 && (await run(["--dry-run", CLAUDE_T, "--event", "PreCompact", "--trigger"])).code === 2, "…or under Stop, or dangling");
   assert((await run(["--dry-run", CLAUDE_T, "--event", "PreCompact", "--min-interval", "20"])).code === 2 && (await run(["--print-hook", "claude-code", "--event", "PreCompact", "--trigger", "auto"])).code === 2, "a flag of the other by-hand form is refused on either, not validated nowhere and dropped");
+  // The flags are read before the transcript (third review pass: a transcript with no prompt returned 0 past every refusal).
+  const quietBogus = await run(["--dry-run", join(TMP, "quiet.jsonl"), "--event", "bogus", "--trigger", "Whatever", "--min-interval", "5"]);
+  assert(quietBogus.code === 2 && /--event takes/.test(quietBogus.err) && !quietBogus.out.trim() && /would SKIP/.test((await run(["--dry-run", join(TMP, "quiet.jsonl"), "--event", "PreCompact", "--trigger", "auto"])).out),
+    "--dry-run on a transcript with no prompt still refuses a bad flag, and with good ones says it would skip");
+  // The `=` form (third review pass: unseen, so `--trigger=auto` previewed no trigger and `--min-interval=45` printed 20).
+  const eqForm = await run(["--dry-run", CLAUDE_T, "--event=PreCompact", "--trigger=auto"]);
+  assert(eqForm.code === 0 && /Checkpoint: compacted at 2026-09-22 13:20 \(auto\), continuing/.test(eqForm.out), `--event=PreCompact --trigger=auto reads as the space form does (${eqForm.err.trim().slice(0, 60)})`);
+  const eqStop = await run(["--print-hook=claude-code", "--event=Stop", "--min-interval=45"]);
+  assert(eqStop.code === 0 && /--min-interval 45/.test(eqStop.out) && Object.keys(JSON.parse(eqStop.out).hooks).join() === "Stop", `…and --print-hook=claude-code --event=Stop --min-interval=45 prints a Stop hook at 45 (exit ${eqStop.code})`);
+  assert((await run(["--print-hook", "claude-code", "--event", "Stop", "--min-interval", "0"])).code === 2 && /above zero/.test((await run(["--print-hook", "claude-code", "--event", "Stop", "--min-interval", "0"])).err), "a printed Stop hook needs a floor above zero — at zero it would capture every turn");
   assert(received.length === 1, "…and sends nothing");
   const ph = await run(["--print-hook", "codex"]);
   assert(ph.code === 0 && JSON.parse(ph.out).hooks.SessionEnd && /installs nothing/.test(ph.err), "--print-hook prints JSON on stdout and the where-to-paste on stderr");
@@ -953,6 +978,8 @@ console.log("\n[9] The printed hook carries no secret; --check tells a capture k
   const miss = await run(["--print-hook", "claude-code", "--event", "precompact"]);
   assert(miss.code === 2 && /--event takes SessionEnd, PreCompact, Stop, not "precompact" — the case matters/.test(miss.err) && !miss.out.trim(), "an event the hook does not know is refused — a misspelt one would install a hook that never fires — and a case slip is named");
   assert((await run(["--print-hook", "claude-code", "--event", "SubagentStop"])).code === 2, "…as is an event the harness has and this hook has no use for");
+  const ctor = await run(["--print-hook", "claude-code", "--event", "constructor"]);
+  assert(ctor.code === 2 && /not "constructor"/.test(ctor.err) && !ctor.out.trim() && (await run(["--print-hook", "claude-code", "--event", "__proto__"])).code === 2, "…and one of Object's own names, which printed a hook under `constructor` (third review pass)");
   const noEv = await run(["--print-hook", "claude-code", "--event", "--min-interval", "20"]);
   assert(noEv.code === 2 && /--event takes one of SessionEnd, PreCompact, Stop; none was given/.test(noEv.err) && !noEv.out.trim(), `--event with no value — the Stop forgotten — is refused, not the default pair with the interval dropped (exit ${noEv.code}; first review pass)`);
   const miNoStop = await run(["--print-hook", "claude-code", "--min-interval", "30"]);
