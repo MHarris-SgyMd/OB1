@@ -203,7 +203,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 029 change 54, 030 change 56, 031 change 57, 032 change 60, 033 change 63,
 034 change 65, 035 change 66, 036 change 68, 037 change 70, 038 change 80, 039 change 81,
 040 change 91, 041 change 94, 042 change 95, 043 change 98, 044 SMD-1804,
-045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1296).
+045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 051 SMD-1296).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -241,7 +241,7 @@ read tool, no update, no delete; `recipes/session-capture-hook`). The column is
 key would have landed without its agent id. Named by ticket for the same reason
 as 044 (SMD-1298).
 
-Migration 050 adds the one read over that log a resuming agent asks first
+Migration 051 adds the one read over that log a resuming agent asks first
 (SMD-1296): `thought_changes(p_since, p_after, p_agent, p_not_agent, p_actions,
 p_limit)` — one page, oldest first, from a time or from a cursor (the audit id a
 page ended with; a keyset on `(created_at, id)`, so a walk never repeats a row
@@ -307,7 +307,7 @@ issues every group at once.
 | **server** — the server's soft extras, beyond capture; never fatal to a bare capture (the `SELECT` on `ob1_agents` 046 made hard is in capture, above), but `resolve_agent` *upserts* the agent tables, so attribution needs the writes, not just `SELECT` | `ob1_config` (006) | `SELECT` |
 | | `ob1_agents` (010) | `SELECT, INSERT, UPDATE` |
 | | `ob1_agent_keys` (010) | `SELECT, INSERT, UPDATE` |
-| | `thought_audit` (008) | `SELECT` — a capture-only key may supersede only a thought whose capture row is its own (SMD-1298); without this the server refuses that pointer and names the grant; `thought_changes` (050, SMD-1296) reads the log for the MCP tool of the same name, and names the grant too |
+| | `thought_audit` (008) | `SELECT` — a capture-only key may supersede only a thought whose capture row is its own (SMD-1298); without this the server refuses that pointer and names the grant; `thought_changes` (051, SMD-1296) reads the log for the MCP tool of the same name, and names the grant too |
 | **worker** — `reembed.ts`, `consolidate.ts`, `extract-entities.ts`: claim work, upsert a job key into `ob1_config`, and (consolidate) record/resolve proposals | `thought_work_claims` (015) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `ob1_config` (006) | `INSERT, UPDATE` |
 | | `supersession_proposals` (029) | `SELECT, INSERT, UPDATE` |

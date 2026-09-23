@@ -410,7 +410,7 @@ export class SqlStore implements ThoughtStore {
   }
 
   async listChanges(f: ChangeFilters): Promise<AuditChange[]> {
-    // Migration 050. NULL for an absent bound or filter — the function reads
+    // Migration 051. NULL for an absent bound or filter — the function reads
     // NULL as "no bound" and refuses a time beside a cursor itself. The actions
     // bind through sql.array (the driver has no array-literal form of its own,
     // as supersededAmong says); a null element is refused by the function.

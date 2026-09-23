@@ -444,7 +444,7 @@ export class PostgrestStore implements ThoughtStore {
   }
 
   async listChanges(f: ChangeFilters): Promise<AuditChange[]> {
-    // Migration 050's function is plain, so PostgREST reaches it over rpc like
+    // Migration 051's function is plain, so PostgREST reaches it over rpc like
     // the proposals above; every argument is named, an absent one as null.
     const { data, error } = await this.client.rpc("thought_changes", {
       p_since: f.since ?? null,

@@ -1249,7 +1249,7 @@ function buildServer(principal: Principal): McpServer {
     }
   );
 
-  // Tool 3b: the change feed (migration 050, SMD-1296) — what moved since a
+  // Tool 3b: the change feed (migration 051, SMD-1296) — what moved since a
   // time or a cursor, for an agent that returns after a break. Gated like the
   // other read tools (canRead: a read or a write key sees it, a capture-only
   // key does not). The store calls one SQL function that chooses the page
@@ -1323,7 +1323,7 @@ function buildServer(principal: Principal): McpServer {
       } catch (err: unknown) {
         const msg = (err as Error).message;
         const hint = /thought_changes/.test(msg) && /does not exist|could not find/i.test(msg)
-          ? " — migration 050 (db/migrations/050_thought_changes.sql) is not applied, or PostgREST has not reloaded its schema cache"
+          ? " — migration 051 (db/migrations/051_thought_changes.sql) is not applied, or PostgREST has not reloaded its schema cache"
           : /permission denied for table thought_audit/i.test(msg)
           ? " — the server's role needs SELECT on thought_audit (db/README.md, Grants for a capturing role — the server group, which migrate.ts --grant issues)"
           : "";
