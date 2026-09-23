@@ -30,6 +30,10 @@
       "scope": "read"
     },
     {
+      "name": "thought_changes",
+      "scope": "read"
+    },
+    {
       "name": "capture_thought",
       "scope": "write"
     },

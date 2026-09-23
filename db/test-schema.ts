@@ -5833,6 +5833,92 @@ console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defi
   await db.query(`UPDATE ob1_entities SET aliases = '{}' WHERE id = $1`, [NUM]);
 }
 
+console.log("\n[45] Migration 049: thought_changes — one page of the log, oldest first, from a time or a cursor; the keyset walks a tie without a gap or a repeat; each row rendered bounded (SMD-1296)");
+{
+  const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
+  const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
+  const refused = async (sql: string, params: unknown[] = []) => { try { await db.query(sql, params); return ""; } catch (e) { return (e as Error).message; } };
+  type Row = { id: string; created_at: unknown; action: string; thought_id: string; actor_name: string | null; actor_kind: string | null; origin: string | null; source: string | null;
+               present: boolean; head: string | null; changed: unknown; metadata_keys: unknown; supersedes_before: string | null; supersedes_after: string | null; derivation: boolean };
+  // A text[] reads back as an array, or as its literal on a driver that does not parse the type — one spelling here.
+  const arr = (v: unknown): string[] => Array.isArray(v) ? v.map(String) : typeof v === "string" ? v.replace(/^\{|\}$/g, "").split(",").filter(Boolean) : [];
+  const ts = (r: Row) => new Date(r.created_at as string).getTime();
+  const changes = (args: string, params: unknown[] = []) => q<Row>(`SELECT * FROM thought_changes(${args})`, params);
+  // PGlite's now() is millisecond-grained ([9]'s lesson): a few ms between writes keeps
+  // each statement's row on its own tick, so the order asserted is the mechanism's, not the clock's.
+  const tick = () => new Promise((r) => setTimeout(r, 3));
+  const cap = async (content: string, envelope: Record<string, unknown>, at = 1) =>
+    String((await one<{ r: { id: string } }>(`SELECT upsert_thought($1::text, $2::jsonb, $3::vector) AS r`, [content, JSON.stringify(envelope), unit(at)])).r.id);
+  const asActor = (name: string, statement: string) => db.exec(`BEGIN; SELECT set_config('ob1.actor', '${JSON.stringify({ name })}', true); ${statement}; COMMIT`);
+  await db.exec(`DELETE FROM thoughts`);
+  await db.exec(`SELECT set_agent_kind('alice', 'operator'); SELECT set_agent_kind('bob', 'agent')`);
+  // The log is append-only, so earlier sections' rows stay: every read below starts after the newest of them — a cursor, the strict bound.
+  const cursor0 = String((await one<{ id: string }>(`SELECT id FROM thought_audit ORDER BY created_at DESC, id DESC LIMIT 1`)).id);
+
+  const A = await cap("the first note about 049", { metadata: { type: "idea", topics: ["a"] }, actor: { name: "alice" } }, 1); await tick();
+  const B = await cap("a second note, replacing the first", { metadata: { type: "idea" }, actor: { name: "bob" }, supersedes: A }, 2); await tick();
+  await asActor("bob", `UPDATE thoughts SET content = 'the first note, edited', metadata = metadata || '{"topics": ["b"], "status": "open"}'::jsonb WHERE id = '${A}'`); await tick();
+  await db.exec(`UPDATE thoughts SET metadata = metadata || '{"hand": 1}'::jsonb WHERE id = '${B}'`); await tick();
+  await asActor("alice", `DELETE FROM thoughts WHERE id = '${A}'`); await tick();
+  const C = await cap("a third note, derived from the second", { metadata: {}, actor: { name: "alice" }, derived_from: [B] }, 3); await tick();
+
+  const all = await changes(`NULL, $1::uuid`, [cursor0]);
+  assert(all.length === 7, `after the cursor: seven rows — two captures, two edits, a delete, the pointer 025's SET NULL cleared, a third capture (${all.length})`);
+  const verbs = all.map((r) => r.action);
+  assert(verbs.slice(0, 4).join(",") === "capture,capture,update,update" && verbs[6] === "capture" && [verbs[4], verbs[5]].sort().join(",") === "delete,update",
+    `…oldest first: ${verbs.join(", ")} (the delete and the pointer it cleared share one transaction, so one created_at, and read in id order)`);
+  assert(all.every((r, i) => i === 0 || ts(all[i - 1]) < ts(r) || (ts(all[i - 1]) === ts(r) && all[i - 1].id < r.id)), "…strictly increasing in (created_at, id)");
+  const [capA, capB, editA, handB] = all;
+  const delA = all.find((r) => r.action === "delete")!, ptrB = all.slice(4, 6).find((r) => r.action === "update")!, capC = all[6];
+  assert(capA.thought_id === A && capA.actor_name === "alice" && capA.actor_kind === "operator" && capA.present === false && capA.head === null && capA.supersedes_after === null && arr(capA.changed).length === 0,
+    "the first capture: alice (operator), the thought gone since, so no head and present false, no pointer");
+  assert(capB.thought_id === B && capB.actor_name === "bob" && capB.actor_kind === "agent" && capB.present === true && capB.head === "a second note, replacing the first" && capB.supersedes_after === A && capB.supersedes_before === null,
+    "the second capture: bob (agent), its current text as the head, and the pointer it was captured with");
+  assert(editA.thought_id === A && editA.actor_name === "bob" && arr(editA.changed).join(",") === "content,metadata" && arr(editA.metadata_keys).join(",") === "status,topics" && editA.head === "the first note, edited",
+    `the edit: changed content and metadata, the keys that moved (status, topics — not type), the new text as the head (${arr(editA.changed).join("/")}; ${arr(editA.metadata_keys).join("/")})`);
+  assert(handB.actor_name === null && handB.actor_kind === null && arr(handB.metadata_keys).join(",") === "hand" && handB.head === null,
+    "a raw write with no actor: null name and kind, the one key it added, no head (the content did not move)");
+  assert(delA.thought_id === A && delA.actor_name === "alice" && delA.head === "the first note, edited" && delA.present === false && delA.supersedes_before === null,
+    "the delete: the previous text as the head, present false, and no pointer of its own");
+  assert(ptrB.thought_id === B && ptrB.actor_name === "alice" && arr(ptrB.changed).join(",") === "supersedes" && ptrB.supersedes_before === A && ptrB.supersedes_after === null,
+    "the cascade: B's pointer cleared by 025's SET NULL reads as an edit by the deleter with supersedes before A, after null");
+  assert(capC.thought_id === C && capC.derivation === true && capB.derivation === false && capC.present === true, "a capture with derived_from says so; one without does not");
+  assert(all.every((r) => Number.isFinite(ts(r)) && (r.source === null || typeof r.source === "string")), "created_at and source ride along");
+
+  // Who: keep one key's rows; drop one key's — a row with no actor is not the caller, so it stays.
+  assert((await changes(`NULL, $1::uuid, 'alice'`, [cursor0])).length === 4, "p_agent alice: her two captures, the delete and the cascade row it wrote");
+  assert((await changes(`NULL, $1::uuid, NULL, 'alice'`, [cursor0])).length === 3, "p_not_agent alice: bob's two and the actorless one");
+  assert((await changes(`NULL, $1::uuid, NULL, 'bob'`, [cursor0])).length === 5, "p_not_agent bob: alice's four and the actorless one");
+  assert((await changes(`NULL, $1::uuid, NULL, NULL, ARRAY['delete']`, [cursor0])).length === 1 && (await changes(`NULL, $1::uuid, NULL, NULL, ARRAY['capture', 'delete']`, [cursor0])).length === 4,
+    "p_actions keeps a subset");
+  assert(/unknown action nope; the actions are capture, update and delete/.test(await refused(`SELECT * FROM thought_changes(NULL, NULL, NULL, NULL, ARRAY['nope'])`)) && /unknown action NULL/.test(await refused(`SELECT * FROM thought_changes(NULL, NULL, NULL, NULL, ARRAY[NULL]::text[])`)),
+    "…and refuses a fourth word or a null element by name");
+  assert(/pass a time \(p_since\) or a cursor \(p_after\), not both/.test(await refused(`SELECT * FROM thought_changes(now(), $1::uuid)`, [cursor0])), "a time beside a cursor is refused");
+  assert(/no audit row 00000000-0000-4000-8000-000000000000; a cursor is the id the previous page ended with/.test(await refused(`SELECT * FROM thought_changes(NULL, '00000000-0000-4000-8000-000000000000'::uuid)`)), "a cursor naming no row is refused by name");
+
+  // The walk: pages of five from the cursor — the boundary falls between the two rows that share a created_at.
+  const p1 = await changes(`NULL, $1::uuid, NULL, NULL, NULL, 5`, [cursor0]);
+  const p2 = await changes(`NULL, $1::uuid, NULL, NULL, NULL, 5`, [p1[p1.length - 1].id]);
+  const p3 = await changes(`NULL, $1::uuid, NULL, NULL, NULL, 5`, [p2[p2.length - 1].id]);
+  assert(p1.length === 5 && p2.length === 2 && p3.length === 0 && ts(p1[4]) === ts(p2[0]), `pages of five: 5, 2, 0 — the boundary on a tie (${p1.length}, ${p2.length}, ${p3.length}; ${ts(p1[4]) === ts(p2[0]) ? "tied" : "not tied"})`);
+  assert(JSON.stringify([...p1, ...p2].map((r) => r.id)) === JSON.stringify(all.map((r) => r.id)), "…and the pages joined are the whole list: no gap, no repeat");
+  // Since a time: at or after.
+  assert((await changes(`$1::timestamptz`, [all[2].created_at])).filter((r) => all.some((a) => a.id === r.id)).length === 5, "p_since is at-or-after: from the edit's tick, five of the seven");
+  // The tail: no bound, the newest three, still oldest first.
+  const tail = await changes(`NULL, NULL, NULL, NULL, NULL, 3`);
+  assert(JSON.stringify(tail.map((r) => r.id)) === JSON.stringify(all.slice(4).map((r) => r.id)), "no bound: the newest three rows, in the same order the walk gives them");
+  assert((await changes(`NULL, $1::uuid, NULL, NULL, NULL, 0`, [cursor0])).length === 1, "p_limit is clamped up to one");
+
+  // A hand-written row cannot break the feed: a metadata side that is not an object, a pointer that is not a uuid.
+  await db.exec(`INSERT INTO thought_audit (thought_id, action, diff) VALUES ('${B}', 'update', '{"metadata": {"before": {"a": 1}, "after": [1]}, "supersedes": {"before": "not-a-uuid", "after": 7}}')`);
+  const planted = (await changes(`NULL, NULL, NULL, NULL, NULL, 1`))[0];
+  assert(planted.thought_id === B && arr(planted.changed).join(",") === "metadata,supersedes" && arr(planted.metadata_keys).length === 0 && planted.supersedes_before === null && planted.supersedes_after === null,
+    "a planted row with a non-object metadata side and non-uuid pointers renders with no keys and no pointer, and raises nothing");
+  const fn = await one<{ v: string; r: number }>(`SELECT provolatile AS v, prorows AS r FROM pg_proc WHERE proname = 'thought_changes'`);
+  assert(fn.v === "s" && Number(fn.r) === 50, "the function is STABLE with ROWS 50");
+  await db.exec(`DELETE FROM thoughts`);
+}
+
 // db/README.md quotes this suite's assertion total in two places ("Expected
 // outcome" and the Testing block). It used to be edited by hand and drifted;
 // this holds every count the README gives for test-schema.ts to what the suite

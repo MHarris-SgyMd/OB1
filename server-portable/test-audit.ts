@@ -202,6 +202,89 @@ console.log("\n[7] A malformed actor setting does not break the mutation");
   assert(ev?.actor_name === null, "…and was audited with a NULL actor");
 }
 
+// [8]–[10] share the cursor the section starts after and the two thoughts the
+// importer writes; a section is a block, so they live here.
+let cursor0 = "", A = "", B = "";
+
+console.log("\n[8] thought_changes: a second key reads what the first did — in order, who, and the thought id on every line (migration 049, SMD-1296)");
+{
+  // 046: the kind comes from the registry, stamped as each row is written, so
+  // classify the two keys once — and run the backfill, so the rows [1]–[7]
+  // wrote before the classification carry it too (the feed reads the amended
+  // column, not the registry).
+  await sql`SELECT set_agent_kind('laptop', 'operator')`;
+  await sql`SELECT set_agent_kind('importer', 'agent')`;
+  await sql`SELECT backfill_thought_audit_events()`;
+  cursor0 = String((await sql`SELECT id FROM thought_audit ORDER BY created_at DESC, id DESC LIMIT 1`)[0].id);
+  const idOf = async (content: string) => String((await sql`SELECT id FROM thoughts WHERE content = ${content}`)[0].id);
+  // The importer's session: capture A, edit it, capture B superseding it, delete A —
+  // whose ON DELETE SET NULL (025) clears B's pointer in the same transaction.
+  await importer.call("capture_thought", { content: "the plan for the 049 review" });
+  A = await idOf("the plan for the 049 review");
+  await importer.call("update_thought", { id: A, content: "the plan for the 049 review, revised", metadata_patch: { status: "open" } });
+  await importer.call("capture_thought", { content: "the 049 review is done", supersedes: A });
+  B = await idOf("the 049 review is done");
+  await importer.call("delete_thought", { id: A });
+
+  const out = await laptop.call("thought_changes", { since: cursor0 });
+  const entries = out.split("\n\n").filter((e) => /^\d+\. /.test(e));
+  assert(/^5 change\(s\) after the cursor, oldest first:/.test(out), `the header counts five after the cursor (${out.split("\n")[0]})`);
+  assert(entries.length === 5 && entries.every((e) => new RegExp(`ID: (${A}|${B})`).test(e.split("\n")[0])), "five entries, each first line naming the thought's ID");
+  assert(entries.every((e) => /by importer \(agent\)/.test(e)), "…every one by importer (agent) — the key's name, and 046's kind from the registry");
+  const verbs = entries.map((e) => /— (captured|edited|deleted) /.exec(e)?.[1]);
+  assert(verbs.slice(0, 3).join(",") === "captured,edited,captured" && [verbs[3], verbs[4]].sort().join(",") === "deleted,edited",
+    `oldest first: ${verbs.join(", ")} (the delete and the pointer it cleared share a transaction, so read in id order)`);
+  assert(/\(deleted since\)/.test(entries[0]) && /\(the text went with the thought\)/.test(entries[0]), "A's capture is marked deleted since, with no text to quote");
+  assert(/content → "the plan for the 049 review, revised"/.test(entries[1]) && /metadata: [^\n]*status/.test(entries[1]), "A's edit shows the new text and the metadata key that moved");
+  assert(new RegExp(`supersedes ${A}`).test(entries[2]) && /"the 049 review is done"/.test(entries[2]), "B's capture says it supersedes A, quoting its text");
+  const del = entries.find((e) => /deleted by/.test(e)) ?? "", ptr = entries.slice(3).find((e) => /edited by/.test(e)) ?? "";
+  assert(/was: "the plan for the 049 review, revised"/.test(del), "A's delete quotes what was lost");
+  assert(new RegExp(`no longer supersedes ${A} \\(pointer cleared\\)`).test(ptr), "B's pointer, cleared by 025's SET NULL, is reported as an edit");
+  const cursor = /Cursor: ([0-9a-f-]{36}) — pass it as `since` to continue from here\./.exec(out)?.[1];
+  assert(cursor !== undefined && !/More changes follow/.test(out), `the reply ends with the cursor and says nothing more follows (${cursor?.slice(0, 8)})`);
+  const newest = String((await sql`SELECT id FROM thought_audit ORDER BY created_at DESC, id DESC LIMIT 1`)[0].id);
+  assert(cursor === newest, "…and the cursor is the newest audit row");
+  const all = await laptop.call("thought_changes", { since: "2000-01-01T00:00:00Z" });
+  assert(/change\(s\) since 2000-01-01T00:00:00\.000Z, oldest first/.test(all) && /by laptop \(operator\)/.test(all) && /from outside the server/.test(all),
+    "a time as since reaches back to [1]'s capture by laptop and [6]'s actorless write");
+}
+
+console.log("\n[9] thought_changes: others_only leaves out the caller's own writes, agent keeps one key's, actions a subset");
+{
+  const mine = await importer.call("thought_changes", { since: "2000-01-01", others_only: true });
+  assert(/by everyone but importer since/.test(mine) && !/by importer/.test(mine) && /by laptop \(operator\)/.test(mine) && /from outside the server/.test(mine),
+    "importer asking for everyone but itself sees laptop's writes and the actorless ones, none of its own");
+  const theirs = await laptop.call("thought_changes", { since: cursor0, others_only: true });
+  assert(/^5 change\(s\) by everyone but laptop after the cursor/.test(theirs), "laptop asking for everyone but itself gets the importer's five");
+  const none = await laptop.call("thought_changes", { since: cursor0, agent: "laptop" });
+  assert(none === "No change(s) by laptop after the cursor. Keep the cursor.", `agent laptop after the cursor: none, and the cursor is worth keeping (${none})`);
+  const dels = await laptop.call("thought_changes", { since: cursor0, actions: ["delete"] });
+  assert(/^1 delete change\(s\) after the cursor/.test(dels) && (dels.match(/^\d+\. /gm) ?? []).length === 1 && /deleted by importer/.test(dels), "actions: [delete] keeps the one delete");
+}
+
+console.log("\n[10] thought_changes: pages by cursor join with no gap or repeat, and a since that is neither a time nor a cursor is refused before any call");
+{
+  const heads = (out: string) => out.split("\n").filter((l) => /^\d+\. /.test(l)).map((l) => l.replace(/^\d+\. /, ""));
+  const whole = heads(await laptop.call("thought_changes", { since: cursor0 }));
+  const pages: string[][] = [];
+  let at = cursor0, more = true, guard = 0;
+  while (more && guard++ < 5) {
+    const out = await laptop.call("thought_changes", { since: at, limit: 2 });
+    pages.push(heads(out));
+    more = /More changes follow\./.test(out);
+    at = /Cursor: ([0-9a-f-]{36})/.exec(out)?.[1] ?? at;
+  }
+  assert(pages.map((p) => p.length).join(",") === "2,2,1", `three pages of two: 2, 2, 1 (${pages.map((p) => p.length).join(",")})`);
+  assert(JSON.stringify(pages.flat()) === JSON.stringify(whole), "…joined, the same five lines in the same order as one call — no gap, no repeat");
+  assert((await laptop.call("thought_changes", { since: at })) === "No change(s) after the cursor. Keep the cursor.", "the last page's cursor yields nothing yet — and is kept");
+  let bad = "";
+  try { await laptop.call("thought_changes", { since: "yesterday" }); } catch (e) { bad = (e as Error).message; }
+  assert(/Refused: `since` must be an ISO-8601 time \(2026-09-22T08:00:00Z\) or the cursor a previous call ended with, not "yesterday"\./.test(bad), `a since that is neither is refused, naming both forms (${bad.slice(0, 60)})`);
+  let ghost = "";
+  try { await laptop.call("thought_changes", { since: "00000000-0000-4000-8000-000000000000" }); } catch (e) { ghost = (e as Error).message; }
+  assert(/no audit row 00000000-0000-4000-8000-000000000000; a cursor is the id the previous page ended with/.test(ghost), "a cursor naming no row is refused by the function, by name");
+}
+
 await sql.close();
 server.stop();
 provider.stop();

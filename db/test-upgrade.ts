@@ -450,8 +450,9 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // delete_thought's third argument, SMD-1712) and 043 (the cite shape stated
   // at the table, SMD-1749), 044 (the schema_version row, SMD-1804), 045
   // (the query_log column set — filter, arm and tier, SMD-1490), 046 (the
-  // audit row's event shape, SMD-1730) and 047 (the query_log.logged_at prune
-  // index, SMD-1492) stay
+  // audit row's event shape, SMD-1730), 047 (the query_log.logged_at prune
+  // index, SMD-1492) and 049 (thought_changes, the read over the audit log,
+  // SMD-1296) stay
   // recorded and are never tried. 030 is the
   // right one to make
   // pending
@@ -472,11 +473,13 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // 008's thought_audit and 010's ob1_agents and redefines 025's trigger, 035's
   // two capture forms and 033's update_thought on their own bodies, all present
   // ([20b]); 047 adds a btree on query_log.logged_at for prune, likewise needing
-  // only 034 and refusing by name without it — all recorded by the baseline with
+  // only 034 and refusing by name without it; 049 adds one read function over
+  // 008's table and 046's columns, refusing by name without either ([20d]) — all
+  // recorded by the baseline with
   // their prerequisites present, so none
   // becomes the plain-run failure point above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 18, `030 is among the last eighteen migrations (${last})`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 19, `030 is among the last nineteen migrations (${last})`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -1714,6 +1717,36 @@ console.log("\n[20c] Migration 047 on a schema without 034 — refused up front,
   // place the same pending file applies. Complete the schema (034 onward) so [21]
   // resets a full brain, now through 047 rather than only through 046.
   await applyMigrations(URL_, { ...OPTS, only: (f) => f >= "034" });
+}
+
+console.log("\n[20d] Migration 049 on a schema without 008, and on 008's table without 046's columns — refused up front, naming the migration and --reapply, and applied once both are there (SMD-1296)");
+{
+  // 049's guard is 047's shape ([20c]): a brain baselined at a ledger through
+  // 049 whose schema stops before 008 would take the function and fail at its
+  // first call with a bare "relation thought_audit does not exist"; the file
+  // refuses at apply instead, naming 008 — and, on 008's table as a hand-applied
+  // 008 leaves it, naming 046. A guard with no driver is prose ([20c]'s
+  // lesson), so both are driven.
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < "008" });
+  const baselined = await migrate("--baseline");
+  assert(baselined.code === 0, `--baseline records every migration over the pre-008 schema (exit ${baselined.code})`);
+  const sql = new SQL({ url: URL_, max: 1 });
+  const the049 = MIGRATIONS.find((f) => f.startsWith("049_"))!;
+  await sql`DELETE FROM schema_migrations WHERE name = ${the049}`;
+  const plain = await migrate();
+  const ok = plain.code === 1 &&
+    /049_thought_changes\.sql\s+FAILED: migration 049 needs 008 \(thought_audit\); this schema lacks it/.test(plain.out) &&
+    /adopted with --baseline\?\)\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plain.out);
+  assert(ok, `a plain run fails at 049 naming 008 and --reapply, not with a bare "does not exist" (exit ${plain.code})${ok ? "" : `:\n${plain.out}`}`);
+  assert(Number((await sql`SELECT count(*)::int AS c FROM schema_migrations WHERE name = ${the049}`)[0].c) === 0, "…049 records nothing");
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f >= "008" && f < "046" });
+  const half = await migrate();
+  assert(half.code === 1 && /049_thought_changes\.sql\s+FAILED: migration 049 needs 046 \(thought_audit\.actor_kind, origin\); this schema lacks it/.test(half.out),
+    `…and on 008's table without 046's columns it names 046 (exit ${half.code})${half.code === 1 ? "" : `:\n${half.out}`}`);
+  await sql.close();
+  // Complete the schema (046 onward) so [21] resets a full brain, through 049.
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f >= "046" });
 }
 
 console.log("\n[21] test-support's schema reset leaves nothing of the fork's in public — every table, function and type a migration creates is on its drop lists (SMD-1749)");

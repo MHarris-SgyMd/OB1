@@ -23,11 +23,13 @@
  */
 
 import { SQL } from "bun";
-import { actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, normaliseThoughtMeta, normaliseThoughtRecord, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE } from "./store.ts";
+import { actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, normaliseThoughtMeta, normaliseThoughtRecord, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
+  AuditChange,
   CaptureResult,
+  ChangeFilters,
   Derivative,
   ListFilters,
   DeleteResult,
@@ -387,6 +389,19 @@ export class SqlStore implements ThoughtStore {
     const rows = await this.sql`
       SELECT * FROM list_supersession_proposals(${opts.status === undefined ? "pending" : opts.status}::text, ${opts.limit ?? null}::int)`;
     return rows.map((r: Record<string, unknown>) => normaliseProposal(r));
+  }
+
+  async listChanges(f: ChangeFilters): Promise<AuditChange[]> {
+    // Migration 049. NULL for an absent bound or filter — the function reads
+    // NULL as "no bound" and refuses a time beside a cursor itself. The actions
+    // bind through sql.array (the driver has no array-literal form of its own,
+    // as supersededAmong says); a null element is refused by the function.
+    const rows = await this.sql`
+      SELECT * FROM thought_changes(
+        ${f.since ?? null}::timestamptz, ${f.after ?? null}::uuid,
+        ${f.agent ?? null}::text, ${f.notAgent ?? null}::text,
+        ${f.actions ? this.sql.array(f.actions, "TEXT") : null}::text[], ${f.limit}::int)`;
+    return rows.map((r: Record<string, unknown>) => normaliseChange(r));
   }
 
   async supersededAmong(ids: string[]): Promise<Record<string, string>> {

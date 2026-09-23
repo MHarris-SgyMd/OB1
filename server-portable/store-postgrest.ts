@@ -14,11 +14,13 @@
  */
 
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
-import { actorPayload, captureEnvelope, normaliseActionRows, normaliseAgentResolution, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, normaliseThoughtMeta, normaliseThoughtRecord, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE } from "./store.ts";
+import { actorPayload, captureEnvelope, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, normaliseThoughtMeta, normaliseThoughtRecord, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
+  AuditChange,
   CaptureResult,
+  ChangeFilters,
   Derivative,
   ListFilters,
   DeleteResult,
@@ -414,6 +416,21 @@ export class PostgrestStore implements ThoughtStore {
     });
     if (error) throw new Error(error.message);
     return ((data ?? []) as Record<string, unknown>[]).map(normaliseProposal);
+  }
+
+  async listChanges(f: ChangeFilters): Promise<AuditChange[]> {
+    // Migration 049's function is plain, so PostgREST reaches it over rpc like
+    // the proposals above; every argument is named, an absent one as null.
+    const { data, error } = await this.client.rpc("thought_changes", {
+      p_since: f.since ?? null,
+      p_after: f.after ?? null,
+      p_agent: f.agent ?? null,
+      p_not_agent: f.notAgent ?? null,
+      p_actions: f.actions ?? null,
+      p_limit: f.limit,
+    });
+    if (error) throw new Error(error.message);
+    return ((data ?? []) as Record<string, unknown>[]).map(normaliseChange);
   }
 
   async supersededAmong(ids: string[]): Promise<Record<string, string>> {

@@ -1488,6 +1488,10 @@ export const ROLE_GRANTS = Object.freeze({
   // writes `resolve_agent` actually makes, so attribution works when it lands.
   server: Object.freeze([
     Object.freeze({ table: "ob1_config",     privileges: Object.freeze(["SELECT"]),                    since: "006" }),
+    // 049's thought_changes (SMD-1296) reads the log the capture set only
+    // writes: soft — every write still goes through without it, and the one
+    // tool that reads it names the grant in its error.
+    Object.freeze({ table: "thought_audit",  privileges: Object.freeze(["SELECT"]),                    since: "049" }),
     Object.freeze({ table: "ob1_agents",     privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]), since: "010" }),
     Object.freeze({ table: "ob1_agent_keys", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]), since: "010" }),
   ]),

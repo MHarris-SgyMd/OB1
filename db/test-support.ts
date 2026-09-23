@@ -121,6 +121,7 @@ const FUNCTIONS = [
   "record_supersession_proposal(uuid, uuid, text, numeric, text, float, text, uuid, text, text)",
   "review_supersession_proposal(uuid, text, text, text, jsonb, boolean)",
   "list_supersession_proposals(text, int)",
+  "thought_changes(timestamptz, uuid, text, text, text[], int)",
   "consolidation_pool(text)",
   "stale_entities(interval, int)",
   // 032 (SMD-1323)

@@ -8,7 +8,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPTransport } from "@hono/mcp";
 import { Hono } from "hono";
 import { z } from "zod";
-import { createStore, postgrestOnBunNotice, storeKind, UUID_RE, type Citation, type ThoughtStore, type ThoughtHybridMatch, type ThoughtKeywordMatch } from "./store.ts";
+import { createStore, postgrestOnBunNotice, storeKind, UUID_RE, type AuditChange, type Citation, type ThoughtStore, type ThoughtHybridMatch, type ThoughtKeywordMatch } from "./store.ts";
 import { queryLogEnabled, trimmedEnv } from "../db/config.mjs";
 import { authenticateRequest, canWrite, type Principal } from "./auth.ts";
 import { AgentResolver, cacheTtlFromEnv } from "./agents.ts";
@@ -325,6 +325,60 @@ function explainRefusal(
 function snipText(text: string, max: number): string {
   const t = cleanForDisplay(text).replace(/\s+/g, " ").trim();
   return t.length > max ? t.slice(0, max) + "…" : t;
+}
+
+/**
+ * thought_changes's `since` (SMD-1296): a uuid is a cursor — the audit row a
+ * previous page ended with — and anything else must read as an ISO-8601 time
+ * (a date at least, so a bare number is not a year), normalised so the reply
+ * echoes one spelling. Neither is a refusal naming both forms, before any call.
+ */
+function parseSince(raw: string | undefined): { since: string | null; after: string | null } | { refused: string } {
+  const v = (raw ?? "").trim();
+  if (v === "") return { since: null, after: null };
+  if (UUID_RE.test(v)) return { since: null, after: v.toLowerCase() };
+  const d = /^\d{4}-\d{2}-\d{2}/.test(v) ? new Date(v) : new Date(NaN);
+  if (Number.isNaN(d.getTime())) {
+    return { refused: `Refused: \`since\` must be an ISO-8601 time (2026-09-22T08:00:00Z) or the cursor a previous call ended with, not "${v.slice(0, 40)}".` };
+  }
+  return { since: d.toISOString(), after: null };
+}
+
+/**
+ * One change as a client reads it: when, what and who on the first line with
+ * the thought's `ID:` (the label every read tool prints, SMD-1248, so fetch and
+ * update_thought can reach what the line names); then what moved, bounded;
+ * then the supersedes pointer, because "X now replaces Y" is the change a
+ * resuming agent most needs. Untrusted text — a head, a metadata key — goes
+ * through snipText, the one cleaner every reply quotes a thought through.
+ */
+function renderChange(c: AuditChange, n: number): string {
+  const when = c.createdAt.replace(/\.\d{3}Z$/, "Z");
+  const who = c.actorName === null ? "from outside the server" : `by ${cleanForDisplay(c.actorName)}${c.actorKind ? ` (${c.actorKind})` : ""}`;
+  const verb = c.action === "capture" ? "captured" : c.action === "update" ? "edited" : "deleted";
+  const gone = c.action !== "delete" && !c.present ? " (deleted since)" : "";
+  const lines = [`${n}. ${when} — ${verb} ${who} — ID: ${c.thoughtId}${gone}`];
+  const text = c.head === null ? null : snipText(c.head, 200);
+  if (c.action === "capture") lines.push(text === null ? "   (the text went with the thought)" : `   "${text}"`);
+  if (c.action === "delete" && text !== null) lines.push(`   was: "${text}"`);
+  if (c.action === "update") {
+    const parts: string[] = [];
+    if (c.changed.includes("content")) parts.push(text === null ? "content" : `content → "${text}"`);
+    if (c.changed.includes("metadata")) parts.push(c.metadataKeys.length ? `metadata: ${c.metadataKeys.map((k) => snipText(k, 40)).join(", ")}` : "metadata");
+    if (c.changed.includes("embedding_present")) parts.push("embedding");
+    if (parts.length) lines.push(`   ${parts.join("; ")}`);
+    // 046: an unchanged edit that declared a stance, cites or a window is an
+    // event with an empty diff — say so rather than print a bare header.
+    else if (!c.changed.length) lines.push("   restated — no field changed");
+  }
+  if (c.action === "capture" && c.supersedesAfter) lines.push(`   supersedes ${c.supersedesAfter}`);
+  if (c.action === "update") {
+    if (c.supersedesAfter) lines.push(`   now supersedes ${c.supersedesAfter}${c.supersedesBefore ? ` (was ${c.supersedesBefore})` : ""}`);
+    else if (c.supersedesBefore) lines.push(`   no longer supersedes ${c.supersedesBefore} (pointer cleared)`);
+  }
+  if (c.action === "delete" && c.supersedesBefore) lines.push(`   it superseded ${c.supersedesBefore}, which is current again unless another thought supersedes it`);
+  if (c.derivation) lines.push(c.action === "capture" ? "   captured with sources (derived_from)" : "   sources (derived_from) changed");
+  return lines.join("\n");
 }
 
 /**
@@ -1133,6 +1187,75 @@ function buildServer(principal: Principal): McpServer {
       } catch (err: unknown) {
         return {
           content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // Tool 3b: the change feed (migration 049, SMD-1296) — what moved since a
+  // time or a cursor, for an agent that returns after a break. Read-only, so a
+  // read key sees it. The store calls one SQL function that chooses the page
+  // and bounds the rendering; this decides `since` and lays the rows out.
+  server.registerTool(
+    "thought_changes",
+    {
+      title: "What Changed",
+      description:
+        "List what changed in Open Brain — every capture, edit and deletion, oldest first, with who made it (by access-key name), the thought's ID, what moved, and whether it now supersedes another thought. " +
+        "Start from `since`: an ISO-8601 time, or the cursor a previous call ended with (its last line) to continue exactly where you left off with no gaps or repeats; leave it out for the most recent changes. " +
+        "`others_only` leaves out this key's own writes — what everyone else did while you were away.",
+      annotations: {
+        readOnlyHint: true,
+      },
+      inputSchema: {
+        since: z.string().optional().describe("An ISO-8601 time (changes at or after it), or the cursor the previous page ended with (changes after that row). Omit for the most recent changes."),
+        others_only: z.boolean().optional().default(false).describe("Leave out this key's own writes"),
+        agent: z.string().optional().describe("Only this writer's changes, by access-key name"),
+        actions: z.array(z.enum(["capture", "update", "delete"])).optional().describe("Only these kinds of change"),
+        limit: z.number().int().min(1).max(200).optional().default(50),
+      },
+    },
+    async ({ since, others_only, agent, actions, limit }) => {
+      // `since` is decided here, before any call: a uuid is a cursor, anything
+      // else must read as a time, and a word that is neither is refused naming
+      // both forms rather than surfacing as a Postgres cast error.
+      const start = parseSince(since);
+      if ("refused" in start) return { content: [{ type: "text" as const, text: start.refused }], isError: true };
+      const who = others_only ? ` by everyone but ${principal.name}` : agent?.trim() ? ` by ${cleanForDisplay(agent.trim())}` : "";
+      const what = actions?.length ? `${actions.join("/")} change(s)` : "change(s)";
+      const where = start.after ? "after the cursor" : start.since ? `since ${start.since}` : "";
+      try {
+        // One more than shown, so the reply can say whether more follow
+        // without a count query; the function caps at 201.
+        const rows = await (await db()).listChanges({
+          since: start.since,
+          after: start.after,
+          agent: agent?.trim() || null,
+          notAgent: others_only ? principal.name : null,
+          actions: actions?.length ? actions : null,
+          limit: limit + 1,
+        });
+        const more = rows.length > limit;
+        const shown = more ? rows.slice(0, limit) : rows;
+        if (shown.length === 0) {
+          return { content: [{ type: "text" as const, text: `No ${what}${who} ${where || "recorded yet"}.${start.after ? " Keep the cursor." : ""}` }] };
+        }
+        const head = where ? `${shown.length} ${what}${who} ${where}, oldest first:` : `The ${shown.length} most recent ${what}${who}, oldest first:`;
+        const cursor = shown[shown.length - 1].id;
+        const tail = `Cursor: ${cursor} — pass it as \`since\` to continue from here.${more ? " More changes follow." : ""}`;
+        return {
+          content: [{ type: "text" as const, text: `${head}\n\n${shown.map((c, i) => renderChange(c, i + 1)).join("\n\n")}\n\n${tail}` }],
+        };
+      } catch (err: unknown) {
+        const msg = (err as Error).message;
+        const hint = /thought_changes/.test(msg) && /does not exist|could not find/i.test(msg)
+          ? " — migration 049 (db/migrations/049_thought_changes.sql) is not applied, or PostgREST has not reloaded its schema cache"
+          : /permission denied for table thought_audit/i.test(msg)
+          ? " — the server's role needs SELECT on thought_audit (db/README.md, Grants for a capturing role — the server group, which migrate.ts --grant issues)"
+          : "";
+        return {
+          content: [{ type: "text" as const, text: `Error: ${msg}${hint}` }],
           isError: true,
         };
       }
