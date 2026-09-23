@@ -164,8 +164,8 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `1444 assertions: 1444 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports fifty (50) migrations applied, and
+`bun test-schema.ts` prints `1500 assertions: 1500 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports fifty-one (51) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -203,7 +203,8 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 029 change 54, 030 change 56, 031 change 57, 032 change 60, 033 change 63,
 034 change 65, 035 change 66, 036 change 68, 037 change 70, 038 change 80, 039 change 81,
 040 change 91, 041 change 94, 042 change 95, 043 change 98, 044 SMD-1804,
-045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726).
+045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
+051 SMD-1867).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -265,6 +266,29 @@ the scan, which derives every thought each time. Run it again after
 classifying or reclassifying a key; it returns `{rows, differing, awaiting}`.
 The identity column rewrites `thought_audit` once at apply (about a minute per
 million rows, captures waiting): apply 050 in a quiet window.
+
+Migration 051 puts the source beside the thought (SMD-1867, the ingestion
+adapter contract; SMD-1865 is its Linear instance). `thought_sources` holds, for
+a thought that came from a source system, the system, the identity that
+survives a rename there and the **canonical** form byte for byte — the truth a
+two-way connector writes back, from which the row's text and its edges are
+derived, never the other way — with its hash and the ingest run; one thought
+per `(system, identity)`, written by `record_thought_source()` (the same
+canonical twice writes nothing; an identity another thought holds is refused,
+not re-pointed) and resolved by `source_thought(system, identity)` (this table
+first; for `linear`, the board sync's `metadata.issue` claim at the head of a
+twin chain). A second facet kind, `link` — `{relation, system, target, origin}`,
+relation one of `references | child_of | blocks | blocked_by | relates_to |
+duplicate_of`, the target named by identity, never by id — is written as a SET
+by `record_source_links(thought, system, links)`: a link the source no longer
+states is closed (`valid_until`, history), one already active is kept, a new
+one added; a partial unique index holds one active row per (thought, system,
+relation, target). And `record_thought_entities` gains the **resolution rule**:
+a `source:<system>` extraction key is a structured pass (the source's own
+project and labels as mentions, no model call) that replaces only its own rows,
+an `extract:*` pass replaces only extracted rows, and where both name one
+(thought, entity) or edge the structured row stands. Additive, no data change,
+no ACL; the ingester and the board sync write through it (below).
 
 ## What changed relative to the guide
 
@@ -1474,22 +1498,23 @@ wipe costs one re-ingest, and that re-ingest is two commands:
 ```bash
 # 1. the records → rows (bare: no vectors, no chunks yet)
 bun ingest-records.ts --url postgres://… \
-  --linear /tmp/linear-corpus-full.json \
+  --linear /tmp/linear-corpus-full.json --allow linear:corpus \
   --memory-dir ~/.claude/projects/<project>/memory
 # 2. rows → vectors + chunks, through the owned embedding path (below)
 bun reembed.ts --url postgres://…
 ```
 
-`ingest-records.ts` reads four sources, each a record becoming one thought row
+`ingest-records.ts` reads five sources, each a record becoming one thought row
 with a deterministic id and a `metadata.source` label (SMD-1806 rule 5 — an
-agent-written capture is one source among four):
+agent-written capture is one source among several):
 
 | source | what | needs |
 | --- | --- | --- |
 | `fork` | the fork's changes, one `changes/*.md` file each (SMD-1917) | in the tree |
 | `commit` | git commit messages since the upstream pin (the fork's whole delta) | in the tree; `--since <ref>` to move the range start |
-| `linear` | a corpus dump built by `evals/build-linear-corpus.ts` | `--linear <dump.json>` |
+| `linear` | a corpus dump built by `evals/build-linear-corpus.ts`, through the Linear adapter | `--linear <dump.json>` and `--allow linear:corpus` |
 | `memory` | the `*.md` memory files (`MEMORY.md`, the index, excluded) | `--memory-dir <path>` or `OB1_MEMORY_DIR` |
+| `markdown` | a Markdown / Obsidian vault, through the Markdown adapter | `--markdown <root>` or `OB1_MARKDOWN_DIR`, and `--allow <root>` |
 
 `--source all` (the default) ingests every source it has an input for and says on
 stderr which it skipped; `--source <one>` restricts it; `--dry-run` counts per
@@ -1505,6 +1530,51 @@ writes **bare** rows on purpose: vectors and
 chunk rows are `reembed.ts`'s job, which walks the new rows through the claim table
 and embeds them exactly as a capture would (chunking long records), so the two
 tools together produce the same rows a live capture would.
+
+**The write merges, and clears what the text no longer vouches for.** A row's
+`metadata` is merged (`thoughts.metadata || record`), never replaced, so the
+board sync's facets, the extractor's tags and 050's actor marks on a row survive
+a rebuild over it; a record whose text stood while its metadata gained a key is
+`patched`. A record whose text moved is `updated`, and its vector, its label and
+its chunk rows are cleared — they were the old text's — so `reembed.ts`, which
+pools rows without a vector, picks it up (SMD-1958's second half; before, a
+rebuild over an embedded brain left a stale vector under new text that nothing
+re-embedded).
+
+**The ingestion contract (SMD-1867).** The `linear` and `markdown` sources go
+through an **adapter** — `ingest-linear.ts`, `ingest-markdown.ts`, each a pure
+map from one source item to the five things `ingest-contract.ts` names: a stable
+**identity** within the system (a Linear identifier; a note's frontmatter `id`,
+else its name), the **canonical** form byte for byte (the issue as fetched, as
+JSON with keys in one order; the file's bytes), the clean **text** that is
+stored and embedded (Linear's autolink markup stripped to the identifier; a
+note's frontmatter dropped and its `[[wikilinks]]` flattened to their alias or
+name), the **links** the source's structured layer states (cross-references,
+parent, blocks / related / duplicate relations; wikilinks), the **mentions** it
+names (project and labels; tags) and the **facets**. The rule the contract is
+built on: *preserve the source, derive the text and the edges* — a corpus that
+stripped and stored could never be written back to Obsidian or Notion without
+shredding the page (SMD-949's connectors). So each such record's transaction
+also writes, through migration 051, its canonical (`thought_sources`), its links
+(`link` facets, as a set — a link the source drops is closed, never deleted) and
+its mentions (`record_thought_entities` under `source:<system>`, confidence 1,
+no model call — rows 016's extractor never displaces and never doubles: where
+both name one pair the structured row stands). Re-ingesting an unchanged item
+writes nothing at any of the four. Every adapter passes one test: its canonical
+IS the input; the Markdown adapter enumerates what its text cannot reproduce
+(`MARKDOWN_LOSSY`) and the two inputs it refuses rather than store mangled — a
+file that is not UTF-8, one holding NUL (`MARKDOWN_LIMITS`). `bun
+ingest-linear.ts --self-check` and `bun ingest-markdown.ts --self-check` run the
+pure rules; `test-schema.ts` [47] drives 051 with the Linear adapter's output.
+
+**The allowlist (SMD-1813).** The two adapter sources are external content —
+stored un-isolated, embedded, sent to a model provider — and are ingested only
+for a **scope** the operator cleared: `--allow <scope,scope>` or
+`OB1_INGEST_ALLOW`, an exact match on the scope each record names (the corpus:
+`linear:corpus`; a vault: its resolved root path), never a prefix and never "the
+whole workspace". The default is nothing; a record refused is counted per source
+and the refusal names the knob that clears it. The fork's own records (`fork`,
+`commit`, `memory`) are not external and are not gated.
 
 **The brain reports its tier.** `OB1_TIER` (`stable` | `canary` | `working`,
 default `stable`); the ingester stamps `ob1_config.tier` and `.last_ingest` on
@@ -1639,9 +1709,18 @@ model call — on the dogfood brain 224 of 268 hand captures rendered byte-ident
 and cost nothing but the patch. Every write goes through `server-portable/store-sql.ts`
 as the actor `board-sync` via `db/sync-linear.ts`, the egress gate asked first
 (refused, the row lands without a vector and the audit row says so), so a synced
-ticket differs from a captured one in `metadata.source` alone. Linear's autolink
-markup (`<issue …>SMD-x</issue>`) is stripped to the identifier before storing
-(SMD-1865's first item; the typed edges are its second and stay there). "Same
+ticket differs from a captured one in `metadata.source` alone. The text, the
+facets and the structure are the Linear adapter's (`ingest-linear.ts`, SMD-1867):
+Linear's autolink markup (`<issue …>SMD-x</issue>`) is stripped to the identifier
+in the text, and once the head row is settled — captured, adopted, patched or
+edited — the pass records beside it, with no model call, the issue as fetched as
+its canonical (`thought_sources`), its cross-references, parent and relations
+(`blocks`, `blocked_by`, `relates_to`, `duplicate_of`, from both sides of each
+relation) as `link` facets, a set that follows the board — a relation removed in
+Linear is closed, not deleted — and its project and labels as mentions under
+`source:linear`, which 016's extractor leaves standing (migration 051; SMD-1865's
+second item). So "the issues blocking X" and "everything under epic Y" are
+answered from the edges, not the prose. "Same
 text" is judged by `content_fingerprint_of` — the rule `update_thought` refuses
 duplicates by, asked of the database — so a paste with a trailing newline is the
 same text. When one identifier has several ticket rows — the hand re-captures —
@@ -1694,12 +1773,13 @@ pass finds what was left.
 
 **Two writers of one identity.** `ingest-records.ts --linear <dump>` and this tool
 both key a ticket on `metadata.issue`, but render different text (the corpus's
-`title / text` against the board header) and the ingester replaces `metadata`
-wholesale — so on one brain they would rewrite each other's rows on every run. A
-brain this tool keeps takes the board from it: rebuild that brain with
-`ingest-records.ts` and no `--linear` (the fork, commit and memory sources), then
-one sync pass fills the board; the corpus dump stays the eval harnesses'
-(SMD-1958 has the one-renderer resolution).
+`title / text` against the board header) — so on one brain they would rewrite
+each other's text on every run. The ingester now merges `metadata` rather than
+replacing it (SMD-1867), so the facets survive; the text still differs until
+the dump carries what the board header renders. A brain this tool keeps takes
+the board from it: rebuild that brain with `ingest-records.ts` and no `--linear`
+(the fork, commit and memory sources), then one sync pass fills the board; the
+corpus dump stays the eval harnesses' (SMD-1958 has the one-renderer resolution).
 
 **Not removed, not commented.** An issue deleted in Linear or moved out of the
 initiative keeps its row (`--audit` lists it under *extra*; `ingest-records.ts` has
@@ -1714,8 +1794,8 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 1444 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 619 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
+bun test-schema.ts                          # 1500 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 623 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```

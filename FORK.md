@@ -277,7 +277,7 @@ and fails a "FORK.md change N" citation with no file behind it (SMD-1917).
 | 122 | [The board reaches the brain by a sweep that runs itself](changes/122-the-board-reaches-the-brain-by-a-sweep-that-runs.md) | SMD-1954 |
 | 123 | [A release publishes what it names](changes/123-a-release-publishes-what-it-names.md) | SMD-1860 |
 
-Landed since the last release and numbered at the next one (SMD-1804): [SMD-1298](changes/smd-1298.md), [SMD-1726](changes/smd-1726.md), [SMD-1809](changes/smd-1809.md), [SMD-1864](changes/smd-1864.md), [SMD-1953](changes/smd-1953.md), [SMD-1989](changes/smd-1989.md), [SMD-1990](changes/smd-1990.md).
+Landed since the last release and numbered at the next one (SMD-1804): [SMD-1298](changes/smd-1298.md), [SMD-1726](changes/smd-1726.md), [SMD-1809](changes/smd-1809.md), [SMD-1864](changes/smd-1864.md), [SMD-1867](changes/smd-1867.md), [SMD-1953](changes/smd-1953.md), [SMD-1989](changes/smd-1989.md), [SMD-1990](changes/smd-1990.md).
 <!-- changes-index:end -->
 
 ### Files we own

@@ -53,9 +53,17 @@
  * synced ticket is indistinguishable from a captured one in every column but
  * `metadata.source`, which says `linear` — SMD-1806 rule 5 — beside the facets
  * Linear knows: issue, project, status, status_type, priority, labels, parent,
- * linear_updated_at, url, archived_at. Linear's autolink markup
- * (`<issue …>SMD-x</issue>`) is stripped to the identifier before storing
- * (SMD-1865's first item; the typed edges are its second and stay there).
+ * linear_updated_at, url, archived_at. The text, the facets and the structure
+ * come from the Linear ADAPTER (db/ingest-linear.ts, SMD-1867's reference
+ * implementation of the ingestion contract; SMD-1865 is what it answers):
+ * Linear's autolink markup (`<issue …>SMD-x</issue>`) is stripped to the
+ * identifier in the text, and once the head row is written the pass records
+ * beside it — through the Writer's `structure` hook, db/ingest-records.ts's
+ * recordStructure — the issue as fetched as its CANONICAL (thought_sources),
+ * its cross-references, parent and relations as `link` facets (a set: a
+ * relation Linear drops is closed, not deleted) and its project and labels as
+ * mentions under `source:linear`, which 016's extractor never displaces
+ * (migration 051). No model call for any of it.
  *
  * The provider settings are the server's (OB1_LLM_BASE_URL, OB1_EMBEDDING_*,
  * OB1_METADATA_MODEL, OB1_LLM_LOCAL, OB1_EGRESS_*…), resolved once at start by
@@ -96,6 +104,14 @@ import { extractMetadata, metadataRefused, tagsOverExisting } from "../server-po
 import type { Actor } from "../server-portable/store.ts";
 import { describeEnv, loadEnv } from "./env.ts";
 import { linearClient, strict, type Gql } from "./linear-api.ts";
+import { IDENTIFIER_PATTERN, issueFacets, labelNames, linearAdapter, renderIssue, SAMPLE_ISSUE, stripAutolinks, type LinearIssue } from "./ingest-linear.ts";
+import { recordStructure, runName, type Structure } from "./ingest-records.ts";
+
+// The Linear adapter's pure rules, re-exported: the renderer, the facets and
+// the markup strip moved to db/ingest-linear.ts (SMD-1867) so the sync and
+// the ingester render a ticket one way (SMD-1958); callers of this module see
+// the same names.
+export { IDENTIFIER_PATTERN, issueFacets, labelNames, renderIssue, stripAutolinks, type LinearIssue };
 
 export const DEFAULT_INITIATIVE = "Open Brain";
 export const DEFAULT_INTERVAL_S = 300;
@@ -106,94 +122,15 @@ const SELF = "db/sync-linear.ts";
 // The issue, as Linear gives it and as the brain stores it — pure functions.
 // ---------------------------------------------------------------------------
 
-export type LinearIssue = {
-  identifier: string;
-  title: string;
-  description: string | null;
-  url: string;
-  createdAt: string;
-  updatedAt: string;
-  archivedAt: string | null;
-  priorityLabel: string;
-  state: { name: string; type: string };
-  project: { id: string; name: string } | null;
-  parent: { identifier: string } | null;
-  labels: { nodes: { name: string }[] };
-};
-
 /** The identifier at the head of a ticket row (a team key of one letter or more), and the header grammar the hand captures used. */
-// One spelling of the grammar, in a dialect both engines read the same
-// (character classes, `*`, `[^\n]`), so the JS test and the SQL pre-filter cannot
-// drift apart — a widening of one that the other did not get would drop hand
-// pastes before ticketIdentifier saw them (tenth review pass).
-export const IDENTIFIER_PATTERN = "[A-Z][A-Z0-9]*-[0-9]+";
+// One spelling of the grammar (IDENTIFIER_PATTERN, the adapter's), in a dialect
+// both engines read the same (character classes, `*`, `[^\n]`), so the JS test
+// and the SQL pre-filter cannot drift apart — a widening of one that the other
+// did not get would drop hand pastes before ticketIdentifier saw them (tenth
+// review pass).
 export const HEADER_PATTERN = `^${IDENTIFIER_PATTERN} — [^\n]*\nProject: `;
 export const IDENTIFIER_RE = new RegExp(`^(${IDENTIFIER_PATTERN})\\b`);
 const HEADER_RE = new RegExp(`^(${IDENTIFIER_PATTERN}) — [^\\n]*\\nProject: [^\\n]*\\nhttps:\\/\\/linear\\.app\\/[^\\n]*(?:\\n|$)`);
-
-/**
- * Linear's autolink markup, `<issue id="…" href="…">SMD-1234</issue>`, to the
- * identifier it wraps — ~80 bytes of URL boilerplate per cross-reference that
- * bloated every embedding and tripped the extractor (SMD-1865). Only that
- * element: the description is otherwise Markdown, which is kept.
- */
-export function stripAutolinks(text: string): string {
-  return text.replace(/<issue\b[^>]*>([^<]*)<\/issue>/g, "$1");
-}
-
-/**
- * The facets Linear knows about an issue — what `metadata` carries beside the
- * extracted tags. Every key is always present (`archived_at` null when the
- * issue is live), so a facet that goes away is patched away too: an issue
- * archived then restored would otherwise keep `archived_at` forever, since the
- * patch compares the keys the new facets name (second review pass).
- */
-export function issueFacets(issue: LinearIssue): Record<string, unknown> {
-  return {
-    source: "linear",
-    issue: issue.identifier,
-    project: issue.project?.name ?? null,
-    status: issue.state.name,
-    status_type: issue.state.type,
-    priority: issue.priorityLabel,
-    labels: labelNames(issue),
-    parent: issue.parent?.identifier ?? null,
-    url: issue.url,
-    linear_updated_at: issue.updatedAt,
-    archived_at: issue.archivedAt ?? null,
-  };
-}
-
-/**
- * The label names in one order. Linear's `labels` connection promises none, and
- * an order that differed between two requests would re-render the text and
- * re-embed the row every pass (third review pass); the hand captures carried
- * Linear's order, so a row with two or more labels re-embeds once on adoption.
- */
-export function labelNames(issue: LinearIssue): string[] {
-  return issue.labels.nodes.map((l) => l.name).sort((a, b) => a.localeCompare(b, "en"));
-}
-
-/**
- * The thought's text: the shape the hand captures used, exactly, so the first
- * pass over a hand-built brain rewrites the tickets that changed and not every
- * one of them. Header line, facet line, URL, blank, the description with
- * autolinks stripped. `Labels: none` and `Parent: none` are spelled, as the hand
- * did; the project too, for an issue that has none.
- */
-export function renderIssue(issue: LinearIssue): string {
-  const labels = labelNames(issue);
-  const header = `${issue.identifier} — ${issue.title.trim()}`;
-  const facets = [
-    `Project: ${issue.project?.name ?? "none"}`,
-    `Status: ${issue.state.name} (${issue.state.type})`,
-    `Priority: ${issue.priorityLabel}`,
-    `Parent: ${issue.parent?.identifier ?? "none"}`,
-    `Labels: ${labels.length ? labels.join(", ") : "none"}`,
-  ].join(" · ");
-  const body = stripAutolinks((issue.description ?? "").trim());
-  return `${header}\n${facets}\n${issue.url}${body ? `\n\n${body}` : ""}`;
-}
 
 /**
  * A brain row as this tool reads it. `fingerprint` is `content_fingerprint`
@@ -442,7 +379,9 @@ export async function censusOf(gql: Gql, projectIds: string[]): Promise<Census> 
 // see the same set, or an issue with more labels than the bound would read
 // `namesMoved` on every pass and never be unchanged.
 export const LABELS_BOUND = 20;
-const ISSUE_FIELDS = `identifier title description url createdAt updatedAt archivedAt priorityLabel state { name type } project { id name } parent { identifier } labels(first: ${LABELS_BOUND}) { nodes { name } }`;
+/** Relations an issue holds, and those held toward it, per request — the structure the adapter turns into `link` facets (SMD-1867); a ticket with more is rare and its links beyond the bound wait for the day the bound is raised. */
+export const RELATIONS_BOUND = 25;
+const ISSUE_FIELDS = `identifier title description url createdAt updatedAt archivedAt priorityLabel state { name type } project { id name } parent { identifier } labels(first: ${LABELS_BOUND}) { nodes { name } } relations(first: ${RELATIONS_BOUND}) { nodes { type relatedIssue { identifier } } } inverseRelations(first: ${RELATIONS_BOUND}) { nodes { type issue { identifier } } }`;
 
 /**
  * The issues named, in full, fifty a request: one query with an alias per
@@ -523,6 +462,15 @@ export type Writer = {
   log: (line: string) => void;
   /** Asked between issues: true ends the pass after the issue in hand (SIGTERM under --loop). */
   stopping?: () => boolean;
+  /**
+   * The structure beside the head row (SMD-1867): called with the row that
+   * holds the ticket after each write or adoption — never under --dry-run,
+   * never for a text refused as another ticket's — with what the adapter
+   * mapped; db/ingest-records.ts's recordStructure is the one implementation,
+   * the self-check records the calls. Absent, the pass writes rows alone (a
+   * brain before 051).
+   */
+  structure?: (thoughtId: string, structure: Structure) => Promise<void>;
 };
 
 /**
@@ -657,8 +605,15 @@ function caveat(e: { wholeContentFellBack?: boolean; wholeContentError?: string;
 }
 
 export async function syncIssue(w: Writer, issue: LinearIssue, rows: BrainRow[]): Promise<SyncOutcome> {
-  const content = renderIssue(issue);
-  const facets = issueFacets(issue);
+  // One mapping, the adapter's: the text, the facets and the structure of one issue (SMD-1867).
+  const mapped = linearAdapter.map(issue);
+  const content = mapped.text;
+  const facets = mapped.facets;
+  const structure: Structure = { identity: mapped.identity, canonical: mapped.canonical, links: mapped.links, mentions: mapped.mentions };
+  // The structure lands on the row that holds the ticket once the row is
+  // settled — after a capture, an adoption, a patch or an edit; not on a dry
+  // run. A failure here is the pass's to report for this issue, as a write's is.
+  const recordOn = async (thoughtId: string): Promise<void> => { if (!w.dryRun && w.structure) await w.structure(thoughtId, structure); };
   const fp = await w.fingerprintOf(content);
   const holds = (row: BrainRow) => row.content === content || (fp !== null && row.fingerprint === fp);
   const actorWith = (record: ReturnType<typeof decideCalls>["record"]): Actor => ({ ...w.actor, ...(record ? { egress: record } : {}) });
@@ -677,10 +632,11 @@ export async function syncIssue(w: Writer, issue: LinearIssue, rows: BrainRow[])
     }
     if (elsewhere) {
       const patch = facetPatch(elsewhere.metadata ?? {}, facets);
-      if (!patch) return { outcome: "unchanged", noVector: false, twinsMarked: 0 };
+      if (!patch) { await recordOn(elsewhere.id); return { outcome: "unchanged", noVector: false, twinsMarked: 0 }; }
       if (w.dryRun) { w.log(`  · ${issue.identifier}: would adopt ${elsewhere.id}, which already holds the text (${said(patch)})`); return { outcome: "patched", noVector: false, twinsMarked: 0 }; }
       const r = await w.store.updateThought({ id: elsewhere.id, metadataPatch: patch, actor: w.actor });
       if (!r.ok) throw new Error(`adopting ${elsewhere.id}: ${r.error}`);
+      await recordOn(elsewhere.id);
       w.log(`  · ${issue.identifier}: adopted ${elsewhere.id}, which already held the text (${said(patch)})`);
       return { outcome: "patched", noVector: false, twinsMarked: 0 };
     }
@@ -705,6 +661,7 @@ export async function syncIssue(w: Writer, issue: LinearIssue, rows: BrainRow[])
         const r = await w.store.updateThought({ id: late.id, metadataPatch: patch, actor: w.actor });
         if (!r.ok) throw new Error(`adopting ${late.id}: ${r.error}`);
       }
+      await recordOn(late.id);
       w.log(`  · ${issue.identifier}: adopted ${late.id}, which took the text while the tags were extracted (${said(patch)})`);
       return { outcome: "patched", noVector: false, twinsMarked: 0 };
     }
@@ -717,6 +674,7 @@ export async function syncIssue(w: Writer, issue: LinearIssue, rows: BrainRow[])
       embedding: embedded?.embedding ?? null,
       embeddingModel: embedded?.model,
     });
+    await recordOn(captured.id);
     if (captured.existed === true) {
       // 035: the text was there after all — written in the window after the
       // second look — and the tag set went over that row's tags wholesale,
@@ -778,10 +736,11 @@ export async function syncIssue(w: Writer, issue: LinearIssue, rows: BrainRow[])
     // retag worker's to repair, for every thought — not this sync's for ticket
     // rows alone (the branch that did it here left before the merge).
     const patch = facetPatch(head.metadata ?? {}, { ...facets, ...staleRefusal });
-    if (!patch) { await clearRefusals(); return { outcome: "unchanged", noVector: false, ...(await chain()) }; }
+    if (!patch) { await recordOn(head.id); await clearRefusals(); return { outcome: "unchanged", noVector: false, ...(await chain()) }; }
     if (w.dryRun) { w.log(`  · ${issue.identifier}: would patch ${said(patch)}${where}`); await clearRefusals(); return { outcome: "patched", noVector: false, ...(await chain()) }; }
     const r = await w.store.updateThought({ id: head.id, metadataPatch: patch, actor: w.actor });
     if (!r.ok) throw new Error(`patching ${head.id}: ${r.error}`);
+    await recordOn(head.id);
     w.log(`  · ${issue.identifier}: facets patched (${said(patch)})${where}`);
     await clearRefusals();
     return { outcome: "patched", noVector: false, ...(await chain()) };
@@ -845,6 +804,7 @@ export async function syncIssue(w: Writer, issue: LinearIssue, rows: BrainRow[])
   // The holder arrived between the lookup and the edit (or is unfingerprinted): the same refusal.
   if (!r.ok && r.error === "DUPLICATE_CONTENT") return refuse(null);
   if (!r.ok) throw new Error(`updating ${head.id}: ${r.error}`);
+  await recordOn(head.id);
   w.log(`  ~ ${issue.identifier}: updated${embedded ? "" : " WITHOUT a vector (egress refused)"}${editPatch ? ` (${said(editPatch)})` : ""}${caveat(embedded)}`);
   // The twins' refusal markers too, as the patch branch does (eighth review pass).
   await clearRefusals();
@@ -993,11 +953,8 @@ function selfCheck(): Promise<number> {
   let bad = 0;
   const ok = (cond: boolean, label: string) => { if (!cond) { console.error(`FAIL ${label}`); bad++; } };
 
-  const issue: LinearIssue = {
-    identifier: "SMD-1936", title: " The SQL-safety guard rail ", description: "## Problem\n\nSee <issue id=\"x\" href=\"https://linear.app/…\">SMD-1730</issue> and SMD-1250.\n",
-    url: "https://linear.app/siggymd/issue/SMD-1936/the-sql-safety", createdAt: "2026-09-22T00:00:00.000Z", updatedAt: "2026-09-22T01:00:00.000Z", archivedAt: null,
-    priorityLabel: "Low", state: { name: "Backlog", type: "backlog" }, project: { id: "p", name: "Open Brain — Release Engineering & Fork Maintenance" }, parent: null, labels: { nodes: [{ name: "infrastructure" }] },
-  };
+  // The adapter's sample issue, with the description the hand-capture shape was asserted on.
+  const issue: LinearIssue = { ...SAMPLE_ISSUE, description: "## Problem\n\nSee <issue id=\"x\" href=\"https://linear.app/…\">SMD-1730</issue> and SMD-1250.\n", createdAt: "2026-09-22T00:00:00.000Z" };
   const text = renderIssue(issue);
   ok(text === "SMD-1936 — The SQL-safety guard rail\nProject: Open Brain — Release Engineering & Fork Maintenance · Status: Backlog (backlog) · Priority: Low · Parent: none · Labels: infrastructure\nhttps://linear.app/siggymd/issue/SMD-1936/the-sql-safety\n\n## Problem\n\nSee SMD-1730 and SMD-1250.", "renders the hand-capture shape: header, facets, url, blank, body with autolinks stripped");
   ok(HEADER_RE.test(text), "…and the rendered text matches the header grammar");
@@ -1299,6 +1256,34 @@ function selfCheck(): Promise<number> {
     r = await run({ ...recorder, store: thirdFails }, [row("H", text, withFacets, "2026-09-23T00:00:00Z", null), row("A", text, {}, "2026-09-22T00:00:00Z", "F"), row("B", text, {}, "2026-09-21T00:00:00Z", null)]);
     ok(r.r.chainRefusal !== undefined && r.calls.join("; ") === "update A supersedes=null; update H supersedes=A; update A supersedes=B; update B supersedes=F → WOULD_CYCLE; update H supersedes=null; update A supersedes=F",
       `every write before the refusal is undone, each row once, to what it held — H back to null, A back to F (${r.calls.join("; ")})`);
+    // The structure hook (SMD-1867): called once, with the row that holds the
+    // ticket and the adapter's mapping, after a capture, an adoption, a patch
+    // and an edit; not on a dry run; not for a text another ticket claims.
+    {
+      const seen: string[] = [];
+      const hooked: Writer = { ...recorder, structure: async (id, s) => { seen.push(`${id}:${s.identity.key}:${s.links.map((l) => `${l.relation}=${l.target}`).join("+")}:${s.mentions.length}`); } };
+      const expectHook = async (label: string, rows: BrainRow[], iss: LinearIssue, want: string[]) => {
+        seen.length = 0; calls.length = 0;
+        await syncIssue(hooked, iss, rows);
+        ok(JSON.stringify(seen) === JSON.stringify(want), `${label}: structure recorded ${JSON.stringify(want)} (got ${JSON.stringify(seen)})`);
+      };
+      const sig = "SMD-1936:references=SMD-1730:2";
+      await expectHook("a capture", [], issue, [`new:${sig}`]);
+      await expectHook("a facet patch on the head", [row("cur", text, { source: "linear", issue: "SMD-1936" }, null, null)], issue, [`cur:${sig}`]);
+      await expectHook("an unchanged head", [row("cur", text, { ...issueFacets(issue) }, null, null)], issue, [`cur:${sig}`]);
+      await expectHook("an edit", [row("cur", "old text", { ...issueFacets(issue), linear_updated_at: "2026-09-21T00:00:00.000Z" }, null, null)], issue, [`cur:${sig}`]);
+      await expectHook("a parent and a relation", [], { ...issue, parent: { identifier: "SMD-949" }, relations: { nodes: [{ type: "blocks", relatedIssue: { identifier: "SMD-1814" } }] } }, ["new:SMD-1936:blocks=SMD-1814+child_of=SMD-949+references=SMD-1730:2"]);
+      const held: Writer = { ...hooked, holderOf: async () => row("H", text, { source: "linear", issue: "SMD-2000" }, null, null) };
+      seen.length = 0;
+      await syncIssue(held, issue, []);
+      ok(seen.length === 0, "a text held under another ticket's claim records no structure (the row is not this ticket's)");
+      seen.length = 0;
+      await syncIssue({ ...hooked, dryRun: true }, issue, []);
+      ok(seen.length === 0, "a dry run records no structure");
+      seen.length = 0;
+      await syncIssue(recorder, issue, []);
+      ok(seen.length === 0 && calls.length > 0, "a Writer without the hook writes rows alone (a brain before 051)");
+    }
     // No projects is no board.
     let refusedEmpty = false;
     const empty: Gql = async <T,>() => ({ data: { initiatives: { pageInfo: { hasNextPage: false, endCursor: "" }, nodes: [{ name: "Open Brain", projects: { pageInfo: { hasNextPage: false }, nodes: [] } }] } } as T, errors: [] });
@@ -1384,6 +1369,9 @@ async function main(): Promise<void> {
   }
   const embedder = createEmbedder(() => cfg, { rememberRefusal: false });
   const session = `${hostname()}:${process.pid}:${randomUUID().slice(0, 8)}`;
+  // One run name per pass, for thought_sources.ingest_run (SMD-1867); a loop's
+  // passes are told apart by it.
+  let run = runName(SELF);
   const writer: Writer = {
     store,
     cfg,
@@ -1419,11 +1407,14 @@ async function main(): Promise<void> {
     dryRun,
     log: quiet ? () => {} : (line) => console.log(line),
     stopping: () => stopping,
+    // The canonical, the links and the mentions beside the head row (051).
+    structure: async (id, s) => { await recordStructure(sql, id, s, run); },
   };
 
   let resolved: Board | undefined;
   const once = async (): Promise<number> => {
     const t0 = Date.now();
+    run = runName(SELF);
     // planBoard asks for the header scan when it needs it; --audit always does (the census should see a hand paste too).
     const readRows: ReadRows = (scanHeaders, claimed) => readTicketRows(sql, { scanHeaders, claimed });
     // The board the preflight resolved serves the first pass; later passes ask again, so a project added to the initiative is seen.
