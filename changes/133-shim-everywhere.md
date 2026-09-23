@@ -1,17 +1,4 @@
----
-type: changed
-bump: minor
-tickets: [SMD-1798]
-migrations: []
----
-
-## Changelog
-
-The last six vendored servers — family-calendar, job-hunt, agent-memory-api, the metadata-norm worker, enhanced-mcp and ob-graph — move onto `compat/supabase-sql`, which now reads the four PostgREST shapes that held them on supabase-js (grouped `.or()`, `in.(…)` lists, nested embeds with `!inner`/`!fk_name` hints, an embed on a written row); every tool and route of the six is driven against Postgres; supabase-js leaves every vendored `deno.json`, the four import recipes' `package.json` and the test packages, kept by `server/` (the Edge Function build), the Workers store and the two counted exceptions; check 22 refuses a runtime import of it in any vendored file (SMD-1798).
-
-## FORK
-
-Shim everywhere — the six servers still on supabase-js move onto the SQL shim, which reads the grammar that kept them there, and no vendored file reaches the brain over PostgREST any more (SMD-1798)
+# 133. Shim everywhere — the six servers still on supabase-js move onto the SQL shim, which reads the grammar that kept them there, and no vendored file reaches the brain over PostgREST any more (SMD-1798)
 
 **What changed.** `compat/supabase-sql/index.ts` reads four PostgREST shapes
 it refused: `.or()` grouping — `and(…)`, `or(…)`, `not.and(…)`, nested to any

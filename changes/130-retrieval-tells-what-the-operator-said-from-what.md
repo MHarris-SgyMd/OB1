@@ -1,17 +1,4 @@
----
-type: added
-bump: minor
-tickets: [SMD-1726]
-migrations: ["050"]
----
-
-## Changelog
-
-Every read says who wrote a thought's current text, from the key that made the write: migration 050 stamps `actor_kind` (`operator | agent | ingested`, 046's registry) and `actor_name` into `thoughts.metadata` by trigger, never from the payload; `search_thoughts`, `search_thoughts_keyword` and `list_thoughts` gain `said_by` and `actor` filters on 014's route and print `By: <key> (<kind>)` under each hit; the consolidation judge hears who wrote each side (prompt version 3); `backfill_thought_actors()` marks the rows written before (SMD-1726).
-
-## FORK
-
-Retrieval tells what the operator said from what an agent concluded — the writer on the row, from the key; `said_by` and `actor` as indexed filters and a `By:` line; migration 050 (SMD-1726)
+# 130. Retrieval tells what the operator said from what an agent concluded — the writer on the row, from the key; `said_by` and `actor` as indexed filters and a `By:` line; migration 050 (SMD-1726)
 
 **Premise.** 046 records who holds the key on every audit row, but a read returns the `thoughts` row and its metadata, and nothing there said who wrote it: a hit an agent's summary pass wrote and a hit the operator typed looked identical, and "only what I said" could not be asked. SMD-1716 defers isolation *between* operators; this is the smaller thing — one operator, several keys.
 

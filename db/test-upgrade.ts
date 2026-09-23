@@ -461,8 +461,9 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // audit row's event shape, SMD-1730), 047 (the query_log.logged_at prune
   // index, SMD-1492), 048 (the first release's schema_version, 1.0.0 — the
   // cut's last migration, SMD-1804/SMD-1860) 049 (the three-value CHECK on
-  // ob1_agent_keys.scope, SMD-1298) and 050 (the writer's mark on the row,
-  // SMD-1726) stay recorded and are never tried. 030 is
+  // ob1_agent_keys.scope, SMD-1298), 050 (the writer's mark on the row,
+  // SMD-1726) and 051 (the second release's schema_version, 1.1.0) stay
+  // recorded and are never tried. 030 is
   // the right one to make pending because its prerequisites — 015 and 021's
   // embedding_model column — are
   // exactly what a through-020 schema lacks, so it fails by name rather than
@@ -489,7 +490,7 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // all recorded by the baseline with their prerequisites present, so none
   // becomes the plain-run failure point above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 21, `030 is among the last twenty-one migrations (${last})`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 22, `030 is among the last twenty-two migrations (${last})`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
