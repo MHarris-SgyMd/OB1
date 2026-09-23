@@ -498,6 +498,85 @@ export function normaliseProposal(r: Record<string, unknown>): SupersessionPropo
 }
 
 /**
+ * One row of the change feed — migration 052's thought_changes over
+ * thought_audit (SMD-1296): what one capture, update or delete did, bounded
+ * for a reply. `head` is at most 240 characters of the text the row is about
+ * (a capture's current content — null once the thought is deleted — an
+ * update's new content when it moved, a delete's previous content).
+ * `changed` is an update's diff keys and `metadataKeys` the metadata keys
+ * whose value moved; both empty on a capture or a delete. The supersedes
+ * pointer before and after is read from the diff for every action, so a
+ * capture that superseded, an update that set or cleared the pointer and a
+ * delete's prior pointer all say so. `present` is whether the thought still
+ * exists. `id` is the audit row's — the cursor the next page starts after.
+ */
+export type AuditChange = {
+  id: string;
+  createdAt: string;
+  action: "capture" | "update" | "delete";
+  thoughtId: string;
+  actorName: string | null;
+  actorKind: string | null;
+  origin: string | null;
+  source: string | null;
+  present: boolean;
+  head: string | null;
+  changed: string[];
+  metadataKeys: string[];
+  supersedesBefore: string | null;
+  supersedesAfter: string | null;
+  derivation: boolean;
+};
+
+/**
+ * Where a page of changes starts and what it keeps. `since` is a time (rows at
+ * or after it), `after` a cursor (rows strictly after that audit row); neither
+ * is the newest `limit` rows; both is refused by the function. `agent` keeps one
+ * key's rows, `notAgent` drops one key's — the server passes the caller's own
+ * name for "everyone but me" — and a row with no actor stays. `actions` is a
+ * subset of the three. `limit` is what the function is asked for (1..201; the
+ * tool asks for one more than it shows).
+ */
+export type ChangeFilters = {
+  since?: string | null;
+  after?: string | null;
+  agent?: string | null;
+  notAgent?: string | null;
+  actions?: string[] | null;
+  limit: number;
+};
+
+const CHANGE_ACTIONS = new Set(["capture", "update", "delete"]);
+
+/** thought_changes's row → AuditChange; both stores map through here so neither drifts. */
+export function normaliseChange(r: Record<string, unknown>): AuditChange {
+  const action = String(r.action);
+  // 008's CHECK admits only the three; a fourth word here is a changed function.
+  if (!CHANGE_ACTIONS.has(action)) throw new Error(`thought_changes returned an unknown action ${JSON.stringify(action)}`);
+  const strOrNull = (v: unknown) => (v == null ? null : String(v));
+  // A text[] arrives as an array from both drivers; NULL (no keys) as null.
+  const list = (v: unknown) => (Array.isArray(v) ? v.map(String) : []);
+  return {
+    id: String(r.id),
+    // NOT NULL DEFAULT now() on the column, so a null here is a changed table.
+    createdAt: isoTimestamp(r.created_at),
+    action: action as AuditChange["action"],
+    thoughtId: String(r.thought_id),
+    actorName: strOrNull(r.actor_name),
+    actorKind: strOrNull(r.actor_kind),
+    origin: strOrNull(r.origin),
+    source: strOrNull(r.source),
+    present: r.present === true,
+    head: strOrNull(r.head),
+    changed: list(r.changed),
+    metadataKeys: list(r.metadata_keys),
+    supersedesBefore: strOrNull(r.supersedes_before),
+    supersedesAfter: strOrNull(r.supersedes_after),
+    derivation: r.derivation === true,
+  };
+}
+
+/**
  * Every database operation the MCP tools perform. Errors are thrown, not returned
  * — each implementation normalises its own error shape so callers do not have to
  * know whether they are talking to PostgREST or to Postgres.
@@ -1008,6 +1087,16 @@ export interface ThoughtStore {
    * the tool names the migration.
    */
   listSupersessionProposals(opts: { status?: "pending" | "accepted" | "rejected" | null; limit?: number }): Promise<SupersessionProposal[]>;
+
+  /**
+   * Migration 052's change feed (SMD-1296): one page of thought_audit, oldest
+   * first, from a time or a cursor — see ChangeFilters. Both stores call the
+   * one function, so the bounds, the order and the bounded rendering are
+   * decided once, in SQL. Throws on a schema before 052 (the tool names the
+   * migration), on a cursor that names no row, on an unknown action, and on a
+   * time beside a cursor — each by the function's own message.
+   */
+  listChanges(filters: ChangeFilters): Promise<AuditChange[]>;
 
   /**
    * The opt-in query log (migration 034, SMD-1295). The server calls these ONLY

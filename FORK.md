@@ -288,6 +288,8 @@ and fails a "FORK.md change N" citation with no file behind it (SMD-1917).
 | 132 | [The SQL shim answers what PostgREST answers](changes/132-the-sql-shim-answers-what-postgrest-answers.md) | SMD-1602 |
 | 133 | [Shim everywhere](changes/133-shim-everywhere.md) | SMD-1798 |
 | 134 | [Entity extraction sent the whole thought in one unbounded call](changes/134-entity-extraction-sent-the-whole-thought-in-one.md) | SMD-1879 |
+
+Landed since the last release and numbered at the next one (SMD-1804): [SMD-1296](changes/smd-1296.md).
 <!-- changes-index:end -->
 
 ### Files we own

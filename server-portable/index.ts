@@ -8,7 +8,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPTransport } from "@hono/mcp";
 import { Hono } from "hono";
 import { z } from "zod";
-import { createStore, postgrestOnBunNotice, storeKind, UUID_RE, type Citation, type ThoughtStore, type ThoughtHybridMatch, type ThoughtKeywordMatch } from "./store.ts";
+import { createStore, postgrestOnBunNotice, storeKind, UUID_RE, type AuditChange, type Citation, type ThoughtStore, type ThoughtHybridMatch, type ThoughtKeywordMatch } from "./store.ts";
 import { queryLogEnabled, tierProblem, trimmedEnv } from "../db/config.mjs";
 import { authenticateRequest, canCapture, canRead, canWrite, SCOPES, type Principal } from "./auth.ts";
 import { AgentResolver, cacheTtlFromEnv } from "./agents.ts";
@@ -356,6 +356,109 @@ const SOURCE_RE = /^[a-z0-9][a-z0-9-]{1,39}$/;
 function snipText(text: string, max: number): string {
   const t = cleanForDisplay(text).replace(/\s+/g, " ").trim();
   return t.length > max ? t.slice(0, max) + "…" : t;
+}
+
+/**
+ * thought_changes's `since` (SMD-1296): a uuid is a cursor — the audit row a
+ * previous page ended with — and anything else must read as an ISO-8601 time
+ * (a date at least, so a bare number is not a year), normalised so the reply
+ * echoes one spelling. Neither is a refusal naming both forms, before any call.
+ */
+function parseSince(raw: string | undefined): { since: string | null; after: string | null } | { refused: string } {
+  const v = (raw ?? "").trim();
+  if (v === "") return { since: null, after: null };
+  if (UUID_RE.test(v)) return { since: null, after: v.toLowerCase() };
+  const refused = { refused: `Refused: \`since\` must be an ISO-8601 time with its zone (2026-09-22T08:00:00Z), a date (2026-09-22), or the cursor a previous call ended with, not "${snipText(v, 40)}".` };
+  // A date, or a date with a clock that names its zone — a clock with no Z or
+  // offset would be read in the server's zone (13:00Z for 08:00 on a Chicago
+  // laptop, 08:00Z in the container). Any ISO-8601 fraction (Python's
+  // isoformat gives six digits) and an hour-only offset (psql prints `+00`)
+  // are normalised to what Date parses: a T, three fraction digits, a colon in
+  // the offset — completed only when the shape has one, since a bare date's
+  // own `-01` is a day, not a zone.
+  const shape = /^(\d{4}-\d{2}-\d{2})(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(Z|[+-]\d{2}(?::?\d{2})?))?$/i.exec(v);
+  if (!shape) return refused;
+  // Upper-cased: the shape is matched case-blind, and a lowercase t or z is
+  // ISO-8601 to JSC (Bun) but not to every Date parser the server runs on.
+  let iso = v.toUpperCase().replace(" ", "T").replace(/(\.\d{3})\d+/, "$1");
+  if (shape[2] && !/^z$/i.test(shape[2])) iso = iso.replace(/([+-]\d{2})(\d{2})$/, "$1:$2").replace(/([+-]\d{2})$/, "$1:00");
+  const d = new Date(iso);
+  // The date part round-trips on its own, whatever the clock or zone beside it
+  // (2026-02-30 would otherwise slide to March, at any hour), and the year
+  // stays where timestamptz has room: a late time with an offset rolls past
+  // 9999, an early one below 1, and either would come back as Postgres's raw
+  // error (review passes 1–3).
+  const day = new Date(`${shape[1]}T00:00:00Z`);
+  if (Number.isNaN(d.getTime()) || Number.isNaN(day.getTime()) || day.toISOString().slice(0, 10) !== shape[1]) return refused;
+  if (d.getUTCFullYear() < 1 || d.getUTCFullYear() > 9999) return refused;
+  return { since: d.toISOString(), after: null };
+}
+
+/** The two metadata keys 050's trigger owns (SMD-1726): the writer's kind and name, stamped as the content moves. */
+const ACTOR_MARKS: ReadonlySet<string> = new Set(["actor_kind", "actor_name"]);
+
+/**
+ * One change as a client reads it: when, what and who on the first line with
+ * the thought's `ID:` (the label every read tool prints, SMD-1248, so fetch and
+ * update_thought can reach what the line names); then what moved, bounded;
+ * then the supersedes pointer, because "X now replaces Y" is the change a
+ * resuming agent most needs. Untrusted text — a head, a metadata key — goes
+ * through snipText, the one cleaner every reply quotes a thought through.
+ */
+function renderChange(c: AuditChange, n: number): string {
+  // The full ISO form — the one spelling the header's `since` echoes, so a
+  // client that checkpoints on a line's time re-reads nothing it need not.
+  const when = c.createdAt;
+  // Name and door are untrusted text (a writer sets its own envelope; a raw
+  // INSERT sets either column), so both go through snipText: one line, and no
+  // forged entry or Cursor line in a feed agents act on. No key but a door is
+  // a worker that names itself alone — 050's backfill_thought_actors — and
+  // reads by its door rather than as an anonymous edit.
+  const who = c.actorName !== null ? `by ${snipText(c.actorName, 80)}${c.actorKind ? ` (${c.actorKind})` : ""}`
+    : c.origin !== null ? `by ${snipText(c.origin, 80)} (no key)`
+    : "from outside the server";
+  // 050's stamp is not an edit (it holds the updated_at trigger): a row whose
+  // only change is the two marks is "marked" — the backfill's row above all.
+  const marksOnly = c.action === "update" && c.changed.length === 1 && c.changed[0] === "metadata" && c.metadataKeys.length > 0 && c.metadataKeys.every((k) => ACTOR_MARKS.has(k));
+  const verb = c.action === "capture" ? "captured" : c.action === "update" ? (marksOnly ? "marked" : "edited") : "deleted";
+  const gone = c.action !== "delete" && !c.present ? " (deleted since)" : "";
+  const lines = [`${n}. ${when} — ${verb} ${who} — ID: ${c.thoughtId}${gone}`];
+  const text = c.head === null ? null : snipText(c.head, 200);
+  // A capture row carries no text of its own (008's capture diff is the
+  // metadata), so the head is the thought's CURRENT text — say so, since an edit
+  // since would otherwise read as what was captured; a deleted thought's text
+  // is in its delete row, not gone (both caught: cold-read, pass 1).
+  if (c.action === "capture") lines.push(text === null ? "   (the text is in its delete row)" : `   now: "${text}"`);
+  if (c.action === "delete" && text !== null) lines.push(`   was: "${text}"`);
+  if (c.action === "update") {
+    const parts: string[] = [];
+    if (c.changed.includes("content")) parts.push(text === null ? "content" : `content → "${text}"`);
+    // 050 stamps the two marks into metadata whenever the content moves under
+    // another key: the first line already says who, so beside a content change
+    // they are not listed as keys the editor touched (a pre-050 row whose
+    // caller wrote a mark of its own loses it the same way — the row cannot
+    // tell the two apart; the raw diff stays reachable by the audit id). Alone
+    // — the backfill's row — they are the whole change and stay. A side that is
+    // not an object has no keys to name and still says "metadata".
+    const keys = c.changed.includes("content") ? c.metadataKeys.filter((k) => !ACTOR_MARKS.has(k)) : c.metadataKeys;
+    const bare = c.metadataKeys.length === 0;
+    if (c.changed.includes("metadata") && (keys.length || bare)) parts.push(bare ? "metadata" : `metadata: ${keys.map((k) => snipText(k, 40)).join(", ")}`);
+    if (c.changed.includes("embedding_present")) parts.push("embedding");
+    if (parts.length) lines.push(`   ${parts.join("; ")}`);
+    // 046: an unchanged edit that declared a stance, cites or a window is an
+    // event with an empty diff — say so rather than print a bare header.
+    else if (!c.changed.some((k) => k === "supersedes" || k === "derived_from")) lines.push("   restated — no field changed");
+  }
+  if (c.action === "capture" && c.supersedesAfter) lines.push(`   supersedes ${c.supersedesAfter}`);
+  if (c.action === "update") {
+    if (c.supersedesAfter) lines.push(`   now supersedes ${c.supersedesAfter}${c.supersedesBefore ? ` (was ${c.supersedesBefore})` : ""}`);
+    else if (c.supersedesBefore) lines.push(`   no longer supersedes ${c.supersedesBefore} (pointer cleared)`);
+  }
+  // A point-in-time record: whether the superseded thought is current again
+  // depends on what happened to it since, which this row cannot know.
+  if (c.action === "delete" && c.supersedesBefore) lines.push(`   it superseded ${c.supersedesBefore}`);
+  if (c.derivation) lines.push(c.action === "capture" ? "   captured with sources (derived_from)" : "   sources (derived_from) changed");
+  return lines.join("\n");
 }
 
 /**
@@ -1243,6 +1346,92 @@ function buildServer(principal: Principal): McpServer {
       } catch (err: unknown) {
         return {
           content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // Tool 3b: the change feed (migration 052, SMD-1296) — what moved since a
+  // time or a cursor, for an agent that returns after a break. Gated like the
+  // other read tools (canRead: a read or a write key sees it, a capture-only
+  // key does not). The store calls one SQL function that chooses the page
+  // and bounds the rendering; this decides `since` and lays the rows out.
+  if (canRead(principal)) server.registerTool(
+    "thought_changes",
+    {
+      title: "What Changed",
+      description:
+        "List what changed in Open Brain — every capture, edit and deletion, oldest first, with who made it (by access-key name), the thought's ID, what moved, and whether it now supersedes another thought. " +
+        "Start from `since`: an ISO-8601 time with Z or an offset (2026-09-22T08:00:00Z), a date (read as UTC midnight), or the cursor a previous call ended with (its last line) to continue where you left off with no repeats; leave it out for the most recent changes. " +
+        "`others_only` leaves out this key's own writes — what everyone else did while you were away.",
+      annotations: {
+        readOnlyHint: true,
+      },
+      inputSchema: {
+        since: z.string().optional().describe("An ISO-8601 time with its zone (changes at or after it; a clock with no Z or offset is refused), a date (UTC midnight), or the cursor the previous page ended with (changes after that row). Omit for the most recent changes."),
+        others_only: z.boolean().optional().default(false).describe("Leave out this key's own writes"),
+        agent: z.string().optional().describe("Only this writer's changes, by access-key name"),
+        actions: z.array(z.enum(["capture", "update", "delete"])).optional().describe("Only these kinds of change"),
+        limit: z.number().int().min(1).max(200).optional().default(50).describe("Changes per page, 1–200 (default 50); the reply's last line says whether more follow"),
+      },
+    },
+    async ({ since, others_only, agent, actions, limit }) => {
+      // `since` is decided here, before any call: a uuid is a cursor, anything
+      // else must read as a time, and a word that is neither is refused naming
+      // both forms rather than surfacing as a Postgres cast error.
+      const start = parseSince(since);
+      if ("refused" in start) return { content: [{ type: "text" as const, text: start.refused }], isError: true };
+      // Both filters name themselves in the header, so `agent` set to the
+      // caller's own key beside others_only reads as the empty set it is
+      // (caught: cold-read, pass 1).
+      // A name that cleans to nothing (all control characters) still names
+      // itself in the header, as its JSON.
+      const name = agent?.trim() || null;
+      const named = name ? ` by ${snipText(name, 80) || JSON.stringify(name)}` : "";
+      const who = named && others_only ? `${named} but not ${principal.name}` : others_only ? ` by everyone but ${principal.name}` : named;
+      const kinds = actions?.length ? [...new Set(actions)] : null;
+      const what = kinds ? `${kinds.join("/")} change(s)` : "change(s)";
+      // Bounded — from a time or a cursor — the function pages forward; with
+      // no bound it returns the newest rows. The two read differently below.
+      const bounded = start.since !== null || start.after !== null;
+      const where = start.after ? "after the cursor" : start.since ? `since ${start.since}` : "recorded yet";
+      try {
+        // One more than shown, so the reply can say whether more follow
+        // without a count query; the function caps at 201.
+        const rows = await (await db()).listChanges({
+          since: start.since,
+          after: start.after,
+          agent: name,
+          notAgent: others_only ? principal.name : null,
+          actions: kinds,
+          limit: limit + 1,
+        });
+        const more = rows.length > limit;
+        // Forward from a bound the extra row is the NEWEST, past the page; with
+        // no bound the function returns the newest limit+1 oldest first, so the
+        // extra row is the OLDEST — slicing the same end would drop the latest
+        // change, the one a resumer most needs (caught: cold-read, pass 1).
+        const shown = !more ? rows : bounded ? rows.slice(0, limit) : rows.slice(1);
+        if (shown.length === 0) {
+          return { content: [{ type: "text" as const, text: `No ${what}${who} ${where}.${start.after ? " Keep the cursor." : ""}` }] };
+        }
+        const head = bounded ? `${shown.length} ${what}${who} ${where}, oldest first:` : `The ${shown.length} most recent ${what}${who}, oldest first:`;
+        const cursor = shown[shown.length - 1].id;
+        const onward = !more ? "" : bounded ? " More changes follow." : " Older changes exist — pass a time before the first entry above as `since` to read them.";
+        const tail = `Cursor: ${cursor} — pass it as \`since\` to continue from here.${onward}`;
+        return {
+          content: [{ type: "text" as const, text: `${head}\n\n${shown.map((c, i) => renderChange(c, i + 1)).join("\n\n")}\n\n${tail}` }],
+        };
+      } catch (err: unknown) {
+        const msg = (err as Error).message;
+        const hint = /thought_changes/.test(msg) && /does not exist|could not find/i.test(msg)
+          ? " — migration 052 (db/migrations/052_thought_changes.sql) is not applied, or PostgREST has not reloaded its schema cache"
+          : /permission denied for table thought_audit/i.test(msg)
+          ? " — the server's role needs SELECT on thought_audit (db/README.md, Grants for a capturing role — the server group, which migrate.ts --grant issues)"
+          : "";
+        return {
+          content: [{ type: "text" as const, text: `Error: ${msg}${hint}` }],
           isError: true,
         };
       }
