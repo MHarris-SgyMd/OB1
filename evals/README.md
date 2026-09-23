@@ -1507,7 +1507,11 @@ turn. The price is time: a runaway on the 7B costs about a minute before the
 retry instead of 30 s (median 106 s per straggler against 76). The dogfood
 brain, re-run with `--retry-failed` under the new budget: **366 of 373
 extracted, 7 failed**, from 339 of 363 under the old one and 262 of 295 under
-p1; the graph holds 2,149 entities, 5,272 mentions and 4,563 edges.
+p1; the graph holds 2,149 entities, 5,272 mentions and 4,563 edges. Those 7 —
+5,058 to 21,345 characters, the brain's longest — all extract on the 27B under
+the shipped shape (7/7, no retry; 2 to 7 windows each, 66 to 351 s), so the
+7B's residue is the 7B's, and a brain that wants them can point
+`OB1_METADATA_MODEL` at the larger model and re-run with `--switch-key`.
 
 ## Entity extraction, measured through the real write path
 
