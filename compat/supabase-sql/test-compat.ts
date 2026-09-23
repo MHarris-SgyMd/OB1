@@ -604,7 +604,8 @@ try {
   rowsOf(await db.from("nodes").insert([{ name: "root" }]).select("id"), "root");
   const root = rowsOf(await db.from("nodes").select("id").eq("name", "root"), "root id")[0]?.id as number;
   rowsOf(await db.from("nodes").insert({ name: "leaf", parent_id: root }).select("id"), "leaf");
-  assert(/in itself/.test(await refusedMsg(() => db.from("nodes").select("*, nodes(name)"))), "embedding a table in itself by name is refused, naming the column form");
+  const selfKids = rowsOf(await db.from("nodes").select("name, nodes(name)").eq("name", "root"), "self by name");
+  assert(JSON.stringify(selfKids[0]) === JSON.stringify({ name: "root", nodes: [{ name: "leaf" }] }), `embedding a table in itself by name is its children — PostgREST's recursive one-to-many (${JSON.stringify(selfKids[0])})`);
   const parent = rowsOf(await db.from("nodes").select("name, parent:parent_id (name)").eq("name", "leaf"), "self by column");
   assert(JSON.stringify(parent[0]) === JSON.stringify({ name: "leaf", parent: { name: "root" } }), `…and the column form serves it (${JSON.stringify(parent[0])})`);
   // A same-named table in a schema off the search path carries a foreign key the visible one lacks: it is not
@@ -858,8 +859,9 @@ try {
   assert(false, `[20] threw: ${e instanceof Error ? e.message : String(e)}`);
 }
 
-console.log("\n[21] What the first review pass found (SMD-1798)");
+console.log("\n[21] What the review passes found (SMD-1798)");
 try {
+  const refusedMsg21 = async (run: () => PromiseLike<unknown>) => { try { await run(); return ""; } catch (e) { return (e as Error).message; } };
   const admin = new SQL({ url: URL_, max: 1 });
   await admin`DROP TABLE IF EXISTS progress CASCADE`;
   await admin`CREATE TABLE progress (learner text, lesson text, status text, PRIMARY KEY (learner, lesson))`;
@@ -887,8 +889,7 @@ try {
   // A hinted self-reference is the one-to-many side, whichever way the key is named; the bare column is the parent.
   const kids = rowsOf(await db.from("nodes").select("name, kids:nodes!parent_id(name)").eq("name", "root"), "self-ref children by column");
   assert(JSON.stringify(kids[0]) === JSON.stringify({ name: "root", kids: [{ name: "leaf" }] }), `relation!fk_column on a table embedded in itself is the children — PostgREST's recursive form (${JSON.stringify(kids[0])})`);
-  const kidsByName = rowsOf(await db.from("nodes").select("name, kids:nodes!nodes_parent_id_fkey(name)").eq("name", "root"), "self-ref children by constraint");
-  assert(JSON.stringify(kidsByName[0]?.kids) === JSON.stringify([{ name: "leaf" }]), `…and by the constraint's name (${JSON.stringify(kidsByName[0])})`);
+  assert(/in itself through the constraint/.test(await refusedMsg21(() => db.from("nodes").select("name, kids:nodes!nodes_parent_id_fkey(name)"))), "…while the constraint's name on a self-reference is refused, as PostgREST refuses it (PGRST200), the message naming the column forms");
   const parentStill = rowsOf(await db.from("nodes").select("name, parent:parent_id(name)").eq("name", "leaf"), "self-ref parent");
   assert(JSON.stringify(parentStill[0]) === JSON.stringify({ name: "leaf", parent: { name: "root" } }), "…while the bare column form is still the parent");
   // A hint naming the relation's own foreign-key column, from the referenced side: one-to-many.
@@ -918,7 +919,6 @@ try {
   const nothing = await db.rpc("nothing_fn");
   assert(nothing.error === null && (nothing.data === null || nothing.data === ""), `a void function is still its (empty) value (${JSON.stringify(nothing.data)})`);
   // order/limit/range on an embedded resource: refused, not applied to the base table.
-  const refusedMsg21 = async (run: () => PromiseLike<unknown>) => { try { await run(); return ""; } catch (e) { return (e as Error).message; } };
   assert(/order\(\) on an embedded resource/.test(await refusedMsg21(() => db.from("widgets").select("name, gizmos(label)").order("label", { foreignTable: "gizmos" }))), "order() with foreignTable is refused, not applied to the base table");
   assert(/limit\(\) on an embedded resource/.test(await refusedMsg21(() => db.from("widgets").select("name, gizmos(label)").limit(1, { referencedTable: "gizmos" }))), "…and limit() with referencedTable");
   // is.NULL in any case, as PostgREST reads it.
@@ -928,6 +928,43 @@ try {
   await admin`DROP FUNCTION one_out()`;
   await admin`DROP FUNCTION nothing_fn()`;
   await admin`DROP TYPE one_col`;
+  // The second pass. A domain over jsonb[]: the element type decides, not the type's name.
+  await admin`DROP DOMAIN IF EXISTS jset CASCADE`;
+  await admin`CREATE DOMAIN jset AS jsonb[]`;
+  await admin`DROP TABLE IF EXISTS djs CASCADE`;
+  await admin`CREATE TABLE djs (id serial PRIMARY KEY, js jset)`;
+  const domainJson = rowsOf(await db.from("djs").insert({ js: ["str", [1, 2]] }).select("js"), "domain over jsonb[]");
+  assert(JSON.stringify(domainJson[0]?.js) === '["str",[1,2]]', `a domain over jsonb[] binds JSON elements too — the element type from the catalog, not the type's name (${JSON.stringify(domainJson[0]?.js)})`);
+  // Two ambiguities PostgREST reports (PGRST201), refused rather than resolved by a rule of the shim's own.
+  await admin`DROP TABLE IF EXISTS mutual_a CASCADE`;
+  await admin`DROP TABLE IF EXISTS mutual_b CASCADE`;
+  await admin`CREATE TABLE mutual_a (id serial PRIMARY KEY, ref int)`;
+  await admin`CREATE TABLE mutual_b (id serial PRIMARY KEY, ref int REFERENCES mutual_a(id))`;
+  await admin`ALTER TABLE mutual_a ADD FOREIGN KEY (ref) REFERENCES mutual_b(id)`;
+  assert(/a foreign-key column of both tables/.test(await refusedMsg21(() => db.from("mutual_a").select("id, mutual_b!ref(id)"))), "a column hint that is a key column of both tables is refused as ambiguous, naming the key form");
+  await admin`DROP TABLE IF EXISTS tags CASCADE`;
+  await admin`CREATE TABLE tags (id serial PRIMARY KEY, owners int REFERENCES owners(id), owner_id int REFERENCES owners(id))`;
+  assert(/also a table another key joins/.test(await refusedMsg21(() => db.from("tags").select("id, owners(id)"))), "a key column named like a table that another key joins is refused as ambiguous");
+  // A nested !inner under a LEFT embed narrows the embedded rows, not the base's (the mutant that survived pass 1's pins).
+  const beta21 = rowsOf(await db.from("widgets").select("id").eq("name", "beta").limit(1), "beta id")[0]?.id as number;
+  rowsOf(await db.from("gizmos").insert({ widget_id: beta21, label: "g3" }).select("id"), "g3 again");
+  const leftInner = rowsOf(await db.from("gizmos").select("label, widgets(name, manuals!inner(pages))").in("label", ["g1", "g3"]).order("id"), "inner under left");
+  assert(leftInner.length === 2 && JSON.stringify(leftInner[0]?.widgets) === JSON.stringify({ name: "alpha", manuals: { pages: 12 } }) && leftInner[1]?.widgets === null,
+    `an !inner nested under a left embed keeps the base row and nulls the embed whose own inner has no row (${JSON.stringify(leftInner.map((r) => r.widgets))})`);
+  const { text: leftInnerText } = await db.from("gizmos").select("label, widgets(name, manuals!inner(pages))").toSQL();
+  assert(/AS __e1 WHERE __e1\."id" = "gizmos"\."widget_id" AND EXISTS \(SELECT 1 FROM "manuals" AS __x2 WHERE __x2\."widget_id" = __e1\."id"\)/.test(leftInnerText), `…the EXISTS inside the embed's own subquery (${leftInnerText.slice(0, 220)})`);
+  await db.from("gizmos").delete().eq("label", "g3");
+  // The page carries count(*) OVER (): under single() with a limit the total is the table's, not the page's.
+  const totalWidgets = (await db.from("widgets").select("id", { count: "exact", head: true })).count;
+  const limitedSingle = await db.from("widgets").select("name", { count: "exact" }).order("id").limit(1).single();
+  assert(limitedSingle.error === null && totalWidgets !== null && totalWidgets > 1 && limitedSingle.count === totalWidgets, `count under single() with a limit is the total over the WHERE, from the window on the page (${limitedSingle.count} of ${totalWidgets})`);
+  const { text: windowText } = await db.from("widgets").select("name", { count: "exact" }).limit(1).toSQL();
+  assert(/count\(\*\) OVER \(\) AS __count/.test(windowText), `…one query, the window on the page (${windowText.slice(0, 80)})`);
+  await admin`DROP TABLE tags CASCADE`;
+  await admin`DROP TABLE mutual_a CASCADE`;
+  await admin`DROP TABLE mutual_b CASCADE`;
+  await admin`DROP TABLE djs CASCADE`;
+  await admin`DROP DOMAIN jset`;
   await admin`DROP TABLE progress CASCADE`;
   await admin`DROP TABLE blobs CASCADE`;
   await admin`DROP TABLE pets CASCADE`;

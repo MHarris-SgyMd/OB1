@@ -53,12 +53,19 @@
  * (`applications(*, job_postings(*, companies(*)))`, each level a correlated
  * subquery on the level above), and hinted: `!inner` keeps only the rows that
  * have an embedded row (an EXISTS beside the filters, nested with the embeds),
- * `!fk_name` and `!fk_column` choose the key where two join the tables,
- * `!left` is the default. Refused, with a message saying which: a relation
- * with no foreign key to its table or with more than one and no hint (name the
- * column or the key), a hint that names no key, a table embedded in itself by
- * name, a filter on an embedded column (`.neq("thoughts.tier", …)`, refused
- * as an identifier). An embed in a write's RETURNING list is served as in a
+ * `!fk_name` and `!fk_column` choose the key where two join the tables — the
+ * column the base's own (`projects.select("clients!client_id(…)")`, many-to-
+ * one) or the relation's (`clients.select("projects!client_id(…)")`, one-to-
+ * many), as PostgREST reads both — and `!left` is the default. A table
+ * embedded in itself by name or by `relation!fk_column` is its children,
+ * PostgREST's recursive form; the bare column, `parent_id(…)`, is the parent.
+ * Refused, with a message saying which: a relation with no foreign key to its
+ * table or with more than one and no hint (name the column or the key), a
+ * hint that names no key, a constraint's name on a self-reference (PostgREST's
+ * PGRST200), a column hint that is a key column of both tables and a key
+ * column named like a table another key joins (PostgREST's PGRST201), a filter
+ * on an embedded column (`.neq("thoughts.tier", …)`, refused as an
+ * identifier). An embed in a write's RETURNING list is served as in a
  * select — the table's name there is the row just written. Whether a relation
  * has one foreign key or two is the catalog's to say, at the first call.
  * Silently mishandling a join is the failure class this migration has been
@@ -245,7 +252,8 @@ function arrayLiteral(values: unknown[], json = false): string {
 
 // ── The catalog ──────────────────────────────────────────────────────────────
 
-type ColumnInfo = { type: string; category: string };
+/** A column's declared type, its type category, and — for an array column, through a domain too — its element type's name. */
+type ColumnInfo = { type: string; category: string; elem?: string };
 type Columns = Map<string, ColumnInfo>;
 type ForeignKey = { name: string; from: string; fromCols: string[]; to: string; toCols: string[]; unique: boolean };
 type Overload = { names: string[]; types: string[]; categories: string[]; outs: Columns; returns: { type: string; category: string; table: string | null; set: boolean } };
@@ -356,14 +364,16 @@ class Catalog {
   private readColumns(table: string): Promise<Columns> {
     return (async () => {
       const rows = (await this.sql.unsafe(
-        `SELECT a.attname AS name, format_type(a.atttypid, a.atttypmod) AS type, t.typcategory AS category, c.relnatts::int AS natts
+        `SELECT a.attname AS name, format_type(a.atttypid, a.atttypmod) AS type, t.typcategory AS category, c.relnatts::int AS natts,
+                (SELECT e.typname FROM pg_type b JOIN pg_type e ON e.oid = b.typelem
+                  WHERE b.oid = CASE WHEN t.typtype = 'd' THEN t.typbasetype ELSE t.oid END) AS elem
            FROM pg_attribute a JOIN pg_type t ON t.oid = a.atttypid JOIN pg_class c ON c.oid = a.attrelid
           WHERE a.attrelid = to_regclass($1) AND a.attnum > 0 AND NOT a.attisdropped
           ORDER BY a.attnum`,
         [ident(table, "table")] as never[]
-      )) as unknown as { name: string; type: string; category: string; natts: number }[];
+      )) as unknown as { name: string; type: string; category: string; natts: number; elem: string | null }[];
       if (rows.length) this.store.natts.set(table, Number(rows[0].natts));
-      return new Map(rows.map((r) => [r.name, { type: r.type, category: r.category }]));
+      return new Map(rows.map((r) => [r.name, { type: r.type, category: r.category, ...(r.elem ? { elem: r.elem } : {}) }]));
     })();
   }
 
@@ -464,7 +474,9 @@ class Catalog {
  */
 function bound(info: ColumnInfo | undefined, v: unknown): { value: unknown; cast: string } {
   // By the type's category, not its name: a domain over `text[]` is category A under its own name.
-  if (Array.isArray(v) && info?.category === "A") return { value: arrayLiteral(v, /^jsonb?\[\]$/.test(info.type)), cast: `::${info.type}` };
+  // JSON elements by the element type where the catalog read it (a domain over jsonb[] is category A under its own
+  // name — the second review pass), else by the type's name (a function argument's).
+  if (Array.isArray(v) && info?.category === "A") return { value: arrayLiteral(v, /^jsonb?$/.test(info.elem ?? "") || /^jsonb?\[\]$/.test(info.type)), cast: `::${info.type}` };
   // `vector` for an argument; `vector(1536)` for a column (format_type carries the typmod).
   if (Array.isArray(v) && /^vector(\(\d+\))?$/.test(info?.type ?? "")) return { value: JSON.stringify(v), cast: "" };
   return { value: v, cast: "" };
@@ -1005,23 +1017,32 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
       const self = item.relation === base;
       const between = (f: ForeignKey) => (f.from === base && f.to === item.relation) || (f.to === base && f.from === item.relation);
       const byName = fks.filter((f) => f.name === keyHint && between(f));
-      if (byName.length === 1) return { fk: byName[0], manyToOne: !self && byName[0].from === base };
+      // PostgREST reads a self-reference's hint as a column only (PGRST200 for a constraint's name): so does this.
+      if (byName.length === 1 && self) throw refusal(`select embeds "${item.relation}" in itself through the constraint "!${keyHint}" — PostgREST names a self-reference by its column: ${item.relation}!fk_column (…) for the children, fk_column (…) for the parent.`);
+      if (byName.length === 1) return { fk: byName[0], manyToOne: byName[0].from === base };
       const fromBase = fks.filter((f) => f.from === base && f.to === item.relation && f.fromCols.length === 1 && f.fromCols[0] === keyHint);
       const fromRelation = fks.filter((f) => f.from === item.relation && f.to === base && f.fromCols.length === 1 && f.fromCols[0] === keyHint);
+      // Two tables each holding a column of that name pointing at the other: PostgREST's PGRST201, not a guess.
+      if (!self && fromBase.length === 1 && fromRelation.length === 1) throw refusal(`select embeds "${item.relation}" through "!${keyHint}", a foreign-key column of both tables — ambiguous; name the key: ${item.relation}!fk_name (…).`);
       if (fromRelation.length === 1 && (self || fromBase.length === 0)) return { fk: fromRelation[0], manyToOne: false };
       if (fromBase.length === 1) return { fk: fromBase[0], manyToOne: true };
       throw refusal(`select embeds "${item.relation}" through "!${keyHint}", which names neither a foreign key between it and "${base}" nor a foreign-key column of either.`);
     }
-    // A foreign-key column of the base, by its name (`recipes:recipe_id (…)`); a column that is not a key falls
-    // through to the table lookup — PostgREST tries the relationship first, and a table may share a column's name.
-    if (cols.has(item.relation)) {
-      const via = fks.filter((f) => f.from === base && f.fromCols.length === 1 && f.fromCols[0] === item.relation);
-      if (via.length === 1) return { fk: via[0], manyToOne: true };
-    }
-    const out = fks.filter((f) => f.from === base && f.to === item.relation);
+    const out = fks.filter((f) => f.from === base && f.to === item.relation && f.from !== f.to);
     const back = fks.filter((f) => f.to === base && f.from === item.relation && f.from !== f.to);
     const self = fks.filter((f) => f.from === base && f.to === base && item.relation === base);
-    if (self.length) throw refusal(`select embeds "${item.relation}" in itself — which side is meant is not decidable from the table's name; name the column: alias:fk_column (…).`);
+    // A foreign-key column of the base, by its name (`recipes:recipe_id (…)`); a column that is not a key falls
+    // through to the table lookup — PostgREST tries the relationship first, and a table may share a column's name.
+    // A key column named like a table that ANOTHER key joins is PostgREST's ambiguity (PGRST201), refused.
+    if (cols.has(item.relation)) {
+      const via = fks.filter((f) => f.from === base && f.fromCols.length === 1 && f.fromCols[0] === item.relation);
+      if (via.length === 1 && [...out, ...back].some((f) => f !== via[0])) throw refusal(`select embeds "${item.relation}", a foreign-key column of "${base}" and also a table another key joins to it — ambiguous; name the key: ${item.relation}!fk_name (…).`);
+      if (via.length === 1) return { fk: via[0], manyToOne: true };
+    }
+    // A table embedded in itself by name is its children — PostgREST's recursive one-to-many; the parent is the
+    // bare column form. (Refused until the second review pass, which read PostgREST's rule.)
+    if (self.length === 1) return { fk: self[0], manyToOne: false };
+    if (self.length > 1) throw refusal(`select embeds "${item.relation}" in itself, and it holds ${self.length} keys to itself — name the column: alias:fk_column (…).`);
     if (out.length + back.length === 0) throw refusal(`select embeds "${item.relation}", and no foreign key joins it to "${base}" (or the table is off the search path).`);
     if (out.length + back.length > 1) throw refusal(`select embeds "${item.relation}", and more than one foreign key joins it to "${base}" — name the column (alias:fk_column (…)) or the key (${item.relation}!fk_name (…)).`);
     return { fk: out[0] ?? back[0], manyToOne: out.length === 1 };

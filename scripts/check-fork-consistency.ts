@@ -4175,14 +4175,14 @@ checkDestructiveSql();
 const SUPABASE_JS_SPECIFIER = /(["'])(?:npm:|jsr:|https?:\/\/[^"'\s]*\/)?@supabase\/supabase-js(?:@[^"'/]*)?(?:\/[^"']*)?\1/g;
 /** Code, and HTML for the inline `<script type="module">` a dashboard's page may carry. */
 const CODE_FILE = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs|svelte|vue|html)$/;
-/** [text, whether it is a hit] — the forms the tree has had, and the neighbours the rule must not reach. */
-const SUPABASE_JS_PROBES: [string, boolean][] = [
+/** [text, whether it is a hit, markup?] — the forms the tree has had, and the neighbours the rule must not reach. */
+const SUPABASE_JS_PROBES: [string, boolean, boolean?][] = [
   ['import { createClient } from "@supabase/supabase-js";', true],
   ["import { createClient } from 'npm:@supabase/supabase-js@2';", true],
   ['import { createClient } from "jsr:@supabase/supabase-js@2";', true],
   ['import { createClient } from "https://esm.sh/@supabase/supabase-js@2.47.10";', true],
   ['import { createClient } from "https://esm.sh/v135/@supabase/supabase-js@2";', true],
-  ['<script type="module">import { createClient } from "https://unpkg.com/@supabase/supabase-js@2/dist/module/index.js";</script>', true],
+  ['<p>Don\'t panic</p>\n<script type="module">import { createClient } from \'https://unpkg.com/@supabase/supabase-js@2/dist/module/index.js\';</script>', true, true],
   ['import type { Session, User } from "@supabase/supabase-js";', true],
   ['const { createClient } = require("@supabase/supabase-js");', true],
   ['const m = await import("@supabase/supabase-js/dist/module/index.js");', true],
@@ -4192,6 +4192,8 @@ const SUPABASE_JS_PROBES: [string, boolean][] = [
   ['/* import { createClient } from "@supabase/supabase-js"; */\nconst x = 1;', false],
   ['const note = "the file imports @supabase/supabase-js at runtime";', false],
   ['import { createClient } from "@supabase/supabase-js-shaped/thing";', false],
+  // Markup: a commented-out script and a link in prose are not imports.
+  ['<!-- <script>import x from "@supabase/supabase-js";</script> -->\n<a href="https://npmjs.com/package/@supabase/supabase-js">docs</a>\n<script>const y = 1;</script>', false, true],
 ];
 /** file → rule → the reason and the exact hit count; a hit past the count fails, a count no hit reaches fails as stale. */
 const SUPABASE_JS_EXCEPTIONS = new Map<string, Record<string, CountedException>>([
@@ -4199,16 +4201,31 @@ const SUPABASE_JS_EXCEPTIONS = new Map<string, Record<string, CountedException>>
   ["dashboards/open-brain-dashboard/src/app.d.ts", { "supabase-js": { why: "the dashboard's type-only import: the one client left that reads the brain over PostgREST — SMD-1801 moves it onto the fork's REST API", lines: 1 } }],
 ]);
 /** The 1-based lines of `text` (comments blanked) holding a supabase-js specifier, ascending. */
-function supabaseJsImportsIn(text: string): number[] {
-  const code = blanked(text, false);
+/** A markup file's code is its `<script>` bodies: everything else, an HTML comment included, is blanked (newlines kept). */
+const MARKUP_FILE = /\.(html|svelte|vue)$/;
+function scriptBodiesOf(text: string): string {
+  const blank = (s: string) => s.replace(/[^\n]/g, " ");
+  const withoutComments = text.replace(/<!--[\s\S]*?-->/g, blank);
+  let out = "";
+  let last = 0;
+  for (const m of withoutComments.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/gi)) {
+    const start = m.index! + m[0].indexOf(m[1]);
+    out += blank(withoutComments.slice(last, start)) + m[1];
+    last = start + m[1].length;
+  }
+  return out + blank(withoutComments.slice(last));
+}
+/** The 1-based lines of `text` holding a supabase-js specifier, ascending — comments blanked; in markup, the script bodies alone (an odd apostrophe in prose had shifted the blanker's quote parity and hidden an import). */
+function supabaseJsImportsIn(text: string, markup = false): number[] {
+  const code = blanked(markup ? scriptBodiesOf(text) : text, false);
   const lineOf = lineIndexer(code);
   const lines = new Set<number>();
   for (const m of code.matchAll(SUPABASE_JS_SPECIFIER)) lines.add(lineOf(m.index!));
   return [...lines].sort((a, b) => a - b);
 }
 function checkSupabaseJsImports() {
-  for (const [probe, hit] of SUPABASE_JS_PROBES) {
-    const n = supabaseJsImportsIn(probe).length;
+  for (const [probe, hit, markup] of SUPABASE_JS_PROBES) {
+    const n = supabaseJsImportsIn(probe, markup === true).length;
     if (hit && n === 0) fail(SELF, `check 22 no longer catches its probe: ${JSON.stringify(probe)} (its own probe)`);
     if (!hit && n > 0) fail(SELF, `check 22 catches a non-probe: ${JSON.stringify(probe)} (its own probe)`);
   }
@@ -4217,7 +4234,7 @@ function checkSupabaseJsImports() {
   const seen = new Set<string>();
   for (const file of files) {
     const rel = relOf(file);
-    const lines = supabaseJsImportsIn(readFileSync(file, "utf8"));
+    const lines = supabaseJsImportsIn(readFileSync(file, "utf8"), MARKUP_FILE.test(file));
     const excepted = SUPABASE_JS_EXCEPTIONS.get(rel)?.["supabase-js"];
     if (excepted) {
       seen.add(rel);

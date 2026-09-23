@@ -105,7 +105,7 @@ cd compat/supabase-sql && bun run test
 
 ## Expected outcome
 
-`250 assertions: 250 passed, 0 failed` and `PASS`. A migrated file behaves
+`257 assertions: 257 passed, 0 failed` and `PASS`. A migrated file behaves
 identically: same `{ data, error }` shape, same SQLSTATE codes, same row counts.
 `extensions/test-tools.ts` then drives every tool of the eight MCP servers with
 a schema of their own — seven extensions and the ob-graph recipe, fifty-five
@@ -122,7 +122,7 @@ files this shim is judged by.
 | Filters | `eq` `neq` `gt` `gte` `lt` `lte` `like` `ilike` `is` `in` `contains` `match` `or` `not` — `.or()` with `and(…)`, `or(…)`, `not.and(…)` grouping to any depth and `col.in.(a,b)` lists (SMD-1798) |
 | Filter columns | a column, or PostgREST's JSON path — `metadata->>key`, `meta->a->>key` — in the comparison filters, `is`, `in`, `match`, `.or()` terms and `.order()`; not `.contains()`, which is containment with the column's own operator |
 | Modifiers | `order` `limit` `range` `single` `maybeSingle` `count` `head` |
-| Embedding | `relation (cols)`, `alias:fk_column (cols)`, `relation(*)`, nested to any depth — through the foreign key the catalog finds; many-to-one an object or `null`, one-to-many an array or `[]`; `relation!inner (…)` keeps only the rows that have an embedded row (an `EXISTS`, nested with the embeds), `relation!fk_name (…)` and `relation!fk_column (…)` choose the key where two join the tables (SMD-1798) |
+| Embedding | `relation (cols)`, `alias:fk_column (cols)`, `relation(*)`, nested to any depth — through the foreign key the catalog finds; many-to-one an object or `null`, one-to-many an array or `[]`; `relation!inner (…)` keeps only the rows that have an embedded row (an `EXISTS`, nested with the embeds), `relation!fk_name (…)` and `relation!fk_column (…)` choose the key where two join the tables, from either side; a table embedded in itself is its children (SMD-1798) |
 | Arrays | a JavaScript array is bound by the column's or the function argument's declared type: an array literal for `text[]`, JSON for `jsonb`, JSON text for `vector` |
 
 Behaviours that are easy to get wrong and are pinned by tests: `range()` is
@@ -153,7 +153,11 @@ arbitrary first row; `{ head: true }` without a count is `data: null` and no
 count, not the table; an upsert's conflict target is `onConflict`'s columns
 or the table's primary key (a table with neither is refused, naming the
 option), never the payload's first key, and every payload column is assigned
-from `EXCLUDED`, so the statement always returns the row; and `.rpc()`'s shape
+from `EXCLUDED`, so the statement always returns the row — unless
+`ignoreDuplicates: true` asks for `DO NOTHING`, which leaves a conflicting row
+as it is and returns none, as `Prefer: resolution=ignore-duplicates` does
+(unread until SMD-1798's first review pass; repo-learning-coach's progress
+upsert had reset a learner's row on every sync); and `.rpc()`'s shape
 is what the function declares (`pg_proc.proretset`): a set-returning function
 is rows even when one row of one column came back, `RETURNS SETOF <scalar>` a
 bare list, a scalar function its value, a function returning one composite row
@@ -172,10 +176,15 @@ Each of these throws with an explanation instead of guessing:
 
 - **An embed the catalog cannot join** — a relation with no foreign key to the
   table it sits in, or with two and no hint (name the column, `alias:fk_column
-  (…)`, or the key, `relation!fk_name (…)`), a hint that names no key, a table
-  embedded in itself by name. Nested embeds (`applications!inner(*,
+  (…)`, or the key, `relation!fk_name (…)`), a hint that names no key, and the
+  two ambiguities PostgREST refuses too: a column hint that is a key column of
+  both tables, and a key column named like a table that another key joins. A
+  self-reference is named by its column, never by its constraint (PostgREST's
+  PGRST200): `nodes!parent_id (…)`, or `nodes (…)` bare, is the children;
+  `parent_id (…)` is the parent. Nested embeds (`applications!inner(*,
   job_postings!inner(*, companies!inner(*)))`), the hints `!inner`, `!fk_name`,
-  `!fk_column` and `!left`, and an embed on the row a write returns
+  `!fk_column` (the base's own key column, or the relation's from the
+  referenced side) and `!left`, and an embed on the row a write returns
   (`.insert(row).select("*, companies (id, name)")`) are served since SMD-1798
   (the table above).
 - **An order, limit or range on an embedded resource** — `.order("due", {
