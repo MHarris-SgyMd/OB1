@@ -87,7 +87,7 @@ Pass it to the server as `DEFAULT_USER_ID` when you start it in Step 3.
 
 ### 3. Run the MCP Server
 
-This server runs under [Bun](https://bun.sh) against your Postgres: it imports the repository's SQL shim (`compat/supabase-sql`, Bun's Postgres client in supabase-js's shape) and `compat/deno-on-bun.ts` (the two Deno globals it uses, on Bun), so it is not a Supabase Edge Function and `supabase functions deploy` does not apply (FORK.md change 74). From a checkout of this repository:
+This server runs under [Bun](https://bun.sh) against your Postgres: it imports the repository's SQL shim (`compat/supabase-sql`, Bun's Postgres client in supabase-js's shape) and is Bun-native — `process.env` for its environment, a default-exported `{ port, fetch }` that `bun` serves (SMD-1799) — so it is not a Supabase Edge Function and `supabase functions deploy` does not apply (FORK.md change 74). From a checkout of this repository:
 
 ```bash
 (cd extensions && bun install)   # once: the pinned hono, zod and MCP SDK the server imports

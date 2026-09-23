@@ -566,7 +566,7 @@ console.log(`\n[${WEBHOOK.file}]`);
 //
 // Everything above drove each server's `fetch` in this process. `bun <file>`
 // serves the same export: Bun starts the entry module's default export on
-// PORT (SMD-1799; until then compat/deno-on-bun.ts stood in for `Deno.serve`,
+// PORT (SMD-1799; until then compat/deno-on-bun.ts stood in for Deno's `serve`,
 // SMD-1480, FORK.md change 74). Each server on the SQL shim (which imports
 // `bun`) is started here as a child process: `bun <file>` with the
 // environment its README documents — PORT a port this test bound for a

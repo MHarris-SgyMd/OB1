@@ -41,11 +41,11 @@ For the full tool and worker inventory, see `docs/05-tool-audit.md` in the repos
 
 ### 1. Check Out the Integration
 
-The workers run from a checkout of this repository: each imports the repository's SQL shim and `compat/deno-on-bun.ts` by relative path, and the access-key module from `../_shared/auth.ts` beside it (the core server's, held byte-identical by `extensions/test-auth.ts`). Nothing is copied anywhere; there is no Supabase Edge Function to deploy, and the directory's `deno.json` pins nothing any more.
+The workers run from a checkout of this repository: each imports the repository's SQL shim by relative path, and the access-key module from `../_shared/auth.ts` beside it (the core server's, held byte-identical by `extensions/test-auth.ts`). Nothing is copied anywhere; there is no Supabase Edge Function to deploy, and the directory's `deno.json` pins nothing any more.
 
 ### 2. Run the Workers
 
-> **Runs under Bun, not as an Edge Function.** Both workers import the repository's SQL shim (`compat/supabase-sql`, which imports `bun`) and `compat/deno-on-bun.ts`, the two Deno globals they use on Bun (FORK.md change 74 moved `consolidation-bio`; SMD-1798 moved `consolidation-metadata`, whose two-group `.or()` over the candidates the shim did not read until then), so `supabase functions deploy` cannot bundle them; from a checkout of this repository each serves on `PORT` (8000 unset — podman's `gvproxy` holds that port on macOS, so set one):
+> **Runs under Bun, not as an Edge Function.** Both workers import the repository's SQL shim (`compat/supabase-sql`, which imports `bun`) and are Bun-native — `process.env` for their environment, a default-exported `{ port, fetch }` that `bun` serves (FORK.md change 74 moved `consolidation-bio`; SMD-1798 moved `consolidation-metadata`, whose two-group `.or()` over the candidates the shim did not read until then; SMD-1799 the shape), so `supabase functions deploy` cannot bundle them; from a checkout of this repository each serves on `PORT` (8000 unset — podman's `gvproxy` holds that port on macOS, so set one):
 >
 > ```bash
 > PORT=8787 SUPABASE_URL='postgres://user:password@host:5432/openbrain' MCP_ACCESS_KEYS='cron:write:<sha256-of-your-key>' OPENROUTER_API_KEY='…' bun integrations/consolidation-workers/bio/index.ts

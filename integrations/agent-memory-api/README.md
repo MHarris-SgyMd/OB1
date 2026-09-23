@@ -57,7 +57,7 @@ Apply [`schemas/agent-memory/schema.sql`](../../schemas/agent-memory/schema.sql)
 
 ![Step 2](https://img.shields.io/badge/Step_2-Run_the_API-1E88E5?style=for-the-badge)
 
-This API runs under [Bun](https://bun.sh) against your Postgres: it imports the repository's SQL shim (`compat/supabase-sql`, Bun's Postgres client in supabase-js's shape) and `compat/deno-on-bun.ts` (the two Deno globals it uses, on Bun), so it is not a Supabase Edge Function and `supabase functions deploy` does not apply (FORK.md change 74; SMD-1798 moved this server — its two embeds were servable since change 77, and it waited on the deploy story). It imports the access-key module from `../_shared/auth.ts` (the copy in `integrations/_shared/`, the core server's). From a checkout of this repository:
+This API runs under [Bun](https://bun.sh) against your Postgres: it imports the repository's SQL shim (`compat/supabase-sql`, Bun's Postgres client in supabase-js's shape) and is Bun-native — `process.env` for its environment, a default-exported `{ port, fetch }` that `bun` serves (SMD-1799) — so it is not a Supabase Edge Function and `supabase functions deploy` does not apply (FORK.md change 74; SMD-1798 moved this server — its two embeds were servable since change 77, and it waited on the deploy story). It imports the access-key module from `../_shared/auth.ts` (the copy in `integrations/_shared/`, the core server's). From a checkout of this repository:
 
 ```bash
 (cd extensions && bun install)   # once: the pinned hono and zod the server imports

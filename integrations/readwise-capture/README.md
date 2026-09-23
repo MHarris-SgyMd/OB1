@@ -78,7 +78,7 @@ supabase link --project-ref YOUR_PROJECT_REF
 
 Replace `YOUR_PROJECT_REF` with the value from your Supabase dashboard URL: `supabase.com/dashboard/project/THIS_PART`.
 
-> **Runs under Bun, not as an Edge Function.** This function imports the repository's SQL shim (`compat/supabase-sql`, which imports `bun`) and `compat/deno-on-bun.ts`, the two Deno globals it uses on Bun (FORK.md change 74), so `supabase functions deploy` cannot bundle it; from a checkout of this repository it serves on `PORT` (8000 unset — podman's `gvproxy` holds that port on macOS, so set one):
+> **Runs under Bun, not as an Edge Function.** This function imports the repository's SQL shim (`compat/supabase-sql`, which imports `bun`) and is Bun-native — `process.env` for its environment, a default-exported `{ port, fetch }` that `bun` serves (FORK.md change 74; SMD-1799) — so `supabase functions deploy` cannot bundle it; from a checkout of this repository it serves on `PORT` (8000 unset — podman's `gvproxy` holds that port on macOS, so set one):
 >
 > ```bash
 > PORT=8787 SUPABASE_URL='postgres://user:password@host:5432/openbrain' READWISE_WEBHOOK_SECRET='…' READWISE_ACCESS_TOKEN='…' OPENROUTER_API_KEY='…' bun integrations/readwise-capture/index.ts
