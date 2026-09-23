@@ -198,7 +198,7 @@ and fails a "FORK.md change N" citation with no file behind it (SMD-1917).
 | 44 | [The read tools print the thought id, so `update_thought` and `delete_thought` can reach what a search found](changes/044-the-read-tools-print-the-thought-id-so-update.md) | SMD-1248 |
 | 45 | [`thought_stats` aggregates in SQL](changes/045-thought-stats-aggregates-in-sql.md) | SMD-1249 |
 | 46 | [Derivation and supersession: what a thought was built from, and which it replaces](changes/046-derivation-and-supersession-what-a-thought.md) | SMD-1253 |
-| 47 | [`trace_provenance` bounds its work, not only its output](changes/047-trace-provenance-bounds-its-work.md) | SMD-1288 |
+| 47 | [`trace_provenance` bounds its work, not only its output](changes/048-trace-provenance-bounds-its-work.md) | SMD-1288 |
 | 48 | [`search_thoughts` no longer floors long captures out of the results](changes/048-search-thoughts-no-longer-floors-long-captures.md) | SMD-1300 |
 | 49 | [The caveat rule is stated at the table](changes/049-the-caveat-rule-is-stated-at-the-table.md) | SMD-1052 |
 | 50 | [The chunk limit follows the model's window, not a constant](changes/050-the-chunk-limit-follows-the-model-s-window.md) | SMD-1305 |

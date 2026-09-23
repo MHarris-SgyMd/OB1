@@ -534,7 +534,7 @@ async function processRow(row: Row): Promise<Outcome> {
     let j: Judgement;
     try {
       // SMD-1726: the judge hears who wrote each side — the database's mark
-      // (047), never a payload field — so "an agent's summary supersedes what
+      // (048), never a payload field — so "an agent's summary supersedes what
       // the operator typed" is a proposal it can decline on that ground.
       j = await judgePair({ content: older.content, createdAt: older.created_at, metadata: older.metadata ?? undefined, writer: actorKindOf(older.metadata) },
                           { content: row.content, createdAt: row.created_at, metadata: row.metadata ?? undefined, writer: actorKindOf(row.metadata) },

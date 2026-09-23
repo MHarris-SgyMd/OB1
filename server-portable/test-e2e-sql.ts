@@ -98,7 +98,7 @@ process.env.DATABASE_URL = URL_;
 process.env.OPENROUTER_API_KEY = "stub";
 process.env.MCP_ACCESS_KEY = "e2e-key";
 // Two named keys beside the legacy one (SMD-1726, [10c]): the server's actor
-// is the key's name, and migration 047 stamps who wrote a thought from it.
+// is the key's name, and migration 048 stamps who wrote a thought from it.
 process.env.MCP_ACCESS_KEYS = `op-key:write:${hashKey("op-raw")},bot-key:write:${hashKey("bot-raw")}`;
 // The query log (034, SMD-1295) is read once at first request and frozen, as in
 // production (set at boot, not toggled per request). On for the whole suite so
@@ -609,7 +609,7 @@ console.log("\n[10b] query log: the filter a search ran, the arm that served it 
   await qlog.close();
 }
 
-console.log("\n[10c] Who wrote it, over MCP: a hit says By: <key> (kind) from the key that made the write, said_by and actor filter on it through the one search operation, a client's metadata cannot set it, and the folded filter reaches the log (SMD-1726, migration 047)");
+console.log("\n[10c] Who wrote it, over MCP: a hit says By: <key> (kind) from the key that made the write, said_by and actor filter on it through the one search operation, a client's metadata cannot set it, and the folded filter reaches the log (SMD-1726, migration 048)");
 {
   const sql = new SQL({ url: URL_, max: 1 });
   await sql`DELETE FROM query_log`;
@@ -617,7 +617,7 @@ console.log("\n[10c] Who wrote it, over MCP: a hit says By: <key> (kind) from th
   await sql`SELECT set_agent_kind('bot-key', 'agent')`;
   // Two different texts — the same text would be one row by 003's fingerprint —
   // one through each key; the server resolves each key's agent (010) and names
-  // it in the envelope, and 047's trigger stamps the row from the registry.
+  // it in the envelope, and 048's trigger stamps the row from the registry.
   const opOut = await call("capture_thought", { content: "theta the operator typed about the schedule" }, "op-raw");
   const botOut = await call("capture_thought", { content: "theta an agent concluded about the schedule" }, "bot-raw");
   assert(/Captured as/.test(opOut) && /Captured as/.test(botOut), "both keys capture");
@@ -636,7 +636,7 @@ console.log("\n[10c] Who wrote it, over MCP: a hit says By: <key> (kind) from th
   assert(/operator typed/.test(await call("list_thoughts", { limit: 20, actor: "op-key" })) && !/agent concluded/.test(await call("list_thoughts", { limit: 20, actor: "op-key" })), "…and by actor");
   // A client cannot set the mark: capture_thought's metadata is the extractor's,
   // so the one client-controlled metadata write is update_thought's patch — an
-  // agent's key patching the operator's row to claim it changes nothing (047:
+  // agent's key patching the operator's row to claim it changes nothing (048:
   // the actor follows the content, and a patch is not content).
   const idOp = blockOf(both, /operator typed/).match(/\nID: ([0-9a-f-]{36})/)![1];
   await call("update_thought", { id: idOp, metadata_patch: { actor_kind: "agent", actor_name: "bot-key" } }, "bot-raw");
