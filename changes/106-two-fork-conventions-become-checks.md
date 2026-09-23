@@ -1,17 +1,4 @@
----
-type: added
-bump: patch
-tickets: [SMD-1808]
-migrations: []
----
-
-## Changelog
-
-commitlint enforces the fork's commit grammar (`[fork]`/`[category]` header, `(SMD-NNNN)` suffix, `(caught: …)` on review-pass finding bullets) and actionlint + shellcheck lint `fork-checks.yml`, which now runs every step under `-eo pipefail` (SMD-1808).
-
-## FORK
-
-Two fork conventions become checks — the commit grammar and the CI workflow (SMD-1808)
+# 106. Two fork conventions become checks — the commit grammar and the CI workflow (SMD-1808)
 
 Two conventions were enforced by memory and review, not by anything that runs: the
 commit grammar SMD-1711 introduced (`[fork]`/`[category]` header ending in

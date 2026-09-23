@@ -1,17 +1,4 @@
----
-type: changed
-bump: minor
-tickets: [SMD-1492]
-migrations: [047]
----
-
-## Changelog
-
-`prune_query_log`'s retention delete can now seek: migration 047 adds a plain btree on `query_log.logged_at`, so the time-range `DELETE` range-scans instead of sequentially scanning the whole log. The awaited log write on the request hot path is kept deliberately — a dropped row is a lost replay for the canary — and both costs are now measured by `db/bench-querylog.ts` (SMD-1492, migration 047).
-
-## FORK
-
-A seekable prune index on the query log, and the awaited write measured and kept (SMD-1492)
+# 116. A seekable prune index on the query log, and the awaited write measured and kept (SMD-1492)
 
 SMD-1295 shipped `query_log` opt-in with two scale acceptances its review flagged,
 both raised in priority because SMD-1806 makes the log the canary's replay source

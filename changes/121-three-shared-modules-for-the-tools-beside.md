@@ -1,17 +1,4 @@
----
-type: changed
-bump: patch
-tickets: [SMD-1985]
-migrations: []
----
-
-## Changelog
-
-The capture's tag extraction is `server-portable/metadata.ts` (`extractMetadata`, `metadataRefused`, and `tagsOverExisting` — what an answer writes over an existing row's tags), the `.env` reader is `db/env.ts` (`evals/env.ts` re-exports it) and the Linear GraphQL client is `db/linear-api.ts`, shared with `evals/build-linear-corpus.ts` — pure moves, so a tool that writes thoughts beside the server carries no second copy of the prompt, the search path or the access rule (SMD-1985).
-
-## FORK
-
-Three shared modules for the tools beside the server — the tag extraction, the `.env` reader and the Linear client move out of the server and the evals, unchanged (SMD-1985)
+# 121. Three shared modules for the tools beside the server — the tag extraction, the `.env` reader and the Linear client move out of the server and the evals, unchanged (SMD-1985)
 
 **What changed.** `server-portable/index.ts`'s private `extractMetadata` and
 `metadataRefused` are `server-portable/metadata.ts`, the function taking the

@@ -1,17 +1,4 @@
----
-type: added
-bump: minor
-tickets: [SMD-1730]
-migrations: [046]
----
-
-## Changelog
-
-`thought_audit` becomes the log of record: every write stamps who holds the key (`actor_kind`, from the registry, never the payload), the ceiling on the content (`trust`), the door (`origin`), and what the call declared (`stance`, `cites`, `valid_from`, `valid_until`); the append-only rule gains its one lawful amendment, a backfill that fills a NULL kind and door and says so. Migration 046; `set_agent_kind` classifies a key, `backfill_thought_audit_events` fills the rows written before (SMD-1730).
-
-## FORK
-
-`thought_audit` becomes the log of record — who from the key, the door, the ceiling on the content, stance, cites and the valid window on every write; immutable by rule; migration 046 (SMD-1730)
+# 113. `thought_audit` becomes the log of record — who from the key, the door, the ceiling on the content, stance, cites and the valid window on every write; immutable by rule; migration 046 (SMD-1730)
 
 **Premise.** 008 made `thought_audit` the one row every capture, update and delete leaves, written by a trigger inside the mutating transaction, UPDATE and DELETE refused by a second trigger; 010 put a stable agent id beside the key's name; SMD-1541 made the five vendored servers pass an actor at all. SMD-1729 makes this table the log the rest of the program derives its views from, and for that it lacked the fields those views read and one rule. Nothing said whether the key belongs to the operator, to an agent or to an importer copying external text, so a read that wants "what the operator said" (SMD-1726) or "how far to trust this" (SMD-1724) had nothing to filter on. The door a write came through lived in `actor_context.via`, a key in the blob 008 declares "analytical only". Nothing recorded what a write claimed to rest on, its stance, or when the fact it states was true in the world. And "derived from the key, never the payload" was a sentence in the epic and nothing in the schema.
 

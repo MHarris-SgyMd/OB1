@@ -1,17 +1,4 @@
----
-type: added
-bump: patch
-tickets: [SMD-1857]
-migrations: []
----
-
-## Changelog
-
-A PR that changes `db/migrations/`, `server-portable/` or `evals/` beyond tests and docs must ship a `changes/smd-NNNN.md` fragment, or the `Repo consistency` job refuses it by file name; the ruleset record and check 20 are ready for GitHub's merge queue, which the API refuses on this user-owned repository (SMD-1857).
-
-## FORK
-
-A landing that changes the fork records itself, and the merge queue is built but refused — GitHub offers it to organisation-owned repositories only (SMD-1857)
+# 120. A landing that changes the fork records itself, and the merge queue is built but refused — GitHub offers it to organisation-owned repositories only (SMD-1857)
 
 **What changed.** The `Repo consistency` job gains one step,
 `scripts/check-landing.ts`: given the event's range — the PR's base and head,
