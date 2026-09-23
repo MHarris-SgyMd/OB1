@@ -406,7 +406,11 @@ function renderChange(c: AuditChange, n: number): string {
   const who = c.actorName !== null ? `by ${snipText(c.actorName, 80)}${c.actorKind ? ` (${c.actorKind})` : ""}`
     : c.origin !== null ? `by ${snipText(c.origin, 80)} (no key)`
     : "from outside the server";
-  const verb = c.action === "capture" ? "captured" : c.action === "update" ? "edited" : "deleted";
+  // 050's stamp is not an edit (it holds the updated_at trigger): a row whose
+  // only change is the two marks is "marked", the backfill's row above all.
+  const isMark = (k: string) => k === "actor_kind" || k === "actor_name";
+  const marksOnly = c.action === "update" && c.changed.length === 1 && c.changed[0] === "metadata" && c.metadataKeys.length > 0 && c.metadataKeys.every(isMark);
+  const verb = c.action === "capture" ? "captured" : c.action === "update" ? (marksOnly ? "marked" : "edited") : "deleted";
   const gone = c.action !== "delete" && !c.present ? " (deleted since)" : "";
   const lines = [`${n}. ${when} — ${verb} ${who} — ID: ${c.thoughtId}${gone}`];
   const text = c.head === null ? null : snipText(c.head, 200);
@@ -423,7 +427,10 @@ function renderChange(c: AuditChange, n: number): string {
     // moves under another key: the first line already says who, so beside a
     // content change the two marks are not listed as keys the editor touched.
     // Alone — the backfill's row — they are the whole change and stay.
-    const keys = c.changed.includes("content") ? c.metadataKeys.filter((k) => k !== "actor_kind" && k !== "actor_name") : c.metadataKeys;
+    // A row from before 050 whose caller wrote a mark of its own beside a
+    // content change loses that key the same way — the row cannot tell the two
+    // apart; the raw diff stays reachable by the audit id (fifth review pass).
+    const keys = c.changed.includes("content") ? c.metadataKeys.filter((k) => !isMark(k)) : c.metadataKeys;
     if (c.changed.includes("metadata") && (keys.length || !c.metadataKeys.length)) parts.push(keys.length ? `metadata: ${keys.map((k) => snipText(k, 40)).join(", ")}` : "metadata");
     if (c.changed.includes("embedding_present")) parts.push("embedding");
     if (parts.length) lines.push(`   ${parts.join("; ")}`);

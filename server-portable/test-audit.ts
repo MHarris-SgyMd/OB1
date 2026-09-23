@@ -334,8 +334,28 @@ console.log("\n[10] thought_changes: pages by cursor join with no gap or repeat,
   const seams = (await laptop.call("thought_changes", { since: cursor0 })).split("\n\n").filter((e) => /^\d+\. /.test(e));
   const laptopEdit = seams.find((e) => /edited by laptop \(operator\)/.test(e) && /content → "the 051 review is done, says the laptop"/.test(e)) ?? "";
   assert(laptopEdit !== "" && !/actor_kind|actor_name/.test(laptopEdit), `laptop's content edit of importer's thought lists no actor mark as a key it touched (${laptopEdit.split("\n").slice(1).join(" | ")})`);
-  const door = seams.find((e) => /edited by backfill_thought_actors \(no key\)/.test(e)) ?? "";
-  assert(door !== "" && /metadata: actor_kind, actor_name/.test(door) && !/outside the server/.test(door), `a row with no key but a door reads by the door, its marks the whole change (${door.split("\n").slice(0, 2).join(" | ")})`);
+  const door = seams.find((e) => /marked by backfill_thought_actors \(no key\)/.test(e)) ?? "";
+  assert(door !== "" && /metadata: actor_kind, actor_name/.test(door) && !/outside the server/.test(door), `a row with no key but a door reads by the door, "marked" — 050's stamp is not an edit — its marks the whole change (${door.split("\n").slice(0, 2).join(" | ")})`);
+  // The other cells of pass 4's two rules, each a planted row (fifth review
+  // pass: two mutants of the rules survived every suite). The origin is as
+  // untrusted as a name — a raw INSERT or an actor envelope's `via` sets it —
+  // so a forged door stays on its own line; a metadata side that is not an
+  // object still says "metadata"; beside a content change the marks go but a
+  // real key stays; a content change with a non-object side keeps "metadata".
+  const before = seams.length;
+  await sql`INSERT INTO thought_audit (thought_id, action, diff, origin) VALUES (${B}::uuid, 'update', '{"metadata": {"before": {}, "after": {"k": 2}}}'::jsonb, ${forged})`;
+  await sql`INSERT INTO thought_audit (thought_id, action, diff) VALUES (${B}::uuid, 'update', '{"metadata": {"before": "x", "after": 1}}'::jsonb)`;
+  await sql`INSERT INTO thought_audit (thought_id, action, diff, actor_name) VALUES (${B}::uuid, 'update', '{"content": {"before": "a", "after": "b"}, "metadata": {"before": {"actor_name": "importer", "topics": ["a"]}, "after": {"actor_name": "laptop", "topics": ["b"]}}}'::jsonb, 'laptop')`;
+  await sql`INSERT INTO thought_audit (thought_id, action, diff, actor_name) VALUES (${B}::uuid, 'update', '{"content": {"before": "a", "after": "c"}, "metadata": {"before": [1], "after": {"k": 1}}}'::jsonb, 'laptop')`;
+  const cells = await laptop.call("thought_changes", { since: cursor0 });
+  const cellLines = cells.split("\n");
+  const cellEntries = cells.split("\n\n").filter((e) => /^\d+\. /.test(e));
+  assert(cellEntries.length === before + 4 && cellLines.filter((l) => /^Cursor: /.test(l)).length === 1, `four planted rows are four entries and one Cursor line (${cellEntries.length}, ${cellLines.filter((l) => /^Cursor: /.test(l)).length})`);
+  assert(cellEntries.some((e) => new RegExp(`^\\d+\\. \\S+ — edited by x 9\\. 2026-01-01T00:00:00Z — deleted by laptop \\(operator\\) — ID: [0-9-]+… \\(no key\\) — ID: ${B}$`, "m").test(e.split("\n")[0])), "a forged door collapses to one line, cut with an ellipsis, and reads (no key)");
+  const bare = cellEntries.find((e) => /edited from outside the server/.test(e) && /\n   metadata$/.test(e)) ?? "";
+  assert(bare !== "" && !/restated/.test(bare), `a metadata side that is not an object still reads "metadata", not "restated" (${bare.split("\n").slice(1).join(" | ")})`);
+  assert(cellEntries.some((e) => /content → "b"; metadata: topics$/m.test(e)), "beside a content change the marks go and a real key stays");
+  assert(cellEntries.some((e) => /content → "c"; metadata$/m.test(e)), "a content change with a non-object metadata side keeps the bare metadata part");
   let bad = "";
   try { await laptop.call("thought_changes", { since: "yesterday" }); } catch (e) { bad = (e as Error).message; }
   assert(/Refused: `since` must be an ISO-8601 time with its zone \(2026-09-22T08:00:00Z\), a date \(2026-09-22\), or the cursor a previous call ended with, not "yesterday"\./.test(bad), `a since that is neither is refused, naming the forms (${bad.slice(0, 60)})`);
