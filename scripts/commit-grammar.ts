@@ -13,8 +13,10 @@
  *   bun scripts/commit-grammar.ts --self-check
  */
 
-export const ORDINAL = "first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|eleventh|twelfth";
-export const ORDINALS: Record<string, number> = { first: 1, second: 2, third: 3, fourth: 4, fifth: 5, sixth: 6, seventh: 7, eighth: 8, ninth: 9, tenth: 10, eleventh: 11, twelfth: 12 };
+// To twentieth: SMD-1298's review ran past twelve passes, and a pass the grammar
+// cannot read is no review pass to mechanism-yield or commitlint.
+export const ORDINAL = "first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|eleventh|twelfth|thirteenth|fourteenth|fifteenth|sixteenth|seventeenth|eighteenth|nineteenth|twentieth";
+export const ORDINALS: Record<string, number> = { first: 1, second: 2, third: 3, fourth: 4, fifth: 5, sixth: 6, seventh: 7, eighth: 8, ninth: 9, tenth: 10, eleventh: 11, twelfth: 12, thirteenth: 13, fourteenth: 14, fifteenth: 15, sixteenth: 16, seventeenth: 17, eighteenth: 18, nineteenth: 19, twentieth: 20 };
 
 // One alternation, so the LEFTMOST mention wins whichever spelling it uses: a
 // subject names its own pass first and an earlier one after ("Review pass 4:
@@ -139,6 +141,7 @@ function selfCheck() {
   const ok = (cond: unknown, label: string) => { if (!cond) { console.error(`FAIL ${label}`); bad++; } };
 
   ok(passNumber("[fork] Review pass 4: the third pass's fix held (SMD-1)") === 4, "leftmost pass number wins over an earlier one");
+  ok(passNumber("[fork] Review, thirteenth pass: an unknown tool is a final answer (SMD-1298)") === 13 && passNumber("[fork] Review, twentieth pass: x (SMD-1)") === 20, "ordinals past twelfth are read (SMD-1298 ran to thirteen)");
   ok(passNumber("[fork] Third review pass, triaged (SMD-1)") === 3, "ordinal review pass");
   ok(passNumber("[fork] Review, reproducibility pass (SMD-1)") === 0, "a named (not numbered) pass is 0");
   ok(passNumber("[fork] A plain change (SMD-1)") === null, "a non-review subject is null");
