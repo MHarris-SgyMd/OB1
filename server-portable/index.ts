@@ -384,6 +384,9 @@ function parseSince(raw: string | undefined): { since: string | null; after: str
   return { since: d.toISOString(), after: null };
 }
 
+/** The two metadata keys 050's trigger owns (SMD-1726): the writer's kind and name, stamped as the content moves. */
+const ACTOR_MARKS: ReadonlySet<string> = new Set(["actor_kind", "actor_name"]);
+
 /**
  * One change as a client reads it: when, what and who on the first line with
  * the thought's `ID:` (the label every read tool prints, SMD-1248, so fetch and
@@ -393,23 +396,20 @@ function parseSince(raw: string | undefined): { since: string | null; after: str
  * through snipText, the one cleaner every reply quotes a thought through.
  */
 function renderChange(c: AuditChange, n: number): string {
-  // The full ISO form, the one spelling the header's `since` echoes — a client
-  // that checkpoints on a line's time rather than the cursor re-reads nothing
-  // it need not (third review pass).
+  // The full ISO form — the one spelling the header's `since` echoes, so a
+  // client that checkpoints on a line's time re-reads nothing it need not.
   const when = c.createdAt;
-  // The name through snipText, not cleanForDisplay alone: a writer that can
-  // set its own actor could carry a newline and forge an entry or the Cursor
-  // line in a feed agents act on (second review pass).
-  // No key but a door (046's origin): a worker that names itself and no key —
-  // 050's backfill_thought_actors writes one row per thought it marks — reads
-  // by its door, not as an anonymous edit (fourth review pass).
+  // Name and door are untrusted text (a writer sets its own envelope; a raw
+  // INSERT sets either column), so both go through snipText: one line, and no
+  // forged entry or Cursor line in a feed agents act on. No key but a door is
+  // a worker that names itself alone — 050's backfill_thought_actors — and
+  // reads by its door rather than as an anonymous edit.
   const who = c.actorName !== null ? `by ${snipText(c.actorName, 80)}${c.actorKind ? ` (${c.actorKind})` : ""}`
     : c.origin !== null ? `by ${snipText(c.origin, 80)} (no key)`
     : "from outside the server";
   // 050's stamp is not an edit (it holds the updated_at trigger): a row whose
-  // only change is the two marks is "marked", the backfill's row above all.
-  const isMark = (k: string) => k === "actor_kind" || k === "actor_name";
-  const marksOnly = c.action === "update" && c.changed.length === 1 && c.changed[0] === "metadata" && c.metadataKeys.length > 0 && c.metadataKeys.every(isMark);
+  // only change is the two marks is "marked" — the backfill's row above all.
+  const marksOnly = c.action === "update" && c.changed.length === 1 && c.changed[0] === "metadata" && c.metadataKeys.length > 0 && c.metadataKeys.every((k) => ACTOR_MARKS.has(k));
   const verb = c.action === "capture" ? "captured" : c.action === "update" ? (marksOnly ? "marked" : "edited") : "deleted";
   const gone = c.action !== "delete" && !c.present ? " (deleted since)" : "";
   const lines = [`${n}. ${when} — ${verb} ${who} — ID: ${c.thoughtId}${gone}`];
@@ -423,15 +423,16 @@ function renderChange(c: AuditChange, n: number): string {
   if (c.action === "update") {
     const parts: string[] = [];
     if (c.changed.includes("content")) parts.push(text === null ? "content" : `content → "${text}"`);
-    // 050 stamps actor_kind and actor_name into metadata whenever the content
-    // moves under another key: the first line already says who, so beside a
-    // content change the two marks are not listed as keys the editor touched.
-    // Alone — the backfill's row — they are the whole change and stay.
-    // A row from before 050 whose caller wrote a mark of its own beside a
-    // content change loses that key the same way — the row cannot tell the two
-    // apart; the raw diff stays reachable by the audit id (fifth review pass).
-    const keys = c.changed.includes("content") ? c.metadataKeys.filter((k) => !isMark(k)) : c.metadataKeys;
-    if (c.changed.includes("metadata") && (keys.length || !c.metadataKeys.length)) parts.push(keys.length ? `metadata: ${keys.map((k) => snipText(k, 40)).join(", ")}` : "metadata");
+    // 050 stamps the two marks into metadata whenever the content moves under
+    // another key: the first line already says who, so beside a content change
+    // they are not listed as keys the editor touched (a pre-050 row whose
+    // caller wrote a mark of its own loses it the same way — the row cannot
+    // tell the two apart; the raw diff stays reachable by the audit id). Alone
+    // — the backfill's row — they are the whole change and stay. A side that is
+    // not an object has no keys to name and still says "metadata".
+    const keys = c.changed.includes("content") ? c.metadataKeys.filter((k) => !ACTOR_MARKS.has(k)) : c.metadataKeys;
+    const bare = c.metadataKeys.length === 0;
+    if (c.changed.includes("metadata") && (keys.length || bare)) parts.push(bare ? "metadata" : `metadata: ${keys.map((k) => snipText(k, 40)).join(", ")}`);
     if (c.changed.includes("embedding_present")) parts.push("embedding");
     if (parts.length) lines.push(`   ${parts.join("; ")}`);
     // 046: an unchanged edit that declared a stance, cites or a window is an

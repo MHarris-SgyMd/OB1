@@ -205,6 +205,8 @@ console.log("\n[7] A malformed actor setting does not break the mutation");
 // [8]–[10] share the cursor the section starts after and the two thoughts the
 // importer writes; a section is a block, so they live here.
 let cursor0 = "", A = "", B = "";
+/** The numbered entries of a thought_changes reply, each a paragraph starting `N. `. */
+const entriesOf = (out: string) => out.split("\n\n").filter((e) => /^\d+\. /.test(e));
 
 console.log("\n[8] thought_changes: a second key reads what the first did — in order, who, and the thought id on every line (migration 051, SMD-1296)");
 {
@@ -227,7 +229,7 @@ console.log("\n[8] thought_changes: a second key reads what the first did — in
   await importer.call("delete_thought", { id: A });
 
   const out = await laptop.call("thought_changes", { since: cursor0 });
-  const entries = out.split("\n\n").filter((e) => /^\d+\. /.test(e));
+  const entries = entriesOf(out);
   assert(/^5 change\(s\) after the cursor, oldest first:/.test(out), `the header counts five after the cursor (${out.split("\n")[0]})`);
   assert(entries.length === 5 && entries.every((e) => new RegExp(`ID: (${A}|${B})`).test(e.split("\n")[0])), "five entries, each first line naming the thought's ID");
   assert(entries.every((e) => /by importer \(agent\)/.test(e)), "…every one by importer (agent) — the key's name, and 046's kind from the registry");
@@ -331,7 +333,7 @@ console.log("\n[10] thought_changes: pages by cursor join with no gap or repeat,
   // thought it marks — reads by its door, not as "from outside the server".
   await laptop.call("update_thought", { id: B, content: "the 051 review is done, says the laptop" });
   await sql`INSERT INTO thought_audit (thought_id, action, diff, origin) VALUES (${B}::uuid, 'update', '{"metadata": {"before": {"actor_name": "importer"}, "after": {"actor_name": "laptop", "actor_kind": "operator"}}}'::jsonb, 'backfill_thought_actors')`;
-  const seams = (await laptop.call("thought_changes", { since: cursor0 })).split("\n\n").filter((e) => /^\d+\. /.test(e));
+  const seams = entriesOf(await laptop.call("thought_changes", { since: cursor0 }));
   const laptopEdit = seams.find((e) => /edited by laptop \(operator\)/.test(e) && /content → "the 051 review is done, says the laptop"/.test(e)) ?? "";
   assert(laptopEdit !== "" && !/actor_kind|actor_name/.test(laptopEdit), `laptop's content edit of importer's thought lists no actor mark as a key it touched (${laptopEdit.split("\n").slice(1).join(" | ")})`);
   const door = seams.find((e) => /marked by backfill_thought_actors \(no key\)/.test(e)) ?? "";
@@ -349,7 +351,7 @@ console.log("\n[10] thought_changes: pages by cursor join with no gap or repeat,
   await sql`INSERT INTO thought_audit (thought_id, action, diff, actor_name) VALUES (${B}::uuid, 'update', '{"content": {"before": "a", "after": "c"}, "metadata": {"before": [1], "after": {"k": 1}}}'::jsonb, 'laptop')`;
   const cells = await laptop.call("thought_changes", { since: cursor0 });
   const cellLines = cells.split("\n");
-  const cellEntries = cells.split("\n\n").filter((e) => /^\d+\. /.test(e));
+  const cellEntries = entriesOf(cells);
   assert(cellEntries.length === before + 4 && cellLines.filter((l) => /^Cursor: /.test(l)).length === 1, `four planted rows are four entries and one Cursor line (${cellEntries.length}, ${cellLines.filter((l) => /^Cursor: /.test(l)).length})`);
   assert(cellEntries.some((e) => new RegExp(`^\\d+\\. \\S+ — edited by x 9\\. 2026-01-01T00:00:00Z — deleted by laptop \\(operator\\) — ID: [0-9-]+… \\(no key\\) — ID: ${B}$`, "m").test(e.split("\n")[0])), "a forged door collapses to one line, cut with an ellipsis, and reads (no key)");
   const bare = cellEntries.find((e) => /edited from outside the server/.test(e) && /\n   metadata$/.test(e)) ?? "";
