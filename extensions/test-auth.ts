@@ -570,7 +570,8 @@ console.log(`\n[${WEBHOOK.file}]`);
 // with the environment its README documents — PORT=0, and the polyfill
 // prints the port the OS chose in Deno's own `Listening on` line; NODE_PATH,
 // since a recipe or integration has no node_modules on its own path and
-// resolves hono and the SDK from this directory's pinned install, as its
+// resolves hono, zod and @hono/mcp from this directory's pinned install (the
+// MCP SDK's subpaths it does not: Bun fetches those into its cache, SMD-1991), as its
 // README says — then asked over the port for the one thing that proves it is
 // that server, authenticating: an MCP server's tools/list under a write key
 // is its full tool list, an API's read probe passes under a read key, a

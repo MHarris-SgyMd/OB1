@@ -36,7 +36,7 @@
 // Deploy this worker with _shared/auth.ts beside the function (supabase/functions/_shared/),
 // as the README says — next to the helpers this directory's _shared/ already held.
 import "../../../compat/deno-on-bun.ts";
-import { createClient } from "../../../compat/supabase-sql/index.ts"; // pinned by ../deno.json
+import { createClient } from "../../../compat/supabase-sql/index.ts";
 import { authenticateRequest, canWrite } from "../_shared/auth.ts";
 import {
   isRecord,

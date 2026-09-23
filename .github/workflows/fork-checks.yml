@@ -131,8 +131,8 @@ jobs:
       # Every vendored MCP server, API and worker imports the SQL shim (which
       # imports `bun`) since SMD-1798 and runs under Bun — the Portable-server
       # job starts each, the data-layer job drives their tools — so none
-      # resolves under Deno any more; the six steps that checked the last of
-      # them went with the move. kubernetes-deployment is the one vendored
+      # resolves under Deno any more; the five steps that checked the last six
+      # of them went with the move. kubernetes-deployment is the one vendored
       # file still written for Deno alone (its own database, SMD-1524).
       - name: deno check integrations/kubernetes-deployment
         working-directory: integrations/kubernetes-deployment
@@ -642,7 +642,7 @@ jobs:
         working-directory: compat/supabase-sql
         run: bunx tsc --noEmit
 
-      # 24 files depend on this behaving exactly like supabase-js. A shim that is
+      # 29 files depend on this behaving exactly like supabase-js. A shim that is
       # merely close is worse than none — they would inherit the differences with
       # no failing test to find them.
       - name: Conformance against real Postgres

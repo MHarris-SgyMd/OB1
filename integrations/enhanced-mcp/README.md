@@ -23,7 +23,7 @@ The original `server/` connector remains untouched and safe to leave connected: 
 
 ## Security
 
-This server authenticates every request against `MCP_ACCESS_KEY` using a constant-time comparison, and accepts the key only through the `x-brain-key` header or `Authorization: Bearer …` — never a URL query string. It runs under the Supabase `service_role`, which bypasses RLS by design; that is intentional for MCP use, but it does mean this server is the sensitivity-filter boundary. All tools that expose thought content skip `sensitivity_tier = 'restricted'` rows, and `brain_capture_thought` rejects restricted content outright (same for `update_thought`).
+This server authenticates every request against `MCP_ACCESS_KEY` using a constant-time comparison, and accepts the key only through the `x-brain-key` header or `Authorization: Bearer …` — never a URL query string. It runs as the database role `SUPABASE_URL` names — Supabase's `service_role` on a Supabase database, the table owner on a plain Postgres — which bypasses RLS by design; that is intentional for MCP use, but it does mean this server is the sensitivity-filter boundary. All tools that expose thought content skip `sensitivity_tier = 'restricted'` rows, and `brain_capture_thought` rejects restricted content outright (same for `update_thought`).
 
 **Companion schema exposure — please read before deploying publicly.** The enhanced-thoughts schema this server depends on is intended to install with `service_role`-only grants on the sensitive RPCs (`search_thoughts_text`, `brain_stats_aggregate`, `get_thought_connections`) — no `anon` GRANTs by default. That means those RPCs are reachable only via authenticated server-side code, including this MCP server. If your deployment's copy of that schema also grants `anon`, or if you later add public grants for a dashboard, be aware: `SECURITY DEFINER` + `anon` grant is an RLS bypass because the function body runs with the function owner's privileges. Combined with a publicly-reachable enhanced-mcp deployment, this would let anyone with your Supabase project URL + anon key read thought content directly via those RPCs — routing around this server's sensitivity filtering. Audit the grants on your companion schemas before exposing this MCP outside a trusted network.
 
@@ -64,15 +64,14 @@ OPENROUTER_API_KEY='your-openrouter-key' \
 PORT=8787 bun integrations/enhanced-mcp/index.ts
 ```
 
-`SUPABASE_URL` carries the Postgres connection string — the shim keeps the variable names, so the code does not change — and `SUPABASE_SERVICE_ROLE_KEY` may be left unset; `NODE_PATH` points an integration at the pinned install, since it has no `node_modules` of its own ([Run a migrated server under Bun](../../compat/supabase-sql/README.md#3-run-a-migrated-server-under-bun)). The server prints `Listening on http://localhost:8787/` (`PORT` unset, it listens on 8000, Deno's default — which podman's `gvproxy` also holds on macOS, hence 8787 here). To reach it from a hosted client, put it behind the same TLS proxy as the core server ([`SETUP.md`](../../SETUP.md)). `extensions/test-auth.ts` starts the server this way in CI, and `extensions/test-writes.ts` drives its thirteen tools against a real Postgres carrying `schemas/enhanced-thoughts` (SMD-1798).
+`SUPABASE_URL` carries the Postgres connection string — the shim keeps the variable names, so the code does not change — and `SUPABASE_SERVICE_ROLE_KEY` may be left unset; `NODE_PATH` resolves `hono`, `zod` and `@hono/mcp` from the pinned install, since an integration has no `node_modules` of its own, while the MCP SDK's subpaths Bun fetches into its own cache on first start — unpinned, and needing npm egress once — until SMD-1991 gives integrations an install of their own ([Run a migrated server under Bun](../../compat/supabase-sql/README.md#3-run-a-migrated-server-under-bun)). The server prints `Listening on http://localhost:8787/` (`PORT` unset, it listens on 8000, Deno's default — which podman's `gvproxy` also holds on macOS, hence 8787 here). To reach it from a hosted client, put it behind the same TLS proxy as the core server ([`SETUP.md`](../../SETUP.md)). `extensions/test-auth.ts` starts the server this way in CI, and `extensions/test-writes.ts` drives its thirteen tools against a real Postgres carrying `schemas/enhanced-thoughts` (SMD-1798).
 
 ### 2. Set Environment Variables
 
 The variables above are the server's secrets, passed as environment. Optional multi-provider fallback (for metadata classification resilience):
 
 ```bash
-OPENAI_API_KEY="your-openai-key" \
-ANTHROPIC_API_KEY="your-anthropic-key"
+export OPENAI_API_KEY="your-openai-key" ANTHROPIC_API_KEY="your-anthropic-key"   # before the bun command above
 ```
 
 ### 3. Add as a Remote MCP Connector

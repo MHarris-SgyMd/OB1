@@ -81,9 +81,13 @@ bun integrations/delete-thought-mcp/index.ts                             # a rec
 
 An extension sits beside `extensions/node_modules` and resolves its packages from
 there; a recipe or integration does not, and `NODE_PATH` points it at the same
-pinned install (only the servers that import `hono` or the MCP SDK need it — the
-workers, the APIs on their own key and the webhook receiver import nothing but the
-shim and their own files). The other variables are the ones the file's README has
+pinned install for `hono`, `zod` and `@hono/mcp` (only the servers that import
+them need it — the workers, the APIs on their own key and the webhook receiver
+import nothing but the shim and their own files). The MCP SDK's `exports`
+subpaths Bun does not resolve through `NODE_PATH`: an SDK-importing recipe or
+integration starts because Bun fetches the package into its own cache on first
+start — unpinned, with npm egress once — until SMD-1991 gives those directories
+an install of their own. The other variables are the ones the file's README has
 its Supabase deploy set as secrets, passed as environment instead; each README's
 callout gives its own line. `SUPABASE_SERVICE_ROLE_KEY` is read and ignored by
 every server but `work-operating-model-activation`, which refuses to start

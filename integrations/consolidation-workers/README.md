@@ -33,26 +33,15 @@ For the full tool and worker inventory, see `docs/05-tool-audit.md` in the repos
 
 ## Steps
 
-1. Copy the worker folders into your Supabase functions directory.
-2. Deploy the `consolidation-bio` and `consolidation-metadata` edge functions.
+1. Check out this repository — the workers run from it, under Bun.
+2. Start `bio/index.ts` and `metadata-norm/index.ts` with the environment below.
 3. Set the required environment variables and API keys.
 4. Run each worker in dry-run mode first, then apply changes.
 5. Verify the resulting rows in `consolidation_log` and `thoughts`.
 
-### 1. Copy the Integration
+### 1. Check Out the Integration
 
-Copy the `integrations/consolidation-workers/` folder into your Supabase project's `supabase/functions/` directory. Each subfolder becomes its own edge function:
-
-```bash
-mkdir -p supabase/functions/consolidation-bio supabase/functions/consolidation-metadata supabase/functions/_shared
-cp integrations/consolidation-workers/bio/index.ts supabase/functions/consolidation-bio/index.ts
-cp integrations/consolidation-workers/metadata-norm/index.ts supabase/functions/consolidation-metadata/index.ts
-cp integrations/consolidation-workers/deno.json supabase/functions/consolidation-bio/deno.json
-cp integrations/consolidation-workers/deno.json supabase/functions/consolidation-metadata/deno.json
-cp integrations/consolidation-workers/_shared/*.ts supabase/functions/_shared/
-```
-
-Files are copied one by one, not folders, so running the block again — or into a `_shared/` folder you already have from the enhanced MCP server or any other server on this fork — replaces files rather than nesting a copy. Both workers import the access-key module from `../_shared/auth.ts`. The copy is for a Supabase deployment of the files after `bun scripts/migrate-to-sql-shim.ts --revert`, which puts them back on supabase-js; on this fork both run under Bun, below, and the copy is not needed.
+The workers run from a checkout of this repository: each imports the repository's SQL shim and `compat/deno-on-bun.ts` by relative path, and the access-key module from `../_shared/auth.ts` beside it (the core server's, held byte-identical by `extensions/test-auth.ts`). Nothing is copied anywhere; there is no Supabase Edge Function to deploy, and the directory's `deno.json` pins nothing any more.
 
 ### 2. Run the Workers
 

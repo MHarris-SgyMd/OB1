@@ -194,8 +194,8 @@
  *      specifier-shaped string naming the package (bare, `npm:`, `jsr:`, an
  *      esm.sh URL, a subpath), comments blanked, in any code file under the
  *      seven category directories and docs/: every vendored server reaches the
- *      brain through compat/supabase-sql, and supabase-js stays only as the
- *      parity oracle in compat/ and extensions/package.json and in
+ *      brain through compat/supabase-sql, and supabase-js stays only in
+ *      server/index.ts (the Edge Function build, SMD-1800's) and
  *      server-portable's Workers store; counted per-file exceptions as 7's —
  *      the codemod's KEEP client (local-brain-no-mcp, SMD-1800's) and the
  *      dashboard's type-only import (SMD-1801's) (SMD-1798)
@@ -4152,11 +4152,11 @@ checkDestructiveSql();
 // SMD-1798 (the third of SMD-1795's seven). Every vendored MCP server, API,
 // worker and script reaches the brain through compat/supabase-sql — Bun's
 // Postgres client in supabase-js's shape — so running any of them needs no
-// Supabase project, PostgREST or service key; supabase-js stays in the tree as
-// the parity oracle compat/supabase-sql/test-compat.ts measures the shim
-// against (extensions/package.json installs it for that) and in
+// Supabase project, PostgREST or service key; supabase-js stays in the tree in
+// server/index.ts — the Edge Function build, SMD-1800's to retire — and in
 // server-portable/store-postgrest.ts for the Cloudflare Workers target
-// (SMD-1847), both outside this scan. This is what keeps the next rebase, or
+// (SMD-1847), both outside this scan (the shim's own suite writes its
+// PostgREST expectations by hand and loads no oracle). This is what keeps the next rebase, or
 // the next vendored file, from bringing a PostgREST client back: a
 // specifier-shaped string naming the package — "@supabase/supabase-js",
 // "npm:@supabase/supabase-js@2", "jsr:@supabase/supabase-js@2", a CDN URL
@@ -4170,8 +4170,8 @@ checkDestructiveSql();
 // counts them: the one client the codemod's KEEP list holds on supabase-js
 // (local-brain-no-mcp's, which runs inside that recipe's own Supabase stack —
 // SMD-1800 decides the recipe) and the dashboard's type-only import
-// (SMD-1801's). Every other vendored client moved: 26 files in change 74, six
-// servers here.
+// (SMD-1801's). Every other vendored client moved: the rest in change 74, the
+// last six here.
 const SUPABASE_JS_SPECIFIER = /(["'])(?:npm:|jsr:|https?:\/\/[^"'\s]*\/)?@supabase\/supabase-js(?:@[^"'/]*)?(?:\/[^"']*)?\1/g;
 /** Code, and HTML for the inline `<script type="module">` a dashboard's page may carry. */
 const CODE_FILE = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs|svelte|vue|html)$/;
@@ -4209,7 +4209,9 @@ function scriptBodiesOf(text: string): string {
   let out = "";
   let last = 0;
   for (const m of withoutComments.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/gi)) {
-    const start = m.index! + m[0].indexOf(m[1]);
+    // The body ends where the closing tag begins: anchored from the end, not by searching the match for the body's
+    // text, which a body repeated in the opening tag's attributes would find first.
+    const start = m.index! + m[0].length - "</script>".length - m[1].length;
     out += blank(withoutComments.slice(last, start)) + m[1];
     last = start + m[1].length;
   }
@@ -4242,7 +4244,7 @@ function checkSupabaseJsImports() {
       continue;
     }
     for (const line of lines) {
-      fail(`${rel}:${line}`, `imports @supabase/supabase-js at runtime — every vendored server reaches the brain through compat/supabase-sql since SMD-1798 (\`bun scripts/migrate-to-sql-shim.ts --apply ${rel}\`; the shim's README says what it still refuses); supabase-js stays only as the parity oracle in compat/ and extensions/package.json, and in server-portable's Workers store`);
+      fail(`${rel}:${line}`, `imports @supabase/supabase-js at runtime — every vendored server reaches the brain through compat/supabase-sql since SMD-1798 (\`bun scripts/migrate-to-sql-shim.ts --apply ${rel}\`; the shim's README says what it still refuses); supabase-js stays only in server/index.ts (the Edge Function build) and in server-portable's Workers store`);
     }
   }
   for (const rel of SUPABASE_JS_EXCEPTIONS.keys()) if (!seen.has(rel)) fail(rel, "check 22's exception names a file the scan does not reach — stale, or the file is gone");
