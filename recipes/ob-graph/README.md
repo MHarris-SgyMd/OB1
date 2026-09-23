@@ -4,7 +4,7 @@
 
 **Created by [@alanshurafa](https://github.com/alanshurafa)**
 
-A knowledge graph you can build and query through your AI — powered by PostgreSQL, deployed as a Supabase Edge Function, and accessed via MCP.
+A knowledge graph you can build and query through your AI — powered by PostgreSQL, served under Bun against your Postgres, and accessed via MCP.
 
 ## Why This Matters
 
@@ -70,32 +70,40 @@ The schema creates:
 </details>
 
 > [!IMPORTANT]
-> The schema includes `GRANT` statements for `service_role`. These are required on newer Supabase projects — don't skip them.
+> The schema includes `GRANT` statements for `service_role` and row-level-security policies on `auth.uid()`. On a Supabase project both exist — don't skip the grants. On a plain Postgres, give the schema the three roles and the two functions first (the server connects as one role and scopes rows by `DEFAULT_USER_ID` itself; the table owner is not subject to the policies):
+>
+> ```bash
+> psql "$DATABASE_URL" -c "DO \$r\$ BEGIN
+>     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'service_role') THEN CREATE ROLE service_role NOLOGIN; END IF;
+>     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN CREATE ROLE anon NOLOGIN; END IF;
+>     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN CREATE ROLE authenticated NOLOGIN; END IF;
+>   END \$r\$;
+>   CREATE SCHEMA IF NOT EXISTS auth;
+>   CREATE FUNCTION auth.uid() RETURNS uuid LANGUAGE sql STABLE AS 'SELECT NULL::uuid';
+>   CREATE FUNCTION auth.jwt() RETURNS jsonb LANGUAGE sql STABLE AS 'SELECT ''{}''::jsonb';"
+> psql "$DATABASE_URL" -f recipes/ob-graph/schema.sql
+> ```
 
-Done when: You can see `graph_nodes` and `graph_edges` in the Supabase Table Editor, and both functions appear under Database → Functions.
+Done when: `graph_nodes` and `graph_edges` exist and `traverse_graph` and `find_shortest_path` are functions in your database (`\dt graph_*` and `\df traverse_graph` in psql; the Supabase Table Editor and Database → Functions, there).
 
 ---
 
-![Step 2](https://img.shields.io/badge/Step_2-Deploy_the_MCP_Server-2E86AB?style=for-the-badge)
+![Step 2](https://img.shields.io/badge/Step_2-Run_the_MCP_Server-2E86AB?style=for-the-badge)
 
-Follow the [Deploy an Edge Function](../../primitives/deploy-edge-function/) guide using these values:
-
-| Setting | Value |
-|---------|-------|
-| Function name | `ob-graph-mcp` |
-| Download path | `recipes/ob-graph` |
-
-The guide's Step 2 also downloads `_shared/auth.ts` — the server imports it from `../_shared/auth.ts` (the copy in `recipes/_shared/` is the same file). Before you deploy, mint an access key as the guide's Step 3 shows and decide which Open Brain user this graph belongs to. Then set the function secrets:
+This server runs under [Bun](https://bun.sh) against your Postgres: it imports the repository's SQL shim (`compat/supabase-sql`, Bun's Postgres client in supabase-js's shape) and `compat/deno-on-bun.ts` (the two Deno globals it uses, on Bun), so it is not a Supabase Edge Function and `supabase functions deploy` does not apply (FORK.md change 74; SMD-1798 moved this server, whose `graph_nodes!graph_edges_target_node_id_fkey(…)` embeds — the key named because two join the tables — the shim did not read until then). It imports the access-key module from `../_shared/auth.ts` (the copy in `recipes/_shared/`, the core server's). Mint an access key as [Deploy an Edge Function, Step 3](../../primitives/deploy-edge-function/README.md#step-3-mint-an-access-key) shows, decide which Open Brain user this graph belongs to, and from a checkout of this repository:
 
 ```bash
-supabase secrets set \
-  MCP_ACCESS_KEYS=laptop:write:<sha256-of-your-key> \
-  DEFAULT_USER_ID=your-user-uuid
+(cd extensions && bun install)   # once: the pinned hono, zod and MCP SDK the server imports
+NODE_PATH=extensions/node_modules \
+SUPABASE_URL='postgres://user:password@host:5432/openbrain' \
+MCP_ACCESS_KEYS='laptop:write:<sha256-of-your-key>' \
+DEFAULT_USER_ID='your-user-uuid' \
+PORT=8787 bun recipes/ob-graph/index.ts
 ```
 
-`SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are provided automatically by Supabase for Edge Functions. You only need to set `MCP_ACCESS_KEYS` and `DEFAULT_USER_ID` manually. `MCP_ACCESS_KEYS` holds one `name:scope:sha256` entry per client — the hash, never the key; the older single `MCP_ACCESS_KEY` still works, compared by digest. The secret is project-wide — one `MCP_ACCESS_KEYS` for every function in the project — so set the whole list, your existing entries plus this one, comma-separated. A `read` key sees the query tools only; the five tools that write (`create_node`, `create_edge`, `update_node`, `delete_node`, `delete_edge`) are registered only for a `write` key.
+`SUPABASE_URL` carries the Postgres connection string — the shim keeps the variable names, so the code does not change — and `SUPABASE_SERVICE_ROLE_KEY` may be left unset; `NODE_PATH` resolves `hono`, `zod` and `@hono/mcp` from the pinned install, since a recipe has no `node_modules` of its own, while the MCP SDK's subpaths Bun fetches into its own cache on first start — unpinned, and needing npm egress once — until SMD-1991 gives recipes an install of their own ([Run a migrated server under Bun](../../compat/supabase-sql/README.md#3-run-a-migrated-server-under-bun)). `MCP_ACCESS_KEYS` holds one `name:scope:sha256` entry per client — the hash, never the key; the older single `MCP_ACCESS_KEY` still works, compared by digest. A `read` key sees the query tools only; the five tools that write (`create_node`, `create_edge`, `update_node`, `delete_node`, `delete_edge`) are registered only for a `write` key. The server prints `Listening on http://localhost:8787/` (`PORT` unset, it listens on 8000, Deno's default — which podman's `gvproxy` also holds on macOS, hence 8787 here); your **MCP Server URL** is `http://your-host:8787/mcp`. To reach it from a hosted client, put it behind the same TLS proxy as the core server ([`SETUP.md`](../../SETUP.md)). `extensions/test-auth.ts` starts the server this way in CI, and `extensions/test-tools.ts` drives all ten tools against a real Postgres carrying this `schema.sql` — the neighbours through the named keys, a traversal's `path` as a list of ids, the shortest path (SMD-1798).
 
-Done when: The `ob-graph-mcp` function is deployed successfully and its secrets include `MCP_ACCESS_KEYS` and `DEFAULT_USER_ID`.
+Done when: the server prints its `Listening on` line and `curl http://localhost:8787/health` answers.
 
 ---
 

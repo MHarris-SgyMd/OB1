@@ -1,3 +1,9 @@
+// MIGRATED OFF SUPABASE: imports compat/supabase-sql instead of @supabase/supabase-js.
+// Same API, but it speaks SQL directly. The environment variable NAMES are
+// unchanged — set SUPABASE_URL to a postgres:// connection string, and
+// SUPABASE_SERVICE_ROLE_KEY is ignored (credentials live in the URL).
+// ob1-original-import: @supabase/supabase-js
+// Revert with: bun scripts/migrate-to-sql-shim.ts --revert <file>
 // ob1-fork (SMD-1228): a thought's content and vector are written through the
 // functions that own them — update_thought for an edit, the 3-argument
 // upsert_thought for a capture — so the fingerprint (003/018), the model label
@@ -14,10 +20,10 @@
 // that write. FORK.md change 67; extensions/test-auth.ts exercises it.
 // The _shared import below is this file's first from outside its own directory: deploy
 // it with _shared/auth.ts beside it (supabase/functions/_shared/), as the README says.
-import "jsr:@supabase/functions-js/edge-runtime.d.ts";
+import "../../compat/deno-on-bun.ts"; // ob1-original-types: jsr:@supabase/functions-js/edge-runtime.d.ts
 
 import { Hono, type MiddlewareHandler } from "hono";
-import { createClient } from "@supabase/supabase-js";
+import { createClient } from "../../compat/supabase-sql/index.ts";
 import { authenticateRequest, canWrite, type Principal } from "../_shared/auth.ts";
 import { z } from "zod";
 
