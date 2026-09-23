@@ -286,12 +286,20 @@ than by editing a hand-numbered FORK.md section:
   the tickets and migrations it touches, a one-to-three-line changelog entry, and
   the record itself in the shape `changes/README.md` gives — at most 150 lines,
   citing tickets, migrations and existing change numbers, never a number of its
-  own, which the release step assigns.
+  own, which the release step assigns. CI holds this: the `Repo consistency`
+  job's landing check (`scripts/check-landing.ts`) refuses a PR whose change in
+  those directories, test files (`test-*.ts`, `*.test.ts`) and Markdown aside,
+  comes with no fragment added or modified; the refusal names the files that
+  asked (SMD-1857). The one landing that passes without a fragment is a release
+  cut, which records itself in `releases.json` instead (SMD-1860).
 - The release step assembles the accumulated fragments into numbered change
   files (`changes/NNN-<slug>.md`), FORK.md's index and `CHANGELOG.md` in one
-  commit and cuts the tag; **do not hand-number a new change file or edit
-  `CHANGELOG.md` by hand.** (Changes 1–103 predate this and keep their numbers;
-  a `### N.` section in FORK.md is refused by `check-fork-consistency`.)
+  commit, after the commit that bumps the version and adds its migration; the
+  maintainer tags the merge and `.github/workflows/release.yml` publishes the
+  images and the release (FORK.md, "Cutting a release"). **Do not hand-number a
+  new change file or edit `CHANGELOG.md` by hand.** (Changes 1–103 predate this
+  and keep their numbers; a `### N.` section in FORK.md is refused by
+  `check-fork-consistency`.)
 - A migration inside a released range is **frozen** — append a new migration file
   rather than editing an old one; `check-fork-consistency` enforces it.
 
@@ -357,7 +365,7 @@ Every PR is checked against these rules. All must pass before human review.
 2. **Required files** — Both `README.md` and `metadata.json` exist in the contribution folder
 3. **Metadata valid** — `metadata.json` parses as valid JSON and passes the repo JSON Schema
 4. **No credentials** — No API keys, tokens, passwords, or secrets in any file
-5. **SQL safety** — No `DROP TABLE`, `DROP DATABASE`, `TRUNCATE`, or unqualified `DELETE FROM`. The rule is that a file must never destroy existing rows; a trigger that refuses one of these statements is the rule applied, not a breach. No modifications to core `thoughts` table columns (adding columns is fine, altering/dropping existing ones is not)
+5. **SQL safety** — A `.sql` file must never destroy existing rows: no `DROP TABLE`, `DROP DATABASE`/`DROP SCHEMA`/`DROP OWNED`, `TRUNCATE`, or `DELETE FROM` without a `WHERE` of its own. `check-fork-consistency` check 21 reads every `.sql` for these as statements — a `--` comment quoting one is not a hit, a trigger that refuses one (`BEFORE TRUNCATE ON …`) is the rule applied, a `DELETE` with its `WHERE` on the next line is qualified — and names the file and line. No modifications to core `thoughts` table columns (adding columns is fine, altering/dropping existing ones is not; check 5)
 6. **Category-specific artifacts** — `recipes/` have code or detailed instructions, `schemas/` have SQL files, `dashboards/` have frontend code or `package.json`, `integrations/` have code files, `skills/` have at least one plain-text skill file, `primitives/` have substantial READMEs (200+ words), `extensions/` have both SQL and code files
 7. **PR format** — Title starts with `[recipes]`, `[schemas]`, `[dashboards]`, `[integrations]`, `[skills]`, `[primitives]`, or `[extensions]`
 8. **No binary blobs** — No files over 1MB, no `.exe`, `.dmg`, `.zip`, `.tar.gz`

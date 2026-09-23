@@ -67,11 +67,12 @@ remembered:
 warns, by name, when a brain is past its version's range or a server is older than
 the brain it serves. `db/version.mjs` is the one definition of the current version
 (`FORK_VERSION`), and `migrate.ts --dry-run` names the release each pending
-migration belongs to. The value 044 writes is `0.0.0+upstream.9543c29`, the
-pre-first-release baseline: the machinery is in place, no release has been cut yet.
+migration belongs to. 044 wrote `0.0.0+upstream.9543c29`, the pre-first-release
+baseline; each cut appends the migration that writes its version as the last file
+of the range it freezes — 048 writes `1.0.0+upstream.9543c29`, the first release.
 
 **A release is a tag naming three things**: the migration range it closes
-(the first cut, `001..044`), the server commit, and the upstream pin. The committed
+(the first cut, `001..048`), the server commit, and the upstream pin. The committed
 `releases.json` is the machine-readable mirror CI reads with no network. Migrations
 inside a released range are **frozen** — the ledger's sha check already refuses
 drift at apply time; `check-fork-consistency` adds the rule that a renumber or
@@ -165,7 +166,7 @@ and fails a "FORK.md change N" citation with no file behind it (SMD-1917).
 | 17 | `[fork] evals: choose the local models by measurement` | The local defaults were picked by size. `evals/` benchmarks retrieval and extraction against real Ollama; `nomic-embed-text` placed 5th of 7 and `llama3.2` reproduced its production faults. Defaults are now `embeddinggemma` + `qwen2.5:7b`. | **Unfiled** |
 
 <!-- changes-index:start — generated from changes/ by scripts/fork-index.ts; do not edit by hand -->
-**103 numbered changes** on top of the pin: 1–17 are the table above; 18–103 are one file each under [`changes/`](changes/README.md), newest last. A change's record is its file; the review-pass prose behind it is in the commits (`(caught: …)` tags, read by `scripts/mechanism-yield.ts`).
+**123 numbered changes** on top of the pin: 1–17 are the table above; 18–123 are one file each under [`changes/`](changes/README.md), newest last. A change's record is its file; the review-pass prose behind it is in the commits (`(caught: …)` tags, read by `scripts/mechanism-yield.ts`).
 
 | # | Change | Ticket |
 | --- | --- | --- |
@@ -255,8 +256,28 @@ and fails a "FORK.md change N" citation with no file behind it (SMD-1917).
 | 101 | [The chat calls can have an endpoint of their own](changes/101-the-chat-calls-can-have-an-endpoint-of-their.md) | SMD-1902 |
 | 102 | [Every knob the server reads reaches the container](changes/102-every-knob-the-server-reads-reaches.md) | SMD-1843 |
 | 103 | [Change 69's five servers name the key on 008's audit row](changes/103-change-69-s-five-servers-name-the-key-on-008.md) | SMD-1541 |
+| 104 | [A version for the fork, reported by the brain, with a changelog beside the design record](changes/104-a-version-for-the-fork-reported-by-the-brain.md) | SMD-1804 |
+| 105 | [The supersession judge has a model of its own](changes/105-the-supersession-judge-has-a-model-of-its-own.md) | SMD-1901 |
+| 106 | [Two fork conventions become checks](changes/106-two-fork-conventions-become-checks.md) | SMD-1808 |
+| 107 | [Nothing decided which content may leave the box for a model call](changes/107-nothing-decided-which-content-may-leave-the-box.md) | SMD-1903 |
+| 108 | [FORK.md is the front door, and every change is one file](changes/108-fork-md-is-the-front-door-and-every-change.md) | SMD-1917 |
+| 109 | [The stable brain is a derived view over the records, rebuilt by one tool](changes/109-the-stable-brain-is-a-derived-view-over.md) | SMD-1806 |
+| 110 | [The workers, benches, suites and evals are type-checked](changes/110-the-workers-benches-suites-and-evals-are-type.md) | SMD-1932 |
+| 111 | [The query log's column set: a filter that is finally written, the arm that served a query, and the tier that wrote it](changes/111-the-query-log-s-column-set-a-filter.md) | SMD-1490 |
+| 112 | [The connector taxonomy](changes/112-the-connector-taxonomy.md) | SMD-1933 |
+| 113 | [`thought_audit` becomes the log of record](changes/113-thought-audit-becomes-the-log-of-record.md) | SMD-1730 |
+| 114 | [The scripts are TypeScript, type-checked where they run](changes/114-the-scripts-are-typescript-type-checked-where.md) | SMD-1870 |
+| 115 | [The entity graph answers "what is central about X" from one command](changes/115-the-entity-graph-answers-what-is-central-about-x.md) | SMD-1938 |
+| 116 | [A seekable prune index on the query log, and the awaited write measured and kept](changes/116-a-seekable-prune-index-on-the-query-log.md) | SMD-1492 |
+| 117 | [Every thought in the dogfood brain labelled by kind](changes/117-every-thought-in-the-dogfood-brain-labelled.md) | SMD-1951 |
+| 118 | [`main`'s ruleset becomes a file the tree holds to the workflow](changes/118-main-s-ruleset-becomes-a-file-the-tree-holds.md) | SMD-1856 |
+| 119 | [The SQL-safety guard rail is a check](changes/119-the-sql-safety-guard-rail-is-a-check.md) | SMD-1936 |
+| 120 | [A landing that changes the fork records itself, and the merge queue is built but refused](changes/120-a-landing-that-changes-the-fork-records-itself.md) | SMD-1857 |
+| 121 | [Three shared modules for the tools beside the server](changes/121-three-shared-modules-for-the-tools-beside.md) | SMD-1985 |
+| 122 | [The board reaches the brain by a sweep that runs itself](changes/122-the-board-reaches-the-brain-by-a-sweep-that-runs.md) | SMD-1954 |
+| 123 | [A release publishes what it names](changes/123-a-release-publishes-what-it-names.md) | SMD-1860 |
 
-Landed since the last release and numbered at the next one (SMD-1804): [SMD-1490](changes/smd-1490.md), [SMD-1492](changes/smd-1492.md), [SMD-1730](changes/smd-1730.md), [SMD-1804](changes/smd-1804.md), [SMD-1806](changes/smd-1806.md), [SMD-1808](changes/smd-1808.md), [SMD-1870](changes/smd-1870.md), [SMD-1879](changes/smd-1879.md), [SMD-1901](changes/smd-1901.md), [SMD-1903](changes/smd-1903.md), [SMD-1917](changes/smd-1917.md), [SMD-1932](changes/smd-1932.md), [SMD-1933](changes/smd-1933.md), [SMD-1938](changes/smd-1938.md), [SMD-1951](changes/smd-1951.md).
+Landed since the last release and numbered at the next one (SMD-1804): [SMD-1298](changes/smd-1298.md), [SMD-1809](changes/smd-1809.md), [SMD-1879](changes/smd-1879.md), [SMD-1953](changes/smd-1953.md), [SMD-1989](changes/smd-1989.md), [SMD-1990](changes/smd-1990.md).
 <!-- changes-index:end -->
 
 ### Files we own
@@ -462,8 +483,8 @@ and the yield count cannot disagree. `workflow-lint` runs `actionlint` (pinned b
 checksum) with `shellcheck` over this workflow's `run:` steps; the workflow now
 sets `defaults.run.shell: bash`, so every step runs under `-eo pipefail` and a
 masked `cmd | grep` failure is surfaced rather than swallowed. Both are opt-in
-locally (`bun scripts/install-hooks.ts` for the commit hook); making them
-*required* is SMD-1805's ruleset work.
+locally (`bun scripts/install-hooks.ts` for the commit hook), and both are
+*required* on `main` with the other ten jobs since SMD-1856.
 
 ## Detached from the fork network
 
@@ -556,27 +577,30 @@ its measurements are in the change file named.
 
 ### Landing a rebase on `main`, which is protected
 
-`main` is the working default and carries a ruleset: nine required status checks,
+`main` is the working default and carries a ruleset: every one of
+`fork-checks.yml`'s twelve jobs required, on a head up to date with `main` and
+satisfied only by a run of the Actions app; changes only through a pull request;
 no deletion, **no force-push**, and no bypass actors — it applies to admins too.
-That is deliberate, and it interacts with a rebase in one specific way.
+The ruleset is a file, `.github/rulesets/main.json`, applied with
+`gh api -X PUT repos/MHarris-SgyMd/OB1/rulesets/22189960 --input .github/rulesets/main.json`,
+and `check-fork-consistency` check 20 holds the file to the workflow's job list,
+so a job added without being required fails CI by name (SMD-1856). That is
+deliberate, and it interacts with a rebase in one specific way.
 
 A rebase produces `siggymd/rebase-YYYYMMDD` with **rewritten history**, so it
 cannot fast-forward onto `main`. Two ways forward:
 
-**Open a pull request (normal case).** Required status checks mean **no push
-directly to `main` succeeds**, merge commit or not — a push carries commits CI has
-never seen, so the rule cannot be satisfied:
-
-```
-remote: - 9 of 9 required status checks are expected.
-```
-
-That is not a quirk of the merge; it is what requiring checks means. Everything
+**Open a pull request (normal case).** The pull-request rule means **no push
+directly to `main` succeeds**, green checks or not, and the required checks refuse
+it a second way — a push carries commits CI has never seen. GitHub answers with
+the rules it applied, one `remote: -` line each: that changes must be made through
+a pull request, and that the required status checks are expected. That is not a
+quirk of the merge; it is what the ruleset means. Everything
 reaching `main` goes through a PR, which is two commands:
 
 ```bash
 gh pr create --fill --base main --head siggymd/rebase-$(date +%Y%m%d)
-gh pr merge --merge --auto        # lands itself once the nine checks pass
+gh pr merge --merge --auto        # lands itself once the twelve checks pass
 ```
 
 History keeps both lines, which is what happened when the fork's work first landed
@@ -592,12 +616,13 @@ remote: - Cannot force-push to this branch
 ```
 
 To do it anyway — as with any push that must bypass the checks — set the ruleset
-to `disabled`, push, and put it back:
+to `disabled`, push, and put it back from the record, so the live copy converges
+on the file — every field the file names — at every use:
 
 ```bash
 gh api -X PUT repos/MHarris-SgyMd/OB1/rulesets/22189960 -f enforcement=disabled
 git push --force-with-lease origin main
-gh api -X PUT repos/MHarris-SgyMd/OB1/rulesets/22189960 -f enforcement=active
+gh api -X PUT repos/MHarris-SgyMd/OB1/rulesets/22189960 --input .github/rulesets/main.json
 ```
 
 Prefer `--force-with-lease` over `--force` so a push that raced with someone else's

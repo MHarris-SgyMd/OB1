@@ -1,17 +1,4 @@
----
-type: changed
-bump: patch
-tickets: [SMD-1870]
-migrations: []
----
-
-## Changelog
-
-`scripts/` is TypeScript and type-checked in CI: the thirteen `.mjs` scripts are `.ts`, with a `tsconfig.json` mirroring the server's and the type pins check 18 holds across five directories, a `Typecheck the scripts` step in the job that runs the checker, and every reference outside `changes/` following; the "node runs it too" claim goes (SMD-1870).
-
-## FORK
-
-The scripts are TypeScript, type-checked where they run — `scripts/*.mjs` become `scripts/*.ts` with a tsconfig and pins mirroring the server's, a typecheck step in the repo-consistency job, check 18 holding five directories, and the "node runs it too" claim gone (SMD-1870)
+# 114. The scripts are TypeScript, type-checked where they run — `scripts/*.mjs` become `scripts/*.ts` with a tsconfig and pins mirroring the server's, a typecheck step in the repo-consistency job, check 18 holding five directories, and the "node runs it too" claim gone (SMD-1870)
 
 **What changed.** The thirteen files under `scripts/` — the consistency checker,
 the release assembler, the index renderer, the fragment reader, the commit

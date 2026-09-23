@@ -1,0 +1,354 @@
+# The release job (SMD-1860): what a tag publishes.
+#
+# A release is cut on main by scripts/assemble-release.ts — the fragments
+# numbered, CHANGELOG.md and releases.json written, FORK_VERSION bumped and a
+# schema_version migration added — and named by an annotated tag `v<X.Y.Z>` on
+# the cut's merge commit. This workflow runs on that tag and publishes the
+# runnable half: the ob1-server and ob1-migrate images to GHCR, tagged with the
+# version; a compose overlay pinning the two by digest and Ollama by the digest
+# its pinned tag resolved to; and a GitHub release carrying the CHANGELOG
+# section, the change files the cut numbered, and the review yield table. The
+# stack is brought up from the PULLED images — not the checkout — and held to
+# the same lines the `Full stack, no Supabase` job holds a checkout build to,
+# plus preflight's schema-version row for the version this release's migrator
+# wrote. Nothing publishes if a rule fails: the release object is created last.
+#
+# The same job runs as a REHEARSAL — on a pull request that touches what it
+# builds from, and on workflow_dispatch — with nothing published: the images
+# are built on the runner and loaded, the overlay names them by tag alone, the
+# stack comes up from them, and the notes and overlay land as a workflow
+# artifact. So the shape is exercised before a tag ever is, and a change to a
+# Dockerfile or to compose.yaml is judged the way a release would judge it.
+#
+# scripts/release-artifacts.ts is the reader and renderer; the bash here only
+# runs docker and gh. It refuses a tag that does not name releases.json's last
+# entry, a FORK_VERSION that was not bumped, a migration or a fragment that
+# landed after the cut, a tag off main, and an unpinned Ollama.
+#
+# One thing to check after the first tag, outside this file: the visibility of
+# the two GHCR packages. A package a workflow first publishes may be created
+# private whatever the repository's visibility; a clean machine's `docker
+# compose pull` then wants a login, so flip both to public in the package
+# settings if they are not. The token's rights come from `permissions:` below
+# (this job alone gets contents and packages write), whatever the repository's
+# default workflow permission is.
+name: Release
+
+on:
+  push:
+    tags: ["v[0-9]*"]
+  pull_request:
+    # What the job builds from, or reads: the two Dockerfiles and what they
+    # COPY, the compose files, the manifest, the script and this file.
+    paths:
+      - ".github/workflows/release.yml"
+      - "scripts/release-artifacts.ts"
+      - "server-portable/**"
+      - "db/Dockerfile"
+      - "db/migrate.ts"
+      - "db/migrations/**"
+      - "db/config.mjs"
+      - "db/version.mjs"
+      - ".dockerignore"
+      - "deploy/**"
+      - "releases.json"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+# One release at a time, never cancelled: a tag's run that stopped half-way
+# would leave images published with no release naming them.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Release (images, stack from them, notes)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # gh release create
+      packages: write   # GHCR
+    env:
+      PUBLISH: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
+      # No build-record artifacts from build-push-action: four `.dockerbuild`
+      # uploads per run beside the one artifact this job means to keep.
+      DOCKER_BUILD_RECORD_UPLOAD: "false"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The yield table reads the commit log; the facts check the tag is on
+          # origin/main; assemble-release refuses a shallow clone for the same
+          # reason. The whole history, then.
+          fetch-depth: 0
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.0"
+
+      # Everything the rest of this job needs to know, checked first. On a tag:
+      # the tag names releases.json's last entry, FORK_VERSION equals it, the
+      # range closes every migration on disk, no fragment sits in changes/, the
+      # commit is on origin/main, Ollama is pinned. A rehearsal takes the tree
+      # as it is (version FORK_VERSION, image tag `rehearsal`).
+      - name: What this run releases
+        id: facts
+        env:
+          MODE_ARGS: ${{ env.PUBLISH == 'true' && format('--tag {0}', github.ref_name) || '--rehearsal' }}
+        run: |
+          bun scripts/release-artifacts.ts --self-check
+          # shellcheck disable=SC2086  # MODE_ARGS is two words on a tag, one on a rehearsal
+          bun scripts/release-artifacts.ts facts $MODE_ARGS --owner "$GITHUB_REPOSITORY_OWNER" --out "$GITHUB_OUTPUT" | grep -v -e '^[a-z_]*_labels<<' -e '^org\.opencontainers' -e '^__OB1_EOF__$'
+
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: env.PUBLISH == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # A rehearsal proves both platforms build (nothing kept) and then loads
+      # the amd64 image the stack below runs; a tag builds both and pushes.
+      # Root context for both images: server-portable/Dockerfile and db/Dockerfile
+      # reach db/config.mjs and releases.json, and the root .dockerignore keeps
+      # the context to what they copy.
+      - name: Build ob1-server for both platforms (rehearsal — kept only in the cache)
+        if: env.PUBLISH != 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ steps.facts.outputs.server_dockerfile }}
+          platforms: linux/amd64,linux/arm64
+          push: false
+          provenance: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build ob1-migrate for both platforms (rehearsal — kept only in the cache)
+        if: env.PUBLISH != 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ steps.facts.outputs.migrate_dockerfile }}
+          platforms: linux/amd64,linux/arm64
+          push: false
+          provenance: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build ob1-server
+        id: server
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ steps.facts.outputs.server_dockerfile }}
+          platforms: ${{ env.PUBLISH == 'true' && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
+          push: ${{ env.PUBLISH == 'true' }}
+          load: ${{ env.PUBLISH != 'true' }}
+          tags: ${{ steps.facts.outputs.server_image }}
+          labels: ${{ steps.facts.outputs.server_labels }}
+          # No provenance attestation: it adds an `unknown/unknown` manifest
+          # beside the two platforms in GHCR's tag list, and the digest the
+          # overlay pins is the index's.
+          provenance: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build ob1-migrate
+        id: migrate
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ steps.facts.outputs.migrate_dockerfile }}
+          platforms: ${{ env.PUBLISH == 'true' && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
+          push: ${{ env.PUBLISH == 'true' }}
+          load: ${{ env.PUBLISH != 'true' }}
+          tags: ${{ steps.facts.outputs.migrate_image }}
+          labels: ${{ steps.facts.outputs.migrate_labels }}
+          provenance: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # The release's compose overlay: the two images by tag — and, on a tag, by
+      # the digest the push returned — and Ollama by the digest its pinned tag
+      # resolves to today, read from the registry without a pull. A rehearsal's
+      # images were built here, not pulled, so `name:tag@digest` would resolve
+      # nothing locally; they are named by tag alone.
+      - name: Render the release's compose overlay
+        id: overlay
+        env:
+          MODE_ARGS: ${{ env.PUBLISH == 'true' && format('--tag {0}', github.ref_name) || '--rehearsal' }}
+          OLLAMA_IMAGE: ${{ steps.facts.outputs.ollama_image }}
+          SERVER_DIGEST: ${{ steps.server.outputs.digest }}
+          MIGRATE_DIGEST: ${{ steps.migrate.outputs.digest }}
+        run: |
+          ollama_digest=$(docker buildx imagetools inspect "$OLLAMA_IMAGE" --format '{{.Manifest.Digest}}')
+          echo "ollama_digest=$ollama_digest" >> "$GITHUB_OUTPUT"
+          digests=()
+          if [ "$PUBLISH" = true ]; then digests=(--server-digest "$SERVER_DIGEST" --migrate-digest "$MIGRATE_DIGEST"); fi
+          # shellcheck disable=SC2086  # MODE_ARGS is two words on a tag, one on a rehearsal
+          bun scripts/release-artifacts.ts compose $MODE_ARGS --owner "$GITHUB_REPOSITORY_OWNER" --ollama-digest "$ollama_digest" "${digests[@]}" > deploy/compose.release.yaml
+          cat deploy/compose.release.yaml
+
+      # The `Full stack, no Supabase` job's stack, from the images instead of the
+      # checkout: the same deploy/.env shape (a provider address that is neither
+      # the code's default nor the compose fallback, declared local; the query
+      # log on), and `up` with `--pull never` so nothing here is built or fetched
+      # behind the overlay's back. Postgres is pulled by name first — a fresh
+      # runner has no image at all, and `--pull never` refused the pgvector pull
+      # too on the first rehearsal (caught: run-it, PR #119) — and on a tag the
+      # two OB1 images with it, which proves the registry serves what was
+      # pushed, under the job's token.
+      - name: Bring up the stack from the images
+        working-directory: deploy
+        run: |
+          KEY=$(openssl rand -hex 32)
+          HASH=$(printf '%s' "$KEY" | shasum -a 256 | cut -d' ' -f1)
+          echo "OB1_SMOKE_KEY=$KEY" >> "$GITHUB_ENV"
+          cat > .env <<EOF
+          POSTGRES_PASSWORD=$(openssl rand -hex 24)
+          MCP_ACCESS_KEYS=ci:write:$HASH
+          OB1_LLM_BASE_URL=http://host.docker.internal:11434/v1
+          OB1_LLM_LOCAL=1
+          OB1_QUERY_LOG=on
+          SERVER_PORT=8010
+          EOF
+          # What compose makes of the overlay: every service the release names
+          # runs the release's image, Ollama's by digest.
+          docker compose -f compose.yaml -f compose.release.yaml --profile local-models config --format json \
+            | jq -e --arg s "$SERVER_IMAGE" --arg m "$MIGRATE_IMAGE" '(.services.server.image | startswith($s)) and (.services.migrate.image | startswith($m)) and (.services.ollama.image | test("^ollama/ollama@sha256:")) and (.services.ollama.image == .services["ollama-pull"].image)' >/dev/null
+          pull=(postgres)
+          if [ "$PUBLISH" = true ]; then pull+=(server migrate); fi
+          docker compose -f compose.yaml -f compose.release.yaml pull "${pull[@]}"
+          docker compose -f compose.yaml -f compose.release.yaml up -d --pull never --wait --wait-timeout 240
+        env:
+          SERVER_IMAGE: ${{ steps.facts.outputs.server_image }}
+          MIGRATE_IMAGE: ${{ steps.facts.outputs.migrate_image }}
+
+      # The lines `Full stack, no Supabase` holds a checkout build to, verbatim
+      # (SMD-1843, SMD-1903), and one more: preflight's schema-version row for
+      # the brain this release's migrator wrote — the version the cut's
+      # migration upserted and the ledger's highest migration, which is the
+      # range's end.
+      - name: The server sees what deploy/.env says, and reports the release's version
+        working-directory: deploy
+        env:
+          PREFLIGHT_ROW: ${{ steps.facts.outputs.preflight_row }}
+        run: |
+          LOG="$(docker compose -f compose.yaml -f compose.release.yaml logs --no-color server)"
+          grep -E 'model provider +http://host\.docker\.internal:11434/v1\b.*\(local — no credential needed\)' <<<"$LOG"
+          grep -E 'embeddings egress +http://host\.docker\.internal:11434/v1 is declared local \(OB1_LLM_LOCAL\)' <<<"$LOG"
+          grep -F 'ON (OB1_QUERY_LOG=on) here' <<<"$LOG"
+          grep -F 'preflight OK' <<<"$LOG"
+          grep -E "$PREFLIGHT_ROW" <<<"$LOG"
+
+      - name: Smoke-test it over MCP
+        working-directory: deploy
+        run: ./smoke.sh
+
+      - name: Confirm no Supabase CLI anywhere in the stack
+        working-directory: deploy
+        run: |
+          if docker compose -f compose.yaml -f compose.release.yaml exec -T server sh -c 'command -v supabase' 2>/dev/null; then
+            echo "A supabase binary is present in the server image." >&2
+            exit 1
+          fi
+          echo "No supabase binary in the running stack."
+
+      - name: Logs on failure
+        if: failure()
+        working-directory: deploy
+        run: docker compose -f compose.yaml -f compose.release.yaml logs --tail 60
+
+      - name: Tear down
+        if: always()
+        working-directory: deploy
+        run: docker compose -f compose.yaml -f compose.release.yaml down -v
+
+      # The release's file assets, copied under their published names from the
+      # one list the notes' download lines read too (release-artifacts.ts
+      # ASSETS); the change files the cut numbered; the yield table over the
+      # window since the previous release (the whole log for the first); and
+      # the notes — the CHANGELOG section, how to run it, the digests, the
+      # change files, the table.
+      - name: Gather the assets and render the release notes
+        env:
+          MODE_ARGS: ${{ env.PUBLISH == 'true' && format('--tag {0}', github.ref_name) || '--rehearsal' }}
+          PREVIOUS_TAG: ${{ steps.facts.outputs.previous_tag }}
+          SERVER_DIGEST: ${{ steps.server.outputs.digest }}
+          MIGRATE_DIGEST: ${{ steps.migrate.outputs.digest }}
+          OLLAMA_DIGEST: ${{ steps.overlay.outputs.ollama_digest }}
+          CHANGE_FILES: ${{ steps.facts.outputs.change_files }}
+          ASSETS: ${{ steps.facts.outputs.assets }}
+          YIELD_ASSET: ${{ steps.facts.outputs.yield_asset }}
+        run: |
+          mkdir -p release-assets
+          for pair in $ASSETS; do cp "${pair%%=*}" "release-assets/${pair##*=}"; done
+          for f in $CHANGE_FILES; do cp "changes/$f" release-assets/; done
+          since=()
+          if [ -n "$PREVIOUS_TAG" ]; then since=(--since "$PREVIOUS_TAG"); fi
+          bun scripts/mechanism-yield.ts "${since[@]}" > "release-assets/$YIELD_ASSET"
+          digests=(--ollama-digest "$OLLAMA_DIGEST")
+          if [ "$PUBLISH" = true ]; then digests+=(--server-digest "$SERVER_DIGEST" --migrate-digest "$MIGRATE_DIGEST"); fi
+          # shellcheck disable=SC2086  # MODE_ARGS is two words on a tag, one on a rehearsal
+          bun scripts/release-artifacts.ts notes $MODE_ARGS --owner "$GITHUB_REPOSITORY_OWNER" --yield "release-assets/$YIELD_ASSET" "${digests[@]}" > release-assets/notes.md
+          ls -la release-assets
+          cat release-assets/notes.md >> "$GITHUB_STEP_SUMMARY"
+
+      # The release's files alone — what a machine with no checkout downloads
+      # (deploy/README.md, "Pinning a release") — bring the stack up: the
+      # copied compose.yaml's `build:` names a context that does not exist
+      # there, and `up` without --build must not care. The same .env, the
+      # same images, a directory of its own (its name is the project's), after
+      # the checkout's stack is down so the port is free. Held by the run, not
+      # by a reading of compose's source (caught: cold read).
+      - name: The release's files alone bring the stack up (no checkout)
+        env:
+          ASSETS: ${{ steps.facts.outputs.assets }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/ob1-release-files"
+          for pair in $ASSETS; do cp "release-assets/${pair##*=}" "$RUNNER_TEMP/ob1-release-files/"; done
+          cp deploy/.env "$RUNNER_TEMP/ob1-release-files/.env"
+          cd "$RUNNER_TEMP/ob1-release-files"
+          docker compose -f compose.yaml -f compose.release.yaml up -d --pull never --wait --wait-timeout 240
+          docker compose -f compose.yaml -f compose.release.yaml logs --no-color server | grep -F 'preflight OK'
+          docker compose -f compose.yaml -f compose.release.yaml down -v
+
+      - name: Keep the rehearsal's overlay and notes
+        if: env.PUBLISH != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-rehearsal-run-${{ github.run_id }}
+          path: release-assets/
+          retention-days: 14
+
+      # Last, so a run that failed above leaves no release naming images the
+      # stack did not come up from. --verify-tag: the tag exists on the remote;
+      # the title is the full version, build metadata included.
+      - name: Create the GitHub release
+        if: env.PUBLISH == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ steps.facts.outputs.version }}
+          ASSETS: ${{ steps.facts.outputs.assets }}
+          YIELD_ASSET: ${{ steps.facts.outputs.yield_asset }}
+          CHANGE_FILES: ${{ steps.facts.outputs.change_files }}
+        run: |
+          files=("release-assets/$YIELD_ASSET")
+          for pair in $ASSETS; do files+=("release-assets/${pair##*=}"); done
+          for f in $CHANGE_FILES; do files+=("release-assets/$f"); done
+          gh release create "$TAG" --verify-tag --title "$VERSION" --notes-file release-assets/notes.md "${files[@]}"
+          gh release view "$TAG" --json url,assets --jq '.url, (.assets[].name)'

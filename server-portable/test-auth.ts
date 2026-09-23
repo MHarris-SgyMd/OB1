@@ -12,10 +12,10 @@
  *                           nothing listens on and refused at once; [11] says why)
  */
 
-import { authenticate, hashKey, parseKeyRecords, canWrite, secretMatches } from "./auth.ts";
+import { authenticate, hashKey, parseKeyRecords, canCapture, canRead, canWrite, secretMatches, SCOPES } from "./auth.ts";
 import { actorPayload } from "./store.ts";
 import { createAssert } from "../db/test-support.ts";
-import { visibleToolNames, READ_TOOL_NAMES, type ToolName } from "./tools.ts";
+import { visibleToolNames, READ_TOOL_NAMES, WRITE_TOOL_NAMES, type ToolName } from "./tools.ts";
 
 const { assert, report } = createAssert();
 
@@ -28,9 +28,12 @@ const MUTATING = ["capture_thought", "update_thought", "delete_thought"] as cons
 
 const WRITE_KEY = "w".repeat(64);
 const READ_KEY = "r".repeat(64);
+// The capture-only scope (SMD-1298): the key a session-end hook holds.
+const CAPTURE_KEY = "c".repeat(64);
 const KEYS = [
   `laptop:write:${hashKey(WRITE_KEY)}`,
   `chatgpt:read:${hashKey(READ_KEY)}`,
+  `session-hook:capture:${hashKey(CAPTURE_KEY)}`,
 ].join(",");
 
 console.log("[1] Keys are stored as hashes, never as keys");
@@ -53,7 +56,8 @@ console.log("\n[2] Parsing rejects a config that stores raw keys");
 {
   const good = parseKeyRecords(KEYS);
   assert(good.problems.length === 0, "a well-formed config parses cleanly");
-  assert(good.keys.length === 2, "…yielding both keys");
+  assert(good.keys.length === 3, "…yielding all three keys");
+  assert(good.keys.map((k) => k.scope).sort().join() === [...SCOPES].sort().join(), "…one of each scope the module names");
 
   /**
    * One raw key registered under two names.
@@ -70,22 +74,23 @@ console.log("\n[2] Parsing rejects a config that stores raw keys");
   assert(/keygen\.ts/.test(dup.problems[0] ?? ""), "…and how to mint a separate key");
   // The mirror: it must be the SHARED digest that trips this, not merely having
   // two keys. A check that rejected every multi-key config would also pass above.
-  assert(parseKeyRecords(KEYS).problems.length === 0, "two names with distinct digests still parse cleanly");
+  assert(parseKeyRecords(KEYS).problems.length === 0, "three names with distinct digests still parse cleanly");
 
   const raw = parseKeyRecords(`laptop:write:${WRITE_KEY}`);
   assert(raw.problems.length > 0, "a raw key in the hash position is rejected");
   assert(/Store the HASH, not the key/.test(raw.problems[0]), "…with an explanation");
   assert(/keygen\.ts/.test(raw.problems[0]), "…and the command to mint one properly");
 
-  assert(parseKeyRecords("laptop:admin:" + hashKey("x")).problems.some((p) => /expected read or write/.test(p)),
-    "an unknown scope is rejected");
+  assert(parseKeyRecords("laptop:admin:" + hashKey("x")).problems.some((p) => /expected read, write or capture/.test(p)),
+    "an unknown scope is rejected, naming the three");
+  assert(parseKeyRecords("laptop:admin:" + hashKey("x")).keys.length === 0, "…and yields no key");
   assert(parseKeyRecords("no-colons").problems.some((p) => /name:scope:sha256/.test(p)),
     "a malformed entry is rejected");
   assert(parseKeyRecords(`a:read:${hashKey("1")},a:write:${hashKey("2")}`).problems.some((p) => /more than once/.test(p)),
     "a duplicate key name is rejected");
 
   const commented = parseKeyRecords(`# a comment\n${KEYS}\n\n`);
-  assert(commented.keys.length === 2 && commented.problems.length === 0,
+  assert(commented.keys.length === 3 && commented.problems.length === 0,
     "comments and blank lines are ignored, so the value can be readable");
 }
 
@@ -96,6 +101,16 @@ console.log("\n[3] Authentication resolves a principal, or nothing");
   assert(w?.name === "laptop" && w?.scope === "write", "the write key resolves to its principal");
   const r = authenticate(READ_KEY, cfg);
   assert(r?.name === "chatgpt" && r?.scope === "read", "the read key resolves to its principal");
+  // Admission (first review pass): a consumer that names no scopes — every
+  // vendored server, whose read tools are registered for any principal — does
+  // not see a capture key at all; the core server names SCOPES and does.
+  assert(authenticate(CAPTURE_KEY, cfg) === null, "a capture key is NO principal to a consumer that does not admit the scope — the vendored servers");
+  const c = authenticate(CAPTURE_KEY, cfg, { admit: SCOPES });
+  assert(c?.name === "session-hook" && c?.scope === "capture", "…and resolves to its principal for one that admits every scope");
+  assert(authenticate(WRITE_KEY, cfg, { admit: ["read"] }) === null && authenticate(READ_KEY, cfg, { admit: ["read"] })?.scope === "read",
+    "admission is by scope, not by kind of key: a write key is refused where only read is admitted");
+  assert(authenticate("old-style-key", { MCP_ACCESS_KEY: "old-style-key" }, { admit: ["read", "capture"] }) === null,
+    "the legacy single key is write scope, and refused where write is not admitted");
 
   assert(authenticate("wrong", cfg) === null, "an unknown key resolves to null");
   assert(authenticate("", cfg) === null, "an empty key resolves to null");
@@ -106,10 +121,16 @@ console.log("\n[3] Authentication resolves a principal, or nothing");
 
 console.log("\n[4] Scopes");
 {
-  assert(canWrite({ name: "laptop", scope: "write", keyHash: hashKey(WRITE_KEY) }),
-         "write scope may write");
-  assert(!canWrite({ name: "chatgpt", scope: "read", keyHash: hashKey(READ_KEY) }),
-         "read scope may not write");
+  const w = { name: "laptop", scope: "write", keyHash: hashKey(WRITE_KEY) } as const;
+  const r = { name: "chatgpt", scope: "read", keyHash: hashKey(READ_KEY) } as const;
+  const c = { name: "session-hook", scope: "capture", keyHash: hashKey(CAPTURE_KEY) } as const;
+  assert(canWrite(w), "write scope may write");
+  assert(!canWrite(r), "read scope may not write");
+  assert(!canWrite(c), "capture scope may not write — it adds, and touches nothing that exists (SMD-1298)");
+  assert(canRead(w) && canRead(r), "write and read scopes may read");
+  assert(!canRead(c), "capture scope may not read");
+  assert(canCapture(w) && canCapture(c), "write and capture scopes may capture");
+  assert(!canCapture(r), "read scope may not capture");
 }
 
 console.log("\n[5] Independent revocation");
@@ -174,15 +195,48 @@ console.log("\n[7] A read-only key cannot see the tool that writes");
   // tools are checked by the independent, typed MUTATING list above — the count
   // alone would pass if one write tool were swapped for another.
   const write = await toolsFor(WRITE_KEY, "header");
-  assert(write.length === visibleToolNames({ write: true }).length, `write scope sees every tool (${write.length})`);
+  assert(write.length === visibleToolNames({ scope: "write" }).length, `write scope sees every tool (${write.length})`);
   for (const t of MUTATING) assert(write.includes(t), `…including "${t}"`);
 
   const read = await toolsFor(READ_KEY, "header");
-  assert(read.length === visibleToolNames({ write: false }).length, `read scope sees only the read tools (${read.length})`);
+  assert(read.length === visibleToolNames({ scope: "read" }).length, `read scope sees only the read tools (${read.length})`);
   for (const t of MUTATING) assert(!read.includes(t), `"${t}" is absent from a read key, not merely refused`);
   for (const t of READ_TOOL_NAMES) {
     assert(read.includes(t), `read scope keeps "${t}"`);
   }
+
+  // The capture-only key (SMD-1298): one tool, and every other absent — the
+  // reads as much as the two other writers. Named against the manifest AND
+  // against the literal, as the write surface is above: the manifest alone
+  // would pass if CAPTURE_TOOL_NAMES grew a read tool by mistake.
+  const capture = await toolsFor(CAPTURE_KEY, "header");
+  assert(capture.join() === [...visibleToolNames({ scope: "capture" })].sort().join(),
+    `capture scope sees exactly the manifest's capture surface (${capture.join(", ")})`);
+  assert(visibleToolNames({ scope: "write" }).join() === [...new Set([...READ_TOOL_NAMES, ...visibleToolNames({ scope: "capture" }), ...WRITE_TOOL_NAMES])].sort().join(),
+    "the write surface is the union of the three groups the manifest names");
+  assert(capture.length === 1 && capture[0] === "capture_thought", "…which is capture_thought alone");
+  for (const t of READ_TOOL_NAMES) assert(!capture.includes(t), `"${t}" is absent from a capture key — it cannot read the brain`);
+  for (const t of MUTATING.filter((t) => t !== "capture_thought")) assert(!capture.includes(t), `"${t}" is absent from a capture key`);
+}
+
+console.log("\n[7b] A capture key calling a read tool is told the tool does not exist, before any store is reached");
+{
+  // Absent, not refused: the SDK answers an unknown tool with a JSON-RPC error
+  // (or an isError result, depending on the version), and nothing here dials
+  // the database — the port nothing listens on would refuse it at once, and
+  // that refusal is a different message (see [11]).
+  const r = await fetch(BASE, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", "x-brain-key": CAPTURE_KEY },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 7, method: "tools/call", params: { name: "search_thoughts", arguments: { query: "anything" } } }),
+  });
+  const t = await r.text();
+  const line = t.startsWith("{") ? t : (t.split("\n").find((l) => l.startsWith("data: ")) ?? "").slice(6);
+  const b = JSON.parse(line);
+  const msg = String(b.error?.message ?? (b.result?.content ?? []).map((c: { text?: string }) => c.text ?? "").join(" "));
+  assert(b.error !== undefined || b.result?.isError === true, "search_thoughts through a capture key is an error");
+  assert(/not found|unknown tool/i.test(msg), `…saying the tool does not exist for this key (${msg.slice(0, 80)})`);
+  assert(!/ECONNREFUSED|connection/i.test(msg), "…and not a store error: the refusal came before any dial");
 }
 
 console.log("\n[8] Scope applies through the ?key= URL form too");
@@ -190,10 +244,12 @@ console.log("\n[8] Scope applies through the ?key= URL form too");
   // This is the form that ends up in logs and browser history, so it is the one
   // that most needs to be limitable.
   const read = await toolsFor(READ_KEY, "query");
-  assert(read.length === visibleToolNames({ write: false }).length && MUTATING.every((t) => !read.includes(t)),
+  assert(read.length === visibleToolNames({ scope: "read" }).length && MUTATING.every((t) => !read.includes(t)),
     "a read-only key in the URL is scoped too — no mutating tool");
   const write = await toolsFor(WRITE_KEY, "query");
   assert(MUTATING.every((t) => write.includes(t)), "a write key in the URL still sees the mutating tools");
+  const capture = await toolsFor(CAPTURE_KEY, "query");
+  assert(capture.join() === "capture_thought", "a capture key in the URL sees capture_thought alone");
 }
 
 console.log("\n[9] Rejection still uses the JSON-RPC envelope");

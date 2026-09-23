@@ -1,0 +1,506 @@
+#!/usr/bin/env bun
+/**
+ * tier.ts — the promotion engine for SMD-1806's three-brain pipeline.
+ *
+ * SMD-1806 runs the fork's own code on the fork's own memory as three brains over
+ * one corpus, so a migration meets real vectors before an operator's brain does
+ * and every PR's "what moved" is measured rather than written by hand:
+ *
+ *   stable   — the record, the only writer; rebuilt from the sources by
+ *              ingest-records.ts (slice 1). This tool never writes to it except on
+ *              --promote.
+ *   canary   — main's shadow. On every merge: refresh from stable's dump, migrate
+ *              forward with the merged tree, replay the query log and diff the ids.
+ *   working  — a per-worktree disposable copy of stable, migrated by the branch.
+ *
+ * This is the tooling half (slice 2); ingest-records.ts, OB1_TIER, the
+ * query_log.tier column (migration 045) and the `tier` preflight check are slice 1.
+ *
+ *   # snapshot stable into the canary (or a working copy) and migrate it forward
+ *   bun db/tier.ts --refresh --from <stable-url> --to <canary-url> [--tier canary|working]
+ *
+ *   # replay stable's logged searches against the canary and report the ranking
+ *   bun db/tier.ts --replay --from <stable-url> --to <canary-url> [--since <iso-ts>]
+ *
+ *   # the same, but print ONLY what moved and exit non-zero if anything did (the gate)
+ *   bun db/tier.ts --diff   --from <stable-url> --to <canary-url> [--since <iso-ts>]
+ *
+ *   # after a soak: stamp the canary's version onto stable
+ *   bun db/tier.ts --promote --from <canary-url> --to <stable-url>
+ *
+ * --refresh uses pg_dump | pg_restore for a faithful whole-database snapshot
+ * (thoughts, vectors, chunks, query_log, provenance, agents, audit — everything a
+ * migration might touch), then runs migrate.ts against the target. It needs a
+ * pg_dump / pg_restore whose major version is at least the source server's (the
+ * pgvector image the tiers run carries matching client tools; a host that runs
+ * this needs postgresql-client >= the server). It is destructive to --to and
+ * refuses a non-loopback target unless OB1_ALLOW_REMOTE_DB=1, the same guard
+ * test-support's dropSchema uses.
+ *
+ * The replay is the LIVE half of the replay gate (SMD-1295, whose db/test-replay.ts
+ * is the offline, model-free, fixture-vector half in CI). For each search row
+ * stable logged, it re-runs the query against the canary through the SHIPPED
+ * retrieval and diffs the returned ids against the ids stable recorded:
+ *   • the keyword arm (search_thoughts_keyword) is model-free — the arm the CI
+ *     end-to-end (test-live [20]) exercises;
+ *   • the hybrid arm (search_thoughts_hybrid) needs a provider to embed the query
+ *     text, so it is replayed only when a model is configured (OB1_EVAL_EMBED, as
+ *     evals/eval-replay.ts uses) and skipped-with-a-note otherwise.
+ * A row logged before migration 045 carries a NULL arm (no way to know which arm
+ * produced its ids), so it is skipped rather than guessed.
+ */
+
+import { SQL } from "bun";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { stampTier, TIERS, type Tier } from "./ingest-records.ts";
+import { parsePgUuidArray } from "../evals/query-log.ts";
+import { embed } from "../evals/lib.ts";
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+
+// ---------------------------------------------------------------------------
+// The replay gate — the reusable engine (imported by db/test-live.ts [20]).
+// ---------------------------------------------------------------------------
+
+/** One search the stable log recorded — everything a faithful replay needs, plus the answer to diff against. */
+export type LoggedSearch = {
+  id: string;
+  query: string;
+  arm: "hybrid" | "keyword" | null;
+  matchCount: number | null;
+  threshold: number | null;
+  recencyWeight: number | null;
+  filter: Record<string, unknown>;
+  /** The ids stable returned, in rank order (query_log.result_ids). */
+  resultIds: string[];
+};
+
+/** How a canary's replay of one row differs from what stable logged. */
+export type RowDiff = {
+  id: string;
+  query: string;
+  logged: string[];
+  replayed: string[];
+  /** ids the canary returned that stable did not. */
+  added: string[];
+  /** ids stable returned that the canary did not. */
+  dropped: string[];
+  /** the same set, a different order. */
+  reordered: boolean;
+  changed: boolean;
+};
+
+export type ReplaySummary = {
+  /** search rows in the window. */
+  total: number;
+  /** rows actually replayed (hybrid rows skip when no model is configured; NULL-arm rows always skip). */
+  replayed: number;
+  skipped: number;
+  /** the reasons rows were skipped, counted. */
+  skips: Record<string, number>;
+  /** rows whose ids moved. */
+  changed: number;
+  /** the moved rows — the per-PR "what moved". */
+  diffs: RowDiff[];
+};
+
+/** An embed function for the hybrid arm — injected so the engine has no provider dependency of its own (and the model-free CI path passes none). */
+export type EmbedFn = (query: string) => Promise<number[]>;
+
+/**
+ * The stable searches to replay: every search row in the window, stable's own
+ * (tier 'stable', or NULL for a brain that predates the column). Ordered oldest
+ * first so a printed diff reads in the order the queries were asked. Kept pure —
+ * no requireQueryLog / process.exit — so a test can drive it; the CLI checks the
+ * table exists before calling.
+ */
+export async function readLoggedSearches(sql: SQL, since: string | null): Promise<LoggedSearch[]> {
+  const rows = await sql`
+    SELECT id, query, arm, match_count, threshold, recency_weight, filter, result_ids
+    FROM query_log
+    WHERE kind = 'search'
+      AND query IS NOT NULL
+      AND (tier = 'stable' OR tier IS NULL)
+      AND (${since}::timestamptz IS NULL OR logged_at > ${since}::timestamptz)
+    ORDER BY logged_at ASC, id ASC`;
+  return rows.map((r: Record<string, unknown>) => ({
+    id: r.id as string,
+    query: r.query as string,
+    arm: (r.arm as LoggedSearch["arm"]) ?? null,
+    matchCount: (r.match_count as number | null) ?? null,
+    threshold: (r.threshold as number | null) ?? null,
+    recencyWeight: (r.recency_weight as number | null) ?? null,
+    filter: (r.filter as Record<string, unknown> | null) ?? {},
+    resultIds: parsePgUuidArray(r.result_ids),
+  }));
+}
+
+/**
+ * Re-run one logged search against the target brain through the shipped
+ * retrieval, returning the ids in rank order. `ran` is false when the row cannot
+ * be replayed faithfully: a hybrid row with no embed function, or a NULL-arm row.
+ */
+export async function replayOne(
+  sql: SQL,
+  row: LoggedSearch,
+  embedFn?: EmbedFn,
+): Promise<{ ids: string[]; ran: boolean; reason?: string }> {
+  const filter = row.filter ?? {};
+  if (row.arm === "keyword") {
+    // The exact-string arm — no vector, so it replays with no model. match_count
+    // maps to the function's p_limit; the logged filter is threaded so the
+    // filtered path (SMD-1490) is replayed as it ran.
+    const limit = row.matchCount ?? 25;
+    const rows = await sql`SELECT id FROM search_thoughts_keyword(${row.query}, ${limit}, 0, ${filter}::jsonb)`;
+    return { ids: rows.map((r: { id: string }) => r.id), ran: true };
+  }
+  if (row.arm === "hybrid") {
+    if (!embedFn) return { ids: [], ran: false, reason: "hybrid needs a provider (set OB1_EVAL_EMBED)" };
+    const qv = await embedFn(row.query);
+    const threshold = row.threshold ?? -1;
+    const count = row.matchCount ?? 10;
+    const recency = row.recencyWeight ?? 0;
+    const rows = await sql`
+      SELECT id FROM search_thoughts_hybrid(
+        ${`[${qv.join(",")}]`}::vector, ${row.query}, ${threshold}, ${count}, ${filter}::jsonb, ${recency})`;
+    return { ids: rows.map((r: { id: string }) => r.id), ran: true };
+  }
+  return { ids: [], ran: false, reason: "arm is NULL (logged before migration 045) — which arm produced its ids is unknown" };
+}
+
+/** The set/order difference between what stable logged and what the canary returned. */
+export function diffResult(logged: string[], replayed: string[]): Omit<RowDiff, "id" | "query" | "logged" | "replayed"> {
+  const loggedSet = new Set(logged);
+  const replayedSet = new Set(replayed);
+  const added = replayed.filter((id) => !loggedSet.has(id));
+  const dropped = logged.filter((id) => !replayedSet.has(id));
+  const sameSet = added.length === 0 && dropped.length === 0;
+  const reordered = sameSet && logged.join(",") !== replayed.join(",");
+  return { added, dropped, reordered, changed: added.length > 0 || dropped.length > 0 || reordered };
+}
+
+/**
+ * Replay every stable search in the window against the canary and collect the
+ * rows whose ids moved — the measured "what moved" a PR would otherwise write by
+ * hand. `stable` supplies the logged searches and answers; `canary` is replayed.
+ */
+export async function replayAndDiff(
+  stable: SQL,
+  canary: SQL,
+  opts: { since: string | null; embedFn?: EmbedFn } = { since: null },
+): Promise<ReplaySummary> {
+  const searches = await readLoggedSearches(stable, opts.since);
+  const summary: ReplaySummary = { total: searches.length, replayed: 0, skipped: 0, skips: {}, changed: 0, diffs: [] };
+  for (const row of searches) {
+    const { ids, ran, reason } = await replayOne(canary, row, opts.embedFn);
+    if (!ran) {
+      summary.skipped++;
+      const key = reason ?? "skipped";
+      summary.skips[key] = (summary.skips[key] ?? 0) + 1;
+      continue;
+    }
+    summary.replayed++;
+    const d = diffResult(row.resultIds, ids);
+    if (d.changed) {
+      summary.changed++;
+      summary.diffs.push({ id: row.id, query: row.query, logged: row.resultIds, replayed: ids, ...d });
+    }
+  }
+  return summary;
+}
+
+// ---------------------------------------------------------------------------
+// The refresh — a faithful whole-database snapshot, then migrate forward.
+// ---------------------------------------------------------------------------
+
+/** A host that is safe to reset without OB1_ALLOW_REMOTE_DB — refresh drops the target's schema. */
+function isLoopback(url: string): boolean {
+  try {
+    const h = new URL(url).hostname.toLowerCase();
+    return h === "" || h === "localhost" || h === "127.0.0.1" || h === "::1" || h === "[::1]";
+  } catch {
+    return false;
+  }
+}
+
+/** The server's major version (16 from 160004), so a pg_dump too old to read it is refused before it half-runs. */
+async function serverMajor(sql: SQL): Promise<number> {
+  const [{ n }] = await sql<{ n: string }[]>`SELECT current_setting('server_version_num') AS n`;
+  return Math.floor(Number(n) / 10000);
+}
+
+/** The major version of a client tool (`pg_dump (PostgreSQL) 16.4` → 16), or null if the tool is absent. */
+async function toolMajor(tool: string): Promise<number | null> {
+  try {
+    const proc = Bun.spawn([tool, "--version"], { stdout: "pipe", stderr: "pipe" });
+    const out = await new Response(proc.stdout).text();
+    if ((await proc.exited) !== 0) return null;
+    const m = out.match(/(\d+)(?:\.\d+)?\s*$/m) ?? out.match(/\)\s+(\d+)/);
+    return m ? Number(m[1]) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Whether pg_dump AND pg_restore exist and are new enough to read `serverMaj` — refresh needs both. */
+export async function refreshToolsReady(serverMaj: number): Promise<{ ready: boolean; why?: string }> {
+  const dump = await toolMajor("pg_dump");
+  if (dump === null) return { ready: false, why: "pg_dump is not on PATH" };
+  const restore = await toolMajor("pg_restore");
+  if (restore === null) return { ready: false, why: "pg_restore is not on PATH" };
+  if (dump < serverMaj) return { ready: false, why: `pg_dump is major ${dump} but the source server is major ${serverMaj} (pg_dump cannot read a newer server)` };
+  return { ready: true };
+}
+
+async function run(cmd: string[], opts: { stdio?: "inherit" | "pipe" } = {}): Promise<{ code: number; out: string; err: string }> {
+  const proc = Bun.spawn(cmd, {
+    stdout: opts.stdio === "inherit" ? "inherit" : "pipe",
+    stderr: opts.stdio === "inherit" ? "inherit" : "pipe",
+  });
+  const out = opts.stdio === "inherit" ? "" : await new Response(proc.stdout).text();
+  const err = opts.stdio === "inherit" ? "" : await new Response(proc.stderr).text();
+  return { code: await proc.exited, out, err };
+}
+
+/**
+ * Snapshot `fromUrl` into `toUrl` and migrate it forward with this tree.
+ *   1. pg_dump the source (custom format, no owner/privileges — the target's role
+ *      may differ; ROLE_GRANTS are re-issued by migrate --grant, not carried).
+ *   2. reset the target's public schema (the destructive step, loopback-guarded).
+ *   3. pg_restore the dump.
+ *   4. migrate.ts forward — the point of the canary: a migration meets real data.
+ *   5. stamp the tier and this refresh's time in ob1_config.
+ * Throws with a plain message on any failed step.
+ */
+export async function refresh(fromUrl: string, toUrl: string, tier: Tier): Promise<void> {
+  if (!isLoopback(toUrl) && process.env.OB1_ALLOW_REMOTE_DB !== "1") {
+    throw new Error(`--to is not loopback and OB1_ALLOW_REMOTE_DB is not 1. Refusing to reset a remote database. (--refresh drops the target's schema.)`);
+  }
+  const src = new SQL({ url: fromUrl, max: 1 });
+  const serverMaj = await serverMajor(src);
+  await src.close();
+  const ready = await refreshToolsReady(serverMaj);
+  if (!ready.ready) throw new Error(`--refresh needs pg_dump / pg_restore: ${ready.why}. The pgvector image carries matching client tools; on a host install postgresql-client >= ${serverMaj}.`);
+
+  const dir = await mkdtemp(join(tmpdir(), "ob1-tier-"));
+  const dumpFile = join(dir, "stable.dump");
+  try {
+    const dumped = await run(["pg_dump", "-Fc", "--no-owner", "--no-privileges", "-f", dumpFile, fromUrl]);
+    if (dumped.code !== 0) throw new Error(`pg_dump failed (exit ${dumped.code}): ${dumped.err.trim()}`);
+
+    // Reset the target so the restore lands on a clean schema. DROP … CASCADE is
+    // the destructive act --refresh exists to perform; it is guarded above.
+    const dst = new SQL({ url: toUrl, max: 1 });
+    try {
+      await dst`DROP SCHEMA IF EXISTS public CASCADE`;
+      await dst`CREATE SCHEMA public`;
+    } finally {
+      await dst.close();
+    }
+
+    const restored = await run(["pg_restore", "--no-owner", "--no-privileges", "-d", toUrl, dumpFile]);
+    // pg_restore exits non-zero on benign warnings (e.g. a comment on an extension
+    // it did not create); treat a restore that produced the core table as success,
+    // otherwise surface it.
+    const check = new SQL({ url: toUrl, max: 1 });
+    let hasThoughts = false;
+    try {
+      const [{ present }] = await check<{ present: boolean }[]>`SELECT to_regclass('public.thoughts') IS NOT NULL AS present`;
+      hasThoughts = present;
+    } finally {
+      await check.close();
+    }
+    if (!hasThoughts) throw new Error(`pg_restore did not produce the thoughts table (exit ${restored.code}): ${restored.err.trim()}`);
+    // pg_restore commonly exits non-zero on benign warnings (a comment on an
+    // extension it did not create, an already-present object). The core table is
+    // present, so proceed — but show the warnings rather than swallow them, so a
+    // partial restore is not silent.
+    if (restored.code !== 0 && restored.err.trim()) console.error(`pg_restore warnings (exit ${restored.code}):\n${restored.err.trim()}`);
+
+    const migrated = await run(["bun", join(HERE, "migrate.ts"), "--url", toUrl], { stdio: "inherit" });
+    if (migrated.code !== 0) throw new Error(`migrate.ts failed on the refreshed target (exit ${migrated.code})`);
+
+    const stamp = new SQL({ url: toUrl, max: 1 });
+    try {
+      await stampTier(stamp, tier);
+      await setConfig(stamp, "last_refresh", new Date().toISOString());
+    } finally {
+      await stamp.close();
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Promote — stamp the soaked canary's version onto stable.
+// ---------------------------------------------------------------------------
+
+/** Read an ob1_config value, or null when the key is absent. */
+async function readConfig(sql: SQL, key: string): Promise<string | null> {
+  const rows = await sql<{ value: string }[]>`SELECT value FROM ob1_config WHERE key = ${key}`;
+  return rows.length ? rows[0].value : null;
+}
+
+/** Upsert an ob1_config KV row — the write half beside readConfig. */
+async function setConfig(sql: SQL, key: string, value: string): Promise<void> {
+  await sql`INSERT INTO ob1_config (key, value) VALUES (${key}, ${value})
+            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`;
+}
+
+/**
+ * Promotion, the data half: record that stable was promoted to the soaked
+ * canary's schema version (migration 044's `ob1_config.schema_version`, SMD-1804),
+ * and the time. It records under `promoted_schema_version`, NOT `schema_version`
+ * — that key is the version the schema was migrated UNDER, which preflight reads,
+ * and stable is not migrated here; the actual retag (pointing the stable stack at
+ * the published image and migrating it) is SMD-1860's step, named rather than
+ * performed because no image is published yet.
+ */
+export async function promote(canaryUrl: string, stableUrl: string): Promise<{ version: string | null }> {
+  const canary = new SQL({ url: canaryUrl, max: 1 });
+  let version: string | null;
+  try {
+    version = await readConfig(canary, "schema_version");
+  } finally {
+    await canary.close();
+  }
+  const stable = new SQL({ url: stableUrl, max: 1 });
+  try {
+    // Assert the target is stable — but only the tier key, not stampTier's
+    // last_ingest: a promotion is not an ingest, and stable's last_ingest must
+    // keep naming the real rebuild time (preflight's `tier` check reads it).
+    await setConfig(stable, "tier", "stable");
+    if (version !== null) await setConfig(stable, "promoted_schema_version", version);
+    await setConfig(stable, "promoted_at", new Date().toISOString());
+  } finally {
+    await stable.close();
+  }
+  return { version };
+}
+
+// ---------------------------------------------------------------------------
+// Output
+// ---------------------------------------------------------------------------
+
+function printSummary(s: ReplaySummary, onlyChanged: boolean): void {
+  const short = (id: string) => id.slice(0, 8);
+  if (!onlyChanged) {
+    console.log(`replayed ${s.replayed} of ${s.total} logged searches (${s.skipped} skipped)`);
+    for (const [reason, n] of Object.entries(s.skips)) console.log(`  skipped ${n}: ${reason}`);
+  }
+  if (s.changed === 0) {
+    console.log(onlyChanged ? "what moved: nothing — the canary reproduces stable's rankings." : "no ranking moved.");
+    return;
+  }
+  console.log(`\nwhat moved — ${s.changed} of ${s.replayed} replayed queries returned different ids:`);
+  for (const d of s.diffs) {
+    const bits: string[] = [];
+    if (d.dropped.length) bits.push(`dropped ${d.dropped.map(short).join(",")}`);
+    if (d.added.length) bits.push(`added ${d.added.map(short).join(",")}`);
+    if (d.reordered) bits.push("reordered");
+    console.log(`  • ${JSON.stringify(d.query.slice(0, 70))}: ${bits.join("; ")}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// CLI
+// ---------------------------------------------------------------------------
+
+async function main(): Promise<void> {
+  const args = process.argv.slice(2);
+  const flag = (name: string): string | undefined => {
+    const i = args.indexOf(`--${name}`);
+    return i >= 0 ? args[i + 1] : undefined;
+  };
+  const has = (name: string) => args.includes(`--${name}`);
+
+  // Every argument accounted for, the way migrate.ts and ingest-records.ts do it.
+  {
+    const TAKES_ONE = new Set(["from", "to", "since", "tier"]);
+    const TAKES_NONE = new Set(["refresh", "replay", "diff", "promote"]);
+    const USAGE =
+      "  one verb: --refresh | --replay | --diff | --promote\n" +
+      "  flags: --from <postgres://…>, --to <postgres://…>, --since <iso-ts>, --tier <canary|working>";
+    const seen = new Set<string>();
+    for (let i = 0; i < args.length; i++) {
+      const a = args[i];
+      const name = a.startsWith("--") ? a.slice(2) : null;
+      if (name !== null && (TAKES_ONE.has(name) || TAKES_NONE.has(name))) {
+        if (seen.has(name)) { console.error(`--${name} given twice.\n${USAGE}`); process.exit(2); }
+        seen.add(name);
+      }
+      if (name !== null && TAKES_ONE.has(name)) {
+        if (i + 1 >= args.length || args[i + 1].startsWith("--")) { console.error(`--${name} takes a value.\n${USAGE}`); process.exit(2); }
+        i++;
+        continue;
+      }
+      if (name !== null && TAKES_NONE.has(name)) continue;
+      const shown = name !== null ? a : /:\/\//.test(a) ? "<a URL>" : a;
+      console.error(`unknown argument: ${shown}${name === null ? " (a value where no flag takes one)" : ""}\n${USAGE}`);
+      process.exit(2);
+    }
+  }
+
+  const verbs = ["refresh", "replay", "diff", "promote"].filter((v) => has(v));
+  if (verbs.length !== 1) {
+    console.error(`Give exactly one verb (--refresh, --replay, --diff, --promote), not ${verbs.length}.`);
+    process.exit(2);
+  }
+  const verb = verbs[0];
+  const from = flag("from");
+  const to = flag("to");
+  if (!from || !to) {
+    console.error(`--${verb} needs --from and --to.`);
+    process.exit(2);
+  }
+
+  if (verb === "refresh") {
+    const tier = (flag("tier") ?? "canary") as Tier;
+    if (!TIERS.includes(tier) || tier === "stable") {
+      console.error(`--tier must be canary or working (stable is the source, ingest-records.ts writes it).`);
+      process.exit(2);
+    }
+    await refresh(from, to, tier);
+    console.log(`refreshed ${tier} from stable and migrated forward.`);
+    return;
+  }
+
+  if (verb === "promote") {
+    const { version } = await promote(from, to);
+    console.log(`promoted: stable stamped tier=stable${version ? `, promoted_schema_version=${version}` : " (canary recorded no schema_version — pre-migration-044)"}.`);
+    console.log(`remaining: point the stable stack at the published image and migrate it (SMD-1860) — no image is published yet.`);
+    return;
+  }
+
+  // replay | diff
+  const since = flag("since") ?? null;
+  const stable = new SQL({ url: from, max: 4 });
+  const canary = new SQL({ url: to, max: 4 });
+  try {
+    // The table must exist on both ends; say so in the reader's words, not a driver trace.
+    for (const [sql, label] of [[stable, "--from (stable)"], [canary, "--to (canary)"]] as const) {
+      const [{ present }] = await sql<{ present: boolean }[]>`SELECT to_regclass('public.query_log') IS NOT NULL AS present`;
+      if (!present) {
+        console.error(`tier.ts --${verb}: query_log is not present on ${label} — migration 034 is not applied there.`);
+        process.exit(2);
+      }
+    }
+    // The default window is since the canary was last refreshed; else everything.
+    const window = since ?? (await readConfig(canary, "last_refresh"));
+    const embedModel = process.env.OB1_EVAL_EMBED;
+    const embedFn: EmbedFn | undefined = embedModel ? (q) => embed(embedModel, q, true) : undefined;
+    if (!embedFn) console.error(`note: OB1_EVAL_EMBED is not set — hybrid-arm searches will be skipped (keyword arm replays without a model).`);
+    const summary = await replayAndDiff(stable, canary, { since: window, embedFn });
+    printSummary(summary, verb === "diff");
+    if (verb === "diff" && summary.changed > 0) process.exit(1);
+  } finally {
+    await stable.close();
+    await canary.close();
+  }
+}
+
+if (import.meta.main) await main();

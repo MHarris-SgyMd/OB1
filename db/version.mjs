@@ -26,15 +26,19 @@ import { fileURLToPath } from "node:url";
 /** The upstream commit the fork sits on — FORK.md's pin, `upstream-pin-9543c29`. */
 export const UPSTREAM_PIN = "9543c29";
 
+/** The fork's repository, for compare links and release downloads — one definition for the assembler and the release job (SMD-1860). */
+export const REPO_URL = "https://github.com/MHarris-SgyMd/OB1";
+
 /**
- * The current fork version. `0.0.0` is the pre-first-release baseline: the
- * versioning machinery is present but no release has been cut, so a brain reports
- * this rather than a perpetual "no version" warning. The first release replaces
- * it with the number that cut deserves (`1.0.0`), assembled and tagged by the
- * release step, not by hand. Migration 044 writes this exact string into
- * ob1_config.schema_version; check-fork's checkSchemaVersion holds the two equal.
+ * The current fork version — the last release cut (releases.json's last entry),
+ * bumped by a cut's first commit together with the migration that writes it
+ * (FORK.md, "Cutting a release"). `1.0.0` is the first release (migrations
+ * 001..048); before it, 044 wrote the pre-first-release baseline `0.0.0`.
+ * The highest migration that upserts ob1_config.schema_version writes this
+ * exact string (048 today); check-fork's 17d holds the two equal, and
+ * scripts/assemble-release.ts refuses --write until both say the version.
  */
-export const FORK_VERSION = `0.0.0+upstream.${UPSTREAM_PIN}`;
+export const FORK_VERSION = `1.0.0+upstream.${UPSTREAM_PIN}`;
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const RELEASES_PATH = join(ROOT, "releases.json");
@@ -141,6 +145,19 @@ export function highestReleasedMigration(releases = readReleases()) {
   return hi;
 }
 
+/**
+ * The schema_version literal a migration template upserts into ob1_config, or
+ * null when it writes none — the two INSERT shapes 044 and a cut's set-version
+ * migration use. One definition (SMD-1860): check-fork-consistency's 17d holds
+ * the highest writer equal to FORK_VERSION, and assemble-release.ts refuses a
+ * cut whose highest migration does not write the version it is cutting.
+ */
+export function schemaVersionValue(template) {
+  const m = /'schema_version'\s*\)\s*VALUES?[\s\S]*?\(\s*'schema_version'\s*,\s*'([^']+)'/.exec(template)
+    || /\(\s*'schema_version'\s*,\s*'([^']+)'\s*\)/.exec(template);
+  return m ? m[1] : null;
+}
+
 function selfCheck() {
   const eq = (got, want, label) => {
     const g = JSON.stringify(got);
@@ -159,7 +176,7 @@ function selfCheck() {
   bad += eq(sign(semverCompare("1.0.0+upstream.9543c29", "1.0.0+upstream.deadbee")), 0, "build metadata ignored");
   bad += eq(sign(semverCompare("1.0.0-rc.1", "1.0.0")), -1, "pre-release precedes release");
   bad += eq(sign(semverCompare("1.0.0-rc.2", "1.0.0-rc.10")), -1, "numeric pre-release fields");
-  bad += eq(sign(semverCompare("0.0.0", FORK_VERSION)), 0, "FORK_VERSION core is 0.0.0");
+  bad += eq(sign(semverCompare("1.0.0", FORK_VERSION)), 0, "FORK_VERSION core is 1.0.0 (the first release)");
   const rel = [{ version: "1.0.0", range: [1, 44] }];
   bad += eq(versionForMigration(44, rel), "1.0.0", "44 is in 1.0.0's range");
   bad += eq(versionForMigration(45, rel), null, "45 is unreleased");
@@ -169,6 +186,8 @@ function selfCheck() {
   bad += eq(versionForMigration(44, withDocsOnly), "1.0.0", "a docs-only release (range null) is skipped, not crashed");
   bad += eq(highestReleasedMigration(withDocsOnly), 44, "a docs-only release does not lower the high-water mark");
   bad += eq(migrationSha("SELECT 1;\n"), migrationSha("SELECT 1;\n"), "sha is deterministic");
+  bad += eq(schemaVersionValue("INSERT INTO ob1_config (key, value) VALUES\n  ('schema_version', '1.2.3+upstream.abc')\nON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;"), "1.2.3+upstream.abc", "the schema_version an INSERT writes is read");
+  bad += eq(schemaVersionValue("INSERT INTO ob1_config (key, value) VALUES ('embedding_dim', '1024');"), null, "a migration writing no schema_version reads as none");
   if (migrationSha("a").length !== 12) {
     console.error("FAIL sha length is not 12");
     bad++;

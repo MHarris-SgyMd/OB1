@@ -6,6 +6,9 @@
 
 > Claude Code adapter for the [auto-capture](../auto-capture/) skill, adding automatic session-end thought capture via Claude Code hooks.
 
+> [!NOTE]
+> **Fork note (SMD-1298).** This adapter POSTs the formatted transcript to a Supabase REST ingest endpoint with a full-access key, and its parser reads a `Human:`/`Assistant:` text format Claude Code does not write. The fork's replacement is [`recipes/session-capture-hook`](../../recipes/session-capture-hook/): one summary thought over MCP, the session's retrieved thoughts as `derived_from`, a capture-only key, a secret scan, and support for Codex. This adapter's fate belongs with the Supabase retirement (SMD-1795 / SMD-1802).
+
 ## Relationship to Upstream Skill
 
 This adapter implements the session-end capture behavior defined by the upstream [auto-capture skill](../auto-capture/) by **Jared Irish**. The base skill is a behavioral protocol — it describes when and what to capture during interactive session closes. This adapter is the concrete Claude Code binding: a Stop-hook script that fires the same capture behavior automatically when a session ends without a verbal trigger (terminal close, Ctrl+C, timeout). The upstream skill and this adapter are complementary; install both for full coverage.

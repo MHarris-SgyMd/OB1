@@ -352,6 +352,7 @@ start, because the URLs end up pasted into client configs:
 cd server-portable
 bun keygen.ts --name laptop  --scope write   # captures and searches
 bun keygen.ts --name chatgpt --scope read    # searches only
+bun keygen.ts --name session-hook --scope capture   # captures only — for a hook
 ```
 
 Each prints the key **once** plus a `name:scope:sha256` line for
@@ -361,6 +362,12 @@ config is not itself a credential.
 Prefer `--scope read` wherever a client only needs to search. A read-only key does
 not get a permission error from `capture_thought` — the tool is never registered
 for it, so it does not appear in `tools/list` at all.
+
+The mirror image is `--scope capture`: `capture_thought` and nothing else — no
+search, no update, no delete. It is the key for a session-end hook or an import
+pipeline, a credential that sits in a config file on a machine you do not watch;
+a leak of it can add a thought and cannot read one
+([`recipes/session-capture-hook`](recipes/session-capture-hook/)).
 
 That matters because the key can travel in the URL (`?key=…`). Claude Desktop's
 custom connectors are URL-only, so this fork keeps that form — but query strings
@@ -434,7 +441,9 @@ podman compose -f deploy/compose.yaml --profile local-models up --build
 Three services in order (five with `local-models`): Postgres with pgvector, a migration job that applies the
 schema and exits, then the MCP server. The server runs `preflight.ts` before it
 serves, so a misconfiguration crashloops rather than starting and failing on your
-first capture.
+first capture. To run a *release* rather than a checkout build — the published
+`ob1-server` and `ob1-migrate` images, Ollama pinned by digest — see
+[`deploy/README.md`](deploy/README.md), "Pinning a release".
 
 ### 3. Verify
 

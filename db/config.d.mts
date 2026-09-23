@@ -254,6 +254,12 @@ export function versionAtLeast(version: string, major: number, minor?: number, p
 /** Every string value of `record` trimmed, everything else as it was — the one boundary rule for a server environment. */
 export function trimmedEnv<T extends Record<string, unknown>>(record: T): T;
 
+/** The pipeline tiers (SMD-1806) — the one source migration 045's CHECK and ingest-records.ts's TIERS mirror. */
+export const PIPELINE_TIERS: readonly ["stable", "canary", "working"];
+
+/** A problem string for an OB1_TIER that is neither unset nor exactly a PIPELINE_TIERS value, else null (SMD-1953). */
+export function tierProblem(raw: string | undefined): string | null;
+
 /** The compose service names a model endpoint may live at (`ollama`); preflight and check 14 read it. */
 export const LOCAL_PROVIDER_SERVICES: readonly string[];
 
@@ -381,3 +387,7 @@ export function stripSqlComments(text: string): string;
 export const SUPABASE_SQL_RULES: readonly { name: string; re: RegExp; msg: string }[];
 /** Every SUPABASE_SQL_RULES hit in `text`, comments excepted, with the source line number. */
 export function supabaseIsmsIn(text: string): { rule: string; line: number; msg: string }[];
+/** The statements a .sql file may never run because each destroys rows a brain holds — DROP TABLE, DROP DATABASE/SCHEMA/OWNED, TRUNCATE (as a statement, not a trigger event or privilege), DELETE FROM with no WHERE — each with its name and reason (SMD-1936). */
+export const DESTRUCTIVE_SQL_RULES: readonly { name: string; msg: string }[];
+/** Every DESTRUCTIVE_SQL_RULES hit in `text`, comments excepted, statements read whole, with the source line number. */
+export function destructiveSqlIn(text: string): { rule: string; line: number; msg: string }[];

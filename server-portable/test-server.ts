@@ -1,5 +1,5 @@
 import { createAssert } from "../db/test-support.ts";
-import { queryLogEnabled, queryLogRetentionDays, QUERY_LOG, trimmedEnv } from "../db/config.mjs";
+import { queryLogEnabled, queryLogRetentionDays, QUERY_LOG, tierProblem, trimmedEnv } from "../db/config.mjs";
 import { visibleToolNames, READ_TOOL_NAMES } from "./tools.ts";
 /**
  * test-server.ts
@@ -130,6 +130,14 @@ console.log("\n[2] Runtime neutrality");
   assert(!/\bBun\./.test(src), "no Bun.* references");
   assert(!/jsr:/.test(src), "no jsr: imports");
   assert(/initEnv\(c\.env/.test(src), "seeds env from the request context (Workers path)");
+  // initEnv is the in-process guard (Workers has no preflight entrypoint): a bad
+  // OB1_TIER throws here at the env-freeze boundary, so it never reaches the
+  // best-effort log write that would silently drop every query_log row (SMD-1953).
+  // The throw must come BEFORE `ENV = candidate`: the `if (ENV) return` at the top
+  // means a bad env assigned first would stick and let the next call skip the
+  // guard (the guard would fire once, then be bypassed).
+  assert(/tierProblem\(candidate\.OB1_TIER\)/.test(src) && src.indexOf("throw new Error(tierIssue)") < src.indexOf("ENV = candidate"),
+    "initEnv refuses an invalid OB1_TIER before assigning ENV, so a bad tier throws on every call, not just the first");
 }
 
 console.log("\n[3] CORS preflight");
@@ -222,7 +230,7 @@ console.log("\n[9] tools/list exposes exactly the documented surface");
   // key — so a tool added to or removed from index.ts without a matching
   // manifest entry shows up here as a mismatch, and a gated tool later just
   // changes what visibleToolNames() returns.
-  const expected = visibleToolNames({ write: true });
+  const expected = visibleToolNames({ scope: "write" });
   assert(tools.length === expected.length, `${expected.length} tools registered (got ${tools.length})`);
   for (const t of expected) assert(tools.includes(t), `exposes "${t}"`);
 }
@@ -512,6 +520,25 @@ console.log("\n[16] parseFilter bounds and normalises a metadata filter at the t
   const manyKeys = Object.fromEntries(Array.from({ length: 21 }, (_, i) => [`k${i}`, i]));
   assert(throws(manyKeys), "a filter over the key cap is refused");
   assert(throws({ blob: "x".repeat(5000) }), "a filter over the size cap is refused");
+  // The byte cap is UTF-8 bytes, not JSON.stringify().length (UTF-16 code units).
+  // "世" is one code unit but three UTF-8 bytes, so 1400 of them are ~1408 code
+  // units (under 4096) but ~4208 bytes (over) — the mutant (.length) passes it,
+  // the fix refuses it (SMD-1953).
+  assert(!throws({ t: "世".repeat(1000) }), "a multibyte filter under the byte cap passes (~3000 bytes)");
+  assert(throws({ t: "世".repeat(1400) }), "a multibyte filter over the byte cap but under the code-unit count is refused — bytes, not UTF-16 length");
+}
+
+console.log("\n[17] tierProblem validates OB1_TIER at the boundary initEnv and preflight share (SMD-1953)");
+{
+  // The one validator db/config.mjs owns; index.ts's initEnv throws on it and
+  // preflight's tier check fails on it, so a wrong OB1_TIER cannot reach the
+  // best-effort log write that would silently drop every query_log row.
+  assert(tierProblem(undefined) === null && tierProblem("") === null, "unset or empty is fine — a plain brain, not a pipeline tier");
+  assert(tierProblem("stable") === null && tierProblem("canary") === null && tierProblem("working") === null, "each pipeline tier is accepted");
+  assert(tierProblem("Stable") !== null && tierProblem("CANARY") !== null, "a case variant is refused (exact match — 045's CHECK is lowercase), not silently normalised");
+  assert(tierProblem("prod") !== null && tierProblem("canary ") !== null, "an unknown value, or one with surrounding space (the caller trims first), is refused");
+  const msg = tierProblem("prod") ?? "";
+  assert(msg.includes("prod") && msg.includes("stable, canary, working") && /045|query_log/.test(msg), "the message names the bad value, the allowed set, and why it matters (the silent drop)");
 }
 
 server.stop();
