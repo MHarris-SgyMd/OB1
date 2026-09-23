@@ -48,7 +48,7 @@ import { hashKey } from "../server-portable/auth.ts";
 import { mcpClient } from "../server-portable/test-support.ts";
 import { DELIVERABLES, READER_K, SESSIONS, SUBJECTS, type SubjectKey } from "./write-path-corpus.ts";
 import {
-  ARMS, STUB_DIM, decide, parseCapturedId, parseHits, parseProposalIds, renderDeliverable, stubChat, vectorFor,
+  ARMS, STUB_DIM, STUB_EMBED_MODEL, decide, parseCapturedId, parseHits, parseProposalIds, renderDeliverable, stubChat, vectorFor,
   type Arm, type DeliverableObservation, type Line, type Observation, type ReaderPolicy,
 } from "./write-path.ts";
 
@@ -63,7 +63,7 @@ const READER = (process.env.OB1_WP_READER ?? "labels") as ReaderPolicy;
 if (READER !== "labels" && READER !== "blind") { console.error(`OB1_WP_READER must be labels or blind, not "${READER}"`); process.exit(2); }
 const on = (m: "supersedes" | "judge" | "actor"): boolean => ARM !== `-${m}`;
 
-const EMBED_MODEL = "write-path-stub";
+const EMBED_MODEL = STUB_EMBED_MODEL;
 const META_MODEL = "write-path-stub-chat";
 const HERE = import.meta.dir;
 
@@ -97,7 +97,6 @@ const PROVIDER = `http://127.0.0.1:${provider.port}/v1`;
 
 const OP_RAW = "op-raw", BOT_RAW = "bot-raw";
 process.env.DATABASE_URL = URL_;
-delete process.env.OB1_STORE;
 process.env.OB1_LLM_BASE_URL = PROVIDER;
 process.env.OB1_LLM_LOCAL = "1"; // the egress gate (SMD-1903): a provider on this box
 process.env.OB1_EMBEDDING_MODEL = EMBED_MODEL;
@@ -106,7 +105,11 @@ process.env.OB1_METADATA_MODEL = META_MODEL;
 process.env.OB1_LLM_TIMEOUT = "10";
 process.env.MCP_ACCESS_KEYS = `op-key:write:${hashKey(OP_RAW)},bot-key:write:${hashKey(BOT_RAW)}`;
 process.env.OB1_AGENT_CACHE_TTL_MS = "0";
-// The OB1_* knobs went above; these are the server's other doors.
+// The OB1_* knobs went above by rule; the server's doors outside that
+// prefix are a list — every non-OB1 name server-portable/ and db/ read
+// (DATABASE_URL and MCP_ACCESS_KEYS are set above; LINEAR_API_KEY is
+// db/sync-linear.ts's, never spawned here). A door added tomorrow under
+// another name is the residual this list carries.
 for (const k of ["MCP_ACCESS_KEY", "OPENROUTER_API_KEY", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"]) delete process.env[k];
 
 const worker = (await import("../server-portable/index.ts")).default as { fetch: (r: Request) => Response | Promise<Response> };

@@ -42,6 +42,13 @@ export const SUBJECT_KEYS = Object.keys(SUBJECTS) as SubjectKey[];
 export const NOISE_AXES = 16;
 /** The vector width the stub embeds at: one axis per subject, then the noise axes. */
 export const STUB_DIM = SUBJECT_KEYS.length + NOISE_AXES;
+/**
+ * The embedding model name the arm runs the server under. A name
+ * db/config.mjs's EMBEDDING_PROMPTS does not know, so the server sends a
+ * query to the provider bare — which is what makes `vectorFor`'s query
+ * branch the live vector; the self-check holds that against the real rule.
+ */
+export const STUB_EMBED_MODEL = "write-path-stub";
 
 /** The subjects a text names, by phrase, case-insensitive, in SUBJECTS' order. */
 export function subjectsIn(text: string): SubjectKey[] {
@@ -345,7 +352,8 @@ export function scoreArm(obs: Observation, items: readonly Item[] = ITEMS, specs
   const presentedBy = new Map<string, LineKind>();
   for (const d of obs.deliverables) for (const l of d.lines) {
     const prev = presentedBy.get(l.id);
-    // A thought stated plain anywhere is stated plain: the worse presentation stands.
+    // A thought stated plain anywhere is stated plain: plain wins — generous
+    // to survival, strict to catch, which is the direction a floor should err.
     if (prev !== "plain") presentedBy.set(l.id, l.kind);
   }
   const covered = new Set(specs.flatMap((s) => s.subjects));
@@ -495,10 +503,14 @@ export function corpusLabel(): string {
 }
 
 /** The floor an arm's score would record. */
+/** The items an arm got right, sorted: the one spelling of the floor's identity, read at the record and at the gate. */
+export function rightItems(s: ArmScore): string[] {
+  return Object.entries(s.outcome).filter(([, o]) => o.counted && o.right).map(([id]) => id).sort();
+}
+
 export function floorOf(s: ArmScore): Floor {
   const rate = (r: Rate): Rate => ({ n: r.n, of: r.of });
-  const right = Object.entries(s.outcome).filter(([, o]) => o.counted && o.right).map(([id]) => id).sort();
-  return { survival: rate(s.survival), catch: rate(s.catch), coverage: rate(s.coverage), unseenErrors: s.catch.unseen, right };
+  return { survival: rate(s.survival), catch: rate(s.catch), coverage: rate(s.coverage), unseenErrors: s.catch.unseen, right: rightItems(s) };
 }
 
 /** The three rates of an arm, rounded as the record keeps them. */
@@ -520,6 +532,9 @@ export function ratesOf(s: ArmScore): { survival: number | null; catch: number |
  * the floor is the value recorded, not a tolerance below it; a legitimate
  * change re-records the section, as `bench.ts --rebaseline` asks for the
  * retrieval ones. A rate with an empty denominator never passes silently.
+ * The cost columns the record keeps (`returned`, `chars`, `contested`) are
+ * reported, not gated: a longer deliverable is a choice, not a regression
+ * class, and SMD-1737 reads them as its fourth layer.
  */
 export function compareToFloor(s: ArmScore, floor: Floor): { failures: string[]; notes: string[] } {
   const failures: string[] = [], notes: string[] = [];
@@ -535,7 +550,7 @@ export function compareToFloor(s: ArmScore, floor: Floor): { failures: string[];
   check("catch", s.catch);
   check("coverage", s.coverage);
   if (s.catch.unseen > floor.unseenErrors) failures.push(`unseen errors: ${s.catch.unseen} planted error(s) never retrieved, recorded ${floor.unseenErrors} — a retrieval change hid an error the catch rate cannot see`);
-  const rightNow = new Set(Object.entries(s.outcome).filter(([, o]) => o.counted && o.right).map(([id]) => id));
+  const rightNow = new Set(rightItems(s));
   const rightThen = new Set(floor.right);
   const lost = [...rightThen].filter((id) => !rightNow.has(id)).sort();
   const gained = [...rightNow].filter((id) => !rightThen.has(id)).sort();
@@ -550,7 +565,6 @@ const pct = (r: Rate): string => (r.of ? `${((100 * r.n) / r.of).toFixed(1).padS
 
 /** The report: one row per arm, then the paired table per mechanism, then each caught error's mechanism. */
 export function renderReport(scores: ArmScore[], paired: Paired[], caught: Record<string, Mechanism[]>, items: readonly Item[] = ITEMS): string {
-  const def0 = scores.find((s) => s.arm === "default" && s.reader === "labels");
   const lines: string[] = [];
   lines.push(`arm            reader   survival            catch               coverage            contested  unseen-err  returned  chars`);
   lines.push(`─`.repeat(118));
@@ -581,7 +595,7 @@ export function renderReport(scores: ArmScore[], paired: Paired[], caught: Recor
   lines.push(``, `errors the default arm caught, and the mechanism each rests on (none named = caught by more than one of the arms run, or never retrieved)`);
   for (const [id, ms] of Object.entries(caught)) {
     const it = byItem.get(id);
-    lines.push(`  ${id.padEnd(5)} ${(it?.planted.kind ?? "?").padEnd(13)} ${ms.length ? ms.join(" + ") : (def0?.outcome[id]?.retrieved ? "more than one" : "never retrieved")}`);
+    lines.push(`  ${id.padEnd(5)} ${(it?.planted.kind ?? "?").padEnd(13)} ${ms.length ? ms.join(" + ") : (def?.outcome[id]?.retrieved ? "more than one" : "never retrieved")}`);
   }
   return lines.join("\n");
 }

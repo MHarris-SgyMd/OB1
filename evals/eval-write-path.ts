@@ -47,12 +47,13 @@
 
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { applyEmbeddingPrompt } from "../db/config.mjs";
 import { createAssert, shellWithoutOb1 } from "../db/test-support.ts";
 import { buildJudgeMessages, parseJudgement } from "../server-portable/consolidate.ts";
 import { buildMessages as buildEntityMessages } from "../server-portable/entities.ts";
 import { DELIVERABLES, ITEMS, READER_K, SESSIONS, SUBJECTS, type Item } from "./write-path-corpus.ts";
 import {
-  ARMS, MECHANISMS, MIN_COSINE_GAP, STUB_DIM, armOff, caughtBy, compareToFloor, corpusLabel, corpusProblems, cosine, decide, floorOf, fnv1a, judgeRule, mcnemarExact, noiseBucket, numbersIn,
+  ARMS, MECHANISMS, MIN_COSINE_GAP, STUB_DIM, STUB_EMBED_MODEL, armOff, caughtBy, compareToFloor, corpusLabel, corpusProblems, cosine, decide, floorOf, fnv1a, judgeRule, mcnemarExact, noiseBucket, numbersIn,
   pair, parseCapturedId, parseHits, parseProposalIds, ratesOf, ratio, renderDeliverable, renderReport, scoreArm, stubChat, subjectsIn, vectorFor,
   type Arm, type ArmScore, type Floor, type Hit, type Mechanism, type Observation, type Paired, type ReaderPolicy, type WritePathBaseline,
 } from "./write-path.ts";
@@ -63,25 +64,33 @@ const args = process.argv.slice(2);
 const has = (f: string) => args.includes(f);
 const valueOf = (f: string): string | undefined => { const i = args.indexOf(f); return i >= 0 ? args[i + 1] : undefined; };
 const MODES = ["--gate", "--self-check", "--only", "--record"];
-args.forEach((a, i) => {
-  if (!MODES.includes(a) && args[i - 1] !== "--only") {
-    console.error(`unknown argument ${a}; see the header for the four modes`);
-    process.exit(2);
+
+/**
+ * What is wrong with an argument list, in words, or null. Pure, so the
+ * self-check can probe every shape: an unknown word; more than one MODE
+ * flag counted by position, not by name — `--only a --only b` is two flags
+ * and `--gate --gate` two, and valueOf would read only the first (review
+ * pass 3); together `--gate --record` wrote a record of two arms and then
+ * held it, and `--gate --only` ran one arm and no gate (review pass 2);
+ * `--only` with no arm, or an arm that is not one of the four.
+ */
+export function argumentProblem(argv: readonly string[]): string | null {
+  for (const [i, a] of argv.entries()) {
+    if (!MODES.includes(a) && argv[i - 1] !== "--only") return `unknown argument ${a}; see the header for the four modes`;
   }
-});
-// One mode at a time: --gate runs two arms and --record needs every arm, so
-// together --record wrote a record of two arms and the gate then held it (a
-// tautology); --gate --only ran one arm and no gate at all (review pass 2).
-if (MODES.filter((m) => has(m)).length > 1) {
-  console.error(`one mode at a time: ${MODES.join(", ")} (--record needs every arm; --gate runs the default arm and the blind reader)`);
-  process.exit(2);
+  const modeFlags = argv.filter((a, i) => MODES.includes(a) && argv[i - 1] !== "--only");
+  if (modeFlags.length > 1) return `one mode at a time: ${MODES.join(", ")} (--record needs every arm; --gate runs the default arm and the blind reader)${new Set(modeFlags).size < modeFlags.length ? "; a flag given twice would be read once" : ""}`;
+  if (argv.includes("--only")) {
+    const only = argv[argv.indexOf("--only") + 1];
+    if (only === undefined || !(ARMS as readonly string[]).includes(only)) {
+      return `--only takes one of ${ARMS.join(", ")}${only === undefined ? "; alone it would run everything and report something other than what was asked" : `, not "${only}"`}`;
+    }
+  }
+  return null;
 }
-if (has("--only")) {
-  const only = valueOf("--only");
-  if (only === undefined || !(ARMS as readonly string[]).includes(only)) {
-    console.error(`--only takes one of ${ARMS.join(", ")}${only === undefined ? "; alone it would run everything and report something other than what was asked" : `, not "${only}"`}`);
-    process.exit(2);
-  }
+{
+  const problem = argumentProblem(args);
+  if (problem) { console.error(problem); process.exit(2); }
 }
 
 // ── Running an arm ──────────────────────────────────────────────────────────
@@ -242,7 +251,8 @@ function selfCheck(): void {
   assert(corpusProblems(digitOnDecisionSubject).some((p) => /-supersedes arm would move the judge/.test(p)), "a digit on a subject with a decision pair couples the -supersedes arm to the judge: a problem");
   const crowdedSessions = [{ title: "Crowd", items: ["x1", "x2", "x3"].map((id) => ({ ...ITEMS[1], id, text: `The Quicksilver cache note ${id}.` })) }, ...SESSIONS];
   assert(corpusProblems(crowdedSessions.flatMap((s) => s.items), DELIVERABLES, crowdedSessions).some((p) => /qs2 conflicts .* more than the shipped/.test(p)), "a slip with more earlier neighbours than the shipped candidate count may miss its twin: a problem");
-  const crowdedTwins = [{ title: "Crowd", items: ["y1", "y2", "y3"].map((id) => ({ ...ITEMS[5], id, text: `The Zeppelin budget note ${id}.` })) }, ...SESSIONS];
+  // Digit-free crowd texts, so the only conflict zp2 has is with its true twin zp1: the rule must reach a salient pair, not only a slip.
+  const crowdedTwins = [{ title: "Crowd", items: ["one", "two", "three"].map((w, i) => ({ ...ITEMS[5], id: `y${i}`, text: `The Zeppelin budget has a note, number ${w}.` })) }, ...SESSIONS];
   assert(corpusProblems(crowdedTwins.flatMap((s) => s.items), DELIVERABLES, crowdedTwins).some((p) => /zp2 conflicts/.test(p)), "…and so may two true facts with different numbers (the judge's false positive), not only a slip");
   const tied = ITEMS.map((it) => (it.id === "mz2" ? { ...it, text: ITEMS.find((o) => o.id === "mz1")!.text + " " } : it));
   assert(corpusProblems(tied).some((p) => /apart in cosine to the query/.test(p)), "two texts of one subject at one cosine to the query tie for it: a problem");
@@ -278,6 +288,9 @@ function selfCheck(): void {
   assert(judgeAnswer.verdict === "conflict" && judgeAnswer.supersedes === "B" && judgeAnswer.confidence === 0.9, "the chat stub answers the judge's prompt with the rule's verdict");
   const entities = JSON.parse(stubChat([{ role: "user", content: "Extract…\n<thought_content>\nThe Zeppelin budget is 40 thousand.\n</thought_content>\nReturn strict JSON" }]));
   assert(entities.entities.length === 1 && entities.entities[0].name === "the Zeppelin budget" && entities.entities[0].type === "project" && Array.isArray(entities.relationships), "the chat stub answers the extractor with the subject as one entity");
+  for (const k of Object.keys(SUBJECTS) as (keyof typeof SUBJECTS)[]) {
+    assert(applyEmbeddingPrompt(STUB_EMBED_MODEL, SUBJECTS[k], true) === SUBJECTS[k], `the server sends the query for ${k} to the provider bare under ${STUB_EMBED_MODEL} (no prompt in db/config.mjs), so the stub's query branch is the live vector`);
+  }
   const meta = JSON.parse(stubChat([{ role: "system", content: "Extract metadata…" }, { role: "user", content: "Saffron onboarding takes 5 sessions." }]));
   assert(meta.type === "observation" && JSON.stringify(meta.topics) === JSON.stringify(["saffron"]) && Array.isArray(meta.people), "the chat stub answers the metadata prompt with the subject as the topic");
   assert(JSON.parse(stubChat([{ role: "user", content: "no subject here" }])).topics[0] === "unplaced", "a text naming no subject still gets a topic (the prompt asks for at least one)");
@@ -435,6 +448,11 @@ function selfCheck(): void {
 
   const rendered = renderReport([def, noJudge], [p2], caught);
   assert(/^arm\s+reader\s+survival/.test(rendered) && /judge\s+0\/6\s+0\.031\s+3\/0\s+0\.250\s+0\.508/.test(rendered) && /qs2\s+wrong_number\s+judge/.test(rendered), "the report renders the arms, the paired row with a p per population, and the attribution");
+  assert(argumentProblem([]) === null && argumentProblem(["--gate"]) === null && argumentProblem(["--only", "-judge"]) === null, "the four modes and the report parse");
+  assert(/^unknown argument bogus/.test(argumentProblem(["bogus"]) ?? "") && /^unknown argument default/.test(argumentProblem(["--record", "default"]) ?? ""), "a stray word is refused, even one that would be an arm name");
+  assert(/^one mode at a time/.test(argumentProblem(["--gate", "--record"]) ?? "") && /^one mode at a time/.test(argumentProblem(["--gate", "--only", "default"]) ?? ""), "two modes are refused");
+  assert(/read once$/.test(argumentProblem(["--only", "default", "--only", "-judge"]) ?? "") && /read once$/.test(argumentProblem(["--gate", "--gate"]) ?? ""), "a mode flag given twice is refused as two flags, not read once");
+  assert(/alone it would run everything/.test(argumentProblem(["--only"]) ?? "") && /not "--gate"/.test(argumentProblem(["--only", "--gate"]) ?? "") && /not "bogus"/.test(argumentProblem(["--only", "bogus"]) ?? ""), "--only without a real arm is refused by name");
   const gateOnly = renderReport([def], [], {});
   assert(/not measured in this run/.test(gateOnly) && !/more than one/.test(gateOnly), "with no mechanism arm run, the report says so and attributes nothing");
 

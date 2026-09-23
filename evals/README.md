@@ -4122,46 +4122,6 @@ errors the default arm caught, and the mechanism each rests on (none named = cau
   ln4   inference     actor
   md2   wrong_number  judge
 ```
-arm            reader   survival            catch               coverage            contested  unseen-err  returned  chars
-──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-default        labels    63.0% (17/27)      100.0% (9/9)        100.0% (26/26)              6           0        34   2266
--supersedes    labels    63.0% (17/27)       66.7% (6/9)        100.0% (29/29)              6           0        34   2436
--judge         labels    85.2% (23/27)       66.7% (6/9)        100.0% (26/26)              0           0        34   2014
--actor         labels    70.4% (19/27)       77.8% (7/9)        100.0% (31/31)              6           0        34   2664
-default        blind     92.6% (25/27)        0.0% (0/9)        100.0% (34/34)              0           0        34   2554
-
-catch by error class (default arm): stale 100.0% (3/3) · wrong_number 100.0% (3/3) · inference 100.0% (3/3)
-
-paired against the default arm — items the mechanism got right that its absence did not (helped) and the reverse (hurt), over the items both arms counted; McNemar exact, two-sided, over the mixed set — read the facts / errors split beside it
-mechanism    helped  hurt   p       facts +/−   errors +/−   helped items              hurt items                    unpaired
-──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-supersedes        3     0   0.250   0/0         3/0          hs1,tm1,ln2                                             
-judge             3     6   0.508   0/6         3/0          qs2,sf2,md2               qs1,zp1,pw1,sf1,md1,zp2       
-actor             2     2   1.000   0/2         2/0          gr2,ln4                   hs3,md3                       
-
-errors the default arm caught, and the mechanism each rests on (none named = caught by more than one, or never retrieved)
-  hs1   stale         supersedes
-  tm1   stale         supersedes
-  ln2   stale         supersedes
-  gr2   inference     actor
-  qs2   wrong_number  judge
-  pw2   inference     more than one
-  sf2   wrong_number  judge
-  ln4   inference     actor
-  md2   wrong_number  judge
-```
-arm            reader   survival        catch          coverage       contested  returned  chars
-default        labels    63.0% (17/27)  100.0% (9/9)   100.0% (26/26)         6        34   2266
--supersedes    labels    63.0% (17/27)   66.7% (6/9)   100.0% (29/29)         6        34   2436
--judge         labels    85.2% (23/27)   66.7% (6/9)   100.0% (26/26)         0        34   2014
--actor         labels    70.4% (19/27)   77.8% (7/9)   100.0% (31/31)         6        34   2664
-default        blind     92.6% (25/27)    0.0% (0/9)   100.0% (34/34)         0        34   2554
-
-mechanism    helped  hurt   p       helped                 hurt
-supersedes        3     0   0.250   hs1,tm1,ln2
-judge             3     6   0.508   qs2,sf2,md2            qs1,zp1,pw1,sf1,md1,zp2
-actor             2     2   1.000   gr2,ln4                hs3,md3
-```
 
 The paired table carries a McNemar p per population — facts (stated) and
 errors (not stated) — and the mixed p over both, where two effects in
@@ -4239,7 +4199,7 @@ planted fact dropped from its deliverable fails the survival floor. Live
 mutants on the gate, restored by copy: the reader dropping the first hit of
 every subject fails survival (9/27); the deliverable captured without
 `derived_from` fails coverage (0/26); the reader ignoring the superseded mark
-fails catch (6/9); the run-it review's eleven more, each on the right rate.
+fails catch (6/9); the run-it reviews' further mutants, each on the right rate.
 
 Not built here: `capture_deliverable` / `verify_deliverable` (SMD-1715), a
 `cites` or `stance` argument (SMD-1733), a real judge's catch rate, proposal
