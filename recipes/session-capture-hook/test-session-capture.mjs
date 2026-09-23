@@ -263,6 +263,14 @@ console.log("\n[3] The summary is deterministic, capped, and says what it carrie
   const big = renderSummary(many);
   assert(big.length <= LIMITS.textChars, `the whole text is capped at ${LIMITS.textChars} (${big.length})`);
   assert((big.match(/^- /gm) ?? []).length === LIMITS.prompts + 1 && /- … and 28 more/.test(big), `at most ${LIMITS.prompts} prompts are listed, the rest counted`);
+  // The cap falls on the body, never on the closing lines (first review pass: clip() cut from the tail, and a long checkpoint summary lost the line saying the session still ran).
+  // Twelve prompts at 200, the outcome at 1,500 and twenty long in-project paths are past the cap (the run-it reviewer's shape).
+  const heavy = { ...many, outcome: "y".repeat(3000), files: new Set(Array.from({ length: 20 }, (_, i) => `/repo/proj/src/${"deeply/nested/".repeat(3)}component-number-${i}-and-more-words-in-its-name.ts`)) };
+  const bigCp = renderSummary({ ...heavy, checkpoint: { kind: "compacted", trigger: "auto" } }), bigEnd = renderSummary(heavy);
+  assert(bigCp.length === LIMITS.textChars && /…\n\nCheckpoint: compacted at 2026-09-22 13:20 \(auto\), continuing — the session's next checkpoint or its end supersedes this summary\.\n\nSession 11111111-2222-4333-8444-555555555555, 2026-09-22 13:00 → 2026-09-22 13:20\.$/.test(bigCp),
+    `a summary over the cap keeps its Checkpoint and Session lines whole and ends on the Session line, the body clipped instead (${bigCp.length} chars, tail: ${JSON.stringify(bigCp.slice(-60))})`);
+  assert(bigEnd.length === LIMITS.textChars && new RegExp(`…\\n\\nSession ${SID}, 2026-09-22 13:00 → 2026-09-22 13:20\\.$`).test(bigEnd), `…and so does one with no checkpoint (${bigEnd.length} chars, tail: ${JSON.stringify(bigEnd.slice(-40))})`);
+  assert(bigCp !== bigEnd, "…so a checkpoint's summary and the end's differ even at the cap, and the end supersedes the checkpoint (first review pass: both clipped to the same 6000 bytes, and the end was 'already captured')");
   assert(provenanceOf(many).length === LIMITS.derived, `derived_from is capped at ${LIMITS.derived}`);
   const empty = renderSummary(summariseTranscript(join(TMP, "empty.jsonl"), (writeFileSync(join(TMP, "empty.jsonl"), "{}\n"), "claude-code")));
   assert(/Brain: no thoughts read or written this session\./.test(empty), "a session that never touched the brain says so");
@@ -385,6 +393,9 @@ console.log("\n[5] The foreground half decides, writes a payload, and never a ke
   assert(compact.payloadPath && compact.payload.event === "PreCompact" && compact.payload.trigger === "auto" && /\n\nCheckpoint: compacted at 2026-09-22 13:20 \(auto\), continuing/.test(compact.payload.text) && /^prepared: session s-compact \(PreCompact auto\), 3 prompt/.test(compact.message),
     `a PreCompact hook prepares a payload naming the compaction, ungated by the Stop interval (${compact.message})`);
   assert(prepare({ ...base, session_id: "s-compact", transcript_path: join(TMP, "two.jsonl"), hook_event_name: "PreCompact", trigger: "manual" }, { minIntervalMin: 20 }).payloadPath !== undefined, "…and a second compaction a moment later, the transcript grown, prepares too — the interval is Stop's alone");
+  const oddTrigger = prepare({ ...base, session_id: "s-compact-odd", hook_event_name: "PreCompact", trigger: "AUTO" });
+  assert(oddTrigger.payloadPath && !("trigger" in JSON.parse(readFileSync(oddTrigger.payloadPath, "utf8"))) && /\n\nCheckpoint: compacted at 2026-09-22 13:20, continuing/.test(oddTrigger.payload.text) && /\(PreCompact\), 3 prompt/.test(oddTrigger.message),
+    "a trigger that is neither manual nor auto is recorded nowhere — not the payload, not the line, not the message (first review pass: the mutant recording any value survived)");
   // No timestamp anywhere: the summary is "undated", so two renders agree whatever the clock says (ninth review pass).
   writeFileSync(join(TMP, "undated.jsonl"), [line({ type: "user", sessionId: SID, message: { role: "user", content: "a prompt with no time" } }), line({ type: "assistant", sessionId: SID, message: { role: "assistant", content: [{ type: "text", text: "ok" }] } })].join("\n"));
   const undated1 = renderSummary(summariseTranscript(join(TMP, "undated.jsonl"))), undated2 = renderSummary(summariseTranscript(join(TMP, "undated.jsonl")));
@@ -847,7 +858,7 @@ console.log("\n[7] As a hook: JSON on stdin, exit codes, and what reaches the en
   const end = await runHook({ session_id: "s-compact-chain", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "SessionEnd", reason: "other" }, { OB1_SESSION_CAPTURE_SYNC: "1" });
   assert(end.code === 0 && received.length === before + 2 && cptId && received.at(-1).args.supersedes === cptId && !/Checkpoint:/.test(received.at(-1).args.content),
     `…and the session's end, the transcript unchanged, supersedes it with a summary naming no checkpoint (${end.err.trim().slice(0, 60)})`);
-  assert(/captured session=s-compact-chain harness=claude-code event=PreCompact id=/.test(readFileSync(join(STATE, "log"), "utf8")), "the log names the event when it is not the session's end");
+  assert(/captured session=s-compact-chain harness=claude-code event=PreCompact trigger=auto id=/.test(readFileSync(join(STATE, "log"), "utf8")), "the log names the event and its trigger when it is not the session's end");
 }
 
 // ── [8] Detached ─────────────────────────────────────────────────────────────
@@ -889,6 +900,7 @@ console.log("\n[9] The printed hook carries no secret; --check tells a capture k
     `Claude Code with no event named prints the pair — SessionEnd and PreCompact, one command, PreCompact pinned to 10 s too: it shares no budget, but a compaction waits on it (${Object.keys(own.hooks).join()}) (SMD-2012)`);
   assert(Object.keys(cx.hooks).join() === "SessionEnd" && Object.keys(st.hooks).join() === "Stop" && Object.keys(hookJson("claude-code", { event: "PreCompact", runtime: "bun" }).hooks).join() === "PreCompact",
     "Codex's default is SessionEnd alone — it has no compaction hook; an event named prints that event alone");
+  assert((() => { try { hookJson("claude", {}); return false; } catch (e) { return /no default events for harness "claude"/.test(e.message); } })(), "a harness with no defaults is a named error from hookJson, not a TypeError off undefined (first review pass)");
   assert(!JSON.stringify([cc, cx, st]).includes("cap-key"), "no key in any of them");
   assert(shellWord("/Users/me/My Projects/OB1/x.mjs") === "'/Users/me/My Projects/OB1/x.mjs'" && shellWord(SCRIPT) === SCRIPT && shellWord("/a'b/c.mjs") === "'/a'\\''b/c.mjs'",
     "a path with a space or a quote is quoted for the shell the harness runs the command through; a plain one is not");
@@ -905,6 +917,11 @@ console.log("\n[9] The printed hook carries no secret; --check tells a capture k
   writeFileSync(CONFIG, JSON.stringify({ url: URL_, key: "cap-key" }), { mode: 0o600 });
   const dry = await run(["--dry-run", CLAUDE_T]);
   assert(dry.code === 0 && /^Session summary — claude-code/.test(dry.out) && /would send: source=claude-code, derived_from=3 id/.test(dry.out) && /secret scan: clean/.test(dry.out), "--dry-run prints the summary and what it would send");
+  assert(!/Checkpoint:/.test(dry.out), "…with no checkpoint line: a dry run has no event");
+  const dryCp = await run(["--dry-run", CLAUDE_T, "--event", "PreCompact", "--trigger", "auto"]);
+  assert(dryCp.code === 0 && /\n\nCheckpoint: compacted at 2026-09-22 13:20 \(auto\), continuing/.test(dryCp.out) && /\n\nCheckpoint: turn ended at /.test((await run(["--dry-run", CLAUDE_T, "--event", "Stop"])).out),
+    "--dry-run --event previews the checkpoint line the hook would write for that event (first review pass)");
+  assert((await run(["--dry-run", CLAUDE_T, "--event", "bogus"])).code === 2, "…and refuses an event it does not know, as --print-hook does");
   assert(received.length === 1, "…and sends nothing");
   const ph = await run(["--print-hook", "codex"]);
   assert(ph.code === 0 && JSON.parse(ph.out).hooks.SessionEnd && /installs nothing/.test(ph.err), "--print-hook prints JSON on stdout and the where-to-paste on stderr");
@@ -915,6 +932,11 @@ console.log("\n[9] The printed hook carries no secret; --check tells a capture k
   const miss = await run(["--print-hook", "claude-code", "--event", "precompact"]);
   assert(miss.code === 2 && /--event takes SessionEnd, PreCompact, Stop, not "precompact" — the case matters/.test(miss.err) && !miss.out.trim(), "an event the hook does not know is refused — a misspelt one would install a hook that never fires — and a case slip is named");
   assert((await run(["--print-hook", "claude-code", "--event", "SubagentStop"])).code === 2, "…as is an event the harness has and this hook has no use for");
+  const noEv = await run(["--print-hook", "claude-code", "--event", "--min-interval", "20"]);
+  assert(noEv.code === 2 && /--event takes one of SessionEnd, PreCompact, Stop; none was given/.test(noEv.err) && !noEv.out.trim(), `--event with no value — the Stop forgotten — is refused, not the default pair with the interval dropped (exit ${noEv.code}; first review pass)`);
+  const miNoStop = await run(["--print-hook", "claude-code", "--min-interval", "30"]);
+  assert(miNoStop.code === 2 && /--min-interval applies to --event Stop alone/.test(miNoStop.err) && !miNoStop.out.trim(), "--min-interval with no Stop event is refused, not validated and dropped");
+  assert((await run(["--print-hook", "claude-code", "--event", "PreCompact", "--min-interval", "30"])).code === 2, "…under PreCompact too");
 }
 
 fake.stop(true);

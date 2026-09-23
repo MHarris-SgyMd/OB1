@@ -122,6 +122,7 @@ Then see what a session of yours would send, without sending it:
 ```bash
 bun recipes/session-capture-hook/session-capture.mjs --dry-run ~/.claude/projects/<project>/<session>.jsonl
 bun recipes/session-capture-hook/session-capture.mjs --dry-run ~/.codex/sessions/2026/09/22/rollout-<…>.jsonl
+bun recipes/session-capture-hook/session-capture.mjs --dry-run <transcript> --event PreCompact --trigger auto   # what a compaction checkpoint would say
 ```
 
 ### 4. Print the hook and paste it

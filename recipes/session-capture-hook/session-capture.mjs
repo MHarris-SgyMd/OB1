@@ -23,7 +23,8 @@
  * Exit 2 is the one code a Stop hook may block with; this script never uses it.
  *
  * Time budget: Claude Code gives SessionEnd hooks 1.5 s by default (raised to the
- * hook's `timeout`, at most 60), Codex 1 s (at most 3). The hook does its local
+ * hook's `timeout`, at most 60), Codex 1 s (at most 3); PreCompact shares no
+ * budget, but a compaction waits on it, so it is printed with the same 10 s. The hook does its local
  * work — read, summarise, scan — in the foreground, well inside a second, then
  * hands the network call to a detached child and exits 0. The child posts,
  * records the new thought's id in the state directory, and appends a line to the
@@ -45,7 +46,7 @@
  *   bun session-capture.mjs --print-hook codex           # the hooks.json to paste (SessionEnd: Codex has no compaction hook)
  *   bun session-capture.mjs --print-hook claude-code --event Stop --min-interval 20   # the coarser checkpoint: a turn, at most every 20 min
  *   bun session-capture.mjs --check                      # config + endpoint + key scope; writes nothing
- *   bun session-capture.mjs --dry-run <transcript.jsonl> # print what WOULD be sent; sends nothing
+ *   bun session-capture.mjs --dry-run <transcript.jsonl> # print what WOULD be sent; sends nothing (--event PreCompact --trigger auto previews a checkpoint's)
  *   bun session-capture.mjs                              # as the hook: hook JSON on stdin
  *
  * Bun or Node 18+, no dependencies. Config (0600, never in a hook command line):
@@ -257,7 +258,9 @@ function emptySummary() {
   // `cwd` and `branch` are where the session ENDED; `roots` every directory it
   // ran in (a session that moves between worktrees has several), so a file under
   // any of them is inside the project.
-  return { harness: "", sessionId: "", title: "", cwd: "", branch: "", roots: new Set(), prompts: [], outcome: "", files: new Set(), commits: 0, prs: [], retrieved: new Set(), captured: new Set(), first: "", last: "", pushed: false };
+  // `checkpoint` is set by prepare() from the hook event (checkpointOf); a
+  // transcript read for --dry-run or a test has none, and renders no such line.
+  return { harness: "", sessionId: "", title: "", cwd: "", branch: "", roots: new Set(), prompts: [], outcome: "", files: new Set(), commits: 0, prs: [], retrieved: new Set(), captured: new Set(), first: "", last: "", pushed: false, checkpoint: undefined };
 }
 
 /**
@@ -400,6 +403,9 @@ function distinctPrompts(prompts) {
   return out;
 }
 
+/** An ISO timestamp as the summary shows it: the day and the minute. */
+const when = (iso) => iso.slice(0, 16).replace("T", " ");
+
 /** Render the summary as one thought. Deterministic: the same transcript renders the same text, which is what the fingerprint and the state compare. */
 export function renderSummary(s) {
   const project = s.cwd && s.cwd !== HOME ? basename(s.cwd) : ""; // a session in $HOME names no project (and not the user)
@@ -447,13 +453,19 @@ export function renderSummary(s) {
   // tells a checkpoint from an end; the end's summary carries no such line and
   // supersedes it (SMD-2012). The moment is the transcript's last timestamp,
   // never the clock: the fingerprint must not move with time.
+  const tail = [];
   if (s.checkpoint) {
-    const at = s.last ? ` at ${s.last.slice(0, 16).replace("T", " ")}` : "";
+    const at = s.last ? ` at ${when(s.last)}` : "";
     const how = s.checkpoint.kind === "compacted" ? `compacted${at}${s.checkpoint.trigger ? ` (${s.checkpoint.trigger})` : ""}` : `turn ended${at}`;
-    parts.push(`Checkpoint: ${how}, continuing — the session's next checkpoint or its end supersedes this summary.`);
+    tail.push(`Checkpoint: ${how}, continuing — the session's next checkpoint or its end supersedes this summary.`);
   }
-  parts.push(`Session ${s.sessionId || "unknown"}${s.first ? `, ${s.first.slice(0, 16).replace("T", " ")}` : ""}${s.last && s.last !== s.first ? ` → ${s.last.slice(0, 16).replace("T", " ")}` : ""}.`);
-  return clip(parts.join("\n\n"), LIMITS.textChars);
+  tail.push(`Session ${s.sessionId || "unknown"}${s.first ? `, ${when(s.first)}` : ""}${s.last && s.last !== s.first ? ` → ${when(s.last)}` : ""}.`);
+  // The cap falls on the body — prompts, outcome, files — never on the closing
+  // lines: clip() cuts from the tail, and a long checkpoint summary that lost
+  // the line saying the session still runs would read as final (first review
+  // pass). The whole stays within LIMITS.textChars.
+  const closing = tail.join("\n\n");
+  return `${clip(parts.join("\n\n"), LIMITS.textChars - closing.length - 2)}\n\n${closing}`;
 }
 
 /**
@@ -852,8 +864,8 @@ export async function postPending(cfg, own) {
       const obsolete = !payload.captured_id && (newestOf.get(payload.session_id) !== home || stateIsNewer);
       if (obsolete) {
         moveTo(here, DEAD_DIR());
-        log(`obsolete session=${payload.session_id} — a later ending of the session has a summary; this one is not posted`);
-        outcomes.push({ file, ok: false, obsolete: true, error: "obsolete: a later ending of the session has a summary" });
+        log(`obsolete session=${payload.session_id} — a later capture of the session has a summary; this one is not posted`);
+        outcomes.push({ file, ok: false, obsolete: true, error: "obsolete: a later capture of the session has a summary" });
         continue;
       }
       // The pointer is decided when the payload POSTS, not when it was prepared:
@@ -925,7 +937,7 @@ export async function postPending(cfg, own) {
         const summaryAt = payload.prepared_at && Date.parse(payload.prepared_at) <= Date.now() ? payload.prepared_at : new Date().toISOString();
         if (!stateIsNewerNow) writeState(payload.session_id, { thought_id: id, fingerprint: payload.fingerprint, captured_at: new Date().toISOString(), summary_at: summaryAt, harness: payload.harness, prompts: payload.prompts, sources: (payload.derived_from ?? []).length });
         unlinkSync(here);
-        log(`captured session=${payload.session_id} harness=${payload.harness}${payload.event && payload.event !== "SessionEnd" ? ` event=${payload.event}` : ""} id=${id} sources=${(payload.derived_from ?? []).length}${payload.supersedes ? ` supersedes=${payload.supersedes}` : ""}${note ? ` note="${note}"` : ""}`);
+        log(`captured session=${payload.session_id} harness=${payload.harness}${payload.event && payload.event !== "SessionEnd" ? ` event=${payload.event}${payload.trigger ? ` trigger=${payload.trigger}` : ""}` : ""} id=${id} sources=${(payload.derived_from ?? []).length}${payload.supersedes ? ` supersedes=${payload.supersedes}` : ""}${note ? ` note="${note}"` : ""}`);
         outcomes.push({ file, ok: true, id, note });
       } catch (e) {
         moveTo(here, PENDING_DIR());
@@ -979,6 +991,7 @@ export function hookJson(harness, { event, minInterval = 20, runtime } = {}) {
   // with "command not found" at every session end (twelfth review pass).
   const bin = runtime || process.execPath;
   const events = event ? [event] : DEFAULT_EVENTS[harness];
+  if (!events) throw new Error(`hookJson: no default events for harness "${harness}" — one of ${Object.keys(DEFAULT_EVENTS).join(", ")}`); // main() checks the name first; a caller of the export hears why (first review pass: a TypeError off undefined)
   const handlerFor = (ev) => {
     // The harness runs the command through a shell: a checkout under a path with a
     // space would otherwise split (first review pass).
@@ -1014,13 +1027,18 @@ export async function main(argv) {
   if (args.includes("--print-hook")) {
     const h = flag(args, "--print-hook") || "claude-code";
     if (h !== "claude-code" && h !== "codex") { console.error(`--print-hook takes claude-code or codex, not "${h}"`); return 2; }
-    const event = flag(args, "--event") || undefined; // none: the harness's default events
-    // A misspelt event would install a hook that never fires, and nothing would say so (SMD-2012).
+    const event = flag(args, "--event"); // absent: the harness's default events
+    // A misspelt event would install a hook that never fires, and nothing would
+    // say so (SMD-2012); `--event` with no value (`--event --min-interval 20`,
+    // the Stop forgotten) would print the default pair as silently (first review pass).
+    if (event === "") { console.error(`--event takes one of ${HOOK_EVENTS.join(", ")}; none was given`); return 2; }
     if (event !== undefined && !HOOK_EVENTS.includes(event)) { console.error(`--event takes ${HOOK_EVENTS.join(", ")}, not "${event}"${HOOK_EVENTS.some((e) => e.toLowerCase() === event.toLowerCase()) ? " — the case matters" : ""}`); return 2; }
     if (h === "codex" && event === "PreCompact") { console.error("Codex has no compaction hook: --print-hook codex prints SessionEnd; for a checkpoint on Codex print --event Stop --min-interval <minutes>"); return 2; }
     const mi = flag(args, "--min-interval");
     // A Stop hook printed with `--min-interval 20m` would run with NaN and capture every turn (eighth review pass).
     if (mi !== undefined && !(Number.isFinite(Number(mi)) && mi.trim() !== "" && Number(mi) > 0)) { console.error(`--min-interval takes a number of minutes above zero, not "${mi}"`); return 2; }
+    // The interval rides on a Stop hook's command line and nowhere else: given with the default pair it would validate and vanish (first review pass).
+    if (mi !== undefined && event !== "Stop") { console.error("--min-interval applies to --event Stop alone; SessionEnd and PreCompact capture at every event"); return 2; }
     const where = h === "codex" ? "~/.codex/hooks.json" : "~/.claude/settings.json (or .claude/settings.json in a project)";
     console.error(`# Paste into ${where} — this prints the hook, it installs nothing. Off until you do.`);
     console.log(JSON.stringify(hookJson(h, { event, minInterval: Number(mi ?? 20) }), null, 2));
@@ -1045,6 +1063,13 @@ export async function main(argv) {
       console.log(`--- would SKIP: no human prompt in ${path} (a compaction, or a transcript with only tool traffic${harness && harness !== sniffed ? `; note: --harness ${harness} was given but the first line says ${sniffed}` : ""})`);
       return 0;
     }
+    // `--event PreCompact [--trigger auto|manual]` or `--event Stop` previews the
+    // checkpoint line the hook would write for that event (first review pass:
+    // --print-hook refused an unknown event while --dry-run took one in silence,
+    // and nothing by hand could show the line).
+    const ev = flag(args, "--event");
+    if (ev !== undefined && !HOOK_EVENTS.includes(ev)) { console.error(`--event takes ${HOOK_EVENTS.join(", ")}, not "${ev}"`); return 2; }
+    if (ev) s.checkpoint = checkpointOf({ hook_event_name: ev, trigger: flag(args, "--trigger") });
     const text = renderSummary(s);
     const findings = scanSummary(s, text);
     const ids = provenanceOf(s);
