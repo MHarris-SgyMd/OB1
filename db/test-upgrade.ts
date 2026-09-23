@@ -462,9 +462,10 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // index, SMD-1492), 048 (the first release's schema_version, 1.0.0 — the
   // cut's last migration, SMD-1804/SMD-1860), 049 (the three-value CHECK on
   // ob1_agent_keys.scope, SMD-1298), 050 (the writer's mark on the row,
-  // SMD-1726), 051 (the second release's schema_version, 1.1.0) and 052
-  // (thought_changes, the read over the audit log, SMD-1296) stay recorded
-  // and are never tried. 030 is the right one to make pending because its
+  // SMD-1726), 051 (the second release's schema_version, 1.1.0), 052
+  // (thought_changes, the read over the audit log, SMD-1296) and 053
+  // (thought_sources, the link facet kind and the structured-wins rule,
+  // SMD-1867) stay recorded and are never tried. 030 is the right one to make pending because its
   // prerequisites — 015 and 021's
   // embedding_model column — are
   // exactly what a through-020 schema lacks, so it fails by name rather than
@@ -488,11 +489,14 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // 010 ([20d]); 050 adds a BEFORE trigger to 001's thoughts and a backfill over
   // 008's thought_audit through 046's ob1_registry_kind, all present ([20e]);
   // 052 adds one read function over 008's table and 046's columns, refusing by
-  // name without either ([20f]) — all recorded by the baseline with their
-  // prerequisites present, so none
+  // name without either ([20f]); 053 adds a table on 001's thoughts, two
+  // indexes on 042's thought_facets and redefines 016's
+  // record_thought_entities and 042's thought_facets_validate on their own
+  // bodies, refusing by name without 016 or 042 (its guard) — all recorded by
+  // the baseline with their prerequisites present, so none
   // becomes the plain-run failure point above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 23, `030 is among the last twenty-three migrations (${last})`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 24, `030 is among the last twenty-four migrations (${last})`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
