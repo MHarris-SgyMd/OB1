@@ -588,6 +588,8 @@ jobs:
           # (SMD-1843); the query log likewise. OB1_LLM_LOCAL declares the
           # endpoint to the egress gate (SMD-1903), which reads the flag and
           # never the address; the log line below holds the forward.
+          # OB1_GIT_SHA reaches the image as compose's build arg (SMD-2041),
+          # and the smoke step asserts the health body reports it.
           cat > .env <<EOF
           POSTGRES_PASSWORD=$(openssl rand -hex 24)
           MCP_ACCESS_KEYS=ci:write:$HASH
@@ -595,6 +597,7 @@ jobs:
           OB1_LLM_LOCAL=1
           OB1_QUERY_LOG=on
           SERVER_PORT=8010
+          OB1_GIT_SHA=$GITHUB_SHA
           EOF
           docker compose -f compose.yaml up -d --build --wait --wait-timeout 240
 
@@ -636,9 +639,13 @@ jobs:
           SERVER_BIND=0.0.0.0 docker compose -f compose.yaml -f compose.host-ports.yaml --profile local-models config --format json \
             | jq -e '([.services[].ports[]?] | length == 3) and .services.server.ports[0].host_ip == "0.0.0.0" and ([.services.postgres.ports[].host_ip, .services.ollama.ports[].host_ip] == ["127.0.0.1", "127.0.0.1"])'
 
+      # OB1_SMOKE_COMMIT: check 10 asserts the keyed /health body names the
+      # commit the build arg above baked in, beside the version it asserts.
       - name: Smoke-test it over MCP
         working-directory: deploy
         run: ./smoke.sh
+        env:
+          OB1_SMOKE_COMMIT: ${{ github.sha }}
 
       - name: Confirm no Supabase CLI anywhere in the stack
         working-directory: deploy

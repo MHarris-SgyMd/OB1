@@ -122,6 +122,8 @@ services:
     build:
       context: ..
       dockerfile: server-portable/Dockerfile
+      args:
+        OB1_GIT_SHA: ${OB1_GIT_SHA:-unknown}
     environment:
       <<: *server-env
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@stable-postgres:5432/openbrain
@@ -154,6 +156,8 @@ services:
     build:
       context: ..
       dockerfile: server-portable/Dockerfile
+      args:
+        OB1_GIT_SHA: ${OB1_GIT_SHA:-unknown}
     environment:
       <<: *server-env
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@canary-postgres:5432/openbrain
@@ -186,6 +190,8 @@ services:
     build:
       context: ..
       dockerfile: server-portable/Dockerfile
+      args:
+        OB1_GIT_SHA: ${OB1_GIT_SHA:-unknown}
     environment:
       <<: *server-env
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@working-postgres:5432/openbrain

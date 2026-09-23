@@ -11,8 +11,9 @@
 # Exit 0 if the deployment is serving correctly, 1 otherwise. Read-only: it never
 # captures a thought, so it is safe against production.
 #
-# Checks 2, 3 and 4 are the ones a Supabase Edge Function deployment cannot
-# pass; FORK.md changes 42 and 75 say why, and why those failures are real.
+# Checks 2, 3, 4 and 10 are the ones a Supabase Edge Function deployment cannot
+# pass; FORK.md changes 42 and 75 say why, and why those failures are real (10:
+# upstream's server has no keyed health body, SMD-2041).
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -168,6 +169,35 @@ case "$kw" in
   "No thoughts contain"*) ok "search_thoughts_keyword reached the database" ;;
   *)               bad "search_thoughts_keyword returned nothing usable — $kw" ;;
 esac
+
+# 10. What the brain is (SMD-2041): GET /health WITH the key answers the
+#     brain_info tool's record as JSON — check 4's keyless probe still gets
+#     `ok`. Printed: the version, the commit the image was built from, the
+#     ledger's highest migration and how it stands against the server's tree.
+#     Asserted: the version is this checkout's (server-portable/version.ts,
+#     generated from db/version.mjs), and, when OB1_SMOKE_COMMIT is set (CI
+#     sets the commit it built), the commit. No -L: curl forwards a custom
+#     header to whatever host a redirect names, and this one carries the key.
+#     A Supabase Edge Function fails here too: upstream has no such body.
+hj=$(curl -s --max-time 20 -H "x-brain-key: $KEY" "$BASE/health")
+facts=$(printf '%s' "$hj" | python3 -c '
+import sys, json
+d = json.load(sys.stdin); db = d.get("database") or {}
+hi = ("error: " + db["error"][:80]) if "error" in db else ("%03d" % db["highestMigration"] if db.get("highestMigration") is not None else "none")
+print("\t".join([d.get("version", ""), d.get("commit", ""), hi, d.get("ledger") or "not judged"]))' 2>/dev/null)
+IFS=$'\t' read -r hv hc hm hl <<<"$facts"
+vfile="$HERE/../server-portable/version.ts"
+want=""
+[ -r "$vfile" ] && want=$(sed -nE 's/^export const FORK_VERSION = "([^"]+)";$/\1/p' "$vfile")
+if [ -z "${hv:-}" ]; then
+  bad "GET /health with the key → '$(printf '%s' "$hj" | head -c 60)' (expected the brain's record as JSON; SMD-2041)"
+elif [ -n "$want" ] && [ "$hv" != "$want" ]; then
+  bad "GET /health with the key → version $hv, but this checkout is $want (a stale image, or the wrong deployment)"
+elif [ -n "${OB1_SMOKE_COMMIT:-}" ] && [ "$hc" != "$OB1_SMOKE_COMMIT" ]; then
+  bad "GET /health with the key → commit $hc, expected $OB1_SMOKE_COMMIT (the build arg did not reach the image)"
+else
+  ok "GET /health with the key → version $hv${want:+ (matching the checkout)}, commit $hc, highest migration $hm (ledger: $hl)"
+fi
 
 echo
 echo "$((pass+fail)) checks: $pass passed, $fail failed"

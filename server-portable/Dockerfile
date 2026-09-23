@@ -26,6 +26,14 @@ COPY server-portable/shims ./shims
 COPY db/config.mjs db/config.d.mts db/version.mjs db/version.d.mts /db/
 COPY releases.json /releases.json
 
+# The commit this image was built from, reported by brain_info and the keyed
+# /health body (SMD-2041). A build arg, not a runtime variable, so the image
+# says what it was built from whatever the environment says: compose passes it
+# from OB1_GIT_SHA, the release job the tag's commit. After every COPY, so a new
+# commit rebuilds no earlier layer. Unset reads as `unknown`.
+ARG OB1_GIT_SHA=unknown
+ENV OB1_GIT_SHA=$OB1_GIT_SHA
+
 # Secrets are injected at runtime, never baked in:
 #   MCP_ACCESS_KEYS (or the legacy MCP_ACCESS_KEY), OPENROUTER_API_KEY or
 #                  OB1_LLM_API_KEY (and OB1_CHAT_API_KEY when OB1_CHAT_BASE_URL
