@@ -70,7 +70,8 @@ const embDim = env.OB1_EMBEDDING_DIM ? Number(env.OB1_EMBEDDING_DIM) : DEF_DIM;
  * Resolved here rather than copied, so the row, the pass remedy and the --deep
  * probe cannot name a model the worker would not use.
  */
-const { metadataModel: metaModel, judgeModel, egress } = resolveEmbedConfig(env);
+const resolvedEmbed = resolveEmbedConfig(env);
+const { metadataModel: metaModel, judgeModel, egress } = resolvedEmbed;
 /**
  * The two endpoints, by embed.ts's rule — the one the server dials by — so the
  * rows below print what a capture will do, not a second opinion of it. Until
@@ -233,6 +234,46 @@ if (chatIsOwn) {
   }
 }
 add("metadata model", "ok", metaModel);
+{
+  // The window db/extract-entities.ts extracts a long thought in, and where
+  // the number came from (SMD-1879): entities.ts's one sentence, the worker's
+  // banner verbatim. An explicit size whose text and answer would not fit the
+  // model's served context beside the rules is the one configuration that
+  // defeats the windows — the call is truncated or refused, which is what they
+  // exist to prevent — so it warns, naming the most that fits.
+  const { extractWindowThatFits, extractContextNeeded, EXTRACT_MIN_WINDOW_TOKENS } = await import("../db/config.mjs");
+  const { describeExtractWindow } = await import("./entities.ts");
+  // The one resolution of the environment this file makes (second review pass).
+  const extractCfg = resolvedEmbed;
+  // The resolver's own arithmetic (first review pass): a copy here omitted the
+  // answer floor and the part marker, and recommended a value that requested
+  // 280 tokens more than the context.
+  const fits = extractCfg.extractModelWindow !== undefined ? extractWindowThatFits(extractCfg.extractModelWindow) : undefined;
+  // A context that holds no window is a fact about the model whatever the
+  // knob says (third review pass: with the knob set, the branch below
+  // recommended a negative size). `unfit` is the resolver's answer for the
+  // derived path; the same arithmetic decides the explicit one.
+  if (fits !== undefined && fits < EXTRACT_MIN_WINDOW_TOKENS) {
+    add("extraction window", "warn",
+        `${metaModel}'s ${extractCfg.extractModelWindow}-token served context holds under ${EXTRACT_MIN_WINDOW_TOKENS} tokens of thought text beside the rules and an answer — no window fits it; ${extractCfg.extractChunkTokensUnfit ? `the default ${extractCfg.extractChunkTokens} is in force` : `OB1_EXTRACT_CHUNK_TOKENS=${extractCfg.extractChunkTokens} cannot fit either`} and every extraction call will be truncated or refused`,
+        `Serve the model with a larger context (a Modelfile's num_ctx, or the provider's setting), or set OB1_METADATA_MODEL to one that has it.`);
+  } else if (extractCfg.extractChunkTokensFrom === "OB1_EXTRACT_CHUNK_TOKENS" && extractCfg.extractChunkTokens < EXTRACT_MIN_WINDOW_TOKENS) {
+    // The explicit path had no floor (third review pass): a 1-token window is
+    // one model call per word.
+    add("extraction window", "warn",
+        `OB1_EXTRACT_CHUNK_TOKENS=${extractCfg.extractChunkTokens} is under ${EXTRACT_MIN_WINDOW_TOKENS} tokens — a window that small is one model call per few words of every thought`,
+        `Set OB1_EXTRACT_CHUNK_TOKENS at or above ${EXTRACT_MIN_WINDOW_TOKENS}, or unset it to derive the window from the model's context.`);
+  } else if (extractCfg.extractChunkTokensFrom === "OB1_EXTRACT_CHUNK_TOKENS" && fits !== undefined && extractCfg.extractChunkTokens > fits) {
+    add("extraction window", "warn",
+        `OB1_EXTRACT_CHUNK_TOKENS=${extractCfg.extractChunkTokens} — a window that long, its answer budget and the rules do not fit ${metaModel}'s ${extractCfg.extractModelWindow}-token served context; the call is truncated or refused`,
+        `Unset OB1_EXTRACT_CHUNK_TOKENS to derive the window from the context, or set it at or under ${fits}.`);
+  } else if (extractCfg.extractChunkTokensFrom === "default") {
+    add("extraction window", "ok",
+        `${describeExtractWindow(extractCfg)} — set OB1_EXTRACT_CHUNK_TOKENS if the model serves fewer than ${extractContextNeeded(extractCfg.extractChunkTokens)} tokens`);
+  } else {
+    add("extraction window", "ok", describeExtractWindow(extractCfg));
+  }
+}
 // The judge's own row, so a report says which model db/consolidate.ts will
 // pool under: the pass key carries the name, and a reader of the consolidate
 // pass row below can match the two.
