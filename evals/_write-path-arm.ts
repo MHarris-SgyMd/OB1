@@ -21,7 +21,20 @@
  * stub (the judge arm); then, as the reader, search each deliverable's
  * subjects, read the pending proposals, apply the policy, and capture each
  * deliverable with `derived_from` naming the ids it used. Prints one line,
- * `RESULT <json>`, the Observation write-path.ts scores.
+ * `RESULT <json>`, the Observation write-path.ts scores, and one
+ * `SUMMARY …` line of the arm's cost on stderr.
+ *
+ * One coupling between arms, stated: 029 keeps a superseded thought out of
+ * the judge's pool and its candidates, so the -supersedes arm also hands
+ * the judge the three stale decisions to pair. `corpusProblems` keeps that
+ * inert by rule — no item on a subject with a decision carries a digit — so
+ * the arm still measures the pointer alone; a corpus that broke the rule
+ * would credit the judge's work to the pointer.
+ *
+ * The parent's environment is not trusted: every knob the server, the
+ * egress gate or the workers read is set or removed below, so a shell that
+ * exports a dogfood key or policy (OB1_WORKER_KEY, OB1_EGRESS_POLICY) does
+ * not change the number or fail the gate.
  */
 
 import { SQL } from "bun";
@@ -87,14 +100,11 @@ process.env.OB1_METADATA_MODEL = META_MODEL;
 process.env.OB1_LLM_TIMEOUT = "10";
 process.env.MCP_ACCESS_KEYS = `op-key:write:${hashKey(OP_RAW)},bot-key:write:${hashKey(BOT_RAW)}`;
 process.env.OB1_AGENT_CACHE_TTL_MS = "0";
-delete process.env.MCP_ACCESS_KEY;
-delete process.env.OPENROUTER_API_KEY;
-delete process.env.OB1_LLM_API_KEY;
-delete process.env.OB1_CHAT_BASE_URL;
-delete process.env.OB1_JUDGE_MODEL;
-delete process.env.OB1_QUERY_LOG;
-delete process.env.SUPABASE_URL;
-delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+for (const k of [
+  "MCP_ACCESS_KEY", "OPENROUTER_API_KEY", "OB1_LLM_API_KEY", "OB1_CHAT_BASE_URL", "OB1_CHAT_API_KEY", "OB1_CHAT_LOCAL", "OB1_JUDGE_MODEL",
+  "OB1_QUERY_LOG", "OB1_TIER", "OB1_EGRESS_POLICY", "OB1_EGRESS_ALLOW", "OB1_EGRESS_DENY", "OB1_WORKER_KEY", "OB1_EMBEDDING_DIMENSIONS",
+  "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY",
+]) delete process.env[k];
 
 const worker = (await import("../server-portable/index.ts")).default as { fetch: (r: Request) => Response | Promise<Response> };
 const server = Bun.serve({ port: 0, fetch: worker.fetch });
@@ -163,10 +173,9 @@ async function runWorker(script: string, args: string[]): Promise<string> {
 if (on("judge")) {
   await runWorker("extract-entities.ts", ["--workers", "1"]);
   extracted = Number((await sql`SELECT count(DISTINCT thought_id)::int AS n FROM thought_entities`)[0].n);
-  // --k above the largest subject: a slip must meet its correct twin among the
-  // candidates, and the shipped 3 nearest is a cost choice for a real brain,
-  // not this corpus's.
-  await runWorker("consolidate.ts", ["--workers", "1", "--k", "10"]);
+  // At the shipped candidate count: the number is the shipped pass's, and
+  // corpusProblems holds that no slip has more earlier neighbours than that.
+  await runWorker("consolidate.ts", ["--workers", "1"]);
 }
 
 // ── The reader ──────────────────────────────────────────────────────────────
@@ -203,7 +212,7 @@ const observation: Observation = {
   pendingProposals: Number(pending), extracted, ms: Date.now() - t0,
 };
 console.log(`RESULT ${JSON.stringify(observation)}`);
-console.error(`  ${ARM} / ${READER}: ${embedCalls} embedding calls, ${chatCalls} chat calls, ${extracted} thoughts extracted, ${pending} pending proposals, ${Date.now() - t0} ms`);
+console.error(`SUMMARY ${ARM} / ${READER}: ${embedCalls} embedding calls, ${chatCalls} chat calls, ${extracted} thoughts extracted, ${pending} pending proposals, ${Date.now() - t0} ms`);
 
 await sql.close();
 server.stop(true);

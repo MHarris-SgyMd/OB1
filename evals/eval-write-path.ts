@@ -39,7 +39,7 @@
  * teeth, as db/test-replay.ts shows with random vectors.
  *
  *   ../db/with-postgres.sh bun eval-write-path.ts              # every arm, the report
- *   ../db/with-postgres.sh bun eval-write-path.ts --gate       # …and hold baselines.json's write_path floor (CI, the data-layer job)
+ *   ../db/with-postgres.sh bun eval-write-path.ts --gate       # the default arm and the blind reader only; hold baselines.json's write_path floor (CI, the data-layer job)
  *   ../db/with-postgres.sh bun eval-write-path.ts --only -judge   # one arm, its observation as JSON
  *   bun eval-write-path.ts --self-check                        # the rules, probed with hand-known answers; no database
  *   bun eval-write-path.ts --record                            # every arm, then write the write_path section of baselines.json
@@ -52,9 +52,9 @@ import { buildJudgeMessages, parseJudgement } from "../server-portable/consolida
 import { buildMessages as buildEntityMessages } from "../server-portable/entities.ts";
 import { DELIVERABLES, ITEMS, READER_K, SESSIONS, SUBJECTS, type Item } from "./write-path-corpus.ts";
 import {
-  ARMS, MECHANISMS, STUB_DIM, armOff, caughtBy, compareToFloor, corpusProblems, decide, fnv1a, judgeRule, mcnemarExact, numbersIn,
+  ARMS, MECHANISMS, STUB_DIM, armOff, caughtBy, compareToFloor, corpusLabel, corpusProblems, decide, floorOf, fnv1a, judgeRule, mcnemarExact, noiseBucket, numbersIn,
   pair, parseCapturedId, parseHits, parseProposalIds, ratesOf, ratio, renderDeliverable, renderReport, scoreArm, stubChat, subjectsIn, vectorFor,
-  type Arm, type ArmScore, type Hit, type Mechanism, type Observation, type Paired, type ReaderPolicy, type WritePathBaseline,
+  type Arm, type ArmScore, type Floor, type Hit, type Mechanism, type Observation, type Paired, type ReaderPolicy, type WritePathBaseline,
 } from "./write-path.ts";
 
 const HERE = import.meta.dir;
@@ -67,6 +67,10 @@ for (const a of args) {
     console.error(`unknown argument ${a}; see the header for the four modes`);
     process.exit(2);
   }
+}
+if (has("--only") && (valueOf("--only") === undefined || valueOf("--only")!.startsWith("--"))) {
+  console.error(`--only takes one of ${ARMS.join(", ")}; alone it would run everything and report something other than what was asked`);
+  process.exit(2);
 }
 
 // ── Running an arm ──────────────────────────────────────────────────────────
@@ -83,20 +87,27 @@ async function runArm(url: string, arm: Arm, reader: ReaderPolicy): Promise<Obse
     console.error(err.slice(-3000));
     throw new Error(`the ${arm}/${reader} arm exited ${code}${line ? "" : " with no RESULT line"}`);
   }
-  const summary = err.trim().split("\n").filter((l) => l.startsWith("  ")).pop();
-  if (summary) console.log(summary);
+  const summary = err.split("\n").find((l) => l.startsWith("SUMMARY "));
+  if (summary) console.log(`  ${summary.slice(8)}`);
   return JSON.parse(line.slice(7)) as Observation;
 }
 
 type Run = { scores: ArmScore[]; paired: Paired[]; caught: Record<string, Mechanism[]>; blind: ArmScore };
 
-async function runAll(url: string): Promise<Run> {
+/**
+ * Every arm and the blind reader for the report and the record; for the
+ * gate, the default arm and the blind reader only — the three other arms
+ * produce the paired table, which the gate does not hold, and each is a
+ * schema reset, thirty-six captures, two workers and twelve searches that
+ * could fail the step for a reason the gate does not claim to guard.
+ */
+async function runAll(url: string, arms: readonly Arm[] = ARMS): Promise<Run> {
   const scores: ArmScore[] = [];
-  for (const arm of ARMS) scores.push(scoreArm(await runArm(url, arm, "labels")));
+  for (const arm of arms) scores.push(scoreArm(await runArm(url, arm, "labels")));
   const blind = scoreArm(await runArm(url, "default", "blind"));
   const def = scores[0];
-  const withouts = Object.fromEntries(MECHANISMS.map((m) => [m, scores.find((s) => s.arm === armOff(m))!]));
-  const paired = MECHANISMS.map((m) => pair(def, withouts[m], m));
+  const withouts = Object.fromEntries(MECHANISMS.filter((m) => scores.some((s) => s.arm === armOff(m))).map((m) => [m, scores.find((s) => s.arm === armOff(m))!]));
+  const paired = MECHANISMS.filter((m) => withouts[m]).map((m) => pair(def, withouts[m], m));
   return { scores, paired, caught: caughtBy(def, withouts), blind };
 }
 
@@ -106,19 +117,19 @@ function readBaseline(): WritePathBaseline | undefined {
 
 function sectionFrom(run: Run): WritePathBaseline {
   const def = run.scores[0];
-  // The floor is the exact ratio, not the three-place display value: rounded
-  // up, 17/27 becomes 0.63 and the gate refuses the very run it recorded.
-  const exact = { survival: ratio(def.survival), catch: ratio(def.catch), coverage: ratio(def.coverage) };
-  if (exact.survival === null || exact.catch === null || exact.coverage === null) throw new Error("the default arm has a rate with nothing under it; the record would hold no floor");
+  // The floor is counts, not the three-place display value: rounded up,
+  // 17/27 became 0.63 and the gate refused the very run it recorded; and the
+  // denominator binds the population the gate must measure over.
+  if (!def.survival.of || !def.catch.of || !def.coverage.of) throw new Error("the default arm has a rate with nothing under it; the record would hold no floor");
   const arms: WritePathBaseline["arms"] = {};
   for (const s of [...run.scores, run.blind]) {
     arms[s.reader === "blind" ? "default (blind reader)" : s.arm] = { ...ratesOf(s), contested: s.survival.contested, unseen_errors: s.catch.unseen, returned: s.returned, chars: s.chars };
   }
   return {
     via: "eval-write-path.ts --record",
-    corpus: `${SESSIONS.length} sessions, ${ITEMS.length} items over ${Object.keys(SUBJECTS).length} subjects, ${DELIVERABLES.length} deliverables, reader k=${READER_K} (write-path-corpus.ts)`,
+    corpus: corpusLabel(),
     reader_k: READER_K,
-    floor: { survival: exact.survival, catch: exact.catch, coverage: exact.coverage },
+    floor: floorOf(def),
     arms,
     paired: Object.fromEntries(run.paired.map((p) => [p.mechanism, { helped: p.helped.length, hurt: p.hurt.length, p: Math.round(p.p * 1000) / 1000 }])),
   };
@@ -139,12 +150,12 @@ const uuid = (n: number) => `10000000-0000-4000-8000-${n.toString(16).padStart(1
 const hit = (n: number, o: Partial<Hit> = {}): Hit => ({ id: uuid(n), superseded: false, writer: null, content: `text ${n}`, ...o });
 
 /** An Observation built by hand: `plainIds` presented plain, `contestedIds` contested, `hitIds` retrieved per subject. */
-function fakeObservation(arm: Arm, presented: Record<string, "plain" | "contested" | "dropped" | "unseen">, opts: { uncite?: string[]; reader?: ReaderPolicy } = {}): Observation {
+function fakeObservation(arm: Arm, presented: Record<string, "plain" | "contested" | "dropped" | "unseen">, opts: { uncite?: string[]; reader?: ReaderPolicy } = {}, items: readonly Item[] = ITEMS): Observation {
   const idOf: Record<string, string> = {};
-  ITEMS.forEach((it, i) => { idOf[it.id] = uuid(i + 1); });
+  items.forEach((it, i) => { idOf[it.id] = uuid(i + 1); });
   const hits: Observation["hits"] = {};
   const bySubject = new Map<string, Item[]>();
-  for (const it of ITEMS) bySubject.set(it.subject, [...(bySubject.get(it.subject) ?? []), it]);
+  for (const it of items) bySubject.set(it.subject, [...(bySubject.get(it.subject) ?? []), it]);
   for (const [k, items] of bySubject) hits[k as keyof typeof SUBJECTS] = items.filter((it) => presented[it.id] !== "unseen").map((it) => idOf[it.id]);
   const deliverables = DELIVERABLES.map((spec) => {
     const lines = spec.subjects.flatMap((k) => (bySubject.get(k) ?? []).filter((it) => presented[it.id] === "plain" || presented[it.id] === "contested")
@@ -175,7 +186,9 @@ function expectedDefault(): Expected {
   }
   for (let i = 0; i < ITEMS.length; i++) for (let j = i + 1; j < ITEMS.length; j++) {
     const a = ITEMS[i], b = ITEMS[j];
-    if (a.subject !== b.subject || a.planted.kind === "stale" || b.supersedes) continue;
+    // 029: a superseded thought is neither `me` nor a candidate, and the pair
+    // (replacement, its own target) is never judged; every other pair is.
+    if (a.subject !== b.subject || a.planted.kind === "stale" || b.planted.kind === "stale" || b.supersedes === a.id) continue;
     if (judgeRule(a.text, b.text).verdict !== "conflict") continue;
     for (const x of [a, b]) if (p[x.id] === "plain") p[x.id] = "contested";
   }
@@ -198,12 +211,25 @@ function selfCheck(): void {
   const digitDecision = ITEMS.map((it) => (it.id === "hs1" ? { ...it, text: "We decided the Harpsichord release ships as 1 bundle." } : it));
   assert(corpusProblems(digitDecision).some((p) => /carries a digit/.test(p)), "a decision with a digit is a problem (the judge would catch what supersedes should)");
   assert(corpusProblems(ITEMS, [DELIVERABLES[0]]).some((p) => /in no deliverable/.test(p)), "a subject in no deliverable is a problem");
+  const sameText = ITEMS.map((it) => (it.id === "cb3" ? { ...it, text: ITEMS.find((o) => o.id === "cb1")!.text } : it));
+  assert(corpusProblems(sameText).some((p) => /repeats cb1's text/.test(p)), "two items with one text are one row after the fingerprint: a problem");
+  const loneInference = ITEMS.map((it) => (it.id === "ob2" ? { ...it, planted: { kind: "inference" as const, against: "ob1" } } : it));
+  assert(corpusProblems(loneInference).some((p) => /where the operator never spoke/.test(p)), "an inference on an agent-only subject is uncatchable: a problem");
+  const digitOnDecisionSubject = ITEMS.map((it) => (it.id === "hs3" ? { ...it, text: "The Harpsichord release notes are 3 pages in the shared folder." } : it));
+  assert(corpusProblems(digitOnDecisionSubject).some((p) => /-supersedes arm would move the judge/.test(p)), "a digit on a subject with a decision pair couples the -supersedes arm to the judge: a problem");
+  const crowdedSessions = [{ title: "Crowd", items: ["x1", "x2", "x3"].map((id) => ({ ...ITEMS[1], id, text: `The Quicksilver cache note ${id}.` })) }, ...SESSIONS];
+  assert(corpusProblems(crowdedSessions.flatMap((s) => s.items), DELIVERABLES, crowdedSessions).some((p) => /more than the shipped/.test(p)), "a slip with more earlier neighbours than the shipped candidate count may miss its twin: a problem");
+  const tied = ITEMS.map((it) => (it.id === "mz2" ? { ...it, text: ITEMS.find((o) => o.id === "mz1")!.text + " " } : it));
+  assert(corpusProblems(tied).some((p) => /noise buckets/.test(p)), "two texts of one subject in one noise bucket tie for the query: a problem");
+  assert(new Set(ITEMS.map((it) => noiseBucket(it.text))).size === ITEMS.length, "every committed text takes its own noise bucket");
   assert(ITEMS.filter((it) => it.subject === "marzipan").length > READER_K, `Project Marzipan has more items than the reader's k (${READER_K})`);
   assert(ITEMS.length >= 30 && SESSIONS.length >= 20, `${SESSIONS.length} sessions, ${ITEMS.length} items`);
 
   console.log("[2] The stub provider's rules");
   const v = vectorFor("Project Marzipan replaces the nightly export.");
   assert(v.length === STUB_DIM && v[0] === 1 && v.filter((x) => x !== 0).length === 2, "a text names its subject on that axis and one noise axis");
+  const w = v.find((x, i) => i >= 12 && x !== 0)!;
+  assert(w >= 0.02 && w < 0.1 && Math.abs(w - (0.02 + 0.08 * (noiseBucket("Project Marzipan replaces the nightly export.") / 1000))) < 1e-12, "the noise weight is the bucket's, in [0.02, 0.1)");
   assert(vectorFor("Project Marzipan").length === STUB_DIM && vectorFor("Project Marzipan")[0] === 1, "the query (the phrase alone) sits on the same axis");
   assert(vectorFor("nothing named here").filter((x) => x !== 0).length === 1, "a text naming no subject is noise alone");
   const d1 = vectorFor("The Quicksilver cache holds 4096 entries before it evicts."), d2 = vectorFor("The Quicksilver cache holds 2048 entries before it evicts.");
@@ -293,7 +319,11 @@ function selfCheck(): void {
   const unseen = scoreArm(fakeObservation("default", { ...exp, mz2: "unseen", qs2: "unseen" }));
   assert(unseen.survival.unseen === 1 && unseen.survival.n === def.survival.n - 1, "a salient fact never retrieved is lost as unseen");
   assert(unseen.catch.unseen === 1 && unseen.catch.of === errors - 1 && unseen.catch.n === errors - 1, "an error never retrieved is counted beside the catch rate, not inside it");
-  assert(unseen.outcome.qs2.right && !unseen.outcome.mz2.right, "an unseen error is right (the deliverable never stated it); an unseen fact is wrong");
+  assert(!unseen.outcome.qs2.counted && !unseen.outcome.qs2.right && unseen.outcome.mz2.counted && !unseen.outcome.mz2.right, "an unseen error is outside the catch population (not counted, not right); an unseen fact is counted and lost");
+  const elsewhere = fakeObservation("default", exp);
+  elsewhere.hits.marzipan = [...(elsewhere.hits.marzipan ?? []), elsewhere.idOf.qs1];
+  elsewhere.hits.quicksilver = (elsewhere.hits.quicksilver ?? []).filter((id) => id !== elsewhere.idOf.qs1);
+  assert(!scoreArm(elsewhere).outcome.qs1.retrieved, "retrieved means the search for ITS subject returned it, not any search");
   const plainError = scoreArm(fakeObservation("default", { ...exp, hs1: "plain" }));
   assert(plainError.catch.n === errors - 1 && plainError.catch.byClass.stale.n === 2 && !plainError.outcome.hs1.right, "an error stated plain is not caught");
   const uncited = scoreArm(fakeObservation("default", exp, { uncite: ["mz1", "cb1"] }));
@@ -309,11 +339,17 @@ function selfCheck(): void {
   const noSupersedes = scoreArm(fakeObservation("-supersedes", { ...exp, hs1: "plain", tm1: "plain", ln2: "plain" }));
   const p1 = pair(def, noSupersedes, "supersedes");
   assert([...p1.helped].sort().join() === "hs1,ln2,tm1" && p1.hurt.length === 0, `supersedes helped the three stale decisions and hurt nothing (${p1.helped.join(",")} / ${p1.hurt.join(",")})`);
+  assert(p1.errors.helped === 3 && p1.facts.helped === 0 && p1.unpaired.length === 0, "the split says the three were errors");
+  const unseenThere = scoreArm(fakeObservation("-supersedes", { ...exp, hs1: "unseen", tm1: "plain", ln2: "plain" }));
+  const pu = pair(def, unseenThere, "supersedes");
+  assert(pu.unpaired.join() === "hs1" && [...pu.helped].sort().join() === "ln2,tm1", "an error one arm never retrieved is unpaired, not credited to the mechanism");
+  assert(caughtBy(def, { supersedes: unseenThere }).hs1.length === 0 && caughtBy(def, { supersedes: unseenThere }).tm1.join() === "supersedes", "…and attribution skips it too");
   assert(p1.p === 0.25, "McNemar exact over 3 helped / 0 hurt is 0.25");
   // Without the judge nothing is contested: the three slips stand plain (uncaught), the six twins return to plain.
   const noJudge = scoreArm(fakeObservation("-judge", Object.fromEntries(Object.entries(exp).map(([k, v]) => [k, v === "contested" ? "plain" : v])) as Expected));
   const p2 = pair(def, noJudge, "judge");
   assert([...p2.helped].sort().join() === "md2,qs2,sf2" && p2.hurt.length === 6, `the judge helped the three slips and hurt the six true twins it contested (${p2.helped.join(",")} / ${p2.hurt.join(",")})`);
+  assert(p2.errors.helped === 3 && p2.errors.hurt === 0 && p2.facts.helped === 0 && p2.facts.hurt === 6, "the split: the judge's help is all errors, its hurt all facts");
   assert(Math.abs(p2.p - 0.508) < 0.001, "McNemar exact over 3 helped / 6 hurt is 0.508");
   // Without the actor's kind: the two unnumbered inferences stand plain, the agent's two true facts stand plain, and pw2 is contested by the judge instead of dropped.
   const noActor = scoreArm(fakeObservation("-actor", { ...exp, gr2: "plain", ln4: "plain", hs3: "plain", md3: "plain", pw2: "contested" }));
@@ -326,30 +362,40 @@ function selfCheck(): void {
   let mcThrew = false;
   try { mcnemarExact(1001, 0); } catch { mcThrew = true; }
   assert(mcThrew, "past 1,000 discordant pairs the exact sum is refused");
-  let pairThrew = false;
+  let pairThrew = false, caughtThrew = false;
   try { const o = scoreArm(fakeObservation("-judge", exp)); delete o.outcome.mz1; pair(def, o, "judge"); } catch { pairThrew = true; }
-  assert(pairThrew, "an item scored in one arm and not the other is a fault");
+  try { const o = scoreArm(fakeObservation("-judge", exp)); delete o.outcome.qs2; caughtBy(def, { judge: o }); } catch { caughtThrew = true; }
+  assert(pairThrew && caughtThrew, "an item scored in one arm and not the other is a fault, for the pairing and the attribution alike");
 
   console.log("[7] The floor, and the ticket's mutant");
-  const floor = { survival: def.survival.n / def.survival.of, catch: 1, coverage: 1 };
+  const floor: Floor = floorOf(def);
+  assert(floor.survival.n === def.survival.n && floor.survival.of === 27 && floor.catch.of === 9 && floor.unseenErrors === 0, "the floor is counts: 27 facts, 9 errors, no error unseen");
   assert(compareToFloor(def, floor).length === 0, "the default arm holds its own floor");
+  const grownItems = [...ITEMS, { ...ITEMS[0], id: "x9", text: "Project Marzipan has a ninth note." }];
+  const grown = scoreArm(fakeObservation("default", { ...exp, x9: "plain" }, {}, grownItems), grownItems);
+  assert(compareToFloor(grown, floor).some((f) => /^survival: measured over 28 item\(s\), recorded over 27/.test(f)), "a corpus that grew is not the recorded population, even at a higher rate");
+  const hidden = scoreArm(fakeObservation("default", { ...exp, qs2: "unseen" }));
+  const hiddenFailures = compareToFloor(hidden, floor);
+  assert(hiddenFailures.some((f) => /^catch: measured over 8/.test(f)) && hiddenFailures.some((f) => /^unseen errors: 1/.test(f)), "an error that stopped being retrieved fails by population and by the unseen ceiling, though the rate stayed 1");
   const mutant = scoreArm(fakeObservation("default", { ...exp, mz3: "dropped" }));
   const failures = compareToFloor(mutant, floor);
-  assert(failures.length === 1 && /^survival: .* below the recorded/.test(failures[0]), `one planted fact dropped from its deliverable fails the survival floor (${failures.join("; ")})`);
+  // The dropped line is also one citation fewer, so coverage's population moves too — two failures, both true.
+  assert(failures.some((f) => /^survival: .* below the recorded/.test(f)) && failures.every((f) => /^(survival|coverage):/.test(f)), `one planted fact dropped from its deliverable fails the survival floor (${failures.join("; ")})`);
   assert(compareToFloor(plainError, floor).some((f) => /^catch:/.test(f)), "an error stated plain fails the catch floor");
   assert(compareToFloor(uncited, floor).some((f) => /^coverage:/.test(f)), "an uncited line fails the coverage floor");
   const better = scoreArm(fakeObservation("default", { ...exp, qs1: "plain" }));
   assert(compareToFloor(better, floor).length === 0, "a rate above the floor passes; the floor is a floor");
   const empty = scoreArm({ ...fakeObservation("default", exp), deliverables: [] });
-  assert(compareToFloor(empty, floor).some((f) => /^coverage: nothing to measure/.test(f)), "a rate with nothing under it never passes silently");
+  assert(compareToFloor(empty, floor).some((f) => /^coverage: measured over 0/.test(f)), "a run with no lines is not the recorded population");
+  assert(compareToFloor(empty, { ...floor, coverage: { n: 0, of: 0 } }).some((f) => /^coverage: nothing to measure/.test(f)), "a rate with nothing under it never passes silently");
   const blindRun = scoreArm(fakeObservation("default", Object.fromEntries(ITEMS.map((it) => [it.id, "plain" as const])), { reader: "blind" }));
   assert(blindRun.catch.n === 0 && blindRun.catch.of === errors && blindRun.survival.n === salient, "the blind reader catches nothing and states everything — the floor's teeth");
   const recorded = readBaseline();
-  assert(recorded !== undefined && recorded.floor.survival > 0 && recorded.floor.catch > 0 && recorded.floor.coverage > 0, "baselines.json carries a write_path floor");
-  assert(recorded !== undefined && recorded.reader_k === READER_K && /write-path-corpus\.ts/.test(recorded.corpus), "the record names the corpus and the reader's k it was measured at");
+  assert(recorded !== undefined && recorded.floor.survival.of > 0 && recorded.floor.catch.of > 0 && recorded.floor.coverage.of > 0, "baselines.json carries a write_path floor as counts");
+  assert(recorded !== undefined && recorded.reader_k === READER_K && recorded.corpus === corpusLabel(), "the record names this corpus and the reader's k");
 
   const rendered = renderReport([def, noJudge], [p2], caught);
-  assert(/^arm\s+reader\s+survival/.test(rendered) && /judge\s+3\s+6\s+0\.508/.test(rendered) && /qs2\s+wrong_number\s+judge/.test(rendered), "the report renders the arms, the paired row and the attribution");
+  assert(/^arm\s+reader\s+survival/.test(rendered) && /judge\s+3\s+6\s+0\.508\s+0\/6\s+3\/0/.test(rendered) && /qs2\s+wrong_number\s+judge/.test(rendered), "the report renders the arms, the paired row with its split, and the attribution");
 
   report();
 }
@@ -373,8 +419,15 @@ if (has("--self-check")) {
     console.log(JSON.stringify(obs, null, 1));
     process.exit(0);
   }
-  console.log(`write-path eval: ${SESSIONS.length} sessions, ${ITEMS.length} items, ${DELIVERABLES.length} deliverables, reader k=${READER_K}, stub dim ${STUB_DIM}; one process per arm\n`);
-  const run = await runAll(url);
+  const gate = has("--gate");
+  console.log(`write-path eval: ${corpusLabel()}, stub dim ${STUB_DIM}; one process per arm${gate ? "; the gate runs the default arm and the blind reader" : ""}\n`);
+  if (gate) {
+    // The corpus's own shape first: the gate must not measure a corpus the
+    // rules would refuse (the self-check runs in another job).
+    const problems = corpusProblems();
+    if (problems.length) { console.error(`the corpus breaks its shape rules:\n  ${problems.join("\n  ")}`); process.exit(1); }
+  }
+  const run = await runAll(url, gate ? ["default"] : ARMS);
   console.log("");
   console.log(renderReport([...run.scores, run.blind], run.paired, run.caught));
   if (has("--record")) {
@@ -387,11 +440,14 @@ if (has("--self-check")) {
     const recorded = readBaseline();
     if (!recorded) { console.error("\nbaselines.json has no write_path section; run --record once."); process.exit(2); }
     const { assert, report } = createAssert();
-    console.log(`\n[gate] the default arm against the recorded floor (survival ${recorded.floor.survival}, catch ${recorded.floor.catch}, coverage ${recorded.floor.coverage})`);
-    const failures = compareToFloor(run.scores[0], recorded.floor);
+    const f = recorded.floor;
+    console.log(`\n[gate] the default arm against the recorded floor (survival ${f.survival.n}/${f.survival.of}, catch ${f.catch.n}/${f.catch.of}, coverage ${f.coverage.n}/${f.coverage.of}, ${f.unseenErrors} error(s) unseen)`);
+    assert(recorded.reader_k === READER_K && recorded.corpus === corpusLabel(), `the floor was recorded on this corpus at this k (recorded "${recorded.corpus}", k=${recorded.reader_k})`);
+    const failures = compareToFloor(run.scores[0], f);
     assert(failures.length === 0, `the default arm holds the floor${failures.length ? `: ${failures.join("; ")}` : ""}`);
-    const blindCatch = run.blind.catch.of ? run.blind.catch.n / run.blind.catch.of : null;
-    assert(blindCatch !== null && blindCatch < recorded.floor.catch, `the floor has teeth: a reader that ignores every label catches ${blindCatch === null ? "n/a" : (100 * blindCatch).toFixed(0) + "%"}, below the recorded ${recorded.floor.catch}`);
+    const blindCatch = ratio(run.blind.catch), ownCatch = ratio(run.scores[0].catch), floorCatch = ratio(f.catch);
+    assert(blindCatch !== null && ownCatch !== null && floorCatch !== null && blindCatch < floorCatch && blindCatch < ownCatch,
+      `the floor has teeth: a reader that ignores every label catches ${blindCatch === null ? "n/a" : (100 * blindCatch).toFixed(0) + "%"}, below the recorded ${floorCatch === null ? "n/a" : floorCatch.toFixed(3)} and below this run's labelled reader`);
     assert(run.blind.survival.n >= run.scores[0].survival.n, "…and states at least as many facts plain, so the labels are what the catch costs");
     report();
   }

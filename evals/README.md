@@ -4087,8 +4087,36 @@ bun eval-write-path.ts --self-check              # the rules, probed with hand-k
 ../db/with-postgres.sh bun eval-write-path.ts --record    # re-record the section after a change that moves a rate
 ```
 
-### Results, 2026-09-23 (the committed corpus; deterministic — three gate runs identical)
+### Results, 2026-09-23 (the committed corpus; deterministic — three gate runs identical; the program's output, verbatim)
 
+```
+arm            reader   survival            catch               coverage            contested  unseen-err  returned  chars
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+default        labels    63.0% (17/27)      100.0% (9/9)        100.0% (26/26)              6           0        34   2266
+-supersedes    labels    63.0% (17/27)       66.7% (6/9)        100.0% (29/29)              6           0        34   2436
+-judge         labels    85.2% (23/27)       66.7% (6/9)        100.0% (26/26)              0           0        34   2014
+-actor         labels    70.4% (19/27)       77.8% (7/9)        100.0% (31/31)              6           0        34   2664
+default        blind     92.6% (25/27)        0.0% (0/9)        100.0% (34/34)              0           0        34   2554
+
+catch by error class (default arm): stale 100.0% (3/3) · wrong_number 100.0% (3/3) · inference 100.0% (3/3)
+
+paired against the default arm — items the mechanism got right that its absence did not (helped) and the reverse (hurt), over the items both arms counted; McNemar exact, two-sided, over the mixed set — read the facts / errors split beside it
+mechanism    helped  hurt   p       facts +/−   errors +/−   helped items              hurt items                    unpaired
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+supersedes        3     0   0.250   0/0         3/0          hs1,tm1,ln2                                             
+judge             3     6   0.508   0/6         3/0          qs2,sf2,md2               qs1,zp1,pw1,sf1,md1,zp2       
+actor             2     2   1.000   0/2         2/0          gr2,ln4                   hs3,md3                       
+
+errors the default arm caught, and the mechanism each rests on (none named = caught by more than one, or never retrieved)
+  hs1   stale         supersedes
+  tm1   stale         supersedes
+  ln2   stale         supersedes
+  gr2   inference     actor
+  qs2   wrong_number  judge
+  pw2   inference     more than one
+  sf2   wrong_number  judge
+  ln4   inference     actor
+  md2   wrong_number  judge
 ```
 arm            reader   survival        catch          coverage       contested  returned  chars
 default        labels    63.0% (17/27)  100.0% (9/9)   100.0% (26/26)         6        34   2266
@@ -4103,10 +4131,10 @@ judge             3     6   0.508   qs2,sf2,md2            qs1,zp1,pw1,sf1,md1,z
 actor             2     2   1.000   gr2,ln4                hs3,md3
 ```
 
-Catch by error class in the default arm: stale 3/3 (all on the supersedes
-pointer), wrong number 3/3 (all on the judge), inference 3/3 (two on the actor
-mark alone; the third, a numbered inference, on either — removing one leaves
-it caught). No planted error went unseen.
+The paired table's `p` is McNemar over every discordant item — a mixed set,
+since "right" is stated for a fact and not stated for an error — so the
+facts / errors split beside it is the row to read: the judge's help is all
+errors and its hurt all facts. No planted error went unseen.
 
 **What it says.**
 
@@ -4134,30 +4162,44 @@ it caught). No planted error went unseen.
   (SMD-1733; trust, SMD-1724).
 - **Labels are what the catch costs.** The blind reader states 25 of 27 facts
   and catches none of the nine errors; the labelled reader catches all nine
-  for eight facts. Coverage is 1.0 in every arm: every line's source is in the
-  deliverable's `derived_from` as the database accepted it, and the eval has
-  no way yet to score a citation finer than the thought (SMD-1715/1733).
+  for eight facts.
+- **Coverage is 1.0 by construction of the reader,** which always cites what
+  it used; what the number holds is the store's side — `derived_from` comes
+  back as given (035's re-capture path and the capture-key trim would show
+  here) — and it is billed as that, not as a measure of the writer. A
+  citation finer than the thought needs SMD-1715/1733.
+- **One coupling between arms, stated.** 029 keeps a superseded thought out
+  of the judge's pool and its candidates, so the `-supersedes` arm also hands
+  the judge the three stale decisions to pair. A corpus rule keeps that
+  inert — no item on a subject with a decision carries a digit — so the arm
+  measures the pointer alone by rule, not by accident.
 
-**The gate.** `--gate` runs in the data-layer job, keyless as the replay gate
-is (a step there rather than its own job: the write path needs the server and
-that database, and a step in a required job gates a merge with no new name in
-the ruleset, SMD-1856). It fails when the default arm's survival, catch or
-coverage falls below the floor `baselines.json` records — the exact ratios,
-since the run is deterministic — and proves the floor has teeth with the blind
-reader (0% < the recorded catch). `--self-check` runs in the portable-server
-job: the corpus's shape rules, the stub's answers against the REAL prompts
-(both name their own delimiters in their rules before the wrapped text — the
-first draft read the rule as the text and extracted nothing), the reader, the
-parsers, the scorer's partitions, the pairing, the comparator, and the
-ticket's mutant — one planted fact dropped from its deliverable fails the
-survival floor. Live mutants on the gate, restored by copy: the reader
-dropping the first hit of every subject fails survival; the deliverable
-captured without `derived_from` fails coverage; the reader ignoring the
-superseded mark fails catch.
+**The gate.** `--gate` runs the default arm and the blind reader in the
+data-layer job, keyless as the replay gate is (a step there rather than its
+own job: the write path needs the server and that database, and a step in a
+required job gates a merge with no new name in the ruleset, SMD-1856). It
+runs the corpus's shape rules, checks the record was made on this corpus at
+this k, then fails when the default arm's survival, catch or coverage is
+measured over a different population than recorded or falls below the
+recorded counts — exact, since the run is deterministic — or when more
+planted errors went unretrieved than recorded (an error the reader never
+sees is outside the catch rate, and a retrieval change that hid one would
+otherwise leave the rate at 1). It proves the floor has teeth with the blind
+reader (0%, below the recorded catch and this run's). `--self-check` runs in
+the portable-server job: the corpus's shape rules probed with broken copies,
+the stub's answers against the REAL prompts (both name their own delimiters
+in their rules before the wrapped text — the first draft read the rule as
+the text and extracted nothing), the reader, the parsers, the scorer's
+partitions, the pairing, the comparator, and the ticket's mutant — one
+planted fact dropped from its deliverable fails the survival floor. Live
+mutants on the gate, restored by copy: the reader dropping the first hit of
+every subject fails survival (9/27); the deliverable captured without
+`derived_from` fails coverage (0/26); the reader ignoring the superseded mark
+fails catch (6/9); the run-it review's eleven more, each on the right rate.
 
 Not built here: `capture_deliverable` / `verify_deliverable` (SMD-1715), a
 `cites` or `stance` argument (SMD-1733), a real judge's catch rate, proposal
-issues 06 and 09 (filed now that this number exists). The record is
+issues 06 and 09 (they may be filed now that this number exists). The record is
 `changes/smd-1713.md`.
 
 

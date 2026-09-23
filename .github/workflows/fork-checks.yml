@@ -485,11 +485,10 @@ jobs:
       # with a reader that ignores every label. Keyless, as the replay gate
       # is; here rather than its own job because the write path needs the
       # server and this database, and a step in a required job gates a merge
-      # without a new name in the ruleset (SMD-1856).
-      - name: Install the evals' pinned packages
-        working-directory: evals
-        run: bun install --frozen-lockfile
-
+      # without a new name in the ruleset (SMD-1856). No install for evals/:
+      # the eval and the workers it spawns import only bun, node and
+      # ../server-portable, whose packages the first step installed; the
+      # evals' own packages (LanceDB, Arrow) belong to the store comparison.
       - name: Write-path gate
         working-directory: evals
         run: bun eval-write-path.ts --gate

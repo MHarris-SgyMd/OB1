@@ -200,9 +200,19 @@
     "corpus": "20 sessions, 36 items over 12 subjects, 4 deliverables, reader k=5 (write-path-corpus.ts)",
     "reader_k": 5,
     "floor": {
-      "survival": 0.6296296296296297,
-      "catch": 1,
-      "coverage": 1
+      "survival": {
+        "n": 17,
+        "of": 27
+      },
+      "catch": {
+        "n": 9,
+        "of": 9
+      },
+      "coverage": {
+        "n": 26,
+        "of": 26
+      },
+      "unseenErrors": 0
     },
     "arms": {
       "default": {
