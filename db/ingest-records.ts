@@ -59,7 +59,7 @@
  * facets and 050's actor marks survive a rebuild — SMD-1958); a record whose
  * text moved has its vector and chunks cleared so `reembed.ts` pools it; and a
  * record that came through an adapter also writes its canonical
- * (thought_sources), its links (051's `link` facets, as a set) and its
+ * (thought_sources), its links (053's `link` facets, as a set) and its
  * structured mentions (record_thought_entities under `source:<system>`), all in
  * the record's own transaction.
  */

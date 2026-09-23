@@ -10,7 +10,7 @@
  * implements: a pure function from one source item to the five things below.
  * The pipeline (db/ingest-records.ts) owns what is common — the row, the
  * fingerprint, the canonical store, the idempotent edge write, the
- * structured-vs-extracted resolution rule (migration 051), the actor envelope
+ * structured-vs-extracted resolution rule (migration 053), the actor envelope
  * — so an adapter is a reader, never a writer.
  *
  * The round-trip rule, load-bearing: the CANONICAL is the stored truth and the
@@ -29,7 +29,7 @@
 
 import { ENTITY_TYPES, type EntityType } from "../server-portable/entities.ts";
 
-/** The relations a source's structured layer may state between two of its items — 051's `link` facet admits exactly these. */
+/** The relations a source's structured layer may state between two of its items — 053's `link` facet admits exactly these. */
 export const LINK_RELATIONS = ["references", "child_of", "blocks", "blocked_by", "relates_to", "duplicate_of"] as const;
 export type LinkRelation = (typeof LINK_RELATIONS)[number];
 

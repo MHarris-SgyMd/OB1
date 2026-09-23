@@ -4996,7 +4996,7 @@ console.log("\n[41] Migration 042: a cited source is refused as a value and deta
   await reapply("042");
   const again = await q<{ tgname: string }>(`SELECT tgname FROM pg_trigger WHERE NOT tgisinternal AND tgname IN ('thoughts_guard_citation_sources', 'thought_facets_validate')`);
   assert(again.length === 2 && (await functionsNamed("delete_thought")) === 1 && before > 0 && (await one<{ c: number }>(`SELECT count(*)::int AS c FROM thought_facets`)).c === before, `042 re-applied twice leaves two triggers, one delete_thought and every facet row (${before})`);
-  // 042's file put 042's validator back; the shipped one is 051's (the `link` kind) — restored for the sections after.
+  // 042's file put 042's validator back; the shipped one is 053's (the `link` kind) — restored for the sections after.
   await restoreShipped("thought_facets_validate");
   // A reset of the whole table: every citing thought goes with its source, so nothing survives and the statement is clean.
   await db.exec(`DELETE FROM thoughts`);
@@ -6187,7 +6187,7 @@ console.log("\n[46] Migration 050: the actor on the row — who wrote the curren
   await db.exec(`DELETE FROM ob1_agents`);
 }
 
-console.log("\n[47] Migration 051: the source beside the thought — the canonical round-trips and is written once, links are a set the validator shapes and an index holds, an identity resolves, and a structured pass and an extracted pass coexist with the structured row standing (SMD-1867)");
+console.log("\n[47] Migration 053: the source beside the thought — the canonical round-trips and is written once, links are a set the validator shapes and an index holds, an identity resolves, and a structured pass and an extracted pass coexist with the structured row standing (SMD-1867)");
 {
   const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
   const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
@@ -6203,8 +6203,8 @@ console.log("\n[47] Migration 051: the source beside the thought — the canonic
   await db.exec(`DELETE FROM ob1_entities`);
 
   // The shape: the table and its identity rule, the two indexes, and the
-  // functions 051 defines — the two it redefines carry sentinels so a test
-  // can tell 051's body from 016's / 042's.
+  // functions 053 defines — the two it redefines carry sentinels so a test
+  // can tell 053's body from 016's / 042's.
   const cols = (await q<{ column_name: string }>(`SELECT column_name FROM information_schema.columns WHERE table_name = 'thought_sources' ORDER BY ordinal_position`)).map((c) => c.column_name);
   assert(cols.join(",") === "thought_id,system,identity,canonical,media_type,canonical_hash,ingest_run,ingested_at", `thought_sources has the eight columns (${cols.join(",")})`);
   const uniq = (await q<{ d: string }>(`SELECT pg_get_constraintdef(oid) AS d FROM pg_constraint WHERE conrelid = 'thought_sources'::regclass AND contype = 'u'`)).map((x) => x.d);
@@ -6212,12 +6212,12 @@ console.log("\n[47] Migration 051: the source beside the thought — the canonic
   const idx = (await q<{ n: string }>(`SELECT indexname AS n FROM pg_indexes WHERE tablename = 'thought_facets' AND indexname LIKE 'thought_facets_link%' ORDER BY 1`)).map((x) => x.n);
   assert(idx.join(",") === "thought_facets_link_active_uniq,thought_facets_link_target_idx", `the active-link unique index and the target probe exist (${idx.join(",")})`);
   const rteSrc = await src("record_thought_entities(uuid, text, jsonb, jsonb, text, uuid)");
-  assert(lastDefinerOf("record_thought_entities").startsWith("051") && /ob1:structured-wins/.test(rteSrc), "051 is the last definer of record_thought_entities and its body carries the structured-wins sentinel");
+  assert(lastDefinerOf("record_thought_entities").startsWith("053") && /ob1:structured-wins/.test(rteSrc), "053 is the last definer of record_thought_entities and its body carries the structured-wins sentinel");
   const validatorSrc = await src("thought_facets_validate()");
-  assert(lastDefinerOf("thought_facets_validate").startsWith("051") && /ob1:link-facet/.test(validatorSrc), "…and of thought_facets_validate, which carries the link-facet sentinel");
+  assert(lastDefinerOf("thought_facets_validate").startsWith("053") && /ob1:link-facet/.test(validatorSrc), "…and of thought_facets_validate, which carries the link-facet sentinel");
   assert(/CASE WHEN v_structured THEN extraction_key = p_extraction_key ELSE extraction_key NOT LIKE 'source:%' END/.test(rteSrc) && (rteSrc.match(/WHERE (?:thought_entities|ob1_entity_edges)\.extraction_key NOT LIKE 'source:%'/g) ?? []).length === 2,
     "the rule is spelled on the key prefix: a source: pass replaces its own rows, an extraction the rest, and both conflict clauses yield to source:");
-  assert(/link \(migration 051\)/.test(validatorSrc) && LINK_RELATIONS.every((r) => validatorSrc.includes(`'${r}'`)) && LINK_RELATIONS.length === 6, `the validator's hint names the new kind, and every relation the contract names it admits (${LINK_RELATIONS.join(", ")})`);
+  assert(/link \(migration 053\)/.test(validatorSrc) && LINK_RELATIONS.every((r) => validatorSrc.includes(`'${r}'`)) && LINK_RELATIONS.length === 6, `the validator's hint names the new kind, and every relation the contract names it admits (${LINK_RELATIONS.join(", ")})`);
   const tc = (await one<{ c: string | null }>(TABLE_COMMENT_SQL, ["thought_sources"])).c ?? "";
   assert(/SMD-1867/.test(tc) && /byte for byte/.test(tc) && /derived/.test(tc), "the table's comment states the round-trip rule: the canonical is the truth, the text and links derived");
 
@@ -6356,9 +6356,9 @@ console.log("\n[47] Migration 051: the source beside the thought — the canonic
   // The entity the structured rows alone held is pruned; the ones an extracted row still names are not.
   assert(!(await q(`SELECT 1 FROM ob1_entities WHERE name = 'Carol'`)).length && (await q(`SELECT 1 FROM ob1_entities WHERE name = 'Open Brain'`)).length === 1, "Carol, referenced by nothing now, is pruned; Open Brain, the extraction's edge end, stays");
 
-  // Re-applying 051 lands the same shape and the rows stand.
-  await reapply("051");
-  assert((await links(t1)).length === 3 && (await q(`SELECT 1 FROM thought_sources WHERE thought_id = $1::uuid`, [t1])).length === 1 && lastDefinerOf("record_thought_entities").startsWith("051"), "re-applying 051 keeps every row and every definition");
+  // Re-applying 053 lands the same shape and the rows stand.
+  await reapply("053");
+  assert((await links(t1)).length === 3 && (await q(`SELECT 1 FROM thought_sources WHERE thought_id = $1::uuid`, [t1])).length === 1 && lastDefinerOf("record_thought_entities").startsWith("053"), "re-applying 053 keeps every row and every definition");
 
   // The takeover (first review pass): the board sync's head row for a ticket
   // moves when an older paste becomes the chain's head, so the identity must

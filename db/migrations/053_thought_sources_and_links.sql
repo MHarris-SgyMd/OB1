@@ -1,5 +1,5 @@
 -- =============================================================================
--- Migration 051: the source beside the thought — thought_sources holds the
+-- Migration 053: the source beside the thought — thought_sources holds the
 --                canonical form and the stable identity, `link` facets hold the
 --                typed relations a source's structured layer names, and
 --                record_thought_entities lets a structured pass and an
@@ -64,7 +64,7 @@
 --      (thought, entity) or (thought, from, to, relation), the structured row
 --      stands: an extracted insert onto a structured row does nothing, a
 --      structured insert onto an extracted row takes it over. The body carries
---      the `ob1:structured-wins` sentinel so a test can tell 051's definition
+--      the `ob1:structured-wins` sentinel so a test can tell 053's definition
 --      from 016's.
 --
 -- SAFETY
@@ -90,7 +90,7 @@ DO $g$
 BEGIN
   IF to_regclass('thought_facets') IS NULL OR to_regclass('ob1_entity_edges') IS NULL THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'migration 051 needs 016 (ob1_entity_edges) and 042 (thought_facets); this schema lacks one of them',
+      MESSAGE = 'migration 053 needs 016 (ob1_entity_edges) and 042 (thought_facets); this schema lacks one of them',
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply';
   END IF;
 END
@@ -119,7 +119,7 @@ CREATE TABLE IF NOT EXISTS thought_sources (
 );
 
 COMMENT ON TABLE thought_sources IS
-  'The source beside the thought (SMD-1867): for a thought ingested from a source system, the system, the identity that survives a rename there, and the CANONICAL form byte for byte — the truth a two-way connector writes back, from which thoughts.content (the clean text) and the link facets are derived, never the other way. One thought per (system, identity). Written through record_thought_source; resolved through source_thought. Migration 051.';
+  'The source beside the thought (SMD-1867): for a thought ingested from a source system, the system, the identity that survives a rename there, and the CANONICAL form byte for byte — the truth a two-way connector writes back, from which thoughts.content (the clean text) and the link facets are derived, never the other way. One thought per (system, identity). Written through record_thought_source; resolved through source_thought. Migration 053.';
 COMMENT ON COLUMN thought_sources.canonical IS
   'The source form as read: a Linear issue as JSON with stable key order, a Markdown file''s bytes. A text column is byte-faithful for UTF-8 without NUL; an adapter refuses the two inputs it cannot hold rather than storing them mangled (SMD-1867).';
 COMMENT ON COLUMN thought_sources.canonical_hash IS
@@ -200,7 +200,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION record_thought_source(uuid, text, text, text, text, text, boolean) IS
-  'Writes a thought''s source row (051): inserted, updated when the canonical (or the system, identity or media type) moved, unchanged otherwise — the same canonical twice writes nothing. Refuses NOT_FOUND for a thought that is not there and IDENTITY_HELD when another thought holds the (system, identity), naming it, rather than re-pointing the identity — unless p_take, when the identity follows the caller''s thought: the holder''s source row goes, its active links from this system are closed and its source:<system> mentions removed (taken_from names it); the board sync says p_take because a ticket''s head row moves. SMD-1867.';
+  'Writes a thought''s source row (053): inserted, updated when the canonical (or the system, identity or media type) moved, unchanged otherwise — the same canonical twice writes nothing. Refuses NOT_FOUND for a thought that is not there and IDENTITY_HELD when another thought holds the (system, identity), naming it, rather than re-pointing the identity — unless p_take, when the identity follows the caller''s thought: the holder''s source row goes, its active links from this system are closed and its source:<system> mentions removed (taken_from names it); the board sync says p_take because a ticket''s head row moves. SMD-1867.';
 
 -- ---------------------------------------------------------------------------
 -- source_thought — an identity, resolved to a thought
@@ -223,7 +223,7 @@ AS $$
 $$;
 
 COMMENT ON FUNCTION source_thought(text, text) IS
-  'The thought a source identity names, or NULL: thought_sources first; for `linear`, the head of the board sync''s twin chain claiming metadata.issue (SMD-1954), so a link facet''s target resolves on a brain the sync filled before 051. Readers resolve link targets through this; the link itself stores the identity. Migration 051 / SMD-1867.';
+  'The thought a source identity names, or NULL: thought_sources first; for `linear`, the head of the board sync''s twin chain claiming metadata.issue (SMD-1954), so a link facet''s target resolves on a brain the sync filled before 053. Readers resolve link targets through this; the link itself stores the identity. Migration 053 / SMD-1867.';
 
 -- ---------------------------------------------------------------------------
 -- The `link` facet kind — thought_facets_validate extended
@@ -253,11 +253,11 @@ BEGIN
   IF NEW.kind IS DISTINCT FROM 'citation' AND NEW.kind IS DISTINCT FROM 'link' THEN
     RAISE EXCEPTION USING ERRCODE = 'check_violation',
       MESSAGE = format('thought_facets.kind %L is not a registered facet kind', NEW.kind),
-      HINT = 'The registered kinds are: citation (migration 042), link (migration 051). A new kind is registered by a migration that extends thought_facets_validate.';
+      HINT = 'The registered kinds are: citation (migration 042), link (migration 053). A new kind is registered by a migration that extends thought_facets_validate.';
   END IF;
 
   IF NEW.kind = 'link' THEN
-    -- ob1:link-facet (051)
+    -- ob1:link-facet (053)
     -- A close — record_source_links setting valid_until with the payload as
     -- it was — is not a new link and is not re-judged: an identity re-pointed
     -- onto the target since (record_thought_source on the same thought) would
@@ -382,7 +382,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION thought_facets_validate() IS
-  'BEFORE INSERT OR UPDATE on thought_facets: refuses an unregistered kind. For a citation (042): a missing text, a stance outside stated | retrieved | inferred, a source_id that is not an existing thought or is the citing thought itself — all as check_violation — stores source_id lower-case, locks the source row FOR KEY SHARE; source_id may be null only in the detached shape, which keeps what it lost and is not re-pointed. For a link (051): relation one of references | child_of | blocks | blocked_by | relates_to | duplicate_of, system one lower-case word, target a non-empty identity within it, never the thought''s own (thought_sources); writes origin = structured. Migrations 042, 051.';
+  'BEFORE INSERT OR UPDATE on thought_facets: refuses an unregistered kind. For a citation (042): a missing text, a stance outside stated | retrieved | inferred, a source_id that is not an existing thought or is the citing thought itself — all as check_violation — stores source_id lower-case, locks the source row FOR KEY SHARE; source_id may be null only in the detached shape, which keeps what it lost and is not re-pointed. For a link (053): relation one of references | child_of | blocks | blocked_by | relates_to | duplicate_of, system one lower-case word, target a non-empty identity within it, never the thought''s own (thought_sources); writes origin = structured. Migrations 042, 053.';
 
 -- One active link per (thought, system, relation, target): the idempotency of
 -- the edge layer is the index's, not a writer's discipline. Closed rows
@@ -467,7 +467,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION record_source_links(uuid, text, jsonb) IS
-  'One thought''s links from one source system, as a SET (051): every {relation, target} stated is active after the call — added when it was not, kept when it was — and every active link of that system not stated is closed (valid_until = now(), history, never deleted). The same set twice writes nothing. A malformed item, an unknown relation or a self-reference is dropped and counted. Returns {ok, added, closed, kept, dropped}; NOT_FOUND for a thought that is not there. SMD-1867.';
+  'One thought''s links from one source system, as a SET (053): every {relation, target} stated is active after the call — added when it was not, kept when it was — and every active link of that system not stated is closed (valid_until = now(), history, never deleted). The same set twice writes nothing. A malformed item, an unknown relation or a self-reference is dropped and counted. Returns {ok, added, closed, kept, dropped}; NOT_FOUND for a thought that is not there. SMD-1867.';
 
 -- ---------------------------------------------------------------------------
 -- record_thought_entities — 016's writer with the resolution rule
@@ -498,7 +498,7 @@ DECLARE
   v_ambiguous  int := 0;
   v_pruned     int := 0;
   v_entities   int := 0;
-  -- ob1:structured-wins (051): a `source:<system>` key is a structured pass.
+  -- ob1:structured-wins (053): a `source:<system>` key is a structured pass.
   v_structured boolean := p_extraction_key LIKE 'source:%';
 BEGIN
   IF p_extraction_key IS NULL OR p_extraction_key = '' THEN
@@ -697,4 +697,4 @@ END;
 $$;
 
 COMMENT ON FUNCTION record_thought_entities(uuid, text, jsonb, jsonb, text, uuid) IS
-  'Writes one thought''s entities and relations atomically (016), with 051''s resolution rule: an extraction_key `source:<system>` is a structured pass (the source''s own project, labels, members — no model call) that keeps its own rows as a set — the same set twice writes nothing, and moves no last_seen_at; an `extract:*` pass replaces only extracted rows; and where both name one (thought, entity) or (thought, from, to, relation) the structured row stands — an extracted insert onto it does nothing, a structured insert onto an extracted row takes it over. Entities upserted by (type, normalised name); a relation naming an unlisted entity is dropped and counted; entities left unreferenced are pruned. p_content_fingerprint NULL skips the stale check. Returns {ok, stale, entities, new_entities, mentions, edges, dropped_relations, ambiguous_relations, pruned_entities}. Migrations 016, 051 / SMD-947, SMD-1867.';
+  'Writes one thought''s entities and relations atomically (016), with 053''s resolution rule: an extraction_key `source:<system>` is a structured pass (the source''s own project, labels, members — no model call) that keeps its own rows as a set — the same set twice writes nothing, and moves no last_seen_at; an `extract:*` pass replaces only extracted rows; and where both name one (thought, entity) or (thought, from, to, relation) the structured row stands — an extracted insert onto it does nothing, a structured insert onto an extracted row takes it over. Entities upserted by (type, normalised name); a relation naming an unlisted entity is dropped and counted; entities left unreferenced are pruned. p_content_fingerprint NULL skips the stale check. Returns {ok, stale, entities, new_entities, mentions, edges, dropped_relations, ambiguous_relations, pruned_entities}. Migrations 016, 053 / SMD-947, SMD-1867.';

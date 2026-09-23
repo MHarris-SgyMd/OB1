@@ -63,7 +63,7 @@
  * its cross-references, parent and relations as `link` facets (a set: a
  * relation Linear drops is closed, not deleted) and its project and labels as
  * mentions under `source:linear`, which 016's extractor never displaces
- * (migration 051). No model call for any of it.
+ * (migration 053). No model call for any of it.
  *
  * The provider settings are the server's (OB1_LLM_BASE_URL, OB1_EMBEDDING_*,
  * OB1_METADATA_MODEL, OB1_LLM_LOCAL, OB1_EGRESS_*…), resolved once at start by
@@ -475,7 +475,7 @@ export type Writer = {
    * never for a text refused as another ticket's — with what the adapter
    * mapped; db/ingest-records.ts's recordStructure is the one implementation,
    * the self-check records the calls. Absent, the pass writes rows alone (a
-   * brain before 051).
+   * brain before 053).
    */
   structure?: (thoughtId: string, structure: Structure) => Promise<void>;
 };
@@ -1361,7 +1361,7 @@ function selfCheck(): Promise<number> {
       ok(seen.length === 0, "a dry run records no structure");
       seen.length = 0;
       await syncIssue(recorder, issue, []);
-      ok(seen.length === 0 && calls.length > 0, "a Writer without the hook writes rows alone (a brain before 051)");
+      ok(seen.length === 0 && calls.length > 0, "a Writer without the hook writes rows alone (a brain before 053)");
       // A hook that fails after the row took this pass's watermark: the
       // watermark comes off so the next pass reads the ticket as stale and
       // retries the structure; the error still fails the issue (fourth review
@@ -1465,13 +1465,13 @@ async function main(): Promise<void> {
   }
   const embedder = createEmbedder(() => cfg, { rememberRefusal: false });
   const session = `${hostname()}:${process.pid}:${randomUUID().slice(0, 8)}`;
-  // The structure hook needs 051. Asked once at boot: on a brain without it
+  // The structure hook needs 053. Asked once at boot: on a brain without it
   // the hook would fail for every ticket, and — since a failure clears the
   // watermark so the next pass retries — every ticket would be re-fetched and
   // re-patched every pass, forever (fifth review pass, independent read). The
   // Writer's contract says the hook is absent on such a brain; this is where.
-  const has051 = ((await sql`SELECT to_regproc('record_thought_source') IS NOT NULL AS ok`)[0] as { ok: boolean }).ok;
-  if (!has051 && !flags.has("audit")) console.error(`  migration 051 is not applied on this brain: tickets land without their canonical, links and mentions until it is (cd db && bun migrate.ts --url …)`);
+  const has053 = ((await sql`SELECT to_regproc('record_thought_source') IS NOT NULL AS ok`)[0] as { ok: boolean }).ok;
+  if (!has053 && !flags.has("audit")) console.error(`  migration 053 is not applied on this brain: tickets land without their canonical, links and mentions until it is (cd db && bun migrate.ts --url …)`);
   // One run name per pass, for thought_sources.ingest_run (SMD-1867); a loop's
   // passes are told apart by it.
   let run = runName(SELF);
@@ -1510,7 +1510,7 @@ async function main(): Promise<void> {
     dryRun,
     log: quiet ? () => {} : (line) => console.log(line),
     stopping: () => stopping,
-    // The canonical, the links and the mentions beside the head row (051).
+    // The canonical, the links and the mentions beside the head row (053).
     // `take`: a ticket's head row moves when an older paste becomes the
     // chain's head, and the identity follows the head — without it the hook
     // would refuse IDENTITY_HELD by the old head on every pass (first review
@@ -1520,7 +1520,7 @@ async function main(): Promise<void> {
     // land together or not at all — three autocommit statements left a ticket
     // edge-less until it next moved when the second failed (third review pass,
     // independent read).
-    ...(has051 ? { structure: async (id: string, s: Structure) => { await sql.begin(async (tx) => { await recordStructure(tx, id, s, run, { take: true }); }); } } : {}),
+    ...(has053 ? { structure: async (id: string, s: Structure) => { await sql.begin(async (tx) => { await recordStructure(tx, id, s, run, { take: true }); }); } } : {}),
   };
 
   let resolved: Board | undefined;

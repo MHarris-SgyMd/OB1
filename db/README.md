@@ -165,7 +165,7 @@ back and corrects the own-key labels an earlier paste of the body left
 ## Expected outcome
 
 `bun test-schema.ts` prints `1521 assertions: 1521 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports fifty-one (51) migrations applied, and
+Against a real database, `bun migrate.ts` reports fifty-three (53) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -204,7 +204,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 034 change 65, 035 change 66, 036 change 68, 037 change 70, 038 change 80, 039 change 81,
 040 change 91, 041 change 94, 042 change 95, 043 change 98, 044 SMD-1804,
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
-051 SMD-1867).
+053 SMD-1867).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -267,7 +267,7 @@ classifying or reclassifying a key; it returns `{rows, differing, awaiting}`.
 The identity column rewrites `thought_audit` once at apply (about a minute per
 million rows, captures waiting): apply 050 in a quiet window.
 
-Migration 051 puts the source beside the thought (SMD-1867, the ingestion
+Migration 053 puts the source beside the thought (SMD-1867, the ingestion
 adapter contract; SMD-1865 is its Linear instance). `thought_sources` holds, for
 a thought that came from a source system, the system, the identity that
 survives a rename there and the **canonical** form byte for byte — the truth a
@@ -1555,7 +1555,7 @@ names (project and labels; tags) and the **facets**. The rule the contract is
 built on: *preserve the source, derive the text and the edges* — a corpus that
 stripped and stored could never be written back to Obsidian or Notion without
 shredding the page (SMD-949's connectors). So each such record's transaction
-also writes, through migration 051, its canonical (`thought_sources`), its links
+also writes, through migration 053, its canonical (`thought_sources`), its links
 (`link` facets, as a set — a link the source drops is closed, never deleted) and
 its mentions (`record_thought_entities` under `source:<system>`, confidence 1,
 no model call — rows 016's extractor never displaces and never doubles: where
@@ -1569,7 +1569,7 @@ IS the input; the Markdown adapter enumerates what its text cannot reproduce
 (`MARKDOWN_LOSSY`) and the two inputs it refuses rather than store mangled — a
 file that is not UTF-8, one holding NUL (`MARKDOWN_LIMITS`). `bun
 ingest-linear.ts --self-check` and `bun ingest-markdown.ts --self-check` run the
-pure rules; `test-schema.ts` [47] drives 051 with the Linear adapter's output.
+pure rules; `test-schema.ts` [47] drives 053 with the Linear adapter's output.
 
 **The allowlist (SMD-1813).** The two adapter sources are external content —
 stored un-isolated, embedded, sent to a model provider — and are ingested only
@@ -1722,7 +1722,7 @@ its canonical (`thought_sources`), its cross-references, parent and relations
 (`blocks`, `blocked_by`, `relates_to`, `duplicate_of`, from both sides of each
 relation) as `link` facets, a set that follows the board — a relation removed in
 Linear is closed, not deleted — and its project and labels as mentions under
-`source:linear`, which 016's extractor leaves standing (migration 051; SMD-1865's
+`source:linear`, which 016's extractor leaves standing (migration 053; SMD-1865's
 second item). So "the issues blocking X" and "everything under epic Y" are
 answered from the edges, not the prose. "Same
 text" is judged by `content_fingerprint_of` — the rule `update_thought` refuses
@@ -1792,13 +1792,13 @@ it: rebuild with `ingest-records.ts` and no `--linear` (the fork, commit and
 memory sources), then one sync pass fills the board; the corpus dump stays the
 eval harnesses' (SMD-1958 has the one-renderer resolution).
 
-**Structure on a brain from before 051.** A scheduled pass fetches only the
+**Structure on a brain from before 053.** A scheduled pass fetches only the
 missing and stale tickets, so the rows a brain already held gain their
 canonical, links and mentions only as each ticket next moves in Linear. To
-record them for every ticket at once, run one `--full` pass after applying 051:
+record them for every ticket at once, run one `--full` pass after applying 053:
 every issue is fetched and compared, the rows read *unchanged* or *patched*,
 and the structure lands beside each head row (no model call, ~1 s of Linear per
-fifty issues). On a brain without 051 the tool says so at boot and writes rows
+fifty issues). On a brain without 053 the tool says so at boot and writes rows
 alone. A ticket whose structure write fails — a validator refusal, a race —
 has its watermark cleared so the next pass fetches it and tries again, every
 pass until it lands: one fetch, the facet patch, the hook's rolled-back

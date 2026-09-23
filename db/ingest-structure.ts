@@ -1,5 +1,5 @@
 /**
- * ingest-structure.ts — the structure beside a row, written as migration 051
+ * ingest-structure.ts — the structure beside a row, written as migration 053
  * records it (SMD-1867): the canonical (thought_sources), the links as a set
  * (`link` facets) and the structured mentions (record_thought_entities under
  * `source:<system>`).
@@ -38,7 +38,7 @@ export class IdentityHeld extends Error {
 }
 
 /**
- * The structure beside a row, as 051 records it: the canonical
+ * The structure beside a row, as 053 records it: the canonical
  * (record_thought_source — unchanged when it stands), the links as a set
  * (record_source_links — the same set twice writes nothing, a link the source
  * no longer states is closed) and the structured mentions
