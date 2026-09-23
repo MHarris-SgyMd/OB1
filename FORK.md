@@ -276,6 +276,8 @@ and fails a "FORK.md change N" citation with no file behind it (SMD-1917).
 | 121 | [Three shared modules for the tools beside the server](changes/121-three-shared-modules-for-the-tools-beside.md) | SMD-1985 |
 | 122 | [The board reaches the brain by a sweep that runs itself](changes/122-the-board-reaches-the-brain-by-a-sweep-that-runs.md) | SMD-1954 |
 | 123 | [A release publishes what it names](changes/123-a-release-publishes-what-it-names.md) | SMD-1860 |
+
+Landed since the last release and numbered at the next one (SMD-1804): [SMD-1864](changes/smd-1864.md).
 <!-- changes-index:end -->
 
 ### Files we own

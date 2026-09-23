@@ -1,5 +1,5 @@
 import { createAssert } from "../db/test-support.ts";
-import { queryLogEnabled, queryLogRetentionDays, QUERY_LOG, trimmedEnv } from "../db/config.mjs";
+import { DEFAULT_EMBEDDING_DIM, queryLogEnabled, queryLogRetentionDays, QUERY_LOG, trimmedEnv } from "../db/config.mjs";
 import { visibleToolNames, READ_TOOL_NAMES } from "./tools.ts";
 /**
  * test-server.ts
@@ -42,13 +42,38 @@ process.env.MCP_ACCESS_KEY = "test-key-xyz";
 
 const KEY = "test-key-xyz";
 
+// The one provider call this suite makes is [17]'s, against a stub that can be
+// told to answer an embedding slowly — the server's env is read once, at the
+// first request, so the stub's address is set before it. Declared local to the
+// egress gate (SMD-1903), as every suite that boots the server against a stub
+// does. One-hot, like test-local-provider's, at the width the server expects.
+let embedDelayMs = 0;
+const provider = Bun.serve({
+  port: 0,
+  async fetch(req) {
+    const url = new URL(req.url);
+    const body = (await req.json()) as { input?: string };
+    if (embedDelayMs > 0) await Bun.sleep(embedDelayMs);
+    if (url.pathname.endsWith("/embeddings")) {
+      const v = new Array(DEFAULT_EMBEDDING_DIM).fill(0);
+      v[String(body.input ?? "").length % DEFAULT_EMBEDDING_DIM] = 1;
+      return Response.json({ data: [{ embedding: v }] });
+    }
+    return Response.json({ choices: [{ message: { content: JSON.stringify({ topics: [], type: "idea", people: [] }) } }] });
+  },
+});
+process.env.OB1_LLM_BASE_URL = `http://127.0.0.1:${provider.port}/v1`;
+process.env.OB1_LLM_LOCAL = "1";
+
 // The import under test.
 const worker = (await import("./index.ts")).default as {
   fetch: (req: Request) => Response | Promise<Response>;
   port?: number;
 };
 
-const server = Bun.serve({ port: 0, fetch: worker.fetch });
+// Served with every field the export declares, so what the export says about
+// the runtime — and what it leaves at the default — is what [17] measures.
+const server = Bun.serve({ ...worker, port: 0 });
 const PORT = server.port ?? 0;
 const BASE = `http://localhost:${PORT}`;
 
@@ -514,6 +539,103 @@ console.log("\n[16] parseFilter bounds and normalises a metadata filter at the t
   assert(throws({ blob: "x".repeat(5000) }), "a filter over the size cap is refused");
 }
 
+console.log("\n[17] A tool call outlives the runtime's idle timeout, and a client that leaves is logged (SMD-1864)");
+{
+  const { withSseKeepalive, requestLabel, abandonedRequestLine, SSE_KEEPALIVE_MS } = await import("./index.ts") as {
+    withSseKeepalive: (r: Response, opts?: { intervalMs?: number; signal?: AbortSignal; onEnd?: () => void }) => Response;
+    requestLabel: (body: string | null) => string;
+    abandonedRequestLine: (label: string, elapsedMs: number) => string;
+    SSE_KEEPALIVE_MS: number;
+  };
+  // The premise is measured, not assumed: Bun closes a streaming response that
+  // has been silent for its default idle timeout (10 s) at the next of its
+  // 4-second sweeps — between 8 and 12 s of silence, by phase — while a handler
+  // that has not returned yet is left alone. So the case is the transport's
+  // shape, an SSE stream opened at once and written to when the tool returns,
+  // and the silence is 13 s: past the last sweep that can catch it, so the
+  // control is reset every run and not by the luck of the phase (11.5 s slipped
+  // under it once). Four requests run at once; the section costs the longest.
+  const SWEEP_WINDOW_MS: [number, number] = [7_500, 12_500];
+  const SILENT_MS = 13_000;
+  const SLOW_EMBED_MS = 13_000;
+  const silentSse = (): Response => {
+    const stream = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        await Bun.sleep(SILENT_MS);
+        try {
+          controller.enqueue(new TextEncoder().encode("event: message\ndata: {\"late\":true}\n\n"));
+          controller.close();
+        } catch { /* reset under us — the bare case */ }
+      },
+    });
+    return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
+  };
+  // The mechanism dropped (bare) beside the mechanism (kept), on the runtime's defaults.
+  const bare = Bun.serve({ port: 0, fetch: () => silentSse() });
+  const kept = Bun.serve({ port: 0, fetch: (req) => withSseKeepalive(silentSse(), { signal: req.signal }) });
+  type Read = { ok: boolean; text: string; error: string; ms: number };
+  const read = async (url: string, init: RequestInit = {}): Promise<Read> => {
+    const t0 = performance.now();
+    try {
+      const r = await fetch(url, init);
+      const text = await r.text();
+      return { ok: true, text, error: "", ms: performance.now() - t0 };
+    } catch (e) {
+      const code = (e as { code?: string }).code;
+      return { ok: false, text: "", error: e instanceof Error ? `${e.name}${code ? ` ${code}` : ""}` : String(e), ms: performance.now() - t0 };
+    }
+  };
+  const call = (id: number, query: string, init: RequestInit = {}) =>
+    read(BASE, { method: "POST", headers: AUTH, body: JSON.stringify({ jsonrpc: "2.0", id, method: "tools/call", params: { name: "search_thoughts", arguments: { query } } }), ...init });
+  const frames = (t: string) => t.split(": keepalive\n\n").length - 1;
+  const warned: string[] = [];
+  const realWarn = console.warn;
+  console.warn = (...args: unknown[]) => { warned.push(args.map(String).join(" ")); };
+  embedDelayMs = SLOW_EMBED_MS;
+  let bareRun: Read, keptRun: Read, slow: Read, gone: Read;
+  try {
+    [bareRun, keptRun, slow, gone] = await Promise.all([
+      read(`http://127.0.0.1:${bare.port}/`),
+      read(`http://127.0.0.1:${kept.port}/`),
+      call(50, "a query whose embedding outlives the idle timeout"),
+      // A client that gives up: the stream's headers arrive at once, so it is the body read that its 1.5 s signal ends.
+      call(51, "needle-the-line-must-not-carry", { signal: AbortSignal.timeout(1500) }),
+    ]);
+    await Bun.sleep(500); // the abandoned call's line, and the stub's sleep behind it, settle
+  } finally {
+    console.warn = realWarn;
+    embedDelayMs = 0;
+    bare.stop(true);
+    kept.stop(true);
+  }
+  assert(!bareRun.ok && bareRun.ms > SWEEP_WINDOW_MS[0] && bareRun.ms < SWEEP_WINDOW_MS[1],
+    `the premise: a streamed response silent past the default is reset at a sweep between 8 and 12 s (${bareRun.ok ? "answered" : bareRun.error} after ${Math.round(bareRun.ms)} ms)`);
+  assert(keptRun.ok && /"late":true/.test(keptRun.text), `the same stream through withSseKeepalive reaches its event (${keptRun.ok ? `${Math.round(keptRun.ms)} ms` : keptRun.error})`);
+  assert(frames(keptRun.text) >= 2, `…carrying comment frames on the way (${frames(keptRun.text)} in ${SILENT_MS} ms at one per ${SSE_KEEPALIVE_MS} ms)`);
+  assert(slow.ok && slow.ms >= SLOW_EMBED_MS, `the real server answers search_thoughts after a ${SLOW_EMBED_MS} ms embedding, past the last sweep (${slow.ok ? `${Math.round(slow.ms)} ms` : `${slow.error} at ${Math.round(slow.ms)} ms`})`);
+  const dataLine = slow.text.split("\n").find((l) => l.startsWith("data: "));
+  let envelope: { jsonrpc?: string; id?: unknown } | null = null;
+  try { envelope = dataLine ? JSON.parse(dataLine.slice(6)) : null; } catch { /* not an envelope */ }
+  assert(envelope?.jsonrpc === "2.0" && envelope.id === 50, "…with the call's JSON-RPC envelope (no store is configured here, so the tool's answer is its refusal — the point is that it arrived)");
+  assert(frames(slow.text) >= 2, `…kept alive by comment frames the client never sees as events (${frames(slow.text)})`);
+  assert(!gone.ok, `a client that gives up at 1.5 s is gone (${gone.ok ? "answered" : gone.error})`);
+  const lines = warned.filter((w) => /request abandoned/.test(w));
+  assert(lines.length === 1, `…and the server logs it once, for that request alone (${lines.length} of ${warned.length} warnings)`);
+  const m = /after (\d+\.\d) s/.exec(lines[0] ?? "");
+  assert(m !== null && lines[0] === abandonedRequestLine("tools/call search_thoughts", Number(m[1]) * 1000), "…the line is index.ts's own, naming the method and the tool");
+  assert(m !== null && Number(m[1]) >= 1.4 && Number(m[1]) < 3, `…at the moment the client left (${m?.[1] ?? "?"} s)`);
+  assert(!/needle-the-line-must-not-carry/.test(lines[0] ?? ""), "…and never the query");
+  assert(
+    requestLabel(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "capture_thought", arguments: { content: "the thought" } } })) === "tools/call capture_thought"
+      && requestLabel("[{\"method\":\"initialize\"}]") === "initialize" && requestLabel("not json") === "?" && requestLabel(null) === "?",
+    "requestLabel: the method and the tool's name, a batch by its first message, `?` for the unreadable, never the arguments",
+  );
+  let ended = false;
+  const plain = new Response("{}", { headers: { "content-type": "application/json" } });
+  assert(withSseKeepalive(plain, { onEnd: () => { ended = true; } }) === plain && ended, "a response that is not an event stream passes through untouched, complete at once");
+}
+
 server.stop();
+provider.stop(true);
 
 report();

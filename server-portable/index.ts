@@ -1735,6 +1735,103 @@ app.all("/.well-known/*", (c) => c.text("Not Found", 404, corsHeaders));
 const HEALTH_PATH = /(^|\/)health\/?$/;
 app.get("*", async (c, next) => (HEALTH_PATH.test(c.req.path) ? c.text("ok", 200, corsHeaders) : next()));
 
+// ── A tool call outlives the runtime's idle timeout (SMD-1864) ───────────────
+//
+// The transport answers a POST with an SSE stream at once and writes the tool's
+// result to it when the tool returns; until then the stream carries nothing.
+// Bun closes a connection that has been silent for `idleTimeout` seconds — 10
+// by default — a streaming response included, at the next of its 4-second
+// sweeps, so between 8 and 12 s of silence by phase; it never reaches into a
+// handler that has not yet returned a response. Measured on 1.4.0, macOS and
+// the Alpine image alike: a handler still pending at 12 s answers normally,
+// body read or not, on a fresh or a reused socket; a streamed response silent
+// for 13 s is closed at the sweep, the client sees ECONNRESET, and the handler
+// runs on to write into a closed stream; a comment frame every 5 s keeps it
+// open. A capture whose embedding and metadata calls ran past ten seconds was
+// that second case (9.76 s, deterministically, on the dogfood brain), with no
+// line in the server's log. So every SSE response leaves through
+// withSseKeepalive: a `: keepalive` comment — a line SSE parsers discard by
+// specification, so no client sees an event — every SSE_KEEPALIVE_MS for the
+// life of the stream, until the transport closes it or the client goes, when
+// the timer stops itself. The idle timeout itself stays at the runtime's
+// default: its job is reaping dead keep-alive sockets, and raising it to the
+// ceiling of 255 s would move the cliff a long capture falls off rather than
+// remove it, and let a dead socket linger 25× longer. Half the default, so a
+// stream is never silent for a whole sweep; a proxy's read timeout in front of
+// the server (SMD-1846) is kept the same way.
+export const SSE_KEEPALIVE_MS = 5_000;
+
+/** The SSE comment frame the keepalive writes. A line beginning `:` is a comment (WHATWG, "event stream interpretation"): every parser drops it. */
+const SSE_KEEPALIVE_FRAME = new TextEncoder().encode(": keepalive\n\n");
+
+/**
+ * The response with its SSE body kept alive: a comment frame every
+ * `intervalMs` until the body ends (`onEnd` runs once, then) or the client
+ * leaves (`signal` aborts, or the next frame finds the stream closed — either
+ * stops the timer, so an abandoned call leaks nothing). A response that is not
+ * an event stream is returned as it is, `onEnd` run at once: it is complete.
+ */
+export function withSseKeepalive(
+  response: Response,
+  opts: { intervalMs?: number; signal?: AbortSignal; onEnd?: () => void } = {},
+): Response {
+  const body = response.body;
+  if (!body || !/^text\/event-stream\b/i.test(response.headers.get("content-type") ?? "")) {
+    opts.onEnd?.();
+    return response;
+  }
+  let timer: ReturnType<typeof setInterval> | null = null;
+  const stop = () => {
+    if (timer === null) return;
+    clearInterval(timer);
+    timer = null;
+  };
+  const keepalive = new TransformStream<Uint8Array, Uint8Array>({
+    start(controller) {
+      timer = setInterval(() => {
+        try {
+          controller.enqueue(SSE_KEEPALIVE_FRAME);
+        } catch {
+          stop(); // the readable side closed under the timer: the client left
+        }
+      }, opts.intervalMs ?? SSE_KEEPALIVE_MS);
+    },
+    flush() {
+      stop(); // the transport closed the stream: the response is complete
+      opts.onEnd?.();
+    },
+  });
+  opts.signal?.addEventListener("abort", stop, { once: true });
+  return new Response(body.pipeThrough(keepalive), { status: response.status, statusText: response.statusText, headers: response.headers });
+}
+
+/**
+ * What a log line may say about a request: the JSON-RPC method and, for a
+ * tool call, the tool's name — never the arguments, which are the thought.
+ * A batch is named by its first message; anything unreadable is `?`.
+ */
+export function requestLabel(bodyText: string | null): string {
+  try {
+    const parsed: unknown = JSON.parse(bodyText ?? "");
+    const first = Array.isArray(parsed) ? parsed[0] : parsed;
+    const msg = (first ?? {}) as { method?: unknown; params?: { name?: unknown } };
+    const method = typeof msg.method === "string" ? msg.method : "?";
+    return typeof msg.params?.name === "string" ? `${method} ${msg.params.name}` : method;
+  } catch {
+    return "?";
+  }
+}
+
+/**
+ * The line the server logs when a client closes the connection before the
+ * response is complete — the trace SMD-1864's captures never left. The tool
+ * runs to its end regardless (a capture may still land), which the line says,
+ * so an operator reading a duplicate row later knows where it came from.
+ */
+export function abandonedRequestLine(label: string, elapsedMs: number): string {
+  return `request abandoned by the client after ${(elapsedMs / 1000).toFixed(1)} s: ${label} — the connection closed before the response was complete; the call runs to its end on this side, so a capture may still have landed (SMD-1864)`;
+}
+
 // The MCP endpoint, registered for MCP_METHODS only. The transport is built per
 // request and is sessionless, so a GET has no server stream to open: before
 // change 75 an authenticated GET cost an agent-registry resolve and a server
@@ -1784,6 +1881,19 @@ app.on(MCP_METHODS, "*", async (c) => {
   }
   principal.agentId = identity.agentId;
 
+  // The one thing this server logs per request (SMD-1849 has the rest): a
+  // client that closes the connection before the response is complete, named
+  // by method and tool, never by content. Read through Hono's request, which
+  // caches the body for the transport's own read of it; the signal aborts when
+  // the client goes, not when a complete response's socket is later reaped,
+  // and `settled` keeps the line to the former.
+  const label = requestLabel(await c.req.text());
+  const started = performance.now();
+  let settled = false;
+  c.req.raw.signal.addEventListener("abort", () => {
+    if (!settled) console.warn(abandonedRequestLine(label, performance.now() - started));
+  }, { once: true });
+
   const server = buildServer(principal);
   const transport = new StreamableHTTPTransport();
   await server.connect(transport);
@@ -1791,7 +1901,8 @@ app.on(MCP_METHODS, "*", async (c) => {
   if (!response) return c.json({ error: "No response from MCP transport" }, 500, corsHeaders);
   response.headers.delete("mcp-session-id");
   for (const [k, v] of Object.entries(corsHeaders)) response.headers.set(k, v);
-  return response;
+  // Kept alive for as long as the tool runs (SMD-1864, above).
+  return withSseKeepalive(response, { signal: c.req.raw.signal, onEnd: () => { settled = true; } });
 });
 
 // Whatever no route above matched: 405 with `Allow`, before authenticate(), so
@@ -1811,6 +1922,8 @@ app.notFound((c) =>
 
 export default {
   // Workers reads `fetch`; Bun also reads `port`. Node uses @hono/node-server.
+  // No `idleTimeout`: a tool call outlives the default by the keepalive above,
+  // and the default is the right reaper for a dead socket (SMD-1864).
   port: Number((globalThis as { process?: { env?: Record<string, string> } }).process?.env?.PORT ?? 8000),
   fetch: app.fetch,
 };

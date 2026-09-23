@@ -343,6 +343,21 @@ directly testable — but the Deno build still needs them.
 - **Auth is unchanged**, which means it is still a single shared key accepted from
   a header or a `?key=` query parameter. Moving runtimes does not improve that; see
   [issue #216](https://github.com/NateBJones-Projects/OB1/issues/216).
+- **A tool call may run longer than the runtime's idle timeout.** Bun closes a
+  connection that has been silent for 10 s — a streaming response included, at
+  the next of its 4-second sweeps, so after 8 to 12 s of silence — and the MCP
+  transport opens a tool call's SSE stream at once and writes to it only when
+  the tool returns. A capture whose model calls took ten seconds was closed under
+  the client with nothing in the server's log (SMD-1864). Every event stream now
+  carries a `: keepalive` comment frame every 5 s (`SSE_KEEPALIVE_MS` in
+  `index.ts`), a line SSE parsers discard by specification, for as long as the
+  tool runs; the idle timeout stays at the runtime's default, which is the right
+  reaper for a dead socket. A client that closes the connection before the
+  response is complete is the one thing the server logs per request — `request
+  abandoned by the client after 9.8 s: tools/call capture_thought …` — by method
+  and tool, never by content; the call runs to its end on the server, and a
+  retry of the same text is `upsert_thought`'s fingerprint no-op rather than a
+  second row. The rest of per-request logging is SMD-1849.
 
 ## Related
 
