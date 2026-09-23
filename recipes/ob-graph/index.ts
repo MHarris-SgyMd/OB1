@@ -35,7 +35,6 @@
 // that write. FORK.md change 67; extensions/test-auth.ts exercises it.
 // The _shared import below is this file's first from outside its own directory: deploy
 // it with _shared/auth.ts beside it (supabase/functions/_shared/), as the README says.
-import "../../compat/deno-on-bun.ts";
 import { Hono, type Context } from "hono";
 // Deno reads the SDK's types through the extensionless subpath: its exports map
 // names them `./dist/esm/*.d.ts`, unreachable from `.js` (FORK.md change 84).
@@ -68,19 +67,19 @@ app.all("*", async (c) => {
   // MCP_ACCESS_KEY still works, compared by digest. A read-scoped key is never
   // given the tools that write, so it cannot see them, let alone call them.
   const principal = authenticateRequest(c.req.raw, {
-    MCP_ACCESS_KEYS: Deno.env.get("MCP_ACCESS_KEYS"),
-    MCP_ACCESS_KEY: Deno.env.get("MCP_ACCESS_KEY"),
+    MCP_ACCESS_KEYS: process.env.MCP_ACCESS_KEYS,
+    MCP_ACCESS_KEY: process.env.MCP_ACCESS_KEY,
   });
   if (!principal) {
     return c.json({ error: "Unauthorized" }, 401);
   }
 
   const supabase = createClient(
-    Deno.env.get("SUPABASE_URL")!,
-    Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
+    process.env.SUPABASE_URL!,
+    process.env.SUPABASE_SERVICE_ROLE_KEY!,
   );
 
-  const userId = Deno.env.get("DEFAULT_USER_ID");
+  const userId = process.env.DEFAULT_USER_ID;
   if (!userId) {
     return c.json({ error: "DEFAULT_USER_ID not configured" }, 500);
   }
@@ -560,4 +559,7 @@ app.all("*", async (c) => {
   return transport.handleRequest(c);
 });
 
-Deno.serve(app.fetch);
+export default {
+  port: Number(process.env.PORT ?? 8000),
+  fetch: app.fetch,
+};

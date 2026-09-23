@@ -55,7 +55,6 @@
  *   - Optional: Knowledge graph schema (schemas/knowledge-graph) for /entities routes
  */
 
-import "../../compat/deno-on-bun.ts";
 import { createClient } from "../../compat/supabase-sql/index.ts";
 import {
   embedText,
@@ -79,9 +78,9 @@ import {
 
 // ── Environment ─────────────────────────────────────────────────────────────
 
-const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
-const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
-const MCP_ACCESS_KEY = Deno.env.get("MCP_ACCESS_KEY") ?? "";
+const SUPABASE_URL = process.env.SUPABASE_URL ?? "";
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY ?? "";
+const MCP_ACCESS_KEY = process.env.MCP_ACCESS_KEY ?? "";
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
@@ -110,7 +109,7 @@ const ACTOR = { name: ACTOR_NAME, via: "rest-api" };
  * with write methods is unsafe for production; set CORS_ALLOWED_ORIGINS
  * to your dashboard origin(s) to restrict.
  */
-const CORS_ALLOWED_ORIGINS = (Deno.env.get("CORS_ALLOWED_ORIGINS") ?? "")
+const CORS_ALLOWED_ORIGINS = (process.env.CORS_ALLOWED_ORIGINS ?? "")
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
@@ -155,7 +154,7 @@ function json(data: unknown, status = 200, req?: Request): Response {
  * attacks against a leaked key, not a replacement for a durable limiter.
  */
 const RATE_LIMIT_PER_MIN = (() => {
-  const raw = Number(Deno.env.get("RATE_LIMIT_PER_MIN") ?? "100");
+  const raw = Number(process.env.RATE_LIMIT_PER_MIN ?? "100");
   return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 100;
 })();
 
@@ -302,7 +301,7 @@ function parseAggregateCounts(
 
 // ── Main Handler ────────────────────────────────────────────────────────────
 
-Deno.serve(async (req) => {
+const handler = async (req: Request) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { status: 204, headers: corsHeadersFor(req) });
   }
@@ -412,7 +411,12 @@ Deno.serve(async (req) => {
     console.error(`rest-api error [${errorId}]`, error);
     return json({ error: "internal_error", code: "GENERIC", error_id: errorId }, 500, req);
   }
-});
+};
+
+export default {
+  port: Number(process.env.PORT ?? 8000),
+  fetch: handler,
+};
 
 // ── Search ──────────────────────────────────────────────────────────────────
 

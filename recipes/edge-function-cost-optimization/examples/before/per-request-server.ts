@@ -18,7 +18,6 @@
 // invocations are the cost, not the build; FORK.md change 78. The new Supabase
 // client per request is the other real waste here.)
 
-import "../../../../compat/deno-on-bun.ts";
 import { Hono } from "hono";
 // Deno reads the SDK's types through the extensionless subpath: its exports map
 // names them `./dist/esm/*.d.ts`, unreachable from `.js` (FORK.md change 84).
@@ -35,8 +34,8 @@ app.post("*", async (c) => {
   // Auth check — named, scoped, hashed keys through the shared module; the one
   // tool here reads, so there is nothing to withhold from a read-scoped key.
   const principal = authenticateRequest(c.req.raw, {
-    MCP_ACCESS_KEYS: Deno.env.get("MCP_ACCESS_KEYS"),
-    MCP_ACCESS_KEY: Deno.env.get("MCP_ACCESS_KEY"),
+    MCP_ACCESS_KEYS: process.env.MCP_ACCESS_KEYS,
+    MCP_ACCESS_KEY: process.env.MCP_ACCESS_KEY,
   });
   if (!principal) {
     return c.json({ error: "Unauthorized" }, 401);
@@ -44,8 +43,8 @@ app.post("*", async (c) => {
 
   // ❌ New Supabase client per request
   const supabase = createClient(
-    Deno.env.get("SUPABASE_URL")!,
-    Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
+    process.env.SUPABASE_URL!,
+    process.env.SUPABASE_SERVICE_ROLE_KEY!,
   );
 
   // ❌ New McpServer per request — rebuilds zod schemas, re-registers tools
@@ -59,7 +58,7 @@ app.post("*", async (c) => {
       const { data } = await supabase
         .from("household_vendors")
         .select("*")
-        .eq("user_id", Deno.env.get("DEFAULT_USER_ID")!)
+        .eq("user_id", process.env.DEFAULT_USER_ID!)
         .ilike("service_type", `%${service_type ?? ""}%`);
       return { content: [{ type: "text", text: JSON.stringify(data) }] };
     },
@@ -73,4 +72,7 @@ app.post("*", async (c) => {
 
 // ❌ No OPTIONS handler — preflight 404s, clients retry, retries are billed.
 
-Deno.serve(app.fetch);
+export default {
+  port: Number(process.env.PORT ?? 8000),
+  fetch: app.fetch,
+};

@@ -23,7 +23,6 @@
 // scoped, hashed entries in MCP_HOUSEHOLD_ACCESS_KEYS (the older single MCP_HOUSEHOLD_ACCESS_KEY still
 // works, compared by digest), and a read-scoped key is never given the tools
 // that write. FORK.md change 64; extensions/test-auth.ts exercises it.
-import "../../compat/deno-on-bun.ts";
 import { Hono } from "hono";
 // Deno reads the SDK's types through the extensionless subpath: its exports map
 // names them `./dist/esm/*.d.ts`, unreachable from `.js` (FORK.md change 84).
@@ -43,16 +42,16 @@ app.post("/mcp", async (c) => {
   // works, compared by digest. A read-scoped key is never given the tools that
   // write, so it cannot see them, let alone call them.
   const principal = authenticateRequest(c.req.raw, {
-    MCP_ACCESS_KEYS: Deno.env.get("MCP_HOUSEHOLD_ACCESS_KEYS"),
-    MCP_ACCESS_KEY: Deno.env.get("MCP_HOUSEHOLD_ACCESS_KEY"),
+    MCP_ACCESS_KEYS: process.env.MCP_HOUSEHOLD_ACCESS_KEYS,
+    MCP_ACCESS_KEY: process.env.MCP_HOUSEHOLD_ACCESS_KEY,
   });
   if (!principal) {
     return c.json({ error: "Unauthorized" }, 401);
   }
 
   const supabase = createClient(
-    Deno.env.get("SUPABASE_URL")!,
-    Deno.env.get("SUPABASE_HOUSEHOLD_KEY")!,
+    process.env.SUPABASE_URL!,
+    process.env.SUPABASE_HOUSEHOLD_KEY!,
   );
 
   const server = new McpServer({ name: "meal-planning-shared", version: "1.0.0" });
@@ -230,4 +229,7 @@ app.post("/mcp", async (c) => {
 
 app.get("/", (c) => c.json({ status: "ok", service: "Meal Planning (Shared)", version: "1.0.0" }));
 
-Deno.serve(app.fetch);
+export default {
+  port: Number(process.env.PORT ?? 8000),
+  fetch: app.fetch,
+};

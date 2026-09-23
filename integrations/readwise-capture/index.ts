@@ -25,15 +25,14 @@
 // `readwise_books` table so highlights can carry book title/author
 // without one Readwise API call per highlight.
 
-import "../../compat/deno-on-bun.ts";
 import { createClient } from "../../compat/supabase-sql/index.ts";
 import { secretMatches } from "../_shared/auth.ts";
 
-const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
-const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-const OPENROUTER_API_KEY = Deno.env.get("OPENROUTER_API_KEY")!;
-const READWISE_ACCESS_TOKEN = Deno.env.get("READWISE_ACCESS_TOKEN")!;
-const READWISE_WEBHOOK_SECRET = Deno.env.get("READWISE_WEBHOOK_SECRET")!;
+const SUPABASE_URL = process.env.SUPABASE_URL!;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY!;
+const READWISE_ACCESS_TOKEN = process.env.READWISE_ACCESS_TOKEN!;
+const READWISE_WEBHOOK_SECRET = process.env.READWISE_WEBHOOK_SECRET!;
 
 const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
 // The label written beside every vector (021): the model as OB1_EMBEDDING_MODEL spells it.
@@ -136,7 +135,7 @@ async function resolveBook(bookId: number): Promise<ReadwiseBook | null> {
   return book;
 }
 
-Deno.serve(async (req: Request): Promise<Response> => {
+const handler = async (req: Request): Promise<Response> => {
   try {
     // Readwise's "Test Webhook" button hits the URL with an empty body
     // (and some infra health checks probe with GET). Respond 200 so the
@@ -270,4 +269,9 @@ Deno.serve(async (req: Request): Promise<Response> => {
     console.error("Function error:", err);
     return new Response("error", { status: 500 });
   }
-});
+};
+
+export default {
+  port: Number(process.env.PORT ?? 8000),
+  fetch: handler,
+};
