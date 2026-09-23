@@ -372,6 +372,8 @@ const rowsOf = (r: { data: unknown; error: { message: string } | null }, what: s
   return (r.data as Record<string, unknown>[] | null) ?? [];
 };
 const namesOf = (r: { data: unknown; error: { message: string } | null }, what: string) => rowsOf(r, what).map((x) => String(x.name)).join();
+/** What a call the shim refuses says — "" when it does not refuse; [10], [17], [20] and [21] read refusals by their message. */
+const refusedMsg = async (run: () => PromiseLike<unknown>) => { try { await run(); return ""; } catch (e) { return (e as Error).message; } };
 try {
   // Two rows with keys under `meta`; alpha and beta have none of them.
   rowsOf(await db.from("widgets").insert([
@@ -580,7 +582,6 @@ try {
   assert(/SELECT \*, \(SELECT row_to_json\(__r\) FROM \(SELECT __e1\."name" FROM "widgets" AS __e1 WHERE __e1\."id" = "gizmos"\."widget_id"\) __r\) AS "widgets" FROM "gizmos" WHERE "label" = \$1/.test(text),
     `the embed is a correlated subquery on the foreign key, its table aliased by depth (${text})`);
   // Refusals, each naming why.
-  const refusedMsg = async (run: () => PromiseLike<unknown>) => { try { await run(); return ""; } catch (e) { return (e as Error).message; } };
   assert(/more than one foreign key/.test(await refusedMsg(() => db.from("links").select("*, widgets(name)"))), "two foreign keys to the same table are refused, naming the column form");
   rowsOf(await db.from("links").insert({ a_id: alpha, b_id: beta }).select("id"), "links setup");
   const links = rowsOf(await db.from("links").select("a:a_id (name), b:b_id (name)"), "links read");
@@ -849,9 +850,8 @@ try {
   assert(JSON.stringify(byKeyNoAlias[0]) === JSON.stringify({ widgets: { name: "beta" } }), `…keyed by the relation's name when there is no alias — graph_nodes!graph_edges_target_node_id_fkey(…) (${JSON.stringify(byKeyNoAlias[0])})`);
   const byColumnHint = rowsOf(await db.from("links").select("a:widgets!a_id(name)"), "key hint by column");
   assert(JSON.stringify(byColumnHint[0]) === JSON.stringify({ a: { name: "alpha" } }), `…or by the foreign-key column's name (${JSON.stringify(byColumnHint[0])})`);
-  const refusedMsg20 = async (run: () => PromiseLike<unknown>) => { try { await run(); return ""; } catch (e) { return (e as Error).message; } };
-  assert(/names neither a foreign key/.test(await refusedMsg20(() => db.from("links").select("widgets!no_such_key(name)"))), "a hint that names no key is refused, saying so");
-  assert(/more than one foreign key/.test(await refusedMsg20(() => db.from("links").select("widgets(name)"))), "…and two keys with no hint are still refused, the message naming both forms");
+  assert(/names neither a foreign key/.test(await refusedMsg(() => db.from("links").select("widgets!no_such_key(name)"))), "a hint that names no key is refused, saying so");
+  assert(/more than one foreign key/.test(await refusedMsg(() => db.from("links").select("widgets(name)"))), "…and two keys with no hint are still refused, the message naming both forms");
   await db.from("gizmos").delete().eq("label", "g3");
   await admin`DROP TABLE acts CASCADE`;
   await admin.close();
@@ -861,7 +861,6 @@ try {
 
 console.log("\n[21] What the review passes found (SMD-1798)");
 try {
-  const refusedMsg21 = async (run: () => PromiseLike<unknown>) => { try { await run(); return ""; } catch (e) { return (e as Error).message; } };
   const admin = new SQL({ url: URL_, max: 1 });
   await admin`DROP TABLE IF EXISTS progress CASCADE`;
   await admin`CREATE TABLE progress (learner text, lesson text, status text, PRIMARY KEY (learner, lesson))`;
@@ -889,7 +888,7 @@ try {
   // A hinted self-reference is the one-to-many side, whichever way the key is named; the bare column is the parent.
   const kids = rowsOf(await db.from("nodes").select("name, kids:nodes!parent_id(name)").eq("name", "root"), "self-ref children by column");
   assert(JSON.stringify(kids[0]) === JSON.stringify({ name: "root", kids: [{ name: "leaf" }] }), `relation!fk_column on a table embedded in itself is the children — PostgREST's recursive form (${JSON.stringify(kids[0])})`);
-  assert(/in itself through the constraint/.test(await refusedMsg21(() => db.from("nodes").select("name, kids:nodes!nodes_parent_id_fkey(name)"))), "…while the constraint's name on a self-reference is refused, as PostgREST refuses it (PGRST200), the message naming the column forms");
+  assert(/in itself through the constraint/.test(await refusedMsg(() => db.from("nodes").select("name, kids:nodes!nodes_parent_id_fkey(name)"))), "…while the constraint's name on a self-reference is refused, as PostgREST refuses it (PGRST200), the message naming the column forms");
   const parentStill = rowsOf(await db.from("nodes").select("name, parent:parent_id(name)").eq("name", "leaf"), "self-ref parent");
   assert(JSON.stringify(parentStill[0]) === JSON.stringify({ name: "leaf", parent: { name: "root" } }), "…while the bare column form is still the parent");
   // A hint naming the relation's own foreign-key column, from the referenced side: one-to-many.
@@ -919,8 +918,8 @@ try {
   const nothing = await db.rpc("nothing_fn");
   assert(nothing.error === null && (nothing.data === null || nothing.data === ""), `a void function is still its (empty) value (${JSON.stringify(nothing.data)})`);
   // order/limit/range on an embedded resource: refused, not applied to the base table.
-  assert(/order\(\) on an embedded resource/.test(await refusedMsg21(() => db.from("widgets").select("name, gizmos(label)").order("label", { foreignTable: "gizmos" }))), "order() with foreignTable is refused, not applied to the base table");
-  assert(/limit\(\) on an embedded resource/.test(await refusedMsg21(() => db.from("widgets").select("name, gizmos(label)").limit(1, { referencedTable: "gizmos" }))), "…and limit() with referencedTable");
+  assert(/order\(\) on an embedded resource/.test(await refusedMsg(() => db.from("widgets").select("name, gizmos(label)").order("label", { foreignTable: "gizmos" }))), "order() with foreignTable is refused, not applied to the base table");
+  assert(/limit\(\) on an embedded resource/.test(await refusedMsg(() => db.from("widgets").select("name, gizmos(label)").limit(1, { referencedTable: "gizmos" }))), "…and limit() with referencedTable");
   // is.NULL in any case, as PostgREST reads it.
   const isNull = namesOf(await db.from("widgets").select("name").or("kind.is.NULL,name.eq.alpha").order("id"), "is.NULL");
   assert(isNull === "alpha,epsilon", `is.NULL is read whatever its case (${isNull})`);
@@ -941,10 +940,10 @@ try {
   await admin`CREATE TABLE mutual_a (id serial PRIMARY KEY, ref int)`;
   await admin`CREATE TABLE mutual_b (id serial PRIMARY KEY, ref int REFERENCES mutual_a(id))`;
   await admin`ALTER TABLE mutual_a ADD FOREIGN KEY (ref) REFERENCES mutual_b(id)`;
-  assert(/a foreign-key column of both tables/.test(await refusedMsg21(() => db.from("mutual_a").select("id, mutual_b!ref(id)"))), "a column hint that is a key column of both tables is refused as ambiguous, naming the key form");
+  assert(/a foreign-key column of both tables/.test(await refusedMsg(() => db.from("mutual_a").select("id, mutual_b!ref(id)"))), "a column hint that is a key column of both tables is refused as ambiguous, naming the key form");
   await admin`DROP TABLE IF EXISTS tags CASCADE`;
   await admin`CREATE TABLE tags (id serial PRIMARY KEY, owners int REFERENCES owners(id), owner_id int REFERENCES owners(id))`;
-  assert(/also a table another key joins/.test(await refusedMsg21(() => db.from("tags").select("id, owners(id)"))), "a key column named like a table that another key joins is refused as ambiguous");
+  assert(/also a table another key joins/.test(await refusedMsg(() => db.from("tags").select("id, owners(id)"))), "a key column named like a table that another key joins is refused as ambiguous");
   // A nested !inner under a LEFT embed narrows the embedded rows, not the base's (the mutant that survived pass 1's pins).
   const beta21 = rowsOf(await db.from("widgets").select("id").eq("name", "beta").limit(1), "beta id")[0]?.id as number;
   rowsOf(await db.from("gizmos").insert({ widget_id: beta21, label: "g3" }).select("id"), "g3 again");

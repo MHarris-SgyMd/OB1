@@ -577,6 +577,11 @@ function parseSelect(spec: string): SelectItem[] {
   });
 }
 
+/** The join an embed walks, as `alias.col = base.col` for each key column: the embedded table's referenced columns against the base's referencing ones for many-to-one, the reverse for one-to-many. */
+function keyPairs(fk: ForeignKey, manyToOne: boolean, alias: string, baseAlias: string): string[] {
+  return (manyToOne ? fk.toCols : fk.fromCols).map((c, i) => `${alias}.${ident(c, "column")} = ${baseAlias}.${ident((manyToOne ? fk.fromCols : fk.toCols)[i], "column")}`);
+}
+
 /** One term of an or() expression: a filter, a group holding terms of its own, or text PostgREST cannot parse either. */
 type OrTerm = { col: string; op: string; value: string; negate: boolean } | { broken: string } | { group: "and" | "or"; negate: boolean; terms: OrTerm[] };
 
@@ -823,10 +828,16 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
       }
       return n;
     };
+    /** The term from `termStart` is broken: kept to the next comma after `from`, for the 400 to name; the scan moves past that comma. */
+    const brokenTo = (termStart: number, from: number): void => {
+      const stop = expression.indexOf(",", from);
+      terms.push({ broken: expression.slice(termStart, stop < 0 ? n : stop).trim() });
+      i = stop < 0 ? n + 1 : stop + 1;
+    };
     /** After a group, a list or a quoted value only a comma or the end may follow: advance past it, or the term is broken to the next comma. */
     const after = (termStart: number, j: number): "next" | "end" | "broken" => {
       const rest = expression.slice(j).match(/^\s*(,|$)/);
-      if (!rest) { const stop = expression.indexOf(",", j); terms.push({ broken: expression.slice(termStart, stop < 0 ? n : stop).trim() }); i = stop < 0 ? n + 1 : stop + 1; return "broken"; }
+      if (!rest) { brokenTo(termStart, j); return "broken"; }
       i = j + rest[0].length + (rest[1] === "," ? 0 : 1);
       return rest[1] === "," ? "next" : "end";
     };
@@ -852,12 +863,7 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
       const secondDot = firstDot < 0 ? -1 : expression.indexOf(".", firstDot + 1);
       // A term is `column.op.value`, the column a name or a JSON path. Anything else here is what a comma in a
       // previous plain value left behind (` Salt%,category` — user text, `x, and (y`) — the broken term, up to the next comma.
-      if (firstDot < 0 || secondDot < 0 || !/^[A-Za-z_][A-Za-z0-9_]*(?:->>?[A-Za-z_][A-Za-z0-9_]*)*$/.test(head)) {
-        const stop = expression.indexOf(",", i);
-        terms.push({ broken: expression.slice(termStart, stop < 0 ? n : stop).trim() });
-        i = stop < 0 ? n + 1 : stop + 1;
-        continue;
-      }
+      if (firstDot < 0 || secondDot < 0 || !/^[A-Za-z_][A-Za-z0-9_]*(?:->>?[A-Za-z_][A-Za-z0-9_]*)*$/.test(head)) { brokenTo(termStart, i); continue; }
       const col = head;
       let op = expression.slice(firstDot + 1, secondDot).trim();
       let j = secondDot + 1;
@@ -865,7 +871,7 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
       if (op === "not") {
         // PostgREST's negation inside or(): `col.not.eq.1`, `col.not.is.null`.
         const thirdDot = expression.indexOf(".", j);
-        if (thirdDot < 0) { const stop = expression.indexOf(",", i); terms.push({ broken: expression.slice(termStart, stop < 0 ? n : stop).trim() }); i = stop < 0 ? n + 1 : stop + 1; continue; }
+        if (thirdDot < 0) { brokenTo(termStart, i); continue; }
         op = expression.slice(j, thirdDot).trim();
         negate = true;
         j = thirdDot + 1;
@@ -1064,8 +1070,7 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
     const oneRow = manyToOne || fk.unique;
     const targetTable = manyToOne ? fk.to : fk.from;
     const alias = `__e${depth}`;
-    const pairs = (manyToOne ? fk.toCols : fk.fromCols).map((c, i) =>
-      `${alias}.${ident(c, "column")} = ${base.alias}.${ident((manyToOne ? fk.fromCols : fk.toCols)[i], "column")}`);
+    const pairs = keyPairs(fk, manyToOne, alias, base.alias);
     const parts: string[] = [];
     const inners: string[] = [];
     for (const inner of item.inner) {
@@ -1095,8 +1100,7 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
     const { fk, manyToOne } = await this.resolveEmbed(item, base.table);
     const targetTable = manyToOne ? fk.to : fk.from;
     const alias = `__x${depth}`;
-    const pairs = (manyToOne ? fk.toCols : fk.fromCols).map((c, i) =>
-      `${alias}.${ident(c, "column")} = ${base.alias}.${ident((manyToOne ? fk.fromCols : fk.toCols)[i], "column")}`);
+    const pairs = keyPairs(fk, manyToOne, alias, base.alias);
     const nested: string[] = [];
     for (const inner of item.inner) if (inner.kind === "embed" && inner.hint === "inner") nested.push(await this.innerClause(inner, { table: targetTable, alias }, depth + 1));
     return `EXISTS (SELECT 1 FROM ${ident(targetTable, "table")} AS ${alias} WHERE ${[...pairs, ...nested].join(" AND ")})`;
