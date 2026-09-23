@@ -265,6 +265,11 @@ export type ThoughtMeta = {
   created_at: string | null;
 };
 
+/** A caller's list of ids as a store queries it: well-formed uuids, lower-cased, de-duplicated. One rule for both stores (SMD-1298). */
+export function idList(ids: string[]): string[] {
+  return [...new Set(ids.filter((id) => UUID_RE.test(id)).map((id) => id.toLowerCase()))];
+}
+
 export function normaliseThoughtRecord(r: Record<string, unknown>): ThoughtRecord {
   return {
     ...normaliseListItem(r),
@@ -1029,6 +1034,23 @@ export interface ThoughtStore {
    * speaking PostgREST needs the same identity a Bun deployment gets.
    */
   resolveAgent(opts: { keyHash: string; label: string; scope?: string }): Promise<AgentResolution>;
+
+  /**
+   * Who captured a thought: the actor of its `capture` audit row (008) — the
+   * key's name, and since 010 its agent id — or null when nothing captured it
+   * through the server (a load by hand, a brain from before 008). Read by
+   * capture_thought when a capture-only key names `supersedes` (SMD-1298): that
+   * key may replace only what it wrote. A malformed id is null, not an error.
+   */
+  captureActorOf(id: string): Promise<{ actorName: string | null; agentId: string | null } | null>;
+
+  /**
+   * Which of the given ids are thoughts, lower-cased. Read after upsert_thought
+   * refuses a `derived_from` — 025 names the whole list in its message — so the
+   * reply can name the POSITIONS that name no thought and a caller can drop
+   * exactly those (SMD-1298). Malformed ids are simply not in the answer.
+   */
+  existingIds(ids: string[]): Promise<Set<string>>;
 
   /**
    * Migration 025's read-back. traceProvenance walks UP the derived_from chain

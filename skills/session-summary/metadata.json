@@ -1,0 +1,20 @@
+{
+  "name": "Session Summary Skill Pack",
+  "description": "Teaches an agent to end a work session with one summary thought — asked, decided, shipped, open — captured through capture_thought with the retrieved thoughts as derived_from and the harness as source. The agent's half of session-end capture; the session-capture-hook recipe is the floor under it.",
+  "category": "skills",
+  "author": {
+    "name": "Michael Harris",
+    "github": "MHarris-SgyMd"
+  },
+  "version": "1.0.0",
+  "requires": {
+    "open_brain": true,
+    "services": [],
+    "tools": ["Claude Code, Codex, or another skill-aware client with the brain's write tools"]
+  },
+  "tags": ["skill", "capture", "session-end", "provenance", "derived_from", "claude-code", "codex"],
+  "difficulty": "beginner",
+  "estimated_time": "5 minutes",
+  "created": "2026-09-22",
+  "updated": "2026-09-22"
+}

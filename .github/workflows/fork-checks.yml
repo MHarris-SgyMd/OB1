@@ -124,6 +124,13 @@ jobs:
         working-directory: scripts
         run: bunx tsc --noEmit
 
+      # The session-end capture hook (SMD-1298): both transcript parsers, the
+      # summary's shape, every secret pattern's probe, the refusal, the detached
+      # hand-off and the MCP post — against synthetic transcripts and a fake
+      # endpoint on localhost. Bun only, no database, so it runs here.
+      - name: Session capture hook
+        run: bun recipes/session-capture-hook/test-session-capture.mjs
+
   deno-check:
     name: Edge Function typecheck
     runs-on: ubuntu-latest
@@ -261,6 +268,14 @@ jobs:
       - name: Thought-kind fixture shape
         working-directory: evals
         run: bun eval-thought-kinds.ts --self-check
+
+      # The calibration ledger's arithmetic (Brier, ECE, skill, the bins) and
+      # its rules (an unstated or unresolved claim is never scored as 0) held
+      # by probes with hand-known answers, and the committed kinds fixture
+      # still yields the kind band a scorable set. No database, no model.
+      - name: Calibration ledger arithmetic
+        working-directory: evals
+        run: bun eval-calibration.ts --self-check
 
       # Proves the Cloudflare target still builds under the real Workers bundler.
       # Catches a dependency pulling in a node: builtin Workers cannot provide.

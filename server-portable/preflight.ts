@@ -28,7 +28,7 @@ import { parseKeyRecords } from "./auth.ts";
 import { DEFAULT_MAX_TOKENS } from "./chunk.ts";
 import { resolveEmbedConfig, resolveProviderEndpoints, stringOr, type ProviderEndpoint } from "./embed.ts";
 import { EGRESS_UNITS, hostOf, localKnob, type EgressTerm } from "./egress.ts";
-import { trimmedEnv } from "../db/config.mjs"; // static: `env` below is built before the dynamic import above resolves
+import { tierProblem, trimmedEnv } from "../db/config.mjs"; // static: `env` below is built before the dynamic import above resolves
 import type { PassCounts } from "../db/config.mjs";
 
 type Status = "ok" | "fail" | "warn" | "skip";
@@ -298,6 +298,15 @@ if (!egress.problems.length) {
   } else {
     add("egress policy", "ok", `allow — a thought's text reaches an endpoint not declared local unless an OB1_EGRESS_DENY term matches; ${showTerms(egress.deny)}`);
   }
+  // A `source:` term gates a label the caller supplies (capture_thought takes
+  // `source`, SMD-1298), so a capture may name any label and pass it; who
+  // wrote is `actor:`, which the key proves. Said here, where a policy written
+  // before that change is read back (ninth review pass; SMD-1941).
+  const sourceTerms = [...egress.allow, ...egress.deny].filter((t) => t.unit === "source");
+  if (sourceTerms.length && egress.mode !== "off") {
+    add("egress policy", "warn", `${sourceTerms.length} source: term(s) (${sourceTerms.map((t) => `source:${t.value}`).join(", ")}) gate a label the caller supplies — since SMD-1298 a capture names its own \`source\`, so the term holds only for callers that keep the label`,
+        "Gate who wrote with actor:<key name>; keep source: terms for what a row's label says, not for who may send.");
+  }
   // Terms in the knob the mode does not read decide nothing — a natural
   // misreading (deny + OB1_EGRESS_DENY) that fails closed and silently
   // (first review pass). Said, with the knob the mode reads.
@@ -369,21 +378,30 @@ if (chatEndpoint === embEndpoint) {
 
 // ── Access keys ──────────────────────────────────────────────────────────────
 
+// Parsed once; the `agent identity` row reads the same records (eighth review pass).
+const accessKeys: ReturnType<typeof parseKeyRecords> = env.MCP_ACCESS_KEYS ? parseKeyRecords(env.MCP_ACCESS_KEYS) : { keys: [], problems: [] };
 if (!env.MCP_ACCESS_KEYS && !env.MCP_ACCESS_KEY) {
   add("access keys", "fail", "neither MCP_ACCESS_KEYS nor MCP_ACCESS_KEY is set",
       "Mint one: bun keygen.ts --name laptop --scope write");
 } else if (env.MCP_ACCESS_KEYS) {
-  const { keys, problems } = parseKeyRecords(env.MCP_ACCESS_KEYS);
+  const { keys, problems } = accessKeys;
   if (problems.length) {
-    for (const p of problems) add("access keys", "fail", p, "bun keygen.ts --name <client> --scope read|write");
+    for (const p of problems) add("access keys", "fail", p, "bun keygen.ts --name <client> --scope read|write|capture");
   } else {
-    const writers = keys.filter((k) => k.scope === "write").length;
+    // A capture-only key (SMD-1298) adds thoughts and reads nothing: it counts
+    // as a capturer here and as a writer for the "every key can write" warning,
+    // since either kind of leak can put a thought into the brain.
+    const capturers = keys.filter((k) => k.scope !== "read").length;
     add("access keys", "ok",
         `${keys.length} key(s): ${keys.map((k) => `${k.name}(${k.scope})`).join(", ")}`);
-    if (writers === 0) {
+    if (capturers === 0) {
       add("access keys scope", "warn", "every key is read-only — capture_thought will not be registered for anyone",
-          "Mint a write key if you intend to capture thoughts.");
+          "Mint a write key (or a capture key for a hook) if you intend to capture thoughts.");
     }
+    // Write keys alone here: a capture key can add a thought and nothing else,
+    // so a laptop's write key beside a hook's capture key is not "every key
+    // can write" (second review pass).
+    const writers = keys.filter((k) => k.scope === "write").length;
     if (writers === keys.length && keys.length > 1) {
       add("access keys scope", "warn", "every key can write",
           "Prefer --scope read for clients that only search, especially URL-embedded connectors.");
@@ -1386,8 +1404,70 @@ if (configFailed) {
           SELECT count(*)::int AS c FROM pg_proc p
           JOIN pg_namespace n ON n.oid = p.pronamespace
           WHERE p.proname = 'resolve_agent' AND n.nspname = 'public'`;
-        if (Number(registry[0].c) >= 1) add("agent identity", "ok", "resolve_agent present");
-        else add("agent identity", "warn",
+        if (Number(registry[0].c) >= 1) {
+          // A capture-scoped key (SMD-1298) needs 049's wider CHECK on
+          // ob1_agent_keys.scope: without it resolve_agent raises, agents.ts
+          // degrades to no id, and every hook capture lands unattributed while
+          // nothing says why (third review pass).
+          const captureKeys = accessKeys.keys.filter((k) => k.scope === "capture");
+          // Read whatever keys are configured (a list lacking read or write is
+          // everyone's problem); a brain without the CHECK at all is said as
+          // such, not as 010's two-value CHECK.
+          // Found by the column it is on, not by its name: a restore or a
+          // hand-written 010 can leave the two-value rule under another name,
+          // which a lookup by name read as "no CHECK at all" (ninth review
+          // pass). conkey = {scope} is the rule 049 drops and re-adds — one
+          // shape in the migration, here and in test-schema (tenth review pass:
+          // three regexes over the definition disagreed at the edges).
+          const scopeChecks = await sql`
+            SELECT c.conname AS n, pg_get_constraintdef(c.oid) AS d FROM pg_constraint c
+            JOIN pg_class t ON t.oid = c.conrelid
+            JOIN pg_namespace ns ON ns.oid = t.relnamespace
+            JOIN pg_attribute a ON a.attrelid = t.oid AND a.attname = 'scope'
+            WHERE t.relname = 'ob1_agent_keys' AND ns.nspname = 'public' AND c.contype = 'c'
+              AND c.conkey = ARRAY[a.attnum]`;
+          // The scope RULE is a value list naming read and write; a CHECK on the
+          // column alone that is not one (`scope <> ''`) is neither the rule nor
+          // "read and write only" — said by its definition, as what 049 will
+          // drop (eleventh review pass: it was described as the two-value rule).
+          const checks = (scopeChecks as { n?: unknown; d?: unknown }[]).map((r) => ({ n: String(r.n ?? ""), d: String(r.d ?? "") }));
+          // A value list by its SHAPE (`= ANY (ARRAY[...])`, `scope = '...'`), not
+          // by the values it names — one naming capture alone was "not the
+          // scope rule" and told to be dropped (twelfth review pass).
+          // …in every spelling pg_get_constraintdef gives it: `= ANY (ARRAY['read'::text, …])`,
+          // `= ANY ('{read,write}'::text[])`, `scope = 'capture'::text` (thirteenth review pass).
+          const isValueList = (c: { d: string }) => /= ANY \((?:ARRAY\[|'\{)|scope = '/.test(c.d);
+          const admits = (c: { d: string }, v: string) => c.d.includes(`'${v}'`) || new RegExp(`[{,]${v}[},]`).test(c.d);
+          const valueLists = checks.filter(isValueList);
+          const others = checks.filter((c) => !isValueList(c));
+          // A list that omits read or write refuses every key of that scope at
+          // resolve_agent — a failure when such a key is configured, a warning
+          // when none is (thirteenth review pass: a read-only mirror carrying
+          // CHECK (scope IN ('read')) on purpose failed over keys it has none of).
+          // (one expression, no Set.add call: the suite reads every check-add in this block by its name)
+          const configured = new Set<string>([...accessKeys.keys.map((k) => k.scope), ...(env.MCP_ACCESS_KEY ? ["write"] : [])]);
+          const missing = ["read", "write"].filter((v) => valueLists.some((c) => !admits(c, v)));
+          const lacking = valueLists.filter((c) => missing.some((v) => !admits(c, v)));
+          const admitsCapture = valueLists.every((c) => admits(c, "capture"));
+          if (missing.length) {
+            const named = lacking.map((c) => `${c.n}: ${c.d.replace(/^CHECK \(\(|\)\)$/g, "")}`).join("; ");
+            const presented = missing.filter((v) => configured.has(v));
+            add("agent identity", presented.length ? "fail" : "warn",
+                `ob1_agent_keys.scope's CHECK does not admit ${missing.join(" or ")} (${named}) — ${presented.length ? `every ${presented.join(" and ")} key configured lands unattributed` : "no key of that scope is configured, so nothing is refused today"}`,
+                "Apply db/migrations/049_agent_key_scope_capture.sql (cd db && bun migrate.ts --url $DATABASE_URL) — it drops every CHECK on the column and adds the three-value one.");
+          } else if (captureKeys.length && scopeChecks.length === 0) {
+            add("agent identity", "warn", `resolve_agent present; ${captureKeys.length} capture-scoped key(s) configured and ob1_agent_keys.scope carries no CHECK at all (010's was dropped or the table restored without it) — any scope is recorded`,
+                "Apply db/migrations/049_agent_key_scope_capture.sql to put the three-value CHECK back (cd db && bun migrate.ts --url $DATABASE_URL).");
+          } else if (captureKeys.length && !admitsCapture) {
+            const odd = valueLists.filter((c) => !/'capture'/.test(c.d) && c.n !== "ob1_agent_keys_scope_check").map((c) => c.n);
+            add("agent identity", "fail",
+                `${captureKeys.length} capture-scoped key(s) configured (${captureKeys.map((k) => k.name).join(", ")}) but ob1_agent_keys.scope admits read and write only${odd.length ? ` (under the name ${odd.join(", ")})` : ""} — every capture through them would land without an agent id`,
+                "Apply db/migrations/049_agent_key_scope_capture.sql (cd db && bun migrate.ts --url $DATABASE_URL) — it drops every CHECK on the column, whatever its name, and adds the three-value one.");
+          } else if (others.length) {
+            add("agent identity", "warn", `resolve_agent present; ${valueLists.length ? "the scope CHECK admits capture (049), and " : ""}${others.length} other CHECK(s) on ob1_agent_keys.scope alone (${others.map((c) => `${c.n}: ${c.d}`).join("; ")}) — not the scope rule, and 049 drops every CHECK on the column alone when re-applied`,
+                "Drop it, or move the rule to a CHECK spanning another column, which 049 leaves alone.");
+          } else add("agent identity", "ok", `resolve_agent present${captureKeys.length ? `; the scope CHECK admits capture (049)` : ""}`);
+        } else add("agent identity", "warn",
                  "resolve_agent is missing — writes are attributed by key name only, and a rename would orphan the history",
                  "Apply db/migrations/010_agent_identity.sql.");
 
@@ -2651,7 +2731,14 @@ if (configFailed) {
           const cfg = Object.fromEntries((rows as { key: string; value: string }[]).map((r) => [r.key, r.value]));
           const stamped = cfg.tier;
           const wantTier = (env as unknown as Record<string, string | undefined>).OB1_TIER?.trim() || undefined;
-          if (!stamped) {
+          const tierIssue = tierProblem(wantTier);
+          if (tierIssue) {
+            // A wrong OB1_TIER silently drops every query_log row (it fails 045's
+            // CHECK and the best-effort write swallows it) — fatal, so the
+            // container entrypoint (bun preflight.ts && …) refuses to serve
+            // (SMD-1953). The server itself also refuses it in initEnv.
+            add("tier", "fail", tierIssue, "Set OB1_TIER to stable, canary or working, or leave it unset (a plain brain).");
+          } else if (!stamped) {
             add("tier", "skip", `no tier recorded — db/ingest-records.ts has not run against this brain${wantTier ? ` (server OB1_TIER=${wantTier})` : ""}. A plain brain, not a pipeline tier.`);
           } else {
             const ingest = cfg.last_ingest ? `, last ingest ${cfg.last_ingest}` : ", never ingested";

@@ -14,7 +14,7 @@
  */
 
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
-import { actorPayload, captureEnvelope, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, normaliseThoughtMeta, normaliseThoughtRecord, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE } from "./store.ts";
+import { actorPayload, captureEnvelope, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, normaliseThoughtMeta, normaliseThoughtRecord, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
@@ -384,6 +384,31 @@ export class PostgrestStore implements ThoughtStore {
     return normaliseAgentResolution(data);
   }
 
+  async captureActorOf(id: string): Promise<{ actorName: string | null; agentId: string | null } | null> {
+    if (!UUID_RE.test(id)) return null;
+    const { data, error } = await this.client
+      .from("thought_audit")
+      .select("actor_name, canonical_agent_id")
+      .eq("thought_id", id)
+      .eq("action", "capture")
+      .order("created_at", { ascending: true })
+      .order("id", { ascending: true }) // created_at can tie; id is a uuid (008), so the tiebreak is stable rather than chronological — one capture row per thought by construction (035)
+      .limit(1)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (data == null) return null;
+    const r = data as Record<string, unknown>;
+    return { actorName: typeof r.actor_name === "string" ? r.actor_name : null, agentId: typeof r.canonical_agent_id === "string" ? r.canonical_agent_id : null };
+  }
+
+  async existingIds(ids: string[]): Promise<Set<string>> {
+    const valid = idList(ids);
+    if (valid.length === 0) return new Set();
+    const { data, error } = await this.client.from("thoughts").select("id").in("id", valid);
+    if (error) throw new Error(error.message);
+    return new Set(((data ?? []) as { id: string }[]).map((r) => String(r.id).toLowerCase()));
+  }
+
   async traceProvenance(opts: { id: string; maxDepth?: number; nodeCap?: number }): Promise<ProvenanceNode[]> {
     if (!UUID_RE.test(opts.id)) return [];
     // Migration 025's function is plain (no SECURITY DEFINER/service_role), so
@@ -434,7 +459,7 @@ export class PostgrestStore implements ThoughtStore {
   }
 
   async supersededAmong(ids: string[]): Promise<Record<string, string>> {
-    const valid = ids.filter((id) => UUID_RE.test(id));
+    const valid = idList(ids);
     if (valid.length === 0) return {};
     // No DISTINCT ON over PostgREST; fetch the newer rows and reduce in JS,
     // keeping the newest per superseded id. Best-effort: a pre-025 schema has no

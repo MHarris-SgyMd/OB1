@@ -5833,6 +5833,60 @@ console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defi
   await db.query(`UPDATE ob1_entities SET aliases = '{}' WHERE id = $1`, [NUM]);
 }
 
+console.log("\n[45] Migration 049: the agent registry records a capture-only key's scope, and the CHECK still refuses a scope the server does not mint (SMD-1298)");
+{
+  // 010's CHECK named read and write. resolve_agent() writes the presented
+  // scope into ob1_agent_keys; a capture key (SMD-1298) would have failed the
+  // CHECK and landed every capture unattributed. Asserted of the LIVE
+  // constraint after every file applied.
+  const hash = "e".repeat(64);
+  const r = (await db.query<{ r: Record<string, unknown> }>(`SELECT resolve_agent($1, 'session-hook', 'capture') AS r`, [hash])).rows[0].r;
+  assert(r.ok === true && typeof r.agent_id === "string", `resolve_agent registers a capture-scoped key (${JSON.stringify(r)})`);
+  const scope = (await db.query<{ scope: string }>(`SELECT scope FROM ob1_agent_keys WHERE key_hash = $1`, [hash])).rows[0]?.scope;
+  assert(scope === "capture", `…and records the scope as presented (${scope})`);
+  const again = (await db.query<{ r: Record<string, unknown> }>(`SELECT resolve_agent($1, 'session-hook', 'capture') AS r`, [hash])).rows[0].r;
+  assert(again.ok === true && again.agent_id === r.agent_id && again.created === false, "a second request resolves to the same agent");
+  // The mirror: the widening admitted one value, not any. The refusal names
+  // the constraint, so a caller reading the error knows where the rule lives.
+  let refused = "";
+  try { await db.query(`SELECT resolve_agent($1, 'stranger', 'admin')`, ["f".repeat(64)]); } catch (e) { refused = (e as Error).message; }
+  assert(/ob1_agent_keys_scope_check/.test(refused), `a scope the server does not mint is still refused by the named CHECK (${refused.slice(0, 90)})`);
+  // Every CHECK on the scope column ALONE (conkey = {scope}) — the shape 049 drops and preflight reads (ninth and tenth review passes).
+  const CHECK_DEF_SQL = `SELECT pg_get_constraintdef(c.oid) AS d FROM pg_constraint c JOIN pg_class t ON t.oid = c.conrelid JOIN pg_namespace n ON n.oid = t.relnamespace JOIN pg_attribute a ON a.attrelid = t.oid AND a.attname = 'scope' WHERE t.relname = 'ob1_agent_keys' AND n.nspname = 'public' AND c.contype = 'c' AND c.conkey = ARRAY[a.attnum]`;
+  const def = (await db.query<{ d: string }>(CHECK_DEF_SQL)).rows.map((x) => x.d);
+  assert(def.length === 1, `one constraint under the name (${def.length})`);
+  assert(/'read'/.test(def[0] ?? "") && /'write'/.test(def[0] ?? "") && /'capture'/.test(def[0] ?? ""), `the live CHECK names read, write and capture (${def[0]})`);
+  // Re-applying lands the same shape: still one constraint, still the three.
+  await reapply("049");
+  const after = (await db.query<{ d: string }>(CHECK_DEF_SQL)).rows.map((x) => x.d);
+  assert(after.length === 1 && after[0] === def[0], "re-applying 049 leaves one constraint with the same definition");
+  // The two-value rule under ANOTHER name — a restore, a hand-written 010 — is
+  // dropped too, else it would stand beside the new one and refuse capture keys still (ninth review pass).
+  await db.query(`ALTER TABLE ob1_agent_keys RENAME CONSTRAINT ob1_agent_keys_scope_check TO ob1_agent_keys_scope_check_old`);
+  await db.query(`ALTER TABLE ob1_agent_keys DROP CONSTRAINT ob1_agent_keys_scope_check_old`);
+  await db.query(`ALTER TABLE ob1_agent_keys ADD CONSTRAINT scope_two_values CHECK (scope IN ('read', 'write')) NOT VALID`); // a capture row exists by now
+  await reapply("049");
+  const renamed = (await db.query<{ d: string }>(CHECK_DEF_SQL)).rows.map((x) => x.d);
+  assert(renamed.length === 1 && renamed[0] === def[0], `049 drops a two-value CHECK under another name and leaves the three-value one alone (${renamed.length} constraint(s))`);
+  // A rule spanning scope and another column is not the scope rule: 049 leaves it (tenth review pass — a match on the word dropped it).
+  await db.query(`ALTER TABLE ob1_agent_keys ADD CONSTRAINT scope_with_hash CHECK (key_hash IS NOT NULL OR scope IS NULL) NOT VALID`);
+  await reapply("049");
+  const spanning = (await db.query<{ n: string }>(`SELECT conname AS n FROM pg_constraint WHERE conrelid = 'ob1_agent_keys'::regclass AND contype = 'c' ORDER BY conname`)).rows.map((x) => x.n);
+  assert(spanning.includes("scope_with_hash") && spanning.includes("ob1_agent_keys_scope_check"), `a CHECK spanning scope and another column survives 049 beside the scope rule (${spanning.join(", ")})`);
+  await db.query(`ALTER TABLE ob1_agent_keys DROP CONSTRAINT scope_with_hash`);
+  // The table without its scope column — a hand-built registry — is refused by name, not with a bare "column does not exist" (eleventh review pass).
+  await db.query(`ALTER TABLE ob1_agent_keys RENAME COLUMN scope TO scope_gone`);
+  let noColumn = "";
+  try { await reapply("049"); } catch (e) { noColumn = (e as Error).message; }
+  assert(/migration 049 needs 010 \(ob1_agent_keys\.scope\); this schema lacks it/.test(noColumn), `049 on a registry without the column refuses by name (${noColumn.slice(0, 80)})`);
+  await db.query(`ALTER TABLE ob1_agent_keys RENAME COLUMN scope_gone TO scope`);
+  await reapply("049");
+  assert((await db.query<{ d: string }>(CHECK_DEF_SQL)).rows.length === 1, "…and applies again once the column is back");
+  const c = (await db.query<{ c: string | null }>(COLUMN_COMMENT_SQL, ["ob1_agent_keys", "scope"])).rows[0]?.c ?? "";
+  assert(/\bcapture\b/.test(c) && /SMD-1298/.test(c) && /Recorded rather than enforced/.test(c),
+    "the column's live comment names the third scope, the ticket, and keeps 010's rule that the scope is recorded, not enforced");
+}
+
 console.log("\n[46] Migration 050: thought_changes — one page of the log, oldest first, from a time or a cursor; the keyset walks a tie without a gap or a repeat; each row rendered bounded (SMD-1296)");
 {
   const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
