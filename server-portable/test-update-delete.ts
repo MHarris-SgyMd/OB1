@@ -25,6 +25,7 @@ import { SQL } from "bun";
 import { createAssert, requireDatabaseUrl, resetSchema } from "../db/test-support.ts";
 import { mcpClient } from "./test-support.ts";
 import { hashKey } from "./auth.ts";
+import { visibleToolNames } from "./tools.ts";
 
 const URL_ = requireDatabaseUrl("test-update-delete.ts");
 const { assert, report } = createAssert();
@@ -91,7 +92,10 @@ console.log("\n[1] Both tools are registered for a write key");
   const names = (listed.result?.tools ?? []).map((t) => t.name);
   assert(names.includes("update_thought"), "update_thought present");
   assert(names.includes("delete_thought"), "delete_thought present");
-  assert(names.length === 10, `ten tools in total (${names.length})`);
+  // The count from the manifest, not a numeral: a read tool added to tools.ts
+  // (thought_changes, SMD-1296) failed this line in CI while every manifest-
+  // driven guard in test-server and test-auth passed.
+  assert(names.length === visibleToolNames({ scope: "write" }).length, `every tool the manifest gives a write key (${names.length})`);
 }
 
 console.log("\n[2] An update with neither content nor metadata is refused");
@@ -242,7 +246,7 @@ console.log("\n[7] A read-scoped key cannot see either tool");
   const names = (listed.result?.tools ?? []).map((t) => t.name);
   assert(!names.includes("update_thought"), "update_thought is not registered for a read key");
   assert(!names.includes("delete_thought"), "delete_thought is not registered either");
-  assert(names.length === 7, `seven read-only tools (${names.length})`);
+  assert(names.length === visibleToolNames({ scope: "read" }).length, `the manifest's read tools and no other (${names.length})`);
 
   // Not merely hidden — calling it must fail rather than being served.
   let msg = "";

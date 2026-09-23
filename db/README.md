@@ -164,8 +164,8 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `1446 assertions: 1446 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports fifty-one (51) migrations applied, and
+`bun test-schema.ts` prints `1475 assertions: 1475 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports fifty-two (52) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -204,7 +204,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 034 change 65, 035 change 66, 036 change 68, 037 change 70, 038 change 80, 039 change 81,
 040 change 91, 041 change 94, 042 change 95, 043 change 98, 044 SMD-1804,
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
-051 SMD-1804).
+051 SMD-1804, 052 SMD-1296).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -268,6 +268,18 @@ classifying or reclassifying a key; it returns `{rows, differing, awaiting}`.
 The identity column rewrites `thought_audit` once at apply (about a minute per
 million rows, captures waiting): apply 050 in a quiet window.
 
+Migration 052 adds the one read over that log a resuming agent asks first
+(SMD-1296): `thought_changes(p_since, p_after, p_agent, p_not_agent, p_actions,
+p_limit)` — one page, oldest first, from a time or from a cursor (the audit id a
+page ended with; a keyset on `(created_at, id)`, so a walk never repeats a row
+and never skips a committed one — `created_at` is the writing transaction's
+start, so a write still in flight when a page is read is not on a later page of
+that walk; a reader who must not miss it re-reads from a time), each row with a
+bounded head of the text, an update's moved keys, the
+`supersedes` pointer before and after, and who. The MCP tool of the same name
+renders it; a self-hosted server role needs `SELECT` on `thought_audit` (the
+server group below).
+
 ## What changed relative to the guide
 
 Four deliberate differences. Each is a portability fix, not a behaviour change.
@@ -323,7 +335,7 @@ issues every group at once.
 | **server** — the server's soft extras, beyond capture; never fatal to a bare capture (the `SELECT` on `ob1_agents` 046 made hard is in capture, above), but `resolve_agent` *upserts* the agent tables, so attribution needs the writes, not just `SELECT` | `ob1_config` (006) | `SELECT` |
 | | `ob1_agents` (010) | `SELECT, INSERT, UPDATE` |
 | | `ob1_agent_keys` (010) | `SELECT, INSERT, UPDATE` |
-| | `thought_audit` (008) | `SELECT` — a capture-only key may supersede only a thought whose capture row is its own (SMD-1298); without this the server refuses that pointer and names the grant |
+| | `thought_audit` (008) | `SELECT` — a capture-only key may supersede only a thought whose capture row is its own (SMD-1298); without this the server refuses that pointer and names the grant; `thought_changes` (052, SMD-1296) reads the log for the MCP tool of the same name, and names the grant too |
 | **worker** — `reembed.ts`, `consolidate.ts`, `extract-entities.ts`: claim work, upsert a job key into `ob1_config`, and (consolidate) record/resolve proposals | `thought_work_claims` (015) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `ob1_config` (006) | `INSERT, UPDATE` |
 | | `supersession_proposals` (029) | `SELECT, INSERT, UPDATE` |
@@ -1748,7 +1760,7 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 1446 assertions, PGlite, no container
+bun test-schema.ts                          # 1475 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts         # 627 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
