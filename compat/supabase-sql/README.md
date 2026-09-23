@@ -95,7 +95,7 @@ every server but `work-operating-model-activation`, which refuses to start
 without it — set it to any value there. An extension's `schema.sql` carries
 Supabase RLS policies on `auth.uid()`; its README's Step 1 gives the two stub
 functions a plain Postgres needs before the file runs. Check 11 of `scripts/check-fork-consistency.ts` holds
-every file under the category directories to no `Deno` at all, and every shim-importing file to no
+every code file under the category directories and docs/ to no `Deno` (save the seven Edge Function files DENO_EXCEPTIONS counts, SMD-1800's), and every shim-importing file to no
 `jsr:`/`npm:`/URL specifier, through the files it imports — and
 `extensions/test-auth.ts` starts each one under `bun` and answers it over its port
 in CI. One file is kept on supabase-js by the codemod's `KEEP` list, with the

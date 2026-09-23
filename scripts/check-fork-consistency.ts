@@ -1678,32 +1678,46 @@ const DENO_EXCEPTIONS = new Map<string, CountedException>([
 /**
  * `text` with comments and regex literals blanked, and — when `stringsToo` —
  * string contents blanked as well; every blanked character becomes a space,
- * newlines stay, so offsets and line numbers hold. A template literal's `${…}`
- * expressions are code and stay (blanked recursively, so a string or a nested
- * template inside one is read the same way): `\`${Deno.env.get("X")}/y\`` is
- * the Edge Function idiom, and the first review pass of SMD-1799 found the
- * whole literal blanked, expression included. A `/` opens a regex literal
- * where a value cannot end — after `(`, `,`, `=`, `:`, `[`, `!`, `&`, `|`,
- * `?`, `{`, `}`, `;`, an arithmetic operator, the start of the text, or a
- * keyword such as `return` — and the literal is blanked to its closing `/`
- * (a `]`-closed class may hold one); a `/` that finds no close on its line is
- * a division. Before this, a quote inside a regex opened a "string" that
- * swallowed the code after it (the same pass; check 22 met the parity hazard
- * in prose). The heuristic can still misread a `/` after `)` as a division,
- * which only ever leaves regex text in view, never hides code.
+ * newlines stay (a `\`-newline continuation keeps its newline), so offsets and
+ * line numbers hold. One scanner, `scan`, linear in the text: a template
+ * literal's `${…}` expressions are code and stay — read by the same rules, so
+ * a quote, a `}` or a comment inside a regex or string within one is read as
+ * such, and the expression ends at the first `}` at depth 0 — while the
+ * literal's own text is blanked (`\`${Deno.env.get("X")}/y\`` is the Edge
+ * Function idiom; SMD-1799's first review pass found the whole literal
+ * blanked, its second found the expression's end read by a scanner that knew
+ * no regex). A `/` opens a regex literal where a value cannot end — after `(`,
+ * `,`, `=`, `:`, `[`, `!`, `&`, `|`, `?`, `{`, `}`, `;`, an arithmetic
+ * operator, the start of the text, or a keyword such as `return` (not a member
+ * named like one: `a.return / b`) — and is blanked to its closing `/` on the
+ * same line (a `]`-closed class may hold one); a `/` with no close on its line
+ * is a division, and so is one after `)` or `<` (`</td>` is JSX's closer, and
+ * two on a line read as a regex spanning the cell between, .tsx being in
+ * scope). What this cannot read: a regex after `)` with a quote inside hides
+ * the rest of that line, never a later one (a string stops at the newline);
+ * an apostrophe in JSX text (`<td>it's</td><td>{Deno.pid}</td>`) does the
+ * same — the .tsx analogue of the prose hazard check 22 met — and matters
+ * only when `Deno` shares the line.
  */
 const REGEX_AFTER_WORD = new Set(["return", "typeof", "case", "do", "else", "in", "of", "new", "delete", "void", "throw", "yield", "await", "instanceof"]);
 function blanked(text: string, stringsToo: boolean): string {
+  return scan(text, 0, stringsToo, false).out;
+}
+/** The scanner behind `blanked`: from `from`; when `inExpression`, stops at the first `}` at depth 0 and says where. */
+function scan(text: string, from: number, stringsToo: boolean, inExpression: boolean): { out: string; end: number } {
   let out = "";
-  // The last code character that is not a space, and the last identifier (kept across the spaces after it), for `/`.
-  let last = "", word = "", wordOpen = false;
+  // The last code character that is not a space, the last identifier (kept across the spaces after it) and whether it
+  // followed a `.` — for the regex-or-division question at a `/`.
+  let last = "", word = "", wordOpen = false, afterDot = false, depth = 0;
+  const blank = (s: string) => s.replace(/[^\n]/g, " ");
   const emit = (ch: string) => {
     out += ch;
     if (/\s/.test(ch)) { wordOpen = false; return; }
+    if (/[\w$]/.test(ch)) { if (!wordOpen) afterDot = last === "."; word = wordOpen ? word + ch : ch; wordOpen = true; } else { word = ""; wordOpen = false; }
     last = ch;
-    if (/[\w$]/.test(ch)) { word = wordOpen ? word + ch : ch; wordOpen = true; } else { word = ""; wordOpen = false; }
   };
-  for (let i = 0; i < text.length;) {
+  let i = from;
+  for (; i < text.length;) {
     const c = text[i], d = text[i + 1];
     if (c === "/" && d === "/") { while (i < text.length && text[i] !== "\n") { out += " "; i++; } continue; }
     if (c === "/" && d === "*") {
@@ -1714,7 +1728,7 @@ function blanked(text: string, stringsToo: boolean): string {
     if (c === '"' || c === "'") {
       out += c; i++;
       while (i < text.length && text[i] !== c && text[i] !== "\n") {
-        if (text[i] === "\\") { out += stringsToo ? "  " : text.slice(i, i + 2); i += 2; continue; }
+        if (text[i] === "\\") { const esc = text.slice(i, i + 2); out += stringsToo ? blank(esc) : esc; i += esc.length; continue; }
         out += stringsToo ? " " : text[i]; i++;
       }
       if (i < text.length && text[i] === c) { out += c; i++; }
@@ -1724,11 +1738,11 @@ function blanked(text: string, stringsToo: boolean): string {
     if (c === "`") {
       out += c; i++;
       while (i < text.length && text[i] !== "`") {
-        if (text[i] === "\\") { out += stringsToo ? "  " : text.slice(i, i + 2); i += 2; continue; }
+        if (text[i] === "\\") { const esc = text.slice(i, i + 2); out += stringsToo ? blank(esc) : esc; i += esc.length; continue; }
         if (text[i] === "$" && text[i + 1] === "{") {
-          const end = expressionEnd(text, i + 2);
-          out += "${" + blanked(text.slice(i + 2, end), stringsToo) + (end < text.length ? "}" : "");
-          i = end + 1;
+          const inner = scan(text, i + 2, stringsToo, true);
+          out += "${" + inner.out + (inner.end < text.length ? "}" : "");
+          i = inner.end + 1;
           continue;
         }
         out += stringsToo && text[i] !== "\n" ? " " : text[i]; i++;
@@ -1737,7 +1751,7 @@ function blanked(text: string, stringsToo: boolean): string {
       last = "`"; word = "";
       continue;
     }
-    if (c === "/" && (last === "" || "(,=:[!&|?{};+-*%<>~^".includes(last) || REGEX_AFTER_WORD.has(word))) {
+    if (c === "/" && (last === "" || "(,=:[!&|?{};+-*%>~^".includes(last) || (REGEX_AFTER_WORD.has(word) && !afterDot))) {
       // A regex literal, if one closes on this line; else the `/` is a division.
       let j = i + 1, inClass = false, closed = false;
       for (; j < text.length && text[j] !== "\n"; j++) {
@@ -1753,46 +1767,38 @@ function blanked(text: string, stringsToo: boolean): string {
         continue;
       }
     }
+    if (inExpression) {
+      if (c === "{") depth++;
+      else if (c === "}") { if (depth === 0) return { out, end: i }; depth--; }
+    }
     emit(c); i++;
   }
-  return out;
+  return { out, end: text.length };
 }
-/** The index of the `}` that closes a template expression opened at `start`, skipping strings and nested templates; `text.length` when none does. */
-function expressionEnd(text: string, start: number): number {
-  let depth = 0;
-  for (let j = start; j < text.length; j++) {
-    const c = text[j];
-    if (c === "\\") { j++; continue; }
-    if (c === '"' || c === "'") { j++; while (j < text.length && text[j] !== c && text[j] !== "\n") { if (text[j] === "\\") j++; j++; } continue; }
-    if (c === "`") {
-      j++;
-      while (j < text.length && text[j] !== "`") {
-        if (text[j] === "\\") { j += 2; continue; }
-        if (text[j] === "$" && text[j + 1] === "{") { j = expressionEnd(text, j + 2) + 1; continue; }
-        j++;
-      }
-      continue;
-    }
-    if (c === "{") depth++;
-    else if (c === "}") { if (depth === 0) return j; depth--; }
-  }
-  return text.length;
-}
+/** The index of the `}` that closes a template expression opened at `start`; `text.length` when none does. */
+function expressionEnd(text: string, start: number): number { return scan(text, start, true, true).end; }
 
 /**
  * Every import (and export-from) statement's specifier, with the line it starts
- * on, in order. A statement ends at its `;` — the tree's imports all carry one;
- * a semicolon-less import would run on to the next `;` and its specifier be
- * missed (a silent miss, never a false catch), so the rule says so here.
+ * on, in order. A statement ends at its `;`, or — for one written on a single
+ * line with no `;` (recipes/repo-learning-coach is semicolon-less throughout;
+ * SMD-1799's second review pass found its twelve files' imports unread) — at
+ * its line's end. A semicolon-less import that spans lines is still missed (a
+ * silent miss, never a false catch), so the rule says so here.
  */
 function importSpecifiers(text: string) {
   const code = blanked(text, false);
   const out: { spec: string; line: number }[] = [];
+  const lineOf = (index: number) => code.slice(0, index).split("\n").length;
   for (const m of code.matchAll(/^[ \t]*(?:import|export)\b[^;]*;/gm)) {
     const spec = /\bfrom\s*(["'])([^"'\n]+)\1\s*;$/.exec(m[0]) ?? /^[ \t]*import\s*(["'])([^"'\n]+)\1\s*;$/.exec(m[0]);
-    if (spec) out.push({ spec: spec[2], line: code.slice(0, m.index).split("\n").length });
+    if (spec) out.push({ spec: spec[2], line: lineOf(m.index) });
   }
-  return out;
+  for (const m of code.matchAll(/^[ \t]*(?:import|export)\b[^;\n]*$/gm)) {
+    const spec = /\bfrom\s*(["'])([^"'\n]+)\1\s*$/.exec(m[0]) ?? /^[ \t]*import\s*(["'])([^"'\n]+)\1\s*$/.exec(m[0]);
+    if (spec) out.push({ spec: spec[2], line: lineOf(m.index) });
+  }
+  return out.sort((a, b) => a.line - b.line);
 }
 
 /** Whether `text` imports the SQL shim by a relative specifier. */
@@ -1860,6 +1866,17 @@ const DENO_PROBES: [string, string[]][] = [
   ['const m = text.match(/\\bDeno\\.env\\b/g);\n', []],
   ['const half = total / 2;\nDeno.exit(1);\n', ["exit@2"]],
   ['function f(s) { return /Deno/.test(s); }\nDeno.exit(1);\n', ["exit@2"]],
+  // The second review pass, against a parser oracle: a `/` after `<` is JSX's closer, not a regex (two on a .tsx
+  // line read as one spanning the cell between); a quote or a `}` inside a regex within `${…}` is the regex's; a
+  // member named like a keyword is not the keyword; a `\`-newline continuation keeps its line count.
+  ['return <tr><td>{a}</td><td>{Deno.env.get("B")}</td></tr>;\n', ["env.get@1"]],
+  ['const s = `${/"/.test(a)}`; Deno.exit(1);\n', ["exit@1"]],
+  ['const t = `${/}/.test(Deno.pid)}`;\n', ["pid@1"]],
+  ['const r = a.return / Deno.pid / 2;\n', ["pid@1"]],
+  ['const s = "a\\\nb";\nDeno.exit(1);\n', ["exit@3"]],
+  // Not read, by design: `globalThis["Deno"]`, `Reflect.get(globalThis, "Deno")`, `eval("Deno")` — strings are prose,
+  // and a rule on the string "Deno" would refuse every README's code block; a file that hides its runtime that way
+  // is a review finding, not a checker's.
 ];
 /** The files check 11 reads: every code extension check 22's CODE_FILE reads, less the markup ones (a `Deno` in a Svelte or HTML script is check 22's kind of rare, and the roots' markup is the dashboards'). */
 const BUN_CODE_FILE = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/;
@@ -1873,6 +1890,8 @@ const SPECIFIER_PROBES: [string, string[], string[]][] = [
   ['import { createClient } from "../../compat/supabase-sql/index.ts";\nimport { db } from "./_shared/db.ts";\n', ['import { Pool } from "npm:pg@8";\nexport const db = new Pool();\n'], ["dep0:specifier:npm:pg@8@1"]],
   // `node:` is fine, a relative dynamic import is fine, a specifier in a comment or a string is prose.
   ['import { createHash } from "node:crypto";\nimport { createClient } from "../../compat/supabase-sql/index.ts";\nconst m = await import("./tools.ts");\n// see "jsr:@supabase/functions-js"\nconst s = "npm:hono";\n', [], []],
+  // Semicolon-less, single-line (the second review pass: repo-learning-coach's shape, unread until then).
+  ["import { Hono } from 'npm:hono@4'\nimport { createClient } from '../../compat/supabase-sql/index.ts'\n", [], ["specifier:npm:hono@4@1"]],
 ];
 
 function checkBunNative() {
@@ -1886,6 +1905,8 @@ function checkBunNative() {
   }
   for (const name of ["x.ts", "x.tsx", "x.mts", "x.cts", "x.js", "x.jsx", "x.mjs", "x.cjs"]) if (!BUN_CODE_FILE.test(name)) fail(SELF, `check 11's BUN_CODE_FILE no longer reads ${name} (its own probe)`);
   for (const name of ["x.md", "x.json", "x.sql", "x.svelte", "x.html"]) if (BUN_CODE_FILE.test(name)) fail(SELF, `check 11's BUN_CODE_FILE reads ${name}, which it should not (its own probe)`);
+  if (!importsShim("import { createClient } from '../../compat/supabase-sql/index.ts'\nexport const c = createClient(u, k)\n")) fail(SELF, "importsShim no longer sees a semicolon-less shim import (its own probe)");
+  if (importsShim("// import { createClient } from '../../compat/supabase-sql/index.ts';\nconst s = 'compat/supabase-sql/index.ts';\n")) fail(SELF, "importsShim reads a shim import out of a comment or a string (its own probe)");
   const gone = new Set([...DENO_EXCEPTIONS.keys()].filter((rel) => !existsSync(join(ROOT, rel))));
   for (const rel of gone) fail(SELF, `DENO_EXCEPTIONS names ${rel}, which is not in the tree — remove the entry with the file`);
 
@@ -1910,8 +1931,11 @@ function checkBunNative() {
       const src = from === file ? text : readFileSync(from, "utf8");
       for (const { spec } of importSpecifiers(src)) {
         if (!spec.startsWith("./") && !spec.startsWith("../")) continue;
-        const p = join(dirname(from), spec);
-        if (seen.has(p) || !existsSync(p) || !statSync(p).isFile() || relOf(p).startsWith("compat/")) continue;
+        // As Bun resolves it: the path as written, a `.js`/`.mjs` specifier for a `.ts`/`.mts` file, or a directory's index.
+        const target = join(dirname(from), spec);
+        const p = [target, target.replace(/\.js$/, ".ts"), target.replace(/\.mjs$/, ".mts"), join(target, "index.ts")]
+          .find((c) => existsSync(c) && statSync(c).isFile());
+        if (!p || seen.has(p) || relOf(p).startsWith("compat/")) continue;
         seen.add(p); queue.push(p); deps.push(p);
       }
     }

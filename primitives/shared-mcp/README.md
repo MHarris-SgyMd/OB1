@@ -114,10 +114,10 @@ CREATE POLICY "Household members update shared lists"
 
 ### Step 3: Build a Separate MCP Server
 
-Create a new Edge Function for the shared server. This is a Supabase Edge Function using Hono and the MCP SDK — the same pattern as the core Open Brain and all extensions.
+Create a second server file beside the extension's — `extensions/<name>/shared-server.ts`, where the relative imports below resolve; the real one is `extensions/meal-planning/shared-server.ts`. It is a Bun-native Hono + MCP SDK server (SMD-1799) — the same pattern as the core Open Brain and all extensions.
 
 ```typescript
-// shared-server index.ts (Supabase Edge Function)
+// extensions/<name>/shared-server.ts — a second, Bun-native server beside the extension's index.ts
 import { Hono } from "hono";
 // Deno reads the SDK's types through the extensionless subpath: its exports map
 // names them `./dist/esm/*.d.ts`, unreachable from `.js` (FORK.md change 84).
@@ -280,34 +280,26 @@ Add to `package.json`:
 }
 ```
 
-### Step 5: Deploy as a Separate Edge Function
+### Step 5: Run It as a Separate Server
 
-Deploy the shared server as its own Supabase Edge Function:
-
-```bash
-supabase functions new household-shared-mcp
-```
-
-Copy the shared server code into `supabase/functions/household-shared-mcp/index.ts`, generate a separate access key, and deploy:
+The shared server is its own process on its own port, with its own keys — the extension's server never sees them:
 
 ```bash
-# Generate a separate access key for the shared server
+# Mint a separate access key for the shared server (the primitive's Step 3 shows the name:scope:hash line)
 openssl rand -hex 32
 
-# Set the shared server's secrets
-supabase secrets set MCP_HOUSEHOLD_ACCESS_KEY=generated-key-here
-supabase secrets set SUPABASE_HOUSEHOLD_KEY=household-scoped-api-key
-
-# Deploy
-supabase functions deploy household-shared-mcp --no-verify-jwt
+SUPABASE_URL='postgres://user:password@host:5432/openbrain' \
+SUPABASE_HOUSEHOLD_KEY='unused-by-the-shim' \
+MCP_HOUSEHOLD_ACCESS_KEYS='partner:read:<sha256-of-the-shared-key>' \
+PORT=8788 bun extensions/<name>/shared-server.ts
 ```
 
-The other person connects via Claude Desktop:
+`bun extensions/meal-planning/shared-server.ts` is the real one (`extensions/test-auth.ts` starts it under `bun` in CI). The other person connects via Claude Desktop:
 
 1. Open Claude Desktop → **Settings** → **Connectors**
 2. Click **Add custom connector**
 3. Name: `Household Shared`
-4. Remote MCP server URL: `https://YOUR_PROJECT_REF.supabase.co/functions/v1/household-shared-mcp?key=shared-access-key`
+4. Remote MCP server URL: `https://your-host/mcp?key=shared-access-key` — the shared server's port behind TLS, never the extension's
 5. Click **Add**
 
 **Key points:**
@@ -537,7 +529,7 @@ For Supabase: Create a custom JWT with limited claims, or use connection pooling
 
    - Check that the `?key=` value is the **key** whose hash sits in the `MCP_HOUSEHOLD_ACCESS_KEYS` secret (the URL carries the key, the secret its hash), and that the line's scope is what you expect
    - Try removing and re-adding the connector in Settings → Connectors
-   - Verify the Edge Function is deployed: `supabase functions list`
+   - Verify the shared server is running: its terminal shows Bun's start line, and `curl http://your-host:8788/mcp` without a key answers 401
 
 ## Extensions That Use This
 

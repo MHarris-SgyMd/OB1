@@ -12,7 +12,7 @@ Every extension produces exactly 5 files in `extensions/{extension-slug}/`:
 | `metadata.json` | Machine-readable metadata (follows schema below) |
 | `schema.sql` | PostgreSQL tables, indexes, RLS policies |
 | `index.ts` | The MCP server — Bun-native, `bun index.ts` serves it (SMD-1799) |
-| `deno.json` | Deno import map for the Edge Function |
+| `deno.json` | Import map for `deno check`, the type gate SMD-1800 retires; Bun resolves the same packages from `extensions/node_modules` |
 
 ---
 
@@ -26,13 +26,12 @@ This file is **identical for every extension** unless the extension needs additi
     "@hono/mcp": "npm:@hono/mcp@0.3.2",
     "@modelcontextprotocol/sdk": "npm:@modelcontextprotocol/sdk@1.30.0",
     "hono": "npm:hono@4.13.8",
-    "zod": "npm:zod@4.6.5",
-    "@supabase/supabase-js": "npm:@supabase/supabase-js@2.47.10"
+    "zod": "npm:zod@4.6.5"
   }
 }
 ```
 
-Only add entries if the extension imports something not listed here.
+Only add entries if the extension imports something not listed here. No `@supabase/supabase-js`: the server imports the repository's SQL shim by relative path (File 4), and `extensions/package.json` pins the same four packages for Bun.
 
 ---
 
@@ -64,7 +63,7 @@ Must validate against `/.github/metadata.schema.json`. Required fields:
 ```
 
 Rules:
-- `requires_primitives` always includes `deploy-edge-function` and `remote-mcp`. Add others (e.g., `rls`, `shared-mcp`) only if the extension teaches those concepts.
+- `requires_primitives` always includes `deploy-edge-function` (its Step 3 mints the access key; the server itself runs under Bun, not as an Edge Function) and `remote-mcp`. Add others (e.g., `rls`, `shared-mcp`) only if the extension teaches those concepts.
 - `learning_order` is only set for curated learning path extensions (1-6). Community extensions omit it.
 - `services` lists external APIs beyond Supabase/OpenRouter (e.g., `["Gmail API"]`).
 - `tags` should include the extension's domain and difficulty-related terms.
@@ -254,18 +253,9 @@ And include the embedding/extraction helper functions from `server/index.ts`.
 
 Must follow the template at `extensions/_template/README.md`. Key sections:
 
-### Deployment Table (CRITICAL)
+### The Bun Run (CRITICAL)
 
-The README must include this exact table format in the "Deploy the MCP Server" step:
-
-```markdown
-| Setting | Value |
-|---------|-------|
-| Function name | `{extension-slug}-mcp` |
-| Download path | `extensions/{extension-slug}` |
-```
-
-This table is consumed by the [Deploy an Edge Function](../../primitives/deploy-edge-function/) primitive. The `Download path` value must match the extension's actual directory name in the repo.
+The README's "Run the MCP Server" step is the run every extension README has (`extensions/household-knowledge/README.md` is the model): `PORT=8787 bun extensions/{extension-slug}/index.ts` with `SUPABASE_URL` (a `postgres://` connection string) and `MCP_ACCESS_KEYS` set, the key minted as the [Deploy an Edge Function](../../primitives/deploy-edge-function/) primitive's Step 3 shows. There is no function to deploy: the fork's servers are Bun-native (SMD-1799), and `extensions/test-auth.ts` starts every one under `bun` in CI. The path in the command must match the extension's actual directory name.
 
 ### SQL Setup
 
@@ -300,18 +290,18 @@ Include 3-5 example prompts a user can try immediately after setup. These should
 
 Before submitting, verify:
 
-- [ ] `deno.json` contains standard imports (add extras only if needed)
+- [ ] `deno.json` contains the standard imports for `deno check` (no supabase-js; add extras only if needed)
 - [ ] `metadata.json` validates against `/.github/metadata.schema.json`
 - [ ] `schema.sql` uses `IF NOT EXISTS`, includes RLS, includes indexes
 - [ ] `schema.sql` does NOT modify the `thoughts` table
 - [ ] `index.ts` follows the exact server structure (imports, auth, Hono app)
 - [ ] `index.ts` tools return `{ content: [{ type: "text" as const, text }] }` format
 - [ ] `index.ts` tools have try/catch with `isError: true` error handling
-- [ ] `README.md` includes the deployment table with correct function name and download path
+- [ ] `README.md` includes the Bun run (`PORT=8787 bun extensions/{extension-slug}/index.ts`) with `SUPABASE_URL` and `MCP_ACCESS_KEYS`
 - [ ] `README.md` includes test prompts
 - [ ] No credentials, API keys, or secrets in any file
 - [ ] No binary files over 1MB
-- [ ] Directory name matches the download path in the README deployment table
+- [ ] Directory name matches the path in the README's `bun` command
 
 ---
 

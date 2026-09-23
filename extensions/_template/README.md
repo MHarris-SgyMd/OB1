@@ -147,19 +147,20 @@ grant select, insert, update, delete on table public.table_name_2 to service_rol
 
 ---
 
-![Step 2](https://img.shields.io/badge/Step_2-Deploy_the_MCP_Server-HEX_COLOR?style=for-the-badge)
+![Step 2](https://img.shields.io/badge/Step_2-Run_the_MCP_Server-HEX_COLOR?style=for-the-badge)
 
-Follow the [Deploy an Edge Function](../../primitives/deploy-edge-function/) guide using these values:
+Run the server under [Bun](https://bun.sh) from a checkout of this repository — there is no Supabase function to deploy; the fork's servers are Bun-native (SMD-1799; `compat/supabase-sql/README.md` §3):
 
-| Setting | Value |
-|---------|-------|
-| Function name | `extension-name-mcp` |
-| Download path | `extensions/extension-name` |
+```bash
+(cd extensions && bun install)   # once: the pinned hono, zod and MCP SDK
+SUPABASE_URL='postgres://user:password@host:5432/openbrain' \
+MCP_ACCESS_KEYS='laptop:write:<sha256-of-your-key>' \
+PORT=8787 bun extensions/extension-name/index.ts
+```
 
-> [!TIP]
-> If you already deployed the core Open Brain server, this process is identical — just with a different function name and download path.
+`SUPABASE_URL` is a `postgres://` connection string (the SQL shim keeps the variable names; `SUPABASE_SERVICE_ROLE_KEY` may be left unset). Mint the access key as [Deploy an Edge Function, Step 3](../../primitives/deploy-edge-function/README.md#step-3-mint-an-access-key) shows and set its `name:scope:hash` line in `MCP_ACCESS_KEYS`. Your **MCP Server URL** is `http://your-host:8787/mcp`, and your **MCP Connection URL** adds the key: `http://your-host:8787/mcp?key=<your-key>` (behind TLS on any host that is not your own).
 
-✅ **Done when:** `supabase functions list` shows `extension-name-mcp` as `ACTIVE`.
+✅ **Done when:** Bun prints its start line (`Started development server: http://localhost:8787`, or `Started server:` under `NODE_ENV=production`) and the process stays up.
 
 ---
 
@@ -188,7 +189,7 @@ Try these prompts in your AI client:
 3. **Test prompt 3** — describe what this tests and what the user should see
 
 > [!CAUTION]
-> If any prompt returns an error, check the Edge Function logs in your Supabase dashboard (Edge Functions → `extension-name-mcp` → Logs) before troubleshooting further.
+> If any prompt returns an error, read the server's terminal output (a failed tool call logs its cause there) before troubleshooting further.
 
 ✅ **Done when:** All test prompts return expected results and you can see data in your Supabase Table Editor.
 

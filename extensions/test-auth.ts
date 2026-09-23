@@ -89,6 +89,8 @@ async function importServer(file: string): Promise<Handler> {
 }
 
 // ── Deno's specifiers, on Bun ────────────────────────────────────────────────
+// Dead for the 22 servers on the shim since SMD-1799 (check 11 refuses a `jsr:`/`npm:`/URL specifier in them); the
+// `postgres` stub still stands in for kubernetes-deployment, a Deno deployment until SMD-1800.
 
 /** The packages this directory installs; the recipes' and integrations' deno.json pin the same names. */
 const PACKAGES = /^(hono|zod|@hono\/mcp|@modelcontextprotocol\/sdk)(\/|$)/;
@@ -662,7 +664,7 @@ for (const live of LIVE) {
   // URL); the process above set them, so they are removed here and the claim is what the start proves.
   for (const name of ["OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "EMBEDDING_API_KEY", "CHAT_API_KEY", "SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_HOUSEHOLD_KEY"]) delete env[name];
   Object.assign(env, live.env);
-  // Bun's own `Started development server:` line goes unread: the port is known, so stdout is dropped and the
+  // Bun's own start line (`Started development server:`, or `Started server:` in production) goes unread: the port is known, so stdout is dropped and the
   // child is up when the port answers at all (SMD-1799).
   const proc = Bun.spawn([process.execPath, join(ROOT, live.file)], { env, cwd: ROOT, stdout: "ignore", stderr: "pipe" });
   // Up when the port answers — any status: Bun serves the file's default export on PORT, so a refused
