@@ -30,7 +30,9 @@
  * Those need a human, and the report says which and why. The blockers are the
  * shim's own refusals, spelled as regexes over the file: Supabase's Auth,
  * Storage, Realtime and Functions clients, a type-only import, `.textSearch()`,
- * and an order, limit or range on an embedded resource (foreignTable).
+ * and an order, limit or range on an embedded resource (foreignTable) — and,
+ * since SMD-1799, a `Deno.*` reach, Bun's refusal rather than the shim's: the
+ * file is ported to Bun's shape by hand first.
  * Resource embedding (nested, hinted) and `.or()` grouping are served since
  * SMD-1798 and block nothing (the history of the embed regexes is at BLOCKERS).
  */

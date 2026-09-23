@@ -383,8 +383,8 @@ integrations/consolidation-workers/_shared/auth.ts  # change 67 (new file — th
 extensions/test-writes.ts        # change 69 (new file — every vendored writer driven against Postgres, its row against update_thought's)
 <8 vendored files>               # change 71 (a captured thought through the 3-argument upsert_thought instead of a raw INSERT; three more say they bypass it)
 compat/supabase-sql/index.ts     # change 73 (PostgREST's JSON-path column in filters and order; a timestamp back as a string — the bio worker runs on the fork); change 77 (the catalog: arrays by declared type, .not(), one-hop embedding, PostgrestError, one pool per URL)
-compat/deno-on-bun.ts            # change 74 (new file — Deno's two globals on Bun, for the servers on the shim)
-<16 vendored files>              # change 74 (one import line each — compat/deno-on-bun.ts first; four swap Supabase's jsr: types import for it)
+compat/deno-on-bun.ts            # change 74 (new file — Deno's two globals on Bun, for the servers on the shim); deleted by SMD-1799 (the servers are Bun-native)
+<16 vendored files>              # change 74 (one import line each — compat/deno-on-bun.ts first; four swap Supabase's jsr: types import for it); the line went with SMD-1799
 extensions/test-tools.ts         # change 77 (new file — every tool of the five extension servers on the shim, driven against Postgres with their schemas)
 db/test-bench-reuse.ts           # change 76 (new file — the kept bench corpus's oracle cache held to the computation, on one index)
 db/bench-oracle.ts               # change 76 (new file — the cache's pure part: what of a marker's entry a run may trust; test-schema [37])

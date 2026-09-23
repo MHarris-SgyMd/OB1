@@ -73,6 +73,6 @@ app.post("*", async (c) => {
 // ❌ No OPTIONS handler — preflight 404s, clients retry, retries are billed.
 
 export default {
-  port: Number(process.env.PORT ?? 8000),
+  port: Number(process.env.PORT || 8000),
   fetch: app.fetch,
 };

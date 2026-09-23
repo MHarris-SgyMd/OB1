@@ -125,7 +125,7 @@ import { Hono } from "hono";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPTransport } from "@hono/mcp";
 import { z } from "zod";
-import { createClient } from "@supabase/supabase-js";
+import { createClient } from "../../compat/supabase-sql/index.ts"; // Bun's Postgres client in supabase-js's shape
 import { authenticateRequest, canWrite } from "../_shared/auth.ts";
 
 const app = new Hono();
@@ -135,8 +135,8 @@ app.post("/mcp", async (c) => {
   // scoped, hashed entries (see the core server's auth.ts); give a household
   // member a read-scoped key unless they should mark items purchased.
   const principal = authenticateRequest(c.req.raw, {
-    MCP_ACCESS_KEYS: Deno.env.get("MCP_HOUSEHOLD_ACCESS_KEYS"),
-    MCP_ACCESS_KEY: Deno.env.get("MCP_HOUSEHOLD_ACCESS_KEY"),
+    MCP_ACCESS_KEYS: process.env.MCP_HOUSEHOLD_ACCESS_KEYS,
+    MCP_ACCESS_KEY: process.env.MCP_HOUSEHOLD_ACCESS_KEY,
   });
   if (!principal) {
     return c.json({ error: "Unauthorized" }, 401);
@@ -144,8 +144,8 @@ app.post("/mcp", async (c) => {
 
   // Use SCOPED credentials — not the service role key
   const supabase = createClient(
-    Deno.env.get("SUPABASE_URL")!,
-    Deno.env.get("SUPABASE_HOUSEHOLD_KEY")!, // Limited key
+    process.env.SUPABASE_URL!,
+    process.env.SUPABASE_HOUSEHOLD_KEY!, // Limited key
   );
 
   const server = new McpServer(
@@ -232,7 +232,11 @@ app.post("/mcp", async (c) => {
 
 app.get("/", (c) => c.json({ status: "ok", service: "Household Shared", version: "1.0.0" }));
 
-Deno.serve(app.fetch);
+// Bun serves the entry module's default export on PORT (8000 unset); the suites import `fetch`.
+export default {
+  port: Number(process.env.PORT || 8000),
+  fetch: app.fetch,
+};
 ```
 
 ### Step 4: Configure Separate Secrets

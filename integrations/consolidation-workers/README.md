@@ -45,7 +45,7 @@ The workers run from a checkout of this repository: each imports the repository'
 
 ### 2. Run the Workers
 
-> **Runs under Bun, not as an Edge Function.** Both workers import the repository's SQL shim (`compat/supabase-sql`, which imports `bun`) and are Bun-native — `process.env` for their environment, a default-exported `{ port, fetch }` that `bun` serves (FORK.md change 74 moved `consolidation-bio`; SMD-1798 moved `consolidation-metadata`, whose two-group `.or()` over the candidates the shim did not read until then; SMD-1799 the shape), so `supabase functions deploy` cannot bundle them; from a checkout of this repository each serves on `PORT` (8000 unset — podman's `gvproxy` holds that port on macOS, so set one):
+> **Runs under Bun, not as an Edge Function.** Both workers import the repository's SQL shim (`compat/supabase-sql`, which imports `bun`) and are Bun-native — `process.env` for their environment, a default-exported `{ port, fetch }` that `bun` serves (FORK.md change 74 moved `consolidation-bio`; SMD-1798 moved `consolidation-metadata`, whose two-group `.or()` over the candidates the shim did not read until then; SMD-1799 gave both the shape), so `supabase functions deploy` cannot bundle them; from a checkout of this repository each serves on `PORT` (8000 unset — podman's `gvproxy` holds that port on macOS, so set one):
 >
 > ```bash
 > PORT=8787 SUPABASE_URL='postgres://user:password@host:5432/openbrain' MCP_ACCESS_KEYS='cron:write:<sha256-of-your-key>' OPENROUTER_API_KEY='…' bun integrations/consolidation-workers/bio/index.ts

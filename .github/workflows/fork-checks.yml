@@ -167,7 +167,8 @@ jobs:
       # job starts each, the data-layer job drives their tools — so none
       # resolves under Deno any more; the five steps that checked the last six
       # of them went with the move. kubernetes-deployment is the one vendored
-      # file still written for Deno alone (its own database, SMD-1524).
+      # file still deployed on Deno (its image, SMD-1800's; its own database,
+      # SMD-1524) — Bun-shaped since SMD-1799, `deno serve` serving the export.
       - name: deno check integrations/kubernetes-deployment
         working-directory: integrations/kubernetes-deployment
         run: deno check --node-modules-dir=none index.ts

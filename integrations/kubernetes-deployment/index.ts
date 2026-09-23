@@ -635,6 +635,6 @@ app.all("*", async (c) => {
 // `deno serve --port 8000 index.ts`, which serves the same export on the flag's port (a `port` here is
 // Bun's to read; Deno's is the flag), so k8s/openbrain.yml names no PORT.
 export default {
-  port: Number(process.env.PORT ?? 8000),
+  port: Number(process.env.PORT || 8000),
   fetch: app.fetch,
 };

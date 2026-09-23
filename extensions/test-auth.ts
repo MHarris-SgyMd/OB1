@@ -636,14 +636,19 @@ const LIVE: Live[] = [
   } },
 ];
 /** Bun's entry shape as the servers spell it — the tail server-portable/index.ts has — held to the letter (SMD-1799). */
-const ENTRY_SHAPE = /^export default \{\n  port: Number\(process\.env\.PORT \?\? 8000\),\n  fetch: (?:app\.fetch|handler),\n\};\n/m;
+const ENTRY_SHAPE = /^export default \{\n  port: Number\(process\.env\.PORT \|\| 8000\),\n  fetch: (?:app\.fetch|handler),\n\};\n/m;
 {
   const inTree = [...new Bun.Glob("{extensions,recipes,integrations}/**/*.ts").scanSync({ cwd: ROOT })]
     .filter((f) => !f.includes("node_modules") && onShim(f) && ENTRY_SHAPE.test(readFileSync(join(ROOT, f), "utf8"))).sort();
   assert(inTree.join() === LIVE.map((l) => l.file).sort().join(), `every file that imports the shim and exports Bun's entry shape is started here (${inTree.length}: ${inTree.join(", ")})`);
 }
 const DEADLINE_MS = 30_000;
-/** A port nothing holds: bound for a moment and released, then handed to the child as PORT. */
+/**
+ * A port nothing holds: bound for a moment and released, then handed to the child as PORT. Another process
+ * may take it in between (a container publishing a port on the same host did, once, while the suite ran);
+ * the child then fails to bind — Bun refuses a held port, exit 1 — or a stranger answers the poll and the
+ * probe's assertions name the file. A counted failure either way, within the deadline; rerun.
+ */
 function freePort(): number {
   const held = Bun.serve({ port: 0, fetch: () => new Response() });
   const port = held.port!;

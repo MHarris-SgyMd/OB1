@@ -1648,9 +1648,10 @@ function checkThoughtWritesAround() {
 //     specifier Bun cannot resolve — `jsr:`, `npm:`, a URL — in the file or
 //     the files it imports, relatively and transitively, a dynamic
 //     `import("…")` included (`node:` is fine).
-// Comments and string contents are not code: members and specifiers are read
-// with both blanked (line numbers kept). Scanned: every .ts/.js/.mjs under
-// the seven category directories and docs/.
+// Comments, string contents and regex literals are not code, and a template
+// literal's `${…}` expressions are: members and specifiers are read with the
+// former blanked (line numbers kept). Scanned: every .ts/.tsx/.mts/.cts/.js/
+// .jsx/.mjs/.cjs under the seven category directories and docs/.
 /** `Deno` wherever it appears in code: a member chain of up to two names, or bare. */
 const DENO_MEMBER = /\bDeno\b(?:\.([A-Za-z_$][\w$]*)(?:\.([A-Za-z_$][\w$]*))?)?/g;
 /** A dynamic import's literal specifier — quoted or in a plain backtick literal; one with `${…}` is not a literal and is not read. */
@@ -1675,16 +1676,33 @@ const DENO_EXCEPTIONS = new Map<string, CountedException>([
 ]);
 
 /**
- * `text` with comments blanked, and — when `stringsToo` — string contents
- * blanked as well; every blanked character becomes a space, newlines stay, so
- * offsets and line numbers hold. A regex literal is not tracked: a quote or
- * `//` inside one may blank to the next quote or line end, which only ever
- * hides text from this check, never invents a member or a specifier. A
- * template literal is blanked whole, `${…}` included, so a `Deno` member
- * inside one is not seen either way (no file on the shim has one).
+ * `text` with comments and regex literals blanked, and — when `stringsToo` —
+ * string contents blanked as well; every blanked character becomes a space,
+ * newlines stay, so offsets and line numbers hold. A template literal's `${…}`
+ * expressions are code and stay (blanked recursively, so a string or a nested
+ * template inside one is read the same way): `\`${Deno.env.get("X")}/y\`` is
+ * the Edge Function idiom, and the first review pass of SMD-1799 found the
+ * whole literal blanked, expression included. A `/` opens a regex literal
+ * where a value cannot end — after `(`, `,`, `=`, `:`, `[`, `!`, `&`, `|`,
+ * `?`, `{`, `}`, `;`, an arithmetic operator, the start of the text, or a
+ * keyword such as `return` — and the literal is blanked to its closing `/`
+ * (a `]`-closed class may hold one); a `/` that finds no close on its line is
+ * a division. Before this, a quote inside a regex opened a "string" that
+ * swallowed the code after it (the same pass; check 22 met the parity hazard
+ * in prose). The heuristic can still misread a `/` after `)` as a division,
+ * which only ever leaves regex text in view, never hides code.
  */
-function blanked(text: string, stringsToo: boolean) {
+const REGEX_AFTER_WORD = new Set(["return", "typeof", "case", "do", "else", "in", "of", "new", "delete", "void", "throw", "yield", "await", "instanceof"]);
+function blanked(text: string, stringsToo: boolean): string {
   let out = "";
+  // The last code character that is not a space, and the last identifier (kept across the spaces after it), for `/`.
+  let last = "", word = "", wordOpen = false;
+  const emit = (ch: string) => {
+    out += ch;
+    if (/\s/.test(ch)) { wordOpen = false; return; }
+    last = ch;
+    if (/[\w$]/.test(ch)) { word = wordOpen ? word + ch : ch; wordOpen = true; } else { word = ""; wordOpen = false; }
+  };
   for (let i = 0; i < text.length;) {
     const c = text[i], d = text[i + 1];
     if (c === "/" && d === "/") { while (i < text.length && text[i] !== "\n") { out += " "; i++; } continue; }
@@ -1693,18 +1711,72 @@ function blanked(text: string, stringsToo: boolean) {
       for (; i < stop; i++) out += text[i] === "\n" ? "\n" : " ";
       continue;
     }
-    if (c === '"' || c === "'" || c === "`") {
+    if (c === '"' || c === "'") {
       out += c; i++;
-      while (i < text.length && text[i] !== c) {
+      while (i < text.length && text[i] !== c && text[i] !== "\n") {
         if (text[i] === "\\") { out += stringsToo ? "  " : text.slice(i, i + 2); i += 2; continue; }
-        out += stringsToo && text[i] !== "\n" ? " " : text[i]; i++;
+        out += stringsToo ? " " : text[i]; i++;
       }
-      if (i < text.length) { out += c; i++; }
+      if (i < text.length && text[i] === c) { out += c; i++; }
+      last = c; word = "";
       continue;
     }
-    out += c; i++;
+    if (c === "`") {
+      out += c; i++;
+      while (i < text.length && text[i] !== "`") {
+        if (text[i] === "\\") { out += stringsToo ? "  " : text.slice(i, i + 2); i += 2; continue; }
+        if (text[i] === "$" && text[i + 1] === "{") {
+          const end = expressionEnd(text, i + 2);
+          out += "${" + blanked(text.slice(i + 2, end), stringsToo) + (end < text.length ? "}" : "");
+          i = end + 1;
+          continue;
+        }
+        out += stringsToo && text[i] !== "\n" ? " " : text[i]; i++;
+      }
+      if (i < text.length) { out += "`"; i++; }
+      last = "`"; word = "";
+      continue;
+    }
+    if (c === "/" && (last === "" || "(,=:[!&|?{};+-*%<>~^".includes(last) || REGEX_AFTER_WORD.has(word))) {
+      // A regex literal, if one closes on this line; else the `/` is a division.
+      let j = i + 1, inClass = false, closed = false;
+      for (; j < text.length && text[j] !== "\n"; j++) {
+        if (text[j] === "\\") { j++; continue; }
+        if (text[j] === "[") inClass = true;
+        else if (text[j] === "]") inClass = false;
+        else if (text[j] === "/" && !inClass) { closed = true; break; }
+      }
+      if (closed) {
+        out += "/" + " ".repeat(j - i - 1) + "/"; i = j + 1;
+        while (i < text.length && /[a-z]/.test(text[i])) { out += " "; i++; } // the flags
+        last = "/"; word = "";
+        continue;
+      }
+    }
+    emit(c); i++;
   }
   return out;
+}
+/** The index of the `}` that closes a template expression opened at `start`, skipping strings and nested templates; `text.length` when none does. */
+function expressionEnd(text: string, start: number): number {
+  let depth = 0;
+  for (let j = start; j < text.length; j++) {
+    const c = text[j];
+    if (c === "\\") { j++; continue; }
+    if (c === '"' || c === "'") { j++; while (j < text.length && text[j] !== c && text[j] !== "\n") { if (text[j] === "\\") j++; j++; } continue; }
+    if (c === "`") {
+      j++;
+      while (j < text.length && text[j] !== "`") {
+        if (text[j] === "\\") { j += 2; continue; }
+        if (text[j] === "$" && text[j + 1] === "{") { j = expressionEnd(text, j + 2) + 1; continue; }
+        j++;
+      }
+      continue;
+    }
+    if (c === "{") depth++;
+    else if (c === "}") { if (depth === 0) return j; depth--; }
+  }
+  return text.length;
 }
 
 /**
@@ -1777,8 +1849,20 @@ const DENO_PROBES: [string, string[]][] = [
   // Members in comments and strings are prose.
   ['// All env reads use Deno.env.get(); never Deno.readTextFile.\nconst note = "Deno.serve(app.fetch)"; /* Deno.exit */\n', []],
   // Bun's entry shape, the tail the sweep left.
-  ['export default {\n  port: Number(process.env.PORT ?? 8000),\n  fetch: app.fetch,\n};\n', []],
+  ['export default {\n  port: Number(process.env.PORT || 8000),\n  fetch: app.fetch,\n};\n', []],
+  // A template literal's expressions are code (the first review pass found the whole literal blanked), nested or not.
+  ['const u = `${Deno.env.get("SUPABASE_URL")}/rest/v1`;\n', ["env.get@1"]],
+  ['const s = `a ${cond ? `${Deno.env.get("A")}` : "b"} c`;\n', ["env.get@1"]],
+  ['const t = `plain ${x} text`;\nDeno.exit(1);\n', ["exit@2"]],
+  // A regex literal is not code: a quote inside one used to open a "string" that hid the next line (the same pass);
+  // `\bDeno\.env\b` inside one is prose; a division is not a regex; a regex after `return` is one.
+  ['const re = /["\']?Deno\\.env/;\nDeno.exit(1);\n', ["exit@2"]],
+  ['const m = text.match(/\\bDeno\\.env\\b/g);\n', []],
+  ['const half = total / 2;\nDeno.exit(1);\n', ["exit@2"]],
+  ['function f(s) { return /Deno/.test(s); }\nDeno.exit(1);\n', ["exit@2"]],
 ];
+/** The files check 11 reads: every code extension check 22's CODE_FILE reads, less the markup ones (a `Deno` in a Svelte or HTML script is check 22's kind of rare, and the roots' markup is the dashboards'). */
+const BUN_CODE_FILE = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/;
 /** [entry, deps, the gaps it must report]: specifiers Bun does not resolve, in the entry and through a dependency. */
 const SPECIFIER_PROBES: [string, string[], string[]][] = [
   // Deno's registries and a URL, in an import and an export-from; a dynamic import; through a dependency.
@@ -1800,10 +1884,13 @@ function checkBunNative() {
     const got = specifierGapsIn(entry, deps);
     if (got.join() !== want.join()) fail(SELF, `bun-native rule reports ${JSON.stringify(got)} for a specifier probe that must report ${JSON.stringify(want)}: ${JSON.stringify(entry)}`);
   }
-  for (const rel of DENO_EXCEPTIONS.keys()) if (!existsSync(join(ROOT, rel))) fail(SELF, `DENO_EXCEPTIONS names ${rel}, which is not in the tree — remove the entry with the file`);
+  for (const name of ["x.ts", "x.tsx", "x.mts", "x.cts", "x.js", "x.jsx", "x.mjs", "x.cjs"]) if (!BUN_CODE_FILE.test(name)) fail(SELF, `check 11's BUN_CODE_FILE no longer reads ${name} (its own probe)`);
+  for (const name of ["x.md", "x.json", "x.sql", "x.svelte", "x.html"]) if (BUN_CODE_FILE.test(name)) fail(SELF, `check 11's BUN_CODE_FILE reads ${name}, which it should not (its own probe)`);
+  const gone = new Set([...DENO_EXCEPTIONS.keys()].filter((rel) => !existsSync(join(ROOT, rel))));
+  for (const rel of gone) fail(SELF, `DENO_EXCEPTIONS names ${rel}, which is not in the tree — remove the entry with the file`);
 
   const HOW = "reaches `Deno` — the vendored files are Bun-native (SMD-1799): `process.env` for the environment, `export default { port, fetch }` at the tail, Bun's own APIs for files and arguments; the Edge Function deployments SMD-1800 retires are the counted exceptions in DENO_EXCEPTIONS";
-  const code = textFilesUnder(SCANNED_ROOTS).filter((f) => /\.(ts|js|mjs)$/.test(f) && !f.includes(`${sep}node_modules${sep}`));
+  const code = textFilesUnder(SCANNED_ROOTS).filter((f) => BUN_CODE_FILE.test(f) && !f.includes(`${sep}node_modules${sep}`));
   const reached = new Map<string, number>();
   for (const file of code) {
     const text = readFileSync(file, "utf8");
@@ -1838,6 +1925,7 @@ function checkBunNative() {
     }
   }
   for (const [rel, { why, lines }] of DENO_EXCEPTIONS) {
+    if (gone.has(rel)) continue; // failed once above
     const n = reached.get(rel) ?? 0;
     if (n !== lines) fail(rel, n === 0
       ? `listed as a Deno exception (${why}) but reaches \`Deno\` on no line — remove it from DENO_EXCEPTIONS`

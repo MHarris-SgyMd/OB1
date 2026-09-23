@@ -11,7 +11,7 @@ Every extension produces exactly 5 files in `extensions/{extension-slug}/`:
 | `README.md` | Human-readable setup guide (follows template below) |
 | `metadata.json` | Machine-readable metadata (follows schema below) |
 | `schema.sql` | PostgreSQL tables, indexes, RLS policies |
-| `index.ts` | Supabase Edge Function — the MCP server |
+| `index.ts` | The MCP server — Bun-native, `bun index.ts` serves it (SMD-1799) |
 | `deno.json` | Deno import map for the Edge Function |
 
 ---
@@ -117,11 +117,9 @@ PostgreSQL DDL that runs in the Supabase SQL Editor. Must follow these rules:
 
 ## File 4: index.ts
 
-Supabase Edge Function that implements an MCP server. Must follow this exact structure:
+The MCP server, in this fork's Bun-native shape (SMD-1799; the Edge Function shape it replaced is FORK.md's history). Must follow this exact structure:
 
 ```typescript
-import "jsr:@supabase/functions-js/edge-runtime.d.ts";
-
 // Deno reads the SDK's types through the extensionless subpath: its exports map
 // names them `./dist/esm/*.d.ts`, unreachable from `.js` (FORK.md change 84).
 // @ts-types="@modelcontextprotocol/sdk/server/mcp"
@@ -129,7 +127,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPTransport } from "@hono/mcp";
 import { Hono } from "hono";
 import { z } from "zod";
-import { createClient } from "@supabase/supabase-js";
+import { createClient } from "../../compat/supabase-sql/index.ts"; // Bun's Postgres client in supabase-js's shape
 // The core server's access keys: named, scoped, SHA-256-hashed entries in
 // MCP_ACCESS_KEYS, compared timing-safe, each revocable on its own. _shared/
 // auth.ts is server-portable/auth.ts, copied so Supabase bundles it. Never
@@ -137,8 +135,8 @@ import { createClient } from "@supabase/supabase-js";
 import { authenticateRequest, canWrite, type Principal } from "../_shared/auth.ts";
 
 // --- Environment Variables ---
-const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
-const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+const SUPABASE_URL = process.env.SUPABASE_URL!; // a postgres:// connection string
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!; // ignored by the shim; the credentials are in the URL
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
@@ -164,8 +162,8 @@ const app = new Hono();
 
 app.all("*", async (c) => {
   const principal = authenticateRequest(c.req.raw, {
-    MCP_ACCESS_KEYS: Deno.env.get("MCP_ACCESS_KEYS"),
-    MCP_ACCESS_KEY: Deno.env.get("MCP_ACCESS_KEY"),
+    MCP_ACCESS_KEYS: process.env.MCP_ACCESS_KEYS,
+    MCP_ACCESS_KEY: process.env.MCP_ACCESS_KEY,
   });
   if (!principal) {
     return c.json({ error: "Invalid or missing access key" }, 401);
@@ -176,7 +174,11 @@ app.all("*", async (c) => {
   return transport.handleRequest(c);
 });
 
-Deno.serve(app.fetch);
+// Bun serves the entry module's default export on PORT (8000 unset); the suites import `fetch`.
+export default {
+  port: Number(process.env.PORT || 8000),
+  fetch: app.fetch,
+};
 ```
 
 ### Tool Registration Pattern
@@ -241,7 +243,7 @@ server.registerTool(
 If the extension uses embeddings or LLM extraction (like the core brain), add:
 
 ```typescript
-const OPENROUTER_API_KEY = Deno.env.get("OPENROUTER_API_KEY")!;
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY!;
 ```
 
 And include the embedding/extraction helper functions from `server/index.ts`.

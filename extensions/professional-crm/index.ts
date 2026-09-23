@@ -714,6 +714,6 @@ app.post("*", async (c) => {
 app.get("*", (c) => c.json({ status: "ok", service: "Professional CRM", version: "1.1.0" }));
 
 export default {
-  port: Number(process.env.PORT ?? 8000),
+  port: Number(process.env.PORT || 8000),
   fetch: app.fetch,
 };

@@ -30,7 +30,7 @@ bun scripts/migrate-to-sql-shim.ts --apply --all      # rewrite every eligible f
 bun scripts/migrate-to-sql-shim.ts --revert <file>    # undo, byte-for-byte
 ```
 
-The rewrite is one line — two, for a file that reads `Deno.env` or calls `Deno.serve` (step 3):
+The rewrite is one line; a file that still reaches `Deno.*` is refused at triage and ported by hand first (step 3):
 
 ```diff
 - import { createClient } from "@supabase/supabase-js";
@@ -53,11 +53,11 @@ environment, `Deno.serve` at the end — and the shim imports `bun`, so until
 SMD-1799 such a file also took `compat/deno-on-bun.ts`, a polyfill for those two
 members, as its first import (SMD-1480, FORK.md change 74). The servers are
 Bun-native now: `process.env` for the environment and, at the tail, the shape the
-core server has —
+core server has (`||`: an empty `PORT` is unset, not port 0) —
 
 ```ts
 export default {
-  port: Number(process.env.PORT ?? 8000),
+  port: Number(process.env.PORT || 8000),
   fetch: app.fetch,
 };
 ```
@@ -95,7 +95,7 @@ every server but `work-operating-model-activation`, which refuses to start
 without it — set it to any value there. An extension's `schema.sql` carries
 Supabase RLS policies on `auth.uid()`; its README's Step 1 gives the two stub
 functions a plain Postgres needs before the file runs. Check 11 of `scripts/check-fork-consistency.ts` holds
-every shim-importing file in this state — the polyfill first, no other `Deno.*`, no
+every file under the category directories to no `Deno` at all, and every shim-importing file to no
 `jsr:`/`npm:`/URL specifier, through the files it imports — and
 `extensions/test-auth.ts` starts each one under `bun` and answers it over its port
 in CI. One file is kept on supabase-js by the codemod's `KEEP` list, with the

@@ -717,6 +717,6 @@ const handler = (req: Request) => {
 };
 
 export default {
-  port: Number(process.env.PORT ?? 8000),
+  port: Number(process.env.PORT || 8000),
   fetch: handler,
 };
