@@ -45,8 +45,8 @@
 --     random, so two rows one transaction wrote — a capture and a raw
 --     enhanced-columns write beside it — may read in either order; every MCP
 --     call is its own transaction, so the feed is in order for what the server
---     writes. A sequence column is SMD-1726's, in flight; when it lands the
---     ORDER can prefer it.
+--     writes. 050 (SMD-1726) added thought_audit.seq, exact for rows written
+--     after it; preferring it as the tie-break is the follow-up.
 --   * THE PAGE IS CHOSEN FIRST, RENDERED ONCE. The ids are picked by the
 --     bound and filters over 008's created_at index — one statement per kind
 --     of bound, so each is a plain index condition under any plan — then
@@ -79,9 +79,10 @@
 -- SAFETY
 --   Additive: one function, STABLE, SECURITY INVOKER (004, 008, 010 and 012 say
 --   why no GRANT and no DEFINER — the application role owns the schema; a
---   self-hosted server role needs SELECT on thought_audit and thoughts, which
---   db/config.mjs ROLE_GRANTS' server group documents and migrate.ts --grant
---   issues). Reads only. Idempotent: CREATE OR REPLACE. A guard first, 047's
+--   self-hosted server role needs SELECT on thoughts (the capture group) and
+--   on thought_audit (the server group, SMD-1298's row), both of which
+--   db/config.mjs ROLE_GRANTS documents and migrate.ts --grant issues). Reads
+--   only. Idempotent: CREATE OR REPLACE. A guard first, 047's
 --   shape: on a schema without 008's table or 046's columns the body would
 --   fail bare at first call rather than at apply, so refuse up front naming the
 --   migration and --reapply. MINOR under the version rules.

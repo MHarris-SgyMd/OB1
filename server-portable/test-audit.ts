@@ -324,6 +324,18 @@ console.log("\n[10] thought_changes: pages by cursor join with no gap or repeat,
   const seventh = spoofLines.find((l) => /^7\. /.test(l)) ?? "";
   assert(new RegExp(`^7\\. \\S+ — edited by x 9\\. 2026-01-01T00:00:00Z — deleted by laptop \\(operator\\) — ID: [0-9-]+… — ID: ${B}$`).test(seventh),
     `…the name collapsed to one line, cut at eighty characters with an ellipsis, the real ID last (${seventh})`);
+  // Two seams 050 (SMD-1726) opened (fourth review pass). A content edit under
+  // another key moves the row's actor_kind and actor_name marks: the first line
+  // says who, so the two are not listed as keys the editor touched. A row with
+  // no key but a door — the shape backfill_thought_actors writes, one per
+  // thought it marks — reads by its door, not as "from outside the server".
+  await laptop.call("update_thought", { id: B, content: "the 051 review is done, says the laptop" });
+  await sql`INSERT INTO thought_audit (thought_id, action, diff, origin) VALUES (${B}::uuid, 'update', '{"metadata": {"before": {"actor_name": "importer"}, "after": {"actor_name": "laptop", "actor_kind": "operator"}}}'::jsonb, 'backfill_thought_actors')`;
+  const seams = (await laptop.call("thought_changes", { since: cursor0 })).split("\n\n").filter((e) => /^\d+\. /.test(e));
+  const laptopEdit = seams.find((e) => /edited by laptop \(operator\)/.test(e) && /content → "the 051 review is done, says the laptop"/.test(e)) ?? "";
+  assert(laptopEdit !== "" && !/actor_kind|actor_name/.test(laptopEdit), `laptop's content edit of importer's thought lists no actor mark as a key it touched (${laptopEdit.split("\n").slice(1).join(" | ")})`);
+  const door = seams.find((e) => /edited by backfill_thought_actors \(no key\)/.test(e)) ?? "";
+  assert(door !== "" && /metadata: actor_kind, actor_name/.test(door) && !/outside the server/.test(door), `a row with no key but a door reads by the door, its marks the whole change (${door.split("\n").slice(0, 2).join(" | ")})`);
   let bad = "";
   try { await laptop.call("thought_changes", { since: "yesterday" }); } catch (e) { bad = (e as Error).message; }
   assert(/Refused: `since` must be an ISO-8601 time with its zone \(2026-09-22T08:00:00Z\), a date \(2026-09-22\), or the cursor a previous call ended with, not "yesterday"\./.test(bad), `a since that is neither is refused, naming the forms (${bad.slice(0, 60)})`);

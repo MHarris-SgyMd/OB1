@@ -400,7 +400,12 @@ function renderChange(c: AuditChange, n: number): string {
   // The name through snipText, not cleanForDisplay alone: a writer that can
   // set its own actor could carry a newline and forge an entry or the Cursor
   // line in a feed agents act on (second review pass).
-  const who = c.actorName === null ? "from outside the server" : `by ${snipText(c.actorName, 80)}${c.actorKind ? ` (${c.actorKind})` : ""}`;
+  // No key but a door (046's origin): a worker that names itself and no key —
+  // 050's backfill_thought_actors writes one row per thought it marks — reads
+  // by its door, not as an anonymous edit (fourth review pass).
+  const who = c.actorName !== null ? `by ${snipText(c.actorName, 80)}${c.actorKind ? ` (${c.actorKind})` : ""}`
+    : c.origin !== null ? `by ${snipText(c.origin, 80)} (no key)`
+    : "from outside the server";
   const verb = c.action === "capture" ? "captured" : c.action === "update" ? "edited" : "deleted";
   const gone = c.action !== "delete" && !c.present ? " (deleted since)" : "";
   const lines = [`${n}. ${when} — ${verb} ${who} — ID: ${c.thoughtId}${gone}`];
@@ -414,7 +419,12 @@ function renderChange(c: AuditChange, n: number): string {
   if (c.action === "update") {
     const parts: string[] = [];
     if (c.changed.includes("content")) parts.push(text === null ? "content" : `content → "${text}"`);
-    if (c.changed.includes("metadata")) parts.push(c.metadataKeys.length ? `metadata: ${c.metadataKeys.map((k) => snipText(k, 40)).join(", ")}` : "metadata");
+    // 050 stamps actor_kind and actor_name into metadata whenever the content
+    // moves under another key: the first line already says who, so beside a
+    // content change the two marks are not listed as keys the editor touched.
+    // Alone — the backfill's row — they are the whole change and stay.
+    const keys = c.changed.includes("content") ? c.metadataKeys.filter((k) => k !== "actor_kind" && k !== "actor_name") : c.metadataKeys;
+    if (c.changed.includes("metadata") && (keys.length || !c.metadataKeys.length)) parts.push(keys.length ? `metadata: ${keys.map((k) => snipText(k, 40)).join(", ")}` : "metadata");
     if (c.changed.includes("embedding_present")) parts.push("embedding");
     if (parts.length) lines.push(`   ${parts.join("; ")}`);
     // 046: an unchanged edit that declared a stance, cites or a window is an
