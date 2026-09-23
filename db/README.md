@@ -165,7 +165,7 @@ back and corrects the own-key labels an earlier paste of the body left
 ## Expected outcome
 
 `bun test-schema.ts` prints `1428 assertions: 1428 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports forty-eight (48) migrations applied, and
+Against a real database, `bun migrate.ts` reports forty-nine (49) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -203,7 +203,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 029 change 54, 030 change 56, 031 change 57, 032 change 60, 033 change 63,
 034 change 65, 035 change 66, 036 change 68, 037 change 70, 038 change 80, 039 change 81,
 040 change 91, 041 change 94, 042 change 95, 043 change 98, 044 SMD-1804,
-045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1726).
+045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1726).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; `0.0.0+upstream.9543c29` until
@@ -229,7 +229,7 @@ row's own `metadata.source`. The event rides `p_payload.event` on both
 inserting `upsert_thought` forms and a tenth, defaulted `p_event` on
 `update_thought`; nothing over MCP sends one yet (SMD-1724, 1725, 1733).
 
-Migration 048 puts the writer on the row (SMD-1726): two reserved keys in
+Migration 049 puts the writer on the row (SMD-1726): two reserved keys in
 `thoughts.metadata`, `actor_kind` and `actor_name`, stamped by a BEFORE trigger
 (`thoughts_stamp_actor`) from the write's envelope through 046's registry lookup
 and never from the payload — a caller's own values under either key are
@@ -241,7 +241,7 @@ list tools are that filter, and every hit prints `By: <key> (<kind>)`.
 `SELECT backfill_thought_actors();` — called once by the file — sets both keys
 on every thought to what the audit row that wrote its current text derives
 (the update row whose after-text is the row's, else the capture when no update
-ever changed the text, the newest by `created_at` then `seq` — an identity 048
+ever changed the text, the newest by `created_at` then `seq` — an identity 049
 adds to `thought_audit` for two rows one transaction wrote; a text no row
 vouches for is nobody's; the registry's kind for the writer now, else the kind
 046 stamped), correcting a planted claim and stripping one the log does not
@@ -252,7 +252,7 @@ own transaction and `OB1_BACKFILL_LIMIT` bounds the rows written per call — no
 the scan, which derives every thought each time. Run it again after
 classifying or reclassifying a key; it returns `{rows, differing, awaiting}`.
 The identity column rewrites `thought_audit` once at apply (about a minute per
-million rows, captures waiting): apply 048 in a quiet window.
+million rows, captures waiting): apply 049 in a quiet window.
 
 ## What changed relative to the guide
 

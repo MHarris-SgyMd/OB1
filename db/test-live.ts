@@ -4124,7 +4124,7 @@ console.log("\n[19] db/ingest-records.ts: the records upsert is source-labelled 
   assert((await count("fork")) === 1, "…and no second row was written for it");
 
   // SMD-1726: the ingester names itself in each record's transaction, so
-  // 048's stamp marks every record with its name (the kind once the operator
+  // 049's stamp marks every record with its name (the kind once the operator
   // classifies it) and 046's audit rows carry its door; without it a re-ingest
   // stripped the mark an operator's edit had placed (run-it, first review
   // pass), and a session-level setting died with the connection (second).
@@ -4240,11 +4240,11 @@ console.log("\n[20] db/tier.ts: the canary reproduces stable's rankings on the s
   await sql`DELETE FROM query_log`;
 }
 
-console.log("\n[21] said_by on real pgvector: the mark 048 stamps is filtered through 014's route — 001's GIN index, scanned inside the call — and the answer is the operator's rows alone (SMD-1726)");
+console.log("\n[21] said_by on real pgvector: the mark 049 stamps is filtered through 014's route — 001's GIN index, scanned inside the call — and the answer is the operator's rows alone (SMD-1726)");
 {
   // The ticket's verification: EXPLAIN cannot see into plpgsql, so the route
   // is read the way [5] reads it — the GIN index's scan count before and after
-  // one call. Rows through two classified keys, stamped by 048's trigger as
+  // one call. Rows through two classified keys, stamped by 049's trigger as
   // they land (the envelope set once for the session, as a bulk writer would).
   await sql`SELECT set_agent_kind('op-live', 'operator')`;
   await sql`SELECT set_agent_kind('bot-live', 'agent')`;
@@ -4252,7 +4252,7 @@ console.log("\n[21] said_by on real pgvector: the mark 048 stamps is filtered th
   const load = async (key: string, n: number) => {
     const ids: string[] = [];
     for (let i = 0; i < n; i++) {
-      const r = (await sql`SELECT upsert_thought(${`live 048 ${key} row ${i}`}, ${{ metadata: { source: "live" }, actor: { name: key, via: "test-live" } }}::jsonb, ${`[${unitVector(EMBEDDING_DIM).join(",")}]`}::vector) AS r`)[0].r as { id: string };
+      const r = (await sql`SELECT upsert_thought(${`live 049 ${key} row ${i}`}, ${{ metadata: { source: "live" }, actor: { name: key, via: "test-live" } }}::jsonb, ${`[${unitVector(EMBEDDING_DIM).join(",")}]`}::vector) AS r`)[0].r as { id: string };
       ids.push(r.id);
     }
     return ids;
@@ -4272,7 +4272,7 @@ console.log("\n[21] said_by on real pgvector: the mark 048 stamps is filtered th
   assert(scans >= 1, `the said_by filter is answered through 001's GIN index inside match_thoughts — 014's route, ${scans} scan(s) in the call`);
   const opSet = new Set(opIds);
   assert(hits.length === 60 && hits.every((h) => opSet.has(h.id)), `…and the answer is exactly the operator's rows: ${hits.length} of 60, none of the agent's`);
-  const kw = (await sql.unsafe(`SELECT id FROM search_thoughts_keyword('live 048', 200, 0, '{"actor_name": "bot-live"}'::jsonb)`)) as { id: string }[];
+  const kw = (await sql.unsafe(`SELECT id FROM search_thoughts_keyword('live 049', 200, 0, '{"actor_name": "bot-live"}'::jsonb)`)) as { id: string }[];
   const botSet = new Set(botIds);
   assert(kw.length === 60 && kw.every((h) => botSet.has(h.id)), `the keyword arm under actor: bot-live returns exactly that key's rows (${kw.length})`);
   for (const id of [...opIds, ...botIds]) await sql`DELETE FROM thoughts WHERE id = ${id}::uuid`;

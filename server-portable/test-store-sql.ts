@@ -268,7 +268,7 @@ console.log("\n[4] listThoughts reproduces the PostgREST filters");
   const combined = await store.listThoughts({ limit: 10, type: "note", topic: "beta", person: "Ada", days: 1 });
   assert(combined.length === 1, "filters combine with AND");
 
-  // SMD-1726: the two keys migration 048 stamps from the write's envelope, as
+  // SMD-1726: the two keys migration 049 stamps from the write's envelope, as
   // containment beside the others. The store's own capture carries the actor;
   // the registry classifies the key. Two rows in, two rows out, so [5]'s
   // counts hold.

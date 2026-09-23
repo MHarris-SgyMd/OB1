@@ -516,7 +516,7 @@ console.log("\n[16] parseFilter bounds and normalises a metadata filter at the t
 
 console.log("\n[16b] said_by and actor fold into the filter, and the By: line renders the row's mark and nothing else (SMD-1726)");
 {
-  // The two arguments are sugar over the two metadata keys migration 048
+  // The two arguments are sugar over the two metadata keys migration 049
   // stamps, so the store, the log and the plan see one filter; the By: line
   // reads the same keys back. Both pure, both exported for this.
   const { withActorFilter, actorLine } = await import("./index.ts") as {

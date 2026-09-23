@@ -310,7 +310,7 @@ console.log(`  embedding: ${EMBEDDING_MODEL} @ ${EMBEDDING_DIM} dimensions`);
 // runs — the first apply, and every --reapply — see the note in that
 // migration's header.
 console.log(`  trigram index: ${TRGM_INDEX ? "on" : "off"} (OB1_TRGM_INDEX)`);
-console.log(`  023/048 backfills: ${SUBSTITUTIONS.BACKFILL_LIMIT === "NULL" ? "every row waiting" : `one batch of ${SUBSTITUTIONS.BACKFILL_LIMIT} rows`} (OB1_BACKFILL_LIMIT)`);
+console.log(`  023/049 backfills: ${SUBSTITUTIONS.BACKFILL_LIMIT === "NULL" ? "every row waiting" : `one batch of ${SUBSTITUTIONS.BACKFILL_LIMIT} rows`} (OB1_BACKFILL_LIMIT)`);
 
 const sql = new SQL({ url, max: 1 });
 // One lock_timeout for the session — the checks' reads before a re-run, the

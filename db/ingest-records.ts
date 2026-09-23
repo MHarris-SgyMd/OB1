@@ -243,7 +243,7 @@ function isFingerprintCollision(e: unknown): boolean {
  * re-runnable regardless.
  */
 /**
- * The ingester's envelope: 048's stamp reads it, so every record carries
+ * The ingester's envelope: 049's stamp reads it, so every record carries
  * actor_name `ingest-records` (and the kind once the operator has said
  * `SELECT set_agent_kind('ingest-records', 'ingested')` — the ingester does
  * not classify itself; 046's rule is that the operator does), and 046's audit

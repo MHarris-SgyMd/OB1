@@ -1,5 +1,5 @@
 -- =============================================================================
--- Migration 048: the actor on the row — who wrote a thought's current text,
+-- Migration 049: the actor on the row — who wrote a thought's current text,
 --                from the key, where a read can filter on it (SMD-1726)
 -- =============================================================================
 --
@@ -49,7 +49,7 @@
 --
 --   3. THE BACKFILL, backfill_thought_actors(p_limit): for every thought, the
 --      audit row that WROTE THE TEXT THAT STANDS gives the writer, and the two
---      keys are set to exactly that wherever the row differs — so a pre-048
+--      keys are set to exactly that wherever the row differs — so a pre-049
 --      row carrying a caller's `actor_kind` is corrected (the log knows the
 --      writer) or stripped (it does not), a stamped row is left alone, and a
 --      re-apply writes nothing.
@@ -68,7 +68,7 @@
 --      one value for the whole transaction, and id is a random uuid, so a
 --      capture and an edit in one transaction ordered by those two was a coin
 --      flip that rewrote the trigger's correct stamp (first review pass,
---      reproduced 6 of 12). seq is exact for rows written after 048; rows from
+--      reproduced 6 of 12). seq is exact for rows written after 049; rows from
 --      before take theirs at the ALTER in heap order, which is NOT insertion
 --      order once 046's backfill has amended rows and VACUUM has let later
 --      inserts fill the freed pages (second review pass, reproduced: ordered
@@ -139,7 +139,7 @@
 ALTER TABLE thought_audit ADD COLUMN IF NOT EXISTS seq bigint GENERATED ALWAYS AS IDENTITY;
 
 COMMENT ON COLUMN thought_audit.seq IS
-  'The order rows were written in — an identity, assigned at INSERT, exact for rows written after 048. created_at is now(), one value for every row a transaction writes, and id is a random uuid, so neither orders two writes to one thought inside a transaction; seq does. Rows from before 048 took theirs at the ALTER in heap order, which is not insertion order where 046''s backfill amended rows and VACUUM let later inserts fill the freed space — so read created_at first and seq as the tiebreak, as backfill_thought_actors does. Migration 048 / SMD-1726.';
+  'The order rows were written in — an identity, assigned at INSERT, exact for rows written after 049. created_at is now(), one value for every row a transaction writes, and id is a random uuid, so neither orders two writes to one thought inside a transaction; seq does. Rows from before 049 took theirs at the ALTER in heap order, which is not insertion order where 046''s backfill amended rows and VACUUM let later inserts fill the freed space — so read created_at first and seq as the tiebreak, as backfill_thought_actors does. Migration 049 / SMD-1726.';
 
 -- ---------------------------------------------------------------------------
 -- The stamp: who wrote this text, from the key.
@@ -272,7 +272,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION ob1_stamp_actor() IS
-  'BEFORE INSERT OR UPDATE on thoughts (thoughts_stamp_actor, 048): writes metadata.actor_kind (ob1_agents.kind for the envelope''s agent_id, else its name — ob1_registry_kind, 046) and metadata.actor_name (the envelope''s name) from the ob1.actor setting 008''s writers set, never from the payload — a payload''s own values under either key are overwritten or removed. The actor follows the content: an INSERT and an UPDATE that changes the text (by 003''s normalised fingerprint, so 018''s unchanged edit is unchanged here too) stamp from the envelope present (no envelope, no mark); an UPDATE that leaves the text keeps the mark as it was. A non-object metadata (a raw writer''s) passes untouched. Under ob1.actor_amend = ''backfill'' the keys are taken as given (backfill_thought_actors). Migration 048 / SMD-1726.';
+  'BEFORE INSERT OR UPDATE on thoughts (thoughts_stamp_actor, 049): writes metadata.actor_kind (ob1_agents.kind for the envelope''s agent_id, else its name — ob1_registry_kind, 046) and metadata.actor_name (the envelope''s name) from the ob1.actor setting 008''s writers set, never from the payload — a payload''s own values under either key are overwritten or removed. The actor follows the content: an INSERT and an UPDATE that changes the text (by 003''s normalised fingerprint, so 018''s unchanged edit is unchanged here too) stamp from the envelope present (no envelope, no mark); an UPDATE that leaves the text keeps the mark as it was. A non-object metadata (a raw writer''s) passes untouched. Under ob1.actor_amend = ''backfill'' the keys are taken as given (backfill_thought_actors). Migration 049 / SMD-1726.';
 
 DROP TRIGGER IF EXISTS thoughts_stamp_actor ON thoughts;
 CREATE TRIGGER thoughts_stamp_actor
@@ -281,7 +281,7 @@ CREATE TRIGGER thoughts_stamp_actor
   EXECUTE FUNCTION ob1_stamp_actor();
 
 COMMENT ON COLUMN thoughts.metadata IS
-  'The thought''s metadata: the caller''s keys and the extractor''s (source, type, topics, people, action_items). Two keys are the DATABASE''s since 048 and a write cannot set them: actor_kind (operator | agent | ingested — who holds the key that wrote the current content, from ob1_agents.kind, 046) and actor_name (that key''s name); absent when the key is unclassified or the write came from outside the server. Reads filter on them through 014''s metadata route (`said_by`, `actor` on the search and list tools) and print them as `By: name (kind)`. Migration 048 / SMD-1726.';
+  'The thought''s metadata: the caller''s keys and the extractor''s (source, type, topics, people, action_items). Two keys are the DATABASE''s since 049 and a write cannot set them: actor_kind (operator | agent | ingested — who holds the key that wrote the current content, from ob1_agents.kind, 046) and actor_name (that key''s name); absent when the key is unclassified or the write came from outside the server. Reads filter on them through 014''s metadata route (`said_by`, `actor` on the search and list tools) and print them as `By: name (kind)`. Migration 049 / SMD-1726.';
 
 -- ---------------------------------------------------------------------------
 -- The backfill: the log says who wrote the content; the row is made to agree.
@@ -378,7 +378,7 @@ BEGIN
         SELECT a.actor_kind, NULLIF(btrim(a.actor_name), '') AS name, a.canonical_agent_id,
                -- Decided from the SET, not from which row sorts first: a
                -- capture stands only when no update ever changed the text
-               -- (fourth review pass, planted: a pre-048 seq inverted under a
+               -- (fourth review pass, planted: a pre-049 seq inverted under a
                -- created_at tie put the capture on top of an unmatched update,
                -- and it was vouched by its place in the order).
                ((a.action = 'update' AND a.fa IS NOT DISTINCT FROM f.fp)
@@ -406,7 +406,7 @@ BEGIN
         WHERE a.action = 'capture' OR a.fb IS DISTINCT FROM a.fa
         -- The row whose text stands first; then the newest transaction; then
         -- the order inside it. Not seq alone (second review pass — see the
-        -- header): a pre-048 seq is heap order, and heap order lies after
+        -- header): a pre-049 seq is heap order, and heap order lies after
         -- 046's amendments and a VACUUM.
         ORDER BY (a.action = 'update' AND a.fa IS NOT DISTINCT FROM f.fp) DESC,
                  a.created_at DESC, a.seq DESC
@@ -467,7 +467,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION backfill_thought_actors(integer) IS
-  'Sets metadata.actor_kind and metadata.actor_name on every thought to what thought_audit derives for the writer of its current content — the update row whose after-text is the row''s text, else the capture when no update ever changed the text (update rows present and none matching: nobody), the newest by created_at then seq among matches: ob1_registry_kind for its id or name NOW (so a reclassified key reaches its rows) else the actor_kind 046 stamped, and its actor_name — wherever the row and the log disagree, stripping a mark no audit row vouches for. Returns {ok, rows (written this call), differing (found disagreeing), awaiting (writer named but unclassified — set_agent_kind, then this)}. p_limit (at least 1) bounds the rows written and the write lock per call, not the scan (every call derives every thought) nor the audit rows (one per row written); each call its own transaction. Holds the updated_at trigger for the write (a stamp is not an edit), which needs the table''s owner; each row written leaves an audit row whose origin is backfill_thought_actors. Idempotent: a second pass finds nothing. Migration 048 / SMD-1726.';
+  'Sets metadata.actor_kind and metadata.actor_name on every thought to what thought_audit derives for the writer of its current content — the update row whose after-text is the row''s text, else the capture when no update ever changed the text (update rows present and none matching: nobody), the newest by created_at then seq among matches: ob1_registry_kind for its id or name NOW (so a reclassified key reaches its rows) else the actor_kind 046 stamped, and its actor_name — wherever the row and the log disagree, stripping a mark no audit row vouches for. Returns {ok, rows (written this call), differing (found disagreeing), awaiting (writer named but unclassified — set_agent_kind, then this)}. p_limit (at least 1) bounds the rows written and the write lock per call, not the scan (every call derives every thought) nor the audit rows (one per row written); each call its own transaction. Holds the updated_at trigger for the write (a stamp is not an edit), which needs the table''s owner; each row written leaves an audit row whose origin is backfill_thought_actors. Idempotent: a second pass finds nothing. Migration 049 / SMD-1726.';
 
 -- Every thought already written takes its writer's mark now — or the batch
 -- OB1_BACKFILL_LIMIT names, the rest by hand.
