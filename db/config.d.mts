@@ -215,6 +215,12 @@ export function versionAtLeast(version: string, major: number, minor?: number, p
 /** Every string value of `record` trimmed, everything else as it was — the one boundary rule for a server environment. */
 export function trimmedEnv<T extends Record<string, unknown>>(record: T): T;
 
+/** The pipeline tiers (SMD-1806) — the one source migration 045's CHECK and ingest-records.ts's TIERS mirror. */
+export const PIPELINE_TIERS: readonly ["stable", "canary", "working"];
+
+/** A problem string for an OB1_TIER that is neither unset nor exactly a PIPELINE_TIERS value, else null (SMD-1953). */
+export function tierProblem(raw: string | undefined): string | null;
+
 /** The compose service names a model endpoint may live at (`ollama`); preflight and check 14 read it. */
 export const LOCAL_PROVIDER_SERVICES: readonly string[];
 

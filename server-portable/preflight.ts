@@ -28,7 +28,7 @@ import { parseKeyRecords } from "./auth.ts";
 import { DEFAULT_MAX_TOKENS } from "./chunk.ts";
 import { resolveEmbedConfig, resolveProviderEndpoints, stringOr, type ProviderEndpoint } from "./embed.ts";
 import { EGRESS_UNITS, hostOf, localKnob, type EgressTerm } from "./egress.ts";
-import { trimmedEnv } from "../db/config.mjs"; // static: `env` below is built before the dynamic import above resolves
+import { tierProblem, trimmedEnv } from "../db/config.mjs"; // static: `env` below is built before the dynamic import above resolves
 import type { PassCounts } from "../db/config.mjs";
 
 type Status = "ok" | "fail" | "warn" | "skip";
@@ -2651,7 +2651,14 @@ if (configFailed) {
           const cfg = Object.fromEntries((rows as { key: string; value: string }[]).map((r) => [r.key, r.value]));
           const stamped = cfg.tier;
           const wantTier = (env as unknown as Record<string, string | undefined>).OB1_TIER?.trim() || undefined;
-          if (!stamped) {
+          const tierIssue = tierProblem(wantTier);
+          if (tierIssue) {
+            // A wrong OB1_TIER silently drops every query_log row (it fails 045's
+            // CHECK and the best-effort write swallows it) — fatal, so the
+            // container entrypoint (bun preflight.ts && …) refuses to serve
+            // (SMD-1953). The server itself also refuses it in initEnv.
+            add("tier", "fail", tierIssue, "Set OB1_TIER to stable, canary or working, or leave it unset (a plain brain).");
+          } else if (!stamped) {
             add("tier", "skip", `no tier recorded — db/ingest-records.ts has not run against this brain${wantTier ? ` (server OB1_TIER=${wantTier})` : ""}. A plain brain, not a pipeline tier.`);
           } else {
             const ingest = cfg.last_ingest ? `, last ingest ${cfg.last_ingest}` : ", never ingested";

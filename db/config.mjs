@@ -53,6 +53,32 @@ export function trimmedEnv(record) {
   return out;
 }
 
+/**
+ * The pipeline tiers (SMD-1806): the three brains one corpus is read through.
+ * Migration 045's `query_log.tier` CHECK and db/ingest-records.ts's `TIERS`
+ * mirror this — it is the one source the server (initEnv) and preflight validate
+ * OB1_TIER against, so a wrong value is caught at one place, not four.
+ */
+export const PIPELINE_TIERS = Object.freeze(["stable", "canary", "working"]);
+
+/**
+ * Validate an OB1_TIER value, returning a problem string or null when it is fine:
+ * unset/empty (a plain brain) or exactly one of PIPELINE_TIERS. Fail-fast and
+ * exact — "Stable" or "prod" is a problem, NOT silently lowercased. The reason it
+ * cannot be lenient: a tier that fails migration 045's CHECK makes the best-effort
+ * query_log write throw, the write swallows it, and every query_log row is
+ * silently dropped — emptying SMD-1806's canary replay (SMD-1953). The env is
+ * already trimmed (trimmedEnv), so this does not re-trim: a value with surrounding
+ * space reaching here is itself the problem.
+ * @param {string | undefined} raw
+ * @returns {string | null}
+ */
+export function tierProblem(raw) {
+  if (raw === undefined || raw === "") return null;
+  if (PIPELINE_TIERS.includes(raw)) return null;
+  return `OB1_TIER is ${JSON.stringify(raw)}, which is not a pipeline tier — set it to one of ${PIPELINE_TIERS.join(", ")}, or leave it unset for a plain brain. An unrecognised tier fails migration 045's query_log.tier CHECK, and because the log write is best-effort every query_log row is then silently dropped (SMD-1953).`;
+}
+
 const ENV = new Proxy(/** @type {Record<string, string|undefined>} */ ({}), {
   get: (_t, k) => {
     const v = RAW_ENV[/** @type {string} */ (k)];

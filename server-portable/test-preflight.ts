@@ -1654,6 +1654,18 @@ else {
     assert(mismJson.ok === true && mismJson.checks.some((c) => c.name === "tier" && c.status === "warn"),
            "…carried as a warning in --json under ok:true — a tier mismatch never refuses the deploy");
 
+    // An INVALID OB1_TIER (a value not in the pipeline set, incl. a case variant)
+    // is a different verdict: fatal. It fails migration 045's CHECK, and the
+    // best-effort log write would silently drop every query_log row — so
+    // preflight fails, and the container entrypoint (bun preflight.ts && …)
+    // refuses to serve (SMD-1953).
+    const bad = await run({ ...SQL_ENV, OB1_TIER: "prod" });
+    assert(bad.code !== 0, `an invalid OB1_TIER refuses at preflight, so the container entrypoint would not serve (exit ${bad.code})`);
+    assert(/OB1_TIER is "prod"/.test(bad.out), `…and the tier row names the bad value (${tierRow(bad.out)})`);
+    const badJson = JSON.parse((await run({ ...SQL_ENV, OB1_TIER: "prod" }, "--json")).out) as { ok: boolean; checks: { name: string; status: string }[] };
+    assert(badJson.ok === false && badJson.checks.some((c) => c.name === "tier" && c.status === "fail"),
+           "…as fail in --json under ok:false — a wrong tier refuses the deploy, unlike a mismatch which only warns (SMD-1953)");
+
     await claims.unsafe("DELETE FROM ob1_config WHERE key IN ('tier', 'last_ingest')");
   }
 
