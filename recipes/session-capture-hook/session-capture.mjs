@@ -464,8 +464,12 @@ export function renderSummary(s) {
   // lines: clip() cuts from the tail, and a long checkpoint summary that lost
   // the line saying the session still runs would read as final (first review
   // pass). The whole stays within LIMITS.textChars.
+  // The body's room is never below one: clip() with a negative bound slices
+  // from the end (second review pass; a session id longer than the cap is
+  // unreachable through the hook — its payload name would fail — but the
+  // arithmetic is honest, and the closing is then the whole).
   const closing = tail.join("\n\n");
-  return `${clip(parts.join("\n\n"), LIMITS.textChars - closing.length - 2)}\n\n${closing}`;
+  return `${clip(parts.join("\n\n"), Math.max(1, LIMITS.textChars - closing.length - 2))}\n\n${closing}`;
 }
 
 /**
@@ -731,18 +735,34 @@ export async function postCapture(cfg, payload) {
 // ── The two halves of a hook run ─────────────────────────────────────────────
 
 /**
- * What the event says about the session (SMD-2012): `compacted` for PreCompact,
- * with its trigger when it is one of the two Claude Code sends; `running` for
- * Stop, a turn's end; nothing for SessionEnd — or for an event this hook does
- * not know, which is an end, not a guess. renderSummary turns it into the
- * summary's Checkpoint line. Codex has no compaction event, so its sessions
- * only ever end.
+ * The events this hook runs on, in one table (SMD-2012; second review pass:
+ * the same three names were spelled in four structures that had to agree).
+ * `checkpoint` is what a summary captured at the event says of the session —
+ * `compacted` before a compaction, `running` at a turn's end, nothing at an
+ * end; `timeout` whether the printed hook pins 10 s (3 on Codex): SessionEnd's
+ * budget is shared, and a compaction waits on PreCompact; `interval` whether
+ * the printed command carries --min-interval, Stop's floor. Claude Code's
+ * PreCompact fires before a compaction, manual or automatic — the checkpoint a
+ * long session already has. The defaults: Claude Code the pair, Codex
+ * SessionEnd alone (it has no compaction hook). An event outside the table is
+ * not the hook's: prepare() skips it, since SubagentStop or UserPromptSubmit
+ * would post a final-looking summary of a session still running.
  */
+export const EVENTS = {
+  SessionEnd: { checkpoint: undefined, timeout: true, interval: false },
+  PreCompact: { checkpoint: "compacted", timeout: true, interval: false },
+  Stop: { checkpoint: "running", timeout: false, interval: true },
+};
+export const HOOK_EVENTS = Object.keys(EVENTS);
+export const DEFAULT_EVENTS = { "claude-code": ["SessionEnd", "PreCompact"], codex: ["SessionEnd"] };
+/** The two triggers Claude Code sends with PreCompact; anything else is recorded nowhere. */
+export const TRIGGERS = ["auto", "manual"];
+
+/** What the event says about the session, for renderSummary's Checkpoint line: `compacted` with its trigger, `running`, or nothing for an end. */
 export function checkpointOf(hook) {
-  const event = String(hook.hook_event_name ?? "");
-  if (event === "PreCompact") return { kind: "compacted", trigger: hook.trigger === "auto" || hook.trigger === "manual" ? hook.trigger : undefined };
-  if (event === "Stop") return { kind: "running" };
-  return undefined;
+  const kind = EVENTS[String(hook.hook_event_name ?? "")]?.checkpoint;
+  if (!kind) return undefined;
+  return kind === "compacted" ? { kind, trigger: TRIGGERS.includes(hook.trigger) ? hook.trigger : undefined } : { kind };
 }
 
 /**
@@ -752,6 +772,11 @@ export function checkpointOf(hook) {
 let payloadSeq = 0;
 export function prepare(hook, opts = {}) {
   const event = String(hook.hook_event_name ?? "");
+  // An event this hook is not for — a command pasted under SubagentStop or
+  // UserPromptSubmit fires mid-session and would post a final-looking summary
+  // that supersedes the checkpoint (second review pass). No event at all is a
+  // run by hand, an end.
+  if (event && !EVENTS[event]) return { code: 0, message: `skip: ${event} is not an event this hook captures on (${HOOK_EVENTS.join(", ")}); nothing captured` };
   if (!hook.transcript_path || !existsSync(hook.transcript_path)) return { code: 0, message: `skip: no transcript for session ${hook.session_id || "?"}` };
   const s = summariseTranscript(hook.transcript_path, opts.harness);
   // ONE id for both halves: the hook's session_id (what a later run of the same
@@ -974,28 +999,23 @@ export function shellWord(p) {
   return /^[A-Za-z0-9_./+:@%,=-]+$/.test(p) ? p : `'${String(p).replace(/'/g, `'\\''`)}'`;
 }
 
-/**
- * The events a hook is printed for. Claude Code's PreCompact fires before a
- * compaction, manual or automatic — the checkpoint a long session already has:
- * the context is about to be squashed and the transcript up to there is a
- * coherent episode (SMD-2012). Its default is the pair; Codex has no compaction
- * hook, so its default is SessionEnd alone and PreCompact is refused for it.
- * Stop is the coarser checkpoint for either, with --min-interval as its floor.
- */
-export const HOOK_EVENTS = ["SessionEnd", "PreCompact", "Stop"];
-export const DEFAULT_EVENTS = { "claude-code": ["SessionEnd", "PreCompact"], codex: ["SessionEnd"] };
-
+/** The settings JSON for a harness: its default events (EVENTS, DEFAULT_EVENTS) or the one named. */
 export function hookJson(harness, { event, minInterval = 20, runtime } = {}) {
   // The runtime that printed the hook, by its absolute path: a harness launched
   // from a GUI may carry a PATH without ~/.bun/bin, and a bare `bun` would fail
   // with "command not found" at every session end (twelfth review pass).
   const bin = runtime || process.execPath;
+  // main() checks both names first; a caller of the export hears why, not a
+  // TypeError off undefined or a hook under an event that never fires (first
+  // and second review passes).
+  if (event !== undefined && !EVENTS[event]) throw new Error(`hookJson: "${event}" is not an event this hook runs on — one of ${HOOK_EVENTS.join(", ")}`);
   const events = event ? [event] : DEFAULT_EVENTS[harness];
-  if (!events) throw new Error(`hookJson: no default events for harness "${harness}" — one of ${Object.keys(DEFAULT_EVENTS).join(", ")}`); // main() checks the name first; a caller of the export hears why (first review pass: a TypeError off undefined)
+  if (!events) throw new Error(`hookJson: no default events for harness "${harness}" — one of ${Object.keys(DEFAULT_EVENTS).join(", ")}`);
   const handlerFor = (ev) => {
+    const spec = EVENTS[ev];
     // The harness runs the command through a shell: a checkout under a path with a
     // space would otherwise split (first review pass).
-    const cmd = [shellWord(bin), shellWord(SELF), ...(ev === "Stop" ? ["--min-interval", String(minInterval)] : [])].join(" ");
+    const cmd = [shellWord(bin), shellWord(SELF), ...(spec.interval ? ["--min-interval", String(minInterval)] : [])].join(" ");
     // Claude Code raises SessionEnd's shared 1.5 s budget to a hook's own timeout (≤ 60);
     // Codex allows at most 3 s there. The foreground finishes in well under one second either way.
     // PreCompact shares no budget — a command hook's 600 s default stands — but a
@@ -1003,7 +1023,7 @@ export function hookJson(harness, { event, minInterval = 20, runtime } = {}) {
     // must not hold a compaction for ten minutes (SMD-2012).
     // A Stop hook keeps the harness's default, 600 s in both (third review pass:
     // a pinned 30 undercut the README's advice for an enormous transcript).
-    return ev === "Stop" ? { type: "command", command: cmd } : { type: "command", command: cmd, timeout: harness === "codex" ? 3 : 10 };
+    return spec.timeout ? { type: "command", command: cmd, timeout: harness === "codex" ? 3 : 10 } : { type: "command", command: cmd };
   };
   return { hooks: Object.fromEntries(events.map((ev) => [ev, [{ hooks: [handlerFor(ev)] }]])) };
 }
@@ -1012,6 +1032,31 @@ export function hookJson(harness, { event, minInterval = 20, runtime } = {}) {
 
 /** The value after a flag, "" when the flag is last or the next token is itself a flag (thirteenth review pass: `--print-hook --event Stop` read `--event` as the harness). */
 function flag(args, name) { const i = args.indexOf(name); if (i < 0) return undefined; const v = args[i + 1] ?? ""; return v.startsWith("--") ? "" : v; }
+
+/**
+ * `--event` as the CLI reads it, for --print-hook and --dry-run alike (second
+ * review pass: spelled twice, and the copies disagreed on the empty value and
+ * the case hint). { event } — undefined when absent — or { error } to print
+ * and exit 2 with. A misspelt event would install a hook that never fires;
+ * an empty one (`--event --min-interval 20`, the Stop forgotten) would print
+ * the default pair as silently (first review pass).
+ */
+function eventFlag(args) {
+  const event = flag(args, "--event");
+  if (event === undefined) return { event };
+  if (event === "") return { error: `--event takes one of ${HOOK_EVENTS.join(", ")}; none was given` };
+  if (!EVENTS[event]) return { error: `--event takes ${HOOK_EVENTS.join(", ")}, not "${event}"${HOOK_EVENTS.some((e) => e.toLowerCase() === event.toLowerCase()) ? " — the case matters" : ""}` };
+  return { event };
+}
+
+/** `--trigger`, --dry-run's: with --event PreCompact, one of the two a harness sends — a typo would preview the wrong line in silence (second review pass). */
+function triggerFlag(args, event) {
+  const trigger = flag(args, "--trigger");
+  if (trigger === undefined) return { trigger };
+  if (event !== "PreCompact") return { error: `--trigger goes with --event PreCompact${event ? `, not ${event}` : ", which was not given"}` };
+  if (!TRIGGERS.includes(trigger)) return { error: `--trigger takes ${TRIGGERS.join(" or ")}${trigger ? `, not "${trigger}"` : "; none was given"}` };
+  return { trigger };
+}
 
 async function readStdin() {
   const chunks = [];
@@ -1027,12 +1072,10 @@ export async function main(argv) {
   if (args.includes("--print-hook")) {
     const h = flag(args, "--print-hook") || "claude-code";
     if (h !== "claude-code" && h !== "codex") { console.error(`--print-hook takes claude-code or codex, not "${h}"`); return 2; }
-    const event = flag(args, "--event"); // absent: the harness's default events
-    // A misspelt event would install a hook that never fires, and nothing would
-    // say so (SMD-2012); `--event` with no value (`--event --min-interval 20`,
-    // the Stop forgotten) would print the default pair as silently (first review pass).
-    if (event === "") { console.error(`--event takes one of ${HOOK_EVENTS.join(", ")}; none was given`); return 2; }
-    if (event !== undefined && !HOOK_EVENTS.includes(event)) { console.error(`--event takes ${HOOK_EVENTS.join(", ")}, not "${event}"${HOOK_EVENTS.some((e) => e.toLowerCase() === event.toLowerCase()) ? " — the case matters" : ""}`); return 2; }
+    const { event, error } = eventFlag(args); // absent: the harness's default events
+    if (error) { console.error(error); return 2; }
+    // A flag of the other by-hand form would validate nowhere and vanish (second review pass).
+    if (flag(args, "--trigger") !== undefined) { console.error("--trigger is --dry-run's, to preview a checkpoint; a hook reads the trigger the harness sends"); return 2; }
     if (h === "codex" && event === "PreCompact") { console.error("Codex has no compaction hook: --print-hook codex prints SessionEnd; for a checkpoint on Codex print --event Stop --min-interval <minutes>"); return 2; }
     const mi = flag(args, "--min-interval");
     // A Stop hook printed with `--min-interval 20m` would run with NaN and capture every turn (eighth review pass).
@@ -1067,9 +1110,12 @@ export async function main(argv) {
     // checkpoint line the hook would write for that event (first review pass:
     // --print-hook refused an unknown event while --dry-run took one in silence,
     // and nothing by hand could show the line).
-    const ev = flag(args, "--event");
-    if (ev !== undefined && !HOOK_EVENTS.includes(ev)) { console.error(`--event takes ${HOOK_EVENTS.join(", ")}, not "${ev}"`); return 2; }
-    if (ev) s.checkpoint = checkpointOf({ hook_event_name: ev, trigger: flag(args, "--trigger") });
+    const { event: ev, error } = eventFlag(args);
+    if (error) { console.error(error); return 2; }
+    const { trigger, error: triggerError } = triggerFlag(args, ev);
+    if (triggerError) { console.error(triggerError); return 2; }
+    if (flag(args, "--min-interval") !== undefined) { console.error("--min-interval is --print-hook's, for a Stop hook; a dry run has no interval"); return 2; }
+    if (ev) s.checkpoint = checkpointOf({ hook_event_name: ev, trigger });
     const text = renderSummary(s);
     const findings = scanSummary(s, text);
     const ids = provenanceOf(s);

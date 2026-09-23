@@ -9,7 +9,7 @@ description: |
   when a PR is merged or a task is closed, or when the conversation is about
   to end and a decision or a shipped change has not been written down.
 author: Michael Harris
-version: 1.0.0
+version: 1.1.0
 ---
 
 # Session Summary

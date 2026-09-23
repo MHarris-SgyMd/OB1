@@ -33,7 +33,7 @@ delete process.env.OB1_CAPTURE_KEY;
 
 const {
   stripInjected, sniffHarness, parseClaudeCode, parseCodex, summariseTranscript, renderSummary, provenanceOf,
-  scanForSecrets, scanSummary, SECRET_PATTERNS, parseRpcBody, postCapture, prepare, postPending, hookJson, shellWord, readState, LIMITS, REFUSAL_RE, checkpointOf,
+  scanForSecrets, scanSummary, SECRET_PATTERNS, parseRpcBody, postCapture, prepare, postPending, hookJson, shellWord, readState, LIMITS, REFUSAL_RE, checkpointOf, EVENTS, HOOK_EVENTS,
 } = await import(SCRIPT);
 
 let passed = 0, failed = 0;
@@ -271,6 +271,9 @@ console.log("\n[3] The summary is deterministic, capped, and says what it carrie
     `a summary over the cap keeps its Checkpoint and Session lines whole and ends on the Session line, the body clipped instead (${bigCp.length} chars, tail: ${JSON.stringify(bigCp.slice(-60))})`);
   assert(bigEnd.length === LIMITS.textChars && new RegExp(`…\\n\\nSession ${SID}, 2026-09-22 13:00 → 2026-09-22 13:20\\.$`).test(bigEnd), `…and so does one with no checkpoint (${bigEnd.length} chars, tail: ${JSON.stringify(bigEnd.slice(-40))})`);
   assert(bigCp !== bigEnd, "…so a checkpoint's summary and the end's differ even at the cap, and the end supersedes the checkpoint (first review pass: both clipped to the same 6000 bytes, and the end was 'already captured')");
+  // The heavy body: with a short one the negative bound sliced it to nothing too, and the mutant hid (pass 2's own run-it).
+  const absurd = renderSummary({ ...heavy, sessionId: "x".repeat(7000), checkpoint: { kind: "compacted", trigger: "auto" } });
+  assert(/^…\n\nCheckpoint: compacted at /.test(absurd) && absurd.length < 7300, `a closing longer than the cap leaves the body as one ellipsis, never a slice from the end (second review pass: a negative bound; ${absurd.length} chars)`);
   assert(provenanceOf(many).length === LIMITS.derived, `derived_from is capped at ${LIMITS.derived}`);
   const empty = renderSummary(summariseTranscript(join(TMP, "empty.jsonl"), (writeFileSync(join(TMP, "empty.jsonl"), "{}\n"), "claude-code")));
   assert(/Brain: no thoughts read or written this session\./.test(empty), "a session that never touched the brain says so");
@@ -389,6 +392,13 @@ console.log("\n[5] The foreground half decides, writes a payload, and never a ke
   assert(checkpointOf({ hook_event_name: "PreCompact", trigger: "manual" }).kind === "compacted" && checkpointOf({ hook_event_name: "PreCompact", trigger: "manual" }).trigger === "manual" && checkpointOf({ hook_event_name: "PreCompact", trigger: 7 }).trigger === undefined
     && checkpointOf({ hook_event_name: "Stop" }).kind === "running" && checkpointOf({ hook_event_name: "SessionEnd", trigger: "auto" }) === undefined && checkpointOf({}) === undefined && checkpointOf({ hook_event_name: "SubagentStop" }) === undefined,
     "checkpointOf reads the event, and a trigger only when it is manual or auto");
+  assert(HOOK_EVENTS.join() === "SessionEnd,PreCompact,Stop" && Object.values(EVENTS).every((e) => "checkpoint" in e && typeof e.timeout === "boolean" && typeof e.interval === "boolean") && EVENTS.Stop.interval && !EVENTS.Stop.timeout && EVENTS.PreCompact.checkpoint === "compacted",
+    "the three events are one table — what a summary there says, whether the printed hook pins a timeout, whether the command carries the interval (second review pass: four structures)");
+  const foreign = prepare({ ...base, session_id: "s-foreign", hook_event_name: "SubagentStop" });
+  assert(foreign.code === 0 && !foreign.payloadPath && /^skip: SubagentStop is not an event this hook captures on \(SessionEnd, PreCompact, Stop\)/.test(foreign.message),
+    `a command pasted under an event the hook is not for is a skip, exit 0 — it fires mid-session and would post a final-looking summary over the checkpoint (second review pass; ${foreign.message})`);
+  assert(prepare({ session_id: "s-no-event", transcript_path: CLAUDE_T, cwd: "/repo/proj" }).payloadPath !== undefined && !/Checkpoint:/.test(prepare({ session_id: "s-no-event-2", transcript_path: CLAUDE_T, cwd: "/repo/proj" }).payload.text),
+    "…while no event at all — a run by hand — is an end, as before");
   const compact = prepare({ ...base, session_id: "s-compact", hook_event_name: "PreCompact", trigger: "auto" }, { minIntervalMin: 20 });
   assert(compact.payloadPath && compact.payload.event === "PreCompact" && compact.payload.trigger === "auto" && /\n\nCheckpoint: compacted at 2026-09-22 13:20 \(auto\), continuing/.test(compact.payload.text) && /^prepared: session s-compact \(PreCompact auto\), 3 prompt/.test(compact.message),
     `a PreCompact hook prepares a payload naming the compaction, ungated by the Stop interval (${compact.message})`);
@@ -720,7 +730,7 @@ console.log("\n[6] The background half posts over MCP, records the id, retries a
   const chainB = prepare({ session_id: "s-chain", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "SessionEnd" });
   const before = received.length;
   const chain = await postPending(cfg, chainB.payloadPath);
-  assert(chain.length === 2 && chain[0].obsolete === true && chain[0].file === chainA.payloadPath, "the earlier payload of the session is obsolete: the summary is cumulative");
+  assert(chain.length === 2 && chain[0].obsolete === true && chain[0].file === chainA.payloadPath && /a later capture of the session/.test(chain[0].error), "the earlier payload of the session is obsolete: the summary is cumulative — and the reason says capture, since the later one may be a checkpoint (second review pass: the wording was held by nothing)");
   assert(received.length === before + 1 && chain[1].ok && chain[1].file === chainB.payloadPath, "…one post, the newest");
   assert(readState("s-chain").thought_id === chain[1].id && existsSync(join(STATE, "dead", basename(chainA.payloadPath))), "…the state names it, and the obsolete payload sits in dead/");
   assert(!existsSync(join(STATE, "dead", "1000-0000-aaaaaa-s-old.json")) && existsSync(join(STATE, "dead", "2000-0000-bbbbbb-s-new.json")), "a dead letter past thirty days is pruned by a run; a younger one stays");
@@ -859,6 +869,8 @@ console.log("\n[7] As a hook: JSON on stdin, exit codes, and what reaches the en
   assert(end.code === 0 && received.length === before + 2 && cptId && received.at(-1).args.supersedes === cptId && !/Checkpoint:/.test(received.at(-1).args.content),
     `…and the session's end, the transcript unchanged, supersedes it with a summary naming no checkpoint (${end.err.trim().slice(0, 60)})`);
   assert(/captured session=s-compact-chain harness=claude-code event=PreCompact trigger=auto id=/.test(readFileSync(join(STATE, "log"), "utf8")), "the log names the event and its trigger when it is not the session's end");
+  const foreignRun = await runHook({ session_id: "s-compact-chain", transcript_path: join(TMP, "two.jsonl"), cwd: "/repo/proj", hook_event_name: "UserPromptSubmit" }, { OB1_SESSION_CAPTURE_SYNC: "1" });
+  assert(foreignRun.code === 0 && received.length === before + 2 && /skip: UserPromptSubmit is not an event this hook captures on/.test(foreignRun.err), `as a hook under an event it is not for: exit 0, nothing sent, the skip named (${foreignRun.err.trim().slice(0, 70)})`);
 }
 
 // ── [8] Detached ─────────────────────────────────────────────────────────────
@@ -901,6 +913,7 @@ console.log("\n[9] The printed hook carries no secret; --check tells a capture k
   assert(Object.keys(cx.hooks).join() === "SessionEnd" && Object.keys(st.hooks).join() === "Stop" && Object.keys(hookJson("claude-code", { event: "PreCompact", runtime: "bun" }).hooks).join() === "PreCompact",
     "Codex's default is SessionEnd alone — it has no compaction hook; an event named prints that event alone");
   assert((() => { try { hookJson("claude", {}); return false; } catch (e) { return /no default events for harness "claude"/.test(e.message); } })(), "a harness with no defaults is a named error from hookJson, not a TypeError off undefined (first review pass)");
+  assert((() => { try { hookJson("claude-code", { event: "precompact" }); return false; } catch (e) { return /"precompact" is not an event this hook runs on/.test(e.message); } })(), "…and so is an event outside the table: the export refuses what the CLI refuses (second review pass: it printed a hook under any name)");
   assert(!JSON.stringify([cc, cx, st]).includes("cap-key"), "no key in any of them");
   assert(shellWord("/Users/me/My Projects/OB1/x.mjs") === "'/Users/me/My Projects/OB1/x.mjs'" && shellWord(SCRIPT) === SCRIPT && shellWord("/a'b/c.mjs") === "'/a'\\''b/c.mjs'",
     "a path with a space or a quote is quoted for the shell the harness runs the command through; a plain one is not");
@@ -922,6 +935,14 @@ console.log("\n[9] The printed hook carries no secret; --check tells a capture k
   assert(dryCp.code === 0 && /\n\nCheckpoint: compacted at 2026-09-22 13:20 \(auto\), continuing/.test(dryCp.out) && /\n\nCheckpoint: turn ended at /.test((await run(["--dry-run", CLAUDE_T, "--event", "Stop"])).out),
     "--dry-run --event previews the checkpoint line the hook would write for that event (first review pass)");
   assert((await run(["--dry-run", CLAUDE_T, "--event", "bogus"])).code === 2, "…and refuses an event it does not know, as --print-hook does");
+  // One reader for --event on both paths (second review pass: two copies, disagreeing on the empty value and the case hint).
+  const dryEmpty = await run(["--dry-run", CLAUDE_T, "--event"]), dryCase = await run(["--dry-run", CLAUDE_T, "--event", "precompact"]);
+  assert(dryEmpty.code === 2 && /none was given/.test(dryEmpty.err) && dryCase.code === 2 && /the case matters/.test(dryCase.err), "--dry-run refuses an empty --event and names a case slip in the same words as --print-hook");
+  const trigTypo = await run(["--dry-run", CLAUDE_T, "--event", "PreCompact", "--trigger", "Auto"]);
+  assert(trigTypo.code === 2 && /--trigger takes auto or manual, not "Auto"/.test(trigTypo.err) && !trigTypo.out.trim(), "a --trigger that is neither is refused, not previewed without one (second review pass)");
+  assert((await run(["--dry-run", CLAUDE_T, "--trigger", "auto"])).code === 2 && /--trigger goes with --event PreCompact, which was not given/.test((await run(["--dry-run", CLAUDE_T, "--trigger", "auto"])).err), "…as is --trigger with no event");
+  assert((await run(["--dry-run", CLAUDE_T, "--event", "Stop", "--trigger", "auto"])).code === 2 && (await run(["--dry-run", CLAUDE_T, "--event", "PreCompact", "--trigger"])).code === 2, "…or under Stop, or dangling");
+  assert((await run(["--dry-run", CLAUDE_T, "--event", "PreCompact", "--min-interval", "20"])).code === 2 && (await run(["--print-hook", "claude-code", "--event", "PreCompact", "--trigger", "auto"])).code === 2, "a flag of the other by-hand form is refused on either, not validated nowhere and dropped");
   assert(received.length === 1, "…and sends nothing");
   const ph = await run(["--print-hook", "codex"]);
   assert(ph.code === 0 && JSON.parse(ph.out).hooks.SessionEnd && /installs nothing/.test(ph.err), "--print-hook prints JSON on stdout and the where-to-paste on stderr");
