@@ -67,11 +67,12 @@ remembered:
 warns, by name, when a brain is past its version's range or a server is older than
 the brain it serves. `db/version.mjs` is the one definition of the current version
 (`FORK_VERSION`), and `migrate.ts --dry-run` names the release each pending
-migration belongs to. The value 044 writes is `0.0.0+upstream.9543c29`, the
-pre-first-release baseline: the machinery is in place, no release has been cut yet.
+migration belongs to. 044 wrote `0.0.0+upstream.9543c29`, the pre-first-release
+baseline; each cut appends the migration that writes its version as the last file
+of the range it freezes — 048 writes `1.0.0+upstream.9543c29`, the first release.
 
 **A release is a tag naming three things**: the migration range it closes
-(the first cut, `001..044`), the server commit, and the upstream pin. The committed
+(the first cut, `001..048`), the server commit, and the upstream pin. The committed
 `releases.json` is the machine-readable mirror CI reads with no network. Migrations
 inside a released range are **frozen** — the ledger's sha check already refuses
 drift at apply time; `check-fork-consistency` adds the rule that a renumber or
