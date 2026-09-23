@@ -453,7 +453,7 @@ console.log("\n[8c] A streamed answer is a runaway at the third copy of one item
   // aborted call to.
   const plain = resolveEmbedConfig({ OB1_METADATA_MODEL: "qwen2.5:7b" });
   assert(windowingFor(plain).streamAbort === true, "the shipped windowing streams the answer and aborts a runaway on it (EXTRACT_STREAM_ABORT)");
-  assert(describeExtractWindow(plain).includes("; the answer is streamed and a call is aborted once it holds 3 copies of one item, and a call aborted so or run to its answer budget is made once more with a 0.5 frequency penalty"), `…and the banner/preflight sentence names the abort and the retry (${describeExtractWindow(plain)})`);
+  assert(describeExtractWindow(plain).includes("; the answer is streamed and a call is aborted once it holds 3 copies of one item, and a call aborted so or run to its answer budget is made once more with a 0.5 frequency penalty, read whole"), `…and the banner/preflight sentence names the abort, the retry and that the retry is read whole (${describeExtractWindow(plain)})`);
   assert(windowingFor(resolveEmbedConfig({ OB1_METADATA_MODEL: "qwen2.5:7b", OB1_METADATA_REASONING: "medium" })).streamAbort === false, "with OB1_METADATA_REASONING on the answer is read whole: no budget, no retry, no abort");
 
   // The merge carries the longest abort of the windows, and none when none was.

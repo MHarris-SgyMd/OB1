@@ -1513,6 +1513,87 @@ the shipped shape (7/7, no retry; 2 to 7 windows each, 66 to 351 s), so the
 7B's residue is the 7B's, and a brain that wants them can point
 `OB1_METADATA_MODEL` at the larger model and re-run with `--switch-key`.
 
+### The stream abort: a runaway known at its third repeated item, 2026-09-23
+
+SMD-1879 left a runaway costing its whole answer budget — about a minute on
+`qwen2.5:7b` — before the penalised retry could start. SMD-1960 streams every
+budgeted call (`stream: true`) and aborts it the moment the answer holds
+three copies of one item (`RunawayDetector`, `RUNAWAY_REPEATS`; items keyed as
+`parseExtraction` keys them, the type or relation unvalidated), then retries
+as before, the retry read whole. The budget stays the bound.
+
+**The rule, against the captured tails.** The 31 runaway tails the probe
+above captured (~300 characters each, the end of a 1,500-token answer) sort
+three ways: 16 repeat one item exactly, 3 alternate two items (tails 7, 13,
+26), 12 enumerate distinct ids — every ticket a `uses` edge, tickets counted
+down, file paths listed. A third copy of one key catches the first two kinds
+and by construction never the third, which the ticket requires: an
+enumeration is not a loop, and only the budget can end it. Two copies is a
+duplicate a converging answer does hold (parseExtraction folds it). Fed the
+tails themselves, 7 fire inside the ~300 characters — a tail holds two to
+four complete items, so the rest need the whole answer; the live run below is
+the measurement.
+
+**The stragglers, paired arms on the same day.** `w1200p` is the shipped
+shape (SMD-1879); `w1200s` is the same with the stream abort. 32 documents,
+`qwen2.5:7b`, sequential on an idle Ollama, 300 s per call:
+
+```
+OB1_LLM_LOCAL=1 OB1_EVAL_DOCS=stragglers.json ../db/with-postgres.sh bun eval-extract-windows.ts --arms w1200p,w1200s
+```
+
+| arm | extracted | malformed | median s | total s | mean entities | mean edges | calls | retried thoughts | aborted (median s into the call) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `w1200p` | **32/32** | 0 | 107.7 | 3,158 | 19.2 | 16.9 | 78 | 20 | 0 |
+| `w1200s` | **31/32** | 1 | **49.6** | **1,796** | 19.0 | 16.9 | 78 | 20 | 19 (20.9) |
+
+Per thought, paired: the same 20 thoughts ran away in both arms and the same
+12 converged first time — **the detector aborted none of the 12**, and their
+times agree within a second or two (a stream costs nothing to read). Of the
+20 runaways, 19 were aborted on the stream, 10.9 to 36.1 s into the call
+(median 20.9, the prompt's evaluation included); the 20th (`d67f2069`, 791
+tokens) is one of the enumerating tails — `SMD-1853`, `SMD-1854`, `SMD-1500`,
+… each a `topic` — and ran to its budget as designed, 130 s in both arms.
+The abort does not land under 10 s, the ticket's hope: the model emits its
+legitimate items first and starts looping some 500 to 1,500 tokens in, so
+the saving per runaway is the budget's remainder — a median 107.7 s per
+straggler becomes 49.6, the pass 3,158 s becomes 1,796.
+
+One thought moved: `155e31a1` (983 tokens) extracted under `w1200p` and did
+not under `w1200s` — aborted at 15.4 s, retried, the penalised retry
+malformed. Probed three more times under the streamed
+shape, deterministic: the first call fires on item 22 —
+`thought_audit.actor_name` a third time — at 15 to 21 s, and the penalised
+retry fires on the same item at the same place; yet under `w1200p` that
+retry converged, 20 entities and 12 relations. So a penalised answer can
+repeat an item three times and recover: a third copy is a runaway for a
+first answer and not always for a penalised one. **The retry is therefore
+read whole, never aborted** — the shipped rule — and the thought re-run so
+extracts twice of twice (20 entities, 12 relations, 42.9 and 40.5 s against
+122.1 under `w1200p`). The other 31 are unchanged by construction: no retry
+of theirs fired (18 converged with the detector on, 12 were never retried,
+one ran to its budget), so the arm as shipped is 32/32 at the table's
+times — derived from the run above and the re-run, not re-measured whole.
+The retried answers otherwise match the shipped arm's
+within the run-to-run noise of a penalised call (`327da071`: 25 entities and
+30 edges against 28 and 35).
+
+**Parity on the labelled captures.** `eval-entities.ts`, the fourteen
+labelled captures, `qwen2.5:7b`, streamed and then `--unstreamed`:
+
+| answers | prec | recall | tp | fp | fn | forbidden | malformed | sec |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| streamed (shipped) | 0.68 | 0.84 | 21 | 10 | 4 | 2 | 0 | 40.3 |
+| read whole (`--unstreamed`) | 0.68 | 0.84 | 21 | 10 | 4 | 2 | 0 | 41.0 |
+
+Identical to the count — tp, fp, fn, forbidden, and 10 rejected items in each — with the streamed run 0.7 s faster over the fourteen: a stream is the same answer, reassembled.
+
+**What this does not do.** It does not rescue the enumerating runaways
+(one of 20 here; 12 of the 31 tails) — only the budget ends those — and it
+does not change what a retry answers: the loop is the model's, the stream
+makes it cheap. `providerCall`'s chat path and `judgePair` are unchanged;
+neither was measured to run away.
+
 ## Entity extraction, measured through the real write path
 
 `eval-entities.ts` scores the extraction pass that migration 016 and

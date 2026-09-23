@@ -579,12 +579,12 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
   const rescued = await extractEntities(short, cfgG, undefined, { kind: "extraction" });
   // The stub's cancel() lands after the client's reader.cancel(): wait for
   // it, bounded, rather than a fixed sleep (second review pass).
-  for (let waited = 0; !(runs[0]?.cancelled && runs[1]?.cancelled) && waited < 2000; waited += 10) await Bun.sleep(10);
+  for (let waited = 0; !runs[0]?.cancelled && waited < 2000; waited += 10) await Bun.sleep(10);
   assert(!rescued.malformed && rescued.retried === true && rescued.entities[0]?.name === "Anita" && rescued.entities.length === 2, "a streamed runaway is aborted and the penalised retry's answer is the thought's");
   assert(rescued.abortedMs !== undefined && rescued.abortedMs >= 0 && rescued.abortedMs < 5000, `…and the answer says how far into the call the runaway was aborted (${rescued.abortedMs} ms)`);
-  assert(runs.length === 2 && runs[0].body.stream === true && runs[0].body.frequency_penalty === undefined && runs[1].body.frequency_penalty === RUNAWAY_PENALTY && runs[1].body.stream === true, `both calls ask for a stream; the first carries no penalty, the retry ${RUNAWAY_PENALTY} (${runs.map((r) => `${r.body.stream}/${r.body.frequency_penalty}`).join(" ")})`);
+  assert(runs.length === 2 && runs[0].body.stream === true && runs[0].body.frequency_penalty === undefined && runs[1].body.frequency_penalty === RUNAWAY_PENALTY && runs[1].body.stream === undefined, `the first call asks for a stream and carries no penalty; the retry carries ${RUNAWAY_PENALTY} and is read WHOLE — a penalised answer can repeat an item three times and recover (${runs.map((r) => `${r.body.stream}/${r.body.frequency_penalty}`).join(" ")})`);
   assert(runs[0].cancelled && runs[0].sent >= RUNAWAY_REPEATS + 1 && runs[0].sent < runs[0].total, `the client hung up on the loop after the third copy and before it ran out (${runs[0].sent} of ${runs[0].total} frames sent) — the mutant that reads the stream to its end sends all ${runs[0].total}`);
-  assert(runs[1].cancelled === true && runs[1].sent < runs[1].total && runs[1].sent > RUNAWAY_REPEATS + 1, `…and read the retry's converging answer to its [DONE], closing the connection on the keepalives after it (${runs[1].sent} of ${runs[1].total} frames)`);
+  assert(!runs[1].cancelled && runs[1].total === 0, "…and the retry's whole answer is the thought's");
 
   // The streamed answer, reassembled from frames that split tokens, is the
   // whole answer; and a provider that answers a stream request with plain JSON

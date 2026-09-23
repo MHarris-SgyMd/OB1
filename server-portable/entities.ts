@@ -104,10 +104,11 @@ export type Extraction = {
   retried?: true;
   /**
    * Set when a call's streamed answer was aborted as a runaway
-   * (ExtractWindowing.streamAbort): how many milliseconds into the call, its
-   * prompt evaluation included — the longest, when more than one call of the
-   * thought was. The measurement the eval and the worker's dump read, against
-   * the budget the call would have run to; absent when no call was aborted.
+   * (ExtractWindowing.streamAbort): how many milliseconds into the first
+   * call, its prompt evaluation included — the longest window's, when more
+   * than one window's was. The measurement the eval and the worker's dump
+   * read, against the budget the call would have run to; absent when no call
+   * was aborted. Only a first call is ever aborted: the retry is read whole.
    */
   abortedMs?: number;
 };
@@ -208,6 +209,12 @@ export type ExtractWindowing = {
    * read whole, as before. Presumes outputBudget: windowingFor turns the two
    * off together (reasoning on), and a harness that streams without a budget
    * gets an aborted call retried without one — its own arm to describe.
+   * The penalised RETRY is read whole whatever this says: measured on the
+   * stragglers, a penalised answer can repeat an item three times and then
+   * recover (155e31a1, the one thought the streamed arm lost to a detector
+   * firing on its retry), and the retry is the last attempt — a false abort
+   * there loses the thought, where a retry that loops costs one budget, the
+   * shipped price, and none of 20 did.
    */
   streamAbort: boolean;
 };
@@ -225,12 +232,13 @@ export const RUNAWAY_PENALTY = 0.5;
  * How many copies of one item — an entity by (type, name), a relation by
  * (relation, from, to), parseExtraction's own keys — make a streamed answer a
  * runaway (SMD-1960). Chosen against the 31 runaway tails the SMD-1879 probe
- * captured (evals/README.md): 16 repeat one item and 3 alternate two, and a
- * third copy is never a converging answer's — parseExtraction folds the
- * second already; the 12 that enumerate distinct ids (every ticket a `uses`
- * edge, tickets counted down) are not loops by this rule and run to the
- * budget, as the ticket requires. Two copies is one duplicate, which a
- * converging answer does hold.
+ * captured (evals/README.md): 16 repeat one item and 3 alternate two, and on
+ * the 32 stragglers a third copy was never a converging FIRST answer's —
+ * parseExtraction folds the second already; the 12 that enumerate distinct
+ * ids (every ticket a `uses` edge, tickets counted down) are not loops by
+ * this rule and run to the budget, as the ticket requires. Two copies is one
+ * duplicate, which a converging answer does hold. A PENALISED answer can hold
+ * three and recover (one of 20 measured), so the retry is not read by this.
  */
 export const RUNAWAY_REPEATS = 3;
 
@@ -350,7 +358,7 @@ export function describeExtractWindow(cfg: EmbedConfig): string {
   const retry = !w.outputBudget
     ? "; no answer budget and no runaway retry — reasoning is on (OB1_METADATA_REASONING), and a budget would cap the thinking, so a call that does not converge ends at the context or the caller's deadline"
     : w.retryRunaway
-      ? `${abort}${w.streamAbort ? ", and a call aborted so or run to its answer budget" : "; a call that runs to its answer budget"} is made once more with a ${RUNAWAY_PENALTY} frequency penalty`
+      ? `${abort}${w.streamAbort ? ", and a call aborted so or run to its answer budget" : "; a call that runs to its answer budget"} is made once more with a ${RUNAWAY_PENALTY} frequency penalty${w.streamAbort ? ", read whole" : ""}`
       : abort;
   if (cfg.extractChunkTokensFrom === "OB1_EXTRACT_CHUNK_TOKENS") return `${rule}, from OB1_EXTRACT_CHUNK_TOKENS (${ctx})${retry}`;
   if (cfg.extractChunkTokensFrom === "window") {
@@ -704,18 +712,19 @@ async function readStreamedAnswer(body: ReadableStream<Uint8Array>, detector: Ru
 
 /**
  * extractOnce, and once more with the penalty when the windowing says so and
- * the first answer ran to its budget or was aborted on the stream. `onCall` is told of every call BEFORE
- * it is made, so a retry that throws is still counted (third review pass).
+ * the first answer ran to its budget or was aborted on the stream — the retry
+ * read WHOLE, never aborted (ExtractWindowing.streamAbort says why). `onCall`
+ * is told of every call BEFORE it is made, so a retry that throws is still
+ * counted (third review pass).
  */
 async function extractCall(text: string, cfg: EmbedConfig, timeoutMs: number, part: { index: number; of: number; header?: string } | undefined, w: ExtractWindowing, onCall: () => void): Promise<Omit<Extraction, "retried"> & { runaway: boolean; retried: boolean }> {
   onCall();
   const first = await extractOnce(text, cfg, timeoutMs, part, w);
   if (!(w.retryRunaway && first.runaway && first.malformed)) return { ...first, retried: false };
   onCall();
-  const second = await extractOnce(text, cfg, timeoutMs, part, w, true);
-  // The longest a runaway ran before it was aborted, over both calls.
-  const abortedMs = [first.abortedMs, second.abortedMs].filter((n): n is number => n !== undefined);
-  return { ...second, ...(abortedMs.length ? { abortedMs: Math.max(...abortedMs) } : {}), retried: true };
+  const second = await extractOnce(text, cfg, timeoutMs, part, { outputBudget: w.outputBudget, streamAbort: false }, true);
+  // The first call's abort rides on the thought's answer; the retry has none.
+  return { ...second, ...(first.abortedMs !== undefined ? { abortedMs: first.abortedMs } : {}), retried: true };
 }
 
 /**

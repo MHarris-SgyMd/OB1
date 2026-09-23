@@ -439,14 +439,13 @@ async function processRow(row: Row): Promise<Outcome> {
     // an operator sorting the failed rows — for SMD-2000's larger model, say —
     // can tell a loop the retry did not rescue from an answer that was never
     // JSON. The MALFORMED window's own abort, not the thought's longest (one
-    // the retry may have rescued); "neither converged" only when a retry was
-    // made; and which of the two calls was aborted is not recorded — the
-    // first at its budget and the retry on the stream is one shape — so the
-    // note names neither (review passes one to four).
+    // the retry may have rescued), and "the retry did not converge" only when
+    // a retry was made (review passes one to four). Only a first call is ever
+    // aborted — the retry is read whole — so the note names it.
     const abortedParts: { abortedMs?: number; retried?: true }[] = extraction.parts ? extraction.parts.filter((p) => p.malformed && p.abortedMs !== undefined) : extraction.abortedMs !== undefined ? [extraction] : [];
     const abortedMs = Math.max(...abortedParts.map((p) => p.abortedMs as number));
     const retriedToo = abortedParts.some((p) => p.retried);
-    const abortedNote = abortedParts.length ? `; a runaway — one item a third time — was aborted on the stream ${(abortedMs / 1000).toFixed(1)} s into ${retriedToo ? "one of its two calls, and neither converged" : "its call, and no retry was made"}` : "";
+    const abortedNote = abortedParts.length ? `; the first call was aborted on the stream ${(abortedMs / 1000).toFixed(1)} s in — one item a third time — ${retriedToo ? "and the penalised retry, read whole, did not converge either" : "and no retry was made"}` : "";
     return { outcome: "failed", error: `the model's answer was not JSON of the expected shape${where}${abortedNote}` };
   }
   if (DUMP) {

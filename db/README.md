@@ -846,7 +846,9 @@ one call could not finish, where windows alone reached 10 to 13. The answer is
 streamed, and a call is aborted the moment its answer holds three copies of one
 item (`RunawayDetector`, `RUNAWAY_REPEATS`; SMD-1960) — the loop is visible on
 the stream long before the budget, so a runaway costs seconds rather than the
-minute the budget allows — and a call aborted so is retried as a cut one is; an
+minute the budget allows (the 32 stragglers' pass: 1,796 s against 3,158) —
+and a call aborted so is retried as a cut one is, the retry read whole, since
+a penalised answer was measured to repeat an item three times and recover; an
 answer that enumerates distinct ids is not a loop by that rule and runs to the
 budget, which stays the bound. A thought whose retry also runs away is recorded
 failed, retryable. The window is the **metadata model's**, not the embedding
