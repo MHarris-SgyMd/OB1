@@ -212,14 +212,22 @@ console.log("\n[2] Migration 010 onto a populated 009 — the actual upgrade");
 console.log("\n[3] Re-applying is a no-op, not a second copy");
 {
   const sql = new SQL({ url: URL_, max: 1 });
+  // [2] left the brain at 010. The rest applies once here FIRST — an apply, not
+  // a re-apply, and one that writes: 050's backfill gives [2]'s two rows their
+  // writers' marks through 008's trigger, one audit row each (SMD-1726). The
+  // baseline is taken after it, so what follows compares a re-run to a brain
+  // that has every migration, which is what "re-applying" means.
+  await applyMigrations(URL_, OPTS);
   const before = await sql`SELECT count(*)::int AS c FROM thought_audit`;
   const agentsBefore = await sql`SELECT count(*)::int AS c FROM ob1_agents`;
+  const marksBefore = await sql`SELECT id, metadata FROM thoughts ORDER BY id`;
 
   // Twice: 010 alone, then the whole set over the top. `bun migrate.ts` tracks
   // what it has applied, but test-support does not, and a migration that is not
   // idempotent breaks a re-run either way.
   await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("010") });
   await applyMigrations(URL_, OPTS);
+  assert(JSON.stringify(await sql`SELECT id, metadata FROM thoughts ORDER BY id`) === JSON.stringify(marksBefore), "050's backfill on a re-run finds every row agreeing with the log and writes nothing (SMD-1726)");
 
   const after = await sql`SELECT count(*)::int AS c FROM thought_audit`;
   const agentsAfter = await sql`SELECT count(*)::int AS c FROM ob1_agents`;
@@ -453,9 +461,10 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // audit row's event shape, SMD-1730), 047 (the query_log.logged_at prune
   // index, SMD-1492), 048 (the first release's schema_version, 1.0.0 — the
   // cut's last migration, SMD-1804/SMD-1860), 049 (the three-value CHECK on
-  // ob1_agent_keys.scope, SMD-1298) and 051 (thought_changes, the read over
-  // the audit log, SMD-1296) stay recorded and are never tried. 030 is the
-  // right one to make pending because its prerequisites — 015 and 021's
+  // ob1_agent_keys.scope, SMD-1298), 050 (the writer's mark on the row,
+  // SMD-1726) and 051 (thought_changes, the read over the audit log, SMD-1296)
+  // stay recorded and are never tried. 030 is the right one to make pending
+  // because its prerequisites — 015 and 021's
   // embedding_model column — are
   // exactly what a through-020 schema lacks, so it fails by name rather than
   // with a bare error. The window guard trips whenever a migration lands past
@@ -472,15 +481,17 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // only 034 and refusing by name without it as 043 does; 046 adds columns to
   // 008's thought_audit and 010's ob1_agents and redefines 025's trigger, 035's
   // two capture forms and 033's update_thought on their own bodies, all present
-  // ([20b]); 047 adds a btree on query_log.logged_at for prune, likewise needing
-  // only 034 and refusing by name without it; 049 drops and re-adds 010's CHECK
-  // on ob1_agent_keys.scope, which every schema past 010 has, refusing by name
-  // without 010 ([20d]); 051 adds one read function over 008's table and 046's
-  // columns, refusing by name without either ([20f]) — all recorded by the
-  // baseline with their prerequisites present, so none
+  // ([20b]); 047 adds a btree on 034's query_log.logged_at ([20c]); 048 upserts
+  // ob1_config.schema_version for the 1.0.0 cut, needing only 006's table; 049
+  // admits the capture scope on 010's ob1_agent_keys, refusing by name without
+  // 010 ([20d]); 050 adds a BEFORE trigger to 001's thoughts and a backfill over
+  // 008's thought_audit through 046's ob1_registry_kind, all present ([20e]);
+  // 051 adds one read function over 008's table and 046's columns, refusing by
+  // name without either ([20f]) — all recorded by the baseline with their
+  // prerequisites present, so none
   // becomes the plain-run failure point above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 21, `030 is among the last twenty-one migrations (${last})`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 22, `030 is among the last twenty-two migrations (${last})`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -1713,11 +1724,15 @@ console.log("\n[20c] Migration 047 on a schema without 034 — refused up front,
     /adopted with --baseline\?\)\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plain.out);
   assert(ok, `a plain run fails at 047 naming 034 and --reapply, not with a bare "does not exist" (exit ${plain.code})${ok ? "" : `:\n${plain.out}`}`);
   assert(Number((await sql`SELECT count(*)::int AS c FROM schema_migrations WHERE name = ${the047}`)[0].c) === 0, "…047 records nothing");
-  await sql.close();
   // The guard is the only thing between the file and the table: with 034..046 in
-  // place the same pending file applies. Complete the schema (034 onward) so [21]
-  // resets a full brain, now through 047 rather than only through 046.
+  // place the same pending file applies — the heading's second half, asserted
+  // (the apply throwing was its only check before SMD-1726's boyscout pass).
+  // [20e] drops and rebuilds its own brain later, so this is the file's own
+  // mirror, not [21]'s fixture.
   await applyMigrations(URL_, { ...OPTS, only: (f) => f >= "034" });
+  assert((await sql`SELECT 1 FROM pg_indexes WHERE tablename = 'query_log' AND indexname = 'query_log_logged_at_idx'`).length === 1,
+    "…and applied once the table exists: 047's index is on query_log");
+  await sql.close();
 }
 
 console.log("\n[20d] Migration 049 on a schema without 010 — refused up front, naming 010 and --reapply (SMD-1298)");
@@ -1741,6 +1756,107 @@ console.log("\n[20d] Migration 049 on a schema without 010 — refused up front,
   assert(Number((await sql`SELECT count(*)::int AS c FROM schema_migrations WHERE name = ${the049}`)[0].c) === 0, "…049 records nothing");
   await sql.close();
   await applyMigrations(URL_, { ...OPTS, only: (f) => f >= "010" });
+}
+
+console.log("\n[20e] Migration 050 onto a populated 046 — every thought gains its writer's mark from the log, a planted claim is corrected, updated_at does not move, one audit row per row written, the trigger stamps every write after, and a re-apply writes nothing (SMD-1726)");
+{
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < "050" });
+  const sql = new SQL({ url: URL_, max: 1 });
+  const vec = (axis: number) => `[${Array.from({ length: OPTS.dim }, (_, i) => (i === axis ? 1 : 0)).join(",")}]`;
+  const marks = async (id: string) => { const [r] = await sql`SELECT metadata->>'actor_kind' AS k, metadata->>'actor_name' AS n FROM thoughts WHERE id = ${id}::uuid`; return `${r.k ?? "-"}/${r.n ?? "-"}`; };
+  // A corpus at 046: a classified key resolved through 010 writing through the
+  // main server; an unclassified vendored key whose payload claims the operator's
+  // mark; a raw load with no envelope. No row carries a database mark yet.
+  await sql`SELECT set_agent_kind('laptop', 'operator')`;
+  const laptop = (await sql`SELECT resolve_agent(${"a".repeat(64)}, 'laptop', 'write') AS r`)[0].r as { agent_id: string };
+  const opRow = (await sql`SELECT upsert_thought('upgrade 050: typed by the operator', ${{ metadata: { source: "mcp" }, actor: { name: "laptop", agent_id: laptop.agent_id, via: "open-brain" } }}::jsonb, ${vec(0)}::vector) AS r`)[0].r as { id: string };
+  const claimRow = (await sql`SELECT upsert_thought('upgrade 050: an agent claiming the operator', ${{ metadata: { actor_kind: "operator", actor_name: "laptop", source: "planted" }, actor: { name: "MCP_ACCESS_KEY", via: "rest-api" } }}::jsonb, ${vec(1)}::vector) AS r`)[0].r as { id: string };
+  const RAW = "47474747-4747-4747-8747-474747474750";
+  await sql.unsafe(`INSERT INTO thoughts (id, content, metadata, embedding) VALUES ('${RAW}', 'upgrade 050: a raw load', '{"source": "load"}'::jsonb, '${vec(2)}'::vector)`);
+  assert((await marks(opRow.id)) === "-/-" && (await marks(claimRow.id)) === "operator/laptop" && (await marks(RAW)) === "-/-", "at 046 no row carries a mark the database wrote, and a payload's claim sits in metadata unchecked");
+  const stamps = async () => JSON.stringify(await sql`SELECT id, content, updated_at::text AS u, embedding_model, content_fingerprint FROM thoughts ORDER BY id`);
+  const before = await stamps();
+  const [{ c: auditBefore }] = await sql`SELECT count(*)::int AS c FROM thought_audit`;
+  assert((await sql`SELECT 1 FROM pg_trigger WHERE tgrelid = 'thoughts'::regclass AND tgname = 'thoughts_stamp_actor'`).length === 0, "…and there is no stamp trigger");
+
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("050") });
+
+  assert((await sql`SELECT tgtype FROM pg_trigger WHERE tgrelid = 'thoughts'::regclass AND tgname = 'thoughts_stamp_actor'`)[0]?.tgtype === 23, "050 adds the BEFORE INSERT OR UPDATE row trigger");
+  assert((await marks(opRow.id)) === "operator/laptop", `the file's own backfill call gives the operator's row its mark from the capture's audit row, by the agent id 010 resolved (${await marks(opRow.id)})`);
+  assert((await marks(claimRow.id)) === "-/MCP_ACCESS_KEY", `…corrects the planted claim to the log's writer — the vendored key's name, no kind since nobody has classified it (${await marks(claimRow.id)})`);
+  assert((await marks(RAW)) === "-/-" && (await sql`SELECT metadata->>'source' AS s FROM thoughts WHERE id = ${RAW}::uuid`)[0].s === "load", "…and leaves the raw load unmarked, its own metadata kept: no audit row names a writer");
+  assert((await stamps()) === before, "no thought's content, fingerprint, label or updated_at moved: a stamp is not an edit");
+  const [{ c: auditAfter }] = await sql`SELECT count(*)::int AS c FROM thought_audit`;
+  assert(Number(auditAfter) === Number(auditBefore) + 2, `one audit row per row written, and none for the row already agreeing (${Number(auditAfter) - Number(auditBefore)})`);
+  const bfRows = await sql`SELECT thought_id, action, actor_name, origin, diff->'metadata'->'after'->>'actor_kind' AS k FROM thought_audit WHERE origin = 'backfill_thought_actors' ORDER BY thought_id`;
+  assert(bfRows.length === 2 && bfRows.every((r: { action: string; actor_name: string | null }) => r.action === "update" && r.actor_name === null) && bfRows.some((r: { thought_id: string; k: string | null }) => r.thought_id === opRow.id && r.k === "operator"),
+    "…each an update under the backfill's door and nobody's name, its diff the mark arriving");
+
+  // The mirror: the day after. A write through a classified key is stamped by
+  // the trigger with no backfill; the vendored key classified, the next pass
+  // fills its row.
+  const fresh = (await sql`SELECT upsert_thought('upgrade 050: a note captured after', ${{ metadata: { source: "mcp" }, actor: { name: "laptop", agent_id: laptop.agent_id, via: "open-brain" } }}::jsonb, ${vec(3)}::vector) AS r`)[0].r as { id: string };
+  assert((await marks(fresh.id)) === "operator/laptop", "after 050 a write through a classified key is stamped as it lands");
+  let bf = (await sql`SELECT backfill_thought_actors() AS r`)[0].r as { rows: number; differing: number; awaiting: number };
+  assert(bf.rows === 0 && bf.differing === 0 && bf.awaiting === 1, `a pass after finds every row agreeing with the log and the vendored key's row awaiting a kind (${JSON.stringify(bf)})`);
+  await sql`SELECT set_agent_kind('MCP_ACCESS_KEY', 'ingested')`;
+  bf = (await sql`SELECT backfill_thought_actors() AS r`)[0].r as { rows: number; differing: number; awaiting: number };
+  assert(bf.rows === 1 && bf.awaiting === 0 && (await marks(claimRow.id)) === "ingested/MCP_ACCESS_KEY", `once the key is classified the next pass fills its row (${JSON.stringify(bf)}, ${await marks(claimRow.id)})`);
+
+  // An edit in flight: B holds update_thought's row lock (FOR NO KEY UPDATE)
+  // and has not written yet; the pass must wait for B's transaction, not
+  // deadlock against it (run-it, first review pass: the ALTER's SHARE ROW
+  // EXCLUSIVE did not conflict with B's ROW SHARE, B's UPDATE then waited on
+  // the table while the pass waited on the row, and the pass was the victim).
+  const passB = new SQL({ url: URL_, max: 1 });
+  await passB`BEGIN`;
+  await passB`SELECT id FROM thoughts WHERE id = ${fresh.id}::uuid FOR NO KEY UPDATE`;
+  const aPid = Number((await sql`SELECT pg_backend_pid() AS p`)[0].p);
+  await sql.unsafe(`ALTER TABLE thoughts DISABLE TRIGGER thoughts_stamp_actor`);
+  await sql.unsafe(`UPDATE thoughts SET metadata = metadata - 'actor_kind' - 'actor_name' WHERE id = '${opRow.id}'`);
+  await sql.unsafe(`ALTER TABLE thoughts ENABLE TRIGGER thoughts_stamp_actor`);
+  const pendingA = sql`SELECT backfill_thought_actors() AS r`.execute();
+  let waitedOnB = false;
+  for (let i = 0; i < 100 && !waitedOnB; i++) {
+    const [w] = await passB`SELECT wait_event_type AS t FROM pg_stat_activity WHERE pid = ${aPid}`;
+    waitedOnB = w?.t === "Lock";
+    if (!waitedOnB) await new Promise((r) => setTimeout(r, 50));
+  }
+  const bEdit = (await passB`SELECT update_thought(${fresh.id}::uuid, 'upgrade 050: edited while a pass waited', NULL, NULL, NULL, NULL, ${{ name: "laptop", agent_id: laptop.agent_id }}::jsonb, NULL, NULL, NULL) AS r`)[0].r as { ok: boolean };
+  await passB`COMMIT`;
+  await passB.close();
+  const passRes = (await pendingA)[0].r as { rows: number };
+  assert(waitedOnB && bEdit.ok === true && passRes.rows === 1 && (await marks(opRow.id)) === "operator/laptop" && (await marks(fresh.id)) === "operator/laptop",
+    `a pass meeting an edit in flight waits for it (seen waiting on a lock), the edit lands, the pass then writes its one row and neither deadlocks (${JSON.stringify(passRes)})`);
+  // Two passes at once: the second waits on the first's table lock and,
+  // re-checking the marks under it, writes and counts nothing the first did.
+  await sql.unsafe(`ALTER TABLE thoughts DISABLE TRIGGER thoughts_stamp_actor`);
+  await sql.unsafe(`UPDATE thoughts SET metadata = metadata - 'actor_kind' - 'actor_name' WHERE id IN ('${opRow.id}', '${fresh.id}')`);
+  await sql.unsafe(`ALTER TABLE thoughts ENABLE TRIGGER thoughts_stamp_actor`);
+  const passC = new SQL({ url: URL_, max: 1 });
+  await passC`BEGIN`;
+  const bfC = (await passC`SELECT backfill_thought_actors() AS r`)[0].r as { rows: number };
+  const pendingD = sql`SELECT backfill_thought_actors() AS r`.execute();
+  let waitedOnC = false;
+  for (let i = 0; i < 100 && !waitedOnC; i++) {
+    const [w] = await passC`SELECT wait_event_type AS t FROM pg_stat_activity WHERE pid = ${aPid}`;
+    waitedOnC = w?.t === "Lock";
+    if (!waitedOnC) await new Promise((r) => setTimeout(r, 50));
+  }
+  await passC`COMMIT`;
+  await passC.close();
+  const bfD = (await pendingD)[0].r as { rows: number; differing: number };
+  assert(waitedOnC && bfC.rows === 2 && bfD.rows === 0 && bfD.differing === 2,
+    `two passes at once: the second waits, finds the first's marks under the lock and writes nothing — rows ${bfC.rows} + ${bfD.rows} (run-it, first review pass: each had reported every row)`);
+  assert(Number((await sql`SELECT count(*)::int AS c FROM thought_audit WHERE origin = 'backfill_thought_actors'`)[0].c) === 2 + 1 + 1 + 2, "…and the audit rows count what was written, once");
+
+  const shapeAfter = await shape(sql);
+  const again = await stamps();
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("050") });
+  assert(JSON.stringify(await shape(sql)) === JSON.stringify(shapeAfter) && (await stamps()) === again && Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c) === Number(auditAfter) + 9,
+    "re-applying 050 is a no-op: the shape as it was, no row moved, no audit row added beyond the nine above — the capture, the classified key's pass, three raw strips of the marks (008 records a metadata change), the edit in flight, its pass, and the two-pass arm's two");
+  await sql.close();
 }
 
 console.log("\n[20f] Migration 051 on a schema without 008, and on 008's table without 046's columns — refused up front, naming the migration and --reapply, and applied once both are there (SMD-1296)");

@@ -1,5 +1,5 @@
 import { createAssert } from "../db/test-support.ts";
-import { queryLogEnabled, queryLogRetentionDays, QUERY_LOG, tierProblem, trimmedEnv } from "../db/config.mjs";
+import { DEFAULT_EMBEDDING_DIM, queryLogEnabled, queryLogRetentionDays, QUERY_LOG, tierProblem, trimmedEnv } from "../db/config.mjs";
 import { visibleToolNames, READ_TOOL_NAMES } from "./tools.ts";
 /**
  * test-server.ts
@@ -42,13 +42,38 @@ process.env.MCP_ACCESS_KEY = "test-key-xyz";
 
 const KEY = "test-key-xyz";
 
+// The one provider call this suite makes is [17]'s, against a stub that can be
+// told to answer an embedding slowly — the server's env is read once, at the
+// first request, so the stub's address is set before it. Declared local to the
+// egress gate (SMD-1903), as every suite that boots the server against a stub
+// does. One-hot, like test-local-provider's, at the width the server expects.
+let embedDelayMs = 0;
+const provider = Bun.serve({
+  port: 0,
+  async fetch(req) {
+    const url = new URL(req.url);
+    const body = (await req.json()) as { input?: string };
+    if (embedDelayMs > 0) await Bun.sleep(embedDelayMs);
+    if (url.pathname.endsWith("/embeddings")) {
+      const v = new Array(DEFAULT_EMBEDDING_DIM).fill(0);
+      v[String(body.input ?? "").length % DEFAULT_EMBEDDING_DIM] = 1;
+      return Response.json({ data: [{ embedding: v }] });
+    }
+    return Response.json({ choices: [{ message: { content: JSON.stringify({ topics: [], type: "idea", people: [] }) } }] });
+  },
+});
+process.env.OB1_LLM_BASE_URL = `http://127.0.0.1:${provider.port}/v1`;
+process.env.OB1_LLM_LOCAL = "1";
+
 // The import under test.
 const worker = (await import("./index.ts")).default as {
   fetch: (req: Request) => Response | Promise<Response>;
   port?: number;
 };
 
-const server = Bun.serve({ port: 0, fetch: worker.fetch });
+// Served with every field the export declares, so what the export says about
+// the runtime — and what it leaves at the default — is what [17] measures.
+const server = Bun.serve({ ...worker, port: 0 });
 const PORT = server.port ?? 0;
 const BASE = `http://localhost:${PORT}`;
 
@@ -541,6 +566,153 @@ console.log("\n[17] tierProblem validates OB1_TIER at the boundary initEnv and p
   assert(msg.includes("prod") && msg.includes("stable, canary, working") && /045|query_log/.test(msg), "the message names the bad value, the allowed set, and why it matters (the silent drop)");
 }
 
+console.log("\n[16b] said_by and actor fold into the filter, and the By: line renders the row's mark and nothing else (SMD-1726)");
+{
+  // The two arguments are sugar over the two metadata keys migration 050
+  // stamps, so the store, the log and the plan see one filter; the By: line
+  // reads the same keys back. Both pure, both exported for this.
+  const { withActorFilter, actorLine } = await import("./index.ts") as {
+    withActorFilter: (f: Record<string, unknown>, s?: string, a?: string) => Record<string, unknown>;
+    actorLine: (m: Record<string, unknown>) => string | null;
+  };
+  assert(JSON.stringify(withActorFilter({}, undefined, undefined)) === "{}", "neither argument leaves the filter as it was");
+  assert(JSON.stringify(withActorFilter({ type: "idea" }, "operator", undefined)) === JSON.stringify({ type: "idea", actor_kind: "operator" }), "said_by becomes filter.actor_kind beside the caller's keys");
+  assert(JSON.stringify(withActorFilter({}, "agent", "bot-key")) === JSON.stringify({ actor_kind: "agent", actor_name: "bot-key" }), "actor becomes filter.actor_name");
+  assert(JSON.stringify(withActorFilter({ actor_kind: "agent" }, "agent", undefined)) === JSON.stringify({ actor_kind: "agent" }), "the same value in both places agrees");
+  const refusal = (f: Record<string, unknown>, s?: string, a?: string) => { try { withActorFilter(f, s, a); return ""; } catch (e) { return (e as Error).message; } };
+  assert(/said_by is "operator" but filter\.actor_kind is "agent" — pass one of the two/.test(refusal({ actor_kind: "agent" }, "operator", undefined)), "a filter naming the key with another value is a contradiction, refused with both spellings named");
+  assert(/actor is "x" but filter\.actor_name is "y"/.test(refusal({ actor_name: "y" }, undefined, "x")), "…for actor too");
+  assert(actorLine({}) === null && actorLine({ type: "idea" }) === null, "no mark, no line — as an undated row prints no Captured: line");
+  assert(actorLine({ actor_kind: "operator", actor_name: "op-key" }) === "By: op-key (operator)", "a name and a kind");
+  assert(actorLine({ actor_name: "ghost-key" }) === "By: ghost-key (kind not classified)", "a name alone says the key is unclassified rather than guessing a kind");
+  assert(actorLine({ actor_kind: "agent" }) === "By: an unnamed key (agent)", "a kind alone — an envelope that carried only an agent id");
+  assert(actorLine({ actor_kind: "root", actor_name: "x" }) === "By: x (kind not classified)", "a word outside the registry's three renders as no kind");
+  assert(actorLine({ actor_name: "op\u001b[2Jkey" }) === "By: op[2Jkey (kind not classified)", "…and the name goes through the display cleaner: a control character cannot reach the terminal");
+  assert(actorLine({ actor_name: "   " }) === null && actorLine({ actor_name: 7, actor_kind: 3 }) === null, "a blank or non-string value is no mark");
+  const twenty = Object.fromEntries(Array.from({ length: 20 }, (_, i) => [`k${i}`, i]));
+  assert(/too many keys/.test(refusal(twenty, "operator", undefined)) && /too large/.test(refusal({ blob: "x".repeat(4090) }, undefined, "op-key")),
+    "the filter's caps hold over the folded object: twenty keys plus said_by is over the key cap, a filter at the size cap plus actor over the size cap (first review pass)");
+}
+
+console.log("\n[17] A tool call outlives the runtime's idle timeout, and a client that leaves is logged (SMD-1864)");
+{
+  const { withSseKeepalive, requestLabel, abandonedRequestLine, stalledRequestLine, SSE_KEEPALIVE_MS } = await import("./index.ts") as {
+    withSseKeepalive: (r: Response, opts?: { intervalMs?: number; maxMs?: number; startedAt?: number; signal?: AbortSignal; onEnd?: () => void; onStall?: () => void; label?: string }) => Response;
+    requestLabel: (body: string | null) => string;
+    abandonedRequestLine: (label: string, elapsedMs: number) => string;
+    stalledRequestLine: (label: string, elapsedMs: number) => string;
+    SSE_KEEPALIVE_MS: number;
+  };
+  // The premise is measured, not assumed: Bun closes a streaming response that
+  // has been silent for its default idle timeout (10 s) at the next of its
+  // 4-second sweeps — between 8 and 12 s of silence, by phase — while a handler
+  // that has not returned yet is left alone. So the case is the transport's
+  // shape, an SSE stream opened at once and written to when the tool returns,
+  // and the silence is 13 s: past the last sweep that can catch it, so the
+  // control is reset every run and not by the luck of the phase (11.5 s slipped
+  // under it once). Four requests run at once; the section costs the longest.
+  const SILENT_MS = 13_000;
+  const SLOW_EMBED_MS = 13_000;
+  const silentSse = (silentMs = SILENT_MS): Response => {
+    const stream = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        await Bun.sleep(silentMs);
+        try {
+          controller.enqueue(new TextEncoder().encode("event: message\ndata: {\"late\":true}\n\n"));
+          controller.close();
+        } catch { /* reset under us — the bare case */ }
+      },
+    });
+    return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
+  };
+  // The mechanism dropped (bare) beside the mechanism (kept), on the runtime's
+  // defaults. The bare server's kill is what prints Bun's own `warn: Bun.serve()
+  // timed out a request after 10 seconds` after the suite's report: expected.
+  const bare = Bun.serve({ port: 0, fetch: () => silentSse() });
+  const kept = Bun.serve({ port: 0, fetch: (req) => withSseKeepalive(silentSse(), { signal: req.signal }) });
+  // The ceiling, at a small scale: a stream silent for 500 ms with a 20 ms
+  // frame and a 200 ms ceiling stops pinging at the ceiling and says so once.
+  // Nominally nine frames, about twenty-four uncapped; the band below leaves a
+  // loaded runner's timer drift room on both sides.
+  let stalls = 0;
+  const capped = Bun.serve({ port: 0, fetch: (req) => withSseKeepalive(silentSse(500), { intervalMs: 20, maxMs: 200, signal: req.signal, label: "tools/call slow_one", onStall: () => { stalls++; } }) });
+  type Read = { ok: boolean; text: string; error: string; ms: number };
+  const read = async (url: string, init: RequestInit = {}): Promise<Read> => {
+    const t0 = performance.now();
+    try {
+      const r = await fetch(url, init);
+      const text = await r.text();
+      return { ok: true, text, error: "", ms: performance.now() - t0 };
+    } catch (e) {
+      const code = (e as { code?: string }).code;
+      return { ok: false, text: "", error: e instanceof Error ? `${e.name}${code ? ` ${code}` : ""}` : String(e), ms: performance.now() - t0 };
+    }
+  };
+  const call = (id: number, query: string, init: RequestInit = {}) =>
+    read(BASE, { method: "POST", headers: AUTH, body: JSON.stringify({ jsonrpc: "2.0", id, method: "tools/call", params: { name: "search_thoughts", arguments: { query } } }), ...init });
+  const frames = (t: string) => t.split(": keepalive\n\n").length - 1;
+  const warned: string[] = [];
+  const realWarn = console.warn;
+  console.warn = (...args: unknown[]) => { warned.push(args.map(String).join(" ")); };
+  embedDelayMs = SLOW_EMBED_MS;
+  let bareRun: Read, keptRun: Read, cappedRun: Read, slow: Read, gone: Read;
+  try {
+    [bareRun, keptRun, cappedRun, slow, gone] = await Promise.all([
+      read(`http://127.0.0.1:${bare.port}/`),
+      read(`http://127.0.0.1:${kept.port}/`),
+      read(`http://127.0.0.1:${capped.port}/`),
+      call(50, "a query whose embedding outlives the idle timeout"),
+      // A client that gives up: the stream's headers arrive at once, so it is the body read that its 1.5 s signal ends.
+      call(51, "needle-the-line-must-not-carry", { signal: AbortSignal.timeout(1500) }),
+    ]);
+    await Bun.sleep(500); // the abandoned call's line, and the stub's sleep behind it, settle
+  } finally {
+    console.warn = realWarn;
+    embedDelayMs = 0;
+    bare.stop(true);
+    kept.stop(true);
+    capped.stop(true);
+  }
+  // The kill lands at a sweep between 8 and 12 s of silence; the bound is the
+  // 13 s answer, so a late sweep on a loaded runner is not read as a pass.
+  assert(!bareRun.ok && bareRun.ms > 7_500 && bareRun.ms < SILENT_MS,
+    `the premise: a streamed response silent past the default is reset at a sweep, before its 13 s event (${bareRun.ok ? "answered" : bareRun.error} after ${Math.round(bareRun.ms)} ms)`);
+  assert(keptRun.ok && /"late":true/.test(keptRun.text), `the same stream through withSseKeepalive reaches its event (${keptRun.ok ? `${Math.round(keptRun.ms)} ms` : keptRun.error})`);
+  assert(frames(keptRun.text) >= 2, `…carrying comment frames on the way (${frames(keptRun.text)} in ${SILENT_MS} ms at one per ${SSE_KEEPALIVE_MS} ms)`);
+  assert(cappedRun.ok && /"late":true/.test(cappedRun.text) && frames(cappedRun.text) >= 4 && frames(cappedRun.text) <= 10,
+    `the ceiling: frames stop at maxMs and the event still arrives (${frames(cappedRun.text)} frames in 500 ms at 20 ms with a 200 ms ceiling)`);
+  assert(stalls === 1, `…and onStall runs once, which is how the route settles the request before the runtime reaps the silent stream (${stalls})`);
+  const stalled = warned.filter((w) => /request still running/.test(w));
+  const sm = /after (\d+) s/.exec(stalled[0] ?? "");
+  assert(stalled.length === 1 && sm !== null && stalled[0] === stalledRequestLine("tools/call slow_one", Number(sm[1]) * 1000),
+    `…and says so once, in index.ts's own line naming the call (${stalled.length} line)`);
+  assert(slow.ok && slow.ms >= SLOW_EMBED_MS, `the real server answers search_thoughts after a ${SLOW_EMBED_MS} ms embedding, past the last sweep (${slow.ok ? `${Math.round(slow.ms)} ms` : `${slow.error} at ${Math.round(slow.ms)} ms`})`);
+  const dataLine = slow.text.split("\n").find((l) => l.startsWith("data: "));
+  let envelope: { jsonrpc?: string; id?: unknown } | null = null;
+  try { envelope = dataLine ? JSON.parse(dataLine.slice(6)) : null; } catch { /* not an envelope */ }
+  assert(envelope?.jsonrpc === "2.0" && envelope.id === 50, "…with the call's JSON-RPC envelope (no store is configured here, so the tool's answer is its refusal — the point is that it arrived)");
+  assert(frames(slow.text) >= 2, `…kept alive by comment frames the client never sees as events (${frames(slow.text)})`);
+  assert(!gone.ok, `a client that gives up at 1.5 s is gone (${gone.ok ? "answered" : gone.error})`);
+  const lines = warned.filter((w) => /request abandoned/.test(w));
+  assert(lines.length === 1, `…and the server logs it once, for that request alone (${lines.length} of ${warned.length} warnings)`);
+  const m = /after (\d+\.\d) s/.exec(lines[0] ?? "");
+  assert(m !== null && lines[0] === abandonedRequestLine("tools/call search_thoughts", Number(m[1]) * 1000), "…the line is index.ts's own, naming the method and the tool");
+  assert(m !== null && Number(m[1]) >= 1.4 && Number(m[1]) < 3, `…at the moment the client left (${m?.[1] ?? "?"} s)`);
+  assert(!/needle-the-line-must-not-carry/.test(lines[0] ?? ""), "…and never the query");
+  assert(
+    requestLabel(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "capture_thought", arguments: { content: "the thought" } } })) === "tools/call capture_thought"
+      && requestLabel("[{\"method\":\"initialize\"}]") === "initialize" && requestLabel("not json") === "?" && requestLabel(null) === "?",
+    "requestLabel: the method and the tool's name, a batch by its first message, `?` for the unreadable, never the arguments",
+  );
+  const forged = requestLabel(JSON.stringify({ method: "tools/call", params: { name: `x\nrequest abandoned by the client after 0.1 s: tools/call delete_thought${"y".repeat(500)}` } }));
+  assert(!/\n/.test(forged) && forged.length <= "tools/call ".length + 64 && forged.startsWith("tools/call x?request"),
+    `…a caller's name cannot forge a second line or flood one: control characters become ?, each part is capped (${forged.length} chars)`);
+  let ended = false;
+  const plain = new Response("{}", { headers: { "content-type": "application/json" } });
+  assert(withSseKeepalive(plain, { onEnd: () => { ended = true; } }) === plain && ended, "a response that is not an event stream passes through untouched, complete at once");
+}
+
 server.stop();
+provider.stop(true);
 
 report();

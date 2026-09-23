@@ -148,6 +148,9 @@ export class PostgrestStore implements ThoughtStore {
     if (f.type) q = q.contains("metadata", { type: f.type });
     if (f.topic) q = q.contains("metadata", { topics: [f.topic] });
     if (f.person) q = q.contains("metadata", { people: [f.person] });
+    // SMD-1726: the two keys migration 050 stamps, the same containment.
+    if (f.saidBy) q = q.contains("metadata", { actor_kind: f.saidBy });
+    if (f.actor?.trim()) q = q.contains("metadata", { actor_name: f.actor.trim() });
     if (f.days) {
       const since = new Date();
       since.setDate(since.getDate() - f.days);

@@ -524,6 +524,57 @@ export function parseFilter(raw: unknown): Record<string, unknown> {
   return out;
 }
 
+// SMD-1726: who wrote a thought's current text, on the read path. Migration 050
+// stamps two reserved metadata keys from the write's key — `actor_kind`
+// (ob1_agents.kind: operator | agent | ingested) and `actor_name` (the key's
+// name) — so "only what the operator said" is the same jsonb containment every
+// other filter key takes, on 014's route, and the hit can say who wrote it.
+/** The three words the key registry holds (migration 046, `ob1_agents.kind`); `said_by` takes one. */
+const SAID_BY = ["operator", "agent", "ingested"] as const;
+const saidByInput = z.enum(SAID_BY).optional()
+  .describe("Only thoughts whose current text was written through a key of this kind: operator (typed by the operator), agent (an agent's own output — a summary, a conclusion), or ingested (an importer copying outside text). Decided by the key that made the write, never by the thought's text. Omit for every writer.");
+const actorInput = z.string().trim().min(1).max(200).optional()
+  .describe("Only thoughts whose current text was written through the access key with this name — the name on a hit's `By:` line. Omit for every key.");
+
+/**
+ * `said_by` and `actor` folded into the metadata filter (SMD-1726): the two
+ * are the keys migration 050 stamps, so the store, the query log and the plan
+ * see one filter and the arguments are sugar over it. A `filter` that names
+ * the same key with another value is a caller contradicting itself, refused
+ * at the boundary as parseFilter refuses a nested object. Exported for the
+ * unit test.
+ */
+export function withActorFilter(filter: Record<string, unknown>, saidBy: string | undefined, actor: string | undefined): Record<string, unknown> {
+  const out = { ...filter };
+  // The stamp trims the key's name (050), so the argument is trimmed here too —
+  // a pasted "op-key " must find the rows op-key wrote (second review pass).
+  for (const [key, value, arg] of [["actor_kind", saidBy, "said_by"], ["actor_name", actor?.trim() || undefined, "actor"]] as const) {
+    if (value === undefined) continue;
+    if (key in out && out[key] !== value) throw new Error(`${arg} is "${value}" but filter.${key} is ${JSON.stringify(out[key])} — pass one of the two`);
+    out[key] = value;
+  }
+  // The caps are the filter's, so they hold over the folded object too (first
+  // review pass: a 20-key filter plus the two was 22 keys the store ran).
+  return parseFilter(out);
+}
+
+/**
+ * The `By:` line under a hit — who wrote its current text, from the two keys
+ * migration 050 stamps. Absent when the row carries neither (a write from
+ * outside the server, or a brain whose backfill has not run), as `Captured:`
+ * is absent for an undated row. A name with no kind is a key nobody has
+ * classified yet (set_agent_kind), said so rather than guessed. The name is
+ * the key's — the server's word, not the thought's — and is rendered through
+ * the same cleaner every quoted text takes all the same. Exported for the
+ * unit test.
+ */
+export function actorLine(m: Record<string, unknown>): string | null {
+  const name = typeof m.actor_name === "string" && m.actor_name.trim() ? snipText(m.actor_name, 80) : null;
+  const kind = typeof m.actor_kind === "string" && (SAID_BY as readonly string[]).includes(m.actor_kind) ? m.actor_kind : null;
+  if (!name && !kind) return null;
+  return `By: ${name ?? "an unnamed key"} (${kind ?? "kind not classified"})`;
+}
+
 function buildServer(principal: Principal): McpServer {
   const server = new McpServer({
     name: SERVER_NAME,
@@ -781,7 +832,8 @@ function buildServer(principal: Principal): McpServer {
         "Search captured thoughts by meaning, with exact matching for identifier-shaped tokens in the query (SMD-944, upsert_thought, db/config.mjs, getUserById) and for \"quoted\" spans. " +
         "Use this when the user asks about a topic, person, or idea they've previously captured, including one named by an error code or a ticket key. " +
         "A thought containing one of those literals is ranked with the strongest results found by meaning, never below them, whatever its own similarity — provided the literal is rare enough to match exactly (found in no more than one keyword page of thoughts) and the result fits within the limit. " +
-        "Returns a fixed top-N; to page through every thought containing an exact string, or to match a literal that is too common here, use search_thoughts_keyword.",
+        "Returns a fixed top-N; to page through every thought containing an exact string, or to match a literal that is too common here, use search_thoughts_keyword. " +
+        "Every hit says who wrote it (`By: <key> (operator|agent|ingested)`); `said_by` keeps only what the operator typed, or only agents' output, and `actor` only one key's.",
       annotations: {
         readOnlyHint: true,
       },
@@ -815,14 +867,17 @@ function buildServer(principal: Principal): McpServer {
         // eval-replay's filtered path). Absent is unfiltered. The store applies
         // `metadata @> filter` inside the scan (014); parseFilter bounds it.
         filter: filterInput,
+        // SMD-1726: who wrote it, as two more keys of the same filter.
+        said_by: saidByInput,
+        actor: actorInput,
       },
     },
-    async ({ query, limit, threshold, recency_weight, filter }) => {
+    async ({ query, limit, threshold, recency_weight, filter, said_by, actor }) => {
       try {
         // The one search op, hybrid arm (SMD-1490): it gates the query
         // (SMD-1903), embeds it, runs the filter and logs. parseFilter refuses a
         // shape jsonb should not run; a bad filter falls to the catch below.
-        const r = await runSearch({ tool: "search_thoughts", arm: "hybrid", query, limit, threshold, recencyWeight: recency_weight, filter: parseFilter(filter) });
+        const r = await runSearch({ tool: "search_thoughts", arm: "hybrid", query, limit, threshold, recencyWeight: recency_weight, filter: withActorFilter(parseFilter(filter), said_by, actor) });
         if (r.refused) return r.refused;
         const data = r.rows;
 
@@ -880,6 +935,11 @@ function buildServer(principal: Principal): McpServer {
               ...(captured ? [`Captured: ${captured}`] : []),
               `Type: ${m.type || "unknown"}`,
             );
+            // SMD-1726: who wrote the current text, from the key (050); its own
+            // line, as every field of this block is — nothing parses `ID:`
+            // past the id, and nothing should start to.
+            const by = actorLine(m);
+            if (by) parts.push(by);
             if (t.matchedNeedles.length) parts.push(`Contains: ${t.matchedNeedles.join(", ")}`);
             if (Array.isArray(m.topics) && m.topics.length)
               parts.push(`Topics: ${(m.topics as string[]).join(", ")}`);
@@ -967,15 +1027,18 @@ function buildServer(principal: Principal): McpServer {
         // SMD-1490: the same metadata filter as search_thoughts, applied inside
         // the keyword scan (`metadata @> filter`). Absent is unfiltered.
         filter: filterInput,
+        // SMD-1726: who wrote it, as two more keys of the same filter.
+        said_by: saidByInput,
+        actor: actorInput,
       },
     },
-    async ({ query, limit, offset, filter }) => {
+    async ({ query, limit, offset, filter, said_by, actor }) => {
       try {
         // The one search op, keyword arm (SMD-1490): no gate (a keyword search
         // embeds nothing, so nothing leaves the box), the filter applied inside
         // the scan, and — new since SMD-1490 — a query_log row written with
         // arm='keyword' (034 logged only the semantic path).
-        const r = await runSearch({ tool: "search_thoughts_keyword", arm: "keyword", query, limit, offset, filter: parseFilter(filter) });
+        const r = await runSearch({ tool: "search_thoughts_keyword", arm: "keyword", query, limit, offset, filter: withActorFilter(parseFilter(filter), said_by, actor) });
         const data = r.rows;
 
         if (data.length === 0) {
@@ -1018,6 +1081,9 @@ function buildServer(principal: Principal): McpServer {
             ...(captured ? [`Captured: ${captured}`] : []),
             `Type: ${m.type || "unknown"}`,
           ];
+          // SMD-1726: who wrote it, the line search_thoughts prints.
+          const by = actorLine(m);
+          if (by) parts.push(by);
           if (Array.isArray(m.topics) && m.topics.length)
             parts.push(`Topics: ${(m.topics as string[]).join(", ")}`);
           parts.push(`\n${t.content}`);
@@ -1056,7 +1122,7 @@ function buildServer(principal: Principal): McpServer {
     {
       title: "List Recent Thoughts",
       description:
-        "List recently captured thoughts with optional filters by type, topic, person, or time range.",
+        "List recently captured thoughts with optional filters by type, topic, person, time range, or who wrote them (`said_by`: operator | agent | ingested; `actor`: a key's name). Each item says who wrote it on a `By:` line.",
       annotations: {
         readOnlyHint: true,
       },
@@ -1066,11 +1132,15 @@ function buildServer(principal: Principal): McpServer {
         topic: z.string().optional().describe("Filter by topic tag"),
         person: z.string().optional().describe("Filter by person mentioned"),
         days: z.number().optional().describe("Only thoughts from the last N days"),
+        // SMD-1726: who wrote it — the two keys 050 stamps, as containment
+        // clauses beside type, topic and person.
+        said_by: saidByInput,
+        actor: actorInput,
       },
     },
-    async ({ limit, type, topic, person, days }) => {
+    async ({ limit, type, topic, person, days, said_by, actor }) => {
       try {
-        const data = await (await db()).listThoughts({ limit, type, topic, person, days });
+        const data = await (await db()).listThoughts({ limit, type, topic, person, days, saidBy: said_by, actor });
 
         if (!data.length) {
           return { content: [{ type: "text" as const, text: "No thoughts found." }] };
@@ -1090,9 +1160,14 @@ function buildServer(principal: Principal): McpServer {
             // update_thought and delete_thought take. This compact format has no
             // header group, so it trails the content. SMD-1248.
             const mark = superseded[t.id] ? `\n   ⚠ Superseded by a newer thought — ID ${superseded[t.id]}` : "";
+            // SMD-1726: who wrote it, AFTER the id line, indented as the block
+            // is — the content-then-ID adjacency stays, which this repo's own
+            // e2e suite ([8]) matched on and a client may too.
+            const by = actorLine(m);
+            const who = by ? `\n   ${by}` : "";
             // SMD-1328: the date bracket is structural here, so an undated row
             // reads `[undated]` (never `[1/1/1970]`); a sentinel shows its text.
-            return `${i + 1}. [${displayDate(t.created_at) ?? "undated"}] (${m.type || "??"}${tags ? " - " + tags : ""})\n   ${t.content}\n   ID: ${t.id}${mark}`;
+            return `${i + 1}. [${displayDate(t.created_at) ?? "undated"}] (${m.type || "??"}${tags ? " - " + tags : ""})\n   ${t.content}\n   ID: ${t.id}${who}${mark}`;
           }
         );
 
@@ -2068,6 +2143,142 @@ app.all("/.well-known/*", (c) => c.text("Not Found", 404, corsHeaders));
 const HEALTH_PATH = /(^|\/)health\/?$/;
 app.get("*", async (c, next) => (HEALTH_PATH.test(c.req.path) ? c.text("ok", 200, corsHeaders) : next()));
 
+// ── A tool call outlives the runtime's idle timeout (SMD-1864) ───────────────
+//
+// The transport answers a POST with an SSE stream at once and writes the tool's
+// result to it when the tool returns; until then the stream carries nothing.
+// Bun closes a connection that has been silent for `idleTimeout` seconds — 10
+// by default — a streaming response included, at the next of its 4-second
+// sweeps, so between 8 and 12 s of silence by phase; it never reaches into a
+// handler that has not yet returned a response. Measured on 1.4.0, macOS and
+// the Alpine image alike: a handler still pending at 12 s answers normally,
+// body read or not, on a fresh or a reused socket; a streamed response silent
+// for 13 s is closed at the sweep, the client sees ECONNRESET, and the handler
+// runs on to write into a closed stream; a comment frame every 5 s keeps it
+// open. A capture whose embedding and metadata calls ran past ten seconds was
+// that second case (9.76 s, deterministically, on the dogfood brain), with no
+// line in the server's log. So every SSE response leaves through
+// withSseKeepalive: a `: keepalive` comment — a line SSE parsers discard by
+// specification, so no client sees an event — every SSE_KEEPALIVE_MS for the
+// life of the stream, until the transport closes it or the client goes, when
+// the timer stops itself. The idle timeout itself stays at the runtime's
+// default: its job is reaping dead keep-alive sockets, and raising it to the
+// ceiling of 255 s would move the cliff a long capture falls off rather than
+// remove it, and let a dead socket linger 25× longer. Half the default, so a
+// stream is never silent for a whole sweep; a proxy's read timeout in front of
+// the server (SMD-1846) is kept the same way.
+export const SSE_KEEPALIVE_MS = 5_000;
+
+/**
+ * How long a stream is kept alive at most. A provider call is bounded by
+ * OB1_LLM_TIMEOUT (120 s, embed.ts) and a capture makes a few; a database
+ * write is bounded by nothing — a transaction stuck on upsert_thought's
+ * fingerprint lock (033) would hold every concurrent capture of that thought,
+ * and with an unbounded keepalive each would hold a stream and a timer for
+ * hours with no line anywhere. Past this the timer stops, one line says so,
+ * and the runtime's idle timeout takes over: a call this long is stuck, not
+ * slow. (Review pass 1.)
+ */
+export const SSE_KEEPALIVE_MAX_MS = 10 * 60_000;
+
+/** The SSE comment frame the keepalive writes. A line beginning `:` is a comment (WHATWG, "event stream interpretation"): every parser drops it. */
+const SSE_KEEPALIVE_FRAME = new TextEncoder().encode(": keepalive\n\n");
+
+/**
+ * The response with its SSE body kept alive: a comment frame every
+ * `intervalMs` until the body ends (`onEnd` runs once, then), the client
+ * leaves (`signal` aborts, or the next frame finds the stream closed — either
+ * stops the timer, so an abandoned call leaks nothing), or `maxMs` passes
+ * since `startedAt` (the timer stops, `stalledRequestLine` is logged for
+ * `label` and `onStall` runs once — the route marks the request settled, so
+ * the runtime's reap that follows on Bun is not logged as a client leaving; on
+ * Node or Workers nothing reaps a silent stream, and it stays open until the
+ * client or a proxy gives up). A response that is not an event stream is
+ * returned as it is, `onEnd` run at once: it is complete.
+ */
+export function withSseKeepalive(
+  response: Response,
+  opts: { intervalMs?: number; maxMs?: number; startedAt?: number; signal?: AbortSignal; onEnd?: () => void; onStall?: () => void; label?: string } = {},
+): Response {
+  const body = response.body;
+  if (!body || !/^text\/event-stream\b/i.test(response.headers.get("content-type") ?? "")) {
+    opts.onEnd?.();
+    return response;
+  }
+  const intervalMs = opts.intervalMs ?? SSE_KEEPALIVE_MS;
+  const maxMs = opts.maxMs ?? SSE_KEEPALIVE_MAX_MS;
+  const started = opts.startedAt ?? performance.now();
+  let timer: ReturnType<typeof setInterval> | null = null;
+  const stop = () => {
+    if (timer === null) return;
+    clearInterval(timer);
+    timer = null;
+    opts.signal?.removeEventListener("abort", stop);
+  };
+  const keepalive = new TransformStream<Uint8Array, Uint8Array>({
+    start(controller) {
+      timer = setInterval(() => {
+        const elapsed = performance.now() - started;
+        if (elapsed >= maxMs) {
+          stop();
+          console.warn(stalledRequestLine(opts.label ?? "?", elapsed));
+          opts.onStall?.();
+          return;
+        }
+        try {
+          controller.enqueue(SSE_KEEPALIVE_FRAME);
+        } catch {
+          stop(); // the readable side closed under the timer: the client left
+        }
+      }, intervalMs);
+    },
+    flush() {
+      stop(); // the transport closed the stream: the response is complete
+      opts.onEnd?.();
+    },
+  });
+  opts.signal?.addEventListener("abort", stop, { once: true });
+  if (opts.signal?.aborted) stop(); // gone before the stream was built: nothing to keep alive
+  return new Response(body.pipeThrough(keepalive), { status: response.status, statusText: response.statusText, headers: response.headers });
+}
+
+/** A caller's string as a log line may carry it: printable ASCII only — a newline would forge a second line — and at most this many characters. */
+const LABEL_PART_MAX = 64;
+const labelPart = (s: string): string => s.replace(/[^\x20-\x7e]/g, "?").slice(0, LABEL_PART_MAX);
+
+/**
+ * What a log line may say about a request: the JSON-RPC method and, for a
+ * tool call, the tool's name — never the arguments, which are the thought —
+ * each as `labelPart` admits it, since both are the caller's strings. A batch
+ * is named by its first message; anything unreadable is `?`.
+ */
+export function requestLabel(bodyText: string | null): string {
+  try {
+    const parsed: unknown = JSON.parse(bodyText ?? "");
+    const first = Array.isArray(parsed) ? parsed[0] : parsed;
+    const msg = (first ?? {}) as { method?: unknown; params?: { name?: unknown } };
+    const method = typeof msg.method === "string" ? labelPart(msg.method) : "?";
+    return typeof msg.params?.name === "string" ? `${method} ${labelPart(msg.params.name)}` : method;
+  } catch {
+    return "?";
+  }
+}
+
+/** The line logged when a stream has been kept alive for SSE_KEEPALIVE_MAX_MS: the call is stuck, and the keepalive lets go. */
+export function stalledRequestLine(label: string, elapsedMs: number): string {
+  return `request still running after ${Math.round(elapsedMs / 1000)} s: ${label} — the keepalive stops here and the runtime's idle timeout takes over; a provider call is bounded by OB1_LLM_TIMEOUT, so look at the database (SMD-1864)`;
+}
+
+/**
+ * The line the server logs when a client closes the connection before the
+ * response is complete — the trace SMD-1864's captures never left. The tool
+ * runs to its end regardless (a capture may still land), which the line says,
+ * so an operator reading a duplicate row later knows where it came from.
+ */
+export function abandonedRequestLine(label: string, elapsedMs: number): string {
+  return `request abandoned by the client after ${(elapsedMs / 1000).toFixed(1)} s: ${label} — the connection closed before the response was complete; the call runs to its end on this side, so a capture may still have landed (SMD-1864)`;
+}
+
 // The MCP endpoint, registered for MCP_METHODS only. The transport is built per
 // request and is sessionless, so a GET has no server stream to open: before
 // change 75 an authenticated GET cost an agent-registry resolve and a server
@@ -2079,6 +2290,31 @@ app.get("*", async (c, next) => (HEALTH_PATH.test(c.req.path) ? c.text("ok", 200
 // it) would not have been enough; it treats the 405 notFound gives as "no
 // stream here". FORK.md change 75.
 app.on(MCP_METHODS, "*", async (c) => {
+  // The one thing this server logs per request (SMD-1849 has the rest): a
+  // client that closes the connection before the response is complete, named
+  // by method and tool, never by content. Registered first, so a client that
+  // leaves during the key check, the registry resolve or the body read is
+  // logged too (a listener added to a signal already aborted never fires — so
+  // that case is checked by hand); the label is filled in once the body is
+  // read. The signal aborts when the client goes, not when a complete
+  // response's socket is later reaped (measured), and `settled` keeps the line
+  // to the former anyway.
+  const signal = c.req.raw.signal;
+  const started = performance.now();
+  let label = "?";
+  let settled = false;
+  const abandoned = () => {
+    if (!settled) console.warn(abandonedRequestLine(label, performance.now() - started));
+  };
+  signal.addEventListener("abort", abandoned, { once: true });
+  if (signal.aborted) {
+    // Gone before the route ran: the line, and nothing else — no key check, no
+    // registry resolve, no tool run for a client that will never read it. The
+    // status reaches no one; 408 is the nearest name for what happened.
+    abandoned();
+    return c.body(null, 408);
+  }
+
   // Accept the access key via header, bearer token OR URL query parameter — every
   // form presented is tried, so a gateway's own bearer token beside the client's
   // `?key=` does not shadow it. The query form stays because Claude Desktop
@@ -2099,6 +2335,7 @@ app.on(MCP_METHODS, "*", async (c) => {
     // correlated; malformed/missing bodies fall back to id: null.
     const bodyText = await readBodyText(c.req.raw);
     const id = extractJsonRpcId(bodyText);
+    settled = true;
     return unauthorizedResponse(id);
   }
 
@@ -2115,19 +2352,33 @@ app.on(MCP_METHODS, "*", async (c) => {
   const identity = await agents().resolve(db(), principal);
   if (identity.status === "revoked") {
     const bodyText = await readBodyText(c.req.raw);
+    settled = true;
     return unauthorizedResponse(extractJsonRpcId(bodyText), REVOKED_MESSAGE);
   }
   principal.agentId = identity.agentId;
   if (identity.status === "ok") principal.agentUnresolved = identity.unresolved;
 
+  // The label, read through Hono's request, which caches the body for the
+  // transport's own read of it — the same text, the same rejection: a body
+  // that cannot be read (the client gone mid-upload) is `?` here and the
+  // transport's 400 there, as before this read existed.
+  label = requestLabel(await c.req.text().catch(() => null));
+
   const server = buildServer(principal);
   const transport = new StreamableHTTPTransport();
   await server.connect(transport);
   const response = await transport.handleRequest(c);
-  if (!response) return c.json({ error: "No response from MCP transport" }, 500, corsHeaders);
+  if (!response) {
+    settled = true;
+    return c.json({ error: "No response from MCP transport" }, 500, corsHeaders);
+  }
   response.headers.delete("mcp-session-id");
   for (const [k, v] of Object.entries(corsHeaders)) response.headers.set(k, v);
-  return response;
+  // Kept alive for as long as the tool runs, up to SSE_KEEPALIVE_MAX_MS from the
+  // route's entry (SMD-1864, above); a stall settles the request too, so the
+  // reap that follows it is not a second line blaming the client.
+  const settle = () => { settled = true; };
+  return withSseKeepalive(response, { signal, label, startedAt: started, onEnd: settle, onStall: settle });
 });
 
 // Whatever no route above matched: 405 with `Allow`, before authenticate(), so
@@ -2147,6 +2398,8 @@ app.notFound((c) =>
 
 export default {
   // Workers reads `fetch`; Bun also reads `port`. Node uses @hono/node-server.
+  // No `idleTimeout`: a tool call outlives the default by the keepalive above,
+  // and the default is the right reaper for a dead socket (SMD-1864).
   port: Number((globalThis as { process?: { env?: Record<string, string> } }).process?.env?.PORT ?? 8000),
   fetch: app.fetch,
 };

@@ -1,7 +1,16 @@
 #!/usr/bin/env bun
 /**
- * test-tools.ts — every tool of the five extension servers on the SQL shim
- * answers against a real Postgres carrying the extensions' own schemas.
+ * test-tools.ts — every tool of the eight MCP servers with a schema of their
+ * own on the SQL shim — seven extension servers and the ob-graph recipe —
+ * answers against a real Postgres carrying those schemas.
+ *
+ * SMD-1798 added the three servers that were still on supabase-js — family-
+ * calendar, job-hunt and ob-graph, held there by a grouped `.or()`, a
+ * three-level `!inner` embed, an `in.(…)` list and a `!fk_name` hint the shim
+ * did not read until that change — so a shim gap in any of those shapes fails
+ * a named assertion here too. (enhanced-mcp, agent-memory-api and the
+ * metadata worker, the other three that moved, need the model provider
+ * stubbed and the fork's own tables; test-writes.ts drives them.)
  *
  * SMD-1588 (FORK.md change 77). Fix 13 moved these servers onto
  * compat/supabase-sql by changing one import line and never drove them; change
@@ -29,9 +38,10 @@
  *
  * The drift guard: each server's `tools/list` under a write key is exactly the
  * set of tools driven here, so a tool added to a server fails this suite until
- * it is driven. Twenty-nine tools on five servers (the ticket's "twenty-five"
- * counted the four `index.ts` files; the shared meal-planning server's four
- * are the rest).
+ * it is driven. Fifty-five tools on eight servers: twenty-nine on the five
+ * change 77 drove (SMD-1588's "twenty-five" counted the four `index.ts` files;
+ * the shared meal-planning server's four are the rest), six on family-calendar,
+ * ten on job-hunt and ten on ob-graph.
  *
  *   ../db/with-postgres.sh bun test-tools.ts
  */
@@ -54,25 +64,30 @@ const { assert, report } = createAssert();
 await resetSchema(URL_, { dim: 1536, model: "openai/text-embedding-3-small" });
 const sql = new SQL({ url: URL_, max: 2 });
 
-/** The five servers, by the schema that owns their tables (the shared server reads meal-planning's). */
-const SCHEMAS = ["household-knowledge", "home-maintenance", "meal-planning", "professional-crm"];
-const schemaText = (ext: string) => readFileSync(join(ROOT, "extensions", ext, "schema.sql"), "utf8");
-/** What the four schemas create, dropped before they are applied and at the end. meal-planning's CREATE TABLE has no IF NOT EXISTS. */
+/** The eight servers, by the schema that owns their tables (the shared server reads meal-planning's; job-hunt's last tool writes into professional-crm's). */
+const SCHEMAS = ["extensions/household-knowledge/schema.sql", "extensions/home-maintenance/schema.sql", "extensions/meal-planning/schema.sql", "extensions/professional-crm/schema.sql",
+  "extensions/family-calendar/schema.sql", "extensions/job-hunt/schema.sql", "recipes/ob-graph/schema.sql"];
+const schemaText = (rel: string) => readFileSync(join(ROOT, rel), "utf8");
+/** What the schemas create, dropped before they are applied and at the end. meal-planning's and family-calendar's CREATE TABLE have no IF NOT EXISTS. */
 async function dropExtensionSchemas() {
-  for (const ext of SCHEMAS) {
-    const text = schemaText(ext);
+  for (const rel of SCHEMAS) {
+    const text = schemaText(rel);
     for (const m of text.matchAll(/CREATE TABLE (?:IF NOT EXISTS )?(\w+)/g)) await sql.unsafe(`DROP TABLE IF EXISTS public.${m[1]} CASCADE`);
     for (const m of text.matchAll(/CREATE OR REPLACE FUNCTION (\w+)\s*\(/g)) await sql.unsafe(`DROP FUNCTION IF EXISTS public.${m[1]} CASCADE`);
   }
 }
 await dropExtensionSchemas();
 // The READMEs' Step 1: the two Supabase functions the RLS policies call, created plain (a Supabase database has them; a
-// throwaway one does not — dropped first here so a re-run on a kept database applies cleanly).
+// throwaway one does not — dropped first here so a re-run on a kept database applies cleanly), and the three Supabase
+// roles ob-graph's GRANT and REVOKE statements name, as its README says to create them.
 await sql.unsafe(`CREATE SCHEMA IF NOT EXISTS auth;
   DROP FUNCTION IF EXISTS auth.uid(); DROP FUNCTION IF EXISTS auth.jwt();
   CREATE FUNCTION auth.uid() RETURNS uuid LANGUAGE sql STABLE AS 'SELECT NULL::uuid';
   CREATE FUNCTION auth.jwt() RETURNS jsonb LANGUAGE sql STABLE AS 'SELECT ''{}''::jsonb';`);
-for (const ext of SCHEMAS) await sql.unsafe(schemaText(ext));
+for (const role of ["authenticated", "service_role", "anon"]) {
+  await sql.unsafe(`DO $r$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${role}') THEN CREATE ROLE ${role} NOLOGIN; END IF; END $r$`);
+}
+for (const rel of SCHEMAS) await sql.unsafe(schemaText(rel));
 
 // ── Deno's two globals, and the environment the READMEs document ────────────
 
@@ -94,10 +109,13 @@ process.env.MCP_HOUSEHOLD_ACCESS_KEY = KEY;
 process.env.DEFAULT_USER_ID = USER;
 for (const name of ["MCP_ACCESS_KEYS", "MCP_HOUSEHOLD_ACCESS_KEYS", "SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_HOUSEHOLD_KEY", "OB1_PG_POOL"]) delete process.env[name];
 
+/** Each server's handler by file, for the drift guard at the end. */
+const handlers = new Map<string, Handler>();
 async function load(rel: string): Promise<Handler> {
   const before = served.length;
   await import(join(ROOT, rel));
   assert(served.length === before + 1, `${rel} imports as deployed and hands Deno.serve one handler`);
+  handlers.set(rel, served[before]);
   return served[before];
 }
 
@@ -469,6 +487,177 @@ let pastaId = "", saladId = "", shoppingListId = "";
   assert(ok(staleOne) && staleOne.body?.count === 1, "…limit applies");
 }
 
+// ── extensions/family-calendar (SMD-1798) ────────────────────────────────────
+
+{
+  const F = "extensions/family-calendar/index.ts";
+  console.log(`\n[${F}]`);
+  const h = await load(F);
+  const c = (name: string, args: Record<string, unknown>) => call(F, h, name, args);
+  // These tools answer the row or the rows themselves, no envelope.
+  const titles = (r: Called) => (Array.isArray(r.body) ? (r.body as { title: string }[]) : []).map((a) => a.title).sort().join();
+
+  const ada = await c("add_family_member", { name: "Ada", relationship: "child", birth_date: "2018-03-01" });
+  assert(ok(ada) && UUID.test(ada.body?.id) && ada.body?.relationship === "child" && ada.body?.birth_date === "2018-03-01", `add_family_member stores the row and answers it, the birth date a bare date (${failure(ada) || JSON.stringify(ada.body).slice(0, 80)})`);
+  const adaId = String(ada.body?.id);
+  // Five activities around the week of 2026-09-21: one recurring, four dated — one across the week, one ended before it,
+  // one open-ended since before it, one ahead of it.
+  const swim = await c("add_activity", { family_member_id: adaId, title: "Swimming", activity_type: "sports", day_of_week: "monday", start_time: "16:00", end_time: "17:00" });
+  const camp = await c("add_activity", { title: "Autumn camp", activity_type: "school", start_date: "2026-09-20", end_date: "2026-09-27", start_time: "09:00" });
+  const ended = await c("add_activity", { title: "Spring term", activity_type: "school", start_date: "2026-09-01", end_date: "2026-09-10", start_time: "08:00" });
+  const ongoing = await c("add_activity", { title: "Piano", activity_type: "music", start_date: "2026-09-15", start_time: "18:00" });
+  const ahead = await c("add_activity", { title: "Ski trip", activity_type: "sports", start_date: "2026-10-15", start_time: "07:00" });
+  assert([swim, camp, ended, ongoing, ahead].every(ok) && swim.body?.family_member_id === adaId && camp.body?.family_member_id === null, `add_activity ×5: a recurring one for Ada, four dated ones for the whole family (${[swim, camp, ended, ongoing, ahead].map(failure).filter(Boolean).join("; ")})`);
+  const week = await c("get_week_schedule", { week_start: "2026-09-21" });
+  assert(ok(week) && titles(week) === "Autumn camp,Piano,Swimming", `get_week_schedule: the recurring activity and the two whose dates reach the week, not the one that ended before it or the one ahead — the grouped .or() the shim reads since SMD-1798 (${failure(week) || titles(week)})`);
+  assert(week.body?.[0]?.title === "Autumn camp" && week.body?.[2]?.title === "Piano", `…ordered by start time (${(week.body ?? []).map((a: { title: string }) => a.title).join()})`);
+  const swimRow = week.body?.find((a: { title: string }) => a.title === "Swimming");
+  assert(swimRow?.family_members?.name === "Ada" && swimRow?.family_members?.relationship === "child" && Object.keys(swimRow?.family_members ?? {}).sort().join() === "name,relationship" && week.body?.find((a: { title: string }) => a.title === "Piano")?.family_members === null,
+    `…each with its family member embedded through the key column — the two named columns, no more — or null for the whole family (${JSON.stringify(swimRow?.family_members)})`);
+  const forAda = await c("get_week_schedule", { week_start: "2026-09-21", family_member_id: adaId });
+  assert(ok(forAda) && titles(forAda) === "Swimming", `…filtered to one family member (${titles(forAda)})`);
+  const byQuery = await c("search_activities", { query: "camp" });
+  assert(ok(byQuery) && titles(byQuery) === "Autumn camp", `search_activities by title, ILIKE (${failure(byQuery) || titles(byQuery)})`);
+  const byType = await c("search_activities", { activity_type: "sports" });
+  assert(ok(byType) && titles(byType) === "Ski trip,Swimming", `…by type (${titles(byType)})`);
+  const byMember = await c("search_activities", { family_member_id: adaId });
+  assert(ok(byMember) && titles(byMember) === "Swimming" && byMember.body?.[0]?.family_members?.relationship === "child", "…by family member, the member embedded");
+  const every = await c("search_activities", {});
+  const dated = (every.body ?? []).filter((a: { start_date: string | null }) => a.start_date);
+  assert(ok(every) && every.body?.length === 5 && dated[0]?.title === "Ski trip" && dated[3]?.title === "Spring term", `…no filter lists all five, latest start date first (${(every.body ?? []).map((a: { title: string }) => a.title).join()})`);
+  const bday = await c("add_important_date", { family_member_id: adaId, title: "Ada's birthday", date_value: dateDaysFromNow(10), recurring_yearly: true });
+  const renewal = await c("add_important_date", { title: "Insurance renewal", date_value: dateDaysFromNow(60), reminder_days_before: 14 });
+  assert(ok(bday) && ok(renewal) && bday.body?.recurring_yearly === true && bday.body?.reminder_days_before === 7 && renewal.body?.reminder_days_before === 14 && renewal.body?.recurring_yearly === false, `add_important_date ×2, the defaults filled (${failure(bday) || failure(renewal) || JSON.stringify(bday.body).slice(0, 80)})`);
+  const soon = await c("get_upcoming_dates", { days_ahead: 30 });
+  assert(ok(soon) && soon.body?.length === 1 && soon.body?.[0]?.title === "Ada's birthday" && soon.body?.[0]?.family_members?.name === "Ada" && soon.body?.[0]?.date_value === dateDaysFromNow(10), `get_upcoming_dates: the birthday within 30 days, the member embedded, the date bare (${failure(soon) || JSON.stringify(soon.body).slice(0, 100)})`);
+  const wider = await c("get_upcoming_dates", { days_ahead: 90 });
+  assert(ok(wider) && wider.body?.length === 2 && wider.body?.[1]?.title === "Insurance renewal" && wider.body?.[1]?.family_members === null, `…a wider window takes in the renewal, ordered by date, a family-wide date's member null (${(wider.body ?? []).map((d: { title: string }) => d.title).join()})`);
+}
+
+// ── extensions/job-hunt (SMD-1798) ───────────────────────────────────────────
+
+{
+  const F = "extensions/job-hunt/index.ts";
+  console.log(`\n[${F}]`);
+  const h = await load(F);
+  const c = (name: string, args: Record<string, unknown>) => call(F, h, name, args);
+
+  const acme = await c("add_company", { name: "Acme Robotics", industry: "robotics", size: "startup", remote_policy: "hybrid", glassdoor_rating: 4.2 });
+  assert(ok(acme) && UUID.test(acme.body?.company?.id) && acme.body?.company?.name === "Acme Robotics" && Number(acme.body?.company?.glassdoor_rating) === 4.2, `add_company (${failure(acme) || JSON.stringify(acme.body?.company).slice(0, 80)})`);
+  const globex = await c("add_company", { name: "Globex", industry: "energy" });
+  assert(ok(globex) && UUID.test(globex.body?.company?.id), `…and a second company (${failure(globex)})`);
+  const acmeId = String(acme.body?.company?.id);
+  const posting = await c("add_job_posting", { company_id: acmeId, title: "Staff Engineer", requirements: ["TypeScript", "Postgres"], salary_min: 180000, salary_max: 220000, source: "referral", posted_date: "2026-09-01" });
+  assert(ok(posting) && UUID.test(posting.body?.job_posting?.id) && eqJson(posting.body?.job_posting?.requirements, ["TypeScript", "Postgres"]) && eqJson(posting.body?.job_posting?.nice_to_haves, []) && posting.body?.job_posting?.posted_date === "2026-09-01",
+    `add_job_posting: the text[] requirements as a list, the empty default too, the date bare (${failure(posting) || JSON.stringify(posting.body?.job_posting).slice(0, 120)})`);
+  const rita = await c("add_job_contact", { company_id: acmeId, name: "Rita Recruiter", title: "Talent Partner", email: "rita@acme.example", role_in_process: "recruiter" });
+  assert(ok(rita) && UUID.test(rita.body?.job_contact?.id) && rita.body?.job_contact?.companies?.name === "Acme Robotics", `add_job_contact answers the contact with its company embedded (${failure(rita) || JSON.stringify(rita.body?.job_contact?.companies)})`);
+  const hank = await c("add_job_contact", { name: "Hank Hiring", role_in_process: "hiring_manager", notes: "met at the robotics meetup" });
+  assert(ok(hank) && hank.body?.job_contact?.companies === null, "…and null where the contact has no company");
+  const gina = await c("add_job_contact", { company_id: String(globex.body?.company?.id), name: "Gina", role_in_process: "interviewer" });
+  assert(ok(gina), `…a third, at the second company (${failure(gina)})`);
+  const app = await c("submit_application", { job_posting_id: posting.body?.job_posting?.id, applied_date: "2026-09-05", resume_version: "v3" });
+  assert(ok(app) && UUID.test(app.body?.application?.id) && app.body?.application?.status === "applied" && app.body?.application?.applied_date === "2026-09-05", `submit_application (${failure(app)})`);
+  const appId = String(app.body?.application?.id);
+  const screen = await c("schedule_interview", { application_id: appId, interview_type: "phone_screen", scheduled_at: isoDaysFromNow(2), duration_minutes: 45, interviewer_name: "Rita Recruiter" });
+  assert(ok(screen) && UUID.test(screen.body?.interview?.id) && screen.body?.interview?.status === "scheduled", `schedule_interview (${failure(screen)})`);
+  const technical = await c("schedule_interview", { application_id: appId, interview_type: "technical", scheduled_at: isoDaysFromNow(20) });
+  assert(ok(technical), `…and a second, further out (${failure(technical)})`);
+  const upcoming = await c("get_upcoming_interviews", { days_ahead: 7 });
+  assert(ok(upcoming) && upcoming.body?.count === 1 && upcoming.body?.interviews?.[0]?.interview_type === "phone_screen", `get_upcoming_interviews within 7 days: the phone screen, not the technical in 20 (${failure(upcoming) || upcoming.body?.count})`);
+  const ctx = upcoming.body?.interviews?.[0]?.applications;
+  assert(ctx?.status === "applied" && ctx?.job_postings?.title === "Staff Engineer" && ctx?.job_postings?.companies?.name === "Acme Robotics" && eqJson(ctx?.job_postings?.requirements, ["TypeScript", "Postgres"]),
+    `…each interview carrying its application, posting and company nested three deep — the !inner chain the shim reads since SMD-1798 (${JSON.stringify(ctx).slice(0, 140)})`);
+  const wider = await c("get_upcoming_interviews", { days_ahead: 30 });
+  assert(ok(wider) && wider.body?.count === 2 && wider.body?.interviews?.[1]?.interview_type === "technical", `…a wider window takes in both, soonest first (${wider.body?.count})`);
+  const overview = await c("get_pipeline_overview", { days_ahead: 7 });
+  assert(ok(overview) && overview.body?.total_applications === 1 && overview.body?.status_breakdown?.applied === 1 && overview.body?.upcoming_interviews_count === 1 && overview.body?.upcoming_interviews?.[0]?.applications?.job_postings?.companies?.name === "Acme Robotics",
+    `get_pipeline_overview: the status breakdown and the week's interviews with their context (${failure(overview) || JSON.stringify(overview.body).slice(0, 120)})`);
+  const notes = await c("log_interview_notes", { interview_id: screen.body?.interview?.id, feedback: "went well", rating: 4 });
+  assert(ok(notes) && notes.body?.interview?.status === "completed" && notes.body?.interview?.rating === 4 && notes.body?.interview?.feedback === "went well", `log_interview_notes marks the interview completed (${failure(notes)})`);
+  const afterNotes = await c("get_upcoming_interviews", { days_ahead: 30 });
+  assert(ok(afterNotes) && afterNotes.body?.count === 1 && afterNotes.body?.interviews?.[0]?.interview_type === "technical", "…and it leaves the upcoming list");
+  const byCompany = await c("search_job_contacts", { query: "globex" });
+  assert(ok(byCompany) && byCompany.body?.count === 1 && byCompany.body?.contacts?.[0]?.name === "Gina" && byCompany.body?.contacts?.[0]?.companies?.name === "Globex",
+    `search_job_contacts by a company's name — nothing on the contact says it; the company_id.in.(…) term inside .or() does (${failure(byCompany) || byCompany.body?.count})`);
+  const byNotes = await c("search_job_contacts", { query: "meetup" });
+  assert(ok(byNotes) && byNotes.body?.count === 1 && byNotes.body?.contacts?.[0]?.name === "Hank Hiring", `…by a word in the notes, through the flat ILIKE terms (${byNotes.body?.count})`);
+  const byRole = await c("search_job_contacts", { role_in_process: "recruiter" });
+  assert(ok(byRole) && byRole.body?.count === 1 && byRole.body?.contacts?.[0]?.name === "Rita Recruiter", `…by role (${byRole.body?.count})`);
+  const unlinked = await c("search_job_contacts", { only_unlinked: true });
+  assert(ok(unlinked) && unlinked.body?.count === 3, `…only the unlinked: all three (${unlinked.body?.count})`);
+  const link = await c("link_contact_to_professional_crm", { job_contact_id: rita.body?.job_contact?.id });
+  assert(ok(link) && UUID.test(link.body?.professional_contact?.id) && link.body?.professional_contact?.company === "Acme Robotics" && eqJson(link.body?.professional_contact?.tags, ["job-hunt", "recruiter"]) && link.body?.job_contact?.professional_crm_contact_id === link.body?.professional_contact?.id,
+    `link_contact_to_professional_crm creates the CRM contact (professional-crm's schema) with the company's name and the tags as a list, and links it (${failure(link) || JSON.stringify(link.body).slice(0, 120)})`);
+  const again = await c("link_contact_to_professional_crm", { job_contact_id: rita.body?.job_contact?.id });
+  assert(ok(again) && again.body?.already_linked === true, "…and a second link says already linked, creating nothing");
+  const stillUnlinked = await c("search_job_contacts", { only_unlinked: true });
+  assert(ok(stillUnlinked) && stillUnlinked.body?.count === 2, `…so two are unlinked now (${stillUnlinked.body?.count})`);
+  const missing = await c("link_contact_to_professional_crm", { job_contact_id: NO_ROW });
+  assert(!ok(missing) && /Failed to retrieve job contact/.test(failure(missing)), `an unknown contact fails by name (${failure(missing).slice(0, 60)})`);
+}
+
+// ── recipes/ob-graph (SMD-1798) ──────────────────────────────────────────────
+
+{
+  const F = "recipes/ob-graph/index.ts";
+  console.log(`\n[${F}]`);
+  const h = await load(F);
+  const c = (name: string, args: Record<string, unknown>) => call(F, h, name, args);
+  const node = async (label: string, node_type: string, properties?: Record<string, unknown>) => {
+    const r = await c("create_node", { label, node_type, ...(properties ? { properties: JSON.stringify(properties) } : {}) });
+    assert(ok(r) && UUID.test(r.body?.node?.id) && r.body?.node?.label === label && r.body?.node?.node_type === node_type, `create_node ${label} (${failure(r)})`);
+    return String(r.body?.node?.id);
+  };
+  const supabase = await node("Supabase", "tool", { url: "https://supabase.com" });
+  const brain = await node("Open Brain", "project");
+  const postgres = await node("Postgres", "tool");
+  const island = await node("Island", "place");
+  const dependsOn = await c("create_edge", { source_node_id: brain, target_node_id: supabase, relationship_type: "depends_on", weight: 0.9 });
+  const runsOn = await c("create_edge", { source_node_id: supabase, target_node_id: postgres, relationship_type: "runs_on" });
+  // weight is a REAL: Bun decodes the float4 into a double (0.8999999761581421), where PostgREST prints Postgres's shortest
+  // spelling (0.9) — a rendering difference the shim does not paper over; the value is the one stored.
+  assert(ok(dependsOn) && ok(runsOn) && UUID.test(dependsOn.body?.edge?.id) && Math.abs(Number(dependsOn.body?.edge?.weight) - 0.9) < 1e-6 && Number(runsOn.body?.edge?.weight) === 1, `create_edge ×2, the weight stored and defaulted (${failure(dependsOn) || failure(runsOn) || dependsOn.body?.edge?.weight})`);
+  const dup = await c("create_edge", { source_node_id: brain, target_node_id: supabase, relationship_type: "depends_on" });
+  assert(!ok(dup) && /Failed to create edge/.test(failure(dup)) && /unique_edge/.test(failure(dup)), `a duplicate edge is refused by the unique constraint, the message the database's (${failure(dup).slice(0, 80)})`);
+  const found = await c("search_nodes", { query: "supa" });
+  assert(ok(found) && found.body?.count === 1 && found.body?.nodes?.[0]?.label === "Supabase" && found.body?.nodes?.[0]?.properties?.url === "https://supabase.com", `search_nodes by label, ILIKE, the properties as JSON (${failure(found) || found.body?.count})`);
+  const tools = await c("search_nodes", { node_type: "tool" });
+  assert(ok(tools) && tools.body?.count === 2, `…by type (${tools.body?.count})`);
+  const neighbours = await c("get_neighbors", { node_id: supabase });
+  const labels = (r: Called) => ((r.body?.neighbors ?? []) as { neighbor: { label: string } | null }[]).map((n) => n.neighbor?.label).sort().join();
+  assert(ok(neighbours) && neighbours.body?.count === 2 && labels(neighbours) === "Open Brain,Postgres", `get_neighbors both ways: the node each edge reaches, embedded through the key the file names (graph_nodes!graph_edges_target_node_id_fkey) — the hint the shim reads since SMD-1798 (${failure(neighbours) || labels(neighbours)})`);
+  const out = neighbours.body?.neighbors?.find((n: { direction: string }) => n.direction === "outgoing");
+  assert(out?.neighbor?.label === "Postgres" && out?.relationship_type === "runs_on" && out?.neighbor?.node_type === "tool" && typeof out?.neighbor?.id === "string", `…the outgoing one Postgres, the neighbour an object of the four named columns (${JSON.stringify(out?.neighbor)})`);
+  const incoming = await c("get_neighbors", { node_id: supabase, direction: "incoming", relationship_type: "depends_on" });
+  assert(ok(incoming) && incoming.body?.count === 1 && labels(incoming) === "Open Brain", `…incoming only, by relationship type (${labels(incoming)})`);
+  const walk = await c("traverse_graph", { start_node_id: brain, max_depth: 3 });
+  const deepest = (walk.body?.nodes ?? []).find((n: { node_label: string }) => n.node_label === "Postgres");
+  assert(ok(walk) && walk.body?.count === 3 && walk.body?.nodes?.[0]?.depth === 0 && deepest?.depth === 2 && deepest?.via_relationship === "runs_on",
+    `traverse_graph from Open Brain: the start, Supabase, Postgres — three rows by depth (${failure(walk) || JSON.stringify(walk.body?.nodes).slice(0, 120)})`);
+  assert(Array.isArray(deepest?.path) && deepest.path.length === 3 && deepest.path[0] === brain && deepest.path[2] === postgres, `…each row's path a list of ids — a uuid[] through to_json, not the literal text Bun left it as (${JSON.stringify(deepest?.path)})`);
+  const typedWalk = await c("traverse_graph", { start_node_id: brain, relationship_type: "depends_on" });
+  assert(ok(typedWalk) && typedWalk.body?.count === 2, `…following one relationship type stops at Supabase (${typedWalk.body?.count})`);
+  const path = await c("find_path", { start_node_id: brain, end_node_id: postgres });
+  assert(ok(path) && path.body?.path_found === true && path.body?.steps === 3 && path.body?.path?.[0]?.node_id === brain && path.body?.path?.[2]?.node_label === "Postgres" && path.body?.path?.[2]?.via_relationship === "runs_on",
+    `find_path Open Brain → Postgres: three steps through Supabase (${failure(path) || JSON.stringify(path.body).slice(0, 120)})`);
+  const noPath = await c("find_path", { start_node_id: brain, end_node_id: island });
+  assert(ok(noPath) && noPath.body?.path_found === false, `…and none to the island (${JSON.stringify(noPath.body)})`);
+  const updated = await c("update_node", { node_id: supabase, label: "Supabase (hosted)", properties: JSON.stringify({ tier: "pro" }) });
+  assert(ok(updated) && updated.body?.node?.label === "Supabase (hosted)" && eqJson(updated.body?.node?.properties, { url: "https://supabase.com", tier: "pro" }), `update_node relabels and merges the properties (${failure(updated) || JSON.stringify(updated.body?.node?.properties)})`);
+  const nothing = await c("update_node", { node_id: supabase });
+  assert(!ok(nothing) && /No fields to update/.test(failure(nothing)), "…and nothing to update is refused by name");
+  const types = await c("list_edge_types", {});
+  assert(ok(types) && types.body?.count === 2 && (types.body?.types ?? []).map((t: { relationship_type: string }) => t.relationship_type).sort().join() === "depends_on,runs_on", `list_edge_types counts each type (${failure(types) || JSON.stringify(types.body?.types)})`);
+  const gone = await c("delete_edge", { edge_id: runsOn.body?.edge?.id });
+  const typesAfter = await c("list_edge_types", {});
+  assert(ok(gone) && ok(typesAfter) && typesAfter.body?.count === 1 && typesAfter.body?.types?.[0]?.relationship_type === "depends_on", `delete_edge removes it (${failure(gone) || typesAfter.body?.count})`);
+  const removed = await c("delete_node", { node_id: supabase });
+  const orphaned = await c("get_neighbors", { node_id: brain });
+  const remaining = await c("search_nodes", {});
+  assert(ok(removed) && ok(orphaned) && orphaned.body?.count === 0 && ok(remaining) && remaining.body?.count === 3, `delete_node removes the node and, by cascade, its edge (${failure(removed) || `${orphaned.body?.count} neighbours, ${remaining.body?.count} nodes`})`);
+}
+
 // ── The connections the servers hold: every request built a client and closed none ──
 
 console.log("\n[the servers' clients share one pool]");
@@ -485,18 +674,20 @@ console.log("\n[the servers' clients share one pool]");
 
 console.log("\n[every tool each server registers is driven here]");
 {
-  const files = ["extensions/household-knowledge/index.ts", "extensions/home-maintenance/index.ts", "extensions/meal-planning/index.ts", "extensions/meal-planning/shared-server.ts", "extensions/professional-crm/index.ts"];
+  const files = ["extensions/household-knowledge/index.ts", "extensions/home-maintenance/index.ts", "extensions/meal-planning/index.ts", "extensions/meal-planning/shared-server.ts", "extensions/professional-crm/index.ts",
+    "extensions/family-calendar/index.ts", "extensions/job-hunt/index.ts", "recipes/ob-graph/index.ts"];
   let total = 0;
-  for (const [i, file] of files.entries()) {
-    const listed = await toolsOf(served[i]);
+  for (const file of files) {
+    const handler = handlers.get(file);
+    const listed = handler ? await toolsOf(handler) : [];
     const called = [...(driven.get(file) ?? [])].sort();
     assert(listed.length > 0 && listed.join() === called.join(), `${file}: tools/list under the write key is exactly the ${called.length} tool(s) driven above (${listed.join(", ")})`);
     total += listed.length;
   }
-  assert(total === 29, `twenty-nine tools on the five servers (${total})`);
+  assert(total === 55, `fifty-five tools on the eight servers (${total})`);
   const onShim = [...new Bun.Glob("extensions/**/*.ts").scanSync({ cwd: ROOT })]
     .filter((f) => !f.includes("node_modules") && !f.startsWith("extensions/test-") && /["'][^"'\n]*compat\/supabase-sql\/index\.ts["']/.test(readFileSync(join(ROOT, f), "utf8"))).sort();
-  assert(onShim.join() === [...files].sort().join(), `every extension file on the SQL shim is driven here (${onShim.join(", ")})`);
+  assert(onShim.join() === files.filter((f) => f.startsWith("extensions/")).sort().join(), `every extension file on the SQL shim is driven here (${onShim.join(", ")})`);
 }
 
 } catch (e) {

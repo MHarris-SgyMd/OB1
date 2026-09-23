@@ -1,3 +1,9 @@
+// MIGRATED OFF SUPABASE: imports compat/supabase-sql instead of @supabase/supabase-js.
+// Same API, but it speaks SQL directly. The environment variable NAMES are
+// unchanged — set SUPABASE_URL to a postgres:// connection string, and
+// SUPABASE_SERVICE_ROLE_KEY is ignored (credentials live in the URL).
+// ob1-original-import: @supabase/supabase-js
+// Revert with: bun scripts/migrate-to-sql-shim.ts --revert <file>
 /**
  * OB-Graph: Knowledge Graph MCP Server for Open Brain
  *
@@ -29,6 +35,7 @@
 // that write. FORK.md change 67; extensions/test-auth.ts exercises it.
 // The _shared import below is this file's first from outside its own directory: deploy
 // it with _shared/auth.ts beside it (supabase/functions/_shared/), as the README says.
+import "../../compat/deno-on-bun.ts";
 import { Hono, type Context } from "hono";
 // Deno reads the SDK's types through the extensionless subpath: its exports map
 // names them `./dist/esm/*.d.ts`, unreachable from `.js` (FORK.md change 84).
@@ -36,7 +43,7 @@ import { Hono, type Context } from "hono";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPTransport } from "@hono/mcp";
 import { z } from "zod";
-import { createClient } from "@supabase/supabase-js";
+import { createClient } from "../../compat/supabase-sql/index.ts";
 import { authenticateRequest, canWrite } from "../_shared/auth.ts";
 
 const app = new Hono();
