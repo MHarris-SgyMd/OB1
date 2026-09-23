@@ -4051,7 +4051,11 @@ with the evals; only numbers go to `baselines.json`.
 **Keyless, through the real server.** The provider is scripted as
 `test-chunking.ts` scripts it: a `Bun.serve` answers `/embeddings` (1 on the
 axis of each fictional subject the text names, a hashed weight on one of
-sixteen noise axes so two texts of one subject never tie — 28 dimensions) and
+sixteen noise axes so the texts of one subject rank in a fixed order, the
+query itself the bare axis — 28 dimensions; a corpus rule holds every pair of
+one subject at least 1e-6 apart in cosine to the query, a margin, since equal
+weights were measured to move the k cut run to run and one bucket apart was
+not) and
 `/chat/completions` for the three prompts the write path sends, told apart by
 their delimiters: the capture's metadata, the extractor's entities (the
 subject named), and the consolidation judge's verdict by one blunt rule — two
@@ -4100,6 +4104,34 @@ default        blind     92.6% (25/27)        0.0% (0/9)        100.0% (34/34)  
 
 catch by error class (default arm): stale 100.0% (3/3) · wrong_number 100.0% (3/3) · inference 100.0% (3/3)
 
+paired against the default arm — items the mechanism got right that its absence did not (helped) and the reverse (hurt), over the items both arms counted; McNemar exact, two-sided: facts (stated) and errors (not stated) each with its own p, and the mixed p over both, where opposite effects cancel
+mechanism    facts +/−  p       errors +/−  p       mixed p   helped items              hurt items                    unpaired
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+supersedes   0/0        1.000   3/0         0.250   0.250     hs1,tm1,ln2                                             
+judge        0/6        0.031   3/0         0.250   0.508     qs2,sf2,md2               qs1,zp1,pw1,sf1,md1,zp2       
+actor        0/2        0.500   2/0         0.500   1.000     gr2,ln4                   hs3,md3                       
+
+errors the default arm caught, and the mechanism each rests on (none named = caught by more than one of the arms run, or never retrieved)
+  hs1   stale         supersedes
+  tm1   stale         supersedes
+  ln2   stale         supersedes
+  gr2   inference     actor
+  qs2   wrong_number  judge
+  pw2   inference     more than one
+  sf2   wrong_number  judge
+  ln4   inference     actor
+  md2   wrong_number  judge
+```
+arm            reader   survival            catch               coverage            contested  unseen-err  returned  chars
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+default        labels    63.0% (17/27)      100.0% (9/9)        100.0% (26/26)              6           0        34   2266
+-supersedes    labels    63.0% (17/27)       66.7% (6/9)        100.0% (29/29)              6           0        34   2436
+-judge         labels    85.2% (23/27)       66.7% (6/9)        100.0% (26/26)              0           0        34   2014
+-actor         labels    70.4% (19/27)       77.8% (7/9)        100.0% (31/31)              6           0        34   2664
+default        blind     92.6% (25/27)        0.0% (0/9)        100.0% (34/34)              0           0        34   2554
+
+catch by error class (default arm): stale 100.0% (3/3) · wrong_number 100.0% (3/3) · inference 100.0% (3/3)
+
 paired against the default arm — items the mechanism got right that its absence did not (helped) and the reverse (hurt), over the items both arms counted; McNemar exact, two-sided, over the mixed set — read the facts / errors split beside it
 mechanism    helped  hurt   p       facts +/−   errors +/−   helped items              hurt items                    unpaired
 ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -4131,10 +4163,11 @@ judge             3     6   0.508   qs2,sf2,md2            qs1,zp1,pw1,sf1,md1,z
 actor             2     2   1.000   gr2,ln4                hs3,md3
 ```
 
-The paired table's `p` is McNemar over every discordant item — a mixed set,
-since "right" is stated for a fact and not stated for an error — so the
-facts / errors split beside it is the row to read: the judge's help is all
-errors and its hurt all facts. No planted error went unseen.
+The paired table carries a McNemar p per population — facts (stated) and
+errors (not stated) — and the mixed p over both, where two effects in
+opposite directions cancel: the judge's 0/6 on facts (p 0.031) and 3/0 on
+errors (p 0.250) read as "no effect" at 0.508 together. Read the two. No
+planted error went unseen.
 
 **What it says.**
 
@@ -4168,24 +4201,35 @@ errors and its hurt all facts. No planted error went unseen.
   back as given (035's re-capture path and the capture-key trim would show
   here) — and it is billed as that, not as a measure of the writer. A
   citation finer than the thought needs SMD-1715/1733.
-- **One coupling between arms, stated.** 029 keeps a superseded thought out
-  of the judge's pool and its candidates, so the `-supersedes` arm also hands
-  the judge the three stale decisions to pair. A corpus rule keeps that
-  inert — no item on a subject with a decision carries a digit — so the arm
-  measures the pointer alone by rule, not by accident.
+- **One coupling between arms, stated and measured.** 029 keeps a superseded
+  thought out of the judge's pool and its candidates, so the `-supersedes`
+  arm also hands the judge the three stale decisions to pair: five more pairs
+  judged than the default arm (114 chat calls against 109), none a proposal,
+  because a corpus rule holds that no item on a subject with a decision
+  carries a digit for the judge's rule to read. The arm measures the pointer
+  alone by that rule, not by accident.
 
 **The gate.** `--gate` runs the default arm and the blind reader in the
 data-layer job, keyless as the replay gate is (a step there rather than its
 own job: the write path needs the server and that database, and a step in a
 required job gates a merge with no new name in the ruleset, SMD-1856). It
 runs the corpus's shape rules, checks the record was made on this corpus at
-this k, then fails when the default arm's survival, catch or coverage is
-measured over a different population than recorded or falls below the
-recorded counts — exact, since the run is deterministic — or when more
-planted errors went unretrieved than recorded (an error the reader never
-sees is outside the catch rate, and a retrieval change that hid one would
-otherwise leave the rate at 1). It proves the floor has teeth with the blind
-reader (0%, below the recorded catch and this run's). `--self-check` runs in
+this k, then fails when the default arm's survival, catch or coverage falls
+below the recorded counts or is measured over a different population
+(coverage's is the line count, so any change to what the reader keeps moves
+it, and the message says so — the ratio is compared as well, so a lost
+citation cannot hide behind a changed count), when more planted errors went
+unretrieved than recorded (an error the reader never sees is outside the
+catch rate, and a retrieval change that hid one would otherwise leave the
+rate at 1), or when any item the record had right is wrong now, by id — a
+fact lost for a fact gained keeps every count. An item now right that the
+record had wrong is a note to re-record, not a failure. The four modes are
+one at a time (`--gate --record` once rewrote the record from two arms and
+then held it). It proves the floor has teeth with the blind reader (0%, below
+the recorded catch and this run's). The arm's process gets the parent's
+shell with every `OB1_*` variable removed and reads no `.env` file — a rule,
+not a list, so a dogfood shell's chunk knob or worker key cannot reach the
+server under test. `--self-check` runs in
 the portable-server job: the corpus's shape rules probed with broken copies,
 the stub's answers against the REAL prompts (both name their own delimiters
 in their rules before the wrapped text — the first draft read the rule as

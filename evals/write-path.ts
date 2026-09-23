@@ -67,25 +67,44 @@ export function noiseBucket(text: string): number {
 }
 
 /**
+ * Two texts of one subject must sit at least this far apart in cosine to the
+ * subject's query, or the k cut is decided by the row's random id (027's
+ * ORDER BY) and moves run to run. Measured: equal weights moved the cut
+ * (one run in three picked other items); one bucket apart did not — the
+ * exact rerank stage (039 / SMD-1707) orders at full precision. So this is
+ * a MARGIN, sixteen times float32's spacing near 1 and about a bucket's
+ * worth at the smallest weight, not a measured tie; `corpusProblems` holds
+ * it over the real vectors.
+ */
+export const MIN_COSINE_GAP = 1e-6;
+
+/**
  * The stub embedding: 1 on each named subject's axis, and a small weight on
- * one noise axis chosen by the text's hash — so a query (the subject's phrase
- * alone) sits near every text of its subject and orthogonal to the rest, and
- * the texts of one subject rank in a fixed order decided by nothing the
- * corpus author chose. The weight is what orders them (the cosine to the
- * query is 1/√(1+w²), whatever the axis), so the order is fixed only while no
- * two texts of one subject share a bucket — a rule `corpusProblems` holds,
- * with a bucket of clearance, since a tie would fall to the row's random id
- * (027's ORDER BY) and the k cut would move run to run. The range is wide
- * enough that adjacent buckets stay apart in float16, 039's index width.
- * A text naming no subject is noise alone.
+ * one noise axis chosen by the text's hash — so a query sits near every text
+ * of its subject and orthogonal to the rest, and the texts of one subject
+ * rank in a fixed order decided by nothing the corpus author chose. The
+ * QUERY — a subject's phrase alone — is the bare axis with no noise, so its
+ * cosine to a text is exactly 1/√(1+w²) and the weight alone orders the
+ * texts; with noise on the query too, a text sharing the query's noise axis
+ * gained w·w_q and jumped the order (review pass 2, demonstrated). A text
+ * naming no subject is noise alone.
  */
 export function vectorFor(text: string, dim = STUB_DIM): number[] {
   if (dim < STUB_DIM) throw new Error(`vectorFor: dim ${dim} is below the stub's ${STUB_DIM}`);
   const v = new Array<number>(dim).fill(0);
-  for (const k of subjectsIn(text)) v[SUBJECT_KEYS.indexOf(k)] = 1;
+  const named = subjectsIn(text);
+  for (const k of named) v[SUBJECT_KEYS.indexOf(k)] = 1;
+  if (named.length === 1 && text.trim().toLowerCase() === SUBJECTS[named[0]].toLowerCase()) return v;
   const h = fnv1a(text.trim().toLowerCase());
   v[SUBJECT_KEYS.length + (h % NOISE_AXES)] = 0.02 + 0.08 * (noiseBucket(text) / NOISE_BUCKETS);
   return v;
+}
+
+/** Cosine of two vectors of one width. */
+export function cosine(a: number[], b: number[]): number {
+  let dot = 0, na = 0, nb = 0;
+  for (let i = 0; i < a.length; i++) { dot += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]; }
+  return na && nb ? dot / Math.sqrt(na * nb) : 0;
 }
 
 /** The digit runs in a text, as strings, in order. */
@@ -390,11 +409,11 @@ export type Paired = {
   helped: string[];
   /** Items wrong with the mechanism and right without it. */
   hurt: string[];
-  /** McNemar over every discordant item — a mixed population (facts stated, errors not stated), so read the split beside it. */
+  /** McNemar over every discordant item — a MIXED population (facts stated, errors not stated); two effects in opposite directions cancel here. Read the two below. */
   p: number;
-  /** The same counts by what was planted: facts (survival's population) and errors (catch's). */
-  facts: { helped: number; hurt: number };
-  errors: { helped: number; hurt: number };
+  /** The same counts by what was planted — facts (survival's population) and errors (catch's) — each with its own McNemar p. */
+  facts: { helped: number; hurt: number; p: number };
+  errors: { helped: number; hurt: number; p: number };
   /** Items in one arm's population and not the other's (an error retrieved in one arm only): compared in neither direction. */
   unpaired: string[];
 };
@@ -407,7 +426,7 @@ export type Paired = {
 export function pair(withAll: ArmScore, without: ArmScore, mechanism: Mechanism, items: readonly Item[] = ITEMS): Paired {
   const byItem = new Map(items.map((i) => [i.id, i]));
   const helped: string[] = [], hurt: string[] = [], unpaired: string[] = [];
-  const facts = { helped: 0, hurt: 0 }, errors = { helped: 0, hurt: 0 };
+  const facts = { helped: 0, hurt: 0, p: 1 }, errors = { helped: 0, hurt: 0, p: 1 };
   for (const [id, o] of Object.entries(withAll.outcome)) {
     const w = without.outcome[id];
     if (!w) throw new Error(`pair: ${id} scored in the default arm and not in ${without.arm}`);
@@ -416,6 +435,8 @@ export function pair(withAll: ArmScore, without: ArmScore, mechanism: Mechanism,
     if (o.right && !w.right) { helped.push(id); bucket.helped++; }
     if (!o.right && w.right) { hurt.push(id); bucket.hurt++; }
   }
+  facts.p = mcnemarExact(facts.helped, facts.hurt);
+  errors.p = mcnemarExact(errors.helped, errors.hurt);
   return { mechanism, helped, hurt, p: mcnemarExact(helped.length, hurt.length), facts, errors, unpaired };
 }
 
@@ -450,7 +471,11 @@ export function caughtBy(withAll: ArmScore, withouts: Partial<Record<Mechanism, 
  * errors never retrieved, since those sit outside the catch rate and a
  * retrieval change that hid an error would otherwise leave it at 1.
  */
-export type Floor = { survival: Rate; catch: Rate; coverage: Rate; unseenErrors: number };
+export type Floor = {
+  survival: Rate; catch: Rate; coverage: Rate; unseenErrors: number;
+  /** The items the default arm got right, sorted — a fact lost for a fact gained keeps every count and fails here by name. */
+  right: string[];
+};
 export type WritePathBaseline = {
   via: string;
   /** corpusLabel() at the record — the gate refuses a corpus that reads differently. */
@@ -458,7 +483,8 @@ export type WritePathBaseline = {
   reader_k: number;
   floor: Floor;
   arms: Record<string, { survival: number | null; catch: number | null; coverage: number | null; contested: number; unseen_errors: number; returned: number; chars: number }>;
-  paired: Record<string, { helped: number; hurt: number; p: number }>;
+  /** Per mechanism: facts and errors each with their own McNemar p, and the mixed p over both (where opposite effects cancel). */
+  paired: Record<string, { facts: { helped: number; hurt: number; p: number }; errors: { helped: number; hurt: number; p: number }; mixed_p: number }>;
 };
 
 export const round3 = (x: number | null): number | null => (x === null ? null : Math.round(x * 1000) / 1000);
@@ -471,7 +497,8 @@ export function corpusLabel(): string {
 /** The floor an arm's score would record. */
 export function floorOf(s: ArmScore): Floor {
   const rate = (r: Rate): Rate => ({ n: r.n, of: r.of });
-  return { survival: rate(s.survival), catch: rate(s.catch), coverage: rate(s.coverage), unseenErrors: s.catch.unseen };
+  const right = Object.entries(s.outcome).filter(([, o]) => o.counted && o.right).map(([id]) => id).sort();
+  return { survival: rate(s.survival), catch: rate(s.catch), coverage: rate(s.coverage), unseenErrors: s.catch.unseen, right };
 }
 
 /** The three rates of an arm, rounded as the record keeps them. */
@@ -480,30 +507,41 @@ export function ratesOf(s: ArmScore): { survival: number | null; catch: number |
 }
 
 /**
- * The gate's comparison: each of the default arm's three rates over the SAME
- * population as recorded (the denominators equal) and at or above the
- * recorded ratio, and no more errors unseen than recorded. The run is
+ * The gate's comparison. Failures: a rate below the recorded ratio (compared
+ * whether or not the population moved — a lost citation must not hide
+ * behind a changed line count); a population other than the recorded one
+ * (the denominators differ; coverage's is the line count, so any change to
+ * what the reader keeps moves it, and the message says so); more errors
+ * unseen than recorded; and any item the record had right that this run has
+ * wrong, by id — the counts alone pass a fact lost for a fact gained. Notes:
+ * an item now right that the record had wrong, since a floor is a floor and
+ * an improvement passes, but the record should say so. The run is
  * deterministic — a stub provider, a fixed corpus, hashed tie-breaks — so
  * the floor is the value recorded, not a tolerance below it; a legitimate
- * change that moves a rate re-records the section, as `bench.ts
- * --rebaseline` asks for the retrieval ones. Returns the failures in words,
- * empty when it holds. A rate with an empty denominator never passes
- * silently.
+ * change re-records the section, as `bench.ts --rebaseline` asks for the
+ * retrieval ones. A rate with an empty denominator never passes silently.
  */
-export function compareToFloor(s: ArmScore, floor: Floor): string[] {
-  const out: string[] = [];
+export function compareToFloor(s: ArmScore, floor: Floor): { failures: string[]; notes: string[] } {
+  const failures: string[] = [], notes: string[] = [];
   const check = (name: "survival" | "catch" | "coverage", r: Rate) => {
     const f = floor[name];
-    if (r.of !== f.of) { out.push(`${name}: measured over ${r.of} item(s), recorded over ${f.of} — not the recorded population; re-record`); return; }
+    if (r.of !== f.of) failures.push(`${name}: measured over ${r.of} item(s), recorded over ${f.of} — not the recorded population${name === "coverage" ? " (the line count: the reader kept a different set of hits)" : ""}; re-record if the change is meant`);
     const v = ratio(r), fv = ratio(f);
-    if (v === null || fv === null) { out.push(`${name}: nothing to measure (${r.n}/${r.of})`); return; }
-    if (v + 1e-9 < fv) out.push(`${name}: ${v.toFixed(3)} (${r.n}/${r.of}) is below the recorded ${fv.toFixed(3)} (${f.n}/${f.of})`);
+    if (v === null || fv === null) { failures.push(`${name}: nothing to measure (${r.n}/${r.of})`); return; }
+    if (v + 1e-9 < fv) failures.push(`${name}: ${v.toFixed(3)} (${r.n}/${r.of}) is below the recorded ${fv.toFixed(3)} (${f.n}/${f.of})`);
+    else if (v > fv + 1e-9) notes.push(`${name}: ${v.toFixed(3)} (${r.n}/${r.of}) is above the recorded ${fv.toFixed(3)} (${f.n}/${f.of}); re-record to hold it`);
   };
   check("survival", s.survival);
   check("catch", s.catch);
   check("coverage", s.coverage);
-  if (s.catch.unseen > floor.unseenErrors) out.push(`unseen errors: ${s.catch.unseen} planted error(s) never retrieved, recorded ${floor.unseenErrors} — a retrieval change hid an error the catch rate cannot see`);
-  return out;
+  if (s.catch.unseen > floor.unseenErrors) failures.push(`unseen errors: ${s.catch.unseen} planted error(s) never retrieved, recorded ${floor.unseenErrors} — a retrieval change hid an error the catch rate cannot see`);
+  const rightNow = new Set(Object.entries(s.outcome).filter(([, o]) => o.counted && o.right).map(([id]) => id));
+  const rightThen = new Set(floor.right);
+  const lost = [...rightThen].filter((id) => !rightNow.has(id)).sort();
+  const gained = [...rightNow].filter((id) => !rightThen.has(id)).sort();
+  if (lost.length) failures.push(`items the record had right and this run has wrong: ${lost.join(", ")}`);
+  if (gained.length) notes.push(`items this run has right and the record had wrong: ${gained.join(", ")}; re-record to hold them`);
+  return { failures, notes };
 }
 
 // ── Rendering ───────────────────────────────────────────────────────────────
@@ -512,6 +550,7 @@ const pct = (r: Rate): string => (r.of ? `${((100 * r.n) / r.of).toFixed(1).padS
 
 /** The report: one row per arm, then the paired table per mechanism, then each caught error's mechanism. */
 export function renderReport(scores: ArmScore[], paired: Paired[], caught: Record<string, Mechanism[]>, items: readonly Item[] = ITEMS): string {
+  const def0 = scores.find((s) => s.arm === "default" && s.reader === "labels");
   const lines: string[] = [];
   lines.push(`arm            reader   survival            catch               coverage            contested  unseen-err  returned  chars`);
   lines.push(`─`.repeat(118));
@@ -525,20 +564,24 @@ export function renderReport(scores: ArmScore[], paired: Paired[], caught: Recor
   if (def) {
     lines.push(``, `catch by error class (default arm): ` + ERROR_CLASSES.map((c) => `${c} ${pct(def.catch.byClass[c]).trim()}`).join(" · "));
   }
-  lines.push(``, `paired against the default arm — items the mechanism got right that its absence did not (helped) and the reverse (hurt), over the items both arms counted; McNemar exact, two-sided, over the mixed set — read the facts / errors split beside it`);
-  lines.push(`mechanism    helped  hurt   p       facts +/−   errors +/−   helped items              hurt items                    unpaired`);
+  if (!paired.length) {
+    lines.push(``, `paired mechanisms and attribution: not measured in this run (no mechanism arm ran; the report and --record run them)`);
+    return lines.join("\n");
+  }
+  lines.push(``, `paired against the default arm — items the mechanism got right that its absence did not (helped) and the reverse (hurt), over the items both arms counted; McNemar exact, two-sided: facts (stated) and errors (not stated) each with its own p, and the mixed p over both, where opposite effects cancel`);
+  lines.push(`mechanism    facts +/−  p       errors +/−  p       mixed p   helped items              hurt items                    unpaired`);
   lines.push(`─`.repeat(118));
   for (const p of paired) {
     lines.push(
-      `${p.mechanism.padEnd(12)} ${String(p.helped.length).padStart(6)}  ${String(p.hurt.length).padStart(4)}   ${p.p.toFixed(3)}   ` +
-      `${`${p.facts.helped}/${p.facts.hurt}`.padEnd(11)} ${`${p.errors.helped}/${p.errors.hurt}`.padEnd(12)} ${p.helped.join(",").padEnd(25)} ${p.hurt.join(",").padEnd(29)} ${p.unpaired.join(",")}`,
+      `${p.mechanism.padEnd(12)} ${`${p.facts.helped}/${p.facts.hurt}`.padEnd(10)} ${p.facts.p.toFixed(3)}   ${`${p.errors.helped}/${p.errors.hurt}`.padEnd(11)} ${p.errors.p.toFixed(3)}   ${p.p.toFixed(3)}     ` +
+      `${p.helped.join(",").padEnd(25)} ${p.hurt.join(",").padEnd(29)} ${p.unpaired.join(",")}`,
     );
   }
   const byItem = new Map(items.map((i) => [i.id, i]));
-  lines.push(``, `errors the default arm caught, and the mechanism each rests on (none named = caught by more than one, or never retrieved)`);
+  lines.push(``, `errors the default arm caught, and the mechanism each rests on (none named = caught by more than one of the arms run, or never retrieved)`);
   for (const [id, ms] of Object.entries(caught)) {
     const it = byItem.get(id);
-    lines.push(`  ${id.padEnd(5)} ${(it?.planted.kind ?? "?").padEnd(13)} ${ms.length ? ms.join(" + ") : (def?.outcome[id]?.retrieved ? "more than one" : "never retrieved")}`);
+    lines.push(`  ${id.padEnd(5)} ${(it?.planted.kind ?? "?").padEnd(13)} ${ms.length ? ms.join(" + ") : (def0?.outcome[id]?.retrieved ? "more than one" : "never retrieved")}`);
   }
   return lines.join("\n");
 }
@@ -560,9 +603,11 @@ export function corpusProblems(items: readonly Item[] = ITEMS, specs: readonly D
     // The same text is one row after upsert_thought's fingerprint (003/035):
     // two items would be scored from one presentation, and the second's
     // capture writes no derived_from.
-    const t = texts.get(it.text.trim().toLowerCase());
-    if (t) out.push(`${it.id} repeats ${t}'s text; upsert_thought would make them one row`);
-    else texts.set(it.text.trim().toLowerCase(), it.id);
+    // 003's rule, as content_fingerprint_of spells it: whitespace runs collapsed, trimmed, lower-cased.
+    const key = it.text.replace(/\s+/g, " ").trim().toLowerCase();
+    const t = texts.get(key);
+    if (t) out.push(`${it.id} repeats ${t}'s text under 003's fingerprint; upsert_thought would make them one row`);
+    else texts.set(key, it.id);
   });
   const phrases = SUBJECT_KEYS.map((k) => SUBJECTS[k].toLowerCase());
   for (const a of phrases) for (const b of phrases) if (a !== b && b.includes(a)) out.push(`subject phrase "${a}" is inside "${b}"`);
@@ -599,16 +644,21 @@ export function corpusProblems(items: readonly Item[] = ITEMS, specs: readonly D
       // (decide); an inference on an agent-only subject no mechanism can catch.
       if (!items.some((o) => o.subject === it.subject && o.writer === "op")) out.push(`${it.id} is an inference on ${it.subject}, where the operator never spoke; nothing could catch it`);
     }
-    if (it.planted.kind === "wrong_number") {
-      // 029 judges a thought against its k nearest OLDER neighbours sharing an
-      // entity, k = the shipped DEFAULT_CANDIDATES; a slip meets its twin only
-      // while the subject has no more earlier items than that. The eval runs
-      // the worker at the shipped k so the number is the shipped pass's.
-      const session = sessions.findIndex((s) => s.items.some((x) => x.id === it.id));
-      const earlier = sessions.slice(0, session).flatMap((s) => s.items).filter((o) => o.subject === it.subject).length;
-      if (earlier > DEFAULT_CANDIDATES) out.push(`${it.id}'s subject has ${earlier} earlier items, more than the shipped ${DEFAULT_CANDIDATES} candidates; its twin may not be judged`);
-    }
   });
+  const sessionOf = (id: string): number => sessions.findIndex((s) => s.items.some((x) => x.id === id));
+  // 029 judges a thought against its k nearest OLDER neighbours (a calendar
+  // day earlier — a session here) sharing an entity, k = the shipped
+  // DEFAULT_CANDIDATES the worker runs at. Every pair the judge stub would
+  // read as a conflict — a slip and its twin, or two true facts with different
+  // numbers — must have the newer side with no more earlier neighbours than
+  // that, or the pair is never judged and the expectation and the run part.
+  for (const b of items) {
+    const sb = sessionOf(b.id);
+    const earlier = items.filter((a) => a.subject === b.subject && sessionOf(a.id) < sb);
+    if (earlier.length > DEFAULT_CANDIDATES && earlier.some((a) => judgeRule(a.text, b.text).verdict === "conflict")) {
+      out.push(`${b.id} conflicts with an earlier item and has ${earlier.length} earlier neighbours on ${b.subject}, more than the shipped ${DEFAULT_CANDIDATES} candidates; the pair may not be judged`);
+    }
+  }
   // The -supersedes arm is not one mechanism by itself: 029 keeps a superseded
   // thought out of the judge's pool and its candidates, so writing no pointer
   // also gives the judge three more thoughts to pair. Inert only while nothing
@@ -616,13 +666,15 @@ export function corpusProblems(items: readonly Item[] = ITEMS, specs: readonly D
   // a rule here, not an accident of the corpus.
   const decisionSubjects = new Set(items.filter((it) => it.planted.kind === "stale").map((it) => it.subject));
   for (const it of items) if (decisionSubjects.has(it.subject) && numbersIn(it.text).length) out.push(`${it.id} carries a digit on ${it.subject}, a subject with a decision pair; the -supersedes arm would move the judge's pairs too`);
-  // The tie-break: two texts of one subject in the same or adjacent noise
-  // bucket tie for the query, and the k cut falls to the row's random id.
+  // The tie-break, over the real vectors: two texts of one subject closer
+  // than MIN_COSINE_GAP to the subject's query tie for it, and the k cut
+  // falls to the row's random id.
   const bySubject = new Map<SubjectKey, Item[]>();
   for (const it of items) bySubject.set(it.subject, [...(bySubject.get(it.subject) ?? []), it]);
   for (const [k, group] of bySubject) {
-    const sorted = group.map((it) => ({ id: it.id, b: noiseBucket(it.text) })).sort((x, y) => x.b - y.b);
-    for (let i = 1; i < sorted.length; i++) if (sorted[i].b - sorted[i - 1].b < 2) out.push(`${sorted[i - 1].id} and ${sorted[i].id} (${k}) take noise buckets ${sorted[i - 1].b} and ${sorted[i].b}; the query would rank them by their row ids — re-word one`);
+    const q = vectorFor(SUBJECTS[k]);
+    const sorted = group.map((it) => ({ id: it.id, c: cosine(vectorFor(it.text), q) })).sort((x, y) => x.c - y.c);
+    for (let i = 1; i < sorted.length; i++) if (sorted[i].c - sorted[i - 1].c < MIN_COSINE_GAP) out.push(`${sorted[i - 1].id} and ${sorted[i].id} (${k}) sit ${(sorted[i].c - sorted[i - 1].c).toExponential(2)} apart in cosine to the query, under ${MIN_COSINE_GAP}; the query would rank them by their row ids — re-word one`);
   }
   const covered = new Set(specs.flatMap((s) => s.subjects));
   for (const k of SUBJECT_KEYS) if (!covered.has(k)) out.push(`subject ${k} is in no deliverable`);

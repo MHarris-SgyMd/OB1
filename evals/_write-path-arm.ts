@@ -24,17 +24,21 @@
  * `RESULT <json>`, the Observation write-path.ts scores, and one
  * `SUMMARY …` line of the arm's cost on stderr.
  *
- * One coupling between arms, stated: 029 keeps a superseded thought out of
- * the judge's pool and its candidates, so the -supersedes arm also hands
- * the judge the three stale decisions to pair. `corpusProblems` keeps that
- * inert by rule — no item on a subject with a decision carries a digit — so
- * the arm still measures the pointer alone; a corpus that broke the rule
- * would credit the judge's work to the pointer.
+ * One coupling between arms, stated and measured: 029 keeps a superseded
+ * thought out of the judge's pool and its candidates, so the -supersedes arm
+ * also hands the judge the three stale decisions to pair — five more pairs
+ * judged than the default arm (114 chat calls against 109), none a proposal,
+ * because `corpusProblems` holds that no item on a subject with a decision
+ * carries a digit for the judge's rule to read. The arm measures the
+ * pointer alone by that rule; a digit there would let the judge's verdicts
+ * differ between the two arms and be credited to the pointer.
  *
- * The parent's environment is not trusted: every knob the server, the
- * egress gate or the workers read is set or removed below, so a shell that
- * exports a dogfood key or policy (OB1_WORKER_KEY, OB1_EGRESS_POLICY) does
- * not change the number or fail the gate.
+ * The parent's environment is not trusted: every OB1_* variable but this
+ * arm's own is removed first thing — a rule, not a list, so a knob added
+ * tomorrow cannot reach the server or the workers either (db/test-support's
+ * shellWithoutOb1 is the same rule for the migrator) — and what the run
+ * needs is then set by name. The parent spawns this file with
+ * `--no-env-file` so no `.env` on the path is read either.
  */
 
 import { SQL } from "bun";
@@ -49,6 +53,8 @@ import {
 } from "./write-path.ts";
 
 const t0 = Date.now();
+// Before anything reads the environment: every OB1_* knob but this arm's own goes.
+for (const k of Object.keys(process.env)) if (k.startsWith("OB1_") && !k.startsWith("OB1_WP_")) delete process.env[k];
 const URL_ = process.env.DATABASE_URL;
 if (!URL_) { console.error("DATABASE_URL is not set."); process.exit(2); }
 const ARM = (process.env.OB1_WP_ARM ?? "default") as Arm;
@@ -100,11 +106,8 @@ process.env.OB1_METADATA_MODEL = META_MODEL;
 process.env.OB1_LLM_TIMEOUT = "10";
 process.env.MCP_ACCESS_KEYS = `op-key:write:${hashKey(OP_RAW)},bot-key:write:${hashKey(BOT_RAW)}`;
 process.env.OB1_AGENT_CACHE_TTL_MS = "0";
-for (const k of [
-  "MCP_ACCESS_KEY", "OPENROUTER_API_KEY", "OB1_LLM_API_KEY", "OB1_CHAT_BASE_URL", "OB1_CHAT_API_KEY", "OB1_CHAT_LOCAL", "OB1_JUDGE_MODEL",
-  "OB1_QUERY_LOG", "OB1_TIER", "OB1_EGRESS_POLICY", "OB1_EGRESS_ALLOW", "OB1_EGRESS_DENY", "OB1_WORKER_KEY", "OB1_EMBEDDING_DIMENSIONS",
-  "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY",
-]) delete process.env[k];
+// The OB1_* knobs went above; these are the server's other doors.
+for (const k of ["MCP_ACCESS_KEY", "OPENROUTER_API_KEY", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"]) delete process.env[k];
 
 const worker = (await import("../server-portable/index.ts")).default as { fetch: (r: Request) => Response | Promise<Response> };
 const server = Bun.serve({ port: 0, fetch: worker.fetch });
@@ -154,7 +157,8 @@ for (const [day, session] of SESSIONS.entries()) {
 
 let extracted = 0;
 async function runWorker(script: string, args: string[]): Promise<string> {
-  const proc = Bun.spawn(["bun", join(HERE, "..", "db", script), "--url", URL_!, ...args], {
+  // --no-env-file: the worker must not read a db/.env or evals/.env either.
+  const proc = Bun.spawn(["bun", "--no-env-file", join(HERE, "..", "db", script), "--url", URL_!, ...args], {
     env: {
       ...process.env,
       OB1_LLM_BASE_URL: PROVIDER,

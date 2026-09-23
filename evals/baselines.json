@@ -212,7 +212,35 @@
         "n": 26,
         "of": 26
       },
-      "unseenErrors": 0
+      "unseenErrors": 0,
+      "right": [
+        "cb1",
+        "cb2",
+        "cb3",
+        "gr1",
+        "gr2",
+        "gr3",
+        "hs1",
+        "hs2",
+        "ln1",
+        "ln2",
+        "ln3",
+        "ln4",
+        "md2",
+        "mz2",
+        "mz3",
+        "mz4",
+        "mz6",
+        "mz7",
+        "ob1",
+        "ob2",
+        "pw2",
+        "qs2",
+        "qs3",
+        "sf2",
+        "tm1",
+        "tm2"
+      ]
     },
     "arms": {
       "default": {
@@ -263,19 +291,43 @@
     },
     "paired": {
       "supersedes": {
-        "helped": 3,
-        "hurt": 0,
-        "p": 0.25
+        "facts": {
+          "helped": 0,
+          "hurt": 0,
+          "p": 1
+        },
+        "errors": {
+          "helped": 3,
+          "hurt": 0,
+          "p": 0.25
+        },
+        "mixed_p": 0.25
       },
       "judge": {
-        "helped": 3,
-        "hurt": 6,
-        "p": 0.508
+        "facts": {
+          "helped": 0,
+          "hurt": 6,
+          "p": 0.031
+        },
+        "errors": {
+          "helped": 3,
+          "hurt": 0,
+          "p": 0.25
+        },
+        "mixed_p": 0.508
       },
       "actor": {
-        "helped": 2,
-        "hurt": 2,
-        "p": 1
+        "facts": {
+          "helped": 0,
+          "hurt": 2,
+          "p": 0.5
+        },
+        "errors": {
+          "helped": 2,
+          "hurt": 0,
+          "p": 0.5
+        },
+        "mixed_p": 1
       }
     }
   }
