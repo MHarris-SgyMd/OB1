@@ -10,8 +10,8 @@ are here so the decision is auditable and re-runnable when better models appear.
 - [Bun](https://bun.sh) 1.4+
 - The models you want to compare, pulled
 - `OB1_LLM_LOCAL=1` in the environment for the harnesses that dial through the
-  server's own resolver (`eval-consolidate`, `eval-entities`, `eval-graphrag`;
-  the chunking end-to-end sets it for its child itself): the egress gate
+  server's own resolver (`eval-consolidate`, `eval-entities`, `eval-graphrag`,
+  `eval-extract-windows`; the chunking end-to-end sets it for its child itself): the egress gate
   (SMD-1903) refuses a thought's text to an endpoint not declared local, and a
   loopback address is not a declaration. `lib.ts`'s own embedding dialler
   (`OB1_EVAL_BASE`) is outside the gate: it embeds eval corpora, not the brain
@@ -1288,6 +1288,230 @@ get 1024. The harness takes `model@1024`. Interestingly 1024 beat 1536 here
 Note that the server does **not** currently send `dimensions`, so configuring a
 2560-native model against a 1024 column still fails the width check at capture
 time. Making that configurable is the obvious follow-up.
+
+## Entity extraction in windows — the stragglers, the answer budget, and what a window costs in relations
+
+`eval-extract-windows.ts` (SMD-1879). Until this change `db/extract-entities.ts`
+sent a thought to the metadata model in one call, cut at 8,000 characters,
+with no bound on the answer. On the fork's own brain 32 of 295 thoughts —
+1,656 to 13,113 characters — failed with "The operation timed out." on
+`qwen2.5:7b`, re-run serially with `--timeout 900`. The ticket read that as one
+oversized read-and-generate. Measured, it was half that.
+
+```bash
+# the thoughts that failed, off a brain (read-only), as the harness's input
+psql "$DATABASE_URL" -At -c "SELECT json_agg(json_build_object('id', t.id, 'content', t.content)) FROM thought_work_claims c JOIN thoughts t ON t.id = c.thought_id WHERE c.work_type LIKE 'extract:%' AND c.status = 'failed'" > stragglers.json
+OB1_LLM_LOCAL=1 OB1_EVAL_DOCS=stragglers.json ../db/with-postgres.sh bun eval-extract-windows.ts --arms whole+budget,w1200,w600
+OB1_LLM_LOCAL=1 ../db/with-postgres.sh bun eval-extract-windows.ts --planted     # three long documents with facts planted at known distances
+```
+
+### What the failures were, 2026-09-22
+
+Three probes before any design, all against an idle Ollama 0.33 serving
+`qwen2.5:7b` at its defaults:
+
+- **Nothing was truncated on the way in.** `/api/ps` reports the model served
+  at a 32,768-token context, and a 14,432-token prompt came back with
+  `usage.prompt_tokens` 14,432. The extraction rules and delimiter with an
+  empty thought cost 398 tokens. So the whole of every straggler — the longest
+  is about 3,300 estimated tokens — fit the context with room to spare.
+- **The shortest straggler ran to the deadline alone.** 1,656 characters, 414
+  estimated tokens, no other load: the worker's exact request ran 300 s and
+  was cut by the client.
+- **Thirty-one of the 32 are answers that do not end.** With `max_tokens:
+  1500` each whole-thought call returned in 30–37 s; 31 hit the cap
+  (`finish_reason: length`) and the tails are one relation repeated
+  (`ToolName → ToolEntry depends_on`, line after line), one entity repeated,
+  or an enumeration of every ticket id in the text as a `uses` edge. The one
+  that finished — 8,853 characters, 2,214 estimated tokens, 19 entities and
+  17 edges in 1,333 tokens — had simply been unlucky under load on the brain.
+  Nothing about the input's length made the model stop; on these texts it
+  did not, and the length of the input did not predict which.
+- **`--timeout 900` was 300.** Bun's `fetch` has its own 300 s idle timeout,
+  and an unstreamed chat completion is silent until it ends: a 330 s
+  `AbortSignal` against a server that answers at 400 s failed at 300.1 s; with
+  `timeout: false` on the request it failed at 330.0, the signal's. The three
+  diallers the server and the workers use — `providerCall`, `judgePair`,
+  `extractOnce` — now pass `timeout: false` so the configured deadline is the
+  deadline; preflight's probes and the evals' own diallers keep Bun's default,
+  being short.
+
+So the windows bound what the model reads, and the answer budget bounds what
+it writes (`db/config.mjs`, `extractOutputBudget`). The first cut was twice
+the text's estimated tokens plus 256, against a measured mean of 0.48 answer
+tokens per input token and a 95th percentile of 1.6 over the 262 thoughts the
+7B did extract; the second model below showed that ratio was the 7B's compact
+answer style, not a property of the task, and the budget shipped is three
+times the text plus 1,536. A runaway ends at the budget as a malformed answer
+the worker records failed in about a minute, where before it held a worker for
+the whole timeout.
+
+### The planted set: what a window costs in relations, 2026-09-22
+
+Three documents of 2,928–3,525 estimated tokens — a title, an opening
+sentence naming a subject and a person, twenty-odd paragraphs of neutral
+meeting-note filler with no names in them, and a closing paragraph stating a
+relation to the subject as "the project" or "the migration" — so one planted
+relation per document has both endpoints in the opening (`near`) and one has
+its endpoints in different windows at every size measured (`FAR`). Scored
+through `record_thought_entities`; any relation between the two planted
+endpoints counts, since the question is whether the model connected them at
+all, not which verb it chose. `qwen2.5:7b`, temperature 0:
+
+| arm | extracted | planted entities | near relations | FAR relations | windows | median s |
+| --- | ---: | ---: | ---: | ---: | --- | ---: |
+| `whole` (one call over the whole text, no budget) | 3/3 | 11/13 | 0/3 | 1/3 | 1 | 9.0 |
+| `whole+budget` | 3/3 | 11/13 | 0/3 | 1/3 | 1 | 6.3 |
+| `w1200` | 3/3 | 12/13 | 0/3 | 0/3 | 4/3/3 | 41.3 |
+| `w1200h` (header) | 3/3 | 12/13 | 0/3 | 1/3 | 4/3/3 | 43.5 |
+| `w600` | 3/3 | 11/13 | 0/3 | 0/3 | 8/9/7 | 94.9 |
+| `w600h` (header) | 3/3 | 12/13 | 0/3 | 0/3 | 8/9/7 | 81.8 |
+
+`whole` is p1's request without p1's 8,000-character cut: these documents run
+to 13,000 characters, so the shipped p1 would have dropped the closing
+paragraph that carries every planted far relation and scored 0/3 on it by
+construction. The arm measures one unbounded call, which is the fair baseline
+for the windows; it is not a re-run of what p1 stored.
+
+Read with the sample size in view — three documents, three far relations:
+
+- **Entities are local and unaffected**, as the ticket predicted: 11–12 of 13
+  on every arm, the miss being `Kafka` typed as a topic or `Acme` dropped, the
+  same under one call as under nine.
+- **Relations are at the model's floor before any window is cut.** The
+  `near` relations — both endpoints in the same sentence — score 0/3 under
+  the whole-thought call too. This model does not reliably emit a relation
+  from a 3,000-token document at all, so the harness cannot separate "lost to
+  the window boundary" from "never produced"; the far loss it can see is one
+  relation in three (`whole` 1/3, `w1200` 0/3), and the header buys one back
+  (`w1200h` 1/3 — a different one), which at n=3 is a sign, not a measurement.
+- **Windows cost wall clock on documents that extract fine whole.** A
+  3,000-token document is one 9-second call or four 41-second-median ones;
+  at 600 tokens, eight to nine calls and 82–95 s. The windows are for the
+  thoughts one call cannot finish, and their price on every other long
+  thought is this.
+
+`EXTRACT_WINDOW_HEADER` ships **off**: one far relation recovered of three, no
+call added, no precision measured — not enough to change every window's
+prompt on. The arms stay in the harness for a labelled corpus that can decide
+it (see the follow-ups).
+
+### The stragglers, 2026-09-22
+
+The 32 thoughts that failed on the brain (414–3,279 estimated tokens, 173,469
+characters), each arm over all 32, `qwen2.5:7b` at temperature 0, 300 s per
+call, sequential on an otherwise idle Ollama. "Extracted" is the thought
+written through `record_thought_entities`; "malformed" is a thought at least
+one of whose calls ran to its budget:
+
+| arm | extracted | malformed | median s | total s | mean mentions | mean edges | calls |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `whole+budget` (one call, budgeted) | 2/32 | 30 | 64.2 | 2,047 | 12.0 | 8.5 | 32 |
+| `w1200` (the shipped window) | 10/32 | 22 | 44.5 | 1,799 | 20.1 | 18.6 | 58 |
+| `w600` | 13/32 | 19 | 62.6 | 2,392 | 20.6 | 21.3 | 132 |
+| `whole+p` (one call, a penalised retry on a runaway) | 27/32 | 4 (+1 timed out) | 79.5 | 2,963 | 12.0 | 9.1 | 31 window calls; 29 thoughts retried |
+| **`w1200p` (shipped: the window and the retry)** | **27/32** | 5 | 75.8 | 2,728 | 17.1 | 15.1 | 58 window calls; 22 thoughts retried |
+
+The `calls` column of that run counted windows, and its retry figures count
+thoughts retried, not retry calls; the harness has counted every call since
+the fourth review pass, so a re-run's column will read higher for the `p` arms.
+
+What the rows say, read together:
+
+- **A call that runs away runs away again at the same size.** Every one of
+  the 15 thoughts short enough to go in one call under `w1200` and `w600`
+  failed there (0/15), as it had on the brain and in the probe. Temperature 0
+  is deterministic: the same text, the same request, the same loop.
+- **Smaller inputs converge more often, and which ones is a coin toss.**
+  Of the 18 thoughts `w1200` split, 10 extracted; of the 31 `w600` split, 13.
+  Across the three arms 18 distinct thoughts extracted under at least one, but
+  only 6 under both window sizes — a thought that converged at 1200 failed at
+  600 and the reverse, so what a window changes is the text the model sees,
+  and any change is another draw. A thought fails when ANY window runs away,
+  which is why nine windows do not beat three by much.
+- **The budget is what makes a failure cheap.** No arm timed out. A thought
+  that fails now fails in 20–130 s — one call cut at its budget — where on the
+  brain each held a worker for the full timeout, and only Bun's 300 s cut
+  ended it.
+- **Windows cost calls, not wall clock, on the thoughts that converge.** 58
+  calls for 32 thoughts at 1200, 132 at 600; the median thought is faster
+  under `w1200` than whole because the cut answers are shorter.
+
+- **The retry is the lever.** A call that ends at its budget is made once
+  more with `frequency_penalty` 0.5 — the repetition the runaways are, taxed —
+  and that reaches the thoughts no window size did: one call plus the retry
+  extracts 27 of 32, and so does the shipped shape, 1200-token windows plus
+  the retry, with no timeouts (the whole-thought retry timed one out: a
+  penalised answer over a long text can be slow as well as long). Under the
+  shipped shape the 14 single-call thoughts go 0 → 10 of 14 and the 18 windowed
+  ones 10 → 17 of 18; 10 of the 27 needed no retry. The 5 the shipped shape
+  still failed under this budget ran away twice — and, the second model below
+  showed, were penalised answers the budget then cut: under the recalibrated
+  budget the same arm takes 32 of 32.
+- **The retried answer is thinner.** The penalty taxes the JSON's repeated
+  keys as it taxes the loop, so a retried call returns fewer items: the
+  whole-thought retry averages 12.0 mentions where the shipped shape's
+  windows, most of which converge first time, average 17.1 — the windows
+  keep the rich answer where they can and the retry rescues where they cannot.
+
+**The default is 1200** (`chunk.ts`, `DEFAULT_EXTRACT_WINDOW_TOKENS`) **with
+the retry on** (`EXTRACT_RETRY_RUNAWAY`): 27 of 32 under this budget, 32 of 32
+under the recalibrated one below, for 1.8× the calls plus a retry on 20–22,
+where 600-token windows alone reached 13 for 4.1× the calls and, on the planted
+set above, cost a far relation the 1200 window kept. A brain whose model runs
+away more can set `OB1_EXTRACT_CHUNK_TOKENS=600`.
+
+### A second model: the p2 residue on `qwen3.8:27b`, 2026-09-22
+
+After the dogfood brain was re-extracted under p2 (343 of 367; 24 failed twice
+on the 7B and a `--retry-failed` pass recovered none), twelve of the 24 —
+every other one by length, 277 to 9,804 characters — went through the shipped
+windowing on `qwen3.8:27b` (served at 262,144 tokens), with and without the
+retry, under the budget of twice the text plus 256:
+
+| arm | extracted | malformed | median s | calls | retried thoughts |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `w1200` | 8/12 | 4 | 52.5 | 18 | 0 |
+| `w1200p` | 8/12 | 4 | 72.1 | 22 | 4 |
+
+The 27B took every thought over 699 estimated tokens, the four-window
+2,451-token one included, and the retry added nothing. The four it "failed"
+are the four shortest — 70, 291, 402 and 525 estimated tokens — and probing
+them showed they are not runaways: with a budget too large to bind, all four
+extract cleanly, at 659, 1,020, 1,494 and 2,301 answer tokens. That is 3.5 to
+9.4 answer tokens per input token, in pretty-printed JSON 1.6× the compact
+size, on notes dense with ticket ids. **The budget of twice the text plus 256
+was the 7B's compact answer style measured, not a property of the task**, and
+it cut every one of those legitimate answers — and a cut answer under the
+retry is retried under a penalty it did not need. The budget shipped is three
+times the text plus 1,536: over every legitimate answer measured on both
+models (1,746 for the 70-token note, 3,111 for the 525-token one), and still a
+bound for the 7B's runaways, which now end in about a minute rather than 30 s.
+The window derivation moves with it: qwen2.5:7b's context would hold 7,688
+(was 10,678), a 4,096-token context derives 520, a 2,048-token one holds no
+window at all.
+
+**Under the recalibrated budget**, the shipped shape (`w1200p`) re-run on both
+sets, same machine, sequential:
+
+| model | set | extracted | malformed | median s | calls | retried thoughts |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| `qwen3.8:27b` | the 12 of the p2 residue | **12/12** | 0 | 63.2 | 18 | 0 |
+| `qwen2.5:7b` | the 32 original stragglers | **32/32** | 0 | 106.4 | 78 | 20 |
+
+On the 27B the retry never fires: every "runaway" was the budget. On the 7B
+the loops are real — 20 of 32 first calls still run to the budget and are
+retried — but the five that failed twice under 2× + 256 converge now, which
+says their penalised retries were legitimate answers the old budget cut in
+turn. The price is time: a runaway on the 7B costs about a minute before the
+retry instead of 30 s (median 106 s per straggler against 76). The dogfood
+brain, re-run with `--retry-failed` under the new budget: **366 of 373
+extracted, 7 failed**, from 339 of 363 under the old one and 262 of 295 under
+p1; the graph holds 2,149 entities, 5,272 mentions and 4,563 edges. Those 7 —
+5,058 to 21,345 characters, the brain's longest — all extract on the 27B under
+the shipped shape (7/7, no retry; 2 to 7 windows each, 66 to 351 s), so the
+7B's residue is the 7B's, and a brain that wants them can point
+`OB1_METADATA_MODEL` at the larger model and re-run with `--switch-key`.
 
 ## Entity extraction, measured through the real write path
 
@@ -3927,7 +4151,8 @@ consolidation judge on every proposal (029), the entity extractor on every
 mention and edge (016), and the metadata model's kind band that the section
 above froze — and it resolves claims in three: a reviewer accepts or rejects a
 proposal — applies it or declines it — the hand label agrees or not with the
-model's kind, and the fork record confirms or refutes a hypothesis. Nothing
+model's kind, and the fork record confirms or refutes a hypothesis (a fourth,
+SMD-1982's hand grade on the extractor's rows, is the subsection below). Nothing
 compared the two. This harness
 does, as a read model over what the log already holds — no table, no
 migration, no new confidence source — so the ticket's first question, whether
@@ -3996,7 +4221,8 @@ What it says:
   the re-extraction running since says 0.80 or 0.90 on under 1% of its rows.
   The column 016 sorts and de-duplicates by carries almost nothing. Its
   outcome set is this directory's `eval-entities.ts` labelled captures, outside
-  any brain, where the same model's precision is 0.68.
+  any brain, where the same model's precision is 0.68 — and, since SMD-1982's
+  grade below, the 64 rows `fixtures/entity-grades.json` resolves by hand.
 * **The 17 resolved hypotheses are an outcome with nothing to score.** No
   thought in the brain carries a confidence; the first Brier over the writer's
   own judgement is over whatever `metadata.confidence` declares from here.
@@ -4012,6 +4238,100 @@ What it says:
 Not built here: a ledger table (SMD-1730/1731's substrate), any control loop
 (SMD-1736 decay, SMD-1724 trust), a `confidence` argument on `capture_thought`
 (SMD-1949). The record is `changes/smd-1809.md`.
+
+### The extractor's hedge, graded blind (SMD-1982, 2026-09-23)
+
+The report above could not score the extractor: nothing in a brain resolves a
+mention or an edge. SMD-1982 asked the natural question first — when the
+windowed prompt does say something other than 1.00, is it right to? — and the
+answer needs no prompt change, only a grade. `fixtures/entity-grades.json`
+holds one: every row `extract:qwen2.5:7b@p2` had written below 1.00 on the
+dogfood brain that day (15 mentions — 13 at 0.80, 2 at the parser's 0.50
+default — and 17 edges — 6 at 0.80, 11 at 0.90) plus a control of the same
+count per kind drawn from the 1.00 rows by md5 of the claim: 64 rows over 37
+thoughts, graded blind to the confidence by reading each name (and for an edge
+its relation) against the thought's text. 1 = a specific named thing the text
+holds, of a defensible type, and for an edge a relation the text states or
+clearly implies; 0 otherwise. The fixture is ids and numbers only (check 9): the
+kind is which list a row is in, the relation an index into `RELATIONS`, the
+confidence at the grade beside the outcome. `eval-calibration.ts` joins it on
+the claim key the live report already uses, so the extractor's row now has a
+resolved count and a reliability table, and a graded claim the brain no longer
+holds is counted in a note. The grade is of the claim, not of the run: a later
+prompt version that writes the same mention or edge is resolved by the same row.
+
+Two bins, held over graded:
+
+| bin | mentions | edges | all |
+| --- | --- | --- | --- |
+| 1.00 (the control) | 12/15 (80%) | 5/17 (29%) | 17/32 (53%) |
+| below 1.00 (every row, as graded) | 1/15 (7%) | 12/17 (71%) | 13/32 (41%) |
+
+By value, as the report prints it over the graded rows: 0.50 held 0 of 2, 0.80
+5 of 19 (mentions 1 of 13, edges 4 of 6), 0.90 8 of 11 (all edges), 1.00 17 of
+32 — Brier 0.425, ECE 0.439, base rate 0.469, skill −0.705 against the
+constant, over a stratified sample, so the base rate is the sample's and not
+the brain's.
+
+What it says:
+
+* **On a mention the hedge is a signal the prompt suppresses.** When the model
+  said 0.80 of a mention it was wrong 12 times in 13: six type-vocabulary words
+  (`person`, `topic`, `place`, `tool`, `organization`, `project`) minted from a
+  ticket that quotes the prompt's own type list, two `PostgreSQL` mentions in
+  thoughts whose text never says Postgres, and four fragments and example
+  tokens; the two 0.50 defaults were `PostgreSQL` too — four in all, each in a
+  different thought, each below 1.00. The control's three failures at 1.00 (an
+  identifier typed as a topic, a URL fragment, a glob typed as a place) were
+  not hedged. "Below 1.00" here is the column as stored, the parser's two
+  0.50 defaults included; whether a value the model omitted is a hedge is the
+  reader's call, so the numbers are given both ways. Fisher's exact test of
+  that bin against the control says p = 0.0001 (0.80 alone, 1 of 13, p =
+  0.0002), but the rows are not independent: ten of the fifteen are one
+  thought's, SMD-1937's ticket body. Without that thought the bin is 1 of 5
+  against the control's 11 of 14 (p = 0.038), or 1 of 3 (p = 0.19) with the
+  two defaults set aside; counted by thought — a thought held in a bin only if
+  every graded mention of that bin in it held — 1 of 6 against 12 of 15 (p =
+  0.014), or 1 of 4 (p = 0.07) without the defaults; and inside that thought
+  the one control mention at 1.00 held while its ten at 0.80 failed. So the
+  model seems to know something about its own false positives — thin outside
+  one thought, enough to be worth an arm, not a proven signal — and today the
+  column throws it away: 016 keeps every row at or above 0.50 and only sorts
+  by it.
+* **On an edge the hedge marks nothing useful.** As graded the hedged edges
+  held *more* often than the control (12/17 against 5/17), but 15 of the 17
+  are one thought's — SMD-1731's ticket body: eleven "SMD-1731 `uses`
+  <component>" edges at 0.90, of which eight held and three did not (`Mutant`,
+  `linear.app`, and `preflight check`, graded 0 where `test-schema` in the same
+  list is 1), and four `related_to` edges at 0.80, all held — and the other two
+  held 0 of 2. The eight rest on reading
+  "the ticket `uses` a component it changes" as held; under the strict reading
+  they are 0 and the hedged bin is 4/17, level with the control. Either way,
+  no signal. The finding on edges is the control itself: 1.00 edges hold 29%
+  of the time, and a confidence that says 1.00 on 99.6% of them is not where
+  that defect will be fixed (SMD-1925, SMD-1937).
+* **The pooled two-bin table is flat (53% against 41%, p = 0.45) because the
+  two kinds run opposite ways.** Read per kind or not at all.
+
+Limits: 64 rows, one grader (the maintainer's assistant, blind to the value but
+not to the fork), the hedged strata clustered on six thoughts for mentions and
+three for edges, and a strict rule on type. The grades stand as they were
+given blind; re-grading the calls the grader marked borderline — the two
+quoted example tokens `migration 021` and `Edge0` read as held, the control's
+`Jev per-type gates` and `PR #119` read as failed — leaves the mention finding
+at 3 of 15 against 10 of 15 (p = 0.025); `actor_name` read as held would
+strengthen it; two more control calls a strict reader might question
+(`check-fork-consistency check 20`, `canary`) take it to 3 of 15 against 8 of
+15 (p = 0.13), past which it rests on the within-thought contrast and the two
+0.80 `PostgreSQL` rows in other thoughts. The control's held rate is the
+estimate of the 1.00 stratum's precision, with the interval fifteen or
+seventeen rows give: mentions 80% (Wilson 95% 55–93%), edges 29% (13–53%).
+
+What it changes in SMD-1982: the elicitation arms in its Work item 1 are worth
+running for mentions — the prompt that asks for a reason below 1 first, on the
+windowed prompt SMD-1879 merged the same day (PR #113) — and item 2 (stop
+recording a confidence) is not the answer for mentions. For edges the
+confidence carries no signal either way. The record is `changes/smd-1982.md`.
 
 
 ## Related

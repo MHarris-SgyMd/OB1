@@ -1,17 +1,4 @@
----
-type: fixed
-bump: patch
-tickets: [SMD-1953]
-migrations: []
----
-
-## Changelog
-
-A wrong `OB1_TIER` (a case variant like `Stable`, or an unknown value like `prod`) no longer silently drops every `query_log` row — it is validated at boot (`initEnv` throws, and preflight's `tier` check fails so the container entrypoint refuses to serve) against one tier list `db/config.mjs` owns; and `parseFilter`'s size cap now counts UTF-8 bytes, not UTF-16 code units (SMD-1953).
-
-## FORK
-
-A wrong `OB1_TIER` is caught at boot instead of silently emptying the query log (SMD-1953)
+# 128. A wrong `OB1_TIER` is caught at boot instead of silently emptying the query log (SMD-1953)
 
 `OB1_TIER` set to a value migration 045's `query_log.tier` CHECK rejects — a case
 variant (`Stable`), or an unknown tier (`prod`) — made every `logSearch` /

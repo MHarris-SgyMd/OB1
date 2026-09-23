@@ -631,6 +631,37 @@ console.log("\n[13] A NULL/infinity created_at survives the provenance and propo
   }
 }
 
+console.log("\n[14] listChanges: one page of the log from a cursor, the actions bound as text[], and the function's refusals surfaced (migration 052, SMD-1296)");
+{
+  const sql = new SQL({ url: URL_, max: 1 });
+  const cursor0 = String((await sql`SELECT id FROM thought_audit ORDER BY created_at DESC, id DESC LIMIT 1`)[0].id);
+  const actor = { name: "store-sql-14" };
+  const { id } = await store.captureThought({ content: "smd-1296 a thought the feed will list", payload: { metadata: { type: "idea" } }, embedding: unit(13), actor });
+  await store.updateThought({ id, content: "smd-1296 the thought, edited", embedding: unit(13), embeddingModel: EMBEDDING_MODEL, actor });
+  await store.deleteThought({ id, actor });
+  const rows = await store.listChanges({ after: cursor0, limit: 10 });
+  assert(rows.map((r) => r.action).join(",") === "capture,update,delete" && rows.every((r) => r.thoughtId === id && r.actorName === "store-sql-14" && ISO_RE.test(r.createdAt)),
+    `three rows after the cursor, oldest first, each the actor's and dated (${rows.map((r) => r.action).join(",")})`);
+  assert(rows[0].present === false && rows[0].head === null && rows[1].head === "smd-1296 the thought, edited" && rows[1].changed.includes("content") && rows[2].head === "smd-1296 the thought, edited",
+    "the capture's text is gone with the thought; the edit and the delete carry the edited text");
+  assert((await store.listChanges({ after: rows[0].id, limit: 10 })).length === 2, "a cursor at the first row yields the two after it");
+  assert((await store.listChanges({ after: cursor0, actions: ["delete"], limit: 10 })).length === 1 && (await store.listChanges({ after: cursor0, actions: ["capture", "delete"], limit: 10 })).length === 2,
+    "actions bind as text[] through sql.array");
+  // Both from the cursor, where only this actor's rows are: a `since` from 2000
+  // with a limit of five read the oldest rows of the log, which were never this
+  // actor's, so the notAgent half passed with the filter removed (second review pass).
+  assert((await store.listChanges({ after: cursor0, agent: "store-sql-14", limit: 10 })).length === 3 && (await store.listChanges({ after: cursor0, notAgent: "store-sql-14", limit: 10 })).length === 0,
+    "agent keeps one key's rows, notAgent drops them — three and none after the cursor");
+  let ghost = "";
+  // Not the all-zero id: SMD-1298's section above plants an audit row under it.
+  try { await store.listChanges({ after: "00000000-0000-4000-8000-0000000000ff", limit: 1 }); } catch (e) { ghost = (e as Error).message; }
+  assert(/no audit row/.test(ghost), "a cursor naming no row throws the function's message");
+  let both = "";
+  try { await store.listChanges({ since: "2000-01-01T00:00:00Z", after: cursor0, limit: 1 }); } catch (e) { both = (e as Error).message; }
+  assert(/not both/.test(both), "a time beside a cursor throws the function's message");
+  await sql.close();
+}
+
 await store.close();
 
 report();
