@@ -2242,6 +2242,115 @@ async function checkEmbeddingDefaults() {
 await checkEmbeddingDefaults();
 
 /**
+ * SMD-1471: the "Grants for a capturing role" table must spell each object's
+ * PRIVILEGES to match ROLE_GRANTS, per group — an object can carry a different
+ * set in two groups (`ob1_config`, `thought_audit`), so a name-only check would
+ * miss a drifted privilege. Read the rows in order, tracking the group from the
+ * bold cell that leads each group's first row, and compare both ways: every
+ * ROLE_GRANTS row must be documented with its privileges, and every documented
+ * object (the backticked names at the head of a cell, before the parenthesis or
+ * em dash that opens the prose) must be granted in that group (SMD-1298's third
+ * review pass: a config row could be deleted with the docs still claiming it).
+ * Pure: the section's text and the grant rows in, the violation messages out,
+ * so GRANTS_PROBES can run it on tables written for the purpose.
+ */
+export type GrantRow = { group: string; kind: string; name: string; privileges: readonly string[] };
+export function grantsDrift(section: string, rows: readonly GrantRow[]): string[] {
+  const out: string[] = [];
+  const rowLines = section.split("\n").filter((l) => l.trimStart().startsWith("|"));
+  const documentedPrivs = new Map<string, Set<string>>(); // `${group}\t${name}` -> Set(privileges)
+  const documentedHead = new Set<string>(); // `${group}\t${name}` for the names at the head of an object cell
+  let group: string | null = null;
+  for (const line of rowLines) {
+    // A pipe-led, pipe-tailed row splits to ['', groupCell, objectCell, privCell, '']
+    // — the leading `**word**` names a group and carries to the rows below it.
+    const cells = line.split("|").map((c) => c.trim());
+    const gm = /\*\*(\w+)\*\*/.exec(cells[1] ?? "");
+    if (gm) group = gm[1];
+    if (!group || cells.length < 4) continue; // the header and its `---` separator
+    // The privileges are one backticked, comma-separated span at the head of
+    // the cell; prose may follow after an em-dash, so read only that span.
+    const pm = /`([^`]+)`/.exec(cells[3] ?? "");
+    const privs = new Set(pm ? pm[1].split(",").map((p) => p.trim()).filter(Boolean) : []);
+    // Every backticked object name in the object cell shares this row's
+    // privileges (a community row lists several tables at once). Stray
+    // backticked prose (`BIGSERIAL`) becomes a key nothing looks up.
+    for (const m of (cells[2] ?? "").matchAll(/`([^`]+)`/g)) documentedPrivs.set(`${group}\t${m[1]}`, privs);
+    // Every backticked name before the first em dash, with every balanced
+    // parenthetical removed first — a cut at the first parenthesis saw only
+    // the first of several tables (seventh review pass), and an optional
+    // parenthetical after each name still lost a table behind an em dash inside
+    // one, and read a `thoughts` inside one as a table (eighth review pass).
+    // The backticked spans are masked first, so a function's own signature
+    // (`f(uuid, jsonb)`) is not a parenthetical.
+    const spans: string[] = [];
+    let head = (cells[2] ?? "").replace(/`[^`]+`/g, (m) => `\u0000${spans.push(m) - 1}\u0000`);
+    for (let stripped; (stripped = head.replace(/\([^()]*\)/g, "")) !== head;) head = stripped;
+    head = head.replace(/\u0000(\d+)\u0000/g, (_, i: string) => spans[Number(i)] ?? "");
+    for (const m of head.split(" — ")[0].matchAll(/`([^`]+)`/g)) documentedHead.add(`${group}\t${m[1]}`);
+  }
+  for (const { group: g, kind, name, privileges } of rows) {
+    const documented = documentedPrivs.get(`${g}\t${name}`);
+    if (!documented) {
+      // The name check fires when the object is absent everywhere; this fires
+      // when it is present but not in this group's row.
+      out.push(`"Grants for a capturing role" has no **${g}** row for the ${kind} \`${name}\` that db/config.mjs's ROLE_GRANTS grants in that group — the table and ROLE_GRANTS have drifted (SMD-1471)`);
+      continue;
+    }
+    const missing = privileges.filter((p) => !documented.has(p));
+    const extra = [...documented].filter((p) => !privileges.includes(p));
+    if (missing.length || extra.length) {
+      out.push(`the **${g}** row for \`${name}\` lists [${[...documented].join(", ")}] but ROLE_GRANTS grants [${privileges.join(", ")}]${missing.length ? `; the README is missing ${missing.join(", ")}` : ""}${extra.length ? `; the README has extra ${extra.join(", ")}` : ""} — a role would be short or over a privilege the docs claim (SMD-1471)`);
+    }
+  }
+  const granted = new Set(rows.map(({ group: g, name }) => `${g}\t${name}`));
+  for (const key of documentedHead) {
+    const [g, name = ""] = key.split("\t");
+    if (!/^[a-z_][a-z0-9_]*(?:\([^)]*\))?$/.test(name) || granted.has(key)) continue; // a table, or a function with its signature
+    out.push(`"Grants for a capturing role" has a **${g}** row for \`${name}\` that db/config.mjs's ROLE_GRANTS does not grant in that group — a privilege the docs claim and no role gets (SMD-1471, SMD-1298)`);
+  }
+  return out;
+}
+/** grantsDrift's own negative and positive tests: [table, rows, the number of violations, why]. */
+const GRANTS_TABLE = [
+  "| Group | Object | Privileges |", "| --- | --- | --- |",
+  "| **capture** — the server | `thoughts` (001) | `SELECT, INSERT` |",
+  "| | `thought_audit` (008) | `INSERT` |",
+  "| **server** — extras | `thought_audit` (008) | `SELECT` — a capture key's supersedes is checked here |",
+  "| | function `resolve_agent(text, text, text)` (010) | `EXECUTE` |",
+  "| **community** — schemas | `ingestion_jobs` (schemas/x — a `thoughts` column) | `SELECT, INSERT` |",
+  "| | `ingestion_runs` (schemas/y), `ingestion_steps` (schemas/y) | `SELECT` |",
+  "| | `t_view` (a view over `thoughts` — needs its own SELECT) | `SELECT` |",
+  "| | `t_one` (schemas/z — jobs), `t_two` (schemas/z) | `SELECT` |",
+  "| | functions `f_sig(uuid, jsonb)` (schemas/z; SECURITY DEFINER, `REVOKE`d `FROM PUBLIC`) | `EXECUTE` |",
+].join("\n");
+const GRANTS_ROWS: GrantRow[] = [
+  { group: "capture", kind: "table", name: "thoughts", privileges: ["SELECT", "INSERT"] },
+  { group: "capture", kind: "table", name: "thought_audit", privileges: ["INSERT"] },
+  { group: "server", kind: "table", name: "thought_audit", privileges: ["SELECT"] },
+  { group: "server", kind: "function", name: "resolve_agent(text, text, text)", privileges: ["EXECUTE"] },
+  { group: "community", kind: "table", name: "ingestion_jobs", privileges: ["SELECT", "INSERT"] },
+  { group: "community", kind: "table", name: "ingestion_runs", privileges: ["SELECT"] },
+  { group: "community", kind: "table", name: "ingestion_steps", privileges: ["SELECT"] },
+  { group: "community", kind: "table", name: "t_view", privileges: ["SELECT"] },
+  { group: "community", kind: "table", name: "t_one", privileges: ["SELECT"] },
+  { group: "community", kind: "table", name: "t_two", privileges: ["SELECT"] },
+  { group: "community", kind: "function", name: "f_sig(uuid, jsonb)", privileges: ["EXECUTE"] },
+];
+const GRANTS_PROBES: [string, GrantRow[], number, string][] = [
+  [GRANTS_TABLE, GRANTS_ROWS, 0, "a table that matches its rows is clean, a table named in a row's prose is not an object"],
+  [GRANTS_TABLE, GRANTS_ROWS.filter((r) => !(r.group === "server" && r.name === "thought_audit")), 1, "a README row no group grants (the server thought_audit SELECT) is a violation — the reverse pass"],
+  [GRANTS_TABLE, GRANTS_ROWS.filter((r) => r.kind !== "function"), 2, "a README function row no group grants is a violation too — both of them, the signature inside the backticks read whole"],
+  [GRANTS_TABLE, [...GRANTS_ROWS, { group: "worker", kind: "table", name: "ob1_config", privileges: ["INSERT"] }], 1, "a config row with no README row is a violation"],
+  [GRANTS_TABLE.replace("| | `thought_audit` (008) | `INSERT` |", "| | `thought_audit` (008) | `SELECT, INSERT` |"), GRANTS_ROWS, 1, "a privilege the README claims and the config does not grant is a violation"],
+  [GRANTS_TABLE, GRANTS_ROWS.filter((r) => r.name !== "ingestion_steps"), 1, "the SECOND table of a multi-table cell, each with its own parenthetical, is read by the reverse pass too"],
+];
+for (const [table, rows, n, why] of GRANTS_PROBES) {
+  const got = grantsDrift(table, rows);
+  if (got.length !== n) fail(SELF, `grantsDrift probe "${why}": expected ${n} violation(s), got ${got.length}${got.length ? ` — ${got[0]}` : ""}`);
+}
+
+/**
  * db/README.md's "Grants for a capturing role" names every table db/config.mjs's
  * ROLE_GRANTS requires — and, since SMD-1796, every view, sequence and function the
  * community group adds — the two are one spelling (SMD-1226). Preflight's `write
@@ -2278,54 +2387,7 @@ async function checkCapturingGrants() {
       });
     }
   }
-  // SMD-1471: the section names every object (above); it must also spell each
-  // object's PRIVILEGES to match ROLE_GRANTS, per group. The README lists a row
-  // per (group, object), and an object can carry a different set in two groups
-  // (`ob1_config`, `thought_audit`), so a name-only check would miss a
-  // privilege that drifted. Read the table rows in order, tracking the group
-  // from the bold cell that leads each group's first row (`**capture**`, …),
-  // and for every ROLE_GRANTS row compare its (group, object) privileges.
-  const rowLines = section.split("\n").filter((l) => l.trimStart().startsWith("|"));
-  const documentedPrivs = new Map<string, Set<string>>(); // `${group}\t${name}` -> Set(privileges)
-  let group: string | null = null;
-  for (const line of rowLines) {
-    // A pipe-led, pipe-tailed row splits to ['', groupCell, objectCell, privCell, '']
-    // — the leading `**word**` names a group and carries to the rows below it.
-    const cells = line.split("|").map((c) => c.trim());
-    const gm = /\*\*(\w+)\*\*/.exec(cells[1] ?? "");
-    if (gm) group = gm[1];
-    if (!group || cells.length < 4) continue; // the header and its `---` separator
-    // The privileges are one backticked, comma-separated span at the head of
-    // the cell; prose may follow after an em-dash, so read only that span.
-    const pm = /`([^`]+)`/.exec(cells[3] ?? "");
-    const privs = new Set(pm ? pm[1].split(",").map((p) => p.trim()).filter(Boolean) : []);
-    // Every backticked object name in the object cell shares this row's
-    // privileges (a community row lists several tables at once). Stray
-    // backticked prose (`BIGSERIAL`) becomes a key nothing looks up.
-    for (const m of (cells[2] ?? "").matchAll(/`([^`]+)`/g)) {
-      documentedPrivs.set(`${group}\t${m[1]}`, privs);
-    }
-  }
-  for (const { group: g, kind, name, privileges } of cfg.grantRows()) {
-    const documented = documentedPrivs.get(`${g}\t${name}`);
-    if (!documented) {
-      // The name check above fires when the object is absent everywhere; this
-      // fires when it is present but not in this group's row.
-      violations.push({
-        where: "db/README.md",
-        msg: `"Grants for a capturing role" has no **${g}** row for the ${kind} \`${name}\` that db/config.mjs's ROLE_GRANTS grants in that group — the table and ROLE_GRANTS have drifted (SMD-1471)`,
-      });
-      continue;
-    }
-    const missing = privileges.filter((p) => !documented.has(p));
-    const extra = [...documented].filter((p) => !privileges.includes(p));
-    if (missing.length || extra.length) {
-      violations.push({
-        where: "db/README.md",
-        msg: `the **${g}** row for \`${name}\` lists [${[...documented].join(", ")}] but ROLE_GRANTS grants [${privileges.join(", ")}]${missing.length ? `; the README is missing ${missing.join(", ")}` : ""}${extra.length ? `; the README has extra ${extra.join(", ")}` : ""} — a role would be short or over a privilege the docs claim (SMD-1471)`,
-      });
-    }
-  }
+  for (const msg of grantsDrift(section, cfg.grantRows())) violations.push({ where: "db/README.md", msg });
 }
 await checkCapturingGrants();
 
