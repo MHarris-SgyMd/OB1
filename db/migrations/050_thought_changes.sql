@@ -1,5 +1,5 @@
 -- =============================================================================
--- Migration 049: thought_changes — the read over thought_audit a resuming agent
+-- Migration 050: thought_changes — the read over thought_audit a resuming agent
 --                asks first: what changed since I was last here (SMD-1296)
 -- =============================================================================
 --
@@ -95,7 +95,7 @@ DO $qc$
 BEGIN
   IF to_regclass('thought_audit') IS NULL THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'migration 049 needs 008 (thought_audit); this schema lacks it',
+      MESSAGE = 'migration 050 needs 008 (thought_audit); this schema lacks it',
       -- ASCII only: Bun's client hands a HINT holding a non-ASCII character back mis-decoded (030's fourth review pass).
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
       ERRCODE = 'invalid_schema_definition';
@@ -103,7 +103,7 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM information_schema.columns
                   WHERE table_schema = 'public' AND table_name = 'thought_audit' AND column_name = 'actor_kind') THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'migration 049 needs 046 (thought_audit.actor_kind, origin); this schema lacks it',
+      MESSAGE = 'migration 050 needs 046 (thought_audit.actor_kind, origin); this schema lacks it',
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
       ERRCODE = 'invalid_schema_definition';
   END IF;
@@ -241,4 +241,4 @@ END;
 $$;
 
 COMMENT ON FUNCTION thought_changes(timestamptz, uuid, text, text, text[], int) IS
-  'One page of thought_audit, oldest first, from a time (p_since, at or after) or a cursor (p_after, the audit id a page ended with; strictly after in (created_at, id)) — neither is the newest p_limit rows; both is refused. p_agent keeps one key''s rows, p_not_agent drops one key''s (rows with no actor stay), p_actions a subset of capture/update/delete. Each row carries a bounded head (240 chars: a capture''s current text, an update''s new text, a delete''s previous), an update''s changed keys and moved metadata keys, the supersedes pointer before and after, whether derived_from moved, and whether the thought still exists. p_limit clamped to 1..201. Migration 049 / SMD-1296.';
+  'One page of thought_audit, oldest first, from a time (p_since, at or after) or a cursor (p_after, the audit id a page ended with; strictly after in (created_at, id)) — neither is the newest p_limit rows; both is refused. p_agent keeps one key''s rows, p_not_agent drops one key''s (rows with no actor stay), p_actions a subset of capture/update/delete. Each row carries a bounded head (240 chars: a capture''s current text, an update''s new text, a delete''s previous), an update''s changed keys and moved metadata keys, the supersedes pointer before and after, whether derived_from moved, and whether the thought still exists. p_limit clamped to 1..201. Migration 050 / SMD-1296.';

@@ -203,7 +203,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 029 change 54, 030 change 56, 031 change 57, 032 change 60, 033 change 63,
 034 change 65, 035 change 66, 036 change 68, 037 change 70, 038 change 80, 039 change 81,
 040 change 91, 041 change 94, 042 change 95, 043 change 98, 044 SMD-1804,
-045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1296).
+045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 050 SMD-1296).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -231,7 +231,7 @@ row's own `metadata.source`. The event rides `p_payload.event` on both
 inserting `upsert_thought` forms and a tenth, defaulted `p_event` on
 `update_thought`; nothing over MCP sends one yet (SMD-1724, 1725, 1733).
 
-Migration 049 adds the one read over that log a resuming agent asks first
+Migration 050 adds the one read over that log a resuming agent asks first
 (SMD-1296): `thought_changes(p_since, p_after, p_agent, p_not_agent, p_actions,
 p_limit)` — one page, oldest first, from a time or from a cursor (the audit id a
 page ended with; a keyset on `(created_at, id)`, so a walk never repeats a row
@@ -295,7 +295,6 @@ issues every group at once.
 | | `thought_facets` (042) | `SELECT, UPDATE` — the delete guard reads the citations that name a thought and, detaching, writes them, on every delete |
 | | `ob1_agents` (046) | `SELECT` — the audit trigger reads the key's kind on every write that carries an actor (SMD-1730) |
 | **server** — the server's soft extras, beyond capture; never fatal to a bare capture (the `SELECT` on `ob1_agents` 046 made hard is in capture, above), but `resolve_agent` *upserts* the agent tables, so attribution needs the writes, not just `SELECT` | `ob1_config` (006) | `SELECT` |
-| | `thought_audit` (049) | `SELECT` — `thought_changes` reads the log for the MCP tool of the same name (SMD-1296); without it only that tool fails, naming the grant |
 | | `ob1_agents` (010) | `SELECT, INSERT, UPDATE` |
 | | `ob1_agent_keys` (010) | `SELECT, INSERT, UPDATE` |
 | **worker** — `reembed.ts`, `consolidate.ts`, `extract-entities.ts`: claim work, upsert a job key into `ob1_config`, and (consolidate) record/resolve proposals | `thought_work_claims` (015) | `SELECT, INSERT, UPDATE, DELETE` |

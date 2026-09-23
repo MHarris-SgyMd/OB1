@@ -5833,7 +5833,7 @@ console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defi
   await db.query(`UPDATE ob1_entities SET aliases = '{}' WHERE id = $1`, [NUM]);
 }
 
-console.log("\n[45] Migration 049: thought_changes — one page of the log, oldest first, from a time or a cursor; the keyset walks a tie without a gap or a repeat; each row rendered bounded (SMD-1296)");
+console.log("\n[46] Migration 050: thought_changes — one page of the log, oldest first, from a time or a cursor; the keyset walks a tie without a gap or a repeat; each row rendered bounded (SMD-1296)");
 {
   const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
   const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
@@ -5855,7 +5855,7 @@ console.log("\n[45] Migration 049: thought_changes — one page of the log, olde
   // The log is append-only, so earlier sections' rows stay: every read below starts after the newest of them — a cursor, the strict bound.
   const cursor0 = String((await one<{ id: string }>(`SELECT id FROM thought_audit ORDER BY created_at DESC, id DESC LIMIT 1`)).id);
 
-  const A = await cap("the first note about 049", { metadata: { type: "idea", topics: ["a"] }, actor: { name: "alice" } }, 1); await tick();
+  const A = await cap("the first note about 050", { metadata: { type: "idea", topics: ["a"] }, actor: { name: "alice" } }, 1); await tick();
   const B = await cap("a second note, replacing the first", { metadata: { type: "idea" }, actor: { name: "bob" }, supersedes: A }, 2); await tick();
   await asActor("bob", `UPDATE thoughts SET content = 'the first note, edited', metadata = metadata || '{"topics": ["b"], "status": "open"}'::jsonb WHERE id = '${A}'`); await tick();
   await db.exec(`UPDATE thoughts SET metadata = metadata || '{"hand": 1}'::jsonb WHERE id = '${B}'`); await tick();

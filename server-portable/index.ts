@@ -1222,7 +1222,7 @@ function buildServer(principal: Principal): McpServer {
     }
   );
 
-  // Tool 3b: the change feed (migration 049, SMD-1296) — what moved since a
+  // Tool 3b: the change feed (migration 050, SMD-1296) — what moved since a
   // time or a cursor, for an agent that returns after a break. Read-only, so a
   // read key sees it. The store calls one SQL function that chooses the page
   // and bounds the rendering; this decides `since` and lays the rows out.
@@ -1295,7 +1295,7 @@ function buildServer(principal: Principal): McpServer {
       } catch (err: unknown) {
         const msg = (err as Error).message;
         const hint = /thought_changes/.test(msg) && /does not exist|could not find/i.test(msg)
-          ? " — migration 049 (db/migrations/049_thought_changes.sql) is not applied, or PostgREST has not reloaded its schema cache"
+          ? " — migration 050 (db/migrations/050_thought_changes.sql) is not applied, or PostgREST has not reloaded its schema cache"
           : /permission denied for table thought_audit/i.test(msg)
           ? " — the server's role needs SELECT on thought_audit (db/README.md, Grants for a capturing role — the server group, which migrate.ts --grant issues)"
           : "";
