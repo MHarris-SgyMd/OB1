@@ -1,8 +1,9 @@
 #!/usr/bin/env bun
 /**
- * session-capture.mjs — a session-end hook for Claude Code and Codex that
- * captures ONE summary thought into Open Brain, with the thoughts the session
- * retrieved as its provenance (SMD-1298).
+ * session-capture.mjs — a session hook for Claude Code and Codex that captures
+ * ONE summary thought into Open Brain at each of a session's checkpoints — a
+ * compaction (Claude Code's PreCompact) and the session's end — with the
+ * thoughts the session retrieved as its provenance (SMD-1298, SMD-2012).
  *
  * What it sends: a summary this script derives from the transcript — what was
  * asked (the human prompts), what came out (the assistant's last message), what
@@ -29,18 +30,20 @@
  * log; a post that fails waits under pending/ for a later run, which claims what
  * it posts by a rename so two runs never share a file, and drops an older
  * payload of a session that has since ended again as obsolete. A later run for
- * the same session (a Stop hook with --min-interval, or a session resumed
- * under the same id — `claude --resume`, a Codex resume — ending again)
+ * the same session (a compaction, a Stop hook with --min-interval, or a session
+ * resumed under the same id — `claude --resume`, a Codex resume — ending again)
  * captures a fresh summary that SUPERSEDES the earlier one, so a session is one
- * current thought however many times it ends. A fork under a new id is a new
- * session with its own summary.
+ * current thought however many times it is captured; a summary of a session
+ * still running says so in a Checkpoint line, which its end drops. A fork under
+ * a new id is a new session with its own summary.
  *
  * Both harnesses hand a hook the same JSON on stdin — session_id,
  * transcript_path, cwd, hook_event_name — so one script serves both; the
  * transcript's first line says which wrote it.
  *
- *   bun session-capture.mjs --print-hook claude-code     # the settings.json to paste; installs nothing
- *   bun session-capture.mjs --print-hook codex           # the hooks.json to paste
+ *   bun session-capture.mjs --print-hook claude-code     # the settings.json to paste (SessionEnd + PreCompact); installs nothing
+ *   bun session-capture.mjs --print-hook codex           # the hooks.json to paste (SessionEnd: Codex has no compaction hook)
+ *   bun session-capture.mjs --print-hook claude-code --event Stop --min-interval 20   # the coarser checkpoint: a turn, at most every 20 min
  *   bun session-capture.mjs --check                      # config + endpoint + key scope; writes nothing
  *   bun session-capture.mjs --dry-run <transcript.jsonl> # print what WOULD be sent; sends nothing
  *   bun session-capture.mjs                              # as the hook: hook JSON on stdin
@@ -439,6 +442,16 @@ export function renderSummary(s) {
   if (s.retrieved.size) brain.push(`retrieved ${s.retrieved.size} thought${s.retrieved.size === 1 ? "" : "s"}`);
   if (s.captured.size) brain.push(`captured ${s.captured.size}`);
   parts.push(brain.length ? `Brain: ${brain.join(", ")} (recorded as this summary's provenance).` : "Brain: no thoughts read or written this session.");
+  // A summary of a session still running says so, and how it got here — a
+  // compaction (PreCompact, manual or auto) or a turn (Stop) — so a reader
+  // tells a checkpoint from an end; the end's summary carries no such line and
+  // supersedes it (SMD-2012). The moment is the transcript's last timestamp,
+  // never the clock: the fingerprint must not move with time.
+  if (s.checkpoint) {
+    const at = s.last ? ` at ${s.last.slice(0, 16).replace("T", " ")}` : "";
+    const how = s.checkpoint.kind === "compacted" ? `compacted${at}${s.checkpoint.trigger ? ` (${s.checkpoint.trigger})` : ""}` : `turn ended${at}`;
+    parts.push(`Checkpoint: ${how}, continuing — the session's next checkpoint or its end supersedes this summary.`);
+  }
   parts.push(`Session ${s.sessionId || "unknown"}${s.first ? `, ${s.first.slice(0, 16).replace("T", " ")}` : ""}${s.last && s.last !== s.first ? ` → ${s.last.slice(0, 16).replace("T", " ")}` : ""}.`);
   return clip(parts.join("\n\n"), LIMITS.textChars);
 }
@@ -706,6 +719,21 @@ export async function postCapture(cfg, payload) {
 // ── The two halves of a hook run ─────────────────────────────────────────────
 
 /**
+ * What the event says about the session (SMD-2012): `compacted` for PreCompact,
+ * with its trigger when it is one of the two Claude Code sends; `running` for
+ * Stop, a turn's end; nothing for SessionEnd — or for an event this hook does
+ * not know, which is an end, not a guess. renderSummary turns it into the
+ * summary's Checkpoint line. Codex has no compaction event, so its sessions
+ * only ever end.
+ */
+export function checkpointOf(hook) {
+  const event = String(hook.hook_event_name ?? "");
+  if (event === "PreCompact") return { kind: "compacted", trigger: hook.trigger === "auto" || hook.trigger === "manual" ? hook.trigger : undefined };
+  if (event === "Stop") return { kind: "running" };
+  return undefined;
+}
+
+/**
  * The foreground: read the transcript, decide, summarise, scan, hand off.
  * Returns { code, message, payloadPath? } — the caller prints the message and exits with the code.
  */
@@ -731,6 +759,7 @@ export function prepare(hook, opts = {}) {
   }
   if (typeof hook.cwd === "string" && hook.cwd) { s.cwd = hook.cwd; s.roots.add(hook.cwd); }
   if (!s.prompts.length) return { code: 0, message: `skip: no human prompt in session ${s.sessionId}` };
+  s.checkpoint = checkpointOf(hook);
   const text = renderSummary(s);
   const fingerprint = sha256(text);
   if (state.fingerprint === fingerprint) return { code: 0, message: `skip: session ${s.sessionId} already captured as ${state.thought_id}` };
@@ -746,7 +775,7 @@ export function prepare(hook, opts = {}) {
     return { code: 1, message: `refused — the summary for session ${s.sessionId} carries what looks like a secret (${where}); nothing sent. Remove it from the conversation before ending the session, or capture by hand.` };
   }
   const payload = {
-    session_id: s.sessionId, harness: s.harness, event, text, fingerprint,
+    session_id: s.sessionId, harness: s.harness, event, trigger: s.checkpoint?.trigger, text, fingerprint,
     derived_from: provenanceOf(s), supersedes: state.thought_id || undefined,
     prompts: distinctPrompts(s.prompts).length, prepared_at: new Date().toISOString(), attempts: 0,
   };
@@ -757,7 +786,7 @@ export function prepare(hook, opts = {}) {
   // so two processes never collide.
   const payloadPath = join(PENDING_DIR(), `${Date.now()}-${String(payloadSeq++).padStart(4, "0")}-${randomBytes(3).toString("hex")}-${basename(statePath(s.sessionId), ".json")}.json`);
   writeJson(payloadPath, payload);
-  return { code: 0, message: `prepared: session ${s.sessionId}, ${payload.prompts} prompt(s), ${payload.derived_from.length} source id(s)${payload.supersedes ? `, supersedes ${payload.supersedes}` : ""}`, payloadPath, payload };
+  return { code: 0, message: `prepared: session ${s.sessionId}${s.checkpoint ? ` (${event}${s.checkpoint.trigger ? ` ${s.checkpoint.trigger}` : ""})` : ""}, ${payload.prompts} prompt(s), ${payload.derived_from.length} source id(s)${payload.supersedes ? `, supersedes ${payload.supersedes}` : ""}`, payloadPath, payload };
 }
 
 /**
@@ -896,7 +925,7 @@ export async function postPending(cfg, own) {
         const summaryAt = payload.prepared_at && Date.parse(payload.prepared_at) <= Date.now() ? payload.prepared_at : new Date().toISOString();
         if (!stateIsNewerNow) writeState(payload.session_id, { thought_id: id, fingerprint: payload.fingerprint, captured_at: new Date().toISOString(), summary_at: summaryAt, harness: payload.harness, prompts: payload.prompts, sources: (payload.derived_from ?? []).length });
         unlinkSync(here);
-        log(`captured session=${payload.session_id} harness=${payload.harness} id=${id} sources=${(payload.derived_from ?? []).length}${payload.supersedes ? ` supersedes=${payload.supersedes}` : ""}${note ? ` note="${note}"` : ""}`);
+        log(`captured session=${payload.session_id} harness=${payload.harness}${payload.event && payload.event !== "SessionEnd" ? ` event=${payload.event}` : ""} id=${id} sources=${(payload.derived_from ?? []).length}${payload.supersedes ? ` supersedes=${payload.supersedes}` : ""}${note ? ` note="${note}"` : ""}`);
         outcomes.push({ file, ok: true, id, note });
       } catch (e) {
         moveTo(here, PENDING_DIR());
@@ -933,20 +962,37 @@ export function shellWord(p) {
   return /^[A-Za-z0-9_./+:@%,=-]+$/.test(p) ? p : `'${String(p).replace(/'/g, `'\\''`)}'`;
 }
 
-export function hookJson(harness, { event = "SessionEnd", minInterval = 20, runtime } = {}) {
+/**
+ * The events a hook is printed for. Claude Code's PreCompact fires before a
+ * compaction, manual or automatic — the checkpoint a long session already has:
+ * the context is about to be squashed and the transcript up to there is a
+ * coherent episode (SMD-2012). Its default is the pair; Codex has no compaction
+ * hook, so its default is SessionEnd alone and PreCompact is refused for it.
+ * Stop is the coarser checkpoint for either, with --min-interval as its floor.
+ */
+export const HOOK_EVENTS = ["SessionEnd", "PreCompact", "Stop"];
+export const DEFAULT_EVENTS = { "claude-code": ["SessionEnd", "PreCompact"], codex: ["SessionEnd"] };
+
+export function hookJson(harness, { event, minInterval = 20, runtime } = {}) {
   // The runtime that printed the hook, by its absolute path: a harness launched
   // from a GUI may carry a PATH without ~/.bun/bin, and a bare `bun` would fail
   // with "command not found" at every session end (twelfth review pass).
   const bin = runtime || process.execPath;
-  // The harness runs the command through a shell: a checkout under a path with a
-  // space would otherwise split (first review pass).
-  const cmd = [shellWord(bin), shellWord(SELF), ...(event === "Stop" ? ["--min-interval", String(minInterval)] : [])].join(" ");
-  // Claude Code raises SessionEnd's shared 1.5 s budget to a hook's own timeout (≤ 60);
-  // Codex allows at most 3 s there. The foreground finishes in well under one second either way.
-  // A Stop hook keeps the harness's default, 600 s in both (third review pass:
-  // a pinned 30 undercut the README's advice for an enormous transcript).
-  const handler = event === "SessionEnd" ? { type: "command", command: cmd, timeout: harness === "codex" ? 3 : 10 } : { type: "command", command: cmd };
-  return { hooks: { [event]: [{ hooks: [handler] }] } };
+  const events = event ? [event] : DEFAULT_EVENTS[harness];
+  const handlerFor = (ev) => {
+    // The harness runs the command through a shell: a checkout under a path with a
+    // space would otherwise split (first review pass).
+    const cmd = [shellWord(bin), shellWord(SELF), ...(ev === "Stop" ? ["--min-interval", String(minInterval)] : [])].join(" ");
+    // Claude Code raises SessionEnd's shared 1.5 s budget to a hook's own timeout (≤ 60);
+    // Codex allows at most 3 s there. The foreground finishes in well under one second either way.
+    // PreCompact shares no budget — a command hook's 600 s default stands — but a
+    // compaction WAITS on it, so it is pinned to the same 10 s: a read that hangs
+    // must not hold a compaction for ten minutes (SMD-2012).
+    // A Stop hook keeps the harness's default, 600 s in both (third review pass:
+    // a pinned 30 undercut the README's advice for an enormous transcript).
+    return ev === "Stop" ? { type: "command", command: cmd } : { type: "command", command: cmd, timeout: harness === "codex" ? 3 : 10 };
+  };
+  return { hooks: Object.fromEntries(events.map((ev) => [ev, [{ hooks: [handlerFor(ev)] }]])) };
 }
 
 // ── CLI ──────────────────────────────────────────────────────────────────────
@@ -968,7 +1014,10 @@ export async function main(argv) {
   if (args.includes("--print-hook")) {
     const h = flag(args, "--print-hook") || "claude-code";
     if (h !== "claude-code" && h !== "codex") { console.error(`--print-hook takes claude-code or codex, not "${h}"`); return 2; }
-    const event = flag(args, "--event") || "SessionEnd";
+    const event = flag(args, "--event") || undefined; // none: the harness's default events
+    // A misspelt event would install a hook that never fires, and nothing would say so (SMD-2012).
+    if (event !== undefined && !HOOK_EVENTS.includes(event)) { console.error(`--event takes ${HOOK_EVENTS.join(", ")}, not "${event}"${HOOK_EVENTS.some((e) => e.toLowerCase() === event.toLowerCase()) ? " — the case matters" : ""}`); return 2; }
+    if (h === "codex" && event === "PreCompact") { console.error("Codex has no compaction hook: --print-hook codex prints SessionEnd; for a checkpoint on Codex print --event Stop --min-interval <minutes>"); return 2; }
     const mi = flag(args, "--min-interval");
     // A Stop hook printed with `--min-interval 20m` would run with NaN and capture every turn (eighth review pass).
     if (mi !== undefined && !(Number.isFinite(Number(mi)) && mi.trim() !== "" && Number(mi) > 0)) { console.error(`--min-interval takes a number of minutes above zero, not "${mi}"`); return 2; }

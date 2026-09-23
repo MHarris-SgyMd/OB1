@@ -1,16 +1,16 @@
 # Session Capture Hook
 
-> A session-end hook for Claude Code and Codex that captures **one summary thought** into Open Brain — what was asked, what came out, what changed — with the thoughts the session retrieved as its provenance. Through a capture-only key, after a secret scan. Off until you paste the hook it prints.
+> A session hook for Claude Code and Codex that captures **one summary thought** into Open Brain at each compaction and at session end — what was asked, what came out, what changed — with the thoughts the session retrieved as its provenance. Through a capture-only key, after a secret scan. Off until you paste the hooks it prints.
 
 ## What It Does
 
 Capture in Open Brain is one thought at a time, when an agent chooses to call `capture_thought`. That under-collects: a two-hour session that searched the brain six times, made a decision and shipped a change leaves nothing behind unless the agent was told to write it down — and on the day this recipe was written, a session whose MCP connection failed at start-up had no capture tool at all and nothing reminded anyone (SMD-1298).
 
-This hook runs when a session ends, whether or not the session ever connected to the brain. It reads the transcript the harness hands it, derives a summary, and posts that summary through the brain's MCP endpoint as one thought:
+This hook runs at a session's checkpoints — before each compaction (Claude Code's `PreCompact`, manual or automatic) and when the session ends — whether or not the session ever connected to the brain. It reads the transcript the harness hands it, derives a summary, and posts that summary through the brain's MCP endpoint as one thought:
 
 - **`derived_from`** — the ids of every thought the session read from the brain (the `ID:` lines of its search results) and every thought it captured. Only the brain's tool results are read: its own tool names under any server prefix, and the generic `search`/`fetch` pair every connector has only under a server named with `brain` as a word — `open-brain`, `my_brain` — not a `brainstorm` (a Notion or Linear `search` prints uuid-shaped ids too). The `trace_provenance` SQL function (migration 025) walks from the summary to them; `find_derivatives` from any of them answers "which sessions used this thought". Neither is an MCP tool — run them against the database.
 - **`source`** — `claude-code` or `codex`, recorded as `metadata.source`, so a per-source weight can rank a session summary below a considered note.
-- **`supersedes`** — when the same session ends again (a resume, a Stop hook on an interval), the new summary replaces the old one. A session is one current thought however many times it ends.
+- **`supersedes`** — when the same session reaches another checkpoint (a compaction, its end, a resume ending again, a Stop hook on an interval), the new summary replaces the old one. A session is one current thought however many times it is captured; a summary of a session still running carries a `Checkpoint:` line, which its end drops (SMD-2012).
 
 The transcript itself is never sent. Nothing is read from the brain. The key the hook holds can add a thought and do nothing else.
 
@@ -47,6 +47,7 @@ Session 8de5e1e1-…, 2026-09-22 12:34 → 2026-09-22 15:10.
 | Changed | Paths of files the session edited or wrote, relative to the project, at most 20; a count of `git commit`s and whether it pushed; PR links | Files outside the project are counted, not named; no diff, no file content |
 | Brain | Counts of thoughts retrieved and captured | The ids are in `derived_from`, not in the text |
 | Session | The session id and the time span | — |
+| Checkpoint | Only while the session runs: `compacted at <time> (auto or manual), continuing` from a PreCompact hook, `turn ended at <time>, continuing` from a Stop hook; the time is the transcript's last | Absent at session end — that summary supersedes the checkpoint's |
 
 Never sent: the transcript, tool outputs, file contents, commands, anything from a subagent, the machine's paths outside the project, the key. What the assistant quoted in its last message is in the summary — that is what the scan is for.
 
@@ -55,7 +56,7 @@ Never sent: the transcript, tool outputs, file contents, commands, anything from
 ## Prerequisites
 
 - A running Open Brain with the portable server at or after SMD-1298 (the `capture` key scope and `capture_thought`'s `source` argument; migration 049) — [`SETUP.md`](../../SETUP.md)
-- Claude Code, or Codex CLI 0.151 or later (hooks)
+- Claude Code, or Codex CLI 0.151 or later (hooks; `PreCompact` is Claude Code's — Codex has no compaction hook)
 - Bun 1.4+ or Node.js 18+ on the machine that runs the sessions
 - The [`session-summary`](../../skills/session-summary/) skill, if you also want the agent to write a considered summary at wrap-up (this hook is the floor under that: it runs whether or not the agent did)
 
@@ -144,20 +145,33 @@ bun recipes/session-capture-hook/session-capture.mjs --print-hook claude-code
           }
         ]
       }
+    ],
+    "PreCompact": [                                   // before each compaction, manual or automatic — the checkpoint a long session already has
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/absolute/path/to/bun /absolute/path/to/recipes/session-capture-hook/session-capture.mjs",
+            "timeout": 10
+          }
+        ]
+      }
     ]
   }
 }
 ```
 
-Paste it into `~/.claude/settings.json` (every project) or `.claude/settings.json` (one project). For Codex, `--print-hook codex` prints the same shape with `"timeout": 3` — paste it into `~/.codex/hooks.json`. Both harnesses hand a hook the same JSON on stdin (`session_id`, `transcript_path`, `cwd`, `hook_event_name`), so one script serves both; it tells the transcripts apart by their first line.
+Paste it into `~/.claude/settings.json` (every project) or `.claude/settings.json` (one project); `--event SessionEnd` or `--event PreCompact` prints one of the two alone. For Codex, `--print-hook codex` prints SessionEnd alone with `"timeout": 3` — paste it into `~/.codex/hooks.json`. Both harnesses hand a hook the same JSON on stdin (`session_id`, `transcript_path`, `cwd`, `hook_event_name`), so one script serves both; it tells the transcripts apart by their first line.
 
-**SessionEnd, not Stop, by default.** Claude Code fires `Stop` every time the assistant finishes a turn; `SessionEnd` fires once, when the session ends (`/exit`, `/clear`, terminal close, resume, logout). A capture per turn would be a thought per turn. If you want protection against a session that never ends cleanly, print a Stop hook with a floor between captures — each new one supersedes the last:
+**SessionEnd and PreCompact by default; Stop as the alternative.** `SessionEnd` fires once, when the session ends (`/exit`, `/clear`, terminal close, resume, logout). `PreCompact` fires before each compaction, manual (`/compact`) or automatic — the checkpoint a long session already has: the context is about to be squashed, and the transcript up to there is a coherent episode. A session that runs for days across several compactions leaves a summary at each, every one superseding the last, so the sessions running beside it read what it knows without waiting for its end (SMD-2012). A summary captured at a checkpoint carries a `Checkpoint:` line — `compacted at 2026-09-23 11:49 (auto), continuing` — which the session's end drops. Claude Code fires `Stop` every time the assistant finishes a turn, and a capture per turn would be a thought per turn; where there is no compaction hook, or against a session that never ends cleanly, print a Stop hook with a floor between captures — each new one supersedes the last, and its checkpoint line says `turn ended at <time>, continuing`:
 
 ```bash
 bun recipes/session-capture-hook/session-capture.mjs --print-hook claude-code --event Stop --min-interval 20
 ```
 
-**The time budget.** Claude Code gives SessionEnd hooks 1.5 seconds between them by default and raises that to the hook's own `timeout` (at most 60); Codex allows 1 second, at most 3. The hook does its local work — read, summarise, scan — in the foreground (about 50 ms on a 20 MB transcript) and hands the network call to a detached child, then exits 0. The child posts, records the new thought's id, and writes one line to the log.
+Codex has no compaction hook: `--print-hook codex` prints SessionEnd alone, `--event PreCompact` for it is refused, and a Stop hook on an interval is its checkpoint. An event the hook does not know (`--event precompact`) is refused too — a misspelt one would install a hook that never fires.
+
+**The time budget.** Claude Code gives SessionEnd hooks 1.5 seconds between them by default and raises that to the hook's own `timeout` (at most 60); Codex allows 1 second, at most 3. PreCompact shares no budget — a command hook's default of 600 seconds stands — but a compaction waits on the hook, so it is printed with the same `"timeout": 10`. The transcript file is written asynchronously and may lag the conversation by a message or two when a checkpoint fires; the session's end has them all. The hook does its local work — read, summarise, scan — in the foreground (about 50 ms on a 20 MB transcript) and hands the network call to a detached child, then exits 0. The child posts, records the new thought's id, and writes one line to the log.
 
 ### 5. End a session and look
 
@@ -174,7 +188,7 @@ Then, from any client with a read key, `search_thoughts` for something the sessi
 
 ## Expected Outcome
 
-- One thought per session, type chosen by the metadata model, `metadata.source` = `claude-code` or `codex`, `derived_from` = the session's retrieved and captured thoughts.
+- One current thought per session — captured before each compaction and at the end, each superseding the last — type chosen by the metadata model, `metadata.source` = `claude-code` or `codex`, `derived_from` = the session's retrieved and captured thoughts.
 - `~/.local/state/open-brain/session-capture/<session_id>.json` holds the thought id and the summary's fingerprint; the same summary is never sent twice; a changed one supersedes.
 - A session with no human prompt, or no transcript, is skipped with exit 0 and a `skip:` line in the log.
 - A summary that carries a secret is refused with exit 1, a `refused —` line naming the shape and the offset, and nothing sent.
@@ -195,6 +209,9 @@ Solution: the endpoint is not reachable from this machine. Check the URL in the 
 **Issue: the log says `refused — … high-entropy token at char N`**
 Solution: something in a prompt or in the assistant's last message looks like a token — `--dry-run` the transcript to see the text at that offset. Take the value out of the conversation before ending the session (or capture a summary by hand with the `session-summary` skill). The scan is deliberately conservative: a refused capture costs one summary; a leaked credential costs more.
 
+**Issue: a search result reads `Checkpoint: compacted at … continuing`**
+Solution: that summary was captured before a compaction, of a session still running; its next checkpoint or its end supersedes it, and search marks the superseded hit. Nothing to do.
+
 **Issue: nothing happens at all**
 Solution: is the hook in the settings file the harness reads (`~/.claude/settings.json`, or `.claude/settings.json` in the project you were in)? Run the hook by hand: `echo '{"session_id":"x","transcript_path":"<path>","hook_event_name":"SessionEnd"}' | bun session-capture.mjs` prints what it decided on stderr.
 
@@ -211,4 +228,4 @@ Solution: Codex allows SessionEnd hooks at most 3 seconds; the foreground finish
 bun recipes/session-capture-hook/test-session-capture.mjs   # no brain, no model: synthetic transcripts and a fake MCP endpoint
 ```
 
-Both parsers, the summary's shape and caps, every secret pattern's probe and the clean probes (uuids, digests in their spellings, paths, URLs, data URIs, identifiers, prose) with each threshold pinned alone, the refusal — a key past a prompt's clip included — the payload, posting, supersession, refused and unreachable pointers, the queue under two children and after a dead one, obsolete and landed payloads, wrong urls and busy endpoints, the SSE shapes, the detached hand-off inside the budget against a slow endpoint, `--check`, `--dry-run`, `--print-hook`. It runs in CI's repo-consistency job.
+Both parsers, the summary's shape and caps, every secret pattern's probe and the clean probes (uuids, digests in their spellings, paths, URLs, data URIs, identifiers, prose) with each threshold pinned alone, the refusal — a key past a prompt's clip included — the payload, posting, supersession, refused and unreachable pointers, the queue under two children and after a dead one, obsolete and landed payloads, wrong urls and busy endpoints, the SSE shapes, the detached hand-off inside the budget against a slow endpoint, `--check`, `--dry-run`, `--print-hook` (the default pair, one event alone, Codex refused a compaction hook, an unknown event refused), a compaction checkpoint's line and its supersession by the session's end. It runs in CI's repo-consistency job.
