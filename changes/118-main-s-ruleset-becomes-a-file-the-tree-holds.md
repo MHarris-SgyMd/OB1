@@ -1,17 +1,4 @@
----
-type: changed
-bump: patch
-tickets: [SMD-1856]
-migrations: []
----
-
-## Changelog
-
-`main`'s ruleset now requires every job in `fork-checks.yml` (twelve, was nine of twelve), on a head up to date with `main`, each check pinned to the Actions app, and admits changes only through a pull request; the ruleset is a file, `.github/rulesets/main.json`, and `check-fork-consistency` check 20 holds it to the workflow's job list (SMD-1856).
-
-## FORK
-
-`main`'s ruleset becomes a file the tree holds to the workflow — every job required, strict, PR-only (SMD-1856)
+# 118. `main`'s ruleset becomes a file the tree holds to the workflow — every job required, strict, PR-only (SMD-1856)
 
 **What changed.** Ruleset 22189960 on `main` required nine checks, none of
 them `Retrieval replay gate` or SMD-1808's two linters, on whatever head the

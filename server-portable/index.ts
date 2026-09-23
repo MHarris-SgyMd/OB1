@@ -1,7 +1,8 @@
 
-import { displayDate, normaliseType, thoughtTitle, thoughtUrl, THOUGHT_TYPES } from "./thoughts.ts";
+import { displayDate, thoughtTitle, thoughtUrl, THOUGHT_TYPES } from "./thoughts.ts";
 import { cleanForDisplay } from "./consolidate.ts";
-import { createEmbedder, providerCall, ProviderError, resolveEmbedConfig, type EmbedConfig, type EmbedKind, type EmbeddedCapture } from "./embed.ts";
+import { createEmbedder, resolveEmbedConfig, type EmbedConfig, type EmbedKind, type EmbeddedCapture } from "./embed.ts";
+import { extractMetadata as extractMetadataWith, metadataRefused } from "./metadata.ts";
 import { decideCalls, mayLeaveBox, type EgressDecision, type EgressSubject } from "./egress.ts";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPTransport } from "@hono/mcp";
@@ -9,7 +10,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { createStore, postgrestOnBunNotice, storeKind, UUID_RE, type Citation, type ThoughtStore, type ThoughtHybridMatch, type ThoughtKeywordMatch } from "./store.ts";
 import { queryLogEnabled, trimmedEnv } from "../db/config.mjs";
-import { authenticateRequest, canWrite, type Principal } from "./auth.ts";
+import { authenticateRequest, canCapture, canRead, canWrite, SCOPES, type Principal } from "./auth.ts";
 import { AgentResolver, cacheTtlFromEnv } from "./agents.ts";
 
 /**
@@ -93,7 +94,7 @@ type Env = {
   OB1_METADATA_MODEL?: string;
   /** The supersession judge's model (db/consolidate.ts), when it is not OB1_METADATA_MODEL; the server never judges, but embed.ts reads one Env (SMD-1901). */
   OB1_JUDGE_MODEL?: string;
-  /** Sampling temperature for extraction. Defaults to 0 — see metadataTemperature. */
+  /** Sampling temperature for extraction. Defaults to 0 — metadata.ts's extractMetadata says why; embed.ts's resolveEmbedConfig owns the default. */
   OB1_METADATA_TEMPERATURE?: string;
   /**
    * Whether a thinking model reasons before extracting. Unset, off/false/0: no
@@ -191,15 +192,9 @@ function agents(): AgentResolver {
 function embedConfig(): EmbedConfig {
   return resolveEmbedConfig(env());
 }
-function metadataModel(): string {
-  return embedConfig().metadataModel;
-}
-function metadataReasoning(): Record<string, unknown> {
-  return embedConfig().metadataReasoning;
-}
-function metadataTemperature(): number {
-  return embedConfig().metadataTemperature;
-}
+// The tag extraction is metadata.ts (shared with db/sync-linear.ts); this is
+// the server's reader over it, lazy like embedConfig for the same reason.
+const extractMetadata = (text: string, subject: EgressSubject) => extractMetadataWith(text, subject, embedConfig());
 
 function citationBase(): string {
   return env().OPEN_BRAIN_CITATION_BASE_URL || "https://openbrain.local/thoughts";
@@ -229,22 +224,6 @@ function explainHeadWindow(e: EmbeddedCapture | undefined): string {
     `the head window's vector stands in for it. The thought is stored and searchable, and every search chunk ` +
     `has its vector; re-capture, or a re-embed pass, gives it the whole-content vector once the provider answers.`
   );
-}
-
-/**
- * What a capture records when the egress gate did not let its text reach the
- * chat endpoint (SMD-1903): the reason under the key the other failures use,
- * and NO topics and NO type — the call never happened, so it produced none,
- * and "observation" or the "uncategorized" placeholder would be a tag set
- * dressed as an extraction. Nothing here but the marker, also because
- * upsert_thought MERGES a re-capture's metadata over the row's (035): a
- * placeholder topic would have replaced an existing thought's real tags on
- * every re-capture under a refusing policy (first review pass). The capture
- * path writes this without calling extractMetadata; extractMetadata returns
- * it too should a refusal reach providerCall, so no path fabricates a tag set.
- */
-function metadataRefused(): Record<string, unknown> {
-  return { metadata_extraction_failed: "egress_denied" };
 }
 
 /**
@@ -279,86 +258,6 @@ function gateQuery(query: string, principal: Principal): { subject: EgressSubjec
   const subject: EgressSubject = { kind: "query", actor: principal.name, content: query };
   const gate = mayLeaveBox(subject, cfg.embeddings, cfg.egress);
   return gate.allowed ? { subject } : { subject, refused: refuseQuery(gate, principal.name) };
-}
-
-async function extractMetadata(text: string, subject: EgressSubject): Promise<Record<string, unknown>> {
-  // The original swallowed every failure into the fallback below: an auth error,
-  // a rate limit, or a 500 from OpenRouter all produced a thought tagged
-  // "uncategorized" and a success message to the user, with no way to tell a
-  // genuinely uncategorisable thought from a broken API key. Capture must still
-  // succeed — the content matters more than the tags — but the degradation is
-  // now recorded on the thought and surfaced in the confirmation.
-  const fallback = (reason: string): Record<string, unknown> => ({
-    topics: ["uncategorized"],
-    type: "observation",
-    metadata_extraction_failed: reason,
-  });
-
-  // Through the one provider call embed.ts owns, so this is bounded like the
-  // embedding calls and by the same setting: a capture awaits this and the
-  // embedding together, so a chat call that never returned held the capture —
-  // and discarded the embedding that had finished — for as long as the
-  // platform allowed. A timeout is one more recorded way the tags can be
-  // missing, told apart from a refused status and from a body that is not JSON.
-  let d: { choices?: [{ message?: { content?: string } }] };
-  try {
-    d = await providerCall(embedConfig(), "/chat/completions", {
-      model: metadataModel(),
-      response_format: { type: "json_object" },
-      // Structured extraction has one right answer, so sampling only adds
-      // variance. No temperature was sent before, which meant the provider
-      // default — 0.8 on Ollama. Measured over three runs of evals/: at the
-      // default, scores ranged 79/84 to 82/84 and the same capture could gain or
-      // lose a field between runs; at 0 the result was identical every time and
-      // above the sampled mean. Determinism also makes a bad capture
-      // reproducible, which matters more than the point of score.
-      temperature: metadataTemperature(),
-      ...metadataReasoning(),
-      messages: [
-        {
-          role: "system",
-          content: `Extract metadata from the user's captured thought. Return JSON with:
-- "people": array of people mentioned (empty if none)
-- "action_items": array of implied to-dos (empty if none)
-- "dates_mentioned": array of dates YYYY-MM-DD (empty if none)
-- "topics": array of 1-3 short topic tags (always at least one)
-- "type": one of "observation", "task", "idea", "reference", "person_note"
-Only extract what's explicitly there.`,
-        },
-        { role: "user", content: text },
-      ],
-    }, subject);
-  } catch (e) {
-    if (e instanceof ProviderError) {
-      console.error(`extractMetadata: ${e.message}`);
-      if (e.kind === "egress") return metadataRefused();
-      return fallback(e.kind === "timeout" ? "provider_timeout" : e.kind === "http" ? `provider_${e.status}` : "invalid_response_body");
-    }
-    throw e;
-  }
-
-  const content = d?.choices?.[0]?.message?.content;
-  if (typeof content !== "string") {
-    console.error("extractMetadata: provider response had no message content");
-    return fallback("no_message_content");
-  }
-
-  try {
-    const parsed = JSON.parse(content);
-    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-      console.error("extractMetadata: model returned JSON that is not an object");
-      return fallback("unexpected_json_shape");
-    }
-
-    const out = parsed as Record<string, unknown>;
-    const { type, raw } = normaliseType(out.type);
-    out.type = type;
-    if (raw) out.type_raw = raw;
-    return out;
-  } catch {
-    console.error("extractMetadata: model content was not valid JSON");
-    return fallback("unparseable_model_output");
-  }
 }
 
 // --- MCP Server Setup ---
@@ -416,6 +315,14 @@ function explainRefusal(
       return `Refused: ${r.error}`;
   }
 }
+
+/**
+ * The shape of a `source` label a capture may carry (SMD-1298): what the egress
+ * policy's `source:` term and a per-source weight can key on — lower-case, no
+ * spaces, bounded. Not a vocabulary: the hook says `claude-code` or `codex`,
+ * an importer says what it imports from, and the default stays `mcp`.
+ */
+const SOURCE_RE = /^[a-z0-9][a-z0-9-]{1,39}$/;
 
 /**
  * Untrusted text — a thought's, a citation's, a judge's reason — on one line
@@ -662,7 +569,7 @@ function buildServer(principal: Principal): McpServer {
   // reference can ask search_thoughts for a weight; this tool stays where
   // every result is the one the query names.
   const SEARCH_COMPAT_RECENCY_WEIGHT = 0;
-  server.registerTool(
+  if (canRead(principal)) server.registerTool(
     "search",
     {
       title: "Search Open Brain",
@@ -705,7 +612,7 @@ function buildServer(principal: Principal): McpServer {
     }
   );
 
-  server.registerTool(
+  if (canRead(principal)) server.registerTool(
     "fetch",
     {
       title: "Fetch Open Brain Thought",
@@ -764,7 +671,7 @@ function buildServer(principal: Principal): McpServer {
   // it still needs search_thoughts_keyword: it does, for paging through every
   // thought containing a string, and for a needle the extraction rule would not
   // pick out of a sentence on its own.
-  server.registerTool(
+  if (canRead(principal)) server.registerTool(
     "search_thoughts",
     {
       title: "Search Thoughts",
@@ -935,7 +842,7 @@ function buildServer(principal: Principal): McpServer {
    * choosing between two meanings of one tool. The description leads with WHEN to
    * reach for it, because that is the only part the model reads before deciding.
    */
-  server.registerTool(
+  if (canRead(principal)) server.registerTool(
     "search_thoughts_keyword",
     {
       title: "Search Thoughts by Exact Text",
@@ -1042,7 +949,7 @@ function buildServer(principal: Principal): McpServer {
   );
 
   // Tool 2: List Recent
-  server.registerTool(
+  if (canRead(principal)) server.registerTool(
     "list_thoughts",
     {
       title: "List Recent Thoughts",
@@ -1105,7 +1012,7 @@ function buildServer(principal: Principal): McpServer {
   );
 
   // Tool 2b: the supersession review queue (migration 029, SMD-1294)
-  server.registerTool(
+  if (canRead(principal)) server.registerTool(
     "list_supersession_proposals",
     {
       title: "List Supersession Proposals",
@@ -1169,7 +1076,7 @@ function buildServer(principal: Principal): McpServer {
   );
 
   // Tool 3: Stats
-  server.registerTool(
+  if (canRead(principal)) server.registerTool(
     "thought_stats",
     {
       title: "Thought Statistics",
@@ -1240,13 +1147,15 @@ function buildServer(principal: Principal): McpServer {
     }
   );
 
-  // Tool 4: Capture Thought — the only tool that writes.
+  // Tool 4: Capture Thought — the tool that adds.
   //
-  // Registered only for a write-scoped key. A read-only key does not get a
+  // Registered for a key that may capture — write scope, or the capture-only
+  // scope a session-end hook holds (SMD-1298). A read-only key does not get a
   // permission error from it; the tool is absent from tools/list entirely, so the
   // client never offers it and never tries. That is a smaller surface than
-  // refusing the call, and it is honest about what the key can do.
-  if (canWrite(principal)) server.registerTool(
+  // refusing the call, and it is honest about what the key can do. The read
+  // tools above are gated the same way for a capture key: absent, not refused.
+  if (canCapture(principal)) server.registerTool(
     "capture_thought",
     {
       title: "Capture Thought",
@@ -1267,10 +1176,25 @@ function buildServer(principal: Principal): McpServer {
           .describe("For a thought SYNTHESISED from others (a digest, consolidation, summary): the ids of the source thoughts it was built from. Each must be an existing thought id (from a search or capture result). Recorded when the thought is new; if this text was already captured, the existing thought's provenance is left as it is."),
         supersedes: z.string().optional()
           .describe("The id of a prior thought this one REPLACES (a corrected or updated version). Search will label the older thought as superseded. Recorded when the thought is new; for text already captured, use update_thought's `supersedes` on that thought instead."),
+        // SMD-1298. Where the capture comes from, for metadata.source — "mcp"
+        // when absent, as every capture before it. A session-end hook says
+        // `claude-code` or `codex`; a per-source weight (SMD-1297) and the
+        // egress policy's `source:` term key on the value. The shape is held
+        // here so a label reaches the row, the audit trail and the policy as
+        // one spelling.
+        source: z.string().regex(SOURCE_RE, "lower-case letters, digits and hyphens, 2–40 characters, starting with a letter or digit").optional()
+          .describe("Where this capture comes from, recorded as metadata.source — e.g. `claude-code` or `codex` for a session-end hook, `mcp` (the default) for an agent capturing in conversation. Lower-case letters, digits and hyphens, 2–40 characters. A label the caller gives; the audit row's actor says which key wrote."),
       },
     },
-    async ({ content, derived_from, supersedes }) => {
+    async ({ content, derived_from, supersedes, source }) => {
+      // What a key that cannot read is told and allowed — decided once here
+      // and read below, in the catch too (fifth review pass: six scattered
+      // canRead tests; sixth: one survived in the catch).
+      const reader = canRead(principal);
       try {
+        // The row's origin label: the caller's, else the one every capture
+        // through this tool carried before `source` existed (SMD-1298).
+        const origin = source ?? "mcp";
         // The shape before the two model calls, in the tool's words — as
         // update_thought's `supersedes` is refused (032). upsert_thought would
         // raise on it after the embedding and the metadata were already paid for.
@@ -1280,12 +1204,76 @@ function buildServer(principal: Principal): McpServer {
         // Existence stays the write's.
         const badDerived = derived_from?.find((d) => !UUID_RE.test(d));
         if (badDerived !== undefined) return toolError(`Refused: every \`derived_from\` entry must be a thought id (the ID: line of a search result), not "${badDerived.slice(0, 40)}".`);
+        // A capture-only key's provenance is trimmed to the ids that exist
+        // BEFORE the write, and the reply says nothing of it — not which
+        // (third review pass: positions were an existence oracle on a key that
+        // cannot read) and not how many (eighth: with one id sent, the count
+        // was the answer). A reader is refused with positions and ids, and can
+        // look. A summary with its live sources beats a refusal over one
+        // deleted thought; the row's derived_from says what was recorded.
+        let derivedFrom = derived_from;
+        if (derivedFrom?.length && !reader) derivedFrom = await liveSubset(await db(), derivedFrom);
+        // A capture-only key may replace only what it captured itself (SMD-1298,
+        // first review pass): `supersedes` marks the target superseded in every
+        // search result — an alteration of a thought the key did not write, the
+        // one thing the scope promises it cannot do. Ownership is the target's
+        // capture audit row (008/010): the same agent id when both sides have
+        // one, else the same key name. One message whichever way it fails, so
+        // the refusal is not an existence oracle for a key that cannot read.
+        if (supersedes !== undefined && !reader) {
+          let writer: { actorName: string | null; agentId: string | null } | null;
+          try {
+            writer = await (await db()).captureActorOf(supersedes);
+          } catch (e) {
+            // The read needs SELECT on thought_audit — the `server` grant group,
+            // soft like the rest of it (second review pass: the capture group
+            // holds INSERT alone). Refuse THIS pointer, name the grant, and let
+            // the capture proceed without it on the caller's retry.
+            // An ERROR of the server's, not a refusal of the request as shaped:
+            // a caller keeps the pointer and tries again once the grant is
+            // there (fifth review pass: "Refused:" made the hook drop it, and
+            // the hook told the two apart by the sentence's wording).
+            const why = String((e as Error).message ?? e).slice(0, 120);
+            // The grant remedy only for a privilege error (42501); a dropped
+            // connection, a timeout or a brain before 010 gets the store's own
+            // words, since `--grant` would change nothing there (sixth review pass).
+            const noPrivilege = (e as { code?: string }).code === "42501" || /permission denied/i.test(why);
+            return toolError(`Error: this key's \`supersedes\` could not be checked against the target's capture record (${why})${noPrivilege ? " — the server role needs SELECT on thought_audit: cd db && bun migrate.ts --grant <role> --url $DATABASE_URL" : ""}.`);
+          }
+          // By agent id when both sides carry one; by name only when NEITHER
+          // does (the registry away now, as it was at the write). A row without
+          // an id met by a principal with one is not this key's to replace: a
+          // later key minted under the same name would otherwise own every
+          // thought captured while the registry was down (fourth review pass).
+          // The registry away NOW while the row is attributed: nothing can be
+          // said either way, and that is the server's condition, not the
+          // caller's — an error to retry, not a refusal (fifth review pass).
+          // Unless the registry ANSWERED and refused this key's argument (a
+          // label the SQL rejects): that will not heal on a retry, so it is a
+          // refusal, and the caller posts without the pointer (sixth review pass).
+          if (writer !== null && writer.agentId !== null && principal.agentId === undefined) {
+            if (principal.agentUnresolved === "refused") return toolError("Refused: a capture-scoped key may name as `supersedes` only a thought it captured itself, and this key's identity could not be resolved — the agent registry refused its name or digest; see the server log.");
+            return toolError("Error: this key's `supersedes` could not be attributed while the agent registry is unavailable — retry when resolve_agent answers.");
+          }
+          const own = writer !== null && (
+            writer.agentId !== null && principal.agentId !== undefined ? writer.agentId === principal.agentId
+              : writer.agentId === null && principal.agentId === undefined ? writer.actorName === principal.name
+                : false);
+          if (!own) return toolError("Refused: a capture-scoped key may name as `supersedes` only a thought it captured itself.");
+        }
         // What may leave the box (SMD-1903): asked once, for both calls, and
         // only the allowed ones are made — a refused capture costs no request
         // and lands all the same, without the vector or the tags the refused
         // call would have produced, with the decision on its audit row.
         const cfg = embedConfig();
-        const subject: EgressSubject = { kind: "capture", actor: principal.name, metadata: { source: "mcp" }, content };
+        // The gate judges the label the ROW will carry — one value for the
+        // row's lifetime, so a `source:` term decides the same at the capture
+        // and at the re-embed and consolidation passes that read the row
+        // (fourth review pass: judging `mcp` here and the label there let one
+        // policy allow and refuse the same row). The label is the caller's, so
+        // a term about WHO wrote names `actor`, which the key proves; SMD-1941
+        // binds a label to the key.
+        const subject: EgressSubject = { kind: "capture", actor: principal.name, metadata: { source: origin }, content };
         const gate = decideCalls(subject, cfg, cfg.egress);
         // Independent of each other, so they overlap.
         const [embedded, metadata] = await Promise.all([
@@ -1295,13 +1283,20 @@ function buildServer(principal: Principal): McpServer {
         const chunks = embedded?.chunks ?? [];
         const contextFailures = embedded?.contextFailures ?? 0;
 
-        const payload = { metadata: { ...metadata, source: "mcp" } };
+        const payload = { metadata: { ...metadata, source: origin } };
 
         // Atomicity is the store's problem now: the SQL path writes content,
         // metadata and vector in one statement, while the PostgREST path keeps the
         // 3-arg RPC with its two-step fallback. Either way a row committed without
         // its embedding is reported, never silently accepted.
-        const captured = await (await db()).captureThought({
+        // A source deleted between the trim above and this write — the one path
+        // left to 025's refusal for a key that cannot read — is met by trimming
+        // once more and writing again, so the summary keeps its live sources;
+        // the refusal that reaches such a key names no position, and the hook
+        // could only drop the whole list (twelfth review pass). A reader is
+        // refused as before, with positions, and decides.
+        const store = await db();
+        const captureArgs = {
           content,
           payload,
           chunks,
@@ -1331,9 +1326,16 @@ function buildServer(principal: Principal): McpServer {
           // 025: provenance, if the caller named any. upsert_thought validates
           // derived_from and refuses a bad reference, so a malformed value
           // fails the capture with a clear message rather than storing a lie.
-          derivedFrom: derived_from,
           supersedes,
-        });
+        };
+        let captured;
+        try {
+          captured = await store.captureThought({ ...captureArgs, derivedFrom });
+        } catch (e) {
+          if (reader || !derivedFrom?.length || !/derived_from references a thought that does not exist/.test(String((e as Error)?.message ?? e))) throw e;
+          derivedFrom = await liveSubset(store, derivedFrom);
+          captured = await store.captureThought({ ...captureArgs, derivedFrom });
+        }
 
         // Memory utilization (SMD-1719, over 034's log): a capture that names a
         // returned id as its source — `derived_from`, or `supersedes` — is the
@@ -1351,7 +1353,7 @@ function buildServer(principal: Principal): McpServer {
         // "fresh" on the one schema where the pointer's fate is unknown). The
         // vector attaching or not does not change what was written.
         if (captured.existed === false) {
-          await logActionCalls(citeRows("capture_thought", { derived_from, supersedes }));
+          await logActionCalls(citeRows("capture_thought", { derived_from: derivedFrom, supersedes }));
         }
 
         if (captured.embeddingFailed) {
@@ -1390,7 +1392,11 @@ function buildServer(principal: Principal): McpServer {
         // two-step, does not say which this was — and the coalesce holds
         // there too (033), so the note hedges rather than tell the fresh-row
         // story of a row that may be keeping its vector (second review pass).
-        const existed = captured.existed;
+        // What a key that cannot read may be told about the row: not whether
+        // the text was already a thought, nor what it points at (first review
+        // pass — an existence oracle on a capture-only key). The id is returned
+        // either way; a hook needs it to supersede its own earlier summary.
+        const existed = reader ? captured.existed : undefined;
         if (!gate.embeddings.allowed) {
           confirmation += existed === true
             ? `\n\nNote: the embedding call for this capture was not made — ${gate.embeddings.reason}. This text was already a thought, and it keeps the vector it had.`
@@ -1400,7 +1406,9 @@ function buildServer(principal: Principal): McpServer {
                 `(db/reembed.ts) against an endpoint the gate allows.`
               : `\n\nNote: the embedding call for this capture was not made — ${gate.embeddings.reason}. A new thought has no vector — findable by exact text ` +
                 `(search_thoughts_keyword), filled in by a re-embed pass (db/reembed.ts) against an endpoint the gate allows; text already captured keeps the vector it had. ` +
-                `This database does not say which this was.`;
+                // A key that cannot read is not told which (SMD-1298); a database
+                // from before 035 cannot say.
+                (reader ? `This database does not say which this was.` : `This reply does not say which.`);
         }
 
         // A chunk whose situating blurb could not be generated is embedded bare
@@ -1427,8 +1435,8 @@ function buildServer(principal: Principal): McpServer {
         // were not written; say so and name the edit that records it, since
         // otherwise nothing would — the trace would show nothing and no
         // error would say why.
-        const derivedNamed = derived_from !== undefined && derived_from.length > 0;
-        if (captured.existed === true && (derivedNamed || supersedes !== undefined)) {
+        const derivedNamed = derivedFrom !== undefined && derivedFrom.length > 0;
+        if (existed === true && (derivedNamed || supersedes !== undefined)) {
           const named = [derivedNamed ? "`derived_from`" : null, supersedes !== undefined ? "`supersedes`" : null].filter(Boolean);
           // What stands, from the row's pointer the store returned beside
           // `existed` (035) — not from the caller's inputs alone, which the
@@ -1487,7 +1495,32 @@ function buildServer(principal: Principal): McpServer {
         // Its sibling: validate_derived_from's existence refusal (032), the
         // one provenance refusal that still reached the caller as a raw error
         // (fifth review pass).
-        if (/derived_from references a thought that does not exist/.test(msg)) return toolError(`Refused: a \`derived_from\` id names no thought — ${msg.replace(/^.*?\(in /, "(in ").replace(/\.$/, "")}. Each must be an existing thought id (the ID: line of a search result).`);
+        if (/derived_from references a thought that does not exist/.test(msg)) {
+          // WHICH ones (second review pass): 025 names the whole list, so the
+          // store is asked which exist and the reply names the POSITIONS that
+          // do not — what a caller needs to drop exactly those and try again,
+          // and nothing it did not send — with the ids beside them for a key
+          // that can read. A capture key's list was trimmed before the write
+          // (third review pass), so it reaches here only when a source was
+          // deleted between the check and the write — and is told no position
+          // even then (eighth review pass: the race was the one path that still
+          // named one to a key that cannot read).
+          const sent = derived_from ?? [];
+          let missingAt: number[] = [];
+          if (reader) { // a non-reader is told no position, so the store is not asked (tenth review pass)
+            try {
+              const have = await (await db()).existingIds(sent);
+              missingAt = sent.map((d, i) => (have.has(d.toLowerCase()) ? -1 : i)).filter((i) => i >= 0);
+            } catch { /* the store could not say: the list alone, then */ }
+          }
+          // The verb agrees with what is SAID: the plural leaked the count to a
+          // non-reader through the placeholder (ninth review pass).
+          const named = reader && missingAt.length ? missingAt : [];
+          const where = named.length
+            ? named.map((i) => `derived_from[${i}] (${sent[i]})`).join(", ")
+            : "a `derived_from` id";
+          return toolError(`Refused: ${where} name${named.length > 1 ? "" : "s"} no thought. Each entry must be an existing thought id (the ID: line of a search result).`);
+        }
         return {
           content: [{ type: "text" as const, text: `Error: ${msg}` }],
           isError: true,
@@ -1703,6 +1736,17 @@ const HEALTH_METHOD_NOT_ALLOWED_HEADERS = { ...corsHeaders, Allow: HEALTH_ALLOWE
 // clients recover (e.g. prompt the user for a new key, refetch a stale
 // cache) instead of dying.
 const JSON_RPC_UNAUTHORIZED_CODE = -32001;
+
+/**
+ * The ids in `ids` that name a thought, or undefined when none does — the one
+ * rule for trimming a capture-only key's `derived_from` before the write and
+ * again on the retry (thirteenth review pass: it was spelled twice).
+ */
+async function liveSubset(store: ThoughtStore, ids: string[]): Promise<string[] | undefined> {
+  const have = await store.existingIds(ids);
+  const kept = ids.filter((d) => have.has(d.toLowerCase()));
+  return kept.length ? kept : undefined;
+}
 const UNAUTHORIZED_MESSAGE = "Unauthorized: missing or invalid authentication.";
 
 /**
@@ -1852,10 +1896,12 @@ app.on(MCP_METHODS, "*", async (c) => {
   // `?key=` does not shadow it. The query form stays because Claude Desktop
   // custom connectors are URL-only; scopes are what limit the damage when such a
   // URL leaks. See auth.ts.
+  // Every scope: this is the one server that registers a tool group for a
+  // capture-only key. A consumer that does not say admits read and write alone.
   const principal = authenticateRequest(c.req.raw, {
     MCP_ACCESS_KEYS: env().MCP_ACCESS_KEYS,
     MCP_ACCESS_KEY: env().MCP_ACCESS_KEY,
-  });
+  }, { admit: SCOPES });
 
   if (!principal) {
     // Return a JSON-RPC 2.0 error envelope (HTTP 200) instead of a bare
@@ -1884,6 +1930,7 @@ app.on(MCP_METHODS, "*", async (c) => {
     return unauthorizedResponse(extractJsonRpcId(bodyText), REVOKED_MESSAGE);
   }
   principal.agentId = identity.agentId;
+  if (identity.status === "ok") principal.agentUnresolved = identity.unresolved;
 
   const server = buildServer(principal);
   const transport = new StreamableHTTPTransport();

@@ -16,6 +16,22 @@
  *   merely fail to write, the write tools are never registered for them, so they
  *   do not appear in tools/list at all.
  *
+ *   A third scope, `capture` (SMD-1298), is the mirror image: `capture_thought`
+ *   and nothing else — no read tool, no update, no delete. It is the key a
+ *   session-end hook holds: a credential that sits in a config file on every
+ *   machine that runs the hook, and whose leak must be worth as little as
+ *   possible. A leaked capture key can add a thought; it cannot read one, alter
+ *   one or remove one. index.ts asks the three questions below — canRead,
+ *   canCapture, canWrite — one per tool group. The vendored servers (the copies
+ *   of this file) ask only canWrite and register their read tools for every
+ *   authenticated key — so authenticate() ADMITS only the scopes its caller
+ *   names, and a caller that names none admits read and write: to a vendored
+ *   server a capture key is no principal at all (unauthorized inside the
+ *   envelope), whatever MCP_ACCESS_KEYS it was pasted into. The core server
+ *   passes `{ admit: SCOPES }` (first review pass: a docblock sentence asking
+ *   operators to keep the key out of the extensions' env was the only guard).
+ *   Migration 049 lets the agent registry record the scope.
+ *
  *   Named keys, revocable independently. One per client, so retiring the key you
  *   pasted into a laptop does not break the rest.
  *
@@ -55,7 +71,18 @@
 import { Buffer } from "node:buffer";
 import { createHash, timingSafeEqual } from "node:crypto";
 
-export type Scope = "read" | "write";
+export type Scope = "read" | "write" | "capture";
+/** Every scope keygen.ts mints and parseKeyRecords accepts, in the order the docs list them. */
+export const SCOPES: readonly Scope[] = Object.freeze(["read", "write", "capture"]);
+/**
+ * The scopes a consumer admits when it does not say: the two every consumer
+ * knew before SMD-1298. A server that registers a tool group for a capture key
+ * — the core server — names SCOPES; one that never asked (the vendored copies
+ * of this file) refuses such a key as it refuses an unknown one.
+ */
+export const DEFAULT_ADMIT: readonly Scope[] = Object.freeze(["read", "write"]);
+export type AuthOptions = { admit?: readonly Scope[] };
+const isScope = (s: string): s is Scope => (SCOPES as readonly string[]).includes(s);
 
 export type Principal = {
   /** Which configured key authenticated, for logging. Never the key itself. */
@@ -77,6 +104,8 @@ export type Principal = {
    * attribution then falls back to `name`, which is where it was before 010.
    */
   agentId?: string;
+  /** Why `agentId` is absent, when it is: the registry could not be reached (a retry may answer) or refused the argument (it will not). Set beside agentId by index.ts from agents.ts's outcome. */
+  agentUnresolved?: "unreachable" | "refused";
 };
 
 export type KeyRecord = { name: string; scope: Scope; sha256: string };
@@ -109,7 +138,7 @@ export function parseKeyRecords(spec: string): { keys: KeyRecord[]; problems: st
     }
     const [name, scope, sha] = parts.map((p) => p.trim());
     if (!name) problems.push(`an entry has no name`);
-    if (scope !== "read" && scope !== "write") problems.push(`key "${name}" has scope "${scope}" — expected read or write`);
+    if (!isScope(scope)) problems.push(`key "${name}" has scope "${scope}" — expected read, write or capture`);
     if (!SHA256_HEX.test(sha)) {
       problems.push(
         `key "${name}" does not carry a SHA-256 hex digest. Store the HASH, not the key — mint one with: bun keygen.ts --name ${name || "client"} --scope ${scope || "read"}`
@@ -138,7 +167,7 @@ export function parseKeyRecords(spec: string): { keys: KeyRecord[]; problems: st
       seenHashes.set(shaLower, name);
     }
 
-    if (name && (scope === "read" || scope === "write") && SHA256_HEX.test(sha)) {
+    if (name && isScope(scope) && SHA256_HEX.test(sha)) {
       keys.push({ name, scope, sha256: sha.toLowerCase() });
     }
   }
@@ -180,17 +209,20 @@ export type AuthConfig = {
  * Resolve a presented key to a principal, or null.
  *
  * Every configured key is compared even after a match, so the work done does not
- * depend on which key matched or on how many are configured.
+ * depend on which key matched or on how many are configured. A key whose scope
+ * the caller does not admit (`opts.admit`, DEFAULT_ADMIT when absent) is
+ * compared like every other and never returned: to that caller it is unknown.
  */
-export function authenticate(presented: string | null | undefined, cfg: AuthConfig): Principal | null {
+export function authenticate(presented: string | null | undefined, cfg: AuthConfig, opts: AuthOptions = {}): Principal | null {
   if (!presented) return null;
   const presentedHash = hashKey(presented);
+  const admit = opts.admit ?? DEFAULT_ADMIT;
 
   let found: Principal | null = null;
 
   if (cfg.MCP_ACCESS_KEYS) {
     for (const k of parseKeyRecords(cfg.MCP_ACCESS_KEYS).keys) {
-      if (digestsMatch(presentedHash, k.sha256) && found === null) {
+      if (digestsMatch(presentedHash, k.sha256) && found === null && admit.includes(k.scope)) {
         found = { name: k.name, scope: k.scope, keyHash: presentedHash };
       }
     }
@@ -200,7 +232,7 @@ export function authenticate(presented: string | null | undefined, cfg: AuthConf
   // working; preflight warns about it.
   if (cfg.MCP_ACCESS_KEY) {
     const legacyMatch = digestsMatch(presentedHash, hashKey(cfg.MCP_ACCESS_KEY));
-    if (legacyMatch && found === null) {
+    if (legacyMatch && found === null && admit.includes("write")) {
       found = { name: "MCP_ACCESS_KEY", scope: "write", keyHash: presentedHash };
     }
   }
@@ -208,9 +240,23 @@ export function authenticate(presented: string | null | undefined, cfg: AuthConf
   return found;
 }
 
-/** True when the principal may use tools that modify data. */
+/**
+ * True when the principal may use tools that modify data — update, delete, and
+ * whatever a vendored server writes. Write scope alone: a capture key adds
+ * thoughts and touches nothing that exists.
+ */
 export function canWrite(p: Principal): boolean {
   return p.scope === "write";
+}
+
+/** True when the principal may use the tools that read — every scope but capture. */
+export function canRead(p: Principal): boolean {
+  return p.scope === "read" || p.scope === "write";
+}
+
+/** True when the principal may add a thought — write scope, or the capture-only scope (SMD-1298). */
+export function canCapture(p: Principal): boolean {
+  return p.scope === "write" || p.scope === "capture";
 }
 
 /**
@@ -238,9 +284,9 @@ export function presentedKeys(req: Request): string[] {
  * done depends on how many forms the client sent and on which of its own forms
  * authenticated — nothing the server holds.
  */
-export function authenticateRequest(req: Request, cfg: AuthConfig): Principal | null {
+export function authenticateRequest(req: Request, cfg: AuthConfig, opts: AuthOptions = {}): Principal | null {
   for (const key of presentedKeys(req)) {
-    const principal = authenticate(key, cfg);
+    const principal = authenticate(key, cfg, opts);
     if (principal) return principal;
   }
   return null;

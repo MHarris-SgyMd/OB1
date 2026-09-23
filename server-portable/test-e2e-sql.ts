@@ -19,6 +19,7 @@ import { SQL } from "bun";
 import { createAssert, plantLegacyRow, resetSchema } from "../db/test-support.ts";
 import { join, dirname } from "node:path";
 import { TOOL_NAMES } from "./tools.ts";
+import { hashKey } from "./auth.ts";
 import { fileURLToPath } from "node:url";
 
 const URL_ = process.env.DATABASE_URL;
@@ -96,6 +97,17 @@ delete process.env.OB1_STORE;
 process.env.DATABASE_URL = URL_;
 process.env.OPENROUTER_API_KEY = "stub";
 process.env.MCP_ACCESS_KEY = "e2e-key";
+// Beside the legacy write key, a capture-only key (SMD-1298) for [13]: the
+// scope a session-end hook holds. Both forms configured at once, as test-auth
+// [6] proves they may be.
+const CAPTURE_KEY = "hook-" + "c".repeat(59);
+// A second capture key for the case where the agent registry is away.
+const CAPTURE_KEY_2 = "hook-" + "d".repeat(59);
+const KEYS_AT_BOOT = `session-hook:capture:${hashKey(CAPTURE_KEY)},hook-two:capture:${hashKey(CAPTURE_KEY_2)}`;
+process.env.MCP_ACCESS_KEYS = KEYS_AT_BOOT;
+// No registry cache: [13] takes resolve_agent away and brings it back, and a
+// principal's agent id must follow at once.
+process.env.OB1_AGENT_CACHE_TTL_MS = "0";
 // The query log (034, SMD-1295) is read once at first request and frozen, as in
 // production (set at boot, not toggled per request). On for the whole suite so
 // [N] can exercise the real write+join path; the OFF guarantee — that the guard
@@ -399,7 +411,7 @@ console.log("\n[7] Dedup through the tool surface");
   try { await call("capture_thought", { content: "iota thought naming a bad source", derived_from: ["abc"] }); } catch (e) { refused = (e as Error).message; }
   assert(/Refused: every `derived_from` entry must be a thought id/.test(refused), `a derived_from element that is no id is refused before the model calls (${refused.slice(0, 60)})`);
   try { await call("capture_thought", { content: "iota thought naming a ghost source", derived_from: ["00000000-0000-0000-0000-000000000000"] }); } catch (e) { refused = (e as Error).message; }
-  assert(/Refused: a `derived_from` id names no thought — \(in \["00000000-0000-0000-0000-000000000000"\]\)\./.test(refused), `a well-formed derived_from id naming no thought is refused in the tool's words too (${refused.slice(0, 90)})`);
+  assert(/Refused: derived_from\[0\] \(00000000-0000-0000-0000-000000000000\) names no thought\./.test(refused), `a well-formed derived_from id naming no thought is refused in the tool's words too, by position, the id beside it for a key that reads (${refused.slice(0, 90)})`);
   assert(!/Note: this text was already captured/.test(await call("capture_thought", { content: "alpha thought about migrations", derived_from: [] })), "an empty derived_from names nothing, and no note fires for it");
   const self = await call("capture_thought", { content: "alpha thought about migrations", supersedes: alpha });
   assert(/names the thought itself; a thought cannot supersede itself\./.test(self) && !/call update_thought/.test(self), "…naming itself: refused in words, no edit advised");
@@ -617,7 +629,8 @@ console.log("\n[11] Undated and infinity rows render through the tools without a
   const infinityId = await plantLegacyRow(sql, "an infinity-dated e2e thought", axis(1), "infinity");
   try {
     const listed = await call("list_thoughts", { limit: 10 });
-    assert(!/1970/.test(listed) && !/Invalid Date/.test(listed), `list_thoughts prints no fabricated date (${listed.replace(/\n/g, " ⏎ ")})`);
+    // The ids are masked first: a uuid ending in 1970 failed this once in a thousand runs (ninth review pass).
+    assert(!/1970/.test(listed.replace(/[0-9a-f-]{36}/g, "")) && !/Invalid Date/.test(listed), `list_thoughts prints no fabricated date (${listed.replace(/\n/g, " ⏎ ")})`);
     assert(/\[undated\]/.test(listed), "the undated row shows [undated], not a date");
     assert(/\[infinity\]/.test(listed), "the infinity row shows [infinity], its own text");
 
@@ -689,6 +702,200 @@ console.log("\n[12] list_supersession_proposals renders an infinity/undated prop
     await sql`DELETE FROM thoughts WHERE id = ${infOlder}::uuid OR id = ${undatedNewer}::uuid`;
     await sql.close();
   }
+}
+
+console.log("\n[13] A capture-only key adds a thought that names its harness and its sources, and can do nothing else (SMD-1298)");
+{
+  // The raw envelope, not call(): this section reads errors as answers. One
+  // helper per key (fifth review pass: three hand-rolled copies).
+  type Envelope = { error?: { message: string }; result?: { isError?: boolean; content?: { text?: string }[]; tools?: { name: string }[] } };
+  const rpcAs = (key: string) => async (method: string, params: Record<string, unknown>): Promise<Envelope> => {
+    const r = await fetch(BASE, { method: "POST", headers: { ...H, "x-brain-key": key }, body: JSON.stringify({ jsonrpc: "2.0", id: rpcId++, method, params }) });
+    const text = await r.text();
+    return JSON.parse(text.startsWith("{") ? text : (text.split("\n").find((l) => l.startsWith("data: ")) ?? "").slice(6));
+  };
+  const rpc = rpcAs(CAPTURE_KEY);
+  const captureAs = (key: string) => (args: Record<string, unknown>) => rpcAs(key)("tools/call", { name: "capture_thought", arguments: args });
+  const textOf = (b: Awaited<ReturnType<typeof rpc>>) => (b.result?.content ?? []).map((c) => c.text ?? "").join("\n");
+  const idIn = (s: string) => /id ([0-9a-f-]{36})/.exec(s)?.[1];
+  const sql = new SQL({ url: URL_, max: 1 });
+
+  const surface = ((await rpc("tools/list", {})).result?.tools ?? []).map((t) => t.name);
+  assert(surface.join() === "capture_thought", `the capture key's surface is capture_thought alone (${surface.join(", ") || "nothing"})`);
+
+  // A thought "the session retrieved", written by the writer key, is the
+  // summary's source; the hook names it as derived_from and the harness as source.
+  const retrieved = idIn(await call("capture_thought", { content: "eta thought the session retrieved from the brain" }));
+  assert(retrieved !== undefined, "a source thought exists to be cited");
+  const cap = await rpc("tools/call", { name: "capture_thought", arguments: {
+    content: "Session summary — claude-code — the hook's first capture of a session that read eta", source: "claude-code", derived_from: [retrieved],
+  } });
+  const capText = textOf(cap);
+  assert(cap.error === undefined && cap.result?.isError !== true, `the capture-scoped key captures (${cap.error?.message ?? capText.split("\n")[0].slice(0, 80)})`);
+  const id = idIn(capText);
+  assert(id !== undefined, "…and the reply carries the new id");
+  const [row] = await sql`SELECT metadata->>'source' AS origin, derived_from FROM thoughts WHERE id = ${id}::uuid`;
+  assert(row?.origin === "claude-code", `metadata.source is the harness the caller named (${row?.origin})`);
+  assert(JSON.stringify(row?.derived_from ?? null).includes(retrieved!), `derived_from carries the retrieved thought (${JSON.stringify(row?.derived_from)})`);
+  const [audit] = await sql`SELECT source, actor_name, canonical_agent_id, origin FROM thought_audit WHERE thought_id = ${id}::uuid AND action = 'capture' ORDER BY id LIMIT 1`;
+  assert(audit?.source === "claude-code" && audit?.actor_name === "session-hook",
+    `the audit row carries the source and the key's name (${audit?.source}, ${audit?.actor_name})`);
+  // 046's origin (SMD-1730) comes from the actor's `via`, which the tool sets inline; no suite drove the real server's capture and read it back (seventh review pass).
+  assert(audit?.origin === "open-brain", `…and the door the write came through, 046's origin (${audit?.origin})`);
+  assert(typeof audit?.canonical_agent_id === "string", "…and the hook's agent id — 049 lets the registry record the capture scope, so the write is attributed");
+  const [key] = await sql`SELECT scope FROM ob1_agent_keys WHERE key_hash = ${hashKey(CAPTURE_KEY)}`;
+  assert(key?.scope === "capture", `the registry recorded the scope as presented (${key?.scope})`);
+
+  // Absent, not refused: a read through the capture key is an unknown tool.
+  const read = await rpc("tools/call", { name: "search_thoughts", arguments: { query: "eta", limit: 5, threshold: 0.1 } });
+  // The shape the hook reads: a RESULT with isError whose text opens "MCP error -32602" (thirteenth review pass — the hook's fake had it as a JSON-RPC error).
+  assert(read.error === undefined && read.result?.isError === true && /^MCP error -32602: Tool search_thoughts not found/.test(textOf(read)), `search_thoughts is not a tool the capture key can call — an isError result, not a JSON-RPC error (${textOf(read).slice(0, 60)})`);
+  assert(/not found|unknown tool/i.test(String(read.error?.message ?? textOf(read))), "…told as a missing tool, not a permission error");
+  const del = await rpc("tools/call", { name: "delete_thought", arguments: { id } });
+  assert(del.error !== undefined || del.result?.isError === true, "delete_thought is not either — the key cannot remove what it added");
+
+  // supersedes through a capture key (first review pass): only what it wrote.
+  const steal = await rpc("tools/call", { name: "capture_thought", arguments: { content: "Session summary — a later ending — claims to replace eta", source: "claude-code", supersedes: retrieved } });
+  assert(steal.result?.isError === true && /only a thought it captured itself/.test(textOf(steal)), `a capture key may not supersede another key's thought (${textOf(steal).slice(0, 80)})`);
+  const [[untouched]] = [await sql`SELECT count(*)::int AS n FROM thoughts WHERE content LIKE 'Session summary — a later ending%'`];
+  assert(untouched?.n === 0, "…and nothing was written");
+  const own = await rpc("tools/call", { name: "capture_thought", arguments: { content: "Session summary — claude-code — the same session, ended again", source: "claude-code", supersedes: id } });
+  const ownId = idIn(textOf(own));
+  assert(own.result?.isError !== true && ownId !== undefined, `…while superseding its own earlier summary is allowed (${textOf(own).split("\n")[0].slice(0, 70)})`);
+  const [chain] = await sql`SELECT supersedes::text AS s FROM thoughts WHERE id = ${ownId}::uuid`;
+  assert(chain?.s === id, "…and the pointer is recorded");
+  // Ownership has two paths (second review pass: mutants keeping either alone
+  // passed). The AGENT path: the key is renamed — same digest, new label — so
+  // its earlier thought's audit row carries the old name and the same agent id;
+  // the NAME path: the registry is away, the principal has no agent id, and a
+  // thought this key captured meanwhile has NULL for one.
+  // The server seeds its env once per process (third review pass: a swap of
+  // MCP_ACCESS_KEYS here reached nothing, and the case was vacuous), so the
+  // rename is written into the RECORD: the earlier row says a name this key no
+  // longer presents, and only the agent path can allow the supersedes.
+  await sql`ALTER TABLE thought_audit DISABLE TRIGGER thought_audit_immutable`; // 008's append-only guard would refuse the UPDATE, honestly
+  await sql`UPDATE thought_audit SET actor_name = 'session-hook-before-rename' WHERE thought_id = ${ownId}::uuid AND action = 'capture'`;
+  await sql`ALTER TABLE thought_audit ENABLE TRIGGER thought_audit_immutable`;
+  const renamed = await rpc("tools/call", { name: "capture_thought", arguments: { content: "Session summary — claude-code — under the key's new name", source: "claude-code", supersedes: ownId } });
+  assert(renamed.result?.isError !== true && idIn(textOf(renamed)) !== undefined, `a renamed key supersedes its own thought — the audit row's name differs, the agent id is the same (${textOf(renamed).split("\n")[0].slice(0, 60)})`);
+  const [renamedAudit] = await sql`SELECT actor_name FROM thought_audit WHERE thought_id = ${ownId}::uuid AND action = 'capture'`;
+  assert(renamedAudit?.actor_name === "session-hook-before-rename", "…the earlier row says the old name, so only the agent path could have allowed it");
+  // The ownership read needs the audit table (SELECT on it, the `server` grant
+  // group): with the table out of reach the pointer is refused by name and the
+  // grant is named, before any model call (third review pass: no tooth held this).
+  await sql`ALTER TABLE thought_audit RENAME TO thought_audit_away`;
+  try {
+    const unreadable = await rpc("tools/call", { name: "capture_thought", arguments: { content: "Session summary — claude-code — with the audit table away", source: "claude-code", supersedes: ownId } });
+    assert(unreadable.result?.isError === true && /^Error: /.test(textOf(unreadable)) && /could not be checked/.test(textOf(unreadable)) && /does not exist/.test(textOf(unreadable)) && !/--grant/.test(textOf(unreadable)),
+      `a supersedes the server cannot check is the server's error — "Error:", not "Refused:" — carrying the store's words, and no grant remedy for what is not a privilege error (${textOf(unreadable).slice(0, 70)})`);
+  } finally {
+    await sql`ALTER TABLE thought_audit_away RENAME TO thought_audit`;
+  }
+  // The check-then-write race — a source deleted between the trim and the
+  // write — is the one path to the catch's derived_from branch, driven here by
+  // a validator that refuses everything: a key that cannot read is told no
+  // position and no count, singular verb and all (ninth review pass: this gate
+  // had no tooth, and the plural leaked the count through the placeholder).
+  // The fake refuses the first N calls (a sequence: it survives the rollback the
+  // RAISE causes) and then hands over to the real validator, so the race can be
+  // made to clear on the retry or to persist.
+  await sql`ALTER FUNCTION validate_derived_from(jsonb) RENAME TO validate_derived_from_real`;
+  await sql`CREATE SEQUENCE race_seq`;
+  await sql`CREATE TABLE race_mode (n int)`;
+  await sql`INSERT INTO race_mode VALUES (99)`;
+  await sql.unsafe("CREATE FUNCTION validate_derived_from(p_value jsonb) RETURNS jsonb LANGUAGE plpgsql AS $$ BEGIN IF p_value IS NULL OR jsonb_typeof(p_value) = 'null' THEN RETURN NULL; END IF; IF nextval('race_seq') <= (SELECT n FROM race_mode) THEN RAISE EXCEPTION 'derived_from references a thought that does not exist (in %).', p_value; END IF; RETURN validate_derived_from_real(p_value); END $$");
+  try {
+    // A refusal that clears on the retry: the write is tried once more after a re-trim, and the summary keeps its live sources (twelfth review pass: the hook could only have dropped them all).
+    await sql`UPDATE race_mode SET n = 1`;
+    const retried = await rpc("tools/call", { name: "capture_thought", arguments: { content: "Session summary — claude-code — a source deleted and the write tried again", source: "claude-code", derived_from: [id, retrieved] } });
+    const retriedId = idIn(textOf(retried));
+    const [retriedRow] = await sql`SELECT derived_from FROM thoughts WHERE id = ${retriedId}::uuid`;
+    assert(retried.result?.isError !== true && retriedId !== undefined && JSON.stringify(retriedRow?.derived_from).includes(retrieved!) && JSON.stringify(retriedRow?.derived_from).includes(id!),
+      `a refusal in the write that clears on a second try lands with both live sources recorded (${textOf(retried).slice(0, 50)})`);
+    assert(Number((await sql`SELECT last_value FROM race_seq`)[0].last_value) === 2, "…after exactly two validator calls: the refusal, then the retry");
+    await sql`UPDATE race_mode SET n = 99`;
+    await sql`ALTER SEQUENCE race_seq RESTART`;
+    const raced = await rpc("tools/call", { name: "capture_thought", arguments: { content: "Session summary — claude-code — a source deleted between the check and the write", source: "claude-code", derived_from: [id, retrieved] } });
+    const racedText = textOf(raced);
+    assert(raced.result?.isError === true && /^Refused: a `derived_from` id names no thought\./.test(racedText) && !/derived_from\[/.test(racedText) && !racedText.includes(id!) && !racedText.includes(retrieved!),
+      `a refusal in the write itself tells a key that cannot read no position, no id and no count (${racedText.slice(0, 60)})`);
+    let racedWriter = "";
+    try { await call("capture_thought", { content: "Session summary — the writer, same race", derived_from: ["0000dead-0000-4000-8000-000000000011", "0000dead-0000-4000-8000-000000000012"] }); } catch (e) { racedWriter = (e as Error).message; }
+    assert(/derived_from\[0\] \(/.test(racedWriter) && /derived_from\[1\] \(/.test(racedWriter) && / name no thought/.test(racedWriter),
+      `…while a reader is told both positions with their ids, plural (${racedWriter.slice(0, 80)})`);
+  } finally {
+    await sql`DROP FUNCTION validate_derived_from(jsonb)`;
+    await sql`ALTER FUNCTION validate_derived_from_real(jsonb) RENAME TO validate_derived_from`;
+    await sql`DROP TABLE race_mode`;
+    await sql`DROP SEQUENCE race_seq`;
+  }
+  await sql`ALTER FUNCTION resolve_agent(text, text, text) RENAME TO resolve_agent_away`;
+  let awayIdOuter: string | undefined;
+  try {
+    const rpc2 = captureAs(CAPTURE_KEY_2);
+    const away1 = await rpc2({ content: "Session summary — codex — captured while the registry was away", source: "codex" });
+    const awayId = idIn(textOf(away1));
+    awayIdOuter = awayId;
+    const [awayAudit] = await sql`SELECT actor_name, canonical_agent_id FROM thought_audit WHERE thought_id = ${awayId}::uuid AND action = 'capture'`;
+    assert(awayId !== undefined && awayAudit?.actor_name === "hook-two" && awayAudit?.canonical_agent_id === null, "with the registry away a capture lands under the key's name and no agent id");
+    const away2 = await rpc2({ content: "Session summary — codex — the same session, ended again, registry still away", source: "codex", supersedes: awayId });
+    assert(away2.result?.isError !== true && idIn(textOf(away2)) !== undefined, `…and the key supersedes it by NAME (${textOf(away2).split("\n")[0].slice(0, 60)})`);
+    const byOtherName = await captureAs(CAPTURE_KEY)({ content: "Session summary — claude-code — session-hook claims hook-two's outage-time thought", source: "claude-code", supersedes: awayId });
+    assert(byOtherName.result?.isError === true && /only a thought it captured itself/.test(textOf(byOtherName)),
+      "…and another key with no id either is refused BY NAME (fifth review pass: the name path had no negative case)");
+    const away3 = await rpc2({ content: "Session summary — codex — a claim on the other key's thought", source: "codex", supersedes: id });
+    assert(away3.result?.isError === true && /^Error: .*could not be attributed while the agent registry is unavailable/.test(textOf(away3)),
+      `…while an ATTRIBUTED row met by a key with no id is the server's error to retry, not a refusal (${textOf(away3).slice(0, 70)})`);
+  } finally {
+    await sql`ALTER FUNCTION resolve_agent_away(text, text, text) RENAME TO resolve_agent`;
+  }
+  // With the registry back the key has an agent id and the row from the outage
+  // has none: not provably this key's, so refused — a later key minted under the
+  // same name would otherwise own every thought written while the registry was
+  // down (fourth review pass).
+  {
+    const b = await captureAs(CAPTURE_KEY_2)({ content: "Session summary — codex — claiming the outage-time thought after the registry returned", source: "codex", supersedes: awayIdOuter });
+    assert(b.result?.isError === true && /only a thought it captured itself/.test(textOf(b)), "a row without an agent id is refused to a key that now has one, even under the same name");
+  }
+  // No existence oracle on a key that cannot read: re-sending the writer's
+  // text says nothing of "already captured" to the capture key, and does to the writer.
+  const again = await rpc("tools/call", { name: "capture_thought", arguments: { content: "eta thought the session retrieved from the brain", source: "claude-code", derived_from: [id] } });
+  assert(!/already captured|currently supersedes/.test(textOf(again)) && idIn(textOf(again)) === retrieved, "a re-capture through the capture key returns the id and no note that the text existed");
+  const writerAgain = await call("capture_thought", { content: "eta thought the session retrieved from the brain", derived_from: [id] });
+  assert(/already captured as/.test(writerAgain), "…the writer key is told, as before");
+
+  // A derived_from that names a ghost: the positions that name no thought are
+  // named, so a caller drops exactly those; the ids beside them only to a key
+  // that can read (second review pass).
+  const ghost = "0000dead-0000-4000-8000-000000000000";
+  const partial = await rpc("tools/call", { name: "capture_thought", arguments: { content: "kappa summary naming a ghost", source: "codex", derived_from: [retrieved, ghost] } });
+  const partialText = textOf(partial);
+  const partialId = idIn(partialText);
+  assert(partial.result?.isError !== true && partialId !== undefined && !/Note:|named no thought/.test(partialText),
+    `a capture key's list is trimmed to what exists and the reply says nothing of it — with one id the count was the answer (eighth review pass) (${partialText.split("\n").slice(-1)[0].slice(0, 80)})`);
+  assert(!partialText.includes(ghost) && !partialText.includes(retrieved!) && !/derived_from\[/.test(partialText), "…never which — no id, no position, to a key that cannot read (third review pass)");
+  // …and a re-capture with a ghost source reads as the re-capture without one: no note on either (seventh and eighth review passes).
+  const againGhost = await rpc("tools/call", { name: "capture_thought", arguments: { content: "eta thought the session retrieved from the brain", source: "claude-code", derived_from: [id, ghost] } });
+  assert(!/Note:|named no thought/.test(textOf(againGhost)) && idIn(textOf(againGhost)) === retrieved && textOf(againGhost) === textOf(again), "a trimmed source leaves a re-capture's reply byte-identical to one with live sources alone");
+  const [partialRow] = await sql`SELECT derived_from FROM thoughts WHERE id = ${partialId}::uuid`;
+  assert(JSON.stringify(partialRow?.derived_from).includes(retrieved!) && !JSON.stringify(partialRow?.derived_from).includes(ghost), "…and the row records the live source alone");
+  let readerText = "";
+  try { await call("capture_thought", { content: "kappa summary naming a ghost", derived_from: [ghost, retrieved] }); } catch (e) { readerText = (e as Error).message; }
+  assert(/derived_from\[0\] \(0000dead-/.test(readerText), `…the writer key sees the id beside the position (${readerText.slice(0, 90)})`);
+
+  // The label's shape is held, and the default is what every capture carried before.
+  const bad = await rpc("tools/call", { name: "capture_thought", arguments: { content: "iota thought under a malformed label", source: "Claude Code!" } });
+  assert(bad.error !== undefined || bad.result?.isError === true, "a source outside the shape is refused");
+  const [[none]] = [await sql`SELECT count(*)::int AS n FROM thoughts WHERE content = 'iota thought under a malformed label'`];
+  assert(none?.n === 0, "…and nothing was written for it");
+  const plain = idIn(await call("capture_thought", { content: "theta thought naming no source" }));
+  const [p] = await sql`SELECT metadata->>'source' AS origin FROM thoughts WHERE id = ${plain}::uuid`;
+  assert(p?.origin === "mcp", `a capture naming no source still records mcp (${p?.origin})`);
+
+  // The writer sees the hook's summary where a session would look for it.
+  const found = await call("search_thoughts", { query: "eta", limit: 10, threshold: 0.1 });
+  assert(found.includes(id!), "the summary the hook captured is retrievable by the writer key");
+  await sql.close();
 }
 
 server.stop();

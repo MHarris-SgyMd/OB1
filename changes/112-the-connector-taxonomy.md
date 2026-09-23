@@ -1,17 +1,4 @@
----
-type: added
-bump: patch
-tickets: [SMD-1933]
-migrations: []
----
-
-## Changelog
-
-The connector taxonomy: every external-touching artifact is classified by family × transport × direction × cardinality × round-trip per capability in `docs/connector-registry.json`, one connector per vendor with its direction derived, a family schema per family as the fetcher-agnostic seam, and check 19 holding the registry sound, the spec's tables current and the coverage complete (SMD-1933).
-
-## FORK
-
-The connector taxonomy — five facets per capability, one connector per vendor with its direction derived, one family schema per family as the seam any fetcher lands on, held by check 19 (SMD-1933)
+# 112. The connector taxonomy — five facets per capability, one connector per vendor with its direction derived, one family schema per family as the seam any fetcher lands on, held by check 19 (SMD-1933)
 
 **What changed.** `docs/connector-taxonomy.md` is the spec and
 `docs/connector-registry.json` the one source behind it: the four closed and

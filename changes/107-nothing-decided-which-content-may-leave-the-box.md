@@ -1,17 +1,4 @@
----
-type: added
-bump: minor
-tickets: [SMD-1903]
-migrations: []
----
-
-## Changelog
-
-An egress gate decides, before any model call, whether a thought's text may reach an endpoint not declared local: `OB1_EGRESS_POLICY` (deny by default, allow, off) with `OB1_EGRESS_ALLOW` / `OB1_EGRESS_DENY` terms over actor, source, type, topic and marker; `OB1_LLM_LOCAL` / `OB1_CHAT_LOCAL` declare an endpoint on the box. A refused capture lands without a vector and says why; the decision is recorded on the audit row; preflight reports the mode and what leaves per endpoint (SMD-1903). Every stack pointing at a local provider by address now sets `OB1_LLM_LOCAL=1`.
-
-## FORK
-
-Nothing decided which content may leave the box for a model call — a deterministic egress gate, deny by default, with "local" declared and never guessed, before any cloud tier (SMD-1903)
+# 107. Nothing decided which content may leave the box for a model call — a deterministic egress gate, deny by default, with "local" declared and never guessed, before any cloud tier (SMD-1903)
 
 **What changed.** `server-portable/egress.ts` is the one rule:
 `mayLeaveBox(subject, endpoint, policy, secondOpinion?) → { allowed, rule,

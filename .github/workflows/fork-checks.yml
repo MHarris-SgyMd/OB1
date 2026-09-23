@@ -69,10 +69,37 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The landing check below diffs the event's range — a PR's base and
+          # head, or the merge group's — so it needs the history, not one tree.
+          fetch-depth: 0
 
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: "1.4.0"
+
+      # What a landing must carry (SMD-1857): a PR — or, in a merge queue, each
+      # PR of the group, one first-parent merge commit each — whose change
+      # touches db/migrations/, server-portable/ or evals/ beyond tests and docs
+      # ships a changes/smd-NNNN.md fragment. Read from the range the event
+      # gives, so it holds on a merge group's result as on a PR's head. GitHub
+      # refuses a merge queue on this user-owned repository (SMD-1984), so today
+      # the pull_request path is the one that runs; the merge_group path is
+      # ready. The migration-number rule (5b) and the rest of
+      # check-fork-consistency below run on whichever tree is checked out. A PR
+      # into another branch is not a landing yet; it is asked when it reaches
+      # main.
+      - name: What the landing carries — a fragment for a change to db/migrations/, server-portable/ or evals/
+        if: github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.base_ref == 'main')
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_FROM: ${{ github.event.pull_request.base.sha }}
+          PR_TO: ${{ github.event.pull_request.head.sha }}
+          MG_FROM: ${{ github.event.merge_group.base_sha }}
+          MG_TO: ${{ github.event.merge_group.head_sha }}
+        run: |
+          if [ "$EVENT" = merge_group ]; then from="$MG_FROM"; to="$MG_TO"; else from="$PR_FROM"; to="$PR_TO"; fi
+          bun scripts/check-landing.ts --event "$EVENT" --from "$from" --to "$to"
 
       # Applies the upstream gate's rules to the WHOLE repo, not just the
       # directories a PR happens to touch. The upstream gate only validates
@@ -96,6 +123,13 @@ jobs:
       - name: Typecheck the scripts
         working-directory: scripts
         run: bunx tsc --noEmit
+
+      # The session-end capture hook (SMD-1298): both transcript parsers, the
+      # summary's shape, every secret pattern's probe, the refusal, the detached
+      # hand-off and the MCP post — against synthetic transcripts and a fake
+      # endpoint on localhost. Bun only, no database, so it runs here.
+      - name: Session capture hook
+        run: bun recipes/session-capture-hook/test-session-capture.mjs
 
   deno-check:
     name: Edge Function typecheck
@@ -209,6 +243,14 @@ jobs:
         working-directory: evals
         run: bun eval-thought-kinds.ts --self-check
 
+      # The calibration ledger's arithmetic (Brier, ECE, skill, the bins) and
+      # its rules (an unstated or unresolved claim is never scored as 0) held
+      # by probes with hand-known answers, and the committed kinds fixture
+      # still yields the kind band a scorable set. No database, no model.
+      - name: Calibration ledger arithmetic
+        working-directory: evals
+        run: bun eval-calibration.ts --self-check
+
       # Proves the Cloudflare target still builds under the real Workers bundler.
       # Catches a dependency pulling in a node: builtin Workers cannot provide.
       - name: Cloudflare Workers build
@@ -258,6 +300,14 @@ jobs:
       - name: Apply migrations and assert the schema
         working-directory: db
         run: bun test-schema.ts
+
+      # The board sync's pure rules and write decisions — the rendering the
+      # hand captures are recognised by, the plan from a census, which call
+      # each state of the brain gets — against a recording store. No network,
+      # no database, no provider (SMD-1954).
+      - name: Board sync rules
+        working-directory: db
+        run: bun sync-linear.ts --self-check
 
       # The embedding width is configurable and must hold at more than one value.
       - name: Schema builds at a non-default embedding width
