@@ -741,8 +741,11 @@ export async function postCapture(cfg, payload) {
  * `compacted` before a compaction, `running` at a turn's end, nothing at an
  * end; `timeout` whether the printed hook pins 10 s (3 on Codex): SessionEnd's
  * budget is shared, and a compaction waits on PreCompact; `interval` whether
- * the printed command carries --min-interval, Stop's floor; `harnesses` which
- * harness fires it, `byDefault` whether --print-hook prints it unasked. Claude
+ * the printed command carries --min-interval, Stop's floor — and prepare()
+ * gates on it; `trigger` whether the harness sends one with it; `harnesses`
+ * which harness fires it, `byDefault` whether --print-hook prints it unasked.
+ * The table is the one reader of these facts (fourth review pass: the gate,
+ * the interval's event and the trigger's were still spelled as names). Claude
  * Code's PreCompact fires before a compaction, manual or automatic — the
  * checkpoint a long session already has; Codex has no compaction hook, so its
  * default is SessionEnd alone. An event outside the table is
@@ -754,9 +757,9 @@ export const HARNESSES = ["claude-code", "codex"];
 // `EVENTS["constructor"]` is Object's, and "toString" passed every check as an
 // event — printed as a hook that never fires, captured as an end (third review pass).
 export const EVENTS = Object.assign(Object.create(null), {
-  SessionEnd: { checkpoint: undefined, timeout: true, interval: false, harnesses: HARNESSES, byDefault: true },
-  PreCompact: { checkpoint: "compacted", timeout: true, interval: false, harnesses: ["claude-code"], byDefault: true },
-  Stop: { checkpoint: "running", timeout: false, interval: true, harnesses: HARNESSES, byDefault: false },
+  SessionEnd: { checkpoint: undefined, timeout: true, interval: false, trigger: false, harnesses: HARNESSES, byDefault: true },
+  PreCompact: { checkpoint: "compacted", timeout: true, interval: false, trigger: true, harnesses: ["claude-code"], byDefault: true },
+  Stop: { checkpoint: "running", timeout: false, interval: true, trigger: false, harnesses: HARNESSES, byDefault: false },
 });
 export const HOOK_EVENTS = Object.keys(EVENTS);
 /** The table's row for a name, or undefined — the one way the table is read. */
@@ -768,9 +771,9 @@ export const TRIGGERS = ["auto", "manual"];
 
 /** What the event says about the session, for renderSummary's Checkpoint line: `compacted` with its trigger, `running`, or nothing for an end. */
 export function checkpointOf(hook) {
-  const kind = eventSpec(String(hook.hook_event_name ?? ""))?.checkpoint;
-  if (!kind) return undefined;
-  return kind === "compacted" ? { kind, trigger: TRIGGERS.includes(hook.trigger) ? hook.trigger : undefined } : { kind };
+  const spec = eventSpec(String(hook.hook_event_name ?? ""));
+  if (!spec?.checkpoint) return undefined;
+  return spec.trigger ? { kind: spec.checkpoint, trigger: TRIGGERS.includes(hook.trigger) ? hook.trigger : undefined } : { kind: spec.checkpoint };
 }
 
 /**
@@ -797,7 +800,7 @@ export function prepare(hook, opts = {}) {
   const sessionId = s.sessionId;
   const state = readState(sessionId) ?? {};
   const queued = sessionPayloads(sessionId); // walked once: the interval and the dedupe below both read it (thirteenth review pass)
-  if (event === "Stop" && opts.minIntervalMin > 0) {
+  if (eventSpec(event)?.interval && opts.minIntervalMin > 0) {
     const last = lastAttemptMs(sessionId, state, queued);
     const ageMin = last ? (Date.now() - last.at) / 60_000 : Infinity;
     if (ageMin < opts.minIntervalMin) return { code: 0, message: `skip: last capture ${ageMin.toFixed(0)} min ago${last.pending ? " (still pending)" : ""}, interval ${opts.minIntervalMin}` };
@@ -1049,12 +1052,14 @@ export function hookJson(harness, { event, minInterval = 20, runtime } = {}) {
  * previewed no trigger, `--min-interval=45` printed 20 (third review pass).
  */
 function flag(args, name) {
-  const eq = args.find((a) => a.startsWith(`${name}=`));
-  if (eq !== undefined) return eq.slice(name.length + 1);
-  const i = args.indexOf(name);
-  if (i < 0) return undefined;
-  const v = args[i + 1] ?? "";
-  return v.startsWith("--") ? "" : v;
+  // The LAST mention wins, in either form (fourth review pass: `=` won over a
+  // later space form, so a corrected flag appended to the line was ignored).
+  let value;
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === name) { const v = args[i + 1] ?? ""; value = v.startsWith("--") ? "" : v; }
+    else if (args[i].startsWith(`${name}=`)) value = args[i].slice(name.length + 1);
+  }
+  return value;
 }
 /** Whether a flag is present in either form. */
 const has = (args, name) => flag(args, name) !== undefined;
@@ -1093,7 +1098,7 @@ function intervalFlag(args, { aboveZero }) {
 function triggerFlag(args, event) {
   const trigger = flag(args, "--trigger");
   if (trigger === undefined) return { trigger };
-  if (event !== "PreCompact") return { error: `--trigger goes with --event PreCompact${event ? `, not ${event}` : ", which was not given"}` };
+  if (!eventSpec(event)?.trigger) return { error: `--trigger goes with --event ${HOOK_EVENTS.filter((e) => EVENTS[e].trigger).join(" or ")}${event ? `, not ${event}` : ", which was not given"}` };
   if (!TRIGGERS.includes(trigger)) return { error: `--trigger takes ${TRIGGERS.join(" or ")}${trigger ? `, not "${trigger}"` : "; none was given"}` };
   return { trigger };
 }
@@ -1115,7 +1120,7 @@ export async function main(argv) {
     const { event, error } = eventFlag(args); // absent: the harness's default events
     if (error) { console.error(error); return 2; }
     // A flag of the other by-hand form would validate nowhere and vanish (second review pass).
-    if (flag(args, "--trigger") !== undefined) { console.error("--trigger is --dry-run's, to preview a checkpoint; a hook reads the trigger the harness sends"); return 2; }
+    if (has(args, "--trigger")) { console.error("--trigger is --dry-run's, to preview a checkpoint; a hook reads the trigger the harness sends"); return 2; }
     if (event !== undefined && !EVENTS[event].harnesses.includes(h)) {
       const who = h === "codex" ? "Codex" : "Claude Code";
       console.error(`${who} has no ${event === "PreCompact" ? "compaction" : event} hook: --print-hook ${h} prints ${DEFAULT_EVENTS[h].join(" and ")}; for a checkpoint on ${who} print --event Stop --min-interval <minutes>`);
@@ -1125,7 +1130,7 @@ export async function main(argv) {
     const { minInterval: mi, error: intervalError } = intervalFlag(args, { aboveZero: true });
     if (intervalError) { console.error(intervalError); return 2; }
     // The interval rides on a Stop hook's command line and nowhere else: given with the default pair it would validate and vanish (first review pass).
-    if (mi !== undefined && event !== "Stop") { console.error("--min-interval applies to --event Stop alone; SessionEnd and PreCompact capture at every event"); return 2; }
+    if (mi !== undefined && !eventSpec(event)?.interval) { console.error(`--min-interval applies to --event ${HOOK_EVENTS.filter((e) => EVENTS[e].interval).join(" or ")} alone; the other events capture every time`); return 2; }
     const where = h === "codex" ? "~/.codex/hooks.json" : "~/.claude/settings.json (or .claude/settings.json in a project)";
     console.error(`# Paste into ${where} — this prints the hook, it installs nothing. Off until you do.`);
     console.log(JSON.stringify(hookJson(h, { event, minInterval: mi ?? 20 }), null, 2));
@@ -1154,7 +1159,7 @@ export async function main(argv) {
     if (error) { console.error(error); return 2; }
     const { trigger, error: triggerError } = triggerFlag(args, ev);
     if (triggerError) { console.error(triggerError); return 2; }
-    if (flag(args, "--min-interval") !== undefined) { console.error("--min-interval is --print-hook's, for a Stop hook; a dry run has no interval"); return 2; }
+    if (has(args, "--min-interval")) { console.error("--min-interval is --print-hook's, for a Stop hook; a dry run has no interval"); return 2; }
     const s = summariseTranscript(path, harness);
     if (!s.prompts.length) {
       const sniffed = sniffHarness(readFileSync(path, "utf8").split("\n", 5));
@@ -1188,6 +1193,10 @@ export async function main(argv) {
   if (process.stdin.isTTY) { console.error("session-capture: expected the hook's JSON on stdin (a harness pipes it). By hand: --print-hook [claude-code|codex], --check, --dry-run <transcript>, --post <payload>."); return 2; }
   let hook;
   try { hook = JSON.parse(await readStdin()); } catch (e) { console.error(`session-capture: stdin is not the hook's JSON (${e.message})`); return 1; }
+  // The event and the trigger are the harness's, on stdin: a `--event` or
+  // `--trigger` edited into the pasted command would change nothing and say
+  // nothing (fourth review pass). Exit 1, never 2 — a Stop hook's 2 blocks the turn.
+  for (const name of ["--event", "--trigger"]) if (has(args, name)) { log(`error: ${name} is not a hook flag`); console.error(`session-capture: ${name} is --print-hook's and --dry-run's; as a hook the event and the trigger come from the harness on stdin — remove it from the command; nothing captured`); return 1; }
   const { minInterval: hookInterval, error: intervalError, raw: intervalRaw } = intervalFlag(args, { aboveZero: false });
   if (intervalError) { log(`error: --min-interval "${intervalRaw}" is not a number of minutes`); console.error(`session-capture: ${intervalError}; nothing captured`); return 1; }
   const minIntervalMin = hookInterval ?? 0;
