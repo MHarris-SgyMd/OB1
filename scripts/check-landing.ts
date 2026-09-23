@@ -16,7 +16,10 @@
  * The rule, CONTRIBUTING.md's "Changelog & versioning": every PR that touches
  * db/migrations/, server-portable/ or evals/ ships a changes/smd-NNNN.md
  * fragment — added, or extended when a ticket lands in slices (SMD-1806 did);
- * a deleted one is not shipped. Tests and docs are exempt by PATH — a
+ * a deleted one is not shipped. The one exception is a release cut (SMD-1860):
+ * it adds the migration that writes the version and deletes the fragments it
+ * numbered, and records itself in releases.json — the manifest written beside a
+ * fragment deleted is its signature. Tests and docs are exempt by PATH — a
  * `test-*.ts` / `*.test.ts` file or a Markdown file inside those directories
  * asks no fragment — rather than by a label, because the merge group's run
  * carries no pull request and the workflow's token reads none. The rule is
@@ -57,11 +60,26 @@ export function landingProblem(changes: readonly Change[]): string | null {
   const asking = changes.filter(([, f]) => FRAGMENT_DIRS.some((d) => f.startsWith(d)) && !FRAGMENT_EXEMPT.test(f)).map(([, f]) => f);
   if (!asking.length) return null;
   if (shippedFragments(changes).length) return null;
-  return `touches ${asking.join(", ")} and ships no changes/smd-NNNN.md fragment — every PR that changes ${FRAGMENT_DIRS.join(", ")} beyond tests and docs records itself (CONTRIBUTING.md, "Changelog & versioning"; SMD-1857)`;
+  if (isReleaseCut(changes)) return null;
+  return `touches ${asking.join(", ")} and ships no changes/smd-NNNN.md fragment — every PR that changes ${FRAGMENT_DIRS.join(", ")} beyond tests and docs records itself (CONTRIBUTING.md, "Changelog & versioning"; SMD-1857), a release cut in ${RELEASE_MANIFEST} (SMD-1860)`;
 }
 /** The fragments a landing ships: added or modified, not deleted. */
 export function shippedFragments(changes: readonly Change[]) {
   return changes.filter(([s, f]) => (s === "A" || s === "M") && FRAGMENT_FILE.test(f)).map(([, f]) => f);
+}
+/** The release manifest scripts/assemble-release.ts appends to; a landing that writes it is a release cut. */
+export const RELEASE_MANIFEST = "releases.json";
+/**
+ * A release cut (SMD-1860) adds the migration that writes the version and
+ * removes the fragments it numbered, and records itself in the manifest rather
+ * than in a fragment of its own — the one landing that changes db/migrations/
+ * without one. Its signature is both: the manifest written (added or modified)
+ * AND a fragment deleted — the assembler refuses a cut with no fragment to
+ * number, so a landing that edits the manifest alone beside a migration is not
+ * a cut and is asked for its fragment.
+ */
+export function isReleaseCut(changes: readonly Change[]) {
+  return changes.some(([s, f]) => (s === "A" || s === "M") && f === RELEASE_MANIFEST) && changes.some(([s, f]) => s === "D" && FRAGMENT_FILE.test(f));
 }
 
 /** [why, changes, a phrase the problem must carry — or null for no problem]. */
@@ -83,6 +101,10 @@ export const LANDING_PROBES: [why: string, changes: Change[], says: string | nul
   ["a lockfile pin in the server", [["M", "server-portable/bun.lock"]], "touches server-portable/bun.lock"],
   ["a fixture — data an eval reads is not a test file", [["M", "evals/fixtures/replay.json"]], "touches evals/fixtures/replay.json"],
   ["a directory-shaped name that only starts like one", [["M", "evals-old/x.ts"], ["M", "server-portable-docs/x.ts"]], null],
+  ["a release cut — the version migration added, the fragments it numbered deleted, the manifest written", [["A", "db/migrations/048_schema_version.sql"], ["M", "db/version.mjs"], ["D", "changes/smd-1804.md"], ["A", "changes/018-long-captures-stay-searchable.md"], ["M", "CHANGELOG.md"], ["M", "releases.json"]], null],
+  ["a migration beside a DELETED manifest — not a cut", [["A", "db/migrations/048_x.sql"], ["D", "releases.json"], ["D", "changes/smd-1804.md"]], "ships no"],
+  ["a migration beside a manifest edit with no fragment numbered — not a cut, the assembler refuses one", [["A", "db/migrations/048_x.sql"], ["M", "releases.json"]], "ships no"],
+  ["a migration beside a manifest elsewhere in the tree — not the fork's", [["A", "db/migrations/048_x.sql"], ["M", "integrations/x/releases.json"]], "ships no"],
   ["nothing", [], null],
 ];
 

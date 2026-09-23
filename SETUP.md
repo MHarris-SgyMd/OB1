@@ -432,7 +432,9 @@ podman compose -f deploy/compose.yaml --profile local-models up --build
 Three services in order (five with `local-models`): Postgres with pgvector, a migration job that applies the
 schema and exits, then the MCP server. The server runs `preflight.ts` before it
 serves, so a misconfiguration crashloops rather than starting and failing on your
-first capture.
+first capture. To run a *release* rather than a checkout build — the published
+`ob1-server` and `ob1-migrate` images, Ollama pinned by digest — see
+[`deploy/README.md`](deploy/README.md), "Pinning a release".
 
 ### 3. Verify
 

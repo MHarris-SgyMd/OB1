@@ -18,9 +18,13 @@ COPY server-portable/*.ts server-portable/package.json ./
 COPY server-portable/shims ./shims
 # The embedding contract and the version helpers, both imported by preflight.ts.
 # Kept at ../db/ inside the image so the import path is identical in the container
-# and in a checkout. releases.json is not copied — a deployed brain that has none
-# reads as "no release cut" (version.mjs returns []), which is correct off a tag.
+# and in a checkout; releases.json at their parent's parent, where version.mjs
+# resolves it, so preflight's "migrations applied beyond the version the brain
+# names" warning reads the release ranges as they stood at this build's commit
+# (SMD-1860 — before, the image carried none, and in a container that warning
+# could never fire).
 COPY db/config.mjs db/config.d.mts db/version.mjs db/version.d.mts /db/
+COPY releases.json /releases.json
 
 # Secrets are injected at runtime, never baked in:
 #   MCP_ACCESS_KEYS (or the legacy MCP_ACCESS_KEY), OPENROUTER_API_KEY or

@@ -12,8 +12,8 @@
 #   docker compose -f deploy/compose.tiers.yaml --profile local-models up --build
 #   podman compose -f deploy/compose.tiers.yaml --profile local-models up --build
 #
-# Built from the checkout, like compose.yaml — the published stable image is
-# SMD-1860, not yet cut. Secrets come from deploy/.env (gitignored); copy
+# Built from the checkout, like compose.yaml (a release pins the published images
+# instead — deploy/README.md, "Pinning a release"). Secrets come from deploy/.env (gitignored); copy
 # .env.example first. Each server's OB1_TIER falls back to its own tier, so leave
 # OB1_TIER UNSET in deploy/.env for this stack — setting it would force all three
 # servers to the same tier. Everything else is forwarded exactly as compose.yaml
@@ -90,13 +90,17 @@ x-tier-postgres: &tier-postgres
     timeout: 5s
     retries: 12
 
+# The migrator image compose.yaml builds (db/Dockerfile — the ob1-migrate image
+# the release job publishes, SMD-1860), one build shared by the three tiers.
 x-tier-migrate: &tier-migrate
-  image: oven/bun:1.4.0-alpine
-  working_dir: /app
-  volumes:
-    - ../db:/app:ro
-  command: ["bun", "migrate.ts"]
+  build:
+    context: ..
+    dockerfile: db/Dockerfile
   restart: "no"
+
+# The Ollama image, one anchor as in compose.yaml and held equal to its pin by
+# scripts/release-artifacts.ts (a rehearsal runs on every PR touching deploy/).
+x-ollama-image: &ollama-image ollama/ollama:0.34.3
 
 services:
   # ── stable ───────────────────────────────────────────────────────────────
@@ -200,7 +204,7 @@ services:
   # three brains). Optional, enabled with `--profile local-models`; the three
   # servers' OB1_LLM_BASE_URL falls back to it by name.
   ollama:
-    image: ollama/ollama:latest
+    image: *ollama-image
     profiles: ["local-models"]
     volumes:
       - ollama:/root/.ollama
@@ -211,7 +215,7 @@ services:
       retries: 20
 
   ollama-pull:
-    image: ollama/ollama:latest
+    image: *ollama-image
     profiles: ["local-models"]
     depends_on:
       ollama:
