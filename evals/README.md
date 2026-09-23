@@ -11,7 +11,8 @@ are here so the decision is auditable and re-runnable when better models appear.
 - The models you want to compare, pulled
 - `OB1_LLM_LOCAL=1` in the environment for the harnesses that dial through the
   server's own resolver (`eval-consolidate`, `eval-entities`, `eval-graphrag`,
-  `eval-extract-windows`; the chunking end-to-end sets it for its child itself): the egress gate
+  `eval-extract-windows`; the chunking end-to-end and the write-path eval set it for their
+  children themselves): the egress gate
   (SMD-1903) refuses a thought's text to an endpoint not declared local, and a
   loopback address is not a declaration. `lib.ts`'s own embedding dialler
   (`OB1_EVAL_BASE`) is outside the gate: it embeds eval corpora, not the brain
