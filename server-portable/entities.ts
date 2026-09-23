@@ -265,9 +265,18 @@ export class RunawayDetector {
   /** Feed the next piece of the answer. The repeated item's key when the answer became a runaway on this piece; null while it has not. */
   feed(piece: string): string | null {
     let fired: string | null = null;
+    // Where the current item's text begins in THIS piece — one slice per item
+    // per piece rather than a concatenation per character (fifth review pass).
+    let start = this.depth >= 2 ? 0 : -1;
     for (let i = 0; i < piece.length; i++) {
       const c = piece[i];
-      if (this.depth >= 2) this.item += c;
+      if (this.depth === 0) {
+        // Outside the answer's object nothing is a string: a stray quote in a
+        // preamble ("Here is the "answer:") must not silence the reading of
+        // everything after it (fifth review pass).
+        if (c === "{") this.depth = 1;
+        continue;
+      }
       if (this.inString) {
         if (this.escaped) this.escaped = false;
         else if (c === "\\") this.escaped = true;
@@ -277,14 +286,15 @@ export class RunawayDetector {
       if (c === '"') { this.inString = true; continue; }
       if (c === "{") {
         this.depth++;
-        if (this.depth === 2) this.item = "{";
+        if (this.depth === 2) { this.item = ""; start = i; }
         continue;
       }
-      if (c === "}" && this.depth > 0) {
+      if (c === "}") {
         this.depth--;
         if (this.depth !== 1) continue;
-        const key = itemKey(this.item);
+        const key = itemKey(this.item + piece.slice(start, i + 1));
         this.item = "";
+        start = -1;
         if (key === null) continue;
         this.items++;
         const n = (this.counts.get(key) ?? 0) + 1;
@@ -292,6 +302,7 @@ export class RunawayDetector {
         if (n >= RUNAWAY_REPEATS && fired === null) fired = key;
       }
     }
+    if (start >= 0) this.item += piece.slice(start);
     return fired;
   }
 }
@@ -620,13 +631,17 @@ async function extractOnce(text: string, cfg: EmbedConfig, timeoutMs: number, pa
 /**
  * A chat completion's `text/event-stream` body reassembled: the `data:` frames'
  * `choices[0].delta.content` concatenated, the last `finish_reason` kept, and
- * comments and frames that are not JSON passed over, and `[DONE]` the end:
- * the reader is cancelled there and the answer returned, so a gateway that
- * keeps the connection open after it (keepalive comments) does not hold the
- * call to its deadline (fourth review pass). Every piece of content goes
- * through the detector as it lands; when it fires the reader is cancelled —
- * the connection closes and Ollama stops generating — and what arrived is
- * returned with the repeated item's key. Frames split across reads
+ * comments and frames that are not JSON passed over, and `[DONE]` OR a
+ * frame carrying `finish_reason` the end: the reader is cancelled there and
+ * the answer returned, so a gateway that keeps the connection open after
+ * either (keepalive comments) does not hold the call to its deadline (fourth
+ * and fifth review passes). Every piece of content goes through the detector
+ * as it lands; when it fires while the answer is still coming the reader is
+ * cancelled — the connection closes and Ollama stops generating — and what
+ * arrived is returned with the repeated item's key. A frame that finishes the
+ * answer is never an abort: the answer is complete, and parseExtraction folds
+ * the copies it holds (fifth review pass — a whole answer in one frame with a
+ * third copy in it was thrown away as a runaway). Frames split across reads
  * are buffered to their newline. A stream that ends with neither a
  * `finish_reason` nor `[DONE]` is a socket that closed mid-answer — the
  * provider died, the connection dropped — and THROWS, as the whole read's
@@ -643,7 +658,7 @@ async function readStreamedAnswer(body: ReadableStream<Uint8Array>, detector: Ru
   let content = "";
   let finish: string | undefined;
   let ended = false;
-  /** The frame's verdict: a repeated item's key, `"[DONE]"` for the end marker, null to go on. */
+  /** The frame's verdict: a repeated item's key, `"[DONE]"` for the end (the marker, or a frame carrying finish_reason), null to go on. */
   const take = (line: string): string | null => {
     if (!line.startsWith("data:")) return null;
     const data = line.slice(5).trim();
@@ -669,10 +684,10 @@ async function readStreamedAnswer(body: ReadableStream<Uint8Array>, detector: Ru
       throw thrown;
     }
     const choice = frame?.choices?.[0];
-    if (typeof choice?.finish_reason === "string") { finish = choice.finish_reason; ended = true; }
-    if (typeof choice?.delta?.content !== "string" || !choice.delta.content) return null;
-    content += choice.delta.content;
-    return detector.feed(choice.delta.content);
+    const piece = typeof choice?.delta?.content === "string" ? choice.delta.content : "";
+    content += piece;
+    if (typeof choice?.finish_reason === "string") { finish = choice.finish_reason; ended = true; return "[DONE]"; }
+    return piece ? detector.feed(piece) : null;
   };
   try {
     for (;;) {

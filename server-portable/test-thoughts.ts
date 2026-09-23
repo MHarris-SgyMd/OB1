@@ -447,6 +447,13 @@ console.log("\n[8c] A streamed answer is a runaway at the third copy of one item
   assert(skipped?.items === 3, `an item that is not JSON is skipped, not counted, and does not stop the reading (${JSON.stringify(skipped)})`);
   assert(fires(`{"entities": [{"name": "n", "type": "tool", "confidence": 1, "meta": {"a": {"b": 1}}}, {"name": "n", "type": "tool", "confidence": 1}, {"name": "n", "type": "tool", "confidence": 1}]}`)?.items === 3, "an object nested inside an item is the item's, not an item");
   assert(fires(answer([], [item({ from: "a", to: null, relation: "uses", name: "a" }), item({ from: "a", to: null, relation: "uses", name: "a" }), item({ from: "a", to: null, relation: "uses", name: "a" })])) === null, "an item with `from` but no string `to` is a relation parseExtraction rejects, not an entity by its `name` — skipped, as the parser skips it (third review pass)");
+  const preamble = fires(`Here is the "answer you asked for:\n${answer([ent("Loop"), ent("Loop"), ent("Loop")])}`, 3);
+  assert(preamble?.key === "tool loop" && preamble.items === 3, `a stray quote in a preamble before the JSON does not silence the reading — outside the object nothing is a string (fifth review pass) (${JSON.stringify(preamble)})`);
+  const across = new RunawayDetector();
+  const spread = answer([ent("Loop"), ent("Loop"), ent("Loop")]);
+  let firedAt: string | null = null;
+  for (let i = 0; i < spread.length; i += 11) { const k = across.feed(spread.slice(i, i + 11)); if (k !== null && firedAt === null) firedAt = k; }
+  assert(firedAt === "tool loop" && across.items === 3, "an item split across pieces is read whole — the scanner keeps the part that arrived and slices the rest");
 
   // The shipped windowing streams and aborts, and the sentence says so; with
   // reasoning on nothing is streamed — no budget, so no retry to send an

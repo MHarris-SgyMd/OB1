@@ -522,7 +522,7 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
   // request, how many frames it got out before the client hung up.
   type Run = { sent: number; total: number; cancelled: boolean; body: { stream?: boolean; frequency_penalty?: number } };
   const runs: Run[] = [];
-  let gMode: "loop" | "good" | "json" | "slow" | "cut" | "error" = "loop";
+  let gMode: "loop" | "good" | "json" | "slow" | "cut" | "error" | "nodone" | "oneframe" = "loop";
   const GOOD = JSON.stringify({ entities: [{ name: "Anita", type: "person", confidence: 0.9, aliases: ["A. {Nita}"] }, { name: "Open Brain", type: "project", confidence: 0.8 }], relationships: [{ from: "Anita", to: "Open Brain", relation: "works_on", confidence: 0.7 }] });
   const frame = (content: string, finish: string | null = null) => `data: ${JSON.stringify({ choices: [{ delta: { content }, finish_reason: finish }] })}\n\n`;
   const providerG = Bun.serve({
@@ -543,6 +543,15 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
       } else if (gMode === "slow") {
         frames = Array.from({ length: 20 }, (_, i) => frame(GOOD.slice(i * 8, i * 8 + 8)));
         gapMs = 100;
+      } else if (gMode === "nodone") {
+        // The whole answer, a finish_reason, then the connection held open with
+        // keepalives and NO [DONE] — a finishing frame is the end (fifth pass).
+        frames = [...(GOOD.match(/[\s\S]{1,7}/g) ?? []).map((p) => frame(p)), frame("", "stop"), ...Array.from({ length: 400 }, () => ": keepalive\n\n")];
+        gapMs = 2;
+      } else if (gMode === "oneframe") {
+        // One frame holding a complete answer with an item three times over,
+        // finishing in the same frame: complete, so parsed — never an abort.
+        frames = [frame(JSON.stringify({ entities: [{ name: "Loop", type: "tool", confidence: 1 }, { name: "Loop", type: "tool", confidence: 1 }, { name: "Loop", type: "tool", confidence: 1 }], relationships: [] }), "stop"), "data: [DONE]\n\n"];
       } else if (gMode === "cut") {
         // Half the answer, then the stream ends: no finish_reason, no [DONE].
         frames = Array.from({ length: 10 }, (_, i) => frame(GOOD.slice(i * 8, i * 8 + 8)));
@@ -617,6 +626,18 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
   let closedCalls = -1;
   try { await extractEntities(short, cfgG, undefined, { kind: "extraction" }); } catch (e) { closed = (e as Error).message; closedCalls = callsMadeBy(e); }
   assert(/closed mid-answer/.test(closed) && /socket/i.test(closed) && /80 characters/.test(closed) && closedCalls === 1, `a stream cut mid-answer throws a socket error naming what arrived, counted as one call, rather than a malformed answer (${closed.slice(0, 100)}; calls ${closedCalls})`);
+
+  // A finishing frame ends the read as [DONE] does, and a complete answer is
+  // never an abort whatever it repeats (fifth review pass, both probed).
+  runs.length = 0;
+  gMode = "nodone";
+  const finished = await extractEntities(short, cfgG, undefined, { kind: "extraction" });
+  for (let waited = 0; !runs[0]?.cancelled && waited < 2000; waited += 10) await Bun.sleep(10);
+  assert(!finished.malformed && finished.entities.length === 2 && finished.retried === undefined && runs[0]?.cancelled === true && runs[0].sent < runs[0].total, `a frame carrying finish_reason ends the read: the answer is the thought's and the connection closed on the keepalives that followed with no [DONE] (${runs[0]?.sent} of ${runs[0]?.total} frames)`);
+  runs.length = 0;
+  gMode = "oneframe";
+  const whole3 = await extractEntities(short, cfgG, undefined, { kind: "extraction" });
+  assert(!whole3.malformed && whole3.entities.length === 1 && whole3.entities[0].name === "Loop" && whole3.retried === undefined && whole3.abortedMs === undefined && runs.length === 1, `a complete answer arriving in one finishing frame with an item three times over is parsed — the copies folded to one — not aborted and not retried (${JSON.stringify(whole3).slice(0, 100)})`);
 
   // The provider's own error frame mid-stream is the provider's error, with its
   // message — not the socket sentence, not a malformed answer (second review pass).

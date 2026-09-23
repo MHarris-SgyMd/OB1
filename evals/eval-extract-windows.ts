@@ -24,8 +24,9 @@
  *       whose endpoints do not — the loss windowing is expected to have, and
  *       what the header buys back.
  *
- *   --arms whole,w1200,w1200h,w600,w600h,whole+p,w1200p,w600p,whole+s,w1200s,w600s    which arms (default: all)
- *                    the `s` arms stream the answer and abort a runaway at the third copy of one item (SMD-1960)
+ *   --arms whole,w1200,w1200h,w600,w600h,whole+p,w1200p,w600p,whole+s,w1200s,w600s    which arms (default: all eleven)
+ *                    the `s` arms stream the answer and abort a runaway at the third copy of one item (SMD-1960);
+ *                    every arm is a full pass over the corpus (the stragglers: 30–55 min each on the 7B), so name the arms wanted
  *   --limit N        first N documents        --timeout S    per call (default 300)
  *
  * Arms: `whole` is one call over the WHOLE text with no answer budget — p1's
