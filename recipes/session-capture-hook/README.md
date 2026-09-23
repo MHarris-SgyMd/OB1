@@ -115,7 +115,7 @@ The key lives here and nowhere else — not in the hook's command line, which si
 bun recipes/session-capture-hook/session-capture.mjs --check
 ```
 
-`ok: http://127.0.0.1:8010/ answers, and the key sees capture_thought alone (capture scope)`. With a write key it warns — the hook would work, and a leak would read your brain. With a read key it exits 1: the key cannot capture.
+`ok: http://127.0.0.1:8010/ answers, and the key sees capture_thought alone (capture scope). State: ~/.local/state/open-brain/session-capture`. With a write key it warns — the hook would work, and a leak would read your brain. With a read key it exits 1: the key cannot capture.
 
 Then see what a session of yours would send, without sending it:
 
@@ -147,7 +147,7 @@ bun recipes/session-capture-hook/session-capture.mjs --print-hook claude-code
         ]
       }
     ],
-    "PreCompact": [                                   // before each compaction, manual or automatic — the checkpoint a long session already has
+    "PreCompact": [
       {
         "hooks": [
           {

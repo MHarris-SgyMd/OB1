@@ -922,9 +922,9 @@ console.log("\n[9] The printed hook carries no secret; --check tells a capture k
     `Claude Code with no event named prints the pair — SessionEnd and PreCompact, one command, PreCompact pinned to 10 s too: it shares no budget, but a compaction waits on it (${Object.keys(own.hooks).join()}) (SMD-2012)`);
   assert(Object.keys(cx.hooks).join() === "SessionEnd" && Object.keys(st.hooks).join() === "Stop" && Object.keys(hookJson("claude-code", { event: "PreCompact", runtime: "bun" }).hooks).join() === "PreCompact",
     "Codex's default is SessionEnd alone — it has no compaction hook; an event named prints that event alone");
-  assert((() => { try { hookJson("claude", {}); return false; } catch (e) { return /no default events for harness "claude"/.test(e.message); } })(), "a harness with no defaults is a named error from hookJson, not a TypeError off undefined (first review pass)");
-  assert((() => { try { hookJson("claude-code", { event: "precompact" }); return false; } catch (e) { return /"precompact" is not an event this hook runs on/.test(e.message); } })(), "…and so is an event outside the table: the export refuses what the CLI refuses (second review pass: it printed a hook under any name)");
   const thrown = (fn) => { try { fn(); return ""; } catch (e) { return e.message; } };
+  assert(/no default events for harness "claude"/.test(thrown(() => hookJson("claude", {}))), "a harness with no defaults is a named error from hookJson, not a TypeError off undefined (first review pass)");
+  assert(/"precompact" is not an event this hook runs on/.test(thrown(() => hookJson("claude-code", { event: "precompact" }))), "…and so is an event outside the table: the export refuses what the CLI refuses (second review pass: it printed a hook under any name)");
   assert(/"constructor" is not an event/.test(thrown(() => hookJson("claude-code", { event: "constructor" }))) && /"__proto__" is not an event/.test(thrown(() => hookJson("claude-code", { event: "__proto__" }))) && /no default events for harness "constructor"/.test(thrown(() => hookJson("constructor", {}))),
     "Object's own names are refused by name as events and as a harness — not printed, not a TypeError (third review pass)");
   assert(/codex has no PreCompact hook/.test(thrown(() => hookJson("codex", { event: "PreCompact" }))) && Object.keys(hookJson("codex", { event: "Stop", runtime: "bun" }).hooks).join() === "Stop",
@@ -955,7 +955,8 @@ console.log("\n[9] The printed hook carries no secret; --check tells a capture k
   assert(dryEmpty.code === 2 && /none was given/.test(dryEmpty.err) && dryCase.code === 2 && /the case matters/.test(dryCase.err), "--dry-run refuses an empty --event and names a case slip in the same words as --print-hook");
   const trigTypo = await run(["--dry-run", CLAUDE_T, "--event", "PreCompact", "--trigger", "Auto"]);
   assert(trigTypo.code === 2 && /--trigger takes auto or manual, not "Auto"/.test(trigTypo.err) && !trigTypo.out.trim(), "a --trigger that is neither is refused, not previewed without one (second review pass)");
-  assert((await run(["--dry-run", CLAUDE_T, "--trigger", "auto"])).code === 2 && /--trigger goes with --event PreCompact, which was not given/.test((await run(["--dry-run", CLAUDE_T, "--trigger", "auto"])).err), "…as is --trigger with no event");
+  const trigAlone = await run(["--dry-run", CLAUDE_T, "--trigger", "auto"]);
+  assert(trigAlone.code === 2 && /--trigger goes with --event PreCompact, which was not given/.test(trigAlone.err), "…as is --trigger with no event");
   assert((await run(["--dry-run", CLAUDE_T, "--event", "Stop", "--trigger", "auto"])).code === 2 && (await run(["--dry-run", CLAUDE_T, "--event", "PreCompact", "--trigger"])).code === 2, "…or under Stop, or dangling");
   assert((await run(["--dry-run", CLAUDE_T, "--event", "PreCompact", "--min-interval", "20"])).code === 2 && (await run(["--print-hook", "claude-code", "--event", "PreCompact", "--trigger", "auto"])).code === 2, "a flag of the other by-hand form is refused on either, not validated nowhere and dropped");
   // The flags are read before the transcript (third review pass: a transcript with no prompt returned 0 past every refusal).
@@ -967,7 +968,8 @@ console.log("\n[9] The printed hook carries no secret; --check tells a capture k
   assert(eqForm.code === 0 && /Checkpoint: compacted at 2026-09-22 13:20 \(auto\), continuing/.test(eqForm.out), `--event=PreCompact --trigger=auto reads as the space form does (${eqForm.err.trim().slice(0, 60)})`);
   const eqStop = await run(["--print-hook=claude-code", "--event=Stop", "--min-interval=45"]);
   assert(eqStop.code === 0 && /--min-interval 45/.test(eqStop.out) && Object.keys(JSON.parse(eqStop.out).hooks).join() === "Stop", `…and --print-hook=claude-code --event=Stop --min-interval=45 prints a Stop hook at 45 (exit ${eqStop.code})`);
-  assert((await run(["--print-hook", "claude-code", "--event", "Stop", "--min-interval", "0"])).code === 2 && /above zero/.test((await run(["--print-hook", "claude-code", "--event", "Stop", "--min-interval", "0"])).err), "a printed Stop hook needs a floor above zero — at zero it would capture every turn");
+  const zero = await run(["--print-hook", "claude-code", "--event", "Stop", "--min-interval", "0"]);
+  assert(zero.code === 2 && /above zero/.test(zero.err), "a printed Stop hook needs a floor above zero — at zero it would capture every turn");
   assert(received.length === 1, "…and sends nothing");
   const ph = await run(["--print-hook", "codex"]);
   assert(ph.code === 0 && JSON.parse(ph.out).hooks.SessionEnd && /installs nothing/.test(ph.err), "--print-hook prints JSON on stdout and the where-to-paste on stderr");

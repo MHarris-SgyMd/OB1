@@ -1108,10 +1108,10 @@ export async function main(argv) {
   const args = argv.slice(2);
   const harness = flag(args, "--harness");
   // Exit 1, not 2: on a Stop hook 2 would block the assistant's turn over a typo in the command line (seventh review pass).
-  if (harness !== undefined && harness !== "claude-code" && harness !== "codex") { console.error(`--harness takes claude-code or codex, not "${harness}" (omit it: the transcript's first line says which)`); return 1; }
+  if (harness !== undefined && !HARNESSES.includes(harness)) { console.error(`--harness takes ${HARNESSES.join(" or ")}, not "${harness}" (omit it: the transcript's first line says which)`); return 1; }
   if (has(args, "--print-hook")) {
     const h = flag(args, "--print-hook") || "claude-code";
-    if (h !== "claude-code" && h !== "codex") { console.error(`--print-hook takes claude-code or codex, not "${h}"`); return 2; }
+    if (!HARNESSES.includes(h)) { console.error(`--print-hook takes ${HARNESSES.join(" or ")}, not "${h}"`); return 2; }
     const { event, error } = eventFlag(args); // absent: the harness's default events
     if (error) { console.error(error); return 2; }
     // A flag of the other by-hand form would validate nowhere and vanish (second review pass).
