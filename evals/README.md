@@ -3927,7 +3927,8 @@ consolidation judge on every proposal (029), the entity extractor on every
 mention and edge (016), and the metadata model's kind band that the section
 above froze — and it resolves claims in three: a reviewer accepts or rejects a
 proposal — applies it or declines it — the hand label agrees or not with the
-model's kind, and the fork record confirms or refutes a hypothesis. Nothing
+model's kind, and the fork record confirms or refutes a hypothesis (a fourth,
+SMD-1982's hand grade on the extractor's rows, is the subsection below). Nothing
 compared the two. This harness
 does, as a read model over what the log already holds — no table, no
 migration, no new confidence source — so the ticket's first question, whether
@@ -4057,20 +4058,22 @@ What it says:
   tokens; the two 0.50 defaults were `PostgreSQL` too — four in all, each in a
   different thought, each below 1.00. The control's three failures at 1.00 (an
   identifier typed as a topic, a URL fragment, a glob typed as a place) were
-  not hedged. Fisher's exact test against the control says p = 0.0001, but the
-  rows are not independent: ten of the fifteen hedged mentions are one
-  thought's, SMD-1937's ticket body. Without that thought the hedged bin is 1
-  of 5 against the control's 11 of 14 (p = 0.038); counted by thought — held
-  only if every graded mention in it held — 1 of 6 against 12 of 15 (p =
-  0.014); and inside that thought the one control mention at 1.00 held while
-  its ten at 0.80 failed. So the model does know something about its own false
+  not hedged. Fisher's exact test of the hedged bin against the control says
+  p = 0.0001, but the rows are not independent: ten of the fifteen hedged
+  mentions are one thought's, SMD-1937's ticket body. Without that thought the
+  hedged bin is 1 of 5 against the control's 11 of 14 (p = 0.038); counted by
+  thought — a thought held in a bin only if every graded mention of that bin
+  in it held — 1 of 6 against 12 of 15 (p = 0.014); and inside that thought
+  the one control mention at 1.00 held while its ten at 0.80 failed. So the model does know something about its own false
   positives, and today the column throws it away: 016 keeps every row at or
   above 0.50 and only sorts by it.
 * **On an edge the hedge marks nothing useful.** As graded the hedged edges
   held *more* often than the control (12/17 against 5/17), but 15 of the 17
   are one thought's — SMD-1731's ticket body: eleven "SMD-1731 `uses`
-  <component>" edges at 0.90, of which eight held, and four `related_to` edges
-  at 0.80, all held — and the other two held 0 of 2. The eight rest on reading
+  <component>" edges at 0.90, of which eight held and three did not (`Mutant`,
+  `linear.app`, and `preflight check`, graded 0 where `test-schema` in the same
+  list is 1), and four `related_to` edges at 0.80, all held — and the other two
+  held 0 of 2. The eight rest on reading
   "the ticket `uses` a component it changes" as held; under the strict reading
   they are 0 and the hedged bin is 4/17, level with the control. Either way,
   no signal. The finding on edges is the control itself: 1.00 edges hold 29%
@@ -4081,19 +4084,20 @@ What it says:
 
 Limits: 64 rows, one grader (the maintainer's assistant, blind to the value but
 not to the fork), the hedged strata clustered on six thoughts for mentions and
-three for edges, and a strict rule on type — `preflight check` graded 0 where
-`test-schema` in the same thought got 1, `migration 021` and `actor_name` 0 for
-being an example and an identifier typed as a topic. The grades stand as they
-were given blind; the most generous defensible re-grade of the borderline calls
-leaves the mention headline at 3 of 15 against 10 of 15 (p = 0.025). The
-control's held rate is the estimate of the 1.00 stratum's precision, with the
-interval fifteen or seventeen rows give: mentions 80% (Wilson 95% 55–93%),
-edges 29% (13–53%).
+three for edges, and a strict rule on type. The grades stand as they were
+given blind; the re-grade that cuts hardest against the mention finding — the
+two quoted example tokens `migration 021` and `Edge0` read as held, and the
+control's `Jev per-type gates` and `PR #119` read as failed — leaves it at 3 of
+15 against 10 of 15 (p = 0.025), and the one borderline call in the control
+that went the other way (`actor_name`, 0 as an identifier typed as a topic)
+would strengthen it. The control's held rate is the estimate of the 1.00
+stratum's precision, with the interval fifteen or seventeen rows give:
+mentions 80% (Wilson 95% 55–93%), edges 29% (13–53%).
 
 What it changes in SMD-1982: the elicitation arms in its Work item 1 are worth
 running for mentions — the prompt that asks for a reason below 1 first, on the
-windowed prompt once SMD-1879 lands — and item 2 (stop recording a confidence)
-is not the answer for mentions. For edges the confidence carries no signal
+windowed prompt SMD-1879 merged the same day (PR #113) — and item 2 (stop
+recording a confidence) is not the answer for mentions. For edges the confidence carries no signal
 either way. The record is `changes/smd-1982.md`.
 
 

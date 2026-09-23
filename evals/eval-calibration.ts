@@ -215,10 +215,15 @@ export function validateGrades(g: unknown): string[] {
     if (seen.has(claim)) problems.push(`${at}: ${claim} is graded twice`);
     seen.add(claim);
   };
-  const obj = (v: unknown): Record<string, unknown> => (v && typeof v === "object" ? (v as Record<string, unknown>) : {});
-  f.mentions.forEach((v, i) => { const m = obj(v); row(`mentions[${i}]`, [m.thought, m.entity], m, `${m.thought}:${m.entity}`); });
+  const obj = (at: string, v: unknown): Record<string, unknown> | null => {
+    if (v && typeof v === "object" && !Array.isArray(v)) return v as Record<string, unknown>;
+    problems.push(`${at} is not an object`);
+    return null;
+  };
+  f.mentions.forEach((v, i) => { const m = obj(`mentions[${i}]`, v); if (m) row(`mentions[${i}]`, [m.thought, m.entity], m, `${m.thought}:${m.entity}`); });
   f.edges.forEach((v, i) => {
-    const e = obj(v);
+    const e = obj(`edges[${i}]`, v);
+    if (!e) return;
     const rel = e.relation;
     if (!Number.isInteger(rel) || (rel as number) < 0 || (rel as number) >= RELATIONS.length) problems.push(`edges[${i}]: relation ${JSON.stringify(rel)} is not an index into RELATIONS (0–${RELATIONS.length - 1})`);
     row(`edges[${i}]`, [e.thought, e.from, e.to], e, `${e.thought}:${e.from}:${e.to}:${RELATIONS[rel as number] ?? rel}`);
@@ -561,10 +566,14 @@ async function selfCheck(): Promise<void> {
       { thought: A, entity: "not-an-id", stated: 1.2, outcome: 2 }, { thought: A, entity: B, stated: 1, outcome: 1 }, { thought: A, entity: B, stated: 1, outcome: 0 },
       { thought: A, entity: C, stated: "0.8", outcome: 1 }, { thought: A, entity: D, stated: -0.1, outcome: 0 }, { thought: A, entity: E, stated: 1, outcome: true }, { thought: A, entity: F.toUpperCase(), stated: 1, outcome: 1 }, null,
     ],
-    edges: [{ ...gfx.edges[0], relation: RELATIONS.length }, { ...gfx.edges[0], to: "nope", relation: 1.5 }, { thought: A, from: B, to: G, relation: RELATIONS.indexOf("uses"), stated: 1, outcome: 1 }],
+    edges: [{ ...gfx.edges[0], relation: RELATIONS.length }, { ...gfx.edges[0], to: "nope", relation: 1.5 }, { thought: A, from: B, to: G, relation: RELATIONS.indexOf("uses"), stated: 1, outcome: 1 }, { ...gfx.edges[0] }, { ...gfx.edges[0] }, "abc"],
   });
-  const expect = ["note is missing", "not-an-id", "stated 1.2", "outcome 2", "graded twice", `stated "0.8"`, "stated -0.1", "outcome true", `"${F.toUpperCase()}" is not a lower-case id`, "mentions[7]: undefined is not a lower-case id", "not an index", `"nope" is not a lower-case id`, "relation 1.5"];
-  ok(expect.every((e) => bad.some((p) => p.includes(e))) && bad.length === 16, `a missing label, a bad id, an upper-case id, a null row, a stated value out of range or not a number, an outcome that is not 0/1, a claim graded twice, a bad edge end and a relation off the vocabulary or not an integer are each refused by name (${bad.length}: ${bad.filter((p) => !expect.some((e) => p.includes(e))).join("; ") || "all named"})`);
+  const expect = [
+    "note is missing", `mentions[0]: "not-an-id" is not a lower-case id`, "mentions[0]: stated 1.2", "mentions[0]: outcome 2", `mentions[2]: ${A}:${B} is graded twice`, `mentions[3]: stated "0.8"`, "mentions[4]: stated -0.1", "mentions[5]: outcome true",
+    `mentions[6]: "${F.toUpperCase()}" is not a lower-case id`, "mentions[7] is not an object", `edges[0]: relation ${RELATIONS.length} is not an index`, "edges[1]: relation 1.5 is not an index", `edges[1]: "nope" is not a lower-case id`, `edges[4]: ${A}:${B}:${C}:uses is graded twice`, "edges[5] is not an object",
+  ];
+  const unexpected = bad.filter((p) => !expect.some((e) => p.includes(e))), unmet = expect.filter((e) => !bad.some((p) => p.includes(e)));
+  ok(unexpected.length === 0 && unmet.length === 0 && bad.length === expect.length, `a missing label, a bad id, an upper-case id, a row that is not an object, a stated value out of range or not a number, an outcome that is not 0/1, a mention or an edge graded twice, a bad edge end and a relation off the vocabulary or not an integer are each refused by name, once (${bad.length}; unmet: ${unmet.join("; ") || "none"}; unexpected: ${unexpected.join("; ") || "none"})`);
   ok(validateGrades(null)[0] === "the fixture is not an object" && validateGrades([])[0] === "the fixture is not an object" && validateGrades("x")[0] === "the fixture is not an object" && validateGrades({}).length === 4, "a fixture that is not an object, or has none of the shape, is a problem and not a throw");
   // The brain holds one graded mention and one ungraded, and lacks the graded edge: the note counts a set difference, not a subtraction (review pass 1).
   const gradedBrain = assemble(committed, { ...none, mentions: [{ claim: `${A}:${B}`, kind: "mention", confidence: 0.8, extraction_key: "x" }, { claim: `${A}:${E}`, kind: "mention", confidence: 1, extraction_key: "x" }] }, gm);
