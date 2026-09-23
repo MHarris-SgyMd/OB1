@@ -1926,13 +1926,16 @@ const SSE_KEEPALIVE_FRAME = new TextEncoder().encode(": keepalive\n\n");
  * `intervalMs` until the body ends (`onEnd` runs once, then), the client
  * leaves (`signal` aborts, or the next frame finds the stream closed — either
  * stops the timer, so an abandoned call leaks nothing), or `maxMs` passes
- * (the timer stops and `stalledRequestLine` is logged for `label`). A
- * response that is not an event stream is returned as it is, `onEnd` run at
- * once: it is complete.
+ * since `startedAt` (the timer stops, `stalledRequestLine` is logged for
+ * `label` and `onStall` runs once — the route marks the request settled, so
+ * the runtime's reap that follows on Bun is not logged as a client leaving; on
+ * Node or Workers nothing reaps a silent stream, and it stays open until the
+ * client or a proxy gives up). A response that is not an event stream is
+ * returned as it is, `onEnd` run at once: it is complete.
  */
 export function withSseKeepalive(
   response: Response,
-  opts: { intervalMs?: number; maxMs?: number; signal?: AbortSignal; onEnd?: () => void; label?: string } = {},
+  opts: { intervalMs?: number; maxMs?: number; startedAt?: number; signal?: AbortSignal; onEnd?: () => void; onStall?: () => void; label?: string } = {},
 ): Response {
   const body = response.body;
   if (!body || !/^text\/event-stream\b/i.test(response.headers.get("content-type") ?? "")) {
@@ -1941,7 +1944,7 @@ export function withSseKeepalive(
   }
   const intervalMs = opts.intervalMs ?? SSE_KEEPALIVE_MS;
   const maxMs = opts.maxMs ?? SSE_KEEPALIVE_MAX_MS;
-  const started = performance.now();
+  const started = opts.startedAt ?? performance.now();
   let timer: ReturnType<typeof setInterval> | null = null;
   const stop = () => {
     if (timer === null) return;
@@ -1956,6 +1959,7 @@ export function withSseKeepalive(
         if (elapsed >= maxMs) {
           stop();
           console.warn(stalledRequestLine(opts.label ?? "?", elapsed));
+          opts.onStall?.();
           return;
         }
         try {
@@ -2040,7 +2044,13 @@ app.on(MCP_METHODS, "*", async (c) => {
     if (!settled) console.warn(abandonedRequestLine(label, performance.now() - started));
   };
   signal.addEventListener("abort", abandoned, { once: true });
-  if (signal.aborted) abandoned();
+  if (signal.aborted) {
+    // Gone before the route ran: the line, and nothing else — no key check, no
+    // registry resolve, no tool run for a client that will never read it. The
+    // status reaches no one; 408 is the nearest name for what happened.
+    abandoned();
+    return c.body(null, 408);
+  }
 
   // Accept the access key via header, bearer token OR URL query parameter — every
   // form presented is tried, so a gateway's own bearer token beside the client's
@@ -2101,8 +2111,11 @@ app.on(MCP_METHODS, "*", async (c) => {
   }
   response.headers.delete("mcp-session-id");
   for (const [k, v] of Object.entries(corsHeaders)) response.headers.set(k, v);
-  // Kept alive for as long as the tool runs, up to SSE_KEEPALIVE_MAX_MS (SMD-1864, above).
-  return withSseKeepalive(response, { signal, label, onEnd: () => { settled = true; } });
+  // Kept alive for as long as the tool runs, up to SSE_KEEPALIVE_MAX_MS from the
+  // route's entry (SMD-1864, above); a stall settles the request too, so the
+  // reap that follows it is not a second line blaming the client.
+  const settle = () => { settled = true; };
+  return withSseKeepalive(response, { signal, label, startedAt: started, onEnd: settle, onStall: settle });
 });
 
 // Whatever no route above matched: 405 with `Allow`, before authenticate(), so

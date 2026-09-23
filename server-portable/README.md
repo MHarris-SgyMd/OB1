@@ -282,7 +282,7 @@ SMD-1451 is the migrator refusing it).
 ## Expected outcome
 
 ```bash
-bun test-server.ts        # 188 — transport, auth, tool surface, OAuth discovery, the method guard, /health and the store default
+bun test-server.ts        # 205 — transport, auth, tool surface, OAuth discovery, the method guard, /health, the store default and the tool-call keepalive
 bun test-auth.ts          # 97 — scoped, hashed, named keys
 bun run test:local        # 52 — fully local provider, no credential
 bun run test:sql          # 123 — store conformance, real Postgres in a container
@@ -352,17 +352,21 @@ directly testable — but the Deno build still needs them.
   carries a `: keepalive` comment frame every 5 s (`SSE_KEEPALIVE_MS` in
   `index.ts`), a line SSE parsers discard by specification, for as long as the
   tool runs — up to ten minutes (`SSE_KEEPALIVE_MAX_MS`), past which the frames
-  stop, one line says `request still running after N s: …` and the runtime's
-  idle timeout takes over, since a provider call is bounded by
-  `OB1_LLM_TIMEOUT` and a call that long is stuck in the database. The idle
-  timeout itself stays at the runtime's default, which is the right reaper for a
-  dead socket. A client that closes the connection before the response is
-  complete is the other line the server logs per request — `request abandoned
-  by the client after 9.8 s: tools/call capture_thought …` — by method and tool
-  (each capped at 64 printable characters), never by content; the call runs to
-  its end on the server, and a retry of the same text is `upsert_thought`'s
-  fingerprint no-op rather than a second row. The rest of per-request logging is
-  SMD-1849.
+  stop, one line says `request still running after N s: …` and, on Bun, the
+  idle timeout reaps the stream (not logged again as a client leaving); on Node
+  or Workers it stays open until the client or a proxy gives up. A provider
+  call is bounded by `OB1_LLM_TIMEOUT`, so a call that long is stuck in the
+  database. The idle timeout itself stays at the runtime's default, which is
+  the right reaper for a dead socket, and the two intervals are constants, not
+  knobs: 5 s is inside any proxy read timeout worth running (SMD-1846). A
+  client that closes the connection before the response is complete is the
+  other line the server logs per request — `request abandoned by the client
+  after 9.8 s: tools/call capture_thought …` — by method and tool (each capped
+  at 64 printable characters), never by content; the MCP SDK client gives up at
+  60 s by default, so for a Claude Desktop-class client that is the line a
+  stuck call produces, long before the ceiling. The call runs to its end on the
+  server, and a retry of the same text is `upsert_thought`'s fingerprint no-op
+  rather than a second row. The rest of per-request logging is SMD-1849.
 
 ## Related
 
