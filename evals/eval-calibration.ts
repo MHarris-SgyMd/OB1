@@ -347,7 +347,8 @@ const has = (n: string) => args.includes(`--${n}`);
 
 async function selfCheck(): Promise<void> {
   let failed = 0;
-  const ok = (cond: boolean, what: string) => { if (!cond) { failed++; console.error(`  FAIL ${what}`); } };
+  // A FAIL sets the exit code the moment it happens, so a probe that fires after an unawaited promise can never leave a green exit (review pass 5).
+  const ok = (cond: boolean, what: string) => { if (!cond) { failed++; process.exitCode = 1; console.error(`  FAIL ${what}`); } };
   const near = (a: number | null, b: number, what: string) => ok(a !== null && Math.abs(a - b) < 1e-9, `${what} (got ${a})`);
 
   // The arithmetic, on sets whose numbers are known by hand.
@@ -434,6 +435,20 @@ async function selfCheck(): Promise<void> {
   const allLive = assemble(readFixture(), { ...none, live: new Set([...kindBandRows(readFixture()).map((r) => r.claim), ...declaredRows(readFixture(), new Map(), []).map((r) => r.claim)]), deleted: 3, proposals: [{ id: "p", confidence: 0.8, status: "rejected", judge_key: "j" }] });
   ok(allLive.summaries.length === 3 && allLive.summaries[0].claims === 342 && allLive.summaries[2].mechanism === "j", "with every fixture id live the kind band has 342 claims, and a producer follows the fixture-fed rows");
   ok(allLive.notes.length === 1 && allLive.notes[0].startsWith("3 thought(s) have been deleted"), "deletes are counted in a note, and no id is reported gone");
+  // Every read wired through, in one brain: a declared value on a hypothesis, a
+  // superseded fixture id that is not one, a mention, a proposal, deletes, and
+  // one fixture id missing — so no read can be dropped from assemble unseen (review pass 5).
+  const fxLive = readFixture();
+  const hypIds = fxLive.kinds.hypothesis, planIds = fxLive.kinds.plan;
+  const ids = [...kindBandRows(fxLive).map((r) => r.claim), ...declaredRows(fxLive, new Map(), []).map((r) => r.claim)];
+  const wired = assemble(fxLive, {
+    live: new Set(ids.filter((id) => id !== planIds[0])), declared: new Map([[hypIds[0], 0.7]]), superseded: [planIds[1]],
+    proposals: [{ id: "p", confidence: 0.8, status: "rejected", judge_key: "j" }], mentions: [{ claim: "m", kind: "mention", confidence: 1, extraction_key: "x" }], deleted: 2,
+  });
+  const [wk, wd, wj, wx] = wired.summaries;
+  ok(wired.summaries.length === 4 && wk.claims === 341 && wd.mechanism === DECLARED && wj.mechanism === "j" && wx.mechanism === "x", `the four mechanisms in order, the kind band one short (${wired.summaries.map((m) => m.claims).join("/")})`);
+  ok(wd.claims === hypIds.length + 1 && wd.withConfidence === 1 && wd.resolved === 17 + 1, `the declared read, the superseded read and the fixture all reach the declared row (${wd.claims}/${wd.withConfidence}/${wd.resolved})`);
+  ok(wired.notes.length === 2 && wired.notes[0].startsWith("1 of the fixture's 342") && wired.notes[1].startsWith("2 thought(s) have been deleted"), "the gone note comes before the deletes note, each with its count");
   ok(render([summarise("u", [{ mechanism: "u", claim: A, kind: "thought", stated: null, band: null, outcome: null, resolvedBy: null }])], "probe", []).includes("- u: 1 claim(s), none with a confidence, none resolved."), "a mechanism with claims that state nothing and resolve nothing says so, not \"no claims\"");
   const dec = summarise(DECLARED, declaredRows(fx, new Map(), [A]));
   ok(resolvers(dec) === "1 by the fork record, 1 superseded", `the resolvers are counted by name (${resolvers(dec)})`);
