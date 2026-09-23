@@ -220,7 +220,7 @@ same commit.**
 Required in every environment:
 
 ```
-MCP_ACCESS_KEYS              name:scope:sha256 entries — bun keygen.ts mints one (or the legacy MCP_ACCESS_KEY, one raw key, write scope)
+MCP_ACCESS_KEYS              name:scope:sha256 entries, scope read | write | capture — bun keygen.ts mints one (or the legacy MCP_ACCESS_KEY, one raw key, write scope)
 DATABASE_URL                 the brain's postgres:// connection string — the SQL store, the default
 OPENROUTER_API_KEY           embeddings, and metadata extraction unless OB1_CHAT_BASE_URL gives chat its own endpoint — then OB1_CHAT_API_KEY (neither needed for a local endpoint)
 ```
@@ -282,11 +282,11 @@ SMD-1451 is the migrator refusing it).
 ## Expected outcome
 
 ```bash
-bun test-server.ts        # 177 — transport, auth, tool surface, OAuth discovery, the method guard, /health and the store default
-bun test-auth.ts          # 67 — scoped, hashed, named keys
-bun run test:local        # 31 — fully local provider, no credential
-bun run test:sql          # 113 — store conformance, real Postgres in a container
-bun run test:e2e          # 112 — the whole server over MCP with no Supabase at all, OB1_STORE unset
+bun test-server.ts        # 188 — transport, auth, tool surface, OAuth discovery, the method guard, /health and the store default
+bun test-auth.ts          # 97 — scoped, hashed, named keys
+bun run test:local        # 52 — fully local provider, no credential
+bun run test:sql          # 123 — store conformance, real Postgres in a container
+bun run test:e2e          # 162 — the whole server over MCP with no Supabase at all, OB1_STORE unset
 bun run cf:build          # ~342 KiB gzipped (measured 2026-09-20 at change 97; the PostgREST store and supabase-js are in it)
 ```
 

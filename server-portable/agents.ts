@@ -72,8 +72,15 @@ function failureTtl(ttlMs: number): number {
 }
 
 export type AgentOutcome =
-  /** Resolved, or resolvable later; `agentId` is undefined when the registry could not answer. */
-  | { status: "ok"; agentId?: string }
+  /**
+   * Resolved, or resolvable later; `agentId` is undefined when the registry
+   * could not answer — `unresolved` says why: `unreachable` (no connection,
+   * not migrated, a CHECK refusing the scope; a retry may answer) or `refused`
+   * (the registry answered and refused the argument — BAD_KEY_HASH, BAD_LABEL,
+   * a malformed reply; a retry will not). capture_thought reads the difference
+   * when a capture-only key's `supersedes` needs the id (SMD-1298).
+   */
+  | { status: "ok"; agentId?: string; unresolved?: "unreachable" | "refused" }
   /** The database refused this digest. The request must be rejected. */
   | { status: "revoked"; agentId: string; revokedAt: string; reason: string | null };
 
@@ -139,23 +146,40 @@ export class AgentResolver {
         // BAD_KEY_HASH, BAD_LABEL, MALFORMED_RESPONSE. A refusal of the ARGUMENT,
         // not of the caller — auth.ts already validated the digest's shape, so
         // reaching here means the schema and the server disagree. Serve without
-        // an agent id rather than locking everyone out over a shape mismatch.
-        outcome = { status: "ok", agentId: undefined };
+        // an agent id rather than locking everyone out over a shape mismatch —
+        // and say so once per key: a retry will not change this answer, and
+        // the tool's `Refused:` sends the operator to this log (eighth review pass).
+        this.warnOnce(key, `agent registry: resolve_agent refused key "${principal.name}" (${String((r as { detail?: unknown }).detail ?? r.error)}) — writes are attributed by name only; the label or digest the schema rejects will not pass on retry`);
+        outcome = { status: "ok", agentId: undefined, unresolved: "refused" };
         ttl = failureTtl(this.ttlMs);
       }
-    } catch {
-      // Unreachable, unmigrated, or misconfigured. See the header.
-      outcome = { status: "ok", agentId: undefined };
+    } catch (e) {
+      // Unreachable, unmigrated, or misconfigured. See the header. Said once
+      // per key while the failure lasts, so a brain whose CHECK refuses a
+      // scope (049, SMD-1298) is not silent about the unattributed writes.
+      this.warnOnce(key, `agent registry: resolve_agent failed for key "${principal.name}" — writes are attributed by name only until it answers: ${String((e as Error)?.message ?? e).split("\n")[0].slice(0, 200)}`);
+      outcome = { status: "ok", agentId: undefined, unresolved: "unreachable" };
       ttl = failureTtl(this.ttlMs);
     }
+    if (outcome.agentId !== undefined) this.warned.delete(key);
 
     if (ttl > 0) this.cache.set(key, { outcome, expires: this.now() + ttl });
     return outcome;
   }
 
+  /** Keys whose resolve threw and were warned about; cleared when one answers again. */
+  private readonly warned = new Set<string>();
+  /** Said once per key while the failure lasts — the one dedupe rule for both outcomes (tenth review pass). */
+  private warnOnce(key: string, message: string): void {
+    if (this.warned.has(key)) return;
+    this.warned.add(key);
+    console.warn(message);
+  }
+
   /** Drop everything cached. For tests, and for a deployment that wants a signal. */
   clear(): void {
     this.cache.clear();
+    this.warned.clear();
   }
 }
 

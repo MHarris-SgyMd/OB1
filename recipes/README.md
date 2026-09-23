@@ -17,6 +17,7 @@ Step-by-step builds that add a new capability to your Open Brain. Follow the ins
 | [NBJ OB1 Agent Memory for OpenClaw](openclaw-agent-memory/) | Canonical recipe for using OB1 Agent Memory as the governed continuity layer for OpenClaw workflows |
 | [OpenClaw Code Review Memory](openclaw-code-review-memory/) | Flagship workflow for compounding repo-specific review lessons, maintainer corrections, and false positives |
 | [OpenClaw TaskFlow Work Log](openclaw-taskflow-work-log/) | Durable handoff recipe for long-running OpenClaw TaskFlows across agents, models, and channels |
+| [Session Capture Hook](session-capture-hook/) | A session-end hook for Claude Code and Codex that captures one summary thought with the session's retrieved thoughts as provenance, through a capture-only key, after a secret scan; off until you paste the hook it prints |
 
 Agent Memory recipes should be paired with
 [Safe Agent Memory and Provenance](../docs/safe-agent-memory-provenance.md)
