@@ -16,19 +16,14 @@
  *   bun scripts/migrate-to-sql-shim.ts --apply --all   # rewrite every eligible file
  *   bun scripts/migrate-to-sql-shim.ts --revert <path>… # put it back
  *
- * The shim imports `bun`, and the files it migrates were written as Supabase
+ * The shim imports `bun`, and the files it migrated were written as Supabase
  * Edge Functions — `Deno.env.get` for the environment, `Deno.serve` at the end
- * — so one import line left them running nowhere: not under Deno, which cannot
- * resolve `bun`, and not under Bun, which has no `Deno` (SMD-1480, FORK.md
- * change 74). A migrated file that uses a Deno global therefore gets a second
- * line: `import "…/compat/deno-on-bun.ts";` as its FIRST import, which gives
- * Bun the two members those files use and nothing else. Where the file's first
- * import is Supabase's type-only `import "jsr:@supabase/functions-js/
- * edge-runtime.d.ts";` — a specifier Bun cannot resolve — that line becomes the
- * polyfill import, the original recorded on the same line for --revert (a
- * types import anywhere else becomes that comment alone). Both are undone by
- * --revert, byte for byte; --apply --all also completes a file migrated
- * before this line existed. `bun <file>` then serves it.
+ * — so until SMD-1799 a migrated file also took a polyfill for those two
+ * members as its first import (compat/deno-on-bun.ts; SMD-1480, FORK.md change
+ * 74). The files are Bun-native now — `process.env`, `export default { port,
+ * fetch }` — and the polyfill is gone: a file that still reaches a Deno global
+ * is refused here (BLOCKERS) and ported by hand, not patched. `bun <file>`
+ * serves a migrated file.
  *
  * A file is INELIGIBLE when it uses something the shim deliberately does not
  * implement, or when it deploys somewhere the shim cannot follow (KEEP below).
@@ -70,6 +65,9 @@ const BLOCKERS = [
     why: "type-only import (Session/User/SupabaseClient) — the shim exports different types",
   },
   { re: /\.textSearch\s*\(/, why: "PostgREST .textSearch() — write it as an .rpc() instead" },
+  // Bun has no `Deno`, and the polyfill that stood in for two of its members is gone (SMD-1799): the file is
+  // ported first — `process.env` for the environment, `export default { port, fetch }` at the tail — by hand.
+  { re: /\bDeno\.[A-Za-z_$]/, why: "reaches a Deno global — port it to Bun's shape first (process.env; export default { port, fetch }), SMD-1799" },
   // An order, limit or range on an embedded resource: the shim's embed returns every row, and the option applied
   // to the base table would be a silent wrong answer (SMD-1798's first review pass); the shim refuses it at the call.
   { re: /\.(?:order|limit|range)\s*\([^)]*\b(?:foreignTable|referencedTable)\b/, why: "an order, limit or range on an embedded resource (foreignTable/referencedTable) — the shim returns every embedded row; order or cut them in the file, or ask in a second query" },
@@ -88,15 +86,8 @@ const KEEP = new Map([
     "runs inside the recipe's own self-hosted Supabase stack (setup.sh symlinks functions/ into its edge runtime), where PostgREST is present and bun is not"],
 ]);
 
-/** Supabase's type-only import of the Edge Functions runtime's types; Bun cannot resolve a jsr: specifier. */
-const TYPES_IMPORT_RE = /^import "(jsr:@supabase\/functions-js\/edge-runtime\.d\.ts)";$/m;
-/** The polyfill's import as this script writes it — alone on a line, or in the types import's place with the original recorded. */
-const RUNTIME_IMPORT_RE = /^import "([^"]*compat\/deno-on-bun\.ts)";(?: \/\/ ob1-original-types: (jsr:\S+))?\n/m;
-/** Read over the whole text, comments included: a Node-shaped file that mentions `Deno.env` in a comment gets a harmless extra line. */
-const USES_DENO_RE = /\bDeno\./;
-
 /** One file the scan found — on supabase-js, or already on the shim — with the reasons it cannot move. */
-type Finding = { file: string; rel: string; already: boolean; incomplete: boolean; blockers: string[]; eligible: boolean };
+type Finding = { file: string; rel: string; already: boolean; blockers: string[]; eligible: boolean };
 
 function walk(dir: string, out: string[] = []): string[] {
   for (const name of readdirSync(dir)) {
@@ -129,9 +120,7 @@ function classify(file: string): Finding | null {
   const already = onShim;
   const blockers = BLOCKERS.filter((b) => b.re.test(text)).map((b) => b.why);
   if (KEEP.has(rel)) blockers.push(`kept on supabase-js: ${KEEP.get(rel)}`);
-  // On the shim, uses a Deno global, and has no deno-on-bun import yet: migrated before change 74.
-  const incomplete = onShim && USES_DENO_RE.test(text) && !RUNTIME_IMPORT_RE.test(text);
-  return { file, rel, already, incomplete, blockers, eligible: blockers.length === 0 };
+  return { file, rel, already, blockers, eligible: blockers.length === 0 };
 }
 
 /** Relative specifier from the file back to compat/supabase-sql/index.ts. */
@@ -139,37 +128,10 @@ function shimPath(file: string): string {
   return relativeTo(file, join(ROOT, "compat", "supabase-sql", "index.ts"));
 }
 
-/** …and to compat/deno-on-bun.ts. */
-function runtimePath(file: string): string {
-  return relativeTo(file, join(ROOT, "compat", "deno-on-bun.ts"));
-}
-
 function relativeTo(file: string, target: string): string {
   let p = relative(dirname(file), target);
   if (!p.startsWith(".")) p = "./" + p;
   return p.split("\\").join("/");
-}
-
-/**
- * The runtime line, for a file that uses a Deno global and lacks it: in the
- * place of Supabase's jsr: types import when the file has one (Bun cannot
- * resolve the specifier; the original is recorded on the line for --revert),
- * otherwise a line of its own before the file's first import statement.
- * First, because a file the entry imports may read Deno.env in its module
- * body, and ES modules evaluate imports in order.
- */
-function withRuntime(text: string, file: string): string {
-  if (!USES_DENO_RE.test(text) || RUNTIME_IMPORT_RE.test(text)) return text;
-  const line = `import "${runtimePath(file)}";`;
-  const first = text.search(/^import[\s{"']/m);
-  if (first < 0) throw new Error(`${relative(ROOT, file)} uses a Deno global but has no import statement to put compat/deno-on-bun.ts before`);
-  const types = TYPES_IMPORT_RE.exec(text);
-  // In the types import's place when that IS the first import (the tree's four); otherwise first,
-  // and any types import elsewhere becomes the comment alone — first is what the file needs.
-  text = types && types.index === first
-    ? text.replace(TYPES_IMPORT_RE, `${line} // ob1-original-types: ${types[1]}`)
-    : text.slice(0, first) + line + "\n" + text.slice(first);
-  return text.replace(new RegExp(TYPES_IMPORT_RE.source, "gm"), (_m: string, spec: string) => `// ob1-original-types: ${spec}`);
 }
 
 function rewrite(file: string): { changed: boolean } {
@@ -205,8 +167,6 @@ function rewrite(file: string): { changed: boolean } {
     }
   }
 
-  // Already on the shim, or just put there: Deno's globals come from compat/deno-on-bun.ts.
-  text = withRuntime(text, file);
   if (text === original) return { changed: false };
 
   writeFileSync(file, text);
@@ -221,10 +181,6 @@ function revert(file: string): { changed: boolean } {
   // than at the start of the file.
   let text = original.replace(/^\/\/ MIGRATED OFF SUPABASE:[\s\S]*?--revert <file>\n/m, "");
   text = text.replace(/(['"])[^'"]*compat\/supabase-sql\/index\.ts\1/g, (_m, q) => `${q}${spec}${q}`);
-  // The runtime line: back to the jsr: types import it replaced, or gone; a types import left as a comment, back.
-  text = text.replace(RUNTIME_IMPORT_RE, (_m, _p, types) => (types ? `import "${types}";\n` : ""));
-  // Only the codemod's own record — a jsr: specifier — not a comment a person wrote in that shape.
-  text = text.replace(/^\/\/ ob1-original-types: (jsr:\S+)$/gm, (_m, spec) => `import "${spec}";`);
   if (text === original) return { changed: false };
   writeFileSync(file, text);
   return { changed: true };
@@ -250,8 +206,8 @@ if (doRevert) {
 
 if (apply) {
   const chosen = all
-    ? found.filter((f) => f.eligible && (!f.already || f.incomplete))
-    : targets.map((t) => found.find((f) => f.file === resolve(ROOT, t)) ?? { file: resolve(ROOT, t), rel: t, eligible: false, blockers: ["not found in the scan"], already: false, incomplete: false });
+    ? found.filter((f) => f.eligible && !f.already)
+    : targets.map((t) => found.find((f) => f.file === resolve(ROOT, t)) ?? { file: resolve(ROOT, t), rel: t, eligible: false, blockers: ["not found in the scan"], already: false });
 
   if (chosen.length === 0) {
     console.log("Nothing to do. Run without --apply for the triage report.");
@@ -275,14 +231,12 @@ if (apply) {
 const eligible = found.filter((f) => f.eligible && !f.already);
 const blocked = found.filter((f) => !f.eligible);
 const migrated = found.filter((f) => f.already);
-const incomplete = migrated.filter((f) => f.incomplete);
 
 console.log(`Scanned ${found.length} file(s) importing @supabase/supabase-js.\n`);
 
 if (migrated.length) {
   console.log(`Already on the shim (${migrated.length}):`);
-  for (const f of migrated) console.log(`  ${f.incomplete ? "!" : "·"}  ${f.rel}`);
-  if (incomplete.length) console.log(`  ! ${incomplete.length} use a Deno global without compat/deno-on-bun.ts — --apply --all adds it`);
+  for (const f of migrated) console.log(`  ·  ${f.rel}`);
   console.log();
 }
 
@@ -294,5 +248,5 @@ if (blocked.length) {
   for (const f of blocked) console.log(`  ✗  ${f.rel}\n     ${f.blockers.join("; ")}`);
 }
 
-console.log(`\n${eligible.length} of ${found.length} migrate with one import change (two, for a file that reads Deno.env or calls Deno.serve).`);
+console.log(`\n${eligible.length} of ${found.length} migrate with one import change.`);
 console.log(`Apply with: bun scripts/migrate-to-sql-shim.ts --apply --all`);

@@ -271,12 +271,13 @@ jobs:
         working-directory: extensions
         run: bun install --frozen-lockfile
 
-      # Imported as deployed under a stand-in for Deno's two globals and a loader
-      # for Deno's specifiers: a wrong or revoked key is refused, a read-scoped
-      # key never sees a tool that writes, is told so by a route that writes and
-      # may only dry-run a worker, every copy is byte for byte auth.ts. Then every
-      # server on the SQL shim is started under `bun` for real and answered over
-      # its port (change 74). No database.
+      # Imported as modules — each server's default export's `fetch`, the shape
+      # `bun <file>` serves (SMD-1799) — under a loader for Deno's specifiers: a
+      # wrong or revoked key is refused, a read-scoped key never sees a tool that
+      # writes, is told so by a route that writes and may only dry-run a worker,
+      # every copy is byte for byte auth.ts. Then every server on the SQL shim is
+      # started under `bun` for real and answered over its port (change 74). No
+      # database.
       - name: Scoped access keys reach every vendored server
         working-directory: extensions
         run: bun test-auth.ts
