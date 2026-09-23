@@ -272,6 +272,65 @@ else {
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL });
 
   /**
+   * A capture-scoped key (SMD-1298) needs 049's wider CHECK on
+   * ob1_agent_keys.scope; on a brain without it resolve_agent raises and every
+   * hook capture lands unattributed while nothing says why. Put 010's CHECK
+   * back and configure a capture key: the registry row fails and names 049;
+   * without a capture key the same brain is fine; with 049 re-applied it is ok.
+   */
+  const KEYS_WITH_CAPTURE = `laptop:write:${"a".repeat(64)},session-hook:capture:${"b".repeat(64)}`;
+  const before049 = new SQL({ url: LIVE, max: 1 });
+  await before049.unsafe("ALTER TABLE ob1_agent_keys DROP CONSTRAINT IF EXISTS ob1_agent_keys_scope_check");
+  // No CHECK at all — a table restored without it — is its own diagnosis, a warning, not 010's two-value CHECK (sixth review pass).
+  const noCheck = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, MCP_ACCESS_KEYS: KEYS_WITH_CAPTURE });
+  assert(noCheck.code === 0 && /agent identity.*carries no CHECK at all/s.test(noCheck.out), `a brain with no scope CHECK at all warns as such and starts (exit ${noCheck.code})`);
+  // A value list that names neither read nor write fails whatever keys are configured — it refuses them all at resolve_agent (twelfth review pass: it read as "not the scope rule").
+  await before049.unsafe("ALTER TABLE ob1_agent_keys ADD CONSTRAINT ob1_agent_keys_scope_check CHECK (scope IN ('capture'))");
+  const captureOnly = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, MCP_ACCESS_KEYS: `laptop:write:${"a".repeat(64)}` });
+  assert(captureOnly.code === 1 && /agent identity.*does not admit read or write \(ob1_agent_keys_scope_check: scope = 'capture'/s.test(captureOnly.out) && /every write key configured lands unattributed/.test(captureOnly.out),
+         `a list naming capture alone fails with a write key configured, naming what it lacks (exit ${captureOnly.code})`);
+  // …and is a warning when no key of the missing scope is configured: a brain with write keys alone may narrow the list on purpose (thirteenth review pass).
+  await before049.unsafe("ALTER TABLE ob1_agent_keys DROP CONSTRAINT ob1_agent_keys_scope_check");
+  await before049.unsafe("ALTER TABLE ob1_agent_keys ADD CONSTRAINT ob1_agent_keys_scope_check CHECK (scope IN ('write', 'capture'))");
+  const writeOnly = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, MCP_ACCESS_KEYS: `laptop:write:${"a".repeat(64)}` });
+  assert(writeOnly.code === 0 && /!\s+agent identity.*does not admit read .*no key of that scope is configured, so nothing is refused today/s.test(writeOnly.out),
+         `a list without read on a brain with write keys alone is a warning, not a failure (exit ${writeOnly.code})`);
+  await before049.unsafe("ALTER TABLE ob1_agent_keys DROP CONSTRAINT ob1_agent_keys_scope_check");
+  // The two-value rule under another name is the same failure, named — not "no CHECK at all" (ninth review pass).
+  await before049.unsafe("ALTER TABLE ob1_agent_keys ADD CONSTRAINT scope_two_values CHECK (scope IN ('read', 'write'))");
+  const oddName = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, MCP_ACCESS_KEYS: KEYS_WITH_CAPTURE });
+  assert(oddName.code === 1 && /admits read and write only \(under the name scope_two_values\)/.test(oddName.out) && !/no CHECK at all/.test(oddName.out),
+         `a two-value CHECK under another name fails the row naming that constraint (exit ${oddName.code})`);
+  // The array-literal spelling of the two-value rule is the same rule (thirteenth review pass: it read as "not the scope rule").
+  await before049.unsafe("ALTER TABLE ob1_agent_keys ADD CONSTRAINT scope_array_literal CHECK (scope = ANY ('{read,write}'::text[]))");
+  const literal = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, MCP_ACCESS_KEYS: KEYS_WITH_CAPTURE });
+  assert(literal.code === 1 && /admits read and write only \(under the name scope_array_literal, scope_two_values\)|admits read and write only \(under the name scope_two_values, scope_array_literal\)/.test(literal.out), `a two-value rule spelled as an array literal is a two-value rule (exit ${literal.code})`);
+  await before049.unsafe("ALTER TABLE ob1_agent_keys DROP CONSTRAINT scope_array_literal");
+  // The mixed shape — the three-value rule beside a two-value one under another name, what a drop by name would have left — fails naming the odd one: every value list must admit capture, not one (eleventh review pass: `.every` → `.some` survived).
+  await before049.unsafe("ALTER TABLE ob1_agent_keys ADD CONSTRAINT ob1_agent_keys_scope_check CHECK (scope IN ('read', 'write', 'capture'))");
+  const mixedShape = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, MCP_ACCESS_KEYS: KEYS_WITH_CAPTURE });
+  assert(mixedShape.code === 1 && /admits read and write only \(under the name scope_two_values\)/.test(mixedShape.out), `a two-value CHECK beside the three-value one still fails, naming it (exit ${mixedShape.code})`);
+  await before049.unsafe("ALTER TABLE ob1_agent_keys DROP CONSTRAINT scope_two_values");
+  // A CHECK on the column alone that is no value list is a warning naming its definition, not "read and write only" (eleventh review pass).
+  await before049.unsafe("ALTER TABLE ob1_agent_keys ADD CONSTRAINT scope_nonempty CHECK (scope <> '')");
+  const nonList = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, MCP_ACCESS_KEYS: KEYS_WITH_CAPTURE });
+  assert(nonList.code === 0 && /!\s+agent identity.*1 other CHECK\(s\) on ob1_agent_keys\.scope alone \(scope_nonempty: CHECK/s.test(nonList.out) && !/read and write only/.test(nonList.out),
+         `a non-list CHECK on the column is warned about by its definition (exit ${nonList.code})`);
+  await before049.unsafe("ALTER TABLE ob1_agent_keys DROP CONSTRAINT scope_nonempty");
+  await before049.unsafe("ALTER TABLE ob1_agent_keys DROP CONSTRAINT ob1_agent_keys_scope_check");
+  await before049.unsafe("ALTER TABLE ob1_agent_keys ADD CONSTRAINT ob1_agent_keys_scope_check CHECK (scope IN ('read', 'write'))");
+  await before049.close();
+  const captureBefore049 = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, MCP_ACCESS_KEYS: KEYS_WITH_CAPTURE });
+  assert(captureBefore049.code === 1 && /agent identity.*1 capture-scoped key\(s\) configured \(session-hook\) but ob1_agent_keys\.scope admits read and write only/s.test(captureBefore049.out),
+         `a capture key on a brain before 049 fails the registry row, naming the key (exit ${captureBefore049.code})`);
+  assert(/049_agent_key_scope_capture\.sql/.test(captureBefore049.out), "…with the migration to apply");
+  const noCaptureBefore049 = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, MCP_ACCESS_KEYS: `laptop:write:${"a".repeat(64)}` });
+  assert(noCaptureBefore049.code === 0 && /resolve_agent present/.test(noCaptureBefore049.out), "…while the same brain with no capture key configured is fine");
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("049") });
+  const captureWith049 = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, MCP_ACCESS_KEYS: KEYS_WITH_CAPTURE });
+  assert(captureWith049.code === 0 && /the scope CHECK admits capture \(049\)/.test(captureWith049.out), "…and with 049 applied the row says the CHECK admits capture");
+
+  /**
    * Migration 012, and the reason it is checked at all: the tool is registered
    * unconditionally, so a database without the function serves a tool that
    * errors on every call while everything else looks healthy.
@@ -1795,6 +1854,9 @@ console.log("\n[8] The egress gate is reported: the mode, and per endpoint what 
   // The upgrade case: a loopback endpoint nothing declared. The policy row
   // says deny is the default; the endpoint row warns with the one-line fix.
   const undeclared = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: LOCAL });
+  const sourceTerm = await run({ ...BASE_OK, ...GATE, OB1_EGRESS_POLICY: "allow", OB1_EGRESS_DENY: "source:mcp,type:idea" });
+  assert(/!\s+egress policy\s+1 source: term\(s\) \(source:mcp\) gate a label the caller supplies/.test(sourceTerm.out) && /actor:<key name>/.test(sourceTerm.out),
+         "a source: term is warned about — the label is the caller's since capture_thought takes it (ninth review pass)");
   assert(/✓\s+egress policy\s+deny \(the default\) — a thought's text reaches an endpoint not declared local only under an OB1_EGRESS_ALLOW term; no terms/.test(undeclared.out),
          "unset: the policy row says deny, the default, no terms");
   assert(/!\s+embeddings egress\s+http:\/\/127\.0\.0\.1:11434\/v1 looks local but is not declared so — the gate treats it as remote, and under deny with no allow term every embeddings and chat call is refused: captures land without a vector/.test(undeclared.out),

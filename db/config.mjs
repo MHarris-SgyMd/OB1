@@ -1516,6 +1516,12 @@ export const ROLE_GRANTS = Object.freeze({
     Object.freeze({ table: "ob1_config",     privileges: Object.freeze(["SELECT"]),                    since: "006" }),
     Object.freeze({ table: "ob1_agents",     privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]), since: "010" }),
     Object.freeze({ table: "ob1_agent_keys", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]), since: "010" }),
+    // capture_thought reads a target's capture row when a capture-only key names
+    // `supersedes` (SMD-1298): that key may replace only what it wrote. Soft as
+    // the rest of this group — a role without it is refused THAT pointer, with
+    // this grant named, and captures on (second review pass: the capture group
+    // holds INSERT alone, and the read failed under the documented role).
+    Object.freeze({ table: "thought_audit",  privileges: Object.freeze(["SELECT"]),                    since: "008" }),
   ]),
   // A worker role — reembed.ts, consolidate.ts, extract-entities.ts — claims and
   // releases work, upserts its job key into `ob1_config` (reembed's
@@ -1712,8 +1718,8 @@ export function grantedObjects(groups = ROLE_GRANT_GROUPS) {
  * answer "is this object documented at all", this keeps an object's rows apart,
  * because db/README.md documents privileges per group and an object can appear
  * in more than one with a different set (`ob1_config`: SELECT in `server`,
- * INSERT/UPDATE in `worker`; `thought_audit`: INSERT in `capture`, SELECT and
- * INSERT in `community`). check-fork-consistency's privilege comparison reads it
+ * INSERT/UPDATE in `worker`; `thought_audit`: INSERT in `capture`, SELECT in
+ * `server`, SELECT and INSERT in `community`). check-fork-consistency's privilege comparison reads it
  * (SMD-1471).
  */
 export function grantRows(groups = ROLE_GRANT_GROUPS) {

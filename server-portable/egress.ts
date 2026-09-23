@@ -56,12 +56,17 @@ export type EgressMode = (typeof EGRESS_MODES)[number];
 export const DEFAULT_EGRESS_MODE: EgressMode = "deny";
 
 /**
- * The units a term may name. `actor` is the access key's name (auth.ts);
- * `source`, `type` and `topic` read the row's metadata, so they decide for the
- * passes and the re-embed over rows already tagged and are unknown at a first
- * capture (the tags come FROM the call being gated); `marker` is a literal the
- * text contains — `#public`, `[phi]` — the one unit a writer controls per
- * thought.
+ * The units a term may name. `actor` is the access key's name (auth.ts) — the
+ * one unit the key proves; `source`, `type` and `topic` read the row's
+ * metadata, so they decide for the passes and the re-embed over rows already
+ * tagged and are unknown at a first capture (the tags come FROM the call being
+ * gated) — and `source` is the row's label at every step, the caller's at a
+ * capture (capture_thought's `source`, `mcp` when it gave none; SMD-1298), so
+ * one policy decides the same for a row at its capture and at the passes that
+ * read it back; a caller's label is a claim, so a term about WHO wrote names
+ * `actor`, which the key proves (SMD-1941 is binding a label to the key).
+ * `marker` is a literal the text contains —
+ * `#public`, `[phi]` — the one unit a writer controls per thought.
  */
 export const EGRESS_UNITS = ["actor", "source", "type", "topic", "marker"] as const;
 export type EgressUnit = (typeof EGRESS_UNITS)[number];

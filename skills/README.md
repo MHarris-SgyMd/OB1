@@ -16,6 +16,7 @@ Reusable AI client skills and prompt packs for Open Brain workflows. These are t
 | [Work Operating Model Skill Pack](work-operating-model/) | Runs a five-layer work elicitation interview and turns the approved result into structured Open Brain records plus exports | [@jonathanedwards](https://github.com/jonathanedwards) |
 | [World Model Readiness Diagnostic](world-model-diagnostic/) | Runs a 20-minute diagnostic that maps company fit, audits the boundary layer, flags simulated-judgment exposure, and returns a labeled build sequence | [@jonathanedwards](https://github.com/jonathanedwards) |
 | [OpenClaw Agent Memory Skill Pack](openclaw-agent-memory/) | Teaches OpenClaw agents to recall, write back, report usage, and respect OB1 provenance/use-policy rules | OB1 Team |
+| [Session Summary Skill Pack](session-summary/) | Ends a work session with one summary thought — asked, decided, shipped, open — captured with the retrieved thoughts as `derived_from` and the harness as `source`; pairs with the session-capture-hook recipe | [@MHarris-SgyMd](https://github.com/MHarris-SgyMd) |
 
 ## How Skills Differ From Recipes
 
