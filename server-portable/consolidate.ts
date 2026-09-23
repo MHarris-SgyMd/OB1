@@ -34,7 +34,7 @@ import { CONSOLIDATE_KEY_PREFIX } from "../db/config.mjs";
  * (review pass 3); the numbers in evals/README.md were measured under 1,
  * whose only difference was a constant `, source linear` on every row.
  * 3 (SMD-1726): the header line names who wrote each thought when the row
- * says — from the key, migration 049 — and a rule says an agent's restatement
+ * says — from the key, migration 050 — and a rule says an agent's restatement
  * of what the operator stated never supersedes it. A row without the mark
  * renders the header exactly as 2 did. Not re-measured against the p1 numbers
  * (the corpus is gone with /tmp; SMD-1898 rebuilds it) — the pool is new
@@ -50,7 +50,7 @@ const WRITER_PHRASE: Record<string, string> = {
 };
 
 /**
- * Who wrote a thought's current text, from the mark migration 049 stamps
+ * Who wrote a thought's current text, from the mark migration 050 stamps
  * (SMD-1726): `metadata.actor_kind`, one of the registry's three words, else
  * null — an unclassified key, a write from outside the server, a brain not yet
  * backfilled. The mark is the DATABASE's, set from the key and never from the
@@ -118,7 +118,7 @@ export type PairSide = {
  * are labelled A (older) and B (newer) and dated, and the direction is asked
  * for by label; the dates are given so the judge can read "as of March" in a
  * text, and the rule tells it the dates alone decide nothing. Since SMD-1726
- * the header also says who wrote each side when the row's mark (049) says —
+ * the header also says who wrote each side when the row's mark (050) says —
  * the one metadata value that may sit there, because the database wrote it
  * from the key. Nothing a caller controls appears outside the two delimited
  * blocks.

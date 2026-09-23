@@ -4639,7 +4639,7 @@ console.log("\n[40] Every schemas/*.sql applies to a migrated brain with no Supa
   assert(serialSeqs.length === 6 && serialSeqs.every((s) => listedSeqs.has(s)) && listedSeqs.size === serialSeqs.length,
     `the community group names exactly the bigserial sequences the files created (${serialSeqs.length}: ${serialSeqs.sort().join(", ")})`);
   assert(identitySeqs.length === 2 && identitySeqs.sort().join() === "thought_audit_seq_seq,wiki_section_revisions_id_seq" && identitySeqs.every((s) => !listedSeqs.has(s)),
-    `…and not the two identity columns' — a schema's and 049's thought_audit.seq (${identitySeqs.join(", ")})`);
+    `…and not the two identity columns' — a schema's and 050's thought_audit.seq (${identitySeqs.join(", ")})`);
 
   // The role: created here with nothing, granted USAGE on the schema, then
   // probed as the connecting role. An INSERT of DEFAULT VALUES asks for every
@@ -5833,7 +5833,7 @@ console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defi
   await db.query(`UPDATE ob1_entities SET aliases = '{}' WHERE id = $1`, [NUM]);
 }
 
-console.log("\n[45] Migration 049: the actor on the row — who wrote the current text, from the key, in metadata where 014's route filters on it; the actor follows the content; the backfill makes the row agree with the log (SMD-1726)");
+console.log("\n[46] Migration 050: the actor on the row — who wrote the current text, from the key, in metadata where 014's route filters on it; the actor follows the content; the backfill makes the row agree with the log (SMD-1726)");
 {
   const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
   const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
@@ -5865,15 +5865,15 @@ console.log("\n[45] Migration 049: the actor on the row — who wrote the curren
   assert(trg?.tgtype === 23, `thoughts_stamp_actor is a BEFORE INSERT OR UPDATE row trigger (tgtype ${trg?.tgtype}: row 1 + before 2 + insert 4 + update 16)`);
   const stamp = await src("ob1_stamp_actor()");
   assert(/ob1:actor-on-the-row-from-the-key/.test(stamp) && /ob1_current_actor\(\)/.test(stamp) && /ob1_registry_kind\(v_agent, v_name\)/.test(stamp),
-    "the stamp carries 049's sentinel, reads the envelope through 008's reader and the kind through 046's one lookup — the three cannot drift");
+    "the stamp carries 050's sentinel, reads the envelope through 008's reader and the kind through 046's one lookup — the three cannot drift");
   assert(/IF v_agent IS NOT NULL OR v_name IS NOT NULL THEN\s+v_kind := ob1_registry_kind/.test(stamp), "…and probes the registry only when the envelope names an id or a name (a raw write needs no SELECT on ob1_agents)");
-  assert(lastDefinerOf("upsert_thought").startsWith("046") && lastDefinerOf("update_thought").startsWith("046") && lastDefinerOf("thoughts_write_audit").startsWith("046") && lastDefinerOf("ob1_stamp_actor").startsWith("049"),
-    "049 redefines no writer and not the audit trigger: the stamp is a trigger of its own beside them");
+  assert(lastDefinerOf("upsert_thought").startsWith("046") && lastDefinerOf("update_thought").startsWith("046") && lastDefinerOf("thoughts_write_audit").startsWith("046") && lastDefinerOf("ob1_stamp_actor").startsWith("050"),
+    "050 redefines no writer and not the audit trigger: the stamp is a trigger of its own beside them");
   const colc = (await one<{ c: string | null }>(COLUMN_COMMENT_SQL, ["thoughts", "metadata"])).c ?? "";
-  assert(/actor_kind/.test(colc) && /actor_name/.test(colc) && /049/.test(colc) && /cannot set them/.test(colc), "thoughts.metadata's comment names the two keys the database writes and a caller cannot");
+  assert(/actor_kind/.test(colc) && /actor_name/.test(colc) && /050/.test(colc) && /cannot set them/.test(colc), "thoughts.metadata's comment names the two keys the database writes and a caller cannot");
   const bfSrc = await src("backfill_thought_actors(integer)");
   assert(/WHERE a\.action = 'capture' OR a\.fb IS DISTINCT FROM a\.fa/.test(bfSrc) && /content_fingerprint_of\(a\.diff->'content'->>'after'\)\s+AS fa\s+FROM thought_audit a[\s\S]*?OFFSET 0\s+\) a/.test(bfSrc) && /a\.fa IS NOT DISTINCT FROM f\.fp\) DESC,\s+a\.created_at DESC, a\.seq DESC/.test(bfSrc) && /t\.updated_at IS NOT DISTINCT FROM d\.updated_at/.test(bfSrc),
-    "the backfill reads the audit row that changed the text by 003's rule — the trigger's rule — the one whose text stands first, then by created_at, then seq (never seq alone: a pre-049 seq is heap order — second review pass), and re-checks updated_at on the locked row, so a thought edited since the scan is left to the next pass");
+    "the backfill reads the audit row that changed the text by 003's rule — the trigger's rule — the one whose text stands first, then by created_at, then seq (never seq alone: a pre-050 seq is heap order — second review pass), and re-checks updated_at on the locked row, so a thought edited since the scan is left to the next pass");
   assert(/\(a\.action = 'capture' AND NOT bool_or\(a\.action = 'update'\) OVER \(\)\)\) AS vouched/.test(bfSrc), "a capture is vouched from the set — no update ever changed the text — not from sorting first (fourth review pass)");
   assert(/CROSS JOIN LATERAL \([\s\S]*?THEN content_fingerprint_of\(t\.content\) END AS fp\s+OFFSET 0\) f/.test(bfSrc), "the thought's own text is hashed once per thought behind an OFFSET 0 fence, and each candidate row's two texts once behind another — without them the planner ran the hashes in every place the value is read (third review pass)");
   assert(/COALESCE\(ob1_registry_kind\(w\.canonical_agent_id, w\.name\), w\.actor_kind\)/.test(bfSrc) && /NULLIF\(btrim\(a\.actor_name\), ''\) AS name/.test(bfSrc), "…the registry's kind now first, the audit row's stamp as the fallback — a reclassified key reaches its rows — and the name trimmed as the stamp trims it (first review pass)");
@@ -5885,25 +5885,25 @@ console.log("\n[45] Migration 049: the actor on the row — who wrote the curren
   assert(/non-DEFAULT value into column "seq"/.test(await refused(`INSERT INTO thought_audit (thought_id, action, diff, seq) VALUES (gen_random_uuid(), 'capture', '{}', 5)`)), "…assigned by the table, not the writer (second review pass: the first spelling of this line passed on `|| true`)");
 
   // The stamp: from the key, never the payload.
-  const op = await cap("049: the operator typed this", { metadata: { source: "mcp" }, actor: { name: "op-key", via: "open-brain" } }, 40);
+  const op = await cap("050: the operator typed this", { metadata: { source: "mcp" }, actor: { name: "op-key", via: "open-brain" } }, 40);
   assert((await marks(op.id)) === "operator/op-key", `a capture through a classified key carries actor_kind and actor_name in metadata (${await marks(op.id)})`);
   let a = await audits(op.id);
   assert(a.length === 1 && a[0].diff.metadata?.actor_kind === "operator" && a[0].diff.metadata?.actor_name === "op-key" && a[0].actor_name === "op-key",
     "…and the capture's audit row records the stamped metadata: the mark is in the log as it is on the row");
-  const claim = await cap("049: an agent claiming to be the operator", { metadata: { actor_kind: "operator", actor_name: "op-key", source: "mcp" }, actor: { name: "bot-key", via: "open-brain" } }, 41);
+  const claim = await cap("050: an agent claiming to be the operator", { metadata: { actor_kind: "operator", actor_name: "op-key", source: "mcp" }, actor: { name: "bot-key", via: "open-brain" } }, 41);
   assert((await marks(claim.id)) === "agent/bot-key", `a payload's own actor_kind and actor_name are overwritten from the key — the mutant that trusts the payload fails here (${await marks(claim.id)})`);
   assert((await metaOf(claim.id))?.m?.source === "mcp", "…and the rest of the payload's metadata is kept");
-  const ghost = await cap("049: an unclassified key claiming a kind", { metadata: { actor_kind: "operator" }, actor: { name: "ghost-key" } }, 42);
+  const ghost = await cap("050: an unclassified key claiming a kind", { metadata: { actor_kind: "operator" }, actor: { name: "ghost-key" } }, 42);
   assert((await marks(ghost.id)) === "-/ghost-key", `an unclassified key stamps its name and no kind: the claim removed, nothing invented (${await marks(ghost.id)})`);
-  const byId = await cap("049: a writer known by id alone", { metadata: {}, actor: { agent_id: idKey.agent_id } }, 43);
+  const byId = await cap("050: a writer known by id alone", { metadata: {}, actor: { agent_id: idKey.agent_id } }, 43);
   assert((await marks(byId.id)) === "agent/-", `an envelope carrying only an agent id stamps the id's kind and no name (${await marks(byId.id)})`);
-  const badId = await cap("049: a malformed id falls to the name", { metadata: {}, actor: { name: "imp-key", agent_id: "not-a-uuid" } }, 44);
+  const badId = await cap("050: a malformed id falls to the name", { metadata: {}, actor: { name: "imp-key", agent_id: "not-a-uuid" } }, 44);
   assert((await marks(badId.id)) === "ingested/imp-key", `a malformed agent_id is no id: the name decides (${await marks(badId.id)})`);
   const RAW = "47474747-4747-4747-8747-474747474747", NUL = "47474747-4747-4747-8747-474747474748", ORPHAN = "47474747-4747-4747-8747-474747474749";
-  await db.exec(`INSERT INTO thoughts (id, content, metadata, embedding) VALUES ('${RAW}', '049: a raw insert claiming a kind', '{"actor_kind": "operator", "actor_name": "op-key", "keep": 1}'::jsonb, '${unit(45)}'::vector)`);
+  await db.exec(`INSERT INTO thoughts (id, content, metadata, embedding) VALUES ('${RAW}', '050: a raw insert claiming a kind', '{"actor_kind": "operator", "actor_name": "op-key", "keep": 1}'::jsonb, '${unit(45)}'::vector)`);
   let m = await metaOf(RAW);
   assert(m?.m?.actor_kind === undefined && m?.m?.actor_name === undefined && m?.m?.keep === 1, `a raw write with no envelope keeps neither key — a mutation from outside the server names nobody — and the rest of its metadata (${JSON.stringify(m?.m)})`);
-  await db.exec(`INSERT INTO thoughts (id, content, metadata, embedding) VALUES ('${NUL}', '049: a raw insert with null metadata', NULL, '${unit(46)}'::vector)`);
+  await db.exec(`INSERT INTO thoughts (id, content, metadata, embedding) VALUES ('${NUL}', '050: a raw insert with null metadata', NULL, '${unit(46)}'::vector)`);
   assert((await metaOf(NUL))?.m === null, "…and a NULL metadata stays NULL: the stamp adds keys, it does not decide the column");
 
   // The actor follows the content.
@@ -5914,36 +5914,36 @@ console.log("\n[45] Migration 049: the actor on the row — who wrote the curren
   assert(a.length === 2 && a[1].diff.metadata?.after?.actor_kind === "operator" && a[1].actor_name === "bot-key", "…the audit row shows the patch landing around the mark, under the editor's name");
   r = await edit(op.id, null, { actor_kind: "agent" }, { name: "bot-key" });
   assert(r.ok === true && (await audits(op.id)).length === 2, "…a patch that tries only the two keys changes nothing, so 008 writes no row");
-  r = await edit(op.id, "049: the agent rewrote the operator's note", null, { name: "bot-key", via: "open-brain" });
+  r = await edit(op.id, "050: the agent rewrote the operator's note", null, { name: "bot-key", via: "open-brain" });
   assert(r.ok === true && (await marks(op.id)) === "agent/bot-key", `an edit that changes the content re-stamps from the editor's key: the text is the agent's now (${await marks(op.id)})`);
   a = await audits(op.id);
-  assert(a.length === 3 && a[2].diff.content?.after === "049: the agent rewrote the operator's note" && a[2].diff.metadata?.before?.actor_kind === "operator" && a[2].diff.metadata?.after?.actor_kind === "agent",
+  assert(a.length === 3 && a[2].diff.content?.after === "050: the agent rewrote the operator's note" && a[2].diff.metadata?.before?.actor_kind === "operator" && a[2].diff.metadata?.after?.actor_kind === "agent",
     "…and the log holds the handover — content and mark in one diff");
-  r = await edit(op.id, "049: the agent rewrote the operator's note", { note: "same text" }, { name: "op-key" });
+  r = await edit(op.id, "050: the agent rewrote the operator's note", { note: "same text" }, { name: "op-key" });
   assert(r.ok === true && (await marks(op.id)) === "agent/bot-key", "018's unchanged edit — the same text, from the operator's key — keeps the agent's mark: the content did not move");
-  const reCap = await cap("049: an agent claiming to be the operator", { metadata: { actor_kind: "ingested", actor_name: "x", extra: true }, actor: { name: "op-key" } }, 41);
+  const reCap = await cap("050: an agent claiming to be the operator", { metadata: { actor_kind: "ingested", actor_name: "x", extra: true }, actor: { name: "op-key" } }, 41);
   assert(reCap.existed === true && (await marks(claim.id)) === "agent/bot-key" && (await metaOf(claim.id))?.m?.extra === true,
     `a re-capture merges the payload's metadata and keeps the mark: the text is unchanged, so its first writer's — through EXCLUDED, which the INSERT's stamp had already rewritten (${await marks(claim.id)})`);
-  await db.exec(`UPDATE thoughts SET content = '049: a raw content update' WHERE id = '${op.id}'`);
+  await db.exec(`UPDATE thoughts SET content = '050: a raw content update' WHERE id = '${op.id}'`);
   assert((await marks(op.id)) === "-/-", `a raw content update with no envelope removes the mark: nobody vouches for this text (${await marks(op.id)})`);
   await db.exec(`UPDATE thoughts SET embedding = '${unit(47)}'::vector WHERE id = '${claim.id}'`);
   assert((await marks(claim.id)) === "agent/bot-key", "a raw write that leaves the content — a re-embed — leaves the mark");
-  r = await edit(claim.id, "049:   AN AGENT claiming to be the operator", null, { name: "op-key" });
+  r = await edit(claim.id, "050:   AN AGENT claiming to be the operator", null, { name: "op-key" });
   assert(r.ok === true && (await marks(claim.id)) === "agent/bot-key", `the same text by 003's rule — case and whitespace folded, 018's "unchanged" edit — keeps the mark whoever sent it (${await marks(claim.id)}; first review pass)`);
   const ARR = "47474747-4747-4747-8747-474747474751", SCL = "47474747-4747-4747-8747-474747474752";
   await db.transaction(async (tx) => {
     await tx.query(`SELECT set_config('ob1.actor', '{"name": "op-key"}', true)`);
-    await tx.query(`INSERT INTO thoughts (id, content, metadata, embedding) VALUES ('${ARR}', '049: an array for metadata', '[1]'::jsonb, '${unit(55)}'::vector)`);
-    await tx.query(`INSERT INTO thoughts (id, content, metadata, embedding) VALUES ('${SCL}', '049: a scalar for metadata', '"str"'::jsonb, '${unit(56)}'::vector)`);
+    await tx.query(`INSERT INTO thoughts (id, content, metadata, embedding) VALUES ('${ARR}', '050: an array for metadata', '[1]'::jsonb, '${unit(55)}'::vector)`);
+    await tx.query(`INSERT INTO thoughts (id, content, metadata, embedding) VALUES ('${SCL}', '050: a scalar for metadata', '"str"'::jsonb, '${unit(56)}'::vector)`);
   });
   assert(JSON.stringify((await metaOf(ARR))?.m) === "[1]" && JSON.stringify((await metaOf(SCL))?.m) === '"str"', "a raw writer's non-object metadata passes the stamp untouched — not mangled into an array of marks, not refused (first review pass)");
-  await db.exec(`UPDATE thoughts SET content = '049: an array for metadata, edited' WHERE id = '${ARR}'`);
+  await db.exec(`UPDATE thoughts SET content = '050: an array for metadata, edited' WHERE id = '${ARR}'`);
   assert(JSON.stringify((await metaOf(ARR))?.m) === "[1]", "…on a content edit too");
   // Two content writes in ONE transaction share created_at (now()) and their
   // ids are random: the backfill must still read the later one — by seq.
   const same = await db.transaction(async (tx) => {
-    const c = (await tx.query<{ r: { id: string } }>(`SELECT upsert_thought($1::text, $2::jsonb, $3::vector) AS r`, ["049: typed then edited in one transaction", JSON.stringify({ metadata: {}, actor: { name: "op-key" } }), unit(57)])).rows[0].r;
-    await tx.query(`SELECT update_thought($1::uuid, $2::text, NULL, NULL, NULL, NULL, $3::jsonb, NULL, NULL, NULL)`, [c.id, "049: edited by the agent in the same transaction", JSON.stringify({ name: "bot-key" })]);
+    const c = (await tx.query<{ r: { id: string } }>(`SELECT upsert_thought($1::text, $2::jsonb, $3::vector) AS r`, ["050: typed then edited in one transaction", JSON.stringify({ metadata: {}, actor: { name: "op-key" } }), unit(57)])).rows[0].r;
+    await tx.query(`SELECT update_thought($1::uuid, $2::text, NULL, NULL, NULL, NULL, $3::jsonb, NULL, NULL, NULL)`, [c.id, "050: edited by the agent in the same transaction", JSON.stringify({ name: "bot-key" })]);
     return c;
   });
   assert((await marks(same.id)) === "agent/bot-key", "in one transaction, a capture then a content edit: the trigger's stamp is the editor's");
@@ -5954,7 +5954,7 @@ console.log("\n[45] Migration 049: the actor on the row — who wrote the curren
   await db.exec(`ALTER TABLE thoughts ENABLE TRIGGER thoughts_stamp_actor`);
   assert(((await one<{ r: Bf }>(`SELECT backfill_thought_actors() AS r`)).r.rows >= 1) && (await marks(same.id)) === "agent/bot-key",
     `the backfill reads the same pair by seq and derives the editor, every time — by created_at and id it was a coin flip that rewrote the trigger's stamp (${await marks(same.id)}; first review pass, reproduced 6 of 12)`);
-  // …and when seq lies — a pre-049 row's is heap order, and 046's amendments
+  // …and when seq lies — a pre-050 row's is heap order, and 046's amendments
   // plus a VACUUM put an agent's later rewrite on an earlier page than the
   // operator's capture (second review pass, reproduced) — the text anchors
   // it: the update row whose after-text is the row's text wrote what stands.
@@ -5962,11 +5962,11 @@ console.log("\n[45] Migration 049: the actor on the row — who wrote the curren
   // one created_at for both rows, the rewrite's seq below the capture's.
   const ANCH = "47474747-4747-4747-8747-474747474755";
   await db.exec(`ALTER TABLE thoughts DISABLE TRIGGER thoughts_audit; ALTER TABLE thoughts DISABLE TRIGGER thoughts_stamp_actor`);
-  await db.exec(`INSERT INTO thoughts (id, content, metadata, embedding) VALUES ('${ANCH}', '049: rewritten by the agent, seq inverted', '{}'::jsonb, '${unit(60)}'::vector)`);
+  await db.exec(`INSERT INTO thoughts (id, content, metadata, embedding) VALUES ('${ANCH}', '050: rewritten by the agent, seq inverted', '{}'::jsonb, '${unit(60)}'::vector)`);
   await db.exec(`ALTER TABLE thoughts ENABLE TRIGGER thoughts_audit; ALTER TABLE thoughts ENABLE TRIGGER thoughts_stamp_actor`);
   await db.exec(`INSERT INTO thought_audit (thought_id, action, actor_name, diff, created_at, seq) OVERRIDING SYSTEM VALUE VALUES
     ('${ANCH}', 'capture', 'op-key', '{"metadata": {}}'::jsonb, '2026-01-01 00:00:00+00', 900001),
-    ('${ANCH}', 'update', 'bot-key', '{"content": {"before": "049: typed by the operator", "after": "049: rewritten by the agent, seq inverted"}}'::jsonb, '2026-01-01 00:00:00+00', 900000)`);
+    ('${ANCH}', 'update', 'bot-key', '{"content": {"before": "050: typed by the operator", "after": "050: rewritten by the agent, seq inverted"}}'::jsonb, '2026-01-01 00:00:00+00', 900000)`);
   await db.exec(`SELECT backfill_thought_actors()`);
   assert((await marks(ANCH)) === "agent/bot-key", `with one created_at and the rewrite's seq BELOW the capture's, the row whose after-text is the thought's text still decides: the agent's (${await marks(ANCH)}; second review pass)`);
   // The same inverted pair, but the text that stands matches neither: the
@@ -5974,22 +5974,22 @@ console.log("\n[45] Migration 049: the actor on the row — who wrote the curren
   // text once, so the capturer's text is gone (fourth review pass, planted).
   const TIE = "47474747-4747-4747-8747-474747474758";
   await db.exec(`ALTER TABLE thoughts DISABLE TRIGGER thoughts_audit; ALTER TABLE thoughts DISABLE TRIGGER thoughts_stamp_actor`);
-  await db.exec(`INSERT INTO thoughts (id, content, metadata, embedding) VALUES ('${TIE}', '049: Z, written unaudited', '{"actor_kind": "operator", "actor_name": "op-key"}'::jsonb, '${unit(65)}'::vector)`);
+  await db.exec(`INSERT INTO thoughts (id, content, metadata, embedding) VALUES ('${TIE}', '050: Z, written unaudited', '{"actor_kind": "operator", "actor_name": "op-key"}'::jsonb, '${unit(65)}'::vector)`);
   await db.exec(`ALTER TABLE thoughts ENABLE TRIGGER thoughts_audit; ALTER TABLE thoughts ENABLE TRIGGER thoughts_stamp_actor`);
   await db.exec(`INSERT INTO thought_audit (thought_id, action, actor_name, diff, created_at, seq) OVERRIDING SYSTEM VALUE VALUES
     ('${TIE}', 'capture', 'op-key', '{"metadata": {}}'::jsonb, '2026-01-02 00:00:00+00', 900003),
-    ('${TIE}', 'update', 'bot-key', '{"content": {"before": "049: X", "after": "049: Y"}}'::jsonb, '2026-01-02 00:00:00+00', 900002)`);
+    ('${TIE}', 'update', 'bot-key', '{"content": {"before": "050: X", "after": "050: Y"}}'::jsonb, '2026-01-02 00:00:00+00', 900002)`);
   await db.exec(`SELECT backfill_thought_actors()`);
   assert((await marks(TIE)) === "-/-", `a capture sorting above an unmatched update, on a created_at tie with the seq inverted, does not stand for a text nobody logged: nobody does (${await marks(TIE)}; fourth review pass)`);
   // Two rows can both have written the text that stands — X, then Y, then X
   // again, then Y, then X: the second and the fourth edits end on X. Then the
   // order decides, newest first, and the ordering mutant (oldest first) fails
   // here and nowhere else, since the anchor carried every other arm.
-  const flip = await cap("049: flip X", { metadata: {}, actor: { name: "op-key" } }, 61);
-  await edit(flip.id, "049: flip Y", null, { name: "bot-key" });
-  await edit(flip.id, "049: flip X", null, { name: "imp-key" });
-  await edit(flip.id, "049: flip Y", null, { name: "op-key" });
-  await edit(flip.id, "049: flip X", null, { name: "bot-key" });
+  const flip = await cap("050: flip X", { metadata: {}, actor: { name: "op-key" } }, 61);
+  await edit(flip.id, "050: flip Y", null, { name: "bot-key" });
+  await edit(flip.id, "050: flip X", null, { name: "imp-key" });
+  await edit(flip.id, "050: flip Y", null, { name: "op-key" });
+  await edit(flip.id, "050: flip X", null, { name: "bot-key" });
   assert((await marks(flip.id)) === "agent/bot-key", "X → Y → X → Y → X through four keys: the trigger's stamp is the last editor's");
   await db.exec(`ALTER TABLE thoughts DISABLE TRIGGER thoughts_stamp_actor`);
   await db.exec(`UPDATE thoughts SET metadata = metadata - 'actor_kind' - 'actor_name' WHERE id = '${flip.id}'`);
@@ -6001,10 +6001,10 @@ console.log("\n[45] Migration 049: the actor on the row — who wrote the curren
   // the text that stands, so the writer is nobody — as for a thought with no
   // row at all — not the agent, whose text is gone (third review pass).
   const awBefore = (await one<{ r: Bf }>(`SELECT backfill_thought_actors() AS r`)).r.awaiting;
-  const unv = await cap("049: unvouched X", { metadata: {}, actor: { name: "op-key" } }, 62);
-  await edit(unv.id, "049: unvouched Y", null, { name: "bot-key" });
+  const unv = await cap("050: unvouched X", { metadata: {}, actor: { name: "op-key" } }, 62);
+  await edit(unv.id, "050: unvouched Y", null, { name: "bot-key" });
   await db.exec(`ALTER TABLE thoughts DISABLE TRIGGER thoughts_audit; ALTER TABLE thoughts DISABLE TRIGGER thoughts_stamp_actor`);
-  await db.exec(`UPDATE thoughts SET content = '049: unvouched Z' WHERE id = '${unv.id}'`);
+  await db.exec(`UPDATE thoughts SET content = '050: unvouched Z' WHERE id = '${unv.id}'`);
   await db.exec(`ALTER TABLE thoughts ENABLE TRIGGER thoughts_audit; ALTER TABLE thoughts ENABLE TRIGGER thoughts_stamp_actor`);
   const unvBf = (await one<{ r: Bf }>(`SELECT backfill_thought_actors() AS r`)).r;
   assert((await marks(unv.id)) === "-/-" && unvBf.awaiting === awBefore,
@@ -6016,9 +6016,9 @@ console.log("\n[45] Migration 049: the actor on the row — who wrote the curren
   const LEG = "47474747-4747-4747-8747-474747474756";
   await db.transaction(async (tx) => {
     await tx.query(`SELECT set_config('ob1.actor', '{"name": "op-key"}', true)`);
-    await tx.query(`INSERT INTO thoughts (id, content, content_fingerprint, metadata, embedding) VALUES ('${LEG}', '049: A Legacy Row', NULL, '{}'::jsonb, '${unit(63)}'::vector)`);
+    await tx.query(`INSERT INTO thoughts (id, content, content_fingerprint, metadata, embedding) VALUES ('${LEG}', '050: A Legacy Row', NULL, '{}'::jsonb, '${unit(63)}'::vector)`);
   });
-  r = await edit(LEG, "049:   a legacy   ROW", null, { name: "bot-key" });
+  r = await edit(LEG, "050:   a legacy   ROW", null, { name: "bot-key" });
   // The column stale after a raw content UPDATE, then an unchanged edit
   // through update_thought moves it to the right value: bytes differ, the
   // column moved between two values — and the text did not (fourth review
@@ -6026,12 +6026,12 @@ console.log("\n[45] Migration 049: the actor on the row — who wrote the curren
   const STALE = "47474747-4747-4747-8747-474747474757";
   await db.transaction(async (tx) => {
     await tx.query(`SELECT set_config('ob1.actor', '{"name": "op-key"}', true)`);
-    await tx.query(`INSERT INTO thoughts (id, content, content_fingerprint, metadata, embedding) VALUES ('${STALE}', '049: stale, typed by the operator', content_fingerprint_of('049: stale, typed by the operator'), '{}'::jsonb, '${unit(64)}'::vector)`);
+    await tx.query(`INSERT INTO thoughts (id, content, content_fingerprint, metadata, embedding) VALUES ('${STALE}', '050: stale, typed by the operator', content_fingerprint_of('050: stale, typed by the operator'), '{}'::jsonb, '${unit(64)}'::vector)`);
   });
-  await db.exec(`UPDATE thoughts SET content = '049: stale, rewritten by hand' WHERE id = '${STALE}'`);
+  await db.exec(`UPDATE thoughts SET content = '050: stale, rewritten by hand' WHERE id = '${STALE}'`);
   assert((await marks(STALE)) === "-/-", "a raw content UPDATE strips the mark and leaves the fingerprint column stale");
-  const staleEdit = await edit(STALE, "049:   STALE, rewritten BY hand", null, { name: "bot-key" });
-  assert(staleEdit.ok === true && (await marks(STALE)) === "-/-" && (await one<{ f: string }>(`SELECT content_fingerprint AS f FROM thoughts WHERE id = $1::uuid`, [STALE]))?.f === (await one<{ f: string }>(`SELECT content_fingerprint_of('049: stale, rewritten by hand') AS f`))?.f,
+  const staleEdit = await edit(STALE, "050:   STALE, rewritten BY hand", null, { name: "bot-key" });
+  assert(staleEdit.ok === true && (await marks(STALE)) === "-/-" && (await one<{ f: string }>(`SELECT content_fingerprint AS f FROM thoughts WHERE id = $1::uuid`, [STALE]))?.f === (await one<{ f: string }>(`SELECT content_fingerprint_of('050: stale, rewritten by hand') AS f`))?.f,
     `an unchanged edit that moves the stale column to the right value keeps the mark as it was — nobody's — while the column is corrected (${await marks(STALE)})`);
   await db.exec(`SELECT backfill_thought_actors()`);
   assert((await marks(STALE)) === "-/-", "…and the backfill agrees: the raw update's row wrote the text that stands, and it names nobody");
@@ -6045,41 +6045,41 @@ console.log("\n[45] Migration 049: the actor on the row — who wrote the curren
   // The two content edits above went through update_thought with no vector, which
   // nulls the embedding (a re-embed's job); give them one so the walk sees them.
   await db.exec(`UPDATE thoughts SET embedding = '${unit(47)}'::vector WHERE id = '${claim.id}'; UPDATE thoughts SET embedding = '${unit(57)}'::vector WHERE id = '${same.id}'`);
-  const op2 = await cap("049: the operator's second note", { metadata: { source: "mcp" }, actor: { name: "op-key" } }, 48);
+  const op2 = await cap("050: the operator's second note", { metadata: { source: "mcp" }, actor: { name: "op-key" } }, 48);
   const bySaid = await q<{ id: string }>(`SELECT id FROM match_thoughts($1::vector, -1.0, 10, '{"actor_kind": "operator"}'::jsonb)`, [unit(41)]);
   assert(bySaid.length === 1 && bySaid[0].id === op2.id, `match_thoughts under {"actor_kind": "operator"} returns the operator's rows and none of the agent's, the claim's or the unmarked (${bySaid.length})`);
   const byActor = await q<{ id: string }>(`SELECT id FROM match_thoughts($1::vector, -1.0, 10, '{"actor_name": "bot-key"}'::jsonb)`, [unit(41)]);
   assert(byActor.map((x) => x.id).sort().join() === [claim.id, same.id, ANCH].sort().join(), `…and {"actor_name": "bot-key"} the three rows that key wrote — its capture, its edit of the operator's, the planted rewrite (${byActor.length})`);
-  const kw = await q<{ id: string }>(`SELECT id FROM search_thoughts_keyword('049:', 50, 0, '{"actor_kind": "agent"}'::jsonb)`);
+  const kw = await q<{ id: string }>(`SELECT id FROM search_thoughts_keyword('050:', 50, 0, '{"actor_kind": "agent"}'::jsonb)`);
   assert(kw.map((x) => x.id).sort().join() === [claim.id, byId.id, same.id, ANCH, flip.id].sort().join(), `the keyword arm's filter reaches the same key — the agent's five rows: by name, by id, the edit, the planted rewrite, the flip (${kw.length})`);
   assert((await q(`SELECT id FROM thoughts WHERE metadata @> jsonb_build_object('actor_kind', 'operator'::text)`)).length === 2, "…as does the list tool's containment clause — the operator's second note and the re-spelled legacy row");
 
-  // The backfill: a brain from before 049 — rows unmarked, one with a planted
+  // The backfill: a brain from before 050 — rows unmarked, one with a planted
   // claim, one typed then rewritten, one an unclassified key's, one with no
   // log at all — the stamp trigger off and the audit trigger on, as it was.
   await db.exec(`ALTER TABLE thoughts DISABLE TRIGGER thoughts_stamp_actor`);
-  const pre1 = await cap("049: pre-049, the operator's", { metadata: { source: "mcp" }, actor: { name: "op-key" } }, 50);
-  const pre2 = await cap("049: pre-049, an agent's with a planted claim", { metadata: { actor_kind: "operator", actor_name: "op-key" }, actor: { name: "bot-key" } }, 51);
-  const pre3 = await cap("049: pre-049, an unclassified key's", { metadata: {}, actor: { name: "late-key" } }, 52);
-  const pre4 = await cap("049: pre-049, typed by the operator then rewritten", { metadata: {}, actor: { name: "op-key" } }, 53);
-  await edit(pre4.id, "049: pre-049, rewritten by an agent", null, { name: "bot-key" });
+  const pre1 = await cap("050: pre-050, the operator's", { metadata: { source: "mcp" }, actor: { name: "op-key" } }, 50);
+  const pre2 = await cap("050: pre-050, an agent's with a planted claim", { metadata: { actor_kind: "operator", actor_name: "op-key" }, actor: { name: "bot-key" } }, 51);
+  const pre3 = await cap("050: pre-050, an unclassified key's", { metadata: {}, actor: { name: "late-key" } }, 52);
+  const pre4 = await cap("050: pre-050, typed by the operator then rewritten", { metadata: {}, actor: { name: "op-key" } }, 53);
+  await edit(pre4.id, "050: pre-050, rewritten by an agent", null, { name: "bot-key" });
   await db.exec(`ALTER TABLE thoughts DISABLE TRIGGER thoughts_audit`);
-  await db.exec(`INSERT INTO thoughts (id, content, metadata, embedding) VALUES ('${ORPHAN}', '049: no log, a planted claim', '{"actor_kind": "operator", "actor_name": "op-key", "keep": true}'::jsonb, '${unit(54)}'::vector)`);
+  await db.exec(`INSERT INTO thoughts (id, content, metadata, embedding) VALUES ('${ORPHAN}', '050: no log, a planted claim', '{"actor_kind": "operator", "actor_name": "op-key", "keep": true}'::jsonb, '${unit(54)}'::vector)`);
   await db.exec(`ALTER TABLE thoughts ENABLE TRIGGER thoughts_audit`);
   await db.exec(`ALTER TABLE thoughts ENABLE TRIGGER thoughts_stamp_actor`);
   assert((await marks(pre1.id)) === "-/-" && (await marks(pre2.id)) === "operator/op-key" && (await marks(pre4.id)) === "-/-" && (await marks(ORPHAN)) === "operator/op-key",
-    "the fixture: unmarked rows and planted claims, as a brain from before 049 holds them");
+    "the fixture: unmarked rows and planted claims, as a brain from before 050 holds them");
   // Two more shapes the run-it reviewer found: an envelope naming a padded or
   // empty key (the audit row keeps it as sent; the stamp trims), and an orphan
   // carrying the two keys as JSON null (`->>` reads NULL, as for absent).
   const PAD = "47474747-4747-4747-8747-474747474753", NULLKEYS = "47474747-4747-4747-8747-474747474754";
   await db.transaction(async (tx) => {
     await tx.query(`SELECT set_config('ob1.actor', '{"name": "  op-key  "}', true)`);
-    await tx.query(`INSERT INTO thoughts (id, content, metadata, embedding) VALUES ('${PAD}', '049: a padded key name', '{}'::jsonb, '${unit(58)}'::vector)`);
+    await tx.query(`INSERT INTO thoughts (id, content, metadata, embedding) VALUES ('${PAD}', '050: a padded key name', '{}'::jsonb, '${unit(58)}'::vector)`);
   });
   assert((await marks(PAD)) === "operator/op-key" && (await one<{ n: string }>(`SELECT actor_name AS n FROM thought_audit WHERE thought_id = $1::uuid`, [PAD]))?.n === "  op-key  ", "a padded name is trimmed by the stamp and kept as sent on the audit row");
   await db.exec(`ALTER TABLE thoughts DISABLE TRIGGER thoughts_audit; ALTER TABLE thoughts DISABLE TRIGGER thoughts_stamp_actor`);
-  await db.exec(`INSERT INTO thoughts (id, content, metadata, embedding) VALUES ('${NULLKEYS}', '049: no log, the keys as json null', '{"actor_kind": null, "actor_name": null, "keep": 2}'::jsonb, '${unit(59)}'::vector)`);
+  await db.exec(`INSERT INTO thoughts (id, content, metadata, embedding) VALUES ('${NULLKEYS}', '050: no log, the keys as json null', '{"actor_kind": null, "actor_name": null, "keep": 2}'::jsonb, '${unit(59)}'::vector)`);
   await db.exec(`ALTER TABLE thoughts ENABLE TRIGGER thoughts_audit; ALTER TABLE thoughts ENABLE TRIGGER thoughts_stamp_actor`);
   const u1 = (await metaOf(pre1.id))?.u;
   const auditsBefore = await auditCount();
@@ -6097,7 +6097,7 @@ console.log("\n[45] Migration 049: the actor on the row — who wrote the curren
   m = await metaOf(NULLKEYS);
   assert(!("actor_kind" in (m?.m ?? {})) && !("actor_name" in (m?.m ?? {})) && m?.m?.keep === 2, `the two keys planted as JSON null on a row no log vouches for are removed, not kept as nulls (${JSON.stringify(m?.m)}; run-it, first review pass)`);
   assert((await marks(PAD)) === "operator/op-key", "the padded name's row already agrees with the log — the backfill trims as the stamp does, so it is not rewritten every pass (run-it, first review pass)");
-  assert((await marks(pre1.id)) === "operator/op-key", `an unmarked pre-049 row takes its capture's writer (${await marks(pre1.id)})`);
+  assert((await marks(pre1.id)) === "operator/op-key", `an unmarked pre-050 row takes its capture's writer (${await marks(pre1.id)})`);
   assert((await marks(pre2.id)) === "agent/bot-key", `a planted claim is corrected to the log's writer (${await marks(pre2.id)})`);
   assert((await marks(pre3.id)) === "-/late-key", `an unclassified writer's row gains the name and waits for the kind (${await marks(pre3.id)})`);
   assert((await marks(pre4.id)) === "agent/bot-key", `the latest CONTENT writer decides, not the capture — the mutant that reads the first row fails here (${await marks(pre4.id)})`);

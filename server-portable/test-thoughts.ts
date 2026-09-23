@@ -283,11 +283,11 @@ console.log("\n[9] The supersession judge's prompt and parser (migration 029): a
          "a slot name inside a thought stays a literal and the template's own slot is filled (one pass over the slots)");
   assert(/THOUGHT A, captured 2026-03-09:/.test(prompt) && !/source/.test(prompt.split("<thought_a>")[0]), "the header lines carry the dates and nothing a caller controls");
 
-  // SMD-1726: the writer's clause — from the database's mark (049) and nothing
+  // SMD-1726: the writer's clause — from the database's mark (050) and nothing
   // else — and the rule that goes with it.
   const who = buildJudgeMessages({ content: "older", createdAt: "2026-03-09T12:00:00Z", writer: "operator" }, { content: "newer", createdAt: "2026-06-08T12:00:00Z", writer: "agent" })[0].content;
   assert(/THOUGHT A, captured 2026-03-09, written by the operator:\n<thought_a>/.test(who) && /THOUGHT B, captured 2026-06-08, written by an agent:\n<thought_b>/.test(who),
-    "the header names who wrote each side when the row's mark says (049), before the block opens");
+    "the header names who wrote each side when the row's mark says (050), before the block opens");
   assert(/never a conflict in which the agent's thought supersedes the operator's/.test(who) && /decide from the texts alone/.test(who),
     "…and the rules say an agent's restatement never supersedes the operator's statement, and what to do when no header says");
   const noWho = buildJudgeMessages({ content: "older", createdAt: "2026-03-09T12:00:00Z", writer: null }, { content: "newer", createdAt: "2026-06-08T12:00:00Z", writer: "root" })[0].content;

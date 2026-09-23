@@ -414,7 +414,7 @@ export function parseFilter(raw: unknown): Record<string, unknown> {
   return out;
 }
 
-// SMD-1726: who wrote a thought's current text, on the read path. Migration 049
+// SMD-1726: who wrote a thought's current text, on the read path. Migration 050
 // stamps two reserved metadata keys from the write's key — `actor_kind`
 // (ob1_agents.kind: operator | agent | ingested) and `actor_name` (the key's
 // name) — so "only what the operator said" is the same jsonb containment every
@@ -428,7 +428,7 @@ const actorInput = z.string().trim().min(1).max(200).optional()
 
 /**
  * `said_by` and `actor` folded into the metadata filter (SMD-1726): the two
- * are the keys migration 049 stamps, so the store, the query log and the plan
+ * are the keys migration 050 stamps, so the store, the query log and the plan
  * see one filter and the arguments are sugar over it. A `filter` that names
  * the same key with another value is a caller contradicting itself, refused
  * at the boundary as parseFilter refuses a nested object. Exported for the
@@ -436,7 +436,7 @@ const actorInput = z.string().trim().min(1).max(200).optional()
  */
 export function withActorFilter(filter: Record<string, unknown>, saidBy: string | undefined, actor: string | undefined): Record<string, unknown> {
   const out = { ...filter };
-  // The stamp trims the key's name (049), so the argument is trimmed here too —
+  // The stamp trims the key's name (050), so the argument is trimmed here too —
   // a pasted "op-key " must find the rows op-key wrote (second review pass).
   for (const [key, value, arg] of [["actor_kind", saidBy, "said_by"], ["actor_name", actor?.trim() || undefined, "actor"]] as const) {
     if (value === undefined) continue;
@@ -450,7 +450,7 @@ export function withActorFilter(filter: Record<string, unknown>, saidBy: string 
 
 /**
  * The `By:` line under a hit — who wrote its current text, from the two keys
- * migration 049 stamps. Absent when the row carries neither (a write from
+ * migration 050 stamps. Absent when the row carries neither (a write from
  * outside the server, or a brain whose backfill has not run), as `Captured:`
  * is absent for an undated row. A name with no kind is a key nobody has
  * classified yet (set_agent_kind), said so rather than guessed. The name is
@@ -825,7 +825,7 @@ function buildServer(principal: Principal): McpServer {
               ...(captured ? [`Captured: ${captured}`] : []),
               `Type: ${m.type || "unknown"}`,
             );
-            // SMD-1726: who wrote the current text, from the key (049); its own
+            // SMD-1726: who wrote the current text, from the key (050); its own
             // line, as every field of this block is — nothing parses `ID:`
             // past the id, and nothing should start to.
             const by = actorLine(m);
@@ -1022,7 +1022,7 @@ function buildServer(principal: Principal): McpServer {
         topic: z.string().optional().describe("Filter by topic tag"),
         person: z.string().optional().describe("Filter by person mentioned"),
         days: z.number().optional().describe("Only thoughts from the last N days"),
-        // SMD-1726: who wrote it — the two keys 049 stamps, as containment
+        // SMD-1726: who wrote it — the two keys 050 stamps, as containment
         // clauses beside type, topic and person.
         said_by: saidByInput,
         actor: actorInput,

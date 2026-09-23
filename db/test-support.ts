@@ -149,7 +149,7 @@ const FUNCTIONS = [
   "ob1_registry_kind(uuid, text)",
   "ob1_trust_ceiling(text, text)",
   "ob1_door_of(jsonb)",
-  // 049 (SMD-1726): the stamp trigger's function and the backfill.
+  // 050 (SMD-1726): the stamp trigger's function and the backfill.
   "ob1_stamp_actor()",
   "backfill_thought_actors(integer)",
 ];
