@@ -28,6 +28,8 @@ import { parseKeyRecords } from "./auth.ts";
 import { DEFAULT_MAX_TOKENS } from "./chunk.ts";
 import { resolveEmbedConfig, resolveProviderEndpoints, stringOr, type ProviderEndpoint } from "./embed.ts";
 import { EGRESS_UNITS, hostOf, localKnob, type EgressTerm } from "./egress.ts";
+import { pad3, readDatabaseFacts } from "./brain-info.ts";
+import { LATEST_MIGRATION } from "./version.ts";
 import { tierProblem, trimmedEnv } from "../db/config.mjs"; // static: `env` below is built before the dynamic import above resolves
 import type { PassCounts } from "../db/config.mjs";
 
@@ -848,8 +850,14 @@ if (configFailed) {
                  current_database()::text AS db, quote_ident(current_database()) AS db_ident
             FROM (SELECT (SELECT n.nspname FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace WHERE e.extname = 'vector') AS schema) v`;
         const setPath = (verb: string, ident: string) => `${verb} ${ident} SET search_path = "$user", public, ${vec.schema_ident};`;
+        // What the database says about itself, read ONCE through brain-info.ts —
+        // the read brain_info and the keyed /health body make (SMD-2041) — so
+        // this row, `migration ledger` and `schema version` below report what
+        // the tool reports. After the probe above, which carries a refused
+        // connection by this check's name.
+        const facts = await readDatabaseFacts(sql);
         if (vec.resolves) {
-          add("vector extension", "ok", `the vector type resolves${vec.schema ? ` (pgvector in schema ${vec.schema})` : ""}`);
+          add("vector extension", "ok", `the vector type resolves${facts.pgvector ? ` (pgvector ${facts.pgvector.version} in schema ${facts.pgvector.schema})` : ""}`);
         } else if (!vec.schema) {
           // Not installed here at all — not this check's failure to raise:
           // migration 001 runs CREATE EXTENSION, and the schema check below
@@ -896,27 +904,17 @@ if (configFailed) {
         const { UPSERT_TWO_ARG_SHIPPED_RE, UPSERT_THREE_ARG_SHIPPED_RE, RELEASE_SHIPPED_RE, THOUGHT_STATS_SHIPPED_RE } = await import("../db/config.mjs");
         /** A function's signature from pg_type's names — the same text on every search_path (see `forms` below). */
         const SIG_SQL = `p.proname || '(' || COALESCE((SELECT string_agg(t.typname, ',' ORDER BY a.n) FROM unnest(p.proargtypes) WITH ORDINALITY AS a(o, n) JOIN pg_type t ON t.oid = a.o), '') || ')'`;
-        const applied = await sql`
-          SELECT count(*)::int AS c FROM information_schema.tables WHERE table_name = 'schema_migrations'`;
         // Which of the migrations that have a ledger-aware remedy the ledger
-        // records — read ONCE, here, for every check below that asks (014,
-        // 019, 020 for the search functions; 023 for the fingerprint backfill).
-        // A role without SELECT on the ledger, or no ledger, reads as none.
-        let ledger = new Set<string>();
-        let ledgerRead = false;
-        if (Number(applied[0].c) > 0) {
-          try {
-            // Every recorded name, as its three-digit prefix: the ledger holds a
-            // few dozen short rows, and a list of the migrations that have a
-            // ledger-aware remedy was one more thing to keep in step (it had
-            // drifted from its own comment by the seventh review pass of SMD-1193).
-            const led = await sql`SELECT name FROM schema_migrations`;
-            ledger = new Set(led.map((r: { name: string }) => String(r.name).slice(0, 3)));
-            ledgerRead = true;
-          } catch {
-            /* no SELECT on the ledger for this role: a remedy that depends on it says so */
-          }
-        }
+        // records — read ONCE, in `facts` above, for every check below that
+        // asks (014, 019, 020 for the search functions; 023 for the fingerprint
+        // backfill). A role without SELECT on the ledger, or no ledger, reads
+        // as none. Every recorded name, as its three-digit prefix: the ledger
+        // holds a few dozen short rows, and a list of the migrations that have a
+        // ledger-aware remedy was one more thing to keep in step (it had drifted
+        // from its own comment by the seventh review pass of SMD-1193).
+        const ledgerPresent = facts.ledger.present;
+        const ledgerRead = ledgerPresent && facts.ledger.names !== null;
+        const ledger = new Set((facts.ledger.names ?? []).map((n) => n.slice(0, 3)));
         /**
          * The remedy for a migration a check finds absent: recorded in the
          * ledger, the migrator's re-run (a plain run skips a recorded file);
@@ -928,7 +926,7 @@ if (configFailed) {
         const ledgerRemedy = (migration: string, apply: string): string =>
           ledger.has(migration)
             ? REAPPLY
-            : ledgerRead || Number(applied[0].c) === 0
+            : ledgerRead || !ledgerPresent
               ? apply
               : `${apply} — or, if the ledger already records ${migration} (this role cannot read schema_migrations): ${REAPPLY.charAt(0).toLowerCase()}${REAPPLY.slice(1)}`;
         // By signature, not arity: a vendored bootstrap's upsert_thought(text,
@@ -1234,7 +1232,7 @@ if (configFailed) {
                   `${waiting}: a capture of that text inserts a second row, since 003's conflict target cannot see a NULL`,
                   ledger.has("023")
                     ? `The ledger says 023 but backfill_content_fingerprints is absent (adopted with --baseline): ${byHand}`
-                    : ledgerRead || Number(applied[0].c) === 0
+                    : ledgerRead || !ledgerPresent
                       ? "Apply db/migrations/023_content_fingerprint_backfill.sql."
                       : `Apply db/migrations/023_content_fingerprint_backfill.sql — or, if the ledger already records 023 (this role cannot read schema_migrations), ${byHand}`);
             } else if (pending) {
@@ -2686,10 +2684,24 @@ if (configFailed) {
               "The check reads thought_work_claims, consolidation_pool() and supersession_proposals.");
         }
 
-        if (Number(applied[0].c) === 0)
+        // The ledger's highest migration against the tree this server was built
+        // from (server-portable/version.ts, SMD-2041) — the judgement brain_info
+        // makes. Behind is a brain this server's tools expect more of; ahead, a
+        // brain a newer tree migrated. Both warn: each still serves.
+        const tree = pad3(LATEST_MIGRATION);
+        const hi = facts.highestMigration;
+        if (!ledgerPresent)
           add("migration ledger", "warn", "no schema_migrations table — the schema was applied by hand",
               "Adopt it with: cd db && bun migrate.ts --url $DATABASE_URL --baseline");
-        else add("migration ledger", "ok", "schema_migrations present");
+        else if (!ledgerRead) add("migration ledger", "ok", `schema_migrations present, not readable by this role (${facts.unread.ledger}) — this server's tree ends at ${tree}`);
+        else if (hi === null) add("migration ledger", "ok", `schema_migrations present, recording none — this server's tree ends at ${tree}`);
+        else if (hi < LATEST_MIGRATION)
+          add("migration ledger", "warn", `the ledger reaches ${pad3(hi)} but this server's tree ends at ${tree} — the brain is behind the server it serves, and a tool that needs a later migration fails`,
+              "Apply the pending migrations: cd db && bun migrate.ts --url $DATABASE_URL (--dry-run lists them).");
+        else if (hi > LATEST_MIGRATION)
+          add("migration ledger", "warn", `the ledger reaches ${pad3(hi)}, past this server's tree (${tree}) — a newer tree migrated this brain`,
+              "Deploy the server built from the tree that migrated it, or confirm this older one is intended.");
+        else add("migration ledger", "ok", `schema_migrations present, highest ${pad3(hi)} — this server's tree ends there too`);
 
         // The version the brain was migrated under (044, SMD-1804): schema_version
         // in ob1_config, reported beside the highest migration the ledger records.
@@ -2700,11 +2712,12 @@ if (configFailed) {
           // Dynamic import, as the config.mjs value reads above are: a static
           // value import of a .mjs trips noImplicitAny (TS7016) under this tsconfig.
           const { FORK_VERSION, semverCompare, readReleases, highestReleasedMigration } = await import("../db/version.mjs");
-          const numbers = ledgerRead ? [...ledger].map(Number).filter((n) => !Number.isNaN(n)) : [];
-          const highestApplied = numbers.length ? Math.max(...numbers) : null;
-          const highest = highestApplied === null ? "unknown" : String(highestApplied).padStart(3, "0");
-          const [row] = (await sql`SELECT value FROM ob1_config WHERE key = 'schema_version'`) as { value: string }[];
-          const brain = row?.value;
+          const highestApplied = facts.highestMigration;
+          const highest = highestApplied === null ? "unknown" : pad3(highestApplied);
+          // ob1_config's schema_version, from `facts` (SMD-2041); a read it
+          // could not make is this row's to report, as the read here once raised.
+          if (facts.unread.ob1_config) throw new Error(facts.unread.ob1_config);
+          const brain = facts.schemaVersion;
           if (!brain) {
             add("schema version", "warn",
               `ob1_config records no schema_version — this brain predates migration 044 (highest migration ${highest}); the server runs ${FORK_VERSION}`,

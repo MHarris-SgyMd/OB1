@@ -283,6 +283,20 @@ console.log("\n[10] Read tools are annotated read-only, capture is not");
   assert(byName["capture_thought"]?.annotations?.readOnlyHint === false, `"capture_thought" is readOnlyHint: false`);
 }
 
+console.log("\n[10b] brain_info answers with no database, and says why that half is missing (SMD-2041)");
+{
+  const r = await fetch(BASE, {
+    method: "POST",
+    headers: AUTH,
+    body: JSON.stringify({ jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "brain_info", arguments: {} } }),
+  });
+  const result = (await mcpBody(r))?.result as { isError?: boolean; content?: { text?: string }[] } | undefined;
+  const text = result?.content?.[0]?.text ?? "";
+  assert(result?.isError !== true && new RegExp(`^Version: +${FORK_VERSION.replace(/[.+]/g, "\\$&")} \\(release range \\d{3}–\\d{3}\\)`, "m").test(text), `the Version row carries FORK_VERSION and its release range (${text.split("\n")[0]})`);
+  assert(/^Commit: +unknown$/m.test(text) && /^Store: +sql$/m.test(text), "…the commit (unknown here) and the store");
+  assert(/^Database: +unavailable — .*DATABASE_URL is not set/m.test(text), `…and the database row names the store's refusal (${text.split("\n").find((l) => l.startsWith("Database"))?.slice(0, 70)})`);
+}
+
 console.log("\n[11] OAuth discovery is a 404, not an auth challenge (upstream #340)");
 {
   // claude.ai fetches this document at the origin root, path as suffix, no key,
@@ -393,12 +407,14 @@ console.log("\n[13] The MCP endpoint answers GET with 405, not an SSE stream not
   // the preflight is probed. POST reaching the transport is [7].
 
   // /health is the probe target for platforms that can only GET and want 2xx:
-  // before authenticate(), so it needs no key and a key changes nothing. The
-  // match rule is the HEALTH_PATH comment in index.ts; these rows pin it.
+  // it needs no key, and without one it says `ok` and nothing else. The match
+  // rule is the HEALTH_PATH comment in index.ts; these rows pin it. A key
+  // presented changes the body (SMD-2041, below), never the status.
   for (const [label, path, init] of [
     ["GET /health", "/health", {}],
     ["GET /health with a key in the URL", `/health?key=${KEY}`, {}],
     ["HEAD /health", "/health", { method: "HEAD" }],
+    ["HEAD /health with the key", "/health", { method: "HEAD", headers: { "x-brain-key": KEY } }],
     ["GET /health/ (trailing slash)", "/health/", {}],
     ["GET /mcp/health (one-segment proxy prefix)", "/mcp/health", {}],
     ["GET /functions/v1/open-brain-mcp/health (the Supabase-shaped prefix)", "/functions/v1/open-brain-mcp/health", {}],
@@ -427,6 +443,47 @@ console.log("\n[13] The MCP endpoint answers GET with 405, not an SSE stream not
   // JSON-RPC refusal a keyless POST gets anywhere.
   const postHealth = await fetch(`${BASE}/health`, { method: "POST", headers: AUTH, body: INIT, signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) });
   assert(postHealth.status === 200 && (await mcpBody(postHealth))?.result != null, `POST /health with the key is the MCP endpoint (${postHealth.status})`);
+}
+
+console.log("\n[13b] GET /health with a key is what the brain is; without one it is `ok` (SMD-2041)");
+{
+  const get = async (path: string, headers: Record<string, string> = {}) => {
+    const r = await fetch(`${BASE}${path}`, { headers, signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) });
+    return { status: r.status, type: r.headers.get("content-type") ?? "", cors: corsOk(r), body: await r.text() };
+  };
+  // Nothing about the deployment reaches a probe that presents no key, or a
+  // key that is not one: the literal, at every health path.
+  for (const [label, path, headers] of [
+    ["no key", "/health", {}],
+    ["no key, behind a prefix", "/mcp/health", {}],
+    ["a wrong key in the header", "/health", { "x-brain-key": "wrong" }],
+    ["a wrong key in the URL", "/health?key=wrong", {}],
+  ] as [string, string, Record<string, string>][]) {
+    const r = await get(path, headers);
+    assert(r.status === 200 && r.body === "ok", `${label} → 200 \`ok\` (${r.status}, ${JSON.stringify(r.body.slice(0, 40))})`);
+  }
+  // The tree's last migration read here from the directory itself, not from
+  // the generated module the server reports it from — a stale version.ts is
+  // caught here as well as by check 17e.
+  const { readdirSync } = await import("node:fs");
+  const treeLast = Math.max(...readdirSync(new URL("../db/migrations/", import.meta.url)).filter((n) => /^\d{3}_.*\.sql$/.test(n)).map((n) => Number(n.slice(0, 3))));
+  for (const [label, path, headers] of [
+    ["the key in a header", "/health", { "x-brain-key": KEY }],
+    ["the key in the URL", `/health?key=${KEY}`, {}],
+    ["the key, behind the Supabase-shaped prefix", "/functions/v1/open-brain-mcp/health", { "x-brain-key": KEY }],
+  ] as [string, string, Record<string, string>][]) {
+    const r = await get(path, headers);
+    let info: Record<string, unknown> = {};
+    try { info = JSON.parse(r.body); } catch { /* asserted below */ }
+    assert(r.status === 200 && /application\/json/.test(r.type) && r.cors, `${label} → 200 JSON with CORS (${r.status}, ${r.type})`);
+    assert(info.version === FORK_VERSION, `…version is FORK_VERSION (${info.version})`);
+    assert(info.latestMigration === treeLast, `…latestMigration is db/migrations/'s last, ${treeLast} (${info.latestMigration})`);
+    assert(info.commit === "unknown" && info.store === "sql" && info.tier === null, `…commit unknown with no OB1_GIT_SHA, the sql store, no tier (${info.commit}, ${info.store}, ${info.tier})`);
+    // No database in this suite: the record still answers, and says why the
+    // database's half is missing — the store's own refusal, not a 500.
+    const database = info.database as { error?: string } | undefined;
+    assert(/DATABASE_URL is not set/.test(database?.error ?? "") && info.ledger === null, `…and the database's facts are an error naming DATABASE_URL, the ledger unjudged (${database?.error?.slice(0, 60)})`);
+  }
 }
 
 console.log("\n[14] OB1_STORE unset selects the SQL store; PostgREST stays selectable and is said to be retired here (SMD-1797)");

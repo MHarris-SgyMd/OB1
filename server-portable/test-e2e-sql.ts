@@ -16,7 +16,9 @@
  */
 
 import { SQL } from "bun";
-import { createAssert, plantLegacyRow, resetSchema } from "../db/test-support.ts";
+import { createAssert, plantLegacyRow, resetSchema, runScript } from "../db/test-support.ts";
+import { readdirSync } from "node:fs";
+import { FORK_VERSION } from "../db/version.mjs";
 import { join, dirname } from "node:path";
 import { TOOL_NAMES } from "./tools.ts";
 import { hashKey } from "./auth.ts";
@@ -946,6 +948,75 @@ console.log("\n[13] A capture-only key adds a thought that names its harness and
   // The writer sees the hook's summary where a session would look for it.
   const found = await call("search_thoughts", { query: "eta", limit: 10, threshold: 0.1 });
   assert(found.includes(id!), "the summary the hook captured is retrievable by the writer key");
+  await sql.close();
+}
+
+console.log("\n[14] brain_info and the keyed /health body read the live database: versions, the ledger against the tree, counts, size, HNSW (SMD-2041)");
+{
+  const sql = new SQL({ url: URL_, max: 1 });
+  const here = dirname(fileURLToPath(import.meta.url));
+  const treeLast = Math.max(...readdirSync(join(here, "..", "db", "migrations")).filter((n) => /^\d{3}_.*\.sql$/.test(n)).map((n) => Number(n.slice(0, 3))));
+  const health = async (key: string | null) => {
+    const r = await fetch(`${BASE}/health`, { headers: key ? { "x-brain-key": key } : {} });
+    const body = await r.text();
+    try { return JSON.parse(body) as Record<string, any>; } catch { return body; }
+  };
+
+  // resetSchema applies the files with no ledger: the record says so rather
+  // than inventing a number, and does not judge the brain against the tree.
+  const bare = await health("e2e-key") as Record<string, any>;
+  assert(bare.database?.ledger?.present === false && bare.database?.highestMigration === null && bare.ledger === null,
+    `a brain with no schema_migrations reports no ledger and no judgement (${JSON.stringify(bare.database?.ledger)}, ${bare.ledger})`);
+
+  // Adopted the way an operator adopts a hand-built schema: the ledger now
+  // records every file, so its highest is the tree's last — a fresh brain is current.
+  const adopt = await runScript(["bun", join(here, "..", "db", "migrate.ts"), "--url", URL_, "--baseline"], { cwd: join(here, "..", "db") });
+  assert(adopt.code === 0, `migrate.ts --baseline adopts the schema (${adopt.out.trim().split("\n").slice(-1)[0]})`);
+  const info = await health("e2e-key") as Record<string, any>;
+  const db = info.database ?? {};
+  const [truth] = await sql`
+    SELECT current_setting('server_version') AS pg,
+           (SELECT extversion FROM pg_extension WHERE extname = 'vector') AS vec,
+           (SELECT count(*)::int FROM thoughts) AS thoughts,
+           (SELECT count(*)::int FROM thought_audit) AS audit,
+           (SELECT count(*)::int FROM thought_chunks) AS chunks,
+           (SELECT count(*)::int FROM ob1_entities) AS entities,
+           (SELECT value FROM ob1_config WHERE key = 'schema_version') AS schema_version`;
+  assert(db.highestMigration === treeLast && info.latestMigration === treeLast && info.ledger === "current",
+    `the ledger's highest is the tree's last file, ${treeLast}, and the brain is current (${db.highestMigration}, ${info.latestMigration}, ${info.ledger})`);
+  assert(db.postgres === truth.pg && db.pgvector?.version === truth.vec && db.pgvector?.schema === "public",
+    `Postgres and pgvector versions are the catalog's (${db.postgres}, ${db.pgvector?.version} in ${db.pgvector?.schema})`);
+  assert(db.schemaVersion === truth.schema_version && db.schemaVersion === FORK_VERSION, `the schema version is ob1_config's, which is FORK_VERSION (${db.schemaVersion})`);
+  assert(db.counts?.thoughts === truth.thoughts && db.counts?.thought_audit === truth.audit && db.counts?.thought_chunks === truth.chunks && db.counts?.ob1_entities === truth.entities && truth.thoughts > 0 && truth.audit > truth.thoughts,
+    `the counts are the tables' (${JSON.stringify(db.counts)})`);
+  assert(typeof db.databaseBytes === "number" && db.databaseBytes > 1_000_000, `the database size is a byte count (${db.databaseBytes})`);
+  const hnsw = (db.hnsw ?? []) as { index: string; table: string; m: number; efConstruction: number }[];
+  assert(hnsw.some((h) => h.table === "thoughts") && hnsw.some((h) => h.table === "thought_chunks") && hnsw.every((h) => h.m === 16 && h.efConstruction === 64),
+    `every HNSW index on the path is listed with pgvector's default build parameters (${hnsw.map((h) => `${h.index}:${h.m}/${h.efConstruction}`).join(", ")})`);
+  assert(Object.keys(db.unread ?? {}).length === 0, `every read answered (${JSON.stringify(db.unread)})`);
+  assert(info.tier === "canary" && info.store === "sql" && info.embedding?.model === EMBEDDING_MODEL && info.embedding?.dim === EMBEDDING_DIM && db.embedding?.dim === EMBEDDING_DIM,
+    `the tier, the store and the embedding contract, the server's and the brain's (${info.tier}, ${info.store}, ${info.embedding?.model} @ ${info.embedding?.dim})`);
+
+  // The tool renders the same read.
+  const text = await call("brain_info");
+  assert(new RegExp(`^Migrations: +${String(treeLast).padStart(3, "0")} applied — this server's tree ends at ${String(treeLast).padStart(3, "0")} \\(current\\)$`, "m").test(text),
+    `the tool's Migrations row says the brain is current (${text.split("\n").find((l) => l.startsWith("Migrations"))})`);
+  assert(new RegExp(`^Rows: +${truth.thoughts} thoughts · ${truth.audit} audit`, "m").test(text) && /^Postgres: +\S.* · pgvector \d/m.test(text), "…and its Rows and Postgres rows carry the same counts and versions");
+
+  // A ledger short of the tree's last file is behind it, by name.
+  const last = String(treeLast).padStart(3, "0");
+  const [{ name: lastName }] = await sql`SELECT name FROM schema_migrations WHERE name LIKE ${last + "%"}`;
+  await sql`DELETE FROM schema_migrations WHERE name = ${lastName}`;
+  const behind = await health("e2e-key") as Record<string, any>;
+  assert(behind.ledger === "behind" && behind.database?.highestMigration === treeLast - 1, `a ledger missing ${last} is behind this server's tree (${behind.ledger}, ${behind.database?.highestMigration})`);
+  await sql`DELETE FROM schema_migrations`;
+
+  // Keyless stays the literal against a live database too, and a key revoked in
+  // the registry reads nothing here, as at the MCP route.
+  assert(await health(null) === "ok", "no key → `ok`, with a live database behind it");
+  await call("thought_stats", {}, "bot-raw"); // registers bot-key in the registry, as any first request does
+  await sql`SELECT revoke_agent_key(${hashKey("bot-raw")}, 'SMD-2041 e2e')`;
+  assert(await health("bot-raw") === "ok", "a revoked write key → `ok`, not the record");
   await sql.close();
 }
 

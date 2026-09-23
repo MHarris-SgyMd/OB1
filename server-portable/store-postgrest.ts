@@ -14,6 +14,7 @@
  */
 
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import type { DatabaseFacts } from "./brain-info.ts";
 import { actorPayload, captureEnvelope, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, normaliseThoughtMeta, normaliseThoughtRecord, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList } from "./store.ts";
 import type {
   Actor,
@@ -182,6 +183,13 @@ export class PostgrestStore implements ThoughtStore {
       .range(offset, offset + limit - 1);
     if (error) throw new Error(error.message);
     return ((data ?? []) as Record<string, unknown>[]).map(normaliseThoughtMeta);
+  }
+
+  async databaseFacts(): Promise<DatabaseFacts> {
+    // Every fact is a catalog read (pg_extension, pg_class, schema_migrations,
+    // pg_database_size) and PostgREST exposes none of them; the record names
+    // this rather than reporting a partial database as a whole one.
+    throw new Error("the PostgREST store has no catalog reads — the database's versions, ledger, counts and indexes need the SQL store's direct connection");
   }
 
   async statsSummary(): Promise<ThoughtStats> {

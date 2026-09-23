@@ -28,6 +28,7 @@
  */
 
 import type { EgressRecord } from "./egress.ts";
+import type { DatabaseFacts } from "./brain-info.ts";
 
 export type ThoughtMatch = {
   id: string;
@@ -926,6 +927,16 @@ export interface ThoughtStore {
    *     `aggregated` is that reach and may be < total, which the tool surfaces.
    */
   statsSummary(): Promise<ThoughtStats>;
+
+  /**
+   * What the database says about itself — Postgres and pgvector versions, the
+   * schema version and ledger, row counts, size, HNSW parameters — for
+   * brain_info and the keyed /health body (SMD-2041). The SQL store runs
+   * brain-info.ts's readDatabaseFacts over its pool, the reads preflight's rows
+   * make; the PostgREST store has no catalog reads and refuses, so the record
+   * carries the server's own facts and says why the database's are missing.
+   */
+  databaseFacts(): Promise<DatabaseFacts>;
 
   /**
    * One page of metadata for aggregation, newest first. The PostgREST

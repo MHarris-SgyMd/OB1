@@ -12,7 +12,7 @@
  */
 
 import { join, dirname } from "node:path";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { applyMigrations, createAssert, dropSchema, runScript } from "../db/test-support.ts";
 import { DIRECT_CHECK_SKIP_OVER_POSTGREST } from "./store.ts";
@@ -1723,6 +1723,46 @@ else {
 
     // Restore the baseline so the --json ok run below is clean.
     await claims.unsafe(`INSERT INTO ob1_config (key, value) VALUES ('schema_version', '${FORK_VERSION}') ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`);
+  }
+
+  // SMD-2041: `vector extension`, `migration ledger` and `schema version` read
+  // brain-info.ts's readDatabaseFacts — the read brain_info and the keyed
+  // /health body make — so a change to that read moves these rows and the
+  // tool's together (test-e2e-sql [14] holds the tool's side). The ledger is
+  // judged against the tree's last file, read here from the directory rather
+  // than from the generated module preflight reads it from.
+  {
+    const row = (out: string, name: string) => out.split("\n").find((l) => new RegExp(`\\b${name}\\b`).test(l))?.trim();
+    const treeLast = Math.max(...readdirSync(join(HERE, "..", "db", "migrations")).filter((n) => /^\d{3}_.*\.sql$/.test(n)).map((n) => Number(n.slice(0, 3))));
+    const last = String(treeLast).padStart(3, "0");
+    const prev = String(treeLast - 1).padStart(3, "0");
+    const [{ v: extversion }] = await claims`SELECT extversion AS v FROM pg_extension WHERE extname = 'vector'`;
+    const bare = await run(SQL_ENV);
+    assert(new RegExp(`✓\\s+vector extension\\s+the vector type resolves \\(pgvector ${rx(String(extversion))} in schema public\\)`).test(bare.out),
+           `the vector row names the installed pgvector, the catalog's ${extversion} (${row(bare.out, "vector extension")})`);
+
+    const adopt = await migrate(["--url", LIVE, "--baseline"]);
+    assert(adopt.code === 0, `migrate.ts --baseline records every file (${adopt.out.trim().split("\n").slice(-1)[0]})`);
+    const current = await run(SQL_ENV);
+    assert(new RegExp(`✓\\s+migration ledger\\s+schema_migrations present, highest ${last} — this server's tree ends there too`).test(current.out)
+             // Between releases the tree's last file is past the release range,
+             // which the version row warns about in its own words (SMD-1804).
+             && new RegExp(`schema version\\s+(?:\\S+ · highest migration|.* ledger reaches migration) ${last}\\b`).test(current.out),
+           `a ledger at the tree's last file is current, and both rows read the same highest migration (${row(current.out, "migration ledger")} | ${row(current.out, "schema version")})`);
+
+    await claims.unsafe(`DELETE FROM schema_migrations WHERE name LIKE '${last}%'`);
+    const behind = await run(SQL_ENV);
+    assert(behind.code === 0 && new RegExp(`!\\s+migration ledger\\s+the ledger reaches ${prev} but this server's tree ends at ${last} — the brain is behind`).test(behind.out)
+             && /bun migrate\.ts --url \$DATABASE_URL \(--dry-run lists them\)/.test(behind.out)
+             && new RegExp(`schema version\\s+\\S+ · highest migration ${prev}\\b`).test(behind.out),
+           `a ledger short of the tree's last file warns, with the migrate remedy, and the version row agrees (${row(behind.out, "migration ledger")})`);
+
+    await claims.unsafe(`INSERT INTO schema_migrations (name, sha256) VALUES ('${last}_x.sql', 'baseline'), ('999_from_a_newer_tree.sql', 'baseline')`);
+    const ahead = await run(SQL_ENV);
+    assert(new RegExp(`!\\s+migration ledger\\s+the ledger reaches 999, past this server's tree \\(${last}\\) — a newer tree migrated this brain`).test(ahead.out),
+           `a ledger past the tree's last file warns the other way (${row(ahead.out, "migration ledger")})`);
+    // Back to the harness's unrecorded schema for the sections below.
+    await claims.unsafe("DROP TABLE schema_migrations");
   }
 
   // The pipeline tier (SMD-1806): unset on a plain brain the ingester never

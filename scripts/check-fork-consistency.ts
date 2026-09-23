@@ -2524,6 +2524,7 @@ const HOUSE_FORM = (k: string) => new RegExp(`^\\$\\{${k}(?::-([^$}]*))?\\}$`);
 /** Knobs the server declares that compose.yaml must NOT forward, with the reason its own comment gives. */
 const NOT_FORWARDED: Record<string, string> = {
   OB1_STORE: "the SQL store is the server's default (FORK.md change 97) and this stack is the deployment that proves it — forwarding it would let the default drift back to PostgREST with nothing in CI noticing",
+  OB1_GIT_SHA: "the commit the image was built from, baked by server-portable/Dockerfile from the build arg of the same name (compose's `build.args`) — a runtime forward would let deploy/.env name a commit the image was not built from (SMD-2041)",
 };
 
 /** The names `type Env = { … }` declares in a server source, in order; null when the block is not there. */

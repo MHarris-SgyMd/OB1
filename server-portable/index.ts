@@ -12,7 +12,8 @@ import { createStore, postgrestOnBunNotice, storeKind, UUID_RE, type AuditChange
 import { queryLogEnabled, tierProblem, trimmedEnv } from "../db/config.mjs";
 import { authenticateRequest, canCapture, canRead, canWrite, SCOPES, type Principal } from "./auth.ts";
 import { AgentResolver, cacheTtlFromEnv } from "./agents.ts";
-import { FORK_VERSION } from "./version.ts";
+import { FORK_VERSION, LATEST_MIGRATION, RELEASE_RANGE } from "./version.ts";
+import { brainInfo, renderBrainInfo, type BrainInfo, type ServerFacts } from "./brain-info.ts";
 
 /**
  * Runtime-portable env access.
@@ -99,6 +100,13 @@ type Env = {
    * db/ingest-records.ts (which stamps ob1_config.tier) and preflight's `tier`.
    */
   OB1_TIER?: string;
+  /**
+   * The commit the image was built from — baked by server-portable/Dockerfile
+   * from its OB1_GIT_SHA build arg, never forwarded at runtime (compose passes
+   * the build arg; check 14 excuses the forward). Reported by brain_info and
+   * the keyed /health body (SMD-2041); unset reads as `unknown`.
+   */
+  OB1_GIT_SHA?: string;
   /** Model for metadata extraction. No schema dependency — safe to change anytime. */
   OB1_METADATA_MODEL?: string;
   /** The supersession judge's model (db/consolidate.ts), when it is not OB1_METADATA_MODEL; the server never judges, but embed.ts reads one Env (SMD-1901). */
@@ -194,6 +202,22 @@ function db(): Promise<ThoughtStore> {
   }
   return _store;
 }
+
+// What this brain is (SMD-2041): the server's own facts beside the database's,
+// one read under the brain_info tool and the keyed /health body.
+function serverFacts(): ServerFacts {
+  const cfg = embedConfig();
+  return {
+    version: FORK_VERSION,
+    releaseRange: RELEASE_RANGE,
+    latestMigration: LATEST_MIGRATION,
+    commit: env().OB1_GIT_SHA || "unknown",
+    store: storeKind(env()),
+    tier: env().OB1_TIER || null,
+    embedding: { model: cfg.embeddingModel, dim: cfg.embeddingDim },
+  };
+}
+const readBrainInfo = (): Promise<BrainInfo> => brainInfo(serverFacts(), async () => (await db()).databaseFacts());
 
 // Built on first use, for the same reason as the store: reading env() at module
 // scope runs before initEnv() has seeded it.
@@ -1441,6 +1465,33 @@ function buildServer(principal: Principal): McpServer {
     }
   );
 
+  // Tool 3c: what this brain is (SMD-2041) — version, commit, store, tier, the
+  // database's versions, ledger, counts, size and HNSW parameters, one short
+  // table. Gated like the other read tools. The same record is the keyed
+  // /health body, as JSON; brainInfo never raises, so a database that cannot
+  // answer is a line in the table, not a tool error.
+  if (canRead(principal)) server.registerTool(
+    "brain_info",
+    {
+      title: "Brain Info",
+      description:
+        "Say what this Open Brain is: the server's version and the release it belongs to, the commit it was built from, the store and tier, " +
+        "the Postgres and pgvector versions, the schema version and highest migration applied (and whether that is this server's last), " +
+        "row counts, database size and vector-index parameters. Use it to check which version you are talking to, or whether a migration has been applied.",
+      annotations: {
+        readOnlyHint: true,
+      },
+      inputSchema: {},
+    },
+    async () => {
+      try {
+        return { content: [{ type: "text" as const, text: renderBrainInfo(await readBrainInfo()) }] };
+      } catch (err: unknown) {
+        return { content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }], isError: true };
+      }
+    }
+  );
+
   // Tool 4: Capture Thought — the tool that adds.
   //
   // Registered for a key that may capture — write scope, or the capture-only
@@ -2149,8 +2200,13 @@ app.all("/.well-known/*", (c) => c.text("Not Found", 404, corsHeaders));
 
 // Liveness for platform probes (Kubernetes httpGet, load-balancer target checks,
 // uptime monitors), which can only GET and expect 2xx — the MCP endpoint answers
-// GET with 405 (below). Before authenticate(), like /.well-known/*: it says the
-// process is serving and nothing else. Readiness — is the database reachable —
+// GET with 405 (below). Without a key, like /.well-known/*: it says the process
+// is serving and nothing else — no key, a wrong key, a capture-only key and a
+// revoked one all get the literal `ok`, so nothing about the deployment reaches
+// an unauthenticated probe. With a read or a write key it answers what the
+// brain is, as JSON — brain_info's record (SMD-2041), for deploy/smoke.sh and an
+// operator's curl; a database that cannot answer is the record's
+// `database.error`, still a 200, since the process is serving. Readiness — is the database reachable —
 // is preflight's job at the entrypoint. HEAD is routed here as GET by Hono, so a
 // HEAD probe gets a bodiless 200. Matched as the last path segment under any
 // prefix a proxy leaves on the request (`/mcp/health`,
@@ -2172,7 +2228,17 @@ app.all("/.well-known/*", (c) => c.text("Not Found", 404, corsHeaders));
 // notFound's 405. POST /health is the MCP endpoint, as POST at every path is.
 // FORK.md change 75.
 const HEALTH_PATH = /(^|\/)health\/?$/;
-app.get("*", async (c, next) => (HEALTH_PATH.test(c.req.path) ? c.text("ok", 200, corsHeaders) : next()));
+app.get("*", async (c, next) => {
+  if (!HEALTH_PATH.test(c.req.path)) return next();
+  const principal = authenticateRequest(c.req.raw, {
+    MCP_ACCESS_KEYS: env().MCP_ACCESS_KEYS,
+    MCP_ACCESS_KEY: env().MCP_ACCESS_KEY,
+  }, { admit: SCOPES });
+  if (!principal || !canRead(principal)) return c.text("ok", 200, corsHeaders);
+  // A revoked key reads nothing here either, as at the MCP route.
+  if ((await agents().resolve(db(), principal)).status === "revoked") return c.text("ok", 200, corsHeaders);
+  return c.json(await readBrainInfo(), 200, corsHeaders);
+});
 
 // ── A tool call outlives the runtime's idle timeout (SMD-1864) ───────────────
 //
