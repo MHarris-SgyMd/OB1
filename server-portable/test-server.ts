@@ -1,6 +1,7 @@
 import { createAssert } from "../db/test-support.ts";
 import { DEFAULT_EMBEDDING_DIM, queryLogEnabled, queryLogRetentionDays, QUERY_LOG, tierProblem, trimmedEnv } from "../db/config.mjs";
 import { visibleToolNames, READ_TOOL_NAMES } from "./tools.ts";
+import { FORK_VERSION } from "../db/version.mjs";
 /**
  * test-server.ts
  *
@@ -220,6 +221,10 @@ console.log("\n[7] initialize");
   const result = b?.result as Record<string, unknown> | undefined;
   assert(result?.protocolVersion != null, "protocolVersion returned");
   assert(result?.capabilities != null, "capabilities returned");
+  // The generated version module's, which is db/version.mjs's (17e holds the
+  // two equal) — a literal here said 1.0.0 through the 1.1.0 cut (SMD-2041).
+  const info = result?.serverInfo as { version?: string } | undefined;
+  assert(info?.version === FORK_VERSION, `serverInfo.version is FORK_VERSION ${FORK_VERSION} (${info?.version})`);
 
   // @hono/mcp 0.1.x wanted both Accept tokens on a POST and the server patched
   // whichever was missing; 0.3.x takes either, or none, and the patch is gone

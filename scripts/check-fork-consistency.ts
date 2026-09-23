@@ -120,7 +120,9 @@
  *      source); a migration inside a released range keeps the sha the release
  *      froze; and
  *      migration 044's schema_version equals db/version.mjs's FORK_VERSION
- *      (SMD-1804)
+ *      (SMD-1804); and server-portable/version.ts is exactly what
+ *      scripts/gen-version.ts renders from db/version.mjs, releases.json and
+ *      db/migrations/ (17e, SMD-2041)
  *  18. the type-checked directories — server-portable/, compat/supabase-sql/,
  *      db/, evals/ and scripts/ — share one type surface and CI checks each: every one
  *      pins @types/bun, typescript and @types/node in devDependencies at the
@@ -3595,6 +3597,30 @@ function checkSchemaVersion() {
   if (current.value !== FORK_VERSION) fail(`db/migrations/${current.name}`, `writes schema_version '${current.value}' but db/version.mjs's FORK_VERSION is '${FORK_VERSION}' — the brain would report a version the tooling does not (SMD-1804)`);
 }
 checkSchemaVersion();
+
+/**
+ * 17e: server-portable/version.ts is generated (SMD-2041) — the version, the
+ * release range and the tree's last migration the server reports, in a module
+ * the Workers build can bundle (db/version.mjs is node-only). It must be
+ * exactly what scripts/gen-version.ts renders, so a migration added or a cut
+ * made without regenerating it fails here rather than a brain reporting the
+ * previous tree. Bun-only, like the tools.json round-trip.
+ */
+async function checkVersionModule() {
+  let renderVersionTs: () => string;
+  try {
+    ({ renderVersionTs } = await import("./gen-version.ts"));
+  } catch (e) {
+    console.warn(`  (version.ts round-trip skipped — ${(e as Error).message.split("\n")[0]} — run under bun)`);
+    return;
+  }
+  const rel = "server-portable/version.ts";
+  const path = join(ROOT, rel);
+  if (!existsSync(path)) return fail(rel, "missing — run `bun scripts/gen-version.ts` (SMD-2041)");
+  if (readFileSync(path, "utf8") !== renderVersionTs())
+    fail(rel, "does not match db/version.mjs, releases.json and db/migrations/ — the server would report the tree before this one; run `bun scripts/gen-version.ts` to regenerate (SMD-2041)");
+}
+await checkVersionModule();
 
 /**
  * 18: one type surface across the type-checked directories, and a CI step

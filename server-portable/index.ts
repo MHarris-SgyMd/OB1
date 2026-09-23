@@ -12,6 +12,7 @@ import { createStore, postgrestOnBunNotice, storeKind, UUID_RE, type AuditChange
 import { queryLogEnabled, tierProblem, trimmedEnv } from "../db/config.mjs";
 import { authenticateRequest, canCapture, canRead, canWrite, SCOPES, type Principal } from "./auth.ts";
 import { AgentResolver, cacheTtlFromEnv } from "./agents.ts";
+import { FORK_VERSION } from "./version.ts";
 
 /**
  * Runtime-portable env access.
@@ -606,7 +607,9 @@ export function actorLine(m: Record<string, unknown>): string | null {
 function buildServer(principal: Principal): McpServer {
   const server = new McpServer({
     name: SERVER_NAME,
-    version: "1.0.0",
+    // The fork's version, generated from db/version.mjs (SMD-2041) — a literal
+    // here said 1.0.0 from before the fork had a version scheme until 1.1.0.
+    version: FORK_VERSION,
   });
 
   // The opt-in query log (migration 034, SMD-1295). Off unless OB1_QUERY_LOG=on,
