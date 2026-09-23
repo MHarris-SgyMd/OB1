@@ -26,7 +26,15 @@
 
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative, sep } from "node:path";
-import { AdapterRefusal, decodeUtf8Strict, normaliseLinks, normaliseMentions, type Adapter, type Ingested, type Link, type Mention } from "./ingest-contract.ts";
+import { AdapterRefusal, decodeUtf8Strict, IDENTITY_MAX, normaliseLinks, normaliseMentions, type Adapter, type Ingested, type Link, type Mention } from "./ingest-contract.ts";
+
+/**
+ * What Obsidian embeds that is not a note: images, audio, video, PDFs and
+ * canvases. A wikilink to one of these is a file reference, not an edge to a
+ * note. An explicit list, not "anything with a dot and letters": a note may be
+ * called `v1.2` or `Plan Q3.2026` (first review pass).
+ */
+export const NON_NOTE_EXTENSIONS = /\.(?:png|jpe?g|gif|svg|webp|bmp|avif|mp3|wav|m4a|ogg|3gp|flac|mp4|webm|ogv|mov|mkv|pdf|canvas|base)$/i;
 
 export const MARKDOWN_SYSTEM = "markdown";
 export const MARKDOWN_MEDIA_TYPE = "text/markdown";
@@ -157,8 +165,9 @@ export const markdownAdapter: Adapter<MarkdownFile> = {
     const md = decoded.text;
     const { fm, body } = parseFrontmatter(md);
     const key = markdownIdentity(fm, noteName);
+    if (key.length > IDENTITY_MAX) throw new AdapterRefusal({ system: MARKDOWN_SYSTEM, key: key.slice(0, 40) + "…" }, `${file.path} has an identity of ${key.length} characters; thought_sources.identity holds ${IDENTITY_MAX}`);
     const tags = noteTags(fm, body);
-    const links: Link[] = wikilinks(body).filter((w) => w.note && !/\.[a-z0-9]{2,4}$/i.test(w.note)).map((w) => ({ relation: "references", target: w.note }));
+    const links: Link[] = wikilinks(body).filter((w) => w.note && !NON_NOTE_EXTENSIONS.test(w.note)).map((w) => ({ relation: "references", target: w.note }));
     const mentions: Mention[] = tags.map((t) => ({ name: t, type: "topic" as const }));
     const { id: _id, uuid: _uuid, ...rest } = fm;
     return {
@@ -211,9 +220,9 @@ export const MARKDOWN_LOSSY: { name: string; input: string; text: RegExp }[] = [
 
 /** A limit of the identity or the link rule, stated rather than discovered. */
 export const MARKDOWN_LIMITS: readonly string[] = [
-  "A note without a frontmatter `id` is identified by its name: renaming it is a new identity (the old row stays; a connector reconciles), and two notes of one name in different folders collide — the pipeline reports IDENTITY_HELD and the fix is a frontmatter id.",
-  "A file that is not UTF-8, or holds a NUL byte, is refused, not stored: a text column cannot hold it byte for byte.",
-  "A wikilink to a file with an extension (an image, a PDF) is not a link to a note and yields no edge.",
+  "A note without a frontmatter `id` is identified by its name: renaming it is a new identity (the old row stays; a connector reconciles), and two notes of one name in different folders collide — the first in walk order keeps the identity, the ingester refuses the rest by name, and the fix is a frontmatter id.",
+  "A file that is not UTF-8, or holds a NUL byte, is refused, not stored: a text column cannot hold it byte for byte. So is an identity over 512 characters, the column's bound.",
+  "A wikilink to an image, audio, video, PDF or canvas file (NON_NOTE_EXTENSIONS) is a file reference, not an edge to a note; a note named `v1.2` is still a note.",
   "Frontmatter is read minimally (scalars, `[a, b]`, `- item` lists); a nested mapping is kept as raw text under its key.",
 ];
 
@@ -236,6 +245,10 @@ export function selfCheck(): number {
   const plain = markdownAdapter.map(file("a/Plain note.md", "Just text with a #tag."));
   ok(plain.identity.key === "Plain note" && plain.text === "Plain note\n\nJust text with a #tag." && plain.mentions[0]?.name === "tag" && plain.links.length === 0 && plain.createdAt === undefined, "a note with no frontmatter: the name is the identity and the title");
   ok(markdownAdapter.map(file("Self.md", "[[Self]] and [[Other]]")).links.map((l) => l.target).join(",") === "Other", "a link to the note itself is dropped");
+  ok(markdownAdapter.map(file("N.md", "[[v1.2]] [[Plan Q3.2026]] ![[photo.JPG]] [[deck.pdf]] [[board.canvas]]")).links.map((l) => l.target).join(",") === "Plan Q3.2026,v1.2", "a dotted note name is a note; an image, a PDF and a canvas are files (first review pass)");
+  let tooLong = "";
+  try { markdownAdapter.map(file("long.md", `---\nid: ${"x".repeat(513)}\n---\nbody`)); } catch (e) { tooLong = (e as Error).message; }
+  ok(/513 characters/.test(tooLong), `an identity over the column's bound is refused by the adapter, not by the write (${tooLong.slice(0, 60)})`);
 
   for (const c of MARKDOWN_LOSSY) {
     const r = markdownAdapter.map(file("N.md", c.input));

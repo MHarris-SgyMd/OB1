@@ -30,7 +30,11 @@
 --      it. `UNIQUE (system, identity)`: an identity names one thought.
 --      record_thought_source() writes it idempotently — the same canonical is
 --      "unchanged", a moved one "updated" — and refuses an identity another
---      thought holds rather than re-pointing it. source_thought() resolves an
+--      thought holds (IDENTITY_HELD, the holder named) unless the caller says
+--      p_take: the board sync does, because the row that holds a ticket moves
+--      when an older paste becomes the chain's head (SMD-1954), and the
+--      identity follows the head; the ingester does not, because its ids are
+--      deterministic and a holder is a real second writer. source_thought() resolves an
 --      identity to a thought for readers: this table first, then the board
 --      sync's `metadata.issue` claim for `linear` (SMD-1954 keyed the dogfood
 --      rows on it before this table existed), the head of a twin chain.
@@ -66,9 +70,10 @@
 -- SAFETY
 --   Additive: a new table, a new facet kind the validator admits (every row it
 --   admitted before it admits still — the citation branch is 042's verbatim),
---   two indexes, three new functions, one function redefined with the same
---   signature and the same return shape (a caller of 016's sees no change
---   unless it wrote `source:` keys, which none did). Idempotent under --reapply:
+--   two indexes, three new functions, two functions redefined with the same
+--   signature and the same return shape (thought_facets_validate admits one
+--   more kind; a caller of 016's record_thought_entities sees no change unless
+--   it wrote `source:` keys, which none did). Idempotent under --reapply:
 --   CREATE TABLE / INDEX IF NOT EXISTS, CREATE OR REPLACE everywhere, no
 --   trigger re-created (042's trigger calls the function by name). No data
 --   change, no ACL; DDL on fork-owned tables — MINOR under the version rules.
@@ -128,7 +133,8 @@ CREATE OR REPLACE FUNCTION record_thought_source(
   p_identity    text,
   p_canonical   text,
   p_media_type  text,
-  p_run         text DEFAULT NULL
+  p_run         text DEFAULT NULL,
+  p_take        boolean DEFAULT false
 )
 RETURNS jsonb
 LANGUAGE plpgsql
@@ -140,13 +146,19 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM thoughts WHERE id = p_thought_id) THEN
     RETURN jsonb_build_object('ok', false, 'error', 'NOT_FOUND');
   END IF;
-  -- An identity another thought holds is not re-pointed: two thoughts claiming
-  -- one source item is a state the caller must resolve (the board sync's twin
-  -- chain does, by supersedes), not one this writer hides by moving the row.
+  -- An identity another thought holds is not re-pointed by default: two
+  -- thoughts claiming one source item is a state the caller must resolve, not
+  -- one this writer hides by moving the row. A caller that has resolved it —
+  -- the board sync, whose head row for a ticket moves when an older paste
+  -- becomes the chain's head — says p_take, and the identity follows: the
+  -- holder's row goes (the canonical is re-recorded on the new holder below).
   SELECT thought_id INTO v_holder FROM thought_sources
    WHERE system = p_system AND identity = p_identity AND thought_id <> p_thought_id;
-  IF v_holder IS NOT NULL THEN
+  IF v_holder IS NOT NULL AND NOT p_take THEN
     RETURN jsonb_build_object('ok', false, 'error', 'IDENTITY_HELD', 'held_by', v_holder);
+  END IF;
+  IF v_holder IS NOT NULL THEN
+    DELETE FROM thought_sources WHERE thought_id = v_holder;
   END IF;
   INSERT INTO thought_sources (thought_id, system, identity, canonical, media_type, canonical_hash, ingest_run)
   VALUES (p_thought_id, p_system, p_identity, p_canonical, p_media_type, encode(sha256(convert_to(p_canonical, 'UTF8')), 'hex'), p_run)
@@ -160,12 +172,12 @@ BEGIN
        OR thought_sources.identity IS DISTINCT FROM EXCLUDED.identity
        OR thought_sources.media_type IS DISTINCT FROM EXCLUDED.media_type
   RETURNING CASE WHEN xmax = 0 THEN 'inserted' ELSE 'updated' END INTO v_outcome;
-  RETURN jsonb_build_object('ok', true, 'outcome', COALESCE(v_outcome, 'unchanged'));
+  RETURN jsonb_build_object('ok', true, 'outcome', COALESCE(v_outcome, 'unchanged'), 'taken_from', v_holder);
 END;
 $$;
 
-COMMENT ON FUNCTION record_thought_source(uuid, text, text, text, text, text) IS
-  'Writes a thought''s source row (051): inserted, updated when the canonical (or the system, identity or media type) moved, unchanged otherwise — the same canonical twice writes nothing. Refuses NOT_FOUND for a thought that is not there and IDENTITY_HELD when another thought holds the (system, identity), naming it, rather than re-pointing the identity. SMD-1867.';
+COMMENT ON FUNCTION record_thought_source(uuid, text, text, text, text, text, boolean) IS
+  'Writes a thought''s source row (051): inserted, updated when the canonical (or the system, identity or media type) moved, unchanged otherwise — the same canonical twice writes nothing. Refuses NOT_FOUND for a thought that is not there and IDENTITY_HELD when another thought holds the (system, identity), naming it, rather than re-pointing the identity — unless p_take, when the identity follows the caller''s thought and the holder''s row goes (taken_from names it); the board sync says p_take because a ticket''s head row moves. SMD-1867.';
 
 -- ---------------------------------------------------------------------------
 -- source_thought — an identity, resolved to a thought

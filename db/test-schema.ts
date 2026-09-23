@@ -6332,6 +6332,19 @@ console.log("\n[47] Migration 051: the source beside the thought — the canonic
   // The entity the structured rows alone held is pruned; the ones an extracted row still names are not.
   assert(!(await q(`SELECT 1 FROM ob1_entities WHERE name = 'Carol'`)).length && (await q(`SELECT 1 FROM ob1_entities WHERE name = 'Open Brain'`)).length === 1, "Carol, referenced by nothing now, is pruned; Open Brain, the extraction's edge end, stays");
 
+  // The takeover (first review pass): the board sync's head row for a ticket
+  // moves when an older paste becomes the chain's head, so the identity must
+  // be able to follow — p_take moves it and names the row it left; without
+  // p_take the refusal stands. A self-link the moved identity now makes on
+  // the new holder is refused by the validator as before.
+  const took = (await one<{ r: J }>(`SELECT record_thought_source($1::uuid, 'linear', 'SMD-1936', 'the same issue, newer head', 'text/plain', 'test@take', true) AS r`, [t2b])).r;
+  assert(took.ok === true && took.outcome === "inserted" && took.taken_from === t1, `p_take moves the identity to the new head and names the row it left (${JSON.stringify(took)})`);
+  assert((await sourceThought("linear", "SMD-1936")) === t2b && (await q(`SELECT 1 FROM thought_sources WHERE thought_id = $1::uuid`, [t1])).length === 0, "…so the identity resolves to the new holder and the old holder has no source row");
+  assert(((await one<{ r: J }>(`SELECT record_thought_source($1::uuid, 'linear', 'SMD-1936', 'x', 'text/plain', 'test@nt') AS r`, [t1])).r).error === "IDENTITY_HELD", "…and without p_take the old holder is refused in its turn");
+  assert(/does not link to itself/.test(await refused(`INSERT INTO thought_facets (thought_id, kind, payload) VALUES ($1::uuid, 'link', '{"relation":"references","system":"linear","target":"SMD-1936"}'::jsonb)`, [t2b])), "the moved identity guards the new holder against a self-link");
+  await db.query(`SELECT record_thought_source($1::uuid, 'linear', 'SMD-1936', $2, $3, 'test@back', true)`, [t1, out.canonical.form, out.canonical.mediaType]);
+  assert((await sourceThought("linear", "SMD-1936")) === t1, "…and back again for the assertions below");
+
   // Re-applying 051 lands the same shape and the rows stand.
   await reapply("051");
   assert((await links(t1)).length === 3 && (await q(`SELECT 1 FROM thought_sources WHERE thought_id = $1::uuid`, [t1])).length === 1 && lastDefinerOf("record_thought_entities").startsWith("051"), "re-applying 051 keeps every row and every definition");

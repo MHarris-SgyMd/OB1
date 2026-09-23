@@ -175,7 +175,10 @@ export function allowlistFrom(value: string | undefined | null): Allowlist {
  * match on the scope — never a prefix, never "the whole workspace" — the rule
  * SMD-1813 asks for; the message names the knob so the refusal is actionable.
  */
-export function scopeRefusal(allow: Allowlist, ingested: Pick<Ingested, "identity" | "scope">): string | null {
+export function scopeRefusal(allow: Allowlist, ingested: Pick<Ingested, "identity" | "scope">, label: string = `${ingested.identity.system} ${ingested.identity.key}`): string | null {
   if (allow.has(ingested.scope)) return null;
-  return `${ingested.identity.system} ${ingested.identity.key}: scope "${ingested.scope}" is not on the allowlist — content pulled in is stored, embedded and sent to a model; clear the scope with --allow "${ingested.scope}" (or OB1_INGEST_ALLOW), never a whole workspace (SMD-1813)`;
+  return `${label}: scope "${ingested.scope}" is not on the allowlist — content pulled in is stored, embedded and sent to a model; clear the scope with --allow "${ingested.scope}" (or OB1_INGEST_ALLOW), never a whole workspace (SMD-1813)`;
 }
+
+/** The bound thought_sources.identity carries; an adapter refuses a longer key rather than fail the write. */
+export const IDENTITY_MAX = 512;

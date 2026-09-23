@@ -1408,7 +1408,11 @@ async function main(): Promise<void> {
     log: quiet ? () => {} : (line) => console.log(line),
     stopping: () => stopping,
     // The canonical, the links and the mentions beside the head row (051).
-    structure: async (id, s) => { await recordStructure(sql, id, s, run); },
+    // `take`: a ticket's head row moves when an older paste becomes the
+    // chain's head, and the identity follows the head — without it the hook
+    // would refuse IDENTITY_HELD by the old head on every pass (first review
+    // pass).
+    structure: async (id, s) => { await recordStructure(sql, id, s, run, { take: true }); },
   };
 
   let resolved: Board | undefined;

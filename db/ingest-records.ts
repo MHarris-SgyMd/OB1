@@ -73,7 +73,7 @@ import { PIPELINE_TIERS } from "./config.mjs";
 import { loadLinearCorpus, linearThoughtId, linearThoughtText, type LinearDoc } from "../evals/linear-corpus.ts";
 import { parseFragment, fragmentSection } from "../scripts/fragments.ts";
 import { headingOf, ticketsOf } from "../scripts/fork-index.ts";
-import { AdapterRefusal, allowlistFrom, normaliseLinks, normaliseMentions, scopeRefusal, stableJson, type Allowlist, type Ingested } from "./ingest-contract.ts";
+import { AdapterRefusal, allowlistFrom, normaliseLinks, normaliseMentions, scopeRefusal, stableJson, type Allowlist, type Identity, type Ingested } from "./ingest-contract.ts";
 import { autolinkTargets, LINEAR_SYSTEM, stripAutolinks } from "./ingest-linear.ts";
 import { markdownAdapter, markdownFiles, MARKDOWN_SYSTEM } from "./ingest-markdown.ts";
 
@@ -274,9 +274,22 @@ export function markdownDocs(root: string): { docs: Doc[]; refused: { path: stri
   const docs: Doc[] = [];
   const refused: { path: string; reason: string }[] = [];
   const scope = resolve(root);
+  // Two notes of one identity — the same name in two folders, with no
+  // frontmatter id — would map to ONE deterministic row id, and the second
+  // would silently overwrite the first's text (first review pass: the limits
+  // list promised IDENTITY_HELD, which the id construction never reaches).
+  // The first file, in walk order, keeps the identity; the rest are refused by
+  // name, and the fix is a frontmatter id.
+  const holders = new Map<string, string>();
   for (const f of markdownFiles(scope)) {
-    try { docs.push(docOf(markdownAdapter.map({ ...f, root: scope }))); }
-    catch (e) {
+    try {
+      const doc = docOf(markdownAdapter.map({ ...f, root: scope }));
+      const key = doc.structure!.identity.key;
+      const holder = holders.get(key);
+      if (holder !== undefined) { refused.push({ path: f.path, reason: `identity "${key}" is already ${holder}'s — two notes of one name; give one a frontmatter id` }); continue; }
+      holders.set(key, f.path);
+      docs.push(doc);
+    } catch (e) {
       if (!(e instanceof AdapterRefusal)) throw e;
       refused.push({ path: f.path, reason: e.message });
     }
@@ -285,22 +298,36 @@ export function markdownDocs(root: string): { docs: Doc[]; refused: { path: stri
 }
 
 /**
- * The allowlist applied to a set of records: the gated sources' records whose
- * scope is not cleared are set aside with the refusal's words (one line per
- * scope, not per record), the rest pass. The fork's own records always pass.
+ * The allowlist applied to a set of records: every record an adapter mapped
+ * (it carries a structure — external content, whatever its source label) whose
+ * scope is not cleared is set aside with the refusal's words (one line per
+ * scope, not per record); the rest pass. The fork's own records carry no
+ * structure and always pass. Gating on the structure, not on a list of source
+ * names, so an adapter added later cannot slip past the gate by its name
+ * (first review pass).
  */
 export function applyAllowlist(docs: Doc[], allow: Allowlist): { docs: Doc[]; refused: Doc[]; reasons: string[] } {
   const kept: Doc[] = [];
   const refused: Doc[] = [];
   const reasons = new Map<string, string>();
   for (const d of docs) {
-    if (!GATED_SOURCES.includes(d.source) || d.structure === undefined) { kept.push(d); continue; }
-    const why = scopeRefusal(allow, { identity: d.structure.identity, scope: d.scope ?? "" });
+    if (d.structure === undefined) { kept.push(d); continue; }
+    const why = scopeRefusal(allow, { identity: d.structure.identity, scope: d.scope ?? "" }, d.source);
     if (why === null) { kept.push(d); continue; }
     refused.push(d);
-    if (!reasons.has(d.scope ?? "")) reasons.set(d.scope ?? "", why.replace(/^[^:]+: /, `${d.source}: `));
+    if (!reasons.has(d.scope ?? "")) reasons.set(d.scope ?? "", why);
   }
   return { docs: kept, refused, reasons: [...reasons.values()] };
+}
+
+/**
+ * `--allow` / OB1_INGEST_ALLOW as scopes: an entry that names a path (it holds
+ * a separator) is resolved the way the markdown scope is, so `--markdown
+ * ./vault --allow ./vault` clears the vault; every other entry is taken as
+ * written (first review pass: a relative path never matched its resolved scope).
+ */
+export function allowlistOf(value: string | undefined): Allowlist {
+  return new Set([...allowlistFrom(value)].map((s) => (s.includes("/") ? resolve(s) : s)));
 }
 
 /**
@@ -327,8 +354,8 @@ export function commitDocs(since: string, cwd: string = REPO_ROOT): Doc[] {
 // Write path — bare rows, idempotent by id, safe on a duplicate-content record.
 // ---------------------------------------------------------------------------
 
-/** inserted: a new row. updated: the text moved (vector and chunks cleared). patched: the text stood and metadata gained keys. unchanged: nothing to write. skipped: another record already holds this text. */
-export type UpsertResult = "inserted" | "updated" | "patched" | "unchanged" | "skipped";
+/** inserted: a new row. updated: the text moved (vector and chunks cleared). patched: the text stood and metadata moved. unchanged: nothing to write. skipped: another record already holds this text. held: another thought already IS this source item (thought_sources), nothing written. */
+export type UpsertResult = "inserted" | "updated" | "patched" | "unchanged" | "skipped" | "held";
 
 function isFingerprintCollision(e: unknown): boolean {
   // Bun's PostgresError carries the SQLSTATE in `errno` (`code` is the generic
@@ -367,6 +394,8 @@ export function runName(tool: string = INGEST_ACTOR.via, at: Date = new Date()):
 export type RecordResult = {
   outcome: UpsertResult;
   structure?: { canonical: string; links: { added: number; closed: number; kept: number; dropped: number }; mentions: number };
+  /** For `held`: the thought that holds the identity. */
+  heldBy?: string;
 };
 
 /**
@@ -413,8 +442,12 @@ export async function upsertRecord(sql: SQL, doc: Doc, run: string = runName()):
               embedding_model = CASE WHEN thoughts.content_fingerprint IS DISTINCT FROM EXCLUDED.content_fingerprint THEN NULL ELSE thoughts.embedding_model END,
               metadata = COALESCE(thoughts.metadata, '{}'::jsonb) || (EXCLUDED.metadata - 'actor_kind' - 'actor_name')
           WHERE thoughts.content_fingerprint IS DISTINCT FROM EXCLUDED.content_fingerprint
-             OR NOT (COALESCE(thoughts.metadata, '{}'::jsonb) @> (EXCLUDED.metadata - 'actor_kind' - 'actor_name'))
+             OR (COALESCE(thoughts.metadata, '{}'::jsonb) || (EXCLUDED.metadata - 'actor_kind' - 'actor_name')) IS DISTINCT FROM thoughts.metadata
         RETURNING (xmax = 0) AS inserted, ((SELECT fp FROM old) IS DISTINCT FROM thoughts.content_fingerprint) AS moved`) as { inserted: boolean; moved: boolean }[];
+      // The guard asks "would the merge change the row" — the merged value
+      // against the stored one — not containment: `@>` holds when an array
+      // facet SHRANK (a label removed: ["a","b"] contains ["a"]), and the row
+      // would have kept the stale list for good (first review pass).
       let outcome: UpsertResult = "unchanged";
       if (rows.length) outcome = rows[0].inserted ? "inserted" : rows[0].moved ? "updated" : "patched";
       // The chunk rows were the old text's windows (022's rule: nothing vouches
@@ -425,7 +458,20 @@ export async function upsertRecord(sql: SQL, doc: Doc, run: string = runName()):
     });
   } catch (e) {
     if (isFingerprintCollision(e)) return { outcome: "skipped" };
+    // The transaction rolled back with it: no second row for an item another
+    // thought already is. The ingester's ids are deterministic, so this is a
+    // real second writer (the board sync's row for a ticket — db/README.md,
+    // "Two writers of one identity"), reported, not taken over.
+    if (e instanceof IdentityHeld) return { outcome: "held", heldBy: e.heldBy };
     throw e;
+  }
+}
+
+/** record_thought_source refused: another thought holds the (system, identity). */
+export class IdentityHeld extends Error {
+  constructor(public readonly identity: Identity, public readonly thoughtId: string, public readonly heldBy: string) {
+    super(`${identity.system} ${identity.key} is held by thought ${heldBy}; not written on ${thoughtId}`);
+    this.name = "IdentityHeld";
   }
 }
 
@@ -437,16 +483,24 @@ export async function upsertRecord(sql: SQL, doc: Doc, run: string = runName()):
  * (record_thought_entities under `source:<system>`, confidence 1, replacing
  * only that key's rows — the resolution rule). Runs on the caller's
  * connection or transaction; db/sync-linear.ts calls it on the head row it
- * has just written. An identity another thought holds is thrown, named: two
+ * has just written, with `take`: a ticket's head row moves when an older
+ * paste becomes the chain's head, and the identity follows it. Without
+ * `take`, an identity another thought holds is thrown as IdentityHeld: two
  * thoughts claiming one source item is the caller's to resolve.
  */
-export async function recordStructure(sql: SQL, thoughtId: string, s: Structure, run: string = runName()): Promise<NonNullable<RecordResult["structure"]>> {
-  const [src] = (await sql`SELECT record_thought_source(${thoughtId}::uuid, ${s.identity.system}, ${s.identity.key}, ${s.canonical.form}, ${s.canonical.mediaType}, ${run}) AS r`) as { r: { ok: boolean; outcome?: string; error?: string; held_by?: string } }[];
-  if (!src.r.ok) throw new Error(`record_thought_source(${s.identity.system} ${s.identity.key}) on ${thoughtId}: ${src.r.error}${src.r.held_by ? ` by ${src.r.held_by}` : ""}`);
-  const [lnk] = (await sql`SELECT record_source_links(${thoughtId}::uuid, ${s.identity.system}, ${JSON.stringify(s.links)}::jsonb) AS r`) as { r: { ok: boolean; added: number; closed: number; kept: number; dropped: number; error?: string } }[];
+export async function recordStructure(sql: SQL, thoughtId: string, s: Structure, run: string = runName(), opts: { take?: boolean } = {}): Promise<NonNullable<RecordResult["structure"]>> {
+  const [src] = (await sql`SELECT record_thought_source(${thoughtId}::uuid, ${s.identity.system}, ${s.identity.key}, ${s.canonical.form}, ${s.canonical.mediaType}, ${run}, ${opts.take === true}) AS r`) as { r: { ok: boolean; outcome?: string; error?: string; held_by?: string } }[];
+  if (!src.r.ok && src.r.error === "IDENTITY_HELD" && src.r.held_by) throw new IdentityHeld(s.identity, thoughtId, src.r.held_by);
+  if (!src.r.ok) throw new Error(`record_thought_source(${s.identity.system} ${s.identity.key}) on ${thoughtId}: ${src.r.error}`);
+  // The JSON goes over as TEXT and is cast in SQL: a JS string bound straight
+  // to a `::jsonb` parameter is serialised as a JSON string — the function saw
+  // `"[…]"`, a string, not an array (test-live, first review pass; db/README.md
+  // "The double-encoding trap"). A JS array bound directly would be a Postgres
+  // array literal, not JSON.
+  const [lnk] = (await sql`SELECT record_source_links(${thoughtId}::uuid, ${s.identity.system}, ${JSON.stringify(s.links)}::text::jsonb) AS r`) as { r: { ok: boolean; added: number; closed: number; kept: number; dropped: number; error?: string } }[];
   if (!lnk.r.ok) throw new Error(`record_source_links on ${thoughtId}: ${lnk.r.error}`);
   const entities = s.mentions.map((m) => ({ name: m.name, type: m.type, confidence: 1 }));
-  const [ent] = (await sql`SELECT record_thought_entities(${thoughtId}::uuid, ${`source:${s.identity.system}`}, ${JSON.stringify(entities)}::jsonb, '[]'::jsonb, NULL, NULL) AS r`) as { r: { ok: boolean; mentions?: number; error?: string } }[];
+  const [ent] = (await sql`SELECT record_thought_entities(${thoughtId}::uuid, ${`source:${s.identity.system}`}, ${JSON.stringify(entities)}::text::jsonb, '[]'::jsonb, NULL, NULL) AS r`) as { r: { ok: boolean; mentions?: number; error?: string } }[];
   if (!ent.r.ok) throw new Error(`record_thought_entities(source:${s.identity.system}) on ${thoughtId}: ${ent.r.error}`);
   return { canonical: src.r.outcome ?? "unchanged", links: { added: lnk.r.added, closed: lnk.r.closed, kept: lnk.r.kept, dropped: lnk.r.dropped }, mentions: ent.r.mentions ?? 0 };
 }
@@ -534,6 +588,8 @@ function selfCheck(): number {
   ok(gated.docs.length === 1 && gated.docs[0].source === "fork" && gated.refused.length === 2 && gated.reasons.length === 1 && /^linear: scope "linear:corpus" is not on the allowlist/.test(gated.reasons[0]) && /--allow "linear:corpus"/.test(gated.reasons[0]), `an empty allowlist refuses every gated record, says so once per scope, names the knob (${gated.reasons[0]})`);
   ok(applyAllowlist([doc], allowlistFrom(" linear:corpus , other ")).docs.length === 1, "a cleared scope passes (list trimmed)");
   ok(applyAllowlist([doc], allowlistFrom("linear")).docs.length === 0, "a prefix is not a clearance — exact scope only");
+  ok(applyAllowlist([{ ...doc, source: "future" as Source }], allowlistFrom("")).docs.length === 0, "a record an adapter mapped is gated whatever its source label — the structure is the tell, not a list of names");
+  ok(allowlistOf("./vault, linear:corpus").has(resolve("./vault")) && allowlistOf("./vault, linear:corpus").has("linear:corpus"), "an allow entry that names a path is resolved as the markdown scope is; the rest are taken as written");
   ok(runName("t", new Date("2026-09-23T00:00:00.000Z")) === "t@2026-09-23T00:00:00.000Z", "a run is named by tool and moment");
 
   if (bad === 0) console.log("ingest-records.ts self-check PASS");
@@ -601,7 +657,7 @@ async function main(): Promise<void> {
   const memoryDir = flag("memory-dir") ?? process.env.OB1_MEMORY_DIR;
   const markdownDir = flag("markdown") ?? process.env.OB1_MARKDOWN_DIR;
   // SMD-1813's allowlist: the flag, else the environment; empty clears nothing.
-  const allow = allowlistFrom(flag("allow") ?? process.env.OB1_INGEST_ALLOW);
+  const allow = allowlistOf(flag("allow") ?? process.env.OB1_INGEST_ALLOW);
 
   // Gather. A source in the wanted set with no input to read is skipped with a
   // word on stderr, not an error — `--source all` on a bare checkout ingests
@@ -669,12 +725,14 @@ async function main(): Promise<void> {
 
   const sql = new SQL({ url, max: 1 });
   const run = runName();
-  const tally: Record<UpsertResult, number> = { inserted: 0, updated: 0, patched: 0, unchanged: 0, skipped: 0 };
+  const tally: Record<UpsertResult, number> = { inserted: 0, updated: 0, patched: 0, unchanged: 0, skipped: 0, held: 0 };
   const structure = { canonical: { inserted: 0, updated: 0, unchanged: 0 } as Record<string, number>, links: { added: 0, closed: 0, kept: 0, dropped: 0 }, mentions: 0, records: 0 };
+  const heldBy = new Map<string, number>();
   try {
     for (const doc of docs) {
       const r = await upsertRecord(sql, doc, run);
       tally[r.outcome]++;
+      if (r.outcome === "held") heldBy.set(doc.source, (heldBy.get(doc.source) ?? 0) + 1);
       if (r.structure) {
         structure.records++;
         structure.canonical[r.structure.canonical] = (structure.canonical[r.structure.canonical] ?? 0) + 1;
@@ -688,7 +746,8 @@ async function main(): Promise<void> {
   }
 
   printCounts();
-  console.log(`  tier=${tier}  inserted ${tally.inserted}  updated ${tally.updated}  patched ${tally.patched}  unchanged ${tally.unchanged}  skipped ${tally.skipped}${dropped ? `  (+${dropped} duplicate-content dropped)` : ""}`);
+  console.log(`  tier=${tier}  inserted ${tally.inserted}  updated ${tally.updated}  patched ${tally.patched}  unchanged ${tally.unchanged}  skipped ${tally.skipped}  held ${tally.held}${dropped ? `  (+${dropped} duplicate-content dropped)` : ""}`);
+  for (const [source, n] of heldBy) console.log(`  ${source}: ${n} record(s) HELD — another thought already is that source item (the board sync's row for a ticket, on a brain it keeps); nothing written for them. db/README.md, "Two writers of one identity".`);
   if (structure.records) {
     console.log(`  structure (${structure.records} record(s), run ${run}): canonical inserted ${structure.canonical.inserted ?? 0} updated ${structure.canonical.updated ?? 0} unchanged ${structure.canonical.unchanged ?? 0}; links added ${structure.links.added} closed ${structure.links.closed} kept ${structure.links.kept} dropped ${structure.links.dropped}; structured mentions ${structure.mentions}`);
   }

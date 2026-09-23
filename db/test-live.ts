@@ -37,7 +37,7 @@ import { SCHEMAS_DIR, TID_PROBE, applyFunctionSettings, applyMigrations, buffers
 import { heartbeatFor, leaseRefusal } from "./lease.ts";
 import { consolidateKey } from "../server-portable/consolidate.ts";
 import { reachabilityReport, readHnswGraph, reachableFromEntry, type HnswElement, type HnswGraph } from "./hnsw-graph.ts";
-import { INGEST_ACTOR, recordId, stampTier, upsertRecord, type Doc } from "./ingest-records.ts";
+import { corpusIngested, docOf, INGEST_ACTOR, recordId, stampTier, upsertRecord, type Doc } from "./ingest-records.ts";
 import { promote, refresh, refreshToolsReady, replayAndDiff } from "./tier.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -4151,6 +4151,35 @@ console.log("\n[19] db/ingest-records.ts: the records upsert is source-labelled 
   assert(namedAudit?.origin === INGEST_ACTOR.via && namedAudit.actor_name === INGEST_ACTOR.name, "…and its audit row names the ingester as writer and door");
   assert((await sql`SELECT current_setting('ob1.actor', true) AS a`)[0].a === "" || (await sql`SELECT current_setting('ob1.actor', true) AS a`)[0].a === null, "…and the envelope does not outlive the record's transaction on the connection");
   ids.push(named.id);
+
+  // A record an adapter mapped (SMD-1867): the row, and in its transaction the
+  // canonical, the links and the structured mentions; the same record again
+  // writes nothing at any of the four; a record whose identity another thought
+  // holds is 'held' and its transaction rolled back — no second row.
+  const structured = docOf(corpusIngested({ id: "SMD-90001", title: "A synthetic ticket", text: "Names <issue id=\"a\" href=\"h\">SMD-90002</issue> twice: <issue id=\"b\" href=\"h\">SMD-90002</issue>.", labels: ["zqlabel"], createdAt: "2026-09-01T00:00:00.000Z" }));
+  ids.push(structured.id);
+  const s1 = await upsertRecord(sql, structured, "test-live@1");
+  assert(s1.outcome === "inserted" && s1.structure?.canonical === "inserted" && s1.structure.links.added === 1 && s1.structure.mentions === 1, `a structured record inserts its row, canonical, one link and one mention (${JSON.stringify(s1)})`);
+  const [srcRow] = await sql`SELECT system, identity, media_type, ingest_run, canonical FROM thought_sources WHERE thought_id = ${structured.id}::uuid`;
+  assert(srcRow?.system === "linear" && srcRow.identity === "SMD-90001" && srcRow.ingest_run === "test-live@1" && /<issue id=/.test(srcRow.canonical) && !/<issue/.test(structured.content), "the canonical keeps the markup the row's text lost");
+  const [linkRow] = await sql`SELECT payload FROM thought_facets WHERE thought_id = ${structured.id}::uuid AND kind = 'link'`;
+  assert(linkRow?.payload?.relation === "references" && linkRow.payload.target === "SMD-90002" && linkRow.payload.origin === "structured", `the link names its target by identity, origin structured (${JSON.stringify(linkRow?.payload)})`);
+  const [mentionRow] = await sql`SELECT m.extraction_key AS k, en.name FROM thought_entities m JOIN ob1_entities en ON en.id = m.entity_id WHERE m.thought_id = ${structured.id}::uuid`;
+  assert(mentionRow?.k === "source:linear" && mentionRow.name === "zqlabel", "the label is a mention under source:linear");
+  const s2 = await upsertRecord(sql, structured, "test-live@2");
+  assert(s2.outcome === "unchanged" && s2.structure?.canonical === "unchanged" && s2.structure.links.added === 0 && s2.structure.links.kept === 1 && s2.structure.links.closed === 0, `the same record again writes nothing at any of the four (${JSON.stringify(s2)})`);
+  // A shrinking array facet is a change the merge must write: containment would have called ["a"] contained in ["a","b"] and kept the stale list (first review pass).
+  await sql`UPDATE thoughts SET metadata = metadata || '{"labels": ["a", "b"]}'::jsonb WHERE id = ${structured.id}::uuid`;
+  const shrunk = await upsertRecord(sql, { ...structured, meta: { ...structured.meta, labels: ["a"] } }, "test-live@3");
+  assert(shrunk.outcome === "patched" && JSON.stringify((await sql`SELECT metadata->'labels' AS l FROM thoughts WHERE id = ${structured.id}::uuid`)[0].l) === '["a"]', `an array facet that shrank is patched to the new list, not kept by containment (${shrunk.outcome})`);
+  // Another thought already IS this source item — the board sync's row for the ticket: held, nothing written, no second row.
+  const syncRow = (await sql`INSERT INTO thoughts (id, content, metadata, content_fingerprint) VALUES (gen_random_uuid(), 'SMD-90003 — held by the sync', '{"source":"linear","issue":"SMD-90003"}'::jsonb, content_fingerprint_of('SMD-90003 — held by the sync')) RETURNING id`)[0].id as string;
+  ids.push(syncRow);
+  await sql`SELECT record_thought_source(${syncRow}::uuid, 'linear', 'SMD-90003', '{}', 'application/json', 'sync')`;
+  const heldDoc = docOf(corpusIngested({ id: "SMD-90003", title: "The same ticket, from the dump", text: "a different text", labels: [], createdAt: "2026-09-01T00:00:00.000Z" }));
+  const held = await upsertRecord(sql, heldDoc, "test-live@4");
+  assert(held.outcome === "held" && held.heldBy === syncRow, `an identity another thought holds is 'held', naming it (${JSON.stringify(held)})`);
+  assert((await sql`SELECT count(*)::int AS c FROM thoughts WHERE id = ${heldDoc.id}::uuid`)[0].c === 0, "…and the transaction rolled back: no second row for the ticket");
   // Tier identity, for preflight's `tier` check.
   await stampTier(sql, "stable");
   const cfg = Object.fromEntries((await sql`SELECT key, value FROM ob1_config WHERE key IN ('tier','last_ingest')`).map((r: { key: string; value: string }) => [r.key, r.value]));

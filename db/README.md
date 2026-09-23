@@ -164,7 +164,7 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `1500 assertions: 1500 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `1505 assertions: 1505 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports fifty-one (51) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
@@ -1774,12 +1774,25 @@ pass finds what was left.
 **Two writers of one identity.** `ingest-records.ts --linear <dump>` and this tool
 both key a ticket on `metadata.issue`, but render different text (the corpus's
 `title / text` against the board header) — so on one brain they would rewrite
-each other's text on every run. The ingester now merges `metadata` rather than
-replacing it (SMD-1867), so the facets survive; the text still differs until
-the dump carries what the board header renders. A brain this tool keeps takes
-the board from it: rebuild that brain with `ingest-records.ts` and no `--linear`
-(the fork, commit and memory sources), then one sync pass fills the board; the
-corpus dump stays the eval harnesses' (SMD-1958 has the one-renderer resolution).
+each other's text on every run. Since SMD-1867 the brain holds the line:
+`thought_sources` names one thought per `(linear, SMD-N)`, this tool takes the
+identity for the ticket's head row (`record_thought_source(…, p_take)` — the head
+moves when an older paste becomes the chain's head), and the ingester, whose
+ids are deterministic, does not: a corpus record for a ticket this tool holds
+comes back `held`, its transaction rolled back, no second row, counted and
+said. The ingester also merges `metadata` rather than replacing it, so the
+facets survive a rebuild. A brain this tool keeps still takes the board from
+it: rebuild with `ingest-records.ts` and no `--linear` (the fork, commit and
+memory sources), then one sync pass fills the board; the corpus dump stays the
+eval harnesses' (SMD-1958 has the one-renderer resolution).
+
+**Structure on a brain from before 051.** A scheduled pass fetches only the
+missing and stale tickets, so the rows a brain already held gain their
+canonical, links and mentions only as each ticket next moves in Linear. To
+record them for every ticket at once, run one `--full` pass after applying 051:
+every issue is fetched and compared, the rows read *unchanged* or *patched*,
+and the structure lands beside each head row (no model call, ~1 s of Linear per
+fifty issues).
 
 **Not removed, not commented.** An issue deleted in Linear or moved out of the
 initiative keeps its row (`--audit` lists it under *extra*; `ingest-records.ts` has
@@ -1794,8 +1807,8 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 1500 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 623 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
+bun test-schema.ts                          # 1505 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 631 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```
