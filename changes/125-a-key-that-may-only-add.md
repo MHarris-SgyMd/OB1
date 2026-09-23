@@ -1,17 +1,4 @@
----
-type: added
-bump: minor
-tickets: [SMD-1298]
-migrations: [049]
----
-
-## Changelog
-
-A capture-only key scope: a key that may call `capture_thought` and nothing else, for a session-end hook or an import pipeline whose credential sits in a config file; `capture_thought` takes a `source` label; migration 049 lets the agent registry record the scope (SMD-1298).
-
-## FORK
-
-A key that may only add — the `capture` scope, a `source` label on capture_thought, and migration 049 (SMD-1298)
+# 125. A key that may only add — the `capture` scope, a `source` label on capture_thought, and migration 049 (SMD-1298)
 
 **What changed.** `auth.ts` gains the `capture` scope — `capture_thought` and
 nothing else; index.ts asks canRead / canCapture / canWrite, one per tool

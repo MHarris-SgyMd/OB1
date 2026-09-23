@@ -1,17 +1,4 @@
----
-type: added
-bump: patch
-tickets: [SMD-1809]
-migrations: []
----
-
-## Changelog
-
-`evals/eval-calibration.ts` builds an outcome ledger from what the log already holds — every confidence the fork writes, beside every resolution it records — and scores each mechanism's calibration (reliability table, Brier, ECE, skill against the base rate). On the dogfood brain: the consolidation judge said 0.80 twenty-four times and the reviewer declined all twenty-four; the entity extractor said 1.00 on every mention and edge but one at the census, and the re-extraction running since emits 0.80 or 0.90 on under 1% — nothing resolves any of them; the metadata model's confidence band runs backwards (`high` right 22%, `medium` 46%, skill −2.3 against a constant); no thought carries a declared confidence, so the 17 resolved hypotheses are an outcome with nothing to score. Measurable, and every mechanism that speaks is overconfident; no control loop is built (SMD-1809).
-
-## FORK
-
-Was the confidence earned — an outcome ledger read from the log and a calibration score per mechanism, before any control loop (SMD-1809)
+# 124. Was the confidence earned — an outcome ledger read from the log and a calibration score per mechanism, before any control loop (SMD-1809)
 
 **What changed.** `evals/eval-calibration.ts`. The ledger is a read model, not a
 table: one row per (mechanism, claim, the confidence it carried, the outcome it
