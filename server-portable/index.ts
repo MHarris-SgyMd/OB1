@@ -378,7 +378,9 @@ function parseSince(raw: string | undefined): { since: string | null; after: str
   // own `-01` is a day, not a zone.
   const shape = /^(\d{4}-\d{2}-\d{2})(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(Z|[+-]\d{2}(?::?\d{2})?))?$/i.exec(v);
   if (!shape) return refused;
-  let iso = v.replace(" ", "T").replace(/(\.\d{3})\d+/, "$1");
+  // Upper-cased: the shape is matched case-blind, and a lowercase t or z is
+  // ISO-8601 to JSC (Bun) but not to every Date parser the server runs on.
+  let iso = v.toUpperCase().replace(" ", "T").replace(/(\.\d{3})\d+/, "$1");
   if (shape[2] && !/^z$/i.test(shape[2])) iso = iso.replace(/([+-]\d{2})(\d{2})$/, "$1:$2").replace(/([+-]\d{2})$/, "$1:00");
   const d = new Date(iso);
   // The date part round-trips on its own, whatever the clock or zone beside it
@@ -1361,17 +1363,17 @@ function buildServer(principal: Principal): McpServer {
       title: "What Changed",
       description:
         "List what changed in Open Brain — every capture, edit and deletion, oldest first, with who made it (by access-key name), the thought's ID, what moved, and whether it now supersedes another thought. " +
-        "Start from `since`: an ISO-8601 time (UTC, or with an offset), or the cursor a previous call ended with (its last line) to continue where you left off with no repeats; leave it out for the most recent changes. " +
+        "Start from `since`: an ISO-8601 time with Z or an offset (2026-09-22T08:00:00Z), a date (read as UTC midnight), or the cursor a previous call ended with (its last line) to continue where you left off with no repeats; leave it out for the most recent changes. " +
         "`others_only` leaves out this key's own writes — what everyone else did while you were away.",
       annotations: {
         readOnlyHint: true,
       },
       inputSchema: {
-        since: z.string().optional().describe("An ISO-8601 time (changes at or after it), or the cursor the previous page ended with (changes after that row). Omit for the most recent changes."),
+        since: z.string().optional().describe("An ISO-8601 time with its zone (changes at or after it; a clock with no Z or offset is refused), a date (UTC midnight), or the cursor the previous page ended with (changes after that row). Omit for the most recent changes."),
         others_only: z.boolean().optional().default(false).describe("Leave out this key's own writes"),
         agent: z.string().optional().describe("Only this writer's changes, by access-key name"),
         actions: z.array(z.enum(["capture", "update", "delete"])).optional().describe("Only these kinds of change"),
-        limit: z.number().int().min(1).max(200).optional().default(50),
+        limit: z.number().int().min(1).max(200).optional().default(50).describe("Changes per page, 1–200 (default 50); the reply's last line says whether more follow"),
       },
     },
     async ({ since, others_only, agent, actions, limit }) => {

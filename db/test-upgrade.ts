@@ -1885,8 +1885,13 @@ console.log("\n[20f] Migration 051 on a schema without 008, and on 008's table w
   assert(half.code === 1 && /051_thought_changes\.sql\s+FAILED: migration 051 needs 046 \(thought_audit\.actor_kind, origin\); this schema lacks it/.test(half.out),
     `…and on 008's table without 046's columns it names 046 (exit ${half.code})${half.code === 1 ? "" : `:\n${half.out}`}`);
   await sql.close();
-  // Complete the schema (046 onward) so [21] resets a full brain, through 051.
+  // Complete the schema (046 onward) so [21] resets a full brain, through 051 —
+  // and say so: the heading promises the file applies once both are there, and
+  // an apply that did not throw is not the function present (sixth review pass).
   await applyMigrations(URL_, { ...OPTS, only: (f) => f >= "046" });
+  const check = new SQL({ url: URL_, max: 1 });
+  assert((await check`SELECT to_regprocedure('thought_changes(timestamptz, uuid, text, text, text[], int)') IS NOT NULL AS ok`)[0].ok === true, "…and applied once both are there: the function is present");
+  await check.close();
 }
 
 console.log("\n[21] test-support's schema reset leaves nothing of the fork's in public — every table, function and type a migration creates is on its drop lists (SMD-1749)");

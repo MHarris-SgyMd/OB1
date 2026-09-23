@@ -6247,7 +6247,7 @@ console.log("\n[47] Migration 051: thought_changes — one page of the log, olde
   assert(/unknown action nope; the actions are capture, update and delete/.test(await refused(`SELECT * FROM thought_changes(NULL, NULL, NULL, NULL, ARRAY['nope'])`)) && /unknown action NULL/.test(await refused(`SELECT * FROM thought_changes(NULL, NULL, NULL, NULL, ARRAY[NULL]::text[])`)),
     "…and refuses a fourth word or a null element by name");
   assert(/pass a time \(p_since\) or a cursor \(p_after\), not both/.test(await refused(`SELECT * FROM thought_changes(now(), $1::uuid)`, [cursor0])), "a time beside a cursor is refused");
-  assert(/no audit row 00000000-0000-4000-8000-000000000000; a cursor is the id the previous page ended with/.test(await refused(`SELECT * FROM thought_changes(NULL, '00000000-0000-4000-8000-000000000000'::uuid)`)), "a cursor naming no row is refused by name");
+  assert(/no audit row 00000000-0000-4000-8000-0000000000ff; a cursor is the id the previous page ended with/.test(await refused(`SELECT * FROM thought_changes(NULL, '00000000-0000-4000-8000-0000000000ff'::uuid)`)), "a cursor naming no row is refused by name");
 
   // The walk: pages of five from the cursor — the boundary falls between the two rows that share a created_at.
   const p1 = await changes(`NULL, $1::uuid, NULL, NULL, NULL, 5`, [cursor0]);

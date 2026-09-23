@@ -362,8 +362,8 @@ console.log("\n[10] thought_changes: pages by cursor join with no gap or repeat,
   try { await laptop.call("thought_changes", { since: "yesterday" }); } catch (e) { bad = (e as Error).message; }
   assert(/Refused: `since` must be an ISO-8601 time with its zone \(2026-09-22T08:00:00Z\), a date \(2026-09-22\), or the cursor a previous call ended with, not "yesterday"\./.test(bad), `a since that is neither is refused, naming the forms (${bad.slice(0, 60)})`);
   let ghost = "";
-  try { await laptop.call("thought_changes", { since: "00000000-0000-4000-8000-000000000000" }); } catch (e) { ghost = (e as Error).message; }
-  assert(/no audit row 00000000-0000-4000-8000-000000000000; a cursor is the id the previous page ended with/.test(ghost), "a cursor naming no row is refused by the function, by name");
+  try { await laptop.call("thought_changes", { since: "00000000-0000-4000-8000-0000000000ff" }); } catch (e) { ghost = (e as Error).message; }
+  assert(/no audit row 00000000-0000-4000-8000-0000000000ff; a cursor is the id the previous page ended with/.test(ghost), "a cursor naming no row is refused by the function, by name");
 }
 
 await sql.close();

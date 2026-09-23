@@ -272,7 +272,8 @@ p_limit)` — one page, oldest first, from a time or from a cursor (the audit id
 page ended with; a keyset on `(created_at, id)`, so a walk never repeats a row
 and never skips a committed one — `created_at` is the writing transaction's
 start, so a write still in flight when a page is read is not on a later page of
-that walk; a reader who must not miss it re-reads from a time), each row with a bounded head of the text, an update's moved keys, the
+that walk; a reader who must not miss it re-reads from a time), each row with a
+bounded head of the text, an update's moved keys, the
 `supersedes` pointer before and after, and who. The MCP tool of the same name
 renders it; a self-hosted server role needs `SELECT` on `thought_audit` (the
 server group below).
