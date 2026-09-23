@@ -17,13 +17,13 @@ The original `server/` connector remains untouched and safe to leave connected: 
 - Working Open Brain setup ([guide](../../docs/01-getting-started.md))
 - **Enhanced Thoughts schema applied** — install `schemas/enhanced-thoughts` first (adds type, importance, sensitivity columns and utility RPCs)
 - OpenRouter API key (same one from the Getting Started guide)
-- Supabase CLI installed for deployment
+- [Bun](https://bun.sh) installed, and a checkout of this repository (the server runs under Bun, Step 1)
 - Optional: `schemas/smart-ingest` (unlocks `ops_capture_status` tool)
 - Optional: `schemas/knowledge-graph` (unlocks `graph_search`, `entity_detail`, `ops_source_monitor` tools)
 
 ## Security
 
-This server authenticates every request against `MCP_ACCESS_KEY` using a constant-time comparison, and accepts the key only through the `x-brain-key` header or `Authorization: Bearer …` — never a URL query string. It runs under the Supabase `service_role`, which bypasses RLS by design; that is intentional for MCP use, but it does mean this Edge Function is the sensitivity-filter boundary. All tools that expose thought content skip `sensitivity_tier = 'restricted'` rows, and `brain_capture_thought` rejects restricted content outright (same for `update_thought`).
+This server authenticates every request against `MCP_ACCESS_KEY` using a constant-time comparison, and accepts the key only through the `x-brain-key` header or `Authorization: Bearer …` — never a URL query string. It runs as whatever database role `SUPABASE_URL` names — Supabase's `service_role` on a Supabase database — which bypasses RLS by design; that is intentional for MCP use, but it does mean this server is the sensitivity-filter boundary. All tools that expose thought content skip `sensitivity_tier = 'restricted'` rows, and `brain_capture_thought` rejects restricted content outright (same for `update_thought`).
 
 **Companion schema exposure — please read before deploying publicly.** The enhanced-thoughts schema this server depends on is intended to install with `service_role`-only grants on the sensitive RPCs (`search_thoughts_text`, `brain_stats_aggregate`, `get_thought_connections`) — no `anon` GRANTs by default. That means those RPCs are reachable only via authenticated server-side code, including this MCP server. If your deployment's copy of that schema also grants `anon`, or if you later add public grants for a dashboard, be aware: `SECURITY DEFINER` + `anon` grant is an RLS bypass because the function body runs with the function owner's privileges. Combined with a publicly-reachable enhanced-mcp deployment, this would let anyone with your Supabase project URL + anon key read thought content directly via those RPCs — routing around this server's sensitivity filtering. Audit the grants on your companion schemas before exposing this MCP outside a trusted network.
 
@@ -38,8 +38,7 @@ ENHANCED MCP SERVER -- CREDENTIAL TRACKER
 ------------------------------------------
 
 FROM YOUR OPEN BRAIN SETUP
-  Project URL:           ____________
-  Service role key:      ____________
+  Postgres URL:          ____________
   MCP access key:        ____________
   OpenRouter API key:    ____________
 
@@ -52,30 +51,27 @@ OPTIONAL (for multi-provider fallback)
 
 ## Steps
 
-### 1. Deploy the Edge Function
+### 1. Run the MCP Server
 
-Copy the `integrations/enhanced-mcp/` folder into your Supabase project's `supabase/functions/` directory, then deploy:
+This server runs under [Bun](https://bun.sh) against your Postgres: it imports the repository's SQL shim (`compat/supabase-sql`, Bun's Postgres client in supabase-js's shape) and `compat/deno-on-bun.ts` (the two Deno globals it uses, on Bun), so it is not a Supabase Edge Function and `supabase functions deploy` does not apply (FORK.md change 74; SMD-1798 moved this server). From a checkout of this repository:
 
 ```bash
-supabase functions deploy enhanced-mcp --no-verify-jwt
+(cd extensions && bun install)   # once: the pinned hono, zod and MCP SDK the server imports
+NODE_PATH=extensions/node_modules \
+SUPABASE_URL='postgres://user:password@host:5432/openbrain' \
+MCP_ACCESS_KEY='your-access-key' \
+OPENROUTER_API_KEY='your-openrouter-key' \
+PORT=8787 bun integrations/enhanced-mcp/index.ts
 ```
+
+`SUPABASE_URL` carries the Postgres connection string — the shim keeps the variable names, so the code does not change — and `SUPABASE_SERVICE_ROLE_KEY` may be left unset; `NODE_PATH` resolves `hono`, `zod` and `@hono/mcp` from the pinned install, since an integration has no `node_modules` of its own, while the MCP SDK's subpaths Bun fetches into its own cache on first start — unpinned, and needing npm egress once — until SMD-1991 gives integrations an install of their own ([Run a migrated server under Bun](../../compat/supabase-sql/README.md#3-run-a-migrated-server-under-bun)). The server prints `Listening on http://localhost:8787/` (`PORT` unset, it listens on 8000, Deno's default — which podman's `gvproxy` also holds on macOS, hence 8787 here). To reach it from a hosted client, put it behind the same TLS proxy as the core server ([`SETUP.md`](../../SETUP.md)). `extensions/test-auth.ts` starts the server this way in CI, and `extensions/test-writes.ts` drives its thirteen tools against a real Postgres carrying `schemas/enhanced-thoughts` (SMD-1798).
 
 ### 2. Set Environment Variables
 
-Add your secrets to the deployed function:
+The variables above are the server's secrets, passed as environment. Optional multi-provider fallback (for metadata classification resilience):
 
 ```bash
-supabase secrets set \
-  MCP_ACCESS_KEY="your-access-key" \
-  OPENROUTER_API_KEY="your-openrouter-key"
-```
-
-Optional multi-provider fallback (for metadata classification resilience):
-
-```bash
-supabase secrets set \
-  OPENAI_API_KEY="your-openai-key" \
-  ANTHROPIC_API_KEY="your-anthropic-key"
+export OPENAI_API_KEY="your-openai-key" ANTHROPIC_API_KEY="your-anthropic-key"   # before the bun command above
 ```
 
 ### 3. Add as a Remote MCP Connector
@@ -83,7 +79,7 @@ supabase secrets set \
 In Claude Desktop (or any MCP-compatible client), add a new remote connector:
 
 - **Name:** `Open Brain Enhanced`
-- **URL:** `https://<your-project-ref>.supabase.co/functions/v1/enhanced-mcp`
+- **URL:** `http://your-host:8787/mcp` (behind your TLS proxy, its `https://` address)
 - **Header:** `x-brain-key: <your-mcp-access-key>` _(or `Authorization: Bearer <your-mcp-access-key>`)_
 
 Header-only authentication — the access key is NOT accepted as a `?key=` URL query parameter. Query strings surface in Supabase, CDN, and proxy access logs, which leaks the credential into places that don't get rotated with the secret itself. Use the header (or `Authorization: Bearer …`) exclusively.
@@ -124,19 +120,19 @@ If you also have the original `server/` connector active, you will see both tool
 |---|------|-------------|-----------------|
 | 1 | `brain_search_thoughts` | Semantic vector or full-text search with date and metadata filters | Enhanced Thoughts |
 | 2 | `brain_list_thoughts` | Paginated browsing with type, source, date filters and sorting | Enhanced Thoughts |
-| 3 | `get_thought` | Fetch a single thought by ID with full metadata | Enhanced Thoughts |
+| 3 | `get_thought` | Fetch a single thought by its UUID with full metadata | Enhanced Thoughts |
 | 4 | `update_thought` | Update content with automatic re-embedding and re-classification, through the database's `update_thought`; takes the thought's UUID | Enhanced Thoughts |
 | 5 | `brain_capture_thought` | Capture with dedup, sensitivity detection, and LLM classification | Enhanced Thoughts |
 | 6 | `brain_thought_stats` | Type and topic statistics via server-side aggregation | Enhanced Thoughts |
 | 7 | `search_thoughts_text` | Direct full-text search (faster for exact phrase matching) | Enhanced Thoughts |
 | 8 | `count_thoughts` | Fast filtered count without returning content | Enhanced Thoughts |
-| 9 | `related_thoughts` | Find thoughts connected by shared topics or people | Enhanced Thoughts |
+| 9 | `related_thoughts` | Find thoughts connected by shared topics or people; takes the thought's UUID | Enhanced Thoughts |
 | 10 | `ops_capture_status` | Ingestion health: job status, error rates, recent failures | Smart Ingest |
 | 11 | `graph_search` | Search knowledge graph entities with thought counts | Knowledge Graph |
-| 12 | `entity_detail` | Full entity profile: aliases, linked thoughts, relationship edges | Knowledge Graph |
+| 12 | `entity_detail` | Full entity profile: aliases, linked thoughts, relationship edges; takes the entity's id as the installed Knowledge Graph schema declares it (a UUID or an integer) | Knowledge Graph |
 | 13 | `ops_source_monitor` | Per-source ingestion volume, errors, and failure samples | Ops Views |
 
-> **On this fork (FORK.md change 69, SMD-1228).** `update_thought` and `brain_capture_thought` write a thought's content and vector through the database's own functions — `update_thought` (`db/migrations/033`) and the 3-argument `upsert_thought` (`035`) — rather than with a raw update of the row, so the content fingerprint follows the text, the model label follows the vector and the previous vector's chunk rows go; the enhanced-thoughts columns this schema adds (`type`, `sensitivity_tier`, `importance`, `quality_score`, `source_type`) are written beside them by an update that carries neither content nor vector. `brain_capture_thought` reads the fork's return — `id` (a UUID), `fingerprint`, `existed` — as well as upstream's; before, every capture here threw after the row was written. The enhanced columns are set for a fresh row; a re-capture of stored text leaves them (the tier rule is escalation-only). `update_thought` takes the thought's UUID, which is what `thoughts.id` is on this fork; the other tools still take upstream's integer ids and cannot address a row here. `extensions/test-writes.ts` drives both tools against Postgres. The vectors these writers make are `openai/text-embedding-3-small`'s, 1536 wide, so the brain must be built at that model and width (`OB1_EMBEDDING_MODEL=openai/text-embedding-3-small`, `OB1_EMBEDDING_DIM=1536` — upstream's Supabase brain is); on this fork's default, `qwen3-embedding:4b` at 1024, the function refuses the vector and the whole capture or edit fails — loudly, where the raw write failed the same way or had its error ignored. Since FORK.md change 103 (SMD-1541) the audit row a capture or edit leaves (`thought_audit`, `db/migrations/008`; the trigger's body is `025`'s) names `MCP_ACCESS_KEY` — the one key this server holds — as the actor, with this server named as the row's `origin` (since migration `046`, SMD-1730; as `via` in the row's `actor_context` before it); before it named nobody.
+> **On this fork (FORK.md change 69, SMD-1228).** `update_thought` and `brain_capture_thought` write a thought's content and vector through the database's own functions — `update_thought` (`db/migrations/033`) and the 3-argument `upsert_thought` (`035`) — rather than with a raw update of the row, so the content fingerprint follows the text, the model label follows the vector and the previous vector's chunk rows go; the enhanced-thoughts columns this schema adds (`type`, `sensitivity_tier`, `importance`, `quality_score`, `source_type`) are written beside them by an update that carries neither content nor vector. `brain_capture_thought` reads the fork's return — `id` (a UUID), `fingerprint`, `existed` — as well as upstream's; before, every capture here threw after the row was written. The enhanced columns are set for a fresh row; a re-capture of stored text leaves them (the tier rule is escalation-only). `update_thought` takes the thought's UUID, which is what `thoughts.id` is on this fork — and since SMD-1525 so do `get_thought` and `related_thoughts`, which took upstream's integer ids and could address no row here; the entity tools carry an entity's id as the installed Knowledge Graph schema declares it. `extensions/test-writes.ts` drives both tools against Postgres. The vectors these writers make are `openai/text-embedding-3-small`'s, 1536 wide, so the brain must be built at that model and width (`OB1_EMBEDDING_MODEL=openai/text-embedding-3-small`, `OB1_EMBEDDING_DIM=1536` — upstream's Supabase brain is); on this fork's default, `qwen3-embedding:4b` at 1024, the function refuses the vector and the whole capture or edit fails — loudly, where the raw write failed the same way or had its error ignored. Since FORK.md change 103 (SMD-1541) the audit row a capture or edit leaves (`thought_audit`, `db/migrations/008`; the trigger's body is `025`'s) names `MCP_ACCESS_KEY` — the one key this server holds — as the actor, with this server named as the row's `origin` (since migration `046`, SMD-1730; as `via` in the row's `actor_context` before it); before it named nobody.
 
 ### Intentionally Excluded From This Release
 
@@ -149,7 +145,7 @@ If you also have the original `server/` connector active, you will see both tool
 ## Troubleshooting
 
 **Issue: "Invalid or missing access key" error**
-Solution: Ensure your `MCP_ACCESS_KEY` secret is set in Supabase and matches the key in your connector configuration. The key must be passed via the `x-brain-key` header or `Authorization: Bearer …`. Query-string auth (`?key=…`) is intentionally not supported — it would leak the credential into access logs.
+Solution: Ensure `MCP_ACCESS_KEY` is set in the server's environment and matches the key in your connector configuration. The key must be passed via the `x-brain-key` header or `Authorization: Bearer …`. Query-string auth (`?key=…`) is intentionally not supported — it would leak the credential into access logs.
 
 **Issue: "No embedding API key configured" error**
 Solution: At least one of `OPENROUTER_API_KEY` or `OPENAI_API_KEY` must be set. OpenRouter is the default and recommended provider for OB1.

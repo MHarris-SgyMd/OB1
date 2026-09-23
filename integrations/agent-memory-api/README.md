@@ -20,14 +20,14 @@ sequenceDiagram
 
 ## What It Does
 
-This Edge Function exposes the v1 OB1 Agent Memory contract. OpenClaw is the first launch runtime, but these endpoints are runtime-neutral and can be used by Codex, Claude Code, local agents, n8n, or future SQLite adapters.
+This API exposes the v1 OB1 Agent Memory contract. OpenClaw is the first launch runtime, but these endpoints are runtime-neutral and can be used by Codex, Claude Code, local agents, n8n, or future SQLite adapters.
 
 ## Prerequisites
 
 - Working Open Brain setup ([guide](../../docs/01-getting-started.md))
 - [`schemas/agent-memory`](../../schemas/agent-memory/) applied
-- Supabase CLI installed
-- `OPENROUTER_API_KEY` and `MCP_ACCESS_KEYS` configured as Supabase secrets — `name:scope:sha256` entries, minted as [Deploy an Edge Function, Step 3](../../primitives/deploy-edge-function/README.md#step-3-mint-an-access-key) shows (the older single `MCP_ACCESS_KEY` still works). The routes that write — `POST /writeback`, `POST /recall/:request_id/usage`, `PATCH /memories/:id/review` — answer 403 to a `read` key; recall and the listings serve either scope, but a recall under a `read` key stores no trace and returns `request_id: null`, so usage reporting needs a `write` key end to end.
+- [Bun](https://bun.sh) installed, and a checkout of this repository (the API runs under Bun, Step 2)
+- `OPENROUTER_API_KEY` and `MCP_ACCESS_KEYS` in the server's environment — `name:scope:sha256` entries, minted as [Deploy an Edge Function, Step 3](../../primitives/deploy-edge-function/README.md#step-3-mint-an-access-key) shows (the older single `MCP_ACCESS_KEY` still works). The routes that write — `POST /writeback`, `POST /recall/:request_id/usage`, `PATCH /memories/:id/review` — answer 403 to a `read` key; recall and the listings serve either scope, but a recall under a `read` key stores no trace and returns `request_id: null`, so usage reporting needs a `write` key end to end.
 
 ## Credential Tracker
 
@@ -36,7 +36,7 @@ AGENT MEMORY API -- CREDENTIAL TRACKER
 --------------------------------------
 
 FROM YOUR OPEN BRAIN SETUP
-  Supabase Project ref:       ____________
+  Postgres URL (SUPABASE_URL): ____________
   MCP Access Key:             ____________
   OpenRouter API Key:         ____________
 
@@ -55,27 +55,27 @@ Apply [`schemas/agent-memory/schema.sql`](../../schemas/agent-memory/schema.sql)
 
 **Done when:** the `agent_memories` and `agent_memory_recall_traces` tables exist.
 
-![Step 2](https://img.shields.io/badge/Step_2-Deploy_the_Edge_Function-1E88E5?style=for-the-badge)
+![Step 2](https://img.shields.io/badge/Step_2-Run_the_API-1E88E5?style=for-the-badge)
 
-Copy this folder into your Supabase project:
+This API runs under [Bun](https://bun.sh) against your Postgres: it imports the repository's SQL shim (`compat/supabase-sql`, Bun's Postgres client in supabase-js's shape) and `compat/deno-on-bun.ts` (the two Deno globals it uses, on Bun), so it is not a Supabase Edge Function and `supabase functions deploy` does not apply (FORK.md change 74; SMD-1798 moved this server — its two embeds were servable since change 77, and it waited on the deploy story). It imports the access-key module from `../_shared/auth.ts` (the copy in `integrations/_shared/`, the core server's). From a checkout of this repository:
 
 ```bash
-supabase functions new agent-memory-api
-cp integrations/agent-memory-api/index.ts supabase/functions/agent-memory-api/index.ts
-cp integrations/agent-memory-api/deno.json supabase/functions/agent-memory-api/deno.json
-mkdir -p supabase/functions/_shared
-cp integrations/_shared/auth.ts supabase/functions/_shared/auth.ts
-supabase functions deploy agent-memory-api --no-verify-jwt
+(cd extensions && bun install)   # once: the pinned hono and zod the server imports
+NODE_PATH=extensions/node_modules \
+SUPABASE_URL='postgres://user:password@host:5432/openbrain' \
+MCP_ACCESS_KEYS='agent:write:<sha256-of-your-key>' \
+OPENROUTER_API_KEY='…' \
+PORT=8787 bun integrations/agent-memory-api/index.ts
 ```
 
-The function imports the access-key module from `../_shared/auth.ts` — the core server's, copied so Supabase bundles it (if you already have `supabase/functions/_shared/auth.ts` from another server on this fork, it is the same file).
+`SUPABASE_URL` carries the Postgres connection string — the shim keeps the variable names, so the code does not change — and `SUPABASE_SERVICE_ROLE_KEY` may be left unset; `NODE_PATH` resolves `hono` and `zod` — all this API imports — from the pinned install, since an integration has no `node_modules` of its own ([Run a migrated server under Bun](../../compat/supabase-sql/README.md#3-run-a-migrated-server-under-bun)). `OPENROUTER_API_KEY` embeds a recall's query and a write-back's memories. The server prints `Listening on http://localhost:8787/` (`PORT` unset, it listens on 8000, Deno's default — which podman's `gvproxy` also holds on macOS, hence 8787 here); the routes below are served at that root, and at `/agent-memory-api/…` too, the prefix Supabase gave them. To reach it from a hosted runtime, put it behind the same TLS proxy as the core server ([`SETUP.md`](../../SETUP.md)). `extensions/test-auth.ts` starts the server this way in CI, and `extensions/test-writes.ts` drives its routes against a real Postgres carrying `schemas/agent-memory` (SMD-1798).
 
-**Done when:** `supabase functions list` shows `agent-memory-api` as active.
+**Done when:** the server prints its `Listening on` line.
 
 ![Step 3](https://img.shields.io/badge/Step_3-Test_Health-1E88E5?style=for-the-badge)
 
 ```bash
-curl "https://YOUR_PROJECT_REF.supabase.co/functions/v1/agent-memory-api/health?key=YOUR_MCP_ACCESS_KEY"
+curl "http://localhost:8787/health?key=YOUR_MCP_ACCESS_KEY"
 ```
 
 **Done when:** the response includes `"ok": true`.
@@ -111,10 +111,10 @@ The trust model is documented in [Safe Agent Memory and Provenance](../../docs/s
 
 ## Smoke Harness
 
-Use the live smoke harness after deploying the Edge Function or rotating secrets, with a `write`-scoped key — the harness writes back first, then reports usage against the recall's `request_id`:
+Use the live smoke harness after starting the server or rotating a key, with a `write`-scoped key — the harness writes back first, then reports usage against the recall's `request_id`:
 
 ```bash
-OB1_AGENT_MEMORY_ENDPOINT="https://YOUR_PROJECT_REF.supabase.co/functions/v1/agent-memory-api" \
+OB1_AGENT_MEMORY_ENDPOINT="http://localhost:8787" \
 OB1_AGENT_MEMORY_KEY="YOUR_MCP_ACCESS_KEY" \
 OB1_AGENT_MEMORY_WORKSPACE_ID="ob1-staging" \
 OB1_AGENT_MEMORY_PROJECT_ID="agent-memory-api-smoke" \
@@ -126,7 +126,7 @@ The harness checks health, write-back policy defaults, conservative recall gatin
 For personal databases, use the cleanup harness to find or reject smoke/test memories without deleting rows:
 
 ```bash
-OB1_AGENT_MEMORY_ENDPOINT="https://YOUR_PROJECT_REF.supabase.co/functions/v1/agent-memory-api" \
+OB1_AGENT_MEMORY_ENDPOINT="http://localhost:8787" \
 OB1_AGENT_MEMORY_KEY="YOUR_MCP_ACCESS_KEY" \
 OB1_AGENT_MEMORY_WORKSPACE_ID="ob1-staging" \
 OB1_AGENT_MEMORY_TEST_PROJECT_IDS="agent-memory-api-smoke,agent-memory-openclaw-smoke" \

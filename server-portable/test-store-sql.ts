@@ -267,6 +267,21 @@ console.log("\n[4] listThoughts reproduces the PostgREST filters");
 
   const combined = await store.listThoughts({ limit: 10, type: "note", topic: "beta", person: "Ada", days: 1 });
   assert(combined.length === 1, "filters combine with AND");
+
+  // SMD-1726: the two keys migration 050 stamps from the write's envelope, as
+  // containment beside the others. The store's own capture carries the actor;
+  // the registry classifies the key. Two rows in, two rows out, so [5]'s
+  // counts hold.
+  const raw = new SQL({ url: URL_, max: 1 });
+  await raw`SELECT set_agent_kind('op-key', 'operator')`;
+  const opRow = await store.captureThought({ content: "the operator's own line", payload: { metadata: { type: "note" } }, embedding: unit(3), actor: { name: "op-key", via: "test-store-sql" } });
+  const whoRow = await store.captureThought({ content: "an unclassified key's line", payload: { metadata: {} }, embedding: unit(4), actor: { name: "who-key", via: "test-store-sql" } });
+  assert((await store.listThoughts({ limit: 10, saidBy: "operator" })).map((r) => r.id).join() === opRow.id, "saidBy matches metadata.actor_kind — the operator's row and no other");
+  assert((await store.listThoughts({ limit: 10, actor: "op-key" })).length === 1 && (await store.listThoughts({ limit: 10, actor: "who-key" })).map((r) => r.id).join() === whoRow.id, "actor matches metadata.actor_name, classified key or not");
+  assert((await store.listThoughts({ limit: 10, saidBy: "agent" })).length === 0, "an unmatched kind returns nothing");
+  assert((await store.listThoughts({ limit: 10, saidBy: "operator", type: "note" })).length === 1 && (await store.listThoughts({ limit: 10, saidBy: "operator", type: "idea" })).length === 0, "…and they combine with the others by AND");
+  await raw`DELETE FROM thoughts WHERE id = ${opRow.id}::uuid OR id = ${whoRow.id}::uuid`;
+  await raw.close();
 }
 
 console.log("\n[5] Stats counting and paging");
@@ -371,7 +386,9 @@ console.log("\n[8b] captureActorOf reads the capture row's actor, the lower id f
   assert(first?.actorName === "owner", `the capture row's actor is read back (${first?.actorName})`);
   // A second capture row with the SAME created_at (theory: one per thought by construction) — the tiebreak is the id, a uuid, so the lowest id is the owner every time, not whichever row the planner met first.
   const sql = new SQL({ url: URL_, max: 1 });
-  await sql`INSERT INTO thought_audit SELECT (json_populate_record(t, '{"id":"00000000-0000-4000-8000-000000000000","actor_name":"first-by-id"}'::json)).* FROM thought_audit t WHERE t.thought_id = ${owned.id}::uuid AND t.action = 'capture'`;
+  // A whole-row copy carries thought_audit.seq (050's identity, GENERATED ALWAYS — a
+  // writer may not assign it); the copy keeps the source's value by saying so.
+  await sql`INSERT INTO thought_audit OVERRIDING SYSTEM VALUE SELECT (json_populate_record(t, '{"id":"00000000-0000-4000-8000-000000000000","actor_name":"first-by-id"}'::json)).* FROM thought_audit t WHERE t.thought_id = ${owned.id}::uuid AND t.action = 'capture'`;
   const tied = await store.captureActorOf(owned.id);
   assert(tied?.actorName === "first-by-id", `on a tied created_at the lower id's actor is returned (${tied?.actorName})`);
   assert((await store.captureActorOf("0000dead-0000-4000-8000-000000000000")) === null && (await store.captureActorOf("not-an-id")) === null, "a ghost and a malformed id read as no row");

@@ -62,14 +62,16 @@ MCP SERVER (new for this extension)
 
 ### 1. Set Up the Database Schema
 
-Run the SQL in `schema.sql` in your Supabase SQL Editor:
+Run the SQL in `schema.sql` against your Open Brain database, as the role the server will connect with. Its row-level-security policies call Supabase's `auth.uid()`, which a plain Postgres does not have, so give it that function first — the server connects as one role and scopes rows by `DEFAULT_USER_ID` itself, and the table owner is not subject to the policies. **On a Supabase database skip the first command**: `auth.uid()` exists there and is GoTrue's.
 
 ```bash
-# Navigate to your Supabase project SQL editor
-# https://supabase.com/dashboard/project/YOUR_PROJECT_ID/sql/new
+psql "$DATABASE_URL" -c "CREATE SCHEMA IF NOT EXISTS auth;
+  CREATE FUNCTION auth.uid() RETURNS uuid LANGUAGE sql STABLE AS 'SELECT NULL::uuid';
+  CREATE FUNCTION auth.jwt() RETURNS jsonb LANGUAGE sql STABLE AS 'SELECT ''{}''::jsonb';"
+psql "$DATABASE_URL" -f extensions/job-hunt/schema.sql
 ```
 
-Copy and paste the contents of `schema.sql` and click Run. This creates five RLS-enabled tables with proper foreign key relationships and cascading deletes.
+(Or paste `schema.sql` alone into the Supabase SQL Editor, if that is where your database lives.) This creates five RLS-enabled tables with proper foreign key relationships and cascading deletes. `link_contact_to_professional_crm` writes into Extension 5's `professional_contacts`, so apply [professional-crm's schema](../professional-crm/README.md) too before using that tool.
 
 ### 2. Generate Your User ID
 
@@ -82,22 +84,29 @@ uuidgen | tr '[:upper:]' '[:lower:]'
 # Or use any UUID generator — the value just needs to be unique to you
 ```
 
-Set it as an environment variable for your Edge Function:
+Set it in the server's environment (Step 3):
 
 ```bash
-supabase secrets set DEFAULT_USER_ID=your-generated-uuid-here
+export DEFAULT_USER_ID=your-generated-uuid-here   # or on the command line in Step 3
 ```
 
 > If you already set `DEFAULT_USER_ID` for a previous extension, you can skip this step — all extensions share the same user ID.
 
-### 3. Deploy the MCP Server
+### 3. Run the MCP Server
 
-Follow the [Deploy an Edge Function](../../primitives/deploy-edge-function/) guide using these values:
+This server runs under [Bun](https://bun.sh) against your Postgres: it imports the repository's SQL shim (`compat/supabase-sql`, Bun's Postgres client in supabase-js's shape) and `compat/deno-on-bun.ts` (the two Deno globals it uses, on Bun), so it is not a Supabase Edge Function and `supabase functions deploy` does not apply (FORK.md change 74; SMD-1798 moved this server, whose three-level `applications!inner(…, job_postings!inner(…, companies!inner(*)))` embed and `company_id.in.(…)` search the shim did not read until then). From a checkout of this repository:
 
-| Setting | Value |
-|---------|-------|
-| Function name | `job-hunt-mcp` |
-| Download path | `extensions/job-hunt` |
+```bash
+(cd extensions && bun install)   # once: the pinned hono, zod and MCP SDK the server imports
+SUPABASE_URL='postgres://user:password@host:5432/openbrain' \
+MCP_ACCESS_KEYS='laptop:write:paste-the-hash-here' \
+DEFAULT_USER_ID='your-generated-uuid-here' \
+PORT=8787 bun extensions/job-hunt/index.ts
+```
+
+`SUPABASE_URL` carries the Postgres connection string — the shim keeps the variable names, so the code does not change — and `SUPABASE_SERVICE_ROLE_KEY` may be left unset. Mint the access key as [Deploy an Edge Function, Step 3](../../primitives/deploy-edge-function/README.md#step-3-mint-an-access-key) shows and set its `name:scope:hash` line in `MCP_ACCESS_KEYS` (the older single `MCP_ACCESS_KEY` still works, with write scope). The server prints `Listening on http://localhost:8787/` (`PORT` unset, it listens on 8000, Deno's default — which podman's `gvproxy` also holds on macOS, hence 8787 here); your **MCP Server URL** is `http://your-host:8787/mcp`, and your **MCP Connection URL** adds the key: `http://your-host:8787/mcp?key=your-access-key` — a read-scoped key is the one to put in a connector URL. To reach it from a hosted client, put it behind the same TLS proxy as the core server ([`SETUP.md`](../../SETUP.md)). `extensions/test-auth.ts` starts the server this way in CI. Each server holds one pool of `OB1_PG_POOL` connections (ten unless set) for its life, shared by every request.
+
+> **Every tool of this server runs on the fork.** `extensions/test-tools.ts` drives all ten against a real Postgres carrying this `schema.sql` and professional-crm's in CI — the pipeline and the upcoming interviews with their application, posting and company nested three deep, the contact search through a matched company, the link into Professional CRM (SMD-1798).
 
 ### 4. Connect to Your AI
 

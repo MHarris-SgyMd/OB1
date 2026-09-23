@@ -87,7 +87,7 @@ const STAND_IN = {
 // ── Deno's specifiers, on Bun ────────────────────────────────────────────────
 
 /** The packages this directory installs; the recipes' and integrations' deno.json pin the same names. */
-const PACKAGES = /^(hono|zod|@hono\/mcp|@modelcontextprotocol\/sdk|@supabase\/supabase-js)(\/|$)/;
+const PACKAGES = /^(hono|zod|@hono\/mcp|@modelcontextprotocol\/sdk)(\/|$)/;
 const PG_STUB = join(tmpdir(), `ob1-test-auth-deno-postgres-stub-${process.pid}.ts`);
 await Bun.write(PG_STUB,
   "export class Pool { constructor(..._: unknown[]) {} connect(): never { throw new Error('the test never queries'); } }\n");
@@ -126,7 +126,7 @@ type Server = {
   /** The env names this server reads its keys from (the shared server and the auditor have their own). */
   keys: string;
   legacy: string;
-  /** What SUPABASE_URL must look like: the SQL shim wants postgres://, supabase-js an https:// URL. */
+  /** What SUPABASE_URL must look like: the SQL shim wants postgres:// (every server is on it since SMD-1798). */
   url: string;
   /** MCP: tool names. HTTP: "METHOD /path". A worker has one operation, gated by dry_run. */
   reads: string[];
@@ -143,16 +143,13 @@ type Server = {
 const PG = "postgres://ob1:stub@stub.invalid:5432/ob1";
 /** For a server whose handler queries before it can answer: refused at once, no name to resolve. */
 const PG_REFUSED = "postgres://ob1:stub@127.0.0.1:1/ob1";
-const HTTPS = "https://stub.invalid";
-/** supabase-js's shape of the same: a valid URL nothing answers, refused at once. */
-const HTTPS_REFUSED = "https://127.0.0.1:1";
 const ext = (file: string, reads: string[], writes: string[], o: Partial<Server> = {}): Server =>
   ({ file: `extensions/${file}`, kind: "mcp", keys: "MCP_ACCESS_KEYS", legacy: "MCP_ACCESS_KEY", url: PG, reads, writes, ...o });
 const vendored = (file: string, kind: Kind, reads: string[], writes: string[], o: Partial<Server> = {}): Server =>
   ({ file, kind, keys: "MCP_ACCESS_KEYS", legacy: "MCP_ACCESS_KEY", url: PG, reads, writes, ...o });
-// To add a server: one entry below — `url` in the shape its client accepts (PG
-// for the SQL shim, HTTPS for supabase-js; the *_REFUSED forms when a handler
-// queries before it can answer); `kind` picks the assertions; a REST server
+// To add a server: one entry below — `url` PG_REFUSED when a handler queries
+// before it can answer (every server is on the SQL shim since SMD-1798; the
+// HTTPS stubs supabase-js took went with it); `kind` picks the assertions; a REST server
 // lists its routes as "METHOD /path" and needs `readProbe`, a worker `dryRun`
 // and `unconfigured`. Then, as needed: RPC_READS and LOG_TABLES for what its
 // reads may call; PACKAGES and extensions/package.json for a new npm package
@@ -163,14 +160,14 @@ const vendored = (file: string, kind: Kind, reads: string[], writes: string[], o
 const SERVERS: Server[] = [
   // The seven extension servers (change 64).
   ext("family-calendar/index.ts", ["get_week_schedule", "search_activities", "get_upcoming_dates"],
-    ["add_family_member", "add_activity", "add_important_date"], { url: HTTPS, health: "/" }),
+    ["add_family_member", "add_activity", "add_important_date"], { health: "/" }),
   ext("home-maintenance/index.ts", ["get_upcoming_maintenance", "search_maintenance_history"],
     ["add_maintenance_task", "log_maintenance"]),
   ext("household-knowledge/index.ts", ["search_household_items", "get_item_details", "list_vendors"],
     ["add_household_item", "add_vendor"]),
   ext("job-hunt/index.ts", ["get_pipeline_overview", "get_upcoming_interviews", "search_job_contacts"],
     ["add_company", "add_job_posting", "add_job_contact", "submit_application", "schedule_interview",
-     "log_interview_notes", "link_contact_to_professional_crm"], { url: HTTPS }),
+     "log_interview_notes", "link_contact_to_professional_crm"]),
   ext("meal-planning/index.ts", ["search_recipes", "get_meal_plan"],
     ["add_recipe", "update_recipe", "create_meal_plan", "generate_shopping_list"]),
   ext("professional-crm/index.ts", ["crm_search_contacts", "crm_get_contact_history", "crm_get_follow_ups", "crm_prep_context", "crm_stale_contacts"],
@@ -180,7 +177,7 @@ const SERVERS: Server[] = [
   // The recipes and integrations (change 67).
   vendored("recipes/edge-function-cost-optimization/examples/before/per-request-server.ts", "mcp", ["list_vendors"], []),
   vendored("recipes/ob-graph/index.ts", "mcp", ["search_nodes", "get_neighbors", "traverse_graph", "find_path", "list_edge_types"],
-    ["create_node", "create_edge", "update_node", "delete_node", "delete_edge"], { url: HTTPS, health: "/health" }),
+    ["create_node", "create_edge", "update_node", "delete_node", "delete_edge"], { health: "/health" }),
   vendored("recipes/work-operating-model-activation/index.ts", "mcp", ["query_operating_model"],
     ["start_operating_model_session", "save_operating_model_layer", "generate_operating_model_exports"], { health: "/health" }),
   vendored("integrations/delete-thought-mcp/index.ts", "mcp", [], ["delete_thought"]),
@@ -188,7 +185,7 @@ const SERVERS: Server[] = [
   vendored("integrations/kubernetes-deployment/index.ts", "mcp", ["search", "fetch", "search_thoughts", "list_thoughts", "thought_stats"], ["capture_thought"]),
   vendored("integrations/agent-memory-api/index.ts", "rest",
     ["GET /health", "POST /recall", "GET /memories/review", "GET /memories", "GET /memories/:id", "GET /recall-traces/:request_id"],
-    ["POST /writeback", "POST /recall/:request_id/usage", "PATCH /memories/:id/review"], { url: HTTPS_REFUSED, readProbe: "POST /recall" }),
+    ["POST /writeback", "POST /recall/:request_id/usage", "PATCH /memories/:id/review"], { url: PG_REFUSED, readProbe: "POST /recall" }),
   vendored("integrations/open-brain-rest/index.ts", "rest",
     ["GET /health", "GET /stats", "GET /thoughts", "GET /thought/:id", "POST /search", "GET /duplicates", "GET /thought/:id/connections",
      "GET /thought/:id/reflection", "GET /ingestion-jobs", "GET /ingestion-jobs/:id", "POST /ingestion-jobs/:id/execute"],
@@ -198,7 +195,7 @@ const SERVERS: Server[] = [
     { keys: "AUDITOR_ACCESS_KEYS", legacy: "AUDITOR_ACCESS_KEY", url: PG_REFUSED, dryRun: "body", unconfigured: 401 }),
   vendored("integrations/entity-extraction-worker/index.ts", "worker", [], [], { dryRun: "query", unconfigured: 503 }),
   vendored("integrations/consolidation-workers/bio/index.ts", "worker", [], [], { dryRun: "query", unconfigured: 503 }),
-  vendored("integrations/consolidation-workers/metadata-norm/index.ts", "worker", [], [], { url: HTTPS, dryRun: "query", unconfigured: 503 }),
+  vendored("integrations/consolidation-workers/metadata-norm/index.ts", "worker", [], [], { dryRun: "query", unconfigured: 503 }),
 ];
 
 /** The webhook receiver: a secret the caller echoes, compared through the module's secretMatches(). */
@@ -460,7 +457,7 @@ for (const s of SERVERS.filter((s) => s.kind === "mcp")) {
 {
   const file = "integrations/enhanced-mcp/index.ts";
   console.log(`\n[${file}]`);
-  process.env.SUPABASE_URL = HTTPS;
+  process.env.SUPABASE_URL = PG;
   process.env.MCP_ACCESS_KEY = LEGACY_KEY;
   const before = served.length;
   try {
@@ -573,7 +570,8 @@ console.log(`\n[${WEBHOOK.file}]`);
 // with the environment its README documents — PORT=0, and the polyfill
 // prints the port the OS chose in Deno's own `Listening on` line; NODE_PATH,
 // since a recipe or integration has no node_modules on its own path and
-// resolves hono and the SDK from this directory's pinned install, as its
+// resolves hono, zod and @hono/mcp from this directory's pinned install (the
+// MCP SDK's subpaths it does not: Bun fetches those into its cache, SMD-1991), as its
 // README says — then asked over the port for the one thing that proves it is
 // that server, authenticating: an MCP server's tools/list under a write key
 // is its full tool list, an API's read probe passes under a read key, a
@@ -628,6 +626,12 @@ const LIVE: Live[] = [
       assert((await fetch(base + path, { method, headers: { "x-brain-key": "not-a-key", "Content-Type": "application/json" }, body })).status === 401, "…and a wrong key is refused with 401");
     },
   })),
+  // The MCP server on its own single-key compare (the section above): on the shim since SMD-1798, so started here too.
+  { file: "integrations/enhanced-mcp/index.ts", env: { MCP_ACCESS_KEY: LEGACY_KEY, SUPABASE_URL: PG }, probe: async (base) => {
+    const r = await parse(await fetch(`${base}/mcp`, { method: "POST", headers: { ...RPC, "x-brain-key": LEGACY_KEY }, body: JSON.stringify(LIST) }));
+    assert(r.status === 200 && toolsOf(r).length === 13, `integrations/enhanced-mcp/index.ts: under bun, the configured key's tools/list is its 13 tools (${r.status}: ${toolsOf(r).length})`);
+    assert((await fetch(`${base}/mcp`, { method: "POST", headers: { ...RPC, "x-brain-key": "not-a-key" }, body: JSON.stringify(LIST) })).status === 401, "…and a wrong key is refused with 401");
+  } },
 ];
 {
   const inTree = [...new Bun.Glob("{extensions,recipes,integrations}/**/*.ts").scanSync({ cwd: ROOT })]
@@ -912,7 +916,8 @@ for (const t of TEXT_ONLY) {
     const file = join(dir, "deno.json");
     if (!existsSync(join(ROOT, file)) || seen.has(file)) continue;
     seen.add(file);
-    const imports = JSON.parse(readFileSync(join(ROOT, file), "utf8")).imports as Record<string, string>;
+    // A deno.json with no import map at all (consolidation-workers', once supabase-js left it) pins nothing.
+    const imports = (JSON.parse(readFileSync(join(ROOT, file), "utf8")).imports ?? {}) as Record<string, string>;
     // Every import of a package installed here — scoped or not, and whatever its spelling (an unversioned
     // `npm:hono`, a `jsr:` or URL import would deploy on latest while the test ran the pin) — is this exact npm pin.
     const drift = Object.entries(imports).filter(([name, spec]) => name in pkg && spec !== `npm:${name}@${pkg[name]}`);

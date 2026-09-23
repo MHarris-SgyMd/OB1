@@ -125,7 +125,9 @@ console.log("\n[8b] captureActorOf reads the capture row's actor, the lower id f
   assert(first?.actorName === "owner", `the capture row's actor is read back (${first?.actorName})`);
   // A second capture row with the SAME created_at (theory: one per thought by construction) — the tiebreak is the id, a uuid, so the lowest id is the owner every time, not whichever row the planner met first.
   const sql = new SQL({ url: URL_, max: 1 });
-  await sql`INSERT INTO thought_audit SELECT (json_populate_record(t, '{"id":"00000000-0000-4000-8000-000000000000","actor_name":"first-by-id"}'::json)).* FROM thought_audit t WHERE t.thought_id = ${owned.id}::uuid AND t.action = 'capture'`;
+  // A whole-row copy carries thought_audit.seq (050's identity, GENERATED ALWAYS — a
+  // writer may not assign it); the copy keeps the source's value by saying so.
+  await sql`INSERT INTO thought_audit OVERRIDING SYSTEM VALUE SELECT (json_populate_record(t, '{"id":"00000000-0000-4000-8000-000000000000","actor_name":"first-by-id"}'::json)).* FROM thought_audit t WHERE t.thought_id = ${owned.id}::uuid AND t.action = 'capture'`;
   const tied = await store.captureActorOf(owned.id);
   assert(tied?.actorName === "first-by-id", `on a tied created_at the lower id's actor is returned (${tied?.actorName})`);
   assert((await store.captureActorOf("0000dead-0000-4000-8000-000000000000")) === null && (await store.captureActorOf("not-an-id")) === null, "a ghost and a malformed id read as no row");
@@ -535,17 +537,16 @@ console.log("\n[11] The query log's action rows over PostgREST: one or many thro
 {
   // The hosted deployment's path for every fetch, edit and cite: logActions'
   // ARRAY insert through the client. Read back by SQL so the rows are checked
-  // as stored, not as the client echoed them. The search row is seeded by SQL:
-  // logSearch through THIS shim is a pre-existing divergence (uuid[] + real[]
-  // with a null element — see SMD-1602), not this ticket's writer.
+  // as stored, not as the client echoed them. The search row goes through
+  // logSearch, on the shim: a `real[]` with a null element was refused by Bun's
+  // array decoder on the row the insert returns until SMD-1602 read array
+  // columns through to_json, so this row was seeded by SQL before.
   const admin = new SQL({ url: URL_, max: 1 });
   await admin`DELETE FROM query_log`;
   const AG = "99999999-9999-4999-8999-999999999999";
   const X = "aaaaaaaa-0000-4000-8000-000000000001";
   const Y = "aaaaaaaa-0000-4000-8000-000000000002";
-  await admin`
-    INSERT INTO query_log (kind, tool, agent_id, query, match_count, threshold, recency_weight, filter, result_ids, result_scores)
-    VALUES ('search', 'search_thoughts', ${AG}::uuid, 'postgrest log', 5, 0, 0, '{}'::jsonb, ARRAY[${X},${Y}]::uuid[], ARRAY[0.9, NULL]::real[])`;
+  await store.logSearch({ tool: "search_thoughts", agentId: AG, query: "postgrest log", matchCount: 5, threshold: 0, recencyWeight: 0, filter: {}, resultIds: [X, Y], resultScores: [0.9, null] });
   await store.logActions([]);
   await store.logActions([{ tool: "fetch", agentId: AG, targetId: X }]);
   await store.logActions([

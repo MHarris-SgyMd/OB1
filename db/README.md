@@ -164,8 +164,8 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `1369 assertions: 1369 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports forty-nine (49) migrations applied, and
+`bun test-schema.ts` prints `1444 assertions: 1444 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports fifty (50) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -203,7 +203,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 029 change 54, 030 change 56, 031 change 57, 032 change 60, 033 change 63,
 034 change 65, 035 change 66, 036 change 68, 037 change 70, 038 change 80, 039 change 81,
 040 change 91, 041 change 94, 042 change 95, 043 change 98, 044 SMD-1804,
-045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298).
+045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -240,6 +240,31 @@ read tool, no update, no delete; `recipes/session-capture-hook`). The column is
 `resolve_agent()` would have refused the row and every capture through such a
 key would have landed without its agent id. Named by ticket for the same reason
 as 044 (SMD-1298).
+
+Migration 050 puts the writer on the row (SMD-1726): two reserved keys in
+`thoughts.metadata`, `actor_kind` and `actor_name`, stamped by a BEFORE trigger
+(`thoughts_stamp_actor`) from the write's envelope through 046's registry lookup
+and never from the payload — a caller's own values under either key are
+overwritten or removed. The actor follows the content: a capture and a
+content-changing edit stamp from the key present, a metadata-only edit keeps the
+mark. In metadata rather than columns because 014's `metadata @> filter` route
+over 001's GIN index already reaches it: `said_by` and `actor` on the search and
+list tools are that filter, and every hit prints `By: <key> (<kind>)`.
+`SELECT backfill_thought_actors();` — called once by the file — sets both keys
+on every thought to what the audit row that wrote its current text derives
+(the update row whose after-text is the row's, else the capture when no update
+ever changed the text, the newest by `created_at` then `seq` — an identity 050
+adds to `thought_audit` for two rows one transaction wrote; a text no row
+vouches for is nobody's; the registry's kind for the writer now, else the kind
+046 stamped), correcting a planted claim and stripping one the log does not
+vouch for; each row written leaves an audit row under the door
+`backfill_thought_actors`. It locks `thoughts IN EXCLUSIVE MODE` for the write,
+as 023's does (writers wait for the call, readers do not), so each call is its
+own transaction and `OB1_BACKFILL_LIMIT` bounds the rows written per call — not
+the scan, which derives every thought each time. Run it again after
+classifying or reclassifying a key; it returns `{rows, differing, awaiting}`.
+The identity column rewrites `thought_audit` once at apply (about a minute per
+million rows, captures waiting): apply 050 in a quiet window.
 
 ## What changed relative to the guide
 
@@ -1721,8 +1746,8 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 1369 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 619 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
+bun test-schema.ts                          # 1444 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 627 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```
