@@ -48,9 +48,9 @@
 --     writes. A sequence column is SMD-1726's, in flight; when it lands the
 --     ORDER can prefer it.
 --   * THE PAGE IS CHOSEN FIRST, RENDERED ONCE. The ids are picked by the
---     bounds and filters over 008's created_at index, then joined back for
---     the rendering — so the two directions (forward from a bound, the tail
---     when there is none) share one projection.
+--     bound and filters over 008's created_at index — one statement per kind
+--     of bound, so each is a plain index condition under any plan — then
+--     joined back for the rendering, so the three share one projection.
 --   * WHAT IS RENDERED, BOUNDED. `head` is at most 240 characters of the text
 --     the row is about: a capture's current content (NULL when the thought has
 --     since been deleted), an update's new content when the content moved, a
@@ -170,8 +170,14 @@ BEGIN
     END IF;
   END IF;
 
-  -- The page: ids only, by the bounds and the three filters (spelled twice,
-  -- once per direction — the projection below is the one copy that matters).
+  -- The page: ids only, by the bound and the three filters — one statement per
+  -- kind of bound (none, a cursor, a time), so the bound is a plain index
+  -- condition on 008's created_at btree. One statement with `(p_since IS NULL
+  -- OR …) AND (v_ts IS NULL OR …)` would have served the first five calls on
+  -- a connection from custom plans and then, under plpgsql's generic plan,
+  -- walked the index from the oldest row and filtered (second review pass).
+  -- The three filters are spelled three times; the projection below is the
+  -- one copy that matters.
   IF p_since IS NULL AND p_after IS NULL THEN
     SELECT array_agg(p.aid) INTO v_ids FROM (
       SELECT a.id AS aid FROM thought_audit a
@@ -180,14 +186,22 @@ BEGIN
          AND (p_actions IS NULL OR a.action = ANY (p_actions))
        ORDER BY a.created_at DESC, a.id DESC
        LIMIT v_limit) p;
+  ELSIF p_after IS NOT NULL THEN
+    SELECT array_agg(p.aid) INTO v_ids FROM (
+      SELECT a.id AS aid FROM thought_audit a
+       WHERE (p_agent IS NULL OR a.actor_name = p_agent)
+         AND (p_not_agent IS NULL OR a.actor_name IS DISTINCT FROM p_not_agent)
+         AND (p_actions IS NULL OR a.action = ANY (p_actions))
+         AND (a.created_at, a.id) > (v_ts, v_id)
+       ORDER BY a.created_at, a.id
+       LIMIT v_limit) p;
   ELSE
     SELECT array_agg(p.aid) INTO v_ids FROM (
       SELECT a.id AS aid FROM thought_audit a
        WHERE (p_agent IS NULL OR a.actor_name = p_agent)
          AND (p_not_agent IS NULL OR a.actor_name IS DISTINCT FROM p_not_agent)
          AND (p_actions IS NULL OR a.action = ANY (p_actions))
-         AND (p_since IS NULL OR a.created_at >= p_since)
-         AND (v_ts IS NULL OR (a.created_at, a.id) > (v_ts, v_id))
+         AND a.created_at >= p_since
        ORDER BY a.created_at, a.id
        LIMIT v_limit) p;
   END IF;

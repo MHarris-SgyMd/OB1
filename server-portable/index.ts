@@ -344,7 +344,13 @@ function parseSince(raw: string | undefined): { since: string | null; after: str
   // room for (0000) would come back as its raw error (caught: cold-read, pass 1).
   const shape = /^(\d{4}-\d{2}-\d{2})(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(Z|[+-]\d{2}:?\d{2}))?$/i.exec(v);
   const d = shape ? new Date(v.replace(" ", "T")) : new Date(NaN);
-  if (Number.isNaN(d.getTime()) || d.getUTCFullYear() < 1 || (shape && !shape[2] && d.toISOString().slice(0, 10) !== shape[1])) {
+  // The date part round-trips on its own, whatever the clock or zone beside it
+  // (the first pass checked it only on a bare date, so 2026-02-30T08:00:00Z
+  // still slid to March); and the year stays where timestamptz has room — a
+  // late one with an offset rolls past 9999 (second review pass).
+  const day = shape ? new Date(`${shape[1]}T00:00:00Z`) : d;
+  const badDay = !shape || Number.isNaN(day.getTime()) || day.toISOString().slice(0, 10) !== shape[1];
+  if (Number.isNaN(d.getTime()) || badDay || d.getUTCFullYear() < 1 || d.getUTCFullYear() > 9999) {
     return { refused: `Refused: \`since\` must be an ISO-8601 time with its zone (2026-09-22T08:00:00Z), a date (2026-09-22), or the cursor a previous call ended with, not "${v.slice(0, 40)}".` };
   }
   return { since: d.toISOString(), after: null };
@@ -360,7 +366,10 @@ function parseSince(raw: string | undefined): { since: string | null; after: str
  */
 function renderChange(c: AuditChange, n: number): string {
   const when = c.createdAt.replace(/\.\d{3}Z$/, "Z");
-  const who = c.actorName === null ? "from outside the server" : `by ${cleanForDisplay(c.actorName)}${c.actorKind ? ` (${c.actorKind})` : ""}`;
+  // The name through snipText, not cleanForDisplay alone: a writer that can
+  // set its own actor could carry a newline and forge an entry or the Cursor
+  // line in a feed agents act on (second review pass).
+  const who = c.actorName === null ? "from outside the server" : `by ${snipText(c.actorName, 80)}${c.actorKind ? ` (${c.actorKind})` : ""}`;
   const verb = c.action === "capture" ? "captured" : c.action === "update" ? "edited" : "deleted";
   const gone = c.action !== "delete" && !c.present ? " (deleted since)" : "";
   const lines = [`${n}. ${when} — ${verb} ${who} — ID: ${c.thoughtId}${gone}`];
@@ -369,7 +378,7 @@ function renderChange(c: AuditChange, n: number): string {
   // metadata), so the head is the thought's CURRENT text — say so, since an edit
   // since would otherwise read as what was captured; a deleted thought's text
   // is in its delete row, not gone (both caught: cold-read, pass 1).
-  if (c.action === "capture") lines.push(text === null ? "   (deleted since — the delete row keeps the text)" : `   now: "${text}"`);
+  if (c.action === "capture") lines.push(text === null ? "   (the text is in its delete row)" : `   now: "${text}"`);
   if (c.action === "delete" && text !== null) lines.push(`   was: "${text}"`);
   if (c.action === "update") {
     const parts: string[] = [];
@@ -386,7 +395,9 @@ function renderChange(c: AuditChange, n: number): string {
     if (c.supersedesAfter) lines.push(`   now supersedes ${c.supersedesAfter}${c.supersedesBefore ? ` (was ${c.supersedesBefore})` : ""}`);
     else if (c.supersedesBefore) lines.push(`   no longer supersedes ${c.supersedesBefore} (pointer cleared)`);
   }
-  if (c.action === "delete" && c.supersedesBefore) lines.push(`   it superseded ${c.supersedesBefore}, which is current again unless another thought supersedes it`);
+  // A point-in-time record: whether the superseded thought is current again
+  // depends on what happened to it since, which this row cannot know.
+  if (c.action === "delete" && c.supersedesBefore) lines.push(`   it superseded ${c.supersedesBefore}`);
   if (c.derivation) lines.push(c.action === "capture" ? "   captured with sources (derived_from)" : "   sources (derived_from) changed");
   return lines.join("\n");
 }
@@ -1235,7 +1246,7 @@ function buildServer(principal: Principal): McpServer {
       // Both filters name themselves in the header, so `agent` set to the
       // caller's own key beside others_only reads as the empty set it is
       // (caught: cold-read, pass 1).
-      const named = agent?.trim() ? ` by ${cleanForDisplay(agent.trim())}` : "";
+      const named = agent?.trim() ? ` by ${snipText(agent.trim(), 80)}` : "";
       const who = named && others_only ? `${named} but not ${principal.name}` : others_only ? ` by everyone but ${principal.name}` : named;
       const what = actions?.length ? `${actions.join("/")} change(s)` : "change(s)";
       const where = start.after ? "after the cursor" : start.since ? `since ${start.since}` : "";

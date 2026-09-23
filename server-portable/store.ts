@@ -489,24 +489,6 @@ export function normaliseProposal(r: Record<string, unknown>): SupersessionPropo
 }
 
 /**
- * Every database operation the MCP tools perform. Errors are thrown, not returned
- * — each implementation normalises its own error shape so callers do not have to
- * know whether they are talking to PostgREST or to Postgres.
- */
-/**
- * A refused mutation is a result, not an exception: "your read was stale" and
- * "that id does not exist" are things the caller should act on, and throwing
- * would make them indistinguishable from a fault at the tool boundary.
- */
-/**
- * What update_thought / delete_thought refuse with. SUPERSEDES_NOT_FOUND and
- * WOULD_CYCLE (migration 032): the provenance envelope named a thought that
- * does not exist, or a pointer that would close a supersession loop. CITED
- * (migration 042): active citations rest on the thought a delete named, and
- * the caller did not ask to detach them — `citedBy` counts them, `citations`
- * is up to ten of the citing rows, newest first.
- */
-/**
  * One row of the change feed — migration 049's thought_changes over
  * thought_audit (SMD-1296): what one capture, update or delete did, bounded
  * for a reply. `head` is at most 240 characters of the text the row is about
@@ -585,6 +567,24 @@ export function normaliseChange(r: Record<string, unknown>): AuditChange {
   };
 }
 
+/**
+ * Every database operation the MCP tools perform. Errors are thrown, not returned
+ * — each implementation normalises its own error shape so callers do not have to
+ * know whether they are talking to PostgREST or to Postgres.
+ */
+/**
+ * A refused mutation is a result, not an exception: "your read was stale" and
+ * "that id does not exist" are things the caller should act on, and throwing
+ * would make them indistinguishable from a fault at the tool boundary.
+ */
+/**
+ * What update_thought / delete_thought refuse with. SUPERSEDES_NOT_FOUND and
+ * WOULD_CYCLE (migration 032): the provenance envelope named a thought that
+ * does not exist, or a pointer that would close a supersession loop. CITED
+ * (migration 042): active citations rest on the thought a delete named, and
+ * the caller did not ask to detach them — `citedBy` counts them, `citations`
+ * is up to ten of the citing rows, newest first.
+ */
 export type MutationError = "NOT_FOUND" | "STALE_READ" | "DUPLICATE_CONTENT" | "SUPERSEDES_NOT_FOUND" | "WOULD_CYCLE" | "CITED";
 /** One citing row of a CITED refusal: the facet, the thought it is on, its stance and text (migration 042). */
 export type Citation = { id: string; thoughtId: string; stance: string; text: string; createdAt?: string };

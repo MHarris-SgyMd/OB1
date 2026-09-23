@@ -611,8 +611,11 @@ console.log("\n[14] listChanges: one page of the log from a cursor, the actions 
   assert((await store.listChanges({ after: rows[0].id, limit: 10 })).length === 2, "a cursor at the first row yields the two after it");
   assert((await store.listChanges({ after: cursor0, actions: ["delete"], limit: 10 })).length === 1 && (await store.listChanges({ after: cursor0, actions: ["capture", "delete"], limit: 10 })).length === 2,
     "actions bind as text[] through sql.array");
-  assert((await store.listChanges({ since: "2000-01-01T00:00:00Z", agent: "store-sql-14", limit: 5 })).length === 3 && (await store.listChanges({ since: "2000-01-01T00:00:00Z", notAgent: "store-sql-14", limit: 5 })).every((r) => r.actorName !== "store-sql-14"),
-    "agent keeps one key's rows, notAgent drops them");
+  // Both from the cursor, where only this actor's rows are: a `since` from 2000
+  // with a limit of five read the oldest rows of the log, which were never this
+  // actor's, so the notAgent half passed with the filter removed (second review pass).
+  assert((await store.listChanges({ after: cursor0, agent: "store-sql-14", limit: 10 })).length === 3 && (await store.listChanges({ after: cursor0, notAgent: "store-sql-14", limit: 10 })).length === 0,
+    "agent keeps one key's rows, notAgent drops them — three and none after the cursor");
   let ghost = "";
   try { await store.listChanges({ after: "00000000-0000-4000-8000-000000000000", limit: 1 }); } catch (e) { ghost = (e as Error).message; }
   assert(/no audit row/.test(ghost), "a cursor naming no row throws the function's message");
