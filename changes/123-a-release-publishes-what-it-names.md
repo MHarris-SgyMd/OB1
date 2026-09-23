@@ -1,17 +1,4 @@
----
-type: added
-bump: patch
-tickets: [SMD-1860]
-migrations: []
----
-
-## Changelog
-
-A release job: on a `v<X.Y.Z>` tag, `.github/workflows/release.yml` publishes `ob1-server` and `ob1-migrate` to GHCR, brings the stack up from the pulled images under the full-stack job's checks plus preflight's schema-version row, and creates the GitHub release with a compose overlay pinning both images and Ollama by digest, the cut's change files and the review yield; the migrator is an image (`db/Dockerfile`), Ollama is pinned by tag in `deploy/compose.yaml`, and a release cut is two commits the assembler now orders (SMD-1860).
-
-## FORK
-
-A release publishes what it names — the two images, a digest-pinned compose, the change files — and a cut is a tree that already says its version (SMD-1860)
+# 123. A release publishes what it names — the two images, a digest-pinned compose, the change files — and a cut is a tree that already says its version (SMD-1860)
 
 **What changed.** `.github/workflows/release.yml` runs on a `v[0-9]*` tag: it
 reads the tree through `scripts/release-artifacts.ts facts`, builds

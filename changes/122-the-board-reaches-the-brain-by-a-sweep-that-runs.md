@@ -1,17 +1,4 @@
----
-type: added
-bump: minor
-tickets: [SMD-1954]
-migrations: []
----
-
-## Changelog
-
-`db/sync-linear.ts` keeps a brain in lockstep with the Linear board — every issue of an initiative's projects as one thought, captured when new and updated in place when it moves, through the server's own store and embedder as the actor `board-sync` — and `deploy/compose.yaml`'s opt-in `board-sync` profile runs it on a schedule (SMD-1954).
-
-## FORK
-
-The board reaches the brain by a sweep that runs itself — `db/sync-linear.ts` and the `board-sync` profile, with the brain as the only state (SMD-1954)
+# 122. The board reaches the brain by a sweep that runs itself — `db/sync-linear.ts` and the `board-sync` profile, with the brain as the only state (SMD-1954)
 
 **What changed.** `db/sync-linear.ts` lists every issue of the `OB1_LINEAR_INITIATIVE`'s
 projects (identifier and `updatedAt`, two requests for three hundred), reads the

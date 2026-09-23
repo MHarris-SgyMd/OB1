@@ -1,17 +1,4 @@
----
-type: added
-bump: patch
-tickets: [SMD-1936]
-migrations: []
----
-
-## Changelog
-
-Check 21 holds every `.sql` git tracks, `db/migrations/` included, to the SQL-safety guard rail read as statements: no `DROP TABLE`, `DROP DATABASE`/`DROP SCHEMA`/`DROP OWNED`, `TRUNCATE` with a table after it, or `DELETE FROM` whose statement has no `WHERE` of its own — comments excepted, string literals read, a refusing `BEFORE TRUNCATE ON` trigger the rule applied; the rules are `db/config.mjs`'s `DESTRUCTIVE_SQL_RULES`, and CLAUDE.md and CONTRIBUTING.md name the check (SMD-1936).
-
-## FORK
-
-The SQL-safety guard rail is a check — a `.sql` file never destroys rows a brain already holds, read as statements rather than words by check 21 over every `.sql` git tracks, so 046's refusing trigger passes and a planted `TRUNCATE` fails by file and line (SMD-1936)
+# 119. The SQL-safety guard rail is a check — a `.sql` file never destroys rows a brain already holds, read as statements rather than words by check 21 over every `.sql` git tracks, so 046's refusing trigger passes and a planted `TRUNCATE` fails by file and line (SMD-1936)
 
 **What changed.** `db/config.mjs` gains `DESTRUCTIVE_SQL_RULES` and
 `destructiveSqlIn()` beside `SUPABASE_SQL_RULES` and `supabaseIsmsIn()`, the

@@ -458,8 +458,10 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // delete_thought's third argument, SMD-1712) and 043 (the cite shape stated
   // at the table, SMD-1749), 044 (the schema_version row, SMD-1804), 045
   // (the query_log column set — filter, arm and tier, SMD-1490), 046 (the
-  // audit row's event shape, SMD-1730) and 047 (the query_log.logged_at prune
-  // index, SMD-1492) stay
+  // audit row's event shape, SMD-1730), 047 (the query_log.logged_at prune
+  // index, SMD-1492), 048 (the first release's schema_version, 1.0.0 — the
+  // cut's last migration, SMD-1804/SMD-1860) and 049 (the writer's mark on the
+  // row, SMD-1726) stay
   // recorded and are never tried. 030 is the
   // right one to make
   // pending
@@ -480,8 +482,9 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // 008's thought_audit and 010's ob1_agents and redefines 025's trigger, 035's
   // two capture forms and 033's update_thought on their own bodies, all present
   // ([20b]); 047 adds a btree on 034's query_log.logged_at ([20c]); 048 upserts
-  // ob1_config.schema_version for the 1.0.0 cut, needing only 006's table; 049 adds a BEFORE trigger to 001's thoughts and a backfill over
-  // 008's thought_audit through 046's ob1_registry_kind, all present ([20d]) —
+  // ob1_config.schema_version for the 1.0.0 cut, needing only 006's table; 049
+  // adds a BEFORE trigger to 001's thoughts and a backfill over 008's
+  // thought_audit through 046's ob1_registry_kind, all present ([20d]) —
   // all recorded by the baseline with their prerequisites present, so none
   // becomes the plain-run failure point above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;

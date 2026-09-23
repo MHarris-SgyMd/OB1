@@ -95,6 +95,8 @@ export type FactsInput = {
   owner: string;
   /** Whether HEAD is an ancestor of origin/main; null when that cannot be read. */
   headOnMain: boolean | null;
+  /** Whether a tag exists in this checkout — the previous release's tag is the yield window's start only when it does (a cut's own rehearsal runs before its tag exists). */
+  tagExists: (tag: string) => boolean;
   head: string;
 };
 export type Facts = Record<string, string>;
@@ -186,7 +188,7 @@ export function releaseFacts(input: FactsInput): { problems: string[]; facts: Fa
     range_lo: pad3(range[0]),
     range_hi: pad3(range[1]),
     ollama_image: ollama ?? "",
-    previous_tag: previous ? tagFor(previous.version) : "",
+    previous_tag: previous && input.tagExists(tagFor(previous.version)) ? tagFor(previous.version) : "",
     change_files: changeFiles.join(" "),
     date,
     server,
@@ -360,6 +362,7 @@ function readInput(mode: "tag" | "rehearsal", tag: string | undefined, owner: st
     changes: readChanges(ROOT),
     composeFiles,
     headOnMain: onMain,
+    tagExists: (t) => git(["rev-parse", "--verify", "-q", `refs/tags/${t}`]) !== null,
   };
 }
 
@@ -382,7 +385,7 @@ function selfCheck(): number {
   const composeGood = "x-ollama-image: &o ollama/ollama:0.34.3\nservices:\n  ollama:\n    image: *o\n";
   const release: Release = { version: "1.0.0+upstream.9543c29", range: [1, 48], server: "abcdef12", upstream: "9543c29", date: "2026-09-30", tickets: ["SMD-1"], changes: [104, 105], frozenShas: {} };
   const numbered = (ns: number[]) => ns.map((n) => ({ name: `${pad3(n)}-x.md`, n, heading: { n, title: "x (SMD-1)" }, text: "", lines: 1 }));
-  const base: FactsInput = { mode: "tag", tag: "v1.0.0", releases: [release], forkVersion: release.version, migrationNumbers: Array.from({ length: 48 }, (_, i) => i + 1), changes: { numbered: numbered([103, 104, 105]), fragments: [] }, composeFiles: { "compose.yaml": composeGood }, owner: "MHarris-SgyMd", headOnMain: true, head: "abcdef1234567890" };
+  const base: FactsInput = { mode: "tag", tag: "v1.0.0", releases: [release], forkVersion: release.version, migrationNumbers: Array.from({ length: 48 }, (_, i) => i + 1), changes: { numbered: numbered([103, 104, 105]), fragments: [] }, composeFiles: { "compose.yaml": composeGood }, owner: "MHarris-SgyMd", headOnMain: true, head: "abcdef1234567890", tagExists: () => true };
 
   ok(coreOf("1.2.3+upstream.abc") === "1.2.3" && tagFor("1.2.3+upstream.abc") === "v1.2.3", "core and tag drop the build metadata");
   ok(imageNames("MHarris-SgyMd").server === "ghcr.io/mharris-sgymd/ob1-server" && imageNames("X").migrate === "ghcr.io/x/ob1-migrate", "image names lower-case the owner");
@@ -415,6 +418,7 @@ function selfCheck(): number {
   }
   const two = releaseFacts({ ...base, releases: [{ ...release, version: "0.9.0+upstream.9543c29", changes: [100, 103], range: [1, 44] }, release], changes: { numbered: numbered([100, 101, 102, 103, 104, 105]), fragments: [] } });
   ok(two.problems.length === 0 && two.facts.previous_tag === "v0.9.0", "the previous release's tag is the yield window's start");
+  ok(releaseFacts({ ...base, mode: "rehearsal", tag: undefined, tagExists: () => false }).facts.previous_tag === "" && releaseFacts({ ...base, mode: "rehearsal", tag: undefined }).facts.previous_tag === "v1.0.0", "a rehearsal names the last release's tag only when it exists — a cut's own rehearsal runs before its tag does (caught: run-it, the first cut's rehearsal)");
   const rehearsal = releaseFacts({ ...base, mode: "rehearsal", tag: undefined, releases: [], forkVersion: "0.0.0+upstream.9543c29", migrationNumbers: Array.from({ length: 47 }, (_, i) => i + 1), changes: { numbered: numbered([103]), fragments: [{ name: "smd-9.md", ticket: "SMD-9", text: "", lines: 1 }] }, headOnMain: false });
   ok(rehearsal.problems.length === 0 && rehearsal.facts.version === "0.0.0+upstream.9543c29" && rehearsal.facts.tag === REHEARSAL_TAG && rehearsal.facts.image_tag === REHEARSAL_TAG && rehearsal.facts.range_lo === "001" && rehearsal.facts.range_hi === "047" && rehearsal.facts.change_files === "" && rehearsal.facts.previous_tag === "", "a rehearsal on an unreleased tree: FORK_VERSION, the rehearsal tag, the whole migration range, no release checks");
   ok(releaseFacts({ ...base, mode: "rehearsal", composeFiles: { "compose.yaml": "services: {}\n" } }).problems.length === 1, "a rehearsal still wants the Ollama pin");
