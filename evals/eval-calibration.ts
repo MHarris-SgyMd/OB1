@@ -188,9 +188,12 @@ export async function orNote<T>(notes: string[], read: () => Promise<T>, note: s
   try { return await read(); } catch (e) { if (!absent(e)) throw e; notes.push(note); return none; }
 }
 
+/** A claim with both sides: what was stated, what happened. */
+export type Scored = { stated: number; outcome: 0 | 1 };
+
 /** The rows a score may read: both sides present and in range. A row out of range is an error naming the claim, not a row dropped. */
-export function scorable(rows: LedgerRow[]): { stated: number; outcome: 0 | 1 }[] {
-  const out: { stated: number; outcome: 0 | 1 }[] = [];
+export function scorable(rows: LedgerRow[]): Scored[] {
+  const out: Scored[] = [];
   for (const r of rows) {
     if (r.stated !== null && !(r.stated >= 0 && r.stated <= 1)) throw new Error(`${r.mechanism}: ${r.claim} states a confidence of ${r.stated}, outside [0, 1]`);
     if (r.outcome !== null && r.outcome !== 0 && r.outcome !== 1) throw new Error(`${r.mechanism}: ${r.claim} resolved to ${r.outcome}, not 0 or 1`);
@@ -200,8 +203,6 @@ export function scorable(rows: LedgerRow[]): { stated: number; outcome: 0 | 1 }[
 }
 
 // ── The score ────────────────────────────────────────────────────────────────
-
-export type Scored = { stated: number; outcome: 0 | 1 };
 
 /** Mean squared distance between the stated probability and what happened; 0 is perfect, 0.25 is a coin the forecaster called at 0.5, 1 is certainty refuted every time. */
 export function brier(rows: Scored[]): number {
@@ -260,25 +261,25 @@ export type Summary = {
 
 export function summarise(mechanism: string, rows: LedgerRow[]): Summary {
   const sc = scorable(rows);
-  const distinct = [...new Set(rows.filter((r) => r.stated !== null).map((r) => r.stated as number))].sort((a, b) => a - b);
-  const bins = sc.length ? reliability(sc, binOf(distinct.length)) : [];
   const bands = new Map<string, { n: number; held: number }>();
-  for (const r of rows) if (r.band && r.outcome !== null) { const b = bands.get(r.band) ?? { n: 0, held: 0 }; b.n++; b.held += r.outcome; bands.set(r.band, b); }
-  const bs = sc.length ? brier(sc) : null, rate = sc.length ? baseRate(sc) : null;
   const perValue = new Map<number, number>(), perResolverWithout = new Map<string, number>(), perKind = new Map<string, number>();
+  let withConfidence = 0, resolved = 0, unresolvedWithConfidence = 0, resolvedWithout = 0;
   for (const r of rows) {
-    if (r.stated !== null) perValue.set(r.stated, (perValue.get(r.stated) ?? 0) + 1);
-    if (r.resolvedBy && r.stated === null) perResolverWithout.set(r.resolvedBy, (perResolverWithout.get(r.resolvedBy) ?? 0) + 1);
+    const stated = r.stated !== null, done = r.outcome !== null;
+    if (stated) { withConfidence++; perValue.set(r.stated!, (perValue.get(r.stated!) ?? 0) + 1); }
+    if (done) resolved++;
+    if (stated && !done) unresolvedWithConfidence++;
+    if (!stated && done) { resolvedWithout++; if (r.resolvedBy) perResolverWithout.set(r.resolvedBy, (perResolverWithout.get(r.resolvedBy) ?? 0) + 1); }
+    if (r.band && done) { const b = bands.get(r.band) ?? { n: 0, held: 0 }; b.n++; b.held += r.outcome!; bands.set(r.band, b); }
     perKind.set(r.kind, (perKind.get(r.kind) ?? 0) + 1);
   }
+  const distinct = [...perValue.keys()].sort((a, b) => a - b);
+  const bins = sc.length ? reliability(sc, binOf(distinct.length)) : [];
+  const bs = sc.length ? brier(sc) : null, rate = sc.length ? baseRate(sc) : null;
   return {
-    mechanism, claims: rows.length,
-    withConfidence: rows.filter((r) => r.stated !== null).length, distinct,
-    resolved: rows.filter((r) => r.outcome !== null).length, scorable: sc.length,
+    mechanism, claims: rows.length, withConfidence, distinct, resolved, scorable: sc.length,
     brier: bs, ece: sc.length ? ece(bins) : null, baseRate: rate, skill: bs !== null && rate !== null ? skill(bs, rate) : null, bins, bands,
-    unresolvedWithConfidence: rows.filter((r) => r.stated !== null && r.outcome === null).length,
-    resolvedWithout: rows.filter((r) => r.stated === null && r.outcome !== null).length,
-    perValue, perResolverWithout, perKind,
+    unresolvedWithConfidence, resolvedWithout, perValue, perResolverWithout, perKind,
   };
 }
 
@@ -290,11 +291,12 @@ function table(header: string[], rows: (string | number)[][]): string {
 }
 const f3 = (n: number | null) => (n === null || Number.isNaN(n) ? "—" : n.toFixed(3));
 const pct = (n: number, d: number) => (d === 0 ? "—" : `${((100 * n) / d).toFixed(0)}%`);
+const num = (n: number) => n.toLocaleString("en-US");
 
 /** "1.00 on 5,492, 0.50 on 1" for a few-valued confidence; the count of values otherwise. */
 function distribution(s: Summary): string {
   if (s.distinct.length === 1) return `every one ${s.distinct[0].toFixed(2)}`;
-  if (s.distinct.length <= 4) return [...s.perValue].sort((a, b) => b[1] - a[1]).map(([p, n]) => `${p.toFixed(2)} on ${n.toLocaleString("en-US")}`).join(", ");
+  if (s.distinct.length <= 4) return [...s.perValue].sort((a, b) => b[1] - a[1]).map(([p, n]) => `${p.toFixed(2)} on ${num(n)}`).join(", ");
   return `${s.distinct.length} distinct values`;
 }
 /** "17 by the fork record, 8 superseded" — who resolved the claims that carry no confidence. */
@@ -303,8 +305,13 @@ function resolvers(s: Summary): string {
 }
 /** "4,126 (3,000 mentions, 1,126 edges)" when a mechanism claims more than one kind of thing. */
 function claims(s: Summary): string {
-  if (s.perKind.size <= 1) return s.claims.toLocaleString("en-US");
-  return `${s.claims.toLocaleString("en-US")} (${[...s.perKind].sort((a, b) => b[1] - a[1]).map(([k, n]) => `${n.toLocaleString("en-US")} ${k}${n === 1 ? "" : "s"}`).join(", ")})`;
+  if (s.perKind.size <= 1) return num(s.claims);
+  return `${num(s.claims)} (${[...s.perKind].sort((a, b) => b[1] - a[1]).map(([k, n]) => `${num(n)} ${k}${n === 1 ? "" : "s"}`).join(", ")})`;
+}
+/** The distinct stated values, listed when few, counted when many, a dash when none. */
+function values(s: Summary): string {
+  if (s.distinct.length === 0) return "—";
+  return s.distinct.length <= 4 ? s.distinct.map((p) => p.toFixed(2)).join(", ") : String(s.distinct.length);
 }
 
 /** The report over a set of summaries, in the order given. */
@@ -313,7 +320,7 @@ export function render(summaries: Summary[], heading: string, notes: string[]): 
   out.push("## The ledger", "", "One row per mechanism: what it claimed, what carried a confidence, how many distinct values that confidence took, what something resolved, and what has both sides.", "");
   out.push(table(
     ["mechanism", "claims", "with a confidence", "distinct values", "resolved", "scorable"],
-    summaries.map((s) => [s.mechanism, claims(s), `${s.withConfidence.toLocaleString("en-US")} (${pct(s.withConfidence, s.claims)})`, s.distinct.length <= 4 ? (s.distinct.length ? s.distinct.map((p) => p.toFixed(2)).join(", ") : "—") : String(s.distinct.length), `${s.resolved.toLocaleString("en-US")} (${pct(s.resolved, s.claims)})`, s.scorable.toLocaleString("en-US")]),
+    summaries.map((s) => [s.mechanism, claims(s), `${num(s.withConfidence)} (${pct(s.withConfidence, s.claims)})`, values(s), `${num(s.resolved)} (${pct(s.resolved, s.claims)})`, num(s.scorable)]),
   ), "");
   for (const s of summaries) {
     if (!s.scorable) continue;
@@ -429,19 +436,19 @@ async function selfCheck(): Promise<void> {
     ok((await orNote(notes, async () => 7, "missing", 0)) === 7 && notes.length === 1, "orNote on a good read returns the value and pushes nothing");
   })();
   const none: Reads = { live: new Set(), declared: new Map(), superseded: [], proposals: [], mentions: [], deleted: 0 };
-  const empty = assemble(readFixture(), none);
+  const committed = readFixture();
+  const empty = assemble(committed, none);
   ok(empty.summaries.length === 2 && empty.summaries[0].mechanism === KIND_BAND && empty.summaries[1].mechanism === DECLARED && empty.summaries.every((m) => m.claims === 0), "an empty brain still has the two fixture-fed rows, first, with no claims");
   ok(empty.notes.length === 1 && /^342 of the fixture's 342 thought ids are not in this brain \(the fixture is /.test(empty.notes[0]), `an empty brain names every fixture id as absent, with the fixture's origin (${empty.notes[0]?.slice(0, 60)})`);
-  const allLive = assemble(readFixture(), { ...none, live: new Set([...kindBandRows(readFixture()).map((r) => r.claim), ...declaredRows(readFixture(), new Map(), []).map((r) => r.claim)]), deleted: 3, proposals: [{ id: "p", confidence: 0.8, status: "rejected", judge_key: "j" }] });
+  const ids = [...kindBandRows(committed).map((r) => r.claim), ...declaredRows(committed, new Map(), []).map((r) => r.claim)];
+  const allLive = assemble(committed, { ...none, live: new Set(ids), deleted: 3, proposals: [{ id: "p", confidence: 0.8, status: "rejected", judge_key: "j" }] });
   ok(allLive.summaries.length === 3 && allLive.summaries[0].claims === 342 && allLive.summaries[2].mechanism === "j", "with every fixture id live the kind band has 342 claims, and a producer follows the fixture-fed rows");
   ok(allLive.notes.length === 1 && allLive.notes[0].startsWith("3 thought(s) have been deleted"), "deletes are counted in a note, and no id is reported gone");
   // Every read wired through, in one brain: a declared value on a hypothesis, a
   // superseded fixture id that is not one, a mention, a proposal, deletes, and
   // one fixture id missing — so no read can be dropped from assemble unseen (review pass 5).
-  const fxLive = readFixture();
-  const hypIds = fxLive.kinds.hypothesis, planIds = fxLive.kinds.plan;
-  const ids = [...kindBandRows(fxLive).map((r) => r.claim), ...declaredRows(fxLive, new Map(), []).map((r) => r.claim)];
-  const wired = assemble(fxLive, {
+  const hypIds = committed.kinds.hypothesis, planIds = committed.kinds.plan;
+  const wired = assemble(committed, {
     live: new Set(ids.filter((id) => id !== planIds[0])), declared: new Map([[hypIds[0], 0.7]]), superseded: [planIds[1]],
     proposals: [{ id: "p", confidence: 0.8, status: "rejected", judge_key: "j" }], mentions: [{ claim: "m", kind: "mention", confidence: 1, extraction_key: "x" }], deleted: 2,
   });
@@ -456,7 +463,7 @@ async function selfCheck(): Promise<void> {
   ok(constant.includes("the confidence is a constant (0.80)") && constant.includes("Brier 0.640") && constant.includes("skill against it — (every claim resolved the same way)"), "a constant confidence is flagged, with its Brier and an undefined skill");
 
   // The committed fixture yields the kind-band mechanism.
-  const live = kindBandRows(readFixture());
+  const live = kindBandRows(committed);
   ok(live.length > 0 && scorable(live).length > 0, "the committed fixture gives the kind band a scorable set");
 
   if (failed) { console.error(`self-check: ${failed} FAILED`); process.exit(1); }
