@@ -559,8 +559,7 @@ export function extractionKey(model: string): string {
  */
 async function extractOnce(text: string, cfg: EmbedConfig, timeoutMs: number, part: { index: number; of: number; header?: string } | undefined, w: Pick<ExtractWindowing, "outputBudget" | "streamAbort">, retry = false): Promise<Extraction & { runaway: boolean }> {
   // Named by the windowing, not positional booleans (second review pass).
-  const budget = w.outputBudget;
-  const stream = w.streamAbort;
+  const { outputBudget: budget, streamAbort: stream } = w;
   const t0 = Date.now();
   const r = await fetch(`${cfg.chat.base}/chat/completions`, {
     method: "POST",

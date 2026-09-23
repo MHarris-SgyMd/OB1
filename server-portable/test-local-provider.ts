@@ -520,7 +520,7 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
   // of one item, before its budget, then retried under the penalty as a cut
   // one is. The stub streams a loop one item per frame and records, per
   // request, how many frames it got out before the client hung up.
-  type Run = { sent: number; total: number; cancelled: boolean; body: { stream?: boolean; frequency_penalty?: number; max_tokens?: number } };
+  type Run = { sent: number; total: number; cancelled: boolean; body: { stream?: boolean; frequency_penalty?: number } };
   const runs: Run[] = [];
   let gMode: "loop" | "good" | "json" | "slow" | "cut" | "error" = "loop";
   const GOOD = JSON.stringify({ entities: [{ name: "Anita", type: "person", confidence: 0.9, aliases: ["A. {Nita}"] }, { name: "Open Brain", type: "project", confidence: 0.8 }], relationships: [{ from: "Anita", to: "Open Brain", relation: "works_on", confidence: 0.7 }] });

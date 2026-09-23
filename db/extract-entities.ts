@@ -435,20 +435,17 @@ async function processRow(row: Row): Promise<Outcome> {
   if (extraction.malformed) {
     malformed++;
     const where = extraction.parts ? ` (window ${extraction.parts.filter((p) => p.malformed).map((p) => p.index + 1).join(", ")} of ${extraction.windows})` : "";
-    // A runaway aborted on the stream is named in the failed row's error (first
-    // review pass): an operator sorting the failed rows — for SMD-2000's larger
-    // model, say — must tell a loop the retry did not rescue from an answer
-    // that was never JSON.
-    // The MALFORMED call's abort, not any window's: a windowed thought lifts
-    // the longest abort of all its windows, one the retry may have rescued
-    // (second review pass).
+    // A runaway aborted on the stream is named in the failed row's error, so
+    // an operator sorting the failed rows — for SMD-2000's larger model, say —
+    // can tell a loop the retry did not rescue from an answer that was never
+    // JSON. The MALFORMED window's own abort, not the thought's longest (one
+    // the retry may have rescued); "neither converged" only when a retry was
+    // made; and which of the two calls was aborted is not recorded — the
+    // first at its budget and the retry on the stream is one shape — so the
+    // note names neither (review passes one to four).
     const abortedParts: { abortedMs?: number; retried?: true }[] = extraction.parts ? extraction.parts.filter((p) => p.malformed && p.abortedMs !== undefined) : extraction.abortedMs !== undefined ? [extraction] : [];
     const abortedMs = Math.max(...abortedParts.map((p) => p.abortedMs as number));
-    // "the retry did not converge" only when one was made (third review pass).
     const retriedToo = abortedParts.some((p) => p.retried);
-    // Which of the two calls was aborted is not recorded — the first at its
-    // budget and the penalised retry on the stream is one shape of this —
-    // so the note names neither (fourth review pass).
     const abortedNote = abortedParts.length ? `; a runaway — one item a third time — was aborted on the stream ${(abortedMs / 1000).toFixed(1)} s into ${retriedToo ? "one of its two calls, and neither converged" : "its call, and no retry was made"}` : "";
     return { outcome: "failed", error: `the model's answer was not JSON of the expected shape${where}${abortedNote}` };
   }
