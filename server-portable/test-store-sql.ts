@@ -631,7 +631,7 @@ console.log("\n[13] A NULL/infinity created_at survives the provenance and propo
   }
 }
 
-console.log("\n[14] listChanges: one page of the log from a cursor, the actions bound as text[], and the function's refusals surfaced (migration 051, SMD-1296)");
+console.log("\n[14] listChanges: one page of the log from a cursor, the actions bound as text[], and the function's refusals surfaced (migration 052, SMD-1296)");
 {
   const sql = new SQL({ url: URL_, max: 1 });
   const cursor0 = String((await sql`SELECT id FROM thought_audit ORDER BY created_at DESC, id DESC LIMIT 1`)[0].id);

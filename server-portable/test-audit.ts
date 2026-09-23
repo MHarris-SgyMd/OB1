@@ -208,7 +208,7 @@ let cursor0 = "", A = "", B = "";
 /** The numbered entries of a thought_changes reply, each a paragraph starting `N. `. */
 const entriesOf = (out: string) => out.split("\n\n").filter((e) => /^\d+\. /.test(e));
 
-console.log("\n[8] thought_changes: a second key reads what the first did — in order, who, and the thought id on every line (migration 051, SMD-1296)");
+console.log("\n[8] thought_changes: a second key reads what the first did — in order, who, and the thought id on every line (migration 052, SMD-1296)");
 {
   // 046: the kind comes from the registry, stamped as each row is written, so
   // classify the two keys once — and run the backfill, so the rows [1]–[7]
@@ -221,11 +221,11 @@ console.log("\n[8] thought_changes: a second key reads what the first did — in
   const idOf = async (content: string) => String((await sql`SELECT id FROM thoughts WHERE content = ${content}`)[0].id);
   // The importer's session: capture A, edit it, capture B superseding it, delete A —
   // whose ON DELETE SET NULL (025) clears B's pointer in the same transaction.
-  await importer.call("capture_thought", { content: "the plan for the 051 review" });
-  A = await idOf("the plan for the 051 review");
-  await importer.call("update_thought", { id: A, content: "the plan for the 051 review, revised", metadata_patch: { status: "open" } });
-  await importer.call("capture_thought", { content: "the 051 review is done", supersedes: A });
-  B = await idOf("the 051 review is done");
+  await importer.call("capture_thought", { content: "the plan for the 052 review" });
+  A = await idOf("the plan for the 052 review");
+  await importer.call("update_thought", { id: A, content: "the plan for the 052 review, revised", metadata_patch: { status: "open" } });
+  await importer.call("capture_thought", { content: "the 052 review is done", supersedes: A });
+  B = await idOf("the 052 review is done");
   await importer.call("delete_thought", { id: A });
 
   const out = await laptop.call("thought_changes", { since: cursor0 });
@@ -237,11 +237,11 @@ console.log("\n[8] thought_changes: a second key reads what the first did — in
   assert(verbs.slice(0, 3).join(",") === "captured,edited,captured" && [verbs[3], verbs[4]].sort().join(",") === "deleted,edited",
     `oldest first: ${verbs.join(", ")} (the delete and the pointer it cleared share a transaction, so read in id order)`);
   assert(/\(deleted since\)/.test(entries[0]) && /\(the text is in its delete row\)/.test(entries[0]), "A's capture is marked deleted since, and points at the delete row for the text");
-  assert(/content → "the plan for the 051 review, revised"/.test(entries[1]) && /metadata: [^\n]*status/.test(entries[1]) && !/metadata: [^\n]*type/.test(entries[1]),
+  assert(/content → "the plan for the 052 review, revised"/.test(entries[1]) && /metadata: [^\n]*status/.test(entries[1]) && !/metadata: [^\n]*type/.test(entries[1]),
     "A's edit shows the new text and the metadata key that moved — not the unchanged type");
-  assert(new RegExp(`supersedes ${A}`).test(entries[2]) && /now: "the 051 review is done"/.test(entries[2]), "B's capture says it supersedes A, quoting its CURRENT text as such (a capture row carries none of its own)");
+  assert(new RegExp(`supersedes ${A}`).test(entries[2]) && /now: "the 052 review is done"/.test(entries[2]), "B's capture says it supersedes A, quoting its CURRENT text as such (a capture row carries none of its own)");
   const del = entries.find((e) => /deleted by/.test(e)) ?? "", ptr = entries.slice(3).find((e) => /edited by/.test(e)) ?? "";
-  assert(/was: "the plan for the 051 review, revised"/.test(del), "A's delete quotes what was lost");
+  assert(/was: "the plan for the 052 review, revised"/.test(del), "A's delete quotes what was lost");
   assert(new RegExp(`no longer supersedes ${A} \\(pointer cleared\\)`).test(ptr), "B's pointer, cleared by 025's SET NULL, is reported as an edit");
   const cursor = /Cursor: ([0-9a-f-]{36}) — pass it as `since` to continue from here\./.exec(out)?.[1];
   assert(cursor !== undefined && !/More changes follow/.test(out), `the reply ends with the cursor and says nothing more follows (${cursor?.slice(0, 8)})`);
@@ -331,10 +331,10 @@ console.log("\n[10] thought_changes: pages by cursor join with no gap or repeat,
   // says who, so the two are not listed as keys the editor touched. A row with
   // no key but a door — the shape backfill_thought_actors writes, one per
   // thought it marks — reads by its door, not as "from outside the server".
-  await laptop.call("update_thought", { id: B, content: "the 051 review is done, says the laptop" });
+  await laptop.call("update_thought", { id: B, content: "the 052 review is done, says the laptop" });
   await sql`INSERT INTO thought_audit (thought_id, action, diff, origin) VALUES (${B}::uuid, 'update', '{"metadata": {"before": {"actor_name": "importer"}, "after": {"actor_name": "laptop", "actor_kind": "operator"}}}'::jsonb, 'backfill_thought_actors')`;
   const seams = entriesOf(await laptop.call("thought_changes", { since: cursor0 }));
-  const laptopEdit = seams.find((e) => /edited by laptop \(operator\)/.test(e) && /content → "the 051 review is done, says the laptop"/.test(e)) ?? "";
+  const laptopEdit = seams.find((e) => /edited by laptop \(operator\)/.test(e) && /content → "the 052 review is done, says the laptop"/.test(e)) ?? "";
   assert(laptopEdit !== "" && !/actor_kind|actor_name/.test(laptopEdit), `laptop's content edit of importer's thought lists no actor mark as a key it touched (${laptopEdit.split("\n").slice(1).join(" | ")})`);
   const door = seams.find((e) => /marked by backfill_thought_actors \(no key\)/.test(e)) ?? "";
   assert(door !== "" && /metadata: actor_kind, actor_name/.test(door) && !/outside the server/.test(door), `a row with no key but a door reads by the door, "marked" — 050's stamp is not an edit — its marks the whole change (${door.split("\n").slice(0, 2).join(" | ")})`);

@@ -498,7 +498,7 @@ export function normaliseProposal(r: Record<string, unknown>): SupersessionPropo
 }
 
 /**
- * One row of the change feed — migration 051's thought_changes over
+ * One row of the change feed — migration 052's thought_changes over
  * thought_audit (SMD-1296): what one capture, update or delete did, bounded
  * for a reply. `head` is at most 240 characters of the text the row is about
  * (a capture's current content — null once the thought is deleted — an
@@ -1089,10 +1089,10 @@ export interface ThoughtStore {
   listSupersessionProposals(opts: { status?: "pending" | "accepted" | "rejected" | null; limit?: number }): Promise<SupersessionProposal[]>;
 
   /**
-   * Migration 051's change feed (SMD-1296): one page of thought_audit, oldest
+   * Migration 052's change feed (SMD-1296): one page of thought_audit, oldest
    * first, from a time or a cursor — see ChangeFilters. Both stores call the
    * one function, so the bounds, the order and the bounded rendering are
-   * decided once, in SQL. Throws on a schema before 051 (the tool names the
+   * decided once, in SQL. Throws on a schema before 052 (the tool names the
    * migration), on a cursor that names no row, on an unknown action, and on a
    * time beside a cursor — each by the function's own message.
    */

@@ -658,7 +658,7 @@ console.log("\n[13] The provenance and proposal rpc shapes are null-safe too: a 
   }
 }
 
-console.log("\n[14] listChanges over PostgREST: the rpc shape — every argument named, the actions as text[] through the shim's catalog read, the row normalised (migration 051, SMD-1296)");
+console.log("\n[14] listChanges over PostgREST: the rpc shape — every argument named, the actions as text[] through the shim's catalog read, the row normalised (migration 052, SMD-1296)");
 {
   const admin = new SQL({ url: URL_, max: 1 });
   const cursor0 = String((await admin`SELECT id FROM thought_audit ORDER BY created_at DESC, id DESC LIMIT 1`)[0].id);
