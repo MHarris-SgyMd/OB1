@@ -210,7 +210,10 @@ services:
       # nothing on it. Measured before SMD-1843, when nothing here forwarded the
       # knob at all: preflight called that address local, wanted no credential,
       # dialled nothing without --deep and said OK; the first capture failed in
-      # 7 ms with "Unable to connect", and the server logged nothing. An Ollama
+      # 7 ms with "Unable to connect", and the server logged nothing. Since
+      # SMD-1875 preflight dials a local endpoint once (GET /models, 2.5 s) and
+      # the container refuses to start on one that answers nothing, naming the
+      # profile, the host aliases or a key as the fix. An Ollama
       # on the host is http://host.containers.internal:11434/v1 (podman; Docker
       # Desktop: host.docker.internal); OpenRouter is https://openrouter.ai/api/v1
       # with a key — deploy/.env.example, "Model provider". Check 14 holds this
@@ -261,6 +264,15 @@ services:
       migrate:
         condition: service_completed_successfully
     restart: unless-stopped
+    # Docker on Linux provides no name for the host; Docker Desktop and podman
+    # do (host.docker.internal; host.containers.internal). This line gives the
+    # container the Docker spelling everywhere Docker runs, so deploy/.env.example's
+    # Option B is one address per runtime and not one per runtime per OS, and
+    # so CI's "Full stack, no Supabase" job can put a listener on the runner
+    # for preflight's reachability probe to find (SMD-1875). A hosts entry
+    # only: nothing is published, nothing else changes.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
   # Keeps the brain in lockstep with the Linear board (SMD-1954). Optional —
   # `--profile board-sync`; a brain that is not the fork's own never runs it.

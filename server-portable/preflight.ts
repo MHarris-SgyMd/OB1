@@ -316,6 +316,65 @@ if (chatIsOwn) {
   credentialRow("chat credential", chatEndpoint, localChat, "OB1_CHAT_API_KEY", "OB1_CHAT_BASE_URL", unshared);
 }
 
+// ── Is the local endpoint there at all? (SMD-1875) ──────────────────────────
+
+/**
+ * A local endpoint is dialled once, by default: one GET of `/models` with no
+ * body and no credential, under a short timeout, and only the connection is
+ * judged — any HTTP status is an endpoint that answers; what it serves is
+ * --deep's question. Until this row the gate decided "local" from the hostname
+ * and connected to nothing without --deep, so an address that reached nothing
+ * — the container's own loopback (the code's default, inside a container), the
+ * `ollama` service name with no profile, `host.docker.internal` where the
+ * runtime does not provide it, a typo in the port — was `preflight OK`, and the
+ * first capture failed in 7 ms with the server log ending at `Started server`
+ * (measured 2026-09-21 on SMD-1843's baseline). A hosted endpoint is not
+ * dialled here: it costs a credential to prove anything about, which is --deep.
+ */
+const LOCAL_PROBE_TIMEOUT_MS = 2500;
+const LOCAL_PROBE_SECONDS = `${LOCAL_PROBE_TIMEOUT_MS / 1000} s`;
+/** The three spellings an operator reaches for, in the remedy's own words: the two host aliases, and the stack's own service. */
+const HOST_ALIASES = "http://host.containers.internal:11434/v1 under podman or http://host.docker.internal:11434/v1 under Docker";
+const STACK_OWN = "http://ollama:11434/v1 with --profile local-models";
+const HOST_SPELLINGS = `an Ollama on the host is ${HOST_ALIASES}, and the stack's own is ${STACK_OWN}`;
+/** What went wrong at the connection, in words, from Bun's error for it. */
+function probeFailure(e: unknown): string {
+  const err = e as Error & { code?: string | number };
+  if (err.name === "TimeoutError") return `no answer in ${LOCAL_PROBE_SECONDS}`;
+  if (err.code === "ENOTFOUND") return "the name does not resolve";
+  if (err.code === "ConnectionRefused" || err.code === "ECONNREFUSED") return "the connection was refused";
+  return err.message;
+}
+/** The remedy for the hostname's kind: which of the three spellings this one is, and what it needs. */
+function probeRemedy(base: string, knob: string): string {
+  const host = (() => { try { return new URL(base).hostname.toLowerCase(); } catch { return ""; } })();
+  if (LOCAL_PROVIDER_SERVICES.includes(host)) {
+    return `\`${host}\` is the local-models profile's service and exists only under it: start the stack with --profile local-models, or set ${knob} to an Ollama on the host (${HOST_ALIASES}) or to a hosted provider with a key.`;
+  }
+  if (host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]" || host === "0.0.0.0") {
+    return `Inside a container ${host} is the container itself, not the host: ${HOST_SPELLINGS}. From a shell on the host, start the provider or fix the port.`;
+  }
+  if (host === "host.docker.internal" || host === "host.containers.internal") {
+    return `Nothing on the host answers at that port, or this runtime does not provide the name — podman provides host.containers.internal, Docker Desktop host.docker.internal, and Docker on Linux the latter only through extra_hosts host-gateway, which deploy/compose.yaml sets. Start the provider on the host, or use the stack's own (${STACK_OWN}).`;
+  }
+  return `Start the provider at that address or fix the host and port in ${knob}; ${HOST_SPELLINGS}.`;
+}
+async function probeLocal(row: string, at: ProviderEndpoint, knob: string): Promise<void> {
+  const started = performance.now();
+  try {
+    const r = await fetch(`${at.base}/models`, { method: "GET", signal: AbortSignal.timeout(LOCAL_PROBE_TIMEOUT_MS) });
+    await r.body?.cancel();
+    add(row, "ok", `${at.base} answers — HTTP ${r.status} to GET /models in ${Math.max(1, Math.round(performance.now() - started))} ms; what it serves is checked under --deep`);
+  } catch (e) {
+    add(row, "fail", `nothing answers at ${at.base} — ${probeFailure(e)} (GET /models, ${LOCAL_PROBE_SECONDS} timeout); the first capture would fail on it in milliseconds`,
+        probeRemedy(at.base, knob));
+  }
+}
+if (localEmbeddings) await probeLocal("provider endpoint", embEndpoint, "OB1_LLM_BASE_URL");
+// A chat endpoint at the same base is the same socket: one probe. Its own
+// local base is its own row, so a down chat runtime fails by its own name.
+if (chatIsOwn && chatEndpoint.base !== embEndpoint.base && localChat) await probeLocal("chat endpoint", chatEndpoint, "OB1_CHAT_BASE_URL");
+
 // ── Egress: what may leave the box (SMD-1903) ───────────────────────────────
 
 /**
