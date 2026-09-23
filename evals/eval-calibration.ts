@@ -5,9 +5,10 @@
  * The fork writes a confidence in three places — the consolidation judge on
  * every proposal (migration 029), the entity extractor on every mention and
  * edge (016), and the metadata model's kind band that SMD-1951 froze — and it
- * resolves claims in three: a reviewer accepts or rejects a proposal, a hand
- * label agrees or not with the model's kind, and the fork record confirms or
- * refutes a hypothesis. Nothing compared the two. This harness does, as a READ
+ * resolves claims in four: a reviewer accepts or rejects a proposal, a hand
+ * label agrees or not with the model's kind, the fork record confirms or
+ * refutes a hypothesis, and (since SMD-1982) a hand grade holds or refutes a
+ * mention or an edge. Nothing compared the two. This harness does, as a READ
  * MODEL over what the log already holds — no table, no migration, no new
  * confidence source — so the first question, "is calibration measurable from
  * the existing log, and is any mechanism systematically over- or
@@ -196,37 +197,43 @@ export type Grades = { generated: string; origin: string; note: string; mentions
 
 export const GRADES_PATH = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "entity-grades.json");
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/** Lower-case only: the live report keys a claim by `uuid::text`, which Postgres prints lower-case, so an upper-case id would validate and never join. */
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
-/** What is wrong with a grades fixture; empty when it is sound. Each problem names the row. */
-export function validateGrades(g: Grades): string[] {
+/** What is wrong with a grades fixture; empty when it is sound. Each problem names the row. Anything that is not the shape is a problem, never a throw (review pass 1). */
+export function validateGrades(g: unknown): string[] {
+  if (!g || typeof g !== "object" || Array.isArray(g)) return ["the fixture is not an object"];
+  const f = g as Partial<Grades>;
   const problems: string[] = [];
-  for (const k of ["generated", "origin", "note"] as const) if (typeof g[k] !== "string" || g[k].trim() === "") problems.push(`${k} is missing`);
-  if (!Array.isArray(g.mentions) || !Array.isArray(g.edges)) return [...problems, "mentions and edges must be lists"];
+  for (const k of ["generated", "origin", "note"] as const) if (typeof f[k] !== "string" || f[k].trim() === "") problems.push(`${k} is missing`);
+  if (!Array.isArray(f.mentions) || !Array.isArray(f.edges)) return [...problems, "mentions and edges must be lists"];
   const seen = new Set<string>();
-  const row = (at: string, ids: string[], r: { stated: number; outcome: 0 | 1 }, claim: string) => {
-    for (const id of ids) if (!UUID.test(id ?? "")) problems.push(`${at}: ${JSON.stringify(id)} is not an id`);
-    if (typeof r.stated !== "number" || !(r.stated >= 0 && r.stated <= 1)) problems.push(`${at}: stated ${JSON.stringify(r.stated)} is not in [0, 1]`);
+  const row = (at: string, ids: unknown[], r: { stated?: unknown; outcome?: unknown }, claim: string) => {
+    for (const id of ids) if (typeof id !== "string" || !UUID.test(id)) problems.push(`${at}: ${JSON.stringify(id)} is not a lower-case id`);
+    if (typeof r.stated !== "number" || !(r.stated >= 0 && r.stated <= 1)) problems.push(`${at}: stated ${JSON.stringify(r.stated)} is not a number in [0, 1]`);
     if (r.outcome !== 0 && r.outcome !== 1) problems.push(`${at}: outcome ${JSON.stringify(r.outcome)} is not 0 or 1`);
     if (seen.has(claim)) problems.push(`${at}: ${claim} is graded twice`);
     seen.add(claim);
   };
-  g.mentions.forEach((m, i) => row(`mentions[${i}]`, [m.thought, m.entity], m, `${m.thought}:${m.entity}`));
-  g.edges.forEach((e, i) => {
-    if (!Number.isInteger(e.relation) || e.relation < 0 || e.relation >= RELATIONS.length) problems.push(`edges[${i}]: relation ${JSON.stringify(e.relation)} is not an index into RELATIONS (0–${RELATIONS.length - 1})`);
-    row(`edges[${i}]`, [e.thought, e.from, e.to], e, `${e.thought}:${e.from}:${e.to}:${RELATIONS[e.relation] ?? e.relation}`);
+  const obj = (v: unknown): Record<string, unknown> => (v && typeof v === "object" ? (v as Record<string, unknown>) : {});
+  f.mentions.forEach((v, i) => { const m = obj(v); row(`mentions[${i}]`, [m.thought, m.entity], m, `${m.thought}:${m.entity}`); });
+  f.edges.forEach((v, i) => {
+    const e = obj(v);
+    const rel = e.relation;
+    if (!Number.isInteger(rel) || (rel as number) < 0 || (rel as number) >= RELATIONS.length) problems.push(`edges[${i}]: relation ${JSON.stringify(rel)} is not an index into RELATIONS (0–${RELATIONS.length - 1})`);
+    row(`edges[${i}]`, [e.thought, e.from, e.to], e, `${e.thought}:${e.from}:${e.to}:${RELATIONS[rel as number] ?? rel}`);
   });
   return problems;
 }
 
 export function readGrades(path = GRADES_PATH): Grades {
-  const g = JSON.parse(readFileSync(path, "utf8")) as Grades;
+  const g: unknown = JSON.parse(readFileSync(path, "utf8"));
   const problems = validateGrades(g);
   if (problems.length) {
     console.error(`${path} is not a sound grades fixture:\n  ${problems.slice(0, 20).join("\n  ")}${problems.length > 20 ? `\n  … ${problems.length - 20} more` : ""}`);
     process.exit(2);
   }
-  return g;
+  return g as Grades;
 }
 
 /** The grades keyed as the live report keys a claim: thought:entity for a mention, thought:from:to:relation for an edge. */
@@ -546,12 +553,24 @@ async function selfCheck(): Promise<void> {
   const graded = mentionRows([{ claim: `${A}:${B}`, kind: "mention", confidence: 0.8, extraction_key: "x" }, { claim: `${A}:${B}:${C}:uses`, kind: "edge", confidence: 1, extraction_key: "x" }, { claim: `${A}:${E}`, kind: "mention", confidence: 1, extraction_key: "x" }], gm);
   ok(graded[0].outcome === 0 && graded[0].resolvedBy === HAND_GRADE && graded[1].outcome === 1 && graded[2].outcome === null && graded[2].resolvedBy === null, "a graded mention and edge resolve by the hand grade; an ungraded one stays unresolved");
   ok(mentionRows(graded.map((r) => ({ claim: r.claim, kind: r.kind as "mention" | "edge", confidence: r.stated!, extraction_key: "x" }))).every((r) => r.outcome === null), "with no grades the extractor resolves nothing, as before");
-  const bad = validateGrades({ ...gfx, mentions: [{ thought: A, entity: "not-an-id", stated: 1.2, outcome: 2 as 0 | 1 }, { thought: A, entity: B, stated: 1, outcome: 1 }, { thought: A, entity: B, stated: 1, outcome: 0 }], edges: [{ ...gfx.edges[0], relation: RELATIONS.length }] });
-  ok(bad.length === 5 && bad[0].includes("not-an-id") && bad[1].includes("1.2") && bad[2].includes("outcome 2") && bad[3].includes("graded twice") && bad[4].includes("not an index"), `a bad id, a stated value out of range, an outcome that is not 0/1, a claim graded twice and a relation off the vocabulary are each refused by name (${bad.length})`);
-  const gradedBrain = assemble(committed, { ...none, mentions: [{ claim: `${A}:${B}`, kind: "mention", confidence: 0.8, extraction_key: "x" }] }, gm);
+  // F has hex letters, so its upper-case form differs (a digits-only id upper-cases to itself and would probe nothing).
+  const F = "1000000a-0000-4000-8000-00000000000f", G = "10000000-0000-4000-8000-000000000007";
+  const bad = validateGrades({
+    ...gfx, note: "",
+    mentions: [
+      { thought: A, entity: "not-an-id", stated: 1.2, outcome: 2 }, { thought: A, entity: B, stated: 1, outcome: 1 }, { thought: A, entity: B, stated: 1, outcome: 0 },
+      { thought: A, entity: C, stated: "0.8", outcome: 1 }, { thought: A, entity: D, stated: -0.1, outcome: 0 }, { thought: A, entity: E, stated: 1, outcome: true }, { thought: A, entity: F.toUpperCase(), stated: 1, outcome: 1 }, null,
+    ],
+    edges: [{ ...gfx.edges[0], relation: RELATIONS.length }, { ...gfx.edges[0], to: "nope", relation: 1.5 }, { thought: A, from: B, to: G, relation: RELATIONS.indexOf("uses"), stated: 1, outcome: 1 }],
+  });
+  const expect = ["note is missing", "not-an-id", "stated 1.2", "outcome 2", "graded twice", `stated "0.8"`, "stated -0.1", "outcome true", `"${F.toUpperCase()}" is not a lower-case id`, "mentions[7]: undefined is not a lower-case id", "not an index", `"nope" is not a lower-case id`, "relation 1.5"];
+  ok(expect.every((e) => bad.some((p) => p.includes(e))) && bad.length === 16, `a missing label, a bad id, an upper-case id, a null row, a stated value out of range or not a number, an outcome that is not 0/1, a claim graded twice, a bad edge end and a relation off the vocabulary or not an integer are each refused by name (${bad.length}: ${bad.filter((p) => !expect.some((e) => p.includes(e))).join("; ") || "all named"})`);
+  ok(validateGrades(null)[0] === "the fixture is not an object" && validateGrades([])[0] === "the fixture is not an object" && validateGrades("x")[0] === "the fixture is not an object" && validateGrades({}).length === 4, "a fixture that is not an object, or has none of the shape, is a problem and not a throw");
+  // The brain holds one graded mention and one ungraded, and lacks the graded edge: the note counts a set difference, not a subtraction (review pass 1).
+  const gradedBrain = assemble(committed, { ...none, mentions: [{ claim: `${A}:${B}`, kind: "mention", confidence: 0.8, extraction_key: "x" }, { claim: `${A}:${E}`, kind: "mention", confidence: 1, extraction_key: "x" }] }, gm);
   const gx = gradedBrain.summaries.find((m) => m.mechanism === "x")!;
-  ok(gx.resolved === 1 && gx.scorable === 1 && Math.abs((gx.brier ?? 0) - 0.64) < 1e-9, `a graded mention in the brain is resolved and scored on the extractor's row (${gx.resolved}/${gx.scorable}/${gx.brier})`);
-  ok(gradedBrain.notes.some((n) => n.startsWith("1 of the 2 hand-graded extractor claims")), "a graded claim the brain lacks is counted in a note");
+  ok(gx.claims === 2 && gx.resolved === 1 && gx.scorable === 1 && Math.abs((gx.brier ?? 0) - 0.64) < 1e-9, `a graded mention in the brain is resolved and scored on the extractor's row, an ungraded one beside it is not (${gx.claims}/${gx.resolved}/${gx.scorable}/${gx.brier})`);
+  ok(gradedBrain.notes.some((n) => n.startsWith("1 of the 2 hand-graded extractor claims")), "a graded claim the brain lacks is counted in a note, and an ungraded claim the brain holds does not offset it");
   ok(!assemble(committed, { ...none, mentions: [{ claim: `${A}:${B}`, kind: "mention", confidence: 0.8, extraction_key: "x" }, { claim: `${A}:${B}:${C}:uses`, kind: "edge", confidence: 1, extraction_key: "x" }] }, gm).notes.some((n) => n.includes("hand-graded")), "with every graded claim present there is no such note");
   ok(assemble(committed, none).notes.every((n) => !n.includes("hand-graded")), "with no grades there is no such note");
   const committedGrades = readGrades();

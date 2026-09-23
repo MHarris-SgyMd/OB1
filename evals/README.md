@@ -4050,31 +4050,45 @@ over a stratified sample, so the base rate is the sample's and not the brain's.
 What it says:
 
 * **On a mention the hedge is a signal the prompt suppresses.** When the model
-  said 0.80 of a mention it was wrong 12 times in 13 (Fisher exact against the
-  control, p = 0.0001): six type-vocabulary words (`person`, `topic`, `place`,
-  `tool`, `organization`, `project`) minted from a ticket that quotes the
-  prompt's own type list, four `PostgreSQL` mentions in thoughts whose text
-  never says Postgres — each in a different thought, each hedged — and four
-  fragments and example tokens. The two 0.50 defaults were both wrong. The
-  control's three failures at 1.00 (an identifier typed as a topic, a URL
-  fragment, a glob typed as a place) were not hedged. So the model does know
-  something about its own false positives, and today the column throws it
-  away: 016 keeps every row at or above 0.50 and only sorts by it.
-* **On an edge the hedge marks nothing useful.** The hedged edges held *more*
-  often than the control (12/17 against 5/17, p = 0.038, the other way), but
-  15 of the 17 come from one thought — SMD-1731's ticket body, whose "SMD-1731
-  `uses` <component>" edges the model marked 0.90 and which mostly hold — and
-  the other two held 0 of 2. The finding on edges is the control itself: 1.00
-  edges hold 29% of the time, and a confidence that says 1.00 on 99.6% of them
-  is not where that defect will be fixed (SMD-1925, SMD-1937).
+  said 0.80 of a mention it was wrong 12 times in 13: six type-vocabulary words
+  (`person`, `topic`, `place`, `tool`, `organization`, `project`) minted from a
+  ticket that quotes the prompt's own type list, two `PostgreSQL` mentions in
+  thoughts whose text never says Postgres, and four fragments and example
+  tokens; the two 0.50 defaults were `PostgreSQL` too — four in all, each in a
+  different thought, each below 1.00. The control's three failures at 1.00 (an
+  identifier typed as a topic, a URL fragment, a glob typed as a place) were
+  not hedged. Fisher's exact test against the control says p = 0.0001, but the
+  rows are not independent: ten of the fifteen hedged mentions are one
+  thought's, SMD-1937's ticket body. Without that thought the hedged bin is 1
+  of 5 against the control's 11 of 14 (p = 0.038); counted by thought — held
+  only if every graded mention in it held — 1 of 6 against 12 of 15 (p =
+  0.014); and inside that thought the one control mention at 1.00 held while
+  its ten at 0.80 failed. So the model does know something about its own false
+  positives, and today the column throws it away: 016 keeps every row at or
+  above 0.50 and only sorts by it.
+* **On an edge the hedge marks nothing useful.** As graded the hedged edges
+  held *more* often than the control (12/17 against 5/17), but 15 of the 17
+  are one thought's — SMD-1731's ticket body: eleven "SMD-1731 `uses`
+  <component>" edges at 0.90, of which eight held, and four `related_to` edges
+  at 0.80, all held — and the other two held 0 of 2. The eight rest on reading
+  "the ticket `uses` a component it changes" as held; under the strict reading
+  they are 0 and the hedged bin is 4/17, level with the control. Either way,
+  no signal. The finding on edges is the control itself: 1.00 edges hold 29%
+  of the time, and a confidence that says 1.00 on 99.6% of them is not where
+  that defect will be fixed (SMD-1925, SMD-1937).
 * **The pooled two-bin table is flat (53% against 41%, p = 0.45) because the
   two kinds run opposite ways.** Read per kind or not at all.
 
 Limits: 64 rows, one grader (the maintainer's assistant, blind to the value but
 not to the fork), the hedged strata clustered on six thoughts for mentions and
-three for edges, and a strict rule on type. The control's held rate is the
-estimate of the 1.00 stratum's precision (mentions 80%, edges 29%) with the
-wide interval fifteen or seventeen rows give.
+three for edges, and a strict rule on type — `preflight check` graded 0 where
+`test-schema` in the same thought got 1, `migration 021` and `actor_name` 0 for
+being an example and an identifier typed as a topic. The grades stand as they
+were given blind; the most generous defensible re-grade of the borderline calls
+leaves the mention headline at 3 of 15 against 10 of 15 (p = 0.025). The
+control's held rate is the estimate of the 1.00 stratum's precision, with the
+interval fifteen or seventeen rows give: mentions 80% (Wilson 95% 55–93%),
+edges 29% (13–53%).
 
 What it changes in SMD-1982: the elicitation arms in its Work item 1 are worth
 running for mentions — the prompt that asks for a reason below 1 first, on the
