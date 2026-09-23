@@ -33,7 +33,7 @@ delete process.env.OB1_CAPTURE_KEY;
 
 const {
   stripInjected, sniffHarness, parseClaudeCode, parseCodex, summariseTranscript, renderSummary, provenanceOf,
-  scanForSecrets, scanSummary, SECRET_PATTERNS, parseRpcBody, postCapture, prepare, postPending, hookJson, shellWord, readState, LIMITS, REFUSAL_RE, checkpointOf, EVENTS, HOOK_EVENTS, DEFAULT_EVENTS, eventSpec,
+  scanForSecrets, scanSummary, SECRET_PATTERNS, parseRpcBody, postCapture, prepare, postPending, hookJson, shellWord, readState, LIMITS, REFUSAL_RE, checkpointOf, EVENTS, HOOK_EVENTS, DEFAULT_EVENTS, eventSpec, HARNESS, HARNESSES, TRIGGER_EVENTS, INTERVAL_EVENTS,
 } = await import(SCRIPT);
 
 let passed = 0, failed = 0;
@@ -273,7 +273,8 @@ console.log("\n[3] The summary is deterministic, capped, and says what it carrie
   assert(bigCp !== bigEnd, "…so a checkpoint's summary and the end's differ even at the cap, and the end supersedes the checkpoint (first review pass: both clipped to the same 6000 bytes, and the end was 'already captured')");
   // The heavy body: with a short one the negative bound sliced it to nothing too, and the mutant hid (pass 2's own run-it).
   const absurd = renderSummary({ ...heavy, sessionId: "x".repeat(7000), checkpoint: { kind: "compacted", trigger: "auto" } });
-  assert(/^…\n\nCheckpoint: compacted at /.test(absurd) && absurd.length < 7300, `a closing longer than the cap leaves the body as one ellipsis, never a slice from the end (second review pass: a negative bound; ${absurd.length} chars)`);
+  assert(absurd.length === LIMITS.textChars && /\n\nCheckpoint: compacted at /.test(absurd) && new RegExp(`\\n\\nSession x{${LIMITS.sessionIdChars - 1}}…, 2026-09-22`).test(absurd),
+    `an absurd session id is clipped in the closing line, so the whole stays within the cap with the Checkpoint whole (fifth review pass: the closing was unbounded and the cap's sentence false; ${absurd.length} chars)`);
   assert(provenanceOf(many).length === LIMITS.derived, `derived_from is capped at ${LIMITS.derived}`);
   const empty = renderSummary(summariseTranscript(join(TMP, "empty.jsonl"), (writeFileSync(join(TMP, "empty.jsonl"), "{}\n"), "claude-code")));
   assert(/Brain: no thoughts read or written this session\./.test(empty), "a session that never touched the brain says so");
@@ -394,7 +395,9 @@ console.log("\n[5] The foreground half decides, writes a payload, and never a ke
     "checkpointOf reads the event, and a trigger only when it is manual or auto");
   assert(HOOK_EVENTS.join() === "SessionEnd,PreCompact,Stop" && Object.values(EVENTS).every((e) => "checkpoint" in e && typeof e.timeout === "boolean" && typeof e.interval === "boolean") && EVENTS.Stop.interval && !EVENTS.Stop.timeout && EVENTS.PreCompact.checkpoint === "compacted",
     "the three events are one table — what a summary there says, whether the printed hook pins a timeout, whether the command carries the interval (second review pass: four structures)");
-  assert(HOOK_EVENTS.filter((e) => EVENTS[e].trigger).join() === "PreCompact" && HOOK_EVENTS.filter((e) => EVENTS[e].interval).join() === "Stop", "…which event carries a trigger and which the interval (fourth review pass: both were still spelled as names outside it)");
+  assert(TRIGGER_EVENTS.join() === "PreCompact" && INTERVAL_EVENTS.join() === "Stop", "…which event carries a trigger and which the interval, derived once (fourth review pass: both were still spelled as names outside it)");
+  assert(HARNESSES.join() === "claude-code,codex" && HARNESS["claude-code"].timeoutSec === 10 && HARNESS.codex.timeoutSec === 3 && HARNESS.codex.label === "Codex" && /hooks\.json$/.test(HARNESS.codex.settings) && HARNESS.constructor === undefined,
+    "the harnesses are one table too — label, settings path, the pinned timeout — with no inherited names (fifth review pass)");
   assert(EVENTS.PreCompact.harnesses.join() === "claude-code" && DEFAULT_EVENTS["claude-code"].join() === "SessionEnd,PreCompact" && DEFAULT_EVENTS.codex.join() === "SessionEnd" && Object.keys(DEFAULT_EVENTS).join() === "claude-code,codex",
     "…and which harness fires which, the defaults derived from it (third review pass: a second table beside the first)");
   // Object's own names are not events (third review pass: `EVENTS["constructor"]` was a function, and "toString" passed every check).
@@ -856,8 +859,11 @@ console.log("\n[7] As a hook: JSON on stdin, exit codes, and what reaches the en
   }
   const evOnHook = await runHook({ session_id: "s-ev-flag", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "SessionEnd" }, { OB1_SESSION_CAPTURE_SYNC: "1" }, ["--event", "PreCompact"]);
   const trOnHook = await runHook({ session_id: "s-tr-flag", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "PreCompact", trigger: "auto" }, { OB1_SESSION_CAPTURE_SYNC: "1" }, ["--trigger=manual"]);
-  assert(evOnHook.code === 1 && /--event is --print-hook's and --dry-run's/.test(evOnHook.err) && trOnHook.code === 1 && /--trigger is/.test(trOnHook.err) && !readState("s-ev-flag") && !readState("s-tr-flag"),
+  assert(evOnHook.code === 1 && /--event is not a hook flag — a hook takes --harness and --min-interval/.test(evOnHook.err) && trOnHook.code === 1 && /--trigger is not a hook flag/.test(trOnHook.err) && !readState("s-ev-flag") && !readState("s-tr-flag"),
     `as a hook, --event or --trigger on the command line is refused with exit 1 and nothing captured — the harness sends both on stdin (fourth review pass: they ran, ignored, in silence; exits ${evOnHook.code}/${trOnHook.code})`);
+  const typoOnHook = await runHook({ session_id: "s-typo-flag", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "Stop" }, { OB1_SESSION_CAPTURE_SYNC: "1" }, ["--min-intervall", "20"]);
+  assert(typoOnHook.code === 1 && /--min-intervall is not a hook flag/.test(typoOnHook.err) && !readState("s-typo-flag"), "…and so is any other flag: a misspelt --min-interval would have captured every turn in silence (fifth review pass)");
+  assert((await runHook({ session_id: "s-two-flags", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "Stop" }, { OB1_SESSION_CAPTURE_SYNC: "1" }, ["--harness=claude-code", "--min-interval=20"])).code === 0 && readState("s-two-flags")?.thought_id, "…while the hook's two flags, in either form, run");
   const mib = await runHook({ session_id: "s-mi", transcript_path: CLAUDE_T, hook_event_name: "Stop" }, {}, ["--min-interval", "20m"]);
   assert(mib.code === 1 && /--min-interval takes a number of minutes/.test(mib.err), `"--min-interval 20m" is refused (exit ${mib.code}), not run as NaN and a capture every turn (eighth review pass)`);
   // The synchronous path reports the RUN'S OWN outcome even when an older
@@ -974,6 +980,10 @@ console.log("\n[9] The printed hook carries no secret; --check tells a capture k
   const lastWins = await run(["--dry-run", CLAUDE_T, "--event=PreCompact", "--event", "Stop"]);
   assert(lastWins.code === 0 && /Checkpoint: turn ended at /.test(lastWins.out) && Object.keys(JSON.parse((await run(["--print-hook=codex", "--print-hook", "claude-code"])).out).hooks).join() === "SessionEnd,PreCompact",
     "a repeated flag: the last mention wins in either form (fourth review pass: the = form won over a later correction)");
+  const prefixed = await run(["--print-hook", "claude-code", "--eventual=Stop", "--eventual", "PreCompact"]);
+  assert(prefixed.code === 0 && Object.keys(JSON.parse(prefixed.out).hooks).join() === "SessionEnd,PreCompact", "a flag whose name merely begins with another's is not that flag, in either form (fifth review pass: the = form's match was unpinned)");
+  const eqDangling = await run(["--print-hook", "claude-code", "--event=--min-interval", "20"]);
+  assert(eqDangling.code === 2 && /none was given/.test(eqDangling.err), "`--event=--min-interval` is an event forgotten, as `--event --min-interval` is (fifth review pass: the = form returned the flag as the value)");
   const eqStop = await run(["--print-hook=claude-code", "--event=Stop", "--min-interval=45"]);
   assert(eqStop.code === 0 && /--min-interval 45/.test(eqStop.out) && Object.keys(JSON.parse(eqStop.out).hooks).join() === "Stop", `…and --print-hook=claude-code --event=Stop --min-interval=45 prints a Stop hook at 45 (exit ${eqStop.code})`);
   const zero = await run(["--print-hook", "claude-code", "--event", "Stop", "--min-interval", "0"]);
