@@ -441,6 +441,57 @@ export function parseFilter(raw: unknown): Record<string, unknown> {
   return out;
 }
 
+// SMD-1726: who wrote a thought's current text, on the read path. Migration 050
+// stamps two reserved metadata keys from the write's key — `actor_kind`
+// (ob1_agents.kind: operator | agent | ingested) and `actor_name` (the key's
+// name) — so "only what the operator said" is the same jsonb containment every
+// other filter key takes, on 014's route, and the hit can say who wrote it.
+/** The three words the key registry holds (migration 046, `ob1_agents.kind`); `said_by` takes one. */
+const SAID_BY = ["operator", "agent", "ingested"] as const;
+const saidByInput = z.enum(SAID_BY).optional()
+  .describe("Only thoughts whose current text was written through a key of this kind: operator (typed by the operator), agent (an agent's own output — a summary, a conclusion), or ingested (an importer copying outside text). Decided by the key that made the write, never by the thought's text. Omit for every writer.");
+const actorInput = z.string().trim().min(1).max(200).optional()
+  .describe("Only thoughts whose current text was written through the access key with this name — the name on a hit's `By:` line. Omit for every key.");
+
+/**
+ * `said_by` and `actor` folded into the metadata filter (SMD-1726): the two
+ * are the keys migration 050 stamps, so the store, the query log and the plan
+ * see one filter and the arguments are sugar over it. A `filter` that names
+ * the same key with another value is a caller contradicting itself, refused
+ * at the boundary as parseFilter refuses a nested object. Exported for the
+ * unit test.
+ */
+export function withActorFilter(filter: Record<string, unknown>, saidBy: string | undefined, actor: string | undefined): Record<string, unknown> {
+  const out = { ...filter };
+  // The stamp trims the key's name (050), so the argument is trimmed here too —
+  // a pasted "op-key " must find the rows op-key wrote (second review pass).
+  for (const [key, value, arg] of [["actor_kind", saidBy, "said_by"], ["actor_name", actor?.trim() || undefined, "actor"]] as const) {
+    if (value === undefined) continue;
+    if (key in out && out[key] !== value) throw new Error(`${arg} is "${value}" but filter.${key} is ${JSON.stringify(out[key])} — pass one of the two`);
+    out[key] = value;
+  }
+  // The caps are the filter's, so they hold over the folded object too (first
+  // review pass: a 20-key filter plus the two was 22 keys the store ran).
+  return parseFilter(out);
+}
+
+/**
+ * The `By:` line under a hit — who wrote its current text, from the two keys
+ * migration 050 stamps. Absent when the row carries neither (a write from
+ * outside the server, or a brain whose backfill has not run), as `Captured:`
+ * is absent for an undated row. A name with no kind is a key nobody has
+ * classified yet (set_agent_kind), said so rather than guessed. The name is
+ * the key's — the server's word, not the thought's — and is rendered through
+ * the same cleaner every quoted text takes all the same. Exported for the
+ * unit test.
+ */
+export function actorLine(m: Record<string, unknown>): string | null {
+  const name = typeof m.actor_name === "string" && m.actor_name.trim() ? snipText(m.actor_name, 80) : null;
+  const kind = typeof m.actor_kind === "string" && (SAID_BY as readonly string[]).includes(m.actor_kind) ? m.actor_kind : null;
+  if (!name && !kind) return null;
+  return `By: ${name ?? "an unnamed key"} (${kind ?? "kind not classified"})`;
+}
+
 function buildServer(principal: Principal): McpServer {
   const server = new McpServer({
     name: SERVER_NAME,
@@ -698,7 +749,8 @@ function buildServer(principal: Principal): McpServer {
         "Search captured thoughts by meaning, with exact matching for identifier-shaped tokens in the query (SMD-944, upsert_thought, db/config.mjs, getUserById) and for \"quoted\" spans. " +
         "Use this when the user asks about a topic, person, or idea they've previously captured, including one named by an error code or a ticket key. " +
         "A thought containing one of those literals is ranked with the strongest results found by meaning, never below them, whatever its own similarity — provided the literal is rare enough to match exactly (found in no more than one keyword page of thoughts) and the result fits within the limit. " +
-        "Returns a fixed top-N; to page through every thought containing an exact string, or to match a literal that is too common here, use search_thoughts_keyword.",
+        "Returns a fixed top-N; to page through every thought containing an exact string, or to match a literal that is too common here, use search_thoughts_keyword. " +
+        "Every hit says who wrote it (`By: <key> (operator|agent|ingested)`); `said_by` keeps only what the operator typed, or only agents' output, and `actor` only one key's.",
       annotations: {
         readOnlyHint: true,
       },
@@ -732,14 +784,17 @@ function buildServer(principal: Principal): McpServer {
         // eval-replay's filtered path). Absent is unfiltered. The store applies
         // `metadata @> filter` inside the scan (014); parseFilter bounds it.
         filter: filterInput,
+        // SMD-1726: who wrote it, as two more keys of the same filter.
+        said_by: saidByInput,
+        actor: actorInput,
       },
     },
-    async ({ query, limit, threshold, recency_weight, filter }) => {
+    async ({ query, limit, threshold, recency_weight, filter, said_by, actor }) => {
       try {
         // The one search op, hybrid arm (SMD-1490): it gates the query
         // (SMD-1903), embeds it, runs the filter and logs. parseFilter refuses a
         // shape jsonb should not run; a bad filter falls to the catch below.
-        const r = await runSearch({ tool: "search_thoughts", arm: "hybrid", query, limit, threshold, recencyWeight: recency_weight, filter: parseFilter(filter) });
+        const r = await runSearch({ tool: "search_thoughts", arm: "hybrid", query, limit, threshold, recencyWeight: recency_weight, filter: withActorFilter(parseFilter(filter), said_by, actor) });
         if (r.refused) return r.refused;
         const data = r.rows;
 
@@ -797,6 +852,11 @@ function buildServer(principal: Principal): McpServer {
               ...(captured ? [`Captured: ${captured}`] : []),
               `Type: ${m.type || "unknown"}`,
             );
+            // SMD-1726: who wrote the current text, from the key (050); its own
+            // line, as every field of this block is — nothing parses `ID:`
+            // past the id, and nothing should start to.
+            const by = actorLine(m);
+            if (by) parts.push(by);
             if (t.matchedNeedles.length) parts.push(`Contains: ${t.matchedNeedles.join(", ")}`);
             if (Array.isArray(m.topics) && m.topics.length)
               parts.push(`Topics: ${(m.topics as string[]).join(", ")}`);
@@ -884,15 +944,18 @@ function buildServer(principal: Principal): McpServer {
         // SMD-1490: the same metadata filter as search_thoughts, applied inside
         // the keyword scan (`metadata @> filter`). Absent is unfiltered.
         filter: filterInput,
+        // SMD-1726: who wrote it, as two more keys of the same filter.
+        said_by: saidByInput,
+        actor: actorInput,
       },
     },
-    async ({ query, limit, offset, filter }) => {
+    async ({ query, limit, offset, filter, said_by, actor }) => {
       try {
         // The one search op, keyword arm (SMD-1490): no gate (a keyword search
         // embeds nothing, so nothing leaves the box), the filter applied inside
         // the scan, and — new since SMD-1490 — a query_log row written with
         // arm='keyword' (034 logged only the semantic path).
-        const r = await runSearch({ tool: "search_thoughts_keyword", arm: "keyword", query, limit, offset, filter: parseFilter(filter) });
+        const r = await runSearch({ tool: "search_thoughts_keyword", arm: "keyword", query, limit, offset, filter: withActorFilter(parseFilter(filter), said_by, actor) });
         const data = r.rows;
 
         if (data.length === 0) {
@@ -935,6 +998,9 @@ function buildServer(principal: Principal): McpServer {
             ...(captured ? [`Captured: ${captured}`] : []),
             `Type: ${m.type || "unknown"}`,
           ];
+          // SMD-1726: who wrote it, the line search_thoughts prints.
+          const by = actorLine(m);
+          if (by) parts.push(by);
           if (Array.isArray(m.topics) && m.topics.length)
             parts.push(`Topics: ${(m.topics as string[]).join(", ")}`);
           parts.push(`\n${t.content}`);
@@ -973,7 +1039,7 @@ function buildServer(principal: Principal): McpServer {
     {
       title: "List Recent Thoughts",
       description:
-        "List recently captured thoughts with optional filters by type, topic, person, or time range.",
+        "List recently captured thoughts with optional filters by type, topic, person, time range, or who wrote them (`said_by`: operator | agent | ingested; `actor`: a key's name). Each item says who wrote it on a `By:` line.",
       annotations: {
         readOnlyHint: true,
       },
@@ -983,11 +1049,15 @@ function buildServer(principal: Principal): McpServer {
         topic: z.string().optional().describe("Filter by topic tag"),
         person: z.string().optional().describe("Filter by person mentioned"),
         days: z.number().optional().describe("Only thoughts from the last N days"),
+        // SMD-1726: who wrote it — the two keys 050 stamps, as containment
+        // clauses beside type, topic and person.
+        said_by: saidByInput,
+        actor: actorInput,
       },
     },
-    async ({ limit, type, topic, person, days }) => {
+    async ({ limit, type, topic, person, days, said_by, actor }) => {
       try {
-        const data = await (await db()).listThoughts({ limit, type, topic, person, days });
+        const data = await (await db()).listThoughts({ limit, type, topic, person, days, saidBy: said_by, actor });
 
         if (!data.length) {
           return { content: [{ type: "text" as const, text: "No thoughts found." }] };
@@ -1007,9 +1077,14 @@ function buildServer(principal: Principal): McpServer {
             // update_thought and delete_thought take. This compact format has no
             // header group, so it trails the content. SMD-1248.
             const mark = superseded[t.id] ? `\n   ⚠ Superseded by a newer thought — ID ${superseded[t.id]}` : "";
+            // SMD-1726: who wrote it, AFTER the id line, indented as the block
+            // is — the content-then-ID adjacency stays, which this repo's own
+            // e2e suite ([8]) matched on and a client may too.
+            const by = actorLine(m);
+            const who = by ? `\n   ${by}` : "";
             // SMD-1328: the date bracket is structural here, so an undated row
             // reads `[undated]` (never `[1/1/1970]`); a sentinel shows its text.
-            return `${i + 1}. [${displayDate(t.created_at) ?? "undated"}] (${m.type || "??"}${tags ? " - " + tags : ""})\n   ${t.content}\n   ID: ${t.id}${mark}`;
+            return `${i + 1}. [${displayDate(t.created_at) ?? "undated"}] (${m.type || "??"}${tags ? " - " + tags : ""})\n   ${t.content}\n   ID: ${t.id}${who}${mark}`;
           }
         );
 

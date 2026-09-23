@@ -566,6 +566,34 @@ console.log("\n[17] tierProblem validates OB1_TIER at the boundary initEnv and p
   assert(msg.includes("prod") && msg.includes("stable, canary, working") && /045|query_log/.test(msg), "the message names the bad value, the allowed set, and why it matters (the silent drop)");
 }
 
+console.log("\n[16b] said_by and actor fold into the filter, and the By: line renders the row's mark and nothing else (SMD-1726)");
+{
+  // The two arguments are sugar over the two metadata keys migration 050
+  // stamps, so the store, the log and the plan see one filter; the By: line
+  // reads the same keys back. Both pure, both exported for this.
+  const { withActorFilter, actorLine } = await import("./index.ts") as {
+    withActorFilter: (f: Record<string, unknown>, s?: string, a?: string) => Record<string, unknown>;
+    actorLine: (m: Record<string, unknown>) => string | null;
+  };
+  assert(JSON.stringify(withActorFilter({}, undefined, undefined)) === "{}", "neither argument leaves the filter as it was");
+  assert(JSON.stringify(withActorFilter({ type: "idea" }, "operator", undefined)) === JSON.stringify({ type: "idea", actor_kind: "operator" }), "said_by becomes filter.actor_kind beside the caller's keys");
+  assert(JSON.stringify(withActorFilter({}, "agent", "bot-key")) === JSON.stringify({ actor_kind: "agent", actor_name: "bot-key" }), "actor becomes filter.actor_name");
+  assert(JSON.stringify(withActorFilter({ actor_kind: "agent" }, "agent", undefined)) === JSON.stringify({ actor_kind: "agent" }), "the same value in both places agrees");
+  const refusal = (f: Record<string, unknown>, s?: string, a?: string) => { try { withActorFilter(f, s, a); return ""; } catch (e) { return (e as Error).message; } };
+  assert(/said_by is "operator" but filter\.actor_kind is "agent" — pass one of the two/.test(refusal({ actor_kind: "agent" }, "operator", undefined)), "a filter naming the key with another value is a contradiction, refused with both spellings named");
+  assert(/actor is "x" but filter\.actor_name is "y"/.test(refusal({ actor_name: "y" }, undefined, "x")), "…for actor too");
+  assert(actorLine({}) === null && actorLine({ type: "idea" }) === null, "no mark, no line — as an undated row prints no Captured: line");
+  assert(actorLine({ actor_kind: "operator", actor_name: "op-key" }) === "By: op-key (operator)", "a name and a kind");
+  assert(actorLine({ actor_name: "ghost-key" }) === "By: ghost-key (kind not classified)", "a name alone says the key is unclassified rather than guessing a kind");
+  assert(actorLine({ actor_kind: "agent" }) === "By: an unnamed key (agent)", "a kind alone — an envelope that carried only an agent id");
+  assert(actorLine({ actor_kind: "root", actor_name: "x" }) === "By: x (kind not classified)", "a word outside the registry's three renders as no kind");
+  assert(actorLine({ actor_name: "op\u001b[2Jkey" }) === "By: op[2Jkey (kind not classified)", "…and the name goes through the display cleaner: a control character cannot reach the terminal");
+  assert(actorLine({ actor_name: "   " }) === null && actorLine({ actor_name: 7, actor_kind: 3 }) === null, "a blank or non-string value is no mark");
+  const twenty = Object.fromEntries(Array.from({ length: 20 }, (_, i) => [`k${i}`, i]));
+  assert(/too many keys/.test(refusal(twenty, "operator", undefined)) && /too large/.test(refusal({ blob: "x".repeat(4090) }, undefined, "op-key")),
+    "the filter's caps hold over the folded object: twenty keys plus said_by is over the key cap, a filter at the size cap plus actor over the size cap (first review pass)");
+}
+
 console.log("\n[17] A tool call outlives the runtime's idle timeout, and a client that leaves is logged (SMD-1864)");
 {
   const { withSseKeepalive, requestLabel, abandonedRequestLine, stalledRequestLine, SSE_KEEPALIVE_MS } = await import("./index.ts") as {

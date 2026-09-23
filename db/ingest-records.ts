@@ -240,22 +240,42 @@ function isFingerprintCollision(e: unknown): boolean {
  * A different record whose content is byte-identical to one already stored
  * collides on the partial-unique content_fingerprint index (23505), not on id;
  * that is "skipped" — the content already exists as another record. Each upsert
- * is its own statement (no surrounding transaction) so one such skip does not
- * poison the rest of the run, which is idempotent and re-runnable regardless.
+ * is its own transaction (the actor envelope and the write, nothing else) so
+ * one such skip does not poison the rest of the run, which is idempotent and
+ * re-runnable regardless.
  */
+/**
+ * The ingester's envelope: 050's stamp reads it, so every record carries
+ * actor_name `ingest-records` (and the kind once the operator has said
+ * `SELECT set_agent_kind('ingest-records', 'ingested')` — the ingester does
+ * not classify itself; 046's rule is that the operator does), and 046's audit
+ * rows carry the door. Without it every record named nobody and a re-ingest
+ * stripped the mark an operator's edit had placed (run-it, SMD-1726's first
+ * review pass). It rides each record's own transaction, set locally beside
+ * the INSERT: a session-level setting died with the connection, and Bun's
+ * pool reopens one silently, after which every record named nobody again
+ * (run-it, second review pass).
+ */
+export const INGEST_ACTOR = { name: "ingest-records", via: "ingest-records" } as const;
+
 export async function upsertRecord(sql: SQL, doc: Doc): Promise<UpsertResult> {
   const meta = { source: doc.source, ...doc.meta };
   const created = doc.createdAt ?? null;
   try {
-    const rows = await sql`
-      INSERT INTO thoughts (id, content, metadata, content_fingerprint, created_at)
-      VALUES (${doc.id}::uuid, ${doc.content}, ${meta}::jsonb, content_fingerprint_of(${doc.content}), COALESCE(${created}::timestamptz, now()))
-      ON CONFLICT (id) DO UPDATE
-        SET content = EXCLUDED.content,
-            metadata = EXCLUDED.metadata,
-            content_fingerprint = EXCLUDED.content_fingerprint
-        WHERE thoughts.content_fingerprint IS DISTINCT FROM EXCLUDED.content_fingerprint
-      RETURNING (xmax = 0) AS inserted`;
+    // One transaction per record — the envelope and the write together, and a
+    // skipped record's error aborts its own transaction only.
+    const rows = await sql.begin(async (tx) => {
+      await tx`SELECT set_config('ob1.actor', ${JSON.stringify(INGEST_ACTOR)}, true)`;
+      return tx`
+        INSERT INTO thoughts (id, content, metadata, content_fingerprint, created_at)
+        VALUES (${doc.id}::uuid, ${doc.content}, ${meta}::jsonb, content_fingerprint_of(${doc.content}), COALESCE(${created}::timestamptz, now()))
+        ON CONFLICT (id) DO UPDATE
+          SET content = EXCLUDED.content,
+              metadata = EXCLUDED.metadata,
+              content_fingerprint = EXCLUDED.content_fingerprint
+          WHERE thoughts.content_fingerprint IS DISTINCT FROM EXCLUDED.content_fingerprint
+        RETURNING (xmax = 0) AS inserted`;
+    }) as { inserted: boolean }[];
     if (rows.length === 0) return "unchanged";
     return rows[0].inserted ? "inserted" : "updated";
   } catch (e) {

@@ -103,7 +103,9 @@ process.env.MCP_ACCESS_KEY = "e2e-key";
 const CAPTURE_KEY = "hook-" + "c".repeat(59);
 // A second capture key for the case where the agent registry is away.
 const CAPTURE_KEY_2 = "hook-" + "d".repeat(59);
-const KEYS_AT_BOOT = `session-hook:capture:${hashKey(CAPTURE_KEY)},hook-two:capture:${hashKey(CAPTURE_KEY_2)}`;
+// Two named write keys beside them (SMD-1726, [10c]): the server's actor is the
+// key's name, and migration 050 stamps who wrote a thought from it.
+const KEYS_AT_BOOT = `session-hook:capture:${hashKey(CAPTURE_KEY)},hook-two:capture:${hashKey(CAPTURE_KEY_2)},op-key:write:${hashKey("op-raw")},bot-key:write:${hashKey("bot-raw")}`;
 process.env.MCP_ACCESS_KEYS = KEYS_AT_BOOT;
 // No registry cache: [13] takes resolve_agent away and brings it back, and a
 // principal's agent id must follow at once.
@@ -130,10 +132,10 @@ const H = {
 };
 
 let rpcId = 1;
-async function call(name: string, args: Record<string, unknown> = {}): Promise<string> {
+async function call(name: string, args: Record<string, unknown> = {}, key = "e2e-key"): Promise<string> {
   const r = await fetch(BASE, {
     method: "POST",
-    headers: H,
+    headers: { ...H, "x-brain-key": key },
     body: JSON.stringify({
       jsonrpc: "2.0",
       id: rpcId++,
@@ -615,6 +617,55 @@ console.log("\n[10b] query log: the filter a search ran, the arm that served it 
   await qlog`DELETE FROM query_log`;
   await qlog`DELETE FROM thoughts`;
   await qlog.close();
+}
+
+console.log("\n[10c] Who wrote it, over MCP: a hit says By: <key> (kind) from the key that made the write, said_by and actor filter on it through the one search operation, a client's metadata cannot set it, and the folded filter reaches the log (SMD-1726, migration 050)");
+{
+  const sql = new SQL({ url: URL_, max: 1 });
+  await sql`DELETE FROM query_log`;
+  await sql`SELECT set_agent_kind('op-key', 'operator')`;
+  await sql`SELECT set_agent_kind('bot-key', 'agent')`;
+  // Two different texts — the same text would be one row by 003's fingerprint —
+  // one through each key; the server resolves each key's agent (010) and names
+  // it in the envelope, and 050's trigger stamps the row from the registry.
+  const opOut = await call("capture_thought", { content: "theta the operator typed about the schedule" }, "op-raw");
+  const botOut = await call("capture_thought", { content: "theta an agent concluded about the schedule" }, "bot-raw");
+  assert(/Captured as/.test(opOut) && /Captured as/.test(botOut), "both keys capture");
+  const blockOf = (out: string, re: RegExp) => out.split("--- Result ").find((b) => re.test(b)) ?? "";
+  const both = await call("search_thoughts", { query: "theta schedule", limit: 10, threshold: -1 });
+  assert(/\nBy: op-key \(operator\)\n/.test(blockOf(both, /operator typed/)) && /\nBy: bot-key \(agent\)\n/.test(blockOf(both, /agent concluded/)),
+    `each hit says who wrote it, from the key that made the write (${both.replace(/\n/g, " ⏎ ").slice(0, 400)})`);
+  assert(/\nID: [0-9a-f-]{36}\n(⚠[^\n]*\n)?Captured: [^\n]*\nType: [^\n]*\nBy: /.test(both), "…on its own line under Type:, so the ID: line is still the id alone and [8]'s reach through it holds");
+  const onlyOp = await call("search_thoughts", { query: "theta schedule", limit: 10, threshold: -1, said_by: "operator" });
+  assert(/operator typed/.test(onlyOp) && !/agent concluded/.test(onlyOp) && /^Found 1 thought/.test(onlyOp), `said_by: operator returns the operator's row and not the agent's (${onlyOp.split("\n")[0]})`);
+  const onlyBot = await call("search_thoughts_keyword", { query: "theta", actor: "bot-key" });
+  assert(/agent concluded/.test(onlyBot) && !/operator typed/.test(onlyBot) && /\nBy: bot-key \(agent\)\n/.test(onlyBot), "actor: bot-key on the keyword arm returns that key's row, with its By: line");
+  const listed = await call("list_thoughts", { limit: 20, said_by: "agent" });
+  assert(/agent concluded/.test(listed) && !/operator typed/.test(listed) && /agent concluded about the schedule\n   ID: [0-9a-f-]{36}\n   By: bot-key \(agent\)/.test(listed),
+    `list_thoughts filters by said_by and prints By: under the ID line — content then ID stay adjacent, which [8] matches on (${listed.replace(/\n/g, " ⏎ ").slice(0, 200)})`);
+  assert(/operator typed/.test(await call("list_thoughts", { limit: 20, actor: "op-key" })) && !/agent concluded/.test(await call("list_thoughts", { limit: 20, actor: "op-key" })), "…and by actor");
+  // A client cannot set the mark: capture_thought's metadata is the extractor's,
+  // so the one client-controlled metadata write is update_thought's patch — an
+  // agent's key patching the operator's row to claim it changes nothing (050:
+  // the actor follows the content, and a patch is not content).
+  const idOp = blockOf(both, /operator typed/).match(/\nID: ([0-9a-f-]{36})/)![1];
+  await call("update_thought", { id: idOp, metadata_patch: { actor_kind: "agent", actor_name: "bot-key" } }, "bot-raw");
+  const patched = await call("search_thoughts", { query: "theta schedule", limit: 10, threshold: -1, said_by: "operator" });
+  assert(/operator typed/.test(patched) && /By: op-key \(operator\)/.test(patched) && /^Found 1 thought/.test(patched), "an agent's metadata patch naming the two keys changes nothing: the mark is the database's, from the key");
+  await call("update_thought", { id: idOp, content: "theta the agent rewrote what the operator typed" }, "bot-raw");
+  const rewritten = await call("search_thoughts", { query: "theta schedule", limit: 10, threshold: -1, said_by: "agent" });
+  assert(/agent rewrote/.test(rewritten) && /agent concluded/.test(rewritten) && /^Found 2 thought/.test(rewritten), "…and an agent's content edit re-stamps: the text is the agent's now, and said_by: agent finds both");
+  assert(/^Found 0|No thoughts found/.test(await call("search_thoughts", { query: "theta schedule", limit: 10, threshold: -1, said_by: "operator" })), "…so said_by: operator finds nothing the operator still says");
+  let refused = "";
+  try { await call("search_thoughts", { query: "theta", said_by: "operator", filter: { actor_kind: "agent" } }); } catch (e) { refused = (e as Error).message; }
+  assert(/pass one of the two/.test(refused), `said_by beside a filter.actor_kind that disagrees is refused at the boundary (${refused.slice(0, 120)})`);
+  // The log sees the folded filter, not the sugar: a per-arm report reads one column.
+  const logged = await sql<{ tool: string; filter: Record<string, unknown> }[]>`SELECT tool, filter FROM query_log WHERE kind = 'search' AND (filter ? 'actor_kind' OR filter ? 'actor_name') ORDER BY logged_at`;
+  assert(logged.length >= 3 && JSON.stringify(logged[0].filter) === JSON.stringify({ actor_kind: "operator" }) && logged.some((r) => r.tool === "search_thoughts_keyword" && JSON.stringify(r.filter) === JSON.stringify({ actor_name: "bot-key" })),
+    `query_log records said_by and actor as the filter they became (${logged.map((r) => `${r.tool}:${JSON.stringify(r.filter)}`).join(" ")})`);
+  await sql`DELETE FROM query_log`;
+  await sql`DELETE FROM thoughts`;
+  await sql.close();
 }
 
 console.log("\n[11] Undated and infinity rows render through the tools without a fabricated date (SMD-1328)");

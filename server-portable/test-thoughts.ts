@@ -19,7 +19,7 @@ import { displayDate, normaliseType, thoughtTitle, thoughtUrl, THOUGHT_TYPES, TY
 import { DEFAULT_LLM_TIMEOUT_S, resolveEmbedConfig } from "./embed.ts";
 import { DEFAULT_PG_POOL, poolSizeFrom } from "./store-sql.ts";
 import { parseExtraction } from "./entities.ts";
-import { buildJudgeMessages, cleanForDisplay, parseJudgement, wrapSide } from "./consolidate.ts";
+import { actorKindOf, buildJudgeMessages, cleanForDisplay, CONSOLIDATE_PROMPT_VERSION, parseJudgement, wrapSide } from "./consolidate.ts";
 import { chunkContent, DEFAULT_MAX_TOKENS, DEFAULT_OVERLAP_TOKENS, estimateTokens } from "./chunk.ts";
 
 const { assert, report } = createAssert();
@@ -282,6 +282,26 @@ console.log("\n[9] The supersession judge's prompt and parser (migration 029): a
   assert(prompt.includes("{content_b} {date_b}") && /THOUGHT B, captured 2026-06-08:\n<thought_b>\nnewer text\n<\/thought_b>/.test(prompt),
          "a slot name inside a thought stays a literal and the template's own slot is filled (one pass over the slots)");
   assert(/THOUGHT A, captured 2026-03-09:/.test(prompt) && !/source/.test(prompt.split("<thought_a>")[0]), "the header lines carry the dates and nothing a caller controls");
+
+  // SMD-1726: the writer's clause — from the database's mark (050) and nothing
+  // else — and the rule that goes with it.
+  const who = buildJudgeMessages({ content: "older", createdAt: "2026-03-09T12:00:00Z", writer: "operator" }, { content: "newer", createdAt: "2026-06-08T12:00:00Z", writer: "agent" })[0].content;
+  assert(/THOUGHT A, captured 2026-03-09, written by the operator:\n<thought_a>/.test(who) && /THOUGHT B, captured 2026-06-08, written by an agent:\n<thought_b>/.test(who),
+    "the header names who wrote each side when the row's mark says (050), before the block opens");
+  assert(/never a conflict in which the agent's thought supersedes the operator's/.test(who) && /decide from the texts alone/.test(who),
+    "…and the rules say an agent's restatement never supersedes the operator's statement, and what to do when no header says");
+  const noWho = buildJudgeMessages({ content: "older", createdAt: "2026-03-09T12:00:00Z", writer: null }, { content: "newer", createdAt: "2026-06-08T12:00:00Z", writer: "root" })[0].content;
+  assert(/THOUGHT A, captured 2026-03-09:\n/.test(noWho) && /THOUGHT B, captured 2026-06-08:\n/.test(noWho),
+    "no mark, or a word outside the registry's three, renders the header exactly as prompt version 2 did — a caller's string cannot reach the header through this slot");
+  assert(/ingested from an outside source:/.test(buildJudgeMessages({ content: "a", createdAt: null, writer: "ingested" }, { content: "b", createdAt: null })[0].content), "an ingested writer has its own words");
+  assert(actorKindOf({ actor_kind: "ingested" }) === "ingested" && actorKindOf({ actor_kind: "root" }) === null && actorKindOf(null) === null && actorKindOf(undefined) === null && actorKindOf({ actor_kind: 3 }) === null,
+    "actorKindOf reads the mark and admits only the three words");
+  for (const proto of ["constructor", "__proto__", "toString", "hasOwnProperty"]) {
+    const p = buildJudgeMessages({ content: "a", createdAt: null, writer: proto }, { content: "b", createdAt: null })[0].content;
+    assert(actorKindOf({ actor_kind: proto }) === null && /THOUGHT A, captured an unknown date:\n/.test(p) && !/native code|\[object/.test(p),
+      `"${proto}" is not a writer: a prototype key is \`in\` every object and would have put Object's source on the trusted header line (first review pass)`);
+  }
+  assert(CONSOLIDATE_PROMPT_VERSION === 3, "the prompt version moved to 3 with the header and the rule, so p2 and p3 verdicts are different pools under different keys");
   assert(wrapSide("thought_a", "x".repeat(7000)).length < 6100, "a thought is cut to the content limit before wrapping");
 
   // SMD-1803: a proposal thought's created_at is nullable and can be a sentinel.
