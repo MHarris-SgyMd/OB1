@@ -1,7 +1,4 @@
 {
-  "tasks": {
-    "check": "deno check metadata-norm/index.ts"
-  },
   "compilerOptions": {
     "strict": true
   }

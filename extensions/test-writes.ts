@@ -587,18 +587,23 @@ try {
   // A candidate — a reference of weak confidence, unreviewed — beside one the worker's two and() groups over JSON
   // paths must leave alone: the .or() the shim reads since SMD-1798.
   // Planted as the other rows are, then given the enhanced columns and the metadata the worker's filters read (a
-  // write of neither content nor vector, so not one check 10 counts).
+  // write of neither content nor vector, so not one check 10 counts). One row for each and() group — an idea of
+  // default importance, a reference of another importance — so each arm selects a row the other does not (the
+  // fourth review pass's mutant: with both rows reference/3, either arm alone found them), beside a confident one.
   const weak = await plant("metadata-norm weak");
-  await sql`UPDATE thoughts SET type = 'reference', importance = 3, metadata = metadata || '{"confidence": 0.5, "topics": ["old"]}'::jsonb WHERE id = ${weak}`;
+  await sql`UPDATE thoughts SET type = 'idea', importance = 3, metadata = metadata || '{"confidence": 0.5, "topics": ["old"]}'::jsonb WHERE id = ${weak}`;
+  const weakRef = await plant("metadata-norm weak reference");
+  await sql`UPDATE thoughts SET type = 'reference', importance = 2, metadata = metadata || '{"confidence": 0.5}'::jsonb WHERE id = ${weakRef}`;
   const strong = await plant("metadata-norm strong");
   await sql`UPDATE thoughts SET type = 'reference', importance = 3, metadata = metadata || '{"confidence": 0.95}'::jsonb WHERE id = ${strong}`;
   const dry = await send(h, "POST", "/?dry_run=true&limit=10");
-  assert(dry.status === 200 && dry.json?.candidates_found === 1 && dry.json?.changed === 1 && dry.json?.dry_run === true && dry.json?.changes?.[0]?.thought_id === weak,
-    `a dry run finds the one weak reference — two and() groups on a JSON path, through the shim — and says what it would change (${dry.status}: ${JSON.stringify(dry.json).slice(0, 140)})`);
+  const dryIds = ((dry.json?.changes ?? []) as { thought_id: string }[]).map((c) => c.thought_id).sort();
+  assert(dry.status === 200 && dry.json?.candidates_found === 2 && dry.json?.changed === 2 && dry.json?.dry_run === true && dryIds.join() === [weak, weakRef].sort().join(),
+    `a dry run finds the two weak rows, one through each and() group on the JSON path, not the confident one — through the shim — and says what it would change (${dry.status}: ${JSON.stringify(dry.json).slice(0, 140)})`);
   const [before] = await sql`SELECT type, importance, metadata FROM thoughts WHERE id = ${weak}`;
-  assert(before.type === "reference" && before.metadata.consolidation_reviewed === undefined, "…and writes nothing");
+  assert(before.type === "idea" && before.metadata.consolidation_reviewed === undefined, "…and writes nothing");
   const run = await send(h, "POST", "/?limit=10");
-  assert(run.status === 200 && run.json?.changed === 1 && run.json?.errors === 0 && run.json?.llm_calls === 1, `a live run reclassifies it through the stubbed classifier (${run.status}: ${JSON.stringify(run.json).slice(0, 140)})`);
+  assert(run.status === 200 && run.json?.changed === 2 && run.json?.errors === 0 && run.json?.llm_calls === 2, `a live run reclassifies both through the stubbed classifier (${run.status}: ${JSON.stringify(run.json).slice(0, 140)})`);
   const [after] = await sql`SELECT type, importance, metadata FROM thoughts WHERE id = ${weak}`;
   assert(after.type === "decision" && Number(after.importance) === 4 && after.metadata.consolidation_reviewed === true && JSON.stringify(after.metadata.topics) === JSON.stringify(["old", "ledger"]),
     `…the type and importance from the answer, the topics merged, the row marked reviewed (${JSON.stringify({ type: after.type, importance: after.importance, topics: after.metadata.topics, reviewed: after.metadata.consolidation_reviewed })})`);

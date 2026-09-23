@@ -4200,7 +4200,6 @@ const SUPABASE_JS_EXCEPTIONS = new Map<string, Record<string, CountedException>>
   ["recipes/local-brain-no-mcp/functions/_shared/db.ts", { "supabase-js": { why: "runs inside the recipe's own self-hosted Supabase stack, where PostgREST is present and bun is not — the codemod's KEEP list; SMD-1800 decides the recipe", lines: 1 } }],
   ["dashboards/open-brain-dashboard/src/app.d.ts", { "supabase-js": { why: "the dashboard's type-only import: the one client left that reads the brain over PostgREST — SMD-1801 moves it onto the fork's REST API", lines: 1 } }],
 ]);
-/** The 1-based lines of `text` (comments blanked) holding a supabase-js specifier, ascending. */
 /** A markup file's code is its `<script>` bodies: everything else, an HTML comment included, is blanked (newlines kept). */
 const MARKUP_FILE = /\.(html|svelte|vue)$/;
 function scriptBodiesOf(text: string): string {
@@ -4208,10 +4207,10 @@ function scriptBodiesOf(text: string): string {
   const withoutComments = text.replace(/<!--[\s\S]*?-->/g, blank);
   let out = "";
   let last = 0;
-  for (const m of withoutComments.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/gi)) {
-    // The body ends where the closing tag begins: anchored from the end, not by searching the match for the body's
-    // text, which a body repeated in the opening tag's attributes would find first.
-    const start = m.index! + m[0].length - "</script>".length - m[1].length;
+  for (const m of withoutComments.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script\s*>/gi)) {
+    // The body starts after the opening tag's `>` (its attributes hold none): anchored there, not by searching the
+    // match for the body's text, which a body repeated in an attribute would find first.
+    const start = m.index! + m[0].indexOf(">") + 1;
     out += blank(withoutComments.slice(last, start)) + m[1];
     last = start + m[1].length;
   }
@@ -4226,6 +4225,11 @@ function supabaseJsImportsIn(text: string, markup = false): number[] {
   return [...lines].sort((a, b) => a - b);
 }
 function checkSupabaseJsImports() {
+  // The file sets have no witness in the tree today (no .html under the roots names the package): held by name.
+  for (const name of ["x.ts", "x.tsx", "x.mts", "x.cts", "x.js", "x.jsx", "x.mjs", "x.cjs", "x.svelte", "x.vue", "x.html"]) if (!CODE_FILE.test(name)) fail(SELF, `check 22's CODE_FILE no longer reads ${name} (its own probe)`);
+  for (const name of ["x.md", "x.sql", "x.json", "x.htm"]) if (CODE_FILE.test(name)) fail(SELF, `check 22's CODE_FILE reads ${name}, which it should not (its own probe)`);
+  for (const name of ["x.html", "x.svelte", "x.vue"]) if (!MARKUP_FILE.test(name)) fail(SELF, `check 22's MARKUP_FILE no longer treats ${name} as markup (its own probe)`);
+  if (MARKUP_FILE.test("x.ts")) fail(SELF, "check 22's MARKUP_FILE treats x.ts as markup (its own probe)");
   for (const [probe, hit, markup] of SUPABASE_JS_PROBES) {
     const n = supabaseJsImportsIn(probe, markup === true).length;
     if (hit && n === 0) fail(SELF, `check 22 no longer catches its probe: ${JSON.stringify(probe)} (its own probe)`);

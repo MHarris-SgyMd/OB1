@@ -511,7 +511,9 @@ let pastaId = "", saladId = "", shoppingListId = "";
   const week = await c("get_week_schedule", { week_start: "2026-09-21" });
   assert(ok(week) && titles(week) === "Autumn camp,Piano,Swimming", `get_week_schedule: the recurring activity and the two whose dates reach the week, not the one that ended before it or the one ahead — the grouped .or() the shim reads since SMD-1798 (${failure(week) || titles(week)})`);
   assert(week.body?.[0]?.title === "Autumn camp" && week.body?.[2]?.title === "Piano", `…ordered by start time (${(week.body ?? []).map((a: { title: string }) => a.title).join()})`);
-  assert(week.body?.find((a: { title: string }) => a.title === "Swimming")?.family_members?.name === "Ada" && week.body?.find((a: { title: string }) => a.title === "Piano")?.family_members === null, "…each with its family member embedded through the key column, or null for the whole family");
+  const swimRow = week.body?.find((a: { title: string }) => a.title === "Swimming");
+  assert(swimRow?.family_members?.name === "Ada" && swimRow?.family_members?.relationship === "child" && Object.keys(swimRow?.family_members ?? {}).sort().join() === "name,relationship" && week.body?.find((a: { title: string }) => a.title === "Piano")?.family_members === null,
+    `…each with its family member embedded through the key column — the two named columns, no more — or null for the whole family (${JSON.stringify(swimRow?.family_members)})`);
   const forAda = await c("get_week_schedule", { week_start: "2026-09-21", family_member_id: adaId });
   assert(ok(forAda) && titles(forAda) === "Swimming", `…filtered to one family member (${titles(forAda)})`);
   const byQuery = await c("search_activities", { query: "camp" });
