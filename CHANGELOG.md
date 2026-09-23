@@ -13,6 +13,25 @@ fragments.
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-09-23
+
+### Added
+- `evals/eval-calibration.ts` builds an outcome ledger from what the log already holds — every confidence the fork writes, beside every resolution it records — and scores each mechanism's calibration (reliability table, Brier, ECE, skill against the base rate). On the dogfood brain: the consolidation judge said 0.80 twenty-four times and the reviewer declined all twenty-four; the entity extractor said 1.00 on every mention and edge but one at the census, and the re-extraction running since emits 0.80 or 0.90 on under 1% — nothing resolves any of them; the metadata model's confidence band runs backwards (`high` right 22%, `medium` 46%, skill −2.3 against a constant); no thought carries a declared confidence, so the 17 resolved hypotheses are an outcome with nothing to score. Measurable, and every mechanism that speaks is overconfident; no control loop is built (SMD-1809).
+- A capture-only key scope: a key that may call `capture_thought` and nothing else, for a session-end hook or an import pipeline whose credential sits in a config file; `capture_thought` takes a `source` label; migration 049 lets the agent registry record the scope (SMD-1298).
+- A session-end capture hook for Claude Code and Codex (`recipes/session-capture-hook`) captures one summary thought per session with the retrieved thoughts as `derived_from`, after a secret scan, through a capture-only key; `skills/session-summary` is the agent's half (SMD-1989, the client of SMD-1298).
+- Every read says who wrote a thought's current text, from the key that made the write: migration 050 stamps `actor_kind` (`operator | agent | ingested`, 046's registry) and `actor_name` into `thoughts.metadata` by trigger, never from the payload; `search_thoughts`, `search_thoughts_keyword` and `list_thoughts` gain `said_by` and `actor` filters on 014's route and print `By: <key> (<kind>)` under each hit; the consolidation judge hears who wrote each side (prompt version 3); `backfill_thought_actors()` marks the rows written before (SMD-1726).
+
+### Changed
+- The last six vendored servers — family-calendar, job-hunt, agent-memory-api, the metadata-norm worker, enhanced-mcp and ob-graph — move onto `compat/supabase-sql`, which now reads the four PostgREST shapes that held them on supabase-js (grouped `.or()`, `in.(…)` lists, nested embeds with `!inner`/`!fk_name` hints, an embed on a written row); every tool and route of the six is driven against Postgres; supabase-js leaves every vendored `deno.json`, the four import recipes' `package.json` and the test packages, kept by `server/` (the Edge Function build), the Workers store and the two counted exceptions; check 22 refuses a runtime import of it in any vendored file (SMD-1798).
+- Entity extraction sends a long thought to the metadata model in overlapping windows sized to that model's served context, budgets every call's answer with `max_tokens`, retries a call that runs to its budget once with a frequency penalty, and merges the windows' answers to one entity per (type, name) — all 32 thoughts that timed out on the fork's brain extract, against 2 before, and a budget sized to both measured models; `OB1_EXTRACT_CHUNK_TOKENS` overrides the derived window and preflight prints it; the prompt version is 2, so the first pass after upgrading needs `--switch-key`; the three worker diallers disable Bun's 300 s fetch idle timeout so `--timeout` and `OB1_LLM_TIMEOUT` above it take effect (SMD-1879).
+
+### Fixed
+- check-fork's grants comparison reads db/README.md's table both ways through a pure function with nine probes, and the commit grammar reads ordinals to "twentieth" (SMD-1990).
+- A wrong `OB1_TIER` (a case variant like `Stable`, or an unknown value like `prod`) no longer silently drops every `query_log` row — it is validated at boot (`initEnv` throws, and preflight's `tier` check fails so the container entrypoint refuses to serve) against one tier list `db/config.mjs` owns; and `parseFilter`'s size cap now counts UTF-8 bytes, not UTF-16 code units (SMD-1953).
+- A tool call that outruns the runtime's 10 s idle timeout reaches the client: every SSE response carries a `: keepalive` comment frame every 5 s for as long as the tool runs, and a client that closes the connection first is logged by method and tool, never by content (SMD-1864).
+- `integrations/enhanced-mcp`'s `get_thought` and `related_thoughts` take the thought's UUID, which is what `thoughts.id` is on this fork — they took upstream's integer id and could address no row here — and `graph_search` and `entity_detail` carry an entity's id as the installed Knowledge Graph schema declares it instead of casting it to a number (SMD-1525).
+- `compat/supabase-sql` answers what PostgREST answers in the five places change 77's review found it did not — a count without `head` is the total, `.single()` over several rows is `PGRST116`, `head` without a count is no rows, an upsert's conflict target is the primary key when none is named and every payload column is assigned, an `.rpc()`'s shape is what `pg_proc.proretset` declares — and an array column is read through `to_json`, so a `real[]` holding a `NULL` and a `uuid[]` arrive as PostgREST's JSON has them (SMD-1602).
+
 ## [1.0.0] - 2026-09-22
 
 ### Added
@@ -41,5 +60,6 @@ fragments.
 ### Fixed
 - `db/` and `evals/` are type-checked in CI: each gains a `tsconfig.json` mirroring the server's, the four type-checked directories pin `@types/bun`, `typescript` and `@types/node` at one version (check 18 holds them in step), two `Typecheck` steps run in the portable-server job, `db/ci-parity.sh` runs the four typechecks, and the findings a first strict pass over the two directories turned up are fixed — none a runtime defect (SMD-1932).
 
-[Unreleased]: https://github.com/MHarris-SgyMd/OB1/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/MHarris-SgyMd/OB1/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/MHarris-SgyMd/OB1/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/MHarris-SgyMd/OB1/compare/upstream-pin-9543c29...v1.0.0

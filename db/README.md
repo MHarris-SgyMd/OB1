@@ -164,8 +164,8 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `1473 assertions: 1473 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports fifty-one (51) migrations applied, and
+`bun test-schema.ts` prints `1475 assertions: 1475 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports fifty-two (52) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -203,13 +203,15 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 029 change 54, 030 change 56, 031 change 57, 032 change 60, 033 change 63,
 034 change 65, 035 change 66, 036 change 68, 037 change 70, 038 change 80, 039 change 81,
 040 change 91, 041 change 94, 042 change 95, 043 change 98, 044 SMD-1804,
-045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726, 052 SMD-1296).
+045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
+051 SMD-1804, 052 SMD-1296).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
 baseline `0.0.0+upstream.9543c29`), and every release cut appends the migration
 that writes its version as the last file of the range it freezes: 048 writes
-`1.0.0+upstream.9543c29`, the first release (`001..048`). `preflight` prints the
+`1.0.0+upstream.9543c29`, the first release (`001..048`), and 051 writes
+`1.1.0+upstream.9543c29`, the second (`049..051`). `preflight` prints the
 value beside the ledger's highest migration and warns when a server is older than
 the brain, or a brain has run past its version's range. Both are introduced by a
 fragment or a cut rather than a hand-numbered change, so they are named here by
@@ -1758,7 +1760,7 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 1473 assertions, PGlite, no container
+bun test-schema.ts                          # 1475 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts         # 627 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database

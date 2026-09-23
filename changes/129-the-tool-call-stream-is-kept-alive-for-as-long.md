@@ -1,17 +1,4 @@
----
-type: fixed
-bump: patch
-tickets: [SMD-1864]
-migrations: []
----
-
-## Changelog
-
-A tool call that outruns the runtime's 10 s idle timeout reaches the client: every SSE response carries a `: keepalive` comment frame every 5 s for as long as the tool runs, and a client that closes the connection first is logged by method and tool, never by content (SMD-1864).
-
-## FORK
-
-The tool-call stream is kept alive for as long as the tool runs, and a client that leaves is logged — a large capture no longer dies at ten seconds with no trace (SMD-1864)
+# 129. The tool-call stream is kept alive for as long as the tool runs, and a client that leaves is logged — a large capture no longer dies at ten seconds with no trace (SMD-1864)
 
 **What changed.** `server-portable/index.ts` passes every response the MCP
 transport returns through `withSseKeepalive`: when the body is

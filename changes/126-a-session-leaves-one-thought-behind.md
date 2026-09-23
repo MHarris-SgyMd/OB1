@@ -1,17 +1,4 @@
----
-type: added
-bump: minor
-tickets: [SMD-1989, SMD-1298]
-migrations: []
----
-
-## Changelog
-
-A session-end capture hook for Claude Code and Codex (`recipes/session-capture-hook`) captures one summary thought per session with the retrieved thoughts as `derived_from`, after a secret scan, through a capture-only key; `skills/session-summary` is the agent's half (SMD-1989, the client of SMD-1298).
-
-## FORK
-
-A session leaves one thought behind — a session-end hook for Claude Code and Codex, and a skill to ask for it (SMD-1989 / SMD-1298)
+# 126. A session leaves one thought behind — a session-end hook for Claude Code and Codex, and a skill to ask for it (SMD-1989 / SMD-1298)
 
 **What changed.** `recipes/session-capture-hook/session-capture.mjs` is a hook
 both harnesses run at session end — they hand a hook the same JSON on stdin,
