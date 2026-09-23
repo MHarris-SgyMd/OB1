@@ -158,6 +158,16 @@ BEGIN
     RETURN jsonb_build_object('ok', false, 'error', 'IDENTITY_HELD', 'held_by', v_holder);
   END IF;
   IF v_holder IS NOT NULL THEN
+    -- The structure goes with the identity: the holder's active links from
+    -- this system are closed (history, as a dropped relation is) and its
+    -- structured mentions under this system's key are removed — the new
+    -- holder records them afresh — so a reader asking "what links to X" sees
+    -- the item's edges once, on the row that is the item (second review pass).
+    UPDATE thought_facets
+       SET valid_until = now()
+     WHERE thought_id = v_holder AND kind = 'link' AND valid_until IS NULL
+       AND payload->>'system' = p_system;
+    PERFORM record_thought_entities(v_holder, 'source:' || p_system, '[]'::jsonb, '[]'::jsonb, NULL, NULL);
     DELETE FROM thought_sources WHERE thought_id = v_holder;
   END IF;
   INSERT INTO thought_sources (thought_id, system, identity, canonical, media_type, canonical_hash, ingest_run)
@@ -177,7 +187,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION record_thought_source(uuid, text, text, text, text, text, boolean) IS
-  'Writes a thought''s source row (051): inserted, updated when the canonical (or the system, identity or media type) moved, unchanged otherwise — the same canonical twice writes nothing. Refuses NOT_FOUND for a thought that is not there and IDENTITY_HELD when another thought holds the (system, identity), naming it, rather than re-pointing the identity — unless p_take, when the identity follows the caller''s thought and the holder''s row goes (taken_from names it); the board sync says p_take because a ticket''s head row moves. SMD-1867.';
+  'Writes a thought''s source row (051): inserted, updated when the canonical (or the system, identity or media type) moved, unchanged otherwise — the same canonical twice writes nothing. Refuses NOT_FOUND for a thought that is not there and IDENTITY_HELD when another thought holds the (system, identity), naming it, rather than re-pointing the identity — unless p_take, when the identity follows the caller''s thought: the holder''s source row goes, its active links from this system are closed and its source:<system> mentions removed (taken_from names it); the board sync says p_take because a ticket''s head row moves. SMD-1867.';
 
 -- ---------------------------------------------------------------------------
 -- source_thought — an identity, resolved to a thought
