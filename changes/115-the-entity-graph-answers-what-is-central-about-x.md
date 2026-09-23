@@ -1,17 +1,4 @@
----
-type: added
-bump: minor
-tickets: [SMD-1938]
-migrations: []
----
-
-## Changelog
-
-`db/graph-centrality.ts` ranks the entity graph by attention — top entities by mentions and degree, the thoughts that build the graph, and around one subject its neighbours by co-mentions plus edge support with the thoughts that tie them — resolving the subject by 016's own rule, printing the graph's caveats with the run's numbers, and offering `--no-edges` as the drop-the-graph control; no MCP tool yet, by decision (SMD-1938).
-
-## FORK
-
-The entity graph answers "what is central about X" from one command — `db/graph-centrality.ts`, with the subject resolved by 016's rule, the caveats printed with the run's numbers and edges-off as the control; promotion to a core MCP tool decided against for now (SMD-1938)
+# 115. The entity graph answers "what is central about X" from one command — `db/graph-centrality.ts`, with the subject resolved by 016's rule, the caveats printed with the run's numbers and edges-off as the control; promotion to a core MCP tool decided against for now (SMD-1938)
 
 **What changed.** `db/graph-centrality.ts` is a read-only Bun script over
 migration 016's three tables. With no subject it prints the whole graph: the

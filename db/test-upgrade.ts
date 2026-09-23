@@ -451,8 +451,9 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // at the table, SMD-1749), 044 (the schema_version row, SMD-1804), 045
   // (the query_log column set — filter, arm and tier, SMD-1490), 046 (the
   // audit row's event shape, SMD-1730), 047 (the query_log.logged_at prune
-  // index, SMD-1492) and 049 (thought_changes, the read over the audit log,
-  // SMD-1296) stay
+  // index, SMD-1492), 048 (the first release's schema_version, 1.0.0 — the
+  // cut's last migration, SMD-1804/SMD-1860) and 049 (thought_changes, the
+  // read over the audit log, SMD-1296) stay
   // recorded and are never tried. 030 is the
   // right one to make
   // pending
@@ -479,7 +480,7 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // their prerequisites present, so none
   // becomes the plain-run failure point above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 19, `030 is among the last nineteen migrations (${last})`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 20, `030 is among the last twenty migrations (${last})`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&

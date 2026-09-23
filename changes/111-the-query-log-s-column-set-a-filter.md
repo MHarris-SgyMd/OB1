@@ -1,17 +1,4 @@
----
-type: changed
-bump: minor
-tickets: [SMD-1490]
-migrations: [045]
----
-
-## Changelog
-
-The search tools take a metadata `filter` and log it: `search_thoughts` and `search_thoughts_keyword` gain an optional shallow-object filter (`metadata @> filter`), the three search tools now share one search operation, and migration 045 populates `query_log.filter` and adds `arm` (hybrid|keyword) and `tier` (the writer's `OB1_TIER`), so the log records the filter, the arm and the tier of every query — keyword searches among them (SMD-1490, migration 045).
-
-## FORK
-
-The query log's column set: a filter that is finally written, the arm that served a query, and the tier that wrote it — over one search operation (SMD-1490)
+# 111. The query log's column set: a filter that is finally written, the arm that served a query, and the tier that wrote it — over one search operation (SMD-1490)
 
 034 (SMD-1295) gave `query_log` a `filter jsonb` column and threaded it end to
 end, but all three search tools passed `filter: {}` unconditionally — no tool
