@@ -1,0 +1,461 @@
+{
+ "generated": "2026-09-23T00:00:00Z",
+ "origin": "the dogfood brain on the maintainer's machine, the extractor's rows under extract:qwen2.5:7b@p2 at migration 050, graded blind by hand (SMD-1982)",
+ "note": "Every mention and edge the windowed prompt (extract:qwen2.5:7b@p2) wrote with a confidence below 1.00 on 2026-09-23 — 15 mentions (13 at 0.80, 2 at the parser's 0.50 default) and 17 edges (6 at 0.80, 11 at 0.90) — plus a control of the same count per kind drawn from the 1.00 rows by md5 of the claim, 64 rows over 37 thoughts. Graded by Claude Fable 5.1 working for the maintainer, blind to the confidence: each row's names (and for an edge its relation) read against the thought's text; 1 = a specific named thing the text holds, of a defensible type, and for an edge a relation the text states or clearly implies; 0 otherwise (a type-vocabulary word or an example token minted as an entity, a name the text never holds, an identifier typed as a topic, a relation the text denies or never states). `stated` is the confidence at the grade; the report reads the live one. `relation` is the index into server-portable/entities.ts RELATIONS (works_on, uses, member_of, located_in, depends_on, related_to, co_occurs_with), because a committed fixture may hold no string but an id or these three labels (check 9). The grade is of the claim, not of the run: a later prompt version that writes the same mention or edge is resolved by the same row.",
+ "mentions": [
+  {
+   "thought": "20c43c7d-1930-450e-ac55-73287cb21a7e",
+   "entity": "438efe50-80af-4fd1-85bf-56554a064dbf",
+   "stated": 1,
+   "outcome": 1
+  },
+  {
+   "thought": "2e8bb0a0-ba76-4744-8893-dc0d7a1d6d50",
+   "entity": "4be1f30e-2e02-4f9c-8d7c-b49c770f2811",
+   "stated": 0.8,
+   "outcome": 1
+  },
+  {
+   "thought": "30198efd-0474-4a5c-8dec-11cdd70bdc31",
+   "entity": "43b455a9-d4d7-47bb-a6f1-05afe922e76a",
+   "stated": 1,
+   "outcome": 0
+  },
+  {
+   "thought": "34b3b91f-4bea-4355-8671-e12a31369674",
+   "entity": "22d6ff6d-4f52-444e-8d18-f0f5d0c1c251",
+   "stated": 1,
+   "outcome": 1
+  },
+  {
+   "thought": "42562f94-9a2d-48f7-9f96-74ccf7c6ddfe",
+   "entity": "f0cebba7-8efd-4fd4-b280-555bc6c0d92b",
+   "stated": 0.8,
+   "outcome": 0
+  },
+  {
+   "thought": "431c02d1-05fc-423c-a6ca-1f47353d6a72",
+   "entity": "f0cebba7-8efd-4fd4-b280-555bc6c0d92b",
+   "stated": 0.8,
+   "outcome": 0
+  },
+  {
+   "thought": "5818ef32-f022-4896-8397-3cbdd7f8cd4c",
+   "entity": "0ffb4e80-9f39-433d-ac2b-10a7447d8c93",
+   "stated": 1,
+   "outcome": 1
+  },
+  {
+   "thought": "6d5c6c03-f6e0-4817-aaf9-d76df064b710",
+   "entity": "108f999d-a476-4b63-b51b-a29dab1fc54b",
+   "stated": 0.8,
+   "outcome": 0
+  },
+  {
+   "thought": "6d5c6c03-f6e0-4817-aaf9-d76df064b710",
+   "entity": "11588d76-b587-4fd9-a321-9d81cf6fddcf",
+   "stated": 0.8,
+   "outcome": 0
+  },
+  {
+   "thought": "6d5c6c03-f6e0-4817-aaf9-d76df064b710",
+   "entity": "17326436-3130-431b-ba88-f1d9e5afcf2b",
+   "stated": 1,
+   "outcome": 1
+  },
+  {
+   "thought": "6d5c6c03-f6e0-4817-aaf9-d76df064b710",
+   "entity": "1822d8d0-df6f-4cc2-92c8-68b0b39442fd",
+   "stated": 0.8,
+   "outcome": 0
+  },
+  {
+   "thought": "6d5c6c03-f6e0-4817-aaf9-d76df064b710",
+   "entity": "1a9a1e8b-1a26-455a-8b40-029ff34ec804",
+   "stated": 0.8,
+   "outcome": 0
+  },
+  {
+   "thought": "6d5c6c03-f6e0-4817-aaf9-d76df064b710",
+   "entity": "4ef3c077-0651-45b7-9c84-9a3725061661",
+   "stated": 0.8,
+   "outcome": 0
+  },
+  {
+   "thought": "6d5c6c03-f6e0-4817-aaf9-d76df064b710",
+   "entity": "52227e1e-0eba-4afa-8ece-92aafdc394a8",
+   "stated": 0.8,
+   "outcome": 0
+  },
+  {
+   "thought": "6d5c6c03-f6e0-4817-aaf9-d76df064b710",
+   "entity": "5d2b870a-9d06-4b5c-8a4a-bf23c4b1364e",
+   "stated": 0.8,
+   "outcome": 0
+  },
+  {
+   "thought": "6d5c6c03-f6e0-4817-aaf9-d76df064b710",
+   "entity": "755f6193-40d3-47d9-8ef5-dfedc824dcb1",
+   "stated": 0.8,
+   "outcome": 0
+  },
+  {
+   "thought": "6d5c6c03-f6e0-4817-aaf9-d76df064b710",
+   "entity": "91d4d3ec-6182-4477-a001-ea29cf451ef1",
+   "stated": 0.8,
+   "outcome": 0
+  },
+  {
+   "thought": "6d5c6c03-f6e0-4817-aaf9-d76df064b710",
+   "entity": "b1c986af-bedd-4b59-81fb-19c1160ca226",
+   "stated": 0.8,
+   "outcome": 0
+  },
+  {
+   "thought": "6decbcfa-9729-4ccc-9395-b54ca7e32c43",
+   "entity": "f0cebba7-8efd-4fd4-b280-555bc6c0d92b",
+   "stated": 0.5,
+   "outcome": 0
+  },
+  {
+   "thought": "754ae39e-413e-4e22-a7f3-0cf5f6dec97b",
+   "entity": "a6f03731-a001-414c-a74c-bd2991b66cab",
+   "stated": 1,
+   "outcome": 1
+  },
+  {
+   "thought": "761c79c7-18d0-4866-9fc8-d634cee3aeb4",
+   "entity": "e694d39b-22f2-4a43-9dda-3780bcf56336",
+   "stated": 1,
+   "outcome": 1
+  },
+  {
+   "thought": "8fc2911c-90bd-4393-812b-78d23c8ee700",
+   "entity": "7c206ffb-7dd5-4062-b8e3-5ca5ed552178",
+   "stated": 1,
+   "outcome": 1
+  },
+  {
+   "thought": "b6cb25e2-289d-46a1-84b2-b171f1c156b8",
+   "entity": "f0cebba7-8efd-4fd4-b280-555bc6c0d92b",
+   "stated": 0.5,
+   "outcome": 0
+  },
+  {
+   "thought": "c25e49a7-4052-414b-8bb2-d3b6a23b8f0f",
+   "entity": "fa88c223-9c8f-42fa-be13-c20493a87007",
+   "stated": 1,
+   "outcome": 1
+  },
+  {
+   "thought": "c3577158-6b1f-4ef3-a786-4afb7906645e",
+   "entity": "632353e7-2d70-44a2-bc18-e34a35f0359d",
+   "stated": 1,
+   "outcome": 1
+  },
+  {
+   "thought": "ca44ba5d-c219-497f-bd9b-338f66031fb4",
+   "entity": "274916a1-ab9b-4546-bd53-a709296a7d49",
+   "stated": 1,
+   "outcome": 1
+  },
+  {
+   "thought": "d821a49e-b6c2-410f-9ff4-57b7d97a1012",
+   "entity": "23747241-dfc5-40c4-b31f-4daeb48aa47f",
+   "stated": 1,
+   "outcome": 0
+  },
+  {
+   "thought": "f04728a0-d1b9-4dec-90d1-11de5d4eae8a",
+   "entity": "9c9a8c93-daf3-4fed-a995-55bac02720e9",
+   "stated": 1,
+   "outcome": 1
+  },
+  {
+   "thought": "f320ad31-5762-4930-9f39-ae3fb2ef8abd",
+   "entity": "74eddbf1-5add-4d1c-8527-5948f7cd409b",
+   "stated": 1,
+   "outcome": 0
+  },
+  {
+   "thought": "ffdce7e7-f6d2-486e-874e-b423132a46d1",
+   "entity": "5746fa71-cfcc-4d7f-9fb3-e352dd91ae3a",
+   "stated": 1,
+   "outcome": 1
+  }
+ ],
+ "edges": [
+  {
+   "thought": "00299246-c51f-47b8-99ef-14a529a4d244",
+   "from": "a2a02a2e-685d-499e-a16c-1e84bb32319c",
+   "to": "e73ccb16-8dfe-4c74-bbd7-6d62ecb95404",
+   "relation": 0,
+   "stated": 1,
+   "outcome": 0
+  },
+  {
+   "thought": "0b5193ad-4a90-4f05-9181-ab095de570ee",
+   "from": "22fdba7e-5107-423e-86fd-dad6e6647961",
+   "to": "249c2a46-f322-40e2-a2d1-ed3003414432",
+   "relation": 1,
+   "stated": 1,
+   "outcome": 1
+  },
+  {
+   "thought": "14f9b68c-24e8-4436-910f-d204a4db8b02",
+   "from": "17294e25-d79e-4379-9322-503b55e19e51",
+   "to": "30e8c22a-2eb6-4e39-8cf3-cf65685182b2",
+   "relation": 5,
+   "stated": 0.8,
+   "outcome": 1
+  },
+  {
+   "thought": "14f9b68c-24e8-4436-910f-d204a4db8b02",
+   "from": "30e8c22a-2eb6-4e39-8cf3-cf65685182b2",
+   "to": "122d28e4-3ab8-4155-9a5a-683cb484dbbe",
+   "relation": 1,
+   "stated": 0.9,
+   "outcome": 0
+  },
+  {
+   "thought": "14f9b68c-24e8-4436-910f-d204a4db8b02",
+   "from": "30e8c22a-2eb6-4e39-8cf3-cf65685182b2",
+   "to": "28025281-86e1-4e04-bdc5-59d82c8b4409",
+   "relation": 1,
+   "stated": 0.9,
+   "outcome": 0
+  },
+  {
+   "thought": "14f9b68c-24e8-4436-910f-d204a4db8b02",
+   "from": "30e8c22a-2eb6-4e39-8cf3-cf65685182b2",
+   "to": "45455358-78cc-4343-aa62-b91733919665",
+   "relation": 1,
+   "stated": 0.9,
+   "outcome": 1
+  },
+  {
+   "thought": "14f9b68c-24e8-4436-910f-d204a4db8b02",
+   "from": "30e8c22a-2eb6-4e39-8cf3-cf65685182b2",
+   "to": "57115d65-6e2d-4aac-8186-50421ec078b1",
+   "relation": 1,
+   "stated": 0.9,
+   "outcome": 1
+  },
+  {
+   "thought": "14f9b68c-24e8-4436-910f-d204a4db8b02",
+   "from": "30e8c22a-2eb6-4e39-8cf3-cf65685182b2",
+   "to": "66c92793-8c09-4662-b577-bd5b172f0979",
+   "relation": 5,
+   "stated": 0.8,
+   "outcome": 1
+  },
+  {
+   "thought": "14f9b68c-24e8-4436-910f-d204a4db8b02",
+   "from": "30e8c22a-2eb6-4e39-8cf3-cf65685182b2",
+   "to": "aef28693-c348-4812-8bf4-13a9e97fdf00",
+   "relation": 1,
+   "stated": 0.9,
+   "outcome": 1
+  },
+  {
+   "thought": "14f9b68c-24e8-4436-910f-d204a4db8b02",
+   "from": "30e8c22a-2eb6-4e39-8cf3-cf65685182b2",
+   "to": "b6d6520e-98aa-402e-b84d-b6339c1cb644",
+   "relation": 1,
+   "stated": 0.9,
+   "outcome": 1
+  },
+  {
+   "thought": "14f9b68c-24e8-4436-910f-d204a4db8b02",
+   "from": "30e8c22a-2eb6-4e39-8cf3-cf65685182b2",
+   "to": "bad51758-e5f2-457e-8356-0fdb61bcacff",
+   "relation": 1,
+   "stated": 0.9,
+   "outcome": 0
+  },
+  {
+   "thought": "14f9b68c-24e8-4436-910f-d204a4db8b02",
+   "from": "30e8c22a-2eb6-4e39-8cf3-cf65685182b2",
+   "to": "c1a9d60b-346a-4ceb-9cfc-995c4b0ab4d7",
+   "relation": 1,
+   "stated": 0.9,
+   "outcome": 1
+  },
+  {
+   "thought": "14f9b68c-24e8-4436-910f-d204a4db8b02",
+   "from": "30e8c22a-2eb6-4e39-8cf3-cf65685182b2",
+   "to": "cc304327-444c-4862-8e9e-bec3feaa9c57",
+   "relation": 5,
+   "stated": 0.8,
+   "outcome": 1
+  },
+  {
+   "thought": "14f9b68c-24e8-4436-910f-d204a4db8b02",
+   "from": "30e8c22a-2eb6-4e39-8cf3-cf65685182b2",
+   "to": "da1823a5-152a-4907-b769-a6d095a5ed9a",
+   "relation": 1,
+   "stated": 0.9,
+   "outcome": 1
+  },
+  {
+   "thought": "14f9b68c-24e8-4436-910f-d204a4db8b02",
+   "from": "30e8c22a-2eb6-4e39-8cf3-cf65685182b2",
+   "to": "df175586-c309-4431-9983-674d31f3f13e",
+   "relation": 1,
+   "stated": 0.9,
+   "outcome": 1
+  },
+  {
+   "thought": "14f9b68c-24e8-4436-910f-d204a4db8b02",
+   "from": "30e8c22a-2eb6-4e39-8cf3-cf65685182b2",
+   "to": "e6cb0f4c-9a36-4918-8eba-ee2ae5472ac9",
+   "relation": 1,
+   "stated": 0.9,
+   "outcome": 1
+  },
+  {
+   "thought": "14f9b68c-24e8-4436-910f-d204a4db8b02",
+   "from": "30e8c22a-2eb6-4e39-8cf3-cf65685182b2",
+   "to": "f83d074f-7a72-4617-8a76-59763ff20d7e",
+   "relation": 5,
+   "stated": 0.8,
+   "outcome": 1
+  },
+  {
+   "thought": "20c43c7d-1930-450e-ac55-73287cb21a7e",
+   "from": "438efe50-80af-4fd1-85bf-56554a064dbf",
+   "to": "fce49d35-2a6b-46f2-bea0-74142e441d2b",
+   "relation": 5,
+   "stated": 1,
+   "outcome": 1
+  },
+  {
+   "thought": "20e1c172-5ae1-4378-bde5-a86e8429654b",
+   "from": "10b12195-3895-4a30-9a82-850fca56ae51",
+   "to": "15dea536-014c-4cd8-a76a-cb049b53e362",
+   "relation": 5,
+   "stated": 1,
+   "outcome": 1
+  },
+  {
+   "thought": "25bceba3-fe80-4cc1-ae61-eff843d2801c",
+   "from": "a2fc40e0-5514-4d72-b677-91526d289dfb",
+   "to": "c1a4bf87-054b-4fd4-831f-36ba13a10553",
+   "relation": 1,
+   "stated": 1,
+   "outcome": 0
+  },
+  {
+   "thought": "2e8bb0a0-ba76-4744-8893-dc0d7a1d6d50",
+   "from": "6c995935-7b61-473e-b0bd-0d31f4a629f2",
+   "to": "4be1f30e-2e02-4f9c-8d7c-b49c770f2811",
+   "relation": 4,
+   "stated": 0.8,
+   "outcome": 0
+  },
+  {
+   "thought": "42562f94-9a2d-48f7-9f96-74ccf7c6ddfe",
+   "from": "274916a1-ab9b-4546-bd53-a709296a7d49",
+   "to": "f0cebba7-8efd-4fd4-b280-555bc6c0d92b",
+   "relation": 1,
+   "stated": 0.8,
+   "outcome": 0
+  },
+  {
+   "thought": "6125af0b-d93e-4710-8dd4-6a5fa707b7ec",
+   "from": "5bef1429-cdf0-4eb9-8124-171e98a7596a",
+   "to": "870ce20f-7991-404d-9abf-b18930be7486",
+   "relation": 5,
+   "stated": 1,
+   "outcome": 0
+  },
+  {
+   "thought": "66014f20-b389-4aed-9f5f-83c56383adcb",
+   "from": "18397f69-1ba6-400d-bdd8-b26f5c045f6e",
+   "to": "824ee5ec-2157-4bb4-b4c6-e85ddcc07a7b",
+   "relation": 1,
+   "stated": 1,
+   "outcome": 0
+  },
+  {
+   "thought": "6cce67f0-5e5c-4187-9e86-cdfa276c303c",
+   "from": "7ff72510-4131-4032-a306-245acaee51a3",
+   "to": "4b5c2fdb-b795-41f1-a2dd-7b939ae10cf1",
+   "relation": 0,
+   "stated": 1,
+   "outcome": 0
+  },
+  {
+   "thought": "6e2529f8-a051-4804-bf82-86d45578f06e",
+   "from": "f3a8947a-d149-4af5-a8c3-254e2a87527a",
+   "to": "df429ffa-ab60-47a3-92f9-6a698e0af21f",
+   "relation": 1,
+   "stated": 1,
+   "outcome": 0
+  },
+  {
+   "thought": "7f5d4590-a4fb-4fd5-a740-91351c0cac9d",
+   "from": "274916a1-ab9b-4546-bd53-a709296a7d49",
+   "to": "519d757b-190a-4b38-9e1e-d226ebe885db",
+   "relation": 0,
+   "stated": 1,
+   "outcome": 0
+  },
+  {
+   "thought": "a5ee93cc-f78a-4a78-89fc-e5356b1b5909",
+   "from": "03fbbe9b-1f70-435e-b881-9b060af20a46",
+   "to": "85f79895-73e2-4d83-8991-79fa8d2a5bba",
+   "relation": 4,
+   "stated": 1,
+   "outcome": 0
+  },
+  {
+   "thought": "a7691108-0ae2-4b99-904f-df7550f8ef4c",
+   "from": "37844a2a-e45d-415b-94d9-55ea2403e301",
+   "to": "2372132c-6bee-4d93-89a5-302b5c424fa9",
+   "relation": 4,
+   "stated": 1,
+   "outcome": 1
+  },
+  {
+   "thought": "ce5cfea4-8e70-4439-91f8-fc124c6dc93a",
+   "from": "5bef1429-cdf0-4eb9-8124-171e98a7596a",
+   "to": "f3a8947a-d149-4af5-a8c3-254e2a87527a",
+   "relation": 5,
+   "stated": 1,
+   "outcome": 1
+  },
+  {
+   "thought": "e176f235-5d37-45eb-afee-e4ceca52c3ee",
+   "from": "d089bc62-a863-4620-9cb5-e893d9866cd4",
+   "to": "ff763795-c380-41de-8f85-9ce30c4d5b5b",
+   "relation": 5,
+   "stated": 1,
+   "outcome": 0
+  },
+  {
+   "thought": "e9e0b165-7c7f-4798-ab31-485e0526f696",
+   "from": "6b896060-ad0f-4fb5-a80c-bf10e03081fb",
+   "to": "ea96fad1-3d00-49e2-983e-2cc7feb65724",
+   "relation": 5,
+   "stated": 1,
+   "outcome": 0
+  },
+  {
+   "thought": "eff590c9-d17a-4633-87ed-50f6034e5b1c",
+   "from": "f79fa096-1738-4ea4-adc8-7a29e92339ef",
+   "to": "9e936e3d-47f4-4810-ae85-f1817c83f3f1",
+   "relation": 1,
+   "stated": 1,
+   "outcome": 0
+  },
+  {
+   "thought": "fb2d4db5-27af-48fe-b14a-3cb9a9b80cc4",
+   "from": "701a7bb1-30c0-42f2-a61b-1ab9aaf9cd49",
+   "to": "81e74763-4f7c-40cb-a605-3a994d991823",
+   "relation": 0,
+   "stated": 1,
+   "outcome": 0
+  }
+ ]
+}
