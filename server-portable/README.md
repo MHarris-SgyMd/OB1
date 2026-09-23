@@ -351,13 +351,18 @@ directly testable — but the Deno build still needs them.
   the client with nothing in the server's log (SMD-1864). Every event stream now
   carries a `: keepalive` comment frame every 5 s (`SSE_KEEPALIVE_MS` in
   `index.ts`), a line SSE parsers discard by specification, for as long as the
-  tool runs; the idle timeout stays at the runtime's default, which is the right
-  reaper for a dead socket. A client that closes the connection before the
-  response is complete is the one thing the server logs per request — `request
-  abandoned by the client after 9.8 s: tools/call capture_thought …` — by method
-  and tool, never by content; the call runs to its end on the server, and a
-  retry of the same text is `upsert_thought`'s fingerprint no-op rather than a
-  second row. The rest of per-request logging is SMD-1849.
+  tool runs — up to ten minutes (`SSE_KEEPALIVE_MAX_MS`), past which the frames
+  stop, one line says `request still running after N s: …` and the runtime's
+  idle timeout takes over, since a provider call is bounded by
+  `OB1_LLM_TIMEOUT` and a call that long is stuck in the database. The idle
+  timeout itself stays at the runtime's default, which is the right reaper for a
+  dead socket. A client that closes the connection before the response is
+  complete is the other line the server logs per request — `request abandoned
+  by the client after 9.8 s: tools/call capture_thought …` — by method and tool
+  (each capped at 64 printable characters), never by content; the call runs to
+  its end on the server, and a retry of the same text is `upsert_thought`'s
+  fingerprint no-op rather than a second row. The rest of per-request logging is
+  SMD-1849.
 
 ## Related
 

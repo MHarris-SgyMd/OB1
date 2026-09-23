@@ -1906,40 +1906,64 @@ app.get("*", async (c, next) => (HEALTH_PATH.test(c.req.path) ? c.text("ok", 200
 // the server (SMD-1846) is kept the same way.
 export const SSE_KEEPALIVE_MS = 5_000;
 
+/**
+ * How long a stream is kept alive at most. A provider call is bounded by
+ * OB1_LLM_TIMEOUT (120 s, embed.ts) and a capture makes a few; a database
+ * write is bounded by nothing — a transaction stuck on upsert_thought's
+ * fingerprint lock (033) would hold every concurrent capture of that thought,
+ * and with an unbounded keepalive each would hold a stream and a timer for
+ * hours with no line anywhere. Past this the timer stops, one line says so,
+ * and the runtime's idle timeout takes over: a call this long is stuck, not
+ * slow. (Review pass 1.)
+ */
+export const SSE_KEEPALIVE_MAX_MS = 10 * 60_000;
+
 /** The SSE comment frame the keepalive writes. A line beginning `:` is a comment (WHATWG, "event stream interpretation"): every parser drops it. */
 const SSE_KEEPALIVE_FRAME = new TextEncoder().encode(": keepalive\n\n");
 
 /**
  * The response with its SSE body kept alive: a comment frame every
- * `intervalMs` until the body ends (`onEnd` runs once, then) or the client
+ * `intervalMs` until the body ends (`onEnd` runs once, then), the client
  * leaves (`signal` aborts, or the next frame finds the stream closed — either
- * stops the timer, so an abandoned call leaks nothing). A response that is not
- * an event stream is returned as it is, `onEnd` run at once: it is complete.
+ * stops the timer, so an abandoned call leaks nothing), or `maxMs` passes
+ * (the timer stops and `stalledRequestLine` is logged for `label`). A
+ * response that is not an event stream is returned as it is, `onEnd` run at
+ * once: it is complete.
  */
 export function withSseKeepalive(
   response: Response,
-  opts: { intervalMs?: number; signal?: AbortSignal; onEnd?: () => void } = {},
+  opts: { intervalMs?: number; maxMs?: number; signal?: AbortSignal; onEnd?: () => void; label?: string } = {},
 ): Response {
   const body = response.body;
   if (!body || !/^text\/event-stream\b/i.test(response.headers.get("content-type") ?? "")) {
     opts.onEnd?.();
     return response;
   }
+  const intervalMs = opts.intervalMs ?? SSE_KEEPALIVE_MS;
+  const maxMs = opts.maxMs ?? SSE_KEEPALIVE_MAX_MS;
+  const started = performance.now();
   let timer: ReturnType<typeof setInterval> | null = null;
   const stop = () => {
     if (timer === null) return;
     clearInterval(timer);
     timer = null;
+    opts.signal?.removeEventListener("abort", stop);
   };
   const keepalive = new TransformStream<Uint8Array, Uint8Array>({
     start(controller) {
       timer = setInterval(() => {
+        const elapsed = performance.now() - started;
+        if (elapsed >= maxMs) {
+          stop();
+          console.warn(stalledRequestLine(opts.label ?? "?", elapsed));
+          return;
+        }
         try {
           controller.enqueue(SSE_KEEPALIVE_FRAME);
         } catch {
           stop(); // the readable side closed under the timer: the client left
         }
-      }, opts.intervalMs ?? SSE_KEEPALIVE_MS);
+      }, intervalMs);
     },
     flush() {
       stop(); // the transport closed the stream: the response is complete
@@ -1947,24 +1971,35 @@ export function withSseKeepalive(
     },
   });
   opts.signal?.addEventListener("abort", stop, { once: true });
+  if (opts.signal?.aborted) stop(); // gone before the stream was built: nothing to keep alive
   return new Response(body.pipeThrough(keepalive), { status: response.status, statusText: response.statusText, headers: response.headers });
 }
 
+/** A caller's string as a log line may carry it: printable ASCII only — a newline would forge a second line — and at most this many characters. */
+const LABEL_PART_MAX = 64;
+const labelPart = (s: string): string => s.replace(/[^\x20-\x7e]/g, "?").slice(0, LABEL_PART_MAX);
+
 /**
  * What a log line may say about a request: the JSON-RPC method and, for a
- * tool call, the tool's name — never the arguments, which are the thought.
- * A batch is named by its first message; anything unreadable is `?`.
+ * tool call, the tool's name — never the arguments, which are the thought —
+ * each as `labelPart` admits it, since both are the caller's strings. A batch
+ * is named by its first message; anything unreadable is `?`.
  */
 export function requestLabel(bodyText: string | null): string {
   try {
     const parsed: unknown = JSON.parse(bodyText ?? "");
     const first = Array.isArray(parsed) ? parsed[0] : parsed;
     const msg = (first ?? {}) as { method?: unknown; params?: { name?: unknown } };
-    const method = typeof msg.method === "string" ? msg.method : "?";
-    return typeof msg.params?.name === "string" ? `${method} ${msg.params.name}` : method;
+    const method = typeof msg.method === "string" ? labelPart(msg.method) : "?";
+    return typeof msg.params?.name === "string" ? `${method} ${labelPart(msg.params.name)}` : method;
   } catch {
     return "?";
   }
+}
+
+/** The line logged when a stream has been kept alive for SSE_KEEPALIVE_MAX_MS: the call is stuck, and the keepalive lets go. */
+export function stalledRequestLine(label: string, elapsedMs: number): string {
+  return `request still running after ${Math.round(elapsedMs / 1000)} s: ${label} — the keepalive stops here and the runtime's idle timeout takes over; a provider call is bounded by OB1_LLM_TIMEOUT, so look at the database (SMD-1864)`;
 }
 
 /**
@@ -1988,6 +2023,25 @@ export function abandonedRequestLine(label: string, elapsedMs: number): string {
 // it) would not have been enough; it treats the 405 notFound gives as "no
 // stream here". FORK.md change 75.
 app.on(MCP_METHODS, "*", async (c) => {
+  // The one thing this server logs per request (SMD-1849 has the rest): a
+  // client that closes the connection before the response is complete, named
+  // by method and tool, never by content. Registered first, so a client that
+  // leaves during the key check, the registry resolve or the body read is
+  // logged too (a listener added to a signal already aborted never fires — so
+  // that case is checked by hand); the label is filled in once the body is
+  // read. The signal aborts when the client goes, not when a complete
+  // response's socket is later reaped (measured), and `settled` keeps the line
+  // to the former anyway.
+  const signal = c.req.raw.signal;
+  const started = performance.now();
+  let label = "?";
+  let settled = false;
+  const abandoned = () => {
+    if (!settled) console.warn(abandonedRequestLine(label, performance.now() - started));
+  };
+  signal.addEventListener("abort", abandoned, { once: true });
+  if (signal.aborted) abandoned();
+
   // Accept the access key via header, bearer token OR URL query parameter — every
   // form presented is tried, so a gateway's own bearer token beside the client's
   // `?key=` does not shadow it. The query form stays because Claude Desktop
@@ -2008,6 +2062,7 @@ app.on(MCP_METHODS, "*", async (c) => {
     // correlated; malformed/missing bodies fall back to id: null.
     const bodyText = await readBodyText(c.req.raw);
     const id = extractJsonRpcId(bodyText);
+    settled = true;
     return unauthorizedResponse(id);
   }
 
@@ -2024,33 +2079,30 @@ app.on(MCP_METHODS, "*", async (c) => {
   const identity = await agents().resolve(db(), principal);
   if (identity.status === "revoked") {
     const bodyText = await readBodyText(c.req.raw);
+    settled = true;
     return unauthorizedResponse(extractJsonRpcId(bodyText), REVOKED_MESSAGE);
   }
   principal.agentId = identity.agentId;
   if (identity.status === "ok") principal.agentUnresolved = identity.unresolved;
 
-  // The one thing this server logs per request (SMD-1849 has the rest): a
-  // client that closes the connection before the response is complete, named
-  // by method and tool, never by content. Read through Hono's request, which
-  // caches the body for the transport's own read of it; the signal aborts when
-  // the client goes, not when a complete response's socket is later reaped,
-  // and `settled` keeps the line to the former.
-  const label = requestLabel(await c.req.text());
-  const started = performance.now();
-  let settled = false;
-  c.req.raw.signal.addEventListener("abort", () => {
-    if (!settled) console.warn(abandonedRequestLine(label, performance.now() - started));
-  }, { once: true });
+  // The label, read through Hono's request, which caches the body for the
+  // transport's own read of it — the same text, the same rejection: a body
+  // that cannot be read (the client gone mid-upload) is `?` here and the
+  // transport's 400 there, as before this read existed.
+  label = requestLabel(await c.req.text().catch(() => null));
 
   const server = buildServer(principal);
   const transport = new StreamableHTTPTransport();
   await server.connect(transport);
   const response = await transport.handleRequest(c);
-  if (!response) return c.json({ error: "No response from MCP transport" }, 500, corsHeaders);
+  if (!response) {
+    settled = true;
+    return c.json({ error: "No response from MCP transport" }, 500, corsHeaders);
+  }
   response.headers.delete("mcp-session-id");
   for (const [k, v] of Object.entries(corsHeaders)) response.headers.set(k, v);
-  // Kept alive for as long as the tool runs (SMD-1864, above).
-  return withSseKeepalive(response, { signal: c.req.raw.signal, onEnd: () => { settled = true; } });
+  // Kept alive for as long as the tool runs, up to SSE_KEEPALIVE_MAX_MS (SMD-1864, above).
+  return withSseKeepalive(response, { signal, label, onEnd: () => { settled = true; } });
 });
 
 // Whatever no route above matched: 405 with `Allow`, before authenticate(), so

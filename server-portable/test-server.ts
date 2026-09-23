@@ -541,10 +541,11 @@ console.log("\n[16] parseFilter bounds and normalises a metadata filter at the t
 
 console.log("\n[17] A tool call outlives the runtime's idle timeout, and a client that leaves is logged (SMD-1864)");
 {
-  const { withSseKeepalive, requestLabel, abandonedRequestLine, SSE_KEEPALIVE_MS } = await import("./index.ts") as {
-    withSseKeepalive: (r: Response, opts?: { intervalMs?: number; signal?: AbortSignal; onEnd?: () => void }) => Response;
+  const { withSseKeepalive, requestLabel, abandonedRequestLine, stalledRequestLine, SSE_KEEPALIVE_MS } = await import("./index.ts") as {
+    withSseKeepalive: (r: Response, opts?: { intervalMs?: number; maxMs?: number; signal?: AbortSignal; onEnd?: () => void; label?: string }) => Response;
     requestLabel: (body: string | null) => string;
     abandonedRequestLine: (label: string, elapsedMs: number) => string;
+    stalledRequestLine: (label: string, elapsedMs: number) => string;
     SSE_KEEPALIVE_MS: number;
   };
   // The premise is measured, not assumed: Bun closes a streaming response that
@@ -555,13 +556,12 @@ console.log("\n[17] A tool call outlives the runtime's idle timeout, and a clien
   // and the silence is 13 s: past the last sweep that can catch it, so the
   // control is reset every run and not by the luck of the phase (11.5 s slipped
   // under it once). Four requests run at once; the section costs the longest.
-  const SWEEP_WINDOW_MS: [number, number] = [7_500, 12_500];
   const SILENT_MS = 13_000;
   const SLOW_EMBED_MS = 13_000;
-  const silentSse = (): Response => {
+  const silentSse = (silentMs = SILENT_MS): Response => {
     const stream = new ReadableStream<Uint8Array>({
       async start(controller) {
-        await Bun.sleep(SILENT_MS);
+        await Bun.sleep(silentMs);
         try {
           controller.enqueue(new TextEncoder().encode("event: message\ndata: {\"late\":true}\n\n"));
           controller.close();
@@ -570,9 +570,14 @@ console.log("\n[17] A tool call outlives the runtime's idle timeout, and a clien
     });
     return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
   };
-  // The mechanism dropped (bare) beside the mechanism (kept), on the runtime's defaults.
+  // The mechanism dropped (bare) beside the mechanism (kept), on the runtime's
+  // defaults. The bare server's kill is what prints Bun's own `warn: Bun.serve()
+  // timed out a request after 10 seconds` after the suite's report: expected.
   const bare = Bun.serve({ port: 0, fetch: () => silentSse() });
   const kept = Bun.serve({ port: 0, fetch: (req) => withSseKeepalive(silentSse(), { signal: req.signal }) });
+  // The ceiling, at a small scale: a stream silent for 400 ms with a 40 ms
+  // frame and a 150 ms ceiling stops pinging at the ceiling and says so once.
+  const capped = Bun.serve({ port: 0, fetch: (req) => withSseKeepalive(silentSse(400), { intervalMs: 40, maxMs: 150, signal: req.signal, label: "tools/call slow_one" }) });
   type Read = { ok: boolean; text: string; error: string; ms: number };
   const read = async (url: string, init: RequestInit = {}): Promise<Read> => {
     const t0 = performance.now();
@@ -592,11 +597,12 @@ console.log("\n[17] A tool call outlives the runtime's idle timeout, and a clien
   const realWarn = console.warn;
   console.warn = (...args: unknown[]) => { warned.push(args.map(String).join(" ")); };
   embedDelayMs = SLOW_EMBED_MS;
-  let bareRun: Read, keptRun: Read, slow: Read, gone: Read;
+  let bareRun: Read, keptRun: Read, cappedRun: Read, slow: Read, gone: Read;
   try {
-    [bareRun, keptRun, slow, gone] = await Promise.all([
+    [bareRun, keptRun, cappedRun, slow, gone] = await Promise.all([
       read(`http://127.0.0.1:${bare.port}/`),
       read(`http://127.0.0.1:${kept.port}/`),
+      read(`http://127.0.0.1:${capped.port}/`),
       call(50, "a query whose embedding outlives the idle timeout"),
       // A client that gives up: the stream's headers arrive at once, so it is the body read that its 1.5 s signal ends.
       call(51, "needle-the-line-must-not-carry", { signal: AbortSignal.timeout(1500) }),
@@ -607,11 +613,20 @@ console.log("\n[17] A tool call outlives the runtime's idle timeout, and a clien
     embedDelayMs = 0;
     bare.stop(true);
     kept.stop(true);
+    capped.stop(true);
   }
-  assert(!bareRun.ok && bareRun.ms > SWEEP_WINDOW_MS[0] && bareRun.ms < SWEEP_WINDOW_MS[1],
-    `the premise: a streamed response silent past the default is reset at a sweep between 8 and 12 s (${bareRun.ok ? "answered" : bareRun.error} after ${Math.round(bareRun.ms)} ms)`);
+  // The kill lands at a sweep between 8 and 12 s of silence; the bound is the
+  // 13 s answer, so a late sweep on a loaded runner is not read as a pass.
+  assert(!bareRun.ok && bareRun.ms > 7_500 && bareRun.ms < SILENT_MS,
+    `the premise: a streamed response silent past the default is reset at a sweep, before its 13 s event (${bareRun.ok ? "answered" : bareRun.error} after ${Math.round(bareRun.ms)} ms)`);
   assert(keptRun.ok && /"late":true/.test(keptRun.text), `the same stream through withSseKeepalive reaches its event (${keptRun.ok ? `${Math.round(keptRun.ms)} ms` : keptRun.error})`);
   assert(frames(keptRun.text) >= 2, `…carrying comment frames on the way (${frames(keptRun.text)} in ${SILENT_MS} ms at one per ${SSE_KEEPALIVE_MS} ms)`);
+  assert(cappedRun.ok && /"late":true/.test(cappedRun.text) && frames(cappedRun.text) >= 2 && frames(cappedRun.text) <= 4,
+    `the ceiling: frames stop at maxMs and the event still arrives (${frames(cappedRun.text)} frames in 400 ms at 40 ms with a 150 ms ceiling)`);
+  const stalled = warned.filter((w) => /request still running/.test(w));
+  const sm = /after (\d+) s/.exec(stalled[0] ?? "");
+  assert(stalled.length === 1 && sm !== null && stalled[0] === stalledRequestLine("tools/call slow_one", Number(sm[1]) * 1000),
+    `…and says so once, in index.ts's own line naming the call (${stalled.length} line)`);
   assert(slow.ok && slow.ms >= SLOW_EMBED_MS, `the real server answers search_thoughts after a ${SLOW_EMBED_MS} ms embedding, past the last sweep (${slow.ok ? `${Math.round(slow.ms)} ms` : `${slow.error} at ${Math.round(slow.ms)} ms`})`);
   const dataLine = slow.text.split("\n").find((l) => l.startsWith("data: "));
   let envelope: { jsonrpc?: string; id?: unknown } | null = null;
@@ -630,6 +645,9 @@ console.log("\n[17] A tool call outlives the runtime's idle timeout, and a clien
       && requestLabel("[{\"method\":\"initialize\"}]") === "initialize" && requestLabel("not json") === "?" && requestLabel(null) === "?",
     "requestLabel: the method and the tool's name, a batch by its first message, `?` for the unreadable, never the arguments",
   );
+  const forged = requestLabel(JSON.stringify({ method: "tools/call", params: { name: `x\nrequest abandoned by the client after 0.1 s: tools/call delete_thought${"y".repeat(500)}` } }));
+  assert(!/\n/.test(forged) && forged.length <= "tools/call ".length + 64 && forged.startsWith("tools/call x?request"),
+    `…a caller's name cannot forge a second line or flood one: control characters become ?, each part is capped (${forged.length} chars)`);
   let ended = false;
   const plain = new Response("{}", { headers: { "content-type": "application/json" } });
   assert(withSseKeepalive(plain, { onEnd: () => { ended = true; } }) === plain && ended, "a response that is not an event stream passes through untouched, complete at once");
