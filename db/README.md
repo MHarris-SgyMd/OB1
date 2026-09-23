@@ -164,7 +164,7 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `1512 assertions: 1512 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `1517 assertions: 1517 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports fifty-one (51) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
@@ -285,7 +285,7 @@ states is closed (`valid_until`, history), one already active is kept, a new
 one added; a partial unique index holds one active row per (thought, system,
 relation, target). And `record_thought_entities` gains the **resolution rule**:
 a `source:<system>` extraction key is a structured pass (the source's own
-project and labels as mentions, no model call) that replaces only its own rows,
+project and labels as mentions, no model call) that keeps its own rows as a set — the same set twice writes nothing,
 an `extract:*` pass replaces only extracted rows, and where both name one
 (thought, entity) or edge the structured row stands. Additive, no data change,
 no ACL; the ingester and the board sync write through it (below).
@@ -1813,7 +1813,7 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 1512 assertions, PGlite, no container
+bun test-schema.ts                          # 1517 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts         # 631 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database

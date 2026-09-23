@@ -53,7 +53,10 @@ export class IdentityHeld extends Error {
  */
 export async function recordStructure(sql: SQL, thoughtId: string, s: Structure, run: string, opts: { take?: boolean } = {}): Promise<StructureResult> {
   const [src] = (await sql`SELECT record_thought_source(${thoughtId}::uuid, ${s.identity.system}, ${s.identity.key}, ${s.canonical.form}, ${s.canonical.mediaType}, ${run}, ${opts.take === true}) AS r`) as { r: { ok: boolean; outcome?: string; error?: string; held_by?: string } }[];
-  if (!src.r.ok && src.r.error === "IDENTITY_HELD" && src.r.held_by) throw new IdentityHeld(s.identity, thoughtId, src.r.held_by);
+  // IDENTITY_HELD is IdentityHeld whether or not the holder could be named —
+  // a race's winner can be gone by the re-read; the refusal is the fact, the
+  // name is detail (fourth review pass).
+  if (!src.r.ok && src.r.error === "IDENTITY_HELD") throw new IdentityHeld(s.identity, thoughtId, src.r.held_by ?? "unknown");
   if (!src.r.ok) throw new Error(`record_thought_source(${s.identity.system} ${s.identity.key}) on ${thoughtId}: ${src.r.error}`);
   // The JSON goes over as TEXT and is cast in SQL: a JS string bound straight
   // to a `::jsonb` parameter is serialised as a JSON string — the function saw

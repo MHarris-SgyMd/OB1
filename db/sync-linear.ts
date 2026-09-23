@@ -620,7 +620,20 @@ export async function syncIssue(w: Writer, issue: LinearIssue, rows: BrainRow[])
   // The structure lands on the row that holds the ticket once the row is
   // settled — after a capture, an adoption, a patch or an edit; not on a dry
   // run. A failure here is the pass's to report for this issue, as a write's is.
-  const recordOn = async (thoughtId: string): Promise<void> => { if (!w.dryRun && w.structure) await w.structure(thoughtId, structure); };
+  const recordOn = async (thoughtId: string): Promise<void> => {
+    if (w.dryRun || !w.structure) return;
+    try {
+      await w.structure(thoughtId, structure);
+    } catch (e) {
+      // The row already carries this pass's watermark, so the next scheduled
+      // pass would read the ticket as unchanged and never retry the structure
+      // (fourth review pass, independent read). The watermark comes off, the
+      // ticket reads stale, the next pass fetches it and records the structure
+      // again; the error still fails this issue in the report.
+      const back = await w.store.updateThought({ id: thoughtId, metadataPatch: { linear_updated_at: null }, actor: w.actor });
+      throw new Error(`structure on ${thoughtId}: ${(e as Error).message}${back.ok ? " (watermark cleared; retried next pass)" : ` (and clearing the watermark failed: ${back.error})`}`);
+    }
+  };
   const fp = await w.fingerprintOf(content);
   const holds = (row: BrainRow) => row.content === content || (fp !== null && row.fingerprint === fp);
   const actorWith = (record: ReturnType<typeof decideCalls>["record"]): Actor => ({ ...w.actor, ...(record ? { egress: record } : {}) });
@@ -975,7 +988,10 @@ export function importClosure(entry: string, root: string): string[] {
     // and cannot be read further — inside the container the ingester's
     // evals/ imports are exactly such files.
     if (!existsSync(abs)) return;
-    const src = readFileSync(abs, "utf8");
+    // Comments first: a docblock that shows an import shape is not an import
+    // (fourth review pass — this function's own example was walked to a
+    // phantom db/x.ts).
+    const src = readFileSync(abs, "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
     for (const m of src.matchAll(/(?:^|\n)\s*(?:import|export)\b[^;]*?\bfrom\s+"(\.{1,2}\/[^"]+)"|(?:^|\n)\s*import\s+"(\.{1,2}\/[^"]+)"|\bimport\(\s*"(\.{1,2}\/[^"]+)"\s*\)/g)) {
       walk(resolve(dirname(abs), m[1] ?? m[2] ?? m[3]));
     }
@@ -1337,6 +1353,18 @@ function selfCheck(): Promise<number> {
       seen.length = 0;
       await syncIssue(recorder, issue, []);
       ok(seen.length === 0 && calls.length > 0, "a Writer without the hook writes rows alone (a brain before 051)");
+      // A hook that fails after the row took this pass's watermark: the
+      // watermark comes off so the next pass reads the ticket as stale and
+      // retries the structure; the error still fails the issue (fourth review
+      // pass, independent read — the ticket would otherwise read unchanged
+      // and stay edge-less until it next moved in Linear).
+      const failing: Writer = { ...recorder, structure: async () => { throw new Error("validator said no"); } };
+      calls.length = 0;
+      let thrown = "";
+      try { await syncIssue(failing, issue, [row("cur", text, { source: "linear", issue: "SMD-1936" }, null, null)]); } catch (e) { thrown = (e as Error).message; }
+      ok(/validator said no/.test(thrown) && /watermark cleared/.test(thrown) && calls.at(-1) === "update cur patch(linear_updated_at)", `a failing hook clears the watermark and fails the issue with the hook's reason (${thrown.slice(0, 80)}; ${calls.join("; ")})`);
+      const planAfter = planPass([{ identifier: "SMD-1936", updatedAt: issue.updatedAt }], new Map([["SMD-1936", [row("cur", text, { ...issueFacets(issue), linear_updated_at: undefined as unknown as string }, null, null)]]]));
+      ok(planAfter.stale.length === 1, "…and a row without the watermark is stale to the next pass's plan");
     }
     // No projects is no board.
     let refusedEmpty = false;

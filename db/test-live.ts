@@ -4167,7 +4167,7 @@ console.log("\n[19] db/ingest-records.ts: the records upsert is source-labelled 
   const [mentionRow] = await sql`SELECT m.extraction_key AS k, en.name FROM thought_entities m JOIN ob1_entities en ON en.id = m.entity_id WHERE m.thought_id = ${structured.id}::uuid`;
   assert(mentionRow?.k === "source:linear" && mentionRow.name === "zqlabel", "the label is a mention under source:linear");
   const s2 = await upsertRecord(sql, structured, "test-live@2");
-  assert(s2.outcome === "unchanged" && s2.structure?.canonical === "unchanged" && s2.structure.links.added === 0 && s2.structure.links.kept === 1 && s2.structure.links.closed === 0, `the same record again writes nothing at any of the four (${JSON.stringify(s2)})`);
+  assert(s2.outcome === "unchanged" && s2.structure?.canonical === "unchanged" && s2.structure.links.added === 0 && s2.structure.links.kept === 1 && s2.structure.links.closed === 0 && s2.structure.mentions === 0, `the same record again writes nothing at any of the four — the mention count is 0 written, not 1 re-inserted (${JSON.stringify(s2)})`);
   // A shrinking array facet is a change the merge must write: containment would have called ["a"] contained in ["a","b"] and kept the stale list (first review pass).
   await sql`UPDATE thoughts SET metadata = metadata || '{"labels": ["a", "b"]}'::jsonb WHERE id = ${structured.id}::uuid`;
   const shrunk = await upsertRecord(sql, { ...structured, meta: { ...structured.meta, labels: ["a"] } }, "test-live@3");

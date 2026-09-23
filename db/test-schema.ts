@@ -6307,7 +6307,14 @@ console.log("\n[47] Migration 051: the source beside the thought — the canonic
   const stampsBefore = await stamps();
   await db.query(`SELECT pg_sleep(0.02)`);
   const s1b = await rte(t1, "source:linear", structured);
-  assert(s1b.ok === true && s1b.mentions === 0 && s1b.new_entities === 0 && JSON.stringify(await stamps()) === JSON.stringify(stampsBefore), `the same structured set again writes nothing: 0 mentions written, extracted_at and last_seen_at unmoved (${JSON.stringify(s1b)})`);
+  assert(s1b.ok === true && s1b.mentions === 0 && s1b.new_entities === 0 && s1b.entities === 2 && JSON.stringify(await stamps()) === JSON.stringify(stampsBefore), `the same structured set again writes nothing: 0 mentions written, extracted_at and last_seen_at unmoved, the two entities still counted (${JSON.stringify(s1b)})`);
+  // …nor an entity ROW: the upsert's WHERE holds the tuple where it was (xmin unmoved), so a no-op sync pass leaves no dead tuple per entity (fourth review pass, independent read).
+  const xmins = async () => q<{ x: string }>(`SELECT en.xmin::text AS x FROM ob1_entities en JOIN thought_entities m ON m.entity_id = en.id WHERE m.thought_id = $1::uuid ORDER BY en.name`, [t1]);
+  const xBefore = await xmins();
+  await rte(t1, "source:linear", structured);
+  assert(JSON.stringify(await xmins()) === JSON.stringify(xBefore), "…and no entity row is rewritten (xmin unmoved) by a structured pass that brings no new alias");
+  await rte(t1, "source:linear", structured.map((x) => (x.type === "topic" ? { ...x, aliases: ["infra"] } : x)));
+  assert(JSON.stringify(await xmins()) !== JSON.stringify(xBefore) && (await one<{ a: string[] }>(`SELECT aliases AS a FROM ob1_entities WHERE name = 'infrastructure'`)).a.includes("infra"), "…while a structured pass that brings a new alias writes it");
   const s1c = await rte(t1, "source:linear", [...structured, { name: "Extra Topic", type: "topic", confidence: 1 }]);
   assert(s1c.mentions === 1 && (await mentions(t1)).length === 3, `a wider structured set writes only what is new (${JSON.stringify(s1c)})`);
   const extraSeen = (await one<{ s: string }>(`SELECT last_seen_at::text AS s FROM ob1_entities WHERE name = 'Extra Topic'`)).s;
@@ -6374,6 +6381,20 @@ console.log("\n[47] Migration 051: the source beside the thought — the canonic
   assert(/does not link to itself/.test(await refused(`INSERT INTO thought_facets (thought_id, kind, payload) VALUES ($1::uuid, 'link', '{"relation":"references","system":"linear","target":"SMD-1936"}'::jsonb)`, [t2b])), "the moved identity guards the new holder against a self-link");
   const plain = (await one<{ r: J }>(`SELECT record_thought_source($1::uuid, 'linear', 'SMD-1936', 'the same issue, newer head', 'text/plain', 'test@again', true) AS r`, [t2b])).r;
   assert(plain.outcome === "unchanged" && plain.taken_from === null, "p_take with nothing to take is the plain write: unchanged, taken from nobody");
+  // A NULL p_take is not a take (fourth review pass: `NOT NULL` is NULL and the guard fell through).
+  const nullTake = (await one<{ r: J }>(`SELECT record_thought_source($1::uuid, 'linear', 'SMD-1936', 'x', 'text/plain', NULL, NULL::boolean) AS r`, [t1])).r;
+  assert(nullTake.ok === false && nullTake.error === "IDENTITY_HELD" && nullTake.held_by === t2b, `a NULL p_take is refused as IDENTITY_HELD, not read as a take (${JSON.stringify(nullTake)})`);
+  // Closing a link is not re-judged: an identity re-pointed onto a link's
+  // target since (the same thought, another identity) would otherwise make
+  // the row impossible to close and every structure write on the thought fail
+  // (fourth review pass, independent read).
+  const tA = await put("A note", {});
+  await db.query(`SELECT record_thought_source($1::uuid, 'markdown', 'a', 'A', 'text/markdown', 'r')`, [tA]);
+  await recordLinks(tA, "markdown", [{ relation: "references", target: "b" }]);
+  await db.query(`SELECT record_thought_source($1::uuid, 'markdown', 'b', 'A', 'text/markdown', 'r')`, [tA]);
+  const closing = await recordLinks(tA, "markdown", []);
+  assert(closing.ok === true && closing.closed === 1 && (await links(tA)).length === 0, `a link to what is now the thought's own identity can still be closed (${JSON.stringify(closing)})`);
+  assert(/does not link to itself/.test(await recordLinks(tA, "markdown", [{ relation: "references", target: "b" }]).then((r) => (r.dropped === 1 ? "does not link to itself (dropped)" : JSON.stringify(r)))), "…while stating it anew is dropped as a self-reference");
   await db.exec(`DELETE FROM thoughts`);
   await db.exec(`DELETE FROM ob1_entities`);
 }

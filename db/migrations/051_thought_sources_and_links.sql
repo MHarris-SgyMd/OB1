@@ -155,7 +155,9 @@ BEGIN
   -- holder's row goes (the canonical is re-recorded on the new holder below).
   SELECT thought_id INTO v_holder FROM thought_sources
    WHERE system = p_system AND identity = p_identity AND thought_id <> p_thought_id;
-  IF v_holder IS NOT NULL AND NOT p_take THEN
+  -- IS NOT TRUE: a NULL p_take is not a take (fourth review pass — NOT NULL is
+  -- NULL, and the guard fell through to the takeover).
+  IF v_holder IS NOT NULL AND p_take IS NOT TRUE THEN
     RETURN jsonb_build_object('ok', false, 'error', 'IDENTITY_HELD', 'held_by', v_holder);
   END IF;
   IF v_holder IS NOT NULL THEN
@@ -256,6 +258,14 @@ BEGIN
 
   IF NEW.kind = 'link' THEN
     -- ob1:link-facet (051)
+    -- A close — record_source_links setting valid_until with the payload as
+    -- it was — is not a new link and is not re-judged: an identity re-pointed
+    -- onto the target since (record_thought_source on the same thought) would
+    -- otherwise make the row impossible to close, and every later structure
+    -- write on the thought would fail (fourth review pass).
+    IF TG_OP = 'UPDATE' AND NEW.payload = OLD.payload THEN
+      RETURN NEW;
+    END IF;
     v_relation := NEW.payload->>'relation';
     v_system   := NEW.payload->>'system';
     v_target   := NEW.payload->>'target';
@@ -543,6 +553,10 @@ BEGIN
   -- over an unchanged ticket leaves the project entity's last_seen_at where
   -- it was and 029's stale_entities can still see it (third review pass,
   -- independent read).
+  -- …and a structured pass that brings no new alias writes no entity row at
+  -- all: without the WHERE, a no-op pass left a dead tuple per entity every
+  -- five minutes on every stale ticket (fourth review pass). An extraction
+  -- still moves last_seen_at, so it always writes.
   WITH up AS (
     INSERT INTO ob1_entities (entity_type, name, normalized_name, aliases)
     SELECT i.ntype, i.name, i.nname, i.aliases FROM _rte_in i
@@ -553,9 +567,13 @@ BEGIN
                        || EXCLUDED.aliases
                        || CASE WHEN EXCLUDED.name <> ob1_entities.name THEN ARRAY[EXCLUDED.name] ELSE '{}'::text[] END
                      ) a WHERE a <> ob1_entities.name ORDER BY a))
+      WHERE NOT v_structured
+         OR EXISTS (SELECT 1 FROM unnest(EXCLUDED.aliases || CASE WHEN EXCLUDED.name <> ob1_entities.name THEN ARRAY[EXCLUDED.name] ELSE '{}'::text[] END) a
+                     WHERE a <> ob1_entities.name AND NOT (a = ANY(ob1_entities.aliases)))
     RETURNING (xmax = 0) AS created
   )
-  SELECT count(*) FILTER (WHERE created), count(*) INTO v_new, v_entities FROM up;
+  SELECT count(*) FILTER (WHERE created) INTO v_new FROM up;
+  SELECT count(*) INTO v_entities FROM _rte_in;
 
   -- The entities this call names, resolved.
   CREATE TEMP TABLE IF NOT EXISTS _rte_ids (id uuid) ON COMMIT DROP;
