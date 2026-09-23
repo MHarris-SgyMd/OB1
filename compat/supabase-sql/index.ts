@@ -42,21 +42,34 @@
  * one dropped or retyped is not until the process restarts — PostgREST's own
  * cache reloads on a signal, not on its own.
  *
- * ── Resource embedding, one hop ──────────────────────────────────────────────
+ * ── Resource embedding ───────────────────────────────────────────────────────
  * `.select("*, maintenance_tasks ( id, name )")`, `"*, recipes:recipe_id (name)"`
  * and `"*, children(*)"` are served: the relation is a table with exactly one
- * foreign key to or from this one, or a foreign-key column of this table; a
- * many-to-one embed is an object (`null` when the key is), a one-to-many one an
- * array (`[]` when empty) — or the one row where the referencing columns are
- * unique, a one-to-one — keyed by the alias or the relation's name, as
- * PostgREST keys them. Refused, with a message saying which: a nested embed, an
- * embedding hint (`!inner`, `!fk_name`), a relation with no foreign key to this
- * table or with more than one (name the column: `alias:fk_column (…)`), and an
- * embed in a RETURNING list. The codemod's blockers refuse the two of these
- * it can see in a file's text — a nested embed, a hint; whether a relation has
- * one foreign key or two is the catalog's to say, at the first call. Silently
- * mishandling a join is the failure class this migration has been removing, so
- * nothing here guesses.
+ * foreign key to or from the table it sits in, or a foreign-key column of that
+ * table; a many-to-one embed is an object (`null` when the key is), a
+ * one-to-many one an array (`[]` when empty) — or the one row where the
+ * referencing columns are unique, a one-to-one — keyed by the alias or the
+ * relation's name, as PostgREST keys them. Nested to any depth since SMD-1798
+ * (`applications(*, job_postings(*, companies(*)))`, each level a correlated
+ * subquery on the level above), and hinted: `!inner` keeps only the rows that
+ * have an embedded row (an EXISTS beside the filters, nested with the embeds),
+ * `!fk_name` and `!fk_column` choose the key where two join the tables — the
+ * column the base's own (`projects.select("clients!client_id(…)")`, many-to-
+ * one) or the relation's (`clients.select("projects!client_id(…)")`, one-to-
+ * many), as PostgREST reads both — and `!left` is the default. A table
+ * embedded in itself by name or by `relation!fk_column` is its children,
+ * PostgREST's recursive form; the bare column, `parent_id(…)`, is the parent.
+ * Refused, with a message saying which: a relation with no foreign key to its
+ * table or with more than one and no hint (name the column or the key), a
+ * hint that names no key, a constraint's name on a self-reference (PostgREST's
+ * PGRST200), a column hint that is a key column of both tables and a key
+ * column named like a table another key joins (PostgREST's PGRST201), a filter
+ * on an embedded column (`.neq("thoughts.tier", …)`, refused as an
+ * identifier). An embed in a write's RETURNING list is served as in a
+ * select — the table's name there is the row just written. Whether a relation
+ * has one foreign key or two is the catalog's to say, at the first call.
+ * Silently mishandling a join is the failure class this migration has been
+ * removing, so nothing here guesses.
  *
  * Also unsupported, because nothing in the repo uses them: `.auth`, `.storage`,
  * `.channel`, `.functions.invoke`.
@@ -73,6 +86,19 @@
  * Bun's Date. The bio worker is the one shim-migrated file that filters on a
  * JSON path and the first whose code slices a timestamp; driven, it hit both —
  * a 500 at its first query, then at its prompt.
+ *
+ * ── What PostgREST answers (SMD-1602) ────────────────────────────────────────
+ * Five places this shim answered what PostgREST does not, found by change 77's
+ * review and closed here — each a silent wrong answer, the failure class this
+ * module exists to avoid: a count without `head` is the total, not the page;
+ * `.single()` over several rows is PGRST116, not the first row; `head` without
+ * a count is no rows, not every row; an upsert's conflict target is the primary
+ * key when none is named, and every payload column is assigned so the row is
+ * always returned; `.rpc()`'s shape is what `pg_proc.proretset` declares, not
+ * how many cells came back. And an array column is read through `to_json` —
+ * PostgREST's rendering — because Bun's binary decoder hands a `uuid[]` back as
+ * literal text and refuses a `real[]` holding a NULL; a table with an array
+ * column therefore has its `*` spelled out from the map (see columnSql).
  *
  * ── Error convention ─────────────────────────────────────────────────────────
  * supabase-js resolves with `{ data, error }` and does not throw. This matches
@@ -210,9 +236,13 @@ function jsonShaped(row: Record<string, unknown>, cols?: Columns): Record<string
  * (a `jsonb[]` column), a Date its ISO instant. Bound with an explicit cast to
  * the declared type.
  */
-function arrayLiteral(values: unknown[]): string {
+function arrayLiteral(values: unknown[], json = false): string {
   const element = (x: unknown): string => {
     if (x === null || x === undefined) return "NULL";
+    // A `json[]`/`jsonb[]` column: every element is JSON text — a nested JS array is a JSON array, a string a JSON
+    // string, a number its digits — where a Postgres array literal would read a nested array as a second dimension
+    // and a bare word as malformed JSON (SMD-1798's first review pass).
+    if (json) return `"${JSON.stringify(x).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
     if (Array.isArray(x)) return arrayLiteral(x);
     const text = x instanceof Date ? x.toISOString() : typeof x === "object" ? JSON.stringify(x) : String(x);
     return `"${text.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
@@ -222,11 +252,12 @@ function arrayLiteral(values: unknown[]): string {
 
 // ── The catalog ──────────────────────────────────────────────────────────────
 
-type ColumnInfo = { type: string; category: string };
+/** A column's declared type, its type category, and — for an array column, through a domain too — its element type's name. */
+type ColumnInfo = { type: string; category: string; elem?: string };
 type Columns = Map<string, ColumnInfo>;
 type ForeignKey = { name: string; from: string; fromCols: string[]; to: string; toCols: string[]; unique: boolean };
-type Overload = { names: string[]; types: string[]; categories: string[]; outs: Columns; returns: { type: string; category: string; table: string | null } };
-type CatalogStore = { columns: Map<string, Promise<Columns>>; absent: Map<string, Set<string>>; fks: Map<string, Promise<ForeignKey[]>>; fns: Map<string, Promise<Overload[]>> };
+type Overload = { names: string[]; types: string[]; categories: string[]; outs: Columns; returns: { type: string; category: string; table: string | null; set: boolean } };
+type CatalogStore = { columns: Map<string, Promise<Columns>>; absent: Map<string, Set<string>>; natts: Map<string, number>; fks: Map<string, Promise<ForeignKey[]>>; fns: Map<string, Promise<Overload[]>>; pks: Map<string, Promise<string[]>> };
 
 /** One store per connection URL: the extension servers create a client per request, and the schema does not change between them. */
 const STORES = new Map<string, CatalogStore>();
@@ -246,7 +277,7 @@ class Catalog {
 
   constructor(private sql: SQL, url: string) {
     let store = STORES.get(url);
-    if (!store) STORES.set(url, (store = { columns: new Map(), absent: new Map(), fks: new Map(), fns: new Map() }));
+    if (!store) STORES.set(url, (store = { columns: new Map(), absent: new Map(), natts: new Map(), fks: new Map(), fns: new Map(), pks: new Map() }));
     this.store = store;
   }
 
@@ -316,18 +347,54 @@ class Catalog {
   forget(table: string): void {
     this.store.columns.delete(table);
     this.store.absent.delete(table);
+    this.store.natts.delete(table);
+  }
+
+  /**
+   * `pg_class.relnatts` as it stood when the table's columns were read: the
+   * count of attributes the table has ever had (a dropped one still counts),
+   * which a query on a spelled-out star carries back beside its rows, so a
+   * column added under a running client is seen on the next call as a
+   * changed count rather than as a key the map lacks (SMD-1602).
+   */
+  nattsOf(table: string): number | undefined {
+    return this.store.natts.get(table);
   }
 
   private readColumns(table: string): Promise<Columns> {
     return (async () => {
       const rows = (await this.sql.unsafe(
-        `SELECT a.attname AS name, format_type(a.atttypid, a.atttypmod) AS type, t.typcategory AS category
-           FROM pg_attribute a JOIN pg_type t ON t.oid = a.atttypid
-          WHERE a.attrelid = to_regclass($1) AND a.attnum > 0 AND NOT a.attisdropped`,
+        `SELECT a.attname AS name, format_type(a.atttypid, a.atttypmod) AS type, t.typcategory AS category, c.relnatts::int AS natts,
+                (SELECT e.typname FROM pg_type b JOIN pg_type e ON e.oid = b.typelem
+                  WHERE b.oid = CASE WHEN t.typtype = 'd' THEN t.typbasetype ELSE t.oid END) AS elem
+           FROM pg_attribute a JOIN pg_type t ON t.oid = a.atttypid JOIN pg_class c ON c.oid = a.attrelid
+          WHERE a.attrelid = to_regclass($1) AND a.attnum > 0 AND NOT a.attisdropped
+          ORDER BY a.attnum`,
         [ident(table, "table")] as never[]
-      )) as unknown as { name: string; type: string; category: string }[];
-      return new Map(rows.map((r) => [r.name, { type: r.type, category: r.category }]));
+      )) as unknown as { name: string; type: string; category: string; natts: number; elem: string | null }[];
+      if (rows.length) this.store.natts.set(table, Number(rows[0].natts));
+      return new Map(rows.map((r) => [r.name, { type: r.type, category: r.category, ...(r.elem ? { elem: r.elem } : {}) }]));
     })();
+  }
+
+  /**
+   * The table's primary key columns, in key order — what PostgREST resolves
+   * an upsert's conflict target to when the caller names none (SMD-1602).
+   * Empty for a table with no primary key, and then not kept (memo's rule),
+   * which costs a read per such upsert; nothing in the tree upserts into one.
+   */
+  primaryKeyOf(table: string): Promise<string[]> {
+    return this.memo(this.store.pks, table, async () => {
+      const rows = (await this.sql.unsafe(
+        `SELECT a.attname AS name
+           FROM pg_index i JOIN unnest(i.indkey::int2[]) WITH ORDINALITY k(attnum, ord) ON true
+                JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum
+          WHERE i.indrelid = to_regclass($1) AND i.indisprimary
+          ORDER BY k.ord`,
+        [ident(table, "table")] as never[]
+      )) as unknown as { name: string }[];
+      return rows.map((r) => r.name);
+    });
   }
 
   /**
@@ -374,13 +441,13 @@ class Catalog {
                 (SELECT array_agg(y.typcategory::text ORDER BY u.ord) FROM unnest(p.proargtypes) WITH ORDINALITY u(t, ord) JOIN pg_type y ON y.oid = u.t) AS categories,
                 (SELECT array_agg(format_type(u.t, NULL) ORDER BY u.ord) FROM unnest(p.proallargtypes) WITH ORDINALITY u(t, ord)) AS all_types,
                 (SELECT array_agg(y.typcategory::text ORDER BY u.ord) FROM unnest(p.proallargtypes) WITH ORDINALITY u(t, ord) JOIN pg_type y ON y.oid = u.t) AS all_categories,
-                format_type(p.prorettype, NULL) AS ret_type, rt.typcategory::text AS ret_category,
+                format_type(p.prorettype, NULL) AS ret_type, rt.typcategory::text AS ret_category, p.proretset AS ret_set,
                 CASE WHEN rt.typtype = 'c' AND rc.relkind IN ('r', 'v', 'm', 'p', 'c') AND pg_table_is_visible(rc.oid) THEN rc.relname END AS ret_table
            FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
                 JOIN pg_type rt ON rt.oid = p.prorettype LEFT JOIN pg_class rc ON rc.oid = rt.typrelid
           WHERE p.proname = $1 AND n.nspname = ANY (current_schemas(true))`,
         [fn.trim()] as never[]
-      )) as unknown as { names: string[] | null; modes: string[] | null; types: string[] | null; categories: string[] | null; all_types: string[] | null; all_categories: string[] | null; ret_type: string; ret_category: string; ret_table: string | null }[];
+      )) as unknown as { names: string[] | null; modes: string[] | null; types: string[] | null; categories: string[] | null; all_types: string[] | null; all_categories: string[] | null; ret_type: string; ret_category: string; ret_set: boolean; ret_table: string | null }[];
       return rows.map((r) => {
         // proargnames covers OUT arguments too (a RETURNS TABLE function's columns); proargtypes only the IN ones;
         // proallargtypes every one, in proargnames' order, when any is OUT.
@@ -389,7 +456,7 @@ class Catalog {
         (r.names ?? []).forEach((name, i) => {
           if (r.modes && ["o", "t", "b"].includes(r.modes[i]) && r.all_types?.[i]) outs.set(name, { type: r.all_types[i], category: r.all_categories?.[i] ?? "" });
         });
-        return { names, types: r.types ?? [], categories: r.categories ?? [], outs, returns: { type: r.ret_type, category: r.ret_category, table: r.ret_table } };
+        return { names, types: r.types ?? [], categories: r.categories ?? [], outs, returns: { type: r.ret_type, category: r.ret_category, table: r.ret_table, set: r.ret_set === true } };
       });
     });
   }
@@ -407,7 +474,9 @@ class Catalog {
  */
 function bound(info: ColumnInfo | undefined, v: unknown): { value: unknown; cast: string } {
   // By the type's category, not its name: a domain over `text[]` is category A under its own name.
-  if (Array.isArray(v) && info?.category === "A") return { value: arrayLiteral(v), cast: `::${info.type}` };
+  // JSON elements by the element type where the catalog read it (a domain over jsonb[] is category A under its own
+  // name — the second review pass), else by the type's name (a function argument's).
+  if (Array.isArray(v) && info?.category === "A") return { value: arrayLiteral(v, /^jsonb?$/.test(info.elem ?? "") || /^jsonb?\[\]$/.test(info.type)), cast: `::${info.type}` };
   // `vector` for an argument; `vector(1536)` for a column (format_type carries the typmod).
   if (Array.isArray(v) && /^vector(\(\d+\))?$/.test(info?.type ?? "")) return { value: JSON.stringify(v), cast: "" };
   return { value: v, cast: "" };
@@ -456,24 +525,26 @@ const isRefusal = (e: unknown) => e instanceof Error && e.message.startsWith("co
 
 type SelectItem =
   | { kind: "star" }
-  | { kind: "column"; sql: string }
-  | { kind: "embed"; key: string; relation: string; cols: string[] | "*" };
+  | { kind: "column"; sql: string; name: string }
+  | { kind: "embed"; key: string; relation: string; hint: string | null; inner: SelectItem[] };
 
 /**
- * PostgREST's select list: `*`, columns, and one hop of resource embedding —
+ * PostgREST's select list: `*`, columns, and resource embedding —
  * `relation (cols)`, `alias:relation (cols)`, `relation(*)` — the relation
- * being a table or a foreign-key column of this one, whitespace anywhere
- * (`maintenance_tasks (\n id,\n name\n )` is the tree's spelling). What is
- * refused is refused here, at the call, as a programming error: a nested
- * embed, an embedding hint (`!inner`, `!fk_name`, which choose a join or a
- * key the shim would otherwise have to guess), a cast or a JSON path in the
- * list (ident() refuses those, as before).
+ * being a table or a foreign-key column of the table it sits in, whitespace
+ * anywhere (`maintenance_tasks (\n id,\n name\n )` is the tree's spelling),
+ * nested to any depth (`applications(*, job_postings(*, companies(*)))`, the
+ * tree's deepest, SMD-1798) and hinted: `relation!inner(…)` keeps only the
+ * rows that have an embedded row, `relation!fk_name(…)` and
+ * `relation!fk_column(…)` choose the key where two join the tables
+ * (`graph_nodes!graph_edges_target_node_id_fkey(…)`), `!left` is the default
+ * said aloud. What is refused is refused here, at the call, as a programming
+ * error: a cast or a JSON path in the list (ident() refuses those), an embed
+ * with no columns, text around one.
  */
 function parseSelect(spec: string): SelectItem[] {
   const trimmed = spec.trim();
   if (trimmed === "" || trimmed === "*") return [{ kind: "star" }];
-  if (/\([^()]*\(/.test(trimmed)) throw refusal(`select("${spec}") nests one resource embedding inside another, which is not supported — one hop is; write the deeper join as an .rpc() or a SQL view.`);
-  if (/!/.test(trimmed)) throw refusal(`select("${spec}") uses a PostgREST embedding hint (!inner, !fk_name), which is not supported — name the foreign-key column instead: alias:fk_column (…).`);
   // Split on the commas outside parentheses.
   const items: string[] = [];
   let depth = 0, start = 0;
@@ -483,21 +554,50 @@ function parseSelect(spec: string): SelectItem[] {
     else if (ch === ")") depth--;
     else if (ch === "," && depth === 0) { items.push(trimmed.slice(start, i)); start = i + 1; }
   }
+  if (depth !== 0) throw refusal(`select("${spec}") has unbalanced parentheses.`);
   items.push(trimmed.slice(start));
   return items.map((raw): SelectItem => {
     const item = raw.trim();
     if (item === "*") return { kind: "star" };
-    const embed = /^([A-Za-z_][A-Za-z0-9_]*)(?:\s*:\s*([A-Za-z_][A-Za-z0-9_]*))?\s*\(([^()]*)\)$/.exec(item);
+    // `key[:relation][!hint] ( inner )` — the inner list is everything between the first `(` and the last `)`.
+    const open = item.indexOf("(");
+    const embed = open > 0 && item.endsWith(")")
+      ? /^([A-Za-z_][A-Za-z0-9_]*)(?:\s*:\s*([A-Za-z_][A-Za-z0-9_]*))?(?:\s*!\s*([A-Za-z_][A-Za-z0-9_]*))?\s*$/.exec(item.slice(0, open))
+      : null;
     if (embed) {
-      const [, first, second, inner] = embed;
-      const cols = inner.trim() === "*" ? "*" : inner.split(",").map((c) => c.trim()).filter(Boolean);
-      if (cols !== "*") for (const c of cols) ident(c, "embedded column");
-      if (cols !== "*" && cols.length === 0) throw refusal(`select("${spec}") embeds "${first}" with no columns — name them, or (*).`);
-      return second ? { kind: "embed", key: first, relation: second, cols } : { kind: "embed", key: first, relation: first, cols };
+      const [, first, second, hintRaw] = embed;
+      const innerText = item.slice(open + 1, -1).trim();
+      if (innerText === "") throw refusal(`select("${spec}") embeds "${first}" with no columns — name them, or (*).`);
+      const inner = parseSelect(innerText);
+      const hint = hintRaw && hintRaw !== "left" ? hintRaw : null;
+      return { kind: "embed", key: first, relation: second ?? first, hint, inner };
     }
-    if (/\(|\)/.test(item)) throw refusal(`select("${spec}"): "${item}" is not a column or a one-hop embed (relation (cols) or alias:relation (cols)).`);
-    return { kind: "column", sql: ident(item, "column") };
+    if (/\(|\)|!/.test(item)) throw refusal(`select("${spec}"): "${item}" is not a column or an embed (relation (cols), alias:relation (cols), relation!hint (cols)).`);
+    return { kind: "column", sql: ident(item, "column"), name: item };
   });
+}
+
+/** The join an embed walks, as `alias.col = base.col` for each key column: the embedded table's referenced columns against the base's referencing ones for many-to-one, the reverse for one-to-many. */
+function keyPairs(fk: ForeignKey, manyToOne: boolean, alias: string, baseAlias: string): string[] {
+  return (manyToOne ? fk.toCols : fk.fromCols).map((c, i) => `${alias}.${ident(c, "column")} = ${baseAlias}.${ident((manyToOne ? fk.fromCols : fk.toCols)[i], "column")}`);
+}
+
+/** One term of an or() expression: a filter, a group holding terms of its own, or text PostgREST cannot parse either. */
+type OrTerm = { col: string; op: string; value: string; negate: boolean } | { broken: string } | { group: "and" | "or"; negate: boolean; terms: OrTerm[] };
+
+/** PostgREST's `in.(a,b,"c, d")` list: split at the commas outside double quotes, each item trimmed and unquoted; `()` is []. */
+function inList(list: string): string[] {
+  const items: string[] = [];
+  let cur = "", quoted = false;
+  for (let i = 0; i < list.length; i++) {
+    const ch = list[i];
+    if (quoted) { if (ch === "\\" && i + 1 < list.length) cur += list[++i]; else if (ch === '"') quoted = false; else cur += ch; continue; }
+    if (ch === '"') quoted = true;
+    else if (ch === ",") { items.push(cur.trim()); cur = ""; }
+    else cur += ch;
+  }
+  if (cur.trim() !== "" || items.length) items.push(cur.trim());
+  return items;
 }
 
 type Filter = (cols: Columns) => { sql: string; values: unknown[] };
@@ -515,11 +615,14 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
   private offsetN: number | null = null;
   private payload: Record<string, unknown>[] = [];
   private conflictTarget: string | null = null;
+  private ignoreDuplicates = false;
   private wantCount: "exact" | null = null;
   private headOnly = false;
   private rowMode: "many" | "single" | "maybeSingle" = "many";
   /** The columns the filters, the order and the payload name — what the catalog's map must know (see columnsOf). */
   private named = new Set<string>();
+  /** Whether the last compile spelled a `*` out from the map (an array-bearing table): a 42703 then means the map named a column since dropped. */
+  private spelledOut = false;
 
   constructor(private sql: SQL, private catalog: Catalog, private table: string) {}
 
@@ -533,7 +636,7 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
   select(cols = "*", opts?: { count?: "exact" | "planned" | "estimated"; head?: boolean }): this {
     // `.select()` after insert/update/delete means RETURNING, not a new query: the verb stands, only the list moves.
     this.items = parseSelect(cols);
-    for (const item of this.items) if (item.kind === "column") this.names(item.sql.slice(1, -1));
+    for (const item of this.items) if (item.kind === "column") this.names(item.name);
     if (opts?.count) this.wantCount = "exact";
     if (opts?.head) this.headOnly = true;
     return this;
@@ -547,11 +650,15 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
 
   upsert(
     values: Record<string, unknown> | Record<string, unknown>[],
-    opts?: { onConflict?: string }
+    opts?: { onConflict?: string; ignoreDuplicates?: boolean }
   ): this {
     this.op = "upsert";
     this.payload = Array.isArray(values) ? values : [values];
     this.conflictTarget = opts?.onConflict ?? null;
+    // supabase-js's `Prefer: resolution=ignore-duplicates`: a conflicting row is left as it is and not returned.
+    // Unread until SMD-1798's first review pass, so repo-learning-coach's progress upsert (db.ts) — the one caller,
+    // `ignoreDuplicates: true` on a fresh learner's row — reset an existing row's progress on every sync.
+    this.ignoreDuplicates = opts?.ignoreDuplicates === true;
     return this;
   }
 
@@ -591,7 +698,9 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
     this.names(col);
     const not = (sql: string) => (negate ? `NOT (${sql})` : sql);
     if (operator === "is") {
-      const lit = value === null || value === "null" ? "NULL" : value === true || value === "true" ? "TRUE" : value === false || value === "false" ? "FALSE" : null;
+      // PostgREST reads the word in any case (`is.NULL`, `is.True`).
+      const word = typeof value === "string" ? value.toLowerCase() : value;
+      const lit = word === null || word === "null" ? "NULL" : word === true || word === "true" ? "TRUE" : word === false || word === "false" ? "FALSE" : null;
       if (lit === null) throw refusal(`is(${String(value)}) must be null, true or false`);
       const c = column(col);
       return () => ({ sql: `${c.sql} IS ${negate ? "NOT " : ""}${lit}`, values: [] });
@@ -669,55 +778,92 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
   not(c: string, operator: string, v: unknown) { return this.where(this.term(c, operator, v, true)); }
 
   /**
-   * PostgREST's `.or("a.gt.1,b.is.null")` — a flat list of `column.op.value`
-   * terms combined with OR; `cs` among the operators (`ingredients.cs.[{"name":"x"}]`).
+   * PostgREST's `.or("a.gt.1,b.is.null")` — `column.op.value` terms combined
+   * with OR, `cs` among the operators (`ingredients.cs.[{"name":"x"}]`), and,
+   * since SMD-1798, grouping: `and(…)`, `or(…)`, `not.and(…)`, `not.or(…)`,
+   * nested to any depth, each holding a list of its own —
+   * `and(start_date.lte.X,or(end_date.gte.Y,end_date.is.null)),day_of_week.not.is.null`
+   * is family-calendar's, two `and(…)` terms metadata-norm's — and
+   * `col.in.(a,b)`, job-hunt's. The flat form was the only one served, and an
+   * expression that began with grouping threw.
    *
    * Read as PostgREST reads it, term by term: a column (a name or a JSON
    * path) up to the first dot, an operator up to the next, then a value —
    * a balanced `[…]` or `{…}` group when it starts with one (a `cs` value's
    * JSON or array literal, brackets and quotes inside it belonging to it), a
-   * double-quoted string when it starts with `"` (PostgREST's quoting), or
-   * plain text up to the next comma; `col.not.op.value` negates as
-   * PostgREST's does. Plain text is split at a comma and nothing else — a
-   * quote, a parenthesis or a bracket in an ILIKE pattern is pattern text
-   * (four tools interpolate user text into their expression:
-   * `name.ilike.%${query}%,…`), and a plain comma in that text splits a term
-   * PostgREST cannot parse either. That term, a group nothing closes, and
-   * whatever a comma-made term asks of term() that it refuses (`v1.2.3` reads
-   * as operator "2") resolve as `{ error }` with PostgREST's `PGRST100` at
-   * execution — the tool's own error handling sees it — while the terms that
-   * did parse stay parameterised. Only the flat form is supported: an
-   * expression that BEGINS with `and(…)`/`or(…)`/`not.and(…)` grouping, which
-   * needs a real parser, is a programming error in the file's own text and
-   * throws at the call; the same words anywhere later are a user's (`x, and
-   * (y`) and are the 400. Every `.or()` in the tree is flat.
+   * balanced `(…)` list for `in`, a double-quoted string when it starts with
+   * `"` (PostgREST's quoting), or plain text up to the next comma;
+   * `col.not.op.value` negates as PostgREST's does. A term that starts with
+   * `and(`, `or(`, `not.and(` or `not.or(` — no space before the parenthesis,
+   * as PostgREST's grammar has none — is a group to its balanced `)` (a
+   * double-quoted string inside it may hold anything), its inside a list of
+   * its own. Plain text is split at a comma and nothing else — a quote, a
+   * parenthesis or a bracket in an ILIKE pattern is pattern text (four tools
+   * interpolate user text into their expression: `name.ilike.%${query}%,…`),
+   * and a plain comma in that text splits a term PostgREST cannot parse
+   * either. That term, a group nothing closes, grouping words a comma left at
+   * a term start (`x, and (y`), an empty group, and whatever a comma-made term
+   * asks of term() that it refuses (`v1.2.3` reads as operator "2") resolve as
+   * `{ error }` with PostgREST's `PGRST100` at execution — the tool's own error
+   * handling sees it — while the terms that did parse stay parameterised.
    */
   or(expression: string): this {
-    type Term = { col: string; op: string; value: string; negate: boolean } | { broken: string };
-    const terms: Term[] = [];
+    return this.where(this.logic(this.parseTerms(expression), "or", false, expression));
+  }
+
+  /** The terms of an or() expression, or of a group inside one — see or(). */
+  private parseTerms(expression: string): OrTerm[] {
+    const terms: OrTerm[] = [];
     let i = 0;
     const n = expression.length;
+    /** The index of the `)` balancing the `(` at `from`, quotes honoured; n when nothing closes it. */
+    const closeOf = (from: number): number => {
+      let depth = 0, quoted = false, k = from;
+      for (; k < n; k++) {
+        const ch = expression[k];
+        if (quoted) { if (ch === "\\") k++; else if (ch === '"') quoted = false; continue; }
+        if (ch === '"') quoted = true;
+        else if (ch === "(") depth++;
+        else if (ch === ")") { depth--; if (depth === 0) return k; }
+      }
+      return n;
+    };
+    /** The term from `termStart` is broken: kept to the next comma after `from`, for the 400 to name; the scan moves past that comma. */
+    const brokenTo = (termStart: number, from: number): void => {
+      const stop = expression.indexOf(",", from);
+      terms.push({ broken: expression.slice(termStart, stop < 0 ? n : stop).trim() });
+      i = stop < 0 ? n + 1 : stop + 1;
+    };
+    /** After a group, a list or a quoted value only a comma or the end may follow: advance past it, or the term is broken to the next comma. */
+    const after = (termStart: number, j: number): "next" | "end" | "broken" => {
+      const rest = expression.slice(j).match(/^\s*(,|$)/);
+      if (!rest) { brokenTo(termStart, j); return "broken"; }
+      i = j + rest[0].length + (rest[1] === "," ? 0 : 1);
+      return rest[1] === "," ? "next" : "end";
+    };
     while (i <= n) {
       const termStart = i;
-      const firstDot = expression.indexOf(".", i);
-      const head = expression.slice(i, firstDot < 0 ? n : firstDot).trim();
-      // Grouping is a programming error only where the file's own text begins with it; later in the expression a
-      // term start is whatever a comma in a plain value left behind (`x, and (y` typed by a user) — that is the 400.
-      if (termStart === 0 && /^(?:not\.)?(?:and|or)\s*\(/.test(expression.trimStart())) {
-        throw refusal(
-          `or("${expression}") uses nested and()/or() grouping, ` +
-            `which is not supported. Express it as an .rpc() or split the query.`
-        );
-      }
-      const secondDot = firstDot < 0 ? -1 : expression.indexOf(".", firstDot + 1);
-      // A term is `column.op.value`, the column a name or a JSON path. Anything else here is what a comma in a
-      // previous plain value left behind (` Salt%,category` — user text) — the broken term, up to the next comma.
-      if (firstDot < 0 || secondDot < 0 || !/^[A-Za-z_][A-Za-z0-9_]*(?:->>?[A-Za-z_][A-Za-z0-9_]*)*$/.test(head)) {
-        const stop = expression.indexOf(",", i);
-        terms.push({ broken: expression.slice(termStart, stop < 0 ? n : stop).trim() });
-        i = stop < 0 ? n + 1 : stop + 1;
+      // A group: `and(`, `or(`, `not.and(`, `not.or(` flush against its parenthesis, to the `)` that balances it — after
+      // the space a file may put after a comma, as a flat term's column is trimmed of one.
+      const g = /^\s*(not\.)?(and|or)\(/.exec(expression.slice(i));
+      if (g) {
+        const open = i + g[0].length - 1;
+        const close = closeOf(open);
+        if (close >= n) { terms.push({ broken: expression.slice(termStart).trim() }); break; }
+        const inside = expression.slice(open + 1, close);
+        const group: OrTerm = { group: g[2] as "and" | "or", negate: !!g[1], terms: inside.trim() === "" ? [] : this.parseTerms(inside) };
+        const step = after(termStart, close + 1);
+        if (step === "broken") continue;
+        terms.push(group);
+        if (step === "end") break;
         continue;
       }
+      const firstDot = expression.indexOf(".", i);
+      const head = expression.slice(i, firstDot < 0 ? n : firstDot).trim();
+      const secondDot = firstDot < 0 ? -1 : expression.indexOf(".", firstDot + 1);
+      // A term is `column.op.value`, the column a name or a JSON path. Anything else here is what a comma in a
+      // previous plain value left behind (` Salt%,category` — user text, `x, and (y`) — the broken term, up to the next comma.
+      if (firstDot < 0 || secondDot < 0 || !/^[A-Za-z_][A-Za-z0-9_]*(?:->>?[A-Za-z_][A-Za-z0-9_]*)*$/.test(head)) { brokenTo(termStart, i); continue; }
       const col = head;
       let op = expression.slice(firstDot + 1, secondDot).trim();
       let j = secondDot + 1;
@@ -725,7 +871,7 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
       if (op === "not") {
         // PostgREST's negation inside or(): `col.not.eq.1`, `col.not.is.null`.
         const thirdDot = expression.indexOf(".", j);
-        if (thirdDot < 0) { const stop = expression.indexOf(",", i); terms.push({ broken: expression.slice(termStart, stop < 0 ? n : stop).trim() }); i = stop < 0 ? n + 1 : stop + 1; continue; }
+        if (thirdDot < 0) { brokenTo(termStart, i); continue; }
         op = expression.slice(j, thirdDot).trim();
         negate = true;
         j = thirdDot + 1;
@@ -745,6 +891,12 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
         if (depth !== 0) { terms.push({ broken: expression.slice(termStart).trim() }); break; }
         value = expression.slice(j, k);
         j = k;
+      } else if (open === "(" && op === "in") {
+        // PostgREST's `in.(a,b,"c, d")`: the list to the `)` that balances it, without its parentheses.
+        const close = closeOf(j);
+        if (close >= n) { terms.push({ broken: expression.slice(termStart).trim() }); break; }
+        value = expression.slice(j + 1, close);
+        j = close + 1;
       } else if (open === '"') {
         // PostgREST's quoted value: to the closing quote, a backslash escaping the next character.
         let k = j + 1;
@@ -757,30 +909,39 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
         value = expression.slice(j, stop < 0 ? n : stop);
         j = stop < 0 ? n : stop;
       }
-      // After a group or a quoted value only a comma or the end may follow.
-      const rest = expression.slice(j).match(/^\s*(,|$)/);
-      if (!rest) { const stop = expression.indexOf(",", j); terms.push({ broken: expression.slice(termStart, stop < 0 ? n : stop).trim() }); i = stop < 0 ? n + 1 : stop + 1; continue; }
+      const step = after(termStart, j);
+      if (step === "broken") continue;
       terms.push({ col, op, value, negate });
-      i = j + rest[0].length + (rest[1] === "," ? 0 : 1);
-      if (rest[1] !== ",") break;
+      if (step === "end") break;
     }
+    return terms;
+  }
+
+  /**
+   * The terms of an or() expression, or of one group inside it, as one
+   * filter: each term rendered by term() and combined with OR or AND, wrapped
+   * in NOT for a negated group. PostgREST answers 400 to a term it cannot
+   * parse; so does this, at execution, as `{ error }` with `PGRST100` — never
+   * a throw out of a tool's handler for text a user typed. The same for what
+   * a comma-made term asks of term() that it refuses (an operator that is not
+   * one, a `cs` value that is not JSON), and for an empty group. An `in` term's
+   * list is split at its commas, a double-quoted item holding anything.
+   */
+  private logic(terms: OrTerm[], op: "and" | "or", negate: boolean, expression: string): Filter {
     const badRequest = (what: string) => (): never => { throw new PostgrestError(`PGRST100: ${what} in or("${expression}") — PostgREST answers 400 here too`, { code: "PGRST100" }); };
     const filters = terms.map((t): Filter => {
-      // PostgREST answers 400 to a term it cannot parse; so does this, at execution, as { error } — never a throw
-      // out of a tool's handler for text a user typed. The same for what a comma-made term asks of term(): an
-      // operator that is not one (`v1.2.3` → operator "2"), `in`, a `cs` value that is not JSON.
       if ("broken" in t) return badRequest(`"${t.broken}" is not column.operator.value (a comma or an unclosed group in a value)`);
-      if (t.op === "in") return badRequest(`operator "in" is not supported in an or() term`);
+      if ("group" in t) return t.terms.length ? this.logic(t.terms, t.group, t.negate, expression) : badRequest(`an empty ${t.group}() group`);
       try {
-        return this.term(t.col, t.op, t.value, t.negate);
+        return this.term(t.col, t.op, t.op === "in" ? inList(t.value) : t.value, t.negate);
       } catch (e) {
         return badRequest(e instanceof Error ? e.message.replace(/^compat\/supabase-sql: /, "") : String(e));
       }
     });
-    return this.where((cols) => {
+    return (cols) => {
       const rendered = filters.map((f) => f(cols));
-      return { sql: `(${rendered.map((r) => r.sql).join(" OR ")})`, values: rendered.flatMap((r) => r.values) };
-    });
+      return { sql: `${negate ? "NOT " : ""}(${rendered.map((r) => r.sql).join(op === "and" ? " AND " : " OR ")})`, values: rendered.flatMap((r) => r.values) };
+    };
   }
 
   /** Equality across several columns at once. */
@@ -791,7 +952,20 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
 
   // ── modifiers ──────────────────────────────────────────────────────────────
 
-  order(col: string, opts?: { ascending?: boolean; nullsFirst?: boolean }): this {
+  /**
+   * supabase-js's `{ foreignTable }` / `{ referencedTable }` on order(), limit()
+   * and range() order or cut the rows of an EMBEDDED resource. Not served: the
+   * shim's embed is a correlated subquery that returns every row, and applying
+   * the option to the base table instead would be a silent wrong answer (the
+   * first review pass found it did). Nothing in the tree passes it.
+   */
+  private static onEmbed(what: string, opts?: { foreignTable?: string; referencedTable?: string }): void {
+    const rel = opts?.foreignTable ?? opts?.referencedTable;
+    if (rel) throw refusal(`${what} on an embedded resource ("${rel}", the foreignTable/referencedTable option) is not supported — the embed returns every row; order or cut them in the file, or ask in a second query.`);
+  }
+
+  order(col: string, opts?: { ascending?: boolean; nullsFirst?: boolean; foreignTable?: string; referencedTable?: string }): this {
+    QueryBuilder.onEmbed("order()", opts);
     this.names(col);
     const dir = opts?.ascending === false ? "DESC" : "ASC";
     const nulls = opts?.nullsFirst === undefined ? "" : opts.nullsFirst ? " NULLS FIRST" : " NULLS LAST";
@@ -799,10 +973,11 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
     return this;
   }
 
-  limit(n: number): this { this.limitN = n; return this; }
+  limit(n: number, opts?: { foreignTable?: string; referencedTable?: string }): this { QueryBuilder.onEmbed("limit()", opts); this.limitN = n; return this; }
 
   /** PostgREST's range is inclusive on both ends. */
-  range(from: number, to: number): this {
+  range(from: number, to: number, opts?: { foreignTable?: string; referencedTable?: string }): this {
+    QueryBuilder.onEmbed("range()", opts);
     this.offsetN = from;
     this.limitN = to - from + 1;
     return this;
@@ -826,80 +1001,197 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
   }
 
   /**
-   * One embed as a correlated subquery. The relation is a foreign-key column of
-   * this table (`recipes:recipe_id (…)`: many-to-one through that key), or a
-   * table with exactly one foreign key between the two, in either direction —
-   * this table's key to it is many-to-one, its key to this table one-to-many.
-   * Many-to-one is `row_to_json` of the one row (NULL when the key is), keyed
-   * as the alias; one-to-many is `json_agg` of the rows, `[]` when there are
-   * none — unless the referencing columns carry a unique index, a one-to-one,
-   * which is the one row again — PostgREST's shapes. The embedded table is aliased `__e` so a
-   * self-reference still names the outer row by the table's own name.
+   * The foreign key an embed walks, resolved against the table it sits in
+   * (`base`). The relation is a foreign-key column of the base (`recipes:
+   * recipe_id (…)`: many-to-one through that key), or a table with exactly one
+   * foreign key between the two, in either direction — the base's key to it is
+   * many-to-one, its key to the base one-to-many — or, with a hint, the key the
+   * hint names: a constraint's name (`graph_nodes!graph_edges_target_node_id_
+   * fkey`) or a foreign-key column of the base, which is how PostgREST
+   * disambiguates two keys to one table (SMD-1798). `!inner` is not a key.
    */
-  private async embed(item: Extract<SelectItem, { kind: "embed" }>, cols: Columns): Promise<string> {
-    const base = this.table.trim();
-    const fks = await this.catalog.foreignKeysOf(base);
-    let fk: ForeignKey, manyToOne: boolean;
+  private async resolveEmbed(item: Extract<SelectItem, { kind: "embed" }>, base: string): Promise<{ fk: ForeignKey; manyToOne: boolean }> {
+    const [fks, cols] = await Promise.all([this.catalog.foreignKeysOf(base), this.catalog.columnsOf(base)]);
+    const keyHint = item.hint && item.hint !== "inner" ? item.hint : null;
+    if (keyHint) {
+      // The hint names a constraint, or a foreign-key column: the base's own column to the relation (many-to-one,
+      // `projects.select("clients!client_id(…)")`) or the relation's column to the base (one-to-many,
+      // `clients.select("projects!client_id(…)")`), as PostgREST reads both. A table embedded in itself is the
+      // one-to-many side — PostgREST's recursive form, `subordinates:employees!supervisor_id(…)`; the bare column
+      // form, `supervisor_id(…)`, is the parent — whichever way the key is named (the first review pass found the
+      // hinted self-reference handing the parent to a caller asking for the children).
+      const self = item.relation === base;
+      const between = (f: ForeignKey) => (f.from === base && f.to === item.relation) || (f.to === base && f.from === item.relation);
+      const byName = fks.filter((f) => f.name === keyHint && between(f));
+      // PostgREST reads a self-reference's hint as a column only (PGRST200 for a constraint's name): so does this.
+      if (byName.length === 1 && self) throw refusal(`select embeds "${item.relation}" in itself through the constraint "!${keyHint}" — PostgREST names a self-reference by its column: ${item.relation}!fk_column (…) for the children, fk_column (…) for the parent.`);
+      if (byName.length === 1) return { fk: byName[0], manyToOne: byName[0].from === base };
+      const fromBase = fks.filter((f) => f.from === base && f.to === item.relation && f.fromCols.length === 1 && f.fromCols[0] === keyHint);
+      const fromRelation = fks.filter((f) => f.from === item.relation && f.to === base && f.fromCols.length === 1 && f.fromCols[0] === keyHint);
+      // Two tables each holding a column of that name pointing at the other: PostgREST's PGRST201, not a guess.
+      if (!self && fromBase.length === 1 && fromRelation.length === 1) throw refusal(`select embeds "${item.relation}" through "!${keyHint}", a foreign-key column of both tables — ambiguous; name the key: ${item.relation}!fk_name (…).`);
+      if (fromRelation.length === 1 && (self || fromBase.length === 0)) return { fk: fromRelation[0], manyToOne: false };
+      if (fromBase.length === 1) return { fk: fromBase[0], manyToOne: true };
+      throw refusal(`select embeds "${item.relation}" through "!${keyHint}", which names neither a foreign key between it and "${base}" nor a foreign-key column of either.`);
+    }
+    const out = fks.filter((f) => f.from === base && f.to === item.relation && f.from !== f.to);
+    const back = fks.filter((f) => f.to === base && f.from === item.relation && f.from !== f.to);
+    const self = fks.filter((f) => f.from === base && f.to === base && item.relation === base);
+    // A foreign-key column of the base, by its name (`recipes:recipe_id (…)`); a column that is not a key falls
+    // through to the table lookup — PostgREST tries the relationship first, and a table may share a column's name.
+    // A key column named like a table that ANOTHER key joins is PostgREST's ambiguity (PGRST201), refused.
     if (cols.has(item.relation)) {
       const via = fks.filter((f) => f.from === base && f.fromCols.length === 1 && f.fromCols[0] === item.relation);
-      if (via.length !== 1) throw refusal(`select embeds "${item.relation}", a column of "${base}" that is not a single-column foreign key.`);
-      fk = via[0]; manyToOne = true;
-    } else {
-      const out = fks.filter((f) => f.from === base && f.to === item.relation);
-      const back = fks.filter((f) => f.to === base && f.from === item.relation && f.from !== f.to);
-      const self = fks.filter((f) => f.from === base && f.to === base && item.relation === base);
-      if (self.length) throw refusal(`select embeds "${item.relation}" in itself — which side is meant is not decidable from the table's name; name the column: alias:fk_column (…).`);
-      if (out.length + back.length === 0) throw refusal(`select embeds "${item.relation}", and no foreign key joins it to "${base}" (or the table is off the search path).`);
-      if (out.length + back.length > 1) throw refusal(`select embeds "${item.relation}", and more than one foreign key joins it to "${base}" — name the column: alias:fk_column (…).`);
-      manyToOne = out.length === 1;
-      fk = out[0] ?? back[0];
+      if (via.length === 1 && [...out, ...back].some((f) => f !== via[0])) throw refusal(`select embeds "${item.relation}", a foreign-key column of "${base}" and also a table another key joins to it — ambiguous; name the key: ${item.relation}!fk_name (…).`);
+      if (via.length === 1) return { fk: via[0], manyToOne: true };
     }
-    // A one-to-many whose referencing columns are unique is a one-to-one: PostgREST gives the one row, or null.
+    // A table embedded in itself by name is its children — PostgREST's recursive one-to-many; the parent is the
+    // bare column form. (Refused until the second review pass, which read PostgREST's rule.)
+    if (self.length === 1) return { fk: self[0], manyToOne: false };
+    if (self.length > 1) throw refusal(`select embeds "${item.relation}" in itself, and it holds ${self.length} keys to itself — name the column: alias:fk_column (…).`);
+    if (out.length + back.length === 0) throw refusal(`select embeds "${item.relation}", and no foreign key joins it to "${base}" (or the table is off the search path).`);
+    if (out.length + back.length > 1) throw refusal(`select embeds "${item.relation}", and more than one foreign key joins it to "${base}" — name the column (alias:fk_column (…)) or the key (${item.relation}!fk_name (…)).`);
+    return { fk: out[0] ?? back[0], manyToOne: out.length === 1 };
+  }
+
+  /**
+   * One embed as a correlated subquery, nested to any depth. Many-to-one is
+   * `row_to_json` of the one row (NULL when the key is), keyed as the alias;
+   * one-to-many is `json_agg` of the rows, `[]` when there are none — unless
+   * the referencing columns carry a unique index, a one-to-one, which is the
+   * one row again — PostgREST's shapes. The embedded table is aliased by depth
+   * (`__e1`, `__e2`, …) so a self-reference still names the outer row, and a
+   * nested embed's rows are correlated to the level above it, not the base. An
+   * inner embed inside the subquery narrows its rows as `!inner` narrows the
+   * base's (innerClause).
+   */
+  private async embedSql(item: Extract<SelectItem, { kind: "embed" }>, base: { table: string; alias: string }, depth: number): Promise<string> {
+    const { fk, manyToOne } = await this.resolveEmbed(item, base.table);
     const oneRow = manyToOne || fk.unique;
-    const target = ident(manyToOne ? fk.to : fk.from, "table");
-    const pairs = (manyToOne ? fk.toCols : fk.fromCols).map((c, i) =>
-      `__e.${ident(c, "column")} = ${ident(base, "table")}.${ident((manyToOne ? fk.fromCols : fk.toCols)[i], "column")}`);
-    const projection = item.cols === "*" ? "__e.*" : item.cols.map((c) => `__e.${ident(c, "column")}`).join(", ");
-    const rows = `SELECT ${projection} FROM ${target} AS __e WHERE ${pairs.join(" AND ")}`;
+    const targetTable = manyToOne ? fk.to : fk.from;
+    const alias = `__e${depth}`;
+    const pairs = keyPairs(fk, manyToOne, alias, base.alias);
+    const parts: string[] = [];
+    const inners: string[] = [];
+    for (const inner of item.inner) {
+      if (inner.kind === "star") parts.push(`${alias}.*`);
+      else if (inner.kind === "column") parts.push(`${alias}.${ident(inner.name, "column")}`);
+      else {
+        parts.push(await this.embedSql(inner, { table: targetTable, alias }, depth + 1));
+        if (inner.hint === "inner") inners.push(await this.innerClause(inner, { table: targetTable, alias }, depth + 1));
+      }
+    }
+    const rows = `SELECT ${parts.join(", ")} FROM ${ident(targetTable, "table")} AS ${alias} WHERE ${[...pairs, ...inners].join(" AND ")}`;
     const value = oneRow
       ? `(SELECT row_to_json(__r) FROM (${rows}) __r)`
       : `COALESCE((SELECT json_agg(__r) FROM (${rows}) __r), '[]'::json)`;
     return `${value} AS ${ident(item.key, "embed alias")}`;
   }
 
-  private async projection(cols: Columns, returning: boolean): Promise<string> {
+  /**
+   * `!inner`: PostgREST keeps only the rows of the table an inner embed sits
+   * in that have at least one embedded row — an EXISTS over the same key,
+   * carrying the inner embeds nested inside it (`applications!inner(*,
+   * job_postings!inner(*))` keeps an interview only when its application has a
+   * posting). A many-to-one through a NOT NULL key is satisfied by every row,
+   * and the clause says so harmlessly.
+   */
+  private async innerClause(item: Extract<SelectItem, { kind: "embed" }>, base: { table: string; alias: string }, depth: number): Promise<string> {
+    const { fk, manyToOne } = await this.resolveEmbed(item, base.table);
+    const targetTable = manyToOne ? fk.to : fk.from;
+    const alias = `__x${depth}`;
+    const pairs = keyPairs(fk, manyToOne, alias, base.alias);
+    const nested: string[] = [];
+    for (const inner of item.inner) if (inner.kind === "embed" && inner.hint === "inner") nested.push(await this.innerClause(inner, { table: targetTable, alias }, depth + 1));
+    return `EXISTS (SELECT 1 FROM ${ident(targetTable, "table")} AS ${alias} WHERE ${[...pairs, ...nested].join(" AND ")})`;
+  }
+
+  /** The base table's `!inner` clauses, to go in the query's WHERE; empty when no top-level embed is inner or the table is unknown. */
+  private async innerClauses(cols: Columns): Promise<string[]> {
+    if (cols.size === 0) return [];
+    const base = { table: this.table.trim(), alias: ident(this.table.trim(), "table") };
+    const out: string[] = [];
+    for (const item of this.items) if (item.kind === "embed" && item.hint === "inner") out.push(await this.innerClause(item, base, 1));
+    return out;
+  }
+
+  /**
+   * An array column is read through `to_json`, which renders it as Postgres
+   * renders JSON (PostgREST's own rendering: a `uuid[]` a list of strings, a
+   * `date[]` bare dates), where Bun's binary decoder hands a `uuid[]` back as
+   * the literal text `{…}` and refuses a `real[]` holding a NULL outright
+   * (`ERR_POSTGRES_NULLS_IN_ARRAY_NOT_SUPPORTED_YET` — the query log's
+   * `result_scores`, SMD-1602). So on a table with an array column a `*` is
+   * spelled out from the map, arrays wrapped, with `relnatts` read beside the
+   * rows so a column added under a running client is still seen on the next
+   * call (execute compares it with the count the map was read at); on a table
+   * without one, `*` stays `*`, and a row carrying a key the map lacks is the
+   * signal, as before.
+   */
+  private columnSql(name: string, info: ColumnInfo | undefined): string {
+    return info?.category === "A" ? `to_json(${ident(name, "column")}) AS ${ident(name, "column")}` : ident(name, "column");
+  }
+
+  /**
+   * The select list, or a write's RETURNING list — the same rendering: in a
+   * RETURNING list the table's name is the row just written, so an embed's
+   * correlated subquery joins to it as it joins to a selected row
+   * (`.insert(contact).select("*, companies (id, name)")`, job-hunt's;
+   * refused until SMD-1798).
+   */
+  private async projection(cols: Columns): Promise<string> {
     const parts: string[] = [];
+    const hasArray = [...cols.values()].some((c) => c.category === "A");
+    this.spelledOut = false;
+    const base = { table: this.table.trim(), alias: ident(this.table.trim(), "table") };
     for (const item of this.items) {
-      if (item.kind === "star") parts.push("*");
-      else if (item.kind === "column") parts.push(item.sql);
+      if (item.kind === "star") {
+        if (!hasArray) { parts.push("*"); continue; }
+        for (const [name, info] of cols) parts.push(this.columnSql(name, info));
+        parts.push(`(SELECT c.relnatts FROM pg_class c WHERE c.oid = to_regclass('${base.alias}'))::int AS __natts`);
+        this.spelledOut = true;
+      }
+      else if (item.kind === "column") parts.push(this.columnSql(item.name, cols.get(item.name)));
       // A table the catalog cannot see has no keys to embed through: the embed is left out so the query itself
       // reports the missing table (42P01, as `{ error }`) rather than a refusal naming a foreign key.
       else if (cols.size === 0) continue;
-      else if (returning) throw refusal(`select("…${item.key}(…)") embeds a relation in a RETURNING list, which is not supported — read the row back with a second select.`);
-      else parts.push(await this.embed(item, cols));
+      else parts.push(await this.embedSql(item, base, 1));
     }
     return parts.join(", ") || "*";
   }
 
-  private async compile(): Promise<{ text: string; values: unknown[]; cols: Columns }> {
+  /**
+   * The query, and — for a counted select that is not head-only — the count
+   * query PostgREST would run for `Content-Range`: the same WHERE, no page.
+   * The page itself carries `count(*) OVER ()`, the total before LIMIT and
+   * OFFSET; `countText` is run only when the page comes back empty (an offset
+   * past the end), where the window has no row to ride on (SMD-1602).
+   */
+  private async compile(): Promise<{ text: string; values: unknown[]; cols: Columns; countText?: string }> {
     const table = this.table.trim();
     const t = ident(table, "table");
     for (const row of this.payload) for (const c of Object.keys(row)) this.names(c);
     const cols = await this.catalog.columnsOf(table, this.named);
 
     if (this.op === "select") {
-      const projection = this.headOnly && this.wantCount ? "count(*)::int AS __count" : await this.projection(cols, false);
-      const where = this.whereClause(cols, 0);
+      const filters = this.whereClause(cols, 0);
+      // `!inner` embeds narrow the base rows too: their EXISTS clauses join the WHERE.
+      const inner = await this.innerClauses(cols);
+      const clauses = [...(filters.text ? [filters.text.slice(" WHERE ".length)] : []), ...inner];
+      const where = { text: clauses.length ? ` WHERE ${clauses.join(" AND ")}` : "", values: filters.values };
+      // head: no rows, whether or not a count was asked for — supabase-js answers `data: null` to both; PostgREST runs
+      // the query for its headers alone. One count query serves both forms; the count is answered only when asked.
+      if (this.headOnly) return { text: `SELECT count(*)::int AS __count FROM ${t}${where.text}`, values: where.values, cols };
+      let projection = await this.projection(cols);
+      if (this.wantCount) projection += ", count(*) OVER () AS __count";
       let text = `SELECT ${projection} FROM ${t}${where.text}`;
-      if (!this.headOnly) {
-        if (this.orderBy.length) text += ` ORDER BY ${this.orderBy.join(", ")}`;
-        if (this.limitN !== null) text += ` LIMIT ${Number(this.limitN)}`;
-        if (this.offsetN !== null) text += ` OFFSET ${Number(this.offsetN)}`;
-      }
-      return { text, values: where.values, cols };
+      if (this.orderBy.length) text += ` ORDER BY ${this.orderBy.join(", ")}`;
+      if (this.limitN !== null) text += ` LIMIT ${Number(this.limitN)}`;
+      if (this.offsetN !== null) text += ` OFFSET ${Number(this.offsetN)}`;
+      return { text, values: where.values, cols, countText: this.wantCount ? `SELECT count(*)::int AS __count FROM ${t}${where.text}` : undefined };
     }
 
-    const returning = await this.projection(cols, true);
+    const returning = await this.projection(cols);
     // A value bound by its column's type: an array column takes an array literal with a cast (change 77).
     const bind = (c: string, v: unknown, values: unknown[]): string => {
       const b = bound(cols.get(c), v);
@@ -918,11 +1210,16 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
       const tuples = this.payload.map((row) => `(${names.map((c) => bind(c, row[c] ?? null, values)).join(", ")})`);
       let text = `INSERT INTO ${t} (${quoted.join(", ")}) VALUES ${tuples.join(", ")}`;
       if (this.op === "upsert") {
-        const target = this.conflictTarget
-          ? this.conflictTarget.split(",").map((c) => ident(c, "conflict column")).join(", ")
-          : quoted[0];
-        const sets = quoted.filter((c) => c !== `"${this.conflictTarget}"`).map((c) => `${c} = EXCLUDED.${c}`);
-        text += ` ON CONFLICT (${target}) DO ${sets.length ? `UPDATE SET ${sets.join(", ")}` : "NOTHING"}`;
+        // PostgREST's upsert: the conflict target is `onConflict`'s columns, or the table's primary key when none is
+        // named — never the payload's first key, which was 42P10 whenever that key was not unique — and every payload
+        // column is assigned from EXCLUDED, the target's among them, so the statement is always DO UPDATE and always
+        // returns the row (`DO NOTHING` returned none, and a following `.single()` was PGRST116) (SMD-1602).
+        const targetNames = this.conflictTarget
+          ? this.conflictTarget.split(",").map((c) => c.trim()).filter(Boolean)
+          : await this.catalog.primaryKeyOf(table);
+        if (targetNames.length === 0) throw refusal(`upsert() into "${table}" names no onConflict column and the table has no primary key — PostgREST resolves the conflict target to the primary key; name the unique columns: upsert(row, { onConflict: "a,b" }).`);
+        const target = targetNames.map((c) => ident(c, "conflict column")).join(", ");
+        text += ` ON CONFLICT (${target}) DO ${this.ignoreDuplicates ? "NOTHING" : `UPDATE SET ${quoted.map((c) => `${c} = EXCLUDED.${c}`).join(", ")}`}`;
       }
       text += ` RETURNING ${returning}`;
       return { text, values, cols };
@@ -965,36 +1262,56 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
    */
   private async execute(): Promise<Result<T>> {
     let compiled = false;
+    const table = this.table.trim();
     try {
-      const { text, values, cols } = await this.compile();
+      const { text, values, cols, countText } = await this.compile();
       compiled = true;
-      const rows = ((await this.sql.unsafe(text, values as never[])) as unknown as Record<string, unknown>[]).map((r) => jsonShaped(r, cols));
+      const raw = (await this.sql.unsafe(text, values as never[])) as unknown as Record<string, unknown>[];
+      // The page's total (count(*) OVER (), the same on every row) and the map's attribute count ride on the rows and
+      // are lifted off them before the caller sees a row.
+      let total: number | null = raw.length && "__count" in raw[0] ? Number(raw[0].__count) : null;
+      const natts = raw.length && "__natts" in raw[0] ? Number(raw[0].__natts) : undefined;
+      const rows = raw.map((r) => {
+        if (!("__count" in r) && !("__natts" in r)) return jsonShaped(r, cols);
+        const { __count: _c, __natts: _n, ...rest } = r;
+        return jsonShaped(rest, cols);
+      });
       // The query named a column remembered as absent and RAN: the column exists, the map is stale (a `date` column
       // added after it was first named would shape as an instant for the process's life) — forget it for the next call.
       // So too when a row comes back with a column the map does not know (`select("*")` after an ADD COLUMN names
-      // nothing, but the row does): this row is shaped by the old map, the next call's by a fresh one.
-      const known = (k: string) => cols.size === 0 || cols.has(k) || k === "__count" || this.items.some((it) => it.kind === "embed" && it.key === k);
-      if (this.catalog.skippedRefresh(this.table.trim(), this.named) || (rows[0] && Object.keys(rows[0]).some((k) => !known(k)))) this.catalog.forget(this.table.trim());
+      // nothing, but the row does): this row is shaped by the old map, the next call's by a fresh one. On a table whose
+      // `*` is spelled out from the map, no such key can come back; the attribute count read beside the rows says it.
+      const known = (k: string) => cols.size === 0 || cols.has(k) || this.items.some((it) => it.kind === "embed" && it.key === k);
+      const grown = natts !== undefined && this.catalog.nattsOf(table) !== undefined && natts !== this.catalog.nattsOf(table);
+      if (this.catalog.skippedRefresh(table, this.named) || grown || (rows[0] && Object.keys(rows[0]).some((k) => !known(k)))) this.catalog.forget(table);
 
-      if (this.headOnly && this.wantCount) {
-        return { data: null, error: null, count: Number(rows[0]?.__count ?? 0) };
+      if (this.headOnly) {
+        // head: no rows, as supabase-js answers; the count only when asked (`{ head: true }` alone streamed the table).
+        return { data: null, error: null, count: this.wantCount ? Number(raw[0]?.__count ?? 0) : null };
       }
       if (this.rowMode !== "many") {
-        if (rows.length === 0) {
-          return this.rowMode === "single"
-            ? { data: null, error: new PostgrestError("JSON object requested, multiple (or no) rows returned", { code: "PGRST116" }), count: null }
-            : { data: null, error: null, count: null };
-        }
-        return { data: rows[0] as T, error: null, count: null };
+        // PostgREST's object response: exactly one row, or PGRST116 — several rows are the error too (an arbitrary first
+        // row was the answer before), and maybeSingle() differs only on none.
+        // The count rides along under single() too: supabase-js reads Content-Range whatever the row mode.
+        if (rows.length === 1) return { data: rows[0] as T, error: null, count: this.wantCount ? total ?? 1 : null };
+        if (rows.length === 0 && this.rowMode === "maybeSingle") return { data: null, error: null, count: this.wantCount ? 0 : null };
+        return { data: null, error: new PostgrestError("JSON object requested, multiple (or no) rows returned", { code: "PGRST116" }), count: null };
       }
-      return { data: rows as T, error: null, count: this.wantCount ? rows.length : null };
+      // A counted page that came back empty (an offset past the end) has no row for the window to ride on: the count
+      // query PostgREST would run for Content-Range, the same WHERE without the page.
+      if (this.wantCount && total === null) {
+        if (countText) total = Number(((await this.sql.unsafe(countText, values as never[])) as unknown as { __count: number }[])[0]?.__count ?? 0);
+        else total = rows.length;
+      }
+      return { data: rows as T, error: null, count: this.wantCount ? total : null };
     } catch (e) {
       if (isRefusal(e)) throw e;
       const error = toPostgrestError(e);
       // The query ran on a map that skipped a refresh for a column remembered as absent, and failed with something
       // other than "that column does not exist": the column is there now and the map is stale — forget it, so the
-      // next call reads the table again (a 42703 confirms the absence and keeps the memo).
-      if (compiled && error.code !== "42703" && this.catalog.skippedRefresh(this.table.trim(), this.named)) this.catalog.forget(this.table.trim());
+      // next call reads the table again (a 42703 confirms the absence and keeps the memo). A 42703 on a spelled-out
+      // `*` is the map's own naming of a column since dropped: forget it too, so the next call spells the fresh set.
+      if (compiled && ((error.code !== "42703" && this.catalog.skippedRefresh(table, this.named)) || (error.code === "42703" && this.spelledOut))) this.catalog.forget(table);
       return { data: null, error, count: null };
     }
   }
@@ -1138,10 +1455,34 @@ export class SupabaseSqlClient {
       }));
       const key = (m: Columns) => JSON.stringify([...m].sort(([a], [b]) => (a < b ? -1 : 1)).map(([k, v]) => [k, v.type]));
       const outs = shapes.length && shapes.every((m) => key(m) === key(shapes[0])) ? shapes[0] : undefined;
-      const rows = ((await this.sql.unsafe(`SELECT * FROM ${call}`, values as never[])) as unknown as Record<string, unknown>[]).map((r) => jsonShaped(r, outs));
+      // An array column of a declared shape is read through to_json, as a table's is (columnSql's reason: a `uuid[]`
+      // path column arrives as literal text otherwise); a shape the candidates disagree on is read as it comes.
+      // The call is aliased with the function's own name: a scalar function's one column takes the alias's name, and
+      // the shape map keys it by the function's.
+      const projection = outs && [...outs.values()].some((c) => c.category === "A")
+        ? [...outs].map(([name, info]) => (info.category === "A" ? `to_json(${f}.${ident(name, "column")}) AS ${ident(name, "column")}` : `${f}.${ident(name, "column")}`)).join(", ")
+        : "*";
+      const rows = ((await this.sql.unsafe(`SELECT ${projection} FROM ${call} AS ${f}`, values as never[])) as unknown as Record<string, unknown>[]).map((r) => jsonShaped(r, outs));
 
-      // A set-returning function yields rows; a scalar one yields a single column
-      // holding the value. PostgREST makes the same distinction.
+      // What the function declares decides the shape, as it does for PostgREST (SMD-1602): a set-returning function
+      // yields rows — one row of one column included, `[{ col: v }]`, where the old rule collapsed it to `v` and the
+      // caller's `data.length` was a string's — unless its rows are scalars (`RETURNS SETOF int`), which PostgREST
+      // lists bare; a scalar function yields its value, a function returning one composite row that row as an
+      // object. Where the candidates disagree on `proretset`, or the function is unknown to the catalog, the shape is
+      // the old rule's: one row of one column is the value.
+      const sets = new Set(overloads.map((o) => o.returns.set));
+      const set = sets.size === 1 ? [...sets][0] : undefined;
+      if (set === true) {
+        const scalarRows = overloads.every((o) => o.outs.size === 0 && !o.returns.table && !/^[CP]$/.test(o.returns.category));
+        return { data: (scalarRows ? rows.map((r) => Object.values(r)[0]) : rows) as T, error: null, count: null };
+      }
+      if (set === false) {
+        // A scalar's one cell is the value; one composite row — a type of one column included, or OUT parameters —
+        // is the object PostgREST gives (the first review pass found a one-column composite collapsed to its cell).
+        const row = rows[0] ?? null;
+        const scalar = overloads.every((o) => o.outs.size === 0 && (o.returns.type === "void" || !/^[CP]$/.test(o.returns.category)));
+        return { data: (row && scalar && Object.keys(row).length === 1 ? Object.values(row)[0] : row) as T, error: null, count: null };
+      }
       if (rows.length === 1 && Object.keys(rows[0]).length === 1) {
         const only = Object.values(rows[0])[0];
         return { data: only as T, error: null, count: null };

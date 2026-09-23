@@ -195,6 +195,15 @@
  *      table); the rules are db/config.mjs's
  *      DESTRUCTIVE_SQL_RULES through destructiveSqlIn, with counted
  *      per-(file, rule) exceptions as 7's (none today) (SMD-1936)
+ *  22. no vendored file imports @supabase/supabase-js at runtime — a
+ *      specifier-shaped string naming the package (bare, `npm:`, `jsr:`, an
+ *      esm.sh URL, a subpath), comments blanked, in any code file under the
+ *      seven category directories and docs/: every vendored server reaches the
+ *      brain through compat/supabase-sql, and supabase-js stays only in
+ *      server/index.ts (the Edge Function build, SMD-1800's) and
+ *      server-portable's Workers store; counted per-file exceptions as 7's —
+ *      the codemod's KEEP client (local-brain-no-mcp, SMD-1800's) and the
+ *      dashboard's type-only import (SMD-1801's) (SMD-1798)
  *
  * Run: bun scripts/check-fork-consistency.ts   (a Bun script — TypeScript, type-checked in CI
  * beside its run (SMD-1870); checks 13, 14, 18 and 20 parse YAML with Bun.YAML)
@@ -4251,6 +4260,114 @@ function checkDestructiveSql() {
   }
 }
 checkDestructiveSql();
+
+// ── 22: no vendored file imports @supabase/supabase-js at runtime ────────────
+//
+// SMD-1798 (the third of SMD-1795's seven). Every vendored MCP server, API,
+// worker and script reaches the brain through compat/supabase-sql — Bun's
+// Postgres client in supabase-js's shape — so running any of them needs no
+// Supabase project, PostgREST or service key; supabase-js stays in the tree in
+// server/index.ts — the Edge Function build, SMD-1800's to retire — and in
+// server-portable/store-postgrest.ts for the Cloudflare Workers target
+// (SMD-1847), both outside this scan (the shim's own suite writes its
+// PostgREST expectations by hand and loads no oracle). This is what keeps the next rebase, or
+// the next vendored file, from bringing a PostgREST client back: a
+// specifier-shaped string naming the package — "@supabase/supabase-js",
+// "npm:@supabase/supabase-js@2", "jsr:@supabase/supabase-js@2", a CDN URL
+// ("https://esm.sh/@supabase/supabase-js@2", unpkg's), with or without a
+// subpath — in any code file (.ts, .tsx, .mts, .cts, .js, .jsx, .mjs, .cjs,
+// .svelte, .vue, and .html for an inline module script) under the seven
+// category directories and docs/, comments blanked (the codemod's
+// `// ob1-original-import:` record is a comment; a README's sample is prose,
+// SMD-1802's), is a hit, whatever statement holds it: an import, a type-only
+// import, a require, a dynamic import. Counted per-file exceptions, as check 7
+// counts them: the one client the codemod's KEEP list holds on supabase-js
+// (local-brain-no-mcp's, which runs inside that recipe's own Supabase stack —
+// SMD-1800 decides the recipe) and the dashboard's type-only import
+// (SMD-1801's). Every other vendored client moved: the rest in change 74, the
+// last six here.
+const SUPABASE_JS_SPECIFIER = /(["'])(?:npm:|jsr:|https?:\/\/[^"'\s]*\/)?@supabase\/supabase-js(?:@[^"'/]*)?(?:\/[^"']*)?\1/g;
+/** Code, and HTML for the inline `<script type="module">` a dashboard's page may carry. */
+const CODE_FILE = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs|svelte|vue|html)$/;
+/** [text, whether it is a hit, markup?] — the forms the tree has had, and the neighbours the rule must not reach. */
+const SUPABASE_JS_PROBES: [string, boolean, boolean?][] = [
+  ['import { createClient } from "@supabase/supabase-js";', true],
+  ["import { createClient } from 'npm:@supabase/supabase-js@2';", true],
+  ['import { createClient } from "jsr:@supabase/supabase-js@2";', true],
+  ['import { createClient } from "https://esm.sh/@supabase/supabase-js@2.47.10";', true],
+  ['import { createClient } from "https://esm.sh/v135/@supabase/supabase-js@2";', true],
+  ['<p>Don\'t panic</p>\n<script type="module">import { createClient } from \'https://unpkg.com/@supabase/supabase-js@2/dist/module/index.js\';</script>', true, true],
+  ['import type { Session, User } from "@supabase/supabase-js";', true],
+  ['const { createClient } = require("@supabase/supabase-js");', true],
+  ['const m = await import("@supabase/supabase-js/dist/module/index.js");', true],
+  ['import { createClient } from "../../compat/supabase-sql/index.ts";', false],
+  ['// ob1-original-import: @supabase/supabase-js\nimport { createClient } from "../../compat/supabase-sql/index.ts";', false],
+  ['import "jsr:@supabase/functions-js/edge-runtime.d.ts";', false],
+  ['/* import { createClient } from "@supabase/supabase-js"; */\nconst x = 1;', false],
+  ['const note = "the file imports @supabase/supabase-js at runtime";', false],
+  ['import { createClient } from "@supabase/supabase-js-shaped/thing";', false],
+  // Markup: a commented-out script and a link in prose are not imports.
+  ['<!-- <script>import x from "@supabase/supabase-js";</script> -->\n<a href="https://npmjs.com/package/@supabase/supabase-js">docs</a>\n<script>const y = 1;</script>', false, true],
+];
+/** file → rule → the reason and the exact hit count; a hit past the count fails, a count no hit reaches fails as stale. */
+const SUPABASE_JS_EXCEPTIONS = new Map<string, Record<string, CountedException>>([
+  ["recipes/local-brain-no-mcp/functions/_shared/db.ts", { "supabase-js": { why: "runs inside the recipe's own self-hosted Supabase stack, where PostgREST is present and bun is not — the codemod's KEEP list; SMD-1800 decides the recipe", lines: 1 } }],
+  ["dashboards/open-brain-dashboard/src/app.d.ts", { "supabase-js": { why: "the dashboard's type-only import: the one client left that reads the brain over PostgREST — SMD-1801 moves it onto the fork's REST API", lines: 1 } }],
+]);
+/** A markup file's code is its `<script>` bodies: everything else, an HTML comment included, is blanked (newlines kept). */
+const MARKUP_FILE = /\.(html|svelte|vue)$/;
+function scriptBodiesOf(text: string): string {
+  const blank = (s: string) => s.replace(/[^\n]/g, " ");
+  const withoutComments = text.replace(/<!--[\s\S]*?-->/g, blank);
+  let out = "";
+  let last = 0;
+  for (const m of withoutComments.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script\s*>/gi)) {
+    // The body starts after the opening tag's `>` (its attributes hold none): anchored there, not by searching the
+    // match for the body's text, which a body repeated in an attribute would find first.
+    const start = m.index! + m[0].indexOf(">") + 1;
+    out += blank(withoutComments.slice(last, start)) + m[1];
+    last = start + m[1].length;
+  }
+  return out + blank(withoutComments.slice(last));
+}
+/** The 1-based lines of `text` holding a supabase-js specifier, ascending — comments blanked; in markup, the script bodies alone (an odd apostrophe in prose had shifted the blanker's quote parity and hidden an import). */
+function supabaseJsImportsIn(text: string, markup = false): number[] {
+  const code = blanked(markup ? scriptBodiesOf(text) : text, false);
+  const lineOf = lineIndexer(code);
+  const lines = new Set<number>();
+  for (const m of code.matchAll(SUPABASE_JS_SPECIFIER)) lines.add(lineOf(m.index!));
+  return [...lines].sort((a, b) => a - b);
+}
+function checkSupabaseJsImports() {
+  // The file sets have no witness in the tree today (no .html under the roots names the package): held by name.
+  for (const name of ["x.ts", "x.tsx", "x.mts", "x.cts", "x.js", "x.jsx", "x.mjs", "x.cjs", "x.svelte", "x.vue", "x.html"]) if (!CODE_FILE.test(name)) fail(SELF, `check 22's CODE_FILE no longer reads ${name} (its own probe)`);
+  for (const name of ["x.md", "x.sql", "x.json", "x.htm"]) if (CODE_FILE.test(name)) fail(SELF, `check 22's CODE_FILE reads ${name}, which it should not (its own probe)`);
+  for (const name of ["x.html", "x.svelte", "x.vue"]) if (!MARKUP_FILE.test(name)) fail(SELF, `check 22's MARKUP_FILE no longer treats ${name} as markup (its own probe)`);
+  if (MARKUP_FILE.test("x.ts")) fail(SELF, "check 22's MARKUP_FILE treats x.ts as markup (its own probe)");
+  for (const [probe, hit, markup] of SUPABASE_JS_PROBES) {
+    const n = supabaseJsImportsIn(probe, markup === true).length;
+    if (hit && n === 0) fail(SELF, `check 22 no longer catches its probe: ${JSON.stringify(probe)} (its own probe)`);
+    if (!hit && n > 0) fail(SELF, `check 22 catches a non-probe: ${JSON.stringify(probe)} (its own probe)`);
+  }
+  const files = textFilesUnder(SCANNED_ROOTS).filter((f) => CODE_FILE.test(f));
+  if (files.length === 0) fail(SELF, "check 22 found no code file under the seven category directories and docs/ — the listing is broken, not the tree clean");
+  const seen = new Set<string>();
+  for (const file of files) {
+    const rel = relOf(file);
+    const lines = supabaseJsImportsIn(readFileSync(file, "utf8"), MARKUP_FILE.test(file));
+    const excepted = SUPABASE_JS_EXCEPTIONS.get(rel)?.["supabase-js"];
+    if (excepted) {
+      seen.add(rel);
+      if (lines.length !== excepted.lines) fail(rel, `check 22's exception covers ${excepted.lines} line(s) of a supabase-js import and the file has ${lines.length} — ${lines.length > excepted.lines ? "a new import, or a moved one" : "the exception is stale"} (${excepted.why})`);
+      continue;
+    }
+    for (const line of lines) {
+      fail(`${rel}:${line}`, `imports @supabase/supabase-js at runtime — every vendored server reaches the brain through compat/supabase-sql since SMD-1798 (\`bun scripts/migrate-to-sql-shim.ts --apply ${rel}\`; the shim's README says what it still refuses); supabase-js stays only in server/index.ts (the Edge Function build) and in server-portable's Workers store`);
+    }
+  }
+  for (const rel of SUPABASE_JS_EXCEPTIONS.keys()) if (!seen.has(rel)) fail(rel, "check 22's exception names a file the scan does not reach — stale, or the file is gone");
+}
+checkSupabaseJsImports();
 
 // No display-time filter. One excused `_template` violations, for a placeholder
 // link that contributionDirs() has skipped since the filter was written — so

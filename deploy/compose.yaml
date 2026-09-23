@@ -173,6 +173,11 @@ services:
       # prints the value, and warns when an explicit one is over the window.
       OB1_CHUNK_TOKENS: ${OB1_CHUNK_TOKENS:-}
       OB1_CHUNK_OVERLAP: ${OB1_CHUNK_OVERLAP:-}
+      # The entity-extraction window (SMD-1879): unset, derived from the
+      # metadata model's served context; preflight prints the value and the
+      # model it came from. The server never extracts — forwarded so preflight,
+      # in this container, reports what db/extract-entities.ts will do.
+      OB1_EXTRACT_CHUNK_TOKENS: ${OB1_EXTRACT_CHUNK_TOKENS:-}
       OB1_EMBEDDING_DIMENSIONS: ${OB1_EMBEDDING_DIMENSIONS:-}
       OB1_LLM_API_KEY: ${OB1_LLM_API_KEY:-}
       # A chat endpoint of its own, when the two calls are not served by one

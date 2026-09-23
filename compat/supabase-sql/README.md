@@ -81,9 +81,13 @@ bun integrations/delete-thought-mcp/index.ts                             # a rec
 
 An extension sits beside `extensions/node_modules` and resolves its packages from
 there; a recipe or integration does not, and `NODE_PATH` points it at the same
-pinned install (only the servers that import `hono` or the MCP SDK need it — the
-workers, the APIs on their own key and the webhook receiver import nothing but the
-shim and their own files). The other variables are the ones the file's README has
+pinned install for `hono`, `zod` and `@hono/mcp` (only the servers that import
+them need it — the workers, the APIs on their own key and the webhook receiver
+import nothing but the shim and their own files). The MCP SDK's `exports`
+subpaths Bun does not resolve through `NODE_PATH`: an SDK-importing recipe or
+integration starts because Bun fetches the package into its own cache on first
+start — unpinned, with npm egress once — until SMD-1991 gives those directories
+an install of their own. The other variables are the ones the file's README has
 its Supabase deploy set as secrets, passed as environment instead; each README's
 callout gives its own line. `SUPABASE_SERVICE_ROLE_KEY` is read and ignored by
 every server but `work-operating-model-activation`, which refuses to start
@@ -105,20 +109,24 @@ cd compat/supabase-sql && bun run test
 
 ## Expected outcome
 
-`177 assertions: 177 passed, 0 failed` and `PASS`. A migrated file behaves
+`257 assertions: 257 passed, 0 failed` and `PASS`. A migrated file behaves
 identically: same `{ data, error }` shape, same SQLSTATE codes, same row counts.
-`extensions/test-tools.ts` then drives every tool of the five extension servers
-on the shim against their own schemas — the migrated files this shim is judged by.
+`extensions/test-tools.ts` then drives every tool of the eight MCP servers with
+a schema of their own — seven extensions and the ob-graph recipe, fifty-five
+tools — against those schemas, and `extensions/test-writes.ts` the servers
+that need the model provider stubbed (enhanced-mcp's thirteen tools,
+agent-memory-api's nine routes, the two consolidation workers): the migrated
+files this shim is judged by.
 
 ## What is supported
 
 | | |
 | --- | --- |
 | Verbs | `from` `select` `insert` `update` `upsert` `delete` `rpc` |
-| Filters | `eq` `neq` `gt` `gte` `lt` `lte` `like` `ilike` `is` `in` `contains` `match` `or` `not` |
+| Filters | `eq` `neq` `gt` `gte` `lt` `lte` `like` `ilike` `is` `in` `contains` `match` `or` `not` — `.or()` with `and(…)`, `or(…)`, `not.and(…)` grouping to any depth and `col.in.(a,b)` lists (SMD-1798) |
 | Filter columns | a column, or PostgREST's JSON path — `metadata->>key`, `meta->a->>key` — in the comparison filters, `is`, `in`, `match`, `.or()` terms and `.order()`; not `.contains()`, which is containment with the column's own operator |
 | Modifiers | `order` `limit` `range` `single` `maybeSingle` `count` `head` |
-| Embedding | one hop: `relation (cols)`, `alias:fk_column (cols)`, `relation(*)` — through the foreign key the catalog finds; many-to-one an object or `null`, one-to-many an array or `[]` |
+| Embedding | `relation (cols)`, `alias:fk_column (cols)`, `relation(*)`, nested to any depth — through the foreign key the catalog finds; many-to-one an object or `null`, one-to-many an array or `[]`; `relation!inner (…)` keeps only the rows that have an embedded row (an `EXISTS`, nested with the embeds), `relation!fk_name (…)` and `relation!fk_column (…)` choose the key where two join the tables, from either side; a table embedded in itself is its children (SMD-1798) |
 | Arrays | a JavaScript array is bound by the column's or the function argument's declared type: an array literal for `text[]`, JSON for `jsonb`, JSON text for `vector` |
 
 Behaviours that are easy to get wrong and are pinned by tests: `range()` is
@@ -140,18 +148,58 @@ extension tools read one). A `timestamp without time zone` column is still a
 `Z` instant where PostgREST gives a zone-less datetime; `.slice(0, 10)` agrees,
 an equality does not — no migrated file reads one.
 
+Five places the shim answered what PostgREST does not, each a silent wrong
+answer until SMD-1602 pinned them: `{ count: "exact" }` without `head` is the
+total over the whole `WHERE` (the page carries `count(*) OVER ()`; an empty
+page past the end runs the count query PostgREST runs), not the page's size;
+`.single()` — and `.maybeSingle()` — over several rows is `PGRST116`, not an
+arbitrary first row; `{ head: true }` without a count is `data: null` and no
+count, not the table; an upsert's conflict target is `onConflict`'s columns
+or the table's primary key (a table with neither is refused, naming the
+option), never the payload's first key, and every payload column is assigned
+from `EXCLUDED`, so the statement always returns the row — unless
+`ignoreDuplicates: true` asks for `DO NOTHING`, which leaves a conflicting row
+as it is and returns none, as `Prefer: resolution=ignore-duplicates` does
+(unread until SMD-1798's first review pass; repo-learning-coach's progress
+upsert had reset a learner's row on every sync); and `.rpc()`'s shape
+is what the function declares (`pg_proc.proretset`): a set-returning function
+is rows even when one row of one column came back, `RETURNS SETOF <scalar>` a
+bare list, a scalar function its value, a function returning one composite row
+that row as an object. An array column is read through `to_json`, which is
+PostgREST's own rendering: a `uuid[]` a list of strings (Bun left it as the
+literal text `{…}`), a `real[]` holding a `NULL` a list with a `null` (Bun's
+binary decoder refused the column outright, so the query log's `result_scores`
+never landed through this shim). On a table with an array column a `*` is
+therefore spelled out from the catalog's map, `pg_class.relnatts` read beside
+the rows so a column added under a running client is still seen on the next
+call; a table without one keeps `SELECT *`.
+
 ## What is deliberately refused
 
 Each of these throws with an explanation instead of guessing:
 
-- **A nested embed, or an embedding hint** — `applications!inner(*,
-  job_postings(*))`, `graph_nodes!graph_edges_target_node_id_fkey(…)`. One hop is
-  served through the catalog's foreign-key read (above); a second hop, `!inner`
-  and a named key are not, nor is a relation with no foreign key to the table or
-  with two (name the column: `alias:fk_column (…)`), nor an embed in a
-  `RETURNING` list.
-- **Nested `.or()`** — `or(and(a.eq.1,b.eq.2),c.eq.3)` needs a real parser. The flat
-  form, which is the only one this repo uses, works.
+- **An embed the catalog cannot join** — a relation with no foreign key to the
+  table it sits in, or with two and no hint (name the column, `alias:fk_column
+  (…)`, or the key, `relation!fk_name (…)`), a hint that names no key, and the
+  two ambiguities PostgREST refuses too: a column hint that is a key column of
+  both tables, and a key column named like a table that another key joins. A
+  self-reference is named by its column, never by its constraint (PostgREST's
+  PGRST200): `nodes!parent_id (…)`, or `nodes (…)` bare, is the children;
+  `parent_id (…)` is the parent. Nested embeds (`applications!inner(*,
+  job_postings!inner(*, companies!inner(*)))`), the hints `!inner`, `!fk_name`,
+  `!fk_column` (the base's own key column, or the relation's from the
+  referenced side) and `!left`, and an embed on the row a write returns
+  (`.insert(row).select("*, companies (id, name)")`) are served since SMD-1798
+  (the table above).
+- **An order, limit or range on an embedded resource** — `.order("due", {
+  foreignTable: "tasks" })`, `.limit(3, { referencedTable: "tasks" })`: the embed
+  returns every row; order or cut them in the file, or ask in a second query.
+  Applied to the base table instead it would be a silent wrong answer, so it is
+  refused at the call and the codemod blocks it.
+- **A filter on an embedded column** — `.neq("thoughts.sensitivity_tier", …)`
+  beside `thoughts!inner(…)`: the dotted name is refused as an identifier. Read
+  the embedded rows and filter them, or ask in two queries (enhanced-mcp's
+  `graph_search` does).
 - **A JSON path ending in `->`** — `meta->flag` yields jsonb, and what a bound value
   means against it depends on the value's JavaScript type. End the path in `->>`
   for the key's text, or use `.contains()`. An array index (`->0`), and a path in
@@ -216,8 +264,9 @@ development — the test caught it.
   migrated file is verified to parse; `extensions/test-writes.ts` drives the
   writers among them against a real Postgres (the bio worker, the one that
   filters on a JSON path, found the two gaps change 73 closed); and
-  `extensions/test-tools.ts` drives every tool of the five extension servers
-  against their own schemas (change 74's review had found seven of twenty-nine
+  `extensions/test-tools.ts` drives every tool of the eight MCP servers with a
+  schema of their own — fifty-five tools since SMD-1798 — against those
+  schemas (change 74's review had found seven of the first twenty-nine
   failing on the shim — no `.not()`, a JavaScript array bound as its `String()`,
   four embedded selects the codemod's blocker regex let through — and driving
   every argument branch found two more; change 77 closed them all). Exercise
