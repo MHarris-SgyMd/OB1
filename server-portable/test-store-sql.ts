@@ -359,6 +359,25 @@ console.log("\n[8] Errors surface rather than being swallowed");
   await broken.close();
 }
 
+console.log("\n[8b] captureActorOf reads the capture row's actor, the lower id first on a tied created_at (SMD-1298)");
+{
+  const owned = await store.captureThought({
+    content: "a thought whose capture row names its owner",
+    payload: { metadata: { source: "mcp" } },
+    embedding: unit(6),
+    actor: { name: "owner", via: "store-test" },
+  });
+  const first = await store.captureActorOf(owned.id);
+  assert(first?.actorName === "owner", `the capture row's actor is read back (${first?.actorName})`);
+  // A second capture row with the SAME created_at (theory: one per thought by construction) — the tiebreak is the id, a uuid, so the lowest id is the owner every time, not whichever row the planner met first.
+  const sql = new SQL({ url: URL_, max: 1 });
+  await sql`INSERT INTO thought_audit SELECT (json_populate_record(t, '{"id":"00000000-0000-4000-8000-000000000000","actor_name":"first-by-id"}'::json)).* FROM thought_audit t WHERE t.thought_id = ${owned.id}::uuid AND t.action = 'capture'`;
+  const tied = await store.captureActorOf(owned.id);
+  assert(tied?.actorName === "first-by-id", `on a tied created_at the lower id's actor is returned (${tied?.actorName})`);
+  assert((await store.captureActorOf("0000dead-0000-4000-8000-000000000000")) === null && (await store.captureActorOf("not-an-id")) === null, "a ghost and a malformed id read as no row");
+  await sql.close();
+}
+
 console.log("\n[9] Provenance: capture writes it, the read methods walk it, and the label lookup finds it (migration 025)");
 {
   const parent = await store.captureThought({

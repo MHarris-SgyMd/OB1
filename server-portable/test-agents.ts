@@ -393,6 +393,11 @@ console.log("\n[12] Resolution is cached, and the TTL is the revocation delay");
 
 console.log("\n[13] An unreachable registry degrades to no id, not to a refusal");
 {
+  // …and says so once per key while it lasts (SMD-1298): a brain whose CHECK
+  // refuses a scope is otherwise silent about its unattributed writes.
+  const warnings: string[] = [];
+  const realWarn = console.warn;
+  console.warn = (...a: unknown[]) => { warnings.push(a.map(String).join(" ")); };
   let calls = 0;
   const store = fakeStore(async () => { throw new Error("connection refused"); }, () => calls++);
   const r = new AgentResolver(60000, () => 0);
@@ -400,6 +405,7 @@ console.log("\n[13] An unreachable registry degrades to no id, not to a refusal"
   assert(out.status === "ok", "a failed lookup is not treated as a revocation");
   assert(out.status === "ok" && out.agentId === undefined,
          "…and carries no id, so attribution falls back to the name");
+  assert(out.status === "ok" && out.unresolved === "unreachable", "…saying the registry could not be REACHED — a retry may answer (SMD-1298)");
 
   // Bounded, so a dead database costs one connection attempt per interval
   // rather than one per request.
@@ -420,6 +426,9 @@ console.log("\n[13] An unreachable registry degrades to no id, not to a refusal"
   await noCache.resolve(dead, principal("laptop", H("a")));
   await noCache.resolve(dead, principal("laptop", H("a")));
   assert(zeroCalls === 2, `with TTL 0 a failure is not cached either (${zeroCalls} lookups)`);
+  console.warn = realWarn;
+  assert(warnings.length === 2 && warnings.every((w) => /agent registry: resolve_agent failed for key "laptop"/.test(w) && /connection refused/.test(w)),
+         `each resolver warned once for the key, naming it and the cause, and not again while the failure lasted (${warnings.length} warning(s))`);
 }
 
 console.log("\n[14] A definitive revocation IS enforced, cached or not");
@@ -437,6 +446,20 @@ console.log("\n[14] A definitive revocation IS enforced, cached or not");
   // something the server cannot act on. Refusing every caller over a schema
   // mismatch would be worse than serving without an id.
   const odd = fakeStore(async () => ({ ok: false, error: "UNRESOLVED", detail: "BAD_LABEL" }), () => {});
+  {
+    const refusedWarnings: string[] = [];
+    const prevWarn = console.warn;
+    console.warn = (...a: unknown[]) => { refusedWarnings.push(a.map(String).join(" ")); };
+    const refuser = new AgentResolver(60000, () => 0);
+    const refusedOut = await refuser.resolve(odd, principal("laptop", H("odd")));
+    await refuser.resolve(odd, principal("laptop", H("odd")));
+    console.warn = prevWarn;
+    assert(refusedOut.status === "ok" && refusedOut.agentId === undefined && refusedOut.unresolved === "refused",
+           "a registry that ANSWERED and refused the argument says so — a retry will not change it (SMD-1298)");
+    // The tool's `Refused:` sends the operator to the server log; the log has to hold a line (eighth review pass).
+    assert(refusedWarnings.length === 1 && /resolve_agent refused key "laptop" \(BAD_LABEL\)/.test(refusedWarnings[0]),
+           `…and warned once for the key, naming the detail (${refusedWarnings.length} warning(s))`);
+  }
   const out2 = await new AgentResolver(0, () => 0).resolve(odd, principal("laptop", H("a")));
   assert(out2.status === "ok" && out2.agentId === undefined, "an unusable answer serves without an id");
 }

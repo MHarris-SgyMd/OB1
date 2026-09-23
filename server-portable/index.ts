@@ -10,7 +10,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { createStore, postgrestOnBunNotice, storeKind, UUID_RE, type Citation, type ThoughtStore, type ThoughtHybridMatch, type ThoughtKeywordMatch } from "./store.ts";
 import { queryLogEnabled, trimmedEnv } from "../db/config.mjs";
-import { authenticateRequest, canWrite, type Principal } from "./auth.ts";
+import { authenticateRequest, canCapture, canRead, canWrite, SCOPES, type Principal } from "./auth.ts";
 import { AgentResolver, cacheTtlFromEnv } from "./agents.ts";
 
 /**
@@ -317,6 +317,14 @@ function explainRefusal(
 }
 
 /**
+ * The shape of a `source` label a capture may carry (SMD-1298): what the egress
+ * policy's `source:` term and a per-source weight can key on — lower-case, no
+ * spaces, bounded. Not a vocabulary: the hook says `claude-code` or `codex`,
+ * an importer says what it imports from, and the default stays `mcp`.
+ */
+const SOURCE_RE = /^[a-z0-9][a-z0-9-]{1,39}$/;
+
+/**
  * Untrusted text — a thought's, a citation's, a judge's reason — on one line
  * of a reply: the same cleaner the CLI renders through
  * (server-portable/consolidate.ts), whitespace collapsed, cut with an ellipsis
@@ -561,7 +569,7 @@ function buildServer(principal: Principal): McpServer {
   // reference can ask search_thoughts for a weight; this tool stays where
   // every result is the one the query names.
   const SEARCH_COMPAT_RECENCY_WEIGHT = 0;
-  server.registerTool(
+  if (canRead(principal)) server.registerTool(
     "search",
     {
       title: "Search Open Brain",
@@ -604,7 +612,7 @@ function buildServer(principal: Principal): McpServer {
     }
   );
 
-  server.registerTool(
+  if (canRead(principal)) server.registerTool(
     "fetch",
     {
       title: "Fetch Open Brain Thought",
@@ -663,7 +671,7 @@ function buildServer(principal: Principal): McpServer {
   // it still needs search_thoughts_keyword: it does, for paging through every
   // thought containing a string, and for a needle the extraction rule would not
   // pick out of a sentence on its own.
-  server.registerTool(
+  if (canRead(principal)) server.registerTool(
     "search_thoughts",
     {
       title: "Search Thoughts",
@@ -834,7 +842,7 @@ function buildServer(principal: Principal): McpServer {
    * choosing between two meanings of one tool. The description leads with WHEN to
    * reach for it, because that is the only part the model reads before deciding.
    */
-  server.registerTool(
+  if (canRead(principal)) server.registerTool(
     "search_thoughts_keyword",
     {
       title: "Search Thoughts by Exact Text",
@@ -941,7 +949,7 @@ function buildServer(principal: Principal): McpServer {
   );
 
   // Tool 2: List Recent
-  server.registerTool(
+  if (canRead(principal)) server.registerTool(
     "list_thoughts",
     {
       title: "List Recent Thoughts",
@@ -1004,7 +1012,7 @@ function buildServer(principal: Principal): McpServer {
   );
 
   // Tool 2b: the supersession review queue (migration 029, SMD-1294)
-  server.registerTool(
+  if (canRead(principal)) server.registerTool(
     "list_supersession_proposals",
     {
       title: "List Supersession Proposals",
@@ -1068,7 +1076,7 @@ function buildServer(principal: Principal): McpServer {
   );
 
   // Tool 3: Stats
-  server.registerTool(
+  if (canRead(principal)) server.registerTool(
     "thought_stats",
     {
       title: "Thought Statistics",
@@ -1139,13 +1147,15 @@ function buildServer(principal: Principal): McpServer {
     }
   );
 
-  // Tool 4: Capture Thought — the only tool that writes.
+  // Tool 4: Capture Thought — the tool that adds.
   //
-  // Registered only for a write-scoped key. A read-only key does not get a
+  // Registered for a key that may capture — write scope, or the capture-only
+  // scope a session-end hook holds (SMD-1298). A read-only key does not get a
   // permission error from it; the tool is absent from tools/list entirely, so the
   // client never offers it and never tries. That is a smaller surface than
-  // refusing the call, and it is honest about what the key can do.
-  if (canWrite(principal)) server.registerTool(
+  // refusing the call, and it is honest about what the key can do. The read
+  // tools above are gated the same way for a capture key: absent, not refused.
+  if (canCapture(principal)) server.registerTool(
     "capture_thought",
     {
       title: "Capture Thought",
@@ -1166,10 +1176,25 @@ function buildServer(principal: Principal): McpServer {
           .describe("For a thought SYNTHESISED from others (a digest, consolidation, summary): the ids of the source thoughts it was built from. Each must be an existing thought id (from a search or capture result). Recorded when the thought is new; if this text was already captured, the existing thought's provenance is left as it is."),
         supersedes: z.string().optional()
           .describe("The id of a prior thought this one REPLACES (a corrected or updated version). Search will label the older thought as superseded. Recorded when the thought is new; for text already captured, use update_thought's `supersedes` on that thought instead."),
+        // SMD-1298. Where the capture comes from, for metadata.source — "mcp"
+        // when absent, as every capture before it. A session-end hook says
+        // `claude-code` or `codex`; a per-source weight (SMD-1297) and the
+        // egress policy's `source:` term key on the value. The shape is held
+        // here so a label reaches the row, the audit trail and the policy as
+        // one spelling.
+        source: z.string().regex(SOURCE_RE, "lower-case letters, digits and hyphens, 2–40 characters, starting with a letter or digit").optional()
+          .describe("Where this capture comes from, recorded as metadata.source — e.g. `claude-code` or `codex` for a session-end hook, `mcp` (the default) for an agent capturing in conversation. Lower-case letters, digits and hyphens, 2–40 characters. A label the caller gives; the audit row's actor says which key wrote."),
       },
     },
-    async ({ content, derived_from, supersedes }) => {
+    async ({ content, derived_from, supersedes, source }) => {
+      // What a key that cannot read is told and allowed — decided once here
+      // and read below, in the catch too (fifth review pass: six scattered
+      // canRead tests; sixth: one survived in the catch).
+      const reader = canRead(principal);
       try {
+        // The row's origin label: the caller's, else the one every capture
+        // through this tool carried before `source` existed (SMD-1298).
+        const origin = source ?? "mcp";
         // The shape before the two model calls, in the tool's words — as
         // update_thought's `supersedes` is refused (032). upsert_thought would
         // raise on it after the embedding and the metadata were already paid for.
@@ -1179,12 +1204,76 @@ function buildServer(principal: Principal): McpServer {
         // Existence stays the write's.
         const badDerived = derived_from?.find((d) => !UUID_RE.test(d));
         if (badDerived !== undefined) return toolError(`Refused: every \`derived_from\` entry must be a thought id (the ID: line of a search result), not "${badDerived.slice(0, 40)}".`);
+        // A capture-only key's provenance is trimmed to the ids that exist
+        // BEFORE the write, and the reply says nothing of it — not which
+        // (third review pass: positions were an existence oracle on a key that
+        // cannot read) and not how many (eighth: with one id sent, the count
+        // was the answer). A reader is refused with positions and ids, and can
+        // look. A summary with its live sources beats a refusal over one
+        // deleted thought; the row's derived_from says what was recorded.
+        let derivedFrom = derived_from;
+        if (derivedFrom?.length && !reader) derivedFrom = await liveSubset(await db(), derivedFrom);
+        // A capture-only key may replace only what it captured itself (SMD-1298,
+        // first review pass): `supersedes` marks the target superseded in every
+        // search result — an alteration of a thought the key did not write, the
+        // one thing the scope promises it cannot do. Ownership is the target's
+        // capture audit row (008/010): the same agent id when both sides have
+        // one, else the same key name. One message whichever way it fails, so
+        // the refusal is not an existence oracle for a key that cannot read.
+        if (supersedes !== undefined && !reader) {
+          let writer: { actorName: string | null; agentId: string | null } | null;
+          try {
+            writer = await (await db()).captureActorOf(supersedes);
+          } catch (e) {
+            // The read needs SELECT on thought_audit — the `server` grant group,
+            // soft like the rest of it (second review pass: the capture group
+            // holds INSERT alone). Refuse THIS pointer, name the grant, and let
+            // the capture proceed without it on the caller's retry.
+            // An ERROR of the server's, not a refusal of the request as shaped:
+            // a caller keeps the pointer and tries again once the grant is
+            // there (fifth review pass: "Refused:" made the hook drop it, and
+            // the hook told the two apart by the sentence's wording).
+            const why = String((e as Error).message ?? e).slice(0, 120);
+            // The grant remedy only for a privilege error (42501); a dropped
+            // connection, a timeout or a brain before 010 gets the store's own
+            // words, since `--grant` would change nothing there (sixth review pass).
+            const noPrivilege = (e as { code?: string }).code === "42501" || /permission denied/i.test(why);
+            return toolError(`Error: this key's \`supersedes\` could not be checked against the target's capture record (${why})${noPrivilege ? " — the server role needs SELECT on thought_audit: cd db && bun migrate.ts --grant <role> --url $DATABASE_URL" : ""}.`);
+          }
+          // By agent id when both sides carry one; by name only when NEITHER
+          // does (the registry away now, as it was at the write). A row without
+          // an id met by a principal with one is not this key's to replace: a
+          // later key minted under the same name would otherwise own every
+          // thought captured while the registry was down (fourth review pass).
+          // The registry away NOW while the row is attributed: nothing can be
+          // said either way, and that is the server's condition, not the
+          // caller's — an error to retry, not a refusal (fifth review pass).
+          // Unless the registry ANSWERED and refused this key's argument (a
+          // label the SQL rejects): that will not heal on a retry, so it is a
+          // refusal, and the caller posts without the pointer (sixth review pass).
+          if (writer !== null && writer.agentId !== null && principal.agentId === undefined) {
+            if (principal.agentUnresolved === "refused") return toolError("Refused: a capture-scoped key may name as `supersedes` only a thought it captured itself, and this key's identity could not be resolved — the agent registry refused its name or digest; see the server log.");
+            return toolError("Error: this key's `supersedes` could not be attributed while the agent registry is unavailable — retry when resolve_agent answers.");
+          }
+          const own = writer !== null && (
+            writer.agentId !== null && principal.agentId !== undefined ? writer.agentId === principal.agentId
+              : writer.agentId === null && principal.agentId === undefined ? writer.actorName === principal.name
+                : false);
+          if (!own) return toolError("Refused: a capture-scoped key may name as `supersedes` only a thought it captured itself.");
+        }
         // What may leave the box (SMD-1903): asked once, for both calls, and
         // only the allowed ones are made — a refused capture costs no request
         // and lands all the same, without the vector or the tags the refused
         // call would have produced, with the decision on its audit row.
         const cfg = embedConfig();
-        const subject: EgressSubject = { kind: "capture", actor: principal.name, metadata: { source: "mcp" }, content };
+        // The gate judges the label the ROW will carry — one value for the
+        // row's lifetime, so a `source:` term decides the same at the capture
+        // and at the re-embed and consolidation passes that read the row
+        // (fourth review pass: judging `mcp` here and the label there let one
+        // policy allow and refuse the same row). The label is the caller's, so
+        // a term about WHO wrote names `actor`, which the key proves; SMD-1941
+        // binds a label to the key.
+        const subject: EgressSubject = { kind: "capture", actor: principal.name, metadata: { source: origin }, content };
         const gate = decideCalls(subject, cfg, cfg.egress);
         // Independent of each other, so they overlap.
         const [embedded, metadata] = await Promise.all([
@@ -1194,13 +1283,20 @@ function buildServer(principal: Principal): McpServer {
         const chunks = embedded?.chunks ?? [];
         const contextFailures = embedded?.contextFailures ?? 0;
 
-        const payload = { metadata: { ...metadata, source: "mcp" } };
+        const payload = { metadata: { ...metadata, source: origin } };
 
         // Atomicity is the store's problem now: the SQL path writes content,
         // metadata and vector in one statement, while the PostgREST path keeps the
         // 3-arg RPC with its two-step fallback. Either way a row committed without
         // its embedding is reported, never silently accepted.
-        const captured = await (await db()).captureThought({
+        // A source deleted between the trim above and this write — the one path
+        // left to 025's refusal for a key that cannot read — is met by trimming
+        // once more and writing again, so the summary keeps its live sources;
+        // the refusal that reaches such a key names no position, and the hook
+        // could only drop the whole list (twelfth review pass). A reader is
+        // refused as before, with positions, and decides.
+        const store = await db();
+        const captureArgs = {
           content,
           payload,
           chunks,
@@ -1230,9 +1326,16 @@ function buildServer(principal: Principal): McpServer {
           // 025: provenance, if the caller named any. upsert_thought validates
           // derived_from and refuses a bad reference, so a malformed value
           // fails the capture with a clear message rather than storing a lie.
-          derivedFrom: derived_from,
           supersedes,
-        });
+        };
+        let captured;
+        try {
+          captured = await store.captureThought({ ...captureArgs, derivedFrom });
+        } catch (e) {
+          if (reader || !derivedFrom?.length || !/derived_from references a thought that does not exist/.test(String((e as Error)?.message ?? e))) throw e;
+          derivedFrom = await liveSubset(store, derivedFrom);
+          captured = await store.captureThought({ ...captureArgs, derivedFrom });
+        }
 
         // Memory utilization (SMD-1719, over 034's log): a capture that names a
         // returned id as its source — `derived_from`, or `supersedes` — is the
@@ -1250,7 +1353,7 @@ function buildServer(principal: Principal): McpServer {
         // "fresh" on the one schema where the pointer's fate is unknown). The
         // vector attaching or not does not change what was written.
         if (captured.existed === false) {
-          await logActionCalls(citeRows("capture_thought", { derived_from, supersedes }));
+          await logActionCalls(citeRows("capture_thought", { derived_from: derivedFrom, supersedes }));
         }
 
         if (captured.embeddingFailed) {
@@ -1289,7 +1392,11 @@ function buildServer(principal: Principal): McpServer {
         // two-step, does not say which this was — and the coalesce holds
         // there too (033), so the note hedges rather than tell the fresh-row
         // story of a row that may be keeping its vector (second review pass).
-        const existed = captured.existed;
+        // What a key that cannot read may be told about the row: not whether
+        // the text was already a thought, nor what it points at (first review
+        // pass — an existence oracle on a capture-only key). The id is returned
+        // either way; a hook needs it to supersede its own earlier summary.
+        const existed = reader ? captured.existed : undefined;
         if (!gate.embeddings.allowed) {
           confirmation += existed === true
             ? `\n\nNote: the embedding call for this capture was not made — ${gate.embeddings.reason}. This text was already a thought, and it keeps the vector it had.`
@@ -1299,7 +1406,9 @@ function buildServer(principal: Principal): McpServer {
                 `(db/reembed.ts) against an endpoint the gate allows.`
               : `\n\nNote: the embedding call for this capture was not made — ${gate.embeddings.reason}. A new thought has no vector — findable by exact text ` +
                 `(search_thoughts_keyword), filled in by a re-embed pass (db/reembed.ts) against an endpoint the gate allows; text already captured keeps the vector it had. ` +
-                `This database does not say which this was.`;
+                // A key that cannot read is not told which (SMD-1298); a database
+                // from before 035 cannot say.
+                (reader ? `This database does not say which this was.` : `This reply does not say which.`);
         }
 
         // A chunk whose situating blurb could not be generated is embedded bare
@@ -1326,8 +1435,8 @@ function buildServer(principal: Principal): McpServer {
         // were not written; say so and name the edit that records it, since
         // otherwise nothing would — the trace would show nothing and no
         // error would say why.
-        const derivedNamed = derived_from !== undefined && derived_from.length > 0;
-        if (captured.existed === true && (derivedNamed || supersedes !== undefined)) {
+        const derivedNamed = derivedFrom !== undefined && derivedFrom.length > 0;
+        if (existed === true && (derivedNamed || supersedes !== undefined)) {
           const named = [derivedNamed ? "`derived_from`" : null, supersedes !== undefined ? "`supersedes`" : null].filter(Boolean);
           // What stands, from the row's pointer the store returned beside
           // `existed` (035) — not from the caller's inputs alone, which the
@@ -1386,7 +1495,32 @@ function buildServer(principal: Principal): McpServer {
         // Its sibling: validate_derived_from's existence refusal (032), the
         // one provenance refusal that still reached the caller as a raw error
         // (fifth review pass).
-        if (/derived_from references a thought that does not exist/.test(msg)) return toolError(`Refused: a \`derived_from\` id names no thought — ${msg.replace(/^.*?\(in /, "(in ").replace(/\.$/, "")}. Each must be an existing thought id (the ID: line of a search result).`);
+        if (/derived_from references a thought that does not exist/.test(msg)) {
+          // WHICH ones (second review pass): 025 names the whole list, so the
+          // store is asked which exist and the reply names the POSITIONS that
+          // do not — what a caller needs to drop exactly those and try again,
+          // and nothing it did not send — with the ids beside them for a key
+          // that can read. A capture key's list was trimmed before the write
+          // (third review pass), so it reaches here only when a source was
+          // deleted between the check and the write — and is told no position
+          // even then (eighth review pass: the race was the one path that still
+          // named one to a key that cannot read).
+          const sent = derived_from ?? [];
+          let missingAt: number[] = [];
+          if (reader) { // a non-reader is told no position, so the store is not asked (tenth review pass)
+            try {
+              const have = await (await db()).existingIds(sent);
+              missingAt = sent.map((d, i) => (have.has(d.toLowerCase()) ? -1 : i)).filter((i) => i >= 0);
+            } catch { /* the store could not say: the list alone, then */ }
+          }
+          // The verb agrees with what is SAID: the plural leaked the count to a
+          // non-reader through the placeholder (ninth review pass).
+          const named = reader && missingAt.length ? missingAt : [];
+          const where = named.length
+            ? named.map((i) => `derived_from[${i}] (${sent[i]})`).join(", ")
+            : "a `derived_from` id";
+          return toolError(`Refused: ${where} name${named.length > 1 ? "" : "s"} no thought. Each entry must be an existing thought id (the ID: line of a search result).`);
+        }
         return {
           content: [{ type: "text" as const, text: `Error: ${msg}` }],
           isError: true,
@@ -1602,6 +1736,17 @@ const HEALTH_METHOD_NOT_ALLOWED_HEADERS = { ...corsHeaders, Allow: HEALTH_ALLOWE
 // clients recover (e.g. prompt the user for a new key, refetch a stale
 // cache) instead of dying.
 const JSON_RPC_UNAUTHORIZED_CODE = -32001;
+
+/**
+ * The ids in `ids` that name a thought, or undefined when none does — the one
+ * rule for trimming a capture-only key's `derived_from` before the write and
+ * again on the retry (thirteenth review pass: it was spelled twice).
+ */
+async function liveSubset(store: ThoughtStore, ids: string[]): Promise<string[] | undefined> {
+  const have = await store.existingIds(ids);
+  const kept = ids.filter((d) => have.has(d.toLowerCase()));
+  return kept.length ? kept : undefined;
+}
 const UNAUTHORIZED_MESSAGE = "Unauthorized: missing or invalid authentication.";
 
 /**
@@ -1751,10 +1896,12 @@ app.on(MCP_METHODS, "*", async (c) => {
   // `?key=` does not shadow it. The query form stays because Claude Desktop
   // custom connectors are URL-only; scopes are what limit the damage when such a
   // URL leaks. See auth.ts.
+  // Every scope: this is the one server that registers a tool group for a
+  // capture-only key. A consumer that does not say admits read and write alone.
   const principal = authenticateRequest(c.req.raw, {
     MCP_ACCESS_KEYS: env().MCP_ACCESS_KEYS,
     MCP_ACCESS_KEY: env().MCP_ACCESS_KEY,
-  });
+  }, { admit: SCOPES });
 
   if (!principal) {
     // Return a JSON-RPC 2.0 error envelope (HTTP 200) instead of a bare
@@ -1783,6 +1930,7 @@ app.on(MCP_METHODS, "*", async (c) => {
     return unauthorizedResponse(extractJsonRpcId(bodyText), REVOKED_MESSAGE);
   }
   principal.agentId = identity.agentId;
+  if (identity.status === "ok") principal.agentUnresolved = identity.unresolved;
 
   const server = buildServer(principal);
   const transport = new StreamableHTTPTransport();
