@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ci-parity.sh — run every database-backed suite the way CI does: in CI's order,
-# against ONE shared Postgres — then the suites that need none, and the four
-# directories' typechecks (SMD-1932).
+# against ONE shared Postgres — then the suites that need none, and the five
+# directories' typechecks (SMD-1932, SMD-1870).
 #
 # This exists because running the suites individually cannot catch a whole class
 # of bug. `with-postgres.sh` starts a fresh container per invocation, so state one
@@ -107,6 +107,7 @@ main() {
   typecheck compat/supabase-sql
   typecheck db
   typecheck evals
+  typecheck scripts
   echo
   [ "$FAILED" -eq 0 ] && echo "  all suites passed" || echo "  FAILURES above"
   return "$FAILED"

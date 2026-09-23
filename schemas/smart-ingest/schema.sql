@@ -73,7 +73,7 @@ CREATE INDEX IF NOT EXISTS idx_ingestion_items_pending
 --     from user_id to Supabase's auth.users(id), inside a DO block that
 --     ran only where the auth schema exists. Guarded or not, it is a
 --     reference into GoTrue's schema, which the fork's SQL rule refuses
---     (scripts/check-fork-consistency.mjs check 12); a single-operator
+--     (scripts/check-fork-consistency.ts check 12); a single-operator
 --     brain (SMD-1716) has no auth.users to point at, so the column
 --     stays a plain nullable uuid and the block is gone.
 -- ============================================================

@@ -38,6 +38,7 @@ import { heartbeatFor, leaseRefusal } from "./lease.ts";
 import { consolidateKey } from "../server-portable/consolidate.ts";
 import { reachabilityReport, readHnswGraph, reachableFromEntry, type HnswElement, type HnswGraph } from "./hnsw-graph.ts";
 import { INGEST_ACTOR, recordId, stampTier, upsertRecord, type Doc } from "./ingest-records.ts";
+import { promote, refresh, refreshToolsReady, replayAndDiff } from "./tier.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const URL_ = process.env.DATABASE_URL;
@@ -4141,6 +4142,102 @@ console.log("\n[19] db/ingest-records.ts: the records upsert is source-labelled 
   assert(cfg.tier === "stable" && /^\d{4}-\d\d-\d\dT/.test(cfg.last_ingest ?? ""), "ob1_config records tier=stable and a last_ingest timestamp");
 
   for (const id of ids) await sql`DELETE FROM thoughts WHERE id = ${id}::uuid`; // per-id: Bun binds a JS array as a comma string, not a {…} literal
+}
+
+console.log("\n[20] db/tier.ts: the canary reproduces stable's rankings on the same corpus, and a perturbed canary is caught — the live replay gate's engine (SMD-1806)");
+{
+  // The live replay gate (SMD-1295's live half): stable logs a search and the ids
+  // it returned; the canary, refreshed from stable, replays that search and its
+  // ids are diffed against stable's. This drives the ENGINE (readLoggedSearches →
+  // replayOne → diffResult) end to end over the KEYWORD arm, which needs no model
+  // — the arm CI can run. The pg_dump-based refresh() and the hybrid arm need
+  // client tools / a provider CI does not have; they are exercised by the compose
+  // stack and documented, the same split as eval-replay.ts vs test-replay.ts.
+  await sql`DELETE FROM query_log`; // scope the replay window to this section's rows
+  const put = (s: SQL, id: string, content: string) =>
+    s`INSERT INTO thoughts (id, content, metadata, content_fingerprint)
+      VALUES (${id}::uuid, ${content}, ${{ source: "fork" }}::jsonb, content_fingerprint_of(${content}))`;
+
+  // A tiny corpus with two distinctive needles: "zqcanary" in three rows, "zqdelta"
+  // in one, so no unrelated row a prior section left behind matches either.
+  const corpus = [
+    { id: recordId("fork", "tier-a"), content: "zqcanary alpha — a migration meets real vectors before an operator does" },
+    { id: recordId("fork", "tier-b"), content: "zqcanary beta — a lost query_log row is a lost replay" },
+    { id: recordId("fork", "tier-c"), content: "zqcanary gamma — three brains as a promotion pipeline over one corpus" },
+    { id: recordId("fork", "tier-d"), content: "zqdelta — unrelated content about pruning old rows" },
+  ];
+  for (const c of corpus) await put(sql, c.id, c.content);
+
+  // Log what STABLE returns for each needle — the answer the canary is diffed against.
+  const loggedFor = async (needle: string): Promise<string[]> => {
+    const rows = await sql`SELECT id FROM search_thoughts_keyword(${needle}, 25, 0, '{}'::jsonb)`;
+    const ids = rows.map((r: { id: string }) => r.id);
+    await sql`
+      INSERT INTO query_log (kind, tool, agent_id, query, match_count, threshold, recency_weight, filter, result_ids, result_scores, arm, tier)
+      VALUES ('search', 'search_thoughts_keyword', NULL, ${needle}, 25, NULL, NULL, '{}'::jsonb, ${`{${ids.join(",")}}`}::uuid[], NULL, 'keyword', 'stable')`;
+    return ids;
+  };
+  const canaryHits = await loggedFor("zqcanary");
+  await loggedFor("zqdelta");
+  assert(canaryHits.length === 3, `stable's "zqcanary" search returned the three matching rows (${canaryHits.length})`);
+
+  // Build the canary as a genuinely separate database on this cluster, migrated
+  // forward and given the identical corpus — the refresh's shape without pg_dump,
+  // which CI has no compatible client for.
+  const canaryDb = "ob1_tier_canary";
+  const canaryUrl = (() => { const u = new URL(URL_!); u.pathname = `/${canaryDb}`; return u.toString(); })();
+  let canarySql: SQL | null = null;
+  try {
+    await sql.unsafe(`SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '${canaryDb}' AND pid <> pg_backend_pid()`);
+    await sql.unsafe(`DROP DATABASE IF EXISTS ${canaryDb}`);
+    await sql.unsafe(`CREATE DATABASE ${canaryDb}`);
+    const migrated = await runMigrator(canaryUrl, undefined);
+    assert(migrated.code === 0, "the canary database migrates forward with this tree");
+    canarySql = new SQL({ url: canaryUrl, max: 4 });
+    for (const c of corpus) await put(canarySql, c.id, c.content);
+
+    // An identical canary reproduces stable's rankings — the diff is empty.
+    const clean = await replayAndDiff(sql, canarySql, { since: null });
+    assert(clean.replayed === 2 && clean.skipped === 0, `both logged keyword searches replay model-free (replayed ${clean.replayed}, skipped ${clean.skipped})`);
+    assert(clean.changed === 0, "an identical canary reproduces stable's logged rankings — the diff is empty");
+
+    // Perturb the canary: drop one "zqcanary" row. Now that query — and only that
+    // query — moves, and the diff names the dropped id. The gate has teeth.
+    await canarySql`DELETE FROM thoughts WHERE id = ${corpus[0].id}::uuid`;
+    const perturbed = await replayAndDiff(sql, canarySql, { since: null });
+    assert(perturbed.changed === 1, `deleting one canary row moves exactly the query that returned it (${perturbed.changed} changed)`);
+    const moved = perturbed.diffs[0];
+    assert(moved?.dropped.includes(corpus[0].id) && moved.added.length === 0, "the diff names the dropped id and adds none — a real difference, measured");
+
+    // --promote, the data half: it reads the soaked canary's schema_version (044,
+    // stamped when the canary migrated) and records it on stable as
+    // promoted_schema_version — NOT schema_version, which is the migrated-under
+    // version preflight reads and stable is not migrated here.
+    const canaryVer = (await canarySql`SELECT value FROM ob1_config WHERE key = 'schema_version'`)[0]?.value;
+    const { version } = await promote(canaryUrl, URL_!);
+    assert(canaryVer != null && version === canaryVer, "promote reads the canary's schema_version (migration 044), not an absent 'version' key");
+    const stableCfg = Object.fromEntries((await sql`SELECT key, value FROM ob1_config WHERE key IN ('tier','promoted_schema_version','promoted_at')`).map((r: { key: string; value: string }) => [r.key, r.value]));
+    assert(stableCfg.tier === "stable" && stableCfg.promoted_schema_version === canaryVer && /^\d{4}-\d\d-\d\dT/.test(stableCfg.promoted_at ?? ""), "promote stamps stable: tier=stable, promoted_schema_version and a promoted_at time");
+    await sql`DELETE FROM ob1_config WHERE key IN ('promoted_schema_version','promoted_at')`;
+  } finally {
+    if (canarySql) await canarySql.close();
+    await sql.unsafe(`SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '${canaryDb}' AND pid <> pg_backend_pid()`);
+    await sql.unsafe(`DROP DATABASE IF EXISTS ${canaryDb}`);
+  }
+
+  // The refresh guards, without needing client tools: a pg_dump older than the
+  // server is refused, and a non-loopback target is refused without the opt-in.
+  assert((await refreshToolsReady(9999)).ready === false, "refreshToolsReady refuses when pg_dump cannot read the server's major version");
+  const savedAllow = process.env.OB1_ALLOW_REMOTE_DB;
+  delete process.env.OB1_ALLOW_REMOTE_DB;
+  let refusedRemote = false;
+  try { await refresh("postgres://u@example.com:5432/a", "postgres://u@example.com:5432/b", "canary"); }
+  catch { refusedRemote = true; }
+  finally { if (savedAllow !== undefined) process.env.OB1_ALLOW_REMOTE_DB = savedAllow; }
+  assert(refusedRemote, "refresh refuses a non-loopback target unless OB1_ALLOW_REMOTE_DB=1 (it drops the target's schema)");
+
+  for (const c of corpus) await sql`DELETE FROM thoughts WHERE id = ${c.id}::uuid`;
+  await sql`DELETE FROM query_log`;
 }
 
 console.log("\n[21] said_by on real pgvector: the mark 048 stamps is filtered through 014's route — 001's GIN index, scanned inside the call — and the answer is the operator's rows alone (SMD-1726)");

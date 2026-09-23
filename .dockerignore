@@ -1,8 +1,10 @@
-# Build context for server-portable/Dockerfile, which is built from the REPO ROOT
-# so it can reach db/config.mjs — the embedding contract shared with migrate.ts.
+# Build context for server-portable/Dockerfile and db/Dockerfile (the ob1-server
+# and ob1-migrate images), both built from the REPO ROOT so they can reach
+# db/config.mjs — the embedding contract the server and the migrator share — and
+# releases.json.
 #
 # A root context means the whole repository is a candidate for upload, and this
-# repo is mostly recipes, dashboards and docs that the server image never touches.
+# repo is mostly recipes, dashboards and docs that neither image touches.
 # Without these rules the context is hundreds of megabytes of node_modules alone.
 # server-portable/.dockerignore no longer applies: Docker reads the file at the
 # context root, so its rules are folded in below.
@@ -39,11 +41,15 @@ supabase
 **/.cf-out
 **/*.log
 
-# db/ is included only for config.mjs and its types; migrations are applied by the
-# separate migrate service, not by the server image.
-db/migrations
+# db/: the server image copies config.mjs, version.mjs and their types; the
+# migrate image (db/Dockerfile, SMD-1860) copies migrate.ts and migrations/. Both
+# are built from this root, so both stay in the context; the tests, benches,
+# workers and the tests' package do not.
 db/*.ts
+!db/migrate.ts
 db/*.sh
+db/package.json
+db/bun.lock
 
 # Local environment and editor state.
 .env

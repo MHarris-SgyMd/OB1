@@ -1,0 +1,238 @@
+# The three-brain promotion pipeline as one stack (SMD-1806).
+#
+# Three brains over one corpus, each its own Postgres and its own server on its
+# own loopback port, one shared Ollama:
+#
+#   stable  (:8010) — the record, the only writer; rebuilt by db/ingest-records.ts.
+#   canary  (:8011) — main's shadow; refreshed from stable and migrated forward by
+#                     db/tier.ts on every merge, then the query log is replayed and
+#                     the ids diffed.
+#   working (:8012) — a per-worktree disposable copy of stable, migrated by the branch.
+#
+#   docker compose -f deploy/compose.tiers.yaml --profile local-models up --build
+#   podman compose -f deploy/compose.tiers.yaml --profile local-models up --build
+#
+# Built from the checkout, like compose.yaml (a release pins the published images
+# instead — deploy/README.md, "Pinning a release"). Secrets come from deploy/.env (gitignored); copy
+# .env.example first. Each server's OB1_TIER falls back to its own tier, so leave
+# OB1_TIER UNSET in deploy/.env for this stack — setting it would force all three
+# servers to the same tier. Everything else is forwarded exactly as compose.yaml
+# forwards it (check 14 holds every OB1_* value to `${NAME}`/`${NAME:-default}`),
+# via the anchors below so the three servers cannot drift.
+#
+# What the host can reach: the three servers, each on 127.0.0.1 unless its
+# `*_SERVER_BIND` knob says otherwise (check 13, SMD-1844). The three Postgres
+# services and Ollama publish nothing; each server reaches its own database by
+# service name on the compose network, and db/tier.ts reaches a tier's database
+# with `compose exec <tier>-postgres …` or through compose.host-ports.yaml.
+
+name: open-brain-tiers
+
+# The server environment every tier shares — a copy of compose.yaml's server
+# block minus DATABASE_URL and OB1_TIER, which are per-tier below. Held to the
+# same house form (check 14): each OB1_* value is `${NAME}` or `${NAME:-default}`.
+x-server-env: &server-env
+  MCP_ACCESS_KEYS: ${MCP_ACCESS_KEYS:?set MCP_ACCESS_KEYS in deploy/.env — mint with server-portable/keygen.ts}
+  OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+  OB1_EMBEDDING_DIM: ${OB1_EMBEDDING_DIM:-1024}
+  OB1_EMBEDDING_MODEL: ${OB1_EMBEDDING_MODEL:-qwen3-embedding:4b}
+  OB1_TRGM_INDEX: ${OB1_TRGM_INDEX:-}
+  OB1_CHUNK_CONTEXT: ${OB1_CHUNK_CONTEXT:-}
+  OB1_CHUNK_TOKENS: ${OB1_CHUNK_TOKENS:-}
+  OB1_CHUNK_OVERLAP: ${OB1_CHUNK_OVERLAP:-}
+  OB1_EMBEDDING_DIMENSIONS: ${OB1_EMBEDDING_DIMENSIONS:-}
+  OB1_LLM_API_KEY: ${OB1_LLM_API_KEY:-}
+  OB1_CHAT_BASE_URL: ${OB1_CHAT_BASE_URL:-}
+  OB1_CHAT_API_KEY: ${OB1_CHAT_API_KEY:-}
+  OB1_JUDGE_MODEL: ${OB1_JUDGE_MODEL:-}
+  OB1_LLM_TIMEOUT: ${OB1_LLM_TIMEOUT:-}
+  OB1_EGRESS_POLICY: ${OB1_EGRESS_POLICY:-}
+  OB1_EGRESS_ALLOW: ${OB1_EGRESS_ALLOW:-}
+  OB1_EGRESS_DENY: ${OB1_EGRESS_DENY:-}
+  OB1_LLM_LOCAL: ${OB1_LLM_LOCAL:-}
+  OB1_CHAT_LOCAL: ${OB1_CHAT_LOCAL:-}
+  # Both model calls go to the shared Ollama by default — the `ollama` service in
+  # this file, the name check 14 holds this fallback to (db/config.mjs's
+  # LOCAL_PROVIDER_SERVICES).
+  OB1_LLM_BASE_URL: ${OB1_LLM_BASE_URL:-http://ollama:11434/v1}
+  OB1_METADATA_MODEL: ${OB1_METADATA_MODEL:-}
+  OB1_METADATA_TEMPERATURE: ${OB1_METADATA_TEMPERATURE:-}
+  OB1_METADATA_REASONING: ${OB1_METADATA_REASONING:-}
+  OB1_QUERY_LOG: ${OB1_QUERY_LOG:-}
+  OB1_QUERY_LOG_RETENTION_DAYS: ${OB1_QUERY_LOG_RETENTION_DAYS:-}
+  OB1_AGENT_CACHE_TTL_MS: ${OB1_AGENT_CACHE_TTL_MS:-}
+  OPEN_BRAIN_CITATION_BASE_URL: ${OPEN_BRAIN_CITATION_BASE_URL:-}
+  OB1_PG_POOL: ${OB1_PG_POOL:-}
+  PORT: "8000"
+
+# The migrate one-shot's environment, minus its per-tier DATABASE_URL — the schema
+# contract every tier is built under (must match db/config.mjs, as compose.yaml).
+x-migrate-env: &migrate-env
+  OB1_EMBEDDING_DIM: ${OB1_EMBEDDING_DIM:-1024}
+  OB1_EMBEDDING_MODEL: ${OB1_EMBEDDING_MODEL:-qwen3-embedding:4b}
+  OB1_TRGM_INDEX: ${OB1_TRGM_INDEX:-}
+  OB1_CHUNK_CONTEXT: ${OB1_CHUNK_CONTEXT:-}
+  OB1_EMBEDDING_DIMENSIONS: ${OB1_EMBEDDING_DIMENSIONS:-}
+  OB1_BACKFILL_LIMIT: ${OB1_BACKFILL_LIMIT:-}
+
+# One Postgres per tier — pinned as compose.yaml pins it, no published port, its
+# own volume so the three brains are genuinely separate corpora.
+x-tier-postgres: &tier-postgres
+  image: pgvector/pgvector:0.8.6-pg16
+  shm_size: ${POSTGRES_SHM_SIZE:-1g}
+  environment:
+    POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in deploy/.env}
+    POSTGRES_DB: openbrain
+    POSTGRES_USER: postgres
+  healthcheck:
+    test: ["CMD-SHELL", "pg_isready -U postgres -d openbrain"]
+    interval: 5s
+    timeout: 5s
+    retries: 12
+
+# The migrator image compose.yaml builds (db/Dockerfile — the ob1-migrate image
+# the release job publishes, SMD-1860), one build shared by the three tiers.
+x-tier-migrate: &tier-migrate
+  build:
+    context: ..
+    dockerfile: db/Dockerfile
+  restart: "no"
+
+# The Ollama image, one anchor as in compose.yaml and held equal to its pin by
+# scripts/release-artifacts.ts (a rehearsal runs on every PR touching deploy/).
+x-ollama-image: &ollama-image ollama/ollama:0.34.3
+
+services:
+  # ── stable ───────────────────────────────────────────────────────────────
+  stable-postgres:
+    <<: *tier-postgres
+    volumes:
+      - stable-pgdata:/var/lib/postgresql/data
+
+  stable-migrate:
+    <<: *tier-migrate
+    environment:
+      <<: *migrate-env
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@stable-postgres:5432/openbrain
+    depends_on:
+      stable-postgres:
+        condition: service_healthy
+
+  stable-server:
+    build:
+      context: ..
+      dockerfile: server-portable/Dockerfile
+    environment:
+      <<: *server-env
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@stable-postgres:5432/openbrain
+      OB1_TIER: ${OB1_TIER:-stable}
+    ports:
+      - "${STABLE_SERVER_BIND:-127.0.0.1}:${STABLE_SERVER_PORT:-8010}:8000"
+    depends_on:
+      stable-postgres:
+        condition: service_healthy
+      stable-migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  # ── canary ───────────────────────────────────────────────────────────────
+  canary-postgres:
+    <<: *tier-postgres
+    volumes:
+      - canary-pgdata:/var/lib/postgresql/data
+
+  canary-migrate:
+    <<: *tier-migrate
+    environment:
+      <<: *migrate-env
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@canary-postgres:5432/openbrain
+    depends_on:
+      canary-postgres:
+        condition: service_healthy
+
+  canary-server:
+    build:
+      context: ..
+      dockerfile: server-portable/Dockerfile
+    environment:
+      <<: *server-env
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@canary-postgres:5432/openbrain
+      OB1_TIER: ${OB1_TIER:-canary}
+    ports:
+      - "${CANARY_SERVER_BIND:-127.0.0.1}:${CANARY_SERVER_PORT:-8011}:8000"
+    depends_on:
+      canary-postgres:
+        condition: service_healthy
+      canary-migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  # ── working ──────────────────────────────────────────────────────────────
+  working-postgres:
+    <<: *tier-postgres
+    volumes:
+      - working-pgdata:/var/lib/postgresql/data
+
+  working-migrate:
+    <<: *tier-migrate
+    environment:
+      <<: *migrate-env
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@working-postgres:5432/openbrain
+    depends_on:
+      working-postgres:
+        condition: service_healthy
+
+  working-server:
+    build:
+      context: ..
+      dockerfile: server-portable/Dockerfile
+    environment:
+      <<: *server-env
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@working-postgres:5432/openbrain
+      OB1_TIER: ${OB1_TIER:-working}
+    ports:
+      - "${WORKING_SERVER_BIND:-127.0.0.1}:${WORKING_SERVER_PORT:-8012}:8000"
+    depends_on:
+      working-postgres:
+        condition: service_healthy
+      working-migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  # ── the shared model provider ────────────────────────────────────────────
+  # One Ollama for all three tiers (the cost SMD-1806 contains — one model server,
+  # three brains). Optional, enabled with `--profile local-models`; the three
+  # servers' OB1_LLM_BASE_URL falls back to it by name.
+  ollama:
+    image: *ollama-image
+    profiles: ["local-models"]
+    volumes:
+      - ollama:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  ollama-pull:
+    image: *ollama-image
+    profiles: ["local-models"]
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+      OB1_JUDGE_MODEL: ${OB1_JUDGE_MODEL:-}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        ollama pull ${OB1_EMBEDDING_MODEL:-qwen3-embedding:4b}
+        ollama pull ${OB1_METADATA_MODEL:-qwen2.5:7b}
+        [ -z "$$OB1_JUDGE_MODEL" ] || ollama pull "$$OB1_JUDGE_MODEL"
+    restart: "no"
+
+volumes:
+  stable-pgdata:
+  canary-pgdata:
+  working-pgdata:
+  ollama:

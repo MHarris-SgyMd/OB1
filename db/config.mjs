@@ -100,7 +100,7 @@ export const DEFAULT_EMBEDDING_DIM = 1024;
  * at all: pointing local model names at OpenRouter produces a 404 per capture, and
  * the embedding one is fatal rather than degraded. Overriding the provider means
  * overriding the models too, which SETUP.md says and
- * scripts/check-fork-consistency.mjs enforces.
+ * scripts/check-fork-consistency.ts enforces.
  */
 export const DEFAULT_LLM_BASE_URL = "http://127.0.0.1:11434/v1";
 
@@ -1050,7 +1050,7 @@ export const LOCK_TIMEOUT_S = 10;
  * sharing a number (two branches each adding "the next number" is how it
  * happens; the fork has renumbered twice; SMD-1421). One rule, read by
  * migrate.ts at load — every operator's run and every compose start — and by
- * scripts/check-fork-consistency.mjs on every push, where the collision is
+ * scripts/check-fork-consistency.ts on every push, where the collision is
  * made. Only .sql files are judged.
  * @param {string[]} names
  * @returns {string | null}
@@ -1112,7 +1112,7 @@ export function versionAtLeast(version, major, minor = 0, patch = 0) {
  * The compose service names a model endpoint may live at — the `ollama`
  * service deploy/compose.yaml's `local-models` profile adds. preflight.ts
  * passes these to isLocalHostname (a service name is local: the compose
- * network), and check 14 of scripts/check-fork-consistency.mjs holds
+ * network), and check 14 of scripts/check-fork-consistency.ts holds
  * compose.yaml's OB1_LLM_BASE_URL fallback to one of them — so the address
  * the file defaults to is one the container will call local (SMD-1843).
  */
@@ -1281,7 +1281,7 @@ export const SUPERSEDED_SIGNATURES = Object.freeze([
  * Workers build and cannot touch the filesystem. A statement at the start of
  * a line, comments stripped first so a header quoting one is not it
  * (test-schema [10]'s rule). Read from the files, never typed: a list would
- * lag the next migration. scripts/check-fork-consistency.mjs check 7 fails a
+ * lag the next migration. scripts/check-fork-consistency.ts check 7 fails a
  * vendored file that redefines or drops one of these; test-schema [31] holds
  * the set to what preflight's remedies name.
  */
@@ -1908,17 +1908,180 @@ export const SUPABASE_SQL_RULES = Object.freeze([
  */
 export function supabaseIsmsIn(text) {
   const sql = stripSqlComments(text);
-  const seen = new Set();
-  const hits = [];
+  const list = sqlHitList(sql, SUPABASE_SQL_RULES);
   for (const rule of SUPABASE_SQL_RULES) {
     const re = new RegExp(rule.re.source, rule.re.flags.includes("g") ? rule.re.flags : rule.re.flags + "g");
-    for (const m of sql.matchAll(re)) {
-      const line = sql.slice(0, m.index).split("\n").length;
-      const key = `${rule.name}@${line}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      hits.push({ rule: rule.name, line, msg: rule.msg });
-    }
+    for (const m of sql.matchAll(re)) list.add(rule.name, m.index);
   }
-  return hits.sort((a, b) => a.line - b.line);
+  return list.sorted();
+}
+/**
+ * The hit list of one rule set over one comment-stripped text: `add(rule,
+ * index)` records the (rule, line) once, with the rule's message; `sorted()`
+ * returns the hits by line. Line numbers are the source's, since the strip
+ * keeps newlines. supabaseIsmsIn and destructiveSqlIn share it.
+ */
+function sqlHitList(sql, rules) {
+  const msgOf = new Map(rules.map((r) => [r.name, r.msg]));
+  const seen = new Set();
+  const hits = [];
+  return {
+    add(rule, index) {
+      const line = sql.slice(0, index).split("\n").length;
+      const key = `${rule}@${line}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      hits.push({ rule, line, msg: msgOf.get(rule) });
+    },
+    sorted: () => hits.sort((a, b) => a.line - b.line),
+  };
+}
+
+/**
+ * The statements a `.sql` file may never run, because each destroys rows a
+ * brain already holds — CLAUDE.md's SQL-safety guard rail, read as what it
+ * means (SMD-1936). A community file is pasted by hand into a running brain and
+ * a migration is applied to every operator's, so a file that destroys rows
+ * destroys a stranger's memory with no undo. The rail's four shapes, with DROP
+ * SCHEMA beside DROP DATABASE (`DROP SCHEMA public CASCADE` is the reset that
+ * takes every table with it), read from the comment-stripped text as
+ * STATEMENTS rather than words: a `TRUNCATE` is a hit only when a table follows
+ * it — `TABLE`, `ONLY`, a name, a format() placeholder (`%I`, `%1$I`) or the
+ * `' ||` / `$tag$ ||` of dynamic SQL — so a trigger event (`BEFORE TRUNCATE ON t`: 046's refusing trigger, the rule
+ * applied), a privilege (`GRANT TRUNCATE ON`) and the value `TG_OP = 'TRUNCATE'`
+ * are not it; a `DELETE FROM` is a hit only when its statement — to its `;`, or
+ * to the `)` that closes the CTE it sits in — carries no WHERE, so 034's
+ * `DELETE FROM query_log` with the WHERE on the next line passes where
+ * upstream's same-line grep failed it, and `DELETE FROM t;` and `DELETE FROM t
+ * RETURNING id;` fail; DROP TABLE and DROP DATABASE/SCHEMA/OWNED wherever they
+ * stand outside a quoted identifier. String literals are read, as
+ * SUPABASE_SQL_RULES reads them: `EXECUTE 'TRUNCATE ' || quote_ident(t)` runs
+ * the truncate. A `--` comment quoting a statement is not a hit, so a header
+ * may say why the file has none. check-fork-consistency check 21 holds every
+ * .sql git tracks to these through destructiveSqlIn().
+ */
+export const DESTRUCTIVE_SQL_RULES = Object.freeze([
+  Object.freeze({ name: "drop-table",
+    msg: "drops a table — a SQL file adds to a brain and never removes what it holds (CLAUDE.md's SQL-safety rail: a file must never destroy existing rows); a scratch table is `CREATE TEMP TABLE … ON COMMIT DROP`, as migration 016's `_rte_in` is, and a table an operator no longer wants is theirs to drop by hand, outside any file. String literals count (an EXECUTE string runs); a word in prose belongs in a `--` comment" }),
+  Object.freeze({ name: "drop-database",
+    msg: "drops a database, a schema, or everything a role owns (`DROP OWNED BY`) — every table in it and every row with it (CLAUDE.md's SQL-safety rail: a file must never destroy existing rows); no file in this repository builds or resets a database, and an operator's reset is theirs to run by hand. String literals count; a word in prose belongs in a `--` comment" }),
+  Object.freeze({ name: "truncate",
+    msg: "truncates a table (CLAUDE.md's SQL-safety rail: a file must never destroy existing rows); a trigger event (`BEFORE TRUNCATE ON t`, which REFUSES it) and a privilege (`GRANT TRUNCATE ON`) are not this statement and pass. String literals count (an EXECUTE string runs); a word in prose belongs in a `--` comment, or reworded (`'never truncated'`)" }),
+  Object.freeze({ name: "unqualified-delete",
+    msg: "a DELETE FROM whose statement has no WHERE clause of its own — every row of the table (CLAUDE.md's SQL-safety rail: a file must never destroy existing rows); name the rows (`WHERE id = $1`, on any line of the statement; a `WHERE true` on a TEMP table the file itself made, as 016's `_rte_in`, is the letter of the rule) — a WHERE inside a subquery or a USING source does not count, nor one inside a string when the file runs the DELETE itself. String literals count (an EXECUTE string or a format() template is read to its `;` or closing `)`); a statement quoted in prose belongs in a `--` comment" }),
+]);
+/**
+ * What may follow TRUNCATE for it to be the statement: the TABLE/ONLY keywords,
+ * then a bare or quoted name that is not the keyword ending a trigger event or a
+ * privilege list (`ON`, `OR`, `TO`, …), a format() placeholder (`%I`, `%s`, the
+ * positional `%1$I`), or the closing quote — `'` or a dollar tag — and `||` of a
+ * statement built by concatenation. A keyword inside a quoted identifier
+ * (`SELECT "TRUNCATE" FROM t`, `"my TRUNCATE"`) names a column, not a
+ * statement: destructiveSqlIn skips a match that blankSqlLiterals marks as
+ * one (first and second review passes).
+ */
+const TRUNCATE_TARGET = String.raw`\bTRUNCATE\b\s*(?:(?:TABLE|ONLY)\s+)*(?:"|%(?:\d+\$)?[Is]|(?:'|\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$)\s*\|\||(?!(?:ON|OR|TO|FROM|AND|THEN|ELSE|END|IN|IS|WHEN)\b)[\p{L}_][\p{L}\p{N}_$.]*)`; // \p: an unquoted name may be non-ASCII (`TRUNCATE Übersicht`), matched with the u flag
+/** What blankSqlLiterals writes over the inside of a quoted identifier, so a caller can tell one from a string literal (blanked to spaces). */
+const IDENT_FILL = "~";
+/**
+ * `sql` (comments already stripped) with the inside of every string literal
+ * blanked to spaces and of every quoted identifier to IDENT_FILL, the quotes
+ * kept and every position where it was, a dollar-quoted body scanned within
+ * its own bounds (an apostrophe in a `$$…$$` value cannot open a literal that
+ * runs to the end of the file — second review pass) and its tags left alone —
+ * so a `(`, `)`, `;` or WHERE inside a literal moves no statement boundary and
+ * qualifies nothing (first review pass), and a keyword inside `"…"` is known
+ * for the column name it is. The quote rules are stripSqlComments's: `''`
+ * doubled, an E'…' string escaping with a backslash, `$tag$` grammar.
+ */
+function blankSqlLiterals(sql) {
+  let out = "";
+  let i = 0;
+  const n = sql.length;
+  while (i < n) {
+    const c = sql[i];
+    if (c === "'" || c === '"') {
+      const escaped = c === "'" && /[Ee]$/.test(out) && !/\w[Ee]$/.test(out);
+      let j = i + 1;
+      while (j < n) {
+        if (escaped && sql[j] === "\\") { j += 2; continue; }
+        if (sql[j] === c) { if (sql[j + 1] === c) { j += 2; continue; } break; }
+        j++;
+      }
+      out += c + sql.slice(i + 1, j).replace(/[^\n]/g, c === "'" ? " " : IDENT_FILL) + (j < n ? c : "");
+      i = j + 1;
+      continue;
+    }
+    if (c === "$") {
+      const m = /^\$([A-Za-z_][A-Za-z0-9_]*)?\$/.exec(sql.slice(i, i + 64));
+      if (m) {
+        const tag = m[0];
+        const end = sql.indexOf(tag, i + tag.length);
+        if (end !== -1) {
+          out += tag + blankSqlLiterals(sql.slice(i + tag.length, end)) + tag;
+          i = end + tag.length;
+          continue;
+        }
+      }
+    }
+    out += c;
+    i++;
+  }
+  return out;
+}
+/** A closing dollar tag followed by `||`: the statement is a dollar-quoted string concatenated onward, read raw like a `'…'` one. */
+const DOLLAR_CONCAT = /\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$\s*\|\|/;
+/** Where the statement continuing at `from` ends in `text`: its `;`, or the text's end. */
+function statementEnd(text, from) {
+  const i = text.indexOf(";", from);
+  return i === -1 ? text.length : i;
+}
+/**
+ * Whether the statement that continues at `from` in `text` carries a WHERE of
+ * its own: read to its `;`, to the `)` that closes the parenthesis it sits in
+ * (a CTE's `WITH d AS (DELETE FROM …)`, a `format('DELETE FROM %I', t)`), or
+ * the end of the text, and a WHERE counts only at depth 0 — one inside a
+ * subquery in USING or in a format() argument qualifies nothing (first review
+ * pass). `text` is the literal-blanked copy for a statement the file runs, the
+ * raw copy for one inside a string — `'…'`, or a dollar-quoted one concatenated
+ * onward — whose WHERE may be concatenated on.
+ */
+function whereQualifies(text, from) {
+  let depth = 0;
+  for (let i = from; i < text.length; i++) {
+    const c = text[i];
+    if (c === "(") depth++;
+    else if (c === ")") { if (depth === 0) return false; depth--; }
+    else if (c === ";") return false;
+    else if (depth === 0 && (c === "w" || c === "W") && /^where\b/i.test(text.slice(i, i + 6)) && !/\w/.test(text[i - 1] ?? "")) return true;
+  }
+  return false;
+}
+/**
+ * Every DESTRUCTIVE_SQL_RULES hit in `text`: [{ rule, line, msg }], line numbers
+ * in the source (stripSqlComments keeps newlines), one per (rule, line), sorted
+ * by line. Comments excepted; string literals and dollar-quoted bodies read.
+ */
+export function destructiveSqlIn(text) {
+  const sql = stripSqlComments(text);
+  const flat = blankSqlLiterals(sql);
+  const list = sqlHitList(sql, DESTRUCTIVE_SQL_RULES);
+  // A keyword inside a quoted identifier names a column (`"my TRUNCATE"`), not a statement.
+  const inIdentifier = (i) => flat[i] === IDENT_FILL;
+  for (const m of sql.matchAll(/\bDROP\s+TABLE\b/gi)) if (!inIdentifier(m.index)) list.add("drop-table", m.index);
+  for (const m of sql.matchAll(/\bDROP\s+(?:DATABASE|SCHEMA|OWNED)\b/gi)) if (!inIdentifier(m.index)) list.add("drop-database", m.index);
+  for (const m of sql.matchAll(new RegExp(TRUNCATE_TARGET, "giu"))) if (!inIdentifier(m.index)) list.add("truncate", m.index);
+  for (const m of sql.matchAll(/\bDELETE\s+FROM\b/gi)) {
+    if (inIdentifier(m.index)) continue;
+    // A DELETE inside a string literal, or inside a dollar-quoted string that
+    // is concatenated onward (`$q$DELETE FROM $q$ || t || ' WHERE …'` — third
+    // review pass), is dynamic SQL: its statement is the string's text and
+    // whatever is concatenated onto it, so it is read in `sql`; one the file
+    // runs is read in `flat`, where a literal cannot move its boundary or
+    // qualify it.
+    const end = m.index + m[0].length;
+    const inLiteral = flat[m.index] === " " || DOLLAR_CONCAT.test(flat.slice(end, statementEnd(flat, end)));
+    if (!whereQualifies(inLiteral ? sql : flat, end)) list.add("unqualified-delete", m.index);
+  }
+  return list.sorted();
 }

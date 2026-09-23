@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * assemble-release.mjs — cut a release from the changes/ fragments (SMD-1804).
+ * assemble-release.ts — cut a release from the changes/ fragments (SMD-1804).
  *
  * The fork's change counter used to be assigned by hand at PR time, so a merge of
  * `main` while a PR was in review renumbered a FORK.md section and its
@@ -11,9 +11,9 @@
  * between assembly and tag. Since SMD-1917 a numbered change is a file,
  * changes/NNN-<slug>.md, not a FORK.md section: the step writes each fragment as
  * the next numbered file, removes the fragment, and re-renders FORK.md's index
- * with scripts/fork-index.mjs. Everything a cut can refuse by reading — a
+ * with scripts/fork-index.ts. Everything a cut can refuse by reading — a
  * directory that is not contiguous or holds a stray or two fragments for one
- * ticket, a fragment check 16 would refuse (one function, fragments.mjs) or one
+ * ticket, a fragment check 16 would refuse (one function, fragments.ts) or one
  * naming a migration outside the range, a FORK.md with no marker pair or a
  * CHANGELOG.md with no Unreleased section or a hand-written note under it, a
  * half-applied earlier cut (its numbered files, changelog section or release
@@ -22,38 +22,51 @@
  * not clean. An I/O failure during --write is not planned for: revert the
  * working tree and run again.
  *
- *   bun scripts/assemble-release.mjs              # DRY RUN: print the plan, touch nothing
- *   bun scripts/assemble-release.mjs --write      # write changes/NNN-*.md, FORK.md's index, CHANGELOG.md, releases.json
- *   bun scripts/assemble-release.mjs --self-check  # exercise the pure functions
+ *   bun scripts/assemble-release.ts              # DRY RUN: print the plan, touch nothing
+ *   bun scripts/assemble-release.ts --write      # write changes/NNN-*.md, FORK.md's index, CHANGELOG.md, releases.json
+ *   bun scripts/assemble-release.ts --self-check  # exercise the pure functions
  *
  * The pieces this computes — the next version, the change numbering, the section
  * and changelog rendering, the frozen shas over the new migration range — are pure
- * functions, self-checked below. --write is the glue that applies them; it is what
- * SMD-1805's release job invokes, and is never run in CI's checks.
+ * functions, self-checked below. --write is the glue that applies them; a
+ * maintainer runs it on a branch, and it is never run in CI's checks.
+ *
+ * A cut is two commits on one branch, in this order (SMD-1860): first the version
+ * — the dry run names it — bumped in db/version.mjs's FORK_VERSION and written by
+ * a new `NNN_schema_version.sql` upserting it, the highest migration on disk, so
+ * the range this cut freezes ends on the migration that names the release and a
+ * brain that applies the range reports the version (check 17d holds the two
+ * equal; db/README.md's map and the suites' migration counts move with it); then
+ * --write, which refuses a tree whose FORK_VERSION or highest migration does not
+ * say the version it is about to record. The PR lands the two; the maintainer
+ * tags the merge commit `v<core>` and pushes the tag, and
+ * .github/workflows/release.yml publishes the images and the release from it.
  *
  * Not this script's job: creating the git tag or the GitHub release, or publishing
- * images. Those are the release job's (SMD-1805) and are gated on approval.
+ * images. Those are the release job's (scripts/release-artifacts.ts, SMD-1860).
  */
 
 import { readFileSync, writeFileSync, readdirSync, unlinkSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { UPSTREAM_PIN, migrationSha, readReleases, highestReleasedMigration } from "../db/version.mjs";
-import { parseFragment, fragmentSection, fragmentProblems } from "./fragments.mjs";
-import { CHANGES_DIR as CHANGES_REL, FIRST_FILED, changeFileName, classifyChanges, pad3, readChangeEntries, renderIndex, spliceIndex } from "./fork-index.mjs";
+import { FORK_VERSION, REPO_URL, UPSTREAM_PIN, migrationSha, readReleases, highestReleasedMigration, schemaVersionValue, type Release } from "../db/version.mjs";
+import { parseFragment, fragmentSection, fragmentProblems, type FragmentFrontMatter } from "./fragments.ts";
+import { CHANGES_DIR as CHANGES_REL, FIRST_FILED, changeFileName, classifyChanges, pad3, readChangeEntries, renderIndex, spliceIndex, type FragmentChange } from "./fork-index.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const CHANGES_ABS = join(ROOT, "changes");
 const MIGRATIONS_DIR = join(ROOT, "db", "migrations");
-const BUMP_RANK = { patch: 0, minor: 1, major: 2 };
-const TYPE_HEADING = { added: "Added", changed: "Changed", deprecated: "Deprecated", removed: "Removed", fixed: "Fixed", security: "Security" };
-const REPO = "https://github.com/MHarris-SgyMd/OB1";
+const BUMP_RANK: Record<string, number> = { patch: 0, minor: 1, major: 2 };
+const TYPE_HEADING: Record<string, string> = { added: "Added", changed: "Changed", deprecated: "Deprecated", removed: "Removed", fixed: "Fixed", security: "Security" };
+
+/** A fragment's front matter once fragmentProblems has passed it: type and bump strings from their sets, tickets a list, migrations a list or absent (a scalar is refused). */
+type CheckedFrontMatter = FragmentFrontMatter & { type: string; bump: string; tickets: string[]; migrations?: string[] };
 
 // ── Pure functions (self-checked) ────────────────────────────────────────────
 
 /** Bump a version by kind, keeping the +upstream build metadata. */
-export function bumpVersion(version, kind) {
+export function bumpVersion(version: string, kind: string): string {
   const [core] = String(version).split("+");
   const [maj, min, pat] = core.split("-")[0].split(".").map(Number);
   const next = kind === "major" ? [maj + 1, 0, 0] : kind === "minor" ? [maj, min + 1, 0] : [maj, min, pat + 1];
@@ -65,14 +78,14 @@ export function bumpVersion(version, kind) {
  * 1.0.0 — SemVer's "the public API is now defined" — whatever the fragments'
  * bumps; after that, the previous version bumped by the strongest bump present.
  */
-export function nextVersion(releases, bumps) {
+export function nextVersion(releases: { version: string }[], bumps: string[]): string {
   const strongest = bumps.reduce((a, b) => (BUMP_RANK[b] > BUMP_RANK[a] ? b : a), "patch");
   if (releases.length === 0) return `1.0.0+upstream.${UPSTREAM_PIN}`;
   return bumpVersion(releases[releases.length - 1].version, strongest);
 }
 
 /** The highest numbered change file today (buildPlan refuses an empty directory before asking). */
-export function highestChangeNumber(numbered) {
+export function highestChangeNumber(numbered: { n: number }[]): number {
   return numbered[numbered.length - 1].n; // buildPlan refuses an empty directory before asking
 }
 
@@ -80,7 +93,7 @@ export function highestChangeNumber(numbered) {
  * Render a fragment's FORK body as a numbered change file: the file's name from
  * the number and the title (its first line), `# N. <title>`, then the body.
  */
-export function renderChangeFile(number, forkBody) {
+export function renderChangeFile(number: number, forkBody: string): { name: string; title: string; text: string } {
   const lines = forkBody.trim().split("\n");
   const title = lines[0].replace(/^#+\s*/, "").trim(); // check 16 refuses a heading here; the writer strips one anyway
   const rest = lines.slice(1).join("\n").trim();
@@ -88,19 +101,19 @@ export function renderChangeFile(number, forkBody) {
 }
 
 /** Render the CHANGELOG version section: entries grouped under the six headings. */
-export function renderChangelogSection(version, date, fragments) {
+export function renderChangelogSection(version: string, date: string, fragments: { fm: { type: string }; body: string }[]): string {
   const core = version.split("+")[0];
-  const byHeading = new Map();
+  const byHeading = new Map<string, string[]>();
   for (const f of fragments) {
     const heading = TYPE_HEADING[f.fm.type];
     if (!byHeading.has(heading)) byHeading.set(heading, []);
-    byHeading.get(heading).push(fragmentSection(f.body, "Changelog").trim());
+    byHeading.get(heading)!.push(fragmentSection(f.body, "Changelog")!.trim()); // has(heading) was ensured the line above; fragmentProblems (and the self-check fixture) guarantee the section
   }
   let out = `## [${core}] - ${date}\n`;
   for (const heading of Object.values(TYPE_HEADING)) {
     if (!byHeading.has(heading)) continue;
     out += `\n### ${heading}\n`;
-    for (const entry of byHeading.get(heading)) out += `- ${entry.replace(/\n+/g, " ")}\n`;
+    for (const entry of byHeading.get(heading)!) out += `- ${entry.replace(/\n+/g, " ")}\n`; // has(heading) was checked the line above
   }
   return out;
 }
@@ -110,7 +123,7 @@ export function renderChangelogSection(version, date, fragments) {
  * its compare link beside the Unreleased one. Throws if there is no Unreleased
  * section to insert under.
  */
-export function insertChangelogSection(clText, sectionText, core, compareUrl) {
+export function insertChangelogSection(clText: string, sectionText: string, core: string, compareUrl: string): string {
   const withSection = clText.replace(/(## \[Unreleased\]\n)([\s\S]*?)(?=\n## \[|\n\[Unreleased\]:)/, `$1\n${sectionText}`);
   if (withSection === clText) throw new Error("CHANGELOG.md has no ## [Unreleased] section to insert under");
   // The Unreleased compare link now runs from this version's tag; the version's own link follows it.
@@ -118,8 +131,8 @@ export function insertChangelogSection(clText, sectionText, core, compareUrl) {
 }
 
 /** The frozen shas for a migration range, computed from the templates on disk. */
-export function frozenShasForRange(lo, hi, readMig) {
-  const shas = {};
+export function frozenShasForRange(lo: number, hi: number, readMig: (n: number) => string | null): Record<string, string> {
+  const shas: Record<string, string> = {};
   for (let n = lo; n <= hi; n++) {
     const tpl = readMig(n);
     if (tpl === null) throw new Error(`no migration file for ${pad3(n)} in the release range ${pad3(lo)}..${pad3(hi)}`);
@@ -142,7 +155,7 @@ export function frozenShasForRange(lo, hi, readMig) {
  * through fork-index's one reader, so a symlink or a pipe named like a fragment
  * is a stray the plan refuses, not a file this numbers (the check's rule).
  */
-function landedAt(name) {
+function landedAt(name: string): number | null {
   try {
     // Tracked at all? An uncommitted re-creation of a name a cut once deleted
     // still has the old path's history; git ls-files answers for the file.
@@ -155,19 +168,19 @@ function landedAt(name) {
     return null; // untracked, or no repository (a copied tree)
   }
 }
-function orderedFragments(fragments) {
+function orderedFragments(fragments: FragmentChange[]) {
   const at = new Map(fragments.map((f) => [f.name, landedAt(f.name)])); // one child process per fragment, not per comparison
-  const key = (f) => at.get(f.name) ?? Number.MAX_SAFE_INTEGER;
-  const ticketNum = (f) => Number(/\d+/.exec(f.name)[0]);
+  const key = (f: FragmentChange) => at.get(f.name) ?? Number.MAX_SAFE_INTEGER;
+  const ticketNum = (f: FragmentChange) => Number(/\d+/.exec(f.name)![0]); // a fragment's name is smd-NNNN.md — classifyChanges matched it
   return [...fragments].sort((a, b) => (key(a) - key(b)) || (ticketNum(a) - ticketNum(b))).map((f) => ({ ...f, landed: at.get(f.name) }));
 }
 
 /** number → file name under db/migrations, listed once when first asked (an import runs no I/O). */
-let migrationFilesCache = null;
+let migrationFilesCache: Map<number, string> | null = null;
 function migrationFiles() {
   return (migrationFilesCache ??= new Map(readdirSync(MIGRATIONS_DIR).filter((f) => /^\d{3}_.*\.sql$/.test(f)).map((f) => [Number(f.slice(0, 3)), f])));
 }
-function readMig(n) {
+function readMig(n: number): string | null {
   const f = migrationFiles().get(n);
   return f ? readFileSync(join(MIGRATIONS_DIR, f), "utf8") : null;
 }
@@ -186,7 +199,7 @@ function buildPlan() {
     if (existing[i].n !== want) throw new Error(`${CHANGES_REL}/ is not contiguous at ${existing[i].name} (expected change ${want}) — run check-fork-consistency and fix the directory before cutting a release`);
   }
   if (pending.length === 0) throw new Error(`nothing to release — no ${CHANGES_REL}/smd-NNNN.md fragment has landed since the last cut`);
-  const byTicket = new Map();
+  const byTicket = new Map<string, string>();
   for (const f of pending) {
     if (byTicket.has(f.ticket)) throw new Error(`${CHANGES_REL}/${f.name} is a second fragment for ${f.ticket} beside ${CHANGES_REL}/${byTicket.get(f.ticket)} — one PR, one fragment`);
     byTicket.set(f.ticket, f.name);
@@ -195,8 +208,8 @@ function buildPlan() {
     // Check 16's rules, the same function: a cut refuses what CI would.
     const problems = fragmentProblems(text, name);
     if (problems.length) throw new Error(`${name}: ${problems.join("; ")} (check-fork-consistency, check 16)`);
-    const parsed = parseFragment(text);
-    return { name, landed, ...parsed, fork: fragmentSection(parsed.body, "FORK") };
+    const parsed = parseFragment(text) as { fm: CheckedFrontMatter; body: string }; // fragmentProblems passed it: front matter present, type and bump strings from their sets, tickets a list
+    return { name, landed, ...parsed, fork: fragmentSection(parsed.body, "FORK")! }; // fragmentProblems refused a fragment without a FORK section
   });
   // A previous --write that stopped after writing the numbered files (before the
   // overwrites) leaves their record beside the fragments it came from; a second
@@ -218,6 +231,7 @@ function buildPlan() {
   const version = nextVersion(releases, fragments.map((f) => f.fm.bump));
   let n = highestChangeNumber(existing);
   const numbered = fragments.map((f) => ({ number: ++n, ...f, file: renderChangeFile(n, f.fork) }));
+  const changeRange: [number, number] = [numbered[0].number, numbered[numbered.length - 1].number]; // pending is non-empty (refused above)
   // The index as it will read after the cut, from the plan — rendered (and the
   // marker pair checked) before a single file is written, so a FORK.md this step
   // cannot write into is refused with nothing half-applied.
@@ -231,7 +245,18 @@ function buildPlan() {
   const migNums = [...migrationFiles().keys()];
   const lo = highestReleasedMigration(releases) + 1;
   const hi = Math.max(...migNums);
-  const range = hi >= lo ? [lo, hi] : null; // a docs/server-only cut closes no migration
+  const range: [number, number] | null = hi >= lo ? [lo, hi] : null; // never null since SMD-1860 — every cut adds the migration that writes its version (the precondition below) — and kept as the type says for the manifest entries the reader still accepts
+  // Before --write: the tree says the version it is about to record. The brain
+  // reports FORK_VERSION through the highest schema_version migration (044 at
+  // the baseline), so a cut bumps the constant and adds that migration FIRST,
+  // as the highest on disk — inside the range this cut freezes, so a brain that
+  // applies the range reports the version, and no later cut has to close a
+  // one-migration gap. The dry run prints these as the next step; --write
+  // refuses on them (SMD-1860).
+  const before: string[] = [];
+  if (FORK_VERSION !== version) before.push(`db/version.mjs's FORK_VERSION is '${FORK_VERSION}'; this cut is ${version} — bump it`);
+  const writes = readMig(hi) === null ? null : schemaVersionValue(readMig(hi)!); // hi is a key of migrationFiles()
+  if (writes !== version) before.push(`the highest migration, ${pad3(hi)}, ${writes === null ? "writes no schema_version" : `writes schema_version '${writes}'`} — add db/migrations/${pad3(hi + (writes === null ? 1 : 0))}_schema_version.sql upserting '${version}' (044's shape), with db/README.md's map and the suites' migration counts moved (check-fork holds them); the range below then ends on it`);
   // Every migration a fragment says it ships lies in the range this cut freezes:
   // one already frozen by an earlier release, or one with no file, is a fragment
   // that lies about its migration and a changelog that would say so.
@@ -247,7 +272,7 @@ function buildPlan() {
   // can raise — a CHANGELOG.md with no Unreleased section, a migration missing from
   // the range — happens before write() has touched a file.
   // The release's day in the house zone (the one every review pass in the log
-  // was committed in and mechanism-yield.mjs defaults to, SMD-1728), not the
+  // was committed in and mechanism-yield.ts defaults to, SMD-1728), not the
   // machine's: a cut at 20:00 in Chicago is not dated tomorrow. Built from the
   // date's parts, so the YYYY-MM-DD shape check 17a wants is asserted, not a
   // locale's habit.
@@ -276,14 +301,17 @@ function buildPlan() {
     changelogBefore,
     renderChangelogSection(version, date, numbered),
     core,
-    releases.length ? `${REPO}/compare/v${releases[releases.length - 1].version.split("+")[0]}...v${core}` : `${REPO}/compare/upstream-pin-${UPSTREAM_PIN}...v${core}`,
+    releases.length ? `${REPO_URL}/compare/v${releases[releases.length - 1].version.split("+")[0]}...v${core}` : `${REPO_URL}/compare/upstream-pin-${UPSTREAM_PIN}...v${core}`,
   );
-  const entry = { version, range, server: gitHead(), upstream: UPSTREAM_PIN, date, tickets };
+  const entry: Release = { version, range, server: gitHead(), upstream: UPSTREAM_PIN, date, tickets, changes: changeRange };
   if (range) entry.frozenShas = frozenShasForRange(range[0], range[1], readMig);
-  return { releases, fragments: numbered, version, range, tickets, date, forkAfter, changelogAfter, entry };
+  return { releases, fragments: numbered, version, range, tickets, date, forkAfter, changelogAfter, entry, before };
 }
 
-function printPlan(plan) {
+/** What buildPlan renders: everything --write applies, and everything the dry run prints. */
+type Plan = ReturnType<typeof buildPlan>;
+
+function printPlan(plan: Plan) {
   const core = plan.version.split("+")[0];
   console.log(`Release: ${plan.version}`);
   console.log(`Migration range: ${plan.range ? `${pad3(plan.range[0])}..${pad3(plan.range[1])}` : "none (no schema change)"}`);
@@ -293,13 +321,17 @@ function printPlan(plan) {
   console.log(`\nCHANGELOG.md [${core}] section:\n`);
   console.log(renderChangelogSection(plan.version, plan.date, plan.fragments).split("\n").map((l) => "  " + l).join("\n"));
   if (plan.range) {
-    const shas = plan.entry.frozenShas;
+    const shas = plan.entry.frozenShas!; // buildPlan sets it whenever range is
     console.log(`releases.json entry would freeze ${Object.keys(shas).length} migration(s): ${Object.entries(shas).map(([k, v]) => `${k}:${v}`).join(", ")}`);
   }
-  console.log(`\n(dry run — nothing written; pass --write to apply, then tag and release out of band)`);
+  if (plan.before.length) {
+    console.log(`\nBefore --write, in one commit (the tree must say the version it records):`);
+    for (const b of plan.before) console.log(`  - ${b}`);
+    console.log(`(dry run — nothing written; --write refuses until the above is done)`);
+  } else console.log(`\n(dry run — nothing written; pass --write to apply, commit, and open the PR; the tag comes after the merge)`);
 }
 
-function write(plan) {
+function write(plan: Plan) {
   // Everything was rendered in buildPlan; this only writes (the release author
   // reviews the diff; this is not run in CI). The new numbered files first —
   // pure additions — then the three overwrites (FORK.md's index, CHANGELOG.md's
@@ -313,8 +345,8 @@ function write(plan) {
   writeFileSync(join(ROOT, "releases.json"), JSON.stringify([...plan.releases, plan.entry], null, 2) + "\n");
   for (const f of plan.fragments) unlinkSync(join(CHANGES_ABS, f.name));
 
-  console.log(`Wrote ${plan.fragments.length} change file(s), FORK.md's index, CHANGELOG.md and releases.json for ${plan.version}.`);
-  console.log(`Next, out of band, in this same commit: bump db/version.mjs's FORK_VERSION to '${plan.version}' and add a NNN_set_schema_version.sql upserting it (check-fork holds the two equal). That migration lands after the range this cut froze${plan.range ? ` (${pad3(plan.range[0])}..${pad3(plan.range[1])})` : ""}, so a brain that applies it sits one migration past the release until the next cut — the release job's shape (SMD-1805) is where that gap closes. Then tag v${plan.version.split("+")[0]} (the tag CHANGELOG.md's compare links name; the full version with its +upstream build metadata is in releases.json) and create the release.`);
+  console.log(`Wrote ${plan.fragments.length} change file(s), FORK.md's index, CHANGELOG.md and releases.json for ${plan.version}${plan.range ? ` (migrations ${pad3(plan.range[0])}..${pad3(plan.range[1])} frozen)` : ""}.`);
+  console.log(`Next: commit this as the cut's second commit, run check-fork-consistency, and open the PR. Once it has merged, tag the merge commit — git tag -a v${plan.version.split("+")[0]} <merge sha> -m '${plan.version}' && git push origin v${plan.version.split("+")[0]} — and .github/workflows/release.yml publishes the images and the release from it (scripts/release-artifacts.ts refuses a tag that does not name this cut).`);
 }
 
 function gitStatus() {
@@ -334,7 +366,7 @@ function gitHead() {
 
 function selfCheck() {
   let bad = 0;
-  const ok = (cond, label) => { if (!cond) { console.error(`FAIL ${label}`); bad++; } };
+  const ok = (cond: boolean, label: string) => { if (!cond) { console.error(`FAIL ${label}`); bad++; } };
   ok(nextVersion([], ["minor"]) === `1.0.0+upstream.${UPSTREAM_PIN}`, "first cut is 1.0.0 whatever the bump");
   ok(nextVersion([{ version: "1.0.0" }], ["patch", "minor"]) === `1.1.0+upstream.${UPSTREAM_PIN}`, "strongest bump wins (minor over patch)");
   ok(nextVersion([{ version: "1.4.2" }], ["major", "minor"]) === `2.0.0+upstream.${UPSTREAM_PIN}`, "a major resets minor and patch");
@@ -344,7 +376,7 @@ function selfCheck() {
   ok(cf.name === "101-a-title.md" && cf.text === "# 101. A title — a consequence (SMD-1)\n\nBody line.\n", "a change file from a fragment body: name from the title's first clause, `# N.` heading, the body");
   ok(renderChangeFile(102, "Only a title (SMD-2)").text === "# 102. Only a title (SMD-2)\n", "a body of one line is a heading alone");
   ok(renderChangeFile(103, "### A title (SMD-3)\n\nBody.").text.startsWith("# 103. A title (SMD-3)\n"), "a heading mark on the title line is stripped, not doubled");
-  ok(fragmentSection("## Changelog\nx\n\n## FORK\nT (SMD-1)\n\nBody.\n\n## Measured after\n\nKept.\n", "FORK").endsWith("## Measured after\n\nKept."), "a FORK body keeps its own ## sub-headings to the end of the file");
+  ok(fragmentSection("## Changelog\nx\n\n## FORK\nT (SMD-1)\n\nBody.\n\n## Measured after\n\nKept.\n", "FORK")!.endsWith("## Measured after\n\nKept."), "a FORK body keeps its own ## sub-headings to the end of the file");
   ok(changeFileName(104, "A".repeat(200) + " (SMD-4)").length <= 60, "one long word is cut to the slug budget");
   ok(changeFileName(105, ["B".repeat(60), "C".repeat(60), "D".repeat(60)].join(" ") + " (SMD-5)").length <= 60, "three long words: the budget applies from the first");
   ok(changeFileName(106, "Only the (SMD-6)") === "106-only.md" && changeFileName(107, "The (SMD-7)") === "107-the.md", "a trailing stop word goes while a word remains");
@@ -361,13 +393,14 @@ function selfCheck() {
   let threw = false;
   try { frozenShasForRange(1, 1, () => null); } catch { threw = true; }
   ok(threw, "a missing migration in the range throws");
+  ok(schemaVersionValue("INSERT INTO ob1_config (key, value) VALUES\n  ('schema_version', '1.0.0+upstream.abc')\nON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;") === "1.0.0+upstream.abc" && schemaVersionValue("CREATE INDEX x ON y (z);") === null, "the version migration's value is read through db/version.mjs's one reader (a cut's precondition)");
   // The mutation helper: the changelog section lands under Unreleased with its link.
   const clOut = insertChangelogSection("# Changelog\n\n## [Unreleased]\n\n_placeholder_\n\n[Unreleased]: https://x/compare/upstream-pin-abc...HEAD\n", "## [1.0.0] - 2026-09-30\n### Added\n- x (SMD-1)\n", "1.0.0", "COMPARE");
   ok(clOut.indexOf("## [Unreleased]") < clOut.indexOf("## [1.0.0] - 2026-09-30") && /\[1\.0\.0\]: COMPARE/.test(clOut) && /\[Unreleased\]: https:\/\/x\/compare\/v1\.0\.0\.\.\.HEAD/.test(clOut) && !/_placeholder_/.test(clOut), "a changelog section lands under Unreleased, with its compare link, replacing the placeholder; Unreleased now compares from this version's tag");
   let clThrew = false;
   try { insertChangelogSection("# Changelog\n\nno unreleased\n", "x", "1.0.0", "u"); } catch { clThrew = true; }
   ok(clThrew, "insertChangelogSection throws when there is no Unreleased section");
-  if (bad === 0) console.log("assemble-release.mjs self-check PASS");
+  if (bad === 0) console.log("assemble-release.ts self-check PASS");
   return bad === 0 ? 0 : 1;
 }
 
@@ -386,13 +419,14 @@ if (import.meta.main) {
       if (dirty) throw new Error(`the working tree is not clean:\n${dirty}\n--write cuts a release from a committed tree — commit or revert first`);
       const uncommitted = plan.fragments.filter((f) => !f.landed).map((f) => f.name);
       if (uncommitted.length) throw new Error(`${uncommitted.join(", ")}: not committed, so the order it landed in is unknown — commit it first`);
+      if (plan.before.length) throw new Error(`the tree does not yet say the version this cut records:\n  - ${plan.before.join("\n  - ")}\n(one commit, before --write; the dry run prints the same)`);
       write(plan);
     } else printPlan(plan);
   } catch (e) {
     // Nothing to release, a fragment this step cannot number, a FORK.md it cannot
     // write into: a sentence, not a stack trace, and a non-zero exit so a release
     // job stops here (SMD-1805).
-    console.error(`assemble-release: ${e.message}`);
+    console.error(`assemble-release: ${(e as Error).message}`); // buildPlan and write throw Errors
     process.exit(1);
   }
 }

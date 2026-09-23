@@ -1,6 +1,6 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 /**
- * migrate-to-sql-shim.mjs — move files off supabase-js onto compat/supabase-sql.
+ * migrate-to-sql-shim.ts — move files off supabase-js onto compat/supabase-sql.
  *
  * 54 files outside the core server talk to PostgREST through supabase-js, across
  * 33,000 lines. Hand-porting them is weeks of work on code that is mostly
@@ -11,12 +11,10 @@
  * This does that mechanically, and — more importantly — refuses to touch the
  * files where it would be wrong.
  *
- *   bun scripts/migrate-to-sql-shim.mjs                 # triage report, no writes
- *   bun scripts/migrate-to-sql-shim.mjs --apply <path>… # rewrite specific files
- *   bun scripts/migrate-to-sql-shim.mjs --apply --all   # rewrite every eligible file
- *   bun scripts/migrate-to-sql-shim.mjs --revert <path>… # put it back
- *
- * (node runs it too, where node is installed.)
+ *   bun scripts/migrate-to-sql-shim.ts                 # triage report, no writes
+ *   bun scripts/migrate-to-sql-shim.ts --apply <path>… # rewrite specific files
+ *   bun scripts/migrate-to-sql-shim.ts --apply --all   # rewrite every eligible file
+ *   bun scripts/migrate-to-sql-shim.ts --revert <path>… # put it back
  *
  * The shim imports `bun`, and the files it migrates were written as Supabase
  * Edge Functions — `Deno.env.get` for the environment, `Deno.serve` at the end
@@ -97,7 +95,10 @@ const RUNTIME_IMPORT_RE = /^import "([^"]*compat\/deno-on-bun\.ts)";(?: \/\/ ob1
 /** Read over the whole text, comments included: a Node-shaped file that mentions `Deno.env` in a comment gets a harmless extra line. */
 const USES_DENO_RE = /\bDeno\./;
 
-function walk(dir, out = []) {
+/** One file the scan found — on supabase-js, or already on the shim — with the reasons it cannot move. */
+type Finding = { file: string; rel: string; already: boolean; incomplete: boolean; blockers: string[]; eligible: boolean };
+
+function walk(dir: string, out: string[] = []): string[] {
   for (const name of readdirSync(dir)) {
     // SKIP_DIRS names top-level directories. Matching at every depth silently
     // skipped recipes/repo-learning-coach/server/, which does need migrating.
@@ -112,7 +113,7 @@ function walk(dir, out = []) {
   return out;
 }
 
-function classify(file) {
+function classify(file: string): Finding | null {
   const text = readFileSync(file, "utf8");
   const usesSupabase = IMPORT_RE.test(text) || NPM_IMPORT_RE.test(text);
   IMPORT_RE.lastIndex = 0;
@@ -134,16 +135,16 @@ function classify(file) {
 }
 
 /** Relative specifier from the file back to compat/supabase-sql/index.ts. */
-function shimPath(file) {
+function shimPath(file: string): string {
   return relativeTo(file, join(ROOT, "compat", "supabase-sql", "index.ts"));
 }
 
 /** …and to compat/deno-on-bun.ts. */
-function runtimePath(file) {
+function runtimePath(file: string): string {
   return relativeTo(file, join(ROOT, "compat", "deno-on-bun.ts"));
 }
 
-function relativeTo(file, target) {
+function relativeTo(file: string, target: string): string {
   let p = relative(dirname(file), target);
   if (!p.startsWith(".")) p = "./" + p;
   return p.split("\\").join("/");
@@ -157,7 +158,7 @@ function relativeTo(file, target) {
  * First, because a file the entry imports may read Deno.env in its module
  * body, and ES modules evaluate imports in order.
  */
-function withRuntime(text, file) {
+function withRuntime(text: string, file: string): string {
   if (!USES_DENO_RE.test(text) || RUNTIME_IMPORT_RE.test(text)) return text;
   const line = `import "${runtimePath(file)}";`;
   const first = text.search(/^import[\s{"']/m);
@@ -168,10 +169,10 @@ function withRuntime(text, file) {
   text = types && types.index === first
     ? text.replace(TYPES_IMPORT_RE, `${line} // ob1-original-types: ${types[1]}`)
     : text.slice(0, first) + line + "\n" + text.slice(first);
-  return text.replace(new RegExp(TYPES_IMPORT_RE.source, "gm"), (_m, spec) => `// ob1-original-types: ${spec}`);
+  return text.replace(new RegExp(TYPES_IMPORT_RE.source, "gm"), (_m: string, spec: string) => `// ob1-original-types: ${spec}`);
 }
 
-function rewrite(file) {
+function rewrite(file: string): { changed: boolean } {
   const original = readFileSync(file, "utf8");
   const spec = shimPath(file);
 
@@ -194,7 +195,7 @@ function rewrite(file) {
       `// unchanged — set SUPABASE_URL to a postgres:// connection string, and\n` +
       `// SUPABASE_SERVICE_ROLE_KEY is ignored (credentials live in the URL).\n` +
       `// ob1-original-import: ${originalSpec}\n` +
-      `// Revert with: node scripts/migrate-to-sql-shim.mjs --revert <file>\n`;
+      `// Revert with: bun scripts/migrate-to-sql-shim.ts --revert <file>\n`;
 
     if (!text.includes("// MIGRATED OFF SUPABASE")) {
       // A shebang must stay on line 1, so insert after it rather than above it.
@@ -212,7 +213,7 @@ function rewrite(file) {
   return { changed: true };
 }
 
-function revert(file) {
+function revert(file: string): { changed: boolean } {
   const original = readFileSync(file, "utf8");
   const recorded = original.match(/^\/\/ ob1-original-import: (.+)$/m);
   const spec = recorded ? recorded[1].trim() : "@supabase/supabase-js";
@@ -237,7 +238,7 @@ const doRevert = argv.includes("--revert");
 const all = argv.includes("--all");
 const targets = argv.filter((a) => !a.startsWith("--"));
 
-const found = walk(ROOT).map(classify).filter(Boolean).sort((a, b) => a.rel.localeCompare(b.rel));
+const found = walk(ROOT).map(classify).filter((f) => f !== null).sort((a, b) => a.rel.localeCompare(b.rel));
 
 if (doRevert) {
   const list = targets.length ? targets.map((t) => resolve(ROOT, t)) : found.filter((f) => f.already).map((f) => f.file);
@@ -294,4 +295,4 @@ if (blocked.length) {
 }
 
 console.log(`\n${eligible.length} of ${found.length} migrate with one import change (two, for a file that reads Deno.env or calls Deno.serve).`);
-console.log(`Apply with: bun scripts/migrate-to-sql-shim.mjs --apply --all`);
+console.log(`Apply with: bun scripts/migrate-to-sql-shim.ts --apply --all`);

@@ -411,7 +411,7 @@ needed. To use OpenRouter instead, set all four — `OB1_LLM_BASE_URL=https://op
 the compose file points the server at the stack's own Ollama and the key is
 sent there (`deploy/.env.example`, Option C). The models are changed as a pair,
 since a local model name sent to a hosted endpoint 404s on every capture and
-silently stores no topics, people or type; `scripts/check-fork-consistency.mjs`
+silently stores no topics, people or type; `scripts/check-fork-consistency.ts`
 fails on that combination in the defaults. To mix them on purpose — local
 embeddings, hosted tagging — give the chat calls their own endpoint with
 `OB1_CHAT_BASE_URL` and `OB1_CHAT_API_KEY`; see "Running the models locally"
@@ -432,7 +432,9 @@ podman compose -f deploy/compose.yaml --profile local-models up --build
 Three services in order (five with `local-models`): Postgres with pgvector, a migration job that applies the
 schema and exits, then the MCP server. The server runs `preflight.ts` before it
 serves, so a misconfiguration crashloops rather than starting and failing on your
-first capture.
+first capture. To run a *release* rather than a checkout build — the published
+`ob1-server` and `ob1-migrate` images, Ollama pinned by digest — see
+[`deploy/README.md`](deploy/README.md), "Pinning a release".
 
 ### 3. Verify
 

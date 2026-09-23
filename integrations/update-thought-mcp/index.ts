@@ -3,13 +3,13 @@
 // unchanged — set SUPABASE_URL to a postgres:// connection string, and
 // SUPABASE_SERVICE_ROLE_KEY is ignored (credentials live in the URL).
 // ob1-original-import: @supabase/supabase-js
-// Revert with: node scripts/migrate-to-sql-shim.mjs --revert <file>
+// Revert with: bun scripts/migrate-to-sql-shim.ts --revert <file>
 // ob1-fork (SMD-1228): a thought's content and vector are written through the
 // functions that own them — update_thought for an edit, the 3-argument
 // upsert_thought for a capture — so the fingerprint (003/018), the model label
 // (021) and the chunk rows (022) follow the text and vector, and the actor
 // reaches the audit (008). FORK.md change 69; extensions/test-writes.ts drives it
-// against Postgres, and scripts/check-fork-consistency.mjs check 10 holds it.
+// against Postgres, and scripts/check-fork-consistency.ts check 10 holds it.
 // SMD-1541 (change 103): the key's name rides as the actor — p_actor on
 // update_thought — so 008's row names it; change 69 passed none, and the clause
 // above was false until then. This server rides as `via` in the actor, which

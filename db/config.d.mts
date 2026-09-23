@@ -332,6 +332,8 @@ export function grantPresenceSql(objects: readonly GrantObject[]): string;
 export function grantStatements(role: string, opts?: { groups?: readonly string[]; present?: Set<string> | null }): string[];
 /** The groups' rows merged per object, privileges in a stable order — the one list grantStatements issues and grantVerifySql checks. */
 export function mergedGrants(groups?: readonly string[], present?: Set<string> | null): { kind: GrantObject["kind"]; name: string; privileges: string[] }[];
+/** Every ROLE_GRANTS row in group/list order, NOT merged by name — check-fork-consistency's per-group privilege comparison reads it (SMD-1471). */
+export function grantRows(groups?: readonly RoleGrantGroup[]): { group: RoleGrantGroup; kind: GrantObject["kind"]; name: string; privileges: string[] }[];
 /** One SELECT returning { kind, name, privilege, held } for USAGE on schema public and every privilege in `merged` — what a GRANT by a grantor without grant option silently fails to give (SMD-1796). */
 export function grantVerifySql(role: string, merged: readonly { kind: string; name: string; privileges: readonly string[] }[]): string;
 /** `text` with its comments blanked in place — literal-aware, dollar-quoted bodies scanned within, newlines kept so line numbers hold (SMD-1796, SMD-1316). */
@@ -340,3 +342,7 @@ export function stripSqlComments(text: string): string;
 export const SUPABASE_SQL_RULES: readonly { name: string; re: RegExp; msg: string }[];
 /** Every SUPABASE_SQL_RULES hit in `text`, comments excepted, with the source line number. */
 export function supabaseIsmsIn(text: string): { rule: string; line: number; msg: string }[];
+/** The statements a .sql file may never run because each destroys rows a brain holds — DROP TABLE, DROP DATABASE/SCHEMA/OWNED, TRUNCATE (as a statement, not a trigger event or privilege), DELETE FROM with no WHERE — each with its name and reason (SMD-1936). */
+export const DESTRUCTIVE_SQL_RULES: readonly { name: string; msg: string }[];
+/** Every DESTRUCTIVE_SQL_RULES hit in `text`, comments excepted, statements read whole, with the source line number. */
+export function destructiveSqlIn(text: string): { rule: string; line: number; msg: string }[];

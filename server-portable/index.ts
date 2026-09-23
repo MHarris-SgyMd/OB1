@@ -1,7 +1,8 @@
 
-import { displayDate, normaliseType, thoughtTitle, thoughtUrl, THOUGHT_TYPES } from "./thoughts.ts";
+import { displayDate, thoughtTitle, thoughtUrl, THOUGHT_TYPES } from "./thoughts.ts";
 import { cleanForDisplay } from "./consolidate.ts";
-import { createEmbedder, providerCall, ProviderError, resolveEmbedConfig, type EmbedConfig, type EmbedKind, type EmbeddedCapture } from "./embed.ts";
+import { createEmbedder, resolveEmbedConfig, type EmbedConfig, type EmbedKind, type EmbeddedCapture } from "./embed.ts";
+import { extractMetadata as extractMetadataWith, metadataRefused } from "./metadata.ts";
 import { decideCalls, mayLeaveBox, type EgressDecision, type EgressSubject } from "./egress.ts";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPTransport } from "@hono/mcp";
@@ -93,7 +94,7 @@ type Env = {
   OB1_METADATA_MODEL?: string;
   /** The supersession judge's model (db/consolidate.ts), when it is not OB1_METADATA_MODEL; the server never judges, but embed.ts reads one Env (SMD-1901). */
   OB1_JUDGE_MODEL?: string;
-  /** Sampling temperature for extraction. Defaults to 0 — see metadataTemperature. */
+  /** Sampling temperature for extraction. Defaults to 0 — metadata.ts's extractMetadata says why; embed.ts's resolveEmbedConfig owns the default. */
   OB1_METADATA_TEMPERATURE?: string;
   /**
    * Whether a thinking model reasons before extracting. Unset, off/false/0: no
@@ -191,15 +192,9 @@ function agents(): AgentResolver {
 function embedConfig(): EmbedConfig {
   return resolveEmbedConfig(env());
 }
-function metadataModel(): string {
-  return embedConfig().metadataModel;
-}
-function metadataReasoning(): Record<string, unknown> {
-  return embedConfig().metadataReasoning;
-}
-function metadataTemperature(): number {
-  return embedConfig().metadataTemperature;
-}
+// The tag extraction is metadata.ts (shared with db/sync-linear.ts); this is
+// the server's reader over it, lazy like embedConfig for the same reason.
+const extractMetadata = (text: string, subject: EgressSubject) => extractMetadataWith(text, subject, embedConfig());
 
 function citationBase(): string {
   return env().OPEN_BRAIN_CITATION_BASE_URL || "https://openbrain.local/thoughts";
@@ -229,22 +224,6 @@ function explainHeadWindow(e: EmbeddedCapture | undefined): string {
     `the head window's vector stands in for it. The thought is stored and searchable, and every search chunk ` +
     `has its vector; re-capture, or a re-embed pass, gives it the whole-content vector once the provider answers.`
   );
-}
-
-/**
- * What a capture records when the egress gate did not let its text reach the
- * chat endpoint (SMD-1903): the reason under the key the other failures use,
- * and NO topics and NO type — the call never happened, so it produced none,
- * and "observation" or the "uncategorized" placeholder would be a tag set
- * dressed as an extraction. Nothing here but the marker, also because
- * upsert_thought MERGES a re-capture's metadata over the row's (035): a
- * placeholder topic would have replaced an existing thought's real tags on
- * every re-capture under a refusing policy (first review pass). The capture
- * path writes this without calling extractMetadata; extractMetadata returns
- * it too should a refusal reach providerCall, so no path fabricates a tag set.
- */
-function metadataRefused(): Record<string, unknown> {
-  return { metadata_extraction_failed: "egress_denied" };
 }
 
 /**
@@ -279,86 +258,6 @@ function gateQuery(query: string, principal: Principal): { subject: EgressSubjec
   const subject: EgressSubject = { kind: "query", actor: principal.name, content: query };
   const gate = mayLeaveBox(subject, cfg.embeddings, cfg.egress);
   return gate.allowed ? { subject } : { subject, refused: refuseQuery(gate, principal.name) };
-}
-
-async function extractMetadata(text: string, subject: EgressSubject): Promise<Record<string, unknown>> {
-  // The original swallowed every failure into the fallback below: an auth error,
-  // a rate limit, or a 500 from OpenRouter all produced a thought tagged
-  // "uncategorized" and a success message to the user, with no way to tell a
-  // genuinely uncategorisable thought from a broken API key. Capture must still
-  // succeed — the content matters more than the tags — but the degradation is
-  // now recorded on the thought and surfaced in the confirmation.
-  const fallback = (reason: string): Record<string, unknown> => ({
-    topics: ["uncategorized"],
-    type: "observation",
-    metadata_extraction_failed: reason,
-  });
-
-  // Through the one provider call embed.ts owns, so this is bounded like the
-  // embedding calls and by the same setting: a capture awaits this and the
-  // embedding together, so a chat call that never returned held the capture —
-  // and discarded the embedding that had finished — for as long as the
-  // platform allowed. A timeout is one more recorded way the tags can be
-  // missing, told apart from a refused status and from a body that is not JSON.
-  let d: { choices?: [{ message?: { content?: string } }] };
-  try {
-    d = await providerCall(embedConfig(), "/chat/completions", {
-      model: metadataModel(),
-      response_format: { type: "json_object" },
-      // Structured extraction has one right answer, so sampling only adds
-      // variance. No temperature was sent before, which meant the provider
-      // default — 0.8 on Ollama. Measured over three runs of evals/: at the
-      // default, scores ranged 79/84 to 82/84 and the same capture could gain or
-      // lose a field between runs; at 0 the result was identical every time and
-      // above the sampled mean. Determinism also makes a bad capture
-      // reproducible, which matters more than the point of score.
-      temperature: metadataTemperature(),
-      ...metadataReasoning(),
-      messages: [
-        {
-          role: "system",
-          content: `Extract metadata from the user's captured thought. Return JSON with:
-- "people": array of people mentioned (empty if none)
-- "action_items": array of implied to-dos (empty if none)
-- "dates_mentioned": array of dates YYYY-MM-DD (empty if none)
-- "topics": array of 1-3 short topic tags (always at least one)
-- "type": one of "observation", "task", "idea", "reference", "person_note"
-Only extract what's explicitly there.`,
-        },
-        { role: "user", content: text },
-      ],
-    }, subject);
-  } catch (e) {
-    if (e instanceof ProviderError) {
-      console.error(`extractMetadata: ${e.message}`);
-      if (e.kind === "egress") return metadataRefused();
-      return fallback(e.kind === "timeout" ? "provider_timeout" : e.kind === "http" ? `provider_${e.status}` : "invalid_response_body");
-    }
-    throw e;
-  }
-
-  const content = d?.choices?.[0]?.message?.content;
-  if (typeof content !== "string") {
-    console.error("extractMetadata: provider response had no message content");
-    return fallback("no_message_content");
-  }
-
-  try {
-    const parsed = JSON.parse(content);
-    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-      console.error("extractMetadata: model returned JSON that is not an object");
-      return fallback("unexpected_json_shape");
-    }
-
-    const out = parsed as Record<string, unknown>;
-    const { type, raw } = normaliseType(out.type);
-    out.type = type;
-    if (raw) out.type_raw = raw;
-    return out;
-  } catch {
-    console.error("extractMetadata: model content was not valid JSON");
-    return fallback("unparseable_model_output");
-  }
 }
 
 // --- MCP Server Setup ---
@@ -578,6 +477,16 @@ function buildServer(principal: Principal): McpServer {
   // The flag is read from the boot-time env snapshot (initEnv freezes it on the
   // first request), so it is set at start-up, not toggled per request. Nothing
   // here reads the log back — the export tool does, offline.
+  //   The write is awaited on the request's hot path, deliberately (SMD-1492).
+  // Fire-and-forget or an in-process queue would shave a local INSERT off the
+  // latency, but either can drop a row when the isolate is torn down or the
+  // process dies — and SMD-1806 replays this log to build the canary, where a
+  // dropped row is a lost replay. The added cost is measured in db/bench-querylog.ts
+  // and kept; a cheaper insert path (a BRIN prune index in place of 047's btree)
+  // is the follow-up (SMD-1950), not a durability trade here. On Workers, executionCtx
+  // .waitUntil would keep the write durable and off the response path, but it is
+  // not plumbed to the handlers today and the dogfood runs Bun, which has no
+  // equivalent (deferred).
   // The pipeline tier this server runs as (SMD-1806), stamped on every query_log
   // row so the canary — which replays stable's log — can tell a stable-written
   // row from its own. Unset is a plain brain (the row's tier is NULL).

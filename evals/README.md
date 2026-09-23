@@ -39,7 +39,7 @@ The directory type-checks — `bunx tsc --noEmit` here, strict, every `.ts` file
 against `../server-portable`'s and `../db`'s exports — and CI runs it in the
 portable-server job (SMD-1932). `tsconfig.json` mirrors the server's;
 `package.json` pins `@types/bun`, `typescript` and `@types/node` at the server's
-versions, held in step across the four type-checked directories by
+versions, held in step across the type-checked directories by
 `check-fork-consistency` 18. The
 harnesses that call `judgePair`, `extractEntities` and `resolveEmbedConfig`
 directly are the call sites a signature change used to reach by grep rather
@@ -2914,7 +2914,7 @@ on to open. This loop captures it and gates PRs on it.
    brain, so the fixture can be committed without the corpus — but the `query`
    strings are the searcher's own words (personal data), so committing an export
    fixture from a real brain commits real queries; that is a maintainer's call.
-   `scripts/check-fork-consistency.mjs` check 9 guards thought content (an
+   `scripts/check-fork-consistency.ts` check 9 guards thought content (an
    allowlist: every committed string must be an id or free text under a known
    key), not query text. Attribution collapses distinct callers who typed the
    same query, and every anonymous (NULL-agent) caller, into one bucket — a proxy.
@@ -3782,6 +3782,143 @@ on the edge between the HNSW walk and the exact GIN bitmap can now walk —
 `db/test-live.ts` [5b]'s 2,000 random rows under a 99% filter did, for the
 five custom-plan calls that open a session, at the walk's usual 7 of 10 on
 random vectors; the vector index had been priced out of that plan entirely.
+
+## What kinds of statement the brain holds, and whether the extractor can tell (SMD-1951)
+
+`eval-thought-kinds.ts`. Every other harness here scores retrieval over a
+corpus; this one scores the `type` facet over the brain itself. On 2026-09-22
+the dogfood brain held 308 thoughts (342 by the cut) and `thought_stats` typed 259 of them
+`task` — the facet carried almost nothing, and SMD-1949 proposes widening the
+five-value enum. Widening it by intuition repeats the mistake, so the whole
+brain was labelled first against a candidate axis of thirteen epistemic kinds
+(`observation`, `fact`, `idea`, `hypothesis`, `question`, `decision`, `lesson`,
+`procedure`, `rule`, `event`, `plan`, `reference`, `compound`), with a status
+where the kind carries one, and the labelled set frozen as
+`fixtures/thought-kinds.json`.
+
+The fixture is ids and closed-vocabulary keys only — a kind is the list of ids
+that are it — so check-fork-consistency 9 admits it and the text stays in the
+brain; the eval pulls content live. `bun eval-thought-kinds.ts --self-check`
+(in CI) probes the shape rules with mutants and validates the committed file.
+
+```bash
+bun eval-thought-kinds.ts --self-check                          # no database, no model
+DATABASE_URL=… bun eval-thought-kinds.ts --label review.jsonl   # the model's first pass, one line per id, resumable
+bun eval-thought-kinds.ts --freeze labels.jsonl review.jsonl --note "who labelled, when, how"
+DATABASE_URL=… bun eval-thought-kinds.ts [--frozen]             # the report; --frozen skips the live model re-run
+```
+
+The brain is behind the compose network on the dogfood Mac (SMD-1844 closed the
+host port), so the label and score runs go through a container on
+`open-brain_default` with `--env-file deploy/.env` and the repo mounted
+read-only; `OB1_LLM_LOCAL=1` from that file lets the egress gate pass the text
+to the host Ollama.
+
+### Results, 2026-09-22
+
+Source is read from the text's shape — every row says `source: mcp`, because
+the board was loaded through `capture_thought`: 271 imported issues, 10 project
+records, 27 agent captures as found; by the cut 342 (286, 10 and 46), after
+the 16 rows this ticket wrote (the atoms below and three session notes) and 18
+a concurrent session added (14 Linear imports and 4 captures, one of them a
+DONE note written in the import's shape).
+
+| kind | issues | projects | captures | total | share |
+| --- | --- | --- | --- | --- | --- |
+| plan | 230 | 10 | 2 | 242 | 71% (open 159, done 77, canceled 6) |
+| hypothesis | 37 | 0 | 0 | 37 | 11% (open 20, confirmed 4, refuted 13) |
+| decision | 2 | 0 | 10 | 12 | 4% (all standing; 9 are the atoms) |
+| event | 2 | 0 | 9 | 11 | 3% |
+| lesson | 0 | 0 | 8 | 8 | 2% |
+| reference | 7 | 0 | 0 | 7 | 2% |
+| compound | 2 | 0 | 4 | 6 | 2% |
+| observation | 0 | 0 | 7 | 7 | 2% |
+| question | 5 | 0 | 0 | 5 | 1% (all open) |
+| rule | 0 | 0 | 4 | 4 | 1% (all atoms) |
+| fact, idea, procedure | | | | 1 each | |
+
+`plan` was added to the axis during labelling: an imported issue is assigned
+work carrying its problem and its acceptance test, which none of the ticket's
+candidates named, and `procedure` (how to do a repeatable thing here) is not
+it. A measure-first spike — "measure X, adopt only if it clears the bar" — is a
+`hypothesis`: GraphRAG as the retriever (refuted, SMD-948) and as an expansion
+stage (refuted at full budget, SMD-1738), the vector-store ladder (SMD-1037,
+1662, 1696 refuted; the composed match SMD-1707 confirmed), recency (refuted),
+contextual retrieval (refuted), the local rerankers (refuted) and
+decompose-then-rerank (confirmed), quantisation (confirmed), and the open
+Jev-class, Edge0, Matryoshka, DiskANN, partitioning and BRIN spikes. So is a
+"verify that" ticket — a claim the work establishes: the index-scan claim
+(SMD-969) and 014's header arithmetic (SMD-1018), both refuted when measured;
+the Windows path, the weather step and the build-worker count, open. Its
+status is the recorded outcome, not the ticket's text, which is the
+prediction. The first freeze had labelled all of these `plan`; the maintainer
+caught the spikes and a second reading of every plan found the rest. Those
+seventeen resolved hypotheses are SMD-1809's seed population. A ticket whose
+only remaining work is the decision is a `question` (SMD-1464, 1465 beside
+the three already there). Compounds are six:
+three DONE notes whose body is a decisions or lessons list (SMD-1933,
+SMD-1903, SMD-1730), a follow-up note (plan + lesson + decision), the posture
+digest (rule + fact + event) and SMD-1729 (its decision + its program).
+
+**The shipped five against the kind.** Where a kind has a slot in the five, the
+extractor's type is right for 224 of 269 (83%) — nearly all of it `plan` read
+as `task`. 73 thoughts (21%) are a kind the five cannot express: every
+hypothesis (all 37 typed `task`; a hypothesis is not an `idea`, it is a
+prediction with an outcome), the lessons, decisions, questions, compounds and
+the procedure. `event` lands on `reference` 9 of 11 times.
+
+**The metadata model on the candidate axis** (`qwen2.5:7b`, temperature 0,
+first 12,000 characters): agrees with the hand label on **82 of 342 (24%)**.
+
+| kind | hand | model recalled | model said | of which right |
+| --- | --- | --- | --- | --- |
+| plan | 242 | 53 (22%) | 84 | 53 (63%) |
+| hypothesis | 37 | 0 | 0 | — |
+| procedure | 1 | 1 | 160 | 1 (1%) |
+| fact | 1 | 1 | 26 | 1 |
+| idea | 1 | 1 | 4 | 1 |
+| observation | 7 | 5 | 22 | 5 |
+| decision | 12 | 11 (92%) | 22 | 11 (50%) |
+| rule | 4 | 4 | 15 | 4 |
+| lesson | 8 | 4 (50%) | 6 | 4 (67%) |
+| event | 11 | 1 | 1 | 1 |
+| reference | 7 | 1 | 2 | 1 |
+| question | 5 | 0 | 0 | — |
+| compound | 6 | 0 | 0 | — |
+
+It reads a Problem / Work / Verify ticket as a `procedure` 151 times out of
+286 and never says `hypothesis`, `question` or `compound`. On the captures it
+is usable for `lesson` and `decision` and blind to `event` (a DONE note reads
+as a procedure or a plan). Its confidence band is `high` on 318 of 342 and
+right on 71 of those (22%), `medium` right on 11 of 24, `low` never given —
+the band does not
+separate right from wrong, the same finding as the entity extractor's flat
+1.00 (SMD-1925) and the judge's flat 0.80 (SMD-1873). Where it named a kind
+that carries a status, it read the status right for 33 of 53 plans (14 gave
+none) and 10 of 11 decisions; the first pass's status is frozen in the fixture
+and the harness prints this table. A band the model omits is recorded as none
+and counted, not coerced to `low`; every row in this fixture gave one.
+
+Also found while labelling: three tickets are in the brain as successive
+versions of one description (SMD-1933 three times, SMD-1867 and SMD-1903
+twice) — SMD-1720's stale-value case, live in the dogfood brain — and the
+`people` facet lists `@hono/mcp` and two ticket ids (SMD-1935).
+
+**Atomized.** The decisions and rules buried in the compounds and the DONE
+notes were written back as thirteen thoughts of their own, each
+`derived_from` its source (nine decisions, four rules, each naming what was
+rejected). The extractor typed all thirteen `observation`; asked for the kind
+on the split text it got 13 of 13 — the compound, not the model, was the
+obstacle, which is the case for atomizing at capture rather than widening
+the prompt. The lesson digests stay whole until a per-claim consumer exists;
+the tickets' dated "Update" sections go to SMD-1867's adapter.
+
+What this decides is on SMD-1949: a kind earns a slot with a count, a
+consumer and an assignment the extractor (or the writer's declaration) can
+make; on this table `plan` (today's `task`, with `status` its own axis),
+`hypothesis` (with its open / confirmed / refuted status, the calibration
+input), `lesson`, `decision` and `event` have counts and consumers, and the
+writer's declaration — not the 7B — is what makes any of them reliable.
 
 ## Related
 

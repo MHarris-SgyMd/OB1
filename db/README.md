@@ -164,7 +164,7 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `1291 assertions: 1291 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `1428 assertions: 1428 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports forty-eight (48) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
@@ -882,6 +882,60 @@ globally unique worker id (hostname, pid and a random suffix —
 `extract-entities.ts` is the shape to copy; `consolidate.ts` (next) is the
 third consumer, and the one whose work is per PAIR rather than per thought.
 
+### graph-centrality.ts
+
+Reads the graph for importance (SMD-1938). "What is relevant to X" is
+`search_thoughts`'s question; this answers the other one — what the brain holds
+as central about X, or overall — with counts anyone can recompute, and no
+hand-written SQL: **mentions** (distinct thoughts mentioning an entity),
+**degree** (distinct entities an edge joins it to, either end), **support**
+(distinct thoughts evidencing any edge touching it); around a subject, per
+neighbour, **co_mentions** (thoughts mentioning both) and **support** (thoughts
+evidencing an edge between them, any relation, either direction, the
+per-relation counts shown). Reads only; one connection; `--limit` is 20 by default and at most 500.
+
+```bash
+bun graph-centrality.ts --url postgres://…                     # the whole graph: top entities by mentions, the hubs by degree, top thoughts
+bun graph-centrality.ts --url … "Open Brain"                   # one subject's neighbourhood and the thoughts that tie it together
+bun graph-centrality.ts --url … "Open Brain" --no-edges        # the control: co-occurrence alone
+bun graph-centrality.ts --url … --types project,tool --json    # a typed subgraph, as data
+```
+
+The subject resolves by 016's own rule, one rung at a time — exact
+`normalized_name` (so "open-brain" finds "Open Brain"), then a name a human
+merged in (`merged_from`) or an alias the model offered, then the five nearest
+by trigram similarity at pg_trgm's default threshold, named as guesses. What
+is ranked around is the entities sharing the first subject's normalised name —
+"postgres" as a tool and as a topic are both it — and the other names an alias
+or fuzzy rung returns are listed, unmarked, and not ranked around
+(`subject_ids` in the JSON says which); a uuid is one entity, ranked around
+alone, its same-name siblings under other types then its neighbours. A neighbour ranks
+by co_mentions + support, and its per-relation counts can sum past support
+when one thought asserts two relations; `--no-edges` drops the support term and every edge
+column, so a run with and a run without say what the edges add over
+co-occurrence — the drop-the-graph control. Entity ties break on mentions,
+then the normalised name, then the type, never on a uuid or a timestamp;
+thought ties break on the thought id, stable on one database and carrying no
+recency: the same rows give the same order every run.
+
+**Centrality here is attention, not value**, and every run prints the caveats
+with its own numbers: edges are unweighted (SMD-1925 — on real runs every edge
+carries confidence 1.00, so support is an edge's only weight); entity typing is
+noisy (SMD-1935 — names that are only digits, dots, colons and spaces are out
+of scope by default, `--keep-numeric` admits them, `--types` narrows further,
+and the scope IS the graph: an entity outside it is in no list and no count,
+the subject the one exception, so `--types tool "Open Brain"` is the tools
+around a project); hubs and clusters inflate each other; no ticket status is
+stored, so open/closed is the caller's filter; and only extracted thoughts are
+in the graph, which the coverage line counts. Exit 0 when ranked, 1 when no
+entity resolves (a near-miss whose only guesses the numeric rule hid is still
+no entity: exit 1, and the line counts the hidden guesses), 3 when the subject
+IS an entity — by id, name, alias or merged-in name — that the numeric rule
+excluded (`--keep-numeric` would rank it), 2 for a usage error, a brain
+without 016 or a query that failed — never 1 for a failure or an exclusion. `test-schema.ts` [44] runs the
+script's own SQL under PGlite over a graph whose every count is known by
+construction, and its edges-on and edges-off orders differ at every position.
+
 ## Consolidation: proposing which thoughts supersede which
 
 Migration 029 and `consolidate.ts`, its worker (SMD-1294). 025 gave `thoughts`
@@ -1073,6 +1127,38 @@ improves by ~350x at 10,000 rows and ~1370x at 100,000 — but a word in 10% of 
 gets only 8-9x at either size, and a common word and any sub-trigram pattern are
 unaffected at every scale. The full table, with the write cost beside it, is in
 the header of `migrations/011_text_search_trgm.sql`.
+
+### bench-querylog.ts
+
+The two `query_log` costs SMD-1492 settles with numbers rather than prose. It ages
+search rows so `prune_query_log` deletes only the oldest tenth — the small old tail a
+real retention prune trims, the selective range the index is for, not the half-table
+delete a Seq Scan would win anyway — on a fresh schema (every migration, so migration
+047's `logged_at` index is built by the schema), then runs the retention `DELETE`
+under `EXPLAIN (ANALYZE)` — rolled back so both arms see the same rows — with the
+index and again with it dropped, reporting the plan for each and flagging the
+Seq-Scan→index-scan flip only where it was actually observed (at small scales the
+table is cheap enough that Postgres scans regardless — the crossover).
+
+The write cost is two separate arms. One times a single **bulk** INSERT of
+`WRITE_BATCH` rows into two tables differing only by the index: the round trip is
+amortized across the batch, so the difference is the btree's per-row maintenance —
+the "fourth index write cost" the ticket weighs, and the number a future BRIN
+follow-up would try to erase (below the noise floor at these scales). The other
+times `AWAITED_PROBES` **single** awaited INSERTs, one round trip each, on the
+index-present table: that per-call millisecond is what `OB1_QUERY_LOG=on` actually
+makes a search or fetch wait for before it returns, the cost the "keep the await"
+decision accepts (a single awaited INSERT cannot isolate the µs-scale index cost —
+the round trip swamps it — which is why the two are measured apart).
+
+```bash
+./with-postgres.sh bun bench-querylog.ts
+OB1_BENCH_SCALES=1000000 ./with-postgres.sh bun bench-querylog.ts
+```
+
+Without a container it does nothing (`requireDatabaseUrl`); PGlite's tiny tables
+would seq-scan whatever the index, which is why the prune teeth live here and not in
+`test-schema.ts` (which asserts only that the index exists).
 
 ### bench-hnsw.ts
 
@@ -1421,16 +1507,193 @@ adds it as one remote MCP entry:
 claude mcp add --transport http open-brain-stable http://127.0.0.1:8010/mcp
 ```
 
-The **canary** and **working** tiers (refresh-on-merge, replay the query log, diff
-the ids; a per-worktree disposable copy) are deferred: they need the log's hot-path
-fixes (SMD-1492) and SMD-1805's published images (SMD-1860). `db/tier.ts` and
-`deploy/compose.tiers.yaml` land with them. The `query_log.tier` column they read is
-already here — migration 045 (SMD-1490) added it, and the server stamps every
-query_log row with its `OB1_TIER` (stable | canary | working, NULL for a plain
-brain). 045 also added `query_log.arm` (the retrieval arm a search ran — `hybrid` or
-`keyword`) and populated the long-dead `filter` column: the search tools now take a
-metadata filter (`metadata @> filter`, a shallow object) and log it, so the offline
-replay gate can measure the filtered path against real use.
+## The canary and working tiers — refresh, replay, diff, promote (SMD-1806)
+
+The **canary** is main's shadow and the **working** tier is a per-worktree
+disposable copy; both are built from stable by one tool, `db/tier.ts`, whose four
+verbs are the promotion pipeline:
+
+```bash
+# snapshot stable into the canary (or a working copy) and migrate it forward
+bun tier.ts --refresh --from <stable-url> --to <canary-url> [--tier canary|working]
+# replay stable's logged searches against the canary and report the ranking
+bun tier.ts --replay  --from <stable-url> --to <canary-url> [--since <iso-ts>]
+# the same, printing ONLY what moved and exiting non-zero if anything did (the gate)
+bun tier.ts --diff    --from <stable-url> --to <canary-url> [--since <iso-ts>]
+# after a soak: stamp the canary's version onto stable
+bun tier.ts --promote --from <canary-url> --to <stable-url>
+```
+
+**`--refresh`** takes a faithful whole-database snapshot with `pg_dump | pg_restore`
+(thoughts, vectors, chunks, query_log, provenance, agents, audit — everything a
+migration might touch, so a migration meets *all* the real data), resets the target
+and restores into it, then runs `migrate.ts` forward with the merged tree. It is
+destructive to `--to` and refuses a non-loopback target unless
+`OB1_ALLOW_REMOTE_DB=1`. It needs a `pg_dump`/`pg_restore` whose major version is at
+least the source server's — the pgvector image the tiers run carries matching client
+tools; a host needs `postgresql-client >=` the server. A branch that changes the
+embedding model or width cannot inherit stable's vectors: `migrate.ts` refuses the
+mismatch on the refreshed copy, so that branch's working tier is rebuilt from the
+records instead (`ingest-records.ts` then `reembed.ts`, the claim path) — a real
+test of the re-embed path, not a cost.
+
+**`--replay` / `--diff`** are the *live* half of the replay gate (SMD-1295, whose
+`db/test-replay.ts` is the offline, model-free, fixture-vector half CI runs). For
+each search stable logged since the canary's last refresh, the query is re-run
+against the canary through the shipped retrieval and the returned ids are diffed
+against the ids stable recorded — the measured per-PR **"what moved"**, in place of
+the hand-written control run. The **keyword** arm replays with no model (the arm
+`test-live` [20] exercises end to end); the **hybrid** arm re-embeds the query text,
+so it replays only when a provider is configured (`OB1_EVAL_EMBED`, as
+`evals/eval-replay.ts` uses) and is skipped-with-a-note otherwise; a row logged
+before migration 045 carries a NULL arm and is skipped rather than guessed.
+
+The three tiers run as one stack, `deploy/compose.tiers.yaml` — three Postgres
+services, one shared Ollama, three servers on three loopback ports — built from the
+checkout (the published stable image is SMD-1860, not yet cut). A client reaches the
+working tier as a second remote MCP entry a transcript can tell from stable's:
+
+```bash
+claude mcp add --transport http open-brain-working http://127.0.0.1:8012/mcp
+```
+
+**Deferred to SMD-1805 + SMD-1860:** the *canary CI job on push to `main`* (which
+runs the refresh/replay/diff against the **published** images through the merge
+queue) and `--promote`'s image-repoint half. The engine, the compose stack and the
+end-to-end test ([20]) do not need them and are here now.
+
+The `query_log.tier` column the tiers read is from migration 045 (SMD-1490): the
+server stamps every query_log row with its `OB1_TIER` (stable | canary | working,
+NULL for a plain brain). 045 also added `query_log.arm` (the retrieval arm a search
+ran — `hybrid` or `keyword`) and populated the long-dead `filter` column: the search
+tools now take a metadata filter (`metadata @> filter`, a shallow object) and log
+it, so both replay halves can measure the filtered path against real use.
+
+**Prune seeks, and the write is measured (migration 047, SMD-1492).** The canary
+replays this log, so a lost row is a lost replay, and a scheduled prune (SMD-1794)
+runs the retention delete at volume. `prune_query_log` deletes `WHERE logged_at <
+cutoff` with no `agent_id` predicate, which 034's composite `(agent_id, logged_at)`
+index cannot serve (its leading column is `agent_id`); migration 047 adds a plain
+btree on `logged_at` so the delete range-scans instead of sequentially scanning the
+whole log. The log write stays awaited on the request hot path deliberately —
+fire-and-forget could drop a row the canary needs — and `bench-querylog.ts` (below)
+measures both that awaited INSERT's cost and the prune plan flipping to an index
+scan. A cheaper insert path (a BRIN in place of the btree, the log being
+append-only with a monotonic `logged_at`) is a tracked follow-up (SMD-1950).
+
+## The board in the brain (SMD-1954)
+
+`ingest-records.ts` above loads the Linear board from a corpus dump, once, for a
+rebuild. The fork's running brain needs the board **continuously**: a ticket filed
+while a session works should be findable in the next, and one that moves to Done
+should read Done. `sync-linear.ts` is that sweep, and `deploy/compose.yaml`'s
+`board-sync` profile runs it on a schedule:
+
+```bash
+bun sync-linear.ts --url postgres://…                # one pass
+bun sync-linear.ts --url … --dry-run                 # what a pass would write
+bun sync-linear.ts --url … --audit                   # the lockstep census: missing / stale / extra; exit 1 when any of the three
+bun sync-linear.ts --url … --loop                    # a pass every OB1_BOARD_SYNC_INTERVAL seconds (300)
+bun sync-linear.ts --url … --full                    # re-render and compare every issue, not only the moved ones
+bun sync-linear.ts --url … --only SMD-1954,SMD-1865  # these identifiers, whatever the plan says of them
+bun sync-linear.ts --self-check                      # the pure rules and the write decisions, no network, no database
+```
+
+`LINEAR_API_KEY` (a personal API key; the tool only reads) comes from the
+environment or a `.env` on `db/env.ts`'s search path; `OB1_LINEAR_INITIATIVE`
+(default `Open Brain`, an exact name or a prefix naming exactly one) says whose
+projects are the board; the provider knobs are the server's, resolved as
+`reembed.ts` resolves them.
+
+**The brain is the state.** A pass lists every issue's identifier and `updatedAt`
+(two requests for three hundred), reads the brain's ticket rows, and the diff is
+the work: an identifier with no row is **missing** and is captured; one whose row's
+`linear_updated_at` is older than Linear's (or absent — a hand capture, adopted on
+first sight) is **stale** and is fetched in full and compared; the rest are left
+alone. A ticket row is one whose `metadata.issue` names an identifier (this tool's
+rows and `ingest-records.ts`'s — one key, so a rebuilt stable brain is adopted, not
+duplicated) or, before adoption, whose text opens with the hand-capture header
+(`SMD-N — title` / `Project: … · Status: …` / the Linear URL). A note that merely
+begins with an identifier is not one and is never touched. There is no done-file
+to lose; a pass killed halfway is finished by the next.
+
+**What a write is.** New: `captureThought` with the vector, the extracted tags and
+the facets Linear knows over them (`source: linear`, `issue`, `project`, `status`,
+`status_type`, `priority`, `labels`, `parent`, `url`, `linear_updated_at`).
+Changed text: `updateThought` with a fresh vector, fresh tags, and every facet over
+them, one statement. Same text, facets behind (the adoption case): a metadata patch and no
+model call — on the dogfood brain 224 of 268 hand captures rendered byte-identical
+and cost nothing but the patch. Every write goes through `server-portable/store-sql.ts`
+as the actor `board-sync` via `db/sync-linear.ts`, the egress gate asked first
+(refused, the row lands without a vector and the audit row says so), so a synced
+ticket differs from a captured one in `metadata.source` alone. Linear's autolink
+markup (`<issue …>SMD-x</issue>`) is stripped to the identifier before storing
+(SMD-1865's first item; the typed edges are its second and stay there). "Same
+text" is judged by `content_fingerprint_of` — the rule `update_thought` refuses
+duplicates by, asked of the database — so a paste with a trailing newline is the
+same text. When one identifier has several ticket rows — the hand re-captures —
+the **head** is the row that already holds Linear's text by that rule, else the
+row no other row of the group supersedes (the chain is the truth; age is the
+tiebreak), and the group is chained under it by `supersedes` (032): head → next →
+… → last, every differing pointer cleared first and then set, so no step closes a
+loop. A pointer the hand set to a thought outside the group is kept at the chain's
+tail, not erased. So a ticket moved back to a state an older paste recorded costs
+no model call: that paste becomes the head and its facets are patched. Nothing is
+deleted; the head's own write lands first, and a pointer the database refuses
+(a hand-set chain through an outside thought that loops back) is reported under
+*chain refusals*, never a reason the text did not land. When none of the ticket's
+rows holds Linear's text but another thought does, that thought is read: one
+that reads as this ticket, or as no ticket at all (a paste made after the row was
+adopted, with or without the header the grammar reads), is folded in as the head
+and chained; a text under ANOTHER ticket's claim is an outside holder, refused
+before any model call and never re-keyed — the facets are patched without
+`linear_updated_at` and `text_refused_by` names it, once, so the ticket stays
+*stale* in `--audit` and is retried each pass, at one lookup and no write, until
+the holder moves — reported under *refused*; the marker is cleared, on the head
+and on any twin, once the head holds the text. A new ticket whose text a stray
+row already holds (a paste the header grammar did not recognise) adopts that row
+with a patch of the facets that differ. One issue the API refuses in a batch fails
+that identifier alone, under *errors*; a batch Linear refuses whole (a rate limit)
+ends the fetch and the batches behind it are reported not attempted, for the next
+pass. The census carries each issue's project, state and label names beside its
+`updatedAt`, so a rename — which never bumps `updatedAt` — makes the ticket stale
+on the next pass. When the text moves, the tags are extracted
+again with the vector (a fallback tag set from a provider outage would otherwise
+stand on current text forever), every facet goes over them (a `status` or an
+`issue` the model read out of the description must not win), and a stale
+`metadata_extraction_failed` the fresh tags do not carry is set to null — the
+nearest a shallow merge comes to removing it (`tagsOverExisting`, the rule in
+`server-portable/metadata.ts` every writer that edits a tagged row shares). A row
+whose tags fell back at capture, with its text unchanged, is not this tool's to
+repair: that is SMD-1975's retag worker, for every thought and not ticket rows
+alone; a row that landed without a vector is `reembed.ts`'s, as any vectorless row
+is. Labels render and store
+sorted, whatever order Linear returns them. A ticket deleted in Linear (trashed)
+falls out of the census and its row reads *extra*; a completed one Linear
+archived stays a ticket. `--only` syncs the identifiers named whatever the plan
+says of them, and names one the census lacks; `--audit` takes no `--only`. The
+scheduled path reads ticket rows by their claim (`metadata ? 'issue'`, indexable)
+and adds the header scan over every thought's text — a sequential scan — only
+when that plan has a *missing* identifier, since a hand paste is the one thing
+that could hold it; `--full` and `--audit` always scan. Under `--loop`, SIGTERM
+ends the pass after the issue in hand (the compose service allows 60 s); the next
+pass finds what was left.
+
+**Two writers of one identity.** `ingest-records.ts --linear <dump>` and this tool
+both key a ticket on `metadata.issue`, but render different text (the corpus's
+`title / text` against the board header) and the ingester replaces `metadata`
+wholesale — so on one brain they would rewrite each other's rows on every run. A
+brain this tool keeps takes the board from it: rebuild that brain with
+`ingest-records.ts` and no `--linear` (the fork, commit and memory sources), then
+one sync pass fills the board; the corpus dump stays the eval harnesses'
+(SMD-1958 has the one-renderer resolution).
+
+**Not removed, not commented.** An issue deleted in Linear or moved out of the
+initiative keeps its row (`--audit` lists it under *extra*; `ingest-records.ts` has
+the same rule). Comments are the corpus builder's for the retrieval eval; the board
+mirror keeps the hand captures' shape, which had none. A Linear webhook would be
+exact and immediate; it needs an inbound URL (SMD-1846) and SMD-1862's handler,
+which would call this tool's `syncIssue` with the one identifier it was told.
 
 ## Testing
 
@@ -1438,8 +1701,8 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 1291 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 609 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
+bun test-schema.ts                          # 1428 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 619 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```
@@ -1447,16 +1710,17 @@ bunx tsc --noEmit                           # every .ts here, strict, against th
 The last line is the type check CI runs in the portable-server job (SMD-1932):
 `tsconfig.json` here mirrors `server-portable/tsconfig.json`, and `package.json`
 pins `@types/bun`, `typescript` and `@types/node` at the server's versions
-(`check-fork-consistency` 18 holds the four type-checked directories in step). The workers,
+(`check-fork-consistency` 18 holds the type-checked directories in step). The workers,
 benches and suites import `../server-portable/*.ts` and are the first callers
 to break when a shared signature moves; before this nothing compiled them, and
 SMD-1903's required `subject` argument reached `reembed.ts`'s provider probe as
 a runtime error that blamed the provider. Run it after any edit here; it needs
 `bun install` in this directory and in `../server-portable`, and nothing else.
 A plain-JavaScript module a `.ts` file here imports needs a `.d.mts` beside it
-(`config.d.mts` beside `config.mjs`; `../scripts/fragments.d.mts` and
-`fork-index.d.mts` beside theirs) — without one the import is an implicit `any`
-and the check refuses it, which is how SMD-1806's ingester met the step.
+(`config.d.mts` beside `config.mjs`, `version.d.mts` beside `version.mjs`) —
+without one the import is an implicit `any` and the check refuses it, which is
+how SMD-1806's ingester met the step when it imported two `scripts/*.mjs`
+(TypeScript since SMD-1870, so their declaration files went).
 
 `test-search-path.ts` relocates pgvector into a schema off the connection's
 `search_path` — how Supabase and several managed providers ship it, where
@@ -1941,7 +2205,7 @@ asserts 749 properties (at migration 032), including:
   the call and moves nothing
 - **a vendored schema applied to a migrated brain replaces no function a
   migration owns** (SMD-1250): the owned set is read from the migration files
-  as `scripts/check-fork-consistency.mjs` check 7 reads it, and the three last
+  as `scripts/check-fork-consistency.ts` check 7 reads it, and the three last
   definers preflight's remedies spell are pinned; `schemas/enhanced-thoughts/schema.sql`
   applied whole leaves every owned body and overload byte for byte while its
   own columns and functions arrive; then what upstream's file did — 003's
@@ -1949,6 +2213,18 @@ asserts 749 properties (at migration 032), including:
   double-encoded payload is emptied silently again; 022 over 025 keeps 022's
   sentinel and drops 025's envelope, which preflight's recogniser sees; the
   last definers re-applied put every body back
+- **`graph-centrality.ts` counts what it says it counts** (SMD-1938): over a
+  graph built by `record_thought_entities` with every count known — a
+  subject, three neighbours, a numeric-named `person`, a merged entity — the
+  script's exported SQL runs through PGlite: mentions, degree and support as
+  the header defines them, the numeric entity in no list and no count and in
+  every one when kept, the merged name resolving through `merged_from`, the
+  ladder's five outcomes (id, exact, alias, fuzzy, none) and its stop for a
+  numeric name that is an entity, the grouping of several returned names
+  around the first, the neighbourhood's
+  order with edges on differing from the order without at every position,
+  two runs byte-identical, the caveats in the rendered text with the run's
+  numbers, and the flags refused as documented
 
 One thing this suite deliberately does NOT assert: that a context survives a
 capture, an edit and a payload that omits it. Writing chunk rows through the

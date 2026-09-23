@@ -92,7 +92,7 @@ supabase secrets set DEFAULT_USER_ID=your-generated-uuid
 > PORT=8787 NODE_PATH=extensions/node_modules SUPABASE_URL='postgres://user:password@host:5432/openbrain' SUPABASE_SERVICE_ROLE_KEY=unused MCP_ACCESS_KEYS='laptop:write:<sha256-of-your-key>' DEFAULT_USER_ID='your-generated-uuid' bun recipes/work-operating-model-activation/index.ts
 > ```
 >
-> `SUPABASE_URL` carries the Postgres connection string (the shim's convention); this server refuses to start without `SUPABASE_SERVICE_ROLE_KEY`, so set it to any value — the shim ignores it — and the other variables are the secrets the steps below set, passed as environment — see [Run a migrated server under Bun](../../compat/supabase-sql/README.md#3-run-a-migrated-server-under-bun). `extensions/test-auth.ts` starts it this way in CI. The Supabase steps below apply to the file after `bun scripts/migrate-to-sql-shim.mjs --revert recipes/work-operating-model-activation/index.ts`, which puts it back on supabase-js.
+> `SUPABASE_URL` carries the Postgres connection string (the shim's convention); this server refuses to start without `SUPABASE_SERVICE_ROLE_KEY`, so set it to any value — the shim ignores it — and the other variables are the secrets the steps below set, passed as environment — see [Run a migrated server under Bun](../../compat/supabase-sql/README.md#3-run-a-migrated-server-under-bun). `extensions/test-auth.ts` starts it this way in CI. The Supabase steps below apply to the file after `bun scripts/migrate-to-sql-shim.ts --revert recipes/work-operating-model-activation/index.ts`, which puts it back on supabase-js.
 
 ### 4. Deploy the MCP server
 

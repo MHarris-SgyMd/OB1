@@ -2,7 +2,7 @@
  * version.d.mts — types for version.mjs.
  *
  * version.mjs is plain JavaScript for the same reason config.mjs is: it is
- * imported by migrate.ts, preflight.ts and check-fork-consistency.mjs with no
+ * imported by migrate.ts, preflight.ts and check-fork-consistency.ts with no
  * build step between them. A TypeScript consumer would see `any`, which
  * `tsc --noEmit` rejects under `noImplicitAny`; this file is the missing half,
  * checked against the implementation by CI's typecheck so the two cannot drift.
@@ -16,12 +16,17 @@ export interface Release {
   upstream: string;
   date: string;
   tickets?: string[];
+  /** The change numbers this cut assigned, first and last (SMD-1860); the release job attaches those files. */
+  changes?: [number, number];
   /** Absent for a docs/server-only cut that closed no migration range. */
   frozenShas?: Record<string, string>;
 }
 
 /** The upstream commit the fork sits on — FORK.md's pin. */
 export const UPSTREAM_PIN: string;
+
+/** The fork's repository URL, for compare links and release downloads. */
+export const REPO_URL: string;
 
 /** The current fork version, `MAJOR.MINOR.PATCH+upstream.<sha>`. */
 export const FORK_VERSION: string;
@@ -40,3 +45,6 @@ export function versionForMigration(n: number | string, releases?: Release[]): s
 
 /** The last released range's upper bound, or 0 when nothing is released. */
 export function highestReleasedMigration(releases?: Release[]): number;
+
+/** The schema_version literal a migration template upserts into ob1_config, or null when it writes none. */
+export function schemaVersionValue(template: string): string | null;
