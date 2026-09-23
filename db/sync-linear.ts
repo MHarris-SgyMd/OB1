@@ -630,8 +630,17 @@ export async function syncIssue(w: Writer, issue: LinearIssue, rows: BrainRow[])
       // (fourth review pass, independent read). The watermark comes off, the
       // ticket reads stale, the next pass fetches it and records the structure
       // again; the error still fails this issue in the report.
-      const back = await w.store.updateThought({ id: thoughtId, metadataPatch: { linear_updated_at: null }, actor: w.actor });
-      throw new Error(`structure on ${thoughtId}: ${(e as Error).message}${back.ok ? " (watermark cleared; retried next pass)" : ` (and clearing the watermark failed: ${back.error})`}`);
+      // …from every row of the group that carries one, not the head alone:
+      // the plan judges staleness by the group's newest watermark, so a twin
+      // still carrying this pass's would read the ticket as unchanged and the
+      // recovery would do nothing (fifth review pass, independent read).
+      const carriers = [thoughtId, ...rows.filter((r) => r.id !== thoughtId && typeof r.metadata?.linear_updated_at === "string").map((r) => r.id)];
+      const failed: string[] = [];
+      for (const id of carriers) {
+        const back = await w.store.updateThought({ id, metadataPatch: { linear_updated_at: null }, actor: w.actor });
+        if (!back.ok) failed.push(`${id}: ${back.error}`);
+      }
+      throw new Error(`structure on ${thoughtId}: ${(e as Error).message}${failed.length ? ` (and clearing the watermark failed on ${failed.join(", ")})` : ` (watermark cleared on ${carriers.length} row(s); retried next pass)`}`);
     }
   };
   const fp = await w.fingerprintOf(content);
@@ -1363,8 +1372,13 @@ function selfCheck(): Promise<number> {
       let thrown = "";
       try { await syncIssue(failing, issue, [row("cur", text, { source: "linear", issue: "SMD-1936" }, null, null)]); } catch (e) { thrown = (e as Error).message; }
       ok(/validator said no/.test(thrown) && /watermark cleared/.test(thrown) && calls.at(-1) === "update cur patch(linear_updated_at)", `a failing hook clears the watermark and fails the issue with the hook's reason (${thrown.slice(0, 80)}; ${calls.join("; ")})`);
-      const planAfter = planPass([{ identifier: "SMD-1936", updatedAt: issue.updatedAt }], new Map([["SMD-1936", [row("cur", text, { ...issueFacets(issue), linear_updated_at: undefined as unknown as string }, null, null)]]]));
-      ok(planAfter.stale.length === 1, "…and a row without the watermark is stale to the next pass's plan");
+      // The shape update_thought leaves (046's shallow merge keeps a JSON null), not an absent key (fifth review pass).
+      const planAfter = planPass([{ identifier: "SMD-1936", updatedAt: issue.updatedAt }], new Map([["SMD-1936", [row("cur", text, { ...issueFacets(issue), linear_updated_at: null as unknown as string }, null, null)]]]));
+      ok(planAfter.stale.length === 1, "…and a row whose watermark was nulled is stale to the next pass's plan");
+      // A twin carrying the watermark makes the group read unchanged; the clear reaches it too.
+      calls.length = 0;
+      try { await syncIssue(failing, issue, [row("cur", text, { source: "linear", issue: "SMD-1936" }, null, null), row("twin", "older text", { ...issueFacets(issue) }, "2026-09-20T00:00:00Z", null)]); } catch { /* the hook's error */ }
+      ok(calls.filter((c) => /patch\(linear_updated_at\)$/.test(c)).map((c) => c.split(" ")[1]).sort().join(",") === "cur,twin", `…and every row of the group carrying a watermark is cleared, not the head alone (${calls.filter((c) => /linear_updated_at\)$/.test(c)).join("; ")})`);
     }
     // No projects is no board.
     let refusedEmpty = false;
@@ -1451,6 +1465,13 @@ async function main(): Promise<void> {
   }
   const embedder = createEmbedder(() => cfg, { rememberRefusal: false });
   const session = `${hostname()}:${process.pid}:${randomUUID().slice(0, 8)}`;
+  // The structure hook needs 051. Asked once at boot: on a brain without it
+  // the hook would fail for every ticket, and — since a failure clears the
+  // watermark so the next pass retries — every ticket would be re-fetched and
+  // re-patched every pass, forever (fifth review pass, independent read). The
+  // Writer's contract says the hook is absent on such a brain; this is where.
+  const has051 = ((await sql`SELECT to_regproc('record_thought_source') IS NOT NULL AS ok`)[0] as { ok: boolean }).ok;
+  if (!has051 && !flags.has("audit")) console.error(`  migration 051 is not applied on this brain: tickets land without their canonical, links and mentions until it is (cd db && bun migrate.ts --url …)`);
   // One run name per pass, for thought_sources.ingest_run (SMD-1867); a loop's
   // passes are told apart by it.
   let run = runName(SELF);
@@ -1499,7 +1520,7 @@ async function main(): Promise<void> {
     // land together or not at all — three autocommit statements left a ticket
     // edge-less until it next moved when the second failed (third review pass,
     // independent read).
-    structure: async (id, s) => { await sql.begin(async (tx) => { await recordStructure(tx, id, s, run, { take: true }); }); },
+    ...(has051 ? { structure: async (id: string, s: Structure) => { await sql.begin(async (tx) => { await recordStructure(tx, id, s, run, { take: true }); }); } } : {}),
   };
 
   let resolved: Board | undefined;

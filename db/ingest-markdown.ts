@@ -48,7 +48,9 @@ export type MarkdownFile = { path: string; bytes: Uint8Array; root: string };
 export type Frontmatter = Record<string, string | string[]>;
 
 /** A frontmatter property line: `key:` then whitespace and a value, or the line's end. The value group is empty for a bare `key:`. */
-const PROPERTY_RE = /^([A-Za-z0-9_-]+):(?:[ \t]+(.*))?$/;
+const PROPERTY_RE = /^([^\s:#\-][^:]*?):(?:[ \t]+(.*))?$/;
+/** A line that belongs to a property block without being a property of its own: an indented continuation (a multi-line scalar, a nested mapping's lines), a list item, a YAML comment, or blank. */
+const PROPERTY_CONTINUATION_RE = /^\s+\S|^\s*-\s+|^\s*#|^\s*$/;
 
 /**
  * The leading `---` fence, read minimally: `key: value`, `key: [a, b]`, and a
@@ -71,7 +73,11 @@ export function parseFrontmatter(md: string): { fm: Frontmatter; body: string; f
   // review pass: "at least one key" let a bare URL line through as body lost).
   // A property is `key:` followed by whitespace or the line's end — `https://x`
   // is a word and a colon, not a property (the first spelling took it as one).
-  if (!m[1].split(/\r?\n/).filter((l) => l.trim()).every((l) => PROPERTY_RE.test(l) || /^\s*-\s+/.test(l))) return { fm: {}, body: md, fence: "" };
+  // A column-0 line that is neither a property nor a list item nor a comment
+  // makes the fence body; an indented line is a continuation (a `>-` scalar's
+  // lines, a nested mapping's) and belongs to the block (fifth review pass —
+  // "every line a property" refused valid frontmatter Obsidian reads).
+  if (!m[1].split(/\r?\n/).every((l) => PROPERTY_RE.test(l) || PROPERTY_CONTINUATION_RE.test(l))) return { fm: {}, body: md, fence: "" };
   const fm: Frontmatter = {};
   let listKey: string | null = null;
   for (const raw of m[1].split(/\r?\n/)) {
@@ -102,7 +108,7 @@ export function wikilinks(md: string): Wikilink[] {
   const out: Wikilink[] = [];
   // Not inside a code fence or span: `[[x]]` there is text about a link, as
   // inlineTags already reads a `#` there (third review pass, independent read).
-  for (const m of stripCode(stripComments(md)).matchAll(WIKILINK_RE)) {
+  for (const m of stripComments(stripCode(md)).matchAll(WIKILINK_RE)) {
     const target = m[2].trim();
     const note = target.split("/").filter(Boolean).at(-1)?.replace(/\.md$/i, "") ?? "";
     out.push({ note, anchor: m[3]?.trim() || null, alias: m[4]?.trim() || null, embed: m[1] === "!", raw: m[0] });
@@ -131,13 +137,16 @@ function outsideCode(md: string, fn: (prose: string) => string): string {
 
 /** Obsidian resolves a note name case-insensitively (a vault on a case-insensitive filesystem has one `Self.md` whatever the case a link wrote); the identity and every link target are folded so they meet. */
 export function noteKey(name: string): string {
-  return name.toLowerCase();
+  // NFC first: a macOS walk hands back NFD file names while Obsidian writes a
+  // link's text NFC, and `Café` in the two forms would not meet (fifth review pass).
+  return name.normalize("NFC").toLowerCase();
 }
 
 /** `#tag` and `#nested/tag` in prose — not a heading (`# Title`), not inside a code span or fence, not a bare `#`. */
 export function inlineTags(md: string): string[] {
   const out: string[] = [];
-  const text = stripCode(stripComments(md));
+  // Code first, then comments: a `%%` inside a fence must not pair with one in prose (fifth review pass).
+  const text = stripComments(stripCode(md));
   for (const m of text.matchAll(/(?:^|[\s(])#([A-Za-z_][\w\/-]*)/g)) if (!out.includes(m[1])) out.push(m[1]);
   return out;
 }
@@ -155,8 +164,8 @@ function stripComments(md: string): string {
 export function markdownText(md: string, noteName: string): string {
   const { fm, body } = parseFrontmatter(md);
   const title = typeof fm.title === "string" && fm.title ? fm.title : noteName;
-  const text = outsideCode(stripComments(body), (prose) => {
-    let t = prose.replace(WIKILINK_RE, (_raw, embed: string, target: string, anchor?: string, alias?: string) => {
+  const text = outsideCode(body, (prose) => {
+    let t = stripComments(prose).replace(WIKILINK_RE, (_raw, embed: string, target: string, anchor?: string, alias?: string) => {
       const note = target.trim().split("/").filter(Boolean).at(-1)?.replace(/\.md$/i, "") ?? "";
       if (alias?.trim()) return alias.trim();
       const a = anchor?.trim() ?? "";
@@ -273,7 +282,7 @@ export const MARKDOWN_LIMITS: readonly string[] = [
   "A note's identity is its NAME folded to lower case — the file name without `.md`, which is what a wikilink names and how Obsidian resolves one, case-insensitively — so a link's target and its note's identity meet with no resolver, and a note can never link to itself under another spelling. The `note` facet keeps the name as written. The cost: renaming a note is a new identity (the old row stays), and two notes of one name in different folders collide — the first in walk order keeps the identity and the ingester refuses the rest by name. A frontmatter `id` is kept as a facet for a connector (SMD-1814) to reconcile a rename by; it is not the identity, because no wikilink names it.",
   "A file that is not UTF-8, or holds a NUL byte, is refused, not stored: a text column cannot hold it byte for byte. So is a name over 512 characters, the column's bound.",
   "A wikilink to an image, audio, video, PDF or canvas file (NON_NOTE_EXTENSIONS) is a file reference, not an edge to a note; a note named `v1.2` is still a note. A `[[link]]` inside a code fence or span is text about a link, not one.",
-  "Frontmatter is read minimally (scalars, `[a, b]`, `- item` lists); the lines of a nested mapping are dropped from the frontmatter facet — the canonical keeps them. A leading `---` fence is frontmatter only when every non-blank line in it is a `key:` line or a list item — what Obsidian reads as properties; a fence holding prose or a bare URL is a horizontal rule and body. A prose line that happens to read `Word: rest` inside such a fence is a property to Obsidian too, and here.",
+  "Frontmatter is read minimally (scalars, `[a, b]`, `- item` lists); a multi-line scalar's continuation lines and a nested mapping's lines belong to the block but are dropped from the frontmatter facet — the canonical keeps them. A leading `---` fence is frontmatter when every column-0 line in it is a property (`key:` then a space or the line's end; the key may hold dots and spaces), a list item or a `#` comment, indented lines being continuation; a fence holding a prose line or a bare URL at column 0 is a horizontal rule and body. A prose line that happens to read `Word: rest` inside such a fence is a property to Obsidian's YAML too, and here.",
 ];
 
 export function selfCheck(): number {
@@ -301,6 +310,11 @@ export function selfCheck(): number {
   ok(/https:\/\/example\.com/.test(urlRule.text) && !("frontmatter" in urlRule.facets), `a fence holding a line that is not a property is body, even beside one that is (fourth review pass) (${JSON.stringify(urlRule.text)})`);
   const propsOnly = markdownAdapter.map(file("P.md", "---\ntitle: T\ntags:\n  - a\n---\nbody"));
   ok(propsOnly.facets.title === "T" && JSON.stringify(propsOnly.facets.tags) === '["a"]', "a fence of properties and list items alone is frontmatter");
+  const yaml = markdownAdapter.map(file("Y.md", "---\ntitle: T\ncreated: 2026-09-21\n# generated by templater\ndescription: >-\n  a long\n  value\nmeta:\n  sub: v\nmy key: with spaces\ndc.title: dotted\ntags: [a]\n---\nbody"));
+  ok(yaml.facets.title === "T" && yaml.createdAt === "2026-09-21" && JSON.stringify(yaml.facets.tags) === '["a"]' && (yaml.facets.frontmatter as Frontmatter)["my key"] === "with spaces" && (yaml.facets.frontmatter as Frontmatter)["dc.title"] === "dotted" && yaml.text === "T\n\nbody", `frontmatter with a multi-line scalar, a nested mapping, a comment and keys with a space and a dot is frontmatter (fifth review pass) (${JSON.stringify(yaml.facets.frontmatter)} ${JSON.stringify(yaml.text)})`);
+  ok(noteKey("Café") === noteKey("Café") && noteKey("Café") === "café", "a note name meets its link whatever the Unicode form the filesystem handed back (NFC, then lower case)");
+  const fenceComment = markdownAdapter.map(file("F.md", "```\nx %% y\n```\nprose %% z"));
+  ok(fenceComment.text === "F\n\n```\nx %% y\n```\nprose %% z", `a %% inside a fence does not pair with one in prose (${JSON.stringify(fenceComment.text)})`);
   const coded = markdownAdapter.map(file("Code.md", "```\n[[NotALink]]\n```\n`[[Inline]]` [[Real]] #Linear #linear"));
   ok(coded.links.map((l) => l.target).join(",") === "real" && JSON.stringify(coded.facets.tags) === '["Linear"]', `a wikilink inside code is not a link; tags dedupe case-insensitively (${JSON.stringify(coded.links)} ${JSON.stringify(coded.facets.tags)})`);
   ok(/```\n\[\[NotALink\]\]\n```\n`\[\[Inline\]\]` Real/.test(coded.text), `…and the text keeps a fenced or spanned [[…]] verbatim, as the link set does (fourth review pass) (${JSON.stringify(coded.text)})`);

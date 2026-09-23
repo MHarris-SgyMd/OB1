@@ -1798,7 +1798,13 @@ canonical, links and mentions only as each ticket next moves in Linear. To
 record them for every ticket at once, run one `--full` pass after applying 051:
 every issue is fetched and compared, the rows read *unchanged* or *patched*,
 and the structure lands beside each head row (no model call, ~1 s of Linear per
-fifty issues).
+fifty issues). On a brain without 051 the tool says so at boot and writes rows
+alone. A ticket whose structure write fails — a validator refusal, a race —
+has its watermark cleared so the next pass fetches it and tries again, every
+pass until it lands: one fetch and one facet patch per failing ticket per
+interval, and the error under *errors* in every report, which is the signal
+to look. The retry is not capped; a ticket that fails forever costs that
+forever, and says so each time.
 
 **Not removed, not commented.** An issue deleted in Linear or moved out of the
 initiative keeps its row (`--audit` lists it under *extra*; `ingest-records.ts` has

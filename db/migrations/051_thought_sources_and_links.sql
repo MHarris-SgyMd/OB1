@@ -263,7 +263,12 @@ BEGIN
     -- onto the target since (record_thought_source on the same thought) would
     -- otherwise make the row impossible to close, and every later structure
     -- write on the thought would fail (fourth review pass).
-    IF TG_OP = 'UPDATE' AND NEW.payload = OLD.payload THEN
+    -- Exactly a close and nothing else: the same link row, on the same
+    -- thought, going from open to closed — a raw UPDATE that moves the row to
+    -- another thought, re-opens it or turns a citation into a link is judged
+    -- like any write (fifth review pass, independent read).
+    IF TG_OP = 'UPDATE' AND OLD.kind = 'link' AND NEW.thought_id = OLD.thought_id
+       AND NEW.payload = OLD.payload AND OLD.valid_until IS NULL AND NEW.valid_until IS NOT NULL THEN
       RETURN NEW;
     END IF;
     v_relation := NEW.payload->>'relation';
