@@ -1,0 +1,137 @@
+# 134. Entity extraction sent the whole thought in one unbounded call — long thoughts go in windows sized to the metadata model, every call carries an answer budget and a runaway is retried under a penalty, and the windows merge to one entity (SMD-1879)
+
+**What changed.** `server-portable/entities.ts`: `extractEntities` splits a
+thought over `EmbedConfig.extractChunkTokens` with `chunk.ts` into overlapping
+windows (overlap at chunk.ts's 150-of-1200 ratio), makes one call per window
+in order — each marked `[Part i of n of a longer note]` inside the untrusted
+delimiter — and merges the answers (`mergeExtractions`) on parseExtraction's
+own key, (type, lower-cased name), keeping the best confidence and the union of
+aliases, and on (relation, from, to); one malformed window makes the thought's
+answer malformed, so a thought is never recorded terminal on a partial reading.
+Every call — windowed or not — carries `max_tokens` from
+`extractOutputBudget` (three times the text's estimated tokens plus 1,536,
+`db/config.mjs`), and a call that ends at its budget (`finish_reason:
+length`) is made once more with `frequency_penalty` 0.5 (`RUNAWAY_PENALTY`;
+`EXTRACT_RETRY_RUNAWAY` in db/config.mjs, on) — the repetition the runaways
+were measured to be, taxed. The 8,000-character cut in `wrapContent` is gone: the tail
+of a long thought is extracted. `timeoutMs` replaces the `signal` argument and
+is per call, so the worker's `--timeout` is per window. The window is the
+**metadata** model's: `resolveExtractWindow(raw, model, fallback)` in
+`db/config.mjs` takes `OB1_EXTRACT_CHUNK_TOKENS` when positive, else, for a
+model in the new `KNOWN_CHAT_MODEL_WINDOW` (served context, measured as
+`KNOWN_MODEL_WINDOW` is — `qwen2.5:7b` 32,768 on Ollama 0.33, a 14,432-token
+prompt evaluated whole), what that context holds beside the 398-token rules
+and an answer at the output ratio (`extractWindowThatFits`: `(window − 398
+rules − 80 marker-and-header reserve − 1,536 floor) / 4`), never above
+`chunk.ts`'s `DEFAULT_EXTRACT_WINDOW_TOKENS` (1200), else that default. The
+knob is declared in `type Env`, forwarded by `deploy/compose.yaml`, documented
+in `deploy/.env.example` and `SETUP.md`. `describeExtractWindow` is the one
+sentence the worker's `window:` banner line and preflight's new `extraction
+window` row print; preflight warns when an explicit window plus its answer
+and the rules would not fit the model's context, naming the most that fits.
+`ENTITY_PROMPT_VERSION` is 2. `--dump` lines carry `windows` and, for a windowed
+thought, `parts` — each window's own answer, the derivation record until
+SMD-1731's lineage tables hold it. `EXTRACT_WINDOW_HEADER` (`db/config.mjs`)
+decides whether a later window is led by the note's opening line
+(`documentHeader`, SMD-951's pattern); the eval below measured it.
+
+**Why.** On the fork's own brain 32 of 295 thoughts — 1,656 to 13,113
+characters — failed extraction with "The operation timed out." on `qwen2.5:7b`,
+re-run serially at a 900 s `--timeout`. Measured for this change: the served
+context is 32,768 tokens, so nothing was truncated on the way in; the shortest
+straggler (414 estimated tokens) ran to a 300 s deadline alone on an idle
+server; with a 1,500-token answer cap 31 of 32 hit the cap whole in 30–37 s,
+the tails one relation or entity repeated without end. Generation that did not
+converge, not a document too long to read. Also found: `--timeout 900` was 300
+whatever it said — Bun's `fetch` cuts an unstreamed call at its own 300 s idle
+timeout (a 330 s signal against a server answering at 400 s failed at 300.1 s;
+with `timeout: false` at 330.0) — so the three worker diallers (`providerCall`,
+`judgePair`, `extractOnce`) disable it; and the 8,000-character cut meant a long
+thought's tail was never extracted at all.
+
+**Held.** `test-thoughts.ts` [8b]: the rule through the worker's resolver
+(qwen2.5:7b derives the held 1200 from 32,768, capped; a planted 4,096-context
+entry derives 520 uncapped through the resolver; unknown model → default; the
+knob wins, is floored, and scales the overlap; `''`/`0`
+mean unset; the embedding model does not move it), the merge (one project from
+three windows at the best confidence with every alias; same name under two
+types stays two; relations dedupe case-insensitively; one malformed window →
+malformed; rejected counts add), and the header (first line, cut, escaped,
+inside the delimiter, never on a whole thought). `test-local-provider.ts`
+[10]: a stub that REFUSES over 700 estimated tokens — the windowing is what
+passes, not the stub's leniency — sees one budgeted call for a short thought
+and one per 600-token window for a 1,320-token one, each with its own budget
+and part marker; the subject every window names is one merged entity; a prose
+window fails the thought; a stub that cuts one answer at `length` sees the
+retry carry the penalty and only the retry, and a converging answer is never
+retried. `test-live.ts` [10]: a six-paragraph thought under
+`OB1_EXTRACT_CHUNK_TOKENS=300` takes ≥3 calls, writes ONE `Ledger` entity row
+and ONE mention (the ticket's "one, not three"), the summary counts calls and
+windowed thoughts, the dump line carries `parts`, the banner prints the rule.
+`test-preflight.ts` [3c]: the row for a listed, unknown, pinned, over-context
+and reasoning-on model, and the chunk window row not moving with the metadata
+model. Mutants (scratch copy): no windowing, no `max_tokens`, merge on name
+alone, no retry, resolver ignoring the table — each fails a named assertion.
+
+**Measured after.** `evals/eval-extract-windows.ts` (new): the 32 stragglers
+and three planted long documents through the real function and the real write
+path, `qwen2.5:7b`, sequential on an idle Ollama. Under the first budget (2× +
+256): one call 2/32; 1200-token windows 10/32; 600-token windows 13/32 (the
+two sizes agree on 6 — a window converging is a draw); one call with the
+penalised retry 27/32; 1200 windows with the retry 27/32, no timeouts. Then
+the p2 residue on `qwen3.8:27b`: 8/12, and the four "runaways" were legitimate
+answers at 3.5–9.4× the input that the budget cut — so the budget is 3× +
+1,536, and **the shipped shape extracts 32/32 on the 7B** (20 retried, median
+106 s) **and 12/12 on the 27B** (none retried). The dogfood brain under p2:
+366 of 373, from 262 of 295 under p1. Planted set (n=3): entities 11–12/13 on
+every arm; the far relation 1/3 whole, 0/3 at 1200, 1/3 with the header — near
+relations 0/3 even whole, so the model's relation recall is the floor and the
+window's loss sits inside it; the header ships OFF. A 3,000-token document is
+one 9 s call or four at a 41 s median. Tables: evals/README.md, "Entity
+extraction in windows".
+
+**Review passes.** Five: a cold read plus six mutants on a scratch copy (five
+bit; the sixth crashed the suite), then `/code-review` at high effort four times,
+two after merges of main. Pass 3's findings sat in pass 2's fixes — the stop
+signal; SMD-1973 and SMD-1974 hold the two without a local reproduction.
+
+| Pass | Finding | Caught | Fix |
+| --- | --- | --- | --- |
+| 1 | the "fits the context" arithmetic — in the resolver, preflight's warning and its hint, three copies — omitted the answer floor and the part marker, so the value preflight recommended requested 280 tokens more than the context | cold read | one `extractWindowThatFits` / `extractContextNeeded` in db/config.mjs; [3c] holds the limit and one over it |
+| 1 | [8b]'s "2,048-context → 550" assertion tested the constants, not the resolver; the uncapped branch and `capped` were exercised by no test | cold read | a planted 2,048-token table entry through the resolver (456, uncapped), qwen capped |
+| 1 | the worker's `calls` did not count retries | cold read | counted per retried window |
+| 1 | the no-windowing mutant crashed test-local-provider [10] rather than failing an assertion | mutant | the long-thought call is caught and asserted |
+| 1 | evals/README claimed every dialler passes `timeout: false`; three do | cold read | names the three |
+| 2 | with `OB1_METADATA_REASONING` on, `max_tokens` caps the thinking and the answer together, so every call would be cut and read as a runaway, retried, cut again | cold read | no budget and no retry under reasoning; the sentence says why; [10] and [3c] hold it |
+| 2 | a served context under ~680 tokens derived a 1-token window, one call per word, with `from: window` so preflight never warned | cold read | `EXTRACT_MIN_WINDOW_TOKENS` 64: the default with `unfit`, and a preflight warning |
+| 2 | one answer kept duplicate relations where the merge folded them — the payload's shape depended on the code path | cold read | one `relationKey` for parseExtraction and the merge |
+| 2 | with Bun's idle cut off, a caller passing no `timeoutMs` had no deadline at all | cold read | `OB1_LLM_TIMEOUT` is the default deadline |
+| 2 | the call counter missed every call of a thought that threw (its fourth window timing out is four calls) | cold read | `callsMade` rides on the error; the worker and the eval read it |
+| 2 | dead alias code and case-sensitive alias dedupe; "held at 1200" inferred from the size, wrong for a context yielding exactly 1200; preflight resolved the environment twice; the eval copied the overlap ratio | cold read | aliases fold by case; `capped` carried from the resolver; one resolution; `EXTRACT_OVERLAP_RATIO` imported |
+| 3 | with the knob set against an unfit context preflight recommended a negative size, and a knob under the minimum printed ok; `callsMade` missed the first call of a window whose retry threw; a padded thought chunk.ts packed into one window took the windowed path with a one-entry `parts`; the marker reserve ignored the 200-character header | cold read | `unfit` carried and judged whatever the knob, a knob-under-minimum warning; calls counted as made; one window is the whole path; reserve 80 |
+| 4 | `judgePair` with no signal had no deadline once Bun's cut was off; an entity read twice in ONE answer kept the first reading where two windows keep the best; the `whole` arm was labelled p1's request although p1 also cut at 8,000 characters; the eval's `calls` column mixed windows and calls | cold read | `OB1_LLM_TIMEOUT` the default deadline; one `mergeEntity` for both; relabelled, with the cut stated; every call counted |
+| 5 | a 400 about `max_tokens` read as this thought's length and failed the pool row by row; nothing bounded a thought's window count once the 8,000-character cut went; a knob of 0.5 floored to a 0-token window; aliases folded by case in two readings but not one; the call count lived twice; a constant declared after its reader | cold read | fatal; `EXTRACT_MAX_WINDOWS` 24; floored before the test; one `foldAliases`; one `callsOf`; moved |
+
+**Not taken.** Per-chunk provenance in the schema — a column on the mention
+rows for the window that evidenced it — pre-empts SMD-1731's design for every
+derived artifact; the dump line carries it until then. A separate overlap knob
+(the overlap follows the window), a second retry or a stronger penalty (27 of
+32 with one at 0.5; each retry is another call), and a knob for the retry or
+the header (one rule for the worker and the eval, so the graph a pass writes is
+the one the eval scored).
+
+Boyscout: one `MALFORMED()`; the window record is a `Pick` of the answer; the docblock names the retry.
+
+**Follow-ups.** SMD-1731 (lineage: the `parts` record's home). SMD-1960: stream
+the call and abort a runaway on its third repeated item, where today it runs to
+the budget first. SMD-1961: a labelled long-document corpus — the header and
+the retry's thinner answer were decided on three planted documents with no
+precision measured. SMD-1962: Bun's idle cut is disabled in the three worker
+diallers only; preflight's probes and the evals' diallers still run under it.
+SMD-1973: the budget and the retry are unmeasured on any hosted provider; one
+that rejects `max_tokens` or `frequency_penalty` stops the pass as fatal.
+SMD-1974: chunk.ts cannot window a whitespace-free run — a chunk.ts fix, since
+it reaches embeddings too. SMD-2000: escalate a runaway to a larger model.
+
+**Upstream status:** not sent — upstream has no extraction worker; the windows,
+the budget and the window table are the fork's.

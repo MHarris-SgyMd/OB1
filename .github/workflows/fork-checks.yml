@@ -105,9 +105,9 @@ jobs:
       # directories a PR happens to touch. The upstream gate only validates
       # changed dirs, so pre-existing violations never surface there. A Bun
       # script, TypeScript since SMD-1870 — bun is the runtime every other job
-      # and every developer here uses, and checks 13, 14 and 18 parse YAML with
+      # and every developer here uses, and checks 13, 14, 18 and 20 parse YAML with
       # Bun.YAML.
-      - name: Check metadata, links, dependencies, SQL guards, shell hazards, core-function redefinitions, credential compares, fixture redaction, thought writes, the shim's runtime, Supabase-isms in schema SQL, the compose stack's ports and forwards, FORK.md's change files, and the type-checked directories' pins
+      - name: Check metadata, links, dependencies, SQL guards, shell hazards, core-function redefinitions, credential compares, fixture redaction, thought writes, the shim's runtime, Supabase-isms in schema SQL, the compose stack's ports and forwards, FORK.md's change files, the type-checked directories' pins, the connector registry, main's ruleset record, destructive statements in SQL files, and runtime supabase-js imports
         run: bun scripts/check-fork-consistency.ts
 
       # The scripts are type-checked where they run (SMD-1870): scripts/tsconfig.json
@@ -162,40 +162,14 @@ jobs:
         working-directory: server
         run: deno check --node-modules-dir=none index.ts
 
-      # The two extensions still on supabase-js resolve under Deno (the other
-      # five import the SQL shim, which imports `bun`, and run under Bun — the
-      # Portable-server job starts each; change 74), so they are checked as
-      # deployed — with ../_shared/auth.ts, the copy of server-portable/auth.ts.
-      - name: deno check extensions/family-calendar and job-hunt
-        working-directory: extensions/family-calendar
-        run: deno check --node-modules-dir=none index.ts ../job-hunt/index.ts
-
-      # The four recipes and integrations that still resolve under Deno after
-      # change 67 made them consumers of ../_shared/auth.ts (SMD-1455): each from
-      # its own directory, where its deno.json import map is.
-      - name: deno check recipes/ob-graph
-        working-directory: recipes/ob-graph
-        run: deno check --node-modules-dir=none index.ts
-
-      - name: deno check integrations/agent-memory-api
-        working-directory: integrations/agent-memory-api
-        run: deno check --node-modules-dir=none index.ts
-
-      - name: deno check integrations/consolidation-workers/metadata-norm
-        working-directory: integrations/consolidation-workers
-        run: deno check --node-modules-dir=none metadata-norm/index.ts
-
+      # Every vendored MCP server, API and worker imports the SQL shim (which
+      # imports `bun`) since SMD-1798 and runs under Bun — the Portable-server
+      # job starts each, the data-layer job drives their tools — so none
+      # resolves under Deno any more; the five steps that checked the last six
+      # of them went with the move. kubernetes-deployment is the one vendored
+      # file still written for Deno alone (its own database, SMD-1524).
       - name: deno check integrations/kubernetes-deployment
         working-directory: integrations/kubernetes-deployment
-        run: deno check --node-modules-dir=none index.ts
-
-      # enhanced-mcp keeps its own key compare, so change 67's rationale never
-      # listed it; change 78 (SMD-1497) wrapped its thirteen tool registrations
-      # in a per-request buildServer() — a 1,517-line span — and this holds
-      # that wrap, and any later edit inside it, to Deno's typecheck. Its
-      # deno.json resolves supabase-js.
-      - name: deno check integrations/enhanced-mcp
-        working-directory: integrations/enhanced-mcp
         run: deno check --node-modules-dir=none index.ts
 
   portable-server:
@@ -748,7 +722,7 @@ jobs:
         working-directory: compat/supabase-sql
         run: bunx tsc --noEmit
 
-      # 24 files depend on this behaving exactly like supabase-js. A shim that is
+      # 29 files depend on this behaving exactly like supabase-js. A shim that is
       # merely close is worse than none — they would inherit the differences with
       # no failing test to find them.
       - name: Conformance against real Postgres

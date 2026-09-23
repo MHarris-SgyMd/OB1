@@ -66,10 +66,9 @@
  * allows; server-portable/test-audit.ts holds the trigger itself.
  *
  * The files are imported under the stand-in extensions/test-auth.ts uses for
- * Deno's two globals and its loader for Deno's specifiers, plus one more
- * rewrite: `@supabase/supabase-js` resolves to compat/supabase-sql, so the two
- * servers still on supabase-js run their PostgREST calls as SQL against the
- * same database the others reach through the shim. The model provider is
+ * Deno's two globals and its loader for Deno's specifiers; every server
+ * imports compat/supabase-sql itself since SMD-1798 (the loader resolved a
+ * supabase-js import to it for the two that did not, until then). The model provider is
  * stubbed — a unit vector keyed off the text, so the vector a writer stored is
  * recognisable — and everything below the tool or route boundary is real. The
  * shim-migrated files import compat/deno-on-bun.ts first (change 74), which
@@ -181,6 +180,10 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     bioPrompts.push(String(body.messages?.[1]?.content ?? ""));
     return Response.json({ choices: [{ message: { content: `Canonical Profile: Test is a reader of the Stoics (run ${bioPrompts.length}).` } }] });
   }
+  // The metadata worker's classifier is answered with a confident, material reclassification (SMD-1798).
+  if (/classifier for personal thoughts/.test(String(body.messages?.[0]?.content ?? ""))) {
+    return Response.json({ choices: [{ message: { content: JSON.stringify({ type: "decision", importance: 4, topics: ["ledger"], confidence: 0.95, reason: "stub" }) } }] });
+  }
   return Response.json({ choices: [{ message: { content: JSON.stringify(STUB_METADATA) } }] });
 }) as typeof fetch;
 
@@ -195,11 +198,13 @@ const served: Handler[] = [];
     return { finished: Promise.resolve() };
   },
 };
-const SHIM = join(ROOT, "compat", "supabase-sql", "index.ts");
 const PACKAGES = /^(hono|zod|@hono\/mcp|@modelcontextprotocol\/sdk)(\/|$)/;
 const VENDORED = new RegExp("^" + ROOT.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "/(recipes|integrations)/.*\\.ts$");
+// Until SMD-1798 this loader also resolved a quoted supabase-js specifier to the shim, for the two servers still on
+// it; every vendored server imports the shim itself now, and a file that imports supabase-js at runtime is check
+// 22's failure, not something a test loader papers over.
 Bun.plugin({
-  name: "deno-specifiers-on-bun, supabase-js as the sql shim",
+  name: "deno-specifiers-on-bun",
   setup(build) {
     build.onLoad({ filter: VENDORED }, async (args) => {
       let src = await Bun.file(args.path).text();
@@ -207,9 +212,6 @@ Bun.plugin({
       src = src.replace(/(from\s+|import\s+)(["'])([^"']+)\2/g, (whole, lead, q, spec) => {
         let s = spec as string;
         if (s.startsWith("npm:")) s = s.slice(4).replace(/^(@?[^@/]+(?:\/[^@/]+)?)@[^/]*/, "$1");
-        // Matched by regex, not a quoted literal: scripts/migrate-to-sql-shim.ts rewrites every
-        // quoted @supabase/supabase-js it finds, and this loader is not a consumer of it.
-        if (/^@supabase\/supabase-js$/.test(s)) return `${lead}${q}${SHIM}${q}`;
         if (PACKAGES.test(s)) return `${lead}${q}${Bun.resolveSync(s, HERE)}${q}`;
         return whole;
       });
@@ -436,6 +438,16 @@ try {
   const [side] = await sql`SELECT type, sensitivity_tier, importance FROM thoughts WHERE id = ${id}`;
   assert(side.type === "idea" && side.sensitivity_tier === "standard" && Number(side.importance) === 3, "the enhanced-thoughts columns are written beside the function, by the raw update that carries neither content nor vector");
 
+  // SMD-1525: the read tools take the row's UUID too — they took upstream's integer id and could reach no row here.
+  const got = await call(h, "get_thought", { id });
+  assert(!got.isError && got.structured?.thought?.id === id && got.structured?.thought?.content === text, `get_thought takes the thought's UUID and answers the row (${got.toolText.slice(0, 60)})`);
+  const gotInt = await call(h, "get_thought", { id: 7 });
+  assert(gotInt.isError || gotInt.json?.error, `…and an integer id is refused by the schema, not looked up (${gotInt.isError ? gotInt.toolText.slice(0, 40) : JSON.stringify(gotInt.json?.error).slice(0, 60)})`);
+  const gotNone = await call(h, "get_thought", { id: "00000000-0000-4000-8000-000000000000" });
+  assert(gotNone.isError && /not found/.test(gotNone.toolText), "…and an unknown UUID is not found");
+  const related = await call(h, "related_thoughts", { thought_id: id });
+  assert(!related.isError && related.structured?.thought_id === id && Array.isArray(related.structured?.results), `related_thoughts takes the UUID and reaches get_thought_connections (enhanced-thoughts's, p_thought_id UUID) rather than binding an integer (${related.toolText.slice(0, 60)})`);
+
   const captured = "a fresh thought captured through enhanced-mcp";
   const c = await call(h, "brain_capture_thought", { content: captured });
   assert(!c.isError && /^Captured new thought #/.test(c.toolText) && UUID.test(String(c.structured?.thought_id)) && c.structured?.action === "inserted",
@@ -455,9 +467,47 @@ try {
     assert(!again.isError && String(again.structured?.thought_id) === cid && again.structured?.action !== "inserted" && kept.sensitivity_tier === "personal",
       `a re-capture answers the same id, not as inserted, and leaves a hand-set tier (${again.structured?.action} ${kept.sensitivity_tier})`);
   }
-  // One key, compared in place: a named key is refused here, and the name this server records is its constant's (SMD-1798 moves it onto the module).
+  // One key, compared in place: a named key is refused here, and the name this server records is its constant's (SMD-1798 moved the file onto the shim and left the compare).
   const named = await call(h, "brain_capture_thought", { content: "a capture under a named key, refused by enhanced-mcp" }, NAMED_KEY);
   assert(named.status === 401, `a named key (MCP_ACCESS_KEYS) is 401 here — this server knows its one MCP_ACCESS_KEY (${named.status})`);
+
+  // The other nine tools, on the shim (SMD-1798): the reads by construction, the schema-backed ones degrading as they say.
+  // The three search tools answer, and answer nothing: each sends `exclude_restricted: true` (and any date bound) as
+  // a key of the `filter` it hands match_thoughts and search_thoughts_text, and both functions — this fork's 014 and
+  // the enhanced-thoughts sidecar's own — read that argument as `metadata @> filter`, which no thought's metadata
+  // satisfies. A defect of the tool, not the shim (the shim ran the calls; the rows came back empty), pinned here so
+  // SMD-1986's fix flips these three by name.
+  const textMode = await call(h, "brain_search_thoughts", { query: "captured through enhanced", mode: "text" });
+  assert(!textMode.isError && Array.isArray(textMode.structured?.results) && textMode.structured.results.length === 0 && textMode.structured?.pagination?.total === 0,
+    `brain_search_thoughts in text mode reaches search_thoughts_text and answers no matches — its exclude_restricted key is read as a containment (${textMode.toolText.slice(0, 80)})`);
+  const semantic = await call(h, "brain_search_thoughts", { query: captured, min_similarity: 0.5 });
+  assert(!semantic.isError && Array.isArray(semantic.structured?.results) && semantic.structured.results.length === 0,
+    `…and in semantic mode embeds the query through the stub, calls match_thoughts, and answers no matches for the same reason (${semantic.toolText.slice(0, 80)})`);
+  const direct = await call(h, "search_thoughts_text", { query: "captured through enhanced" });
+  assert(!direct.isError && Array.isArray(direct.structured?.results) && direct.structured.results.length === 0, `search_thoughts_text likewise (${direct.toolText.slice(0, 60)})`);
+  const listed = await call(h, "brain_list_thoughts", { limit: 1, type: "idea" });
+  const pagination = listed.structured?.pagination;
+  assert(!listed.isError && listed.structured?.results?.length === 1 && typeof pagination?.total === "number" && pagination.total >= 2 && pagination.has_more === true,
+    `brain_list_thoughts pages: one row, the head count the total, has_more from the two (${listed.toolText.slice(0, 60)}; ${JSON.stringify(pagination)})`);
+  const counted = await call(h, "count_thoughts", { type: "idea" });
+  assert(!counted.isError && counted.structured?.count === pagination?.total, `count_thoughts agrees with the listing's total (${counted.structured?.count} vs ${pagination?.total})`);
+  const stats = await call(h, "brain_thought_stats", {});
+  assert(!stats.isError && typeof stats.structured?.total === "number" && stats.structured.total >= 2 && Array.isArray(stats.structured?.top_types),
+    `brain_thought_stats reads brain_stats_aggregate, a jsonb scalar (${stats.toolText.slice(0, 60)})`);
+  const ops = await call(h, "ops_capture_status", {});
+  assert(!ops.isError && ops.structured?.available === false, `ops_capture_status says smart-ingest is not installed — tableExists through the shim's head count (${ops.toolText.slice(0, 60)})`);
+  const graph = await call(h, "graph_search", { query: "ada" });
+  assert(!graph.isError && graph.structured?.available === false, `graph_search degrades without schemas/knowledge-graph (${graph.toolText.slice(0, 60)})`);
+  const entity = await call(h, "entity_detail", { entity_id: "11111111-1111-4111-8111-111111111111" });
+  const entityInt = await call(h, "entity_detail", { entity_id: 7 });
+  assert(!entity.isError && entity.structured?.available === false && !entityInt.isError && entityInt.structured?.available === false, `entity_detail takes a UUID or an integer id and degrades the same way (SMD-1525) (${entity.toolText.slice(0, 40)})`);
+  const monitor = await call(h, "ops_source_monitor", {});
+  assert(!monitor.isError && monitor.structured?.available === false, `ops_source_monitor degrades without the ops views (${monitor.toolText.slice(0, 60)})`);
+  // The drift guard: tools/list under the key is exactly the thirteen driven in this block.
+  const listedTools = await send(h, "POST", "/mcp", { jsonrpc: "2.0", id: 1, method: "tools/list" });
+  const names = ((listedTools.json?.result?.tools ?? []) as { name: string }[]).map((t) => t.name).sort().join();
+  const drivenHere = ["brain_capture_thought", "brain_list_thoughts", "brain_search_thoughts", "brain_thought_stats", "count_thoughts", "entity_detail", "get_thought", "graph_search", "ops_capture_status", "ops_source_monitor", "related_thoughts", "search_thoughts_text", "update_thought"].join();
+  assert(names === drivenHere, `enhanced-mcp's tools/list is exactly the thirteen tools driven here (${names})`);
 }
 
 // ── integrations/agent-memory-api ────────────────────────────────────────────
@@ -492,6 +542,75 @@ try {
   const nid = await idOf(decision2);
   assert(nid !== null, "…and its thought");
   if (nid) judgeActor("agent-memory-api writeback under a named key", await auditRow(nid, "capture"), "agent-memory-api", NAMED);
+
+  // The read and review routes, on the shim (SMD-1798): the recall through match_thoughts, the trace it leaves, its
+  // usage, the listings and the review — every route the server has.
+  const health = await send(h, "GET", "/health");
+  assert(health.status === 200 && health.json?.ok === true, `GET /health (${health.status})`);
+  const [{ id: memoryId }] = await sql`SELECT id FROM agent_memories WHERE content = ${decision}`;
+  const recallBody = { schema_version: "openbrain.agent_memory.recall.v1", workspace_id: "ws-test", runtime: { name: "test" }, query: decision, scope: { visibility: "personal", project_only: false }, limits: { max_items: 5 } };
+  const recall = await send(h, "POST", "/recall", recallBody);
+  const recalled = ((recall.json?.memories ?? []) as { memory_id: string }[]).map((m) => m.memory_id); // responseMemory's shape
+  assert(recall.status === 200 && UUID.test(String(recall.json?.request_id)) && recalled.includes(memoryId),
+    `POST /recall under a write key: the query embedded through the stub, match_thoughts on the shim, the written-back memory ranked and a trace stored (${recall.status}: ${recall.json?.error ?? recalled.length + " memories"})`);
+  const requestId = String(recall.json?.request_id);
+  const trace = await send(h, "GET", `/recall-traces/${requestId}`);
+  const items = (trace.json?.items ?? []) as { memory_id: string; agent_memories: { id: string } | null }[];
+  assert(trace.status === 200 && trace.json?.trace?.request_id === requestId && items.some((i) => i.memory_id === memoryId && i.agent_memories?.id === memoryId),
+    `GET /recall-traces/:request_id: the trace and its items, each with the memory embedded (${trace.status}: ${trace.json?.error ?? items.length + " items"})`);
+  const usage = await send(h, "POST", `/recall/${requestId}/usage`, { used_memory_ids: [memoryId], ignored: [] });
+  const [{ used }] = await sql`SELECT used FROM agent_memory_recall_items WHERE memory_id = ${memoryId} AND trace_id = (SELECT id FROM agent_memory_recall_traces WHERE request_id = ${requestId})`;
+  assert(usage.status === 200 && usage.json?.ok === true && used === true, `POST /recall/:request_id/usage marks the memory used, in the row (${usage.status}: ${used})`);
+  const list = await send(h, "GET", "/memories?workspace_id=ws-test&limit=10");
+  assert(list.status === 200 && list.json?.count >= 2 && ((list.json?.memories ?? []) as { memory_id: string }[]).some((m) => m.memory_id === memoryId), `GET /memories lists the workspace's memories (${list.status}: ${list.json?.count})`);
+  const byRuntime = await send(h, "GET", "/memories?workspace_id=ws-test&runtime_name=nobody");
+  assert(byRuntime.status === 200 && byRuntime.json?.count === 0, `…filtered by runtime (${byRuntime.json?.count})`);
+  const review = await send(h, "GET", "/memories/review?workspace_id=ws-test");
+  assert(review.status === 200 && Array.isArray(review.json?.memories), `GET /memories/review answers the pending list (${review.status})`);
+  const one = await send(h, "GET", `/memories/${memoryId}`);
+  assert(one.status === 200 && one.json?.memory?.id === memoryId && Array.isArray(one.json?.memory?.agent_memory_source_refs) && Array.isArray(one.json?.memory?.agent_memory_artifacts),
+    `GET /memories/:id, its two one-to-many embeds as arrays (${one.status}: ${one.json?.error ?? Object.keys(one.json?.memory ?? {}).length + " keys"})`);
+  const reviewed = await send(h, "PATCH", `/memories/${memoryId}/review`, { action: "mark_stale", notes: "driven" });
+  const [{ n: actions }] = await sql`SELECT count(*)::int AS n FROM agent_memory_review_actions WHERE memory_id = ${memoryId}`;
+  assert(reviewed.status === 200 && reviewed.json?.memory?.review_status === "stale" && reviewed.json?.memory?.lifecycle_status === "stale" && actions === 1,
+    `PATCH /memories/:id/review marks it stale and records the action (${reviewed.status}: ${reviewed.json?.error ?? reviewed.json?.memory?.review_status}; ${actions} action)`);
+  const staleOut = await send(h, "POST", "/recall", recallBody);
+  assert(staleOut.status === 200 && !((staleOut.json?.memories ?? []) as { memory_id: string }[]).some((m) => m.memory_id === memoryId), "…and a recall no longer returns it without include_stale");
+}
+
+// ── integrations/consolidation-workers/metadata-norm (SMD-1798) ──────────────
+
+{
+  const F = "integrations/consolidation-workers/metadata-norm/index.ts";
+  console.log(`\n[${F}]`);
+  const h = await load(F);
+  // A candidate — a reference of weak confidence, unreviewed — beside one the worker's two and() groups over JSON
+  // paths must leave alone: the .or() the shim reads since SMD-1798.
+  // Planted as the other rows are, then given the enhanced columns and the metadata the worker's filters read (a
+  // write of neither content nor vector, so not one check 10 counts). One row for each and() group — an idea of
+  // default importance, a reference of another importance — so each arm selects a row the other does not (the
+  // fourth review pass's mutant: with both rows reference/3, either arm alone found them), beside a confident one.
+  const weak = await plant("metadata-norm weak");
+  await sql`UPDATE thoughts SET type = 'idea', importance = 3, metadata = metadata || '{"confidence": 0.5, "topics": ["old"]}'::jsonb WHERE id = ${weak}`;
+  const weakRef = await plant("metadata-norm weak reference");
+  await sql`UPDATE thoughts SET type = 'reference', importance = 2, metadata = metadata || '{"confidence": 0.5}'::jsonb WHERE id = ${weakRef}`;
+  const strong = await plant("metadata-norm strong");
+  await sql`UPDATE thoughts SET type = 'reference', importance = 3, metadata = metadata || '{"confidence": 0.95}'::jsonb WHERE id = ${strong}`;
+  const dry = await send(h, "POST", "/?dry_run=true&limit=10");
+  const dryIds = ((dry.json?.changes ?? []) as { thought_id: string }[]).map((c) => c.thought_id).sort();
+  assert(dry.status === 200 && dry.json?.candidates_found === 2 && dry.json?.changed === 2 && dry.json?.dry_run === true && dryIds.join() === [weak, weakRef].sort().join(),
+    `a dry run finds the two weak rows, one through each and() group on the JSON path, not the confident one — through the shim — and says what it would change (${dry.status}: ${JSON.stringify(dry.json).slice(0, 140)})`);
+  const [before] = await sql`SELECT type, importance, metadata FROM thoughts WHERE id = ${weak}`;
+  assert(before.type === "idea" && before.metadata.consolidation_reviewed === undefined, "…and writes nothing");
+  const run = await send(h, "POST", "/?limit=10");
+  assert(run.status === 200 && run.json?.changed === 2 && run.json?.errors === 0 && run.json?.llm_calls === 2, `a live run reclassifies both through the stubbed classifier (${run.status}: ${JSON.stringify(run.json).slice(0, 140)})`);
+  const [after] = await sql`SELECT type, importance, metadata FROM thoughts WHERE id = ${weak}`;
+  assert(after.type === "decision" && Number(after.importance) === 4 && after.metadata.consolidation_reviewed === true && JSON.stringify(after.metadata.topics) === JSON.stringify(["old", "ledger"]),
+    `…the type and importance from the answer, the topics merged, the row marked reviewed (${JSON.stringify({ type: after.type, importance: after.importance, topics: after.metadata.topics, reviewed: after.metadata.consolidation_reviewed })})`);
+  const [{ n: logged }] = await sql`SELECT count(*)::int AS n FROM consolidation_log WHERE operation = 'metadata_quality' AND survivor_id = ${weak}`;
+  assert(logged === 1, `…and one consolidation_log row for it (${logged})`);
+  const again = await send(h, "POST", "/?limit=10");
+  assert(again.status === 200 && again.json?.candidates_found === 0, `a second run finds no candidate — the reviewed marker excludes it (${again.json?.candidates_found})`);
 }
 
 // ── integrations/open-brain-rest ─────────────────────────────────────────────

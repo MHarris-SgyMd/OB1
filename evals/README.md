@@ -10,8 +10,8 @@ are here so the decision is auditable and re-runnable when better models appear.
 - [Bun](https://bun.sh) 1.4+
 - The models you want to compare, pulled
 - `OB1_LLM_LOCAL=1` in the environment for the harnesses that dial through the
-  server's own resolver (`eval-consolidate`, `eval-entities`, `eval-graphrag`;
-  the chunking end-to-end sets it for its child itself): the egress gate
+  server's own resolver (`eval-consolidate`, `eval-entities`, `eval-graphrag`,
+  `eval-extract-windows`; the chunking end-to-end sets it for its child itself): the egress gate
   (SMD-1903) refuses a thought's text to an endpoint not declared local, and a
   loopback address is not a declaration. `lib.ts`'s own embedding dialler
   (`OB1_EVAL_BASE`) is outside the gate: it embeds eval corpora, not the brain
@@ -1288,6 +1288,230 @@ get 1024. The harness takes `model@1024`. Interestingly 1024 beat 1536 here
 Note that the server does **not** currently send `dimensions`, so configuring a
 2560-native model against a 1024 column still fails the width check at capture
 time. Making that configurable is the obvious follow-up.
+
+## Entity extraction in windows — the stragglers, the answer budget, and what a window costs in relations
+
+`eval-extract-windows.ts` (SMD-1879). Until this change `db/extract-entities.ts`
+sent a thought to the metadata model in one call, cut at 8,000 characters,
+with no bound on the answer. On the fork's own brain 32 of 295 thoughts —
+1,656 to 13,113 characters — failed with "The operation timed out." on
+`qwen2.5:7b`, re-run serially with `--timeout 900`. The ticket read that as one
+oversized read-and-generate. Measured, it was half that.
+
+```bash
+# the thoughts that failed, off a brain (read-only), as the harness's input
+psql "$DATABASE_URL" -At -c "SELECT json_agg(json_build_object('id', t.id, 'content', t.content)) FROM thought_work_claims c JOIN thoughts t ON t.id = c.thought_id WHERE c.work_type LIKE 'extract:%' AND c.status = 'failed'" > stragglers.json
+OB1_LLM_LOCAL=1 OB1_EVAL_DOCS=stragglers.json ../db/with-postgres.sh bun eval-extract-windows.ts --arms whole+budget,w1200,w600
+OB1_LLM_LOCAL=1 ../db/with-postgres.sh bun eval-extract-windows.ts --planted     # three long documents with facts planted at known distances
+```
+
+### What the failures were, 2026-09-22
+
+Three probes before any design, all against an idle Ollama 0.33 serving
+`qwen2.5:7b` at its defaults:
+
+- **Nothing was truncated on the way in.** `/api/ps` reports the model served
+  at a 32,768-token context, and a 14,432-token prompt came back with
+  `usage.prompt_tokens` 14,432. The extraction rules and delimiter with an
+  empty thought cost 398 tokens. So the whole of every straggler — the longest
+  is about 3,300 estimated tokens — fit the context with room to spare.
+- **The shortest straggler ran to the deadline alone.** 1,656 characters, 414
+  estimated tokens, no other load: the worker's exact request ran 300 s and
+  was cut by the client.
+- **Thirty-one of the 32 are answers that do not end.** With `max_tokens:
+  1500` each whole-thought call returned in 30–37 s; 31 hit the cap
+  (`finish_reason: length`) and the tails are one relation repeated
+  (`ToolName → ToolEntry depends_on`, line after line), one entity repeated,
+  or an enumeration of every ticket id in the text as a `uses` edge. The one
+  that finished — 8,853 characters, 2,214 estimated tokens, 19 entities and
+  17 edges in 1,333 tokens — had simply been unlucky under load on the brain.
+  Nothing about the input's length made the model stop; on these texts it
+  did not, and the length of the input did not predict which.
+- **`--timeout 900` was 300.** Bun's `fetch` has its own 300 s idle timeout,
+  and an unstreamed chat completion is silent until it ends: a 330 s
+  `AbortSignal` against a server that answers at 400 s failed at 300.1 s; with
+  `timeout: false` on the request it failed at 330.0, the signal's. The three
+  diallers the server and the workers use — `providerCall`, `judgePair`,
+  `extractOnce` — now pass `timeout: false` so the configured deadline is the
+  deadline; preflight's probes and the evals' own diallers keep Bun's default,
+  being short.
+
+So the windows bound what the model reads, and the answer budget bounds what
+it writes (`db/config.mjs`, `extractOutputBudget`). The first cut was twice
+the text's estimated tokens plus 256, against a measured mean of 0.48 answer
+tokens per input token and a 95th percentile of 1.6 over the 262 thoughts the
+7B did extract; the second model below showed that ratio was the 7B's compact
+answer style, not a property of the task, and the budget shipped is three
+times the text plus 1,536. A runaway ends at the budget as a malformed answer
+the worker records failed in about a minute, where before it held a worker for
+the whole timeout.
+
+### The planted set: what a window costs in relations, 2026-09-22
+
+Three documents of 2,928–3,525 estimated tokens — a title, an opening
+sentence naming a subject and a person, twenty-odd paragraphs of neutral
+meeting-note filler with no names in them, and a closing paragraph stating a
+relation to the subject as "the project" or "the migration" — so one planted
+relation per document has both endpoints in the opening (`near`) and one has
+its endpoints in different windows at every size measured (`FAR`). Scored
+through `record_thought_entities`; any relation between the two planted
+endpoints counts, since the question is whether the model connected them at
+all, not which verb it chose. `qwen2.5:7b`, temperature 0:
+
+| arm | extracted | planted entities | near relations | FAR relations | windows | median s |
+| --- | ---: | ---: | ---: | ---: | --- | ---: |
+| `whole` (one call over the whole text, no budget) | 3/3 | 11/13 | 0/3 | 1/3 | 1 | 9.0 |
+| `whole+budget` | 3/3 | 11/13 | 0/3 | 1/3 | 1 | 6.3 |
+| `w1200` | 3/3 | 12/13 | 0/3 | 0/3 | 4/3/3 | 41.3 |
+| `w1200h` (header) | 3/3 | 12/13 | 0/3 | 1/3 | 4/3/3 | 43.5 |
+| `w600` | 3/3 | 11/13 | 0/3 | 0/3 | 8/9/7 | 94.9 |
+| `w600h` (header) | 3/3 | 12/13 | 0/3 | 0/3 | 8/9/7 | 81.8 |
+
+`whole` is p1's request without p1's 8,000-character cut: these documents run
+to 13,000 characters, so the shipped p1 would have dropped the closing
+paragraph that carries every planted far relation and scored 0/3 on it by
+construction. The arm measures one unbounded call, which is the fair baseline
+for the windows; it is not a re-run of what p1 stored.
+
+Read with the sample size in view — three documents, three far relations:
+
+- **Entities are local and unaffected**, as the ticket predicted: 11–12 of 13
+  on every arm, the miss being `Kafka` typed as a topic or `Acme` dropped, the
+  same under one call as under nine.
+- **Relations are at the model's floor before any window is cut.** The
+  `near` relations — both endpoints in the same sentence — score 0/3 under
+  the whole-thought call too. This model does not reliably emit a relation
+  from a 3,000-token document at all, so the harness cannot separate "lost to
+  the window boundary" from "never produced"; the far loss it can see is one
+  relation in three (`whole` 1/3, `w1200` 0/3), and the header buys one back
+  (`w1200h` 1/3 — a different one), which at n=3 is a sign, not a measurement.
+- **Windows cost wall clock on documents that extract fine whole.** A
+  3,000-token document is one 9-second call or four 41-second-median ones;
+  at 600 tokens, eight to nine calls and 82–95 s. The windows are for the
+  thoughts one call cannot finish, and their price on every other long
+  thought is this.
+
+`EXTRACT_WINDOW_HEADER` ships **off**: one far relation recovered of three, no
+call added, no precision measured — not enough to change every window's
+prompt on. The arms stay in the harness for a labelled corpus that can decide
+it (see the follow-ups).
+
+### The stragglers, 2026-09-22
+
+The 32 thoughts that failed on the brain (414–3,279 estimated tokens, 173,469
+characters), each arm over all 32, `qwen2.5:7b` at temperature 0, 300 s per
+call, sequential on an otherwise idle Ollama. "Extracted" is the thought
+written through `record_thought_entities`; "malformed" is a thought at least
+one of whose calls ran to its budget:
+
+| arm | extracted | malformed | median s | total s | mean mentions | mean edges | calls |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `whole+budget` (one call, budgeted) | 2/32 | 30 | 64.2 | 2,047 | 12.0 | 8.5 | 32 |
+| `w1200` (the shipped window) | 10/32 | 22 | 44.5 | 1,799 | 20.1 | 18.6 | 58 |
+| `w600` | 13/32 | 19 | 62.6 | 2,392 | 20.6 | 21.3 | 132 |
+| `whole+p` (one call, a penalised retry on a runaway) | 27/32 | 4 (+1 timed out) | 79.5 | 2,963 | 12.0 | 9.1 | 31 window calls; 29 thoughts retried |
+| **`w1200p` (shipped: the window and the retry)** | **27/32** | 5 | 75.8 | 2,728 | 17.1 | 15.1 | 58 window calls; 22 thoughts retried |
+
+The `calls` column of that run counted windows, and its retry figures count
+thoughts retried, not retry calls; the harness has counted every call since
+the fourth review pass, so a re-run's column will read higher for the `p` arms.
+
+What the rows say, read together:
+
+- **A call that runs away runs away again at the same size.** Every one of
+  the 15 thoughts short enough to go in one call under `w1200` and `w600`
+  failed there (0/15), as it had on the brain and in the probe. Temperature 0
+  is deterministic: the same text, the same request, the same loop.
+- **Smaller inputs converge more often, and which ones is a coin toss.**
+  Of the 18 thoughts `w1200` split, 10 extracted; of the 31 `w600` split, 13.
+  Across the three arms 18 distinct thoughts extracted under at least one, but
+  only 6 under both window sizes — a thought that converged at 1200 failed at
+  600 and the reverse, so what a window changes is the text the model sees,
+  and any change is another draw. A thought fails when ANY window runs away,
+  which is why nine windows do not beat three by much.
+- **The budget is what makes a failure cheap.** No arm timed out. A thought
+  that fails now fails in 20–130 s — one call cut at its budget — where on the
+  brain each held a worker for the full timeout, and only Bun's 300 s cut
+  ended it.
+- **Windows cost calls, not wall clock, on the thoughts that converge.** 58
+  calls for 32 thoughts at 1200, 132 at 600; the median thought is faster
+  under `w1200` than whole because the cut answers are shorter.
+
+- **The retry is the lever.** A call that ends at its budget is made once
+  more with `frequency_penalty` 0.5 — the repetition the runaways are, taxed —
+  and that reaches the thoughts no window size did: one call plus the retry
+  extracts 27 of 32, and so does the shipped shape, 1200-token windows plus
+  the retry, with no timeouts (the whole-thought retry timed one out: a
+  penalised answer over a long text can be slow as well as long). Under the
+  shipped shape the 14 single-call thoughts go 0 → 10 of 14 and the 18 windowed
+  ones 10 → 17 of 18; 10 of the 27 needed no retry. The 5 the shipped shape
+  still failed under this budget ran away twice — and, the second model below
+  showed, were penalised answers the budget then cut: under the recalibrated
+  budget the same arm takes 32 of 32.
+- **The retried answer is thinner.** The penalty taxes the JSON's repeated
+  keys as it taxes the loop, so a retried call returns fewer items: the
+  whole-thought retry averages 12.0 mentions where the shipped shape's
+  windows, most of which converge first time, average 17.1 — the windows
+  keep the rich answer where they can and the retry rescues where they cannot.
+
+**The default is 1200** (`chunk.ts`, `DEFAULT_EXTRACT_WINDOW_TOKENS`) **with
+the retry on** (`EXTRACT_RETRY_RUNAWAY`): 27 of 32 under this budget, 32 of 32
+under the recalibrated one below, for 1.8× the calls plus a retry on 20–22,
+where 600-token windows alone reached 13 for 4.1× the calls and, on the planted
+set above, cost a far relation the 1200 window kept. A brain whose model runs
+away more can set `OB1_EXTRACT_CHUNK_TOKENS=600`.
+
+### A second model: the p2 residue on `qwen3.8:27b`, 2026-09-22
+
+After the dogfood brain was re-extracted under p2 (343 of 367; 24 failed twice
+on the 7B and a `--retry-failed` pass recovered none), twelve of the 24 —
+every other one by length, 277 to 9,804 characters — went through the shipped
+windowing on `qwen3.8:27b` (served at 262,144 tokens), with and without the
+retry, under the budget of twice the text plus 256:
+
+| arm | extracted | malformed | median s | calls | retried thoughts |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `w1200` | 8/12 | 4 | 52.5 | 18 | 0 |
+| `w1200p` | 8/12 | 4 | 72.1 | 22 | 4 |
+
+The 27B took every thought over 699 estimated tokens, the four-window
+2,451-token one included, and the retry added nothing. The four it "failed"
+are the four shortest — 70, 291, 402 and 525 estimated tokens — and probing
+them showed they are not runaways: with a budget too large to bind, all four
+extract cleanly, at 659, 1,020, 1,494 and 2,301 answer tokens. That is 3.5 to
+9.4 answer tokens per input token, in pretty-printed JSON 1.6× the compact
+size, on notes dense with ticket ids. **The budget of twice the text plus 256
+was the 7B's compact answer style measured, not a property of the task**, and
+it cut every one of those legitimate answers — and a cut answer under the
+retry is retried under a penalty it did not need. The budget shipped is three
+times the text plus 1,536: over every legitimate answer measured on both
+models (1,746 for the 70-token note, 3,111 for the 525-token one), and still a
+bound for the 7B's runaways, which now end in about a minute rather than 30 s.
+The window derivation moves with it: qwen2.5:7b's context would hold 7,688
+(was 10,678), a 4,096-token context derives 520, a 2,048-token one holds no
+window at all.
+
+**Under the recalibrated budget**, the shipped shape (`w1200p`) re-run on both
+sets, same machine, sequential:
+
+| model | set | extracted | malformed | median s | calls | retried thoughts |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| `qwen3.8:27b` | the 12 of the p2 residue | **12/12** | 0 | 63.2 | 18 | 0 |
+| `qwen2.5:7b` | the 32 original stragglers | **32/32** | 0 | 106.4 | 78 | 20 |
+
+On the 27B the retry never fires: every "runaway" was the budget. On the 7B
+the loops are real — 20 of 32 first calls still run to the budget and are
+retried — but the five that failed twice under 2× + 256 converge now, which
+says their penalised retries were legitimate answers the old budget cut in
+turn. The price is time: a runaway on the 7B costs about a minute before the
+retry instead of 30 s (median 106 s per straggler against 76). The dogfood
+brain, re-run with `--retry-failed` under the new budget: **366 of 373
+extracted, 7 failed**, from 339 of 363 under the old one and 262 of 295 under
+p1; the graph holds 2,149 entities, 5,272 mentions and 4,563 edges. Those 7 —
+5,058 to 21,345 characters, the brain's longest — all extract on the 27B under
+the shipped shape (7/7, no retry; 2 to 7 windows each, 66 to 351 s), so the
+7B's residue is the 7B's, and a brain that wants them can point
+`OB1_METADATA_MODEL` at the larger model and re-run with `--switch-key`.
 
 ## Entity extraction, measured through the real write path
 

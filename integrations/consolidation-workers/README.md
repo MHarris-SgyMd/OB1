@@ -8,7 +8,7 @@
 
 ## What It Does
 
-This integration provides two Supabase Edge Function workers that improve thought quality after initial import:
+This integration provides two workers, run under Bun against your Postgres, that improve thought quality after initial import:
 
 **Bio Worker** (`bio/index.ts`): Synthesizes a canonical biographical profile from person_note, decision, and journal thoughts. The profile is stored as a thought with `metadata.generated_by = "consolidation-bio"` and is rewritten through the database's `update_thought` on subsequent runs — embedded by the worker, so the row carries a vector and its model label and the content fingerprint follows the text; a re-embed pass's vector is replaced, not blanked (FORK.md change 69). The first run stores the profile through the 3-argument `upsert_thought`, embedded, with the enhanced columns following on the fresh row, and both paths name the key as 008's audit actor (FORK.md change 71, SMD-1524) — the raw insert it replaced computed its own fingerprint and stored no vector. On this fork the worker's source and profile queries — filters on `metadata->>generated_by`, `->>artifact_type` and `->>subject` — run through the SQL shim's JSON-path columns (FORK.md change 73, SMD-1544); before that change the shim refused the column and the worker answered 500 at its first query, so nothing above had run. `extensions/test-writes.ts` drives both write paths against Postgres. Useful for generating "Who is X" summaries from scattered notes.
 
@@ -29,60 +29,45 @@ For the full tool and worker inventory, see `docs/05-tool-audit.md` in the repos
 - **Enhanced thoughts schema** applied — install `schemas/enhanced-thoughts` for the `type`, `importance`, `sensitivity_tier`, and `source_type` columns
 - **Knowledge graph schema** applied — install `schemas/knowledge-graph` for the `consolidation_log` table
 - At least one LLM API key: OpenRouter (recommended), OpenAI, or Anthropic
-- Supabase CLI installed for deployment
+- [Bun](https://bun.sh) installed, and a checkout of this repository (the workers run from it)
 
 ## Steps
 
-1. Copy the worker folders into your Supabase functions directory.
-2. Deploy the `consolidation-bio` and `consolidation-metadata` edge functions.
+1. Check out this repository — the workers run from it, under Bun.
+2. Start `bio/index.ts` and `metadata-norm/index.ts` with the environment below.
 3. Set the required environment variables and API keys.
 4. Run each worker in dry-run mode first, then apply changes.
 5. Verify the resulting rows in `consolidation_log` and `thoughts`.
 
-### 1. Copy the Integration
+### 1. Check Out the Integration
 
-Copy the `integrations/consolidation-workers/` folder into your Supabase project's `supabase/functions/` directory. Each subfolder becomes its own edge function:
+The workers run from a checkout of this repository: each imports the repository's SQL shim and `compat/deno-on-bun.ts` by relative path, and the access-key module from `../_shared/auth.ts` beside it (the core server's, held byte-identical by `extensions/test-auth.ts`). Nothing is copied anywhere; there is no Supabase Edge Function to deploy, and the directory's `deno.json` pins nothing any more.
 
-```bash
-mkdir -p supabase/functions/consolidation-bio supabase/functions/consolidation-metadata supabase/functions/_shared
-cp integrations/consolidation-workers/bio/index.ts supabase/functions/consolidation-bio/index.ts
-cp integrations/consolidation-workers/metadata-norm/index.ts supabase/functions/consolidation-metadata/index.ts
-cp integrations/consolidation-workers/deno.json supabase/functions/consolidation-bio/deno.json
-cp integrations/consolidation-workers/deno.json supabase/functions/consolidation-metadata/deno.json
-cp integrations/consolidation-workers/_shared/*.ts supabase/functions/_shared/
-```
+### 2. Run the Workers
 
-Files are copied one by one, not folders, so running the block again — or into a `_shared/` folder you already have from the enhanced MCP server or any other server on this fork — replaces files rather than nesting a copy. The `deno.json` pins `@supabase/supabase-js`, which `consolidation-metadata` imports by its bare name (Supabase reads one per function directory); `consolidation-bio` imports the SQL shim instead and runs under Bun (the callout below), so the copy is for `consolidation-metadata`. Both workers import the access-key module from `../_shared/auth.ts`.
-
-### 2. Deploy the Edge Functions
-
-> **Runs under Bun, not as an Edge Function.** This worker (`consolidation-bio`) imports the repository's SQL shim (`compat/supabase-sql`, which imports `bun`) and `compat/deno-on-bun.ts`, the two Deno globals it uses on Bun (FORK.md change 74), so `supabase functions deploy` cannot bundle it; from a checkout of this repository it serves on `PORT` (8000 unset — podman's `gvproxy` holds that port on macOS, so set one):
+> **Runs under Bun, not as an Edge Function.** Both workers import the repository's SQL shim (`compat/supabase-sql`, which imports `bun`) and `compat/deno-on-bun.ts`, the two Deno globals they use on Bun (FORK.md change 74 moved `consolidation-bio`; SMD-1798 moved `consolidation-metadata`, whose two-group `.or()` over the candidates the shim did not read until then), so `supabase functions deploy` cannot bundle them; from a checkout of this repository each serves on `PORT` (8000 unset — podman's `gvproxy` holds that port on macOS, so set one):
 >
 > ```bash
 > PORT=8787 SUPABASE_URL='postgres://user:password@host:5432/openbrain' MCP_ACCESS_KEYS='cron:write:<sha256-of-your-key>' OPENROUTER_API_KEY='…' bun integrations/consolidation-workers/bio/index.ts
+> PORT=8788 SUPABASE_URL='postgres://user:password@host:5432/openbrain' MCP_ACCESS_KEYS='cron:write:<sha256-of-your-key>' OPENROUTER_API_KEY='…' bun integrations/consolidation-workers/metadata-norm/index.ts
 > ```
 >
-> `SUPABASE_URL` carries the Postgres connection string (the shim's convention; `SUPABASE_SERVICE_ROLE_KEY` may be left unset), and the other variables are the secrets the steps below set, passed as environment — see [Run a migrated server under Bun](../../compat/supabase-sql/README.md#3-run-a-migrated-server-under-bun). `extensions/test-auth.ts` starts it this way in CI, and `extensions/test-writes.ts` drives both of its write paths against Postgres; `consolidation-metadata` deploys as below. The `supabase functions deploy consolidation-bio` below applies to the file after `bun scripts/migrate-to-sql-shim.ts --revert integrations/consolidation-workers/bio/index.ts`, which puts it back on supabase-js.
-
-```bash
-supabase functions deploy consolidation-bio --no-verify-jwt
-supabase functions deploy consolidation-metadata --no-verify-jwt
-```
+> `SUPABASE_URL` carries the Postgres connection string (the shim's convention; `SUPABASE_SERVICE_ROLE_KEY` may be left unset), and the other variables are the secrets the steps below set, passed as environment — see [Run a migrated server under Bun](../../compat/supabase-sql/README.md#3-run-a-migrated-server-under-bun). `extensions/test-auth.ts` starts both this way in CI, and `extensions/test-writes.ts` drives the bio worker's two write paths and the metadata worker's review against Postgres.
 
 ### 3. Set Environment Variables
 
 ```bash
-supabase secrets set \
+export \
   MCP_ACCESS_KEYS="cron:write:<sha256-of-your-key>" \
   OPENROUTER_API_KEY="your-openrouter-key"
 ```
 
-`MCP_ACCESS_KEYS` holds one `name:scope:sha256` entry per caller — the hash, never the key; mint one as [Deploy an Edge Function, Step 3](../../primitives/deploy-edge-function/README.md#step-3-mint-an-access-key) shows. The older single `MCP_ACCESS_KEY` still works, compared by digest. The secret is project-wide — one `MCP_ACCESS_KEYS` for every function in the project — so set the whole list, your existing entries plus this one, comma-separated. Both workers write, so a real run needs a `write` key; a `read` key may only `dry_run=true`.
+`MCP_ACCESS_KEYS` holds one `name:scope:sha256` entry per caller — the hash, never the key; mint one as [Deploy an Edge Function, Step 3](../../primitives/deploy-edge-function/README.md#step-3-mint-an-access-key) shows. The older single `MCP_ACCESS_KEY` still works, compared by digest. One `MCP_ACCESS_KEYS` list serves every server you run — set the whole list, comma-separated, in each worker's environment. Both workers write, so a real run needs a `write` key; a `read` key may only `dry_run=true`.
 
 Optional multi-provider fallback:
 
 ```bash
-supabase secrets set \
+export \
   OPENAI_API_KEY="your-openai-key" \
   ANTHROPIC_API_KEY="your-anthropic-key"
 ```
@@ -92,7 +77,7 @@ supabase secrets set \
 Optional tuning:
 
 ```bash
-supabase secrets set \
+export \
   CONSOLIDATION_MAX_CALLS="100" \
   FETCH_TIMEOUT_MS="60000"
 ```
@@ -110,21 +95,21 @@ supabase secrets set \
 Generate a biographical profile (dry run first — the one thing a `read`-scoped key may do):
 
 ```bash
-curl -X POST "https://<project-ref>.supabase.co/functions/v1/consolidation-bio?dry_run=true" \
+curl -X POST "http://localhost:8787/?dry_run=true" \
   -H "x-brain-key: your-access-key"
 ```
 
 Apply the profile:
 
 ```bash
-curl -X POST "https://<project-ref>.supabase.co/functions/v1/consolidation-bio" \
+curl -X POST "http://localhost:8787" \
   -H "x-brain-key: your-access-key"
 ```
 
 Optionally target a specific person:
 
 ```bash
-curl -X POST "https://<project-ref>.supabase.co/functions/v1/consolidation-bio?name=Sarah" \
+curl -X POST "http://localhost:8787/?name=Sarah" \
   -H "x-brain-key: your-access-key"
 ```
 
@@ -133,21 +118,21 @@ curl -X POST "https://<project-ref>.supabase.co/functions/v1/consolidation-bio?n
 Preview what would change (dry run):
 
 ```bash
-curl -X POST "https://<project-ref>.supabase.co/functions/v1/consolidation-metadata?dry_run=true&limit=20" \
+curl -X POST "http://localhost:8788/?dry_run=true&limit=20" \
   -H "x-brain-key: your-access-key"
 ```
 
 Apply changes:
 
 ```bash
-curl -X POST "https://<project-ref>.supabase.co/functions/v1/consolidation-metadata?limit=20" \
+curl -X POST "http://localhost:8788/?limit=20" \
   -H "x-brain-key: your-access-key"
 ```
 
 Increase batch size (max 100):
 
 ```bash
-curl -X POST "https://<project-ref>.supabase.co/functions/v1/consolidation-metadata?limit=100" \
+curl -X POST "http://localhost:8788/?limit=100" \
   -H "x-brain-key: your-access-key"
 ```
 
@@ -208,7 +193,7 @@ Solution: The worker needs at least one person_note, high-importance decision (>
 Solution: Candidates must have `type = 'reference'` with confidence < 0.7, or `importance = 3` with confidence < 0.7, and must not already be marked `consolidation_reviewed`. Check your thoughts meet these criteria.
 
 **Issue: All LLM providers fail**
-Solution: Verify your API keys are set correctly. Check the Supabase function logs for specific error messages. The worker tries OpenRouter first, then OpenAI, then Anthropic.
+Solution: Verify your API keys are set correctly. Check the worker's stderr for the specific error. The worker tries OpenRouter first, then OpenAI, then Anthropic.
 
 **Issue: consolidation_log insert fails**
 Solution: Ensure the knowledge graph schema is applied. The `consolidation_log` table is created by `schemas/knowledge-graph`. This is a non-fatal error — the thought updates still succeed.

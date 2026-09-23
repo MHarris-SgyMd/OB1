@@ -537,17 +537,16 @@ console.log("\n[11] The query log's action rows over PostgREST: one or many thro
 {
   // The hosted deployment's path for every fetch, edit and cite: logActions'
   // ARRAY insert through the client. Read back by SQL so the rows are checked
-  // as stored, not as the client echoed them. The search row is seeded by SQL:
-  // logSearch through THIS shim is a pre-existing divergence (uuid[] + real[]
-  // with a null element — see SMD-1602), not this ticket's writer.
+  // as stored, not as the client echoed them. The search row goes through
+  // logSearch, on the shim: a `real[]` with a null element was refused by Bun's
+  // array decoder on the row the insert returns until SMD-1602 read array
+  // columns through to_json, so this row was seeded by SQL before.
   const admin = new SQL({ url: URL_, max: 1 });
   await admin`DELETE FROM query_log`;
   const AG = "99999999-9999-4999-8999-999999999999";
   const X = "aaaaaaaa-0000-4000-8000-000000000001";
   const Y = "aaaaaaaa-0000-4000-8000-000000000002";
-  await admin`
-    INSERT INTO query_log (kind, tool, agent_id, query, match_count, threshold, recency_weight, filter, result_ids, result_scores)
-    VALUES ('search', 'search_thoughts', ${AG}::uuid, 'postgrest log', 5, 0, 0, '{}'::jsonb, ARRAY[${X},${Y}]::uuid[], ARRAY[0.9, NULL]::real[])`;
+  await store.logSearch({ tool: "search_thoughts", agentId: AG, query: "postgrest log", matchCount: 5, threshold: 0, recencyWeight: 0, filter: {}, resultIds: [X, Y], resultScores: [0.9, null] });
   await store.logActions([]);
   await store.logActions([{ tool: "fetch", agentId: AG, targetId: X }]);
   await store.logActions([
@@ -657,6 +656,28 @@ console.log("\n[13] The provenance and proposal rpc shapes are null-safe too: a 
     await admin`DELETE FROM thoughts WHERE id IN (${undatedAncestor}::uuid, ${heir}::uuid, ${parent}::uuid, ${undatedChild}::uuid, ${infOlder}::uuid, ${undatedNewer}::uuid)`;
     await admin.close();
   }
+}
+
+console.log("\n[14] listChanges over PostgREST: the rpc shape — every argument named, the actions as text[] through the shim's catalog read, the row normalised (migration 052, SMD-1296)");
+{
+  const admin = new SQL({ url: URL_, max: 1 });
+  const cursor0 = String((await admin`SELECT id FROM thought_audit ORDER BY created_at DESC, id DESC LIMIT 1`)[0].id);
+  const actor = { name: "store-pg-14" };
+  const { id } = await store.captureThought({ content: "postgrest 1296 a thought the feed will list", payload: { metadata: { type: "idea" } }, embedding: vec(14), actor });
+  await store.updateThought({ id, content: "postgrest 1296 the thought, edited", embedding: vec(14), embeddingModel: "unit-test-model", actor });
+  await store.deleteThought({ id, actor });
+  const rows = await store.listChanges({ after: cursor0, limit: 10 });
+  assert(rows.map((r) => r.action).join(",") === "capture,update,delete" && rows.every((r) => r.thoughtId === id && r.actorName === "store-pg-14" && ISO_RE.test(r.createdAt)),
+    `three rows after the cursor over rpc, oldest first (${rows.map((r) => r.action).join(",")})`);
+  assert(rows[1].changed.includes("content") && rows[1].head === "postgrest 1296 the thought, edited" && rows[0].present === false,
+    "the text[] columns and the booleans come back as values, not literals");
+  assert((await store.listChanges({ after: cursor0, actions: ["capture", "delete"], limit: 10 })).length === 2, "p_actions binds as text[] over the rpc");
+  assert((await store.listChanges({ after: rows[1].id, limit: 10 })).length === 1, "a cursor at the second row yields the one after it");
+  let ghost = "";
+  // Not the all-zero id: SMD-1298's section above plants an audit row under it.
+  try { await store.listChanges({ after: "00000000-0000-4000-8000-0000000000ff", limit: 1 }); } catch (e) { ghost = (e as Error).message; }
+  assert(/no audit row/.test(ghost), "the function's refusal crosses the rpc as the thrown message");
+  await admin.close();
 }
 
 await store.close();

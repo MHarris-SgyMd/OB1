@@ -1,0 +1,137 @@
+# 133. Shim everywhere — the six servers still on supabase-js move onto the SQL shim, which reads the grammar that kept them there, and no vendored file reaches the brain over PostgREST any more (SMD-1798)
+
+**What changed.** `compat/supabase-sql/index.ts` reads four PostgREST shapes
+it refused: `.or()` grouping — `and(…)`, `or(…)`, `not.and(…)`, nested to any
+depth, each a list of its own, and `col.in.(a,"b, c")` lists — through a
+recursive term parser (`parseTerms`, `logic`, `inList`), grouping words a
+comma left in user text (`x, and (y`) and a group nothing closes still the
+400; resource embedding nested to any depth (`parseSelect` recurses,
+`embedSql` renders each level as a correlated subquery on the level above,
+aliased `__e1`, `__e2`…), with `!inner` an `EXISTS` on the same key beside the
+filters and nested with the inner embeds below it (`innerClause`), `!fk_name`
+and `!fk_column` choosing the key where two join the tables (`resolveEmbed`),
+`!left` the default said aloud; and an embed on the row a write returns — in a
+`RETURNING` list the table's name is the row just written, so `projection()`
+renders both lists alike. Refused still, naming why: a relation nothing joins
+to its level, two keys and no hint, a hint that names no key, a filter on an
+embedded column, an order or limit on an embedded resource. The codemod's
+blockers shrink to what the shim refuses to fake (Auth, Storage, Realtime,
+`functions.invoke`, a type-only import, `.textSearch()`, an order, limit or
+range with `foreignTable`); agent-memory-api leaves `KEEP`; the six migrate
+by two import lines each, the polyfill and the client (in two, the polyfill
+takes the Edge types import's place). One call site
+changes by hand: enhanced-mcp's `graph_search`, whose `thoughts!inner(…)`
+carried a filter on the embedded column, asks in two queries.
+
+Around the move: `extensions/test-auth.ts` starts the six under `bun` (the
+HTTPS stubs go; enhanced-mcp joins the under-bun list with a probe of its
+own), every `deno.json` but `server/`'s drops the supabase-js pin, the four
+import recipes' `package.json` drop the dependency their `.mjs` no longer
+import, the five `deno check` steps that checked the six leave
+`fork-checks.yml`, the dead supabase-js pin leaves `extensions/package.json`
+(no suite loads it; the tests' PostgREST expectations are written by hand), and the six
+READMEs get the Bun run the other migrated READMEs have (job-hunt's and
+ob-graph's schema steps gain the `auth.*` stubs and, for ob-graph, the three
+roles its GRANTs name). Check 22 in `scripts/check-fork-consistency.ts`
+refuses a specifier-shaped string naming `@supabase/supabase-js` — bare,
+`npm:`, `jsr:`, an esm.sh URL, a subpath — in any code file under the seven
+category directories and docs/, comments blanked, with counted exceptions for
+local-brain-no-mcp's KEEP client (SMD-1800's) and the dashboard's type-only
+import (SMD-1801's); 16 probes; a markup file (.html, .svelte, .vue) is read
+by its script bodies alone.
+
+**Why.** Each of the six was a PostgREST client over HTTP: a Supabase project
+was required to run it, on a fork whose SETUP.md says "No Supabase account".
+Fix 13 and change 74 put the other 23 on the shim and left these, and the
+codemod said why for each:
+family-calendar's week query and metadata-norm's candidate query group their
+`.or()`; job-hunt's interviews carry their application, posting and company
+three embeds deep with `!inner`, and its contact search puts `company_id.in.(…)`
+inside `.or()`; ob-graph names its keys (`graph_nodes!graph_edges_target_node_
+id_fkey`) because two join the tables; enhanced-mcp's count joined through
+`thoughts!inner` and filtered on the embedded column; agent-memory-api was
+servable since change 77 and waited on its deploy story. Each is PostgREST's
+own grammar, so the shim reads it rather than six files rewriting around it —
+the one shape it declines (a filter on an embedded column) is the one whose
+site is dead on this fork's schema anyway. Driving the six found one more
+shape at once — job-hunt's contact returned with its company embedded — and
+one defect that is the tool's, not the shim's (below).
+
+**Held.** `compat/supabase-sql/test-compat.ts` [20] (26 assertions):
+family-calendar's and metadata-norm's expressions verbatim on a five-row
+calendar, `not.and`, an `or()` group beside an `and()`, `in.(…)` with a quoted
+comma and empty, the rendered SQL, four unparsable forms as PGRST100, `and (`
+as pattern text; a three-level embed with a null at the deepest level, its
+SQL, an `!inner` chain and a one-to-many `!inner`, the `EXISTS` text, `!left`,
+two keys by constraint name and by column, a hint naming no key refused;
+[17]'s refusal pins for hints and for RETURNING become served-form pins.
+`extensions/test-tools.ts` drives family-calendar's six, job-hunt's ten and
+ob-graph's ten tools against their schemas — the week through the grouped
+`.or()`, the interviews three deep, the search through a matched company, a
+traversal's `path` as a list of ids — fifty-five tools on eight servers under
+the drift guard. `extensions/test-writes.ts` drives enhanced-mcp's other nine
+tools (a tools/list guard of thirteen), agent-memory-api's nine routes (recall,
+trace, usage, listings, review) and the metadata worker's dry and live runs.
+Check 22's 16 probes run every time; the tree passes with its two counted
+exceptions. `test-auth.ts` 833/833 with the six started under `bun` and asked
+over their ports; the codemod round trip is clean with the six migrated;
+every migrated file parses; the third pass started the six as processes
+against a real database and drove the moved shapes over HTTP. Counts after
+the review passes: test-compat 257 (205 before this ticket), test-tools 185
+(122), test-writes 313 (285).
+
+**Review passes.** A cold read and a runner each pass, beside the drives; pass
+two's top findings were against pass one's — the stop signal; twenty mutants.
+
+| Pass | Finding | Caught | Fix |
+| --- | --- | --- | --- |
+| 1 | `ignoreDuplicates` was never read: an upsert asked to ignore a duplicate rewrote the row — repo-learning-coach's progress upsert reset every learner's row on each sync | run-it | `DO NOTHING` when asked; test-compat [21] |
+| 1 | a `jsonb[]` payload bound a nested array as a second dimension and a bare string as malformed JSON | run-it | every element JSON text |
+| 1 | a hinted self-reference handed the parent to a caller asking for the children; a hint naming the relation's own key column from the referenced side was refused | run-it | direction rules as PostgREST's recursive form |
+| 1 | a relation named like a non-key column of the base was refused before the table lookup | run-it | the column form only for a key column |
+| 1 | `count` under `single()`/`maybeSingle()` was null; a one-column composite from a non-set function collapsed to its cell | run-it | the total rides along; scalar only for a scalar return |
+| 1 | `order`/`limit`/`range` with `foreignTable`/`referencedTable` applied to the base table | cold-read | refused at the call; the codemod blocks it |
+| 1 | a space after a comma before a group made it text; `is.NULL` in upper case was the 400 | run-it | trimmed; the word in any case |
+| 1 | check 22 read no `.html`, `.mts`, `.jsx`, nor a CDN other than esm.sh; the spelled-out `*` came in arbitrary order; five READMEs still said Edge Function | cold-read | widened; `ORDER BY attnum`; reworded |
+| 2 | a nested `!inner` under a left embed was unpinned — dropping it from the embed's own WHERE survived every pin; so did dropping the count window (wrong only under `single()` with a limit) | mutant | two pins in [21] |
+| 2 | a domain over `jsonb[]` was still bound as a Postgres array (pass 1 decided by the type's name); a self-reference by constraint name was served where PostgREST refuses, and by table name refused where PostgREST serves the children; two ambiguities PostgREST reports were resolved by a rule of the shim's own | run-it | the element type from the catalog; PostgREST's rules |
+| 2 | check 22's blanker read an odd apostrophe in HTML prose as an open string and hid the import after it | run-it | a markup file's script bodies alone |
+| 3 | the record and check 22 said supabase-js stays "as the parity oracle in compat/" — nothing in compat/ imports it; the expectations are hand-written, and the pin in extensions/package.json was dead | cold-read | reworded to name `server/` and the Workers store; the pin removed |
+| 3 | `NODE_PATH` does not resolve the MCP SDK's subpaths under Bun — the recipes start through Bun's network auto-install, as every SDK-importing recipe has since change 74 | run-it | SMD-1991 filed; the READMEs say what resolves how |
+| 3 | stale numbers and sentences in the record, the workflow comment, the codemod header and two READMEs (probe count, suite counts, "six steps", a refused form now served, the missing blocker, a `service_role` claim, a deploy story for a `deno.json` that pins nothing) | cold-read | corrected |
+| 4 | three of sixteen drive mutants survived (an embedded column no assertion read; metadata-norm's two `and()` arms not told apart by two `reference/3` rows; check 22's file sets with no witness); pass 3's prose overstated where supabase-js left and left the consolidation README's later steps deploying; an orphaned docblock; two `deno.json` pinning nothing | mutant; cold-read | pinned; corrected; the files removed |
+| 5 | the merge of main: main plus the branch by name lists both ways, a capture key (SMD-1298) unauthorized on the six by construction; the repo-consistency step's name stopped at check 18 | cold-read | the name lists every check; SMD-1996 filed for the primitive and the suite |
+| 6 | the second merge of main (SMD-1990, SMD-1953): none of main's twelve files reaches the shim, the six or their suites; but the four MCP servers start through `Deno.serve` → `Bun.serve` with no keepalive, so SMD-1864's silent-stream close reaches enhanced-mcp's model-backed tools and its fix, in the core server file, does not | cold-read | SMD-2001 filed; the merge message's "the suites" narrowed to this branch's |
+
+**Not taken.** A filter on an embedded column (`.neq("thoughts.sensitivity_
+tier", …)` beside `thoughts!inner`): a second grammar for one dead site, asked
+in two queries instead. The parser's leniences against PostgREST's grammar (an
+unquoted `(` or `"` inside a group is the 400 where PostgREST reads it; a `)`
+in a top-level value is read where PostgREST refuses; a quoted value followed
+by a space is the quoted value): no vendored expression meets them, and each
+is a refusal or a match, not a wrong row. A column named `__natts` or `__count`
+is lifted off with the shim's own; two rpc overloads differing only in
+`proretset` take the old one-cell rule; `select("meta->>k")` stays refused; a
+write with no `.select()` answers `data: []`, not supabase-js's `null`, as
+since fix 13. Moving enhanced-mcp onto `MCP_ACCESS_KEYS`: change 67's decision.
+A `real` renders as Bun's double (`0.8999999761581421`, not PostgREST's `0.9`),
+noted in the one assertion that meets it. repo-learning-coach's package.json
+keeps supabase-js (an npm lockfile; npm is not in this toolchain; its code is
+on the shim).
+
+**Follow-ups.** SMD-1991: `NODE_PATH` resolves hono, zod and @hono/mcp for a
+recipe but not the MCP SDK's subpaths, which Bun fetches into its cache on
+first start (unpinned, npm egress) — every SDK-importing recipe since change
+74; a per-directory install. SMD-1992: a per-request client accepts an
+`https://` URL at start and answers bare 500s, as does agent-memory-api on a
+provider failure. SMD-1986: enhanced-mcp's three search tools send
+`exclude_restricted` (and date bounds) inside the `filter` that `match_thoughts`
+and `search_thoughts_text` read as `metadata @> filter`, so every search
+answers no matches — pinned in test-writes so the fix flips three assertions
+by name. SMD-1644 is a test-only bump now; SMD-1800 can retire the Edge
+Function build. SMD-2001: the four MCP servers start through `Deno.serve` →
+`Bun.serve` with no keepalive, so SMD-1864's silent-stream close reaches
+enhanced-mcp's model-backed tools; its fix, in the core server file, does not.
+
+**Upstream status:** not sent — the shim and the Bun runtime are the fork's;
+the call-site change in enhanced-mcp is honest on upstream's schema too.
