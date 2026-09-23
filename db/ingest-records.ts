@@ -50,6 +50,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
+import { PIPELINE_TIERS } from "./config.mjs";
 import { loadLinearCorpus, linearThoughtId, linearThoughtText, type LinearDoc } from "../evals/linear-corpus.ts";
 import { parseFragment, fragmentSection } from "../scripts/fragments.ts";
 import { headingOf, ticketsOf } from "../scripts/fork-index.ts";
@@ -58,7 +59,8 @@ const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 export const SOURCES = ["fork", "commit", "linear", "memory"] as const;
 export type Source = (typeof SOURCES)[number];
-export const TIERS = ["stable", "canary", "working"] as const;
+/** The pipeline tiers, from the one source db/config.mjs owns (SMD-1953) — migration 045's CHECK and preflight/initEnv validate against the same list. */
+export const TIERS = PIPELINE_TIERS;
 export type Tier = (typeof TIERS)[number];
 
 /** One record as a thought row: its id, its content, its source label and the metadata that goes under it. */

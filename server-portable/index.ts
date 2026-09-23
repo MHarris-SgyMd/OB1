@@ -9,7 +9,7 @@ import { StreamableHTTPTransport } from "@hono/mcp";
 import { Hono } from "hono";
 import { z } from "zod";
 import { createStore, postgrestOnBunNotice, storeKind, UUID_RE, type Citation, type ThoughtStore, type ThoughtHybridMatch, type ThoughtKeywordMatch } from "./store.ts";
-import { queryLogEnabled, trimmedEnv } from "../db/config.mjs";
+import { queryLogEnabled, tierProblem, trimmedEnv } from "../db/config.mjs";
 import { authenticateRequest, canCapture, canRead, canWrite, SCOPES, type Principal } from "./auth.ts";
 import { AgentResolver, cacheTtlFromEnv } from "./agents.ts";
 
@@ -148,7 +148,22 @@ function initEnv(bindings?: Record<string, unknown>): void {
   const globals = (globalThis as { process?: { env?: Record<string, string> } }).process?.env ?? {};
   // Trimmed once here, for every knob: a quoted `"sk-abc "` in deploy/.env
   // reaches the provider as the key, not the key and a space (SMD-1843).
-  ENV = trimmedEnv({ ...globals, ...(bindings ?? {}) }) as Env;
+  const candidate = trimmedEnv({ ...globals, ...(bindings ?? {}) }) as Env;
+  // A wrong OB1_TIER (e.g. "Stable", "prod") fails migration 045's query_log.tier
+  // CHECK, and the best-effort log write swallows the error — silently dropping
+  // every query_log row and emptying SMD-1806's canary replay. Refuse it here,
+  // at the one place the env is frozen, rather than lean on the DB CHECK. The
+  // container also gates it earlier (preflight, the entrypoint's first command);
+  // this covers Workers and any direct `bun index.ts` (SMD-1953).
+  //
+  // Validate BEFORE assigning ENV: the `if (ENV) return` above means a value
+  // assigned here sticks, so throwing after assignment would fire on the first
+  // call and then let every later call skip the guard — the bad tier would reach
+  // the log write on the second request. Leaving ENV null on a bad value makes
+  // every call re-run and re-throw.
+  const tierIssue = tierProblem(candidate.OB1_TIER);
+  if (tierIssue) throw new Error(tierIssue);
+  ENV = candidate;
 }
 
 function env(): Env {
@@ -418,7 +433,11 @@ export function parseFilter(raw: unknown): Record<string, unknown> {
     }
     out[k] = v;
   }
-  if (JSON.stringify(out).length > FILTER_MAX_BYTES) throw new Error(`filter is too large (max ${FILTER_MAX_BYTES} bytes)`);
+  // UTF-8 bytes, not JSON.stringify().length (UTF-16 code units) — multibyte
+  // content (CJK, accents) is ~2x its code-unit count, so the code-unit check let
+  // a filter past ~2x the byte bound the error names. TextEncoder is Workers-safe
+  // where Buffer is not (SMD-1953).
+  if (new TextEncoder().encode(JSON.stringify(out)).length > FILTER_MAX_BYTES) throw new Error(`filter is too large (max ${FILTER_MAX_BYTES} bytes)`);
   return out;
 }
 
