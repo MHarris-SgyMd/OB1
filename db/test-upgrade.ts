@@ -1721,12 +1721,15 @@ console.log("\n[20c] Migration 047 on a schema without 034 — refused up front,
     /adopted with --baseline\?\)\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plain.out);
   assert(ok, `a plain run fails at 047 naming 034 and --reapply, not with a bare "does not exist" (exit ${plain.code})${ok ? "" : `:\n${plain.out}`}`);
   assert(Number((await sql`SELECT count(*)::int AS c FROM schema_migrations WHERE name = ${the047}`)[0].c) === 0, "…047 records nothing");
-  await sql.close();
   // The guard is the only thing between the file and the table: with 034..046 in
-  // place the same pending file applies. Complete the schema (034 onward) — [20d]
-  // drops and rebuilds its own brain next, so this is the file's own mirror, not
-  // [21]'s fixture.
+  // place the same pending file applies — the heading's second half, asserted
+  // (the apply throwing was its only check before SMD-1726's boyscout pass).
+  // [20d] drops and rebuilds its own brain next, so this is the file's own
+  // mirror, not [21]'s fixture.
   await applyMigrations(URL_, { ...OPTS, only: (f) => f >= "034" });
+  assert((await sql`SELECT 1 FROM pg_indexes WHERE tablename = 'query_log' AND indexname = 'query_log_logged_at_idx'`).length === 1,
+    "…and applied once the table exists: 047's index is on query_log");
+  await sql.close();
 }
 
 console.log("\n[20d] Migration 049 onto a populated 046 — every thought gains its writer's mark from the log, a planted claim is corrected, updated_at does not move, one audit row per row written, the trigger stamps every write after, and a re-apply writes nothing (SMD-1726)");
