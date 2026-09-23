@@ -234,8 +234,8 @@ inserting `upsert_thought` forms and a tenth, defaulted `p_event` on
 Migration 049 adds the one read over that log a resuming agent asks first
 (SMD-1296): `thought_changes(p_since, p_after, p_agent, p_not_agent, p_actions,
 p_limit)` — one page, oldest first, from a time or from a cursor (the audit id a
-page ended with; a keyset on `(created_at, id)`, so a walk has no gap and no
-repeat), each row with a bounded head of the text, an update's moved keys, the
+page ended with; a keyset on `(created_at, id)`, so a walk never repeats a row
+and never skips a committed one), each row with a bounded head of the text, an update's moved keys, the
 `supersedes` pointer before and after, and who. The MCP tool of the same name
 renders it; a self-hosted server role needs `SELECT` on `thought_audit` (the
 server group below).

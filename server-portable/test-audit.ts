@@ -234,9 +234,9 @@ console.log("\n[8] thought_changes: a second key reads what the first did — in
   const verbs = entries.map((e) => /— (captured|edited|deleted) /.exec(e)?.[1]);
   assert(verbs.slice(0, 3).join(",") === "captured,edited,captured" && [verbs[3], verbs[4]].sort().join(",") === "deleted,edited",
     `oldest first: ${verbs.join(", ")} (the delete and the pointer it cleared share a transaction, so read in id order)`);
-  assert(/\(deleted since\)/.test(entries[0]) && /\(the text went with the thought\)/.test(entries[0]), "A's capture is marked deleted since, with no text to quote");
+  assert(/\(deleted since\)/.test(entries[0]) && /\(deleted since — the delete row keeps the text\)/.test(entries[0]), "A's capture is marked deleted since, and points at the delete row for the text");
   assert(/content → "the plan for the 049 review, revised"/.test(entries[1]) && /metadata: [^\n]*status/.test(entries[1]), "A's edit shows the new text and the metadata key that moved");
-  assert(new RegExp(`supersedes ${A}`).test(entries[2]) && /"the 049 review is done"/.test(entries[2]), "B's capture says it supersedes A, quoting its text");
+  assert(new RegExp(`supersedes ${A}`).test(entries[2]) && /now: "the 049 review is done"/.test(entries[2]), "B's capture says it supersedes A, quoting its CURRENT text as such (a capture row carries none of its own)");
   const del = entries.find((e) => /deleted by/.test(e)) ?? "", ptr = entries.slice(3).find((e) => /edited by/.test(e)) ?? "";
   assert(/was: "the plan for the 049 review, revised"/.test(del), "A's delete quotes what was lost");
   assert(new RegExp(`no longer supersedes ${A} \\(pointer cleared\\)`).test(ptr), "B's pointer, cleared by 025's SET NULL, is reported as an edit");
@@ -277,9 +277,27 @@ console.log("\n[10] thought_changes: pages by cursor join with no gap or repeat,
   assert(pages.map((p) => p.length).join(",") === "2,2,1", `three pages of two: 2, 2, 1 (${pages.map((p) => p.length).join(",")})`);
   assert(JSON.stringify(pages.flat()) === JSON.stringify(whole), "…joined, the same five lines in the same order as one call — no gap, no repeat");
   assert((await laptop.call("thought_changes", { since: at })) === "No change(s) after the cursor. Keep the cursor.", "the last page's cursor yields nothing yet — and is kept");
+  // No since: the newest two, the LATEST change among them (first review pass —
+  // the extra row the function returns is the oldest here, not the newest, and
+  // slicing the same end dropped the latest change on every first call).
+  const recent = await laptop.call("thought_changes", { limit: 2 });
+  assert(/^The 2 most recent change\(s\), oldest first:/.test(recent) && JSON.stringify(heads(recent)) === JSON.stringify(whole.slice(3)) && /Older changes exist — pass a time as `since` to read them\./.test(recent) && !/More changes follow/.test(recent),
+    "with no since, the two newest entries end with the latest change, and the reply says older ones exist rather than that more follow");
+  // Both writer filters name themselves, so agent = the caller's own key beside
+  // others_only is an explained empty set, not a silent one.
+  const self = await laptop.call("thought_changes", { since: cursor0, agent: "laptop", others_only: true });
+  assert(self === "No change(s) by laptop but not laptop after the cursor. Keep the cursor.", `agent beside others_only names both filters (${self})`);
+  // A clock with no zone, a date that does not round-trip, a year Postgres has no room for: refused before any call.
+  for (const bad of ["2026-09-22T08:00:00", "2026-02-30", "0000-01-01"]) {
+    let msg = "";
+    try { await laptop.call("thought_changes", { since: bad }); } catch (e) { msg = (e as Error).message; }
+    assert(/Refused: `since` must be an ISO-8601 time with its zone/.test(msg), `"${bad}" is refused before any call (${msg.slice(0, 50)})`);
+  }
+  assert(/change\(s\) since 2026-09-22T08:00:00\.000Z/.test(await laptop.call("thought_changes", { since: "2026-09-22 08:00+00:00" })) && /change\(s\) since 2026-09-22T00:00:00\.000Z/.test(await laptop.call("thought_changes", { since: "2026-09-22" })),
+    "…while an offset form and a bare date are read as UTC");
   let bad = "";
   try { await laptop.call("thought_changes", { since: "yesterday" }); } catch (e) { bad = (e as Error).message; }
-  assert(/Refused: `since` must be an ISO-8601 time \(2026-09-22T08:00:00Z\) or the cursor a previous call ended with, not "yesterday"\./.test(bad), `a since that is neither is refused, naming both forms (${bad.slice(0, 60)})`);
+  assert(/Refused: `since` must be an ISO-8601 time with its zone \(2026-09-22T08:00:00Z\), a date \(2026-09-22\), or the cursor a previous call ended with, not "yesterday"\./.test(bad), `a since that is neither is refused, naming the forms (${bad.slice(0, 60)})`);
   let ghost = "";
   try { await laptop.call("thought_changes", { since: "00000000-0000-4000-8000-000000000000" }); } catch (e) { ghost = (e as Error).message; }
   assert(/no audit row 00000000-0000-4000-8000-000000000000; a cursor is the id the previous page ended with/.test(ghost), "a cursor naming no row is refused by the function, by name");

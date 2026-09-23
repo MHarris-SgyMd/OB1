@@ -33,8 +33,14 @@
 --     refused. A cursor that names no row is refused by name (the log is
 --     append-only, so a missing cursor is a typo, never a pruned row).
 --   * THE ORDER IS A KEYSET. (created_at, id) is a total order, so a walk by
---     cursor has no duplicates and no gaps across a page boundary, which an
---     OFFSET over a table that is being appended to cannot promise. Within one
+--     cursor never repeats a row and never skips a committed one across a page
+--     boundary, which an OFFSET over a table that is being appended to cannot
+--     promise. What it cannot see: created_at is the writing transaction's
+--     start (DEFAULT now()), so a transaction that began before the cursor's
+--     row and committed after the page was read sorts behind the cursor and is
+--     not on any later page of that walk (first review pass) — a window of one
+--     write's duration, since every MCP write is its own short transaction; a
+--     reader who must not miss it re-reads from a time. Within one
 --     transaction created_at ties (it is transaction-fixed) and the id is
 --     random, so two rows one transaction wrote — a capture and a raw
 --     enhanced-columns write beside it — may read in either order; every MCP

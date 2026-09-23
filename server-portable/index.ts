@@ -337,9 +337,15 @@ function parseSince(raw: string | undefined): { since: string | null; after: str
   const v = (raw ?? "").trim();
   if (v === "") return { since: null, after: null };
   if (UUID_RE.test(v)) return { since: null, after: v.toLowerCase() };
-  const d = /^\d{4}-\d{2}-\d{2}/.test(v) ? new Date(v) : new Date(NaN);
-  if (Number.isNaN(d.getTime())) {
-    return { refused: `Refused: \`since\` must be an ISO-8601 time (2026-09-22T08:00:00Z) or the cursor a previous call ended with, not "${v.slice(0, 40)}".` };
+  // A date, or a date with a clock that names its zone: a clock with no Z or
+  // offset would be read in the server's zone (13:00Z for 08:00 on a Chicago
+  // laptop, 08:00Z in the container); a date that does not round-trip
+  // (2026-02-30) would silently become another day; a year Postgres has no
+  // room for (0000) would come back as its raw error (caught: cold-read, pass 1).
+  const shape = /^(\d{4}-\d{2}-\d{2})(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(Z|[+-]\d{2}:?\d{2}))?$/i.exec(v);
+  const d = shape ? new Date(v.replace(" ", "T")) : new Date(NaN);
+  if (Number.isNaN(d.getTime()) || d.getUTCFullYear() < 1 || (shape && !shape[2] && d.toISOString().slice(0, 10) !== shape[1])) {
+    return { refused: `Refused: \`since\` must be an ISO-8601 time with its zone (2026-09-22T08:00:00Z), a date (2026-09-22), or the cursor a previous call ended with, not "${v.slice(0, 40)}".` };
   }
   return { since: d.toISOString(), after: null };
 }
@@ -359,7 +365,11 @@ function renderChange(c: AuditChange, n: number): string {
   const gone = c.action !== "delete" && !c.present ? " (deleted since)" : "";
   const lines = [`${n}. ${when} — ${verb} ${who} — ID: ${c.thoughtId}${gone}`];
   const text = c.head === null ? null : snipText(c.head, 200);
-  if (c.action === "capture") lines.push(text === null ? "   (the text went with the thought)" : `   "${text}"`);
+  // A capture row carries no text of its own (008's capture diff is the
+  // metadata), so the head is the thought's CURRENT text — say so, since an edit
+  // since would otherwise read as what was captured; a deleted thought's text
+  // is in its delete row, not gone (both caught: cold-read, pass 1).
+  if (c.action === "capture") lines.push(text === null ? "   (deleted since — the delete row keeps the text)" : `   now: "${text}"`);
   if (c.action === "delete" && text !== null) lines.push(`   was: "${text}"`);
   if (c.action === "update") {
     const parts: string[] = [];
@@ -1203,7 +1213,7 @@ function buildServer(principal: Principal): McpServer {
       title: "What Changed",
       description:
         "List what changed in Open Brain — every capture, edit and deletion, oldest first, with who made it (by access-key name), the thought's ID, what moved, and whether it now supersedes another thought. " +
-        "Start from `since`: an ISO-8601 time, or the cursor a previous call ended with (its last line) to continue exactly where you left off with no gaps or repeats; leave it out for the most recent changes. " +
+        "Start from `since`: an ISO-8601 time (UTC, or with an offset), or the cursor a previous call ended with (its last line) to continue where you left off with no repeats; leave it out for the most recent changes. " +
         "`others_only` leaves out this key's own writes — what everyone else did while you were away.",
       annotations: {
         readOnlyHint: true,
@@ -1222,7 +1232,11 @@ function buildServer(principal: Principal): McpServer {
       // both forms rather than surfacing as a Postgres cast error.
       const start = parseSince(since);
       if ("refused" in start) return { content: [{ type: "text" as const, text: start.refused }], isError: true };
-      const who = others_only ? ` by everyone but ${principal.name}` : agent?.trim() ? ` by ${cleanForDisplay(agent.trim())}` : "";
+      // Both filters name themselves in the header, so `agent` set to the
+      // caller's own key beside others_only reads as the empty set it is
+      // (caught: cold-read, pass 1).
+      const named = agent?.trim() ? ` by ${cleanForDisplay(agent.trim())}` : "";
+      const who = named && others_only ? `${named} but not ${principal.name}` : others_only ? ` by everyone but ${principal.name}` : named;
       const what = actions?.length ? `${actions.join("/")} change(s)` : "change(s)";
       const where = start.after ? "after the cursor" : start.since ? `since ${start.since}` : "";
       try {
@@ -1237,13 +1251,18 @@ function buildServer(principal: Principal): McpServer {
           limit: limit + 1,
         });
         const more = rows.length > limit;
-        const shown = more ? rows.slice(0, limit) : rows;
+        // Forward from a bound the extra row is the NEWEST, past the page; with
+        // no bound the function returns the newest limit+1 oldest first, so the
+        // extra row is the OLDEST — slicing the same end would drop the latest
+        // change, the one a resumer most needs (caught: cold-read, pass 1).
+        const shown = !more ? rows : where ? rows.slice(0, limit) : rows.slice(1);
         if (shown.length === 0) {
           return { content: [{ type: "text" as const, text: `No ${what}${who} ${where || "recorded yet"}.${start.after ? " Keep the cursor." : ""}` }] };
         }
         const head = where ? `${shown.length} ${what}${who} ${where}, oldest first:` : `The ${shown.length} most recent ${what}${who}, oldest first:`;
         const cursor = shown[shown.length - 1].id;
-        const tail = `Cursor: ${cursor} — pass it as \`since\` to continue from here.${more ? " More changes follow." : ""}`;
+        const onward = !more ? "" : where ? " More changes follow." : " Older changes exist — pass a time as `since` to read them.";
+        const tail = `Cursor: ${cursor} — pass it as \`since\` to continue from here.${onward}`;
         return {
           content: [{ type: "text" as const, text: `${head}\n\n${shown.map((c, i) => renderChange(c, i + 1)).join("\n\n")}\n\n${tail}` }],
         };
