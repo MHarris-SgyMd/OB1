@@ -4112,8 +4112,42 @@ console.log("\n[18] Every schemas/*.sql applies over TCP with no Supabase role p
     `the section leaves the database's tables, views and functions as it found them (${left.tables.size}/${left.views.size}/${left.fns.size})`);
 }
 
-/** A corpus dump's record for an issue (SMD-1958): the shape the sync fetches, through the same adapter; `fetchedAt` is the dump's build instant, absent for a dump with no second clock. [19] and [22]. */
+/** A corpus dump's record for an issue (SMD-1958): the shape the sync fetches, through the same adapter; `fetchedAt` is the dump's build instant, absent for a dump with no second clock. [19], [22] and [23]. */
 const dumpOf = (issue: LinearIssue, fetchedAt?: string): LinearDoc => ({ id: issue.identifier, title: issue.title, text: issue.description ?? "", labels: labelNames(issue), createdAt: issue.createdAt, issue, ...(fetchedAt ? { fetchedAt } : {}) });
+
+/**
+ * The board sync's per-ticket unit over the REAL store (server-portable/store-sql.ts
+ * — upsert_thought, update_thought, 050's stamp, 053's structure hook and
+ * identity lookup) with the two model calls faked and counted: what [22] and
+ * [23] converge on is the text, the facets and the structure the two writers
+ * write, which the self-check's fakes cannot show. `syncIssue` is the sync's
+ * per-ticket unit; the census and the fetch it sits behind are Linear's side.
+ * `unitIndex` picks the fake vector, so two harnesses' rows stay distinct.
+ */
+function syncHarness(unitIndex: number) {
+  const store = new SqlStore(URL_!, { max: 1 });
+  const calls: string[] = [];
+  const brainRow = async (rows: Promise<unknown[]>) => ((await rows)[0] as BrainRow | undefined) ?? null;
+  const writer: Writer = {
+    store,
+    cfg: resolveEmbedConfig({ OB1_LLM_LOCAL: "1", OB1_EGRESS_POLICY: "off" }),
+    embed: async () => { calls.push("embed"); return { embedding: JSON.parse(unit(unitIndex)) as number[], model: EMBEDDING_MODEL, chunks: [] }; },
+    tags: async () => { calls.push("tags"); return { type: "task", topics: ["zqtopic"] }; },
+    fingerprintOf: async (t) => (await sql`SELECT content_fingerprint_of(${t}) AS f`)[0].f as string,
+    holderOf: (fp) => brainRow(sql`SELECT id::text AS id, content, metadata, created_at::text AS created_at, supersedes::text AS supersedes, content_fingerprint AS fingerprint FROM thoughts WHERE content_fingerprint = ${fp} LIMIT 1`),
+    holderOfIdentity: (system, key) => brainRow(sql`SELECT id::text AS id, content, metadata, created_at::text AS created_at, supersedes::text AS supersedes, content_fingerprint AS fingerprint FROM thoughts WHERE id = source_thought(${system}, ${key})`),
+    actor: { name: SYNC_ACTOR, via: "test-live" },
+    dryRun: false,
+    log: () => {},
+    structure: async (id, s) => { await sql.begin(async (tx) => { await recordStructure(tx, id, s, "test-live@sync", { take: true }); }); },
+  };
+  // A dump built NOW, by the brain's clock — `fetchedAt` is compared with the
+  // row's updated_at, and the container's clock is the one that stamps it.
+  const dbNow = async () => (await sql`SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS t`)[0].t as string;
+  const rowsFor = async (identifier: string) => groupTicketRows(await readTicketRows(sql, { scanHeaders: true })).get(identifier) ?? [];
+  const sync = async (issue: LinearIssue) => { calls.length = 0; return syncIssue(writer, issue, await rowsFor(issue.identifier)); };
+  return { store, calls, writer, dbNow, sync };
+}
 
 console.log("\n[19] db/ingest-records.ts: the records upsert is source-labelled and idempotent, an edit moves one row, duplicate content is skipped (SMD-1806)");
 {
@@ -4369,32 +4403,7 @@ console.log("\n[21] said_by on real pgvector: the mark 050 stamps is filtered th
 
 console.log("\n[22] one renderer, one merge rule: a corpus dump through ingest-records.ts and the board sync through sync-linear.ts converge on one row in both orders, and an older dump does not move a ticket back (SMD-1958)");
 {
-  // The sync's write decisions over the REAL store (server-portable/store-sql.ts
-  // — upsert_thought, update_thought, 050's stamp, 053's structure hook) with
-  // the two model calls faked and counted: what converges here is the text,
-  // the facets and the structure the two tools write, which the self-check's
-  // fakes cannot show. `syncIssue` is the sync's per-ticket unit; the census
-  // and the fetch it sits behind are Linear's side and are not needed to ask
-  // whether the second writer finds anything to write.
-  const store = new SqlStore(URL_!, { max: 1 });
-  const calls: string[] = [];
-  const writer: Writer = {
-    store,
-    cfg: resolveEmbedConfig({ OB1_LLM_LOCAL: "1", OB1_EGRESS_POLICY: "off" }),
-    embed: async () => { calls.push("embed"); return { embedding: JSON.parse(unit(7)) as number[], model: EMBEDDING_MODEL, chunks: [] }; },
-    tags: async () => { calls.push("tags"); return { type: "task", topics: ["zqtopic"] }; },
-    fingerprintOf: async (t) => (await sql`SELECT content_fingerprint_of(${t}) AS f`)[0].f as string,
-    holderOf: async (fp) => ((await sql`SELECT id::text AS id, content, metadata, created_at::text AS created_at, supersedes::text AS supersedes, content_fingerprint AS fingerprint FROM thoughts WHERE content_fingerprint = ${fp} LIMIT 1`)[0] as BrainRow | undefined) ?? null,
-    actor: { name: SYNC_ACTOR, via: "test-live" },
-    dryRun: false,
-    log: () => {},
-    structure: async (id, s) => { await sql.begin(async (tx) => { await recordStructure(tx, id, s, "test-live@sync", { take: true }); }); },
-  };
-  // A dump built NOW, by the brain's clock — `fetchedAt` is compared with the
-  // row's updated_at, and the container's clock is the one that stamps it.
-  const dbNow = async () => (await sql`SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS t`)[0].t as string;
-  const rowsFor = async (identifier: string) => groupTicketRows(await readTicketRows(sql, { scanHeaders: true })).get(identifier) ?? [];
-  const sync = async (issue: LinearIssue) => { calls.length = 0; return syncIssue(writer, issue, await rowsFor(issue.identifier)); };
+  const { store, calls, dbNow, sync } = syncHarness(7);
   const ticketRows = async (identifier: string) => (await sql`SELECT count(*)::int AS c FROM thoughts WHERE metadata->>'issue' = ${identifier}`)[0].c as number;
   const holderOf = async (identifier: string) => (await sql`SELECT thought_id::text AS t, canonical FROM thought_sources WHERE system = 'linear' AND identity = ${identifier}`)[0] as { t: string; canonical: string } | undefined;
   const mentionsOf = async (id: string) => (await sql`SELECT en.name FROM thought_entities m JOIN ob1_entities en ON en.id = m.entity_id WHERE m.thought_id = ${id}::uuid AND m.extraction_key = 'source:linear' ORDER BY en.name`).map((r: { name: string }) => r.name).join(",");
@@ -4475,24 +4484,7 @@ console.log("\n[22] one renderer, one merge rule: a corpus dump through ingest-r
 
 console.log("\n[23] a ticket's dated sections are thoughts of their own — derived_from the ticket, type observation, one row per section from either writer, and both writers converge on them (SMD-2059)");
 {
-  const store = new SqlStore(URL_!, { max: 1 });
-  const calls: string[] = [];
-  const writer: Writer = {
-    store,
-    cfg: resolveEmbedConfig({ OB1_LLM_LOCAL: "1", OB1_EGRESS_POLICY: "off" }),
-    embed: async () => { calls.push("embed"); return { embedding: JSON.parse(unit(9)) as number[], model: EMBEDDING_MODEL, chunks: [] }; },
-    tags: async () => { calls.push("tags"); return { type: "task", topics: ["zqtopic"] }; },
-    fingerprintOf: async (t) => (await sql`SELECT content_fingerprint_of(${t}) AS f`)[0].f as string,
-    holderOf: async (fp) => ((await sql`SELECT id::text AS id, content, metadata, created_at::text AS created_at, supersedes::text AS supersedes, content_fingerprint AS fingerprint FROM thoughts WHERE content_fingerprint = ${fp} LIMIT 1`)[0] as BrainRow | undefined) ?? null,
-    actor: { name: SYNC_ACTOR, via: "test-live" },
-    dryRun: false,
-    log: () => {},
-    structure: async (id, s) => { await sql.begin(async (tx) => { await recordStructure(tx, id, s, "test-live@sync", { take: true }); }); },
-    holderOfIdentity: async (system, key) => ((await sql`SELECT id::text AS id, content, metadata, created_at::text AS created_at, supersedes::text AS supersedes, content_fingerprint AS fingerprint FROM thoughts WHERE id = source_thought(${system}, ${key})`)[0] as BrainRow | undefined) ?? null,
-  };
-  const dbNow = async () => (await sql`SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS t`)[0].t as string;
-  const rowsFor = async (identifier: string) => groupTicketRows(await readTicketRows(sql, { scanHeaders: true })).get(identifier) ?? [];
-  const sync = async (issue: LinearIssue) => { calls.length = 0; return syncIssue(writer, issue, await rowsFor(issue.identifier)); };
+  const { store, calls, dbNow, sync } = syncHarness(9);
   const holderOf = async (identifier: string) => (await sql`SELECT thought_id::text AS t FROM thought_sources WHERE system = 'linear' AND identity = ${identifier}`)[0]?.t as string | undefined;
   const partsOf = async (identifier: string) => (await sql`SELECT count(*)::int AS c FROM thoughts WHERE metadata->>'ticket' = ${identifier}`)[0].c as number;
   const ids: string[] = [];
