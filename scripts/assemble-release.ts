@@ -236,14 +236,11 @@ function buildPlan() {
   const changeRange: [number, number] = [numbered[0].number, numbered[numbered.length - 1].number]; // pending is non-empty (refused above)
   // The index as it will read after the cut, from the plan — rendered (and the
   // marker pair checked) before a single file is written, so a FORK.md this step
-  // cannot write into is refused with nothing half-applied.
-  const after = classifyChanges([
-    ...entries.filter((e) => !numbered.some((f) => f.name === e.name)),
-    ...numbered.map((f) => ({ name: f.file.name, text: f.file.text })),
-  ]);
+  // cannot write into is refused with nothing half-applied. The numbered files
+  // alone reach it (SMD-2084): those there are, then those the plan writes.
+  const after = [...existing, ...classifyChanges(numbered.map((f) => ({ name: f.file.name, text: f.file.text }))).numbered];
   const forkPath = join(ROOT, "FORK.md");
-  const forkAfter = spliceIndex(readFileSync(forkPath, "utf8"), renderIndex(after.numbered));
-
+  const forkAfter = spliceIndex(readFileSync(forkPath, "utf8"), renderIndex(after));
   const migNums = [...migrationFiles().keys()];
   const lo = highestReleasedMigration(releases) + 1;
   const hi = Math.max(...migNums);
