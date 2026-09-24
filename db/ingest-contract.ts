@@ -83,7 +83,21 @@ export type Ingested = {
    * live writer (the sync) has no `asOf`; a dump has one.
    */
   watermark?: { key: string; value: string; asOf?: string };
+  /**
+   * Parts of the item that are thoughts of their own (SMD-2059): a ticket's
+   * dated `## Update 2026-09-19 …` sections are observations about premises
+   * that moved, and inside the ticket's row no filter or report reaches them.
+   * Each has its own identity within the system (`SMD-1951#update-2026-09-19-board-audit`),
+   * its own canonical (the section's bytes), text, links and facets, and is
+   * written `derived_from` the item's thought — whichever writer's row that
+   * is — under the item's scope and watermark. The item's own text is
+   * unchanged: the ticket stays what people search for and cite.
+   */
+  derived?: Derived[];
 };
+
+/** A part of an item mapped as its own thought: everything an item has except the scope, the watermark and further parts, which are the parent's. */
+export type Derived = Omit<Ingested, "scope" | "watermark" | "derived">;
 
 /** A source adapter: a name and a pure map. It reads; the pipeline writes. */
 export type Adapter<Item> = {

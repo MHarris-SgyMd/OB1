@@ -559,13 +559,26 @@ jobs:
           HASH=$(printf '%s' "$KEY" | shasum -a 256 | cut -d' ' -f1)
           echo "OB1_SMOKE_KEY=$KEY" >> "$GITHUB_ENV"
           # No OPENROUTER_API_KEY: the provider is a local endpoint, which
-          # needs no credential (preflight decides), and nothing in this job
-          # dials it — smoke.sh captures nothing and preflight runs without
-          # --deep. The address is neither the code's default nor the compose
-          # fallback, so the log line below can only come from this file
-          # (SMD-1843); the query log likewise. OB1_LLM_LOCAL declares the
-          # endpoint to the egress gate (SMD-1903), which reads the flag and
-          # never the address; the log line below holds the forward.
+          # needs no credential (preflight decides). Preflight dials it once
+          # (GET /models, SMD-1875) and nothing else in this job does —
+          # smoke.sh captures nothing and preflight runs without --deep — so
+          # a listener on the runner that answers GET is the whole provider:
+          # the runner is the container's host.docker.internal (compose.yaml's
+          # extra_hosts host-gateway), and the listener binds every interface
+          # because host-gateway is the bridge address, not loopback. The
+          # address is neither the code's default nor the compose fallback,
+          # so the log line below can only come from this file (SMD-1843);
+          # the query log likewise. OB1_LLM_LOCAL declares the endpoint to the
+          # egress gate (SMD-1903), which reads the flag and never the
+          # address; the log line below holds the forward.
+          nohup python3 - <<'PY' > /tmp/provider-stub.log 2>&1 &
+          from http.server import BaseHTTPRequestHandler, HTTPServer
+          class H(BaseHTTPRequestHandler):
+              def do_GET(self):
+                  body = b'{"object":"list","data":[]}'
+                  self.send_response(200); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
+          HTTPServer(("0.0.0.0", 11434), H).serve_forever()
+          PY
           cat > .env <<EOF
           POSTGRES_PASSWORD=$(openssl rand -hex 24)
           MCP_ACCESS_KEYS=ci:write:$HASH
@@ -590,9 +603,39 @@ jobs:
         run: |
           LOG="$(docker compose -f compose.yaml logs --no-color server)"
           grep -E 'model provider +http://host\.docker\.internal:11434/v1\b.*\(local — no credential needed\)' <<<"$LOG"
+          grep -E '✓ +provider endpoint +http://host\.docker\.internal:11434/v1 answers — HTTP 200 to GET /models' <<<"$LOG"
           grep -E 'embeddings egress +http://host\.docker\.internal:11434/v1 is declared local \(OB1_LLM_LOCAL\)' <<<"$LOG"
           grep -F 'ON (OB1_QUERY_LOG=on) here' <<<"$LOG"
           grep -F 'preflight OK' <<<"$LOG"
+
+      # SMD-1875, the ticket's first Verify item on every PR: the compose
+      # fallback (the `ollama` service) with no profile is a name that does not
+      # resolve, and the container must refuse to start on it — where it used
+      # to say `preflight OK` and fail the first capture on it (getaddrinfo
+      # ENOTFOUND ollama). The
+      # built image, the running database, one environment line changed, and
+      # preflight alone (the image's entrypoint is `sh -c "bun preflight.ts &&
+      # exec bun index.ts"`, so the command is replaced through --entrypoint).
+      # Exit 1, the `provider endpoint` row failed, the remedy naming the
+      # profile; and the same run with the reachable address (the runner's
+      # listener from the first step, still up) passes, so the step proves
+      # the probe and not a broken container.
+      - name: A local endpoint that answers nothing refuses to start
+        working-directory: deploy
+        run: |
+          set +e
+          docker compose -f compose.yaml run --rm --no-deps -T --entrypoint bun -e OB1_LLM_BASE_URL=http://ollama:11434/v1 server preflight.ts > /tmp/negative.out 2>&1
+          CODE=$?
+          set -e
+          # The report is printed whole when a line is missing, so a runner
+          # whose resolver answers differently is read, not guessed at (the
+          # first run read the unknown name as the timeout kind; caught: CI, PR #138).
+          hold() { grep -E "$1" /tmp/negative.out || { echo "--- expected /$1/ in preflight's report: ---" >&2; cat /tmp/negative.out >&2; exit 1; }; }
+          hold '✗ +provider endpoint +nothing answers at http://ollama:11434/v1 — the name does not resolve'
+          hold 'is the local-models profile.*start the stack with --profile local-models'
+          hold 'preflight FAILED'
+          [ "$CODE" -eq 1 ] || { echo "preflight exited $CODE, expected 1" >&2; cat /tmp/negative.out >&2; exit 1; }
+          docker compose -f compose.yaml run --rm --no-deps -T --entrypoint bun server preflight.ts | grep -F 'preflight OK'
 
       # SMD-1844. An address-less mapping binds 0.0.0.0; this stack holds a brain
       # behind one password and one key over plain HTTP. Read compose's own
@@ -630,7 +673,10 @@ jobs:
       - name: Logs on failure
         if: failure()
         working-directory: deploy
-        run: docker compose -f compose.yaml logs --tail 60
+        run: |
+          docker compose -f compose.yaml logs --tail 60
+          echo "--- provider stub (the runner's listener on :11434) ---"
+          cat /tmp/provider-stub.log 2>/dev/null || echo "(no stub log)"
 
       - name: Tear down
         if: always()
