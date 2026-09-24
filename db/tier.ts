@@ -239,7 +239,10 @@ async function serverMajor(sql: SQL): Promise<number> {
 /** The major version of a client tool (`pg_dump (PostgreSQL) 16.4` → 16), or null if the tool is absent. */
 async function toolMajor(tool: string): Promise<number | null> {
   try {
-    const proc = Bun.spawn([tool, "--version"], { stdout: "pipe", stderr: "pipe" });
+    // env passed explicitly: without it Bun resolves the command against the
+    // PATH it started with, not the process's current one (measured, Bun 1.4.0),
+    // and test-live [20] puts stand-in tools on PATH at runtime. run() likewise.
+    const proc = Bun.spawn([tool, "--version"], { stdout: "pipe", stderr: "pipe", env: process.env });
     const out = await new Response(proc.stdout).text();
     if ((await proc.exited) !== 0) return null;
     const m = out.match(/(\d+)(?:\.\d+)?\s*$/m) ?? out.match(/\)\s+(\d+)/);
@@ -282,10 +285,19 @@ async function sameDatabase(a: SQL, b: SQL): Promise<boolean> {
  * and pg_restore does not overwrite it — unlike ob1_config.tier, which the
  * restore copies from the SOURCE (stable's `stable`) before the final stamp,
  * so a refresh that failed after its restore would otherwise read as stable.
+ * Read from the database's own row in pg_db_role_setting (setrole 0), not
+ * current_setting: a session's value also comes from ALTER ROLE, ALTER SYSTEM
+ * or a connection option, any of which would make every database it reaches
+ * read as marked — a stable brain included. It lasts until
+ * `ALTER DATABASE … RESET ob1.refresh_target`.
  */
 async function refreshMark(sql: SQL): Promise<string | null> {
-  const [{ mark }] = await sql<{ mark: string | null }[]>`SELECT nullif(current_setting('ob1.refresh_target', true), '') AS mark`;
-  return mark;
+  const rows = await sql<{ mark: string }[]>`
+    SELECT substr(c, length('ob1.refresh_target=') + 1) AS mark
+    FROM pg_db_role_setting s, unnest(s.setconfig) c
+    WHERE s.setdatabase = (SELECT oid FROM pg_database WHERE datname = current_database())
+      AND s.setrole = 0 AND c LIKE 'ob1.refresh\\_target=%'`;
+  return rows.length && rows[0].mark !== "" ? rows[0].mark : null;
 }
 
 /**
@@ -295,30 +307,37 @@ async function refreshMark(sql: SQL): Promise<string | null> {
  *     says, which is how a refresh that failed after its restore is retried;
  *   • stamped canary or working in ob1_config (a canary refreshed before the
  *     mark existed);
- *   • with nothing in its public schema (a new `createdb`);
- *   • an Open Brain schema (schema_migrations present) holding no thoughts — a
- *     tier stack's database after `up`.
+ *   • with nothing in its public schema but what extensions own (a new
+ *     `createdb`, whatever its template installed);
+ *   • an Open Brain schema — schema_migrations, ob1_config AND thoughts, since
+ *     schema_migrations alone is Rails', Ecto's, golang-migrate's and dbmate's
+ *     table too — holding no thoughts: a tier stack's database after `up`.
  * Anything else is refused: the record (tier=stable), a brain with thoughts
  * under no tier stamp (an untiered stable), and a schema that is not Open
- * Brain's at all (another application's database, one name away).
+ * Brain's at all (another application's database, one name away). The
+ * refusal names no override: the likeliest cause is --from and --to the wrong
+ * way round, and marking the target by hand would disarm this guard for it
+ * for good. deploy/README.md says how to mark one deliberately.
  */
 export async function targetRefusal(target: SQL): Promise<string | null> {
   if ((await refreshMark(target)) !== null) return null;
   const [{ db, relations, migrations, config, thoughts }] = await target<{ db: string; relations: number; migrations: boolean; config: boolean; thoughts: boolean }[]>`
     SELECT current_database() AS db,
-           (SELECT count(*)::int FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public') AS relations,
+           (SELECT count(*)::int FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = 'public'
+              AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'e')) AS relations,
            to_regclass('public.schema_migrations') IS NOT NULL AS migrations,
            to_regclass('public.ob1_config') IS NOT NULL AS config,
            to_regclass('public.thoughts') IS NOT NULL AS thoughts`;
   const tier = config ? await readConfig(target, "tier") : null;
   if (tier === "canary" || tier === "working" || relations === 0) return null;
   const held = thoughts && (await target<{ n: number }[]>`SELECT count(*)::int AS n FROM (SELECT 1 FROM thoughts LIMIT 1) t`)[0].n > 0;
-  if (migrations && !held && tier !== "stable") return null;
+  if (migrations && config && thoughts && !held && tier !== "stable") return null;
   const why =
     tier === "stable" ? "--to is stamped tier=stable, the record — are --from and --to the wrong way round?"
     : held ? `--to holds thoughts and ${tier === null ? "no tier stamp" : `tier=${tier}`}, a brain rather than a tier a refresh made — are --from and --to the wrong way round?`
     : "--to has tables in its public schema and is not an Open Brain schema — another database, one name away?";
-  return `${why} It carries no refresh mark; if it is meant to be a refresh target, mark it: ALTER DATABASE ${db} SET ob1.refresh_target = 'canary'`;
+  return `${why} (database ${db}, no refresh mark)`;
 }
 
 /** Whether pg_dump AND pg_restore exist and are new enough to read `serverMaj` — refresh needs both. */
@@ -335,6 +354,7 @@ async function run(cmd: string[], opts: { stdio?: "inherit" | "pipe" } = {}): Pr
   const proc = Bun.spawn(cmd, {
     stdout: opts.stdio === "inherit" ? "inherit" : "pipe",
     stderr: opts.stdio === "inherit" ? "inherit" : "pipe",
+    env: process.env,
   });
   const out = opts.stdio === "inherit" ? "" : await new Response(proc.stdout).text();
   const err = opts.stdio === "inherit" ? "" : await new Response(proc.stderr).text();
@@ -391,7 +411,14 @@ export async function refresh(fromUrl: string, toUrl: string, tier: Tier): Promi
     const dst = new SQL({ url: toUrl, max: 1 });
     try {
       if (!TIERS.includes(tier)) throw new Error(`not a tier: ${tier}`);
-      await dst.unsafe(`DO $mark$ BEGIN EXECUTE format('ALTER DATABASE %I SET ob1.refresh_target = %L', current_database(), '${tier}'); END $mark$`);
+      try {
+        await dst.unsafe(`DO $mark$ BEGIN EXECUTE format('ALTER DATABASE %I SET ob1.refresh_target = %L', current_database(), '${tier}'); END $mark$`);
+      } catch (e) {
+        // Nothing is reset yet. A database-level setting of a custom name needs a
+        // superuser (PG15+), as does restoring pgvector (CREATE EXTENSION vector),
+        // so a refresh that cannot mark could not have finished either.
+        throw new Error(`--refresh marks --to before resetting it (ALTER DATABASE … SET ob1.refresh_target) and could not: ${(e as Error).message}. A refresh needs a superuser on --to — pg_restore of pgvector's extension does too. --to is untouched.`);
+      }
       await dst`DROP SCHEMA IF EXISTS public CASCADE`;
       await dst`CREATE SCHEMA public`;
     } finally {
@@ -470,7 +497,8 @@ export async function promote(canaryUrl: string, stableUrl: string): Promise<{ v
     const [{ config }] = await stable<{ config: boolean }[]>`SELECT to_regclass('public.ob1_config') IS NOT NULL AS config`;
     const tier = config ? await readConfig(stable, "tier") : null;
     if (mark !== null || tier === "canary" || tier === "working") {
-      throw new Error(`--to is a tier (${mark !== null ? `refresh mark ${mark}` : `tier=${tier}`}), not the record — are --from and --to the wrong way round? Refusing: --promote stamps --to as stable.`);
+      const [{ db }] = await stable<{ db: string }[]>`SELECT quote_ident(current_database()) AS db`;
+      throw new Error(`--to is a tier (${mark !== null ? `refresh mark ${mark}` : `tier=${tier}`}), not the record — are --from and --to the wrong way round? Refusing: --promote stamps --to as stable.${mark !== null ? ` If --to really is to be the record now, clear the mark first: ALTER DATABASE ${db} RESET ob1.refresh_target` : ""}`);
     }
     version = await readConfig(canary, "schema_version");
   } catch (e) {

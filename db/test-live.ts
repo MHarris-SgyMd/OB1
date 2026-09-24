@@ -29,7 +29,7 @@
  */
 
 import { SQL } from "bun";
-import { readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, EMBEDDING_DIM, EMBEDDING_MODEL, HNSW_BOUNDS, MATCH_COUNT_CEILING, MATCH_THOUGHTS_SIGNATURE, ROUTE_ESTIMATE_MIN_PAGES, ROUTE_SAMPLE_PAGES, grantedFunctions, grantedSequences, grantedTables, grantedViews, parseSetConfig, versionAtLeast } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -4367,6 +4367,14 @@ console.log("\n[20] db/tier.ts: the canary reproduces stable's rankings on the s
     // its tier=stable, and carries the mark the refresh set before the reset.
     await canarySql`INSERT INTO ob1_config (key, value) VALUES ('tier', 'stable') ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`;
     assert(/stamped tier=stable/.test((await refusalAt(canaryUrl)) ?? ""), "unmarked, stamped tier=stable and holding rows: refused");
+    // Only the database's own setting is a mark: the same name set for a role in
+    // this database (or for a role, the server, a connection option) is not.
+    await sql.unsafe(`ALTER ROLE CURRENT_USER IN DATABASE ${canaryDb} SET ob1.refresh_target = 'canary'`);
+    try {
+      assert(/stamped tier=stable/.test((await refusalAt(canaryUrl)) ?? ""), "a role-level ob1.refresh_target is not the database's mark: still refused");
+    } finally {
+      await sql.unsafe(`ALTER ROLE CURRENT_USER IN DATABASE ${canaryDb} RESET ob1.refresh_target`);
+    }
     await setMark(canaryDb, "canary");
     assert((await refusalAt(canaryUrl)) === null, "marked by a refresh, the same target is allowed whatever its restored ob1_config says — a failed refresh can be retried");
     let refusedPromote: string | null = null;
@@ -4389,9 +4397,55 @@ console.log("\n[20] db/tier.ts: the canary reproduces stable's rankings on the s
       const foreign = new SQL({ url: foreignUrl, max: 1 });
       try { await foreign`CREATE TABLE invoices (id int)`; } finally { await foreign.close(); }
       assert(/not an Open Brain schema/.test((await refusalAt(foreignUrl)) ?? ""), "a database whose public schema holds another application's tables: refused");
+      const railsLike = new SQL({ url: foreignUrl, max: 1 });
+      try { await railsLike`CREATE TABLE schema_migrations (version varchar PRIMARY KEY)`; } finally { await railsLike.close(); }
+      assert(/not an Open Brain schema/.test((await refusalAt(foreignUrl)) ?? ""), "the same with a schema_migrations table (Rails', Ecto's, dbmate's name too) and no thoughts: still refused");
     } finally {
       await sql.unsafe(`DROP DATABASE IF EXISTS ${foreignDb}`);
     }
+
+    // The mark goes on BEFORE the reset, so a refresh that dies after it — here
+    // a pg_restore that fails — leaves a target the next refresh recognises. Two
+    // stand-in tools on PATH, reporting the server's major so refreshToolsReady
+    // passes: the dump writes nothing, the restore fails.
+    const shimDb = "ob1_tier_shim";
+    const shimUrl = (() => { const u = new URL(URL_!); u.pathname = `/${shimDb}`; return u.toString(); })();
+    const shimDir = join(tmpdir(), `ob1-tier-shim-${process.pid}`);
+    const savedPath = process.env.PATH;
+    await sql.unsafe(`DROP DATABASE IF EXISTS ${shimDb}`);
+    await sql.unsafe(`CREATE DATABASE ${shimDb}`);
+    try {
+      const [{ n }] = await sql<{ n: string }[]>`SELECT current_setting('server_version_num') AS n`;
+      const major = Math.floor(Number(n) / 10000);
+      mkdirSync(shimDir, { recursive: true });
+      const shim = (name: string, rest: string) => {
+        writeFileSync(join(shimDir, name), `#!/bin/sh\nif [ "$1" = --version ]; then echo "${name} (PostgreSQL) ${major}.0"; exit 0; fi\n${rest}\n`);
+        chmodSync(join(shimDir, name), 0o755);
+      };
+      shim("pg_dump", `while [ $# -gt 0 ]; do [ "$1" = -f ] && : > "$2"; shift; done; exit 0`);
+      shim("pg_restore", "exit 1");
+      process.env.PATH = `${shimDir}:${savedPath}`;
+      let failed: string | null = null;
+      try { await refresh(URL_!, shimUrl, "working"); }
+      catch (e) { failed = (e as Error).message; }
+      assert(/did not produce the thoughts table/.test(failed ?? ""), `a refresh whose restore fails stops there (got: ${failed ?? "no failure"})`);
+      const [marked] = await sql<{ c: string }[]>`
+        SELECT c FROM pg_db_role_setting s, unnest(s.setconfig) c
+        WHERE s.setdatabase = (SELECT oid FROM pg_database WHERE datname = ${shimDb}) AND s.setrole = 0 AND c LIKE 'ob1.refresh%'`;
+      assert(marked?.c === "ob1.refresh_target=working", `…and leaves its target marked (ob1.refresh_target=working), set before the reset (got: ${marked?.c ?? "no mark"})`);
+    } finally {
+      process.env.PATH = savedPath;
+      rmSync(shimDir, { recursive: true, force: true });
+      await sql.unsafe(`DROP DATABASE IF EXISTS ${shimDb}`);
+    }
+
+    // promote's mirror of the same-database guard, the URL respelled.
+    const samePromote = new URL(URL_!);
+    samePromote.searchParams.set("application_name", "tier-same-db-promote");
+    let refusedSamePromote: string | null = null;
+    try { await promote(URL_!, samePromote.toString()); }
+    catch (e) { refusedSamePromote = (e as Error).message; }
+    assert(/name the same database/.test(refusedSamePromote ?? ""), `promote refuses a --to that is the --from database spelled another way (got: ${refusedSamePromote ?? "no refusal"})`);
     await sql`DELETE FROM ob1_config WHERE key IN ('promoted_schema_version','promoted_at')`;
   } finally {
     if (canarySql) await canarySql.close();

@@ -364,14 +364,32 @@ loopback check, `tier.ts` guards `--to` two ways:
     `ob1.refresh_target` on the database, where the reset and the restore
     cannot reach it, so a refresh that failed partway can simply be re-run;
   - one stamped `canary` or `working`;
-  - one with an empty public schema;
-  - an Open Brain schema holding no thoughts.
+  - one whose public schema holds nothing but what extensions own;
+  - an Open Brain schema (`schema_migrations`, `ob1_config` and `thoughts`)
+    holding no thoughts. `schema_migrations` alone is not enough, since Rails,
+    Ecto, golang-migrate and dbmate use that name too.
 
   A `--to` stamped `stable`, a brain holding thoughts under no tier stamp,
   and another application's database are refused. The first two are most
   often `--from` and `--to` the wrong way round, and the third a name one off.
-  The refusal prints the `ALTER DATABASE … SET ob1.refresh_target` that marks
-  the target, for when a reset is really meant.
+  The refusal names no override, because marking such a target by hand
+  disarms the guard for it for good.
+
+**The mark.** The mark is only ever read from the database's own setting (in
+`pg_db_role_setting`). A value set for a role, for the server or on a
+connection does not count. Setting it needs a superuser. So does restoring
+pgvector, so a refresh needs one on `--to` anyway, and one that cannot set the
+mark stops before touching anything. The mark lasts until it is cleared, and a
+database restored from a canary's dump with `--create` brings it along:
+
+```sql
+-- make a database a refresh target on purpose (a new tier's database, say)
+ALTER DATABASE openbrain SET ob1.refresh_target = 'canary';
+-- clear it before a database that was a tier becomes the record
+ALTER DATABASE openbrain RESET ob1.refresh_target;
+```
+
+`--promote` refuses a marked `--to` and prints the `RESET` for it.
 
 The container runs with `--init`, so Ctrl-C stops a refresh, and it publishes
 nothing. The client's major has to be at least the source server's, and
