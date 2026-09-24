@@ -15,9 +15,6 @@
 // extensions/test-auth.ts fires three overlapping requests.
 
 import { StreamableHTTPTransport } from "@hono/mcp";
-// Deno reads the SDK's types through the extensionless subpath: its exports map
-// names them `./dist/esm/*.d.ts`, unreachable from `.js` (FORK.md change 84).
-// @ts-types="@modelcontextprotocol/sdk/server/mcp"
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { createClient } from "../../compat/supabase-sql/index.ts";
 import { Hono } from "hono";

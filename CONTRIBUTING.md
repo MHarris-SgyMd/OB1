@@ -286,11 +286,12 @@ than by editing a hand-numbered FORK.md section:
   the tickets and migrations it touches, a one-to-three-line changelog entry, and
   the record itself in the shape `changes/README.md` gives — at most 150 lines,
   citing tickets, migrations and existing change numbers, never a number of its
-  own, which the release step assigns. CI holds this: the `Repo consistency`
-  job's landing check (`scripts/check-landing.ts`) refuses a PR whose change in
-  those directories, test files (`test-*.ts`, `*.test.ts`) and Markdown aside,
-  comes with no fragment added or modified; the refusal names the files that
-  asked (SMD-1857). The one landing that passes without a fragment is a release
+  own, which the release step assigns. A fragment needs no edit to FORK.md's
+  index, which lists numbered changes alone (SMD-2084). CI holds this: the
+  `Repo consistency` job's landing check (`scripts/check-landing.ts`) refuses a
+  PR whose change in those directories, test files (`test-*.ts`, `*.test.ts`)
+  and Markdown aside, comes with no fragment added or modified; the refusal
+  names the files that asked (SMD-1857). The one landing that passes without a fragment is a release
   cut, which records itself in `releases.json` instead (SMD-1860).
 - The release step assembles the accumulated fragments into numbered change
   files (`changes/NNN-<slug>.md`), FORK.md's index and `CHANGELOG.md` in one
@@ -302,6 +303,10 @@ than by editing a hand-numbered FORK.md section:
   `check-fork-consistency`.)
 - A migration inside a released range is **frozen** — append a new migration file
   rather than editing an old one; `check-fork-consistency` enforces it.
+- A new migration, like a cut, moves what the server reports about itself: rerun
+  `bun scripts/gen-version.ts`, which regenerates `server-portable/version.ts`
+  (the tree's last migration, the version and its release range);
+  `check-fork-consistency`'s 17e names the command when the file is stale.
 
 `check-fork-consistency` validates every fragment and the changelog shape, so a PR
 that gets this wrong fails CI at one place.

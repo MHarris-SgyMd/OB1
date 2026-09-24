@@ -49,7 +49,7 @@ The core user journey is:
 - `docs/03-faq.md`: Common user questions and troubleshooting, especially ChatGPT, search, import, storage, and key rotation.
 - `docs/04-ai-assisted-setup.md`: Guide for using AI coding tools to build the same system.
 - `docs/05-tool-audit.md`: Guidance for keeping MCP tool surfaces useful and not bloated.
-- `server/index.ts`: Canonical core MCP server deployed as the `open-brain-mcp` Supabase Edge Function.
+- `server-portable/index.ts`: Canonical core MCP server — Bun, a container or Cloudflare Workers (`SETUP.md`); upstream deploys its copy as the `open-brain-mcp` Supabase Edge Function.
 - `extensions/`: Curated six-part learning path for practical Open Brain builds.
 - `recipes/`: Standalone imports, workflows, automation patterns, and alternative architectures.
 - `skills/`: Reusable AI client skills or prompt packs.
@@ -67,13 +67,14 @@ The base Open Brain system has three layers:
 2. Intelligence: OpenRouter generates embeddings with `openai/text-embedding-3-small` and extracts simple metadata with `openai/gpt-4o-mini`.
 3. Access: a Supabase Edge Function exposes MCP tools to AI clients.
 
-The core MCP server in `server/index.ts` exposes:
+The core MCP server in `server-portable/index.ts` exposes:
 
 - `capture_thought`: write a standalone thought, generate embedding, extract metadata, and store it.
 - `search_thoughts`: semantic search over stored thoughts.
 - `list_thoughts`: browse recent thoughts with optional filters.
 - `thought_stats`: summarize total thoughts, types, top topics, and people.
 - `thought_changes`: what changed since a time or a cursor — every capture, edit and deletion, who made it, and what moved (this fork's `server-portable` server only, migration 052).
+- `brain_info`: what this brain is — the server's version and commit, the store and tier, the Postgres and pgvector versions, the highest migration applied against the server's own, row counts, size and vector-index parameters (this fork's `server-portable` server only).
 - `search`: ChatGPT-compatible read-only search alias.
 - `fetch`: ChatGPT-compatible read-only fetch-by-id alias.
 
@@ -120,7 +121,7 @@ Key ChatGPT guidance:
 
 ## Common Troubleshooting
 
-Start with logs and configuration. Do not tell users to rewrite `server/index.ts` unless logs prove the code is the issue.
+Start with logs and configuration. Do not tell users to rewrite `server-portable/index.ts` unless logs prove the code is the issue.
 
 Common issues:
 

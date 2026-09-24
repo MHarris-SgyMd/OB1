@@ -28,9 +28,7 @@
         "strict_required_status_checks_policy": true,
         "do_not_enforce_on_create": false,
         "required_status_checks": [
-          { "context": "Server tests", "integration_id": 15368 },
           { "context": "Repo consistency", "integration_id": 15368 },
-          { "context": "Edge Function typecheck", "integration_id": 15368 },
           { "context": "Portable server (Bun + Workers)", "integration_id": 15368 },
           { "context": "Schema migrations", "integration_id": 15368 },
           { "context": "Retrieval replay gate", "integration_id": 15368 },

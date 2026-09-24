@@ -12,6 +12,8 @@ import { createStore, postgrestOnBunNotice, storeKind, UUID_RE, type AuditChange
 import { queryLogEnabled, tierProblem, trimmedEnv } from "../db/config.mjs";
 import { authenticateRequest, canCapture, canRead, canWrite, SCOPES, type Principal } from "./auth.ts";
 import { AgentResolver, cacheTtlFromEnv } from "./agents.ts";
+import { FORK_VERSION, LATEST_MIGRATION, RELEASE_RANGE } from "./version.ts";
+import { brainInfo, renderBrainInfo, type BrainInfo, type ReadOptions, type ServerFacts } from "./brain-info.ts";
 
 /**
  * Runtime-portable env access.
@@ -98,6 +100,13 @@ type Env = {
    * db/ingest-records.ts (which stamps ob1_config.tier) and preflight's `tier`.
    */
   OB1_TIER?: string;
+  /**
+   * The commit the image was built from — baked by server-portable/Dockerfile
+   * from its OB1_GIT_SHA build arg, never forwarded at runtime (compose passes
+   * the build arg; check 14 excuses the forward). Reported by brain_info and
+   * the keyed /health body (SMD-2041); unset reads as `unknown`.
+   */
+  OB1_GIT_SHA?: string;
   /** Model for metadata extraction. No schema dependency — safe to change anytime. */
   OB1_METADATA_MODEL?: string;
   /** The supersession judge's model (db/consolidate.ts), when it is not OB1_METADATA_MODEL; the server never judges, but embed.ts reads one Env (SMD-1901). */
@@ -203,11 +212,60 @@ function db(): Promise<ThoughtStore> {
   return _store;
 }
 
+// What this brain is (SMD-2041): the server's own facts beside the database's,
+// one read under the brain_info tool and the keyed /health body.
+function serverFacts(): ServerFacts {
+  const cfg = embedConfig();
+  return {
+    version: FORK_VERSION,
+    releaseRange: RELEASE_RANGE,
+    latestMigration: LATEST_MIGRATION,
+    commit: env().OB1_GIT_SHA || "unknown",
+    store: storeKind(env()),
+    tier: env().OB1_TIER || null,
+    embedding: { model: cfg.embeddingModel, dim: cfg.embeddingDim },
+  };
+}
+// Bounded (review pass 1: a keyed probe at an unreachable database waited out
+// the driver's 30-second connect and got no reply). The health body answers
+// within a probe's usual timeout — its statements capped to fit, so a few
+// locked tables cost their lock waits and not the whole record (review pass
+// 2); the tool, kept alive by its stream (SMD-1864), waits longer for a large
+// brain's counts, at brain-info.ts's default ceilings.
+export const HEALTH_DEADLINE_MS = 2_500;
+export const BRAIN_INFO_TOOL_DEADLINE_MS = 15_000;
+type Surface = "health" | "tool";
+const SURFACES: Record<Surface, { deadlineMs: number; opts: ReadOptions }> = {
+  health: { deadlineMs: HEALTH_DEADLINE_MS, opts: { statementTimeoutMs: 800, lockTimeoutMs: 300 } },
+  tool: { deadlineMs: BRAIN_INFO_TOOL_DEADLINE_MS, opts: {} },
+};
+// One read in flight per surface, so concurrent callers share one pool
+// connection rather than taking one each (forty probes against a locked table
+// once held the pool). Keyed by surface, so a probe never gets the tool's
+// deadline and ceilings. Released when the answer settles: an abandoned read
+// finishes its last statement within its ceiling (800 ms for health) beside the
+// next caller's, and a read hung on a half-open connection pins nothing.
+const inflight = new Map<Surface, Promise<BrainInfo>>();
+function readBrainInfo(surface: Surface): Promise<BrainInfo> {
+  const { deadlineMs, opts } = SURFACES[surface];
+  const read = () => brainInfo(serverFacts(), async (progress) => (await db()).databaseFacts(opts, progress), deadlineMs);
+  // Not shared on Workers (the PostgREST store): its read is a refusal with no
+  // I/O to share, and a promise from one request is not another's to await.
+  if (storeKind(env()) !== "sql") return read();
+  const shared = inflight.get(surface);
+  if (shared) return shared;
+  const answer = read().finally(() => { if (inflight.get(surface) === answer) inflight.delete(surface); });
+  inflight.set(surface, answer);
+  return answer;
+}
+
 // Built on first use, for the same reason as the store: reading env() at module
 // scope runs before initEnv() has seeded it.
 let _agents: AgentResolver | null = null;
 function agents(): AgentResolver {
-  if (!_agents) _agents = new AgentResolver(cacheTtlFromEnv(env().OB1_AGENT_CACHE_TTL_MS));
+  // Lookups are shared across requests only on the SQL store: on Workers (the
+  // PostgREST store) a fetch belongs to the request that started it.
+  if (!_agents) _agents = new AgentResolver(cacheTtlFromEnv(env().OB1_AGENT_CACHE_TTL_MS), Date.now, storeKind(env()) === "sql");
   return _agents;
 }
 
@@ -615,7 +673,9 @@ export function actorLine(m: Record<string, unknown>): string | null {
 function buildServer(principal: Principal): McpServer {
   const server = new McpServer({
     name: SERVER_NAME,
-    version: "1.0.0",
+    // The fork's version, generated from db/version.mjs (SMD-2041) — a literal
+    // here said 1.0.0 from before the fork had a version scheme until 1.1.0.
+    version: FORK_VERSION,
   });
 
   // The opt-in query log (migration 034, SMD-1295). Off unless OB1_QUERY_LOG=on,
@@ -1447,6 +1507,34 @@ function buildServer(principal: Principal): McpServer {
     }
   );
 
+  // Tool 3c: what this brain is (SMD-2041) — version, commit, store, tier, the
+  // database's versions, ledger, counts, size and HNSW parameters, one short
+  // table. Gated like the other read tools. The same record is the keyed
+  // /health body, as JSON; brainInfo never raises, so a database that cannot
+  // answer is a line in the table, not a tool error.
+  if (canRead(principal)) server.registerTool(
+    "brain_info",
+    {
+      title: "Brain Info",
+      description:
+        "Say what this Open Brain is: the server's version and the release it belongs to, the commit it was built from, the store and tier, " +
+        "the Postgres and pgvector versions, the schema version and highest migration applied (and whether that is this server's last), " +
+        "row counts, database size and vector-index parameters. Use it to check which version you are talking to, or whether the brain has reached this server's last migration " +
+        "(it compares the highest number applied; a skipped or edited migration is what `migrate.ts --dry-run` lists).",
+      annotations: {
+        readOnlyHint: true,
+      },
+      inputSchema: {},
+    },
+    async () => {
+      try {
+        return { content: [{ type: "text" as const, text: renderBrainInfo(await readBrainInfo("tool")) }] };
+      } catch (err: unknown) {
+        return { content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }], isError: true };
+      }
+    }
+  );
+
   // Tool 4: Capture Thought — the tool that adds.
   //
   // Registered for a key that may capture — write scope, or the capture-only
@@ -2155,8 +2243,15 @@ app.all("/.well-known/*", (c) => c.text("Not Found", 404, corsHeaders));
 
 // Liveness for platform probes (Kubernetes httpGet, load-balancer target checks,
 // uptime monitors), which can only GET and expect 2xx — the MCP endpoint answers
-// GET with 405 (below). Before authenticate(), like /.well-known/*: it says the
-// process is serving and nothing else. Readiness — is the database reachable —
+// GET with 405 (below). Without a key, like /.well-known/*: it says the process
+// is serving and nothing else — no key, a wrong key, a capture-only key and a
+// revoked one all get the literal `ok`, so nothing about the deployment reaches
+// an unauthenticated probe. With a read or a write key it answers what the
+// brain is, as JSON — brain_info's record (SMD-2041), for deploy/smoke.sh and an
+// operator's curl — still a 200, since the process is serving: a database that
+// refuses at once is the record's `database.error`; one that never answers
+// leaves the registry check unanswered too, and the body is then `ok` (below).
+// Readiness — is the database reachable —
 // is preflight's job at the entrypoint. HEAD is routed here as GET by Hono, so a
 // HEAD probe gets a bodiless 200. Matched as the last path segment under any
 // prefix a proxy leaves on the request (`/mcp/health`,
@@ -2178,7 +2273,35 @@ app.all("/.well-known/*", (c) => c.text("Not Found", 404, corsHeaders));
 // notFound's 405. POST /health is the MCP endpoint, as POST at every path is.
 // FORK.md change 75.
 const HEALTH_PATH = /(^|\/)health\/?$/;
-app.get("*", async (c, next) => (HEALTH_PATH.test(c.req.path) ? c.text("ok", 200, corsHeaders) : next()));
+app.get("*", async (c, next) => {
+  if (!HEALTH_PATH.test(c.req.path)) return next();
+  const principal = authenticateRequest(c.req.raw, {
+    MCP_ACCESS_KEYS: env().MCP_ACCESS_KEYS,
+    MCP_ACCESS_KEY: env().MCP_ACCESS_KEY,
+  }, { admit: SCOPES });
+  if (!principal || !canRead(principal)) return c.text("ok", 200, corsHeaders);
+  // A HEAD has no body to carry the record: liveness, as without a key, and no
+  // read for nothing (review pass 1: it paid the whole read, and the deadline).
+  if (c.req.method === "HEAD") return c.text("ok", 200, corsHeaders);
+  // The registry check and the read start together, under one deadline, so the
+  // answer comes within HEALTH_DEADLINE_MS whatever the database does — the
+  // read runs for a revoked key too (serialising the two would not fit the
+  // deadline), but a revoked key is shown nothing, as at the MCP route. A registry that has
+  // not answered by the deadline could still say `revoked`, so the key gets
+  // what an unknown key gets (review pass 2: a revoked key read the whole
+  // record while the registry's tables were locked); one that answers that it
+  // cannot reach the database (agents.ts: not a refusal) lets the record
+  // through with the database's error.
+  const info = readBrainInfo("health");
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const identity = await Promise.race([
+    agents().resolve(db(), principal), // one lookup in flight per key (agents.ts)
+    new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), HEALTH_DEADLINE_MS); }),
+  ]);
+  clearTimeout(timer);
+  if (!identity || identity.status === "revoked") return c.text("ok", 200, corsHeaders);
+  return c.json(await info, 200, corsHeaders);
+});
 
 // ── A tool call outlives the runtime's idle timeout (SMD-1864) ───────────────
 //

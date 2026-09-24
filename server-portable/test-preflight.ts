@@ -12,7 +12,7 @@
  */
 
 import { join, dirname } from "node:path";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { applyMigrations, createAssert, dropSchema, runScript } from "../db/test-support.ts";
@@ -479,8 +479,8 @@ else {
 
   /**
    * Two more bodies a vendored file replaced on a real brain (SMD-1250, fourth
-   * review pass): the edge-function-cost-optimization recipe's
-   * thought_stats_summary over 024's — a warning, thought_stats raising on a
+   * review pass): the edge-function-cost-optimization recipe's (retired by
+   * SMD-1800) thought_stats_summary over 024's — a warning, thought_stats raising on a
    * null topic — and upstream's thought-work-claims release_thought over
    * 015's — a failure, every worker release refused by 015's CHECK. Stand-ins
    * with the same shape and none of the clause each recogniser reads; and a
@@ -1740,6 +1740,116 @@ else {
 
     // Restore the baseline so the --json ok run below is clean.
     await claims.unsafe(`INSERT INTO ob1_config (key, value) VALUES ('schema_version', '${FORK_VERSION}') ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`);
+  }
+
+  // SMD-2041: `vector extension`, `migration ledger` and `schema version` read
+  // brain-info.ts's readDatabaseFacts — the read brain_info and the keyed
+  // /health body make — so a change to that read moves these rows and the
+  // tool's together (test-e2e-sql [14] holds the tool's side). The ledger is
+  // judged against the tree's last file, read here from the directory rather
+  // than from the generated module preflight reads it from.
+  {
+    const row = (out: string, name: string) => out.split("\n").find((l) => new RegExp(`\\b${name}\\b`).test(l))?.trim();
+    const treeLast = Math.max(...readdirSync(join(HERE, "..", "db", "migrations")).filter((n) => /^\d{3}_.*\.sql$/.test(n)).map((n) => Number(n.slice(0, 3))));
+    const last = String(treeLast).padStart(3, "0");
+    const prev = String(treeLast - 1).padStart(3, "0");
+    const [{ v: extversion }] = await claims`SELECT extversion AS v FROM pg_extension WHERE extname = 'vector'`;
+    const bare = await run(SQL_ENV);
+    assert(new RegExp(`✓\\s+vector extension\\s+the vector type resolves \\(pgvector ${rx(String(extversion))} in schema public\\)`).test(bare.out),
+           `the vector row names the installed pgvector, the catalog's ${extversion} (${row(bare.out, "vector extension")})`);
+    // In a checkout the generated version module is held to db/migrations/
+    // (review pass 4: a stale one made a freshly migrated brain read "ahead").
+    assert(new RegExp(`✓\\s+version module\\s+server-portable/version\\.ts matches db/migrations/ \\(${last}\\)`).test(bare.out),
+           `the version module row holds version.ts to the tree it sits in (${row(bare.out, "version module")})`);
+
+    const adopt = await migrate(["--url", LIVE, "--baseline"]);
+    assert(adopt.code === 0, `migrate.ts --baseline records every file (${adopt.out.trim().split("\n").slice(-1)[0]})`);
+    const current = await run(SQL_ENV);
+    assert(new RegExp(`✓\\s+migration ledger\\s+schema_migrations present, highest ${last} — this server's tree ends there too`).test(current.out)
+             // Between releases the tree's last file is past the release range,
+             // which the version row warns about in its own words (SMD-1804).
+             && new RegExp(`schema version\\s+(?:\\S+ · highest migration|.* ledger reaches migration) ${last}\\b`).test(current.out),
+           `a ledger at the tree's last file is current, and both rows read the same highest migration (${row(current.out, "migration ledger")} | ${row(current.out, "schema version")})`);
+
+    await claims.unsafe(`DELETE FROM schema_migrations WHERE name LIKE '${last}%'`);
+    const behind = await run(SQL_ENV);
+    assert(behind.code === 0 && new RegExp(`!\\s+migration ledger\\s+the ledger reaches ${prev} but this server's tree ends at ${last} — the brain is behind`).test(behind.out)
+             && /bun migrate\.ts --url \$DATABASE_URL \(--dry-run lists them\)/.test(behind.out)
+             // As in the current case: past the release range the version row
+             // warns in its own words, and a merge of main moves the range's
+             // top under this test (review pass 5: 052 behind 053 is past 051).
+             && new RegExp(`schema version\\s+(?:\\S+ · highest migration|.* ledger reaches migration) ${prev}\\b`).test(behind.out),
+           `a ledger short of the tree's last file warns, with the migrate remedy, and the version row agrees (${row(behind.out, "migration ledger")})`);
+
+    await claims.unsafe(`INSERT INTO schema_migrations (name, sha256) VALUES ('${last}_x.sql', 'baseline'), ('999_from_a_newer_tree.sql', 'baseline')`);
+    const ahead = await run(SQL_ENV);
+    assert(new RegExp(`!\\s+migration ledger\\s+the ledger reaches 999, past this server's tree \\(${last}\\) — a newer tree migrated this brain`).test(ahead.out),
+           `a ledger past the tree's last file warns the other way (${row(ahead.out, "migration ledger")})`);
+
+    // A role that may read the corpus and neither the ledger nor ob1_config
+    // (review pass 1): the ledger row says the table is there and unreadable —
+    // information_schema hid it from such a role, and the row told it to adopt
+    // a hand-applied schema with --baseline — and the version row says it
+    // could not read ob1_config rather than that 044 never ran.
+    await claims.unsafe("DROP ROLE IF EXISTS pf_reader");
+    await claims.unsafe("CREATE ROLE pf_reader LOGIN PASSWORD 'reader'");
+    await claims.unsafe("GRANT USAGE ON SCHEMA public TO pf_reader");
+    await claims.unsafe("GRANT SELECT ON thoughts TO pf_reader");
+    try {
+      const asReader = await run({ ...SQL_ENV, DATABASE_URL: LIVE!.replace(/\/\/[^@]*@/, "//pf_reader:reader@") });
+      assert(/migration ledger\s+schema_migrations present, not readable by this role \(permission denied for table schema_migrations\)/.test(asReader.out) && !/no schema_migrations table/.test(asReader.out),
+             `a role without SELECT on the ledger is told it is unreadable, not absent (${row(asReader.out, "migration ledger")})`);
+      assert(/schema version\s+could not verify: permission denied for table ob1_config/.test(asReader.out),
+             `…and the version row names the refused ob1_config read (${row(asReader.out, "schema version")})`);
+
+      // The same role with public off its search path (review pass 2): the
+      // ledger exists and does not resolve for it. Never "no schema_migrations
+      // table" and never the --baseline remedy, which on a partly migrated
+      // brain would record pending migrations as applied.
+      await claims.unsafe("ALTER ROLE pf_reader SET search_path = nowhere");
+      const lost = await run({ ...SQL_ENV, DATABASE_URL: LIVE!.replace(/\/\/[^@]*@/, "//pf_reader:reader@") });
+      assert(/!\s+migration ledger\s+schema_migrations exists \(schema public\) but does not resolve for this role/.test(lost.out)
+               && !/no schema_migrations table/.test(lost.out) && !/Adopt it with: cd db && bun migrate\.ts --url \$DATABASE_URL --baseline/.test(lost.out),
+             `a ledger off the role's search path warns that it does not resolve, and recommends no --baseline (${row(lost.out, "migration ledger")})`);
+    } finally {
+      await claims.unsafe("REVOKE ALL ON thoughts FROM pf_reader");
+      await claims.unsafe("REVOKE USAGE ON SCHEMA public FROM pf_reader");
+      await claims.unsafe("DROP ROLE pf_reader");
+    }
+
+    // A ledger held by a migration while preflight runs (review pass 2): its
+    // read times out, and the row says it could not verify — not that the
+    // role lacks a grant.
+    {
+      const locker = new SQL({ url: LIVE!, max: 1 });
+      let release: () => void = () => {};
+      const held = new Promise<void>((r) => { release = r; });
+      let locked: () => void = () => {};
+      const isLocked = new Promise<void>((r) => { locked = r; });
+      const tx = locker.begin(async (t) => {
+        await t`LOCK TABLE schema_migrations IN ACCESS EXCLUSIVE MODE`;
+        locked();
+        await held;
+      });
+      await isLocked;
+      let busy: { code: number; out: string } = { code: -1, out: "" };
+      try {
+        busy = await run(SQL_ENV);
+      } finally {
+        release();
+        await tx;
+        await locker.close();
+      }
+      assert(/!\s+migration ledger\s+could not verify: schema_migrations could not be read \(canceling statement due to lock timeout\)/.test(busy.out) && !/not readable by this role/.test(row(busy.out, "migration ledger") ?? ""),
+             `a locked ledger is could-not-verify, not a missing grant (${row(busy.out, "migration ledger")})`);
+      // …and the version row, whose range check needs the ledger's highest,
+      // says it could not verify rather than ✓ "unknown" (review pass 3).
+      assert(/!\s+schema version\s+could not verify against the ledger: .* schema_migrations could not be read: canceling statement due to lock timeout/.test(busy.out),
+             `a locked ledger leaves the version row unverified, not ✓ (${row(busy.out, "schema version")})`);
+    }
+
+    // Back to the harness's unrecorded schema for the sections below.
+    await claims.unsafe("DROP TABLE schema_migrations");
   }
 
   // The pipeline tier (SMD-1806): unset on a plain brain the ingester never

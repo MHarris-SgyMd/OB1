@@ -1,8 +1,9 @@
 # server-portable
 
 A runtime-neutral build of the Open Brain MCP server. Same tools, same wire
-behaviour as `../server/index.ts`, but with no dependency on Deno or on Supabase
-Edge Functions as a host.
+behaviour as upstream's Edge Function build (`server/index.ts`, in this fork
+until SMD-1800), with no dependency on Deno or on Supabase Edge Functions as a
+host.
 
 This exists so the runtime decision in the Supabase migration can be made last,
 and changed later. One file targets four runtimes.
@@ -14,7 +15,7 @@ and changed later. One file targets four runtimes.
   [the getting-started guide](../docs/01-getting-started.md)
 - For the Cloudflare target: a Cloudflare account and `wrangler` (a dev dependency here)
 
-## What differs from `../server/index.ts`
+## What differs from upstream's Edge Function build
 
 Three changes.
 
@@ -230,9 +231,10 @@ cannot take a parameter and sends a fixed weight; `db/migrations/020_*.sql` and
 bun install
 ```
 
-Runtime dependencies are pinned to the exact versions in `../server/deno.json`, so
-every target runs identical library code. **If you bump one file, bump both in the
-same commit.**
+Runtime dependencies are pinned to the exact versions `../extensions/package.json`
+installs for the vendored servers, so every target runs identical library code;
+`extensions/test-auth.ts` fails if the two drift. **If you bump one file, bump
+both in the same commit.**
 
 ### 2. Pick a target
 
@@ -307,6 +309,84 @@ current checkout re-applies. The compose stack is in lockstep by construction; a
 or a Supabase brain served from another machine is not (FORK.md change 60;
 SMD-1451 is the migrator refusing it).
 
+## What this brain is: `brain_info` and a keyed `/health`
+
+An agent or an operator can ask a running brain what it is (SMD-2041). The
+**`brain_info`** tool (read scope — a read or a write key sees it, a capture-only
+key does not) answers a short table:
+
+```
+Version:         1.1.0+upstream.9543c29 (release range 049–051; this tree adds 052, unreleased)
+Commit:          8ba58db5…
+Store:           sql · tier stable
+Embedding:       qwen3-embedding:4b @ 1024
+Postgres:        16.15 (Debian 16.15-1.pgdg12+2) · pgvector 0.8.6 (schema public)
+Schema version:  1.1.0+upstream.9543c29
+Migrations:      052 applied — this server's tree ends at 052 (current: the ledger's highest is the tree's last)
+Brain embedding: qwen3-embedding:4b @ 1024
+Rows:            373 thoughts · 1,204 audit events · 90 chunks · 512 entities
+Database size:   45.2 MB
+HNSW:            thought_chunks_embedding_idx on thought_chunks (m 16, ef_construction 64); …
+```
+
+What the judgements mean. `ledgerStatus` compares one number: the ledger's
+highest migration against the last file of the tree this server was built from.
+`current` says they are equal — not that every file below it was applied as
+written: a skipped, renumbered or edited migration is what `migrate.ts --dry-run`
+lists, file by file (SMD-2069 compares the two lists). Between release cuts the
+version stays the last cut's; `unreleased` names the migrations this tree adds
+past its range. The audit count is the event log's size — every capture, edit and
+delete, deleted thoughts' included — not a count of thoughts. `Database size` is
+the whole database's. The server's embedding and the brain's are printed side by
+side without a verdict (preflight's embedding rows judge them; SMD-2071).
+
+**`GET /health` with a read or write key** (the `x-brain-key` header, a bearer
+token or `?key=`) answers the same record as JSON — `version`, `releaseRange`,
+`unreleased`, `latestMigration`, `commit`, `store`, `tier`, `embedding`,
+`ledgerStatus` (`current` | `behind` | `ahead` | `null`) and `database`, which carries the
+database's facts (the ledger as `{ present, readable }`, not its names) or
+`{ "error": … }` when it cannot answer. It answers within 2.5 s
+(`HEALTH_DEADLINE_MS`) whatever the database does — still a 200, since the
+process is serving. A database that refuses at once is `database.error`; one
+that never answers (a dropped route) leaves the agent registry unanswered too,
+and the body is then the literal `ok`, as for a key the server cannot vouch for
+(below); tables locked by a migration cost their lock waits. The
+read is one transaction whose statements are capped at 800 ms and whose lock
+waits at 300 ms (never above a stricter setting the role already has), a read
+that does not answer is named in `unread` with its reason (`refused`,
+`timeout`, `deadline`, `invisible`, `error`), the facts read by the deadline
+are kept, and a database whose catalog has not answered by then is
+`database.error`. Concurrent probes share one read, and requests of one key share
+one agent-registry lookup (at /health and the MCP route alike), so a burst during
+a migration holds one connection for the read and one per distinct key — the
+registry's lock wait itself is unbounded (SMD-2072). Without a key, with a wrong
+or capture-only key, or with a revoked one — or while the agent registry has
+not answered by the deadline, since it could still say revoked — the body is
+the literal `ok`, so nothing about the deployment reaches an unauthenticated
+probe; a `HEAD`, keyed or not, is the bodiless `ok` and reads nothing. Point a
+platform's liveness probe at the keyless form. `deploy/smoke.sh`'s check 10
+reads the keyed body.
+
+Where each fact comes from: the version, its release range and the tree's last
+migration are generated into `version.ts` by `scripts/gen-version.ts` (the Workers
+build cannot import the node-only `db/version.mjs`, and neither a Worker nor the
+image carries `db/migrations/`; check-fork's 17e round-trips the file, and in a
+checkout preflight's `version module` row compares it with `db/migrations/`, so
+rerun the script after adding a migration). The commit is the image's
+`OB1_GIT_SHA` build arg (`deploy/README.md`), `unknown` when unset — and always
+on Workers, which has no build arg. The database's
+half is `brain-info.ts`'s `readDatabaseFacts`, the same read preflight's
+`vector extension`, `migration ledger` and `schema version` rows make, so the gate
+and the tool cannot disagree (preflight skips the counts and size, which it does
+not use). Each read that a role or a lock can refuse has a savepoint of its own:
+a role without `SELECT` on, say, `ob1_entities` or `schema_migrations` gets that
+field as unread, named on a `Not read:` line, and the rest still answers; a table
+that exists where the role cannot resolve it (off its search path, or no USAGE on
+its schema) is `invisible`, never "no table". The tool's statements are capped at
+5 s and its whole read at 15 s. Over the PostgREST store (Workers) the
+database's half is not read — PostgREST exposes no catalog reads — and the table
+says so; see Caveats.
+
 ## Expected outcome
 
 ```bash
@@ -325,16 +405,17 @@ to start and remove a throwaway `pgvector/pgvector:0.8.6-pg16`.
 
 `test-server.ts` **imports the real server.** That is the point of this directory.
 
-`../server/index.ts` cannot be imported by a test runner — it reads `Deno.env` at
-module scope and imports from `jsr:` — so the suites beside it reimplement the
-server inline and assert against the copy. That is precisely how upstream's auth
-assertions came to claim HTTP 401 for three months after the server started
-returning HTTP 200 ([issue #487](https://github.com/NateBJones-Projects/OB1/issues/487)).
-The copy kept passing.
+Upstream's Edge Function build, `server/index.ts` (in this fork until SMD-1800),
+could not be imported by a test runner — it read `Deno.env` at module scope and
+imported from `jsr:` — so the suites beside it reimplemented the server inline and
+asserted against the copy. That is precisely how upstream's auth assertions came
+to claim HTTP 401 for three months after the server started returning HTTP 200
+([issue #487](https://github.com/NateBJones-Projects/OB1/issues/487)). The copy
+kept passing.
 
-The fork's answer over there is a drift guard that greps `index.ts` as text, which
-detects the divergence but does not prevent it. Here there is nothing to diverge
-from, so the guards are unnecessary and absent.
+The fork's first answer over there was a drift guard that grepped `index.ts` as
+text, which detected the divergence but did not prevent it. Here there is nothing
+to diverge from, so the guards are unnecessary and absent.
 
 `test-e2e-sql.ts` goes further: it boots the real server with `OB1_STORE` unset —
 the default store is what it drives — and `SUPABASE_URL` deleted from the
@@ -350,13 +431,19 @@ reaches the stub. Every other suite that boots the server against a stub
 declares it local (`OB1_LLM_LOCAL=1`), which is the upgrade every stack from
 before the gate makes.
 
-**Not yet ported:** `test-stats-pagination.mjs` and `test-capture-atomicity.mjs`
-still live in `../server/` and still test mirrors of the Deno build. They are now
-largely superseded for the portable build — the store interface makes both paths
-directly testable — but the Deno build still needs them.
+The three mirror suites went with the Edge Function build (SMD-1800): what they
+asserted is this server's behaviour, tested on the server itself — the auth
+envelope (`test-server.ts` [4]–[5]), `thought_stats` aggregated in SQL with no page
+to fall off (migration 024, `test-e2e-sql.ts`), and the vector written in the same
+statement as the row (`test-store-sql.ts` [2], `test-e2e-sql.ts` "the embedding was
+stored in the same write").
 
 ## Caveats
 
+- **`brain_info` on Workers reports the server, not the database.** The
+  PostgREST store has no catalog reads: the version, commit (`unknown`, no build
+  arg), store and embedding answer; the database's versions, ledger, counts and
+  indexes do not. A container or Bun deployment on the SQL store reports them.
 - **Workers cannot pool Postgres connections.** `wrangler.toml` pins
   `OB1_STORE=postgrest` there; the SQL store, selected by hand or by a lost
   binding, fails loudly via the shim. Whether Hyperdrive and a Workers-capable

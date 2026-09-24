@@ -28,7 +28,7 @@
  *   update_thought(id, content?, metadata_patch?, if_unchanged_since?)
  *
  * Why a separate Edge Function?
- *   The core `open-brain` MCP server (server/index.ts) is curated and does not
+ *   The core `open-brain` MCP server (server-portable/index.ts) is curated and does not
  *   expose an update path. This integration adds one without modifying the
  *   core server. Deploy it alongside your main MCP connector and register it
  *   as a separate custom connector in Claude Desktop (or your client of
@@ -58,11 +58,7 @@
  */
 
 
-// Deno reads the SDK's types through the extensionless subpath: its exports map
-// names them `./dist/esm/*.d.ts`, unreachable from `.js` (FORK.md change 84).
-// @ts-types="@modelcontextprotocol/sdk/server/mcp"
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-// @ts-types="@modelcontextprotocol/sdk/types"
 import { ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { StreamableHTTPTransport } from "@hono/mcp";
 import { Hono } from "hono";

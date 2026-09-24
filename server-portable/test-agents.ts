@@ -464,6 +464,25 @@ console.log("\n[14] A definitive revocation IS enforced, cached or not");
   assert(out2.status === "ok" && out2.agentId === undefined, "an unusable answer serves without an id");
 }
 
+console.log("\n[15] Concurrent requests of a key share one lookup — on the SQL store, not on Workers (SMD-2041)");
+{
+  // resolve_agent can wait on a lock with no timeout of its own (SMD-2072):
+  // five concurrent requests of a cold key are one lookup, one connection.
+  // On Workers a fetch belongs to the request that started it, so there each
+  // request makes its own.
+  const slow = (onCall: () => void) => fakeStore(async () => { await Bun.sleep(50); return { ok: true, agentId: "agent-1" } as AgentResolution; }, onCall);
+  let shared = 0;
+  const pooled = new AgentResolver(0, () => 0);
+  const store = slow(() => shared++);
+  const outs = await Promise.all(Array.from({ length: 5 }, () => pooled.resolve(store, principal("laptop", H("s")))));
+  assert(shared === 1 && outs.every((o) => o.status === "ok" && o.agentId === "agent-1"), `five concurrent requests of one key, one lookup (${shared})`);
+  let apart = 0;
+  const workers = new AgentResolver(0, () => 0, false);
+  const store2 = slow(() => apart++);
+  await Promise.all(Array.from({ length: 5 }, () => workers.resolve(store2, principal("laptop", H("s")))));
+  assert(apart === 5, `with sharing off (Workers), each request its own lookup (${apart})`);
+}
+
 await sql.close();
 server.stop();
 provider.stop();
