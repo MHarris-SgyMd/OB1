@@ -66,8 +66,12 @@ export type JevEnv = EgressEnv & {
  * podman VM the profile runs in, so a full batch of 64 is 25 s there — and
  * the service runs one request at a time, so a request also waits for the ones
  * ahead of it. A flat 30 s timed out the second of two concurrent full batches
- * (fifth review pass); 30 s + 1 s a decision holds two full batches, one
- * queued, with room. `timeoutMs` in a call replaces the whole of it.
+ * (fifth review pass); 30 s + 1 s a decision holds a full batch behind one
+ * other full batch. The deadline scales with the caller's own request, not the
+ * queue it joins: one decision behind two full batches in the container (51 s
+ * of queue) still has 31 s — a caller that shares a busy tier passes a larger
+ * `timeoutMs` (sixth review pass). `timeoutMs` in a call replaces the whole
+ * of it, per request.
  */
 export const DEFAULT_JEV_TIMEOUT_MS = 30_000;
 export const JEV_PER_DECISION_MS = 1_000;
@@ -98,6 +102,11 @@ export function resolveJevConfig(env: JevEnv): JevConfig | null {
   };
 }
 
+/**
+ * `timeoutMs` bounds each request a call makes (jevDecideMany makes one per
+ * packed batch), not the call: a bound on the whole call is a `signal`, e.g.
+ * AbortSignal.timeout(…), which every request of the call shares.
+ */
 type CallOpts = { signal?: AbortSignal; timeoutMs?: number };
 
 /** One exchange with the tier: the deadline, the status kept, the body capped in a message, the JSON parsed. */

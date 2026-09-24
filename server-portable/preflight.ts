@@ -3076,12 +3076,15 @@ if (!jevCfg) {
   // The stack's own service name resolves only while the service runs: the
   // profile is down, or `compose restart server` ran — which does not start
   // what the server depends on (fifth review pass: ~5 restarts a second).
-  const START_HERE = host === "jev"
-    ? "The jev service is not running: bring the profile up — compose --profile jev up -d (compose restart server does not start it) — or unset OB1_JEV_BASE_URL to turn the tier off."
-    : START;
+  const NOT_RUNNING = "The jev service is not running: bring the profile up — compose --profile jev up -d (compose restart server does not start it) — or unset OB1_JEV_BASE_URL to turn the tier off.";
+  // It resolves and answers nothing: it runs but does not listen yet — it
+  // listens only after the fetch and the load, ~20 s on a first start — or is
+  // restarting, or the port is not its 8020 (sixth review pass: the
+  // not-running remedy was given here too, and dropped "fix the URL").
+  const NOT_LISTENING = "The jev service is up but not listening: on a first start it fetches the weights (~20 s) before it listens — compose ps shows its health — or it is restarting (compose logs jev), or OB1_JEV_BASE_URL's port is not the service's 8020.";
   const unresolved = await resolveFirst(host);
   if (unresolved) {
-    add("jev tier", "fail", `nothing answers at ${at} — ${unresolved.why} (GET /info, ${LOCAL_PROBE_SECONDS} timeout)`, START_HERE);
+    add("jev tier", "fail", `nothing answers at ${at} — ${unresolved.why} (GET /info, ${LOCAL_PROBE_SECONDS} timeout)`, host === "jev" ? NOT_RUNNING : START);
   } else try {
     const info = await jevInfo(jevCfg, { timeoutMs: LOCAL_PROBE_TIMEOUT_MS });
     const pins = `${info.model.name} (${info.model.source}@${info.model.revision.slice(0, 8)}, weights ${info.model.weights_sha256.slice(0, 12)}…)`;
@@ -3099,7 +3102,10 @@ if (!jevCfg) {
     // serves plain http); nothing answered; and in each, a proxy variable
     // that routes the call is named, since podman forwards the host's.
     const err = e as Error & { kind?: string };
-    const proxy = proxyKnobFor(base);
+    // A NO_PROXY entry naming the host exactly exempts it (Bun 1.4, measured
+    // by the sixth review pass); then the proxy is not the route, and not the fix.
+    const exempt = [process.env.NO_PROXY, process.env.no_proxy].some((v) => (v ?? "").split(",").map((x) => x.trim().toLowerCase()).includes(host));
+    const proxy = exempt ? null : proxyKnobFor(base);
     const route = proxy ? `; ${proxy} is set, so this call goes through that proxy unless NO_PROXY names ${host}` : "";
     const viaProxy = proxy ? `Add ${host} to NO_PROXY (and no_proxy) for the server, or unset ${proxy} for it. Otherwise: ` : "";
     if (err.kind === "http" || err.kind === "body") {
@@ -3107,10 +3113,10 @@ if (!jevCfg) {
           `${viaProxy}Check OB1_JEV_BASE_URL is the tier's base with no path — its routes are /health, /info and /decide (not Ollama's /v1) — and that it names the jev service, not another.`);
     } else if (err.kind !== "timeout" && probeFailure(e).kind === "tls") {
       add("jev tier", "fail", `${at} answers, but ${probeFailure(e).why}${route}`,
-          `${viaProxy}The tier serves plain http: use http:// in OB1_JEV_BASE_URL, or trust the certificate of whatever terminates TLS in front of it (${TLS_REMEDY})`);
+          `${viaProxy}The tier serves plain http: use http:// in OB1_JEV_BASE_URL, or trust the issuer of whatever terminates TLS in front of it for the server (NODE_EXTRA_CA_CERTS=<ca.pem>).`);
     } else {
       const why = err.kind === "timeout" ? `no HTTP answer in ${LOCAL_PROBE_SECONDS}` : probeFailure(e).why;
-      add("jev tier", "fail", `nothing answers at ${at} — ${why} (GET /info, ${LOCAL_PROBE_SECONDS} timeout)${route}`, viaProxy + START_HERE);
+      add("jev tier", "fail", `nothing answers at ${at} — ${why} (GET /info, ${LOCAL_PROBE_SECONDS} timeout)${route}`, viaProxy + (host === "jev" ? NOT_LISTENING : START));
     }
   }
   egressRow("jev egress", jevCfg.endpoint, "OB1_JEV_LOCAL", "decision",

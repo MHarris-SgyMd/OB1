@@ -2243,6 +2243,28 @@ console.log("\n[10] The typed-decision tier is dialled when configured — every
   assert(/✗\s+jev tier\s+.*HTTP_PROXY is set, so this call goes through that proxy unless NO_PROXY names 127\.0\.0\.1/.test(proxied.out) && /→ Add 127\.0\.0\.1 to NO_PROXY/.test(proxied.out), "a proxy variable in the way is named, with NO_PROXY as the fix");
   const stopped = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: "http://jev:8020", OB1_JEV_LOCAL: "1" });
   assert(/→ The jev service is not running: bring the profile up — compose --profile jev up -d \(compose restart server does not start it\)/.test(stopped.out), "the stack's own service unresolved: not running, and restart server does not start it");
+  // A proxy that answers — with an error status — is an answer not from the
+  // tier, and the row still names the proxy as the route.
+  const badProxy = Bun.serve({ port: 0, fetch: () => new Response("bad gateway", { status: 502 }) });
+  const viaBadProxy = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: TIER, OB1_JEV_LOCAL: "1", HTTP_PROXY: `http://127.0.0.1:${badProxy.port}`, http_proxy: undefined, NO_PROXY: undefined, no_proxy: undefined });
+  badProxy.stop();
+  assert(/✗\s+jev tier\s+.* answers, but not as the tier: Info request .*502.*; HTTP_PROXY is set, so this call goes through that proxy/.test(viaBadProxy.out), "an error status through a proxy is not the tier's, and the proxy is named as the route");
+  // NO_PROXY naming the host exempts it: the proxy is then neither the route nor the fix.
+  const exempted = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: "http://127.0.0.1:1", OB1_JEV_LOCAL: "1", HTTP_PROXY: "http://127.0.0.1:9", http_proxy: undefined, NO_PROXY: "127.0.0.1", no_proxy: undefined });
+  assert(/✗\s+jev tier\s+nothing answers at http:\/\/127\.0\.0\.1:1 — the connection was refused/.test(exempted.out) && !/HTTP_PROXY is set/.test(exempted.out), "a host NO_PROXY names is dialled direct, and the row does not blame the proxy");
+  // A certificate the runtime does not trust: something answers; the tier serves plain http.
+  const jevCerts = mkdtempSync(join(tmpdir(), "ob1-preflight-jev-tls-"));
+  const jevMinted = Bun.spawnSync(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", join(jevCerts, "k.pem"), "-out", join(jevCerts, "c.pem"), "-subj", "/CN=localhost", "-days", "1"], { stdout: "ignore", stderr: "ignore" });
+  if (jevMinted.exitCode !== 0) {
+    skipRaw("an https tier with an untrusted certificate answers, and the fix is http://", "no openssl to mint a certificate");
+  } else {
+    const tlsTier = Bun.serve({ port: 0, tls: { key: Bun.file(join(jevCerts, "k.pem")), cert: Bun.file(join(jevCerts, "c.pem")) }, fetch: () => Response.json({}) });
+    const tls = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: `https://127.0.0.1:${tlsTier.port}`, OB1_JEV_LOCAL: "1", NODE_TLS_REJECT_UNAUTHORIZED: undefined });
+    tlsTier.stop(true);
+    assert(/✗\s+jev tier\s+https:\/\/127\.0\.0\.1:\d+ answers, but its TLS certificate is not trusted/.test(tls.out) && /→ The tier serves plain http: use http:\/\/ in OB1_JEV_BASE_URL/.test(tls.out),
+           "an https tier with an untrusted certificate answers, and the fix is http://");
+  }
+  rmSync(jevCerts, { recursive: true, force: true });
   redirector.stop();
   halfTier.stop();
   const wrongModel = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: TIER, OB1_JEV_LOCAL: "1", OB1_JEV_MODEL: "semif" });

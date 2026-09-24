@@ -48,7 +48,7 @@ this service and by the client:
 | --- | --- |
 | `GET /health` | `ok`, once the model is loaded (the service listens only then); HEAD too |
 | `GET /info` | `JevInfo`: `ob1-jev/1`, the model's name, source, revision, weights and calibrator sha256, the limits |
-| `POST /decide` | `{ model?, decisions: [...] }` → `JevResponse`; 400 malformed, 409 another model, 413 over 8 MB, 422 a decision the model cannot read faithfully, 499 the caller left before its turn, 500 the model failed |
+| `POST /decide` | `{ model?, decisions: [...] }` → `JevResponse`; 400 malformed, 409 another model, 413 over 8 MB, 422 a decision the model cannot read faithfully, 499 the caller left (before its turn, or mid-batch — the engine stops between forward passes), 500 the model failed |
 
 A decision is `binary` (`proposition`, `context`) or `choice` (`question`,
 up to 24 `options`, `context`). Every answer adds the tier's own option,
@@ -96,7 +96,12 @@ Or `podman compose -f deploy/compose.yaml --profile jev up -d` —
 `JEV_THREADS` and `JEV_HUB` only; there `JEV_PORT` is the host port
 `compose.host-ports.yaml` publishes. The brain's knobs are `OB1_JEV_BASE_URL`,
 `OB1_JEV_MODEL` and `OB1_JEV_LOCAL` (`deploy/.env.example`); the API is
-unauthenticated, like Ollama's, and binds loopback by default.
+unauthenticated, like Ollama's, and binds loopback by default. Its queue is
+unbounded: each waiting request holds its body (up to 8 MB) several times
+over until its turn, so a burst of large requests raised resident memory from
+0.9 to 2.1 GB in the sixth review pass's run (a high-water mark; 5,000
+ordinary decisions grew it ~2 MB per 1,000). Keep it where only the brain's
+own callers reach it; SMD-2082 bounds the queue.
 
 **The weights are referenced, not vendored.** `verdict.ts`'s `VERDICT` pins the
 repository, revision `8af2496e…` and each file's size and sha256;

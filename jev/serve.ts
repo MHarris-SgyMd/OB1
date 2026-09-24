@@ -65,7 +65,9 @@ const ROUTES: Record<string, string> = { "/health": "GET", "/info": "GET", "/dec
  * take twice as long — in arrival order. A request whose caller has gone by
  * the time its turn comes (its deadline passed, it hung up) is skipped, not
  * computed for no one (first review pass: ten abandoned requests still ran
- * ten times ahead of everyone behind them).
+ * ten times ahead of everyone behind them); one whose caller goes mid-batch
+ * stops between forward passes (CallerGone, fifth review pass). Both answer
+ * 499. The queue itself is unbounded — SMD-2082 bounds it.
  */
 export function createHandler(engine: Engine): (req: Request) => Promise<Response> {
   let queue: Promise<unknown> = Promise.resolve();
