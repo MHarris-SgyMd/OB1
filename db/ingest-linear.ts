@@ -25,7 +25,7 @@
  * Every function here is pure; `--self-check` runs them with no network.
  */
 
-import { AdapterRefusal, normaliseLinks, normaliseMentions, stableJson, type Adapter, type Ingested, type Link, type Mention } from "./ingest-contract.ts";
+import { AdapterRefusal, IDENTITY_MAX, normaliseLinks, normaliseMentions, stableJson, type Adapter, type Derived, type Ingested, type Link, type Mention } from "./ingest-contract.ts";
 
 export const LINEAR_SYSTEM = "linear";
 export const LINEAR_MEDIA_TYPE = "application/vnd.linear.issue+json";
@@ -170,6 +170,93 @@ export function issueScope(issue: LinearIssue): string {
   return issue.project?.name ?? "linear:no-project";
 }
 
+// ---------------------------------------------------------------------------
+// Dated sections → derived observations (SMD-2059; SMD-1951's finding)
+// ---------------------------------------------------------------------------
+
+/** A level-2 heading that carries an ISO date anywhere in it: `## Update 2026-09-19 (board audit)`, `## Corrected 2026-09-22 — …`, `## Upstream survey, 2026-09-11`. */
+const DATED_HEADING_RE = /^## (.*\b(\d{4}-\d{2}-\d{2})\b.*)$/;
+/** Where a section ends: the next heading of level one or two (a `###` inside it belongs to it). */
+const SECTION_END_RE = /^#{1,2} /;
+/** A Markdown link, to its label — the brain's rows show Linear hands some cross-references this way, others as autolink elements. */
+const MD_LINK_RE = /\[([^\]]*)\]\([^)]*\)/g;
+/** The slug's length bound: with the identifier and `#` it stays well inside IDENTITY_MAX. */
+export const SECTION_SLUG_MAX = 80;
+export const SECTION_MEDIA_TYPE = "text/markdown";
+
+/** One dated section of a description: the heading (markup stripped), its date, the raw Markdown from the heading line to the section's end, and the body under the heading. */
+export type IssueSection = { heading: string; date: string; raw: string; body: string; slug: string };
+
+/** Markup out of a heading or a body: autolink elements and Markdown links to their text. */
+function plainText(s: string): string {
+  return stripAutolinks(s).replace(MD_LINK_RE, "$1");
+}
+
+/** A heading as an identity part: lower case, words joined by `-`, bounded. */
+export function sectionSlug(heading: string): string {
+  return plainText(heading).toLowerCase().normalize("NFKD").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, SECTION_SLUG_MAX).replace(/-+$/, "");
+}
+
+/**
+ * The dated sections of a description, in order. Deterministic: headings only —
+ * a bold `**Corrected …**` paragraph is prose and stays in the ticket. Two
+ * sections of one slug in one description are told apart by a counter, so each
+ * keeps an identity of its own.
+ */
+export function issueSections(issue: LinearIssue): IssueSection[] {
+  const lines = (issue.description ?? "").split("\n");
+  const out: IssueSection[] = [];
+  const slugs = new Map<string, number>();
+  for (let i = 0; i < lines.length; i++) {
+    const m = DATED_HEADING_RE.exec(lines[i]);
+    if (!m) continue;
+    let j = i + 1;
+    while (j < lines.length && !SECTION_END_RE.test(lines[j])) j++;
+    const raw = lines.slice(i, j).join("\n").replace(/\s+$/, "");
+    const body = lines.slice(i + 1, j).join("\n").trim();
+    const base = sectionSlug(m[1]) || `section-${m[2]}`;
+    const n = (slugs.get(base) ?? 0) + 1;
+    slugs.set(base, n);
+    out.push({ heading: plainText(m[1]).trim(), date: m[2], raw, body, slug: n === 1 ? base : `${base}-${n}` });
+    i = j - 1;
+  }
+  return out;
+}
+
+/** The identity of a section within the linear system: the ticket's identifier, `#`, the slug. */
+export function sectionKey(identifier: string, slug: string): string {
+  return `${identifier}#${slug}`;
+}
+
+/**
+ * Each dated section as a thought of its own: an `observation` dated by the
+ * heading, `child_of` the ticket, its cross-references as `references`, the
+ * section's Markdown as its canonical, its text the ticket's identifier and
+ * title, the heading, then the body with markup stripped. The facet that
+ * names the ticket is `ticket`, NOT `issue`: `issue` is the board sync's claim
+ * on a ticket ROW, and a derived row carrying it would join the ticket's twin
+ * group and be chained as an older paste of the ticket.
+ */
+export function derivedSections(issue: LinearIssue): Derived[] {
+  const out: Derived[] = [];
+  for (const s of issueSections(issue)) {
+    const key = sectionKey(issue.identifier, s.slug);
+    if (key.length > IDENTITY_MAX) continue; // unreachable with the slug bound; the contract's limit stated where it would bite
+    const body = plainText(s.body).trim();
+    const links: Link[] = [{ relation: "child_of", target: issue.identifier }, ...autolinkTargets(s.body).map((target) => ({ relation: "references" as const, target }))];
+    out.push({
+      identity: { system: LINEAR_SYSTEM, key },
+      canonical: { form: s.raw, mediaType: SECTION_MEDIA_TYPE },
+      text: `${issue.identifier} — ${issue.title.trim()} · ${s.heading}${body ? `\n\n${body}` : ""}`,
+      links: normaliseLinks(links, key).links,
+      mentions: [],
+      facets: { ticket: issue.identifier, section: s.heading, observed_at: s.date, type: "observation", url: issue.url, [WATERMARK_KEY]: issue.updatedAt },
+      createdAt: `${s.date}T00:00:00.000Z`,
+    });
+  }
+  return out;
+}
+
 /** The adapter. */
 export const linearAdapter: Adapter<LinearIssue> = {
   system: LINEAR_SYSTEM,
@@ -187,6 +274,7 @@ export const linearAdapter: Adapter<LinearIssue> = {
       facets: issueFacets(issue),
       createdAt: issue.createdAt,
       watermark: { key: WATERMARK_KEY, value: issue.updatedAt },
+      derived: derivedSections(issue),
     };
   },
 };
@@ -257,6 +345,28 @@ export function selfCheck(): number {
   try { linearAdapter.map({ ...issue, identifier: "not an id" }); } catch (e) { refused = (e as Error).name; }
   ok(refused === "AdapterRefusal", "an identifier outside Linear's grammar is refused, not stored");
   ok(JSON.stringify(issueMentions({ ...issue, labels: { nodes: [{ name: "b" }, { name: "a" }, { name: " a " }] } }).map((m) => m.name)) === JSON.stringify([issue.project!.name, "a", "b"]), "mentions are one per name, trimmed, in one order");
+
+  // Dated sections → derived observations (SMD-2059).
+  ok(out.derived !== undefined && out.derived.length === 0, "an issue with no dated section derives nothing");
+  const sectioned: LinearIssue = {
+    ...issue, identifier: "SMD-1951",
+    description: "## Problem\n\nThe plan.\n\n## Update 2026-09-19 (board audit)\n\nStill open; see <issue id=\"a\" href=\"h\">SMD-1949</issue> and [SMD-1809](https://linear.app/x/SMD-1809).\n\n### Detail\n\nA sub-heading belongs to the section.\n\n## Notes\n\nUndated, stays.\n\n## Corrected 2026-09-22 — the spikes are hypotheses\n\nRelabelled.\n\n## Update 2026-09-19 (board audit)\n\nA second update the same day.",
+  };
+  const sections = issueSections(sectioned);
+  ok(sections.length === 3 && sections.map((s) => s.slug).join(" ") === "update-2026-09-19-board-audit corrected-2026-09-22-the-spikes-are-hypotheses update-2026-09-19-board-audit-2", `three dated sections, slugged, the repeated heading counted (${sections.map((s) => s.slug).join(" ")})`);
+  ok(sections[0].date === "2026-09-19" && sections[0].heading === "Update 2026-09-19 (board audit)" && /### Detail/.test(sections[0].raw) && /A sub-heading belongs/.test(sections[0].body) && !/## Notes/.test(sections[0].raw), "a section runs to the next level-1 or level-2 heading; a ### inside it belongs to it; the raw keeps the heading line");
+  ok(/<issue id=/.test(sections[0].raw) && !/<issue/.test(sections[0].heading), "the raw keeps the markup, the heading is stripped");
+  const d = derivedSections(sectioned);
+  ok(d.length === 3 && d[0].identity.key === "SMD-1951#update-2026-09-19-board-audit" && d[2].identity.key === "SMD-1951#update-2026-09-19-board-audit-2", `each section is an identity of its own under the ticket (${d.map((x) => x.identity.key).join(" ")})`);
+  ok(d[0].text === "SMD-1951 — The SQL-safety guard rail · Update 2026-09-19 (board audit)\n\nStill open; see SMD-1949 and SMD-1809.\n\n### Detail\n\nA sub-heading belongs to the section.", `the text is the ticket's identifier and trimmed title, the heading, the body with autolinks and Markdown links flattened (${JSON.stringify(d[0].text.split("\n")[0])})`);
+  ok(d[0].canonical.form === sections[0].raw && d[0].canonical.mediaType === SECTION_MEDIA_TYPE, "the canonical is the section's Markdown as written");
+  ok(JSON.stringify(d[0].links) === JSON.stringify([{ relation: "child_of", target: "SMD-1951" }, { relation: "references", target: "SMD-1949" }]), `child_of the ticket and references for the autolinks — a Markdown link is prose, not a structured cross-reference (${JSON.stringify(d[0].links)})`);
+  ok(d[0].facets.type === "observation" && d[0].facets.ticket === "SMD-1951" && d[0].facets.issue === undefined && d[0].facets.observed_at === "2026-09-19" && d[0].facets[WATERMARK_KEY] === issue.updatedAt && d[0].createdAt === "2026-09-19T00:00:00.000Z", "an observation dated by the heading, naming the ticket under `ticket` (never `issue`, the sync's row claim), carrying the parent's watermark");
+  ok(d.every((x) => x.mentions.length === 0), "a section names no entities of its own — the ticket's project and labels are the ticket's");
+  ok(derivedSections({ ...sectioned, description: "## Update (2026-09-19): measured\n\nx\n\n**Corrected 2026-09-22** in prose." }).length === 1, "a date in parentheses counts; a bold paragraph is prose and is not split");
+  ok(derivedSections({ ...sectioned, description: "## Update 2026-09-19\n## Update 2026-09-20" })[0].text.endsWith("· Update 2026-09-19") && derivedSections({ ...sectioned, description: "## Update 2026-09-19\n## Update 2026-09-20" }).length === 2, "a section with no body is its heading alone; back-to-back headings are two sections");
+  ok(sectionSlug("Update 2026-09-19 — what [SMD-1879](https://linear.app/x) found: Ärger!") === "update-2026-09-19-what-smd-1879-found-a-rger", `a slug is lower-case words, Markdown links to their label, non-ASCII folded (${sectionSlug("Update 2026-09-19 — what [SMD-1879](https://linear.app/x) found: Ärger!")})`);
+  ok(sectionSlug("x".repeat(200)).length === SECTION_SLUG_MAX, "a slug is bounded");
 
   if (bad === 0) console.log("ingest-linear.ts self-check PASS");
   return bad === 0 ? 0 : 1;

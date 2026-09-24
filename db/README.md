@@ -1623,6 +1623,11 @@ IS the input; the Markdown adapter enumerates what its text cannot reproduce
 file that is not UTF-8, one holding NUL (`MARKDOWN_LIMITS`). `bun
 ingest-linear.ts --self-check` and `bun ingest-markdown.ts --self-check` run the
 pure rules; `test-schema.ts` [48] drives 053 with the Linear adapter's output.
+An item may yield **derived items** (`Ingested.derived`, SMD-2059): parts that
+are thoughts of their own — a Linear ticket's dated sections — each with its
+own identity, canonical, text, links and facets, written after the parent
+under its scope and watermark with `derived_from` the row that holds the
+parent's identity, whichever writer's it is.
 
 **The allowlist (SMD-1813).** The two adapter sources are external content —
 stored un-isolated, embedded, sent to a model provider — and are ingested only
@@ -1868,6 +1873,23 @@ asked for (`OB1_CORPUS_STATE`, `completed` by default) — and every other
 ticket is this tool's alone. A dump built before the `issue` field
 is refused by name with the rebuild command — one renderer, not two.
 
+**A ticket's dated sections are thoughts of their own (SMD-2059).** A level-2
+heading carrying an ISO date — `## Update 2026-09-19 (board audit)`,
+`## Corrected 2026-09-22 — …` — is a dated observation about a premise that
+moved, and inside the ticket's row no filter or report reaches it (SMD-1951's
+finding). The adapter yields each such section as a derived item on an
+identity of its own (`SMD-N#<slug of the heading>`): an `observation` dated by
+the heading, `derived_from` the ticket's row, `child_of` it, the section's
+Markdown as its canonical, the facet `ticket` naming the ticket (never
+`issue`, which is this tool's claim on a ticket ROW). This tool writes the
+parts beside the head row once it is settled — found by identity on later
+passes, patched, edited or captured as the ticket's own text is, each with its
+own vector and tags — and the report's `sections` line counts them; the
+ingester writes the same parts from the dump. The ticket's text is unchanged:
+it is what people search for and cite. Headings only; a bold `**Corrected**`
+paragraph is prose. A brain from before this change gains its parts as each
+ticket next moves, or all at once from one `--full` pass.
+
 **Structure on a brain from before 053.** A scheduled pass fetches only the
 missing and stale tickets, so the rows a brain already held gain their
 canonical, links and mentions only as each ticket next moves in Linear. To
@@ -1897,7 +1919,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 1552 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 660 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
+./with-postgres.sh bun test-live.ts         # 675 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```
