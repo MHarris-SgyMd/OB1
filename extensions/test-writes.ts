@@ -908,17 +908,29 @@ try {
   const recentOpen = await send(h, "GET", "/recent?limit=50&exclude_restricted=false");
   assert(recent.status === 200 && ids(recent).includes(cid) && !ids(recent).includes(rid) && ids(recentOpen).includes(rid) && ids(recentOpen).includes(cid),
     `GET /recent hides the restricted twin by default and shows it under exclude_restricted=false, as its siblings do — it filtered nothing before (${recent.status}: ${ids(recent).length} rows${ids(recent).includes(rid) ? ", the twin among them" : ""}; open: ${ids(recentOpen).length})`);
-  // Every answer of /search carries the request's CORS headers (review pass 3): the second pass passed `req` on the
-  // 400s and said the 200s did the same — they did not, so under an allowlist a browser could read the refusal and
-  // not the page. The allowlist was set before the module loaded (above); send() carries the Origin and returns the
-  // headers. The file's other routes still answer null under an allowlist — SMD-2079.
-  const [okCors, refusedCors, strangerCors] = await Promise.all([
-    send(h, "POST", "/search", { query: captured, min_similarity: 0.5 }, KEY, "https://dash.test"),
-    send(h, "POST", "/search", { query: captured, end_date: "yesterday" }, KEY, "https://dash.test"),
-    send(h, "POST", "/search", { query: captured, min_similarity: 0.5 }, KEY, "https://elsewhere.test")]);
+  // Every answer of the gateway carries the request's CORS headers: SMD-2054's third pass gave /search's five, and the
+  // file's other forty-seven answers said `Access-Control-Allow-Origin: null` under an allowlist — json() built the
+  // headers from the request only when handed `req` — so a browser dashboard could read a search and not /recent,
+  // /thoughts, /stats or a 404 (SMD-2079). They are set once now, on every response the main handler returns. The
+  // allowlist was set before the module loaded (above); send() carries the Origin and returns the headers.
+  const D = "https://dash.test";
+  const [okCors, refusedCors, strangerCors, recentCors, browseCors, lostCors, strangerRecent, preflight, unauthorized] = await Promise.all([
+    send(h, "POST", "/search", { query: captured, min_similarity: 0.5 }, KEY, D),
+    send(h, "POST", "/search", { query: captured, end_date: "yesterday" }, KEY, D),
+    send(h, "POST", "/search", { query: captured, min_similarity: 0.5 }, KEY, "https://elsewhere.test"),
+    send(h, "GET", "/recent?limit=1", undefined, KEY, D),
+    send(h, "GET", "/thoughts", undefined, KEY, D),
+    send(h, "GET", "/no-such-route", undefined, KEY, D),
+    send(h, "GET", "/recent?limit=1", undefined, KEY, "https://elsewhere.test"),
+    send(h, "OPTIONS", "/recent", undefined, KEY, D),
+    send(h, "GET", "/recent?limit=1", undefined, "not-the-key", D)]);
   const allow = (r: Reply) => r.headers.get("access-control-allow-origin");
-  assert(okCors.status === 200 && allow(okCors) === "https://dash.test" && refusedCors.status === 400 && allow(refusedCors) === "https://dash.test" && strangerCors.status === 200 && allow(strangerCors) === "null",
+  assert(okCors.status === 200 && allow(okCors) === D && refusedCors.status === 400 && allow(refusedCors) === D && strangerCors.status === 200 && allow(strangerCors) === "null",
     `every answer of POST /search carries the request's CORS headers under an allowlist — the 200 and the 400 echo a listed origin, an unlisted one gets null (${allow(okCors)} / ${allow(refusedCors)} / ${allow(strangerCors)})`);
+  assert(recentCors.status === 200 && allow(recentCors) === D && browseCors.status === 200 && allow(browseCors) === D && lostCors.status === 404 && allow(lostCors) === D && allow(strangerRecent) === "null",
+    `…and so does every other answer of the gateway (SMD-2079): a page from GET /recent and from GET /thoughts and the 404 for an unknown route echo a listed origin, and GET /recent answers null to an unlisted one (${recentCors.status} ${allow(recentCors)} / ${browseCors.status} ${allow(browseCors)} / ${lostCors.status} ${allow(lostCors)} / ${allow(strangerRecent)})`);
+  assert(preflight.status === 204 && allow(preflight) === D && /x-brain-key/.test(String(preflight.headers.get("access-control-allow-headers"))) && unauthorized.status === 401 && allow(unauthorized) === D,
+    `the preflight 204 and the 401 keep theirs, set on the way out of the main handler as every answer's are (controls: both passed the request before) (${preflight.status} ${allow(preflight)} / ${unauthorized.status} ${allow(unauthorized)})`);
   delete process.env.CORS_ALLOWED_ORIGINS;
 }
 

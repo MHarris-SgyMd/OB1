@@ -10,7 +10,7 @@
 
 Provides a standard REST API alongside the MCP server for clients that cannot use the Model Context Protocol. This includes browser-based dashboards, ChatGPT Actions, Gemini extensions, webhook receivers, and any HTTP client.
 
-All endpoints share the same authentication, sensitivity filtering, and enrichment pipeline as the MCP server. CORS is enabled for browser and Electron clients.
+All endpoints share the same authentication, sensitivity filtering, and enrichment pipeline as the MCP server. CORS is enabled for browser and Electron clients, and every response carries the headers.
 
 **Available endpoints:**
 
@@ -143,6 +143,14 @@ by updating the `MCP_ACCESS_KEY` secret.
 |---------|---------|-------|
 | `CORS_ALLOWED_ORIGINS` | unset (`*`) | Comma-separated origin allowlist. When unset the gateway responds with `Access-Control-Allow-Origin: *` for backward compatibility. |
 
+Every response carries the request's CORS headers — a page, a refusal, the
+preflight `204`, the `404`, the `429`, the `500` — set once on the way out of
+the main handler, not by each route (SMD-2079). Until that change forty-seven
+of the gateway's answers, every route's `200` among them, said
+`Access-Control-Allow-Origin: null` under an allowlist, so a browser dashboard
+could read `POST /search` and not `GET /recent`, `/thoughts` or `/stats`; the
+allowlist below broke the clients it was set for.
+
 **Warning:** `*` combined with write methods (`POST`, `PUT`, `PATCH`,
 `DELETE`) is unsafe for production. Any webpage a victim visits can
 attempt a cross-origin write if it can obtain the key from another
@@ -177,7 +185,7 @@ The REST API uses the same `_shared/` helpers as the Enhanced MCP Server (`integ
 >
 > Two consequences. In **semantic mode** `match_thoughts` returns the top-N by similarity and the route over-fetches — `limit + 20`, or `limit + 50` under a date bound, at most 200 — then filters, so a brain with more than twenty restricted rows ranked above the cut can answer fewer than `limit` rows with matches left below the over-fetch; `total` there is the rows returned, as before. In **text mode** the function ranks and pages before the filters apply: `total` and `total_pages` count the rows the filters hide, `count` is the rows on the page after them, and a page the filters emptied is `count: 0` with `total_pages` still saying how many pages the function has; a page past the last hit answers `total: 0`, since the count rides on the rows. No route gives the exact count of a search's matches after the filters (`GET /count` counts by type, source and window, not by query); SMD-2055 gives `search_thoughts_text` tier and date arguments of its own, which makes text mode's page and total exact.
 >
-> `GET /recent` was the one route reading `thoughts` directly with no tier predicate — it answered every restricted thought's full content, newest first (`GET /duplicates` calls `find_near_duplicates`, which is defined nowhere on this fork, so it fails rather than answers) — and takes `exclude_restricted` (default `true`) as its siblings do; like theirs, its predicate is `<>` on the column, which also hides a row whose tier is NULL (an explicit write; the column defaults to `standard`), where the sidecar's functions use `IS DISTINCT FROM` — and where `/search` shows such a row, as enhanced-mcp's tools do; the two routes differ there. Every answer of `POST /search` — a page or a refused bound — carries the request's CORS headers; the file's other routes answer `Access-Control-Allow-Origin: null` under an allowlist (SMD-2079). `extensions/test-writes.ts` drives both modes against a restricted twin planted at a captured thought's vector.
+> `GET /recent` was the one route reading `thoughts` directly with no tier predicate — it answered every restricted thought's full content, newest first (`GET /duplicates` calls `find_near_duplicates`, which is defined nowhere on this fork, so it fails rather than answers) — and takes `exclude_restricted` (default `true`) as its siblings do; like theirs, its predicate is `<>` on the column, which also hides a row whose tier is NULL (an explicit write; the column defaults to `standard`), where the sidecar's functions use `IS DISTINCT FROM` — and where `/search` shows such a row, as enhanced-mcp's tools do; the two routes differ there. Every answer of the gateway carries the request's CORS headers, set once in the main handler (SMD-2079); until it, `POST /search`'s five answers alone did under an allowlist. `extensions/test-writes.ts` drives both modes against a restricted twin planted at a captured thought's vector.
 
 For guidance on managing tool count and token overhead when running multiple integrations, see the [tool audit guide](../../docs/05-tool-audit.md).
 
