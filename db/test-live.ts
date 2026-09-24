@@ -4343,6 +4343,21 @@ console.log("\n[20] db/tier.ts: the canary reproduces stable's rankings on the s
     assert(canaryVer != null && version === canaryVer, "promote reads the canary's schema_version (migration 044), not an absent 'version' key");
     const stableCfg = Object.fromEntries((await sql`SELECT key, value FROM ob1_config WHERE key IN ('tier','promoted_schema_version','promoted_at')`).map((r: { key: string; value: string }) => [r.key, r.value]));
     assert(stableCfg.tier === "stable" && stableCfg.promoted_schema_version === canaryVer && /^\d{4}-\d\d-\d\dT/.test(stableCfg.promoted_at ?? ""), "promote stamps stable: tier=stable, promoted_schema_version and a promoted_at time");
+
+    // --from and --to the wrong way round (SMD-2036): the canary into stable is two
+    // distinct databases, so the same-database guard passes it, and the target is
+    // the record. Refused on the stamp, before the client tools are looked for.
+    let refusedStable: string | null = null;
+    try { await refresh(canaryUrl, URL_!, "canary"); }
+    catch (e) { refusedStable = (e as Error).message; }
+    assert(/stamped tier=stable/.test(refusedStable ?? ""), `refresh refuses a --to stamped tier=stable — --from and --to swapped (got: ${refusedStable ?? "no refusal"})`);
+    // And a --to that is a brain with no tier stamp — the shape of an untiered
+    // stable. This canary was migrated and loaded here, never refreshed, so it
+    // carries rows and no ob1_config.tier.
+    let refusedBrain: string | null = null;
+    try { await refresh(URL_!, canaryUrl, "canary"); }
+    catch (e) { refusedBrain = (e as Error).message; }
+    assert(/holds thoughts and no tier stamp/.test(refusedBrain ?? ""), `refresh refuses a --to holding thoughts under no tier stamp (got: ${refusedBrain ?? "no refusal"})`);
     await sql`DELETE FROM ob1_config WHERE key IN ('promoted_schema_version','promoted_at')`;
   } finally {
     if (canarySql) await canarySql.close();

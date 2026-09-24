@@ -1718,9 +1718,13 @@ bun tier.ts --promote --from <canary-url> --to <stable-url>
 (thoughts, vectors, chunks, query_log, provenance, agents, audit — everything a
 migration might touch, so a migration meets *all* the real data), resets the target
 and restores into it, then runs `migrate.ts` forward with the merged tree. It is
-destructive to `--to`: it refuses a `--to` that is the `--from` database (compared by
-the server's `system_identifier` and the database name, so two names for one host are
-still one), and a non-loopback target unless `OB1_ALLOW_REMOTE_DB=1`. It needs Bun
+destructive to `--to`, so it refuses three kinds of target. The first is a `--to`
+that is the `--from` database. The source session is looked up in the target's
+`pg_stat_activity`, so two names for one server are still one server, and a copy
+that shares the source's `system_identifier` is still another. The second is a
+`--to` stamped `tier=stable`, or holding thoughts under no `canary`/`working`
+stamp, which is `--from` and `--to` the wrong way round. The third is a
+non-loopback target, unless `OB1_ALLOW_REMOTE_DB=1`. It needs Bun
 and a `pg_dump`/`pg_restore` whose major version is at least the source server's, and
 no image the stack runs has both — the pgvector image has the client and no Bun,
 `oven/bun` the reverse. **`deploy/tier.sh` is the runnable form** (SMD-2036): it
@@ -1985,7 +1989,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 1590 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 676 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
+./with-postgres.sh bun test-live.ts         # 678 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```

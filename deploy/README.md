@@ -323,33 +323,54 @@ service) as `open-brain-tier:latest`, and runs this checkout's `tier.ts`
 in it, mounted read-only, on the stack's network:
 
 ```bash
-# stable (this stack's postgres) into a canary on its own server beside it
-deploy/tier.sh --refresh --from postgres --to open-brain-canary-postgres --tier canary
-deploy/tier.sh --diff    --from postgres --to open-brain-canary-postgres
+# stable (this stack's postgres) into a canary on its own server beside it; from
+# a branch worktree, name the running stack's env file (deploy/.env is gitignored)
+deploy/tier.sh --env-file ~/OB1/deploy/.env --refresh --from postgres --to open-brain-canary-postgres --tier canary
+deploy/tier.sh --env-file ~/OB1/deploy/.env --diff    --from postgres --to open-brain-canary-postgres
 # the three-tier stack's own network and services
 deploy/tier.sh --refresh --from stable-postgres --to canary-postgres --network open-brain-tiers_default
 ```
 
 `--from` and `--to` name a database on the network as `HOST[:PORT][/DB]`
 (port 5432 and database `openbrain` by default). The wrapper builds the URL as
-the services here do, with `POSTGRES_PASSWORD` from the environment or from
-`deploy/.env`. A full `postgres://` URL is used as given. The URLs reach the
-container as variables, not arguments. `--env-file` (default `deploy/.env`) is
-passed to the container, because `migrate.ts` reads the `OB1_EMBEDDING_*`
-knobs from it on a refresh. `--network` defaults to `open-brain_default`, and
-`--runtime` is `docker` or `podman` (docker when it is on the PATH). Anything
-else goes to `tier.ts` as given.
+the services here do, with `POSTGRES_PASSWORD`. A full `postgres://` URL is used
+as given. `--network` defaults to `open-brain_default`, and `--runtime` is
+`docker` or `podman` (docker when it is on the PATH). Anything else goes to
+`tier.ts` as given, and a wrapper flag given twice is refused.
 
-From a container every database is remote, so the wrapper sets
-`OB1_ALLOW_REMOTE_DB=1`. What guards `--to` in place of the loopback check is
-`tier.ts` refusing a `--to` that is the `--from` database. It compares the
-server's `system_identifier` and the database name, so `postgres` and
-`open-brain-postgres-1` are recognised as one database. The container publishes
+The env file (`--env-file`, default `deploy/.env`) is read by compose itself,
+through `compose config --environment`. So a quoted value, an inline comment,
+an `export` line or CRLF line endings read here as they do for the stack, and
+a variable set in the shell wins over the file, as it does there. Each name the
+file sets is handed to the container with the value compose resolved:
+`migrate.ts` reads the `OB1_EMBEDDING_*` knobs from it on a refresh. The values
+travel in a temporary env file (mode 600, removed on exit), so they are not on
+the wrapper's command line or the runtime's. Inside the container the URLs are
+on the argument lists of bun, `pg_dump`, `pg_restore` and `migrate.ts`, and a
+Linux host's `ps` shows those.
+
+From a container every database is remote, so a short-form `--to` gets
+`OB1_ALLOW_REMOTE_DB=1`. A `--to` given as a URL does not, so export
+`OB1_ALLOW_REMOTE_DB=1` to reset one, as with `tier.ts` itself. In place of the
+loopback check, `tier.ts` guards `--to` two ways:
+
+- **It is not the `--from` database.** The source connection's own session is
+  looked up in the target's `pg_stat_activity`. Only the same cluster lists it,
+  and then the database names decide. So `postgres` and `open-brain-postgres-1`
+  are one database, and a canary copied from stable's volume, which shares its
+  `system_identifier`, is still another.
+- **It is a tier a refresh can own.** That is an empty database, a migrated one
+  holding no thoughts, or one stamped `canary` or `working`. A `--to` stamped
+  `stable`, or holding thoughts under no tier stamp (a plain brain), is refused.
+  Either is most often `--from` and `--to` the wrong way round.
+
+The container runs with `--init`, so Ctrl-C stops a refresh, and it publishes
 nothing. The client's major has to be at least the source server's, and
 `refreshToolsReady` refuses the refresh otherwise, so a Postgres bump in the
-compose files means bumping the package in `db/tier.Dockerfile` with it.
-The deploy-stack CI job runs a refresh, a `--diff` and the refusal through
-this script on every PR.
+compose files means bumping the package in `db/tier.Dockerfile` with it. On
+every PR, the deploy-stack CI job seeds one thought and one logged search, then
+runs through this script: a refresh, a `--replay`, a `--diff`, and both
+refusals.
 
 A refresh does not carry the per-database HNSW settings over (SMD-2037), and a
 server already running on the refreshed database keeps its old pool until it

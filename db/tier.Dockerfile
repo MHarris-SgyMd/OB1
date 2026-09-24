@@ -15,11 +15,13 @@
 # a release artifact.
 FROM oven/bun:1.4.0-alpine
 # The client major matches the stack's server, pgvector/pgvector:0.8.6-pg16.
-# refreshToolsReady refuses a pg_dump older than the source server, and a newer
-# one is no better: pg_dump 17 writes `SET transaction_timeout`, a setting a
-# pg16 server does not have, so its restore errors. The package name pins the major; Alpine moves the
-# minor within it. The check makes a repository that ever resolves the name to
-# another major a failed build, not a refused refresh. Bump it with the server.
+# refreshToolsReady refuses a pg_dump older than the source server. A newer one
+# works, with noise: pg_dump 17 writes `SET transaction_timeout`, a setting a
+# pg16 server does not have, and the restore reports it as an error (measured in
+# review: exit 0 overall, rows intact). The package name pins the major and
+# Alpine moves the minor within it. The check makes a repository that ever
+# resolves the name to another major a failed build rather than a surprise.
+# Bump it with the server.
 RUN apk add --no-cache postgresql16-client \
  && pg_dump --version | grep -Eq '\) 16\.' \
  && pg_restore --version | grep -Eq '\) 16\.'

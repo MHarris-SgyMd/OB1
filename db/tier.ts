@@ -34,9 +34,11 @@
  * pg_dump / pg_restore whose major version is at least the source server's, AND
  * Bun: no image the stack runs has both, so deploy/tier.sh runs this file in one
  * that does (db/tier.Dockerfile, SMD-2036); a host that runs it directly needs
- * postgresql-client >= the server. It is destructive to --to, refuses a --to
- * that is the --from database, and refuses a non-loopback target unless
- * OB1_ALLOW_REMOTE_DB=1, the same guard test-support's dropSchema uses.
+ * postgresql-client >= the server. It is destructive to --to: it refuses a --to
+ * that is the --from database, is stamped tier=stable, or holds thoughts under
+ * no canary/working stamp (targetRefusal), and a non-loopback
+ * target unless OB1_ALLOW_REMOTE_DB=1, the same guard test-support's dropSchema
+ * uses.
  *
  * The replay is the LIVE half of the replay gate (SMD-1295, whose db/test-replay.ts
  * is the offline, model-free, fixture-vector half in CI). For each search row
@@ -247,21 +249,49 @@ async function toolMajor(tool: string): Promise<number | null> {
 }
 
 /**
- * Which database a connection reached, as the server knows it: the cluster's
- * system_identifier (fixed at initdb) and the database name. Two URLs that
- * spell one database differently — a compose service name and its container
- * name, localhost and 127.0.0.1 — agree here where their strings do not. A
- * role that may not read pg_control_system falls back to the address the
- * server answered on.
+ * Whether `a` and `b` reached the same database. The test is exact: `a`'s own
+ * session — its backend pid and the instant it started, the pair no two live
+ * sessions on one cluster share — is looked up in `b`'s pg_stat_activity, which
+ * lists every session on `b`'s cluster. Found means one cluster, and then the
+ * database names decide. No URL, host name or address is compared, so a compose
+ * service name and its container name, an alias and an IP, are still one
+ * database; and a copy that shares the source's system_identifier (a volume
+ * copy, a base backup) is still another. A role that may not read another
+ * role's backend_start sees it NULL, and a matching pid is then taken as a
+ * match: the error falls on the side of refusing.
  */
-async function databaseIdentity(sql: SQL): Promise<string> {
-  try {
-    const [{ id, db }] = await sql<{ id: string; db: string }[]>`SELECT system_identifier::text AS id, current_database() AS db FROM pg_control_system()`;
-    return `${id}/${db}`;
-  } catch {
-    const [{ addr, port, db }] = await sql<{ addr: string | null; port: number | null; db: string }[]>`SELECT host(inet_server_addr()) AS addr, inet_server_port() AS port, current_database() AS db`;
-    return `${addr ?? "socket"}:${port ?? ""}/${db}`;
-  }
+async function sameDatabase(a: SQL, b: SQL): Promise<boolean> {
+  const [me] = await a<{ pid: number; started: string; db: string }[]>`
+    SELECT pid, extract(epoch FROM backend_start)::text AS started, current_database() AS db
+    FROM pg_stat_activity WHERE pid = pg_backend_pid()`;
+  const [seen] = await b<{ found: boolean; db: string }[]>`
+    SELECT EXISTS (
+             SELECT 1 FROM pg_stat_activity
+             WHERE pid = ${me.pid}
+               AND (backend_start IS NULL OR extract(epoch FROM backend_start)::text = ${me.started})
+           ) AS found,
+           current_database() AS db`;
+  return seen.found && seen.db === me.db;
+}
+
+/**
+ * Why `target` must not be reset by a refresh, or null when it may. A refresh
+ * writes a tier it made: a database with nothing in it (no ob1_config, or a
+ * migrated schema holding no thoughts — a tier stack's database after `up`), or
+ * one a refresh stamped canary or working. It refuses the record (tier=stable)
+ * and a database that holds thoughts under no tier stamp — a plain brain, which
+ * is what an untiered stable looks like. Either is most often --from and --to
+ * the wrong way round.
+ */
+async function targetRefusal(target: SQL): Promise<string | null> {
+  const [{ config, thoughts }] = await target<{ config: boolean; thoughts: boolean }[]>`
+    SELECT to_regclass('public.ob1_config') IS NOT NULL AS config, to_regclass('public.thoughts') IS NOT NULL AS thoughts`;
+  const tier = config ? await readConfig(target, "tier") : null;
+  if (tier === "stable") return "--to is stamped tier=stable — the record, which ingest-records.ts builds and a refresh never writes";
+  if (tier === "canary" || tier === "working" || !thoughts) return null;
+  const [{ n }] = await target<{ n: string }[]>`SELECT count(*)::text AS n FROM (SELECT 1 FROM thoughts LIMIT 1) t`;
+  if (n === "0") return null;
+  return `--to holds thoughts and ${tier === null ? "no tier stamp" : `tier=${tier}`} — a brain, not a tier a refresh made (stamp it canary or working in ob1_config to mean otherwise)`;
 }
 
 /** Whether pg_dump AND pg_restore exist and are new enough to read `serverMaj` — refresh needs both. */
@@ -303,12 +333,14 @@ export async function refresh(fromUrl: string, toUrl: string, tier: Tier): Promi
   let serverMaj: number;
   try {
     serverMaj = await serverMajor(src);
-    // The reset below drops --to's schema, so --to must not be the source. The
-    // loopback guard does not cover it — deploy/tier.sh sets OB1_ALLOW_REMOTE_DB,
-    // since from its container every database is remote — and a typo'd --to is
-    // most often stable itself, under the name of the service beside it.
-    const [a, b] = [await databaseIdentity(src), await databaseIdentity(target)];
-    if (a === b) throw new Error(`--from and --to name the same database (${b.split("/").pop()} on one server). Refusing: --refresh drops the target's schema.`);
+    // The reset below drops --to's schema, so --to must be neither the source
+    // nor the record. The loopback guard covers neither — deploy/tier.sh sets
+    // OB1_ALLOW_REMOTE_DB, since from its container every database is remote —
+    // and the likeliest slips are both: stable under the other name it answers
+    // to on the network, and --from and --to the wrong way round.
+    if (await sameDatabase(src, target)) throw new Error(`--from and --to name the same database. Refusing: --refresh drops the target's schema.`);
+    const refusal = await targetRefusal(target);
+    if (refusal) throw new Error(`${refusal}. Are --from and --to the wrong way round? Refusing: --refresh drops the target's schema.`);
   } finally {
     await src.close();
     await target.close();
