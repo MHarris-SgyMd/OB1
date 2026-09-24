@@ -89,14 +89,27 @@
  * are held identical to the character (the text pins at the end); and every
  * answer of /search carries the request's CORS headers under an allowlist.
  *
+ * SMD-2079 widens that last arm to the gateway: json() built the CORS headers
+ * from the request only when handed `req`, and forty-five of the file's
+ * sixty-two answers were not, so under an allowlist a browser could read
+ * /search and no other route's page. The headers are set once now, on the way
+ * out of the main handler, and an unlisted origin gets no allow-origin header
+ * (the literal `null` matched an opaque origin's own). The block drives a page
+ * from /recent and /thoughts, a 404, an unlisted origin, the preflight 204, the
+ * 401, the 429 (Retry-After exposed), the default `*` through a second instance
+ * of the module loaded with no allowlist, and the ingest proxy's timeout
+ * through the fetch stub.
+ *
  * The files are imported as modules — each exports Bun's entry shape, and its
  * default export's `fetch` is the handler driven here (SMD-1799) — under the
  * loader extensions/test-auth.ts uses for Deno's specifiers; every server
  * imports compat/supabase-sql itself since SMD-1798 (the loader resolved a
  * supabase-js import to it for the two that did not, until then). The model provider is
  * stubbed — a unit vector keyed off the text, so the vector a writer stored is
- * recognisable — and everything below the tool or route boundary is real;
- * test-auth.ts is where the servers start under bun for real.
+ * recognisable — as are Readwise's book lookup and smart-ingest's execute
+ * (SMD-2079, the ingest proxy's upstream), and everything below the tool or
+ * route boundary is real; test-auth.ts is where the servers start under bun
+ * for real.
  *
  * The database is the fork's migrations plus three vendored sidecars the
  * writers assume: schemas/enhanced-thoughts (the columns the APIs write
@@ -961,6 +974,13 @@ try {
     && /\bRetry-After\b/.test(String(limited.headers.get("access-control-expose-headers"))),
     `the 429 carries the request's CORS headers beside Retry-After and its JSON content type, and exposes Retry-After to the browser (${limited?.status} ${limited ? allow(limited) : "-"} / ${limited?.headers.get("retry-after")} / ${limited?.headers.get("content-type")} / ${limited?.headers.get("access-control-expose-headers")})`);
   delete process.env.CORS_ALLOWED_ORIGINS;
+  // The default, no allowlist: `*` to any origin — the backward-compatibility promise the README's table makes, which
+  // nothing drove while the block ran under an allowlist (review pass 3). A second instance of the module, loaded with
+  // the variable unset; the query string keeps Bun's module cache from handing back the first.
+  const open = (await import(join(ROOT, F) + "?no-allowlist")) as { default?: { fetch?: Handler } };
+  const star = await send(open.default!.fetch!, "GET", "/health", undefined, KEY, "https://elsewhere.test");
+  assert(star.status === 200 && allow(star) === "*",
+    `with no allowlist the gateway answers Access-Control-Allow-Origin: * to any origin — the README's default (${star.status} ${allow(star)})`);
 }
 
 // ── recipes/repo-learning-coach ──────────────────────────────────────────────

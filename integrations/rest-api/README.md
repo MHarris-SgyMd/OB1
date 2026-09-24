@@ -10,7 +10,7 @@
 
 Provides a standard REST API alongside the MCP server for clients that cannot use the Model Context Protocol. This includes browser-based dashboards, ChatGPT Actions, Gemini extensions, webhook receivers, and any HTTP client.
 
-All endpoints share the same authentication, sensitivity filtering, and enrichment pipeline as the MCP server. CORS is enabled for browser and Electron clients, and every response carries the headers.
+All endpoints share the same authentication, sensitivity filtering, and enrichment pipeline as the MCP server. CORS is enabled for browser and Electron clients, and every response carries the request's CORS headers.
 
 **Available endpoints:**
 
@@ -150,7 +150,11 @@ of the gateway's sixty-two answers, every other route's `200` among them, said
 `Access-Control-Allow-Origin: null` under an allowlist, so a browser dashboard
 could read `POST /search` and not `GET /recent`, `/thoughts` or `/stats`; the
 allowlist below broke the clients it was set for. `Retry-After` is exposed,
-so a browser can read the `429`'s wait.
+so a browser can read the `429`'s wait; the preflight `204` carries no
+`Content-Type`. This is the one gateway on the fork that reads the
+allowlist: its siblings (`open-brain-rest`, `enhanced-mcp`,
+`agent-memory-api`, `server-portable`) answer `*` to every origin
+(SMD-2113).
 
 **Warning:** `*` combined with write methods (`POST`, `PUT`, `PATCH`,
 `DELETE`) is unsafe for production. Any webpage a victim visits can
@@ -217,9 +221,10 @@ The knowledge graph schema (`schemas/knowledge-graph`) must be applied first. Wi
 
 **CORS errors from browser**
 If `CORS_ALLOWED_ORIGINS` is unset, the gateway responds with `*` for backward
-compatibility. If it is set, confirm your browser's `Origin` header matches
-one of the allowlisted origins exactly (scheme + host + port). Also check
-that your Supabase project allows Edge Function CORS headers.
+compatibility. If it is set, an unlisted `Origin` gets no
+`Access-Control-Allow-Origin` header at all, so the browser reports that
+header as missing: confirm the page's `Origin` matches one of the allowlisted
+origins exactly (scheme + host + port, no trailing slash, same case).
 
 **429 rate_limited**
 Requests from a single key exceeded `RATE_LIMIT_PER_MIN` (default 100) in a
