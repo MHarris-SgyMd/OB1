@@ -16,7 +16,7 @@
  * printed hook carries no key; --check tells a capture key from a wider one.
  */
 
-import { mkdtempSync, readFileSync, writeFileSync, existsSync, readdirSync, rmSync, mkdirSync, unlinkSync, utimesSync, renameSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync, existsSync, readdirSync, rmSync, mkdirSync, unlinkSync, utimesSync, renameSync, symlinkSync } from "node:fs";
 import { join, dirname, basename } from "node:path";
 import { tmpdir } from "node:os";
 import { spawn } from "node:child_process";
@@ -120,6 +120,7 @@ const fake = Bun.serve({
         refusedOnce.add(content);
         return sse({ result: { isError: true, content: [{ type: "text", text: `Refused: derived_from[${at[1]}] names no thought. Each entry must be an existing thought id (the ID: line of a search result).` }] } });
       }
+      if (/\[\[slow-down\]\]/.test(content)) { await sleep(2500); return sse({ result: { isError: true, content: [{ type: "text", text: "Error: Failed to connect" }] } }); }
       if (/\[\[slow\]\]/.test(content)) await sleep(2500);
       const id = uuid(1000 + n);
       if (/\[\[embedding-failed\]\]/.test(content)) return sse({ result: { isError: true, content: [{ type: "text", text: `Thought saved (id ${id}) but its embedding failed to attach: stub. It will NOT appear in semantic search until re-captured.` }] } });
@@ -1110,8 +1111,9 @@ console.log("\n[6c] A checkpoint's child still posting when the session's end po
   writeFileSync(join(holder, `${Date.now() - 5000}-0-aaaa-s_dot.json`), JSON.stringify({ session_id: "s_dot" })); // the stranger's, older
   writeFileSync(join(holder, `${Date.now() + 5000}-0-aaaa-s_dot.json`), JSON.stringify({ session_id: "s_dot" })); // the stranger's, newer
   writeFileSync(join(holder, `${Date.now() + 6000}-0-aaaa-s_dot.json`), "{"); // unreadable, newer
-  assert(aheadOf("s.dot", dotMine).length === 1 && aheadOf("s_dot", dotMine).length === 2 && landedBefore("s_dot", dotMine)?.id === uuid(65) && newerInFlight("s.dot", dotMine) === false && newerInFlight("s_dot", dotMine) === true,
-    "in a live child's hands the stranger's older payloads are not ahead of this session — the unreadable one is, the safe side — and its newer one is not newer in flight, nor is the unreadable one, the safe side; for their own session the unposted older ones are ahead, the landed one is not (its bookkeeping alone is outstanding, and the pointer reads it), all but the unreadable count as newer");
+  symlinkSync(join(holder, "nowhere"), join(holder, `${Date.now() - 7000}-0-aaaa-s_dot.json`)); // listed, gone on the read: a claim that has just cleared (ninth review pass)
+  assert(aheadOf("s.dot", dotMine).length === 1 && aheadOf("s_dot", dotMine).length === 3 && landedBefore("s_dot", dotMine)?.id === uuid(65) && newerInFlight("s.dot", dotMine) === false && newerInFlight("s_dot", dotMine) === true,
+    "in a live child's hands the stranger's older payloads are not ahead of this session — the unreadable one is, the safe side; one gone on the read is not — and its newer one is not newer in flight, nor is the unreadable one, the safe side; for their own session the older ones are ahead, landed or not (a landed one is still writing its state, and a post past it would race that write), all but the unreadable count as newer");
   rmSync(holder, { recursive: true, force: true });
   // Two children finishing one session's owed bookkeepings at once write the
   // state together: each writes beside under its own pid and renames, so
@@ -1142,6 +1144,7 @@ console.log("\n[6c] A checkpoint's child still posting when the session's end po
   const idEndAside = join(TMP, basename(idEnd.payloadPath));
   renameSync(idEnd.payloadPath, idEndAside);
   mkdirSync(join(STATE, "inflight", String(process.pid), `${basename(idO.payloadPath)}.${process.pid}.tmp`), { recursive: true }); // the temp path, taken
+  writeFileSync(join(STATE, "s-idless.json"), JSON.stringify({ thought_id: uuid(50), fingerprint: "old", captured_at: iso(Date.now() - 3_600_000), summary_at: iso(Date.now() - 3_600_000) })); // an end an hour ago: the run's landing is the newer, by its time (ninth review pass: the moment had no tooth)
   const idRunning = postPending(cfg);
   await sleep(600);
   renameSync(idEndAside, idEnd.payloadPath); // the end reaches pending/ while the run posts the slow one
@@ -1180,6 +1183,26 @@ console.log("\n[6c] A checkpoint's child still posting when the session's end po
   writeFileSync(join(deadDir, `${Date.now()}-0-aaaa-s-tmp.json.${gone0}.tmp`), "{");
   await postPending(cfg);
   assert(!existsSync(deadDir) && readdirSync(join(STATE, "pending")).length === 0, "a dead child's half-written temp file is unlinked by the sweep, not swept into pending/");
+  // The follow-up's "newest" of a session never regresses across rounds: the
+  // newest, taken in the main claim, posts slowly and fails; an older payload
+  // reaching pending/ meanwhile is followed up — and is obsolete beside it,
+  // not the session's newest (ninth review pass: a fresh set per round named
+  // it newest and it posted).
+  rmSync(STATE, { recursive: true, force: true });
+  received.length = 0;
+  const slowDownT = join(TMP, "slow-down.jsonl");
+  writeFileSync(slowDownT, [user("[[slow-down]] wrap up", { origin: { kind: "human" } }), assistant([{ type: "text", text: "done" }])].join("\n"));
+  const rgC = prepare({ session_id: "s-regress", transcript_path: downT, cwd: "/repo/proj", hook_event_name: "PreCompact", trigger: "auto" }); await sleep(3);
+  const rgM = prepare({ session_id: "s-regress", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "PreCompact", trigger: "manual" }); await sleep(3);
+  const rgE = prepare({ session_id: "s-regress", transcript_path: slowDownT, cwd: "/repo/proj", hook_event_name: "SessionEnd" });
+  const rgMAside = join(TMP, basename(rgM.payloadPath));
+  renameSync(rgM.payloadPath, rgMAside);
+  const rgRunning = postPending(cfg);
+  await sleep(600); // the checkpoint is obsolete beside the end; the end is posting, slowly, and will fail
+  renameSync(rgMAside, rgM.payloadPath);
+  const rgRun = await rgRunning;
+  assert(rgRun.find((x) => x.file === rgC.payloadPath)?.obsolete && !rgRun.find((x) => x.file === rgE.payloadPath)?.ok && rgRun.find((x) => x.file === rgM.payloadPath)?.obsolete && received.length === 1 && existsSync(rgE.payloadPath) && !existsSync(rgM.payloadPath),
+    `the middle payload followed up is obsolete beside the failed newest, not posted as the newest (${rgRun.map((x) => x.ok ? "ok" : x.obsolete ? "obsolete" : "failed").join(", ")}; ${received.length} post(s))`);
   // A payload that steps aside goes back under pending/ AT ONCE, not at the
   // run's end: while this run goes on posting another session's slow payload,
   // the landing child's follow-up must be able to see it, and a newer payload

@@ -157,7 +157,7 @@ function sweepInflight() {
     let age = Infinity;
     try { age = Date.now() - statSync(dir).mtimeMs; } catch { continue; }
     if (isAlive(pid) && age < CLAIM_MAX_AGE_MS) continue;
-    release(dir);
+    release(dir, { keepTemps: isAlive(pid) }); // a live child stalled past the age is still writing: its temp is its own (ninth review pass)
   }
 }
 /**
@@ -167,8 +167,8 @@ function sweepInflight() {
  * then the directory goes. Spelled once for the sweep and a run's end
  * (SMD-2035's second boyscout).
  */
-function release(dir) {
-  try { for (const f of readdirSync(dir)) { try { if (f.endsWith(".json")) renameSync(join(dir, f), join(PENDING_DIR(), f)); else unlinkSync(join(dir, f)); } catch { /* a sibling swept it */ } } } catch { /* swept from under us: nothing left to return */ }
+function release(dir, { keepTemps = false } = {}) {
+  try { for (const f of readdirSync(dir)) { try { if (f.endsWith(".json")) renameSync(join(dir, f), join(PENDING_DIR(), f)); else if (!keepTemps) unlinkSync(join(dir, f)); } catch { /* a sibling swept it */ } } } catch { /* swept from under us: nothing left to return */ }
   try { rmdirSync(dir); } catch { /* not empty after all, or gone */ }
 }
 /**
@@ -195,7 +195,9 @@ function pruneDead() {
   // between its write and its rename — is nobody's once older than any run
   // lasts; the sweep reaches only the claim directories (seventh review pass).
   for (const dir of [STATE_DIR, PENDING_DIR()]) {
-    for (const f of readdirSync(dir)) {
+    let names = [];
+    try { names = readdirSync(dir); } catch { continue; } // removed under the run: nothing to prune there
+    for (const f of names) {
       if (!f.endsWith(".tmp")) continue;
       try { if (Date.now() - statSync(join(dir, f)).mtimeMs > CLAIM_MAX_AGE_MS) unlinkSync(join(dir, f)); } catch { /* gone */ }
     }
@@ -262,8 +264,7 @@ export function readState(sessionId) {
  */
 const writeJson = (p, obj) => {
   const tmp = `${p}.${process.pid}.tmp`;
-  writeFileSync(tmp, JSON.stringify(obj, null, 2) + "\n", { mode: 0o600 });
-  try { renameSync(tmp, p); } catch (e) { try { unlinkSync(tmp); } catch { /* gone */ } throw e; } // a rename that fails leaves no temp behind (seventh review pass: one per run, for as long as the fault lasted)
+  try { writeFileSync(tmp, JSON.stringify(obj, null, 2) + "\n", { mode: 0o600 }); renameSync(tmp, p); } catch (e) { try { unlinkSync(tmp); } catch { /* never made */ } throw e; } // a write or rename that fails leaves no temp behind (seventh and ninth review passes: one per run, for as long as the fault lasted)
 };
 function writeState(sessionId, state) {
   ensureDirs();
@@ -943,13 +944,14 @@ function recordedAfter(state, preparedAt) {
  * "a_b"), so the file says whose it is (seventh review pass: the sixth had
  * fixed one reader of five); and it says whether it has landed.
  */
-const payloadOf = (p) => { try { return JSON.parse(readFileSync(p.path, "utf8")) ?? undefined; } catch { return undefined; } };
+const payloadOf = (p) => { try { return JSON.parse(readFileSync(p.path, "utf8")) ?? undefined; } catch (e) { return e?.code === "ENOENT" ? null : undefined; } }; // null: gone between the listing and the read — a claim that has just cleared, nobody's (ninth review pass)
 /**
  * The claims a payload steps aside for: payloads of its session that another
- * LIVE child holds under inflight/<pid>/, OLDER than it — a name leads with
- * the millisecond it was prepared, so the names order them — and not yet
- * landed: one that carries its `captured_id` is over, only its bookkeeping
- * outstanding, and `landedBefore` reads it (eighth review pass). A
+ * LIVE child holds under inflight/<pid>/ and that are OLDER than it — a name
+ * leads with the millisecond it was prepared, so the names order them —
+ * landed or not: one that carries its `captured_id` is over but for its
+ * state write, and a sibling posting past it would write the state beside
+ * that write, in no order (eighth review pass let it, the ninth undid it). A
  * compaction's child still posting when the session's end spawned its own
  * (`/compact` then `/exit`; an auto-compaction on the last turn) left the
  * end's payload pointing at nothing — the checkpoint had not landed — so the
@@ -962,7 +964,7 @@ const payloadOf = (p) => { try { return JSON.parse(readFileSync(p.path, "utf8"))
 export const aheadOf = (sessionId, name) => sessionPayloads(sessionId, { pending: false }).filter((p) => {
   if (p.pid === process.pid || p.name.localeCompare(name) >= 0 || !isAlive(p.pid)) return false;
   const j = payloadOf(p);
-  return j === undefined || (j.session_id === sessionId && !j.captured_id); // unreadable: ahead, the safe side
+  return j === undefined || (j !== null && j.session_id === sessionId); // unreadable: ahead, the safe side; gone: not
 });
 /**
  * Whether a NEWER payload of the session is in another live child's hands:
@@ -983,8 +985,8 @@ export const newerInFlight = (sessionId, name) => sessionPayloads(sessionId, { p
 function landedPayloads(sessionId) {
   const out = [];
   for (const p of sessionPayloads(sessionId)) {
-    let j;
-    try { j = JSON.parse(readFileSync(p.path, "utf8")); } catch { continue; }
+    const j = payloadOf(p);
+    if (!j) continue;
     // The name's millisecond was written by the same clock as prepared_at: a
     // future one decides nothing either, and the payload ranks last — a clock
     // that ran ahead never puts it over the state (fifth review pass).
@@ -1079,7 +1081,6 @@ export async function postPending(cfg, own) {
     const done = new Set(outcomes.map((o) => o.file));
     const lists = [...clearedSessions].map((sid) => [sid, sessionPayloads(sid).filter((q) => q.pid === null && !done.has(q.path) && !bounced.has(q.path)).sort((x, y) => y.name.localeCompare(x.name))]);
     const next = [];
-    const named = new Set();
     for (let k = 0; next.length < room && lists.some(([, l]) => l.length > k); k++) {
       for (const [sid, l] of lists) {
         const p = l[k];
@@ -1091,7 +1092,8 @@ export async function postPending(cfg, own) {
         // to judge (sixth review pass — it was dropped as obsolete beside a
         // session it did not belong to).
         if (c.payload.session_id !== sid) { moveTo(c.here, PENDING_DIR()); bounced.add(p.path); continue; }
-        if (!named.has(sid)) { named.add(sid); newestOf.set(sid, p.path); }
+        // The session's newest, across rounds: a later round must not name an older payload newest when the newest was taken before and failed (ninth review pass).
+        if (!newestOf.has(sid) || basename(newestOf.get(sid)).localeCompare(p.name) < 0) newestOf.set(sid, p.path);
         next.push(c);
       }
     }
@@ -1220,20 +1222,20 @@ export async function postPending(cfg, own) {
       clearedSessions.add(payload.session_id);
       landedHere.set(payload.session_id, { id, ms: momentOf(payload.prepared_at, 0) });
       const note = [posted.note, lastResort].filter(Boolean).join("; ");
-      // The state is read AGAIN after the post: a sibling run may have landed a
-      // newer summary of the session meanwhile, and a judgement made before the
-      // post would move the state back to this older one (eighth review pass).
-      const stateIsNewerNow = stateIsNewer || recordedAfter(readState(payload.session_id), payload.prepared_at);
       // Bookkeeping, apart from the post: the id goes onto the payload first, so a
       // fault here leaves a file the next run finishes without posting twice. A
       // landed payload whose session already records a NEWER summary is finished
       // without moving the state back to it (third review pass). The ORDER is
-      // load-bearing: the state is written, then the claim is removed — a run
-      // taking back the payload it stepped aside with reads the state the
-      // moment the claim clears, and a claim cleared before the state was
-      // written would leave it pointerless (SMD-2035, second review pass).
+      // load-bearing: the id goes onto the file, the state is read AGAIN, then
+      // written, then the claim removed — a sibling's end steps aside until the
+      // claim clears, so its state write follows this one; and a sibling that
+      // landed a newer summary meanwhile must not be moved back to this one
+      // (eighth review pass of SMD-1298). The state is read after the id write:
+      // read before it, a stall between the two let a sibling's state, written
+      // meanwhile, be overwritten by this older one (ninth review pass).
       try {
         if (!payload.captured_id) writeJson(here, { ...payload, captured_id: id, captured_note: note });
+        const stateIsNewerNow = stateIsNewer || recordedAfter(readState(payload.session_id), payload.prepared_at);
         // summary_at never runs ahead of the clock that will read it back.
         const summaryAt = payload.prepared_at && Date.parse(payload.prepared_at) <= Date.now() ? payload.prepared_at : new Date().toISOString();
         if (!stateIsNewerNow) writeState(payload.session_id, { thought_id: id, fingerprint: payload.fingerprint, captured_at: new Date().toISOString(), summary_at: summaryAt, harness: payload.harness, prompts: payload.prompts, sources: (payload.derived_from ?? []).length });
