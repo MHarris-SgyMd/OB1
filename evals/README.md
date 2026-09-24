@@ -4917,9 +4917,10 @@ there, its p95 is its maximum:
 The warm-up loaded nothing, and no Ollama model was evicted or reloaded: both
 of its runners (`llama-server`) kept their pids and start times across the run.
 The tier is its own process, outside the scheduler `OLLAMA_MAX_LOADED_MODELS`
-governs; its footprint was 942–953 MB over two runs (macOS `footprint`, which counts the
-compressed pages `ps`'s resident set leaves out: an earlier run's `ps` read
-536–622 MB), with 12.2 → 12.1 GB free. The cost is contention, not memory. What
+governs; its footprint was 944 → 953 MB with 12.2 → 12.1 GB free in the table's
+run, 942–953 MB over two (macOS `footprint`, which counts the compressed pages
+`ps`'s resident set leaves out: an earlier run's `ps` read 536–622 MB). The
+cost is contention, not memory. What
 this does not test, and the run says so: past a warm-up load, no model load was
 requested and no memory pressure applied — Ollama evicts on a load, which the
 tier never makes — so it shows the tier causes no eviction by being there, not
@@ -4940,9 +4941,8 @@ SMD-1935's rule: a strong label), `positive` (tools, projects, organizations in
 with a window of the first thought naming it, sent through the client and
 nothing else, under its own thought's metadata (so an egress policy's
 source/type/topic terms apply row by row, a refused row counted and left out);
-at most `--per-cohort` (60) of each,
-the most mentioned. The
-dogfood brain's Postgres is not published, so the run is a one-off container
+at most `--per-cohort` (60) of each, the most mentioned. The dogfood brain's
+Postgres is not published, so the run is a one-off container
 on the stack's network, the tier on the host (reached through the podman
 machine's `host.containers.internal`):
 

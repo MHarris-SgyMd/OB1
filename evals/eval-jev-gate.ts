@@ -126,11 +126,14 @@ function auroc(pos: number[], neg: number[]): number {
 }
 const pct = (n: number, d: number) => (d ? `${((100 * n) / d).toFixed(1)}%` : "—");
 const quantile = (xs: number[], q: number) => [...xs].sort((a, b) => a - b)[Math.min(xs.length - 1, Math.floor(q * xs.length))];
+/** A number to `digits`, or "—" for an empty cohort's quantile or AUROC, as pct prints an empty rate. */
+const fixed = (x: number | undefined, digits: number) => (x === undefined || Number.isNaN(x) ? "—" : x.toFixed(digits));
 
 const all = await candidates();
 // Each window leaves under its own thought's metadata, so a source/type/topic
 // term the egress policy names applies to it (jevDecideMany: one subject a call);
-// a row the policy refuses is counted and left out, not the end of the run.
+// a row the policy refuses is counted and left out, not the end of the run —
+// on either call, so a row refused on the second has sent its window once.
 const subject = (c: Candidate) => ({ kind: "decision" as const, actor: "eval-jev-gate", metadata: c.metadata });
 const t0 = performance.now();
 // One decision per request so the per-decision latency is measured, not a batch's share.
@@ -157,17 +160,17 @@ const rejects = (v: { p: number | null; abstained: boolean }) => v.abstained || 
 /** The choice arm rejects as the binary arm does: a number, a generic word, or an abstention. */
 const CHOICE_REJECTS = ["number", "generic", INSUFFICIENT_EVIDENCE];
 
-console.log(`\n${all.length} candidates from the brain${refused ? `, ${refused} refused by the egress policy and left out` : ""} (${bad.length} bad, ${positive.length} positive, ${typedLayer.length} person/place); tier ${cfg!.endpoint.base}; ${(wall / 1000).toFixed(1)} s\n`);
+console.log(`\n${all.length} candidates from the brain${refused ? `, ${refused} refused by the egress policy (on either call) and left out` : ""} (${bad.length} bad, ${positive.length} positive, ${typedLayer.length} person/place); tier ${cfg!.endpoint.base}; ${(wall / 1000).toFixed(1)} s\n`);
 console.log("| arm | rejects bad (recall) | rejects positive (false rejections, weak label) |");
 console.log("| --- | --- | --- |");
 console.log(`| baseline ^[0-9.:]+$ | ${pct(bad.filter((x) => baselineRejects(x.c)).length, bad.length)} | ${pct(positive.filter((x) => baselineRejects(x.c)).length, positive.length)} |`);
 console.log(`| tier, binary validity (p < 0.5 or abstained) | ${pct(bad.filter((x) => rejects(x.v)).length, bad.length)} | ${pct(positive.filter((x) => rejects(x.v)).length, positive.length)} |`);
 console.log(`| tier, choice → number, generic or abstained | ${pct(bad.filter((x) => CHOICE_REJECTS.includes(x.t.selected)).length, bad.length)} | ${pct(positive.filter((x) => CHOICE_REJECTS.includes(x.t.selected)).length, positive.length)} |`);
 const pv = (xs: typeof bad) => xs.map((x) => x.v.p ?? 0);
-console.log(`\nbinary p_true: AUROC positive vs bad ${auroc(pv(positive), pv(bad)).toFixed(3)}; median bad ${quantile(pv(bad), 0.5)?.toFixed(3)}, median positive ${quantile(pv(positive), 0.5)?.toFixed(3)}; abstained ${pct(valid.filter((v) => v.abstained).length, valid.length)}`);
+console.log(`\nbinary p_true: AUROC positive vs bad ${fixed(auroc(pv(positive), pv(bad)), 3)}; median bad ${fixed(quantile(pv(bad), 0.5), 3)}, median positive ${fixed(quantile(pv(positive), 0.5), 3)}; abstained ${pct(valid.filter((v) => v.abstained).length, valid.length)}`);
 console.log(`choice: positives typed as the extractor typed them ${pct(positive.filter((x) => x.t.selected === x.c.type).length, positive.length)}; bad typed number ${pct(bad.filter((x) => x.t.selected === "number").length, bad.length)}`);
 const ms = valid.map((v) => v.ms);
-console.log(`latency, one binary decision per request: p50 ${quantile(ms, 0.5)?.toFixed(0)} ms, p95 ${quantile(ms, 0.95)?.toFixed(0)} ms`);
+console.log(`latency, one binary decision per request: p50 ${fixed(quantile(ms, 0.5), 0)} ms, p95 ${fixed(quantile(ms, 0.95), 0)} ms`);
 
 console.log("\nperson/place layer — the extractor's type, the tier's choice, P(named):");
 for (const x of typedLayer) console.log(`  ${x.c.type.padEnd(6)} ${x.c.name.padEnd(28).slice(0, 28)} → ${x.t.selected.padEnd(12)} ${x.v.p === null ? "—" : x.v.p.toFixed(2)}`);
