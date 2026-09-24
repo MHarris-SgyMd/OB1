@@ -263,7 +263,12 @@ export const RUNAWAY_REPEATS = 3;
  * on, not ending — which is the abort. The array closing disarms it: a loop
  * that ends with its array, whatever follows in the other array, is an answer
  * parseExtraction folds, and the verdict does not depend on where the
- * provider split its frames (sixth and seventh passes).
+ * provider split its frames (sixth and seventh passes); a later array's own
+ * loop arms it anew (eighth pass). An "item" that turns out to hold an array
+ * of objects was the answer itself — an unbalanced `[` in a preamble made it
+ * one — and the reading re-roots to the object inside (eighth pass).
+ * `closedAt` is where in the text fed the answer closed, so a reader can cut
+ * what a frame carried after it.
  */
 export class RunawayDetector {
   private readonly stack: ("{" | "[")[] = [];
@@ -275,17 +280,22 @@ export class RunawayDetector {
   private readonly counts = new Map<string, number>();
   /** Items read so far, the one that fired included. */
   items = 0;
-  /** True once the outermost container has closed with an item read: the answer is complete. */
+  /** True once the outermost container has closed with an item read: the answer is complete. Final — a second object opening after it is not the answer (eighth pass). */
   closed = false;
-  /** The item that reached RUNAWAY_REPEATS: its key, the item count then, and the stack depth of the array holding it; null while none has. */
+  /** Characters fed up to and including the brace that closed the answer; -1 while open. */
+  closedAt = -1;
+  private consumed = 0;
+  /** The first item that reached RUNAWAY_REPEATS — or, once `runaway`, the one whose loop went on: its key, the item count then, and the stack depth of the array holding it. Kept; null while none has. */
   fired: { key: string; atItem: number; arrayLevel: number } | null = null;
+  /** The fire still in force — cleared when its array closes, set anew by a later array's own third copy. */
+  private armed: { key: string; atItem: number; arrayLevel: number } | null = null;
   /** True once an item followed the third copy inside the same array: the abort. */
   runaway = false;
-  private disarmed = false;
 
-  /** Feed the next piece of the answer. The repeated item's key when the answer became a runaway on THIS piece — the first time only; null otherwise. */
-  feed(piece: string): string | null {
-    let firedNow: string | null = null;
+  /** Feed the next piece of the answer; the verdict is the state — `fired`, `runaway`, `closed`, `items`. */
+  feed(piece: string): void {
+    const offset = this.consumed;
+    this.consumed += piece.length;
     // Where the current item's text begins in THIS piece — one slice per item
     // per piece rather than a concatenation per character (fifth review pass).
     let start = this.itemLevel >= 0 ? 0 : -1;
@@ -295,7 +305,7 @@ export class RunawayDetector {
         // Outside every container nothing is a string: a stray quote in a
         // preamble ("Here is the "answer:") must not silence the reading of
         // everything after it (fifth review pass).
-        if (c === "{" || c === "[") { this.stack.push(c); this.closed = false; }
+        if (c === "{" || c === "[") this.stack.push(c);
         continue;
       }
       if (this.inString) {
@@ -306,16 +316,22 @@ export class RunawayDetector {
       }
       if (c === '"') { this.inString = true; continue; }
       if (c === "{" || c === "[") {
-        // An object opening directly inside an array is an item, at any depth.
-        if (c === "{" && this.itemLevel < 0 && this.stack[this.stack.length - 1] === "[") { this.itemLevel = this.stack.length + 1; this.item = ""; start = i; }
+        // An object opening directly inside an array is an item, at any depth —
+        // and one opening inside an array INSIDE the current item says that
+        // "item" was the answer object (an unbalanced `[` in a preamble put it
+        // inside an array): the reading re-roots to this one (eighth pass).
+        if (c === "{" && this.stack[this.stack.length - 1] === "[") { this.itemLevel = this.stack.length + 1; this.item = ""; start = i; }
         this.stack.push(c);
         continue;
       }
       if (c === "}" || c === "]") {
         this.stack.pop();
-        if (this.stack.length === 0 && this.items > 0) this.closed = true;
-        // The array that held the third copy has closed: the loop ended with it.
-        if (this.fired !== null && this.stack.length < this.fired.arrayLevel) this.disarmed = true;
+        if (this.stack.length === 0 && this.items > 0 && !this.closed) { this.closed = true; this.closedAt = offset + i + 1; }
+        // The array that held the third copy has closed: the loop ended with it,
+        // and the detector is armed again for a loop in a later array (eighth
+        // review pass: the first fire was final, so a relation repeated three
+        // times after a folded entity triplet was never seen).
+        if (this.armed !== null && !this.runaway && this.stack.length < this.armed.arrayLevel) this.armed = null;
         if (this.itemLevel < 0 || this.stack.length !== this.itemLevel - 1) continue;
         const key = itemKey(this.item + piece.slice(start, i + 1));
         this.item = "";
@@ -323,14 +339,13 @@ export class RunawayDetector {
         this.itemLevel = -1;
         if (key === null) continue;
         this.items++;
-        if (this.fired !== null && !this.disarmed && this.items > this.fired.atItem && this.stack.length === this.fired.arrayLevel) this.runaway = true;
+        if (this.armed !== null && this.items > this.armed.atItem && this.stack.length === this.armed.arrayLevel) { this.runaway = true; this.fired = this.armed; }
         const n = (this.counts.get(key) ?? 0) + 1;
         this.counts.set(key, n);
-        if (n >= RUNAWAY_REPEATS && this.fired === null) { this.fired = { key, atItem: this.items, arrayLevel: this.stack.length }; firedNow = key; }
+        if (n >= RUNAWAY_REPEATS && this.armed === null) { this.armed = { key, atItem: this.items, arrayLevel: this.stack.length }; this.fired ??= this.armed; }
       }
     }
     if (start >= 0) this.item += piece.slice(start);
-    return firedNow;
   }
 }
 
@@ -673,36 +688,39 @@ async function extractOnce(text: string, cfg: EmbedConfig, timeoutMs: number, pa
   return { ...parseExtraction(answer), runaway };
 }
 
+type StreamVerdict = { kind: "end" } | { kind: "repeated"; key: string } | null;
+type StreamedBody = { kind: "sse"; content: string; finish: string | undefined; repeated: string | null } | { kind: "json"; text: string };
 /**
  * A chat completion's body, read as it arrives. Sniffed, not trusted to its
  * content-type (sixth review pass): a body opening with `{` is a whole JSON
  * answer — a provider that ignores `stream` — returned as text to be read as
- * one; anything else is `text/event-stream`, reassembled: the `data:` frames'
- * `choices[0].delta.content` concatenated, the last `finish_reason` kept,
- * comments and frames that are not JSON passed over. The read ENDS — the
- * reader cancelled, so a gateway holding the connection open does not hold
- * the call to its deadline — at `[DONE]`, at a frame carrying `finish_reason`,
- * or when the detector says the answer's outermost container has closed
- * (Ollama sends its finish in a frame of its own, after the content; sixth
- * review pass). Every piece of content goes through the detector, and the
- * detector's `runaway` — an item after the third copy inside the same array,
- * the loop going on — is the abort: the reader is cancelled (the connection
- * closes, Ollama stops generating) and the repeated item's key returned. An
- * answer that closes or finishes after its third copy, or goes on in its
- * OTHER array, is complete, not a runaway: parseExtraction folds the copies,
- * and the verdict is the same however the provider split the frames (fifth
- * to seventh passes). A stream that ends with content but none of the three
- * end signs is a socket that closed mid-answer — thrown, so the worker
+ * one; anything else is `text/event-stream`, reassembled by the grammar:
+ * lines end at `\n`, `\r\n` or a lone `\r`; the `data:` lines up to a blank
+ * line are one event, joined by `\n` (eighth pass); comments and events that
+ * are not JSON are passed over; the events' `choices[0].delta.content` is
+ * concatenated and the last `finish_reason` kept. The read ENDS — the reader
+ * cancelled, so a gateway holding the connection open does not hold the call
+ * to its deadline — at `[DONE]`, at an event carrying a non-empty
+ * `finish_reason`, or when the detector says the answer's outermost container
+ * has closed (Ollama sends its finish in an event of its own; a frame that
+ * carries more after the closing brace is cut there). Every piece of content
+ * goes through the detector, and the detector's `runaway` — an item after the
+ * third copy inside the same array, the loop going on — is the abort, judged
+ * BEFORE the close so the verdict is the detector's whatever the split: the
+ * reader is cancelled (the connection closes, Ollama stops generating) and the
+ * repeated item's key returned. An answer that closes or finishes after its
+ * third copy, or goes on in its other array, is complete: parseExtraction
+ * folds the copies (fifth to eighth passes). A stream that ends with content
+ * but no end sign is a socket that closed mid-answer — thrown, so the worker
  * classifies it (transient) — unless what arrived is whole JSON, which is the
- * answer (sixth pass: a provider omitting the terminal marker stalled the
- * pass one row at a time); one that ends with no frame at all is an empty
- * answer, thrown as that — the row's, not the connection's (seventh pass).
- * Lines end at `\n`, `\r\n` or a lone `\r`, as the SSE grammar allows. A frame
- * that is the provider's error (`data: {"error": …}`) throws with its message
- * and HTTP-shaped code, the reader cancelled on the way out.
+ * answer; one that ends with no content and at most the end marker is the
+ * provider's empty answer, thrown as that — the row's, not the connection's
+ * (seventh and eighth passes). An event that is the provider's error (`data:
+ * {"error": …}`) throws with its message and HTTP-shaped code, the reader
+ * cancelled on the way out. Assumed: the event that finishes the answer is
+ * the last with content — the OpenAI shape, Ollama's too; a layer sending
+ * content after its finish is read short (named, not handled).
  */
-type StreamVerdict = { kind: "end" } | { kind: "repeated"; key: string } | null;
-type StreamedBody = { kind: "sse"; content: string; finish: string | undefined; repeated: string | null } | { kind: "json"; text: string };
 async function readStreamedAnswer(body: ReadableStream<Uint8Array>, detector: RunawayDetector, base: string): Promise<StreamedBody> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
@@ -711,13 +729,11 @@ async function readStreamedAnswer(body: ReadableStream<Uint8Array>, detector: Ru
   let finish: string | undefined;
   let kind: "sse" | "json" | undefined;
   let frames = 0;
-  /** The frame's verdict: the end, a repeated item's key to abort on, or null to go on. */
-  const take = (line: string): StreamVerdict => {
-    if (!line.startsWith("data:")) return null;
-    const data = line.slice(5).trim();
-    if (data === "[DONE]") return { kind: "end" };
+  /** An event's verdict: the end, a repeated item's key to abort on, or null to go on. */
+  const take = (data: string): StreamVerdict => {
     if (!data) return null;
     frames++;
+    if (data === "[DONE]") return { kind: "end" };
     let frame: { choices?: [{ delta?: { content?: unknown }; finish_reason?: unknown }]; error?: unknown };
     try { frame = JSON.parse(data); } catch { return null; }
     // `"error": null` beside the choices is no error (fourth review pass).
@@ -745,14 +761,29 @@ async function readStreamedAnswer(body: ReadableStream<Uint8Array>, detector: Ru
     if (typeof choice?.finish_reason === "string" && choice.finish_reason) { finish = choice.finish_reason; return { kind: "end" }; }
     if (!piece) return null;
     detector.feed(piece);
-    if (detector.closed) return { kind: "end" };
-    return detector.runaway && detector.fired !== null ? { kind: "repeated", key: detector.fired.key } : null;
+    if (detector.runaway && detector.fired !== null) return { kind: "repeated", key: detector.fired.key };
+    if (!detector.closed) return null;
+    content = content.slice(0, detector.closedAt);
+    return { kind: "end" };
   };
+  // The `data:` lines of the event in hand, dispatched at the blank line that ends it.
+  const event: string[] = [];
+  const line = (text: string): StreamVerdict => {
+    if (text !== "") {
+      if (text.startsWith("data:")) event.push(text.slice(5).replace(/^ /, ""));
+      return null;
+    }
+    if (event.length === 0) return null;
+    const data = event.join("\n").trim();
+    event.length = 0;
+    return take(data);
+  };
+  let verdict: StreamVerdict = null;
   try {
-    for (;;) {
+    outer: for (;;) {
       const { done, value } = await reader.read();
       // Line ends normalised as they land: a `\r` split from its `\n` by the
-      // chunk boundary makes one empty line, which is nothing (seventh pass).
+      // chunk boundary makes one empty line, which ends an event or is nothing.
       buffer += (done ? decoder.decode() : decoder.decode(value, { stream: true })).replace(/\r\n?/g, "\n");
       if (kind === undefined) {
         const head = buffer.trimStart();
@@ -763,36 +794,38 @@ async function readStreamedAnswer(body: ReadableStream<Uint8Array>, detector: Ru
         if (done) return { kind, text: buffer };
         continue;
       }
-      // One slice per read, however many frames it carried (first review pass).
+      // One slice per read, however many lines it carried (first review pass).
       let from = 0;
       let nl: number;
       while ((nl = buffer.indexOf("\n", from)) >= 0) {
-        const line = buffer.slice(from, nl);
+        const v = line(buffer.slice(from, nl));
         from = nl + 1;
-        const verdict = take(line);
-        if (verdict !== null) {
-          await reader.cancel().catch(() => {});
-          return { kind: "sse", content, finish, repeated: verdict.kind === "repeated" ? verdict.key : null };
-        }
+        if (v !== null) { verdict = v; break outer; }
       }
       buffer = buffer.slice(from);
       if (done) break;
     }
   } catch (e) {
-    // A throw from a frame (the provider's error) leaves by here: the reader
+    // A throw from an event (the provider's error) leaves by here: the reader
     // is cancelled so the connection closes now, not at the deadline (third
     // review pass). A throw from read() itself — the deadline — has no
     // connection left to close, and cancel() on it is a no-op.
     await reader.cancel().catch(() => {});
     throw e;
   }
-  // A last frame without its newline; then the end, with or without an end sign.
-  const verdict = buffer ? take(buffer) : null;
+  if (verdict !== null) {
+    // An end sign or the runaway mid-stream: the connection closes now.
+    await reader.cancel().catch(() => {});
+  } else {
+    // The stream ended: a last line without its newline, then the event in hand.
+    if (buffer) line(buffer);
+    verdict = line("");
+  }
   if (verdict?.kind === "repeated") return { kind: "sse", content, finish, repeated: verdict.key };
+  if (!content && frames <= (verdict?.kind === "end" ? 1 : 0)) {
+    throw new Error(`Extraction stream from ${base} was empty: no answer in ${frames} frame(s)`);
+  }
   if (verdict === null && !isWholeJson(content)) {
-    // No frame at all is the provider's answer — empty — and the row's failure
-    // to record; content that stopped short is the connection's (seventh pass).
-    if (frames === 0) throw new Error(`Extraction stream from ${base} was empty: no frame and no JSON in ${buffer.length + content.length} characters`);
     throw new Error(`Extraction stream from ${base} closed mid-answer: the socket closed after ${content.length} characters with no finish_reason — not an answer`);
   }
   return { kind: "sse", content, finish, repeated: null };

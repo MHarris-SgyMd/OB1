@@ -422,7 +422,7 @@ console.log("\n[8c] A streamed answer is a runaway at the third copy of one item
   /** Feed `text` in pieces of `step` characters; what fired, and on which item, or null. */
   const fires = (text: string, step = text.length) => {
     const d = new RunawayDetector();
-    for (let i = 0; i < text.length; i += step) { const k = d.feed(text.slice(i, i + step)); if (k !== null) return { key: k, items: d.items }; }
+    for (let i = 0; i < text.length; i += step) { d.feed(text.slice(i, i + step)); if (d.fired !== null) return { key: d.fired.key, items: d.fired.atItem }; }
     return null;
   };
   assert(RUNAWAY_REPEATS === 3, "three copies of one item make a runaway — the rule chosen against the 31 captured tails (evals/README.md)");
@@ -451,9 +451,8 @@ console.log("\n[8c] A streamed answer is a runaway at the third copy of one item
   assert(preamble?.key === "e:tool loop" && preamble.items === 3, `a stray quote in a preamble before the JSON does not silence the reading — outside the object nothing is a string (fifth review pass) (${JSON.stringify(preamble)})`);
   const across = new RunawayDetector();
   const spread = answer([ent("Loop"), ent("Loop"), ent("Loop")]);
-  let firedAt: string | null = null;
-  for (let i = 0; i < spread.length; i += 11) { const k = across.feed(spread.slice(i, i + 11)); if (k !== null && firedAt === null) firedAt = k; }
-  assert(firedAt === "e:tool loop" && across.items === 3, "an item split across pieces is read whole — the scanner keeps the part that arrived and slices the rest");
+  for (let i = 0; i < spread.length; i += 11) across.feed(spread.slice(i, i + 11));
+  assert(across.fired?.key === "e:tool loop" && across.items === 3, "an item split across pieces is read whole — the scanner keeps the part that arrived and slices the rest");
   // Sixth review pass: an item is an object directly inside an array, at any
   // depth; the two kinds have their own key spaces; the detector says when the
   // answer has closed and on which item it fired.
@@ -475,6 +474,15 @@ console.log("\n[8c] A streamed answer is a runaway at the third copy of one item
   const goesOn = answer([ent("Loop"), ent("Loop"), ent("Loop"), ent("Anita", "person")], [rel("Anita", "Loop")]);
   assert([1, 3, 7, goesOn.length].every((step) => verdictAt(goesOn, step).startsWith("runaway/")), `a third copy followed by another item in its own array is the runaway at every split (${[1, 3, 7].map((s) => verdictAt(goesOn, s)).join(" ")})`);
   assert(verdictAt(`Here is the JSON (entities [3 items]):\n${answer([ent("Loop")])}`, 7) === "quiet/closed/1", "a preamble's own `[3 items]` closing is not the answer closing — closed needs an item read");
+  // Eighth review pass.
+  const laterLoop = answer([ent("Loop"), ent("Loop"), ent("Loop")], [rel("a", "b"), rel("a", "b"), rel("a", "b"), rel("a", "b")]);
+  assert([1, 5, laterLoop.length].every((step) => verdictAt(laterLoop, step).startsWith("runaway/")), `a folded entity triplet ends its array, then the relations loop: the detector is armed again for the later array (${verdictAt(laterLoop, 5)})`);
+  const bracketPreamble = `Here is the JSON [as requested:\n${answer([ent("Loop"), ent("Loop"), ent("Loop"), ent("Anita", "person")])}`;
+  assert([1, 3, bracketPreamble.length].every((step) => verdictAt(bracketPreamble, step).startsWith("runaway/")), `an unbalanced [ in a preamble made the answer object an "item"; the reading re-roots to the objects inside it (${verdictAt(bracketPreamble, 3)})`);
+  const twice = new RunawayDetector();
+  const one = answer([ent("Loop")]);
+  twice.feed(`${one}\n{"entities": [`);
+  assert(twice.closed && twice.closedAt === one.length, `closed is final and says where: a second object opening in the same piece after the answer's last brace does not reopen it, and closedAt is that brace (${twice.closedAt} of ${one.length})`);
 
   // The shipped windowing streams and aborts, and the sentence says so; with
   // reasoning on nothing is streamed — no budget, so no retry to send an

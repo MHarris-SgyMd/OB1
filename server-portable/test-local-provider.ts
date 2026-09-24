@@ -522,7 +522,7 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
   // request, how many frames it got out before the client hung up.
   type Run = { sent: number; total: number; cancelled: boolean; body: { stream?: boolean; frequency_penalty?: number } };
   const runs: Run[] = [];
-  let gMode: "loop" | "good" | "json" | "slow" | "cut" | "error" | "nodone" | "oneframe" | "sepfinish" | "cleanclose" | "mislabelled" | "emptyfinish" | "empty" | "cr" = "loop";
+  let gMode: "loop" | "good" | "json" | "slow" | "cut" | "error" | "nodone" | "oneframe" | "sepfinish" | "cleanclose" | "mislabelled" | "emptyfinish" | "empty" | "cr" | "multiline" | "doneonly" | "braceopen" = "loop";
   // A converging answer whose LAST item is a third copy: the object closes
   // after it, so the abort that was pending never fires. (Anita first: a
   // fourth item after the third copy would be the answer going on — an abort.)
@@ -570,6 +570,17 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
       } else if (gMode === "cr") {
         // Lone \r line ends, as the SSE grammar allows.
         frames = [...(GOOD.match(/[\s\S]{1,7}/g) ?? []).map((p) => frame(p)), frame("", "stop"), "data: [DONE]\n\n"].map((f) => f.replace(/\n/g, "\r"));
+      } else if (gMode === "multiline") {
+        // One event, its payload on two data: lines (the grammar joins them with
+        // a newline, so the split falls between JSON tokens).
+        const one = JSON.stringify({ choices: [{ delta: { content: GOOD }, finish_reason: null }] });
+        const cut = one.indexOf("[") + 1;
+        frames = [`data: ${one.slice(0, cut)}\ndata: ${one.slice(cut)}\n\n`, frame("", "stop"), "data: [DONE]\n\n"];
+      } else if (gMode === "doneonly") {
+        frames = ["data: [DONE]\n\n"];
+      } else if (gMode === "braceopen") {
+        // The answer's last brace and a second object's first in ONE frame.
+        frames = [frame(`${GOOD}\n{`), frame(GOOD.slice(1)), frame("", "stop"), "data: [DONE]\n\n"];
       } else if (gMode === "cleanclose") {
         // The whole answer, then the stream closes with no finish_reason and
         // no [DONE]: an answer, not a closed socket (sixth pass).
@@ -682,7 +693,22 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
   gMode = "empty";
   let empty = "";
   try { await extractEntities(short, cfgG, undefined, { kind: "extraction" }); } catch (e) { empty = (e as Error).message; }
-  assert(/was empty: no frame/.test(empty) && !/socket/.test(empty), `a 200 with no body at all is the provider's empty answer, this row's failure, not a closed socket (${empty.slice(0, 90)})`);
+  assert(/was empty: no answer in 0 frame/.test(empty) && !/socket/.test(empty), `a 200 with no body at all is the provider's empty answer, this row's failure, not a closed socket (${empty.slice(0, 90)})`);
+  // Eighth review pass, probed: [DONE] alone is the same empty answer; one
+  // event on two data: lines is one frame; the answer's last brace and a
+  // second object's first in one frame is the answer, cut at the brace.
+  gMode = "doneonly";
+  let doneOnly = "";
+  try { await extractEntities(short, cfgG, undefined, { kind: "extraction" }); } catch (e) { doneOnly = (e as Error).message; }
+  assert(/was empty: no answer in 1 frame/.test(doneOnly), `[DONE] alone is the provider's empty answer too, in the same words (${doneOnly.slice(0, 90)})`);
+  runs.length = 0;
+  gMode = "multiline";
+  const multiline = await extractEntities(short, cfgG, undefined, { kind: "extraction" });
+  assert(!multiline.malformed && multiline.entities.length === 2 && runs.length === 1, "an event whose payload spans two data: lines is one frame, joined as the grammar says");
+  runs.length = 0;
+  gMode = "braceopen";
+  const braceOpen = await extractEntities(short, cfgG, undefined, { kind: "extraction" });
+  assert(!braceOpen.malformed && braceOpen.entities.length === 2 && braceOpen.retried === undefined && runs.length === 1, `the answer's last brace followed by a second object's first in the same frame is the answer, cut at the brace (${JSON.stringify(braceOpen).slice(0, 80)})`);
   runs.length = 0;
   gMode = "cleanclose";
   const wholeClose = await extractEntities(short, cfgG, undefined, { kind: "extraction" });

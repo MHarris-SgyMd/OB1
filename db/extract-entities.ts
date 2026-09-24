@@ -445,7 +445,7 @@ async function processRow(row: Row): Promise<Outcome> {
     const abortedParts: { abortedMs?: number; retried?: true }[] = extraction.parts ? extraction.parts.filter((p) => p.malformed && p.abortedMs !== undefined) : extraction.abortedMs !== undefined ? [extraction] : [];
     const abortedMs = Math.max(...abortedParts.map((p) => p.abortedMs as number));
     const retriedToo = abortedParts.some((p) => p.retried);
-    const abortedNote = abortedParts.length ? `; the first call was aborted on the stream ${(abortedMs / 1000).toFixed(1)} s in — one item a third time — ${retriedToo ? "and the penalised retry, read whole, did not converge either" : "and no retry was made"}` : "";
+    const abortedNote = abortedParts.length ? `; the first call was aborted on the stream ${(abortedMs / 1000).toFixed(1)} s in — the answer went on past a third copy of one item — ${retriedToo ? "and the penalised retry, read whole, did not converge either" : "and no retry was made"}` : "";
     return { outcome: "failed", error: `the model's answer was not JSON of the expected shape${where}${abortedNote}` };
   }
   if (DUMP) {
