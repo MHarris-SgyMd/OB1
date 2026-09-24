@@ -1,65 +1,44 @@
 <script lang="ts">
-	import { goto } from '$app/navigation';
-	import { supabase } from '$lib/supabase';
+	import { enhance } from '$app/forms';
+	import type { ActionData } from './$types';
 
-	let email = $state('');
-	let password = $state('');
+	let { form }: { form: ActionData } = $props();
 	let loading = $state(false);
-	let errorMessage = $state('');
-
-	async function handleSubmit(event: SubmitEvent) {
-		event.preventDefault();
-		loading = true;
-		errorMessage = '';
-
-		const { error } = await supabase.auth.signInWithPassword({
-			email: email.trim(),
-			password,
-		});
-
-		if (error) {
-			errorMessage = error.message;
-			loading = false;
-			return;
-		}
-
-		await goto('/');
-	}
 </script>
 
 <div class="max-w-md mx-auto px-6 py-16">
 	<div class="bg-bg-card border border-white/10 rounded-2xl p-8">
-		<h1 class="text-2xl font-semibold mb-8">Sign in</h1>
+		<h1 class="text-2xl font-semibold mb-2">Sign in</h1>
+		<p class="text-sm text-text-muted mb-8">
+			Paste an access key for your Open Brain server. A read key browses and searches; a write key can capture too. A capture-only key cannot read, so it is refused here.
+		</p>
 
-		<form class="space-y-4" onsubmit={handleSubmit}>
+		<form
+			method="POST"
+			class="space-y-4"
+			use:enhance={() => {
+				loading = true;
+				return async ({ update }) => {
+					await update();
+					loading = false;
+				};
+			}}
+		>
 			<div>
-				<label class="text-sm text-text-muted" for="email">Email</label>
+				<label class="text-sm text-text-muted" for="key">Access key</label>
 				<input
-					id="email"
-					type="email"
-					bind:value={email}
-					placeholder="you@example.com"
-					autocomplete="email"
-					required
-					class="mt-2 w-full bg-bg-elevated border border-white/10 rounded-lg px-3 py-2 focus:outline-none focus:border-primary"
-				/>
-			</div>
-
-			<div>
-				<label class="text-sm text-text-muted" for="password">Password</label>
-				<input
-					id="password"
+					id="key"
+					name="key"
 					type="password"
-					bind:value={password}
-					placeholder="••••••••"
+					placeholder="the key keygen.ts printed once"
 					autocomplete="current-password"
 					required
 					class="mt-2 w-full bg-bg-elevated border border-white/10 rounded-lg px-3 py-2 focus:outline-none focus:border-primary"
 				/>
 			</div>
 
-			{#if errorMessage}
-				<div class="text-sm text-red-400">{errorMessage}</div>
+			{#if form?.error}
+				<div class="text-sm text-red-400" role="alert">{form.error}</div>
 			{/if}
 
 			<button

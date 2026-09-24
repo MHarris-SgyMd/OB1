@@ -780,6 +780,26 @@ const builtPerRequest = (text: string) =>
   !/^(?:export )?(?:const|let|var) [^\n]*(?:\bMcpServer\b|\bStreamableHTTPTransport\b|= buildServer\(|= new Map[<(])/m.test(text);
 /** The Accept patch by its mechanism — every one re-wrapped the request over `c.req.raw` — not by the header it set, which an outgoing fetch may set too. */
 const ACCEPT_PATCH = /Object\.defineProperty\(\s*c\.req,\s*['"]raw['"]/;
+/** A published CORS allow-list, the one shape these servers use (none takes hono's cors() middleware). */
+const ALLOW_HEADERS = /"Access-Control-Allow-Headers":\s*\n?\s*"([^"]+)"/;
+/**
+ * SMD-1668: an MCP server that publishes an allow-list names the two headers the
+ * Streamable HTTP spec has a client send after initialize — a browser-hosted
+ * client asks for them at preflight, and a list without them refuses the request
+ * before it arrives; since @hono/mcp 0.3.x the server reads mcp-protocol-version
+ * on every non-initialize POST, so that client was the one it could never see. A
+ * server with no list at all is not a browser's to reach and is not held.
+ */
+const HELD_ALLOW_LISTS: string[] = [];
+const holdsBrowserHeaders = (file: string, text: string) => {
+  const list = text.match(ALLOW_HEADERS);
+  if (!list) return;
+  HELD_ALLOW_LISTS.push(file);
+  const names = list[1].split(",").map((h) => h.trim().toLowerCase());
+  for (const h of ["mcp-protocol-version", "last-event-id"]) {
+    assert(names.includes(h), `${file}: Access-Control-Allow-Headers names ${h} — a browser client's preflight is refused without it (SMD-1668)`);
+  }
+};
 
 console.log("\n[the files say what this test assumes]");
 for (const s of SERVERS) {
@@ -807,6 +827,7 @@ for (const s of SERVERS) {
     assert(builtPerRequest(text), "…the McpServer is built inside a function, per request: no module-level declaration names McpServer, holds what buildServer() returns, or is a `new Map` (a server that outlives the request is connect()ed to a fresh transport each time and answers on the wrong one — SMD-1497, change 78)");
     assert(!ACCEPT_PATCH.test(text),
       "…and no Accept patch: the transport at @hono/mcp 0.3.x takes a missing Accept as */* and either token as enough, so the re-wrap of every request for Claude Desktop connectors is gone (change 84)");
+    holdsBrowserHeaders(s.file, text);
   } else if (s.kind === "rest") {
     const mounted = [...text.matchAll(/^app\.(get|post|put|patch|delete)\("([^"]+)",\s*(requireWrite,\s*)?/gm)]
       .map((m) => ({ route: `${m[1].toUpperCase()} ${m[2]}`, gated: Boolean(m[3]), at: m.index! }));
@@ -852,7 +873,12 @@ for (const s of SERVERS) {
   assert(builtPerRequest(text) && text.includes("await buildServer().connect(transport)"),
     `${file}: the McpServer is built per request by buildServer() and connected to that request's transport (SMD-1497, change 78)`);
   assert(!ACCEPT_PATCH.test(text), `${file}: the Accept patch is gone (change 84)`);
+  holdsBrowserHeaders(file, text);
 }
+// The rule reached the four lists the tree publishes — a list respelled (a template literal, hono's cors())
+// would drop out of the regex's reach silently otherwise (first review pass).
+assert(HELD_ALLOW_LISTS.length === 4,
+  `the allow-list rule read four lists — delete-thought, update-thought, kubernetes-deployment, enhanced-mcp (${HELD_ALLOW_LISTS.length}: ${HELD_ALLOW_LISTS.join(", ")})`);
 
 // The files this test cannot import — a Next.js route, a README's code block, a
 // Node stub — say the same thing in their text. (The cost recipe's per-session

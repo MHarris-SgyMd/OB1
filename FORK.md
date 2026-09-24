@@ -807,9 +807,11 @@ Deliberate. Recorded so nobody assumes they were missed.
 - **`claude-issue-triage.yml`** feeds untrusted issue bodies to an agent holding
   `issues: write`; **`discord-announce.yml`** declares no `permissions:` block.
   Neither is reachable in a fork that has those workflows disabled.
-- **Three overlapping dashboards** (`open-brain-dashboard`, `-next`, `-pro`) with
-  different auth and env models. Nothing says which is canonical. Pick one before
-  depending on any.
+- **Three overlapping dashboards** (`open-brain-dashboard`, `-next`, `-pro`).
+  All three sign in with one of the server's access keys sealed in a cookie
+  (SMD-1801 brought the SvelteKit one to the shape the Next two had), but the
+  first speaks MCP to the server and the other two speak to the `open-brain-rest`
+  gateway, and nothing says which is canonical. Pick one before depending on any.
 - **`sensitivity-tiers` does not exist.** Both Next dashboards, the
   `weekly-digest` recipe and its code reference it as a primitive.
   [PR #110](https://github.com/NateBJones-Projects/OB1/pull/110) was closed
@@ -840,10 +842,11 @@ Deliberate. Recorded so nobody assumes they were missed.
   real Postgres, and CI checks every migrated file still parses and that the
   codemod round-trips byte-for-byte — but exercise the ones you actually run
   before trusting them.
-- **One file still needs a human.** The dashboard's type-only supabase-js
-  import (SMD-1801's); the six servers that used resource embedding and nested
-  `.or()` moved with SMD-1798. Run `bun scripts/migrate-to-sql-shim.ts` for
-  the current list and the reason.
+- **No file imports supabase-js at runtime any more.** The six servers that
+  used resource embedding and nested `.or()` moved with SMD-1798; the
+  dashboard's type-only import went with its Supabase sign-in (SMD-1801). Check
+  22 holds the tree there; `bun scripts/migrate-to-sql-shim.ts` lists what a
+  rebase brings back and why.
 - **`CLAUDE.md` and `AGENTS.md` disagree** — a duplicated worktrees block, then
   divergent content, and `AGENTS.md` mandates updating a private tracker.
   [PR #274](https://github.com/NateBJones-Projects/OB1/pull/274) proposed the
