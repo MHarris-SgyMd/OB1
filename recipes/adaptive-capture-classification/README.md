@@ -17,7 +17,7 @@ Intermediate
 
 - Open Brain setup complete with the `thoughts` table populated
 - An AI gateway configured (OpenRouter, Ollama, or any OpenAI-compatible endpoint)
-- Access to run SQL migrations against your Supabase project (Supabase Studio or CLI)
+- Access to run SQL against your brain's database (`psql`, or any SQL client)
 - A capture interface you control — CLI script, Telegram bot, n8n workflow, or similar
   (this recipe is interface-agnostic; the gating logic sits between your interface and the
   OB1 `capture` MCP call)

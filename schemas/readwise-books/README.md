@@ -23,7 +23,7 @@ This schema is required by:
 ## Prerequisites
 
 - Working Open Brain setup ([guide](../../docs/01-getting-started.md))
-- Supabase project with the `thoughts` table already created (from the core setup)
+- A Postgres with the `thoughts` table already created (from the core setup) — the fork's stack, or a Supabase project
 - Recommended: [enhanced-thoughts](../enhanced-thoughts/) schema applied first — `get_book_highlights` filters on `source_type = 'readwise'`, which is a top-level column added by that extension. Without it, the RPC will not return rows.
 
 ## Credential Tracker

@@ -17,7 +17,7 @@ This schema adds two tables and one RPC function that together support a structu
 ## Prerequisites
 
 - Working Open Brain setup (see the getting-started guide in `docs/01-getting-started.md`)
-- Supabase project with the core `thoughts` table created (the SQL only reads and writes `thoughts.id` and `thoughts.metadata`, so no additional schema extensions are required)
+- A Postgres with the core `thoughts` table created — the fork's stack, or a Supabase project (the SQL only reads and writes `thoughts.id` and `thoughts.metadata`, so no additional schema extensions are required)
 
 ## Credential Tracker
 

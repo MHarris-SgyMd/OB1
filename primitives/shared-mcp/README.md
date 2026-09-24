@@ -44,7 +44,7 @@ Control operations per table:
 Before building a shared MCP server:
 
 - Working Open Brain installation with your primary MCP server
-- Supabase project (or PostgreSQL database with RLS support)
+- A PostgreSQL database with RLS support — the fork's stack, or a Supabase project
 - Node.js 18+ installed
 - Understanding of database roles and permissions
 - The other person's Claude Desktop config access (or ability to share config)
