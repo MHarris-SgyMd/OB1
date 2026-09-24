@@ -470,11 +470,14 @@ try {
   // alone and the tier and the dates are applied to the rows — the tier by the COLUMN (match_thoughts returns none,
   // so semantic mode looks it up by id; the old client-side filter compared undefined). A restricted twin at the
   // captured thought's own vector, whose text the query matches too, is the mutant that shows the filter at work.
-  // Importance 5: the text function's rank adds importance/20, so the twin outranks the capture (the stub's 4) and is
-  // the first row of the function's order — the page drive below leans on that.
+  // Importance 5 and quality 100: the text function's rank adds importance/20 + quality_score/500 to a text score the
+  // two contents tie on (the same three-word cover), so the twin's 0.45 beats the capture's 0.316 (the stub leaves
+  // importance at the default 3 and confidence 0.9 becomes quality 83) and the twin is the first row of the
+  // function's order — the page drive below leans on that; a tie would fall to created_at DESC, which the
+  // later-planted twin also wins.
   const hidden = "a restricted thought captured through enhanced-mcp, which no search may show";
-  const [{ id: rid }] = await sql`INSERT INTO thoughts (content, content_fingerprint, embedding, embedding_model, sensitivity_tier, importance, metadata)
-    VALUES (${hidden}, content_fingerprint_of(${hidden}), ${vec(unit(captured))}::vector, ${MODEL}, 'restricted', 5, '{"source": "planted"}'::jsonb) RETURNING id`;
+  const [{ id: rid }] = await sql`INSERT INTO thoughts (content, content_fingerprint, embedding, embedding_model, sensitivity_tier, importance, quality_score, metadata)
+    VALUES (${hidden}, content_fingerprint_of(${hidden}), ${vec(unit(captured))}::vector, ${MODEL}, 'restricted', 5, 100, '{"source": "planted"}'::jsonb) RETURNING id`;
   const ids = (r: { structured: any }) => ((r.structured?.results ?? []) as { id: string }[]).map((x) => x.id);
   const textMode = await call(h, "brain_search_thoughts", { query: "captured through enhanced", mode: "text" });
   assert(!textMode.isError && ids(textMode).includes(cid) && !ids(textMode).includes(rid),
@@ -519,15 +522,18 @@ try {
   const offsetBound = await call(h, "brain_search_thoughts", { query: captured, min_similarity: 0.5, start_date: later });
   assert(ids(offsetBound).includes(cid), `a start_date with a UTC offset is the instant it names — later digits, an earlier instant, so the capture is inside the window (${later}: ${ids(offsetBound).length})`);
   // `earlier` is a zone-less clock one hour before the capture: read as UTC it opens the window before the row;
-  // read in this process's zone (a machine west of UTC) it would open hours after it.
-  const zoneless = await call(h, "brain_search_thoughts", { query: captured, min_similarity: 0.5, start_date: earlier });
-  assert(ids(zoneless).includes(cid), `a zone-less date-time is read as UTC, never the process's zone (${earlier}: ${ids(zoneless).length})`);
+  // read in this process's zone it would open hours after it — on a machine west of UTC, which is why CI's step
+  // runs this suite under TZ=America/Chicago (fork-checks.yml); on a UTC machine the two readings coincide and this
+  // arm proves nothing. Text mode, so the instant reading is pinned in both modes (offsetBound is semantic).
+  const zoneless = await call(h, "brain_search_thoughts", { query: "captured through enhanced", mode: "text", start_date: earlier });
+  assert(ids(zoneless).includes(cid), `a zone-less date-time is read as UTC, never the process's zone — text mode (${earlier}: ${ids(zoneless).length})`);
   const unparsable = await call(h, "brain_search_thoughts", { query: captured, end_date: "yesterday" });
   const prose = await call(h, "brain_search_thoughts", { query: captured, start_date: "Dec 25, 2025" });
+  const rolled = await call(h, "brain_search_thoughts", { query: captured, start_date: "2026-02-30" });
   const inverted = await call(h, "brain_search_thoughts", { query: captured, mode: "text", start_date: "2026-01-02", end_date: "2026-01-01" });
   assert(unparsable.isError && /end_date is not an ISO 8601 date or date-time: yesterday/.test(unparsable.toolText) && prose.isError && /start_date is not an ISO 8601/.test(prose.toolText)
-    && inverted.isError && /is after end_date/.test(inverted.toolText),
-    `a bound off the ISO shape — prose Date.parse would take included — or a window closed before it opens is refused by name (${unparsable.toolText.slice(0, 60)} / ${prose.toolText.slice(0, 50)} / ${inverted.toolText.slice(0, 60)})`);
+    && rolled.isError && /start_date is not a real date: 2026-02-30/.test(rolled.toolText) && inverted.isError && /is after end_date/.test(inverted.toolText),
+    `a bound off the ISO shape (prose Date.parse would take), a day the calendar lacks (Date.parse rolls it to March), or a window closed before it opens is refused by name (${unparsable.toolText.slice(0, 60)} / ${prose.toolText.slice(0, 50)} / ${rolled.toolText.slice(0, 50)} / ${inverted.toolText.slice(0, 60)})`);
   // A page the tier filter emptied, with hits behind it: the twin ranks first (importance 5, above), so with limit 1
   // it is the whole page — hidden, and the tool says another page follows rather than a false end; the third tool
   // answers the same page the same way (its first draft said "No matches found.").
@@ -537,8 +543,13 @@ try {
   assert(ids(onePage).length === 0 && /^No matches on this page; more follow\./.test(onePage.toolText) && onePage.structured?.pagination?.has_more === true
     && ids(onePageDirect).length === 0 && /more follow/.test(onePageDirect.toolText) && onePageDirect.structured?.pagination?.has_more === true,
     `a page the tier filter emptied says more follow, in both tools, with has_more true (${onePage.toolText} / ${onePageDirect.toolText}; ${JSON.stringify(onePageDirect.structured?.pagination)})`);
-  assert(ids(secondPage).includes(cid) && secondPage.structured?.pagination?.has_more === false && /^2\. /.test(secondPage.toolText),
-    `…and the next page holds the capture, numbered by its place in the function's order, with no page after (${secondPage.toolText.slice(0, 40)}; ${JSON.stringify(secondPage.structured?.pagination)})`);
+  assert(ids(secondPage).includes(cid) && secondPage.structured?.pagination?.has_more === false,
+    `…and the next page holds the capture, with no page after (${secondPage.toolText.slice(0, 40)}; ${JSON.stringify(secondPage.structured?.pagination)})`);
+  // The ordinal's teeth (review pass 2): one page of two, the hidden twin first — the capture's line is `2.`, its
+  // place in the function's order; numbered by its place in the filtered list it would read `1.`.
+  const twoPage = await call(h, "search_thoughts_text", { query: "captured through enhanced", limit: 2 });
+  assert(ids(twoPage).length === 1 && /^2\. /.test(twoPage.toolText) && twoPage.structured?.pagination?.has_more === false,
+    `a line is numbered by the row's place in the page, hidden rows counted: the capture behind the twin is 2. (${twoPage.toolText.slice(0, 30)})`);
   const listed = await call(h, "brain_list_thoughts", { limit: 1, type: "idea" });
   const pagination = listed.structured?.pagination;
   assert(!listed.isError && listed.structured?.results?.length === 1 && typeof pagination?.total === "number" && pagination.total >= 2 && pagination.has_more === true,

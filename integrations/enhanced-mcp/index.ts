@@ -140,9 +140,9 @@ function truncateContent(content: string, maxLen: number): string {
 // `exclude_restricted: true` and `start_date` / `end_date` keys the tools used
 // to fold in were containment keys no thought's metadata holds, and every
 // search answered "No matches found." (extensions/test-writes.ts pinned it).
-// The tier and the date bounds are applied here, to the rows, by the two
-// helpers below; the restricted tier is read from the COLUMN the sidecar adds,
-// never from metadata, which a capture's caller can set.
+// The tier and the date bounds are applied here, to the rows, by the helpers
+// below; the restricted tier is read from the COLUMN the sidecar adds, never
+// from metadata, which a capture's caller can set.
 
 /**
  * The `sensitivity_tier` column of each id, one query. match_thoughts returns
@@ -176,18 +176,30 @@ async function tiersOf(ids: string[]): Promise<Map<string, string>> {
  * offset: a date-only value is that day's midnight UTC, a zone-less date-time
  * is UTC too — never the process's zone. `brain_list_thoughts` and
  * `count_thoughts` hand the same string to Postgres, which reads a bare date in
- * the session's time zone; the four tools agree on a database running in UTC,
- * the container images' default. A bound that fails the shape, or a window
- * closed before it opens, is refused by name rather than compared.
+ * the session's time zone and takes shapes this refuses (`yesterday`, an
+ * hour-only offset); for a bound all three accept, they agree on the instant
+ * on a database running in UTC, the container images' default. A bound that
+ * fails the shape, or a window closed before it opens, is refused by name
+ * rather than compared.
  */
 type DateWindow = { start: number | null; end: number | null };
 // An offset carries its minutes (`+02:00`, `+0200`): Bun's Date.parse makes `+02` an Invalid Date.
-const ISO_BOUND = /^\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?<zone>Z|[+-]\d{2}:?\d{2})?)?$/i;
+const ISO_BOUND = /^(?<y>\d{4})-(?<mo>\d{2})-(?<d>\d{2})(?:[T ](?<h>\d{2}):(?<mi>\d{2})(?::(?<s>\d{2})(?:\.\d{1,9})?)?(?<zone>Z|[+-]\d{2}:?\d{2})?)?$/i;
 function parseBound(name: string, value: string | null): number | null | { error: string } {
   if (!value) return null;
   const m = ISO_BOUND.exec(value);
   if (!m) return { error: `${name} is not an ISO 8601 date or date-time: ${value}` };
-  const utc = m.groups?.zone || value.length === 10 ? value : `${value}Z`;
+  // The fields in range, as Postgres holds them: Bun's Date.parse rolls
+  // `2026-02-30` over to March 2 (review pass 2), where Postgres refuses the
+  // string — a rolled bound is a silently different day. An hour past 23 or a
+  // minute past 59 Bun refuses on its own; the clause holds them the same way.
+  // `24:00` is ISO's end of day and stays.
+  const g = m.groups!;
+  const [y, mo, d, h, mi, s] = [g.y, g.mo, g.d, g.h ?? "0", g.mi ?? "0", g.s ?? "0"].map(Number);
+  const daysIn = new Date(Date.UTC(y, mo, 0)).getUTCDate(); // day 0 of the next month
+  const inRange = mo >= 1 && mo <= 12 && d >= 1 && d <= daysIn && mi <= 59 && s <= 60 && (h <= 23 || (h === 24 && mi === 0 && s === 0));
+  if (!inRange) return { error: `${name} is not a real date: ${value}` };
+  const utc = g.zone || value.length === 10 ? value : `${value}Z`;
   const t = Date.parse(utc.replace(" ", "T"));
   return Number.isNaN(t) ? { error: `${name} is not a real date: ${value}` } : t;
 }
