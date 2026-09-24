@@ -487,7 +487,7 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
   // A runaway — an answer cut at its budget — is the answer under the shipped
   // windowing, and is made once more with the frequency penalty when the
   // windowing says so; a penalty is never sent on a first call.
-  const { RUNAWAY_PENALTY } = await import("./entities.ts");
+  const { RUNAWAY_PENALTY, RUNAWAY_REPEATS, callsMadeBy } = await import("./entities.ts");
   let runawayOnce = false;
   const penalties: (number | undefined)[] = [];
   const providerE = Bun.serve({
@@ -516,6 +516,256 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
   const clean = await extractEntities(short, cfgE, undefined, { kind: "extraction" });
   assert(!clean.malformed && clean.retried === undefined && penalties.length === 1, "…and an answer that converges is never retried");
 
+  // SMD-1960: the answer is streamed and a runaway is aborted at the third copy
+  // of one item, before its budget, then retried under the penalty as a cut
+  // one is. The stub streams a loop one item per frame and records, per
+  // request, how many frames it got out before the client hung up.
+  type Run = { sent: number; total: number; cancelled: boolean; body: { stream?: boolean; frequency_penalty?: number } };
+  const runs: Run[] = [];
+  let gMode: "loop" | "good" | "json" | "slow" | "cut" | "error" | "nodone" | "oneframe" | "sepfinish" | "cleanclose" | "mislabelled" | "emptyfinish" | "empty" | "cr" | "multiline" | "doneonly" | "braceopen" | "finishtail" | "loop4finish" | "rolefinish" | "crlfsplit" = "loop";
+  const LOOP4 = JSON.stringify({ entities: [{ name: "Loop", type: "tool", confidence: 1 }, { name: "Loop", type: "tool", confidence: 1 }, { name: "Loop", type: "tool", confidence: 1 }, { name: "Anita", type: "person", confidence: 0.9 }], relationships: [] });
+  // A converging answer whose LAST item is a third copy: the object closes
+  // after it, so the abort that was pending never fires. (Anita first: a
+  // fourth item after the third copy would be the answer going on — an abort.)
+  // …and a relation in the other array after it (seventh pass: an item there
+  // is not the loop going on, whatever frame it lands in).
+  const THRICE = JSON.stringify({ entities: [{ name: "Anita", type: "person", confidence: 0.9 }, { name: "Loop", type: "tool", confidence: 1 }, { name: "Loop", type: "tool", confidence: 1 }, { name: "Loop", type: "tool", confidence: 1 }], relationships: [{ from: "Anita", to: "Loop", relation: "uses", confidence: 0.8 }] });
+  const GOOD = JSON.stringify({ entities: [{ name: "Anita", type: "person", confidence: 0.9, aliases: ["A. {Nita}"] }, { name: "Open Brain", type: "project", confidence: 0.8 }], relationships: [{ from: "Anita", to: "Open Brain", relation: "works_on", confidence: 0.7 }] });
+  const frame = (content: string, finish: string | null = null) => `data: ${JSON.stringify({ choices: [{ delta: { content }, finish_reason: finish }] })}\n\n`;
+  const providerG = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      const body = (await req.json()) as Run["body"];
+      const run: Run = { sent: 0, total: 0, cancelled: false, body };
+      runs.push(run);
+      if (gMode === "json" || !body.stream) return Response.json({ choices: [{ message: { content: GOOD }, finish_reason: "stop" }] });
+      let frames: string[];
+      let gapMs = 1;
+      if (gMode === "loop" && body.frequency_penalty === undefined) {
+        const loop = '{"name": "Loop", "type": "tool", "confidence": 1.0}';
+        frames = ['{"entities": [{"name": "Anita", "type": "person", "confidence": 0.9}', ...Array.from({ length: 40 }, () => `,\n    ${loop}`), ""].map((p, i, a) => frame(p, i === a.length - 1 ? "length" : null));
+        // A second between the third copy and the loop running out (third
+        // review pass): the stub's loop stops only when Bun sees the hang-up.
+        gapMs = 25;
+      } else if (gMode === "slow") {
+        frames = Array.from({ length: 20 }, (_, i) => frame(GOOD.slice(i * 8, i * 8 + 8)));
+        gapMs = 100;
+      } else if (gMode === "nodone") {
+        // The whole answer, a finish_reason, then the connection held open with
+        // keepalives and NO [DONE] — a finishing frame is the end (fifth pass).
+        frames = [...(GOOD.match(/[\s\S]{1,7}/g) ?? []).map((p) => frame(p)), frame("", "stop"), ...Array.from({ length: 400 }, () => ": keepalive\n\n")];
+        gapMs = 2;
+      } else if (gMode === "oneframe") {
+        // One frame holding a complete answer with an item three times over,
+        // finishing in the same frame: complete, so parsed — never an abort.
+        frames = [frame(JSON.stringify({ entities: [{ name: "Loop", type: "tool", confidence: 1 }, { name: "Loop", type: "tool", confidence: 1 }, { name: "Loop", type: "tool", confidence: 1 }], relationships: [] }), "stop"), "data: [DONE]\n\n"];
+      } else if (gMode === "sepfinish") {
+        // Ollama's own shape: content frames, then the finish in a frame of its
+        // own — with a third copy inside a CONVERGING answer (sixth pass).
+        frames = [...(THRICE.match(/[\s\S]{1,6}/g) ?? []).map((p) => frame(p)), frame("", "stop"), "data: [DONE]\n\n"];
+      } else if (gMode === "emptyfinish") {
+        // Every frame carries finish_reason "" where the OpenAI shape has null.
+        frames = [...(GOOD.match(/[\s\S]{1,7}/g) ?? []).map((p) => frame(p).replace('"finish_reason":null', '"finish_reason":""')), frame("", "stop"), "data: [DONE]\n\n"];
+      } else if (gMode === "empty") {
+        frames = [];
+      } else if (gMode === "cr") {
+        // Lone \r line ends, as the SSE grammar allows.
+        frames = [...(GOOD.match(/[\s\S]{1,7}/g) ?? []).map((p) => frame(p)), frame("", "stop"), "data: [DONE]\n\n"].map((f) => f.replace(/\n/g, "\r"));
+      } else if (gMode === "multiline") {
+        // One event, its payload on two data: lines (the grammar joins them with
+        // a newline, so the split falls between JSON tokens).
+        const one = JSON.stringify({ choices: [{ delta: { content: GOOD }, finish_reason: null }] });
+        const cut = one.indexOf("[") + 1;
+        frames = [`data: ${one.slice(0, cut)}\ndata: ${one.slice(cut)}\n\n`, frame("", "stop"), "data: [DONE]\n\n"];
+      } else if (gMode === "doneonly") {
+        frames = ["data: [DONE]\n\n"];
+      } else if (gMode === "braceopen") {
+        // The answer's last brace and a second object's first in ONE frame.
+        frames = [frame(`${GOOD}\n{`), frame(GOOD.slice(1)), frame("", "stop"), "data: [DONE]\n\n"];
+      } else if (gMode === "finishtail") {
+        // The whole answer AND chatter after its brace, in the finishing frame.
+        frames = [frame(`${GOOD}\n\nHope this helps!`, "stop"), "data: [DONE]\n\n"];
+      } else if (gMode === "loop4finish") {
+        // A loop that went on, complete, in the finishing frame: the same
+        // runaway it is when the finish comes alone (ninth pass).
+        frames = [frame(LOOP4, "stop"), "data: [DONE]\n\n"];
+      } else if (gMode === "rolefinish") {
+        // The OpenAI shape with nothing said: a role frame, a finish, [DONE].
+        frames = [`data: ${JSON.stringify({ choices: [{ delta: { role: "assistant" }, finish_reason: null }] })}\n\n`, frame("", "stop"), "data: [DONE]\n\n"];
+      } else if (gMode === "crlfsplit") {
+        // A CRLF event on two data: lines, the chunk boundary between the \r
+        // and the \n of the first — one event still (ninth pass).
+        const one = JSON.stringify({ choices: [{ delta: { content: GOOD }, finish_reason: null }] });
+        const cut = one.indexOf("[") + 1;
+        frames = [`data: ${one.slice(0, cut)}\r`, `\ndata: ${one.slice(cut)}\r\n\r\n`, frame("", "stop").replace(/\n/g, "\r\n"), "data: [DONE]\r\n\r\n"];
+      } else if (gMode === "cleanclose") {
+        // The whole answer, then the stream closes with no finish_reason and
+        // no [DONE]: an answer, not a closed socket (sixth pass).
+        frames = (GOOD.match(/[\s\S]{1,8}/g) ?? []).map((p) => frame(p));
+      } else if (gMode === "cut") {
+        // Half the answer, then the stream ends: no finish_reason, no [DONE].
+        frames = Array.from({ length: 10 }, (_, i) => frame(GOOD.slice(i * 8, i * 8 + 8)));
+      } else if (gMode === "error") {
+        // Half the answer, then the provider's error frame — and the stream
+        // kept OPEN after it, as a gateway that goes on talking would.
+        frames = [...Array.from({ length: 10 }, (_, i) => frame(GOOD.slice(i * 8, i * 8 + 8))), `data: ${JSON.stringify({ error: { message: "the runner exited: context length exceeded", code: 500 } })}\n\n`, ...Array.from({ length: 40 }, () => ": still here\n\n")];
+        gapMs = 25;
+      } else {
+        // Seven characters a frame: tokens split mid-name, mid-number, mid-brace;
+        // `"error": null` beside every choice, as some compat layers send; and
+        // after [DONE] the connection kept open with keepalive comments for
+        // seconds, as a gateway might (fourth review pass).
+        frames = [...(GOOD.match(/[\s\S]{1,7}/g) ?? []).map((p) => frame(p).replace('"finish_reason":null}]', '"finish_reason":null}],"error":null')), frame("", "stop"), "data: [DONE]\n\n", ...Array.from({ length: 400 }, () => ": keepalive\n\n")];
+        gapMs = 2;
+      }
+      run.total = frames.length;
+      const encoder = new TextEncoder();
+      const stream = new ReadableStream<Uint8Array>({
+        async start(c) {
+          try {
+            for (const f of frames) { c.enqueue(encoder.encode(f)); run.sent++; await Bun.sleep(gapMs); }
+            c.close();
+          } catch { /* cancelled mid-loop */ }
+        },
+        cancel() { run.cancelled = true; },
+      });
+      // "mislabelled": the same frames under application/json — read as what
+      // the body is, not what the header says (sixth pass).
+      return new Response(stream, { headers: { "content-type": gMode === "mislabelled" ? "application/json" : "text/event-stream" } });
+    },
+  });
+  const cfgG = resolveEmbedConfig({ OB1_LLM_LOCAL: "1", OB1_LLM_BASE_URL: `http://127.0.0.1:${providerG.port}/v1`, OB1_METADATA_MODEL: "stub-chat" });
+  assert(windowingFor(cfgG).streamAbort === true, "the shipped windowing streams the answer and aborts a runaway on it (EXTRACT_STREAM_ABORT)");
+  gMode = "loop";
+  const rescued = await extractEntities(short, cfgG, undefined, { kind: "extraction" });
+  // The stub's cancel() lands after the client's reader.cancel(): wait for
+  // it, bounded, rather than a fixed sleep (second review pass).
+  for (let waited = 0; !runs[0]?.cancelled && waited < 2000; waited += 10) await Bun.sleep(10);
+  assert(!rescued.malformed && rescued.retried === true && rescued.entities[0]?.name === "Anita" && rescued.entities.length === 2, "a streamed runaway is aborted and the penalised retry's answer is the thought's");
+  assert(rescued.abortedMs !== undefined && rescued.abortedMs >= 0 && rescued.abortedMs < 5000, `…and the answer says how far into the call the runaway was aborted (${rescued.abortedMs} ms)`);
+  assert(runs.length === 2 && runs[0].body.stream === true && runs[0].body.frequency_penalty === undefined && runs[1].body.frequency_penalty === RUNAWAY_PENALTY && runs[1].body.stream === undefined, `the first call asks for a stream and carries no penalty; the retry carries ${RUNAWAY_PENALTY} and is read WHOLE — a penalised answer can repeat an item three times and recover (${runs.map((r) => `${r.body.stream}/${r.body.frequency_penalty}`).join(" ")})`);
+  assert(runs[0].cancelled && runs[0].sent >= RUNAWAY_REPEATS + 1 && runs[0].sent < runs[0].total, `the client hung up on the loop after the third copy and before it ran out (${runs[0].sent} of ${runs[0].total} frames sent) — the mutant that reads the stream to its end sends all ${runs[0].total}`);
+  assert(!runs[1].cancelled && runs[1].total === 0, "…and the retry's whole answer is the thought's");
+
+  // The streamed answer, reassembled from frames that split tokens, is the
+  // whole answer; and a provider that answers a stream request with plain JSON
+  // is read as one not asked (every other stub in this suite does).
+  runs.length = 0;
+  gMode = "good";
+  const streamed = await extractEntities(short, cfgG, undefined, { kind: "extraction" });
+  for (let waited = 0; !runs[0]?.cancelled && waited < 2000; waited += 10) await Bun.sleep(10);
+  assert(runs[0]?.cancelled === true && runs[0].sent < runs[0].total, `[DONE] ends the read: the call returned with the gateway still sending keepalives (${runs[0]?.sent} of ${runs[0]?.total} frames) and the connection closed — the mutant that waits for the socket sends all ${runs[0]?.total}`);
+  gMode = "json";
+  const whole = await extractEntities(short, cfgG, undefined, { kind: "extraction" });
+  assert(JSON.stringify(streamed) === JSON.stringify(whole) && streamed.entities.length === 2 && streamed.relations.length === 1 && streamed.entities[0].aliases[0] === "A. {Nita}" && streamed.retried === undefined && streamed.abortedMs === undefined, `a streamed answer parses to the same Extraction as the whole one — braces inside an alias included — with nothing aborted or retried (${JSON.stringify(streamed).slice(0, 120)})`);
+  assert(runs.length === 2 && runs[1].body.stream === true && runs[1].total === 0, "…and the JSON answer to a stream request read whole");
+
+  // The per-call deadline bounds a stream that keeps coming too slowly, and
+  // the error is the timeout the worker classifies (TimeoutError / timed out),
+  // with the call counted.
+  gMode = "slow";
+  let late = "";
+  let lateCalls = -1;
+  try { await extractEntities(short, cfgG, 300, { kind: "extraction" }); } catch (e) { late = `${(e as Error).name}: ${(e as Error).message}`; lateCalls = callsMadeBy(e); }
+  assert(/TimeoutError|timed out/i.test(late) && lateCalls === 1, `a stream still coming at the deadline is the timeout, counted as one call (${late.slice(0, 80)}; calls ${lateCalls})`);
+
+  // A stream that ends with neither a finish_reason nor [DONE] is a socket
+  // that closed mid-answer — thrown, as the whole read's r.json() on a
+  // truncated body was, and worded for the worker's transient rule (`socket`),
+  // NOT returned as the model's malformed answer (first review pass).
+  gMode = "cut";
+  let closed = "";
+  let closedCalls = -1;
+  try { await extractEntities(short, cfgG, undefined, { kind: "extraction" }); } catch (e) { closed = (e as Error).message; closedCalls = callsMadeBy(e); }
+  assert(/closed mid-answer/.test(closed) && /socket/i.test(closed) && /80 characters/.test(closed) && closedCalls === 1, `a stream cut mid-answer throws a socket error naming what arrived, counted as one call, rather than a malformed answer (${closed.slice(0, 100)}; calls ${closedCalls})`);
+
+  // A finishing frame ends the read as [DONE] does, and a complete answer is
+  // never an abort whatever it repeats (fifth review pass, both probed).
+  runs.length = 0;
+  gMode = "nodone";
+  const finished = await extractEntities(short, cfgG, undefined, { kind: "extraction" });
+  for (let waited = 0; !runs[0]?.cancelled && waited < 2000; waited += 10) await Bun.sleep(10);
+  assert(!finished.malformed && finished.entities.length === 2 && finished.retried === undefined && runs[0]?.cancelled === true && runs[0].sent < runs[0].total, `a frame carrying finish_reason ends the read: the answer is the thought's and the connection closed on the keepalives that followed with no [DONE] (${runs[0]?.sent} of ${runs[0]?.total} frames)`);
+  runs.length = 0;
+  gMode = "oneframe";
+  const whole3 = await extractEntities(short, cfgG, undefined, { kind: "extraction" });
+  assert(!whole3.malformed && whole3.entities.length === 1 && whole3.entities[0].name === "Loop" && whole3.retried === undefined && whole3.abortedMs === undefined && runs.length === 1, `a complete answer arriving in one finishing frame with an item three times over is parsed — the copies folded to one — not aborted and not retried (${JSON.stringify(whole3).slice(0, 100)})`);
+
+  // Sixth review pass, probed: the finish in its own frame after a converging
+  // answer holding a third copy; a clean close with no end sign; SSE under the
+  // wrong content-type.
+  runs.length = 0;
+  gMode = "sepfinish";
+  const converging = await extractEntities(short, cfgG, undefined, { kind: "extraction" });
+  assert(!converging.malformed && converging.entities.length === 2 && converging.relations.length === 1 && converging.retried === undefined && converging.abortedMs === undefined && runs.length === 1, `a converging answer holding an item three times, then a relation, its finish in a frame of its own, is complete — folded to two entities and one edge, not aborted, not retried (${JSON.stringify(converging).slice(0, 100)})`);
+  assert(converging.entities[1]?.name === "Loop" && converging.entities.length === 2, "…the three copies one entity beside Anita");
+  runs.length = 0;
+  gMode = "emptyfinish";
+  const emptyFinish = await extractEntities(short, cfgG, undefined, { kind: "extraction" });
+  assert(!emptyFinish.malformed && emptyFinish.entities.length === 2 && runs.length === 1, "a finish_reason of \"\" on every frame is not the end — only a non-empty one is");
+  runs.length = 0;
+  gMode = "cr";
+  const cr = await extractEntities(short, cfgG, undefined, { kind: "extraction" });
+  assert(!cr.malformed && cr.entities.length === 2 && runs.length === 1, "a stream whose lines end in a lone \\r is framed all the same");
+  gMode = "empty";
+  let empty = "";
+  try { await extractEntities(short, cfgG, undefined, { kind: "extraction" }); } catch (e) { empty = (e as Error).message; }
+  assert(/was empty: no answer in 0 frame/.test(empty) && !/socket/.test(empty), `a 200 with no body at all is the provider's empty answer, this row's failure, not a closed socket (${empty.slice(0, 90)})`);
+  // Eighth review pass, probed: [DONE] alone is the same empty answer; one
+  // event on two data: lines is one frame; the answer's last brace and a
+  // second object's first in one frame is the answer, cut at the brace.
+  runs.length = 0;
+  gMode = "doneonly";
+  const doneOnly = await extractEntities(short, cfgG, undefined, { kind: "extraction" }, { ...windowingFor(cfgG), retryRunaway: false });
+  assert(doneOnly.malformed && doneOnly.retried === undefined && runs.length === 1, "[DONE] alone is the provider's empty answer, malformed as the whole read has it — not thrown (tenth review pass)");
+  runs.length = 0;
+  gMode = "multiline";
+  const multiline = await extractEntities(short, cfgG, undefined, { kind: "extraction" });
+  assert(!multiline.malformed && multiline.entities.length === 2 && runs.length === 1, "an event whose payload spans two data: lines is one frame, joined as the grammar says");
+  runs.length = 0;
+  gMode = "braceopen";
+  const braceOpen = await extractEntities(short, cfgG, undefined, { kind: "extraction" });
+  assert(!braceOpen.malformed && braceOpen.entities.length === 2 && braceOpen.retried === undefined && runs.length === 1, `the answer's last brace followed by a second object's first in the same frame is the answer, cut at the brace (${JSON.stringify(braceOpen).slice(0, 80)})`);
+  // Ninth review pass, probed: the finishing frame's content is read too.
+  runs.length = 0;
+  gMode = "finishtail";
+  const finishTail = await extractEntities(short, cfgG, undefined, { kind: "extraction" });
+  assert(!finishTail.malformed && finishTail.entities.length === 2 && runs.length === 1, "chatter after the brace in the FINISHING frame is cut at the brace too");
+  runs.length = 0;
+  gMode = "loop4finish";
+  const loop4 = await extractEntities(short, cfgG, undefined, { kind: "extraction" });
+  assert(loop4.retried === true && loop4.abortedMs !== undefined && runs.length === 2 && runs[1].body.stream === undefined, "a loop that went on, arriving complete in the finishing frame, is the runaway it is when the finish comes alone — retried, read whole");
+  runs.length = 0;
+  gMode = "rolefinish";
+  const roleFinish = await extractEntities(short, cfgG, undefined, { kind: "extraction" }, { ...windowingFor(cfgG), retryRunaway: false });
+  assert(roleFinish.malformed && roleFinish.retried === undefined && runs.length === 1, "a role frame and a finish with no content is the empty answer, malformed as the whole read has it — the same record by either transport");
+  runs.length = 0;
+  gMode = "crlfsplit";
+  const crlfSplit = await extractEntities(short, cfgG, undefined, { kind: "extraction" });
+  assert(!crlfSplit.malformed && crlfSplit.entities.length === 2 && runs.length === 1, "a CRLF event split between its \\r and \\n across reads is one event still");
+  runs.length = 0;
+  gMode = "cleanclose";
+  const wholeClose = await extractEntities(short, cfgG, undefined, { kind: "extraction" });
+  assert(!wholeClose.malformed && wholeClose.entities.length === 2 && wholeClose.retried === undefined && runs.length === 1, "a whole answer whose stream then closes with no finish_reason and no [DONE] is the answer, not a closed socket");
+  runs.length = 0;
+  gMode = "mislabelled";
+  const mislabelled = await extractEntities(short, cfgG, undefined, { kind: "extraction" });
+  assert(!mislabelled.malformed && mislabelled.entities.length === 2 && runs.length === 1 && runs[0].body.stream === true, "an event stream served as application/json is read as the stream it is");
+  gMode = "loop";
+
+  // The provider's own error frame mid-stream is the provider's error, with its
+  // message — not the socket sentence, not a malformed answer (second review pass).
+  gMode = "error";
+  runs.length = 0;
+  let errored = "";
+  let erroredStatus: number | undefined;
+  try { await extractEntities(short, cfgG, undefined, { kind: "extraction" }); } catch (e) { errored = (e as Error).message; erroredStatus = (e as { status?: number }).status; }
+  assert(/answered an error mid-stream: the runner exited: context length exceeded/.test(errored) && !/socket/.test(errored), `an error frame mid-stream throws the provider's message (${errored.slice(0, 120)})`);
+  assert(erroredStatus === 500, `…carrying the frame's code as the status the worker's transient rule reads (${erroredStatus})`);
+  for (let waited = 0; !runs[0]?.cancelled && waited < 2000; waited += 10) await Bun.sleep(10);
+  assert(runs[0]?.cancelled === true && runs[0].sent < runs[0].total, `…and the connection is closed on the way out, not left open to the deadline (${runs[0]?.sent} of ${runs[0]?.total} frames sent)`);
+  gMode = "loop";
+
   // Reasoning on (second review pass): max_tokens would cap the thinking and
   // the answer together, so no budget is sent and a cut answer is not retried.
   const maxTokensSeen: (number | undefined)[] = [];
@@ -534,6 +784,7 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
   assert(maxTokensSeen.length === 1 && maxTokensSeen[0] === undefined && penalties[0] === undefined, "with OB1_METADATA_REASONING on the call carries no max_tokens and no penalty — the p1 request");
   assert(!thought.malformed && thought.retried === undefined && maxTokensSeen.length === 1, "…and an answer that parses is the thought's, with `length` not read as a runaway since nothing was budgeted");
   providerF.stop();
+  providerG.stop();
   providerE.stop();
 
   // The default window for a model the table lists is the measured 1200, and
