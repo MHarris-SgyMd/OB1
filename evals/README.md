@@ -5332,6 +5332,7 @@ in the path.
   roles (`operator`, `evals`, `full stack`).
 
 ```sh
+mkdir -p "$HOME/.cache/ob1"   # podman does not create a missing bind source
 podman run --rm --network open-brain_default --env-file deploy/.env \
   -e OB1_JEV_BASE_URL=http://host.containers.internal:8020 -e OB1_JEV_LOCAL=1 \
   -v "$PWD":/repo:ro -v "$HOME/.cache/ob1":/cache -w /repo/evals oven/bun:1.4.0-alpine sh -c \
@@ -5340,23 +5341,25 @@ podman run --rm --network open-brain_default --env-file deploy/.env \
 
 `--cache` keeps the tier's answers on the host, as probabilities and logits
 only. They are keyed by the model's provenance and by what was asked, so a
-re-analysis makes no tier pass and another model is asked afresh.
+re-analysis asks the tier only for `/info` and the timed thoughts
+(`--cost-thoughts 0` skips those), and another model is asked afresh. The
+file is replaced whole, and written on an interrupt too.
 `--dump-sample` writes the grading sample, which is the brain's text, so write
 it outside the tree.
 
 On the test split (90 mentions, 52 invalid), with the threshold, temperature
-and Platt refit taken from dev, and the Brier skill measured against a constant
-at dev's base rate:
+and Platt refit taken from dev. The Brier skill is measured against a constant
+at the test split's base rate, scored on the same rows:
 
 | arm | AUROC | served p: mean (range) | ECE served | Brier / skill / ECE, Platt | balanced accuracy | rejects invalid | keeps valid |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | B1 (SMD-1935's gate) | — | — | — | — | 0.545 | 11.5% | 97.4% |
-| v1: SMD-2050's validity framing | 0.586 | 0.54 (0.35–0.66) | 0.114 | 0.242 / −1.8% / 0.052 | 0.562 | 51.9% | 60.5% |
-| **v2**: validity in the prompt's words | **0.658** | 0.55 (0.29–0.67) | 0.136 | 0.229 / 3.6% / 0.118 | **0.645** | 71.2% | 57.9% |
-| claim: "X is <the extractor's type>" | 0.559 | 0.57 (0.41–0.72) | 0.156 | 0.244 / −2.9% / 0.035 | 0.503 | 5.8% | 94.7% |
-| pertype: six binaries, the max | 0.547 | 0.60 (0.45–0.72) | 0.191 | 0.242 / −2.0% / 0.035 | 0.529 | 5.8% | 100.0% |
-| choice: types + number + generic | 0.516 | 0.75 (0.34–0.96) | 0.366 | 0.245 / −3.3% / 0.050 | 0.515 | 34.6% | 68.4% |
-| the extractor's stored confidence | 0.487 | 1.00 (0.90–1.00) | 0.577 | 0.246 / −3.5% / 0.030 | 0.500 | 0.0% | 100.0% |
+| v1: SMD-2050's validity framing | 0.586 | 0.54 (0.35–0.66) | 0.114 | 0.242 / 1.0% / 0.052 | 0.562 | 51.9% | 60.5% |
+| **v2**: validity in the prompt's words | **0.658** | 0.55 (0.29–0.67) | 0.136 | 0.229 / 6.2% / 0.118 | **0.645** | 71.2% | 57.9% |
+| claim: "X is <the extractor's type>" | 0.559 | 0.57 (0.41–0.72) | 0.156 | 0.244 / −0.1% / 0.035 | 0.503 | 5.8% | 94.7% |
+| pertype: six binaries, the max | 0.547 | 0.60 (0.45–0.72) | 0.191 | 0.242 / 0.8% / 0.035 | 0.529 | 5.8% | 100.0% |
+| choice: types + number + generic | 0.516 | 0.75 (0.34–0.96) | 0.366 | 0.245 / −0.5% / 0.049 | 0.515 | 34.6% | 68.4% |
+| the extractor's stored confidence | 0.487 | 1.00 (0.90–1.00) | 0.577 | 0.246 / −0.7% / 0.030 | 0.500 | 0.0% | 100.0% |
 
 - **The margin is not met.** v2 was chosen on dev, by a hair: its dev balanced
   accuracy is 0.637, against 0.635 for the choice.
@@ -5384,15 +5387,15 @@ at dev's base rate:
   - A temperature alone cannot move them. The fit flattens every arm toward a
     coin (Brier 0.250), and for claim, pertype and the choice it sits at the
     search's floor.
-  - Platt's offset brings the ECE to 0.03–0.12. Only v2 then beats the
-    base-rate constant's Brier score (skill 3.6%); the rest score 2–4% worse
-    than it.
+  - Platt's offset brings the ECE to 0.03–0.12, and every arm then sits at the
+    base-rate constant's Brier score. v2 beats it by 6.2%; the rest are within
+    about 1% of it, on either side.
 - **Typing is worse than the extractor's.** On the 38 valid test mentions:
 
   | typer | right type |
   | --- | --- |
   | the extractor | 71% |
-  | always `project` | 58% |
+  | always `project`, the commonest graded type on these rows | 58% |
   | the choice (no type when it abstains or picks number or generic) | 53% |
   | pertype (argmax) | 21% |
 
@@ -5416,8 +5419,8 @@ at dev's base rate:
 
   | shape | p50 | p90 | max | requests a call |
   | --- | --- | --- | --- | --- |
-  | one binary a candidate (v2) | 0.89 s | 2.3 s | 3.1 s | 1 |
-  | six binaries a candidate (pertype) | 4.8 s | 13.0 s | 17.7 s | 2–4 |
+  | one binary a candidate (v2) | 0.88 s | 2.3 s | 3.2 s | 1 |
+  | six binaries a candidate (pertype) | 4.7 s | 12.6 s | 17.2 s | 1 to 4 (p50 2) |
 
   The reference is SMD-1879's measurement of a 3,000-token thought: one
   9-second extraction call ("Entity extraction in windows", above). Against

@@ -9,7 +9,8 @@
  * positive label. SMD-1937's Verify asks something else: a margin over the
  * deterministic gate on the AMBIGUOUS cases, Brier/ECE for the calibrated arms,
  * a threshold on the stored confidence (SMD-1925), a drop-the-mechanism control
- * and the cost at real volume. This harness measures those. It builds nothing
+ * and the cost at real volume. This harness measures those; the control is
+ * `gate()`'s identity when off, which the self-check holds. It builds nothing
  * into the extraction path, and it writes nothing to the brain (each read is one
  * READ ONLY transaction). It calls the tier through server-portable/jev.ts and
  * holds no serving code of its own.
@@ -39,7 +40,8 @@
  *              invalid mention must beat B1's by 10 points, with the paired
  *              bootstrap's 95% interval of the difference above 0. For typing,
  *              the per-type gates must beat the extractor's own type by 10
- *              points on the valid mentions.
+ *              points on the valid mentions (the report also prints the
+ *              interval, which the typing margin does not require).
  *
  * The arms, on whatever serves ob1-jev/1 (Verdict v1.4 today; SemIf is SMD-2052):
  *
@@ -62,7 +64,7 @@
  * served. A calibration refit (temperature alone, and Platt) is fitted on dev
  * and applied to test.
  *
- *   bun eval-jev-gate.ts --url postgres://…/openbrain [--cache <file>] [--numeric 60] [--cost-thoughts 40]
+ *   bun eval-jev-gate.ts --url postgres://…/openbrain [--cache <file>] [--numeric 60] [--cost-thoughts 40, 0 to skip]
  *                                                   the report (or DATABASE_URL for --url)
  *   bun eval-jev-gate.ts --url … --dump-sample <file>       the grading sample as JSONL
  *   bun eval-jev-gate.ts --self-check                       the rules and the arithmetic; no tier, no database
@@ -72,9 +74,10 @@
  * Write it outside the tree: a committed fixture holds ids and numbers only
  * (check 9). `--cache` keeps the tier's answers (probabilities and logits, no
  * text) keyed by the model's provenance and what was asked, so a re-analysis
- * makes no tier pass and another model is asked afresh. `--numeric` sizes the
- * B0 cohort, `--cost-thoughts` the thoughts timed whole. The report prints the
- * brain's vocabulary to stdout and nothing to the tree.
+ * asks the tier again only for /info and the timed thoughts, and another model
+ * is asked afresh. `--numeric` sizes the B0 cohort, `--cost-thoughts` the
+ * thoughts timed whole (0 skips the timing). The report prints the brain's
+ * vocabulary to stdout and nothing to the tree.
  */
 
 import { SQL } from "bun";
@@ -84,7 +87,8 @@ import { ENTITY_TYPES, NUMERIC_NAME_RE, type EntityType } from "../server-portab
 import { ProviderError } from "../server-portable/embed.ts";
 import { INSUFFICIENT_EVIDENCE, jevDecideMany, jevInfo, resolveJevConfig, type JevDecision, type JevEnv, type JevResult } from "../server-portable/jev.ts";
 import { JEV_MAX_BATCH } from "../server-portable/jev-contract.ts";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -408,17 +412,22 @@ export function readArms(results: JevResult[], extractorType: string, stored: nu
 /** `inWindow`: the window holds the name. The extractor sometimes names what the text does not spell ("OpenBrain"), and the window is then the thought's head. */
 export type Candidate = { thought: string; entity: string; name: string; type: string; context: string; inWindow: boolean; metadata: Record<string, unknown>; stored: number };
 
-/** One window of the thought around the first place it names the entity, else its head. */
-export function windowAround(text: string, name: string, span = 400): string {
-  const at = text.toLowerCase().indexOf(name.toLowerCase());
-  if (at < 0) return text.slice(0, 2 * span);
-  return text.slice(Math.max(0, at - span), at + name.length + span);
+/**
+ * One window of the thought around the first place it names the entity, found
+ * without case on the text itself (lower-casing first can change a string's
+ * length, "İ", and misplace the window), else its head; and whether the window
+ * holds the name.
+ */
+export function windowAround(text: string, name: string, span = 400): { context: string; inWindow: boolean } {
+  const m = new RegExp(name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "iu").exec(text);
+  if (!m) return { context: text.slice(0, 2 * span), inWindow: false };
+  return { context: text.slice(Math.max(0, m.index - span), m.index + m[0].length + span), inWindow: true };
 }
 
 type Row = { thought: string; entity: string; name: string; entity_type: string; content: string; metadata: Record<string, unknown> | null; confidence: string | number };
 const toCandidate = (r: Row): Candidate => {
-  const context = windowAround(r.content, r.name);
-  return { thought: r.thought, entity: r.entity, name: r.name, type: r.entity_type, context, inWindow: context.toLowerCase().includes(r.name.toLowerCase()), metadata: r.metadata ?? {}, stored: Number(r.confidence) };
+  const { context, inWindow } = windowAround(r.content, r.name);
+  return { thought: r.thought, entity: r.entity, name: r.name, type: r.entity_type, context, inWindow, metadata: r.metadata ?? {}, stored: Number(r.confidence) };
 };
 
 /** The pre-registered sample: every person/place/organization past B0, and 50 each of the rest by md5(entity id); each entity's first mention. */
@@ -506,9 +515,30 @@ const quantile = (xs: number[], q: number) => (xs.length ? [...xs].sort((a, b) =
 const table = (header: string[], rows: (string | number)[][]) =>
   [`| ${header.join(" | ")} |`, `| ${header.map(() => "---").join(" | ")} |`, ...rows.map((r) => `| ${r.join(" | ")} |`)].join("\n");
 
-type ScoredRow = { c: Candidate; g: GradedMention; split: "dev" | "test"; arms: Record<ArmName, Reading>; b1: string | null };
-type Label = (r: ScoredRow) => 0 | 1;
+export type ScoredRow = { c: Candidate; g: GradedMention; split: "dev" | "test"; arms: Record<ArmName, Reading>; b1: string | null };
+export type Label = (r: ScoredRow) => 0 | 1;
 type Fitted = { temp: { a: number; b: number }; pOf: (s: number) => number; threshold: number };
+
+/** The cache's key: the model's provenance and what was asked. Another model, another framing or another window is another key. */
+export function cacheKey(model: { name: string; revision: string; weights_sha256: string; calibrator_sha256: string; rules: string }, ds: JevDecision[]): string {
+  return new Bun.CryptoHasher("md5").update([model.name, model.revision, model.weights_sha256, model.calibrator_sha256, model.rules].join("|")).update(JSON.stringify(ds)).digest("hex");
+}
+
+/** A cache file read and checked: an object of answer lists, or a refusal that names the file. */
+export function readCache(path: string | undefined): Record<string, JevResult[]> {
+  if (!path || !existsSync(path)) return {};
+  let data: unknown;
+  try { data = JSON.parse(readFileSync(path, "utf8")); } catch (e) { throw new Error(`--cache ${path} is not JSON (${(e as Error).message}); move it aside to start afresh`); }
+  if (!data || typeof data !== "object" || Array.isArray(data) || !Object.values(data).every(Array.isArray)) throw new Error(`--cache ${path} is not an object of answer lists; move it aside to start afresh`);
+  return data as Record<string, JevResult[]>;
+}
+
+/** Write the cache whole or not at all: a temporary file renamed over it, so a kill mid-write leaves the last good file. */
+function writeCache(path: string, cached: Record<string, JevResult[]>) {
+  const tmp = `${path}.tmp-${process.pid}`;
+  writeFileSync(tmp, JSON.stringify(cached));
+  renameSync(tmp, path);
+}
 
 /** ECE over the deciles, the calibration harness's bins. */
 const eceOf = (rows: Scored[]) => ece(reliability(rows, binOf(Infinity)));
@@ -521,11 +551,12 @@ const TIER_ARMS = ARMS.filter((x) => x !== "extractor");
  * sensitivity calls it again with that grader's labels, so a grader's margin
  * is the whole procedure under their labels, not the adjudicated arm rescored.
  */
-function fitOnDev(dev: ScoredRow[], y: Label): { fitted: Record<ArmName, Fitted>; keep: (arm: ArmName) => (r: ScoredRow) => boolean; devBa: Record<ArmName, number>; chosen: ArmName } {
+export function fitOnDev(dev: ScoredRow[], y: Label): { fitted: Record<ArmName, Fitted>; keep: (arm: ArmName) => (r: ScoredRow) => boolean; devBa: Record<ArmName, number>; chosen: ArmName } {
   const fitted = Object.fromEntries(ARMS.map((arm) => {
     const d = dev.map((r) => ({ s: r.arms[arm].s, y: y(r) })).filter((r) => Number.isFinite(r.s));
     const platt = fitPlatt(d);
-    const pOf = (s: number) => clampP(sigmoid(platt.a * s + platt.b));
+    // A slope of 0 (a constant dev score) is the base rate for every row, a -Infinity claim included (0 · -Infinity is NaN).
+    const pOf = (s: number) => clampP(sigmoid(platt.a === 0 ? platt.b : platt.a * s + platt.b));
     return [arm, { temp: fitPlatt(d, true), pOf, threshold: bestThreshold(dev.map((r) => ({ p: pOf(r.arms[arm].s), y: y(r) }))) }];
   })) as Record<ArmName, Fitted>;
   const keep = (arm: ArmName) => (r: ScoredRow) => fitted[arm].pOf(r.arms[arm].s) >= fitted[arm].threshold;
@@ -539,14 +570,17 @@ async function report(url: string, numericN: number, costThoughts: number, cache
   if (!cfg) { console.error("the report needs OB1_JEV_BASE_URL (and OB1_JEV_LOCAL=1 for a tier on this box)"); process.exit(2); }
   const grades = readGateGrades();
   const second = readGrades().mentions;
+  const cached = readCache(cachePath);
   const info = await jevInfo(cfg);
   const sql = new SQL(url);
   let found: Candidate[], missing: number, numeric: Candidate[], secondFound: Candidate[], lists: Candidate[][], perThought: number[];
   try {
     ({ found, missing } = await graded(sql, grades.mentions));
+    const order = new Map(grades.mentions.map((g, i) => [`${g.thought}:${g.entity}`, i]));
+    if (found.some((c, i) => i > 0 && order.get(`${c.thought}:${c.entity}`)! < order.get(`${found[i - 1].thought}:${found[i - 1].entity}`)!)) throw new Error("the graded rows did not come back in fixture order; the bootstrap reads rows by index");
     ({ found: secondFound } = await graded(sql, second));
     numeric = await numericCohort(sql, numericN);
-    ({ lists, perThought } = await thoughtLists(sql, costThoughts));
+    ({ lists, perThought } = costThoughts ? await thoughtLists(sql, costThoughts) : { lists: [], perThought: [] });
   } finally {
     await sql.close();
   }
@@ -562,13 +596,15 @@ async function report(url: string, numericN: number, costThoughts: number, cache
   // rules) and what was asked (the window included): another model or another
   // window is asked afresh. Written however the run ends, so a tier error late
   // in the run keeps the answers before it.
+  // A signal does not run `finally`: an interrupted ten-minute run keeps what it asked.
   const m = info.model;
-  const provenance = [m.name, m.revision, m.weights_sha256, m.calibrator_sha256, m.rules].join("|");
-  const cached: Record<string, JevResult[]> = cachePath && existsSync(cachePath) ? JSON.parse(readFileSync(cachePath, "utf8")) : {};
+  const onSignal = (code: number) => () => { if (cachePath) writeCache(cachePath, cached); process.exit(code); };
+  const onInt = onSignal(130), onTerm = onSignal(143);
+  process.once("SIGINT", onInt).once("SIGTERM", onTerm);
   let asked = 0, hits = 0;
   const decide = async (c: Candidate, cohort: keyof typeof refused) => {
     const ds = decisionsFor(c);
-    const key = new Bun.CryptoHasher("md5").update(provenance).update(JSON.stringify(ds)).digest("hex");
+    const key = cacheKey(m, ds);
     if (cached[key]) { hits++; return cached[key]; }
     try {
       asked++;
@@ -595,7 +631,8 @@ async function report(url: string, numericN: number, costThoughts: number, cache
     }
     for (const c of numeric) { const r = await decide(c, "numeric"); if (r) numericRows.push(readArms(r, c.type, c.stored)); }
   } finally {
-    if (cachePath) await Bun.write(cachePath, JSON.stringify(cached));
+    process.off("SIGINT", onInt).off("SIGTERM", onTerm);
+    if (cachePath) writeCache(cachePath, cached);
   }
   const wall = performance.now() - t0;
 
@@ -612,9 +649,9 @@ async function report(url: string, numericN: number, costThoughts: number, cache
   const { fitted, keep: armKeep, devBa, chosen } = fitOnDev(dev, y);
   const keepB1 = (r: { b1: string | null }) => r.b1 === null;
   const baTest = (keep: (r: ScoredRow) => boolean, rs = test) => balancedAccuracy(rs.map((r) => ({ keep: keep(r), y: y(r) })));
-  const devRate = dev.filter((r) => y(r)).length / dev.length;
+  const testRate = test.filter((r) => y(r)).length / test.length;
 
-  console.log("\nValidity on the test split (threshold, temperature and Platt fitted on dev; AUROC is the order alone; skill is against a constant at dev's base rate):\n");
+  console.log("\nValidity on the test split (threshold, temperature and Platt fitted on dev; AUROC is the order alone; skill is against a constant at test's base rate, scored on the same rows):\n");
   // The served probability: the tier's p_true (or the choice's total) at its own temperature; for the extractor, its stored column.
   const served = (s: number) => clampP(sigmoid(s));
   const rates = (keep: (r: ScoredRow) => boolean) => [fixed(baTest(keep), 3), pct(test.filter((r) => !y(r) && !keep(r)).length, test.filter((r) => !y(r)).length), pct(test.filter((r) => y(r) && keep(r)).length, test.filter((r) => y(r)).length)];
@@ -632,13 +669,14 @@ async function report(url: string, numericN: number, costThoughts: number, cache
         const tp = test.map((r) => ({ stated: clampP(sigmoid(f.temp.a * r.arms[arm].s)), outcome: y(r) }));
         const pl = test.map((r) => ({ stated: f.pOf(r.arms[arm].s), outcome: y(r) }));
         const ps = sv.map((x) => x.stated);
-        const sk = skill(brier(pl), devRate);
+        const sk = skill(brier(pl), testRate);
         return [arm, fixed(auroc(pos, neg), 3), `${fixed(ps.reduce((t, p) => t + p, 0) / ps.length, 2)} (${fixed(Math.min(...ps), 2)}–${fixed(Math.max(...ps), 2)})`, fixed(brier(sv), 3), fixed(eceOf(sv), 3), fixed(brier(tp), 3), fixed(brier(pl), 3),
           sk === null ? "—" : `${(100 * sk).toFixed(1)}%`, fixed(eceOf(pl), 3), fixed(f.threshold, 2), ...rates(armKeep(arm))];
       }),
     ],
   ));
-  console.log(`\n(temperature alone, b = 0, lands at 1/T ${TIER_ARMS.map((arm) => `${arm} ${fitted[arm].temp.a.toFixed(3)}`).join(", ")}: at the search's floor of 0.001 it has flattened the arm to a coin.)`);
+  const floored = TIER_ARMS.filter((arm) => fitted[arm].temp.a < 0.002);
+  console.log(`\n(temperature alone, b = 0, lands at 1/T ${TIER_ARMS.map((arm) => `${arm} ${fitted[arm].temp.a.toFixed(3)}`).join(", ")}${floored.length ? `; ${floored.join(", ")} at the search's floor of 0.001, flattened to a coin` : ""}.)`);
 
   const ranked = [...TIER_ARMS].sort((p, q) => devBa[q] - devBa[p]);
   const marginOf = (keep: (r: ScoredRow) => boolean, label: Label, rs = test) =>
@@ -653,7 +691,7 @@ async function report(url: string, numericN: number, costThoughts: number, cache
   for (const who of ["grader_a", "grader_b"] as const) {
     const label: Label = (r) => r.g[who][0];
     const f = fitOnDev(dev, label);
-    console.log(`  under ${who}'s labels alone (${test.filter((r) => label(r) === 0).length} test invalid), refit on dev: chosen ${f.chosen} (dev ${fixed(f.devBa[f.chosen], 3)}); ${f.chosen} − B1 = ${interval(marginOf(f.keep(f.chosen), label))}`);
+    console.log(`  under ${who}'s labels alone (${test.filter((r) => label(r) === 0).length} test invalid), refit on dev: chosen ${f.chosen} (dev ${[...TIER_ARMS].sort((p, q) => f.devBa[q] - f.devBa[p]).map((arm) => `${arm} ${fixed(f.devBa[arm], 3)}`).join(", ")}); ${f.chosen} − B1 = ${interval(marginOf(f.keep(f.chosen), label))}`);
   }
 
   // Typing, on the valid mentions the graders typed.
@@ -662,7 +700,7 @@ async function report(url: string, numericN: number, costThoughts: number, cache
   const extractorType = (r: ScoredRow) => ENTITY_TYPES.indexOf(r.c.type as EntityType);
   const typing = pairedBootstrap(typedRows, (rs) => [rs.filter((r) => r.arms.pertype.type === r.g.type).length / rs.length, rs.filter((r) => extractorType(r) === r.g.type).length / rs.length]);
   const most = ENTITY_TYPES.map((_, i) => typedRows.filter((r) => r.g.type === i).length);
-  console.log(`\nTyping on the ${typedRows.length} valid test mentions: the extractor ${pct(typeAcc(extractorType), typedRows.length)}, pertype ${pct(typeAcc((r) => r.arms.pertype.type!), typedRows.length)}, choice ${pct(typeAcc((r) => r.arms.choice.type!), typedRows.length)} (no type when it abstains or picks number or generic), always "${ENTITY_TYPES[most.indexOf(Math.max(...most))]}" ${pct(Math.max(...most), typedRows.length)}. pertype − extractor = ${fixed(100 * typing.diff, 1)} points, 95% interval ${fixed(100 * typing.lo, 1)} to ${fixed(100 * typing.hi, 1)}: the margin (≥ 10 points, interval above 0) is ${typing.diff >= 0.1 && typing.lo > 0 ? "MET" : "NOT met"}. pertype says ${ENTITY_TYPES[3]} for ${typedRows.filter((r) => r.arms.pertype.type === 3).length} of them.`);
+  console.log(`\nTyping on the ${typedRows.length} valid test mentions: the extractor ${pct(typeAcc(extractorType), typedRows.length)}, pertype ${pct(typeAcc((r) => r.arms.pertype.type!), typedRows.length)}, choice ${pct(typeAcc((r) => r.arms.choice.type!), typedRows.length)} (no type when it abstains or picks number or generic), always "${ENTITY_TYPES[most.indexOf(Math.max(...most))]}" (the commonest graded type on these rows) ${pct(Math.max(...most), typedRows.length)}. pertype − extractor = ${fixed(100 * typing.diff, 1)} points, 95% interval ${fixed(100 * typing.lo, 1)} to ${fixed(100 * typing.hi, 1)}: the pre-registered margin (≥ 10 points) is ${typing.diff >= 0.1 ? "MET" : "NOT met"}. pertype says ${ENTITY_TYPES[3]} for ${typedRows.filter((r) => r.arms.pertype.type === 3).length} of them.`);
   const confusion = ENTITY_TYPES.map((t, i) => [t, ...ENTITY_TYPES.map((_, j) => typedRows.filter((r) => r.g.type === i && extractorType(r) === j).length)]);
   console.log("\nthe graders' type (rows) against the extractor's (columns), valid test mentions:\n");
   console.log(table(["graded \\ extractor", ...ENTITY_TYPES], confusion));
@@ -709,8 +747,8 @@ async function report(url: string, numericN: number, costThoughts: number, cache
     }
   }
   const sizes = lists.map((l) => l.length);
-  const line = (xs: { ms: number; requests: number }[]) => `p50 ${fixed(quantile(xs.map((x) => x.ms), 0.5), 0)} ms, p90 ${fixed(quantile(xs.map((x) => x.ms), 0.9), 0)} ms, max ${fixed(quantile(xs.map((x) => x.ms), 1), 0)} ms, ${quantile(xs.map((x) => x.requests), 0.5)}–${quantile(xs.map((x) => x.requests), 1)} requests`;
-  console.log(`\nCost at real volume: mentions per thought in the brain p50 ${quantile(perThought, 0.5)}, p95 ${quantile(perThought, 0.95)}, max ${quantile(perThought, 1)}. Timed: ${cost.binary.length} whole thoughts by md5 (candidates p50 ${quantile(sizes, 0.5)}, p90 ${quantile(sizes, 0.9)}, max ${quantile(sizes, 1)}${refused.cost ? `; ${refused.cost} calls refused` : ""}), each list in one call. One binary a candidate (v2's shape): ${line(cost.binary)}. The six per-type binaries: ${line(cost.pertype)}.`);
+  const line = (xs: { ms: number; requests: number }[]) => `p50 ${fixed(quantile(xs.map((x) => x.ms), 0.5), 0)} ms, p90 ${fixed(quantile(xs.map((x) => x.ms), 0.9), 0)} ms, max ${fixed(quantile(xs.map((x) => x.ms), 1), 0)} ms, requests a call ${quantile(xs.map((x) => x.requests), 0)} to ${quantile(xs.map((x) => x.requests), 1)} (p50 ${quantile(xs.map((x) => x.requests), 0.5)})`;
+  if (lists.length) console.log(`\nCost at real volume: mentions per thought in the brain p50 ${quantile(perThought, 0.5)}, p95 ${quantile(perThought, 0.95)}, max ${quantile(perThought, 1)}. Timed: ${cost.binary.length} whole thoughts by md5 (candidates p50 ${quantile(sizes, 0.5)}, p90 ${quantile(sizes, 0.9)}, max ${quantile(sizes, 1)}${refused.cost ? `; ${refused.cost} calls refused` : ""}), each list in one call. One binary a candidate (v2's shape): ${line(cost.binary)}. The six per-type binaries: ${line(cost.pertype)}.`);
 
   // For a human: the test mentions the chosen arm and B1 disagree on, with the grade.
   console.log(`\ntest mentions where ${chosen} and B1 disagree — the extractor's type, the name, the grade, ${chosen}'s P, pertype's type, * when the window lacks the name:`);
@@ -753,12 +791,19 @@ function selfCheck() {
   ok(w.a < 0.1, `a temperature on a confident column the labels do not follow flattens it (1/T = ${w.a.toFixed(3)}), not sharpens it`);
   const flat = fitPlatt([0, 1, 1, 0, 1].map((y) => ({ s: 0.3, y: y as 0 | 1 })));
   ok(flat.a === 0 && Math.abs(flat.b - logit(0.6)) < 1e-12, "Platt on scores that do not vary returns the base rate, not a slope of arbitrary sign");
+  const tied = fitPlatt([{ s: 1, y: 1 }, { s: 1, y: 0 }, { s: 2, y: 1 }, { s: 0, y: 0 }]);
+  ok(tied.a > 0, "scores that vary but repeat their first value are fitted, not taken for constant");
+  const tflat = fitPlatt([0, 1, 1].map((y) => ({ s: 0.3, y: y as 0 | 1 })), true);
+  ok(tflat.b === 0, "a temperature has no offset, constant scores or not");
   ok(kappa([1, 1, 0, 0], [1, 1, 0, 0]) === 1 && Math.abs(kappa([1, 0, 1, 0], [1, 1, 0, 0])) < 1e-12, "kappa: agreement 1, agreement at chance 0");
   ok(Math.abs(kappa([1, 1, 1, 0], [1, 1, 0, 0]) - 0.5) < 1e-12 && kappa([1, 1], [1, 1]) === 1, "kappa with unequal marginals (0.75 agreement, 0.5 by chance: 0.5), and one label throughout is agreement");
   const rows = Array.from({ length: 200 }, (_, i) => ({ a: i % 2 === 0, b: i % 4 === 0, y: (i % 2 === 0 ? 1 : 0) as 0 | 1 }));
   const bs = pairedBootstrap(rows, (rs) => [balancedAccuracy(rs.map((r) => ({ keep: r.a, y: r.y }))), balancedAccuracy(rs.map((r) => ({ keep: r.b, y: r.y })))]);
+  const oneClassy = Array.from({ length: 10 }, (_, i) => ({ keep: i === 0, y: (i === 0 ? 1 : 0) as 0 | 1 }));
+  const thin = pairedBootstrap(oneClassy, (rs) => [balancedAccuracy(rs), 0.5], 2000);
+  ok(thin.kept < 2000 && thin.kept > 0 && Number.isFinite(thin.lo) && Number.isFinite(thin.hi), `a resample with one class has no balanced accuracy and is dropped, and counted (${thin.kept} of 2000 kept)`);
   ok(Math.abs(bs.diff - 0.25) < 1e-12 && bs.lo > 0 && bs.hi <= 0.5 && bs.kept === 10_000 && JSON.stringify(bs) === JSON.stringify(pairedBootstrap(rows, (rs) => [balancedAccuracy(rs.map((r) => ({ keep: r.a, y: r.y }))), balancedAccuracy(rs.map((r) => ({ keep: r.b, y: r.y })))])), `the paired bootstrap: the point difference exact, the interval around it, every resample kept, the same seed the same interval (${bs.lo.toFixed(3)}–${bs.hi.toFixed(3)})`);
-  // Pairing: B errs everywhere A errs and on ten rows more, so on ANY resample of
+  // Pairing: B errs everywhere A errs and on four rows more, so on ANY resample of
   // the same rows A − B >= 0. Resampled apart, the two statistics cross zero.
   // A errs on 20 rows, B on those and 4 more: the difference (0.02) is small beside either statistic's own spread.
   const nested = Array.from({ length: 200 }, (_, i) => ({ y: (i % 2) as 0 | 1, a: i < 20 ? i % 2 === 0 : i % 2 === 1, b: i < 24 ? i % 2 === 0 : i % 2 === 1 }));
@@ -796,23 +841,51 @@ function selfCheck() {
   ok(noType(INSUFFICIENT_EVIDENCE) === -1 && noType("number") === -1 && noType("generic") === -1, "the choice names no type when it abstains or picks number or generic: one rule for all three");
   ok(readArms([bin(0, 0), bin(0, 0), ...per.map((s) => bin(s, 0)), choice], "not-a-type", 1).claim.s === -Infinity, "a claim for a type off the vocabulary scores as a reject");
 
-  // The grades: the shape, and the committed file when it is there.
   const A = "10000000-0000-4000-8000-000000000001", B = "10000000-0000-4000-8000-000000000002";
+  // The dev procedure: the refit, the threshold and the arm, under the labels given.
+  const mk = (i: number, scores: Partial<Record<ArmName, number>>, valid: 0 | 1, alt: 0 | 1): ScoredRow => ({
+    c: { thought: A, entity: A, name: `n${i}`, type: "tool", context: "c", inWindow: true, metadata: {}, stored: 1 },
+    g: { thought: A, entity: A, valid, type: valid ? 3 : -1, grader_a: [valid, valid ? 3 : -1], grader_b: [alt, alt ? 3 : -1] },
+    split: "dev", b1: null,
+    arms: Object.fromEntries(ARMS.map((arm) => [arm, { s: scores[arm] ?? 0, type: null }])) as Record<ArmName, Reading>,
+  });
+  // v2 follows the adjudicated label, choice follows grader B's, and v1 ties v2 exactly.
+  const devRows = Array.from({ length: 40 }, (_, i) => { const y = (i % 2) as 0 | 1, alt = (i % 4 < 2 ? 1 : 0) as 0 | 1; return mk(i, { v1: y ? 2 : -2, v2: y ? 2 : -2, choice: alt ? 2 : -2, claim: i % 5 ? 0.5 : -Infinity }, y, alt); });
+  const byValid = fitOnDev(devRows, (r) => r.g.valid), byB = fitOnDev(devRows, (r) => r.g.grader_b[0]);
+  ok(byValid.chosen === "v1" && byValid.devBa.v1 === 1 && byValid.devBa.v2 === 1 && byB.chosen === "choice" && byB.devBa.choice === 1, `the arm is chosen on dev under the labels given, the first in ARMS' order on a tie (${byValid.chosen}; under grader B's labels ${byB.chosen})`);
+  ok(Number.isFinite(byValid.fitted.claim.threshold) && Number.isFinite(byValid.fitted.claim.pOf(-Infinity)) && byValid.fitted.claim.pOf(-Infinity) === byValid.fitted.claim.pOf(0.5), "an arm constant on its finite dev rows fits the base rate for every row, a -Infinity claim included (0 · -Infinity would be NaN), and keeps a finite threshold");
+  const onlyExtractor = fitOnDev(Array.from({ length: 20 }, (_, i) => mk(i, { extractor: i % 2 ? 5 : -5 }, (i % 2) as 0 | 1, 0)), (r) => r.g.valid);
+  ok(onlyExtractor.devBa.extractor === 1 && onlyExtractor.chosen !== "extractor", "the extractor's column is scored but never chosen: the verdict is about the tier's arms");
+  ok(byB.fitted.v2.threshold !== byValid.fitted.v2.threshold || byB.devBa.v2 !== byValid.devBa.v2, "the threshold and the dev score are refit under another grader's labels, not carried over");
+  // The cache: the key names the model and what was asked; a bad file is refused by name.
+  const model = { name: "m", revision: "r", weights_sha256: "w", calibrator_sha256: "c", rules: "u" };
+  const k0 = cacheKey(model, ds);
+  ok(k0 !== cacheKey({ ...model, revision: "r2" }, ds) && k0 !== cacheKey({ ...model, weights_sha256: "w2" }, ds) && k0 !== cacheKey(model, decisionsFor({ name: "Bun", context: "ctx2" })) && k0 === cacheKey({ ...model }, decisionsFor({ name: "Bun", context: "ctx" })), "the cache key changes with the model's revision or weights and with the window, and only with them");
+  const tmpDir = tmpdir(), bad1 = join(tmpDir, `gate-cache-${process.pid}-1.json`), bad2 = join(tmpDir, `gate-cache-${process.pid}-2.json`);
+  writeFileSync(bad1, "{\"a\": [1]"); writeFileSync(bad2, "{\"a\": 1}");
+  const refusal = (path: string) => { try { readCache(path); return ""; } catch (e) { return (e as Error).message; } };
+  ok(refusal(bad1).includes(bad1) && refusal(bad1).includes("not JSON") && refusal(bad2).includes("not an object of answer lists") && Object.keys(readCache(join(tmpDir, "absent-gate-cache.json"))).length === 0, "a cache that is not JSON, or not an object of answer lists, is refused by name; an absent one is empty");
+  rmSync(bad1); rmSync(bad2);
+
+  // The grades: the shape, and the committed file when it is there.
   const good = { generated: "g", origin: "o", note: "n", mentions: [{ thought: A, entity: B, valid: 1, type: 3, grader_a: [1, 3], grader_b: [1, 2] }] };
   ok(validateGateGrades(good).length === 0, "a sound grades file validates");
   const row = good.mentions[0], C = "10000000-0000-4000-8000-00000000000c";
-  const bad = validateGateGrades({ generated: "", origin: "o", note: "", mentions: [
+  const bad = validateGateGrades({ generated: "", note: "", mentions: [
     { ...row, valid: 0 }, { ...row, entity: C, type: 6 }, { ...row, entity: "x" }, { ...row, entity: C, thought: `x${A}` }, { ...row, entity: C, thought: A.toUpperCase().replace("10000000", "1000000A") },
     { ...row, entity: C, valid: 1, type: -1 }, { ...row, entity: C, valid: 2 }, { ...row, entity: C, type: 1.5 },
     { ...row, entity: C, grader_a: [1] }, { ...row, entity: C, grader_b: [2, 1] }, { ...row, entity: C, grader_b: [1, 1.5] }, null, { ...row }, "a row", { ...row, entity: C, grader_a: [1, 3, 3] },
   ] });
-  const expect = ["generated is missing", "note is missing", "mentions[0]: valid 0 with type 3", "mentions[1]: type 6 is not an index", `mentions[2]: "x" is not a lower-case id`, `mentions[3]: "x${A}" is not a lower-case id`, "mentions[4]: ", "mentions[5]: valid 1 with type -1", "mentions[6]: valid 2 is not 0 or 1", "mentions[7]: type 1.5 is not an index", "mentions[8]: grader_a is not [valid, type]", "mentions[9]: grader_b is not [valid, type]", "mentions[10]: grader_b is not [valid, type]", "mentions[11] is not an object", "mentions[12]: ", "is graded twice", "mentions[13] is not an object", "mentions[14]: grader_a is not [valid, type]"];
+  const expect = ["generated is missing", "origin is missing", "note is missing", "mentions[0]: valid 0 with type 3", "mentions[1]: type 6 is not an index", `mentions[2]: "x" is not a lower-case id`, `mentions[3]: "x${A}" is not a lower-case id`, "mentions[4]: ", "mentions[5]: valid 1 with type -1", "mentions[6]: valid 2 is not 0 or 1", "mentions[7]: type 1.5 is not an index", "mentions[8]: grader_a is not [valid, type]", "mentions[9]: grader_b is not [valid, type]", "mentions[10]: grader_b is not [valid, type]", "mentions[11] is not an object", "mentions[12]: ", "is graded twice", "mentions[13] is not an object", "mentions[14]: grader_a is not [valid, type]"];
   const unmet = expect.filter((e) => !bad.some((p) => p.includes(e)));
   ok(unmet.length === 0, `each rule refuses by name: a missing label, an invalid row with a type and a valid one without, a type off the vocabulary or not an integer, a validity not 0/1, a bad id in either column (unanchored, upper case), each grader's label of the wrong shape or values, a row that is not an object, a duplicate (unmet: ${unmet.join("; ") || "none"})`);
   ok(validateGateGrades(null)[0] === "the fixture is not an object" && validateGateGrades([])[0] === "the fixture is not an object" && validateGateGrades({ generated: "g", origin: "o", note: "n" }).includes("mentions is not an array"), "a fixture that is not an object, or has no mentions array, is a problem and not a throw");
   ok(splitOf(A) === "test" && splitOf("10000000-0000-4000-8000-000000000003") === "dev", "the split is pinned: md5's first hex digit below 8 is dev");
   const wtext = `${"x".repeat(500)}The Name${"y".repeat(500)}`;
-  ok(windowAround(wtext, "the name") === `${"x".repeat(400)}The Name${"y".repeat(400)}` && windowAround("short The Name text", "the name") === "short The Name text" && windowAround(wtext, "absent") === wtext.slice(0, 800), "the window: 400 characters either side of the first place the name appears, found without case, clipped at the ends; the head when the text lacks the name");
+  const win = (t: string, n: string) => windowAround(t, n);
+  ok(win(wtext, "the name").context === `${"x".repeat(400)}The Name${"y".repeat(400)}` && win(wtext, "the name").inWindow && win("short The Name text", "the name").context === "short The Name text" && win(wtext, "absent").context === wtext.slice(0, 800) && !win(wtext, "absent").inWindow, "the window: 400 characters either side of the first place the name appears, found without case, clipped at the ends; the head, and not in the window, when the text lacks the name");
+  const dotted = `${"İ".repeat(500)} see Bun here`;
+  ok(win(dotted, "bun").inWindow && win(dotted, "bun").context.includes("Bun") && win("a+b (c) and more", "(c)").inWindow && win("a+b (c) and more", "a+b").inWindow && win("x [y z", "[y").inWindow, "the name is found on the text itself: a character whose lower case is longer (İ) does not misplace the window, and a name's regex characters are literal");
   if (existsSync(GATE_GRADES_PATH)) {
     const g = readGateGrades();
     const n = g.mentions.length, dev = g.mentions.filter((m) => splitOf(m.thought) === "dev").length;
@@ -833,7 +906,7 @@ if (import.meta.main) {
   else {
     const url = arg("--url") ?? process.env.DATABASE_URL;
     const numericN = Number(arg("--numeric") ?? 60), costThoughts = Number(arg("--cost-thoughts") ?? 40);
-    if (!url || !Number.isInteger(numericN) || numericN < 1 || !Number.isInteger(costThoughts) || costThoughts < 1) {
+    if (!url || !Number.isInteger(numericN) || numericN < 1 || !Number.isInteger(costThoughts) || costThoughts < 0) {
       console.error("usage: bun eval-jev-gate.ts --url postgres://… [--numeric 60] [--cost-thoughts 40] [--cache <file>] | --dump-sample <file> | --self-check");
       process.exit(2);
     }
