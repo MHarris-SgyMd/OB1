@@ -83,7 +83,10 @@
  * restricted thought's full content; text mode sent `exclude_restricted: true`
  * inside p_filter and answered an empty page, reading no date bound at all. A
  * restricted twin at that block's capture holds both modes, the open switch,
- * the bounds as instants, the refusals as 400s and the emptied first page.
+ * the bounds as instants, the refusals as 400s, the emptied first page and
+ * the page past the last hit; GET /recent, which filtered no tier at all,
+ * hides the twin too; and the date helpers rest-api copied from enhanced-mcp
+ * are held identical to the character (the text pins at the end).
  *
  * The files are imported as modules — each exports Bun's entry shape, and its
  * default export's `fetch` is the handler driven here (SMD-1799) — under the
@@ -318,12 +321,13 @@ async function plant(tag: string): Promise<string> {
  * the twin — by the `sensitivity_tier` column, the row no search may show
  * (SMD-1986 for enhanced-mcp's three tools, SMD-2054 for rest-api's /search).
  * Importance 5 and quality 100: search_thoughts_text's rank adds importance/20
- * + quality_score/500 to a text score the two contents tie on (the same cover
- * of the query's words), so the twin's 0.45 beats a stubbed capture's 0.316
- * (the stub leaves importance at the default 3 and confidence 0.9 becomes
- * quality 83) and the twin is the first row of the function's order — the
- * page drives lean on that; a tie would fall to created_at DESC, which the
- * later-planted twin also wins.
+ * + quality_score/500 to a text term the two contents tie on (both hold the
+ * query as a substring, so the ILIKE floor of 0.35 is each one's), so the
+ * twin's bonus, 0.45, beats a stubbed capture's 0.316 (the stub leaves
+ * importance at the default 3 and confidence 0.9 becomes quality 83) and the
+ * twin is the first row of the function's order — the page drives lean on
+ * that; a tie would fall to created_at DESC, which the later-planted twin
+ * also wins.
  */
 async function plantRestricted(hidden: string, atText: string): Promise<string> {
   const [{ id }] = await sql`INSERT INTO thoughts (content, content_fingerprint, embedding, embedding_model, sensitivity_tier, importance, quality_score, metadata)
@@ -845,6 +849,12 @@ try {
   const semantic = await sem({});
   assert(semantic.status === 200 && ids(semantic).includes(cid) && !ids(semantic).includes(rid),
     `POST /search in semantic mode finds the capture and not the restricted twin — the tier read by the column, looked up by id after the match (${semantic.status}: ${ids(semantic).length} rows${ids(semantic).includes(rid) ? ", the twin among them" : ""})`);
+  // match_thoughts returns no `type` and no `source_type` either (review pass 1): the projection named both from the
+  // row, so `source_type` was missing from every semantic result. Both come from the same lookup as the tier.
+  const [own] = await sql`SELECT type, source_type FROM thoughts WHERE id = ${cid}`;
+  const hit = ((semantic.json?.results ?? []) as Record<string, unknown>[]).find((x) => x.id === cid);
+  assert(hit !== undefined && "source_type" in hit && hit.source_type === own.source_type && hit.type === own.type,
+    `…and a semantic result carries the row's source_type and type, read by the same lookup — match_thoughts returns neither (${JSON.stringify({ type: hit?.type, source_type: hit?.source_type })} vs ${JSON.stringify(own)})`);
   const textMode = await txt({});
   assert(textMode.status === 200 && ids(textMode).includes(cid) && !ids(textMode).includes(rid) && textMode.json?.total === 2 && textMode.json?.count === 1 && textMode.json?.total_pages === 1,
     `…and in text mode, through search_thoughts_text with p_filter {}: the page filtered by the column the function returns, total its count with the hidden row, count the rows shown (${textMode.status}: ${JSON.stringify({ count: textMode.json?.count, total: textMode.json?.total, total_pages: textMode.json?.total_pages })})`);
@@ -855,7 +865,7 @@ try {
   const past = "2000-01-01T00:00:00Z";
   const [beforeSem, sinceSem, beforeText, sinceText] = await Promise.all([sem({ end_date: past }), sem({ start_date: past }), txt({ end_date: past }), txt({ start_date: past })]);
   assert(ids(beforeSem).length === 0 && ids(sinceSem).includes(cid) && ids(beforeText).length === 0 && ids(sinceText).includes(cid) && beforeText.json?.total === 2,
-    `a date bound is applied to the rows in both modes: an end_date in the past hides the capture, a start_date in the past shows it; text mode's total still counts the function's rows (${ids(beforeSem).length}/${ids(sinceSem).length}/${ids(beforeText).length}/${ids(sinceText).length}; total ${beforeText.json?.total})`);
+    `a date bound is applied to the rows in both modes: an end_date in the past hides the capture (the arms with teeth), a start_date in the past leaves it (the controls); text mode's total still counts the function's rows (${ids(beforeSem).length}/${ids(sinceSem).length}/${ids(beforeText).length}/${ids(sinceText).length}; total ${beforeText.json?.total})`);
   // `later` names a clock one hour after the capture in a zone two hours ahead: an instant one hour BEFORE it, so a
   // window opening there holds the capture — compared as strings its digits sorted after the row's and dropped it.
   const [{ later }] = await sql`SELECT to_char((created_at + interval '1 hour') AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS') || '+02:00' AS later FROM thoughts WHERE id = ${cid}`;
@@ -865,10 +875,19 @@ try {
   assert(prose.status === 400 && /end_date is not an ISO 8601 date or date-time: yesterday/.test(String(prose.json?.error)) && inverted.status === 400 && /is after end_date/.test(String(inverted.json?.error)),
     `a bound off the ISO shape, or a window closed before it opens, is a 400 naming the field (${prose.status} ${prose.json?.error} / ${inverted.status} ${inverted.json?.error})`);
   // A page the tier filter emptied, with the hit behind it: the twin ranks first (plantRestricted), so with limit 1 it
-  // is the whole first page — count 0, the total and total_pages the function's — and page 2 holds the capture.
-  const [onePage, secondPage] = await Promise.all([txt({ limit: 1 }), txt({ limit: 1, page: 2 })]);
-  assert(onePage.status === 200 && ids(onePage).length === 0 && onePage.json?.count === 0 && onePage.json?.total === 2 && onePage.json?.total_pages === 2 && ids(secondPage).includes(cid) && secondPage.json?.page === 2,
-    `a text page the tier filter emptied answers count 0 with total 2 and total_pages 2 — another page follows — and page 2 holds the capture (${JSON.stringify({ count: onePage.json?.count, total: onePage.json?.total, total_pages: onePage.json?.total_pages })}; page 2: ${ids(secondPage).length})`);
+  // is the whole first page — count 0, the total and total_pages the function's — and page 2 holds the capture. A page
+  // past the last hit has no rows for the count to ride on, so its total is 0 (the README says so).
+  const [onePage, secondPage, pastEnd] = await Promise.all([txt({ limit: 1 }), txt({ limit: 1, page: 2 }), txt({ limit: 1, page: 3 })]);
+  assert(onePage.status === 200 && ids(onePage).length === 0 && onePage.json?.count === 0 && onePage.json?.total === 2 && onePage.json?.total_pages === 2 && ids(secondPage).includes(cid) && secondPage.json?.count === 1,
+    `a text page the tier filter emptied answers count 0 with total 2 and total_pages 2 — another page follows — and page 2 holds the capture, count 1 (${JSON.stringify({ count: onePage.json?.count, total: onePage.json?.total, total_pages: onePage.json?.total_pages })}; page 2: ${ids(secondPage).length})`);
+  assert(pastEnd.status === 200 && pastEnd.json?.count === 0 && pastEnd.json?.total === 0 && pastEnd.json?.total_pages === 0,
+    `…and page 3, past the last hit, answers total 0 — the count rides on the rows, and there are none (${JSON.stringify({ count: pastEnd.json?.count, total: pastEnd.json?.total, total_pages: pastEnd.json?.total_pages })})`);
+  // GET /recent (review pass 1): the one content route with no tier filter at all — it answered every restricted
+  // thought's full content, newest first. Its siblings' exclude_restricted, default true.
+  const recent = await send(h, "GET", "/recent?limit=50");
+  const recentOpen = await send(h, "GET", "/recent?limit=50&exclude_restricted=false");
+  assert(recent.status === 200 && ids(recent).includes(cid) && !ids(recent).includes(rid) && ids(recentOpen).includes(rid) && ids(recentOpen).includes(cid),
+    `GET /recent hides the restricted twin by default and shows it under exclude_restricted=false, as its siblings do — it filtered nothing before (${recent.status}: ${ids(recent).length} rows${ids(recent).includes(rid) ? ", the twin among them" : ""}; open: ${ids(recentOpen).length})`);
 }
 
 // ── recipes/repo-learning-coach ──────────────────────────────────────────────
@@ -1070,6 +1089,17 @@ try {
 
 console.log("\n[the files say what this test assumes]");
 const spells = (rel: string, re: RegExp, what: string) => assert(re.test(readFileSync(join(ROOT, rel), "utf8")), `${rel} ${what}`);
+// The date helpers rest-api's /search copied from enhanced-mcp (SMD-2054) — ISO_BOUND, parseBound, dateWindow,
+// withinDates — are held identical to the character, comment lines and the row's type aside: the enhanced-mcp block
+// above drives the date-only, zone-less and calendar arms through ITS copy, and a divergence in rest-api's would pass
+// every arm of the rest-api block (review pass 1). The two servers deploy alone and share only _shared/.
+{
+  const dateHelpers = (rel: string) => (readFileSync(join(ROOT, rel), "utf8").match(/^const ISO_BOUND[\s\S]*?^function withinDates[\s\S]*?^}$/m)?.[0] ?? "")
+    .split("\n").filter((l) => !/^\s*(\/\/|\*|\/\*\*)/.test(l)).join("\n").replace("row: ThoughtRow", "row: Record<string, unknown>");
+  const [ours, theirs] = [dateHelpers("integrations/rest-api/index.ts"), dateHelpers("integrations/enhanced-mcp/index.ts")];
+  assert(ours.length > 1000 && ours === theirs,
+    `integrations/rest-api/index.ts 's date helpers are integrations/enhanced-mcp/index.ts's to the character, comment lines and the row's type aside (${ours.length} vs ${theirs.length} chars)`);
+}
 // A paste-in snippet with free variables; a README's sample.
 spells("recipes/provenance-chains/mcp-tools.ts", /"upsert_thought",\s*\{\s*p_content: content,\s*p_payload: \{[^}]*embedding_model: EMBEDDING_MODEL/s, "captures content, vector and label in one 3-argument upsert_thought");
 spells("recipes/provenance-chains/mcp-tools.ts", /p_embedding: embedding,/, "…passing the vector as p_embedding");

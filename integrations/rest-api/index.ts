@@ -22,6 +22,8 @@
 // modes — the note above tiersOf(). Semantic mode compared a column
 // match_thoughts never returns and leaked restricted rows; text mode sent
 // `exclude_restricted: true` as a metadata containment and answered nothing.
+// GET /recent, the one content route with no tier filter at all, takes
+// exclude_restricted (default true) as its siblings do (review pass 1).
 /**
  * rest-api — REST API gateway for Open Brain.
  *
@@ -436,23 +438,31 @@ export default {
 // a column match_thoughts does not return (it returns id, content, metadata,
 // similarity, created_at and score): undefined !== "restricted" is always
 // true, and restricted thoughts' full content came back under the default
-// exclude_restricted. The tier is read from the COLUMN by the helpers below,
-// and the date bounds are instants applied to the rows in both modes (text
-// mode read none). They are enhanced-mcp's (SMD-1986), kept in step by hand:
-// the two servers deploy alone and share only _shared/. extensions/test-writes.ts
+// exclude_restricted. The tier is read from the COLUMN — columnsOf below, for
+// the ids match_thoughts returned — and the date bounds are instants applied
+// to the rows in both modes (text mode read none). The date helpers are
+// enhanced-mcp's (SMD-1986): the two servers deploy alone and share only
+// _shared/, so the text is copied, and extensions/test-writes.ts holds the two
+// copies identical to the character (comments and the row's type aside) and
 // drives this route against a restricted twin planted at a captured thought's
 // vector.
 
+type ThoughtColumns = { sensitivity_tier: string; type: unknown; source_type: unknown };
 /**
- * The `sensitivity_tier` column of each id, one query — semantic mode reads
- * the tier this way before it drops a restricted row; the text function
- * returns the column and needs no lookup.
+ * The enhanced-thoughts columns of each id, one query: `sensitivity_tier`, on
+ * which semantic mode drops a restricted row, and `type` and `source_type`,
+ * which the semantic projection names — match_thoughts returns none of the
+ * three (review pass 1: `row.source_type` was undefined on every semantic
+ * result, so the key was missing from the JSON while text mode carried it,
+ * and `row.type` was a dead fallback behind metadata.type). The text function
+ * returns all three and needs no lookup.
  */
-async function tiersOf(ids: string[]): Promise<Map<string, string>> {
+async function columnsOf(ids: string[]): Promise<Map<string, ThoughtColumns>> {
   if (ids.length === 0) return new Map();
-  const { data, error } = await supabase.from("thoughts").select("id, sensitivity_tier").in("id", ids);
-  if (error) throw new Error(`sensitivity_tier lookup failed: ${error.message}`);
-  return new Map(((data ?? []) as { id: unknown; sensitivity_tier: unknown }[]).map((r) => [String(r.id), String(r.sensitivity_tier ?? "standard")]));
+  const { data, error } = await supabase.from("thoughts").select("id, sensitivity_tier, type, source_type").in("id", ids);
+  if (error) throw new Error(`thoughts column lookup failed: ${error.message}`);
+  return new Map(((data ?? []) as Record<string, unknown>[]).map((r) => [String(r.id),
+    { sensitivity_tier: String(r.sensitivity_tier ?? "standard"), type: r.type ?? null, source_type: r.source_type ?? null }]));
 }
 
 /**
@@ -463,9 +473,9 @@ async function tiersOf(ids: string[]): Promise<Map<string, string>> {
  * too — never the process's zone. Semantic mode compared the strings before:
  * a bound written with a UTC offset sorted against the shim's `Z` rendering
  * by its digits (later digits for an earlier instant), and a bound that did
- * not parse hid every row or was ignored, neither with a word. GET /thoughts,
- * GET /count and GET /recent hand the same string to Postgres, which reads a
- * bare date in the session's time zone and takes shapes this refuses
+ * not parse hid every row or was ignored, neither with a word. GET /thoughts
+ * and GET /count hand the same string to Postgres, which reads a bare date in
+ * the session's time zone and takes shapes this refuses
  * (`yesterday`, an hour-only offset); for a bound both accept, they agree on
  * the instant on a database running in UTC, the container images' default. A
  * bound off the shape, or a window closed before it opens, is a 400 naming the
@@ -534,7 +544,8 @@ async function handleSearch(req: Request): Promise<Response> {
     if (error) throw new Error(`search failed: ${error.message}`);
 
     const rows = (data ?? []) as Record<string, unknown>[];
-    const totalCount = rows.length > 0 ? Number(rows[0].total_count ?? rows.length) : 0;
+    // total_count rides on every row the function returns (hit_count, non-null); a page past the last hit has none.
+    const totalCount = rows.length > 0 ? Number(rows[0].total_count) : 0;
     const results = rows
       .filter((row) => !excludeRestricted || row.sensitivity_tier !== "restricted")
       .filter((row) => withinDates(row, window))
@@ -558,18 +569,22 @@ async function handleSearch(req: Request): Promise<Response> {
   if (error) throw new Error(`search failed: ${error.message}`);
 
   const allRows = (data ?? []) as Record<string, unknown>[];
-  // The tier by the column, one lookup of the returned ids; an id the lookup did not return (deleted between the
-  // two calls) is treated as restricted — the filter fails closed.
-  const tiers = excludeRestricted ? await tiersOf(allRows.map((r) => String(r.id))) : null;
+  // The columns by id, one lookup: the tier, on which the filter drops a row — an id the lookup did not return
+  // (deleted between the two calls) is treated as restricted, so the filter fails closed; nothing drives that
+  // branch, since the lookup reads the table the match just read — and the two the projection names.
+  const columns = await columnsOf(allRows.map((r) => String(r.id)));
   const semanticRows = allRows
-    .filter((r) => tiers === null || (tiers.get(String(r.id)) ?? "restricted") !== "restricted")
+    .filter((r) => !excludeRestricted || (columns.get(String(r.id))?.sensitivity_tier ?? "restricted") !== "restricted")
     .filter((r) => withinDates(r, window))
     .slice(0, limit);
 
-  const results = semanticRows.map((row) => ({
-    id: row.id, content: row.content, type: (row.metadata as Record<string, unknown>)?.type ?? row.type,
-    similarity: row.similarity, source_type: row.source_type, created_at: row.created_at,
-  }));
+  const results = semanticRows.map((row) => {
+    const own = columns.get(String(row.id));
+    return {
+      id: row.id, content: row.content, type: (row.metadata as Record<string, unknown>)?.type ?? own?.type ?? null,
+      similarity: row.similarity, source_type: own?.source_type ?? null, created_at: row.created_at,
+    };
+  });
 
   return json({ results, count: results.length, total: results.length, page: 1, per_page: limit, total_pages: 1, mode: "semantic" });
 }
@@ -660,6 +675,10 @@ async function handleRecent(url: URL): Promise<Response> {
   const source = url.searchParams.get("source")?.trim() || null;
   const type = url.searchParams.get("type")?.trim() || null;
   const topic = url.searchParams.get("topic")?.trim() || null;
+  // ob1-fork (SMD-2054, review pass 1): the one content route with no tier filter — `GET /recent?limit=100`
+  // answered every restricted thought's full content, newest first. exclude_restricted, default true, as its
+  // siblings (/thoughts, /count, /thought/:id) take it; the predicate is the column's.
+  const excludeRestricted = url.searchParams.get("exclude_restricted") !== "false";
 
   let query = supabase.from("thoughts")
     .select("id, content, type, source_type, importance, metadata, created_at, updated_at")
@@ -669,10 +688,11 @@ async function handleRecent(url: URL): Promise<Response> {
   if (source) query = query.eq("source_type", source);
   if (type) query = query.eq("type", type);
   if (topic) query = query.contains("metadata", { topics: [topic] });
+  if (excludeRestricted) query = query.neq("sensitivity_tier", "restricted");
 
   const { data, error } = await query;
   if (error) throw new Error(`recent query failed: ${error.message}`);
-  return json({ results: data ?? [], count: (data ?? []).length, offset, limit, filters: { source, type, topic } });
+  return json({ results: data ?? [], count: (data ?? []).length, offset, limit, filters: { source, type, topic, exclude_restricted: excludeRestricted } });
 }
 
 // ── Get / Update / Delete Thought ───────────────────────────────────────────
