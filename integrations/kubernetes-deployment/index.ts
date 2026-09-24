@@ -16,6 +16,7 @@
  *   MCP_ACCESS_KEYS - name:scope:sha256 access keys (the older single MCP_ACCESS_KEY still works);
  *                     capture_thought is registered only for a write-scoped key
  *   OPEN_BRAIN_CITATION_BASE_URL - Optional base URL for search/fetch citation links
+ *   PORT - the port the export at the tail listens on (default 8000; the image and k8s/openbrain.yml leave it)
  */
 
 // ob1-fork (SMD-1455): access keys go through ../_shared/auth.ts — the core server's

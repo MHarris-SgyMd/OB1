@@ -87,11 +87,11 @@ async function importServer(file: string): Promise<Handler> {
 }
 
 // ── The vendored servers' packages, from this directory's install ────────────
-// A recipe or integration imports hono, zod, @hono/mcp and the SDK by bare name
-// and has no install of its own beside it (kubernetes-deployment's package.json
-// is the image's, SMD-1800; run from a checkout, Bun fetches the four on demand —
-// SMD-1991), so this loader resolves those names from extensions/node_modules,
-// the pinned versions. Until SMD-1800 it also read Deno's specifiers — a `jsr:`
+// A recipe or integration imports STACK's four (hono, zod, @hono/mcp, the SDK) by
+// bare name and has no install of its own beside it (kubernetes-deployment's
+// package.json is the image's, SMD-1800; run from a checkout, Bun fetches the four
+// on demand — SMD-1991), so this loader resolves those names from
+// extensions/node_modules, the pinned versions. Until SMD-1800 it also read Deno's specifiers — a `jsr:`
 // type-only import dropped, `npm:pkg@version` unprefixed, the deno.land postgres
 // driver stubbed for kubernetes-deployment; none is left in the tree (check 11
 // refuses them in every shim importer).

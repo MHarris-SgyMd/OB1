@@ -4,8 +4,8 @@ description: |
   Capture, search and browse thoughts in an Open Brain over plain HTTP, with
   no MCP transport involved. Use this skill where Claude Code's MCP feature
   is disabled or the network blocks remote MCP endpoints, but the brain's
-  REST gateway (`integrations/open-brain-rest`, on the stack `SETUP.md`
-  builds) is reachable. Triggers: prompts like "remember this", "save that
+  REST gateway (`integrations/open-brain-rest`, on a brain built as this
+  skill's README says) is reachable. Triggers: prompts like "remember this", "save that
   for later", "what did I note about X", "search my brain for Y", "what
   thoughts touched on Z", or any explicit request to record or recall
   personal memory.

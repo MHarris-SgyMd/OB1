@@ -376,7 +376,7 @@ scripts/migrate-to-sql-shim.ts   # fix 13  (new file — the codemod); change 74
 <23 recipe/integration files>    # fix 13  (one import line each; revert with the codemod; 24 until change 74 put the local-brain client back)
 <7 extension servers>            # change 64 (keys through extensions/_shared/auth.ts; the tools that write gated)
 extensions/_shared/auth.ts       # change 64 (new file — server-portable/auth.ts byte for byte; the test holds them equal)
-extensions/test-auth.ts          # change 64 (new file — the seven servers under scoped keys); change 67 widened it to every vendored server; change 74 starts every server on the shim under bun
+extensions/test-auth.ts          # change 64 (new file — the seven servers under scoped keys); change 67 widened it to every vendored server; change 74 starts every server on the shim under bun; SMD-1800 holds the tree's three package.json to one MCP stack
 extensions/package.json          # change 64 (new file — test deps pinned to the extensions' deno.json; since SMD-1800 the pin the other two installs are held to)
 extensions/bun.lock              # change 64 (new file)
 <17 vendored files>              # change 67 (thirteen servers and samples onto scoped keys through _shared/auth.ts; four onto a timing-safe compare, one through the same module)

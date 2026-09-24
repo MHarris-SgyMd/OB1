@@ -191,7 +191,7 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 type Handler = (req: Request) => Response | Promise<Response>;
 // PACKAGES (db/test-support.ts): the stack's four names, the same list test-auth.ts's loader and pin guard read.
 const VENDORED = new RegExp("^" + ROOT.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "/(recipes|integrations)/.*\\.ts$");
-// A recipe or integration imports the four by bare name and has no install of its own beside it, so they resolve
+// A recipe or integration imports STACK's four by bare name and has no install of its own beside it, so they resolve
 // from extensions/node_modules here (test-auth.ts has the same loader). Until SMD-1798 this loader also resolved a
 // quoted supabase-js specifier to the shim; until SMD-1800 it read Deno's specifiers (a `jsr:` line, an `npm:`
 // prefix) — neither is in the tree now, and check 11 and 22 refuse them.
