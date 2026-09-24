@@ -169,22 +169,75 @@ export type Engine = {
   decide(decisions: JevDecision[]): Promise<JevResult[]>;
 };
 
+/** The two markers' ids in the model's tokenizer (core/formatting.py's LABEL_TOKEN_ID, SEP_TOKEN_ID). */
+export const MARKER_IDS = { label: 50368, sep: 50369 } as const;
+
+/**
+ * A decision this model cannot read faithfully, refused rather than answered:
+ * the service answers 422 naming it. Not a malformed request — the contract
+ * accepts it — but one whose prompt would not be the one the model reads.
+ */
+export class DecisionRefused extends Error {
+  constructor(message: string, readonly index: number) {
+    super(message);
+    this.name = "DecisionRefused";
+  }
+}
+
+/**
+ * The model reads option k's score off the k-th label marker, so the prompt it
+ * sees must carry exactly one marker per option and one separator (first
+ * review pass). Two ways it would not, each refused:
+ *
+ * - The caller's text holds a marker. `<<LABEL>>` in a context or a
+ *   description tokenizes to the marker itself, adds a slot, and every later
+ *   option's probability is read off its neighbour's — measured: a description
+ *   carrying one moved `p_insufficient` from 0.194 to 0.034. Notes about this
+ *   tier contain the strings; the refusal names them.
+ * - The labels alone overrun the 512 tokens. The cut keeps the head, so a long
+ *   option list loses its later labels, the separator and every word of the
+ *   question and context — measured: 24 fifty-token options kept 9 markers and
+ *   still answered `o8`, not abstaining. A cut that ends inside the context is
+ *   the reference engine's rule and is answered, `truncated: true`.
+ */
+function markersProblem(ids: number[], options: number, cut: boolean, index: number): DecisionRefused | null {
+  let labels = 0, seps = 0;
+  for (const id of ids) {
+    if (id === MARKER_IDS.label) labels++;
+    else if (id === MARKER_IDS.sep) seps++;
+  }
+  if (labels === options && seps === 1) return null;
+  return cut
+    ? new DecisionRefused(`decision ${index}: its labels take more than the model's ${MAX_TOKENS} tokens, so the model would read ${labels} of ${options} options and none of the question or context — shorten the option descriptions or the proposition, or split the options`, index)
+    : new DecisionRefused(`decision ${index}: its text contains the model's own markers (${LABEL_MARKER} or ${SEP_MARKER}), which would move every option's slot — remove or rewrite them before asking`, index);
+}
+
 /**
  * The engine over a tokenizer, a runner and a calibrator. One forward pass per
  * decision, batch 1: a padded batch of eight measured no faster than eight
  * singles on the dogfood Mac's CPU (720 ms against 8 × 75), and batch 1 needs
  * no pad token. Decisions run one at a time; the runner's own threads are
- * where the parallelism is.
+ * where the parallelism is. Every decision's prompt is encoded and checked
+ * (markersProblem) before the first forward pass, so a refused decision at
+ * index 40 does not leave 39 computed and discarded.
  */
 export function createEngine(encoder: Encoder, run: Runner, cal: Calibrator): Engine {
   temperatureFor(cal, 3); // a calibrator with no usable global temperature is refused at load, not at the first request
   return {
     info: INFO,
     async decide(decisions) {
-      const out: JevResult[] = [];
-      for (const d of decisions) {
+      const prepared = decisions.map((d, i) => {
         const { prompt, ids } = buildPrompt(d);
-        const cut = truncate(encoder.encode(prompt).ids, MAX_TOKENS);
+        const full = encoder.encode(prompt).ids;
+        const injected = markersProblem(full, ids.length, false, i);
+        if (injected) throw injected;
+        const cut = truncate(full, MAX_TOKENS);
+        const overrun = cut.truncated ? markersProblem(cut.ids, ids.length, true, i) : null;
+        if (overrun) throw overrun;
+        return { d, ids, cut };
+      });
+      const out: JevResult[] = [];
+      for (const { d, ids, cut } of prepared) {
         const inputIds = BigInt64Array.from(cut.ids, BigInt);
         const mask = new BigInt64Array(cut.ids.length).fill(1n);
         const logits = await run(inputIds, mask);

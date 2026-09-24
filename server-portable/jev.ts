@@ -13,9 +13,12 @@
  * and no caller should have to shape a classifier as a generator. What it
  * shares with providerCall is the discipline — every call names its subject
  * and the egress gate (egress.ts, SMD-1903) reads it against the endpoint
- * before anything is sent, so a decision cannot silently leave the box; a
- * failure is a ProviderError of the same four kinds; the answer is checked
- * before it is believed.
+ * before anything is sent, so a decision cannot silently leave the box; the
+ * refusal is a ProviderError of kind `egress`, a deadline one of `timeout`, an
+ * error status `http` (422: a decision this model cannot read faithfully), an
+ * answer outside the contract `body`; a refused connection or the caller's own
+ * abort is the runtime's error, rethrown as it came — providerCall's rule. The
+ * answer is checked before it is believed.
  *
  * Provenance: every answer carries the model's name, source revision, weights
  * sha256 and calibrator sha256 (JevModelInfo). A caller that stores a
@@ -33,6 +36,7 @@ import {
   INSUFFICIENT_EVIDENCE,
   JEV_CONTRACT,
   JEV_MAX_BATCH,
+  JEV_MAX_BODY_BYTES,
   jevRequestProblem,
   type JevDecision,
   type JevInfo,
@@ -99,6 +103,9 @@ async function exchange<T>(cfg: JevConfig, method: "GET" | "POST", path: "/info"
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       signal,
       redirect: "manual",
+      // The one deadline is ours: Bun's fetch would otherwise cut a quiet
+      // exchange at its own 300 s idle timeout (providerCall's note).
+      timeout: false,
     });
   } catch (e) {
     if ((e as Error).name === "TimeoutError") throw timedOut();
@@ -109,6 +116,9 @@ async function exchange<T>(cfg: JevConfig, method: "GET" | "POST", path: "/info"
     text = await r.text();
   } catch (e) {
     if ((e as Error).name === "TimeoutError") throw timedOut();
+    // The caller's abort, or a reset: not an answer to read as "not JSON"
+    // (first review pass — it was swallowed and reported as a body error).
+    if (r.ok) throw e;
   }
   const capped = text.slice(0, 500);
   if (!r.ok) throw new ProviderError(`Decision request to ${at}${path} failed: ${r.status} ${capped}`, "http", r.status, capped);
@@ -138,12 +148,21 @@ export function jevAnswerProblem(cfg: Pick<JevConfig, "model">, decisions: JevDe
   return null;
 }
 
-/** The subject a decision is judged as: the caller's, with every text the request carries as the `marker` unit when the caller gave none. */
+/**
+ * The subject a decision is judged as: the caller's, with every text the
+ * requests carry — ids included — joined to its content, so the `marker` unit
+ * reads what is sent and not only what the caller named (first review pass: a
+ * caller's `content` used to replace the decisions' text, and a marker in a
+ * context it did not name went unread).
+ */
 function gatedSubject(subject: EgressSubject, decisions: JevDecision[]): EgressSubject {
-  if (subject.content !== undefined) return subject;
-  const texts = decisions.flatMap((d) => (d.kind === "binary" ? [d.proposition, d.context] : [d.question, d.context, ...d.options.map((o) => o.description)]));
-  return { ...subject, content: texts.join("\n") };
+  const texts = decisions.flatMap((d) =>
+    d.kind === "binary" ? [d.id ?? "", d.proposition, d.context] : [d.id ?? "", d.question, d.context, ...d.options.flatMap((o) => [o.id, o.description])],
+  );
+  return { ...subject, content: [subject.content ?? "", ...texts].filter(Boolean).join("\n") };
 }
+
+const utf8 = new TextEncoder();
 
 /** The tier's own description: contract, model, limits. No text is sent, so the gate is not asked; preflight's probe. */
 export async function jevInfo(cfg: JevConfig, opts: CallOpts = {}): Promise<JevInfo> {
@@ -154,11 +173,13 @@ export async function jevInfo(cfg: JevConfig, opts: CallOpts = {}): Promise<JevI
 
 /**
  * Many decisions about one subject — the classify-every-span caller (SMD-2017,
- * 2049) — split into requests of JEV_MAX_BATCH, in order. One subject for the
- * whole list: a caller deciding about several rows under a policy with
- * source/type/topic terms calls once per row, since one row's allowance is not
- * another's. Refused by the gate before anything is sent; a malformed
- * decision is refused before anything is sent, with its index.
+ * 2049) — packed in order into requests of at most JEV_MAX_BATCH decisions and
+ * JEV_MAX_BODY_BYTES bytes. One subject for the whole list: a caller deciding
+ * about several rows under a policy with source/type/topic terms calls once per
+ * row, since one row's allowance is not another's. Refused by the gate before
+ * anything is sent; a malformed decision is refused before anything is sent,
+ * with its index. A decision the model cannot read (422) refuses its request,
+ * and the requests before it are already answered: the error says how many.
  */
 export async function jevDecideMany(cfg: JevConfig, decisions: JevDecision[], subject: EgressSubject, opts: CallOpts = {}): Promise<{ results: JevResult[]; model: JevModelInfo; ms: number }> {
   const gate = mayLeaveBox(gatedSubject(subject, decisions), cfg.endpoint, cfg.egress);
@@ -166,19 +187,36 @@ export async function jevDecideMany(cfg: JevConfig, decisions: JevDecision[], su
   // Every request built and checked before the first is sent: a bad decision
   // at index 70 must not leave the first 64 decided and the caller holding
   // half an answer.
+  const envelope = { ...(cfg.model ? { model: cfg.model } : {}) };
+  if (!decisions.length) throw new Error(`not sent to ${cfg.endpoint.base}: \`decisions\` is a non-empty array`);
   const requests: { model?: string; decisions: JevDecision[] }[] = [];
-  for (let i = 0; i < decisions.length || i === 0; i += JEV_MAX_BATCH) {
-    const request = { ...(cfg.model ? { model: cfg.model } : {}), decisions: decisions.slice(i, i + JEV_MAX_BATCH) };
-    const problem = jevRequestProblem(request);
-    if (problem) throw new Error(`not sent to ${cfg.endpoint.base}: ${problem.replace(/^decision (\d+)/, (_, n) => `decision ${i + Number(n)}`)}`);
-    requests.push(request);
+  const overhead = utf8.encode(JSON.stringify({ ...envelope, decisions: [] })).length;
+  let batch: JevDecision[] = [], bytes = overhead;
+  for (const [i, d] of decisions.entries()) {
+    const problem = jevRequestProblem({ ...envelope, decisions: [d] });
+    if (problem) throw new Error(`not sent to ${cfg.endpoint.base}: ${problem.replace(/^decision 0/, `decision ${i}`)}`);
+    const size = utf8.encode(JSON.stringify(d)).length + 1; // and its comma
+    if (batch.length && (batch.length === JEV_MAX_BATCH || bytes + size > JEV_MAX_BODY_BYTES)) {
+      requests.push({ ...envelope, decisions: batch });
+      batch = [];
+      bytes = overhead;
+    }
+    batch.push(d);
+    bytes += size;
   }
+  requests.push({ ...envelope, decisions: batch });
   const results: JevResult[] = [];
   let model: JevModelInfo | undefined;
   let ms = 0;
   for (const request of requests) {
     const batch = request.decisions;
-    const answer = await exchange<JevResponse>(cfg, "POST", "/decide", request, opts);
+    let answer: JevResponse;
+    try {
+      answer = await exchange<JevResponse>(cfg, "POST", "/decide", request, opts);
+    } catch (e) {
+      if (results.length && e instanceof ProviderError) e.message += ` (after ${results.length} of ${decisions.length} decisions were answered)`;
+      throw e;
+    }
     const wrong = jevAnswerProblem(cfg, batch, answer);
     if (wrong) throw new ProviderError(`${cfg.endpoint.base}/decide: ${wrong}`, "body");
     results.push(...answer.results);

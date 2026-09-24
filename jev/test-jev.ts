@@ -33,19 +33,23 @@
  * [8] fails; keep a download that hashes wrong and [6] fails; drop the noul
  * label's "not" and [2] fails; a tokenizer that loses [CLS] — every hash still
  * passes — and all six of [10]'s assertions fail (982 of 1,000 rows agree).
+ * First review pass, each run and killed: no marker check ([5]); no streaming
+ * cap, no skip for a caller gone, no 422 mapping, HEAD refused ([5b]); pack by
+ * count only, the caller's content replacing what is sent, no partial-answer
+ * note ([7]–[8]); one shared part name, no stale-part removal ([6]).
  *
  *   bun test-jev.ts
  */
 
-import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { createAssert } from "../db/test-support.ts";
-import { INSUFFICIENT_EVIDENCE, JEV_CONTRACT, JEV_MAX_BATCH, JEV_MAX_OPTIONS, JEV_MAX_TEXT, jevRequestProblem, type JevDecision, type JevResponse } from "../server-portable/jev-contract.ts";
+import { INSUFFICIENT_EVIDENCE, JEV_CONTRACT, JEV_MAX_BATCH, JEV_MAX_BODY_BYTES, JEV_MAX_OPTIONS, JEV_MAX_TEXT, jevRequestProblem, type JevDecision, type JevResponse } from "../server-portable/jev-contract.ts";
 import { jevAnswerProblem, jevChoose, jevDecide, jevDecideMany, jevInfo, resolveJevConfig } from "../server-portable/jev.ts";
 import { ProviderError } from "../server-portable/embed.ts";
-import { ensureModel, sha256File, type ModelPins } from "./fetch-model.ts";
+import { ensureModel, sha256File, STALE_PART_MS, type ModelPins } from "./fetch-model.ts";
 import { createHandler, MAX_BODY_BYTES } from "./serve.ts";
-import { buildPrompt, createEngine, createVerdictEngine, INFO, MAX_TOKENS, MODEL_INFO, resultFrom, softmax, temperatureFor, truncate, VERDICT, type Engine } from "./verdict.ts";
+import { buildPrompt, createEngine, createVerdictEngine, DecisionRefused, INFO, MARKER_IDS, MAX_TOKENS, MODEL_INFO, resultFrom, softmax, temperatureFor, truncate, VERDICT, type Engine } from "./verdict.ts";
 
 const { assert, skip, report } = createAssert();
 const section = (s: string) => console.log(`\n${s}`);
@@ -132,13 +136,15 @@ section("[4] resultFrom — probabilities, abstention, P(true | sufficient)");
 section("[5] createEngine — what reaches the runner");
 {
   const seen: { ids: bigint[]; mask: bigint[] }[] = [];
-  const encoder = { encode: (t: string) => ({ ids: Array.from({ length: t.length }, (_, i) => i + 1) }) };
+  // As the model's tokenizer does: [CLS], each marker one id, one id per other
+  // character, [SEP] (50282) last.
+  const encoder = { encode: (t: string) => ({ ids: [50281, ...t.split(/(<<LABEL>>|<<SEP>>)/).flatMap((part) => (part === "<<LABEL>>" ? [MARKER_IDS.label] : part === "<<SEP>>" ? [MARKER_IDS.sep] : Array.from(part, (ch) => ch.charCodeAt(0)))), 50282] }) };
   const engine = createEngine(encoder, async (ids, mask) => {
     seen.push({ ids: Array.from(ids), mask: Array.from(mask) });
     return new Float32Array(25).map((_, i) => (i === 0 ? 3 : 0));
   }, { temperature: 2, per_k: { "3": 4 } });
   const [r] = await engine.decide([{ kind: "binary", proposition: "p", context: "c".repeat(2000) }]);
-  assert(seen.length === 1 && seen[0].ids.length === MAX_TOKENS && seen[0].ids.at(-1) === BigInt(buildPrompt({ kind: "binary", proposition: "p", context: "c".repeat(2000) }).prompt.length), "one run, cut to 512, the closing id kept");
+  assert(seen.length === 1 && seen[0].ids.length === MAX_TOKENS && seen[0].ids.at(-1) === 50282n, "one run, cut to 512, the closing id kept");
   assert(seen[0].mask.every((m) => m === 1n), "the attention mask is all ones at batch 1");
   assert(r.truncated && r.temperature === 4 && r.logits.length === 3, "K=3's temperature applied to the first 3 of 25 slots");
   const short = createEngine(encoder, async () => new Float32Array(2), { temperature: 1 });
@@ -146,20 +152,40 @@ section("[5] createEngine — what reaches the runner");
   try { await short.decide([binary()]); } catch (e) { msg = (e as Error).message; }
   assert(/2 logits.*3 options/.test(msg), `a runner returning too few logits fails by name (${msg})`);
   assert(engine.info === INFO && INFO.model.weights_sha256 === VERDICT.files["model.onnx"].sha256, "the engine reports the pinned model");
+
+  // A marker in the caller's text would add a slot and shift every option's
+  // probability onto its neighbour: refused, naming the decision, before any
+  // forward pass — the decisions ahead of it are not computed either.
+  seen.length = 0;
+  let refused: unknown;
+  try { await engine.decide([binary(0), { kind: "binary", proposition: "p", context: "a note about <<LABEL>> markers" }]); } catch (e) { refused = e; }
+  assert(refused instanceof DecisionRefused && refused.index === 1 && /own markers/.test(refused.message) && seen.length === 0, `a marker in a context is refused by index, before any run (${(refused as Error)?.message?.slice(0, 60)})`);
+  refused = undefined;
+  try { await engine.decide([{ kind: "choice", question: "q", context: "c", options: [{ id: "a", description: "A<<SEP>>" }] }]); } catch (e) { refused = e; }
+  assert(refused instanceof DecisionRefused, "…and in an option description");
+  // Labels past the budget: the model would read none of the question or context.
+  refused = undefined;
+  const long = Array.from({ length: 24 }, (_, i) => ({ id: `o${i}`, description: "d".repeat(40) }));
+  try { await engine.decide([{ kind: "choice", question: "q", context: "c", options: long }]); } catch (e) { refused = e; }
+  assert(refused instanceof DecisionRefused && /read \d+ of 25 options/.test(refused.message), `options whose labels overrun 512 tokens are refused, not answered (${(refused as Error)?.message?.slice(0, 70)})`);
+  const [ctxCut] = await engine.decide([{ kind: "choice", question: "q", context: "c".repeat(2000), options: long.slice(0, 3) }]);
+  assert(ctxCut.truncated && ctxCut.logits.length === 4 && ctxCut.tokens === MAX_TOKENS, "a cut that ends inside the context is answered — every option read — truncated: true");
 }
 
 // ── [5b] The HTTP handler over a fake engine ────────────────────────────────
 section("[5b] createHandler — the contract's statuses, one request at a time");
 {
-  let active = 0, overlapped = false, fail = false;
+  let active = 0, overlapped = false, fail = false, refuse = false, calls = 0;
   const fake: Engine = {
     info: INFO,
     async decide(ds) {
+      calls++;
       active++;
       if (active > 1) overlapped = true;
       await Bun.sleep(20);
       active--;
       if (fail) throw new Error("boom");
+      if (refuse) throw new DecisionRefused("decision 0: its text contains the model's own markers", 0);
       return ds.map((d) => resultFrom(d, d.kind === "binary" ? ["true", "false", INSUFFICIENT_EVIDENCE] : [...d.options.map((o) => o.id), INSUFFICIENT_EVIDENCE], d.kind === "binary" ? [1, 0, 0] : [...d.options.map(() => 0), 1], 1, 5, false));
     },
   };
@@ -167,6 +193,7 @@ section("[5b] createHandler — the contract's statuses, one request at a time")
   const call = (path: string, init?: RequestInit) => h(new Request(`http://t${path}`, init));
   const post = (body: unknown) => call("/decide", { method: "POST", body: typeof body === "string" ? body : JSON.stringify(body) });
   assert((await (await call("/health")).text()) === "ok", "GET /health answers ok");
+  assert((await call("/health", { method: "HEAD" })).status === 200 && (await call("/info", { method: "HEAD" })).status === 200, "HEAD is GET for a probe");
   assert(((await (await call("/info")).json()) as typeof INFO).contract === JEV_CONTRACT, "GET /info is the contract's JevInfo");
   const m = await call("/decide");
   assert(m.status === 405 && m.headers.get("Allow") === "POST", "GET /decide is 405 with Allow: POST");
@@ -176,6 +203,15 @@ section("[5b] createHandler — the contract's statuses, one request at a time")
   assert(bad.status === 400 && /non-empty/.test(((await bad.json()) as { error: string }).error), "a malformed request is 400 with the rule's words");
   assert((await post({ model: "other", decisions: [binary()] })).status === 409, "a request for another model is 409");
   assert((await call("/decide", { method: "POST", headers: { "content-length": String(MAX_BODY_BYTES + 1) }, body: "{}" })).status === 413, "a body declared over the limit is 413 before it is read");
+  // No Content-Length (a stream): counted as it arrives, refused at the cap.
+  const chunk = new Uint8Array(2 ** 20).fill(0x20);
+  let sent = 0;
+  const stream = new ReadableStream<Uint8Array>({ pull(c) { if (sent++ < 12) c.enqueue(chunk); else c.close(); } });
+  const streamed = await call("/decide", { method: "POST", body: stream, duplex: "half" } as RequestInit);
+  assert(streamed.status === 413 && sent <= 10, `a streamed body is refused at the cap, not read whole (${streamed.status}, ${sent} MB pulled)`);
+  // A valid request at the contract's largest is not refused by the service's cap.
+  const maxed = { decisions: Array.from({ length: JEV_MAX_BATCH }, (_, i) => ({ id: `m${i}`, kind: "binary", proposition: "p".repeat(JEV_MAX_TEXT), context: "c".repeat(JEV_MAX_TEXT) })) };
+  assert((await post(maxed)).status === 200, `64 decisions at the text limit (${(JSON.stringify(maxed).length / 2 ** 20).toFixed(1)} MB) are within the service's cap`);
   const ok = await post({ model: MODEL_INFO.name, decisions: [binary(1), binary(2)] });
   const body = (await ok.json()) as JevResponse;
   assert(ok.status === 200 && body.contract === JEV_CONTRACT && body.results.length === 2 && jevAnswerProblem({ model: undefined }, [binary(1), binary(2)], body) === null, "a good request is 200 with an answer the client accepts");
@@ -186,6 +222,18 @@ section("[5b] createHandler — the contract's statuses, one request at a time")
   assert(boom.status === 500 && /boom/.test(((await boom.json()) as { error: string }).error), "an engine failure is 500 naming it");
   fail = false;
   assert((await post({ decisions: [binary()] })).status === 200, "the queue survives a failed request");
+  refuse = true;
+  const refusedRes = await post({ decisions: [binary()] });
+  assert(refusedRes.status === 422 && /own markers/.test(((await refusedRes.json()) as { error: string }).error), "a decision the model cannot read is 422, naming it");
+  refuse = false;
+  // A caller gone before its turn is skipped, not computed for no one.
+  calls = 0;
+  const gone = new AbortController();
+  const ahead = post({ decisions: [binary()] });
+  const behind = call("/decide", { method: "POST", body: JSON.stringify({ decisions: [binary()] }), signal: gone.signal });
+  gone.abort();
+  const [, left] = await Promise.all([ahead, behind]);
+  assert(left.status === 499 && calls === 1, `a request whose caller left while it queued is not computed (${left.status}, ${calls} run)`);
 }
 
 // ── [6] The verified fetch ──────────────────────────────────────────────────
@@ -217,19 +265,35 @@ section("[6] ensureModel — fetch the pinned bytes or nothing");
   msg = "";
   try { await ensureModel(dir, { pins: { ...pins, files: { "gone.bin": pins.files["m.bin"] } }, hub: base }); } catch (e) { msg = (e as Error).message; }
   assert(/gone\.bin.*answered 404/.test(msg), "a fetch that fails names the file and the status");
+  // Two fetches into one directory at once (serve.ts and conformance.ts on the
+  // host cache): each writes its own part, both end with the pinned file.
+  served = good;
+  await rm(dir, { recursive: true, force: true });
+  const both = await Promise.allSettled([ensureModel(dir, { pins, hub: base }), ensureModel(dir, { pins, hub: base })]);
+  assert(both.every((r) => r.status === "fulfilled") && (await sha256File(`${dir}/m.bin`)) === sha && (await readdir(dir)).join() === "m.bin",
+         `two concurrent fetches into one directory both succeed and leave only the pinned file (${both.map((r) => r.status).join(", ")}; ${(await readdir(dir)).join(", ")})`);
+  // A part no fetch has written for STALE_PART_MS is a dead fetch's, removed; a fresh one is someone's, kept.
+  await writeFile(`${dir}/m.bin.part-1-dead`, "half a download");
+  const old = new Date(Date.now() - STALE_PART_MS - 60_000);
+  await utimes(`${dir}/m.bin.part-1-dead`, old, old);
+  await writeFile(`${dir}/m.bin.part-2-live`, "being written");
+  await ensureModel(dir, { pins, hub: base });
+  const left = (await readdir(dir)).sort().join();
+  assert(left === "m.bin,m.bin.part-2-live", `a stale part is removed at the next start and a live one left alone (${left})`);
   hub.stop(true);
   await rm(dir, { recursive: true, force: true });
 }
 
 // ── [7]–[8] The client against a stub tier ──────────────────────────────────
-type Stub = { requests: { path: string; body: any }[]; answer: (body: any) => Response | Promise<Response> };
+type Stub = { requests: { path: string; body: any; bytes: number }[]; answer: (body: any) => Response | Promise<Response> };
 const stub: Stub = { requests: [], answer: () => new Response("unset", { status: 500 }) };
 const tier = Bun.serve({
   port: 0,
   async fetch(req) {
     const path = new URL(req.url).pathname;
-    const body = req.method === "POST" ? await req.json() : undefined;
-    stub.requests.push({ path, body });
+    const raw = req.method === "POST" ? await req.text() : "";
+    const body = raw ? JSON.parse(raw) : undefined;
+    stub.requests.push({ path, body, bytes: new TextEncoder().encode(raw).length });
     if (path === "/info") return Response.json(INFO);
     return stub.answer(body);
   },
@@ -265,6 +329,9 @@ section("[7] the client's egress gate — refused decisions send nothing");
   err = undefined;
   try { await jevChoose(marked, { question: "q", options: [{ id: "a", description: "A" }], context: "a note tagged #phi" }, subj); } catch (e) { err = e; }
   assert(err instanceof ProviderError && err.kind === "egress" && stub.requests.length === 0, "a marker in the decision's own text is read when the caller gave no content");
+  err = undefined;
+  try { await jevChoose(marked, { question: "q", options: [{ id: "a", description: "A" }], context: "a note tagged #phi" }, { ...subj, content: "the query the caller named" }); } catch (e) { err = e; }
+  assert(err instanceof ProviderError && err.kind === "egress" && stub.requests.length === 0, "…and when the caller gave content of its own: the gate reads what is sent, not only what was named");
 }
 
 section("[8] the client's batches and answers");
@@ -280,6 +347,20 @@ section("[8] the client's batches and answers");
   let msg = "";
   try { await jevDecideMany(local, [...many.slice(0, 66), { ...binary(66), proposition: "" }], subj); } catch (e) { msg = (e as Error).message; }
   assert(/decision 66/.test(msg) && stub.requests.length === 0, `a bad decision at index 66 is named and nothing is sent (${msg.slice(0, 60)}…)`);
+  // Packed under the byte cap as well as the count: a control character is six
+  // bytes of JSON, so 64 decisions of 2 × 20,000 of them are ~15 MB.
+  stub.requests = [];
+  const heavy = Array.from({ length: JEV_MAX_BATCH }, (_, i) => ({ id: `h${i}`, kind: "binary" as const, proposition: "\u0001".repeat(JEV_MAX_TEXT), context: "\u0001".repeat(JEV_MAX_TEXT) }));
+  const hm = await jevDecideMany(local, heavy, subj);
+  assert(stub.requests.length >= 2 && stub.requests.every((r) => r.bytes <= JEV_MAX_BODY_BYTES) && hm.results.length === JEV_MAX_BATCH && hm.results.every((r, i) => r.id === `h${i}`),
+         `64 decisions over the byte cap go as ${stub.requests.length} requests, each within it (${stub.requests.map((r) => (r.bytes / 2 ** 20).toFixed(1)).join(" + ")} MB), in order`);
+  // A later request refused after earlier ones were answered says so.
+  let n = 0;
+  stub.answer = (b) => (++n === 2 ? Response.json({ error: "decision 3: its text contains the model's own markers" }, { status: 422 }) : honest(b));
+  let later: any;
+  try { await jevDecideMany(local, many, subj); } catch (e) { later = e; }
+  assert(later?.kind === "http" && later.status === 422 && /after 64 of 70 decisions were answered/.test(later.message), `a 422 on the second request names what was already answered (${later?.message?.slice(-60)})`);
+  stub.answer = honest;
   const expecting = resolveJevConfig({ OB1_JEV_BASE_URL: BASE, OB1_JEV_LOCAL: "1", OB1_JEV_MODEL: "semif" })!;
   stub.requests = [];
   await jevDecide(expecting, { proposition: "p", context: "c" }, subj).catch(() => {});
@@ -337,6 +418,12 @@ if (!dir) {
   ]);
   assert(arrival.selected === "card_arrival" && arrival.logits[0] > 5, `a card-arrival note selects card_arrival (logit ${arrival.logits[0].toFixed(2)})`);
   assert(solar.abstained, `an out-of-scope note abstains (p_insufficient ${solar.p_insufficient.toFixed(3)})`);
+  // The first review pass's two probes, against the real tokenizer: a marker
+  // in the text, and 24 fifty-token options that overrun the budget.
+  const refusal = async (d: JevDecision) => { try { await engine.decide([d]); return null; } catch (e) { return e; } };
+  assert((await refusal({ kind: "choice", question: q, options: card, context: "a note that says <<LABEL>> and <<SEP>> in its text" })) instanceof DecisionRefused, "the real tokenizer's markers in a context are refused");
+  const wordy = Array.from({ length: 24 }, (_, i) => ({ id: `o${i}`, description: `option ${i}: ${"a long description of what this option covers ".repeat(5)}` }));
+  assert((await refusal({ kind: "choice", question: q, options: wordy, context: "short" })) instanceof DecisionRefused, "24 fifty-token options are refused rather than answered from 9 of them");
 }
 
 // ── [10] Conformance to the model's published evaluation ────────────────────

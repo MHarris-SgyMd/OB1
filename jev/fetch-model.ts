@@ -5,16 +5,20 @@
  * repository, the revision and each file's sha256 (verdict.ts's VERDICT), and
  * this fetches exactly those bytes into a directory the serving process owns —
  * a compose volume, or a cache directory on the host. Every file is hashed on
- * every start, fetched or not (606 MB hashes in about a second), because the
+ * every start, fetched or not (606 MB in 0.2–0.7 s measured), because the
  * question at load is "are these the bytes that were pinned", and a file
  * that was there yesterday answers it no better than one fetched now.
  *
- * A download goes to `<file>.part` and is renamed only after it hashes to the
- * pin, so an interrupted fetch leaves nothing that looks complete, and a file
- * that hashes wrong is removed and named — never loaded.
+ * A download goes to `<file>.part-<pid>-<random>` — its own name, so two
+ * processes fetching into one directory (serve.ts and conformance.ts on the
+ * host cache) cannot write one file between them, and a stale part cannot be
+ * appended to (first review pass: both happened, measured) — and is renamed
+ * only after it hashes to the pin. An interrupted fetch leaves nothing that
+ * looks complete; a part no one has written for STALE_PART_MS is removed at
+ * the next start. A file that hashes wrong is removed and named, never loaded.
  */
 
-import { mkdir, rename, rm, stat } from "node:fs/promises";
+import { mkdir, readdir, rename, rm, stat } from "node:fs/promises";
 import { VERDICT } from "./verdict.ts";
 
 export const DEFAULT_HUB = "https://huggingface.co";
@@ -31,6 +35,22 @@ async function sizeOf(path: string): Promise<number | null> {
     return (await stat(path)).size;
   } catch {
     return null;
+  }
+}
+
+/** A part file untouched this long belongs to a fetch that died; a live one is written continuously. */
+export const STALE_PART_MS = 10 * 60_000;
+
+/** Remove the parts of `name` in `dir` that no fetch has written for STALE_PART_MS. */
+async function removeStaleParts(dir: string, name: string, log: (line: string) => void): Promise<void> {
+  for (const f of await readdir(dir)) {
+    if (!f.startsWith(`${name}.part`)) continue;
+    const at = `${dir}/${f}`;
+    const s = await stat(at).catch(() => null);
+    if (s && Date.now() - s.mtimeMs > STALE_PART_MS) {
+      log(`${f}: a part from a fetch that did not finish — removed`);
+      await rm(at, { force: true });
+    }
   }
 }
 
@@ -75,6 +95,7 @@ export async function ensureModel(
   const verified: string[] = [];
   for (const [name, pin] of Object.entries(pins.files)) {
     const path = `${dir}/${name}`;
+    await removeStaleParts(dir, name, log);
     if (await matchesPin(path, pin)) {
       verified.push(name);
       continue;
@@ -84,13 +105,13 @@ export async function ensureModel(
     if (opts.fetch === false) throw new Error(`${path} is ${present ? "not the pinned file" : "missing"}, and fetching is off`);
     if (present) {
       log(`${name}: present but not the pinned bytes (${pin.sha256.slice(0, 12)}…) — replacing it`);
-      await rm(path);
+      await rm(path, { force: true }); // another process may have replaced it since
     }
     const url = pins.url ? pins.url(name) : `${hub}/${pins.repo}/resolve/${pins.revision}/${name}`;
     log(`${name}: fetching ${(pin.bytes / 2 ** 20).toFixed(1)} MB from ${url}`);
     const r = await doFetch(url, { redirect: "follow" });
     if (!r.ok || !r.body) throw new Error(`fetching ${name} from ${url} answered ${r.status}`);
-    const part = `${path}.part`;
+    const part = `${path}.part-${process.pid}-${crypto.randomUUID().slice(0, 8)}`;
     // Streamed through a sink, never held whole. Not `Bun.write(part, r)`:
     // once `r.body` has been read — as the check above reads it — Bun 1.4's
     // write of the Response never settles (measured; the suite hung here).

@@ -29,12 +29,29 @@
  */
 
 import { homedir } from "node:os";
-import { JEV_CONTRACT, jevRequestProblem, type JevRequest, type JevResponse } from "../server-portable/jev-contract.ts";
+import { JEV_CONTRACT, JEV_MAX_BODY_BYTES, jevRequestProblem, type JevRequest, type JevResponse } from "../server-portable/jev-contract.ts";
 import { DEFAULT_HUB, ensureModel } from "./fetch-model.ts";
-import { createVerdictEngine, VERDICT, type Engine } from "./verdict.ts";
+import { createVerdictEngine, DecisionRefused, VERDICT, type Engine } from "./verdict.ts";
 
-/** A request body larger than this is refused before it is read: 64 decisions of 20k characters with room to spare. */
-export const MAX_BODY_BYTES = 2 * 2 ** 20;
+/** The contract's body cap, which the client splits its batches under (first review pass: this was 2 MB, under what a valid batch could be). */
+export const MAX_BODY_BYTES = JEV_MAX_BODY_BYTES;
+
+/**
+ * The body as text, or null past `max` bytes — counted as they arrive, so a
+ * chunked request with no Content-Length is refused at the cap rather than
+ * read whole first (first review pass: req.text() read up to Bun's 128 MB).
+ */
+export async function readCapped(req: Request, max: number): Promise<string | null> {
+  if (!req.body) return "";
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for await (const chunk of req.body) {
+    total += chunk.byteLength;
+    if (total > max) return null;
+    chunks.push(chunk);
+  }
+  return new TextDecoder().decode(Buffer.concat(chunks));
+}
 
 const json = (status: number, body: unknown, headers: Record<string, string> = {}) =>
   new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json", ...headers } });
@@ -44,7 +61,10 @@ const ROUTES: Record<string, string> = { "/health": "GET", "/info": "GET", "/dec
 /**
  * The fetch handler over an engine. Decisions run one request at a time — the
  * model's threads are the parallelism, and two interleaved requests would each
- * take twice as long — in arrival order.
+ * take twice as long — in arrival order. A request whose caller has gone by
+ * the time its turn comes (its deadline passed, it hung up) is skipped, not
+ * computed for no one (first review pass: ten abandoned requests still ran
+ * ten times ahead of everyone behind them).
  */
 export function createHandler(engine: Engine): (req: Request) => Promise<Response> {
   let queue: Promise<unknown> = Promise.resolve();
@@ -57,14 +77,15 @@ export function createHandler(engine: Engine): (req: Request) => Promise<Respons
     const path = new URL(req.url).pathname.replace(/\/+$/, "") || "/";
     const method = ROUTES[path];
     if (!method) return json(404, { error: `no route ${path}; the tier serves ${Object.keys(ROUTES).join(", ")}` });
-    if (req.method !== method) return json(405, { error: `${path} takes ${method}` }, { Allow: method });
+    // HEAD is GET without the body, for a probe that asks it (Bun drops the body).
+    if (req.method !== method && !(method === "GET" && req.method === "HEAD")) return json(405, { error: `${path} takes ${method}` }, { Allow: method === "GET" ? "GET, HEAD" : method });
     if (path === "/health") return new Response("ok");
     if (path === "/info") return json(200, engine.info);
 
     const declared = Number(req.headers.get("content-length") ?? "0");
     if (declared > MAX_BODY_BYTES) return json(413, { error: `the body is ${declared} bytes; at most ${MAX_BODY_BYTES}` });
-    const raw = await req.text();
-    if (raw.length > MAX_BODY_BYTES) return json(413, { error: `the body is over ${MAX_BODY_BYTES} bytes` });
+    const raw = await readCapped(req, MAX_BODY_BYTES);
+    if (raw === null) return json(413, { error: `the body is over ${MAX_BODY_BYTES} bytes` });
     let body: unknown;
     try {
       body = JSON.parse(raw);
@@ -79,10 +100,13 @@ export function createHandler(engine: Engine): (req: Request) => Promise<Respons
     }
     const t0 = performance.now();
     try {
-      const results = await serial(() => engine.decide(request.decisions));
+      const results = await serial(async () => (req.signal.aborted ? null : engine.decide(request.decisions)));
+      // 499, nginx's "client closed request": there is no one to read it.
+      if (results === null) return json(499, { error: "the caller went away before its turn; nothing was computed" });
       const response: JevResponse = { contract: JEV_CONTRACT, model: engine.info.model, results, ms: performance.now() - t0 };
       return json(200, response);
     } catch (e) {
+      if (e instanceof DecisionRefused) return json(422, { error: e.message });
       return json(500, { error: `the model failed: ${(e as Error).message}` });
     }
   };
@@ -112,6 +136,16 @@ if (import.meta.main) {
   const threads = intKnob("JEV_THREADS", 4, 256);
   const dir = (process.env.JEV_MODEL_DIR?.trim() || `${homedir()}/.cache/ob1-jev/${VERDICT.revision}`).replace(/\/+$/, "");
   const log = (line: string) => console.log(`jev: ${line}`);
+  // Before the fetch and the load, not after: as a container's PID 1 the
+  // process has no default SIGTERM action, so a stop during the 20 s fetch
+  // waited out the grace period and was killed (first review pass).
+  let server: ReturnType<typeof Bun.serve> | undefined;
+  for (const sig of ["SIGTERM", "SIGINT"] as const) {
+    process.on(sig, () => {
+      server?.stop();
+      process.exit(0);
+    });
+  }
   try {
     const got = await ensureModel(dir, { hub: process.env.JEV_HUB?.trim() || DEFAULT_HUB, fetch: !args.includes("--no-fetch"), log });
     log(`${VERDICT.repo}@${VERDICT.revision.slice(0, 8)} in ${dir}: ${got.fetched.length ? `fetched ${got.fetched.join(", ")}; ` : ""}every file matches its pin (${got.ms.toFixed(0)} ms)`);
@@ -122,7 +156,7 @@ if (import.meta.main) {
   if (args.includes("--fetch-only")) process.exit(0);
   const t0 = performance.now();
   const engine = await createVerdictEngine(dir, { threads });
-  const server = Bun.serve({
+  server = Bun.serve({
     hostname: host,
     port,
     // A queued request waits for the ones ahead of it; Bun's 10 s default
@@ -131,10 +165,4 @@ if (import.meta.main) {
     fetch: createHandler(engine),
   });
   log(`${VERDICT.name} loaded in ${(performance.now() - t0).toFixed(0)} ms (${threads} threads, rss ${(process.memoryUsage().rss / 2 ** 20).toFixed(0)} MB); serving ${JEV_CONTRACT} on http://${host}:${server.port}`);
-  for (const sig of ["SIGTERM", "SIGINT"] as const) {
-    process.on(sig, () => {
-      server.stop();
-      process.exit(0);
-    });
-  }
 }

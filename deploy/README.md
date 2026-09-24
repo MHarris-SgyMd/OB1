@@ -298,7 +298,9 @@ The first start fetches the pinned weights (606 MB, about 20 s here) into the
 that does not match (a verify-only restart serves in about a second). About
 1 GB resident, outside Ollama's scheduler. With `OB1_JEV_BASE_URL` set the
 server's preflight dials the tier and fails the start when it does not answer,
-so set the knob with the profile, not before it. A spike run from a checkout
+so set the knob with the profile, not before it; with the profile the server
+waits for `jev` to be healthy (`depends_on … required: false`), so the first
+start's fetch does not crashloop it. A spike run from a checkout
 adds `-f deploy/compose.host-ports.yaml` and reaches it at
 `http://127.0.0.1:8020`; without compose, `bun jev/serve.ts` on the host serves
 the same contract on the same port.

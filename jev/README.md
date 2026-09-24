@@ -46,9 +46,9 @@ this service and by the client:
 
 | Route | Answer |
 | --- | --- |
-| `GET /health` | `ok`, once the model is loaded (the service listens only then) |
+| `GET /health` | `ok`, once the model is loaded (the service listens only then); HEAD too |
 | `GET /info` | `JevInfo`: `ob1-jev/1`, the model's name, source, revision, weights and calibrator sha256, the limits |
-| `POST /decide` | `{ model?, decisions: [...] }` → `JevResponse`; 400 malformed, 409 another model, 413 too large, 500 the model failed |
+| `POST /decide` | `{ model?, decisions: [...] }` → `JevResponse`; 400 malformed, 409 another model, 413 over 8 MB, 422 a decision the model cannot read faithfully, 499 the caller left before its turn, 500 the model failed |
 
 A decision is `binary` (`proposition`, `context`) or `choice` (`question`,
 up to 24 `options`, `context`). Every answer adds the tier's own option,
@@ -56,8 +56,20 @@ up to 24 `options`, `context`). Every answer adds the tier's own option,
 least-bad option; `abstained` says it did. A binary result carries `p_true` —
 P(true | the evidence suffices). Every result carries the raw `logits` and the
 `temperature` applied, so a spike can recalibrate on its own workload without
-a second serving path. Up to 64 decisions a request; the client splits longer
-lists.
+a second serving path. Up to 64 decisions and 8 MB a request (a cap derived
+so the largest valid decision always fits alone); the client packs longer
+lists under both.
+
+**422: what the model cannot read, refused rather than answered.** The model
+reads option k's score off the k-th `<<LABEL>>` marker, so the service checks
+every decision's encoding before the first forward pass. A marker string in
+the caller's own text (`<<LABEL>>` or `<<SEP>>` in a context, a proposition,
+an option) would add a slot and shift every probability onto the wrong
+option — measured, `p_insufficient` 0.194 → 0.034 — and labels that overrun
+the 512 tokens would be answered without the question or context ever read —
+measured, 24 fifty-token options kept 9 markers and still answered. Both are
+422 naming the decision; the whole request is refused. A cut that ends inside
+the context is the reference engine's rule and is answered, `truncated: true`.
 
 ## Running it
 
@@ -78,8 +90,9 @@ unauthenticated, like Ollama's, and binds loopback by default.
 **The weights are referenced, not vendored.** `verdict.ts`'s `VERDICT` pins the
 repository, revision `8af2496e…` and each file's size and sha256;
 `fetch-model.ts` fetches exactly those bytes, to `<file>.part`, renamed only
-after they hash to the pin. Every file is hashed on every start (under half a
-second), and one that does not match is replaced, never loaded — measured by
+after they hash to the pin. Every file is hashed on every start (0.2 s on the
+host, 0.5–0.7 s in the container), and one that does not match is replaced,
+never loaded — measured by
 flipping a byte in the container's volume: the next start named the file,
 fetched it again, and served.
 
@@ -205,8 +218,8 @@ FSL-1.1-MIT.
 
 ## Tests
 
-`bun test-jev.ts` — 75 assertions with no model; with `JEV_TEST_MODEL_DIR`
-naming the pinned files, [9] adds the model's presets, [10] the receipt run
-and [11] both JevBench rows and the served-prompt equivalence (86, about three
-minutes). CI runs it in the
+`bun test-jev.ts` — 89 assertions with no model; with `JEV_TEST_MODEL_DIR`
+naming the pinned files, [9] adds the model's presets and its refusals on the
+real tokenizer, [10] the receipt run and [11] both JevBench rows and the
+served-prompt equivalence (102, about three minutes). CI runs it in the
 portable-server job, with `bunx tsc --noEmit` here (check 18 lists `jev`).

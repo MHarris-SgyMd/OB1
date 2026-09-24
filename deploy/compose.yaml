@@ -269,6 +269,16 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+      # The typed-decision tier, when --profile jev runs it: the server waits
+      # for it to be healthy, so a first start that fetches the weights (~20 s)
+      # does not crashloop the server on preflight's `jev tier` row (first
+      # review pass). `required: false`: without the profile there is no jev
+      # service and this is ignored (compose 2.20+; measured on 5.5 — `config`
+      # lists postgres, migrate, server). A jev that never becomes healthy
+      # holds the server back, which is what OB1_JEV_BASE_URL asked for.
+      jev:
+        condition: service_healthy
+        required: false
     restart: unless-stopped
 
   # Keeps the brain in lockstep with the Linear board (SMD-1954). Optional —

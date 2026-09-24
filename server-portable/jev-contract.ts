@@ -12,9 +12,15 @@
  * model behind the same contract (SemIf, the follow-up) implements this JSON
  * and nothing else.
  *
- *   GET  {base}/health   "ok" once the model is loaded
+ *   GET  {base}/health   "ok" once the model is loaded (HEAD too)
  *   GET  {base}/info     JevInfo: the contract, the model and its pins, the limits
- *   POST {base}/decide   JevRequest → JevResponse, or 4xx { error }
+ *   POST {base}/decide   JevRequest → JevResponse, or { error } with
+ *                        400 malformed (jevRequestProblem), 409 another model,
+ *                        413 over JEV_MAX_BODY_BYTES, 422 a decision this model
+ *                        cannot read faithfully (its own markers in the text,
+ *                        labels past its token budget — the whole request is
+ *                        refused, naming the decision), 499 the caller left
+ *                        before its turn, 500 the model failed
  *
  * Probabilities are conditional on the options supplied, and the tier always
  * adds one of its own — INSUFFICIENT_EVIDENCE — so a model can decline rather
@@ -38,6 +44,17 @@ export const JEV_MAX_BATCH = 64;
 
 /** Characters in any one text field — the model reads 512 tokens, so this only bounds the tokenizer's work. */
 export const JEV_MAX_TEXT = 20_000;
+
+/**
+ * Bytes in one request body. Chosen so the largest decision the rule above
+ * accepts always fits in a request of its own: a choice has at most 50 text
+ * fields (question, context, 24 ids, 24 descriptions) of 20,000 UTF-16 units,
+ * and a unit costs at most 6 bytes of JSON (a control character written as
+ * \u00XX), so 6 MB. The client packs decisions into requests under both this
+ * and JEV_MAX_BATCH (first review pass: the cap was 2 MB, and 64 valid
+ * decisions of 20,000 characters made a 2.5 MB request the service refused).
+ */
+export const JEV_MAX_BODY_BYTES = 8 * 2 ** 20;
 
 /**
  * One decision. `binary`: is `proposition` true of `context` — the caller
