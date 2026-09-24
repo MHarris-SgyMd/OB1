@@ -39,7 +39,7 @@ import { CallerGone, createVerdictEngine, DecisionRefused, VERDICT, type Engine 
  * chunked request with no Content-Length is refused at the cap rather than
  * read whole first (first review pass: req.text() read up to Bun's 128 MB).
  */
-export async function readCapped(req: Request, max: number): Promise<string | null> {
+async function readCapped(req: Request, max: number): Promise<string | null> {
   if (!req.body) return "";
   const chunks: Uint8Array[] = [];
   let total = 0;

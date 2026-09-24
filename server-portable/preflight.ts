@@ -138,7 +138,6 @@ const APPLY_020_POSTGREST = `Apply the migrations through db/migrations/042_thou
 /** An id no row has: the probes below call a function with it and read the NOT_FOUND it answers, writing nothing. */
 const NOBODY = "00000000-0000-4000-8000-000000000000";
 const APPLY_021 = "Apply db/migrations/021_embedding_model_per_row.sql.";
-const APPLY_032 = "Apply db/migrations/032_update_thought_provenance.sql.";
 const APPLY_042 = "Apply db/migrations/042_thought_citations.sql.";
 const APPLY_046 = "Apply db/migrations/046_thought_audit_event_shape.sql.";
 const APPLY_042_POSTGREST = `Apply the migrations through db/migrations/042_thought_citations.sql against the project's direct connection (server-portable/README.md §4). ${RELOAD_HINT}`;
@@ -149,7 +148,6 @@ const APPLY_042_POSTGREST = `Apply the migrations through db/migrations/042_thou
  * (SMD-1193); the 014, 019 and 023 remedies read the ledger the same way.
  */
 const REAPPLY = `The ledger records that migration but the schema installed is older — adopted with --baseline, or a body put there or removed from outside the migrations (an earlier migration re-applied by hand, a vendored schema's CREATE OR REPLACE or DROP; SMD-1250): re-apply the recorded migrations with the migrator — ${REAPPLY_COMMAND} — with the server and every worker stopped; a plain run skips a recorded file.`;
-const APPLY_021_POSTGREST = `Apply the migrations through db/migrations/021_embedding_model_per_row.sql against the project's direct connection (server-portable/README.md §4). ${RELOAD_HINT}`;
 const APPLY_032_POSTGREST = `Apply the migrations through db/migrations/032_update_thought_provenance.sql against the project's direct connection (server-portable/README.md §4). ${RELOAD_HINT}`;
 /** PostgREST's wording for a function it cannot resolve — missing, or not at the argument shape sent. */
 const missing = (msg: string) => /could not find the function|does not exist/i.test(msg);
@@ -3124,6 +3122,7 @@ if (!jevCfg) {
     // serves plain http); nothing answered; and in each, a proxy variable
     // that routes the call is named, since podman forwards the host's.
     const err = e as Error & { kind?: string };
+    const failure = err.kind ? null : probeFailure(e); // the connection's own failure, when the client did not name one
     // An exempt host is dialled direct: the proxy is then not the route, and
     // not the fix (proxyKnobFor, by Bun's NO_PROXY rule).
     const proxy = proxyKnobFor(base);
@@ -3132,11 +3131,11 @@ if (!jevCfg) {
     if (err.kind === "http" || err.kind === "body") {
       add("jev tier", "fail", `${at} answers, but not as the tier: ${masked(err.message)}${route}`,
           `${viaProxy}Check OB1_JEV_BASE_URL is the tier's base with no path — its routes are /health, /info and /decide (not Ollama's /v1) — and that it names the jev service, not another.`);
-    } else if (err.kind !== "timeout" && probeFailure(e).kind === "tls") {
-      add("jev tier", "fail", `${at} answers, but ${probeFailure(e).why}${route}`,
+    } else if (failure?.kind === "tls") {
+      add("jev tier", "fail", `${at} answers, but ${failure.why}${route}`,
           `${viaProxy}The tier serves plain http: use http:// in OB1_JEV_BASE_URL, or trust the issuer of whatever terminates TLS in front of it for the server (NODE_EXTRA_CA_CERTS=<ca.pem>).`);
     } else {
-      const why = err.kind === "timeout" ? `no HTTP answer in ${LOCAL_PROBE_SECONDS}` : probeFailure(e).why;
+      const why = failure ? failure.why : `no HTTP answer in ${LOCAL_PROBE_SECONDS}`;
       add("jev tier", "fail", `nothing answers at ${at} — ${why} (GET /info, ${LOCAL_PROBE_SECONDS} timeout)${route}`, viaProxy + (host === "jev" ? NOT_LISTENING : START));
     }
   }

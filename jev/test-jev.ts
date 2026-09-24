@@ -62,6 +62,8 @@ import { buildPrompt, createEngine, createVerdictEngine, DecisionRefused, INFO, 
 
 const { assert, skip, report } = createAssert();
 const section = (s: string) => console.log(`\n${s}`);
+/** As the model's tokenizer does: [CLS], each marker one id, one id per other character, [SEP] (50282) last. */
+const markerEncoder = { encode: (t: string) => ({ ids: [50281, ...t.split(/(<<LABEL>>|<<SEP>>)/).flatMap((part) => (part === "<<LABEL>>" ? [MARKER_IDS.label] : part === "<<SEP>>" ? [MARKER_IDS.sep] : Array.from(part, (ch) => ch.charCodeAt(0)))), 50282] }) };
 const binary = (i = 0): Extract<JevDecision, { kind: "binary" }> => ({ id: `d${i}`, kind: "binary", proposition: `item ${i} is even`, context: `The number is ${i}.` });
 
 // ── [1] The contract's validation rule ──────────────────────────────────────
@@ -149,9 +151,7 @@ section("[4] resultFrom — probabilities, abstention, P(true | sufficient)");
 section("[5] createEngine — what reaches the runner");
 {
   const seen: { ids: bigint[]; mask: bigint[] }[] = [];
-  // As the model's tokenizer does: [CLS], each marker one id, one id per other
-  // character, [SEP] (50282) last.
-  const encoder = { encode: (t: string) => ({ ids: [50281, ...t.split(/(<<LABEL>>|<<SEP>>)/).flatMap((part) => (part === "<<LABEL>>" ? [MARKER_IDS.label] : part === "<<SEP>>" ? [MARKER_IDS.sep] : Array.from(part, (ch) => ch.charCodeAt(0)))), 50282] }) };
+  const encoder = markerEncoder;
   const engine = createEngine(encoder, async (ids, mask) => {
     seen.push({ ids: Array.from(ids), mask: Array.from(mask) });
     return new Float32Array(25).map((_, i) => (i === 0 ? 3 : 0));
@@ -257,7 +257,6 @@ section("[5b] createHandler — the contract's statuses, one request at a time")
   assert(left.status === 499 && calls === 1, `a request whose caller left while it queued is not computed (${left.status}, ${calls} run)`);
   // …and one that leaves mid-batch stops the engine between forward passes.
   let passes = 0;
-  const markerEncoder = { encode: (t: string) => ({ ids: [50281, ...t.split(/(<<LABEL>>|<<SEP>>)/).flatMap((part) => (part === "<<LABEL>>" ? [MARKER_IDS.label] : part === "<<SEP>>" ? [MARKER_IDS.sep] : Array.from(part, (ch) => ch.charCodeAt(0)))), 50282] }) };
   const slow = createHandler(createEngine(markerEncoder, async () => { passes++; await Bun.sleep(25); return new Float32Array(25); }, { temperature: 1 }));
   const leaving = new AbortController();
   const pending = slow(new Request("http://t/decide", { method: "POST", body: JSON.stringify({ decisions: Array.from({ length: 20 }, (_, i) => binary(i)) }), signal: leaving.signal }));
