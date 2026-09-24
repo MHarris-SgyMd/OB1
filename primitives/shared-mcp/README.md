@@ -119,9 +119,6 @@ Create a second server file beside the extension's — `extensions/<name>/shared
 ```typescript
 // extensions/<name>/shared-server.ts — a second, Bun-native server beside the extension's index.ts
 import { Hono } from "hono";
-// Deno reads the SDK's types through the extensionless subpath: its exports map
-// names them `./dist/esm/*.d.ts`, unreachable from `.js` (FORK.md change 84).
-// @ts-types="@modelcontextprotocol/sdk/server/mcp"
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPTransport } from "@hono/mcp";
 import { z } from "zod";
@@ -252,7 +249,7 @@ The shared server's keys are its own environment, separate from the extension se
 (cd /path/to/your/OB1/checkout/server-portable && bun keygen.ts --name spouse --scope read)
 ```
 
-The shared server reads `MCP_HOUSEHOLD_ACCESS_KEYS` (the older single `MCP_HOUSEHOLD_ACCESS_KEY` still works, compared by digest) and `SUPABASE_HOUSEHOLD_KEY`, which the SQL shim accepts and ignores — the credentials are in `SUPABASE_URL`, so the household's scope is the key's `read`/`write`, not a second database credential. No `package.json` of its own: `extensions/package.json` and the extension's `deno.json` pin the packages the file imports.
+The shared server reads `MCP_HOUSEHOLD_ACCESS_KEYS` (the older single `MCP_HOUSEHOLD_ACCESS_KEY` still works, compared by digest) and `SUPABASE_HOUSEHOLD_KEY`, which the SQL shim accepts and ignores — the credentials are in `SUPABASE_URL`, so the household's scope is the key's `read`/`write`, not a second database credential. No `package.json` of its own: `extensions/package.json` pins the packages the file imports.
 
 ### Step 5: Run It as a Separate Server
 

@@ -304,7 +304,7 @@ handler's shape (signature, replay window, loop guard) is SMD-1862's.
   2 fails there — and the failure is real: the claude.ai connector will not open
   against that deployment either (upstream
   [#340](https://github.com/NateBJones-Projects/OB1/issues/340); FORK.md change 42).
-  Checks 3 and 4 fail too: upstream's `server/index.ts` has no method guard, so
+  Checks 3 and 4 fail too: upstream's Edge Function build has no method guard, so
   a GET answers 200 instead of 405 — with a key it hangs (upstream
   [#424](https://github.com/NateBJones-Projects/OB1/issues/424)) — and it has no
   `/health` route, so that GET gets the same 200 JSON-RPC refusal instead of

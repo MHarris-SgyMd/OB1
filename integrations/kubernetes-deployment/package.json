@@ -1,0 +1,12 @@
+{
+  "name": "ob1-kubernetes-deployment",
+  "private": true,
+  "type": "module",
+  "comment": "The image's install (SMD-1800): the Dockerfile copies this file and bun.lock and runs `bun install --frozen-lockfile --production`, so the container runs exactly these versions. The MCP stack is pinned to the same versions as extensions/package.json — one stack across the tree — and extensions/test-auth.ts fails if this file drifts from it. Bump both in the same commit. The Postgres client is Bun's own (`import { SQL } from \"bun\"`), so nothing here for it.",
+  "dependencies": {
+    "@hono/mcp": "0.3.2",
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "hono": "4.13.8",
+    "zod": "4.6.5"
+  }
+}

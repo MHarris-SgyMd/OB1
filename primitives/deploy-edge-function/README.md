@@ -56,10 +56,6 @@ Example: `supabase functions new household-knowledge-mcp`
 curl -o supabase/functions/FUNCTION_NAME/index.ts https://raw.githubusercontent.com/MHarris-SgyMd/OB1/main/DOWNLOAD_PATH/index.ts
 ```
 
-```bash
-curl -o supabase/functions/FUNCTION_NAME/deno.json https://raw.githubusercontent.com/MHarris-SgyMd/OB1/main/DOWNLOAD_PATH/deno.json
-```
-
 The server imports the access-key module from `../_shared/auth.ts` — Supabase bundles `supabase/functions/_shared/` with every function. Download it once; every extension shares it, and so do the recipes and integrations that authenticate the same way (every `_shared/auth.ts` under `recipes/` and `integrations/` is the same file byte for byte, so this one copy serves them all):
 
 ```bash
@@ -67,16 +63,12 @@ mkdir -p supabase/functions/_shared
 curl -o supabase/functions/_shared/auth.ts https://raw.githubusercontent.com/MHarris-SgyMd/OB1/main/extensions/_shared/auth.ts
 ```
 
-> **None of the six extensions deploys this way any more.** All run under Bun against your Postgres — they import this repository's SQL shim (`compat/supabase-sql`, which imports `bun`) and are Bun-native, a default-exported `{ port, fetch }` that `bun` serves (FORK.md change 74; SMD-1798 moved the last two; SMD-1799 the shape) — so their READMEs' Step 3 is a `bun extensions/<name>/index.ts` command, not this guide, which stays as upstream's Supabase path until SMD-1800 retires it. Step 3 below, the access key, is the same for all six; `extensions/test-auth.ts` starts the six (and meal-planning's shared server) under `bun` in CI, and `extensions/test-tools.ts` drives every one of their tools against a real Postgres there (FORK.md change 77, SMD-1588).
+> **None of the six extensions deploys this way any more.** All run under Bun against your Postgres — they import this repository's SQL shim (`compat/supabase-sql`, which imports `bun`) and are Bun-native, a default-exported `{ port, fetch }` that `bun` serves (FORK.md change 74; SMD-1798 moved the last two; SMD-1799 the shape) — so their READMEs' Step 3 is a `bun extensions/<name>/index.ts` command, not this guide, which stays as upstream's Supabase path until SMD-1802 retires it. Step 3 below, the access key, is the same for all six; `extensions/test-auth.ts` starts the six (and meal-planning's shared server) under `bun` in CI, and `extensions/test-tools.ts` drives every one of their tools against a real Postgres there (FORK.md change 77, SMD-1588).
 
 🟦 **Windows (PowerShell):**
 
 ```powershell
 Invoke-WebRequest -Uri https://raw.githubusercontent.com/MHarris-SgyMd/OB1/main/DOWNLOAD_PATH/index.ts -OutFile supabase\functions\FUNCTION_NAME\index.ts
-```
-
-```powershell
-Invoke-WebRequest -Uri https://raw.githubusercontent.com/MHarris-SgyMd/OB1/main/DOWNLOAD_PATH/deno.json -OutFile supabase\functions\FUNCTION_NAME\deno.json
 ```
 
 ```powershell
@@ -150,13 +142,12 @@ Save this in your credential tracker, then follow the [Remote MCP Connection](..
 
 ## Updating a Deployed Function
 
-When the extension code is updated in the repo, pull the latest version of all three files — the server, its pins, and the shared access-key module (a server may start using something the module gained) — and redeploy:
+When the extension code is updated in the repo, pull the latest version of both files — the server and the shared access-key module (a server may start using something the module gained) — and redeploy:
 
 🟩 **Mac/Linux:**
 
 ```bash
 curl -o supabase/functions/FUNCTION_NAME/index.ts https://raw.githubusercontent.com/MHarris-SgyMd/OB1/main/DOWNLOAD_PATH/index.ts
-curl -o supabase/functions/FUNCTION_NAME/deno.json https://raw.githubusercontent.com/MHarris-SgyMd/OB1/main/DOWNLOAD_PATH/deno.json
 curl -o supabase/functions/_shared/auth.ts https://raw.githubusercontent.com/MHarris-SgyMd/OB1/main/extensions/_shared/auth.ts
 ```
 
@@ -164,7 +155,6 @@ curl -o supabase/functions/_shared/auth.ts https://raw.githubusercontent.com/MHa
 
 ```powershell
 Invoke-WebRequest -Uri https://raw.githubusercontent.com/MHarris-SgyMd/OB1/main/DOWNLOAD_PATH/index.ts -OutFile supabase\functions\FUNCTION_NAME\index.ts
-Invoke-WebRequest -Uri https://raw.githubusercontent.com/MHarris-SgyMd/OB1/main/DOWNLOAD_PATH/deno.json -OutFile supabase\functions\FUNCTION_NAME\deno.json
 Invoke-WebRequest -Uri https://raw.githubusercontent.com/MHarris-SgyMd/OB1/main/extensions/_shared/auth.ts -OutFile supabase\functions\_shared\auth.ts
 ```
 
@@ -185,9 +175,8 @@ The URL and access key stay the same — no need to reconfigure your AI clients.
 - Make sure you're in your Open Brain project folder (the one with the `supabase/` directory)
 
 **Import errors or "not in import map"**
-- Verify `deno.json` was downloaded into the function directory, not the project root
-- Run `ls supabase/functions/FUNCTION_NAME/` — you should see both `index.ts` and `deno.json`
-- `Module not found "../_shared/auth.ts"`: Step 2's third download is missing — `ls supabase/functions/_shared/` should show `auth.ts`
+- Run `ls supabase/functions/FUNCTION_NAME/` — you should see `index.ts` (this fork ships no `deno.json` import map since SMD-1800; the servers resolve their packages from `extensions/package.json` under Bun, and SMD-1802 retires this guide)
+- `Module not found "../_shared/auth.ts"`: Step 2's second download is missing — `ls supabase/functions/_shared/` should show `auth.ts`
 
 **Deploy succeeds but function returns errors**
 - Check Edge Function logs: Supabase Dashboard → Edge Functions → your function → Logs
