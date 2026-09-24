@@ -174,10 +174,19 @@ export function issueScope(issue: LinearIssue): string {
 // Dated sections → derived observations (SMD-2059; SMD-1951's finding)
 // ---------------------------------------------------------------------------
 
-/** A level-2 heading that carries an ISO date anywhere in it: `## Update 2026-09-19 (board audit)`, `## Corrected 2026-09-22 — …`, `## Upstream survey, 2026-09-11`. */
-const DATED_HEADING_RE = /^## (.*\b(\d{4}-\d{2}-\d{2})\b.*)$/;
+/** A level-2 heading that carries an ISO date anywhere in it: `## Update 2026-09-19 (board audit)`, `## Corrected 2026-09-22 — …`, `## Upstream survey, 2026-09-11`, `## Update 2026-09-19T10:00` (the date part; digits may not run on). Whether the date EXISTS is `isCalendarDate`'s question. */
+const DATED_HEADING_RE = /^## (.*\b(\d{4}-\d{2}-\d{2})(?!\d).*)$/;
 /** Where a section ends: the next heading of level one or two (a `###` inside it belongs to it). */
 const SECTION_END_RE = /^#{1,2} /;
+/** A fenced code block's edge; inside one a `## ` or `# ` line is code, not a heading (first review pass, independent read: a bash comment ended a section, a quoted heading opened one). */
+const FENCE_RE = /^(```|~~~)/;
+
+/** `2026-09-31` and `2026-13-45` match the shape and are not dates; written as `created_at` they would abort the ingester's run at the cast (first review pass, independent read). */
+export function isCalendarDate(s: string): boolean {
+  const [y, m, d] = s.split("-").map(Number);
+  const t = Date.UTC(y, m - 1, d);
+  return new Date(t).toISOString().slice(0, 10) === s;
+}
 /** A Markdown link, to its label — the brain's rows show Linear hands some cross-references this way, others as autolink elements. */
 const MD_LINK_RE = /\[([^\]]*)\]\([^)]*\)/g;
 /** The slug's length bound: with the identifier and `#` it stays well inside IDENTITY_MAX. */
@@ -199,19 +208,30 @@ export function sectionSlug(heading: string): string {
 
 /**
  * The dated sections of a description, in order. Deterministic: headings only —
- * a bold `**Corrected …**` paragraph is prose and stays in the ticket. Two
- * sections of one slug in one description are told apart by a counter, so each
- * keeps an identity of its own.
+ * a bold `**Corrected …**` paragraph is prose and stays in the ticket; a `## `
+ * line inside a fenced code block is code. Two sections of one slug in one
+ * description are told apart by a counter in order of appearance (so deleting
+ * the first renames the second — a renamed heading is a new part, the old
+ * row stays). A heading whose date does not exist is not a dated heading.
+ * Lines are split on LF or CRLF; a CRLF description's raw is re-joined with LF.
  */
 export function issueSections(issue: LinearIssue): IssueSection[] {
-  const lines = (issue.description ?? "").split("\n");
+  const lines = (issue.description ?? "").split(/\r?\n/);
   const out: IssueSection[] = [];
   const slugs = new Map<string, number>();
+  let fenced = false;
   for (let i = 0; i < lines.length; i++) {
+    if (FENCE_RE.test(lines[i])) { fenced = !fenced; continue; }
+    if (fenced) continue;
     const m = DATED_HEADING_RE.exec(lines[i]);
-    if (!m) continue;
+    if (!m || !isCalendarDate(m[2])) continue;
     let j = i + 1;
-    while (j < lines.length && !SECTION_END_RE.test(lines[j])) j++;
+    let inner = false;
+    while (j < lines.length) {
+      if (FENCE_RE.test(lines[j])) inner = !inner;
+      else if (!inner && SECTION_END_RE.test(lines[j])) break;
+      j++;
+    }
     const raw = lines.slice(i, j).join("\n").replace(/\s+$/, "");
     const body = lines.slice(i + 1, j).join("\n").trim();
     const base = sectionSlug(m[1]) || `section-${m[2]}`;
@@ -235,19 +255,27 @@ export function sectionKey(identifier: string, slug: string): string {
  * title, the heading, then the body with markup stripped. The facet that
  * names the ticket is `ticket`, NOT `issue`: `issue` is the board sync's claim
  * on a ticket ROW, and a derived row carrying it would join the ticket's twin
- * group and be chained as an older paste of the ticket.
+ * group and be chained as an older paste of the ticket. Two sections whose
+ * text comes out identical yield ONE part (the first): a second row could
+ * not hold the same text (003's fingerprint), and the sync would re-key one
+ * row between the two identities every pass (first review pass, independent
+ * read).
  */
 export function derivedSections(issue: LinearIssue): Derived[] {
   const out: Derived[] = [];
+  const texts = new Set<string>();
   for (const s of issueSections(issue)) {
     const key = sectionKey(issue.identifier, s.slug);
     if (key.length > IDENTITY_MAX) continue; // unreachable with the slug bound; the contract's limit stated where it would bite
     const body = plainText(s.body).trim();
+    const text = `${issue.identifier} — ${issue.title.trim()} · ${s.heading}${body ? `\n\n${body}` : ""}`;
+    if (texts.has(text)) continue;
+    texts.add(text);
     const links: Link[] = [{ relation: "child_of", target: issue.identifier }, ...autolinkTargets(s.body).map((target) => ({ relation: "references" as const, target }))];
     out.push({
       identity: { system: LINEAR_SYSTEM, key },
       canonical: { form: s.raw, mediaType: SECTION_MEDIA_TYPE },
-      text: `${issue.identifier} — ${issue.title.trim()} · ${s.heading}${body ? `\n\n${body}` : ""}`,
+      text,
       links: normaliseLinks(links, key).links,
       mentions: [],
       facets: { ticket: issue.identifier, section: s.heading, observed_at: s.date, type: "observation", url: issue.url, [WATERMARK_KEY]: issue.updatedAt },
@@ -367,6 +395,13 @@ export function selfCheck(): number {
   ok(derivedSections({ ...sectioned, description: "## Update 2026-09-19\n## Update 2026-09-20" })[0].text.endsWith("· Update 2026-09-19") && derivedSections({ ...sectioned, description: "## Update 2026-09-19\n## Update 2026-09-20" }).length === 2, "a section with no body is its heading alone; back-to-back headings are two sections");
   ok(sectionSlug("Update 2026-09-19 — what [SMD-1879](https://linear.app/x) found: Ärger!") === "update-2026-09-19-what-smd-1879-found-a-rger", `a slug is lower-case words, Markdown links to their label, non-ASCII folded (${sectionSlug("Update 2026-09-19 — what [SMD-1879](https://linear.app/x) found: Ärger!")})`);
   ok(sectionSlug("x".repeat(200)).length === SECTION_SLUG_MAX, "a slug is bounded");
+  // First review pass (independent read): fences, impossible dates, CRLF, same-text sections.
+  const fenced = issueSections({ ...sectioned, description: "## Update 2026-09-19\n\n```bash\n# run this\n## not a heading\nbun x.ts\n```\n\nAfter.\n\n## Notes\n\n```md\n## Update 2026-09-20\n```\n\nx" });
+  ok(fenced.length === 1 && /After\./.test(fenced[0].body) && /```bash\n# run this/.test(fenced[0].raw) && !/## Notes/.test(fenced[0].raw), `a \`# \` or \`## \` line inside a fenced code block is code: it neither ends a section nor opens one (${fenced.length} section(s), body ends "${fenced[0]?.body.slice(-6)}")`);
+  ok(issueSections({ ...sectioned, description: "## Update 2026-13-45\n\nx\n\n## Update 2026-09-31\n\ny\n\n## Update 2026-02-29\n\nz" }).length === 0 && isCalendarDate("2024-02-29") && !isCalendarDate("2026-02-29"), "a heading whose date does not exist is not a dated heading — it would abort the ingester's run at the timestamp cast");
+  ok(issueSections({ ...sectioned, description: "## Update 2026-09-19 (a)\r\n\r\nx\r\n" }).length === 1 && issueSections({ ...sectioned, description: "## Update 2026-09-19T10:00 measured\n\nx" })[0]?.date === "2026-09-19" && issueSections({ ...sectioned, description: "## Build 2026-09-1999\n\nx" }).length === 0, "CRLF lines are read; an ISO timestamp's date part counts; digits running on do not");
+  const twins = derivedSections({ ...sectioned, description: "## Update 2026-09-19\n\nDone.\n\n## Update 2026-09-19\n\nDone." });
+  ok(twins.length === 1 && twins[0].identity.key === "SMD-1951#update-2026-09-19", "two sections whose text comes out identical yield one part — a second row could not hold the text, and the sync would re-key one row between two identities every pass");
 
   if (bad === 0) console.log("ingest-linear.ts self-check PASS");
   return bad === 0 ? 0 : 1;

@@ -1887,8 +1887,15 @@ passes, patched, edited or captured as the ticket's own text is, each with its
 own vector and tags — and the report's `sections` line counts them; the
 ingester writes the same parts from the dump. The ticket's text is unchanged:
 it is what people search for and cite. Headings only; a bold `**Corrected**`
-paragraph is prose. A brain from before this change gains its parts as each
-ticket next moves, or all at once from one `--full` pass.
+paragraph is prose, and a `## ` line inside a fenced code block is code. A
+renamed heading is a new part and the old row stays (neither writer removes);
+two sections whose text comes out identical are one part. A part's
+`created_at` is the heading's date from the ingester and the capture's moment
+from this tool (a capture takes no date). Parts land only once the ticket's
+head row is settled — a ticket whose text another thought holds gets none, and
+`--dry-run` counts none — and a part whose parent no row holds yet carries no
+`derived_from` until a run finds one. A brain from before this change gains
+its parts as each ticket next moves, or all at once from one `--full` pass.
 
 **Structure on a brain from before 053.** A scheduled pass fetches only the
 missing and stale tickets, so the rows a brain already held gain their

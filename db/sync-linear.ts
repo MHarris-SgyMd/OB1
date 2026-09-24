@@ -656,8 +656,10 @@ async function syncDerived(w: Writer, headId: string, parts: readonly Derived[])
       t[patch ? "patched" : "unchanged"]++;
       continue;
     }
-    // New or moved text: the vector and the tags, gated as the ticket's own text is.
-    const subject: EgressSubject = { kind: row ? "edit" : "capture", actor: w.actor.name, metadata: facets, content };
+    // New or moved text: the vector and the tags, gated as the ticket's own text
+    // is — an edit judged with the row's own metadata under the facets, as the
+    // ticket's edit is (first review pass, independent read).
+    const subject: EgressSubject = { kind: row ? "edit" : "capture", actor: w.actor.name, metadata: { ...(row?.metadata ?? {}), ...facets }, content };
     const g = decideCalls(subject, w.cfg, w.cfg.egress);
     const embedded = g.embeddings.allowed ? await w.embed(content, subject) : undefined;
     // The model's `status` is a workflow guess about a ticket; a section is
@@ -676,8 +678,15 @@ async function syncDerived(w: Writer, headId: string, parts: readonly Derived[])
     }
     // The facets over the tags, as at a ticket's capture: `type: observation` is the adapter's word, not the model's guess.
     const captured = await w.store.captureThought({ content, payload: { metadata: { ...tags, ...facets } }, chunks: embedded?.chunks ?? [], actor, embedding: embedded?.embedding ?? null, embeddingModel: embedded?.model, derivedFrom: [headId] });
+    // The text was there after all, on a row this identity does not hold
+    // (holderOfIdentity said none): another part's, or a paste. A thought
+    // holds ONE identity (thought_sources' key is the thought), so taking it
+    // would re-key that row — and two same-text parts would re-key one row
+    // between their identities every pass (first review pass, independent
+    // read). Refused and said, as the ticket path refuses an outside holder;
+    // the facets merged onto the row by the capture stand.
+    if (captured.existed === true) { w.log(`  ! ${label}: ${captured.id} already holds the section's text under another identity or none; not taken (DUPLICATE_CONTENT)`); t.refused++; continue; }
     await w.structure(captured.id, structure);
-    if (captured.existed === true) { w.log(`  · ${label}: ${captured.id} already held the section's text; the facets merged onto it and it is the section's row now`); t.patched++; continue; }
     w.log(`  + ${label}: captured${embedded ? "" : " WITHOUT a vector (egress refused)"}`);
     t.captured++;
   }
@@ -1181,7 +1190,7 @@ function selfCheck(): Promise<number> {
   const calls: string[] = [];
   const recorder: Writer = {
     store: {
-      captureThought: async (o) => { calls.push(`capture ${JSON.stringify(o.payload.metadata.status)} vec=${o.embedding ? "yes" : "no"} type=${o.payload.metadata.type ?? "-"}${o.derivedFrom ? ` from=${o.derivedFrom.join(",")}` : ""}`); return { id: "new" }; },
+      captureThought: async (o) => { calls.push(`capture ${o.payload.metadata.status === undefined ? "-" : JSON.stringify(o.payload.metadata.status)} vec=${o.embedding ? "yes" : "no"} type=${o.payload.metadata.type ?? "-"}${o.derivedFrom ? ` from=${o.derivedFrom.join(",")}` : ""}`); return { id: "new" }; },
       updateThought: async (o) => { calls.push(`update ${o.id}${o.content !== undefined ? " content" : ""}${o.metadataPatch ? ` patch(${Object.keys(o.metadataPatch).join(",")})` : ""}${o.provenance ? ` supersedes=${o.provenance.supersedes}` : ""}${o.embedding ? " vec" : ""}`); return { ok: true, id: o.id }; },
     },
     cfg: resolveEmbedConfig({ OB1_LLM_LOCAL: "1", OB1_EGRESS_POLICY: "off" }),
@@ -1479,7 +1488,11 @@ function selfCheck(): Promise<number> {
       const headRow = row("cur", renderIssue(sectioned), { ...issueFacets(sectioned) }, null, null);
       calls.length = 0;
       let r = await syncIssue(parts, sectioned, []);
-      ok(r.outcome === "captured" && r.derived?.captured === 1 && calls.join("; ") === 'embed; tags; capture "Backlog" vec=yes type=task; embed; tags; capture undefined vec=yes type=observation from=new' && seen.join(" ") === `new:SMD-1936 new:${part.identity.key}`, `a capture writes the ticket, then its dated section — a vector and tags of its own, type observation over the model's guess, derived_from the head — and records both structures (${calls.join("; ")}; ${seen.join(" ")})`);
+      ok(r.outcome === "captured" && r.derived?.captured === 1 && calls.join("; ") === 'embed; tags; capture "Backlog" vec=yes type=task; embed; tags; capture - vec=yes type=observation from=new' && seen.join(" ") === `new:SMD-1936 new:${part.identity.key}`, `a capture writes the ticket, then its dated section — a vector and tags of its own, type observation over the model's guess, no status, derived_from the head — and records both structures (${calls.join("; ")}; ${seen.join(" ")})`);
+      const existed: Writer = { ...parts, store: { ...recorder.store, captureThought: async (o) => (o.derivedFrom ? { id: "other", existed: true, supersedes: null } : recorder.store.captureThought(o)) } };
+      seen.length = 0;
+      r = await syncIssue(existed, sectioned, []);
+      ok(r.derived?.refused === 1 && r.derived.captured === 0 && seen.join(" ") === "new:SMD-1936", `a section's text held by a row this identity does not hold is refused, not taken — the identity is not re-keyed onto that row (${JSON.stringify(r.derived)}; ${seen.join(" ")})`);
       const held: Writer = { ...parts, holderOfIdentity: async () => row("d1", part.text, { ...part.facets, source: "linear" }, null, null) };
       calls.length = 0; seen.length = 0;
       r = await syncIssue(held, sectioned, [headRow]);
