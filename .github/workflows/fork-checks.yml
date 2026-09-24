@@ -646,9 +646,14 @@ jobs:
           HTTPServer(("0.0.0.0", 11434), H).serve_forever()
           PY
           # OB1_GIT_SHA reaches the image as compose's build arg (SMD-2041),
-          # and the smoke step asserts the health body reports it.
+          # and the smoke step asserts the health body reports it. The quoted
+          # password and the commented OB1_EMBEDDING_DIM are shapes an operator
+          # writes; compose reads them as the bare values, and deploy/tier.sh
+          # must too (SMD-2036): a literal read hands pg_dump a quoted password
+          # and migrate.ts a width of "1024   # …", and the tier step fails.
           cat > .env <<EOF
-          POSTGRES_PASSWORD=$(openssl rand -hex 24)
+          POSTGRES_PASSWORD="$(openssl rand -hex 24)"
+          OB1_EMBEDDING_DIM=1024   # the stack's default, written out as an operator would
           MCP_ACCESS_KEYS=ci:write:$HASH,ci-read:read:$READ_HASH,ci-capture:capture:$CAPTURE_HASH
           OB1_LLM_BASE_URL=http://host.docker.internal:11434/v1
           OB1_LLM_LOCAL=1
@@ -746,7 +751,8 @@ jobs:
       # second database on the server, read back one test per line (a test inside
       # an && list does not trip set -e: a schema-only copy passed that way in
       # review), the tier stamp, a --replay that replays that search and a --diff
-      # that finds it unmoved. Then the two guards the wrapper runs under, since
+      # that finds it unmoved, and a retry over a copy left stamped stable, as a
+      # refresh that died after its restore leaves it. Then the two guards the wrapper runs under, since
       # from its container every database is remote: the brain under its service
       # name and its container name is one database, and a refresh the wrong way
       # round lands on a brain with no tier stamp. Both are refused, and the
@@ -772,6 +778,14 @@ jobs:
           grep -E '^replayed [1-9][0-9]* of ' /tmp/tier-replay.out
           ./tier.sh --diff --since 1970-01-01T00:00:00Z --from postgres --to postgres/ob1_tier_ci | tee /tmp/tier-diff.out
           grep -F 'what moved: nothing' /tmp/tier-diff.out
+          # A refresh that dies after its restore leaves the source's ob1_config
+          # behind — the brain's, here no tier; the dogfood's, tier=stable. The
+          # mark the refresh set on the database before its reset lets the
+          # retry through.
+          [ "$(q ob1_tier_ci "SHOW ob1.refresh_target")" = working ] || { echo "the refresh did not mark its target" >&2; exit 1; }
+          q ob1_tier_ci "UPDATE ob1_config SET value = 'stable' WHERE key = 'tier'"
+          ./tier.sh --refresh --from postgres --to postgres/ob1_tier_ci --tier working
+          [ "$(q ob1_tier_ci "SELECT value FROM ob1_config WHERE key = 'tier'")" = working ] || { echo "the retry did not restamp the copy" >&2; exit 1; }
           refused() {
             if ./tier.sh --refresh --from "$1" --to "$2" --tier working 2> /tmp/tier-refused.err; then
               echo "tier.sh refreshed $1 into $2" >&2; exit 1

@@ -359,10 +359,19 @@ loopback check, `tier.ts` guards `--to` two ways:
   and then the database names decide. So `postgres` and `open-brain-postgres-1`
   are one database, and a canary copied from stable's volume, which shares its
   `system_identifier`, is still another.
-- **It is a tier a refresh can own.** That is an empty database, a migrated one
-  holding no thoughts, or one stamped `canary` or `working`. A `--to` stamped
-  `stable`, or holding thoughts under no tier stamp (a plain brain), is refused.
-  Either is most often `--from` and `--to` the wrong way round.
+- **It is a tier a refresh can own.** That means one of:
+  - a database an earlier refresh marked. Before resetting, each refresh sets
+    `ob1.refresh_target` on the database, where the reset and the restore
+    cannot reach it, so a refresh that failed partway can simply be re-run;
+  - one stamped `canary` or `working`;
+  - one with an empty public schema;
+  - an Open Brain schema holding no thoughts.
+
+  A `--to` stamped `stable`, a brain holding thoughts under no tier stamp,
+  and another application's database are refused. The first two are most
+  often `--from` and `--to` the wrong way round, and the third a name one off.
+  The refusal prints the `ALTER DATABASE … SET ob1.refresh_target` that marks
+  the target, for when a reset is really meant.
 
 The container runs with `--init`, so Ctrl-C stops a refresh, and it publishes
 nothing. The client's major has to be at least the source server's, and

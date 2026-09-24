@@ -35,9 +35,11 @@
 #
 # A short-form --to is set OB1_ALLOW_REMOTE_DB=1: tier.ts refuses to reset a
 # non-loopback --to without it, and from a container every other container is
-# non-loopback. What guards --to in its place is tier.ts refusing a --to that is
-# the --from database or is stamped tier=stable. A --to given as a URL gets no
-# such opt-in: export OB1_ALLOW_REMOTE_DB=1 to reset one, as with tier.ts.
+# non-loopback. What guards --to in its place is tier.ts: it refuses a --to that
+# is the --from database, and resets only a target a refresh marked before
+# (ob1.refresh_target on the database), a canary/working stamp, an empty public
+# schema, or an Open Brain schema with no thoughts. A --to given as a URL gets
+# no such opt-in: export OB1_ALLOW_REMOTE_DB=1 to reset one, as with tier.ts.
 #
 # The client major, 16, must be at least the source server's: refreshToolsReady
 # refuses the refresh otherwise, and bumping the stack's Postgres means bumping
@@ -103,20 +105,26 @@ NAMES=" POSTGRES_PASSWORD $(tr -d '\r' < "$ENV_FILE" \
 # The file as compose reads it: an empty project, the file, its interpolation
 # environment. The runtime's compose first, then the other's.
 RESOLVED=""
+COMPOSE_ERR=""
 for c in "$RUNTIME" docker podman; do
   command -v "$c" >/dev/null 2>&1 || continue
-  if RESOLVED="$(printf 'services: {}\n' | "$c" compose -p open-brain-tier-env --env-file "$ENV_FILE" -f - config --environment 2>/dev/null)"; then break; fi
+  if RESOLVED="$(printf 'services: {}\n' | "$c" compose -p open-brain-tier-env --env-file "$ENV_FILE" -f - config --environment 2>&1)"; then break; fi
+  # The first failure is kept — the runtime's own compose, tried first — so a
+  # file compose cannot parse is reported as that, not as a missing compose.
+  [ -n "$COMPOSE_ERR" ] || COMPOSE_ERR="$c compose said: $RESOLVED"
   RESOLVED=""
 done
-[ -n "$RESOLVED" ] || { echo "could not read $ENV_FILE through compose — tier.sh needs docker compose (or podman compose) with \`config --environment\`." >&2; exit 2; }
+[ -n "$RESOLVED" ] || { printf 'could not read %s through compose — tier.sh needs docker compose (or podman compose) with "config --environment".\n%s\n' "$ENV_FILE" "$COMPOSE_ERR" >&2; exit 2; }
 
 TMP_ENV="$(mktemp "${TMPDIR:-/tmp}/ob1-tier-env.XXXXXX")"
 chmod 600 "$TMP_ENV"
 trap 'rm -f "$TMP_ENV"' EXIT
 
 # One NAME=value line per name the file sets, value as compose resolved it; a
-# runtime's --env-file takes such a line literally. A value spanning lines is
-# not carried (none of the stack's knobs is one).
+# runtime's --env-file takes such a line literally. A quoted value spanning
+# lines is not supported: compose prints its lines raw, so the first is carried
+# cut short and a later one shaped NAME=… reads as that name (none of the
+# stack's knobs is multi-line).
 POSTGRES_PASSWORD=""
 while IFS= read -r line; do
   name="${line%%=*}"

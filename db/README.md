@@ -1718,13 +1718,27 @@ bun tier.ts --promote --from <canary-url> --to <stable-url>
 (thoughts, vectors, chunks, query_log, provenance, agents, audit — everything a
 migration might touch, so a migration meets *all* the real data), resets the target
 and restores into it, then runs `migrate.ts` forward with the merged tree. It is
-destructive to `--to`, so it refuses three kinds of target. The first is a `--to`
-that is the `--from` database. The source session is looked up in the target's
-`pg_stat_activity`, so two names for one server are still one server, and a copy
-that shares the source's `system_identifier` is still another. The second is a
-`--to` stamped `tier=stable`, or holding thoughts under no `canary`/`working`
-stamp, which is `--from` and `--to` the wrong way round. The third is a
-non-loopback target, unless `OB1_ALLOW_REMOTE_DB=1`. It needs Bun
+destructive to `--to`, so it guards the target three ways.
+
+- **It is not the `--from` database.** The source session is looked up in the
+  target's `pg_stat_activity`. Two names for one server are still one server,
+  and a copy that shares the source's `system_identifier` is still another.
+- **It is a tier, or empty** (`targetRefusal`). A target is allowed when:
+  - an earlier refresh marked it. Before its reset, each refresh sets
+    `ALTER DATABASE … SET ob1.refresh_target`, which neither the reset nor the
+    restore touches. A refresh that died after its restore therefore retries,
+    even though the restore left the source's `tier=stable` in `ob1_config`;
+  - it is stamped `canary` or `working`;
+  - its public schema is empty;
+  - it is an Open Brain schema with no thoughts.
+
+  Anything else is refused, with the `ALTER DATABASE` that marks it if that is
+  meant: the record (`tier=stable`), a brain with thoughts under no stamp, and
+  another application's schema. `--promote` mirrors this and refuses a `--to`
+  that is the `--from` database, marked, or stamped `canary`/`working`.
+- **It is loopback,** unless `OB1_ALLOW_REMOTE_DB=1`.
+
+It needs Bun
 and a `pg_dump`/`pg_restore` whose major version is at least the source server's, and
 no image the stack runs has both — the pgvector image has the client and no Bun,
 `oven/bun` the reverse. **`deploy/tier.sh` is the runnable form** (SMD-2036): it
@@ -1735,8 +1749,9 @@ network, so a refresh migrates forward with the tree it was run from —
 server can still run `bun tier.ts` directly. A branch that changes the
 embedding model or width cannot inherit stable's vectors: `migrate.ts` refuses the
 mismatch on the refreshed copy, so that branch's working tier is rebuilt from the
-records instead (`ingest-records.ts` then `reembed.ts`, the claim path) — a real
-test of the re-embed path, not a cost.
+records instead (`ingest-records.ts --tier working` then `reembed.ts`, the claim
+path; without `--tier` the ingester stamps `stable`) — a real test of the
+re-embed path, not a cost.
 
 **`--replay` / `--diff`** are the *live* half of the replay gate (SMD-1295, whose
 `db/test-replay.ts` is the offline, model-free, fixture-vector half CI runs). For
@@ -1989,7 +2004,7 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 1590 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 678 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
+./with-postgres.sh bun test-live.ts         # 685 assertions, real server, throwaway container (fewer, as one skipped group, on PostgreSQL 18 or without JIT)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bunx tsc --noEmit                           # every .ts here, strict, against the server's exports — no database
 ```

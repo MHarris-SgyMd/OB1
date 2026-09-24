@@ -44,7 +44,7 @@ import { ACTOR_NAME as SYNC_ACTOR, groupTicketRows, readTicketRows, syncIssue, t
 import type { LinearDoc } from "../evals/linear-corpus.ts";
 import { SqlStore } from "../server-portable/store-sql.ts";
 import { resolveEmbedConfig } from "../server-portable/embed.ts";
-import { promote, refresh, refreshToolsReady, replayAndDiff } from "./tier.ts";
+import { promote, refresh, refreshToolsReady, replayAndDiff, targetRefusal } from "./tier.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const URL_ = process.env.DATABASE_URL;
@@ -4358,6 +4358,40 @@ console.log("\n[20] db/tier.ts: the canary reproduces stable's rankings on the s
     try { await refresh(URL_!, canaryUrl, "canary"); }
     catch (e) { refusedBrain = (e as Error).message; }
     assert(/holds thoughts and no tier stamp/.test(refusedBrain ?? ""), `refresh refuses a --to holding thoughts under no tier stamp (got: ${refusedBrain ?? "no refusal"})`);
+
+    // targetRefusal's cells, read directly (no pg_dump needed). Each read is a new
+    // session, since a database-level setting reaches only sessions opened after it.
+    const refusalAt = async (url: string) => { const s = new SQL({ url, max: 1 }); try { return await targetRefusal(s); } finally { await s.close(); } };
+    const setMark = (db: string, v: string | null) => sql.unsafe(v === null ? `ALTER DATABASE ${db} RESET ob1.refresh_target` : `ALTER DATABASE ${db} SET ob1.refresh_target = '${v}'`);
+    // A refresh that died after its restore: the target holds the source's rows and
+    // its tier=stable, and carries the mark the refresh set before the reset.
+    await canarySql`INSERT INTO ob1_config (key, value) VALUES ('tier', 'stable') ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`;
+    assert(/stamped tier=stable/.test((await refusalAt(canaryUrl)) ?? ""), "unmarked, stamped tier=stable and holding rows: refused");
+    await setMark(canaryDb, "canary");
+    assert((await refusalAt(canaryUrl)) === null, "marked by a refresh, the same target is allowed whatever its restored ob1_config says — a failed refresh can be retried");
+    let refusedPromote: string | null = null;
+    try { await promote(URL_!, canaryUrl); }
+    catch (e) { refusedPromote = (e as Error).message; }
+    assert(/is a tier \(refresh mark canary\)/.test(refusedPromote ?? ""), `promote refuses a --to that carries the refresh mark — --from and --to swapped (got: ${refusedPromote ?? "no refusal"})`);
+    await setMark(canaryDb, null);
+    await canarySql`UPDATE ob1_config SET value = 'canary' WHERE key = 'tier'`;
+    assert((await refusalAt(canaryUrl)) === null, "unmarked but stamped tier=canary (a canary refreshed before the mark existed): allowed");
+    await canarySql`DELETE FROM ob1_config WHERE key = 'tier'`;
+    for (const c of corpus) await canarySql`DELETE FROM thoughts WHERE id = ${c.id}::uuid`;
+    assert((await refusalAt(canaryUrl)) === null, "an Open Brain schema holding no thoughts (a tier stack's database after `up`): allowed");
+    // Another application's database, one name away from a tier.
+    const foreignDb = "ob1_tier_foreign";
+    const foreignUrl = (() => { const u = new URL(URL_!); u.pathname = `/${foreignDb}`; return u.toString(); })();
+    await sql.unsafe(`DROP DATABASE IF EXISTS ${foreignDb}`);
+    await sql.unsafe(`CREATE DATABASE ${foreignDb}`);
+    try {
+      assert((await refusalAt(foreignUrl)) === null, "a new database with nothing in its public schema: allowed");
+      const foreign = new SQL({ url: foreignUrl, max: 1 });
+      try { await foreign`CREATE TABLE invoices (id int)`; } finally { await foreign.close(); }
+      assert(/not an Open Brain schema/.test((await refusalAt(foreignUrl)) ?? ""), "a database whose public schema holds another application's tables: refused");
+    } finally {
+      await sql.unsafe(`DROP DATABASE IF EXISTS ${foreignDb}`);
+    }
     await sql`DELETE FROM ob1_config WHERE key IN ('promoted_schema_version','promoted_at')`;
   } finally {
     if (canarySql) await canarySql.close();

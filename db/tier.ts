@@ -36,7 +36,8 @@
  * that does (db/tier.Dockerfile, SMD-2036); a host that runs it directly needs
  * postgresql-client >= the server. It is destructive to --to: it refuses a --to
  * that is the --from database, is stamped tier=stable, or holds thoughts under
- * no canary/working stamp (targetRefusal), and a non-loopback
+ * no canary/working stamp, or is some other application's schema, unless an
+ * earlier refresh marked it (targetRefusal); and a non-loopback
  * target unless OB1_ALLOW_REMOTE_DB=1, the same guard test-support's dropSchema
  * uses.
  *
@@ -275,23 +276,49 @@ async function sameDatabase(a: SQL, b: SQL): Promise<boolean> {
 }
 
 /**
- * Why `target` must not be reset by a refresh, or null when it may. A refresh
- * writes a tier it made: a database with nothing in it (no ob1_config, or a
- * migrated schema holding no thoughts — a tier stack's database after `up`), or
- * one a refresh stamped canary or working. It refuses the record (tier=stable)
- * and a database that holds thoughts under no tier stamp — a plain brain, which
- * is what an untiered stable looks like. Either is most often --from and --to
- * the wrong way round.
+ * The mark a refresh leaves on its target: the tier, as a database-level
+ * setting (`ALTER DATABASE … SET ob1.refresh_target`), or null when unmarked.
+ * It lives on the database, not in its schema, so the reset does not drop it
+ * and pg_restore does not overwrite it — unlike ob1_config.tier, which the
+ * restore copies from the SOURCE (stable's `stable`) before the final stamp,
+ * so a refresh that failed after its restore would otherwise read as stable.
  */
-async function targetRefusal(target: SQL): Promise<string | null> {
-  const [{ config, thoughts }] = await target<{ config: boolean; thoughts: boolean }[]>`
-    SELECT to_regclass('public.ob1_config') IS NOT NULL AS config, to_regclass('public.thoughts') IS NOT NULL AS thoughts`;
+async function refreshMark(sql: SQL): Promise<string | null> {
+  const [{ mark }] = await sql<{ mark: string | null }[]>`SELECT nullif(current_setting('ob1.refresh_target', true), '') AS mark`;
+  return mark;
+}
+
+/**
+ * Why `target` must not be reset by a refresh, or null when it may. A refresh
+ * resets only a database that is plainly a tier or plainly empty:
+ *   • marked by an earlier refresh (refreshMark) — whatever its ob1_config
+ *     says, which is how a refresh that failed after its restore is retried;
+ *   • stamped canary or working in ob1_config (a canary refreshed before the
+ *     mark existed);
+ *   • with nothing in its public schema (a new `createdb`);
+ *   • an Open Brain schema (schema_migrations present) holding no thoughts — a
+ *     tier stack's database after `up`.
+ * Anything else is refused: the record (tier=stable), a brain with thoughts
+ * under no tier stamp (an untiered stable), and a schema that is not Open
+ * Brain's at all (another application's database, one name away).
+ */
+export async function targetRefusal(target: SQL): Promise<string | null> {
+  if ((await refreshMark(target)) !== null) return null;
+  const [{ db, relations, migrations, config, thoughts }] = await target<{ db: string; relations: number; migrations: boolean; config: boolean; thoughts: boolean }[]>`
+    SELECT current_database() AS db,
+           (SELECT count(*)::int FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public') AS relations,
+           to_regclass('public.schema_migrations') IS NOT NULL AS migrations,
+           to_regclass('public.ob1_config') IS NOT NULL AS config,
+           to_regclass('public.thoughts') IS NOT NULL AS thoughts`;
   const tier = config ? await readConfig(target, "tier") : null;
-  if (tier === "stable") return "--to is stamped tier=stable — the record, which ingest-records.ts builds and a refresh never writes";
-  if (tier === "canary" || tier === "working" || !thoughts) return null;
-  const [{ n }] = await target<{ n: string }[]>`SELECT count(*)::text AS n FROM (SELECT 1 FROM thoughts LIMIT 1) t`;
-  if (n === "0") return null;
-  return `--to holds thoughts and ${tier === null ? "no tier stamp" : `tier=${tier}`} — a brain, not a tier a refresh made (stamp it canary or working in ob1_config to mean otherwise)`;
+  if (tier === "canary" || tier === "working" || relations === 0) return null;
+  const held = thoughts && (await target<{ n: number }[]>`SELECT count(*)::int AS n FROM (SELECT 1 FROM thoughts LIMIT 1) t`)[0].n > 0;
+  if (migrations && !held && tier !== "stable") return null;
+  const why =
+    tier === "stable" ? "--to is stamped tier=stable, the record — are --from and --to the wrong way round?"
+    : held ? `--to holds thoughts and ${tier === null ? "no tier stamp" : `tier=${tier}`}, a brain rather than a tier a refresh made — are --from and --to the wrong way round?`
+    : "--to has tables in its public schema and is not an Open Brain schema — another database, one name away?";
+  return `${why} It carries no refresh mark; if it is meant to be a refresh target, mark it: ALTER DATABASE ${db} SET ob1.refresh_target = 'canary'`;
 }
 
 /** Whether pg_dump AND pg_restore exist and are new enough to read `serverMaj` — refresh needs both. */
@@ -318,7 +345,8 @@ async function run(cmd: string[], opts: { stdio?: "inherit" | "pipe" } = {}): Pr
  * Snapshot `fromUrl` into `toUrl` and migrate it forward with this tree.
  *   1. pg_dump the source (custom format, no owner/privileges — the target's role
  *      may differ; ROLE_GRANTS are re-issued by migrate --grant, not carried).
- *   2. reset the target's public schema (the destructive step, loopback-guarded).
+ *   2. mark the target as a refresh target (refreshMark), then reset its public
+ *      schema (the destructive step, guarded by targetRefusal and the loopback check).
  *   3. pg_restore the dump.
  *   4. migrate.ts forward — the point of the canary: a migration meets real data.
  *   5. stamp the tier and this refresh's time in ob1_config.
@@ -340,7 +368,7 @@ export async function refresh(fromUrl: string, toUrl: string, tier: Tier): Promi
     // to on the network, and --from and --to the wrong way round.
     if (await sameDatabase(src, target)) throw new Error(`--from and --to name the same database. Refusing: --refresh drops the target's schema.`);
     const refusal = await targetRefusal(target);
-    if (refusal) throw new Error(`${refusal}. Are --from and --to the wrong way round? Refusing: --refresh drops the target's schema.`);
+    if (refusal) throw new Error(`${refusal}. Refusing: --refresh drops the target's schema.`);
   } finally {
     await src.close();
     await target.close();
@@ -355,9 +383,15 @@ export async function refresh(fromUrl: string, toUrl: string, tier: Tier): Promi
     if (dumped.code !== 0) throw new Error(`pg_dump failed (exit ${dumped.code}): ${dumped.err.trim()}`);
 
     // Reset the target so the restore lands on a clean schema. DROP … CASCADE is
-    // the destructive act --refresh exists to perform; it is guarded above.
+    // the destructive act --refresh exists to perform; it is guarded above. The
+    // mark goes first, so a refresh that dies from here on — a migration that
+    // fails on the copy, a Ctrl-C mid-restore — leaves a target the next one
+    // recognises as its own (refreshMark). `tier` is one of TIERS, checked by
+    // the caller; ALTER DATABASE takes no bind parameters.
     const dst = new SQL({ url: toUrl, max: 1 });
     try {
+      if (!TIERS.includes(tier)) throw new Error(`not a tier: ${tier}`);
+      await dst.unsafe(`DO $mark$ BEGIN EXECUTE format('ALTER DATABASE %I SET ob1.refresh_target = %L', current_database(), '${tier}'); END $mark$`);
       await dst`DROP SCHEMA IF EXISTS public CASCADE`;
       await dst`CREATE SCHEMA public`;
     } finally {
@@ -425,13 +459,26 @@ async function setConfig(sql: SQL, key: string, value: string): Promise<void> {
  */
 export async function promote(canaryUrl: string, stableUrl: string): Promise<{ version: string | null }> {
   const canary = new SQL({ url: canaryUrl, max: 1 });
+  const stable = new SQL({ url: stableUrl, max: 1 });
   let version: string | null;
   try {
+    // The mirror of refresh's guard: promote stamps --to as stable, so --to must
+    // not be the canary itself, nor a tier — the shape of --from and --to the
+    // wrong way round, which would make the canary read as the record.
+    if (await sameDatabase(canary, stable)) throw new Error(`--from and --to name the same database. Refusing: --promote stamps --to as stable.`);
+    const mark = await refreshMark(stable);
+    const [{ config }] = await stable<{ config: boolean }[]>`SELECT to_regclass('public.ob1_config') IS NOT NULL AS config`;
+    const tier = config ? await readConfig(stable, "tier") : null;
+    if (mark !== null || tier === "canary" || tier === "working") {
+      throw new Error(`--to is a tier (${mark !== null ? `refresh mark ${mark}` : `tier=${tier}`}), not the record — are --from and --to the wrong way round? Refusing: --promote stamps --to as stable.`);
+    }
     version = await readConfig(canary, "schema_version");
+  } catch (e) {
+    await stable.close();
+    throw e;
   } finally {
     await canary.close();
   }
-  const stable = new SQL({ url: stableUrl, max: 1 });
   try {
     // Assert the target is stable — but only the tier key, not stampTier's
     // last_ingest: a promotion is not an ingest, and stable's last_ingest must
@@ -566,4 +613,12 @@ async function main(): Promise<void> {
   }
 }
 
-if (import.meta.main) await main();
+// A refusal or a failed step is a sentence for the operator, not a stack trace
+// with Bun's source excerpt around it. Exit 1, as before: --diff's "moved" is
+// also 1, and either one fails a gate.
+if (import.meta.main) {
+  await main().catch((e: unknown) => {
+    console.error(`tier.ts: error: ${e instanceof Error ? e.message : String(e)}`);
+    process.exit(1);
+  });
+}
