@@ -1,0 +1,21 @@
+{
+  "name": "ob1-jev",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "serve": "bun serve.ts",
+    "fetch-model": "bun serve.ts --fetch-only",
+    "test": "bun test-jev.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "comment": "The typed-decision tier's serving process (SMD-2050). onnxruntime-node runs the model; its postinstall only fetches CUDA provider binaries, which the CPU provider does not use, and Bun leaves it untrusted — do not add it to trustedDependencies. @huggingface/tokenizers is the tokenizer alone (zero dependencies), not transformers.js.",
+  "dependencies": {
+    "@huggingface/tokenizers": "0.2.0",
+    "onnxruntime-node": "1.30.0"
+  },
+  "devDependencies": {
+    "@types/bun": "1.4.0",
+    "@types/node": "26.6.2",
+    "typescript": "5.9.3"
+  }
+}

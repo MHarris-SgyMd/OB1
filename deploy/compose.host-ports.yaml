@@ -1,4 +1,4 @@
-# Publishes the stack's two internal services to the host, for tools run from a
+# Publishes the stack's internal services to the host, for tools run from a
 # checkout rather than inside the compose network. A second -f, never the default,
 # and chosen when the stack comes up: adding or dropping it later changes the
 # postgres service's mapping, so `up -d` recreates that container and, through
@@ -18,8 +18,10 @@
 # openbrain` and `compose exec -T postgres pg_dump -U postgres openbrain > dump.sql`
 # run inside the container (`compose` with the -f files the stack runs with).
 #
-# The ollama entry applies only with `--profile local-models`; without the
-# profile the service does not exist and the entry is inert.
+# The ollama entry applies only with `--profile local-models`, and the jev
+# entry only with `--profile jev` (the typed-decision tier, SMD-2050 — a spike
+# run from a checkout then sets OB1_JEV_BASE_URL=http://127.0.0.1:8020);
+# without its profile a service does not exist and its entry is inert.
 
 services:
   postgres:
@@ -29,3 +31,7 @@ services:
   ollama:
     ports:
       - "${OLLAMA_BIND:-127.0.0.1}:${OLLAMA_PORT:-11434}:11434"
+
+  jev:
+    ports:
+      - "${JEV_BIND:-127.0.0.1}:${JEV_PORT:-8020}:8020"

@@ -50,7 +50,7 @@ jobs:
 
       # What a landing must carry (SMD-1857): a PR — or, in a merge queue, each
       # PR of the group, one first-parent merge commit each — whose change
-      # touches db/migrations/, server-portable/ or evals/ beyond tests and docs
+      # touches db/migrations/, server-portable/, evals/ or jev/ beyond tests and docs
       # ships a changes/smd-NNNN.md fragment. Read from the range the event
       # gives, so it holds on a merge group's result as on a PR's head. GitHub
       # refuses a merge queue on this user-owned repository (SMD-1984), so today
@@ -59,7 +59,7 @@ jobs:
       # check-fork-consistency below run on whichever tree is checked out. A PR
       # into another branch is not a landing yet; it is asked when it reaches
       # main.
-      - name: What the landing carries — a fragment for a change to db/migrations/, server-portable/ or evals/
+      - name: What the landing carries — a fragment for a change to db/migrations/, server-portable/, evals/ or jev/
         if: github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.base_ref == 'main')
         env:
           EVENT: ${{ github.event_name }}
@@ -165,6 +165,26 @@ jobs:
         working-directory: evals
         run: bunx tsc --noEmit
 
+      # The typed-decision tier (SMD-2050): its serving process under jev/ and
+      # the client in server-portable/jev.ts, which the suite imports — so it
+      # runs in THIS job, after server-portable's install. No model: [1]–[8]
+      # hold the contract, the Verdict port, the handler, the verified fetch
+      # and the client's gate against stubs; [9]-[11], the model itself, its
+      # published receipt and JevBench's rows, skip unless JEV_TEST_MODEL_DIR
+      # names the pinned files (606 MB, not fetched in CI). onnxruntime-node's postinstall stays untrusted: it fetches only
+      # CUDA binaries, and the typecheck needs none.
+      - name: Install the decision tier's pinned packages
+        working-directory: jev
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck the decision tier
+        working-directory: jev
+        run: bunx tsc --noEmit
+
+      - name: Decision tier — contract, service and client
+        working-directory: jev
+        run: bun test-jev.ts
+
       # The thought-kind labels (SMD-1951): the fixture's shape rules, probed
       # with mutants, and the committed fixture held to them. Ids and closed
       # vocabulary only; no database, no model.
@@ -197,6 +217,18 @@ jobs:
       - name: Projection-replay rules
         working-directory: evals
         run: bun eval-projection-replay.ts --self-check
+
+      # The writable-projection spike's rules (SMD-1999): the four options and
+      # fourteen criteria, the judgement of probes, the pre-registered verdict
+      # (GO only when every contract criterion PASSes and every behaviour
+      # holds), the recommendation's tie-break, the differential's
+      # normalisation, the replay rule and its one tolerated kind of difference, the
+      # recorded matrix and the drift from it, the report — probed with
+      # hand-known observations. No database; the prototype runs in the
+      # data-layer job.
+      - name: Writable-projection rules
+        working-directory: evals
+        run: bun eval-writable-projection.ts --self-check
 
       # Proves the Cloudflare target still builds under the real Workers bundler.
       # Catches a dependency pulling in a node: builtin Workers cannot provide.
@@ -434,6 +466,28 @@ jobs:
       - name: Projection-replay fixture
         working-directory: evals
         run: bun eval-projection-replay.ts --fixture-check
+        env:
+          DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
+          OB1_FIXTURE_RESET: "1"
+
+      # The writable-projection spike's prototype (SMD-1999): the schema reset
+      # to 053 four times — as it stands, with option 2's functions (append
+      # the event, project the row), with a view named thoughts over a renamed
+      # table and 053's functions, with the view and option 2's functions —
+      # and the same scripted writes run against each: the vendored capture as
+      # readwise sends it, the 2- and 4-argument forms, the server's and the
+      # integrations' update_thought calls, delete_thought plain and refused,
+      # a raw INSERT, ingest-records' statement, the community DDL verbatim,
+      # the three concurrency behaviours, the trigger counts, read-your-writes
+      # with the drop-the-projector control, the replay of the whole log.
+      # --check holds the run to the matrix the spike recorded, so a Postgres
+      # or prototype change that moves a cell is named. No provider (vectors at
+      # width 8). It DROPS the schema and refuses a database holding thoughts
+      # unless told; this one is a throwaway. Runs after the fixture above,
+      # which leaves its rows; every suite after this resets for itself.
+      - name: Writable-projection prototype
+        working-directory: evals
+        run: bun eval-writable-projection.ts --check
         env:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
           OB1_FIXTURE_RESET: "1"
