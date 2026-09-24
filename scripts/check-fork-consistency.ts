@@ -4549,12 +4549,13 @@ checkSupabaseJsImports();
  * read from the parsed document. The comment, which a YAML parser drops, is
  * read from the value's line: the first unclaimed line carrying the value,
  * block scalars (`run: |`, `run: |- # note`, `- |`, an anchored or tagged
- * `&a |`) skipped, since a `uses:` line there is text, not a step. A SHA-pinned `uses:` with no line of its own (flow style, a
- * folded value, or steps reused by YAML alias, which actionlint 1.7.7 refuses
- * too) is refused, since its tag cannot be read; and every SHA-pinned line
- * the reader does find carries its tag whether a step claimed it or not, so
- * text the reader cannot tell from a step (a quoted scalar across lines, an
- * input named `uses`) cannot lend its tag to a bare step below it. Check 23
+ * `&a |`) skipped, since a `uses:` line there is text, not a step. A
+ * SHA-pinned `uses:` with no line of its own (flow style, a folded value, or
+ * steps reused by YAML alias, which actionlint 1.7.7 refuses too) is refused,
+ * since its tag cannot be read; and every SHA-pinned line the reader does find
+ * carries its tag whether a step claimed it or not, so text the reader cannot
+ * tell from a step (a quoted scalar across lines, an input named `uses`)
+ * cannot lend its tag to a bare step below it. Check 23
  * holds a pin's shape, not its truth: a comment that names another tag, or a
  * commit only a fork of the action holds, is zizmor's to find (run once for
  * SMD-2093, not in CI); actionlint cannot check a SHA-pinned action's inputs,
@@ -4582,9 +4583,10 @@ const MOVING_LABEL = /-latest(?:-|$)/i;
  * first dash's for a keyless item.
  */
 const BLOCK_SCALAR_KEY = /^(\s*)((?:-\s+)*)(?:([^\s#][^#]*?):\s+)?(?:[&!]\S*\s+)*[|>][-+0-9]*\s*(?:#.*)?$/;
+type UsesLine = { value: string; comment: string; line: number };
 /** Every line outside a block scalar that reads as `uses: <value> [# comment]`: a `- ` list item or not, the key anchored or not, the value quoted or not. */
-function usesLinesOf(text: string): { value: string; comment: string; line: number }[] {
-  const out: { value: string; comment: string; line: number }[] = [];
+function usesLinesOf(text: string): UsesLine[] {
+  const out: UsesLine[] = [];
   let blockColumn = -1; // inside a block scalar, the column its body must be indented past; -1 outside one
   text.split(/\r?\n/).forEach((raw, i) => {
     if (blockColumn >= 0) {
@@ -4653,7 +4655,7 @@ function workflowPinProblems(file: string, text: string): [string, string][] {
   });
   return problems;
 }
-/** .github/dependabot.yml, as text or null when absent: it must keep a `github-actions` update over `/` that can open a PR. */
+/** .github/dependabot.yml, as text or null when absent: a `version: 2` file, every entry on a schedule Dependabot accepts, with a `github-actions` update over `/` that can open a PR. */
 function dependabotProblems(text: string | null): [string, string][] {
   if (text === null) return [[DEPENDABOT, "missing — nothing moves the workflows' SHA pins, so they stay on the commit they were pinned at; add a `github-actions` update over `/` (SMD-2093)"]];
   let doc: unknown;
@@ -4661,7 +4663,7 @@ function dependabotProblems(text: string | null): [string, string][] {
   // Dependabot refuses the whole file for a wrong version or an entry with no schedule, and then moves nothing.
   if (!doc || typeof doc !== "object" || (doc as { version?: unknown }).version !== 2) return [[DEPENDABOT, "is not a `version: 2` file — Dependabot refuses the whole file, and nothing moves the workflows' SHA pins (SMD-2093)"]];
   const updates = (doc as { updates?: unknown }).updates;
-  type Update = { "package-ecosystem"?: unknown; directory?: unknown; directories?: unknown; "open-pull-requests-limit"?: unknown; ignore?: unknown; schedule?: unknown };
+  type Update = { "package-ecosystem"?: unknown; directory?: unknown; directories?: unknown; "open-pull-requests-limit"?: unknown; ignore?: unknown };
   const covers = (u: unknown): u is Update => {
     if (!u || typeof u !== "object") return false;
     const e = u as Update;
@@ -4697,62 +4699,69 @@ const PIN_PROBE = (runsOn: string, step: string) => `name: probe\non: push\njobs
 const PIN_STEP = `- uses: actions/checkout@${PIN_SHA} # v7.0.1`;
 /** Workflows check 23 accepts: [why, text]. */
 const PIN_ACCEPTED: [string, string][] = [
+  // A pin as it is written: quoted, after a name, after a folded name, under an anchored key, twice, by digest, CRLF.
   ["a named image and a SHA pin with its tag", PIN_PROBE("ubuntu-24.04", PIN_STEP)],
   ["a quoted SHA pin", PIN_PROBE("ubuntu-24.04", `- uses: "actions/checkout@${PIN_SHA}" # v7`)],
   ["a SHA pin on the line after the step's name", PIN_PROBE("ubuntu-24.04", `- name: Check out\n        uses: actions/checkout@${PIN_SHA} # v7.0.1`)],
-  ["a docker image by digest", PIN_PROBE("ubuntu-24.04", `- uses: docker://alpine@sha256:${"a".repeat(64)}`)],
-  ["a runner label list with no -latest", PIN_PROBE("[self-hosted, linux]", PIN_STEP)],
-  ["a `uses:` line inside a run body, which is text", PIN_PROBE("ubuntu-24.04", `${PIN_STEP}\n      - run: |\n          uses: actions/checkout@v4`)],
-  ["two steps on one pin", PIN_PROBE("ubuntu-24.04", `${PIN_STEP}\n      ${PIN_STEP}`)],
-  ["a bare copy of the pin in an earlier run body, which does not take the commented step's line", PIN_PROBE("ubuntu-24.04", `- run: |\n          uses: actions/checkout@${PIN_SHA}\n      ${PIN_STEP}`)],
-  ["a bare copy of the pin in an earlier `- |` item, skipped as a block too", PIN_PROBE("ubuntu-24.04", `- uses: ./.github/actions/local\n        with:\n          args:\n            - |\n              uses: actions/checkout@${PIN_SHA}\n      ${PIN_STEP}`)],
-  ["a workflow with CRLF line ends", PIN_PROBE("ubuntu-24.04", PIN_STEP).replace(/\n/g, "\r\n")],
-  ["a bare copy of the pin in an earlier nested `- - |` item", PIN_PROBE("ubuntu-24.04", `- uses: ./.github/actions/local\n        with:\n          args:\n            - - |\n                uses: actions/checkout@${PIN_SHA}\n      ${PIN_STEP}`)],
-  ["a bare copy of the pin after a blank line in an earlier run body", PIN_PROBE("ubuntu-24.04", `- run: |\n          echo one\n\n          uses: actions/checkout@${PIN_SHA}\n      ${PIN_STEP}`)],
-  ["a `uses:` key with an anchor", PIN_PROBE("ubuntu-24.04", `- &checkout uses: actions/checkout@${PIN_SHA} # v7.0.1`)],
   ["a step whose folded `name: >-` precedes its `uses:`", PIN_PROBE("ubuntu-24.04", `- name: >-\n          Check out\n        uses: actions/checkout@${PIN_SHA} # v7.0.1`)],
-  ["a bare copy of the pin in an earlier `run: |-` body, a chomping indicator after the `|`", PIN_PROBE("ubuntu-24.04", `- run: |-\n          uses: actions/checkout@${PIN_SHA}\n      ${PIN_STEP}`)],
-  ["a bare copy of the pin in an earlier `run: | # note` body, a comment after the `|`", PIN_PROBE("ubuntu-24.04", `- run: | # note\n          uses: actions/checkout@${PIN_SHA}\n      ${PIN_STEP}`)],
-  ["a bare copy of the pin in an earlier tagged run body",PIN_PROBE("ubuntu-24.04", `- run: !!str |\n          uses: actions/checkout@${PIN_SHA}\n      ${PIN_STEP}`)],
+  ["a `uses:` key with an anchor", PIN_PROBE("ubuntu-24.04", `- &checkout uses: actions/checkout@${PIN_SHA} # v7.0.1`)],
+  ["two steps on one pin", PIN_PROBE("ubuntu-24.04", `${PIN_STEP}\n      ${PIN_STEP}`)],
   ["a tag comment with no v, as an action whose tags carry none", PIN_PROBE("ubuntu-24.04", `- uses: actions/checkout@${PIN_SHA} # 7.0.1`)],
+  ["a docker image by digest", PIN_PROBE("ubuntu-24.04", `- uses: docker://alpine@sha256:${"a".repeat(64)}`)],
+  ["a workflow with CRLF line ends", PIN_PROBE("ubuntu-24.04", PIN_STEP).replace(/\n/g, "\r\n")],
+  // Runners that name their image.
+  ["a runner label list with no -latest", PIN_PROBE("[self-hosted, linux]", PIN_STEP)],
   ["a runner group alone, which names no image", PIN_PROBE("{ group: big-runners }", PIN_STEP)],
   ["a runner group with a named image", PIN_PROBE("{ group: big-runners, labels: [ubuntu-24.04] }", PIN_STEP)],
+  // Block scalars are text: a bare copy of the pin in one takes no step's line.
+  ["a `uses:` line inside a run body, which is text", PIN_PROBE("ubuntu-24.04", `${PIN_STEP}\n      - run: |\n          uses: actions/checkout@v4`)],
+  ["a bare copy of the pin in an earlier run body, which does not take the commented step's line", PIN_PROBE("ubuntu-24.04", `- run: |\n          uses: actions/checkout@${PIN_SHA}\n      ${PIN_STEP}`)],
+  ["a bare copy of the pin after a blank line in an earlier run body", PIN_PROBE("ubuntu-24.04", `- run: |\n          echo one\n\n          uses: actions/checkout@${PIN_SHA}\n      ${PIN_STEP}`)],
+  ["a bare copy of the pin in an earlier `run: |-` body, a chomping indicator after the `|`", PIN_PROBE("ubuntu-24.04", `- run: |-\n          uses: actions/checkout@${PIN_SHA}\n      ${PIN_STEP}`)],
+  ["a bare copy of the pin in an earlier `run: | # note` body, a comment after the `|`", PIN_PROBE("ubuntu-24.04", `- run: | # note\n          uses: actions/checkout@${PIN_SHA}\n      ${PIN_STEP}`)],
+  ["a bare copy of the pin in an earlier tagged run body", PIN_PROBE("ubuntu-24.04", `- run: !!str |\n          uses: actions/checkout@${PIN_SHA}\n      ${PIN_STEP}`)],
+  ["a bare copy of the pin in an earlier `- |` item, skipped as a block too", PIN_PROBE("ubuntu-24.04", `- uses: ./.github/actions/local\n        with:\n          args:\n            - |\n              uses: actions/checkout@${PIN_SHA}\n      ${PIN_STEP}`)],
+  ["a bare copy of the pin in an earlier nested `- - |` item", PIN_PROBE("ubuntu-24.04", `- uses: ./.github/actions/local\n        with:\n          args:\n            - - |\n                uses: actions/checkout@${PIN_SHA}\n      ${PIN_STEP}`)],
 ];
 /** Workflows check 23 refuses with exactly one problem: [why, text, a phrase the problem carries]. */
 const PIN_MUTANTS: [string, string, string][] = [
+  // Runners GitHub moves, or that this check cannot read.
   ["runs-on ubuntu-latest", PIN_PROBE("ubuntu-latest", PIN_STEP), "moves to a new image"],
   ["a -latest label in a list", PIN_PROBE("[self-hosted, macos-latest]", PIN_STEP), "moves to a new image"],
-  ["a runner picked by an expression", PIN_PROBE("${{ matrix.os }}", PIN_STEP), "by an expression"],
-  ["an action by major tag", PIN_PROBE("ubuntu-24.04", "- uses: actions/checkout@v4"), "can move"],
-  ["an action by branch", PIN_PROBE("ubuntu-24.04", "- uses: actions/checkout@main"), "can move"],
-  ["an action by short SHA", PIN_PROBE("ubuntu-24.04", `- uses: actions/checkout@${PIN_SHA.slice(0, 7)} # v7.0.1`), "can move"],
-  ["an action with no ref", PIN_PROBE("ubuntu-24.04", "- uses: actions/checkout"), "no ref at all"],
-  ["a SHA pin with no comment", PIN_PROBE("ubuntu-24.04", `- uses: actions/checkout@${PIN_SHA}`), "no `# vX.Y.Z` comment"],
-  ["a SHA pin whose comment names no tag", PIN_PROBE("ubuntu-24.04", `- uses: actions/checkout@${PIN_SHA} # pinned`), "no `# vX.Y.Z` comment"],
-  ["a SHA pin in flow style", PIN_PROBE("ubuntu-24.04", `- { uses: "actions/checkout@${PIN_SHA}" }`), "on no line"],
-  ["a docker image by tag", PIN_PROBE("ubuntu-24.04", "- uses: docker://alpine:3"), "by its sha256 digest"],
-  ["a reusable workflow by tag", "name: probe\non: push\njobs:\n  b:\n    uses: org/repo/.github/workflows/x.yml@v1\n", "can move"],
   ["a -latest label with a size", PIN_PROBE("macos-latest-large", PIN_STEP), "moves to a new image"],
   ["a -latest label in another case", PIN_PROBE("Ubuntu-Latest", PIN_STEP), "moves to a new image"],
   ["a runner group whose label is -latest", PIN_PROBE("{ group: big-runners, labels: [ubuntu-latest] }", PIN_STEP), "moves to a new image"],
+  ["a runner picked by an expression", PIN_PROBE("${{ matrix.os }}", PIN_STEP), "by an expression"],
   ["a runner label that is not a string", PIN_PROBE("[ubuntu-24.04, 3]", PIN_STEP), "cannot read"],
-  ["two steps on one pin, the second bare", PIN_PROBE("ubuntu-24.04", `${PIN_STEP}\n      - uses: actions/checkout@${PIN_SHA}`), "no `# vX.Y.Z` comment"],
-  // Each step claims its own line: without the claim both steps read the bare first line, and it is reported twice.
-  ["two steps on one pin, the first bare", PIN_PROBE("ubuntu-24.04", `- uses: actions/checkout@${PIN_SHA}\n      ${PIN_STEP}`), "comment naming the tag"],
-  ["a SHA pin whose comment is a date", PIN_PROBE("ubuntu-24.04", `- uses: actions/checkout@${PIN_SHA} # 2026-09-24`), "comment naming the tag"],
+  // Refs an owner can move, and images by tag.
+  ["an action by major tag", PIN_PROBE("ubuntu-24.04", "- uses: actions/checkout@v4"), "can move"],
+  ["an action by branch", PIN_PROBE("ubuntu-24.04", "- uses: actions/checkout@main"), "can move"],
+  ["an action by short SHA", PIN_PROBE("ubuntu-24.04", `- uses: actions/checkout@${PIN_SHA.slice(0, 7)} # v7.0.1`), "can move"],
   ["a 41-character ref", PIN_PROBE("ubuntu-24.04", `- uses: actions/checkout@${PIN_SHA}0 # v7.0.1`), "can move"],
+  ["an action with no ref", PIN_PROBE("ubuntu-24.04", "- uses: actions/checkout"), "no ref at all"],
+  ["a reusable workflow by tag", "name: probe\non: push\njobs:\n  b:\n    uses: org/repo/.github/workflows/x.yml@v1\n", "can move"],
+  ["a docker image by tag", PIN_PROBE("ubuntu-24.04", "- uses: docker://alpine:3"), "by its sha256 digest"],
   ["a docker digest with text after it", PIN_PROBE("ubuntu-24.04", `- uses: docker://alpine@sha256:${"a".repeat(64)}x`), "by its sha256 digest"],
+  // A SHA with no tag. Each step claims its own line: without the claim, both steps of "the first bare" read line
+  // one, and it is reported twice.
+  ["a SHA pin with no comment", PIN_PROBE("ubuntu-24.04", `- uses: actions/checkout@${PIN_SHA}`), "no `# vX.Y.Z` comment"],
+  ["a SHA pin whose comment names no tag", PIN_PROBE("ubuntu-24.04", `- uses: actions/checkout@${PIN_SHA} # pinned`), "no `# vX.Y.Z` comment"],
+  ["a SHA pin whose comment is a date", PIN_PROBE("ubuntu-24.04", `- uses: actions/checkout@${PIN_SHA} # 2026-09-24`), "comment naming the tag"],
+  ["two steps on one pin, the second bare", PIN_PROBE("ubuntu-24.04", `${PIN_STEP}\n      - uses: actions/checkout@${PIN_SHA}`), "no `# vX.Y.Z` comment"],
+  ["two steps on one pin, the first bare", PIN_PROBE("ubuntu-24.04", `- uses: actions/checkout@${PIN_SHA}\n      ${PIN_STEP}`), "comment naming the tag"],
+  // A pin with no line of its own, whose tag cannot be read.
+  ["a SHA pin in flow style", PIN_PROBE("ubuntu-24.04", `- { uses: "actions/checkout@${PIN_SHA}" }`), "on no line"],
   ["steps reused by alias, which have no line of their own", `name: probe\non: push\njobs:\n  a:\n    runs-on: ubuntu-24.04\n    steps: &s\n      ${PIN_STEP}\n  b:\n    runs-on: ubuntu-24.04\n    steps: *s\n`, "an alias of another step"],
-  // A run body is skipped: its commented copy of the pin lends the bare step below it nothing.
+  // A commented copy of the pin above a bare step lends it nothing: in a block scalar the bare step claims its own
+  // line; in text the reader cannot tell from a step, the bare line goes unclaimed, and every pinned line carries its tag.
   ["a bare step under a run body carrying the commented pin", PIN_PROBE("ubuntu-24.04", `- run: |\n          uses: actions/checkout@${PIN_SHA} # v7.0.1\n      - uses: actions/checkout@${PIN_SHA}`), "no `# vX.Y.Z` comment"],
-  ["no jobs at all", "name: probe\non: push\n", "no `jobs:` map"],
-  ["a `uses:` that is not a string", PIN_PROBE("ubuntu-24.04", "- uses: 3"), "not a string"],
-  // Block scalars the skip must know as blocks: the bare step then claims its own line.
   ["a bare step under a `- |` item carrying the commented pin", PIN_PROBE("ubuntu-24.04", `- uses: ./.github/actions/local\n        with:\n          args:\n            - |\n              uses: actions/checkout@${PIN_SHA} # v7.0.1\n      - uses: actions/checkout@${PIN_SHA}`), "comment naming the tag"],
   ["a bare step under an anchored run body carrying the commented pin", PIN_PROBE("ubuntu-24.04", `- run: &body |\n          uses: actions/checkout@${PIN_SHA} # v7.0.1\n      - uses: actions/checkout@${PIN_SHA}`), "comment naming the tag"],
-  // Text the reader cannot tell from a step: the bare step's line goes unclaimed, and every pinned line carries its tag.
   ["a bare step under a quoted run across lines carrying the commented pin", PIN_PROBE("ubuntu-24.04", `- run: "echo one\n          uses: actions/checkout@${PIN_SHA} # v7.0.1 \n          echo two"\n      - uses: actions/checkout@${PIN_SHA}`), "no step's tag was read from"],
   ["a bare step under an input named uses carrying the commented pin", PIN_PROBE("ubuntu-24.04", `- uses: ./.github/actions/local\n        with:\n          uses: actions/checkout@${PIN_SHA} # v7.0.1\n      - uses: actions/checkout@${PIN_SHA}`), "no step's tag was read from"],
+  // Shapes the check cannot read at all.
+  ["no jobs at all", "name: probe\non: push\n", "no `jobs:` map"],
+  ["a `uses:` that is not a string", PIN_PROBE("ubuntu-24.04", "- uses: 3"), "not a string"],
 ];
 function checkWorkflowPins() {
   if (typeof Bun === "undefined" || typeof Bun.YAML?.parse !== "function") {
@@ -4775,7 +4784,7 @@ function checkWorkflowPins() {
     ["a cron schedule with its cronjob", DEPENDABOT_OK.replace("interval: weekly", "interval: cron\n      cronjob: \"0 6 * * 1\"")],
     ["an ignore of every action at some versions alone, which still opens PRs", `${DEPENDABOT_OK}    ignore:\n      - dependency-name: "*"\n        versions: [">= 8"]\n`],
     ["an entry in a multi-ecosystem group whose own schedule stands where the group names none", `${DEPENDABOT_OK}  - package-ecosystem: npm\n    directory: /scripts\n    multi-ecosystem-group: infra\n    schedule:\n      interval: weekly\nmulti-ecosystem-groups:\n  infra: {}\n`],
-    ["an entry scheduled by its multi-ecosystem group",`${DEPENDABOT_OK}  - package-ecosystem: npm\n    directory: /scripts\n    multi-ecosystem-group: infra\nmulti-ecosystem-groups:\n  infra:\n    schedule:\n      interval: weekly\n`],
+    ["an entry scheduled by its multi-ecosystem group", `${DEPENDABOT_OK}  - package-ecosystem: npm\n    directory: /scripts\n    multi-ecosystem-group: infra\nmulti-ecosystem-groups:\n  infra:\n    schedule:\n      interval: weekly\n`],
   ] as const) if (dependabotProblems(text).length) fail(SELF, `check 23 refuses ${why} (its own probe)`);
   for (const [why, text, says] of [
     ["no file", null, "missing"],
