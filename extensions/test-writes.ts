@@ -340,7 +340,7 @@ async function plantRestricted(hidden: string, atText: string): Promise<string> 
  * Four clocks around a row's created_at, rendered by Postgres: its UTC day and
  * the next (date-only bounds), one hour later in a zone two hours ahead (an
  * offset bound naming an instant an hour BEFORE the row), and one hour earlier
- * with no zone. The date-bound arms of both search blocks read them.
+ * with no zone. The enhanced-mcp block reads all four; the rest-api block reads `later`.
  */
 async function clocksOf(id: string): Promise<{ day: string; next: string; later: string; earlier: string }> {
   const [row] = await sql`SELECT to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS day,
