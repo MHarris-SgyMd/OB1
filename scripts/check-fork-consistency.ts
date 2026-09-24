@@ -42,9 +42,9 @@
  *      their own, three function bodies shown, one test fixture)
  *  11. no code file under the seven category directories or docs/ reaches
  *      `Deno` — the vendored files are Bun-native since SMD-1799 (`process.env`,
- *      `export default { port, fetch }`, what `bun <file>` serves) — save the
- *      Edge Function deployments SMD-1800 retires, counted per file in
- *      DENO_EXCEPTIONS; and a file that imports the SQL shim (Bun's client)
+ *      `export default { port, fetch }`, what `bun <file>` serves), and the
+ *      Edge Function deployments that were excepted left with SMD-1800
+ *      (DENO_EXCEPTIONS counts per file; none today); and a file that imports the SQL shim (Bun's client)
  *      imports no specifier Bun cannot resolve (`jsr:`, `npm:`, a URL), itself
  *      or through the files it imports (SMD-1480)
  *  12. a .sql file under schemas/ or db/ runs nothing that needs Supabase — no
@@ -202,10 +202,10 @@
  *      esm.sh URL, a subpath), comments blanked, in any code file under the
  *      seven category directories and docs/: every vendored server reaches the
  *      brain through compat/supabase-sql, and supabase-js stays only in
- *      server/index.ts (the Edge Function build, SMD-1800's) and
- *      server-portable's Workers store; counted per-file exceptions as 7's —
- *      the codemod's KEEP client (local-brain-no-mcp, SMD-1800's) and the
- *      dashboard's type-only import (SMD-1801's) (SMD-1798)
+ *      server-portable's Workers store (server/index.ts, the Edge Function
+ *      build that also held it, left with SMD-1800); counted per-file
+ *      exceptions as 7's — the dashboard's type-only import (SMD-1801's)
+ *      (SMD-1798)
  *
  * Run: bun scripts/check-fork-consistency.ts   (a Bun script — TypeScript, type-checked in CI
  * beside its run (SMD-1870); checks 13, 14, 18 and 20 parse YAML with Bun.YAML)
