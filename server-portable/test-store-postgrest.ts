@@ -680,5 +680,17 @@ console.log("\n[14] listChanges over PostgREST: the rpc shape — every argument
   await admin.close();
 }
 
+console.log("\n[15] resolveAgent's failure carries PostgREST's SQLSTATE as errno, where Bun's SQL puts it (SMD-2072)");
+{
+  // Workers sets no cap of its own; a role's statement_timeout on a locked
+  // registry reaches agents.ts as 57014, which it reads as busy only by errno.
+  const timedOut = new PostgrestStore("unused", "unused", {
+    rpc: async () => ({ data: null, error: { message: "canceling statement due to statement timeout", code: "57014", details: null, hint: null } }),
+  } as never);
+  let err: { errno?: string; message?: string } = {};
+  try { await timedOut.resolveAgent({ keyHash: "f".repeat(64), label: "worker", scope: "read" }); } catch (e) { err = e as typeof err; }
+  assert(err.errno === "57014" && /statement timeout/.test(err.message ?? ""), `the thrown error carries errno 57014 and the message (${err.errno}, ${err.message})`);
+}
+
 await store.close();
 report();
