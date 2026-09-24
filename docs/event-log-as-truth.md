@@ -32,9 +32,10 @@ two-thirds of an event-sourced system and not named it as one.
    COLUMN`, `CREATE INDEX ON thoughts`, `REFERENCES public.thoughts(id)` and
    row-level triggers, and 053's own capture runs `INSERT … ON CONFLICT`;
    Postgres refuses every one of them on a view (measured: SMD-1999's C1 and
-   C2 for the capture, C6 for the community DDL). The
-   guard rail in `CLAUDE.md` — never alter or drop a core `thoughts` column,
-   adding is fine — stands word for word.
+   C2 for the capture, C6 for the community DDL). The guard rail in
+   `CLAUDE.md` — never alter or drop a core `thoughts` column, adding is fine
+   — stands unchanged; this record adds one sentence to that bullet pointing
+   here.
 3. **The write functions are the projector.** `upsert_thought`,
    `update_thought` and `delete_thought` append the event and call one
    projector, `ob1_project_thought_event`, that writes the row. The audit
@@ -46,8 +47,8 @@ two-thirds of an event-sourced system and not named it as one.
    window in which an agent reads a row its own write has not reached — the
    requirement the prior-art scan made hard (Tacnode's counterpoint: an
    eventually-consistent read model breaks an agent that writes then reads).
-5. **The three verbs are a read, not a column.** Ingested, expressed and
-   comprehended are determined, in that order of precedence, by columns the
+5. **The three verbs are a read, not a column.** Ingested, comprehended and
+   expressed are determined, in that order of precedence, by columns the
    event already carries — `trust` (a ceiling the trigger enforces from the
    registry's kind; a payload can lower it, never raise it, and a key of
    unknown kind supports only a declared `ingested`), `origin` (the door —
@@ -103,11 +104,12 @@ The evidence the ticket collected, checked against the migrations:
 **Gate 1 — can the read model be rebuilt without re-embedding the world?**
 (SMD-1998, PR #142.) On the dogfood brain as found, 440 thoughts and 1.83 M
 characters: a projection rebuild reuses **440 of 440** vectors by the recorded
-key; 10 edits recompute exactly 10; a comprehension-only change recomputes 0;
-the fresh vector equals the cached one to within 2.2e-16 on the 21 sampled
+key; 10 edits (simulated) recompute exactly 10; a comprehension-only change
+(derived from the contract, not observed) recomputes no vector; the fresh
+vector equals the cached one to within 2.2e-16 on the 21 sampled
 rows and 1.1e-16 on the 7 window vectors; the worst case, a model bump,
 re-embeds the whole brain in minutes on host Ollama — 8.4 by rows, 5.0 over
-the rows between the extremes, 7.6 by characters. The premise inverted: a full
+the 19 rows between the extremes, 7.6 by characters. The premise inverted: a full
 re-extract of the graph costs about 4.5 hours one row after another (the 7B
 extractor, median 36.9 s a thought; 5.1 hours under the 27B), thirty-two times
 the re-embed — an order of magnitude rather than a digit, since the claim log
@@ -174,7 +176,7 @@ million rows.
 | Verb | What it is | Read as |
 | --- | --- | --- |
 | **Ingested** | an external observation handed in through an adapter (SMD-1867's contract; `db/ingest-records.ts`, `db/sync-linear.ts`) — source-faithful, with its observed-at and its trust | first in precedence: `trust = 'ingested'` (an operator's key handing in a page is `actor_kind = 'operator'`, `trust = 'ingested'` — the case that settled two columns in 046). The trust comes from the key's registered kind or a declared lowering, never from the door: the ingester and the board sync declare none, so their rows read as Ingested only once the operator has classified their keys (`set_agent_kind`), which 046 makes the operator's act |
-| **Comprehended, on the row** | the brain's own cognition landing on the thought row: a supersession or derivation pointer (025, 029's accept), a kind label (SMD-1951); a re-embed's vector flip is one until step 2 and a projection refresh with no event after it | second: `action = 'update'` from a worker's door — `origin` names it and the sub-type is the door. Not executable today: no column says which door is a worker's, and each writer passes its own string — `consolidate`, `db/reembed.ts`, `db/sync-linear.ts`, `ingest-records`, the servers' names, and `backfill_thought_actors` written by 050's SQL with no `via` at all — while the labelling pass left none. A normalised door vocabulary is the gap this read needs closed (below, "Not decided here") |
+| **Comprehended, on the row** | the brain's own cognition landing on the thought row: a supersession or derivation pointer (025, 029's accept), a kind label (SMD-1951); a re-embed's vector flip is one until step 2 and a projection refresh with no event after it | second: `action = 'update'` from a worker's door — `origin` names it and the sub-type is the door. Not executable today: no column says which door is a worker's, and each writer passes its own string — `consolidate`, `db/reembed.ts`, `db/sync-linear.ts`, `ingest-records`, the servers' names, and `backfill_thought_actors`, a SQL function's own name set as its `via` by 050 — while the labelling pass left none. A normalised door vocabulary is the gap this read needs closed (below, "Not decided here") |
 | **Expressed** | a direct capture or edit by a person or an agent: "I assert this" | otherwise: `action in ('capture', 'update')` from a server's door, `trust in ('operator', 'agent')`; the `stance`, when declared, says how it was asserted (`stated`, `retrieved`, `inferred`) and moves the verb not at all |
 | **Comprehended, off the row** | extraction (entities, edges), chunking, proposals, calibration | not rows of this log — projections with their own lineage row (SMD-1731's `derivations`: inputs, recipe, `artifact_kind`), rebuilt by `rebuild_derived` (SMD-1732; neither built yet) |
 
@@ -198,7 +200,8 @@ At 053 the row is written first and the trigger derives the event from
 
 1. The function takes the locks it takes today, in the order it takes them —
    036's supersession lock, 033's advisory lock on the fingerprint, 032's row
-   lock.
+   lock; `update_thought` takes all three, `delete_thought` the first and
+   last, `upsert_thought` the last two.
 2. It computes the event (`ob1_thought_diff`, 046's diff rule as a function)
    and appends it (`ob1_append_thought_event`, 046's trigger tail: the kind
    from the registry by the envelope's agent id or the key's name, the trust
@@ -238,15 +241,27 @@ part of a later event still verifies.
 its stamp is the snapshot's `taken_at`. Today's re-embed goes through
 `update_thought`, bumps `updated_at`, and so reads as a change to a caller
 holding an `if_unchanged_since`; the decision treats that as the defect. The
-snapshot is fed by a trigger on the row store that records live writes only:
-under `ob1.projecting_replay` it does nothing, so a fold never moves a
-`taken_at`; a raw writer's vector enters it like any other, since the row
-store is what the snapshot trusts today. The fold's input is the log AND the
-snapshot: a fold into a tier on another server copies both (step 3 owns the
-copy), and a dump of the log without it is a dump that re-embeds.
+snapshot is fed by a trigger on the row store; step 2 makes it record live
+writes only (under `ob1.projecting_replay` it does nothing, so a fold never
+moves a `taken_at` — the prototype's trigger has no such exclusion) and seeds
+it once from every row holding key, model and vector. A raw writer's vector
+enters it like any other, since the row store is what the snapshot trusts
+today. What the seed buys, exactly: one pair per thought, for its current
+text. A fold lands each thought's capture text first and its later texts
+after, so an edited thought misses at capture and hits at its final text;
+the fold calls no provider — a miss leaves the vector NULL or keeps the one
+before, as the prototype does — and after the fold each thought's final
+text has the vector the seed held for it, the thoughts with an 018 NULL key
+or no vector re-embed under 015's pass as they would today. Gate 1's reuse
+holds for every thought's final text, not for the intermediate states the
+fold passes through. The fold's input is the log AND the snapshot: a fold
+into a tier on another server copies both (step 3 owns the copy), and a
+dump of the log without it is a dump that re-embeds.
 
 **"No event, no write" — the deltas against 053, accepted.** SMD-1999's
-record named four and its bodies a fifth; the decision takes all five: an
+record (`changes/smd-1999.md`) named four and its bodies' header
+(`evals/writable-projection/option2-functions.sql`) a fifth; the decision
+takes all five: an
 identical re-capture no longer bumps `updated_at` (053's `ON CONFLICT DO
 UPDATE` does — a write that changes nothing is not a write; `thought_changes`
 and `if_unchanged_since` read the log and the row's stamp, and neither should
@@ -259,16 +274,16 @@ row lock taken first by 046's own argument, goes; the 2-argument
 advisory lock.
 
 **The log is faithful, not corrective.** A raw content edit that leaves 018's
-key stale replays with the key still stale and the stale vector kept; a key
-the event does not move stays, a vector the event does not flip stays unless
-the snapshot holds one for the new text. The one thing a replay fills is a
-raw insert's NULL key — 003's rule lives in the functions, and a raw insert
-never had it. Faithfulness begins at step 1: an update event written before
-it carries no key move (that is one of the three additions), so for those
-events the projector derives the key from the content it lands and counts
-them — 018's NULL, a text another row held at the time, cannot be recovered
-after the fact, and the fold says how many rows it re-derived rather than
-replayed. A replayed tombstone never refuses (042's guard runs in detach
+key stale replays with the key still stale and the stale vector kept; from
+step 1 on, a key the event does not move stays, and a vector the event does
+not flip stays unless the snapshot holds one for the new text. Two things a
+replay fills. A raw insert's NULL key — 003's rule lives in the functions,
+and a raw insert never had it. And the key of an update event written before
+step 1, which carries no key move (that is one of the three additions): for
+those the projector derives the key from the content it lands under 018's
+own rule — NULL when another live row already holds it, since 003's partial
+unique index admits one holder — and counts them; this is SMD-2117's arm,
+the prototype keeps the row's key today. A replayed tombstone never refuses (042's guard runs in detach
 mode; the citations are a projection rebuilt apart). A projector that
 corrected the log on the way would make the row disagree with its event and
 the check would refuse it; that is the point of the check.
@@ -278,7 +293,7 @@ the check would refuse it; that is the point of the check.
 | Projection | Table | Key it records at 053 | Rebuild | What the decision requires |
 | --- | --- | --- | --- | --- |
 | the thought row | `thoughts` | `id` — it is the aggregate | the fold: replay the log through the projector (SMD-2117) | steps 1–3 |
-| the vector | `thoughts.embedding`, `embedding_model` | `(content_fingerprint, embedding_model)` — recorded; the prompt template and the requested width ride on the model name by convention (`db/config.mjs`'s `EMBEDDING_PROMPTS` and `KNOWN_MODEL_DIMS`) — code, not data, so a template change under one name invalidates every vector with the key unmoved, and gate 1's cosine bar is the check for that | from the snapshot by key; the provider only on a miss | `ob1_embedding_snapshot (content_fingerprint, embedding_model) → embedding, taken_at` as the prototype has it, fed by a trigger on the row store and **seeded once** at step 2 from every row holding all three (the trigger records writes from then on; gate 1's reuse number holds only after the seed, since a fold wipes the rows the vectors sit on today), `dims` beside the snapshot row (SMD-2116); the recipe on the lineage row (SMD-1731) |
+| the vector | `thoughts.embedding`, `embedding_model` | `(content_fingerprint, embedding_model)` — recorded; the prompt template and the requested width ride on the model name by convention (`db/config.mjs`'s `EMBEDDING_PROMPTS` and `KNOWN_MODEL_DIMS`) — code, not data, so a template change under one name invalidates every vector with the key unmoved, and gate 1's cosine bar is the check for that | from the snapshot by key; the fold calls no provider — a miss leaves the vector NULL or keeps the one before (the prototype's rule), and 015's re-embed fills a final state the snapshot lacks afterwards | `ob1_embedding_snapshot (content_fingerprint, embedding_model) → embedding, taken_at` is the prototype's table; step 2 adds the one-time **seed** from every row holding all three (without it a fold wipes the rows the vectors sit on and every thought re-embeds), the replay exclusion on the feeding trigger, and `dims` beside the row (SMD-2116). The seed holds each thought's current text, so gate 1's reuse holds for every thought's final text after a fold, not for the intermediate states; the recipe on the lineage row (SMD-1731) |
 | the chunk rows | `thought_chunks` | the parent's label vouches (022); no recipe of their own | re-chunk, re-embed the windows | the recipe (tokens, overlap, context, blurb model) on a lineage row (SMD-1731) |
 | the graph | `thought_entities`, `ob1_entities`, `ob1_entity_edges` | `extraction_key` — half a key: no fingerprint of the input | re-extract from the surviving input — the dearest projection (hours, not minutes) | the input's fingerprint beside the key (SMD-1731); a "done" keyed by the payload's fingerprint, not by the pass (gate 1's staleness pattern) |
 | capture-time metadata | `thoughts.metadata` (`type`, `topics`, `people`) | none — no model, no prompt version | re-run the extractor | a lineage row from the fifth producer (SMD-1731, SMD-1254) |
@@ -403,9 +418,9 @@ exist.
 
 | Step | Ticket | What lands | What coexists | Rollback |
 | --- | --- | --- | --- | --- |
-| 1 | SMD-2115 | the capture event carries `content` and, when set by the writer, `created_at`; the update event carries the key's move; 046's diff rule, its append and 050's stamp become functions the trigger calls; a backfill fills the payload on earlier capture rows — the third named amendment, which needs a third arm in 046's immutability gate (today an UPDATE of `diff` is refused even under the setting, and test-schema asserts so; the arm fills `diff.content` and `diff.created_at` where absent and nothing else, and the assertion moves) — or the replay seeds from the row store, decided there after the pass is measured | everything: the trigger still derives the event after the write; no function changes what it returns | none needed for the shape — readers of 046's shape ignore the added keys; the text written into the log is not removable until SMD-1723's redaction exists, which is why that lands no later than step 2 |
+| 1 | SMD-2115 | the capture event carries `content` and, when set by the writer, `created_at`; the update event carries the key's move; 046's diff rule, its append and 050's stamp become functions the trigger calls; a backfill fills the payload on earlier capture rows — the third named amendment, which needs a third arm in 046's immutability gate (today an UPDATE of `diff` is refused even under the setting, and test-schema asserts so; the arm runs under its own value of `ob1.audit_amend`, removes `diff` from 046's byte-equal comparison as a fifth column under that value alone, fills `diff.content` and `diff.created_at` where absent and nothing else, key by key inside the trigger, and the assertion moves with it; the text comes from the first content-moving update's `before`, else the tombstone's `previous_content`, else the live row, else it is unrecoverable and counted) — or the replay seeds from the row store, decided there after the pass is measured | everything: the trigger still derives the event after the write; no function changes what it returns | none needed for the shape — readers of 046's shape ignore the added keys; the text written into the log is not removable until SMD-1723's redaction exists, which is why that lands no later than step 2 |
 | 2 | SMD-2116 | the three write functions append then project; the trigger checks under `ob1.projecting` and appends otherwise; the vector snapshot table, seeded once from the rows and fed by live writes from then on, and `ob1_refresh_thought_vector`; the five accepted deltas; `update_thought`'s COMMENT moves with its body (046's says the predicate is in the UPDATE); blocked by SMD-1723's redaction as well as by step 1 | the raw in-tree writers (`review_supersession_proposal`, the backfills, 042's guard) and every community schema's raw write — trigger-audited, so the log stays complete | re-apply 046's bodies (`db/migrate.ts --reapply`, SMD-1193); the log written in between is complete and shaped as before |
-| 3 | SMD-2117 | `db/fold.ts` — the fold in `(created_at, seq)` order, bounded, into a tier or a named schema, with a verify mode; its input the log and the snapshot, both copied for a fold onto another server; it rebuilds the thought rows and nothing else — the chunks, claims, citations, facets and graph are the workers' and the rebuild primitive's, and the report names them as not rebuilt (gate 2's replay landed in a database with no chunks, claims or citations); defined over the events written since step 1 until step 1's backfill has run on the brain (a fold that meets a capture with no content stops and names it), and faithful from step 1 on (earlier update events carry no key move, so their key is re-derived and counted); the raw in-tree writers append their own event first; `thought_changes` reads a capture's head from the event | a community schema's raw write, still trigger-audited: the contract is unchanged | none needed — a tool and moved callers |
+| 3 | SMD-2117 | `db/fold.ts` — the fold in `(created_at, seq)` order, bounded, into a tier or a named schema, with a verify mode; its input the log and the snapshot, both copied for a fold onto another server; it rebuilds the thought rows and nothing else — the chunks, claims, citations, facets and graph are the workers' and the rebuild primitive's, and the report names them as not rebuilt (gate 2's replay landed in a database with no chunks, claims or citations); defined over the events written since step 1 until step 1's backfill has run on the brain (a fold that meets a capture with no content stops and names it), and faithful from step 1 on (earlier update events carry no key move, so their key is derived under 018's rule and counted); the verify mode folds a sample beside its rows and tolerates two kinds of difference and no other — a raw insert's NULL key filled, a pre-step update's derived key, each under its own count; a function-borne capture must carry a backdating writer's `created_at` once the ingester moves onto the functions (today only the trigger's raw path fills it; the form is this step's to decide); the raw in-tree writers append their own event first; `thought_changes` reads a capture's head from the event | a community schema's raw write, still trigger-audited: the contract is unchanged | none needed — a tool and moved callers |
 
 What does not change on any step, and is the contract this record holds:
 
@@ -417,9 +432,12 @@ What does not change on any step, and is the contract this record holds:
   against. One bound C6 did not measure (it applied the DDL, it did not
   write under a projection): a community row trigger that writes a sidecar
   table is untouched, but one that writes a `thoughts` row during a
-  function-borne write now meets the check, and the check accepts a bump or
-  a successor's nulled pointer and refuses anything else — where today the
-  write is merely audited. No schema in the tree does this (the one row
+  function-borne write now meets the check: a foreign row must be a bump
+  (an empty diff by 046's diff rule — a community column the rule does not
+  read is free), or, under a tombstone's projection alone, a successor's
+  pointer nulled and nothing else; a write to the event's own row must leave
+  it the event's AFTER image; anything else refuses — where today the write
+  is merely audited. No schema in the tree does this (the one row
   trigger writes its own table); the contract says so rather than promising
   wider. The contributor delta SMD-1999 measured — signatures, returns,
   DDL, the raw write audited — is empty and the decision keeps it so. What
@@ -488,12 +506,17 @@ bounded fold into a tier that writes on (SMD-2118, Low, blocked by step 3).
 - **The door vocabulary, and a helper that reads the verb.** `origin` holds
   whatever string each writer passes as `via` — a file path
   (`db/reembed.ts`, `db/sync-linear.ts`), a bare word (`consolidate`,
-  `ingest-records`), a server's name, and one SQL function's name
-  (`backfill_thought_actors`, written by 050 with no `via`); reading the
+  `ingest-records`), a server's name, and one SQL function's own name set as
+  its `via` (`backfill_thought_actors`, 050); reading the
   comprehended sub-type off it wants a registry or a convention the writers
   hold, the labelling pass has to pass one at all, and the ingesting writers
   have to declare `trust` or be classified, or their rows read as Expressed.
   Filed with `ob1_event_verb(row)` when a reader needs the verb, not before.
+- **A row with no capture event.** A bulk load from before 008, or a raw
+  insert the trigger never saw, has a row and no log; gate 2's corpus had an
+  event for every row. The fold cannot rebuild such a row and reports the
+  count; whether SMD-2115's backfill synthesises a capture from the row is
+  decided there.
 - **Benchmarking against Zep's DMR or a temporal-memory suite** — stays under
   the eval program (SMD-1039).
 
