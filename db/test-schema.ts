@@ -5814,13 +5814,18 @@ console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defi
   const tDone = await thought("Open Brain uses Redis, said a settled ticket.");
   await record(tDone, [E("Open Brain", "project"), E("Redis", "tool")], [R("Open Brain", "Redis", "uses")]);
   await stamp(tDone, "Done", "completed");
+  // Eleven thoughts now, four of them tied at one entity and no edge, so a
+  // read at the default limit of ten would drop one of the four by its uuid —
+  // a coin toss per run (the merge's CI run lost tOrphan). Every list in this
+  // block is read wide enough to hold every row.
+  const wide: GraphOptions = { ...on, limit: 50 };
   const covH = await graphCoverage(run, on);
   assert(covH.thoughts === 11 && covH.with_lifecycle === 8 && covH.done === 5 && covH.last_sync === LATEST && (await graphCoverage(run, open)).weighed === 6,
     `the derived row and the superseded row take the head's lifecycle: 8 of 11 carry one, 5 settled (t1, t5, tSec, tPrev, tDone); the head is the un-superseded row though tPrev's watermark is newer; neither the derived row's own newer watermark nor the lifecycle-less tOrphan's newest is the freshness, the head's is; open weighs t2, t3, t4, t6, t8 and the orphan-ticket tOrphan (${covH.with_lifecycle}/${covH.done}/${covH.last_sync}/${(await graphCoverage(run, open)).weighed})`);
-  const ttH = await topThoughts(run, on);
+  const ttH = await topThoughts(run, wide);
   assert(ttH.find((t) => t.id === tSec)!.status === "Done" && ttH.find((t) => t.id === tSec)!.status_type === "completed" && ttH.find((t) => t.id === tPrev)!.status === "Done" && ttH.find((t) => t.id === tOrphan)!.status === null,
     "listed by default, the section row and the superseded row show the head's status, Done — not none and not the In Progress tPrev froze at — and the row derived from an unknown ticket shows none");
-  const ttOpenH = await topThoughts(run, open);
+  const ttOpenH = await topThoughts(run, { ...wide, status: "open" });
   assert(ttOpenH.every((t) => t.id !== tSec && t.id !== tPrev && t.id !== tDone) && ttOpenH.some((t) => t.id === tOrphan),
     "--status open lists neither the Done ticket's section nor its earlier row nor the Done tDone, and lists the row whose ticket no row holds (its own lifecycle: none)");
   const obAll = (await topEntities(run, on)).byMentions.find((e) => e.id === OB)!;
@@ -5832,7 +5837,7 @@ console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defi
   const nAllH = await neighbourhood(run, [OB], on);
   assert(names(nOpenH).join(",") === "PostgreSQL,Bun,Anita" && nOpenH[0].co_mentions === 2 && nAllH.find((n) => n.name === "PostgreSQL")!.co_mentions === 4 && nAllH.some((n) => n.name === "Redis"),
     `under open the section row adds nothing to PostgreSQL (co 2, not 3) and Redis is no neighbour; by default the section counts (co 4) and Redis is one (${names(nOpenH).join(",")}; ${nAllH.find((n) => n.name === "PostgreSQL")!.co_mentions})`);
-  assert((await topThoughts(run, doneOnly)).map((t) => t.id).sort().join() === [t1, t5, t6, t8, tSec, tDone, tPrev, tOrphan].sort().join(),
+  assert((await topThoughts(run, { ...wide, status: "done" })).map((t) => t.id).sort().join() === [t1, t5, t6, t8, tSec, tDone, tPrev, tOrphan].sort().join(),
     "--status done lists the section row and the earlier row with their Done head, the Done tDone, and — passing every filter — the two without a lifecycle and the row whose ticket no row holds");
   await db.query(`UPDATE thoughts SET supersedes = NULL, metadata = metadata - 'issue' WHERE id = $1`, [t1]);
   for (const id of [tSec, tDone, tPrev, tOrphan]) await drop(id);
