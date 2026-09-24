@@ -107,7 +107,7 @@ jobs:
       # script, TypeScript since SMD-1870 — bun is the runtime every other job
       # and every developer here uses, and checks 13, 14, 18 and 20 parse YAML with
       # Bun.YAML.
-      - name: Check metadata, links, dependencies, SQL guards, shell hazards, core-function redefinitions, credential compares, fixture redaction, thought writes, the shim's runtime, Supabase-isms in schema SQL, the compose stack's ports and forwards, FORK.md's change files, the type-checked directories' pins, the connector registry, main's ruleset record, destructive statements in SQL files, and runtime supabase-js imports
+      - name: Check metadata, links, dependencies, SQL guards, shell hazards, core-function redefinitions, credential compares, fixture redaction, thought writes, the vendored files' Bun-native shape, Supabase-isms in schema SQL, the compose stack's ports and forwards, FORK.md's change files, the type-checked directories' pins, the connector registry, main's ruleset record, destructive statements in SQL files, and runtime supabase-js imports
         run: bun scripts/check-fork-consistency.ts
 
       # The scripts are type-checked where they run (SMD-1870): scripts/tsconfig.json
@@ -167,7 +167,8 @@ jobs:
       # job starts each, the data-layer job drives their tools — so none
       # resolves under Deno any more; the five steps that checked the last six
       # of them went with the move. kubernetes-deployment is the one vendored
-      # file still written for Deno alone (its own database, SMD-1524).
+      # file still deployed on Deno (its image, SMD-1800's; its own database,
+      # SMD-1524) — Bun-shaped since SMD-1799, `deno serve` serving the export.
       - name: deno check integrations/kubernetes-deployment
         working-directory: integrations/kubernetes-deployment
         run: deno check --node-modules-dir=none index.ts
@@ -280,12 +281,13 @@ jobs:
         working-directory: extensions
         run: bun install --frozen-lockfile
 
-      # Imported as deployed under a stand-in for Deno's two globals and a loader
-      # for Deno's specifiers: a wrong or revoked key is refused, a read-scoped
-      # key never sees a tool that writes, is told so by a route that writes and
-      # may only dry-run a worker, every copy is byte for byte auth.ts. Then every
-      # server on the SQL shim is started under `bun` for real and answered over
-      # its port (change 74). No database.
+      # Imported as modules — each server's default export's `fetch`, the shape
+      # `bun <file>` serves (SMD-1799) — under a loader for Deno's specifiers: a
+      # wrong or revoked key is refused, a read-scoped key never sees a tool that
+      # writes, is told so by a route that writes and may only dry-run a worker,
+      # every copy is byte for byte auth.ts. Then every server on the SQL shim is
+      # started under `bun` for real and answered over its port (change 74). No
+      # database.
       - name: Scoped access keys reach every vendored server
         working-directory: extensions
         run: bun test-auth.ts
