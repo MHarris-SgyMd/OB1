@@ -79,8 +79,9 @@ egress` row says so with the line.
 
 A local endpoint — local by its hostname, the credential rule's sense and not
 `OB1_LLM_LOCAL`'s: loopback, a private address, the `ollama` service name, the two
-host aliases — is dialled once on every start, with or without `--deep`: one
-`GET /models`, no body, no credential, 2.5 s, and any HTTP answer passes the
+host aliases — is dialled once on every start, with or without `--deep`: the
+name resolved first, then one `GET /models`, no body, no credential, 2.5 s
+each, and any HTTP answer passes the
 `provider endpoint` row (a `chat endpoint` row for a chat base of its own). One
 that answers nothing — refused, unresolved, or silent — fails it, with a remedy
 for the name's kind: the service name needs `--profile local-models`; inside a

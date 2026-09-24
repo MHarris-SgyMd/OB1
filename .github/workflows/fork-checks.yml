@@ -687,13 +687,17 @@ jobs:
         working-directory: deploy
         run: |
           set +e
-          OUT="$(docker compose -f compose.yaml run --rm --no-deps -T --entrypoint bun -e OB1_LLM_BASE_URL=http://ollama:11434/v1 server preflight.ts 2>&1)"
+          docker compose -f compose.yaml run --rm --no-deps -T --entrypoint bun -e OB1_LLM_BASE_URL=http://ollama:11434/v1 server preflight.ts > /tmp/negative.out 2>&1
           CODE=$?
           set -e
-          printf '%s\n' "$OUT" | grep -E '✗ +provider endpoint +nothing answers at http://ollama:11434/v1 — the name does not resolve'
-          printf '%s\n' "$OUT" | grep -F 'is the local-models profile' | grep -F -e 'start the stack with --profile local-models'
-          printf '%s\n' "$OUT" | grep -F 'preflight FAILED'
-          [ "$CODE" -eq 1 ] || { echo "preflight exited $CODE, expected 1" >&2; exit 1; }
+          # The report is printed whole when a line is missing, so a runner
+          # whose resolver answers differently is read, not guessed at (the
+          # first run read the unknown name as the timeout kind; caught: CI, PR #138).
+          hold() { grep -E "$1" /tmp/negative.out || { echo "--- expected /$1/ in preflight's report: ---" >&2; cat /tmp/negative.out >&2; exit 1; }; }
+          hold '✗ +provider endpoint +nothing answers at http://ollama:11434/v1 — the name does not resolve'
+          hold 'is the local-models profile.*start the stack with --profile local-models'
+          hold 'preflight FAILED'
+          [ "$CODE" -eq 1 ] || { echo "preflight exited $CODE, expected 1" >&2; cat /tmp/negative.out >&2; exit 1; }
           docker compose -f compose.yaml run --rm --no-deps -T --entrypoint bun server preflight.ts | grep -F 'preflight OK'
 
       # SMD-1844. An address-less mapping binds 0.0.0.0; this stack holds a brain

@@ -1998,7 +1998,10 @@ console.log("\n[9] A local endpoint is dialled by default, and one that answers 
   // wording (second review pass); an unknown name is one wording, pinned.
   const ollamaResolves = await Bun.dns.lookup("ollama").then(() => true, () => false);
   const service = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: "http://ollama:1/v1" });
-  const serviceWhy = ollamaResolves ? String.raw`(the connection was refused|no HTTP answer in 2\.5 s)` : String.raw`the name does not resolve \(GET /models, 2\.5 s timeout\); the first capture would fail on it in milliseconds`;
+  // An unknown name is "does not resolve" — with its code, or "within 2.5 s"
+  // where the resolver stalls (a GitHub runner did, on PR #138's first run) —
+  // never the timeout kind: the name is judged before anything is dialled.
+  const serviceWhy = ollamaResolves ? String.raw`(the connection was refused|no HTTP answer in 2\.5 s)` : String.raw`the name does not resolve(?: \([A-Z_]+\)| within 2\.5 s — the resolver did not answer)? \(GET /models, 2\.5 s timeout\); the first capture would (?:fail on it in milliseconds|wait on the resolver)`;
   assert(service.code === 1 && new RegExp(String.raw`✗\s+provider endpoint\s+nothing answers at http://ollama:1/v1 — ${serviceWhy}`).test(row(service.out, "provider endpoint")),
          `the ollama service name with nothing behind it fails (exit ${service.code}; the name ${ollamaResolves ? "resolves here, so refused or silent" : "does not resolve here, so that wording, pinned"})`);
   assert(/→ `ollama` is the local-models profile's service and exists only under it: start the stack with --profile local-models, or set OB1_LLM_BASE_URL to an Ollama on the host \(http:\/\/host\.containers\.internal:11434\/v1 under podman or http:\/\/host\.docker\.internal:11434\/v1 under Docker\) or to a hosted provider with a key\./.test(fix(service.out, "provider endpoint")),

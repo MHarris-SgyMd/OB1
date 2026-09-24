@@ -401,12 +401,37 @@ function proxyKnobFor(base: string): string | null {
   const names = base.startsWith("https:") ? ["HTTPS_PROXY", "https_proxy"] : ["HTTP_PROXY", "http_proxy"];
   return names.find((n) => process.env[n]) ?? null;
 }
+/**
+ * The name, resolved before anything is dialled, under the same bound as the
+ * connection. Judged apart because on a GitHub runner the first run of PR #138
+ * read the unknown `ollama` name as the TIMEOUT kind — the resolver took
+ * longer than the probe's window to say NXDOMAIN, so the fetch aborted first —
+ * and a resolver that never answers deserves its own words either way. An IP
+ * literal resolves to itself. `Bun.dns.lookup` is the resolver the suite asks
+ * too, so the two agree by construction (caught: CI, PR #138).
+ */
+async function resolveFirst(host: string): Promise<{ why: string; then: string } | null> {
+  if (!host || /^[\d.]+$/.test(host) || host.startsWith("[")) return null;
+  const outcome = await Promise.race([
+    Bun.dns.lookup(host).then(() => null, (e) => (e as Error & { code?: string })),
+    Bun.sleep(LOCAL_PROBE_TIMEOUT_MS).then(() => "stall" as const),
+  ]);
+  if (outcome === null) return null;
+  if (outcome === "stall") return { why: `the name does not resolve within ${LOCAL_PROBE_SECONDS} — the resolver did not answer`, then: "the first capture would wait on the resolver, up to its request timeout (OB1_LLM_TIMEOUT), and then fail" };
+  const code = String(outcome.code ?? "").replace(/^DNS_/, "");
+  return { why: `the name does not resolve${code && code !== "ENOTFOUND" ? ` (${code})` : ""}`, then: "the first capture would fail on it in milliseconds" };
+}
 async function probeLocal(row: string, at: ProviderEndpoint, knob: string): Promise<void> {
   const started = performance.now();
   // Userinfo in the URL is never sent by fetch and would otherwise land in the
   // log on every start (fifth review pass); maskUrl is store.ts's, the one the
   // DATABASE_URL row uses.
   const shown = maskUrl(at.base);
+  const unresolved = await resolveFirst(hostnameOf(at.base));
+  if (unresolved) {
+    add(row, "fail", `nothing answers at ${shown} — ${unresolved.why} (GET /models, ${LOCAL_PROBE_SECONDS} timeout); ${unresolved.then}`, probeRemedy(at.base, knob));
+    return;
+  }
   try {
     // No redirects followed: a 3xx is an answer from THIS address, and
     // following one would judge — and dial — wherever it points, off the box
