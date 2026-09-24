@@ -382,6 +382,8 @@ let llmMs = 0;
 /** Thoughts extracted in more than one window, thoughts a runaway call was retried for, and model calls made in all (SMD-1879). */
 let windowed = 0;
 let retried = 0;
+/** Thoughts a runaway was aborted on the stream for, before its budget (SMD-1960). */
+let aborted = 0;
 let calls = 0;
 const totals = { entities: 0, newEntities: 0, mentions: 0, edges: 0, dropped: 0, ambiguous: 0 };
 const activeWorkers = new Set<string>();
@@ -429,17 +431,31 @@ async function processRow(row: Row): Promise<Outcome> {
   calls += callsOf(extraction);
   if (extraction.windows > 1) windowed++;
   if (extraction.retried) retried++;
+  if (extraction.abortedMs !== undefined) aborted++;
   if (extraction.malformed) {
     malformed++;
     const where = extraction.parts ? ` (window ${extraction.parts.filter((p) => p.malformed).map((p) => p.index + 1).join(", ")} of ${extraction.windows})` : "";
-    return { outcome: "failed", error: `the model's answer was not JSON of the expected shape${where}` };
+    // "No retry was made" is reachable only with EXTRACT_RETRY_RUNAWAY off and
+    // the stream abort on — a constant flipped — and stays for that truth.
+    // A runaway aborted on the stream is named in the failed row's error, so
+    // an operator sorting the failed rows — for SMD-2000's larger model, say —
+    // can tell a loop the retry did not rescue from an answer that was never
+    // JSON. The MALFORMED window's own abort, not the thought's longest (one
+    // the retry may have rescued), and "the retry did not converge" only when
+    // a retry was made (review passes one to four). Only a first call is ever
+    // aborted — the retry is read whole — so the note names it.
+    const abortedParts: { abortedMs?: number; retried?: true }[] = extraction.parts ? extraction.parts.filter((p) => p.malformed && p.abortedMs !== undefined) : extraction.abortedMs !== undefined ? [extraction] : [];
+    const abortedMs = Math.max(...abortedParts.map((p) => p.abortedMs as number));
+    const retriedToo = abortedParts.some((p) => p.retried);
+    const abortedNote = abortedParts.length ? `; the first call was aborted on the stream ${(abortedMs / 1000).toFixed(1)} s in — the answer went on past a third copy of one item — ${retriedToo ? "and the penalised retry, read whole, did not converge either" : "and no retry was made"}` : "";
+    return { outcome: "failed", error: `the model's answer was not JSON of the expected shape${where}${abortedNote}` };
   }
   if (DUMP) {
     // The model's answer as parsed, before the database applies the rule —
     // what a replay needs to re-score a rule change without the model — and,
     // for a windowed thought, each window's own answer beside the merged one:
     // the derivation record (SMD-1731) until a lineage table holds it.
-    appendFileSync(DUMP, JSON.stringify({ id: row.id, fingerprint: row.fingerprint, key: JOB, entities: extraction.entities, relations: extraction.relations, windows: extraction.windows, ...(extraction.retried ? { retried: true } : {}), ...(extraction.parts ? { parts: extraction.parts } : {}) }) + "\n");
+    appendFileSync(DUMP, JSON.stringify({ id: row.id, fingerprint: row.fingerprint, key: JOB, entities: extraction.entities, relations: extraction.relations, windows: extraction.windows, ...(extraction.retried ? { retried: true } : {}), ...(extraction.abortedMs !== undefined ? { abortedMs: extraction.abortedMs } : {}), ...(extraction.parts ? { parts: extraction.parts } : {}) }) + "\n");
   }
   const [r] = await sql`
     SELECT record_thought_entities(
@@ -741,7 +757,7 @@ if (FOLLOW) {
 const elapsed = ((Date.now() - started) / 1000).toFixed(1);
 console.log(
   `\n  ${done} extracted, ${failed} failed, ${superseded} edited mid-extraction and re-queued, ${vanished} deleted mid-pass${lost ? `, ${lost} no longer this worker's when checked (each named above)` : ""}, in ${elapsed}s ` +
-    `(${(llmMs / 1000).toFixed(1)}s in ${calls} model call(s) across ${WORKERS} worker(s), ${windowed} thought(s) in windows, ${retried} retried after a runaway answer, ${beats} heartbeat(s))`
+    `(${(llmMs / 1000).toFixed(1)}s in ${calls} model call(s) across ${WORKERS} worker(s), ${windowed} thought(s) in windows, ${retried} retried after a runaway answer (${aborted} aborted on the stream before the budget), ${beats} heartbeat(s))`
 );
 console.log(
   `  wrote ${totals.mentions} mentions of ${totals.newEntities} new entities, ${totals.edges} edges; ` +
