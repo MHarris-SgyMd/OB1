@@ -288,7 +288,8 @@ two-way connector writes back, from which the row's text and its edges are
 derived, never the other way — with its hash and the ingest run; one thought
 per `(system, identity)`, written by `record_thought_source()` (the same
 canonical twice writes nothing; an identity another thought holds is refused,
-not re-pointed) and resolved by `source_thought(system, identity)` (this table
+not re-pointed, unless the caller takes it — `p_take`, the board sync's case,
+below) and resolved by `source_thought(system, identity)` (this table
 first; for `linear`, the board sync's `metadata.issue` claim at the head of a
 twin chain). A second facet kind, `link` — `{relation, system, target, origin}`,
 relation one of `references | child_of | blocks | blocked_by | relates_to |

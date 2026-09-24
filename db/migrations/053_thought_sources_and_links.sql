@@ -86,11 +86,19 @@
 --   (thought_facets, thought_facets_validate).
 -- =============================================================================
 
+-- Each prerequisite named on its own, as 052 names its two: the operator is
+-- told which migration the schema lacks (eighth review pass). Driven by
+-- test-upgrade.ts [20g].
 DO $g$
 BEGIN
-  IF to_regclass('thought_facets') IS NULL OR to_regclass('ob1_entity_edges') IS NULL THEN
+  IF to_regclass('ob1_entity_edges') IS NULL THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'migration 053 needs 016 (ob1_entity_edges) and 042 (thought_facets); this schema lacks one of them',
+      MESSAGE = 'migration 053 needs 016 (ob1_entity_edges); this schema lacks it',
+      HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply';
+  END IF;
+  IF to_regclass('thought_facets') IS NULL THEN
+    RAISE EXCEPTION USING
+      MESSAGE = 'migration 053 needs 042 (thought_facets); this schema lacks it',
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply';
   END IF;
 END

@@ -492,7 +492,7 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // name without either ([20f]); 053 adds a table on 001's thoughts, two
   // indexes on 042's thought_facets and redefines 016's
   // record_thought_entities and 042's thought_facets_validate on their own
-  // bodies, refusing by name without 016 or 042 (its guard) — all recorded by
+  // bodies, refusing by name without 016 or 042 ([20g]) — all recorded by
   // the baseline with their prerequisites present, so none
   // becomes the plain-run failure point above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
@@ -1894,6 +1894,38 @@ console.log("\n[20f] Migration 052 on a schema without 008, and on 008's table w
   // an apply that did not throw is not the function present.
   await applyMigrations(URL_, { ...OPTS, only: (f) => f >= "046" });
   assert((await sql`SELECT to_regprocedure('thought_changes(timestamptz, uuid, text, text, text[], int)') IS NOT NULL AS ok`)[0].ok === true, "…and applied once both are there: the function is present");
+  await sql.close();
+}
+
+console.log("\n[20g] Migration 053 on a schema without 016, and on 016's tables without 042's — refused up front, naming the missing migration and --reapply, and applied once both are there (SMD-1867)");
+{
+  // 053's guard is 052's shape ([20f]): a brain baselined at a ledger through
+  // 053 whose schema stops before 016 would take the validator and fail at
+  // record_thought_entities's CREATE OR REPLACE with a bare "relation
+  // ob1_entities does not exist"; the file refuses at apply instead, naming 016
+  // — and, with 016's tables but not 042's thought_facets, naming 042. A guard
+  // with no driver is prose ([20c]'s lesson), so both are driven (eighth
+  // review pass: the guard had none).
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < "016" });
+  const baselined = await migrate("--baseline");
+  assert(baselined.code === 0, `--baseline records every migration over the pre-016 schema (exit ${baselined.code})`);
+  const sql = new SQL({ url: URL_, max: 1 });
+  const the053 = MIGRATIONS.find((f) => f.startsWith("053_"))!;
+  await sql`DELETE FROM schema_migrations WHERE name = ${the053}`;
+  const plain = await migrate();
+  const ok = plain.code === 1 &&
+    /053_thought_sources_and_links\.sql\s+FAILED: migration 053 needs 016 \(ob1_entity_edges\); this schema lacks it/.test(plain.out) &&
+    /adopted with --baseline\?\)\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plain.out);
+  assert(ok, `a plain run fails at 053 naming 016 and --reapply, not with a bare "does not exist" (exit ${plain.code})${ok ? "" : `:\n${plain.out}`}`);
+  assert(Number((await sql`SELECT count(*)::int AS c FROM schema_migrations WHERE name = ${the053}`)[0].c) === 0, "…053 records nothing");
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f >= "016" && f < "042" });
+  const half = await migrate();
+  assert(half.code === 1 && /053_thought_sources_and_links\.sql\s+FAILED: migration 053 needs 042 \(thought_facets\); this schema lacks it/.test(half.out),
+    `…and with 016's tables but not 042's it names 042 (exit ${half.code})${half.code === 1 ? "" : `:\n${half.out}`}`);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f >= "042" });
+  assert((await sql`SELECT to_regclass('thought_sources') IS NOT NULL AS t, to_regprocedure('record_source_links(uuid, text, jsonb)') IS NOT NULL AS f`)[0].t === true
+    && (await sql`SELECT to_regprocedure('record_source_links(uuid, text, jsonb)') IS NOT NULL AS f`)[0].f === true, "…and applied once both are there: the table and the writer are present");
   await sql.close();
 }
 
