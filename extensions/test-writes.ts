@@ -929,13 +929,11 @@ try {
   const recentOpen = await send(h, "GET", "/recent?limit=50&exclude_restricted=false");
   assert(recent.status === 200 && ids(recent).includes(cid) && !ids(recent).includes(rid) && ids(recentOpen).includes(rid) && ids(recentOpen).includes(cid),
     `GET /recent hides the restricted twin by default and shows it under exclude_restricted=false, as its siblings do — it filtered nothing before (${recent.status}: ${ids(recent).length} rows${ids(recent).includes(rid) ? ", the twin among them" : ""}; open: ${ids(recentOpen).length})`);
-  // Every answer of the gateway carries the request's CORS headers: SMD-2054's third pass gave /search's, and forty-five
-  // of the file's sixty-two answers said `Access-Control-Allow-Origin: null` under an allowlist — json() built the
-  // headers from the request only when handed `req` — so a browser dashboard could read a search and not /recent,
-  // /thoughts, /stats or a 404 (SMD-2079). They are set once now, on every response the main handler returns. An
-  // unlisted origin gets NO allow-origin header: the literal `null` is what an opaque origin (a sandboxed iframe, a
-  // data: document) sends as its Origin, so it matched (review pass 1). The allowlist was set before the module loaded
-  // (above); send() carries the Origin and returns the headers.
+  // Every answer of the gateway carries the request's CORS headers (SMD-2079): json() built them only when handed `req`,
+  // and forty-five of the file's sixty-two answers were not, so under an allowlist a browser could read /search (SMD-2054)
+  // and no other route's page. Set once now, on the way out of the main handler; an unlisted origin gets NO allow-origin
+  // header, since the literal `null` is an opaque origin's own (review pass 1). The allowlist was set before the module
+  // loaded (above); send() carries the Origin and returns the headers.
   const D = "https://dash.test";
   const [okCors, refusedCors, strangerCors, recentCors, browseCors, lostCors, strangerRecent, preflight, unauthorized] = await Promise.all([
     send(h, "POST", "/search", { query: captured, min_similarity: 0.5 }, KEY, D),
@@ -954,29 +952,27 @@ try {
     `…and so does every other answer of the gateway (SMD-2079): a page from GET /recent and from GET /thoughts and the 404 for an unknown route echo a listed origin, and GET /recent's page to an unlisted one carries no allow-origin header — main's file answered the literal null (${recentCors.status} ${allow(recentCors)} / ${browseCors.status} ${allow(browseCors)} / ${lostCors.status} ${allow(lostCors)} / ${strangerRecent.status} ${allow(strangerRecent)})`);
   assert(preflight.status === 204 && allow(preflight) === D && /x-brain-key/.test(String(preflight.headers.get("access-control-allow-headers"))) && unauthorized.status === 401 && allow(unauthorized) === D,
     `the preflight 204 and the 401 keep theirs — they passed the request before, and are the wrapper's now like every answer (the wrapper-absent mutant fails this arm too) (${preflight.status} ${allow(preflight)} / ${unauthorized.status} ${allow(unauthorized)})`);
-  // POST /ingestion-jobs/:id/execute proxies to smart-ingest with a bounded timeout. Dropping `req` from the proxy's
-  // parameters left this handler passing it into the timeout's slot — a NaN timeout, so the abort fired at once and
-  // every execute was a 504 (SMD-2079, found reading the change; nothing typechecks the file, SMD-2080). The stub
-  // answers after 25 ms and honours the signal, so a timeout that is not a number aborts it. The stub matches the URL
-  // by its path: on this fork the route builds it from SUPABASE_URL, which is the Postgres DSN, so a real fetch refuses
-  // the protocol and every deployment answers 502 (SMD-2110) — this arm holds the proxy's timeout and its headers, not the route.
+  // The ingest proxy's timeout: dropping `req` from proxyFetchJson's parameters left handleExecuteJob passing it into the
+  // timeout's slot — NaN, so every execute aborted at once with a 504 (SMD-2079; nothing typechecks the file, SMD-2080).
+  // The stub answers after 25 ms honouring the signal, so a timeout that is not a number aborts it. It matches the URL by
+  // its path: on this fork the route builds it from SUPABASE_URL, the Postgres DSN, and a real fetch refuses the protocol
+  // (SMD-2110) — this arm holds the proxy's timeout and its headers, not the route.
   const exec = await send(h, "POST", "/ingestion-jobs/7/execute", undefined, KEY, D);
   assert(exec.status === 200 && exec.json?.status === "executed" && exec.json?.job_id === "7" && allow(exec) === D,
     `the ingest proxy's timeout is the number it was given, not the request — through the stub, POST /ingestion-jobs/:id/execute answers the upstream's reply with the CORS headers instead of an immediate 504 (${exec.status} ${JSON.stringify(exec.json).slice(0, 80)}; ${allow(exec)})`);
-  // The 429 rebuilt its header set in the same change (it spread the CORS headers itself before): Retry-After and the
-  // content type stay, the CORS headers arrive from the wrapper, and Retry-After is exposed, which no answer did — a
-  // browser could not read the wait off the 429 (review pass 1). The cap is the default hundred a minute; the block
-  // has sent about thirty under KEY, this loop sends the rest, and its bound outlasts a window that rolls over mid-loop
-  // (a lower cap set before the module loaded would leave every earlier arm little headroom — review pass 2).
+  // The 429 rebuilt its header set (it spread the CORS headers itself before): Retry-After and the content type stay, the
+  // CORS headers arrive from the wrapper, and Retry-After is exposed, which no answer was (review pass 1). The cap is the
+  // default hundred a minute — the block has sent about thirty under KEY, this loop sends the rest, and its bound outlasts
+  // a window that rolls over mid-loop; a lower cap set before load would starve the earlier arms (review pass 2).
   let limited: Reply | null = null;
   for (let i = 0; i < 250 && !limited; i++) { const r = await send(h, "GET", "/health", undefined, KEY, D); if (r.status === 429) limited = r; }
   assert(limited !== null && allow(limited) === D && /^\d+$/.test(String(limited.headers.get("retry-after"))) && String(limited.headers.get("content-type")).startsWith("application/json") && limited.json?.error === "rate_limited"
     && /\bRetry-After\b/.test(String(limited.headers.get("access-control-expose-headers"))),
     `the 429 carries the request's CORS headers beside Retry-After and its JSON content type, and exposes Retry-After to the browser (${limited?.status} ${limited ? allow(limited) : "-"} / ${limited?.headers.get("retry-after")} / ${limited?.headers.get("content-type")} / ${limited?.headers.get("access-control-expose-headers")})`);
   delete process.env.CORS_ALLOWED_ORIGINS;
-  // The default, no allowlist: `*` to any origin — the backward-compatibility promise the README's table makes, which
-  // nothing drove while the block ran under an allowlist (review pass 3). A second instance of the module, loaded with
-  // the variable unset; the query string keeps Bun's module cache from handing back the first.
+  // The default, no allowlist: `*` to any origin, the README's backward-compatibility promise, which nothing drove while
+  // the block ran under an allowlist (review pass 3). A second instance of the module, loaded with the variable unset;
+  // the query string keeps Bun's module cache from handing back the first.
   const open = (await import(join(ROOT, F) + "?no-allowlist")) as { default?: { fetch?: Handler } };
   const star = await send(open.default!.fetch!, "GET", "/health", undefined, KEY, "https://elsewhere.test");
   assert(star.status === 200 && allow(star) === "*",

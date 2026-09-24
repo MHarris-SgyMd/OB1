@@ -122,10 +122,9 @@ const CORS_ALLOWED_ORIGINS = (process.env.CORS_ALLOWED_ORIGINS ?? "")
   .filter(Boolean);
 
 /**
- * The CORS headers for one request: Access-Control-Allow-Origin is the request's Origin when the allowlist names it,
- * `*` when there is no list, and absent otherwise — the literal `null` this answered an unlisted origin with until
- * SMD-2079 is what an opaque origin (a sandboxed iframe, a `data:` or `file:` document) sends as its Origin, so such
- * a document matched the allowlist it was meant to fail (review pass 1). Retry-After is exposed for the 429's sake.
+ * The CORS headers for one request. Access-Control-Allow-Origin is the request's Origin when the allowlist names it,
+ * `*` with no list, and absent otherwise: the literal `null` is an opaque origin's own (a sandboxed iframe, a `data:`
+ * document), so answering it matched what the list was meant to fail (SMD-2079). Retry-After is exposed for the 429.
  */
 function corsHeadersFor(req: Request): Record<string, string> {
   const origin = req.headers.get("origin") ?? "";
@@ -144,12 +143,10 @@ function corsHeadersFor(req: Request): Record<string, string> {
 }
 
 /**
- * The handler's answer with the request's CORS headers over its own (SMD-2079). Set here, once, on every response
- * the main handler returns — a page, a refusal, the preflight, the 404, the 500. Until this, json() built the headers
- * from the request only when handed `req`, and forty-five of the file's sixty-two answers were not: under an allowlist
- * they said `Access-Control-Allow-Origin: null`, so a browser client could read the auth refusals, the preflight, the
- * rate limit and POST /search, and no route's page. A header the handler set under the same name is replaced —
- * `Vary` among them, so it is the wrapper's: a route that needs another `Vary` token adds it here, not to its answer.
+ * The answer with the request's CORS headers over its own, set once here for every response the exported handler
+ * returns — a page, a refusal, the preflight, the 404, the 500 (SMD-2079; the note at the top of the file says what
+ * answered without them). A header the route set under the same name is replaced, `Vary` among them: a route that
+ * needs another `Vary` token adds it here, not to its answer.
  */
 function withCors(req: Request, res: Response): Response {
   const headers = new Headers(res.headers);
@@ -425,7 +422,7 @@ function internalError(error: unknown): Response {
   return json({ error: "internal_error", code: "GENERIC", error_id: errorId }, 500);
 }
 
-/** Every answer carries the request's CORS headers (withCors, SMD-2079): route's, or the 500 for what escaped its try — the auth and rate-limit steps stand before it. */
+/** Every answer carries the request's CORS headers (withCors, SMD-2079): route's, or the 500 for what escaped its try — the preflight, auth, the rate limit and the URL stand before it. */
 const handler = async (req: Request): Promise<Response> => withCors(req, await route(req).catch(internalError));
 
 export default {
